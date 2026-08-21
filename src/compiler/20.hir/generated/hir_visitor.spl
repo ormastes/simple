@@ -1,0 +1,836 @@
+# GENERATED — do not edit; regenerate with: bin/simple run src/app/compiler_schema/main.spl visitors
+# registry-hash: 202339647
+#
+# Fold-style HIR visitor (hardening plan §11.5; lanes C3/C4).
+#
+# walk_hir_<kind>(node, ctx, f) -> ctx threads `ctx` through every node in
+# the subtree, calling `f(node, ctx)` on entry. There is one explicit match
+# arm per registry variant, each setting `handled`; the trailing `case _`
+# leaves it false and the post-match check raises E-HIR-VISIT-UNHANDLED.
+# That flag is the ONLY fallback: a new variant cannot be walked silently.
+
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_types.*
+
+enum HirWalkNode:
+    """Any node the fold callback can be handed."""
+    Expr(node: HirExpr)
+    Stmt(node: HirStmt)
+    Type_(node: HirType)
+    Pattern(node: HirPattern)
+
+fn hir_walk_unhandled(kind: text, where_: text, variant: text) -> text:
+    """A variant no generated arm names. Loud, never silent."""
+    print "E-HIR-VISIT-UNHANDLED: {kind} variant {variant} unhandled at {where_}"
+    raise "E-HIR-VISIT-UNHANDLED: {kind} variant {variant} unhandled at {where_}; regenerate src/compiler/20.hir/generated"
+
+fn hir_walk_expr_kind_name(node: HirExpr) -> text:
+    """Variant name of one HirExprKind, for the unhandled diagnostic."""
+    if node == nil:
+        return "<nil>"
+    var name = "<unknown>"
+    match node.kind:
+        case IntLit(_, _): name = "IntLit"
+        case FloatLit(_, _): name = "FloatLit"
+        case StringLit(_, _): name = "StringLit"
+        case BoolLit(_): name = "BoolLit"
+        case CharLit(_): name = "CharLit"
+        case UnitLit: name = "UnitLit"
+        case NilLit: name = "NilLit"
+        case ArrayLit(_, _): name = "ArrayLit"
+        case ArrayRepeat(_, _, _): name = "ArrayRepeat"
+        case TupleLit(_): name = "TupleLit"
+        case DictLit(_, _, _): name = "DictLit"
+        case SetLit(_, _): name = "SetLit"
+        case Var(_): name = "Var"
+        case NamedVar(_, _): name = "NamedVar"
+        case Field(_, _, _): name = "Field"
+        case Index(_, _): name = "Index"
+        case TupleIndex(_, _): name = "TupleIndex"
+        case OptionalChain(_, _): name = "OptionalChain"
+        case NullCoalesce(_, _): name = "NullCoalesce"
+        case ExistsCheck(_): name = "ExistsCheck"
+        case Unwrap(_): name = "Unwrap"
+        case Binary(_, _, _): name = "Binary"
+        case Unary(_, _): name = "Unary"
+        case Call(_, _, _): name = "Call"
+        case MethodCall(_, _, _, _): name = "MethodCall"
+        case StaticCall(_, _, _, _): name = "StaticCall"
+        case If(_, _, _): name = "If"
+        case IfChain(_, _): name = "IfChain"
+        case MatchCase(_, _): name = "MatchCase"
+        case Loop(_, _): name = "Loop"
+        case While(_, _, _): name = "While"
+        case For(_, _, _, _): name = "For"
+        case With(_, _): name = "With"
+        case Lambda(_, _, _): name = "Lambda"
+        case Block(_): name = "Block"
+        case HostGpuLane(_, _, _, _): name = "HostGpuLane"
+        case Return(_): name = "Return"
+        case Break(_, _): name = "Break"
+        case Continue(_): name = "Continue"
+        case Throw(_): name = "Throw"
+        case Try(_): name = "Try"
+        case Await(_): name = "Await"
+        case Yield(_): name = "Yield"
+        case StructLit(_, _): name = "StructLit"
+        case EnumLit(_, _, _): name = "EnumLit"
+        case Cast(_, _): name = "Cast"
+        case As(_, _): name = "As"
+        case Range(_, _, _, _): name = "Range"
+        case Comprehension(_, _, _): name = "Comprehension"
+        case CustomBlock(_, _): name = "CustomBlock"
+        case LossBlock(_): name = "LossBlock"
+        case NogradBlock(_): name = "NogradBlock"
+        case UnsafeBlock(_): name = "UnsafeBlock"
+        case InlineAsm(_): name = "InlineAsm"
+        case InlineAsmMatch(_): name = "InlineAsmMatch"
+        case Error: name = "Error"
+        case _: name = "<unknown>"
+    name
+
+fn hir_walk_stmt_kind_name(node: HirStmt) -> text:
+    """Variant name of one HirStmtKind, for the unhandled diagnostic."""
+    if node == nil:
+        return "<nil>"
+    var name = "<unknown>"
+    match node.kind:
+        case Expr(_): name = "Expr"
+        case Let(_, _, _): name = "Let"
+        case Assign(_, _, _): name = "Assign"
+        case Block(_): name = "Block"
+        case AsmAssert(_): name = "AsmAssert"
+        case _: name = "<unknown>"
+    name
+
+fn hir_walk_type_kind_name(node: HirType) -> text:
+    """Variant name of one HirTypeKind, for the unhandled diagnostic."""
+    if node == nil:
+        return "<nil>"
+    var name = "<unknown>"
+    match node.kind:
+        case Int(_, _): name = "Int"
+        case Float(_): name = "Float"
+        case Bool: name = "Bool"
+        case Char: name = "Char"
+        case Str: name = "Str"
+        case Unit: name = "Unit"
+        case Tuple(_): name = "Tuple"
+        case Array(_, _): name = "Array"
+        case Slice(_): name = "Slice"
+        case Dict(_, _): name = "Dict"
+        case Ref(_, _): name = "Ref"
+        case Ptr(_, _): name = "Ptr"
+        case Optional(_): name = "Optional"
+        case Result(_, _): name = "Result"
+        case Named(_, _): name = "Named"
+        case TypeParam(_, _): name = "TypeParam"
+        case Union(_): name = "Union"
+        case DynTrait(_): name = "DynTrait"
+        case Function(_, _, _): name = "Function"
+        case Projection(_, _): name = "Projection"
+        case Isolated(_): name = "Isolated"
+        case Infer(_, _): name = "Infer"
+        case Error: name = "Error"
+        case Never: name = "Never"
+        case Any: name = "Any"
+        case Tensor(_, _, _): name = "Tensor"
+        case Layer(_, _): name = "Layer"
+        case _: name = "<unknown>"
+    name
+
+fn hir_walk_pattern_kind_name(node: HirPattern) -> text:
+    """Variant name of one HirPatternKind, for the unhandled diagnostic."""
+    if node == nil:
+        return "<nil>"
+    var name = "<unknown>"
+    match node.kind:
+        case Wildcard: name = "Wildcard"
+        case Literal(_): name = "Literal"
+        case Binding(_, _): name = "Binding"
+        case Tuple(_): name = "Tuple"
+        case Array(_, _): name = "Array"
+        case Struct(_, _): name = "Struct"
+        case Enum(_, _, _): name = "Enum"
+        case Or(_): name = "Or"
+        case Range(_, _, _): name = "Range"
+        case Error: name = "Error"
+        case CompleteRegion(_): name = "CompleteRegion"
+        case DynRegion(_): name = "DynRegion"
+        case _: name = "<unknown>"
+    name
+
+fn walk_hir_expr<C>(node: HirExpr, ctx: C, f: fn(HirWalkNode, C) -> C) -> C:
+    if node == nil:
+        return ctx
+    var acc = f(HirWalkNode.Expr(node), ctx)
+    var handled = false
+    if node.has_type_:
+        acc = walk_hir_type(node.type_, acc, f)
+    match node.kind:
+        case IntLit(_, _):
+            handled = true
+        case FloatLit(_, _):
+            handled = true
+        case StringLit(_, b_interpolations):
+            handled = true
+            if b_interpolations != nil:
+                for it1 in b_interpolations:
+                    acc = walk_hir_interpolation(it1, acc, f)
+        case BoolLit(_):
+            handled = true
+        case CharLit(_):
+            handled = true
+        case UnitLit:
+            handled = true
+        case NilLit:
+            handled = true
+        case ArrayLit(b_elements, b_type_):
+            handled = true
+            if b_elements != nil:
+                for it0 in b_elements:
+                    acc = walk_hir_expr(it0, acc, f)
+            acc = walk_hir_type(b_type_, acc, f)
+        case ArrayRepeat(b_value, b_count, b_elem_type):
+            handled = true
+            acc = walk_hir_expr(b_value, acc, f)
+            acc = walk_hir_expr(b_count, acc, f)
+            acc = walk_hir_type(b_elem_type, acc, f)
+        case TupleLit(b_elements):
+            handled = true
+            if b_elements != nil:
+                for it0 in b_elements:
+                    acc = walk_hir_expr(it0, acc, f)
+        case DictLit(b_entries, b_key_type, b_value_type):
+            handled = true
+            if b_entries != nil:
+                for (ka0, kb0) in b_entries:
+                    acc = walk_hir_expr(ka0, acc, f)
+                    acc = walk_hir_expr(kb0, acc, f)
+            acc = walk_hir_type(b_key_type, acc, f)
+            acc = walk_hir_type(b_value_type, acc, f)
+        case SetLit(b_elements, b_elem_type):
+            handled = true
+            if b_elements != nil:
+                for it0 in b_elements:
+                    acc = walk_hir_expr(it0, acc, f)
+            acc = walk_hir_type(b_elem_type, acc, f)
+        case Var(_):
+            handled = true
+        case NamedVar(_, _):
+            handled = true
+        case Field(b_base, _, _):
+            handled = true
+            acc = walk_hir_expr(b_base, acc, f)
+        case Index(b_base, b_index):
+            handled = true
+            acc = walk_hir_expr(b_base, acc, f)
+            acc = walk_hir_expr(b_index, acc, f)
+        case TupleIndex(b_base, _):
+            handled = true
+            acc = walk_hir_expr(b_base, acc, f)
+        case OptionalChain(b_base, _):
+            handled = true
+            acc = walk_hir_expr(b_base, acc, f)
+        case NullCoalesce(b_left, b_right):
+            handled = true
+            acc = walk_hir_expr(b_left, acc, f)
+            acc = walk_hir_expr(b_right, acc, f)
+        case ExistsCheck(b_base):
+            handled = true
+            acc = walk_hir_expr(b_base, acc, f)
+        case Unwrap(b_base):
+            handled = true
+            acc = walk_hir_expr(b_base, acc, f)
+        case Binary(_, b_left, b_right):
+            handled = true
+            acc = walk_hir_expr(b_left, acc, f)
+            acc = walk_hir_expr(b_right, acc, f)
+        case Unary(_, b_operand):
+            handled = true
+            acc = walk_hir_expr(b_operand, acc, f)
+        case Call(b_callee, b_args, b_type_args):
+            handled = true
+            acc = walk_hir_expr(b_callee, acc, f)
+            if b_args != nil:
+                for it1 in b_args:
+                    acc = walk_hir_call_arg(it1, acc, f)
+            if b_type_args != nil:
+                for it2 in b_type_args:
+                    acc = walk_hir_type(it2, acc, f)
+        case MethodCall(b_receiver, _, b_args, _):
+            handled = true
+            acc = walk_hir_expr(b_receiver, acc, f)
+            if b_args != nil:
+                for it2 in b_args:
+                    acc = walk_hir_call_arg(it2, acc, f)
+        case StaticCall(b_type_, _, b_args, _):
+            handled = true
+            acc = walk_hir_type(b_type_, acc, f)
+            if b_args != nil:
+                for it2 in b_args:
+                    acc = walk_hir_call_arg(it2, acc, f)
+        case If(b_cond, b_then_, b_else_):
+            handled = true
+            acc = walk_hir_expr(b_cond, acc, f)
+            acc = walk_hir_block(b_then_, acc, f)
+            acc = walk_hir_block(b_else_, acc, f)
+        case IfChain(b_arms, b_else_):
+            handled = true
+            if b_arms != nil:
+                for it0 in b_arms:
+                    acc = walk_hir_if_arm(it0, acc, f)
+            acc = walk_hir_block(b_else_, acc, f)
+        case MatchCase(b_scrutinee, b_arms):
+            handled = true
+            acc = walk_hir_expr(b_scrutinee, acc, f)
+            if b_arms != nil:
+                for it1 in b_arms:
+                    acc = walk_hir_match_arm(it1, acc, f)
+        case Loop(b_body, _):
+            handled = true
+            acc = walk_hir_block(b_body, acc, f)
+        case While(b_cond, b_body, _):
+            handled = true
+            acc = walk_hir_expr(b_cond, acc, f)
+            acc = walk_hir_block(b_body, acc, f)
+        case For(_, b_iter, b_body, _):
+            handled = true
+            acc = walk_hir_expr(b_iter, acc, f)
+            acc = walk_hir_block(b_body, acc, f)
+        case With(b_items, b_body):
+            handled = true
+            if b_items != nil:
+                for it0 in b_items:
+                    acc = walk_hir_with_item(it0, acc, f)
+            acc = walk_hir_block(b_body, acc, f)
+        case Lambda(b_params, b_body, _):
+            handled = true
+            if b_params != nil:
+                for it0 in b_params:
+                    acc = walk_hir_param(it0, acc, f)
+            acc = walk_hir_expr(b_body, acc, f)
+        case Block(b_block):
+            handled = true
+            acc = walk_hir_block(b_block, acc, f)
+        case HostGpuLane(_, _, b_marker, b_body):
+            handled = true
+            acc = walk_hir_expr(b_marker, acc, f)
+            acc = walk_hir_block(b_body, acc, f)
+        case Return(b_value):
+            handled = true
+            acc = walk_hir_expr(b_value, acc, f)
+        case Break(_, b_value):
+            handled = true
+            acc = walk_hir_expr(b_value, acc, f)
+        case Continue(_):
+            handled = true
+        case Throw(b_value):
+            handled = true
+            acc = walk_hir_expr(b_value, acc, f)
+        case Try(b_expr):
+            handled = true
+            acc = walk_hir_expr(b_expr, acc, f)
+        case Await(b_expr):
+            handled = true
+            acc = walk_hir_expr(b_expr, acc, f)
+        case Yield(b_value):
+            handled = true
+            acc = walk_hir_expr(b_value, acc, f)
+        case StructLit(b_type_, b_fields):
+            handled = true
+            acc = walk_hir_type(b_type_, acc, f)
+            if b_fields != nil:
+                for (ka1, kb1) in b_fields:
+                    acc = walk_hir_expr(kb1, acc, f)
+        case EnumLit(b_type_, _, b_payload):
+            handled = true
+            acc = walk_hir_type(b_type_, acc, f)
+            acc = walk_hir_enum_payload(b_payload, acc, f)
+        case Cast(b_expr, b_target):
+            handled = true
+            acc = walk_hir_expr(b_expr, acc, f)
+            acc = walk_hir_type(b_target, acc, f)
+        case As(b_expr, b_target):
+            handled = true
+            acc = walk_hir_expr(b_expr, acc, f)
+            acc = walk_hir_type(b_target, acc, f)
+        case Range(b_start, b_end, _, b_step):
+            handled = true
+            acc = walk_hir_expr(b_start, acc, f)
+            acc = walk_hir_expr(b_end, acc, f)
+            acc = walk_hir_expr(b_step, acc, f)
+        case Comprehension(b_kind, b_expr, b_clauses):
+            handled = true
+            acc = walk_hir_comprehension_kind(b_kind, acc, f)
+            acc = walk_hir_expr(b_expr, acc, f)
+            if b_clauses != nil:
+                for it2 in b_clauses:
+                    acc = walk_hir_comp_clause(it2, acc, f)
+        case CustomBlock(_, _):
+            handled = true
+        case LossBlock(b_body):
+            handled = true
+            acc = walk_hir_block(b_body, acc, f)
+        case NogradBlock(b_body):
+            handled = true
+            acc = walk_hir_block(b_body, acc, f)
+        case UnsafeBlock(b_body):
+            handled = true
+            acc = walk_hir_block(b_body, acc, f)
+        case InlineAsm(b_asm_node):
+            handled = true
+            acc = walk_hir_asm(b_asm_node, acc, f)
+        case InlineAsmMatch(b_arms):
+            handled = true
+            if b_arms != nil:
+                for it0 in b_arms:
+                    acc = walk_hir_asm_match_arm(it0, acc, f)
+        case Error:
+            handled = true
+        case _:
+            handled = false
+    if not handled:
+        hir_walk_unhandled("HirExprKind", "walk_hir_expr", hir_walk_expr_kind_name(node))
+    acc
+
+fn walk_hir_stmt<C>(node: HirStmt, ctx: C, f: fn(HirWalkNode, C) -> C) -> C:
+    if node == nil:
+        return ctx
+    var acc = f(HirWalkNode.Stmt(node), ctx)
+    var handled = false
+    match node.kind:
+        case Expr(b_expr):
+            handled = true
+            acc = walk_hir_expr(b_expr, acc, f)
+        case Let(_, b_type_, b_init):
+            handled = true
+            acc = walk_hir_type(b_type_, acc, f)
+            acc = walk_hir_expr(b_init, acc, f)
+        case Assign(b_target, _, b_value):
+            handled = true
+            acc = walk_hir_expr(b_target, acc, f)
+            acc = walk_hir_expr(b_value, acc, f)
+        case Block(b_block):
+            handled = true
+            acc = walk_hir_block(b_block, acc, f)
+        case AsmAssert(_):
+            handled = true
+        case _:
+            handled = false
+    if not handled:
+        hir_walk_unhandled("HirStmtKind", "walk_hir_stmt", hir_walk_stmt_kind_name(node))
+    acc
+
+fn walk_hir_type<C>(node: HirType, ctx: C, f: fn(HirWalkNode, C) -> C) -> C:
+    if node == nil:
+        return ctx
+    var acc = f(HirWalkNode.Type_(node), ctx)
+    var handled = false
+    match node.kind:
+        case Int(_, _):
+            handled = true
+        case Float(_):
+            handled = true
+        case Bool:
+            handled = true
+        case Char:
+            handled = true
+        case Str:
+            handled = true
+        case Unit:
+            handled = true
+        case Tuple(b_elements):
+            handled = true
+            if b_elements != nil:
+                for it0 in b_elements:
+                    acc = walk_hir_type(it0, acc, f)
+        case Array(b_element, _):
+            handled = true
+            acc = walk_hir_type(b_element, acc, f)
+        case Slice(b_element):
+            handled = true
+            acc = walk_hir_type(b_element, acc, f)
+        case Dict(b_key, b_value):
+            handled = true
+            acc = walk_hir_type(b_key, acc, f)
+            acc = walk_hir_type(b_value, acc, f)
+        case Ref(b_inner, _):
+            handled = true
+            acc = walk_hir_type(b_inner, acc, f)
+        case Ptr(b_inner, _):
+            handled = true
+            acc = walk_hir_type(b_inner, acc, f)
+        case Optional(b_inner):
+            handled = true
+            acc = walk_hir_type(b_inner, acc, f)
+        case Result(b_ok, b_err):
+            handled = true
+            acc = walk_hir_type(b_ok, acc, f)
+            acc = walk_hir_type(b_err, acc, f)
+        case Named(_, b_args):
+            handled = true
+            if b_args != nil:
+                for it1 in b_args:
+                    acc = walk_hir_type(it1, acc, f)
+        case TypeParam(_, b_bounds):
+            handled = true
+            if b_bounds != nil:
+                for it1 in b_bounds:
+                    acc = walk_hir_type(it1, acc, f)
+        case Union(b_members):
+            handled = true
+            if b_members != nil:
+                for it0 in b_members:
+                    acc = walk_hir_type(it0, acc, f)
+        case DynTrait(_):
+            handled = true
+        case Function(b_params, b_ret, b_effects):
+            handled = true
+            if b_params != nil:
+                for it0 in b_params:
+                    acc = walk_hir_type(it0, acc, f)
+            acc = walk_hir_type(b_ret, acc, f)
+            if b_effects != nil:
+                for it2 in b_effects:
+                    acc = walk_hir_effect(it2, acc, f)
+        case Projection(b_base, _):
+            handled = true
+            acc = walk_hir_type(b_base, acc, f)
+        case Isolated(b_inner):
+            handled = true
+            acc = walk_hir_type(b_inner, acc, f)
+        case Infer(_, _):
+            handled = true
+        case Error:
+            handled = true
+        case Never:
+            handled = true
+        case Any:
+            handled = true
+        case Tensor(b_element, b_dims, _):
+            handled = true
+            acc = walk_hir_type(b_element, acc, f)
+            if b_dims != nil:
+                for it1 in b_dims:
+                    acc = walk_hir_dim_expr(it1, acc, f)
+        case Layer(b_input, b_output):
+            handled = true
+            if b_input != nil:
+                for it0 in b_input:
+                    acc = walk_hir_dim_expr(it0, acc, f)
+            if b_output != nil:
+                for it1 in b_output:
+                    acc = walk_hir_dim_expr(it1, acc, f)
+        case _:
+            handled = false
+    if not handled:
+        hir_walk_unhandled("HirTypeKind", "walk_hir_type", hir_walk_type_kind_name(node))
+    acc
+
+fn walk_hir_pattern<C>(node: HirPattern, ctx: C, f: fn(HirWalkNode, C) -> C) -> C:
+    if node == nil:
+        return ctx
+    var acc = f(HirWalkNode.Pattern(node), ctx)
+    var handled = false
+    if node.has_type_:
+        acc = walk_hir_type(node.type_, acc, f)
+    match node.kind:
+        case Wildcard:
+            handled = true
+        case Literal(b_value):
+            handled = true
+            acc = walk_hir_expr(b_value, acc, f)
+        case Binding(_, _):
+            handled = true
+        case Tuple(b_elements):
+            handled = true
+            if b_elements != nil:
+                for it0 in b_elements:
+                    acc = walk_hir_pattern(it0, acc, f)
+        case Array(b_elements, _):
+            handled = true
+            if b_elements != nil:
+                for it0 in b_elements:
+                    acc = walk_hir_pattern(it0, acc, f)
+        case Struct(b_type_, b_fields):
+            handled = true
+            acc = walk_hir_type(b_type_, acc, f)
+            if b_fields != nil:
+                for (ka1, kb1) in b_fields:
+                    acc = walk_hir_pattern(kb1, acc, f)
+        case Enum(b_type_, _, b_payload):
+            handled = true
+            acc = walk_hir_type(b_type_, acc, f)
+            acc = walk_hir_pattern_payload(b_payload, acc, f)
+        case Or(b_patterns):
+            handled = true
+            if b_patterns != nil:
+                for it0 in b_patterns:
+                    acc = walk_hir_pattern(it0, acc, f)
+        case Range(b_start, b_end, _):
+            handled = true
+            acc = walk_hir_expr(b_start, acc, f)
+            acc = walk_hir_expr(b_end, acc, f)
+        case Error:
+            handled = true
+        case CompleteRegion(_):
+            handled = true
+        case DynRegion(_):
+            handled = true
+        case _:
+            handled = false
+    if not handled:
+        hir_walk_unhandled("HirPatternKind", "walk_hir_pattern", hir_walk_pattern_kind_name(node))
+    acc
+
+fn walk_hir_dim_expr<C>(node: DimExpr, ctx: C, f: fn(HirWalkNode, C) -> C) -> C:
+    if node == nil:
+        return ctx
+    var acc = ctx
+    acc
+
+fn walk_hir_dim_expr_kind<C>(node: DimExprKind, ctx: C, f: fn(HirWalkNode, C) -> C) -> C:
+    if node == nil:
+        return ctx
+    var acc = ctx
+    var handled = false
+    match node:
+        case Literal(_):
+            handled = true
+        case Named(_, _, _):
+            handled = true
+        case Var(_):
+            handled = true
+        case Dynamic:
+            handled = true
+        case Broadcast:
+            handled = true
+        case ConstParam(_):
+            handled = true
+        case Add(b_left, b_right):
+            handled = true
+            acc = walk_hir_dim_expr(b_left, acc, f)
+            acc = walk_hir_dim_expr(b_right, acc, f)
+        case Mul(b_left, b_right):
+            handled = true
+            acc = walk_hir_dim_expr(b_left, acc, f)
+            acc = walk_hir_dim_expr(b_right, acc, f)
+        case Div(b_left, b_right):
+            handled = true
+            acc = walk_hir_dim_expr(b_left, acc, f)
+            acc = walk_hir_dim_expr(b_right, acc, f)
+        case _:
+            handled = false
+    if not handled:
+        hir_walk_unhandled("DimExprKind", "walk_hir_dim_expr_kind", "<unnamed>")
+    acc
+
+fn walk_hir_effect<C>(node: Effect, ctx: C, f: fn(HirWalkNode, C) -> C) -> C:
+    if node == nil:
+        return ctx
+    var acc = ctx
+    acc
+
+fn walk_hir_effect_kind<C>(node: EffectKind, ctx: C, f: fn(HirWalkNode, C) -> C) -> C:
+    if node == nil:
+        return ctx
+    var acc = ctx
+    var handled = false
+    match node:
+        case Pure:
+            handled = true
+        case IO:
+            handled = true
+        case Async:
+            handled = true
+        case Throws(b_type_):
+            handled = true
+            acc = walk_hir_type(b_type_, acc, f)
+        case Mutates:
+            handled = true
+        case Allocates:
+            handled = true
+        case Custom(_):
+            handled = true
+        case _:
+            handled = false
+    if not handled:
+        hir_walk_unhandled("EffectKind", "walk_hir_effect_kind", "<unnamed>")
+    acc
+
+fn walk_hir_asm<C>(node: HirAsm, ctx: C, f: fn(HirWalkNode, C) -> C) -> C:
+    if node == nil:
+        return ctx
+    var acc = ctx
+    if node.constraints != nil:
+        for it0 in node.constraints:
+            acc = walk_hir_asm_constraint(it0, acc, f)
+    acc
+
+fn walk_hir_asm_constraint<C>(node: HirAsmConstraint, ctx: C, f: fn(HirWalkNode, C) -> C) -> C:
+    if node == nil:
+        return ctx
+    var acc = ctx
+    acc = walk_hir_expr(node.value, acc, f)
+    acc = walk_hir_expr(node.output_value, acc, f)
+    acc
+
+fn walk_hir_asm_match_arm<C>(node: HirAsmMatchArm, ctx: C, f: fn(HirWalkNode, C) -> C) -> C:
+    if node == nil:
+        return ctx
+    var acc = ctx
+    if node.has_asm_body:
+        acc = walk_hir_asm(node.asm_body, acc, f)
+    acc
+
+fn walk_hir_block<C>(node: HirBlock, ctx: C, f: fn(HirWalkNode, C) -> C) -> C:
+    if node == nil:
+        return ctx
+    var acc = ctx
+    if node.stmts != nil:
+        for it0 in node.stmts:
+            acc = walk_hir_stmt(it0, acc, f)
+    if node.has:
+        acc = walk_hir_expr(node.value, acc, f)
+    acc
+
+fn walk_hir_call_arg<C>(node: HirCallArg, ctx: C, f: fn(HirWalkNode, C) -> C) -> C:
+    if node == nil:
+        return ctx
+    var acc = ctx
+    acc = walk_hir_expr(node.value, acc, f)
+    acc
+
+fn walk_hir_comp_clause<C>(node: HirCompClause, ctx: C, f: fn(HirWalkNode, C) -> C) -> C:
+    if node == nil:
+        return ctx
+    var acc = ctx
+    acc
+
+fn walk_hir_comp_clause_kind<C>(node: HirCompClauseKind, ctx: C, f: fn(HirWalkNode, C) -> C) -> C:
+    if node == nil:
+        return ctx
+    var acc = ctx
+    var handled = false
+    match node:
+        case For(_, b_iter):
+            handled = true
+            acc = walk_hir_expr(b_iter, acc, f)
+        case If(b_cond):
+            handled = true
+            acc = walk_hir_expr(b_cond, acc, f)
+        case _:
+            handled = false
+    if not handled:
+        hir_walk_unhandled("HirCompClauseKind", "walk_hir_comp_clause_kind", "<unnamed>")
+    acc
+
+fn walk_hir_comprehension_kind<C>(node: HirComprehensionKind, ctx: C, f: fn(HirWalkNode, C) -> C) -> C:
+    if node == nil:
+        return ctx
+    var acc = ctx
+    var handled = false
+    match node:
+        case List:
+            handled = true
+        case Dict:
+            handled = true
+        case Set:
+            handled = true
+        case Generator:
+            handled = true
+        case _:
+            handled = false
+    if not handled:
+        hir_walk_unhandled("HirComprehensionKind", "walk_hir_comprehension_kind", "<unnamed>")
+    acc
+
+fn walk_hir_enum_payload<C>(node: HirEnumPayload, ctx: C, f: fn(HirWalkNode, C) -> C) -> C:
+    if node == nil:
+        return ctx
+    var acc = ctx
+    var handled = false
+    match node:
+        case Tuple(b_values):
+            handled = true
+            if b_values != nil:
+                for it0 in b_values:
+                    acc = walk_hir_expr(it0, acc, f)
+        case Struct(b_fields):
+            handled = true
+            if b_fields != nil:
+                for (ka0, kb0) in b_fields:
+                    acc = walk_hir_expr(kb0, acc, f)
+        case _:
+            handled = false
+    if not handled:
+        hir_walk_unhandled("HirEnumPayload", "walk_hir_enum_payload", "<unnamed>")
+    acc
+
+fn walk_hir_if_arm<C>(node: HirIfArm, ctx: C, f: fn(HirWalkNode, C) -> C) -> C:
+    if node == nil:
+        return ctx
+    var acc = ctx
+    acc = walk_hir_expr(node.cond, acc, f)
+    acc = walk_hir_block(node.then_, acc, f)
+    acc
+
+fn walk_hir_interpolation<C>(node: HirInterpolation, ctx: C, f: fn(HirWalkNode, C) -> C) -> C:
+    if node == nil:
+        return ctx
+    var acc = ctx
+    acc = walk_hir_expr(node.expr, acc, f)
+    acc
+
+fn walk_hir_match_arm<C>(node: HirMatchArm, ctx: C, f: fn(HirWalkNode, C) -> C) -> C:
+    if node == nil:
+        return ctx
+    var acc = ctx
+    acc = walk_hir_pattern(node.pattern, acc, f)
+    if node.has_guard:
+        acc = walk_hir_expr(node.guard, acc, f)
+    acc = walk_hir_block(node.body, acc, f)
+    acc
+
+fn walk_hir_param<C>(node: HirParam, ctx: C, f: fn(HirWalkNode, C) -> C) -> C:
+    if node == nil:
+        return ctx
+    var acc = ctx
+    acc = walk_hir_type(node.type_, acc, f)
+    if node.has_default:
+        acc = walk_hir_expr(node.default, acc, f)
+    acc
+
+fn walk_hir_pattern_payload<C>(node: HirPatternPayload, ctx: C, f: fn(HirWalkNode, C) -> C) -> C:
+    if node == nil:
+        return ctx
+    var acc = ctx
+    var handled = false
+    match node:
+        case Tuple(b_patterns):
+            handled = true
+            if b_patterns != nil:
+                for it0 in b_patterns:
+                    acc = walk_hir_pattern(it0, acc, f)
+        case Struct(b_fields):
+            handled = true
+            if b_fields != nil:
+                for (ka0, kb0) in b_fields:
+                    acc = walk_hir_pattern(kb0, acc, f)
+        case _:
+            handled = false
+    if not handled:
+        hir_walk_unhandled("HirPatternPayload", "walk_hir_pattern_payload", "<unnamed>")
+    acc
+
+fn walk_hir_with_item<C>(node: HirWithItem, ctx: C, f: fn(HirWalkNode, C) -> C) -> C:
+    if node == nil:
+        return ctx
+    var acc = ctx
+    acc = walk_hir_expr(node.context_expr, acc, f)
+    acc
+
+export HirWalkNode, hir_walk_unhandled
+export hir_walk_expr_kind_name, hir_walk_stmt_kind_name, hir_walk_type_kind_name, hir_walk_pattern_kind_name
+export walk_hir_expr, walk_hir_stmt, walk_hir_type, walk_hir_pattern, walk_hir_dim_expr, walk_hir_dim_expr_kind, walk_hir_effect, walk_hir_effect_kind, walk_hir_asm, walk_hir_asm_constraint, walk_hir_asm_match_arm, walk_hir_block, walk_hir_call_arg, walk_hir_comp_clause, walk_hir_comp_clause_kind, walk_hir_comprehension_kind, walk_hir_enum_payload, walk_hir_if_arm, walk_hir_interpolation, walk_hir_match_arm, walk_hir_param, walk_hir_pattern_payload, walk_hir_with_item

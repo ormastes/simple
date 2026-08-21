@@ -79,7 +79,9 @@ fn opaque_types() -> [text]:
         "HirDomainBlock", "HirStaticAssert", "HirAopAdvice", "HirDiBinding",
         "HirArchRule", "HirMockDecl", "HirContractBlock", "HirContractClause",
         "HirAssocTypeDecl", "HirAssocTypeImpl", "HirBitfield",
-        "HirBitfieldField"
+        "HirBitfieldField", "SymbolId", "SymbolKind", "MethodResolution",
+        "ScopeId", "ScopeKind", "DeviceType", "MemorySpace", "LayerType",
+        "ParamShape"
     ]
 
 fn prim_types() -> [text]:
@@ -240,12 +242,17 @@ class DeclUniverse:
     sources: [text]
     struct_names: [text]
     enum_names: [text]
+    opaques: [text]
 
     static fn load(repo_root: text) -> DeclUniverse:
+        DeclUniverse.load_from(repo_root, decl_sources(), opaque_types())
+
+    static fn load_from(repo_root: text, rels: [text], opaques: [text]) -> DeclUniverse:
+        """Load an arbitrary dialect: its declaration sources and its opaque set."""
         var texts: [text] = []
         var snames: [text] = []
         var enames: [text] = []
-        for rel in decl_sources():
+        for rel in rels:
             val path = repo_root + "/" + rel
             if not file_exists(path):
                 continue
@@ -257,7 +264,7 @@ class DeclUniverse:
                     snames = snames.push(t.substring(7, t.len() - 1).trim())
                 if _indent_of(line) == 0 and t.starts_with("enum ") and t.ends_with(":"):
                     enames = enames.push(t.substring(5, t.len() - 1).trim())
-        DeclUniverse(sources: texts, struct_names: snames, enum_names: enames)
+        DeclUniverse(sources: texts, struct_names: snames, enum_names: enames, opaques: opaques)
 
     me is_struct(name: text) -> bool:
         _contains(self.struct_names, name)
@@ -267,7 +274,7 @@ class DeclUniverse:
 
     me is_node(name: text) -> bool:
         """A type the walk descends into."""
-        if _contains(opaque_types(), name):
+        if _contains(self.opaques, name):
             return false
         self.is_struct(name) or self.is_enum(name)
 
@@ -349,6 +356,8 @@ fn node_closure(u: DeclUniverse) -> [text]:
             for row in decl.variants:
                 for f in parse_payload_fields(row.payload_schema):
                     val c = u.classify(f.type_text)
+                    if c.cat == "prim" or c.cat == "opaque":
+                        continue
                     if c.a != "":
                         work = _push_unique(work, c.a)
                     if c.b != "":
@@ -356,6 +365,8 @@ fn node_closure(u: DeclUniverse) -> [text]:
         else:
             for f in decl.fields:
                 val c = u.classify(f.type_text)
+                if c.cat == "prim" or c.cat == "opaque":
+                    continue
                 if c.a != "":
                     work = _push_unique(work, c.a)
                 if c.b != "":
@@ -446,10 +457,9 @@ fn _one_call(mode: text, type_name: text, v: text) -> text:
         return "out = out.push(HirNode." + ctor + "(" + v + "))"
     return "out = _hir_extend(out, " + children_fn_name(type_name) + "(" + v + "))"
 
-fn _recurse_lines(u: DeclUniverse, f: FieldDecl, indent: text, mode: text, idx: i64) -> text:
-    """Emit the traversal for one field, for one of visit/children/hash."""
-    val c = u.classify(f.type_text)
-    val v = "b_" + f.binder
+fn _recurse_lines(u: DeclUniverse, type_text: text, v: text, indent: text, mode: text, idx: i64) -> text:
+    """Emit the traversal for one field value `v`, for visit/children/hash."""
+    val c = u.classify(type_text)
     if c.cat == "node":
         return indent + _one_call(mode, c.a, v) + "\n"
     if c.cat == "list":
@@ -464,12 +474,341 @@ fn _recurse_lines(u: DeclUniverse, f: FieldDecl, indent: text, mode: text, idx: 
             out = out + indent + "    " + _one_call(mode, c.b, "kb{idx}") + "\n"
         return out
     if c.cat == "prim" and mode == "hash":
-        return indent + "h = _hir_mix_text(h, \"{" + v + "}\")\n"
+        return indent + "h = _hir_mix_prim(h, " + v + ")\n"
     ""
 
+# ============================================================================
+# Emission
+# ============================================================================
+
+fn _sort_texts(items: [text]) -> [text]:
+    var out = items
+    var i = 1
+    while i < out.len():
+        val key = out[i]
+        var j = i - 1
+        while j >= 0 and out[j] > key:
+            out[j + 1] = out[j]
+            j = j - 1
+        out[j + 1] = key
+        i = i + 1
+    out
+
+fn _wild_arm(variant: text, arity: i64) -> text:
+    """`Call(_, _, _)` — a kind-name arm reads no payload field."""
+    if arity == 0:
+        return variant
+    var out = variant + "("
+    var i = 0
+    while i < arity:
+        if i > 0:
+            out = out + ", "
+        out = out + "_"
+        i = i + 1
+    out + ")"
+
+fn variant_arity(payload_schema: text) -> i64:
+    """Payload arity of one variant row, for wildcard arm rendering."""
+    parse_payload_fields(payload_schema).len()
+
+fn _is_kind_enum(name: text) -> bool:
+    for pair in base_pairs():
+        if pair[1] == name:
+            return true
+    false
+
+fn emit_order(u: DeclUniverse) -> [text]:
+    """Carriers first, in the fixed base order, then every wrapper sorted."""
+    var out: [text] = []
+    for pair in base_pairs():
+        out.push(pair[0])
+    var rest: [text] = []
+    for name in node_closure(u):
+        if _is_kind_enum(name) or _is_base_carrier(name):
+            continue
+        rest.push(name)
+    for name in _sort_texts(rest):
+        out.push(name)
+    out
+
+fn _enum_arms(u: DeclUniverse, decl: NodeDecl, mode: text, indent: text) -> text:
+    var out = ""
+    for row in decl.variants:
+        val fields = parse_payload_fields(row.payload_schema)
+        out = out + indent + "case " + row.variant + _binders(u, fields, mode == "hash") + ":\n"
+        var body = ""
+        if mode == "hash":
+            body = indent + "    h = _hir_mix_text(h, \"" + row.variant + "\")\n"
+        var idx = 0
+        for f in fields:
+            body = body + _recurse_lines(u, f.type_text, "b_" + f.binder, indent + "    ", mode, idx)
+            idx = idx + 1
+        if body == "":
+            body = indent + "    hir_visit_nothing()\n"
+        out = out + body
+    out
+
+fn _struct_body(u: DeclUniverse, decl: NodeDecl, mode: text, indent: text) -> text:
+    """Traversal of a wrapper struct's fields, honouring `has_x` guards."""
+    var out = ""
+    var idx = 0
+    for f in decl.fields:
+        if f.binder == "kind":
+            continue
+        val c = u.classify(f.type_text)
+        val useful = c.cat == "node" or c.cat == "list" or c.cat == "pair" or (mode == "hash" and c.cat == "prim")
+        if not useful:
+            continue
+        val guard = u.guard_of(decl, f)
+        if guard == "":
+            out = out + _recurse_lines(u, f.type_text, "node." + f.binder, indent, mode, idx)
+        else:
+            out = out + indent + "if node." + guard + ":\n"
+            out = out + _recurse_lines(u, f.type_text, "node." + f.binder, indent + "    ", mode, idx)
+        idx = idx + 1
+    out
+
+fn _carrier_extra(u: DeclUniverse, carrier: text, mode: text, indent: text) -> text:
+    """The carrier struct's own node-bearing fields (e.g. `HirExpr.type_`)."""
+    _struct_body(u, u.decl_of(carrier), mode, indent)
+
+fn _kind_name_fn(slot: text) -> text:
+    """Generated kind-name fn; `type` is prefixed to avoid colliding with hir_types.spl."""
+    if slot == "type":
+        return "hir_gen_type_kind_name"
+    "hir_" + slot + "_kind_name"
+
+fn emit_kind_name_fns(u: DeclUniverse) -> text:
+    var out = ""
+    for pair in base_pairs():
+        val decl = u.decl_of(pair[1])
+        val kn = _kind_name_fn(pair[2])
+        out = out + "\nfn " + kn + "(node: " + pair[0] + ") -> text:\n"
+        out = out + "    \"\"\"Variant name of one " + pair[1] + ", for logs and hashing.\"\"\"\n"
+        out = out + "    if node == nil:\n"
+        out = out + "        return \"<nil>\"\n"
+        out = out + "    var name = \"\"\n"
+        out = out + "    match node.kind:\n"
+        for row in decl.variants:
+            val fields = parse_payload_fields(row.payload_schema)
+            out = out + "        case " + _wild_arm(row.variant, fields.len()) + ": name = \"" + row.variant + "\"\n"
+        out = out + "        case _: name = unreachable_hir_variant(\"" + pair[1] + "\", \"" + kn + "\")\n"
+        out = out + "    name\n"
+    out
+
+fn emit_visit_file(u: DeclUniverse) -> text:
+    var out = GEN_HEADER
+    out = out + "#\n# Read-only recursive HIR visitors (hardening plan §11.5, agent C4).\n"
+    out = out + "# One match arm per registered variant, no semantic `case _` fallback:\n"
+    out = out + "# the trailing arm the seed's match checker still demands routes to\n"
+    out = out + "# `unreachable_hir_variant`, which raises rather than ignoring the node.\n\n"
+    out = out + "use compiler.hir.hir_definitions.*\n"
+    out = out + "use compiler.hir.hir_types.*\n\n"
+    out = out + "trait HirVisitor:\n"
+    out = out + "    \"\"\"Read-only callback surface. One hook per base HIR carrier.\"\"\"\n"
+    out = out + "    me on_expr(node: HirExpr)\n"
+    out = out + "    me on_stmt(node: HirStmt)\n"
+    out = out + "    me on_type(node: HirType)\n"
+    out = out + "    me on_pattern(node: HirPattern)\n\n"
+    out = out + "fn hir_visit_nothing():\n"
+    out = out + "    \"\"\"Leaf arm: the variant carries no HIR children.\"\"\"\n"
+    out = out + "    val _leaf = 0\n\n"
+    out = out + "fn unreachable_hir_variant(kind: text, where_: text) -> text:\n"
+    out = out + "    \"\"\"A variant no generated arm names. Fail closed, never ignore.\"\"\"\n"
+    out = out + "    print \"[hir-visit] unhandled {{kind}} variant at {{where_}}\"\n"
+    out = out + "    raise \"unhandled {{kind}} variant at {{where_}}: regenerate src/compiler/20.hir/generated\"\n"
+    out = out + emit_kind_name_fns(u)
+    out = out + "\nclass HirVisitCounter:\n"
+    out = out + "    \"\"\"Concrete HirVisitor recording what the walk reached.\"\"\"\n"
+    out = out + "    exprs: i64\n    stmts: i64\n    types: i64\n    patterns: i64\n    kinds: [text]\n\n"
+    out = out + "    static fn create() -> HirVisitCounter:\n"
+    out = out + "        HirVisitCounter(exprs: 0, stmts: 0, types: 0, patterns: 0, kinds: [])\n\n"
+    out = out + "    me on_expr(node: HirExpr):\n"
+    out = out + "        self.exprs = self.exprs + 1\n"
+    out = out + "        self.kinds = self.kinds.push(hir_expr_kind_name(node))\n\n"
+    out = out + "    me on_stmt(node: HirStmt):\n"
+    out = out + "        self.stmts = self.stmts + 1\n"
+    out = out + "        self.kinds = self.kinds.push(hir_stmt_kind_name(node))\n\n"
+    out = out + "    me on_type(node: HirType):\n"
+    out = out + "        self.types = self.types + 1\n"
+    out = out + "        self.kinds = self.kinds.push(hir_gen_type_kind_name(node))\n\n"
+    out = out + "    me on_pattern(node: HirPattern):\n"
+    out = out + "        self.patterns = self.patterns + 1\n"
+    out = out + "        self.kinds = self.kinds.push(hir_pattern_kind_name(node))\n"
+    for name in emit_order(u):
+        out = out + "\n" + _emit_one_visit(u, name)
+    out = out + "\nexport HirVisitor, HirVisitCounter, unreachable_hir_variant, hir_visit_nothing\n"
+    out = out + "export hir_expr_kind_name, hir_stmt_kind_name, hir_gen_type_kind_name, hir_pattern_kind_name\n"
+    var names: [text] = []
+    for name in emit_order(u):
+        names.push(visit_fn_name(name))
+    out = out + "export " + _join(names, ", ") + "\n"
+    out
+
+fn _join(items: [text], sep: text) -> text:
+    var out = ""
+    var i = 0
+    while i < items.len():
+        if i > 0:
+            out = out + sep
+        out = out + items[i]
+        i = i + 1
+    out
+
+fn _emit_one_visit(u: DeclUniverse, name: text) -> text:
+    val decl = u.decl_of(name)
+    var out = "fn " + visit_fn_name(name) + "(node: " + name + ", visitor: HirVisitor):\n"
+    out = out + "    if node == nil:\n        return\n"
+    if _is_base_carrier(name):
+        val short = _base_short(name)
+        val kind_enum = _kind_enum_of(name)
+        out = out + "    visitor.on_" + short + "(node)\n"
+        out = out + _carrier_extra(u, name, "visit", "    ")
+        out = out + "    match node.kind:\n"
+        out = out + _enum_arms(u, u.decl_of(kind_enum), "visit", "        ")
+        out = out + "        case _: unreachable_hir_variant(\"" + kind_enum + "\", \"" + visit_fn_name(name) + "\")\n"
+        return out
+    if decl.is_enum:
+        out = out + "    match node:\n"
+        out = out + _enum_arms(u, decl, "visit", "        ")
+        out = out + "        case _: unreachable_hir_variant(\"" + name + "\", \"" + visit_fn_name(name) + "\")\n"
+        return out
+    val body = _struct_body(u, decl, "visit", "    ")
+    if body == "":
+        return out + "    hir_visit_nothing()\n"
+    out + body
+
+fn emit_children_file(u: DeclUniverse) -> text:
+    var out = GEN_HEADER
+    out = out + "#\n# Immediate HIR child enumeration (hardening plan §11.5, agent C4).\n"
+    out = out + "# Wrapper structs (HirCallArg, HirMatchArm, ...) are TRANSPARENT: the\n"
+    out = out + "# children of a Call are its callee and argument expressions, not opaque\n"
+    out = out + "# argument records.\n\n"
+    out = out + "use compiler.hir.hir_definitions.*\n"
+    out = out + "use compiler.hir.hir_types.*\n\n"
+    out = out + "enum HirNode:\n"
+    out = out + "    \"\"\"One HIR node of any base carrier kind.\"\"\"\n"
+    out = out + "    Expr(node: HirExpr)\n    Stmt(node: HirStmt)\n    Type_(node: HirType)\n    Pattern(node: HirPattern)\n\n"
+    out = out + "fn _hir_extend(a: [HirNode], b: [HirNode]) -> [HirNode]:\n"
+    out = out + "    var out = a\n    for it in b:\n        out = out.push(it)\n    out\n\n"
+    out = out + "fn hir_children_of(node: HirNode) -> [HirNode]:\n"
+    out = out + "    \"\"\"Immediate children of any HIR node.\"\"\"\n"
+    out = out + "    if node == nil:\n        return []\n"
+    out = out + "    var out: [HirNode] = []\n"
+    out = out + "    match node:\n"
+    out = out + "        case Expr(e): out = hir_children_of_expr(e)\n"
+    out = out + "        case Stmt(s): out = hir_children_of_stmt(s)\n"
+    out = out + "        case Type_(t): out = hir_children_of_type(t)\n"
+    out = out + "        case Pattern(p): out = hir_children_of_pattern(p)\n"
+    out = out + "        case _: unreachable_hir_variant(\"HirNode\", \"hir_children_of\")\n"
+    out = out + "    out\n"
+    for name in emit_order(u):
+        out = out + "\n" + _emit_one_children(u, name)
+    out = out + "\nexport HirNode, hir_children_of, _hir_extend\n"
+    var names: [text] = []
+    for name in emit_order(u):
+        names.push(children_fn_name(name))
+    out = out + "export " + _join(names, ", ") + "\n"
+    out
+
+fn _emit_one_children(u: DeclUniverse, name: text) -> text:
+    val decl = u.decl_of(name)
+    var out = "fn " + children_fn_name(name) + "(node: " + name + ") -> [HirNode]:\n"
+    out = out + "    if node == nil:\n        return []\n"
+    out = out + "    var out: [HirNode] = []\n"
+    if _is_base_carrier(name):
+        val kind_enum = _kind_enum_of(name)
+        out = out + _carrier_extra(u, name, "children", "    ")
+        out = out + "    match node.kind:\n"
+        out = out + _enum_arms(u, u.decl_of(kind_enum), "children", "        ")
+        out = out + "        case _: unreachable_hir_variant(\"" + kind_enum + "\", \"" + children_fn_name(name) + "\")\n"
+        return out + "    out\n"
+    if decl.is_enum:
+        out = out + "    match node:\n"
+        out = out + _enum_arms(u, decl, "children", "        ")
+        out = out + "        case _: unreachable_hir_variant(\"" + name + "\", \"" + children_fn_name(name) + "\")\n"
+        return out + "    out\n"
+    out = out + _struct_body(u, decl, "children", "    ")
+    out + "    out\n"
+
+fn emit_hash_file(u: DeclUniverse) -> text:
+    var out = GEN_HEADER
+    out = out + "#\n# Structural HIR hash (hardening plan §11.5, agent C4).\n"
+    out = out + "# The hash folds the variant NAME plus every primitive payload field and\n"
+    out = out + "# every child hash, so it is stable across two builds of the same HIR and\n"
+    out = out + "# changes when a literal changes. Non-primitive opaque payloads (symbol\n"
+    out = out + "# ids, spans, operator enums) are deliberately NOT folded in: they are\n"
+    out = out + "# not structural.\n\n"
+    out = out + "use compiler.hir.hir_definitions.*\n"
+    out = out + "use compiler.hir.hir_types.*\n\n"
+    out = out + "val HIR_HASH_SEED = 1469598103\n"
+    out = out + "val HIR_HASH_MOD = 1000000007\n\n"
+    out = out + "fn _hir_mix_text(h: i64, s: text) -> i64:\n"
+    out = out + "    var acc = h\n    var i = 0\n    while i < s.len():\n"
+    out = out + "        acc = (acc * 131 + s.char_at(i).to_i64()) % HIR_HASH_MOD\n        i = i + 1\n    acc\n\n"
+    out = out + "fn _hir_mix_i64(h: i64, v: i64) -> i64:\n"
+    out = out + "    (h * 131 + v) % HIR_HASH_MOD\n\n"
+    out = out + "fn _hir_mix_prim<T>(h: i64, v: T) -> i64:\n"
+    out = out + "    \"\"\"Fold one primitive payload field by its printed form.\"\"\"\n"
+    out = out + "    _hir_mix_text(h, \"{{v}}\")\n"
+    for name in emit_order(u):
+        out = out + "\n" + _emit_one_hash(u, name)
+    out = out + "\nexport HIR_HASH_SEED, HIR_HASH_MOD, _hir_mix_text, _hir_mix_i64, _hir_mix_prim\n"
+    var names: [text] = []
+    for name in emit_order(u):
+        names.push(hash_fn_name(name))
+    out = out + "export " + _join(names, ", ") + "\n"
+    out
+
+fn _emit_one_hash(u: DeclUniverse, name: text) -> text:
+    val decl = u.decl_of(name)
+    var out = "fn " + hash_fn_name(name) + "(node: " + name + ") -> i64:\n"
+    out = out + "    if node == nil:\n        return 0\n"
+    out = out + "    var h = _hir_mix_text(HIR_HASH_SEED, \"" + name + "\")\n"
+    if _is_base_carrier(name):
+        val kind_enum = _kind_enum_of(name)
+        out = out + "    match node.kind:\n"
+        out = out + _enum_arms(u, u.decl_of(kind_enum), "hash", "        ")
+        out = out + "        case _: unreachable_hir_variant(\"" + kind_enum + "\", \"" + hash_fn_name(name) + "\")\n"
+        return out + "    h\n"
+    if decl.is_enum:
+        out = out + "    match node:\n"
+        out = out + _enum_arms(u, decl, "hash", "        ")
+        out = out + "        case _: unreachable_hir_variant(\"" + name + "\", \"" + hash_fn_name(name) + "\")\n"
+        return out + "    h\n"
+    out = out + _struct_body(u, decl, "hash", "    ")
+    out + "    h\n"
+
+fn emit_init_file() -> text:
+    var out = GEN_HEADER
+    out = out + "#\n# Generated HIR visitor package (hardening plan §11.5, agent C4).\n\n"
+    out = out + "export use compiler.hir.generated.hir_visit.*\n"
+    out = out + "export use compiler.hir.generated.hir_children.*\n"
+    out = out + "export use compiler.hir.generated.hir_hash.*\n"
+    out = out + "export use compiler.hir.generated.hir_visitor.*\n"
+    out
+
+fn generate_visitors_into(repo_root: text, out_dir: text) -> i64:
+    """Write the three generated files. Returns the number of visitor
+    functions emitted (three per reachable declaration)."""
+    val u = DeclUniverse.load(repo_root)
+    dir_create_all(out_dir)
+    file_write(out_dir + "/hir_visit.spl", emit_visit_file(u))
+    file_write(out_dir + "/hir_children.spl", emit_children_file(u))
+    file_write(out_dir + "/hir_hash.spl", emit_hash_file(u))
+    file_write(out_dir + "/__init__.spl", emit_init_file())
+    emit_order(u).len() * 3
+
+fn visitor_kind_count(repo_root: text) -> i64:
+    val u = DeclUniverse.load(repo_root)
+    emit_order(u).len()
+
+export emit_order, emit_visit_file, emit_children_file, emit_hash_file
+export emit_init_file, generate_visitors_into, visitor_kind_count
 export GEN_HEADER, FieldDecl, FieldClass, NodeDecl, DeclUniverse
 export base_pairs, decl_sources, opaque_types, prim_types
 export extract_struct_fields, parse_payload_fields, node_closure
 export visit_fn_name, children_fn_name, hash_fn_name
 export _snake, _split_top, _is_base_carrier, _kind_enum_of, _base_short
 export _binders, _recurse_lines, _contains, _strip_opt, _is_prim
+export _sort_texts, _wild_arm, _join, variant_arity

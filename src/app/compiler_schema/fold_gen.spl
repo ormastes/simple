@@ -1,0 +1,465 @@
+# Fold-style visitor generator — src/app/compiler_schema/fold_gen.spl
+#
+# Hardening plan §11.5 "Generated visitors" / §11.9 "generated, never
+# hand-maintained", lanes C3 (AST) and C4 (HIR).
+#
+# WHAT THIS EMITS, and why it is not the same as visitor_gen.spl's output:
+# visitor_gen emits a CALLBACK visitor (`hir_visit_expr(node, visitor)`), which
+# can only accumulate through mutable visitor state. A consumer that folds a
+# value through the walk — the shape every real analysis pass in this tree
+# actually has, e.g. 35.semantics/enum_contract/hir_match_coverage.spl building
+# a `[HirMatchSite]` — needs `walk(node, ctx, f) -> ctx`. This module emits that
+# form, from the SAME authoritative enum declarations, for two dialects:
+#
+#   HIR       -> src/compiler/20.hir/generated/hir_visitor.spl
+#   frontend  -> src/compiler/10.frontend/generated/ast_visitor.spl
+#
+# Every registered variant gets its own explicit match arm which sets a
+# `handled` flag; the trailing `case _` (which the seed's match checker still
+# demands) leaves the flag false, and the post-match check raises the loud
+# diagnostic. That flag is the ONLY fallback — a new variant cannot be walked
+# silently.
+
+use std.io_runtime.{file_write, dir_create_all}
+use app.compiler_schema.extract.{VariantRow}
+use app.compiler_schema.visitor_gen.{DeclUniverse, NodeDecl, FieldDecl, FieldClass}
+use app.compiler_schema.visitor_gen.{parse_payload_fields, _binders, _snake, _contains}
+use app.compiler_schema.visitor_gen.{_sort_texts, _wild_arm, _join, _strip_opt}
+
+# ============================================================================
+# Dialect description
+# ============================================================================
+
+struct Dialect:
+    """One AST-shaped tree the fold visitor is generated over.
+
+    carriers rows are [carrier_struct, kind_enum, short, node_ctor]; an empty
+    carrier_struct means the kind enum IS the node (the frontend `Node` decl
+    enum has no `{kind, span}` wrapper struct)."""
+    key: text
+    sources: [text]
+    opaques: [text]
+    uses: [text]
+    carriers: [[text]]
+    diag: text
+    node_enum: text
+    out_dir: text
+    out_file: text
+    title: text
+
+fn dialect_hir() -> Dialect:
+    Dialect(
+        key: "hir",
+        sources: ["src/compiler/20.hir/hir_definitions.spl", "src/compiler/20.hir/hir_types.spl"],
+        opaques: [
+            "HirModule", "HirFunction", "HirClass", "HirStruct", "HirEnum",
+            "HirTrait", "HirImpl", "HirConst", "HirSymbol", "HirVariant",
+            "HirField", "HirAttribute", "HirTypeParam", "HirTraitBound",
+            "Scope", "SymbolTable", "HirImport", "HirImportItem",
+            "HirDomainBlock", "HirStaticAssert", "HirAopAdvice", "HirDiBinding",
+            "HirArchRule", "HirMockDecl", "HirContractBlock", "HirContractClause",
+            "HirAssocTypeDecl", "HirAssocTypeImpl", "HirBitfield",
+            "HirBitfieldField", "SymbolId", "SymbolKind", "MethodResolution",
+            "ScopeId", "ScopeKind", "DeviceType", "MemorySpace", "LayerType",
+            "ParamShape"
+        ],
+        uses: ["compiler.hir.hir_definitions.*", "compiler.hir.hir_types.*"],
+        carriers: [
+            ["HirExpr", "HirExprKind", "expr", "Expr"],
+            ["HirStmt", "HirStmtKind", "stmt", "Stmt"],
+            ["HirType", "HirTypeKind", "type", "Type_"],
+            ["HirPattern", "HirPatternKind", "pattern", "Pattern"]
+        ],
+        diag: "E-HIR-VISIT-UNHANDLED",
+        node_enum: "HirWalkNode",
+        out_dir: "src/compiler/20.hir/generated",
+        out_file: "hir_visitor.spl",
+        title: "HIR"
+    )
+
+fn dialect_ast() -> Dialect:
+    Dialect(
+        key: "ast",
+        sources: ["src/compiler/10.frontend/parser_types_expr.spl", "src/compiler/10.frontend/ast.spl"],
+        opaques: ["AstModule", "Span", "Token"],
+        uses: ["compiler.frontend.parser_types_expr.*", "compiler.frontend.ast.*"],
+        carriers: [
+            ["Expr", "ExprKind", "expr", "Expr"],
+            ["Stmt", "StmtKind", "stmt", "Stmt"],
+            ["Type", "TypeKind", "type", "Type_"],
+            ["Pattern", "PatternKind", "pattern", "Pattern"],
+            ["", "Node", "decl", "Decl"]
+        ],
+        diag: "E-AST-VISIT-UNHANDLED",
+        node_enum: "AstWalkNode",
+        out_dir: "src/compiler/10.frontend/generated",
+        out_file: "ast_visitor.spl",
+        title: "frontend AST"
+    )
+
+fn all_dialects() -> [Dialect]:
+    [dialect_hir(), dialect_ast()]
+
+fn load_dialect(repo_root: text, d: Dialect) -> DeclUniverse:
+    DeclUniverse.load_from(repo_root, d.sources, d.opaques)
+
+# ============================================================================
+# Dialect queries
+# ============================================================================
+
+fn d_carrier_row(d: Dialect, name: text) -> [text]:
+    """The carriers row whose carrier struct — or, for a bare kind enum
+    carrier, whose kind enum — is `name`; empty when `name` is a wrapper."""
+    for row in d.carriers:
+        if row[0] == name and row[0] != "":
+            return row
+        if row[0] == "" and row[1] == name:
+            return row
+    []
+
+fn d_is_carrier(d: Dialect, name: text) -> bool:
+    d_carrier_row(d, name).len() > 0
+
+fn d_is_kind_enum(d: Dialect, name: text) -> bool:
+    """A kind enum reached only through its carrier gets no walk fn of its own."""
+    for row in d.carriers:
+        if row[1] == name and row[0] != "":
+            return true
+    false
+
+fn d_walk_name(d: Dialect, name: text) -> text:
+    val row = d_carrier_row(d, name)
+    if row.len() > 0:
+        return "walk_" + d.key + "_" + row[2]
+    "walk_" + d.key + "_" + _snake(name)
+
+fn d_kind_name_fn(d: Dialect, short: text) -> text:
+    d.key + "_walk_" + short + "_kind_name"
+
+fn d_unhandled_fn(d: Dialect) -> text:
+    d.key + "_walk_unhandled"
+
+fn d_roots(d: Dialect) -> [text]:
+    """Declaration names the closure starts from: every carrier and kind enum."""
+    var out: [text] = []
+    for row in d.carriers:
+        if row[0] != "":
+            out.push(row[0])
+        out.push(row[1])
+    out
+
+# ============================================================================
+# Reachability
+# ============================================================================
+
+fn _push_unique(items: [text], name: text) -> [text]:
+    if _contains(items, name):
+        return items
+    items.push(name)
+
+fn _decl_edges(u: DeclUniverse, decl: NodeDecl) -> [text]:
+    var out: [text] = []
+    if decl.is_enum:
+        for row in decl.variants:
+            for f in parse_payload_fields(row.payload_schema):
+                val c = u.classify(f.type_text)
+                if c.cat == "prim" or c.cat == "opaque":
+                    continue
+                if c.a != "":
+                    out = _push_unique(out, c.a)
+                if c.b != "":
+                    out = _push_unique(out, c.b)
+    else:
+        for f in decl.fields:
+            val c = u.classify(f.type_text)
+            if c.cat == "prim" or c.cat == "opaque":
+                continue
+            if c.a != "":
+                out = _push_unique(out, c.a)
+            if c.b != "":
+                out = _push_unique(out, c.b)
+    out
+
+fn d_node_closure(u: DeclUniverse, d: Dialect) -> [text]:
+    """Every declaration reachable from the dialect's roots, discovery order."""
+    var work: [text] = []
+    for r in d_roots(d):
+        work = _push_unique(work, r)
+    var seen: [text] = []
+    var i = 0
+    while i < work.len():
+        val name = work[i]
+        i = i + 1
+        if _contains(seen, name):
+            continue
+        seen = seen.push(name)
+        for edge in _decl_edges(u, u.decl_of(name)):
+            work = _push_unique(work, edge)
+    seen
+
+fn d_emit_order(u: DeclUniverse, d: Dialect) -> [text]:
+    """Carriers in declared order, then every wrapper sorted by name."""
+    var out: [text] = []
+    for row in d.carriers:
+        if row[0] != "":
+            out.push(row[0])
+        else:
+            out.push(row[1])
+    var rest: [text] = []
+    for name in d_node_closure(u, d):
+        if d_is_carrier(d, name) or d_is_kind_enum(d, name):
+            continue
+        rest.push(name)
+    for name in _sort_texts(rest):
+        out.push(name)
+    out
+
+fn d_variant_total(u: DeclUniverse, d: Dialect) -> i64:
+    """Total registry variants the emitted arms must cover."""
+    var total = 0
+    for name in d_node_closure(u, d):
+        val decl = u.decl_of(name)
+        if decl.is_enum:
+            total = total + decl.variants.len()
+    total
+
+fn d_carrier_variant_total(u: DeclUniverse, d: Dialect) -> i64:
+    """Variants of the carrier kind enums only — the registry-tracked ones."""
+    var total = 0
+    for row in d.carriers:
+        total = total + u.decl_of(row[1]).variants.len()
+    total
+
+# ============================================================================
+# Registry hash — a change in any covered variant changes the emitted header
+# ============================================================================
+
+fn _mix_text(h: i64, s: text) -> i64:
+    var acc = h
+    var i = 0
+    while i < s.len():
+        acc = (acc * 131 + s.char_at(i).to_i64()) % 1000000007
+        i = i + 1
+    acc
+
+fn registry_hash(u: DeclUniverse, d: Dialect) -> text:
+    """Stable digest over every variant + payload schema this file covers."""
+    var h = 1469598103
+    for name in d_emit_order(u, d):
+        h = _mix_text(h, name)
+        val decl = u.decl_of(name)
+        if decl.is_enum:
+            for row in decl.variants:
+                h = _mix_text(h, row.variant)
+                h = _mix_text(h, row.payload_schema)
+        else:
+            for f in decl.fields:
+                h = _mix_text(h, f.binder)
+                h = _mix_text(h, f.type_text)
+    "{h}"
+
+# ============================================================================
+# Body emission
+# ============================================================================
+
+fn _one_fold_call(d: Dialect, type_name: text, v: text) -> text:
+    "acc = " + d_walk_name(d, type_name) + "(" + v + ", acc, f)"
+
+fn _fold_lines(u: DeclUniverse, d: Dialect, type_text: text, v: text, indent: text, idx: i64) -> text:
+    """Recursion into ONE field value `v`, folding `acc` through every child."""
+    val c = u.classify(type_text)
+    if c.cat == "node":
+        return indent + _one_fold_call(d, c.a, v) + "\n"
+    if c.cat == "list":
+        # The nil guard is load-bearing: an OPTIONAL list payload (e.g.
+        # `StringLit(value, interpolations: [HirInterpolation]?)`) is nil far
+        # more often than empty, and iterating nil is a hard semantic error.
+        var out = indent + "if " + v + " != nil:\n"
+        out = out + indent + "    for it{idx} in " + v + ":\n"
+        out = out + indent + "        " + _one_fold_call(d, c.a, "it{idx}") + "\n"
+        return out
+    if c.cat == "pair":
+        var out = indent + "if " + v + " != nil:\n"
+        out = out + indent + "    for (ka{idx}, kb{idx}) in " + v + ":\n"
+        if c.a != "":
+            out = out + indent + "        " + _one_fold_call(d, c.a, "ka{idx}") + "\n"
+        if c.b != "":
+            out = out + indent + "        " + _one_fold_call(d, c.b, "kb{idx}") + "\n"
+        return out
+    ""
+
+fn _fold_arms(u: DeclUniverse, d: Dialect, decl: NodeDecl, indent: text) -> text:
+    """One explicit arm per registry variant; each arm sets `handled`."""
+    var out = ""
+    for row in decl.variants:
+        val fields = parse_payload_fields(row.payload_schema)
+        out = out + indent + "case " + row.variant + _binders(u, fields, false) + ":\n"
+        out = out + indent + "    handled = true\n"
+        var idx = 0
+        for fd in fields:
+            out = out + _fold_lines(u, d, fd.type_text, "b_" + fd.binder, indent + "    ", idx)
+            idx = idx + 1
+    out
+
+fn _fold_struct_body(u: DeclUniverse, d: Dialect, decl: NodeDecl, indent: text) -> text:
+    var out = ""
+    var idx = 0
+    for fd in decl.fields:
+        if fd.binder == "kind":
+            continue
+        val c = u.classify(fd.type_text)
+        if not (c.cat == "node" or c.cat == "list" or c.cat == "pair"):
+            continue
+        val guard = u.guard_of(decl, fd)
+        if guard == "":
+            out = out + _fold_lines(u, d, fd.type_text, "node." + fd.binder, indent, idx)
+        else:
+            out = out + indent + "if node." + guard + ":\n"
+            out = out + _fold_lines(u, d, fd.type_text, "node." + fd.binder, indent + "    ", idx)
+        idx = idx + 1
+    out
+
+fn _sig(d: Dialect, name: text, type_name: text) -> text:
+    "fn " + d_walk_name(d, name) + "<C>(node: " + type_name + ", ctx: C, f: fn(" + d.node_enum + ", C) -> C) -> C:\n"
+
+fn emit_one_walk(u: DeclUniverse, d: Dialect, name: text) -> text:
+    val row = d_carrier_row(d, name)
+    if row.len() > 0:
+        val carrier = row[0]
+        val kind_enum = row[1]
+        val short = row[2]
+        val ctor = row[3]
+        val type_name = if carrier == "": kind_enum else: carrier
+        val kind_decl = u.decl_of(kind_enum)
+        var out = _sig(d, name, type_name)
+        out = out + "    if node == nil:\n        return ctx\n"
+        out = out + "    var acc = f(" + d.node_enum + "." + ctor + "(node), ctx)\n"
+        out = out + "    var handled = false\n"
+        if carrier != "":
+            out = out + _fold_struct_body(u, d, u.decl_of(carrier), "    ")
+            out = out + "    match node.kind:\n"
+        else:
+            out = out + "    match node:\n"
+        out = out + _fold_arms(u, d, kind_decl, "        ")
+        out = out + "        case _:\n            handled = false\n"
+        out = out + "    if not handled:\n"
+        out = out + "        " + d_unhandled_fn(d) + "(\"" + kind_enum + "\", \"" + d_walk_name(d, name) + "\", " + d_kind_name_fn(d, short) + "(node))\n"
+        return out + "    acc\n"
+    val decl = u.decl_of(name)
+    var out = _sig(d, name, name)
+    out = out + "    if node == nil:\n        return ctx\n"
+    out = out + "    var acc = ctx\n"
+    if decl.is_enum:
+        out = out + "    var handled = false\n"
+        out = out + "    match node:\n"
+        out = out + _fold_arms(u, d, decl, "        ")
+        out = out + "        case _:\n            handled = false\n"
+        out = out + "    if not handled:\n"
+        out = out + "        " + d_unhandled_fn(d) + "(\"" + name + "\", \"" + d_walk_name(d, name) + "\", \"<unnamed>\")\n"
+        return out + "    acc\n"
+    val body = _fold_struct_body(u, d, decl, "    ")
+    out + body + "    acc\n"
+
+fn emit_fold_kind_name_fns(u: DeclUniverse, d: Dialect) -> text:
+    var out = ""
+    for row in d.carriers:
+        val carrier = row[0]
+        val kind_enum = row[1]
+        val type_name = if carrier == "": kind_enum else: carrier
+        val kn = d_kind_name_fn(d, row[2])
+        out = out + "\nfn " + kn + "(node: " + type_name + ") -> text:\n"
+        out = out + "    \"\"\"Variant name of one " + kind_enum + ", for the unhandled diagnostic.\"\"\"\n"
+        out = out + "    if node == nil:\n        return \"<nil>\"\n"
+        out = out + "    var name = \"<unknown>\"\n"
+        if carrier == "":
+            out = out + "    match node:\n"
+        else:
+            out = out + "    match node.kind:\n"
+        for vrow in u.decl_of(kind_enum).variants:
+            val arity = parse_payload_fields(vrow.payload_schema).len()
+            out = out + "        case " + _wild_arm(vrow.variant, arity) + ": name = \"" + vrow.variant + "\"\n"
+        out = out + "        case _: name = \"<unknown>\"\n"
+        out = out + "    name\n"
+    out
+
+fn emit_fold_file(u: DeclUniverse, d: Dialect) -> text:
+    var out = "# GENERATED — do not edit; regenerate with: bin/simple run src/app/compiler_schema/main.spl visitors\n"
+    out = out + "# registry-hash: " + registry_hash(u, d) + "\n"
+    out = out + "#\n# Fold-style " + d.title + " visitor (hardening plan §11.5; lanes C3/C4).\n"
+    out = out + "#\n# walk_" + d.key + "_<kind>(node, ctx, f) -> ctx threads `ctx` through every node in\n"
+    out = out + "# the subtree, calling `f(node, ctx)` on entry. There is one explicit match\n"
+    out = out + "# arm per registry variant, each setting `handled`; the trailing `case _`\n"
+    out = out + "# leaves it false and the post-match check raises " + d.diag + ".\n"
+    out = out + "# That flag is the ONLY fallback: a new variant cannot be walked silently.\n\n"
+    for u_ in d.uses:
+        out = out + "use " + u_ + "\n"
+    out = out + "\nenum " + d.node_enum + ":\n"
+    out = out + "    \"\"\"Any node the fold callback can be handed.\"\"\"\n"
+    for row in d.carriers:
+        val carrier = row[0]
+        val type_name = if carrier == "": row[1] else: carrier
+        out = out + "    " + row[3] + "(node: " + type_name + ")\n"
+    out = out + "\nfn " + d_unhandled_fn(d) + "(kind: text, where_: text, variant: text) -> text:\n"
+    out = out + "    \"\"\"A variant no generated arm names. Loud, never silent.\"\"\"\n"
+    out = out + "    print \"" + d.diag + ": {{kind}} variant {{variant}} unhandled at {{where_}}\"\n"
+    out = out + "    raise \"" + d.diag + ": {{kind}} variant {{variant}} unhandled at {{where_}}; regenerate " + d.out_dir + "\"\n"
+    out = out + emit_fold_kind_name_fns(u, d)
+    for name in d_emit_order(u, d):
+        out = out + "\n" + emit_one_walk(u, d, name)
+    out = out + "\nexport " + d.node_enum + ", " + d_unhandled_fn(d) + "\n"
+    var kns: [text] = []
+    for row in d.carriers:
+        kns.push(d_kind_name_fn(d, row[2]))
+    out = out + "export " + _join(kns, ", ") + "\n"
+    var names: [text] = []
+    for name in d_emit_order(u, d):
+        names.push(d_walk_name(d, name))
+    out = out + "export " + _join(names, ", ") + "\n"
+    out
+
+fn emit_fold_init(d: Dialect) -> text:
+    var out = "# GENERATED — do not edit; regenerate with: bin/simple run src/app/compiler_schema/main.spl visitors\n"
+    out = out + "#\n# Generated " + d.title + " visitor package (hardening plan §11.5).\n\n"
+    val mod = if d.key == "hir": "compiler.hir.generated" else: "compiler.frontend.generated"
+    val stem = d.out_file.substring(0, d.out_file.len() - 4)
+    out + "export use " + mod + "." + stem + ".*\n"
+
+# ============================================================================
+# Driver
+# ============================================================================
+
+fn generate_folds_into(repo_root: text, out_root: text) -> i64:
+    """Write every dialect's fold visitor under `out_root`. Returns file count.
+
+    `out_root` is a tree root, not one directory: each dialect owns its own
+    path, so the freshness checker can regenerate into a temp tree and diff."""
+    var files = 0
+    for d in all_dialects():
+        val u = load_dialect(repo_root, d)
+        if u.sources.len() == 0:
+            continue
+        val dir = out_root + "/" + d.out_dir
+        dir_create_all(dir)
+        file_write(dir + "/" + d.out_file, emit_fold_file(u, d))
+        if d.key != "hir":
+            # The HIR package __init__ is owned by visitor_gen, which already
+            # re-exports this file; a second writer would fight it.
+            file_write(dir + "/__init__.spl", emit_fold_init(d))
+        files = files + 1
+    files
+
+fn fold_variant_report(repo_root: text) -> text:
+    var out = ""
+    for d in all_dialects():
+        val u = load_dialect(repo_root, d)
+        out = out + d.key + ": " + "{d_carrier_variant_total(u, d)}" + " carrier variant(s), "
+        out = out + "{d_variant_total(u, d)}" + " total variant(s), "
+        out = out + "{d_emit_order(u, d).len()}" + " walk fn(s)\n"
+    out
+
+export Dialect, dialect_hir, dialect_ast, all_dialects, load_dialect
+export d_carrier_row, d_is_carrier, d_is_kind_enum, d_walk_name, d_kind_name_fn
+export d_unhandled_fn, d_roots, d_node_closure, d_emit_order
+export d_variant_total, d_carrier_variant_total, registry_hash
+export emit_one_walk, emit_fold_kind_name_fns, emit_fold_file, emit_fold_init
+export generate_folds_into, fold_variant_report

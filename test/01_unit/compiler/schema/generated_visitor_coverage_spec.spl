@@ -1,0 +1,135 @@
+"""
+# Generated Visitor Coverage Unit Spec
+
+Proves the two GENERATED fold visitors (hardening plan §11.5, lanes C3 + C4)
+actually cover every variant the A1 registry knows about, and that the walk
+they emit really recurses.
+
+Why coverage is asserted against the REGISTRY and not against a hand-written
+list: a hand-written expectation rots exactly the same way a hand-written
+walker does. `spec/compiler_schema/registry/*.sdn` is itself generated from the
+enum declarations and gated by `check-compiler-schema-fresh.shs`, so comparing
+the emitted arms to it closes the loop — a variant added to `HirExprKind`
+appears in the registry, and if the visitor were not regenerated this spec
+fails naming it.
+
+The runtime examples then prove the emitted code is a real fold: `ctx` is
+threaded through and every node of a nested subtree is handed to the callback
+exactly once.
+"""
+# tag: unit
+
+use std.spec
+use std.fs.{read_file}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirStmt, HirStmtKind, HirBlock}
+use compiler.hir.generated.hir_visitor.{HirWalkNode, walk_hir_expr}
+use compiler.frontend.parser_types_expr.{Expr, ExprKind, Stmt, StmtKind}
+use compiler.frontend.generated.ast_visitor.{AstWalkNode, walk_ast_expr}
+
+val REGISTRY = "spec/compiler_schema/registry/"
+val HIR_VISITOR = "src/compiler/20.hir/generated/hir_visitor.spl"
+val AST_VISITOR = "src/compiler/10.frontend/generated/ast_visitor.spl"
+
+fn registry_variants(enum_file: text) -> [text]:
+    """Variant names recorded for one registry enum."""
+    var out: [text] = []
+    for line in read_file(REGISTRY + enum_file).split("\n"):
+        val t = line.trim()
+        if t.starts_with("payload_schema:"):
+            val schema = t.substring(15, t.len()).trim()
+            val open = schema.find("(")
+            if open > 0:
+                out = out.push(schema.substring(0, open))
+            else:
+                out = out.push(schema)
+    out
+
+fn arms_missing_from(source_path: text, enum_files: [text]) -> [text]:
+    """Registry variants with no `case <Variant>` arm in the generated file."""
+    val body = read_file(source_path)
+    var missing: [text] = []
+    for ef in enum_files:
+        for v in registry_variants(ef):
+            if body.find("case " + v + "(") < 0 and body.find("case " + v + ":") < 0:
+                missing = missing.push(ef + "." + v)
+    missing
+
+fn registry_total(enum_files: [text]) -> i64:
+    var total = 0
+    for ef in enum_files:
+        total = total + registry_variants(ef).len()
+    total
+
+fn hir_enums() -> [text]:
+    ["compiler.hir.HirExprKind.sdn", "compiler.hir.HirStmtKind.sdn",
+     "compiler.hir.HirTypeKind.sdn", "compiler.hir.HirPatternKind.sdn"]
+
+fn ast_enums() -> [text]:
+    ["compiler.frontend.ExprKind.sdn", "compiler.frontend.StmtKind.sdn",
+     "compiler.frontend.TypeKind.sdn", "compiler.frontend.PatternKind.sdn",
+     "compiler.frontend.Node.sdn"]
+
+fn hir_int(v: i64) -> HirExpr:
+    HirExpr(kind: HirExprKind.IntLit(v, "i64"), type_: nil, span: nil, has_type_: false)
+
+fn count_hir(node: HirWalkNode, acc: i64) -> i64:
+    acc + 1
+
+fn ast_int(v: i64) -> Expr:
+    Expr(kind: ExprKind.IntLit(v), span: nil)
+
+fn count_ast(node: AstWalkNode, acc: i64) -> i64:
+    acc + 1
+
+describe "generated fold visitors cover the whole registry":
+    it "emits one HIR arm per registry variant across all four kind enums":
+        val missing = arms_missing_from(HIR_VISITOR, hir_enums())
+        expect(missing.len()).to_equal(0)
+
+    it "covers exactly the registry's HIR variant count":
+        expect(registry_total(hir_enums())).to_equal(100)
+
+    it "emits one AST arm per registry variant across all five kind enums":
+        val missing = arms_missing_from(AST_VISITOR, ast_enums())
+        expect(missing.len()).to_equal(0)
+
+    it "covers exactly the registry's frontend variant count":
+        expect(registry_total(ast_enums())).to_equal(103)
+
+describe "generated fold visitors are marked generated and registry-pinned":
+    it "carries the GENERATED header and a registry hash in both files":
+        val hir = read_file(HIR_VISITOR)
+        val ast = read_file(AST_VISITOR)
+        expect(hir.starts_with("# GENERATED — do not edit")).to_equal(true)
+        expect(ast.starts_with("# GENERATED — do not edit")).to_equal(true)
+        expect(hir.find("# registry-hash: ") >= 0).to_equal(true)
+        expect(ast.find("# registry-hash: ") >= 0).to_equal(true)
+
+    it "uses the loud unhandled diagnostic as its only fallback":
+        expect(read_file(HIR_VISITOR).find("E-HIR-VISIT-UNHANDLED") >= 0).to_equal(true)
+        expect(read_file(AST_VISITOR).find("E-AST-VISIT-UNHANDLED") >= 0).to_equal(true)
+
+describe "generated fold visitors really recurse":
+    it "reaches every node of a nested HIR expression exactly once":
+        # Array of two ints, wrapped in a binary node: 1 + 2 + 2 = 5 nodes.
+        val arr = HirExpr(kind: HirExprKind.ArrayLit([hir_int(1), hir_int(2)], nil),
+                          type_: nil, span: nil, has_type_: false)
+        val top = HirExpr(kind: HirExprKind.TupleLit([arr, hir_int(3)]),
+                          type_: nil, span: nil, has_type_: false)
+        expect(walk_hir_expr(top, 0, count_hir)).to_equal(5)
+
+    it "threads the fold context rather than restarting it":
+        expect(walk_hir_expr(hir_int(7), 40, count_hir)).to_equal(41)
+
+    it "returns the context untouched for a nil HIR node":
+        val none: HirExpr = nil
+        expect(walk_hir_expr(none, 9, count_hir)).to_equal(9)
+
+    it "reaches every node of a nested frontend AST expression":
+        val arr = Expr(kind: ExprKind.ArrayLit([ast_int(1), ast_int(2)]), span: nil)
+        val top = Expr(kind: ExprKind.TupleLit([arr, ast_int(3)]), span: nil)
+        expect(walk_ast_expr(top, 0, count_ast)).to_equal(5)
+
+    it "returns the context untouched for a nil AST node":
+        val none: Expr = nil
+        expect(walk_ast_expr(none, 4, count_ast)).to_equal(4)
