@@ -4,10 +4,101 @@
 # i686 are guest output targets; a cross-built QEMU hello is not evidence that
 # either compiler executed inside the 32-bit guest.
 
+use std.common.contracts.execution.simpleos_target_v1.{
+    SIMPLEOS_TARGET_V1_I686_TRIPLE, SIMPLEOS_TARGET_V1_ARMV7_TRIPLE,
+    SIMPLEOS_TARGET_V1_RISCV32IMAC_TRIPLE, simpleos_target_v1_is_userland_triple,
+    simpleos_target_v1_abi_for_triple
+}
+use std.common.structural.digest.hash256.{hash256_hex_valid}
+use lib.common.crypto.ed25519.{pure_ed25519_verify}
+
 enum SimpleOs32BitGuest:
     Arm32
     Riscv32
     X86_32
+
+pub struct SimpleOs32BitTargetProfileV1:
+    guest: SimpleOs32BitGuest
+    target_triple: text
+    abi: text
+    linker_emulation: text
+    sysroot_manifest: text
+    tool_manifest: text
+    qemu_system: text
+
+struct SimpleOs32BitPlatformFieldsV1:
+    linker_emulation: text
+    sysroot_manifest: text
+    tool_manifest: text
+    qemu_system: text
+
+fn _platform_fields_v1(guest: SimpleOs32BitGuest) -> SimpleOs32BitPlatformFieldsV1:
+    val sysroot_manifest = "share/simpleos/target-manifest.sdn"
+    val tool_manifest = "share/simpleos/tool-manifest.sdn"
+    match guest:
+        SimpleOs32BitGuest.Arm32:
+            SimpleOs32BitPlatformFieldsV1(linker_emulation: "armelf_linux_eabi",
+                sysroot_manifest: sysroot_manifest, tool_manifest: tool_manifest,
+                qemu_system: "qemu-system-arm")
+        SimpleOs32BitGuest.Riscv32:
+            SimpleOs32BitPlatformFieldsV1(linker_emulation: "elf32lriscv",
+                sysroot_manifest: sysroot_manifest, tool_manifest: tool_manifest,
+                qemu_system: "qemu-system-riscv32")
+        SimpleOs32BitGuest.X86_32:
+            SimpleOs32BitPlatformFieldsV1(linker_emulation: "elf_i386",
+                sysroot_manifest: sysroot_manifest, tool_manifest: tool_manifest,
+                qemu_system: "qemu-system-i386")
+
+fn _canonical_triple_v1(guest: SimpleOs32BitGuest) -> text:
+    match guest:
+        SimpleOs32BitGuest.Arm32: SIMPLEOS_TARGET_V1_ARMV7_TRIPLE
+        SimpleOs32BitGuest.Riscv32: SIMPLEOS_TARGET_V1_RISCV32IMAC_TRIPLE
+        SimpleOs32BitGuest.X86_32: SIMPLEOS_TARGET_V1_I686_TRIPLE
+
+pub fn simpleos_32bit_target_profile_v1(guest: SimpleOs32BitGuest) -> SimpleOs32BitTargetProfileV1:
+    val target_triple = _canonical_triple_v1(guest)
+    val fields = _platform_fields_v1(guest)
+    SimpleOs32BitTargetProfileV1(guest: guest, target_triple: target_triple,
+        abi: simpleos_target_v1_abi_for_triple(target_triple),
+        linker_emulation: fields.linker_emulation,
+        sysroot_manifest: fields.sysroot_manifest, tool_manifest: fields.tool_manifest,
+        qemu_system: fields.qemu_system)
+
+pub fn simpleos_32bit_target_catalog_v1_complete() -> bool:
+    val guests = [SimpleOs32BitGuest.Arm32, SimpleOs32BitGuest.Riscv32,
+                  SimpleOs32BitGuest.X86_32]
+    for guest in guests:
+        val profile = simpleos_32bit_target_profile_v1(guest)
+        if not simpleos_target_v1_is_userland_triple(profile.target_triple): return false
+        if profile.abi == "": return false
+        if profile.abi != simpleos_target_v1_abi_for_triple(profile.target_triple): return false
+        if profile.linker_emulation == "" or profile.qemu_system == "": return false
+        if profile.sysroot_manifest == "" or profile.tool_manifest == "": return false
+    true
+
+pub struct SimpleOs32BitBootstrapReceiptV2:
+    receipt_version: text
+    guest: SimpleOs32BitGuest
+    target_triple: text
+    abi: text
+    linker_emulation: text
+    host_compiler_sha256: text
+    phase1_status: text
+    phase1_sha256: text
+    phase2_status: text
+    phase2_sha256: text
+    phase2_parent_sha256: text
+    sysroot_manifest_sha256: text
+    linker_script_sha256: text
+    tool_manifest_sha256: text
+    qemu_system: text
+    qemu_exit_code: i64
+    nonce: text
+    serial_stdout: text
+    stub_fallback_disabled: bool
+    receipt_id: text
+    key_id: text
+    signature: [u8]
 
 pub struct BootstrapHostPhase12EvidenceV1:
     host_triple: text
@@ -32,7 +123,71 @@ pub struct SimpleOs32BitGuestHelloEvidenceV1:
     exit_code: i64
 
 fn _sha256_is_bound(value: text) -> bool:
-    value.len() == 64 and value != "0000000000000000000000000000000000000000000000000000000000000000"
+    hash256_hex_valid(value) and value != "0000000000000000000000000000000000000000000000000000000000000000"
+
+fn _safe_receipt_identity(value: text) -> bool:
+    value.trim() != "" and value.len() <= 256 and not value.contains("\0") and
+        not value.contains("\n") and not value.contains("\r")
+
+fn _guest_signing_name(guest: SimpleOs32BitGuest) -> text:
+    match guest:
+        SimpleOs32BitGuest.Arm32: "arm32"
+        SimpleOs32BitGuest.Riscv32: "riscv32"
+        SimpleOs32BitGuest.X86_32: "x86_32"
+
+fn _receipt_signing_bytes_v2(receipt: SimpleOs32BitBootstrapReceiptV2) -> [u8]:
+    (receipt.receipt_version + "\n" + receipt.receipt_id + "\n" + receipt.key_id + "\n" +
+     _guest_signing_name(receipt.guest) + "\n" +
+     receipt.target_triple + "\n" + receipt.abi + "\n" + receipt.linker_emulation + "\n" +
+     receipt.host_compiler_sha256 + "\n" + receipt.phase1_status + "\n" +
+     receipt.phase1_sha256 + "\n" + receipt.phase2_status + "\n" +
+     receipt.phase2_sha256 + "\n" + receipt.phase2_parent_sha256 + "\n" +
+     receipt.sysroot_manifest_sha256 + "\n" + receipt.linker_script_sha256 + "\n" +
+     receipt.tool_manifest_sha256 + "\n" + receipt.qemu_system + "\n" +
+     receipt.qemu_exit_code.to_text() + "\n" + receipt.stub_fallback_disabled.to_text() + "\n" +
+     receipt.nonce + "\n" +
+     receipt.serial_stdout).to_bytes()
+
+fn _profile_matches_receipt(profile: SimpleOs32BitTargetProfileV1, receipt: SimpleOs32BitBootstrapReceiptV2) -> bool:
+    receipt.guest == profile.guest and receipt.target_triple == profile.target_triple and
+        receipt.abi == profile.abi and receipt.linker_emulation == profile.linker_emulation and
+        receipt.qemu_system == profile.qemu_system
+
+pub fn simpleos_32bit_bootstrap_receipt_v2_valid(receipt: SimpleOs32BitBootstrapReceiptV2) -> bool:
+    val profile = simpleos_32bit_target_profile_v1(receipt.guest)
+    if receipt.receipt_version != "simpleos-32bit-bootstrap-v2": return false
+    if not _safe_receipt_identity(receipt.receipt_id) or not _safe_receipt_identity(receipt.key_id): return false
+    if receipt.signature.len() != 64: return false
+    if not _profile_matches_receipt(profile, receipt): return false
+    if receipt.phase1_status != "pass" or receipt.phase2_status != "pass": return false
+    if not receipt.stub_fallback_disabled: return false
+    if not _sha256_is_bound(receipt.host_compiler_sha256): return false
+    if not _sha256_is_bound(receipt.phase1_sha256): return false
+    if not _sha256_is_bound(receipt.phase2_sha256): return false
+    if receipt.phase2_parent_sha256 != receipt.phase1_sha256: return false
+    if receipt.phase1_sha256 == receipt.phase2_sha256: return false
+    if not _sha256_is_bound(receipt.sysroot_manifest_sha256): return false
+    if not _sha256_is_bound(receipt.linker_script_sha256): return false
+    if not _sha256_is_bound(receipt.tool_manifest_sha256): return false
+    if receipt.qemu_exit_code != 37 or receipt.nonce.len() < 16: return false
+    val marker = _guest_marker(receipt.guest) + receipt.nonce
+    receipt.serial_stdout.contains("guest-entry nonce=" + receipt.nonce) and
+        receipt.serial_stdout.contains(marker) and
+        receipt.serial_stdout.contains("reap exit=37 nonce=" + receipt.nonce) and
+        receipt.serial_stdout.contains("TEST PASSED nonce=" + receipt.nonce)
+
+pub fn simpleos_32bit_bootstrap_receipt_v2_authorized(
+    receipt: SimpleOs32BitBootstrapReceiptV2,
+    expected_receipt_id: text,
+    expected_nonce: text,
+    trusted_key_id: text,
+    trusted_public_key: [u8]
+) -> bool:
+    if not simpleos_32bit_bootstrap_receipt_v2_valid(receipt): return false
+    if receipt.receipt_id != expected_receipt_id or receipt.nonce != expected_nonce: return false
+    if receipt.key_id != trusted_key_id or trusted_public_key.len() != 32: return false
+    pure_ed25519_verify(public_key: trusted_public_key,
+        message: _receipt_signing_bytes_v2(receipt), signature: receipt.signature)
 
 fn _known_host_triple(host: text) -> bool:
     host == "x86_64-unknown-linux-gnu" or host == "aarch64-unknown-linux-gnu" or
@@ -81,6 +236,10 @@ pub fn simpleos_32bit_target_native_phase12_v1_valid(host: BootstrapHostPhase12E
     false
 
 export SimpleOs32BitGuest, BootstrapHostPhase12EvidenceV1,
+    SimpleOs32BitTargetProfileV1, SimpleOs32BitBootstrapReceiptV2,
+    simpleos_32bit_target_profile_v1, simpleos_32bit_target_catalog_v1_complete,
+    simpleos_32bit_bootstrap_receipt_v2_valid,
+    simpleos_32bit_bootstrap_receipt_v2_authorized,
     SimpleOs32BitGuestHelloEvidenceV1, bootstrap_host_phase12_evidence_v1_valid,
     simpleos_32bit_cross_phase12_hello_v1_valid,
     simpleos_32bit_target_native_phase12_v1_valid

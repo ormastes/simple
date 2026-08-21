@@ -1,0 +1,83 @@
+use std.spec
+use std.common.contracts.execution.simpleos_capability_v1.{ProtocolCapabilityManifestV1, protocol_capability_manifest_v1_validate}
+use std.common.contracts.execution.simpleos_server_protocol_capabilities.{
+    simpleos_http_protocol_reachable,
+    simpleos_http_select_alpn,
+    simpleos_http_capability_manifests,
+    simpleos_ssh_protocol_reachable,
+    simpleos_ssh_capability_manifests,
+    ServerProtocolProbeHandle, server_protocol_probe_handle_admitted
+}
+
+fn manifest_valid(manifest: ProtocolCapabilityManifestV1) -> bool:
+    match protocol_capability_manifest_v1_validate(manifest):
+        Ok(_): true
+        Err(_): false
+
+describe "SimpleOS production server capability projection":
+    it "reports only reachable HTTP/1.1 and HTTP/2 ALPN implementations":
+        expect(simpleos_http_protocol_reachable("http/1.1")).to_equal(true)
+        expect(simpleos_http_protocol_reachable("h2")).to_equal(true)
+        expect(simpleos_http_select_alpn("h2")).to_equal("h2")
+        expect(simpleos_http_select_alpn("http/1.1")).to_equal("http/1.1")
+
+    it "fails closed for HTTP/3 QUIC WebTransport WebSocket ALPN and unknown protocols":
+        expect(simpleos_http_select_alpn("h3")).to_equal("")
+        expect(simpleos_http_select_alpn("quic")).to_equal("")
+        expect(simpleos_http_select_alpn("webtransport")).to_equal("")
+        expect(simpleos_http_select_alpn("websocket")).to_equal("")
+        expect(simpleos_http_select_alpn("future-protocol")).to_equal("")
+
+    it "binds HTTP manifests to the production probe and evidence identities":
+        val manifests = simpleos_http_capability_manifests(true, true, true, "loopback-1", "worker-dispatch-1")
+        expect(manifests.len()).to_equal(2)
+        expect(manifests[0].protocol).to_equal("http/1.1")
+        expect(manifests[1].protocol).to_equal("h2")
+        expect(manifest_valid(manifests[0])).to_equal(true)
+        expect(manifest_valid(manifests[1])).to_equal(true)
+
+    it "does not validate HTTP claims before live identities exist":
+        val absent = simpleos_http_capability_manifests(true, false, false, "tcp-only", "")
+        expect(absent.len()).to_equal(0)
+        val manifests = simpleos_http_capability_manifests(true, true, false, "", "")
+        expect(manifests.len()).to_equal(1)
+        expect(manifest_valid(manifests[0])).to_equal(false)
+
+    it "does not claim TLS or H2 when the configured listener is cleartext":
+        val manifests = simpleos_http_capability_manifests(false, true, false, "http-live", "h1-dispatch")
+        expect(manifests.len()).to_equal(1)
+        expect(manifests[0].transport).to_equal("tcp")
+        expect(manifests[0].tls_required).to_equal(false)
+
+    it "reports SSH and authenticated SFTP independently":
+        expect(simpleos_ssh_protocol_reachable("ssh", true, false)).to_equal(true)
+        expect(simpleos_ssh_protocol_reachable("sftp-v3", true, false)).to_equal(false)
+        expect(simpleos_ssh_protocol_reachable("sftp-v3", true, true)).to_equal(true)
+        expect(simpleos_ssh_protocol_reachable("scp", true, true)).to_equal(false)
+        val ssh_only = simpleos_ssh_capability_manifests(true, false, "listener-1", "session-1")
+        expect(ssh_only.len()).to_equal(1)
+        expect(ssh_only[0].protocol).to_equal("ssh")
+        val with_sftp = simpleos_ssh_capability_manifests(true, true, "listener-1", "session-1")
+        expect(with_sftp.len()).to_equal(2)
+        expect(with_sftp[1].protocol).to_equal("sftp-v3")
+        expect(manifest_valid(with_sftp[1])).to_equal(true)
+
+    it "reports no SSH capabilities before the daemon is ready":
+        expect(simpleos_ssh_capability_manifests(false, true, "listener-1", "session-1").len()).to_equal(0)
+
+    it "rejects stale and replayed SSH evidence handles":
+        val handle = ServerProtocolProbeHandle(
+            generation: 7, sequence: 11, authority: "probe-owner-7",
+            authenticated: true, channel_opened: true, sftp_subsystem_opened: true
+        )
+        expect(server_protocol_probe_handle_admitted(handle, 7, 11, "probe-owner-7", 0)).to_equal(true)
+        expect(server_protocol_probe_handle_admitted(handle, 8, 11, "probe-owner-7", 0)).to_equal(false)
+        expect(server_protocol_probe_handle_admitted(handle, 7, 11, "probe-owner-7", 11)).to_equal(false)
+        expect(server_protocol_probe_handle_admitted(handle, 7, 12, "probe-owner-7", 0)).to_equal(false)
+
+    it "rejects unauthenticated or channel-less SSH evidence":
+        val unauthenticated = ServerProtocolProbeHandle(
+            generation: 7, sequence: 12, authority: "probe-owner-7",
+            authenticated: false, channel_opened: true, sftp_subsystem_opened: true
+        )
+        expect(server_protocol_probe_handle_admitted(unauthenticated, 7, 12, "probe-owner-7", 0)).to_equal(false)

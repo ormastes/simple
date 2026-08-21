@@ -84,6 +84,14 @@ regression, but don't claim byte-exact either.
 
 ## Pipeline Links
 
+## 32-bit receipt boundary (2026-08-21)
+
+Use `src/os/port/simpleos_32bit_bootstrap_contract.spl` for x86_32, ARM32,
+and RV32 target metadata and receipt admission. The v2 validator binds Phase
+1/2 lineage, sysroot/linker/tool manifests, QEMU identity, exit 37, and four
+nonce-bearing transcript markers. Offline specs never prove a live or
+target-native bootstrap; resume rows are Todo 834-836.
+
 - [research](../../skill_command/skills/pipe/research/skill.md)
 - [design](../../skill_command/skills/pipe/design/skill.md)
 - [impl](../../skill_command/skills/pipe/impl/skill.md)

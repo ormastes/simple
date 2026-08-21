@@ -22,7 +22,7 @@ use os.apps.sshd.ssh_remote_shell.{SshRemoteShell}
 use os.kernel.log.klog_api.{log_info}
 use os.kernel.net.rt_net_socket_facade.{rt_net_send_bytes, rt_net_send_ssh_banner, rt_net_recv_bytes, rt_net_recv_ssh_plain_packet_payload, rt_net_recv_ssh_encrypted_packet, rt_net_ssh_encrypted_read_plan, rt_net_recv_version_text, rt_net_recv_version_bytes, rt_net_close}
 use os.crypto.ed25519.{ed25519_keypair_from_seed, ed25519_sign}
-use std.common.string_core.{text_to_bytes}
+use os.apps.sshd.ssh_identification.{ssh_identification_text_to_bytes_stable, ssh_identification_bytes_start_ssh2, ssh_identification_bytes_trim_crlf}
 
 pub fn ssh_recv_ring_u32_be(ring: SshRecvRing, offset: u64) -> u32:
     """Read a big-endian u32 out of the receive ring without materializing it."""
@@ -118,33 +118,6 @@ fn _live_openssh_client_version_bytes() -> [u8]:
     serial_println("[sshd-session] version builder done")
     out
 
-fn _ssh_identification_text_to_bytes_stable(line: text) -> [u8]:
-    var out: [u8] = []
-    var i: u64 = 0
-    while i < line.len():
-        out = rt_push_byte(out, line.char_at(i).to_i64() & 0xFF)
-        i = i + 1
-    out
-
-fn _ssh_identification_bytes_start_ssh2(data: [u8]) -> bool:
-    if data.len() < 8:
-        return false
-    ssh_session_u8_at(data, 0) == 0x53 and
-        ssh_session_u8_at(data, 1) == 0x53 and
-        ssh_session_u8_at(data, 2) == 0x48 and
-        ssh_session_u8_at(data, 3) == 0x2D and
-        ssh_session_u8_at(data, 4) == 0x32 and
-        ssh_session_u8_at(data, 5) == 0x2E and
-        ssh_session_u8_at(data, 6) == 0x30 and
-        ssh_session_u8_at(data, 7) == 0x2D
-
-fn _ssh_identification_bytes_trim_crlf(data: [u8]) -> [u8]:
-    if data.len() >= 2 and ssh_session_u8_at(data, data.len() - 2) == 0x0D and ssh_session_u8_at(data, data.len() - 1) == 0x0A:
-        return _slice_range(data, 0, data.len() - 2)
-    if data.len() >= 1 and (ssh_session_u8_at(data, data.len() - 1) == 0x0D or ssh_session_u8_at(data, data.len() - 1) == 0x0A):
-        return _slice_range(data, 0, data.len() - 1)
-    _copy_bytes_stable(data)
-
 enum SshSessionState:
     VersionExchange
     KexInit
@@ -179,6 +152,9 @@ class SshSession:
     sftp: SftpSessionV3
     sftp_enabled: bool
     sftp_local_channel_id: u32
+    capability_authenticated: bool
+    capability_channel_opened: bool
+    capability_sftp_opened: bool
     recv_ring: SshRecvRing   # Fixed-capacity receive ring (linear accumulation)
     send_seq: u32
     recv_seq: u32
@@ -261,6 +237,9 @@ impl SshSession:
             sftp: SftpSessionV3.new(),
             sftp_enabled: false,
             sftp_local_channel_id: SSH_INVALID_CHANNEL_ID,
+            capability_authenticated: false,
+            capability_channel_opened: false,
+            capability_sftp_opened: false,
             recv_ring: ssh_recv_ring_new(),
             send_seq: 0,
             recv_seq: 0,
@@ -448,6 +427,7 @@ impl SshSession:
                                         check.algorithm, check.key_blob))
                                 elif check.valid:
                                     self.authenticated_user = request.username
+                                    self.capability_authenticated = true
                                     self.send_packet(ssh_build_auth_success())
                                     self.state = SshSessionState.Interactive
                                     return true
@@ -497,10 +477,10 @@ impl SshSession:
         # returning corrupt values from split/char_at byte reconstruction.
         serial_println("[sshd-session] version recv start")
         val client_version_raw = rt_net_recv_version_bytes(self.socket_fd as i64)
-        val client_version_from_bytes = _ssh_identification_bytes_trim_crlf(client_version_raw)
+        val client_version_from_bytes = ssh_identification_bytes_trim_crlf(client_version_raw)
         serial_println("[sshd-session] version raw bytes len={client_version_from_bytes.len()} hex={_bytes_to_hex(client_version_from_bytes)}")
         serial_println("[sshd-session] version bytes assign start")
-        if client_version_from_bytes.len() > 0 and _ssh_identification_bytes_start_ssh2(client_version_from_bytes):
+        if client_version_from_bytes.len() > 0 and ssh_identification_bytes_start_ssh2(client_version_from_bytes):
             self.client_version_bytes = _copy_bytes_stable(client_version_from_bytes)
             self.client_version = rt_string_from_byte_array(self.client_version_bytes)
             serial_println("[sshd-session] version recv text={self.client_version}")
@@ -512,7 +492,7 @@ impl SshSession:
                 self.transition_closed()
                 return false
             self.client_version = client_version_text
-            self.client_version_bytes = _ssh_identification_text_to_bytes_stable(client_version_text)
+            self.client_version_bytes = ssh_identification_text_to_bytes_stable(client_version_text)
         serial_println("[sshd-session] version bytes stored len={self.client_version_bytes.len()}")
         serial_println("[sshd-session] version bytes stored hex={_bytes_to_hex(self.client_version_bytes)}")
         self.state = SshSessionState.KexInit

@@ -35,6 +35,9 @@ also recorded in
 
 SimpleOS protocol status is tracked in
 `doc/07_guide/os/simpleos_server_protocol_status.md`. Platform adapters must not
-turn unknown TLS ALPN into H1, advertise H3 without QUIC, or give SFTP ambient
-host filesystem access. Live server evidence requires admitted target tooling
+fork protocol reachability policy: HTTP ALPN and HTTP/SSH capability reporting
+share `simpleos_server_protocol_capabilities`, and unsupported transports stay
+absent until their production owner exists. Never turn unknown TLS ALPN into
+H1, advertise H3 without QUIC, or bypass SFTP's
+canonical VFS capability gates with ambient host filesystem access. Live server evidence requires admitted target tooling
 and configured credentials.

@@ -1,5 +1,29 @@
 # SimpleOS primary tool manifest
 
+## Authenticated artifact receipts
+
+Every tool is admitted independently through
+`simpleos_primary_tool_receipt_v1`. The signed payload is bounded to 4096 bytes
+and binds the tool name, canonical filesystem path, artifact digest, target,
+filesystem, behavior contract, receipt id, signing key id, validity window, and
+nonce. Verification is Ed25519 against the loader-configured trust root and
+fails closed for missing/malformed signatures, unknown keys, stale/future or
+overlong windows, invalid targets, and malformed identities.
+The verifier owner reconstructs a domain-separated, length-prefixed canonical
+body from every typed receipt field. Both the carried payload and any caller
+expectation must exactly equal those bytes before signature verification, so an
+arbitrary signed payload cannot be attached to substituted metadata. Successful
+admission atomically consumes the bounded `receipt_id:nonce` replay key; reuse,
+store exhaustion, expiry, and future issuance fail closed.
+
+A verified receipt is not executable authority. The loader must separately
+hash the bytes read from the mounted filesystem, compare that digest and all
+receipt bindings, consume a live loader-owned authority token, and only then
+spawn the process. Source modules, package projections, serial markers, fixed
+commands, and host-side execution cannot satisfy this contract. Until those
+target artifacts and live receipts exist, canonical manifest rows remain
+`Blocked`; this lane makes no bootstrap or guest-execution claim.
+
 `simpleos_primary_tool_manifest_v1` is the closed, versioned declaration for
 primary userland categories: administration, archive/compression, networking,
 checksums, text processing, process monitoring, and package management.

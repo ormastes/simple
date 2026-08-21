@@ -1,0 +1,61 @@
+use std.spec.*
+use common.contracts.execution.simpleos_primary_tool_receipt_v1.*
+use common.contracts.execution.simpleos_target_v1.{SIMPLEOS_TARGET_V1_X86_64_TRIPLE}
+
+fn receipt(signature: [u8]) -> SimpleOsPrimaryToolReceiptV1:
+    val draft = SimpleOsPrimaryToolReceiptV1(
+        schema_version: SIMPLEOS_PRIMARY_TOOL_RECEIPT_V1,
+        tool_name: "grep", canonical_path: "/usr/bin/grep",
+        artifact_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        target_triple: SIMPLEOS_TARGET_V1_X86_64_TRIPLE,
+        filesystem: "FAT32", behavior_id: "grep-bounded-line-search-v1",
+        receipt_id: "grep-x86-fat32-1", key_id: "release-key-1",
+        issued_unix_us: 100, expires_unix_us: 200, nonce: "build-42",
+        payload: [], signature: signature)
+    SimpleOsPrimaryToolReceiptV1(
+        schema_version: draft.schema_version, tool_name: draft.tool_name,
+        canonical_path: draft.canonical_path, artifact_digest: draft.artifact_digest,
+        target_triple: draft.target_triple, filesystem: draft.filesystem,
+        behavior_id: draft.behavior_id, receipt_id: draft.receipt_id,
+        key_id: draft.key_id, issued_unix_us: draft.issued_unix_us,
+        expires_unix_us: draft.expires_unix_us, nonce: draft.nonce,
+        payload: simpleos_primary_tool_receipt_canonical_body_v1(draft),
+        signature: signature)
+
+describe "authenticated primary tool receipt":
+    it "rejects a missing signature instead of promoting source presence":
+        val result = simpleos_primary_tool_receipt_verify_v1(
+            receipt([]), "release-key-1", [], 150)
+        expect(result).to_be_err()
+
+    it "rejects expired and overlong admission windows before signature use":
+        val expired = simpleos_primary_tool_receipt_verify_v1(
+            receipt([]), "release-key-1", [], 201)
+        expect(expired).to_be_err()
+
+    it "rejects a key id that is not the configured trust root":
+        val result = simpleos_primary_tool_receipt_verify_v1(
+            receipt([]), "another-key", [], 150)
+        expect(result).to_be_err()
+
+    it "changes canonical signed bytes when bound metadata is substituted":
+        val original = receipt([])
+        val changed = SimpleOsPrimaryToolReceiptV1(
+            schema_version: original.schema_version, tool_name: "ps",
+            canonical_path: original.canonical_path,
+            artifact_digest: original.artifact_digest,
+            target_triple: original.target_triple, filesystem: original.filesystem,
+            behavior_id: original.behavior_id, receipt_id: original.receipt_id,
+            key_id: original.key_id, issued_unix_us: original.issued_unix_us,
+            expires_unix_us: original.expires_unix_us, nonce: original.nonce,
+            payload: original.payload, signature: original.signature)
+        expect(simpleos_primary_tool_receipt_canonical_body_v1(changed) == original.payload).to_be(false)
+
+    it "rejects a consumed receipt id and nonce before another admission":
+        val original = receipt([])
+        val owner = SimpleOsPrimaryToolReceiptOwnerV1(
+            consumed_keys: ["{original.receipt_id.len()}:{original.receipt_id}{original.nonce.len()}:{original.nonce}"])
+        val replay = simpleos_primary_tool_receipt_admit_v1(
+            owner, original, "release-key-1", [], 150)
+        expect(replay.ok).to_be(false)
+        expect(replay.error).to_equal(SimpleOsPrimaryToolReceiptError.Replayed)

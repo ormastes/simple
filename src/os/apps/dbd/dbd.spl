@@ -49,7 +49,10 @@ use os.apps.dbd.dbd_auth_ingress.{
 use os.apps.dbd.dbd_command_ingress.{
     DbdAuthenticatedRespIngressV1, DbdCommandIngressStatusV1
 }
-use os.apps.dbd.dbd_dbfs_adapter.{DbdDbfsAdapter, dbd_dbfs_adapter_from_driver}
+use os.apps.dbd.dbd_dbfs_adapter.{
+    DbdDbfsAdapter, dbd_dbfs_adapter_from_driver,
+    dbd_dbfs_adapter_from_filesystem_vfs
+}
 use os.apps.dbd.dbd_provisioning.{DbdProvisioningOwnerV1}
 use os.apps.dbd.dbd_close_owner.{
     DbdCloseOwnerV1, DbdCloseStateV1, DbdCloseDispositionV1
@@ -209,7 +212,7 @@ pub class DbdServer:
     provisioning: DbdProvisioningOwnerV1
 
 impl DbdServer:
-    static fn new() -> DbdServer:
+    pub static fn new() -> DbdServer:
         DbdServer(engine: DbdEngine.new(), log_text: "", backend_is_dbfs: false,
                   persistence: DbdPersistenceBudget.new(),
                   quarantine_present: false,
@@ -242,6 +245,28 @@ impl DbdServer:
         if not self.dbfs_adapter.ready(): return self.dbfs_adapter.blocker()
         if not self.persistence.healthy: return "dbd-persistence-quarantined"
         ""
+
+    pub me close_service() -> bool:
+        """Close the whole service owner and destroy retained provisioning."""
+        var resources_closed = true
+        if self.client_close.owns_fd():
+            resources_closed = self.attempt_client_resource_close() ==
+                DbdCloseDispositionV1.Closed
+        if self.listener_close.owns_fd():
+            resources_closed = self.close_listener() and resources_closed
+        self.provisioning.close()
+        self.credential_provider.revoke()
+        val storage_closed = self.dbfs_adapter.close()
+        resources_closed and storage_closed and
+            not self.provisioning.ready() and
+            not self.credential_provider.configured
+
+    pub me attach_filesystem_dbfs_vfs(
+        dbfs_root: bool, durable_sync: bool, transactional_replace: bool
+    ) -> bool:
+        self.dbfs_adapter = dbd_dbfs_adapter_from_filesystem_vfs(
+            dbfs_root, durable_sync, transactional_replace)
+        self.dbfs_adapter.ready()
 
     me configure_authentication(principal: text, credential: [u8]) -> bool:
         """Hash a copied credential into the digest-only verifier.
@@ -294,9 +319,9 @@ impl DbdServer:
     # through the REAL RedisServer.dispatch() at startup.
     # ------------------------------------------------------------------
 
-    me replay_log():
+    pub me replay_log():
         """Load existing durable state at startup. Selects and logs the backend."""
-        if self.try_dbfs_backend():
+        if self.dbfs_adapter.ready() or self.try_dbfs_backend():
             self.backend_is_dbfs = true
             val recovered = self.dbfs_adapter.read_existing_bounded(
                 DBD_LOG_PATH, DBD_MAX_JOURNAL_BYTES)
@@ -430,7 +455,7 @@ impl DbdServer:
     # dispatch commands on a disposable owner copy.
     # ------------------------------------------------------------------
 
-    me bind_listener(port: i64) -> i64:
+    pub me bind_listener(port: i64) -> i64:
         if self.listener_close.owns_fd() or
             self.lifecycle.state != ServerLifecycleState.Created:
             return -16
@@ -710,7 +735,7 @@ impl DbdServer:
         self.finish_client(client_fd, live.budget)
         true
 
-    me accept_and_handle_once() -> bool:
+    pub me accept_and_handle_once() -> bool:
         """Handle one connection on this owner's listener.
 
         The method mutates the canonical DbdServer, so verified journal state

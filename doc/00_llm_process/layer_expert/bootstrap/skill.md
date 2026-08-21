@@ -20,6 +20,14 @@ verification, and all bootstrap-blocking regressions.
 
 ## Pipeline Links
 
+## SimpleOS 32-bit cross-target boundary
+
+The shared consumer contract is
+`src/os/port/simpleos_32bit_bootstrap_contract.spl`. It keeps host Phase 1/2
+lineage distinct from guest execution and permanently refuses to reinterpret
+cross-built QEMU evidence as target-native compiler execution. Do not close
+Todo 834-836 from source tests, a Rust seed, or synthetic serial markers.
+
 - [verify skill](../../../../.claude/skills/verify.md)
 - [impl skill](../../../../.claude/skills/impl.md)
 

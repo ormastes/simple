@@ -42,6 +42,10 @@ use os.services.vfs.vfs_dispatch.{
     g_vfs_dispatch_write_file_text, g_vfs_dispatch_write_file_bytes,
     g_vfs_dispatch_delete_file
 }
+use os.services.vfs.dbfs_mount_capability.{
+    dbfs_vfs_mount_capability_clear_v1,
+    dbfs_vfs_mount_capability_publish_driver_v1
+}
 use os.services.vfs.vfs_write_ops.{
     g_vfs_select_file, g_vfs_get_selected_file, g_vfs_clear_selected_file,
     g_vfs_write_file_text, g_vfs_write_file_bytes,
@@ -114,10 +118,18 @@ fn _clone_bytes(buf: [u8]) -> [u8]:
 pub fn _clear_vfs_rootfs_for_test():
     """Reset rootfs-related globals so hosted driver tests start clean."""
     vfs_state_reset_rootfs()
+    dbfs_vfs_mount_capability_clear_v1()
 
 pub fn vfs_mount_rootfs(driver: DriverInstance) -> Result<(), text>:
     """Mount an already constructed root driver; production NVMe callers should use vfs_mount_rootfs_from_nvme_lease_checked."""
+    dbfs_vfs_mount_capability_clear_v1()
     match driver:
+        case DbFs(dbfs):
+            val mount_r = vfs_state_mount("/", driver, MountOptions.default())
+            if mount_r.is_err():
+                return Err("vfs_mount_rootfs: mount failed")
+            dbfs_vfs_mount_capability_publish_driver_v1(
+                dbfs.durability_serialization_ready())
         case NvfsPosix(d):
             vfs_state_commit_root_nvfs(d)
         case _:

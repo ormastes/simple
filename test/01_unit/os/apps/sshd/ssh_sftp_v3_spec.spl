@@ -3,9 +3,6 @@ use std.spipe.*
 use os.apps.sshd.ssh_sftp_v3.{SftpSessionV3}
 use os.apps.sshd.ssh_session.{ssh_channel_request_is_sftp}
 use os.apps.sshd.ssh_packet.{ssh_put_u32, ssh_put_string, ssh_put_text, ssh_get_u32}
-use os.services.vfs.vfs_init.{_clear_vfs_rootfs_for_test, vfs_mount_rootfs}
-use std.db.dbfs_driver.{DbFsDriver}
-use std.fs_driver.instance.{DriverInstance}
 extern fn rt_file_read_text(path: text) -> text
 
 fn _frame(body: [u8]) -> [u8]:
@@ -128,48 +125,31 @@ describe "bounded SFTP v3 protocol core":
         expect(work.header_scan_bytes).to_equal(8)
         expect(work.complete_frames).to_equal(2)
 
-    it "round-trips OPEN WRITE READ STAT and CLOSE through canonical DBFS VFS objects":
-        _clear_vfs_rootfs_for_test()
-        vfs_mount_rootfs(DriverInstance.DbFs(DbFsDriver.new_hosted())).unwrap()
+    it "fails closed for every filesystem and handle operation":
         var session = SftpSessionV3.new()
         session.handle_packet([0, 0, 0, 5, 1, 0, 0, 0, 3])
-        val opened = session.handle_packet(_open_request(10u32, "/sftp.bin", 27u32))
-        expect(opened[4]).to_equal(102u8)
-        val handle: [u8] = [opened[13], opened[14], opened[15], opened[16]]
-        val wrote = session.handle_packet(_write_request(11u32, handle, 2u64, [65u8, 66u8, 67u8]))
-        expect(wrote[4]).to_equal(101u8)
-        expect(ssh_get_u32(wrote, 9)).to_equal(0u32)
-        val read = session.handle_packet(_read_request(12u32, handle, 0u64, 8u32))
-        expect(read[4]).to_equal(103u8)
-        expect([read[13], read[14], read[15], read[16], read[17]]).to_equal([0u8, 0u8, 65u8, 66u8, 67u8])
-        val stated = session.handle_packet(_stat_request(13u32, "/sftp.bin"))
-        expect(stated[4]).to_equal(105u8)
-        expect(stated[20]).to_equal(5u8)
-        val closed = session.handle_packet(_close_request(14u32, handle))
-        expect(ssh_get_u32(closed, 9)).to_equal(0u32)
-        val stale = session.handle_packet(_read_request(15u32, handle, 0u64, 1u32))
-        expect(ssh_get_u32(stale, 9)).to_equal(9u32)
+        val requests = [
+            _open_request(10u32, "/sftp.bin", 1u32),
+            _stat_request(11u32, "/sftp.bin"),
+            _read_request(12u32, [0u8, 0u8, 0u8, 1u8], 0u64, 1u32),
+            _write_request(13u32, [0u8, 0u8, 0u8, 1u8], 0u64, [65u8]),
+            _close_request(14u32, [0u8, 0u8, 0u8, 1u8])
+        ]
+        var expected_id: u32 = 10u32
+        for request in requests:
+            val response = session.handle_packet(request)
+            expect(response[4]).to_equal(101u8)
+            expect(ssh_get_u32(response, 5)).to_equal(expected_id)
+            expect(ssh_get_u32(response, 9)).to_equal(8u32)
+            expected_id = expected_id + 1u32
 
-    it "rejects non-atomic append instead of racing stat against positioned write":
+    it "teardown revokes negotiation state without touching filesystem authority":
         var session = SftpSessionV3.new()
         session.handle_packet([0, 0, 0, 5, 1, 0, 0, 0, 3])
-        val response = session.handle_packet(
-            _open_request(20u32, "/append.bin", 15u32))
+        session.close_all()
+        val response = session.handle_packet(_stat_request(20u32, "/sftp.bin"))
         expect(response[4]).to_equal(101u8)
         expect(ssh_get_u32(response, 9)).to_equal(8u32)
-
-    it "retires every live VFS object when the SFTP owner closes":
-        _clear_vfs_rootfs_for_test()
-        vfs_mount_rootfs(DriverInstance.DbFs(DbFsDriver.new_hosted())).unwrap()
-        var session = SftpSessionV3.new()
-        session.handle_packet([0, 0, 0, 5, 1, 0, 0, 0, 3])
-        val opened = session.handle_packet(
-            _open_request(21u32, "/terminal.bin", 27u32))
-        val handle: [u8] = [opened[13], opened[14], opened[15], opened[16]]
-        session.close_all()
-        val stale = session.handle_packet(
-            _read_request(22u32, handle, 0u64, 1u32))
-        expect(ssh_get_u32(stale, 9)).to_equal(9u32)
 
     it "routes every SSH terminal transition through the cleanup owner":
         val core = rt_file_read_text("src/os/apps/sshd/ssh_session.spl")

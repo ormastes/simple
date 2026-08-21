@@ -16,6 +16,9 @@ use os.apps.sshd.ssh_kex_primitives.{HostKeySet, HostCertificateSet, host_key_se
 use os.apps.sshd.ssh_auth.{SshUserDb}
 use os.kernel.net.rt_net_socket_facade.{rt_net_close}
 use std.common.string_core.{text_to_bytes}
+use std.common.contracts.execution.simpleos_capability_v1.{ProtocolCapabilityManifestV1}
+use std.common.contracts.execution.simpleos_server_protocol_capabilities.{ServerProtocolProbeHandle, server_protocol_probe_handle_admitted, simpleos_ssh_capability_manifests}
+export use os.apps.sshd.sshd_net_decode.*
 # NOTE: call the x86_64 spawn DIRECTLY (single non-@cfg pub fn) rather than the
 # cross-arch fs_exec_spawn_ring3 wrapper — the @cfg multi-variant dispatch of
 # _fs_exec_spawn_ring3_active mis-selects a non-x86_64 variant on the
@@ -45,7 +48,6 @@ extern fn rt_push_byte(arr: [u8], byte_val: i64) -> [u8]
 
 val SSHD_PORT: u16 = 22
 val SSHD_BACKLOG: i32 = 5
-
 # Deferred ring-3 exec, run from the SHALLOW accept-loop frame (kernel-stack
 # overflow deep in the session call stack otherwise — see the unified
 # _sshd_run_pending_exec below for the real implementation; PATH resolution
@@ -225,50 +227,10 @@ fn _sshd_bytes_equal(a: [u8], b: [u8]) -> bool:
         i = i + 1
     true
 val SSHD_MAX_SESSIONS: u32 = 16
-
 pub struct SshDaemonAcceptResult:
     accepted: bool
     session_complete: bool
     accept_resumed: bool
-
-fn decode_net_runtime_i32(raw: i64) -> i32:
-    """Decode tagged positive ints returned by the baremetal direct net runtime.
-
-    The direct C runtime returns ENCODE_INT(value) for success paths. Zero stays
-    zero, negative errno values stay negative enough for `< 0` checks, and
-    positive file descriptors need to be untagged before Simple code stores them.
-    """
-    if raw > 0:
-        return (raw >> 3).to_i32()
-    raw.to_i32()
-
-fn decode_net_runtime_fd(raw: i64) -> i64:
-    """Decode accepted positive socket handles while preserving raw fd 0."""
-    if raw > 7:
-        return raw >> 3
-    raw
-
-fn normalize_boot_tcp_client_fd(raw: i64) -> i64:
-    """Map the direct boot TCP accept result onto the boot session handle.
-
-    The freestanding runtime exposes the accepted SSH connection through fd 200.
-    Some generated call paths surface that success as decoded fd 0, so normalize
-    non-negative boot accepts before constructing an SshSession.
-    """
-    if raw == 200:
-        return 200
-    val decoded = decode_net_runtime_fd(raw)
-    if decoded == 0:
-        return 200
-    decoded
-
-pub fn sshd_decode_net_runtime_i32_for_test(raw: i64) -> i32:
-    """Test hook for tagged direct-runtime integer decoding."""
-    decode_net_runtime_i32(raw)
-
-pub fn sshd_normalize_boot_tcp_client_fd_for_test(raw: i64) -> i64:
-    """Test hook for the live boot TCP accepted-session handle contract."""
-    normalize_boot_tcp_client_fd(raw)
 
 pub fn sshd_build_host_keys_for_session_for_test(
     advertise_ed25519: bool,
@@ -454,6 +416,14 @@ class SshDaemon:
     host_rsa_sha2_256_cert: [u8]?
     host_rsa_sha2_512_cert: [u8]?
     credential_provider_configured: bool
+    capability_probe_identity: text
+    capability_evidence_identity: text
+    capability_generation: i64
+    capability_next_sequence: i64
+    capability_pending_sequence: i64
+    capability_consumed_sequence: i64
+    capability_authority: text
+    published_capabilities: [ProtocolCapabilityManifestV1]
 
 impl SshDaemon:
 
@@ -482,7 +452,15 @@ impl SshDaemon:
             host_ed25519_cert: nil,
             host_rsa_sha2_256_cert: nil,
             host_rsa_sha2_512_cert: nil,
-            credential_provider_configured: false
+            credential_provider_configured: false,
+            capability_probe_identity: "",
+            capability_evidence_identity: "",
+            capability_generation: 0,
+            capability_next_sequence: 1,
+            capability_pending_sequence: 0,
+            capability_consumed_sequence: 0,
+            capability_authority: "",
+            published_capabilities: []
         )
 
     static fn new_with_provider(port: u16, provider: SshdCredentialProvider) -> SshDaemon:
@@ -591,7 +569,46 @@ impl SshDaemon:
 
         serial_println("[sshd] SSH daemon listening on port {self.port}")
         self.running = true
+        self.capability_generation = self.capability_generation + 1
+        self.capability_authority = "sshd-probe-owner:{self.port}:generation={self.capability_generation}"
+        self.capability_probe_identity = ""
+        self.capability_evidence_identity = ""
+        self.published_capabilities = []
         Ok(true)
+
+    fn _issue_protocol_probe_handle(session: SshSession) -> ServerProtocolProbeHandle:
+        val sequence = self.capability_next_sequence
+        self.capability_next_sequence = self.capability_next_sequence + 1
+        self.capability_pending_sequence = sequence
+        ServerProtocolProbeHandle(
+            generation: self.capability_generation,
+            sequence: sequence,
+            authority: self.capability_authority,
+            authenticated: session.capability_authenticated,
+            channel_opened: session.capability_channel_opened,
+            sftp_subsystem_opened: session.capability_sftp_opened
+        )
+
+    me consume_protocol_probe_handle(handle: ServerProtocolProbeHandle) -> bool:
+        """Single production publisher boundary; stale and replayed handles fail."""
+        if not self.running or not server_protocol_probe_handle_admitted(
+            handle, self.capability_generation, self.capability_pending_sequence,
+            self.capability_authority, self.capability_consumed_sequence
+        ):
+            return false
+        self.capability_consumed_sequence = handle.sequence
+        self.capability_probe_identity = "ssh-live-auth-channel:generation={handle.generation}:sequence={handle.sequence}"
+        self.capability_evidence_identity = "authority={handle.authority};authenticated=true;channel=true;sftp={handle.sftp_subsystem_opened}"
+        self.published_capabilities = simpleos_ssh_capability_manifests(
+            # SFTP stays unpublished until the subsystem receives a scoped,
+            # per-principal atomic VFS capability. Opening framing is not proof.
+            true, false,
+            self.capability_probe_identity, self.capability_evidence_identity
+        )
+        true
+
+    pub fn published_protocol_capability_manifests() -> [ProtocolCapabilityManifestV1]:
+        self.published_capabilities
 
     me accept_loop():
         """Accept connections and handle them sequentially.
@@ -649,6 +666,8 @@ impl SshDaemon:
         )
         serial_println("[sshd] session run")
         session.run()
+        val capability_handle = self._issue_protocol_probe_handle(session)
+        self.consume_protocol_probe_handle(capability_handle)
         # Deferred ring-3 exec: perform the spawn HERE, from the shallow
         # accept-loop frame (mirrors the prod entry's shallow boot stack),
         # not deep inside the session's exec dispatch where it faults. The
@@ -698,6 +717,8 @@ impl SshDaemon:
         session.run()
 
         # Clean up after session ends
+        val capability_handle = self._issue_protocol_probe_handle(session)
+        self.consume_protocol_probe_handle(capability_handle)
         session.close()
 
     me _cleanup_closed_sessions():
@@ -752,6 +773,10 @@ impl SshDaemon:
     me stop():
         """Stop the SSH daemon and close the listening socket."""
         self.running = false
+        self.capability_probe_identity = ""
+        self.capability_evidence_identity = ""
+        self.capability_pending_sequence = 0
+        self.published_capabilities = []
         if self.listen_fd >= 0:
             rt_net_close(self.listen_fd)
             self.listen_fd = -1

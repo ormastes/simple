@@ -1,0 +1,46 @@
+# codex-system-test
+# @tag:system
+# @req REQ-013 REQ-015 REQ-016
+
+"""# Honest SimpleOS server protocol discovery
+
+Operators inspect one production-owned capability projection before publishing
+or negotiating server protocols. The same projection keeps unavailable modern
+web transports closed and distinguishes SSH from its authenticated SFTP
+subsystem.
+"""
+
+use std.spec.*
+use std.common.contracts.execution.simpleos_server_protocol_capabilities.{
+    simpleos_http_select_alpn,
+    simpleos_http_capability_manifests,
+    simpleos_ssh_capability_manifests
+}
+
+describe "REQ-013: publish only reachable web protocols":
+    # @capture(protocol)
+    it "should publish the probed HTTP/1.1 and HTTP/2 production owners":
+        step("Start the canonical HTTP owner and retain its loopback and worker-dispatch identities")
+        val before_request = simpleos_http_capability_manifests(true, false, false, "tcp-connect", "")
+        expect(before_request.len()).to_equal(0)
+        step("Complete one TLS HTTP/1.1 request and response through the production worker")
+        val before_h2 = simpleos_http_capability_manifests(true, true, false, "live-request", "tls12-cert-aes-h1-response")
+        expect(before_h2.len()).to_equal(1)
+        step("Keep HTTP/2 unpublished until a full worker-owned request and response receipt exists")
+        expect(before_h2.len()).to_equal(1)
+        expect(simpleos_http_select_alpn("h2")).to_equal("h2")
+
+    it "should reject unavailable HTTP/3 QUIC and WebTransport negotiations":
+        step("Offer unavailable and unknown ALPN identifiers to the canonical negotiation policy")
+        expect(simpleos_http_select_alpn("h3")).to_equal("")
+        expect(simpleos_http_select_alpn("quic")).to_equal("")
+        expect(simpleos_http_select_alpn("webtransport")).to_equal("")
+
+describe "REQ-015 and REQ-016: publish SSH and SFTP from their reachable owners":
+    # @capture(protocol)
+    it "should publish SSH only after live authentication and keep SFTP unpublished without atomic VFS authority":
+        step("Authenticate, open a channel, and request SFTP through the canonical daemon")
+        expect(simpleos_ssh_capability_manifests(false, true, "listener", "session").len()).to_equal(0)
+        expect(simpleos_ssh_capability_manifests(true, false, "listener", "session").len()).to_equal(1)
+        step("Refuse to promote subsystem framing while per-principal atomic VFS authority is absent")
+        expect(simpleos_ssh_capability_manifests(true, false, "authenticated-channel", "sftp-vfs-blocked").len()).to_equal(1)

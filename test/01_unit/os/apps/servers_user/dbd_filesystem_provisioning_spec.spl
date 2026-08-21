@@ -1,0 +1,82 @@
+# @cover src/os/apps/servers_user/main.spl 80%
+"""
+# Filesystem-launched DBD provisioning and DBFS/VFS admission
+
+The combined server payload is only a transport adapter. It must provision the
+canonical DBD owner from owned boot files, destroy all source buffers, and
+admit persistence only from a DBFS VFS capability that proves durable sync and
+transactional namespace replacement.
+"""
+
+use std.spec
+use std.io_runtime.{file_read}
+
+describe "filesystem DBD boot secret ownership":
+    it "calls the canonical provision_service and wipes every source buffer":
+        val source = file_read("src/os/apps/servers_user/main.spl")
+        expect(source).to_contain("server.provision_service(")
+        expect(source).to_contain("read_file_bytes_direct_owned(DB_CREDENTIAL_PATH")
+        expect(source).to_contain("read_file_bytes_direct_owned(DB_CERTIFICATE_PATH")
+        expect(source).to_contain("read_file_bytes_direct_owned(DB_PRIVATE_KEY_PATH")
+        expect(source).to_contain("secure_zero_u8_slots(credential)")
+        expect(source).to_contain("secure_zero_u8_slots(cert)")
+        expect(source).to_contain("secure_zero_u8_slots(key)")
+        expect(source.contains("DbServerCapsule")).to_equal(false)
+        expect(source.contains("--credential=")).to_equal(false)
+
+describe "filesystem DBD DBFS VFS capability":
+    it "fails closed unless mount identity sync and transaction facts agree":
+        val adapter = file_read("src/os/apps/dbd/dbd_dbfs_adapter.spl")
+        expect(adapter).to_contain("if not dbfs_root:")
+        expect(adapter).to_contain("if not durable_sync:")
+        expect(adapter).to_contain("if not transactional_replace:")
+        expect(adapter).to_contain("dbfs-vfs-transactional-replace-unavailable")
+        val projection = file_read("src/os/apps/servers_user/database_persistence_adapter.spl")
+        expect(projection).to_contain("dbfs_vfs_mount_capability_v1()")
+        expect(projection.contains("FILE_ATOMIC_DBFS_ROOT")).to_equal(false)
+
+    it "admits the complete least-authority capability without a driver copy":
+        val adapter = file_read("src/os/apps/dbd/dbd_dbfs_adapter.spl")
+        expect(adapter).to_contain("state: DbdDbfsAdapterState.MountedDurable")
+        expect(adapter).to_contain("driver: nil")
+        expect(adapter).to_contain("filesystem_vfs: true")
+
+    it "publishes readiness only from an actually mounted durable DBFS driver":
+        val mount = file_read("src/os/services/vfs/vfs_init.spl")
+        val owner = file_read("src/os/services/vfs/dbfs_mount_capability.spl")
+        expect(mount).to_contain("case DbFs(dbfs):")
+        expect(mount).to_contain("dbfs.durability_serialization_ready()")
+        expect(mount).to_contain("dbfs_vfs_mount_capability_clear_v1()")
+        expect(owner).to_contain("DbfsMountedRecoveryCompleteDurableTransactionalReplace")
+
+    it "shares one contract type while keeping wire encode and decode separated":
+        val contract = file_read("src/lib/common/contracts/os/dbfs_vfs_mount_capability_v1.spl")
+        val owner = file_read("src/os/services/vfs/dbfs_mount_capability.spl")
+        val userlib = file_read("src/os/userlib/fs.spl")
+        expect(contract).to_contain("pub enum DbfsVfsMountCapabilityV1")
+        expect(owner).to_contain("pub use std.common.contracts.os.dbfs_vfs_mount_capability_v1")
+        expect(owner).to_contain("dbfs_vfs_mount_capability_code_v1()")
+        expect(userlib).to_contain("pub use std.common.contracts.os.dbfs_vfs_mount_capability_v1")
+        expect(userlib).to_contain("match syscall(79, 0, 0, 0, 0, 0)")
+
+describe "filesystem DBD authenticated durable transaction path":
+    it "routes TLS AUTH and persistent write/read through the canonical owner":
+        val source = file_read("src/os/apps/servers_user/main.spl")
+        val dbd = file_read("src/os/apps/dbd/dbd.spl")
+        expect(source).to_contain("db_server.replay_log()")
+        expect(source).to_contain("db_server.bind_listener")
+        expect(source).to_contain("db_server.accept_and_handle_once()")
+        expect(dbd).to_contain("self.dbfs_adapter.commit_and_sync(")
+        expect(dbd).to_contain("return self.engine.dispatch(args)")
+        expect(dbd).to_contain("self.engine.replay_journal(self.log_text)")
+
+    it "uses exclusive staging namespace sync and whole-owner close":
+        val source = file_read("src/os/apps/servers_user/main.spl")
+        val dbd = file_read("src/os/apps/dbd/dbd.spl")
+        val adapter = file_read("src/os/apps/dbd/dbd_dbfs_adapter.spl")
+        expect(adapter).to_contain("self.generation.to_text()")
+        expect(adapter).to_contain("file_open_direct(temp_path, 0xC1u32)")
+        expect(adapter).to_contain("file_sync_direct(directory.unwrap())")
+        expect(dbd).to_contain("pub me close_service() -> bool:")
+        expect(dbd).to_contain("self.provisioning.close()")
+        expect(source).to_contain("db_server.close_service()")

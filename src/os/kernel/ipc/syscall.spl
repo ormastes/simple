@@ -1,52 +1,14 @@
-# Syscall Dispatcher — hub file.
-# Imports, shared constants, shared state vars, security helpers,
-# helper functions, and the main syscall_dispatch/syscall_handler.
-# Handler implementations live in the syscall_* sub-files below.
+# Syscall dispatcher hub; handler implementations live in syscall_* modules.
 
 use os.kernel.types.syscall_types.{SyscallId, SyscallArgs, SyscallResult, SyscallTrapDisposition, SyscallDispatchResult, syscall_dispatch_with, SignalKind, TaskInfoBuf, DeviceInfoBuf, KLogEntry, MemInfoBuf, SysInfoKind}
-use os.kernel.types.task_types.{
-    TaskId, TaskState, TaskPriority, BlockReason,
-    SchedulerPolicy
-}
-use os.kernel.types.ipc_types.{IpcPort, IpcMessage}
-use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind, CapabilitySet}
-use os.kernel.types.notification_types.{Notification}
-use os.kernel.types.vmspace_types.{ProcessVmSpace, VmArea, VMA_READ, VMA_WRITE, VMA_ANON, VMA_FILE, VMA_SHARED}
-use os.kernel.memory.vmm.{vmm_mmap, vmm_munmap, vmm_new_process_space, vmm_teardown_user_space, vmm_cache_file_backing}
-use os.kernel.scheduler.scheduler.{Scheduler, g_scheduler_next_task_id, wait_collect_result_pid, wait_collect_result_status, wait_collect_result_error, task_control_pid, task_control_parent_pid, task_control_memory_pages, task_control_name, task_control_state_code, task_control_priority_code, task_control_ticks_remaining}
+use os.kernel.types.task_types.{TaskId, TaskState, TaskPriority, SchedulerPolicy}
+use os.kernel.types.capability_types.{CapabilityKind}
+use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
-use os.kernel.ipc.notification.{NotificationTable, notification_create, notification_signal, notification_wait, notification_poll, notification_destroy, notification_wait_any, notification_register_multi_waiter, notification_drain_signaled_waiters}
-use os.kernel.ipc.notif_global.{g_notification_table}
-use os.kernel.log.klog.{KernelLog, klog_write}
-use os.kernel.loader.executable_source.{resolve_executable_bytes, resolve_executable_bytes_from_path_bytes}
-use os.kernel.loader.app_registry.{app_registry_lookup}
-use os.kernel.loader.builtin_binary_registry.{resolve_builtin_binary}
-use os.kernel.loader.process_image.{build_user_process_image}
-use os.kernel.loader.dylib_registry.{dylib_registry_register, dylib_registry_symbol, dylib_registry_close}
+use os.kernel.log.klog.{KernelLog}
 use os.kernel.arch.arch_context.{Architecture}
-use os.kernel.memory.vmm.{vmm_map_page, vmm_unmap_page, vmm_verify_user_write, vmm_copyin_string_vector, vmm_copyin_bytes_from_space, vmm_copy_bytes_result_ok, vmm_copy_string_vector_result_ok, vmm_copy_string_vector_result_errno, vmm_copy_string_vector_result_values, vmm_read_pte, VmmCopyBytesResult, PAGE_SIZE, PTE_ADDR_MASK}
-use os.kernel.memory.pmm.{pmm_alloc_page, pmm_free_page}
-use os.kernel.types.memory_types.{PhysAddr, VirtAddr, PageFrame, VmFlags, VM_PRESENT, VM_WRITABLE, VM_USER, VM_NO_EXECUTE, VM_CACHE_DISABLE}
-use os.drivers.pci.pci.{pci_read_config, pci_read_vendor, pci_read_device_id, pci_read_class, pci_read_header_type, pci_read_irq, pci_read_bar, pci_write_config}
-use os.kernel.boot.mmio.{mmio_read16, mmio_read32, mmio_write8, mmio_write16, mmio_write32, mmio_write64}
-use os.kernel.interrupts.irq_routing.{irq_route_register}
-use os.kernel.interrupts.idt.{VEC_IRQ_BASE}
-use os.kernel.lifecycle.task_cleanup.{task_cleanup, task_register_resource, task_unregister_resource, RES_NOTIFICATION, RES_IRQ_ROUTE, RES_DMA_BUFFER}
-use os.kernel.ipc.capability.{CapabilityManager, PrivilegeTable, GrantTable, _vma_range_readable, register_task_vmspace, task_vmspace_of}
-use os.kernel.types.capability_types.{PrivilegeMask, Grant, PRIVCTL_SET_MASK, PRIVCTL_GET_MASK, PRIVCTL_ADD_PEER, PRIVCTL_REMOVE_PEER, PRIVCTL_SET_MASK_FULL, GRANT_R, GRANT_W, GRANT_RW}
-use os.drivers.rtc.rtc.{rtc_get_seconds, rtc_get_minutes, rtc_get_hours}
-use os.kernel.ipc.spm_port.{spm_port_send, spm_port_listen, spm_port_is_registered}
-use os.kernel.ipc.spm_claim.{spm_claim_for_task}
-use os.kernel.ipc.shared_dataset.{SharedDatasetRead, shared_dataset_create, shared_dataset_write, shared_dataset_seal, shared_dataset_close, shared_dataset_read, shared_dataset_is_sealed}
-use os.kernel.ipc.process_queue.{ProcessQueueRecv, PROCESS_QUEUE_NO_HANDLE, process_queue_create, process_queue_send, process_queue_recv, process_queue_poll, process_queue_close}
-use os.kernel.privilege.privilege_bridge.{bridge_lookup, two_gate_check}
-use os.kernel.pipe_compat.{posix_pipe}
-use os.kernel.fd_io.{PosixPreadExactBytes, posix_close, posix_dup, posix_dup2, posix_read, posix_write, posix_pread_exact_bytes, posix_lseek}
-use os.kernel.fd_table.{fd_activate_task, fd_prepare_fork_to_task, fd_dup_from, fd_is_valid, fd_get_cloexec, fd_set_cloexec, fd_get_status_flags, fd_set_status_flags, fd_get_object_id, fd_poll_ready, fd_poll_notification, MAX_FDS, POLLERR, POLLHUP, POLLNVAL}
-use os.kernel.errno.{EFAULT, EIO, EINVAL, ENAMETOOLONG}
-use os.kernel.log.klog_api.{log_raw_println}
-extern fn rt_string_from_byte_array(arr: [u8]) -> text
-extern fn rt_text_to_bytes(s: text) -> [u8]
+use os.drivers.pci.pci.{pci_read_vendor, pci_read_device_id, pci_read_class, pci_read_header_type, pci_read_irq, pci_read_bar}
+use os.kernel.fd_table.{fd_activate_task}
 
 # Pull in all syscall sub-modules so their handler fns are in scope.
 use os.kernel.ipc.syscall_ipc
@@ -59,6 +21,7 @@ use os.kernel.ipc.syscall_notif
 use os.kernel.ipc.syscall_file
 use os.kernel.ipc.syscall_memory
 use os.kernel.ipc.syscall_net
+use os.kernel.ipc.syscall_dbfs_mount_capability
 use os.kernel.ipc.syscall_spm
 
 # Re-export handlers from sub-modules so external callers (syscall_shim.spl)
@@ -74,6 +37,7 @@ use os.kernel.ipc.syscall_notif.{_handle_notification_create, _handle_notificati
 use os.kernel.ipc.syscall_file.{_handle_file_open, _handle_file_read, _handle_file_write, _handle_file_close, _handle_file_stat, _handle_file_mkdir, _handle_file_readdir, _handle_file_unlink, _handle_file_rename, _handle_file_rmdir, _handle_lseek, _handle_ftruncate, _handle_getcwd, _handle_chdir, _handle_file_sync}
 use os.kernel.ipc.syscall_memory.{_handle_memory_map, _handle_memory_unmap, _handle_memory_protect}
 use os.kernel.ipc.syscall_net.{_handle_net_socket, _handle_net_bind, _handle_net_listen, _handle_net_connect, _handle_net_accept, _handle_net_send_to, _handle_net_recv_from, _handle_net_if_config}
+use os.kernel.ipc.syscall_dbfs_mount_capability.{_handle_dbfs_vfs_mount_capability}
 use os.kernel.ipc.syscall_spm.{_handle_privctl, _handle_mem_grant, _handle_mem_revoke, _handle_safecopy_from, _handle_safecopy_to, _handle_brk_for_task, _handle_system_reboot, _handle_sys_mmap, _handle_sys_munmap, _handle_spm_priv_check, _handle_spm_win_register, _handle_spm_approval_request, _handle_spm_send, _handle_spm_listen, _handle_spm_claim, _handle_dataset_create, _handle_dataset_create_from_file, _handle_dataset_write, _handle_dataset_seal, _handle_dataset_map, _handle_dataset_unmap, _handle_dataset_close, _handle_queue_create, _handle_queue_send, _handle_queue_recv, _handle_queue_poll, _handle_queue_close, syscall_current_vmspace, g_current_vmspace}
 
 # ============================================================================
@@ -607,6 +571,10 @@ fn syscall_handler(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klo
             if not _cap_check(ipc, caller, CapabilityKind.FileWrite(path_prefix: "")):
                 return SyscallResult(value: SYSCALL_EPERM)
             _handle_file_sync(args, scheduler)
+        case 79:    # DbfsVfsMountCapability (read-only mount-owner fact)
+            if not _cap_check(ipc, caller, CapabilityKind.FileRead(path_prefix: "")):
+                return SyscallResult(value: SYSCALL_EPERM)
+            _handle_dbfs_vfs_mount_capability()
 
         # -- Device ----------------------------------------------------------
         case 80:    # DevEnumerate

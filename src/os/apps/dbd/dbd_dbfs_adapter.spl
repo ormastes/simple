@@ -8,6 +8,10 @@
 use std.db.dbfs_driver.dbfs_driver.{DbFsDriver}
 use std.fs_driver.instance.{DriverInstance}
 use std.fs_driver.types.{Path, OpenFlags}
+use os.userlib.fs.{
+    file_open_direct, file_read_direct, file_write_direct, file_close_direct,
+    file_sync_direct, file_rename_direct
+}
 
 pub val DBD_DBFS_MAX_RECOVERY_BYTES: i64 = 1024 * 1024
 val DBD_DBFS_MAX_GENERATION: i64 = 9223372036854775807
@@ -26,6 +30,8 @@ pub class DbdDbfsAdapter:
     generation: i64
     open_handles: i64
     last_error: text
+    filesystem_vfs: bool
+    filesystem_vfs_transactional_replace: bool
 
     pub static fn detached(reason: text) -> DbdDbfsAdapter:
         DbdDbfsAdapter(
@@ -34,7 +40,9 @@ pub class DbdDbfsAdapter:
             driver_instance_id: 0,
             generation: 1,
             open_handles: 0,
-            last_error: reason
+            last_error: reason,
+            filesystem_vfs: false,
+            filesystem_vfs_transactional_replace: false
         )
 
     pub fn ready() -> bool:
@@ -65,6 +73,17 @@ pub class DbdDbfsAdapter:
             return Err(self.blocker())
         if path != "/DBD.LOG" or max_bytes <= 0 or max_bytes > DBD_DBFS_MAX_RECOVERY_BYTES:
             return Err("dbfs-recovery-read-invalid-boundary")
+        if self.filesystem_vfs:
+            val opened = file_open_direct(path, 0u32)
+            if opened.is_err(): return Err("dbfs-recovery-journal-not-found")
+            val fd = opened.unwrap()
+            val read = file_read_direct(fd, max_bytes.to_u64())
+            if not file_close_direct(fd):
+                self.state = DbdDbfsAdapterState.Quarantined
+                self.last_error = "dbfs-recovery-close-failed"
+                return Err(self.last_error)
+            if read.is_err(): return Err("dbfs-recovery-read-failed")
+            return read
         val driver = match self.driver:
             Some(value): value
             nil: return Err("dbfs-root-driver-unavailable")
@@ -103,6 +122,42 @@ pub class DbdDbfsAdapter:
         if path != "/DBD.LOG" or bytes.len().to_i64() <= 0 or
             bytes.len().to_i64() > DBD_DBFS_MAX_RECOVERY_BYTES:
             return Err("dbfs-commit-invalid-boundary")
+        if self.filesystem_vfs:
+            if not self.filesystem_vfs_transactional_replace:
+                return Err("dbfs-vfs-transactional-replace-unavailable")
+            # One generation-owned exclusive name prevents two service owners
+            # from truncating or substituting a shared staging file.
+            val temp_path = "/DBD.LOG.NEW." + self.generation.to_text()
+            val opened = file_open_direct(temp_path, 0xC1u32)
+            if opened.is_err(): return Err("dbfs-commit-open-failed")
+            val fd = opened.unwrap()
+            val written = file_write_direct(fd, bytes)
+            if written.is_err() or file_sync_direct(fd).is_err():
+                val _ = file_close_direct(fd)
+                self.state = DbdDbfsAdapterState.Quarantined
+                self.last_error = "dbfs-commit-sync-failed"
+                return Err(self.last_error)
+            if not file_close_direct(fd):
+                self.state = DbdDbfsAdapterState.Quarantined
+                self.last_error = "dbfs-commit-close-failed"
+                return Err(self.last_error)
+            if file_rename_direct(temp_path, path).is_err():
+                self.state = DbdDbfsAdapterState.Quarantined
+                self.last_error = "dbfs-commit-transactional-replace-failed"
+                return Err(self.last_error)
+            val directory = file_open_direct("/", 0u32)
+            if directory.is_err() or file_sync_direct(directory.unwrap()).is_err():
+                if directory.is_ok():
+                    val _ = file_close_direct(directory.unwrap())
+                self.state = DbdDbfsAdapterState.Quarantined
+                self.last_error = "dbfs-commit-namespace-sync-failed"
+                return Err(self.last_error)
+            if not file_close_direct(directory.unwrap()):
+                self.state = DbdDbfsAdapterState.Quarantined
+                self.last_error = "dbfs-commit-namespace-close-failed"
+                return Err(self.last_error)
+            self.generation = self.generation + 1
+            return Ok(())
         val driver = match self.driver:
             Some(value): value
             nil: return Err("dbfs-root-driver-unavailable")
@@ -134,7 +189,7 @@ pub class DbdDbfsAdapter:
         self.last_error = reason
         true
 
-    me close() -> bool:
+    pub me close() -> bool:
         if self.open_handles != 0:
             return false
         self.driver = nil
@@ -177,7 +232,30 @@ pub fn dbd_dbfs_adapter_from_driver(driver: DriverInstance) -> DbdDbfsAdapter:
                 driver_instance_id: dbfs.inst_id,
                 generation: 1,
                 open_handles: 0,
-                last_error: mounted_error
+                last_error: mounted_error,
+                filesystem_vfs: false,
+                filesystem_vfs_transactional_replace: false
             )
         case _:
             DbdDbfsAdapter.detached("mounted-root-is-not-dbfs")
+
+pub fn dbd_dbfs_adapter_from_filesystem_vfs(
+    dbfs_root: bool, durable_sync: bool, transactional_replace: bool
+) -> DbdDbfsAdapter:
+    """Admit the least-authority filesystem-process VFS projection.
+
+    The caller cannot promote a FAT32/RamFS mount: all three facts originate
+    in the mounted VFS owner.  Replacement is acknowledged only after the
+    DBFS VFS has synced the temporary file and committed its namespace rename.
+    """
+    if not dbfs_root:
+        return DbdDbfsAdapter.detached("filesystem-vfs-root-is-not-dbfs")
+    if not durable_sync:
+        return DbdDbfsAdapter.detached("filesystem-vfs-durable-sync-unavailable")
+    if not transactional_replace:
+        return DbdDbfsAdapter.detached("filesystem-vfs-transactional-replace-unavailable")
+    DbdDbfsAdapter(
+        state: DbdDbfsAdapterState.MountedDurable,
+        driver: nil, driver_instance_id: 0, generation: 1, open_handles: 0,
+        last_error: "", filesystem_vfs: true,
+        filesystem_vfs_transactional_replace: true)

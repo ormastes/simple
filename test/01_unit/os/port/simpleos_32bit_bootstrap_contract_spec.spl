@@ -30,6 +30,27 @@ fn guest_evidence(guest: SimpleOs32BitGuest) -> SimpleOs32BitGuestHelloEvidenceV
         executable_sha256: SHA3, filesystem_path: "/FSEXEC.ELF",
         serial_stdout: marker, exit_code: 0)
 
+fn receipt_v2(guest: SimpleOs32BitGuest) -> SimpleOs32BitBootstrapReceiptV2:
+    val profile = simpleos_32bit_target_profile_v1(guest)
+    val nonce = "0123456789abcdef"
+    var arch = "arm32"
+    if guest == SimpleOs32BitGuest.Riscv32: arch = "riscv32"
+    if guest == SimpleOs32BitGuest.X86_32: arch = "x86_32"
+    SimpleOs32BitBootstrapReceiptV2(
+        receipt_version: "simpleos-32bit-bootstrap-v2", guest: guest,
+        target_triple: profile.target_triple, abi: profile.abi,
+        linker_emulation: profile.linker_emulation,
+        host_compiler_sha256: SHA4, phase1_status: "pass", phase1_sha256: SHA1,
+        phase2_status: "pass", phase2_sha256: SHA2, phase2_parent_sha256: SHA1,
+        sysroot_manifest_sha256: SHA3, linker_script_sha256: SHA4,
+        tool_manifest_sha256: SHA3, qemu_system: profile.qemu_system,
+        qemu_exit_code: 37, nonce: nonce,
+        serial_stdout: "guest-entry nonce=" + nonce + "\n" +
+            "SIMPLEOS_FS_EXEC_OK arch=" + arch + " nonce=" + nonce + "\n" +
+            "reap exit=37 nonce=" + nonce + "\nTEST PASSED nonce=" + nonce,
+        stub_fallback_disabled: true, receipt_id: "receipt-0123456789abcdef",
+        key_id: "simpleos-qemu-test-key", signature: [for _ in 0..64: 1])
+
 describe "SimpleOS 32-bit bootstrap phase 1/2 evidence":
     it "accepts bound host phases plus real per-guest filesystem hello evidence":
         expect(SHA1.len()).to_equal(64)
@@ -72,3 +93,58 @@ describe "SimpleOS 32-bit bootstrap phase 1/2 evidence":
         expect(simpleos_32bit_target_native_phase12_v1_valid(host_evidence(), guest_evidence(SimpleOs32BitGuest.Arm32))).to_be(false)
         expect(simpleos_32bit_target_native_phase12_v1_valid(host_evidence(), guest_evidence(SimpleOs32BitGuest.Riscv32))).to_be(false)
         expect(simpleos_32bit_target_native_phase12_v1_valid(host_evidence(), guest_evidence(SimpleOs32BitGuest.X86_32))).to_be(false)
+
+    it "publishes one data-driven target ABI linker sysroot and tool-manifest profile per guest":
+        val arm = simpleos_32bit_target_profile_v1(SimpleOs32BitGuest.Arm32)
+        val rv = simpleos_32bit_target_profile_v1(SimpleOs32BitGuest.Riscv32)
+        val x86 = simpleos_32bit_target_profile_v1(SimpleOs32BitGuest.X86_32)
+        expect(arm.target_triple).to_equal("armv7-unknown-simpleos")
+        expect(rv.abi).to_equal("ilp32")
+        expect(rv.target_triple).to_equal("riscv32imac-unknown-simpleos")
+        expect(x86.target_triple).to_equal("i686-unknown-simpleos")
+        expect(arm.linker_emulation).to_equal("armelf_linux_eabi")
+        expect(x86.linker_emulation).to_equal("elf_i386")
+        expect(x86.qemu_system).to_equal("qemu-system-i386")
+        expect(arm.sysroot_manifest).to_equal(rv.sysroot_manifest)
+        expect(rv.tool_manifest).to_equal(x86.tool_manifest)
+
+    it "derives every 32-bit target identity and ABI from the canonical SimpleOS catalog":
+        expect(simpleos_32bit_target_catalog_v1_complete()).to_be(true)
+        val arm = simpleos_32bit_target_profile_v1(SimpleOs32BitGuest.Arm32)
+        val rv = simpleos_32bit_target_profile_v1(SimpleOs32BitGuest.Riscv32)
+        val x86 = simpleos_32bit_target_profile_v1(SimpleOs32BitGuest.X86_32)
+        expect(arm.abi).to_equal("eabihf")
+        expect(rv.abi).to_equal("ilp32")
+        expect(x86.abi).to_equal("cdecl")
+
+    it "accepts complete phase 1 and phase 2 receipts for all three targets":
+        expect(simpleos_32bit_bootstrap_receipt_v2_valid(receipt_v2(SimpleOs32BitGuest.Arm32))).to_be(true)
+        expect(simpleos_32bit_bootstrap_receipt_v2_valid(receipt_v2(SimpleOs32BitGuest.Riscv32))).to_be(true)
+        expect(simpleos_32bit_bootstrap_receipt_v2_valid(receipt_v2(SimpleOs32BitGuest.X86_32))).to_be(true)
+
+    it "fails closed on incomplete phases manifests target metadata or QEMU transcript":
+        val incomplete = receipt_v2(SimpleOs32BitGuest.Riscv32)
+        incomplete.phase2_status = "blocked"
+        expect(simpleos_32bit_bootstrap_receipt_v2_valid(incomplete)).to_be(false)
+        val no_tools = receipt_v2(SimpleOs32BitGuest.Riscv32)
+        no_tools.tool_manifest_sha256 = ""
+        expect(simpleos_32bit_bootstrap_receipt_v2_valid(no_tools)).to_be(false)
+        val wrong_abi = receipt_v2(SimpleOs32BitGuest.Riscv32)
+        wrong_abi.abi = "lp64"
+        expect(simpleos_32bit_bootstrap_receipt_v2_valid(wrong_abi)).to_be(false)
+        val fabricated = receipt_v2(SimpleOs32BitGuest.Riscv32)
+        fabricated.serial_stdout = "TEST PASSED nonce=" + fabricated.nonce
+        expect(simpleos_32bit_bootstrap_receipt_v2_valid(fabricated)).to_be(false)
+
+    it "rejects malformed digests missing authority and replayed receipt identity or nonce":
+        val malformed = receipt_v2(SimpleOs32BitGuest.Arm32)
+        malformed.phase1_sha256 = "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG"
+        expect(simpleos_32bit_bootstrap_receipt_v2_valid(malformed)).to_be(false)
+        val no_authority = receipt_v2(SimpleOs32BitGuest.Arm32)
+        no_authority.key_id = ""
+        expect(simpleos_32bit_bootstrap_receipt_v2_valid(no_authority)).to_be(false)
+        val receipt = receipt_v2(SimpleOs32BitGuest.Arm32)
+        expect(simpleos_32bit_bootstrap_receipt_v2_authorized(receipt,
+            "replayed-receipt", receipt.nonce, receipt.key_id, [for _ in 0..32: 1])).to_be(false)
+        expect(simpleos_32bit_bootstrap_receipt_v2_authorized(receipt,
+            receipt.receipt_id, "replayed-nonce-0000", receipt.key_id, [for _ in 0..32: 1])).to_be(false)

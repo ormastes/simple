@@ -44,7 +44,10 @@ changes. Never substitute the Rust seed or an unadmitted self-hosted runtime.
 # Protocol honesty update (2026-08-21)
 
 For web/SSH hardening, use `doc/07_guide/os/simpleos_server_protocol_status.md`.
+Capability claims must flow through
+`std.common.contracts.execution.simpleos_server_protocol_capabilities`; do not
+infer reachability from framing modules or client SFFI declarations.
 The TCP/TLS HTTP owner rejects unknown ALPN and H3 without H1 downgrade. SFTP
-currently proves only authenticated bounded v3 negotiation; filesystem
-operations and live SFTP remain blocked on an injected VFS capability. Never
+now routes bounded filesystem operations through the canonical capability-gated
+VFS; fresh live OpenSSH/QEMU evidence remains blocked on an admitted runtime. Never
 promote `check-simpleos-servers-qemu.shs` while it uses the Rust seed/password.

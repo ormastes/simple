@@ -69,6 +69,8 @@ use std.nogc_async_mut.io.tls_common.{TlsConfig}
 use std.tls.certificate.{TlsCertificateChain, TlsPrivateKey}
 use std.nogc_async_mut.io.file_ops.{file_exists}
 use std.nogc_sync_mut.io.tcp.{TcpStream}
+use std.common.contracts.execution.simpleos_capability_v1.{ProtocolCapabilityManifestV1}
+use std.common.contracts.execution.simpleos_server_protocol_capabilities.{simpleos_http_capability_manifests}
 
 # Module-level worker storage for thread entry points.
 # Each spawned worker is stored here so the thread callback can retrieve it.
@@ -191,6 +193,8 @@ class HttpServer:
     bind_identity: text
     probe_identity: text
     evidence_identity: text
+    h2_live_evidence: bool
+    h1_live_evidence: bool
 
     static fn new(config: ServerConfig) -> HttpServer:
         """Create server from a ServerConfig."""
@@ -217,7 +221,9 @@ class HttpServer:
             result_reservations: 0,
             bind_identity: "",
             probe_identity: "",
-            evidence_identity: ""
+            evidence_identity: "",
+            h2_live_evidence: false,
+            h1_live_evidence: false
         )
 
     static fn from_config_file(path: text) -> Result<HttpServer, HttpServerError>:
@@ -265,6 +271,8 @@ class HttpServer:
         self.bind_identity = ""
         self.probe_identity = ""
         self.evidence_identity = ""
+        self.h2_live_evidence = false
+        self.h1_live_evidence = false
 
         # Validate TLS configuration early (fail fast before spawning workers)
         if self.config.tls_enabled:
@@ -373,6 +381,14 @@ class HttpServer:
             print "[SimpleServer] Listening on {proto}://{self.config.listen_addr} with {worker_count} workers (SO_REUSEPORT)"
         else:
             print "[SimpleServer] Listening on {proto}://{self.config.listen_addr} with 1 worker"
+
+        # Startup owns capability admission: do not publish a ready server whose
+        # listener cannot be reached through its canonical loopback probe.
+        match self.live_probe():
+            Err(error):
+                self.stop()
+                return Err(error)
+            Ok(_): pass
 
         Ok(())
 
@@ -520,6 +536,27 @@ class HttpServer:
 
     fn evidence_identity() -> text:
         self.evidence_identity
+
+    pub me fn protocol_capability_manifests() -> [ProtocolCapabilityManifestV1]:
+        """Return only protocols backed by this ready generation and live probe."""
+        if not self.is_ready() or self.probe_identity == "" or self.evidence_identity == "":
+            return []
+        var i = 0
+        while i < self.status_channels.len():
+            val evidence = self.status_channels[i].try_recv()
+            if evidence.?:
+                val message = evidence as text
+                if message == "protocol:http-h1" and not self.config.tls_enabled:
+                    self.h1_live_evidence = true
+                    self.evidence_identity = self.evidence_identity + ";h1-request-response-generation={self.generation};worker={i}"
+                elif message == "protocol:https-h1" and self.config.tls_enabled:
+                    self.h1_live_evidence = true
+                    self.evidence_identity = self.evidence_identity + ";tls12-aes-cert-h1-request-response-generation={self.generation};worker={i}"
+            i = i + 1
+        simpleos_http_capability_manifests(
+            self.config.tls_enabled, self.h1_live_evidence, self.h2_live_evidence,
+            self.probe_identity, self.evidence_identity
+        )
 
     me live_probe() -> Result<text, HttpServerError>:
         if not self.is_ready():

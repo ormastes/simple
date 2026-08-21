@@ -11,17 +11,38 @@ bounded HTTP/1.1 WebSocket upgrade path. This does not imply that the generic
 HTTP server automatically upgrades arbitrary routes.
 
 The SimpleOS SSH daemon uses configured public-key identities and bounded
-channel admission. Its SFTP subsystem currently proves authenticated SFTP v3
-negotiation and bounded framing only. It rejects duplicate initialization and
-all filesystem operations because no VFS capability is injected. Do not
-advertise file transfer through SFTP until that owner and a live OpenSSH SFTP
-transcript exist. The legacy combined-server QEMU checker is not current
+channel admission. Its SFTP v3 owner negotiates and frames requests, but every
+filesystem operation fails closed with `SSH_FX_OP_UNSUPPORTED`: the canonical
+VFS does not yet expose a per-principal revocable capability with atomic
+beneath/no-follow lookup or non-materializing paged iteration, and SFTP must not
+emulate those guarantees with stat-then-open or slicing a full listing. This is
+source and host-fixture capability evidence only; do not advertise live file
+transfer until those controls and a current OpenSSH SFTP transcript exist. The legacy combined-server QEMU checker is not current
 acceptance evidence because it builds with the Rust seed and probes a hardcoded
 password; see the tracked bug records.
 
 Current source-only checks cannot replace live evidence. Resume focused checks
 after deploying an admitted Stage 4 `bin/simple`; then run the canonical HTTP
 loopback specs and the SSH QEMU specs from their in-file operator instructions.
-The production servers also do not yet publish the architecture's canonical
-capability manifest; that wiring remains tracked and must precede any unified
-protocol advertisement.
+Production startup and negotiation now share
+`std.common.contracts.execution.simpleos_server_protocol_capabilities`. HTTP
+publishes manifests only after ready-generation loopback evidence; TLS ALPN
+uses the same exact H1/H2 reachability predicate. SSH publishes only after the
+listener, configured public-key identity, and host-key policy are ready.
+SFTP remains unpublished even after authenticated subsystem framing because no
+per-principal atomic VFS capability is injected. HTTP/3, QUIC,
+WebTransport, generic-server WebSocket, and unknown identifiers remain absent
+and fail closed.
+# Filesystem-launched database provisioning
+
+The `/SERVERS.ELF` database listener is an adapter to `DbdServer`, not a second
+database implementation. It reads `/SYS/SRVDB.KEY`, `/SYS/SRVDB.CRT`, and
+`/SYS/SRVDB.PK8` as bounded owned byte buffers, invokes
+`DbdServer.provision_service`, and verifies zeroization of every source buffer
+before DBFS recovery. The paths are configuration locations, never embedded
+credential values.
+
+Startup additionally requires the mounted VFS owner to attest DBFS root,
+durable file sync, and transactional namespace replacement. A missing bit is a
+hard startup failure. Operators should never place secrets in command-line
+arguments; filesystem launch admission rejects all DBD arguments.

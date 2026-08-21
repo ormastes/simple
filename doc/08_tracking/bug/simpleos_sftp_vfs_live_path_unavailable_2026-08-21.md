@@ -2,14 +2,17 @@
 
 Status: open
 
-`src/os/apps/sshd/ssh_sftp_v3.spl:1` advertises only SFTP v3 negotiation and
-returns `SSH_FX_OP_UNSUPPORTED` for filesystem operations. The session/channel
-owner is authenticated and bounded, but no VFS capability is injected, so a
-real OpenSSH `sftp` client cannot list, stat, open, read, or close a SimpleOS
-filesystem file.
+`src/os/apps/sshd/ssh_sftp_v3.spl` negotiates SFTP v3 and enforces bounded
+framing, but every filesystem operation fails closed with
+`SSH_FX_OP_UNSUPPORTED`. Implementation blockers before live use are:
+`OpenFlags`/`MountTable.open` has no atomic no-follow/beneath primitive, and the
+`Filesystem.readdir` contract returns a fully materialized array rather than a
+bounded page/cursor. A stat-then-open check and slicing that array are rejected
+as unsafe substitutes.
 
-Unblock by defining a least-authority, root-confined VFS capability owned by
-the authenticated SSH session; implement bounded REALPATH/STAT/OPEN/READ/CLOSE
-without host-I/O fallback; then retain a fresh QEMU transcript from OpenSSH
+Unblock by adding backend-enforced no-follow/beneath open plus cursor-based
+bounded readdir through the fs-driver, MountTable, and VFS layers, together
+with per-principal revocable capability binding in SFTP. Then deploy an admitted Stage 4
+runtime and retain a fresh QEMU transcript from OpenSSH
 public-key login through SFTP v3 negotiation, one filesystem read, traversal
 rejection, handle close, and session teardown.
