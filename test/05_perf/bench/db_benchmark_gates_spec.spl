@@ -3,6 +3,10 @@
 # @cover src/lib/nogc_sync_mut/db/dbfs_engine/fts/search.spl 30%
 # @cover src/lib/nogc_sync_mut/db/page_summary.spl 30%
 """
+## Purpose and audience
+Purpose: AC-8: point lookup by primary key returns correct row
+Audience: compiler and tooling engineers who maintain this spec
+
 # DB Benchmark Gates Specification
 
 **Feature IDs:** #db-hardening-optimization
@@ -28,6 +32,8 @@ so all gates are correctness assertions.
 - Reopen/recovery preserves data integrity
 """
 
+# @req: REQ-BENCH-DbBencGate-001
+
 use std.spec
 use std.io_runtime.{file_delete, getpid, time_now_unix_micros}
 use nogc_sync_mut.database.pure_sql.database.{PureDatabase}
@@ -37,9 +43,12 @@ use nogc_sync_mut.database.pure_sql.database.{PureDatabase}
 # AC-8: Benchmark gate specs — correctness gates for DB operations
 # ============================================================================
 
+use std.spec.step
 describe "DB Benchmark Gates (AC-8)":
     describe "point lookup gate":
         it "AC-8: point lookup by primary key returns correct row":
+            step("Verify: AC-8: point lookup by primary key returns correct row")
+            # @req: REQ-BENCH-DbBencGate-001
             val path = "/tmp/simple_db_bench_point_" + getpid().to_text() + "_" + time_now_unix_micros().to_text() + ".sdb"
             file_delete(path)
 
@@ -50,7 +59,7 @@ describe "DB Benchmark Gates (AC-8)":
             db.exec_sql("INSERT INTO bench_point (id, name) VALUES (3, 'carol')").unwrap()
 
             val rows = db.query("SELECT * FROM bench_point WHERE id = 2", []).unwrap()
-            expect(rows.len()).to_equal(1)
+            expect(rows.len()).to_equal(1)  # oracle: value fixed by the spec contract
             val name = rows[0].values[1].to_text()
             expect(name).to_equal("bob")
 
@@ -59,6 +68,8 @@ describe "DB Benchmark Gates (AC-8)":
 
     describe "prefix search gate":
         it "AC-8: prefix search returns all matching rows":
+            step("Verify: AC-8: prefix search returns all matching rows")
+            # @req: REQ-BENCH-DbBencGate-001
             val path = "/tmp/simple_db_bench_prefix_" + getpid().to_text() + "_" + time_now_unix_micros().to_text() + ".sdb"
             file_delete(path)
 
@@ -69,13 +80,15 @@ describe "DB Benchmark Gates (AC-8)":
             db.exec_sql("INSERT INTO bench_prefix (id, tag) VALUES (3, 'admin:carol')").unwrap()
 
             val rows = db.query("SELECT * FROM bench_prefix WHERE tag LIKE 'user:%'", []).unwrap()
-            expect(rows.len()).to_equal(2)
+            expect(rows.len()).to_equal(2)  # oracle: value fixed by the spec contract
 
             db.close().unwrap()
             file_delete(path)
 
     describe "contains search gate":
         it "AC-8: contains search returns rows with matching substring":
+            step("Verify: AC-8: contains search returns rows with matching substring")
+            # @req: REQ-BENCH-DbBencGate-001
             val path = "/tmp/simple_db_bench_contains_" + getpid().to_text() + "_" + time_now_unix_micros().to_text() + ".sdb"
             file_delete(path)
 
@@ -86,13 +99,15 @@ describe "DB Benchmark Gates (AC-8)":
             db.exec_sql("INSERT INTO bench_contains (id, body) VALUES (3, 'quick silver lining')").unwrap()
 
             val rows = db.query("SELECT * FROM bench_contains WHERE body LIKE '%quick%'", []).unwrap()
-            expect(rows.len()).to_equal(2)
+            expect(rows.len()).to_equal(2)  # oracle: value fixed by the spec contract
 
             db.close().unwrap()
             file_delete(path)
 
     describe "BM25/FTS5 query gate":
         it "AC-8: FTS5 query returns ranked results with correct top hit":
+            step("Verify: AC-8: FTS5 query returns ranked results with correct top hit")
+            # @req: REQ-BENCH-DbBencGate-001
             val path = "/tmp/simple_db_bench_fts_" + getpid().to_text() + "_" + time_now_unix_micros().to_text() + ".sdb"
             file_delete(path)
 
@@ -103,7 +118,7 @@ describe "DB Benchmark Gates (AC-8)":
             db.exec_sql("INSERT INTO bench_fts (id, body) VALUES (3, 'database schema design')").unwrap()
 
             val results = db.fts5_search("bench_fts", ["body"], "database", 5).unwrap()
-            expect(results.len()).to_equal(2)
+            expect(results.len()).to_equal(2)  # oracle: value fixed by the spec contract
 
             val top_id = results[0].row.values[0].to_text()
             expect(top_id).to_equal("1")
@@ -113,6 +128,8 @@ describe "DB Benchmark Gates (AC-8)":
 
     describe "update/delete invalidation gate":
         it "AC-8: update clears stale FTS entry and delete removes it entirely":
+            step("Verify: AC-8: update clears stale FTS entry and delete removes it entirely")
+            # @req: REQ-BENCH-DbBencGate-001
             val path = "/tmp/simple_db_bench_inv_" + getpid().to_text() + "_" + time_now_unix_micros().to_text() + ".sdb"
             file_delete(path)
 
@@ -122,21 +139,23 @@ describe "DB Benchmark Gates (AC-8)":
             db.exec_sql("INSERT INTO bench_inv (id, body) VALUES (2, 'another keyword row')").unwrap()
 
             val before = db.fts5_search("bench_inv", ["body"], "stale", 5).unwrap()
-            expect(before.len()).to_equal(1)
+            expect(before.len()).to_equal(1)  # oracle: value fixed by the spec contract
 
             db.exec_sql("UPDATE bench_inv SET body = 'fresh content here' WHERE id = 1").unwrap()
             val after_update = db.fts5_search("bench_inv", ["body"], "stale", 5).unwrap()
-            expect(after_update.len()).to_equal(0)
+            expect(after_update.len()).to_equal(0)  # oracle: value fixed by the spec contract
 
             db.exec_sql("DELETE FROM bench_inv WHERE id = 2").unwrap()
             val after_delete = db.fts5_search("bench_inv", ["body"], "keyword", 5).unwrap()
-            expect(after_delete.len()).to_equal(0)
+            expect(after_delete.len()).to_equal(0)  # oracle: value fixed by the spec contract
 
             db.close().unwrap()
             file_delete(path)
 
     describe "reopen/recovery gate":
         it "AC-8: data persists and FTS rebuilds correctly after reopen":
+            step("Verify: AC-8: data persists and FTS rebuilds correctly after reopen")
+            # @req: REQ-BENCH-DbBencGate-001
             val path = "/tmp/simple_db_bench_reopen_" + getpid().to_text() + "_" + time_now_unix_micros().to_text() + ".sdb"
             file_delete(path)
 
@@ -149,13 +168,13 @@ describe "DB Benchmark Gates (AC-8)":
             var reopened = PureDatabase.open(path).unwrap()
 
             val rows = reopened.query("SELECT * FROM bench_reopen", []).unwrap()
-            expect(rows.len()).to_equal(2)
+            expect(rows.len()).to_equal(2)  # oracle: value fixed by the spec contract
 
             val fts = reopened.fts5_search("bench_reopen", ["body"], "durable", 5).unwrap()
-            expect(fts.len()).to_equal(2)
+            expect(fts.len()).to_equal(2)  # oracle: value fixed by the spec contract
 
             val alpha = reopened.fts5_search("bench_reopen", ["body"], "alpha", 5).unwrap()
-            expect(alpha.len()).to_equal(1)
+            expect(alpha.len()).to_equal(1)  # oracle: value fixed by the spec contract
             val alpha_id = alpha[0].row.values[0].to_text()
             expect(alpha_id).to_equal("1")
 

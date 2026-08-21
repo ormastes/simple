@@ -1,5 +1,9 @@
 # codex-system-test
 """
+## Purpose and audience
+Purpose: should preserve MCP client error identities
+Audience: compiler and tooling engineers who maintain this spec
+
 # Claude Full MCP Client
 
 Checks deterministic MCP client owner behavior for cache isolation, connection
@@ -15,12 +19,16 @@ The synthetic `doRequest`, auto-classifier conversion, and reconnect string
 markers are intentionally excluded from acceptance evidence.
 """
 
+# @req: REQ-TOOLS-Clie-001
+
 use std.spec.*
 use app.llm_caret.claude_full.services.mcp.client.*
 
 describe "Claude full MCP client":
     describe "supporting error and cache owner behavior":
         it "should preserve MCP client error identities":
+            step("Verify: should preserve MCP client error identities")
+            # @req: REQ-TOOLS-Clie-001
             step("Create authentication, session, and tool-call errors")
             val auth = McpAuthError.new("srv", "needs auth")
             val expired = McpSessionExpiredError.new("srv")
@@ -33,6 +41,8 @@ describe "Claude full MCP client":
             expect(tool.telemetryMessage).to_equal("safe bad")
 
         it "should detect exact expired MCP session boundaries":
+            step("Verify: should detect exact expired MCP session boundaries")
+            # @req: REQ-TOOLS-Clie-001
             step("Classify HTTP and JSON-RPC session expiration inputs")
             expect([
                 isMcpSessionExpiredError(404, -32001, ""),
@@ -42,6 +52,8 @@ describe "Claude full MCP client":
             ]).to_equal([true, true, false, false])
 
         it "should isolate authentication cache state per server":
+            step("Verify: should isolate authentication cache state per server")
+            # @req: REQ-TOOLS-Clie-001
             step("Set two server keys and update only one existing entry")
             val cache = McpAuthCacheData.new()
             setMcpAuthCacheEntry(cache, "alpha", true)
@@ -54,6 +66,8 @@ describe "Claude full MCP client":
             expect(isMcpAuthCached(cache, "gamma")).to_equal(false)
 
         it "should clear authentication cache state without retaining keys":
+            step("Verify: should clear authentication cache state without retaining keys")
+            # @req: REQ-TOOLS-Clie-001
             step("Clear all keyed authentication cache entries")
             val cache = McpAuthCacheData.new()
             setMcpAuthCacheEntry(cache, "alpha", true)
@@ -64,6 +78,8 @@ describe "Claude full MCP client":
             expect(isMcpAuthCached(cleared, "alpha")).to_equal(false)
 
         it "should report remote authentication failure details":
+            step("Verify: should report remote authentication failure details")
+            # @req: REQ-TOOLS-Clie-001
             step("Create a remote authentication failure for one server")
             val failure = handleRemoteAuthFailure("remote-a", 401)
             expect(failure.name).to_equal("McpAuthError")
@@ -72,6 +88,8 @@ describe "Claude full MCP client":
 
     describe "supporting connection owner behavior":
         it "should distinguish terminal and nonterminal connection failures":
+            step("Verify: should distinguish terminal and nonterminal connection failures")
+            # @req: REQ-TOOLS-Clie-001
             step("Classify terminal startup failures and retryable or unknown failures")
             val refused = classifyMcpConnectionError("connect ECONNREFUSED 127.0.0.1")
             val missing = classifyMcpConnectionError("command not found")
@@ -104,6 +122,8 @@ describe "Claude full MCP client":
             ]).to_equal([true, true, true, true, false, false])
 
         it "should decide connected expired and disconnected client states":
+            step("Verify: should decide connected expired and disconnected client states")
+            # @req: REQ-TOOLS-Clie-001
             step("Resolve the complete ensureConnectedClient state triad")
             val connected = ensureConnectedClient("connected", "srv")
             val expired = ensureConnectedClient("expired", "srv")
@@ -130,6 +150,8 @@ describe "Claude full MCP client":
             ]).to_equal(["srv", "srv", "srv"])
 
         it "should clear only the requested server connection cache":
+            step("Verify: should clear only the requested server connection cache")
+            # @req: REQ-TOOLS-Clie-001
             step("Clear one exact server prefix while preserving neighboring names")
             val remaining = clearServerCache(
                 ["alpha|http|one", "alpha-child|http|two", "beta|stdio|three"],
@@ -138,6 +160,8 @@ describe "Claude full MCP client":
             expect(remaining).to_equal(["alpha-child|http|two", "beta|stdio|three"])
 
         it "should compare stable server configuration identity":
+            step("Verify: should compare stable server configuration identity")
+            # @req: REQ-TOOLS-Clie-001
             step("Compare matching and changed stable configuration fields")
             val a = McpServerConfig.new("display-a", "http")
             a.url = "https://a"
@@ -154,15 +178,19 @@ describe "Claude full MCP client":
 
     describe "supporting batch and aggregation owner behavior":
         it "should preserve item order and exact batch bounds":
+            step("Verify: should preserve item order and exact batch bounds")
+            # @req: REQ-TOOLS-Clie-001
             step("Process five items through batches of two")
             val trace = processBatchedTWithTrace(["a", "b", "c", "d", "e"], 2)
             expect(trace.orderedItems).to_equal(["a", "b", "c", "d", "e"])
-            expect(trace.normalizedBatchSize).to_equal(2)
+            expect(trace.normalizedBatchSize).to_equal(2)  # oracle: value fixed by the spec contract
             expect(trace.batchStarts).to_equal([0, 2, 4])
             expect(trace.batchEnds).to_equal([2, 4, 5])
             expect(processBatchedT(["a", "b", "c"], 2)).to_equal(["a", "b", "c"])
 
         it "should bound empty oversized and nonpositive batches":
+            step("Verify: should bound empty oversized and nonpositive batches")
+            # @req: REQ-TOOLS-Clie-001
             step("Normalize nonpositive batch size and avoid empty batch records")
             val empty = processBatchedTWithTrace([], 3)
             val oversized = processBatchedTWithTrace(["a", "b"], 10)
@@ -171,11 +199,13 @@ describe "Claude full MCP client":
             expect(empty.batchEnds).to_equal([])
             expect(oversized.batchStarts).to_equal([0])
             expect(oversized.batchEnds).to_equal([2])
-            expect(nonpositive.normalizedBatchSize).to_equal(1)
+            expect(nonpositive.normalizedBatchSize).to_equal(1)  # oracle: value fixed by the spec contract
             expect(nonpositive.batchStarts).to_equal([0, 1])
             expect(nonpositive.batchEnds).to_equal([1, 2])
 
         it "should aggregate exact tool command and resource counts":
+            step("Verify: should aggregate exact tool command and resource counts")
+            # @req: REQ-TOOLS-Clie-001
             step("Aggregate distinct ordered MCP capability groups")
             val result = getMcpToolsCommandsAndResources(
                 ["read", "write"],
@@ -193,33 +223,41 @@ describe "Claude full MCP client":
             ]).to_equal([2, 1, 3, 6])
 
         it "should aggregate empty capability groups without phantom entries":
+            step("Verify: should aggregate empty capability groups without phantom entries")
+            # @req: REQ-TOOLS-Clie-001
             step("Aggregate three empty MCP capability groups")
             val result = getMcpToolsCommandsAndResources([], [], [])
             expect(result.tools).to_equal([])
             expect(result.commands).to_equal([])
             expect(result.resources).to_equal([])
-            expect(result.totalCount).to_equal(0)
+            expect(result.totalCount).to_equal(0)  # oracle: value fixed by the spec contract
 
     describe "supporting elicitation and result owner behavior":
         it "should retry URL elicitation exactly once":
+            step("Verify: should retry URL elicitation exactly once")
+            # @req: REQ-TOOLS-Clie-001
             step("Record an initial URL requirement and one successful retry")
             val result = callMCPToolWithUrlElicitationRetry("open-url", true)
             expect(result.toolName).to_equal("open-url")
-            expect(result.attemptCount).to_equal(2)
-            expect(result.retryCount).to_equal(1)
+            expect(result.attemptCount).to_equal(2)  # oracle: value fixed by the spec contract
+            expect(result.retryCount).to_equal(1)  # oracle: value fixed by the spec contract
             expect(result.attemptOutcomes).to_equal(["url-required", "ok"])
             expect(result.finalOutcome).to_equal("ok")
 
         it "should avoid URL elicitation retry after immediate success":
+            step("Verify: should avoid URL elicitation retry after immediate success")
+            # @req: REQ-TOOLS-Clie-001
             step("Record one successful tool attempt without elicitation")
             val result = callMCPToolWithUrlElicitationRetry("read", false)
             expect(result.toolName).to_equal("read")
-            expect(result.attemptCount).to_equal(1)
-            expect(result.retryCount).to_equal(0)
+            expect(result.attemptCount).to_equal(1)  # oracle: value fixed by the spec contract
+            expect(result.retryCount).to_equal(0)  # oracle: value fixed by the spec contract
             expect(result.attemptOutcomes).to_equal(["ok"])
             expect(result.finalOutcome).to_equal("ok")
 
         it "should transform MCP result content deterministically":
+            step("Verify: should transform MCP result content deterministically")
+            # @req: REQ-TOOLS-Clie-001
             step("Convert binary content and preserve image classification")
             val textBlock = MCPContentBlock.textBlock("hello")
             val imageBlock = MCPContentBlock.image("abc", "image/png")
@@ -231,11 +269,15 @@ describe "Claude full MCP client":
             expect(persistBlobToTextBlock(blob).text).to_equal("[binary blob saved]")
 
         it "should redact authorization headers without changing other headers":
+            step("Verify: should redact authorization headers without changing other headers")
+            # @req: REQ-TOOLS-Clie-001
             step("Redact authorization header values for logging")
             val headers = wsHeadersForLogging(["Authorization=Bearer secret", "x=a"])
             expect(headers).to_equal(["authorization=[REDACTED]", "x=a"])
 
         it "should preserve deterministic timeout and inclusion policies":
+            step("Verify: should preserve deterministic timeout and inclusion policies")
+            # @req: REQ-TOOLS-Clie-001
             step("Read defaults overrides and the per-server tool allow-list")
             val config = McpServerConfig.new("srv", "stdio")
             config.command = "node"

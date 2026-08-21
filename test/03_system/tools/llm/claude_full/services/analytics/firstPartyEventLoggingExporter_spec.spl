@@ -1,4 +1,8 @@
 """
+## Purpose and audience
+Purpose: should build default endpoint and transform only event scope logs
+Audience: compiler and tooling engineers who maintain this spec
+
 # Claude Full First Party Event Logging Exporter
 
 ## Overview
@@ -43,11 +47,15 @@ Regenerate the manual with:
 `bin/simple spipe-docgen test/03_system/tools/llm/claude_full/services/analytics/firstPartyEventLoggingExporter_spec.spl`
 """
 
+# @req: REQ-TOOLS-Firs-001
+
 use std.spec.*
 use app.llm_caret.claude_full.services.analytics.firstPartyEventLoggingExporter.*
 
 describe "Claude full FirstPartyEventLoggingExporter":
     it "should build default endpoint and transform only event scope logs":
+        step("Verify: should build default endpoint and transform only event scope logs")
+        # @req: REQ-TOOLS-Firs-001
         step("Create mixed scope logs")
         val exporter = firstPartyExporterDefault()
         val logs = [
@@ -57,11 +65,13 @@ describe "Claude full FirstPartyEventLoggingExporter":
         ]
         val events = exporter.transformLogsToEvents(logs)
         expect(exporter.endpoint).to_equal("https://api.anthropic.com/api/event_logging/batch")
-        expect(events.len()).to_equal(2)
+        expect(events.len()).to_equal(2)  # oracle: value fixed by the spec contract
         expect(events[0].eventType).to_equal("ClaudeCodeInternalEvent")
         expect(events[1].eventType).to_equal("GrowthbookExperimentEvent")
 
     it "should emit transform error when core metadata is missing":
+        step("Verify: should emit transform error when core metadata is missing")
+        # @req: REQ-TOOLS-Firs-001
         step("Transform a log without core metadata")
         val exporter = firstPartyExporterDefault()
         var log = FirstPartyReadableLogRecord.event("", "evt-2")
@@ -72,6 +82,8 @@ describe "Claude full FirstPartyEventLoggingExporter":
         expect(events[0].eventData).to_contain("transform_error")
 
     it "should strip proto metadata from additional metadata":
+        step("Verify: should strip proto metadata from additional metadata")
+        # @req: REQ-TOOLS-Firs-001
         step("Transform a log with hoisted proto keys")
         val exporter = firstPartyExporterDefault()
         var log = FirstPartyReadableLogRecord.event("startup", "evt-3")
@@ -83,6 +95,8 @@ describe "Claude full FirstPartyEventLoggingExporter":
         expect(events[0].eventData).to_contain("additional:safe=1,")
 
     it "should chunk posts and short circuit remaining batches after failure":
+        step("Verify: should chunk posts and short circuit remaining batches after failure")
+        # @req: REQ-TOOLS-Firs-001
         step("Export three events with max batch size two and a failing first post")
         val options = FirstPartyExporterOptions.new()
         options.maxBatchSize = 2
@@ -95,21 +109,25 @@ describe "Claude full FirstPartyEventLoggingExporter":
         ])
         expect(result.code).to_equal("FAILED")
         expect(result.error).to_contain("3 events")
-        expect(exporter.posts.len()).to_equal(1)
-        expect(exporter.getQueuedEventCount()).to_equal(3)
-        expect(exporter.scheduledDelays[0]).to_equal(500)
+        expect(exporter.posts.len()).to_equal(1)  # oracle: value fixed by the spec contract
+        expect(exporter.getQueuedEventCount()).to_equal(3)  # oracle: value fixed by the spec contract
+        expect(exporter.scheduledDelays[0]).to_equal(500)  # oracle: value fixed by the spec contract
 
     it "should retry authenticated 401 without auth":
+        step("Verify: should retry authenticated 401 without auth")
+        # @req: REQ-TOOLS-Firs-001
         step("Plan a 401 followed by a successful unauthenticated POST")
         val exporter = firstPartyExporterDefault()
         exporter.postPlan = [FirstPartyPostResult.fail(401, "401 Unauthorized"), FirstPartyPostResult.ok(200)]
         val result = exporter.export([FirstPartyReadableLogRecord.event("auth", "4")])
         expect(result.code).to_equal("SUCCESS")
-        expect(exporter.posts.len()).to_equal(2)
+        expect(exporter.posts.len()).to_equal(2)  # oracle: value fixed by the spec contract
         expect(exporter.posts[0]).to_contain("|auth")
         expect(exporter.posts[1]).to_contain("|noauth")
 
     it "should skip auth when trust is missing or oauth is expired":
+        step("Verify: should skip auth when trust is missing or oauth is expired")
+        # @req: REQ-TOOLS-Firs-001
         step("Compare trust and subscriber skip-auth gates")
         val trustOptions = FirstPartyExporterOptions.new()
         trustOptions.trusted = false
@@ -122,21 +140,25 @@ describe "Claude full FirstPartyEventLoggingExporter":
         expect(oauthExporter.shouldUseAuth()).to_equal(false)
 
     it "should drain queued failures after a healthy export":
+        step("Verify: should drain queued failures after a healthy export")
+        # @req: REQ-TOOLS-Firs-001
         step("Seed failed queue and make the new export succeed")
         val exporter = firstPartyExporterDefault()
         exporter.queued = [FirstPartyEventLoggingEvent.new("ClaudeCodeInternalEvent", "old", "old-1", "old")]
         val result = exporter.export([FirstPartyReadableLogRecord.event("new", "5")])
         expect(result.code).to_equal("SUCCESS")
-        expect(exporter.getQueuedEventCount()).to_equal(0)
-        expect(exporter.attempts).to_equal(0)
+        expect(exporter.getQueuedEventCount()).to_equal(0)  # oracle: value fixed by the spec contract
+        expect(exporter.attempts).to_equal(0)  # oracle: value fixed by the spec contract
 
     it "should drop queued events after max attempts and cancel on shutdown":
+        step("Verify: should drop queued events after max attempts and cancel on shutdown")
+        # @req: REQ-TOOLS-Firs-001
         step("Retry with max attempts already reached")
         val exporter = firstPartyExporterDefault()
         exporter.queued = [FirstPartyEventLoggingEvent.new("ClaudeCodeInternalEvent", "old", "old-2", "old")]
         exporter.attempts = 8
         exporter.retryFailedEvents()
-        expect(exporter.getQueuedEventCount()).to_equal(0)
+        expect(exporter.getQueuedEventCount()).to_equal(0)  # oracle: value fixed by the spec contract
         exporter.cancelBackoff = true
         exporter.shutdown()
         expect(exporter.shutdownFlag).to_equal(true)
@@ -145,6 +167,8 @@ describe "Claude full FirstPartyEventLoggingExporter":
         expect(result.code).to_equal("FAILED")
 
     it "should retry previous batch files and rewrite only failures":
+        step("Verify: should retry previous batch files and rewrite only failures")
+        # @req: REQ-TOOLS-Firs-001
         step("Load two previous synthetic files")
         val exporter = firstPartyExporterDefault()
         exporter.previousFiles = [
@@ -153,9 +177,11 @@ describe "Claude full FirstPartyEventLoggingExporter":
         ]
         exporter.postPlan = [FirstPartyPostResult.fail(503, "down")]
         exporter.retryPreviousBatches()
-        expect(exporter.previousFiles[0].len()).to_equal(1)
-        expect(exporter.deletedFiles).to_equal(1)
+        expect(exporter.previousFiles[0].len()).to_equal(1)  # oracle: value fixed by the spec contract
+        expect(exporter.deletedFiles).to_equal(1)  # oracle: value fixed by the spec contract
 
     it "should expose source-backed constants":
+        step("Verify: should expose source-backed constants")
+        # @req: REQ-TOOLS-Firs-001
         step("Pin modeled source surface")
-        expect(firstPartyExporterSourceLinesModeled()).to_equal(720)
+        expect(firstPartyExporterSourceLinesModeled()).to_equal(720)  # oracle: value fixed by the spec contract

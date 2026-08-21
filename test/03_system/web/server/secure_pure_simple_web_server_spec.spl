@@ -4,6 +4,14 @@
 # `.spipe/secure_pure_simple_servers/state.md`. These scenarios exercise the
 # production policy and the same parser/router/TLS owners used by the listener.
 
+"""
+## Purpose and audience
+Purpose: AC-1 Bind the production listener
+Audience: compiler and tooling engineers who maintain this spec
+"""
+
+# @req: REQ-WEB-SecuPureSimpWebServ-001
+
 use std.spec.*
 use std.nogc_sync_mut.http_server.parser.{headers_decision, parse_request_line, request_line_without_terminator, RUNTIME_READ_LINE_CAP}
 use std.nogc_sync_mut.http_server.router.{Router, path_is_safe}
@@ -22,16 +30,20 @@ fn expect_web_request_rejected(headers: [(text, text)], expected: text):
 
 describe "Secure Pure-Simple production web routing":
     it "AC-1 Bind the production listener":
+        step("Verify: AC-1 Bind the production listener")
+        # @req: REQ-WEB-SecuPureSimpWebServ-001
         val policy = secure_web_server_fixture()
         expect(secure_server_policy_error(policy)).to_equal("")
         expect(policy.plaintext_development).to_equal(false)
-        expect(policy.max_keep_alive_requests).to_equal(1)
+        expect(policy.max_keep_alive_requests).to_equal(1)  # oracle: value fixed by the spec contract
         expect(policy.max_connections).to_be_greater_than(0)
         var invalid = SecureServerPolicy.production()
         invalid.max_connections = 0
         expect(secure_server_policy_error(invalid)).to_contain("max_connections must be positive")
 
     it "AC-2 Reject an unsafe web request before dispatch":
+        step("Verify: AC-2 Reject an unsafe web request before dispatch")
+        # @req: REQ-WEB-SecuPureSimpWebServ-001
         expect(path_is_safe("/assets/%2e%2e/secrets.txt")).to_equal(false)
         expect_web_request_rejected([("Content-Length", "3"), ("Content-Length", "4")], "Duplicate Content-Length")
         expect_web_request_rejected([("Transfer-Encoding", "gzip")], "Transfer-Encoding is not supported")
@@ -39,9 +51,11 @@ describe "Secure Pure-Simple production web routing":
         expect(parse_request_line("GET / HTTP/1.1 extra").0).to_equal("")
         expect(parse_request_line(" GET / HTTP/1.1").0).to_equal("")
         expect(request_line_without_terminator("GET / HTTP/1.1\r\n")).to_equal("GET / HTTP/1.1")
-        expect(RUNTIME_READ_LINE_CAP).to_equal(4096)
+        expect(RUNTIME_READ_LINE_CAP).to_equal(4096)  # oracle: value fixed by the spec contract
 
     it "AC-3 refuses missing or invalid production TLS material":
+        step("Verify: AC-3 refuses missing or invalid production TLS material")
+        # @req: REQ-WEB-SecuPureSimpWebServ-001
         val missing = tls_server_config_new("", "", ["http/1.1"])
         expect(tls_server_config_error(missing)).to_contain("certificate material is missing")
         val invalid = tls_server_config_new("00", "11", ["http/1.1"])
@@ -55,6 +69,8 @@ describe "Secure Pure-Simple production web routing":
                 expect(dev.plaintext_development).to_equal(true)
 
     it "AC-1 attaches default security headers before writing":
+        step("Verify: AC-1 attaches default security headers before writing")
+        # @req: REQ-WEB-SecuPureSimpWebServ-001
         val secured = with_default_security_headers(HttpResponse.ok("ok"), false)
         val wire = serialize_response(secured)
         expect(wire).to_contain("X-Content-Type-Options: nosniff")
@@ -62,6 +78,8 @@ describe "Secure Pure-Simple production web routing":
         expect(wire.contains("Strict-Transport-Security")).to_equal(false)
 
     it "AC-3 closes a connection when TLS cannot be established":
+        step("Verify: AC-3 closes a connection when TLS cannot be established")
+        # @req: REQ-WEB-SecuPureSimpWebServ-001
         val stream = TcpStream.from_accepted_fd(-1)
         val config = tls_server_config_new("3000000000000000", "3000000000000000", ["http/1.1"])
         val conn = tls_server_accept(stream, config)
@@ -73,16 +91,20 @@ describe "Secure Pure-Simple production web routing":
         expect(conn.tcp.is_open()).to_equal(false)
 
     it "AC-3 returns a production startup failure instead of opening plaintext":
+        step("Verify: AC-3 returns a production startup failure instead of opening plaintext")
+        # @req: REQ-WEB-SecuPureSimpWebServ-001
         val server = SimpleHttpServer.new("127.0.0.1", 0, Router.new())
         val result = server.start()
         expect(result.error?).to_equal(true)
 
     it "AC-2 admits the configured connection boundary and rejects boundary plus one":
+        step("Verify: AC-2 admits the configured connection boundary and rejects boundary plus one")
+        # @req: REQ-WEB-SecuPureSimpWebServ-001
         val admission = ConnectionAdmission.new(2)
         expect(admission.try_acquire()).to_equal(true)
         expect(admission.try_acquire()).to_equal(true)
-        expect(admission.count()).to_equal(2)
+        expect(admission.count()).to_equal(2)  # oracle: value fixed by the spec contract
         expect(admission.try_acquire()).to_equal(false)
         admission.release()
-        expect(admission.count()).to_equal(1)
+        expect(admission.count()).to_equal(1)  # oracle: value fixed by the spec contract
         expect(admission.try_acquire()).to_equal(true)
