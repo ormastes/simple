@@ -20,6 +20,8 @@ const { spawn } = require('child_process');
 const path = require('path');
 const {
     commonInputEnvelope,
+    darwinHiddenInsetMode,
+    darwinTopInsetScript,
     renderEnvelopeMetadata,
     renderEnvelopeScript
 } = require('./bridge_envelopes.js');
@@ -141,7 +143,10 @@ function bitmapEvidence(bitmap) {
 }
 
 function attachElectronLiveSmokeScreenshot(win, envelope) {
-    const screenshotPath = process.env.SIMPLE_ELECTRON_SCREENSHOT_PATH || '';
+    // Default mirrors check-electron-live-smoke.shs: screenshot lives next to
+    // the proof as <proof>.png when no explicit path is provided.
+    const screenshotPath = process.env.SIMPLE_ELECTRON_SCREENSHOT_PATH
+        || (process.env.SIMPLE_ELECTRON_PROOF_PATH ? process.env.SIMPLE_ELECTRON_PROOF_PATH + '.png' : '');
     if (!screenshotPath || !win || !win.webContents) {
         return Promise.resolve(Object.assign({}, envelope, {
             screenshot_path: '',
@@ -153,6 +158,14 @@ function attachElectronLiveSmokeScreenshot(win, envelope) {
         const png = image.toPNG();
         const bitmap = image.toBitmap();
         const size = image.getSize();
+        // capturePage returns physical pixels; on HiDPI/Retina displays the
+        // bitmap is scaleFactor x the logical content size. Report the measured
+        // factor so validators can scale expectations instead of failing on
+        // dimensions (Linux/xvfb measures exactly 1).
+        const contentSize = typeof win.getContentSize === 'function' ? win.getContentSize() : [0, 0];
+        const scaleFactor = Array.isArray(contentSize) && contentSize[0] > 0
+            ? size.width / contentSize[0]
+            : 1;
         const pixels = bitmapEvidence(bitmap);
         fs.mkdirSync(path.dirname(resolvedScreenshotPath), { recursive: true });
         fs.writeFileSync(resolvedScreenshotPath, png);
@@ -160,6 +173,7 @@ function attachElectronLiveSmokeScreenshot(win, envelope) {
             screenshot_path: resolvedScreenshotPath,
             screenshot_width: size.width,
             screenshot_height: size.height,
+            screenshot_scale_factor: scaleFactor,
             screenshot_png_size_bytes: png.length,
             screenshot_bitmap_byte_count: bitmap.length,
             screenshot_pixel_checksum: pixels.checksum,
@@ -396,12 +410,23 @@ function electronLiveSmokeProofScript() {
 }
 
 function electronWmInitScript() {
+    // macOS `hiddenInset` keeps the native traffic-light cluster visible at the
+    // host window's top-left (~x 0..92, y 0..32 in viewport coords) while each
+    // WM window also renders its own lights in its titlebar — the two sets paint
+    // over each other when a WM window sits under the native cluster. Hide the
+    // WM-rendered lights for the overlapping window instead (native lights keep
+    // host close/min/max; WM lights keep working on all non-overlapping windows).
+    const hideWmTrafficOnNativeOverlap = darwinHiddenInsetMode();
     return `
+        var SIMPLE_ELECTRON_HIDE_WM_TRAFFIC_OVERLAP = ${hideWmTrafficOnNativeOverlap ? 'true' : 'false'};
         (function() {
             if (!document.getElementById('simple-electron-wm-style')) {
                 var style = document.createElement('style');
                 style.id = 'simple-electron-wm-style';
                 style.textContent = '#wm-desktop{position:fixed;inset:0;overflow:hidden;isolation:isolate}#wm-desktop .wm-window{position:absolute;display:flex;flex-direction:column;overflow:hidden}#wm-desktop .wm-body{flex:1;min-height:0;overflow:auto}#wm-desktop .wm-titlebar{display:flex;align-items:center;gap:8px;height:46px;padding:0 18px;background:linear-gradient(180deg,rgba(255,255,255,.12),rgba(255,255,255,.04));border-bottom:1px solid rgba(255,255,255,.12);user-select:none;cursor:grab}#wm-desktop .wm-titlebar:active{cursor:grabbing}#wm-desktop .wm-title{font:600 13px/1 var(--ui-font-label,system-ui,sans-serif);color:var(--ui-text,#e5e7eb);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}#wm-desktop .wm-titlebar-widgets{display:flex;align-items:center;gap:6px;margin-left:auto}#wm-desktop .wm-titlebar-widgets [data-simple-titlebar-widget]{min-height:24px}';
+                if (SIMPLE_ELECTRON_HIDE_WM_TRAFFIC_OVERLAP) {
+                    style.textContent += '#wm-desktop{top:28px}';
+                }
                 document.head.appendChild(style);
             }
             var desktop = document.getElementById('wm-desktop');
@@ -411,6 +436,7 @@ function electronWmInitScript() {
                 document.body.appendChild(desktop);
             }
             if (!window.__SIMPLE_ELECTRON_WM__) {
+                ${darwinTopInsetScript()}
                 window.__SIMPLE_ELECTRON_WM__ = {
                     windows: {},
                     _themeRootAttrs: '',
@@ -552,6 +578,7 @@ function electronWmInitScript() {
                         titlebar.addEventListener('pointerup', function(ev) {
                             try { titlebar.releasePointerCapture(ev.pointerId); } catch (_) {}
                             self.finishDrag(ev, ev.pointerId, false);
+                            self.syncTrafficOverlap(id);
                         });
                         titlebar.addEventListener('pointercancel', function(ev) {
                             self.cancelDrag(ev.pointerId, false);
@@ -565,7 +592,21 @@ function electronWmInitScript() {
                         });
                         titlebar.addEventListener('mouseup', function(ev) {
                             self.finishDrag(ev, 'mouse', true);
+                            self.syncTrafficOverlap(id);
                         });
+                    },
+                    syncTrafficOverlap: function(id) {
+                        var existing = this.windows[id];
+                        if (!existing || !existing.titlebar) return;
+                        var lights = existing.titlebar.querySelector('.wm-traffic-lights');
+                        if (!lights) return;
+                        if (!SIMPLE_ELECTRON_HIDE_WM_TRAFFIC_OVERLAP) {
+                            lights.style.display = '';
+                            return;
+                        }
+                        var r = existing.win.getBoundingClientRect();
+                        var overlapsNativeLights = r.left < 92 && r.top < 32 && (r.left + r.width) > 0 && (r.top + r.height) > 0;
+                        lights.style.display = overlapsNativeLights ? 'none' : '';
                     },
                     focus: function(id) {
                         var existing = this.windows[id];
@@ -730,6 +771,7 @@ function electronWmInitScript() {
                                 this.bindDrag(id, win, titlebar);
                                 this.bindWindowEvents(id, win, body);
                                 this._applyElectronWindowEnvelope(msg, body);
+                                this.syncTrafficOverlap(id);
                             } else {
                                 existing.body.innerHTML = msg.html || '';
                                 existing.title.textContent = msg.title || id;
