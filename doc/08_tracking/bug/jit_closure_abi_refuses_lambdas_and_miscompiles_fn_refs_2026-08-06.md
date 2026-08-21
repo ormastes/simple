@@ -323,3 +323,66 @@ sharing the same `target/` directory.**
 
 Related regression lock (interpreter lane only, unaffected by this change):
 `test/01_unit/language/jit_lambda_and_fn_ref_value_spec.spl`.
+
+## 2026-08-21 — the blocker is NOT the closure object; it is that a closure call has no result type
+
+A full implementation of the "tag-box lambda arguments and results" fix was
+built and measured against the tree-walking interpreter as the oracle. It is
+reverted; the JIT lambda guard stays. What the attempt established, with
+evidence, is that the ABI was the wrong layer to fix.
+
+**What was implemented and works.** Replacing the bare `rt_alloc` closure block
+with a real `rt_closure_new` object (`HeapObjectType::Closure` header,
+`capture_count`, capture slots written by `rt_closure_set_capture` and read in
+the outlined body's prologue by `rt_closure_get_capture`, bit-preserving
+`rt_value_int` transport per slot) compiles clean and RUNS CORRECTLY under the
+JIT: a capturing lambda (`val n = 5; val add = \x: x + n; add(37)`) printed
+`42`, matching the interpreter. Two mechanical prerequisites are worth
+recording because both cost a build cycle: `rt_closure_new`,
+`rt_closure_set_capture`, `rt_closure_get_capture` and `rt_closure_func_ptr`
+must be added to the codegen-roots list in `codegen/common_backend.rs` or the
+prologue panics with "no entry found for key" (they are emitted from the
+prologue, never from a MIR call node), and `capture_types` must be threaded
+through `Emitter::emit_closure_create` (`emitter_trait.rs`, `dispatch.rs`, four
+impls), which previously dropped it on the floor.
+
+**Why boxing arguments and results cannot be made correct here.** Neither side
+of the boundary has a usable static type:
+
+- The call site has none. `MirInst::IndirectCall` reports `return_type = ANY`
+  and `param_types = [ANY]` for EVERY untyped lambda, and the destination
+  vreg's MIR type is `ANY` too — measured with a trace on `\x: x > 1`,
+  `\x: x * 1.5` and `\s: s + "!"`, all three identical.
+- The callee's types are present but lie for floats: the returned vreg of
+  `\x: x * 1.5` carries static type `I64` while its machine type is `F64`.
+
+Four encodings were built and measured end to end (interpreter oracle in
+parentheses): fully type-directed tagging, bit-preserving `rt_value_int`
+transport with a single total `rt_value_unbox_int` decode at the call site, the
+old raw convention with only `bool` re-tagged, and raw plus an intraprocedural
+pass that propagates the lambda body's result type to the call's dest vreg
+through the `ClosureCreate -> Store -> Load -> IndirectCall` chain. Every one
+of them gets some cases right and others wrong, and the wrong set MOVES between
+encodings: with fully tagged results `\x: x * 10` printed `320` (the tagged
+word for 40) instead of `40` (40); with raw results `\x: x * 1.5` printed
+`4888657395510673408`, its f64 bit pattern, instead of `3.0` (3.0), and
+`\s: s + "!"` printed a pointer instead of `hi!` (hi!). `\x: x > 1` SIGSEGVs
+under BOTH raw and tagged: raw `true` is the word 1, which is `TAG_HEAP` with a
+NULL payload.
+
+That the failing set moves with the encoding is the proof that no single
+encoding is correct: different call sites in the same program want different
+representations, because the consumer's sink is chosen from the HIR type while
+the closure boundary carries `ANY`.
+
+**The actual fix, one layer up.** MIR lowering must propagate the lambda's
+inferred HIR result type into `MirInst::IndirectCall.return_type` (and its
+`param_types`), so the boundary is typed per call site the way a direct
+`MirInst::Call` already is via `function_return_types`. With that in place the
+ABI work above is a small, mechanical follow-up and the JIT guard can be
+removed. The codegen-only shortcut — deriving the type from `ClosureCreate`
+provenance inside `build_vreg_types` — was implemented and does NOT suffice:
+stamping the dest vreg does not change which print sink MIR already chose.
+
+Until then the guard is correct and must stay: a lambda under the JIT is a
+crash or a silently wrong number, not a slow-but-right fallback.
