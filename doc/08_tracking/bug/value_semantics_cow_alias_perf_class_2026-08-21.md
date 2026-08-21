@@ -161,10 +161,68 @@ Recorded in `.claude/rules/code-style.md`:
 > owner (`self.table.push(x)`, `self.a[i].b[k] = v`) and hoist `.keys()` above the
 > loop. Ratcheted by `sh scripts/check/check-cow-alias-hotpath.shs`.
 
+## Offender remediation, 2026-08-21 (79 -> 23)
+
+Every ROUNDTRIP and every mechanically-safe BYVALUE offender was rewritten to
+write through the owning field. Each rewrite is semantics-identical: the
+temporary was never read after the mutation, so collapsing the read-modify-write
+into a direct in-place write cannot be observed.
+
+| layer | file(s) | ROUNDTRIP | BYVALUE | how |
+|---|---|---:|---:|---|
+| 00.common | `di.spl` | 5 | — | `self.bindings[name] = factory`, `self.singletons[name] = v`, `self.all_bindings.push(...)` |
+| 25.traits | `trait_solver.spl` | 2 | — | write `self.traits` / `self.trait_methods` directly; only the small per-method owner list is touched |
+| 40.mono | `instantiation.spl` | — | 5 | `_template_remove_text(self.in_progress, k)` -> `me _drop_in_progress(k)` rebuilding into a fresh unaliased list |
+| 50.mir | `mir_lowering_types.spl` | 11 | — | `bind_local`, `remember_local_hir_type`, `copy_local_hir_type_metadata`, `mark_runtime_value_local` write the aligned local arrays in place |
+| 50.mir | `_MirLowering/module_lowering.spl` | 16 | — | enum registry dicts written directly; `reindex_enum_variant_owners` mutates `self.enum_variant_owners` |
+| 50.mir | `mir_lowering_stmts.spl`, `_MirLowering/function_lowering.spl` | 4 | — | `self.resource_owned_locals.push(local)` |
+| 70.backend | `svmg_lowering.spl` | 2 | — | `self.code.push(...)` / `self.code[i] = ...` in `emit_u8` and `patch_rel16` |
+| 70.backend | `linker/lazy_instantiator.spl` | — | 1 | `lazyinstantiator_drop_in_progress(self, sym)` |
+| 80.driver | `driver_types.spl` | 6 | — | storage-registry rows pushed through the owning fields |
+| 80.driver | `incremental.spl` | — | 2 | `add_edge(self.dependencies, ...)` helper deleted; `add_dependency` touches only the per-key list, never a copy of the whole edge dict |
+| 99.loader | `jit_instantiator.spl` | — | 2 | `me _drop_in_progress(name)` |
+| **total** | | **46** | **10** | |
+
+Guard after: `PASS — 1808 file(s) scanned, 23 offender(s) checked, 0 new, 0 stale`.
+
+`test/01_unit/compiler/driver/native_build_jit_ambiguity_source_spec.spl` pins
+the `in_progress` shapes as source text; its three affected assertions were
+updated to the new owner-method form and now also assert the old
+take-and-return helpers are gone. Its `in_progress: [text]` / no-`Set<text>`
+intent is unchanged, and all four of its `in_progress` examples pass.
+
+### What was deliberately NOT changed
+
+The 12 remaining KEYSINLOOP entries are not hoistable. In
+`20.hir/.../_Items/module_lowering.spl` (7 of them) each `.keys()` call is over a
+*different* dict — one per module surface per declaration kind — and each result
+is consumed once, so there is no repeated materialization of the same key set to
+lift out. Hoisting is not available because the tree has no dict-direct iteration
+idiom; `.keys()` is the only way to walk a dict. They stay baselined so the
+ratchet keeps blocking genuinely new ones. The 11 remaining BYVALUE entries
+(`00.common/effects.spl`, `10.frontend/treesitter/outline.spl`,
+`60.mir_opt/**`, `70.backend/linker/link.spl`,
+`99.loader/loader/module_loader.spl`) are on cold link/unload/outline paths;
+several are additionally pinned as source text by the spec above and want their
+own reviewed change.
+
+### Counter measurement: attempted, not obtained
+
+`SIMPLE_PERF_COUNTERS=1` on a 3-module fixture through
+`src/app/cli/bootstrap_main.spl compile` reports **1099 clones / 1348 elements,
+byte-identical before and after** — because that pipeline aborts inside HIR
+(`error[E1002]: function 'module_surface_name_position' not found`, an unrelated
+in-flight change in the shared working tree) and never reaches the MIR, driver
+or DI code that was edited. The measurement is therefore non-discriminating
+rather than a null result, and no clone-reduction figure is claimed here. It
+should be re-run once the HIR path builds again.
+
 ## Open
 
-* The 79 baselined `.spl` offenders are not yet fixed; MIR lowering (31) is the
-  largest cluster and the next phase stage1 will reach.
+* 23 baselined `.spl` offenders remain (12 KEYSINLOOP, 11 BYVALUE); see
+  "What was deliberately NOT changed" above for why each is held.
+* A discriminating runtime counter delta for the 56 fixed offenders has not been
+  measured — the compile pipeline that reaches them is currently broken in HIR.
 * Per-Simple-function attribution in `perf_counters.rs` (top-30 by elements
   cloned) is not landed — the mechanism tests proved the specific defects without
   it, but the census still wants it.
