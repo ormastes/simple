@@ -168,6 +168,15 @@ impl<'a> Parser<'a> {
             if self.is_inline_statement() {
                 // Parse inline statement like match_arm does
                 let stmt = self.parse_item()?;
+                // bug: parser_trailing_operator_line_continuation_2026-07-13.
+                // A condition that used a trailing-operator line continuation
+                // left a pseudo-INDENT whose compensating DEDENT is still in
+                // the stream. `parse_inline_or_block` reconciles it for every
+                // OTHER inline body (elif/else/match-arm), but this `if` arm
+                // parses its body directly and skipped that step, so the
+                // stray DEDENT closed the enclosing block early and the next
+                // statement was read as "expected expression, found Dedent".
+                self.reconcile_inline_body_deferred_dedents();
                 let then_block = Block {
                     span: self.previous.span,
                     statements: vec![stmt],
@@ -256,6 +265,10 @@ impl<'a> Parser<'a> {
             // not an expression, so such an `if` can only be statement-form
             // and is finished by a separate path below.
             let then_node = self.parse_expression_or_assignment()?;
+            // Same reconciliation as the inline-statement arm above: an
+            // expression-bodied `if cond_continued: expr` carries the same
+            // pending pseudo-dedent.
+            self.reconcile_inline_body_deferred_dedents();
             let then_expr = match then_node {
                 Node::Expression(expr) => expr,
                 stmt => {

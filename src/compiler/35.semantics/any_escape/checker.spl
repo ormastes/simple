@@ -90,35 +90,21 @@ fn any_type_is_any(t: HirType) -> bool:
     so they are `Any` for the purposes of §8.1. A container OF `Any` is a
     different question -- see `any_type_mentions_any`.
 
-    `Optional<Any>` is deliberately NOT `Any` here. The frontend only carries
-    a payload identity for `i64?`/`f64?`/`text?`/`bool?` and for `T?` where
-    `T` is declared in the SAME file; every other `T?` (in practice: every
-    imported struct/class/enum, e.g. `SignedVerifiedReleaseBundleDecisionV1?`)
-    collapses to a bare `Option` and is lowered as `Optional(Any)`
-    (`parser.spl` postfix-`?` branch, `hir_lowering/types.spl` argless
-    `Option`). Treating that placeholder as an erased value reported a clean
-    typed parameter, every use of it, and every arm binding extracted from it
-    as E-MC-ANY-001/002 (8 false positives in `formal_delivery_gates.spl`,
-    2026-08-21). Until the parser threads the payload name through, an
-    `Optional` inner is only `Any` when it is itself a wrapped `Any`
-    (`Optional(Ref(Any))`), never a bare one -- a written `Any?` is therefore
-    a known blind spot, recorded in
-    doc/08_tracking/bug/any_escape_census_undercounts_2026-08-21.md.
+    `Optional<Any>` IS `Any`: a written `Any?` holds an erased value exactly as
+    a bare `Any` does. This used to be excluded as a workaround, because the
+    parser collapsed every IMPORTED `T?` to a bare `Option` that HIR lowered as
+    `Optional(Any)` (8 false positives in `formal_delivery_gates.spl`,
+    2026-08-21). That was fixed at the source -- the postfix-`?` branch in
+    `parser.spl` now registers the payload name, so `T?` reaches HIR as
+    `Optional(Named(T))` regardless of where `T` is declared -- and the
+    exclusion, whose cost was that a written `Any?` was invisible, is gone.
     """
     match t.kind:
         case Any: true
-        case Optional(inner): any_optional_inner_is_any(inner)
+        case Optional(inner): any_type_is_any(inner)
         case Ref(inner, mutable): any_type_is_any(inner)
         case Isolated(inner): any_type_is_any(inner)
         case _: false
-
-fn any_optional_inner_is_any(inner: HirType) -> bool:
-    """The inner type of an `Optional`: a bare `Any` is the parser's erased
-    `T?` placeholder (see `any_type_is_any`), so only a wrapped or nested
-    erased inner counts."""
-    match inner.kind:
-        case Any: false
-        case _: any_type_is_any(inner)
 
 fn any_type_mentions_any(t: HirType) -> bool:
     """True when `t` is `Any` or a container/aggregate holding `Any`.

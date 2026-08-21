@@ -51,5 +51,6 @@ mod recovery_bound_tests;
 mod lt_index_hint_leak_tests;
 mod multiline_shapes_test;
 mod rejoined_continuation_test;
+mod trailing_operator_single_line_body_test;
 mod try_probe_test;
 mod pipe_lambda_typed_param_test;

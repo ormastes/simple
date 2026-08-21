@@ -247,3 +247,46 @@ invocation; rc 124 → `ERROR — nothing was checked (module timed out after Ns
 <file>; …)` exit 2. Selftest fixture substitutes a sleeping stand-in driver
 (`CENSUS_BIN`) under a 1s budget and requires 124; no `timeout` binary is a
 selftest failure, never a pass. Baseline file untouched.
+
+## 2026-08-21 (later still) — fixed at the SOURCE; the checker workaround is reverted
+
+The previous section's triage was right about the mechanism and the workaround
+it landed (excluding `Optional(<bare Any>)` in the checker) traded one blind
+spot for another: a WRITTEN `Any?` became invisible. Both are now resolved.
+
+**Root cause:** `src/compiler/10.frontend/core/parser.spl`, the postfix-`?`
+branch of `parser_parse_type_impl` (~:797-840). It kept the payload identity of
+`T?` only when `named_type_find(T)` succeeded — i.e. only when `T` is declared
+in the SAME file — so every IMPORTED `T?` fell through to bare `TYPE_OPTION`.
+`src/compiler/20.hir/hir_lowering/types.spl:519` lowers an argless `Option` as
+`Optional(Any)`, so every imported `SomeStruct?` parameter/field was an `Any`
+inside HIR.
+
+**Fix (parser):** the postfix-`?` branch now REGISTERS the name when the lookup
+misses — `named_type_register(type_name, [], [])`, idempotent and exactly what
+the non-optional tail of the same function already does for a sibling/forward
+name — and wraps it with `option_generic_type_register`. `T?` therefore reaches
+HIR as `Optional(Named(T))` regardless of where `T` is declared. Fixed-width
+integer spellings (`u7?`, …) are excluded so their existing lane is untouched.
+
+**Fix (checker):** `src/compiler/35.semantics/any_escape/checker.spl` —
+`any_optional_inner_is_any` is deleted and `any_type_is_any` is back to
+`case Optional(inner): any_type_is_any(inner)`. A written `Any?` is an erased
+value again.
+
+**Files changed**
+- `src/compiler/10.frontend/core/parser.spl`
+- `src/compiler/35.semantics/any_escape/checker.spl`
+- `test/fixtures/any_escape/written_any_optional.spl` (new)
+- `test/01_unit/compiler/semantics/any_escape/any_escape_spec.spl` (+ mirror
+  under `test/unit/...`)
+
+**Spec results.** `any_escape_spec.spl` 7/7 before → **8/8** after, with the new
+scenario proving both halves of the contract: an imported `T?` parameter is NOT
+an `Any` site (`imported_optional_param`, silent) and a written `Any?` IS
+(`written_any_optional`, one E-MC-ANY-001 origin + one E-MC-ANY-002 escape).
+The new scenario is failing-pre-fix by construction — the reverted workaround
+excluded exactly the `Optional(<bare Any>)` shape it asserts on.
+Option-related neighbours all green and unchanged: `enum_payload_capture` 7/7,
+`dict_get_option_match` 2/2, `result_unwrap_payload_type_preserved` 3/3,
+`qualified_result_option_no_import` 6/6.

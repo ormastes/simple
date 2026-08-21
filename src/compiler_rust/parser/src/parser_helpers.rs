@@ -167,14 +167,27 @@ impl<'a> Parser<'a> {
             // so a pending pseudo-dedent from a preceding condition's
             // multi-line continuation can only ever show up now (there is no
             // "deep vs. shallow" ambiguity for the inline-body shape).
-            if self.deferred_dedent_count > 0 {
-                let deferred = self.deferred_dedent_count;
-                self.deferred_dedent_count = 0;
-                self.consume_dedents_for_method_chain(deferred);
-            }
+            self.reconcile_inline_body_deferred_dedents();
             Ok(block)
         } else {
             self.parse_condition_block()
+        }
+    }
+
+    /// Reconcile a pseudo-DEDENT left over from a condition's trailing-operator
+    /// line continuation, for a body that was parsed INLINE (no newline after
+    /// the colon). Inline bodies never introduce a competing Indent of their
+    /// own, so the compensating DEDENT can only show up right after the body.
+    ///
+    /// Extracted from `parse_inline_or_block` so the `if` statement's two
+    /// direct inline-body paths — which do not route through it — get the
+    /// identical treatment. See doc/08_tracking/bug/
+    /// parser_trailing_operator_line_continuation_2026-07-13.md.
+    pub(crate) fn reconcile_inline_body_deferred_dedents(&mut self) {
+        if self.deferred_dedent_count > 0 {
+            let deferred = self.deferred_dedent_count;
+            self.deferred_dedent_count = 0;
+            self.consume_dedents_for_method_chain(deferred);
         }
     }
 

@@ -2,9 +2,9 @@
 
 **ID:** parser_trailing_operator_line_continuation_2026-07-13
 **Filed:** 2026-07-13
-**Status:** OPEN — narrowed 2026-08-09/10, see "2026-08-09 re-triage" below: the
-multi-line-body form of this pattern is already fine; only a single-line body on
-the continuation line still reproduces.
+**Status:** RESOLVED 2026-08-21 — see "2026-08-21 fix" at the end. The
+single-line-body form now parses in the Rust seed; the earlier narrowing
+(multi-line body already fine) is retained below for history.
 **Severity:** P2 — silently-confusing parse failure on a plausible/idiomatic form
 **Component:** compiler frontend / parser (both the deployed self-hosted `bin/simple`
 and the fresh Rust seed reject the same input)
@@ -134,3 +134,46 @@ the any-escape census lowers that file with 0 unanalyzable — so this is
 seed-parser-only (`src/compiler_rust/parser`, owned by another lane; not
 edited here). It is unrelated to the any-escape census false positives
 (see `any_escape_census_undercounts_2026-08-21.md`, same day).
+
+
+## 2026-08-21 fix — RESOLVED (Rust seed parser)
+
+**Root cause:** `src/compiler_rust/parser/src/stmt_parsing/control_flow.rs`,
+`parse_if`. A condition that used a trailing-operator line continuation leaves a
+pending pseudo-INDENT whose compensating DEDENT is still in the token stream and
+counted in `deferred_dedent_count`. Every OTHER inline body in the grammar
+(`elif`, `else`, match arms) routes through
+`Parser::parse_inline_or_block` (`parser_helpers.rs:159`), which reconciles that
+pending dedent after parsing the inline statement. `parse_if`'s two INLINE body
+paths do not route through it — the inline-statement arm calls `parse_item()`
+directly (`control_flow.rs:167`) and the inline-expression arm calls
+`parse_expression_or_assignment()` directly (`control_flow.rs:259`) — so the
+stray DEDENT survived, closed the enclosing block early, and the next statement
+was reported as `expected expression, found Dedent`. That also explains why
+`while` was unaffected and why only `if` reproduced.
+
+**Fix:** extracted the reconciliation out of `parse_inline_or_block` into
+`Parser::reconcile_inline_body_deferred_dedents`
+(`src/compiler_rust/parser/src/parser_helpers.rs`) and called it from both of
+`parse_if`'s inline body paths. `parse_inline_or_block` now calls the same
+helper, so there is one implementation, not two.
+
+**Files changed**
+- `src/compiler_rust/parser/src/parser_helpers.rs` (helper extracted)
+- `src/compiler_rust/parser/src/stmt_parsing/control_flow.rs` (two call sites)
+- `src/compiler_rust/parser/src/trailing_operator_single_line_body_test.rs` (new)
+- `src/compiler_rust/parser/src/lib.rs` (test module registration)
+
+**Verification** (`CARGO_TARGET_DIR=/mnt/data/.cargo-target-parser cargo test -p simple-parser`):
+the new 11-variant matrix was **7 failed / 4 passed before the fix** and is
+**11 passed / 0 failed after**. The matrix covers `or`, `and`, `not`, a 3-way
+chain, an int `>` operand, a shallower-than-body continuation column, `while`
+(already passing — pinned so the fix is not `if`-only), a single-line body as
+the last statement of the function, plus three controls the record says already
+passed (multi-line body, bare trailing-operator statement, uncontinued
+single-line body). Whole crate: **299 + 1 lib/integration suites all green,
+0 failures**.
+
+The live instances at
+`src/compiler/00.common/assurance/formal_delivery_gates.spl:147-149,205-207` are
+no longer a parse failure for the seed.

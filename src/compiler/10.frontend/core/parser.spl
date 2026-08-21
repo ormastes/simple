@@ -68,7 +68,7 @@ use compiler.frontend.core.parser_expr.{parse_addition, parse_multiplication, pa
 use compiler.frontend.core.parser_expr.{parse_call_arg, parse_postfix_on, parse_binary_from, parse_int_text}
 use compiler.frontend.core.parser_stmts.{parse_block, parse_statement}
 use compiler.frontend.core.parser_stmts.{parse_val_decl_stmt, parse_lazy_val_decl_stmt, parse_var_decl_stmt}
-use compiler.frontend.core.parser_stmts.{parse_if_stmt, parse_for_stmt, parse_while_stmt, parse_match_stmt}
+use compiler.frontend.core.parser_stmts.{parse_if_stmt, parse_for_stmt, parse_while_stmt}
 use compiler.frontend.core.parser_stmts.{parse_receive_stmt, parse_bind_stmt}
 use compiler.frontend.core.parser_stmts.{parse_if_expr, parse_for_expr, parse_while_expr}
 use compiler.core.parser_decls.{parse_fn_decl, parse_extern_fn_decl, parse_struct_decl, parse_enum_decl}
@@ -814,7 +814,16 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
                 # class identity via the inner-type registry rather than
                 # collapsing to bare TYPE_OPTION (same rationale as the
                 # `Option<T>` generic branch above).
-                val postfix_nid = named_type_find(type_name)
+                # bug: any_escape_census_undercounts_2026-08-21 -- an IMPORTED
+                # `T?` is absent from this file's named-type registry, so
+                # named_type_find failed and the annotation collapsed to bare
+                # TYPE_OPTION, which HIR lowers as Optional(Any). Register the
+                # name (idempotent, exactly like the non-optional tail of this
+                # function) so `T?` keeps its payload identity as
+                # Optional(Named(T)) regardless of where T is declared.
+                var postfix_nid = named_type_find(type_name)
+                if postfix_nid < 0 and type_name != "" and primitive_integer_bit_width_from_name(type_name) == 0:
+                    postfix_nid = named_type_register(type_name, [], [])
                 if postfix_nid >= 0:
                     val postfix_opt_tag = option_generic_type_register(TYPE_NAMED_BASE + postfix_nid)
                     if postfix_opt_tag >= 0:
@@ -1180,7 +1189,7 @@ export parse_call_arg, parse_postfix_on, parse_binary_from, parse_int_text
 # Re-export from parser_stmts
 export parse_block, parse_statement
 export parse_val_decl_stmt, parse_lazy_val_decl_stmt, parse_var_decl_stmt
-export parse_if_stmt, parse_for_stmt, parse_while_stmt, parse_match_stmt
+export parse_if_stmt, parse_for_stmt, parse_while_stmt
 export parse_receive_stmt, parse_bind_stmt
 export parse_if_expr, parse_for_expr, parse_while_expr
 
