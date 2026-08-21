@@ -151,8 +151,8 @@ fn normalize_rsa_public_key(pubkey: &[u8]) -> Option<Vec<u8>> {
 
 fn checked_sign_value(result: Result<Value, i64>) -> Value {
     match result {
-        Ok(payload) => Value::Array(vec![Value::Int(0), payload]),
-        Err(status) => Value::Array(vec![Value::Int(status), Value::Nil]),
+        Ok(payload) => Value::Array(vec![Value::Int(0), payload].into()),
+        Err(status) => Value::Array(vec![Value::Int(status), Value::Nil].into()),
     }
 }
 
