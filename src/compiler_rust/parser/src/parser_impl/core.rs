@@ -460,6 +460,13 @@ impl<'a> Parser<'a> {
                 | TokenKind::Mod
                 | TokenKind::Examples
                 | TokenKind::AndThen
+                // A proof statement is `assume <cond>` / `admit <cond>`; it can
+                // never be followed by `=` or `.`, so those shapes mean the
+                // name is being used as an lvalue (`admit = admit * 10`).
+                // Bug: doc/08_tracking/bug/
+                // admit_is_a_hard_keyword_unusable_as_identifier_2026-08-21.md
+                | TokenKind::Assume
+                | TokenKind::Admit
         ) && (self.peek_is(&TokenKind::Assign) || self.peek_is(&TokenKind::Dot)))
             || (matches!(&self.current.kind, TokenKind::Use) && self.peek_is(&TokenKind::Assign));
         // `common` keyword: only treat as `common use` when followed by `use`.
@@ -780,6 +787,9 @@ impl<'a> Parser<'a> {
             TokenKind::Defer => self.parse_defer(),
             TokenKind::Errdefer => self.parse_errdefer(),
             TokenKind::Assert => self.parse_assert(),
+            TokenKind::Assume | TokenKind::Admit if soft_kw_stmt_as_ident => {
+                self.parse_expression_or_assignment()
+            }
             TokenKind::Assume => self.parse_assume(),
             TokenKind::Admit => self.parse_admit(),
             // "calc" is parsed contextually - not a reserved keyword

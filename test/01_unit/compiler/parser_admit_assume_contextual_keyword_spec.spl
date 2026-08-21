@@ -1,0 +1,79 @@
+# @cover src/compiler_rust/parser/src/parser_helpers.rs 0%
+# @req REQ-PARSER-CONTEXTUAL-ADMIT-001
+"""
+# `admit` and `assume` as ordinary identifiers
+
+**Category:** Language / Parser
+**Status:** Regression guard
+
+## Purpose and Audience
+
+`admit` and `assume` are proof statements: they only ever appear in STATEMENT
+position, followed by a condition. They are not in the reserved-keyword list in
+`.claude/rules/language.md`, so a user naturally reaches for `admit` as a plain
+name -- a loader that admits a module, a verifier that admits a seal.
+
+Until 2026-08-21 the lexer already handed back an identifier when `!` or `(`
+followed (so `fn admit(x)` and `admit(1)` happened to work), but every OTHER
+identifier position still saw the keyword token and died with
+`Unexpected token: expected identifier, found Admit`: an import list
+(`use m.lib.{admit}`), a variable declaration, a parameter or field name, or a
+bare read in an expression. That is the same defect class as `move`,
+`examples`, and `and_then` -- a reserved token rejected at the USE site.
+
+The audience is anyone touching identifier admission in the Rust seed parser:
+`expect_identifier` / `expect_path_segment` (`parser/src/parser_helpers.rs`)
+and the primary-expression dispatch
+(`parser/src/expressions/primary/identifiers.rs`).
+
+## Scope and Preconditions
+
+Requires a seed built at or after 2026-08-21; an older binary reports
+`parse: Unexpected token: expected identifier, found Admit`.
+
+This spec deliberately does NOT assert that the proof statements stopped
+working -- the last scenario proves the keyword meaning survives in statement
+position, which is the only place it was ever meant to apply.
+
+See doc/08_tracking/bug/admit_is_a_hard_keyword_unusable_as_identifier_2026-08-21.md
+"""
+
+use std.spec
+
+pub fn admit(seal: i64) -> i64:
+    seal + 1
+
+pub fn assume(claim: i64) -> i64:
+    claim * 2
+
+describe "admit and assume as ordinary identifiers":
+
+    it "declares and calls module-level functions named admit and assume":
+        step("Call a module-level `pub fn admit(...)` -- the D4 loader-admission shape")
+        expect(admit(41)).to_equal(42)
+
+        step("Same for `assume`")
+        expect(assume(21)).to_equal(42)
+
+    it "binds local variables named admit and assume":
+        step("Declare them -- the declaration name goes through expect_identifier")
+        val admit = 5
+        val assume = 7
+
+        step("Read them in expression position -- the position that used to fail")
+        expect(admit + 1).to_equal(6)
+        expect(2 + assume).to_equal(9)
+        expect(admit * assume).to_equal(35)
+
+    it "passes them as arguments and reassigns them":
+        var admit = 1
+        admit = admit * 10
+        expect(admit).to_equal(10)
+
+        step("Pass a variable named admit to a function")
+        expect(str(admit)).to_equal("10")
+
+    it "still runs `assume` as a proof statement":
+        step("Statement position keeps the keyword meaning; this must not error")
+        assume true
+        expect(1 + 1).to_equal(2)

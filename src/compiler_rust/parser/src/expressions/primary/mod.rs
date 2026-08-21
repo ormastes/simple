@@ -157,6 +157,11 @@ impl<'a> Parser<'a> {
             // `move \x: ...` is a move-closure; a bare `move` is an identifier.
             TokenKind::Move if self.peek_is(&TokenKind::Backslash) => self.parse_primary_lambda(),
             TokenKind::Move => self.parse_primary_identifier(),
+            // `admit`/`assume` are STATEMENT keywords, dispatched before any
+            // expression is parsed, so reaching primary-expression position
+            // means the source used them as a name. Bug: doc/08_tracking/bug/
+            // admit_is_a_hard_keyword_unusable_as_identifier_2026-08-21.md
+            TokenKind::Admit | TokenKind::Assume => self.parse_primary_identifier(),
             // fn(): lambda syntax (alias for \:) - only in expression context
             // Check if fn is IMMEDIATELY followed by ( (no identifier) to distinguish from function definitions
             // fn(): ... => lambda

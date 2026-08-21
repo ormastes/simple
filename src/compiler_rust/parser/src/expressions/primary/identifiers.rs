@@ -151,6 +151,14 @@ impl<'a> Parser<'a> {
             // Allow 'move' and 'spawn' as identifiers (e.g., fn move(...) in MIR, spawn() calls)
             TokenKind::Move => self.parse_keyword_identifier("move"),
             TokenKind::Spawn => self.parse_keyword_identifier("spawn"),
+            // Allow the proof-statement keywords as identifiers. `admit`/
+            // `assume` are dispatched as statements before any expression is
+            // parsed (parser_impl/core.rs), so reaching primary-expression
+            // position means the source used them as a NAME -- `admit + 1`,
+            // `xs.map(admit)`. Bug: doc/08_tracking/bug/
+            // admit_is_a_hard_keyword_unusable_as_identifier_2026-08-21.md
+            TokenKind::Admit => self.parse_keyword_identifier("admit"),
+            TokenKind::Assume => self.parse_keyword_identifier("assume"),
             // 'me' is the mutable-self keyword; treat it like 'self' in expression context
             // so that `me.field` and `me.method()` work.
             TokenKind::Me => {

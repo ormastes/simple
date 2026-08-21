@@ -980,6 +980,18 @@ impl<'a> Parser<'a> {
             // Allow 'unit' to be used as identifier (field names like 'unit: Type')
             // The 'unit' keyword is only used for unit type context
             TokenKind::Unit => "unit".to_string(),
+            // Allow the proof-statement keywords to be used as identifiers.
+            // `assume`/`admit` are STATEMENT keywords only: the lexer already
+            // yields an identifier when `!` or `(` follows (so `admit(x)` and
+            // `fn admit(...)` were always fine), but every other identifier
+            // position -- `use m.{admit}`, `export admit`, an alias, a field
+            // name -- still saw the keyword token and failed with
+            // "expected identifier, found Admit". They can never legitimately
+            // START an expression, so accepting them here is safe.
+            // Bug: doc/08_tracking/bug/
+            // admit_is_a_hard_keyword_unusable_as_identifier_2026-08-21.md
+            TokenKind::Admit => "admit".to_string(),
+            TokenKind::Assume => "assume".to_string(),
             // Allow contextual keywords as identifiers
             TokenKind::Actor => "actor".to_string(),
             TokenKind::Kernel => "kernel".to_string(),
@@ -1120,6 +1132,13 @@ impl<'a> Parser<'a> {
 
         // Allow certain keywords as path segments
         let name = match &self.current.kind {
+            // Proof-statement keywords: statement-position only, so they are
+            // ordinary names in a module path or an import list
+            // (`use m.lib.{admit}`). See expect_identifier() above and
+            // doc/08_tracking/bug/
+            // admit_is_a_hard_keyword_unusable_as_identifier_2026-08-21.md
+            TokenKind::Admit => "admit",
+            TokenKind::Assume => "assume",
             TokenKind::Unit => "unit",
             TokenKind::Type => "type",
             TokenKind::As => "as",

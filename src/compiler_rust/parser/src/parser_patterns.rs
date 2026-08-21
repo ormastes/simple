@@ -650,6 +650,11 @@ impl<'a> Parser<'a> {
             TokenKind::Class => self.parse_keyword_as_pattern("Class"),
             TokenKind::Fn => self.parse_keyword_as_pattern("Fn"),
             TokenKind::Trait => self.parse_keyword_as_pattern("Trait"),
+            // Proof-statement keywords usable as binding names (`val admit = ...`).
+            // They are statement keywords only. Bug: doc/08_tracking/bug/
+            // admit_is_a_hard_keyword_unusable_as_identifier_2026-08-21.md
+            TokenKind::Admit => self.parse_keyword_as_pattern("admit"),
+            TokenKind::Assume => self.parse_keyword_as_pattern("assume"),
             // Additional keywords that appear as enum variant names
             TokenKind::Self_ => self.parse_keyword_as_pattern("Self"),
             TokenKind::Export => self.parse_keyword_as_pattern("Export"),
