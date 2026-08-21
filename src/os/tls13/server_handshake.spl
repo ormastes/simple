@@ -36,7 +36,7 @@ use os.tls13.server_types.{
 }
 use os.tls13.server_builders.{
     build_server_hello, build_encrypted_extensions_server_side,
-    build_certificate, build_certificate_verify, build_server_finished
+    build_certificate, build_certificate_verify_checked, build_server_finished
 }
 use os.crypto.curve25519.{x25519, x25519_base}
 use os.crypto.ecdh_p256.{p256_ecdh_shared_x, p256_keypair_pub}
@@ -540,13 +540,14 @@ fn prepare_server_handshake_from_client_hello_record_with_hybrid(
     t = transcript_add(t, cert)
 
     val cv_hash = transcript_hash(t)
-    val cv = build_certificate_verify(
-        cv_hash,
-        server_config.server_pkcs8,
-        server_config.server_sig_scheme
-    )
-    if cv.len() == 0u64:
-        return Tls13ServerHandshakeResult.Failed("certificate_verify_failed")
+    val cv = match build_certificate_verify_checked(
+        cv_hash, server_config.server_pkcs8, server_config.server_sig_scheme
+    ):
+        case Ok(message): message
+        case Err(error):
+            return Tls13ServerHandshakeResult.Failed(
+                "certificate_verify_failed: {error}"
+            )
     t = transcript_add(t, cv)
 
     val fin_hash = transcript_hash(t)

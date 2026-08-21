@@ -191,3 +191,19 @@ Removing the four false declarations reduces the global missing-both inventory
 to 13,545. Valid verification performs fixed-size checks followed by the same
 single Ed25519 operation; no hashing, lookup, allocation, or fallback crypto
 was added to the successful checked-wrapper path.
+
+TLS server CertificateVerify also bypassed the checked wrappers: it called the
+raw Ed25519 extern directly, retried when an empty signature was returned, and
+used empty handshake bytes as the final error signal. The live server handshake
+now calls `build_certificate_verify_checked`, which uses Result-bearing
+Ed25519/ECDSA wrappers once and propagates the diagnostic into the handshake
+failure. A compatibility builder remains for existing byte-structure tests but
+is forbidden on the live handshake path by `crypto-sffi-checked-callers.shs`.
+This removes a redundant cryptographic retry from failure cases and adds no
+work to successful signing.
+
+The compact `Result<[u8], text>` propagation form exposed a compiler array-cast
+bug during the TLS spec. The explicit-match equivalent is used and documented
+in `result_propagation_array_cast_tls_checked_signing_2026-08-21.md`; the spec
+reached its three-run cap before the workaround, so only file-check and static
+checked-call evidence are claimed for the final source in this session.

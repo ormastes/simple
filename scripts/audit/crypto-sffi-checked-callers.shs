@@ -1,0 +1,35 @@
+#!/bin/sh
+set -eu
+
+# Security-sensitive consumers must use Result-bearing crypto wrappers. Legacy
+# convenience APIs may remain for compatibility tests, but not on admission or
+# handshake paths.
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+builder="$root/src/os/tls13/server_builders.spl"
+handshake="$root/src/os/tls13/server_handshake.spl"
+failed=0
+
+if grep -n -E 'extern fn rt_.*(sign|verify)|rt_ed25519_sign\(' "$builder"; then
+    echo "TLS CertificateVerify builder calls raw crypto SFFI" >&2
+    failed=1
+fi
+if ! grep -q 'ed25519_sign_pkcs8_checked' "$builder" ||
+   ! grep -q 'ecdsa_p256_sign_checked' "$builder"; then
+    echo "TLS CertificateVerify builder must use checked signing wrappers" >&2
+    failed=1
+fi
+if ! grep -q 'build_certificate_verify_checked' "$handshake"; then
+    echo "TLS server handshake must propagate CertificateVerify signing errors" >&2
+    failed=1
+fi
+if grep -q 'build_certificate_verify(' "$handshake"; then
+    echo "TLS server handshake still uses the empty-array compatibility wrapper" >&2
+    failed=1
+fi
+
+if [ "$failed" -ne 0 ]; then
+    exit 1
+fi
+
+echo "crypto SFFI checked-caller audit: PASS"

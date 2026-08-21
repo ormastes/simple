@@ -15,9 +15,7 @@
 use os.tls13.handshake13.{build_finished_bytes, SIG_ED25519}
 use os.tls13.server_types.{Tls13ServerConfig}
 use os.crypto.sha256.{sha256_hmac}
-use std.nogc_sync_mut.io.signature_sffi.{ecdsa_p256_sign}
-
-extern fn rt_ed25519_sign(pkcs8: [u8], message: [u8]) -> [u8]
+use std.nogc_sync_mut.io.signature_sffi.{ed25519_sign_pkcs8_checked, ecdsa_p256_sign_checked}
 
 # HandshakeType bytes (local copies — handshake13 keeps the canonical defs).
 val HS_SERVER_HELLO: u8         = 2
@@ -232,7 +230,9 @@ fn build_certificate_verify_signing_input(transcript_hash: [u8]) -> [u8]:
     msg = _b_append(msg, transcript_hash)
     msg
 
-fn build_certificate_verify(transcript_hash: [u8], server_signing_key_pkcs8: [u8], sig_scheme: u16) -> [u8]:
+fn build_certificate_verify_checked(
+    transcript_hash: [u8], server_signing_key_pkcs8: [u8], sig_scheme: u16
+) -> Result<[u8], text>:
     """Build a TLS 1.3 server-side CertificateVerify handshake message.
 
     Args:
@@ -246,16 +246,18 @@ fn build_certificate_verify(transcript_hash: [u8], server_signing_key_pkcs8: [u8
     val signing_input = build_certificate_verify_signing_input(transcript_hash)
     var sig: [u8] = []
     if sig_scheme == SIG_ED25519:
-        sig = _b_unwrap_sig(rt_ed25519_sign(server_signing_key_pkcs8, signing_input))
-        if sig.len() == 0:
-            sig = _b_unwrap_sig(rt_ed25519_sign(server_signing_key_pkcs8, signing_input))
+        match ed25519_sign_pkcs8_checked(server_signing_key_pkcs8, signing_input):
+            case Ok(signature): sig = signature
+            case Err(error): return Err(error)
     elif sig_scheme == 0x0403u16:
-        sig = ecdsa_p256_sign(server_signing_key_pkcs8, signing_input)
+        match ecdsa_p256_sign_checked(server_signing_key_pkcs8, signing_input):
+            case Ok(signature): sig = signature
+            case Err(error): return Err(error)
     else:
-        return []
+        return Err("E-SFFI-014: unsupported TLS CertificateVerify signature scheme")
 
     if sig.len() == 0:
-        return []
+        return Err("E-SFFI-017: signing provider returned an empty signature")
 
     var body: [u8] = []
     body = _b_append(body, _b_put_u16_be(sig_scheme))
@@ -266,7 +268,16 @@ fn build_certificate_verify(transcript_hash: [u8], server_signing_key_pkcs8: [u8
     out.push(HS_CERTIFICATE_VERIFY)
     out = _b_append(out, _b_put_u24_be(body.len().to_u64()))
     out = _b_append(out, body)
-    out
+    Ok(out)
+
+fn build_certificate_verify(
+    transcript_hash: [u8], server_signing_key_pkcs8: [u8], sig_scheme: u16
+) -> [u8]:
+    match build_certificate_verify_checked(
+        transcript_hash, server_signing_key_pkcs8, sig_scheme
+    ):
+        case Ok(message): message
+        case Err(_): []
 
 # ============================================================================
 # Public: build_server_finished — RFC 8446 §4.4.4
