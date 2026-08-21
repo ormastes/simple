@@ -409,6 +409,13 @@ invalid-handle, and empty-builder tests pass. The normal positive-length path
 retains its existing `len <= 0` and NULL comparisons with no added hot-path
 lookup, allocation, or hashing.
 
+The cryptographic signature byte bridge now rejects `RuntimeValue::NIL` before
+generic collection decoding and accepts NULL string data only when the declared
+length is exactly zero. This prevents NIL or a corrupt positive-length string
+from becoming valid empty key/message/signature bytes. All six focused Ed25519,
+checked-family, bridge-failure, and empty-value tests pass. Existing non-empty
+array/string conversion loops and cryptographic calls are unchanged.
+
 These are migration inputs, not 14,391 independent implementations. The audit
 now hashes normalized declaration shapes and groups them by symbol. The next
 tooling step replaces the text-derived shape with the resolved HIR ABI hash,

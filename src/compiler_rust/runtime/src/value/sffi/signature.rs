@@ -20,6 +20,9 @@ use ring::signature::{
 // ---------------------------------------------------------------------------
 
 fn runtime_byte_array_to_vec(data: RuntimeValue) -> Option<Vec<u8>> {
+    if data.is_nil() {
+        return None;
+    }
     let len = crate::value::collections::rt_array_len(data);
     if len >= 0 {
         let mut out = Vec::with_capacity(len as usize);
@@ -43,7 +46,7 @@ fn runtime_byte_array_to_vec(data: RuntimeValue) -> Option<Vec<u8>> {
     }
     let ptr = crate::value::collections::rt_string_data(data);
     if ptr.is_null() {
-        return Some(Vec::new());
+        return if len == 0 { Some(Vec::new()) } else { None };
     }
     let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
     Some(bytes.to_vec())
@@ -782,6 +785,12 @@ mod tests {
         assert_eq!(rt_rsa_pss_sha384_verify_checked(nil, nil, nil), -1);
         assert_eq!(rt_rsa_pss_sha512_verify_checked(nil, nil, nil), -1);
         assert_eq!(rt_ecdsa_p256_verify_checked(nil, nil, nil), -1);
+    }
+
+    #[test]
+    fn empty_byte_bridge_remains_valid_but_nil_is_rejected() {
+        assert_eq!(runtime_byte_array_to_vec(bytes_value(&[])), Some(Vec::new()));
+        assert_eq!(runtime_byte_array_to_vec(RuntimeValue::NIL), None);
     }
 
     fn checked_sign_status(value: RuntimeValue) -> i64 {
