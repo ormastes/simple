@@ -11,9 +11,14 @@ use compiler.frontend.core.string_interpolation_expand.{expand_string_interpolat
 use compiler.frontend.desugar.placeholder_lambda.{transform_placeholder_call_args_after_interpolation}
 use compiler.semantics.layer_dag_checker.{LayerDagRegistry, check_layer_dag}
 use compiler.core.parser_decls.{parse_module_body, parser_enum_attributes_for}
+use compiler.core.parser_decls.{parser_enum_open_regions_for}
+use compiler.core.parser_decls.{parser_extend_targets, parser_extend_closures, parser_extend_ctor_counts}
+use compiler.core.parser_decls.{parser_extend_ctor_providers, parser_extend_ctor_names}
+use compiler.core.parser_decls.{parser_extend_ctor_type_counts, parser_extend_ctor_type_ids}
+use compiler.common.dynamic_identity.closure.{Closure}
 use compiler.core.ast.*
 use compiler.core.ast.{decl_get_body, decl_get_field_bits, decl_get_field_defaults, decl_get_field_types, decl_get_fields}
-use compiler.core.ast.{decl_get_imports, decl_get_is_comptime, decl_get_is_lazy, decl_get_name, decl_get_param_names}
+use compiler.core.ast.{decl_enum_payload_unnamed_marker, decl_get_imports, decl_get_is_comptime, decl_get_is_lazy, decl_get_name, decl_get_param_names}
 use compiler.core.ast.{decl_get_param_types, decl_get_ret_type, decl_get_visibility_text, module_decl_at, module_decl_count_get}
 use compiler.core.ast.{decl_is_packed, decl_get_is_value_type}
 use compiler.core.ast_expr.*
@@ -415,6 +420,12 @@ fn flat_ast_to_module(path: text) -> ParserModule:
             val e_discriminants = decl_get_field_defaults(idx)
             val e_payload_types_flat = decl_get_field_types(idx)
             val e_payload_counts = decl_get_field_bits(idx)
+            # S1 (hardening plan 15 Phase 4): payload field NAMES, parallel
+            # element-for-element to e_payload_types_flat, stored by
+            # decl_enum_def in the otherwise-unused-for-enums PARAM_NAMES slot.
+            # An entry equal to decl_enum_payload_unnamed_marker() means the
+            # field was POSITIONAL. Absent (older flat AST) => all positional.
+            val e_payload_field_names_flat = decl_get_param_names(idx)
             var e_vi = 0
             var e_type_offset = 0
             while e_vi < e_names.len():
@@ -429,12 +440,56 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                 if e_vi < e_payload_counts.len():
                     e_payload_count = e_payload_counts[e_vi]
                 var e_variant_types: [Type] = []
+                var e_variant_field_names: [text] = []
+                var e_variant_any_named = false
                 var e_ti = 0
                 while e_ti < e_payload_count and e_type_offset < e_payload_types_flat.len():
                     e_variant_types.push(convert_flat_type(e_payload_types_flat[e_type_offset]))
+                    var e_field_name = decl_enum_payload_unnamed_marker()
+                    if e_type_offset < e_payload_field_names_flat.len():
+                        e_field_name = e_payload_field_names_flat[e_type_offset]
+                    if e_field_name != decl_enum_payload_unnamed_marker():
+                        e_variant_any_named = true
+                    e_variant_field_names.push(e_field_name)
                     e_type_offset = e_type_offset + 1
                     e_ti = e_ti + 1
-                val e_kind = VariantKind.Tuple(e_variant_types)
+                # A variant whose payload fields were DECLARED with names
+                # rebuilds as VariantKind.Struct so the names survive into HIR
+                # (lower_variant already maps Struct -> HirVariantKind.Struct);
+                # a positional payload stays VariantKind.Tuple. Before S1 every
+                # variant was forced to Tuple, so a named payload was
+                # indistinguishable from a positional one downstream.
+                var e_kind = VariantKind.Tuple(e_variant_types)
+                if e_variant_any_named:
+                    var e_variant_fields: [ParserField] = []
+                    var e_fi = 0
+                    while e_fi < e_variant_types.len():
+                        var e_fname = e_variant_field_names[e_fi]
+                        if e_fname == decl_enum_payload_unnamed_marker():
+                            # Mixed spelling (`A(i64, n: i64)`): give the
+                            # positional slot a stable positional name rather
+                            # than the marker, which is not a legal identifier.
+                            e_fname = "_{e_fi}"
+                        # NAMED construction (NOT positional) -- see the
+                        # struct-field ParserField note above: the positional
+                        # form misaligns the 12-field desugared struct and
+                        # SIGSEGVs in lower_type.
+                        e_variant_fields.push(ParserField(
+                            name: e_fname,
+                            type_: e_variant_types[e_fi],
+                            has_default: false,
+                            default: Expr(kind: ExprKind.NilLit, span: span),
+                            visibility: Visibility.Public,
+                            is_public: true,
+                            is_volatile: false,
+                            has_bits: false,
+                            bits: 0,
+                            has_fixed_address: false,
+                            fixed_address: 0,
+                            span: span
+                        ))
+                        e_fi = e_fi + 1
+                    e_kind = VariantKind.Struct(e_variant_fields)
                 e_variants.push(Variant(
                     name: e_names[e_vi],
                     kind: e_kind,
@@ -443,6 +498,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                     span: span
                 ))
                 e_vi = e_vi + 1
+            val (e_complete_open, e_dyn_open) = parser_enum_open_regions_for(e_name)
             enums[e_name] = ParserEnum(
                 name: e_name,
                 type_params: [],
@@ -452,7 +508,9 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                 has_doc_comment: false,
                 doc_comment: "",
                 span: span,
-                attributes: parser_enum_attributes_for(e_name)
+                attributes: parser_enum_attributes_for(e_name),
+                complete_open: e_complete_open,
+                dyn_open: e_dyn_open
             )
         elif tag_text == "9":
             val target_name = decl_get_name(idx)
@@ -954,6 +1012,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
         layer_dag_edges: layer_dag_edges_text
     )
     built_module.function_headers = function_headers
+    built_module.extend_enums = build_parser_extend_enums()
     if flat_bridge_trace_enabled():
         print "[flat-bridge] built frontend module path={path}"
     built_module
@@ -1010,3 +1069,55 @@ pub fn parse_and_build_module_scoped(source: text, path: text, streaming_scope: 
 
 fn parse_and_build_module(source: text, path: text) -> ParserModule:
     parse_and_build_module_scoped(source, path, false)
+
+
+# Rebuilds ParserExtendEnum records from the flat side-channel the `extend`
+# parser fills (src/compiler/10.frontend/core/_ParserDecls/extend_decls.spl).
+# The parser layer speaks type/decl IDs only, so the payload types arrive as a
+# flat id list plus per-constructor arities -- the same encoding parse_enum_decl
+# uses for variant payloads, decoded here with convert_flat_type exactly as the
+# enum branch above does.
+fn build_parser_extend_enums() -> [ParserExtendEnum]:
+    val targets = parser_extend_targets()
+    val closures = parser_extend_closures()
+    val ctor_counts = parser_extend_ctor_counts()
+    val providers = parser_extend_ctor_providers()
+    val names = parser_extend_ctor_names()
+    val type_counts = parser_extend_ctor_type_counts()
+    val type_ids = parser_extend_ctor_type_ids()
+    val span = make_span()
+    var out: [ParserExtendEnum] = []
+    var ctor_offset = 0
+    var type_offset = 0
+    var si = 0
+    while si < targets.len():
+        var section_ctors: [ExtendConstructor] = []
+        var ci = 0
+        val n_ctors = ctor_counts[si]
+        while ci < n_ctors and ctor_offset < names.len():
+            var payload: [Type] = []
+            var ti = 0
+            val n_types = type_counts[ctor_offset]
+            while ti < n_types and type_offset < type_ids.len():
+                payload.push(convert_flat_type(type_ids[type_offset]))
+                type_offset = type_offset + 1
+                ti = ti + 1
+            section_ctors.push(ExtendConstructor(
+                provider: providers[ctor_offset],
+                name: names[ctor_offset],
+                payload_types: payload,
+                span: span
+            ))
+            ctor_offset = ctor_offset + 1
+            ci = ci + 1
+        var section_closure = Closure.Dyn
+        if si < closures.len() and closures[si] == "complete":
+            section_closure = Closure.Complete
+        out.push(ParserExtendEnum(
+            target: targets[si],
+            closure: section_closure,
+            constructors: section_ctors,
+            span: span
+        ))
+        si = si + 1
+    out

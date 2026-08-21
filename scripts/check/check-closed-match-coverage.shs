@@ -1,0 +1,187 @@
+#!/bin/sh
+# check-closed-match-coverage.shs — prove that @closed / @evolving enum
+# contracts are enforced END TO END on real source files.
+#
+# What it proves (hardening plan Phase 4, lane "decorators -> HIR"):
+#   parser decorator  ->  ParserEnum.attributes  ->  HirEnum.attributes
+#   ->  enum_contract_table_from_hir  ->  E-CLOSED-001 / E-EVOLVING-003 over
+#   ResolvedMatchCoverage built from the HIR match sites of the same file.
+# Nothing here reads source text for the contract: if the decorator were
+# dropped before HIR again, every fixture would report contract=none and the
+# selftest's "closed_wildcard must FAIL" fixture would go silent — which is
+# exactly the regression this guard exists to catch.
+#
+# Driver: src/app/check/closed_match_coverage.spl (real parse -> HIR lowering
+# -> compiler.semantics.enum_contract.enum_contract_check_module at the
+# `critical` profile). The driver prints one line per fact; this script reads
+# only those lines.
+#
+# Usage:
+#   sh scripts/check/check-closed-match-coverage.shs                 # default scope
+#   sh scripts/check/check-closed-match-coverage.shs <file.spl>...   # explicit files
+#   sh scripts/check/check-closed-match-coverage.shs --selftest      # fixtures only
+#
+# Verdict is ALWAYS the last line of stdout:
+#   PASS — <n> match(es) checked, non-exhaustive=0 wildcard-closed-critical=0   exit 0
+#   FAIL — <n> match(es) checked, non-exhaustive=<k> wildcard-closed-critical=<m> [...]  exit 1
+#   ERROR — nothing was checked (<reason>)                                       exit 2
+#
+# Non-vacuity is absolute: 0 contracted matches reaching the checker is ERROR,
+# never a pass; a missing bin/simple is ERROR; a selftest failure is FAIL
+# before any scan. The selftest runs before every scan and is fatal.
+
+set -u
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
+cd "$REPO_ROOT" || { echo "ERROR — nothing was checked (cannot cd to repo root)"; exit 2; }
+
+SIMPLE_BIN="bin/simple"
+DRIVER="src/app/check/closed_match_coverage.spl"
+FIXTURES="test/fixtures/enum_contract"
+# Default scope: the contract fixtures that are REQUIRED to be clean. A real
+# @closed enum in product code belongs on this list the day it lands.
+DEFAULT_SCOPE="$FIXTURES/closed_exhaustive.spl"
+
+MODE="scan"
+FILES=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) MODE="selftest"; shift ;;
+        --help|-h) sed -n '2,32p' "$0"; exit 0 ;;
+        -*) echo "ERROR — nothing was checked (unknown argument: $1)"; exit 2 ;;
+        *) FILES="$FILES $1"; shift ;;
+    esac
+done
+
+if [ ! -x "$SIMPLE_BIN" ]; then
+    echo "ERROR — nothing was checked (no executable $SIMPLE_BIN; absence of a compiler is absence of evidence)"
+    exit 2
+fi
+if [ ! -f "$DRIVER" ]; then
+    echo "ERROR — nothing was checked (driver $DRIVER missing)"
+    exit 2
+fi
+
+TMPDIR_RUN=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -rf "$TMPDIR_RUN"' EXIT
+
+# run_driver <list-file> <out-file>
+# The driver's exit status is read DIRECTLY into a variable on the line after
+# the invocation, never through a pipe.
+run_driver() {
+    "$SIMPLE_BIN" run "$DRIVER" --list "$1" > "$2" 2>"$2.err"
+    _rc=$?
+    return $_rc
+}
+
+count_lines() {
+    # count_lines <out-file> <grep-pattern>  — always exactly one number
+    grep -- "$2" "$1" 2>/dev/null | wc -l | tr -d ' \n'
+}
+
+summary_field() {
+    # summary_field <out-file> <name>  — value of name=<n> on the SUMMARY line
+    grep '^SUMMARY ' "$1" 2>/dev/null | tail -1 | tr ' ' '\n' | grep "^$2=" | cut -d= -f2
+}
+
+# ---------------------------------------------------------------------------
+# SELFTEST — five fixtures, each a real .spl parsed, lowered and checked by
+# the real pipeline:
+#   closed_exhaustive     @closed, every variant named      -> clean
+#   closed_wildcard       @closed, `case _` hides variants  -> E-CLOSED-001
+#   closed_missing_arm    @closed, arm missing, no wildcard -> non-exhaustive, NO E-CLOSED-001
+#                         (that shape belongs to the plain exhaustiveness error)
+#   evolving_wildcard     @evolving, wildcard swallows Unknown -> E-EVOLVING-003
+#   undecorated_wildcard  no decorator, wildcard            -> contract=none, 0 diags
+# The last one is the one that matters most: without it a checker that treats
+# every enum as @closed would pass the other four.
+# ---------------------------------------------------------------------------
+selftest() {
+    _fail=0
+    for _f in closed_exhaustive closed_wildcard closed_missing_arm evolving_wildcard undecorated_wildcard; do
+        if [ ! -f "$FIXTURES/$_f.spl" ]; then
+            echo "selftest: missing fixture $FIXTURES/$_f.spl"
+            _fail=1
+            continue
+        fi
+        echo "$FIXTURES/$_f.spl" > "$TMPDIR_RUN/$_f.list"
+        run_driver "$TMPDIR_RUN/$_f.list" "$TMPDIR_RUN/$_f.out"
+        _rc=$?
+        if [ "$_rc" -ne 0 ]; then
+            echo "selftest: fixture $_f: driver exited $_rc"
+            _fail=1
+            continue
+        fi
+        _matches=$(summary_field "$TMPDIR_RUN/$_f.out" matches)
+        _contracted=$(summary_field "$TMPDIR_RUN/$_f.out" contracted)
+        _nonex=$(summary_field "$TMPDIR_RUN/$_f.out" non_exhaustive)
+        _wc=$(summary_field "$TMPDIR_RUN/$_f.out" wildcard_closed_critical)
+        _ev3=$(count_lines "$TMPDIR_RUN/$_f.out" '^DIAG E-EVOLVING-003 ')
+        [ "${_matches:-0}" -eq 1 ] || { echo "selftest: $_f must expose exactly 1 match, got ${_matches:-none}"; _fail=1; continue; }
+        case "$_f" in
+            closed_exhaustive)
+                [ "$_contracted" -eq 1 ] && [ "$_nonex" -eq 0 ] && [ "$_wc" -eq 0 ] || { echo "selftest: closed_exhaustive must be contracted+clean, got contracted=$_contracted non_exhaustive=$_nonex wc=$_wc"; _fail=1; } ;;
+            closed_wildcard)
+                [ "$_contracted" -eq 1 ] && [ "$_wc" -eq 1 ] || { echo "selftest: closed_wildcard must emit E-CLOSED-001, got contracted=$_contracted wc=$_wc"; _fail=1; } ;;
+            closed_missing_arm)
+                [ "$_contracted" -eq 1 ] && [ "$_nonex" -eq 1 ] && [ "$_wc" -eq 0 ] || { echo "selftest: closed_missing_arm must be non-exhaustive WITHOUT E-CLOSED-001, got non_exhaustive=$_nonex wc=$_wc"; _fail=1; } ;;
+            evolving_wildcard)
+                [ "$_contracted" -eq 1 ] && [ "$_ev3" -eq 1 ] || { echo "selftest: evolving_wildcard must emit E-EVOLVING-003, got contracted=$_contracted ev3=$_ev3"; _fail=1; } ;;
+            undecorated_wildcard)
+                [ "$_contracted" -eq 0 ] && [ "$_wc" -eq 0 ] && [ "$(count_lines "$TMPDIR_RUN/$_f.out" '^DIAG ')" -eq 0 ] || { echo "selftest: undecorated_wildcard must be uncontracted and silent"; _fail=1; } ;;
+        esac
+    done
+    return $_fail
+}
+
+selftest
+SELF_RC=$?
+if [ "$SELF_RC" -ne 0 ]; then
+    echo "FAIL — selftest failed; no scan was attempted"
+    exit 1
+fi
+if [ "$MODE" = "selftest" ]; then
+    echo "PASS — 5 fixture(s) checked, selftest only (no scan requested)"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# SCAN
+# ---------------------------------------------------------------------------
+[ -n "$FILES" ] || FILES="$DEFAULT_SCOPE"
+: > "$TMPDIR_RUN/scan.list"
+NFILES=0
+for _f in $FILES; do
+    if [ ! -f "$_f" ]; then
+        echo "ERROR — nothing was checked (no such file: $_f)"
+        exit 2
+    fi
+    echo "$_f" >> "$TMPDIR_RUN/scan.list"
+    NFILES=$((NFILES + 1))
+done
+run_driver "$TMPDIR_RUN/scan.list" "$TMPDIR_RUN/scan.out"
+RC=$?
+if [ "$RC" -ne 0 ]; then
+    echo "ERROR — nothing was checked (driver exited $RC over $NFILES file(s); see stderr)"
+    head -20 "$TMPDIR_RUN/scan.out.err" >&2
+    exit 2
+fi
+grep '^DIAG \|^MATCH \|^PARSE-FAIL ' "$TMPDIR_RUN/scan.out"
+MODULES=$(summary_field "$TMPDIR_RUN/scan.out" modules)
+MATCHES=$(summary_field "$TMPDIR_RUN/scan.out" matches)
+CONTRACTED=$(summary_field "$TMPDIR_RUN/scan.out" contracted)
+NONEX=$(summary_field "$TMPDIR_RUN/scan.out" non_exhaustive)
+WC=$(summary_field "$TMPDIR_RUN/scan.out" wildcard_closed_critical)
+PARSE_FAILS=$(count_lines "$TMPDIR_RUN/scan.out" '^PARSE-FAIL ')
+
+if [ -z "$MATCHES" ] || [ "${CONTRACTED:-0}" -eq 0 ]; then
+    echo "ERROR — nothing was checked (0 contracted match(es) reached the checker across ${MODULES:-0} module(s), $NFILES file(s), $PARSE_FAILS parse failure(s))"
+    exit 2
+fi
+if [ "$NONEX" -ne 0 ] || [ "$WC" -ne 0 ] || [ "$PARSE_FAILS" -ne 0 ]; then
+    echo "FAIL — $MATCHES match(es) checked, non-exhaustive=$NONEX wildcard-closed-critical=$WC ($CONTRACTED contracted, $PARSE_FAILS parse failure(s), $MODULES module(s))"
+    exit 1
+fi
+echo "PASS — $MATCHES match(es) checked, non-exhaustive=0 wildcard-closed-critical=0 ($CONTRACTED contracted across $MODULES module(s))"
+exit 0

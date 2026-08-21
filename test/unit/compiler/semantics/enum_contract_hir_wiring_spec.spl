@@ -1,0 +1,97 @@
+"""
+# Enum Contract HIR Wiring Unit Spec
+
+Proves `enum_contract` fires END TO END from a real source file through the
+real pipeline -- parse_full_frontend -> HirLowering.lower_module ->
+enum_contract_check_module -- reading the contract from `HirEnum.attributes`
+(never from source text) and the match coverage from the module's own HIR
+match sites (enum_contract/hir_match_coverage.spl).
+
+Before the decorator reached HIR, `enum_contract_check` had to re-scan the
+module's SOURCE TEXT and nothing could build coverage for it, so this spec
+could not exist. Fixtures are the same five files
+scripts/check/check-closed-match-coverage.shs selftests against.
+
+HARNESS NOTE: `use compiler.hir.hir_lowering.statements.*` is REQUIRED for
+lower_module.
+"""
+# tag: unit
+
+use std.spec
+use std.fs.{read_file}
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.common.assurance.policy_schema.{AssuranceStrictness}
+use compiler.semantics.enum_contract.{
+    EnumContractModuleReport, enum_contract_check_module, enum_contract_table, hir_enum_match_sites
+}
+
+val FIXTURES = "test/fixtures/enum_contract/"
+
+fn lower_fixture(name: text) -> HirModule:
+    val path = FIXTURES + name + ".spl"
+    val parsed = parse_full_frontend(read_file(path), path, name, Logger(level: 0))
+    var hl = HirLowering.with_filename(path)
+    hl.lower_module(parsed)
+
+fn codes_of(report: EnumContractModuleReport) -> [text]:
+    var out: [text] = []
+    for d in report.diags:
+        out = out.push(d.code)
+    out
+
+fn has_code(codes: [text], code: text) -> bool:
+    for c in codes:
+        if c == code:
+            return true
+    false
+
+describe "enum_contract wired through HIR":
+    it "recovers the @closed contract from HirEnum.attributes, not source":
+        val hm = lower_fixture("closed_exhaustive")
+        val table = enum_contract_table(hm)
+        expect(table.has("Color")).to_equal(true)
+
+    it "builds one coverage record per enum match from HIR":
+        val hm = lower_fixture("closed_exhaustive")
+        val sites = hir_enum_match_sites(hm)
+        expect(sites.len()).to_equal(1)
+        expect(sites[0].coverage.enum_name).to_equal("Color")
+        expect(sites[0].coverage.covered_variant_ids.len()).to_equal(3)
+        expect(sites[0].coverage.has_wildcard).to_equal(false)
+
+    it "is silent on a fully covered @closed match":
+        val report = enum_contract_check_module(lower_fixture("closed_exhaustive"), AssuranceStrictness.Critical)
+        expect(report.contracted_sites).to_equal(1)
+        expect(report.diags.len()).to_equal(0)
+
+    it "raises E-CLOSED-001 when a wildcard hides @closed variants":
+        val report = enum_contract_check_module(lower_fixture("closed_wildcard"), AssuranceStrictness.Critical)
+        val codes = codes_of(report)
+        expect(has_code(codes, "E-CLOSED-001")).to_equal(true)
+        expect(report.diags[0].detail).to_equal("Green, Blue")
+
+    it "leaves a wildcard-free missing arm to plain exhaustiveness (no E-CLOSED-001)":
+        val report = enum_contract_check_module(lower_fixture("closed_missing_arm"), AssuranceStrictness.Critical)
+        expect(has_code(codes_of(report), "E-CLOSED-001")).to_equal(false)
+        expect(report.sites[0].coverage.is_exhaustive_for(AssuranceStrictness.Critical, true)).to_equal(false)
+
+    it "raises E-EVOLVING-003 under critical when a wildcard swallows Unknown":
+        val report = enum_contract_check_module(lower_fixture("evolving_wildcard"), AssuranceStrictness.Critical)
+        expect(has_code(codes_of(report), "E-EVOLVING-003")).to_equal(true)
+
+    it "does not raise E-EVOLVING-003 below critical":
+        val report = enum_contract_check_module(lower_fixture("evolving_wildcard"), AssuranceStrictness.Strict)
+        expect(has_code(codes_of(report), "E-EVOLVING-003")).to_equal(false)
+
+    it "neighbor: an undecorated enum is uncontracted and silent even with a wildcard":
+        val hm = lower_fixture("undecorated_wildcard")
+        expect(enum_contract_table(hm).has("Color")).to_equal(false)
+        val report = enum_contract_check_module(hm, AssuranceStrictness.Critical)
+        expect(report.sites.len()).to_equal(1)
+        expect(report.contracted_sites).to_equal(0)
+        expect(report.diags.len()).to_equal(0)

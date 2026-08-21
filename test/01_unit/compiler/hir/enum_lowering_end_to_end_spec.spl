@@ -1,0 +1,96 @@
+"""
+# Enum Lowering End To End Unit Spec
+
+Reproduce-first specs for two defects found while wiring enum decorators
+through to `enum_contract` (doc/08_tracking/bug/enum_decorators_dropped_before_hir_2026-08-21.md):
+
+1. `HirLowering.lower_enum` returned NIL for every enum: `lower_enum_with_symbol`
+   destructured the parser enum with a positional `case ParserEnum(8 fields)`
+   arm, which stopped matching once `attributes` (and later fields) were
+   appended to `ParserEnum`. `lower_module` then failed with
+   `undefined field 'symbol' ... on value of type 'nil'`.
+2. `lower_variant` built the variant kind with `val kind = match v.kind:` over
+   BARE `Tuple(types)` arms; on the seed the bare arm bound `types` to a
+   620-element garbage list, so every variant became `Tuple(620 junk types)`
+   and any payload reader died with `unknown property 'kind' on Tuple`.
+
+Both failed on the unmodified tree and pass with the field-access / qualified
+pattern rewrite in hir_lowering/_Items/declaration_lowering.spl. The pipeline
+used is the real one -- parse_full_frontend -> HirLowering.lower_module -- so
+these also prove `@closed` / `@evolving` decorators arrive on
+`HirEnum.attributes` through real lowering, not on a hand-built HirEnum.
+
+HARNESS NOTE: `use compiler.hir.hir_lowering.statements.*` is REQUIRED for
+lower_module (see enum_payload_range_or_frontend_exec_spec.spl).
+"""
+# tag: unit
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_definitions.{HirEnum, HirVariantKind, hir_enum_has_attribute, hir_enum_attribute_args}
+
+fn lower(src: text) -> HirModule:
+    val parsed = parse_full_frontend(src, "spec.spl", "spec", Logger(level: 0))
+    var hl = HirLowering.with_filename("spec.spl")
+    hl.lower_module(parsed)
+
+fn only_enum(hm: HirModule) -> HirEnum:
+    var out: [HirEnum] = []
+    for e in hm.enums.values():
+        out = out.push(e)
+    out[0]
+
+fn tuple_arity(e: HirEnum, variant: text) -> i64:
+    """Payload arity of `variant`; -1 when it is not a Tuple variant."""
+    for v in e.variants:
+        if v.name == variant:
+            match v.kind:
+                case HirVariantKind.Tuple(tys): return tys.len()
+                case HirVariantKind.Unit: return 0
+                case HirVariantKind.Struct(fs): return fs.len()
+    -1
+
+val CLOSED_SRC = "@closed\nenum Color:\n    Red\n    Green\n    Blue\n\nfn f(c: Color) -> i64:\n    match c:\n        case Color.Red: 1\n        case Color.Green: 2\n        case Color.Blue: 3\n"
+val EVOLVING_SRC = "@evolving(repr: u16, unknown: Unknown)\nenum Opcode:\n    Nop = 0\n    Halt = 1\n    Unknown(u16)\n"
+
+describe "enum lowering end to end":
+    it "lowers a decorated enum to a non-nil HirEnum (reproduce: positional ParserEnum destructure)":
+        val hm = lower(CLOSED_SRC)
+        expect(hm.enums.len()).to_equal(1)
+        val e = only_enum(hm)
+        expect(e.name).to_equal("Color")
+        expect(e.variants.len()).to_equal(3)
+
+    it "carries @closed onto HirEnum.attributes through real lowering":
+        val e = only_enum(lower(CLOSED_SRC))
+        expect(hir_enum_has_attribute(e, "closed")).to_equal(true)
+        expect(hir_enum_has_attribute(e, "evolving")).to_equal(false)
+
+    it "carries @evolving(...) with its raw argument text":
+        val e = only_enum(lower(EVOLVING_SRC))
+        expect(hir_enum_has_attribute(e, "evolving")).to_equal(true)
+        expect(hir_enum_attribute_args(e, "evolving")).to_equal("repr:u16,unknown:Unknown")
+
+    it "lowers unit variants with an EMPTY payload (reproduce: 620-element garbage Tuple)":
+        val e = only_enum(lower(CLOSED_SRC))
+        expect(tuple_arity(e, "Red")).to_equal(0)
+        expect(tuple_arity(e, "Green")).to_equal(0)
+        expect(tuple_arity(e, "Blue")).to_equal(0)
+
+    it "neighbor: an undecorated enum lowers with zero attributes":
+        val e = only_enum(lower("enum Plain:\n    A\n    B\n"))
+        expect(e.name).to_equal("Plain")
+        expect(e.attributes.len()).to_equal(0)
+
+    it "neighbor: discriminants survive lowering alongside attributes":
+        val e = only_enum(lower(EVOLVING_SRC))
+        var with_disc = 0
+        for v in e.variants:
+            if v.has_discriminant:
+                with_disc = with_disc + 1
+        expect(with_disc).to_equal(2)

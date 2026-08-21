@@ -5,19 +5,16 @@
 # data (contract_model / declaration_check / match_check) so the rules stay
 # testable without a symbol table.
 #
-# SCOPE, stated rather than implied: this entry point performs the
-# DECLARATION checks (E-CLOSED-002, E-EVOLVING-001/002), which are decidable
-# from `module.enums` alone. The MATCH-SITE checks (E-CLOSED-001,
-# E-EVOLVING-003) need a `ResolvedMatchCoverage`, which is built where a match
-# arm has already been resolved to a numeric discriminant against a
-# definitively-known enum -- that is
-# src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl, not here.
-# Rebuilding that resolution over raw HIR patterns would be a second,
-# divergent copy of it, which is precisely what ResolvedMatchCoverage's header
-# warns against. `enum_contract_check_matches` is therefore exposed for that
-# call site to hand its already-built coverage records to.
+# SCOPE, stated rather than implied: `enum_contract_check` performs the
+# DECLARATION checks (E-CLOSED-002, E-EVOLVING-001/002), decidable from
+# `module.enums` alone. The MATCH-SITE checks (E-CLOSED-001, E-EVOLVING-003)
+# need a `ResolvedMatchCoverage`: `enum_contract_check_module` builds one per
+# HIR match site from the arm patterns (hir_match_coverage.spl) so the whole
+# contract can be checked on a lowered module; `enum_contract_check_matches`
+# stays exposed for the MIR call site
+# (src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl), which
+# resolves arms to numeric discriminants and remains the codegen authority.
 
-use std.fs.{read_file}
 use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind}
 use compiler.hir.hir_definitions.{HirEnum, HirVariant, HirVariantKind, HirExprKind}
 use compiler.hir.match_coverage.{ResolvedMatchCoverage}
@@ -25,7 +22,8 @@ use compiler.common.assurance.policy_schema.{AssuranceStrictness}
 use compiler.semantics.enum_contract.contract_model.{
     EnumContractKind, EnumContract, EnumContractTable, EnumContractDiag
 }
-use compiler.semantics.enum_contract.attribute_source.{enum_contract_table_from_source}
+use compiler.semantics.enum_contract.attribute_source.{enum_contract_table_from_hir}
+use compiler.semantics.enum_contract.hir_match_coverage.{HirMatchSite, hir_enum_match_sites}
 use compiler.semantics.enum_contract.declaration_check.{
     EnumVariantShape, check_enum_declaration
 }
@@ -103,7 +101,7 @@ fn enum_contract_check_with_table(
     val fallback = EnumContract(enum_name: "", kind: EnumContractKind.Closed)
     for e in module.enums.values():
         if table.has(e.name):
-            val contract = table.lookup_or(e.name, fallback)
+            val contract: EnumContract = table.lookup_or(e.name, fallback)
             for d in check_enum_declaration(contract, enum_variant_shapes(e)):
                 diags = diags.push(d)
     diags
@@ -112,25 +110,41 @@ fn enum_contract_check(module: HirModule, profile: AssuranceStrictness) -> [Enum
     """S2/S3 entry point: validate every `@closed` / `@evolving` enum declared
     in `module` against its contract.
 
-    The contract table is recovered from the module's source text because the
-    decorator does not survive lowering today -- see attribute_source.spl and
-    doc/08_tracking/bug/enum_decorators_dropped_before_hir_2026-08-21.md. When
-    that is fixed this function keeps its signature and only its first line
-    changes."""
-    val table = enum_contract_table_from_source(read_module_source(module))
-    enum_contract_check_with_table(module, table, profile)
+    The contract table is read from `HirEnum.attributes` -- the decorator now
+    survives lowering (doc/08_tracking/bug/enum_decorators_dropped_before_hir_2026-08-21.md),
+    so no source text is consulted here."""
+    enum_contract_check_with_table(module, enum_contract_table(module), profile)
 
-fn read_module_source(module: HirModule) -> text:
-    """Module source text, or "" when it cannot be read.
+fn enum_contract_table(module: HirModule) -> EnumContractTable:
+    """Contract table of every decorated enum declared in `module`."""
+    var enums: [HirEnum] = []
+    for e in module.enums.values():
+        enums = enums.push(e)
+    enum_contract_table_from_hir(enums)
 
-    "" yields an EMPTY contract table, i.e. no enum is treated as contracted.
-    That is the safe direction for a checker that can only ADD diagnostics:
-    an unreadable source can never fabricate a violation. It cannot hide one
-    either once the decorator reaches HIR, at which point this function goes
-    away entirely."""
-    if module.path == "":
-        return ""
-    read_file(module.path)
+struct EnumContractModuleReport:
+    """Declaration + match-site diagnostics for one module, with the match
+    sites that were examined so a caller can prove the check was not vacuous."""
+    diags: [EnumContractDiag]
+    sites: [HirMatchSite]
+    contracted_sites: i64
+
+fn enum_contract_check_module(module: HirModule, profile: AssuranceStrictness) -> EnumContractModuleReport:
+    """Full S2/S3 check of one lowered module: declaration rules over
+    `module.enums` plus E-CLOSED-001 / E-EVOLVING-003 over every enum match in
+    its function bodies (coverage built by hir_match_coverage)."""
+    val table = enum_contract_table(module)
+    var diags = enum_contract_check_with_table(module, table, profile)
+    val sites = hir_enum_match_sites(module)
+    var contracted = 0
+    val fallback = EnumContract(enum_name: "", kind: EnumContractKind.Closed)
+    for site in sites:
+        if table.has(site.coverage.enum_name):
+            contracted = contracted + 1
+            val contract: EnumContract = table.lookup_or(site.coverage.enum_name, fallback)
+            for d in check_match_for_contract(contract, site.coverage, profile):
+                diags = diags.push(d)
+    EnumContractModuleReport(diags: diags, sites: sites, contracted_sites: contracted)
 
 fn enum_contract_check_matches(
     coverages: [ResolvedMatchCoverage],
@@ -147,10 +161,11 @@ fn enum_contract_check_matches(
     val fallback = EnumContract(enum_name: "", kind: EnumContractKind.Closed)
     for cov in coverages:
         if table.has(cov.enum_name):
-            val contract = table.lookup_or(cov.enum_name, fallback)
+            val contract: EnumContract = table.lookup_or(cov.enum_name, fallback)
             for d in check_match_for_contract(contract, cov, profile):
                 diags = diags.push(d)
     diags
 
 export enum_contract_check, enum_contract_check_with_table, enum_contract_check_matches
+export enum_contract_table, enum_contract_check_module, EnumContractModuleReport
 export hir_type_name, variant_shape, enum_variant_shapes

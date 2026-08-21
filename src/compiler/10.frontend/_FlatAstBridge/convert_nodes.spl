@@ -1156,7 +1156,11 @@ fn convert_flat_expr(idx: i64) -> Expr:
         while ui < u_stmts.len():
             u_body.push(convert_flat_stmt(u_stmts[ui]))
             ui = ui + 1
-        return Expr(kind: ExprKind.UnsafeBlock(Block(stmts: u_body, span: span)), span: span)
+        val u_caps_raw = expr_get_str(idx)
+        var u_caps: [text] = []
+        if u_caps_raw != "":
+            u_caps = u_caps_raw.split(",")
+        return Expr(kind: ExprKind.UnsafeBlock(Block(stmts: u_body, span: span), u_caps), span: span)
     if tag == EXPR_CUSTOM_BLOCK:
         val custom_kind = expr_get_str(idx)
         val payload_expr = expr_get_left(idx)
@@ -1385,6 +1389,22 @@ fn convert_flat_pattern(pat_eid: i64) -> Pattern:
             # against the registered enums (never silently a Wildcard, which
             # made these arms fall through).
             val bare_variant = expr_get_str(callee)
+            # `case complete b:` / `case dyn b:` region arms arrive as the
+            # marker calls parse_match_region_marker() synthesizes (§2 of
+            # doc/05_design/compiler/hardening/critical_completeness_design_2026-08-21.md).
+            # They are NOT enum variants and must never degrade to a Binding or
+            # a Wildcard: `complete` covers only the frozen complete region and
+            # `dyn` only the open region, so treating either as a catch-all
+            # would silently close a match over a missing STATIC constructor --
+            # the exact defect §3's E-COMPLETE-001 exists to stop.
+            if bare_variant == "__complete_region" or bare_variant == "__dyn_region":
+                var region_binder = ""
+                for r_eid in expr_get_args(pat_eid):
+                    if expr_get_tag(r_eid) == EXPR_IDENT:
+                        region_binder = expr_get_str(r_eid)
+                if bare_variant == "__complete_region":
+                    return Pattern(kind: PatternKind.CompleteRegion(region_binder), span: pspan)
+                return Pattern(kind: PatternKind.DynRegion(region_binder), span: pspan)
             var bsub: [Pattern] = []
             for b_eid in expr_get_args(pat_eid):
                 if expr_get_tag(b_eid) == EXPR_IDENT:

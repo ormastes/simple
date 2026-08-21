@@ -666,57 +666,78 @@ impl HirLowering:
         self.lower_enum_with_symbol(enum_, owner_module, enum_.name)
 
     me lower_enum_with_symbol(enum_: ParserEnum, owner_module: text, lookup_name: text) -> HirEnum:
-        match enum_:
-            case ParserEnum(name, type_params, variants, visibility, is_public, _, doc_comment, span):
-                val symbol = self.symbols.lookup_or_invalid(lookup_name)
-                var hir_type_params: [HirTypeParam] = []
-                for tp in type_params:
-                    hir_type_params = hir_type_params.push(self.lower_type_param(tp))
-                var hir_variants: [HirVariant] = []
-                for v in variants:
-                    hir_variants = hir_variants.push(self.lower_variant(v))
-                var hir_attrs: [HirAttribute] = []
-                for raw_attr in enum_.attributes:
-                    hir_attrs = hir_attrs.push(hir_attribute_from_raw(raw_attr))
-                # Every field is named explicitly, in declaration order: the
-                # Rust seed fills PARTIAL named constructions positionally, so
-                # the previously-omitted has_doc_comment / has_specialization_of
-                # slots silently absorbed the new trailing `attributes` field
-                # and produced a nil HirEnum.
-                HirEnum(
-                    symbol: symbol,
-                    name: name,
-                    runtime_name: if owner_module != "": "{owner_module}.{name}" else: name,
-                    type_params: hir_type_params,
-                    variants: hir_variants,
-                    visibility: self.compute_visibility(name, visibility),
-                    is_public: is_public,
-                    has_doc_comment: doc_comment != "",
-                    doc_comment: doc_comment,
-                    span: span,
-                    is_generic_template: false,
-                    has_specialization_of: false,
-                    specialization_of: "",
-                    type_bindings: {},
-                    attributes: hir_attrs
-                )
+        # Field access, NOT a positional `case ParserEnum(...)` destructure: that
+        # arm was written for an 8-field ParserEnum and stopped matching once
+        # `attributes` (and later fields) were appended, so every enum lowered
+        # to nil (doc/08_tracking/bug/enum_decorators_dropped_before_hir_2026-08-21.md).
+        val name = enum_.name
+        val type_params = enum_.type_params
+        val variants = enum_.variants
+        val visibility = enum_.visibility
+        val is_public = enum_.is_public
+        val doc_comment = enum_.doc_comment
+        val span = enum_.span
+        val symbol = self.symbols.lookup_or_invalid(lookup_name)
+        var hir_type_params: [HirTypeParam] = []
+        for tp in type_params:
+            hir_type_params = hir_type_params.push(self.lower_type_param(tp))
+        var hir_variants: [HirVariant] = []
+        for v in variants:
+            hir_variants = hir_variants.push(self.lower_variant(v))
+        var hir_attrs: [HirAttribute] = []
+        for raw_attr in enum_.attributes:
+            hir_attrs = hir_attrs.push(hir_attribute_from_raw(raw_attr))
+        # Every field is named explicitly, in declaration order: the
+        # Rust seed fills PARTIAL named constructions positionally, so
+        # the previously-omitted has_doc_comment / has_specialization_of
+        # slots silently absorbed the new trailing `attributes` field
+        # and produced a nil HirEnum.
+        HirEnum(
+            symbol: symbol,
+            name: name,
+            runtime_name: if owner_module != "": "{owner_module}.{name}" else: name,
+            type_params: hir_type_params,
+            variants: hir_variants,
+            visibility: self.compute_visibility(name, visibility),
+            is_public: is_public,
+            has_doc_comment: doc_comment != "",
+            doc_comment: doc_comment,
+            span: span,
+            is_generic_template: false,
+            has_specialization_of: false,
+            specialization_of: "",
+            type_bindings: {},
+            attributes: hir_attrs,
+            # D1 extension axis: a trailing `complete:` / `dyn:` section in the
+            # enum body declares that region OPEN. Neither section = closed, so
+            # an enum written without the new syntax keeps both flags false and
+            # behaves exactly as before.
+            complete_open: enum_.complete_open,
+            dyn_open: enum_.dyn_open
+        )
 
     me lower_variant(v: Variant) -> HirVariant:
         val symbol = self.symbols.define(v.name, SymbolKind.EnumVariant, nil, v.span, Visibility.Public, false, nil)
 
-        val kind = match v.kind:
-            case Unit:
-                HirVariantKind.Unit
-            case Tuple(types):
+        # QUALIFIED patterns in a statement match, not `val kind = match` over
+        # bare `Tuple(types)` arms: on the seed the bare arm bound `types` to a
+        # 620-element garbage list, so every variant lowered as
+        # Tuple(620 junk types) and any reader of a HirVariantKind.Tuple
+        # payload (enum_contract's variant_shape) died on it.
+        var kind = HirVariantKind.Unit
+        match v.kind:
+            case VariantKind.Unit:
+                kind = HirVariantKind.Unit
+            case VariantKind.Tuple(types):
                 var hir_types: [HirType] = []
                 for t in types:
                     hir_types = hir_types.push(self.lower_type(t))
-                HirVariantKind.Tuple(hir_types)
-            case Struct(fields):
+                kind = HirVariantKind.Tuple(hir_types)
+            case VariantKind.Struct(fields):
                 var hir_fields: [HirField] = []
                 for f in fields:
                     hir_fields = hir_fields.push(self.lower_field(f))
-                HirVariantKind.Struct(hir_fields)
+                kind = HirVariantKind.Struct(hir_fields)
 
         var discriminant = HirExpr(kind: HirExprKind.NilLit, type_: nil, span: v.span)
         if v.has_discriminant:

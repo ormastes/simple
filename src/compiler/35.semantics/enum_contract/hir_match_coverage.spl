@@ -1,0 +1,194 @@
+# Enum-contract match coverage built from HIR match sites (S2/S3 wiring).
+#
+# Produces one `ResolvedMatchCoverage` per `match` whose arms name variants of
+# an enum DECLARED IN THE SAME MODULE (`module.enums`). The scrutinee enum is
+# identified from the arm patterns themselves: `HirPatternKind.Enum(type_, ...)`
+# carries the enum's `HirTypeKind.Named(symbol)`, which is resolved back to a
+# `HirEnum` through `module.enums` and, when symbol ids are not distinct (the
+# seed hands several local enums id 0), disambiguated by the variant name the
+# arm spells. A match with no enum arm at all (a literal or binding match) is
+# not an enum match and produces no record.
+#
+# Variant IDS are the variant's declaration INDEX within its enum, not the
+# `HirVariant.symbol` id: the index is guaranteed distinct per enum on every
+# binary, which is all `ResolvedMatchCoverage` needs from an id. Two enums are
+# never mixed in one record, so the index is sufficient to keep coverage
+# id-keyed rather than name-keyed.
+#
+# Scope, stated: walks `module.functions` bodies (free functions and the
+# methods HIR already hoists into that table), recursing through blocks,
+# if/loop/while/for, let/assign/return/try values, lambdas and nested match
+# arm bodies. An arm shape this walker does not recognise contributes nothing;
+# it never invents a wildcard.
+
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId}
+use compiler.hir.hir_definitions.{
+    HirEnum, HirFunction, HirExpr, HirExprKind, HirStmt, HirStmtKind, HirBlock,
+    HirMatchArm, HirPattern, HirPatternKind
+}
+use compiler.hir.match_coverage.{ResolvedMatchCoverage}
+
+struct HirMatchSite:
+    """One enum match found in HIR, with the function it sits in."""
+    function_name: text
+    line: i64
+    coverage: ResolvedMatchCoverage
+
+struct ArmScan:
+    """Raw facts collected from one match's arms before enum resolution."""
+    enum_symbol_ids: [i64]
+    variant_names: [text]
+    has_wildcard: bool
+
+fn scan_pattern(p: HirPattern, acc: ArmScan) -> ArmScan:
+    var out = acc
+    match p.kind:
+        case HirPatternKind.Enum(type_, variant, payload):
+            match type_.kind:
+                case HirTypeKind.Named(symbol, args):
+                    out.enum_symbol_ids = out.enum_symbol_ids.push(symbol.id)
+                case _:
+                    out.enum_symbol_ids = out.enum_symbol_ids.push(-1)
+            out.variant_names = out.variant_names.push(variant)
+        case HirPatternKind.Wildcard:
+            out.has_wildcard = true
+        case HirPatternKind.Binding(symbol, mutable):
+            out.has_wildcard = true
+        case HirPatternKind.Or(patterns):
+            for sub in patterns:
+                out = scan_pattern(sub, out)
+        case HirPatternKind.DynRegion(binder):
+            # `case dyn b:` covers only the OPEN region; it is not a wildcard
+            # over the static constructors (design §2).
+            pass_do_nothing
+        case _:
+            pass_do_nothing
+    out
+
+fn variant_index(e: HirEnum, name: text) -> i64:
+    var i = 0
+    while i < e.variants.len():
+        if e.variants[i].name == name:
+            return i
+        i = i + 1
+    -1
+
+fn resolve_enum(module: HirModule, scan: ArmScan) -> HirEnum?:
+    """The module-local enum the arms belong to, or nil.
+
+    First by symbol id; if that leaves more than one candidate (ids not
+    distinct) or none, by the enum that declares the first named variant."""
+    var by_symbol: [HirEnum] = []
+    val first_sym = if scan.enum_symbol_ids.len() > 0: scan.enum_symbol_ids[0] else: -1
+    for e in module.enums.values():
+        if e.symbol.id == first_sym:
+            by_symbol = by_symbol.push(e)
+    if by_symbol.len() == 1:
+        return by_symbol[0]
+    if scan.variant_names.len() == 0:
+        return nil
+    val first_name = scan.variant_names[0]
+    var by_variant: [HirEnum] = []
+    for e in module.enums.values():
+        if variant_index(e, first_name) >= 0:
+            by_variant = by_variant.push(e)
+    if by_variant.len() == 1:
+        return by_variant[0]
+    nil
+
+fn coverage_for_match(module: HirModule, arms: [HirMatchArm]) -> ResolvedMatchCoverage?:
+    var scan = ArmScan(enum_symbol_ids: [], variant_names: [], has_wildcard: false)
+    for arm in arms:
+        scan = scan_pattern(arm.pattern, scan)
+    if scan.variant_names.len() == 0:
+        return nil
+    val found = resolve_enum(module, scan)
+    if found == nil:
+        return nil
+    val e: HirEnum = found
+    var all_ids: [i64] = []
+    var all_names: [text] = []
+    var i = 0
+    while i < e.variants.len():
+        all_ids = all_ids.push(i)
+        all_names = all_names.push(e.variants[i].name)
+        i = i + 1
+    var covered: [i64] = []
+    for vname in scan.variant_names:
+        val idx = variant_index(e, vname)
+        if idx >= 0:
+            var seen = false
+            for c in covered:
+                if c == idx:
+                    seen = true
+            if not seen:
+                covered = covered.push(idx)
+    ResolvedMatchCoverage(
+        scrutinee_type_id: e.symbol.id,
+        enum_symbol_id: e.symbol.id,
+        enum_name: e.name,
+        all_variant_ids: all_ids,
+        all_variant_names: all_names,
+        covered_variant_ids: covered,
+        has_wildcard: scan.has_wildcard
+    )
+
+fn walk_block(module: HirModule, fn_name: text, b: HirBlock, acc: [HirMatchSite]) -> [HirMatchSite]:
+    var out = acc
+    for s in b.stmts:
+        out = walk_stmt(module, fn_name, s, out)
+    if b.has:
+        out = walk_expr(module, fn_name, b.value, out)
+    out
+
+fn walk_stmt(module: HirModule, fn_name: text, s: HirStmt, acc: [HirMatchSite]) -> [HirMatchSite]:
+    match s.kind:
+        case HirStmtKind.Expr(e): walk_expr(module, fn_name, e, acc)
+        case HirStmtKind.Let(symbol, type_, init): walk_expr(module, fn_name, init, acc)
+        case HirStmtKind.Assign(target, op, value): walk_expr(module, fn_name, value, acc)
+        case HirStmtKind.Block(block): walk_block(module, fn_name, block, acc)
+        case _: acc
+
+fn walk_expr(module: HirModule, fn_name: text, e: HirExpr, acc: [HirMatchSite]) -> [HirMatchSite]:
+    var out = acc
+    match e.kind:
+        case HirExprKind.MatchCase(scrutinee, arms):
+            val cov = coverage_for_match(module, arms)
+            if cov != nil:
+                out = out.push(HirMatchSite(function_name: fn_name, line: e.span.line, coverage: cov))
+            for arm in arms:
+                out = walk_block(module, fn_name, arm.body, out)
+        case HirExprKind.If(cond, then_, else_):
+            out = walk_block(module, fn_name, then_, out)
+            if else_ != nil:
+                val eb: HirBlock = else_
+                out = walk_block(module, fn_name, eb, out)
+        case HirExprKind.Loop(body, label): out = walk_block(module, fn_name, body, out)
+        case HirExprKind.While(cond, body, label): out = walk_block(module, fn_name, body, out)
+        case HirExprKind.For(var_, iter, body, label): out = walk_block(module, fn_name, body, out)
+        case HirExprKind.Block(block): out = walk_block(module, fn_name, block, out)
+        case HirExprKind.UnsafeBlock(body): out = walk_block(module, fn_name, body, out)
+        case HirExprKind.Lambda(params, body, captures): out = walk_expr(module, fn_name, body, out)
+        case HirExprKind.Return(value):
+            if value != nil:
+                val v: HirExpr = value
+                out = walk_expr(module, fn_name, v, out)
+        case HirExprKind.Try(inner): out = walk_expr(module, fn_name, inner, out)
+        case _: pass_do_nothing
+    out
+
+fn hir_enum_match_sites(module: HirModule) -> [HirMatchSite]:
+    """Every enum match in `module`'s function bodies, in table order."""
+    var out: [HirMatchSite] = []
+    for f in module.functions.values():
+        if not f.is_extern:
+            out = walk_block(module, f.name, f.body, out)
+    out
+
+fn hir_enum_match_coverages(module: HirModule) -> [ResolvedMatchCoverage]:
+    var out: [ResolvedMatchCoverage] = []
+    for site in hir_enum_match_sites(module):
+        out = out.push(site.coverage)
+    out
+
+export HirMatchSite, hir_enum_match_sites, hir_enum_match_coverages
