@@ -78,3 +78,89 @@ bootstrap_post_entry_lowering 2 (clusters 5 and 10 residue).
 The example count differs by 3 between runs because several of these specs
 abort mid-file on the first failing assertion, so the number of examples that
 get to report at all moves with what is passing.
+
+---
+
+# Round 2 (2026-08-21, origin/main `26c13f73ce8`)
+
+## Headline: the directory regressed, it did not settle
+
+Round 1 closed at 481 ex / 441 pass / **40 fail** in 7 of 122 specs
+(`3c27a81c724`). Re-running all 122 specs individually on `26c13f73ce8`
+gives **411 ex / 336 pass / 75 fail in 36 of 122 specs**. The example count
+*fell* because more specs now abort on their first failing assertion.
+
+The cause is a second, larger refactor wave that landed in the interval —
+`4b88aebf00b` ("feat(hardening): compiler completeness lanes, bootstrap
+pinning, seed fixes, test sweep repairs") split `driver.spl` into
+`driver_orchestration.spl`, `driver_aot_pipeline.spl`,
+`driver_source_pipeline_loading.spl` and `driver_source_pipeline_parsing.spl`,
+and split `20.hir/hir_lowering` into `_Items/class_declaration_lowering.spl`,
+`_Items/module_declarations_bootstrap.spl`, `_Items/module_build.spl` and
+`_Expressions/expression_support.spl`. Round 1's premise — that cluster 6
+could be judged "against settled files" — is false: the files moved again
+between the two rounds, and 29 specs that were green in round 1 are now red
+purely because the file they read no longer holds the anchor.
+
+## Harness note (cost this round two hours)
+
+Running two `simple test` processes concurrently against the same worktree
+**silently loses all output for one of them**: 42 of 122 logs came back with
+rc=0 and zero test output. Re-run serially they all produce normal results.
+Do not shard this directory by parallel processes; run it serially.
+`memory_snapshot_sink_source_spec` produces no summary line even serially and
+is excluded from the totals.
+
+## Classification method
+
+Every failing anchor was (a) searched across all of `src/` with an exact
+substring match (Python, not `grep -F` — `grep` splits a multi-line pattern
+into independent line patterns and gives false positives), and (b) run through
+`git log -S<anchor> origin/main -- src/`. A content-preserving file split
+produces **no** `-S` commit, because the occurrence count across the pathspec
+is unchanged. That is the signature used to distinguish "moved" from
+"deleted", and it is what licensed the repoints below.
+
+## Round-2 cluster table
+
+| # | Cluster | Fails | Root cause | Class | Action |
+|---|---------|------:|------------|-------|--------|
+| 6a | Anchor moved by the `4b88aebf00b` split | 4 | Contract intact, file renamed; confirmed by zero `-S` commits | STALE anchor | **fixed** — repointed |
+| 6b | Anchor deleted from `src/` by a named commit | 9 anchors | e.g. `use app.io.cli_commands.*` (`27a8ea6e77c`), `states.push(isolation_state)` (`c01a05b3055`), `self.diagnostic_recovered.clear()` (`c80b5c62ced`), `val let_symbol = match stmt_kind_value:` (`ca5d0f50805`), `progress_hir_done % 16 == 0`, `recv_enum_name = rs.name`, `case MirTypeKind.I64 \| MirTypeKind.U64: 1` (`8a27fa62644`), `build_cache.update_entry(cache_source, source_fp_val, ...)` (`e1625f702fd`) | needs per-anchor read of the deleting commit | open |
+| 6c | **Aspirational** — anchor matches no commit in history | 13 anchors | `bootstrap_mir_functions_add(bootstrap_name, mir_fn)`, `discovered[drop_rp] = true`, `if fn_.blocks.len() == 1:`, `if mir.functions.len() > 0 or ...`, `if not bootstrap_hir_symbol_known_name(name):`, `if type_expr_idx > 16 and type_expr_idx < 18:`, `me lower_hir_const_decl(const_: Const) -> HirConst:` (the signature has ALWAYS been `ParserConst`), `me translate_instruction_at(...)`, `me translate_load_global_ids(...)`, `self.current_bootstrap_module = module_index`, `use lazy compiler.backend.backend.interpreter.`, `val base_val = self.value_as_type(raw_base_val, ...)`, `val ret_ty = self.valid_llvm_type(self.current_return_type)`, `var func_val = self.translate_operand(func)` | ASPIRATIONAL | **left failing** |
+| 7 | `rt_string_free` under the Rust seed | 3 | unchanged from round 1 | ENV | recorded |
+| 8 | VHDL design-catalog fixture gap | 3 | unchanged from round 1 | ENV/fixture | recorded |
+| 9 | Streaming module surface lifecycle | 3 | red again (was green in round 1's after-run) | REAL, flaky | open |
+| 11 | Behavioural (not source-text) failures | ~8 | `parse_collect_all_errors` 0 vs 3, `phase2_verdict_from_scalar_field` false vs true, `smf_cache_loading` nil vs false, `native_build_success_implies_functions` true vs false, `riscv_gen2_artifact_authorization`, `backend_result_payload_identity`, `check_mode_short_circuit`, `native_entry_closure_gate_source` | REAL | open |
+
+`test/01_unit/compiler/driver` still has **no** skip/pending/xit mechanism in
+use (zero occurrences directory-wide), so nothing in cluster 6c was weakened,
+skipped, or deleted. The 13 aspirational anchors are left red and listed here.
+
+## Fixed in round 2
+
+| Commit | Effect |
+|---|---|
+| `02db03d6705` — test(driver): repoint driver/HIR split anchors | `hir_self_owner_scalar_source` 1 -> 0; `native_build_jit_ambiguity` 4 -> 2; partial repoints in `bootstrap_context_mir_source` and `cli_args_mutability` (both still red on cluster-6b/6c anchors) |
+
+No mirror under `test/unit/compiler/driver/` exists for any of the four
+edited specs, so no mirror sync was required.
+
+## Round-2 before / after
+
+| | examples | passed | failed | specs with failures |
+|---|---:|---:|---:|---:|
+| round 1 close (`3c27a81c724`) | 481 | 441 | 40 | 7 of 122 |
+| round 2 open (`26c13f73ce8`) | 411 | 336 | 75 | 36 of 122 |
+| round 2 close | 411 | 339 | **72** | 35 of 122 |
+
+## The standing recommendation
+
+Round 1 argued for keeping symbol-level source assertions because they caught
+two clobbers. Round 2 shows the other half of the bill: 29 specs went red in
+one refactor wave without any contract changing, and 13 anchors in this
+directory assert text that has never existed in the repository. Anchors that
+name a *symbol* survive a file split; anchors that pin a whole-line or
+multi-line verbatim body do not. Converting cluster 6's body-text anchors to
+symbol-presence anchors would preserve the clobber-detection value at a
+fraction of the churn.
