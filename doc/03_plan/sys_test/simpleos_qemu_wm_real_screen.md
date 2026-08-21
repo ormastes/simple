@@ -1218,3 +1218,12 @@ authority tuple is rebuilt from the same frozen source.  Do not repeat the
 three commands above or reuse `dd4c-stage3-admission.env`, whose bound inputs
 belong to this exhausted attempt.  After Stage 3, continue to a provenance-
 accepted full CLI before invoking the ARM64 attested producer.
+## Phase 2 compiler and QEMU-infrastructure audit (2026-08-21)
+
+- ARM64 QEMU/HVF readiness passes, including `virt`, `ramfb`, and dry-run parsing.
+- Attested-producer compiler admission self-test passes clean/debug/seed/fabricated-receipt cases.
+- Host-GPU daemon-ready, runtime-provider closure, accelerator, guest-ISA, and Metal guest-contract self-tests pass.
+- ARM64 host-GPU preflight is ready through `file-backed-ram-tail`; the aggregate multi-ISA preflight remains blocked only for the unimplemented x86_64/RISC-V virtio-serial guest transport.
+- The aggregate host-GPU self-test was killed inside candidate frontend admission while compiling its probe; focused constituent checks above remain green.
+- A production native probe reaches the linker but `SharedWmPixelBufferBackend` readback needs `_rt_u32s_from_raw`, absent from the Stage 2 `core-c-bootstrap` ABI. Three compile/fix attempts were exhausted, so this lane stops here per the runaway guard.
+- Real QEMU boot/readback still needs an attested guest artifact. The Stage 2 compiler has no `os build` command, and its direct production readback closure currently cannot link; Phase 3 (or an explicit Stage 2 ABI/producer extension) is the remaining producer boundary.
