@@ -113,3 +113,33 @@ AC-5/AC-6's ACID *property* is already proven natively — real sqlite, real
 `ROLLBACK`, `acidD=true`, stage 1 of the same gate, and it needs no slice. What
 this bug blocks is stage 2, "the store module itself compiles standalone-native".
 That is a compiler-completeness property, not a durability one.
+
+## Scope: BOTH compilers lack it — and the pure-Simple side already says why
+
+This is not a Rust-seed-only gap, so it cannot be routed around by preferring
+the self-hosted compiler (the repo's default-tooling policy).
+
+`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:3225` declines
+`slice` explicitly, and gives the mechanism this doc was missing:
+
+> `slice` is likewise NOT handled: rt_slice returns a fresh collection HANDLE
+> that would also need registering in the lowering's runtime-value bookkeeping
+> for a downstream `.len()`/index read to work.
+
+So the work is not "call `rt_slice`" — it is **handle lifetime and
+runtime-value bookkeeping** so the result is usable by later operations. That
+also explains cleanly why the Rust seed emits nothing rather than emitting a
+broken call: both sides stop at the same design problem.
+
+Already filed on the pure-Simple side (same root, different surface):
+`doc/08_tracking/bug/native_mir_lowering_unresolved_to_u8_and_join_2026-08-08.md`,
+which records `slice` and `merge` as loud-failing by choice, fail-CLOSED. That
+doc and this one should be worked as one item; this one adds the Rust-seed half
+(`compilability.rs:529`, the measured undefined-`_main` result of removing it)
+and the enterprise AC-5/AC-6 stage-2 impact.
+
+The pure-Simple note also records the discipline the fix must keep: in that same
+arm, `rt_contains` ships only because it was verified against an oracle, while
+`rt_index_of` on a text receiver was verified WRONG and deliberately kept
+failing loudly. Slice lowering must clear the same bar rather than being wired
+up because it links.
