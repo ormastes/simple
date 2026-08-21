@@ -121,9 +121,9 @@ Evidence:
   absence marker outside folded executable source.
 - `find doc/06_spec -name '*_spec.spl' | wc -l` returned `0`.
 
-## Lane 2: Torch/svLLM Placeholder Blockers
+## Lane 2: Torch/Slang Placeholder Blockers
 
-Owner: Codex if a later lane selects real Torch/svLLM readiness work.
+Owner: Codex if a later lane selects real Torch/Slang readiness work.
 
 Reported files:
 
@@ -132,8 +132,8 @@ Reported files:
 - `src/lib/nogc_sync_mut/torch/backend.spl`
 - `src/lib/gc_async_mut/torch/torch_training.spl`
 - `src/lib/nogc_sync_mut/torch/torch_training.spl`
-- `src/lib/gc_async_mut/svllm/model_executor/model_loader/manifest.spl`
-- `src/lib/gc_async_mut/svllm/model_executor/model_loader/loader.spl`
+- `src/lib/gc_async_mut/slang/model_executor/model_loader/manifest.spl`
+- `src/lib/gc_async_mut/slang/model_executor/model_loader/loader.spl`
 
 Tasks:
 
@@ -226,47 +226,47 @@ Evidence:
 - `release/x86_64-unknown-linux-gnu/simple check
   src/lib/nogc_sync_mut/io_runtime.spl
   src/lib/io_runtime.spl
-  src/lib/gc_async_mut/svllm/model_executor/model_loader/loader.spl
-  test/01_unit/lib/gc_async_mut/svllm/model_loader_manifest_spec.spl
-  test/unit/lib/gc_async_mut/svllm/model_loader_manifest_spec.spl` passed.
-- `test/01_unit/lib/gc_async_mut/svllm/model_loader_manifest_spec.spl` passed
+  src/lib/gc_async_mut/slang/model_executor/model_loader/loader.spl
+  test/01_unit/lib/gc_async_mut/slang/model_loader_manifest_spec.spl
+  test/unit/lib/gc_async_mut/slang/model_loader_manifest_spec.spl` passed.
+- `test/01_unit/lib/gc_async_mut/slang/model_loader_manifest_spec.spl` passed
   with 7/7 scenarios.
-- `test/unit/lib/gc_async_mut/svllm/model_loader_manifest_spec.spl` passed
+- `test/unit/lib/gc_async_mut/slang/model_loader_manifest_spec.spl` passed
   with 7/7 scenarios.
 - `direct-env-runtime-guard --working`, `direct-env-runtime-guard --staged`,
   `check-llm-tooling-public-absence-rendering.shs`, and the `doc/06_spec`
   executable-spec layout check passed after the file-backed pack loader slice.
 - `release/x86_64-unknown-linux-gnu/simple check
-  src/lib/gc_async_mut/svllm/model_executor/model_loader/loader.spl
-  src/lib/gc_async_mut/svllm/model_executor/model_loader/__init__.spl
-  test/01_unit/lib/gc_async_mut/svllm/model_loader_tensor_bytes_spec.spl
-  test/unit/lib/gc_async_mut/svllm/model_loader_tensor_bytes_spec.spl` passed.
-- `test/01_unit/lib/gc_async_mut/svllm/model_loader_tensor_bytes_spec.spl`
+  src/lib/gc_async_mut/slang/model_executor/model_loader/loader.spl
+  src/lib/gc_async_mut/slang/model_executor/model_loader/__init__.spl
+  test/01_unit/lib/gc_async_mut/slang/model_loader_tensor_bytes_spec.spl
+  test/unit/lib/gc_async_mut/slang/model_loader_tensor_bytes_spec.spl` passed.
+- `test/01_unit/lib/gc_async_mut/slang/model_loader_tensor_bytes_spec.spl`
   passed with multi-chunk span coverage.
-- `test/unit/lib/gc_async_mut/svllm/model_loader_tensor_bytes_spec.spl` passed
+- `test/unit/lib/gc_async_mut/slang/model_loader_tensor_bytes_spec.spl` passed
   with multi-chunk span coverage.
-- `test/01_unit/lib/gc_async_mut/svllm/model_loader_stream_plan_spec.spl`
+- `test/01_unit/lib/gc_async_mut/slang/model_loader_stream_plan_spec.spl`
   covers single-segment plans, cross-chunk ordered segments, pin/device-staging
   intent flags, and `plan_only_not_scheduled`.
-- `test/unit/lib/gc_async_mut/svllm/model_loader_stream_plan_spec.spl` mirrors
+- `test/unit/lib/gc_async_mut/slang/model_loader_stream_plan_spec.spl` mirrors
   the same stream-plan coverage.
-- `test/01_unit/lib/gc_async_mut/svllm/nvfs_client/std_fs_spec.spl` and
-  `test/unit/lib/gc_async_mut/svllm/nvfs_client/std_fs_spec.spl` cover
+- `test/01_unit/lib/gc_async_mut/slang/nvfs_client/std_fs_spec.spl` and
+  `test/unit/lib/gc_async_mut/slang/nvfs_client/std_fs_spec.spl` cover
   unsupported trait `read_range`/buffer registration, local `read_range_bytes`
   payload correctness, and out-of-bounds rejection.
-- `src/lib/gc_async_mut/svllm/model_executor/model_loader/streaming_readiness.spl`
+- `src/lib/gc_async_mut/slang/model_executor/model_loader/streaming_readiness.spl`
   adds a single readiness gate that combines the existing tensor stream plan
   with native `read_range`, pinned-buffer, and device-staging capability
   statuses. The default pack readiness reports `blocked` with
   `native_read_range_unavailable`; tests also prove it only reports `ready`
   when all native statuses are `ready`.
 - The streaming readiness gate now emits sanitized JSONL evidence
-  (`svllm_streaming_readiness`) with plan status, execution status, segment
+  (`slang_streaming_readiness`) with plan status, execution status, segment
   count, total byte length, and normalized native capability statuses. Specs
   prove blocked, ready, loader-error, and unknown-status normalization paths
   without requiring live NVFS scheduling, pinned buffers, or device staging.
 - The streaming readiness gate also records `local_read_bytes` evidence for
-  file-backed pack roots. `svllm_streaming_readiness_from_local_pack(...)`
+  file-backed pack roots. `slang_streaming_readiness_from_local_pack(...)`
   proves local byte reads match the planned byte length and emits
   `local_read_bytes=ready` while keeping full streaming `blocked` until native
   `read_range`, pinned-buffer registration, and device staging are ready.
@@ -297,7 +297,7 @@ Evidence:
 
 Still open:
 
-- Full svLLM streaming through NVFS remains open: async scheduling, true pinned
+- Full Slang streaming through NVFS remains open: async scheduling, true pinned
   buffer registration, and device staging are now surfaced by absence-safe JSONL
   streaming readiness evidence but still report unavailable until real native
   adapters are implemented. The std_fs adapter only proves local file-backed
@@ -606,7 +606,7 @@ weakening the fail-closed invalid-pid behavior.
 
 The selected Option A requirement docs now include the implemented live request
 planning, response parsing, serve lifecycle, dashboard control boundary,
-bounded resource detection, and Torch/svLLM unavailable-status contracts. The
+bounded resource detection, and Torch/Slang unavailable-status contracts. The
 same sync keeps host-dependent proof explicitly deferred: real local vLLM/GPU
 serving, live dashboard execution against an installed vLLM server, full NVFS
 streaming, and live CUDA/libtorch optimizer execution remain open until the
@@ -620,11 +620,11 @@ absence-text contract, dashboard-control ownership rules, implemented evidence,
 and remaining host-dependent gates so the runtime tracking rows no longer rely
 only on the generic dashboard guide.
 
-## 2026-06-29 svLLM Native Streaming Evidence Hardening
+## 2026-06-29 Slang Native Streaming Evidence Hardening
 
-`scripts/check/check-llm-runtime-svllm-native-streaming-evidence.shs` now
-produces the `SVLLM_NATIVE_EVIDENCE_ENV` contract consumed by strict svLLM
-readiness and the aggregate LLM gate. The checker runs the local svLLM
+`scripts/check/check-llm-runtime-slang-native-streaming-evidence.shs` now
+produces the `SLANG_NATIVE_EVIDENCE_ENV` contract consumed by strict Slang
+readiness and the aggregate LLM gate. The checker runs the local Slang
 readiness wrapper, records local file-backed byte-read evidence separately, and
 keeps native streaming failed with concrete blockers until native read_range,
 pinned buffer registration, and device staging all report `ready`.
@@ -633,39 +633,39 @@ native wrapper can prove exactly which local readiness run it consumed before
 evaluating native capability evidence.
 
 The native streaming wrapper now consumes explicit host capability inputs:
-`SVLLM_NATIVE_READ_RANGE_STATUS`, `SVLLM_NATIVE_PINNED_BUFFER_STATUS`, and
-`SVLLM_NATIVE_DEVICE_STAGING_STATUS`. Missing inputs default to `unsupported`,
+`SLANG_NATIVE_READ_RANGE_STATUS`, `SLANG_NATIVE_PINNED_BUFFER_STATUS`, and
+`SLANG_NATIVE_DEVICE_STAGING_STATUS`. Missing inputs default to `unsupported`,
 but a configured host can provide `ready` values without editing tests or
-source fixtures. The wrapper records `svllm_native_streaming_capability_source`,
-`svllm_native_streaming_capability_provenance_status`,
-`svllm_native_streaming_blocked_gates`,
-`svllm_native_streaming_primary_blocked_gate`, and
-`svllm_native_streaming_next_action`; strict local readiness forwards those
+source fixtures. The wrapper records `slang_native_streaming_capability_source`,
+`slang_native_streaming_capability_provenance_status`,
+`slang_native_streaming_blocked_gates`,
+`slang_native_streaming_primary_blocked_gate`, and
+`slang_native_streaming_next_action`; strict local readiness forwards those
 native blocker fields, and the aggregate forwards them in
-`llm_goal_evidence_svllm_local_detail`.
+`llm_goal_evidence_slang_local_detail`.
 
 Strict native evidence also requires a non-default
-`SVLLM_NATIVE_CAPABILITY_SOURCE` naming the host probe or artifact that proved
+`SLANG_NATIVE_CAPABILITY_SOURCE` naming the host probe or artifact that proved
 ready native capabilities. Setting all native status env values to `ready`
 without that provenance now fails with `capability_provenance` instead of
 claiming native streaming completion from env defaults alone.
-It also requires `SVLLM_NATIVE_CAPABILITY_EVIDENCE_PATH` to point at a
+It also requires `SLANG_NATIVE_CAPABILITY_EVIDENCE_PATH` to point at a
 non-empty schema-v1 probe artifact with
-`svllm_native_capability_source` matching
-`SVLLM_NATIVE_CAPABILITY_SOURCE`,
-`svllm_native_capability_probe_event=svllm_native_capability_probe`,
-`svllm_native_capability_probe_status=pass`,
-`svllm_native_capability_probe_exit=0`, and reported read-range, pinned-buffer,
+`slang_native_capability_source` matching
+`SLANG_NATIVE_CAPABILITY_SOURCE`,
+`slang_native_capability_probe_event=slang_native_capability_probe`,
+`slang_native_capability_probe_status=pass`,
+`slang_native_capability_probe_exit=0`, and reported read-range, pinned-buffer,
 and device-staging statuses that match the wrapper inputs. Ready native status
 env values plus a source label but without that artifact fail with
 `capability_evidence`, and the wrapper records artifact SHA-256, size, mtime,
 source, schema version, probe event/status/exit, reported native statuses,
-`svllm_native_streaming_pass_integrity_status` plus
-`svllm_native_streaming_pass_integrity_reason` so aggregate detail can
+`slang_native_streaming_pass_integrity_status` plus
+`slang_native_streaming_pass_integrity_reason` so aggregate detail can
 distinguish a real native pass from env-only status injection.
 
-Follow-up hardening binds `SVLLM_NATIVE_CAPABILITY_SOURCE` to the probe
-artifact itself through `svllm_native_capability_source`. A ready-status env
+Follow-up hardening binds `SLANG_NATIVE_CAPABILITY_SOURCE` to the probe
+artifact itself through `slang_native_capability_source`. A ready-status env
 plus an artifact from another source now remains `capability_evidence` instead
 of satisfying native streaming completion.
 
@@ -831,7 +831,7 @@ claim.
 ## 2026-06-29 Aggregate Blocker Detail Hardening
 
 `scripts/check/check-llm-goal-evidence.shs` now copies focused blocker contracts
-into the aggregate env and report for the vLLM, svLLM, Torch optimizer, and
+into the aggregate env and report for the vLLM, Slang, Torch optimizer, and
 fine-tune lanes. The aggregate records per-lane required gates, blocked gates,
 primary blocked gate, and blocker reasons in `llm_goal_evidence_<lane>_*` keys
 and adds a Blocker Details table to the Markdown report, so strict-host
@@ -844,56 +844,56 @@ wrappers with the vLLM, Torch, and fine-tune contracts: both now emit
 aggregate strict detail rows forward those first-blocker values beside the full
 blocked-gates lists.
 
-## 2026-06-29 svLLM Readiness Timeout Hardening
+## 2026-06-29 Slang Readiness Timeout Hardening
 
-`scripts/check/check-llm-runtime-svllm-local-readiness.shs` now bounds each
-local svLLM spec with `SVLLM_READINESS_SPEC_TIMEOUT_SECONDS` and records every
+`scripts/check/check-llm-runtime-slang-local-readiness.shs` now bounds each
+local Slang spec with `SLANG_READINESS_SPEC_TIMEOUT_SECONDS` and records every
 subgate exit code in the env/report. Timeout failures write the top-level
 readiness report instead of leaving it missing. The native streaming producer
 passes the same timeout through its nested local-readiness run and records
-`svllm_native_streaming_local_spec_timeout_seconds` beside the native
+`slang_native_streaming_local_spec_timeout_seconds` beside the native
 read-range, pinned-buffer, and device-staging blockers.
 The local readiness wrapper now also writes a local readiness surface manifest
 with path, size, and SHA-256 rows for the eight checked specs and their produced
 logs, plus per-log size/SHA-256 fields in the focused env/report. The aggregate
-svLLM detail forwards the local manifest count, size, and SHA-256 so default
+Slang detail forwards the local manifest count, size, and SHA-256 so default
 local-readiness PASS evidence is not a status-only claim.
 
-## 2026-06-29 svLLM Manifest Spec Cleanup
+## 2026-06-29 Slang Manifest Spec Cleanup
 
-`test/01_unit/lib/gc_async_mut/svllm/model_executor/model_loader/manifest_spec.spl`
+`test/01_unit/lib/gc_async_mut/slang/model_executor/model_loader/manifest_spec.spl`
 no longer carries stale `TODO:` scenario names or intentionally failing parser
 comments. The spec now asserts the implemented canonical v0 manifest parser and
 `build_tensor_pack` materializer behavior directly, and the generated manual
-under `doc/06_spec/test/01_unit/lib/gc_async_mut/svllm/model_executor/model_loader/`
+under `doc/06_spec/test/01_unit/lib/gc_async_mut/slang/model_executor/model_loader/`
 records 11 active scenarios with no pending cases.
 
-## 2026-06-29 svLLM Safetensors Parser Cleanup
+## 2026-06-29 Slang Safetensors Parser Cleanup
 
-`test/01_unit/lib/gc_async_mut/svllm/model_executor/model_loader/safetensors_spec.spl`
+`test/01_unit/lib/gc_async_mut/slang/model_executor/model_loader/safetensors_spec.spl`
 now uses the repo text-to-bytes helper and an arithmetic little-endian length
 fixture writer, matching the parser's runtime constraints. The safetensors
 parser's little-endian length reader now uses arithmetic accumulation instead
 of boolean-style bitwise syntax, and stale stub comments in the safetensors and
 loader modules were replaced with the current implemented boundary.
 
-## 2026-06-29 LLM Aggregate svLLM Timeout Floor
+## 2026-06-29 LLM Aggregate Slang Timeout Floor
 
-`scripts/check/check-llm-goal-evidence.shs` now gives the `svllm_local` lane a
+`scripts/check/check-llm-goal-evidence.shs` now gives the `slang_local` lane a
 separate bounded timeout contract. Short global aggregate timeouts still bound
-quick lanes, while svLLM local readiness uses
-`LLM_GOAL_SVLLM_LANE_TIMEOUT_SECONDS` or a 120s floor so a normal local
+quick lanes, while Slang local readiness uses
+`LLM_GOAL_SLANG_LANE_TIMEOUT_SECONDS` or a 120s floor so a normal local
 readiness pass is not misreported as `lane_timeout_45s`. The aggregate env and
 report include each lane's actual timeout seconds for review.
 
-## 2026-06-29 svLLM Memory Transport Restore
+## 2026-06-29 Slang Memory Transport Restore
 
 `load_model_from_pack_streamed(...)` is restored as the bridge from already-read
 manifest text and chunk bytes into the pure streamer. The memory NVFS transport
 now compiles against that entry again, and `stream_pack` can gather a tensor
 span across sequential chunks instead of rejecting split tensors. The new
 `model_loader_transport_spec` covers success, missing transport chunks, short
-chunk data, and split-tensor streaming; local svLLM readiness now includes that
+chunk data, and split-tensor streaming; local Slang readiness now includes that
 transport spec as an evidence subgate.
 
 ## 2026-06-29 Torch Optimizer Probe Lowering Cleanup
@@ -946,12 +946,12 @@ Default aggregate mode now also generates and consumes the repo-local
 context/Ponytail full-replacement env before running the context/Ponytail lane.
 This keeps the default report aligned with the completed Simple-owned
 `simple_context`/`simple_ponytail` replacement surfaces, while live dashboard,
-vLLM, native svLLM, fine-tune acceptance, and Torch optimizer gates remain
+vLLM, native Slang, fine-tune acceptance, and Torch optimizer gates remain
 strict-host completion evidence.
 
 Strict aggregate mode also clears each strict producer env before running the
 producer. A timeout or early producer failure therefore leaves missing evidence
-instead of reusing a stale full-replacement, live-dashboard, native-svLLM, or
+instead of reusing a stale full-replacement, live-dashboard, native-Slang, or
 fine-tune acceptance env from a prior run.
 
 The aggregate now records `llm_goal_evidence_<lane>_producer_exit` and
@@ -959,21 +959,21 @@ The aggregate now records `llm_goal_evidence_<lane>_producer_exit` and
 table. Strict producer failures and timeouts can be distinguished from
 downstream strict lane failures without hunting for the producer log path first.
 
-The aggregate now also forwards `llm_goal_evidence_svllm_local_detail`.
-Strict-native svLLM failures show the native streaming status, blocker reason,
+The aggregate now also forwards `llm_goal_evidence_slang_local_detail`.
+Strict-native Slang failures show the native streaming status, blocker reason,
 native blocked gates, primary blocked gate, next action, local readiness,
 native `read_range`, pinned-buffer, device-staging, and local file-backed
 byte-read states, capability evidence artifact status, source, and
 pass-integrity state in the aggregate report instead of collapsing the detail
 row to `n/a`.
 Strict local readiness also rejects native envs that report
-`svllm_native_streaming_status=pass` without
-`svllm_native_streaming_pass_integrity_status=pass`.
+`slang_native_streaming_status=pass` without
+`slang_native_streaming_pass_integrity_status=pass`.
 
-The svLLM aggregate blocker table is now mode-aware. Default local-readiness
+The Slang aggregate blocker table is now mode-aware. Default local-readiness
 mode reports `required_gates=local_readiness`, `blocked_gates=none`, and
 `reason=default_local_readiness_only`; strict host mode consumes
-`svllm_native_streaming_blocked_gates` directly so producer and aggregate
+`slang_native_streaming_blocked_gates` directly so producer and aggregate
 blocker ordering stay identical.
 
 The focused vLLM host probe and Torch optimizer probe now write `next_action`
@@ -983,11 +983,11 @@ operator action needed before strict host completion can pass.
 
 The aggregate now promotes next actions to first-class
 `llm_goal_evidence_<lane>_next_action` env fields and a `Next Actions` report
-table for vLLM, svLLM, Torch optimizer, and fine-tune. This makes the strict
+table for vLLM, Slang, Torch optimizer, and fine-tune. This makes the strict
 host handoff actionable without parsing the longer detail strings.
 
 The aggregate `Next Actions` table now covers every lane: context/Ponytail
-replacement, live dashboard, vLLM, svLLM, Torch optimizer, fine-tune, and public
+replacement, live dashboard, vLLM, Slang, Torch optimizer, fine-tune, and public
 absence rendering.
 Default mode explicitly points context/Ponytail and dashboard at `--strict-host`
 when completion evidence is required; strict mode points failed replacement and
@@ -1017,7 +1017,7 @@ env files from earlier standalone runs.
 `required_gates`, `blocked_gates`, and `next_action` fields. The aggregate
 consumes those fields in strict mode, so replacement-surface failures and live
 dashboard route/auth failures are visible in the same blocker table and detail
-rows as vLLM, svLLM, Torch optimizer, and fine-tune blockers.
+rows as vLLM, Slang, Torch optimizer, and fine-tune blockers.
 
 Normal-review and Spark sidecars both flagged that route/source checks were not
 live authenticated dashboard proof. The dashboard live wrapper now requires a
@@ -1059,7 +1059,7 @@ passing context/Ponytail replacement cannot be accepted as a status-only claim.
 `doc/09_report/2026/06/llm_goal_strict_completion_audit_2026-06-29.md` records
 the current completion state. Default aggregate evidence passes with
 `warn_gates=vllm_host|torch_optimizer`; strict-host aggregate evidence fails
-five lanes: live dashboard HTTP auth/base URL, local vLLM serving, native svLLM
+five lanes: live dashboard HTTP auth/base URL, local vLLM serving, native Slang
 streaming, Simple-visible libtorch optimizer execution, and fine-tune retry6/7
 acceptance. Context/Ponytail full replacement is passing and is no longer a
 strict blocker.

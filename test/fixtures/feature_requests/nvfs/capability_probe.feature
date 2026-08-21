@@ -7,7 +7,7 @@
 Feature: NVFS capability-probe surface matches §6
   As a Phase 5 engineer
   I want the FsCaps struct and probe trait to enumerate every row from §6
-  So that callers (spostgre, svllm) can depend on the cached capability shape
+  So that callers (spostgre, slang) can depend on the cached capability shape
 
   Background:
     Given §6 names 10 capability rows, each with a probe mechanism and a baseline fallback

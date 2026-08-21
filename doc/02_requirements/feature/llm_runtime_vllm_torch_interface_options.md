@@ -14,7 +14,7 @@ Requirements:
 - Emit JSONL evidence consumable by the existing diagnostics/dashboard lane.
 - Treat dynamic LoRA loading as disabled unless explicitly marked trusted.
 - Reuse existing Torch/SFFI probes only as readiness evidence.
-- Report known Torch/svLLM placeholder blockers as `blocked`, not `ready`.
+- Report known Torch/Slang placeholder blockers as `blocked`, not `ready`.
 
 Pros:
 

@@ -1158,6 +1158,13 @@ runs a pure-Simple database hot path. Interpreter-hosted applications should
 supervise this carrier instead of interpreting database operations; this does
 not mean a C SQLite SFFI wrapper.
 
+## Slang
+
+Simple's native local LLM runtime. Slang owns model loading, tensor-pack
+conversion, local inference readiness, and streaming integration. It is
+distinct from Caret's current `local_torch` provider, the external vLLM
+compatibility surface, the Slang shader language, and Raku Slang modules.
+
 ## LLM Fraud Prevention (rules.sdl)
 
 **rules.sdl** — Root-level registry (SDN syntax, `.sdl` extension) enumerating the

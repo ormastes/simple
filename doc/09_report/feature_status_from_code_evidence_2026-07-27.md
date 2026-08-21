@@ -51,7 +51,7 @@ Legend — **IT** = IMPLEMENTED+TESTED, **IU** = IMPLEMENTED-UNTESTED,
 | 7 | llm_caret_claude_cli_full_parity | **IT** | `src/app/llm_caret/` (875 path matches incl. `chat.spl`, `server.spl`, `redact.spl`, `types.spl`); 63 specs; 34 manuals | no marker |
 | 8 | llm_caret_claude_cli_harden | **IT** | Same `src/app/llm_caret/` tree; `test/04_smoke/llm_caret_cli_tui_hardening_smoke.spl` | no marker |
 | 9 | llm_caret_gui_backends | **IT** | `src/app/llm_caret/{gui.spl,gui_metal.spl,gui_native_model.spl}`; `test/03_system/app/llm_caret/feature/llm_caret_gui_backends_spec.spl` + manual | no marker |
-| 10 | llm_runtime_vllm_torch_interface | **IT** | `src/app/svllm_pack/{core,main}.spl`, `src/lib/gc_sync_mut/svllm/`, `src/app/llm_dashboard/collectors/vllm_control_panel.spl`; 56 specs; 66 manuals | no marker |
+| 10 | llm_runtime_vllm_torch_interface | **IT** | `src/app/slang_pack/{core,main}.spl`, `src/lib/gc_sync_mut/slang/`, `src/app/llm_dashboard/collectors/vllm_control_panel.spl`; 56 specs; 66 manuals | no marker |
 | 11 | llm_runtime_vllm_torch_interface_options | **IT** | Options doc for #10; same evidence. Duplicate identity — inflates any naive count | no marker |
 | 12 | llm_tooling_context_ponytail_mimic | **IT** | `src/app/ponytail/{__init__,audit}.spl`, `src/lib/common/ponytail/`; `test/03_system/app/tooling/feature/context_ponytail_mimic_spec.spl`, `test/01_unit/app/tooling/ponytail_audit_spec.spl` | no marker |
 | 13 | llm_tooling_context_ponytail_mimic_options | **IT** | Options doc for #12; same evidence. Duplicate identity | no marker |

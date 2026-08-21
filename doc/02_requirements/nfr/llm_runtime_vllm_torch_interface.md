@@ -28,7 +28,7 @@ Selection source: user requested the first implementation option.
 - NFR-009: Process, HTTP, environment, and time access used by the vLLM control
   lane shall route through existing owner facades; new raw `rt_*` shortcuts are
   not acceptable for app/dashboard code.
-- NFR-010: Torch/svLLM placeholder hardening shall fail closed with explicit
+- NFR-010: Torch/Slang placeholder hardening shall fail closed with explicit
   unavailable or unsupported status strings and remain usable in clean
   workspaces that lack libtorch, CUDA, vLLM, and NVFS native streaming support.
 - NFR-011: CLI-provider kill support shall use pid-scoped owner process facades,

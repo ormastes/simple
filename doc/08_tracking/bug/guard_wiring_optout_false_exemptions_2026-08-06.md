@@ -438,7 +438,7 @@ and nothing has been reporting it.
 - **`check-scilib-accelerator-gates.shs` — exits 0 on
   `pytorch_error=libtorch_not_found`.** Absence of the thing under test is
   treated as a pass.
-- **`check-llm-runtime-svllm-native-capability-probe.shs` — exits 0 with
+- **`check-llm-runtime-slang-native-capability-probe.shs` — exits 0 with
   `STATUS: PASS ... reason=native_runtime_capabilities_not_linked`.** Same
   shape: the capability is missing, so the probe passes.
 - **`check-nvme-firmware-remaining-gates.shs`** exits 0 on `STATUS: POSTPONED
@@ -499,7 +499,7 @@ candidate, so not re-run.
 | `check-wm-daemon-autoconnect-overhead-evidence.shs` | BROKEN | 1 | n/a | Illegal instruction (core dumped) FAIL: no-measurement-produced (see build/wm_daemon_overhead/stderr |
 | `check-scilib-runtime-shims.shs` | BROKEN-STALE | 127 | n/a | scripts/check/check-scilib-runtime-shims.shs: 45: src/runtime/scilib/verify_symbols.sh: not found  |
 | `check-expect-footgun.shs` | FAIL-OPEN | 0 | 0 | test/01_unit/compiler/backend/stage4_final_symbol_closure_spec.spl:723: expect(compiler == base).to_ |
-| `check-llm-runtime-svllm-native-capability-probe.shs` | FAIL-OPEN | 0 | n/a | STATUS: PASS llm-runtime-svllm-native-capability-probe reason=native_runtime_capabilities_not_linked |
+| `check-llm-runtime-slang-native-capability-probe.shs` | FAIL-OPEN | 0 | n/a | STATUS: PASS llm-runtime-slang-native-capability-probe reason=native_runtime_capabilities_not_linked |
 | `check-llm-strict-host-prereq-doctor.shs` | FAIL-OPEN | 0 | 0 | STATUS: WARN llm-strict-host-prereq-doctor blocked_gate_count=4 blocked_gates=dashboard_live_http vl |
 | `check-nvme-firmware-remaining-gates.shs` | FAIL-OPEN | 0 | n/a | STATUS: POSTPONED uno-q-supplementary environment-unavailable STATUS: POSTPONED cosmos-board BT-001. |
 | `check-portable-compute-toolchains.shs` | FAIL-OPEN | 0 | n/a | all_portable_compute_pins_verified=false all_portable_compute_toolchains_verified=false  |
@@ -518,8 +518,8 @@ candidate, so not re-run.
 | `check-hosted-wm-capture-evidence.shs` | GENUINE | 1 | n/a | hosted_wm_capture_simple_bin_source=repo-self-hosted-fallback hosted_wm_capture_simple_bin_status=pa |
 | `check-lean-proofs.shs` | GENUINE | 0 | n/a | lean-proof-check: PASS — 38 project(s), 99 .lean file(s) checked  |
 | `check-linux-hosted-wm-live-window-evidence.shs` | GENUINE | 1 | n/a | linux_hosted_wm_live_window_framebuffer_ppm=missing linux_hosted_wm_live_window_snapshot=missing  |
-| `check-llm-runtime-svllm-local-readiness.shs` | GENUINE | 1 | n/a | STATUS: FAIL llm-runtime-svllm-local-readiness  |
-| `check-llm-runtime-svllm-native-streaming-evidence.shs` | GENUINE | 1 | n/a | STATUS: FAIL llm-runtime-svllm-native-streaming reason=local_readiness_failed  |
+| `check-llm-runtime-slang-local-readiness.shs` | GENUINE | 1 | n/a | STATUS: FAIL llm-runtime-slang-local-readiness  |
+| `check-llm-runtime-slang-native-streaming-evidence.shs` | GENUINE | 1 | n/a | STATUS: FAIL llm-runtime-slang-native-streaming reason=local_readiness_failed  |
 | `check-llm-runtime-vllm-host-env-contract.shs` | GENUINE | 1 | n/a | STATUS: FAIL llm-runtime-vllm-host-env-contract reason=probe_exit_expected_0_got_1  |
 | `check-llm-runtime-vllm-host-probe.shs` | GENUINE | 1 | n/a | STATUS: FAIL llm-runtime-vllm-host-probe reason=missing_reason  |
 | `check-low-dependency-dynsmf-build-plans.shs` | GENUINE | 1 | n/a | low_dependency_dynsmf_plan_stderr=build/low_dependency_ui_dynsmf/build_plans/plan.err low_dependency |
@@ -562,7 +562,7 @@ candidate, so not re-run.
 | `check-html-css-rendering-manifest-traceability.shs` | GREEN | 0 | 0 | html_css_rendering_manifest_traceability_fixture_scene_count=55 html_css_rendering_manifest_traceabi |
 | `check-llm-feature-db-reference-integrity.shs` | GREEN | 0 | 0 | STATUS: PASS llm-feature-db-reference-integrity rows_checked=11 paths_checked=292 missing_count=0 st |
 | `check-llm-finetune-setup-contract.shs` | GREEN | 0 | 0 | STATUS: PASS llm-finetune-setup-contract checked_count=34  |
-| `check-llm-runtime-svllm-setup-contract.shs` | GREEN | 0 | 0 | STATUS: PASS llm-runtime-svllm-setup-contract checked_count=41  |
+| `check-llm-runtime-slang-setup-contract.shs` | GREEN | 0 | 0 | STATUS: PASS llm-runtime-slang-setup-contract checked_count=41  |
 | `check-llm-runtime-torch-setup-contract.shs` | GREEN | 0 | 0 | STATUS: PASS llm-runtime-torch-setup-contract checked_count=33  |
 | `check-llm-strict-host-prereq-doctor-contract.shs` | GREEN | 0 | 0 | STATUS: PASS llm-strict-host-prereq-doctor-contract checked_count=10  |
 | `check-llm-tooling-public-absence-rendering.shs` | GREEN | 0 | 0 | STATUS: PASS llm-tooling-public-absence-rendering  |
@@ -632,7 +632,7 @@ correct one level up. Recorded here rather than left standing:
 |---|---|
 | `check-llm-finetune-acceptance-evidence.shs` | **RED** (`STATUS: FAIL llm-finetune-acceptance reason=BLOCKED_RETRY6_NOT_READY`) |
 | `check-llm-finetune-guard-evidence.shs` | **RED** (`STATUS: FAIL llm-finetune-guard-evidence`) |
-| `check-llm-runtime-svllm-native-capability-probe.shs` | **FAIL-OPEN** (exit 0, `reason=native_runtime_capabilities_not_linked`) |
+| `check-llm-runtime-slang-native-capability-probe.shs` | **FAIL-OPEN** (exit 0, `reason=native_runtime_capabilities_not_linked`) |
 | `check-llm-strict-host-prereq-doctor.shs` | **FAIL-OPEN** (exit 0, `STATUS: WARN blocked_gate_count=5`) |
 
 The **removals stand** — each is genuinely executed as a subprocess by a wired
@@ -643,13 +643,13 @@ pipeline.
 **What the four wired contract gates actually assert.** Only
 `check-llm-strict-host-prereq-doctor-contract.shs` asserts its subject's exit
 code (`doctor_exit != 0` → `add_failure`). The other three
-(`svllm`/`torch`/`finetune`) *record* `native_exit` / `local_exit` /
+(`slang`/`torch`/`finetune`) *record* `native_exit` / `local_exit` /
 `probe_exit` / `acceptance_exit` / `guard_exit` into their evidence env and
 never assert them. Their 41 / 33 / 34 cases are `require_env_key` and
 `require_report_key` assertions: each requires a named key to be present with a
 non-empty value in the subject's emitted env file or report. So the counts are
 **real and non-vacuous — they are evidence-shape assertions — but they are not
-success assertions**. `check-llm-runtime-svllm-local-readiness.shs` exits 1
+success assertions**. `check-llm-runtime-slang-local-readiness.shs` exits 1
 standalone while its parent contract exits 0.
 
 That is not a reason to unwire them and it is not fixed here (changing an

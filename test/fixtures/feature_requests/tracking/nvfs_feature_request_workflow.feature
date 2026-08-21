@@ -1,7 +1,7 @@
 # Feature: NVFS feature-request workflow
 # Anchors: doc/08_tracking/feature/README.md, TEMPLATE.md, nvfs_requests.md
 #          doc/05_design/nvfs/from_spostgre.md (upfront primary channel)
-#          memory: feedback_svllm_drives_nvfs_design.md
+#          memory: feedback_slang_drives_nvfs_design.md
 # Status: pending — README/TEMPLATE/nvfs_requests.md exist; scenarios lock the schema.
 
 Feature: NVFS feature-request tracker enforces the primary vs secondary channel rule
@@ -19,8 +19,8 @@ Feature: NVFS feature-request tracker enforces the primary vs secondary channel 
     When  the README is read
     Then  it names the upfront docs as "primary" channel
     And   it names this tracker as "secondary" channel
-    And   it cross-references "doc/05_design/nvfs/from_spostgre.md" and "doc/05_design/nvfs/svllm_requirements.md"
-    And   it cites memory note "feedback_svllm_drives_nvfs_design.md" for the rule
+    And   it cross-references "doc/05_design/nvfs/from_spostgre.md" and "doc/05_design/nvfs/slang_requirements.md"
+    And   it cites memory note "feedback_slang_drives_nvfs_design.md" for the rule
 
   Scenario: TEMPLATE defines the required fields
     Given TEMPLATE.md is the canonical entry shape
@@ -34,7 +34,7 @@ Feature: NVFS feature-request tracker enforces the primary vs secondary channel 
     When  nvfs_requests.md is inspected
     Then  it declares Target = nvfs
     And   it points to the owning design doc "doc/05_design/nvfs_design.md"
-    And   it lists both upfront contributions: "from_spostgre.md" and "svllm_requirements.md"
+    And   it lists both upfront contributions: "from_spostgre.md" and "slang_requirements.md"
 
   Scenario: Upfront items are cross-referenced, not re-filed
     Given the 7 S-entries in "from_spostgre.md §3 Required API surface" are the authoritative upfront items

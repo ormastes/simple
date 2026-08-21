@@ -39,7 +39,7 @@ Feature: spostgre declares the five MDSOC outer axes as designed
     Given §2.4 says spostgre requires capabilities: nvfs-client, storage-class META_DURABLE, DB_WAL, DB_TEMP, GENERAL_MUTABLE, CHECKPOINT_SNAPSHOT
     When  the skeleton manifest is inspected
     Then  the required capability set is declared (even if as a comment list for Phase 5)
-    And   MODEL_IMMUTABLE is NOT claimed (that class is svllm-only per §2.4)
+    And   MODEL_IMMUTABLE is NOT claimed (that class is slang-only per §2.4)
 
   Scenario: Axis 5 — Ownership (§2.5)
     Given §2.5 maps owner subsystems to component stores

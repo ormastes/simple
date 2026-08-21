@@ -21,8 +21,8 @@ It does not replace the context/ponytail mimic lane. That lane is tracked in
   `doc/04_architecture/app/spipe/` and `doc/05_design/app/spipe/`.
 - PyTorch wrapper and integration research/design already exists under
   `doc/01_research/ml/` and `doc/05_design/ml/`.
-- svLLM planning exists at `doc/05_design/ml/svllm/svllm_master_plan.md`.
-- Runtime/source surfaces include `src/app/svllm_pack`, `src/app/llm_caret`,
+- Slang planning exists at `doc/05_design/ml/slang/slang_master_plan.md`.
+- Runtime/source surfaces include `src/app/slang_pack`, `src/app/llm_caret`,
   `src/compiler_rust/driver/src/cli/llm_tools.rs`,
   `src/compiler_rust/compiler/src/interpreter_extern/torch.rs`, and
   `src/runtime/torch_sffi.h`.
@@ -42,7 +42,7 @@ It does not replace the context/ponytail mimic lane. That lane is tracked in
   `dyn_torch_tensor_linalg_solve(...)` is reported as returning `0`,
   `tensor_cuda` is reported as hardcoding device `0` in multiple backends, and
   seed helpers are reported as no-op.
-- svLLM loader surfaces still have unimplemented or stubbed entry points around
+- Slang loader surfaces still have unimplemented or stubbed entry points around
   manifest parsing, tensor-pack building, and `load_model_from_pack`.
 - Existing fine-tune tracking still has open target-attainment, safety, license,
   latency, and memory evidence requests. A process-valid run is not deployment
@@ -56,5 +56,5 @@ readiness/probe evidence. Feed all run metadata into SPipe JSONL so the
 dashboard can show status without exposing nil.
 
 The first implementation lane after requirement selection should either build
-the vLLM readiness bridge or clear the Torch/svLLM placeholder blockers that
+the vLLM readiness bridge or clear the Torch/Slang placeholder blockers that
 would make the bridge report a false-ready state.

@@ -1045,8 +1045,8 @@ unchanged.** No further execution was attempted — see rationale below.
   - `SPEC FILE VERDICT: test/01_unit/lib/gc_async_mut/src/collections/src_collections_facade_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0`
 - `test/01_unit/lib/gc_async_mut/src/tooling/tooling_facade_spec.spl` rc=0 vacuous_hits=0
   - `SPEC FILE VERDICT: test/01_unit/lib/gc_async_mut/src/tooling/tooling_facade_spec.spl declared>=2 executed=2 passed=1 failed=1 dropped=0`
-- `test/01_unit/lib/gc_async_mut/svllm/nvfs_client/.spipe_wrapped_entry_std_fs_transport_spec.spl` rc=0 vacuous_hits=0
-  - `SPEC FILE VERDICT: test/01_unit/lib/gc_async_mut/svllm/nvfs_client/.spipe_wrapped_entry_std_fs_transport_spec.spl declared>=0 executed=9 passed=0 failed=9 dropped=0`
+- `test/01_unit/lib/gc_async_mut/slang/nvfs_client/.spipe_wrapped_entry_std_fs_transport_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/gc_async_mut/slang/nvfs_client/.spipe_wrapped_entry_std_fs_transport_spec.spl declared>=0 executed=9 passed=0 failed=9 dropped=0`
 - `test/01_unit/lib/nogc_async_mut/mcp_sdk/core/core_facade_spec.spl` rc=0 vacuous_hits=0
   - `SPEC FILE VERDICT: test/01_unit/lib/nogc_async_mut/mcp_sdk/core/core_facade_spec.spl declared>=2 executed=2 passed=1 failed=1 dropped=0`
 - `test/01_unit/lib/nogc_async_mut/monitor_link_spec.spl` rc=0 vacuous_hits=0
@@ -1153,10 +1153,10 @@ unchanged.** No further execution was attempted — see rationale below.
   - `SPEC FILE VERDICT: test/unit/lib/gc_async_mut/mcp_sdk/core/core_facade_spec.spl declared>=2 executed=2 passed=0 failed=2 dropped=0`
 - `test/unit/lib/gc_async_mut/src/tooling/tooling_facade_spec.spl` rc=0 vacuous_hits=0
   - `SPEC FILE VERDICT: test/unit/lib/gc_async_mut/src/tooling/tooling_facade_spec.spl declared>=2 executed=2 passed=1 failed=1 dropped=0`
-- `test/unit/lib/gc_async_mut/svllm/model_executor/model_loader/manifest_spec.spl` rc=0 vacuous_hits=0
-  - `SPEC FILE VERDICT: test/unit/lib/gc_async_mut/svllm/model_executor/model_loader/manifest_spec.spl declared>=9 executed=9 passed=8 failed=1 dropped=0`
-- `test/unit/lib/gc_async_mut/svllm/model_executor/model_loader/safetensors_spec.spl` rc=0 vacuous_hits=0
-  - `SPEC FILE VERDICT: test/unit/lib/gc_async_mut/svllm/model_executor/model_loader/safetensors_spec.spl declared>=10 executed=10 passed=4 failed=6 dropped=0`
+- `test/unit/lib/gc_async_mut/slang/model_executor/model_loader/manifest_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/gc_async_mut/slang/model_executor/model_loader/manifest_spec.spl declared>=9 executed=9 passed=8 failed=1 dropped=0`
+- `test/unit/lib/gc_async_mut/slang/model_executor/model_loader/safetensors_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/gc_async_mut/slang/model_executor/model_loader/safetensors_spec.spl declared>=10 executed=10 passed=4 failed=6 dropped=0`
 - `test/unit/lib/gc_async_mut/text_layout/text_layout_facade_spec.spl` rc=0 vacuous_hits=0
   - `SPEC FILE VERDICT: test/unit/lib/gc_async_mut/text_layout/text_layout_facade_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0`
 - `test/unit/lib/gpu/engine2d/backend_software_simd_spec.spl` rc=0 vacuous_hits=0

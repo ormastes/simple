@@ -3,10 +3,10 @@
 - status: `warn`
 - reason: `strict_host_prereqs_missing`
 - blocked_gate_count: `5`
-- blocked_gates: `dashboard_live_http|vllm_host|svllm_native|torch_libtorch|finetune_retry`
+- blocked_gates: `dashboard_live_http|vllm_host|slang_native|torch_libtorch|finetune_retry`
 - dashboard: `blocked`
 - vllm: `blocked`
-- svllm_native: `blocked`
+- slang_native: `blocked`
 - torch_libtorch: `blocked`
 - finetune_retry: `blocked`
 - primary_blocked_gate: `dashboard_live_http`
@@ -23,23 +23,23 @@
 - python_vllm_module: `missing`
 - local_gpu: `available`
 - vllm_next_action: `install local vllm command and Python module, keep GPU visible, then start the configured endpoint`
-- svllm_read_range: `missing`
-- svllm_pinned_buffer: `missing`
-- svllm_device_staging: `missing`
-- svllm_capability_source: `missing`
-- svllm_capability_source_status: `missing`
-- svllm_capability_evidence_path: ``
-- svllm_capability_evidence: `missing`
-- svllm_capability_evidence_sha256: `missing`
-- svllm_capability_evidence_source: `missing`
-- svllm_capability_evidence_schema_version: `missing`
-- svllm_capability_probe_event: `missing`
-- svllm_capability_probe_status: `missing`
-- svllm_capability_probe_exit: `missing`
-- svllm_capability_evidence_read_range: `missing`
-- svllm_capability_evidence_pinned_buffer: `missing`
-- svllm_capability_evidence_device_staging: `missing`
-- svllm_next_action: `provide matching SVLLM_NATIVE_CAPABILITY_SOURCE and schema-v1 capability evidence for read_range, pinned_buffer, and device_staging`
+- slang_read_range: `missing`
+- slang_pinned_buffer: `missing`
+- slang_device_staging: `missing`
+- slang_capability_source: `missing`
+- slang_capability_source_status: `missing`
+- slang_capability_evidence_path: ``
+- slang_capability_evidence: `missing`
+- slang_capability_evidence_sha256: `missing`
+- slang_capability_evidence_source: `missing`
+- slang_capability_evidence_schema_version: `missing`
+- slang_capability_probe_event: `missing`
+- slang_capability_probe_status: `missing`
+- slang_capability_probe_exit: `missing`
+- slang_capability_evidence_read_range: `missing`
+- slang_capability_evidence_pinned_buffer: `missing`
+- slang_capability_evidence_device_staging: `missing`
+- slang_next_action: `provide matching SLANG_NATIVE_CAPABILITY_SOURCE and schema-v1 capability evidence for read_range, pinned_buffer, and device_staging`
 - python_torch_cuda_available: `true`
 - python_torch_cuda_device_count: `2`
 - python_torch_error: `none`

@@ -1,7 +1,7 @@
 # LLM Runtime vLLM/Torch Feature Requests
 
 Tracker for host-dependent runtime work discovered while hardening the local
-LLM dashboard, vLLM control surface, svLLM/NVFS streaming path, and Torch
+LLM dashboard, vLLM control surface, Slang/NVFS streaming path, and Torch
 interface.
 
 Id scheme: `FR-LLM-RUNTIME-####`, monotonic, no reuse.
@@ -30,17 +30,17 @@ Lifecycle: `Open` -> `Accepted` -> `Implemented` or `Rejected`.
   - [ ] Operator docs and SPipe manuals show the live evidence keys and the
         unavailable-host classification.
 
-### FR-LLM-RUNTIME-0002 - Complete svLLM NVFS streaming adapters
+### FR-LLM-RUNTIME-0002 - Complete Slang NVFS streaming adapters
 
 - **Filed-on:** 2026-06-28
 - **Filed-by:** Codex
-- **Target:** svLLM model streaming over NVFS
+- **Target:** Slang model streaming over NVFS
 - **Priority:** P1
 - **Status:** Open
 - **Requested-semantics:** Implement the native adapters required for true
   streaming model loads instead of local file-backed byte-read readiness only.
 - **Acceptance-criteria:**
-  - [ ] svLLM streaming supports async scheduling, pinned buffer registration,
+  - [ ] Slang streaming supports async scheduling, pinned buffer registration,
         and device staging through owner-layer facades.
   - [ ] Readiness evidence reports true streaming support separately from
         `local_read_bytes` fallback evidence.

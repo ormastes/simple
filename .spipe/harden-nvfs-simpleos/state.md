@@ -21,7 +21,7 @@ code-quality
 - Core NVFS engine work (arena/extent/scrub/dedup/compression/AES — tracked under `spostgre-nvfs-storage` sstack)
 - NVMe driver layer (FR-NVFS-N4a, N4b, N6x, N7x remain in backlog)
 - Formal verification (`src/verification/formal/nvfs`) changes
-- svllm `nvfs_client` — separate consumer
+- slang `nvfs_client` — separate consumer
 
 ## Acceptance Criteria
 - [x] AC-1: **No silent mount.** `nvfs_vfs_connect` returns a `Result`-style / error-bearing connection; a failed mount or invalid (non-absolute / empty-after-trim) mount path is distinguishable from a good connection, and every public helper refuses to operate on a failed connection with an explicit error rather than `false` / `[]`.
@@ -55,7 +55,7 @@ code-quality
 - `doc/05_design/nvfs_design_v2.md` (current design — v1 superseded)
 - `doc/08_tracking/feature_request/nvfs_requests.md` (FR backlog)
 - Memory: `feedback_interpreter_bulk_buffer.md` (per-char `buf.push` is a known pitfall → prefer bulk extern)
-- Memory: `feedback_svllm_drives_nvfs_design.md` (NVFS design has parallel drivers — do not step on core engine work)
+- Memory: `feedback_slang_drives_nvfs_design.md` (NVFS design has parallel drivers — do not step on core engine work)
 
 ## Phase Outputs
 
@@ -133,7 +133,7 @@ Registered in `src/compiler_rust/common/src/runtime_symbols.rs:447-460` and `src
 **Risks (from memory):**
 - `feedback_interpreter_bulk_buffer.md` — per-char `buf.push(str_char_at(...))` in interpreter is a known timeout source → use `rt_text_to_bytes` / `rt_bytes_to_text` (AC-4).
 - `feedback_extern_bootstrap_rebuild.md` — externs used above are **already registered** → no bootstrap rebuild required. ✅
-- `feedback_svllm_drives_nvfs_design.md` — the parallel `spostgre-nvfs-storage` sstack owns the NVFS engine; our scope stays at the SimpleOS connector only. ✅
+- `feedback_slang_drives_nvfs_design.md` — the parallel `spostgre-nvfs-storage` sstack owns the NVFS engine; our scope stays at the SimpleOS connector only. ✅
 - `feedback_submodule_race_parallel_dev.md` — Phase 8 (ship) must pause parallel /dev tracks before `jj commit` to avoid submodule gitlink flipping to a tree.
 - `feedback_test_imports.md` — new specs must `use std.io_runtime`, not `use app.io`.
 - `feedback_no_branches.md` — Phase 8 commits straight onto `main`.
@@ -388,7 +388,7 @@ If `use std.log.{...}` fails to import from `src/os/services/vfs/` (the log modu
 
 **AC-6 regression specs (explicit):**
 - `test/03_system/spostgre_nvfs_constants_spec.spl` — **1/1 pass** (144ms)
-- `test/01_unit/lib/gc_async_mut/svllm/nvfs_client/std_fs_spec.spl` — **6/6 pass** (41ms)
+- `test/01_unit/lib/gc_async_mut/slang/nvfs_client/std_fs_spec.spl` — **6/6 pass** (41ms)
 
 **Wider vfs service sweep (no regression):**
 - `test/01_unit/os/services/vfs/vfs_spec.spl` — pass

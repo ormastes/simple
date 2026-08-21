@@ -6,33 +6,33 @@
 - **Last-updated:** 2026-04-18
 - **Companion docs:**
   - `./README.md` — index for this directory
-  - `./svllm_requirements.md` — parallel upfront contribution from the svllm track (load this first; this doc follows its schema)
-  - `../svllm/svllm_master_plan.md` — svllm master plan (context only)
-  - `../nvfs_design.md` — NVFS design that consumes both this file and `svllm_requirements.md`
+  - `./slang_requirements.md` — parallel upfront contribution from the slang track (load this first; this doc follows its schema)
+  - `../slang/slang_master_plan.md` — slang master plan (context only)
+  - `../nvfs_design.md` — NVFS design that consumes both this file and `slang_requirements.md`
   - `../simple_db_design.md` — Simple DB engine design that originates these requirements
 
 ---
 
 ## Why this doc exists
 
-Per the memory note `feedback_svllm_drives_nvfs_design.md`, **upfront design contributions are the primary channel** through which upstream consumers steer NVFS. The post-hoc feature-request backlog at `doc/08_tracking/feature/nvfs_requests.md` is the **secondary** channel, for discoveries made during Phase 5+ implementation.
+Per the memory note `feedback_slang_drives_nvfs_design.md`, **upfront design contributions are the primary channel** through which upstream consumers steer NVFS. The post-hoc feature-request backlog at `doc/08_tracking/feature/nvfs_requests.md` is the **secondary** channel, for discoveries made during Phase 5+ implementation.
 
-This document is Simple DB's upfront contribution. It sits alongside `svllm_requirements.md` (same directory), so the NVFS designer can reconcile both in one pass.
+This document is Simple DB's upfront contribution. It sits alongside `slang_requirements.md` (same directory), so the NVFS designer can reconcile both in one pass.
 
 Simple DB commits to this contract in `../simple_db_design.md §11` ("NVFS interface assumptions") — every storage API call listed there maps to one of the S-entries below, and the engine milestones M1–M5 each depend on a named subset of the S-entries.
 
 ---
 
-## Companion to svllm_requirements.md
+## Companion to slang_requirements.md
 
-Simple DB and svllm make partially overlapping demands on NVFS. Where they align, NVFS should serve a single primitive; where they diverge, NVFS must serve both without forcing either track to degrade.
+Simple DB and slang make partially overlapping demands on NVFS. Where they align, NVFS should serve a single primitive; where they diverge, NVFS must serve both without forcing either track to degrade.
 
 ### Alignment / divergence matrix
 
-| Concern | Simple DB need | svllm need | Action for NVFS |
+| Concern | Simple DB need | slang need | Action for NVFS |
 |---|---|---|---|
-| Sealed-after-write objects | `arena_seal` for checkpoints (durable, compactable, generation-pinned) | `fs_seal` on tensor_pack / adapter objects | **Unify:** one `arena_seal(arena) -> SealToken` primitive; Simple DB uses seal + generation pinning, svllm uses seal + immutability |
-| Atomic publish | pmap-root swap for checkpoint commit (8–16 B record) | manifest rename/flip (arbitrary-size JSON) | **Unify:** generic `atomic_pointer_record_publish(name, bytes, expected_gen) -> PublishResult`. Simple DB's pmap CAS and svllm's manifest flip share this abstraction |
+| Sealed-after-write objects | `arena_seal` for checkpoints (durable, compactable, generation-pinned) | `fs_seal` on tensor_pack / adapter objects | **Unify:** one `arena_seal(arena) -> SealToken` primitive; Simple DB uses seal + generation pinning, slang uses seal + immutability |
+| Atomic publish | pmap-root swap for checkpoint commit (8–16 B record) | manifest rename/flip (arbitrary-size JSON) | **Unify:** generic `atomic_pointer_record_publish(name, bytes, expected_gen) -> PublishResult`. Simple DB's pmap CAS and slang's manifest flip share this abstraction |
 | Pinned buffers | Not required at M1 (sync path); useful at M3 (AIO) | **Required from v0** (weight streaming to GPU) | NVFS must offer `fs_register_buffer` from milestone N2; Simple DB adopts it at its M3 |
 | Append arenas | WAL aligned-append to device granule | `append_only` telemetry logs | **Unify:** `arena_append_aligned(arena, bytes, granule) -> Offset`. Both consumers converge on the same call; WAL needs group-commit semantics on top |
 | Short-lived scratch | DB_TEMP for sort spill, hash build | `temp` for request-local scratch | **Unify:** `DB_TEMP` class; drop-on-mount semantics satisfy both |
@@ -42,8 +42,8 @@ Simple DB and svllm make partially overlapping demands on NVFS. Where they align
 ### Convergence candidates (NVFS author: please reconcile)
 
 - **C1.** `atomic_pointer_record_publish` subsumes both pmap-root CAS and manifest flip. Semantics: publish a small opaque record under a named slot; accept an `expected_generation` for CAS. The record's bytes are opaque to NVFS; it only needs durability + generation bump + old-gen reader-pinning.
-- **C2.** `arena_seal` is a single primitive serving both checkpoint-commit (Simple DB) and weight-seal (svllm). The distinction is purely in caller policy, not in NVFS.
-- **C3.** `arena_append_aligned` unifies WAL and telemetry logs. Simple DB needs a group-commit helper on top; svllm does not, but the underlying call is the same.
+- **C2.** `arena_seal` is a single primitive serving both checkpoint-commit (Simple DB) and weight-seal (slang). The distinction is purely in caller policy, not in NVFS.
+- **C3.** `arena_append_aligned` unifies WAL and telemetry logs. Simple DB needs a group-commit helper on top; slang does not, but the underlying call is the same.
 
 ---
 
@@ -70,7 +70,7 @@ Simple DB expects to drive NVFS near the device's 4K-random-write durability env
 
 ## Required API surface
 
-Numbering uses prefix **S** (for Simple DB) to avoid collision with svllm's `R1..R9`.
+Numbering uses prefix **S** (for Simple DB) to avoid collision with slang's `R1..R9`.
 
 ### S1. arena_create per storage class (load-bearing, P0)
 
@@ -78,7 +78,7 @@ Numbering uses prefix **S** (for Simple DB) to avoid collision with svllm's `R1.
 fn arena_create(class: StorageClass, hint: ArenaHint) -> Result<ArenaId, FsErr>
 ```
 
-- **StorageClass** is the authoritative 6-class enum defined in `../nvfs_design.md §3`. Simple DB uses: `META_DURABLE` (catalog), `DB_WAL` (wal fork), `DB_TEMP` (temp fork, hash build, sort spill), `GENERAL_MUTABLE` (rel.main, rel.pmap, rel.vmap, rel.fmap), `CHECKPOINT_SNAPSHOT` (sealed checkpoint arenas), `MODEL_IMMUTABLE` (unused by Simple DB; svllm only).
+- **StorageClass** is the authoritative 6-class enum defined in `../nvfs_design.md §3`. Simple DB uses: `META_DURABLE` (catalog), `DB_WAL` (wal fork), `DB_TEMP` (temp fork, hash build, sort spill), `GENERAL_MUTABLE` (rel.main, rel.pmap, rel.vmap, rel.fmap), `CHECKPOINT_SNAPSHOT` (sealed checkpoint arenas), `MODEL_IMMUTABLE` (unused by Simple DB; slang only).
 - **ArenaHint** may carry: expected size, preferred granule, locality group (for FDP PID), ZNS-zone hint.
 - **Failure modes:** out-of-space, invalid class for this mount, capability-probe mismatch.
 - **Durability after create:** arena metadata durable; no data yet.
@@ -159,7 +159,7 @@ fn atomic_pointer_record_publish(
 
 - Publish `bytes` under `(scope, name)`. If `expected_gen = Some(g)` and the stored generation differs, fail with `CasMismatch(actual_gen)`. Otherwise bump generation and return the new one in `PublishResult`.
 - On devices with fused Compare-and-Write (`fs_caps().supports_cas == true`), NVFS implements this as a single fused NVMe op; otherwise it uses a double-buffered intent-log with a sequence number (research §11.5 + research OQ-14).
-- Simple DB uses this for pmap-root atomic swap at checkpoint commit. svllm uses it for manifest flip. **This is convergence candidate C1** — NVFS must not fork into two APIs.
+- Simple DB uses this for pmap-root atomic swap at checkpoint commit. slang uses it for manifest flip. **This is convergence candidate C1** — NVFS must not fork into two APIs.
 - **Failure modes:** `CasMismatch` (caller retries), media error (caller aborts commit).
 
 ### S7. NVMe Flush / FUA pass-through tied to durability classes (load-bearing, P0)
@@ -268,12 +268,12 @@ Simple DB never uses `gc_async_mut` or `nogc_async_mut_noalloc` against NVFS.
 ## Open coordination questions for the nvfs agent
 
 1. **Naming of the atomic-pointer primitive.** `atomic_pointer_record_publish` is verbose. Alternatives: `fs_publish_atomic`, `slot_cas_publish`, `named_record_publish`. Pick one; Simple DB will follow.
-2. **Per-op durability flag vs per-arena policy.** Simple DB prefers per-op (S2's `Durability` enum). svllm's R4 prefers per-open-handle default with per-op override. Can both be served by a single API with `Durability::INHERIT` as the default?
+2. **Per-op durability flag vs per-arena policy.** Simple DB prefers per-op (S2's `Durability` enum). slang's R4 prefers per-open-handle default with per-op override. Can both be served by a single API with `Durability::INHERIT` as the default?
 3. **AIO signatures.** When Simple DB reaches M3, what is the NVFS async API shape? io_uring completion entries? Simple's actor mailboxes? Decide before M3 so Simple DB's AIO plan is concrete.
 4. **Generation-number width.** Simple DB needs 64-bit generations (commit LSNs are 64 bit). Confirm NVFS's `Generation` type is `u64`.
 5. **SealToken opacity.** Is `SealToken` a `u64` (opaque ID) or a struct carrying generation + checksum? Simple DB prefers opaque; reveal only what `arena_discard`'s `keep_gen_above` needs.
 6. **DB_TEMP drop-on-mount.** Simple DB needs this for hash-build / sort-spill — temp arenas MUST be discarded at every fresh mount. Confirm NVFS guarantees this in its recovery path.
 7. **Multi-drive mount.** If NVFS spans two NVMe drives, does Simple DB see one logical arena space or must it issue per-drive calls? Simple DB prefers single logical space; NVFS handles striping.
 8. **Capability-probe caching window.** Simple DB re-reads `FsCaps` at every checkpoint. Is that too infrequent (mid-mount hot-plug) or too frequent (wasted probe)? Propose a cadence.
-9. **Reconciliation with svllm_requirements.md.** Please produce a single NVFS design (§11 of `../nvfs_design.md`) that serves both without two API surfaces. Call out any conflict you find so Simple DB can negotiate.
+9. **Reconciliation with slang_requirements.md.** Please produce a single NVFS design (§11 of `../nvfs_design.md`) that serves both without two API surfaces. Call out any conflict you find so Simple DB can negotiate.
 10. **ZNS-only mode.** If NVFS is mounted on a pure-ZNS drive, does `GENERAL_MUTABLE` have meaningful semantics or does it degrade to copy-on-seal like `MODEL_IMMUTABLE`? Answer drives Simple DB's rel.main placement.

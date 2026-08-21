@@ -26,7 +26,7 @@ External repositories mounted as git submodules.
 | Path | URL | Description |
 |---|---|---|
 | `07_ml/simple_deeplearning_study` | `ormastes/simple_deeplearning_study` | Deep learning study examples in Simple |
-| `07_ml/svllm` | `ormastes/svllm` | Simple vLLM inference engine |
+| `07_ml/slang` | `ormastes/slang` | Simple Slang local inference engine (upstream repository name pending rename) |
 | `08_gpu/cuda_exercise` | `ormastes/cuda_exercise` | CUDA exercise workbook |
 | `08_gpu/simple_cuda_example` | `ormastes/simple_cuda_example` | CUDA examples in Simple |
 | `10_tooling/korean_stock_mcp` | `ormastes/korean_stock_mcp` | Korean stock market MCP server |

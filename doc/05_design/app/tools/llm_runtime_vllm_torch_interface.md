@@ -82,7 +82,7 @@ Date: 2026-06-25
   `status=missing` with `reason=invalid_endpoint`.
 - Malformed adapter entries become `reason=invalid_adapter_entry` instead of
   being silently dropped.
-- Known Torch/SFFI or svLLM loader placeholder behavior becomes
+- Known Torch/SFFI or Slang loader placeholder behavior becomes
   `status=blocked`; it must not be normalized into `ready`.
 - Missing local vLLM or GPU resources become `skipped` or `blocked` evidence
   before spawn/fetch paths are attempted.
@@ -91,7 +91,7 @@ Date: 2026-06-25
 
 ## Test Design
 
-- Manifest with base model and no LoRA is blocked by default while Torch/svLLM
+- Manifest with base model and no LoRA is blocked by default while Torch/Slang
   placeholder readiness remains unresolved.
 - Absent chat template is reported as `none`; a configured but missing chat
   template path is reported as `missing`.
@@ -137,7 +137,7 @@ new scheduler, no dynamic adapter plugin, and no claim of live serving until
 real endpoint evidence exists.
 
 If implementation starts from the runtime blocker lane instead, the cut is:
-clear the reported Torch availability/seed/device placeholders and svLLM loader
+clear the reported Torch availability/seed/device placeholders and Slang loader
 stubs with focused tests, then return to the readiness bridge.
 
 ## Implemented Option A Evidence
@@ -155,7 +155,7 @@ stubs with focused tests, then return to the readiness bridge.
 The implemented bridge validates required local manifest fields, reports
 optional absence with explicit text states, surfaces malformed adapter tokens,
 blocks untrusted dynamic LoRA, omits adapter paths and sensitive-looking model
-labels from JSONL evidence, and keeps Torch/svLLM placeholder readiness as
+labels from JSONL evidence, and keeps Torch/Slang placeholder readiness as
 `blocked` by default while those owner modules are known placeholders. The
 static serve-plan path emits sanitized vLLM command metadata and rejects invalid
 endpoints without starting vLLM or probing live HTTP endpoints.
@@ -514,7 +514,7 @@ runtime panic. Torch training seed helpers now return explicit
 SFFI exists. Explicit Torch CUDA device ids now pass through GC/NoGC backend
 placement, `Tensor.cuda`, and stream creation instead of being forced to device
 `0`; optimizer state initialization no longer silently moves state tensors to
-CUDA `0` while device-aware optimizer-state SFFI remains unselected. svLLM
+CUDA `0` while device-aware optimizer-state SFFI remains unselected. Slang
 canonical v0 manifests now parse, non-empty tensor/chunk
 metadata materializes into `TensorPack`, declared chunk digests are shape
 validated, already-read manifests load without throwing, and filesystem-backed
@@ -535,7 +535,7 @@ scheduling or GPU staging. Streaming readiness JSONL now carries a separate
 `local_read_bytes` field so clean pack roots can prove local bytes are readable
 without turning native streaming readiness green. The native capability probe
 now executes the StdFs NVFS client spec and records
-`svllm_native_capability_local_read_range_bytes_status` plus a reason field so
+`slang_native_capability_local_read_range_bytes_status` plus a reason field so
 strict evidence can show local file-backed read-range progress while keeping
 native `read_range`, pinned-buffer registration, and device staging
 unsupported. Remaining blockers include full async NVFS scheduling,

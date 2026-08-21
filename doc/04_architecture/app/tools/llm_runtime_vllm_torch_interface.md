@@ -100,5 +100,5 @@ training primitives only when a later lane explicitly enters training.
   evidence remains host-dependent.
 - Dynamic adapter resolver plugins.
 - GPU memory accounting beyond optional readback.
-- Full svLLM native streaming through NVFS scheduling, pinned-buffer
+- Full Slang native streaming through NVFS scheduling, pinned-buffer
   registration, and device staging.
