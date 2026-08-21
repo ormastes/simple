@@ -1,0 +1,42 @@
+# @cover src/lib/nogc_sync_mut/test_runner/test_db_core.spl
+# Reproduce check for
+# doc/08_tracking/bug/runner_test_db_core_imports_nonexistent_stringinterner_2026-08-20.md
+#
+# `test_db_core.spl` imported `std.test_runner.string_interner.StringInterner`,
+# a symbol that module does not define (it defines `TestDbStringInterner`; the
+# rename was deliberate, see string_interner.spl:34-35). The bad import is only
+# a WARNING, so the failure was deferred to `RunnerTestDbCore.empty()`, which
+# died with `method `empty` not found on type `dict``. Pre-fix this spec fails
+# at the first expectation; post-fix it is green. It also pins that the fix was
+# NOT made by re-adding a `StringInterner` alias.
+use std.nogc_sync_mut.test_runner.test_db_core.{RunnerTestDbCore}
+use std.test_runner.string_interner.{TestDbStringInterner}
+
+describe "RunnerTestDbCore is constructible":
+    it "empty() builds a database with no records":
+        var db = RunnerTestDbCore.empty()
+        expect(db.tests.len()).to_equal(0)
+        expect(db.files.len()).to_equal(0)
+        expect(db.suites.len()).to_equal(0)
+        expect(db.dirty).to_equal(false)
+
+    it "carries a real TestDbStringInterner, not an empty dict":
+        var db = RunnerTestDbCore.empty()
+        expect(db.interner.len()).to_equal(0)
+        expect(db.interner.contains("nope")).to_equal(false)
+
+    it "interns through the field the broken import used to blank out":
+        var db = RunnerTestDbCore.empty()
+        val id = db.interner.intern("test/01_unit/example_spec.spl")
+        expect(id).to_equal(0)
+        expect(db.interner.get(id)).to_equal("test/01_unit/example_spec.spl")
+        expect(db.interner.len()).to_equal(1)
+
+    it "find_test_index reports absence on an empty database":
+        var db = RunnerTestDbCore.empty()
+        expect(db.find_test_index(0, 0)).to_equal(-1)
+
+describe "the renamed interner class is the only one":
+    it "TestDbStringInterner.empty() is the constructor the module provides":
+        var interner = TestDbStringInterner.empty()
+        expect(interner.len()).to_equal(0)

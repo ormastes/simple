@@ -1,7 +1,7 @@
 # `RunnerTestDbCore` cannot be constructed — `test_db_core.spl` imports a `StringInterner` that does not exist
 
 - **Filed:** 2026-08-20
-- **Status:** OPEN — root-caused, one-line-ish fix identified, not applied
+- **Status:** RESOLVED (2026-08-21)
 - **Severity:** medium (the module is unusable and untestable; it is NOT on the
   live `bin/simple test` path, so nothing is currently broken *because* of it)
 - **Found while:** investigating
@@ -111,3 +111,25 @@ reopen that defect.
 - `doc/08_tracking/bug/test_runner_spins_at_100pct_after_summary_2026-08-18.md`
   — the investigation this was found during; §4 of its 2026-08-20 note records
   the same evidence in less detail.
+
+## Resolution (2026-08-21)
+
+Renamed every stale importer to the real symbol `TestDbStringInterner`. The
+record listed only `test_db_core.spl`, but the scan found **four** files
+carrying the dead name: `test_db_core.spl`, `test_db_parser.spl`,
+`test_db_serializer.spl`, `test_db_validation.spl`. All four were fixed; no
+`StringInterner` alias was reintroduced (`grep -rn 'StringInterner'
+src/lib/nogc_sync_mut/test_runner/` now shows only `TestDbStringInterner`, plus
+two prose comments that merely name the old symbol).
+
+**Reproduce check:** `test/01_unit/lib/test_runner/test_db_core_construction_spec.spl`
+(mirrored under `test/unit/...`) — 5 examples covering `RunnerTestDbCore.empty()`,
+the interner field's identity (`len`/`contains`/`intern`/`get`), and
+`find_test_index` on an empty database. This is coverage the module has never had.
+
+Evidence, one binary, one tree:
+- pre-fix (name reverted by sed): `Results: 5 total, 1 passed, 4 failed`, each
+  failure `semantic: method 'empty' not found on type 'dict' (receiver value: {})`
+  — the exact reported error.
+- post-fix: `Results: 5 total, 5 passed, 0 failed`, `PASS`.
+- probe from the record prints `tests=0` instead of erroring.
