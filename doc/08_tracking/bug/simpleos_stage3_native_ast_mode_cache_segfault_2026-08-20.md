@@ -1166,3 +1166,35 @@ therefore treat a cache miss as inconclusive and fall back to
 `module_surface_registry_index`, which already scans those retained scalar
 arrays when the construction Dict is unavailable. The three-cycle cap prevents
 claiming this queued correction until the next fresh session.
+
+## Scalar registry fallback Cycle 1 (2026-08-22)
+
+The fresh cycle removed every `missing importing module surface` diagnostic
+and advanced HIR from source 1 to source 71. Imported composite registration
+then produced bogus dependencies such as `Type`, `Expr`, and `Block`. The
+field array and its scalar projections survived; the defect is that composite
+dependency discovery always traversed the retained parser `Type` enum instead
+of preferring `ModuleSurfaceField.type_name` and `array_element_name` as the
+callable path already does. Native scalar projections must be authoritative
+for simple named and array fields, with parser-Type traversal reserved only for
+unprojected compound shapes.
+
+Cycle 2 regressed nondeterministically: `CompileOptions` itself was again
+unresolved and the crash moved from source 71 to source 61. A fallback only on
+cache miss is therefore insufficient; the transient Dict can also report a
+spurious hit or wrong retained index. Retained HIR lookup must bypass the
+per-lowerer Dict entirely and call `module_surface_registry_index`, whose
+construction Dict is rejected when invalid and whose ordered scalar arrays are
+the authority. This reintroduces linear lookup cost and is a recorded
+performance follow-up; correctness and Stage-3 admission take precedence over
+an untrustworthy O(1) cache.
+
+Cycle 3 stabilized cache-independent routing but still lost facade declarations
+such as `CompileOptions`, `BootLogger`, and `SourceFile`. Inventory found three
+remaining retained HIR traversals in `module_reexport_materialization.spl`
+reading nested `ParserImport.items` directly: facade chase, enum payload
+explicit imports, and callable dependency explicit imports. Those stale arrays
+bypass the flattened projection and explain why direct modules resolve while
+facade exports do not. All three must consume the validated offset/name/alias
+scalar arrays. This correction is queued after the three-cycle cap and remains
+unclaimed until a fresh admitted run.

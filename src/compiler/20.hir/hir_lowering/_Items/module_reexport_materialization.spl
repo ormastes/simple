@@ -85,16 +85,19 @@ impl HirLowering:
 
         var import_idx = 0
         while import_idx < facade_mod.imports.len():
-            val imp = facade_mod.imports[import_idx]
-            var matches = imp.items.len() == 0
+            val item_start = facade_mod.import_item_offsets[import_idx]
+            val item_end = facade_mod.import_item_offsets[import_idx + 1]
+            var matches = item_start == item_end
             var source_item = wanted
-            var item_idx = 0
-            while item_idx < imp.items.len():
-                val item = imp.items[item_idx]
-                val local = if item.has_alias: item.alias else: item.name
-                if local == wanted or item.name == wanted:
+            var item_idx = item_start
+            while item_idx < item_end:
+                val item_name = facade_mod.import_item_names[item_idx]
+                val local = if facade_mod.import_item_has_alias[item_idx]:
+                    facade_mod.import_item_aliases[item_idx]
+                else: item_name
+                if local == wanted or item_name == wanted:
                     matches = true
-                    source_item = item.name
+                    source_item = item_name
                 item_idx = item_idx + 1
             if matches and import_idx < facade_mod.import_target_indices.len():
                 val next_index = facade_mod.import_target_indices[import_idx]
@@ -253,25 +256,28 @@ impl HirLowering:
         while import_index < imported_mod.imports.len() and
               import_index < imported_mod.import_target_indices.len():
             val target_index = imported_mod.import_target_indices[import_index]
-            val import_decl = imported_mod.imports[import_index]
-            var item_index: i64 = 0
-            while item_index < import_decl.items.len():
-                val item = import_decl.items[item_index]
-                val local_name = if item.has_alias: item.alias else: item.name
+            val item_start = imported_mod.import_item_offsets[import_index]
+            val item_end = imported_mod.import_item_offsets[import_index + 1]
+            var item_index: i64 = item_start
+            while item_index < item_end:
+                val item_name = imported_mod.import_item_names[item_index]
+                val local_name = if imported_mod.import_item_has_alias[item_index]:
+                    imported_mod.import_item_aliases[item_index]
+                else: item_name
                 if local_name == dependency and target_index >= 0 and
                    target_index < self.module_surfaces.surfaces.len():
                     val target = self.module_surfaces.surfaces[target_index]
-                    if hir_module_declares_item(target, item.name):
-                        val kind = hir_module_item_terminal_kind(target, item.name)
+                    if hir_module_declares_item(target, item_name):
+                        val kind = hir_module_item_terminal_kind(target, item_name)
                         if kind != "":
                             return HirMaterializedPayloadOrigin(
                                 found: true,
                                 module_name: hir_pkg_canonical_module_name(target.module_name),
-                                item_name: item.name,
+                                item_name: item_name,
                                 item_kind: kind,
                                 module_key: target.preferred_registry_name)
                     val hop = self.find_reexport_source(
-                        target, target.preferred_registry_name, item.name)
+                        target, target.preferred_registry_name, item_name)
                     if hop.found and hop.module_index >= 0:
                         val terminal = self.module_surfaces.surfaces[hop.module_index]
                         val hop_kind = hir_module_item_terminal_kind(terminal, hop.item_name)
@@ -515,21 +521,24 @@ impl HirLowering:
             while import_index < imported_mod.imports.len() and
                   import_index < imported_mod.import_target_indices.len():
                 val target_index = imported_mod.import_target_indices[import_index]
-                val import_decl = imported_mod.imports[import_index]
-                var item_index: i64 = 0
-                while item_index < import_decl.items.len():
-                    val item = import_decl.items[item_index]
-                    val local_name = if item.has_alias: item.alias else: item.name
+                val item_start = imported_mod.import_item_offsets[import_index]
+                val item_end = imported_mod.import_item_offsets[import_index + 1]
+                var item_index: i64 = item_start
+                while item_index < item_end:
+                    val item_name = imported_mod.import_item_names[item_index]
+                    val local_name = if imported_mod.import_item_has_alias[item_index]:
+                        imported_mod.import_item_aliases[item_index]
+                    else: item_name
                     if local_name == dependency and target_index >= 0 and
                        target_index < self.module_surfaces.surfaces.len():
                         val target = self.module_surfaces.surfaces[target_index]
                         var candidate_target = target_index
-                        var candidate_item = item.name
+                        var candidate_item = item_name
                         var candidate_found = hir_module_declares_item(
-                            target, item.name)
+                            target, item_name)
                         if not candidate_found:
                             val hop = self.find_reexport_source(
-                                target, target.preferred_registry_name, item.name)
+                                target, target.preferred_registry_name, item_name)
                             if hop.found and hop.module_index >= 0:
                                 candidate_target = hop.module_index
                                 candidate_item = hop.item_name
