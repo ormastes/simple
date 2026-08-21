@@ -641,3 +641,12 @@ The opaque-handle implementation still uses registry locks and returns zero or
 false for stale handles; therefore the current safe-looking Simple wrappers are
 not yet verified lock-free or fail-closed and need a separate API/ownership
 migration before critical-mode approval.
+
+The 22 implemented RSA, RSA-PSS, Ed25519, and ECDSA P-256 sign/verify symbols
+now have compiler-owned ABI contracts, moving coverage to 1,071/719. The
+generated static table is tested to resolve representative checked RSA verify,
+Ed25519 verify, and ECDSA sign names to their exact provider addresses. Existing
+checked transports retain their tri-state verification and status/payload
+semantics; legacy payload-only entries remain compatibility-only. This is
+build-time metadata and provider-identity validation only, adding no per-call
+lookup, hashing, allocation, lock, or crypto operation.

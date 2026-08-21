@@ -276,6 +276,31 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_atomic_flag_clear", &[I64], &[]),
     RuntimeFuncSpec::new("rt_atomic_flag_free", &[I64], &[]),
     // =========================================================================
+    // Signature verification and generation
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_rsa_sha256_verify", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_rsa_sha256_verify_checked", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_rsa_sha512_verify", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_rsa_sha512_verify_checked", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_rsa_pss_sha256_verify", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_rsa_pss_sha256_verify_checked", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_rsa_pss_sha384_verify", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_rsa_pss_sha384_verify_checked", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_rsa_pss_sha512_verify", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_rsa_pss_sha512_verify_checked", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_ed25519_verify", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_ed25519_verify_checked", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_ecdsa_p256_verify", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_ecdsa_p256_verify_checked", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_rsa_sha256_sign", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_rsa_sha256_sign_checked", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_rsa_sha512_sign", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_rsa_sha512_sign_checked", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_ed25519_sign", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_ed25519_sign_checked", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_ecdsa_p256_sign", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_ecdsa_p256_sign_checked", &[I64, I64], &[I64]),
+    // =========================================================================
     // AOP runtime operations
     // =========================================================================
     RuntimeFuncSpec::new("rt_aop_invoke_around", &[I64, I64, I64, I64, I64], &[I64]),

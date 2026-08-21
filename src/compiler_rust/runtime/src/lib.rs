@@ -475,6 +475,32 @@ fn runtime_symbol_table_atomic_contracts_dispatch() {
 
 #[cfg(all(test, feature = "runtime-symbol-table"))]
 #[test]
+fn runtime_symbol_table_signature_contracts_resolve_exact_providers() {
+    for (name, expected) in [
+        (
+            "rt_rsa_sha256_verify_checked",
+            value::sffi::signature::rt_rsa_sha256_verify_checked as *const u8,
+        ),
+        (
+            "rt_ed25519_verify_checked",
+            value::sffi::signature::rt_ed25519_verify_checked as *const u8,
+        ),
+        (
+            "rt_ecdsa_p256_sign_checked",
+            value::sffi::signature::rt_ecdsa_p256_sign_checked as *const u8,
+        ),
+    ] {
+        let actual = RUNTIME_SYMBOL_ENTRIES
+            .iter()
+            .find(|entry| entry.name == name)
+            .unwrap_or_else(|| panic!("{name} provider must be registered"))
+            .ptr;
+        assert_eq!(actual, expected, "{name} resolved to a different provider");
+    }
+}
+
+#[cfg(all(test, feature = "runtime-symbol-table"))]
+#[test]
 fn runtime_symbol_table_keeps_struct_allocator_and_receiver_validator_paired() {
     let allocator = RUNTIME_SYMBOL_ENTRIES
         .iter()
