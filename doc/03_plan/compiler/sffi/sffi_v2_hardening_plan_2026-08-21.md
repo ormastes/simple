@@ -295,8 +295,8 @@ Current evidence after the thread synchronization boundary migration:
 
 - 3,964 distinct symbols in the current backing census, including 3,962
   compiler-owned canonical symbols;
-- 14,737 declaration sites;
-- 14,199 sites have neither an explicit FFI-unsafe tag nor a local contract;
+- 14,706 declaration sites;
+- 14,168 sites have neither an explicit FFI-unsafe tag nor a local contract;
 - 502 sites declare a typed/documented contract but lack the unsafe tag;
 - 24 declarations now carry explicit FFI authority
   but still require canonical ABI-contract metadata;
@@ -308,7 +308,7 @@ Current evidence after the thread synchronization boundary migration:
 - among `rt_*`/`spl_*` declarations, 1,855 sites reference symbols classified
   genuinely missing and 321 are backed only in owned C runtime source.
 
-These are migration inputs, not 14,737 independent implementations. The audit
+These are migration inputs, not 14,706 independent implementations. The audit
 now hashes normalized declaration shapes and groups them by symbol. The next
 tooling step replaces the text-derived shape with the resolved HIR ABI hash,
 rejects the 401 conflict groups, and converts compatibility modules to
@@ -340,8 +340,8 @@ call-site migration ledger at
 `doc/08_tracking/bug/data/sffi_call_authority_2026-08-21.tsv`. It recognizes
 file-local externs and explicit `rt_*`/`spl_*` imports from SFFI modules, tracks
 function and lexical FFI authority by indentation, and can fail CI with
-`SFFI_FAIL_ON_MISSING=1`. The current source/test census contains 22,479
-missing-authority calls, 51 lexical scopes, and 24 function scopes across 3,162
+`SFFI_FAIL_ON_MISSING=1`. The current source/test census contains 22,455
+missing-authority calls, 51 lexical scopes, and 24 function scopes across 3,161
 files. It completed in 24.21 seconds at 7,424 KiB maximum RSS. This is a
 migration index rather than ABI proof; aliases, generated bindings, and
 re-exports still require resolved-HIR identity.
@@ -373,6 +373,13 @@ and 73 duplicate raw calls. The TLS facade exposes only validated wrapper
 types/functions and no `rt_rustls_*` provider symbol; both facades compile and
 their six structural compatibility cases pass. Static re-export resolution
 again leaves the foreign-call hot path unchanged.
+
+The byte-identical audio pair is consolidated in the same way, removing 31
+duplicate declarations and 24 duplicate raw calls while replacing its 568-line
+skipped legacy spec with three passing facade assertions. SQLite was
+deliberately not collapsed in this batch: its pair contains a real placeholder
+construction algorithm difference, so performance/semantic equivalence must be
+measured before selecting the canonical implementation.
 
 Thread-pool construction no longer treats a zero/invalid native worker handle
 as a successfully degraded pool. The unused duplicate thread-create extern was
