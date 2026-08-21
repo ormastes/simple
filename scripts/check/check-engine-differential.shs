@@ -21,15 +21,66 @@
 # The native lane runs a full native-build per fixture and takes several
 # minutes; DIFF_LANES=interpret,jit is the fast pre-push configuration.
 
-set -e
+# --selftest (fatal, runs before any scan) proves the wrapper's own
+# classification: that a non-zero harness status becomes FAIL and a zero status
+# becomes PASS, and that a vacuous run (0 fixtures) is ERROR rather than a pass.
+#
+# Verdict line (house convention, last line of stdout):
+#   PASS — <n> fixture(s) checked, unbaselined divergence(s)=0   exit 0
+#   FAIL — <n> fixture(s) checked, unbaselined divergence(s)=<k> exit 1
+#   ERROR — nothing was checked (<reason>)                       exit 2
+#
+# A Phase 9 evidence receipt is minted for the verdict (ADDITIVE: emit_receipt
+# never changes this gate's verdict or exit status).
 
-if [ ! -e .git ] && [ ! -e .jj ]; then
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+. "$ROOT_DIR/scripts/check/lib/emit_receipt.shs"
+
+FIXTURE_DIR="test/fixtures/engine_differential"
+
+# classify <harness-rc> <fixture-count> -> echoes the verdict, returns the exit
+# code the gate should use. Pure function, so --selftest can exercise it.
+classify() {
+    _cd_rc="$1"
+    _cd_n="$2"
+    if [ "${_cd_n:-0}" -eq 0 ]; then
+        echo "ERROR — nothing was checked (0 fixture(s) in $FIXTURE_DIR; a vacuous run is not a pass)"
+        return 2
+    fi
+    if [ "$_cd_rc" -ne 0 ]; then
+        echo "FAIL — $_cd_n fixture(s) checked, unbaselined divergence(s)=$_cd_rc"
+        return 1
+    fi
+    echo "PASS — $_cd_n fixture(s) checked, unbaselined divergence(s)=0"
+    return 0
+}
+
+if [ "${1:-}" = "--selftest" ]; then
+    _sfail=0
+    _v=$(classify 0 11); _rc=$?
+    [ "$_rc" -eq 0 ] || { echo "selftest FAIL: rc=0 did not classify as PASS" >&2; _sfail=1; }
+    case "$_v" in "PASS — 11 fixture(s) checked, unbaselined divergence(s)=0") ;;
+        *) echo "selftest FAIL: unexpected PASS verdict: $_v" >&2; _sfail=1 ;; esac
+    _v=$(classify 3 11); _rc=$?
+    [ "$_rc" -eq 1 ] || { echo "selftest FAIL: rc=3 did not classify as FAIL" >&2; _sfail=1; }
+    case "$_v" in *"unbaselined divergence(s)=3") ;;
+        *) echo "selftest FAIL: FAIL verdict did not name the count: $_v" >&2; _sfail=1 ;; esac
+    _v=$(classify 0 0); _rc=$?
+    [ "$_rc" -eq 2 ] || { echo "selftest FAIL: 0 fixtures did not classify as ERROR" >&2; _sfail=1; }
+    case "$_v" in "ERROR — nothing was checked"*) ;;
+        *) echo "selftest FAIL: unexpected ERROR verdict: $_v" >&2; _sfail=1 ;; esac
+    [ "$_sfail" -eq 0 ] || { echo "selftest FAILED"; exit 2; }
+    echo "PASS — 3 fixture(s) checked, selftest only (no scan requested)"
+    exit 0
+fi
+
+if [ ! -d .git ] && [ ! -d .jj ]; then
     echo "ERROR — must run from the repo root (native-build resolves its source root from cwd); nothing was checked"
     exit 2
 fi
 
-if [ ! -d test/fixtures/engine_differential ]; then
-    echo "ERROR — fixture corpus test/fixtures/engine_differential is missing; nothing was checked"
+if [ ! -d "$FIXTURE_DIR" ]; then
+    echo "ERROR — nothing was checked (fixture corpus $FIXTURE_DIR is missing)"
     exit 2
 fi
 
@@ -39,4 +90,17 @@ if [ ! -x "$SIMPLE" ]; then
     exit 2
 fi
 
+N=$(find "$FIXTURE_DIR" -type f -name '*.spl' | wc -l | tr -d ' ')
+
+# The harness's exit status is read DIRECTLY into a variable on the line after
+# the invocation, never through a pipe: a pipeline's $? is the last command's
+# status and has produced false greens in this repo before.
+set +e
 "$SIMPLE" run scripts/check/check_engine_differential.spl
+HARNESS_RC=$?
+
+VERDICT=$(classify "$HARNESS_RC" "$N")
+GATE_RC=$?
+printf '%s\n' "$VERDICT"
+emit_receipt "check-engine-differential" "$VERDICT" || true
+exit "$GATE_RC"

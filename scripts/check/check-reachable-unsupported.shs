@@ -1,0 +1,249 @@
+#!/bin/sh
+# check-reachable-unsupported.shs — hardening plan Phase 9 release obligation
+# "reachable unsupported 0" (definition: plan sections 11.6 and 22.1).
+#
+# WHAT IT MEASURES
+#   The number of code paths that are REACHABLE from the compiler's main entry
+#   (src/app/cli/main.spl -> src/compiler/80.driver) and end in an
+#   "unsupported"/"not implemented" diagnostic. The classification itself lives
+#   in the pure-Simple driver src/app/check/reachable_unsupported_census.spl,
+#   which joins the `state: unsupported` rows of every transition table in
+#   spec/compiler_schema/transitions/ against that table's `universe:` block —
+#   the set of tags the producer can actually construct. A row outside the
+#   universe describes a node no reachable path can produce, and is excluded on
+#   purpose: counting it would let the number be lowered by deleting dead rows
+#   rather than by implementing anything. See the driver's header for the full
+#   argument.
+#
+# WHY A RATCHET AND NOT A HARD ZERO
+#   The tree carries hundreds of deliberately-unsupported transitions, each
+#   already loud (a named, spanned diagnostic — that is what the transition
+#   census gate proves). The obligation is that the population never GROWS
+#   while the lanes close it out. The baseline lives in
+#   scripts/check/reachable_unsupported_baseline.txt; the first run records it
+#   and no run ever raises it. A count BELOW the baseline is a pass AND
+#   rewrites the baseline downward, so progress is locked in.
+#
+# VERDICT (house convention, always the last line of stdout):
+#   PASS — <n> transition row(s) checked, reachable-unsupported=<k> (baseline <k>)   exit 0
+#   FAIL — <n> transition row(s) checked, reachable-unsupported=<k> (baseline <b>)   exit 1
+#   ERROR — nothing was checked (<reason>)                                           exit 2
+#
+# Non-vacuity is absolute: 0 transition rows, 0 tables, a missing driver, or a
+# missing compiler is ERROR, never a pass. --selftest runs before every scan
+# and is fatal.
+#
+# A Phase 9 evidence receipt is minted for the verdict (ADDITIVE: emit_receipt
+# never changes this gate's verdict or its exit status).
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+. "$ROOT_DIR/scripts/check/lib/emit_receipt.shs"
+
+TABLE_DIR="$ROOT_DIR/spec/compiler_schema/transitions"
+DRIVER="$ROOT_DIR/src/app/check/reachable_unsupported_census.spl"
+BASELINE="$ROOT_DIR/scripts/check/reachable_unsupported_baseline.txt"
+SIMPLE_BIN="${SIMPLE_BIN:-$ROOT_DIR/bin/simple}"
+SELFTEST_ONLY=0
+LIST_ROWS=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) SELFTEST_ONLY=1; shift ;;
+        --list-rows) LIST_ROWS="--list-rows"; shift ;;
+        --tables) TABLE_DIR="$2"; shift 2 ;;
+        --baseline) BASELINE="$2"; shift 2 ;;
+        *) echo "ERROR — nothing was checked (unknown argument: $1)"; exit 2 ;;
+    esac
+done
+
+# summary_field <file> <key>
+summary_field() {
+    awk -v k="$2" '/^SUMMARY /{ for (i=2;i<=NF;i++) { split($i,p,"="); if (p[1]==k) print p[2] } }' "$1"
+}
+
+# ---------------------------------------------------------------------------
+# SELFTEST — fixtures are real .sdn tables fed to the real driver, so a driver
+# that stopped classifying would fail here rather than pass vacuously.
+# ---------------------------------------------------------------------------
+if [ ! -x "$SIMPLE_BIN" ]; then
+    echo "ERROR — nothing was checked (no executable $SIMPLE_BIN; absence of a compiler is absence of evidence)"
+    exit 2
+fi
+if [ ! -f "$DRIVER" ]; then
+    echo "ERROR — nothing was checked (driver $DRIVER missing)"
+    exit 2
+fi
+
+WORK=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -rf "$WORK"' EXIT
+
+write_fixture() {
+    # write_fixture <path> <state> <in-universe:yes|no>
+    _wf_from="Kind.Alpha"
+    [ "$3" = "yes" ] || _wf_from="Kind.Ghost"
+    cat > "$1" <<FIXEOF
+table: fixture
+producer: Kind
+consumer: Sink
+source: fixture.spl
+
+universe:
+  - Alpha
+  - Beta
+
+transition:
+  from: Kind.Beta
+  to: Sink
+  state: implemented
+  reason: "dedicated arm"
+  test: fixture_spec
+
+transition:
+  from: $_wf_from
+  to: "(none)"
+  state: $2
+  reason: "fixture row"
+  issue: E-FIXTURE-Alpha
+  test: fixture_spec
+FIXEOF
+}
+
+run_driver() {
+    # run_driver <out> <table>... — exit status read DIRECTLY into a variable
+    # on the line after the invocation, never through a pipe.
+    _rd_out="$1"; shift
+    _rd_args=""
+    for _t in "$@"; do _rd_args="$_rd_args --table $_t"; done
+    # shellcheck disable=SC2086
+    "$SIMPLE_BIN" run "$DRIVER" -- $_rd_args $LIST_ROWS > "$_rd_out" 2>"$_rd_out.err"
+    return $?
+}
+
+selftest() {
+    _sfail=0
+
+    # Fixture 1: an unsupported row INSIDE the universe must be counted.
+    write_fixture "$WORK/f1.sdn" "unsupported" "yes"
+    run_driver "$WORK/f1.out" "$WORK/f1.sdn"
+    _n=$(summary_field "$WORK/f1.out" reachable_unsupported)
+    [ "${_n:-x}" = "1" ] || { echo "selftest FAIL: in-universe unsupported row not counted (got ${_n:-none})" >&2; _sfail=1; }
+    _r=$(summary_field "$WORK/f1.out" rows)
+    [ "${_r:-x}" = "2" ] || { echo "selftest FAIL: expected 2 rows, got ${_r:-none}" >&2; _sfail=1; }
+
+    # Fixture 2: an unsupported row OUTSIDE the universe is unreachable and
+    # must NOT be counted — this is the whole point of the join.
+    write_fixture "$WORK/f2.sdn" "unsupported" "no"
+    run_driver "$WORK/f2.out" "$WORK/f2.sdn"
+    _n=$(summary_field "$WORK/f2.out" reachable_unsupported)
+    [ "${_n:-x}" = "0" ] || { echo "selftest FAIL: out-of-universe row was counted as reachable (got ${_n:-none})" >&2; _sfail=1; }
+    _u=$(summary_field "$WORK/f2.out" unsupported)
+    [ "${_u:-x}" = "1" ] || { echo "selftest FAIL: out-of-universe row was not counted as unsupported at all" >&2; _sfail=1; }
+
+    # Fixture 3: an implemented row must not be counted.
+    write_fixture "$WORK/f3.sdn" "implemented" "yes"
+    run_driver "$WORK/f3.out" "$WORK/f3.sdn"
+    _n=$(summary_field "$WORK/f3.out" reachable_unsupported)
+    [ "${_n:-x}" = "0" ] || { echo "selftest FAIL: implemented row counted as unsupported" >&2; _sfail=1; }
+
+    # Fixture 4: the quoted/parameterised spelling `"Unsupported(reason)"`
+    # must classify identically to the bare lowercase token.
+    write_fixture "$WORK/f4.sdn" '"Unsupported(no arm)"' "yes"
+    run_driver "$WORK/f4.out" "$WORK/f4.sdn"
+    _n=$(summary_field "$WORK/f4.out" reachable_unsupported)
+    [ "${_n:-x}" = "1" ] || { echo "selftest FAIL: quoted Unsupported(...) spelling not recognised (got ${_n:-none})" >&2; _sfail=1; }
+
+    # Fixture 5: an empty table set must yield 0 rows so the caller is FORCED
+    # to ERROR rather than reporting a vacuous pass.
+    run_driver "$WORK/f5.out"
+    _r=$(summary_field "$WORK/f5.out" rows)
+    [ "${_r:-x}" = "0" ] || { echo "selftest FAIL: empty scan did not report 0 rows (got ${_r:-none})" >&2; _sfail=1; }
+
+    # Fixture 6: the ratchet comparison itself — over baseline FAILs, at or
+    # under baseline PASSes.
+    [ "$(ratchet_rc 5 4)" = "1" ] || { echo "selftest FAIL: 5 over baseline 4 did not fail" >&2; _sfail=1; }
+    [ "$(ratchet_rc 4 4)" = "0" ] || { echo "selftest FAIL: 4 at baseline 4 did not pass" >&2; _sfail=1; }
+    [ "$(ratchet_rc 3 4)" = "0" ] || { echo "selftest FAIL: 3 under baseline 4 did not pass" >&2; _sfail=1; }
+
+    [ "$_sfail" -eq 0 ] || { echo "selftest FAILED"; exit 2; }
+}
+
+ratchet_rc() {
+    if [ "$1" -gt "$2" ]; then echo 1; else echo 0; fi
+}
+
+selftest
+
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+    echo "PASS — 6 fixture(s) checked, selftest only (no scan requested)"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# SCAN
+# ---------------------------------------------------------------------------
+if [ ! -d "$TABLE_DIR" ]; then
+    echo "ERROR — nothing was checked (no transition tables at $TABLE_DIR)"
+    exit 2
+fi
+
+TABLES=$(find "$TABLE_DIR" -type f -name '*.sdn' | sort)
+if [ -z "$TABLES" ]; then
+    echo "ERROR — nothing was checked (0 transition table(s) in $TABLE_DIR)"
+    exit 2
+fi
+
+# shellcheck disable=SC2086
+run_driver "$WORK/scan.out" $TABLES
+RC=$?
+if [ "$RC" -ne 0 ]; then
+    echo "ERROR — nothing was checked (driver exited $RC)"
+    head -20 "$WORK/scan.out.err" >&2
+    exit 2
+fi
+
+grep -E '^(ROW|TABLE) ' "$WORK/scan.out" || true
+
+ROWS=$(summary_field "$WORK/scan.out" rows)
+COUNT=$(summary_field "$WORK/scan.out" reachable_unsupported)
+NTAB=$(summary_field "$WORK/scan.out" tables)
+if [ -z "$ROWS" ] || [ -z "$COUNT" ] || [ -z "$NTAB" ]; then
+    echo "ERROR — nothing was checked (driver printed no SUMMARY line)"
+    exit 2
+fi
+if [ "$ROWS" -eq 0 ] || [ "$NTAB" -eq 0 ]; then
+    echo "ERROR — nothing was checked (0 transition row(s) across $NTAB table(s); a vacuous census is not a pass)"
+    exit 2
+fi
+
+if [ ! -f "$BASELINE" ]; then
+    printf '# reachable-unsupported ratchet baseline (hardening plan Phase 9).\n' > "$BASELINE"
+    printf '# Recorded by the first run of check-reachable-unsupported.shs.\n' >> "$BASELINE"
+    printf '# NEVER raise this number. A run that measures fewer lowers it automatically.\n' >> "$BASELINE"
+    printf '%s\n' "$COUNT" >> "$BASELINE"
+    echo "baseline recorded: $BASELINE = $COUNT"
+fi
+
+BASE_N=$(grep -v '^#' "$BASELINE" | grep -E '^[0-9]+$' | head -1)
+if [ -z "$BASE_N" ]; then
+    echo "ERROR — nothing was checked (unreadable baseline $BASELINE)"
+    exit 2
+fi
+
+if [ "$COUNT" -gt "$BASE_N" ]; then
+    VERDICT="FAIL — $ROWS transition row(s) checked, reachable-unsupported=$COUNT (baseline $BASE_N)"
+    printf '%s\n' "$VERDICT"
+    emit_receipt "check-reachable-unsupported" "$VERDICT" || true
+    exit 1
+fi
+
+if [ "$COUNT" -lt "$BASE_N" ]; then
+    # Progress is locked in: the ratchet only ever tightens.
+    sed "s/^$BASE_N\$/$COUNT/" "$BASELINE" > "$BASELINE.tmp" && mv -f "$BASELINE.tmp" "$BASELINE"
+    echo "baseline lowered: $BASE_N -> $COUNT"
+    BASE_N="$COUNT"
+fi
+
+VERDICT="PASS — $ROWS transition row(s) checked, reachable-unsupported=$COUNT (baseline $BASE_N)"
+printf '%s\n' "$VERDICT"
+emit_receipt "check-reachable-unsupported" "$VERDICT" || true
+exit 0
