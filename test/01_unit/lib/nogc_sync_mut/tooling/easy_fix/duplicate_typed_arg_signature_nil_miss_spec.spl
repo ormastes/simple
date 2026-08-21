@@ -1,0 +1,47 @@
+# Regression for: _parse_duplicate_typed_arg_signature returned nil on a
+# non-optional return contract after 8d3b7d009b9's native find() rewrite.
+# Under a build that enforces the stricter SFFI-style return contract
+# (validate_sffi_return_contract, src/compiler_rust/compiler/src/
+# interpreter_call/core/function_exec.rs), a function declared
+# `-> Option<T>` (the generic form) is classified NonOptional because only
+# the `T?` sugar parses to Type::Optional. Any `return nil` inside such a
+# function then aborts lint with:
+#   semantic: nil is forbidden by the non-optional return contract of
+#   '_parse_duplicate_typed_arg_signature'
+# Fix: declare the return type as `DuplicateTypedArgSignature?` instead of
+# `Option<DuplicateTypedArgSignature>`.
+#
+# This spec exercises exactly the "no duplicate typed args" miss path (a
+# function signature with unique parameter types) that walks through every
+# early `return nil` in `_parse_duplicate_typed_arg_signature` before falling
+# off the end -- i.e. never once returning `Some(...)`.
+use std.spec.*
+use compiler.tools.lint.main.{Linter, lint_cli_source}
+use std.tooling.easy_fix.*
+
+# No duplicate types (i64 vs text) -- must resolve to nil, not crash.
+val NO_DUP_SRC = "fn pair(left: i64, right: text):\n    0\n\nfn caller():\n    pair(1, \"a\")\n"
+
+# Single typed arg -- `raw_types.len() < 2` -- must also resolve to nil.
+val SINGLE_ARG_SRC = "fn one(left: i64):\n    0\n\nfn caller():\n    one(1)\n"
+
+describe "duplicate-typed-args signature parse on the nil-miss path":
+
+    it "does not crash lint on a signature with no duplicate parameter types":
+        """A signature whose parameter types are all distinct must be parsed
+        as 'no match' (nil), not crash the non-optional return contract."""
+        step("Lint a function whose params have distinct types")
+        var count = 0
+        for result in lint_cli_source(Linter.new(), "/tmp/dtyp_nil_miss_no_dup.spl", NO_DUP_SRC):
+            if result.lint.code == "DTYP001":
+                count = count + 1
+        assert_equal(count, 0)
+
+    it "does not crash lint on a signature with fewer than two typed params":
+        """A single-parameter signature must also resolve to nil cleanly."""
+        step("Lint a function with only one parameter")
+        var count = 0
+        for result in lint_cli_source(Linter.new(), "/tmp/dtyp_nil_miss_single.spl", SINGLE_ARG_SRC):
+            if result.lint.code == "DTYP001":
+                count = count + 1
+        assert_equal(count, 0)
