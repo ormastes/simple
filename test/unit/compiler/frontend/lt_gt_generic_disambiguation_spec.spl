@@ -1,0 +1,110 @@
+# @cover src/compiler/10.frontend/core/parser_expr.spl
+# Lane: `<`/`>` disambiguation in EXPRESSION position.
+#
+# Bug: doc/08_tracking/bug/parser_lt_gt_or_misparsed_as_generic_args_2026-08-21.md
+#
+# `try_skip_ident_generic_args` (parser_expr.spl) speculatively reads `ident <`
+# as the head of a generic-argument list. Its token walk accepted idents,
+# numeric literals and commas indiscriminately, so a boolean comparison chain
+# such as
+#
+#     if n < 0 or n > (self.lines.len() - self.pos):
+#
+# walked `0 or n` as if those were three more type arguments, hit `>` followed
+# by `(`, CONFIRMED the generic reading, and then reported
+# `const generic arguments are not supported: ... Tensor<i64, 2>` at the `<`.
+# The Rust seed parser accepts the same source, so this was a self-hosted-only
+# stage1 parse failure (real casualty:
+# src/compiler/10.frontend/core/flat_pool_codec.spl:94).
+#
+# Rule under test: a numeric literal consumed as a generic-argument candidate
+# may only be followed by `,` or a closing angle. Anything else proves the `<`
+# was a comparison operator, so the speculation backtracks and the chain parses
+# as ordinary boolean logic -- it is NOT an error. Genuine generic
+# instantiations must keep parsing, and a genuine const-generic attempt in TYPE
+# position must keep its precise error.
+#
+# HARNESS NOTE (same as convert_nodes_loud_fallback_spec.spl /
+# enum_payload_capture_spec.spl in this directory): the parse call is inlined
+# in each `it` block on purpose -- routing it through a shared module-level
+# helper has previously been shown to lose recorded parser state when read
+# back afterward.
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.core.parser.{parser_has_errors}
+
+describe "comparison chains are not misparsed as generic arguments":
+    it "parses `a < 0 or b > (c)` as boolean logic, not generic args":
+        val src = "fn probe(a: i64, b: i64, c: i64) -> bool:\n" +
+            "    a < 0 or b > (c)\n"
+        val parsed = parse_full_frontend(src, "testdata/ltgt_or_paren.spl", "ltgt_or_paren", Logger(level: 0))
+        assert_false(parser_has_errors())
+
+    it "parses `a < b and c > d` as boolean logic":
+        val src = "fn probe(a: i64, b: i64, c: i64, d: i64) -> bool:\n" +
+            "    a < b and c > d\n"
+        val parsed = parse_full_frontend(src, "testdata/ltgt_and_plain.spl", "ltgt_and_plain", Logger(level: 0))
+        assert_false(parser_has_errors())
+
+    it "parses `x < y or z > f(q)` where the right side is a real call":
+        val src = "fn f(q: i64) -> i64:\n" +
+            "    q\n" +
+            "\n" +
+            "fn probe(x: i64, y: i64, z: i64, q: i64) -> bool:\n" +
+            "    x < y or z > f(q)\n"
+        val parsed = parse_full_frontend(src, "testdata/ltgt_or_call.spl", "ltgt_or_call", Logger(level: 0))
+        assert_false(parser_has_errors())
+
+    it "parses the real flat_pool_codec.spl:94 shape `if n < 0 or n > (len - pos):`":
+        val src = "fn probe(n: i64, len: i64, pos: i64) -> bool:\n" +
+            "    if n < 0 or n > (len - pos):\n" +
+            "        return false\n" +
+            "    true\n"
+        val parsed = parse_full_frontend(src, "testdata/ltgt_codec_shape.spl", "ltgt_codec_shape", Logger(level: 0))
+        assert_false(parser_has_errors())
+
+    it "parses `while i < n and j > (k):`":
+        val src = "fn probe(n: i64, k: i64):\n" +
+            "    var i = 0\n" +
+            "    var j = 0\n" +
+            "    while i < n and j > (k):\n" +
+            "        i = i + 1\n"
+        val parsed = parse_full_frontend(src, "testdata/ltgt_while.spl", "ltgt_while", Logger(level: 0))
+        assert_false(parser_has_errors())
+
+describe "genuine generic instantiations still parse":
+    it "keeps `Dict<text, i64>(...)` construction parsing":
+        val src = "fn probe():\n" +
+            "    val d = Dict<text, i64>()\n"
+        val parsed = parse_full_frontend(src, "testdata/gen_dict.spl", "gen_dict", Logger(level: 0))
+        assert_false(parser_has_errors())
+
+    it "keeps an explicit generic call `foo<i64>(x)` parsing":
+        val src = "fn foo<T>(x: T) -> T:\n" +
+            "    x\n" +
+            "\n" +
+            "fn probe(x: i64) -> i64:\n" +
+            "    foo<i64>(x)\n"
+        val parsed = parse_full_frontend(src, "testdata/gen_call.spl", "gen_call", Logger(level: 0))
+        assert_false(parser_has_errors())
+
+    it "keeps a nested generic type `List<Pair<i64, text>>` in type position parsing":
+        val src = "class Pair<A, B>:\n" +
+            "    a: A\n" +
+            "    b: B\n" +
+            "\n" +
+            "fn probe(xs: List<Pair<i64, text>>) -> i64:\n" +
+            "    0\n"
+        val parsed = parse_full_frontend(src, "testdata/gen_nested.spl", "gen_nested", Logger(level: 0))
+        assert_false(parser_has_errors())
+
+    it "keeps `Tensor<f64>` in type position parsing":
+        val src = "class Tensor<T>:\n" +
+            "    n: i64\n" +
+            "\n" +
+            "fn probe(t: Tensor<f64>) -> i64:\n" +
+            "    t.n\n"
+        val parsed = parse_full_frontend(src, "testdata/gen_tensor.spl", "gen_tensor", Logger(level: 0))
+        assert_false(parser_has_errors())
