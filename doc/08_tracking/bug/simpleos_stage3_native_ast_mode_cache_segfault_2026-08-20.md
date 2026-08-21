@@ -847,3 +847,53 @@ the caller-created owner in place, and return only an empty/error text scalar.
 The caller must retain and validate that same handle before wrapping it in
 `Some`. Rebuild Phase2, require a non-nil unwrapped owner, then resume Stage3.
 Kernel/QEMU rendering evidence remains unclaimed until that succeeds.
+
+## 2026-08-22 planner admission link regression
+
+The next fresh-cycle admission producer failed before authorization with
+`Undefined symbols for architecture arm64: _file_delete`. The minimal planner
+documents a bounded bootstrap-recovery ABI for delete/write, but imported
+`file_delete` through `std.io_runtime`; the admitted Phase-2 compiler emitted
+the facade name rather than the core-C runtime export `rt_file_delete`.
+
+This planner is the explicit bootstrap recovery boundary, so the smallest
+owner fix is to declare and call `rt_file_delete` beside its existing
+`rt_file_write_text_at`. Acceptance requires the producer self-test and a real
+source-bound Stage-3 admission receipt. No general app/runtime shortcut is
+introduced.
+
+The first `finish_into` bootstrap cycle admitted Phase 2 at SHA-256
+`ad3060d54edfb67a66901cfa3d121ecb861fcbc348f97cceb34446a03cc7757d`.
+Stage 3 parsed and released all 665 surfaces, then failed closed with
+`Module surface alignment error: module surface destination is not empty`.
+The remaining hop was `ModuleSurfacesByName.empty()`, itself a class-valued
+return. Cycle 2 constructs the destination directly in the driver frame before
+passing it to `finish_into`; no class-valued return may create or transfer the
+streaming owner.
+
+Cycle 2 admitted Phase 2 at SHA-256
+`44386d4864eebf00985dfecc271579c694decaa0a0cd2d8665a152a7def00f2d` but
+reported the same destination error after 665 releases. Therefore the direct
+constructor was not the remaining transfer; the staged compiler misread the
+pre-population compound emptiness predicate. `finish_into` now implements its
+literal mutation contract: after nil/frozen-builder guards it validates the
+builder data and overwrites the destination fields. The adjacent regression
+uses a successful first finish, then proves a second finish is rejected before
+mutating a sentinel destination.
+
+Cycle 3 admitted Phase 2 at SHA-256
+`30f2e469df42a696f41a82a97234c2e287b277d28302d1e82ee1638152078401`.
+Stage 3 crossed the former owner guard, entered `phase3:hir_typecheck:start`,
+and began lowering the retained 665-surface inventory. This proves the
+caller-owned `finish_into` transfer itself is live. The first imported module
+immediately failed lookup, however, and the run accumulated broad
+`missing module surface` diagnostics before a later SIGSEGV at source index 98.
+
+The retained registry lookup contradicts its own scalar-index design comment:
+`module_surface_registry_index` still reads only `registry.index_by_name`, even
+though `ordered_names`/`ordered_indices` are the native-safe authoritative
+representation and the compatibility dictionary is documented as
+construction-time-only. The next fresh cycle must make the registry lookup scan
+the aligned ordered arrays, add exact hit/miss plus adjacent alias tests through
+the registry API, and only then rebuild. No fourth cycle was started. Stage 3,
+the ARM64 image, and QEMU rendering evidence remain unclaimed.

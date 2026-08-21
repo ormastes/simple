@@ -58,6 +58,30 @@
   remain active and unclaimed.
 
 ## Raw Request
+
+### Bootstrap planner recovery-boundary decision
+
+- `runtime_need`: delete a prior authorization receipt before bounded rewrite.
+- `facade_checked`: `std.io_runtime.file_delete` was used but linked as missing
+  `_file_delete` in the core-C planner lane.
+- `chosen_path`: `runtime-owned-change`; reuse the planner's documented minimal
+  recovery ABI and call the existing `rt_file_delete` export directly.
+- `rejected_shortcuts`: no hosted runtime bundle, unresolved-symbol bypass,
+  fixture-only receipt, or stale admission reuse.
+
+### 2026-08-22 finish-into three-cycle handoff
+
+- Phase 2 admitted at
+  `30f2e469df42a696f41a82a97234c2e287b277d28302d1e82ee1638152078401`.
+- Stage 3 now owns a non-nil 665-surface registry and enters HIR; the former
+  owner-payload error is cleared.
+- Imported lookups fail from the first dependent module because the hot
+  `module_surface_registry_index` still trusts the compatibility Dict instead
+  of the retained `ordered_names`/`ordered_indices` scalar representation.
+- Three-cycle cap reached. Next cycle: switch that lookup to the aligned scalar
+  arrays, add registry hit/miss/alias regressions, rebuild Stage 2/3, then resume
+  ARM64 image and real QEMU 2D/Web/GUI/WM evidence. No QEMU PASS is claimed.
+
 > make deep research and plan with agents, simple os to have configs, 2d rendering
 > screen, web rendering screen, gui rendering screen, and existing default wm screen.
 > in 2d showcase check events/click/drag/keytype, panel with scrollbar, linked panels,

@@ -5,6 +5,7 @@ use compiler.common.driver_core_types.{SourceFile}
 use compiler.hir.hir_lowering.module_surface.{
     ModuleSurface,
     ModuleSurfaceBuilder,
+    ModuleSurfacesByName,
     ModuleSurfaceExportOriginIndex,
     module_surface_export_origin_index_empty,
     module_surface_export_origin_index_lookup,
@@ -26,12 +27,30 @@ describe "module surface aligned scalar index":
         expect(builder.add_indexed_name("second_alias", 1).is_ok()).to_equal(true)
         expect(builder.add_indexed_name("second_alias", 1).is_ok()).to_equal(true)
         builder.surfaces = [ModuleSurface.empty("first"), ModuleSurface.empty("second")]
-        val result = builder.finish()
-        expect(result.is_ok()).to_equal(true)
-        if result.is_ok():
-            val surfaces = result.unwrap()
-            expect(surfaces.ordered_names).to_equal(["first", "second", "second_alias"])
-            expect(surfaces.ordered_indices).to_equal([0, 1, 1])
+        val surfaces = ModuleSurfacesByName(
+            surfaces: [], index_by_name: {},
+            ordered_names: [], ordered_indices: [], generation: 0, frozen: false)
+        val finish_error = builder.finish_into(surfaces)
+        expect(finish_error).to_equal("")
+        expect(surfaces.frozen).to_equal(true)
+        expect(surfaces.ordered_names).to_equal(["first", "second", "second_alias"])
+        expect(surfaces.ordered_indices).to_equal([0, 1, 1])
+
+    it "rejects a second finish without replacing its destination":
+        var builder = ModuleSurfaceBuilder.new()
+        expect(builder.add_indexed_name("new", 0).is_ok()).to_equal(true)
+        builder.surfaces = [ModuleSurface.empty("new")]
+        val first_destination = ModuleSurfacesByName(
+            surfaces: [], index_by_name: {},
+            ordered_names: [], ordered_indices: [], generation: 0, frozen: false)
+        expect(builder.finish_into(first_destination)).to_equal("")
+        val destination = ModuleSurfacesByName(
+            surfaces: [], index_by_name: {},
+            ordered_names: [], ordered_indices: [], generation: 0, frozen: false)
+        destination.ordered_names = ["existing"]
+        val finish_error = builder.finish_into(destination)
+        expect(finish_error).to_contain("builder is frozen")
+        expect(destination.ordered_names).to_equal(["existing"])
 
     it "rejects an alias that changes its existing target":
         var builder = ModuleSurfaceBuilder.new()

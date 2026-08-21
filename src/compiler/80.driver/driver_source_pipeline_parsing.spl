@@ -18,6 +18,7 @@ use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_enabled, fronte
 use compiler.frontend.parser_types.*
 use compiler.hir.hir_lowering.module_surface.{
     ModuleSurfaceBuilder,
+    ModuleSurfacesByName,
     ModuleSurfaceParserOwner,
     module_surface_canonical_path,
     module_surface_from_owner,
@@ -352,16 +353,20 @@ impl CompilerDriver:
             self.ctx.add_error(
                 "Module surface extraction error: {origin_result.unwrap_err()}")
             return false
-        val finished_surfaces = builder.finish()
-        if finished_surfaces.is_err():
+        # Retain the class owner in this frame. The staged native ABI can keep
+        # a class-valued Result's Ok tag while dropping its payload.
+        val retained_surfaces = ModuleSurfacesByName(
+            surfaces: [], index_by_name: {},
+            ordered_names: [], ordered_indices: [], generation: 0, frozen: false)
+        val finish_error = builder.finish_into(retained_surfaces)
+        if finish_error != "":
             self.ctx.add_error(
-                "Module surface alignment error: {finished_surfaces.unwrap_err()}")
+                "Module surface alignment error: {finish_error}")
             return false
         # Commit the retained surface owner directly to the mutable driver
         # context.  Assigning it through a copied `streaming_ctx` returned
         # parse_ok=true while the caller still observed module_surfaces=nil
         # under native value semantics.
-        val retained_surfaces = finished_surfaces.unwrap()
         self.streaming_module_surfaces_owner = Some(retained_surfaces)
         self.streaming_surface_owner_ready = true
         self.ctx.module_surfaces = Some(retained_surfaces)
@@ -643,10 +648,13 @@ impl CompilerDriver:
                 "complete", 1, 6, 0, 0, "running")
             log_build_progress("surface_freeze", "surfaces", 0, -1,
                 "start", 1, 6, 0, 0, "running")
-            val entry_surfaces_result = entry_surface_builder.finish()
-            if entry_surfaces_result.is_err():
+            val entry_surfaces = ModuleSurfacesByName(
+                surfaces: [], index_by_name: {},
+                ordered_names: [], ordered_indices: [], generation: 0, frozen: false)
+            val entry_surfaces_error = entry_surface_builder.finish_into(entry_surfaces)
+            if entry_surfaces_error != "":
                 self.ctx.add_error(
-                    "entry-closure module surface freeze error: {entry_surfaces_result.unwrap_err()}")
+                    "entry-closure module surface freeze error: {entry_surfaces_error}")
                 return (self.ctx, false)
             log_build_progress("surface_freeze", "surfaces", -1, -1,
                 "complete", 1, 6, 0, 0, "running")
@@ -664,7 +672,7 @@ impl CompilerDriver:
             # doc/08_tracking/bug/stage3_native_build_and_compile_segv_on_hello_world_2026-08-18.md
             self.ctx.modules = entry_modules
             self.ctx.sources = unique_entry_sources
-            self.ctx.module_surfaces = Some(entry_surfaces_result.unwrap())
+            self.ctx.module_surfaces = Some(entry_surfaces)
             if entry_sources.len() == 0:
                 self.ctx.add_error(
                     "native entry source not found: {native_entry}")
