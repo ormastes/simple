@@ -127,6 +127,15 @@ segments, exits boot services, parks APs, or transfers through the Multiboot2
 shim. OVMF proves the existing embedded GRUB/module boot and post-boot RSP
 staging range; neither is evidence of a DCI-authored preboot payload handoff.
 
+The current image topology explains the gap: `BOOTX64.EFI` is produced by
+`grub-mkstandalone`, and GRUB enters the ELF32 Multiboot2 loader only after the
+UEFI application phase. Adding mailbox polling to that shim could prove a
+post-UEFI RAM transport, but could not reserve pages, obtain the final UEFI
+memory map, or own `ExitBootServices`; it must not be relabelled as the selected
+UEFI-resident loader. The missing implementation dependency is a real x86-64
+PE/COFF UEFI application using the Microsoft x64 firmware ABI plus a reviewed
+transition into the existing 32-bit Multiboot shim.
+
 The current host inventory on 2026-08-22 again exposes only Smart KM Link
 `0ea0:2211`; Tigard `0403:6010`, `/dev/ttyUSB*`, Intel toolkit directories, and
 a retained DCI connection are absent.

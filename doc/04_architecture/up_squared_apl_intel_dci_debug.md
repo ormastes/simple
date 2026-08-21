@@ -70,3 +70,12 @@ CN16 still requires a fresh board transcript.
 The mailbox parser/admission capsule alone does not satisfy REQ-006..008: those
 requirements remain open until an executable UEFI adapter publishes and
 consumes the mailbox and completes the handoff.
+
+`BOOTX64.EFI` is currently GRUB, not a Simple UEFI adapter. The resident owner
+must therefore be a separate PE/COFF application entered directly by firmware;
+putting the consumer in the ELF32 Multiboot shim is architecturally too late
+because GRUB already owns the UEFI memory-map and `ExitBootServices` transition.
+The adapter needs an explicit x86-64 UEFI/MS-ABI capsule and a reviewed
+long-mode-to-Multiboot transition boundary. Neither capability exists in the
+current Simple target matrix, so this dependency remains visible rather than
+being hidden behind a post-UEFI fallback.

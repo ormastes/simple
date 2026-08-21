@@ -89,3 +89,13 @@ per-boot nonce, snapshot the descriptor twice around SHA-256, apply the admitted
 ELF plan, obtain the final memory map, retry `ExitBootServices` only for a stale
 map key, park APs, and invoke the reviewed shim. Until that code and an OVMF
 producer/consumer test exist, the mailbox layer is policy evidence only.
+
+The implementation must replace the mailbox portion of the GRUB-first topology,
+not patch the later ELF32 shim and call it UEFI-resident. The required capsule
+is a PE32+ EFI application with the firmware's Microsoft x64 calling convention.
+It reserves the descriptor, payload, destination, stack, and transition pages
+before publishing their addresses; after stable double-snapshot and SHA-256/ELF
+admission it obtains the final memory map, performs the bounded
+`ExitBootServices` retry, and enters a reviewed 64-to-32-bit transition that
+supplies the Multiboot2 magic and information pointer. The existing GRUB image
+remains the fallback first-boot path until that capsule passes OVMF.

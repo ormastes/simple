@@ -230,6 +230,11 @@ external debugger's memory discovery; they do not reserve a command mailbox,
 authenticate a payload, load ELF segments, exit boot services, or transfer
 control. Treat `dci_mailbox.spl` as admission policy, not a boot loader, until
 an executable UEFI adapter completes and proves that handoff.
+For the current UP2 image, `BOOTX64.EFI` is GRUB. Code first entered through
+the ELF32 Multiboot2 shim is post-UEFI and cannot truthfully claim ownership of
+page reservation, the final memory map, or `ExitBootServices`. A selected
+UEFI-resident mailbox therefore requires a directly entered PE32+ application,
+the Microsoft x64 firmware ABI, and a reviewed 64-to-32-bit Multiboot handoff.
 When Intel DCI is unavailable, do not claim that OpenOCD, CHIPSEC, KGDB, xHCI
 DbC, or host GDB replaces it. The free UP2 lane is removable UEFI boot plus a
 target-resident debugger over CN16 UART (and later xHCI DbC). Wire CN16 pin 8

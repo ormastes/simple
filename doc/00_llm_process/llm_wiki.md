@@ -103,6 +103,11 @@ same-thread/typed-payload exclusions and the Stage-4 blocker.
   `dci_mailbox.spl` is admission policy; direct DCI RAM boot remains incomplete
   until a resident UEFI adapter reserves/publishes the mailbox, validates and
   loads the ELF, exits boot services, and transfers control.
+- **UP2 UEFI topology boundary:** the current `BOOTX64.EFI` is GRUB, and its
+  ELF32 Multiboot2 child runs after the UEFI boot-services transition. Mailbox
+  polling added only to that child is post-UEFI RAM loading, not the selected
+  UEFI-resident loader. The real adapter needs PE32+, Microsoft x64 firmware
+  ABI calls, and a reviewed long-mode-to-Multiboot transition.
 - **Free UP2 debug boundary (2026-08-22):** no open tool found implements
   Apollo Lake's proprietary DCI ExI/JTAG/DMA plane. The practical free lane is
   removable UEFI boot plus CN16 UART, followed by a target-resident SimpleOS

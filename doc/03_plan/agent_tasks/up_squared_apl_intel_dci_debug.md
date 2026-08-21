@@ -4,6 +4,9 @@
 
 - Implement the executable resident UEFI mailbox adapter; the landed
   `dci_mailbox.spl` provides admission policy only.
+- Add/admit the x86-64 PE32+ UEFI/MS-ABI target capsule and reviewed
+  long-mode-to-Multiboot transition; the current GRUB child is too late to own
+  UEFI page reservation, memory-map capture, or `ExitBootServices`.
 - Prove CN16 RSP and NVMe Identify/provision/readback on physical UP2 hardware.
 - Keep direct DCI RAM boot blocked until mailbox publication, replay-safe load,
   final UEFI memory-map handoff, and entry transfer are executable and tested.
