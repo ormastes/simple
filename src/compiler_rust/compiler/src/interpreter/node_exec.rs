@@ -1819,6 +1819,28 @@ pub(crate) fn exec_assignment(
                         }
                     }
                 }
+                // General place fallback: an arbitrary projection chain rooted at a
+                // variable (`self.a[i].b[k] = v`, `self.rows[i].cols[j] = v`).
+                // `place::resolve_place` + `write_place` already walk any depth with
+                // `Arc::make_mut`, so this is the same copy-on-write contract the
+                // hand-written two-level cases use — a uniquely-owned container
+                // mutates in place, a genuinely aliased one deep-copies first. The
+                // hand-written cases above stop at `ident[i]` and `ident.field[i]`;
+                // anything deeper used to be rejected outright, forcing callers into
+                // a read-modify-write round trip (`var row = self.rows[i]; row.x[k]
+                // = v; self.rows[i] = row`) whose intermediate binding ALIASES the
+                // inner container and therefore pays a full O(n) COW clone on every
+                // single write.
+                // `receiver` is resolved as the place and the ALREADY-EVALUATED
+                // `index_val` is appended, so no index expression is evaluated twice.
+                if let Some(mut place) =
+                    super::place::resolve_place(receiver, env, functions, classes, enums, impl_methods)?
+                {
+                    place.projections.push(super::place::Projection::Index(index_val));
+                    if super::place::write_place(env, &place, value) {
+                        return Ok(Control::Next);
+                    }
+                }
                 let ctx = ErrorContext::new()
                     .with_code(codes::INVALID_ASSIGNMENT)
                     .with_help("nested field access index assignment requires a simple identifier chain");
@@ -1827,6 +1849,28 @@ pub(crate) fn exec_assignment(
                     ctx,
                 ))
             } else {
+                // General place fallback: an arbitrary projection chain rooted at a
+                // variable (`self.a[i].b[k] = v`, `self.rows[i].cols[j] = v`).
+                // `place::resolve_place` + `write_place` already walk any depth with
+                // `Arc::make_mut`, so this is the same copy-on-write contract the
+                // hand-written two-level cases use — a uniquely-owned container
+                // mutates in place, a genuinely aliased one deep-copies first. The
+                // hand-written cases above stop at `ident[i]` and `ident.field[i]`;
+                // anything deeper used to be rejected outright, forcing callers into
+                // a read-modify-write round trip (`var row = self.rows[i]; row.x[k]
+                // = v; self.rows[i] = row`) whose intermediate binding ALIASES the
+                // inner container and therefore pays a full O(n) COW clone on every
+                // single write.
+                // `receiver` is resolved as the place and the ALREADY-EVALUATED
+                // `index_val` is appended, so no index expression is evaluated twice.
+                if let Some(mut place) =
+                    super::place::resolve_place(receiver, env, functions, classes, enums, impl_methods)?
+                {
+                    place.projections.push(super::place::Projection::Index(index_val));
+                    if super::place::write_place(env, &place, value) {
+                        return Ok(Control::Next);
+                    }
+                }
                 let ctx = ErrorContext::new()
                     .with_code(codes::INVALID_ASSIGNMENT)
                     .with_help("index assignment on field access requires an identifier as the object");
@@ -1836,6 +1880,28 @@ pub(crate) fn exec_assignment(
                 ))
             }
         } else {
+            // General place fallback: an arbitrary projection chain rooted at a
+            // variable (`self.a[i].b[k] = v`, `self.rows[i].cols[j] = v`).
+            // `place::resolve_place` + `write_place` already walk any depth with
+            // `Arc::make_mut`, so this is the same copy-on-write contract the
+            // hand-written two-level cases use — a uniquely-owned container
+            // mutates in place, a genuinely aliased one deep-copies first. The
+            // hand-written cases above stop at `ident[i]` and `ident.field[i]`;
+            // anything deeper used to be rejected outright, forcing callers into
+            // a read-modify-write round trip (`var row = self.rows[i]; row.x[k]
+            // = v; self.rows[i] = row`) whose intermediate binding ALIASES the
+            // inner container and therefore pays a full O(n) COW clone on every
+            // single write.
+            // `receiver` is resolved as the place and the ALREADY-EVALUATED
+            // `index_val` is appended, so no index expression is evaluated twice.
+            if let Some(mut place) =
+                super::place::resolve_place(receiver, env, functions, classes, enums, impl_methods)?
+            {
+                place.projections.push(super::place::Projection::Index(index_val));
+                if super::place::write_place(env, &place, value) {
+                    return Ok(Control::Next);
+                }
+            }
             let ctx = ErrorContext::new()
                 .with_code(codes::INVALID_ASSIGNMENT)
                 .with_help("index assignment requires an identifier or field access as the container");
@@ -2886,5 +2952,173 @@ mod string_append_in_place_tests {
             Value::Str(s) => assert_eq!(s.as_str(), "start-more", "s must observe its own append"),
             other => panic!("s must remain a Str, got {:?}", other),
         }
+    }
+}
+
+/// Nested assignment targets: `self.a[i].b[k] = v` and friends.
+///
+/// The index-assignment path hand-wrote exactly two shapes (`ident[i] = v` and
+/// `ident.field[i] = v`) and rejected anything deeper with
+/// `invalid assignment: complex field access not supported`. That is a
+/// grammar-shaped hole with a real performance cost, not just an ergonomic one:
+/// the workaround it forces is a read-modify-write round trip
+/// (`var row = self.rows[i]; row.cols[k] = v; self.rows[i] = row`) whose
+/// intermediate binding ALIASES the inner container, so the first write to it
+/// deep-copies the whole container — O(n) per outer operation, O(n^2) overall.
+/// `SymbolTable.define` in the self-hosted compiler pays exactly this.
+///
+/// The fix routes the rejected shapes through `place::resolve_place` +
+/// `write_place`, which already walk an arbitrary projection chain with
+/// `Arc::make_mut`. Semantics are unchanged: a uniquely-owned container mutates
+/// in place, a genuinely aliased one still copies first.
+#[cfg(test)]
+mod nested_assignment_target_tests {
+    use super::*;
+    use simple_parser::Span;
+
+    fn obj(class: &str, fields: Vec<(&str, Value)>) -> Value {
+        let mut map: HashMap<String, Value> = HashMap::new();
+        for (k, v) in fields {
+            map.insert(k.to_string(), v);
+        }
+        Value::Object {
+            class: class.to_string(),
+            fields: Arc::new(map),
+        }
+    }
+
+    fn assign(target: Expr, value: Expr) -> simple_parser::ast::AssignmentStmt {
+        simple_parser::ast::AssignmentStmt {
+            span: Span::new(0, 0, 0, 0),
+            target,
+            op: AssignOp::Assign,
+            value,
+        }
+    }
+
+    fn exec(stmt: &simple_parser::ast::AssignmentStmt, env: &mut Env) -> Result<Control, CompileError> {
+        exec_assignment(
+            stmt,
+            env,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+    }
+
+    fn ident(name: &str) -> Expr {
+        Expr::Identifier(name.to_string())
+    }
+
+    fn field(recv: Expr, name: &str) -> Expr {
+        Expr::FieldAccess {
+            receiver: Box::new(recv),
+            field: name.to_string(),
+        }
+    }
+
+    fn index(recv: Expr, i: Expr) -> Expr {
+        Expr::Index {
+            receiver: Box::new(recv),
+            index: Box::new(i),
+        }
+    }
+
+    fn read(env: &Env, root: &str, path: &[&str]) -> Value {
+        let mut cur = env.get(root).expect("root").clone();
+        for step in path {
+            cur = match (&cur, step.parse::<usize>()) {
+                (Value::Array(items), Ok(i)) => items[i].clone(),
+                (Value::Object { fields, .. }, _) => fields.get(*step).expect("field").clone(),
+                (Value::Dict(entries), _) => entries.get(*step).expect("key").clone(),
+                (other, _) => panic!("cannot project {step} out of {:?}", other),
+            };
+        }
+        cur
+    }
+
+    /// `s.rows[0].cols[1] = 42` — three projections deep, array of structs of
+    /// arrays. Rejected outright before this change.
+    #[test]
+    fn three_deep_field_index_field_index_assignment_lands() {
+        let mut env = Env::new();
+        let row = obj("Row", vec![("cols", Value::array(vec![Value::Int(0), Value::Int(0)]))]);
+        env.insert("s".to_string(), obj("S", vec![("rows", Value::array(vec![row]))]));
+        let target = index(field(index(field(ident("s"), "rows"), Expr::Integer(0)), "cols"), Expr::Integer(1));
+        exec(&assign(target, Expr::Integer(42)), &mut env).expect("nested assignment must be accepted");
+        assert_eq!(read(&env, "s", &["rows", "0", "cols", "1"]), Value::Int(42));
+        assert_eq!(
+            read(&env, "s", &["rows", "0", "cols", "0"]),
+            Value::Int(0),
+            "the sibling element must be untouched"
+        );
+    }
+
+    /// `s.scopes[0].symbols["k"] = 7` — the exact SymbolTable.define shape:
+    /// array of structs holding a dict.
+    #[test]
+    fn nested_dict_under_indexed_struct_assignment_lands() {
+        let mut env = Env::new();
+        let scope = obj("Scope", vec![("symbols", Value::Dict(Arc::new(HashMap::new())))]);
+        env.insert("s".to_string(), obj("S", vec![("scopes", Value::array(vec![scope]))]));
+        let target = index(
+            field(index(field(ident("s"), "scopes"), Expr::Integer(0)), "symbols"),
+            Expr::String("k".to_string()),
+        );
+        exec(&assign(target, Expr::Integer(7)), &mut env).expect("nested dict assignment must be accepted");
+        assert_eq!(read(&env, "s", &["scopes", "0", "symbols", "k"]), Value::Int(7));
+    }
+
+    /// `grid[0][1] = 5` — index-of-index, no fields at all.
+    #[test]
+    fn two_deep_index_of_index_assignment_lands() {
+        let mut env = Env::new();
+        env.insert(
+            "grid".to_string(),
+            Value::array(vec![Value::array(vec![Value::Int(0), Value::Int(0)])]),
+        );
+        let target = index(index(ident("grid"), Expr::Integer(0)), Expr::Integer(1));
+        exec(&assign(target, Expr::Integer(5)), &mut env).expect("index-of-index assignment must be accepted");
+        assert_eq!(read(&env, "grid", &["0", "1"]), Value::Int(5));
+    }
+
+    /// Value semantics: a live alias of an INTERMEDIATE container must still
+    /// copy-on-write and must not observe the nested write.
+    #[test]
+    fn live_alias_of_an_intermediate_still_copies_on_write() {
+        let mut env = Env::new();
+        let row = obj("Row", vec![("cols", Value::array(vec![Value::Int(0), Value::Int(0)]))]);
+        env.insert("s".to_string(), obj("S", vec![("rows", Value::array(vec![row]))]));
+        // `alias` holds the same rows array Arc as `s.rows`.
+        let alias = read(&env, "s", &["rows"]);
+        env.insert("alias".to_string(), alias);
+
+        let target = index(field(index(field(ident("s"), "rows"), Expr::Integer(0)), "cols"), Expr::Integer(1));
+        exec(&assign(target, Expr::Integer(42)), &mut env).expect("nested assignment must be accepted");
+
+        assert_eq!(read(&env, "s", &["rows", "0", "cols", "1"]), Value::Int(42));
+        assert_eq!(
+            read(&env, "alias", &["0", "cols", "1"]),
+            Value::Int(0),
+            "the aliased intermediate must not observe the write — value semantics"
+        );
+    }
+
+    /// A genuine non-place target must still be rejected, not silently dropped.
+    #[test]
+    fn non_place_index_target_is_still_rejected() {
+        let mut env = Env::new();
+        let target = index(
+            Expr::MethodCall {
+                receiver: Box::new(ident("nothing")),
+                method: "f".to_string(),
+                args: vec![],
+                generic_args: vec![],
+            },
+            Expr::Integer(0),
+        );
+        let err = exec(&assign(target, Expr::Integer(1)), &mut env);
+        assert!(err.is_err(), "a call-result index target is not a place and must be an error");
     }
 }
