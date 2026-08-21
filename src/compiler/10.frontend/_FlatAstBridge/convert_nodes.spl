@@ -1901,12 +1901,22 @@ fn convert_decl_fn(idx: i64) -> ParserFunction:
         val p_is_mut = pi < p_muts.len() and p_muts[pi] != 0
         val p_default_idx = if pi < p_defaults.len(): p_defaults[pi] else: -1
         val p_has_default = p_default_idx >= 0
+        # Do not select rich value aggregates inline inside another aggregate
+        # constructor. The staged native bridge lowered that conditional as a
+        # pointer-selected 48-byte copy; the selected Type pointer could be
+        # invalid and faulted while converting typed extern/function params.
+        var param_type: Type = Type(kind: TypeKind.Infer, span: span)
+        if has_t:
+            param_type = convert_flat_type(p_type)
+        var param_default: Expr = Expr(kind: ExprKind.NilLit, span: span)
+        if p_has_default:
+            param_default = convert_flat_expr(p_default_idx)
         params.push(Param(
             name: p_names[pi],
             has_type_: has_t,
-            type_: if has_t: convert_flat_type(p_type) else: Type(kind: TypeKind.Infer, span: span),
+            type_: param_type,
             has_default: p_has_default,
-            default: if p_has_default: convert_flat_expr(p_default_idx) else: Expr(kind: ExprKind.NilLit, span: span),
+            default: param_default,
             span: span,
             is_mutable: p_is_mut
         ))
@@ -2186,10 +2196,13 @@ fn convert_decl_extern_fn(idx: i64) -> ParserFunction:
     while pi < p_names.len():
         val p_type = if pi < p_types.len(): p_types[pi] else: 0
         val has_t = p_type > 0
+        var param_type: Type = Type(kind: TypeKind.Infer, span: span)
+        if has_t:
+            param_type = convert_flat_type(p_type)
         params.push(Param(
             name: p_names[pi],
             has_type_: has_t,
-            type_: if has_t: convert_flat_type(p_type) else: Type(kind: TypeKind.Infer, span: span),
+            type_: param_type,
             has_default: false,
             default: Expr(kind: ExprKind.NilLit, span: span),
             span: span,
