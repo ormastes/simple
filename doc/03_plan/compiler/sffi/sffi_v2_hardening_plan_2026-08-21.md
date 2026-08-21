@@ -740,3 +740,18 @@ bounded-read assertion passes, while a pre-existing timeout-diagnostic substring
 assertion fails outside this change. The deployed `bin/simple` is still the
 Rust bootstrap seed and does not contain the newly added checked symbol, so the
 runtime behavior SSpec must be rerun after the pure-Simple binary is rebuilt.
+
+The compiler-owned runtime coverage gate now optionally emits the exact missing
+symbol ledger atomically, so remediation can target real metadata gaps instead
+of treating source spelling variants as ABI evidence. Exact contracts for the
+hardened path-mapping pair and SimpleOS Ed25519 seed signer move coverage to
+1,084/707. The Ed25519 provider ABI is now consistently three runtime values
+(seed, public key, message) on x86_32, x86_64, ARM32, ARM64, and RISC-V; the
+previous shared two-argument implementation could misread registers when
+called from the canonical Simple declaration. Raw signing is `unsafe(ffi)` and
+nullable, all provider failures return nil rather than an empty signature, and
+the safe wrapper lifts the boundary to `Result<[u8], text>`. SSH disconnects on
+that error. Successful signing retains the same fixed-size inputs, one direct
+call, and 64-byte output construction; no lookup, hashing pass, allocation,
+lock, or dynamic dispatch was added beyond the cryptographic work already
+required.

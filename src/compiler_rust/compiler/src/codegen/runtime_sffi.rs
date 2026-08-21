@@ -298,6 +298,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_rsa_sha512_sign_checked", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_ed25519_sign", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_ed25519_sign_checked", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_ed25519_sign_seed", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_ecdsa_p256_sign", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_ecdsa_p256_sign_checked", &[I64, I64], &[I64]),
     // =========================================================================
@@ -2426,6 +2427,16 @@ mod tests {
             .expect("rt_munmap must be registered for native codegen");
         assert_eq!(unmap.params, [I64, I64]);
         assert_eq!(unmap.returns, [I8]);
+    }
+
+    #[test]
+    fn ed25519_seed_signing_abi_is_registered_exactly() {
+        let spec = RUNTIME_FUNCS
+            .iter()
+            .find(|spec| spec.name == "rt_ed25519_sign_seed")
+            .expect("rt_ed25519_sign_seed must be registered for native codegen");
+        assert_eq!(spec.params, [I64, I64, I64]);
+        assert_eq!(spec.returns, [I64]);
     }
 
     #[test]

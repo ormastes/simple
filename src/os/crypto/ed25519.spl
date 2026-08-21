@@ -24,7 +24,8 @@ extern fn serial_println(msg: text)
 extern fn rt_tls13_sha512_full(data: [u8]) -> [u8]
 extern fn rt_ed25519_sc_reduce_64(data: [u8]) -> [u8]
 extern fn rt_ed25519_sc_muladd(a: [u8], b: [u8], c: [u8]) -> [u8]
-extern fn rt_ed25519_sign_seed(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8]
+@unsafe(reason: "raw SimpleOS Ed25519 provider ABI; caller validates the 64-byte signature result", capabilities: [ffi])
+extern fn rt_ed25519_sign_seed(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8]?
 
 # ============================================================================
 # Ed25519 Scalar Clamping
@@ -339,21 +340,25 @@ fn _ed25519_sign_live_runtime_components(private_seed: [u8], public_key: [u8], m
     serial_println("[ed25519] sign: done")
     sig
 
-fn _ed25519_sign_live_runtime(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8]:
-    val direct_sig = rt_ed25519_sign_seed(private_seed, public_key, message)
+fn _ed25519_sign_live_runtime(private_seed: [u8], public_key: [u8], message: [u8]) -> Result<[u8], text>:
+    var direct_sig: [u8]? = nil
+    unsafe(capabilities: [ffi]):
+        direct_sig = rt_ed25519_sign_seed(private_seed, public_key, message)
     val component_sig = _ed25519_sign_live_runtime_components(private_seed, public_key, message)
-    if direct_sig.len() == 64 and component_sig.len() == 64:
-        if dual_backend_bytes_equal(direct_sig, component_sig):
-            return direct_sig
-        serial_println("[ed25519] direct runtime sign mismatch: using direct runtime path")
-        serial_println("[ed25519] direct runtime sig=" + dual_backend_hex(direct_sig, 64))
-        serial_println("[ed25519] component runtime sig=" + dual_backend_hex(component_sig, 64))
-        return direct_sig
+    if direct_sig.?:
+        val direct = direct_sig.unwrap()
+        if direct.len() == 64 and component_sig.len() == 64:
+            if dual_backend_bytes_equal(direct, component_sig):
+                return Ok(direct)
+            serial_println("[ed25519] direct runtime sign mismatch: using direct runtime path")
+            serial_println("[ed25519] direct runtime sig=" + dual_backend_hex(direct, 64))
+            serial_println("[ed25519] component runtime sig=" + dual_backend_hex(component_sig, 64))
+            return Ok(direct)
     if component_sig.len() == 64:
-        return component_sig
-    direct_sig
+        return Ok(component_sig)
+    Err("Ed25519 runtime providers did not produce a 64-byte signature")
 
-fn ed25519_sign_live_runtime_only(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8]:
+fn ed25519_sign_live_runtime_only(private_seed: [u8], public_key: [u8], message: [u8]) -> Result<[u8], text>:
     _ed25519_sign_live_runtime(private_seed, public_key, message)
 
 fn _ed25519_sign_live_pure(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8]:
