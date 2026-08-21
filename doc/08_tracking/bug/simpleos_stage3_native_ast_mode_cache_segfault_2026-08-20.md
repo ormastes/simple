@@ -1248,3 +1248,39 @@ queued correction shallow-copies every declaration name/value array during
 freeze and explicitly promotes those new registry-scope carriers. This is left
 unclaimed because Cycle 3 exhausted the session cap; the next fresh session
 must prove that the identical query remains `found=true` after source 0.
+
+## Freeze-owned declaration Cycle 1 (2026-08-22)
+
+The fresh admitted run rebuilt Stage 2 in approximately six minutes and passed
+compiler sanity plus struct-receiver/runtime capability. Stage 3 still exited
+139. The identical `driver_core_types -> CompileOptions` query was false at
+source 1, true again during later modules, and false again after that. A single
+declaration-array teardown cannot explain this reversible result. Cycle 2 adds
+a diagnostic-only record at each matching re-export hop with its retained item
+range, selected target index/name, declaration decision, and all declaration
+name-array lengths. No semantic change is made until that record identifies
+whether route selection or the target declaration carrier is unstable.
+
+Cycle 2 proved both are stable. Every successful `CompileOptions` hop selected
+target 25 (`compiler.common.driver_compile_options`), retained item range
+10..14, and reported `declares=true`, `composites=1`. Failed root queries
+emitted no hop record at all, so they returned before scanning routes. The
+shared `HirLowering.reexport_visit_*` arrays are reset by assigning fresh local
+arrays, but nested root queries and native cross-module return synchronization
+can restore an older field snapshot containing the same root at depth zero;
+cycle detection then rejects a new root as already visited.
+
+Cycle 3 replaces that shared recursion state with a fresh explicit
+`HirReexportWalkState` carrier passed through recursive calls. Nested root
+queries receive different carriers, so they cannot overwrite or resurrect the
+outer root's visited set. Compatibility completion/valid flags are copied back
+only after the walk returns.
+
+Cycle 3 still reproduced the source-1 false result, so the three-cycle cap was
+reached. Failed calls continued to emit no hop, proving the return remains in
+the pre-walk root validation. That validation accepts a by-value
+`ModuleSurface` aggregate, extracts its index, then compares several aggregate
+fields with the registry copy. This is the final aggregate ABI boundary on the
+route. The queued owner correction changes the root API to accept only the
+scalar physical index and wanted name, then loads and validates the canonical
+surface from the retained registry. It remains unclaimed until a fresh session.

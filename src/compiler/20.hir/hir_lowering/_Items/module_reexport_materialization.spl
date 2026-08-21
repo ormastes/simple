@@ -36,34 +36,37 @@ use compiler.core.{int_to_str}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
 impl HirLowering:
-    me find_reexport_source_walk(facade_index: i64, wanted: text, depth: i64) -> HirReexportSource:
+    me find_reexport_source_walk(
+        facade_index: i64, wanted: text, depth: i64,
+        state: HirReexportWalkState
+    ) -> HirReexportSource:
         """Walk frozen physical routes without path normalization or splits."""
         if depth > 8:
-            self.reexport_walk_complete = false
+            state.complete = false
             return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
         if facade_index < 0 or facade_index >= self.module_surfaces.surfaces.len():
-            self.reexport_walk_valid = false
+            state.valid = false
             return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
         if not module_surface_route_arrays_aligned(self.module_surfaces.surfaces[facade_index]):
-            self.reexport_walk_valid = false
+            state.valid = false
             return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
-        if self.reexport_visit_surface_indices.len() != self.reexport_visit_wanted.len() or
-           self.reexport_visit_surface_indices.len() != self.reexport_visit_depths.len():
-            self.reexport_walk_valid = false
+        if (state.surface_indices.len() != state.wanted_names.len() or
+            state.surface_indices.len() != state.depths.len()):
+            state.valid = false
             return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
 
         val visit_entry = hir_reexport_parallel_find(
-            self.reexport_visit_surface_indices, self.reexport_visit_wanted,
+            state.surface_indices, state.wanted_names,
             facade_index, wanted)
         if visit_entry >= 0:
-            val seen_depth = self.reexport_visit_depths[visit_entry]
+            val seen_depth = state.depths[visit_entry]
             if seen_depth <= depth:
                 return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
-            self.reexport_visit_depths[visit_entry] = depth
+            state.depths[visit_entry] = depth
         else:
-            self.reexport_visit_surface_indices = self.reexport_visit_surface_indices.push(facade_index)
-            self.reexport_visit_wanted = self.reexport_visit_wanted.push(wanted)
-            self.reexport_visit_depths = self.reexport_visit_depths.push(depth)
+            state.surface_indices = state.surface_indices.push(facade_index)
+            state.wanted_names = state.wanted_names.push(wanted)
+            state.depths = state.depths.push(depth)
 
         self.reexport_chase_calls = self.reexport_chase_calls + 1
         self.report_reexport_chase_stats()
@@ -75,7 +78,7 @@ impl HirLowering:
                 self.module_surfaces, origin_lookup.owner_module)
             if origin_index_value < 0 or
                origin_index_value >= self.module_surfaces.surfaces.len():
-                self.reexport_walk_valid = false
+                state.valid = false
                 return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
             return HirReexportSource(
                 found: true,
@@ -103,6 +106,10 @@ impl HirLowering:
                 val next_index = facade_mod.import_target_indices[import_idx]
                 if next_index >= 0 and next_index < self.module_surfaces.surfaces.len():
                     val next_mod = self.module_surfaces.surfaces[next_index]
+                    if (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
+                        val next_declares = hir_module_declares_item(
+                            next_mod, source_item)
+                        eprint("[reexport-hop] facade={facade_mod.preferred_registry_name} wanted={wanted} import={import_idx} item_start={item_start} item_end={item_end} source_item={source_item} target={next_index} target_name={next_mod.preferred_registry_name} declares={next_declares} composites={next_mod.composite_names.len()} enums={next_mod.enum_names.len()} traits={next_mod.trait_names.len()} callables={next_mod.callable_names.len()} aliases={next_mod.type_alias_names.len()} constants={next_mod.constant_names.len()}")
                     if hir_module_declares_item(next_mod, source_item):
                         return HirReexportSource(
                             found: true,
@@ -110,7 +117,7 @@ impl HirLowering:
                             module_name: next_mod.preferred_registry_name,
                             item_name: source_item)
                     val deeper = self.find_reexport_source_walk(
-                        next_index, source_item, depth + 1)
+                        next_index, source_item, depth + 1, state)
                     if deeper.found:
                         return deeper
             import_idx = import_idx + 1
@@ -130,7 +137,7 @@ impl HirLowering:
                             module_name: sibling.preferred_registry_name,
                             item_name: wanted)
                     val deeper = self.find_reexport_source_walk(
-                        sibling_index, wanted, depth + 1)
+                        sibling_index, wanted, depth + 1, state)
                     if deeper.found:
                         return deeper
             elif exp_local == wanted:
@@ -142,7 +149,7 @@ impl HirLowering:
                         item_name: exp_source)
                 if exp_source != wanted:
                     val alias_source = self.find_reexport_source_walk(
-                        facade_index, exp_source, depth + 1)
+                        facade_index, exp_source, depth + 1, state)
                     if alias_source.found:
                         return alias_source
                 else:
@@ -218,7 +225,8 @@ impl HirLowering:
                 item_name: dependency,
                 item_kind: kind,
                 module_key: imported_mod_name)
-        val hop = self.find_reexport_source(imported_mod, imported_mod_name, dependency)
+        val hop = self.find_reexport_source(
+            imported_mod.physical_index, dependency)
         if hop.found:
             val source_index = hop.module_index
             if source_index >= 0:
@@ -277,7 +285,7 @@ impl HirLowering:
                                 item_kind: kind,
                                 module_key: target.preferred_registry_name)
                     val hop = self.find_reexport_source(
-                        target, target.preferred_registry_name, item_name)
+                        target.physical_index, item_name)
                     if hop.found and hop.module_index >= 0:
                         val terminal = self.module_surfaces.surfaces[hop.module_index]
                         val hop_kind = hir_module_item_terminal_kind(terminal, hop.item_name)
@@ -538,7 +546,7 @@ impl HirLowering:
                             target, item_name)
                         if not candidate_found:
                             val hop = self.find_reexport_source(
-                                target, target.preferred_registry_name, item_name)
+                                target.physical_index, item_name)
                             if hop.found and hop.module_index >= 0:
                                 candidate_target = hop.module_index
                                 candidate_item = hop.item_name
@@ -876,7 +884,8 @@ impl HirLowering:
                 var trait_module_found = true
                 var trait_source_name = trait_name
                 if module_surface_name_position(imported_mod.trait_names, trait_source_name) < 0:
-                    val trait_source = self.find_reexport_source(imported_mod, imported_mod_name, trait_name)
+                    val trait_source = self.find_reexport_source(
+                        imported_mod.physical_index, trait_name)
                     if trait_source.found:
                         val trait_module_index = trait_source.module_index
                         trait_module_found = trait_module_index >= 0

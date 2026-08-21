@@ -328,7 +328,8 @@ impl HirLowering:
             # import silently registered NOTHING and every use site died
             # later with "unresolved name: rt_env_get" (native-build
             # entry-closure path; parity case dynload_tagged_text).
-            val hop = self.find_reexport_source(imported_mod, imported_mod_name, imported_name)
+            val hop = self.find_reexport_source(
+                imported_mod.physical_index, imported_name)
             if (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
                 eprint("[reexport-chase] mod={imported_mod_name} wanted={imported_name} imports={imported_mod.imports.len()} exports={imported_mod.exports.len()} found={hop.found} mname={imported_mod.module_name} fns={imported_mod.callable_names.len()}")
             if hop.found:
@@ -504,8 +505,8 @@ impl HirLowering:
             return resolved
         package_key
 
-    me find_reexport_source(facade_mod: ModuleSurface, facade_name: text, wanted: text) -> HirReexportSource:
-        """Resolve one root query using physical-surface scalar caches."""
+    me find_reexport_source(facade_index: i64, wanted: text) -> HirReexportSource:
+        """Resolve one root query from its retained physical surface index."""
         val generation = self.module_surfaces.generation
         if self.reexport_generation != generation:
             var root_surface_indices = self.reexport_root_surface_indices
@@ -538,28 +539,21 @@ impl HirLowering:
             self.reexport_walk_valid = false
             return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
 
-        val facade_index = facade_mod.physical_index
         if facade_index < 0 or facade_index >= self.module_surfaces.surfaces.len():
             self.reexport_walk_valid = false
             return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
         val current_facade = self.module_surfaces.surfaces[facade_index]
         if current_facade.physical_index != facade_index or
-           facade_mod.generation != self.module_surfaces.generation or
-           facade_mod.generation != current_facade.generation or
-           facade_mod.canonical_path != current_facade.canonical_path or
-           facade_mod.preferred_registry_name != current_facade.preferred_registry_name:
+           current_facade.generation != self.module_surfaces.generation:
             self.reexport_walk_valid = false
             return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
 
-        # Cross-module memo arrays can change meaning after a native module
-        # scope transition. Resolve every root from promoted scalar routes and
-        # keep cycle detection local to this one walk.
-        val visit_surface_indices: [i64] = []
-        val visit_wanted: [text] = []
-        val visit_depths: [i64] = []
-        self.reexport_visit_surface_indices = visit_surface_indices
-        self.reexport_visit_wanted = visit_wanted
-        self.reexport_visit_depths = visit_depths
-
-        val result = self.find_reexport_source_walk(facade_index, wanted, 0)
+        # Keep recursion state on a fresh explicit carrier. HirLowering fields
+        # are shared by nested root queries and native cross-module frame sync
+        # can restore an older visit snapshot after a nested call returns.
+        val state = HirReexportWalkState.fresh()
+        val result = self.find_reexport_source_walk(
+            facade_index, wanted, 0, state)
+        self.reexport_walk_complete = state.complete
+        self.reexport_walk_valid = state.valid
         result
