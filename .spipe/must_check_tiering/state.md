@@ -185,3 +185,8 @@ implementation-blocked-by-bootstrap-authority
 - verify: Updated push/bootstrap/tiering self-tests passed; the real ref fixture
   remained within the ten-second budget. Full bootstrap remains blocked by the
   unchanged Stage-3 imported-type cascade after the third bounded cycle.
+- fix-pending-verification: The unchanged impossible dependency payloads were
+  localized to the two staged `Dict<text, ModuleSurfaceCallable>` value reads.
+  Surfaces now retain aligned callable name/value arrays and registration uses
+  their scalar index, with a source contract and tracked resume command. No
+  fourth bootstrap was launched after the three-cycle cap.
