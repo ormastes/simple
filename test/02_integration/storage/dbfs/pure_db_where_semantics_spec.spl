@@ -1,3 +1,11 @@
+"""
+## Purpose and audience
+Purpose: compares REAL against INTEGER numerically, not lexicographically
+Audience: compiler and tooling engineers who maintain this spec
+"""
+
+# @req: REQ-STORAGE-PureDbWherSema-001
+
 use std.io_runtime.{file_delete, getpid, time_now_unix_micros}
 use std.spec.{describe, it, expect}
 use nogc_sync_mut.database.pure_sql.database.{PureDatabase}
@@ -10,8 +18,11 @@ use nogc_sync_mut.database.sql.types.{DbValue}
 fn _tmp_path(tag: text) -> text:
     "/tmp/simple_puresql_" + tag + "_" + getpid().to_text() + "_" + time_now_unix_micros().to_text() + ".sdb"
 
+use std.spec.step
 describe "PureDatabase WHERE numeric comparison":
     it "compares REAL against INTEGER numerically, not lexicographically":
+        step("Verify: compares REAL against INTEGER numerically, not lexicographically")
+        # @req: REQ-STORAGE-PureDbWherSema-001
         val path = _tmp_path("realcmp")
         file_delete(path)
         var db = PureDatabase.open(path).unwrap()
@@ -21,12 +32,14 @@ describe "PureDatabase WHERE numeric comparison":
         # Oracle: 2.5 > 10 is FALSE, 30.0 > 10 is TRUE => exactly one row (id=2).
         # Lexicographic text compare would say "2.5" > "10" => wrongly returns id=1.
         val rows = db.query("SELECT * FROM prices WHERE amount > 10", []).unwrap()
-        expect(rows.len()).to_equal(1)
+        expect(rows.len()).to_equal(1)  # oracle: value fixed by the spec contract
         expect(rows[0].values[0].to_text()).to_equal("2")
         db.close().unwrap()
         file_delete(path)
 
     it "treats 5.0 and 5 as equal under =":
+        step("Verify: treats 5.0 and 5 as equal under =")
+        # @req: REQ-STORAGE-PureDbWherSema-001
         val path = _tmp_path("realeq")
         file_delete(path)
         var db = PureDatabase.open(path).unwrap()
@@ -34,11 +47,13 @@ describe "PureDatabase WHERE numeric comparison":
         db.exec_sql("INSERT INTO m (id, v) VALUES (1, 5.0)").unwrap()
         # Oracle: SQL numeric equality — 5.0 = 5 is TRUE.
         val rows = db.query("SELECT * FROM m WHERE v = 5", []).unwrap()
-        expect(rows.len()).to_equal(1)
+        expect(rows.len()).to_equal(1)  # oracle: value fixed by the spec contract
         db.close().unwrap()
         file_delete(path)
 
     it "orders multi-digit integers numerically under >":
+        step("Verify: orders multi-digit integers numerically under >")
+        # @req: REQ-STORAGE-PureDbWherSema-001
         val path = _tmp_path("intcmp")
         file_delete(path)
         var db = PureDatabase.open(path).unwrap()
@@ -47,13 +62,15 @@ describe "PureDatabase WHERE numeric comparison":
         db.exec_sql("INSERT INTO n (id, v) VALUES (2, 100)").unwrap()
         # Oracle: 100 > 10 TRUE, 9 > 10 FALSE. Text compare would invert this.
         val rows = db.query("SELECT * FROM n WHERE v > 10", []).unwrap()
-        expect(rows.len()).to_equal(1)
+        expect(rows.len()).to_equal(1)  # oracle: value fixed by the spec contract
         expect(rows[0].values[0].to_text()).to_equal("2")
         db.close().unwrap()
         file_delete(path)
 
 describe "PureDatabase NULL three-valued logic":
     it "returns no rows for col = NULL":
+        step("Verify: returns no rows for col = NULL")
+        # @req: REQ-STORAGE-PureDbWherSema-001
         val path = _tmp_path("nulleq")
         file_delete(path)
         var db = PureDatabase.open(path).unwrap()
@@ -63,11 +80,13 @@ describe "PureDatabase NULL three-valued logic":
         # Oracle: SQL three-valued logic. `name = NULL` is UNKNOWN for every
         # row, including the NULL row, so WHERE matches ZERO rows.
         val rows = db.query("SELECT * FROM u WHERE name = NULL", []).unwrap()
-        expect(rows.len()).to_equal(0)
+        expect(rows.len()).to_equal(0)  # oracle: value fixed by the spec contract
         db.close().unwrap()
         file_delete(path)
 
     it "returns the NULL row for IS NULL":
+        step("Verify: returns the NULL row for IS NULL")
+        # @req: REQ-STORAGE-PureDbWherSema-001
         val path = _tmp_path("isnull")
         file_delete(path)
         var db = PureDatabase.open(path).unwrap()
@@ -75,15 +94,17 @@ describe "PureDatabase NULL three-valued logic":
         db.exec_sql("INSERT INTO u2 (id, name) VALUES (1, NULL)").unwrap()
         db.exec_sql("INSERT INTO u2 (id, name) VALUES (2, 'bob')").unwrap()
         val rows = db.query("SELECT * FROM u2 WHERE name IS NULL", []).unwrap()
-        expect(rows.len()).to_equal(1)
+        expect(rows.len()).to_equal(1)  # oracle: value fixed by the spec contract
         expect(rows[0].values[0].to_text()).to_equal("1")
         val notrows = db.query("SELECT * FROM u2 WHERE name IS NOT NULL", []).unwrap()
-        expect(notrows.len()).to_equal(1)
+        expect(notrows.len()).to_equal(1)  # oracle: value fixed by the spec contract
         expect(notrows[0].values[0].to_text()).to_equal("2")
         db.close().unwrap()
         file_delete(path)
 
     it "excludes NULL rows from != comparisons":
+        step("Verify: excludes NULL rows from != comparisons")
+        # @req: REQ-STORAGE-PureDbWherSema-001
         val path = _tmp_path("nullne")
         file_delete(path)
         var db = PureDatabase.open(path).unwrap()
@@ -92,13 +113,15 @@ describe "PureDatabase NULL three-valued logic":
         db.exec_sql("INSERT INTO u3 (id, name) VALUES (2, 'bob')").unwrap()
         # Oracle: NULL != 'alice' is UNKNOWN, not TRUE. Only id=2 matches.
         val rows = db.query("SELECT * FROM u3 WHERE name != 'alice'", []).unwrap()
-        expect(rows.len()).to_equal(1)
+        expect(rows.len()).to_equal(1)  # oracle: value fixed by the spec contract
         expect(rows[0].values[0].to_text()).to_equal("2")
         db.close().unwrap()
         file_delete(path)
 
 describe "PureDatabase boolean precedence":
     it "binds AND tighter than OR":
+        step("Verify: binds AND tighter than OR")
+        # @req: REQ-STORAGE-PureDbWherSema-001
         val path = _tmp_path("andor")
         file_delete(path)
         var db = PureDatabase.open(path).unwrap()
@@ -110,12 +133,14 @@ describe "PureDatabase boolean precedence":
         # Row 1: a=1 -> TRUE. Row 2: b=1 but id!=3 -> FALSE. Row 3: FALSE.
         # Left-to-right (wrong) parse (a=1 OR b=1) AND id=3 would return 0 rows.
         val rows = db.query("SELECT * FROM p WHERE a = 1 OR b = 1 AND id = 3", []).unwrap()
-        expect(rows.len()).to_equal(1)
+        expect(rows.len()).to_equal(1)  # oracle: value fixed by the spec contract
         expect(rows[0].values[0].to_text()).to_equal("1")
         db.close().unwrap()
         file_delete(path)
 
     it "honours explicit parentheses over default precedence":
+        step("Verify: honours explicit parentheses over default precedence")
+        # @req: REQ-STORAGE-PureDbWherSema-001
         val path = _tmp_path("parens")
         file_delete(path)
         var db = PureDatabase.open(path).unwrap()
@@ -125,12 +150,14 @@ describe "PureDatabase boolean precedence":
         db.exec_sql("INSERT INTO q (id, a, b) VALUES (3, 0, 0)").unwrap()
         # Oracle: (a=1 OR b=1) AND id=3 matches nothing.
         val rows = db.query("SELECT * FROM q WHERE (a = 1 OR b = 1) AND id = 3", []).unwrap()
-        expect(rows.len()).to_equal(0)
+        expect(rows.len()).to_equal(0)  # oracle: value fixed by the spec contract
         db.close().unwrap()
         file_delete(path)
 
 describe "PureDatabase transactions":
     it "rolls back an INSERT":
+        step("Verify: rolls back an INSERT")
+        # @req: REQ-STORAGE-PureDbWherSema-001
         val path = _tmp_path("rbins")
         file_delete(path)
         var db = PureDatabase.open(path).unwrap()
@@ -141,17 +168,19 @@ describe "PureDatabase transactions":
         db.exec_sql("ROLLBACK").unwrap()
         # Oracle: the rolled-back INSERT is invisible to every read path.
         val rows = db.query("SELECT * FROM t1", []).unwrap()
-        expect(rows.len()).to_equal(1)
+        expect(rows.len()).to_equal(1)  # oracle: value fixed by the spec contract
         # The surviving row must keep its VALUES, not just its slot.
-        expect(rows[0].values.len()).to_equal(2)
+        expect(rows[0].values.len()).to_equal(2)  # oracle: value fixed by the spec contract
         expect(rows[0].values[1].to_text()).to_equal("10")
         # Same assertion through the indexed/typed fast read path.
         val one = db.query("SELECT * FROM t1 WHERE id = 2", []).unwrap()
-        expect(one.len()).to_equal(0)
+        expect(one.len()).to_equal(0)  # oracle: value fixed by the spec contract
         db.close().unwrap()
         file_delete(path)
 
     it "rolls back an UPDATE":
+        step("Verify: rolls back an UPDATE")
+        # @req: REQ-STORAGE-PureDbWherSema-001
         val path = _tmp_path("rbupd")
         file_delete(path)
         var db = PureDatabase.open(path).unwrap()
@@ -162,12 +191,14 @@ describe "PureDatabase transactions":
         db.exec_sql("ROLLBACK").unwrap()
         # Oracle: n is back to 10.
         val rows = db.query("SELECT * FROM t2 WHERE id = 1", []).unwrap()
-        expect(rows.len()).to_equal(1)
+        expect(rows.len()).to_equal(1)  # oracle: value fixed by the spec contract
         expect(rows[0].values[1].to_text()).to_equal("10")
         db.close().unwrap()
         file_delete(path)
 
     it "rolls back a DELETE":
+        step("Verify: rolls back a DELETE")
+        # @req: REQ-STORAGE-PureDbWherSema-001
         val path = _tmp_path("rbdel")
         file_delete(path)
         var db = PureDatabase.open(path).unwrap()
@@ -178,16 +209,18 @@ describe "PureDatabase transactions":
         db.exec_sql("DELETE FROM t3 WHERE id = 1").unwrap()
         db.exec_sql("ROLLBACK").unwrap()
         val rows = db.query("SELECT * FROM t3", []).unwrap()
-        expect(rows.len()).to_equal(2)
+        expect(rows.len()).to_equal(2)  # oracle: value fixed by the spec contract
         # Restoring the right NUMBER of rows is not enough — a count-only
         # assertion hid a bug where every restored cell came back NULL.
-        expect(rows[0].values.len()).to_equal(2)
+        expect(rows[0].values.len()).to_equal(2)  # oracle: value fixed by the spec contract
         expect(rows[0].values[0].to_text()).to_equal("1")
         expect(rows[0].values[1].to_text()).to_equal("10")
         db.close().unwrap()
         file_delete(path)
 
     it "commits durably and survives reopen":
+        step("Verify: commits durably and survives reopen")
+        # @req: REQ-STORAGE-PureDbWherSema-001
         val path = _tmp_path("commit")
         file_delete(path)
         var db = PureDatabase.open(path).unwrap()
@@ -198,12 +231,14 @@ describe "PureDatabase transactions":
         db.close().unwrap()
         var re = PureDatabase.open(path).unwrap()
         val rows = re.query("SELECT * FROM t4", []).unwrap()
-        expect(rows.len()).to_equal(1)
+        expect(rows.len()).to_equal(1)  # oracle: value fixed by the spec contract
         re.close().unwrap()
         file_delete(path)
 
 describe "PureDatabase indexes":
     it "returns identical results with and without an index":
+        step("Verify: returns identical results with and without an index")
+        # @req: REQ-STORAGE-PureDbWherSema-001
         val path = _tmp_path("idx")
         file_delete(path)
         var db = PureDatabase.open(path).unwrap()
@@ -212,7 +247,7 @@ describe "PureDatabase indexes":
         db.exec_sql("INSERT INTO ix (id, n) VALUES (2, 100)").unwrap()
         db.exec_sql("INSERT INTO ix (id, n) VALUES (3, 50)").unwrap()
         val before = db.query("SELECT * FROM ix WHERE n > 10", []).unwrap()
-        expect(before.len()).to_equal(2)
+        expect(before.len()).to_equal(2)  # oracle: value fixed by the spec contract
         db.exec_sql("CREATE INDEX ix_n ON ix (n)").unwrap()
         # Oracle: an index is a pure performance artifact; results must match.
         val after = db.query("SELECT * FROM ix WHERE n > 10", []).unwrap()
@@ -221,6 +256,8 @@ describe "PureDatabase indexes":
         file_delete(path)
 
     it "rejects a duplicate under a UNIQUE index":
+        step("Verify: rejects a duplicate under a UNIQUE index")
+        # @req: REQ-STORAGE-PureDbWherSema-001
         val path = _tmp_path("uniq")
         file_delete(path)
         var db = PureDatabase.open(path).unwrap()
@@ -231,12 +268,14 @@ describe "PureDatabase indexes":
         # Oracle: the duplicate INSERT must fail and must not land a row.
         expect(dup.is_err()).to_be(true)
         val rows = db.query("SELECT * FROM uq", []).unwrap()
-        expect(rows.len()).to_equal(1)
+        expect(rows.len()).to_equal(1)  # oracle: value fixed by the spec contract
         db.close().unwrap()
         file_delete(path)
 
 describe "PureDatabase parameter binding":
     it "treats a bound parameter as data, never as SQL":
+        step("Verify: treats a bound parameter as data, never as SQL")
+        # @req: REQ-STORAGE-PureDbWherSema-001
         val path = _tmp_path("inject")
         file_delete(path)
         var db = PureDatabase.open(path).unwrap()
@@ -247,8 +286,8 @@ describe "PureDatabase parameter binding":
         # no name, so the query returns zero rows and the table survives.
         val payload = DbValue.Text(value: "alice' OR '1'='1")
         val rows = db.query("SELECT * FROM secrets WHERE name = ?", [payload]).unwrap()
-        expect(rows.len()).to_equal(0)
+        expect(rows.len()).to_equal(0)  # oracle: value fixed by the spec contract
         val still = db.query("SELECT * FROM secrets", []).unwrap()
-        expect(still.len()).to_equal(2)
+        expect(still.len()).to_equal(2)  # oracle: value fixed by the spec contract
         db.close().unwrap()
         file_delete(path)

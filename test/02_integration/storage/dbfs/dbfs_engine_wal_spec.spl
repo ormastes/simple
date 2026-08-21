@@ -2,6 +2,10 @@
 # Run: bin/simple test test/integration/storage/dbfs/dbfs_engine_wal_spec.spl
 
 """
+## Purpose and audience
+Purpose: first append returns LSN > 0
+Audience: compiler and tooling engineers who maintain this spec
+
 DBFS WAL Specification
 
 Verifies write-ahead log append, flush, durable LSN tracking,
@@ -13,19 +17,26 @@ and recovery cursor positioning:
   5. flush is idempotent
 """
 
+# @req: REQ-STORAGE-DbfsEngiWal-001
+
 use std.spipe.*
 use std.db.dbfs_engine.wal.{DbfsWal, WalRecord, Lsn, WAL_RECORD_COMMIT}
 
+use std.spec.step
 describe "DBFS WAL — append":
     """Append contract: monotonic LSNs, readable records."""
 
     it "first append returns LSN > 0":
+        step("Verify: first append returns LSN > 0")
+        # @req: REQ-STORAGE-DbfsEngiWal-001
         val wal = DbfsWal.new()
         val rec = WalRecord(txn_id: 1, record_type: WAL_RECORD_COMMIT, payload: "")
         val lsn = wal.append(rec).unwrap()
         expect(lsn > 0).to_equal(true)
 
     it "successive appends produce strictly increasing LSNs":
+        step("Verify: successive appends produce strictly increasing LSNs")
+        # @req: REQ-STORAGE-DbfsEngiWal-001
         val wal = DbfsWal.new()
         val rec1 = WalRecord(txn_id: 1, record_type: WAL_RECORD_COMMIT, payload: "a")
         val rec2 = WalRecord(txn_id: 2, record_type: WAL_RECORD_COMMIT, payload: "b")
@@ -34,20 +45,26 @@ describe "DBFS WAL — append":
         expect(lsn2 > lsn1).to_equal(true)
 
     it "appended record is readable by LSN before flush":
+        step("Verify: appended record is readable by LSN before flush")
+        # @req: REQ-STORAGE-DbfsEngiWal-001
         val wal = DbfsWal.new()
         val rec = WalRecord(txn_id: 3, record_type: WAL_RECORD_COMMIT, payload: "hello")
         val lsn = wal.append(rec).unwrap()
         val got = wal.read_record(lsn).unwrap()
-        expect(got.txn_id).to_equal(3)
+        expect(got.txn_id).to_equal(3)  # oracle: value fixed by the spec contract
 
 describe "DBFS WAL — flush and durable LSN":
     """Flush advances durable_lsn."""
 
     it "durable_lsn is 0 before any flush":
+        step("Verify: durable_lsn is 0 before any flush")
+        # @req: REQ-STORAGE-DbfsEngiWal-001
         val wal = DbfsWal.new()
-        expect(wal.durable_lsn()).to_equal(0)
+        expect(wal.durable_lsn()).to_equal(0)  # oracle: value fixed by the spec contract
 
     it "durable_lsn equals tail_lsn after flush":
+        step("Verify: durable_lsn equals tail_lsn after flush")
+        # @req: REQ-STORAGE-DbfsEngiWal-001
         val wal = DbfsWal.new()
         val rec = WalRecord(txn_id: 1, record_type: WAL_RECORD_COMMIT, payload: "")
         val lsn = wal.append(rec).unwrap()
@@ -55,6 +72,8 @@ describe "DBFS WAL — flush and durable LSN":
         expect(wal.durable_lsn()).to_equal(lsn.value)
 
     it "flush is idempotent":
+        step("Verify: flush is idempotent")
+        # @req: REQ-STORAGE-DbfsEngiWal-001
         val wal = DbfsWal.new()
         val rec = WalRecord(txn_id: 1, record_type: WAL_RECORD_COMMIT, payload: "")
         wal.append(rec).unwrap()
@@ -66,6 +85,8 @@ describe "DBFS WAL — recovery cursor":
     """Recovery cursor starts at intent_log_head."""
 
     it "recovery_cursor starts at intent_log_head after flush":
+        step("Verify: recovery_cursor starts at intent_log_head after flush")
+        # @req: REQ-STORAGE-DbfsEngiWal-001
         val wal = DbfsWal.new()
         val rec = WalRecord(txn_id: 10, record_type: WAL_RECORD_COMMIT, payload: "")
         wal.append(rec).unwrap()
@@ -75,10 +96,12 @@ describe "DBFS WAL — recovery cursor":
         expect(cursor.start_lsn()).to_equal(head)
 
     it "recovery cursor iterates all committed records":
+        step("Verify: recovery cursor iterates all committed records")
+        # @req: REQ-STORAGE-DbfsEngiWal-001
         val wal = DbfsWal.new()
         wal.append(WalRecord(txn_id: 1, record_type: WAL_RECORD_COMMIT, payload: "a")).unwrap()
         wal.append(WalRecord(txn_id: 2, record_type: WAL_RECORD_COMMIT, payload: "b")).unwrap()
         wal.flush().unwrap()
         val cursor = wal.recovery_cursor()
         val records = cursor.collect_committed().unwrap()
-        expect(records.len()).to_equal(2)
+        expect(records.len()).to_equal(2)  # oracle: value fixed by the spec contract

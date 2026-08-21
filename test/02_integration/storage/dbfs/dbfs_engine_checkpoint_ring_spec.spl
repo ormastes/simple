@@ -4,6 +4,10 @@
 # (currently in-memory only — R2 HIGH-risk gap from D12)
 
 """
+## Purpose and audience
+Purpose: ring slot written before remount is readable after
+Audience: compiler and tooling engineers who maintain this spec
+
 DBFS Checkpoint Ring Disk Persistence Specification
 
 Verifies R2 HIGH-risk gap: checkpoint ring is written to META_DURABLE
@@ -15,6 +19,8 @@ and remount reads the correct slot.
   4. stale dirty slots are not returned as current
 """
 
+# @req: REQ-STORAGE-DbfsEngiChecRing-001
+
 use std.spipe.*
 use std.db.dbfs_engine.checkpoint_ring.{
     CheckpointRing, RingSlot, RING_SIZE,
@@ -23,10 +29,13 @@ use std.db.dbfs_engine.checkpoint_ring.{
 }
 use std.storage.arena.{StorageClass}
 
+use std.spec.step
 describe "DBFS Checkpoint Ring — disk persistence":
     """Ring slot survives simulated remount."""
 
     it "ring slot written before remount is readable after":
+        step("Verify: ring slot written before remount is readable after")
+        # @req: REQ-STORAGE-DbfsEngiChecRing-001
         val ring = CheckpointRing.new_persistent()
         val slot = RingSlot(slot_gen: 5, clean: true, btree_root_page: 100)
         ring.write_slot(0, slot).unwrap()
@@ -34,10 +43,12 @@ describe "DBFS Checkpoint Ring — disk persistence":
         ring.close().unwrap()
         val ring2 = CheckpointRing.reopen()
         val got = ring2.read_slot(0).unwrap()
-        expect(got.slot_gen).to_equal(5)
+        expect(got.slot_gen).to_equal(5)  # oracle: value fixed by the spec contract
         expect(got.clean).to_equal(true)
 
     it "highest ring slot survives remount":
+        step("Verify: highest ring slot survives remount")
+        # @req: REQ-STORAGE-DbfsEngiChecRing-001
         val ring = CheckpointRing.new_persistent()
         CheckpointRing.persist_slot(RING_SIZE - 1, RingSlot(
             slot_gen: RING_SIZE,
@@ -54,6 +65,8 @@ describe "DBFS Checkpoint Ring — best slot selection":
     """Remount picks the slot with highest gen and clean=true."""
 
     it "current_slot returns slot with highest gen and clean=true":
+        step("Verify: current_slot returns slot with highest gen and clean=true")
+        # @req: REQ-STORAGE-DbfsEngiChecRing-001
         val ring = CheckpointRing.new_persistent()
         ring.write_slot(0, RingSlot(slot_gen: 3, clean: true, btree_root_page: 30)).unwrap()
         ring.write_slot(1, RingSlot(slot_gen: 5, clean: true, btree_root_page: 50)).unwrap()
@@ -62,9 +75,11 @@ describe "DBFS Checkpoint Ring — best slot selection":
         ring.close().unwrap()
         val ring2 = CheckpointRing.reopen()
         val best = ring2.current_slot().unwrap()
-        expect(best.slot_gen).to_equal(5)
+        expect(best.slot_gen).to_equal(5)  # oracle: value fixed by the spec contract
 
     it "dirty slots are not selected as current":
+        step("Verify: dirty slots are not selected as current")
+        # @req: REQ-STORAGE-DbfsEngiChecRing-001
         val ring = CheckpointRing.new_persistent()
         ring.write_slot(0, RingSlot(slot_gen: 10, clean: false, btree_root_page: 10)).unwrap()
         ring.write_slot(1, RingSlot(slot_gen: 2, clean: true, btree_root_page: 20)).unwrap()
@@ -72,12 +87,14 @@ describe "DBFS Checkpoint Ring — best slot selection":
         ring.close().unwrap()
         val ring2 = CheckpointRing.reopen()
         val best = ring2.current_slot().unwrap()
-        expect(best.slot_gen).to_equal(2)
+        expect(best.slot_gen).to_equal(2)  # oracle: value fixed by the spec contract
 
 describe "DBFS Checkpoint Ring — storage class":
     """Ring writes must target META_DURABLE arena."""
 
     it "ring write uses META_DURABLE storage class":
+        step("Verify: ring write uses META_DURABLE storage class")
+        # @req: REQ-STORAGE-DbfsEngiChecRing-001
         val ring = CheckpointRing.new_persistent()
         ring.write_slot(0, RingSlot(slot_gen: 1, clean: true, btree_root_page: 0)).unwrap()
         ring.flush().unwrap()
@@ -85,12 +102,16 @@ describe "DBFS Checkpoint Ring — storage class":
         expect(sc).to_equal(StorageClass.MetaDurable)
 
     it "ring size constant is at least 4":
+        step("Verify: ring size constant is at least 4")
+        # @req: REQ-STORAGE-DbfsEngiChecRing-001
         expect(RING_SIZE >= 4).to_equal(true)
 
 describe "DBFS Checkpoint Ring — callback persistence":
     """When callback is registered, writes go through the callback path."""
 
     it "callback path persists slots across reopen":
+        step("Verify: callback path persists slots across reopen")
+        # @req: REQ-STORAGE-DbfsEngiChecRing-001
         ring_clear_persist_callback()
         ring_register_persist_callback("arena:META_DURABLE")
         expect(ring_is_callback_registered()).to_equal(true)
@@ -98,13 +119,15 @@ describe "DBFS Checkpoint Ring — callback persistence":
         ring.write_slot(0, RingSlot(slot_gen: 7, clean: true, btree_root_page: 70)).unwrap()
         ring.flush().unwrap()
         ring.close().unwrap()
-        expect(ring_cb_slot_count()).to_equal(1)
+        expect(ring_cb_slot_count()).to_equal(1)  # oracle: value fixed by the spec contract
         val ring2 = CheckpointRing.reopen()
         val got = ring2.read_slot(0).unwrap()
-        expect(got.slot_gen).to_equal(7)
+        expect(got.slot_gen).to_equal(7)  # oracle: value fixed by the spec contract
         ring_clear_persist_callback()
 
     it "callback registration is clearable":
+        step("Verify: callback registration is clearable")
+        # @req: REQ-STORAGE-DbfsEngiChecRing-001
         ring_register_persist_callback("test")
         expect(ring_is_callback_registered()).to_equal(true)
         ring_clear_persist_callback()

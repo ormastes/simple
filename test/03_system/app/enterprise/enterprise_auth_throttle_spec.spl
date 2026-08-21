@@ -1,4 +1,8 @@
 """
+## Purpose and audience
+Purpose: logs in, uses the bearer token, and stays generic on failure
+Audience: compiler and tooling engineers who maintain this spec
+
 # Enterprise Web App — session issuance and request throttling
 
 ## Overview
@@ -31,6 +35,8 @@ attempts get a stricter anti-brute-force window.
 
 Lane: .spipe/simple_enterprise_suite (v2, W5-A).
 """
+
+# @req: REQ-APP-EnteAuthThro-001
 
 use std.spec.*
 use std.io_runtime.{file_exists, file_delete, dir_create_all}
@@ -85,67 +91,73 @@ fn fresh(name: text):
 
 describe "enterprise auth — login issues a durable bearer session":
     it "logs in, uses the bearer token, and stays generic on failure":
+        step("Verify: logs in, uses the bearer token, and stays generic on failure")
+        # @req: REQ-APP-EnteAuthThro-001
         val store = fresh("login")
         val t = tenant_a()
 
         step("POST /auth/login with correct credentials returns a token")
         val login = store_app_handle_bearer(store, t, "POST", "/auth/login", plain_headers(),
             "user=clerk-1&secret=s3cret&ttl=1000", 100, "entropy-1")
-        expect(http_status_code(login.status)).to_equal(200)
+        expect(http_status_code(login.status)).to_equal(200)  # oracle: value fixed by the spec contract
         expect(login.body.starts_with("token=")).to_be(true)
         val token = login.body.slice(6, login.body.len())
         expect(token.len() > 30).to_be(true)
 
         step("The bearer token authorizes a store route")
         val cat = store_app_handle_bearer(store, t, "GET", "/store/catalog", bearer_headers(token), "", 200, "")
-        expect(http_status_code(cat.status)).to_equal(200)
+        expect(http_status_code(cat.status)).to_equal(200)  # oracle: value fixed by the spec contract
 
         step("Wrong secret is a generic 401 — identical to unknown user")
         val wrong = store_app_handle_bearer(store, t, "POST", "/auth/login", plain_headers(),
             "user=clerk-1&secret=nope", 300, "entropy-2")
-        expect(http_status_code(wrong.status)).to_equal(401)
+        expect(http_status_code(wrong.status)).to_equal(401)  # oracle: value fixed by the spec contract
         val ghost = store_app_handle_bearer(store, t, "POST", "/auth/login", plain_headers(),
             "user=who-is-this&secret=nope", 300, "entropy-3")
-        expect(http_status_code(ghost.status)).to_equal(401)
+        expect(http_status_code(ghost.status)).to_equal(401)  # oracle: value fixed by the spec contract
         expect(wrong.body).to_equal(ghost.body)
         expect(wrong.body.contains("clerk-1")).to_be(false)
 
         step("A missing bearer token is 401 on a protected route")
         val anon = store_app_handle_bearer(store, t, "GET", "/store/catalog", plain_headers(), "", 400, "")
-        expect(http_status_code(anon.status)).to_equal(401)
+        expect(http_status_code(anon.status)).to_equal(401)  # oracle: value fixed by the spec contract
         store_close(store)
 
 describe "enterprise auth — revocation and expiry":
     it "revoked and expired tokens are 401":
+        step("Verify: revoked and expired tokens are 401")
+        # @req: REQ-APP-EnteAuthThro-001
         val store = fresh("expiry")
         val t = tenant_a()
 
         step("Issue a session with ttl 100 at now=1000")
         val login = store_app_handle_bearer(store, t, "POST", "/auth/login", plain_headers(),
             "user=clerk-1&secret=s3cret&ttl=100", 1000, "entropy-e")
-        expect(http_status_code(login.status)).to_equal(200)
+        expect(http_status_code(login.status)).to_equal(200)  # oracle: value fixed by the spec contract
         val token = login.body.slice(6, login.body.len())
 
         step("Within ttl (now=1050) the token authorizes")
         val ok = store_app_handle_bearer(store, t, "GET", "/store/catalog", bearer_headers(token), "", 1050, "")
-        expect(http_status_code(ok.status)).to_equal(200)
+        expect(http_status_code(ok.status)).to_equal(200)  # oracle: value fixed by the spec contract
 
         step("At now=1100 (issued_at + ttl) the token is expired — 401")
         val expired = store_app_handle_bearer(store, t, "GET", "/store/catalog", bearer_headers(token), "", 1100, "")
-        expect(http_status_code(expired.status)).to_equal(401)
+        expect(http_status_code(expired.status)).to_equal(401)  # oracle: value fixed by the spec contract
 
         step("A fresh token revoked via POST /auth/logout is 401 afterwards")
         val login2 = store_app_handle_bearer(store, t, "POST", "/auth/login", plain_headers(),
             "user=clerk-1&secret=s3cret&ttl=5000", 1200, "entropy-f")
         val token2 = login2.body.slice(6, login2.body.len())
         val out = store_app_handle_bearer(store, t, "POST", "/auth/logout", bearer_headers(token2), "", 1210, "")
-        expect(http_status_code(out.status)).to_equal(200)
+        expect(http_status_code(out.status)).to_equal(200)  # oracle: value fixed by the spec contract
         val after = store_app_handle_bearer(store, t, "GET", "/store/catalog", bearer_headers(token2), "", 1220, "")
-        expect(http_status_code(after.status)).to_equal(401)
+        expect(http_status_code(after.status)).to_equal(401)  # oracle: value fixed by the spec contract
         store_close(store)
 
 describe "enterprise auth — repeated login issues distinct sessions":
     it "does not collide two logins onto one token even with identical entropy + now":
+        step("Verify: does not collide two logins onto one token even with identical entropy + now")
+        # @req: REQ-APP-EnteAuthThro-001
         # Until the W9-D security audit the token was
         # sha256(entropy | tenant | actor | now), so two logins in the same
         # second with the same entropy produced ONE token — and any party that
@@ -169,6 +181,8 @@ describe "enterprise auth — repeated login issues distinct sessions":
 
 describe "enterprise auth — tenant isolation of sessions":
     it "a tenant-a token never resolves under tenant-b":
+        step("Verify: a tenant-a token never resolves under tenant-b")
+        # @req: REQ-APP-EnteAuthThro-001
         val store = fresh("isolation")
         val t = tenant_a()
         val login = store_app_handle_bearer(store, t, "POST", "/auth/login", plain_headers(),
@@ -177,7 +191,7 @@ describe "enterprise auth — tenant isolation of sessions":
 
         step("Under tenant-b the same token is 401")
         val cross = store_app_handle_bearer(store, tenant_b(), "GET", "/store/catalog", bearer_headers(token), "", 200, "")
-        expect(http_status_code(cross.status)).to_equal(401)
+        expect(http_status_code(cross.status)).to_equal(401)  # oracle: value fixed by the spec contract
 
         step("Direct resolve under tenant-b is inactive")
         val r = session_resolve(store, "tenant-b", token, 200)
@@ -186,6 +200,8 @@ describe "enterprise auth — tenant isolation of sessions":
 
 describe "enterprise throttle — fixed window with deterministic clock":
     it "over-limit is 429 with security headers, allowed after the window":
+        step("Verify: over-limit is 429 with security headers, allowed after the window")
+        # @req: REQ-APP-EnteAuthThro-001
         val store = fresh("throttle")
         val t = tenant_a()
         val login = store_app_handle_bearer(store, t, "POST", "/auth/login", plain_headers(),
@@ -199,7 +215,7 @@ describe "enterprise throttle — fixed window with deterministic clock":
             val r = store_app_handle_bearer(store, t, "GET", "/store/catalog", bearer_headers(token), "", 200, "")
             last = http_status_code(r.status)
             i = i + 1
-        expect(last).to_equal(429)
+        expect(last).to_equal(429)  # oracle: value fixed by the spec contract
 
         step("The 429 carries the shared security-header policy")
         val over = store_app_handle_bearer(store, t, "GET", "/store/catalog", bearer_headers(token), "", 200, "")
@@ -211,11 +227,13 @@ describe "enterprise throttle — fixed window with deterministic clock":
 
         step("Advancing now past the window admits again")
         val next = store_app_handle_bearer(store, t, "GET", "/store/catalog", bearer_headers(token), "", 260, "")
-        expect(http_status_code(next.status)).to_equal(200)
+        expect(http_status_code(next.status)).to_equal(200)  # oracle: value fixed by the spec contract
         store_close(store)
 
 describe "enterprise throttle — login brute force gets the stricter window":
     it "5 failed logins lock the 6th attempt (even correct) until the window turns":
+        step("Verify: 5 failed logins lock the 6th attempt (even correct) until the window turns")
+        # @req: REQ-APP-EnteAuthThro-001
         val store = fresh("brute")
         val t = tenant_a()
 
@@ -224,21 +242,21 @@ describe "enterprise throttle — login brute force gets the stricter window":
         while i < 5:
             val r = store_app_handle_bearer(store, t, "POST", "/auth/login", plain_headers(),
                 "user=clerk-1&secret=wrong", 100, "entropy-{i}")
-            expect(http_status_code(r.status)).to_equal(401)
+            expect(http_status_code(r.status)).to_equal(401)  # oracle: value fixed by the spec contract
             i = i + 1
 
         step("The 6th attempt — even with the CORRECT secret — is 429")
         val locked = store_app_handle_bearer(store, t, "POST", "/auth/login", plain_headers(),
             "user=clerk-1&secret=s3cret", 110, "entropy-lock")
-        expect(http_status_code(locked.status)).to_equal(429)
+        expect(http_status_code(locked.status)).to_equal(429)  # oracle: value fixed by the spec contract
 
         step("A different user is not locked out (per-key window)")
         val other = store_app_handle_bearer(store, t, "POST", "/auth/login", plain_headers(),
             "user=someone-else&secret=x", 110, "entropy-other")
-        expect(http_status_code(other.status)).to_equal(401)
+        expect(http_status_code(other.status)).to_equal(401)  # oracle: value fixed by the spec contract
 
         step("After the window advances the correct login succeeds")
         val next = store_app_handle_bearer(store, t, "POST", "/auth/login", plain_headers(),
             "user=clerk-1&secret=s3cret&ttl=1000", 170, "entropy-next")
-        expect(http_status_code(next.status)).to_equal(200)
+        expect(http_status_code(next.status)).to_equal(200)  # oracle: value fixed by the spec contract
         store_close(store)

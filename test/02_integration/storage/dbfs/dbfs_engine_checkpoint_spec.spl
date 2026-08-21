@@ -2,6 +2,10 @@
 # Run: bin/simple test test/integration/storage/dbfs/dbfs_engine_checkpoint_spec.spl
 
 """
+## Purpose and audience
+Purpose: old root is readable before new checkpoint commits
+Audience: compiler and tooling engineers who maintain this spec
+
 DBFS Checkpoint Specification
 
 Verifies checkpoint atomicity and META_DURABLE storage class usage:
@@ -10,6 +14,8 @@ Verifies checkpoint atomicity and META_DURABLE storage class usage:
   3. META_DURABLE storage class is used for checkpoint writes
   4. partial checkpoint does not corrupt the ring
 """
+
+# @req: REQ-STORAGE-DbfsEngiChec-001
 
 use std.spipe.*
 use std.db.dbfs_engine.checkpoint.{DbfsCheckpoint, CheckpointEntry, CheckpointRoot}
@@ -44,10 +50,13 @@ fn _entries_contain_gen(entries: [CheckpointEntry], target_gen: i64) -> bool:
         j = j + 1
     found
 
+use std.spec.step
 describe "DBFS Checkpoint — atomic root publication":
     """Old root must remain visible until new checkpoint completes."""
 
     it "old root is readable before new checkpoint commits":
+        step("Verify: old root is readable before new checkpoint commits")
+        # @req: REQ-STORAGE-DbfsEngiChec-001
         val ckpt = DbfsCheckpoint.new()
         val root1 = CheckpointRoot(btree_root: PageId(1), slot_gen: 1)
         ckpt.publish(root1).unwrap()
@@ -55,20 +64,24 @@ describe "DBFS Checkpoint — atomic root publication":
         # Simulate: begin new checkpoint but do NOT commit yet
         val pending = ckpt.begin_publish(root2)
         val current = ckpt.current_root().unwrap()
-        expect(current.slot_gen).to_equal(1)
+        expect(current.slot_gen).to_equal(1)  # oracle: value fixed by the spec contract
         pending.abort()
 
     it "new root is visible after commit":
+        step("Verify: new root is visible after commit")
+        # @req: REQ-STORAGE-DbfsEngiChec-001
         val ckpt = DbfsCheckpoint.new()
         ckpt.publish(CheckpointRoot(btree_root: PageId(1), slot_gen: 1)).unwrap()
         ckpt.publish(CheckpointRoot(btree_root: PageId(2), slot_gen: 2)).unwrap()
         val current = ckpt.current_root().unwrap()
-        expect(current.slot_gen).to_equal(2)
+        expect(current.slot_gen).to_equal(2)  # oracle: value fixed by the spec contract
 
 describe "DBFS Checkpoint — ring retention":
     """Ring retains published entries until the configured ring size is exceeded."""
 
     it "ring retains last 4 entries after 5 publishes":
+        step("Verify: ring retains last 4 entries after 5 publishes")
+        # @req: REQ-STORAGE-DbfsEngiChec-001
         # Uses module-level helper: publish() write_pos mutation is lost
         # between calls under interpreter value-semantics.
         val ckpt = DbfsCheckpoint.new()
@@ -77,6 +90,8 @@ describe "DBFS Checkpoint — ring retention":
         expect(entries.len() >= 4).to_equal(true)
 
     it "ring entries still include the latest published generation after 5 publishes":
+        step("Verify: ring entries still include the latest published generation after 5 publishes")
+        # @req: REQ-STORAGE-DbfsEngiChec-001
         # Uses module-level helpers: write_pos + var-rebind value-semantics workarounds.
         val ckpt = DbfsCheckpoint.new()
         _publish_5_roots_to_ring()
@@ -88,6 +103,8 @@ describe "DBFS Checkpoint — META_DURABLE storage class":
     """Checkpoint writes must target META_DURABLE arena."""
 
     it "checkpoint write uses META_DURABLE storage class":
+        step("Verify: checkpoint write uses META_DURABLE storage class")
+        # @req: REQ-STORAGE-DbfsEngiChec-001
         val ckpt = DbfsCheckpoint.new()
         ckpt.publish(CheckpointRoot(btree_root: PageId(1), slot_gen: 1)).unwrap()
         val storage_class = ckpt.last_write_storage_class()
@@ -97,9 +114,11 @@ describe "DBFS Checkpoint — partial failure safety":
     """Aborting a publish leaves ring intact."""
 
     it "ring is unchanged when publish is aborted":
+        step("Verify: ring is unchanged when publish is aborted")
+        # @req: REQ-STORAGE-DbfsEngiChec-001
         val ckpt = DbfsCheckpoint.new()
         ckpt.publish(CheckpointRoot(btree_root: PageId(1), slot_gen: 1)).unwrap()
         val pending = ckpt.begin_publish(CheckpointRoot(btree_root: PageId(2), slot_gen: 2))
         pending.abort()
         val current = ckpt.current_root().unwrap()
-        expect(current.slot_gen).to_equal(1)
+        expect(current.slot_gen).to_equal(1)  # oracle: value fixed by the spec contract

@@ -2,6 +2,10 @@
 # Run: bin/simple test test/integration/storage/dbfs/dbfs_recovery_spec.spl
 
 """
+## Purpose and audience
+Purpose: picks replica with highest valid gen
+Audience: compiler and tooling engineers who maintain this spec
+
 DBFS Recovery Specification
 
 Verifies 5-step D5 recovery model using the power-cut harness:
@@ -11,6 +15,8 @@ Verifies 5-step D5 recovery model using the power-cut harness:
   4. clean mount-generation is written after recovery
   5. partially-written superblock is rejected
 """
+
+# @req: REQ-STORAGE-DbfsReco-001
 
 use std.spipe.*
 use std.db.dbfs_engine.recovery.{
@@ -22,29 +28,36 @@ use std.db.dbfs_engine.recovery.{
 use std.db.dbfs_engine.wal.{WalRecord, WAL_RECORD_COMMIT}
 use test.fixtures.storage.dbfs.power_cut_harness.{PowerCutHarness, FaultPoint}
 
+use std.spec.step
 describe "DBFS Recovery — superblock replica selection":
     """Best-of-3 replicas: highest gen with valid CRC."""
 
     it "picks replica with highest valid gen":
+        step("Verify: picks replica with highest valid gen")
+        # @req: REQ-STORAGE-DbfsReco-001
         val harness = PowerCutHarness.new()
         harness.write_replica(0, SuperblockReplica(generation: 3, crc_valid: true))
         harness.write_replica(1, SuperblockReplica(generation: 5, crc_valid: true))
         harness.write_replica(2, SuperblockReplica(generation: 4, crc_valid: true))
         val result = DbfsRecovery.recover(harness.device()).unwrap()
-        expect(result.superblock_gen).to_equal(5)
+        expect(result.superblock_gen).to_equal(5)  # oracle: value fixed by the spec contract
 
     it "skips replica with invalid CRC":
+        step("Verify: skips replica with invalid CRC")
+        # @req: REQ-STORAGE-DbfsReco-001
         val harness = PowerCutHarness.new()
         harness.write_replica(0, SuperblockReplica(generation: 10, crc_valid: false))
         harness.write_replica(1, SuperblockReplica(generation: 3, crc_valid: true))
         harness.write_replica(2, SuperblockReplica(generation: 2, crc_valid: true))
         val result = DbfsRecovery.recover(harness.device()).unwrap()
-        expect(result.superblock_gen).to_equal(3)
+        expect(result.superblock_gen).to_equal(3)  # oracle: value fixed by the spec contract
 
 describe "DBFS Recovery — WAL replay":
     """Only committed records are replayed."""
 
     it "committed record is replayed after power-cut":
+        step("Verify: committed record is replayed after power-cut")
+        # @req: REQ-STORAGE-DbfsReco-001
         val harness = PowerCutHarness.new()
         harness.inject_fault(FaultPoint.AfterWalFlush)
         harness.write_wal_record(WalRecord(txn_id: 1, record_type: WAL_RECORD_COMMIT, payload: "inode=42"))
@@ -53,6 +66,8 @@ describe "DBFS Recovery — WAL replay":
         expect(result.replayed_txn_ids.contains(1)).to_equal(true)
 
     it "uncommitted record is NOT replayed":
+        step("Verify: uncommitted record is NOT replayed")
+        # @req: REQ-STORAGE-DbfsReco-001
         val harness = PowerCutHarness.new()
         harness.inject_fault(FaultPoint.AfterWalAppend)
         harness.write_wal_record(WalRecord(txn_id: 7, record_type: WAL_RECORD_COMMIT, payload: "inode=99"))
@@ -64,6 +79,8 @@ describe "DBFS Recovery — orphan reclamation":
     """Orphan arenas are discarded after crash."""
 
     it "orphan arenas are reclaimed via arena_discard":
+        step("Verify: orphan arenas are reclaimed via arena_discard")
+        # @req: REQ-STORAGE-DbfsReco-001
         val harness = PowerCutHarness.new()
         harness.inject_fault(FaultPoint.AfterDataWrite)
         harness.mark_orphan_arena(arena_id: 99)
@@ -74,21 +91,27 @@ describe "DBFS Recovery — clean mount generation":
     """After recovery, a new clean checkpoint entry is written."""
 
     it "recovery writes a new clean checkpoint slot":
+        step("Verify: recovery writes a new clean checkpoint slot")
+        # @req: REQ-STORAGE-DbfsReco-001
         val harness = PowerCutHarness.new()
         harness.inject_fault(FaultPoint.AfterWalFlush)
         val result = DbfsRecovery.recover(harness.device()).unwrap()
         expect(result.clean_mount_gen > 0).to_equal(true)
 
     it "mount generation increments from previous clean checkpoint":
+        step("Verify: mount generation increments from previous clean checkpoint")
+        # @req: REQ-STORAGE-DbfsReco-001
         val harness = PowerCutHarness.new()
         harness.set_last_clean_gen(g: 8)
         val result = DbfsRecovery.recover(harness.device()).unwrap()
-        expect(result.clean_mount_gen).to_equal(9)
+        expect(result.clean_mount_gen).to_equal(9)  # oracle: value fixed by the spec contract
 
 describe "DBFS Recovery — callback-based side effects":
     """When callbacks are registered, recovery routes discard and checkpoint through them."""
 
     it "discard callback receives orphan arena IDs":
+        step("Verify: discard callback receives orphan arena IDs")
+        # @req: REQ-STORAGE-DbfsReco-001
         recovery_clear_callbacks()
         recovery_register_discard_cb("arena:META_DURABLE")
         val harness = PowerCutHarness.new()
@@ -101,11 +124,13 @@ describe "DBFS Recovery — callback-based side effects":
         recovery_clear_callbacks()
 
     it "checkpoint callback receives mount generation":
+        step("Verify: checkpoint callback receives mount generation")
+        # @req: REQ-STORAGE-DbfsReco-001
         recovery_clear_callbacks()
         recovery_register_checkpoint_cb("arena:META_DURABLE")
         val harness = PowerCutHarness.new()
         harness.set_last_clean_gen(g: 5)
         val result = DbfsRecovery.recover(harness.device()).unwrap()
         val cp_gen = recovery_get_checkpoint_gen()
-        expect(cp_gen).to_equal(6)
+        expect(cp_gen).to_equal(6)  # oracle: value fixed by the spec contract
         recovery_clear_callbacks()
