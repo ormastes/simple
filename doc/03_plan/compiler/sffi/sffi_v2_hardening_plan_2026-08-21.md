@@ -256,32 +256,6 @@ duplicate symbol, and critical-profile rejection. Tests assert codes, not prose.
 - Critical readiness requires every phase through P6 plus a separate `$verify`
   `STATUS: PASS`; this plan itself is not verification evidence.
 
-## Current implementation checkpoint — checked C/Rust transport
-
-Completed in the `codex/sffi-v2-full` lane:
-
-- Rust native and interpreter checked integer/byte-descriptor transports;
-- argument-array bounds and maximum-arity validation before invocation;
-- pure-Simple `DynLib.call_checked -> Result<i64, text>` lifting;
-- C status/out `spl_wffi_try_call_i64_c`, including null output/function checks;
-- null `dlclose` rejection in both owned C runtime definitions;
-- Ed25519 native/interpreter argument-order parity and checked tri-state verify;
-- a cross-owner lint guard covering registrations, null checks, and signature
-  order, plus focused Rust and C syntax tests.
-
-Next migration checkpoint:
-
-1. migrate every remaining legacy dynamic-call consumer to a typed or checked
-   contract family;
-2. add checked RSA/ECDSA sign/verify output APIs and route safe Simple callers;
-3. replace caller-supplied loader verification booleans with canonical signed
-   manifest verification against a trusted-key registry;
-4. complete the owned C/C++ provider inventory by ownership/null/status family;
-5. run the full P6 cross-lane and release verification matrix.
-
-This checkpoint is an implemented hardening increment, not a claim that every
-repository SFFI provider is already robust/critical-safe.
-
 ## Requirement decision
 
 The user selected the recommended SFFI v2 architecture: versioned stable C ABI

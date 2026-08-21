@@ -6915,7 +6915,7 @@ int64_t spl_dlsym(int64_t handle, int64_t name_value) {
 }
 
 int64_t spl_dlclose(int64_t handle) {
-    if (!handle) return -1;
+    if (!handle) return 0;
 #ifdef _WIN32
     return FreeLibrary((HMODULE)(intptr_t)handle) ? 0 : -1;
 #else

@@ -306,23 +306,6 @@ pub fn rt_ed25519_verify(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(if key.verify(&msg, &sig).is_ok() { 1 } else { 0 }))
 }
 
-pub fn rt_ed25519_verify_checked(args: &[Value]) -> Result<Value, CompileError> {
-    let Some(msg) = extract_bytes(args, 0) else {
-        return Ok(Value::Int(-1));
-    };
-    let Some(pk) = extract_bytes(args, 1) else {
-        return Ok(Value::Int(-1));
-    };
-    let Some(sig) = extract_bytes(args, 2) else {
-        return Ok(Value::Int(-1));
-    };
-    if pk.len() != 32 || sig.len() != 64 {
-        return Ok(Value::Int(-1));
-    }
-    let key = UnparsedPublicKey::new(&ED25519, pk);
-    Ok(Value::Int(if key.verify(&msg, &sig).is_ok() { 1 } else { 0 }))
-}
-
 // ---------------------------------------------------------------------------
 // Ed25519 sign
 // ---------------------------------------------------------------------------

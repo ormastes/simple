@@ -34,6 +34,42 @@ use compiler.core.{int_to_str}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
 impl HirLowering:
+    me materialize_imported_field_dependency(
+        imported_mod: ModuleSurface,
+        imported_mod_name: text,
+        dependency: text,
+        import_span: Span,
+        materialize_enum: bool
+    ):
+        """Resolve one named type a public composite FIELD depends on, in the
+        DECLARING module's qualified scope.
+
+        Three steps, tried in order and each a no-op once the name resolves:
+        the declaring module's own declarations (what this loop always did),
+        then that module's explicit `use` items, then a unique package sibling.
+        The last two mirror the callable-signature twin
+        (`materialize_imported_callable_type_dependencies`), which grew the same
+        fallbacks for the same reason: field-type projection queries the
+        declaring module's scope, so a dependency that module reaches by import
+        or by directory-sibling visibility was invisible here and landed on the
+        hard `unresolved type: {name}` error, poisoning whichever module was
+        being lowered rather than the type's actual owner. See
+        `materialize_imported_field_package_dependency` for the Stage-1
+        `HirImpl`/`HirStaticAssert` case that forced step three."""
+        if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, dependency) >= 0:
+            return
+        self.register_imported_symbol(
+            imported_mod, imported_mod_name, dependency, dependency,
+            import_span, materialize_enum)
+        if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, dependency) >= 0:
+            return
+        self.materialize_imported_callable_explicit_dependency(
+            imported_mod, dependency, import_span, materialize_enum)
+        if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, dependency) >= 0:
+            return
+        self.materialize_imported_field_package_dependency(
+            imported_mod, dependency, import_span, materialize_enum)
+
     me register_imported_symbol(imported_mod: ModuleSurface, imported_mod_name: text, imported_name: text, local_name: text, import_span: Span, materialize_enum: bool):
         if imported_mod.composites.contains_key(imported_name):
             val composite = imported_mod.composites[imported_name]
@@ -53,33 +89,19 @@ impl HirLowering:
                 self.symbols.bind_qualified_type(imported_mod.module_name, imported_name, imported_type)
             else:
                 return
-            # A public composite field can name a type declared beside it OR a
-            # type explicitly imported by its defining module. Materialize the
-            # local declaration first, then follow the owner's exact named
-            # import when the qualified binding is still absent. This mirrors
-            # callable signature dependency materialization below; searching
-            # only imported_mod left CompileContext fields such as OutputFormat,
-            # WeavingConfig, Span, and parser Type unresolved in Stage 3.
+            # A public composite field can name another type from the same
+            # defining module inside a container (`[Cell]`, `Cell?`, ...).
+            # Materialize those identities before lowering the field type so
+            # resolution is independent of the consumer's import item order.
             for field in composite.fields:
                 for dependency in parser_type_named_dependencies(field.type_):
-                    if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, dependency) < 0:
-                        self.materialize_imported_callable_declared_dependency(
-                            imported_mod, imported_mod_name, dependency,
-                            import_span, materialize_enum)
-                    if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, dependency) < 0:
-                        self.materialize_imported_callable_explicit_dependency(
-                            imported_mod, dependency, import_span,
-                            materialize_enum)
-                if field.array_element_name != "" and self.symbols.lookup_qualified_type_raw(
-                        imported_mod.module_name, field.array_element_name) < 0:
-                    self.materialize_imported_callable_declared_dependency(
-                        imported_mod, imported_mod_name,
-                        field.array_element_name, import_span, materialize_enum)
-                    if self.symbols.lookup_qualified_type_raw(
-                            imported_mod.module_name, field.array_element_name) < 0:
-                        self.materialize_imported_callable_explicit_dependency(
-                            imported_mod, field.array_element_name, import_span,
-                            materialize_enum)
+                    self.materialize_imported_field_dependency(
+                        imported_mod, imported_mod_name, dependency,
+                        import_span, materialize_enum)
+                if field.array_element_name != "":
+                    self.materialize_imported_field_dependency(
+                        imported_mod, imported_mod_name, field.array_element_name,
+                        import_span, materialize_enum)
             var imported_field_types: Dict<text, HirType> = {}
             for field in composite.fields:
                 imported_field_types[field.name] = self.imported_surface_type_projected(

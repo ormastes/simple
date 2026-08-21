@@ -14,6 +14,7 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.module_surface.*
+use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_package_name}
 use compiler.hir.hir_lowering.expressions.*
 use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
 use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind, PlatformParseResult, PlatformDiagnosticLevel, PlatformLayoutDiagnostic}
@@ -200,11 +201,7 @@ impl HirLowering:
                 # dependency conflicts" in the Stage 3 log were of this
                 # shape, and in 0 of the 78 did the two sides even share a
                 # name (73 `callable`, 3 `struct`, 2 `class`).
-                # A record that is not even NAMED like the binding being
-                # claimed cannot contest it -- see
-                # `hir_payload_binding_names_agree`.
-                val contestable = hir_payload_binding_names_agree(local_name, origin.item_name, symbol.name)
-                if contestable and not hir_payload_kind_is_type(existing_kind):
+                if not hir_payload_kind_is_type(existing_kind):
                     # Level-gated probe (SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE=1, default
                     # OFF) that decides which of two layers is at fault, because
                     # the reported symbol shares NO NAME with the requested one:
@@ -222,14 +219,9 @@ impl HirLowering:
                         eprint("[HIR-PAYLOAD-LOOKUP] key=" + local_name + " id=" + int_to_str(existing_raw) + " sym_name=" + symbol.name + " kind=" + existing_kind + " owner=" + existing_owner)
                     self.error("enum payload dependency `{local_name}` resolved to non-type binding `{symbol.name}` (kind `{existing_kind}`) in `{existing_owner}`; expected the type `{wanted}`", import_span)
                     return false
-                if contestable and existing != wanted:
+                if existing != wanted:
                     self.error("enum payload dependency `{local_name}` conflicts: `{existing}` vs `{wanted}`", import_span)
                     return false
-                if not contestable:
-                    # Keep the mismatch visible under the same probe gate; it
-                    # is a real resolver/fetch defect, just not a conflict.
-                    if (hir_module_env_get("SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE") ?? "") == "1":
-                        eprint("[HIR-PAYLOAD-LOOKUP] non-contestable key=" + local_name + " id=" + int_to_str(existing_raw) + " sym_name=" + symbol.name + " kind=" + existing_kind + " owner=" + existing_owner)
         self.materialized_payload_bindings[local_name] = wanted
         true
 
@@ -381,6 +373,72 @@ impl HirLowering:
             self.symbols.bind_qualified_type(
                 imported_mod.module_name, dependency,
                 terminal_symbol)
+
+    me materialize_imported_field_package_dependency(
+        imported_mod: ModuleSurface,
+        dependency: text,
+        import_span: Span,
+        materialize_enum: bool
+    ):
+        """Last-resort materialization for a composite FIELD type that the
+        declaring module names but does not itself declare or import.
+
+        `register_imported_symbol`'s field loop recursively registers a field
+        type against the DECLARING module's surface, and
+        `materialize_imported_callable_explicit_dependency` (above) chases that
+        module's explicit `use` items. Neither covers the PACKAGE-SIBLING case:
+        two files in the same directory see each other's declarations without
+        an import edge (`resolve_package_sibling_symbols`), and a cycle can make
+        the import edge impossible to write at all.
+
+        Stage 1/3 hit this as `unresolved type: HirImpl` plus HirStaticAssert,
+        HirAopAdvice, HirDiBinding, HirArchRule and HirMockDecl, 6x per
+        importer, in every module that imports `HirModule`: `HirModule` is
+        declared in `20.hir/hir_types.spl` with fields typed `[HirImpl]` etc.,
+        but those six structs are declared in the SIBLING file
+        `20.hir/hir_definitions.spl`, which hir_types.spl structurally cannot
+        import (hir_definitions.spl:9 already does `use
+        compiler.hir.hir_types.*`, so the reverse edge is a cycle). The
+        `Dict<SymbolId, HirConst>`-typed fields on the SAME struct never failed,
+        because only `[T]`/scalar field shapes reach the dependency walk -- the
+        error therefore depended on the field's CONTAINER, not on anything the
+        code does. The previous remedy (70.backend/bitfield.spl, 2026-08-08) was
+        to drop an UNUSED `HirModule` import; that does not generalize to the
+        importers which genuinely use it.
+
+        Only a UNIQUE declaring sibling in the same package is followed. An
+        ambiguous short name (Span, TraitBound) leaves the dependency alone
+        rather than silently choosing, exactly as the explicit-import chase
+        does."""
+        val package_name = module_surface_package_name(imported_mod)
+        if package_name == "":
+            return
+        var selected: i64 = -1
+        var index: i64 = 0
+        while index < self.module_surfaces.surfaces.len():
+            val candidate = self.module_surfaces.surfaces[index]
+            if candidate.module_name != imported_mod.module_name and
+               module_surface_package_name(candidate) == package_name and
+               hir_module_declares_item(candidate, dependency):
+                if selected >= 0:
+                    return
+                selected = index
+            index = index + 1
+        if selected < 0:
+            return
+        val terminal = self.module_surfaces.surfaces[selected]
+        val terminal_local_name = "{terminal.module_name}::{dependency}"
+        self.register_imported_symbol(
+            terminal, terminal.preferred_registry_name, dependency,
+            terminal_local_name, import_span, materialize_enum)
+        val terminal_symbol = self.symbols.lookup_or_invalid(terminal_local_name)
+        if terminal_symbol.is_valid():
+            self.symbols.bind_qualified_type(
+                terminal.module_name, dependency, terminal_symbol)
+            # Field-type projection queries the DECLARING module's qualified
+            # scope, so publish the alias there too.
+            self.symbols.bind_qualified_type(
+                imported_mod.module_name, dependency, terminal_symbol)
 
     me materialize_imported_callable_type_dependencies(imported_mod: ModuleSurface, imported_mod_name: text, callable: ModuleSurfaceCallable, import_span: Span, materialize_enum: bool):
         """Pre-register every named type a cross-module method SIGNATURE

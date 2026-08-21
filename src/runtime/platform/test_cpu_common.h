@@ -68,7 +68,6 @@ static int64_t cpu_odd_frame(int64_t depth) {
 /* --- WFFI helpers --- */
 
 static int64_t cpu_wffi_fn0(void) { return 99; }
-static int64_t cpu_wffi_zero(void) { return 0; }
 
 static int64_t cpu_wffi_fn4(int64_t a, int64_t b,
                              int64_t c, int64_t d) {
@@ -210,14 +209,6 @@ TEST(cpu_nested_odd_frame) {
 TEST(cpu_wffi_0_arg) {
     int64_t args[1] = {0};
     ASSERT_EQ_INT(spl_wffi_call_i64_c((void*)cpu_wffi_fn0, args, 0), 99);
-}
-
-TEST(cpu_wffi_checked_zero_is_not_bridge_failure) {
-    int64_t result = -1;
-    ASSERT_EQ_INT(spl_wffi_try_call_i64_c((void*)cpu_wffi_zero, NULL, 0, &result), 0);
-    ASSERT_EQ_INT(result, 0);
-    ASSERT(spl_wffi_try_call_i64_c(NULL, NULL, 0, &result) != 0);
-    ASSERT(spl_wffi_try_call_i64_c((void*)cpu_wffi_zero, NULL, 0, NULL) != 0);
 }
 
 TEST(cpu_wffi_4_arg_max) {

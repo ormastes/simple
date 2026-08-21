@@ -193,19 +193,9 @@ pub fn spl_wffi_call_i64(args: &[Value]) -> Result<Value, CompileError> {
     };
 
     let nargs = match &args[2] {
-        Value::Int(n) => {
-            usize::try_from(*n).map_err(|_| CompileError::runtime("spl_wffi_call_i64: nargs must be non-negative"))?
-        }
+        Value::Int(n) => *n as usize,
         _ => return Err(CompileError::runtime("spl_wffi_call_i64: nargs must be an integer")),
     };
-    if nargs > 8 {
-        return Err(CompileError::runtime("spl_wffi_call_i64: max 8 arguments supported"));
-    }
-    if nargs > call_args.len() {
-        return Err(CompileError::runtime(
-            "spl_wffi_call_i64: nargs exceeds supplied argument array",
-        ));
-    }
 
     // Safety: we trust the caller has provided a valid function pointer
     // and the correct number of arguments. This is inherently unsafe SFFI.
@@ -280,42 +270,6 @@ pub fn spl_wffi_call_i64(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(result))
 }
 
-/// Checked WFFI transport. Returns `[status, value]`; value is meaningful only
-/// for status zero. Bridge failures never masquerade as a foreign zero result.
-pub fn spl_wffi_call_i64_checked(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() != 3 {
-        return Ok(Value::array(vec![Value::Int(1), Value::Int(0)]));
-    }
-    if !matches!(args[0], Value::Int(p) if p != 0) {
-        return Ok(Value::array(vec![Value::Int(2), Value::Int(0)]));
-    }
-    let supplied = match &args[1] {
-        Value::Array(values)
-            if values
-                .iter()
-                .all(|value| matches!(value, Value::Int(_) | Value::Bool(_))) =>
-        {
-            values.len()
-        }
-        _ => return Ok(Value::array(vec![Value::Int(1), Value::Int(0)])),
-    };
-    let nargs = match args[2] {
-        Value::Int(n) => match usize::try_from(n) {
-            Ok(n) => n,
-            Err(_) => return Ok(Value::array(vec![Value::Int(1), Value::Int(0)])),
-        },
-        _ => return Ok(Value::array(vec![Value::Int(1), Value::Int(0)])),
-    };
-    if nargs > 8 {
-        return Ok(Value::array(vec![Value::Int(3), Value::Int(0)]));
-    }
-    if nargs > supplied {
-        return Ok(Value::array(vec![Value::Int(1), Value::Int(0)]));
-    }
-    let value = spl_wffi_call_i64(args)?;
-    Ok(Value::array(vec![Value::Int(0), value]))
-}
-
 /// Call a function pointer with f64 arguments and return an f64 result.
 ///
 /// Callable from Simple as: `spl_wffi_call_f64(fptr: i64, args: [f64], nargs: i64) -> f64`
@@ -344,19 +298,9 @@ pub fn spl_wffi_call_f64(args: &[Value]) -> Result<Value, CompileError> {
     };
 
     let nargs = match &args[2] {
-        Value::Int(n) => {
-            usize::try_from(*n).map_err(|_| CompileError::runtime("spl_wffi_call_f64: nargs must be non-negative"))?
-        }
+        Value::Int(n) => *n as usize,
         _ => return Err(CompileError::runtime("spl_wffi_call_f64: nargs must be an integer")),
     };
-    if nargs > 8 {
-        return Err(CompileError::runtime("spl_wffi_call_f64: max 8 arguments supported"));
-    }
-    if nargs > call_args.len() {
-        return Err(CompileError::runtime(
-            "spl_wffi_call_f64: nargs exceeds supplied argument array",
-        ));
-    }
 
     let result: f64 = unsafe {
         match nargs {
