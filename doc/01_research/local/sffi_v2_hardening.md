@@ -503,3 +503,20 @@ errors C build, Simple checks for both facades, and a dedicated sentinel and
 performance-shape audit pass. Inventory now records 177 contracted and 299
 uncontracted unsafe declarations. SDL artifact signing and runtime sanitizer
 receipts remain absent, so these functions are fail-closed but not verified.
+
+SDL2 millisecond and nanosecond clocks previously returned valid timestamp
+zero when provider loading or performance-frequency discovery failed. Both raw
+ABIs now reserve negative status for failure; the nanosecond conversion also
+saturates at `INT64_MAX` before signed overflow. Safe `i64?` wrappers confine
+the FFI calls and are exported through both runtime facades. The Web UI frame
+pacer now stops and reports failure when the clock disappears instead of using
+fabricated time or entering an unbounded busy wait.
+
+Successful millisecond queries still make one `SDL_GetTicks` call and
+nanosecond queries one `SDL_GetPerformanceCounter` call after the existing
+frequency cache is warm. Safety adds scalar comparisons only, with no lock,
+allocation, hash, lookup, or error-string query. Optimized C compilation, three
+Simple checks, and the clock performance-shape audit pass. Inventory improves
+to 179 contracted and 297 uncontracted unsafe declarations. The provider
+artifact and clock semantics still lack signed/sanitizer evidence, so they are
+fail-closed rather than verified.

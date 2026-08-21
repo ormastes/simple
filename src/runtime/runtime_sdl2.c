@@ -1036,21 +1036,22 @@ int64_t rt_sdl2_is_mouse_button_pressed(int64_t button) {
  * ================================================================ */
 
 int64_t rt_sdl2_get_ticks_ms(void) {
-    SDL2_REQUIRE(0);
+    SDL2_REQUIRE(-1);
     return (int64_t)SDL_GetTicks();
 }
 
 int64_t rt_sdl2_get_ticks_ns(void) {
-    SDL2_REQUIRE(0);
+    SDL2_REQUIRE(-1);
     if (g_perf_freq == 0) {
         g_perf_freq = SDL_GetPerformanceFrequency();
-        if (g_perf_freq == 0) return 0;
+        if (g_perf_freq == 0) return -1;
     }
     uint64_t counter = SDL_GetPerformanceCounter();
     /* Convert to nanoseconds: counter * 1e9 / freq
      * Use 128-bit math to avoid overflow on large counter values */
     uint64_t seconds = counter / g_perf_freq;
     uint64_t remainder = counter % g_perf_freq;
+    if (seconds > (uint64_t)INT64_MAX / 1000000000ULL) return INT64_MAX;
     return (int64_t)(seconds * 1000000000ULL + remainder * 1000000000ULL / g_perf_freq);
 }
 

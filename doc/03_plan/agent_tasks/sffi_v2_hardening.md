@@ -96,3 +96,7 @@ passing placeholder.
     sentinels and safe optional wrappers with unchanged native-call counts.
     Continue through time, quit-state, and window-property declarations, then
     bind signed provider and sanitizer receipts before verification status.
+16. SDL2 clocks now reserve negative provider failure, saturate nanosecond
+    overflow, and expose safe optional wrappers; Web UI stops rather than spins
+    on loss. Continue with quit state and window properties, then attach signed
+    artifact and runtime verification evidence.

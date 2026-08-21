@@ -11,7 +11,7 @@ use std.nogc_sync_mut.web_ui.event_bus.{EventBus}
 use std.nogc_sync_mut.web_ui.plugin.{Plugin, PluginRegistry}
 use std.nogc_sync_mut.web_ui.dom_backend.{EngineDomBackend}
 use common.web.logging.{Logger, LogLevel}
-use std.nogc_sync_mut.io.window_sffi.{rt_sdl2_get_ticks_ms}
+use std.nogc_sync_mut.io.window_sffi.{window_ticks_ms}
 
 # Application configuration.
 class AppConfig:
@@ -127,7 +127,13 @@ class WebUIApp:
 
         # Main event loop
         while self.running:
-            val frame_start = rt_sdl2_get_ticks_ms()
+            val maybe_frame_start = window_ticks_ms()
+            if not maybe_frame_start.?:
+                self.logger.log(LogLevel.Error, "SDL2 frame clock unavailable")
+                presentation_ok = false
+                self.running = false
+                continue
+            val frame_start = maybe_frame_start.unwrap()
 
             # Phase 1: Poll SDL2 events
             val events = self.input_bridge.poll()
@@ -143,13 +149,25 @@ class WebUIApp:
                 self.running = false
 
             # Phase 4: Frame pacing (busy-wait to target FPS)
-            var now = rt_sdl2_get_ticks_ms()
+            val maybe_now = window_ticks_ms()
+            if not maybe_now.?:
+                self.logger.log(LogLevel.Error, "SDL2 frame clock unavailable")
+                presentation_ok = false
+                self.running = false
+                continue
+            var now = maybe_now.unwrap()
             val elapsed = now - frame_start
             if elapsed < frame_ms:
                 # Busy wait for remaining frame budget
                 val target = frame_start + frame_ms
-                while now < target:
-                    now = rt_sdl2_get_ticks_ms()
+                while self.running and now < target:
+                    val next_now = window_ticks_ms()
+                    if not next_now.?:
+                        self.logger.log(LogLevel.Error, "SDL2 frame clock unavailable")
+                        presentation_ok = false
+                        self.running = false
+                    else:
+                        now = next_now.unwrap()
 
         # Shutdown
         self.state = AppState.ShuttingDown
