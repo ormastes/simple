@@ -19,6 +19,7 @@
 
 use crate::error::CompileError;
 use crate::value::Value;
+#[cfg(test)]
 use std::sync::Arc;
 
 use simple_runtime::value::pbkdf2_native;
@@ -26,14 +27,18 @@ use simple_runtime::value::pbkdf2_native;
 /// Extract a `Vec<u8>` from a `Value::Array` of `Value::Int` entries.
 /// Mirrors `signatures.rs::extract_bytes` — `i as u8` truncates to the
 /// low 8 bits so signed-wraparound byte values round-trip correctly.
-fn extract_bytes(args: &[Value], index: usize) -> Vec<u8> {
-    args.get(index).and_then(Value::try_array_bytes).unwrap_or_default()
+fn extract_bytes(args: &[Value], index: usize, name: &str) -> Result<Vec<u8>, CompileError> {
+    args.get(index)
+        .and_then(Value::try_array_bytes)
+        .ok_or_else(|| CompileError::runtime(format!("{name}: argument {index} must be a byte array")))
 }
 
-fn extract_i64(args: &[Value], index: usize) -> i64 {
+fn extract_i64(args: &[Value], index: usize, name: &str) -> Result<i64, CompileError> {
     match args.get(index) {
-        Some(Value::Int(i)) => *i,
-        _ => 0,
+        Some(Value::Int(i)) => Ok(*i),
+        _ => Err(CompileError::runtime(format!(
+            "{name}: argument {index} must be an integer"
+        ))),
     }
 }
 
@@ -43,40 +48,40 @@ fn bytes_to_value(bytes: &[u8]) -> Value {
 
 /// `rt_pbkdf2_hmac_sha1(password: [u8], salt: [u8], iterations: i64, dk_len: i64) -> [u8]`
 pub fn rt_pbkdf2_hmac_sha1(args: &[Value]) -> Result<Value, CompileError> {
-    let password = extract_bytes(args, 0);
-    let salt = extract_bytes(args, 1);
-    let iterations = extract_i64(args, 2);
-    let dk_len = extract_i64(args, 3);
+    let password = extract_bytes(args, 0, "rt_pbkdf2_hmac_sha1")?;
+    let salt = extract_bytes(args, 1, "rt_pbkdf2_hmac_sha1")?;
+    let iterations = extract_i64(args, 2, "rt_pbkdf2_hmac_sha1")?;
+    let dk_len = extract_i64(args, 3, "rt_pbkdf2_hmac_sha1")?;
     let out = pbkdf2_native::pbkdf2_hmac_sha1(&password, &salt, iterations, dk_len);
     Ok(bytes_to_value(&out))
 }
 
 /// `rt_pbkdf2_hmac_sha256(password: [u8], salt: [u8], iterations: i64, dk_len: i64) -> [u8]`
 pub fn rt_pbkdf2_hmac_sha256(args: &[Value]) -> Result<Value, CompileError> {
-    let password = extract_bytes(args, 0);
-    let salt = extract_bytes(args, 1);
-    let iterations = extract_i64(args, 2);
-    let dk_len = extract_i64(args, 3);
+    let password = extract_bytes(args, 0, "rt_pbkdf2_hmac_sha256")?;
+    let salt = extract_bytes(args, 1, "rt_pbkdf2_hmac_sha256")?;
+    let iterations = extract_i64(args, 2, "rt_pbkdf2_hmac_sha256")?;
+    let dk_len = extract_i64(args, 3, "rt_pbkdf2_hmac_sha256")?;
     let out = pbkdf2_native::pbkdf2_hmac_sha256(&password, &salt, iterations, dk_len);
     Ok(bytes_to_value(&out))
 }
 
 /// `rt_pbkdf2_hmac_sha384(password: [u8], salt: [u8], iterations: i64, dk_len: i64) -> [u8]`
 pub fn rt_pbkdf2_hmac_sha384(args: &[Value]) -> Result<Value, CompileError> {
-    let password = extract_bytes(args, 0);
-    let salt = extract_bytes(args, 1);
-    let iterations = extract_i64(args, 2);
-    let dk_len = extract_i64(args, 3);
+    let password = extract_bytes(args, 0, "rt_pbkdf2_hmac_sha384")?;
+    let salt = extract_bytes(args, 1, "rt_pbkdf2_hmac_sha384")?;
+    let iterations = extract_i64(args, 2, "rt_pbkdf2_hmac_sha384")?;
+    let dk_len = extract_i64(args, 3, "rt_pbkdf2_hmac_sha384")?;
     let out = pbkdf2_native::pbkdf2_hmac_sha384(&password, &salt, iterations, dk_len);
     Ok(bytes_to_value(&out))
 }
 
 /// `rt_pbkdf2_hmac_sha512(password: [u8], salt: [u8], iterations: i64, dk_len: i64) -> [u8]`
 pub fn rt_pbkdf2_hmac_sha512(args: &[Value]) -> Result<Value, CompileError> {
-    let password = extract_bytes(args, 0);
-    let salt = extract_bytes(args, 1);
-    let iterations = extract_i64(args, 2);
-    let dk_len = extract_i64(args, 3);
+    let password = extract_bytes(args, 0, "rt_pbkdf2_hmac_sha512")?;
+    let salt = extract_bytes(args, 1, "rt_pbkdf2_hmac_sha512")?;
+    let iterations = extract_i64(args, 2, "rt_pbkdf2_hmac_sha512")?;
+    let dk_len = extract_i64(args, 3, "rt_pbkdf2_hmac_sha512")?;
     let out = pbkdf2_native::pbkdf2_hmac_sha512(&password, &salt, iterations, dk_len);
     Ok(bytes_to_value(&out))
 }
@@ -90,18 +95,14 @@ mod tests {
     }
 
     fn value_to_hex(v: &Value) -> String {
-        match v {
-            Value::Array(arr) => {
-                let mut s = String::with_capacity(arr.len() * 2);
-                for entry in arr.iter() {
-                    if let Value::Int(i) = entry {
-                        s.push_str(&format!("{:02x}", *i as u8));
-                    }
-                }
-                s
-            }
-            _ => String::new(),
+        let Some(bytes) = v.try_array_bytes() else {
+            return String::new();
+        };
+        let mut s = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            s.push_str(&format!("{byte:02x}"));
         }
+        s
     }
 
     #[test]
@@ -149,5 +150,24 @@ mod tests {
             "c0e14f06e49e32d73f9f52ddf1d0c5c7191609233631dadd76a567db42b78676\
              b38fc800cc53ddb642f5c74442e62be4"
         );
+    }
+
+    #[test]
+    fn rejects_missing_or_wrong_typed_arguments() {
+        assert!(rt_pbkdf2_hmac_sha256(&[]).is_err());
+        assert!(rt_pbkdf2_hmac_sha256(&[
+            Value::Int(0),
+            arr_of_bytes(b"salt"),
+            Value::Int(1),
+            Value::Int(32),
+        ])
+        .is_err());
+        assert!(rt_pbkdf2_hmac_sha256(&[
+            arr_of_bytes(b"password"),
+            arr_of_bytes(b"salt"),
+            Value::Nil,
+            Value::Int(32),
+        ])
+        .is_err());
     }
 }

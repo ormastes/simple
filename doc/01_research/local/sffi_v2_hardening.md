@@ -219,6 +219,14 @@ path still performs exactly one foreign verification operation; no retry,
 hashing, lookup, or extra cryptographic operation was introduced. The static
 crypto audit now forbids legacy RSA-PSS wrappers throughout `_CertVerify`.
 
+The native PBKDF2 interpreter handlers also fabricated valid-looking inputs:
+missing or wrong-typed byte arrays became empty arrays, while missing or
+wrong-typed integer parameters became zero. All four SHA-family handlers now
+reject malformed arguments before derivation. Valid calls retain the same
+direct RustCrypto operation and output allocation. Focused tests cover
+SHA-256/384/512 vectors plus malformed argument rejection; their test decoder
+now accepts the canonical packed byte-array representation.
+
 All 15 remaining legacy sign/verify declarations in the canonical signature
 module are now explicitly `unsafe(ffi)` and document their sentinel contract:
 verification collapses malformed bridge input into `0`, while signing may
