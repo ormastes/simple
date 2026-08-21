@@ -316,6 +316,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_file_lock", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_file_unlock", &[I64], &[I8]),
     RuntimeFuncSpec::new("rt_file_read_text_at_checked", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_mmap", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_munmap", &[I64, I64], &[I8]),
     // =========================================================================
     // AOP runtime operations
     // =========================================================================
@@ -2407,6 +2409,23 @@ mod tests {
         assert_eq!(spec.params, [I64]);
         assert!(spec.returns.is_empty());
         assert_eq!(tier_of(spec.name), RuntimeFuncTier::Alloc);
+    }
+
+    #[test]
+    fn path_mmap_abi_is_registered_exactly() {
+        let map = RUNTIME_FUNCS
+            .iter()
+            .find(|spec| spec.name == "rt_mmap")
+            .expect("rt_mmap must be registered for native codegen");
+        assert_eq!(map.params, [I64, I64, I64, I64]);
+        assert_eq!(map.returns, [I64]);
+
+        let unmap = RUNTIME_FUNCS
+            .iter()
+            .find(|spec| spec.name == "rt_munmap")
+            .expect("rt_munmap must be registered for native codegen");
+        assert_eq!(unmap.params, [I64, I64]);
+        assert_eq!(unmap.returns, [I8]);
     }
 
     #[test]
