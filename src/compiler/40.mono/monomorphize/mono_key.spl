@@ -1,0 +1,341 @@
+# Typed monomorphization keys (critical hardening Phase 3, lane M1).
+#
+# Design: doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md §9.2
+#
+# Two keys:
+#   MonoSemanticKey  - identifies WHAT is specialized: generic definition id +
+#                      positional type args + const args + effect args +
+#                      capability args. Two uses that produce the same semantic
+#                      key share one specialization.
+#   MonoArtifactKey  - semantic key + everything that changes the EMITTED
+#                      artifact without changing meaning (target, data layout,
+#                      cpu features, backend, assurance/universe/weave hashes).
+#
+# Both have a canonical, deterministic text form and a 64-bit FNV-1a hash of
+# that text. Pure data + canonicalization only; no pipeline wiring here.
+#
+# Canonical-form rules (what makes two keys "the same"):
+#   - type args are POSITIONAL (order matters, never sorted)
+#   - const args are positional
+#   - effect and capability args are SETS: sorted + de-duplicated, so
+#     `[io, alloc]` and `[alloc, io, io]` canonicalize identically
+#   - canonical type ids never depend on spans or symbol display names when a
+#     stable numeric symbol id exists (Named types use `sym#<id>`)
+
+use compiler.hir.hir_types.*
+use compiler.monomorphize.types.{SpecializationKey, ConcreteType, PointerKind, ReferenceCapability}
+
+
+# ============================================================================
+# Semantic key
+# ============================================================================
+
+struct MonoSemanticKey:
+    """What is being specialized (§9.2). Field types are the canonical TEXT
+    ids - the whole point of the key is that it is already canonical."""
+    definition: text            # stable symbol id of the generic definition
+    type_args: [text]           # canonical type ids, positional
+    const_args: [text]          # canonical const values, positional
+    effect_args: [text]         # canonical effect names, sorted+dedup
+    capability_args: [text]     # canonical capability ids, sorted+dedup
+
+
+struct MonoArtifactKey:
+    """Semantic key + emission context (§9.2)."""
+    semantic: MonoSemanticKey
+    target: text                # target triple
+    data_layout_hash: i64
+    cpu_feature_hash: i64
+    backend: text
+    assurance_semantics_hash: i64
+    complete_universe_hash: i64
+    weave_plan_hash: i64
+
+
+# ============================================================================
+# Hashing
+# ============================================================================
+
+fn mono_key_fnv1a(s: text) -> i64:
+    """FNV-1a over the UTF-8 bytes of `s`. Deterministic across runs/hosts."""
+    var hash: i64 = 1469598103934665603
+    val bytes = s.bytes()
+    var i = 0
+    while i < bytes.len():
+        hash = hash ^ (bytes[i] as i64)
+        hash = hash * 1099511628211
+        i = i + 1
+    hash
+
+
+# ============================================================================
+# Canonical set helpers (sorted + de-duplicated text lists)
+# ============================================================================
+
+fn mono_key_canonical_set(items: [text]) -> [text]:
+    """Sort lexicographically and drop duplicates. Insertion sort: these
+    lists are tiny (a handful of effects/capabilities)."""
+    var sorted: [text] = []
+    for item in items:
+        val it: text = item
+        var inserted = false
+        var out: [text] = []
+        var dup = false
+        for s in sorted:
+            val st: text = s
+            if st == it:
+                dup = true
+            if not inserted and not dup and it < st:
+                out = out.push(it)
+                inserted = true
+            out = out.push(st)
+        if dup:
+            continue
+        if not inserted:
+            out = out.push(it)
+        sorted = out
+    sorted
+
+
+fn mono_key_join(items: [text], sep: text) -> text:
+    var out = ""
+    var first = true
+    for item in items:
+        val it: text = item
+        if not first:
+            out = out + sep
+        out = out + it
+        first = false
+    out
+
+
+# ============================================================================
+# Canonical type ids
+# ============================================================================
+
+fn canonical_type_ids_of_hir(types: [HirType]) -> [text]:
+    var out: [text] = []
+    for t in types:
+        val tt: HirType = t
+        out = out.push(canonical_type_id_of_hir(tt))
+    out
+
+
+fn canonical_type_id_of_hir(ty: HirType) -> text:
+    """Canonical, span-free text id for a HirType. Every HirTypeKind is
+    handled explicitly; a new kind must be added here (no fallback)."""
+    if ty == nil:
+        return "<nil>"
+    match ty.kind:
+        case HirTypeKind.Int(bits, signed):
+            if signed:
+                "i{bits}"
+            else:
+                "u{bits}"
+        case HirTypeKind.Float(bits): "f{bits}"
+        case HirTypeKind.Bool: "bool"
+        case HirTypeKind.Char: "char"
+        case HirTypeKind.Str: "str"
+        case HirTypeKind.Unit: "unit"
+        case HirTypeKind.Tuple(elements):
+            "(" + mono_key_join(canonical_type_ids_of_hir(elements), ",") + ")"
+        case HirTypeKind.Array(element, size):
+            if size == nil:
+                "[{canonical_type_id_of_hir(element)}]"
+            else:
+                "[{canonical_type_id_of_hir(element)};{size}]"
+        case HirTypeKind.Slice(element): "slice<{canonical_type_id_of_hir(element)}>"
+        case HirTypeKind.Dict(key, value):
+            "dict<{canonical_type_id_of_hir(key)},{canonical_type_id_of_hir(value)}>"
+        case HirTypeKind.Ref(inner, mutable):
+            if mutable:
+                "&mut {canonical_type_id_of_hir(inner)}"
+            else:
+                "&{canonical_type_id_of_hir(inner)}"
+        case HirTypeKind.Ptr(inner, mutable):
+            if mutable:
+                "*mut {canonical_type_id_of_hir(inner)}"
+            else:
+                "*const {canonical_type_id_of_hir(inner)}"
+        case HirTypeKind.Optional(inner): "opt<{canonical_type_id_of_hir(inner)}>"
+        case HirTypeKind.Result(ok, err):
+            "result<{canonical_type_id_of_hir(ok)},{canonical_type_id_of_hir(err)}>"
+        case HirTypeKind.Named(symbol, args):
+            val sid: SymbolId = symbol
+            if args.len() == 0:
+                "sym#{sid.id}"
+            else:
+                "sym#{sid.id}<" + mono_key_join(canonical_type_ids_of_hir(args), ",") + ">"
+        case HirTypeKind.TypeParam(name, _): "param:{name}"
+        case HirTypeKind.Union(members):
+            # Unions are sets: canonicalize member order.
+            "union<" + mono_key_join(mono_key_canonical_set(canonical_type_ids_of_hir(members)), "|") + ">"
+        case HirTypeKind.DynTrait(trait_):
+            val tid: SymbolId = trait_
+            "dyn#{tid.id}"
+        case HirTypeKind.Function(params, ret, effects):
+            var effs: [text] = []
+            for e in effects:
+                val ef: Effect = e
+                effs = effs.push(canonical_effect_id(ef))
+            "fn(" + mono_key_join(canonical_type_ids_of_hir(params), ",") + ")->" + canonical_type_id_of_hir(ret) + ";e=[" + mono_key_join(mono_key_canonical_set(effs), ",") + "]"
+        case HirTypeKind.Projection(base, assoc_name):
+            "{canonical_type_id_of_hir(base)}::{assoc_name}"
+        case HirTypeKind.Isolated(inner): "iso<{canonical_type_id_of_hir(inner)}>"
+        case HirTypeKind.Infer(id, level): "infer#{id}@{level}"
+        case HirTypeKind.Error: "<error>"
+        case HirTypeKind.Never: "never"
+        case HirTypeKind.Any: "any"
+        case HirTypeKind.Tensor(element, dims, device):
+            "tensor<{canonical_type_id_of_hir(element)};{dims.len()}>"
+        case HirTypeKind.Layer(input, output):
+            "layer<{input.len()}->{output.len()}>"
+
+
+fn canonical_type_ids_of_concrete(types: [ConcreteType]) -> [text]:
+    var out: [text] = []
+    for t in types:
+        val tt: ConcreteType = t
+        out = out.push(canonical_type_id_of_concrete(tt))
+    out
+
+
+fn canonical_type_id_of_concrete(ty: ConcreteType) -> text:
+    """Canonical text id for a legacy ConcreteType. Mirrors the HirType ids
+    where the two overlap so a key built from either side agrees."""
+    match ty:
+        case ConcreteType.Int: "i64"
+        case ConcreteType.Float: "f64"
+        case ConcreteType.Bool: "bool"
+        case ConcreteType.String: "str"
+        case ConcreteType.Nil: "unit"
+        case ConcreteType.Named(name): "named:{name}"
+        case ConcreteType.Array(elem): "[{canonical_type_id_of_concrete(elem)}]"
+        case ConcreteType.Tuple(elems):
+            "(" + mono_key_join(canonical_type_ids_of_concrete(elems), ",") + ")"
+        case ConcreteType.Dict(k, v):
+            "dict<{canonical_type_id_of_concrete(k)},{canonical_type_id_of_concrete(v)}>"
+        case ConcreteType.Function(params, ret):
+            "fn(" + mono_key_join(canonical_type_ids_of_concrete(params), ",") + ")->" + canonical_type_id_of_concrete(ret)
+        case ConcreteType.Optional(inner): "opt<{canonical_type_id_of_concrete(inner)}>"
+        case ConcreteType.Pointer(kind, capability, inner):
+            "ptr<{pointer_kind_text(kind)},{reference_capability_text(capability)},{canonical_type_id_of_concrete(inner)}>"
+        case ConcreteType.Union(members):
+            "union<" + mono_key_join(mono_key_canonical_set(canonical_type_ids_of_concrete(members)), "|") + ">"
+        case ConcreteType.Specialized(name, args):
+            "named:{name}<" + mono_key_join(canonical_type_ids_of_concrete(args), ",") + ">"
+
+
+fn pointer_kind_text(kind: PointerKind) -> text:
+    match kind:
+        case PointerKind.Unique: "unique"
+        case PointerKind.Shared: "shared"
+        case PointerKind.Weak: "weak"
+        case PointerKind.Handle: "handle"
+        case PointerKind.Borrow: "borrow"
+        case PointerKind.BorrowMut: "borrow_mut"
+        case PointerKind.RawConst: "raw_const"
+        case PointerKind.RawMut: "raw_mut"
+
+
+fn reference_capability_text(cap: ReferenceCapability) -> text:
+    match cap:
+        case ReferenceCapability.Isolated: "iso"
+        case ReferenceCapability.Exclusive: "excl"
+        case ReferenceCapability.Shared: "shared"
+
+
+# ============================================================================
+# Constructors
+# ============================================================================
+
+fn mono_semantic_key_new(definition: text, type_args: [text], const_args: [text], effect_args: [text], capability_args: [text]) -> MonoSemanticKey:
+    """Build a semantic key, canonicalizing the set-valued fields."""
+    MonoSemanticKey(
+        definition: definition,
+        type_args: type_args,
+        const_args: const_args,
+        effect_args: mono_key_canonical_set(effect_args),
+        capability_args: mono_key_canonical_set(capability_args))
+
+
+fn mono_semantic_key_types_only(definition: text, type_args: [text]) -> MonoSemanticKey:
+    mono_semantic_key_new(definition, type_args, [], [], [])
+
+
+fn mono_semantic_key_from_hir(definition: SymbolId, type_args: [HirType]) -> MonoSemanticKey:
+    """Key for a generic use site carrying HIR type arguments."""
+    mono_semantic_key_types_only("sym#{definition.id}", canonical_type_ids_of_hir(type_args))
+
+
+fn specialization_key_to_mono_key(key: SpecializationKey) -> MonoSemanticKey:
+    """Adapter from the legacy name-based SpecializationKey
+    (40.mono/monomorphize/types.spl, used by table.spl). The legacy key has
+    no stable symbol id, so the definition is `name:<name>`; the concrete
+    type args map through canonical_type_id_of_concrete."""
+    mono_semantic_key_types_only("name:{key.name}", canonical_type_ids_of_concrete(key.type_args))
+
+
+fn mono_artifact_key_new(semantic: MonoSemanticKey, target: text, data_layout_hash: i64, cpu_feature_hash: i64, backend: text, assurance_semantics_hash: i64, complete_universe_hash: i64, weave_plan_hash: i64) -> MonoArtifactKey:
+    MonoArtifactKey(
+        semantic: semantic,
+        target: target,
+        data_layout_hash: data_layout_hash,
+        cpu_feature_hash: cpu_feature_hash,
+        backend: backend,
+        assurance_semantics_hash: assurance_semantics_hash,
+        complete_universe_hash: complete_universe_hash,
+        weave_plan_hash: weave_plan_hash)
+
+
+# ============================================================================
+# Canonical text + hash + equality
+# ============================================================================
+
+fn mono_semantic_key_canonical_text(key: MonoSemanticKey) -> text:
+    """Deterministic text form. Field separators are chosen so no field can
+    be confused with its neighbour:
+    `def<type,...>;c=[const,...];e=[eff,...];k=[cap,...]`."""
+    key.definition + "<" + mono_key_join(key.type_args, ",") + ">;c=[" + mono_key_join(key.const_args, ",") + "];e=[" + mono_key_join(key.effect_args, ",") + "];k=[" + mono_key_join(key.capability_args, ",") + "]"
+
+
+fn mono_semantic_key_hash(key: MonoSemanticKey) -> i64:
+    mono_key_fnv1a(mono_semantic_key_canonical_text(key))
+
+
+fn mono_semantic_key_equals(a: MonoSemanticKey, b: MonoSemanticKey) -> bool:
+    mono_semantic_key_canonical_text(a) == mono_semantic_key_canonical_text(b)
+
+
+fn mono_semantic_key_is_generic(key: MonoSemanticKey) -> bool:
+    """True if any type arg still names an unresolved type parameter - such a
+    key must never reach the specialization table (§9.5)."""
+    for t in key.type_args:
+        val tt: text = t
+        if tt.starts_with("param:") or tt.contains("<param:") or tt.contains(",param:") or tt.contains("[param:") or tt.contains("(param:") or tt.contains("|param:"):
+            return true
+    false
+
+
+fn mono_artifact_key_canonical_text(key: MonoArtifactKey) -> text:
+    mono_semantic_key_canonical_text(key.semantic) + "|target=" + key.target + "|layout=" + "{key.data_layout_hash}" + "|cpu=" + "{key.cpu_feature_hash}" + "|backend=" + key.backend + "|assurance=" + "{key.assurance_semantics_hash}" + "|universe=" + "{key.complete_universe_hash}" + "|weave=" + "{key.weave_plan_hash}"
+
+
+fn mono_artifact_key_hash(key: MonoArtifactKey) -> i64:
+    mono_key_fnv1a(mono_artifact_key_canonical_text(key))
+
+
+fn mono_artifact_key_equals(a: MonoArtifactKey, b: MonoArtifactKey) -> bool:
+    mono_artifact_key_canonical_text(a) == mono_artifact_key_canonical_text(b)
+
+
+fn canonical_effect_id(e: Effect) -> text:
+    """Canonical text for an effect annotation (every EffectKind handled)."""
+    match e.kind:
+        case EffectKind.Pure: "pure"
+        case EffectKind.IO: "io"
+        case EffectKind.Async: "async"
+        case EffectKind.Throws(type_): "throws<{canonical_type_id_of_hir(type_)}>"
+        case EffectKind.Mutates: "mutates"
+        case EffectKind.Allocates: "allocates"
+        case EffectKind.Custom(name): "custom:{name}"

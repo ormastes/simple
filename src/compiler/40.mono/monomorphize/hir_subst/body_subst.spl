@@ -1,0 +1,636 @@
+# HIR body substitution (critical hardening Phase 3, lane M3).
+#
+# Design: doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md §9.4
+#
+# Walks a HIR function body and applies a type-param -> type substitution to
+# EVERY typed node: expression result types, `let` annotations, casts, call
+# type arguments, struct/enum constructor types, static-call receiver types,
+# closure parameters, patterns (incl. match arms, struct/enum patterns), and
+# collection literal element types.
+#
+# Per-type substitution is delegated to `substitute_type` in
+# 40.mono/monomorphize/type_subst.spl (not duplicated here).
+#
+# Exhaustiveness rule (plan Phase 1): every match over HirExprKind,
+# HirStmtKind, HirPatternKind, HirEnumPayload, HirPatternPayload and
+# HirCompClauseKind lists every variant explicitly. There is NO `case _:`.
+# Each arm sets `handled = true`; a kind that reaches the end of a match
+# without being handled (a variant added to hir_definitions.spl but not here)
+# is recorded as a loud `E-MONO-SUBST-UNHANDLED` diagnostic instead of being
+# silently passed through.
+
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.monomorphize.type_subst.{TypeSubstitution, substitute_type}
+
+
+# ============================================================================
+# Report
+# ============================================================================
+
+class HirSubstReport:
+    """Outcome of one body substitution."""
+    body: HirBlock
+    diagnostics: [text]         # E-MONO-SUBST-* messages; empty on success
+    nodes_visited: i64          # exprs + stmts + patterns walked
+
+
+class HirSubstCtx:
+    subst: TypeSubstitution
+    diagnostics: [text]
+    nodes_visited: i64
+
+
+fn hir_subst_diag(ctx: HirSubstCtx, code: text, what: text, span: Span) -> void:
+    val msg = "error[{code}]: monomorphization substitution: {what} (span {span.start}..{span.end})"
+    ctx.diagnostics = ctx.diagnostics.push(msg)
+
+
+fn hir_subst_unhandled(ctx: HirSubstCtx, node_kind: text, span: Span) -> void:
+    hir_subst_diag(ctx, "E-MONO-SUBST-UNHANDLED", "unhandled {node_kind} variant - add it to hir_subst/body_subst.spl", span)
+
+
+# ============================================================================
+# Entry points
+# ============================================================================
+
+fn subst_hir_body(body: HirBlock, subst_map: TypeSubstitution) -> HirBlock:
+    """Substitute `subst_map` through an entire function body.
+
+    Any diagnostic (an unhandled HIR variant) is printed LOUDLY to stderr;
+    use `subst_hir_body_with_report` to inspect them programmatically."""
+    val report = subst_hir_body_with_report(body, subst_map)
+    for d in report.diagnostics:
+        val dt: text = d
+        eprint(dt)
+    report.body
+
+
+fn subst_hir_body_with_report(body: HirBlock, subst_map: TypeSubstitution) -> HirSubstReport:
+    val ctx = HirSubstCtx(subst: subst_map, diagnostics: [], nodes_visited: 0)
+    val out = subst_hir_block(body, ctx)
+    HirSubstReport(body: out, diagnostics: ctx.diagnostics, nodes_visited: ctx.nodes_visited)
+
+
+# ============================================================================
+# Small helpers
+# ============================================================================
+
+fn hs_type(ty: HirType, ctx: HirSubstCtx) -> HirType:
+    substitute_type(ty, ctx.subst)
+
+
+fn hs_type_opt(ty: HirType?, ctx: HirSubstCtx) -> HirType?:
+    if ty == nil:
+        return nil
+    val t: HirType = ty
+    substitute_type(t, ctx.subst)
+
+
+fn hs_types(types: [HirType], ctx: HirSubstCtx) -> [HirType]:
+    var out: [HirType] = []
+    for t in types:
+        val tt: HirType = t
+        out = out.push(substitute_type(tt, ctx.subst))
+    out
+
+
+fn hs_expr_opt(e: HirExpr?, ctx: HirSubstCtx) -> HirExpr?:
+    if e == nil:
+        return nil
+    val et: HirExpr = e
+    subst_hir_expr(et, ctx)
+
+
+fn hs_exprs(exprs: [HirExpr], ctx: HirSubstCtx) -> [HirExpr]:
+    var out: [HirExpr] = []
+    for e in exprs:
+        val et: HirExpr = e
+        out = out.push(subst_hir_expr(et, ctx))
+    out
+
+
+fn hs_block_opt(b: HirBlock?, ctx: HirSubstCtx) -> HirBlock?:
+    if b == nil:
+        return nil
+    val bt: HirBlock = b
+    subst_hir_block(bt, ctx)
+
+
+fn hs_call_args(args: [HirCallArg], ctx: HirSubstCtx) -> [HirCallArg]:
+    var out: [HirCallArg] = []
+    for a in args:
+        val at: HirCallArg = a
+        var na = at
+        na.value = subst_hir_expr(at.value, ctx)
+        out = out.push(na)
+    out
+
+
+fn hs_named_exprs(fields: [(text, HirExpr)], ctx: HirSubstCtx) -> [(text, HirExpr)]:
+    var out: [(text, HirExpr)] = []
+    for f in fields:
+        val (name, value) = f
+        val vt: HirExpr = value
+        out = out.push((name, subst_hir_expr(vt, ctx)))
+    out
+
+
+fn hs_patterns(patterns: [HirPattern], ctx: HirSubstCtx) -> [HirPattern]:
+    var out: [HirPattern] = []
+    for p in patterns:
+        val pt: HirPattern = p
+        out = out.push(subst_hir_pattern(pt, ctx))
+    out
+
+
+fn hs_named_patterns(fields: [(text, HirPattern)], ctx: HirSubstCtx) -> [(text, HirPattern)]:
+    var out: [(text, HirPattern)] = []
+    for f in fields:
+        val (name, pat) = f
+        val pt: HirPattern = pat
+        out = out.push((name, subst_hir_pattern(pt, ctx)))
+    out
+
+
+fn hs_param(param: HirParam, ctx: HirSubstCtx) -> HirParam:
+    var out = param
+    out.type_ = hs_type(param.type_, ctx)
+    if param.has_default:
+        out.default = subst_hir_expr(param.default, ctx)
+    out
+
+
+fn hs_params(params: [HirParam], ctx: HirSubstCtx) -> [HirParam]:
+    var out: [HirParam] = []
+    for p in params:
+        val pt: HirParam = p
+        out = out.push(hs_param(pt, ctx))
+    out
+
+
+fn hs_enum_payload(payload: HirEnumPayload?, ctx: HirSubstCtx, span: Span) -> HirEnumPayload?:
+    if payload == nil:
+        return nil
+    # An `X?` value may arrive BARE (fresh construction) or wrapped in
+    # `Some(...)` (after a round trip through an `-> X?` signature); both are
+    # matched so a second pass over already-substituted HIR still works.
+    val out: HirEnumPayload? = match payload:
+        case Tuple(values):
+            HirEnumPayload.Tuple(hs_exprs(values, ctx))
+        case Struct(fields):
+            HirEnumPayload.Struct(hs_named_exprs(fields, ctx))
+        Some(p):
+            hs_enum_payload(p, ctx, span)
+        nil:
+            nil
+    if out == nil:
+        hir_subst_unhandled(ctx, "HirEnumPayload", span)
+        return payload
+    out
+
+
+fn hs_pattern_payload(payload: HirPatternPayload?, ctx: HirSubstCtx, span: Span) -> HirPatternPayload?:
+    if payload == nil:
+        return nil
+    val out: HirPatternPayload? = match payload:
+        case Tuple(patterns):
+            HirPatternPayload.Tuple(hs_patterns(patterns, ctx))
+        case Struct(fields):
+            HirPatternPayload.Struct(hs_named_patterns(fields, ctx))
+        Some(p):
+            hs_pattern_payload(p, ctx, span)
+        nil:
+            nil
+    if out == nil:
+        hir_subst_unhandled(ctx, "HirPatternPayload", span)
+        return payload
+    out
+
+
+fn hs_asm(asm_node: HirAsm, ctx: HirSubstCtx) -> HirAsm:
+    var out = asm_node
+    var cons: [HirAsmConstraint] = []
+    for c in asm_node.constraints:
+        val ct: HirAsmConstraint = c
+        var nc = ct
+        nc.value = subst_hir_expr(ct.value, ctx)
+        nc.output_value = hs_expr_opt(ct.output_value, ctx)
+        cons = cons.push(nc)
+    out.constraints = cons
+    out
+
+
+fn hs_interpolations(interps: [HirInterpolation]?, ctx: HirSubstCtx) -> [HirInterpolation]?:
+    if interps == nil:
+        return nil
+    val list: [HirInterpolation] = interps
+    var out: [HirInterpolation] = []
+    for i in list:
+        val it: HirInterpolation = i
+        var ni = it
+        ni.expr = subst_hir_expr(it.expr, ctx)
+        out = out.push(ni)
+    out
+
+
+# ============================================================================
+# Blocks and statements
+# ============================================================================
+
+fn subst_hir_block(block: HirBlock, ctx: HirSubstCtx) -> HirBlock:
+    """`block.value` is a desugared plain field gated by `block.has`."""
+    if block == nil:
+        return block
+    var out = block
+    var stmts: [HirStmt] = []
+    for s in block.stmts:
+        val st: HirStmt = s
+        stmts = stmts.push(subst_hir_stmt(st, ctx))
+    out.stmts = stmts
+    if block.has:
+        out.value = subst_hir_expr(block.value, ctx)
+    out
+
+
+fn subst_hir_stmt(stmt: HirStmt, ctx: HirSubstCtx) -> HirStmt:
+    if stmt == nil:
+        return stmt
+    ctx.nodes_visited = ctx.nodes_visited + 1
+    var out = stmt
+    var handled = false
+    match stmt.kind:
+        case HirStmtKind.Expr(e):
+            val et: HirExpr = e
+            out.kind = HirStmtKind.Expr(subst_hir_expr(et, ctx))
+            handled = true
+        case HirStmtKind.Let(symbol, ty, init):
+            val lt: HirType = ty
+            val li: HirExpr = init
+            out.kind = HirStmtKind.Let(symbol, hs_type(lt, ctx), subst_hir_expr(li, ctx))
+            handled = true
+        case HirStmtKind.Assign(target, op, value):
+            val at: HirExpr = target
+            val av: HirExpr = value
+            out.kind = HirStmtKind.Assign(subst_hir_expr(at, ctx), op, subst_hir_expr(av, ctx))
+            handled = true
+        case HirStmtKind.Block(b):
+            val bt: HirBlock = b
+            out.kind = HirStmtKind.Block(subst_hir_block(bt, ctx))
+            handled = true
+        case HirStmtKind.AsmAssert(spec):
+            # Compile-time target guard; carries no types or expressions.
+            handled = true
+    if not handled:
+        hir_subst_unhandled(ctx, "HirStmtKind", stmt.span)
+    out
+
+
+# ============================================================================
+# Patterns
+# ============================================================================
+
+fn subst_hir_pattern(pattern: HirPattern, ctx: HirSubstCtx) -> HirPattern:
+    if pattern == nil:
+        return pattern
+    ctx.nodes_visited = ctx.nodes_visited + 1
+    var out = pattern
+    if pattern.has_type_:
+        out.type_ = hs_type(pattern.type_, ctx)
+    var handled = false
+    match pattern.kind:
+        case HirPatternKind.Wildcard:
+            handled = true
+        case HirPatternKind.Literal(value):
+            val v: HirExpr = value
+            out.kind = HirPatternKind.Literal(subst_hir_expr(v, ctx))
+            handled = true
+        case HirPatternKind.Binding(symbol, mutable):
+            handled = true
+        case HirPatternKind.Tuple(elements):
+            out.kind = HirPatternKind.Tuple(hs_patterns(elements, ctx))
+            handled = true
+        case HirPatternKind.Array(elements, rest):
+            out.kind = HirPatternKind.Array(hs_patterns(elements, ctx), rest)
+            handled = true
+        case HirPatternKind.Struct(ty, fields):
+            val st: HirType = ty
+            out.kind = HirPatternKind.Struct(hs_type(st, ctx), hs_named_patterns(fields, ctx))
+            handled = true
+        case HirPatternKind.Enum(ty, variant, payload):
+            val et: HirType = ty
+            out.kind = HirPatternKind.Enum(hs_type(et, ctx), variant, hs_pattern_payload(payload, ctx, pattern.span))
+            handled = true
+        case HirPatternKind.Or(patterns):
+            out.kind = HirPatternKind.Or(hs_patterns(patterns, ctx))
+            handled = true
+        case HirPatternKind.Range(start, end, inclusive):
+            val rs: HirExpr = start
+            val re: HirExpr = end
+            out.kind = HirPatternKind.Range(subst_hir_expr(rs, ctx), subst_hir_expr(re, ctx), inclusive)
+            handled = true
+        case HirPatternKind.Error:
+            handled = true
+        case HirPatternKind.CompleteRegion(binder):
+            handled = true
+        case HirPatternKind.DynRegion(binder):
+            handled = true
+    if not handled:
+        hir_subst_unhandled(ctx, "HirPatternKind", pattern.span)
+    out
+
+
+# ============================================================================
+# Expressions
+# ============================================================================
+
+fn subst_hir_expr(expr: HirExpr, ctx: HirSubstCtx) -> HirExpr:
+    if expr == nil:
+        return expr
+    ctx.nodes_visited = ctx.nodes_visited + 1
+    var out = expr
+    if expr.has_type_:
+        out.type_ = hs_type(expr.type_, ctx)
+    var handled = false
+    match expr.kind:
+        # ---- Literals -------------------------------------------------------
+        case HirExprKind.IntLit(value, suffix):
+            handled = true
+        case HirExprKind.FloatLit(value, suffix):
+            handled = true
+        case HirExprKind.StringLit(value, interpolations):
+            out.kind = HirExprKind.StringLit(value, hs_interpolations(interpolations, ctx))
+            handled = true
+        case HirExprKind.BoolLit(value):
+            handled = true
+        case HirExprKind.CharLit(value):
+            handled = true
+        case HirExprKind.UnitLit:
+            handled = true
+        case HirExprKind.NilLit:
+            handled = true
+
+        # ---- Collections ----------------------------------------------------
+        case HirExprKind.ArrayLit(elements, elem_ty):
+            out.kind = HirExprKind.ArrayLit(hs_exprs(elements, ctx), hs_type_opt(elem_ty, ctx))
+            handled = true
+        case HirExprKind.ArrayRepeat(value, count, elem_ty):
+            val av: HirExpr = value
+            val ac: HirExpr = count
+            out.kind = HirExprKind.ArrayRepeat(subst_hir_expr(av, ctx), subst_hir_expr(ac, ctx), hs_type_opt(elem_ty, ctx))
+            handled = true
+        case HirExprKind.TupleLit(elements):
+            out.kind = HirExprKind.TupleLit(hs_exprs(elements, ctx))
+            handled = true
+        case HirExprKind.DictLit(entries, key_ty, value_ty):
+            var new_entries: [(HirExpr, HirExpr)] = []
+            for entry in entries:
+                val (k, v) = entry
+                val kt: HirExpr = k
+                val vt: HirExpr = v
+                new_entries = new_entries.push((subst_hir_expr(kt, ctx), subst_hir_expr(vt, ctx)))
+            val ktype: HirType = key_ty
+            out.kind = HirExprKind.DictLit(new_entries, hs_type(ktype, ctx), hs_type_opt(value_ty, ctx))
+            handled = true
+        case HirExprKind.SetLit(elements, elem_ty):
+            out.kind = HirExprKind.SetLit(hs_exprs(elements, ctx), hs_type_opt(elem_ty, ctx))
+            handled = true
+
+        # ---- Variables and access -------------------------------------------
+        case HirExprKind.Var(symbol):
+            handled = true
+        case HirExprKind.NamedVar(symbol, name):
+            handled = true
+        case HirExprKind.Field(base, field, resolved):
+            val fb: HirExpr = base
+            out.kind = HirExprKind.Field(subst_hir_expr(fb, ctx), field, resolved)
+            handled = true
+        case HirExprKind.Index(base, index):
+            val ib: HirExpr = base
+            val ii: HirExpr = index
+            out.kind = HirExprKind.Index(subst_hir_expr(ib, ctx), subst_hir_expr(ii, ctx))
+            handled = true
+        case HirExprKind.TupleIndex(base, index):
+            val tb: HirExpr = base
+            out.kind = HirExprKind.TupleIndex(subst_hir_expr(tb, ctx), index)
+            handled = true
+        case HirExprKind.OptionalChain(base, field):
+            val ob: HirExpr = base
+            out.kind = HirExprKind.OptionalChain(subst_hir_expr(ob, ctx), field)
+            handled = true
+        case HirExprKind.NullCoalesce(left, right):
+            val nl: HirExpr = left
+            val nr: HirExpr = right
+            out.kind = HirExprKind.NullCoalesce(subst_hir_expr(nl, ctx), subst_hir_expr(nr, ctx))
+            handled = true
+        case HirExprKind.ExistsCheck(base):
+            val eb: HirExpr = base
+            out.kind = HirExprKind.ExistsCheck(subst_hir_expr(eb, ctx))
+            handled = true
+        case HirExprKind.Unwrap(base):
+            val ub: HirExpr = base
+            out.kind = HirExprKind.Unwrap(subst_hir_expr(ub, ctx))
+            handled = true
+
+        # ---- Operators ------------------------------------------------------
+        case HirExprKind.Binary(op, left, right):
+            val bl: HirExpr = left
+            val br: HirExpr = right
+            out.kind = HirExprKind.Binary(op, subst_hir_expr(bl, ctx), subst_hir_expr(br, ctx))
+            handled = true
+        case HirExprKind.Unary(op, operand):
+            val uo: HirExpr = operand
+            out.kind = HirExprKind.Unary(op, subst_hir_expr(uo, ctx))
+            handled = true
+
+        # ---- Calls ----------------------------------------------------------
+        case HirExprKind.Call(callee, args, type_args):
+            val cc: HirExpr = callee
+            out.kind = HirExprKind.Call(subst_hir_expr(cc, ctx), hs_call_args(args, ctx), hs_types(type_args, ctx))
+            handled = true
+        case HirExprKind.MethodCall(receiver, method, args, resolution):
+            val mr: HirExpr = receiver
+            out.kind = HirExprKind.MethodCall(subst_hir_expr(mr, ctx), method, hs_call_args(args, ctx), resolution)
+            handled = true
+        case HirExprKind.StaticCall(ty, method, args, resolution):
+            val st: HirType = ty
+            out.kind = HirExprKind.StaticCall(hs_type(st, ctx), method, hs_call_args(args, ctx), resolution)
+            handled = true
+
+        # ---- Control flow ---------------------------------------------------
+        case HirExprKind.If(cond, then_, else_):
+            val ic: HirExpr = cond
+            val it: HirBlock = then_
+            out.kind = HirExprKind.If(subst_hir_expr(ic, ctx), subst_hir_block(it, ctx), hs_block_opt(else_, ctx))
+            handled = true
+        case HirExprKind.IfChain(arms, else_):
+            var new_arms: [HirIfArm] = []
+            for arm in arms:
+                val a: HirIfArm = arm
+                var na = a
+                na.cond = subst_hir_expr(a.cond, ctx)
+                na.then_ = subst_hir_block(a.then_, ctx)
+                new_arms = new_arms.push(na)
+            out.kind = HirExprKind.IfChain(new_arms, hs_block_opt(else_, ctx))
+            handled = true
+        case HirExprKind.MatchCase(scrutinee, arms):
+            val sc: HirExpr = scrutinee
+            var marms: [HirMatchArm] = []
+            for arm in arms:
+                val m: HirMatchArm = arm
+                var nm = m
+                nm.pattern = subst_hir_pattern(m.pattern, ctx)
+                if m.has_guard:
+                    nm.guard = subst_hir_expr(m.guard, ctx)
+                nm.body = subst_hir_block(m.body, ctx)
+                marms = marms.push(nm)
+            out.kind = HirExprKind.MatchCase(subst_hir_expr(sc, ctx), marms)
+            handled = true
+        case HirExprKind.Loop(body, label):
+            val lb: HirBlock = body
+            out.kind = HirExprKind.Loop(subst_hir_block(lb, ctx), label)
+            handled = true
+        case HirExprKind.While(cond, body, label):
+            val wc: HirExpr = cond
+            val wb: HirBlock = body
+            out.kind = HirExprKind.While(subst_hir_expr(wc, ctx), subst_hir_block(wb, ctx), label)
+            handled = true
+        case HirExprKind.For(var_, iter, body, label):
+            val fi: HirExpr = iter
+            val fb2: HirBlock = body
+            out.kind = HirExprKind.For(var_, subst_hir_expr(fi, ctx), subst_hir_block(fb2, ctx), label)
+            handled = true
+        case HirExprKind.With(items, body):
+            var new_items: [HirWithItem] = []
+            for item in items:
+                val wi: HirWithItem = item
+                var ni = wi
+                ni.context_expr = subst_hir_expr(wi.context_expr, ctx)
+                new_items = new_items.push(ni)
+            val wbb: HirBlock = body
+            out.kind = HirExprKind.With(new_items, subst_hir_block(wbb, ctx))
+            handled = true
+
+        # ---- Closures and blocks --------------------------------------------
+        case HirExprKind.Lambda(params, body, captures):
+            val lbody: HirExpr = body
+            out.kind = HirExprKind.Lambda(hs_params(params, ctx), subst_hir_expr(lbody, ctx), captures)
+            handled = true
+        case HirExprKind.Block(block):
+            val bk: HirBlock = block
+            out.kind = HirExprKind.Block(subst_hir_block(bk, ctx))
+            handled = true
+        case HirExprKind.HostGpuLane(lane_code, payload_size, marker, body):
+            val gm: HirExpr = marker
+            val gb: HirBlock = body
+            out.kind = HirExprKind.HostGpuLane(lane_code, payload_size, subst_hir_expr(gm, ctx), subst_hir_block(gb, ctx))
+            handled = true
+
+        # ---- Control transfer -----------------------------------------------
+        case HirExprKind.Return(value):
+            out.kind = HirExprKind.Return(hs_expr_opt(value, ctx))
+            handled = true
+        case HirExprKind.Break(label, value):
+            out.kind = HirExprKind.Break(label, hs_expr_opt(value, ctx))
+            handled = true
+        case HirExprKind.Continue(label):
+            handled = true
+        case HirExprKind.Throw(value):
+            val tv: HirExpr = value
+            out.kind = HirExprKind.Throw(subst_hir_expr(tv, ctx))
+            handled = true
+        case HirExprKind.Try(inner):
+            val te: HirExpr = inner
+            out.kind = HirExprKind.Try(subst_hir_expr(te, ctx))
+            handled = true
+        case HirExprKind.Await(inner):
+            val ae: HirExpr = inner
+            out.kind = HirExprKind.Await(subst_hir_expr(ae, ctx))
+            handled = true
+        case HirExprKind.Yield(value):
+            out.kind = HirExprKind.Yield(hs_expr_opt(value, ctx))
+            handled = true
+
+        # ---- Constructors and casts -----------------------------------------
+        case HirExprKind.StructLit(ty, fields):
+            val slt: HirType = ty
+            out.kind = HirExprKind.StructLit(hs_type(slt, ctx), hs_named_exprs(fields, ctx))
+            handled = true
+        case HirExprKind.EnumLit(ty, variant, payload):
+            val elt: HirType = ty
+            out.kind = HirExprKind.EnumLit(hs_type(elt, ctx), variant, hs_enum_payload(payload, ctx, expr.span))
+            handled = true
+        case HirExprKind.Cast(inner, target):
+            val ce: HirExpr = inner
+            val ct: HirType = target
+            out.kind = HirExprKind.Cast(subst_hir_expr(ce, ctx), hs_type(ct, ctx))
+            handled = true
+        case HirExprKind.As(inner, target):
+            val ase: HirExpr = inner
+            val ast: HirType = target
+            out.kind = HirExprKind.As(subst_hir_expr(ase, ctx), hs_type(ast, ctx))
+            handled = true
+        case HirExprKind.Range(start, end, inclusive, step):
+            val rs: HirExpr = start
+            val re: HirExpr = end
+            out.kind = HirExprKind.Range(subst_hir_expr(rs, ctx), subst_hir_expr(re, ctx), inclusive, hs_expr_opt(step, ctx))
+            handled = true
+        case HirExprKind.Comprehension(kind, inner, clauses):
+            val ce2: HirExpr = inner
+            var new_clauses: [HirCompClause] = []
+            for clause in clauses:
+                val cl: HirCompClause = clause
+                var nc = cl
+                var clause_handled = false
+                match cl.kind:
+                    case HirCompClauseKind.For(var_, iter):
+                        val cli: HirExpr = iter
+                        nc.kind = HirCompClauseKind.For(var_, subst_hir_expr(cli, ctx))
+                        clause_handled = true
+                    case HirCompClauseKind.If(cond):
+                        val clc: HirExpr = cond
+                        nc.kind = HirCompClauseKind.If(subst_hir_expr(clc, ctx))
+                        clause_handled = true
+                if not clause_handled:
+                    hir_subst_unhandled(ctx, "HirCompClauseKind", cl.span)
+                new_clauses = new_clauses.push(nc)
+            out.kind = HirExprKind.Comprehension(kind, subst_hir_expr(ce2, ctx), new_clauses)
+            handled = true
+
+        # ---- Custom / DL / unsafe / asm blocks ------------------------------
+        case HirExprKind.CustomBlock(kind, value):
+            # Opaque BlockValue payload from compiler.blocks; carries no HIR
+            # types this layer can reach. The expression's own `type_` was
+            # already substituted above.
+            handled = true
+        case HirExprKind.LossBlock(body):
+            val lbb: HirBlock = body
+            out.kind = HirExprKind.LossBlock(subst_hir_block(lbb, ctx))
+            handled = true
+        case HirExprKind.NogradBlock(body):
+            val nbb: HirBlock = body
+            out.kind = HirExprKind.NogradBlock(subst_hir_block(nbb, ctx))
+            handled = true
+        case HirExprKind.UnsafeBlock(body):
+            val ubb: HirBlock = body
+            out.kind = HirExprKind.UnsafeBlock(subst_hir_block(ubb, ctx))
+            handled = true
+        case HirExprKind.InlineAsm(asm_node):
+            val an: HirAsm = asm_node
+            out.kind = HirExprKind.InlineAsm(hs_asm(an, ctx))
+            handled = true
+        case HirExprKind.InlineAsmMatch(arms):
+            var aarms: [HirAsmMatchArm] = []
+            for arm in arms:
+                val aa: HirAsmMatchArm = arm
+                var na2 = aa
+                if aa.has_asm_body:
+                    na2.asm_body = hs_asm(aa.asm_body, ctx)
+                aarms = aarms.push(na2)
+            out.kind = HirExprKind.InlineAsmMatch(aarms)
+            handled = true
+        case HirExprKind.Error:
+            handled = true
+    if not handled:
+        hir_subst_unhandled(ctx, "HirExprKind", expr.span)
+    out

@@ -1,0 +1,383 @@
+"""
+# subst_hir_body: exhaustive type-param substitution over a HIR body (Phase 3, M3)
+
+`subst_hir_body(body, subst_map)` must rewrite EVERY typed node in a function
+body through the substitution map - expression result types, `let`
+annotations, casts, call type arguments, struct/enum constructor types,
+static-call receivers, closure params, match-arm patterns (struct/enum/tuple/
+or), collection literal element types - including type params nested inside
+Option/Result/Array/Named generics. The walk is exhaustive over
+HirExprKind/HirStmtKind/HirPatternKind (no `case _`), reports the number of
+nodes it visited, and never silently leaves a `TypeParam` behind.
+"""
+
+use std.spec
+use compiler.hir.hir.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.monomorphize.type_subst.{TypeSubstitution, typesubstitution_from_params}
+use compiler.monomorphize.hir_subst.body_subst.{subst_hir_body, subst_hir_body_with_report}
+
+fn sp() -> Span:
+    Span.empty()
+
+fn t_i64() -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: sp())
+
+fn t_str() -> HirType:
+    HirType(kind: HirTypeKind.Str, span: sp())
+
+fn t_param(name: text) -> HirType:
+    HirType(kind: HirTypeKind.TypeParam(name, []), span: sp())
+
+fn t_opt(inner: HirType) -> HirType:
+    HirType(kind: HirTypeKind.Optional(inner), span: sp())
+
+fn t_result(ok: HirType, err: HirType) -> HirType:
+    HirType(kind: HirTypeKind.Result(ok, err), span: sp())
+
+fn t_arr(inner: HirType) -> HirType:
+    HirType(kind: HirTypeKind.Array(inner, nil), span: sp())
+
+fn t_named(id: i64, args: [HirType]) -> HirType:
+    HirType(kind: HirTypeKind.Named(SymbolId(id: id), args), span: sp())
+
+fn e(kind: HirExprKind, ty: HirType) -> HirExpr:
+    HirExpr(kind: kind, has_type_: true, type_: ty, span: sp())
+
+fn e_untyped(kind: HirExprKind) -> HirExpr:
+    HirExpr(kind: kind, has_type_: false, type_: nil, span: sp())
+
+fn var_(id: i64, ty: HirType) -> HirExpr:
+    e(HirExprKind.Var(SymbolId(id: id)), ty)
+
+fn pat(kind: HirPatternKind, ty: HirType) -> HirPattern:
+    HirPattern(kind: kind, has_type_: true, type_: ty, span: sp())
+
+fn stmt(kind: HirStmtKind) -> HirStmt:
+    HirStmt(kind: kind, span: sp())
+
+fn blk(stmts: [HirStmt], value: HirExpr) -> HirBlock:
+    HirBlock(stmts: stmts, has: true, value: value, span: sp())
+
+fn blk_nv(stmts: [HirStmt]) -> HirBlock:
+    HirBlock(stmts: stmts, has: false, value: nil, span: sp())
+
+fn tp(name: text) -> HirTypeParam:
+    HirTypeParam(symbol: SymbolId(id: 0), name: name, bounds: [], has_default: false, default: nil, span: sp())
+
+fn param(id: i64, ty: HirType) -> HirParam:
+    HirParam(symbol: SymbolId(id: id), name: "p{id}", type_: ty, has_default: false, default: nil, span: sp(), is_mutable: false)
+
+fn arm(p: HirPattern, body: HirBlock) -> HirMatchArm:
+    HirMatchArm(pattern: p, has_guard: false, guard: nil, body: body, span: sp())
+
+fn subst_t_to_i64() -> TypeSubstitution:
+    typesubstitution_from_params([tp("T"), tp("U")], [t_i64(), t_str()])
+
+# ---------------------------------------------------------------------------
+# Oracle: count surviving TypeParams anywhere (types, exprs, stmts, patterns)
+# ---------------------------------------------------------------------------
+
+fn tp_type(ty: HirType) -> i64:
+    if ty == nil:
+        return 0
+    match ty.kind:
+        case TypeParam(_, _): 1
+        case Array(element, _): tp_type(element)
+        case Optional(inner): tp_type(inner)
+        case Result(ok, err): tp_type(ok) + tp_type(err)
+        case Named(_, args):
+            var n = 0
+            for a in args:
+                n = n + tp_type(a)
+            n
+        case Tuple(elements):
+            var n = 0
+            for x in elements:
+                n = n + tp_type(x)
+            n
+        case Function(params, ret, _):
+            var n = tp_type(ret)
+            for x in params:
+                n = n + tp_type(x)
+            n
+        case _: 0
+
+fn tp_type_opt(ty: HirType?) -> i64:
+    if ty == nil:
+        return 0
+    val t: HirType = ty
+    tp_type(t)
+
+fn tp_exprs(exprs: [HirExpr]) -> i64:
+    var n = 0
+    for x in exprs:
+        val xt: HirExpr = x
+        n = n + tp_expr(xt)
+    n
+
+fn tp_args(args: [HirCallArg]) -> i64:
+    var n = 0
+    for a in args:
+        val at: HirCallArg = a
+        n = n + tp_expr(at.value)
+    n
+
+fn tp_pattern(p: HirPattern) -> i64:
+    if p == nil:
+        return 0
+    var n = 0
+    if p.has_type_:
+        n = n + tp_type(p.type_)
+    match p.kind:
+        case HirPatternKind.Struct(ty, fields):
+            n = n + tp_type(ty)
+            for f in fields:
+                val (_, fp) = f
+                val fpt: HirPattern = fp
+                n = n + tp_pattern(fpt)
+        case HirPatternKind.Enum(ty, _, payload):
+            n = n + tp_type(ty)
+            if payload != nil:
+                val pl: HirPatternPayload = payload
+                match pl:
+                    case HirPatternPayload.Tuple(ps):
+                        for q in ps:
+                            val qt: HirPattern = q
+                            n = n + tp_pattern(qt)
+                    case HirPatternPayload.Struct(fs):
+                        for f2 in fs:
+                            val (_, fq) = f2
+                            val fqt: HirPattern = fq
+                            n = n + tp_pattern(fqt)
+        case HirPatternKind.Tuple(elements):
+            for q2 in elements:
+                val q2t: HirPattern = q2
+                n = n + tp_pattern(q2t)
+        case HirPatternKind.Or(patterns):
+            for q3 in patterns:
+                val q3t: HirPattern = q3
+                n = n + tp_pattern(q3t)
+        case _: pass
+    n
+
+fn tp_block(b: HirBlock) -> i64:
+    if b == nil:
+        return 0
+    var n = 0
+    for s in b.stmts:
+        val st: HirStmt = s
+        n = n + tp_stmt(st)
+    if b.has:
+        n = n + tp_expr(b.value)
+    n
+
+fn tp_stmt(s: HirStmt) -> i64:
+    match s.kind:
+        case HirStmtKind.Expr(x): tp_expr(x)
+        case HirStmtKind.Let(_, ty, init): tp_type(ty) + tp_expr(init)
+        case HirStmtKind.Assign(target, _, value): tp_expr(target) + tp_expr(value)
+        case HirStmtKind.Block(b): tp_block(b)
+        case _: 0
+
+fn tp_expr(x: HirExpr) -> i64:
+    if x == nil:
+        return 0
+    var n = 0
+    if x.has_type_:
+        n = n + tp_type(x.type_)
+    match x.kind:
+        case HirExprKind.ArrayLit(elements, elem_ty): n = n + tp_exprs(elements) + tp_type_opt(elem_ty)
+        case HirExprKind.TupleLit(elements): n = n + tp_exprs(elements)
+        case HirExprKind.Call(callee, args, type_args):
+            n = n + tp_expr(callee) + tp_args(args)
+            for ta in type_args:
+                val tat: HirType = ta
+                n = n + tp_type(tat)
+        case HirExprKind.MethodCall(receiver, _, args, _): n = n + tp_expr(receiver) + tp_args(args)
+        case HirExprKind.StaticCall(ty, _, args, _): n = n + tp_type(ty) + tp_args(args)
+        case HirExprKind.Cast(inner, target): n = n + tp_expr(inner) + tp_type(target)
+        case HirExprKind.As(inner, target): n = n + tp_expr(inner) + tp_type(target)
+        case HirExprKind.StructLit(ty, fields):
+            n = n + tp_type(ty)
+            for f in fields:
+                val (_, fv) = f
+                val fvt: HirExpr = fv
+                n = n + tp_expr(fvt)
+        case HirExprKind.EnumLit(ty, _, payload):
+            n = n + tp_type(ty)
+            if payload != nil:
+                val pl: HirEnumPayload = payload
+                match pl:
+                    case HirEnumPayload.Tuple(vs): n = n + tp_exprs(vs)
+                    case HirEnumPayload.Struct(fs):
+                        for f2 in fs:
+                            val (_, fv2) = f2
+                            val fv2t: HirExpr = fv2
+                            n = n + tp_expr(fv2t)
+        case HirExprKind.Lambda(params, body, _):
+            for p in params:
+                val pt: HirParam = p
+                n = n + tp_type(pt.type_)
+            n = n + tp_expr(body)
+        case HirExprKind.MatchCase(scrutinee, arms):
+            n = n + tp_expr(scrutinee)
+            for a in arms:
+                val at: HirMatchArm = a
+                n = n + tp_pattern(at.pattern) + tp_block(at.body)
+        case HirExprKind.If(cond, then_, else_):
+            n = n + tp_expr(cond) + tp_block(then_)
+            if else_ != nil:
+                val eb: HirBlock = else_
+                n = n + tp_block(eb)
+        case HirExprKind.Block(b): n = n + tp_block(b)
+        case HirExprKind.Binary(_, l, r): n = n + tp_expr(l) + tp_expr(r)
+        case HirExprKind.Unary(_, o): n = n + tp_expr(o)
+        case HirExprKind.Field(base, _, _): n = n + tp_expr(base)
+        case HirExprKind.Index(base, index): n = n + tp_expr(base) + tp_expr(index)
+        case HirExprKind.Return(value):
+            if value != nil:
+                val rv: HirExpr = value
+                n = n + tp_expr(rv)
+        case HirExprKind.Unwrap(base): n = n + tp_expr(base)
+        case HirExprKind.Try(inner): n = n + tp_expr(inner)
+        case HirExprKind.While(cond, body, _): n = n + tp_expr(cond) + tp_block(body)
+        case HirExprKind.For(_, iter, body, _): n = n + tp_expr(iter) + tp_block(body)
+        case _: pass
+    n
+
+# ---------------------------------------------------------------------------
+# Fixture: one body touching every substitution site, all typed with T/U
+# ---------------------------------------------------------------------------
+
+fn fixture_body() -> HirBlock:
+    val t = t_param("T")
+    val u = t_param("U")
+    val opt_t = t_opt(t)
+    val res_tu = t_result(t, u)
+    val list_t = t_named(100, [t])          # List<T>
+    val boxed = t_named(101, [t_opt(t)])    # Box<Option<T>>
+
+    # let a: Option<T> = Some(v)            -- enum ctor with typed payload
+    val some_v = e(HirExprKind.EnumLit(opt_t, "Some", HirEnumPayload.Tuple([var_(1, t)])), opt_t)
+    val s_let = stmt(HirStmtKind.Let(SymbolId(id: 2), opt_t, some_v))
+
+    # let r: Result<T, U> = Ok(v)
+    val ok_v = e(HirExprKind.EnumLit(res_tu, "Ok", HirEnumPayload.Tuple([var_(1, t)])), res_tu)
+    val s_let2 = stmt(HirStmtKind.Let(SymbolId(id: 3), res_tu, ok_v))
+
+    # identity<T>(v) with explicit call type arg, List<T>.new() static call
+    val call = e(HirExprKind.Call(var_(10, t), [HirCallArg(has_name: false, name: "", value: var_(1, t), span: sp())], [t]), t)
+    val scall = e(HirExprKind.StaticCall(list_t, "new", [], MethodResolution.Unresolved), list_t)
+    val s_call = stmt(HirStmtKind.Expr(call))
+    val s_scall = stmt(HirStmtKind.Expr(scall))
+
+    # cast + safe cast + array literal elem type + struct literal Box<Option<T>>
+    val cast = e(HirExprKind.Cast(var_(1, t), t), t)
+    val as_ = e(HirExprKind.As(var_(1, t), opt_t), opt_t)
+    val arr = e(HirExprKind.ArrayLit([cast, as_], t), t_arr(t))
+    val slit = e(HirExprKind.StructLit(boxed, [("inner", some_v)]), boxed)
+    val s_assign = stmt(HirStmtKind.Assign(var_(4, boxed), HirAssignOp.Add, slit))
+    val s_arr = stmt(HirStmtKind.Expr(arr))
+
+    # closure \x: T -> x, and a method call on it
+    val lam = e(HirExprKind.Lambda([param(5, t)], var_(5, t), []), HirType(kind: HirTypeKind.Function([t], t, []), span: sp()))
+    val mcall = e(HirExprKind.MethodCall(lam, "call", [HirCallArg(has_name: false, name: "", value: var_(1, t), span: sp())], MethodResolution.Unresolved), t)
+    val s_m = stmt(HirStmtKind.Expr(mcall))
+
+    # match r: case Ok(x) | Err(y) with typed bindings, struct pattern, tuple pattern
+    val p_ok = pat(HirPatternKind.Enum(res_tu, "Ok", HirPatternPayload.Tuple([pat(HirPatternKind.Binding(SymbolId(id: 6), false), t)])), res_tu)
+    val p_err = pat(HirPatternKind.Enum(res_tu, "Err", HirPatternPayload.Tuple([pat(HirPatternKind.Binding(SymbolId(id: 7), false), u)])), res_tu)
+    val p_or = pat(HirPatternKind.Or([p_ok, p_err]), res_tu)
+    val p_struct = pat(HirPatternKind.Struct(boxed, [("inner", pat(HirPatternKind.Wildcard, opt_t))]), boxed)
+    val p_tuple = pat(HirPatternKind.Tuple([pat(HirPatternKind.Binding(SymbolId(id: 8), false), t), pat(HirPatternKind.Wildcard, u)]), HirType(kind: HirTypeKind.Tuple([t, u]), span: sp()))
+    val m = e(HirExprKind.MatchCase(var_(3, res_tu), [arm(p_or, blk([], var_(6, t))), arm(p_struct, blk([], var_(1, t))), arm(p_tuple, blk([], var_(8, t)))]), t)
+
+    # if/else + nested block + binary + return inside while/for
+    val ret = e_untyped(HirExprKind.Return(var_(1, t)))
+    val wh = e_untyped(HirExprKind.While(e(HirExprKind.BoolLit(true), HirType(kind: HirTypeKind.Bool, span: sp())), blk_nv([stmt(HirStmtKind.Expr(ret))]), nil))
+    val fo = e_untyped(HirExprKind.For(SymbolId(id: 9), var_(4, list_t), blk_nv([stmt(HirStmtKind.Expr(e(HirExprKind.Unwrap(var_(2, opt_t)), t)))]), nil))
+    val iff = e(HirExprKind.If(e(HirExprKind.BoolLit(false), HirType(kind: HirTypeKind.Bool, span: sp())), blk([], e(HirExprKind.Binary(HirBinOp.Add, var_(1, t), var_(1, t)), t)), blk([stmt(HirStmtKind.Expr(wh)), stmt(HirStmtKind.Expr(fo))], e(HirExprKind.Block(blk([], e(HirExprKind.Try(var_(3, res_tu)), t))), t))), t)
+    val s_if = stmt(HirStmtKind.Expr(iff))
+
+    blk([s_let, s_let2, s_call, s_scall, s_assign, s_arr, s_m, s_if], m)
+
+describe "subst_hir_body over every substitution site":
+    it "the fixture really carries type params before substitution (control)":
+        expect(tp_block(fixture_body()) > 20).to_equal(true)
+
+    it "leaves no TypeParam anywhere in the body":
+        val out = subst_hir_body(fixture_body(), subst_t_to_i64())
+        expect(tp_block(out)).to_equal(0)
+
+    it "rewrites let annotations, Option/Result members and call type args to the concrete types":
+        val out = subst_hir_body(fixture_body(), subst_t_to_i64())
+        val s0: HirStmt = out.stmts[0]
+        match s0.kind:
+            case HirStmtKind.Let(_, ty, init):
+                match ty.kind:
+                    case Optional(inner):
+                        match inner.kind:
+                            case Int(bits, signed):
+                                expect(bits).to_equal(64)
+                            case _: expect("Optional<i64>").to_equal("other")
+                    case _: expect("Optional").to_equal("other")
+            case _: expect("Let").to_equal("other")
+        val s1: HirStmt = out.stmts[1]
+        match s1.kind:
+            case HirStmtKind.Let(_, ty, _):
+                match ty.kind:
+                    case Result(ok, err):
+                        expect(tp_type(ok) + tp_type(err)).to_equal(0)
+                        match err.kind:
+                            case Str: expect(true).to_equal(true)
+                            case _: expect("Str").to_equal("other")
+                    case _: expect("Result").to_equal("other")
+            case _: expect("Let").to_equal("other")
+        val s2: HirStmt = out.stmts[2]
+        match s2.kind:
+            case HirStmtKind.Expr(x):
+                match x.kind:
+                    case HirExprKind.Call(_, _, type_args):
+                        expect(type_args.len()).to_equal(1)
+                        val ta0: HirType = type_args[0]
+                        match ta0.kind:
+                            case Int(_, _): expect(true).to_equal(true)
+                            case _: expect("i64 type arg").to_equal("other")
+                    case _: expect("Call").to_equal("other")
+            case _: expect("Expr").to_equal("other")
+
+    it "substitutes match-arm patterns including nested enum payload bindings":
+        val out = subst_hir_body(fixture_body(), subst_t_to_i64())
+        match out.value.kind:
+            case HirExprKind.MatchCase(scrutinee, arms):
+                expect(arms.len()).to_equal(3)
+                expect(tp_expr(scrutinee)).to_equal(0)
+                for a in arms:
+                    val at: HirMatchArm = a
+                    expect(tp_pattern(at.pattern)).to_equal(0)
+            case _: expect("MatchCase").to_equal("other")
+
+    it "leaves unbound type params alone (outer scope may bind them)":
+        val only_t = typesubstitution_from_params([tp("T")], [t_i64()])
+        val out = subst_hir_body(fixture_body(), only_t)
+        # U survives: Result<T,U> err member + Err(y) binding + tuple pattern slot
+        expect(tp_block(out) > 0).to_equal(true)
+        expect(tp_block(out) < tp_block(fixture_body())).to_equal(true)
+
+    it "reports nodes visited and zero diagnostics on a fully-covered body":
+        val report = subst_hir_body_with_report(fixture_body(), subst_t_to_i64())
+        expect(report.diagnostics.len()).to_equal(0)
+        expect(report.nodes_visited > 30).to_equal(true)
+        expect(tp_block(report.body)).to_equal(0)
+
+    it "is idempotent: substituting an already-concrete body changes nothing":
+        val once = subst_hir_body(fixture_body(), subst_t_to_i64())
+        val twice = subst_hir_body(once, subst_t_to_i64())
+        expect(tp_block(twice)).to_equal(0)
+        expect(twice.stmts.len()).to_equal(once.stmts.len())
+
+    it "handles an empty body and a body with no value":
+        val empty = subst_hir_body(blk_nv([]), subst_t_to_i64())
+        expect(empty.stmts.len()).to_equal(0)
+        expect(empty.has).to_equal(false)
