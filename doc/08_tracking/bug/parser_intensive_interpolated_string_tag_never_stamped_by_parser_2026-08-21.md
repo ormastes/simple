@@ -2,7 +2,7 @@
 
 - **Date:** 2026-08-21
 - **Spec:** `test/01_unit/compiler_core/parser_intensive_spec.spl` (39/40; the one failure is `expected 3 to equal 34`)
-- **Status:** open, pre-existing (not introduced by the grammar-registry cross-check work that surfaced it)
+- **Status:** RESOLVED 2026-08-21 (was: open, pre-existing; not introduced by the grammar-registry cross-check work that surfaced it)
 
 ## What the spec asserts
 `parse_expr_src("\"hello {name}!\"")` must yield tag `EXPR_INTERPOLATED_STRING` (34). It yields `EXPR_STRING_LIT` (3).
@@ -17,3 +17,29 @@
 2. Change the spec to run the expansion pass before asserting, if "parsed in isolation keeps tag 3" is the intended contract.
 
 Either way the registry will reflect it automatically (a parser production would then produce tag 34 and the desugar row would stay).
+
+## RESOLVED 2026-08-21 — fix option 2 (the spec expectation was wrong)
+
+Decision: the PARSER must NOT stamp `EXPR_INTERPOLATED_STRING`. The pipeline is
+built on the opposite contract, stated in
+`src/compiler/10.frontend/core/string_interpolation_expand.spl:143-158`: the
+driver path "leaves every string literal opaque and sub-parses interpolation
+regions much later in the flat->rich bridge (`flat_bridge_build_string_interps`)",
+and the promotion helper there deliberately promotes ONLY placeholder-bearing
+call arguments so that "the broad StringLit-with-Interpolation-parts
+representation the bridge relies on is not disturbed". Stamping tag 34 at parse
+time would break that bridge representation for every interpolated literal in
+the tree — a large blast radius to satisfy one assertion.
+
+So `parse_expr_src("\"hello {name}!\"")` correctly yields `EXPR_STRING_LIT` (3),
+and the spec now asserts 3 with the contract written out inline. No parser
+change, therefore **no grammar-registry regeneration**: the registry already
+records `EXPR_INTERPOLATED_STRING` as `kind: desugar`-only, which is now exactly
+what the spec says too.
+
+Evidence (`bin/simple test test/01_unit/compiler_core/parser_intensive_spec.spl`):
+
+- pre-fix:  `Results: 40 total, 39 passed, 1 failed` (`expected 3 to equal 34`)
+- post-fix: `Results: 40 total, 40 passed, 0 failed`
+
+Mirror `test/unit/compiler_core/parser_intensive_spec.spl` updated byte-identical.
