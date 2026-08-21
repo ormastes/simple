@@ -24,7 +24,8 @@
 use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId}
 use compiler.hir.hir_definitions.{
     HirEnum, HirFunction, HirExpr, HirExprKind, HirStmt, HirStmtKind, HirBlock,
-    HirMatchArm, HirPattern, HirPatternKind
+    HirMatchArm, HirPattern, HirPatternKind, HirCallArg, HirInterpolation, HirIfArm,
+    HirWithItem, HirEnumPayload, HirCompClause, HirCompClauseKind
 }
 use compiler.hir.match_coverage.{ResolvedMatchCoverage}
 
@@ -40,8 +41,14 @@ struct ArmScan:
     variant_names: [text]
     has_wildcard: bool
 
+fn hir_walk_unhandled(node_kind: text, line: i64) -> void:
+    # Loud by design: a HirPatternKind/HirExprKind variant added after this
+    # walker was written must fail visibly rather than be silently skipped.
+    print("E-ENUM-CONTRACT-WALK-UNHANDLED: unhandled {node_kind} variant at line {line} - add it to enum_contract/hir_match_coverage.spl")
+
 fn scan_pattern(p: HirPattern, acc: ArmScan) -> ArmScan:
     var out = acc
+    var handled = false
     match p.kind:
         case HirPatternKind.Enum(type_, variant, payload):
             match type_.kind:
@@ -50,21 +57,50 @@ fn scan_pattern(p: HirPattern, acc: ArmScan) -> ArmScan:
                 case _:
                     out.enum_symbol_ids = out.enum_symbol_ids.push(-1)
             out.variant_names = out.variant_names.push(variant)
+            handled = true
         case HirPatternKind.Wildcard:
             out.has_wildcard = true
+            handled = true
         case HirPatternKind.Binding(symbol, mutable):
             out.has_wildcard = true
+            handled = true
         case HirPatternKind.Or(patterns):
             for sub in patterns:
                 out = scan_pattern(sub, out)
+            handled = true
+        case HirPatternKind.Tuple(elements):
+            for sub in elements:
+                out = scan_pattern(sub, out)
+            handled = true
+        case HirPatternKind.Array(elements, rest):
+            for sub in elements:
+                out = scan_pattern(sub, out)
+            handled = true
+        case HirPatternKind.Struct(type_, fields):
+            for f in fields:
+                val (fname, sub) = f
+                val sp: HirPattern = sub
+                out = scan_pattern(sp, out)
+            handled = true
+        case HirPatternKind.Literal(value):
+            # A literal arm names no enum variant and covers nothing else.
+            handled = true
+        case HirPatternKind.Range(start, end, inclusive):
+            # A range arm names no enum variant and is never a wildcard.
+            handled = true
+        case HirPatternKind.Error:
+            # A parse-error placeholder pattern contributes no coverage fact.
+            handled = true
+        case HirPatternKind.CompleteRegion(binder):
+            # `case complete b:` covers only the CLOSED region; not a wildcard.
+            handled = true
         case HirPatternKind.DynRegion(binder):
             # `case dyn b:` covers only the OPEN region; it is not a wildcard
             # over the static constructors (design §2).
-            pass_do_nothing
-        case _:
-            pass_do_nothing
+            handled = true
+    if not handled:
+        hir_walk_unhandled("HirPatternKind", p.span.line)
     out
-
 fn variant_index(e: HirEnum, name: text) -> i64:
     var i = 0
     while i < e.variants.len():
@@ -149,32 +185,292 @@ fn walk_stmt(module: HirModule, fn_name: text, s: HirStmt, acc: [HirMatchSite]) 
         case HirStmtKind.Block(block): walk_block(module, fn_name, block, acc)
         case _: acc
 
+
+fn walk_exprs(module: HirModule, fn_name: text, es: [HirExpr], acc: [HirMatchSite]) -> [HirMatchSite]:
+    var out = acc
+    for e in es:
+        out = walk_expr(module, fn_name, e, out)
+    out
+
+fn walk_args(module: HirModule, fn_name: text, args: [HirCallArg], acc: [HirMatchSite]) -> [HirMatchSite]:
+    var out = acc
+    for a in args:
+        val ca: HirCallArg = a
+        out = walk_expr(module, fn_name, ca.value, out)
+    out
+
+fn walk_named_exprs(module: HirModule, fn_name: text, fields: [(text, HirExpr)], acc: [HirMatchSite]) -> [HirMatchSite]:
+    var out = acc
+    for f in fields:
+        val (fname, fe) = f
+        val fx: HirExpr = fe
+        out = walk_expr(module, fn_name, fx, out)
+    out
+
+fn walk_expr_opt(module: HirModule, fn_name: text, e: HirExpr?, acc: [HirMatchSite]) -> [HirMatchSite]:
+    if e == nil:
+        return acc
+    val v: HirExpr = e
+    walk_expr(module, fn_name, v, acc)
+
+fn walk_block_opt(module: HirModule, fn_name: text, b: HirBlock?, acc: [HirMatchSite]) -> [HirMatchSite]:
+    if b == nil:
+        return acc
+    val v: HirBlock = b
+    walk_block(module, fn_name, v, acc)
+
 fn walk_expr(module: HirModule, fn_name: text, e: HirExpr, acc: [HirMatchSite]) -> [HirMatchSite]:
     var out = acc
+    var handled = false
     match e.kind:
+        # ---- Literals (leaves) ---------------------------------------------
+        case HirExprKind.IntLit(value, suffix): handled = true
+        case HirExprKind.FloatLit(value, suffix): handled = true
+        case HirExprKind.StringLit(value, interpolations):
+            if interpolations != nil:
+                val ips: [HirInterpolation] = interpolations
+                for ip in ips:
+                    val ipv: HirInterpolation = ip
+                    out = walk_expr(module, fn_name, ipv.expr, out)
+            handled = true
+        case HirExprKind.BoolLit(value): handled = true
+        case HirExprKind.CharLit(value): handled = true
+        case HirExprKind.UnitLit: handled = true
+        case HirExprKind.NilLit: handled = true
+
+        # ---- Collections ----------------------------------------------------
+        case HirExprKind.ArrayLit(elements, elem_ty):
+            out = walk_exprs(module, fn_name, elements, out)
+            handled = true
+        case HirExprKind.ArrayRepeat(value, count, elem_ty):
+            val av: HirExpr = value
+            val ac: HirExpr = count
+            out = walk_expr(module, fn_name, av, out)
+            out = walk_expr(module, fn_name, ac, out)
+            handled = true
+        case HirExprKind.TupleLit(elements):
+            out = walk_exprs(module, fn_name, elements, out)
+            handled = true
+        case HirExprKind.DictLit(entries, key_ty, value_ty):
+            for entry in entries:
+                val (k, v) = entry
+                val kt: HirExpr = k
+                val vt: HirExpr = v
+                out = walk_expr(module, fn_name, kt, out)
+                out = walk_expr(module, fn_name, vt, out)
+            handled = true
+        case HirExprKind.SetLit(elements, elem_ty):
+            out = walk_exprs(module, fn_name, elements, out)
+            handled = true
+
+        # ---- Variables and access -------------------------------------------
+        case HirExprKind.Var(symbol): handled = true
+        case HirExprKind.NamedVar(symbol, name): handled = true
+        case HirExprKind.Field(base, field, resolved):
+            val fb: HirExpr = base
+            out = walk_expr(module, fn_name, fb, out)
+            handled = true
+        case HirExprKind.Index(base, index):
+            val ib: HirExpr = base
+            val ii: HirExpr = index
+            out = walk_expr(module, fn_name, ib, out)
+            out = walk_expr(module, fn_name, ii, out)
+            handled = true
+        case HirExprKind.TupleIndex(base, index):
+            val tb: HirExpr = base
+            out = walk_expr(module, fn_name, tb, out)
+            handled = true
+        case HirExprKind.OptionalChain(base, field):
+            val ob: HirExpr = base
+            out = walk_expr(module, fn_name, ob, out)
+            handled = true
+        case HirExprKind.NullCoalesce(left, right):
+            val nl: HirExpr = left
+            val nr: HirExpr = right
+            out = walk_expr(module, fn_name, nl, out)
+            out = walk_expr(module, fn_name, nr, out)
+            handled = true
+        case HirExprKind.ExistsCheck(base):
+            val eb: HirExpr = base
+            out = walk_expr(module, fn_name, eb, out)
+            handled = true
+        case HirExprKind.Unwrap(base):
+            val ub: HirExpr = base
+            out = walk_expr(module, fn_name, ub, out)
+            handled = true
+
+        # ---- Operators ------------------------------------------------------
+        case HirExprKind.Binary(op, left, right):
+            val bl: HirExpr = left
+            val br: HirExpr = right
+            out = walk_expr(module, fn_name, bl, out)
+            out = walk_expr(module, fn_name, br, out)
+            handled = true
+        case HirExprKind.Unary(op, operand):
+            val uo: HirExpr = operand
+            out = walk_expr(module, fn_name, uo, out)
+            handled = true
+
+        # ---- Calls ----------------------------------------------------------
+        case HirExprKind.Call(callee, args, type_args):
+            val cc: HirExpr = callee
+            out = walk_expr(module, fn_name, cc, out)
+            out = walk_args(module, fn_name, args, out)
+            handled = true
+        case HirExprKind.MethodCall(receiver, method, args, resolution):
+            val mr: HirExpr = receiver
+            out = walk_expr(module, fn_name, mr, out)
+            out = walk_args(module, fn_name, args, out)
+            handled = true
+        case HirExprKind.StaticCall(ty, method, args, resolution):
+            out = walk_args(module, fn_name, args, out)
+            handled = true
+
+        # ---- Control flow ---------------------------------------------------
+        case HirExprKind.If(cond, then_, else_):
+            val ic: HirExpr = cond
+            out = walk_expr(module, fn_name, ic, out)
+            out = walk_block(module, fn_name, then_, out)
+            out = walk_block_opt(module, fn_name, else_, out)
+            handled = true
+        case HirExprKind.IfChain(arms, else_):
+            for arm in arms:
+                val a: HirIfArm = arm
+                out = walk_expr(module, fn_name, a.cond, out)
+                out = walk_block(module, fn_name, a.then_, out)
+            out = walk_block_opt(module, fn_name, else_, out)
+            handled = true
         case HirExprKind.MatchCase(scrutinee, arms):
             val cov = coverage_for_match(module, arms)
             if cov != nil:
                 out = out.push(HirMatchSite(function_name: fn_name, line: e.span.line, coverage: cov))
+            val ms: HirExpr = scrutinee
+            out = walk_expr(module, fn_name, ms, out)
             for arm in arms:
                 out = walk_block(module, fn_name, arm.body, out)
-        case HirExprKind.If(cond, then_, else_):
-            out = walk_block(module, fn_name, then_, out)
-            if else_ != nil:
-                val eb: HirBlock = else_
-                out = walk_block(module, fn_name, eb, out)
-        case HirExprKind.Loop(body, label): out = walk_block(module, fn_name, body, out)
-        case HirExprKind.While(cond, body, label): out = walk_block(module, fn_name, body, out)
-        case HirExprKind.For(var_, iter, body, label): out = walk_block(module, fn_name, body, out)
-        case HirExprKind.Block(block): out = walk_block(module, fn_name, block, out)
-        case HirExprKind.UnsafeBlock(body): out = walk_block(module, fn_name, body, out)
-        case HirExprKind.Lambda(params, body, captures): out = walk_expr(module, fn_name, body, out)
+            handled = true
+        case HirExprKind.Loop(body, label):
+            out = walk_block(module, fn_name, body, out)
+            handled = true
+        case HirExprKind.While(cond, body, label):
+            val wc: HirExpr = cond
+            out = walk_expr(module, fn_name, wc, out)
+            out = walk_block(module, fn_name, body, out)
+            handled = true
+        case HirExprKind.For(var_, iter, body, label):
+            val fi: HirExpr = iter
+            out = walk_expr(module, fn_name, fi, out)
+            out = walk_block(module, fn_name, body, out)
+            handled = true
+        case HirExprKind.With(items, body):
+            for item in items:
+                val wi: HirWithItem = item
+                out = walk_expr(module, fn_name, wi.context_expr, out)
+            out = walk_block(module, fn_name, body, out)
+            handled = true
+
+        # ---- Closures and blocks --------------------------------------------
+        case HirExprKind.Lambda(params, body, captures):
+            val lb: HirExpr = body
+            out = walk_expr(module, fn_name, lb, out)
+            handled = true
+        case HirExprKind.Block(block):
+            out = walk_block(module, fn_name, block, out)
+            handled = true
+        case HirExprKind.HostGpuLane(lane_code, payload_size, marker, body):
+            val gm: HirExpr = marker
+            out = walk_expr(module, fn_name, gm, out)
+            out = walk_block(module, fn_name, body, out)
+            handled = true
+
+        # ---- Control transfer -----------------------------------------------
         case HirExprKind.Return(value):
-            if value != nil:
-                val v: HirExpr = value
-                out = walk_expr(module, fn_name, v, out)
-        case HirExprKind.Try(inner): out = walk_expr(module, fn_name, inner, out)
-        case _: pass_do_nothing
+            out = walk_expr_opt(module, fn_name, value, out)
+            handled = true
+        case HirExprKind.Break(label, value):
+            out = walk_expr_opt(module, fn_name, value, out)
+            handled = true
+        case HirExprKind.Continue(label): handled = true
+        case HirExprKind.Throw(value):
+            val tv: HirExpr = value
+            out = walk_expr(module, fn_name, tv, out)
+            handled = true
+        case HirExprKind.Try(inner):
+            val te: HirExpr = inner
+            out = walk_expr(module, fn_name, te, out)
+            handled = true
+        case HirExprKind.Await(inner):
+            val ae: HirExpr = inner
+            out = walk_expr(module, fn_name, ae, out)
+            handled = true
+        case HirExprKind.Yield(value):
+            out = walk_expr_opt(module, fn_name, value, out)
+            handled = true
+
+        # ---- Constructors and casts -----------------------------------------
+        case HirExprKind.StructLit(ty, fields):
+            out = walk_named_exprs(module, fn_name, fields, out)
+            handled = true
+        case HirExprKind.EnumLit(ty, variant, payload):
+            if payload != nil:
+                val pl: HirEnumPayload = payload
+                match pl:
+                    case HirEnumPayload.Tuple(values):
+                        out = walk_exprs(module, fn_name, values, out)
+                    case HirEnumPayload.Struct(pfields):
+                        out = walk_named_exprs(module, fn_name, pfields, out)
+            handled = true
+        case HirExprKind.Cast(inner, target):
+            val ce: HirExpr = inner
+            out = walk_expr(module, fn_name, ce, out)
+            handled = true
+        case HirExprKind.As(inner, target):
+            val ase: HirExpr = inner
+            out = walk_expr(module, fn_name, ase, out)
+            handled = true
+        case HirExprKind.Range(start, end, inclusive, step):
+            val rs: HirExpr = start
+            val re: HirExpr = end
+            out = walk_expr(module, fn_name, rs, out)
+            out = walk_expr(module, fn_name, re, out)
+            out = walk_expr_opt(module, fn_name, step, out)
+            handled = true
+        case HirExprKind.Comprehension(kind, inner, clauses):
+            val ce2: HirExpr = inner
+            out = walk_expr(module, fn_name, ce2, out)
+            for clause in clauses:
+                val cl: HirCompClause = clause
+                match cl.kind:
+                    case HirCompClauseKind.For(cvar, iter):
+                        val cli: HirExpr = iter
+                        out = walk_expr(module, fn_name, cli, out)
+                    case HirCompClauseKind.If(cond):
+                        val clc: HirExpr = cond
+                        out = walk_expr(module, fn_name, clc, out)
+            handled = true
+
+        # ---- Custom / DL / unsafe / asm blocks ------------------------------
+        case HirExprKind.CustomBlock(kind, value):
+            # Opaque BlockValue payload; carries no HIR match this layer can reach.
+            handled = true
+        case HirExprKind.LossBlock(body):
+            out = walk_block(module, fn_name, body, out)
+            handled = true
+        case HirExprKind.NogradBlock(body):
+            out = walk_block(module, fn_name, body, out)
+            handled = true
+        case HirExprKind.UnsafeBlock(body):
+            out = walk_block(module, fn_name, body, out)
+            handled = true
+        case HirExprKind.InlineAsm(asm_node):
+            # Assembly text carries no Simple `match`.
+            handled = true
+        case HirExprKind.InlineAsmMatch(arms):
+            # Arms select by target spec and hold asm bodies, not HIR blocks.
+            handled = true
+        case HirExprKind.Error: handled = true
+    if not handled:
+        hir_walk_unhandled("HirExprKind", e.span.line)
     out
 
 fn hir_enum_match_sites(module: HirModule) -> [HirMatchSite]:
@@ -191,4 +487,4 @@ fn hir_enum_match_coverages(module: HirModule) -> [ResolvedMatchCoverage]:
         out = out.push(site.coverage)
     out
 
-export HirMatchSite, hir_enum_match_sites, hir_enum_match_coverages
+export HirMatchSite, hir_enum_match_sites, hir_enum_match_coverages, coverage_for_match

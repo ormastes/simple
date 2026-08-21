@@ -26,6 +26,8 @@ use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_lowering.statements.*
 use compiler.hir.hir_types.{HirModule}
 use compiler.common.assurance.policy_schema.{AssuranceStrictness}
+use compiler.semantics.enum_contract.hir_match_coverage.{coverage_for_match}
+use compiler.hir.hir_definitions.{HirMatchArm, HirPattern, HirPatternKind, HirExprKind}
 use compiler.semantics.enum_contract.{
     EnumContractModuleReport, enum_contract_check_module, enum_contract_table, hir_enum_match_sites
 }
@@ -95,3 +97,38 @@ describe "enum_contract wired through HIR":
         expect(report.sites.len()).to_equal(1)
         expect(report.contracted_sites).to_equal(0)
         expect(report.diags.len()).to_equal(0)
+
+    it "finds an enum arm nested inside a tuple pattern":
+        # HIR lowering desugars a tuple-scrutinee match into if-chains before
+        # it reaches HIR, so the tuple arms are built here from the real enum
+        # arms the closed_exhaustive fixture lowers to.
+        val hm = lower_fixture("closed_exhaustive")
+        var enum_arms: [HirMatchArm] = []
+        for f in hm.functions.values():
+            if f.name == "name_of" and f.body.has:
+                match f.body.value.kind:
+                    case HirExprKind.MatchCase(scrutinee, arms):
+                        enum_arms = arms
+                    case _: pass_do_nothing
+        expect(enum_arms.len()).to_equal(3)
+        val wild = HirPattern(kind: HirPatternKind.Wildcard, has_type_: false, type_: enum_arms[0].pattern.type_, span: enum_arms[0].pattern.span)
+        var tuple_arms: [HirMatchArm] = []
+        var i = 0
+        while i < 2:
+            var a = enum_arms[i]
+            a.pattern = HirPattern(kind: HirPatternKind.Tuple([enum_arms[i].pattern, wild]), has_type_: false, type_: enum_arms[i].pattern.type_, span: enum_arms[i].pattern.span)
+            tuple_arms = tuple_arms.push(a)
+            i = i + 1
+        val cov = coverage_for_match(hm, tuple_arms)
+        expect(cov != nil).to_equal(true)
+        val c = cov
+        expect(c.enum_name).to_equal("Color")
+        expect(c.covered_variant_ids.len()).to_equal(2)
+        expect(c.has_wildcard).to_equal(true)
+
+    it "finds an enum match sitting inside a Call argument":
+        val hm = lower_fixture("closed_in_call_arg")
+        val sites = hir_enum_match_sites(hm)
+        expect(sites.len()).to_equal(1)
+        expect(sites[0].function_name).to_equal("name_of")
+        expect(sites[0].coverage.covered_variant_ids.len()).to_equal(3)
