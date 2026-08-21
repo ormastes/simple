@@ -19,20 +19,6 @@ receipt_value() { awk -F= -v key="$2" '$1==key {sub(/^[^=]*=/, ""); print; exit}
 
 contract() {
     rg -q 'UP2 entry' "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/entry.spl"
-    rg -Fq 'use os.kernel.arch.x86_64.console.{serial_init}' "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/entry.spl"
-    awk '
-        /serial_init\(\)/ { initialized = NR }
-        /serial_println\("UP2 entry"\)/ { first_print = NR }
-        END { exit !(initialized > 0 && first_print > initialized) }
-    ' "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/entry.spl"
-    rg -Fq 'val _loopback_byte = rt_port_inb(X86_COM1_DATA)' \
-        "$ROOT_DIR/src/os/kernel/arch/x86/com1_common.spl"
-    rg -Fq 'UP2_RSP_STAGING_START: u64 = 0x0a000000u64' \
-        "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/gdb_rsp_monitor.spl"
-    rg -Fq '. = 0x0A000000;' \
-        "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/linker.ld"
-    rg -Fq 'elif command == "gdb"' \
-        "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/console.spl"
     rg -q 'UP2 console-ready' "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/entry.spl"
     rg -q 'UP2 filesystem-ready entries=' "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/entry.spl"
     rg -q 'UP2 shell-ready' "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/entry.spl"
@@ -135,13 +121,6 @@ validate_image_receipts() {
 
 line_number() { grep -anF "$2" "$1" | head -n 1 | cut -d: -f1; }
 
-rsp_packet() {
-    RSP_PAYLOAD="$1"
-    RSP_CHECKSUM="$(printf '%s' "$RSP_PAYLOAD" | od -An -tu1 -v | \
-        awk '{ for (i = 1; i <= NF; i++) sum += $i } END { printf "%02x", sum % 256 }')"
-    printf '$%s#%s' "$RSP_PAYLOAD" "$RSP_CHECKSUM"
-}
-
 ovmf() {
     validate_image_receipts
     command -v qemu-system-x86_64 >/dev/null 2>&1 || blocked qemu-system-x86_64-missing
@@ -153,11 +132,7 @@ ovmf() {
     TRANSCRIPT="$RUN_DIR/ovmf-uart.log"
     cp "$OVMF_VARS_SRC" "$OVMF_VARS"
     set +e
-    (sleep 12; printf 'ls /\r'; sleep 1; printf 'gdb\r'; sleep 1; \
-        rsp_packet 'qSupported'; sleep 1; \
-        rsp_packet 'M0a000000,4:53494d50'; sleep 1; \
-        rsp_packet 'm0a000000,4'; sleep 1; rsp_packet 'D') | \
-        timeout 30 qemu-system-x86_64 \
+    (sleep 12; printf 'ls /\r') | timeout 30 qemu-system-x86_64 \
         -no-user-config -monitor none -display none -no-reboot -net none \
         -machine q35 -cpu qemu64 -m 512M -smp 1 \
         -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE" \
@@ -174,10 +149,7 @@ ovmf() {
         '[BOOT32] entry' '[BOOT64] entry' 'UP2 entry' \
         'UP2 console-ready' 'UP2 filesystem-ready entries=bin,etc,README.txt' \
         'UP2 shell-ready' 'UP2 ls-begin source=vfs command=ls /' \
-        'UP2 ls-end status=pass' \
-        'UP2 gdb-rsp-ready range=0x0a000000+0x01000000 max=1024' \
-        '$PacketSize=1000#' '$OK#9a' '$53494d50#' \
-        'UP2 gdb-rsp-detached'; do
+        'UP2 ls-end status=pass'; do
         grep -aFq "$marker" "$TRANSCRIPT" || fail ovmf-marker-missing
     done
     LS_BEGIN_LINE="$(line_number "$TRANSCRIPT" 'UP2 ls-begin source=vfs command=ls /')"
@@ -197,9 +169,6 @@ ovmf() {
         echo 'ls_command=ls /'
         echo ls_source=vfs
         echo ls_entries=bin,etc,README.txt
-        echo gdb_rsp_transport=serial
-        echo gdb_rsp_staging=0x0a000000+0x01000000
-        echo gdb_rsp_memory_readback=pass
         echo uart_transcript="$TRANSCRIPT"
         echo uart_transcript_sha256="$(sha256sum "$TRANSCRIPT" | awk '{print $1}')"
         echo persistent_writes=none

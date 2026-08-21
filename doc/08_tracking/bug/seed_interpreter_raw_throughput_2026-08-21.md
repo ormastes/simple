@@ -48,49 +48,111 @@ ns/op, measured at 50M iterations unless noted.
 | (h) call touching module global | 259 | (n too small) | faster | interp |
 | **(e1) string concat in a loop** | **~793,000/op** | ~11,500/op | **121x slower** | interp |
 
-## The one real defect: string concat is quadratic in kernel page-fault work
+## The one real defect: repeated string append is quadratic
 
-`s = s + "ab"` repeated. Simple 40k iterations = **55,962 ms**; Python = **461
-ms** (even a genuinely-quadratic Python prepend is 210 ms). **121x slower.**
+### Corrected measurement (supersedes the first pass)
 
-Scaling confirms O(n^2): 20k=15.9 s, 40k=56.0 s (3.5x for 2x n).
+The first pass measured 20k appends at 15.9 s and 40k at 56.0 s. Those numbers
+were **load-contaminated** (box load 46 at the time) and are retained here only
+so the correction is auditable. Re-measured back-to-back against Python,
+min-of-3, at load ~28:
 
-The cost is **not** interpretation and **not** the copy. `/usr/bin/time -v` on
-the 20k case:
-
-- User time **0.57 s**, System time **8.98 s** — 94% of CPU is in the kernel.
-- Minor page faults **107,792** (control: 2,159).
-- Max RSS **447 MB** — to build a **40 KB** string.
-
-The concat code itself is optimal: `concat_text`
-(`src/compiler_rust/compiler/src/interpreter/expr/ops.rs:99`) does one
-`String::with_capacity` + two `push_str`, and `Value::text`
-(`src/compiler_rust/compiler/src/value.rs:1624`) is just `Arc::new`. The hot arm
-is `ops.rs:735`.
-
-**Mechanism: RSS tracks the *sum of every allocation ever made*, so freed
-buffers are never reused.**
-
-| iters | total bytes allocated | max RSS | minor faults |
+| appends | seed | python | ratio |
 |---|---|---|---|
-| 5,000 | 25 MB | 66 MB | 1,390 |
-| 10,000 | 100 MB | 148 MB | 3,973 |
-| 20,000 | 400 MB | 459 MB | 86,339 |
+| 10,000 | 191 ms | 37 ms | 5x |
+| 20,000 | 660 ms | 56 ms | 11x |
+| 40,000 | 12,114 ms | 128 ms | **94x** |
 
-Each iteration allocates a buffer exactly 2 bytes larger than the last, so a
-freed block of size k can never satisfy the next request of size k+2. This
-defeats mimalloc's size-class reuse: the heap grows monotonically, pages are
-committed/purged, and the process pays ~100k minor faults. mimalloc tuning only
-dents it (`MIMALLOC_RESET_DELAY=-1`: 15.9 s -> 11.1 s), confirming the problem
-is the allocation *pattern*, not the purge policy.
+The defect is real and is worse than quadratic at the top end: 10k->20k costs
+3.5x, but 20k->40k costs **18x**. The knee is the point where the process starts
+paying page faults for buffers it can never reuse — at 40k appends RSS reaches
+~1.7 GB to build an 80 KB string, and 94% of CPU is kernel time.
 
-**Fix direction (not yet implemented):** grow in place when the left operand's
-`Arc<String>` is uniquely referenced — CPython's `str +=` optimization. The
-obstacle is that the environment slot for `s` still holds a reference while
-`s + "ab"` is evaluated, so the refcount is 2 and `Arc::make_mut` would clone
-anyway; making this work needs the assignment path to release the old binding
-before the concat commits. This is real interpreter surgery on the binary every
-lane depends on, so it is filed rather than patched speculatively.
+Mechanism: each append allocates a buffer exactly 2 bytes larger than the last,
+so a freed block can never satisfy the next request. The heap grows
+monotonically and mimalloc's size-class reuse is defeated. RSS tracks the *sum
+of every allocation ever made*:
+
+| iters | total bytes allocated | max RSS |
+|---|---|---|
+| 5,000 | 25 MB | 66 MB |
+| 10,000 | 100 MB | 148 MB |
+| 20,000 | 400 MB | 459 MB |
+
+mimalloc tuning only dents it (`MIMALLOC_RESET_DELAY=-1`: 15.9 s -> 11.1 s),
+confirming the problem is the allocation *pattern*, not the purge policy.
+
+### There are two engines, and the defect lives in both
+
+`bin/simple run` defaults to **JIT**, not the tree-walk interpreter
+(`driver/src/exec_core.rs:195` `ExecutionMode::Jit`; dispatch
+`driver/src/cli/basic.rs:499` -> `exec_core.rs:912` -> `run_file_jit`
+`exec_core.rs:993`). `SIMPLE_EXECUTION_MODE=interpret` selects the AST
+interpreter. Both lanes had the same quadratic defect, in different code.
+
+**JIT lane (default, still OPEN).** MIR lowers `s + "ab"` to a call to
+`rt_string_concat` (`compiler/src/mir/lower/lowering_expr_ops.rs:363-393`),
+implemented at `runtime/src/value/collections.rs:2407`. It does **three O(n)
+passes per append**: allocate exactly `len_a+len_b` with zero slack, copy both
+sides, then re-hash the entire string with fnv1a. Nothing is amortized.
+
+A complete incremental **StringBuilder already exists** —
+`rt_string_builder_new/push/finish/len/free`
+(`runtime/src/value/string_builder.rs`), re-exported at `runtime/src/lib.rs:869`
+with the comment naming the earlier bug `rt_string_concat_quadratic_2026-06-12`
+("O(1) amortized push instead of O(n^2) acc = acc + piece accumulation"). It is
+declared to codegen (`compiler/src/codegen/runtime_sffi.rs:405`,
+`common_backend.rs:593-597`) — **and MIR never emits it.** Every compiler-side
+reference is codegen plumbing or a unit test; no lowering site converts an
+accumulator append into builder calls. The fix was built and left wired to
+nothing, the same pattern CLAUDE.md documents for `interface_digest_of`.
+
+Fixing the JIT lane properly needs one of:
+- a MIR/HIR pass that recognises an accumulator-append loop and lowers it to
+  `rt_string_builder_*` (safe by liveness: the old value is provably dead), or
+- refcounting heap strings so `rt_string_concat` can grow in place when the left
+  operand is uniquely owned.
+
+Neither is a minimal patch. Heap strings are a flat inline-data allocation
+(`RuntimeString { header, len, hash, data.. }`, `alloc_runtime_string`
+`collections.rs:301`) with **no refcount**, and Simple strings are documented
+immutable, so in-place mutation is unsound without one of the above. Filed, not
+patched speculatively.
+
+**Interpreter lane (FIXED, this change).** `try_string_append_in_place`
+(`compiler/src/interpreter/node_exec.rs`) already existed as the designated fast
+path for `s = s + x` and `s += x`, and correctly took the binding out of the
+environment with `env.remove(name)` — but then did `s.as_ref().clone()`
+**unconditionally**, deep-copying the whole string on every append. It was a
+fast path in name only, and the loop stayed quadratic.
+
+Fix: `Arc::try_unwrap(s).unwrap_or_else(|shared| shared.as_ref().clone())`.
+Because `env.remove` already dropped the environment's reference, the strong
+count is 1 whenever this variable is the sole holder, so `try_unwrap` returns
+the owned `String` and `push_str` grows its existing buffer with `String`'s
+amortized doubling. The aliased case is unchanged — another holder makes
+`try_unwrap` fail and we copy exactly as before, preserving value semantics.
+
+Measured on the interpreter lane (`SIMPLE_EXECUTION_MODE=interpret`), pre vs
+post, same binary build:
+
+| appends | pre | post | speedup |
+|---|---|---|---|
+| 5,000 | 72 ms | 48 ms | 1.5x |
+| 10,000 | 156 ms | 53 ms | 2.9x |
+| 20,000 | 177 ms | 64 ms | 2.8x |
+| 40,000 | 0.28 s | 0.16 s | 1.8x |
+| 80,000 | 0.96 s | 0.29 s | **3.3x** |
+
+The asymptotics change, which is the real result: pre-fix cost multiplies by
+**3.4x** per doubling of N (quadratic); post-fix by **1.8x** (linear).
+
+Mechanism test: `string_append_in_place_tests` in the same file counts the
+number of DISTINCT string data pointers across 20,000 appends — deterministic,
+no timing, so it is stable on a loaded box. Post-fix that is O(log N) (amortized
+doubling); pre-fix it is O(N). Verified to fail pre-fix (**3585** distinct
+buffers, over the 1000 bound) and pass post-fix. A second test pins that an
+aliased string is still never mutated in place.
 
 ## Where the 5 s/file actually is
 
@@ -103,7 +165,14 @@ interpreter dispatch cost.
 
 ## Status
 
-No code fix shipped. No shape met the ">5x slower than Python ⇒ fix it" bar
-except string concat, whose fix is scoped above and deliberately deferred as
-too risky to land without full validation. Benchmarks:
-`scratchpad/thru/{a,b,c,d,e1,e2,f,g,h}.spl`.
+- Interpreter lane: **FIXED** (quadratic -> linear, pinned by a deterministic
+  allocation-count test that fails pre-fix).
+- JIT lane (the default for `bin/simple run`): **OPEN**. Root cause located
+  exactly (`rt_string_concat`, no amortization, plus an unwired StringBuilder
+  that was written for this very bug). Deliberately not patched: a correct fix
+  needs a MIR lowering pass or heap-string refcounting, neither of which is a
+  minimal change to the binary every lane depends on.
+- No other shape met the ">5x slower than Python ⇒ fix it" bar.
+
+Because `run` defaults to JIT, this change does **not** move the `simple run`
+concat benchmark — that number only improves when the JIT lane is fixed.

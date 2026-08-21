@@ -39,16 +39,6 @@ SECTIONS
         . = . + 8M;
         _stack_top = .;
     }
-
-    /* Loader-owned, identity-mapped RAM exposed by the bounded RSP monitor.
-     * Keep these addresses synchronized with gdb_rsp_monitor.spl. */
-    . = 0x0A000000;
-    .debug_staging (NOLOAD) :
-    {
-        __up2_debug_staging_start = .;
-        . = . + 16M;
-        __up2_debug_staging_end = .;
-    }
     _kernel_end = .;
 
     .debug_info 0 : { *(.debug_info) }

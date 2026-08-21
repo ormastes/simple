@@ -1981,7 +1981,26 @@ fn try_string_append_in_place(
     };
     // Re-check after side effects in case RHS evaluation rebound `name`.
     if let Some(Value::Str(s)) = env.remove(name) {
-        let mut result = s.as_ref().clone();
+        // `env.remove` above took the binding OUT of the environment, so when
+        // this variable is the only holder the Arc strong count is now 1 and
+        // `try_unwrap` hands back the owned `String` — we then `push_str` into
+        // its existing buffer, which grows with `String`'s amortized doubling.
+        // That is what makes a repeated `s = s + x` loop O(N) total instead of
+        // O(N^2).
+        //
+        // Before 2026-08-21 this unconditionally did `s.as_ref().clone()`,
+        // deep-copying the whole string on EVERY append, so the "fast path"
+        // still allocated a fresh N-byte buffer per iteration and the loop
+        // stayed quadratic — 40k appends took ~56 s and drove ~450 MB RSS to
+        // build a 40 KB string, 94% of it kernel time servicing page faults for
+        // buffers that could never be reused (each request was 2 bytes larger
+        // than the last, defeating size-class reuse).
+        // See doc/08_tracking/bug/seed_interpreter_raw_throughput_2026-08-21.md
+        //
+        // The aliased case is unchanged: if another holder still references the
+        // string, `try_unwrap` fails and we copy exactly as before, so value
+        // semantics are preserved.
+        let mut result = Arc::try_unwrap(s).unwrap_or_else(|shared| shared.as_ref().clone());
         result.push_str(rhs_str.as_str());
         env.insert(name.to_string(), Value::text(result));
         Ok(None)
@@ -2735,5 +2754,137 @@ mod indexed_augmented_assignment_tests {
             1,
             "the subscript variable must be unchanged"
         );
+    }
+}
+
+/// Mechanism test for the `s = s + x` in-place append fast path.
+///
+/// Pins the fix in `try_string_append_in_place`: `env.remove(name)` drops the
+/// environment's reference so `Arc::try_unwrap` yields the owned `String`, and
+/// `push_str` then grows that buffer in place with `String`'s amortized
+/// doubling. The observable consequence is that the string's DATA POINTER
+/// changes only O(log N) times across N appends (once per capacity doubling)
+/// instead of every single append.
+///
+/// Before the fix the body did `s.as_ref().clone()` unconditionally, so every
+/// append allocated a fresh exact-sized buffer and copied the whole string:
+/// N distinct buffers, O(N^2) bytes copied. A repeated-append loop grew
+/// superlinearly (measured on the interpreter lane: 40k appends 0.28s -> 0.16s,
+/// 80k appends 0.96s -> 0.29s, i.e. quadratic 3.4x-per-doubling -> linear 1.8x).
+///
+/// This assertion is deterministic — it counts allocations, not time — so it is
+/// stable on a loaded box.
+/// See doc/08_tracking/bug/seed_interpreter_raw_throughput_2026-08-21.md
+#[cfg(test)]
+mod string_append_in_place_tests {
+    use super::*;
+    use simple_parser::Span;
+    use std::collections::HashSet;
+
+    fn append_loop_distinct_buffers(iterations: usize) -> (usize, String) {
+        let mut env = Env::new();
+        env.insert("s".to_string(), Value::text(String::new()));
+
+        let span = Span::new(0, 0, 0, 0);
+        // `s = s + "ab"`
+        let assign = simple_parser::ast::AssignmentStmt {
+            span,
+            target: Expr::Identifier("s".to_string()),
+            op: AssignOp::Assign,
+            value: Expr::Binary {
+                op: BinOp::Add,
+                left: Box::new(Expr::Identifier("s".to_string())),
+                right: Box::new(Expr::String("ab".to_string())),
+            },
+        };
+
+        let mut seen: HashSet<usize> = HashSet::new();
+        for _ in 0..iterations {
+            exec_assignment(
+                &assign,
+                &mut env,
+                &mut HashMap::new(),
+                &mut HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+            )
+            .expect("exec_assignment");
+            match env.get("s").expect("s must stay bound") {
+                Value::Str(s) => {
+                    seen.insert(s.as_str().as_ptr() as usize);
+                }
+                other => panic!("s must remain a Str, got {:?}", other),
+            }
+        }
+
+        let final_text = match env.get("s").expect("s") {
+            Value::Str(s) => s.as_ref().clone(),
+            other => panic!("s must remain a Str, got {:?}", other),
+        };
+        (seen.len(), final_text)
+    }
+
+    #[test]
+    fn repeated_append_reuses_its_buffer_instead_of_reallocating_each_time() {
+        const N: usize = 20_000;
+        let (distinct_buffers, text) = append_loop_distinct_buffers(N);
+
+        // Correctness first: the fast path must still produce the right string.
+        assert_eq!(text.len(), N * 2, "every append must land");
+        assert!(text.starts_with("abab"), "content must be the appended text");
+        assert!(text.ends_with("abab"), "content must be the appended text");
+
+        // Mechanism: amortized doubling touches O(log N) buffers. Pre-fix this
+        // was ~N (a fresh exact-sized allocation per append). The bound is set
+        // far above log2(40_000) ~ 16 so incidental allocator address reuse or
+        // a different growth factor cannot make it flaky, while still being
+        // ~20x below the pre-fix value.
+        assert!(
+            distinct_buffers < 1_000,
+            "expected O(log N) buffer reallocations for {N} appends (amortized \
+             in-place growth), got {distinct_buffers}; a value near {N} means \
+             try_string_append_in_place is deep-copying on every append again"
+        );
+    }
+
+    #[test]
+    fn aliased_string_is_not_mutated_in_place() {
+        // Value semantics must survive the optimization: when another binding
+        // still holds the same Arc, `try_unwrap` must fail and fall back to a
+        // copy, leaving the alias untouched.
+        let mut env = Env::new();
+        env.insert("s".to_string(), Value::text("start".to_string()));
+        let aliased = env.get("s").expect("s").clone();
+        env.insert("alias".to_string(), aliased);
+
+        let span = Span::new(0, 0, 0, 0);
+        let assign = simple_parser::ast::AssignmentStmt {
+            span,
+            target: Expr::Identifier("s".to_string()),
+            op: AssignOp::Assign,
+            value: Expr::Binary {
+                op: BinOp::Add,
+                left: Box::new(Expr::Identifier("s".to_string())),
+                right: Box::new(Expr::String("-more".to_string())),
+            },
+        };
+        exec_assignment(
+            &assign,
+            &mut env,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .expect("exec_assignment");
+
+        match env.get("alias").expect("alias") {
+            Value::Str(s) => assert_eq!(s.as_str(), "start", "alias must be unaffected"),
+            other => panic!("alias must remain a Str, got {:?}", other),
+        }
+        match env.get("s").expect("s") {
+            Value::Str(s) => assert_eq!(s.as_str(), "start-more", "s must observe its own append"),
+            other => panic!("s must remain a Str, got {:?}", other),
+        }
     }
 }

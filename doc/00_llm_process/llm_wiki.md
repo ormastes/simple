@@ -47,8 +47,8 @@ same-thread/typed-payload exclusions and the Stage-4 blocker.
 
 ## UP Squared Apollo Lake SimpleOS bring-up
 
-- **Current status:** OVMF boot and VFS-backed `ls /` PASS; physical-board boot
-  and physical DCI remain blocked.
+- **Current status:** offline implementation complete; no physical boot or
+  `ls` PASS yet.
 - **Canonical handoff:**
   `doc/03_plan/agent_tasks/up_squared_apl_simpleos.md`.
 - **Safe upload:** dedicated removable GPT/FAT32 x64 UEFI media at
@@ -73,58 +73,13 @@ same-thread/typed-payload exclusions and the Stage-4 blocker.
 - **Verdict rule:** offline image structure, Tigard enumeration, or retained
   partial source is not live board evidence. PASS requires ordered UART boot
   markers and a command-correlated VFS-backed `ls /` response.
-- **Current build state (2026-08-21):** the admitted build produced a
-  37,280-byte freestanding ELF and 256 MiB GPT/FAT32 UEFI image. OVMF reaches
-  loader admission, shim, 32/64-bit bootstrap, entry, console, filesystem, and
-  shell; injected `ls /` returns `/bin`, `/etc`, and `/README.txt`. Physical F7
-  boot is still pending because the board-attached stick is not visible to the
-  writer host.
-- **Intel DCI:** original Apollo Lake UP2 conditionally supports proprietary
-  Intel DCI USB 3.x DbC for JTAG-like run control and physical-memory access.
-  It requires a qualified SuperSpeed debug cable, enabled/unlocked firmware and
-  architectural gates, and Intel System Debugger/System Bring-Up Toolkit. Smart
-  KM Link `0ea0:2211`, Tigard `0403:6010`, CN22, GDB, and OpenOCD are not DCI.
-  DCI can stage RAM but is not a block-storage writer; persistent I/O remains a
-  target-side driver/provisioner operation. Primary guide:
-  `doc/07_guide/platform/simpleos/up_squared_apl_intel_dci_debug.md`.
-- **Selected DCI implementation (2026-08-21):** A+B+D: DCI-assisted UEFI
-  first boot, replay-safe UEFI-resident RAM mailbox/physical-ELF admission, and
-  identity/challenge-gated target-side storage provisioning. The pure-Simple
-  policy is `src/os/kernel/arch/x86_64/up_squared/dci_mailbox.spl`; physical
-  transport, boot, and exact-length storage readback still require hardware.
-- **Current DCI host checkpoint:** Ubuntu has no authentic Intel toolkit or
-  `99-dci.rules`; Intel distributes the toolkit only after its CNDA/Registration
-  Center request. Smart KM Link `0ea0:2211` enumerates as USB 2.0 HID/storage,
-  not DCI. BIOS enablement is not inferred from cable presence.
-- **Free UP2 debug boundary (2026-08-22):** no open tool found implements
-  Apollo Lake's proprietary DCI ExI/JTAG/DMA plane. The practical free lane is
-  removable UEFI boot plus CN16 UART, followed by a target-resident SimpleOS
-  GDB RSP stub; xHCI DbC is only a later byte transport. CHIPSEC must run on the
-  target and cannot remotely halt it. CN16 is pin 8 GND, pin 9 board RX, pin 10
-  board TX at 3.3-V TTL/115200 8N1; never connect pins 1/5 (5 V) or use CN22.
-- **2026-08-22 live trial:** Ubuntu GDB was present and `picocom` 3.1 was
-  installed. Tigard interface 00 was verified as Port A/Serial, but passive,
-  command, and five-minute reset-window captures returned zero bytes; Tigard
-  was subsequently disconnected. Physical power/reset and CN16 wiring remain
-  the next evidence gate.
-- **UP2 COM1 first-read rule:** initialize COM1 before the first kernel marker,
-  then drain the `0xAE` loopback probe from RX before accepting shell input.
-  OVMF exposed this as `0xAEls /`; the corrected image now boots and completes
-  a fresh VFS-backed `ls /`. This is host evidence, not physical CN16 proof.
-- **UP2 free RAM monitor:** after the shell command `gdb`, SimpleOS serves
-  checksummed GDB RSP `m`/`M` packets over CN16 for only
-  `0x0a000000..0x0b000000`, capped at 1024 bytes with write readback. OVMF
-  proves `SIMP` → `53494d50` and detach. Registers, run control, reset, binary
-  `X`, preboot DCI, and physical CN16 remain outside that PASS.
-- **Apollo Lake reset exception:** Intel's 2020 debugger notes say OpenRC warm
-  reset can leave Apollo Lake cores unreleasable, with manual reset required.
-  Never use it as the UP2 software-reset fallback. A Power-Good reset remains
-  unqualified until proven on the exact FAB.
-- **Direct-load boundary:** the current ELF has three non-contiguous `PT_LOAD`
-  mappings and a 138-byte writable file payload expanding to `0x0180d000` in
-  memory. Contiguous ELF copy plus RIP assignment is invalid. Inspect the exact
-  artifact with `scripts/check/inspect-up-squared-apl-dci-elf.shs`; prefer a
-  UEFI-resident mailbox loader that performs ELF and Multiboot transitions.
+- **Current build state (2026-08-20):** the UP2 wrapper binds the canonical x86
+  freestanding `simple-core` runtime capsule plus Multiboot CRT and board serial
+  input provider. The admitted build produced a 68,936-byte ELF and a 256 MiB
+  GPT/FAT32 UEFI image that passes eight structural/embedded-loader checks.
+  OVMF reaches the GRUB loader-ready and kernel-admitted markers, but the
+  Multiboot2 transition still does not reach `_entry32`; physical F7 boot is
+  also pending because the USB stick is attached to UP2, not the writer host.
 - **Canonical tooling:** build the exact-kernel image receipt with
   `scripts/os/build-simpleos-up-squared-usb-image.shs`; admit/write only through
   `scripts/os/write-simpleos-up-squared-usb.shs`; accept hardware only through
