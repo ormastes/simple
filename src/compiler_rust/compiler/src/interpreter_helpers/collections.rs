@@ -358,69 +358,6 @@ pub(crate) fn eval_dict_map_values(
     })
 }
 
-/// Visit dict entries in canonical order while preserving writes to the
-/// caller environment. Lambda parameter bindings never leak after the call.
-pub(crate) fn eval_dict_for_each(
-    map: &HashMap<String, Value>,
-    func: Value,
-    env: &mut Env,
-    functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, Arc<ClassDef>>,
-    enums: &Enums,
-    impl_methods: &ImplMethods,
-) -> Result<Value, CompileError> {
-    let (params, body) = match func {
-        Value::Lambda { params, body, .. } => (params, body),
-        _ => return Err(crate::error::factory::expects_lambda("for_each")),
-    };
-    let saved: Vec<(String, Option<Value>)> = params
-        .iter()
-        .map(|name| (name.clone(), env.get(name).cloned()))
-        .collect();
-    let result = (|| {
-        for (key, value) in crate::value::dict_entries_sorted(map) {
-            crate::interpreter::check_execution_limit()?;
-            if params.len() >= 2 {
-                env.insert(
-                    params[0].clone(),
-                    Value::dict_entry_key_for_iteration(value, key),
-                );
-                env.insert(
-                    params[1].clone(),
-                    Value::dict_entry_value_for_iteration(value),
-                );
-            } else if let Some(param) = params.first() {
-                env.insert(
-                    param.clone(),
-                    Value::dict_entry_value_for_iteration(value),
-                );
-            }
-            match body.as_ref() {
-                Expr::DoBlock(nodes) | Expr::UnsafeBlock(nodes) => {
-                    crate::interpreter::exec_block_closure_into(
-                        nodes, env, functions, classes, enums, impl_methods,
-                    )?;
-                }
-                _ => {
-                    evaluate_expr(&body, env, functions, classes, enums, impl_methods)?;
-                }
-            }
-        }
-        Ok(Value::Nil)
-    })();
-    for (name, previous) in saved {
-        match previous {
-            Some(value) => {
-                env.insert(name, value);
-            }
-            None => {
-                env.remove(&name);
-            }
-        }
-    }
-    result
-}
-
 /// Dict filter: keep entries where lambda returns truthy
 pub(crate) fn eval_dict_filter(
     map: &HashMap<String, Value>,
