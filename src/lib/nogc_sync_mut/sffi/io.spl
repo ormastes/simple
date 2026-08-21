@@ -112,9 +112,23 @@ fn file_hash_sha256(path: text) -> text:
 
 # --- File Locking ---
 
+@unsafe(reason: "acquires an OS-owned file descriptor that must be released exactly once", capabilities: [ffi])
 extern fn rt_file_lock(path: text, timeout_secs: i64) -> i64
 
+@unsafe(reason: "consumes a raw OS file-lock descriptor", capabilities: [ffi])
 extern fn rt_file_unlock(fd: i64) -> bool
+
+fn file_lock_raw(path: text, timeout_secs: i64) -> i64:
+    var handle: i64 = -1
+    unsafe(capabilities: [ffi]):
+        handle = rt_file_lock(path, timeout_secs)
+    handle
+
+fn file_unlock_raw(handle: i64) -> bool:
+    var released = false
+    unsafe(capabilities: [ffi]):
+        released = rt_file_unlock(handle)
+    released
 
 # File lock resource wrapper with double-close guard
 class SffiFileLock:
@@ -127,12 +141,12 @@ impl SffiFileLock:
     fn close():
         # Consuming drop: one-shot guard against double-close
         if self.handle != -1:
-            rt_file_unlock(self.handle)
+            file_unlock_raw(self.handle)
             self.handle = -1
 
 # Acquire a file lock. Returns nil on timeout or error.
 fn file_lock_acquire(path: text, timeout_secs: i64) -> SffiFileLock?:
-    val h = rt_file_lock(path, timeout_secs)
+    val h = file_lock_raw(path, timeout_secs)
     if h == -1:
         nil
     else:
@@ -140,11 +154,11 @@ fn file_lock_acquire(path: text, timeout_secs: i64) -> SffiFileLock?:
 
 # Deprecated: use file_lock_acquire() + .close() instead
 fn file_lock(path: text, timeout_secs: i64) -> i64:
-    rt_file_lock(path, timeout_secs)
+    file_lock_raw(path, timeout_secs)
 
 # Deprecated: use SffiFileLock.close() instead
 fn file_unlock(fd: i64) -> bool:
-    rt_file_unlock(fd)
+    file_unlock_raw(fd)
 
 # --- Memory-Mapped Files ---
 

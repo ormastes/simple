@@ -501,6 +501,28 @@ fn runtime_symbol_table_signature_contracts_resolve_exact_providers() {
 
 #[cfg(all(test, feature = "runtime-symbol-table"))]
 #[test]
+fn runtime_symbol_table_file_lock_contracts_resolve_exact_providers() {
+    for (name, expected) in [
+        (
+            "rt_file_lock",
+            value::sffi::file_io::rt_file_lock as *const u8,
+        ),
+        (
+            "rt_file_unlock",
+            value::sffi::file_io::rt_file_unlock as *const u8,
+        ),
+    ] {
+        let actual = RUNTIME_SYMBOL_ENTRIES
+            .iter()
+            .find(|entry| entry.name == name)
+            .unwrap_or_else(|| panic!("{name} provider must be registered"))
+            .ptr;
+        assert_eq!(actual, expected, "{name} resolved to a different provider");
+    }
+}
+
+#[cfg(all(test, feature = "runtime-symbol-table"))]
+#[test]
 fn runtime_symbol_table_keeps_struct_allocator_and_receiver_validator_paired() {
     let allocator = RUNTIME_SYMBOL_ENTRIES
         .iter()

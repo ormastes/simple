@@ -353,6 +353,35 @@ if printf '%s\n' "$mmap_provider_region" | rg -q \
     failed=1
 fi
 
+# File locks are owned OS descriptors, not link-only success stubs. The text
+# argument is expanded to pointer/length once, and every compiled lane must
+# retain the timeout and descriptor result ABI.
+require_fixed 'RuntimeFuncSpec::new("rt_file_lock", &[I64, I64, I64], &[I64])' \
+    src/compiler_rust/compiler/src/codegen/runtime_sffi.rs
+require_fixed 'RuntimeFuncSpec::new("rt_file_unlock", &[I64], &[I8])' \
+    src/compiler_rust/compiler/src/codegen/runtime_sffi.rs
+require_fixed '"(path_ptr: *const u8, path_len: u64, timeout_secs: i64) -> i64"' \
+    src/compiler_rust/runtime/build.rs
+require_fixed 'pub unsafe extern "C" fn rt_file_lock' \
+    src/compiler_rust/runtime/src/value/sffi/file_io/file_ops.rs
+require_fixed 'pub unsafe extern "C" fn rt_file_unlock' \
+    src/compiler_rust/runtime/src/value/sffi/file_io/file_ops.rs
+require_fixed 'file_lock_provider_owns_and_releases_real_descriptor' \
+    src/compiler_rust/runtime/src/value/sffi/file_io/file_ops.rs
+require_fixed 'runtime_symbol_table_file_lock_contracts_resolve_exact_providers' \
+    src/compiler_rust/runtime/src/lib.rs
+require_fixed 'declare i64 @rt_file_lock(ptr, i64, i64)' \
+    src/compiler/70.backend/backend/llvm_backend.spl
+
+file_lock_provider_region=$(sed -n \
+    '/pub unsafe extern "C" fn rt_file_lock(/,/pub unsafe extern "C" fn rt_file_mmap_read_text/p' \
+    "$root/src/compiler_rust/runtime/src/value/sffi/file_io/file_ops.rs")
+if printf '%s\n' "$file_lock_provider_region" | rg -q \
+    'HashMap|Mutex|RwLock|sha|dlsym|dlopen|return 1;|return true;'; then
+    echo "SFFI lint: file-lock provider regained fabricated success or per-call registry work" >&2
+    failed=1
+fi
+
 # Cryptographic sign/verify symbols must resolve through the same typed static
 # registry as their checked tri-state/status-payload wrappers.
 for symbol in \

@@ -171,6 +171,9 @@ fn runtime_symbol_declaration(
         "rt_file_munmap" => "(addr: *mut u8, length: u64) -> i32",
         "rt_file_madvise" => "(addr: *mut u8, length: u64, advice: i32) -> i32",
         "rt_file_msync" => "(addr: *mut u8, length: u64, flags: i32) -> i32",
+        "rt_file_lock" =>
+            "(path_ptr: *const u8, path_len: u64, timeout_secs: i64) -> i64",
+        "rt_file_unlock" => "(handle: i64) -> bool",
         "rt_time_now_nanos" | "rt_time_now_micros" | "rt_time_now_unix_micros" => "() -> i64",
         _ => return canonical_runtime_symbol_declaration(alias, canonical),
     };

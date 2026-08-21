@@ -313,6 +313,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_file_munmap", &[I64, I64], &[I32]),
     RuntimeFuncSpec::new("rt_file_madvise", &[I64, I64, I32], &[I32]),
     RuntimeFuncSpec::new("rt_file_msync", &[I64, I64, I32], &[I32]),
+    RuntimeFuncSpec::new("rt_file_lock", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_file_unlock", &[I64], &[I8]),
     // =========================================================================
     // AOP runtime operations
     // =========================================================================

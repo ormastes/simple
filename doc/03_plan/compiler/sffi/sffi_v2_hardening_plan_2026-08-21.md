@@ -674,3 +674,17 @@ the OS syscall. Four focused lifecycle tests, the legacy Simple file check, and
 the generated runtime-symbol-table build pass. The syscall hot path gained only
 constant-time boundary branches: no allocation, hashing, locking, registry
 lookup, dynamic symbol lookup, or per-byte work was introduced.
+
+The file-lock pair now has exact expanded-text and owned-descriptor contracts,
+moving coverage to 1,080/710. The Rust runtime no longer exports a one-argument
+stub that always returned handle `1` and an unlock stub that always returned
+`true`: Unix builds now use `open` plus `flock`, return the actual owned file
+descriptor, close it exactly once on unlock, and fail closed for invalid paths,
+handles, contention, syscall errors, and unsupported Rust-provider targets.
+The compiler generator, Rust declaration generator, and both legacy LLVM
+declaration tables agree on `(ptr, len, timeout) -> i64` and `i64 -> bool`.
+Raw Simple declarations are tagged `unsafe(ffi)` and the database compatibility
+wrapper no longer misdeclares handles as text. Focused lifecycle/contention and
+static-provider identity tests cover the boundary. Acquisition performs the
+unavoidable path-to-C-string conversion and OS calls; it adds no handle map,
+mutex, hashing, dynamic lookup, or work to unrelated file operations.

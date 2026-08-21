@@ -11,12 +11,14 @@ use simple_sdn.*
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_atomic_write(path: text, content: text) -> bool
-extern fn rt_file_lock(path: text, timeout_secs: i64) -> text
-extern fn rt_file_unlock(lock_path: text) -> bool
+@unsafe(reason: "acquires an OS-owned file descriptor that must be released exactly once", capabilities: [ffi])
+extern fn rt_file_lock(path: text, timeout_secs: i64) -> i64
+@unsafe(reason: "consumes a raw OS file-lock descriptor", capabilities: [ffi])
+extern fn rt_file_unlock(handle: i64) -> bool
 
 # Lock guard for RAII-style locking
 struct FileLock:
-    lock_path: text
+    handle: i64
     released: bool
 
 impl FileLock:
@@ -25,16 +27,19 @@ impl FileLock:
     # Creates a lock file at `path.lock` and waits up to timeout_secs.
     # Returns FileLock on success, None on timeout.
     static fn acquire(path: text, timeout_secs: i64) -> Option<FileLock>:
-        val lock_path = rt_file_lock(path, timeout_secs)
-        if lock_path == "":
+        var handle: i64 = -1
+        unsafe(capabilities: [ffi]):
+            handle = rt_file_lock(path, timeout_secs)
+        if handle == -1:
             nil
         else:
-            Some(FileLock(lock_path: lock_path, released: false))
+            Some(FileLock(handle: handle, released: false))
 
     # Release the lock manually (also happens on drop)
     me release():
         if not self.released:
-            rt_file_unlock(self.lock_path)
+            unsafe(capabilities: [ffi]):
+                rt_file_unlock(self.handle)
             self.released = true
 
 # Atomic read-modify-write operation with file locking
@@ -117,9 +122,11 @@ fn acquire_lock(path: text, timeout_secs: i64) -> Result<FileLock, text>:
         Some(lock) : Ok(lock)
         None : Err("Failed to acquire lock: timeout after {timeout_secs}s")
 
-fn release_lock(path: text) -> bool:
-    val lock_path = path + ".lock"
-    rt_file_unlock(lock_path)
+fn release_lock(handle: i64) -> bool:
+    var released = false
+    unsafe(capabilities: [ffi]):
+        released = rt_file_unlock(handle)
+    released
 
 fn cleanup_lock_files() -> bool:
     val patterns = ["*.lock", "doc/**/*.lock", "tmp/**/*.lock"]

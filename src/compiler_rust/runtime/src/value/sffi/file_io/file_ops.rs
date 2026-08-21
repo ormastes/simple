@@ -604,20 +604,83 @@ pub unsafe extern "C" fn rt_file_hash_sha256(path_ptr: *const u8, path_len: u64)
     rt_string_new(hex.as_ptr(), hex.len() as u64)
 }
 
-/// Best-effort file lock shim for native runtime-only bundles.
+/// Acquire an exclusive OS file lock and return its owned descriptor.
 ///
-/// The non-compiler native specs only need this symbol to link; they do not
-/// rely on real locking semantics here. Keep the ABI permissive so existing
-/// native call sites that pass tagged RuntimeValue strings continue to link.
+/// The text ABI is the compiler's expanded `(ptr, len)` representation. The
+/// returned descriptor must be consumed exactly once by `rt_file_unlock`.
 #[no_mangle]
-pub extern "C" fn rt_file_lock(_path: i64) -> i64 {
-    1
+pub unsafe extern "C" fn rt_file_lock(path_ptr: *const u8, path_len: u64, timeout_secs: i64) -> i64 {
+    let Some(path) = (unsafe { path_from_raw_or_tagged(path_ptr, path_len) }) else {
+        return -1;
+    };
+    let Ok(path) = std::ffi::CString::new(path.as_bytes()) else {
+        return -1;
+    };
+
+    #[cfg(unix)]
+    {
+        let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDWR | libc::O_CREAT, 0o644) };
+        if fd < 0 {
+            return -1;
+        }
+
+        if timeout_secs <= 0 {
+            loop {
+                if unsafe { libc::flock(fd, libc::LOCK_EX) } == 0 {
+                    return i64::from(fd);
+                }
+                if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+                    unsafe { libc::close(fd) };
+                    return -1;
+                }
+            }
+        }
+
+        let timeout = std::time::Duration::from_secs(timeout_secs as u64);
+        let deadline = std::time::Instant::now().checked_add(timeout);
+        loop {
+            if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                return i64::from(fd);
+            }
+            let error = std::io::Error::last_os_error().raw_os_error();
+            if !matches!(error, Some(libc::EWOULDBLOCK) | Some(libc::EAGAIN) | Some(libc::EINTR))
+                || deadline.is_none_or(|limit| std::time::Instant::now() >= limit)
+            {
+                unsafe { libc::close(fd) };
+                return -1;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = (path, timeout_secs);
+        -1
+    }
 }
 
-/// Best-effort file unlock shim paired with `rt_file_lock`.
+/// Release a descriptor returned by `rt_file_lock`.
 #[no_mangle]
-pub extern "C" fn rt_file_unlock(_handle: i64) -> bool {
-    true
+pub unsafe extern "C" fn rt_file_unlock(handle: i64) -> bool {
+    #[cfg(unix)]
+    {
+        let Ok(fd) = i32::try_from(handle) else {
+            return false;
+        };
+        if fd < 0 {
+            return false;
+        }
+        let unlocked = unsafe { libc::flock(fd, libc::LOCK_UN) } == 0;
+        let closed = unsafe { libc::close(fd) } == 0;
+        unlocked && closed
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = handle;
+        false
+    }
 }
 
 #[no_mangle]
@@ -1496,6 +1559,30 @@ mod tests {
     // Helper to create string pointer for SFFI
     fn str_to_ptr(s: &str) -> (*const u8, u64) {
         (s.as_ptr(), s.len() as u64)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_lock_provider_owns_and_releases_real_descriptor() {
+        let temp_dir = TempDir::new().unwrap();
+        let lock_path = temp_dir.path().join("provider.lock");
+        let path = lock_path.to_str().unwrap();
+
+        unsafe {
+            assert_eq!(rt_file_lock(std::ptr::null(), 0, 1), -1);
+            assert!(!rt_file_unlock(-1));
+
+            let handle = rt_file_lock(path.as_ptr(), path.len() as u64, 1);
+            assert!(handle >= 0);
+
+            let contended = rt_file_lock(path.as_ptr(), path.len() as u64, 1);
+            assert_eq!(contended, -1);
+            assert!(rt_file_unlock(handle));
+
+            let reacquired = rt_file_lock(path.as_ptr(), path.len() as u64, 1);
+            assert!(reacquired >= 0);
+            assert!(rt_file_unlock(reacquired));
+        }
     }
 
     #[cfg(unix)]
