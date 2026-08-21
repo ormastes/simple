@@ -365,20 +365,48 @@ pub(crate) fn handle_method_call_with_self_update(
         if env.is_local(name.as_str()) {
             return Ok(out);
         }
-        crate::interpreter::MODULE_GLOBALS.with(|cell| {
-            // Peek before the write borrow: borrow_mut() on this generation-tracked
-            // cell invalidates every owned-env template, so an unconditional
-            // write borrow here made EVERY `xs = xs.push(v)` in a loop that also
-            // calls a module fn rebuild the callee env (~1.5 ms) on the next call
-            // (2026-08-21 stall record, fingerprint/parse phases).
-            if !cell.borrow().contains_key(name.as_str()) {
-                return;
-            }
-            let mut globals = cell.borrow_mut();
-            globals.insert(name.clone(), new_value.clone());
-        });
+        sync_flat_global(name.as_str(), new_value);
     }
     Ok(out)
+}
+
+/// Write a module global the caller has already identified by name, WITHOUT
+/// invalidating every cached call-env template.
+///
+/// A plain `borrow_mut()` on either generation-tracked store bumps the
+/// module-globals generation, which drops every owned-env template and forces
+/// a full rebuild (clone of the owner module env + re-resolution of every
+/// import) on the next call. Interpreted parsing does these write-backs
+/// constantly, so the bumps -- not the misses -- were the wall: 165k rebuilds
+/// in a single `lint` of driver_types.spl. Since the (owner, name) pair is
+/// known here, the write is recorded instead, and the cache patches just that
+/// name. Both stores are kept in step so a later rebuild cannot resurrect the
+/// pre-write value. When the executing module is unknown there is no owner to
+/// key a patch on, so that path keeps the blunt invalidation.
+fn sync_flat_global(name: &str, value: &Value) {
+    let present = crate::interpreter::MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(name));
+    if !present {
+        return;
+    }
+    let owner = crate::interpreter::CURRENT_EXEC_MODULE.with(|cell| cell.borrow().clone());
+    let Some(owner) = owner else {
+        crate::interpreter::MODULE_GLOBALS.with(|cell| {
+            cell.borrow_mut().insert(name.to_string(), value.clone());
+        });
+        return;
+    };
+    crate::interpreter::MODULE_GLOBALS.with(|cell| {
+        cell.borrow_mut_recorded().insert(name.to_string(), value.clone());
+    });
+    crate::interpreter::MODULE_GLOBALS_BY_OWNER.with(|cell| {
+        let mut by_owner = cell.borrow_mut_recorded();
+        if let Some(globals) = by_owner.get_mut(&owner) {
+            if globals.contains_key(name) {
+                globals.insert(name.to_string(), value.clone());
+            }
+        }
+    });
+    crate::interpreter::record_global_write(owner, name.to_string(), value.clone());
 }
 
 fn handle_method_call_with_self_update_inner(
@@ -561,17 +589,7 @@ fn handle_method_call_with_self_update_inner(
                                     // Update local env.
                                     env.insert(arr_name.clone(), new_arr_val.clone());
                                     // Sync to MODULE_GLOBALS if this variable lives there.
-                                    MODULE_GLOBALS.with(|cell| {
-                                        // Peek before the write borrow: borrow_mut() on this generation-tracked
-                                        // cell invalidates every owned-env template (2026-08-21 stall record).
-                                        if !cell.borrow().contains_key(arr_name) {
-                                            return;
-                                        }
-                                        let mut globals = cell.borrow_mut();
-                                        {
-                                            globals.insert(arr_name.clone(), new_arr_val.clone());
-                                        }
-                                    });
+                                    sync_flat_global(arr_name.as_ref(), &new_arr_val);
                                     return Ok((result, Some((arr_name.clone(), new_arr_val))));
                                 }
                             }
@@ -601,17 +619,7 @@ fn handle_method_call_with_self_update_inner(
                                     new_arr[real_idx as usize] = updated_elem;
                                     let new_arr_val = Value::Array(Arc::new(new_arr));
                                     env.insert(arr_name.clone(), new_arr_val.clone());
-                                    MODULE_GLOBALS.with(|cell| {
-                                        // Peek before the write borrow: borrow_mut() on this generation-tracked
-                                        // cell invalidates every owned-env template (2026-08-21 stall record).
-                                        if !cell.borrow().contains_key(arr_name) {
-                                            return;
-                                        }
-                                        let mut globals = cell.borrow_mut();
-                                        {
-                                            globals.insert(arr_name.clone(), new_arr_val.clone());
-                                        }
-                                    });
+                                    sync_flat_global(arr_name.as_ref(), &new_arr_val);
                                     return Ok((result, Some((arr_name.clone(), new_arr_val))));
                                 }
                                 return Ok((result, None));
@@ -682,17 +690,7 @@ fn handle_method_call_with_self_update_inner(
                 if let Some(new_self) = updated_self {
                     if let Some(new_root) = super::super::place::updated_root(env, &place, new_self) {
                         // Keep MODULE_GLOBALS in step, as the sibling paths do.
-                        MODULE_GLOBALS.with(|cell| {
-                            // Peek before the write borrow: borrow_mut() on this generation-tracked
-                            // cell invalidates every owned-env template (2026-08-21 stall record).
-                            if !cell.borrow().contains_key(&place.root) {
-                                return;
-                            }
-                            let mut globals = cell.borrow_mut();
-                            {
-                                globals.insert(place.root.clone(), new_root.clone());
-                            }
-                        });
+                        sync_flat_global(place.root.as_ref(), &new_root);
                         return Ok((result, Some((place.root.clone(), new_root))));
                     }
                 }
@@ -785,9 +783,7 @@ fn handle_method_call_with_self_update_inner(
                     impl_methods,
                 )? {
                     // Write back to MODULE_GLOBALS directly
-                    MODULE_GLOBALS.with(|cell| {
-                        cell.borrow_mut().insert(obj_name.clone(), updated_self.clone());
-                    });
+                    sync_flat_global(obj_name.as_str(), &updated_self);
                     return Ok((result, Some((obj_name.clone(), updated_self))));
                 }
             }

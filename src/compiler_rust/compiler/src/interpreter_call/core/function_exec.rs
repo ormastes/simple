@@ -8,6 +8,7 @@ use crate::interpreter::{
     exec_block_fn, Control, CONST_NAMES, IMMUTABLE_VARS, IN_IMMUTABLE_FN_METHOD, GENERATOR_YIELDS, CURRENT_EXEC_MODULE,
     FUNCTION_MODULE_OWNER, MODULE_ENV_BY_OWNER, MODULE_GLOBALS, MODULE_GLOBAL_BINDINGS_BY_OWNER,
     MODULE_GLOBALS_BY_OWNER, MODULE_GLOBALS_INITIAL_BY_OWNER, module_globals_generation,
+    for_each_global_write_since, global_write_log_base, global_write_seq, record_global_write,
     visit_pattern_binding_names,
 };
 use crate::interpreter_unit::{is_unit_type, validate_unit_type};
@@ -56,8 +57,19 @@ fn function_module_owner(func: &FunctionDef) -> Option<Arc<str>> {
 // doc/08_tracking/bug/lint_timeout_hwir_zca_rows_2026-08-17.md).
 //
 // Kill switch: SIMPLE_INTERP_ENV_CACHE=0 disables the cache entirely.
+// A cached template carries, besides the env itself, the generation and the
+// global-write sequence it reflects, plus a reverse index
+// (defining owner, defining name) -> local names, so a recorded write can be
+// patched into the template in O(1) instead of rescanning every binding.
+struct EnvTemplate {
+    generation: u64,
+    seq: usize,
+    env: Env,
+    by_source: HashMap<(Arc<str>, String), Vec<String>>,
+}
+
 thread_local! {
-    static OWNED_ENV_TEMPLATE_CACHE: std::cell::RefCell<HashMap<(Arc<str>, usize), (u64, Env)>> =
+    static OWNED_ENV_TEMPLATE_CACHE: std::cell::RefCell<HashMap<(Arc<str>, usize), EnvTemplate>> =
         std::cell::RefCell::new(HashMap::new());
 }
 
@@ -122,10 +134,32 @@ pub(crate) fn captured_env_with_live_globals(func: &FunctionDef, captured_env: &
     let cache_key = (Arc::clone(&owner), template_key.unwrap_or(usize::MAX));
     if cache_ok {
         let generation = module_globals_generation();
+        let seq = global_write_seq();
+        let log_base = global_write_log_base();
         let cached = OWNED_ENV_TEMPLATE_CACHE.with(|cell| {
-            cell.borrow()
-                .get(&cache_key)
-                .and_then(|(cached_gen, template)| (*cached_gen == generation).then(|| template.clone()))
+            let mut cache = cell.borrow_mut();
+            let template = cache.get_mut(&cache_key)?;
+            if template.generation != generation || template.seq < log_base {
+                return None;
+            }
+            if template.seq < seq {
+                // Replay only the names written since this template was last
+                // refreshed. Values land in the env overlay marked "refreshed
+                // global", exactly as `refresh_bound_global` does, so
+                // `publish_live_bound_globals` will not write them back.
+                let mut patches: Vec<(String, Value)> = Vec::new();
+                let by_source = &template.by_source;
+                for_each_global_write_since(template.seq, |owner, name, value| {
+                    if let Some(locals) = by_source.get(&(Arc::clone(owner), name.to_string())) {
+                        for local in locals {
+                            patches.push((local.clone(), value.clone()));
+                        }
+                    }
+                });
+                template.env.refresh_globals(patches);
+                template.seq = seq;
+            }
+            Some(template.env.clone())
         });
         if let Some(env) = cached {
             env_cache_count(0);
@@ -202,8 +236,20 @@ pub(crate) fn captured_env_with_live_globals(func: &FunctionDef, captured_env: &
         // have bumped it, and the template must be stamped with the state it
         // actually reflects.
         let generation = module_globals_generation();
-        OWNED_ENV_TEMPLATE_CACHE
-            .with(|cell| cell.borrow_mut().insert(cache_key, (generation, env.clone())));
+        let mut by_source: HashMap<(Arc<str>, String), Vec<String>> = HashMap::new();
+        for (local_name, (owner, source_name)) in env.global_bindings() {
+            by_source
+                .entry((Arc::clone(owner), source_name.clone()))
+                .or_default()
+                .push(local_name.clone());
+        }
+        let template = EnvTemplate {
+            generation,
+            seq: global_write_seq(),
+            env: env.clone(),
+            by_source,
+        };
+        OWNED_ENV_TEMPLATE_CACHE.with(|cell| cell.borrow_mut().insert(cache_key, template));
     }
     env
 }
@@ -220,22 +266,27 @@ pub(crate) fn publish_live_bound_globals(env: &Env) {
     if changed.is_empty() {
         return;
     }
+    let mut recorded: Vec<(Arc<str>, String, Value)> = Vec::new();
     MODULE_GLOBALS_BY_OWNER.with(|cell| {
-        let mut globals_by_owner = cell.borrow_mut();
+        let mut globals_by_owner = cell.borrow_mut_recorded();
         for (owner, name, value) in &changed {
             if let Some(globals) = globals_by_owner.get_mut(owner) {
                 if globals.contains_key(name) {
                     globals.insert(name.clone(), value.clone());
+                    recorded.push((Arc::clone(owner), name.clone(), value.clone()));
                 }
             }
         }
     });
     MODULE_GLOBALS.with(|cell| {
-        let mut globals = cell.borrow_mut();
+        let mut globals = cell.borrow_mut_recorded();
         for (_, name, value) in changed {
             globals.insert(name, value);
         }
     });
+    for (owner, name, value) in recorded {
+        record_global_write(owner, name, value);
+    }
 }
 
 pub(crate) fn refresh_live_bound_globals(env: &mut Env) {
@@ -335,12 +386,19 @@ pub(crate) fn sync_owned_captured_globals(func: &FunctionDef, local_env: &Env, o
         }
         (changed, live_for_caller)
     });
+    // Recorded, not generation-bumping: this write-back runs on essentially
+    // every interpreted call that touched a global, and a bump here dropped
+    // every cached call-env template (measured 160k full rebuilds in one
+    // `lint` of driver_types.spl -- the dominant remaining cost after the
+    // template cache landed).
+    let mut recorded: Vec<(Arc<str>, String, Value)> = Vec::new();
     if !changed.is_empty() {
         MODULE_GLOBALS_BY_OWNER.with(|cell| {
-            let mut globals_by_owner = cell.borrow_mut();
+            let mut globals_by_owner = cell.borrow_mut_recorded();
             for (target_owner, target_name, value) in &changed {
                 if let Some(globals) = globals_by_owner.get_mut(target_owner) {
                     globals.insert(target_name.clone(), value.clone());
+                    recorded.push((Arc::clone(target_owner), target_name.clone(), value.clone()));
                 }
             }
         });
@@ -359,11 +417,14 @@ pub(crate) fn sync_owned_captured_globals(func: &FunctionDef, local_env: &Env, o
     // globals stay isolated.
     if !changed.is_empty() {
         MODULE_GLOBALS.with(|cell| {
-            let mut globals = cell.borrow_mut();
+            let mut globals = cell.borrow_mut_recorded();
             for (_, name, value) in &changed {
                 globals.insert(name.clone(), value.clone());
             }
         });
+    }
+    for (owner, name, value) in recorded {
+        record_global_write(owner, name, value);
     }
     let Some(caller_owner) = caller_owner else {
         return;

@@ -70,7 +70,8 @@ pub(crate) use interpreter_state::{
     UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY, USER_MACROS, FUNCTION_OVERLOADS,
     CLASS_OVERLOADS, FUNCTION_MODULE_OWNER, CURRENT_EXEC_MODULE, FLATTEN_GLOBAL_OWNER_MARKER_PREFIX,
     FLATTEN_IMPORT_BINDING_MARKER_PREFIX, FLATTEN_MODULE_OWNER_ATTR_PREFIX, tag_function_module_owner,
-    module_globals_generation, report_globals_census,
+    module_globals_generation, report_globals_census, for_each_global_write_since, global_write_log_base,
+    global_write_seq, record_global_write,
 };
 
 // Core types and utilities
@@ -129,7 +130,6 @@ use interpreter_control::{exec_context, exec_for, exec_if, exec_loop, exec_match
 pub(crate) use interpreter_control::{exec_if_expr, exec_if_core, exec_match_expr, exec_match_core};
 pub(crate) use interpreter_control::exec_with;
 
-pub(crate) mod dispatch_profile;
 mod expr;
 pub(crate) use expr::evaluate_expr;
 
@@ -155,7 +155,6 @@ pub(crate) use interpreter_helpers::{
 mod interpreter_call;
 pub(crate) use interpreter_call::IN_NEW_METHOD;
 pub(crate) use interpreter_call::exec_block_value;
-pub(crate) use interpreter_call::exec_block_closure_into;
 pub(crate) use interpreter_call::{
     captured_env_with_live_globals, execute_function_body, publish_live_bound_globals, sync_owned_captured_globals,
 };

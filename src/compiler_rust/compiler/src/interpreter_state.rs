@@ -66,6 +66,65 @@ fn bump_module_globals_generation() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Recorded global writes (dirty-name patching of cached env templates)
+// ---------------------------------------------------------------------------
+//
+// A full generation bump invalidates EVERY cached call-env template, forcing a
+// rebuild that clones the owner module env and re-resolves thousands of
+// imported bindings. Interpreted parsing writes module globals constantly
+// (measured `hits=82708 misses=17292` on a 7 KB file), so the bumps, not the
+// hits, were the wall. Write sites that KNOW which (owner, name) they touched
+// therefore use `borrow_mut_recorded()` (no bump) and push the write here; the
+// template cache replays the log tail into the template it already holds,
+// which is O(writes-since) instead of O(module globals). Any other
+// `borrow_mut()` still bumps and still invalidates everything, so an
+// unrecorded mutation can never be observed stale.
+thread_local! {
+    static GLOBAL_WRITE_LOG: RefCell<Vec<(Arc<str>, String, Value)>> = const { RefCell::new(Vec::new()) };
+    static GLOBAL_WRITE_LOG_BASE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+const GLOBAL_WRITE_LOG_CAP: usize = 1 << 16;
+
+/// Sequence number of the next write to be recorded.
+pub(crate) fn global_write_seq() -> usize {
+    GLOBAL_WRITE_LOG_BASE.with(|b| b.get()) + GLOBAL_WRITE_LOG.with(|c| c.borrow().len())
+}
+
+/// Oldest sequence number still replayable; a template stamped before this
+/// must be rebuilt.
+pub(crate) fn global_write_log_base() -> usize {
+    GLOBAL_WRITE_LOG_BASE.with(|b| b.get())
+}
+
+pub(crate) fn record_global_write(owner: Arc<str>, name: String, value: Value) {
+    GLOBAL_WRITE_LOG.with(|c| {
+        let mut log = c.borrow_mut();
+        log.push((owner, name, value));
+        if log.len() >= GLOBAL_WRITE_LOG_CAP {
+            // Truncating loses replayability, so fall back to the blunt
+            // instrument: drop the log and invalidate every template.
+            let dropped = log.len();
+            log.clear();
+            GLOBAL_WRITE_LOG_BASE.with(|b| b.set(b.get() + dropped));
+            bump_module_globals_generation();
+        }
+    });
+}
+
+/// Replay the writes recorded at or after `from` (must be >= `global_write_log_base()`).
+pub(crate) fn for_each_global_write_since(from: usize, mut f: impl FnMut(&Arc<str>, &str, &Value)) {
+    let base = GLOBAL_WRITE_LOG_BASE.with(|b| b.get());
+    let start = from.saturating_sub(base);
+    GLOBAL_WRITE_LOG.with(|c| {
+        let log = c.borrow();
+        for (owner, name, value) in log.iter().skip(start) {
+            f(owner, name.as_str(), value);
+        }
+    });
+}
+
 /// RefCell wrapper that bumps the module-globals generation on every
 /// `borrow_mut()`, so any possible mutation invalidates dependent caches.
 pub(crate) struct GenTrackedCell<T> {
@@ -85,6 +144,14 @@ impl<T> GenTrackedCell<T> {
 
     pub(crate) fn borrow_mut(&self) -> std::cell::RefMut<'_, T> {
         bump_module_globals_generation();
+        self.inner.borrow_mut()
+    }
+
+    /// `borrow_mut` for sites that record every (owner, name) they write via
+    /// `record_global_write`, so no generation bump (and no cache-wide
+    /// invalidation) is needed. Using this WITHOUT recording is a correctness
+    /// bug, not a performance one.
+    pub(crate) fn borrow_mut_recorded(&self) -> std::cell::RefMut<'_, T> {
         self.inner.borrow_mut()
     }
 }

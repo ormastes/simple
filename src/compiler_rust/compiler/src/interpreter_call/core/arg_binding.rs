@@ -8,20 +8,48 @@ use crate::interpreter::await_value;
 use crate::interpreter_unit::{is_unit_type, validate_unit_type};
 use crate::value::*;
 use simple_parser::ast::{Argument, ClassDef, EnumDef, Expr, FunctionDef, Parameter, SelfMode, Type};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 type Enums = HashMap<String, Arc<EnumDef>>;
 type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
 
 const METHOD_SELF: &str = "self";
 
-fn copy_value_type_parameter(value: Value, value_type_names: &HashSet<String>) -> Value {
+// Value-type (struct) arguments are passed by copy. Until 2026-08-21 every
+// bind built a `HashSet` of ALL value-type class names by iterating and
+// cloning every entry of `classes` (thousands in the self-hosted compiler) on
+// EVERY call -- ~0.2 ms per intra-module call, the dominant cost of
+// interpreting the driver (a 23 KB file took 128 s to parse). The copy is now
+// a post-pass over the bound map with a by-name lookup per Object argument.
+fn copy_value_type_in_place(value: &mut Value, classes: &HashMap<String, Arc<ClassDef>>) {
     match value {
-        Value::Object { class, fields } if value_type_names.contains(&class) => Value::Object {
-            class,
-            fields: Arc::new((*fields).clone()),
-        },
-        other => other,
+        Value::Object { class, fields } => {
+            if classes.get(class.as_str()).is_some_and(|def| def.is_value_type) {
+                *fields = Arc::new((**fields).clone());
+            }
+        }
+        Value::Array(items) => {
+            // Recurse only when an element is itself a VALUE-type object: the
+            // pre-2026-08-21 code never touched arrays, so cloning an array of
+            // reference-class objects here would change aliasing semantics.
+            if items.iter().any(|item| {
+                matches!(item, Value::Object { class, .. }
+                    if classes.get(class.as_str()).is_some_and(|def| def.is_value_type))
+            }) {
+                let mut copied: Vec<Value> = (**items).clone();
+                for item in copied.iter_mut() {
+                    copy_value_type_in_place(item, classes);
+                }
+                *items = Arc::new(copied);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn copy_value_type_params(bound: &mut HashMap<String, Value>, classes: &HashMap<String, Arc<ClassDef>>) {
+    for value in bound.values_mut() {
+        copy_value_type_in_place(value, classes);
     }
 }
 
@@ -117,11 +145,6 @@ pub(crate) fn bind_args_with_injected(
 
     // Check if there's a variadic parameter (should be last)
     let variadic_param_idx = params_to_bind.iter().position(|p| p.variadic);
-    let value_type_names: HashSet<String> = classes
-        .iter()
-        .filter(|(_, def)| def.is_value_type)
-        .map(|(name, _)| name.clone())
-        .collect();
 
     let mut bound = HashMap::new();
     let mut positional_idx = 0usize;
@@ -181,7 +204,7 @@ pub(crate) fn bind_args_with_injected(
                 }
             }
         }
-        copy_value_type_parameter(value, &value_type_names)
+        value
     };
 
     for arg in args {
@@ -405,6 +428,7 @@ pub(crate) fn bind_args_with_injected(
         }
     }
 
+    copy_value_type_params(&mut bound, classes);
     Ok(bound)
 }
 
@@ -422,11 +446,6 @@ pub(crate) fn bind_args_with_values(
     let params_to_bind: Vec<_> = params
         .iter()
         .filter(|p| !(self_mode.should_skip_self() && p.name == METHOD_SELF))
-        .collect();
-    let value_type_names: HashSet<String> = classes
-        .iter()
-        .filter(|(_, def)| def.is_value_type)
-        .map(|(name, _)| name.clone())
         .collect();
 
     if args.len() > params_to_bind.len() {
@@ -497,7 +516,7 @@ pub(crate) fn bind_args_with_values(
                 }
             }
         }
-        copy_value_type_parameter(value, &value_type_names)
+        value
     };
 
     let mut bound = HashMap::new();
@@ -532,5 +551,6 @@ pub(crate) fn bind_args_with_values(
         bound.insert(param.name.clone(), value);
     }
 
+    copy_value_type_params(&mut bound, classes);
     Ok(bound)
 }
