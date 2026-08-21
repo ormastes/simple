@@ -293,15 +293,16 @@ symbol/signature roll-up is
 
 Current evidence:
 
-- 3,960 distinct symbols in the backing census and 3,958 with owned Simple
+- 3,966 distinct symbols in the backing census and 3,964 with owned Simple
   declaration sites;
-- 14,913 declaration sites;
-- 14,393 sites have neither an explicit FFI-unsafe tag nor a local contract;
-- 518 sites declare a typed/documented contract but lack the unsafe tag;
-- 2 sites carry an unsafe tag but still lack a return/ownership contract;
+- 14,919 declaration sites;
+- 14,426 sites have neither an explicit FFI-unsafe tag nor a local contract;
+- 486 sites declare a typed/documented contract but lack the unsafe tag;
+- 7 checked verification declarations carry both explicit FFI authority and a
+  typed result contract; their cryptographic artifact evidence remains open;
 - 399 canonical symbols currently have more than one normalized declaration
   shape and require typed-resolution review before one ABI hash can be sealed;
-- all 3,958 declared symbols still require migration or conflict resolution;
+- 3,558 declared symbols require migration and 399 require conflict resolution;
 - among `rt_*`/`spl_*` declarations, 1,855 sites reference symbols classified
   genuinely missing and 321 are backed only in owned C runtime source.
 
@@ -320,6 +321,16 @@ The lint guard extracts its body and fails if `rt_array_new`, `Vec`, maps,
 mutexes, `dlsym`, or other lookup/allocation primitives enter that hot path.
 Typed sealed thunks remain the production target; pair-returning checked arrays
 are migration/interpreter adapters, not the final critical hot path.
+
+Security-sensitive verification checkpoint: deployed/interpreter transports now
+provide tri-state checked results for Ed25519, RSA PKCS#1 SHA-256/SHA-512,
+RSA-PSS SHA-256/SHA-384/SHA-512, and ECDSA P-256. Malformed bridge values return
+`-1`, a processed invalid signature returns `0`, and a valid signature returns
+`1`. Safe Simple wrappers lift those states to `Result<bool, text>`, and the SSH
+client host-key path uses the checked dispatcher. P-384/P-521 remain rejected by
+that dispatcher until checked providers exist. The additional status branch is
+constant-time transport work relative to the existing cryptographic operation;
+no registry lookup, hashing, mutex, or wrapper allocation was added.
 
 ## Requirement decision
 

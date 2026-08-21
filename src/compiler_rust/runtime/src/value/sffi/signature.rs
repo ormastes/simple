@@ -176,6 +176,48 @@ pub extern "C" fn rt_rsa_sha256_verify(pubkey: RuntimeValue, message: RuntimeVal
     }
 }
 
+fn checked_rsa_verify(
+    pubkey: RuntimeValue,
+    message: RuntimeValue,
+    signature: RuntimeValue,
+    algorithm: &'static dyn ring::signature::VerificationAlgorithm,
+    accept_spki_directly: bool,
+) -> i64 {
+    let Some(pk_bytes) = runtime_byte_array_to_vec(pubkey) else {
+        return -1;
+    };
+    let Some(msg_bytes) = runtime_byte_array_to_vec(message) else {
+        return -1;
+    };
+    let Some(sig_bytes) = runtime_byte_array_to_vec(signature) else {
+        return -1;
+    };
+    if accept_spki_directly {
+        let key = UnparsedPublicKey::new(algorithm, &pk_bytes);
+        if key.verify(&msg_bytes, &sig_bytes).is_ok() {
+            return 1;
+        }
+    }
+    let Some(pkcs1) = normalize_rsa_public_key(&pk_bytes) else {
+        return -1;
+    };
+    let key = UnparsedPublicKey::new(algorithm, pkcs1);
+    if key.verify(&msg_bytes, &sig_bytes).is_ok() {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_rsa_sha256_verify_checked(
+    pubkey: RuntimeValue,
+    message: RuntimeValue,
+    signature: RuntimeValue,
+) -> i64 {
+    checked_rsa_verify(pubkey, message, signature, &RSA_PKCS1_2048_8192_SHA256, false)
+}
+
 /// Verify an Ed25519 signature.
 ///
 /// # Arguments
@@ -258,6 +300,15 @@ pub extern "C" fn rt_rsa_sha512_verify(pubkey: RuntimeValue, message: RuntimeVal
     }
 }
 
+#[no_mangle]
+pub extern "C" fn rt_rsa_sha512_verify_checked(
+    pubkey: RuntimeValue,
+    message: RuntimeValue,
+    signature: RuntimeValue,
+) -> i64 {
+    checked_rsa_verify(pubkey, message, signature, &RSA_PKCS1_2048_8192_SHA512, false)
+}
+
 // === RSA-PSS Verify ===
 //
 // Three functions for RSA-PSS (RSASSA-PSS) used in TLS 1.3 certificate
@@ -305,6 +356,15 @@ pub extern "C" fn rt_rsa_pss_sha256_verify(
     }
 }
 
+#[no_mangle]
+pub extern "C" fn rt_rsa_pss_sha256_verify_checked(
+    pubkey: RuntimeValue,
+    message: RuntimeValue,
+    signature: RuntimeValue,
+) -> i64 {
+    checked_rsa_verify(pubkey, message, signature, &RSA_PSS_2048_8192_SHA256, true)
+}
+
 /// Verify an RSA-PSS SHA-384 signature (TLS 1.3 `rsa_pss_rsae_sha384`).
 ///
 /// Mirror of `rt_rsa_pss_sha256_verify`; see that function's docs.
@@ -338,6 +398,15 @@ pub extern "C" fn rt_rsa_pss_sha384_verify(
     } else {
         0
     }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_rsa_pss_sha384_verify_checked(
+    pubkey: RuntimeValue,
+    message: RuntimeValue,
+    signature: RuntimeValue,
+) -> i64 {
+    checked_rsa_verify(pubkey, message, signature, &RSA_PSS_2048_8192_SHA384, true)
 }
 
 /// Verify an RSA-PSS SHA-512 signature (TLS 1.3 `rsa_pss_rsae_sha512`).
@@ -375,6 +444,15 @@ pub extern "C" fn rt_rsa_pss_sha512_verify(
     }
 }
 
+#[no_mangle]
+pub extern "C" fn rt_rsa_pss_sha512_verify_checked(
+    pubkey: RuntimeValue,
+    message: RuntimeValue,
+    signature: RuntimeValue,
+) -> i64 {
+    checked_rsa_verify(pubkey, message, signature, &RSA_PSS_2048_8192_SHA512, true)
+}
+
 /// Verify an ECDSA P-256 SHA-256 fixed-width signature (RFC 5656
 /// `ecdsa-sha2-nistp256` raw `r‖s`, 64 bytes).
 ///
@@ -397,6 +475,32 @@ pub extern "C" fn rt_ecdsa_p256_verify(pubkey: RuntimeValue, message: RuntimeVal
     match key.verify(&msg_bytes, &sig_bytes) {
         Ok(()) => 1,
         Err(_) => 0,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_ecdsa_p256_verify_checked(
+    pubkey: RuntimeValue,
+    message: RuntimeValue,
+    signature: RuntimeValue,
+) -> i64 {
+    let Some(pk_bytes) = runtime_byte_array_to_vec(pubkey) else {
+        return -1;
+    };
+    let Some(msg_bytes) = runtime_byte_array_to_vec(message) else {
+        return -1;
+    };
+    let Some(sig_bytes) = runtime_byte_array_to_vec(signature) else {
+        return -1;
+    };
+    if sig_bytes.len() != 64 {
+        return -1;
+    }
+    let key = UnparsedPublicKey::new(&ECDSA_P256_SHA256_FIXED, pk_bytes);
+    if key.verify(&msg_bytes, &sig_bytes).is_ok() {
+        1
+    } else {
+        0
     }
 }
 
@@ -590,5 +694,16 @@ mod tests {
             rt_ed25519_verify_checked(bytes_value(MSG), bytes_value(&[]), bytes_value(&[])),
             -1
         );
+    }
+
+    #[test]
+    fn checked_signature_families_reject_non_byte_bridge_values() {
+        let nil = RuntimeValue::NIL;
+        assert_eq!(rt_rsa_sha256_verify_checked(nil, nil, nil), -1);
+        assert_eq!(rt_rsa_sha512_verify_checked(nil, nil, nil), -1);
+        assert_eq!(rt_rsa_pss_sha256_verify_checked(nil, nil, nil), -1);
+        assert_eq!(rt_rsa_pss_sha384_verify_checked(nil, nil, nil), -1);
+        assert_eq!(rt_rsa_pss_sha512_verify_checked(nil, nil, nil), -1);
+        assert_eq!(rt_ecdsa_p256_verify_checked(nil, nil, nil), -1);
     }
 }

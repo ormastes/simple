@@ -1178,6 +1178,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     );
     insert_simple!("rt_ecdsa_p256_sign", signatures::rt_ecdsa_p256_sign);
     insert_simple!("rt_ecdsa_p256_verify", signatures::rt_ecdsa_p256_verify);
+    insert_simple!("rt_ecdsa_p256_verify_checked", signatures::rt_ecdsa_p256_verify_checked);
     insert_simple!("rt_ed25519_sign", signatures::rt_ed25519_sign);
     insert_simple!("rt_ed25519_verify", signatures::rt_ed25519_verify);
     insert_simple!("rt_ed25519_verify_checked", signatures::rt_ed25519_verify_checked);
@@ -1684,12 +1685,17 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_readdir_free", file_io::rt_readdir_free);
     insert_simple!("rt_remove", file_io::rt_remove);
     insert_simple!("rt_rsa_pss_sha256_verify", signatures::rt_rsa_pss_sha256_verify);
+    insert_simple!("rt_rsa_pss_sha256_verify_checked", signatures::rt_rsa_pss_sha256_verify_checked);
     insert_simple!("rt_rsa_pss_sha384_verify", signatures::rt_rsa_pss_sha384_verify);
+    insert_simple!("rt_rsa_pss_sha384_verify_checked", signatures::rt_rsa_pss_sha384_verify_checked);
     insert_simple!("rt_rsa_pss_sha512_verify", signatures::rt_rsa_pss_sha512_verify);
+    insert_simple!("rt_rsa_pss_sha512_verify_checked", signatures::rt_rsa_pss_sha512_verify_checked);
     insert_simple!("rt_rsa_sha256_sign", signatures::rt_rsa_sha256_sign);
     insert_simple!("rt_rsa_sha256_verify", signatures::rt_rsa_sha256_verify);
+    insert_simple!("rt_rsa_sha256_verify_checked", signatures::rt_rsa_sha256_verify_checked);
     insert_simple!("rt_rsa_sha512_sign", signatures::rt_rsa_sha512_sign);
     insert_simple!("rt_rsa_sha512_verify", signatures::rt_rsa_sha512_verify);
+    insert_simple!("rt_rsa_sha512_verify_checked", signatures::rt_rsa_sha512_verify_checked);
     insert_simple!("rt_rwlock_new", atomic::rt_rwlock_new_fn);
     insert_simple!("rt_rwlock_read", atomic::rt_rwlock_read_fn);
     insert_simple!("rt_rwlock_set", atomic::rt_rwlock_set_fn);

@@ -181,6 +181,33 @@ pub fn rt_rsa_sha512_sign(args: &[Value]) -> Result<Value, CompileError> {
 // RSA verify
 // ---------------------------------------------------------------------------
 
+fn rsa_verify_checked_impl(
+    args: &[Value],
+    algorithm: &'static dyn ring::signature::VerificationAlgorithm,
+    accept_spki_directly: bool,
+) -> Result<Value, CompileError> {
+    let Some(pk) = extract_bytes(args, 0) else {
+        return Ok(Value::Int(-1));
+    };
+    let Some(msg) = extract_bytes(args, 1) else {
+        return Ok(Value::Int(-1));
+    };
+    let Some(sig) = extract_bytes(args, 2) else {
+        return Ok(Value::Int(-1));
+    };
+    if accept_spki_directly {
+        let key = UnparsedPublicKey::new(algorithm, &pk);
+        if key.verify(&msg, &sig).is_ok() {
+            return Ok(Value::Int(1));
+        }
+    }
+    let Some(pkcs1) = normalize_rsa_public_key(&pk) else {
+        return Ok(Value::Int(-1));
+    };
+    let key = UnparsedPublicKey::new(algorithm, pkcs1);
+    Ok(Value::Int(if key.verify(&msg, &sig).is_ok() { 1 } else { 0 }))
+}
+
 /// `rt_rsa_sha256_verify(spki: [u8], message: [u8], signature: [u8]) -> i64`
 pub fn rt_rsa_sha256_verify(args: &[Value]) -> Result<Value, CompileError> {
     let Some(pk) = extract_bytes(args, 0) else {
@@ -199,6 +226,10 @@ pub fn rt_rsa_sha256_verify(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(if key.verify(&msg, &sig).is_ok() { 1 } else { 0 }))
 }
 
+pub fn rt_rsa_sha256_verify_checked(args: &[Value]) -> Result<Value, CompileError> {
+    rsa_verify_checked_impl(args, &RSA_PKCS1_2048_8192_SHA256, false)
+}
+
 /// `rt_rsa_sha512_verify(spki: [u8], message: [u8], signature: [u8]) -> i64`
 pub fn rt_rsa_sha512_verify(args: &[Value]) -> Result<Value, CompileError> {
     let Some(pk) = extract_bytes(args, 0) else {
@@ -215,6 +246,10 @@ pub fn rt_rsa_sha512_verify(args: &[Value]) -> Result<Value, CompileError> {
     };
     let key = UnparsedPublicKey::new(&RSA_PKCS1_2048_8192_SHA512, pk);
     Ok(Value::Int(if key.verify(&msg, &sig).is_ok() { 1 } else { 0 }))
+}
+
+pub fn rt_rsa_sha512_verify_checked(args: &[Value]) -> Result<Value, CompileError> {
+    rsa_verify_checked_impl(args, &RSA_PKCS1_2048_8192_SHA512, false)
 }
 
 // ---------------------------------------------------------------------------
@@ -243,6 +278,10 @@ pub fn rt_rsa_pss_sha256_verify(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(if key.verify(&msg, &sig).is_ok() { 1 } else { 0 }))
 }
 
+pub fn rt_rsa_pss_sha256_verify_checked(args: &[Value]) -> Result<Value, CompileError> {
+    rsa_verify_checked_impl(args, &RSA_PSS_2048_8192_SHA256, true)
+}
+
 /// `rt_rsa_pss_sha384_verify(spki: [u8], message: [u8], signature: [u8]) -> i64`
 pub fn rt_rsa_pss_sha384_verify(args: &[Value]) -> Result<Value, CompileError> {
     let Some(pk) = extract_bytes(args, 0) else {
@@ -265,6 +304,10 @@ pub fn rt_rsa_pss_sha384_verify(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(if key.verify(&msg, &sig).is_ok() { 1 } else { 0 }))
 }
 
+pub fn rt_rsa_pss_sha384_verify_checked(args: &[Value]) -> Result<Value, CompileError> {
+    rsa_verify_checked_impl(args, &RSA_PSS_2048_8192_SHA384, true)
+}
+
 /// `rt_rsa_pss_sha512_verify(spki: [u8], message: [u8], signature: [u8]) -> i64`
 pub fn rt_rsa_pss_sha512_verify(args: &[Value]) -> Result<Value, CompileError> {
     let Some(pk) = extract_bytes(args, 0) else {
@@ -285,6 +328,10 @@ pub fn rt_rsa_pss_sha512_verify(args: &[Value]) -> Result<Value, CompileError> {
     };
     let key = UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA512, pkcs1);
     Ok(Value::Int(if key.verify(&msg, &sig).is_ok() { 1 } else { 0 }))
+}
+
+pub fn rt_rsa_pss_sha512_verify_checked(args: &[Value]) -> Result<Value, CompileError> {
+    rsa_verify_checked_impl(args, &RSA_PSS_2048_8192_SHA512, true)
 }
 
 // ---------------------------------------------------------------------------
@@ -383,6 +430,23 @@ pub fn rt_ecdsa_p256_verify(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(if key.verify(&msg, &sig).is_ok() { 1 } else { 0 }))
 }
 
+pub fn rt_ecdsa_p256_verify_checked(args: &[Value]) -> Result<Value, CompileError> {
+    let Some(pk) = extract_bytes(args, 0) else {
+        return Ok(Value::Int(-1));
+    };
+    let Some(msg) = extract_bytes(args, 1) else {
+        return Ok(Value::Int(-1));
+    };
+    let Some(sig) = extract_bytes(args, 2) else {
+        return Ok(Value::Int(-1));
+    };
+    if sig.len() != 64 {
+        return Ok(Value::Int(-1));
+    }
+    let key = UnparsedPublicKey::new(&ECDSA_P256_SHA256_FIXED, pk);
+    Ok(Value::Int(if key.verify(&msg, &sig).is_ok() { 1 } else { 0 }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -438,5 +502,21 @@ mod tests {
             })
             .collect();
         assert_eq!(sig, ED25519_SIG_HELLO);
+    }
+
+    #[test]
+    fn checked_signature_families_reject_non_byte_bridge_values() {
+        let args = [Value::Nil, Value::Nil, Value::Nil];
+        let checked = [
+            rt_rsa_sha256_verify_checked(&args),
+            rt_rsa_sha512_verify_checked(&args),
+            rt_rsa_pss_sha256_verify_checked(&args),
+            rt_rsa_pss_sha384_verify_checked(&args),
+            rt_rsa_pss_sha512_verify_checked(&args),
+            rt_ecdsa_p256_verify_checked(&args),
+        ];
+        for result in checked {
+            assert!(matches!(result, Ok(Value::Int(-1))));
+        }
     }
 }

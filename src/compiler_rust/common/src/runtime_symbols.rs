@@ -1255,10 +1255,13 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_value_truthy",
     // Signature verification (RSA-SHA256/512, Ed25519, ECDSA-P256) for SSH host keys
     "rt_rsa_sha256_verify",
+    "rt_rsa_sha256_verify_checked",
     "rt_rsa_sha512_verify",
+    "rt_rsa_sha512_verify_checked",
     "rt_ed25519_verify",
     "rt_ed25519_verify_checked",
     "rt_ecdsa_p256_verify",
+    "rt_ecdsa_p256_verify_checked",
     // Signature generation (RFC 8332 RSA + RFC 5656 ECDSA-P256) for SSH host keys
     "rt_rsa_sha256_sign",
     "rt_rsa_sha512_sign",
@@ -1877,8 +1880,11 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_resource_registry_register",
     "rt_resource_registry_unregister",
     "rt_rsa_pss_sha256_verify",
+    "rt_rsa_pss_sha256_verify_checked",
     "rt_rsa_pss_sha384_verify",
+    "rt_rsa_pss_sha384_verify_checked",
     "rt_rsa_pss_sha512_verify",
+    "rt_rsa_pss_sha512_verify_checked",
     "rt_rwlock_free",
     "rt_rwlock_new",
     "rt_rwlock_read",
@@ -2393,9 +2399,7 @@ mod tests {
                  this test deliberately rather than letting coverage lapse"
             );
             assert!(
-                RUNTIME_SYMBOL_NAMES
-                    .iter()
-                    .any(|name| name.starts_with(prefix)),
+                RUNTIME_SYMBOL_NAMES.iter().any(|name| name.starts_with(prefix)),
                 "the `{prefix}*` extern family is classified Sys but has ZERO \
                  entries in RUNTIME_SYMBOL_NAMES — the JIT cannot resolve any of \
                  them and every module using one is silently demoted to the \
@@ -2403,10 +2407,7 @@ mod tests {
             );
         }
 
-        for name in RUNTIME_SYMBOL_NAMES
-            .iter()
-            .filter(|name| name.starts_with("native_"))
-        {
+        for name in RUNTIME_SYMBOL_NAMES.iter().filter(|name| name.starts_with("native_")) {
             assert_eq!(
                 symbol_tier_of(name),
                 Sys,
