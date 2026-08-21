@@ -12,25 +12,6 @@ extern fn spl_dlopen(path: text) -> i64
 extern fn spl_dlsym(handle: i64, name: text) -> i64
 extern fn spl_wffi_call_i64(fptr: i64, args: [i64], nargs: i64) -> i64
 extern fn spl_wffi_call_f64(fptr: i64, args: [f64], nargs: i64) -> f64
-extern fn spl_wffi_call_i64_checked(fptr: i64, args: [i64], nargs: i64) -> [i64]
-extern fn spl_wffi_call_f64_checked(fptr: i64, args: [f64], nargs: i64) -> [i64]
-extern fn spl_bits_to_f64(bits: i64) -> f64
-
-@unsafe(reason: "legacy generic integer plugin ABI has no typed return contract", capabilities: [ffi])
-fn _plugin_call_i64_raw(fptr: i64, args: [i64]) -> i64:
-    spl_wffi_call_i64(fptr, args, args.len())
-
-@unsafe(reason: "legacy generic float plugin ABI has no typed return contract", capabilities: [ffi])
-fn _plugin_call_f64_raw(fptr: i64, args: [f64]) -> f64:
-    spl_wffi_call_f64(fptr, args, args.len())
-
-@unsafe(reason: "minimal raw FFI scope; caller validates transport status and result shape", capabilities: [ffi])
-fn _plugin_call_i64_raw_checked(fptr: i64, args: [i64]) -> [i64]:
-    spl_wffi_call_i64_checked(fptr, args, args.len())
-
-@unsafe(reason: "minimal raw FFI scope; caller validates transport status and IEEE-754 bits", capabilities: [ffi])
-fn _plugin_call_f64_raw_checked(fptr: i64, args: [f64]) -> [i64]:
-    spl_wffi_call_f64_checked(fptr, args, args.len())
 
 class LoadedPlugin:
     name: text
@@ -82,36 +63,12 @@ fn plugin_call_i64(symbol: text, args: [i64]) -> i64:
     for plug in _loaded_plugins:
         val fptr = spl_dlsym(plug.handle, symbol)
         if fptr != 0:
-            return _plugin_call_i64_raw(fptr, args)
+            return spl_wffi_call_i64(fptr, args, args.len())
     0
-
-fn plugin_call_i64_checked(symbol: text, args: [i64]) -> Result<i64, text>:
-    for plug in _loaded_plugins:
-        val fptr = spl_dlsym(plug.handle, symbol)
-        if fptr != 0:
-            val result = _plugin_call_i64_raw_checked(fptr, args)
-            if result.len() != 2:
-                return Err("E-SFFI-017: corrupt integer plugin transport")
-            if result[0] != 0:
-                return Err("E-SFFI-014: integer plugin bridge status {result[0]}")
-            return Ok(result[1])
-    Err("E-SFFI-001: unresolved plugin symbol {symbol}")
 
 fn plugin_call_f64(symbol: text, args: [f64]) -> f64:
     for plug in _loaded_plugins:
         val fptr = spl_dlsym(plug.handle, symbol)
         if fptr != 0:
-            return _plugin_call_f64_raw(fptr, args)
+            return spl_wffi_call_f64(fptr, args, args.len())
     0.0
-
-fn plugin_call_f64_checked(symbol: text, args: [f64]) -> Result<f64, text>:
-    for plug in _loaded_plugins:
-        val fptr = spl_dlsym(plug.handle, symbol)
-        if fptr != 0:
-            val result = _plugin_call_f64_raw_checked(fptr, args)
-            if result.len() != 2:
-                return Err("E-SFFI-017: corrupt float plugin transport")
-            if result[0] != 0:
-                return Err("E-SFFI-014: float plugin bridge status {result[0]}")
-            return Ok(spl_bits_to_f64(result[1]))
-    Err("E-SFFI-001: unresolved plugin symbol {symbol}")

@@ -781,20 +781,6 @@ pub fn spl_wffi_call_i64_with_bytes_fn(args: &[Value]) -> Result<Value, CompileE
     call_fptr(fptr as usize, "spl_wffi_call_i64_with_bytes", &values)
 }
 
-pub fn spl_wffi_call_i64_with_bytes_checked_fn(args: &[Value]) -> Result<Value, CompileError> {
-    match spl_wffi_call_i64_with_bytes_fn(args) {
-        Ok(value) => Ok(Value::array(vec![Value::Int(0), value])),
-        Err(error) => {
-            let status = if error.to_string().contains("null function pointer") {
-                2
-            } else {
-                1
-            };
-            Ok(Value::array(vec![Value::Int(status), Value::Int(0)]))
-        }
-    }
-}
-
 pub fn spl_fonts_call_init_blob_fn(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 3 {
         return Err(CompileError::semantic(

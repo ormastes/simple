@@ -1,0 +1,166 @@
+#!/bin/sh
+# check-interpreter-module-owners.shs
+#
+# Guard for doc/08_tracking/bug/interpreter_dispatch_profile_owner_missing_2026-08-21.md
+#
+# A tracked `.rs` file under the interpreter tree that no `mod` declaration owns
+# is invisible to rustc until something calls it -- and then the whole crate
+# fails with E0433/E0432, taking every compiler-library test with it. That is
+# exactly what happened to `interpreter/dispatch_profile.rs`: the file was
+# tracked, level-gated and correct, but `interpreter/mod.rs` never declared it,
+# so `interpreter/expr.rs`'s call site failed to resolve.
+#
+# `cargo check` catches this only once a call site exists. This guard catches an
+# unowned module the moment it lands, which is cheap (a text scan, no compiler)
+# and does not depend on anybody having written the call yet.
+#
+# Verdict convention (last line of stdout, same as the pre-push guards):
+#   PASS  — <n> module file(s) checked, 0 unowned      exit 0
+#   FAIL  — <n> module file(s) checked, <k> unowned: … exit 1
+#   ERROR — nothing was checked (<reason>)             exit 2
+# A run that checked 0 files is ERROR, never a pass.
+
+set -u
+
+ROOT="${SIMPLE_REPO_ROOT:-$(pwd)}"
+
+# Directories scanned. Each entry is a directory holding an owner `mod.rs`
+# alongside sibling module files.
+SCAN_DIRS="src/compiler_rust/compiler/src/interpreter"
+
+scan_dir() {
+    # $1 = absolute directory. Prints one unowned stem per line on fd 3,
+    # echoes the number of module files examined on stdout.
+    dir="$1"
+    owner="$dir/mod.rs"
+    checked=0
+    if [ ! -f "$owner" ]; then
+        echo 0
+        return 0
+    fi
+    for f in "$dir"/*.rs; do
+        [ -e "$f" ] || continue
+        base=$(basename "$f")
+        [ "$base" = "mod.rs" ] && continue
+        stem=${base%.rs}
+        checked=$((checked + 1))
+        # Anchored at line start so a commented-out `// mod x;` never counts.
+        if ! grep -Eq "^[[:space:]]*(pub([[:space:]]*\([^)]*\))?[[:space:]]+)?mod[[:space:]]+${stem}[[:space:]]*;" "$owner"; then
+            echo "$stem" >&3
+        fi
+    done
+    # Subdirectories that carry their own mod.rs are owners in their own right;
+    # the parent must still declare them.
+    for d in "$dir"/*/; do
+        [ -d "$d" ] || continue
+        [ -f "$d/mod.rs" ] || continue
+        stem=$(basename "$d")
+        checked=$((checked + 1))
+        # Anchored at line start so a commented-out `// mod x;` never counts.
+        if ! grep -Eq "^[[:space:]]*(pub([[:space:]]*\([^)]*\))?[[:space:]]+)?mod[[:space:]]+${stem}[[:space:]]*;" "$owner"; then
+            echo "$stem" >&3
+        fi
+    done
+    echo "$checked"
+}
+
+run_scan() {
+    # $1 = repo root. Sets SCAN_CHECKED and SCAN_UNOWNED.
+    root="$1"
+    SCAN_CHECKED=0
+    SCAN_UNOWNED=""
+    for rel in $SCAN_DIRS; do
+        dir="$root/$rel"
+        [ -d "$dir" ] || continue
+        tmp=$(mktemp)
+        n=$(scan_dir "$dir" 3>"$tmp")
+        SCAN_CHECKED=$((SCAN_CHECKED + n))
+        while IFS= read -r stem; do
+            [ -n "$stem" ] || continue
+            SCAN_UNOWNED="$SCAN_UNOWNED $rel/$stem.rs"
+        done < "$tmp"
+        rm -f "$tmp"
+    done
+}
+
+selftest() {
+    fixroot=$(mktemp -d)
+    dir="$fixroot/src/compiler_rust/compiler/src/interpreter"
+    mkdir -p "$dir"
+
+    # Fixture 1: every sibling declared -> no offenders.
+    printf 'pub(crate) mod expr;\npub(crate) mod dispatch_profile;\n' > "$dir/mod.rs"
+    : > "$dir/expr.rs"
+    : > "$dir/dispatch_profile.rs"
+    run_scan "$fixroot"
+    if [ "$SCAN_CHECKED" -ne 2 ] || [ -n "$SCAN_UNOWNED" ]; then
+        echo "selftest FAIL: clean fixture reported checked=$SCAN_CHECKED unowned='$SCAN_UNOWNED'"
+        rm -rf "$fixroot"; return 1
+    fi
+
+    # Fixture 2: the incident shape -- tracked file, no mod declaration.
+    printf 'pub(crate) mod expr;\n' > "$dir/mod.rs"
+    run_scan "$fixroot"
+    case "$SCAN_UNOWNED" in
+        *dispatch_profile.rs*) ;;
+        *) echo "selftest FAIL: unowned dispatch_profile.rs not detected"; rm -rf "$fixroot"; return 1 ;;
+    esac
+
+    # Fixture 3: a commented-out declaration must not count as ownership.
+    printf 'pub(crate) mod expr;\n// mod dispatch_profile;\n' > "$dir/mod.rs"
+    run_scan "$fixroot"
+    case "$SCAN_UNOWNED" in
+        *dispatch_profile.rs*) ;;
+        *) echo "selftest FAIL: commented-out mod accepted as ownership"; rm -rf "$fixroot"; return 1 ;;
+    esac
+
+    # Fixture 4: a subdirectory module must be declared too.
+    printf 'pub(crate) mod expr;\npub(crate) mod dispatch_profile;\n' > "$dir/mod.rs"
+    mkdir -p "$dir/macros"
+    : > "$dir/macros/mod.rs"
+    run_scan "$fixroot"
+    case "$SCAN_UNOWNED" in
+        *macros.rs*) ;;
+        *) echo "selftest FAIL: undeclared subdirectory module not detected"; rm -rf "$fixroot"; return 1 ;;
+    esac
+
+    # Fixture 5: an empty tree must check 0 files so the caller ERRORs.
+    empty=$(mktemp -d)
+    run_scan "$empty"
+    if [ "$SCAN_CHECKED" -ne 0 ]; then
+        echo "selftest FAIL: empty tree reported checked=$SCAN_CHECKED"
+        rm -rf "$fixroot" "$empty"; return 1
+    fi
+    rm -rf "$fixroot" "$empty"
+    return 0
+}
+
+if [ "${1:-}" = "--selftest" ]; then
+    if selftest; then
+        echo "PASS — selftest: 5 fixture(s) checked, 0 failures"
+        exit 0
+    fi
+    echo "ERROR — nothing was checked (selftest failed)"
+    exit 2
+fi
+
+if ! selftest; then
+    echo "ERROR — nothing was checked (selftest failed)"
+    exit 2
+fi
+
+run_scan "$ROOT"
+
+if [ "$SCAN_CHECKED" -eq 0 ]; then
+    echo "ERROR — nothing was checked (no interpreter module tree under $ROOT)"
+    exit 2
+fi
+
+if [ -n "$SCAN_UNOWNED" ]; then
+    count=$(echo $SCAN_UNOWNED | wc -w | tr -d ' ')
+    echo "FAIL — $SCAN_CHECKED module file(s) checked, $count unowned:$SCAN_UNOWNED"
+    exit 1
+fi
+
+echo "PASS — $SCAN_CHECKED module file(s) checked, 0 unowned"
+exit 0

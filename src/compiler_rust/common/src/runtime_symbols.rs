@@ -1257,7 +1257,6 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_rsa_sha256_verify",
     "rt_rsa_sha512_verify",
     "rt_ed25519_verify",
-    "rt_ed25519_verify_checked",
     "rt_ecdsa_p256_verify",
     // Signature generation (RFC 8332 RSA + RFC 5656 ECDSA-P256) for SSH host keys
     "rt_rsa_sha256_sign",
@@ -2226,9 +2225,6 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_simpleos_socket_send_bytes",
     "rt_simpleos_socket_recv_bytes",
     "spl_wffi_call_i64_with_bytes",
-    "spl_wffi_call_i64_with_bytes_checked",
-    "spl_wffi_call_i64_checked",
-    "spl_wffi_call_f64_checked",
     "spl_fonts_call_init_blob",
     "spl_fonts_call_init_path",
     "spl_fonts_call_layout_text",
@@ -2514,9 +2510,6 @@ mod tests {
             "spl_fonts_call_init_path",
             "spl_fonts_call_layout_text",
             "spl_wffi_call_i64_with_bytes",
-            "spl_wffi_call_i64_with_bytes_checked",
-            "spl_wffi_call_i64_checked",
-            "spl_wffi_call_f64_checked",
         ];
 
         for name in adapters {

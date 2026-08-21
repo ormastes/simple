@@ -1180,7 +1180,6 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_ecdsa_p256_verify", signatures::rt_ecdsa_p256_verify);
     insert_simple!("rt_ed25519_sign", signatures::rt_ed25519_sign);
     insert_simple!("rt_ed25519_verify", signatures::rt_ed25519_verify);
-    insert_simple!("rt_ed25519_verify_checked", signatures::rt_ed25519_verify_checked);
     insert_simple!("rt_entropy_hardware_ready", random::rt_entropy_hardware_ready_fn);
     insert_simple!("rt_env_all", system::rt_env_all);
     insert_simple!("rt_env_cwd", system::rt_env_cwd);
@@ -2342,14 +2341,8 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("spl_i64_is_zero", memory::spl_i64_is_zero);
     insert_simple!("spl_str_ptr", wsffi::spl_str_ptr);
     insert_simple!("spl_wffi_call_f64", wsffi::spl_wffi_call_f64);
-    insert_simple!("spl_wffi_call_f64_checked", wsffi::spl_wffi_call_f64_checked);
     insert_simple!("spl_wffi_call_i64", wsffi::spl_wffi_call_i64);
-    insert_simple!("spl_wffi_call_i64_checked", wsffi::spl_wffi_call_i64_checked);
     insert_simple!("spl_wffi_call_i64_with_bytes", dynamic_sffi::spl_wffi_call_i64_with_bytes_fn);
-    insert_simple!(
-        "spl_wffi_call_i64_with_bytes_checked",
-        dynamic_sffi::spl_wffi_call_i64_with_bytes_checked_fn
-    );
     insert_simple!("spl_fonts_call_init_blob", dynamic_sffi::spl_fonts_call_init_blob_fn);
     insert_simple!("spl_fonts_call_init_path", dynamic_sffi::spl_fonts_call_init_path_fn);
     insert_simple!("spl_fonts_call_layout_text", dynamic_sffi::spl_fonts_call_layout_text_fn);
