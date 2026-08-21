@@ -1,0 +1,34 @@
+use compiler.semantics.lint.raw_rt_access.{check_raw_rt_access, check_raw_rt_access_with_allowlist, raw_rt_provider_allowlist_allows}
+
+extern fn rt_exit(code: i32)
+
+fn require(ok: bool):
+    if not ok:
+        rt_exit(1)
+
+val direct = check_raw_rt_access("fn f(): r" + "t_process_run(cmd, args)\n", "src/app/f.spl")
+require(direct.len() == 1)
+require(direct[0].code == "RAW-RT-002")
+require(direct[0].name == "rt_process_run")
+require(direct[0].column == 9)
+
+val embedded = check_raw_rt_access("u" + "se x.{support_r" + "t_hook}\n", "src/app/f.spl")
+require(embedded.len() == 0)
+
+val multiline_import = "u" + "se runtime.primitive.{\n    r" + "t_memcpy as memory_copy\n}\nfn f(): memory_copy(a, b, n)\n"
+val multiline_import_findings = check_raw_rt_access(multiline_import, "src/app/f.spl")
+require(multiline_import_findings.len() == 1)
+require(multiline_import_findings[0].code == "RAW-RT-002")
+require(multiline_import_findings[0].line_num == 2)
+require(multiline_import_findings[0].column == 5)
+
+val multiline = "val docs = \"\"\"\nr" + "t_process_run(cmd, args)\n@runtime_intrinsics\n\"\"\"\nfn f(): 1\n"
+require(check_raw_rt_access(multiline, "src/app/f.spl").len() == 0)
+
+val policy = "src/app/provider/\nsuffix:_sffi.spl\n"
+require(raw_rt_provider_allowlist_allows("/repo/src/app/provider/x.spl", policy))
+require(raw_rt_provider_allowlist_allows("/repo/src/app/io/file_sffi.spl", policy))
+require(not raw_rt_provider_allowlist_allows("/repo/src/app/providerish/x.spl", policy))
+require(check_raw_rt_access_with_allowlist("fn f(): r" + "t_raw()\n", "src/app/provider/x.spl", policy).len() == 0)
+
+rt_exit(0)

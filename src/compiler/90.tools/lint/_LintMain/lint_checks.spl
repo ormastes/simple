@@ -26,7 +26,7 @@ use lazy nogc_sync_mut.ui.theme_package.{validate_default_theme_package}
 use compiler.semantics.lint.riscv_rtl_debuggability_lint.{lint_riscv_rtl_debuggability}
 use compiler.semantics.lint.param_tag.{check_param_tag}
 use compiler.semantics.lint.module_init_literal.{check_module_init_literal}
-use compiler.semantics.lint.raw_rt_access.{check_raw_rt_access}
+use compiler.semantics.lint.raw_rt_access.{check_raw_rt_access_with_allowlist, raw_rt_lexical_code_lines, raw_rt_wrapper_replacement}
 use compiler.semantics.lint.silent_default.{check_silent_default}
 use compiler.semantics.lint.dynamic_capability_acquire.{check_dynamic_capability_acquire}
 use std.critical.capability_manifest.{load_critical_mode_config}
@@ -36,6 +36,33 @@ use compiler.semantics.lint.bare_primitive_internal.{check_bare_primitive_intern
 use compiler.semantics.lint.unwrapped_foreign_resource.{check_unwrapped_foreign_resource}
 
 # File I/O wrapper
+
+var _RAW_RT_ALLOWLIST_LOADED = false
+var _RAW_RT_ALLOWLIST = ""
+
+fn _raw_rt_canonical_allowlist() -> text:
+    if not _RAW_RT_ALLOWLIST_LOADED:
+        _RAW_RT_ALLOWLIST = file_read("scripts/check/no_direct_rt_allowlist.txt")
+        _RAW_RT_ALLOWLIST_LOADED = true
+    _RAW_RT_ALLOWLIST
+
+fn _raw_rt_wrapper_is_in_scope(content: text, wrapper: text) -> bool:
+    # Auto-fix requires an exact selective import of this symbol. Broad module
+    # imports, comments, strings, lookalike module names, and unrelated wrapper
+    # symbols are intentionally insufficient evidence for a Safe edit.
+    val modules = ["app.io.mod", "std.io_runtime"]
+    for raw_line in raw_rt_lexical_code_lines(content):
+        val line = raw_line.trim()
+        if not line.starts_with("use "):
+            continue
+        for module_name in modules:
+            val brace_form = "use {module_name}.{{"
+            if line.starts_with(brace_form) and line.ends_with("}"):
+                val body = line.substring(brace_form.len(), line.len() - 1)
+                for item in body.split(","):
+                    if item.trim() == wrapper:
+                        return true
+    false
 
 impl Linter:
     static fn new() -> Linter:
@@ -367,11 +394,41 @@ impl Linter:
             self.results.push(LintRunResult.new(path, finding.line_num, 0, lint))
 
     me check_raw_rt_access_spl(path: String, content: String):
-        val findings = check_raw_rt_access(content, path)
+        val findings = check_raw_rt_access_with_allowlist(content, path, _raw_rt_canonical_allowlist())
+        # There is currently one signature-proven mechanical mapping. Resolve
+        # its import evidence once per file, not once per finding.
+        val process_run_fixable = if findings.len() > 0: _raw_rt_wrapper_is_in_scope(content, "process_run") else: false
+        var fix_lines: [text] = []
+        var fix_line_starts: [i64] = []
+        if process_run_fixable:
+            fix_lines = content.split("\n")
+            var next_start = 0
+            for fix_line in fix_lines:
+                fix_line_starts.push(next_start)
+                next_start = next_start + fix_line.len() + 1
         for finding in findings:
-            val lint = LintDiag.new(finding.code, LintLevel.Warn, LintCategory.Correctness, finding.message)
+            var lint = LintDiag.new(finding.code, LintLevel.Warn, LintCategory.Correctness, finding.message)
                 .with_fix(finding.note)
-            self.results.push(LintRunResult.new(path, finding.line_num, 0, lint))
+            val wrapper = raw_rt_wrapper_replacement(finding.name)
+            if finding.code == "RAW-RT-002" and wrapper == "process_run" and process_run_fixable:
+                val line_idx = finding.line_num - 1
+                if line_idx >= 0 and line_idx < fix_lines.len():
+                    val source_line = fix_lines[line_idx]
+                    val name_col = finding.column - 1
+                    val is_import = source_line.trim().starts_with("use ") or source_line.trim().starts_with("export ")
+                    if name_col >= 0 and not is_import:
+                        val byte_start = fix_line_starts[line_idx] + name_col
+                        var fix = EasyFix.create(
+                            "RAW-RT-002:{finding.line_num}:{name_col + 1}",
+                            "replace direct `{finding.name}` call with in-scope `{wrapper}` wrapper",
+                            FixConfidence.Safe
+                        )
+                        fix.add_replacement(Replacement.create(
+                            path, byte_start, byte_start + finding.name.len(),
+                            finding.line_num, name_col + 1, wrapper
+                        ))
+                        lint = lint.with_easy_fix(fix)
+            self.results.push(LintRunResult.new(path, finding.line_num, finding.column, lint))
 
     # W-MC-DEF-00x (silent_default): fail-open code that substitutes a
     # plausible-looking constant for a missing answer. LintLevel.Warn — NOT Deny:

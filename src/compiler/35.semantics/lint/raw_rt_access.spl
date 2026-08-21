@@ -1,14 +1,16 @@
 # Raw Runtime Intrinsic Access Lint
 #
-# raw_rt_access: warns when a module OUTSIDE the privileged tiers declares a
-# raw `extern fn rt_*` runtime intrinsic directly. Application and library code
-# must use the std wrappers instead of binding raw runtime symbols.
+# raw_rt_access: warns when product code declares, imports, or calls a raw
+# `rt_*` runtime intrinsic directly. Only sanctioned provider modules may bind
+# and call raw runtime symbols.
 #
-# RAW-RT-001: `extern fn rt_<name>` declared outside src/lib/ or src/runtime/   WARNING
+# RAW-RT-001: `extern fn rt_<name>` outside a provider                         WARNING
+# RAW-RT-002: direct `rt_<name>(...)` call/import outside a provider           WARNING
+# RAW-RT-003: removed product-side `fn rt_<name>` alias                        WARNING
 #
-# Privileged tiers may declare raw intrinsics directly. A source path is
-# privileged when it sits under `src/lib/` or `src/runtime/` — the facade
-# owners. `src/compiler/` is NOT privileged: a refactor (see
+# Sanctioned provider modules may declare raw intrinsics directly. Ordinary
+# `src/lib/` product code is not implicitly privileged. `src/compiler/` is
+# also NOT privileged: a refactor (see
 # llvm_native_link.spl) routed ~65 raw rt_* call sites in the compiler
 # backend through the std.nogc_sync_mut.io_runtime facade because new
 # `extern fn rt_*` decls in CLI-closure modules brick the deployed binary
@@ -34,6 +36,7 @@ pub struct RawRtAccessFinding:
     name: text
     note: text
     line_num: i64
+    column: i64
 
     fn fmt() -> text:
         "[{self.code}] {self.severity}: {self.message} — {self.note}"
@@ -42,20 +45,22 @@ pub struct RawRtAccessFinding:
 # Path Privilege Helper
 # ============================================================================
 
-fn _rra_is_privileged_path(file_path: text) -> bool:
-    """Privileged (facade-owner) tiers may declare raw intrinsics directly:
-    any path under `src/lib/` or `src/runtime/`.
-
-    `src/compiler/` is intentionally NOT privileged: it is CLI-closure code,
-    and a new `extern fn rt_*` declared there can brick the deployed binary
-    (unknown-extern rejection at module load). The compiler's many existing
-    `extern fn rt_*` declarations are still only WARNING-level findings (see
-    file header), so this does not fail the build — it surfaces them for
-    review and stops new ones from blending in silently."""
-    if file_path.contains("src/lib/"):
-        return true
-    if file_path.contains("src/runtime/"):
-        return true
+pub fn raw_rt_provider_allowlist_allows(file_path: text, allowlist: text) -> bool:
+    """Apply the canonical shell gate's prefix/suffix allowlist semantics."""
+    var relative = file_path
+    val src_at = file_path.find("src/")
+    if src_at >= 0:
+        relative = file_path.substring(src_at, file_path.len())
+    for raw in allowlist.split("\n"):
+        val entry = raw.trim()
+        if entry == "" or entry.starts_with("#"):
+            continue
+        if entry.starts_with("suffix:"):
+            val suffix = entry.substring(7, entry.len())
+            if relative.ends_with(suffix):
+                return true
+        elif relative.starts_with(entry):
+            return true
     false
 
 fn _rra_marks_runtime_intrinsics(source: text) -> bool:
@@ -71,6 +76,11 @@ fn _rra_marks_runtime_intrinsics(source: text) -> bool:
         val t = lines[i].trim()
         if t == "@runtime_intrinsics" or t.starts_with("@runtime_intrinsics ") or t == "#[runtime_intrinsics]":
             return true
+        # The marker is a header declaration, never content inside a module
+        # docstring or below code. Ignore only blank lines and ordinary #
+        # comments while looking for it.
+        if t != "" and not t.starts_with("#"):
+            return false
         i = i + 1
     false
 
@@ -106,42 +116,212 @@ fn _rra_is_ident_char(ch: text) -> bool:
     val is_digit = ch >= "0" and ch <= "9"
     is_lower or is_upper or is_digit
 
+pub fn raw_rt_wrapper_replacement(name: text) -> text:
+    """Canonical wrapper name when a mechanical call rename is known."""
+    # Only this mapping is signature-identical across the canonical facades.
+    # Nullable file/env and recursive-dir wrappers deliberately remain hints,
+    # not mechanical edits.
+    if name == "rt_process_run": return "process_run"
+    ""
+
+fn _rra_fix_note(name: text) -> text:
+    val wrapper = raw_rt_wrapper_replacement(name)
+    if wrapper != "":
+        return "replace `{name}(...)` with `{wrapper}(...)` from the canonical std/app I/O facade; `simple lint --fix` applies this rename when `{wrapper}` is already imported"
+    "route `{name}` through its std semantic facade; if none exists, create a provider wrapper instead of a product-side rt_* alias"
+
+pub fn raw_rt_lexical_code_lines(source: text) -> [text]:
+    """Blank comments and normal/triple strings while preserving columns."""
+    var result: [text] = []
+    var in_string = false
+    var in_triple = false
+    var escaped = false
+    for raw_line in source.split("\n"):
+        var pieces: [text] = []
+        var i = 0
+        while i < raw_line.len():
+            val ch = raw_line.substring(i, i + 1)
+            val triple = i + 2 < raw_line.len() and raw_line.substring(i, i + 3) == "\"\"\""
+            if in_triple:
+                if triple:
+                    pieces.push(" ")
+                    pieces.push(" ")
+                    pieces.push(" ")
+                    i = i + 3
+                    in_triple = false
+                else:
+                    pieces.push(" ")
+                    i = i + 1
+                continue
+            if in_string:
+                pieces.push(" ")
+                if escaped:
+                    escaped = false
+                elif ch == "\\":
+                    escaped = true
+                elif ch == "\"":
+                    in_string = false
+                i = i + 1
+                continue
+            if ch == "#":
+                while i < raw_line.len():
+                    pieces.push(" ")
+                    i = i + 1
+                break
+            if triple:
+                pieces.push(" ")
+                pieces.push(" ")
+                pieces.push(" ")
+                i = i + 3
+                in_triple = true
+                continue
+            if ch == "\"":
+                pieces.push(" ")
+                i = i + 1
+                in_string = true
+                continue
+            pieces.push(ch)
+            i = i + 1
+        result.push(pieces.join(""))
+    result
+
+fn _rra_names_in_call_position(line: text) -> [text]:
+    var names: [text] = []
+    var i = 0
+    while i + 3 < line.len():
+        val boundary_ok = i == 0 or not _rra_is_ident_char(line.substring(i - 1, i))
+        if boundary_ok and line.substring(i, i + 3) == "rt_":
+            var j = i + 3
+            while j < line.len() and _rra_is_ident_char(line.substring(j, j + 1)):
+                j = j + 1
+            var k = j
+            while k < line.len() and line.substring(k, k + 1) == " ":
+                k = k + 1
+            if j > i + 3 and k < line.len() and line.substring(k, k + 1) == "(":
+                names.push(line.substring(i, j))
+            i = j
+        else:
+            i = i + 1
+    names
+
+fn _rra_call_column(line: text, wanted: text) -> i64:
+    var i = 0
+    while i + wanted.len() <= line.len():
+        val boundary_ok = i == 0 or not _rra_is_ident_char(line.substring(i - 1, i))
+        if boundary_ok and line.substring(i, i + wanted.len()) == wanted:
+            val end = i + wanted.len()
+            var k = end
+            while k < line.len() and line.substring(k, k + 1) == " ":
+                k = k + 1
+            if k < line.len() and line.substring(k, k + 1) == "(":
+                return i + 1
+        i = i + 1
+    0
+
+fn _rra_direct_import_names(line: text, import_context: bool) -> [text]:
+    var names: [text] = []
+    val t = line.trim()
+    if not import_context and not t.starts_with("use ") and not t.starts_with("export use "):
+        return names
+    var i = 0
+    while i + 3 < line.len():
+        val boundary_ok = i == 0 or not _rra_is_ident_char(line.substring(i - 1, i))
+        if boundary_ok and line.substring(i, i + 3) == "rt_":
+            var j = i + 3
+            while j < line.len() and _rra_is_ident_char(line.substring(j, j + 1)):
+                j = j + 1
+            names.push(line.substring(i, j))
+            i = j
+        else:
+            i = i + 1
+    names
+
 # ============================================================================
 # Main Entry Point
 # ============================================================================
 
-pub fn check_raw_rt_access(source: text, file_path: text) -> [RawRtAccessFinding]:
+pub fn check_raw_rt_access_with_allowlist(source: text, file_path: text, allowlist: text) -> [RawRtAccessFinding]:
     """Text-based heuristic for RAW-RT-001 detection.
 
-    Emits a WARNING for each `extern fn rt_*` declaration in a non-privileged
-    source file. Privileged tiers (src/lib/, src/runtime/) are skipped, matching
-    the Rust seed lint `raw_rt_access`. Pass "" for file_path when unknown
-    (treated as non-privileged)."""
+    Emits a WARNING for raw declarations, imports, calls, and product aliases
+    outside paths admitted by the canonical provider allowlist. The explicit
+    header marker remains available for true provider sources. Pass "" for
+    file_path when unknown (treated as product code)."""
     var findings: [RawRtAccessFinding] = []
-    if _rra_is_privileged_path(file_path):
+    if raw_rt_provider_allowlist_allows(file_path, allowlist):
         return findings
     if _rra_marks_runtime_intrinsics(source):
         return findings
+    # Dominant fast path: avoid line splitting and lexical work for ordinary
+    # files. `contains` is the only added scan in this case.
+    if not source.contains("rt_"):
+        return findings
 
-    val lines = source.split("\n")
+    val lines = raw_rt_lexical_code_lines(source)
     var line_num = 0
+    var in_selective_import = false
     for line in lines:
         line_num = line_num + 1
-        val t = line.trim()
-        if not t.starts_with("extern fn "):
+        val code_line = line
+        if not code_line.contains("rt_"):
+            val no_rt_trimmed = code_line.trim()
+            val starts_import = no_rt_trimmed.starts_with("use ") or no_rt_trimmed.starts_with("export use ")
+            if starts_import and code_line.contains("{") and not code_line.contains("}"):
+                in_selective_import = true
+            if in_selective_import and code_line.contains("}"):
+                in_selective_import = false
             continue
-        val name = _rra_extern_fn_name(t)
-        if name == "":
+        val t = code_line.trim()
+        if t.starts_with("extern fn "):
+            val name = _rra_extern_fn_name(t)
+            if name.starts_with("rt_"):
+                findings.push(RawRtAccessFinding(
+                    code: "RAW-RT-001", severity: "WARNING",
+                    message: "product code must not declare raw runtime intrinsic `{name}` directly",
+                    name: name, note: _rra_fix_note(name), line_num: line_num,
+                    column: code_line.find(name) + 1
+                ))
             continue
-        if not name.starts_with("rt_"):
+        val is_rt_alias_decl = t.starts_with("fn rt_") or t.starts_with("pub fn rt_") or t.starts_with("static fn rt_") or t.starts_with("pub static fn rt_") or t.starts_with("async fn rt_") or t.starts_with("pub async fn rt_")
+        if is_rt_alias_decl:
+            val fn_start = t.find("fn ") + 3
+            val tail = t.substring(fn_start, t.len())
+            val stop = tail.find("(")
+            val name = if stop > 0: tail.substring(0, stop).trim() else: "rt_alias"
+            findings.push(RawRtAccessFinding(
+                code: "RAW-RT-003", severity: "WARNING",
+                message: "product-side runtime alias `{name}` is removed; expose a semantic wrapper instead",
+                name: name, note: _rra_fix_note(name), line_num: line_num,
+                column: code_line.find(name) + 1
+            ))
             continue
-        val msg = "application code must not declare raw runtime intrinsic `{name}` directly; use the std wrapper"
-        findings.push(RawRtAccessFinding(
-            code: "RAW-RT-001",
-            severity: "WARNING",
-            message: msg,
-            name: name,
-            note: "use the std wrapper (e.g. std.io_runtime.file_read / file_write) instead of extern fn rt_*",
-            line_num: line_num
-        ))
+        val starts_import = t.starts_with("use ") or t.starts_with("export use ")
+        val import_context = starts_import or in_selective_import
+        if starts_import and code_line.contains("{") and not code_line.contains("}"):
+            in_selective_import = true
+        val import_names = _rra_direct_import_names(code_line, import_context)
+        if in_selective_import and code_line.contains("}"):
+            in_selective_import = false
+        if import_names.len() > 0:
+            val name = import_names[0]
+            findings.push(RawRtAccessFinding(
+                code: "RAW-RT-002", severity: "WARNING",
+                message: "product code imports raw runtime intrinsic `{name}` directly",
+                name: name, note: _rra_fix_note(name), line_num: line_num,
+                column: code_line.find(name) + 1
+            ))
+            continue
+        val call_names = _rra_names_in_call_position(code_line)
+        if call_names.len() > 0:
+            val name = call_names[0]
+            findings.push(RawRtAccessFinding(
+                code: "RAW-RT-002", severity: "WARNING",
+                message: "product code calls raw runtime intrinsic `{name}` directly",
+                name: name, note: _rra_fix_note(name), line_num: line_num,
+                column: _rra_call_column(code_line, name)
+            ))
     findings
+
+pub fn check_raw_rt_access(source: text, file_path: text) -> [RawRtAccessFinding]:
+    """Pure checker used by focused callers; no implicit path exemptions."""
+    check_raw_rt_access_with_allowlist(source, file_path, "")

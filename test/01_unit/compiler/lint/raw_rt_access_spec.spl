@@ -1,17 +1,22 @@
 # Raw Runtime Intrinsic Access Lint Specification
 #
 # Verifies RAW-RT-001 flags `extern fn rt_*` declarations outside the
-# privileged (facade-owner) tiers. `src/compiler/` was previously exempt as a
+# sanctioned provider modules. `src/compiler/` was previously exempt as a
 # whole tier; a refactor (see llvm_native_link.spl) routed the compiler
 # backend through the std facade because a new `extern fn rt_*` in a
 # CLI-closure module can brick the deployed binary. This spec covers the
-# extended coverage (src/compiler/** now flagged) while confirming
-# src/lib/** and src/runtime/** (the facade owners) stay exempt.
+# extended coverage while confirming the canonical allowlist, rather than a
+# blanket src/lib exemption, controls provider access.
 
 use std.spec.*
+use compiler.tools.lint.main.{Linter, lint_cli_source}
+use std.tooling.easy_fix.{easyfix_replacements}
 use compiler.semantics.lint.raw_rt_access.{
     RawRtAccessFinding,
-    check_raw_rt_access
+    check_raw_rt_access,
+    check_raw_rt_access_with_allowlist,
+    raw_rt_provider_allowlist_allows,
+    raw_rt_wrapper_replacement
 }
 
 
@@ -67,7 +72,7 @@ describe "RAW-RT-001: raw extern fn rt_* outside privileged tiers":
             expect(findings.len()).to_equal(1)
             expect(findings[0].code).to_equal("RAW-RT-001")
 
-    context "when declared in a privileged (facade-owner) tier":
+    context "when declared in a sanctioned provider":
         """
         ### Scenario: src/lib/ and src/runtime/ still exempt
 
@@ -75,15 +80,144 @@ describe "RAW-RT-001: raw extern fn rt_* outside privileged tiers":
         intrinsics directly (routing through themselves would be circular).
         """
 
-        it "does not flag extern fn rt_* in src/lib/":
+        it "flags an ordinary product library instead of exempting all src/lib":
             val source = "extern fn rt_file_read_text(path: text) -> text\n"
-            val findings = check_raw_rt_access(source, "src/lib/nogc_sync_mut/io_runtime.spl")
+            val findings = check_raw_rt_access(source, "src/lib/nogc_sync_mut/product/config.spl")
+            expect(findings.len()).to_equal(1)
+
+        it "allows a named SFFI provider":
+            val source = "extern fn rt_file_read_text(path: text) -> text\nfn read(path: text): rt_file_read_text(path)\n"
+            val findings = check_raw_rt_access_with_allowlist(source, "src/lib/nogc_sync_mut/io/file_sffi.spl", "suffix:_sffi.spl\n")
             expect(findings.len()).to_equal(0)
 
         it "does not flag extern fn rt_* in src/runtime/":
             val source = "extern fn rt_gc_alloc(size: i64) -> i64\n"
-            val findings = check_raw_rt_access(source, "src/runtime/gc/alloc.spl")
+            val findings = check_raw_rt_access_with_allowlist(source, "src/runtime/gc/alloc.spl", "src/runtime/\n")
             expect(findings.len()).to_equal(0)
+
+describe "RAW-RT-002: direct raw runtime use":
+    it "warns on a direct call without a local extern declaration":
+        val source = "fn load(path: text):\n    rt_file_read_text(path)\n"
+        val findings = check_raw_rt_access(source, "src/app/config/load.spl")
+        expect(findings.len()).to_equal(1)
+        expect(findings[0].code).to_equal("RAW-RT-002")
+        expect(findings[0].name).to_equal("rt_file_read_text")
+        expect(findings[0].note).to_contain("file_read_text")
+        expect(findings[0].note).to_contain("simple lint --fix")
+
+    it "warns on a direct selective import":
+        # Split the token so the seed's eager source-import scan does not treat
+        # this fixture string as an import belonging to the spec itself.
+        val source = "u" + "se std.runtime.{r" + "t_http_request}\n"
+        val findings = check_raw_rt_access(source, "src/app/http/client.spl")
+        expect(findings.len()).to_equal(1)
+        expect(findings[0].code).to_equal("RAW-RT-002")
+
+    it "warns on a product-side private alias import":
+        val source = "u" + "se runtime.primitive.{r" + "t_memcpy as _memory_copy_primitive}\nfn copy(): _memory_copy_primitive()\n"
+        val findings = check_raw_rt_access(source, "src/app/product/native_copy.spl")
+        expect(findings.len()).to_equal(1)
+        expect(findings[0].code).to_equal("RAW-RT-002")
+
+    it "allows that alias only when the canonical policy sanctions its provider path":
+        val source = "u" + "se runtime.primitive.{r" + "t_memcpy as _memory_copy_primitive}\nfn copy(): _memory_copy_primitive()\n"
+        val policy = "src/app/provider_cli/native_provider_v1.spl\n"
+        val findings = check_raw_rt_access_with_allowlist(source, "src/app/provider_cli/native_provider_v1.spl", policy)
+        expect(findings.len()).to_equal(0)
+
+    it "ignores comment and string decoys":
+        val source = "# rt_process_run(cmd, args)\nval example = \"rt_file_read_text(path)\"\n"
+        val findings = check_raw_rt_access(source, "src/app/example.spl")
+        expect(findings.len()).to_equal(0)
+
+    it "ignores calls, imports, and markers inside multiline strings":
+        val source = "val docs = \"\"\"\nr" + "t_process_run(cmd, args)\nu" + "se app.io.{process_run}\n@runtime_intrinsics\n\"\"\"\nfn clean(): 1\n"
+        val findings = check_raw_rt_access(source, "src/app/docs.spl")
+        expect(findings.len()).to_equal(0)
+
+    it "does not match rt_ embedded in a larger imported identifier":
+        val source = "u" + "se product.api.{support_r" + "t_hook}\n"
+        val findings = check_raw_rt_access(source, "src/app/product.spl")
+        expect(findings.len()).to_equal(0)
+
+    it "reports at most one direct-use finding per source line":
+        val source = "fn run(): rt_process_run(cmd, args) + rt_process_run(cmd, args)\n"
+        val findings = check_raw_rt_access(source, "src/app/run.spl")
+        expect(findings.len()).to_equal(1)
+
+describe "RAW-RT-003: removed product aliases":
+    it "warns on a product-side rt alias declaration":
+        val source = "fn rt_old_read(path: text): file_read_text(path)\n"
+        val findings = check_raw_rt_access(source, "src/app/compat.spl")
+        expect(findings.len()).to_equal(1)
+        expect(findings[0].code).to_equal("RAW-RT-003")
+
+describe "raw rt wrapper fix lookup":
+    it "returns safe known replacements and no invented replacement":
+        expect(raw_rt_wrapper_replacement("rt_process_run")).to_equal("process_run")
+        expect(raw_rt_wrapper_replacement("rt_unknown_device_op")).to_equal("")
+
+    it "uses exact canonical prefix and suffix allowlist semantics":
+        val policy = "src/lib/provider/\nsuffix:_sffi.spl\n"
+        expect(raw_rt_provider_allowlist_allows("/repo/src/lib/provider/x.spl", policy)).to_equal(true)
+        expect(raw_rt_provider_allowlist_allows("/repo/src/app/io/file_sffi.spl", policy)).to_equal(true)
+        expect(raw_rt_provider_allowlist_allows("/repo/src/lib/providerish/x.spl", policy)).to_equal(false)
+
+describe "RAW-RT-002 auto-fix":
+    it "offers a safe rename only when the canonical wrapper facade is in scope":
+        val source = "u" + "se app.io.mod.{process_run}\nfn run():\n    rt_process_run(cmd, args)\n"
+        var replacements = 0
+        var applied = ""
+        for result in lint_cli_source(Linter.new(), "/tmp/raw_rt_fix.spl", source):
+            if result.lint.code == "RAW-RT-002" and result.line == 3:
+                match result.lint.easy_fix:
+                    case Some(fix):
+                        for rep in easyfix_replacements(fix):
+                            replacements = replacements + 1
+                            applied = source.slice(0, rep.start) + rep.new_text + source.slice(rep.end)
+                    case nil:
+                        val _ = 0
+        expect(replacements).to_equal(1)
+        expect(applied).to_contain("    process_run(cmd, args)")
+        expect(applied).to_not_contain("    rt_process_run(cmd, args)")
+
+    it "targets the lexical call rather than an earlier string decoy":
+        val source = "u" + "se app.io.mod.{process_run}\nfn run():\n    sink(\"r" + "t_process_run(x, y)\", rt_process_run(cmd, args))\n"
+        var applied = ""
+        for result in lint_cli_source(Linter.new(), "/tmp/raw_rt_decoy_fix.spl", source):
+            if result.lint.code == "RAW-RT-002" and result.line == 3:
+                match result.lint.easy_fix:
+                    case Some(fix):
+                        for rep in easyfix_replacements(fix):
+                            applied = source.slice(0, rep.start) + rep.new_text + source.slice(rep.end)
+                    case nil:
+                        val _ = 0
+        expect(applied).to_contain("\"rt_process_run(x, y)\", process_run(cmd, args))")
+
+    it "keeps an actionable warning but withholds an unsafe bare rename":
+        val source = "fn run():\n    rt_process_run(cmd, args)\n"
+        var warned = false
+        var replacements = 0
+        for result in lint_cli_source(Linter.new(), "/tmp/raw_rt_no_scope.spl", source):
+            if result.lint.code == "RAW-RT-002":
+                warned = true
+                match result.lint.easy_fix:
+                    case Some(fix):
+                        replacements = replacements + easyfix_replacements(fix).len()
+                    case nil:
+                        val _ = 0
+        expect(warned).to_equal(true)
+        expect(replacements).to_equal(0)
+
+    it "recognizes the canonical std.io_runtime selective import":
+        val source = "u" + "se std.io_runtime.{process_run}\nfn run():\n    rt_process_run(cmd, args)\n"
+        var replacements = 0
+        for result in lint_cli_source(Linter.new(), "/tmp/raw_rt_std_fix.spl", source):
+            if result.lint.code == "RAW-RT-002" and result.line == 3:
+                match result.lint.easy_fix:
+                    case Some(fix): replacements = replacements + easyfix_replacements(fix).len()
+                    case nil: val _ = 0
+        expect(replacements).to_equal(1)
 
     context "when the file opts out with @runtime_intrinsics":
         """
@@ -131,7 +265,8 @@ describe "RawRtAccessFinding formatting":
             message: "test message",
             name: "rt_thing",
             note: "test note",
-            line_num: 3
+            line_num: 3,
+            column: 2
         )
         val output = f.fmt()
         expect(output).to_contain("RAW-RT-001")
