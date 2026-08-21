@@ -208,6 +208,23 @@ together and delete the stopgap note. Then route each producer through its mappe
 and needs the E0-prefixed block, which requires a 16-bit parameter (`0xE000|byte`),
 and the 4 duplicate SDL `parse_virtual_key` copies should call the shared mapper.
 
+### 2026-08-21 ARM64 compiler recovery receipt
+
+- Fresh no-stub Phase 2 admitted on source `68a4eea1c13d`: SHA-256
+  `d2d89487dbba5249003f5f7c85b1deda96b31980d3b133ce10112121c0c914e2`,
+  714 compiled / 0 cached / 0 failed, sanity and struct-receiver gates PASS.
+- Exact Rust-seed `Map.for_each` regression passed 8/8. Current `main` now owns
+  the superseding generalized implementation in `fd40b997a913`.
+- Phase-2 SMF compilation of the imported-composite regression remained
+  fail-closed on `Module`/`BlockValue` dependency materialization; no SMF was
+  produced.
+- A bound Phase-3 planner receipt was produced and Stage 3 started, but external
+  deletion of the temporary workspace removed the ignored build artifacts before
+  completion. This is neither Stage-3 admission nor QEMU evidence.
+- Resume from `/Users/ormastes/simple-dd4c-qemu-recover` on current `main` with a
+  fresh Phase-2/receipt pair, then Stage 3, full-CLI producer, ARM64 QEMU RAMFB +
+  QMP input capture, and unchanged fail-closed 2D/Web/GUI/WM assertions.
+
 ## Unowned gaps (cross-review; assign before the AC they gate can pass)
 - **Key-code vocabulary has no owner.** Three producers (PS/2 scancodes, SDL keysyms,
   evdev codes) in three different code spaces feed one `Key(code)` field. This
