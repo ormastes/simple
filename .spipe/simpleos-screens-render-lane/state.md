@@ -23,6 +23,23 @@
 - Three-cycle cap reached. Parser fix, new Phase 2/3 admission, ARM64 image, and
   real QEMU 2D/Web/GUI/WM rows remain active and unclaimed.
 
+### 2026-08-22 pure-parser proof and next Stage3 blocker
+
+- A current-source ARM64 Phase2 compiler was admitted and then parsed,
+  promoted, committed, and released all 665 Stage3 surfaces. The former
+  `flat_pool_codec.spl:94` comparison-chain failure is cleared.
+- Stage3 next segfaults immediately after `phase3:hir_typecheck:start`.
+  LLDB pins the null dereference to
+  `lower_and_check_streaming_surfaces_impl +356`.
+- Source calls `hirlowering_for_module_with_diagnostics`, but admitted Phase2
+  machine code calls `hirlowering_for_module`. A disjoint-name experiment was
+  also misbound after a 722-compiled/0-cached rebuild, so it was removed.
+- Latest admitted diagnostic Phase2 SHA-256:
+  `d6d490c15128e9f3c706747f87380d57e17e26aba6d9486412ef6e5bf00e9b3e`.
+- Three-cycle cap reached. Next session must try a method-owned constructor,
+  gate on exact disassembly, and only then resume Stage3. ARM64 image and real
+  QEMU 2D/Web/GUI/WM evidence remain active and unclaimed.
+
 ## Raw Request
 > make deep research and plan with agents, simple os to have configs, 2d rendering
 > screen, web rendering screen, gui rendering screen, and existing default wm screen.

@@ -1,27 +1,26 @@
 # Comparison chain closed by `(` is misread as a generic-argument list
 
-Status: PARTIAL — Rust seed fixed; pure-Simple parser OPEN (reproduced 2026-08-22)
+Status: FIXED — Rust and pure-Simple parsers; Stage3 proof 2026-08-22
 Component: `src/compiler_rust/parser/src/expressions/postfix.rs`
            (`try_skip_ident_generic_args`)
 
 ## 2026-08-22 pure-Simple Stage 3 regression
 
-The original fix landed only in the Rust seed twin. The pure-Simple
-`10.frontend/core/parser_expr.spl::try_skip_ident_generic_args` has no
-`need_comma` ratchet and still accepts consecutive numeric/keyword/identifier
-tokens as one speculative type-argument list. A provenance-admitted ARM64
-Phase 2 therefore rejects valid source in
-`src/compiler/frontend/core/flat_pool_codec.spl:94`:
+The original fix initially landed only in the Rust seed twin. The pure-Simple
+`10.frontend/core/parser_expr.spl::try_skip_ident_generic_args` now has the
+equivalent numeric-argument separator ratchet. The original admitted Phase2
+had rejected valid source in `src/compiler/frontend/core/flat_pool_codec.spl:94`:
 
 ```simple
 if n < 0 or n > (self.lines.len() - self.pos):
 ```
 
-It reports the unrelated const-generic diagnostic three times after parsing
-all 664 surfaces. The valid source is intentionally unchanged. The next fix
-must port the existing Rust `need_comma` state machine into the pure parser and
-run this file plus the existing defect-class spec and a real generic-call
-positive control before Stage 3 is retried.
+The valid source remained unchanged. On 2026-08-22 a freshly rebuilt and
+admitted pure-Simple ARM64 Phase2 compiler parsed, promoted, committed, and
+released all 665 Stage3 surfaces with no const-generic diagnostic. Stage3 then
+advanced to `phase3:hir_typecheck:start`, where a separate native call-target
+mis-resolution now blocks it. That downstream crash does not weaken the parser
+proof.
 
 ## Symptom
 

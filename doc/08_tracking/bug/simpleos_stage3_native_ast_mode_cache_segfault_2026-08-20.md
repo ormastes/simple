@@ -778,3 +778,31 @@ Not fixed here, recorded instead:
   `executed=0`/`outcome=ERROR` before any example runs. The complexity claim
   above is therefore analytic plus the RSS slopes already recorded; a measured
   number should be taken from the next bounded Stage-3 cycle's phase-5 log.
+
+## 2026-08-22 ARM64: prefix-sharing constructor mis-resolution
+
+A fresh admitted ARM64 Phase2 compiler parsed, promoted, committed, and
+released all 665 Stage3 surfaces, proving the comparison-chain parser repair.
+It then segfaulted immediately after `phase3:hir_typecheck:start`. LLDB pinned
+the null dereference to
+`CompilerDriver.lower_and_check_streaming_surfaces_impl +356` while reading
+the newly constructed `HirLowering`.
+
+Disassembly provides the decisive cause: source requested
+`hirlowering_for_module_with_diagnostics`, but the caller emitted a branch to
+its prefix-sharing shorter sibling `hirlowering_for_module`. Both symbols are
+present, and disassembly of the longer constructor itself is correct. The
+failure is therefore call-target mis-resolution, not a nullable parse result;
+adding a later nil check would only mask the wrong call.
+
+A disjoint exported-name containment, `streaming_hir_lowering_owner`, was then
+tried and rejected. A from-scratch Phase2 build compiled 722 units with zero
+cache hits and admitted successfully, but its machine code still called
+`hirlowering_for_module`; the unique replacement symbol was present but unused
+at this call site. This disproves both a stale object cache and a simple textual
+prefix collision. The ineffective source/test changes were removed.
+
+The next bounded experiment must bypass imported free-function resolution at
+this boundary, preferably with a method-owned diagnostic constructor, and
+must gate Stage3 on disassembly naming that exact target. No further build was
+started because this session's three-cycle limit was exhausted.
