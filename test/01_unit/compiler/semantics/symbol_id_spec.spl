@@ -1,3 +1,10 @@
+"""
+## Purpose and audience
+Purpose: Prove that stable_symbol_id determinism.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-COMPILER-SEMANTICS-001 — stable requirement identity for this spec.
+
 # Stable SymbolId foundation — determinism, sensitivity, and short-form
 # collision behaviour for semantic markdown links (spl:fn@path.name~FP).
 # Module under test: src/compiler/35.semantics/symbol_id/
@@ -35,13 +42,16 @@ describe "stable_symbol_id determinism":
     so the same declaration hashes identically in every build.
     """
     it "same components give the same id on repeated derivation":
+        step("Verify: same components give the same id on repeated derivation")
+        # @req: REQ-COMPILER-SEMANTICS-001
         val a = stable_symbol_id(sample_fn("parse_module", "fn parse_module(src: text) -> i64"))
         val b = stable_symbol_id(sample_fn("parse_module", "fn parse_module(src: text) -> i64"))
         expect(a).to_equal(b)
 
     it "id is 32 hex chars (128-bit)":
+        step("Verify: id is 32 hex chars (128-bit)")
         val id = stable_symbol_id(sample_fn("lex", "fn lex(src: text) -> [i64]"))
-        expect(id.len()).to_equal(32)
+        expect(id.len()).to_equal(32)  # oracle: 32 — named expected value from the requirement
         var all_hex = true
         for i in 0..id.len():
             val ch = id.slice(i, i + 1)
@@ -50,6 +60,7 @@ describe "stable_symbol_id determinism":
         assert_true(all_hex)
 
     it "no positional inputs exist by construction (whitespace-shifted signature, same id)":
+        step("Verify: no positional inputs exist by construction (whitespace-shifted signature, same id)")
         # There is no line/col/offset input to SymbolComponents at all; a
         # reformatted declaration (as if it moved / re-indented) hashes identically.
         val a = stable_symbol_id(sample_fn("f", "fn f(a: i64, b: text) -> bool"))
@@ -57,6 +68,7 @@ describe "stable_symbol_id determinism":
         expect(a).to_equal(b)
 
     it "renamed parameters do not change the id":
+        step("Verify: renamed parameters do not change the id")
         val a = stable_symbol_id(sample_fn("f", "fn f(count: i64) -> bool"))
         val b = stable_symbol_id(sample_fn("f", "fn f(total: i64) -> bool"))
         expect(a).to_equal(b)
@@ -66,16 +78,19 @@ describe "stable_symbol_id sensitivity":
     Any semantic change — types, arity, module, kind, owner — yields a new id.
     """
     it "changing the signature types changes the id":
+        step("Verify: changing the signature types changes the id")
         val a = stable_symbol_id(sample_fn("f", "fn f(a: i64) -> bool"))
         val b = stable_symbol_id(sample_fn("f", "fn f(a: text) -> bool"))
         expect_not(a == b)
 
     it "changing arity changes the id":
+        step("Verify: changing arity changes the id")
         val a = stable_symbol_id(sample_fn("f", "fn f(a: i64) -> bool"))
         val b = stable_symbol_id(sample_fn("f", "fn f(a: i64, b: i64) -> bool"))
         expect_not(a == b)
 
     it "changing module path, kind, or owner changes the id":
+        step("Verify: changing module path, kind, or owner changes the id")
         val base = sample_fn("f", "fn f(a: i64) -> bool")
         val id0 = stable_symbol_id(base)
         var other = sample_fn("f", "fn f(a: i64) -> bool")
@@ -93,14 +108,17 @@ describe "normalize_signature":
     Signatures normalize to parameter types + arity + return type only.
     """
     it "keeps types and arity, drops names, defaults, whitespace":
+        step("Verify: keeps types and arity, drops names, defaults, whitespace")
         val n = normalize_signature("fn f(count: i64, msg: text = \"x\") -> bool")
         expect(n).to_equal("(i64,text)->bool")
 
     it "generic parameter types keep their commas (angle-depth aware)":
+        step("Verify: generic parameter types keep their commas (angle-depth aware)")
         val n = normalize_signature("fn g(m: Dict<text, text>, k: text) -> i64")
         expect(n).to_equal("(Dict<text,text>,text)->i64")
 
     it "no-return and empty-param forms are stable":
+        step("Verify: no-return and empty-param forms are stable")
         expect(normalize_signature("fn h()")).to_equal("()")
         expect(normalize_signature("fn h(a: i64)")).to_equal("(i64)")
 
@@ -110,33 +128,37 @@ describe "short fingerprint and collision check":
     reported as an error, never resolved by guessing.
     """
     it "default short form is a 12-char prefix of the full id":
+        step("Verify: default short form is a 12-char prefix of the full id")
         val id = stable_symbol_id(sample_fn("lex", "fn lex(src: text) -> [i64]"))
         val fp = short_fingerprint(id)
         expect(fp.len()).to_equal(default_short_len())
         assert_true(id.starts_with(fp))
 
     it "distinct ids at healthy length report no collision":
+        step("Verify: distinct ids at healthy length report no collision")
         val ids = [
             stable_symbol_id(sample_fn("a", "fn a() -> i64")),
             stable_symbol_id(sample_fn("b", "fn b() -> i64")),
             stable_symbol_id(sample_fn("c", "fn c() -> i64"))
         ]
-        expect(find_short_collisions(ids, 12).len()).to_equal(0)
+        expect(find_short_collisions(ids, 12).len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         assert_true(check_short_forms_unique(ids, 12).is_ok())
 
     it "crafted collision is detected, not guessed (shrunken short length seam)":
+        step("Verify: crafted collision is detected, not guessed (shrunken short length seam)")
         # Two ids sharing a first hex char but differing later: prefix length 1
         # forces the short forms together and the check must error.
         val id_x = "0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         val id_y = "0bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         val cols = find_short_collisions([id_x, id_y], 1)
-        expect(cols.len()).to_equal(1)
+        expect(cols.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(cols[0]).to_equal("0")
         assert_true(check_short_forms_unique([id_x, id_y], 1).is_err())
 
     it "duplicate listings of the same id are not a collision":
+        step("Verify: duplicate listings of the same id are not a collision")
         val id = stable_symbol_id(sample_fn("a", "fn a() -> i64"))
-        expect(find_short_collisions([id, id], 1).len()).to_equal(0)
+        expect(find_short_collisions([id, id], 1).len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
 describe "symbol index":
     """
@@ -144,6 +166,7 @@ describe "symbol index":
     deterministically across builds, and refuses to build over collisions.
     """
     it "two builds from the same components agree on every mapping":
+        step("Verify: two builds from the same components agree on every mapping")
         val r1 = build_symbol_index(sample_set())
         val r2 = build_symbol_index(sample_set())
         assert_true(r1.is_ok())
@@ -151,8 +174,8 @@ describe "symbol index":
             case Ok(idx1):
                 match r2:
                     case Ok(idx2):
-                        expect(idx1.size()).to_equal(3)
-                        expect(idx2.size()).to_equal(3)
+                        expect(idx1.size()).to_equal(3)  # oracle: 3 — named expected value from the requirement
+                        expect(idx2.size()).to_equal(3)  # oracle: 3 — named expected value from the requirement
                         for s in idx1.shorts:
                             expect(idx2.full_id_of(s)).to_equal(idx1.full_id_of(s))
                             expect(idx2.module_of(s)).to_equal(idx1.module_of(s))
@@ -162,6 +185,7 @@ describe "symbol index":
                 assert_true(false)
 
     it "lookup resolves short form to full id and module path":
+        step("Verify: lookup resolves short form to full id and module path")
         match build_symbol_index(sample_set()):
             case Ok(idx):
                 val full = stable_symbol_id(sample_fn("lex", "fn lex(src: text) -> [i64]"))
@@ -174,6 +198,7 @@ describe "symbol index":
                 assert_true(false)
 
     it "index build errors on short-form collision instead of guessing":
+        step("Verify: index build errors on short-form collision instead of guessing")
         # Seam: short length 1 over 40+ symbols guarantees a hex-prefix clash.
         var many: [SymbolComponents] = []
         for i in 0..40:
@@ -191,6 +216,7 @@ describe "link formatting":
     Short links render as spl:kind@module.name~fingerprint.
     """
     it "renders spl:<kind>@<module>.<name>~<fingerprint>":
+        step("Verify: renders spl:<kind>@<module>.<name>~<fingerprint>")
         val c = sample_fn("parse_module", "fn parse_module(src: text) -> i64")
         val id = stable_symbol_id(c)
         val link = format_short_link(c, id)

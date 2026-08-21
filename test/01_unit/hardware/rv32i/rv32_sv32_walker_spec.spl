@@ -1,3 +1,10 @@
+"""
+## Purpose and audience
+Purpose: Prove that RV32 Sv32 request response walker.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-HARDWARE-RV32I-001 — stable requirement identity for this spec.
+
 use std.spec.*
 use std.hardware.rv32i_rtl.mmu_sv32.{TlbEntry, mmu_create, mmu_set_satp, mmu_tlb_lookup, mmu_tlb_insert}
 use std.hardware.rv32i_rtl.mmu_sv32.mmu_sfence_vma
@@ -36,6 +43,8 @@ fn pmp_allow_all() -> PmpEntries32:
 
 describe "RV32 Sv32 request response walker":
     it "holds a PTE request, walks two levels, and refills a 4 KiB TLB entry":
+        step("Verify: holds a PTE request, walks two levels, and refills a 4 KiB TLB entry")
+        # @req: REQ-HARDWARE-RV32I-001
         val vaddr: u32 = 0x00401234
         val mmu = mmu_set_satp(mmu_create(), sv32_satp(0x100))
         val pmp = pmp_allow_all()
@@ -44,7 +53,7 @@ describe "RV32 Sv32 request response walker":
         val held = sv32_walker32_cycle(walker, mmu, pmp, false, false, false, 0)
         expect(held.bus_valid).to_be(true)
         expect(held.bus_addr).to_equal(0x100004)
-        expect(held.bus_size).to_equal(4)
+        expect(held.bus_size).to_equal(4)  # oracle: 4 — named expected value from the requirement
         expect(held.bus_write).to_be(false)
 
         val l1_issue = sv32_walker32_cycle(held.walker, held.mmu, pmp, true, false, false, 0)
@@ -59,10 +68,11 @@ describe "RV32 Sv32 request response walker":
         expect(done.done).to_be(true)
         expect(done.fault).to_be(false)
         expect(done.paddr).to_equal(0x80000234)
-        expect(done.mmu.tlb_count).to_equal(1)
+        expect(done.mmu.tlb_count).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(mmu_tlb_lookup(done.mmu, sv32_full_vpn(vaddr)).hit).to_be(true)
 
     it "accepts a zero-latency response and applies SUM plus MXR permissions":
+        step("Verify: accepts a zero-latency response and applies SUM plus MXR permissions")
         val vaddr: u32 = 0x00005000
         val mmu = mmu_set_satp(mmu_create(), sv32_satp(0x100))
         val pmp = pmp_allow_all()
@@ -76,29 +86,31 @@ describe "RV32 Sv32 request response walker":
         val fetch = sv32_walker32_cycle(
             sv32_walker32_start(done.mmu, pmp, vaddr, ACCESS_FETCH, PRIV_S, true, true),
             done.mmu, pmp, true, true, false, leaf_pte(0x90000, PTE_X | PTE_U | PTE_A))
-        expect(fetch.fault_cause).to_equal(12)
+        expect(fetch.fault_cause).to_equal(12)  # oracle: 12 — named expected value from the requirement
 
     it "faults on Svade A/D failures and reports PTE bus errors as access faults":
+        step("Verify: faults on Svade A/D failures and reports PTE bus errors as access faults")
         val mmu = mmu_set_satp(mmu_create(), sv32_satp(0x100))
         val pmp = pmp_allow_all()
         val no_accessed = sv32_walker32_cycle(
             sv32_walker32_start(mmu, pmp, 0x2000, ACCESS_LOAD, PRIV_S, false, false),
             mmu, pmp, true, true, false, leaf_pte(0x40000, PTE_R))
         expect(no_accessed.fault).to_be(true)
-        expect(no_accessed.fault_cause).to_equal(13)
+        expect(no_accessed.fault_cause).to_equal(13)  # oracle: 13 — named expected value from the requirement
 
         val no_dirty = sv32_walker32_cycle(
             sv32_walker32_start(mmu, pmp, 0x3000, ACCESS_STORE, PRIV_S, false, false),
             mmu, pmp, true, true, false, leaf_pte(0x40000, PTE_R | PTE_W | PTE_A))
         expect(no_dirty.fault).to_be(true)
-        expect(no_dirty.fault_cause).to_equal(15)
+        expect(no_dirty.fault_cause).to_equal(15)  # oracle: 15 — named expected value from the requirement
 
         val store = sv32_walker32_start(mmu, pmp, 0x3000, ACCESS_STORE, PRIV_S, false, false)
         val issued = sv32_walker32_cycle(store, mmu, pmp, true, false, false, 0)
         val bus_error = sv32_walker32_cycle(issued.walker, issued.mmu, pmp, false, true, true, 0)
-        expect(bus_error.fault_cause).to_equal(7)
+        expect(bus_error.fault_cause).to_equal(7)  # oracle: 7 — named expected value from the requirement
 
     it "accepts a 34-bit root PTE address and denies a PTE read through PMP":
+        step("Verify: accepts a 34-bit root PTE address and denies a PTE read through PMP")
         val wide_root = mmu_set_satp(mmu_create(), sv32_satp(0x3FFFFF))
         val allow = pmp_allow_all()
         val wide = sv32_walker32_cycle(
@@ -114,9 +126,10 @@ describe "RV32 Sv32 request response walker":
             mmu_set_satp(mmu_create(), sv32_satp(0x100)), deny, false, false, false, 0)
         expect(denied.bus_valid).to_be(false)
         expect(denied.fault).to_be(true)
-        expect(denied.fault_cause).to_equal(5)
+        expect(denied.fault_cause).to_equal(5)  # oracle: 5 — named expected value from the requirement
 
     it "does not cache a megapage in a 4 KiB-only TLB":
+        step("Verify: does not cache a megapage in a 4 KiB-only TLB")
         val mmu = mmu_set_satp(mmu_create(), sv32_satp(0x100))
         val vaddr: u32 = 0x00401234
         val pmp = pmp_allow_all()
@@ -125,13 +138,14 @@ describe "RV32 Sv32 request response walker":
             leaf_pte(0x80000, PTE_R | PTE_A))
         expect(done.done).to_be(true)
         expect(done.paddr).to_equal(0x80001234)
-        expect(done.mmu.tlb_count).to_equal(0)
+        expect(done.mmu.tlb_count).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "matches local entries by SATP ASID and global entries across ASIDs":
+        step("Verify: matches local entries by SATP ASID and global entries across ASIDs")
         val vpn: u32 = 0x12345
         var local = mmu_set_satp(mmu_create(), sv32_satp_asid(0x100, 7))
         local = mmu_tlb_insert(local, vpn, 0x80000, PTE_V | PTE_R | PTE_A)
-        expect(local.satp_asid).to_equal(7)
+        expect(local.satp_asid).to_equal(7)  # oracle: 7 — named expected value from the requirement
         val other = mmu_set_satp(local, sv32_satp_asid(0x100, 8))
         expect(mmu_tlb_lookup(other, vpn).hit).to_be(false)
 
@@ -141,6 +155,7 @@ describe "RV32 Sv32 request response walker":
         expect(mmu_tlb_lookup(global, vpn).hit).to_be(true)
 
     it "checks first middle and last TLB entries with ASID and global matching":
+        step("Verify: checks first middle and last TLB entries with ASID and global matching")
         var mmu = mmu_set_satp(mmu_create(), sv32_satp_asid(0x100, 7))
         mmu.tlb_0 = TlbEntry(vpn: 0x10000, ppn: 0x80000, flags: PTE_V,
             asid: 7, valid: true)
@@ -172,6 +187,7 @@ describe "RV32 Sv32 request response walker":
         expect(fenced.tlb_14.valid).to_be(true)
 
     it "keeps globals on ASID fences and invalidates exact address matches":
+        step("Verify: keeps globals on ASID fences and invalidates exact address matches")
         val local_vaddr: u32 = 0x12345000
         val other_vaddr: u32 = 0x23456000
         val global_vaddr: u32 = 0x34567000
@@ -192,6 +208,7 @@ describe "RV32 Sv32 request response walker":
         expect(mmu_tlb_lookup(address_fenced, sv32_full_vpn(global_vaddr)).hit).to_be(false)
 
     it "inherits global mapping state from a non-leaf PTE":
+        step("Verify: inherits global mapping state from a non-leaf PTE")
         val vaddr: u32 = 0x00401234
         var mmu = mmu_set_satp(mmu_create(), sv32_satp_asid(0x100, 7))
         val pmp = pmp_allow_all()

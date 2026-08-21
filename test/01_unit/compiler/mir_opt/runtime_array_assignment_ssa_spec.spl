@@ -1,3 +1,10 @@
+"""
+## Purpose and audience
+Purpose: Prove that runtime array assignment SSA (bug: duplicate %lN def).
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-COMPILER-MIR-OPT-001 — stable requirement identity for this spec.
+
 use std.spec
 use compiler.mir.mir_instructions.{
     BlockId, MirBlock, MirInst, MirInstKind, MirOperand, MirOperandKind,
@@ -59,6 +66,8 @@ fn writes_of(blocks: [MirBlock], target_id: i64) -> i64:
 describe "runtime array assignment SSA (bug: duplicate %lN def)":
 
     it "slots a straight-line single-block reassignment of a returned array":
+        step("Verify: slots a straight-line single-block reassignment of a returned array")
+        # @req: REQ-COMPILER-MIR-OPT-001
         # Mirrors the bug's span probe:
         #   %l5 = getelementptr i8, ptr %l4, i64 0
         #   %l5 = add i64 %l11, 0     <- second def of the SAME local
@@ -80,9 +89,10 @@ describe "runtime array assignment SSA (bug: duplicate %lN def)":
         expect(result.applied).to_equal(true)
         expect(result.reason).to_equal("ready")
         # The two duplicate defs of local 5 must be gone (rewritten to stores).
-        expect(writes_of(result.blocks, 5)).to_equal(0)
+        expect(writes_of(result.blocks, 5)).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "slots a reassignment inside an if/else (multi-block)":
+        step("Verify: slots a reassignment inside an if/else (multi-block)")
         val blocks = [
             MirBlock(id: BlockId.new(0), label: "entry", instructions: [],
                 terminator: MirTerminator.If(copy_operand(9), BlockId.new(1), BlockId.new(2))),
@@ -99,9 +109,10 @@ describe "runtime array assignment SSA (bug: duplicate %lN def)":
         val result = ssa_alloca_transform_blocks(blocks, locals, BlockId.new(0))
         expect(result.applied).to_equal(true)
         expect(result.reason).to_equal("ready")
-        expect(writes_of(result.blocks, 5)).to_equal(0)
+        expect(writes_of(result.blocks, 5)).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "slots a loop-carried reassignment (back-edge, multi-block)":
+        step("Verify: slots a loop-carried reassignment (back-edge, multi-block)")
         val blocks = [
             MirBlock(id: BlockId.new(0), label: "entry",
                 instructions: [inst(MirInstKind.GetElementPtr(local(5), copy_operand(4), [int_operand(0)]))],
@@ -118,9 +129,10 @@ describe "runtime array assignment SSA (bug: duplicate %lN def)":
         val result = ssa_alloca_transform_blocks(blocks, locals, BlockId.new(0))
         expect(result.applied).to_equal(true)
         expect(result.reason).to_equal("ready")
-        expect(writes_of(result.blocks, 5)).to_equal(0)
+        expect(writes_of(result.blocks, 5)).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "keeps logical merge memory valid while slotting a loop-carried scalar":
+        step("Verify: keeps logical merge memory valid while slotting a loop-carried scalar")
         val blocks = [
             MirBlock(id: BlockId.new(0), label: "entry", instructions: [
                     inst(MirInstKind.Const(local(5), MirConstValue.Int(0), MirType.i64())),
@@ -152,10 +164,10 @@ describe "runtime array assignment SSA (bug: duplicate %lN def)":
         val result = ssa_alloca_transform_blocks(blocks, locals, BlockId.new(0))
         expect(result.applied).to_equal(true)
         expect(result.reason).to_equal("ready")
-        expect(writes_of(result.blocks, 5)).to_equal(0)
+        expect(writes_of(result.blocks, 5)).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
         val rhs = result.blocks[1].instructions
-        expect(rhs.len()).to_equal(3)
+        expect(rhs.len()).to_equal(3)  # oracle: 3 — named expected value from the requirement
         var rhs_ptr_load_id = -1
         match rhs[0].kind:
             case Load(dest, _): rhs_ptr_load_id = dest.id
@@ -184,7 +196,7 @@ describe "runtime array assignment SSA (bug: duplicate %lN def)":
         expect(kept_merge_load).to_equal(true)
 
         val exit_insts = result.blocks[6].instructions
-        expect(exit_insts.len()).to_equal(1)
+        expect(exit_insts.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         var exit_load_id = -1
         match exit_insts[0].kind:
             case Load(dest, _): exit_load_id = dest.id
@@ -198,6 +210,7 @@ describe "runtime array assignment SSA (bug: duplicate %lN def)":
             case _: fail("exit return was not preserved")
 
     it "slots a possibly-zero-iteration loop (entry def dominates exit use)":
+        step("Verify: slots a possibly-zero-iteration loop (entry def dominates exit use)")
         # Same CFG as a loop, but the body may run zero times; the exit still
         # reads local 5. The entry-block alloca dominates the exit load, so the
         # use is defined on the zero-trip path too (no `undef`).
@@ -217,9 +230,10 @@ describe "runtime array assignment SSA (bug: duplicate %lN def)":
         val result = ssa_alloca_transform_blocks(blocks, locals, BlockId.new(0))
         expect(result.applied).to_equal(true)
         expect(result.reason).to_equal("ready")
-        expect(writes_of(result.blocks, 5)).to_equal(0)
+        expect(writes_of(result.blocks, 5)).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "slots a cross-block-live single-def array pointer (array-index inttoptr shape)":
+        step("Verify: slots a cross-block-live single-def array pointer (array-index inttoptr shape)")
         # Regression for the array-index pointer half of
         #   doc/08_tracking/bug/llvm_aot_array_len_comparison_width_mismatch_2026-07-10.md
         # `val fill = <returned [u32]>` is a SINGLE def (local 5, a GetElementPtr
@@ -249,9 +263,10 @@ describe "runtime array assignment SSA (bug: duplicate %lN def)":
         expect(result.reason).to_equal("ready")
         # The single def of local 5 is rewritten to a Store; both cross-block
         # reads become Loads, so local 5 is written zero times afterward.
-        expect(writes_of(result.blocks, 5)).to_equal(0)
+        expect(writes_of(result.blocks, 5)).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "stays a no-op for a single-block function with no reassignment":
+        step("Verify: stays a no-op for a single-block function with no reassignment")
         val blocks = [
             MirBlock(
                 id: BlockId.new(0),

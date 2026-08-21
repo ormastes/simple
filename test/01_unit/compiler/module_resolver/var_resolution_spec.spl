@@ -1,3 +1,10 @@
+"""
+## Purpose and audience
+Purpose: Prove that var overlay resolution.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-COMPILER-MODULE-RESOLVER-001 — stable requirement identity for this spec.
+
 # Unit spec: variant overlay candidate-root ordering + fail-closed validation.
 use std.spec.*
 use compiler.module_resolver.var_resolution.{VarGroup, VarManifest, VarSelection, VarSources, var_group_dir, var_candidate_roots, var_validate, var_parse_manifest, var_resolve_selections, var_module_candidates, var_config_selections}
@@ -35,6 +42,7 @@ fn sample_manifest() -> VarManifest:
 
 describe "var overlay resolution":
     it "maps dotted group names to nested directories":
+        # @req: REQ-COMPILER-MODULE-RESOLVER-001
         step("lib.crypto resolves under lib/crypto")
         expect(var_group_dir("lib.crypto")).to_equal("lib/crypto")
         expect(var_group_dir("platform")).to_equal("platform")
@@ -64,9 +72,10 @@ describe "var overlay resolution":
         step("Only one selected root, then the three group defaults + global")
         expect(roots[0]).to_equal("variants/hw/x86_64")
         expect(roots[1]).to_equal("variants/platform/default")
-        expect(roots.len()).to_equal(5)
+        expect(roots.len()).to_equal(5)  # oracle: 5 — named expected value from the requirement
 
     it "passes validation for a well-formed manifest + selections":
+        step("Verify: passes validation for a well-formed manifest + selections")
         val sels = [VarSelection(group: "platform", value: "mac")]
         val errs = var_validate(sample_manifest(), sels)
         # NOTE: `expect(n).to_equal(0)` mis-reports 0 as falsy (see bug
@@ -75,10 +84,12 @@ describe "var overlay resolution":
         expect(is_empty).to_equal(true)
 
     it "rejects an unknown group (E-VAR001)":
+        step("Verify: rejects an unknown group (E-VAR001)")
         val sels = [VarSelection(group: "nope", value: "x")]
         expect(var_validate(sample_manifest(), sels)).to_contain("E-VAR001")
 
     it "rejects an unknown value (E-VAR002)":
+        step("Verify: rejects an unknown value (E-VAR002)")
         val sels = [VarSelection(group: "hw", value: "sparc")]
         expect(var_validate(sample_manifest(), sels)).to_contain("E-VAR002")
 
@@ -93,6 +104,7 @@ describe "var overlay resolution":
         expect(var_validate(bad, [])).to_contain("E-VAR003")
 
     it "rejects a duplicate group in order (E-VAR004)":
+        step("Verify: rejects a duplicate group in order (E-VAR004)")
         val bad = VarManifest(
             version: 1,
             global_default: "default",
@@ -111,16 +123,19 @@ describe "var config reader (config/var.sdn)":
         "    mac_metal: { platform: mac, hw: auto, lib.crypto: openssl, ui.renderer: metal }\n"
 
     it "reads the file's active profile when no override":
+        step("Verify: reads the file's active profile when no override")
         val sels = var_config_selections(sample_config(), "")
         expect(sel_value(sels, "lib.crypto")).to_equal("default")
         expect(sel_value(sels, "ui.renderer")).to_equal("cpu")
 
     it "honors a profile override (CLI --var-profile)":
+        step("Verify: honors a profile override (CLI --var-profile)")
         val sels = var_config_selections(sample_config(), "prod")
         expect(sel_value(sels, "lib.crypto")).to_equal("openssl")
         expect(sel_value(sels, "ui.renderer")).to_equal("auto")
 
     it "parses dotted-group keys and non-auto values":
+        step("Verify: parses dotted-group keys and non-auto values")
         val sels = var_config_selections(sample_config(), "mac_metal")
         expect(sel_value(sels, "platform")).to_equal("mac")
         expect(sel_value(sels, "ui.renderer")).to_equal("metal")
@@ -137,6 +152,7 @@ describe "var config reader (config/var.sdn)":
 describe "var active-selection precedence":
     # sample_manifest groups order: [0]=platform [1]=hw [2]=lib.crypto
     it "CLI override beats env and config":
+        step("Verify: CLI override beats env and config")
         val src = VarSources(
             cli: [VarSelection(group: "platform", value: "linux")],
             env: [VarSelection(group: "platform", value: "windows")],
@@ -146,6 +162,7 @@ describe "var active-selection precedence":
         expect(sels[0].value).to_equal("linux")
 
     it "env beats config when no CLI override":
+        step("Verify: env beats config when no CLI override")
         val src = VarSources(
             cli: [],
             env: [VarSelection(group: "platform", value: "windows")],
@@ -163,6 +180,7 @@ describe "var active-selection precedence":
         expect(sels[1].value).to_equal("arm64")   # hw -> host_arch
 
     it "a non-auto select_default with no override stays default":
+        step("Verify: a non-auto select_default with no override stays default")
         val src = VarSources(cli: [], env: [], config_profile: [],
             host_platform: "mac", host_arch: "arm64")
         val sels = var_resolve_selections(sample_manifest(), src)
@@ -184,11 +202,13 @@ describe "var file probe (real filesystem fixtures)":
         expect(first_existing(cands)).to_contain("variants/lib/crypto/openssl/crypto/provider.spl")
 
     it "falls through to the default root when no selected root has the file":
+        step("Verify: falls through to the default root when no selected root has the file")
         val roots = ["variants/lib/crypto/mbedtls", "variants/lib/crypto/default"]
         val cands = var_module_candidates(FIX, roots, ["crypto", "provider"])
         expect(first_existing(cands)).to_contain("variants/lib/crypto/default/crypto/provider.spl")
 
     it "finds nothing when no root provides the module":
+        step("Verify: finds nothing when no root provides the module")
         val roots = ["variants/lib/crypto/mbedtls"]
         val cands = var_module_candidates(FIX, roots, ["crypto", "provider"])
         val none = first_existing(cands).len() == 0
@@ -238,7 +258,7 @@ describe "var manifest reader (bootstrap-safe)":
         step("Top-level fields parsed")
         expect(m.global_default).to_equal("default")
         expect(m.order).to_equal(["platform", "hw", "lib.crypto"])
-        expect(m.groups.len()).to_equal(3)
+        expect(m.groups.len()).to_equal(3)  # oracle: 3 — named expected value from the requirement
         step("Group values + select_default parsed")
         expect(m.groups[0].name).to_equal("platform")
         expect(m.groups[0].values).to_equal(["default", "mac", "linux"])

@@ -1,3 +1,10 @@
+"""
+## Purpose and audience
+Purpose: Prove that RV64 Sv39 request response walker.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-HARDWARE-RV64GC-001 — stable requirement identity for this spec.
+
 use std.spec.*
 use std.hardware.rv64gc_rtl.sv39_address.sv39_full_vpn
 use std.hardware.rv64gc_rtl.mmu_sv39.{MmuState64, mmu64_create, mmu64_set_satp}
@@ -33,6 +40,8 @@ fn allow_all_pmp() -> PmpEntries64:
 
 describe "RV64 Sv39 request response walker":
     it "walks three levels, preserves request handshakes, and refills a 4 KiB TLB entry":
+        step("Verify: walks three levels, preserves request handshakes, and refills a 4 KiB TLB entry")
+        # @req: REQ-HARDWARE-RV64GC-001
         val vaddr: i64 = 0x0000000000401234
         var mmu = mmu64_set_satp(mmu64_create(), satp_sv39(0x100, 7))
         val pmp = allow_all_pmp()
@@ -44,7 +53,7 @@ describe "RV64 Sv39 request response walker":
         val l2_issue = sv39_walker64_cycle(held.walker, held.mmu, pmp, true, false, false, 0)
         expect(l2_issue.bus_valid).to_be(true)
         expect(l2_issue.bus_addr).to_equal(0x100000)
-        expect(l2_issue.bus_size).to_equal(8)
+        expect(l2_issue.bus_size).to_equal(8)  # oracle: 8 — named expected value from the requirement
         expect(l2_issue.bus_write).to_be(false)
         walker = l2_issue.walker
         val l2_response = sv39_walker64_cycle(walker, mmu, pmp, false, true, false, pointer_pte(0x101))
@@ -60,14 +69,15 @@ describe "RV64 Sv39 request response walker":
         expect(done.done).to_be(true)
         expect(done.fault).to_be(false)
         expect(done.paddr).to_equal(0x80000234)
-        expect(done.mmu.tlb_count).to_equal(1)
+        expect(done.mmu.tlb_count).to_equal(1)  # oracle: 1 — named expected value from the requirement
         val hit = mmu64_tlb_lookup(done.mmu, sv39_full_vpn(vaddr))
         expect(hit.hit).to_be(true)
-        expect(hit.level).to_equal(0)
+        expect(hit.level).to_equal(0)  # oracle: 0 — named expected value from the requirement
         val other_asid = mmu64_set_satp(done.mmu, satp_sv39(0x100, 8))
         expect(sv39_walker64_start(other_asid, vaddr, ACCESS_LOAD_64, PRIV_S_64, false, false).tlb_hit).to_be(false)
 
     it "suppresses a page-table bus request when S-effective PMP denies it":
+        step("Verify: suppresses a page-table bus request when S-effective PMP denies it")
         val vaddr: i64 = 0x4000
         val mmu = mmu64_set_satp(mmu64_create(), satp_sv39(0x100, 0))
         val walker = sv39_walker64_start(mmu, vaddr, ACCESS_FETCH_64, PRIV_S_64, false, false)
@@ -75,18 +85,20 @@ describe "RV64 Sv39 request response walker":
         expect(denied.bus_valid).to_be(false)
         expect(denied.done).to_be(true)
         expect(denied.fault).to_be(true)
-        expect(denied.fault_cause).to_equal(1)
+        expect(denied.fault_cause).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(denied.fault_tval).to_equal(vaddr)
 
     it "maps a page-table bus error to the originating store access fault":
+        step("Verify: maps a page-table bus error to the originating store access fault")
         val mmu = mmu64_set_satp(mmu64_create(), satp_sv39(0x100, 0))
         val walker = sv39_walker64_start(mmu, 0x8000, ACCESS_STORE_64, PRIV_S_64, false, false)
         val issued = sv39_walker64_cycle(walker, mmu, allow_all_pmp(), true, false, false, 0)
         val failed = sv39_walker64_cycle(issued.walker, issued.mmu, allow_all_pmp(), false, true, true, 0)
         expect(failed.fault).to_be(true)
-        expect(failed.fault_cause).to_equal(7)
+        expect(failed.fault_cause).to_equal(7)  # oracle: 7 — named expected value from the requirement
 
     it "applies SUM and MXR on TLB hits without allowing supervisor fetches from user pages":
+        step("Verify: applies SUM and MXR on TLB hits without allowing supervisor fetches from user pages")
         val vaddr: i64 = 0x5000
         var mmu = mmu64_set_satp(mmu64_create(), satp_sv39(0x100, 0))
         mmu = mmu64_tlb_insert(mmu, sv39_full_vpn(vaddr), 0x90000, PTE_V | PTE_X | PTE_U | PTE_A)
@@ -94,9 +106,10 @@ describe "RV64 Sv39 request response walker":
         expect(load.tlb_hit).to_be(true)
         expect(load.paddr).to_equal(0x90000000)
         val fetch = sv39_walker64_start(mmu, vaddr, ACCESS_FETCH_64, PRIV_S_64, true, false)
-        expect(fetch.fault_cause).to_equal(12)
+        expect(fetch.fault_cause).to_equal(12)  # oracle: 12 — named expected value from the requirement
 
     it "translates and caches an aligned 1 GiB leaf":
+        step("Verify: translates and caches an aligned 1 GiB leaf")
         val vaddr: i64 = 0x0000000040203456
         var mmu = mmu64_set_satp(mmu64_create(), satp_sv39(0x100, 0))
         val walker = sv39_walker64_start(mmu, vaddr, ACCESS_LOAD_64, PRIV_S_64, false, false)
@@ -111,6 +124,7 @@ describe "RV64 Sv39 request response walker":
         expect(cached.paddr).to_equal(0x0000000080203456)
 
     it "accepts a zero-latency PTE response in the request handshake cycle":
+        step("Verify: accepts a zero-latency PTE response in the request handshake cycle")
         val vaddr: i64 = 0x0000000040001234
         val mmu = mmu64_set_satp(mmu64_create(), satp_sv39(0x100, 0))
         val walker = sv39_walker64_start(mmu, vaddr, ACCESS_LOAD_64, PRIV_S_64, false, false)
@@ -121,14 +135,15 @@ describe "RV64 Sv39 request response walker":
         expect(done.paddr).to_equal(0x00000000C0001234)
 
     it "faults before bus issue on a noncanonical address and on a clear accessed bit":
+        step("Verify: faults before bus issue on a noncanonical address and on a clear accessed bit")
         val mmu = mmu64_set_satp(mmu64_create(), satp_sv39(0x100, 0))
         val noncanonical = sv39_walker64_start(mmu, 0x0000004000000000, ACCESS_LOAD_64, PRIV_S_64, false, false)
-        expect(noncanonical.fault_cause).to_equal(13)
+        expect(noncanonical.fault_cause).to_equal(13)  # oracle: 13 — named expected value from the requirement
         val reserved_privilege = sv39_walker64_start(mmu64_create(), 0x1000, ACCESS_LOAD_64, 2, false, false)
-        expect(reserved_privilege.fault_cause).to_equal(13)
+        expect(reserved_privilege.fault_cause).to_equal(13)  # oracle: 13 — named expected value from the requirement
 
         val walker = sv39_walker64_start(mmu, 0x2000, ACCESS_LOAD_64, PRIV_S_64, false, false)
         val issued = sv39_walker64_cycle(walker, mmu, allow_all_pmp(), true, false, false, 0)
         val no_accessed = sv39_walker64_cycle(issued.walker, issued.mmu, allow_all_pmp(), false, true, false, leaf_pte(0x40000, PTE_R))
         expect(no_accessed.fault).to_be(true)
-        expect(no_accessed.fault_cause).to_equal(13)
+        expect(no_accessed.fault_cause).to_equal(13)  # oracle: 13 — named expected value from the requirement

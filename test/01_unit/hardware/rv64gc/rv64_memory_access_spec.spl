@@ -1,3 +1,10 @@
+"""
+## Purpose and audience
+Purpose: Prove that RV64 translated and protected memory frontend.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-HARDWARE-RV64GC-001 — stable requirement identity for this spec.
+
 use std.spec.*
 use std.hardware.rv64gc_rtl.mmu_sv39.{mmu64_create, mmu64_set_satp}
 use std.hardware.rv64gc_rtl.mmu_sv39.{ACCESS_FETCH_64, ACCESS_LOAD_64, ACCESS_STORE_64}
@@ -30,13 +37,15 @@ fn pmp_allow_root_page_only() -> PmpEntries64:
 
 describe "RV64 translated and protected memory frontend":
     it "issues and completes a Bare M-mode instruction parcel":
+        step("Verify: issues and completes a Bare M-mode instruction parcel")
+        # @req: REQ-HARDWARE-RV64GC-001
         val mmu = mmu64_create()
         val pmp = pmp64_entries_reset()
         val state = memory64_start(mmu, pmp, 0x1000, ACCESS_FETCH_64, 2, PRIV_M_64, false, false, 0)
         val request = memory64_cycle(state, mmu, pmp, false, false, false, 0)
         expect(request.bus_valid).to_be(true)
         expect(request.bus_addr).to_equal(0x1000)
-        expect(request.bus_size).to_equal(2)
+        expect(request.bus_size).to_equal(2)  # oracle: 2 — named expected value from the requirement
         expect(request.bus_is_pte).to_be(false)
         val done = memory64_cycle(request.state, request.mmu, pmp, true, true, false, 0x1234)
         expect(done.done).to_be(true)
@@ -44,15 +53,17 @@ describe "RV64 translated and protected memory frontend":
         expect(done.read_data).to_equal(0x1234)
 
     it "suppresses a Bare S-mode load denied by final PMP":
+        step("Verify: suppresses a Bare S-mode load denied by final PMP")
         val mmu = mmu64_create()
         val pmp = pmp64_entries_reset()
         val state = memory64_start(mmu, pmp, 0x2000, ACCESS_LOAD_64, 8, PRIV_S_64, false, false, 0)
         val denied = memory64_cycle(state, mmu, pmp, false, false, false, 0)
         expect(denied.bus_valid).to_be(false)
         expect(denied.fault).to_be(true)
-        expect(denied.fault_cause).to_equal(5)
+        expect(denied.fault_cause).to_equal(5)  # oracle: 5 — named expected value from the requirement
 
     it "walks Sv39 before issuing the translated physical load":
+        step("Verify: walks Sv39 before issuing the translated physical load")
         val vaddr: i64 = 0x0000000040001000
         val mmu = mmu64_set_satp(mmu64_create(), satp_sv39(0x100))
         val pmp = pmp_allow_all()
@@ -60,7 +71,7 @@ describe "RV64 translated and protected memory frontend":
         val pte_request = memory64_cycle(state, mmu, pmp, true, false, false, 0)
         expect(pte_request.bus_valid).to_be(true)
         expect(pte_request.bus_is_pte).to_be(true)
-        expect(pte_request.bus_size).to_equal(8)
+        expect(pte_request.bus_size).to_equal(8)  # oracle: 8 — named expected value from the requirement
         val translated = memory64_cycle(pte_request.state, pte_request.mmu, pmp, false, true, false, gigapage_pte(2))
         expect(translated.bus_valid).to_be(false)
         val load_request = memory64_cycle(translated.state, translated.mmu, pmp, false, false, false, 0)
@@ -69,6 +80,7 @@ describe "RV64 translated and protected memory frontend":
         expect(load_request.bus_addr).to_equal(0x0000000080001000)
 
     it "allows the PTE read but suppresses a translated target denied by PMP":
+        step("Verify: allows the PTE read but suppresses a translated target denied by PMP")
         val vaddr: i64 = 0x0000000040001000
         val mmu = mmu64_set_satp(mmu64_create(), satp_sv39(0x100))
         val pmp = pmp_allow_root_page_only()
@@ -78,20 +90,22 @@ describe "RV64 translated and protected memory frontend":
         val denied = memory64_cycle(pte_request.state, pte_request.mmu, pmp, false, true, false, gigapage_pte(2))
         expect(denied.done).to_be(true)
         expect(denied.fault).to_be(true)
-        expect(denied.fault_cause).to_equal(5)
+        expect(denied.fault_cause).to_equal(5)  # oracle: 5 — named expected value from the requirement
         expect(denied.bus_valid).to_be(false)
 
     it "raises a precise misaligned store before translation or bus issue":
+        step("Verify: raises a precise misaligned store before translation or bus issue")
         val mmu = mmu64_create()
         val pmp = pmp_allow_all()
         val state = memory64_start(mmu, pmp, 0x1003, ACCESS_STORE_64, 8, PRIV_M_64, false, false, 0x55)
         val fault = memory64_cycle(state, mmu, pmp, false, false, false, 0)
         expect(fault.bus_valid).to_be(false)
         expect(fault.fault).to_be(true)
-        expect(fault.fault_cause).to_equal(6)
+        expect(fault.fault_cause).to_equal(6)  # oracle: 6 — named expected value from the requirement
         expect(fault.fault_tval).to_equal(0x1003)
 
     it "marks LR, AMO, store, and successful SC requests atomic":
+        step("Verify: marks LR, AMO, store, and successful SC requests atomic")
         val mmu = mmu64_create()
         val pmp = pmp_allow_all()
         val lr = memory64_cycle(memory64_start_lr(mmu, pmp, 0x1000, 8, PRIV_M_64, false, false), mmu, pmp, false, false, false, 0)
@@ -108,16 +122,17 @@ describe "RV64 translated and protected memory frontend":
         expect(sc.bus_write).to_be(true)
 
     it "uses LR load faults, AMO store faults, and suppresses failed SC":
+        step("Verify: uses LR load faults, AMO store faults, and suppresses failed SC")
         val mmu = mmu64_create()
         val denied = pmp64_entries_reset()
         val lr_fault = memory64_cycle(memory64_start_lr(mmu, denied, 0x1000, 4, PRIV_S_64, false, false), mmu, denied, false, false, false, 0)
-        expect(lr_fault.fault_cause).to_equal(5)
+        expect(lr_fault.fault_cause).to_equal(5)  # oracle: 5 — named expected value from the requirement
         val amo_fault = memory64_cycle(memory64_start_atomic_read(mmu, denied, 0x1000, 4, PRIV_S_64, false, false), mmu, denied, false, false, false, 0)
-        expect(amo_fault.fault_cause).to_equal(7)
+        expect(amo_fault.fault_cause).to_equal(7)  # oracle: 7 — named expected value from the requirement
         val invalid_lr = memory64_cycle(memory64_start_lr(mmu, pmp_allow_all(), 0x1000, 2, PRIV_M_64, false, false), mmu, pmp_allow_all(), false, false, false, 0)
-        expect(invalid_lr.fault_cause).to_equal(5)
+        expect(invalid_lr.fault_cause).to_equal(5)  # oracle: 5 — named expected value from the requirement
         val invalid_store = memory64_cycle(memory64_start_atomic_store(mmu, pmp_allow_all(), 0x1000, 1, PRIV_M_64, false, false, 0), mmu, pmp_allow_all(), false, false, false, 0)
-        expect(invalid_store.fault_cause).to_equal(7)
+        expect(invalid_store.fault_cause).to_equal(7)  # oracle: 7 — named expected value from the requirement
         val failed_sc = memory64_cycle(memory64_start_conditional_store(mmu, pmp_allow_all(), 0x1000, 8, PRIV_M_64, false, false, 0x22, true, 0x2000, 8), mmu, pmp_allow_all(), false, false, false, 0)
         expect(failed_sc.done).to_be(true)
         expect(failed_sc.fault).to_be(false)

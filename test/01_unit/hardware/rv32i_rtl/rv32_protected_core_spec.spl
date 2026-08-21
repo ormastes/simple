@@ -1,3 +1,10 @@
+"""
+## Purpose and audience
+Purpose: Prove that RV32 protected core shell.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-HARDWARE-RV32I-RTL-001 — stable requirement identity for this spec.
+
 use std.spec.*
 use std.hardware.rv32i_rtl.protected_core.{CoreProtectedState32, CORE32_FETCH, CORE32_EXECUTE, CORE32_DATA_ACCESS, CORE32_WFI, core32_init, core32_cycle}
 use std.hardware.rv32i_rtl.protected_core.{core32_csr_access, core32_data_privilege, core32_check_interrupt, core32_enter_trap}
@@ -21,6 +28,8 @@ fn deliver_32bit_instruction(requested: CoreProtectedState32,
 
 describe "RV32 protected core shell":
     it "fetches and commits an integer instruction through the only bus":
+        step("Verify: fetches and commits an integer instruction through the only bus")
+        # @req: REQ-HARDWARE-RV32I-RTL-001
         val initial = core32_init(0x1000)
         val request = core32_cycle(initial, false, false, false, 0)
         expect(request.bus_valid).to_be(true)
@@ -29,19 +38,20 @@ describe "RV32 protected core shell":
         val fetched = deliver_32bit_instruction(request.state, 0x00100093)
         expect(fetched.pipeline_phase).to_equal(CORE32_EXECUTE)
         val committed = core32_cycle(fetched, false, false, false, 0)
-        expect(regfile_read(committed.state.rf, 1, 0).rs1_data).to_equal(1)
+        expect(regfile_read(committed.state.rf, 1, 0).rs1_data).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(committed.state.core.pc).to_equal(0x1004)
         expect(committed.rvfi.rvfi_valid).to_be(true)
         expect(committed.rvfi.rvfi_trap).to_be(false)
-        expect(committed.rvfi.rvfi_order).to_equal(0)
+        expect(committed.rvfi.rvfi_order).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(committed.rvfi.rvfi_insn).to_equal(0x00100093)
         expect(committed.rvfi.rvfi_pc_rdata).to_equal(0x1000)
         expect(committed.rvfi.rvfi_pc_wdata).to_equal(0x1004)
-        expect(committed.rvfi.rvfi_rd_addr).to_equal(1)
-        expect(committed.rvfi.rvfi_rd_wdata).to_equal(1)
-        expect(committed.state.rvfi_order).to_equal(1)
+        expect(committed.rvfi.rvfi_rd_addr).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(committed.rvfi.rvfi_rd_wdata).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(committed.state.rvfi_order).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "exposes the protected transition through the compiler clocked entry":
+        step("Verify: exposes the protected transition through the compiler clocked entry")
         val initial = core32_init(0x1000)
         val result = core32_protected_clocked_entry(true, true, initial,
             false, false, false, 0)
@@ -49,12 +59,13 @@ describe "RV32 protected core shell":
         expect(result.bus_addr).to_equal(0x1000)
 
     it "owns reset state and feeds the protected result into the next clock":
+        step("Verify: owns reset state and feeds the protected result into the next clock")
         val reset = core32_protected_product_entry(true, false, 0x2000,
             false, false, false, false, false, 0,
             false, false, false, 0)
         expect(reset.bus_valid).to_be(false)
-        expect(reset.rvfi_ixl).to_equal(1)
-        expect(reset.rvfi_mode).to_equal(3)
+        expect(reset.rvfi_ixl).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(reset.rvfi_mode).to_equal(3)  # oracle: 3 — named expected value from the requirement
         val first = core32_protected_product_entry(true, true, 0x2000,
             false, false, false, false, false, 0,
             false, false, false, 0)
@@ -66,6 +77,7 @@ describe "RV32 protected core shell":
         expect(second.bus_addr).to_equal(0x2000)
 
     it "emits one ordered trap event for a synchronous illegal instruction":
+        step("Verify: emits one ordered trap event for a synchronous illegal instruction")
         var initial = core32_init(0x1000)
         initial.pipeline_phase = CORE32_EXECUTE
         initial.instruction = 0xFFFFFFFF
@@ -73,13 +85,14 @@ describe "RV32 protected core shell":
         val trapped = core32_cycle(initial, false, false, false, 0)
         expect(trapped.rvfi.rvfi_valid).to_be(true)
         expect(trapped.rvfi.rvfi_trap).to_be(true)
-        expect(trapped.rvfi.rvfi_order).to_equal(0)
+        expect(trapped.rvfi.rvfi_order).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(trapped.rvfi.rvfi_insn).to_equal(0xFFFFFFFF)
         expect(trapped.rvfi.rvfi_pc_rdata).to_equal(0x1000)
         expect(trapped.rvfi.rvfi_pc_wdata).to_equal(0x2000)
-        expect(trapped.state.rvfi_order).to_equal(1)
+        expect(trapped.state.rvfi_order).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "preserves the raw illegal compressed parcel in the trap trace":
+        step("Verify: preserves the raw illegal compressed parcel in the trap trace")
         var initial = core32_init(0x1000)
         initial.csr_m.mtvec = 0x2000
         val trapped = core32_cycle(initial, true, true, false, 0x1082)
@@ -90,16 +103,18 @@ describe "RV32 protected core shell":
         expect(trapped.rvfi.rvfi_pc_wdata).to_equal(0x2000)
 
     it "routes SATP CSR writes through S-mode state and flushes the MMU":
+        step("Verify: routes SATP CSR writes through S-mode state and flushes the MMU")
         var initial = core32_init(0x1000)
         initial.rf = regfile_write(initial.rf, 1, 0x80000100, true)
         val request = core32_cycle(initial, false, false, false, 0)
         val fetched = deliver_32bit_instruction(request.state, 0x18009073)
         val committed = core32_cycle(fetched, false, false, false, 0)
         expect(committed.state.csr_s.satp).to_equal(0x80000100)
-        expect(committed.state.mmu.satp_mode).to_equal(1)
+        expect(committed.state.mmu.satp_mode).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(committed.state.mmu.satp_ppn).to_equal(0x100)
 
     it "takes a data PMP fault without committing the load destination":
+        step("Verify: takes a data PMP fault without committing the load destination")
         var initial = core32_init(0x1000)
         initial.pmp.cfg_0 = 0x88
         initial.pmp.addr_0 = 0x400
@@ -107,42 +122,45 @@ describe "RV32 protected core shell":
         val fetch_request = core32_cycle(initial, false, false, false, 0)
         val fetched = deliver_32bit_instruction(fetch_request.state, 0x00002103)
         val data_started = core32_cycle(fetched, false, false, false, 0)
-        expect(data_started.state.memory.vaddr).to_equal(0)
+        expect(data_started.state.memory.vaddr).to_equal(0)  # oracle: 0 — named expected value from the requirement
         val fault = core32_cycle(data_started.state, false, false, false, 0)
         expect(fault.bus_valid).to_be(false)
-        expect(fault.state.csr_m.mcause).to_equal(5)
-        expect(fault.state.csr_m.mtval).to_equal(0)
+        expect(fault.state.csr_m.mcause).to_equal(5)  # oracle: 5 — named expected value from the requirement
+        expect(fault.state.csr_m.mtval).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(regfile_read(fault.state.rf, 2, 0).rs1_data).to_equal(0x00000FFC)
         expect(fault.state.core.pc).to_equal(0x2000)
 
     it "ticks mcycle every active clock and minstret only on retirement":
+        step("Verify: ticks mcycle every active clock and minstret only on retirement")
         val initial = core32_init(0x1000)
         val request = core32_cycle(initial, false, false, false, 0)
-        expect(request.state.csr_m.mcycle).to_equal(1)
-        expect(request.state.csr_m.minstret).to_equal(0)
+        expect(request.state.csr_m.mcycle).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(request.state.csr_m.minstret).to_equal(0)  # oracle: 0 — named expected value from the requirement
         val fetched = deliver_32bit_instruction(request.state, 0x00100093)
-        expect(fetched.csr_m.mcycle).to_equal(4)
-        expect(fetched.csr_m.minstret).to_equal(0)
+        expect(fetched.csr_m.mcycle).to_equal(4)  # oracle: 4 — named expected value from the requirement
+        expect(fetched.csr_m.minstret).to_equal(0)  # oracle: 0 — named expected value from the requirement
         val committed = core32_cycle(fetched, false, false, false, 0)
-        expect(committed.state.csr_m.mcycle).to_equal(5)
-        expect(committed.state.csr_m.minstret).to_equal(1)
+        expect(committed.state.csr_m.mcycle).to_equal(5)  # oracle: 5 — named expected value from the requirement
+        expect(committed.state.csr_m.minstret).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
         val next_request = core32_cycle(committed.state, false, false, false, 0)
         val invalid_fetched = deliver_32bit_instruction(next_request.state, 0xFFFFFFFF)
         val trapped = core32_cycle(invalid_fetched, false, false, false, 0)
-        expect(trapped.state.csr_m.mcycle).to_equal(10)
-        expect(trapped.state.csr_m.minstret).to_equal(1)
+        expect(trapped.state.csr_m.mcycle).to_equal(10)  # oracle: 10 — named expected value from the requirement
+        expect(trapped.state.csr_m.minstret).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "permits a Zicsr write to mcycle through the protected core":
+        step("Verify: permits a Zicsr write to mcycle through the protected core")
         var initial = core32_init(0x1000)
         initial.rf = regfile_write(initial.rf, 1, 0x12345678, true)
         val request = core32_cycle(initial, false, false, false, 0)
         val fetched = deliver_32bit_instruction(request.state, 0xB0009073)
         val committed = core32_cycle(fetched, false, false, false, 0)
         expect(committed.state.csr_m.mcycle).to_equal(0x12345678)
-        expect(committed.state.csr_m.minstret).to_equal(1)
+        expect(committed.state.csr_m.minstret).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "issues SC.W to the exact physical address accepted by its probe":
+        step("Verify: issues SC.W to the exact physical address accepted by its probe")
         var initial = core32_init(0x1000)
         initial.pipeline_phase = CORE32_EXECUTE
         initial.instruction = 0x1820A1AF
@@ -162,12 +180,13 @@ describe "RV32 protected core shell":
         val invalidated = core32_invalidate_reservation(armed.state, 0x2000, 4)
         val cancelled = core32_cycle(invalidated, true, false, false, 0)
         expect(cancelled.bus_valid).to_be(false)
-        expect(regfile_read(cancelled.state.rf, 3, 0).rs1_data).to_equal(1)
+        expect(regfile_read(cancelled.state.rf, 3, 0).rs1_data).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(cancelled.rvfi.rvfi_valid).to_be(true)
-        expect(cancelled.rvfi.rvfi_mem_rmask).to_equal(0)
-        expect(cancelled.rvfi.rvfi_mem_wmask).to_equal(0)
+        expect(cancelled.rvfi.rvfi_mem_rmask).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(cancelled.rvfi.rvfi_mem_wmask).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "does not alias a 34-bit external write onto a low reservation":
+        step("Verify: does not alias a 34-bit external write onto a low reservation")
         var initial = core32_init(0x1000)
         initial.reservation = rv32a_lr_set(0)
         val high = core32_invalidate_reservation(initial, 0x100000000, 4)
@@ -179,6 +198,7 @@ describe "RV32 protected core shell":
         expect(exact_high.reservation.valid).to_be(false)
 
     it "keeps translated LR/SC and AMO physical state above 4 GiB":
+        step("Verify: keeps translated LR/SC and AMO physical state above 4 GiB")
         val virtual_address: u32 = 0x2000
         val physical_address: i64 = 0x100001000
         var initial = core32_init(0x1000)
@@ -213,7 +233,7 @@ describe "RV32 protected core shell":
         expect(sc_store.bus_write).to_be(true)
         expect(sc_store.bus_lock).to_be(true)
         val sc_done = core32_cycle(sc_store.state, true, true, false, 0)
-        expect(regfile_read(sc_done.state.rf, 3, 0).rs1_data).to_equal(0)
+        expect(regfile_read(sc_done.state.rf, 3, 0).rs1_data).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(sc_done.state.reservation.valid).to_be(false)
 
         var amo_state = sc_done.state
@@ -227,7 +247,7 @@ describe "RV32 protected core shell":
         expect(amo_read.bus_lock).to_be(true)
         val amo_loaded = core32_cycle(amo_read.state, true, true, false, 7)
         val amo_store = core32_cycle(amo_loaded.state, false, false, false, 0)
-        expect(amo_store.state.atomic_old).to_equal(7)
+        expect(amo_store.state.atomic_old).to_equal(7)  # oracle: 7 — named expected value from the requirement
         expect(amo_store.bus_addr).to_equal(physical_address)
         expect(amo_store.bus_write).to_be(true)
         expect(amo_store.bus_lock).to_be(true)
@@ -236,10 +256,11 @@ describe "RV32 protected core shell":
         expect(amo_done.rvfi.rvfi_mem_addr).to_equal(virtual_address)
         expect(amo_done.rvfi.rvfi_mem_rmask).to_equal(0xF)
         expect(amo_done.rvfi.rvfi_mem_wmask).to_equal(0xF)
-        expect(amo_done.rvfi.rvfi_mem_rdata).to_equal(7)
+        expect(amo_done.rvfi.rvfi_mem_rdata).to_equal(7)  # oracle: 7 — named expected value from the requirement
         expect(amo_done.rvfi.rvfi_mem_wdata).to_equal(0xA5A5A5AC)
 
     it "services the protected core fetch through the canonical SoC fabric":
+        step("Verify: services the protected core fetch through the canonical SoC fabric")
         val initial = soc_protected32_create(16)
         val issued = soc_protected32_tick(initial)
         expect(issued.state.response_valid).to_be(true)
@@ -254,6 +275,7 @@ describe "RV32 protected core shell":
         expect(completed.state.core.pipeline_phase).to_equal(CORE32_EXECUTE)
 
     it "propagates an unmapped protected-bus response as an access fault":
+        step("Verify: propagates an unmapped protected-bus response as an access fault")
         var initial = soc_protected32_create(16)
         initial.core.pipeline_phase = CORE32_DATA_ACCESS
         initial.core.memory = memory32_start(initial.core.mmu, initial.core.pmp,
@@ -262,9 +284,10 @@ describe "RV32 protected core shell":
         expect(issued.state.response_valid).to_be(true)
         expect(issued.state.response_error).to_be(true)
         val faulted = soc_protected32_tick(issued.state)
-        expect(faulted.state.core.csr_m.mcause).to_equal(5)
+        expect(faulted.state.core.csr_m.mcause).to_equal(5)  # oracle: 5 — named expected value from the requirement
 
     it "rejects protected writes to the read-only DTB overlay":
+        step("Verify: rejects protected writes to the read-only DTB overlay")
         var initial = soc_protected32_create(16)
         initial.core.pipeline_phase = CORE32_DATA_ACCESS
         initial.core.memory = memory32_start(initial.core.mmu, initial.core.pmp,
@@ -277,27 +300,29 @@ describe "RV32 protected core shell":
             sparse_read(initial.sparse, 0x08000000))
         val consumed = soc_protected32_tick(issued.state)
         expect(consumed.state.response_valid).to_be(false)
-        expect(consumed.state.core.csr_m.mcause).to_equal(7)
+        expect(consumed.state.core.csr_m.mcause).to_equal(7)  # oracle: 7 — named expected value from the requirement
 
     it "uses MPRV for data and clears it when MRET lowers privilege":
+        step("Verify: uses MPRV for data and clears it when MRET lowers privilege")
         var initial = core32_init(0x1000)
         initial.csr_m.mstatus = 0x00020000 | (1 << 11)
-        expect(core32_data_privilege(initial)).to_equal(1)
+        expect(core32_data_privilege(initial)).to_equal(1)  # oracle: 1 — named expected value from the requirement
         initial.pipeline_phase = CORE32_EXECUTE
         initial.instruction = 0x0000A103
         initial.instruction_bytes = 4
         initial.rf = regfile_write(initial.rf, 1, 0x2000, true)
         val load = core32_cycle(initial, false, false, false, 0)
-        expect(load.state.memory.privilege).to_equal(1)
+        expect(load.state.memory.privilege).to_equal(1)  # oracle: 1 — named expected value from the requirement
         initial.pipeline_phase = CORE32_EXECUTE
         initial.instruction = 0x30200073
         initial.instruction_bytes = 4
         initial.csr_m.mepc = 0x3000
         val returned = core32_cycle(initial, false, false, false, 0)
-        expect(returned.state.privilege).to_equal(1)
-        expect(returned.state.csr_m.mstatus & 0x00020000).to_equal(0)
+        expect(returned.state.privilege).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(returned.state.csr_m.mstatus & 0x00020000).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "keeps S status and interrupt CSRs as delegated M aliases":
+        step("Verify: keeps S status and interrupt CSRs as delegated M aliases")
         var initial = core32_init(0x1000)
         val delegated = core32_csr_access(initial, 0x303, 0x222, 1)
         initial.csr_m = delegated.csr_m
@@ -318,6 +343,7 @@ describe "RV32 protected core shell":
         expect(refreshed.csr_s.sip).to_equal(0x2)
 
     it "vectors delegated supervisor and machine interrupts from aligned BASE":
+        step("Verify: vectors delegated supervisor and machine interrupts from aligned BASE")
         var supervisor = core32_init(0x1000)
         supervisor.privilege = 1
         supervisor.csr_s.mideleg = 0x2
@@ -329,7 +355,7 @@ describe "RV32 protected core shell":
         supervisor.csr_m.mstatus = 0x2
         expect(core32_check_interrupt(supervisor).pending).to_be(true)
         val strap = core32_enter_trap(supervisor, 0x80000001, 0)
-        expect(strap.privilege).to_equal(1)
+        expect(strap.privilege).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(strap.pc).to_equal(0x2004)
         var machine = core32_init(0x1000)
         val mtvec = core32_csr_access(machine, 0x305, 0x3003, 1)
@@ -339,6 +365,7 @@ describe "RV32 protected core shell":
         expect(mtrap.pc).to_equal(0x302C)
 
     it "filters interrupt eligibility before selecting priority":
+        step("Verify: filters interrupt eligibility before selecting priority")
         var machine = core32_init(0x1000)
         machine.csr_m.mstatus = 0x8
         machine.csr_s.mideleg = 0x200
@@ -361,6 +388,7 @@ describe "RV32 protected core shell":
         expect(higher_target.cause).to_equal(0x80000001)
 
     it "routes supervisor pending levels without clobbering machine or SSIP levels":
+        step("Verify: routes supervisor pending levels without clobbering machine or SSIP levels")
         var initial = core32_init(0x1000)
         initial.csr_m.mip = 0x88A
         initial.csr_s.mideleg = 0x222
@@ -371,6 +399,7 @@ describe "RV32 protected core shell":
         expect(lowered.csr_m.mip).to_equal(0x88A)
 
     it "merges firmware and platform STIP while keeping SIP writes SSIP-only":
+        step("Verify: merges firmware and platform STIP while keeping SIP writes SSIP-only")
         var initial = core32_init(0x1000)
         initial.csr_s.mideleg = 0x20
         val firmware_set = core32_csr_access(initial, 0x344, 0x20, 1)
@@ -389,7 +418,7 @@ describe "RV32 protected core shell":
         initial.privilege = 3
         val firmware_clear = core32_csr_access(initial, 0x344, 0, 1)
         expect(firmware_clear.firmware_stip).to_be(false)
-        expect(firmware_clear.csr_m.mip & 0x20).to_equal(0)
+        expect(firmware_clear.csr_m.mip & 0x20).to_equal(0)  # oracle: 0 — named expected value from the requirement
         val firmware_merged = core32_set_supervisor_pending_interrupts(initial, false, false)
         expect(firmware_merged.csr_m.mip & 0x20).to_equal(0x20)
         initial.csr_m = firmware_clear.csr_m
@@ -406,12 +435,13 @@ describe "RV32 protected core shell":
         platform_state.firmware_stip = platform_m_clear.firmware_stip
         platform_state.platform_stip = platform_m_clear.platform_stip
         val platform_clear = core32_set_supervisor_pending_interrupts(platform_state, false, false)
-        expect(platform_clear.csr_m.mip & 0x20).to_equal(0)
+        expect(platform_clear.csr_m.mip & 0x20).to_equal(0)  # oracle: 0 — named expected value from the requirement
         var supervisor_clear_observe = platform_clear
         supervisor_clear_observe.privilege = 1
-        expect(core32_csr_access(supervisor_clear_observe, 0x144, 0, 2).old_value & 0x20).to_equal(0)
+        expect(core32_csr_access(supervisor_clear_observe, 0x144, 0, 2).old_value & 0x20).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "gates cycle time and instret aliases with counter-enable CSRs":
+        step("Verify: gates cycle time and instret aliases with counter-enable CSRs")
         var initial = core32_init(0x1000)
         initial.csr_m.mcycle = 0x12345678
         initial.csr_m.mcycleh = 0x9ABCDEF0
@@ -424,7 +454,7 @@ describe "RV32 protected core shell":
         initial.privilege = 3
         val machine_enable = core32_csr_access(initial, 0x306, 7, 1)
         expect(machine_enable.valid).to_be(true)
-        expect(machine_enable.mcounteren).to_equal(7)
+        expect(machine_enable.mcounteren).to_equal(7)  # oracle: 7 — named expected value from the requirement
         initial.mcounteren = machine_enable.mcounteren
         initial.privilege = 1
         expect(core32_csr_access(initial, 0xC00, 0, 2).old_value).to_equal(0x12345678)
@@ -443,6 +473,7 @@ describe "RV32 protected core shell":
         expect(core32_csr_access(initial, 0xC01, 0, 2).valid).to_be(false)
 
     it "returns with SRET only from a legal privilege":
+        step("Verify: returns with SRET only from a legal privilege")
         var supervisor = core32_init(0x1000)
         supervisor.privilege = 1
         supervisor.pipeline_phase = CORE32_EXECUTE
@@ -451,7 +482,7 @@ describe "RV32 protected core shell":
         supervisor.csr_s.sepc = 0x2345
         supervisor.csr_m.mstatus = 0x20
         val returned = core32_cycle(supervisor, false, false, false, 0)
-        expect(returned.state.privilege).to_equal(0)
+        expect(returned.state.privilege).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(returned.state.core.pc).to_equal(0x2344)
         expect(returned.state.csr_m.mstatus & 0x22).to_equal(0x22)
 
@@ -462,12 +493,13 @@ describe "RV32 protected core shell":
         user.instruction_bytes = 4
         user.csr_m.mtvec = 0x3000
         val rejected = core32_cycle(user, false, false, false, 0)
-        expect(rejected.state.privilege).to_equal(3)
-        expect(rejected.state.csr_m.mcause).to_equal(2)
+        expect(rejected.state.privilege).to_equal(3)  # oracle: 3 — named expected value from the requirement
+        expect(rejected.state.csr_m.mcause).to_equal(2)  # oracle: 2 — named expected value from the requirement
         expect(rejected.state.csr_m.mtval).to_equal(0x10200073)
         expect(rejected.state.core.pc).to_equal(0x3000)
 
     it "passes SFENCE.VMA register operands to selective TLB invalidation":
+        step("Verify: passes SFENCE.VMA register operands to selective TLB invalidation")
         var supervisor = core32_init(0x1000)
         supervisor.privilege = 1
         supervisor.pipeline_phase = CORE32_EXECUTE
@@ -483,6 +515,7 @@ describe "RV32 protected core shell":
         expect(mmu_tlb_lookup(fenced.state.mmu, 0x23456).hit).to_be(true)
 
     it "retires WFI once then wakes or traps on a locally enabled interrupt":
+        step("Verify: retires WFI once then wakes or traps on a locally enabled interrupt")
         var initial = core32_init(0x1000)
         initial.pipeline_phase = CORE32_EXECUTE
         initial.instruction = 0x10500073
@@ -491,19 +524,19 @@ describe "RV32 protected core shell":
         val parked = core32_cycle(initial, false, false, false, 0)
         expect(parked.state.pipeline_phase).to_equal(CORE32_WFI)
         expect(parked.state.core.pc).to_equal(0x1004)
-        expect(parked.state.csr_m.minstret).to_equal(1)
+        expect(parked.state.csr_m.minstret).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(parked.rvfi.rvfi_valid).to_be(true)
         expect(parked.rvfi.rvfi_trap).to_be(false)
         val held = core32_cycle(parked.state, false, false, false, 0)
         expect(held.state.pipeline_phase).to_equal(CORE32_WFI)
-        expect(held.state.csr_m.minstret).to_equal(1)
+        expect(held.state.csr_m.minstret).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
         var wake = held.state
         wake.csr_m.mie = 0x80
         wake.csr_m.mip = 0x80
         val woken = core32_cycle(wake, false, false, false, 0)
         expect(woken.state.pipeline_phase).to_equal(CORE32_FETCH)
-        expect(woken.state.csr_m.mcause).to_equal(0)
+        expect(woken.state.csr_m.mcause).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(woken.state.core.pc).to_equal(0x1004)
 
         var trap = held.state
@@ -512,7 +545,7 @@ describe "RV32 protected core shell":
         trap.csr_m.mip = 0x80
         trap.csr_m.mtvec = 0x4000
         val trapped = core32_cycle(trap, false, false, false, 0)
-        expect(trapped.state.privilege).to_equal(3)
+        expect(trapped.state.privilege).to_equal(3)  # oracle: 3 — named expected value from the requirement
         expect(trapped.state.csr_m.mcause).to_equal(0x80000007)
         expect(trapped.state.csr_m.mepc).to_equal(0x1004)
         expect(trapped.state.core.pc).to_equal(0x4000)

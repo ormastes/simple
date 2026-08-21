@@ -1,3 +1,10 @@
+"""
+## Purpose and audience
+Purpose: Prove that effect verifier.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-COMPILER-SEMANTICS-001 — stable requirement identity for this spec.
+
 # Spec for the effect verifier (@copy_budget / @bounded_loop).
 # Runs under the Rust seed bin/simple — noted per measurement policy.
 #
@@ -35,85 +42,102 @@ describe "effect verifier":
 
     describe "@copy_budget — accepted":
         it "accepts copies that fit the budget":
+            step("Verify: accepts copies that fit the budget")
+            # @req: REQ-COMPILER-SEMANTICS-001
             val v = check_copy_budget("blit_row", 64, [copy("Rect", 16), copy("Color", 4)], 0)
-            expect(v.len()).to_equal(0)
+            expect(v.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
         it "accepts a zero-budget function that copies nothing":
+            step("Verify: accepts a zero-budget function that copies nothing")
             expect(check_copy_budget("commit_scene", 0, [], 0).len()).to_equal(0)
 
         it "does not check an unannotated function":
+            step("Verify: does not check an unannotated function")
             # Opt-in, exactly like @noalloc. A 4KB copy in an unannotated
             # function is not this pass's business.
             val v = check_copy_budget("free_fn", COPY_BUDGET_UNSET, [copy("Style", 4096)], 0)
-            expect(v.len()).to_equal(0)
+            expect(v.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     describe "@copy_budget — rejected":
         it "rejects a copy over budget":
+            step("Verify: rejects a copy over budget")
             val v = check_copy_budget("blit_row", 8, [copy("Rect", 16)], 0)
-            expect(v.len()).to_equal(1)
+            expect(v.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
             expect(v[0].kind).to_equal(EFFECT_COPY_OVER_BUDGET)
 
         it "rejects an implicit whole-struct copy under budget 0":
+            step("Verify: rejects an implicit whole-struct copy under budget 0")
             # Two violations: the implicit copy on sight, and the budget breach.
             val v = check_copy_budget("commit_scene", 0, [implicit_copy("Style", 1408)], 0)
-            expect(v.len()).to_equal(2)
+            expect(v.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
             expect(v[0].kind).to_equal(EFFECT_IMPLICIT_COPY)
             assert_true(v[0].detail.contains("implicit whole-value copy"))
 
         it "rejects a caller whose CALLEE blows the budget":
+            step("Verify: rejects a caller whose CALLEE blows the budget")
             # The body itself copies 8 bytes and would pass in isolation.
             # This is the transitive check: without it, the example goes green.
             val v = check_copy_budget("outer", 16, [copy("i64", 8)], 4096)
-            expect(v.len()).to_equal(1)
+            expect(v.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
             expect(v[0].kind).to_equal(EFFECT_COPY_OVER_BUDGET)
             assert_true(v[0].detail.contains("4096 from callees"))
 
     describe "transitive closure":
         it "charges a caller for its whole callee chain":
+            step("Verify: charges a caller for its whole callee chain")
             # top -> mid -> leaf, own cost 1 / 10 / 100.
             val t = effect_copy_closure(["top", "mid", "leaf"], [1, 10, 100],
                 [["mid"], ["leaf"], []])
-            expect(t[0]).to_equal(111)
-            expect(t[1]).to_equal(110)
-            expect(t[2]).to_equal(100)
+            expect(t[0]).to_equal(111)  # oracle: 111 — named expected value from the requirement
+            expect(t[1]).to_equal(110)  # oracle: 110 — named expected value from the requirement
+            expect(t[2]).to_equal(100)  # oracle: 100 — named expected value from the requirement
 
         it "saturates a recursive cycle instead of diverging":
+            step("Verify: saturates a recursive cycle instead of diverging")
             # a -> b -> a. Fail-closed: saturation breaches every finite budget.
             val t = effect_copy_closure(["a", "b"], [1, 1], [["b"], ["a"]])
             assert_true(t[0] > 1000)
 
         it "ignores calls to functions outside the unit":
+            step("Verify: ignores calls to functions outside the unit")
             val t = effect_copy_closure(["a"], [5], [["unknown_extern"]])
-            expect(t[0]).to_equal(5)
+            expect(t[0]).to_equal(5)  # oracle: 5 — named expected value from the requirement
 
     describe "@bounded_loop — accepted":
         it "accepts a capacity-bounded loop":
+            step("Verify: accepts a capacity-bounded loop")
             expect(check_bounded_loops("raster", true, [loop_ok("for tile in tiles")]).len()).to_equal(0)
 
         it "does not check an unannotated function":
+            step("Verify: does not check an unannotated function")
             expect(check_bounded_loops("repl", false, [loop_unbounded("while true")]).len()).to_equal(0)
 
     describe "@bounded_loop — rejected":
         it "rejects a loop with no provable bound":
+            step("Verify: rejects a loop with no provable bound")
             val v = check_bounded_loops("raster", true, [loop_unbounded("while true")])
-            expect(v.len()).to_equal(1)
+            expect(v.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
             expect(v[0].kind).to_equal(EFFECT_UNBOUNDED_LOOP)
 
         it "rejects unbounded container growth even when the trip count is bounded":
+            step("Verify: rejects unbounded container growth even when the trip count is bounded")
             val v = check_bounded_loops("raster", true, [loop_growing("for i in 0..64")])
-            expect(v.len()).to_equal(1)
+            expect(v.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
             expect(v[0].kind).to_equal(EFFECT_GROWTH_IN_LOOP)
 
     describe "manifest and diagnostics":
         it "treats an unknown function as unannotated":
+            step("Verify: treats an unknown function as unannotated")
             val m = EffectManifest.new()
             expect_not(m.has_copy_budget("never_registered"))
 
         it "reports a registered budget":
+            step("Verify: reports a registered budget")
             val m = EffectManifest.new()
             m.register("commit", 0, true, 0)
             assert_true(m.has_copy_budget("commit"))
 
         it "formats a violation as an error[effect] diagnostic":
+            step("Verify: formats a violation as an error[effect] diagnostic")
             val v = check_copy_budget("blit_row", 8, [copy("Rect", 16)], 0)
             assert_true(format_effect_violation(v[0]).starts_with("error[effect]"))

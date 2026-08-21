@@ -1,3 +1,10 @@
+"""
+## Purpose and audience
+Purpose: Prove that Text builtin rfind MIR lowering.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-COMPILER-MIR-001 — stable requirement identity for this spec.
+
 use std.spec
 use compiler.common.config.{Logger}
 use compiler.frontend.frontend.{parse_full_frontend}
@@ -16,6 +23,8 @@ fn lower_text_method_mir(src: text, fname: text) -> text:
 
 describe "Text builtin rfind MIR lowering", tag: ["only-compiled"]:
     it "keeps a replace result on the string runtime owner":
+        step("Verify: keeps a replace result on the string runtime owner")
+        # @req: REQ-COMPILER-MIR-001
         val source = "fn parent_dir(path: text) -> i64:\n    val normalized = path.replace(\"\\\\\", \"/\")\n    return normalized.rfind(\"/\")\n"
         val mir = lower_text_method_mir(source, "parent_dir")
 
@@ -26,6 +35,7 @@ describe "Text builtin rfind MIR lowering", tag: ["only-compiled"]:
 
 describe "Primitive text conversion MIR lowering", tag: ["only-compiled"]:
     it "selects each scalar renderer for both aliases":
+        step("Verify: selects each scalar renderer for both aliases")
         val source = "fn render_string(b: bool, f: f64, u: u64, i: i64) -> text:\n    b.to_string() + \"|\" + f.to_string() + \"|\" + u.to_string() + \"|\" + i.to_string()\n\nfn render_text(b: bool, f: f64, u: u64, i: i64) -> text:\n    b.to_text() + \"|\" + f.to_text() + \"|\" + u.to_text() + \"|\" + i.to_text()\n"
         val mir = lower_text_method_mir(source, "primitive_to_string")
 
@@ -36,29 +46,32 @@ describe "Primitive text conversion MIR lowering", tag: ["only-compiled"]:
 
 describe "Text char_code_at MIR lowering", tag: ["only-compiled"]:
     it "rejects a source definition of the compiler-reserved alias":
+        step("Verify: rejects a source definition of the compiler-reserved alias")
         val module = parse_full_frontend("fn __simple_rt_string_char_code_at(value: i64, index: i64) -> i64:\n    999\n", "reserved_alias.spl", "reserved_alias.spl", Logger(level: 0))
         var lowering = HirLowering.with_filename("reserved_alias.spl")
         val _hir = lowering.lower_module(module)
 
-        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.errors.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(lowering.errors[0].message).to_contain("is reserved for compiler-generated text calls")
 
     it "accepts the alias only from the canonical runtime module":
+        step("Verify: accepts the alias only from the canonical runtime module")
         val source = "fn __simple_rt_string_char_code_at(value: i64, index: i64) -> i64:\n    999\n"
         for filename in ["src/runtime/simple_core/core_string.spl", "src\\runtime\\simple_core\\core_string.spl"]:
             val module = parse_full_frontend(source, filename, filename, Logger(level: 0))
             var lowering = HirLowering.with_filename(filename)
             val _hir = lowering.lower_module(module)
 
-            expect(lowering.errors.len()).to_equal(0)
+            expect(lowering.errors.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
         val spoof = "/tmp/project/src/runtime/simple_core/core_string.spl"
         val spoof_module = parse_full_frontend(source, spoof, spoof, Logger(level: 0))
         var spoof_lowering = HirLowering.with_filename(spoof)
         val _spoof_hir = spoof_lowering.lower_module(spoof_module)
-        expect(spoof_lowering.errors.len()).to_equal(1)
+        expect(spoof_lowering.errors.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "uses the reserved raw runtime ABI without capturing a source function":
+        step("Verify: uses the reserved raw runtime ABI without capturing a source function")
         val source = "fn rt_string_char_code_at(value: i64, index: i64) -> i64:\n    return 999\n\nfn codes() -> i64:\n    val tagged = \"X\" + \"Y\"\n    return \"X\".char_code_at(0) + tagged.char_code_at(0) + rt_string_char_code_at(1, 2)\n"
         val mir = lower_text_method_mir(source, "text_char_code_at")
 
@@ -68,6 +81,7 @@ describe "Text char_code_at MIR lowering", tag: ["only-compiled"]:
 
 describe "Text predicate custom-owner MIR lowering", tag: ["only-compiled"]:
     it "keeps custom predicate methods ahead of text fallbacks":
+        step("Verify: keeps custom predicate methods ahead of text fallbacks")
         val source = "struct PredicateOwner:\n    marker: i64\n\nimpl PredicateOwner:\n    fn starts_with(self, value: text) -> bool: self.marker == value.len()\n    fn ends_with(self, value: text) -> bool: self.marker != value.len()\n    fn contains(self, value: text) -> bool: self.marker > value.len()\n\nstruct StaticPredicates:\n    marker: i64\n\nimpl StaticPredicates:\n    static fn starts_with(value: text) -> bool: value.len() == 1\n    static fn ends_with(value: text) -> bool: value.len() == 2\n    static fn contains(value: text) -> bool: value.len() == 3\n\nfn predicate_calls(owner: PredicateOwner) -> bool:\n    owner.starts_with(\"a\") and owner.ends_with(\"bb\") and owner.contains(\"ccc\") and StaticPredicates.starts_with(\"a\") and StaticPredicates.ends_with(\"bb\") and StaticPredicates.contains(\"ccc\")\n"
         val mir = lower_text_method_mir(source, "predicate_owner")
 

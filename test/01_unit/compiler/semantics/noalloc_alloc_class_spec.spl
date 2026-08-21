@@ -1,3 +1,10 @@
+"""
+## Purpose and audience
+Purpose: Prove that WP-12 allocation-class lattice — real symbol classification.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-COMPILER-SEMANTICS-001 — stable requirement identity for this spec.
+
 # Regression spec for WP-12:
 # doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md
 #
@@ -36,6 +43,8 @@ use compiler.semantics.noalloc_checker.{
 
 describe "WP-12 allocation-class lattice — real symbol classification":
     it "classifies a real proven-pure leaf function as `none` (bm_abs)":
+        step("Verify: classifies a real proven-pure leaf function as `none` (bm_abs)")
+        # @req: REQ-COMPILER-SEMANTICS-001
         val m = NoallocCapabilityManifest.new()
         m.register("bm_abs", true, false, "nogc_async_mut_noalloc.math")
 
@@ -45,6 +54,7 @@ describe "WP-12 allocation-class lattice — real symbol classification":
         expect(entry.alloc_class.is_steady_state_safe()).to_equal(true)
 
     it "classifies a real one-time-construction function as `init_only` (FixedArray.new)":
+        step("Verify: classifies a real one-time-construction function as `init_only` (FixedArray.new)")
         val m = NoallocCapabilityManifest.new()
         # `new` allocates (per the honest text-scan classification landed for
         # this family) but only once, at construction -- the startup-seal
@@ -57,6 +67,7 @@ describe "WP-12 allocation-class lattice — real symbol classification":
         expect(entry.alloc_class.is_steady_state_safe()).to_equal(true)
 
     it "classifies a real caller-supplied-region sub-allocator as `bounded_pool` (mimalloc.alloc)":
+        step("Verify: classifies a real caller-supplied-region sub-allocator as `bounded_pool` (mimalloc.alloc)")
         val m = NoallocCapabilityManifest.new()
         m.register("mimalloc_alloc", false, false, "std.nogc_async_mut_noalloc.mimalloc")
 
@@ -66,6 +77,7 @@ describe "WP-12 allocation-class lattice — real symbol classification":
         expect(entry.alloc_class.is_steady_state_safe()).to_equal(true)
 
     it "classifies a real direct-malloc caller as `unbounded` (rt_alloc)":
+        step("Verify: classifies a real direct-malloc caller as `unbounded` (rt_alloc)")
         val m = NoallocCapabilityManifest.new()
         # rt_alloc (src/runtime/simple_core/core_memory.spl:16) is `return
         # malloc(size)` -- registered here exactly as the family-manifest
@@ -78,6 +90,7 @@ describe "WP-12 allocation-class lattice — real symbol classification":
         expect(entry.alloc_class.is_steady_state_safe()).to_equal(false)
 
     it "classifies an unregistered indirect-call target as `unknown`, never `none` (kernel_thread_create's `entry` callback)":
+        step("Verify: classifies an unregistered indirect-call target as `unknown`, never `none` (kernel_thread_create's `entry` callback)")
         val m = NoallocCapabilityManifest.new()
         m.register("kernel_thread_create", false, false, "nogc_async_mut_noalloc.baremetal.kernel_thread")
         # The callback the created thread actually runs is a `fn() -> void`
@@ -91,6 +104,7 @@ describe "WP-12 allocation-class lattice — real symbol classification":
 
 describe "WP-12 steady-state gate — real accept/reject over the 5 classes":
     it "ACCEPTS none/init_only/bounded_pool and REJECTS unbounded/unknown over one real manifest":
+        step("Verify: ACCEPTS none/init_only/bounded_pool and REJECTS unbounded/unknown over one real manifest")
         val m = NoallocCapabilityManifest.new()
         m.register("bm_abs", true, false, "nogc_async_mut_noalloc.math")
         m.register("new", false, true, "nogc_async_mut_noalloc.collections.fixed_array")
@@ -100,19 +114,21 @@ describe "WP-12 steady-state gate — real accept/reject over the 5 classes":
         val symbols = ["bm_abs", "new", "mimalloc_alloc", "rt_alloc", "thread_entry_point_via_fn_ptr"]
         val violations = check_steady_state_gate(m, symbols)
 
-        expect(violations.len()).to_equal(2)
+        expect(violations.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
         expect(violations[0].fn_name).to_equal("rt_alloc")
         expect(violations[0].alloc_class).to_equal(AllocClass.Unbounded)
         expect(violations[1].fn_name).to_equal("thread_entry_point_via_fn_ptr")
         expect(violations[1].alloc_class).to_equal(AllocClass.Unknown)
 
     it "routes activation through policy.spl's resolver, not a new severity table":
+        step("Verify: routes activation through policy.spl's resolver, not a new severity table")
         expect(steady_state_gate_active("moderate", false)).to_equal(false)
         expect(steady_state_gate_active("critical", false)).to_equal(true)
         expect(steady_state_gate_active("moderate", true)).to_equal(true)
 
 describe "WP-12 @noalloc checker — direct-expr Unknown classification is real, not dead code":
     it "REJECTS a @noalloc fn body expression tag the classifier does not recognize (not silently `none`)":
+        step("Verify: REJECTS a @noalloc fn body expression tag the classifier does not recognize (not silently `none`)")
         # An expression tag outside the known 5-allocating/3-safe vocabulary
         # (`classify_direct_alloc_expr`) classifies `Unknown` and is rejected
         # via the `UnknownClass` violation kind -- proving the kind is
@@ -120,10 +136,11 @@ describe "WP-12 @noalloc checker — direct-expr Unknown classification is real,
         val m = NoallocCapabilityManifest.new()
         val violations = check_noalloc_violations("boot_probe", ["unrecognized_expr_form"], [], m)
 
-        expect(violations.len()).to_equal(1)
+        expect(violations.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(violations[0].kind).to_equal(NoallocViolationKind.UnknownClass)
 
     it "the @noalloc gate deliberately does NOT reject a text-scanner callee lookup-miss (see driver false-positive note)":
+        step("Verify: the @noalloc gate deliberately does NOT reject a text-scanner callee lookup-miss (see driver false-positive note)")
         # This is the flip side of the steady-state gate test above: the
         # SAME unresolvable-callee case that `check_steady_state_gate`
         # correctly rejects is deliberately NOT rejected by
@@ -139,4 +156,4 @@ describe "WP-12 @noalloc checker — direct-expr Unknown classification is real,
         val m = NoallocCapabilityManifest.new()
         val violations = check_noalloc_violations("boot_dispatch", [], ["unregistered_text_scan_artifact"], m)
 
-        expect(violations.len()).to_equal(0)
+        expect(violations.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement

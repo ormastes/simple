@@ -1,3 +1,10 @@
+"""
+## Purpose and audience
+Purpose: Prove that validate_value_struct_layouts rejects genuine direct by-value cycles.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-COMPILER-SEMANTICS-001 — stable requirement identity for this spec.
+
 # @cover src/compiler/35.semantics/value_struct_layout.spl 60%
 """
 # value_struct_layout — by-value struct cycle validation (lane VSL1)
@@ -171,16 +178,19 @@ fn mk_module(name: text, table: SymbolTable, structs: [HirStruct]) -> HirModule:
 
 describe "validate_value_struct_layouts rejects genuine direct by-value cycles":
     it "flags a struct that embeds itself by value":
+        step("Verify: flags a struct that embeds itself by value")
+        # @req: REQ-COMPILER-SEMANTICS-001
         var table = SymbolTable.new()
         val node_sym = table.define("VslSelfNode", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
         val node_struct = mk_struct(node_sym, "VslSelfNode", [mk_field("value", i64_type()), mk_field("next", named_type(node_sym))], [])
         val hir = mk_module("vsl_self_cycle", table, [node_struct])
         val errors = validate_value_struct_layouts(["vsl_self_cycle"], [hir])
-        expect(errors.len()).to_equal(1)
+        expect(errors.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(errors[0]).to_contain("recursive by-value struct layout")
         expect(errors[0]).to_contain("VslSelfNode")
 
     it "flags a two-struct mutual by-value cycle (A -> B -> A)":
+        step("Verify: flags a two-struct mutual by-value cycle (A -> B -> A)")
         var table = SymbolTable.new()
         val a_sym = table.define("VslMutA", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
         val b_sym = table.define("VslMutB", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
@@ -188,10 +198,11 @@ describe "validate_value_struct_layouts rejects genuine direct by-value cycles":
         val b_struct = mk_struct(b_sym, "VslMutB", [mk_field("a", named_type(a_sym))], [])
         val hir = mk_module("vsl_mutual_cycle", table, [a_struct, b_struct])
         val errors = validate_value_struct_layouts(["vsl_mutual_cycle"], [hir])
-        expect(errors.len()).to_equal(1)
+        expect(errors.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(errors[0]).to_contain("recursive by-value struct layout")
 
     it "flags a three-struct chain by-value cycle (A -> B -> C -> A)":
+        step("Verify: flags a three-struct chain by-value cycle (A -> B -> C -> A)")
         var table = SymbolTable.new()
         val a_sym = table.define("VslChainA", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
         val b_sym = table.define("VslChainB", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
@@ -201,19 +212,21 @@ describe "validate_value_struct_layouts rejects genuine direct by-value cycles":
         val c_struct = mk_struct(c_sym, "VslChainC", [mk_field("a", named_type(a_sym))], [])
         val hir = mk_module("vsl_chain_cycle", table, [a_struct, b_struct, c_struct])
         val errors = validate_value_struct_layouts(["vsl_chain_cycle"], [hir])
-        expect(errors.len()).to_equal(1)
+        expect(errors.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(errors[0]).to_contain("recursive by-value struct layout")
 
 describe "validate_value_struct_layouts accepts layouts that only look recursive":
     it "does not flag self-reference through an optional (T?) indirection — classic linked-list node":
+        step("Verify: does not flag self-reference through an optional (T?) indirection — classic linked-list node")
         var table = SymbolTable.new()
         val node_sym = table.define("VslOptNode", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
         val node_struct = mk_struct(node_sym, "VslOptNode", [mk_field("value", i64_type()), mk_field("next", optional_type(named_type(node_sym)))], [])
         val hir = mk_module("vsl_optional_self", table, [node_struct])
         val errors = validate_value_struct_layouts(["vsl_optional_self"], [hir])
-        expect(errors.len()).to_equal(0)
+        expect(errors.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "does not flag mutual recursion mediated entirely by optional (T?) indirection":
+        step("Verify: does not flag mutual recursion mediated entirely by optional (T?) indirection")
         var table = SymbolTable.new()
         val a_sym = table.define("VslOptMutA", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
         val b_sym = table.define("VslOptMutB", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
@@ -221,17 +234,19 @@ describe "validate_value_struct_layouts accepts layouts that only look recursive
         val b_struct = mk_struct(b_sym, "VslOptMutB", [mk_field("a", optional_type(named_type(a_sym)))], [])
         val hir = mk_module("vsl_optional_mutual", table, [a_struct, b_struct])
         val errors = validate_value_struct_layouts(["vsl_optional_mutual"], [hir])
-        expect(errors.len()).to_equal(0)
+        expect(errors.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "does not flag self-reference through an array/slice field — heap-backed collection of children":
+        step("Verify: does not flag self-reference through an array/slice field — heap-backed collection of children")
         var table = SymbolTable.new()
         val node_sym = table.define("VslArrNode", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
         val node_struct = mk_struct(node_sym, "VslArrNode", [mk_field("value", i64_type()), mk_field("children", array_type(named_type(node_sym)))], [])
         val hir = mk_module("vsl_array_children", table, [node_struct])
         val errors = validate_value_struct_layouts(["vsl_array_children"], [hir])
-        expect(errors.len()).to_equal(0)
+        expect(errors.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "does not flag a non-cyclic diamond where two structs share one common by-value field type":
+        step("Verify: does not flag a non-cyclic diamond where two structs share one common by-value field type")
         var table = SymbolTable.new()
         val shared_sym = table.define("VslShared", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
         val a_sym = table.define("VslDiamondA", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
@@ -241,9 +256,10 @@ describe "validate_value_struct_layouts accepts layouts that only look recursive
         val b_struct = mk_struct(b_sym, "VslDiamondB", [mk_field("shared", named_type(shared_sym))], [])
         val hir = mk_module("vsl_diamond", table, [shared_struct, a_struct, b_struct])
         val errors = validate_value_struct_layouts(["vsl_diamond"], [hir])
-        expect(errors.len()).to_equal(0)
+        expect(errors.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "does not flag the same by-value struct type appearing twice as sibling fields (not a cycle)":
+        step("Verify: does not flag the same by-value struct type appearing twice as sibling fields (not a cycle)")
         var table = SymbolTable.new()
         val point_sym = table.define("VslPoint", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
         val line_sym = table.define("VslLine", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
@@ -251,10 +267,11 @@ describe "validate_value_struct_layouts accepts layouts that only look recursive
         val line_struct = mk_struct(line_sym, "VslLine", [mk_field("p1", named_type(point_sym)), mk_field("p2", named_type(point_sym))], [])
         val hir = mk_module("vsl_repeated_sibling", table, [point_struct, line_struct])
         val errors = validate_value_struct_layouts(["vsl_repeated_sibling"], [hir])
-        expect(errors.len()).to_equal(0)
+        expect(errors.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
 describe "validate_value_struct_layouts and generic-mediated recursion (documented coverage gap, not a false positive)":
     it "does not flag (and cannot currently detect) recursion mediated through a generic struct instantiation":
+        step("Verify: does not flag (and cannot currently detect) recursion mediated through a generic struct instantiation")
         """
         `value_layout_named_symbol` only treats `HirTypeKind.Named(symbol, args)`
         as a struct reference when `args.len() == 0` (see
@@ -280,20 +297,23 @@ describe "validate_value_struct_layouts and generic-mediated recursion (document
 
 describe "validate_value_struct_layouts aligned input boundary":
     it "rejects misaligned module key and value arrays":
+        step("Verify: rejects misaligned module key and value arrays")
         val errors = validate_value_struct_layouts(["vsl_orphan_key"], [])
-        expect(errors.len()).to_equal(1)
+        expect(errors.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(errors[0]).to_contain("misaligned")
 
     it "coalesces duplicate canonical keys into one layout":
+        step("Verify: coalesces duplicate canonical keys into one layout")
         var table = SymbolTable.new()
         val node_sym = table.define("VslAliasNode", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
         val node_struct = mk_struct(node_sym, "VslAliasNode", [mk_field("value", i64_type())], [])
         val hir = mk_module("registry.alias", table, [node_struct])
         val errors = validate_value_struct_layouts(
             ["physical.vsl_alias", "physical.vsl_alias"], [hir, hir])
-        expect(errors.len()).to_equal(0)
+        expect(errors.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "resolves a by-value cycle through aligned physical module keys":
+        step("Verify: resolves a by-value cycle through aligned physical module keys")
         var left_table = SymbolTable.new()
         val left_sym = left_table.define("VslPhysicalLeft", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, "physical.left")
         val right_import = left_table.define("VslPhysicalRight", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, "physical.right")
@@ -308,5 +328,5 @@ describe "validate_value_struct_layouts aligned input boundary":
 
         val errors = validate_value_struct_layouts(
             ["physical.left", "physical.right"], [left_hir, right_hir])
-        expect(errors.len()).to_equal(1)
+        expect(errors.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(errors[0]).to_contain("recursive by-value struct layout")
