@@ -1,9 +1,16 @@
 # Text slicing at a mid-codepoint boundary: THREE divergent policies, one of them invalid UTF-8
 
-Status: OPEN — stage 1 (counting mode) LANDED `2ca6b4da3a9`; stage 2
-(blast-radius measurement) MEASURED, see "Stage 2". Stage 3 (fix the sites) and
-stage 4 (flip to a hard error) are NOT done: the flip is **deferred**, with the
-number that justifies deferring recorded below.
+Status: RESOLVED 2026-08-21 for the ENGINE DIVERGENCE — the three policies are
+now one. `.slice()`/`.substring()` in the interpreter preserve RAW BYTES, the
+same as bracket `s[i:j]` on every engine and the same as `rt_slice` on
+JIT/native, so the spelling of the slice no longer changes the answer and the
+engines no longer disagree. See "Resolution (2026-08-21)" at the end.
+Stage 1 (counting mode) LANDED `2ca6b4da3a9`; stage 2 (blast-radius
+measurement) MEASURED, see "Stage 2". Stage 4 (flip a mid-codepoint slice to a
+hard ERROR) remains **deferred** and is a SEPARATE question from the divergence
+— the ~891 byte-stepping scanner call sites that justify deferring it are
+unchanged by this fix. Sections below describing the pre-fix three-way split are
+kept as the historical record; read them as "before 2026-08-21".
 Measured: 2026-08-01
 
 **Re-verified 2026-08-07, unchanged.** Ran the "Reproduce" probe below (`s =
@@ -664,3 +671,84 @@ flagged for human re-triage rather than silently re-accepted). Sabotage-verified
 fence's `FAIL — aligned control s[0:3] regressed` on both the existing Part-A
 assertion and the new native-build byte-level assertion; restoring the line
 returned a clean `PASS` on all branches.
+
+
+## Resolution (2026-08-21) — the interpreter was the wrong engine
+
+Measured at `origin/main` `f5823c5ab74`, seed built from a clean worktree
+(sha256 `53af156a5bbac8db`). The differential fixture
+`test/fixtures/engine_differential/utf8_slice_boundary.spl` reproduced the split
+exactly as documented above: `slice_len` and `substring_len` were **4** on
+interpret and **2** on jit, while `bracket_split_len` was 2 on both.
+
+### Which engine was right, and why
+
+Byte-indexed slicing is the DESIGN, not an accident, and it was already decided
+and implemented for the bracket path. `interpreter/expr/collections.rs`
+(`Expr::Slice`, `Value::Str` arm) returns `Value::text_from_bytes(...)` with a
+comment recording why: U+FFFD substitution there "shredded every 1-unit slice
+walk (json/toml tokenizers) because the original byte was unrecoverable at
+concat time". `Value::StrBytes` exists precisely to carry a mid-codepoint
+fragment until concatenation re-validates it, and `len`/`index_of` are
+byte-valued so their results are valid inputs to `slice`.
+
+The `.slice`/`.substring` METHOD arm in
+`compiler/src/interpreter_method/string.rs` was simply never migrated to that
+decision. It computed the correct byte range and then ran it through
+`String::from_utf8_lossy`, which is valid-but-wrong: it CHANGES the byte length
+of the result (a 2-byte range came back with `len() == 4`) and destroys the
+original byte. The interpreter was the outlier against its own bracket path AND
+against both compiled lanes, so it is the engine that was fixed. The JIT/native
+`rt_slice` was not touched.
+
+One line changed:
+
+```rust
+-let result = String::from_utf8_lossy(&bytes[start..end]).into_owned();
+-return Ok(Value::text(result));
++return Ok(Value::text_from_bytes(bytes[start..end].to_vec()));
+```
+
+`text_from_bytes` collapses back to a normal `Str` whenever the bytes are valid
+UTF-8, so aligned slices — the overwhelming majority — are bit-identical to
+before.
+
+### Evidence
+
+| expression | interpret before | interpret after | jit (unchanged) |
+|---|---|---|---|
+| `s[0:2].len()` | 2 | 2 | 2 |
+| `s.slice(0, 2).len()` | **4** | **2** | 2 |
+| `s.substring(0, 2).len()` | **4** | **2** | 2 |
+| `s.slice(0, 8).len()` | **9** | **8** | 8 |
+| `s.slice(0,2) + s.slice(2,11)` | corrupted | `aé€𝄞z` | `aé€𝄞z` |
+
+The fixture was extended with the wide-split, empty (`slice(3,3)`), overrun
+(`slice(6,99)`) and reassembly cases, and **removed from the harness's
+`baselines()`** — that list is now empty, which is its correct state. Full
+corpus, `DIFF_LANES=interpret,jit`: `PASS — 13 fixture(s) compared across 2
+lane(s), 0 new divergences (0 baselined, 0 lane error(s))`.
+
+Tests: new `compiler/tests/interpreter_utf8_slice_boundary.rs`, 5/5 — split
+ranges keep their byte width, the three spellings agree, adjacent split slices
+reassemble the original, aligned ranges are unchanged (the non-vacuity
+control), and empty/overrun ranges clamp. Every assertion is on an integer
+length or a reassembled string, never on a printed glyph, because `print()`
+renders the lossy and the raw forms identically.
+
+`test/01_unit/bugs/text_slice_substring_spec.spl` §"Test Group 8" pinned the OLD
+lossy behaviour as intentional (`expect(bad).to_equal("\u{FFFD}")`). Its
+`codepoint-boundary safety` context was rewritten to pin the raw-byte invariant
+instead: the length of a byte slice equals the width of its range, and adjacent
+slices reassemble. The spec was not deleted, and its docstring records what
+changed and why.
+
+### Not changed
+
+- Stage 4 (mid-codepoint slice as a hard error) is still deferred, for the
+  reason already recorded: the byte-stepping call sites measured in Stage 2.
+  Unifying the engines does not make that flip any safer.
+- The native lane could not be measured — `native-build` fails at this tip for
+  an unrelated pre-existing reason (`method \`replace\` not found on type
+  \`function\``, function `hash_text`), so it reports LANE_ERROR before any
+  fixture runs. `rt_slice` itself was not modified.

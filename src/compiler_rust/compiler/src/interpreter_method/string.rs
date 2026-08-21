@@ -354,12 +354,18 @@ if let Value::Str(ref s) = recv_val {
             let end = end.min(bytes.len());
             let start = start.min(end);
             // A range that splits a multi-byte codepoint cannot be held in
-            // Rust's UTF-8 `String`; substitute U+FFFD, which prints
-            // byte-identically to what the native lane emits for such a range.
+            // Rust's UTF-8 `String`; preserve the RAW bytes (`Value::StrBytes`)
+            // exactly like the bracket-slice path in
+            // `interpreter/expr/collections.rs` and like the JIT/native lane's
+            // `rt_slice`, which slices `s->data + begin` raw. The previous
+            // `String::from_utf8_lossy` here substituted U+FFFD, which is
+            // valid-but-wrong: it CHANGES the byte length of the result
+            // (`"aé€𝄞z".slice(0, 2).len()` was 4, not 2) and makes the original
+            // byte unrecoverable at concat time. That was the sole remaining
+            // interpret-vs-jit divergence in
+            // `test/fixtures/engine_differential/utf8_slice_boundary.spl`.
             // UTF-8 slice audit, stage 1 (COUNTING ONLY, default off). Measured
-            // on the RAW range, before the lossy substitution below: U+FFFD
-            // makes the value valid-but-wrong (and CHANGES its byte length),
-            // which is exactly what hides this defect. Record it; do not fail.
+            // on the RAW range, which is now also what is returned.
             if simple_runtime::text_slice_audit::enabled() {
                 simple_runtime::text_slice_audit::note(
                     simple_runtime::text_slice_audit::site::INTERP_METHOD,
@@ -369,8 +375,7 @@ if let Value::Str(ref s) = recv_val {
                     &bytes[start..end],
                 );
             }
-            let result = String::from_utf8_lossy(&bytes[start..end]).into_owned();
-            return Ok(Value::text(result));
+            return Ok(Value::text_from_bytes(bytes[start..end].to_vec()));
         }
         "repeat" => {
             // Read the count as a SIGNED integer and clamp. `eval_arg_usize`

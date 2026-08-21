@@ -562,37 +562,58 @@ describe "text.slice()/text.substring() with multi-byte UTF-8 content":
             expect(s.slice(0, 7)).to_equal("abc😀")
             expect(s.slice(3, 10)).to_equal("😀def")
 
-    context "codepoint-boundary safety (the byte-split / U+FFFD case)":
+    context "codepoint-boundary safety (the byte-split / raw-bytes case)":
         """
         A byte range that lands inside a multi-byte codepoint's UTF-8
-        encoding cannot be represented as valid text: slice()/substring()
-        substitute U+FFFD via Rust's `String::from_utf8_lossy` (see
+        encoding cannot be represented as valid text. slice()/substring()
+        preserve the RAW BYTES of the requested range (see
         src/compiler_rust/compiler/src/interpreter_method/string.rs, the
-        "slice"|"substring" arm). This is verified, current, intentional
-        behavior on the lane `bin/simple test` executes -- not hypothetical.
-        Pinning it here means any call site that hand-counts a character
-        position instead of deriving a byte offset is exactly one non-ASCII
-        input away from silently emitting U+FFFD.
+        "slice"|"substring" arm), exactly like bracket slicing `s[i:j]` and
+        exactly like the JIT/native `rt_slice`. The previous behavior
+        substituted U+FFFD via `String::from_utf8_lossy`, which CHANGED the
+        byte length of the result and made the original byte unrecoverable at
+        concat time -- the interpret-vs-jit divergence pinned by
+        test/fixtures/engine_differential/utf8_slice_boundary.spl.
+        The invariant that matters at a call site is therefore: the length of
+        a byte slice equals the width of the byte range, and adjacent slices
+        reassemble the original text.
         """
-        it "splits a 2-byte codepoint (café) into a lossy replacement char":
-            step("Verify: splits a 2-byte codepoint (café) into a lossy replacement char")
+        it "splits a 2-byte codepoint (café) keeping the raw lead byte":
+            step("Verify: splits a 2-byte codepoint (café) keeping the raw lead byte")
             val s = "café"
             # Byte 3 alone is 0xC3, the lead byte of 'é' without its
             # continuation byte (0xA9) -- invalid UTF-8 on its own.
             val bad = s.slice(3, 4)
-            expect(bad).to_equal("\u{FFFD}")
-            expect(bad.char_code_at(0)).to_equal(65533)  # oracle: 65533 — named expected value from the requirement
+            expect(bad.len()).to_equal(1)  # oracle: 1 — the byte range is 1 byte wide
+            expect(s.slice(0, 3) + bad + s.slice(4, 5)).to_equal(s)
 
-        it "splits a 3-byte codepoint (CJK) into a lossy replacement char":
-            step("Verify: splits a 3-byte codepoint (CJK) into a lossy replacement char")
+        it "splits a 3-byte codepoint (CJK) keeping the raw lead byte":
+            step("Verify: splits a 3-byte codepoint (CJK) keeping the raw lead byte")
             val s = "a日b"
             val bad = s.slice(1, 2)
-            expect(bad).to_equal("\u{FFFD}")
-            expect(bad.char_code_at(0)).to_equal(65533)  # oracle: 65533 — named expected value from the requirement
+            expect(bad.len()).to_equal(1)  # oracle: 1 — the byte range is 1 byte wide
+            expect(s.slice(0, 1) + bad + s.slice(2, 5)).to_equal(s)
 
-        it "splits a 4-byte codepoint (emoji) into a lossy replacement char":
-            step("Verify: splits a 4-byte codepoint (emoji) into a lossy replacement char")
+        it "splits a 4-byte codepoint (emoji) keeping the raw lead byte":
+            step("Verify: splits a 4-byte codepoint (emoji) keeping the raw lead byte")
             val s = "a😀b"
             val bad = s.slice(1, 2)
-            expect(bad).to_equal("\u{FFFD}")
-            expect(bad.char_code_at(0)).to_equal(65533)  # oracle: 65533 — named expected value from the requirement
+            expect(bad.len()).to_equal(1)  # oracle: 1 — the byte range is 1 byte wide
+            expect(s.slice(0, 1) + bad + s.slice(2, 6)).to_equal(s)
+
+        it "agrees byte-for-byte with bracket slicing on a split range":
+            step("Verify: agrees byte-for-byte with bracket slicing on a split range")
+            # Each slice is BOUND before `.len()` is taken. The direct spelling
+            # `expect(s.slice(0, 2).len())` is rejected with `E3009: method
+            # 'len' not found on value of type str in nested call context` -- a
+            # pre-existing interpreter gap in chained method calls, unrelated to
+            # slicing. Filed as
+            # doc/08_tracking/bug/interpreter_val_bound_chained_method_call_e3009_2026-08-21.md.
+            val s = "aé€𝄞z"
+            val bracket = s[0:2]
+            val sliced = s.slice(0, 2)
+            val subbed = s.substring(0, 2)
+            val wide = s.slice(0, 8)
+            expect(sliced.len()).to_equal(bracket.len())
+            expect(subbed.len()).to_equal(bracket.len())
+            expect(wide.len()).to_equal(8)  # oracle: 8 — byte range width

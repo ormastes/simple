@@ -1,19 +1,20 @@
 # Divergence class (a): UTF-8 slice boundary handling.
 #
-# Slicing text at a byte offset INSIDE a multi-byte codepoint has three
-# different behaviours depending on the SPELLING of the slice and the ENGINE:
-#   - bracket `s[0:2]`      -> raw bytes on every engine (stores INVALID UTF-8)
-#   - `.slice(0,2)`         -> interpreter substitutes U+FFFD (len 4),
-#                              JIT/native keep raw bytes (len 2)
-#   - `.substring(0,2)`     -> same divergence as .slice
+# Slicing text at a byte offset INSIDE a multi-byte codepoint must behave the
+# same for every SPELLING of the slice and on every ENGINE: the result carries
+# the RAW BYTES of the requested range, so its length is the width of that
+# range and adjacent slices reassemble the original text.
 #
-# Only the integer LENGTH distinguishes these -- print() renders all three as
+# Until 2026-08-21 the interpreter's `.slice`/`.substring` substituted U+FFFD
+# (via Rust's `String::from_utf8_lossy`), which is valid-but-wrong: it CHANGED
+# the byte length (`slice_len` was 4, not 2) while the JIT/native `rt_slice`
+# and bracket `s[0:2]` kept the raw bytes on every engine. Fixed in
+# src/compiler_rust/compiler/src/interpreter_method/string.rs.
+#
+# Only the integer LENGTH distinguishes these -- print() renders every case as
 # the same `a<?>` glyph, so never verify this class by eyeballing glyphs.
 #
 # See doc/08_tracking/bug/native_slice_splits_utf8_three_divergent_policies_2026-08-01.md
-#
-# EXPECTED: DIVERGENCE between interpret and jit/native on slice_len and
-# substring_len. This fixture is the harness's own proof-of-life.
 
 fn main() -> i64:
     val s = "aé€𝄞z"
@@ -22,4 +23,8 @@ fn main() -> i64:
     print("bracket_split_len={s[0:2].len()}")
     print("slice_len={s.slice(0, 2).len()}")
     print("substring_len={s.substring(0, 2).len()}")
+    print("slice_wide_len={s.slice(0, 8).len()}")
+    print("empty_len={s.slice(3, 3).len()}")
+    print("overrun_len={s.slice(6, 99).len()}")
+    print("reassembled={s.slice(0, 2) + s.slice(2, 11)}")
     0
