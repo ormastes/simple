@@ -28,7 +28,28 @@
 # (`.../baremetal/test/qemu_semihost_test.S`), which corroborate the same
 # LSR bit-0x20 (THR empty) meaning used below.
 
-use std.spec.{describe, it, assert_equal, assert_true, assert_false}
+"""
+## Purpose and audience
+
+This spec proves the binary SSpec comparator against embedded register
+words (spec/evidence-layer work only — no hardware, no QEMU): 16550 UART
+LSR readback comparison (reserved FIFO-error bit actively checked), FCR
+write/readback with self-clearing W1C-style bits (why ComparePolicy's
+per-field mask exists), and a multi-register block dump rendered as one
+stacked block. Ground truth is this repo's own 16550 driver constants, not
+an invented layout.
+
+Audience: driver/baremetal authors writing register-level evidence
+comparisons, and maintainers of
+std.common.spec.evidence.format.binary_layout. Evidence produced here is
+consumed later by board/QEMU lanes.
+
+Lifecycle references:
+- Design: doc/05_design/infra/sspec/binary_reference_stacked_design.md
+- Ground truth: src/lib/nogc_async_mut_noalloc/baremetal/syscall.spl
+"""
+
+use std.spec.{describe, it, step, assert_equal, assert_true, assert_false}
 use std.common.spec.evidence.format.binary_layout.{
     BinaryLayout, ByteOrder, BitOrder, binary_field, reserved_field,
     ComparePolicy, policy_dont_care,
@@ -74,6 +95,7 @@ describe "binary embedded — UART LSR (16550)":
         # inspects (overrun/parity/framing/break) — still checked exactly
         # by default, so this passes because they are genuinely 0 both
         # sides, demonstrating exact-by-default is the safe baseline.
+        step("compare an idle, THR/TX-empty LSR readback against its expected word")
         val d = compare_word(0x60, 0x60, lsr_layout(), [])
         assert_equal(d.status, "pass")
 
@@ -81,6 +103,7 @@ describe "binary embedded — UART LSR (16550)":
         # actual has bit 7 set even though caller marks it dont_care: the
         # reserved contract in compare_word overrides dont_care for
         # `reserved`-flagged fields.
+        step("set the reserved FIFO-error bit on actual under a dont_care policy and require a failure")
         val pols = [policy_dont_care("reserved_fifo_err")]
         val d = compare_word(0x60, 0xE0, lsr_layout(), pols)
         assert_equal(d.status, "fail")
@@ -94,6 +117,7 @@ describe "binary embedded — UART LSR (16550)":
         # expected: idle+THR/TX empty (0x60); actual: a framing error crept
         # in (0x68) — a corrupted-line-status capture, the kind of evidence
         # a UART soak test records.
+        step("render a clean and a framing-error LSR readback through the stacked comparison rows")
         val ok = compare_word(0x60, 0x60, lsr_layout(), [])
         val bad = compare_word(0x60, 0x68, lsr_layout(), [])
         val rows = stacked_compare_rows([ok, bad], lsr_layout(), "LSR", 0)
@@ -137,6 +161,8 @@ fn fcr_layout() -> BinaryLayout:
 
 describe "binary embedded — UART FCR write/readback (self-clearing bits)":
     it "a full-word equality check FAILS on a genuine self-clearing readback":
+        # @req: REQ-SSPEC-BINARY-EMBEDDED-DOMAINS
+        step("read back 0x01 after writing FCR 0x07 and require exact compare to fail both reset bits")
         val written = 0x07   # fifo_enable | rcvr_reset | xmit_reset
         val readback = 0x01  # hardware auto-cleared the two reset bits
         val exact = compare_word(written, readback, fcr_layout(), [])
@@ -156,6 +182,7 @@ describe "binary embedded — UART FCR write/readback (self-clearing bits)":
         # value bits (fifo_enable, dma_mode, rx_trigger — none of which
         # changed) still compare exactly, while the two self-clearing
         # write-only bits are excluded from compare_mask entirely.
+        step("mask the two self-clearing bits dont_care and require the same readback to pass")
         val pols = [policy_dont_care("rcvr_reset"), policy_dont_care("xmit_reset")]
         val written = 0x07
         val readback = 0x01
@@ -166,6 +193,7 @@ describe "binary embedded — UART FCR write/readback (self-clearing bits)":
     it "value bits still fail under the mask when they genuinely diverge":
         # fifo_enable itself flips (0 vs written 1) — must still fail even
         # with the self-clearing bits masked out.
+        step("drop fifo_enable in the readback and require a failure under the same mask")
         val pols = [policy_dont_care("rcvr_reset"), policy_dont_care("xmit_reset")]
         val written = 0x07
         val bad_readback = 0x00  # fifo_enable also dropped — real defect
@@ -178,6 +206,7 @@ describe "binary embedded — UART FCR write/readback (self-clearing bits)":
         assert_true(found)
 
     it "reserved_low still fails even under the same dont_care policy list":
+        step("set the reserved_low bit under the reset-bit mask and require a failure")
         val pols = [policy_dont_care("rcvr_reset"), policy_dont_care("xmit_reset")]
         val d = compare_word(0x07, 0x17, fcr_layout(), pols)  # bit4 (reserved) set on actual
         assert_equal(d.status, "fail")
@@ -195,6 +224,8 @@ describe "binary embedded — UART FCR write/readback (self-clearing bits)":
 # ---------------------------------------------------------------------------
 describe "binary embedded — multi-register block dump (stacked_rows)":
     it "renders 4 consecutive UART registers as one stacked block view":
+        # @req: REQ-SSPEC-BINARY-EMBEDDED-DOMAINS
+        step("dump RBR/THR, IER, FCR, LCR as four stacked register rows")
         val rbr_thr = 0x00
         val ier = 0x00
         val fcr = 0x07

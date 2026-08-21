@@ -12,7 +12,27 @@
 # `binary_domains_spec.spl`, proving the declarative path is not a second,
 # independently-drifting model.
 
-use std.spec.{describe, it, assert_equal, assert_true}
+"""
+## Purpose and audience
+
+This spec proves the declarative `WordLayout` generation half of the binary
+SSpec infra: a layout declared once (named fields with global bit offsets,
+widths, and per-field compare/dont_care/reserved policies) generates the
+same expected words and compare masks as the hand-built fixtures
+(reproduce-parity), labels diffs by field, round-trips through SDN, and
+fails closed on invalid schemas (negative widths, out-of-bounds fields,
+overlaps, duplicate names) and on word-count mismatches.
+
+Audience: spec authors who want word fixtures declared rather than
+hand-packed next to a separate policy list, and maintainers of
+std.common.spec.evidence.format.layout_schema.
+
+Lifecycle references:
+- Design: doc/05_design/infra/sspec/binary_reference_stacked_design.md
+- Parity fixture: test/01_unit/lib/common/spec/evidence/binary_domains_spec.spl
+"""
+
+use std.spec.{describe, it, step, assert_equal, assert_true}
 use std.common.spec.evidence.format.binary_layout.{
     BinaryLayout, ByteOrder, BitOrder, binary_field, reserved_field, compare_word
 }
@@ -62,6 +82,8 @@ fn tcp_hand_built_layout() -> BinaryLayout:
 
 describe "declarative binary layout — generation":
     it "generates the same expected word as the hand-built fixture (reproduce-parity)":
+        # @req: REQ-SSPEC-BINARY-DOMAINS
+        step("generate expected words from the declarative TCP schema and compare with the hand-packed value")
         val schema = tcp_schema_layout()
         val words = layout_words(schema)
         assert_equal(words.len(), 1)
@@ -71,6 +93,7 @@ describe "declarative binary layout — generation":
         assert_equal(words[0], 0x50021000)
 
     it "generates the same compare mask as the hand-built comparator (reproduce-parity)":
+        step("generate masks from the schema and diff against the hand-built comparator's mask")
         val schema = tcp_schema_layout()
         val masks = layout_masks(schema)
         val hand_built = tcp_hand_built_layout()
@@ -79,6 +102,7 @@ describe "declarative binary layout — generation":
         assert_equal(masks[0], hand_built_diff.compare_mask)
 
     it "field-labeled diff names the corrupted field":
+        step("flip one flags bit and require the rendered diff to name it")
         val schema = tcp_schema_layout()
         val expected = layout_words(schema)[0]
         # corrupt the flags field only (bit 17 flips one flag bit)
@@ -92,6 +116,7 @@ describe "declarative binary layout — generation":
         assert_true(joined.contains("window") == false or joined.contains("^ FAIL in: flags"))
 
     it "reserved field violation fails even though the caller never asked to check it":
+        step("set a bit inside the reserved range and require a failing diff")
         val schema = tcp_schema_layout()
         val expected = layout_words(schema)[0]
         # set a bit inside the reserved range (bits 22..27)
@@ -102,6 +127,7 @@ describe "declarative binary layout — generation":
         assert_true(diffs[0].failing_fields.contains("reserved"))
 
     it "dont_care field never fails regardless of actual value":
+        step("flip every bit of the dont_care field's range and require a pass")
         val schema = WordLayout(
             layout_id: "dont_care_fixture",
             word_bits: 32,
@@ -124,6 +150,7 @@ describe "declarative binary layout — generation":
         assert_equal(diffs[0].status, "pass")
 
     it "round-trips through SDN":
+        step("serialize the schema to SDN, load it back, and compare generated words")
         val schema = tcp_schema_layout()
         val sdn_text = layout_to_sdn(schema)
         val back = layout_from_sdn(sdn_text)
@@ -139,6 +166,7 @@ describe "declarative binary layout — generation":
     # --- Adversarial cases (goal 4 hardening) ---
 
     it "layout_schema_errors catches negative width":
+        step("declare a field with width -1 and require a schema error")
         val bad = WordLayout(
             layout_id: "bad_width",
             word_bits: 32,
@@ -154,6 +182,7 @@ describe "declarative binary layout — generation":
         assert_true(errs.len() > 0)
 
     it "layout_schema_errors catches a field placed beyond the layout":
+        step("declare a field running past word_bits*word_count and require a schema error")
         val bad = WordLayout(
             layout_id: "bad_oob",
             word_bits: 32,
@@ -172,6 +201,7 @@ describe "declarative binary layout — generation":
     # binary_layout.spl — overlap and duplicate-name checks added.
     # doc/08_tracking/bug/layout_schema_errors_missing_overlap_and_generation_wiring_2026-08-18.md
     it "layout_schema_errors catches overlapping fields":
+        step("declare two fields sharing bits 4..7 and require a schema error")
         val overlapping = WordLayout(
             layout_id: "overlap",
             word_bits: 32,
@@ -190,6 +220,7 @@ describe "declarative binary layout — generation":
         assert_true(errs.len() > 0)
 
     it "layout_schema_errors catches duplicate field names":
+        step("declare two fields named 'same' and require a schema error")
         val duped = WordLayout(
             layout_id: "duped",
             word_bits: 32,
@@ -208,6 +239,7 @@ describe "declarative binary layout — generation":
         assert_true(errs.len() > 0)
 
     it "layout_schema_errors catches duplicate names differing only in case as DISTINCT (case-sensitive) — no false positive":
+        step("declare 'Flag' and 'flag' as separate fields and require zero errors")
         val distinct_case = WordLayout(
             layout_id: "case_distinct",
             word_bits: 32,
@@ -226,6 +258,7 @@ describe "declarative binary layout — generation":
         assert_equal(errs.len(), 0)
 
     it "layout_schema_errors catches a 1-bit overlap at the boundary between two fields":
+        step("declare fields sharing exactly bit 7 and require a schema error")
         val one_bit_overlap = WordLayout(
             layout_id: "one_bit_overlap",
             word_bits: 32,
@@ -244,6 +277,7 @@ describe "declarative binary layout — generation":
         assert_true(errs.len() > 0)
 
     it "valid adjacent (touching, non-overlapping) fields do not false-positive":
+        step("declare fields touching at bit 8 and require zero errors")
         val adjacent = WordLayout(
             layout_id: "adjacent",
             word_bits: 32,
@@ -262,6 +296,7 @@ describe "declarative binary layout — generation":
         assert_equal(errs.len(), 0)
 
     it "layout_schema_errors catches a three-way overlap (all three pairs flagged)":
+        step("declare three mutually overlapping fields and require at least three errors")
         val three_way = WordLayout(
             layout_id: "three_way_overlap",
             word_bits: 32,
@@ -287,6 +322,7 @@ describe "declarative binary layout — generation":
     # `[text]` return type (no parse_error variant available — see the doc
     # comment above `layout_is_invalid`).
     it "layout_words fails closed (empty) on an invalid (overlapping) layout":
+        step("generate words from an overlapping layout and require an empty result")
         val overlapping = WordLayout(
             layout_id: "overlap_generation",
             word_bits: 32,
@@ -305,6 +341,7 @@ describe "declarative binary layout — generation":
         assert_equal(words.len(), 0)
 
     it "layout_masks fails closed (empty) on an invalid (duplicate-name) layout":
+        step("generate masks from a duplicate-name layout and require an empty result")
         val duped = WordLayout(
             layout_id: "duped_generation",
             word_bits: 32,
@@ -323,6 +360,7 @@ describe "declarative binary layout — generation":
         assert_equal(masks.len(), 0)
 
     it "layout_compare fails closed (empty) on an invalid (overlapping) layout instead of silently passing":
+        step("compare against an overlapping layout and require an empty result, not a silent pass")
         val overlapping = WordLayout(
             layout_id: "overlap_compare",
             word_bits: 32,
@@ -341,6 +379,7 @@ describe "declarative binary layout — generation":
         assert_equal(diffs.len(), 0)
 
     it "layout_render fails closed (empty) on an invalid layout":
+        step("render rows from a negative-width layout and require an empty result")
         val bad = WordLayout(
             layout_id: "bad_render",
             word_bits: 32,
@@ -362,6 +401,7 @@ describe "declarative binary layout — generation":
     # validation error (empty result) rather than a silent pass, matching the
     # invalid-layout case above.
     it "extra actual words beyond word_count now fail closed instead of being silently ignored":
+        step("pass two actual words against a one-word layout and require an empty result")
         val schema = WordLayout(
             layout_id: "single_word",
             word_bits: 32,
@@ -378,6 +418,7 @@ describe "declarative binary layout — generation":
         assert_equal(diffs.len(), 0)
 
     it "too few actual words also fails closed instead of indexing out of range":
+        step("pass one actual word against a two-word layout and require an empty result")
         val schema = WordLayout(
             layout_id: "two_word",
             word_bits: 32,

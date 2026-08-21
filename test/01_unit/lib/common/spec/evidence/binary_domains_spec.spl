@@ -6,7 +6,25 @@
 # cipher known-answer vector, and a compression stream — no per-domain diff
 # helpers.
 
-use std.spec.{describe, it, assert_equal, assert_true, assert_false}
+"""
+## Purpose and audience
+
+This spec proves the goal-4 domain claim of the binary SSpec infra: one
+mask-aware comparator and one stacked word-table renderer serve a TCP
+header word fixture, an AES-128-OFB known-answer vector (NIST SP 800-38A
+F.4.1), and a gzip roundtrip/corruption check — with no per-domain diff
+helpers, and expected/actual word tables emitted to the evidence sidecar.
+
+Audience: protocol/crypto/compression spec authors deciding whether the
+generic binary evidence format covers their domain, and maintainers of
+std.common.spec.evidence.format.binary_layout.
+
+Lifecycle references:
+- Design: doc/05_design/infra/sspec/binary_reference_stacked_design.md
+- Status: doc/08_tracking/test/sspec_binary_md_manual_status_2026-08-18.md
+"""
+
+use std.spec.{describe, it, step, assert_equal, assert_true, assert_false}
 use std.common.spec.evidence.format.binary_layout.{
     BinaryLayout, ByteOrder, BitOrder, binary_field, reserved_field,
     compare_word, WordDiff, stacked_rows, stacked_compare_rows, stacked_manual_rows
@@ -51,12 +69,16 @@ fn tcp_word_layout() -> BinaryLayout:
 
 describe "binary domains — protocol stacked table":
     it "renders the reference word table (word rows)":
+        # @req: REQ-SSPEC-BINARY-DOMAINS
+        step("render two stacked words as the reference word table")
         val rows = stacked_rows([0x50021000, 0x00000000], "W", 0)
         assert_equal(rows.len(), 2)
         assert_true(rows[0].starts_with("W0"))
         assert_true(rows[1].starts_with("W1"))
 
     it "expands only the failing word with the failing field named":
+        # @req: REQ-SSPEC-BINARY-DOMAINS
+        step("corrupt the TCP flags field and render the stacked comparison rows")
         val layout = tcp_word_layout()
         # flags differ (SYN vs SYN+ACK), window and offset equal
         val ok = compare_word(0x50021000, 0x50021000, layout, [])
@@ -77,6 +99,8 @@ describe "binary domains — protocol stacked table":
         emit_evidence(SPEC_PATH, "TCP word3 — actual (flags corrupted)", actual_table)
 
     it "reserved bits fail even when both sides carry them":
+        # @req: REQ-SSPEC-BINARY-DOMAINS
+        step("carry the same reserved bit on both sides and require a failure")
         val d = compare_word(0x00400000, 0x00400000, tcp_word_layout(), [])
         assert_equal(d.status, "fail")
 
@@ -99,6 +123,8 @@ fn cipher_word_layout() -> BinaryLayout:
 
 describe "binary domains — cipher KAT":
     it "AES-128-OFB block 1 matches the NIST vector and corruption is caught":
+        # @req: REQ-SSPEC-BINARY-DOMAINS
+        step("encrypt the NIST F.4.1 plaintext and compare ciphertext word 0 against the vector")
         val key: [u8] = [0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6, 0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f, 0x3c]
         val iv: [u8] = [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f]
         val pt: [u8] = [0x6b, 0xc1, 0xbe, 0xe2, 0x2e, 0x40, 0x9f, 0x96, 0xe9, 0x3d, 0x7e, 0x11, 0x73, 0x93, 0x17, 0x2a]
@@ -124,6 +150,8 @@ describe "binary domains — cipher KAT":
 # ---------------------------------------------------------------------------
 describe "binary domains — compression":
     it "roundtrips and validates":
+        # @req: REQ-SSPEC-BINARY-DOMAINS
+        step("gzip-compress 400 deterministic bytes and decompress the stream back")
         var data: [u8] = []
         var i = 0
         while i < 400:
@@ -142,6 +170,8 @@ describe "binary domains — compression":
         assert_true(same)
 
     it "rejects a corrupted stream":
+        # @req: REQ-SSPEC-BINARY-DOMAINS
+        step("corrupt one byte inside the deflate body and require CRC32-gated rejection")
         var data: [u8] = []
         var i = 0
         while i < 100:

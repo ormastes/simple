@@ -9,6 +9,24 @@
 # Ground truth for the example layout is the real x86_64 PTE bitfield
 # accessors in src/os/kernel/types/bitfield.spl.
 
+"""
+## Purpose and audience
+
+This spec proves the binary/bitfield layout evidence format: that a layout
+declared once can assemble a real x86_64 PTE, decode it back into named
+fields the evidence comparator accepts, render the manual's byte-and-bit
+table from the same layout, reject invalid layouts (truncation, unspecified
+order, overlap) fail-closed, and flag reserved-field violations.
+
+Audience: kernel/driver reviewers reading a generated evidence manual, and
+the maintainers of std.common.spec.evidence.format.binary_layout who must
+not let the rendered table drift from the decode the comparator checks.
+
+Lifecycle references:
+- Design: doc/05_design/infra/sspec/binary_reference_stacked_design.md
+- Ground truth: src/os/kernel/types/bitfield.spl
+"""
+
 use std.spec.{describe, it, step, assert_equal, assert_true, assert_false}
 use std.common.spec.evidence.model.{
     OracleSpec, OracleCheck, oracle_spec,
@@ -40,6 +58,7 @@ fn pte_oracle() -> OracleSpec:
 describe "Binary layout evidence format":
 
     it "decodes a real x86_64 PTE value against the kernel's own field set":
+        # @req: REQ-SSPEC-BINARY-LAYOUT
         step("build a PTE the way src/os/kernel/types/bitfield.spl's pte_make does")
         # pte_make(phys: 0x0000_0000_1234_5000, present: true, writable: true,
         #          user: false, no_execute: true)
@@ -61,6 +80,8 @@ describe "Binary layout evidence format":
         assert_true(result.status == EvidenceStatus.passed)
 
     it "renders a manual table generated from the same layout, not hand-written":
+        # @req: REQ-SSPEC-BINARY-LAYOUT
+        step("render the field table for the ground-truth PTE from the layout itself")
         val pte: i64 = 0x8000000012345003
         val rows = binary_field_table(pte, pte_layout())
         assert_true(rows.len() > 1)
@@ -84,6 +105,8 @@ describe "Binary layout evidence format":
         assert_equal(after.nodes[4].value, "1")
 
     it "reports a layout as invalid when a field truncates past total_bits":
+        # @req: REQ-SSPEC-BINARY-LAYOUT
+        step("declare a layout whose field overruns the declared word width")
         val bad = BinaryLayout(
             layout_id: "bad_truncated",
             total_bits: 64,
@@ -100,6 +123,8 @@ describe "Binary layout evidence format":
         assert_false(evidence.parse_ok)
 
     it "rejects a layout with unspecified byte order or bit order":
+        # @req: REQ-SSPEC-BINARY-LAYOUT
+        step("declare a layout leaving both orders unspecified")
         val unspecified = BinaryLayout(
             layout_id: "no_order",
             total_bits: 32,
@@ -111,6 +136,8 @@ describe "Binary layout evidence format":
         assert_false(layout_is_valid(unspecified))
 
     it "rejects overlapping fields":
+        # @req: REQ-SSPEC-BINARY-LAYOUT
+        step("declare a layout whose two fields share bits 4..7")
         val overlapping = BinaryLayout(
             layout_id: "overlap",
             total_bits: 16,
@@ -125,6 +152,8 @@ describe "Binary layout evidence format":
         assert_false(layout_is_valid(overlapping))
 
     it "flags a reserved field that is nonzero under a must-be-zero policy":
+        # @req: REQ-SSPEC-BINARY-LAYOUT
+        step("set a bit inside the PTE's reserved_low range and check for violations")
         val layout = pte_layout()
         val dirty_reserved: i64 = 1 << 4  # inside reserved_low[3:11]
         val violations = reserved_violations(dirty_reserved, layout)
@@ -135,6 +164,8 @@ describe "Binary layout evidence format":
         assert_equal(reserved_violations(0, layout).len(), 0)
 
     it "round-trips field_insert then field_extract":
+        # @req: REQ-SSPEC-BINARY-LAYOUT
+        step("insert the PTE phys and present bits, then extract them back")
         val v0: i64 = 0
         val v1 = field_insert(v0, 12, 40, 74565)
         assert_equal(field_extract(v1, 12, 40), 74565)
@@ -143,6 +174,8 @@ describe "Binary layout evidence format":
         assert_equal(field_extract(v2, 12, 40), 74565)
 
     it "renders a grouped binary string for the ground-truth PTE":
+        # @req: REQ-SSPEC-BINARY-LAYOUT
+        step("render the ground-truth PTE as an underscore-grouped binary string")
         val pte: i64 = 0x8000000012345003
         val grouped = u64_binary_grouped(pte)
         assert_true(grouped.starts_with("0b10000000_00000000"))
@@ -167,6 +200,8 @@ describe "Red-team hardening: wide-field table hex":
         )
 
     it "renders the full field width in the table, not just its low byte":
+        # @req: REQ-SSPEC-BINARY-LAYOUT
+        step("render the 40-bit phys_addr field's table row from the layout")
         val layout = wide_field_layout()
         val value = 0x0000_0000_1234_5000
         val rows = binary_field_table(value, layout)

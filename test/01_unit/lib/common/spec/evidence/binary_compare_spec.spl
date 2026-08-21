@@ -7,7 +7,23 @@
 # gray — reserved fields are actively checked even when the caller marks
 # them dont_care or passes a nonzero expected in that range.
 
-use std.spec.{describe, it, assert_equal, assert_true, assert_false}
+"""
+## Purpose and audience
+
+This spec locks the word-level semantics of `compare_word`: delta =
+(actual XOR expected) AND compare_mask, dont_care fields cannot fail an
+assertion, an all-gray word reports "ignored", masked policies compare only
+the selected sub-bits, and reserved fields are actively checked against
+zero on the actual side no matter what policy the caller supplied.
+
+Audience: spec authors writing binary evidence comparisons, and maintainers
+of std.common.spec.evidence.format.binary_layout's comparator.
+
+Lifecycle references:
+- Design: doc/05_design/infra/sspec/binary_reference_stacked_design.md
+"""
+
+use std.spec.{describe, it, step, assert_equal, assert_true, assert_false}
 use std.common.spec.evidence.format.binary_layout.{
     BinaryLayout, ByteOrder, BitOrder,
     binary_field, reserved_field,
@@ -33,11 +49,15 @@ fn toy_layout() -> BinaryLayout:
 
 describe "binary compare_word":
     it "passes when all checked bits match":
+        # @req: REQ-SSPEC-BINARY-COMPARE
+        step("compare two identical words under exact policy")
         val d = compare_word(0x5A03, 0x5A03, toy_layout(), [])
         assert_equal(d.status, "pass")
         assert_equal(d.delta, 0)
 
     it "fails an exact field and names it":
+        # @req: REQ-SSPEC-BINARY-COMPARE
+        step("differ the payload byte and require the failure to name the field")
         # payload differs: 0x5A vs 0x4A
         val d = compare_word(0x5A03, 0x4A03, toy_layout(), [])
         assert_equal(d.status, "fail")
@@ -48,6 +68,8 @@ describe "binary compare_word":
         assert_true(found)
 
     it "checks reserved bits even when expected also has them set":
+        # @req: REQ-SSPEC-BINARY-COMPARE
+        step("set the same reserved bit on both sides and require a failure on actual")
         # bit 5 set in BOTH expected and actual: a naive xor would pass,
         # but reserved_zero must fail on the ACTUAL bit being set.
         val d = compare_word(0x0020, 0x0020, toy_layout(), [])
@@ -59,16 +81,22 @@ describe "binary compare_word":
         assert_true(found)
 
     it "reserved overrides a dont_care request":
+        # @req: REQ-SSPEC-BINARY-COMPARE
+        step("mark the reserved field dont_care while actual carries a nonzero bit there")
         val d = compare_word(0x0000, 0x0010, toy_layout(), [policy_dont_care("reserved_mid")])
         assert_equal(d.status, "fail")
 
     it "dont_care field cannot fail the assertion":
+        # @req: REQ-SSPEC-BINARY-COMPARE
+        step("differ the payload wildly under a dont_care payload policy")
         val pols = [policy_dont_care("payload")]
         # payload wildly different, everything else equal
         val d = compare_word(0xFF01, 0x0001, toy_layout(), pols)
         assert_equal(d.status, "pass")
 
     it "reports ignored when no bits are compared":
+        # @req: REQ-SSPEC-BINARY-COMPARE
+        step("dont_care every non-reserved field and require an ignored verdict with a zero mask")
         val pols = [
             policy_dont_care("flag"),
             policy_dont_care("mode"),
@@ -92,6 +120,8 @@ describe "binary compare_word":
         assert_equal(d.compare_mask, 0)
 
     it "masked policy compares only the selected sub-bits":
+        # @req: REQ-SSPEC-BINARY-COMPARE
+        step("mask the payload to its low nibble and differ each nibble in turn")
         # payload masked to low nibble: high-nibble diff ignored, low-nibble diff fails
         val pols = [policy_masked("payload", 0x0F)]
         val ok = compare_word(0xA503, 0xF503, toy_layout(), pols)
@@ -100,6 +130,8 @@ describe "binary compare_word":
         assert_equal(bad.status, "fail")
 
     it "renders a compact word line with failing field names":
+        # @req: REQ-SSPEC-BINARY-COMPARE
+        step("render the failing word diff as a compact line")
         val d = compare_word(0x5A03, 0x4A03, toy_layout(), [])
         val line = render_word_line("W0", d)
         assert_true(line.contains("FAIL"))
@@ -108,6 +140,8 @@ describe "binary compare_word":
     # --- Adversarial cases (goal 4 hardening) ---
 
     it "all-bits-set actual vs all-bits-clear expected fails every field under exact policy":
+        # @req: REQ-SSPEC-BINARY-COMPARE
+        step("compare 0x0000 expected against 0xFFFF actual and require every field to fail")
         # expected=0x0000, actual=0xFFFF: every non-reserved field mismatches,
         # and the reserved field (forced reserved_zero regardless of policy)
         # also fails because actual has bits set where reserved must be 0.
@@ -124,6 +158,7 @@ describe "binary compare_word":
         # never fail the assertion, even though the caller wrote "masked"
         # rather than "dont_care". This is documented intentional behavior,
         # not a bug: a zero mask always means "compare nothing".
+        step("apply a zero-width mask and require the differing field to still pass")
         val pols = [policy_masked("payload", 0x00)]
         val d = compare_word(0x5A03, 0x0003, toy_layout(), pols)
         assert_equal(d.status, "pass")
@@ -135,5 +170,6 @@ describe "binary compare_word":
         # caller passed as `expected`. actual has the reserved range clear,
         # so the comparison passes even though `expected` "claimed" a
         # reserved bit was set — the reserved policy overrides both sides.
+        step("set an expected-only reserved bit and require the comparison to pass")
         val d = compare_word(0x0020, 0x0000, toy_layout(), [])
         assert_equal(d.status, "pass")

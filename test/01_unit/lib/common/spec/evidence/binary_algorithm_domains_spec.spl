@@ -7,7 +7,25 @@
 # checksum, reusing the existing std.common.crypto.sha256 / std.common.compress
 # implementations — no algorithm is reimplemented here.
 
-use std.spec.{describe, it, assert_equal, assert_true}
+"""
+## Purpose and audience
+
+This spec proves the generic binary SSpec comparator and stacked word
+table serve algorithm domains with zero reimplementation: SHA-256 NIST
+KATs (digest viewed as 8 stacked 32-bit words, with avalanche detection on
+a flipped input byte) and CRC-32/ISO-HDLC (Rocksoft check value, plus a
+masked low-half comparison for truncated checksums).
+
+Audience: crypto/checksum spec authors deciding whether the generic
+word-comparison evidence format covers KAT-style suites, and maintainers of
+std.common.spec.evidence.format.binary_layout.
+
+Lifecycle references:
+- Design: doc/05_design/infra/sspec/binary_reference_stacked_design.md
+- Sibling domain suite: test/01_unit/lib/common/spec/evidence/binary_domains_spec.spl
+"""
+
+use std.spec.{describe, it, step, assert_equal, assert_true}
 use std.common.spec.evidence.format.binary_layout.{
     BinaryLayout, ByteOrder, BitOrder, binary_field,
     compare_word, WordDiff, stacked_compare_rows, stacked_manual_rows,
@@ -69,6 +87,8 @@ fn sha256_word_layout() -> BinaryLayout:
 
 describe "binary algorithm domains — SHA-256 KAT stacked words":
     it "matches the empty-string vector across all 8 digest words":
+        # @req: REQ-SSPEC-BINARY-DOMAINS
+        step("hash the empty string and compare all 8 digest words against the NIST vector")
         # sha256("") = e3b0c442 98fc1c14 9afbf4c8 996fb924 27ae41e4 649b934c a495991b 7852b855
         val expected: [i64] = [
             0xe3b0c442, 0x98fc1c14, 0x9afbf4c8, 0x996fb924,
@@ -85,6 +105,7 @@ describe "binary algorithm domains — SHA-256 KAT stacked words":
             i = i + 1
 
     it "matches the \"abc\" vector and a flipped input byte fails a downstream word":
+        step("hash \"abc\" and \"abd\", render both stacked comparisons, and require only the corrupted one to FAIL")
         # sha256("abc") = ba7816bf 8f01cfea 414140de 5dae2223 b00361a3 96177a9c b410ff61 f20015ad
         val expected: [i64] = [
             0xba7816bf, 0x8f01cfea, 0x414140de, 0x5dae2223,
@@ -165,6 +186,8 @@ fn crc32_low_half_layout() -> BinaryLayout:
 
 describe "binary algorithm domains — CRC32 word comparison":
     it "matches the Rocksoft check value for \"123456789\" as a single word":
+        # @req: REQ-SSPEC-BINARY-DOMAINS
+        step("compute CRC-32/ISO-HDLC of \"123456789\" and compare the check value as one word")
         # CRC-32/ISO-HDLC check("123456789") = 0xCBF43926
         val expected: i64 = 0xCBF43926
         val actual = crc32_bytes(text_to_u8_bytes("123456789")) as i64
@@ -173,6 +196,7 @@ describe "binary algorithm domains — CRC32 word comparison":
         assert_equal(d.status, "pass")
 
     it "masked (low-half) comparison ignores a differing high half — appropriate for a truncated checksum":
+        step("corrupt only the high half and require a full-word FAIL but a low-half masked PASS")
         val expected: i64 = 0xCBF43926
         # Simulate a corrupted high half (as if only the low 16 bits are the
         # authoritative truncated checksum): full-word compare must FAIL,
