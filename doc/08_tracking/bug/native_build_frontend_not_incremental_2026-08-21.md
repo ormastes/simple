@@ -156,6 +156,69 @@ change in `src/compiler/10.frontend/**`, which was out of scope for this session
 because another lane was actively working in that tree. It is the first thing to
 do before writing any codec.
 
+## Moving the object-cache lookup earlier (the highest-value change)
+
+For a cache HIT the step-5 loop consumes almost nothing:
+`driver_native_module_cache_source` (`driver_aot_native_output.spl:175-193`)
+scans only `ctx.sources` for a path — **available before parse** — and the hit
+branch (`:795-806`) just pushes the cached object paths. The only parsed state it
+touches is `driver_native_module_is_export_facade(ctx.mir_modules[name],
+ctx.modules[name])` (`:390-430`), a "does this module have any code" predicate
+that is moot for a module the cache says produced objects.
+
+So the lookup itself can move to right after the source closure. What stops the
+front end from being skipped is **dependents**, not the lookup:
+
+- HIR lowering resolves imports against `HirLowering.module_surfaces`
+  (`20.hir/hir_lowering/types.spl:65`, read in `_Items/module_import_resolution.spl:238-295`
+  and `_Items/module_import_registration.spl:268-477`). A module missing from
+  `module_surfaces.index_by_name` fails import resolution in its dependents.
+- **No surface can be reloaded from disk.** `ModuleSurface`
+  (`20.hir/hir_lowering/module_surface_types.spl:220-285`) is ~30 fields over 8
+  nested types and embeds parser `Type`/`Span`/`Variant`/`ParserImport`/`Export`,
+  plus real AST bodies in `ModuleSurfaceTrait.default_methods: [ParserFunction]`
+  (`:77`, the deliberate "sole executable-body exception") and enum struct-variant
+  field defaults. `smf_serialization.spl:212-367` writes bodyless HIR *placeholder*
+  records and has no reader, no impls, and no export routes.
+  `interface_digest_of` (`cache/action_key.spl:197-204`) and
+  `smf_manifest_entry_iface_verdict` (`watcher/smf_manifest.spl:173`) **hash** an
+  interface; nothing **reloads** one.
+
+### Ranked options
+- **(c) Parse-only for cached deps — ~100-200 lines, recommended first.** Keep
+  parse + `ModuleSurfaceBuilder.add_parsed/add_alias`
+  (`driver_source_pipeline_parsing.spl:~495-540`) so dependents still resolve,
+  but skip **HIR + MIR lowering and codegen** for object-cached modules. Needs a
+  skip flag threaded through the HIR/MIR loops plus a synthesized
+  `ctx.mir_modules[name]` placeholder for the `:776` dereference. No
+  serialization at all. Does **not** reach "parse=0 files" — it reaches
+  "HIR/MIR=0 modules".
+- **(a) Persist + reload the surface — ~1200-2000 lines.** The only route to
+  "parse=0 files". Needs a canon-v1 writer+reader over the nested types above,
+  registry re-freeze (`registry_index.spl:200`), and a version/digest guard.
+- **(b) Reuse SMF placeholder records — ~600-1000 lines. Not recommended:**
+  wrong shape (no impls, no export routes/origins) and write-only today.
+
+### Blocking correctness prerequisite for ALL of the above
+`BuildCache.has_cached_object` (`driver_build/incremental.spl:530-545`) compares
+**only that one file's own `content_hash`** plus output existence. There is **no
+dependency tracking of any kind** — which matches CLAUDE.md's note that
+`interface_digest_of` has zero call sites.
+
+Today that is merely wasteful: if `util_a.spl` changes and `main.spl` does not,
+`main.spl` hits the cache and its stale object is linked either way. But
+`main.spl` is still re-parsed, re-HIR'd and re-MIR'd, so a type error introduced
+by the changed interface **is still caught**. Skipping the front end for cache
+hits removes exactly that check, turning a wasteful-but-loud build into a fast
+and **silent** one. Therefore:
+
+> Moving the lookup earlier MUST land together with dependency-aware
+> invalidation, not before it. The cheap sound version is to fold the transitive
+> import closure's content hashes into each module's cache key (the fingerprints
+> already exist in `BuildCache`), so editing `util_a.spl` changes `main.spl`'s
+> key and re-front-ends exactly the affected modules — which is also precisely
+> the acceptance criterion for the reproduce spec.
+
 ## Status
 **Not fixed.** Instrumentation only (`146d987b1c0`). The front-end cache and the
 parse sharding are designed and sited above but not implemented: the codec must
