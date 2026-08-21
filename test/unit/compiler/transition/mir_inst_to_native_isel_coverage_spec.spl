@@ -1,0 +1,72 @@
+# @cover src/compiler/00.common/transition/validator.spl 60%
+"""
+# MirInstKind -> x86_64 native instruction selection is a totally declared boundary
+
+**Category:** Compiler / completeness proofs
+**Plan:** doc/03_plan/compiler/hardening/critical_hardening_plan_2026-08-21.md (lane C7)
+**Design:** doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md sections 11.3-11.6
+
+## Purpose
+
+`spec/compiler_schema/transitions/mir_inst_to_native_isel.sdn` records the instruction boundary of `isel_inst_with_simd`. Before lane C7, 105 of the
+126 variants fell to a terminal `case _:` that emitted a NOP, deleting the
+instruction from the generated machine code.
+
+Every variant of the producer universe carries exactly one declared state, so a
+NEW variant added upstream is reported as Missing by
+`scripts/check/check-compiler-transition-coverage.shs` instead of vanishing into
+a wildcard. This spec pins the TABLE, not the deployed binary: `bin/simple test`
+runs an already-built compiler, so only a source-level assertion can catch a
+revert of the arms the table describes.
+"""
+
+use std.spec
+use std.io_runtime.{file_read, file_exists}
+use compiler.common.transition.transition_table.{parse_transition_table, variant_name_of}
+use compiler.common.transition.validator.{
+    validate_transition_table, coverage_report_is_clean, coverage_report_handled
+}
+use compiler.common.transition.coverage_state.{coverage_state_tag}
+
+val TABLE_PATH = "spec/compiler_schema/transitions/mir_inst_to_native_isel.sdn"
+val REGISTRY_PATH = "spec/compiler_schema/registry/compiler.mir.MirInstKind.sdn"
+
+fn load_table_text() -> text:
+    if not file_exists(TABLE_PATH):
+        fail("transition table not found at {TABLE_PATH}; run from the repo root")
+        return ""
+    return file_read(TABLE_PATH)
+
+describe "mir_inst_to_native_isel transition table":
+    it "loads without a single parse error":
+        val table = parse_transition_table(load_table_text())
+        expect(table.errors.len()).to_equal(0)
+        expect(table.name).to_equal("mir_inst_to_native_isel")
+        expect(table.producer).to_equal("MirInstKind")
+
+    it "declares all 126 MirInstKind variants — Missing is empty":
+        expect(file_exists(REGISTRY_PATH)).to_equal(true)
+        val report = validate_transition_table(parse_transition_table(load_table_text()))
+        expect(report.universe_size).to_equal(126)
+        expect(report.declared).to_equal(126)
+        expect(report.missing.len()).to_equal(0)
+        expect(report.unknown.len()).to_equal(0)
+        expect(coverage_report_is_clean(report)).to_equal(true)
+
+    it "names the variants this boundary is built around":
+        val table = parse_transition_table(load_table_text())
+        var names: [text] = []
+        for row in table.rows:
+            names.push(variant_name_of(row.from_id))
+        for v in ["Const", "Copy", "BinOp", "Call", "Drop", "Await", "InlineAsm", "VhdlProcess"]:
+            expect(names.contains(v)).to_equal(true)
+
+    it "records exactly 103 unsupported row(s) — every other variant is handled":
+        step("An `unsupported` row is a variant with an EXPLICIT arm raising a named diagnostic, never a wildcard")
+        val table = parse_transition_table(load_table_text())
+        var unsupported = 0
+        for row in table.rows:
+            if coverage_state_tag(row.state) == "unsupported":
+                unsupported = unsupported + 1
+        expect(unsupported).to_equal(103)
+        expect(coverage_report_handled(table) + unsupported).to_equal(126)

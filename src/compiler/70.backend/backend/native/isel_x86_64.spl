@@ -17,6 +17,8 @@ use compiler.backend.common.isel_context.{ISelContext, new_isel_context, isel_al
 use compiler.backend.common.ascii_utils.{char_to_ascii}
 use compiler.backend.native.native_avx2_capability.{NativeAvx2CapabilityV1, native_avx2_denied_v1}
 use compiler.mir_opt.mir_opt.storage_projection_lowering.{MIR_STORAGE_PROJECT_ADDRESS_V1}
+use compiler.common.diagnostics.span.{Span}
+extern fn rt_enum_discriminant(value: Any) -> i64
 
 # ============================================================================
 # Operand Lowering
@@ -174,6 +176,22 @@ fn isel_block_with_simd(ctx: ISelContext, block: MirBlock, simd_regs: Dict<i64, 
 # Instruction Selection - Instructions
 # ============================================================================
 
+# Lane C7: render a MIR instruction's source span for a loud backend
+# diagnostic, or a stable placeholder when the instruction carries none.
+fn x86_isel_format_span(span: Span?) -> text:
+    if span.?:
+        val sp = span.unwrap()
+        "{sp.file}:{sp.line}:{sp.col}"
+    else:
+        "unknown location"
+
+fn x86_unsupported_inst(ctx: ISelContext, variant: text, span: Span?) -> ISelInstResult:
+    """NAMED, spanned refusal for a MirInstKind variant x86_64 instruction
+    selection cannot lower (lane C7). `E-BACKEND-X86ISEL-INST-<Variant>` is
+    stable and greppable. This used to be a shared `case _:` that emitted a NOP,
+    i.e. it deleted the instruction and let the program run on regardless."""
+    panic("E-BACKEND-X86ISEL-INST-{variant}: x86_64 instruction selection does not lower {variant} at {x86_isel_format_span(span)}")
+
 fn isel_inst(ctx: ISelContext, inst: MirInst) -> ISelInstResult:
     isel_inst_with_simd(ctx, inst, {})
 
@@ -221,9 +239,238 @@ fn isel_inst_with_simd(ctx: ISelContext, inst: MirInst, simd_regs: Dict<i64, i64
             panic("x86_64 isel: unlowered ConditionProbe '{semantic_id}' reached instruction selection")
         case Nop:
             ISelInstResult(insts: [new_mach_inst(X86_OP_NOP, [])], ctx: ctx)
-        case _:
-            # Unsupported instruction - emit NOP
+        # --------------------------------------------------------------------
+        # Lane C7 (backend coverage, hardening plan 2026-08-21 sections
+        # 11.3-11.6). EXPLICIT arms for the 105 MirInstKind variants that used to
+        # reach the terminal `case _:` below, which emitted a NOP -- the
+        # instruction was silently DELETED from the generated machine code and
+        # execution ran on with whatever the missing computation never wrote.
+        # Each now raises a stable, spanned E-BACKEND-X86ISEL-INST-<Variant>.
+        # Universe: spec/compiler_schema/registry/compiler.mir.MirInstKind.sdn
+        # Table:    spec/compiler_schema/transitions/mir_inst_to_native_isel.sdn
+        # --------------------------------------------------------------------
+        case AcquireSnapshot(_, _):
+            x86_unsupported_inst(ctx, "AcquireSnapshot", inst.span)
+        case Await(_, _):
+            x86_unsupported_inst(ctx, "Await", inst.span)
+        case Bitcast(_, _, _):
+            x86_unsupported_inst(ctx, "Bitcast", inst.span)
+        case CallIndirect(_, _, _, _):
+            x86_unsupported_inst(ctx, "CallIndirect", inst.span)
+        case CheckedBinOp(_, _, _, _):
+            x86_unsupported_inst(ctx, "CheckedBinOp", inst.span)
+        case CommitUpdates(_, _, _):
+            x86_unsupported_inst(ctx, "CommitUpdates", inst.span)
+        case Compose(_, _, _, _):
+            x86_unsupported_inst(ctx, "Compose", inst.span)
+        case CreatePromise(_, _, _):
+            x86_unsupported_inst(ctx, "CreatePromise", inst.span)
+        case DebugValue(_, _):
+            # Deliberate no-op: DebugValue is a MIR-level marker with no machine
+            # code. A real NOP encoding is the correct lowering, unlike the
+            # blanket wildcard this replaces. Recorded `implemented`.
             ISelInstResult(insts: [new_mach_inst(X86_OP_NOP, [])], ctx: ctx)
+        case Drop(_):
+            # Deliberate no-op: Drop is a MIR-level marker with no machine
+            # code. A real NOP encoding is the correct lowering, unlike the
+            # blanket wildcard this replaces. Recorded `implemented`.
+            ISelInstResult(insts: [new_mach_inst(X86_OP_NOP, [])], ctx: ctx)
+        case FreezeRegion(_):
+            x86_unsupported_inst(ctx, "FreezeRegion", inst.span)
+        case GpuAtomicCas(_, _, _, _):
+            x86_unsupported_inst(ctx, "GpuAtomicCas", inst.span)
+        case GpuAtomicOp(_, _, _, _):
+            x86_unsupported_inst(ctx, "GpuAtomicOp", inst.span)
+        case GpuBarrier(_):
+            x86_unsupported_inst(ctx, "GpuBarrier", inst.span)
+        case GpuBlockDim(_, _):
+            x86_unsupported_inst(ctx, "GpuBlockDim", inst.span)
+        case GpuBlockId(_, _):
+            x86_unsupported_inst(ctx, "GpuBlockId", inst.span)
+        case GpuGlobalId(_, _):
+            x86_unsupported_inst(ctx, "GpuGlobalId", inst.span)
+        case GpuGridDim(_, _):
+            x86_unsupported_inst(ctx, "GpuGridDim", inst.span)
+        case GpuKernelDef(_):
+            x86_unsupported_inst(ctx, "GpuKernelDef", inst.span)
+        case GpuLaunch(_):
+            x86_unsupported_inst(ctx, "GpuLaunch", inst.span)
+        case GpuLocalId(_, _):
+            x86_unsupported_inst(ctx, "GpuLocalId", inst.span)
+        case GpuMemFence(_):
+            x86_unsupported_inst(ctx, "GpuMemFence", inst.span)
+        case GpuSharedAlloc(_, _, _):
+            x86_unsupported_inst(ctx, "GpuSharedAlloc", inst.span)
+        case HostGpuLaneBegin(_, _):
+            x86_unsupported_inst(ctx, "HostGpuLaneBegin", inst.span)
+        case HostGpuLaneEnd(_):
+            x86_unsupported_inst(ctx, "HostGpuLaneEnd", inst.span)
+        case InlineAsm(_, _, _, _, _, _, _):
+            x86_unsupported_inst(ctx, "InlineAsm", inst.span)
+        case LayerConnect(_, _, _):
+            x86_unsupported_inst(ctx, "LayerConnect", inst.span)
+        case LoadGlobal(_, _):
+            x86_unsupported_inst(ctx, "LoadGlobal", inst.span)
+        case MaskFromCmp(_, _, _, _):
+            x86_unsupported_inst(ctx, "MaskFromCmp", inst.span)
+        case MaskedAdd(_, _, _, _):
+            x86_unsupported_inst(ctx, "MaskedAdd", inst.span)
+        case MaskedFma(_, _, _, _, _):
+            x86_unsupported_inst(ctx, "MaskedFma", inst.span)
+        case MaskedMul(_, _, _, _):
+            x86_unsupported_inst(ctx, "MaskedMul", inst.span)
+        case MirSimdCmp(_, _, _, _):
+            x86_unsupported_inst(ctx, "MirSimdCmp", inst.span)
+        case MirSimdGather(_, _, _, _):
+            x86_unsupported_inst(ctx, "MirSimdGather", inst.span)
+        case MirSimdMaskOp(_, _, _, _):
+            x86_unsupported_inst(ctx, "MirSimdMaskOp", inst.span)
+        case MirSimdPermute(_, _, _):
+            x86_unsupported_inst(ctx, "MirSimdPermute", inst.span)
+        case MirSimdReduce(_, _, _):
+            x86_unsupported_inst(ctx, "MirSimdReduce", inst.span)
+        case MirSimdScalableVsetvl(_, _, _):
+            x86_unsupported_inst(ctx, "MirSimdScalableVsetvl", inst.span)
+        case MirSimdScatter(_, _, _):
+            x86_unsupported_inst(ctx, "MirSimdScatter", inst.span)
+        case MirSimdSelect(_, _, _, _):
+            x86_unsupported_inst(ctx, "MirSimdSelect", inst.span)
+        case MirSimdShuffle(_, _, _, _):
+            x86_unsupported_inst(ctx, "MirSimdShuffle", inst.span)
+        case MirSimdSplat(_, _, _):
+            x86_unsupported_inst(ctx, "MirSimdSplat", inst.span)
+        case MirSimdTernop(_, _, _, _, _):
+            x86_unsupported_inst(ctx, "MirSimdTernop", inst.span)
+        case MirSimdUnop(_, _, _):
+            x86_unsupported_inst(ctx, "MirSimdUnop", inst.span)
+        case MirWarpActivesMask(_):
+            x86_unsupported_inst(ctx, "MirWarpActivesMask", inst.span)
+        case MirWarpBallot(_, _, _):
+            x86_unsupported_inst(ctx, "MirWarpBallot", inst.span)
+        case MirWarpReduce(_, _, _, _):
+            x86_unsupported_inst(ctx, "MirWarpReduce", inst.span)
+        case MirWarpShfl(_, _, _, _, _):
+            x86_unsupported_inst(ctx, "MirWarpShfl", inst.span)
+        case MirWarpSync(_):
+            x86_unsupported_inst(ctx, "MirWarpSync", inst.span)
+        case Parallel(_, _):
+            x86_unsupported_inst(ctx, "Parallel", inst.span)
+        case PipeForward(_, _, _):
+            x86_unsupported_inst(ctx, "PipeForward", inst.span)
+        case PredicatedAdd(_, _, _, _, _, _):
+            x86_unsupported_inst(ctx, "PredicatedAdd", inst.span)
+        case PredicatedFma(_, _, _, _, _, _, _):
+            x86_unsupported_inst(ctx, "PredicatedFma", inst.span)
+        case PredicatedMul(_, _, _, _, _, _):
+            x86_unsupported_inst(ctx, "PredicatedMul", inst.span)
+        case Receive(_, _):
+            x86_unsupported_inst(ctx, "Receive", inst.span)
+        case Ref(_, _, _):
+            x86_unsupported_inst(ctx, "Ref", inst.span)
+        case ResultMatchSemantic(_, _, _, _, _, _, _):
+            x86_unsupported_inst(ctx, "ResultMatchSemantic", inst.span)
+        case ScalableVecFence(_):
+            x86_unsupported_inst(ctx, "ScalableVecFence", inst.span)
+        case Send(_, _, _):
+            x86_unsupported_inst(ctx, "Send", inst.span)
+        case SimdAddF32x4(_, _, _):
+            x86_unsupported_inst(ctx, "SimdAddF32x4", inst.span)
+        case SimdAddF32x8(_, _, _):
+            x86_unsupported_inst(ctx, "SimdAddF32x8", inst.span)
+        case SimdAddF64x4(_, _, _):
+            x86_unsupported_inst(ctx, "SimdAddF64x4", inst.span)
+        case SimdAddI32x4(_, _, _):
+            x86_unsupported_inst(ctx, "SimdAddI32x4", inst.span)
+        case SimdAddI32x8(_, _, _):
+            x86_unsupported_inst(ctx, "SimdAddI32x8", inst.span)
+        case SimdAndI32x4(_, _, _):
+            x86_unsupported_inst(ctx, "SimdAndI32x4", inst.span)
+        case SimdAndI32x8(_, _, _):
+            x86_unsupported_inst(ctx, "SimdAndI32x8", inst.span)
+        case SimdDivF32x4(_, _, _):
+            x86_unsupported_inst(ctx, "SimdDivF32x4", inst.span)
+        case SimdDivF32x8(_, _, _):
+            x86_unsupported_inst(ctx, "SimdDivF32x8", inst.span)
+        case SimdDivF64x4(_, _, _):
+            x86_unsupported_inst(ctx, "SimdDivF64x4", inst.span)
+        case SimdFmaF32x4(_, _, _, _):
+            x86_unsupported_inst(ctx, "SimdFmaF32x4", inst.span)
+        case SimdFmaF32x8(_, _, _, _):
+            x86_unsupported_inst(ctx, "SimdFmaF32x8", inst.span)
+        case SimdFmaF64x4(_, _, _, _):
+            x86_unsupported_inst(ctx, "SimdFmaF64x4", inst.span)
+        case SimdHaddF32x4(_, _):
+            x86_unsupported_inst(ctx, "SimdHaddF32x4", inst.span)
+        case SimdHmaxF32x4(_, _):
+            x86_unsupported_inst(ctx, "SimdHmaxF32x4", inst.span)
+        case SimdHminF32x4(_, _):
+            x86_unsupported_inst(ctx, "SimdHminF32x4", inst.span)
+        case SimdMulF32x4(_, _, _):
+            x86_unsupported_inst(ctx, "SimdMulF32x4", inst.span)
+        case SimdMulF32x8(_, _, _):
+            x86_unsupported_inst(ctx, "SimdMulF32x8", inst.span)
+        case SimdMulF64x4(_, _, _):
+            x86_unsupported_inst(ctx, "SimdMulF64x4", inst.span)
+        case SimdMulI32x4(_, _, _):
+            x86_unsupported_inst(ctx, "SimdMulI32x4", inst.span)
+        case SimdMulI32x8(_, _, _):
+            x86_unsupported_inst(ctx, "SimdMulI32x8", inst.span)
+        case SimdOrI32x4(_, _, _):
+            x86_unsupported_inst(ctx, "SimdOrI32x4", inst.span)
+        case SimdOrI32x8(_, _, _):
+            x86_unsupported_inst(ctx, "SimdOrI32x8", inst.span)
+        case SimdShlI32x4(_, _, _):
+            x86_unsupported_inst(ctx, "SimdShlI32x4", inst.span)
+        case SimdShlI32x8(_, _, _):
+            x86_unsupported_inst(ctx, "SimdShlI32x8", inst.span)
+        case SimdShrI32x4(_, _, _):
+            x86_unsupported_inst(ctx, "SimdShrI32x4", inst.span)
+        case SimdShrI32x8(_, _, _):
+            x86_unsupported_inst(ctx, "SimdShrI32x8", inst.span)
+        case SimdSubF32x4(_, _, _):
+            x86_unsupported_inst(ctx, "SimdSubF32x4", inst.span)
+        case SimdSubF32x8(_, _, _):
+            x86_unsupported_inst(ctx, "SimdSubF32x8", inst.span)
+        case SimdSubF64x4(_, _, _):
+            x86_unsupported_inst(ctx, "SimdSubF64x4", inst.span)
+        case SimdSubI32x4(_, _, _):
+            x86_unsupported_inst(ctx, "SimdSubI32x4", inst.span)
+        case SimdSubI32x8(_, _, _):
+            x86_unsupported_inst(ctx, "SimdSubI32x8", inst.span)
+        case SimdXorI32x4(_, _, _):
+            x86_unsupported_inst(ctx, "SimdXorI32x4", inst.span)
+        case SimdXorI32x8(_, _, _):
+            x86_unsupported_inst(ctx, "SimdXorI32x8", inst.span)
+        case Spawn(_, _, _):
+            x86_unsupported_inst(ctx, "Spawn", inst.span)
+        case StoreGlobal(_, _):
+            x86_unsupported_inst(ctx, "StoreGlobal", inst.span)
+        case TransferIn(_, _, _, _):
+            x86_unsupported_inst(ctx, "TransferIn", inst.span)
+        case TransferOut(_, _, _, _, _, _):
+            x86_unsupported_inst(ctx, "TransferOut", inst.span)
+        case VhdlConcat(_, _):
+            x86_unsupported_inst(ctx, "VhdlConcat", inst.span)
+        case VhdlPortMap(_, _, _):
+            x86_unsupported_inst(ctx, "VhdlPortMap", inst.span)
+        case VhdlProcess(_, _):
+            x86_unsupported_inst(ctx, "VhdlProcess", inst.span)
+        case VhdlResize(_, _, _, _):
+            x86_unsupported_inst(ctx, "VhdlResize", inst.span)
+        case VhdlSignalAssign(_, _, _):
+            x86_unsupported_inst(ctx, "VhdlSignalAssign", inst.span)
+        case VhdlSlice(_, _, _, _):
+            x86_unsupported_inst(ctx, "VhdlSlice", inst.span)
+        case VhdlVarAssign(_, _):
+            x86_unsupported_inst(ctx, "VhdlVarAssign", inst.span)
+        case Yield(_):
+            x86_unsupported_inst(ctx, "Yield", inst.span)
+        case _:
+            # Not a variant: every MirInstKind now has an arm above, so this is
+            # reachable only by a NEW upstream variant with no arm here, or by a
+            # mis-decoded enum handle. It used to lower to a silent NOP.
+            val unknown_isel_disc = rt_enum_discriminant(inst.kind)
+            panic("E-BACKEND-X86ISEL-INST-Unknown: no x86_64 instruction-selection arm for MIR instruction kind (discriminant {unknown_isel_disc}) at {x86_isel_format_span(inst.span)}")
 
 struct X86Avx2FunctionPlanV1:
     ok: bool

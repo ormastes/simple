@@ -1,0 +1,145 @@
+# @cover src/compiler/70.backend/backend/_CBackendTranslate/instruction_lowering.spl 30%
+"""
+# Every previously-silent MIR->native backend fallback is now loud
+
+**Category:** Compiler / completeness proofs
+**Plan:** doc/03_plan/compiler/hardening/critical_hardening_plan_2026-08-21.md (lane C7)
+**Design:** doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md sections 11.3-11.6
+
+## Purpose
+
+Lane C7 closed the silent fallbacks of `src/compiler/70.backend/**` — the
+MIR -> native / LLVM / C emitters. Three instruction dispatches over
+`MirInstKind` (126 variants) plus the operand and type boundaries around them
+each turned "this backend cannot lower the construct" into silently wrong or
+silently absent code.
+
+As with lanes C6 and C8 this spec pins the SOURCE: for each site it asserts BOTH
+that the named diagnostic is present AND that the silent shape it replaced is
+gone. `bin/simple test` executes an already-deployed binary, so a behavioural
+test alone would pass against reverted source.
+
+## Sites covered
+
+1. `MirToC.translate_instruction` — 36 `MirInstKind` variants had NO arm at all;
+   each now raises a spanned `E-BACKEND-C-INST-<Variant>`, plus a terminal
+   `E-BACKEND-C-INST-Unknown` carrying the observed discriminant.
+2. `MirToLlvm.translate_instruction_at` — a terminal `case _: ()` SILENTLY
+   DROPPED 32 variants from the emitted module; each now raises
+   `E-BACKEND-LLVM-INST-<Variant>`.
+3. `isel_inst_with_simd` (x86_64) — a terminal `case _:` emitted a NOP, deleting
+   105 variants from the generated machine code; each now raises
+   `E-BACKEND-X86ISEL-INST-<Variant>`.
+4. `native/operand_utils.spl` — five accessors answered `0` for a mis-kinded
+   operand. `0` is register RAX, offset 0, immediate 0 and block label 0, all
+   valid values, so the miscompile was invisible. Now
+   `E-BACKEND-OPERAND-<Accessor>`.
+5. `CTypeMapper.map_type` — `case _: "int64_t"` silently gave vectors, scalable
+   vectors, arbitrary-width Bits and Result a 64-bit integer representation.
+   Real C types for the vector and Bits families; `E-BACKEND-C-TYPE-<Kind>`
+   otherwise.
+6. `llvm_lib_translate_expr.get_operand_value` — `case _: 0` returned a NULL
+   LLVMValueRef that the C API then dereferenced. Now
+   `E-BACKEND-LLVMLIB-OPERAND-NonLocal`.
+"""
+
+use std.spec
+use std.io_runtime.{file_read, file_exists}
+
+val C_BACKEND = "src/compiler/70.backend/backend/_CBackendTranslate/instruction_lowering.spl"
+val LLVM = "src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl"
+val ISEL = "src/compiler/70.backend/backend/native/isel_x86_64.spl"
+val OPERANDS = "src/compiler/70.backend/backend/native/operand_utils.spl"
+val TYPE_MAPPER = "src/compiler/70.backend/backend/c_type_mapper.spl"
+val LLVM_LIB = "src/compiler/70.backend/backend/llvm_lib_translate_expr.spl"
+
+fn source_of(path: text) -> text:
+    if not file_exists(path):
+        fail("source not found at {path}; run from the repo root")
+        return ""
+    return file_read(path)
+
+fn count_of(haystack: text, needle: text) -> i64:
+    haystack.split(needle).len() - 1
+
+describe "C backend has no silent instruction fallback":
+    it "raises a NAMED, spanned diagnostic through an explicit arm for unlowered MirInstKind variants":
+        step("Before C7 these 36 variants had NO arm at all in translate_instruction")
+        val src = source_of(C_BACKEND)
+        expect(src).to_contain("me _unsupported_c_inst(variant: text, span: Span?):")
+        expect(src.contains("E-BACKEND-C-INST-" + "\{variant}")).to_equal(true)
+        expect(src).to_contain("case LoadGlobal(_, _):")
+        expect(src).to_contain("case StoreGlobal(_, _):")
+        expect(src).to_contain("case MirSimdSplat(_, _, _):")
+        expect(src).to_contain("case MirWarpBallot(_, _, _):")
+        expect(src).to_contain("self._unsupported_c_inst(\"MirWarpBallot\", inst.span)")
+
+    it "names the terminal wildcard with the observed discriminant":
+        val src = source_of(C_BACKEND)
+        expect(src).to_contain("E-BACKEND-C-INST-Unknown")
+        expect(src).to_contain("rt_enum_discriminant(inst.kind)")
+
+    it "keeps Drop an EXPLICIT no-op rather than a wildcard casualty":
+        step("Drop is emitted by MIR lowering and legitimately has no C code effect")
+        val src = source_of(C_BACKEND)
+        expect(src).to_contain("case Drop(_):")
+
+describe "LLVM text backend no longer drops instructions silently":
+    it "replaced the terminal `case _: ()` that emitted nothing at all":
+        val src = source_of(LLVM)
+        expect(count_of(src, "\n            case _: ()\n")).to_equal(0)
+        expect(src).to_contain("E-BACKEND-LLVM-INST-Unknown")
+
+    it "raises a NAMED, spanned diagnostic per unlowered variant":
+        val src = source_of(LLVM)
+        expect(src).to_contain("me _unsupported_llvm_inst(variant: text, span: Span?):")
+        expect(src.contains("E-BACKEND-LLVM-INST-" + "\{variant}")).to_equal(true)
+        expect(src).to_contain("self._unsupported_llvm_inst(\"MirSimdLoad\", inst.span)")
+        expect(src).to_contain("self._unsupported_llvm_inst(\"ScalableVecFence\", inst.span)")
+
+describe "x86_64 instruction selection no longer deletes instructions":
+    it "replaced the wildcard that lowered any unknown instruction to a NOP":
+        step("A NOP is not a refusal: the computation vanished and execution continued")
+        val src = source_of(ISEL)
+        expect(count_of(src, "# Unsupported instruction - emit NOP")).to_equal(0)
+        expect(src).to_contain("fn x86_unsupported_inst(ctx: ISelContext, variant: text, span: Span?) -> ISelInstResult:")
+        expect(src.contains("E-BACKEND-X86ISEL-INST-" + "\{variant}")).to_equal(true)
+
+    it "raises the named diagnostic for variants it cannot select":
+        val src = source_of(ISEL)
+        expect(src).to_contain("x86_unsupported_inst(ctx, \"Await\", inst.span)")
+        expect(src).to_contain("x86_unsupported_inst(ctx, \"InlineAsm\", inst.span)")
+        expect(src).to_contain("E-BACKEND-X86ISEL-INST-Unknown")
+
+describe "native operand accessors refuse a mis-kinded operand":
+    it "no accessor answers a bare 0 any more":
+        step("0 is RAX / offset 0 / immediate 0 / label 0 — all valid, so the bug was invisible")
+        val src = source_of(OPERANDS)
+        expect(count_of(src, "\n        case _: 0\n")).to_equal(0)
+        expect(count_of(src, "native_operand_mismatch(")).to_equal(6)
+
+    it "names the accessor and the expected kind":
+        val src = source_of(OPERANDS)
+        expect(src.contains("E-BACKEND-OPERAND-" + "\{accessor}")).to_equal(true)
+        expect(src).to_contain("native_operand_mismatch(\"get_phys_reg_id\", \"Reg\", op)")
+        expect(src).to_contain("native_operand_mismatch(\"get_imm_value\", \"Imm\", op)")
+
+describe "C type mapper no longer answers int64_t for anything it cannot map":
+    it "dropped the silent int64_t fallback":
+        val src = source_of(TYPE_MAPPER)
+        expect(count_of(src, "\n            case _: \"int64_t\"\n")).to_equal(0)
+        expect(src).to_contain("fn c_backend_unsupported_type(kind: text) -> text:")
+        expect(src.contains("E-BACKEND-C-TYPE-" + "\{kind}")).to_equal(true)
+
+    it "gives the vector and Bits families a real C representation":
+        val src = source_of(TYPE_MAPPER)
+        expect(src).to_contain("case Vec8f:")
+        expect(src).to_contain("case Vec4i:")
+        expect(src).to_contain("case Bits(width, signed):")
+        expect(src).to_contain("case Result(_, _):")
+
+describe "llvm_lib operand lookup refuses a non-local operand":
+    it "no longer returns a NULL LLVMValueRef as 0":
+        val src = source_of(LLVM_LIB)
+        expect(src).to_contain("E-BACKEND-LLVMLIB-OPERAND-NonLocal")
+        expect(count_of(src, "        case Move(local): get_value(value_map, local.id)\n        case _: 0")).to_equal(0)

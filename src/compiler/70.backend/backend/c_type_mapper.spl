@@ -7,6 +7,15 @@
 use compiler.mir.mir_data.*
 use compiler.backend.common.type_mapper.*
 
+extern fn rt_enum_discriminant(value: Any) -> i64
+
+# Lane C7: NAMED refusal for a MirTypeKind the C backend cannot represent.
+# `E-BACKEND-C-TYPE-<Kind>` is stable and greppable; the shared `case _:` this
+# replaces answered "int64_t", a valid C type, so the miscompile was silent.
+fn c_backend_unsupported_type(kind: text) -> text:
+    panic("E-BACKEND-C-TYPE-{kind}: C backend has no C type for MIR type kind {kind}")
+
+
 # ============================================================================
 # C Type Mapper
 # ============================================================================
@@ -112,7 +121,42 @@ impl CTypeMapper:
             case Promise(_): "void*"
             case Generator(_, _): "void*"
             case ActorType(_): "void*"
-            case _: "int64_t"
+
+            # ----------------------------------------------------------------
+            # Lane C7 (backend coverage, hardening plan 2026-08-21 sections
+            # 11.3-11.6). EXPLICIT arms for the eight MirTypeKind variants that
+            # used to reach `case _: "int64_t"`. That fallback is the worst
+            # shape in this file: `int64_t` is a perfectly valid C type, so a
+            # 256-bit vector, a scalable vector, an arbitrary-width Bits or a
+            # Result silently became a 64-bit integer and the generated C
+            # compiled and RAN with the wrong representation.
+            # Universe: spec/compiler_schema/registry/compiler.mir.MirTypeKind.sdn
+            # Table:    spec/compiler_schema/transitions/mir_type_to_c_backend.sdn
+            # ----------------------------------------------------------------
+            case Bits(width, signed):
+                # Arbitrary-width integer: widen to the smallest standard C type
+                # that holds it, rather than assuming 64 bits.
+                if width <= 8: (if signed: "int8_t" else: "uint8_t")
+                elif width <= 16: (if signed: "int16_t" else: "uint16_t")
+                elif width <= 32: (if signed: "int32_t" else: "uint32_t")
+                elif width <= 64: (if signed: "int64_t" else: "uint64_t")
+                else: c_backend_unsupported_type("Bits({width} bits, wider than 64)")
+            case Result(_, _):
+                # Runtime-boxed like the other aggregates above; a bare int64_t
+                # would drop the error payload.
+                "void*"
+            case Vec4f: "float __attribute__((vector_size(16)))"
+            case Vec4i: "int32_t __attribute__((vector_size(16)))"
+            case Vec4d: "double __attribute__((vector_size(32)))"
+            case Vec8f: "float __attribute__((vector_size(32)))"
+            case Vec8i: "int32_t __attribute__((vector_size(32)))"
+            case ScalableVec(_, _):
+                c_backend_unsupported_type("ScalableVec")
+            case _:
+                # Not a variant: every MirTypeKind now has an arm above, so this
+                # is reachable only by a NEW upstream variant with no arm here,
+                # or a mis-decoded enum handle. It used to answer "int64_t".
+                c_backend_unsupported_type("Unknown(discriminant {rt_enum_discriminant(ty.kind)})")
 
     fn map_return_type(ty: MirType) -> text:
         match ty.kind:

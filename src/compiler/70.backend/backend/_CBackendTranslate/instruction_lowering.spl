@@ -25,6 +25,17 @@ use compiler.backend.callback_trampoline.{is_callback_type, build_callback_typed
 use compiler.types.type_layout.{LayoutVerification, LayoutAttr, layoutattr_c_repr, verify_c_layout, generate_runtime_layout_asserts}
 use compiler.hir.hir_definitions.{HirField}
 use compiler.hir.hir_types.{HirType}
+use compiler.common.diagnostics.span.{Span}
+extern fn rt_enum_discriminant(value: Any) -> i64
+
+# Lane C7: render a MIR instruction's source span for a loud backend
+# diagnostic, or a stable placeholder when the instruction carries none.
+fn c_backend_format_span(span: Span?) -> text:
+    if span.?:
+        val sp = span.unwrap()
+        "{sp.file}:{sp.line}:{sp.col}"
+    else:
+        "unknown location"
 
 # ============================================================================
 # Utility
@@ -507,6 +518,108 @@ impl MirToC:
                 self.emit_unsupported_panic("C backend does not support SIMD hmax_f32x4")
             case SimdHminF32x4(dest, a):
                 self.emit_unsupported_panic("C backend does not support SIMD hmin_f32x4")
+
+            # ----------------------------------------------------------------
+            # Lane C7 (backend coverage, hardening plan 2026-08-21 sections
+            # 11.3-11.6). EXPLICIT arms for the 36 MirInstKind variants that had
+            # NO arm at all in this match. Reaching one was an unnamed match
+            # failure inside code generation with nothing naming WHICH
+            # instruction the C backend cannot lower. Each now raises a stable,
+            # greppable, spanned E-BACKEND-C-INST-<Variant>.
+            # Universe: spec/compiler_schema/registry/compiler.mir.MirInstKind.sdn
+            # Table:    spec/compiler_schema/transitions/mir_inst_to_c_backend.sdn
+            # ----------------------------------------------------------------
+            case ConditionProbe(_, _, _, _, _, _, _, _):
+                self._unsupported_c_inst("ConditionProbe", inst.span)
+            case DecisionProbe(_, _, _, _, _, _):
+                self._unsupported_c_inst("DecisionProbe", inst.span)
+            case Drop(_):
+                # Deliberate no-op: Drop is a MIR-level marker with no C
+                # code-generation effect. Recorded `implemented` in the table.
+                pass_dn
+            case HostGpuLaneBegin(_, _):
+                self._unsupported_c_inst("HostGpuLaneBegin", inst.span)
+            case HostGpuLaneEnd(_):
+                self._unsupported_c_inst("HostGpuLaneEnd", inst.span)
+            case LoadGlobal(_, _):
+                self._unsupported_c_inst("LoadGlobal", inst.span)
+            case MaskFromCmp(_, _, _, _):
+                self._unsupported_c_inst("MaskFromCmp", inst.span)
+            case MaskedAdd(_, _, _, _):
+                self._unsupported_c_inst("MaskedAdd", inst.span)
+            case MaskedFma(_, _, _, _, _):
+                self._unsupported_c_inst("MaskedFma", inst.span)
+            case MaskedMul(_, _, _, _):
+                self._unsupported_c_inst("MaskedMul", inst.span)
+            case MirSimdBinop(_, _, _, _):
+                self._unsupported_c_inst("MirSimdBinop", inst.span)
+            case MirSimdCmp(_, _, _, _):
+                self._unsupported_c_inst("MirSimdCmp", inst.span)
+            case MirSimdGather(_, _, _, _):
+                self._unsupported_c_inst("MirSimdGather", inst.span)
+            case MirSimdLoad(_, _, _, _):
+                self._unsupported_c_inst("MirSimdLoad", inst.span)
+            case MirSimdMaskOp(_, _, _, _):
+                self._unsupported_c_inst("MirSimdMaskOp", inst.span)
+            case MirSimdPermute(_, _, _):
+                self._unsupported_c_inst("MirSimdPermute", inst.span)
+            case MirSimdReduce(_, _, _):
+                self._unsupported_c_inst("MirSimdReduce", inst.span)
+            case MirSimdScalableVsetvl(_, _, _):
+                self._unsupported_c_inst("MirSimdScalableVsetvl", inst.span)
+            case MirSimdScatter(_, _, _):
+                self._unsupported_c_inst("MirSimdScatter", inst.span)
+            case MirSimdSelect(_, _, _, _):
+                self._unsupported_c_inst("MirSimdSelect", inst.span)
+            case MirSimdShuffle(_, _, _, _):
+                self._unsupported_c_inst("MirSimdShuffle", inst.span)
+            case MirSimdSplat(_, _, _):
+                self._unsupported_c_inst("MirSimdSplat", inst.span)
+            case MirSimdStore(_, _, _):
+                self._unsupported_c_inst("MirSimdStore", inst.span)
+            case MirSimdTernop(_, _, _, _, _):
+                self._unsupported_c_inst("MirSimdTernop", inst.span)
+            case MirSimdUnop(_, _, _):
+                self._unsupported_c_inst("MirSimdUnop", inst.span)
+            case MirWarpActivesMask(_):
+                self._unsupported_c_inst("MirWarpActivesMask", inst.span)
+            case MirWarpBallot(_, _, _):
+                self._unsupported_c_inst("MirWarpBallot", inst.span)
+            case MirWarpReduce(_, _, _, _):
+                self._unsupported_c_inst("MirWarpReduce", inst.span)
+            case MirWarpShfl(_, _, _, _, _):
+                self._unsupported_c_inst("MirWarpShfl", inst.span)
+            case MirWarpSync(_):
+                self._unsupported_c_inst("MirWarpSync", inst.span)
+            case PredicatedAdd(_, _, _, _, _, _):
+                self._unsupported_c_inst("PredicatedAdd", inst.span)
+            case PredicatedFma(_, _, _, _, _, _, _):
+                self._unsupported_c_inst("PredicatedFma", inst.span)
+            case PredicatedMul(_, _, _, _, _, _):
+                self._unsupported_c_inst("PredicatedMul", inst.span)
+            case ResultMatchSemantic(_, _, _, _, _, _, _):
+                self._unsupported_c_inst("ResultMatchSemantic", inst.span)
+            case ScalableVecFence(_):
+                self._unsupported_c_inst("ScalableVecFence", inst.span)
+            case StoreGlobal(_, _):
+                self._unsupported_c_inst("StoreGlobal", inst.span)
+
+            case _:
+                # Not a variant: every MirInstKind now has an arm above, so this
+                # is reachable only by a NEW upstream variant with no arm here,
+                # or by a mis-decoded enum handle. Named and spanned either way.
+                val unknown_c_inst_disc = rt_enum_discriminant(inst.kind)
+                eprint("[c-backend] E-BACKEND-C-INST-Unknown disc={unknown_c_inst_disc} at={c_backend_format_span(inst.span)}")
+                self.emit_unsupported_panic("E-BACKEND-C-INST-Unknown: no C backend arm for MIR instruction kind (discriminant {unknown_c_inst_disc}) at {c_backend_format_span(inst.span)}")
+
+    me _unsupported_c_inst(variant: text, span: Span?):
+        """NAMED, spanned diagnostic for a MirInstKind variant the C backend
+        does not lower (lane C7). `E-BACKEND-C-INST-<Variant>` is stable and
+        greppable; before C7 these variants had no arm here at all."""
+        val code = "E-BACKEND-C-INST-{variant}"
+        eprint("[c-backend] {code} at={c_backend_format_span(span)}")
+        self.emit_unsupported_panic("{code}: C backend does not lower {variant} at {c_backend_format_span(span)}")
+
 
     # === Terminators ===
 

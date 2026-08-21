@@ -101,6 +101,15 @@ fn llvm_bootstrap_ssa_function(fn_: MirFunction) -> MirFunction:
         return MirFunction.with_blocks(fn_, rewritten.blocks)
     fn_
 
+# Lane C7: render a MIR instruction's source span for a loud backend
+# diagnostic, or a stable placeholder when the instruction carries none.
+fn llvm_format_span(span: Span?) -> text:
+    if span.?:
+        val sp = span.unwrap()
+        "{sp.file}:{sp.line}:{sp.col}"
+    else:
+        "unknown location"
+
 fn llvm_module_name_from_entry_path(path: text) -> text:
     # Delegates to the single shared derivation in 00.common — see
     # module_path_naming.spl for history (this used to be one of four
@@ -770,11 +779,99 @@ impl MirTextCodegen for MirToLlvm:
                 panic("compile error: unlowered DecisionProbe '{semantic_id}' reached LLVM instruction translation")
             case ConditionProbe(_, semantic_id, _, _, _, _, _, _):
                 panic("compile error: unlowered ConditionProbe '{semantic_id}' reached LLVM instruction translation")
-            # MirTextCodegen's default unsupported hook is a no-op. Keep that
-            # behavior in place so a MirInst aggregate never crosses another
-            # method boundary in the bootstrap translator.
-            case _: ()
+            # ----------------------------------------------------------------
+            # Lane C7 (backend coverage, hardening plan 2026-08-21 sections
+            # 11.3-11.6). EXPLICIT arms for the 32 MirInstKind variants that
+            # used to reach the terminal `case _: ()` below and were SILENTLY
+            # DROPPED -- the emitted LLVM module simply came out missing the
+            # instruction, with no diagnostic anywhere. Each now raises a
+            # stable, spanned E-BACKEND-LLVM-INST-<Variant>.
+            # Universe: spec/compiler_schema/registry/compiler.mir.MirInstKind.sdn
+            # Table:    spec/compiler_schema/transitions/mir_inst_to_llvm.sdn
+            # ----------------------------------------------------------------
+            case Drop(_):
+                # Deliberate no-op: Drop is a MIR-level marker with no LLVM
+                # code-generation effect. Recorded `implemented` in the table.
+                ()
+            case HostGpuLaneBegin(_, _):
+                self._unsupported_llvm_inst("HostGpuLaneBegin", inst.span)
+            case HostGpuLaneEnd(_):
+                self._unsupported_llvm_inst("HostGpuLaneEnd", inst.span)
+            case MaskFromCmp(_, _, _, _):
+                self._unsupported_llvm_inst("MaskFromCmp", inst.span)
+            case MaskedAdd(_, _, _, _):
+                self._unsupported_llvm_inst("MaskedAdd", inst.span)
+            case MaskedFma(_, _, _, _, _):
+                self._unsupported_llvm_inst("MaskedFma", inst.span)
+            case MaskedMul(_, _, _, _):
+                self._unsupported_llvm_inst("MaskedMul", inst.span)
+            case MirSimdBinop(_, _, _, _):
+                self._unsupported_llvm_inst("MirSimdBinop", inst.span)
+            case MirSimdCmp(_, _, _, _):
+                self._unsupported_llvm_inst("MirSimdCmp", inst.span)
+            case MirSimdGather(_, _, _, _):
+                self._unsupported_llvm_inst("MirSimdGather", inst.span)
+            case MirSimdLoad(_, _, _, _):
+                self._unsupported_llvm_inst("MirSimdLoad", inst.span)
+            case MirSimdMaskOp(_, _, _, _):
+                self._unsupported_llvm_inst("MirSimdMaskOp", inst.span)
+            case MirSimdPermute(_, _, _):
+                self._unsupported_llvm_inst("MirSimdPermute", inst.span)
+            case MirSimdReduce(_, _, _):
+                self._unsupported_llvm_inst("MirSimdReduce", inst.span)
+            case MirSimdScalableVsetvl(_, _, _):
+                self._unsupported_llvm_inst("MirSimdScalableVsetvl", inst.span)
+            case MirSimdScatter(_, _, _):
+                self._unsupported_llvm_inst("MirSimdScatter", inst.span)
+            case MirSimdSelect(_, _, _, _):
+                self._unsupported_llvm_inst("MirSimdSelect", inst.span)
+            case MirSimdShuffle(_, _, _, _):
+                self._unsupported_llvm_inst("MirSimdShuffle", inst.span)
+            case MirSimdSplat(_, _, _):
+                self._unsupported_llvm_inst("MirSimdSplat", inst.span)
+            case MirSimdStore(_, _, _):
+                self._unsupported_llvm_inst("MirSimdStore", inst.span)
+            case MirSimdTernop(_, _, _, _, _):
+                self._unsupported_llvm_inst("MirSimdTernop", inst.span)
+            case MirSimdUnop(_, _, _):
+                self._unsupported_llvm_inst("MirSimdUnop", inst.span)
+            case MirWarpActivesMask(_):
+                self._unsupported_llvm_inst("MirWarpActivesMask", inst.span)
+            case MirWarpBallot(_, _, _):
+                self._unsupported_llvm_inst("MirWarpBallot", inst.span)
+            case MirWarpReduce(_, _, _, _):
+                self._unsupported_llvm_inst("MirWarpReduce", inst.span)
+            case MirWarpShfl(_, _, _, _, _):
+                self._unsupported_llvm_inst("MirWarpShfl", inst.span)
+            case MirWarpSync(_):
+                self._unsupported_llvm_inst("MirWarpSync", inst.span)
+            case PredicatedAdd(_, _, _, _, _, _):
+                self._unsupported_llvm_inst("PredicatedAdd", inst.span)
+            case PredicatedFma(_, _, _, _, _, _, _):
+                self._unsupported_llvm_inst("PredicatedFma", inst.span)
+            case PredicatedMul(_, _, _, _, _, _):
+                self._unsupported_llvm_inst("PredicatedMul", inst.span)
+            case ResultMatchSemantic(_, _, _, _, _, _, _):
+                self._unsupported_llvm_inst("ResultMatchSemantic", inst.span)
+            case ScalableVecFence(_):
+                self._unsupported_llvm_inst("ScalableVecFence", inst.span)
+            case _:
+                # Not a variant: every MirInstKind now has an arm above, so this
+                # is reachable only by a NEW upstream variant with no arm here,
+                # or by a mis-decoded enum handle. It used to be a silent `()`.
+                val unknown_llvm_inst_disc = rt_enum_discriminant(inst_kind)
+                eprint("[mir-to-llvm] E-BACKEND-LLVM-INST-Unknown disc={unknown_llvm_inst_disc} at={llvm_format_span(inst.span)}")
+                self.emit_unsupported_panic("E-BACKEND-LLVM-INST-Unknown: no LLVM backend arm for MIR instruction kind (discriminant {unknown_llvm_inst_disc}) at {llvm_format_span(inst.span)}")
         self.mark_instruction_dest_defined_at(instructions, index)
+
+    me _unsupported_llvm_inst(variant: text, span: Span?):
+        """NAMED, spanned diagnostic for a MirInstKind variant the LLVM text
+        backend does not lower (lane C7). `E-BACKEND-LLVM-INST-<Variant>` is
+        stable and greppable; before C7 these variants were silently dropped by
+        a shared `case _: ()`."""
+        val code = "E-BACKEND-LLVM-INST-{variant}"
+        eprint("[mir-to-llvm] {code} at={llvm_format_span(span)}")
+        self.emit_unsupported_panic("{code}: LLVM backend does not lower {variant} at {llvm_format_span(span)}")
 
     me mark_instruction_dest_defined_at(instructions: [MirInst], index: i64):
         val inst: MirInst = instructions[index]
