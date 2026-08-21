@@ -343,3 +343,71 @@ file and would link-fail. These 13 need Slice only, not ArrayRepeat.
 AC-5/AC-6 status: the ACID PROPERTY is now natively demonstrated (stage 1,
 above). The store-module-native stage remains blocked, on a named compiler
 rejection with a known tractable fix.
+
+---
+
+## 2026-08-21 (later still): the compilability relaxation was MEASURED AND REJECTED
+
+The previous entry named relaxing `compilability.rs:529` (`Expr::Slice ->
+CollectionOps`) as the tractable next step. It was measured in a throwaway
+worktree — rejection commented out, separate `CARGO_TARGET_DIR`, nothing
+landed. **Do not land it. W12-C's decision to defer was correct.**
+
+### What the relaxation appears to buy
+
+Stage 2 compiles, and the gate goes fully green:
+
+```
+store_open_ok=true
+store_acid=true
+PASS — 9 stage(s) checked, probe_backend_acid true at every stage
+       and native store_backend_acid=true
+```
+
+### Why that green is not trustworthy
+
+Two independent checks contradict it.
+
+**(1) A minimal text-slice program does not produce a native `main` under the
+relaxation.** Three `t[a:b]` prints, nothing else:
+
+```
+ld: symbol(s) not found for architecture arm64      ("_main" in _main_shim.o)
+```
+
+The semantic stage now accepts the function and codegen emits nothing for it,
+so the entry symbol never appears. The interpreter oracle for the same file is
+`A:hello B:world H:` (empty slice), i.e. the program is well-formed. So the
+rejection at :529 is not merely bookkeeping about a missing `rt_slice`
+allowlist entry — **native lowering for slice genuinely is not there**, and the
+rejection is what converts that into an honest, actionable diagnostic
+(`13 function(s) contain constructs that require the interpreter`) instead of
+an obscure undefined-`_main` link error.
+
+**(2) The stage-2 PASS never exercised a single slice.** The 13 rejected
+helpers (`str_slice`, `str_index_of`, `str_to_lower`, `str_trim_*`, …) are
+called **zero** times by `store_native_acid_probe.spl`
+(`grep -cE 'str_slice|str_index_of|…'` = 0). They reach the compile only
+through `use std.nogc_sync_mut.enterprise_store.store`, are never invoked on
+the probe's path, and are dead-stripped. The gate turned green because the
+broken code was compiled-but-unreachable — a vacuous pass in exactly the sense
+this repo's detector standard warns about.
+
+### Consequence for the acceptance row
+
+The relaxation would trade a truthful compile-time refusal for a link-time
+mystery, and would let a gate report `native store_backend_acid=true` on a
+binary whose string helpers cannot be called. Correct sequencing remains
+W12-C's: implement native slice lowering FIRST, then remove the rejection, with
+a test that actually calls a slice at runtime and compares against the
+interpreter oracle.
+
+Stage 1 (the ACID property itself: real sqlite, real ROLLBACK, `acidD=true`)
+stands unaffected — it needs no slice and is genuine native evidence.
+
+### Suggested gate hardening (independent of the above)
+
+`check-store-open-acid.shs` stage 2 should call at least one slice-using store
+helper and assert its result, so the stage cannot pass while the code it claims
+to validate is dead-stripped. As written, stage 2 would have stayed green
+through a completely broken `str_*` implementation.
