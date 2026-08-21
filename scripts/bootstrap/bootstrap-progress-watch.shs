@@ -102,7 +102,7 @@ fi
 #    the real elapsed interval, with `starttime` checked so a RECYCLED pid can
 #    never inherit a stranger's prior sample.
 #
-# Emits: "<cpu_pct|unknown> <tree_rss_kb> <nproc> <top_pid> <top_rss_kb> <top_comm> <root_rss_kb>".
+# Emits: "<cpu_pct|unknown> <tree_rss_kb> <nproc> <top_pid> <top_rss_kb> <top_comm> <tree_rss_pgroup_kb> <pgroup_processes> <scan_misses> <root_rss_kb>".
 # root_rss_kb and tree_rss_kb come from the same /proc snapshot, so a leaf
 # process cannot report two different RSS values merely because it changed
 # residency between independent reads.
@@ -170,7 +170,7 @@ process_tree_metrics() {
       close(state)
 
       printf "when %s\n", now > state
-      total_rss = 0; nproc = 0; dticks = 0
+      total_rss = 0; nproc = 0; dticks = 0; root_rss = 0
       pg_rss = 0; pg_nproc = 0
       root_pg = (root in pgrp) ? pgrp[root] : ""
       top_pid = "none"; top_rss = 0; top_comm = "none"
@@ -213,8 +213,8 @@ process_tree_metrics() {
 
       if (prev_when == "" || now - prev_when < 1) { cpu = "unknown" }
       else { cpu = sprintf("%.1f", dticks * 100.0 / (clk * (now - prev_when))) }
-      printf "%s %d %d %s %d %s %d %d %d\n", cpu, total_rss * pagekb, nproc, \
-        top_pid, top_rss * pagekb, top_comm, pg_rss * pagekb, pg_nproc, misses
+      printf "%s %d %d %s %d %s %d %d %d %d\n", cpu, total_rss * pagekb, nproc, \
+        top_pid, top_rss * pagekb, top_comm, pg_rss * pagekb, pg_nproc, misses, root_rss
     }
   '
 }
@@ -334,6 +334,10 @@ while :; do
   tree_rss_pgroup_kb=${7:-unknown}
   tree_pgroup_processes=${8:-unknown}
   tree_scan_misses=${9:-unknown}
+  # `process_tree_metrics` emits the root RSS as its final field.  Keep the
+  # legacy root field total on hosts where /proc is unavailable: otherwise
+  # `set -u` aborts the watcher before it can record even an `unknown` sample.
+  rss_kb=${10:-unknown}
   # cpu_pct now means "instantaneous CPU of the work", i.e. the whole tree. It
   # used to mean the root pid's lifetime average, which for the wrapper shell
   # was a constant 0.0 no matter what the build was doing.
