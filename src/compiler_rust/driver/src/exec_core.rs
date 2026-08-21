@@ -955,6 +955,7 @@ impl ExecCore {
                             if jit_err.contains("SIMPLE_JIT_STRICT:") {
                                 return Err(jit_err);
                             }
+                            jit_coverage_report(path, "jit-compile-error");
                             eprintln!(
                                 "[INFO] JIT compilation failed, falling back to interpreter: {}",
                                 jit_err
@@ -962,6 +963,7 @@ impl ExecCore {
                             self.run_file_interpreted_with_args(path, args)
                         }
                         Err(payload) => {
+                            jit_coverage_report(path, "jit-panic");
                             eprintln!(
                                 "[INFO] JIT panicked, falling back to interpreter: {}",
                                 panic_payload_to_string(payload.as_ref())
@@ -1409,13 +1411,59 @@ fn should_force_interpreter_for_source(path: &Path) -> bool {
 }
 
 fn should_prefer_interpreter_for_source(path: &Path, extension: &str) -> bool {
-    if should_force_interpreter_for_source(path) || extension == "shs" {
-        return true;
+    match interpreter_preference_reason(path, extension) {
+        Some(reason) => {
+            jit_coverage_report(path, reason);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Why this source is diverted to the interpreter before the JIT is ever
+/// attempted, or `None` if the JIT lane is taken.
+///
+/// Split out of `should_prefer_interpreter_for_source` so the decision can be
+/// *reported* as well as taken. This gate is a whole-module, whole-program
+/// switch: when it fires, `run_file_jit` is never called, `compilability.rs`
+/// never runs, and NOTHING in the program is JIT-compiled -- there is no
+/// per-function JIT/interpreter split on this path. Because it fired silently,
+/// the cost it imposes on the self-hosted compiler sat unmeasured; see
+/// doc/08_tracking/bug/seed_jit_coverage_self_hosted_compiler_2026-08-21.md.
+fn interpreter_preference_reason(path: &Path, extension: &str) -> Option<&'static str> {
+    if should_force_interpreter_for_source(path) {
+        return Some("forced-source-allowlist");
+    }
+    if extension == "shs" {
+        return Some("shs-extension");
     }
     if std::env::var_os("SIMPLE_EXECUTION_MODE").is_some() {
-        return false;
+        return None;
     }
-    source_uses_cli_args(path) || source_uses_jit_unsafe_graphics_runtime(path)
+    if source_uses_cli_args(path) {
+        return Some("cli-args-substring");
+    }
+    if source_uses_jit_unsafe_graphics_runtime(path) {
+        return Some("jit-unsafe-graphics");
+    }
+    None
+}
+
+/// Level-gated de-JIT census (`SIMPLE_JIT_COVERAGE=1`, default off).
+///
+/// Prints one greppable `[jit-coverage]` line per whole-module de-JIT decision.
+/// Deliberately cheap and side-effect-free so it can be left compiled in: the
+/// env var is read once per decision and the common case is a single
+/// `var_os` miss.
+pub(crate) fn jit_coverage_report(path: &Path, reason: &str) {
+    if std::env::var_os("SIMPLE_JIT_COVERAGE").is_none() {
+        return;
+    }
+    eprintln!(
+        "[jit-coverage] de-jit whole-module reason={} path={}",
+        reason,
+        path.display()
+    );
 }
 
 fn source_uses_cli_args(path: &Path) -> bool {
@@ -1457,9 +1505,58 @@ fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        panic_payload_to_string, should_force_interpreter_for_source, should_prefer_interpreter_for_source,
-        source_uses_cli_args, source_uses_jit_unsafe_graphics_runtime,
+        interpreter_preference_reason, panic_payload_to_string, should_force_interpreter_for_source,
+        should_prefer_interpreter_for_source, source_uses_cli_args,
+        source_uses_jit_unsafe_graphics_runtime,
     };
+
+    /// The de-JIT census must NAME the gate that fired, not just return a bool.
+    ///
+    /// Measured 2026-08-21: every pure-Simple CLI app -- `lint`, `fmt`, `test`,
+    /// the whole self-hosted compiler surface -- is diverted here by a plain
+    /// SUBSTRING test for `std.cli` / `get_cli_args` on the ENTRY FILE, so the
+    /// JIT is never attempted and `compilability.rs` (the per-function
+    /// `FallbackReason` classifier) never runs on that lane at all. This test
+    /// pins the reason strings the census emits; without them the divert is
+    /// silent, which is exactly why the cost went unmeasured.
+    #[test]
+    fn interpreter_preference_reason_names_the_cli_args_substring_gate() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("entry.spl");
+        fs::write(&path, "use std.cli.cli_util (get_cli_args)\n\nfn main():\n    print \"hi\"\n")
+            .expect("write fixture");
+        // Guard against a stray ambient override in the test environment.
+        std::env::remove_var("SIMPLE_EXECUTION_MODE");
+        assert_eq!(
+            interpreter_preference_reason(&path, "spl"),
+            Some("cli-args-substring"),
+            "a source merely MENTIONING std.cli must be reported as de-JIT'd, with its reason named"
+        );
+        assert!(should_prefer_interpreter_for_source(&path, "spl"));
+    }
+
+    /// The complement: a source with no gate trigger must take the JIT lane and
+    /// report NO reason. A census that fired for everything would be as useless
+    /// as one that fired for nothing.
+    #[test]
+    fn interpreter_preference_reason_is_none_for_an_ordinary_source() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("plain.spl");
+        fs::write(&path, "fn main():\n    print \"hi\"\n").expect("write fixture");
+        std::env::remove_var("SIMPLE_EXECUTION_MODE");
+        assert_eq!(interpreter_preference_reason(&path, "spl"), None);
+        assert!(!should_prefer_interpreter_for_source(&path, "spl"));
+    }
+
+    /// `.shs` and the forced allowlist are separate gates and must not be
+    /// collapsed into the cli-args reason -- they have different fixes.
+    #[test]
+    fn interpreter_preference_reason_distinguishes_the_shs_gate() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("script.shs");
+        fs::write(&path, "fn main():\n    print \"hi\"\n").expect("write fixture");
+        assert_eq!(interpreter_preference_reason(&path, "shs"), Some("shs-extension"));
+    }
     use std::fs;
     use std::path::Path;
     use tempfile::tempdir;
