@@ -1,0 +1,39 @@
+# Regression pin for the `CodegenTarget` half of
+# doc/08_tracking/bug/duplicate_backend_types_terminal_declarations.md
+#
+# `CodegenTarget` was declared TWICE with divergent variant orders and lengths:
+#   compiler.backend.backend.backend_types  -- 20 variants, Native 6, Host 7
+#   compiler.core.backend_types             -- 13 variants, Host 8, Native 9
+# Same-named enums collapse in the global enum registry, so a value encoded
+# against one order and decoded against the other is a DIFFERENT target -- a
+# wrong answer, not a crash. Stage 1 surfaced it as `unresolved type:
+# CodegenTarget`, 13x across src/compiler/driver/**.
+#
+# Both checks below FAIL on the pre-fix tree: the count is 2, and
+# `CudaPtx` does not exist in the frontend copy.
+use std.spec.{describe, it, expect}
+use compiler.core.backend_types.{CodegenTarget}
+
+fn codegen_target_decl_count(path: text) -> i64:
+    val content = rt_file_read_text(path) ?? ""
+    var count = 0
+    for line in content.split("\n"):
+        if line.starts_with("enum CodegenTarget:"):
+            count = count + 1
+    count
+
+describe "CodegenTarget has exactly one terminal declaration":
+    it "is declared only in compiler.backend.backend.backend_types":
+        val terminal = codegen_target_decl_count("src/compiler/70.backend/backend/backend_types.spl")
+        val frontend = codegen_target_decl_count("src/compiler/10.frontend/core/backend_types.spl")
+        val facade = codegen_target_decl_count("src/compiler/70.backend/backend_types.spl")
+        expect(terminal).to_equal(1)
+        expect(frontend).to_equal(0)
+        expect(facade).to_equal(0)
+
+    it "re-exports the terminal variant set through compiler.core.backend_types":
+        # A GPU target the deleted 13-variant copy never carried.
+        expect(CodegenTarget.CudaPtx.to_text()).to_equal("cuda-ptx")
+        # Ordering witnesses: these two swapped places between the copies.
+        expect(CodegenTarget.Native.to_text()).to_equal("native")
+        expect(CodegenTarget.Host.to_text()).to_equal("host")

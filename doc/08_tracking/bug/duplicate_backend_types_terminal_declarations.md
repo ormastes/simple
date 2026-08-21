@@ -1,7 +1,9 @@
 # Duplicate `backend_types` terminal declarations
 
-Status: OPEN (P2)
+Status: OPEN (P2) — `BackendKind` and `CodegenTarget` are both deduped; the
+rest of the family below is untouched.
 Status re-verified 2026-08-17 by source inspection (triage shard 01).
+`CodegenTarget` deduped 2026-08-21 (see its section below).
 terminal declaration, in `compiler.backend.backend.backend_types`. The wider
 family of multiply-declared enums with divergent variant orders is STILL OPEN,
 and nothing in the repo detects it (see the sabotage section).
@@ -98,6 +100,59 @@ sharing a registry. C is **not** isolated:
   C declares `OptLevel`, not `OptimizationLevel` — a dangling export. The spec
   above asks `compiler.core.backend_types` for `OptimizationLevel`, which only B
   has ever declared. Not fixed here.
+
+## `CodegenTarget` — FIXED 2026-08-21
+
+The second `CodegenTarget` declaration in `src/compiler/10.frontend/core/backend_types.spl`
+(copy C) is removed; C now re-exports the single terminal declaration in
+`src/compiler/70.backend/backend/backend_types.spl` (copy B), exactly as it
+already did for `BackendKind`.
+
+The two copies diverged on BOTH axes:
+
+| | C (deleted) | B (terminal) |
+|---|---|---|
+| variants | 13 | 20 |
+| `Native` | 9 | 6 |
+| `Host` | 8 | 7 |
+| `Wasm32` | 6 | 10 |
+| `Wasm64` | 7 | 11 |
+| GPU targets (`CudaPtx` … `VulkanSpirv`) | absent | 13–17 |
+| mLLVM_QEMU targets (`Avr`, `I8086`) | absent | 18–19 |
+
+Stage 1 surfaced it as `unresolved type: CodegenTarget`, **13 times**, once each
+in `src/compiler/driver/{bootstrap_api_fixed, driver_aot_output,
+driver_aot_pipeline, driver_compiler_type, driver_log_helpers,
+driver_orchestration, driver_pipeline, driver_public_api, driver_public_compile,
+driver_public_headers, driver_public_interpret_bridge, driver_riscv_gen2_product,
+driver_source_pipeline_impl, driver_types}.spl`.
+
+Two other things moved with the declaration, both load-bearing:
+
+- **The `TARGET_*` integer mirror is renumbered to B's order** and extended with
+  the seven tags it never had. `impl BackendKind.supports_target` compares an
+  enum value against those integers, so leaving the mirror on C's order would
+  have kept the wrong-answer hazard alive after the enum itself was deduped.
+  `target_name` gained the matching arms; it answered `"unknown"` for every GPU
+  and mLLVM_QEMU target before.
+- **C's `impl CodegenTarget` block is deleted.** A second impl block on the same
+  enum from another module is the same divergence hazard as a second
+  declaration. B already declares `to_text`, `is_32bit`, `is_64bit`, `is_wasm`
+  and more. `is_macos` is the only method C added that B lacks, and
+  `/usr/bin/grep -rn '\.is_macos()' src/ --include=*.spl` returns **zero** call
+  sites; the integer helper `target_is_macos` is kept and is still used by
+  `supports_target`.
+
+Regression pin: `test/01_unit/compiler/frontend/codegen_target_single_terminal_declaration_spec.spl`
+(mirrored byte-identically at `test/unit/compiler/frontend/`). Both examples fail
+on the pre-fix tree — `expected 1 to equal 0` on the declaration count, and
+`semantic: unknown variant or method 'CudaPtx' on enum CodegenTarget` — and pass
+after.
+
+Still open in these three files: `CompiledSymbolKind` (3 declarations),
+`struct CompiledSymbol` (3, divergent FIELD order), `BuildMode` (3),
+`OutputFormat` (5). And the sabotage gap below is unchanged: nothing in the repo
+detects a divergent duplicate.
 
 ## Sabotage check — NOTHING observes a divergent duplicate (open gap)
 
