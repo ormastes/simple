@@ -286,31 +286,15 @@ impl HirLowering:
             return false
         if self.symbols.lookup(name).?:
             return true
-        # PKGDEP (2026-08-21): memoized because this runs per UNBOUND NAME in
-        # every function body and the scan below has no early exit (it must
-        # prove uniqueness). The registry is frozen for the whole HIR phase, so
-        # the owner of a name is a constant; without the memo the pass is
-        # O(bodies x names x registry). See types.spl bootstrap_global_owner_memo.
-        var matching_index: i64 = -1
-        if self.bootstrap_global_owner_memo.contains_key(name):
-            matching_index = self.bootstrap_global_owner_memo[name]
-        else:
-            self.bootstrap_global_scan_count = self.bootstrap_global_scan_count + 1
-            var surface_index: i64 = 0
-            var ambiguous = false
-            while surface_index < self.module_surfaces.surfaces.len():
-                val surface = self.module_surfaces.surfaces[surface_index]
-                if hir_module_declares_item(surface, name):
-                    if matching_index >= 0:
-                        ambiguous = true
-                        break
-                    matching_index = surface_index
-                surface_index = surface_index + 1
-            if ambiguous:
-                matching_index = -1
-            self.bootstrap_global_owner_memo[name] = matching_index
-        if matching_index < 0:
+        # PKGIDX (2026-08-21): this runs per UNBOUND NAME in every function
+        # body, and the sweep it replaces had no early exit (it must prove the
+        # owner is unique), so the pass was O(bodies x names x registry). The
+        # index answers the same question from the name alone; a non-singleton
+        # owner list is exactly the old "ambiguous -> give up".
+        val owner_indices: [i64] = self.surface_decl_owner_indices(name)
+        if owner_indices.len() != 1:
             return false
+        val matching_index: i64 = owner_indices[0]
         val owner = self.module_surfaces.surfaces[matching_index]
         # BGS1 (2026-08-06): this is an IMPORT REGISTRATION performed LAZILY,
         # from BODY lowering (types.spl:673 in lower_named_kind, and

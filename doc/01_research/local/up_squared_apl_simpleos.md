@@ -67,15 +67,3 @@ The UP2 wrapper also bypasses the proven x86 runtime capsule in
 sysroot/runtime-native archives or pass the runtime bundle. This matches the
 unresolved runtime and serial symbols. Adapt that capsule while preserving the
 freestanding linker contract; do not retry target-name variables.
-
-## 2026-08-21 implementation and DCI audit
-
-The admitted freestanding build now produces a 37,280-byte ELF and 256 MiB UEFI
-image. OVMF reaches the loader, shim, 32/64-bit bootstrap, board entry, console,
-filesystem, shell, and a command-correlated VFS-backed `ls /` PASS. Physical
-UP2 boot remains unproven.
-
-The connected Smart KM Link and Tigard are not Intel DCI. No Intel System
-Debugger/System Bring-Up Toolkit, DCI udev rules, or retained target connection
-receipt is present. Detailed DCI findings and the read-only inventory contract
-are in `up_squared_apl_intel_dci_debug.md`.

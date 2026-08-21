@@ -353,38 +353,31 @@ impl HirLowering:
             canon_pkg = canon_pkg + canon_segs[canon_si]
             canon_si = canon_si + 1
         val canon_prefix = canon_pkg + "."
-        # Cheap pre-filter: a real sibling's key must mention the package's own
-        # last segment in SOME spelling. Canonicalizing every registry key for
-        # every module is O(modules x keys) with a split/join per key; this
-        # substring test drops ~all non-siblings before that cost is paid.
-        val canon_pkg_last = if canon_segs.len() >= 2: canon_segs[canon_segs.len() - 2] else: ""
         val sibling_span = Span(start: 0, end: 0, line: 0, col: 0, file: "", length: 0)
         val trace = hir_module_sibling_trace_enabled()
-        # One physical sibling can hold SEVERAL registry keys (path spelling,
-        # tier-numbered dotted spelling, symlink dotted spelling). Register each
-        # physical sibling once: re-globbing the same surface is wasted work and
-        # would re-enter register_imported_symbol for names already bound.
-        var seen_siblings: Dict<text, bool> = {}
+        # PKGIDX (2026-08-21): the members of a package are looked up, not
+        # searched for. This loop used to sweep every registry KEY and
+        # canonicalize it (split/join per key) once per module lowered --
+        # O(modules x registry) with an allocation per step, for an answer the
+        # frozen registry fixes once. Deduplication by canonical name (one
+        # physical sibling can hold several spellings) now happens during the
+        # index build, so the registration below is still once per sibling.
+        val sibling_names: [text] = self.package_sibling_registry_names(canon_pkg)
+        val sibling_canons: [text] = self.package_sibling_canonical_names(canon_pkg)
         var literal_matched = 0
         var canon_matched = 0
-        for sibling_name in self.module_surfaces.ordered_names:
+        var sibling_idx = 0
+        while sibling_idx < sibling_names.len() and sibling_idx < sibling_canons.len():
+            val sibling_name = sibling_names[sibling_idx]
+            val sibling_canon = sibling_canons[sibling_idx]
+            sibling_idx = sibling_idx + 1
             if sibling_name == self_name or sibling_name == module.name:
                 continue
-            if sibling_name.starts_with(pkg_prefix) and not sibling_name.substring(pkg_prefix.len()).contains("."):
-                literal_matched = literal_matched + 1
-            if canon_pkg_last != "" and not sibling_name.contains(canon_pkg_last):
-                continue
-            val sibling_canon = hir_pkg_canonical_module_name(sibling_name)
             if sibling_canon == self_canon:
                 continue
-            if not sibling_canon.starts_with(canon_prefix):
-                continue
-            # DIRECT siblings only: exactly one segment past the package.
-            if sibling_canon.substring(canon_prefix.len()).contains("."):
-                continue
-            if seen_siblings.contains_key(sibling_canon):
-                continue
-            seen_siblings[sibling_canon] = true
+            if trace and sibling_name.starts_with(pkg_prefix) and
+               not sibling_name.substring(pkg_prefix.len()).contains("."):
+                literal_matched = literal_matched + 1
             canon_matched = canon_matched + 1
             val sibling_index = hir_module_surface_index(self.module_surfaces, sibling_name)
             if sibling_index >= 0:

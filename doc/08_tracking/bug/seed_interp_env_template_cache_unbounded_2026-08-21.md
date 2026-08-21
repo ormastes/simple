@@ -1,43 +1,4 @@
-# Seed interpreter burns ~12 GB RSS / 3.4x wall on one module — ROOT CAUSE FOUND, FIXED
-
-> **2026-08-21 resolution.** Status: **FIXED and LANDED**. Root cause was NOT
-> the env-template cache (correctly refuted below) and not any `src/compiler`
-> change: it was the **per-call `Env` clone graph**. Every interpreted call
-> materialized the callee frame's environment by cloning the caller's env —
-> including, for a module function, the module's entire visible-global map —
-> and every one of those clones was then RETAINED for the life of the frame
-> (and, via closure captures, beyond it). Cost is O(globals) per call in both
-> time and memory, so a module with thousands of imported globals paid the
-> whole map per call and the retained clones accumulated into multi-GB RSS.
-> Capping the template cache could not help, because the templates were not
-> what was being retained; the clones were.
->
-> **Fix**: a scope-chain `CowEnv`. The callee frame gets a `GlobalScope` — four
-> `Arc` handles to the owner's static module env, its import table, and the
-> live per-owner global stores — and resolves globals through that parent
-> pointer. Nothing is materialized per call, so there is no template to cache
-> and no generation to invalidate. Env setup becomes O(args), and the write
-> path copies only the one owner map it touches (`Arc::make_mut`) instead of
-> the whole store.
->
-> **Measured on the same tree and files** (`/usr/bin/time`, shared box):
->
-> | probe | before (seed at 47ee75c7cf5) | after |
-> |---|---|---|
-> | `lint src/compiler/80.driver/driver_types.spl` | 90.5 s / 1.97 GB | **23.1 s / 0.42 GB** |
-> | `lint src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl` | 759 s / 12 GB | **159 s / 0.66 GB** |
->
-> **Regression pins**: `scripts/check/check-lint-cost-budget.shs` (row
-> `src/compiler/80.driver/driver_types.spl` at 60 s — verdict
-> `PASS ... driver_types.spl=20s/60s`), and the mechanism test
-> `src/compiler_rust/compiler/tests/interpreter_call_env_o_args.rs`
-> (`per_call_env_setup_does_not_scale_with_module_global_count`), which asserts
-> a RATIO, not a wall time, so it holds on a loaded box.
->
-> The three `env_template_cache_tests` in `function_exec.rs` were removed with
-> the mechanism they pinned (the template cache no longer exists); the six
-> `sffi_return_contract_*` tests are untouched and green.
-
+# Seed interpreter burns ~12 GB RSS / 3.4x wall on one module — root cause OPEN
 
 > **2026-08-21 update, read the Numbers section first.** This was filed against
 > the unbounded env-template cache. That hypothesis has since been MEASURED AND
@@ -47,7 +8,7 @@
 
 Date: 2026-08-21
 Area: `src/compiler_rust` (Rust bootstrap seed, tree-walk interpreter)
-Status: FIXED (landed), gated
+Status: FIXED (uncommitted), gated
 Related: `doc/08_tracking/bug/seed_interpreter_env_rebuild_per_call_o_globals_2026-08-21.md`
 (this defect is a regression introduced by that fix's cache)
 

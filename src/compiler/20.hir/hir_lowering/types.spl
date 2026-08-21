@@ -181,15 +181,24 @@ class HirLowering:
     # fallback. Observable mechanism counter for the memo above; a spec
     # pins that repeated identical queries do not raise it.
     field_package_dep_scan_count: i64
-    # PKGDEP (2026-08-21): owner memo for try_register_bootstrap_global_symbol.
-    # That resolver is called LAZILY from BODY lowering for every unbound name
-    # (see BGS1 in _Items/module_import_registration.spl) and scans the whole
-    # frozen surface registry with no early exit, since it must prove the owner
-    # is unique. Same name, same registry, same answer -- so the scan is memoized
-    # by name. Value is the owning surface index, or -1 for none/ambiguous.
-    bootstrap_global_owner_memo: {text: i64}
-    # Full-registry scans actually performed by the resolver above.
-    bootstrap_global_scan_count: i64
+    # PKGIDX (2026-08-21): inverted index over the FROZEN registry, declaration
+    # name -> owning surface indices. Replaces the per-item full sweeps in
+    # try_register_bootstrap_global_symbol (called lazily from BODY lowering for
+    # every unbound name -- see BGS1 in _Items/module_import_registration.spl)
+    # and in materialize_imported_field_package_dependency. Built once per
+    # lowerer; the registry cannot change while it is frozen.
+    surface_decl_owners: {text: [i64]}
+    surface_decl_index_built: bool
+    # Times the index above was actually built. A spec pins this at 1 across
+    # many queries, which is the mechanism the wall clock only hints at.
+    surface_decl_index_build_count: i64
+    # PKGIDX: canonical package name -> member modules, for
+    # resolve_package_sibling_symbols, which swept every registry KEY (with a
+    # canonicalization per key) once per module lowered.
+    package_sibling_names: {text: [text]}
+    package_sibling_canons: {text: [text]}
+    package_sibling_index_built: bool
+    package_sibling_index_build_count: i64
     # Parallel scalar re-export caches keyed by physical surface index and
     # wanted item. Registry aliases therefore share one cache entry and no
     # concatenated facade-name key is allocated during traversal.
@@ -243,7 +252,9 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
     val empty_glob_expand_memo: {text: i64} = {}
     val empty_field_package_dep_memo: {text: i64} = {}
     val empty_surface_package_name_memo: {text: text} = {}
-    val empty_bootstrap_global_owner_memo: {text: i64} = {}
+    val empty_surface_decl_owners: {text: [i64]} = {}
+    val empty_package_sibling_names: {text: [text]} = {}
+    val empty_package_sibling_canons: {text: [text]} = {}
     val empty_reexport_root_surface_indices: [i64] = []
     val empty_imported_type_methods_in_progress: [text] = []
     val empty_reexport_root_wanted: [text] = []
@@ -287,8 +298,13 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         field_package_dep_memo: empty_field_package_dep_memo,
         surface_package_name_memo: empty_surface_package_name_memo,
         field_package_dep_scan_count: 0,
-        bootstrap_global_owner_memo: empty_bootstrap_global_owner_memo,
-        bootstrap_global_scan_count: 0,
+        surface_decl_owners: empty_surface_decl_owners,
+        surface_decl_index_built: false,
+        surface_decl_index_build_count: 0,
+        package_sibling_names: empty_package_sibling_names,
+        package_sibling_canons: empty_package_sibling_canons,
+        package_sibling_index_built: false,
+        package_sibling_index_build_count: 0,
         reexport_root_surface_indices: empty_reexport_root_surface_indices,
         reexport_root_wanted: empty_reexport_root_wanted,
         reexport_root_found: empty_reexport_root_found,

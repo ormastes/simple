@@ -35,11 +35,6 @@ debug chain. Tigard/OpenOCD must therefore not be attached or driven as a CPU
 debugger on CN22. First bring-up uses UART logs and UEFI removable media;
 hardware reset remains the physical power/reset path.
 
-Apollo Lake also has a separate, proprietary Intel DCI USB 3.x DbC debug lane
-when firmware/security gates, qualified cable, and Intel tooling are present.
-It is not exposed through CN22. See `up_squared_apl_intel_dci_debug.md` for the
-run-control, RAM-load, reset, and storage-programming analysis.
-
 ## Board-attached media and remote upload
 
 The Type-A connectors are USB host ports; the Micro-B connector is OTG.

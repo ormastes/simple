@@ -13,6 +13,7 @@ use std.spec.{describe, it, expect}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.{hirlowering_for_module}
 use compiler.hir.hir_lowering._Items.module_reexport_materialization.*
+use compiler.hir.hir_lowering._Items.module_lowering.*
 use compiler.hir.hir_lowering.module_surface.{
     ModuleSurface,
     ModuleSurfacesByName
@@ -61,5 +62,30 @@ describe("HIR package-dependency scan memo", fn():
         expect(lowering.cached_surface_package_name(registry.surfaces[0])).to_equal("pkg")
         expect(lowering.cached_surface_package_name(registry.surfaces[0])).to_equal("pkg")
         expect(lowering.surface_package_name_memo.len()).to_equal(1)
+    )
+
+    it("builds the declaration-owner index once, then answers from it", fn():
+        val registry = package_registry()
+        var lowering = hirlowering_for_module("pkg/a.spl", registry)
+        expect(lowering.surface_decl_index_build_count).to_equal(0)
+        val first = lowering.surface_decl_owner_indices("Missing")
+        expect(first.len()).to_equal(0)
+        expect(lowering.surface_decl_index_build_count).to_equal(1)
+        val second = lowering.surface_decl_owner_indices("Other")
+        expect(second.len()).to_equal(0)
+        # The point of the index: a SECOND name costs a dict probe, not a
+        # second sweep of the registry.
+        expect(lowering.surface_decl_index_build_count).to_equal(1)
+    )
+
+    it("builds the package-sibling index once and lists direct members", fn():
+        val registry = package_registry()
+        var lowering = hirlowering_for_module("pkg/a.spl", registry)
+        expect(lowering.package_sibling_index_build_count).to_equal(0)
+        val members = lowering.package_sibling_registry_names("pkg")
+        expect(members.len()).to_equal(3)
+        expect(lowering.package_sibling_canonical_names("pkg").len()).to_equal(3)
+        expect(lowering.package_sibling_registry_names("other").len()).to_equal(0)
+        expect(lowering.package_sibling_index_build_count).to_equal(1)
     )
 )

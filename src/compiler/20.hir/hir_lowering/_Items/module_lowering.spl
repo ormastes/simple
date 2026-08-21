@@ -229,32 +229,6 @@ fn hir_payload_kind_is_type(kind: text) -> bool:
     """
     kind == "class" or kind == "struct" or kind == "enum" or kind == "trait" or kind == "type_alias"
 
-fn hir_payload_binding_names_agree(local_name: text, origin_item_name: text, symbol_name: text) -> bool:
-    """True only when a fetched symbol can actually BE the binding for `local_name`.
-
-    `claim_materialized_payload_binding` reaches an existing symbol via
-    `symbols.lookup_or_invalid(local_name)` and then a chained class-field
-    `Dict<i64, HirSymbol>` bracket read. Both hops have known failure modes
-    (a resolver id for a different name; a native-codegen bracket read that
-    returns a foreign record), and when either fires the fetched record shares
-    NO NAME with the payload spelling being claimed -- e.g. Stage 3 reporting
-    payload `TokenKind` as bound by `asm_arm_backend`, kind `const`, two
-    entities that are not even the same kind of thing.
-
-    Contesting ownership on such a record is unsound BY CONSTRUCTION: the code
-    never established that the fetched symbol is the binding for `local_name`,
-    so a "conflict" between them is a claim about two unrelated entities.
-    Require positive name agreement instead. The symbol may legitimately carry
-    either the local payload spelling or the terminal declared name, because
-    `register_materialized_payload_named_dependency` registers the terminal
-    item under the payload's local alias -- so both are accepted, and only a
-    record matching NEITHER is refused a vote.
-
-    This is deliberately a positive identity test, in the same spirit as
-    `hir_payload_kind_is_type`: an unrecognised record defaults to "cannot
-    contest" rather than "is a competing owner"."""
-    symbol_name == local_name or symbol_name == origin_item_name
-
 fn hir_payload_terminal_identity(module_name: text, item_name: text, item_kind: text) -> text:
     val canonical_module = hir_pkg_canonical_module_name(module_name)
     val canonical_item_owner = if canonical_module == "compiler.tools.lint._LintMain.config_and_model" and (item_name == "LintLevel" or item_name == "LintCategory"):
@@ -346,3 +320,103 @@ fn hir_module_is_bootstrap_entry(module_name: text) -> bool:
     if entry_path == "":
         return false
     hir_module_logical_name_from_path(entry_path) == hir_module_logical_name_from_path(module_name)
+
+# PKGIDX (2026-08-21): inverted indices over the FROZEN module-surface
+# registry, shared by every resolver that used to answer a per-item question
+# with a full-registry sweep. See
+# doc/08_tracking/bug/hir_phase_per_module_cost_2026-08-21.md. Placed here
+# because module_import_registration, module_import_resolution and
+# module_reexport_materialization all import this module, and each of them
+# owned a copy of the same sweep.
+impl HirLowering:
+    me build_surface_decl_index():
+        """One pass over the registry: declaration name -> owning surface
+        indices (ascending, one entry per surface even when the same name is
+        declared in several of that surface's decl kinds)."""
+        self.surface_decl_index_build_count = self.surface_decl_index_build_count + 1
+        var owners: {text: [i64]} = {}
+        var surface_index = 0
+        while surface_index < self.module_surfaces.surfaces.len():
+            val surface = self.module_surfaces.surfaces[surface_index]
+            var kind_index = 0
+            while kind_index < 6:
+                val names: [text] = match kind_index:
+                    case 0: surface.callables.keys()
+                    case 1: surface.composites.keys()
+                    case 2: surface.enums.keys()
+                    case 3: surface.traits.keys()
+                    case 4: surface.type_aliases.keys()
+                    case _: surface.constants.keys()
+                var name_index = 0
+                while name_index < names.len():
+                    val decl_name = names[name_index]
+                    if owners.contains_key(decl_name):
+                        val existing: [i64] = owners[decl_name]
+                        # Ascending insertion order makes the duplicate check a
+                        # single tail comparison rather than a membership scan.
+                        if existing.len() == 0 or existing[existing.len() - 1] != surface_index:
+                            owners[decl_name] = existing.push(surface_index)
+                    else:
+                        owners[decl_name] = [surface_index]
+                    name_index = name_index + 1
+                kind_index = kind_index + 1
+            surface_index = surface_index + 1
+        self.surface_decl_owners = owners
+        self.surface_decl_index_built = true
+
+    me surface_decl_owner_indices(name: text) -> [i64]:
+        """Surfaces declaring `name`, as `hir_module_declares_item` defines
+        declaring. Replaces the full-registry sweeps that asked the same
+        question once per consumer."""
+        if not self.surface_decl_index_built:
+            self.build_surface_decl_index()
+        if self.surface_decl_owners.contains_key(name):
+            return self.surface_decl_owners[name]
+        val empty: [i64] = []
+        empty
+
+    me build_package_sibling_index():
+        """One pass over the registry KEYS: canonical package name -> the
+        registry keys of its direct member modules, deduplicated by canonical
+        module name (one physical sibling can hold several spellings)."""
+        self.package_sibling_index_build_count = self.package_sibling_index_build_count + 1
+        var members: {text: [text]} = {}
+        var canons: {text: [text]} = {}
+        var seen: {text: bool} = {}
+        var key_index = 0
+        while key_index < self.module_surfaces.ordered_names.len():
+            val registry_name = self.module_surfaces.ordered_names[key_index]
+            val canon = hir_pkg_canonical_module_name(registry_name)
+            if seen.contains_key(canon):
+                key_index = key_index + 1
+                continue
+            seen[canon] = true
+            val segs = canon.split(".")
+            if segs.len() >= 2:
+                val pkg = segs[0:segs.len() - 1].join(".")
+                if members.contains_key(pkg):
+                    members[pkg] = members[pkg].push(registry_name)
+                    canons[pkg] = canons[pkg].push(canon)
+                else:
+                    members[pkg] = [registry_name]
+                    canons[pkg] = [canon]
+            key_index = key_index + 1
+        self.package_sibling_names = members
+        self.package_sibling_canons = canons
+        self.package_sibling_index_built = true
+
+    me package_sibling_registry_names(package_name: text) -> [text]:
+        if not self.package_sibling_index_built:
+            self.build_package_sibling_index()
+        if self.package_sibling_names.contains_key(package_name):
+            return self.package_sibling_names[package_name]
+        val empty: [text] = []
+        empty
+
+    me package_sibling_canonical_names(package_name: text) -> [text]:
+        if not self.package_sibling_index_built:
+            self.build_package_sibling_index()
+        if self.package_sibling_canons.contains_key(package_name):
+            return self.package_sibling_canons[package_name]
+        val empty: [text] = []
+        empty

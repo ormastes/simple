@@ -61,8 +61,46 @@ different dependency name scans again, and a surface's package name is computed
 once. It pins the algorithm, so it cannot pass on the pre-fix code (the counters
 did not exist) and cannot be satisfied by a faster machine.
 
+## Follow-up landed the same day: inverted indices (2026-08-21, second commit)
+The memos above still answered each question with a full-registry sweep the
+FIRST time, and a third resolver had no memo at all. All three now read an index
+built once per lowerer from the frozen registry:
+
+- `surface_decl_owners` (`{name: [surface_index]}`, built in
+  `_Items/module_lowering.spl`) replaces the sweeps in
+  `try_register_bootstrap_global_symbol` (a non-singleton owner list is exactly
+  the old "ambiguous -> give up") and in
+  `materialize_imported_field_package_dependency`, whose candidate loop now runs
+  over the one or two surfaces that declare the name at all. The
+  `bootstrap_global_owner_memo` added by the first commit is therefore gone —
+  the index subsumes it.
+- `package_sibling_names` / `package_sibling_canons` (canonical package ->
+  member modules) replace the per-module sweep over every registry KEY in
+  `resolve_package_sibling_symbols`
+  (`_Items/module_import_resolution.spl`), which canonicalized each key with a
+  split/join and deduplicated into a fresh dict on every module lowered. The
+  dedup by canonical name now happens once, during the index build.
+
+Measured on a 240-module package fixture of the same shape, `--threads 1`,
+`[build] hir` span:
+
+| | HIR span (240 modules) | per module |
+|---|---|---|
+| memos only (a865dced154) | 54 s | 0.225 s |
+| + inverted indices | **32 s** | **0.133 s** |
+
+Per-module cost is now flat between the 61- and 240-module fixtures (0.15 s vs
+0.13 s), which is the property that was missing: the eliminated terms were all
+linear in registry size, so they grew with the closure rather than with the
+module. Diagnostics are unchanged (same stderr content on the 61-module fixture;
+only blank-line wrapping of the truncation banner differs).
+
+Pin: two further examples in the same spec assert that the declaration-owner
+index and the package-sibling index are each built exactly ONCE no matter how
+many distinct names or packages are queried.
+
 ## Not fixed here
-`_Items/module_import_resolution.spl:370` (package-sibling fallback) still
-sweeps `ordered_names` once per module lowered with per-key canonicalization,
-and `hir_module_declares_item` still has no inverted `name -> [surface_index]`
-index. Both are follow-ups; the two memos above remove the multiplicative terms.
+`hir_module_declares_item` is still a linear probe of six dicts when called
+directly (the index calls it implicitly, once per surface, at build time), and
+the surface registry itself is still rebuilt per lowerer rather than shared
+across phases. Neither is multiplicative any more.
