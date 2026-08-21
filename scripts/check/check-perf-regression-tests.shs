@@ -1,0 +1,141 @@
+#!/bin/sh
+# check-perf-regression-tests.shs — umbrella gate for the perf fixes landed
+# since 2026-08-14.
+#
+# WHY THIS EXISTS. A perf fix with no test is indistinguishable from a perf fix
+# that has been reverted. On 2026-08-21 an audit found exactly that: commit
+# 8f3efdfbd65 removed two O(n^2) steps from the test-manifest reindex, and
+# f13adc2eca5 silently clobbered both of them with a stale snapshot while adding
+# an unrelated forward change. `main` carried the quadratic reindex again for
+# three days and every existing guard was green, because every one of them
+# checks tree structure, symbols, or compilability — none of them knows what a
+# fix was FOR.
+#
+# Each row below pins ONE landed perf fix by its MECHANISM: the identifier,
+# call, or data structure whose absence IS the regression. A budget in wall time
+# would be noise on this shared box; a mechanism pin is deterministic and would
+# have caught the clobber the hour it landed.
+#
+# Verdict is the LAST line of stdout, same convention as the pre-push guards:
+#   PASS — <n> mechanism(s) checked, 0 regressed     exit 0
+#   FAIL — <n> mechanism(s) checked, <k> regressed   exit 1
+#   ERROR — nothing was checked (<reason>)           exit 2
+# A run that checked 0 mechanisms is ERROR, never a pass.
+#
+# --selftest runs first, unconditionally, and is fatal.
+
+set -u
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+CHECKED=0
+FAILED=0
+OFFENDERS=""
+
+# must_contain <label> <file> <needle>
+must_contain() {
+    _label=$1; _file=$2; _needle=$3
+    CHECKED=$((CHECKED + 1))
+    if [ ! -f "$_file" ]; then
+        echo "  MISSING FILE  $_label: $_file"
+        FAILED=$((FAILED + 1)); OFFENDERS="$OFFENDERS $_label"; return
+    fi
+    if grep -qF -- "$_needle" "$_file"; then
+        echo "  ok            $_label"
+    else
+        echo "  REGRESSED     $_label: '$_needle' absent from $_file"
+        FAILED=$((FAILED + 1)); OFFENDERS="$OFFENDERS $_label"
+    fi
+}
+
+# must_not_contain <label> <file> <needle>  (comment lines are ignored)
+must_not_contain() {
+    _label=$1; _file=$2; _needle=$3
+    CHECKED=$((CHECKED + 1))
+    if [ ! -f "$_file" ]; then
+        echo "  MISSING FILE  $_label: $_file"
+        FAILED=$((FAILED + 1)); OFFENDERS="$OFFENDERS $_label"; return
+    fi
+    if grep -v '^[[:space:]]*#' "$_file" | grep -v '^[[:space:]]*//' | grep -qF -- "$_needle"; then
+        echo "  REGRESSED     $_label: '$_needle' is back in $_file"
+        FAILED=$((FAILED + 1)); OFFENDERS="$OFFENDERS $_label"
+    else
+        echo "  ok            $_label"
+    fi
+}
+
+selftest() {
+    _d=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+    printf 'alpha\nbeta\n' > "$_d/good"
+    printf '# alpha\nbeta\n' > "$_d/commented"
+    _sc=$CHECKED; _sf=$FAILED; _so=$OFFENDERS
+    CHECKED=0; FAILED=0; OFFENDERS=""
+    must_contain     st1 "$_d/good"      alpha    >/dev/null
+    must_contain     st2 "$_d/good"      gamma    >/dev/null   # must FAIL
+    must_contain     st3 "$_d/nope"      alpha    >/dev/null   # must FAIL
+    must_not_contain st4 "$_d/good"      gamma    >/dev/null
+    must_not_contain st5 "$_d/good"      alpha    >/dev/null   # must FAIL
+    must_not_contain st6 "$_d/commented" alpha    >/dev/null   # comment ignored -> pass
+    rm -rf "$_d"
+    if [ "$CHECKED" -ne 6 ] || [ "$FAILED" -ne 3 ]; then
+        echo "ERROR — nothing was checked (selftest broken: checked=$CHECKED failed=$FAILED, want 6/3)"
+        exit 2
+    fi
+    echo "selftest: 6 fixtures, 3 expected failures — ok"
+    CHECKED=$_sc; FAILED=$_sf; OFFENDERS=$_so
+}
+
+selftest
+
+echo "perf-regression mechanism pins:"
+
+# --- 8f3efdfbd65 / restored 2026-08-21: test-manifest reindex O(n^2) ---
+SCANNER="$ROOT/src/lib/nogc_sync_mut/test_runner/test_manifest_scanner.spl"
+must_contain     "8f3efdfbd65 reindex path->index dict"        "$SCANNER" "old_index: {text: i64}"
+must_contain     "8f3efdfbd65 sdoctest path->index dict"       "$SCANNER" "old_sd_index: {text: i64}"
+must_not_contain "8f3efdfbd65 no linear manifest_find_entry"   "$SCANNER" "manifest_find_entry(old,"
+must_not_contain "8f3efdfbd65 no linear find_sdoctest_entry"   "$SCANNER" "manifest_find_sdoctest_entry(old,"
+must_not_contain "8f3efdfbd65 no struct-field push in walk"    "$SCANNER" "manifest.entries.push("
+must_not_contain "8f3efdfbd65 no sdoctest struct-field push"   "$SCANNER" "manifest.sdoctest_entries.push("
+
+# --- 7a6f6459a81: daemon backlog bypass had ZERO production call sites ---
+must_contain "7a6f6459a81 backlog bypass wired into client" \
+    "$ROOT/src/app/test_runner_new/test_runner_client.spl" "daemon_backlog_bypass"
+must_contain "7a6f6459a81 backlog bypass policy spec" \
+    "$ROOT/test/01_unit/app/test_runner_new/daemon_backlog_bypass_spec.spl" "daemon_backlog_bypass(0)"
+
+# --- 8d3b7d009b9: native find() instead of per-character interpreted loops ---
+EZRULES="$ROOT/src/lib/nogc_sync_mut/tooling/easy_fix/rules.spl"
+must_contain "8d3b7d009b9 dup-args line fast reject"  "$EZRULES" "if not line.contains(sig.name):"
+must_contain "8d3b7d009b9 native find in call scan"   "$EZRULES" "val rel = _tail.find(sig.name)"
+must_contain "8d3b7d009b9 native find in text search" "$EZRULES" "val rel = _sfx.find(needle)"
+
+# --- e73a0bec647 (and 408fb57b109, which it supersedes): CowEnv scope chain ---
+must_contain "e73a0bec647 per-call env O(args) cargo test" \
+    "$ROOT/src/compiler_rust/compiler/tests/interpreter_call_env_o_args.rs" \
+    "per_call_env_setup_does_not_scale_with_module_global_count"
+must_contain "e73a0bec647 ratio assertion is the pin" \
+    "$ROOT/src/compiler_rust/compiler/tests/interpreter_call_env_o_args.rs" "ratio < 3.0"
+
+# --- a865dced154 / 5c783d9935d / 331c7d16d54: HIR registry sweep memos ---
+HIRSPEC="$ROOT/test/01_unit/compiler/hir/hir_package_dependency_scan_memo_spec.spl"
+must_contain "a865dced154 HIR registry memo spec" "$HIRSPEC" "describe"
+
+# --- 809ce6d4e71: native object cache never persisted entries ---
+must_contain "809ce6d4e71 object cache second-build-hits spec" \
+    "$ROOT/test/02_integration/compiler/driver/native_build_cache_second_build_hits_spec.spl" \
+    "describe"
+
+# --- lint cost: the budget gate itself must still exist and self-test ---
+must_contain "lint cost budget gate present" \
+    "$ROOT/scripts/check/check-lint-cost-budget.shs" "selftest"
+
+echo ""
+if [ "$CHECKED" -eq 0 ]; then
+    echo "ERROR — nothing was checked (no mechanism rows ran)"
+    exit 2
+fi
+if [ "$FAILED" -ne 0 ]; then
+    echo "FAIL — $CHECKED mechanism(s) checked, $FAILED regressed:$OFFENDERS"
+    exit 1
+fi
+echo "PASS — $CHECKED mechanism(s) checked, 0 regressed"
+exit 0

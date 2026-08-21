@@ -13,6 +13,7 @@ bin/simple lint <changed .spl files> # Pure-Simple source linter
 bin/simple build fmt                # Rust formatter
 bin/simple build check              # Rust clippy + rustfmt check + Rust tests
 sh scripts/check/check-dual-run-shadow.shs # C/Simple dual-run shadow gate (goal 6, binary_runtime_hardening plan)
+sh scripts/check/check-perf-regression-tests.shs # Pins every landed perf fix by its mechanism (16 rows, fail-closed, --selftest); caught f13adc2eca5 silently reverting the O(n^2) test-manifest reindex fix 8f3efdfbd65. Audit: doc/09_report/perf_regression_test_audit_2026-08-21.md
 
 # Documentation Coverage
 bin/simple stats                    # Doc coverage in stats
