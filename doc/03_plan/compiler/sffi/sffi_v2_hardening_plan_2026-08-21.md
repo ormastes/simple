@@ -391,6 +391,12 @@ five focused audio registration, arity, backend, and sabotage tests pass. The
 change adds only the existing-required null comparison on the backend-name
 query and does not touch audio processing or scalar hot paths.
 
+The Vulkan, GLFW, and SDL3 interpreter text lifts now reject NULL instead of
+manufacturing empty text. Their owned Rust/C providers already encode ordinary
+absence with non-null empty/static strings. One combined sabotage run passes
+all four matching null-contract tests (including SDL2). The added comparison is
+limited to text-return calls; graphics/event/scalar paths are unchanged.
+
 These are migration inputs, not 14,391 independent implementations. The audit
 now hashes normalized declaration shapes and groups them by symbol. The next
 tooling step replaces the text-derived shape with the resolved HIR ABI hash,

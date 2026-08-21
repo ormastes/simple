@@ -206,15 +206,16 @@ fn arg_text(args: &[Value], idx: usize, name: &str) -> Result<String, CompileErr
 
 /// Read a C string return value into an owned `Value::Str`.
 ///
-/// A NULL return becomes empty text rather than nil, matching how the C
-/// wrappers treat "no value" (e.g. `rt_glfw_clipboard_get` returns `""` when
-/// GLFW has no clipboard string).
-unsafe fn text_from_ptr(ptr: *const std::os::raw::c_char) -> Value {
+/// The owned C provider returns non-null static/empty strings for absence.
+/// NULL is therefore a provider-contract violation, not empty text.
+unsafe fn text_from_ptr(ptr: *const std::os::raw::c_char, symbol: &str) -> Result<Value, CompileError> {
     if ptr.is_null() {
-        return Value::Str(std::sync::Arc::new(String::new()));
+        return Err(CompileError::runtime(format!(
+            "{symbol}: foreign text contract returned null"
+        )));
     }
     let owned = unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned();
-    Value::Str(std::sync::Arc::new(owned))
+    Ok(Value::Str(std::sync::Arc::new(owned)))
 }
 
 /// Dispatch an `rt_glfw_*` call to the C implementation.
@@ -301,11 +302,11 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             }
             (Ret::T, 0) => {
                 let f: extern "C" fn() -> *const std::os::raw::c_char = std::mem::transmute(fptr);
-                text_from_ptr(f())
+                text_from_ptr(f(), name)?
             }
             (Ret::T, 1) => {
                 let f: extern "C" fn(i64) -> *const std::os::raw::c_char = std::mem::transmute(fptr);
-                text_from_ptr(f(raw[0]))
+                text_from_ptr(f(raw[0]), name)?
             }
             (kind, arity) => {
                 return Err(CompileError::runtime(format!(
@@ -406,5 +407,11 @@ mod tests {
         )
         .unwrap_err();
         assert!(format!("{err:?}").contains("natively-linked"));
+    }
+
+    #[test]
+    fn null_text_return_is_a_contract_error() {
+        let result = unsafe { text_from_ptr(std::ptr::null(), "rt_glfw_event_text") };
+        assert!(result.is_err(), "null foreign text must never become empty text");
     }
 }

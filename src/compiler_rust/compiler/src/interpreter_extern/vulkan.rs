@@ -231,15 +231,16 @@ fn arg_f64(args: &[Value], idx: usize, name: &str) -> Result<f64, CompileError> 
 
 /// Read a C string return value into an owned `Value::Str`.
 ///
-/// A NULL return becomes empty text, matching what the runtime returns when it
-/// has no name to report. This is the case the old registration got wrong: it
-/// returned `Value::Int(0)`, which callers rendered as the device name `"0"`.
-unsafe fn text_from_ptr(ptr: *const std::os::raw::c_char) -> Value {
+/// The owned provider uses a non-null empty C string for ordinary absence.
+/// NULL is therefore a provider-contract violation, not empty text.
+unsafe fn text_from_ptr(ptr: *const std::os::raw::c_char, symbol: &str) -> Result<Value, CompileError> {
     if ptr.is_null() {
-        return Value::Str(std::sync::Arc::new(String::new()));
+        return Err(CompileError::runtime(format!(
+            "{symbol}: foreign text contract returned null"
+        )));
     }
     let owned = unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned();
-    Value::Str(std::sync::Arc::new(owned))
+    Ok(Value::Str(std::sync::Arc::new(owned)))
 }
 
 /// Dispatch an `rt_vulkan_*` call to the linked runtime implementation.
@@ -334,11 +335,11 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
                 }
                 (Ret::T, 0) => {
                     let f: extern "C" fn() -> *const std::os::raw::c_char = std::mem::transmute(fptr);
-                    text_from_ptr(f())
+                    text_from_ptr(f(), name)?
                 }
                 (Ret::T, 1) => {
                     let f: extern "C" fn(i64) -> *const std::os::raw::c_char = std::mem::transmute(fptr);
-                    text_from_ptr(f(v[0]))
+                    text_from_ptr(f(v[0]), name)?
                 }
                 (kind, arity) => {
                     return Err(CompileError::runtime(format!(
@@ -528,5 +529,11 @@ mod tests {
             matches!(value, Value::Str(_)),
             "rt_vulkan_get_last_error must return text, got {value:?}"
         );
+    }
+
+    #[test]
+    fn null_text_return_is_a_contract_error() {
+        let result = unsafe { text_from_ptr(std::ptr::null(), "rt_vulkan_get_last_error") };
+        assert!(result.is_err(), "null foreign text must never become empty text");
     }
 }
