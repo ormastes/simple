@@ -52,10 +52,18 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.dependency.visibility.{Visibility}
 use std.nogc_sync_mut.io.process_ops.{eprint}
-extern fn rt_env_get(key: text) -> text
+# `rt_env_get` returns nil for an UNSET variable, so its return type must be
+# declared optional. Declaring it `-> text` made the wrapper below propagate
+# that nil out of a non-optional return, which the SFFI return-contract
+# validator (wired 2026-08-21) correctly rejects with
+# `nil is forbidden by the non-optional return contract of 'flat_bridge_env_get'`
+# — every parse that consulted an unset env var then died. The wrapper stays
+# total by collapsing an unset variable to the empty string, which is exactly
+# what all of its `?? ""` call sites already assumed.
+extern fn rt_env_get(key: text) -> text?
 
 fn flat_bridge_env_get(key: text) -> text:
-    rt_env_get(key)
+    rt_env_get(key) ?? ""
 
 fn flat_bridge_trace_enabled() -> bool:
     (flat_bridge_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
