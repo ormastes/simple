@@ -82,6 +82,38 @@ describe "resolve_import_symbols 2-pass import resolver":
         val hir = lowering.lower_module(consumer)
         expect(hir.symbols.lookup("answer").?).to_be_truthy()
 
+    it "closes package-sibling signatures over explicit glob and re-export imports":
+        val log = make_logger()
+        val owner_source = "pub struct ExternalToken:\n    value: i64\nexport ExternalToken"
+        val facade_source = "export use foreign.owner.\{ExternalToken\}\nexport ExternalToken"
+        val glob_sibling_source = "use foreign.owner.*\npub fn glob_token(v: ExternalToken) -> ExternalToken:\n    v"
+        val named_sibling_source = "use foreign.facade.\{ExternalToken\}\npub fn named_token(v: ExternalToken) -> ExternalToken:\n    v"
+        val consumer_source = "fn local_value() -> i64:\n    1"
+        val owner = parse_full_frontend(owner_source, "foreign.owner", "foreign.owner", log)
+        val facade = parse_full_frontend(facade_source, "foreign.facade", "foreign.facade", log)
+        val glob_sibling = parse_full_frontend(glob_sibling_source, "pkg.glob_sibling", "pkg.glob_sibling", log)
+        val named_sibling = parse_full_frontend(named_sibling_source, "pkg.named_sibling", "pkg.named_sibling", log)
+        val consumer = parse_full_frontend(consumer_source, "pkg.consumer", "pkg.consumer", log)
+        var modules: Dict<text, Module> = {}
+        modules["foreign.owner"] = owner
+        modules["foreign.facade"] = facade
+        modules["pkg.glob_sibling"] = glob_sibling
+        modules["pkg.named_sibling"] = named_sibling
+        modules["pkg.consumer"] = consumer
+        val sources = [
+            SourceFile(path: "foreign/owner.spl", content: owner_source, module_name: "foreign.owner"),
+            SourceFile(path: "foreign/facade.spl", content: facade_source, module_name: "foreign.facade"),
+            SourceFile(path: "pkg/glob_sibling.spl", content: glob_sibling_source, module_name: "pkg.glob_sibling"),
+            SourceFile(path: "pkg/named_sibling.spl", content: named_sibling_source, module_name: "pkg.named_sibling"),
+            SourceFile(path: "pkg/consumer.spl", content: consumer_source, module_name: "pkg.consumer")
+        ]
+        val surfaces = resolve_import_symbols_spec_build_surfaces(modules, sources)
+        var lowering = hirlowering_for_module("pkg.consumer", surfaces)
+        val hir = lowering.lower_module(consumer)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(hir.symbols.lookup("glob_token").?).to_be_truthy()
+        expect(hir.symbols.lookup("named_token").?).to_be_truthy()
+
     it "resolves plain facade exports to their unique package sibling":
         val log = make_logger()
         val provider_source = "struct TickSpan:\n    value: i64\npub fn tick() -> i64:\n    42\npub fn locate() -> TickSpan:\n    TickSpan(value: 1)"

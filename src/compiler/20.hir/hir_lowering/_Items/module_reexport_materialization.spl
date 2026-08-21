@@ -311,21 +311,58 @@ impl HirLowering:
 
     me materialize_imported_callable_explicit_dependency(
         imported_mod: ModuleSurface,
+        imported_mod_name: text,
         dependency: text,
         import_span: Span,
         materialize_enum: bool
     ):
-        # Resolve only an explicit named import written by the callable owner.
-        # Glob/package inference is intentionally excluded here: the same short
-        # name may be present in multiple sibling modules (Span, TraitBound,
-        # TraitDef), and choosing one would silently rewrite the signature.
+        # Resolve only imports explicitly written by the callable owner. Named
+        # imports are exact; explicit glob/module routes are accepted only when
+        # every matching route agrees on one terminal declaration. Implicit
+        # package inference remains excluded because choosing among same-named
+        # siblings would silently rewrite the signature.
+        # ModuleSurface is a large value aggregate. The staged native ABI can
+        # retain scalar declaration maps while losing adjacent nested import
+        # routes across sibling registration. Read routes from the canonical
+        # frozen registry instead of trusting the copied aggregate.
+        var owner_index = imported_mod.physical_index
+        if owner_index < 0 or owner_index >= self.module_surfaces.surfaces.len():
+            owner_index = hir_module_surface_index(
+                self.module_surfaces, imported_mod_name)
+        if owner_index < 0 or owner_index >= self.module_surfaces.surfaces.len():
+            return
         var selected_target: i64 = -1
         var selected_item: text = ""
         var import_index: i64 = 0
-        while import_index < imported_mod.imports.len() and
-              import_index < imported_mod.import_target_indices.len():
-            val target_index = imported_mod.import_target_indices[import_index]
-            val import_decl = imported_mod.imports[import_index]
+        while import_index < self.module_surfaces.surfaces[owner_index].imports.len() and
+              import_index < self.module_surfaces.surfaces[owner_index].import_target_indices.len():
+            val target_index = self.module_surfaces.surfaces[owner_index].import_target_indices[import_index]
+            val import_decl = self.module_surfaces.surfaces[owner_index].imports[import_index]
+            # Empty items represent an explicit glob/module route. Admit it
+            # only when all matching routes agree on one terminal declaration.
+            if import_decl.items.len() == 0 and target_index >= 0 and
+               target_index < self.module_surfaces.surfaces.len():
+                val target = self.module_surfaces.surfaces[target_index]
+                var candidate_target = target_index
+                var candidate_item = dependency
+                var candidate_found = hir_module_declares_item(target, dependency)
+                if not candidate_found:
+                    val hop = self.find_reexport_source(
+                        target, target.preferred_registry_name, dependency)
+                    if hop.found and hop.module_index >= 0:
+                        candidate_target = hop.module_index
+                        candidate_item = hop.item_name
+                        candidate_found = true
+                if candidate_found:
+                    if selected_target >= 0 and
+                       (selected_target != candidate_target or
+                        selected_item != candidate_item):
+                        self.error(
+                            "ambiguous explicit callable dependency `{dependency}` in `{imported_mod.module_name}`",
+                            import_span)
+                        return
+                    selected_target = candidate_target
+                    selected_item = candidate_item
             var item_index: i64 = 0
             while item_index < import_decl.items.len():
                 val item = import_decl.items[item_index]
@@ -416,7 +453,7 @@ impl HirLowering:
                         import_span, materialize_enum)
                     if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, param.type_name) < 0:
                         self.materialize_imported_callable_explicit_dependency(
-                            imported_mod, param.type_name, import_span,
+                            imported_mod, imported_mod_name, param.type_name, import_span,
                             materialize_enum)
             elif param.array_element_name != "":
                 if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, param.array_element_name) < 0:
@@ -426,7 +463,7 @@ impl HirLowering:
                         materialize_enum)
                     if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, param.array_element_name) < 0:
                         self.materialize_imported_callable_explicit_dependency(
-                            imported_mod, param.array_element_name, import_span,
+                            imported_mod, imported_mod_name, param.array_element_name, import_span,
                             materialize_enum)
             else:
                 for dependency in parser_type_named_dependencies(param.type_):
@@ -436,7 +473,7 @@ impl HirLowering:
                             import_span, materialize_enum)
                         if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, dependency) < 0:
                             self.materialize_imported_callable_explicit_dependency(
-                                imported_mod, dependency, import_span,
+                                imported_mod, imported_mod_name, dependency, import_span,
                                 materialize_enum)
         if callable.has_return_type:
             if callable.return_type_name != "":
@@ -447,7 +484,7 @@ impl HirLowering:
                         materialize_enum)
                     if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, callable.return_type_name) < 0:
                         self.materialize_imported_callable_explicit_dependency(
-                            imported_mod, callable.return_type_name, import_span,
+                            imported_mod, imported_mod_name, callable.return_type_name, import_span,
                             materialize_enum)
             elif callable.return_array_element_name != "":
                 if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, callable.return_array_element_name) < 0:
@@ -457,7 +494,7 @@ impl HirLowering:
                         materialize_enum)
                     if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, callable.return_array_element_name) < 0:
                         self.materialize_imported_callable_explicit_dependency(
-                            imported_mod, callable.return_array_element_name,
+                            imported_mod, imported_mod_name, callable.return_array_element_name,
                             import_span, materialize_enum)
             else:
                 for dependency in parser_type_named_dependencies(callable.return_type):
@@ -467,7 +504,7 @@ impl HirLowering:
                             import_span, materialize_enum)
                         if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, dependency) < 0:
                             self.materialize_imported_callable_explicit_dependency(
-                                imported_mod, dependency, import_span,
+                                imported_mod, imported_mod_name, dependency, import_span,
                                 materialize_enum)
 
     me register_imported_type_methods(imported_mod: ModuleSurface, imported_mod_name: text, imported_name: text, local_owner: SymbolId, import_span: Span, materialize_enum: bool):
