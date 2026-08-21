@@ -226,3 +226,10 @@ implementation-blocked-by-bootstrap-authority
   boundary. Surfaces now freeze aligned scalar signatures, dependencies, and
   impl-to-trait relations; unsupported complex shapes fail soft. Bootstrap
   cycle count is 1/3.
+- verify-fail: Cycle 2 again passed Stage 2, but Stage 3 reproduced the exact
+  early unresolved Span/OptimizationLevel/ProcessResult cascade; Stage 4 and
+  deployment were correctly refused.
+- fix-pending-verification: Declaration discovery itself still used staged
+  Dict membership before any scalarized consumer could run. Import routing and
+  terminal-kind discovery now select composite/enum/trait/alias/callable/const
+  declarations through frozen scalar name arrays. Bootstrap cycle count is 2/3.
