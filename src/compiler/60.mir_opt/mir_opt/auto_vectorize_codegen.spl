@@ -5,7 +5,7 @@
 
 use compiler.mir.mir_data.{MirInst, MirInstKind, MirTerminator, MirOperand, MirOperandKind, MirBinOp, LocalId, BlockId}
 use compiler.mir.mir_instructions.{MirBlock}
-use compiler.mir_opt.mir_opt.auto_vectorize_types.{LoopInfo}
+use compiler.mir_opt.mir_opt.auto_vectorize_types.{VectorLoopInfo}
 use compiler.mir_opt.mir_opt.simd_opt_metadata.{plugin_hook_vectorize_event}
 
 # ============================================================================
@@ -23,7 +23,7 @@ struct VectorizedLoop:
     prologue_blocks: [MirBlock]
     vector_blocks: [MirBlock]
     epilogue_blocks: [MirBlock]
-    original_loop: LoopInfo
+    original_loop: VectorLoopInfo
 
 # ============================================================================
 # Main Code Generation
@@ -31,7 +31,7 @@ struct VectorizedLoop:
 
 fn create_vector_loop(
     ctx: VectorizeContext,
-    loop_info: LoopInfo,
+    loop_info: VectorLoopInfo,
     body_blocks: [MirBlock]
 ) -> VectorizedLoop:
     """
@@ -65,7 +65,7 @@ fn create_vector_loop(
 # Prologue Generation
 # ============================================================================
 
-fn generate_prologue(ctx: VectorizeContext, loop_info: LoopInfo) -> [MirBlock]:
+fn generate_prologue(ctx: VectorizeContext, loop_info: VectorLoopInfo) -> [MirBlock]:
     """
     Generate prologue code:
     - Alignment checks
@@ -87,7 +87,7 @@ fn generate_prologue(ctx: VectorizeContext, loop_info: LoopInfo) -> [MirBlock]:
 
     blocks
 
-fn create_alignment_check_block(ctx: VectorizeContext, loop_info: LoopInfo) -> MirBlock:
+fn create_alignment_check_block(ctx: VectorizeContext, loop_info: VectorLoopInfo) -> MirBlock:
     """
     Create block that computes mismatch = (end - start) % chunk_width at runtime
     and branches: if mismatch == 0 → vector loop (next_local+2); else → peeling block
@@ -116,7 +116,7 @@ fn create_alignment_check_block(ctx: VectorizeContext, loop_info: LoopInfo) -> M
     val range_dest    = LocalId(id: ctx.next_local + 100)
     val mismatch_dest = LocalId(id: ctx.next_local + 101)
 
-    # Operands: loop bounds and chunk width come from LoopInfo / VectorizeContext
+    # Operands: loop bounds and chunk width come from VectorLoopInfo / VectorizeContext
     val end_op   = MirOperand(kind: MirOperandKind.Const("i64", "{loop_info.end_value}"))
     val start_op = MirOperand(kind: MirOperandKind.Const("i64", "{loop_info.start_value}"))
     val vf_op    = MirOperand(kind: MirOperandKind.Const("i64", "{ctx.vector_width}"))
@@ -149,7 +149,7 @@ fn create_alignment_check_block(ctx: VectorizeContext, loop_info: LoopInfo) -> M
         terminator:   terminator
     )
 
-fn create_peeling_block(ctx: VectorizeContext, loop_info: LoopInfo, body_blocks: [MirBlock]) -> MirBlock:
+fn create_peeling_block(ctx: VectorizeContext, loop_info: VectorLoopInfo, body_blocks: [MirBlock]) -> MirBlock:
     """
     Create scalar-fixup peeling block that runs the loop body for the misaligned
     suffix (remainder iterations after the vector loop).
@@ -222,7 +222,7 @@ fn create_peeling_block(ctx: VectorizeContext, loop_info: LoopInfo, body_blocks:
 # Vector Body Generation
 # ============================================================================
 
-fn generate_vector_body(ctx: VectorizeContext, loop_info: LoopInfo, body_blocks: [MirBlock]) -> [MirBlock]:
+fn generate_vector_body(ctx: VectorizeContext, loop_info: VectorLoopInfo, body_blocks: [MirBlock]) -> [MirBlock]:
     """
     Generate vectorized loop body.
     Replaces scalar operations with SIMD equivalents.
@@ -254,7 +254,7 @@ fn generate_vector_body(ctx: VectorizeContext, loop_info: LoopInfo, body_blocks:
 # Epilogue Generation
 # ============================================================================
 
-fn generate_epilogue(ctx: VectorizeContext, loop_info: LoopInfo, body_blocks: [MirBlock]) -> [MirBlock]:
+fn generate_epilogue(ctx: VectorizeContext, loop_info: VectorLoopInfo, body_blocks: [MirBlock]) -> [MirBlock]:
     """
     Generate epilogue (remainder loop).
     Handles last few iterations when trip count not multiple of vector width.

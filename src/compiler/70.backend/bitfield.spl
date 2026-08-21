@@ -1,4 +1,4 @@
-# Bitfield Compilation
+# ResolvedBitfield Compilation
 #
 # Compiles bitfield type definitions to efficient bit manipulation code.
 #
@@ -104,15 +104,15 @@ fn bits_needed(n: i64) -> i64:
         value = value >> 1
     bits
 
-# Bitfield field definition
-struct BitfieldField:
+# ResolvedBitfield field definition
+struct ResolvedBitfieldField:
     name: text              # Field name ("_" for reserved/padding)
     type_: HirType          # Field type
     bit_layout: BitLayout           # Bit representation
     bit_offset: i64         # Offset from LSB (computed)
     span: Span
 
-impl BitfieldField:
+impl ResolvedBitfieldField:
     fn is_reserved() -> bool:
         self.name == "_"
 
@@ -128,14 +128,14 @@ impl BitfieldField:
         ~self.getter_mask()
 
 # Complete bitfield definition
-struct Bitfield:
+struct ResolvedBitfield:
     name: text              # Type name
     backing_type: HirType   # Backing storage type (u8, u16, u32, u64)
     backing_bits: i64       # Total bits in backing type
-    fields: [BitfieldField] # Fields in declaration order
+    fields: [ResolvedBitfieldField] # Fields in declaration order
     span: Span
 
-impl Bitfield:
+impl ResolvedBitfield:
     # Get total bits used by fields
     fn used_bits() -> i64:
         var total: i64 = 0
@@ -152,13 +152,13 @@ impl Bitfield:
         self.used_bits() <= self.backing_bits
 
     # Get field by name
-    fn get_field(name: text) -> BitfieldField?:
+    fn get_field(name: text) -> ResolvedBitfieldField?:
         for field in self.fields:
             if field.name == name:
                 return Some(field)
         nil
 
-# Bitfield compilation error
+# ResolvedBitfield compilation error
 enum BitfieldError:
     OverflowError(bitfield: text, used: i64, available: i64, span: Span)
     InvalidBackingType(type_name: text, span: Span)
@@ -262,7 +262,7 @@ fn compile_bitfield(
     preserve_order: bool,
     compactq: bool,
     target_word_bits: i64
-) -> Result<Bitfield, BitfieldError>:
+) -> Result<ResolvedBitfield, BitfieldError>:
     # Validate backing type
     val bits = backing_type_bits(backing_type)
     if not bits.?:
@@ -294,7 +294,7 @@ fn compile_bitfield(
         resolved = sort_fields_by_width_desc(resolved)
 
     # Assign bit offsets with optional word-boundary straddle avoidance
-    var compiled_fields: [BitfieldField] = []
+    var compiled_fields: [ResolvedBitfieldField] = []
     var current_offset: i64 = 0
 
     for (field_name, field_type, field_span, field_repr) in resolved:
@@ -304,7 +304,7 @@ fn compile_bitfield(
                 val word_end = ((current_offset / target_word_bits) + 1) * target_word_bits
                 current_offset = word_end
 
-        compiled_fields.push(BitfieldField(
+        compiled_fields.push(ResolvedBitfieldField(
             name: field_name,
             type_: field_type,
             bit_layout: field_repr,
@@ -318,7 +318,7 @@ fn compile_bitfield(
     if current_offset > backing_bits:
         return Err(BitfieldError.OverflowError(name, current_offset, backing_bits, span))
 
-    Ok(Bitfield(
+    Ok(ResolvedBitfield(
         name: name,
         backing_type: backing_type,
         backing_bits: backing_bits,
@@ -327,7 +327,7 @@ fn compile_bitfield(
     ))
 
 # Validate a compiled bitfield
-fn validate_bitfield(bitfield: Bitfield) -> Result<(), BitfieldError>:
+fn validate_bitfield(bitfield: ResolvedBitfield) -> Result<(), BitfieldError>:
     if not bitfield.is_valid():
         return Err(BitfieldError.OverflowError(
             bitfield.name,
@@ -338,7 +338,7 @@ fn validate_bitfield(bitfield: Bitfield) -> Result<(), BitfieldError>:
     Ok(())
 
 # Generate getter expression for a field
-fn generate_getter(bitfield: Bitfield, field_name: text, value_expr: text) -> text?:
+fn generate_getter(bitfield: ResolvedBitfield, field_name: text, value_expr: text) -> text?:
     val field = bitfield.get_field(field_name)
     if not field.?:
         return nil
@@ -354,7 +354,7 @@ fn generate_getter(bitfield: Bitfield, field_name: text, value_expr: text) -> te
         Some("(({value_expr} >> {shift}) & {mask})")
 
 # Generate setter expression for a field
-fn generate_setter(bitfield: Bitfield, field_name: text, value_expr: text, new_value: text) -> text?:
+fn generate_setter(bitfield: ResolvedBitfield, field_name: text, value_expr: text, new_value: text) -> text?:
     val field = bitfield.get_field(field_name)
     if not field.?:
         return nil
