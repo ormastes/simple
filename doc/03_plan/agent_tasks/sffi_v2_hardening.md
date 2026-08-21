@@ -77,3 +77,8 @@ passing placeholder.
     names/DPI/bounds and all 11 declarations have exact sentinels. Continue
     through the canonical event/input/clipboard declarations, then implement
     signed admission for the dynamically loaded SDL artifact.
+12. SDL2 clipboard read/query now preserve provider failure as typed absence,
+    strict UTF-8 lifting, and `Result`, with a reusable shutdown-owned cache and
+    no extra hot-path call. Replace the two explicitly unsafe legacy plain
+    adapters, migrate remaining event/input declarations, and bind signed
+    artifact plus sanitizer evidence before classifying SDL2 as verified.

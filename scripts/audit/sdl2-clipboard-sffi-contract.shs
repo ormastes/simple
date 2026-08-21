@@ -1,0 +1,55 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+provider="$root/src/runtime/runtime_sdl2.c"
+header="$root/src/runtime/runtime.h"
+binding="$root/src/lib/nogc_sync_mut/io/window_sffi.spl"
+dispatcher="$root/src/compiler_rust/compiler/src/interpreter_extern/sdl2.rs"
+failed=0
+
+clipboard_get=$(sed -n '/^const char\* rt_sdl2_clipboard_get/,/^}/p' "$provider")
+if ! printf '%s\n' "$clipboard_get" | grep -q 'SDL2_REQUIRE(NULL)' ||
+   printf '%s\n' "$clipboard_get" | grep -Eq 'strdup|return ""'; then
+    echo "SDL2 clipboard read must return NULL on failure without fabricated text" >&2
+    failed=1
+fi
+if ! printf '%s\n' "$clipboard_get" | grep -q 'g_sdl2_clipboard_text_capacity' ||
+   ! grep -q 'free(g_sdl2_clipboard_text)' "$provider"; then
+    echo "SDL2 clipboard read must reuse and release its owned cache" >&2
+    failed=1
+fi
+if ! grep -q '^int64_t rt_sdl2_clipboard_has_text(void)' "$provider" ||
+   ! grep -q '^int64_t  rt_sdl2_clipboard_has_text(void);' "$header" ||
+   ! sed -n '/^int64_t rt_sdl2_clipboard_has_text/,/^}/p' "$provider" | grep -q 'SDL2_REQUIRE(-1)'; then
+    echo "SDL2 clipboard query must retain its -1/0/1 status contract" >&2
+    failed=1
+fi
+
+if ! grep -q '^extern fn rt_sdl2_clipboard_get() -> text?' "$binding" ||
+   ! grep -q '^extern fn rt_sdl2_clipboard_has_text() -> i64' "$binding" ||
+   ! grep -q '^fn window_clipboard_get() -> text?:' "$binding" ||
+   ! grep -q '^fn window_clipboard_has_text() -> bool?:' "$binding"; then
+    echo "Simple clipboard wrappers must preserve provider failure as typed absence" >&2
+    failed=1
+fi
+clipboard_binding=$(sed -n '/^# --- Clipboard ---/,/^# --- Utilities ---/p' "$binding")
+if [ "$(printf '%s\n' "$clipboard_binding" | grep -c 'unsafe(capabilities: \[ffi\]):' || true)" -ne 3 ] ||
+   [ "$(printf '%s\n' "$clipboard_binding" | grep -c '^@unsafe(reason: "raw SDL2 provider ABI;' || true)" -ne 3 ]; then
+    echo "SDL2 clipboard unsafe authority must remain on three raw contracts and calls" >&2
+    failed=1
+fi
+
+if ! grep -q '("rt_sdl2_clipboard_get", Ret::TN, "")' "$dispatcher" ||
+   ! grep -q '("rt_sdl2_clipboard_has_text", Ret::I, "")' "$dispatcher" ||
+   grep -q 'CStr::from_ptr(ptr).*to_string_lossy' "$dispatcher" ||
+   ! grep -q 'invalid_foreign_text_is_a_contract_error' "$dispatcher"; then
+    echo "Rust SDL2 lifting must preserve null and reject invalid UTF-8" >&2
+    failed=1
+fi
+
+if [ "$failed" -ne 0 ]; then
+    exit 1
+fi
+
+echo "SDL2 clipboard SFFI contract audit: PASS"

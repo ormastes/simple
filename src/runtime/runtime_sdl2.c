@@ -455,6 +455,8 @@ static uint32_t g_audio_generation = 0;
 static int64_t g_audio_handle = 0;
 static int64_t g_audio_submitted_frames = 0;
 static int g_audio_owns_subsystem = 0;
+static char *g_sdl2_clipboard_text;
+static size_t g_sdl2_clipboard_text_capacity;
 
 /* Generation-checked SDL_Window resources. All table access is confined to
  * the thread that successfully initialized the video/event subsystem. */
@@ -566,6 +568,9 @@ void rt_sdl2_quit(void) {
     }
     SDL_StopTextInput();
     SDL_Quit();
+    free(g_sdl2_clipboard_text);
+    g_sdl2_clipboard_text = NULL;
+    g_sdl2_clipboard_text_capacity = 0;
     g_quit_requested = 0;
     g_last_event_valid = 0;
     atomic_store_explicit(&g_sdl2_owner_thread, 0, memory_order_release);
@@ -1255,22 +1260,40 @@ void rt_sdl2_warp_mouse(int64_t handle, int64_t x, int64_t y) {
 /* ===== Clipboard ===== */
 
 const char* rt_sdl2_clipboard_get(void) {
-    SDL2_REQUIRE("");
+    SDL2_REQUIRE(NULL);
+    if (!sdl2_on_owner_thread()) return NULL;
     char* text = SDL_GetClipboardText();
-    if (!text) return "";
-    char* copy = strdup(text);
+    if (!text) return NULL;
+    size_t len = strlen(text);
+    if (len == SIZE_MAX) {
+        SDL_free(text);
+        return NULL;
+    }
+    size_t needed = len + 1;
+    if (g_sdl2_clipboard_text_capacity < needed) {
+        char *resized = (char *)realloc(g_sdl2_clipboard_text, needed);
+        if (!resized) {
+            SDL_free(text);
+            return NULL;
+        }
+        g_sdl2_clipboard_text = resized;
+        g_sdl2_clipboard_text_capacity = needed;
+    }
+    memcpy(g_sdl2_clipboard_text, text, needed);
     SDL_free(text);
-    return copy ? copy : "";
+    return g_sdl2_clipboard_text;
 }
 
 bool rt_sdl2_clipboard_set(const char* text) {
     SDL2_REQUIRE(false);
+    if (!sdl2_on_owner_thread() || !text) return false;
     return SDL_SetClipboardText(text) == 0;
 }
 
-bool rt_sdl2_clipboard_has_text(void) {
-    SDL2_REQUIRE(false);
-    return SDL_HasClipboardText() == SDL_TRUE;
+int64_t rt_sdl2_clipboard_has_text(void) {
+    SDL2_REQUIRE(-1);
+    if (!sdl2_on_owner_thread()) return -1;
+    return SDL_HasClipboardText() == SDL_TRUE ? 1 : 0;
 }
 
 /* ===== Display Info ===== */
@@ -1455,6 +1478,8 @@ int64_t rt_sdl_event_window_data2(void) {
 
 #ifdef SIMPLE_SDL2_HANDLE_SELFTEST
 int main(void) {
+    if (rt_sdl2_clipboard_get() != NULL || rt_sdl2_clipboard_has_text() != -1 ||
+        rt_sdl2_clipboard_set("probe")) return 9;
     if (rt_sdl2_get_num_displays() != -1 || rt_sdl2_get_display_name(0) != NULL ||
         rt_sdl2_get_display_bounds_x(0) != INT64_MIN ||
         rt_sdl2_get_display_bounds_w(0) != -1 ||

@@ -430,3 +430,24 @@ queries; safety adds only the already-required owner-token load and scalar
 comparisons, with no hashing, allocation, lookup table, or extra native query.
 The inventory now records 156 `unsafe_contract_declared` rows and 13,367 rows
 missing both tag and contract. SDL artifact admission remains unsigned.
+
+SDL2 clipboard reads previously collapsed provider failure into valid empty
+text, allocated an untracked `strdup` copy on every successful read, and
+represented both “no text” and provider failure as `false`. The canonical C
+provider now returns null on read failure, uses one capacity-tracked cache
+released at shutdown, and exposes a `-1/0/1` query contract. Simple lifts these
+states to `text?`, `bool?`, and public `Result` values, while the Rust dispatcher
+preserves nullable absence and rejects invalid UTF-8 rather than inserting
+replacement characters. The two old Result-free host-bridge adapters remain
+explicitly unsafe because their fixed function-pointer ABI still collapses
+errors; replacing that bridge is follow-up work.
+
+The native sabotage fixture, warnings-as-errors optimized C build, Rust family
+tests, Simple syntax checks, and a dedicated source audit pass. The successful
+read path makes the same single SDL query and byte copy as before, while cache
+reuse removes repeated allocation churn; no hash, symbol lookup, mutex, or
+additional native call was added. The refreshed inventory records 159
+`unsafe_contract_declared` rows and 317 `unsafe_contract_missing` rows. These
+contracts are locally checked but the dynamically loaded SDL artifact is still
+unsigned and lacks sanitizer/proof receipts, so the SDL2 family is not fully
+verified.

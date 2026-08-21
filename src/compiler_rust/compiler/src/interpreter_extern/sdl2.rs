@@ -40,6 +40,8 @@ pub enum Ret {
     V,
     /// `const char*`
     T,
+    /// nullable `const char*`, lifted as explicit `nil`
+    TN,
     /// `double`
     D,
     /// `bool`
@@ -57,8 +59,8 @@ pub enum Ret {
 /// absent because it is `static` in the C file and therefore not exported.
 pub const SDL2_FNS: &[(&str, Ret, &str)] = &[
     ("rt_sdl2_clear_quit", Ret::V, ""),
-    ("rt_sdl2_clipboard_get", Ret::T, ""),
-    ("rt_sdl2_clipboard_has_text", Ret::B, ""),
+    ("rt_sdl2_clipboard_get", Ret::TN, ""),
+    ("rt_sdl2_clipboard_has_text", Ret::I, ""),
     ("rt_sdl2_clipboard_set", Ret::B, "s"),
     ("rt_sdl2_create_window", Ret::I, "sii"),
     ("rt_sdl2_destroy_window", Ret::V, "i"),
@@ -80,7 +82,7 @@ pub const SDL2_FNS: &[(&str, Ret, &str)] = &[
     ("rt_sdl2_get_display_bounds_x", Ret::I, "i"),
     ("rt_sdl2_get_display_bounds_y", Ret::I, "i"),
     ("rt_sdl2_get_display_dpi", Ret::D, "i"),
-    ("rt_sdl2_get_display_name", Ret::T, "i"),
+    ("rt_sdl2_get_display_name", Ret::TN, "i"),
     ("rt_sdl2_get_display_usable_h", Ret::I, "i"),
     ("rt_sdl2_get_display_usable_w", Ret::I, "i"),
     ("rt_sdl2_get_display_usable_x", Ret::I, "i"),
@@ -246,8 +248,19 @@ unsafe fn text_from_ptr(ptr: *const std::os::raw::c_char, symbol: &str) -> Resul
             "{symbol}: foreign text contract returned null"
         )));
     }
-    let owned = unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned();
+    let owned = unsafe { CStr::from_ptr(ptr) }
+        .to_str()
+        .map_err(|_| CompileError::runtime(format!("{symbol}: foreign text is not valid UTF-8")))?
+        .to_owned();
     Ok(Value::Str(std::sync::Arc::new(owned)))
+}
+
+unsafe fn nullable_text_from_ptr(ptr: *const std::os::raw::c_char, symbol: &str) -> Result<Value, CompileError> {
+    if ptr.is_null() {
+        Ok(Value::Nil)
+    } else {
+        text_from_ptr(ptr, symbol)
+    }
 }
 
 /// Dispatch an `rt_sdl2_*` call to the C implementation.
@@ -293,7 +306,7 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             other => {
                 return Err(CompileError::runtime(format!(
                     "{name}: unsupported argument kind '{other}'"
-                )))
+                )));
             }
         }
     }
@@ -350,6 +363,14 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
                 let f: extern "C" fn(i64) -> *const std::os::raw::c_char = std::mem::transmute(fptr);
                 text_from_ptr(f(raw[0]), name)?
             }
+            (Ret::TN, 0) => {
+                let f: extern "C" fn() -> *const std::os::raw::c_char = std::mem::transmute(fptr);
+                nullable_text_from_ptr(f(), name)?
+            }
+            (Ret::TN, 1) => {
+                let f: extern "C" fn(i64) -> *const std::os::raw::c_char = std::mem::transmute(fptr);
+                nullable_text_from_ptr(f(raw[0]), name)?
+            }
             (Ret::D, 1) => {
                 let f: extern "C" fn(i64) -> f64 = std::mem::transmute(fptr);
                 Value::Float(f(raw[0]))
@@ -365,7 +386,7 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             (kind, arity) => {
                 return Err(CompileError::runtime(format!(
                     "{name}: unsupported SDL2 signature shape {kind:?}/{arity}"
-                )))
+                )));
             }
         }
     };
@@ -382,6 +403,19 @@ mod tests {
     fn null_text_return_is_a_contract_error() {
         let result = unsafe { text_from_ptr(std::ptr::null(), "rt_sdl2_event_text") };
         assert!(result.is_err(), "null foreign text must never become empty text");
+    }
+
+    #[test]
+    fn nullable_text_return_preserves_absence() {
+        let result = unsafe { nullable_text_from_ptr(std::ptr::null(), "rt_sdl2_clipboard_get") }.unwrap();
+        assert!(matches!(result, Value::Nil));
+    }
+
+    #[test]
+    fn invalid_foreign_text_is_a_contract_error() {
+        let bytes = [0xff_u8, 0];
+        let result = unsafe { text_from_ptr(bytes.as_ptr().cast::<std::os::raw::c_char>(), "rt_sdl2_clipboard_get") };
+        assert!(result.is_err(), "invalid UTF-8 must never be replaced lossily");
     }
 
     /// The table must cover exactly the exported family in the C source.

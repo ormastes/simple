@@ -1344,7 +1344,7 @@ void     rt_sdl2_warp_mouse(int64_t handle, int64_t x, int64_t y);
 /* Clipboard */
 const char* rt_sdl2_clipboard_get(void);
 bool     rt_sdl2_clipboard_set(const char* text);
-bool     rt_sdl2_clipboard_has_text(void);
+int64_t  rt_sdl2_clipboard_has_text(void);
 
 /* ===== GLFW Windowing Runtime ===== */
 int64_t rt_glfw_init(void);
