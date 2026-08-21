@@ -122,3 +122,96 @@ per-module cost now flat in registry size. Diagnostics unchanged.
 directly (the index calls it implicitly, once per surface, at build time), and
 the surface registry itself is still rebuilt per lowerer rather than shared
 across phases. Neither is multiplicative any more.
+
+## Real-closure follow-up (2026-08-21, later session)
+
+The registry memos/indexes above were measured on FIXTURE packages (61 and 240
+modules, 0.11 s/module). The real 662-module stage1 closure still cost
+60-190 s/module, so a mechanism was scaling with the closure that fixtures do
+not exercise. Two things were established, one fixed and one measured.
+
+### Fixed: `field_module_callable` swept the whole symbol table
+
+`HirLowering.field_module_callable`
+(`src/compiler/20.hir/hir_lowering/_Expressions/expression_support.spl:171`)
+materialized `self.symbols.symbols.keys()` -- an array over the ENTIRE symbol
+table -- and scanned it in reverse. Its only gate is "the receiver symbol has
+a `defining_module`", which is true for every imported symbol, so it ran on
+essentially every `x.field` / `x.method(...)` in every body. Fixture symbol
+tables hold tens of symbols; the real closure holds tens of thousands.
+
+Replaced by `SymbolTable.module_callables`, a `{defining_module}#{name}` index
+(also keyed by the name's last dotted segment, matching the sweep's
+`ends_with("." + field)` arm) maintained in `define()`,
+`register_preserved_symbol()`, `rename_symbol()`, and cleared by
+`reset_module()`. Commit `45749fb5130`; mechanism spec
+`test/01_unit/compiler/hir/hir_module_callable_index_spec.spl` (6/6).
+
+Real-closure effect, same lane and box, `[build] hir` `dt=` stamps:
+
+| module | before | after |
+|---|---|---|
+| `compiler.common.driver_core_types` | 354238 ms | 191286 ms |
+| `compiler.common.driver_core_types` (alias pass) | 11322 ms | 6143 ms |
+| `compiler.driver.driver_riscv_gen2_product` | 136600 ms | 135867 ms |
+
+So it is roughly a 45% cut on import-heavy modules and no change on others --
+real, but not the whole story. (Different processes on a shared box; treat as
+an envelope, not a controlled A/B.)
+
+### Measured: the remaining cost is import REGISTRATION, not glob expansion
+
+`SIMPLE_HIR_PHASE_PROFILE=1` (new, default off,
+`src/compiler/20.hir/hir_lowering/hir_phase_profile.spl`) emits one row per
+lowered module splitting its wall time into imports / declare / enums /
+functions / other, with the glob walk timed separately inside imports and
+`other` computed as the residual so nothing can hide in an uninstrumented gap.
+Real closure, first modules of phase 2/6:
+
+| module | total | imports | glob roots | expansions | reg_imported | enums | functions | other |
+|---|---|---|---|---|---|---|---|---|
+| `compiler/driver/driver.spl` | 161207 ms | **148777 ms (92%)** | 69223 ms / 6 | 73 | 9435 | 11265 ms (177) | 118 ms | 993 ms |
+| `app/cli/bootstrap_main.spl` | 56371 ms | **42718 ms (76%)** | 0 ms / 0 | 3 | 2163 | 5558 ms (100) | 7965 ms | 6 ms |
+| `common/driver_core_types.spl` | 5171 ms | 5136 ms (99%) | 0 ms / 0 | 14 | 792 | 34 ms (5) | 0 ms | 1 ms |
+| `std/.../io/file_ops.spl` (cheap) | 3465 ms | 1340 ms (39%) | 0 ms / 0 | 8 | 563 | 0 ms | 1739 ms | 14 ms |
+| `app/cli/bootstrap_identity.spl` (cheap) | 272 ms | 249 ms | 0 ms / 0 | 3 | 143 | 0 ms | 17 ms | 2 ms |
+
+Body lowering is NOT the cost (118 ms of 161 s on `driver.spl`). The glob walk
+is NOT the cost either: 73 expansions for 9435 registrations -- the GLB2 memo
+is working exactly as its note claims.
+
+The signal is the PER-CALL cost of `register_imported_symbol`, and it grows
+with the accumulated closure: 1.7 ms/call (`bootstrap_identity`, 143 calls) ->
+2.8 ms (`io_runtime`) -> 6.5 ms (`driver_core_types`, 792) -> **15.8 ms**
+(`driver.spl`, 9435). A registration is nominally a dict probe plus a
+`define()`. The next suspect is the work reached from it --
+`materialize_imported_callable_type_dependencies`
+(`_Items/module_reexport_materialization.spl:564`), which for every param and
+return type of every imported callable does a qualified-type lookup and, on a
+miss, a declared- then explicit-dependency materialization; the misses repeat
+per importer.
+
+### Two proposed fixes that are NOT safe, with the reason
+
+Both were considered and rejected on code evidence, not preference:
+
+1. **Making `glob_expand_memo` phase-lifetime** (i.e. not clearing it at
+   `context_helpers.spl:83`) would be a correctness bug, not a speedup.
+   The memo does not cache a RESULT; it guards re-entry within one root
+   expansion, and the walk's side effect is `register_imported_symbol` ->
+   `SymbolTable.define()` into the CURRENT module's table, which
+   `begin_module` wipes via `symbols.reset_module()` (`hir_types.spl:253`).
+   A memo that survived the module boundary would make the second importer of
+   a surface skip registration entirely and see no symbols. Note also that the
+   memo is already reset per ROOT (`module_import_resolution.spl:65,74`), so
+   the per-module clear is redundant and cannot be the cost -- and the profile
+   above confirms the walk is 73 expansions, not thousands.
+
+2. **Caching lowered imported enums across importers** (memo keyed by owner
+   surface + enum name) is unsafe for the same reason: a lowered `HirEnum`
+   carries `SymbolId`s allocated in the lowering module's table, and
+   `reset_module()` sets `next_symbol_id = 0`, so ids restart per module. A
+   cached `HirEnum` would hand a later importer symbol ids belonging to a
+   different table. Enum re-lowering is real cost (11.3 s of 161 s on
+   `driver.spl`, 177 lowerings) but any fix must re-key the symbols, not reuse
+   them.

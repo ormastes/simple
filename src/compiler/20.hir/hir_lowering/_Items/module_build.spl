@@ -15,6 +15,17 @@ use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.module_surface.*
 use compiler.hir.hir_lowering.expressions.*
+use compiler.hir.hir_lowering.hir_phase_profile.{
+    HIR_PROF_IMPORTS,
+    HIR_PROF_DECLARE,
+    HIR_PROF_ENUMS,
+    HIR_PROF_FUNCTIONS,
+    hir_phase_profile_now,
+    hir_phase_profile_add,
+    hir_phase_profile_module_begin,
+    hir_phase_profile_module_end,
+    hir_phase_profile_count_enum_lowering
+}
 use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
 use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind, PlatformParseResult, PlatformDiagnosticLevel, PlatformLayoutDiagnostic}
 use compiler.common.dependency.visibility.{Visibility}
@@ -46,6 +57,7 @@ impl HirLowering:
         # Keep the aggregate out of the stage4 Any-erasure path. HirModule
         # contains several dictionaries, and the first field access below can
         # otherwise dispatch through a nil Any receiver in bootstrap builds.
+        hir_phase_profile_module_begin()
         var lowered_module: HirModule = self.lower_module(module)
         val focused_future_diag = bootstrap_mode and module.name == "src/lib/nogc_async_mut/async/future.spl"
         if focused_future_diag:
@@ -121,6 +133,7 @@ impl HirLowering:
             bootstrap_hir_modules_add(registry_module_name, is_entry, flat_symbols, flat_functions, flat_constants, flat_enums, flat_structs, flat_classes)
             if focused_future_diag:
                 eprint("[hir-finalize] cache done")
+        hir_phase_profile_module_end(module.name)
         lowered_module
 
     me lower_module_enum_definitions(module: ParserModule) -> Dict<SymbolId, HirEnum>:
@@ -133,6 +146,7 @@ impl HirLowering:
                 self.error("imported enum `{local_name}` has no declaration owner", Span.empty())
                 enum_idx = enum_idx + 1
                 continue
+            hir_phase_profile_count_enum_lowering()
             val hir_enum = self.lower_enum_with_symbol(self.imported_enums[local_name], self.imported_enum_owners[local_name], local_name)
             lowered[hir_enum.symbol] = hir_enum
             enum_idx = enum_idx + 1
@@ -210,10 +224,12 @@ impl HirLowering:
             hir_module_phase_probe("phase3:hir:imports:start {module.name}")
             if bootstrap_diag:
                 eprint("[hir-lower] resolve_import_symbols:start module={module.name}")
+            val prof_imports_started = hir_phase_profile_now()
             self.registering_import_symbols = true
             self.resolve_import_symbols(module)
             self.resolve_package_sibling_symbols(module)
             self.registering_import_symbols = false
+            hir_phase_profile_add(HIR_PROF_IMPORTS, prof_imports_started)
             if bootstrap_diag:
                 eprint("[hir-lower] resolve_import_symbols:done module={module.name}")
             hir_module_phase_probe("phase3:hir:imports:done {module.name}")
@@ -232,7 +248,9 @@ impl HirLowering:
             # mode already pre-declares its own function names via the
             # bootstrap_decl_idx loop below, so this only widens declaration
             # coverage to types/consts for the closure path.
+            val prof_declare_started = hir_phase_profile_now()
             self.declare_module_symbols(module)
+            hir_phase_profile_add(HIR_PROF_DECLARE, prof_declare_started)
             hir_module_phase_probe("phase3:hir:declare:done {module.name}")
         if bootstrap_diag:
             eprint("[hir-lower] declare:done module={module.name}")
@@ -378,7 +396,9 @@ impl HirLowering:
                 val name = lower_function_keys[lower_idx]
                 hir_module_phase_probe("phase3:hir:function:start {module.name}.{name}")
                 val fn_: ParserFunction = lower_module_functions[name]
+                val prof_fn_started = hir_phase_profile_now()
                 val hir_fn = self.lower_function(fn_)
+                hir_phase_profile_add(HIR_PROF_FUNCTIONS, prof_fn_started)
                 if hir_fn.is_gpu_kernel:
                     gpu_function_targets[hir_fn.name] = hir_fn.gpu_target
                     gpu_function_backend_orders[hir_fn.name] = hir_fn.gpu_backend_order
@@ -453,7 +473,9 @@ impl HirLowering:
                     self.register_struct_field_types(bootstrap_hir_struct)
                     bootstrap_struct_idx = bootstrap_struct_idx + 1
 
+                val prof_enums_started = hir_phase_profile_now()
                 enums = self.lower_module_enum_definitions(module)
+                hir_phase_profile_add(HIR_PROF_ENUMS, prof_enums_started)
 
                 val bootstrap_module_bitfields = module.bitfields
                 val bootstrap_bitfield_keys = bootstrap_module_bitfields.keys()
@@ -561,7 +583,9 @@ impl HirLowering:
             self.register_struct_field_types(hir_struct)
             lower_idx = lower_idx + 1
 
+        val prof_enums_started = hir_phase_profile_now()
         enums = self.lower_module_enum_definitions(module)
+        hir_phase_profile_add(HIR_PROF_ENUMS, prof_enums_started)
 
         val lower_module_bitfields = module.bitfields
         val lower_bitfield_keys = lower_module_bitfields.keys()

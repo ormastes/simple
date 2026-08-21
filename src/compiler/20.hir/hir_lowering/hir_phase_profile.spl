@@ -1,0 +1,112 @@
+# HIR sub-phase profiler (level-gated, default OFF).
+#
+# Set SIMPLE_HIR_PHASE_PROFILE=1 to get one line per lowered module naming
+# where its wall time went. This exists because the real 662-module closure
+# costs 60-190 s per module in phase 2/6 while fixture packages cost 0.11 s,
+# and the per-module `dt=` stamp in the build progress log names the module
+# but not the mechanism inside it
+# (doc/08_tracking/bug/hir_phase_per_module_cost_2026-08-21.md).
+#
+# Cost when disabled: one env probe per process (the verdict is cached in
+# `_hir_prof_state`) plus one `if` per instrumented boundary. No clock is
+# read and no string is built, which matters because the no-GC compiler
+# allocates for every formatted string.
+
+use std.nogc_sync_mut.io.process_ops.{eprint}
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_time_now_monotonic_ms() -> i64
+extern fn rt_stdout_flush()
+
+# 0 = not yet probed, 1 = enabled, 2 = disabled.
+var _hir_prof_state: i64 = 0
+
+# Slot layout. Kept as parallel arrays rather than a Dict so that an
+# accumulate is two bracket ops with no hashing on a hot boundary.
+val HIR_PROF_IMPORTS: i64 = 0        # resolve_import_symbols + package siblings
+val HIR_PROF_DECLARE: i64 = 1        # declare_module_symbols
+val HIR_PROF_ENUMS: i64 = 2          # lower_module_enum_definitions (incl. imported)
+val HIR_PROF_FUNCTIONS: i64 = 3      # lower_function over the module's own bodies
+val HIR_PROF_GLOB: i64 = 4           # register_glob_imported_symbols roots
+val HIR_PROF_SLOT_COUNT: i64 = 5
+
+var _hir_prof_ms: [i64] = [0, 0, 0, 0, 0]
+var _hir_prof_calls: [i64] = [0, 0, 0, 0, 0]
+var _hir_prof_module_start_ms: i64 = 0
+# Nested-expansion counter for the glob walk: roots vs total expansions is
+# exactly the ratio the GLB3 note in module_import_resolution.spl argues
+# about, so it is worth counting rather than re-deriving.
+var _hir_prof_glob_expansions: i64 = 0
+var _hir_prof_imported_symbol_calls: i64 = 0
+var _hir_prof_enum_lowerings: i64 = 0
+
+fn hir_phase_profile_enabled() -> bool:
+    if _hir_prof_state == 0:
+        _hir_prof_state = if (rt_env_get("SIMPLE_HIR_PHASE_PROFILE") ?? "") == "1": 1 else: 2
+    _hir_prof_state == 1
+
+fn hir_phase_profile_now() -> i64:
+    """Clock read for one boundary; 0 when profiling is off (never read)."""
+    if not hir_phase_profile_enabled():
+        return 0
+    rt_time_now_monotonic_ms()
+
+fn hir_phase_profile_add(slot: i64, started_ms: i64):
+    if not hir_phase_profile_enabled():
+        return
+    if slot < 0 or slot >= HIR_PROF_SLOT_COUNT:
+        return
+    _hir_prof_ms[slot] = _hir_prof_ms[slot] + (rt_time_now_monotonic_ms() - started_ms)
+    _hir_prof_calls[slot] = _hir_prof_calls[slot] + 1
+
+fn hir_phase_profile_count_glob_expansion():
+    if hir_phase_profile_enabled():
+        _hir_prof_glob_expansions = _hir_prof_glob_expansions + 1
+
+fn hir_phase_profile_count_imported_symbol():
+    if hir_phase_profile_enabled():
+        _hir_prof_imported_symbol_calls = _hir_prof_imported_symbol_calls + 1
+
+fn hir_phase_profile_count_enum_lowering():
+    if hir_phase_profile_enabled():
+        _hir_prof_enum_lowerings = _hir_prof_enum_lowerings + 1
+
+fn hir_phase_profile_module_begin():
+    if not hir_phase_profile_enabled():
+        return
+    var slot = 0
+    while slot < HIR_PROF_SLOT_COUNT:
+        _hir_prof_ms[slot] = 0
+        _hir_prof_calls[slot] = 0
+        slot = slot + 1
+    _hir_prof_glob_expansions = 0
+    _hir_prof_imported_symbol_calls = 0
+    _hir_prof_enum_lowerings = 0
+    _hir_prof_module_start_ms = rt_time_now_monotonic_ms()
+
+fn hir_phase_profile_module_end(module_name: text):
+    """One line per module. `other` is the residual (item lowering, struct/
+    trait/impl passes, diagnostics) so the row always adds up to `total` and a
+    dominant cost cannot hide in an uninstrumented gap."""
+    if not hir_phase_profile_enabled():
+        return
+    val total = rt_time_now_monotonic_ms() - _hir_prof_module_start_ms
+    var measured = 0
+    var slot = 0
+    while slot < HIR_PROF_SLOT_COUNT:
+        # The glob slot is nested INSIDE imports; counting it in `measured`
+        # would double-count it and make `other` negative.
+        if slot != HIR_PROF_GLOB:
+            measured = measured + _hir_prof_ms[slot]
+        slot = slot + 1
+    eprint("[hir-prof] module={module_name} total={total}ms"
+        + " imports={_hir_prof_ms[HIR_PROF_IMPORTS]}ms/{_hir_prof_calls[HIR_PROF_IMPORTS]}"
+        + " (glob={_hir_prof_ms[HIR_PROF_GLOB]}ms/{_hir_prof_calls[HIR_PROF_GLOB]} roots,"
+        + " expansions={_hir_prof_glob_expansions},"
+        + " reg_imported={_hir_prof_imported_symbol_calls})"
+        + " declare={_hir_prof_ms[HIR_PROF_DECLARE]}ms"
+        + " enums={_hir_prof_ms[HIR_PROF_ENUMS]}ms/{_hir_prof_calls[HIR_PROF_ENUMS]}"
+        + " (lowerings={_hir_prof_enum_lowerings})"
+        + " functions={_hir_prof_ms[HIR_PROF_FUNCTIONS]}ms/{_hir_prof_calls[HIR_PROF_FUNCTIONS]}"
+        + " other={total - measured}ms")
+    rt_stdout_flush()
