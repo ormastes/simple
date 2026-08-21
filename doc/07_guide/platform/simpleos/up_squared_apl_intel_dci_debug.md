@@ -112,6 +112,11 @@ Tigard interface 00 is Port A/Serial; interface 01 is Port B/JTAG. Do not send
 UART data through the JTAG interface and do not connect 3.3-V Tigard JTAG to the
 1.8-V CN22 CPLD/BIOS header.
 
+SimpleOS initializes COM1 before its first `UP2 entry` marker. Its loopback
+self-test must consume the injected `0xAE` byte before the shell starts; a raw
+transcript containing `ae 6c 73 20 2f` identifies a stale probe byte. The
+admitted OVMF check covers this invariant.
+
 On the host:
 
 ```sh

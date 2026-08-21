@@ -97,7 +97,10 @@ firmware output, or a SimpleOS legacy-COM1 routing defect.
 Local code review found no target-side GDB server: the existing
 `src/lib/nogc_sync_mut/debug/remote/protocol/gdb_rsp.spl` is a host client, and
 the UP2 IDT has no #DB/#BP register-frame/continue/step service. The xHCI driver
-also lacks Debug Capability extended-register/context/ring support. The current
-UP2 serial runtime directly uses legacy COM1 I/O `0x3f8`; compatibility with the
-physical CN16 UART remains unproven. Generic NVMe read/write/flush code exists,
+also lacks Debug Capability extended-register/context/ring support. The UP2
+entry now explicitly initializes legacy COM1 I/O `0x3f8` before its first
+marker. The shared initializer drains the `0xAE` loopback-probe byte before
+normal input; otherwise the first command becomes `0xAEls /`. OVMF proves clean
+boot output and `ls /` after this fix, but physical CN16 remains unproven.
+Generic NVMe read/write/flush code exists,
 but the UP2 entry does not initialize it, so no physical storage claim follows.
