@@ -233,3 +233,7 @@ implementation-blocked-by-bootstrap-authority
   Dict membership before any scalarized consumer could run. Import routing and
   terminal-kind discovery now select composite/enum/trait/alias/callable/const
   declarations through frozen scalar name arrays. Bootstrap cycle count is 2/3.
+- verify-fail-blocked: Final cycle 3 passed Stage 2 and its replay, then the
+  Stage-3 self-host compiler was killed by SIGSEGV (signal 11). Stage 4,
+  deployment, the lightweight push hook, and GitHub push remain unavailable.
+  The three-cycle cap is exhausted; no seed fallback or bypass was used.
