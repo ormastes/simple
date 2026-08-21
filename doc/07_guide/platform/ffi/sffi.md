@@ -137,9 +137,17 @@ and `examples/10_tooling/libraries/external_compression/`.
 
 ## Common Patterns
 
+> **SFFI v2 hardening status (2026-08-21):** the normative P0/P1 contract is
+> specified in `doc/02_requirements/feature/sffi_v2_hardening.md`. Until it is
+> implemented and verified across interpreter, JIT, native, dynload, and
+> SimpleOS, raw foreign returns are not mission-critical-safe. Missing symbols,
+> missing returns, null violations, or bridge failures must never be interpreted
+> as ordinary nil/zero/empty values.
+
 ### Opaque Handle Pattern
 
-External objects are represented as `i64` handles in Simple:
+Legacy external objects are commonly represented as `i64` handles in Simple.
+This is migration syntax, not the SFFI v2 safe boundary:
 
 ```simple
 extern fn spl_db_open(path: text) -> i64      # Returns handle
@@ -158,6 +166,12 @@ class Database:
     fn close():
         spl_db_close(self.handle)
 ```
+
+New bindings must define an explicit sentinel/status and ownership contract,
+keep the raw handle inside `unsafe(ffi)`, and publish a generated/reviewed
+`Result<Resource, SffiError>` wrapper. Never assume that `0`, `-1`, or null has
+the same meaning for every provider. The eventual generated resource wrapper
+must bind the matching allocator/destructor and reject use after close.
 
 > **Partially implemented, not yet reachable from source:** a `resource R`
 > declaration is designed to replace this raw-`i64`-handle-plus-manual-`_free`
@@ -459,13 +473,15 @@ src/runtime/           # C implementations
 
 ## Best Practices
 
-1. **Always wrap raw FFI** -- Never use `extern fn` directly in application code
-2. **Use opaque handles** -- Represent C objects as `i64`, not raw pointers
-3. **Check availability** -- Use feature detection before calling optional FFI
-4. **Handle errors** -- Return `Result<T, E>` from wrappers, not raw error codes
-5. **Document ownership** -- Clearly state who frees handles (Simple or C)
-6. **Prefix conventions** -- `rt_` for runtime, `spl_` for external library glue
-7. **Keep glue minimal** -- C/C++ glue should only convert types, not implement logic
+1. **Prefer pure Simple** -- Search `src/lib/**` and `src/os/**` before adding a provider
+2. **Wrap every raw call** -- Raw declarations remain internal and `unsafe(ffi)`
+3. **Use typed contracts** -- Declare ABI, status/null/sentinel, bounds, and unwind semantics
+4. **Lift before use** -- Unvalidated pointers, handles, and descriptors cannot escape safely
+5. **Encode ownership** -- Bind allocator, borrow scope, retain/release, and destructor
+6. **Fail closed** -- Missing symbols and unsupported conversion are errors, never defaults
+7. **Keep checks hot** -- Status/null/descriptor checks stay enabled by default
+8. **Keep glue minimal** -- C/C++ glue converts layouts and exceptions, not application logic
+9. **Verify every lane** -- Interpreter/JIT/native/dynload/SimpleOS must agree by contract category
 
 ---
 

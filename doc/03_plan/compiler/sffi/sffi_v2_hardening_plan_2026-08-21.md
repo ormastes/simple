@@ -4,6 +4,12 @@
 
 **Research:** `doc/01_research/platform/sffi_v2_hardening_2026-08-21.md`
 
+**Requirements:** `doc/02_requirements/feature/sffi_v2_hardening.md` and
+`doc/02_requirements/nfr/sffi_v2_hardening.md`
+
+**Architecture/design:** `doc/04_architecture/platform/sffi_v2_hardening.md`
+and `doc/05_design/platform/sffi_v2_hardening.md`
+
 **Status:** Planned; no implementation or verification PASS is claimed
 
 ## Objective
@@ -29,6 +35,8 @@ No lane may create a private duplicate registry, ABI encoder, error enum, or
 contract meaning.
 
 ## P0 — Fail closed
+
+Normative requirements: `REQ-SFFI-V2-001` through `REQ-SFFI-V2-012`.
 
 Principal paths:
 
@@ -56,6 +64,9 @@ Exit gate: no scoped lane can fabricate a usable default, and every negative
 fixture reports the canonical error category exactly once.
 
 ## P1 — Canonical typed contracts and lift wrappers
+
+Normative requirements: `REQ-SFFI-V2-101` through `REQ-SFFI-V2-112` and
+`REQ-SFFI-V2-NFR-001` through `REQ-SFFI-V2-NFR-006`.
 
 Principal paths:
 
@@ -114,6 +125,8 @@ generic decoding, or allocation per scalar/opaque-handle call.
 
 ## P4 — Cryptographic evidence admission
 
+**Status: planned, not implemented or verified by the P0/P1 documentation set.**
+
 Principal owners include assurance stamps, artifact manifests, mission-critical
 evidence modules, build/release scripts, and SimpleOS loader trust policy.
 
@@ -135,6 +148,8 @@ change invalidates stale evidence.
 
 ## P5 — Provider migration
 
+**Status: planned after P0/P1 contracts and P2/P3 enforcement/admission.**
+
 Migrate in this risk order:
 
 1. unknown/unregistered externs and fabricated return paths;
@@ -150,6 +165,9 @@ run cross-lane tests, benchmark, then remove the legacy binding. Raw declaration
 remain internal and are never re-exported as safe APIs.
 
 ## P6 — Conformance and performance gates
+
+**Status: planned; focused P0/P1 reproduce-first evidence does not constitute
+the complete P6 matrix.**
 
 Run each supported fixture under seed interpreter, self-hosted interpreter,
 `simple test`, `simple run`/JIT, native/AOT, sealed dynload, SimpleOS, Linux, and
@@ -214,10 +232,10 @@ duplicate symbol, and critical-profile rejection. Tests assert codes, not prose.
 - Critical readiness requires every phase through P6 plus a separate `$verify`
   `STATUS: PASS`; this plan itself is not verification evidence.
 
-## Deferred requirement decision
+## Requirement decision
 
-This plan records the supplied recommended architecture. Before implementation,
-the research pipeline must still present user-selectable feature and NFR options
-for legacy compatibility duration, critical admission policy, check-elision
-policy, signing/trust deployment, and isolation targets. No option is silently
-selected by this document.
+The user selected the recommended SFFI v2 architecture: versioned stable C ABI
+shim, generated unsafe raw declaration, generated validation/lift wrapper, and
+safe typed API. P0/P1 requirements and NFRs are final in the linked documents.
+Detailed P4 signing/trust deployment and P5 migration scheduling remain planned
+decisions; they must not delay P0 fail-closed behavior or be claimed complete.
