@@ -150,6 +150,9 @@ mod metal_impl {
     }
 
     fn set_last_error(msg: &str) {
+        if std::env::var_os("SIMPLE_METAL_DIAGNOSTICS").is_some() {
+            eprintln!("metal-runtime-error: {msg}");
+        }
         LAST_ERROR.with(|e| {
             *e.borrow_mut() = CString::new(msg).ok();
         });
@@ -183,6 +186,21 @@ mod metal_impl {
     fn runtime_text(value_raw: i64, argument: &str) -> Result<String, String> {
         let value = RuntimeValue::from_raw(value_raw as u64);
         if value.is_heap() {
+            // Pure-Simple/core-C strings use the shared tagged-pointer ABI but
+            // not Rust RuntimeString's HeapHeader/hash layout. Detect their
+            // explicit STR1 header before asking the Rust heap registry.
+            let core_ptr = ((value_raw as u64) & !0x7) as *const u8;
+            let core_kind = unsafe { std::ptr::read_unaligned(core_ptr.cast::<u32>()) };
+            if core_kind == 0x5354_5231 {
+                let len = unsafe { std::ptr::read_unaligned(core_ptr.add(8).cast::<u64>()) };
+                if len > 64 * 1024 * 1024 {
+                    return Err(format!("{argument}: core-C string exceeds safety limit"));
+                }
+                let bytes = unsafe { std::slice::from_raw_parts(core_ptr.add(16), len as usize) };
+                return std::str::from_utf8(bytes)
+                    .map(str::to_owned)
+                    .map_err(|_| format!("{argument}: core-C string is not valid UTF-8"));
+            }
             let bytes = with_typed_ptr(
                 value,
                 HeapObjectType::String,
@@ -862,6 +880,19 @@ mod metal_impl {
                 "an unregistered heap-tagged value must not fall through to CStr"
             );
             assert_eq!(rt_string_free(value), 1);
+        }
+
+        #[test]
+        fn runtime_text_reads_core_c_string_layout() {
+            let text = b"core-C Metal source";
+            let mut words = vec![0_u64; 2 + text.len().div_ceil(8)];
+            words[0] = 0x5354_5231;
+            words[1] = text.len() as u64;
+            unsafe {
+                std::ptr::copy_nonoverlapping(text.as_ptr(), words.as_mut_ptr().add(2).cast(), text.len());
+            }
+            let tagged = (words.as_ptr() as u64 | 1) as i64;
+            assert_eq!(runtime_text(tagged, "test source"), Ok("core-C Metal source".to_owned()));
         }
 
         #[test]

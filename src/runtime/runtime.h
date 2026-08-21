@@ -608,6 +608,7 @@ int64_t  rt_string_to_upper(int64_t value);
 int64_t  rt_string_to_float(int64_t value);
 int64_t  rt_char_from_code(int64_t code);
 int64_t  text_dot_from_char_code(int64_t code);
+int64_t  rt_cstring_to_text(int64_t cstr);
 int64_t  rt_string_split(int64_t value, int64_t delimiter);
 int64_t  rt_string_split_limit(int64_t value, int64_t delimiter, int64_t limit);
 int64_t  rt_string_join(int64_t array, int64_t separator);

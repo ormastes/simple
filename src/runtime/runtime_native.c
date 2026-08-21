@@ -3815,6 +3815,15 @@ int64_t text_dot_from_char_code(int64_t code) {
     return rt_char_from_code(code);
 }
 
+/* Convert an SFFI-owned NUL-terminated diagnostic into the active core-C text
+ * heap. This executable-owned definition keeps error text in the same heap ABI
+ * as the Phase-2-produced caller instead of returning a Rust RuntimeValue. */
+int64_t rt_cstring_to_text(int64_t cstr) {
+    if (cstr == 0) return rt_string_new(NULL, 0);
+    const char* raw = (const char*)(uintptr_t)cstr;
+    return rt_string_new((const uint8_t*)raw, (uint64_t)strlen(raw));
+}
+
 int64_t rt_string_find(int64_t value, int64_t needle) {
     RtCoreString* s = rt_core_as_string(value);
     RtCoreString* n = rt_core_as_string(needle);
