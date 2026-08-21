@@ -37,6 +37,7 @@ make_admission() {
     candidate=$1
     stem=$2
     row_hash=${3:-}
+    second_row_hash=${4:-}
     evidence=$stage/$stem-evidence
     mkdir -p "$evidence"
     sanity=$evidence/stage2-sanity.env
@@ -52,6 +53,9 @@ make_admission() {
     printf 'source-snapshot\n' >"$source"
     printf 'tool-authority\n' >"$tool"
     printf 'file-hex:73696d706c65:1:%s\n' "$row_hash" >"$runtime"
+    if [ -n "$second_row_hash" ]; then
+        printf 'file-hex:73696d706c65:1:%s\n' "$second_row_hash" >>"$runtime"
+    fi
     printf 'receiver-probe-pass\n' >"$receiver_log"
     runtime_hash=$(sha256sum -- "$runtime" | awk '{print $1}')
     receiver_log_hash=$(sha256sum -- "$receiver_log" | awk '{print $1}')
@@ -125,15 +129,21 @@ if simpleos_admitted_runtime_verify "$good" "$good_admission"; then
     exit 1
 fi
 
-# Recomputing every receipt hash must not legitimize a runtime snapshot whose
-# executable role points at unrelated bytes.
-mkdir -p "$work/unrelated-stage/stage2-admitted"
-unrelated=$work/unrelated-stage/stage2-admitted/simple
-cp "$good" "$unrelated"
-unrelated_admission=$(make_admission "$unrelated" unrelated \
+mkdir -p "$work/fresh-stage/stage2-admitted"
+fresh=$work/fresh-stage/stage2-admitted/simple
+cp "$good" "$fresh"
+fresh_admission=$(make_admission "$fresh" fresh \
     bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)
-if simpleos_admitted_runtime_verify "$unrelated" "$unrelated_admission"; then
-    echo "FAIL: freshly forged receipt with unrelated executable row admitted"
+simpleos_admitted_runtime_verify "$fresh" "$fresh_admission" || {
+    echo "FAIL: fresh Stage2 rejected because its attested input seed differs from its output candidate"
+    exit 1
+}
+rm -f "$fresh_admission"
+fresh_admission=$(make_admission "$fresh" fresh-two-rows \
+    bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+    cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc)
+if simpleos_admitted_runtime_verify "$fresh" "$fresh_admission"; then
+    echo "FAIL: ambiguous runtime snapshot with two executable seed rows admitted"
     exit 1
 fi
 
@@ -155,4 +165,4 @@ fi
 grep -Fq 'simpleos_admitted_runtime_verify_auto "$simple_bin"' \
     "$root/scripts/check/check-native-scalar-metadata-copy.shs"
 
-echo "PASS: canonical SimpleOS runtime admission rejects forged and stale candidates"
+echo "PASS: canonical SimpleOS runtime admission accepts fresh lineage and rejects malformed or stale candidates"
