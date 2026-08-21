@@ -291,22 +291,29 @@ Its generated ledger is
 symbol/signature roll-up is
 `doc/08_tracking/bug/data/sffi_contract_symbols_2026-08-21.tsv`.
 
-Current evidence after the thread synchronization boundary migration:
+Current evidence after the checked regex boundary migration:
 
 - 3,964 distinct symbols in the current backing census, including 3,962
   compiler-owned canonical symbols;
 - 14,611 declaration sites;
-- 14,069 sites have neither an explicit FFI-unsafe tag nor a local contract;
-- 506 sites declare a typed/documented contract but lack the unsafe tag;
-- 24 declarations now carry explicit FFI authority
+- 14,050 sites have neither an explicit FFI-unsafe tag nor a local contract;
+- 510 sites declare a typed/documented contract but lack the unsafe tag;
+- 38 declarations now carry explicit FFI authority
   but still require canonical ABI-contract metadata;
-- 12 checked declarations carry both explicit FFI authority and a
+- 13 checked declarations carry both explicit FFI authority and a
   typed result contract; their cryptographic artifact evidence remains open;
 - 401 canonical symbols currently have more than one normalized declaration
   shape and require typed-resolution review before one ABI hash can be sealed;
-- 3,549 declared symbols require migration and 401 require conflict resolution;
+- 3,548 declared symbols require migration and 401 require conflict resolution;
 - among `rt_*`/`spl_*` declarations, 1,855 sites reference symbols classified
   genuinely missing and 321 are backed only in owned C runtime source.
+
+The regex wrapper now exposes checked `Result` construction and boolean-match
+operations without adding lookup or allocation to the hot path. Its executable
+interpreter regression remains red because the deployed interpreter does not
+register `rt_regex_new` or `rt_regex_is_match_quick`; the fail-closed provider
+registration gap is tracked separately and no weak fallback or skipped test was
+introduced.
 
 These are migration inputs, not 14,611 independent implementations. The audit
 now hashes normalized declaration shapes and groups them by symbol. The next
