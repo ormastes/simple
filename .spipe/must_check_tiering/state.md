@@ -120,3 +120,6 @@ implementation-blocked-by-bootstrap-authority
   `exec_block_closure_into` export. Those fixes are staged in another active
   lane and were not appropriated. See
   `doc/08_tracking/bug/bootstrap_rust_authority_compile_blockers_2026-08-21.md`.
+- verify: The real committed-ref push check completed in 0s and failed closed
+  because the source-bound compiler Stage 1-4 ledger rows remain TODO. This
+  proves the interactive budget and refusal behavior; it is not a release PASS.
