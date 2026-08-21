@@ -4,11 +4,14 @@
 # Provides a unified interface for file I/O via shell commands.
 
 
-use std.io_runtime.{process_run}
+use std.io_runtime.{process_run, ProcessResult}
 
-# Execute shell command and return (stdout, stderr, exit_code)
-fn shell(command: text) -> (text, text, i64):
-    process_run("sh", ["-c", command])
+# Execute shell command; returns the canonical ProcessResult (same shape as
+# std.io_runtime.shell and io.process_ops.shell, so the three are no longer a
+# differing-signature cross-module collision).
+fn shell(command: text) -> ProcessResult:
+    val (stdout, stderr, code) = process_run("sh", ["-c", command])
+    ProcessResult(stdout: stdout, stderr: stderr, exit_code: code, limit_exceeded: false, limit_type: "")
 
 # Execute shell command and return trimmed stdout
 fn shell_output(command: text) -> text:
@@ -17,19 +20,28 @@ fn shell_output(command: text) -> text:
 
 # Write content to file using heredoc (shell-safe)
 fn file_write(path: text, content: text) -> bool:
-    val (out, err, code) = shell("cat > '{path}' << 'SIMPLE_WRITE_EOF'\n{content}\nSIMPLE_WRITE_EOF")
+    val out_r = shell("cat > '{path}' << 'SIMPLE_WRITE_EOF'\n{content}\nSIMPLE_WRITE_EOF")
+    val out = out_r.stdout
+    val err = out_r.stderr
+    val code = out_r.exit_code
     code == 0
 
 # Delete file (safe - uses -f flag)
 # Returns bool to MATCH the other 3 co-compiled `file_delete` definitions.
 # See doc/08_tracking/bug/cross_module_public_symbol_collisions_2026-08-16.md
 fn file_delete(path: text) -> bool:
-    val (out, err, code) = shell("rm -f '{path}'")
+    val out_r = shell("rm -f '{path}'")
+    val out = out_r.stdout
+    val err = out_r.stderr
+    val code = out_r.exit_code
     code == 0
 
 # Get file size in bytes (returns 0 if file doesn't exist)
 fn file_size(path: text) -> i64:
-    val (size_str, err, code) = shell("stat -c '%s' '{path}' 2>/dev/null")
+    val size_str_r = shell("stat -c '%s' '{path}' 2>/dev/null")
+    val size_str = size_str_r.stdout
+    val err = size_str_r.stderr
+    val code = size_str_r.exit_code
     if code != 0:
         return 0
     val trimmed = size_str.trim()

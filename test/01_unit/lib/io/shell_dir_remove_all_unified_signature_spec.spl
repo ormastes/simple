@@ -1,0 +1,46 @@
+# Regression (duplicate semantic tables, critical_hardening_plan_2026-08-21):
+# `dir_remove_all` and `shell` each had co-compiled definitions with DIFFERING
+# signatures — dir_ops returned i32 (0/-1) while io_runtime/ffi/sffi returned
+# bool; `shell` returned ShellResult, ProcessResult or a (text,text,i64) tuple
+# depending on the import path. JIT call sites fall back to the LAST definition
+# when arg types are ambiguous, so a caller could receive the wrong shape.
+# Pre-fix this spec fails: `dir_ops.dir_remove_all` returns 0 (not true) and
+# `file_shell.shell(...)` has no `.exit_code` field.
+use std.spec
+use std.nogc_sync_mut.io.dir_ops.{dir_remove_all, dir_create_all}
+use std.io_runtime.{dir_remove_all as rt_dir_remove_all_variant, dir_exists, file_write}
+use std.nogc_sync_mut.io.file_shell.{shell as file_shell_shell}
+use std.nogc_sync_mut.io.process_ops.{shell as process_ops_shell}
+use std.io_runtime.{shell as io_runtime_shell}
+
+describe "dir_remove_all unified signature":
+    it "dir_ops and io_runtime variants both return bool true on success":
+        val a = "/tmp/dir_remove_all_unified_spec_a"
+        val b = "/tmp/dir_remove_all_unified_spec_b"
+        dir_create_all(a + "/nested")
+        dir_create_all(b + "/nested")
+        file_write(a + "/nested/f.txt", "x")
+        file_write(b + "/nested/f.txt", "x")
+        val ra = dir_remove_all(a)
+        val rb = rt_dir_remove_all_variant(b)
+        expect(ra).to_equal(true)
+        expect(rb).to_equal(true)
+        expect(dir_exists(a)).to_equal(false)
+        expect(dir_exists(b)).to_equal(false)
+
+describe "shell unified signature":
+    it "file_shell, process_ops and io_runtime variants all return ProcessResult":
+        val r1 = file_shell_shell("printf hi; printf err >&2; exit 3")
+        val r2 = process_ops_shell("printf hi; printf err >&2; exit 3")
+        val r3 = io_runtime_shell("printf hi; printf err >&2; exit 3")
+        expect(r1.stdout).to_equal("hi")
+        expect(r2.stdout).to_equal("hi")
+        expect(r3.stdout).to_equal("hi")
+        expect(r1.stderr).to_equal("err")
+        expect(r2.stderr).to_equal("err")
+        expect(r3.stderr).to_equal("err")
+        expect(r1.exit_code).to_equal(3)
+        expect(r2.exit_code).to_equal(3)
+        expect(r3.exit_code).to_equal(3)
+        expect(r1.limit_exceeded).to_equal(false)
+        expect(r3.limit_exceeded).to_equal(false)
