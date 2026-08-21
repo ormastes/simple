@@ -85,3 +85,19 @@ Typed adapters run before `dynamic_sffi::try_call_dynamic`, making it the
 legacy-generic choke point. Until typed policy reaches Rust in process, generic
 dispatch requires a positive development opt-in; robust/critical/verified and
 unknown profiles deny before library or symbol resolution with `E-SFFI-014`.
+
+## Raw pointer-write contract audit
+
+The interpreter and both owned C runtime providers implement
+`rt_ptr_write_u8`, `rt_ptr_write_i32`, and `rt_ptr_write_i64` as void-returning
+raw stores. Their canonical ABI is `(i64 address, i64 offset, exact-width
+value) -> void`; in particular, the i32 value is not an i64. Invalid nonpositive
+addresses or negative offsets must fail closed before dereference. The hot path
+remains a validation branch followed by one direct store: it performs no heap
+allocation, symbol lookup, hashing, locking, or generic marshalling.
+
+Owned Simple declarations are not yet uniformly consistent with this ABI.
+Several still claim fabricated i64/optional returns or widen the i32 argument.
+Those declarations and their callers remain an explicit migration item; this
+provider hardening does not establish caller-owned allocation bounds or prove
+all raw-pointer users safe.
