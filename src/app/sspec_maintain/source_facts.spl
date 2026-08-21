@@ -8,13 +8,21 @@ fn _quoted_name(line: text) -> text:
         return parts[1].trim()
     line.trim()
 
+fn _is_standalone_assertion(line: text) -> bool:
+    val lower = line.lower()
+    lower.contains("assert_equal(") or lower.contains("assert_not_equal(") or
+        lower.contains("assert_true(") or lower.contains("assert_false(") or
+        lower.contains("assert_contains(") or lower.contains("assert_nil(")
+
 fn _is_real_assertion(line: text) -> bool:
     val lower = line.lower()
     val assertion = lower.contains("expect(") or lower.contains("assert(") or
-        lower.contains("expect_compile") or lower.contains("assert_compile")
+        lower.contains("expect_compile") or lower.contains("assert_compile") or
+        _is_standalone_assertion(line)
     if not assertion:
         return false
-    if lower.contains("assert(true)") or lower.contains("assert(false)"):
+    if lower.contains("assert(true)") or lower.contains("assert(false)") or
+            lower.contains("assert_true(true)") or lower.contains("assert_false(false)"):
         return false
     val expect_start = lower.index_of("expect(")
     val equal_start = lower.index_of(").to_equal(")
@@ -70,8 +78,11 @@ fn _is_numeric_literal(value: text) -> bool:
 
 fn _assignment(line: text) -> (text, text):
     val trimmed = line.trim()
-    if not (trimmed.starts_with("val ") or trimmed.starts_with("var ")) or
-            not trimmed.contains("="):
+    # Only immutable `val` bindings feed the tautology heuristic: a `var`
+    # initialized to a literal is typically a flag mutated inside a loop
+    # (`var found = false` ... `expect(found).to_equal(false)`), where the
+    # binding's initial text says nothing about the asserted value.
+    if not trimmed.starts_with("val ") or not trimmed.contains("="):
         return ("", "")
     val pieces = trimmed.split("=")
     if pieces.len() < 2: return ("", "")
@@ -171,7 +182,8 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
             steps = steps + 1
             scenario_steps = scenario_steps + 1
         if current_line > 0 and (line_lower.contains("expect(") or line_lower.contains("assert(") or
-                line_lower.contains("expect_compile") or line_lower.contains("assert_compile")):
+                line_lower.contains("expect_compile") or line_lower.contains("assert_compile") or
+                _is_standalone_assertion(line)):
             assertions = assertions + 1
             if current_line > 0: scenario_assertions = scenario_assertions + 1
             val (actual, expected) = _assertion_parts(line)
