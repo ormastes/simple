@@ -1,7 +1,7 @@
 # Defect class: copy-on-write + accidental aliasing = O(n) per write
 
 **Date:** 2026-08-21
-**Status:** two seed-side fixes landed; static ratchet landed with 79 offenders baselined
+**Status:** two seed-side fixes landed; static ratchet landed with 79 offenders baselined, remediated to 23, then to 7 (zero KEYSINLOOP) on 2026-08-21
 **Scope:** whole compiler — HIR import registration, MIR lowering, mono, driver module tables
 
 ## What the class is
@@ -217,10 +217,94 @@ or DI code that was edited. The measurement is therefore non-discriminating
 rather than a null result, and no clone-reduction figure is claimed here. It
 should be re-run once the HIR path builds again.
 
+## KEYSINLOOP resolved, 2026-08-21 (23 -> 7, zero KEYSINLOOP)
+
+### Is there dict iteration that does not materialize keys?
+
+The premise behind holding the 12 KEYSINLOOP offenders was "the tree has no
+dict-direct iteration idiom". That is half right, and the half that is wrong
+changes the answer.
+
+`for (k, v) in d:` **does exist and does work.** `interpreter_control.rs:3410`
+detects a `Value::Dict` iterable and suppresses `auto_enumerate` precisely
+because dict items are already `(key, value)` tuples, and both it and `.keys()`
+go through `dict_entries_sorted`, so the two agree on order **exactly** —
+verified by running both loops over the same dict and diffing the sequence.
+(A stale comment at `25.traits/trait_coherence.spl:91` claimed "for (k,v) in
+dict is broken in compiled mode"; it is no longer true of the interpreter lane.)
+
+But it is **not cheaper**, which is the part that matters here:
+
+| path | what it allocates |
+|---|---|
+| `d.keys()` (interpreter) | a `Vec` of every key |
+| `for (k, v) in d` (interpreter) | `iter_to_vec` -> a `Vec` of every `(k, v)` **tuple** |
+| native / JIT | `rt_dict_keys`, `rt_dict_values`, `rt_dict_entries` — the only three the runtime exposes, **all materializing** |
+
+There is no cursor, view, or lazy iterator anywhere in the interpreter or the
+runtime. So rewriting a `.keys()` loop into a `(k, v)` loop allocates *strictly
+more*, not less. Adding a real non-materializing iterator would mean a new
+runtime cursor ABI plus interpreter, MIR and JIT lowering — and it would buy
+nothing for the 12 sites, for the reason below.
+
+### The 12 were mostly not offenders
+
+Re-examined individually, **11 of the 12 had a receiver that is REBOUND on every
+iteration** — `for surface in ...` then `surface.callables.keys()`,
+`val module = mods[i]` then `module.structs.keys()`, `val impl_def = ...` then
+`impl_def.methods.keys()`. Each of those materializes the keys of a *different*
+dict, visits every key exactly once, and totals O(total entries). That is
+optimal and not rewritable into anything cheaper. The O(n^2) the rule names was
+never present at those sites; the detector simply did not distinguish a
+loop-invariant receiver from a loop-varying one.
+
+`scripts/check/check-cow-alias-hotpath.shs` now makes that distinction, and a
+second, opposite defect was found while doing it: loop indents were kept in a
+single scalar, so closing an INNER loop read as "no longer in a loop" while
+still inside the OUTER body, hiding every offender that follows an inner loop.
+Replaced with a stack. Net effect on the rule: **-11 false positives, +1 true
+positive** the old rule structurally could not see.
+
+### Fixed
+
+| site | was | now |
+|---|---|---|
+| `25.traits/trait_coherence.spl:100` | `self.local_types.keys().len() > 0` in a doubly-nested loop | `.len() > 0` — no array built to ask "non-empty?" |
+| `70.backend/backend/vulkan_backend.spl:264,271` | `push_arg_locals.keys().len() > 0` (found only by the stacked-indent fix) | `.len() > 0` |
+| `70.backend/backend/native/regalloc.spl:160` | `intervals.keys()` re-materialized per back-edge | hoisted above the scan; the back-edge pass only rewrites values at existing keys, never adds one, so the key set is fixed |
+| `10.frontend/treesitter/outline.spl` (4 BYVALUE) | `self.X = X_push(self.X, item)` | `self.X.push(item)`; the 3 helpers were bare `blocks.push(item)` and are deleted |
+
+Baseline **23 -> 7**. Every surviving offender is a cold-path BYVALUE whose
+helper does real work (dedupe, removal, stats folding) and is not a mechanical
+rewrite.
+
+### Mechanism test
+
+`compiler/src/interpreter_method/collections.rs`,
+`mod keys_materialization_tests` — a test-only thread-local counter incremented
+where `.keys()`/`.values()` actually builds the array, driven through the real
+`exec_for`:
+
+* `.keys()` in the loop BODY, invariant receiver: **200 materializations for 200
+  iterations** — the O(n^2) shape, asserted to still be there so the rule is not
+  guarding a phantom.
+* hoisted `.keys()` as the loop's iterable: **exactly 1**, i.e. **0 per
+  iteration** — the property the rewrites bought.
+* size-independence: still exactly 1 at 1, 8 and 512 entries, so the assertion is
+  not an artifact of one dict size.
+
+Counting materializations rather than wall time keeps this exact on a loaded box.
+The counter is `#[cfg(test)]`, so the production dict path pays nothing.
+
 ## Open
 
-* 23 baselined `.spl` offenders remain (12 KEYSINLOOP, 11 BYVALUE); see
+* 7 baselined `.spl` offenders remain, all BYVALUE on cold paths; see
   "What was deliberately NOT changed" above for why each is held.
+* No non-materializing dict iteration exists in either the interpreter or the
+  runtime (`rt_dict_keys`/`values`/`entries` are the whole surface). Nothing in
+  the compiler currently needs one — every remaining `.keys()` in a loop is over
+  a loop-varying receiver — but a genuinely hot invariant-receiver site would
+  have no cheap idiom to reach for.
 * A discriminating runtime counter delta for the 56 fixed offenders has not been
   measured — the compile pipeline that reaches them is currently broken in HIR.
 * Per-Simple-function attribution in `perf_counters.rs` (top-30 by elements

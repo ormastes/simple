@@ -16,6 +16,38 @@ thread_local! {
     static BYTE_ARRAY_WIDEN_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// Counts how many times a `.keys()` / `.values()` call MATERIALIZED a fresh
+/// array of every entry. Test-only, so the production dict path pays nothing.
+///
+/// This is the counter behind the KEYSINLOOP rule in
+/// `scripts/check/check-cow-alias-hotpath.shs`: the cost that rule exists to
+/// catch is one full materialization PER LOOP ITERATION, which is O(n) per
+/// iteration and O(n^2) per loop. Counting materializations is deterministic
+/// and size-independent, so it is stable on a loaded box where a wall-clock
+/// threshold would be flaky.
+#[cfg(test)]
+thread_local! {
+    static KEYS_MATERIALIZE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn measure_keys_materializations<T>(f: impl FnOnce() -> T) -> (T, usize) {
+    KEYS_MATERIALIZE_COUNT.with(|count| {
+        count.set(0);
+        let result = f();
+        (result, count.get())
+    })
+}
+
+#[cfg(test)]
+fn note_keys_materialization() {
+    KEYS_MATERIALIZE_COUNT.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn note_keys_materialization() {}
+
 #[cfg(test)]
 fn measure_byte_array_widens<T>(f: impl FnOnce() -> T) -> (T, usize) {
     BYTE_ARRAY_WIDEN_COUNT.with(|count| {
@@ -1206,6 +1238,7 @@ pub fn handle_dict_methods(
         // describe the SAME entry. `values` must not use `map.values()`: that
         // is raw HashMap order and would desync from the sorted `keys()`.
         "keys" => {
+            note_keys_materialization();
             let keys: Vec<Value> = crate::value::dict_entries_sorted(map)
                 .into_iter()
                 .map(|(k, v)| Value::dict_entry_key_for_iteration(v, k))
@@ -1213,6 +1246,7 @@ pub fn handle_dict_methods(
             Value::array(keys)
         }
         "values" => {
+            note_keys_materialization();
             let vals: Vec<Value> = crate::value::dict_entries_sorted(map)
                 .into_iter()
                 .map(|(_, v)| Value::dict_entry_value_for_iteration(v))
@@ -1475,5 +1509,146 @@ mod is_condition_present_tests {
         let cond = Expr::Integer(0);
         assert!(!is_condition_present(&cond, &Value::Int(0)));
         assert!(is_condition_present(&cond, &Value::Int(1)));
+    }
+}
+
+/// Mechanism test for the KEYSINLOOP rule in
+/// `scripts/check/check-cow-alias-hotpath.shs`.
+///
+/// The rule's claim is that a `.keys()` on a LOOP-INVARIANT receiver inside a
+/// loop body re-materializes the whole key array on every iteration -- O(n) per
+/// iteration, O(n^2) per loop -- while the hoisted form materializes it once
+/// and pays nothing per iteration. Both halves are asserted here against the
+/// real `exec_for`, so the ratchet rests on measured interpreter behaviour
+/// rather than on a plausible-sounding story about it.
+///
+/// Counting materializations (not wall time) makes the assertion deterministic
+/// and size-independent: it is exact on a loaded box, where a timing threshold
+/// would be flaky, and it stays true no matter how fast the machine is.
+#[cfg(test)]
+mod keys_materialization_tests {
+    use super::*;
+    // interpreter::interpreter_method::collections::<this mod> -> 3 supers is
+    // the `interpreter` module, where exec_for is in scope.
+    use super::super::super::exec_for;
+    use simple_parser::ast::{Block, ForStmt, Node, Pattern};
+    use simple_parser::Span;
+
+    const ENTRIES: usize = 64;
+    const ITERATIONS: usize = 200;
+
+    fn span() -> Span {
+        Span::new(0, 0, 0, 0)
+    }
+
+    fn dict_of(n: usize) -> Value {
+        let mut map = HashMap::new();
+        for i in 0..n {
+            map.insert(format!("k{i}"), Value::Int(i as i64));
+        }
+        Value::Dict(Arc::new(map))
+    }
+
+    fn keys_call() -> Expr {
+        Expr::MethodCall {
+            receiver: Box::new(Expr::Identifier("d".to_string())),
+            method: "keys".to_string(),
+            args: vec![],
+            generic_args: vec![],
+        }
+    }
+
+    /// Runs `for x in <iterable>: <body>` and returns how many key arrays the
+    /// dict materialized in total.
+    fn run_loop(iterable: Expr, body: Vec<Node>) -> usize {
+        let mut env = Env::new();
+        env.insert("d".to_string(), dict_of(ENTRIES));
+        env.insert(
+            "ticks".to_string(),
+            Value::array((0..ITERATIONS).map(|i| Value::Int(i as i64)).collect::<Vec<_>>()),
+        );
+
+        let for_stmt = ForStmt {
+            span: span(),
+            pattern: Pattern::Identifier("x".to_string()),
+            iterable,
+            body: Block { span: span(), statements: body },
+            simd_requested: false,
+            is_suspend: false,
+            auto_enumerate: false,
+            invariants: vec![],
+            label: None,
+        };
+
+        let (result, materializations) = measure_keys_materializations(|| {
+            exec_for(
+                &for_stmt,
+                &mut env,
+                &mut HashMap::new(),
+                &mut HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+            )
+        });
+        result.expect("exec_for");
+        materializations
+    }
+
+    #[test]
+    fn keys_in_loop_body_materializes_once_per_iteration() {
+        // The shape the ratchet forbids: an invariant receiver, called inside
+        // the body. One full key array per iteration.
+        let n = run_loop(Expr::Identifier("ticks".to_string()), vec![Node::Expression(keys_call())]);
+        assert_eq!(
+            n, ITERATIONS,
+            "a .keys() inside the body must materialize once per iteration -- \
+             that is the O(n^2) the KEYSINLOOP rule exists to catch"
+        );
+    }
+
+    #[test]
+    fn hoisted_keys_materializes_once_regardless_of_iteration_count() {
+        // The fix shape: evaluated once as the loop's own iterable. Per
+        // ITERATION cost is zero, which is the property the rewrites in
+        // trait_coherence / regalloc / vulkan_backend bought.
+        let n = run_loop(keys_call(), vec![]);
+        assert_eq!(
+            n, 1,
+            "a hoisted .keys() must materialize exactly once for the whole \
+             loop, so the per-iteration materialization count is 0"
+        );
+    }
+
+    #[test]
+    fn hoisted_count_does_not_grow_with_the_dict() {
+        // Size-independence: the hoisted form is 1 at any dict size, so the
+        // assertion above is not an artifact of this particular ENTRIES value.
+        for size in [1usize, 8, 512] {
+            let mut env = Env::new();
+            env.insert("d".to_string(), dict_of(size));
+            let for_stmt = ForStmt {
+                span: span(),
+                pattern: Pattern::Identifier("x".to_string()),
+                iterable: keys_call(),
+                body: Block { span: span(), statements: vec![] },
+                simd_requested: false,
+                is_suspend: false,
+                auto_enumerate: false,
+                invariants: vec![],
+                label: None,
+            };
+            let (result, n) = measure_keys_materializations(|| {
+                exec_for(
+                    &for_stmt,
+                    &mut env,
+                    &mut HashMap::new(),
+                    &mut HashMap::new(),
+                    &HashMap::new(),
+                    &HashMap::new(),
+                )
+            });
+            result.expect("exec_for");
+            assert_eq!(n, 1, "hoisted .keys() must stay at 1 materialization for a {size}-entry dict");
+        }
     }
 }
