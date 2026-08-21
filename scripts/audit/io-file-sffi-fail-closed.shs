@@ -1,0 +1,36 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+bridge="$root/src/compiler_rust/compiler/src/interpreter_extern/io_file.rs"
+failed=0
+
+if grep -n -E 'and_then\(Value::try_array_bytes\)\.unwrap_or_default\(\)|fn extract_(fd|i64).*-> i64' "$bridge"; then
+    echo "file-I/O SFFI contains a fabricated argument fallback" >&2
+    failed=1
+fi
+
+for file in \
+    "$root/src/compiler/99.loader/aspect_pack_io.spl" \
+    "$root/src/lib/nogc_sync_mut/io/file.spl"
+do
+    if ! awk '
+        /^[[:space:]]*extern fn rt_io_file_/ {
+            if (previous !~ /@unsafe\(/ || previous !~ /capabilities:[[:space:]]*\[[^]]*ffi/) {
+                printf "%s:%d:%s\n", FILENAME, FNR, $0
+                failed = 1
+            }
+        }
+        { previous = $0 }
+        END { exit failed }
+    ' "$file"; then
+        echo "raw file-I/O declarations must carry explicit ffi unsafe metadata" >&2
+        failed=1
+    fi
+done
+
+if [ "$failed" -ne 0 ]; then
+    exit 1
+fi
+
+echo "file-I/O SFFI fail-closed audit: PASS"

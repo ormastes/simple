@@ -64,17 +64,33 @@ fn extract_path(args: &[Value], idx: usize) -> Result<String, CompileError> {
     }
 }
 
-fn extract_fd(args: &[Value], idx: usize) -> i64 {
+#[inline]
+fn extract_fd(args: &[Value], idx: usize, symbol: &str) -> Result<i64, CompileError> {
     match args.get(idx) {
-        Some(Value::Int(n)) => *n,
-        _ => -1,
+        Some(Value::Int(fd)) if *fd >= 0 => Ok(*fd),
+        _ => Err(CompileError::runtime(format!(
+            "{symbol}: argument {idx} must be a valid file descriptor"
+        ))),
     }
 }
 
-fn extract_i64(args: &[Value], idx: usize, default: i64) -> i64 {
+#[inline]
+fn extract_i64(args: &[Value], idx: usize, symbol: &str) -> Result<i64, CompileError> {
     match args.get(idx) {
-        Some(Value::Int(n)) => *n,
-        _ => default,
+        Some(Value::Int(value)) => Ok(*value),
+        _ => Err(CompileError::runtime(format!(
+            "{symbol}: argument {idx} must be an integer"
+        ))),
+    }
+}
+
+#[inline]
+fn extract_bool(args: &[Value], idx: usize, symbol: &str) -> Result<bool, CompileError> {
+    match args.get(idx) {
+        Some(Value::Bool(value)) => Ok(*value),
+        _ => Err(CompileError::runtime(format!(
+            "{symbol}: argument {idx} must be boolean"
+        ))),
     }
 }
 
@@ -86,8 +102,10 @@ fn byte_of(v: &Value) -> u8 {
     }
 }
 
-fn extract_bytes(args: &[Value], idx: usize) -> Vec<u8> {
-    args.get(idx).and_then(Value::try_array_bytes).unwrap_or_default()
+fn extract_bytes(args: &[Value], idx: usize, symbol: &str) -> Result<Vec<u8>, CompileError> {
+    args.get(idx)
+        .and_then(Value::try_array_bytes)
+        .ok_or_else(|| CompileError::runtime(format!("{symbol}: argument {idx} must be bytes")))
 }
 
 fn bytes_to_value(bytes: &[u8]) -> Value {
@@ -111,7 +129,7 @@ fn secs_since_epoch(t: std::io::Result<std::time::SystemTime>) -> i64 {
 /// `3` Append.
 pub fn rt_io_file_open(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
-    let mode = extract_i64(args, 1, -1);
+    let mode = extract_i64(args, 1, "rt_io_file_open")?;
     let mut opts = OpenOptions::new();
     match mode {
         0 => {
@@ -126,7 +144,7 @@ pub fn rt_io_file_open(args: &[Value]) -> Result<Value, CompileError> {
         3 => {
             opts.append(true).create(true);
         }
-        _ => return Ok(Value::Int(-1)),
+        _ => return Err(CompileError::runtime(format!("rt_io_file_open: invalid mode {mode}"))),
     }
     #[cfg(unix)]
     {
@@ -144,10 +162,12 @@ pub fn rt_io_file_open(args: &[Value]) -> Result<Value, CompileError> {
 /// Read up to `size` bytes from `fd`. Returns a bare `[u8]`, empty at EOF or
 /// on error (see module-level divergence note).
 pub fn rt_io_file_read(args: &[Value]) -> Result<Value, CompileError> {
-    let fd = extract_fd(args, 0);
-    let size = extract_i64(args, 1, -1);
+    let fd = extract_fd(args, 0, "rt_io_file_read")?;
+    let size = extract_i64(args, 1, "rt_io_file_read")?;
     if size < 0 {
-        return Ok(bytes_to_value(&[]));
+        return Err(CompileError::runtime(format!(
+            "rt_io_file_read: size must be non-negative, got {size}"
+        )));
     }
     let result = unsafe {
         with_fd(fd, Vec::new(), |file| {
@@ -166,7 +186,7 @@ pub fn rt_io_file_read(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Read from the current position to EOF. Returns a bare `[u8]`.
 pub fn rt_io_file_read_all(args: &[Value]) -> Result<Value, CompileError> {
-    let fd = extract_fd(args, 0);
+    let fd = extract_fd(args, 0, "rt_io_file_read_all")?;
     let result = unsafe {
         with_fd(fd, Vec::new(), |file| {
             let mut buf = Vec::new();
@@ -180,7 +200,7 @@ pub fn rt_io_file_read_all(args: &[Value]) -> Result<Value, CompileError> {
 /// Read one newline-terminated line. Returns `Value::Nil` at EOF, matching
 /// `file.spl`'s `if line == nil:` check on this `text?` extern.
 pub fn rt_io_file_read_line(args: &[Value]) -> Result<Value, CompileError> {
-    let fd = extract_fd(args, 0);
+    let fd = extract_fd(args, 0, "rt_io_file_read_line")?;
     let result = unsafe {
         with_fd(fd, None, |file| {
             let mut line: Vec<u8> = Vec::new();
@@ -212,8 +232,8 @@ pub fn rt_io_file_read_line(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Write `data` to `fd`. Returns the byte count written, or `-1` on error.
 pub fn rt_io_file_write(args: &[Value]) -> Result<Value, CompileError> {
-    let fd = extract_fd(args, 0);
-    let data = extract_bytes(args, 1);
+    let fd = extract_fd(args, 0, "rt_io_file_write")?;
+    let data = extract_bytes(args, 1, "rt_io_file_write")?;
     let n = unsafe {
         with_fd(fd, -1i64, |file| match file.write(&data) {
             Ok(n) => n as i64,
@@ -225,8 +245,8 @@ pub fn rt_io_file_write(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Write all of `data` to `fd`. Returns false on a short write or error.
 pub fn rt_io_file_write_all(args: &[Value]) -> Result<Value, CompileError> {
-    let fd = extract_fd(args, 0);
-    let data = extract_bytes(args, 1);
+    let fd = extract_fd(args, 0, "rt_io_file_write_all")?;
+    let data = extract_bytes(args, 1, "rt_io_file_write_all")?;
     let ok = unsafe { with_fd(fd, false, |file| file.write_all(&data).is_ok()) };
     Ok(Value::Bool(ok))
 }
@@ -234,19 +254,25 @@ pub fn rt_io_file_write_all(args: &[Value]) -> Result<Value, CompileError> {
 /// Seek. `whence`: `0` SEEK_SET, `1` SEEK_CUR, `2` SEEK_END. Returns the new
 /// absolute position, or `-1` on error.
 pub fn rt_io_file_seek(args: &[Value]) -> Result<Value, CompileError> {
-    let fd = extract_fd(args, 0);
-    let offset = extract_i64(args, 1, -1);
-    let whence = extract_i64(args, 2, -1);
+    let fd = extract_fd(args, 0, "rt_io_file_seek")?;
+    let offset = extract_i64(args, 1, "rt_io_file_seek")?;
+    let whence = extract_i64(args, 2, "rt_io_file_seek")?;
     let pos = match whence {
         0 => {
             if offset < 0 {
-                return Ok(Value::Int(-1));
+                return Err(CompileError::runtime(
+                    "rt_io_file_seek: negative SEEK_SET offset".to_string(),
+                ));
             }
             SeekFrom::Start(offset as u64)
         }
         1 => SeekFrom::Current(offset),
         2 => SeekFrom::End(offset),
-        _ => return Ok(Value::Int(-1)),
+        _ => {
+            return Err(CompileError::runtime(format!(
+                "rt_io_file_seek: invalid whence {whence}"
+            )))
+        }
     };
     let result = unsafe {
         with_fd(fd, -1i64, |file| match file.seek(pos) {
@@ -259,14 +285,14 @@ pub fn rt_io_file_seek(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Flush userspace buffers and sync data to disk.
 pub fn rt_io_file_flush(args: &[Value]) -> Result<Value, CompileError> {
-    let fd = extract_fd(args, 0);
+    let fd = extract_fd(args, 0, "rt_io_file_flush")?;
     let ok = unsafe { with_fd(fd, false, |file| file.flush().is_ok() && file.sync_data().is_ok()) };
     Ok(Value::Bool(ok))
 }
 
 /// Close `fd`. Unlike the helpers above this genuinely drops the handle.
 pub fn rt_io_file_close(args: &[Value]) -> Result<Value, CompileError> {
-    let fd = extract_fd(args, 0);
+    let fd = extract_fd(args, 0, "rt_io_file_close")?;
     #[cfg(unix)]
     {
         if fd < 0 {
@@ -285,8 +311,8 @@ pub fn rt_io_file_close(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Toggle the read-only bit on the file behind `fd`.
 pub fn rt_io_file_set_permissions(args: &[Value]) -> Result<Value, CompileError> {
-    let fd = extract_fd(args, 0);
-    let readonly = matches!(args.get(1), Some(Value::Bool(true)));
+    let fd = extract_fd(args, 0, "rt_io_file_set_permissions")?;
+    let readonly = extract_bool(args, 1, "rt_io_file_set_permissions")?;
     let ok = unsafe {
         with_fd(fd, false, |file| match file.metadata() {
             Ok(meta) => {
@@ -302,7 +328,7 @@ pub fn rt_io_file_set_permissions(args: &[Value]) -> Result<Value, CompileError>
 
 /// File size in bytes, or `-1` on error.
 pub fn rt_io_file_meta_size(args: &[Value]) -> Result<Value, CompileError> {
-    let fd = extract_fd(args, 0);
+    let fd = extract_fd(args, 0, "rt_io_file_meta_size")?;
     let size = unsafe {
         with_fd(fd, -1i64, |file| match file.metadata() {
             Ok(meta) => meta.len() as i64,
@@ -315,7 +341,7 @@ pub fn rt_io_file_meta_size(args: &[Value]) -> Result<Value, CompileError> {
 /// Packed metadata flags, or `-1` on error.
 /// bit 0 is_file, bit 1 is_dir, bit 2 is_symlink, bit 3 readonly.
 pub fn rt_io_file_meta_flags(args: &[Value]) -> Result<Value, CompileError> {
-    let fd = extract_fd(args, 0);
+    let fd = extract_fd(args, 0, "rt_io_file_meta_flags")?;
     let flags = unsafe {
         with_fd(fd, -1i64, |file| match file.metadata() {
             Ok(meta) => {
@@ -343,7 +369,7 @@ pub fn rt_io_file_meta_flags(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Modification time in seconds since the Unix epoch, `0` if unavailable.
 pub fn rt_io_file_meta_modified(args: &[Value]) -> Result<Value, CompileError> {
-    let fd = extract_fd(args, 0);
+    let fd = extract_fd(args, 0, "rt_io_file_meta_modified")?;
     let secs = unsafe {
         with_fd(fd, 0i64, |file| match file.metadata() {
             Ok(meta) => secs_since_epoch(meta.modified()),
@@ -355,7 +381,7 @@ pub fn rt_io_file_meta_modified(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Creation time in seconds since the Unix epoch, `0` if unavailable.
 pub fn rt_io_file_meta_created(args: &[Value]) -> Result<Value, CompileError> {
-    let fd = extract_fd(args, 0);
+    let fd = extract_fd(args, 0, "rt_io_file_meta_created")?;
     let secs = unsafe {
         with_fd(fd, 0i64, |file| match file.metadata() {
             Ok(meta) => secs_since_epoch(meta.created()),
@@ -445,8 +471,27 @@ mod tests {
         let path = dir.path().join("interp_gone.txt");
         std::fs::write(&path, b"x").unwrap();
         let path = path.to_str().unwrap().to_string();
-        assert_eq!(rt_io_file_exists(&[Value::text(path.clone())]).unwrap(), Value::Bool(true));
-        assert_eq!(rt_io_file_delete(&[Value::text(path.clone())]).unwrap(), Value::Bool(true));
+        assert_eq!(
+            rt_io_file_exists(&[Value::text(path.clone())]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            rt_io_file_delete(&[Value::text(path.clone())]).unwrap(),
+            Value::Bool(true)
+        );
         assert_eq!(rt_io_file_exists(&[Value::text(path)]).unwrap(), Value::Bool(false));
+    }
+
+    #[test]
+    fn malformed_file_arguments_fail_before_os_io() {
+        assert!(rt_io_file_open(&[Value::text("path")]).is_err());
+        assert!(rt_io_file_open(&[Value::text("path"), Value::Int(99)]).is_err());
+        assert!(rt_io_file_read(&[Value::Nil, Value::Int(1)]).is_err());
+        assert!(rt_io_file_read(&[Value::Int(1), Value::Int(-1)]).is_err());
+        assert!(rt_io_file_write(&[Value::Int(1), Value::Bool(false)]).is_err());
+        assert!(rt_io_file_write_all(&[Value::Int(-1), Value::byte_array(Vec::new())]).is_err());
+        assert!(rt_io_file_seek(&[Value::Int(1), Value::Int(0), Value::Int(9)]).is_err());
+        assert!(rt_io_file_set_permissions(&[Value::Int(1), Value::Int(0)]).is_err());
+        assert!(rt_io_file_meta_size(&[]).is_err());
     }
 }

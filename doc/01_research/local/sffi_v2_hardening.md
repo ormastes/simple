@@ -302,6 +302,16 @@ free after consuming finish, and all raw SHA-1 declarations are explicitly
 path retains one hash/encoding operation; the removed double cleanup reduces
 work. A source-only audit gates the decoder, unsafe tags, and ownership rule.
 
+The interpreter `rt_io_file_*` family used shared decoders that fabricated
+`-1`, caller-selected defaults, false, zero bytes, or an empty byte array for
+missing and wrong-typed arguments. File descriptors, modes, sizes, offsets,
+whence values, permissions, and write buffers now fail before OS I/O when their
+contract is malformed; explicit empty byte buffers remain valid. Operational
+filesystem failures retain the declared legacy status results. The valid path
+keeps one existing byte extraction and one OS operation. A focused sabotage
+test passes, all raw file declarations are tagged `unsafe(ffi)`, and a
+source-only audit enforces both properties.
+
 All 15 remaining legacy sign/verify declarations in the canonical signature
 module are now explicitly `unsafe(ffi)` and document their sentinel contract:
 verification collapses malformed bridge input into `0`, while signing may
