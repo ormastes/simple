@@ -187,3 +187,63 @@ RED, which is the correct state — it is red because it can finally see.
 `run_census` has no per-file timeout, so one pathological file would hang the
 whole gate indefinitely with no verdict. Every other guard in this repo treats a
 non-terminating check as fail-closed; this one cannot, because it never returns.
+
+## 2026-08-21 (later) — the 8 findings triaged: ALL FALSE POSITIVES, checker fixed
+
+Neither suspicion above was the cause. Reproduced with a 3-function probe
+(`scratchpad/probe2.spl`): a local `struct R` used as `x: R?` is silent; the
+same code with an IMPORTED type, `x: SignedVerifiedReleaseBundleDecisionV1?`,
+reproduces every class of finding. Mechanism, in order:
+
+1. `src/compiler/10.frontend/core/parser.spl` postfix-`?` branch (~:797-833):
+   `i64?/f64?/text?/bool?` get dedicated tags and `T?` keeps its identity only
+   when `named_type_find(T)` succeeds, i.e. `T` is declared in the SAME file.
+   Every other `T?` — in practice every imported struct/class/enum — collapses
+   to bare `TYPE_OPTION`.
+2. `src/compiler/20.hir/hir_lowering/types.spl:519` lowers an argless `Option`
+   as `HirTypeKind.Optional(HirType(kind: Any))`.
+3. `any_type_is_any` (checker.spl) treated `Optional(Any)` as `Any` (correct
+   for a written `Any?`, wrong for this placeholder). The parameter symbol was
+   then tracked, so every `Var` use of it, the `Some(value)` arm binding, and
+   the `!= nil` / `== ""` operators on it were reported.
+
+| line | construct | checker saw | verdict |
+|---|---|---|---|
+| 107 / 165 | param `verified_release_bundle: SignedVerifiedReleaseBundleDecisionV{1,2}?` | `Optional(Any)` (parser-erased payload) | FALSE POSITIVE |
+| 145 / 203 | `val release = match verified_release_bundle:` … `Some(value): value` | arm binding inherits the tracked param's placeholder type | FALSE POSITIVE |
+| 154 / 212 | `elif verified_release_bundle != nil:` (E-MC-ANY-002 escape_operator) | Binary on the tracked param | FALSE POSITIVE |
+| 19 (x2) | reported inside v1/v2 but the span says line 19 (`match self:` in `name()`) | a node in v1/v2 whose span points at line 19 — which node was NOT pinned down (probe2 reproduced the same extra per-function site at its own `match` line); it vanishes with the `Optional(Any)` fix, so it is the same placeholder type | FALSE POSITIVE (span provenance is a separate, cosmetic defect worth its own record if it recurs) |
+
+The multi-line `or` continuation is NOT involved: the pure-Simple frontend used
+by the census parses the file (it produced a SUMMARY, 0 unanalyzable), and
+`probe2.spl` carried the same construct and lowered cleanly. The `found Dedent`
+error quoted above comes from the Rust SEED parser when the *spec* is
+interpreted, and is the still-open single-line-body case of
+`doc/08_tracking/bug/parser_trailing_operator_line_continuation_2026-07-13.md`
+(repro appended there today).
+
+**Fix (checker, not baseline):** `any_type_is_any` no longer counts a bare
+`Any` directly under `Optional` — `any_optional_inner_is_any` in
+`src/compiler/35.semantics/any_escape/checker.spl`. `Optional(Ref(Any))` and
+every other wrapper still count. Spec (failing-pre-fix verified: 6/7 with the
+old line, 7/7 after) + neighbour that a real `raw: Any` under the same `!= nil`
+shape still reports 001+002:
+`test/01_unit/compiler/semantics/any_escape/any_escape_spec.spl` (mirrored to
+`test/unit/…`), fixtures `test/fixtures/any_escape/imported_optional_param.spl`,
+`any_param_operator.spl`.
+
+**Known blind spot introduced, stated rather than hidden:** a WRITTEN `Any?`
+also reaches HIR as `Optional(Any)` (same `TYPE_OPTION` collapse) and is now
+not reported. It is indistinguishable at HIR level from the erased `T?`. The
+real fix is in the parser: thread the payload name for any `T?` (not only
+same-file names) so HIR gets `Optional(Named(T))` / `Optional(Any)` faithfully;
+then `any_optional_inner_is_any` can be deleted. That is `10.frontend` work and
+is not ≤30 lines (it needs a per-name option tag for names not yet in
+`named_type_find`, i.e. imported ones resolved only at HIR time).
+
+**Per-module timeout added** to `scripts/check/check-any-escape-census.shs`:
+`timeout -k 5 $ANY_ESCAPE_MODULE_TIMEOUT` (default 600s) around every driver
+invocation; rc 124 → `ERROR — nothing was checked (module timed out after Ns:
+<file>; …)` exit 2. Selftest fixture substitutes a sleeping stand-in driver
+(`CENSUS_BIN`) under a 1s budget and requires 124; no `timeout` binary is a
+selftest failure, never a pass. Baseline file untouched.

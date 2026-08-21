@@ -104,3 +104,33 @@ Repro files used (not checked in): `if a or / b: return false` style single-line
 variants confirmed failing; `if a or / b:\n return true` (indented block) and
 bare `a and / b` confirmed passing, on `bin/simple run` with the current
 `bin/release/x86_64-unknown-linux-gnu/simple` seed.
+
+## 2026-08-21 re-verification (seed `bin/simple`, still OPEN, single-line body only)
+
+Bisected six variants; exactly one shape fails, confirming the 2026-08-09
+narrowing. Multi-line bodies pass regardless of `not`, 3-way chains, `==`/`>`
+operands, or text/int operands:
+
+```
+# FAILS — "Unexpected token: expected expression, found Dedent"
+fn f(a: bool, c: text) -> i64:
+    if a or
+            c == "": return 1
+    2
+
+# PASSES — identical condition, body on its own line
+fn f(a: bool, c: text) -> i64:
+    if a or
+            c == "":
+        return 1
+    2
+```
+
+Live instance in the tree: `src/compiler/00.common/assurance/formal_delivery_gates.spl:147-149`
+and `:205-207` (`release.bundle_hash == "": return FormalDeliveryDecisionV1(`),
+which is why `formal_delivery_gates_spec.spl` reports `executed=0` under the
+seed. The pure-Simple frontend (`parse_full_frontend`) accepts both forms —
+the any-escape census lowers that file with 0 unanalyzable — so this is
+seed-parser-only (`src/compiler_rust/parser`, owned by another lane; not
+edited here). It is unrelated to the any-escape census false positives
+(see `any_escape_census_undercounts_2026-08-21.md`, same day).
