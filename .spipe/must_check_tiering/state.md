@@ -123,3 +123,12 @@ implementation-blocked-by-bootstrap-authority
 - verify: The real committed-ref push check completed in 0s and failed closed
   because the source-bound compiler Stage 1-4 ledger rows remain TODO. This
   proves the interactive budget and refusal behavior; it is not a release PASS.
+- progress: After rebasing onto the upstream duplicate-helper fix, the Rust
+  authority still lacked `interpreter::dispatch_profile`. Restoring the module
+  made `cargo check -p simple-compiler` pass and allowed bootstrap to enter the
+  pure-Simple Stage-2 native build.
+- blocker: Stage 2 then rejected `_FlatAstBridge/convert_nodes.spl` because it
+  constructed undeclared `PatternKind.TypeTest`. The enum variant is now added
+  last to preserve ordinal ABI, and the stage-log diagnoser now recognizes the
+  uppercase native-build summary (11 fixtures PASS). A fourth bootstrap run is
+  prohibited by the three-cycle cap, so Stage 2-4 evidence remains pending.

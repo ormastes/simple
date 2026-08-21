@@ -59,7 +59,7 @@ EV_TRANSCRIPT=""
 # `[hir-fatal]` is included because the driver now emits fatal HIR diagnostics
 # with their text at the moment they are recorded, which is the only thing that
 # survives a stage that dies before its end-of-phase summary.
-diag_pattern='error:|\[hir-fatal\]|\[hir-poisoned\]|\[collect-all\]|panicked|Segmentation fault|SIGSEGV|Assertion|fatal|undefined reference|cannot find|No space left'
+diag_pattern='error:|\[hir-fatal\]|\[hir-poisoned\]|\[collect-all\]|panicked|segmentation fault|sigsegv|assertion|fatal|undefined reference|cannot find|no space left|failed files|build failed|unsupported .*construct'
 
 usage() {
     echo "usage: $0 --log PATH --status N [--stage NAME] [--transcript PATH]"
@@ -107,7 +107,7 @@ classify_failure() {
     # numeric test blow up with "Illegal number" and — because the comparison
     # errored rather than being false — reported an undiagnosable log as
     # diagnosable. The counts-without-text fixture caught exactly that.
-    _hits=$(grep -c -E "${diag_pattern}" "${_log}" 2>/dev/null)
+    _hits=$(grep -c -i -E "${diag_pattern}" "${_log}" 2>/dev/null)
     if [ -z "${_hits}" ]; then
         _hits=0
     fi
@@ -122,7 +122,7 @@ classify_failure() {
     fi
 
     echo "  diagnosis: ${_hits} diagnostic line(s) found. First 5:"
-    grep -E "${diag_pattern}" "${_log}" 2>/dev/null | head -5 | sed 's/^/    | /'
+    grep -i -E "${diag_pattern}" "${_log}" 2>/dev/null | head -5 | sed 's/^/    | /'
     return 0
 }
 
@@ -208,6 +208,11 @@ selftest() {
     # 5. a real error message present -> diagnosable, must PASS
     printf 'building...\nerror: semantic: undefined field kind at foo.spl:12:3\n' > "${_dir}/real.log"
     _assert "real-error-text-must-pass" 0 --log "${_dir}/real.log" --status 1 --stage t5
+
+    # Native-build summaries are diagnostics even when they do not prefix the
+    # line with lowercase `error:`.
+    printf 'FAILED FILES (1):\nBuild failed: Unsupported HIR construct: TypeTest\n' > "${_dir}/native-summary.log"
+    _assert "native-summary-must-pass" 0 --log "${_dir}/native-summary.log" --status 1 --stage t5b
 
     # 6. the driver's own mid-phase fatal line must count as diagnostic text
     printf '[hir-fatal] source_idx=2 path=a.spl error_idx=0 text=HIR lowering error in m (a.spl:9:1): unresolved type X\n' > "${_dir}/hirfatal.log"
