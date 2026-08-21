@@ -319,3 +319,107 @@ the closure-ABI question can even be asked of the worker.
 3. Undeclared lambda parameter types (defaulted to I64) — currently detected and
    routed to the interpreter rather than inferred.
 4. `TypeId::BOOL` (and other sub-register types) across a closure boundary.
+
+---
+
+## Update 2026-08-21 (later still) — the runtime-facing convention is implemented
+
+Item 2 of the previous section's remaining list is done. A JIT-compiled lambda is
+now a real `HeapObjectType::Closure` that the runtime can call.
+
+### The convention
+
+- `compile_closure_create` allocates through **`rt_closure_new`** instead of a
+  bare `rt_alloc` block. The old object was not a `RuntimeClosure` at all — it
+  had a raw code address at offset 0 and no `HeapHeader` — so
+  `rt_closure_func_ptr` rejected it and `rt_array_map` silently answered an
+  EMPTY array. That is why every runtime-facing shape had to be refused.
+- `func_ptr` is the lambda's **boxed entry**, a per-lambda thunk emitted by the
+  new `codegen/closure_boxed_entry.rs` with exactly the shape every runtime
+  helper `transmute`s to: `fn(RuntimeValue, RuntimeValue..) -> RuntimeValue`. It
+  unboxes each tagged argument to the parameter type the body was compiled with
+  (`rt_value_unbox_int` / `rt_value_as_float`), calls the typed body, and boxes
+  the result back (`rt_value_int` / `rt_value_float` / `rt_value_bool`).
+- **Every** indirect call resolves its target with `rt_closure_func_ptr` and
+  goes through that same door, boxing its arguments and unboxing its result
+  (`compile_indirect_call`, mirrored helpers `box_for_closure_boundary` /
+  `unbox_from_closure_boundary`). There is deliberately no separate fast path
+  keyed on provenance: a closure value reaching an indirect call may have come
+  from a capture, a struct field, a parameter or another module, and nothing in
+  the vreg carries that provenance. One uniform door is cheap (a tag shift and
+  a call) and cannot be wrong about which convention applies.
+- **Captures stay bit-preserving.** `rt_closure_set_capture` /
+  `rt_closure_get_capture` store and return the word verbatim, so a capture
+  keeps whatever representation the parent function had for it; nothing in the
+  runtime ever interprets a capture, so no boxing is owed at that boundary. The
+  outlined body reads them with `rt_closure_get_capture` rather than the old
+  `closure_ptr + 8 + 8i` load, because the ctx pointer is now a TAGGED handle.
+
+### What is still refused, and why (all named in the bail reason)
+
+1. **An `ANY`-typed call boundary.** Unchanged, and still the right refusal: no
+   encoding is correct for both a tagged integer and a heap-boxed float. The
+   check is now applied to EVERY `IndirectCall` in a lambda-bearing function,
+   not only to calls on the closure's own registers and not only outside the
+   outlined body blocks. That widening was forced by measurement: nested
+   `val outer = \y: inner(y) * 2` answered **64 instead of 8**, because the
+   callee's tagged result (`4 << 3 == 32`) was multiplied raw inside the body
+   block the old guard skipped.
+2. **A `BOOL` boundary.** The boxed entry carries a bool correctly (full-width
+   `rt_value_bool` 0/1, never a bare `i8`), but declaring the OUTLINED BODY's
+   Cranelift return type as `i8` still SIGSEGVs `print(f(32))` for `\x: x > 1`.
+   Re-measured on this convention. The defect is in the surrounding
+   sub-register value handling, not at the boundary — item 4 below.
+3. **A closure HANDLE reaching a scalar boxing instruction.** `fn mk() -> any:
+   return \x: x + 100` SIGSEGVs: the `any` return slot inserts `BoxInt`, which
+   shifts a handle whose vreg type it cannot see left by 3, destroying the
+   pointer; `rt_closure_func_ptr` then answers NULL and the indirect call jumps
+   to 0. The object convention is right, the boxing of the handle on the way out
+   is not.
+
+### A gap the refusals had been hiding
+
+The moment such modules stopped bailing, `arr.map(\x: x*3)` failed at RUNTIME
+with `Function 'Array.map' not found`. `rt_map` and its siblings are emitted
+straight from a method NAME by the dispatch table in
+`codegen/instr/closures_structs.rs`, never as a MIR call node, so they were
+absent from `referenced_call_names` and therefore from `runtime_funcs`; the
+table arm answered `Ok(None)` and dispatch fell through. `rt_map`,
+`rt_array_map`, `rt_array_filter`, `rt_find`, `rt_array_find`,
+`rt_array_reduce` and `rt_option_map` are now codegen roots. (`any`/`all` have
+dispatch arms but no `rt_array_any`/`rt_array_all` runtime spec at all — a
+separate, pre-existing gap.)
+
+### Measured (differential, JIT vs interpreter)
+
+| shape | lane taken | result |
+|---|---|---|
+| `xs.map(\x: x*3)`, `.filter`, `.find` | **JIT** | identical |
+| `xs.map(\x: x + k)` (captures a mutable local) | **JIT** | identical |
+| `["a","bb"].map(\s: s.len())` (text elements) | **JIT** | identical |
+| lambda stored in a struct field | fallback (handle boxed) | identical |
+| `val f = \x: x*10`, `\a,b: a+b`, capture | **JIT** | identical |
+| `\x: x*1.5` called with `4.0` | fallback (poisoned ANY) | identical |
+| `\x: x > 1` (BOOL result) | fallback (unsupported type) | identical |
+| lambda returned from a fn, called by caller | fallback (handle boxed) | identical |
+| nested lambda capturing a lambda | fallback (ANY boundary) | identical |
+
+No wrong answers in any lane. `test/fixtures/engine_differential`: 10/12 SAME,
+the 2 DIFFs are the two pre-existing pre-filed ones (`i64_boundary_values`,
+`utf8_slice_boundary`). `cargo test -p simple-compiler --release --lib`: 3742
+passed / 52 failed — the same failure set as baseline (3 more tests pass).
+`SIMPLE_JIT_COVERAGE=1` on a `.map(\x: ...)` fixture reports no closure bail.
+
+### Remaining, in order
+
+1. Undeclared lambda parameter types. `hir/lower/expr/control.rs::lower_lambda`
+   defaults an untyped parameter to `I64`, unconditionally. The transport itself
+   is bit-preserving — `rt_value_unbox_int` decodes a tagged int and passes a
+   heap handle through verbatim, which is why `["a","bb"].map(\s: s.len())` is
+   correct — so the risk is confined to what the BODY does with a value whose
+   type was guessed wrong. This is the largest remaining source of
+   interpreter-fallbacks in real code and the right next fix.
+2. `TypeId::BOOL` across a closure boundary (refusal 2 above): the outlined
+   body's `i8` return, not the boxed entry.
+3. Scalar-boxing of a closure handle (refusal 3 above): `BoxInt` needs to see
+   that its operand is a heap handle.
