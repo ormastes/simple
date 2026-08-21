@@ -13,6 +13,7 @@ include!(concat!(env!("OUT_DIR"), "/runtime_symbol_entries.rs"));
 // test target as well so its definition/prototype discrimination is executed.
 #[cfg(test)]
 mod runtime_export_scan;
+mod runtime_signature_scan;
 
 pub mod hir_core;
 pub mod loader;

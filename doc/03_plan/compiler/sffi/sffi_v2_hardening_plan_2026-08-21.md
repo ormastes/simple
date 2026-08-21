@@ -584,3 +584,14 @@ emits their canonical pointer, integer, and return signatures, eliminating all
 address table and lookup behavior. A focused runtime test resolves and invokes
 allocation, typed write/read/free, and all three time providers through the
 table. This migration adds no runtime allocation, hashing, locking, or lookup.
+
+The runtime build generator now consumes the compiler-owned `RUNTIME_FUNCS`
+signature registry rather than inventing `fn()` for every covered linker
+anchor. A dependency-free build-time scanner validates the four canonical ABI
+scalar types, rejects duplicates/unknown types, and currently parses at least
+1,250 contracts (1,264 at implementation time). Exact pointer signatures take
+precedence where the coarse codegen registry represents pointers as `I64`.
+Legacy multi-value networking tuples remain explicitly marked as improper C
+types and require status/out migration; their actual tuple signature is no
+longer hidden by a zero-argument declaration. All work is compile/admission
+time and leaves the static table and foreign-call hot paths unchanged.

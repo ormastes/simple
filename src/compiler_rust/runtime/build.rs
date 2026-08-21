@@ -5,10 +5,14 @@ use std::path::{Path, PathBuf};
 
 #[path = "src/runtime_export_scan.rs"]
 mod runtime_export_scan;
+#[path = "src/runtime_signature_scan.rs"]
+mod runtime_signature_scan;
 
 fn main() {
     println!("cargo:rerun-if-changed=../common/src/runtime_symbols.rs");
     println!("cargo:rerun-if-changed=src/runtime_export_scan.rs");
+    println!("cargo:rerun-if-changed=src/runtime_signature_scan.rs");
+    println!("cargo:rerun-if-changed=../compiler/src/codegen/runtime_sffi.rs");
     println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=../../runtime/runtime_memory.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_process_owned.c");
@@ -40,6 +44,10 @@ fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let source = manifest_dir.join("../common/src/runtime_symbols.rs");
     let content = fs::read_to_string(&source).expect("read runtime_symbols.rs");
+    let signature_source = fs::read_to_string(manifest_dir.join("../compiler/src/codegen/runtime_sffi.rs"))
+        .expect("read compiler runtime SFFI signatures");
+    let canonical_signatures =
+        runtime_signature_scan::runtime_signatures(&signature_source).expect("parse compiler runtime SFFI signatures");
     let runtime_src = manifest_dir.join("src");
     let runtime_c_dir = manifest_dir.join("../../runtime");
     let runtime_symbol_table = env::var_os("CARGO_FEATURE_RUNTIME_SYMBOL_TABLE").is_some();
@@ -100,7 +108,11 @@ fn main() {
             let alias = runtime_symbol_alias(symbol);
             generated.push_str(&format!("        #[link_name = \"{symbol}\"]\n"));
             generated.push_str("        ");
-            generated.push_str(&runtime_symbol_declaration(symbol, &alias));
+            generated.push_str(&runtime_symbol_declaration(
+                symbol,
+                &alias,
+                canonical_signatures.get(symbol),
+            ));
             generated.push('\n');
         }
     }
@@ -128,7 +140,11 @@ fn main() {
 /// called and triggers `clashing_extern_declarations` even when used only as a
 /// linker anchor. Symbols not yet migrated retain the legacy address-anchor
 /// form and are tracked by the SFFI contract inventory.
-fn runtime_symbol_declaration(symbol: &str, alias: &str) -> String {
+fn runtime_symbol_declaration(
+    symbol: &str,
+    alias: &str,
+    canonical: Option<&runtime_signature_scan::RuntimeSignature>,
+) -> String {
     let signature = match symbol {
         "rt_alloc" => "(size: i64) -> *mut u8",
         "rt_free" => "(ptr: *mut u8)",
@@ -142,9 +158,46 @@ fn runtime_symbol_declaration(symbol: &str, alias: &str) -> String {
         "rt_memset" => "(dst: *mut u8, val: i8, n: i64) -> *mut u8",
         "rt_memcpy" => "(dst: *mut u8, src: *const u8, n: i64) -> *mut u8",
         "rt_time_now_nanos" | "rt_time_now_micros" | "rt_time_now_unix_micros" => "() -> i64",
-        _ => "()",
+        _ => return canonical_runtime_symbol_declaration(alias, canonical),
     };
     format!("pub fn {alias}{signature};")
+}
+
+fn canonical_runtime_symbol_declaration(
+    alias: &str,
+    canonical: Option<&runtime_signature_scan::RuntimeSignature>,
+) -> String {
+    let Some(canonical) = canonical else {
+        return format!("pub fn {alias}();");
+    };
+    let params = canonical
+        .params
+        .iter()
+        .enumerate()
+        .map(|(index, ty)| format!("arg{index}: {}", rust_abi_type(ty)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let result = match canonical.returns.as_slice() {
+        [] => String::new(),
+        [ty] => format!(" -> {}", rust_abi_type(ty)),
+        many => {
+            let tuple = many.iter().map(|ty| rust_abi_type(ty)).collect::<Vec<_>>().join(", ");
+            return format!(
+                "#[allow(improper_ctypes)]\n        pub fn {alias}({params}) -> ({tuple});"
+            );
+        }
+    };
+    format!("pub fn {alias}({params}){result};")
+}
+
+fn rust_abi_type(ty: &str) -> &'static str {
+    match ty {
+        "I8" => "i8",
+        "I32" => "i32",
+        "I64" => "i64",
+        "F64" => "f64",
+        _ => panic!("unsupported runtime ABI type {ty}"),
+    }
 }
 
 fn compile_c_runtime_sources() {
