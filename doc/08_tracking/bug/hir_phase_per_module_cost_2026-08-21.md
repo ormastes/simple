@@ -310,3 +310,109 @@ lanes' shard workers resident, so the run could not be carried to
 `compiler.driver.driver` in phase 2/6. The numbers above are therefore a
 controlled single-tree A/B on the isolated mechanism, not a closure measurement.
 Re-measuring driver.spl and bootstrap_main.spl HIR `dt=` remains open.
+
+## Fifth session (2026-08-21): where the 2.7x went, and the completed-registration memo
+
+### The two real-closure profiles, same deployed seed
+
+Both lines below come from the SAME binary
+(`bin/release/x86_64-unknown-linux-gnu/simple`, built from `dee19c5bb80`), so
+they compare TREES, not compilers. `[hir-prof]` is emitted by the seed, which is
+why a tree that predates the profiler commit still produces the line.
+
+| module | run6 tree `5020e8f3f45` | run7 tree `d1fd6255ecd` | ratio |
+|---|---|---|---|
+| `compiler/driver/driver.spl` total | 161,207 ms | 427,283 ms | 2.65x |
+| … imports | 148,777 ms | 402,472 ms | 2.71x |
+| … glob (6 roots, 73 expansions both) | 69,223 ms | 194,639 ms | 2.81x |
+| … enums | 11,265 ms | 22,168 ms | 1.97x |
+| … reg_imported | 9,435 | 8,284 | 0.88x |
+| `app/cli/bootstrap_main.spl` total | 56,371 ms | 66,380 ms | 1.18x |
+| `common/driver_core_types.spl` total | 5,171 ms | 7,049 ms | 1.36x |
+| `cli/bootstrap_identity.spl` total | 272 ms | 220 ms | 0.81x |
+
+Read that shape before blaming any one commit. The blow-up is **not uniform**:
+small modules are flat or faster, and the one huge module got 2.7x worse while
+performing FEWER registrations (9,435 -> 8,284). Whatever changed is superlinear
+in the size of the import closure, not a constant factor added per call — which
+is why the commit-by-commit bisect over the 19 commits in
+`5020e8f3f45..d1fd6255ecd` was started but is not the fastest route to a fix: one
+probe costs ~70 min wall (parse of the real closure alone is ~50 min at
+`--threads 2`), so a 4-probe halving is ~5 h.
+
+### What the RIS split actually names (run7, `driver.spl`)
+
+    callable_deps 412,526 ms / 1,632    declared_dep 410,535 ms / 3,045
+    field_dep     377,261 ms / 3,991    explicit_dep  19,599 ms / 5,764
+    methods       146,273 ms /   784    define        15,297 ms / 1,529
+    qtype 7,522 queries / 5,832 miss
+
+These are INCLUSIVE and nested inside each other, so they do not sum to the
+427 s total; the useful reading is the ordering. `explicit_dep` is the one step
+that already carries a memo (RISFACT) and it is now the cheapest at 3.4 ms/call
+against 5,764 calls — the memo works. Everything above it is the same recursive
+descent re-entered again and again: `field_dep` -> `register_imported_symbol` ->
+the composite's field loop -> `field_dep` …, with `methods` hanging off the same
+node. 78% of qualified-type queries MISS, and a miss is what triggers the
+descent.
+
+### Fix in this session: RISDONE, the completed-registration memo
+
+`register_imported_symbol` is idempotent **within one importer** — every branch
+re-checks `already_bound` / `contains_key` before it writes — but nothing
+remembered that a given tuple had already been registered, so a repeat re-ran
+six linear surface-name scans and re-descended the entire field / method /
+payload subtree beneath it. driver.spl issued 8,284 registrations for a far
+smaller distinct set.
+
+`registered_import_memo` (`hir_lowering/types.spl`) records
+`{declaring module} {imported name} {local name} {materialize_enum}` for
+registrations that **completed**, and the wrapper skips a repeat.
+
+Two properties are deliberate and are what the spec pins:
+
+- **It is not phase-invariant, unlike `explicit_dep_target_memo`.** The body
+  writes into the IMPORTING module's symbol table, so the memo is owned by one
+  importer: `begin_module` clears it (`context_helpers.spl`), and the wrapper
+  independently drops it whenever `module_filename` names a different module.
+  Carrying it across importers would leave the next importer with no binding at
+  all.
+- **A key is recorded only AFTER the body returns, never before.** Marking on
+  entry would have been a free re-entrancy breaker, but it would also mark
+  tuples whose body bailed out early against `imported_type_methods_in_progress`
+  without finishing; those must stay retryable. Cycles keep being broken by the
+  existing guards.
+
+Observable mechanism counters, not wall clocks: `registered_import_skip_count`
+on the lowerer, and `reg_skipped=` next to `reg_imported=` on the `[hir-prof]`
+line. Pinned by `test/01_unit/compiler/hir/hir_import_registration_cost_spec.spl`
+(mirrored in `test/unit/...`), which cannot pass on the pre-fix code.
+
+### Also fixed: the last owner in `SymbolTable.define` (SCOPEIP)
+
+`define` still did `var scope = self.scopes[i]` … `self.scopes[i] = scope`,
+copying a value-type scope row (and its `symbols` Dict) on every one of the
+1,529 defines driver.spl performs. That round trip survived only because
+`self.scopes[i].symbols[name] = v` used to be rejected with *"semantic: invalid
+assignment: complex field access not supported"*. Nested assignment targets are
+supported now (`344f277cc45`) — verified against the deployed seed with a
+10-line probe before the edit — so the row is written in place. The source-shape
+contract in the same spec was updated to pin the new shape and to forbid the old
+round trip.
+
+### Still open
+
+- The bisect table is NOT complete. The 2.7x between the two trees above is
+  measured and reproducible from the two logs, but no single commit in
+  `5020e8f3f45..d1fd6255ecd` has been isolated yet. Prime suspect on reading:
+  `d757f7d70d0` ("freeze import item projections") deleted the re-export ROOT
+  memo (`reexport_root_*`) outright as a correctness fix, which puts the whole
+  re-export walk back on the un-memoized path that `glob` sits on top of — and
+  `glob` is the sub-phase that grew 2.81x. Reinstating a correctly-invalidated
+  version of that memo is the obvious next fix.
+- **Neither fix in this session can be MEASURED on the deployed seed.** The
+  `[hir-prof]` numbers are produced by the compiler doing the work, so a change
+  to `src/compiler/**` shows up only once a compiler built from the patched tree
+  is deployed. The evidence here is therefore the counter-based spec plus the
+  mechanism argument; the wall-clock re-measure is owed after the next seed
+  deploy.

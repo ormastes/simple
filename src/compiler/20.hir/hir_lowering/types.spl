@@ -231,6 +231,25 @@ class HirLowering:
     # re-emitted per importer so diagnostics are unchanged).
     explicit_dep_target_memo: {text: i64}
     explicit_dep_item_memo: {text: text}
+    # RISDONE (2026-08-21): completed-registration memo for
+    # `register_imported_symbol`, keyed on
+    # `{declaring module} {imported name} {local name} {materialize_enum}`.
+    # Unlike `explicit_dep_target_memo` this is NOT phase-invariant: the body
+    # writes into the IMPORTING module's symbol table, so the memo is owned by
+    # one importer and is cleared the moment `module_filename` names a
+    # different module (see `registered_import_memo_owner`). Within one
+    # importer the registration is idempotent -- every branch re-checks
+    # `already_bound` / `contains_key` before it writes -- so a repeat of the
+    # same key can only redo the six surface name scans and re-descend the
+    # same field/method subtree. driver.spl issued 8,284 registrations for a
+    # far smaller distinct set; that re-descent is what made field_dep cost
+    # 377 s of a 427 s module (hir_phase_per_module_cost_2026-08-21.md).
+    registered_import_memo: {text: bool}
+    # Importer that `registered_import_memo` describes ("" = none yet).
+    registered_import_memo_owner: text
+    # Registrations skipped by the memo. Observable mechanism counter: a spec
+    # pins that repeating one (module, name, local, enum) query registers once.
+    registered_import_skip_count: i64
     # Sweeps actually performed. Observable mechanism counter for the memo
     # above; a spec pins that N importers of one surface cause exactly one
     # sweep per (surface, dependency) pair.
@@ -294,6 +313,7 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
     val empty_surface_index_by_name: {text: i64} = {}
     val empty_explicit_dep_target_memo: {text: i64} = {}
     val empty_explicit_dep_item_memo: {text: text} = {}
+    val empty_registered_import_memo: {text: bool} = {}
     val empty_reexport_root_surface_indices: [i64] = []
     val empty_imported_type_methods_in_progress: [text] = []
     val empty_reexport_root_wanted: [text] = []
@@ -350,6 +370,9 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         explicit_dep_target_memo: empty_explicit_dep_target_memo,
         explicit_dep_item_memo: empty_explicit_dep_item_memo,
         explicit_dep_scan_count: 0,
+        registered_import_memo: empty_registered_import_memo,
+        registered_import_memo_owner: "",
+        registered_import_skip_count: 0,
         reexport_root_surface_indices: empty_reexport_root_surface_indices,
         reexport_root_wanted: empty_reexport_root_wanted,
         reexport_root_found: empty_reexport_root_found,

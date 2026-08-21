@@ -23,6 +23,7 @@ use std.spec.{describe, it, expect}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.{hirlowering_for_module}
 use compiler.hir.hir_lowering._Items.module_reexport_materialization.*
+use compiler.hir.hir_lowering._Items.module_import_registration.*
 use compiler.hir.hir_lowering._Items.module_lowering.*
 use compiler.hir.hir_lowering.module_surface.{
     ModuleSurface,
@@ -149,10 +150,14 @@ describe("HIR import registration resolution facts", fn():
         # the first block from 1818 ms to 904 ms.
         #
         # A source-shape contract rather than a clone counter because the
-        # counters live in the Rust seed and are not reachable from Simple. The
-        # remaining `var scope` round trip cannot be removed in Simple today:
-        # `self.scopes[i].symbols[name] = v` is rejected with
-        # "semantic: invalid assignment: complex field access not supported".
+        # counters live in the Rust seed and are not reachable from Simple.
+        #
+        # SCOPEIP (2026-08-21): the LAST owner is gone too. The `var scope`
+        # round trip survived only because `self.scopes[i].symbols[name] = v`
+        # used to be rejected with "semantic: invalid assignment: complex field
+        # access not supported"; nested assignment targets are supported now
+        # (344f277cc45), so the scope row is written in place and `define` no
+        # longer reads a value-type row out and writes it back.
         val source = file_read("src/compiler/20.hir/hir_types.spl")
         val start = source.index_of("me define(name: text, kind: SymbolKind")
         expect(start).to_be_greater_than(0)
@@ -160,6 +165,50 @@ describe("HIR import registration resolution facts", fn():
             "me bind_qualified_function(", start))
         expect(body.contains("var scope_syms = scope.symbols")).to_equal(false)
         expect(body.contains("self.root_scope_symbols = scope_syms")).to_equal(false)
-        expect(body).to_contain("scope.symbols[name] = raw_id")
+        expect(body.contains("var scope = self.scopes[self.current_scope.id]")).to_equal(false)
+        expect(body.contains("self.scopes[self.current_scope.id] = scope")).to_equal(false)
+        expect(body).to_contain("self.scopes[self.current_scope.id].symbols[name] = raw_id")
+    )
+
+    it("registers one (surface, name, local, enum) tuple once per importer", fn():
+        # RISDONE (2026-08-21). `register_imported_symbol` is idempotent within
+        # one importer -- every branch re-checks `already_bound` before it
+        # writes -- but a repeat still re-ran six surface name scans and
+        # re-descended the whole field / method / payload subtree under it.
+        # driver.spl issued 8,284 registrations for a far smaller distinct set,
+        # and 377 s of its 427 s HIR was inside the field-dependency descent.
+        # Counter, not wall clock: it cannot pass on the pre-fix code.
+        val registry = import_registry()
+        var lowering = hirlowering_for_module("pkg/imp1.spl", registry)
+        val span = Span.empty()
+        val decl = registry.surfaces[0]
+        lowering.register_imported_symbol(decl, "pkg.decl", "Widget", "Widget", span, false)
+        expect(lowering.registered_import_skip_count).to_equal(0)
+        lowering.register_imported_symbol(decl, "pkg.decl", "Widget", "Widget", span, false)
+        lowering.register_imported_symbol(decl, "pkg.decl", "Widget", "Widget", span, false)
+        expect(lowering.registered_import_skip_count).to_equal(2)
+        # A different local name, a different imported name, and a different
+        # materialize_enum flag are all DIFFERENT registrations: each writes a
+        # different binding, so none of them may be skipped.
+        lowering.register_imported_symbol(decl, "pkg.decl", "Widget", "pkg.decl::Widget", span, false)
+        lowering.register_imported_symbol(decl, "pkg.decl", "Other", "Other", span, false)
+        lowering.register_imported_symbol(decl, "pkg.decl", "Widget", "Widget", span, true)
+        expect(lowering.registered_import_skip_count).to_equal(2)
+    )
+
+    it("never carries a completed registration across importers", fn():
+        # The safety argument. Unlike `explicit_dep_target_memo` (a pure
+        # function of the frozen registry) this memo records work done against
+        # ONE importer's symbol table, which `begin_module` wipes. Carrying it
+        # over would leave the next importer with no binding at all.
+        val registry = import_registry()
+        var lowering = hirlowering_for_module("pkg/imp1.spl", registry)
+        val span = Span.empty()
+        val decl = registry.surfaces[0]
+        lowering.register_imported_symbol(decl, "pkg.decl", "Widget", "Widget", span, false)
+        lowering.begin_module("pkg/imp2.spl")
+        expect(lowering.registered_import_memo.len()).to_equal(0)
+        lowering.register_imported_symbol(decl, "pkg.decl", "Widget", "Widget", span, false)
+        expect(lowering.registered_import_skip_count).to_equal(0)
     )
 )

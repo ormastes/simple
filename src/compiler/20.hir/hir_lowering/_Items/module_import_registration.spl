@@ -9,7 +9,7 @@ use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types.{ParserFunction, ImportItem, Param}
 use compiler.frontend.parser_types_expr.*
-use compiler.hir.hir_lowering.hir_phase_profile.{hir_phase_profile_count_imported_symbol, hir_phase_profile_now, hir_phase_profile_add, HIR_PROF_RIS_FIELD_DEP, HIR_PROF_RIS_SIGTYPE, HIR_PROF_RIS_DEFINE}
+use compiler.hir.hir_lowering.hir_phase_profile.{hir_phase_profile_count_imported_symbol, hir_phase_profile_count_imported_symbol_skip, hir_phase_profile_now, hir_phase_profile_add, HIR_PROF_RIS_FIELD_DEP, HIR_PROF_RIS_SIGTYPE, HIR_PROF_RIS_DEFINE}
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
@@ -85,6 +85,46 @@ impl HirLowering:
             imported_mod, dependency, import_span, materialize_enum)
 
     me register_imported_symbol(imported_mod: ModuleSurface, imported_mod_name: text, imported_name: text, local_name: text, import_span: Span, materialize_enum: bool):
+        # RISDONE (2026-08-21): registering one (declaring module, imported
+        # name, local name, materialize_enum) tuple is idempotent within one
+        # IMPORTER -- every branch below re-checks `already_bound` /
+        # `contains_key` before it writes -- but a repeat still re-runs the six
+        # surface name scans and re-descends the whole field / method / payload
+        # subtree underneath it. That re-descent is the cost the RIS split
+        # located: driver.spl spent 377 s of its 427 s HIR inside
+        # `materialize_imported_field_dependency` while issuing 8,284
+        # registrations for a much smaller distinct set
+        # (doc/08_tracking/bug/hir_phase_per_module_cost_2026-08-21.md).
+        #
+        # The memo is owned by ONE importer and dropped as soon as
+        # `module_filename` names a different module: the body writes into the
+        # importing module's symbol table, so unlike `explicit_dep_target_memo`
+        # (a pure function of the frozen registry) it is NOT phase-invariant
+        # and must never be shared across importers.
+        #
+        # A key is recorded only AFTER the body returns, never before. Marking
+        # on entry would have been a cheap re-entrancy breaker, but it would
+        # also mark tuples whose body bailed out early against an in-progress
+        # guard (`imported_type_methods_in_progress`) without finishing --
+        # those must stay retryable, exactly as they are today. Cycles keep
+        # being broken by the existing guards; this memo only removes repeats
+        # of a registration that already ran to completion.
+        if self.registered_import_memo_owner != self.module_filename:
+            val fresh_registered_import_memo: {text: bool} = {}
+            self.registered_import_memo = fresh_registered_import_memo
+            self.registered_import_memo_owner = self.module_filename
+        val registered_enum_tag = if materialize_enum: " E" else: " -"
+        val registered_key = imported_mod.module_name + " " + imported_name + " " + local_name + registered_enum_tag
+        if self.registered_import_memo.contains_key(registered_key):
+            self.registered_import_skip_count = self.registered_import_skip_count + 1
+            hir_phase_profile_count_imported_symbol_skip()
+            return
+        self.register_imported_symbol_inner(
+            imported_mod, imported_mod_name, imported_name, local_name,
+            import_span, materialize_enum)
+        self.registered_import_memo[registered_key] = true
+
+    me register_imported_symbol_inner(imported_mod: ModuleSurface, imported_mod_name: text, imported_name: text, local_name: text, import_span: Span, materialize_enum: bool):
         hir_phase_profile_count_imported_symbol()
         val composite_position = module_surface_name_position(
             imported_mod.composite_names, imported_name)
