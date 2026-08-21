@@ -66,3 +66,23 @@ statement-position `unsafe` parser needs the same argument-list branch, and the
 parsed capability list needs to reach `HirExprKind.UnsafeBlock` — see the sibling
 record `unsafe_capabilities_not_carried_into_hir_2026-08-21.md`, which is the
 other half of the same gap.
+
+## Resolution (2026-08-21)
+
+Status: RESOLVED (pending spec run — see evidence below).
+
+- `src/compiler/10.frontend/core/parser_stmts.spl`: the statement-position
+  `unsafe` / `danger` branch now also accepts `unsafe(reason: "...",
+  capabilities: [a, b]):` — same argument grammar as the declaration-level
+  `@unsafe(...)`. Anything else after `unsafe(` rolls back to the previous
+  behaviour (an ordinary expression statement), so `unsafe(x)` calls are unchanged.
+- `src/compiler/10.frontend/core/_AstExpr/nodes.spl`: `expr_unsafe_block_with_caps`
+  stores the names on the flat node's S slot; `_FlatAstBridge/convert_nodes.spl`
+  splits them back out; `ExprKind.UnsafeBlock` is now `UnsafeBlock(Block, [text])`
+  (`parser_types_expr.spl`).
+- Unknown capability names are a lowering diagnostic (see the sibling record).
+
+Evidence: `test/01_unit/compiler/semantics/any_escape/unsafe_block_capabilities_spec.spl`
+— scenario "parses the block form into HirExprKind.UnsafeBlock carrying its
+capabilities" (fixture `test/fixtures/any_escape/block_form_type_erasure.spl`),
+which pre-fix returned `["<none>"]` because the statement was not an UnsafeBlock.

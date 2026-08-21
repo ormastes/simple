@@ -53,3 +53,31 @@ textual, every finding is still decided on resolved HIR types.
    `unknown_unsafe_capability_names` as a diagnostic.
 4. Delete `AnyEscapeProfile.type_erasure_functions` and
    `granted_type_erasure_functions` once (1)-(3) land.
+
+## Resolution (2026-08-21)
+
+Status: RESOLVED for the BLOCK form (pending spec run — see evidence below).
+
+`HirExprKind.UnsafeBlock(body)` keeps its shape (40.mono/50.mir match on it by
+arity and were out of scope); instead the body gains a trailing defaulted field,
+`HirBlock.unsafe_caps: [text] = []` (`20.hir/hir_definitions.spl`), set by
+`hir_lowering/_Expressions/expression_core.spl` when lowering
+`ExprKind.UnsafeBlock(body, caps)`. Unknown names are reported there through
+`unknown_unsafe_capability_names` + `valid_unsafe_capability_names_help`
+(fix item 3) — never silently dropped.
+
+`35.semantics/any_escape/checker.spl` now reads the grant off the node
+(`te_block_depth`, fed by `unsafe_capability_set_contains(body.unsafe_caps,
+UnsafeCapability.TypeErasure)`), so "Any inside a type_erasure region" is
+decided from HIR with an EMPTY profile grant list.
+
+Left open (deliberately, minimal diff): fix items 1b/4 — the ANNOTATION form
+`@unsafe(...)` on a declaration is still not carried onto `HirFunction`, so
+`AnyEscapeProfile.type_erasure_functions` stays for that spelling, and
+`40.mono/monomorphize/type_subst.spl` rebuilds `HirBlock` without copying
+`unsafe_caps` (the checker runs before mono, so this does not affect it).
+
+Evidence: `test/01_unit/compiler/semantics/any_escape/unsafe_block_capabilities_spec.spl`
+(6 scenarios: type_erasure block granted with no profile grant; raw_ptr-only
+block still an origin; granted block returning its Any is an escape not an
+origin; misspelled capability grants nothing; bare `unsafe:` carries `[]`).

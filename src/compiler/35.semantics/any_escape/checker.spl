@@ -18,6 +18,7 @@
 # phase after HIR type resolution. See the module report for the wiring point.
 
 use compiler.hir.hir_definitions.*
+use compiler.common.assurance.unsafe_capabilities.{UnsafeCapability, unsafe_capability_set_contains}
 use compiler.hir.hir_types.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.semantics.any_escape.types.{
@@ -48,6 +49,9 @@ class AnyEscapeState:
     function_name: text
     # Lexical `unsafe:` nesting depth of the node being visited.
     unsafe_depth: i64
+    # Nesting depth of enclosing `unsafe(capabilities: [type_erasure]):` blocks
+    # — the grant read off `HirBlock.unsafe_caps`, not off the profile.
+    te_block_depth: i64
     # True when the CURRENT function's unsafe blocks carry `type_erasure`.
     te_granted: bool
     any_symbols: [i64]
@@ -68,6 +72,7 @@ fn any_escape_state_new(symbols: SymbolTable, module_name: text) -> AnyEscapeSta
         module_name: module_name,
         function_name: "",
         unsafe_depth: 0,
+        te_block_depth: 0,
         te_granted: false,
         any_symbols: [],
         live_any: 0,
@@ -151,7 +156,7 @@ fn any_in_type_erasure_region(self: AnyEscapeState) -> bool:
     `type_erasure` capability on it. An `unsafe:` block that only asked for
     `raw_ptr` does not license erasure (§8.1).
     """
-    self.unsafe_depth > 0 and self.te_granted
+    self.unsafe_depth > 0 and (self.te_granted or self.te_block_depth > 0)
 
 # ============================================================================
 # Diagnostic emission
@@ -224,8 +229,16 @@ fn any_check_expr(self: AnyEscapeState, profile: AnyEscapeProfile, e: HirExpr):
 
     match e.kind:
         case UnsafeBlock(body):
+            # The block form carries its own grant on the HIR node (§8.1):
+            # `unsafe(capabilities: [type_erasure]):`. Only that capability
+            # licenses erasure; `raw_ptr` alone does not.
+            val te_here = unsafe_capability_set_contains(body.unsafe_caps, UnsafeCapability.TypeErasure)
             self.unsafe_depth = self.unsafe_depth + 1
+            if te_here:
+                self.te_block_depth = self.te_block_depth + 1
             any_check_block(self, profile, body)
+            if te_here:
+                self.te_block_depth = self.te_block_depth - 1
             self.unsafe_depth = self.unsafe_depth - 1
 
         case Return(value):
@@ -608,6 +621,7 @@ fn any_check_function(self: AnyEscapeState, profile: AnyEscapeProfile, f: HirFun
     self.any_symbols = []
     self.live_any = 0
     self.unsafe_depth = 0
+    self.te_block_depth = 0
     self.depth = 0
 
     # A public signature that mentions Any is an origin AND a guaranteed

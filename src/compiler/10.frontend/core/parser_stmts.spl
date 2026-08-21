@@ -7,6 +7,7 @@
 use compiler.core.tokens.{tok_kind_name, keyword_lookup}
 use compiler.core.tokens.{TOK_INT_LIT, TOK_STRING_LIT}
 use compiler.core.tokens.{TOK_IDENT}
+use compiler.core.tokens.{TOK_KW_DYN}
 use compiler.core.tokens.{TOK_KW_VAL, TOK_KW_VAR, TOK_KW_FN}
 use compiler.core.tokens.{TOK_KW_IF, TOK_KW_ELIF, TOK_KW_ELSE}
 use compiler.core.tokens.{TOK_KW_FOR, TOK_KW_WHILE, TOK_KW_IN, TOK_KW_LOOP}
@@ -39,12 +40,13 @@ use compiler.core.ast.{expr_int_lit, expr_float_lit}
 use compiler.core.ast.{expr_if_expr, expr_for_expr, expr_while_expr, expr_match_expr}
 use compiler.core.ast.{expr_pass, expr_pass_with_msg, expr_pass_todo, expr_pass_do_nothing, expr_pass_dn}
 use compiler.core.ast.{expr_unit, expr_block, expr_lambda}
-use compiler.core.ast.{expr_unsafe_block}
+use compiler.core.ast.{expr_unsafe_block, expr_unsafe_block_with_caps}
 use compiler.core.ast.{expr_method_call}
 use compiler.core.ast.{EXPR_CAST, expr_get_int}
 use compiler.core.types.{named_type_name, TYPE_NAMED_BASE}
 use compiler.frontend.desugar.placeholder_lambda.{set_placeholder_transform_suppressed}
 use compiler.frontend.core.lexer.{lex_token_start_get, lex_token_end_get, lex_source_char_at}
+use compiler.frontend.core.lexer.{lex_source_len}
 use compiler.frontend.core.lexer.{lex_pop_indent, lex_enable_forced_indentation, lex_disable_forced_indentation}
 use compiler.core.ast.{expr_get_tag, expr_get_str, expr_get_left, expr_get_args, expr_set_span}
 use compiler.core.ast.{expr_get_arg_names, expr_call_args_set}
@@ -697,6 +699,54 @@ fn parse_statement() -> i64:
                 val unsafe_body = parse_block()
                 lex_snapshot_commit(uns_snap)
                 return stmt_expr_stmt(expr_unsafe_block(unsafe_body, 0), 0)
+            if par_kind_get() == TOK_LPAREN:
+                # `unsafe(reason: "...", capabilities: [type_erasure, ...]):`
+                # — the capability-scoped block form (hardening plan §8.1).
+                # Same argument grammar as the declaration-level `@unsafe(...)`
+                # in _ParserDecls/enum_module_body.spl; the reason is accepted
+                # and the capability names are carried on the block node.
+                var uns_caps: [text] = []
+                var uns_ok = true
+                parser_advance()
+                while par_kind_get() != TOK_RPAREN and par_kind_get() != TOK_EOF:
+                    parser_skip_newlines()
+                    if par_kind_get() != TOK_IDENT:
+                        uns_ok = false
+                        break
+                    val uns_arg = par_text_get()
+                    parser_advance()
+                    if par_kind_get() != TOK_COLON:
+                        uns_ok = false
+                        break
+                    parser_advance()
+                    if uns_arg == "reason" and par_kind_get() == TOK_STRING_LIT:
+                        parser_advance()
+                    elif uns_arg == "capabilities" and par_kind_get() == TOK_LBRACKET:
+                        parser_advance()
+                        while par_kind_get() != TOK_RBRACKET and par_kind_get() != TOK_EOF:
+                            if par_kind_get() == TOK_IDENT:
+                                uns_caps.push(par_text_get())
+                            elif par_kind_get() != TOK_COMMA:
+                                uns_ok = false
+                                break
+                            parser_advance()
+                        if par_kind_get() != TOK_RBRACKET:
+                            uns_ok = false
+                            break
+                        parser_advance()
+                    else:
+                        uns_ok = false
+                        break
+                    parser_skip_newlines()
+                    if par_kind_get() == TOK_COMMA:
+                        parser_advance()
+                if uns_ok and par_kind_get() == TOK_RPAREN:
+                    parser_advance()
+                    if par_kind_get() == TOK_COLON:
+                        parser_advance()
+                        val caps_body = parse_block()
+                        lex_snapshot_commit(uns_snap)
+                        return stmt_expr_stmt(expr_unsafe_block_with_caps(caps_body, uns_caps, 0), 0)
             lex_snapshot_rollback(uns_snap)
             parser_tok_restore(uns_tok_nums, uns_tok_text)
         if ident_text == "todo":
@@ -1460,6 +1510,45 @@ fn parse_match_stmt() -> i64:
 # expr_match_expr, a value-producing match, e.g. `val r = match n: ...`).
 # Returns (scrutinee_expr_id, arm_indices) so each caller only differs in
 # which AST constructor it wraps the result in.
+# Recognizes `complete <ident>` / `dyn <ident>` in match-pattern position and
+# returns the marker-call expression id, or -1 when the current tokens are not
+# a region arm (in which case NOTHING has been consumed).
+fn parse_match_region_marker() -> i64:
+    val k = par_kind_get()
+    var marker = ""
+    if k == TOK_KW_DYN:
+        marker = "__dyn_region"
+    elif k == TOK_IDENT and par_text_get() == "complete":
+        marker = "__complete_region"
+    else:
+        return 0 - 1
+    if not parser_region_binder_follows():
+        return 0 - 1
+    parser_advance()
+    val binder = par_text_get()
+    parser_advance()
+    expr_call(expr_ident(marker, 0), [expr_ident(binder, 0)], 0)
+
+# True when the token after the current one is an identifier (the region
+# binder). Raw-source lookahead, the same technique the soft-keyword decl
+# probes in _ParserDecls/enum_module_body.spl use, because the parser has no
+# general two-token peek.
+fn parser_region_binder_follows() -> bool:
+    var pos = lex_token_end_get()
+    val source_len = lex_source_len()
+    var saw_space = false
+    while pos < source_len:
+        val ch = lex_source_char_at(pos)
+        if ch == " " or ch == "\t":
+            saw_space = true
+            pos = pos + 1
+            continue
+        break
+    if not saw_space or pos >= source_len:
+        return false
+    val c = lex_source_char_at(pos)
+    (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or c == "_"
+
 fn parse_match_arms_common() -> (i64, [i64]):
     val scrutinee = parse_expr()
     # Enable forced indentation BEFORE consuming the ':' so the newline after
@@ -1561,7 +1650,23 @@ fn parse_match_arms_common() -> (i64, [i64]):
             #   match_arm_underscore_subpattern_becomes_lambda_2026-08-01.md
             var patterns: [i64] = []
             val ph_prev = set_placeholder_transform_suppressed(true)
-            patterns.push(parse_expr())
+            # `case complete b:` / `case dyn b:` region arms (§2 of
+            # doc/05_design/compiler/hardening/critical_completeness_design_2026-08-21.md).
+            # Patterns are parsed with the general EXPRESSION parser (see
+            # convert_flat_pattern's docstring), and `complete b` / `dyn b` are
+            # two juxtaposed tokens that no expression grammar accepts -- so
+            # they are recognized HERE and lowered to a marker call
+            # `__complete_region(b)` / `__dyn_region(b)`, which
+            # convert_flat_pattern turns into PatternKind.CompleteRegion /
+            # DynRegion. `complete` stays a SOFT keyword (ordinary identifier
+            # everywhere else); `dyn` is already TOK_KW_DYN. Both require an
+            # IDENT binder immediately after, so a plain `case complete:`
+            # matching a variant named `complete` is unaffected.
+            val region_marker = parse_match_region_marker()
+            if region_marker >= 0:
+                patterns.push(region_marker)
+            else:
+                patterns.push(parse_expr())
 
             # Check for pipe separator and collect additional patterns
             # Support multi-line patterns by skipping newlines/indents before pipes

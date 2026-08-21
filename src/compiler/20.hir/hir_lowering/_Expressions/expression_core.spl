@@ -4,6 +4,7 @@ use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types_expr.*
 use compiler.common.diagnostics.span.{Span}
+use compiler.common.assurance.unsafe_capabilities.{unknown_unsafe_capability_names, valid_unsafe_capability_names_help}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering._Expressions.expression_support.{hir_expr_kind_disc, is_tuple_positional_field, parse_tuple_field_index, primitive_cast_type_kind, _hir_expr_symbol_or_invalid}
 
@@ -663,8 +664,17 @@ impl HirLowering:
                 HirExprKind.NogradBlock(self.lower_hir_block(body))
 
             # Unsafe block for raw pointer ops, SFFI, inline assembly
-            case ExprKind.UnsafeBlock(body):
-                HirExprKind.UnsafeBlock(self.lower_hir_block(body))
+            # `unsafe(capabilities: [...]):` — the capability names ride on the
+            # lowered body (`HirBlock.unsafe_caps`) so 35.semantics can ask
+            # "does THIS region carry type_erasure?" without a source lookup.
+            # Unknown names are a diagnostic here, never silently dropped.
+            case ExprKind.UnsafeBlock(body, caps):
+                val unknown_caps = unknown_unsafe_capability_names(caps)
+                if unknown_caps.len() > 0:
+                    self.error("unknown unsafe capability `" + unknown_caps[0] + "`; " + valid_unsafe_capability_names_help(), e.span)
+                var unsafe_hir_body = self.lower_hir_block(body)
+                unsafe_hir_body.unsafe_caps = caps
+                HirExprKind.UnsafeBlock(unsafe_hir_body)
 
             # Inline assembly
             case ExprKind.AsmBlock(asm_node):
