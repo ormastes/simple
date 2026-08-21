@@ -78,9 +78,9 @@ codec of several thousand.
 
 ### Two caveats that must not be skipped
 - **The bridge half is not cacheable by this design.** A flat-AST cache hit
-  still runs `flat_ast_to_module`. If the bridge is the dominant half of per-file
-  cost, the cache's ceiling is low. Measuring this split is the gate on the whole
-  design (see Measurement below).
+  still runs `flat_ast_to_module`. This was the gate on the whole design and it
+  is now **ANSWERED**: the bridge is only 1-4% of per-file cost, so the ceiling
+  is ~96%. See Measurement below.
 - **Dual store under `SIMPLE_BOOTSTRAP`.** decl/stmt/expr pools mirror into env
   vars (`decl_nodes.spl:154-200`, `ast_decl_prefer_arena` /
   `ast_decl_env_mirror_enabled`). A restore must either run arena-preferred or
@@ -123,12 +123,41 @@ Example (3-module fixture, per-file parse cost now self-reporting):
 ```
 
 ### Parse-vs-bridge split
-Measured with `SIMPLE_COMPILER_TRACE=1`, which already emits all three needed
-boundary markers with no source edits:
-`[frontend] parse_and_build:start` -> `[flat-bridge] path=` (start of
-`flat_ast_to_module`) -> `[frontend] parse_and_build:done`.
+**RESULT (2026-08-21): the bridge is only 1-4% of per-file cost. The flat-AST
+cache design has a ~96% ceiling and is worth building.**
 
-**Result: NOT MEASURABLE from outside the process. Do not retry the obvious way.**
+Measured with `SIMPLE_PARSE_PHASE_PROFILE=1`, the six-phase profile the
+parser-perf lane landed in `module_assembly.spl:1058-1088` (which already
+supersedes the two markers this record originally asked for). All values are
+microseconds, as emitted:
+
+| file | lines | parse_module_body | interp | placeholder | desugar_coll | bridge | total | bridge % |
+|---|---|---|---|---|---|---|---|---|
+| `driver_types.spl` | 1199 | 66.06 s | 16.07 s | 12.07 s | 0.27 s | **3.90 s** | 98.4 s | **4.0%** |
+| `compiler/hir/hir.spl` | — | 0.95 s | ~0 | ~0 | ~0 | **0.025 s** | 0.98 s | **2.5%** |
+| `common/driver_core_types.spl` | — | 0.69 s | ~0 | ~0 | ~0 | **0.010 s** | 0.70 s | **1.4%** |
+
+`coverage_inv` is negligible everywhere (tens of microseconds).
+
+Consequences:
+- **A flat-AST cache would eliminate ~96% of per-file front-end cost.** The
+  non-cacheable half (`flat_ast_to_module`, which still runs on every hit) is the
+  small half after all. This removes the doubt that previously gated the design.
+- **It is also sound by construction**, which the alternatives are not: a hit
+  reproduces the identical `ParserModule`, so surfaces, HIR, and type checking
+  all still run normally. It needs no dependency-invalidation prerequisite and
+  silences no diagnostics — unlike skipping HIR/MIR on an object-cache hit.
+- Secondary finding for the parser-perf lane: on `driver_types.spl`,
+  `expand_string_interpolations` (16.1 s) + the placeholder passes (12.1 s) are
+  **29%** of the file's cost, versus 67% for `parse_module_body`. Those two
+  passes are worth profiling in their own right.
+- Also visible via the new `dt=` instrumentation: that 279-file closure spent
+  **57.6 s before parse even began** (source load + closure + lint), which is not
+  nothing and is not currently attributed to any phase.
+
+### Earlier failed attempts (kept so they are not repeated)
+**These external-timestamping routes do NOT work. Use `SIMPLE_PARSE_PHASE_PROFILE=1`
+instead — it computes deltas inside the process, so output buffering is irrelevant.**
 Three attempts failed, each for a different reason, and the last one is
 fundamental:
 
@@ -148,13 +177,9 @@ fundamental:
    timestamp on it measures the flush, not the work. (This also explains why
    `[build]` receipts stream in a stage log while traces do not.)
 
-Consequence: getting the split requires a **flushed, self-timestamped marker
-emitted from inside the frontend** — one `log_phase`-style line (it already
-carries a monotonic `+Nms` and is flushed) on either side of
-`flat_ast_to_module` in `module_assembly.spl:1080`. That is a ~4-line additive
-change in `src/compiler/10.frontend/**`, which was out of scope for this session
-because another lane was actively working in that tree. It is the first thing to
-do before writing any codec.
+Consequence: the split can only be measured from **inside** the process. That is
+exactly what `SIMPLE_PARSE_PHASE_PROFILE=1` does, and the numbers above come
+from it.
 
 ## Moving the object-cache lookup earlier (the highest-value change)
 
@@ -224,12 +249,18 @@ and **silent** one. Therefore:
 parse sharding are designed and sited above but not implemented: the codec must
 live in `src/compiler/10.frontend/core/**`, which was out of scope for this
 session, and the parse-vs-bridge split that gates the design's value was still
-being measured when the session ended. Implement in this order:
-1. Add the two flushed `log_phase` markers around `flat_ast_to_module`
-   (`module_assembly.spl:1080`) and measure the split. If the bridge dominates,
-   this design is not worth 1000 lines and the effort belongs in per-file parse
-   cost instead.
-2. Land the flat-pool codec alone, gated by round-trip equality over the whole
-   `src/app` closure, before any cache or shard mode is wired.
-3. Then the per-module front-end cache at the `:379` hook.
-4. Then `--parse-shard i/N` in `native_build_worker.spl` + parent fan-out.
+being measured when the session ended. **Recommended order, REVISED by the 1-4% bridge measurement.** The flat-AST
+cache should come FIRST, ahead of moving the object-cache lookup earlier:
+
+1. **Flat-AST per-module cache** (~700-1000 lines + round-trip gate). Highest
+   value and *lowest risk* of the three: ~96% of per-file front-end cost, and
+   sound by construction because a hit rebuilds the identical `ParserModule`, so
+   HIR and type checking still run and no diagnostic is silenced. Land the codec
+   alone first, gated by round-trip equality over the whole `src/app` closure,
+   before wiring any cache or shard mode.
+2. **Then** the per-module cache wiring at the `:379` hook, and sharding.
+3. **Only then** skipping HIR/MIR on an object-cache hit — and only together
+   with dependency-aware invalidation, per the prerequisite above. It is the
+   riskiest of the three and, now that parse can be made ~25x cheaper, no longer
+   the biggest win.
+
