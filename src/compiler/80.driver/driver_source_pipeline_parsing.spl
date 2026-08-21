@@ -553,14 +553,27 @@ impl CompilerDriver:
                 return (self.ctx, false)
             log_build_progress("surface_freeze", "surfaces", -1, -1,
                 "complete", 1, 6, 0, 0, "running")
-            var entry_ctx: CompileContext = self.ctx
-            entry_ctx.modules = entry_modules
-            entry_ctx.sources = unique_entry_sources
-            entry_ctx.module_surfaces = Some(entry_surfaces_result.unwrap())
+            # Commit the entry-closure result IN PLACE and derive the verdict
+            # from the authoritative scalar field, exactly as
+            # parse_all_streaming_surfaces_in_place_impl already does. The
+            # previous form staged the commit into a `var entry_ctx` local and
+            # returned the verdict as a negated has_errors() receiver call;
+            # under native codegen that receiver call on a freshly reassigned struct
+            # local read a stale snapshot and reported errors that were never
+            # recorded, so `compile`/`native-build` on a 3-line hello world
+            # failed phase 2 with an EMPTY error list ("[ERROR] phase 2 FAILED"
+            # and nothing else). The same defect class is already recorded on
+            # the streaming path and on `errors_at` in driver_types.spl.
+            # doc/08_tracking/bug/stage3_native_build_and_compile_segv_on_hello_world_2026-08-18.md
+            self.ctx.modules = entry_modules
+            self.ctx.sources = unique_entry_sources
+            self.ctx.module_surfaces = Some(entry_surfaces_result.unwrap())
             if entry_sources.len() == 0:
-                entry_ctx.add_error(
+                self.ctx.add_error(
                     "native entry source not found: {native_entry}")
-            return (entry_ctx, not entry_ctx.has_errors())
+            if (rt_env_get("SIMPLE_TRACE_PHASE2") ?? "") != "":
+                print "[phase2] entry-closure verdict error_count={self.ctx.error_count_value} errors_len={self.ctx.errors.len()}"
+            return (self.ctx, self.ctx.error_count_value == 0)
         if ((rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and
             (rt_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1"):
             var bootstrap_modules: Dict<text, ParserModule> = self.ctx.modules
@@ -626,12 +639,11 @@ impl CompilerDriver:
                         layer_dag_edges: ""
                     )
                 boot_idx = boot_idx + 1
-            var bootstrap_parse_ctx: CompileContext = self.ctx
-            bootstrap_parse_ctx.modules = bootstrap_modules
-            return (
-                bootstrap_parse_ctx,
-                not bootstrap_parse_ctx.has_errors()
-            )
+            # Same defect class as the entry-closure verdict above: commit in
+            # place and read the authoritative scalar, never `has_errors()` on
+            # a freshly reassigned struct local.
+            self.ctx.modules = bootstrap_modules
+            return (self.ctx, self.ctx.error_count_value == 0)
 
         var parsed_modules: Dict<text, ParserModule> = self.ctx.modules
         # M1b wiring (doc/03_plan/compiler/forwarding/
@@ -718,9 +730,11 @@ impl CompilerDriver:
             lcv_idx = lcv_idx + 1
 
         log_debug("parsing done")
-        var parsed_all_ctx: CompileContext = self.ctx
-        parsed_all_ctx.modules = parsed_modules
-        (parsed_all_ctx, not parsed_all_ctx.has_errors())
+        # Same defect class as the entry-closure verdict above: commit in place
+        # and read the authoritative scalar, never `has_errors()` on a freshly
+        # reassigned struct local.
+        self.ctx.modules = parsed_modules
+        (self.ctx, self.ctx.error_count_value == 0)
 
     fn parse_source(source: SourceFile) -> ParserModule:
         print "[parse_source] start {source.path} module {source.module_name} len {source.content.len()}"

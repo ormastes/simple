@@ -1,0 +1,66 @@
+# Regression + defect-CLASS spec for
+# doc/08_tracking/bug/stage3_native_build_and_compile_segv_on_hello_world_2026-08-18.md
+# (the phase-2 half: `[ERROR] phase 2 FAILED` on a 3-line hello world with an
+# EMPTY error list).
+#
+# @cover src/compiler/80.driver/driver_source_pipeline_parsing.spl
+# @cover src/compiler/80.driver/driver_orchestration.spl
+#
+# THE CLASS, stated once: under the pure-Simple NATIVE codegen used for the
+# self-hosted bootstrap binary, a `fn`-receiver method call (immutable
+# receiver) on a struct local that was JUST reassigned from another struct
+# value reads a STALE snapshot of that struct's scalar fields. The measured
+# consequences in this family are all the same shape:
+#   * `not entry_ctx.has_errors()` reported errors that were never recorded
+#     (this bug — phase 2 returned false with error_count_value == 0);
+#   * `ctx.errors[i]` read through a freshly reassigned local silently produced
+#     nothing while `.len()` was correct
+#     (stage3_selfhost_phase3_error_array_index_after_struct_reassign_silently_noops_2026-08-10);
+#   * a tuple-carried CompileContext preserved the bool while reconstructing an
+#     older value snapshot (comment on parse_all_committing_impl).
+# The established remedy, applied in all three places, is to commit IN PLACE on
+# the owner (`self.ctx`) and derive the verdict by reading the AUTHORITATIVE
+# scalar field directly (`error_count_value`), never through a receiver call on
+# a copied local.
+#
+# These examples are source-shape assertions rather than a native execution:
+# reproducing the miscompile itself needs a ~40-minute native bootstrap build,
+# so the check that can run on every test pass is that the code no longer has
+# the shape that miscompiles. Non-vacuity: each example FAILS if the file is
+# missing or the guarded text is absent, and all three failed before the fix.
+
+use std.spec
+use std.io_runtime.{file_read}
+
+val _PARSING_SRC = "src/compiler/80.driver/driver_source_pipeline_parsing.spl"
+val _ORCH_SRC = "src/compiler/80.driver/driver_orchestration.spl"
+
+fn _read(path: text) -> text:
+    file_read(path) ?? ""
+
+describe "phase-2 verdict is read from the authoritative scalar field":
+
+    it "entry-closure parse verdict does not go through has_errors() on a copied local":
+        val src = _read(_PARSING_SRC)
+        expect(src.len() > 0).to_equal(true)
+        # The exact pre-fix text. Its return re-appearing is the regression.
+        expect(src.contains("return (entry_ctx, not entry_ctx.has_errors())")).to_equal(false)
+        expect(src.contains("return (self.ctx, self.ctx.error_count_value == 0)")).to_equal(true)
+
+    it "entry-closure result is committed in place on self.ctx, not staged in a var local":
+        val src = _read(_PARSING_SRC)
+        expect(src.len() > 0).to_equal(true)
+        expect(src.contains("var entry_ctx: CompileContext = self.ctx")).to_equal(false)
+        expect(src.contains("self.ctx.module_surfaces = Some(entry_surfaces_result.unwrap())")).to_equal(true)
+
+    it "a phase-2 failure names how many diagnostics were actually recorded":
+        val src = _read(_ORCH_SRC)
+        expect(src.len() > 0).to_equal(true)
+        # A bare "phase 2 FAILED" cannot distinguish a real parse error from a
+        # false verdict with an empty error list; that ambiguity cost a whole
+        # investigation.
+        assert_true(src.contains("phase 2 FAILED (") and src.contains("recorded error(s))"))
+        expect(src.contains("self.ctx.error_message_at(phase2_err_idx)")).to_equal(true)
+        # Zero recorded errors with a failing verdict is an internal invariant
+        # break, and the log must SAY so rather than print "0 recorded error(s)".
+        expect(src.contains("failing verdict with ZERO recorded errors")).to_equal(true)

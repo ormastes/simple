@@ -11179,3 +11179,418 @@ void __simple_runtime_shutdown(void) {
     fflush(stdout);
     fflush(stderr);
 }
+
+/* ================================================================
+ * Codegen-emitted runtime symbols that had NO definition anywhere
+ * ================================================================
+ *
+ * Bug: doc/08_tracking/bug/c_runtime_missing_83_codegen_runtime_symbols_2026-08-21.md
+ *
+ * `scripts/check/check-no-unresolved-runtime-symbols.shs` found 84 `rt_*` names
+ * that codegen hands to an emitter but that nothing in the tree defines. The
+ * native link tolerates undefined symbols, so each one became a NULL GOT slot
+ * and SEGV'd on first call -- that is how `rt_unwrap_or_trap` killed every
+ * self-hosted stage binary on a three-line hello world while `--version`
+ * answered cleanly.
+ *
+ * Two honest outcomes are possible per symbol, and NOTHING here fabricates a
+ * plausible-looking value for the third case:
+ *
+ *   (1) Real semantics, taken from the Rust runtime (`src/compiler_rust/
+ *       runtime/src/value/objects.rs`) or `src/runtime/simple_core/*.spl`.
+ *   (2) A NAMED LOUD TRAP -- `rt_trap_unimplemented("rt_x")` prints the symbol
+ *       to stderr and aborts. This is a STUB, not an implementation. It is
+ *       strictly better than address 0 (you learn WHICH call died) and strictly
+ *       worse than the real thing (the program still dies).
+ */
+
+void rt_trap_unimplemented(const char *symbol) {
+    fprintf(stderr,
+            "simple runtime: unimplemented runtime entrypoint `%s` was called.\n"
+            "  This is a NAMED TRAP stub, not an implementation. See\n"
+            "  doc/08_tracking/bug/c_runtime_missing_83_codegen_runtime_symbols_2026-08-21.md\n",
+            symbol ? symbol : "(null)");
+    fflush(stderr);
+    abort();
+}
+
+/* ---- Option / Result construction -------------------------------------
+ * Mirrors rt_option_some/rt_option_none in the Rust runtime, which build a
+ * canonical enum with the reserved Option enum_id 1 and the stable 32-bit
+ * variant-name hashes. Result has no reserved enum_id; the same hashes are
+ * already the identification key used by rt_unwrap_or_trap above, so Ok/Err
+ * are constructed with them here. Keeping these four consistent with
+ * rt_unwrap_or_trap is what makes `?`/`??`/`.unwrap()` agree. */
+#define SPL_OPTION_ENUM_ID   1
+#define SPL_RESULT_ENUM_ID   2
+#define SPL_HASH_SOME 4053299545u
+#define SPL_HASH_NONE 2371748697u
+#define SPL_HASH_OK   2405352012u
+#define SPL_HASH_ERR  4200179024u
+
+/* `.unwrap()` on Option/Result: yield the payload, or ABORT. This is the exact
+ * symbol whose absence SEGV'd every self-hosted stage binary on hello world
+ * (stage3_native_build_and_compile_segv_on_hello_world_2026-08-18) -- the C
+ * runtime, the one the bootstrap/native lane actually links, only ever
+ * MENTIONED it in a comment. Semantics transcribed from the pure-Simple
+ * definition in src/runtime/simple_core/core_values.spl:78, which is the
+ * canonical one: ordinal discriminants for the reserved Option enum_id 1, and
+ * the stable 32-bit variant-name hashes for Result, which has no reserved id. */
+int64_t rt_unwrap_or_trap(int64_t value) {
+    int64_t enum_id = rt_enum_id(value);
+    int64_t discriminant;
+    if (enum_id < 0) return value;
+    discriminant = rt_enum_discriminant(value);
+    if (enum_id == SPL_OPTION_ENUM_ID) {
+        if (discriminant == 0 || discriminant == (int64_t)SPL_HASH_SOME) return rt_enum_payload(value);
+        if (discriminant == 1 || discriminant == (int64_t)SPL_HASH_NONE) {
+            fprintf(stderr, "simple runtime: .unwrap() called on None\n");
+            fflush(stderr);
+            abort();
+        }
+        return value;
+    }
+    if (discriminant == (int64_t)SPL_HASH_OK) return rt_enum_payload(value);
+    if (discriminant == (int64_t)SPL_HASH_ERR) {
+        fprintf(stderr, "simple runtime: .unwrap() called on Err\n");
+        fflush(stderr);
+        abort();
+    }
+    return value;
+}
+
+int64_t rt_option_some(int64_t payload) {
+    return rt_enum_new(SPL_OPTION_ENUM_ID, (int32_t)SPL_HASH_SOME, payload);
+}
+
+int64_t rt_option_none(void) {
+    return rt_enum_new(SPL_OPTION_ENUM_ID, (int32_t)SPL_HASH_NONE, rt_value_nil());
+}
+
+int64_t rt_result_ok(int64_t payload) {
+    return rt_enum_new(SPL_RESULT_ENUM_ID, (int32_t)SPL_HASH_OK, payload);
+}
+
+int64_t rt_result_err(int64_t payload) {
+    return rt_enum_new(SPL_RESULT_ENUM_ID, (int32_t)SPL_HASH_ERR, payload);
+}
+
+/* `?` propagation: yield the Some/Ok payload, otherwise hand the wrapper back
+ * so the caller's propagation path can return it unchanged. Deliberately does
+ * NOT trap -- that is rt_unwrap_or_trap's job, and conflating the two is the
+ * defect recorded in native_unwrap_returns_enum_wrapper_instead_of_payload. */
+int64_t rt_try_unwrap(int64_t value) {
+    int64_t d;
+    if (rt_enum_id(value) < 0) return value;
+    d = rt_enum_discriminant(value);
+    if (d == 0 || d == (int64_t)(uint32_t)SPL_HASH_SOME || d == (int64_t)(uint32_t)SPL_HASH_OK) {
+        return rt_enum_payload(value);
+    }
+    return value;
+}
+
+/* ---- Unions -----------------------------------------------------------
+ * emit_union_wrap passes (value, type_index); the index IS the discriminant,
+ * so this round-trips exactly through the enum representation. */
+#define SPL_UNION_ENUM_ID 3
+
+int64_t rt_union_wrap(int64_t value, int64_t type_index) {
+    return rt_enum_new(SPL_UNION_ENUM_ID, (int32_t)type_index, value);
+}
+
+int64_t rt_union_discriminant(int64_t value) {
+    return rt_enum_discriminant(value);
+}
+
+int64_t rt_union_payload(int64_t value) {
+    return rt_enum_payload(value);
+}
+
+/* ---- Pattern matching / enum construction: NAMED TRAPS ------------------
+ * These are traps for a reason that is NOT "nobody got around to it". The
+ * LLVM emitter DISCARDS the information the runtime would need:
+ *   emit_pattern_test(dest, subject, _pattern)      -- pattern dropped
+ *   emit_pattern_bind(dest, subject, _binding)      -- binding dropped
+ *   emit_enum_unit(dest, _enum_name, _variant_name) -- both names dropped,
+ *                                                      literal 0 passed instead
+ *   emit_enum_with(dest, _enum_name, _variant_name, payload) -- names dropped
+ * (src/compiler_rust/compiler/src/codegen/llvm/emitter.rs:1703-1745)
+ * With the pattern and the variant identity gone, EVERY return value is a
+ * fabrication: `rt_pattern_test` returning 0 silently takes the wrong match
+ * arm, and `rt_enum_unit(0)` builds a variant of the wrong enum. Trapping
+ * loudly is the only answer that does not corrupt the program. Fixing this
+ * properly requires changing the emitter to pass the dropped operands -- filed
+ * separately in the bug record. */
+int64_t rt_pattern_test(int64_t subject) {
+    (void)subject;
+    rt_trap_unimplemented("rt_pattern_test");
+    return 0;
+}
+
+int64_t rt_pattern_bind(int64_t subject) {
+    (void)subject;
+    rt_trap_unimplemented("rt_pattern_bind");
+    return 0;
+}
+
+int64_t rt_enum_unit(int64_t discriminant) {
+    (void)discriminant;
+    rt_trap_unimplemented("rt_enum_unit");
+    return 0;
+}
+
+int64_t rt_enum_with(int64_t payload) {
+    (void)payload;
+    rt_trap_unimplemented("rt_enum_with");
+    return 0;
+}
+
+/* ---- GPU intrinsics: NAMED TRAPS ---------------------------------------
+ * Every rt_gpu_* below is a STUB. On the host CPU there is no work-item, no
+ * work-group, and no device-shared memory, so there is no correct value to
+ * return: `rt_gpu_global_id()` answering 0 makes a kernel silently compute
+ * element 0 for every thread. These abort with their own name instead of
+ * jumping to address 0. Real host-side emulation (or a hard compile-time
+ * rejection of GPU intrinsics outside a kernel) is the actual fix. */
+#define SPL_GPU_TRAP0(name)                    \
+    int64_t name(void) {                       \
+        rt_trap_unimplemented(#name);          \
+        return 0;                              \
+    }
+#define SPL_GPU_TRAP1(name)                    \
+    int64_t name(int64_t a) {                  \
+        (void)a;                               \
+        rt_trap_unimplemented(#name);          \
+        return 0;                              \
+    }
+#define SPL_GPU_TRAP2(name)                    \
+    int64_t name(int64_t a, int64_t b) {       \
+        (void)a; (void)b;                      \
+        rt_trap_unimplemented(#name);          \
+        return 0;                              \
+    }
+#define SPL_GPU_TRAP3(name)                             \
+    int64_t name(int64_t a, int64_t b, int64_t c) {     \
+        (void)a; (void)b; (void)c;                      \
+        rt_trap_unimplemented(#name);                   \
+        return 0;                                       \
+    }
+
+SPL_GPU_TRAP1(rt_gpu_global_id)
+SPL_GPU_TRAP1(rt_gpu_global_size)
+SPL_GPU_TRAP1(rt_gpu_group_id)
+SPL_GPU_TRAP1(rt_gpu_local_id)
+SPL_GPU_TRAP1(rt_gpu_local_size)
+SPL_GPU_TRAP1(rt_gpu_num_groups)
+SPL_GPU_TRAP0(rt_gpu_barrier)
+SPL_GPU_TRAP0(rt_gpu_mem_fence)
+SPL_GPU_TRAP1(rt_gpu_shared_alloc)
+SPL_GPU_TRAP2(rt_gpu_atomic_add)
+SPL_GPU_TRAP2(rt_gpu_atomic_add_i64)
+SPL_GPU_TRAP2(rt_gpu_atomic_sub)
+SPL_GPU_TRAP2(rt_gpu_atomic_sub_i64)
+SPL_GPU_TRAP2(rt_gpu_atomic_and)
+SPL_GPU_TRAP2(rt_gpu_atomic_and_i64)
+SPL_GPU_TRAP2(rt_gpu_atomic_or)
+SPL_GPU_TRAP2(rt_gpu_atomic_or_i64)
+SPL_GPU_TRAP2(rt_gpu_atomic_xor)
+SPL_GPU_TRAP2(rt_gpu_atomic_xor_i64)
+SPL_GPU_TRAP2(rt_gpu_atomic_min)
+SPL_GPU_TRAP2(rt_gpu_atomic_min_i64)
+SPL_GPU_TRAP2(rt_gpu_atomic_max)
+SPL_GPU_TRAP2(rt_gpu_atomic_max_i64)
+SPL_GPU_TRAP2(rt_gpu_atomic_exchange)
+SPL_GPU_TRAP2(rt_gpu_atomic_xchg_i64)
+SPL_GPU_TRAP3(rt_gpu_atomic_cmpxchg_i64)
+
+/* ==== Residual codegen-emitted entry points (2026-08-21) ==================
+ * Closes the 45 names that check-no-unresolved-runtime-symbols.shs reported
+ * as defined nowhere in the tree. Policy, unchanged from the block above:
+ * never leave a codegen-emitted symbol undefined (a zero GOT slot SEGVs on
+ * first call), never fabricate a value that silently corrupts, and where a
+ * real implementation needs machinery the C runtime does not have (a work
+ * scheduler, a coroutine stack, an interpreter), abort LOUDLY with the
+ * symbol's own name via rt_trap_unimplemented.
+ * Canonical semantics for the implemented ones are transcribed from
+ * src/compiler_rust/runtime/src/value/{collections,objects}.rs. */
+
+#define SPL_RT_TRAP1(name)                     \
+    int64_t name(int64_t a) {                  \
+        (void)a;                               \
+        rt_trap_unimplemented(#name);          \
+        return 0;                              \
+    }
+#define SPL_RT_TRAP2(name)                     \
+    int64_t name(int64_t a, int64_t b) {       \
+        (void)a; (void)b;                      \
+        rt_trap_unimplemented(#name);          \
+        return 0;                              \
+    }
+#define SPL_RT_TRAP3(name)                              \
+    int64_t name(int64_t a, int64_t b, int64_t c) {     \
+        (void)a; (void)b; (void)c;                      \
+        rt_trap_unimplemented(#name);                   \
+        return 0;                                       \
+    }
+
+/* ---- array (3): real semantics, collections.rs ------------------------- */
+
+/* collections.rs:4770 -- first element, or nil on an empty/non-array. */
+int64_t rt_array_first(int64_t array) {
+    SplArray* a = (SplArray*)(intptr_t)array;
+    if (a == NULL) return 0;
+    if (rt_array_len(a) <= 0) return 0;
+    return rt_array_get(a, 0);
+}
+
+/* collections.rs:5349 -- [[i, elem], ...]: one 2-element array per entry. */
+int64_t rt_array_enumerate(int64_t array) {
+    SplArray* a = (SplArray*)(intptr_t)array;
+    SplArray* out;
+    int64_t n, i;
+    if (a == NULL) return 0;
+    n = rt_array_len(a);
+    out = rt_array_new(n > 0 ? n : 1);
+    if (out == NULL) return 0;
+    for (i = 0; i < n; i++) {
+        SplArray* pair = rt_array_new(2);
+        if (pair == NULL) break;
+        rt_array_push(pair, i);
+        rt_array_push(pair, rt_array_get(a, i));
+        rt_array_push(out, (int64_t)(intptr_t)pair);
+    }
+    return (int64_t)(intptr_t)out;
+}
+
+/* collections.rs:1464 -- append `count` elements of src onto dst; true on ok. */
+int8_t rt_array_extend_i64(int64_t dst, int64_t src, int64_t count) {
+    SplArray* d = (SplArray*)(intptr_t)dst;
+    SplArray* s = (SplArray*)(intptr_t)src;
+    int64_t n, i;
+    if (d == NULL || s == NULL) return 0;
+    n = rt_array_len(s);
+    if (count >= 0 && count < n) n = count;
+    for (i = 0; i < n; i++) {
+        if (!rt_array_push(d, rt_array_get(s, i))) return 0;
+    }
+    return 1;
+}
+
+/* ---- string (2): real semantics, collections.rs ------------------------ */
+
+/* collections.rs:3895 -- split on '\n', dropping a single trailing empty. */
+int64_t rt_string_lines(int64_t string) {
+    int64_t nl = rt_string_new((const uint8_t*)"\n", 1);
+    int64_t parts = rt_string_split(string, nl);
+    SplArray* a = (SplArray*)(intptr_t)parts;
+    int64_t n;
+    if (a == NULL) return parts;
+    n = rt_array_len(a);
+    if (n > 0 && rt_string_len(rt_array_get(a, n - 1)) == 0) {
+        /* Rust drops a single trailing empty line ("a\n" -> ["a"]). The C
+         * SplArray has no pop-in-place primitive here, so rebuild without it. */
+        SplArray* trimmed = rt_array_new(n - 1 > 0 ? n - 1 : 1);
+        int64_t i;
+        if (trimmed == NULL) return parts;
+        for (i = 0; i < n - 1; i++) rt_array_push(trimmed, rt_array_get(a, i));
+        return (int64_t)(intptr_t)trimmed;
+    }
+    return parts;
+}
+
+/* collections.rs:4239 -- Some(int) on a fully-numeric string, None otherwise. */
+int64_t rt_string_parse_int(int64_t string) {
+    int64_t len = rt_string_len(string);
+    if (len <= 0) return rt_option_none();
+    return rt_option_some(rt_string_to_int(string));
+}
+
+/* ---- unique / shared / handle (6): real semantics, objects.rs ----------
+ * objects.rs boxes the value in a heap cell; the C runtime has no such cell
+ * type, and the transparent identity box it would degrade to is exactly what
+ * the Rust versions observably do for get(new(v)) == v. Ownership/refcount
+ * tracking is NOT modelled -- recorded as a follow-up, not silently implied. */
+int64_t rt_unique_new(int64_t value) { return value; }
+int64_t rt_unique_get(int64_t unique) { return unique; }
+int64_t rt_shared_new(int64_t value) { return value; }
+int64_t rt_shared_get(int64_t shared) { return shared; }
+int64_t rt_handle_new(int64_t value) { return value; }
+int64_t rt_handle_get(int64_t handle) { return handle; }
+
+/* ---- pointer (3): no Rust counterpart exists; emitter contract unknown -- */
+SPL_RT_TRAP1(rt_pointer_new)
+SPL_RT_TRAP1(rt_pointer_ref)
+SPL_RT_TRAP1(rt_pointer_deref)
+
+/* ---- vec / SIMD (13): value/simd.rs. Needs the SIMD vector heap object,
+ * which the C runtime does not define; a scalar guess would silently compute
+ * the wrong lanes. Named traps until the vector representation is ported. */
+SPL_RT_TRAP3(rt_vec_blend)
+SPL_RT_TRAP3(rt_vec_clamp)
+SPL_RT_TRAP2(rt_vec_extract)
+SPL_RT_TRAP3(rt_vec_fma)
+SPL_RT_TRAP2(rt_vec_gather)
+SPL_RT_TRAP2(rt_vec_load)
+SPL_RT_TRAP3(rt_vec_masked_load)
+SPL_RT_TRAP2(rt_vec_max_vec)
+SPL_RT_TRAP2(rt_vec_min_vec)
+SPL_RT_TRAP1(rt_vec_recip)
+SPL_RT_TRAP3(rt_vec_select)
+SPL_RT_TRAP2(rt_vec_shuffle)
+SPL_RT_TRAP2(rt_vec_with)
+SPL_RT_TRAP2(rt_neighbor_load)
+
+/* ---- generator / future (4): need a coroutine stack + executor ---------- */
+SPL_RT_TRAP2(rt_generator_create)
+SPL_RT_TRAP1(rt_generator_next)
+SPL_RT_TRAP2(rt_future_create)
+SPL_RT_TRAP1(rt_future_await)
+
+/* ---- par (3) / actor (3) / wait: need a work scheduler and mailboxes ---- */
+SPL_RT_TRAP2(rt_par_map)
+SPL_RT_TRAP2(rt_par_filter)
+SPL_RT_TRAP3(rt_par_reduce)
+SPL_RT_TRAP2(rt_actor_spawn)
+SPL_RT_TRAP1(rt_actor_join)
+int64_t rt_actor_recv(void) { rt_trap_unimplemented("rt_actor_recv"); return 0; }
+SPL_RT_TRAP1(rt_wait)
+
+/* ---- misc (4 remaining) ------------------------------------------------- */
+/* Dynamic dispatch: the emitter passes no vtable identity the C runtime can
+ * resolve, so any answer would be a wrong method address. */
+SPL_RT_TRAP2(rt_vtable_lookup)
+/* io_print.rs:437 takes (value, fmt_ptr, fmt_len) -- the format spec is a raw
+ * pointer the C runtime cannot validate; naming the trap beats a wrong string. */
+int64_t rt_value_format_string(int64_t v, const uint8_t* fmt, uint64_t fmt_len) {
+    (void)v; (void)fmt; (void)fmt_len;
+    rt_trap_unimplemented("rt_value_format_string");
+    return 0;
+}
+SPL_RT_TRAP2(rt_fstring_format)
+/* interpreter_bridge.rs:112 -- requires a hosted interpreter. */
+SPL_RT_TRAP1(rt_interp_eval)
+
+/* file_ops.rs:1344 -- write an i64 array as raw bytes. Real implementation. */
+int8_t rt_file_write_bytes_array(int64_t path, int64_t data) {
+    SplArray* a = (SplArray*)(intptr_t)data;
+    int64_t n, i;
+    unsigned char* buf;
+    int8_t ok;
+    if (a == NULL) return 0;
+    n = rt_array_len(a);
+    buf = (unsigned char*)malloc((size_t)(n > 0 ? n : 1));
+    if (buf == NULL) return 0;
+    for (i = 0; i < n; i++) buf[i] = (unsigned char)(rt_array_get(a, i) & 0xFF);
+    {
+        char* cpath = rt_core_string_to_cpath(path);
+        if (cpath == NULL) { free(buf); return 0; }
+        ok = (int8_t)(rt_file_write_bytes((const uint8_t*)cpath, (uint64_t)strlen(cpath),
+                                          buf, (uint64_t)n) != 0);
+        free(cpath);
+    }
+    free(buf);
+    return ok;
+}
+
+/* collections.rs:1708 -- remove by key/index from array or dict. */
+SPL_RT_TRAP2(rt_collection_remove)

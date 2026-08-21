@@ -601,6 +601,51 @@ int64_t  rt_string_join(int64_t array, int64_t separator);
 int8_t   rt_contains(int64_t collection, int64_t value);
 int64_t  rt_unwrap_or_self(int64_t value);
 int64_t  rt_unwrap_or_value(int64_t value, int64_t default_val);
+int64_t  rt_unwrap_or_trap(int64_t value);
+
+/* Codegen-emitted entry points recovered 2026-08-21 -- see
+ * doc/08_tracking/bug/c_runtime_missing_83_codegen_runtime_symbols_2026-08-21.md
+ * Names marked NAMED TRAP abort with their own name instead of being an
+ * undefined symbol whose GOT slot stays zero. */
+void     rt_trap_unimplemented(const char *symbol);
+int64_t  rt_option_some(int64_t payload);
+int64_t  rt_option_none(void);
+int64_t  rt_result_ok(int64_t payload);
+int64_t  rt_result_err(int64_t payload);
+int64_t  rt_try_unwrap(int64_t value);
+int64_t  rt_union_wrap(int64_t value, int64_t type_index);
+int64_t  rt_union_discriminant(int64_t value);
+int64_t  rt_union_payload(int64_t value);
+int64_t  rt_pattern_test(int64_t subject);   /* NAMED TRAP */
+int64_t  rt_pattern_bind(int64_t subject);   /* NAMED TRAP */
+int64_t  rt_enum_unit(int64_t discriminant); /* NAMED TRAP */
+int64_t  rt_enum_with(int64_t payload);      /* NAMED TRAP */
+int64_t  rt_gpu_barrier(void);               /* NAMED TRAP */
+int64_t  rt_gpu_mem_fence(void);             /* NAMED TRAP */
+int64_t  rt_gpu_global_id(int64_t a);  /* NAMED TRAP */
+int64_t  rt_gpu_global_size(int64_t a);  /* NAMED TRAP */
+int64_t  rt_gpu_group_id(int64_t a);  /* NAMED TRAP */
+int64_t  rt_gpu_local_id(int64_t a);  /* NAMED TRAP */
+int64_t  rt_gpu_local_size(int64_t a);  /* NAMED TRAP */
+int64_t  rt_gpu_num_groups(int64_t a);  /* NAMED TRAP */
+int64_t  rt_gpu_shared_alloc(int64_t a);  /* NAMED TRAP */
+int64_t  rt_gpu_atomic_add(int64_t a, int64_t b);  /* NAMED TRAP */
+int64_t  rt_gpu_atomic_add_i64(int64_t a, int64_t b);  /* NAMED TRAP */
+int64_t  rt_gpu_atomic_sub(int64_t a, int64_t b);  /* NAMED TRAP */
+int64_t  rt_gpu_atomic_sub_i64(int64_t a, int64_t b);  /* NAMED TRAP */
+int64_t  rt_gpu_atomic_and(int64_t a, int64_t b);  /* NAMED TRAP */
+int64_t  rt_gpu_atomic_and_i64(int64_t a, int64_t b);  /* NAMED TRAP */
+int64_t  rt_gpu_atomic_or(int64_t a, int64_t b);  /* NAMED TRAP */
+int64_t  rt_gpu_atomic_or_i64(int64_t a, int64_t b);  /* NAMED TRAP */
+int64_t  rt_gpu_atomic_xor(int64_t a, int64_t b);  /* NAMED TRAP */
+int64_t  rt_gpu_atomic_xor_i64(int64_t a, int64_t b);  /* NAMED TRAP */
+int64_t  rt_gpu_atomic_min(int64_t a, int64_t b);  /* NAMED TRAP */
+int64_t  rt_gpu_atomic_min_i64(int64_t a, int64_t b);  /* NAMED TRAP */
+int64_t  rt_gpu_atomic_max(int64_t a, int64_t b);  /* NAMED TRAP */
+int64_t  rt_gpu_atomic_max_i64(int64_t a, int64_t b);  /* NAMED TRAP */
+int64_t  rt_gpu_atomic_exchange(int64_t a, int64_t b);  /* NAMED TRAP */
+int64_t  rt_gpu_atomic_xchg_i64(int64_t a, int64_t b);  /* NAMED TRAP */
+int64_t  rt_gpu_atomic_cmpxchg_i64(int64_t a, int64_t b, int64_t c);  /* NAMED TRAP */
 int8_t   rt_is_none(int64_t value);
 int8_t   rt_is_some(int64_t value);
 double   rt_math_pow(double base, double exponent);
