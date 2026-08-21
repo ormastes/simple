@@ -138,3 +138,74 @@ first time** (they were hidden behind `executed=0`). Handoff, with locations:
 | flags missing validation targets as mismatches | `expected true to equal false` — `regen.validate_regeneration` | `verification/regenerate` |
 
 Items 1 and 3-12 are unchanged and still OPEN.
+
+## Update 2026-08-21 (later) — item 2 RESOLVED: `lean_workflow_spec` is 9/9
+
+The 6 "remaining product defects" in the previous update were measured against
+`test/01_unit/compiler/verification/lean_workflow_spec.spl`, which is a
+**divergent copy**, not the maintained spec. The spec the
+`test/00_formal_verification` lane actually runs is
+`test/00_formal_verification/compiler/lean_workflow_spec.spl`, and on it only
+**two** of the six were real:
+
+| previously filed | actual status |
+|---|---|
+| `is_model_complete` missing on `LeanCheckResult` / `VerificationSummary` | NOT a product defect. The product method is `is_fully_proven()` (`src/compiler_rust/lib/std/src/verification/lean/runner.spl:31,398`), which the maintained spec calls and which passes. `is_model_complete` exists nowhere in the tree; it is an invented name in the `test/01_unit` + `test/unit` copies. |
+| `write_regenerated_files` writes empty | NOT reproducible on the maintained spec — passes. |
+| `validate_regeneration` wrong | NOT reproducible — passes. |
+| `verification.models` does not export `ContractExprKind` | REAL — fixed. |
+| unbacked extern `_rt_process_run` | REAL — fixed. |
+
+### Fix 1 — `Module "verification.models" does not export 'ContractExprKind'`
+
+Root cause: `src/compiler_rust/lib/std/src/verification/lean/expressions_eval.spl:374`
+carried a **function-body** `use verification.models.ContractExprKind`. That
+module path does not export the enum (`models/__init__.spl` re-exports only the
+tensor-dimension surface; the enum lives in `models/contracts.spl:21`), and the
+same file already imports it correctly at line 5 from
+`verification.models.contracts`. The local import was redundant *and* wrong, and
+it aborted every call into `translate_contract_expr`. Deleted.
+
+### Fix 2 — `unknown extern function: _rt_process_run`
+
+Root cause: `src/compiler_rust/lib/std/src/verification/proofs/checker.spl`
+declared its own `@extern("runtime", "rt_process_run")` shim
+(`fn _rt_process_run(cmd_ptr: &u8, cmd_len: u64, args_ptr: &u8, args_len: u64) -> (i32, text, text)`)
+with no runtime backing on any deployed binary — the same class as
+`unregistered_extern_silent_nil_2026-08-01.md`. Replaced with the existing
+backed `process_run(cmd, args) -> (text, text, i64)` from
+`src/lib/nogc_sync_mut/io/process_ops.spl:67` (exported at
+`src/lib/nogc_sync_mut/io/__init__.spl:214`). No new extern was added, so the
+unbacked-extern baseline is unaffected.
+
+### Fix 3 — strict checker was environment-dependent (found while fixing 2)
+
+With a real process runner wired in, `ProofChecker.check_file` still failed: it
+shelled out to `lean --run <file>` and only did the static `sorry` scan on the
+"Lean not installed" fallbacks. Lean IS installed on this host, so a file
+containing `sorry` produced `unknown declaration 'main'` and was classified as a
+generic `ProofError` whose message never mentions `sorry`. Worse, plain `lean`
+treats `sorry` as a *warning* and exits 0, so the strict check would have PASSED
+an unproven file wherever `--run` succeeded. `check_file` now fails closed on
+`sorry` by reading the source **before** invoking Lean, which also removes the
+"is Lean installed" dependency from the verdict.
+
+### Evidence
+
+```
+SPEC FILE VERDICT: test/00_formal_verification/compiler/lean_workflow_spec.spl outcome=OK declared>=9 executed=9 passed=9 failed=0 skipped=0 dropped=0
+```
+
+Defect-class neighbours re-run, all green after the change:
+`tool_checker_spec` 11/11, `lean_basic_spec` 4/4, `lean_codegen_spec` 4/4,
+`proof_reference_spec` 11/11.
+
+### Still open, and deliberately not "fixed"
+
+`test/01_unit/compiler/verification/lean_workflow_spec.spl` and its
+`test/unit/` mirror still call `is_model_complete()`, `result.status`,
+`result.sorry_count` (field, not method) and `theorem.proof` (field, not
+`proof_text()`) — an API surface that has never existed. They are divergent
+copies, not a second contract, and reconciling them touches the test-tree
+divergence baseline, so they are left for a reviewed baseline update rather
+than edited here.

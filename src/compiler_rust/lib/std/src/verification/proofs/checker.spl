@@ -3,12 +3,12 @@
 # Invokes Lean 4 to check proofs and reports results.
 
 use verification.proofs.obligations.{ObligationSet, generate_theorem_stubs}
-use std.nogc_sync_mut.io.{file_read_text}
+use std.nogc_sync_mut.io.{file_read_text, process_run}
 
-# SFFI for process execution and file operations
-@extern("runtime", "rt_process_run")
-fn _rt_process_run(cmd_ptr: &u8, cmd_len: u64, args_ptr: &u8, args_len: u64) -> (i32, text, text)
-
+# SFFI for file operations. Process execution goes through the backed
+# `process_run` above — the former local `@extern("runtime", "rt_process_run")`
+# declaration `_rt_process_run` had no runtime backing on any deployed binary
+# and aborted with `unknown extern function: _rt_process_run`.
 @extern("runtime", "rt_file_write_text")
 fn _rt_file_write_text(path_ptr: &u8, path_len: u64, content_ptr: &u8, content_len: u64) -> bool
 
@@ -132,23 +132,22 @@ class ProofChecker:
         return ProofChecker(config)
 
     fn check_file(file_path: text) -> FileCheckResult:
+        # Fail closed on `sorry` BEFORE invoking Lean. `lean` accepts a file
+        # containing `sorry` (it is only a warning, exit 0), so deferring this
+        # to the subprocess made a strict check pass on an unproven file — and
+        # made the verdict depend on whether Lean happened to be installed.
+        val source = file_read_text(file_path)
+        if source.contains("sorry"):
+            var sorry_result = FileCheckResult.create(file_path, LeanResult.ProofError("sorry found in proof"))
+            sorry_result = sorry_result.with_error("sorry found in proof")
+            return sorry_result
+
         # Invoke Lean via subprocess
         val cmd = self.config.lean_path
-        val args = "--run {file_path}"
-        val proc_result = _rt_process_run(cmd.ptr(), cmd.len(), args.ptr(), args.len())
-
-        # Guard: if Lean is not installed, proc_result is nil — fall back to static sorry scan
-        if proc_result is nil:
-            val content = file_read_text(file_path)
-            if content.contains("sorry"):
-                var fr = FileCheckResult.create(file_path, LeanResult.ProofError("sorry found in proof"))
-                fr = fr.with_error("sorry")
-                return fr
-            return FileCheckResult.create(file_path, LeanResult.NotFound)
-
-        val exit_code = proc_result[0]
-        val stdout = proc_result[1]
-        val stderr = proc_result[2]
+        val proc_result = process_run(cmd, ["--run", file_path])
+        val stdout = proc_result.0
+        val stderr = proc_result.1
+        val exit_code = proc_result.2
 
         # Lean not found (exit 127) — fall back to static sorry scan
         if exit_code == 127:

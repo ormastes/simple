@@ -2,7 +2,7 @@
 
 Date: 2026-08-21
 Reporter: agent A5+Y2 (Any hardening)
-Status: OPEN
+Status: RESOLVED (2026-08-21)
 
 ## Symptom
 
@@ -96,3 +96,81 @@ span/offset where a name is expected.
 
 Consequence for the Any census is unchanged: it stays one process per file with
 UNANALYZABLE counted and named.
+
+
+## Update 2026-08-21 — RESOLVED, and the previous narrowing was wrong on both counts
+
+### It was never in HIR lowering
+
+Bisected with progress markers inside the real call chain, driven through
+`src/app/check/any_escape_census.spl` at its real path:
+
+```
+DBGF a / b preprocess done / c pre parse_and_build      <- frontend.spl
+DBGM 1 pre parse_module_body / 2 done / 3 pre flat_ast_to_module
+DBGD idx=0 tag=8   (the enum decl — converted fine)
+DBGD idx=1 tag=1   (a fn decl)
+error: semantic: method `split` not found on type `i64` (receiver value: 32)
+```
+
+The abort is inside **`flat_ast_to_module`**
+(`src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl:124`), i.e. in
+**parse**, before `lower_module` is ever called. `hirlowering_for_module` and
+`lower_module` were never reached. Every statement in this record about
+"declaration lowering" and about `src/compiler/20.hir/**` owning the fix was
+wrong.
+
+### The prime suspect was dead code
+
+`_hir_text_index_of` (`20.hir/hir_lowering/_Items/module_lowering.spl:286-291`)
+has **zero callers**: `/usr/bin/grep -rn _hir_text_index_of src/compiler/`
+returns exactly one line, its own definition. It cannot have produced the
+abort, and it also is not on the parse path the bisect landed on.
+
+### It was not the content either
+
+Byte-identical copies of `unsafe_capabilities.spl` parse and lower **cleanly**:
+
+- at a scratch path outside the repo,
+- at `src/compiler/00.common/assurance/zz_tmp_probe.spl` — same directory, same
+  bytes, different filename,
+- and as a standalone program whose import set exactly matches the census
+  driver's.
+
+Only that one path, in that one process, aborted. So the enum/struct hypothesis
+("the trigger is a declaration KIND") does not hold: the same enum and the same
+struct parse fine two directories' worth of identical bytes away.
+
+### Current status: GREEN, fixed elsewhere
+
+Re-measured after `b5821b5daa2` and `e8e20d3c053` (the SMF enum-record-v2 /
+HIR->EnumDef bridge work) landed on `main` mid-session, the abort is gone with
+no change to `20.hir`, `10.frontend` or the census driver by this lane:
+
+```
+bin/simple run src/app/check/any_escape_census.spl \
+    src/compiler/00.common/assurance/unsafe_capabilities.spl
+MODULE unsafe_capabilities src/compiler/00.common/assurance/unsafe_capabilities.spl
+SUMMARY modules=1 any_sites=0 escapes=0 unanalyzable=0
+```
+
+Reproduced repeatedly earlier in the same session on the pre-commit tree, so
+this is a real fix landing, not a flaky observation. Pinned against regression
+by `test/01_unit/compiler/hir/standalone_lowering_real_compiler_files_spec.spl`
+(and its `test/unit/` mirror), which lowers both the known-good and the
+historically-aborting file standalone — 2/2.
+
+### Separate defect found and fixed while verifying this: the census was fail-open
+
+`scripts/check/check-any-escape-census.shs --selftest` was RED for a reason
+unrelated to the abort: `selftest: unanalyzable fixture was accepted (rc=0) —
+the census denominator is fail-open`. The driver never inspected parse errors.
+The Simple parser RECOVERS and still returns a `ParserModule`, so a deliberately
+malformed file was censused as a clean, zero-finding module — which lowers the
+Any-site and escape totals and reads as progress, exactly the shape
+`any_escape_census_undercounts_2026-08-21.md` describes. Fixed in
+`src/app/check/any_escape_census.spl`: after `parse_full_frontend` it now calls
+`parser_has_errors()` / `parser_get_errors()`
+(`src/compiler/10.frontend/core/parser.spl:1119,1125`), prints `PARSE-FAIL`
+plus every error, counts the file as unanalyzable and returns non-zero, and
+`main` propagates a non-zero exit. `SUMMARY` gained an `unanalyzable=` field.
