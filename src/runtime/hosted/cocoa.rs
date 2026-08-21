@@ -34,7 +34,7 @@ pub const COCOA_INVALID_HANDLE: i64 = -1;
 // Simple-runtime helpers that decode a tagged-text RuntimeValue (i64) into a
 // raw byte pointer + length. Linked dynamically against `libsimple_native_all`
 // at the final native-build step.
-extern "C" {
+unsafe extern "C" {
     fn rt_string_data(rv: i64) -> *const u8;
     fn rt_string_len(rv: i64) -> i64;
 }
@@ -48,15 +48,21 @@ unsafe fn text_rv_to_string(rv: i64) -> String {
     if rv == 0 {
         return "untitled".to_string();
     }
-    let len = unsafe { rt_string_len(rv) };
-    if len <= 0 {
+    let raw_len = unsafe { rt_string_len(rv) };
+    if raw_len <= 0 {
+        return "untitled".to_string();
+    }
+    let Ok(len) = usize::try_from(raw_len) else {
+        return "untitled".to_string();
+    };
+    if len > isize::MAX as usize {
         return "untitled".to_string();
     }
     let ptr = unsafe { rt_string_data(rv) };
     if ptr.is_null() {
         return "untitled".to_string();
     }
-    let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
     std::str::from_utf8(bytes).unwrap_or("untitled").to_string()
 }
 
@@ -68,6 +74,16 @@ static NEXT_HANDLE: AtomicI64 = AtomicI64::new(1);
 #[allow(dead_code)]
 fn next_handle() -> i64 {
     NEXT_HANDLE.fetch_add(1, Ordering::Relaxed)
+}
+
+#[cfg(any(test, all(target_os = "macos", feature = "cocoa-real")))]
+fn checked_pixel_len(w: i64, h: i64) -> Option<usize> {
+    if w <= 0 || h <= 0 {
+        return None;
+    }
+    usize::try_from(w)
+        .ok()?
+        .checked_mul(usize::try_from(h).ok()?)
 }
 
 // ---------------------------------------------------------------------------
@@ -303,20 +319,21 @@ mod imp {
     }
 
     pub fn layer_create(_win: i64, w: i64, h: i64, fill: i64) -> i64 {
-        if w <= 0 || h <= 0 {
+        let Some(len) = super::checked_pixel_len(w, h) else {
             return COCOA_INVALID_HANDLE;
-        }
-        let len = (w as usize) * (h as usize);
+        };
         let id = next_handle();
         let color = fill as u32;
-        state().lock().unwrap().layers.insert(
-            id,
-            Layer {
-                w,
-                h,
-                pixels: vec![color; len],
-            },
-        );
+        let mut pixels = Vec::new();
+        if pixels.try_reserve_exact(len).is_err() {
+            return COCOA_INVALID_HANDLE;
+        }
+        pixels.resize(len, color);
+        state()
+            .lock()
+            .unwrap()
+            .layers
+            .insert(id, Layer { w, h, pixels });
         id
     }
 
@@ -330,8 +347,8 @@ mod imp {
         let lh = l.h;
         let x0 = x.max(0).min(lw);
         let y0 = y.max(0).min(lh);
-        let x1 = (x + w).max(0).min(lw);
-        let y1 = (y + h).max(0).min(lh);
+        let x1 = x.saturating_add(w).max(0).min(lw);
+        let y1 = y.saturating_add(h).max(0).min(lh);
         for yy in y0..y1 {
             let row = (yy * lw) as usize;
             for xx in x0..x1 {
@@ -358,13 +375,22 @@ mod imp {
         };
         let w = l.w as usize;
         let h = l.h as usize;
-        if w == 0 || h == 0 || l.pixels.len() < w * h {
+        let Some(pixel_count) = w.checked_mul(h) else {
+            return false;
+        };
+        let Some(byte_count) = pixel_count.checked_mul(4) else {
+            return false;
+        };
+        if w == 0 || h == 0 || l.pixels.len() < pixel_count {
             return false;
         }
         // Convert ARGB u32 -> RGBA bytes (NSBitmapImageRep with
         // NSDeviceRGBColorSpace + 4 samples per pixel + 32 bits).
-        let mut rgba: Vec<u8> = Vec::with_capacity(w * h * 4);
-        for &px in l.pixels[..w * h].iter() {
+        let mut rgba: Vec<u8> = Vec::new();
+        if rgba.try_reserve_exact(byte_count).is_err() {
+            return false;
+        }
+        for &px in l.pixels[..pixel_count].iter() {
             let a = ((px >> 24) & 0xff) as u8;
             let r = ((px >> 16) & 0xff) as u8;
             let g = ((px >> 8) & 0xff) as u8;
@@ -373,14 +399,10 @@ mod imp {
         }
         let data = NSData::with_bytes(&rgba);
         let image = NSImage::initWithData(mtm.alloc::<NSImage>(), &data);
-        if let Some(img) = image {
-            unsafe { wnd.ns_view.setImage(Some(&img)) };
-        } else {
-            // TODO(cocoa): build NSBitmapImageRep directly from the raw RGBA
-            // buffer instead of relying on NSImage's image-format auto-detect.
-            // For now, falling through still returns true so the Simple-side
-            // present loop keeps ticking.
-        }
+        let Some(img) = image else {
+            return false;
+        };
+        unsafe { wnd.ns_view.setImage(Some(&img)) };
         true
     }
 
@@ -423,8 +445,8 @@ mod imp {
         let lh = l.h;
         let x0 = x.max(0).min(lw);
         let y0 = y.max(0).min(lh);
-        let x1 = (x + w).max(0).min(lw);
-        let y1 = (y + h).max(0).min(lh);
+        let x1 = x.saturating_add(w).max(0).min(lw);
+        let y1 = y.saturating_add(h).max(0).min(lh);
         for yy in y0..y1 {
             let row = (yy * lw) as usize;
             for xx in x0..x1 {
@@ -443,9 +465,9 @@ mod imp {
     }
 
     pub fn layer_blur(_layer: i64, _x: i64, _y: i64, _w: i64, _h: i64, _radius: i64) -> bool {
-        // TODO(metal): CIFilter-based blur. Phase C no-ops but returns true so
-        // the Simple-side glass path does not fall back.
-        true
+        // This provider does not implement blur yet. Report failure so the
+        // Simple compositor can select its real fallback.
+        false
     }
 
     pub fn layer_gradient_v(layer: i64, x: i64, y: i64, w: i64, h: i64, c1: i64, c2: i64) -> bool {
@@ -457,8 +479,8 @@ mod imp {
         let lh = l.h;
         let x0 = x.max(0).min(lw);
         let y0 = y.max(0).min(lh);
-        let x1 = (x + w).max(0).min(lw);
-        let y1 = (y + h).max(0).min(lh);
+        let x1 = x.saturating_add(w).max(0).min(lw);
+        let y1 = y.saturating_add(h).max(0).min(lh);
         if y1 <= y0 {
             return true;
         }
@@ -628,6 +650,14 @@ mod tests {
             // pointer; 0 is its empty/none sentinel.
             assert_eq!(rt_cocoa_window_new(320, 200, 0), COCOA_INVALID_HANDLE);
             assert!(!rt_cocoa_window_resize(1, 800, 600));
+            assert!(!rt_cocoa_layer_blur(1, 0, 0, 1, 1, 1));
         }
+    }
+
+    #[test]
+    fn pixel_dimensions_reject_invalid_or_overflowing_storage() {
+        assert_eq!(checked_pixel_len(4, 3), Some(12));
+        assert_eq!(checked_pixel_len(0, 3), None);
+        assert_eq!(checked_pixel_len(i64::MAX, i64::MAX), None);
     }
 }

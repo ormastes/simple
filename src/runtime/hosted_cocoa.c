@@ -38,12 +38,14 @@ static char *text_rv_to_cstr(int64_t rv) {
     if (rv == 0) return strdup("untitled");
     int64_t len = rt_string_len(rv);
     if (len <= 0) return strdup("untitled");
+    if ((uint64_t)len >= (uint64_t)SIZE_MAX) return strdup("untitled");
     const char *ptr = rt_string_data(rv);
     if (!ptr) return strdup("untitled");
-    char *buf = (char *)malloc((size_t)(len + 1));
+    if (memchr(ptr, '\0', (size_t)len) != NULL) return strdup("untitled");
+    char *buf = (char *)malloc((size_t)len + 1);
     if (!buf) return strdup("untitled");
     memcpy(buf, ptr, (size_t)len);
-    buf[len] = '\0';
+    buf[(size_t)len] = '\0';
     return buf;
 }
 
@@ -228,6 +230,13 @@ static bool is_main_thread(void) {
     return [NSThread isMainThread];
 }
 
+static int64_t clipped_end(int64_t start, int64_t extent, int64_t limit) {
+    if (extent > 0 && start > INT64_MAX - extent) return limit;
+    if (extent < 0 && start < INT64_MIN - extent) return 0;
+    int64_t end = start + extent;
+    return end < 0 ? 0 : (end > limit ? limit : end);
+}
+
 /* =========================================================================
  * Window operations
  * ====================================================================== */
@@ -334,8 +343,11 @@ bool rt_cocoa_window_close(int64_t win) {
 int64_t rt_cocoa_layer_create(int64_t win, int64_t w, int64_t h, int64_t fill_color) {
     (void)win; /* not bound to a specific window in our model */
     if (w <= 0 || h <= 0) return COCOA_INVALID_HANDLE;
+    if ((uint64_t)w > (uint64_t)SIZE_MAX / (uint64_t)h)
+        return COCOA_INVALID_HANDLE;
 
-    size_t len = (size_t)(w * h);
+    size_t len = (size_t)w * (size_t)h;
+    if (len > SIZE_MAX / sizeof(uint32_t)) return COCOA_INVALID_HANDLE;
     uint32_t *pixels = (uint32_t *)malloc(len * sizeof(uint32_t));
     if (!pixels) return COCOA_INVALID_HANDLE;
 
@@ -369,8 +381,8 @@ bool rt_cocoa_layer_fill_rect(int64_t layer_id, int64_t x, int64_t y,
     int64_t lw = l->w, lh = l->h;
     int64_t x0 = x < 0 ? 0 : (x > lw ? lw : x);
     int64_t y0 = y < 0 ? 0 : (y > lh ? lh : y);
-    int64_t x1 = (x+w) < 0 ? 0 : ((x+w) > lw ? lw : (x+w));
-    int64_t y1 = (y+h) < 0 ? 0 : ((y+h) > lh ? lh : (y+h));
+    int64_t x1 = clipped_end(x, w, lw);
+    int64_t y1 = clipped_end(y, h, lh);
 
     for (int64_t yy = y0; yy < y1; yy++) {
         uint32_t *row = l->pixels + (size_t)(yy * lw);
@@ -392,14 +404,17 @@ bool rt_cocoa_layer_present(int64_t win, int64_t layer_id) {
     size_t  pw = (size_t)l->w;
     size_t  ph = (size_t)l->h;
     if (pw == 0 || ph == 0) return false;
+    if (pw > SIZE_MAX / ph) return false;
+    size_t pixel_count = pw * ph;
+    if (pixel_count > SIZE_MAX / 4) return false;
 
     @autoreleasepool {
         /* Convert ARGB (0xAARRGGBB) → RGBA bytes for NSBitmapImageRep. */
-        size_t  nbytes = pw * ph * 4;
+        size_t  nbytes = pixel_count * 4;
         uint8_t *rgba  = (uint8_t *)malloc(nbytes);
         if (!rgba) return false;
 
-        for (size_t i = 0; i < pw * ph; i++) {
+        for (size_t i = 0; i < pixel_count; i++) {
             uint32_t px = l->pixels[i];
             rgba[i*4+0] = (uint8_t)((px >> 16) & 0xff); /* R */
             rgba[i*4+1] = (uint8_t)((px >>  8) & 0xff); /* G */
@@ -419,13 +434,19 @@ bool rt_cocoa_layer_present(int64_t win, int64_t layer_id) {
                          bytesPerRow:(NSInteger)(pw * 4)
                         bitsPerPixel:32];
 
-        if (bmp) {
-            memcpy([bmp bitmapData], rgba, nbytes);
-            NSImage *image = [[NSImage alloc]
-                initWithSize:NSMakeSize((CGFloat)pw, (CGFloat)ph)];
-            [image addRepresentation:bmp];
-            [wnd->ns_view setImage:image];
+        if (!bmp || ![bmp bitmapData]) {
+            free(rgba);
+            return false;
         }
+        memcpy([bmp bitmapData], rgba, nbytes);
+        NSImage *image = [[NSImage alloc]
+            initWithSize:NSMakeSize((CGFloat)pw, (CGFloat)ph)];
+        if (!image) {
+            free(rgba);
+            return false;
+        }
+        [image addRepresentation:bmp];
+        [wnd->ns_view setImage:image];
 
         free(rgba);
     }
@@ -468,8 +489,8 @@ bool rt_cocoa_layer_blend_rect(int64_t layer_id, int64_t x, int64_t y,
     int64_t lw = l->w, lh = l->h;
     int64_t x0 = x < 0 ? 0 : (x > lw ? lw : x);
     int64_t y0 = y < 0 ? 0 : (y > lh ? lh : y);
-    int64_t x1 = (x+w) < 0 ? 0 : ((x+w) > lw ? lw : (x+w));
-    int64_t y1 = (y+h) < 0 ? 0 : ((y+h) > lh ? lh : (y+h));
+    int64_t x1 = clipped_end(x, w, lw);
+    int64_t y1 = clipped_end(y, h, lh);
 
     for (int64_t yy = y0; yy < y1; yy++) {
         uint32_t *row = l->pixels + (size_t)(yy * lw);
@@ -502,13 +523,16 @@ bool rt_cocoa_layer_blur(int64_t layer_id, int64_t x, int64_t y,
     int64_t lw = l->w, lh = l->h;
     int64_t x0 = x < 0 ? 0 : (x > lw ? lw : x);
     int64_t y0 = y < 0 ? 0 : (y > lh ? lh : y);
-    int64_t x1 = (x+w) < 0 ? 0 : ((x+w) > lw ? lw : (x+w));
-    int64_t y1 = (y+h) < 0 ? 0 : ((y+h) > lh ? lh : (y+h));
+    int64_t x1 = clipped_end(x, w, lw);
+    int64_t y1 = clipped_end(y, h, lh);
     if (x1 <= x0 || y1 <= y0) return true;
 
     int64_t rw = x1 - x0;
     int64_t rh = y1 - y0;
-    uint32_t *tmp = (uint32_t *)malloc((size_t)(rw * rh) * sizeof(uint32_t));
+    if ((uint64_t)rw > (uint64_t)SIZE_MAX / (uint64_t)rh) return false;
+    size_t tmp_count = (size_t)rw * (size_t)rh;
+    if (tmp_count > SIZE_MAX / sizeof(uint32_t)) return false;
+    uint32_t *tmp = (uint32_t *)malloc(tmp_count * sizeof(uint32_t));
     if (!tmp) return false;
 
     int64_t r = radius;
@@ -587,8 +611,8 @@ bool rt_cocoa_layer_gradient_v(int64_t layer_id, int64_t x, int64_t y,
     int64_t lw = l->w, lh = l->h;
     int64_t x0 = x < 0 ? 0 : (x > lw ? lw : x);
     int64_t y0 = y < 0 ? 0 : (y > lh ? lh : y);
-    int64_t x1 = (x+w) < 0 ? 0 : ((x+w) > lw ? lw : (x+w));
-    int64_t y1 = (y+h) < 0 ? 0 : ((y+h) > lh ? lh : (y+h));
+    int64_t x1 = clipped_end(x, w, lw);
+    int64_t y1 = clipped_end(y, h, lh);
     if (y1 <= y0) return true;
 
     int64_t span = y1 - y0;

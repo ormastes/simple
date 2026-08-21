@@ -63,3 +63,8 @@ passing placeholder.
 8. Continue the inventory by replacing remaining sentinel/nullable raw ABIs
    with generated typed contracts and proof/test receipts; full SFFI remains
    incomplete until every execution lane consumes the authoritative registry.
+9. Cocoa C/Rust providers and their Simple consumer are now fail-closed for
+   fabricated presentation/blur success, invalid strings, and allocation
+   arithmetic. Before `Verified`, run macOS real-provider race/sanitizer tests,
+   bind the selected provider artifact, and replace ambiguous pixel/event
+   sentinels with typed results.

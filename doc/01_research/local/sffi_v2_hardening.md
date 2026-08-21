@@ -368,5 +368,21 @@ produce an empty signature. The crypto audit rejects any future raw
 sign/verify declaration without adjacent FFI-unsafe metadata. These legacy
 ABIs are not thereby verified or safe; the tags prevent them from masquerading
 as ordinary safe interfaces while callers migrate to checked `Result` APIs.
-Inventory improves to 108 `unsafe_contract_declared` rows and 13,529 missing
-both tag and contract. An annotation-only change has no call-path cost.
+The Cocoa compositor boundary had 12 untagged raw declarations and 20 calls
+outside lexical unsafe scopes. Its Rust real provider also reported success
+when image creation failed and for an unimplemented blur, while C and Rust
+size/coordinate arithmetic could overflow before allocation or clipping. All
+declarations now document ownership/sentinel semantics, every call has one
+minimal `unsafe(ffi)` scope, and both providers fail closed on unsupported or
+invalid storage. The C provider additionally rejects embedded-NUL titles and
+failed bitmap/image construction. Rust provider tests, C warnings-as-errors
+syntax, Simple syntax, and a dedicated source audit pass. These changes add no
+native call, lookup, hash, or allocation to the hot path; checked arithmetic
+replaces potentially undefined or panicking arithmetic. The macOS real C lane
+still needs race-focused execution and signed-artifact evidence, so this is
+contract-hardened rather than fully verified.
+
+The rebuilt inventory now records 124 `unsafe_contract_declared` rows and
+13,456 missing both tag and contract. Twelve Cocoa declarations are in the
+declared state. Metadata and lexical unsafe scopes compile away and have no
+call-path cost.
