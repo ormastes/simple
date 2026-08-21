@@ -51,6 +51,11 @@ debugger-authored CPU-state boot and open xHCI DbC are excluded.
 - **REQ-012 — Persistent mutation boundary:** No BIOS/SPI, MSR, UEFI-variable,
   internal eMMC/SATA, or removable-media mutation occurs without its separately
   admitted operation and explicit confirmation.
+- **REQ-013 — Free post-boot RAM access:** After SimpleOS boots, a target-side
+  GDB RSP monitor shall expose only a loader-reserved staging range over CN16.
+  It shall checksum packets, cap each transfer, verify writes by readback, and
+  return unsupported for registers, breakpoints, continue, step, or reset until
+  real x86 trap-frame/run-control support exists.
 
 ## Acceptance
 
@@ -58,4 +63,5 @@ Contract/OVMF evidence may prove implementation behavior but cannot satisfy
 REQ-002, REQ-003, REQ-005 physical execution, REQ-010 physical readback, or
 REQ-011. Those remain BLOCKED until the licensed Intel tool, qualified cable,
 and exact board connection exist.
-
+REQ-013 may pass under OVMF for protocol and RAM readback while physical CN16
+transport remains a separate hardware evidence gate.

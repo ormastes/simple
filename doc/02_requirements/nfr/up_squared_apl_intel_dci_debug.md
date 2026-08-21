@@ -25,4 +25,7 @@ Selection: Safety baseline and evidence levels confirmed with A + B + D.
   repeated full-image scan after commit.
 - **NFR-010 — Auditability:** Every mutation records target identity, operation,
   address or LBA bounds, payload hash, tool/build provenance, and result.
-
+- **NFR-011 — Debug honesty:** The free RSP monitor advertises only implemented
+  packet size and bounded RAM operations. Missing register and run-control
+  capabilities return the standard empty unsupported response, never fabricated
+  state or a false halt/reset result.

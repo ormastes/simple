@@ -2,7 +2,8 @@
 # UP Squared Apollo Lake DCI-safe load and storage policy
 
 Executable contract coverage for REQ-006, REQ-007, REQ-009, and the admission
-portion of REQ-010. Physical DCI discovery, boot, and storage readback remain
+portion of REQ-010, plus REQ-013 free post-boot RAM access. Physical DCI
+discovery, boot, and storage readback remain
 hardware evidence gates and are not represented as passing assertions here.
 """
 
@@ -12,6 +13,9 @@ use os.kernel.arch.x86_64.up_squared.dci_mailbox.{
     DciElfPlan, DciStorageIdentity, DciStorageWrite,
     dci_admit_mailbox, dci_admit_load_plan,
     dci_storage_confirmation, dci_admit_storage_write
+}
+use os.kernel.arch.x86_64.up_squared.gdb_rsp_monitor.{
+    Up2RspOperation, up2_rsp_plan, up2_rsp_frame, up2_rsp_decode_frame
 }
 
 val IMAGE_HASH: text = "1840191f50d032d9c3b4af9b012d211ce01c1cd77b3315961a9e4b486c1c48f3"
@@ -105,3 +109,24 @@ describe "UP2 target-side storage admission":
             confirmation: challenge, persistent_allowed: true
         ))
         expect(accepted.accepted).to_equal(true)
+
+describe "UP2 free post-boot RAM loading":
+    it "accepts only framed operations inside the loader-owned staging range":
+        # @step: Establish an RSP session without advertising false run control.
+        val supported = up2_rsp_plan("qSupported:multiprocess+")
+        expect(supported.response).to_equal("PacketSize=1000")
+        expect(up2_rsp_plan("g").response).to_equal("")
+        expect(up2_rsp_plan("c").response).to_equal("")
+
+        # @step: Decode one exact write inside the dedicated staging segment.
+        val write_frame = up2_rsp_frame("M0a000000,4:53494d50")
+        val decoded = up2_rsp_decode_frame(write_frame)
+        expect(decoded.is_ok()).to_equal(true)
+        val write = up2_rsp_plan(decoded.unwrap())
+        expect(write.operation).to_equal(Up2RspOperation.WriteMemory)
+        expect(write.data).to_equal([0x53u8, 0x49u8, 0x4du8, 0x50u8])
+
+        # @step: Reject the same write outside loader-owned RAM.
+        val outside = up2_rsp_plan("M09000000,4:53494d50")
+        expect(outside.operation).to_equal(Up2RspOperation.Reply)
+        expect(outside.response).to_equal("E02")

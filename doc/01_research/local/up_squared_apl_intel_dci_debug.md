@@ -104,3 +104,13 @@ normal input; otherwise the first command becomes `0xAEls /`. OVMF proves clean
 boot output and `ls /` after this fix, but physical CN16 remains unproven.
 Generic NVMe read/write/flush code exists,
 but the UP2 entry does not initialize it, so no physical storage claim follows.
+
+The free post-boot memory gap is now implemented without expanding DCI claims.
+The linker reserves a 16 MiB writable `PT_LOAD` range at
+`0x0a000000..0x0b000000`; `gdb_rsp_monitor.spl` admits only checksummed `m`/`M`
+packets of at most 1024 bytes in that range, and `M` performs exact readback.
+The CN16 adapter enters only after the shell command `gdb`; register,
+breakpoint, continue, step, reset, and binary-write packets remain unsupported.
+The admitted Stage 3 compiler built the freestanding image, and OVMF wrote
+`SIMP`, read `53494d50`, detached, and returned to the shell. Physical CN16
+evidence remains missing because Tigard is disconnected.

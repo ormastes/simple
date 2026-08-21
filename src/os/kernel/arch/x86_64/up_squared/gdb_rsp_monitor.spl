@@ -1,0 +1,267 @@
+# codex-impl: bounded target-side GDB RSP memory monitor for UP Squared.
+
+val UP2_RSP_STAGING_START: u64 = 0x0a000000u64
+val UP2_RSP_STAGING_SIZE: u64 = 0x01000000u64
+val UP2_RSP_MAX_TRANSFER: i64 = 1024
+val UP2_RSP_MAX_PACKET: i64 = 4096
+val UP2_RSP_U64_MAX: u64 = 0xffffffffffffffffu64
+
+extern fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64
+extern fn rt_ptr_write_u8(addr: i64, offset: i64, value: i64)
+
+pub enum Up2RspOperation:
+    Reply
+    ReadMemory
+    WriteMemory
+    Detach
+
+pub struct Up2RspPlan:
+    operation: Up2RspOperation
+    address: u64
+    length: i64
+    data: [u8]
+    response: text
+
+struct Up2RspHex:
+    valid: bool
+    value: u64
+
+fn _up2_rsp_hex_char_value(char: text) -> i64:
+    match char:
+        "0": 0
+        "1": 1
+        "2": 2
+        "3": 3
+        "4": 4
+        "5": 5
+        "6": 6
+        "7": 7
+        "8": 8
+        "9": 9
+        "a": 10
+        "A": 10
+        "b": 11
+        "B": 11
+        "c": 12
+        "C": 12
+        "d": 13
+        "D": 13
+        "e": 14
+        "E": 14
+        "f": 15
+        "F": 15
+        _: -1
+
+fn _up2_rsp_hex_digit(value: i64) -> text:
+    match value:
+        0: "0"
+        1: "1"
+        2: "2"
+        3: "3"
+        4: "4"
+        5: "5"
+        6: "6"
+        7: "7"
+        8: "8"
+        9: "9"
+        10: "a"
+        11: "b"
+        12: "c"
+        13: "d"
+        14: "e"
+        15: "f"
+        _: ""
+
+fn _up2_rsp_byte_to_hex(value: i64) -> text:
+    _up2_rsp_hex_digit((value / 16) & 15) + _up2_rsp_hex_digit(value & 15)
+
+fn _up2_rsp_substring(raw: text, start: i64, finish: i64) -> text:
+    var out = ""
+    var index = start
+    while index < finish:
+        out = out + raw.char_at(index)
+        index = index + 1
+    out
+
+fn _up2_rsp_find_char(raw: text, char: text, start: i64) -> i64:
+    var index = start
+    while index < raw.len():
+        if raw.char_at(index) == char:
+            return index
+        index = index + 1
+    -1
+
+fn _up2_rsp_starts_with(raw: text, prefix: text) -> bool:
+    if prefix.len() > raw.len():
+        return false
+    var index: i64 = 0
+    while index < prefix.len():
+        if raw.char_at(index) != prefix.char_at(index):
+            return false
+        index = index + 1
+    true
+
+fn _up2_rsp_reply(response: text) -> Up2RspPlan:
+    Up2RspPlan(operation: Up2RspOperation.Reply, address: 0u64,
+        length: 0, data: [], response: response)
+
+fn _up2_rsp_hex(raw: text) -> Up2RspHex:
+    if raw == "" or raw.len() > 16:
+        return Up2RspHex(valid: false, value: 0u64)
+    var value: u64 = 0u64
+    var index: i64 = 0
+    while index < raw.len():
+        val digit = _up2_rsp_hex_char_value(raw.char_at(index))
+        if digit < 0 or value > (UP2_RSP_U64_MAX - digit as u64) / 16u64:
+            return Up2RspHex(valid: false, value: 0u64)
+        value = value * 16u64 + digit as u64
+        index = index + 1
+    Up2RspHex(valid: true, value: value)
+
+fn _up2_rsp_range_allowed(address: u64, length: i64) -> bool:
+    if (length <= 0 or length > UP2_RSP_MAX_TRANSFER or
+        address < UP2_RSP_STAGING_START):
+        return false
+    val relative = address - UP2_RSP_STAGING_START
+    val byte_length = length as u64
+    return (relative <= UP2_RSP_STAGING_SIZE and
+        byte_length <= UP2_RSP_STAGING_SIZE - relative)
+
+fn _up2_rsp_memory_parts(payload: text, write: bool) -> Result<[text], text>:
+    val comma = _up2_rsp_find_char(payload, ",", 1)
+    if comma <= 1:
+        return Err("E01")
+    var length_end = payload.len()
+    if write:
+        val colon = _up2_rsp_find_char(payload, ":", comma + 1)
+        if colon <= comma + 1:
+            return Err("E01")
+        length_end = colon
+    val address = _up2_rsp_substring(payload, 1, comma)
+    val length = _up2_rsp_substring(payload, comma + 1, length_end)
+    if write:
+        return Ok([address, length,
+            _up2_rsp_substring(payload, length_end + 1, payload.len())])
+    Ok([address, length])
+
+fn _up2_rsp_decode_write_data(raw: text, length: i64) -> Result<[u8], text>:
+    if raw.len() != length * 2:
+        return Err("E01")
+    var bytes: [u8] = []
+    var index: i64 = 0
+    while index < raw.len():
+        val high = _up2_rsp_hex_char_value(raw.char_at(index))
+        val low = _up2_rsp_hex_char_value(raw.char_at(index + 1))
+        if high < 0 or low < 0:
+            return Err("E01")
+        bytes.push((high * 16 + low) as u8)
+        index = index + 2
+    Ok(bytes)
+
+fn _up2_rsp_memory_plan(payload: text, write: bool) -> Up2RspPlan:
+    val parts_result = _up2_rsp_memory_parts(payload, write)
+    if parts_result.is_err():
+        return _up2_rsp_reply(parts_result.unwrap_err())
+    val parts = parts_result.unwrap()
+    val address = _up2_rsp_hex(parts[0])
+    val length = _up2_rsp_hex(parts[1])
+    if not address.valid or not length.valid or length.value > 0x7fffffffu64:
+        return _up2_rsp_reply("E01")
+    val byte_length = length.value as i64
+    if not _up2_rsp_range_allowed(address.value, byte_length):
+        return _up2_rsp_reply("E02")
+    if not write:
+        return Up2RspPlan(operation: Up2RspOperation.ReadMemory,
+            address: address.value, length: byte_length, data: [], response: "")
+    val data_result = _up2_rsp_decode_write_data(parts[2], byte_length)
+    if data_result.is_err():
+        return _up2_rsp_reply(data_result.unwrap_err())
+    Up2RspPlan(operation: Up2RspOperation.WriteMemory,
+        address: address.value, length: byte_length,
+        data: data_result.unwrap(), response: "")
+
+pub fn up2_rsp_plan(payload: text) -> Up2RspPlan:
+    if payload == "?":
+        return _up2_rsp_reply("S00")
+    if _up2_rsp_starts_with(payload, "qSupported"):
+        return _up2_rsp_reply("PacketSize=1000")
+    if payload == "qAttached":
+        return _up2_rsp_reply("1")
+    if payload == "qC":
+        return _up2_rsp_reply("QC1")
+    if payload == "qfThreadInfo":
+        return _up2_rsp_reply("m1")
+    if payload == "qsThreadInfo":
+        return _up2_rsp_reply("l")
+    if _up2_rsp_starts_with(payload, "H"):
+        return _up2_rsp_reply("OK")
+    if payload == "vMustReplyEmpty" or payload == "qTStatus":
+        return _up2_rsp_reply("")
+    if payload == "D":
+        return Up2RspPlan(operation: Up2RspOperation.Detach,
+            address: 0u64, length: 0, data: [], response: "OK")
+    if _up2_rsp_starts_with(payload, "m"):
+        return _up2_rsp_memory_plan(payload, false)
+    if _up2_rsp_starts_with(payload, "M"):
+        return _up2_rsp_memory_plan(payload, true)
+    # Register access, breakpoints, continue, and step are deliberately
+    # unsupported until a real x86 trap frame and resume path exist.
+    _up2_rsp_reply("")
+
+pub fn up2_rsp_checksum(payload: text) -> u8:
+    var sum: i64 = 0
+    var index: i64 = 0
+    while index < payload.len():
+        sum = (sum + payload.char_code_at(index)) & 0xff
+        index = index + 1
+    sum as u8
+
+pub fn up2_rsp_frame(payload: text) -> text:
+    "$" + payload + "#" + _up2_rsp_byte_to_hex(up2_rsp_checksum(payload) as i64)
+
+pub fn up2_rsp_decode_frame(frame: text) -> Result<text, text>:
+    if (frame.len() < 4 or frame.len() > UP2_RSP_MAX_PACKET or
+        frame.char_at(0) != "$" or frame.char_at(frame.len() - 3) != "#"):
+        return Err("rsp-frame")
+    val expected_high = _up2_rsp_hex_char_value(frame.char_at(frame.len() - 2))
+    val expected_low = _up2_rsp_hex_char_value(frame.char_at(frame.len() - 1))
+    if expected_high < 0 or expected_low < 0:
+        return Err("rsp-checksum-format")
+    val payload = _up2_rsp_substring(frame, 1, frame.len() - 3)
+    val expected = (expected_high * 16 + expected_low) as u8
+    if up2_rsp_checksum(payload) != expected:
+        return Err("rsp-checksum")
+    Ok(payload)
+
+fn _up2_rsp_read_byte(address: u64) -> u8:
+    val aligned = address & 0xfffffffffffffff8u64
+    val shift = ((address - aligned) * 8u64) as i64
+    ((rt_ptr_read_i64(aligned as i64, 0) >> shift) & 0xff) as u8
+
+pub fn up2_rsp_execute(plan: Up2RspPlan) -> text:
+    if plan.operation == Up2RspOperation.ReadMemory:
+        var response = ""
+        var offset: i64 = 0
+        while offset < plan.length:
+            response = response + _up2_rsp_byte_to_hex(
+                _up2_rsp_read_byte(plan.address + offset as u64) as i64)
+            offset = offset + 1
+        return response
+    if plan.operation == Up2RspOperation.WriteMemory:
+        var offset: i64 = 0
+        while offset < plan.length:
+            rt_ptr_write_u8((plan.address + offset as u64) as i64, 0,
+                plan.data[offset] as i64)
+            offset = offset + 1
+        offset = 0
+        while offset < plan.length:
+            if _up2_rsp_read_byte(plan.address + offset as u64) != plan.data[offset]:
+                return "E03"
+            offset = offset + 1
+        return "OK"
+    plan.response
+
+export UP2_RSP_STAGING_START, UP2_RSP_STAGING_SIZE, UP2_RSP_MAX_TRANSFER
+export Up2RspOperation, Up2RspPlan
+export up2_rsp_plan, up2_rsp_checksum, up2_rsp_frame, up2_rsp_decode_frame
+export up2_rsp_execute

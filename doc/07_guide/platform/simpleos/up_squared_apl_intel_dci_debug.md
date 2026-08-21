@@ -98,8 +98,8 @@ pre-boot reset/halt/memory load before target software initializes xHCI.
 ## Free first-light and software-debug path
 
 The free path does not emulate Intel DCI. It boots the existing removable UEFI
-image, observes CN16, and can later attach GDB to a target-resident SimpleOS RSP
-stub. Use this exact CN16 UART wiring:
+image, observes CN16, and exposes a bounded target-resident GDB RSP memory
+monitor after SimpleOS starts. Use this exact CN16 UART wiring:
 
 | CN16 pin | UP2 signal | Connect to Tigard Port A |
 |---:|---|---|
@@ -129,9 +129,36 @@ capture from power-on/reset through the fresh `ls /` response. A quiet UART is
 not PASS: verify power, pin 10-to-RX and pin 8-to-GND first, then capture factory
 firmware output to separate wiring from a SimpleOS UART-routing problem.
 
+### Load and verify staging RAM with GDB
+
+At the SimpleOS prompt, type `gdb`. The monitor then owns the serial port until
+detach. Exit picocom without resetting the board, and attach host GDB to the
+same stable serial path:
+
+```gdb
+set serial baud 115200
+set remotetimeout 5
+target remote /dev/serial/by-id/usb-Tigard_port_A:Serial_port_B:JTAG_*-if00-port0
+maintenance packet M0a000000,4:53494d50
+maintenance packet m0a000000,4
+detach
+```
+
+The read response must be `53494d50`. Valid addresses are exactly
+`0x0a000000..0x0b000000`, with at most 1024 bytes per packet. The writable ELF
+`PT_LOAD` reserves this 16 MiB staging range, and every `M` packet is read back
+before `OK`. Use `maintenance packet` for this current memory-only monitor;
+ordinary register display, breakpoints, `continue`, `step`, reset, and binary
+`X` packets are not implemented and return unsupported. This is post-boot RAM
+access, not preboot DCI/JTAG or a direct CPU-state boot method.
+
+The canonical OVMF checker proves the sequence `qSupported` → write `SIMP` →
+read `53494d50` → detach while retaining the earlier boot/VFS/`ls /` evidence.
+Physical CN16 PASS still requires the exact board transcript.
+
 Do not install CHIPSEC on the host expecting remote access. CHIPSEC must execute
-on UP2 under a trusted Linux/Windows driver or UEFI agent. Linux xHCI DbC and a
-future SimpleOS GDB stub are post-initialization software tools; neither can
+on UP2 under a trusted Linux/Windows driver or UEFI agent. Linux xHCI DbC and the
+SimpleOS GDB monitor are post-initialization software tools; neither can
 halt or reset an otherwise dead target.
 
 Research and source links are in
