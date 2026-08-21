@@ -10,9 +10,13 @@ Trust flows in one direction:
 `bootstrap phase artifacts -> per-phase verifiers -> automated gates + retained logs -> atomic SDN ledger -> push`
 
 The push consumer recomputes a content fingerprint excluding the ledger itself,
-requires one-to-one unique registry/result IDs, retains a per-gate PASS time,
-and fails closed on malformed, stale, failed, missing, evidence-less, or
-non-passing push-blocking rows. Non-blocking TODOs remain visible. The bootstrap
-owner writes logs before the ledger and records repository-relative evidence
-references. This avoids a circular Git hash dependency while binding PASS
-evidence to the source/config/scripts/tests/docs it qualifies.
+requires one-to-one unique registry/result IDs and exact command agreement,
+retains a per-gate PASS time, and verifies each PASS evidence file against its
+recorded SHA-256. It fails closed on malformed, stale, failed, missing,
+tampered, evidence-less, or non-passing push-blocking rows. Non-blocking TODOs
+remain visible. Push-tier commands are registry rows dispatched through a
+closed ID/mode/command allowlist, so a changed manifest cannot turn the hook
+into an arbitrary shell-command executor.
+The bootstrap owner writes logs before the ledger and records repository-relative
+evidence references and hashes. This avoids a circular Git hash dependency
+while binding PASS evidence to the source/config/scripts/tests/docs it qualifies.

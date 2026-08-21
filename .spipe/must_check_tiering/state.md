@@ -177,3 +177,11 @@ implementation-blocked-by-bootstrap-authority
   gives explicit named imports precedence over overlapping globs while keeping
   same-precedence ambiguity fail-closed, with behavioral and source-contract
   regressions. Fresh bootstrap verification remains pending.
+- harden: The SDN registry now owns the four bounded push commands; the push
+  consumer rejects manifest/ledger command drift and missing or SHA-mismatched
+  PASS evidence. Bootstrap automation accepts only an explicit final PASS
+  verdict, and Sdoctest bootstrap evidence requires independently nonzero green
+  Markdown and source-comment lanes.
+- verify: Updated push/bootstrap/tiering self-tests passed; the real ref fixture
+  remained within the ten-second budget. Full bootstrap remains blocked by the
+  unchanged Stage-3 imported-type cascade after the third bounded cycle.

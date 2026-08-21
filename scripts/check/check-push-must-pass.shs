@@ -19,6 +19,8 @@ fingerprint_rev() {
     return "$_rc"
 }
 
+hash_file() { sha256sum -- "$1" 2>/dev/null | awk '{print $1}'; }
+
 field_from_text() {
     _key=$1
     awk -v key="$_key" '$1 == key ":" {gsub(/^[^:]*:[[:space:]]*/, ""); if (substr($0,1,1)=="\"") $0=substr($0,2); if (substr($0,length($0),1)=="\"") $0=substr($0,1,length($0)-1); print; exit}'
@@ -29,17 +31,17 @@ validate_ledger_text() {
     _ledger=$2
     _want_fp=$3
     _schema=$(printf '%s\n' "$_ledger" | field_from_text schema)
-    [ "$_schema" = simple.must-check-ledger/v1 ] || return 10
+    [ "$_schema" = simple.must-check-ledger/v2 ] || return 10
     _got_fp=$(printf '%s\n' "$_ledger" | field_from_text source_fingerprint)
     [ "$_got_fp" = "$_want_fp" ] || return 11
-    _manifest_ids=$(printf '%s\n' "$_manifest" | awk -F, '/^[[:space:]]+[a-z0-9][a-z0-9-]*,[[:space:]]*(push|bootstrap),/ {x=$1; gsub(/^[[:space:]]+/,"",x); print x}')
+    _manifest_ids=$(printf '%s\n' "$_manifest" | awk -F, '/^[[:space:]]+[a-z0-9][a-z0-9-]*,[[:space:]]*bootstrap,/ {x=$1; gsub(/^[[:space:]]+/,"",x); print x}')
     _ledger_ids=$(printf '%s\n' "$_ledger" | awk -F, '/^[[:space:]]+[a-z0-9][a-z0-9-]*,[[:space:]]*(pass|todo|blocked|fail),/ {x=$1; gsub(/^[[:space:]]+/,"",x); print x}')
     [ -n "$_manifest_ids" ] && [ -n "$_ledger_ids" ] || return 12
     [ "$(printf '%s\n' "$_manifest_ids" | sort | uniq -d | wc -l)" -eq 0 ] || return 13
     [ "$(printf '%s\n' "$_ledger_ids" | sort | uniq -d | wc -l)" -eq 0 ] || return 14
     [ "$(printf '%s\n' "$_manifest_ids" | sort)" = "$(printf '%s\n' "$_ledger_ids" | sort)" ] || return 15
     _todo=0
-    printf '%s\n' "$_manifest" | awk '/^[[:space:]]+[a-z0-9][a-z0-9-]*,[[:space:]]*(push|bootstrap),/ {print}' |
+    printf '%s\n' "$_manifest" | awk '/^[[:space:]]+[a-z0-9][a-z0-9-]*,[[:space:]]*bootstrap,/ {print}' |
     while IFS=, read -r _id _tier _blocking _mode _command _description; do
         _id=$(printf '%s' "$_id" | tr -d ' ')
         _blocking=$(printf '%s' "$_blocking" | tr -d ' ')
@@ -48,9 +50,17 @@ validate_ledger_text() {
         _status=$(printf '%s\n' "$_row" | awk -F, '{x=$2; gsub(/[[:space:]]/, "", x); print x}')
         _passed_at=$(printf '%s\n' "$_row" | awk -F, '{x=$3; gsub(/[[:space:]]/, "", x); print x}')
         _evidence=$(printf '%s\n' "$_row" | awk -F, '{x=$5; gsub(/^[[:space:]]+|[[:space:]]+$/, "", x); gsub(/^"|"$/, "", x); print x}')
+        _evidence_sha=$(printf '%s\n' "$_row" | awk -F, '{x=$6; gsub(/[[:space:]"]/, "", x); print x}')
+        _ledger_command=$(printf '%s\n' "$_row" | awk -F, '{x=$4; gsub(/^[[:space:]]+|[[:space:]]+$/, "", x); gsub(/^"|"$/, "", x); print x}')
+        _manifest_command=$(printf '%s' "$_command" | sed 's/^[[:space:]]*"//;s/"[[:space:]]*$//')
+        [ "$_ledger_command" = "$_manifest_command" ] || exit 26
         if [ "$_status" = pass ]; then
             printf '%s\n' "$_passed_at" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' || exit 23
             [ -n "$_evidence" ] && [ "$_evidence" != never ] && [ "$_evidence" != "pending required evidence" ] || exit 25
+            printf '%s\n' "$_evidence_sha" | grep -Eq '^[0-9a-f]{64}$' || exit 27
+            case "$_evidence" in /*) _evidence_path=$_evidence ;; *) _evidence_path="$ROOT/$_evidence" ;; esac
+            [ -f "$_evidence_path" ] && [ ! -L "$_evidence_path" ] || exit 28
+            [ "$(hash_file "$_evidence_path")" = "$_evidence_sha" ] || exit 29
         elif [ "$_passed_at" != never ]; then
             exit 24
         fi
@@ -64,12 +74,42 @@ validate_ledger_text() {
     return $?
 }
 
+run_manifest_push_gates() {
+    _manifest=$1
+    _range=$2
+    _ref=$3
+    _push_rows=$(mktemp) || return 2
+    printf '%s\n' "$_manifest" | awk '/^[[:space:]]+[a-z0-9][a-z0-9-]*,[[:space:]]*push,/ {print}' > "$_push_rows"
+    [ -s "$_push_rows" ] || { rm -f "$_push_rows"; return 2; }
+    while IFS=, read -r _id _tier _blocking _mode _command _description; do
+        _id=$(printf '%s' "$_id" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        _mode=$(printf '%s' "$_mode" | tr -d ' ')
+        _command=$(printf '%s' "$_command" | sed 's/^[[:space:]]*"//;s/"[[:space:]]*$//')
+        [ -n "$_command" ] || { rm -f "$_push_rows"; return 2; }
+        case "$_id:$_mode:$_command" in
+            'push-conflict-tree:range:sh scripts/check/check-no-conflict-tree-push.shs')
+                sh "$ROOT/scripts/check/check-no-conflict-tree-push.shs" "$_range" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-tree-size:range:sh scripts/check/check-tree-size-push.shs')
+                sh "$ROOT/scripts/check/check-tree-size-push.shs" "$_range" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-conflict-markers:range:sh scripts/check/check-no-conflict-markers-push.shs')
+                sh "$ROOT/scripts/check/check-no-conflict-markers-push.shs" "$_range" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-rules-quick:ref:sh scripts/check/check-rules-sdl.shs --group quick --ref')
+                sh "$ROOT/scripts/check/check-rules-sdl.shs" --group quick --ref "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
+            *) rm -f "$_push_rows"; return 2 ;;
+        esac
+    done < "$_push_rows"
+    rm -f "$_push_rows"
+}
+
 if [ "${1:-}" = --self-test ]; then
     _tmp=$(mktemp -d) || exit 2
     trap 'rm -rf "$_tmp"' EXIT INT TERM
     cp "$ROOT/$MANIFEST_REL" "$_tmp/manifest"
     cp "$ROOT/$LEDGER_REL" "$_tmp/ledger"
-    sed 's/source_fingerprint: "unrecorded"/source_fingerprint: "abc"/; s/compiler-stage1, todo, never/compiler-stage1, pass, 2000-01-01T00:00:00Z/; s/compiler-stage2, todo, never/compiler-stage2, pass, 2000-01-01T00:00:00Z/; s/compiler-stage3, todo, never/compiler-stage3, pass, 2000-01-01T00:00:00Z/; s/compiler-stage4, todo, never/compiler-stage4, pass, 2000-01-01T00:00:00Z/' "$_tmp/ledger" > "$_tmp/pass"
+    printf '%s\n' 'self-test authoritative evidence' > "$_tmp/evidence"
+    _evidence_sha=$(hash_file "$_tmp/evidence") || exit 1
+    sed 's/source_fingerprint: "unrecorded"/source_fingerprint: "abc"/; s/compiler-stage1, todo, never/compiler-stage1, pass, 2000-01-01T00:00:00Z/; s/compiler-stage2, todo, never/compiler-stage2, pass, 2000-01-01T00:00:00Z/; s/compiler-stage3, todo, never/compiler-stage3, pass, 2000-01-01T00:00:00Z/; s/compiler-stage4, todo, never/compiler-stage4, pass, 2000-01-01T00:00:00Z/' "$_tmp/ledger" > "$_tmp/pass-raw"
+    awk -F, -v ev="$_tmp/evidence" -v sha="$_evidence_sha" 'BEGIN{OFS=","} $2 ~ /pass/ {$5=" \"" ev "\""; $6=" \"" sha "\""} {print}' "$_tmp/pass-raw" > "$_tmp/pass"
     validate_ledger_text "$(cat "$_tmp/manifest")" "$(cat "$_tmp/pass")" abc || die "valid fixture rejected"
     validate_ledger_text "$(cat "$_tmp/manifest")" "$(cat "$_tmp/pass")" stale && die "stale fixture accepted"
     sed 's/compiler-stage4, pass/compiler-stage4, fail/' "$_tmp/pass" > "$_tmp/fail"
@@ -83,9 +123,12 @@ if [ "${1:-}" = --self-test ]; then
     validate_ledger_text "$(cat "$_tmp/empty-manifest")" "$(cat "$_tmp/fail")" abc && die "empty manifest accepted"
     sed 's/compiler-stage4, pass, 2000-01-01T00:00:00Z/compiler-stage4, pass, never/' "$_tmp/pass" > "$_tmp/no-pass-time"
     validate_ledger_text "$(cat "$_tmp/manifest")" "$(cat "$_tmp/no-pass-time")" abc && die "PASS without timestamp accepted"
-    sed 's/"successful full Stage 4 CLI receipt required"/""/' "$_tmp/pass" > "$_tmp/no-evidence"
+    awk -F, 'BEGIN{OFS=","} $1 ~ /compiler-stage4/ {$5=" \"\""} {print}' "$_tmp/pass" > "$_tmp/no-evidence"
     validate_ledger_text "$(cat "$_tmp/manifest")" "$(cat "$_tmp/no-evidence")" abc && die "PASS without evidence reference accepted"
-    echo "push-must-check: PASS — 8 ledger fixtures checked"
+    sed 's/authoritative evidence/tampered evidence/' "$_tmp/evidence" > "$_tmp/tampered"
+    mv "$_tmp/tampered" "$_tmp/evidence"
+    validate_ledger_text "$(cat "$_tmp/manifest")" "$(cat "$_tmp/pass")" abc && die "tampered evidence accepted"
+    echo "push-must-check: PASS — 9 ledger fixtures checked"
     exit 0
 fi
 
@@ -106,10 +149,8 @@ while read -r _local_ref _local_sha _remote_ref _remote_sha; do
         _base=$(git -C "$ROOT" merge-base "$_local_sha" origin/main 2>/dev/null) || die "cannot derive new-ref base"
         _range="$_base..$_local_sha"
     fi
-    sh "$ROOT/scripts/check/check-no-conflict-tree-push.shs" "$_range" || exit $?
-    sh "$ROOT/scripts/check/check-tree-size-push.shs" "$_range" || exit $?
-    sh "$ROOT/scripts/check/check-no-conflict-markers-push.shs" "$_range" || exit $?
-    sh "$ROOT/scripts/check/check-rules-sdl.shs" --group quick --ref "$_local_sha" || exit $?
+    run_manifest_push_gates "$_manifest" "$_range" "$_local_sha" ||
+        die "one or more manifest-declared push gates failed"
 done < "$_refs"
 
 echo "push-must-check: PASS — lightweight committed-tree and bootstrap-ledger checks passed"
