@@ -1,0 +1,82 @@
+"""
+# Imported Tuple Signature Dependency — Unit Spec
+
+Regression guard for the Stage-1 HIR fatal
+
+    HIR lowering error in src/compiler/driver/driver.spl:
+    unresolved type: ResolveError
+
+`src/compiler/80.driver/driver.spl` never names `ResolveError` (0 hits in all
+156 lines). `struct ResolveError` is declared in
+`src/compiler/35.semantics/resolve.spl:762`, and `resolve_methods` there returns
+the TUPLE `(HirModule, [ResolveError])`.
+
+Cross-module signature dependencies are materialized under the QUALIFIED local
+name `{module}::{name}` (`materialize_imported_callable_declared_dependency`),
+never the bare one. `imported_surface_type_projected` projects an imported
+signature back through that qualified scope, but only for two SCALAR shapes:
+a top-level named type (`return_type_name`) and an array-of-named
+(`return_array_element_name`). A tuple populates NEITHER, so it fell through to
+`imported_surface_type`, which also only projected a top-level Named kind, and
+finally to `lower_type` — which resolves names in the IMPORTER's scope, where
+`ResolveError` is bound only as `sem.resolve::ResolveError`. Result: the hard,
+non-recovered `unresolved type: ResolveError` blamed on the importer.
+
+The defect is SHAPE-specific, not type-specific: the identical signature written
+as a bare `[ResolveError]` always worked, which is what made it look arbitrary.
+"""
+
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.config.{Logger}
+
+fn tuple_dep_spec_logger() -> Logger:
+    Logger(level: 0)
+
+fn tuple_dep_spec_surfaces(modules: Dict<text, Module>, sources: [SourceFile]) -> ModuleSurfacesByName:
+    match module_surfaces_from_modules(modules, sources):
+        case Ok(value): value
+        case Err(error):
+            assert_true(false)
+            ModuleSurfacesByName.empty()
+
+fn tuple_dep_spec_lower(owner_return: text) -> HirLowering:
+    val log = tuple_dep_spec_logger()
+    val sem_source =
+        "struct ResolveError:\n    message: text\n\nfn resolve_methods(m: i64) -> " +
+        owner_return + ":\n    " + (if owner_return == "[ResolveError]": "[]" else: "(m, [])")
+    val mid_source =
+        "use sem.resolve.\{resolve_methods\}\n\nfn run_pass(m: i64) -> i64:\n    m"
+    val cons_source =
+        "use sem.resolve.\{resolve_methods\}\n\nfn go() -> i64:\n    1"
+    val sem = parse_full_frontend(sem_source, "sem.resolve", "sem.resolve", log)
+    val mid = parse_full_frontend(mid_source, "drv.passes", "drv.passes", log)
+    val cons = parse_full_frontend(cons_source, "drv.driver", "drv.driver", log)
+    var modules: Dict<text, Module> = {}
+    modules["sem.resolve"] = sem
+    modules["drv.passes"] = mid
+    val sources = [
+        SourceFile(path: "sem/resolve.spl", content: sem_source, module_name: "sem.resolve"),
+        SourceFile(path: "drv/passes.spl", content: mid_source, module_name: "drv.passes")
+    ]
+    val surfaces = tuple_dep_spec_surfaces(modules, sources)
+    var lowering = hirlowering_for_module("drv.driver", surfaces)
+    val hir = lowering.lower_module(cons)
+    lowering
+
+describe "imported callable whose signature dependency sits inside a tuple":
+    it "resolves a tuple-return element type through the declaring module":
+        # Pre-fix: `unresolved type: ResolveError`, attributed to drv.driver.
+        val lowering = tuple_dep_spec_lower("(i64, [ResolveError])")
+        for error in lowering.errors:
+            eprint("[tuple-dep-error] {error.message}")
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "still resolves the array-only shape that always worked":
+        # Control: proves the defect was the SHAPE, not the type name.
+        val lowering = tuple_dep_spec_lower("[ResolveError]")
+        expect(lowering.errors.len()).to_equal(0)

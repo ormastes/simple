@@ -639,7 +639,17 @@ impl HirLowering:
                             imported_mod, callable.return_array_element_name,
                             import_span, materialize_enum)
             else:
-                for dependency in parser_type_named_dependencies(callable.return_type):
+                # COMPOSITE return shape (tuple, optional, union, fn-type...).
+                # Neither scalar projection applies, so the only source of
+                # named dependencies is the retained parser Type. If that
+                # retained Type is empty the whole signature silently
+                # materializes NOTHING and the failure resurfaces later as a
+                # hard `unresolved type: X` against an innocent importer.
+                # Level-gated so the empty case is observable.
+                val composite_deps = parser_type_named_dependencies(callable.return_type)
+                if (hir_module_env_get("SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE") ?? "") == "1":
+                    eprint("[hir-callable-composite-return] owner={imported_mod.module_name} fn={callable.name} deps={composite_deps.len()}")
+                for dependency in composite_deps:
                     if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, dependency) < 0:
                         self.materialize_imported_callable_declared_dependency(
                             imported_mod, imported_mod_name, dependency,

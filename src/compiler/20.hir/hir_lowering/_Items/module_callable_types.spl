@@ -161,6 +161,46 @@ impl HirLowering:
                 imported_module_name, source_name)
             if raw_symbol_id >= 0:
                 return HirType(kind: HirTypeKind.Named(SymbolId(id: raw_symbol_id), []), span: type_.span)
+            return self.lower_type(type_)
+        # COMPOSITE shapes must be projected ELEMENTWISE.
+        #
+        # Only a TOP-LEVEL Named type used to be projected through the
+        # declaring module's qualified scope; every composite shape fell
+        # straight to `lower_type`, which resolves names in the IMPORTER's
+        # scope. Cross-module signature dependencies are materialized under
+        # the QUALIFIED local name `{module}::{name}` (see
+        # `materialize_imported_callable_declared_dependency`), never the bare
+        # one, so the importer's scope does not have them -- and the fallback
+        # landed on the hard, non-recovered `unresolved type: {name}`,
+        # attributed to whichever module was being lowered rather than to the
+        # type's owner.
+        #
+        # Stage 1 hit this as `unresolved type: ResolveError` against
+        # src/compiler/80.driver/driver.spl, which never names ResolveError:
+        # `resolve_methods` (src/compiler/35.semantics/resolve.spl:775) returns
+        # the TUPLE `(HirModule, [ResolveError])`. Because it is a tuple,
+        # neither `return_type_name` nor `return_array_element_name` is
+        # populated, so both scalar projections in
+        # `imported_surface_type_projected` were skipped. The same signature
+        # written as a bare `[ResolveError]` always worked, which is why the
+        # defect looked type-specific rather than SHAPE-specific.
+        # See doc/08_tracking/bug/hir_tuple_signature_dependency_unprojected_2026-08-21.md
+        val tuple_elements = parser_type_kind_tuple_elements(type_.kind)
+        if tuple_elements.len() > 0:
+            var lowered_elements: [HirType] = []
+            for element in tuple_elements:
+                lowered_elements = lowered_elements.push(
+                    self.imported_surface_type(element, imported_module_name))
+            return HirType(kind: HirTypeKind.Tuple(lowered_elements), span: type_.span)
+        val array_element_name = parser_type_kind_array_element_name(type_.kind)
+        if array_element_name != "":
+            val raw_element_id = self.symbols.lookup_qualified_type_raw(
+                imported_module_name, array_element_name)
+            val element = if raw_element_id >= 0:
+                HirType(kind: HirTypeKind.Named(SymbolId(id: raw_element_id), []), span: type_.span)
+            else:
+                HirType(kind: self.lower_named_kind(array_element_name, [], type_.span), span: type_.span)
+            return HirType(kind: HirTypeKind.Array(element, nil), span: type_.span)
         self.lower_type(type_)
 
     me imported_surface_type_projected(type_: Type, type_name: text, array_element_name: text, imported_module_name: text) -> HirType:
