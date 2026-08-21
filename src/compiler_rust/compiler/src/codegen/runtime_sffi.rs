@@ -236,6 +236,13 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_arena_reset", &[I64], &[]),
     RuntimeFuncSpec::new("rt_arena_free", &[I64], &[]),
     // =========================================================================
+    // AES block bridges (RuntimeValue is one i64 ABI word)
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_aes128_encrypt_block_pure", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_aes128_decrypt_block_pure", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_aes256_encrypt_block_into", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_aes256_encrypt_block_pure", &[I64, I64], &[I64]),
+    // =========================================================================
     // AOP runtime operations
     // =========================================================================
     RuntimeFuncSpec::new("rt_aop_invoke_around", &[I64, I64, I64, I64, I64], &[I64]),

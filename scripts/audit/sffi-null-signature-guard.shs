@@ -274,6 +274,36 @@ if printf '%s\n' "$arena_alloc_body" | rg -q 'HashMap::|Vec::|sha|dlsym'; then
     failed=1
 fi
 
+# AES block bridges must have compiler-owned signatures. Legacy payload-only
+# native exports remain raw/unsafe, while interpreter failures are typed errors
+# rather than empty arrays or all-zero blocks.
+for symbol in \
+    rt_aes128_encrypt_block_pure rt_aes128_decrypt_block_pure \
+    rt_aes256_encrypt_block_into rt_aes256_encrypt_block_pure
+do
+    require_fixed "RuntimeFuncSpec::new(\"$symbol\"" \
+        src/compiler_rust/compiler/src/codegen/runtime_sffi.rs
+done
+require_fixed 'pub unsafe extern "C" fn rt_aes128_encrypt_block_pure' \
+    src/compiler_rust/runtime/src/value/aes.rs
+require_fixed 'pub unsafe extern "C" fn rt_aes128_decrypt_block_pure' \
+    src/compiler_rust/runtime/src/value/aes.rs
+require_fixed 'pub unsafe extern "C" fn rt_aes256_encrypt_block_into' \
+    src/compiler_rust/runtime/src/value/aes.rs
+require_fixed 'pub unsafe extern "C" fn rt_aes256_encrypt_block_pure' \
+    src/compiler_rust/runtime/src/value/aes.rs
+require_fixed 'pure_block_bridges_reject_bad_lengths_instead_of_fabricating_bytes' \
+    src/compiler_rust/compiler/src/interpreter_extern/simd.rs
+
+aes_handler_region=$(sed -n \
+    '/pub fn rt_aes128_encrypt_block_pure(/,/pub fn rt_tls13_aes256_gcm_encrypt(/p' \
+    "$root/src/compiler_rust/compiler/src/interpreter_extern/simd.rs")
+if printf '%s\n' "$aes_handler_region" | rg -q \
+    'unwrap_or\(\[0u8; 16\]\)|return Ok\(Value::array\(vec!\[\]\)\)'; then
+    echo "SFFI lint: interpreter AES bridge fabricates empty/zero output on failure" >&2
+    failed=1
+fi
+
 if [ "$failed" -ne 0 ]; then
     exit 1
 fi

@@ -272,9 +272,13 @@ pub fn rt_aes128_encrypt_block_pure(args: &[Value]) -> Result<Value, CompileErro
     let key = expect_byte_array("rt_aes128_encrypt_block_pure", &args[0])?;
     let block = expect_byte_array("rt_aes128_encrypt_block_pure", &args[1])?;
     if key.len() != 16 || block.len() != 16 {
-        return Ok(Value::array(vec![]));
+        return Err(CompileError::runtime(
+            "rt_aes128_encrypt_block_pure requires a 16-byte key and block".to_string(),
+        ));
     }
-    let cipher = aes128_encrypt_one_block(&key, &block).unwrap_or([0u8; 16]);
+    let cipher = aes128_encrypt_one_block(&key, &block).ok_or_else(|| {
+        CompileError::runtime("rt_aes128_encrypt_block_pure rejected its inputs".to_string())
+    })?;
     Ok(Value::byte_array(cipher.to_vec()))
 }
 
@@ -286,7 +290,11 @@ pub fn rt_aes128_decrypt_block_pure(args: &[Value]) -> Result<Value, CompileErro
     }
     let key = expect_byte_array("rt_aes128_decrypt_block_pure", &args[0])?;
     let block = expect_byte_array("rt_aes128_decrypt_block_pure", &args[1])?;
-    let plain = aes128_decrypt_one_block(&key, &block).unwrap_or([0u8; 16]);
+    let plain = aes128_decrypt_one_block(&key, &block).ok_or_else(|| {
+        CompileError::runtime(
+            "rt_aes128_decrypt_block_pure requires a 16-byte key and block".to_string(),
+        )
+    })?;
     Ok(Value::byte_array(plain.to_vec()))
 }
 
@@ -341,9 +349,13 @@ pub fn rt_aes256_encrypt_block_pure(args: &[Value]) -> Result<Value, CompileErro
     let key = expect_byte_array("rt_aes256_encrypt_block_pure", &args[0])?;
     let block = expect_byte_array("rt_aes256_encrypt_block_pure", &args[1])?;
     if key.len() != 32 || block.len() != 16 {
-        return Ok(Value::array(vec![]));
+        return Err(CompileError::runtime(
+            "rt_aes256_encrypt_block_pure requires a 32-byte key and 16-byte block".to_string(),
+        ));
     }
-    let cipher = aes256_encrypt_one_block(&key, &block).unwrap_or([0u8; 16]);
+    let cipher = aes256_encrypt_one_block(&key, &block).ok_or_else(|| {
+        CompileError::runtime("rt_aes256_encrypt_block_pure rejected its inputs".to_string())
+    })?;
     Ok(Value::byte_array(cipher.to_vec()))
 }
 
@@ -2256,6 +2268,34 @@ mod engine2d_span_tests {
         assert_eq!(
             unpack_u32_array("blended", &blended).unwrap(),
             vec![0x80ff_ffff, 0xbfaa_0054, 0x0011_2233]
+        );
+    }
+}
+
+#[cfg(test)]
+mod aes_bridge_contract_tests {
+    use super::{expect_byte_array, rt_aes128_decrypt_block_pure, rt_aes128_encrypt_block_pure, rt_aes256_encrypt_block_pure};
+    use crate::value::Value;
+
+    #[test]
+    fn pure_block_bridges_reject_bad_lengths_instead_of_fabricating_bytes() {
+        let empty = Value::byte_array(vec![]);
+        let block = Value::byte_array(vec![0; 16]);
+        assert!(rt_aes128_encrypt_block_pure(&[empty.clone(), block.clone()]).is_err());
+        assert!(rt_aes128_decrypt_block_pure(&[empty.clone(), block.clone()]).is_err());
+        assert!(rt_aes256_encrypt_block_pure(&[empty, block]).is_err());
+    }
+
+    #[test]
+    fn aes128_zero_vector_returns_the_fips197_ciphertext() {
+        let zero = Value::byte_array(vec![0; 16]);
+        let cipher = rt_aes128_encrypt_block_pure(&[zero.clone(), zero]).unwrap();
+        assert_eq!(
+            expect_byte_array("cipher", &cipher).unwrap(),
+            [
+                0x66, 0xe9, 0x4b, 0xd4, 0xef, 0x8a, 0x2c, 0x3b, 0x88, 0x4c, 0xfa, 0x59, 0xca, 0x34,
+                0x2b, 0x2e,
+            ]
         );
     }
 }

@@ -614,3 +614,18 @@ allocation path retains exactly one existing registry lock and adds no lookup,
 hashing, or allocation. Twelve focused arena tests pass. The legacy Simple file
 check remains blocked by six pre-existing direct `rt_pool_*` ownership errors
 outside this arena family.
+
+Four AES block bridges now have compiler-owned ABI contracts, moving coverage
+to 1,019/771. Their native payload-only exports are explicitly Rust-unsafe and
+the migrated debug Simple declaration uses lexical `unsafe(ffi)` authority. Interpreter AES
+failures now return `CompileError` instead of an empty array or a fabricated
+all-zero block; focused tests prove malformed-length refusal and the successful
+FIPS-197 AES-128 zero vector. The AES round/block algorithm and successful hot
+path are unchanged—no lookup, lock, hashing, or extra allocation was added.
+The legacy native payload-only functions still encode failure as an empty
+runtime array internally and therefore remain unsafe; checked status/payload
+replacements are required before they can back a safe Simple API.
+The NVFS vendored AES copy still directly declares the status/out helper; its
+own header requires replacement by the canonical pure-Simple module rather
+than local edits. That replacement needs an NVFS crypto throughput comparison
+before landing so hardening does not silently regress storage performance.

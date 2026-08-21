@@ -627,7 +627,7 @@ pub extern "C" fn rt_aes128_encrypt_block_into(key: RuntimeValue, block: Runtime
 // Returns empty array on bad sizes.
 // ----------------------------------------------------------------------------
 #[no_mangle]
-pub extern "C" fn rt_aes128_encrypt_block_pure(key: RuntimeValue, block: RuntimeValue) -> RuntimeValue {
+pub unsafe extern "C" fn rt_aes128_encrypt_block_pure(key: RuntimeValue, block: RuntimeValue) -> RuntimeValue {
     let Some(key_bytes) = runtime_array_to_bytes(key) else {
         return empty_runtime_array();
     };
@@ -646,7 +646,7 @@ pub extern "C" fn rt_aes128_encrypt_block_pure(key: RuntimeValue, block: Runtime
 // array. Empty array on bad sizes.
 // ----------------------------------------------------------------------------
 #[no_mangle]
-pub extern "C" fn rt_aes128_decrypt_block_pure(key: RuntimeValue, block: RuntimeValue) -> RuntimeValue {
+pub unsafe extern "C" fn rt_aes128_decrypt_block_pure(key: RuntimeValue, block: RuntimeValue) -> RuntimeValue {
     let Some(key_bytes) = runtime_array_to_bytes(key) else {
         return empty_runtime_array();
     };
@@ -982,7 +982,11 @@ pub fn aes256_encrypt_one_block(key: &[u8], block: &[u8]) -> Option<[u8; AES_BLO
 }
 
 #[no_mangle]
-pub extern "C" fn rt_aes256_encrypt_block_into(key: RuntimeValue, block: RuntimeValue, out: RuntimeValue) -> i64 {
+pub unsafe extern "C" fn rt_aes256_encrypt_block_into(
+    key: RuntimeValue,
+    block: RuntimeValue,
+    out: RuntimeValue,
+) -> i64 {
     let Some(key_bytes) = runtime_array_to_bytes(key) else {
         return 1;
     };
@@ -1010,7 +1014,7 @@ pub extern "C" fn rt_aes256_encrypt_block_into(key: RuntimeValue, block: Runtime
 // Returns empty array on bad sizes (key must be 32B, block 16B).
 // ----------------------------------------------------------------------------
 #[no_mangle]
-pub extern "C" fn rt_aes256_encrypt_block_pure(key: RuntimeValue, block: RuntimeValue) -> RuntimeValue {
+pub unsafe extern "C" fn rt_aes256_encrypt_block_pure(key: RuntimeValue, block: RuntimeValue) -> RuntimeValue {
     let Some(key_bytes) = runtime_array_to_bytes(key) else {
         return empty_runtime_array();
     };
