@@ -13,6 +13,12 @@ pub struct RawSffiCallFinding:
     note: text
     line_num: i64
 
+pub struct RawSffiDeclarationFinding:
+    code: text
+    message: text
+    note: text
+    line_num: i64
+
 fn _rsc_indent(raw: text) -> i64:
     var i = 0
     while i < raw.len() and raw.substring(i, i + 1) == " ":
@@ -53,6 +59,52 @@ fn _rsc_has_ffi_unsafe_boundary(lines: [CodeLine], header_index: i64) -> bool:
         return previous.starts_with("@unsafe(") and previous.contains("capabilities") and
             previous.contains("ffi")
     false
+
+fn _rsc_has_ffi_unsafe_declaration(lines: [CodeLine], declaration_index: i64) -> bool:
+    val declaration = lines[declaration_index].trimmed
+    if declaration.starts_with("unsafe extern fn ") or
+        declaration.starts_with("pub unsafe extern fn "):
+        return true
+    var i = declaration_index - 1
+    while i >= 0 and declaration_index - i <= 8:
+        val previous = lines[i].trimmed
+        if previous == "":
+            i = i - 1
+            continue
+        if previous.starts_with("@unsafe("):
+            return previous.contains("capabilities") and previous.contains("ffi")
+        if not previous.starts_with("@"):
+            return false
+        i = i - 1
+    false
+
+pub fn check_raw_sffi_declarations(
+    source: text,
+    file_path: text
+) -> [RawSffiDeclarationFinding]:
+    var findings: [RawSffiDeclarationFinding] = []
+    if file_path.contains("src/compiler_rust/vendor") or
+        file_path.contains("src/runtime/vendor") or file_path.contains("sffi_gen"):
+        return findings
+
+    val lines = iter_code_lines(source)
+    var i = 0
+    while i < lines.len():
+        val declaration = lines[i].trimmed
+        val is_raw = declaration.starts_with("extern fn ") or
+            declaration.starts_with("pub extern fn ") or
+            declaration.starts_with("unsafe extern fn ") or
+            declaration.starts_with("pub unsafe extern fn ") or
+            declaration.starts_with("@extern(")
+        if is_raw and not _rsc_has_ffi_unsafe_declaration(lines, i):
+            findings.push(RawSffiDeclarationFinding(
+                code: "SFFI010",
+                message: "raw foreign declaration is not explicitly ffi-unsafe",
+                note: "add the smallest @unsafe(reason: ..., capabilities: [ffi]) boundary; a signature, name, or runtime provider does not make foreign code safe",
+                line_num: lines[i].line_num
+            ))
+        i = i + 1
+    findings
 
 pub fn check_raw_sffi_calls(source: text, file_path: text) -> [RawSffiCallFinding]:
     var findings: [RawSffiCallFinding] = []

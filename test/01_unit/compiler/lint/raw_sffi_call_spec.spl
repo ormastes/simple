@@ -1,5 +1,7 @@
 use std.spec.*
-use compiler.semantics.lint.raw_sffi_call.{check_raw_sffi_calls}
+use compiler.semantics.lint.raw_sffi_call.{
+    check_raw_sffi_calls, check_raw_sffi_declarations
+}
 use compiler.tools.lint._LintMain.config_and_model.{
     profile_default_levels, map_lint_code_to_config_name, LintProfile
 }
@@ -42,3 +44,22 @@ describe "SFFI009: raw calls require minimal ffi-unsafe scope":
         val critical = profile_default_levels(LintProfile.Critical)
         expect(robust["raw_sffi_call"]).to_equal("deny")
         expect(critical["raw_sffi_call"]).to_equal("deny")
+
+    it "reports an extern declaration that lacks ffi authority":
+        """Declarations are ABI assertions even when the function is never called."""
+        val findings = check_raw_sffi_declarations(
+            "extern fn rt_widget_open() -> i64\n", "src/app/demo.spl")
+        expect(findings.len()).to_equal(1)
+        expect(findings[0].code).to_equal("SFFI010")
+
+    it "accepts an explicitly ffi-unsafe extern declaration":
+        """The declaration carries authority independently of its safe wrapper."""
+        val source = "@unsafe(reason: \"foreign ABI\", capabilities: [ffi])\nextern fn rt_widget_open() -> i64\n"
+        expect(check_raw_sffi_declarations(source, "src/app/demo.spl").len()).to_equal(0)
+
+    it "checks attribute-style foreign declarations":
+        """Legacy @extern syntax cannot bypass the same declaration policy."""
+        val source = "@extern(\"runtime\", \"rt_widget_open\")\nfn rt_widget_open() -> i64:\n    0\n"
+        val findings = check_raw_sffi_declarations(source, "src/app/demo.spl")
+        expect(findings.len()).to_equal(1)
+        expect(findings[0].code).to_equal("SFFI010")
