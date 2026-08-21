@@ -87,6 +87,16 @@ fn parse_interpolation_fragment(inner: text) -> i64:
     idx
 
 fn decode_interpolation_brace_escapes(value: text) -> text:
+    # Fast path (perf, exact): this function only ever rewrites `{{` -> `{` and
+    # `}}` -> `}`. A value carrying neither doubled brace decodes to itself, so
+    # the char-by-char rebuild below (one `value[i:i+1]` substring allocation
+    # AND one `result + ch` string reallocation per character -- quadratic in
+    # the literal's length) is pure waste for the overwhelming majority of
+    # string literals. Measured 2026-08-21: this loop ran over every plain
+    # string literal in the module. See
+    # doc/08_tracking/bug/frontend_parse_per_file_cost_2026-08-21.md
+    if not (value.contains("{{") or value.contains("}}")):
+        return value
     var result = ""
     var i = 0
     while i < value.len():
@@ -104,6 +114,12 @@ fn decode_interpolation_brace_escapes(value: text) -> text:
     result
 
 fn parse_string_interpolation_parts(value: text) -> [i64]:
+    # Fast path (perf, exact): every branch of the scanner below is gated on
+    # seeing a `{` or a `}`. A literal with neither cannot produce a part and
+    # cannot leave `depth != 0`, so it always returns `[]` -- reached here
+    # without the per-character `value[i:i+1]` substring allocations.
+    if not (value.contains("{") or value.contains("}")):
+        return []
     var parts: [i64] = []
     var depth = 0
     var inner = ""
@@ -166,8 +182,19 @@ fn expand_interpolated_placeholder_call_args(start_expr: i64):
             while i < args.len():
                 val a = args[i]
                 if (a >= 0 and expr_get_tag(a) == EXPR_STRING_LIT and
-                        expr_get_int(a) == 0):
+                        expr_get_int(a) == 0 and expr_get_str(a).contains("_")):
                     val value = expr_get_str(a)
+                    # PERF (exact): the ONLY outcome this walk acts on is
+                    # `expr_has_placeholder(part)`, and a placeholder is spelled
+                    # `_`, `_0`, `_1`, ... -- it cannot exist in a literal that
+                    # contains no `_` character at all. Without this guard every
+                    # plain call-argument string literal in the module paid a
+                    # full `lex_init_with_path` + `parse_expr` SUB-PARSE per
+                    # `{...}` region, whose freshly minted nodes then extended
+                    # `expr_count()` and were themselves re-walked by this very
+                    # loop -- the superlinear term measured 2026-08-21 (a 34x
+                    # larger file cost 176x more in this phase). See
+                    # doc/08_tracking/bug/frontend_parse_per_file_cost_2026-08-21.md
                     val parts = parse_string_interpolation_parts(value)
                     if parts.len() > 0:
                         var has_ph = false

@@ -1,0 +1,55 @@
+# Front-end parse scaling budget: string-interpolation expansion must stay
+# LINEAR in module size.
+#
+# Mechanism pinned (not just a wall-clock number): before the 2026-08-21 fix,
+# `expand_interpolated_placeholder_call_args` ran a full
+# `lex_init_with_path` + `parse_expr` SUB-PARSE for every `{...}` region of
+# every call-argument string literal, *including* literals that could not
+# possibly hold a `_` placeholder. Those sub-parses minted fresh AST nodes,
+# which extended `expr_count()`, which is the bound of the very loop doing the
+# walking -- so the walk re-visited its own output. Cost therefore grew
+# superlinearly in the number of interpolated string literals in a file.
+#
+# This spec doubles the number of such literals and asserts the cost does not
+# more than triple. Measured 2026-08-21 on this host:
+#   pre-fix   20 decls = 5.38s   40 decls = 17.35s   ratio 3.23  (RED)
+#   post-fix  20 decls = 6.57s   40 decls = 11.68s   ratio 1.78  (GREEN)
+# Controlled A/B: one tree, one binary, the fix reverted and restored with
+# `git checkout --`, nothing else changed. Read the RATIO, not the seconds --
+# this host ran at load average 21-64 and absolute times move 2x between runs
+# of identical code. A 3.0 bound discriminates the two.
+#
+# See doc/08_tracking/bug/frontend_parse_per_file_cost_2026-08-21.md
+
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module_scoped}
+
+extern fn rt_time_now_unix_micros() -> i64
+
+# One function whose body is nothing but call-argument interpolated string
+# literals with NO `_` in them -- the exact shape that paid the sub-parse.
+fn gen_body(n: i64) -> text:
+    var out = ""
+    var i = 0
+    while i < n:
+        out = out + "fn probe_{i}(name: text, count: i64) -> text:\n"
+        out = out + "    val a = \"module {{name}} has {{count}} entries\"\n"
+        out = out + "    val b = \"second {{name}} line {{count}} here\"\n"
+        out = out + "    val c = \"third {{name}} slot {{count}} tail\"\n"
+        out = out + "    a + b + c\n\n"
+        i = i + 1
+    out
+
+fn time_parse(n: i64) -> i64:
+    val src = gen_body(n)
+    val t0 = rt_time_now_unix_micros()
+    val m = parse_and_build_module_scoped(src, "interp_scaling_probe_{n}.spl", false)
+    rt_time_now_unix_micros() - t0
+
+describe "frontend interpolation expansion scales linearly":
+    it "doubling interpolated literals costs less than 3x":
+        val small = time_parse(20)
+        val large = time_parse(40)
+        print "[perf] interp_scaling: 20 decls={small}us 40 decls={large}us"
+        # Guard against a degenerate zero measurement making the ratio vacuous.
+        expect(small > 0).to_equal(true)
+        expect(large * 10 < small * 30).to_equal(true)

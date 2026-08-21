@@ -44,6 +44,16 @@ use compiler.frontend.aspect_registry.{aspect_registry_declare}
 use compiler.common.dependency.visibility.{Visibility}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 extern fn rt_env_get(key: text) -> text
+extern fn rt_time_now_unix_micros() -> i64
+
+# Level-gated parse phase profile (DEFAULT OFF; SIMPLE_PARSE_PHASE_PROFILE=1).
+# Splits parse_and_build_module_scoped into its six phases so a per-file cost
+# regression can be attributed. NOT a throwaway probe -- do not delete.
+var _fab_phase_prof_cached: i64 = -1
+fn fab_phase_prof_enabled() -> bool:
+    if _fab_phase_prof_cached < 0:
+        _fab_phase_prof_cached = if (rt_env_get("SIMPLE_PARSE_PHASE_PROFILE") ?? "") == "1": 1 else: 0
+    _fab_phase_prof_cached == 1
 extern fn rt_env_set(key: text, value: text)
 extern fn rt_transient_array_scope_begin() -> bool
 extern fn rt_transient_array_scope_pause() -> bool
@@ -1045,20 +1055,26 @@ pub fn parse_and_build_module_scoped(source: text, path: text, streaming_scope: 
     # copied out of the flat AST, then promote that retained graph before the
     # arena is cleared.
     val transient_scope = if streaming_scope: rt_transient_array_scope_begin() else: false
+    val _pp_t0 = if fab_phase_prof_enabled(): rt_time_now_unix_micros() else: 0
     parse_module_body()
+    val _pp_t1 = if fab_phase_prof_enabled(): rt_time_now_unix_micros() else: 0
     # String interpolation fragments are parsed only after the enclosing module
     # body. Reapply placeholder shorthand at that point so `{_}` / `{_1}` in a
     # call argument produces its enclosing callback lambda before the bridge
     # converts flat nodes into ParserModule expressions.
     expand_string_interpolations(0)
+    val _pp_t2 = if fab_phase_prof_enabled(): rt_time_now_unix_micros() else: 0
     transform_placeholder_call_args_after_interpolation()
     # Driver/native-build path only: promote + desugar placeholder lambdas that
     # were written as interpolated string call arguments. The interpreter path
     # gets this from core_frontend_parse(); this path does not go through it.
     # doc/08_tracking/bug/placeholder_lambda_fix_missed_driver_native_build_parse_path_2026-08-09.md
     expand_interpolated_placeholder_call_args(0)
+    val _pp_t3 = if fab_phase_prof_enabled(): rt_time_now_unix_micros() else: 0
     desugar_collections(0, 0)
+    val _pp_t4 = if fab_phase_prof_enabled(): rt_time_now_unix_micros() else: 0
     compiler_coverage_inventory_record_module(path)
+    val _pp_t5 = if fab_phase_prof_enabled(): rt_time_now_unix_micros() else: 0
     if parser_has_errors():
         val errors = parser_get_errors()
         var ei = 0
@@ -1068,6 +1084,9 @@ pub fn parse_and_build_module_scoped(source: text, path: text, streaming_scope: 
     if transient_scope:
         val _paused = rt_transient_array_scope_pause()
     val built_module = flat_ast_to_module(path)
+    if fab_phase_prof_enabled():
+        val _pp_t6 = rt_time_now_unix_micros()
+        print("PARSEPHASE\tparse_module_body\t{_pp_t1 - _pp_t0}\tinterp\t{_pp_t2 - _pp_t1}\tplaceholder\t{_pp_t3 - _pp_t2}\tdesugar_coll\t{_pp_t4 - _pp_t3}\tcoverage_inv\t{_pp_t5 - _pp_t4}\tbridge\t{_pp_t6 - _pp_t5}\tpath\t{path}")
     if transient_scope:
         val _promoted = rt_transient_heap_promote(built_module)
         lexer_release_parse_source_globals()
