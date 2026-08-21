@@ -1,8 +1,34 @@
+bootstrap_stage3_sanity_fail() {
+    printf 'stage2-sanity-error: %s\n' "$1" >&2
+    return 1
+}
+
+bootstrap_stage3_sanity_expect() {
+    bootstrap_stage3_sanity_expect_key=$1
+    bootstrap_stage3_sanity_expect_file=$2
+    bootstrap_stage3_sanity_expect_value=$3
+    bootstrap_stage3_sanity_expect_actual=$(
+        bootstrap_stage3_manifest_value \
+            "$bootstrap_stage3_sanity_expect_key" \
+            "$bootstrap_stage3_sanity_expect_file"
+    ) || bootstrap_stage3_sanity_fail \
+"field '$bootstrap_stage3_sanity_expect_key' unreadable in $bootstrap_stage3_sanity_expect_file" ||
+        return 1
+    [ "$bootstrap_stage3_sanity_expect_actual" = \
+        "$bootstrap_stage3_sanity_expect_value" ] ||
+        bootstrap_stage3_sanity_fail \
+"field '$bootstrap_stage3_sanity_expect_key' was '$bootstrap_stage3_sanity_expect_actual', expected '$bootstrap_stage3_sanity_expect_value'" ||
+        return 1
+}
+
 bootstrap_stage3_verify_sanity_evidence_receipt() (
     bootstrap_stage3_sanity_file=$1
     bootstrap_stage3_sanity_candidate=$2
     [ -f "$bootstrap_stage3_sanity_file" ] &&
-        [ ! -L "$bootstrap_stage3_sanity_file" ] || return 1
+        [ ! -L "$bootstrap_stage3_sanity_file" ] ||
+        bootstrap_stage3_sanity_fail \
+"sanity evidence '$bootstrap_stage3_sanity_file' is missing or is a symlink" ||
+        return 1
     for bootstrap_stage3_sanity_key in schema status candidate_sha256_before \
         version_status version_output unsupported_status \
         unsupported_output_sha256 frontend_smoke_status \
@@ -15,33 +41,31 @@ bootstrap_stage3_verify_sanity_evidence_receipt() (
 "required field '$bootstrap_stage3_sanity_key' absent from $bootstrap_stage3_sanity_file" ||
             return 1
     done
-    [ "$(bootstrap_stage3_manifest_value schema \
-        "$bootstrap_stage3_sanity_file")" = \
-        simple-bootstrap-sanity-evidence-v1 ] || return 1
-    [ "$(bootstrap_stage3_manifest_value status \
-        "$bootstrap_stage3_sanity_file")" = pass ] || return 1
-    [ "$(bootstrap_stage3_manifest_value version_status \
-        "$bootstrap_stage3_sanity_file")" = 0 ] || return 1
-    [ "$(bootstrap_stage3_manifest_value version_output \
-        "$bootstrap_stage3_sanity_file")" = \
-        "simple-bootstrap 1.0.0-RC" ] || return 1
-    [ "$(bootstrap_stage3_manifest_value unsupported_status \
-        "$bootstrap_stage3_sanity_file")" = 1 ] || return 1
-    [ "$(bootstrap_stage3_manifest_value frontend_smoke_status \
-        "$bootstrap_stage3_sanity_file")" = 0 ] || return 1
-    [ "$(bootstrap_stage3_manifest_value frontend_smoke_bootstrap_mode_status \
-        "$bootstrap_stage3_sanity_file")" = 0 ] || return 1
+    bootstrap_stage3_sanity_expect schema "$bootstrap_stage3_sanity_file" \
+        simple-bootstrap-sanity-evidence-v1 || return 1
+    bootstrap_stage3_sanity_expect status "$bootstrap_stage3_sanity_file" \
+        pass || return 1
+    bootstrap_stage3_sanity_expect version_status \
+        "$bootstrap_stage3_sanity_file" 0 || return 1
+    bootstrap_stage3_sanity_expect version_output \
+        "$bootstrap_stage3_sanity_file" "simple-bootstrap 1.0.0-RC" || return 1
+    bootstrap_stage3_sanity_expect unsupported_status \
+        "$bootstrap_stage3_sanity_file" 1 || return 1
+    bootstrap_stage3_sanity_expect frontend_smoke_status \
+        "$bootstrap_stage3_sanity_file" 0 || return 1
+    bootstrap_stage3_sanity_expect frontend_smoke_bootstrap_mode_status \
+        "$bootstrap_stage3_sanity_file" 0 || return 1
     bootstrap_stage3_sanity_candidate_sha=$(
         bootstrap_stage3_hash_file "$bootstrap_stage3_sanity_candidate"
     ) || bootstrap_stage3_sanity_fail \
 "candidate '$bootstrap_stage3_sanity_candidate' could not be hashed" ||
         return 1
-    [ "$(bootstrap_stage3_manifest_value candidate_sha256_before \
-        "$bootstrap_stage3_sanity_file")" = \
-        "$bootstrap_stage3_sanity_candidate_sha" ] || return 1
-    [ "$(bootstrap_stage3_manifest_value candidate_sha256_after \
-        "$bootstrap_stage3_sanity_file")" = \
-        "$bootstrap_stage3_sanity_candidate_sha" ] || return 1
+    bootstrap_stage3_sanity_expect candidate_sha256_before \
+        "$bootstrap_stage3_sanity_file" \
+        "$bootstrap_stage3_sanity_candidate_sha" || return 1
+    bootstrap_stage3_sanity_expect candidate_sha256_after \
+        "$bootstrap_stage3_sanity_file" \
+        "$bootstrap_stage3_sanity_candidate_sha" || return 1
     bootstrap_stage3_sanity_unsupported_sha=$(
         bootstrap_stage3_manifest_value unsupported_output_sha256 \
             "$bootstrap_stage3_sanity_file"
@@ -60,7 +84,10 @@ bootstrap_stage3_verify_sanity_evidence_receipt() (
 "field 'frontend_smoke_output_sha256' unreadable in $bootstrap_stage3_sanity_file" ||
         return 1
     printf '%s\n' "$bootstrap_stage3_sanity_frontend_sha" |
-        grep -Eq '^[0-9a-f]{64}$' || return 1
+        grep -Eq '^[0-9a-f]{64}$' ||
+        bootstrap_stage3_sanity_fail \
+"field 'frontend_smoke_output_sha256' is not a sha256: '$bootstrap_stage3_sanity_frontend_sha'" ||
+        return 1
 )
 
 bootstrap_stage3_verify_receiver_evidence_receipt() (
