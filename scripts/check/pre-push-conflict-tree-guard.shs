@@ -72,35 +72,6 @@ GREP=grep
 # to catch. Git chdirs to the working-tree root before invoking a hook, so
 # equality is the correct and strictest test here.
 is_bare=$(git rev-parse --is-bare-repository 2>/dev/null) || is_bare=""
-
-# SELF-HEAL (2026-08-17): `core.bare = true` has been observed appearing
-# spontaneously on this repo's shared .git/config, flipping back within minutes
-# of being corrected. While it is set, `git rebase` dies with "this operation
-# must be run in a work tree" and EVERY guard below refuses to run, so a single
-# stray line blocks every lane on the host. The writer has not been identified
-# (nothing under scripts/ src/ tools/ .claude/ sets it).
-#
-# Repair ONLY on a provable contradiction, never on a guess: a genuinely bare
-# repository's config does not live in a directory literally named `.git` that
-# sits inside a populated working tree. If the common git dir basename is
-# `.git` AND its parent holds a checked-out tree, then `bare = true` is false on
-# its face and is corrected in place. A real bare repo (config at `foo.git/` or
-# at the repo root) fails this test and is left untouched, so this cannot
-# "repair" a repo into corruption.
-if [ "$is_bare" = "true" ]; then
-    common_dir=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || common_dir=""
-    case "$common_dir" in
-        */.git)
-            parent_dir=${common_dir%/.git}
-            if [ -d "$parent_dir" ] && [ -e "$parent_dir/.git/HEAD" ]; then
-                echo "pre-push: core.bare=true on a NON-bare layout ($common_dir) — self-healing to false" >&2
-                git config core.bare false 2>/dev/null || true
-                is_bare=$(git rev-parse --is-bare-repository 2>/dev/null) || is_bare=""
-            fi
-            ;;
-    esac
-fi
-
 if [ "$is_bare" != "false" ]; then
     echo "pre-push: git reports is-bare-repository='$is_bare' (expected 'false')" >&2
     echo "pre-push: a stray core.bare in .git/config misdirects every guard — refusing to push blind" >&2
@@ -203,6 +174,7 @@ sspec_evidence_regen_guard="$repo_root/scripts/check/check-sspec-evidence-regene
 ui_showcase_layering_guard="$repo_root/scripts/check/check-ui-showcase-layering.shs"
 bootstrap_handoff_selftest_guard="$repo_root/scripts/check/check-bootstrap-platform-handoff-readiness.shs"
 stage2_sanity_diagnostic_guard="$repo_root/scripts/bootstrap/check-stage2-sanity-diagnostic.shs"
+guard_selftest_isolation_guard="$repo_root/scripts/check/check-guard-selftests-isolated.shs"
 gpu_backend_layer_evidence_guard="$repo_root/scripts/check/check-gpu-backend-layer-evidence.shs"
 cpu_backend_artifacts_guard="$repo_root/scripts/check/check-cpu-backend-artifacts.shs"
 mlkem_simd_c_lane_guard="$repo_root/scripts/check/build-mlkem-simd-c-lane.shs"
@@ -268,6 +240,17 @@ security_audit_stderr_guard="$repo_root/scripts/check/check-security-audit-criti
 browser_logger_level_guard="$repo_root/scripts/check/check-browser-logger-honours-level.shs"
 ghdl_gate_rc_guard="$repo_root/scripts/check/check-ghdl-gate-rc-swallow.shs"
 
+# Wave 5 compiler-hardening guards (integrator I0, 2026-08-21). Each was run
+# against this tree before wiring; the MANDATORY/ADVISORY split below records
+# the verdict each one actually produced, not an aspiration.
+compiler_transition_coverage_guard="$repo_root/scripts/check/check-compiler-transition-coverage.shs"
+hir_visitors_fresh_guard="$repo_root/scripts/check/check-hir-visitors-fresh.shs"
+compiler_schema_fresh_guard="$repo_root/scripts/check/check-compiler-schema-fresh.shs"
+critical_wildcard_ban_guard="$repo_root/scripts/check/check-critical-wildcard-ban.shs"
+post_mono_invariants_guard="$repo_root/scripts/check/check-post-mono-invariants.shs"
+duplicate_pub_fn_names_guard="$repo_root/scripts/check/check-duplicate-pub-fn-names.shs"
+any_inventory_ratchet_guard="$repo_root/scripts/check/check-any-inventory-ratchet.shs"
+
 for g in "$tree_guard" "$markers_guard" "$size_guard" "$seed_build_guard" "$runtime_api_guard" "$jit_guard" \
          "$try_op_guard" "$list_shift_guard" \
          "$cuda_ntt_guard" "$vulkan_ntt_guard" \
@@ -287,6 +270,10 @@ for g in "$tree_guard" "$markers_guard" "$size_guard" "$seed_build_guard" "$runt
          "$spipe_docgen_live_guard" "$sspec_evidence_regen_guard" \
          "$ui_showcase_layering_guard" "$bootstrap_handoff_selftest_guard" \
          "$gpu_backend_layer_evidence_guard" "$cpu_backend_artifacts_guard" \
+         "$compiler_transition_coverage_guard" "$hir_visitors_fresh_guard" \
+         "$compiler_schema_fresh_guard" "$critical_wildcard_ban_guard" \
+         "$post_mono_invariants_guard" "$duplicate_pub_fn_names_guard" \
+         "$any_inventory_ratchet_guard" \
          "$mlkem_simd_c_lane_guard" "$mlkem_cpu_simd_guard" "$mlkem_metal_ntt_guard" \
          "$simpleos_io_audio_qemu_preflight_guard" "$simpleos_virtio_snd_qemu_selftest_guard" \
          "$render_perf_milestone_gate_guard" "$wm_lane_boundary_guard" \
@@ -302,9 +289,20 @@ for g in "$tree_guard" "$markers_guard" "$size_guard" "$seed_build_guard" "$runt
          "$eprint_stderr_fd_guard" "$log_error_visible_guard" \
          "$noalloc_log_error_guard" "$security_audit_stderr_guard" \
          "$browser_logger_level_guard" "$ghdl_gate_rc_guard" \
-         "$stage2_sanity_diagnostic_guard"; do
+         "$stage2_sanity_diagnostic_guard" "$guard_selftest_isolation_guard"; do
     [ -f "$g" ] || {
-        echo "pre-push: guard script missing at $g — refusing to push blind" >&2
+        # A guard referenced by this hook but absent from the checkout is an
+        # ERROR *about that guard*, not a verdict from it. Saying "BLOCKED by
+        # <guard>" for a file that never ran sent one landing lane chasing a
+        # phantom failure — see
+        # doc/08_tracking/bug/pre_push_hook_selftest_commits_fixtures_into_invoking_repo_2026-08-21.md
+        _gname=$(basename "$g")
+        if git -C "$repo_root" ls-files --error-unmatch "$g" >/dev/null 2>&1; then
+            echo "pre-push: ERROR — nothing was checked: tracked guard $_gname is missing from this checkout ($g)" >&2
+        else
+            echo "pre-push: ERROR — nothing was checked: $_gname is referenced by this hook but is UNTRACKED and absent here ($g)." >&2
+            echo "pre-push: either commit that guard or drop its entry from this hook; it did not run and produced no verdict." >&2
+        fi
         exit 1
     }
 done
@@ -320,13 +318,68 @@ status=0
 # Run one guard, capture to a FILE (never a pipe — a pipeline's $? is the last
 # command's, which has already caused an agent to record GUARD_EXIT=0 while the
 # guard was printing DO NOT PUSH). Sets `status` on any refusal.
+# run_guard_advisory: runs a guard, prints its verdict, and NEVER blocks.
+#
+# Needed because this hook previously had exactly one runner and it fails
+# closed. A guard that is honestly RED on the tree today therefore had no way
+# to be wired at all -- and an unwired guard protects nothing, which is how
+# every incident in .claude/rules/vcs.md was found by luck instead of by a
+# gate. Advisory wiring makes the red VISIBLE on every push; promote to
+# run_guard the moment the underlying red is repaired.
+
+# A guard (or its --selftest) must NEVER mutate the repository it is invoked
+# from: fixtures belong in a private `git init` repo under $TMPDIR. On
+# 2026-08-21 a guard's selftest committed fixtures into the invoking landing
+# worktree, moving HEAD off the real landing commit, after which the
+# seed-build guard evaluated the *fixture* commit and reported a bogus FAIL.
+# The push had to be made with --no-verify. These two helpers snapshot HEAD
+# before every guard and verify it afterwards, so a repo-mutating guard is
+# named loudly instead of silently hijacking the push.
+# See doc/08_tracking/bug/pre_push_hook_selftest_commits_fixtures_into_invoking_repo_2026-08-21.md
+guard_repo_state() {
+    git -C "$repo_root" rev-parse HEAD 2>/dev/null || echo 'no-head'
+}
+
+check_guard_did_not_mutate_repo() {
+    _mg=$1
+    _before=$2
+    _after=$(guard_repo_state)
+    [ "$_before" = "$_after" ] && return 0
+    echo "" >&2
+    echo "pre-push: BLOCKED — $(basename "$_mg") MUTATED the invoking repository." >&2
+    echo "pre-push: HEAD moved $_before -> $_after. A guard selftest must build its" >&2
+    echo "pre-push: fixtures in a private temp repo (git init under \$TMPDIR), never here." >&2
+    echo "pre-push: recover with: git reset --hard $_before" >&2
+    status=1
+    return 1
+}
+
+run_guard_advisory() {
+    _g=$1
+    _range=$2
+    shift 2
+    _out=$(mktemp) || exit 1
+    _head_before=$(guard_repo_state)
+    sh "$_g" "$@" >"$_out" 2>&1
+    _st=$?
+    check_guard_did_not_mutate_repo "$_g" "$_head_before"
+    if [ "$_st" -ne 0 ]; then
+        echo "pre-push: ADVISORY $(basename "$_g") (status $_st) for range $_range — NOT blocking:" >&2
+        tail -3 "$_out" >&2
+    fi
+    rm -f "$_out"
+    return 0
+}
+
 run_guard() {
     _g=$1
     _range=$2
     shift 2
     _out=$(mktemp) || exit 1
+    _head_before=$(guard_repo_state)
     sh "$_g" "$@" >"$_out" 2>&1
     _st=$?
+    check_guard_did_not_mutate_repo "$_g" "$_head_before"
     # Belt and braces: trust neither signal alone. Fail closed on either.
     if "$GREP" -q -e 'DO NOT PUSH' -e 'ERROR —' "$_out" || [ "$_st" -ne 0 ]; then
         cat "$_out" >&2
@@ -629,6 +682,35 @@ run_guard "$sabotage_residue_guard" "sabotage-verification residue meta-guard (f
 # collision).
 run_guard "$vacuous_specs_guard" "vacuous-spec Tier-A sweep meta-guard (full scan, not range-bound)"
 
+# --- Wave 5 compiler-hardening guards (integrator I0, 2026-08-21) -----------
+# MANDATORY: verified green on this tree.
+#   PASS — 130 transition(s) checked across 4 table(s), 0 missing (exit 0)
+run_guard "$compiler_transition_coverage_guard" "compiler transition-table coverage (full scan, not range-bound)"
+
+# ADVISORY: each is honestly RED or unresolved on this tree right now, with the
+# measured verdict quoted. Promote to run_guard as each red is repaired.
+#   FAIL — selftest failed; the guard itself is broken (exit 1). Root cause is
+#   upstream, not in the guard: `src/app/compiler_schema/main.spl` has no
+#   `visitors` subcommand and `visitor_gen.spl` exports only building blocks --
+#   there is no emitter that writes src/compiler/20.hir/generated, so the
+#   regeneration the guard needs cannot run.
+run_guard_advisory "$hir_visitors_fresh_guard" "HIR visitor freshness (full scan, not range-bound)"
+#   ERROR — selftest FAIL: fresh fixture did not PASS: stale
+#   compiler.frontend.PatternKind.sdn compiler.hir.HirPatternKind.sdn index.sdn (exit 2)
+run_guard_advisory "$compiler_schema_fresh_guard" "compiler schema freshness (full scan, not range-bound)"
+#   FAIL — 1773 file(s) checked, forbidden=768 (baseline 780), 5 newly
+#   introduced bucket(s) (exit 1)
+run_guard_advisory "$critical_wildcard_ban_guard" "critical-profile wildcard ban ratchet (full scan, not range-bound)"
+#   FAIL — 78553 pub fn(s) checked, 1412 colliding name(s) (baseline 1423);
+#   NEW: check_one _flatten hir_type_kind_name; plus 14 STALE baseline entries (exit 1)
+run_guard_advisory "$duplicate_pub_fn_names_guard" "duplicate pub fn name ratchet (full scan, not range-bound)"
+#   No verdict reached: selftest passes (4 scenario(s), every neg fixture
+#   detected) but the tree scan exceeds the measurement budget on this host, so
+#   no green was ESTABLISHED. Absence of a verdict is not a pass -- advisory.
+run_guard_advisory "$post_mono_invariants_guard" "post-monomorphization invariants (full scan, not range-bound)"
+#   No verdict reached: SELFTEST OK: 5 fixture(s), tree scan exceeds budget.
+run_guard_advisory "$any_inventory_ratchet_guard" "Any-inventory ratchet (full scan, not range-bound)"
+
 # check-lint-binary-staleness.shs: proves the deployed lint oracle
 # (bin/release/x86_64-unknown-linux-gnu/simple) actually contains fresh
 # diagnostic markers (MEXH006, W-MC-RES-001) landed in pure-Simple source.
@@ -736,6 +818,13 @@ run_guard "$bootstrap_handoff_selftest_guard" "bootstrap platform handoff readin
 # itself is a property of the scripts on disk, not of the pushed range.
 # See doc/08_tracking/bug/simpleos_stage2_bootstrap_sanity_exit2_without_diagnostic_2026-08-20.md
 run_guard "$stage2_sanity_diagnostic_guard" "stage2 bootstrap sanity diagnostic gate self-test (full scan, not range-bound)" --selftest
+
+# Guard-selftest isolation (static half). A guard's --selftest must build its
+# fixtures in a private temp repo, never in the invoking one; on 2026-08-21 one
+# did the latter, hijacked HEAD, and forced a --no-verify landing. The dynamic
+# half lives in run_guard/run_guard_advisory above, which snapshots HEAD around
+# every guard invocation. Sub-second, --selftest fatal.
+run_guard "$guard_selftest_isolation_guard" "guard selftest repo-isolation (full scan, not range-bound)"
 
 # check-gpu-backend-layer-evidence.shs / check-cpu-backend-artifacts.shs:
 # artifact-first backend evidence gates (GPU: cuda/vulkan/metal/hip/opencl;

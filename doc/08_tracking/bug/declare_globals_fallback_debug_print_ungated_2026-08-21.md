@@ -74,3 +74,26 @@ function.
   name is a `*_trace_state` global, suggesting these genuinely miss both
   `use_map` and `import_map` and fall through to `mangle_name`. That is a
   distinct question from the logging and is not filed here.
+
+## RESOLVED 2026-08-21 — level-gated, default off
+
+`src/compiler_rust/compiler/src/codegen/common_backend.rs` `declare_globals`:
+the probe is now gated on `SIMPLE_TRACE_DECLARE_GLOBALS` being SET (opt-in),
+the `SIMPLE_NO_DEPRECATED_WARNINGS` condition is gone, and the tag is aligned
+with the neighbouring traces (`[declare-globals] fallback name=… module_prefix=…`),
+so one env var governs the whole function.
+
+Per `.claude/rules/code-style.md` the log was **converted, not deleted** — the
+probe still exists and still prints the same two fields; it just no longer
+fires by default. The second defect in this record (wrong knob) is closed by
+the same change: suppressing this line no longer requires silencing genuine
+deprecation output.
+
+Not verified by a compile here — this is seed code and no seed build was run in
+this session. The change is a two-line condition/format edit inside an existing
+`if`; the surrounding `use_hit` / `import_hit` / `self.module_prefix` bindings
+are untouched.
+
+The separate open question this record already flagged — why every observed
+name is a `*_trace_state` global that misses both `use_map` and `import_map` —
+is unchanged and still not filed.

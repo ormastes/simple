@@ -4,12 +4,12 @@ use std.sffi.cli.{cli_get_args}
 use app.io.process_ops.{process_run, process_run_bounded, process_run_timeout}
 use app.io.mod.{env_get}
 use app.test_runner_new.timeout_budget.{client_default_timeout_secs}
-use app.test_runner_new.daemon_backlog.{daemon_backlog_bypass}
+use app.test_runner_new.daemon_backlog.{daemon_backlog_bypass, count_pending_requests}
 use std.test_runner.test_runner_args.{parse_test_args}
 use std.test_runner.test_config.{load_test_config}
 use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES}
 use std.test_runner.test_runner_modes.{run_spl_doctest_mode}
-use app.test_daemon.light_protocol.{LIGHT_REQUEST_RESPONSE_GRACE_MS, light_request_encode, light_request_expiry_micros, light_request_timeout_ms_from_seconds, timeout_verdict_line, no_response_verdict_line, has_verdict_line, exit_code_reason}
+use app.test_daemon.light_protocol.{LIGHT_REQUEST_RESPONSE_GRACE_MS, light_request_encode, light_request_expiry_micros, light_request_timeout_ms_from_seconds, timeout_verdict_line, has_verdict_line, exit_code_reason}
 
 use std.io_runtime.{dir_create_all}
 use std.io_runtime.{dir_list}
@@ -438,7 +438,7 @@ fn run_one_via_daemon(path: text, timeout_ms: i64, seq: i64) -> i64:
     print "ERROR: test daemon timed out: {path}"
     print "ERROR: no response from the light daemon within {timeout_ms}ms + {LIGHT_REQUEST_RESPONSE_GRACE_MS}ms grace."
     print "ERROR: if EVERY spec reports this, the lock at {LIGHT_LOCK} is stale/wedged; fix: rm -rf {LIGHT_DAEMON_DIR}"
-    print no_response_verdict_line(path, timeout_ms)
+    print timeout_verdict_line(path, "daemon-no-response", timeout_ms)
     1
 
 # Environment variables by which a caller selects WHICH binary, backend or
@@ -629,7 +629,13 @@ fn main() -> i64:
     # daemon_backlog.spl already decided the policy and pinned it with a unit
     # spec, but had ZERO production call sites -- the decision was never
     # consulted, so clients joined the queue unconditionally. This is that wiring.
-    val backlog_pending = if file_exists(LIGHT_REQ_DIR): dir_list(LIGHT_REQ_DIR).len() else: 0
+    # Count only `.req` entries. A raw dir_list().len() also counts the
+    # `.req.tmp` files produced by the atomic tmp+rename write above, so a
+    # client could bypass on the in-flight write that is about to become its
+    # OWN request -- and, worse, on leftover `.resp`/lock names. That is what
+    # `count_pending_requests` exists for; it was pinned by a unit spec but had
+    # zero production call sites. This is that wiring.
+    val backlog_pending = if file_exists(LIGHT_REQ_DIR): count_pending_requests(dir_list(LIGHT_REQ_DIR)) else: 0
     val backlog_bypass = daemon_backlog_bypass(backlog_pending)
     val daemon_ok = if cov_bypass or binary_override_bypass or long_timeout_bypass or invoker_bypass or require_gpu_bypass or env_gate_bypass or backlog_bypass: false else: ensure_daemon()
     var binary = ""

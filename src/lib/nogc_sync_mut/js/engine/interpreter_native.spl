@@ -38,19 +38,6 @@ val JS_HOST_EVENT_OP_LIMIT: i64 = 4096
 
 impl JsInterpreter:
     me _dispatch_native_with_receiver(native_id: i64, this_val: JsValue, arg_vals: [JsValue], env: i64) -> JsValue:
-        # Global String()/Number()/Boolean() conversion functions (-14/-15/-16)
-        if native_id == -14:
-            if arg_vals.len() > 0:
-                return JsValue.String(v: js_to_string(arg_vals.get(0)))
-            return JsValue.String(v: "")
-        if native_id == -15:
-            if arg_vals.len() > 0:
-                return JsValue.Number(v: to_number(arg_vals.get(0)))
-            return JsValue.Number(v: 0.0)
-        if native_id == -16:
-            if arg_vals.len() > 0:
-                return JsValue.Boolean(v: is_truthy(arg_vals.get(0)))
-            return JsValue.Boolean(v: false)
         if native_id == NATIVE_DOM_EVENT_TARGET_ADD:
             return self._native_dom_event_listener(
                 "add", this_val, arg_vals
@@ -8582,36 +8569,67 @@ impl JsInterpreter:
         val value = if arg_vals.len() > 0: arg_vals.get(0) else: JsValue.Undefined
         JsValue.Object(id: self._create_settled_promise_object(value, true))
 
+    # WHATWG Fetch "disturbed body" rule, single-sourced for all four body
+    # readers below. A Response body may be read ONCE; a second read must
+    # reject with `TypeError: Body is unusable` and leave `bodyUsed` true.
+    #
+    # This copy of the engine previously read `body` directly in each of the
+    # four natives with no consumed flag at all, so every repeat read
+    # succeeded. Only the gc_async_mut copy implemented the rule, and it is not
+    # the copy this lane resolves to. See
+    # doc/08_tracking/bug/browser_session_fetch_body_not_disturbed_and_timer_rollback_2026-08-21.md
+    me _consume_response_body(response_id: i64) -> Result<text, text>:
+        match self.get_object_property(
+            response_id, "__simple_internal_response_body_consumed"
+        ):
+            JsValue.Boolean(true):
+                self.set_object_property(
+                    response_id, "bodyUsed", JsValue.Boolean(v: true)
+                )
+                return Err("TypeError: Body is unusable")
+            _:
+                pass_dn("unconsumed response body")
+        self.set_object_property(
+            response_id, "__simple_internal_response_body_consumed",
+            JsValue.Boolean(v: true)
+        )
+        self.set_object_property(
+            response_id, "bodyUsed", JsValue.Boolean(v: true)
+        )
+        match self.get_object_property(response_id, "body"):
+            JsValue.String(v): Ok(v)
+            _: Ok("")
+
     me _native_response_text(this_val: JsValue) -> JsValue:
         val response_id = _get_obj_id(this_val)
         if response_id < 0:
             return JsValue.Undefined
-        self.set_object_property(response_id, "bodyUsed", JsValue.Boolean(v: true))
-        match self.get_object_property(response_id, "body"):
-            JsValue.String(v): JsValue.Object(id: self._create_settled_promise_object(JsValue.String(v: v), false))
-            _: JsValue.Undefined
+        match self._consume_response_body(response_id):
+            Ok(body): JsValue.Object(id: self._create_settled_promise_object(JsValue.String(v: body), false))
+            Err(e): JsValue.Object(id: self._create_settled_promise_object(JsValue.String(v: e), true))
 
     me _native_response_json(this_val: JsValue) -> JsValue:
         val response_id = _get_obj_id(this_val)
         if response_id < 0:
             return JsValue.Undefined
-        self.set_object_property(response_id, "bodyUsed", JsValue.Boolean(v: true))
-        match self.get_object_property(response_id, "body"):
-            JsValue.String(v):
-                match self._json_parse_allocated(v, self.global_env):
+        match self._consume_response_body(response_id):
+            Ok(body):
+                match self._json_parse_allocated(body, self.global_env):
                     Ok(value): JsValue.Object(id: self._create_settled_promise_object(value, false))
                     Err(e): JsValue.Object(id: self._create_settled_promise_object(JsValue.String(v: e.message), true))
-            _: JsValue.Undefined
+            Err(e): JsValue.Object(id: self._create_settled_promise_object(JsValue.String(v: e), true))
 
     me _native_response_blob(this_val: JsValue) -> JsValue:
         val response_id = _get_obj_id(this_val)
         if response_id < 0:
             return JsValue.Undefined
-        self.set_object_property(response_id, "bodyUsed", JsValue.Boolean(v: true))
         var body = ""
-        match self.get_object_property(response_id, "body"):
-            JsValue.String(v): body = v
-            _: pass_dn
+        match self._consume_response_body(response_id):
+            Ok(v): body = v
+            Err(e):
+                return JsValue.Object(id: self._create_settled_promise_object(
+                    JsValue.String(v: e), true
+                ))
         var blob_type = self._response_content_type(response_id)
         if blob_type == "":
             blob_type = "application/octet-stream"
@@ -8627,11 +8645,13 @@ impl JsInterpreter:
         val response_id = _get_obj_id(this_val)
         if response_id < 0:
             return JsValue.Undefined
-        self.set_object_property(response_id, "bodyUsed", JsValue.Boolean(v: true))
         var body = ""
-        match self.get_object_property(response_id, "body"):
-            JsValue.String(v): body = v
-            _: pass_dn
+        match self._consume_response_body(response_id):
+            Ok(v): body = v
+            Err(e):
+                return JsValue.Object(id: self._create_settled_promise_object(
+                    JsValue.String(v: e), true
+                ))
         val body_hex = self._native_webassembly_normalize_hex(body)
         val use_hex_body = self._native_webassembly_valid_header(body_hex)
         val byte_len = if use_hex_body: body_hex.len() / 2 else: body.bytes().len()

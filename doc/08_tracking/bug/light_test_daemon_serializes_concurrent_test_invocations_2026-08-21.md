@@ -90,3 +90,48 @@ These emitted verdicts and are honest failures, not harness artifacts:
 | lib/common/web/browser_session_cookies_spec.spl | 12 total, 10 passed, 2 failed |
 | lib/common/web/browser_session_dom_generation_runtime_spec.spl | 1 total, 0 passed, 1 failed |
 | lib/common/web/browser_session_async_spec.spl | 24 executed, 22 passed, 2 failed |
+
+## RESOLVED 2026-08-21
+
+Proposed fix (2) had landed in `7a6f6459a81` but was incomplete, and (1) is
+addressed by bounding staleness rather than by adding parallelism.
+
+**`count_pending_requests` was dead code.** `test_runner_client.spl` computed
+its backlog depth as `dir_list(LIGHT_REQ_DIR).len()` — a raw listing that also
+counts the `.req.tmp` files the client's own atomic tmp+rename write creates,
+plus any stale `.resp`/lock names. `daemon_backlog.spl` had shipped
+`count_pending_requests` for exactly this, pinned by a unit spec, with **zero
+production call sites**. It is now wired: `count_pending_requests(dir_list(...))`.
+
+**The daemon no longer drains a stale snapshot.** `light_daemon.spl` main()
+took one `dir_list` and ran `handle_request` for every entry in it, each
+blocking inside `process_run_bounded` for up to the 600s protocol cap. Requests
+that expired WHILE QUEUED were therefore executed long after their client had
+given up, and the stop file went unseen for the whole drain. It now serves ONE
+`.req` per poll iteration and re-lists, so staleness is bounded by a single
+spec runtime and handle_request's own deadline check answers expired requests
+immediately. This deliberately does **not** make the daemon parallel — clients
+no longer join the queue at all — so no worker-pool or non-blocking-spawn
+machinery was added for a queue that should stay empty.
+
+### Evidence
+
+4 concurrent `bin/simple test` clients on 4 healthy specs, the exact shape that
+previously returned at ~596s with `missing test path`:
+
+```
+elapsed=13s, all four rc=0
+```
+
+`test/01_unit/app/test_runner_new/daemon_backlog_bypass_spec.spl` — 10/10.
+
+Every spec run in this session (60+ invocations, several concurrent) emitted a
+`Results:` line; zero `missing test path` replies were observed.
+
+### Still open
+
+The **unresolved sub-question** in this record — the mechanism by which the
+daemon read a request file as empty at high queue depth — is NOT closed. It is
+now unreachable in practice (clients bypass, and the daemon no longer holds a
+stale listing), but it was never root-caused, and a lane that re-enables
+queueing would meet it again.

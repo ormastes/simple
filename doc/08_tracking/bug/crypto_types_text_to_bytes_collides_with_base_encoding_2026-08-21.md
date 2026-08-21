@@ -208,3 +208,49 @@ rather than a crash. **Not changed here** — `bin/simple` is the Rust seed and 
 seed build was attempted (see the note above). The deeper fix remains that an
 explicit `use std.crypto.types.{text_to_bytes}` must bind to *that module's*
 definition regardless of collisions.
+
+## RESOLVED (product surface) 2026-08-21 — `bytes_to_text` collision eliminated
+
+The sibling half of the `text_to_bytes` collision. `bytes_to_text` had 8
+co-compiled definitions across **3 distinct signatures** — `([u8])->text`,
+`([i64])->text`, `(List<i64>)->text` and `([u8],i64,i64)->text` — and was
+carried in `scripts/check/duplicate_pub_fn_baseline.txt`.
+
+Every non-`[u8]` definition was renamed to a tree-unique name and every caller
+switched to the unique name **directly, not via `X as bytes_to_text`**: an
+import alias binds the *colliding* name locally and is hijacked exactly like a
+bare call. That was proved, not assumed — the first pass used aliases and
+`websocket_facade_spec` went RED (`ws_bytes_to_text` resolved to
+`string_core`'s `[u8]` variant, dropping the out-of-range byte and returning
+`""` instead of `"ABCD?"`). Dropping the aliases turned it green.
+
+Renamed: `aes_bytes_to_text`, `cbor_bytes_to_text`, `codec_bytes_to_text`,
+`ws_bytes_to_text`, `compression_bytes_to_text`, `gzip_stream_bytes_to_text`,
+`zip_reader_bytes_to_text`. Remaining definitions all share `([u8])->text`.
+
+Note that `websocket_facade_spec` was **passing by accident** before this
+change: the collision made it call string_core's variant. A green spec is not
+evidence that the intended function ran.
+
+Gate verdicts (the 5 NEW names are another session's in-flight edits under
+`src/lib/editor`, `src/compiler/35.semantics`, `src/compiler/99.loader`, not
+this change):
+
+- before: `FAIL — 78738 pub fn(s) checked, 1407 colliding name(s) (baseline 1402); NEW: activation_from_text _opt_bool _opt_int _opt_text _required_text`
+- after rename: `... 1406 colliding ...; NEW: <same 5>; STALE (no longer colliding, baseline out of date): bytes_to_text`
+- after lowering the baseline by exactly that one name (1402 -> 1401):
+  `FAIL — 78738 pub fn(s) checked, 1406 colliding name(s) (baseline 1401); NEW: <same 5>` — STALE cleared.
+
+Specs: new `test/01_unit/lib/nogc_sync_mut/websocket/ws_bytes_to_text_collision_spec.spl`
+(2/2, mirrored). Neighbours green: `websocket_facade_spec` 1/1,
+`cbor_bytes_to_text_invalid_guard_spec` 2/2, `codec_byte_text_guard_spec` 3/3,
+`cbor_decode_spec` 94/94, `cbor_quick_spec` 4/4,
+`zip_writer_negative_offset_guard_spec` 1/1, `upx_byte_text_spec` 1/1,
+`gzip_validate_crc_isize_spec` 6/6, `http/auth/digest_spec` 14/14.
+
+**Still open, unchanged:** the compiler-side fix (an explicit
+`use std.crypto.types.{text_to_bytes}` must bind to *that module's*
+definition), which is a Rust-seed change. **New, and worth its own attention:**
+several modules still spell `use ....{crypto_bytes_to_text as bytes_to_text}`
+(and the `base_encoding_*` equivalents). Those aliases re-bind a name that
+other modules still define, which is the same hazard in a different spelling.

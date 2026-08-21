@@ -1683,12 +1683,18 @@ impl<M: Module> CodegenBackend<M> {
                         "ambiguous private global `{name}` must be imported explicitly"
                     )));
                 }
+                // Level-gated developer probe, DEFAULT OFF. Opt in with
+                // SIMPLE_TRACE_DECLARE_GLOBALS=1, the same knob that governs the
+                // `[declare-globals]` traces earlier in this function. It used to be
+                // gated only on the *absence* of SIMPLE_NO_DEPRECATED_WARNINGS, so it
+                // fired on every ordinary user-facing build through an unrelated knob.
+                // See doc/08_tracking/bug/declare_globals_fallback_debug_print_ungated_2026-08-21.md
                 if use_hit.is_none()
                     && import_hit.is_none()
-                    && std::env::var_os("SIMPLE_NO_DEPRECATED_WARNINGS").is_none()
+                    && std::env::var_os("SIMPLE_TRACE_DECLARE_GLOBALS").is_some()
                 {
                     eprintln!(
-                        "[DEBUG declare_globals fallback] name={} module_prefix={:?}",
+                        "[declare-globals] fallback name={} module_prefix={:?}",
                         name, self.module_prefix
                     );
                 }

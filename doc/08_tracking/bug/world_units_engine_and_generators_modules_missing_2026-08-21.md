@@ -70,3 +70,31 @@ Unblock condition: implement the two modules above under
 `src/lib/common/units/generators/world_units_importers.spl`.
 
 ## No seed (Rust) change is required.
+
+## RESOLVED 2026-08-21 — both modules implemented
+
+- `src/lib/common/units/engine/unit_expr.spl` — `ParsedUnitExpression`
+  (`.ok` / `.expression` / `.error`), `parse_unit_expression`,
+  `format_unit_expression`. Handles a bare unit, a single quotient, and the
+  catalog's whole-expression aliases (`kmph`, `M`). Anything naming a unit the
+  catalog does not carry — `USD/h` — reports `unknown unit expression` rather
+  than guessing a scale. Formatting canonicalises by VALUE, not by the spelling
+  that produced it, so `kmph` and `km/h` both render `km/h`.
+- `src/lib/common/units/generators/world_units_importers.spl` —
+  `ImportedUnitRow`, the five per-standard importers (UCUM, ISO 4217/SIX,
+  UNECE Rec 20, IUPAC Gold Book, IEC 80000-13),
+  `import_all_world_unit_seed_rows` (10 rows),
+  `imported_rows_have_unique_ids`, `imported_rows_to_sdn`.
+
+Both build on the pre-existing model layer (`units/model/world_units.spl`)
+rather than duplicating its exact-rational arithmetic; `format_unit_expression`
+compares via `unit_expression_equivalent` so no scale is re-derived.
+
+Evidence — both specs and both mirrors GREEN, zero examples previously executed:
+
+- `test/01_unit/lib/common/units/engine/unit_expr_spec.spl` — 4/4
+- `test/01_unit/lib/common/units/generators/world_units_importers_spec.spl` — 1/1
+- `test/unit/.../unit_expr_spec.spl` — 4/4
+- `test/unit/.../world_units_importers_spec.spl` — 1/1
+
+No test file was edited; the specs are the ones that were already in the tree.

@@ -172,10 +172,28 @@ fn main() -> i64:
             thread_sleep(250)
             continue
         idle = 0
+        # Serve ONE request per poll iteration, then re-list.
+        #
+        # This loop used to drain the whole `entries` snapshot, with every
+        # handle_request blocking inside process_run_bounded for up to the
+        # 600s protocol cap. Draining a stale snapshot means the stop file and
+        # every request that expired WHILE QUEUED go unnoticed for as long as
+        # the drain takes — the shape recorded in
+        # doc/08_tracking/bug/light_test_daemon_serializes_concurrent_test_invocations_2026-08-21.md,
+        # where 4 concurrent clients all returned at ~596s.
+        # Re-listing after each served request bounds the staleness to one
+        # spec runtime: expired requests are then answered immediately by
+        # handle_request's own deadline check instead of being executed long
+        # after their client gave up. It does NOT make the daemon parallel —
+        # clients avoid the queue entirely via daemon_backlog_bypass, which is
+        # wired in test_runner_client.spl.
         var i = 0
         while i < entries.len():
-            handle_request(binary, entries[i])
-            i = i + 1
+            if entries[i].ends_with(".req"):
+                handle_request(binary, entries[i])
+                i = entries.len()
+            else:
+                i = i + 1
     file_delete(LIGHT_LOCK)
     file_delete(LIGHT_BINARY)
     0

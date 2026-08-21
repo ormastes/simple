@@ -60,7 +60,6 @@ use std.gc_async_mut.gpu.browser_engine.script.form_api.{
 use std.js.engine.runtime.{JsRuntime}
 use std.js.types.js_types.{JsValue}
 use std.gc_async_mut.web.browser_session.{BrowserSession, BrowserRuntimeState, BrowserDomCallableListener, BrowserLoadState, BrowserRequest, BrowserHistoryEntry, BrowserOriginStorage, BrowserImageSource, browser_history_push_bounded}
-use std.gc_async_mut.web.browser_session_loading.*  # loads the impl BrowserSession extension block (navigation/history methods) for every runtime consumer
 use std.gc_async_mut.web.browser_session_storage.{sync_storage_runtime_state, pair_value, upsert_pair, is_storage_api_property, is_storage_internal_property, storage_public_key_from_internal, js_value_to_storage_text}
 use std.js.types.pair.{Pair}
 use std.gc_async_mut.web.browser_session_url.{
@@ -1459,7 +1458,28 @@ impl BrowserSession:
             return 0
         var ran: i64 = 0
         if val Some(state) = self.runtime_state:
+            # A due timer's effects are tentative until its runtime/DOM mirrors
+            # publish as one transaction, exactly as in eval_script above.
+            # This path used to restore ONLY runtime_state, so a rejected DOM
+            # candidate leaked the timer's cookie writes, request queue and
+            # warnings into the session — the timer's
+            # `document.cookie='timer=leak'` stayed visible after the rollback.
+            # The restore set below is deliberately the same one eval_script
+            # uses; the two must not drift apart. See
+            # doc/08_tracking/bug/browser_session_fetch_body_not_disturbed_and_timer_rollback_2026-08-21.md
             val previous_runtime_state = self.runtime_state
+            val previous_pending_requests = self.pending_requests
+            val previous_pending_request_head = self.pending_request_head
+            val previous_inflight_requests = self.inflight_requests
+            val previous_next_request_seq = self.next_request_seq
+            val previous_warnings = self.warnings
+            val previous_pending_history_delta = (
+                self.pending_history_traversal_delta
+            )
+            val previous_pending_cookie_writes = (
+                self.pending_script_cookie_writes
+            )
+            val previous_body_html = self.current_body_html
             var runtime = state.runtime
             val js_ran = runtime.drain_due_timers(self.monotonic_time_ms)
             state.runtime = runtime
@@ -1470,6 +1490,18 @@ impl BrowserSession:
                 )
                 if val Err(_) = flushed:
                     self.runtime_state = previous_runtime_state
+                    self.pending_requests = previous_pending_requests
+                    self.pending_request_head = previous_pending_request_head
+                    self.inflight_requests = previous_inflight_requests
+                    self.next_request_seq = previous_next_request_seq
+                    self.warnings = previous_warnings
+                    self.pending_history_traversal_delta = (
+                        previous_pending_history_delta
+                    )
+                    self.pending_script_cookie_writes = (
+                        previous_pending_cookie_writes
+                    )
+                    self.current_body_html = previous_body_html
                     return 0
             ran = ran + js_ran
         val simple_callbacks = self.simple_script_executor.tick(
