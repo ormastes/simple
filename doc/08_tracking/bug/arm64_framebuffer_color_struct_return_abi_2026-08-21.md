@@ -109,3 +109,30 @@ binary. A fresh Stage-2 admission and Stage-3 build remain required in a new
 guarded session. Consequently the ARM64 kernel build, QEMU framebuffer capture,
 and fail-closed 2D/Web/GUI/WM backend evidence remain pending; no historical or
 host-only result is promoted to QEMU proof.
+
+## 2026-08-21 fresh admission and Stage-3 dependency result
+
+A fresh isolated checkout of pushed `main` rebuilt the Rust authority and then
+produced a current pure-Simple Stage-2 compiler. The canonical sanity gate and
+struct-receiver/runtime-capability gate both passed, and the candidate was
+admitted before the run stopped at the requested Stage-2 boundary. A planner
+admission produced from that exact parent then authorized Stage 3.
+
+Stage 3 retained and promoted all 657 module surfaces, lowered the entry module,
+then rejected `src/compiler/driver/driver.spl` with 108 unresolved field types
+(`OutputFormat`, `WeavingConfig`, `Span`, parser `Type`, and peers). An env-gated
+diagnostic replay proved the surfaces were populated and localized the defect
+to imported-composite dependency materialization: `CompileContext` is declared
+in `driver_types`, while those field types are explicit imports of
+`driver_types`. `register_imported_symbol` searched only the composite's own
+surface, unlike the already-correct callable dependency path, so the qualified
+bindings were never created.
+
+The composite-field path now first materializes same-owner declarations and,
+when still absent, follows the defining module's exact named import through the
+existing fail-closed terminal resolver. A native system regression fixture
+captures the three-module shape at
+`test/03_system/native/hir_imported_composite_explicit_field_dependency.spl`.
+The three-cycle cap was then reached, so the new regression and Stage 3 were not
+rerun in this session. Stage-3 admission, ARM64 kernel production, and real QEMU
+2D/Web/GUI/WM evidence remain pending and unclaimed.
