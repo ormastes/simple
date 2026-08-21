@@ -442,6 +442,39 @@ fn runtime_symbol_table_typed_memory_contracts_dispatch() {
 
 #[cfg(all(test, feature = "runtime-symbol-table"))]
 #[test]
+fn runtime_symbol_table_atomic_contracts_dispatch() {
+    fn entry(name: &str) -> *const u8 {
+        RUNTIME_SYMBOL_ENTRIES
+            .iter()
+            .find(|entry| entry.name == name)
+            .unwrap_or_else(|| panic!("{name} provider must be registered"))
+            .ptr
+    }
+
+    let int_new: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(entry("rt_atomic_int_new")) };
+    let int_add: extern "C" fn(i64, i64) -> i64 =
+        unsafe { std::mem::transmute(entry("rt_atomic_int_fetch_add")) };
+    let int_load: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(entry("rt_atomic_int_load")) };
+    let int_free: extern "C" fn(i64) = unsafe { std::mem::transmute(entry("rt_atomic_int_free")) };
+    let int_handle = int_new(7);
+    assert_ne!(int_handle, 0);
+    assert_eq!(int_add(int_handle, 5), 7);
+    assert_eq!(int_load(int_handle), 12);
+    int_free(int_handle);
+
+    let bool_new: extern "C" fn(bool) -> i64 = unsafe { std::mem::transmute(entry("rt_atomic_bool_new")) };
+    let bool_swap: extern "C" fn(i64, bool) -> bool =
+        unsafe { std::mem::transmute(entry("rt_atomic_bool_swap")) };
+    let bool_free: extern "C" fn(i64) = unsafe { std::mem::transmute(entry("rt_atomic_bool_free")) };
+    let bool_handle = bool_new(false);
+    assert_ne!(bool_handle, 0);
+    assert!(!bool_swap(bool_handle, true));
+    assert!(bool_swap(bool_handle, false));
+    bool_free(bool_handle);
+}
+
+#[cfg(all(test, feature = "runtime-symbol-table"))]
+#[test]
 fn runtime_symbol_table_keeps_struct_allocator_and_receiver_validator_paired() {
     let allocator = RUNTIME_SYMBOL_ENTRIES
         .iter()

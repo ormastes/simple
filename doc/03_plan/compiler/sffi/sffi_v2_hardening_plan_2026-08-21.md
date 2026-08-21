@@ -629,3 +629,15 @@ The NVFS vendored AES copy still directly declares the status/out helper; its
 own header requires replacement by the canonical pure-Simple module rather
 than local edits. That replacement needs an NVFS crypto throughput comparison
 before landing so hardening does not silently regress storage performance.
+
+All 30 RuntimeValue/opaque-handle atomic symbols now have compiler-owned ABI
+contracts, moving coverage to 1,049/741. The build generator has exact overrides
+for Rust `bool` parameters/results and the compare-exchange output pointer, so
+the coarse `I8`/`I64` codegen representation cannot create a clashing extern
+declaration. A generated-table test invokes integer new/fetch-add/load/free and
+boolean new/swap/free successfully. This change is metadata-only for execution:
+it adds no wrapper, branch, allocation, lock, lookup, or memory-ordering change.
+The opaque-handle implementation still uses registry locks and returns zero or
+false for stale handles; therefore the current safe-looking Simple wrappers are
+not yet verified lock-free or fail-closed and need a separate API/ownership
+migration before critical-mode approval.
