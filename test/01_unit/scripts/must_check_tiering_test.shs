@@ -1,0 +1,66 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
+PUSH="$ROOT/scripts/check/check-push-must-pass.shs"
+BOOTSTRAP="$ROOT/scripts/check/check-bootstrap-must-pass.shs"
+HOOK="$ROOT/scripts/check/pre-push-conflict-tree-guard.shs"
+INSTALL_UNIX="$ROOT/scripts/setup/install-must-check-hooks.shs"
+INSTALL_WINDOWS="$ROOT/scripts/setup/install-must-check-hooks.ps1"
+
+start=$(date +%s)
+sh "$PUSH" --self-test >/dev/null
+elapsed=$(($(date +%s) - start))
+[ "$elapsed" -le 10 ] || { echo "FAIL: push must-check selftest took ${elapsed}s"; exit 1; }
+
+sh "$BOOTSTRAP" --self-test >/dev/null
+grep -q 'exec sh "$repo_root/scripts/check/check-push-must-pass.shs"' "$HOOK"
+grep -q 'check-bootstrap-stage3-selfverify.shs' "$BOOTSTRAP"
+grep -q 'check-post-bootstrap-stage4-sspec.shs' "$BOOTSTRAP"
+grep -q 'pre-push.local' "$ROOT/scripts/hooks/pre-push"
+grep -q -- '--install' "$INSTALL_UNIX"
+grep -q 'Move-Item' "$INSTALL_WINDOWS"
+
+if grep -E 'native-build|qemu|benchmark|--whole' "$PUSH" >/dev/null; then
+    echo "FAIL: push-tier driver directly names an expensive execution lane"
+    exit 1
+fi
+
+# Exercise the real pre-push ref-input path in an isolated committed fixture.
+fixture=$(mktemp -d)
+trap 'rm -rf "$fixture"' EXIT INT TERM
+mkdir -p "$fixture/scripts/check" "$fixture/config/check" "$fixture/doc/08_tracking/check"
+cp "$PUSH" "$fixture/scripts/check/check-push-must-pass.shs"
+for guard in check-no-conflict-tree-push check-tree-size-push check-no-conflict-markers-push check-rules-sdl; do
+    printf '%s\n' '#!/bin/sh' 'echo "PASS — fixture guard"' > "$fixture/scripts/check/$guard.shs"
+    chmod +x "$fixture/scripts/check/$guard.shs"
+done
+printf '%s\n' \
+    'must_check_gates |id, tier, push_blocking, mode, command, description|' \
+    '    compiler-stage1, bootstrap, true, receipt, "", "fixture"' \
+    > "$fixture/config/check/must_check_gates.sdn"
+printf '%s\n' \
+    'must_check_ledger:' \
+    '  schema: "simple.must-check-ledger/v1"' \
+    '  source_fingerprint: "pending"' \
+    'must_check_results |id, status, passed_at_utc, command, evidence|' \
+    '    compiler-stage1, pass, 2000-01-01T00:00:00Z, "fixture", "fixture"' \
+    > "$fixture/doc/08_tracking/check/must_check_db.sdn"
+git -C "$fixture" init -q
+git -C "$fixture" config user.name must-check-test
+git -C "$fixture" config user.email must-check-test@example.invalid
+git -C "$fixture" add .
+git -C "$fixture" commit -qm base
+base=$(git -C "$fixture" rev-parse HEAD)
+fp=$(git -C "$fixture" ls-tree -r HEAD -- src scripts config test doc/07_guide doc/00_llm_process doc/glossary.md | sed '\|[[:space:]]doc/08_tracking/check/must_check_db.sdn$|d' | sha256sum | awk '{print $1}')
+sed "s/source_fingerprint: \"pending\"/source_fingerprint: \"$fp\"/" "$fixture/doc/08_tracking/check/must_check_db.sdn" > "$fixture/ledger.next"
+mv "$fixture/ledger.next" "$fixture/doc/08_tracking/check/must_check_db.sdn"
+git -C "$fixture" add doc/08_tracking/check/must_check_db.sdn
+git -C "$fixture" commit -qm ledger
+tip=$(git -C "$fixture" rev-parse HEAD)
+start=$(date +%s)
+printf 'refs/heads/main %s refs/heads/main %s\n' "$tip" "$base" | MUST_CHECK_ROOT="$fixture" sh "$fixture/scripts/check/check-push-must-pass.shs" >/dev/null
+ref_elapsed=$(($(date +%s) - start))
+[ "$ref_elapsed" -le 10 ] || { echo "FAIL: push must-check ref path took ${ref_elapsed}s"; exit 1; }
+
+echo "PASS: must-check tiering contract selftest=${elapsed}s ref-path=${ref_elapsed}s"

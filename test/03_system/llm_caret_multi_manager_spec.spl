@@ -1,0 +1,47 @@
+# @cover src/app/llm_caret/multi_caret_manager.spl 80%
+# @req REQ-014
+
+use std.spec.*
+use app.llm_caret.agent_plan.{AgentLaunchRequest}
+use app.llm_caret.multi_caret_manager.{launch_multi_caret_manager,
+    poll_multi_caret_manager, stop_multi_caret_manager}
+
+fn backend_request(provider: text, agent_id: text) -> AgentLaunchRequest:
+    AgentLaunchRequest(provider: provider, agent_md_path: agent_id,
+        skill_path: "skills/sys.md", task_desc: "multi-Caret system check",
+        model: "", session_id: "", extra_args: [])
+
+describe "bounded parent-owned multi-Caret manager":
+    it "launches four provider wrappers into four derived terminal panes":
+        step("Build one bounded parent-owned batch")
+        val requests = [backend_request("claude_cli", "claude"),
+            backend_request("codex", "codex"), backend_request("gemini", "gemini"),
+            backend_request("kimi", "kimi")]
+        val manager = launch_multi_caret_manager("system-team", requests, 4,
+            "/bin/echo", "/bin/echo", "/bin/echo", "/bin/echo", "")
+        expect(manager.status).to_equal("running")
+        expect(manager.team.processes.len()).to_equal(4)
+        expect(manager.terminal_view.session.windows[0].panes.len()).to_equal(4)
+        step("Poll through the parent and perform one terminal cleanup")
+        val polled = poll_multi_caret_manager(manager)
+        val stopped = stop_multi_caret_manager(polled)
+        expect(stopped.status).to_equal("stopped")
+
+    it "rejects an over-capacity batch before spawning any process":
+        step("Submit two requests to a one-slot manager")
+        val requests = [backend_request("claude_cli", "claude"),
+            backend_request("codex", "codex")]
+        val manager = launch_multi_caret_manager("bounded-team", requests, 1,
+            "/bin/echo", "/bin/echo", "", "", "")
+        expect(manager.status).to_equal("not_started")
+        expect(manager.reason).to_equal("capacity_exceeded")
+        expect(manager.team.processes.len()).to_equal(0)
+
+    it "keeps terminal stop idempotent at the parent boundary":
+        step("Stop an unstarted manager twice")
+        val manager = launch_multi_caret_manager("empty-team", [], 4,
+            "", "", "", "", "")
+        val stopped = stop_multi_caret_manager(manager)
+        val stopped_again = stop_multi_caret_manager(stopped)
+        expect(stopped_again.status).to_equal("stopped")
+        expect(stopped_again.reason).to_equal("no_processes")

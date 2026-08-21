@@ -45,10 +45,12 @@ reuses `build/database/llm_caret_messaging_server` and supervises that process.
 The HTTP server and PureDatabase hot path therefore never fall back merely
 because the launching CLI happens to be interpreted.
 
-The provider-neutral agent runtime resolves Claude Code, Codex, Gemini CLI, and
-the retained OpenCode compatibility path. Callers that need an explicit Gemini
-binary use the `*_with_gemini` runtime entrypoints; the older three-path
-entrypoints remain source-compatible.
+The provider-neutral agent runtime resolves Claude Code, Codex, Gemini CLI,
+Kimi CLI, and the retained OpenCode compatibility path. New callers that need
+all explicit paths use the `*_with_all` entrypoints; `*_with_gemini` and the
+older three-path entrypoints remain source-compatible. Kimi agent launch is
+available at this runtime boundary; the managed messaging-plugin installer is
+still the Claude/Codex/Gemini composite and must not claim Kimi hook support.
 
 Use `launch_messaging_agent_plan` for a room task. It starts the selected
 provider with only `LLM_CARET_TASK_ID`, `LLM_CARET_ROOM_ID`,
@@ -139,3 +141,11 @@ The v1 installer treats Claude, Codex, and Gemini as one composite activation.
 unknown selections fail before writes. The selected-agent SDN record is covered
 by the same backup, hash, drift-check, and guarded-uninstall policy as the rest
 of the bundle.
+## Bounded multi-Caret launch
+
+`app.llm_caret.multi_caret_manager` launches a finite Claude, Codex, Gemini,
+Kimi, or OpenCode batch behind one parent-owned lifecycle. Set an explicit
+capacity (maximum 16); over-capacity requests fail before spawn, and partial
+launches are rolled back. The returned terminal embed is a display-only pane
+model, not an `os.apps.smux` session. Call the manager poll and stop operations
+rather than acting on child PIDs.

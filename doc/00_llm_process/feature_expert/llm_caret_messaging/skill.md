@@ -5,7 +5,9 @@
 The primitive Simple room is the semantic authority. The messaging domain owns
 identities, rooms, messages, receipts, tasks, artifacts, profiles, ACLs, audit,
 and loop protection. `ChatTransportPort` adapts external chat; `AgentControlPort`
-controls Claude, Codex, and Gemini. Provider protocol messages, agent launch
+controls Claude, Codex, and Gemini. The adjacent agent-runtime launcher also
+maps Kimi through `*_with_all`; do not misstate that as managed Kimi messaging
+hook support. Provider protocol messages, agent launch
 plans, legacy mailboxes, and SPipe documentation tooling remain separate.
 
 No platform- or provider-specific type belongs in the domain. Capability levels
@@ -28,6 +30,9 @@ planned from capability data, not platform-name branches.
   never settings-file literals.
 - Codex App Server is primary; Claude and Gemini lifecycle hooks map to the
   common agent-control contract.
+- Bootstrap must-check runs the Caret local-model, four-provider wrapper, and
+  primitive gates. Keep smux multi-Caret launch TODO until a production adapter
+  actually connects smux supervision to the agent manager.
 
 ## SPipe evidence
 

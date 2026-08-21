@@ -1,0 +1,231 @@
+#!/bin/sh
+# Bootstrap-tier mandatory checks and deterministic textual SDN evidence writer.
+set -u
+
+ROOT=${MUST_CHECK_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}
+MANIFEST=${MUST_CHECK_MANIFEST:-$ROOT/config/check/must_check_gates.sdn}
+LEDGER=${MUST_CHECK_LEDGER:-$ROOT/doc/08_tracking/check/must_check_db.sdn}
+MODE=run
+[ "${1:-}" = --record-bootstrap-success ] && MODE=record-bootstrap
+[ "${1:-}" = --self-test ] && MODE=selftest
+OUTPUT_DIR=build/bootstrap
+STAGE4_BINARY=""
+STAGE4_PROVENANCE=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --record-bootstrap-success|--self-test) shift ;;
+        --output-dir) OUTPUT_DIR=$2; shift 2 ;;
+        --stage4-binary) STAGE4_BINARY=$2; shift 2 ;;
+        --stage4-provenance) STAGE4_PROVENANCE=$2; shift 2 ;;
+        *) echo "bootstrap-must-check: ERROR — unknown argument $1" >&2; exit 2 ;;
+    esac
+done
+
+fingerprint_head() {
+    _tree=$(mktemp) || return 1
+    git -C "$ROOT" ls-tree -r HEAD -- src scripts config test doc/07_guide doc/00_llm_process doc/glossary.md >"$_tree" 2>/dev/null || { rm -f "$_tree"; return 1; }
+    sed '\|[[:space:]]doc/08_tracking/check/must_check_db.sdn$|d' "$_tree" | sha256sum | awk '{print $1}'
+    _rc=$?
+    rm -f "$_tree"
+    return "$_rc"
+}
+
+write_ledger() {
+    _rows=$1
+    _fp=$2
+    _at=$3
+    _tmp="$LEDGER.tmp.$$"
+    mkdir -p "$(dirname "$LEDGER")"
+    {
+        echo '# Updated by scripts/check/check-bootstrap-must-pass.shs. TODO is visible debt, never PASS.'
+        echo 'must_check_ledger:'
+        echo '  schema: "simple.must-check-ledger/v1"'
+        echo "  source_fingerprint: \"$_fp\""
+        echo "  completed_at_utc: \"$_at\""
+        echo 'must_check_results |id, status, passed_at_utc, command, evidence|'
+        printf '%s\n' "$_rows"
+    } > "$_tmp"
+    mv "$_tmp" "$LEDGER"
+}
+
+manifest_rows() {
+    awk '/^[[:space:]]+[a-z0-9][a-z0-9-]*,[[:space:]]*(push|bootstrap),/ {print}' "$MANIFEST"
+}
+
+row_value() {
+    _id=$1; _column=$2
+    awk -F, -v id="$_id" -v col="$_column" '{x=$1; gsub(/^[[:space:]]+/, "", x); if (x==id) {v=$col; gsub(/^[[:space:]]+|[[:space:]]+$/, "", v); if (substr(v,1,1)=="\"") v=substr(v,2); if (substr(v,length(v),1)=="\"") v=substr(v,1,length(v)-1); print v; exit}}' "$LEDGER" 2>/dev/null
+}
+
+validate_compiler_phases() {
+    if [ -n "${MUST_CHECK_PHASE_VALIDATOR:-}" ]; then
+        [ "${MUST_CHECK_SELFTEST:-0}" = 1 ] || {
+            echo "bootstrap-must-check: ERROR — phase validator override is self-test-only" >&2
+            return 2
+        }
+        sh "$MUST_CHECK_PHASE_VALIDATOR" "$OUTPUT_DIR" "$STAGE4_BINARY" "$STAGE4_PROVENANCE"
+        return $?
+    fi
+    [ -n "$STAGE4_BINARY" ] && [ -n "$STAGE4_PROVENANCE" ] || return 2
+    _stage123_out=$(mktemp) || return 2
+    _stage4_out=$(mktemp) || { rm -f "$_stage123_out"; return 2; }
+    sh "$ROOT/scripts/check/check-bootstrap-stage3-selfverify.shs" \
+        --output-dir "$OUTPUT_DIR" --full-provenance >"$_stage123_out" 2>&1
+    _stage123_rc=$?
+    sh "$ROOT/scripts/check/check-post-bootstrap-stage4-sspec.shs" \
+        "$STAGE4_BINARY" "$STAGE4_PROVENANCE" >"$_stage4_out" 2>&1
+    _stage4_rc=$?
+    if [ "$_stage123_rc" -eq 0 ] && \
+       tail -n 1 "$_stage123_out" | grep -Eq '^PASS — [1-9][0-9]* assertion\(s\) checked, stage3 self-verified at .+' && \
+       [ "$_stage4_rc" -eq 0 ] && grep -qx 'post_bootstrap_stage4_acceptance=true' "$_stage4_out"; then
+        _stage3_provenance=$(tail -n 1 "$_stage123_out" | sed 's/^PASS — [1-9][0-9]* assertion(s) checked, stage3 self-verified at //')
+        printf '%s\n' compiler-stage1=pass compiler-stage2=pass compiler-stage3=pass compiler-stage4=pass
+        printf '%s\n' \
+            "compiler-stage1-evidence=$_stage3_provenance#seed" \
+            "compiler-stage2-evidence=$_stage3_provenance#stage2" \
+            "compiler-stage3-evidence=$_stage3_provenance#stage3" \
+            "compiler-stage4-evidence=$STAGE4_PROVENANCE#post-bootstrap-stage4"
+        rm -f "$_stage123_out" "$_stage4_out"
+        return 0
+    fi
+    tail -n 12 "$_stage123_out" >&2
+    tail -n 12 "$_stage4_out" >&2
+    rm -f "$_stage123_out" "$_stage4_out"
+    return 1
+}
+
+run_automated_gate() {
+    _gate_command=$1
+    if [ -n "${MUST_CHECK_GATE_RUNNER:-}" ]; then
+        [ "${MUST_CHECK_SELFTEST:-0}" = 1 ] || {
+            echo "bootstrap-must-check: ERROR — gate runner override is self-test-only" >&2
+            return 2
+        }
+        sh "$MUST_CHECK_GATE_RUNNER" "$_gate_command"
+        return $?
+    fi
+    (cd "$ROOT" && sh -c "$_gate_command")
+}
+
+if [ "$MODE" = selftest ]; then
+    _tmp=$(mktemp -d) || exit 2
+    trap 'rm -rf "$_tmp"' EXIT INT TERM
+    printf '%s\n' '#!/bin/sh' 'printf "%s\n" compiler-stage1=pass compiler-stage2=pass compiler-stage3=pass compiler-stage4=pass' > "$_tmp/phase-validator"
+    printf '%s\n' 'printf "%s\n" compiler-stage1-evidence=selftest#seed compiler-stage2-evidence=selftest#stage2 compiler-stage3-evidence=selftest#stage3 compiler-stage4-evidence=selftest#stage4' >> "$_tmp/phase-validator"
+    printf '%s\n' '#!/bin/sh' 'echo "STATUS: PASS self-test automated gate"' > "$_tmp/gate-runner"
+    chmod +x "$_tmp/phase-validator"
+    chmod +x "$_tmp/gate-runner"
+    MUST_CHECK_ROOT="$ROOT" MUST_CHECK_LEDGER="$_tmp/ledger.sdn" MUST_CHECK_EVIDENCE_DIR="$_tmp/evidence" MUST_CHECK_PHASE_VALIDATOR="$_tmp/phase-validator" MUST_CHECK_GATE_RUNNER="$_tmp/gate-runner" MUST_CHECK_SELFTEST=1 sh "$0" --record-bootstrap-success >/dev/null || exit 1
+    grep -q 'compiler-stage1, pass' "$_tmp/ledger.sdn" || exit 1
+    grep -q 'compiler-stage2, pass' "$_tmp/ledger.sdn" || exit 1
+    grep -q 'compiler-stage3, pass' "$_tmp/ledger.sdn" || exit 1
+    grep -q 'compiler-stage4, pass' "$_tmp/ledger.sdn" || exit 1
+    grep -q 'rules-full, pass' "$_tmp/ledger.sdn" || exit 1
+    grep -q 'caret-multi-manager-launch, pass' "$_tmp/ledger.sdn" || exit 1
+    grep -q 'caret-smux-multi-launch, todo' "$_tmp/ledger.sdn" || exit 1
+    grep -q 'web-server-gpu-nginx, todo' "$_tmp/ledger.sdn" || exit 1
+    _first=$(sha256sum "$_tmp/ledger.sdn" | awk '{print $1}')
+    MUST_CHECK_ROOT="$ROOT" MUST_CHECK_LEDGER="$_tmp/ledger.sdn" MUST_CHECK_EVIDENCE_DIR="$_tmp/evidence" MUST_CHECK_PHASE_VALIDATOR="$_tmp/phase-validator" MUST_CHECK_GATE_RUNNER="$_tmp/gate-runner" MUST_CHECK_SELFTEST=1 MUST_CHECK_NOW=2000-01-01T00:00:00Z sh "$0" --record-bootstrap-success >/dev/null || exit 1
+    MUST_CHECK_ROOT="$ROOT" MUST_CHECK_LEDGER="$_tmp/ledger2.sdn" MUST_CHECK_EVIDENCE_DIR="$_tmp/evidence" MUST_CHECK_PHASE_VALIDATOR="$_tmp/phase-validator" MUST_CHECK_GATE_RUNNER="$_tmp/gate-runner" MUST_CHECK_SELFTEST=1 MUST_CHECK_NOW=2000-01-01T00:00:00Z sh "$0" --record-bootstrap-success >/dev/null || exit 1
+    cmp "$_tmp/ledger.sdn" "$_tmp/ledger2.sdn" >/dev/null || exit 1
+    [ -n "$_first" ] || exit 1
+    sed 's/source_fingerprint: "[^"]*"/source_fingerprint: "old"/; s/engine-differential, todo, never/engine-differential, pass, 1999-01-01T00:00:00Z/' "$_tmp/ledger.sdn" > "$_tmp/stale-ledger.sdn"
+    MUST_CHECK_ROOT="$ROOT" MUST_CHECK_LEDGER="$_tmp/stale-ledger.sdn" MUST_CHECK_EVIDENCE_DIR="$_tmp/evidence-stale" MUST_CHECK_PHASE_VALIDATOR="$_tmp/phase-validator" MUST_CHECK_GATE_RUNNER="$_tmp/gate-runner" MUST_CHECK_SELFTEST=1 MUST_CHECK_FINGERPRINT=new MUST_CHECK_NOW=2000-01-01T00:00:00Z sh "$0" --record-bootstrap-success >/dev/null || exit 1
+    grep -q 'engine-differential, todo, never' "$_tmp/stale-ledger.sdn" || exit 1
+    if MUST_CHECK_ROOT="$ROOT" MUST_CHECK_LEDGER="$_tmp/rejected.sdn" MUST_CHECK_PHASE_VALIDATOR="$_tmp/phase-validator" MUST_CHECK_GATE_RUNNER="$_tmp/gate-runner" sh "$0" --record-bootstrap-success >/dev/null 2>&1; then
+        echo "bootstrap-must-check selftest: production validator override was accepted" >&2
+        exit 1
+    fi
+    echo "bootstrap-must-check: PASS — phase promotion TODO preservation stale reset override rejection and deterministic output checked"
+    exit 0
+fi
+
+[ -f "$MANIFEST" ] || { echo "bootstrap-must-check: ERROR — missing manifest" >&2; exit 2; }
+if [ -n "${MUST_CHECK_FINGERPRINT:-}" ]; then
+    [ "${MUST_CHECK_SELFTEST:-0}" = 1 ] || {
+        echo "bootstrap-must-check: ERROR — fingerprint override is self-test-only" >&2
+        exit 2
+    }
+    _fp=$MUST_CHECK_FINGERPRINT
+else
+    _fp=$(fingerprint_head) || exit 2
+fi
+_at=${MUST_CHECK_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
+if [ -n "${MUST_CHECK_EVIDENCE_DIR:-}" ]; then
+    [ "${MUST_CHECK_SELFTEST:-0}" = 1 ] || {
+        echo "bootstrap-must-check: ERROR — evidence directory override is self-test-only" >&2
+        exit 2
+    }
+    _evidence_dir=$MUST_CHECK_EVIDENCE_DIR
+else
+    _evidence_dir="$ROOT/build/must-check/$_fp"
+fi
+mkdir -p "$_evidence_dir"
+_old_fp=""
+[ -f "$LEDGER" ] && _old_fp=$(awk '$1 == "source_fingerprint:" {v=$2; if (substr(v,1,1)=="\"") v=substr(v,2); if (substr(v,length(v),1)=="\"") v=substr(v,1,length(v)-1); print v; exit}' "$LEDGER")
+_carry_pass=0
+[ "$_old_fp" = "$_fp" ] && _carry_pass=1
+_rows=""
+_failed=0
+_phase_results=""
+    if [ "$MODE" = record-bootstrap ]; then
+    _phase_results=$(validate_compiler_phases) || {
+        echo "bootstrap-must-check: FAIL — compiler Stage 1/2/3/4 evidence did not all pass" >&2
+        exit 1
+    }
+    for _phase in compiler-stage1 compiler-stage2 compiler-stage3 compiler-stage4; do
+        printf '%s\n' "$_phase_results" | grep -qx "$_phase=pass" || {
+            echo "bootstrap-must-check: FAIL — missing $_phase PASS evidence" >&2
+            exit 1
+        }
+    done
+fi
+
+manifest_rows | while IFS=, read -r _id _tier _blocking _gate_mode _command _description; do
+    : # parsed below outside the pipeline so status survives POSIX-shell subshells
+done
+
+_manifest_tmp=$(mktemp) || exit 2
+_rows_tmp=$(mktemp) || exit 2
+trap 'rm -f "$_manifest_tmp" "$_rows_tmp"' EXIT INT TERM
+manifest_rows > "$_manifest_tmp"
+while IFS=, read -r _id _tier _blocking _gate_mode _command _description; do
+    _id=$(printf '%s' "$_id" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    _gate_mode=$(printf '%s' "$_gate_mode" | tr -d ' ')
+    _command=$(printf '%s' "$_command" | sed 's/^[[:space:]]*"//;s/"[[:space:]]*$//')
+    _status=todo
+    _passed_at=never
+    _evidence='not run'
+    if [ "$MODE" = record-bootstrap ] && { [ "$_id" = compiler-stage1 ] || [ "$_id" = compiler-stage2 ] || [ "$_id" = compiler-stage3 ] || [ "$_id" = compiler-stage4 ]; }; then
+        _status=pass; _passed_at=$_at
+        _evidence=$(printf '%s\n' "$_phase_results" | sed -n "s/^$_id-evidence=//p")
+        [ -n "$_evidence" ] || { echo "bootstrap-must-check: FAIL — missing $_id evidence reference" >&2; exit 1; }
+        case "$_evidence" in "$ROOT/"*) _evidence=${_evidence#"$ROOT/"} ;; esac
+    elif { [ "$MODE" = run ] || [ "$MODE" = record-bootstrap ]; } && [ "$_gate_mode" = automated ]; then
+        _out="$_evidence_dir/${_id}.log.tmp.$$"
+        _final_out="$_evidence_dir/${_id}.log"
+        run_automated_gate "$_command" >"$_out" 2>&1
+        _rc=$?
+        if [ "$_rc" -eq 0 ] && tail -n 8 "$_out" | grep -q 'PASS'; then
+            mv "$_out" "$_final_out"
+            _status=pass; _passed_at=$_at; _evidence="$_final_out"
+            case "$_evidence" in "$ROOT/"*) _evidence=${_evidence#"$ROOT/"} ;; esac
+        else
+            mv "$_out" "$_final_out"
+            _status=fail; _evidence="exit $_rc without accepted PASS at $_at"; _failed=1
+        fi
+    else
+        _old=$(row_value "$_id" 2)
+        if [ "$_carry_pass" -eq 1 ] && [ "$_old" = pass ]; then
+            _status=pass
+            _passed_at=$(row_value "$_id" 3)
+        fi
+        _evidence=$(row_value "$_id" 5)
+        [ -n "$_evidence" ] || _evidence='pending required evidence'
+    fi
+    printf '    %s, %s, %s, "%s", "%s"\n' "$_id" "$_status" "$_passed_at" "$_command" "$_evidence" >> "$_rows_tmp"
+done < "$_manifest_tmp"
+
+write_ledger "$(cat "$_rows_tmp")" "$_fp" "$_at"
+[ "$_failed" -eq 0 ] || { echo "bootstrap-must-check: FAIL — one or more automated gates failed"; exit 1; }
+echo "bootstrap-must-check: PASS — ledger updated; TODO rows remain visible and are not counted as pass"
