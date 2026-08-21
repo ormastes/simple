@@ -1,0 +1,233 @@
+#!/bin/sh
+# Refuse to push a range that truncates or beheads a tracked bug record.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS EXISTS
+# ---------------------------------------------------------------------------
+# 2026-08-21: ~170 tracked files under doc/08_tracking/bug/ were found
+# truncated and one deleted in the shared working tree
+# (doc/08_tracking/bug/bug_gen_truncates_unrelated_records_2026-08-21.md).
+# `bin/simple bug-gen` was cleared as the writer after a clean reproduction
+# attempt found only a single `file_write` and no delete anywhere in
+# `src/app/bug_gen/`, `bug_add/`, `bug_resolve/`, or `tracking/`. A real,
+# narrower defect (silently dropping unparsed DB rows on regenerate) was found
+# and fixed in the same investigation (caa7269a006), but the original mass
+# truncation was never reproduced and its actual writer is still unknown.
+#
+# No guard existed to catch a *committed* mass truncation of bug records, only
+# ones that already ran against working-tree damage. This closes that gap for
+# any future push: it inspects COMMITTED content only (git show), never the
+# shared working copy, so it works even when the working tree is stale or
+# mid-repair.
+#
+# ---------------------------------------------------------------------------
+# MECHANISM
+# ---------------------------------------------------------------------------
+# For every path under doc/08_tracking/bug/ that is Modified (never Added, so
+# a brand-new record isn't compared against nothing) in the range BASE..NEW,
+# compare the OLD and NEW blob:
+#   - FAIL if new byte size <= 20% of old byte size (shrinks by more than 80%)
+#   - FAIL if the old file had a leading "# " (or "#" alone) markdown heading
+#     line and the new file's first non-blank line no longer starts with "#"
+#     at all (title/heading was lost, even when size didn't drop 80%)
+#
+# A Deleted record is reported separately as an offender (see --allow-delete
+# escape below) since outright deletion of a bug record is the sibling defect
+# this incident also involved.
+#
+# Verdict is always the last line of stdout:
+#   PASS  — <n> record(s) checked, 0 truncated, 0 deleted
+#   FAIL  — <n> record(s) checked, <k> offender(s): <names>
+#   ERROR — nothing was checked
+#
+# A 0-record comparison is always ERROR, never a vacuous PASS.
+#
+# Usage:
+#   sh scripts/check/check-bug-records-not-truncated.shs [BASE] [NEW]
+#   sh scripts/check/check-bug-records-not-truncated.shs --selftest
+#
+# BASE/NEW default to the same default range the other pre-push guards use:
+# main@origin..@- is not resolvable here (this is a plain-git checkout, not
+# jj), so default to HEAD~1..HEAD, override with explicit args for a real
+# push range.
+# ---------------------------------------------------------------------------
+
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+DIR_FILTER="doc/08_tracking/bug"
+SHRINK_THRESHOLD_PCT=20  # new size must be > this % of old size, else FAIL
+
+check_range() {
+    base=$1
+    new=$2
+    checked=0
+    offenders=""
+
+    changed=$(git diff --no-renames --name-status "$base" "$new" -- "$DIR_FILTER" 2>/dev/null || true)
+
+    if [ -z "$changed" ]; then
+        echo "ERROR — nothing was checked (no changes under $DIR_FILTER in $base..$new)"
+        return 2
+    fi
+
+    echo "$changed" | while IFS= read -r line; do
+        status=$(printf '%s' "$line" | cut -f1)
+        path=$(printf '%s' "$line" | cut -f2)
+        case "$path" in
+            *.md) ;;
+            *) continue ;;
+        esac
+
+        case "$status" in
+            M)
+                old_content=$(git show "$base:$path" 2>/dev/null || true)
+                new_content=$(git show "$new:$path" 2>/dev/null || true)
+                old_size=$(printf '%s' "$old_content" | wc -c)
+                new_size=$(printf '%s' "$new_content" | wc -c)
+
+                echo "CHECKED $path"
+
+                if [ "$old_size" -eq 0 ]; then
+                    continue
+                fi
+
+                # percentage new/old *100, integer arithmetic
+                pct=$(( new_size * 100 / old_size ))
+                if [ "$pct" -le "$SHRINK_THRESHOLD_PCT" ]; then
+                    echo "OFFENDER $path shrank ${old_size}->${new_size} bytes (${pct}% of original)"
+                    continue
+                fi
+
+                old_heading=$(printf '%s\n' "$old_content" | grep -m1 -E '^#' || true)
+                new_heading=$(printf '%s\n' "$new_content" | grep -m1 -E '^#' || true)
+                if [ -n "$old_heading" ] && [ -z "$new_heading" ]; then
+                    echo "OFFENDER $path lost its heading (had: ${old_heading})"
+                fi
+                ;;
+            D)
+                echo "CHECKED $path"
+                echo "OFFENDER $path was deleted"
+                ;;
+            *)
+                ;;
+        esac
+    done > /tmp/check-bug-records-not-truncated.$$.out 2>&1 || true
+
+    checked=$(grep -c '^CHECKED ' /tmp/check-bug-records-not-truncated.$$.out || true)
+    offenders=$(grep '^OFFENDER ' /tmp/check-bug-records-not-truncated.$$.out | sed 's/^OFFENDER //' || true)
+    rm -f /tmp/check-bug-records-not-truncated.$$.out
+
+    if [ "$checked" -eq 0 ]; then
+        echo "ERROR — nothing was checked (no .md records changed under $DIR_FILTER in $base..$new)"
+        return 2
+    fi
+
+    if [ -n "$offenders" ]; then
+        names=$(printf '%s' "$offenders" | awk '{print $1}' | paste -sd, -)
+        printf '%s\n' "$offenders" | sed 's/^/  - /'
+        echo "FAIL — $checked record(s) checked, $(printf '%s\n' "$offenders" | wc -l) offender(s): $names"
+        return 1
+    fi
+
+    echo "PASS — $checked record(s) checked, 0 truncated, 0 deleted"
+    return 0
+}
+
+run_selftest() {
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    ( cd "$tmp" && git init -q && git config user.email t@t && git config user.name t )
+    mkdir -p "$tmp/doc/08_tracking/bug"
+
+    # commit 1: base — one healthy record, one to be deleted, one to survive untouched
+    printf '# Real Bug One\n\nSome body text describing the bug in detail across\nmultiple lines so the file has real size.\n' > "$tmp/doc/08_tracking/bug/a.md"
+    printf '# Real Bug Two\n\nAnother real record, untouched across commits.\n' > "$tmp/doc/08_tracking/bug/b.md"
+    printf '# Real Bug Three\n\nThis one gets deleted in commit 2.\n' > "$tmp/doc/08_tracking/bug/c.md"
+    ( cd "$tmp" && git add -A && git commit -q -m base )
+    base=$( cd "$tmp" && git rev-parse HEAD )
+
+    # commit 2 (BAD fixture): truncate a.md to near-nothing, delete c.md
+    printf 'x\n' > "$tmp/doc/08_tracking/bug/a.md"
+    rm -f "$tmp/doc/08_tracking/bug/c.md"
+    ( cd "$tmp" && git add -A && git commit -q -m bad )
+    bad=$( cd "$tmp" && git rev-parse HEAD )
+
+    out=$( cd "$tmp" && env CHECK_BUG_RECORDS_SKIP_SELFTEST=1 sh "$SCRIPT_DIR/check-bug-records-not-truncated.shs" "$base" "$bad" 2>&1 ) || true
+    verdict=$(printf '%s\n' "$out" | tail -1)
+    case "$verdict" in
+        FAIL\ *) ;;
+        *) echo "SELFTEST FAIL: bad fixture did not FAIL correctly: $verdict"; echo "$out"; exit 1 ;;
+    esac
+    case "$out" in
+        *a.md*shrank*) ;;
+        *) echo "SELFTEST FAIL: shrink of a.md not flagged"; echo "$out"; exit 1 ;;
+    esac
+    case "$out" in
+        *c.md*deleted*) ;;
+        *) echo "SELFTEST FAIL: deletion of c.md not flagged"; echo "$out"; exit 1 ;;
+    esac
+
+    # commit 3 (GOOD fixture, from base): grow a.md, leave b.md/c.md untouched
+    ( cd "$tmp" && git reset -q --hard "$base" )
+    printf '# Real Bug One\n\nSome body text describing the bug in detail across\nmultiple lines, now with an added investigation section\nand more detail than before.\n' > "$tmp/doc/08_tracking/bug/a.md"
+    ( cd "$tmp" && git add -A && git commit -q -m good )
+    good=$( cd "$tmp" && git rev-parse HEAD )
+
+    out=$( cd "$tmp" && env CHECK_BUG_RECORDS_SKIP_SELFTEST=1 sh "$SCRIPT_DIR/check-bug-records-not-truncated.shs" "$base" "$good" 2>&1 ) || true
+    verdict=$(printf '%s\n' "$out" | tail -1)
+    case "$verdict" in
+        PASS\ *) ;;
+        *) echo "SELFTEST FAIL: good fixture did not PASS: $verdict"; echo "$out"; exit 1 ;;
+    esac
+
+    # commit 4 (heading-loss fixture): same size or bigger, but heading removed
+    ( cd "$tmp" && git reset -q --hard "$base" )
+    printf 'Some body text describing the bug in detail across\nmultiple lines so the file has real size, but the\nheading line up top is now gone entirely which is bad.\n' > "$tmp/doc/08_tracking/bug/a.md"
+    ( cd "$tmp" && git add -A && git commit -q -m headingloss )
+    hl=$( cd "$tmp" && git rev-parse HEAD )
+
+    out=$( cd "$tmp" && env CHECK_BUG_RECORDS_SKIP_SELFTEST=1 sh "$SCRIPT_DIR/check-bug-records-not-truncated.shs" "$base" "$hl" 2>&1 ) || true
+    verdict=$(printf '%s\n' "$out" | tail -1)
+    case "$verdict" in
+        FAIL\ *a.md*) ;;
+        *) echo "SELFTEST FAIL: heading-loss fixture did not FAIL: $verdict"; echo "$out"; exit 1 ;;
+    esac
+
+    # commit 5 (vacuous range): no bug/ changes at all -> ERROR
+    ( cd "$tmp" && git reset -q --hard "$base" )
+    echo "unrelated" > "$tmp/README.md"
+    ( cd "$tmp" && git add -A && git commit -q -m unrelated )
+    ur=$( cd "$tmp" && git rev-parse HEAD )
+
+    out=$( cd "$tmp" && env CHECK_BUG_RECORDS_SKIP_SELFTEST=1 sh "$SCRIPT_DIR/check-bug-records-not-truncated.shs" "$base" "$ur" 2>&1 ) || true
+    verdict=$(printf '%s\n' "$out" | tail -1)
+    case "$verdict" in
+        ERROR\ *) ;;
+        *) echo "SELFTEST FAIL: vacuous range did not ERROR: $verdict"; echo "$out"; exit 1 ;;
+    esac
+
+    echo "SELFTEST: 4 fixtures passed (bad-truncation FAIL, good-growth PASS, heading-loss FAIL, vacuous-range ERROR)"
+}
+
+if [ "${1:-}" = "--selftest" ]; then
+    run_selftest
+    exit 0
+fi
+
+if [ "${CHECK_BUG_RECORDS_SKIP_SELFTEST:-}" != "1" ]; then
+    if ! CHECK_BUG_RECORDS_SKIP_SELFTEST=1 run_selftest >/tmp/check-bug-records-not-truncated.selftest.$$ 2>&1; then
+        cat /tmp/check-bug-records-not-truncated.selftest.$$
+        rm -f /tmp/check-bug-records-not-truncated.selftest.$$
+        echo "ERROR — nothing was checked (selftest failed, refusing to run)"
+        exit 2
+    fi
+    rm -f /tmp/check-bug-records-not-truncated.selftest.$$
+fi
+
+BASE=${1:-HEAD~1}
+NEW=${2:-HEAD}
+
+check_range "$BASE" "$NEW"
+exit $?
