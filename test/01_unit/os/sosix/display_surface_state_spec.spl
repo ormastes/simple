@@ -1,4 +1,12 @@
 # @cover src/os/sosix/host/display_surface_state.spl 80%
+"""
+## Purpose and audience
+Purpose: rejects invalid capability and zero queue capacity
+Audience: compiler and tooling engineers who maintain this spec
+"""
+
+# @req: REQ-OS-DispSurfStat-001
+
 use std.spec
 use os.sosix.core.operation.{SosixOperationId}
 use os.sosix.core.capability_ref.{SosixCapabilityRef, SosixBufferRef}
@@ -36,44 +44,57 @@ fn completion(generation: u32, sequence: u64) -> SosixDisplayCompletionKey:
 fn fresh_state(capacity: u32) -> SosixDisplaySurfaceState:
     sosix_display_surface_state_create(surface(), capacity).state
 
+use std.spec.step
 describe "SOSIX asynchronous display surface lifecycle":
     it "rejects invalid capability and zero queue capacity":
+        step("Verify: rejects invalid capability and zero queue capacity")
+        # @req: REQ-OS-DispSurfStat-001
         val invalid = SosixCapabilityRef(slot: 7, generation: 0)
         expect(sosix_display_surface_state_create(invalid, 2).reason).to_equal("invalid-surface")
         expect(sosix_display_surface_state_create(surface(), 0).reason).to_equal("zero-inflight-capacity")
 
     it "submits sequential frames until bounded backpressure":
+        step("Verify: submits sequential frames until bounded backpressure")
+        # @req: REQ-OS-DispSurfStat-001
         val first = sosix_display_surface_submit(fresh_state(2), request(1, 1))
         val second = sosix_display_surface_submit(first.state, request(1, 2))
         val blocked = sosix_display_surface_submit(second.state, request(1, 3))
         expect(first.accepted).to_equal(true)
-        expect(second.state.inflight_count).to_equal(2)
+        expect(second.state.inflight_count).to_equal(2)  # oracle: value fixed by the spec contract
         expect(blocked.reason).to_equal("display-backpressure")
 
     it "rejects skipped sequence and stale surface generation":
+        step("Verify: rejects skipped sequence and stale surface generation")
+        # @req: REQ-OS-DispSurfStat-001
         val state = fresh_state(2)
         expect(sosix_display_surface_submit(state, request(1, 2)).reason).to_equal("unexpected-frame-sequence")
         expect(sosix_display_surface_submit(state, request(2, 1)).reason).to_equal("stale-surface-generation")
 
     it "completes frames in submission order and rejects duplicates":
+        step("Verify: completes frames in submission order and rejects duplicates")
+        # @req: REQ-OS-DispSurfStat-001
         val one = sosix_display_surface_submit(fresh_state(2), request(1, 1)).state
         val two = sosix_display_surface_submit(one, request(1, 2)).state
         expect(sosix_display_surface_complete(two, completion(1, 2)).reason).to_equal("out-of-order-completion")
         val completed = sosix_display_surface_complete(two, completion(1, 1))
         expect(completed.accepted).to_equal(true)
-        expect(completed.state.inflight_count).to_equal(1)
+        expect(completed.state.inflight_count).to_equal(1)  # oracle: value fixed by the spec contract
         expect(sosix_display_surface_complete(completed.state, completion(1, 1)).reason).to_equal("out-of-order-completion")
 
     it "resizes only while drained and invalidates the old generation":
+        step("Verify: resizes only while drained and invalidates the old generation")
+        # @req: REQ-OS-DispSurfStat-001
         val inflight = sosix_display_surface_submit(fresh_state(1), request(1, 1)).state
         expect(sosix_display_surface_resize(inflight).reason).to_equal("resize-with-frames-inflight")
         val drained = sosix_display_surface_complete(inflight, completion(1, 1)).state
         val resized = sosix_display_surface_resize(drained)
-        expect(resized.state.surface_generation).to_equal(2)
+        expect(resized.state.surface_generation).to_equal(2)  # oracle: value fixed by the spec contract
         expect(sosix_display_surface_submit(resized.state, request(1, 1)).reason).to_equal("stale-surface-generation")
         expect(sosix_display_surface_submit(resized.state, request(2, 1)).accepted).to_equal(true)
 
     it "closes only while drained and rejects later work":
+        step("Verify: closes only while drained and rejects later work")
+        # @req: REQ-OS-DispSurfStat-001
         val inflight = sosix_display_surface_submit(fresh_state(1), request(1, 1)).state
         expect(sosix_display_surface_close(inflight).reason).to_equal("close-with-frames-inflight")
         val drained = sosix_display_surface_complete(inflight, completion(1, 1)).state

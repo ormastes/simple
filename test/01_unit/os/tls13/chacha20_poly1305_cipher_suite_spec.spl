@@ -17,6 +17,14 @@
 #   - Full server-side negotiation fixture
 #   - Interop with rustls / openssl backends
 
+"""
+## Purpose and audience
+Purpose: CIPHER_CHACHA20_POLY1305_SHA256 constant has IANA value 0x1303
+Audience: compiler and tooling engineers who maintain this spec
+"""
+
+# @req: REQ-OS-ChacPolyCiphSuit-001
+
 use std.spipe.*
 
 use os.tls13.handshake13.{
@@ -148,24 +156,33 @@ fn _bytes_equal(a: [u8], b: [u8]) -> bool:
 # Specs
 # ============================================================================
 
+use std.spec.step
 describe "TLS_CHACHA20_POLY1305_SHA256 (0x1303) cipher suite landing":
 
     # --- AC-1: constant ---
 
     it "CIPHER_CHACHA20_POLY1305_SHA256 constant has IANA value 0x1303":
+        step("Verify: CIPHER_CHACHA20_POLY1305_SHA256 constant has IANA value 0x1303")
+        # @req: REQ-OS-ChacPolyCiphSuit-001
         expect(CIPHER_CHACHA20_POLY1305_SHA256).to_equal(0x1303u16)
 
     it "CIPHER_AES_128_GCM_SHA256 constant remains at IANA value 0x1301":
+        step("Verify: CIPHER_AES_128_GCM_SHA256 constant remains at IANA value 0x1301")
+        # @req: REQ-OS-ChacPolyCiphSuit-001
         # Sanity check — the existing suite must not have shifted.
         expect(CIPHER_AES_128_GCM_SHA256).to_equal(0x1301u16)
 
     it "CIPHER_AES_256_GCM_SHA384 constant remains at IANA value 0x1302":
+        step("Verify: CIPHER_AES_256_GCM_SHA384 constant remains at IANA value 0x1302")
+        # @req: REQ-OS-ChacPolyCiphSuit-001
         # Sanity check — the existing T21 suite must not have shifted.
         expect(CIPHER_AES_256_GCM_SHA384).to_equal(0x1302u16)
 
     # --- AC-2: advertise on the wire ---
 
     it "ClientHello cipher_suites bytes advertise 0x1301, 0x1302 and 0x1303":
+        step("Verify: ClientHello cipher_suites bytes advertise 0x1301, 0x1302 and 0x1303")
+        # @req: REQ-OS-ChacPolyCiphSuit-001
         # The on-the-wire byte sequence for the cipher_suites list should
         # contain {0x13,0x01,0x13,0x02,0x13,0x03} for the 3 TLS 1.3 suites
         # per RFC 8446 §9.1.
@@ -177,12 +194,16 @@ describe "TLS_CHACHA20_POLY1305_SHA256 (0x1303) cipher suite landing":
     # --- AC-4: ChaCha20-Poly1305 AEAD round-trip on a synthetic record ---
 
     it "ChaCha20-Poly1305 encrypt produces ciphertext || 16-byte tag":
+        step("Verify: ChaCha20-Poly1305 encrypt produces ciphertext || 16-byte tag")
+        # @req: REQ-OS-ChacPolyCiphSuit-001
         val key = _chacha_key()
         val out = chacha20_poly1305_encrypt(key, _zero_nonce(), _plaintext_demo(), _aad_demo())
         # 32-byte plaintext + 16-byte tag = 48 bytes
-        expect(out.len()).to_equal(48)
+        expect(out.len()).to_equal(48)  # oracle: value fixed by the spec contract
 
     it "ChaCha20-Poly1305 round-trip recovers plaintext":
+        step("Verify: ChaCha20-Poly1305 round-trip recovers plaintext")
+        # @req: REQ-OS-ChacPolyCiphSuit-001
         val key = _chacha_key()
         val nonce = _zero_nonce()
         val pt = _plaintext_demo()
@@ -200,6 +221,8 @@ describe "TLS_CHACHA20_POLY1305_SHA256 (0x1303) cipher suite landing":
                 fail("ChaCha20-Poly1305 round-trip returned Err: {msg}")
 
     it "ChaCha20-Poly1305 tag-corruption is rejected":
+        step("Verify: ChaCha20-Poly1305 tag-corruption is rejected")
+        # @req: REQ-OS-ChacPolyCiphSuit-001
         val key = _chacha_key()
         val nonce = _zero_nonce()
         val pt = _plaintext_demo()
@@ -227,34 +250,42 @@ describe "TLS_CHACHA20_POLY1305_SHA256 (0x1303) cipher suite landing":
     # --- TLS 1.3 nonce derivation per RFC 8446 §5.3 ---
 
     it "record13_make_nonce: seq_num=0 yields the IV unchanged":
+        step("Verify: record13_make_nonce: seq_num=0 yields the IV unchanged")
+        # @req: REQ-OS-ChacPolyCiphSuit-001
         val iv = _record_iv()
         val nonce = record13_make_nonce(iv, 0u64)
-        expect(nonce.len()).to_equal(12)
+        expect(nonce.len()).to_equal(12)  # oracle: value fixed by the spec contract
         # XOR with zero counter is identity.
         expect(_bytes_equal(nonce, iv)).to_equal(true)
 
     it "record13_make_nonce: seq_num=1 differs from seq_num=0":
+        step("Verify: record13_make_nonce: seq_num=1 differs from seq_num=0")
+        # @req: REQ-OS-ChacPolyCiphSuit-001
         val iv = _record_iv()
         val n0 = record13_make_nonce(iv, 0u64)
         val n1 = record13_make_nonce(iv, 1u64)
-        expect(n1.len()).to_equal(12)
+        expect(n1.len()).to_equal(12)  # oracle: value fixed by the spec contract
         # Different sequence numbers MUST produce different per-record nonces.
         expect(_bytes_equal(n0, n1)).to_equal(false)
 
     # --- AC-3: record-layer dispatch + per-record nonce round-trip ---
 
     it "record13_encrypt_chacha20_poly1305 wraps the AEAD output in a TLS 1.3 record":
+        step("Verify: record13_encrypt_chacha20_poly1305 wraps the AEAD output in a TLS 1.3 record")
+        # @req: REQ-OS-ChacPolyCiphSuit-001
         val rk = RecordKey(key: _chacha_key(), iv: _record_iv())
         val pt = _plaintext_demo()
         val record = record13_encrypt_chacha20_poly1305(rk, 0u64, 0x17u8, pt)
         # 5-byte header + (33-byte inner = 32 pt + 1 ct byte) + 16-byte tag = 54 bytes
-        expect(record.len()).to_equal(54)
+        expect(record.len()).to_equal(54)  # oracle: value fixed by the spec contract
         # TLS record header bytes
         expect(record[0]).to_equal(0x17u8)
         expect(record[1]).to_equal(0x03u8)
         expect(record[2]).to_equal(0x03u8)
 
     it "record13 ChaCha20-Poly1305 round-trip recovers content_type + data with seq_num=0":
+        step("Verify: record13 ChaCha20-Poly1305 round-trip recovers content_type + data with seq_num=0")
+        # @req: REQ-OS-ChacPolyCiphSuit-001
         val rk = RecordKey(key: _chacha_key(), iv: _record_iv())
         val pt = _plaintext_demo()
         val record = record13_encrypt_chacha20_poly1305(rk, 0u64, 0x17u8, pt)
@@ -267,6 +298,8 @@ describe "TLS_CHACHA20_POLY1305_SHA256 (0x1303) cipher suite landing":
                 fail("record13 ChaCha20-Poly1305 seq_num=0 round-trip returned Err: {msg}")
 
     it "record13 ChaCha20-Poly1305 round-trip with seq_num=1 (per-record nonce derivation)":
+        step("Verify: record13 ChaCha20-Poly1305 round-trip with seq_num=1 (per-record nonce derivation)")
+        # @req: REQ-OS-ChacPolyCiphSuit-001
         val rk = RecordKey(key: _chacha_key(), iv: _record_iv())
         val pt = _plaintext_demo()
         val record = record13_encrypt_chacha20_poly1305(rk, 1u64, 0x17u8, pt)
@@ -279,6 +312,8 @@ describe "TLS_CHACHA20_POLY1305_SHA256 (0x1303) cipher suite landing":
                 fail("record13 ChaCha20-Poly1305 seq_num=1 round-trip returned Err: {msg}")
 
     it "record13 ChaCha20-Poly1305 mismatched seq_num is rejected (auth tag)":
+        step("Verify: record13 ChaCha20-Poly1305 mismatched seq_num is rejected (auth tag)")
+        # @req: REQ-OS-ChacPolyCiphSuit-001
         val rk = RecordKey(key: _chacha_key(), iv: _record_iv())
         val pt = _plaintext_demo()
         val record = record13_encrypt_chacha20_poly1305(rk, 0u64, 0x17u8, pt)
@@ -292,6 +327,8 @@ describe "TLS_CHACHA20_POLY1305_SHA256 (0x1303) cipher suite landing":
                 expect(msg).to_equal("authentication tag mismatch")
 
     it "record13_encrypt_for_suite dispatches 0x1303 to ChaCha20-Poly1305":
+        step("Verify: record13_encrypt_for_suite dispatches 0x1303 to ChaCha20-Poly1305")
+        # @req: REQ-OS-ChacPolyCiphSuit-001
         val rk = RecordKey(key: _chacha_key(), iv: _record_iv())
         val pt = _plaintext_demo()
         val via_dispatch = record13_encrypt_for_suite(

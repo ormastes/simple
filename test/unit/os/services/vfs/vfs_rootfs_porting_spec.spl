@@ -1,6 +1,14 @@
 # @cover src/os/services/vfs/vfs_init.spl
 # @cover src/lib/nogc_sync_mut/fs_driver/mem_block_device.spl
 
+"""
+## Purpose and audience
+Purpose: gates transitional C FAT32 bridge fallbacks when boot storage is pure Simple
+Audience: compiler and tooling engineers who maintain this spec
+"""
+
+# @req: REQ-OS-VfsRootPort-001
+
 use std.spec
 use std.io_runtime.{read_file}
 use os.services.vfs.vfs_init.{
@@ -71,8 +79,11 @@ fn _make_elf64_rv64() -> [u8]:
     hdr[4099] = 0x00u8
     hdr
 
+use std.spec.step
 describe "SimpleOS rootfs helpers — DBFS and NVFS porting":
     it "gates transitional C FAT32 bridge fallbacks when boot storage is pure Simple":
+        step("Verify: gates transitional C FAT32 bridge fallbacks when boot storage is pure Simple")
+        # @req: REQ-OS-VfsRootPort-001
         val init_source = read_file("src/os/services/vfs/vfs_init.spl")
         val write_source = read_file("src/os/services/vfs/vfs_write_ops.spl")
 
@@ -84,45 +95,55 @@ describe "SimpleOS rootfs helpers — DBFS and NVFS porting":
         expect(write_source.contains("if _vfs_c_fat32_bridge_allowed():\n        if simpleos_fat32_read_path_size(name) > 0:")).to_equal(true)
 
     it "DBFS rootfs can write, read, size, and existence-check through g_vfs_*":
+        step("Verify: DBFS rootfs can write, read, size, and existence-check through g_vfs_*")
+        # @req: REQ-OS-VfsRootPort-001
         _clear_vfs_rootfs_for_test()
         expect(_mount_hosted_rootfs_for_test(_dbfs_root())).to_equal(true)
         expect(g_vfs_write_file_text("/etc/hostname", "simpleos-dbfs\n")).to_equal(true)
         expect(g_vfs_file_exists("/etc/hostname")).to_equal(true)
-        expect(g_vfs_file_size("/etc/hostname").unwrap().to_i64()).to_equal(14)
+        expect(g_vfs_file_size("/etc/hostname").unwrap().to_i64()).to_equal(14)  # oracle: value fixed by the spec contract
         expect(g_vfs_read_file_text("/etc/hostname")).to_equal("simpleos-dbfs\n")
         val bytes = g_vfs_read_file_bytes("/etc/hostname")
-        expect(bytes.len()).to_equal(14)
+        expect(bytes.len()).to_equal(14)  # oracle: value fixed by the spec contract
         expect(bytes[0]).to_equal(115u8)
 
     it "NvfsPosix rootfs can write, read, size, and existence-check through g_vfs_*":
+        step("Verify: NvfsPosix rootfs can write, read, size, and existence-check through g_vfs_*")
+        # @req: REQ-OS-VfsRootPort-001
         _clear_vfs_rootfs_for_test()
         expect(_mount_hosted_rootfs_for_test(_nvfs_posix_root())).to_equal(true)
         expect(g_vfs_write_file_text("/sys/version.txt", "simpleos-nvfs\n")).to_equal(true)
         expect(g_vfs_file_exists("/sys/version.txt")).to_equal(true)
-        expect(g_vfs_file_size("/sys/version.txt").unwrap().to_i64()).to_equal(14)
+        expect(g_vfs_file_size("/sys/version.txt").unwrap().to_i64()).to_equal(14)  # oracle: value fixed by the spec contract
         expect(g_vfs_read_file_text("/sys/version.txt")).to_equal("simpleos-nvfs\n")
         val bytes = g_vfs_read_file_bytes("/sys/version.txt")
-        expect(bytes.len()).to_equal(14)
+        expect(bytes.len()).to_equal(14)  # oracle: value fixed by the spec contract
         expect(bytes[0]).to_equal(115u8)
 
     it "NvfsPosix rootfs rewrite replaces instead of appending":
+        step("Verify: NvfsPosix rootfs rewrite replaces instead of appending")
+        # @req: REQ-OS-VfsRootPort-001
         _clear_vfs_rootfs_for_test()
         expect(_mount_hosted_rootfs_for_test(_nvfs_posix_root())).to_equal(true)
         expect(g_vfs_write_file_text("/sys/apps/hello_world", "first")).to_equal(true)
         expect(g_vfs_write_file_text("/sys/apps/hello_world", "second")).to_equal(true)
-        expect(g_vfs_file_size("/sys/apps/hello_world").unwrap().to_i64()).to_equal(6)
+        expect(g_vfs_file_size("/sys/apps/hello_world").unwrap().to_i64()).to_equal(6)  # oracle: value fixed by the spec contract
         expect(g_vfs_read_file_text("/sys/apps/hello_world")).to_equal("second")
 
     it "DBFS executable reads fall back to the mounted rootfs":
+        step("Verify: DBFS executable reads fall back to the mounted rootfs")
+        # @req: REQ-OS-VfsRootPort-001
         _clear_vfs_rootfs_for_test()
         expect(_mount_hosted_rootfs_for_test(_dbfs_root())).to_equal(true)
         expect(g_vfs_write_file_text("/home/RUNME.ELF", "ELFAA")).to_equal(true)
         val bytes = g_vfs_read_executable_bytes("/home/RUNME.ELF")
-        expect(bytes.len()).to_equal(5)
+        expect(bytes.len()).to_equal(5)  # oracle: value fixed by the spec contract
         expect(bytes[0]).to_equal(69u8)
         expect(bytes[4]).to_equal(65u8)
 
     it "DBFS rootfs resolves executable bytes and parses ELF image":
+        step("Verify: DBFS rootfs resolves executable bytes and parses ELF image")
+        # @req: REQ-OS-VfsRootPort-001
         _clear_vfs_rootfs_for_test()
         _clear_synthetic_initramfs_for_test()
         _clear_synthetic_vfs_for_test()
@@ -130,14 +151,14 @@ describe "SimpleOS rootfs helpers — DBFS and NVFS porting":
         val elf = _make_elf64_rv64()
         expect(g_vfs_write_file_bytes("/dbfs-init.elf", elf)).to_equal(true)
         val direct = g_vfs_read_file_bytes("/dbfs-init.elf")
-        expect(direct.len()).to_equal(4100)
+        expect(direct.len()).to_equal(4100)  # oracle: value fixed by the spec contract
         expect(direct[0]).to_equal(0x7Fu8)
         expect(direct[4]).to_equal(2u8)
         expect(direct[18]).to_equal(0xF3u8)
         val resolved = resolve_executable_bytes("/dbfs-init.elf", Architecture.Riscv64)
         expect(resolved.is_ok()).to_equal(true)
         val bytes = resolved.unwrap()
-        expect(bytes.len()).to_equal(4100)
+        expect(bytes.len()).to_equal(4100)  # oracle: value fixed by the spec contract
         expect(bytes[0]).to_equal(0x7Fu8)
         expect(bytes[4]).to_equal(2u8)
         expect(bytes[18]).to_equal(0xF3u8)
@@ -146,15 +167,19 @@ describe "SimpleOS rootfs helpers — DBFS and NVFS porting":
         expect(image.unwrap().entry > 0).to_equal(true)
 
     it "NvfsPosix executable reads fall back to the mounted rootfs":
+        step("Verify: NvfsPosix executable reads fall back to the mounted rootfs")
+        # @req: REQ-OS-VfsRootPort-001
         _clear_vfs_rootfs_for_test()
         expect(_mount_hosted_rootfs_for_test(_nvfs_posix_root())).to_equal(true)
         expect(g_vfs_write_file_text("/home/RUNME.ELF", "ELFAA")).to_equal(true)
         val bytes = g_vfs_read_executable_bytes("/home/RUNME.ELF")
-        expect(bytes.len()).to_equal(5)
+        expect(bytes.len()).to_equal(5)  # oracle: value fixed by the spec contract
         expect(bytes[0]).to_equal(69u8)
         expect(bytes[4]).to_equal(65u8)
 
     it "AC-4: DbFsDriver open_on_device stores and round-trips ELF bytes via block device":
+        step("Verify: AC-4: DbFsDriver open_on_device stores and round-trips ELF bytes via block device")
+        # @req: REQ-OS-VfsRootPort-001
         # Arrange: create a MemBlockDevice with 2048 sectors of 512 bytes each
         val dev = MemBlockDevice.new(2048u64, 512u32)
         # Open DbFsDriver with arena starting at LBA 4 (size_sectors - 4 arena blocks)
@@ -179,7 +204,7 @@ describe "SimpleOS rootfs helpers — DBFS and NVFS porting":
         val resolved = resolve_executable_bytes("/sbin/init", Architecture.Riscv64)
         expect(resolved.is_ok()).to_equal(true)
         val rbytes = resolved.unwrap()
-        expect(rbytes.len()).to_equal(4100)
+        expect(rbytes.len()).to_equal(4100)  # oracle: value fixed by the spec contract
         expect(rbytes[0]).to_equal(0x7Fu8)
         expect(rbytes[18]).to_equal(0xF3u8)
         val image = load_user_executable(rbytes, Architecture.Riscv64)
@@ -188,6 +213,8 @@ describe "SimpleOS rootfs helpers — DBFS and NVFS porting":
         expect(entry > 0).to_equal(true)
 
     it "AC-4: vfs_mount_rootfs registers driver at VFS root (file accessible after mount)":
+        step("Verify: AC-4: vfs_mount_rootfs registers driver at VFS root (file accessible after mount)")
+        # @req: REQ-OS-VfsRootPort-001
         # Arrange: hosted DBFS driver (simpler path to verify vfs_mount_rootfs itself)
         _clear_vfs_rootfs_for_test()
         val mount_r = vfs_mount_rootfs(DriverInstance.DbFs(DbFsDriver.new_hosted()))

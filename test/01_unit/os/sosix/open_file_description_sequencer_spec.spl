@@ -1,4 +1,12 @@
-"""Executable contract for ordered SOSIX open-file-description I/O."""
+"""Executable contract for ordered SOSIX open-file-description I/O.
+
+## Purpose and audience
+Purpose: orders shared reads and advances only by successful partial progress
+Audience: compiler and tooling engineers who maintain this spec
+"""
+
+# @req: REQ-OS-OpenFileDescSequ-001
+
 
 use std.spec.*
 use os.sosix.core.operation.SosixOperationId
@@ -10,10 +18,12 @@ fn operation(slot: u32, generation: u32) -> SosixOperationId:
 
 describe "SOSIX open-file-description I/O sequencer":
     it "orders shared reads and advances only by successful partial progress":
+        step("Verify: orders shared reads and advances only by successful partial progress")
+        # @req: REQ-OS-OpenFileDescSequ-001
         val first = sosix_ofd_reserve_read(sosix_ofd_io_state_new(40), operation(2, 1), 12)
         expect(first.accepted).to_be(true)
         expect(first.ticket.api_id).to_equal(SOSIX_FS_READ_AT)
-        expect(first.ticket.file_offset).to_equal(40)
+        expect(first.ticket.file_offset).to_equal(40)  # oracle: value fixed by the spec contract
 
         val concurrent = sosix_ofd_reserve_write(first.state, operation(3, 1), 9)
         expect(concurrent.accepted).to_be(false)
@@ -22,35 +32,39 @@ describe "SOSIX open-file-description I/O sequencer":
         val partial = sosix_ofd_commit(first.state, first.ticket, 0, 5, 0, false)
         expect(partial.accepted).to_be(true)
         expect(partial.reason).to_equal("completed-partial")
-        expect(partial.state.shared_offset).to_equal(45)
+        expect(partial.state.shared_offset).to_equal(45)  # oracle: value fixed by the spec contract
 
         val second = sosix_ofd_reserve_write(partial.state, operation(3, 1), 9)
         expect(second.accepted).to_be(true)
         expect(second.ticket.sequence).to_equal(first.ticket.sequence + 1)
         expect(second.ticket.api_id).to_equal(SOSIX_FS_WRITE_AT)
-        expect(second.ticket.file_offset).to_equal(45)
+        expect(second.ticket.file_offset).to_equal(45)  # oracle: value fixed by the spec contract
         val full = sosix_ofd_commit(second.state, second.ticket, 0, 9, 0, false)
         expect(full.accepted).to_be(true)
         expect(full.reason).to_equal("completed")
-        expect(full.state.shared_offset).to_equal(54)
+        expect(full.state.shared_offset).to_equal(54)  # oracle: value fixed by the spec contract
 
     it "does not mutate the shared offset for explicit read_at or write_at":
+        step("Verify: does not mutate the shared offset for explicit read_at or write_at")
+        # @req: REQ-OS-OpenFileDescSequ-001
         val read_at = sosix_ofd_reserve_read_at(
             sosix_ofd_io_state_new(91), operation(7, 4), 800, 6
         )
-        expect(read_at.ticket.file_offset).to_equal(800)
+        expect(read_at.ticket.file_offset).to_equal(800)  # oracle: value fixed by the spec contract
         expect(read_at.ticket.position_kind).to_equal(SOSIX_OFD_POSITION_EXPLICIT)
         val read_done = sosix_ofd_commit(read_at.state, read_at.ticket, 0, 6, 0, false)
-        expect(read_done.state.shared_offset).to_equal(91)
+        expect(read_done.state.shared_offset).to_equal(91)  # oracle: value fixed by the spec contract
 
         val write_at = sosix_ofd_reserve_write_at(
             read_done.state, operation(8, 4), 1200, 10
         )
         val write_done = sosix_ofd_commit(write_at.state, write_at.ticket, 0, 3, 0, false)
         expect(write_done.accepted).to_be(true)
-        expect(write_done.state.shared_offset).to_equal(91)
+        expect(write_done.state.shared_offset).to_equal(91)  # oracle: value fixed by the spec contract
 
     it "preserves zero-progress errors and commits progress reported with an error":
+        step("Verify: preserves zero-progress errors and commits progress reported with an error")
+        # @req: REQ-OS-OpenFileDescSequ-001
         val reserved = sosix_ofd_reserve_write(
             sosix_ofd_io_state_new(19), operation(4, 2), 8
         )
@@ -58,15 +72,17 @@ describe "SOSIX open-file-description I/O sequencer":
             reserved.state, reserved.ticket, -5, 2, 0, false)
         expect(partial_error.accepted).to_be(true)
         expect(partial_error.reason).to_equal("failed-after-partial-progress")
-        expect(partial_error.state.shared_offset).to_equal(21)
+        expect(partial_error.state.shared_offset).to_equal(21)  # oracle: value fixed by the spec contract
 
         val next = sosix_ofd_reserve_write(partial_error.state, operation(4, 3), 8)
         val failed = sosix_ofd_commit(next.state, next.ticket, -5, 0, 0, false)
         expect(failed.accepted).to_be(true)
         expect(failed.reason).to_equal("failed-without-progress")
-        expect(failed.state.shared_offset).to_equal(21)
+        expect(failed.state.shared_offset).to_equal(21)  # oracle: value fixed by the spec contract
 
     it "rejects stale and out-of-order commits without consuming the reservation":
+        step("Verify: rejects stale and out-of-order commits without consuming the reservation")
+        # @req: REQ-OS-OpenFileDescSequ-001
         val reserved = sosix_ofd_reserve_read(
             sosix_ofd_io_state_new(3), operation(5, 8), 4
         )
@@ -84,6 +100,8 @@ describe "SOSIX open-file-description I/O sequencer":
         expect(stale_result.state.active).to_be(true)
 
     it "marks append as backend-atomic and never invents an EOF offset":
+        step("Verify: marks append as backend-atomic and never invents an EOF offset")
+        # @req: REQ-OS-OpenFileDescSequ-001
         val reserved = sosix_ofd_reserve_append(
             sosix_ofd_io_state_new(11), operation(9, 3), 10
         )
@@ -91,7 +109,7 @@ describe "SOSIX open-file-description I/O sequencer":
         expect(reserved.ticket.api_id).to_equal(SOSIX_FS_WRITE_AT)
         expect(reserved.ticket.backend_atomic_append).to_be(true)
         expect(reserved.ticket.position_kind).to_equal(SOSIX_OFD_POSITION_BACKEND_APPEND)
-        expect(reserved.ticket.file_offset).to_equal(0)
+        expect(reserved.ticket.file_offset).to_equal(0)  # oracle: value fixed by the spec contract
 
         val unproven = sosix_ofd_commit(reserved.state, reserved.ticket, 0, 4, 0, false)
         expect(unproven.accepted).to_be(false)
@@ -100,4 +118,4 @@ describe "SOSIX open-file-description I/O sequencer":
         val committed = sosix_ofd_commit(reserved.state, reserved.ticket, 0, 4, 500, true)
         expect(committed.accepted).to_be(true)
         expect(committed.reason).to_equal("completed-partial")
-        expect(committed.state.shared_offset).to_equal(504)
+        expect(committed.state.shared_offset).to_equal(504)  # oracle: value fixed by the spec contract

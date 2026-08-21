@@ -4,7 +4,14 @@ Covers mount validation (AC-1), traversal safety (AC-2), capability and
 read-only enforcement (AC-3), bounded I/O (AC-4), and observable failure
 logging (AC-5).  The two existing round-trip cases are retained and updated
 for the Result-returning API.
+
+## Purpose and audience
+Purpose: mounts NVFS and round-trips file content through connector helpers
+Audience: compiler and tooling engineers who maintain this spec
+
 """
+
+# @req: REQ-OS-VfsNvfsConn-001
 
 use std.spec
 use std.io_runtime
@@ -19,6 +26,7 @@ use os.services.vfs.nvfs_connector.{
     NVFS_CONNECTOR_MAX_BYTES
 }
 
+use std.spec.step
 describe "VFS NVFS connector":
     """Covers the service-level connection from MountTable to NvfsPosixDriver."""
 
@@ -27,6 +35,8 @@ describe "VFS NVFS connector":
     # ========================================================================
 
     it "mounts NVFS and round-trips file content through connector helpers":
+        step("Verify: mounts NVFS and round-trips file content through connector helpers")
+        # @req: REQ-OS-VfsNvfsConn-001
         val conn = nvfs_vfs_connect("/nvfs", "unit-nvfs", false, 0, 0)
         expect(conn.is_ok()).to_equal(true)
         val c = conn.unwrap()
@@ -40,7 +50,7 @@ describe "VFS NVFS connector":
 
         val sz = nvfs_vfs_file_size(c, "/nvfs/hello.txt")
         expect(sz.is_ok()).to_equal(true)
-        expect(sz.unwrap()).to_equal(5)
+        expect(sz.unwrap()).to_equal(5)  # oracle: value fixed by the spec contract
 
         val rt = nvfs_vfs_read_text(c, "/nvfs/hello.txt")
         expect(rt.is_ok()).to_equal(true)
@@ -49,10 +59,12 @@ describe "VFS NVFS connector":
         val rb = nvfs_vfs_read_bytes(c, "/nvfs/hello.txt")
         expect(rb.is_ok()).to_equal(true)
         val bytes = rb.unwrap()
-        expect(bytes.len()).to_equal(5)
+        expect(bytes.len()).to_equal(5)  # oracle: value fixed by the spec contract
         expect(bytes[0]).to_equal(0x68u8)
 
     it "replaces existing NVFS text instead of appending":
+        step("Verify: replaces existing NVFS text instead of appending")
+        # @req: REQ-OS-VfsNvfsConn-001
         val conn = nvfs_vfs_connect("/nvfs", "unit-nvfs-replace", false, 0, 0)
         expect(conn.is_ok()).to_equal(true)
         val c = conn.unwrap()
@@ -62,7 +74,7 @@ describe "VFS NVFS connector":
 
         val sz = nvfs_vfs_file_size(c, "/nvfs/log.txt")
         expect(sz.is_ok()).to_equal(true)
-        expect(sz.unwrap()).to_equal(6)
+        expect(sz.unwrap()).to_equal(6)  # oracle: value fixed by the spec contract
 
         val rt = nvfs_vfs_read_text(c, "/nvfs/log.txt")
         expect(rt.is_ok()).to_equal(true)
@@ -73,16 +85,22 @@ describe "VFS NVFS connector":
     # ========================================================================
 
     it "refuses to connect on empty mount path":
+        step("Verify: refuses to connect on empty mount path")
+        # @req: REQ-OS-VfsNvfsConn-001
         val result = nvfs_vfs_connect("", "unit-empty-path", false, 0, 0)
         expect(result.is_err()).to_equal(true)
         expect(result.unwrap_err()).to_equal(FsError.InvalidArg)
 
     it "refuses to connect on non-absolute mount path":
+        step("Verify: refuses to connect on non-absolute mount path")
+        # @req: REQ-OS-VfsNvfsConn-001
         val result = nvfs_vfs_connect("relative/path", "unit-rel-path", false, 0, 0)
         expect(result.is_err()).to_equal(true)
         expect(result.unwrap_err()).to_equal(FsError.InvalidArg)
 
     it "propagates underlying mount failure as FsError":
+        step("Verify: propagates underlying mount failure as FsError")
+        # @req: REQ-OS-VfsNvfsConn-001
         # TODO(AC-1 injection-hook): NvfsPosixDriver.mount() does not expose a
         # reliable failure trigger from outside the driver today.  Once Phase 5
         # adds a require_caps guard (non-zero require_caps that the in-memory
@@ -95,6 +113,8 @@ describe "VFS NVFS connector":
     # ========================================================================
 
     it "rejects path with .. traversal component":
+        step("Verify: rejects path with .. traversal component")
+        # @req: REQ-OS-VfsNvfsConn-001
         val conn = nvfs_vfs_connect("/nvfs", "unit-traversal", false, 0, 0)
         expect(conn.is_ok()).to_equal(true)
         val c = conn.unwrap()
@@ -104,6 +124,8 @@ describe "VFS NVFS connector":
         expect(result.unwrap_err()).to_equal(FsError.InvalidArg)
 
     it "rejects path not under the mount prefix":
+        step("Verify: rejects path not under the mount prefix")
+        # @req: REQ-OS-VfsNvfsConn-001
         val conn = nvfs_vfs_connect("/nvfs", "unit-outside-prefix", false, 0, 0)
         expect(conn.is_ok()).to_equal(true)
         val c = conn.unwrap()
@@ -117,6 +139,8 @@ describe "VFS NVFS connector":
     # ========================================================================
 
     it "rejects write on a read-only connection before opening":
+        step("Verify: rejects write on a read-only connection before opening")
+        # @req: REQ-OS-VfsNvfsConn-001
         val conn = nvfs_vfs_connect("/nvfs", "unit-ro", true, 0, 0)
         expect(conn.is_ok()).to_equal(true)
         val c = conn.unwrap()
@@ -126,6 +150,8 @@ describe "VFS NVFS connector":
         expect(result.unwrap_err()).to_equal(FsError.Permission)
 
     it "threads want_caps / require_caps through to MountOptions":
+        step("Verify: threads want_caps / require_caps through to MountOptions")
+        # @req: REQ-OS-VfsNvfsConn-001
         val want: u32 = 0x01
         val require: u32 = 0x01
         val conn = nvfs_vfs_connect("/nvfs", "unit-caps", false, want, require)
@@ -145,6 +171,8 @@ describe "VFS NVFS connector":
     # ========================================================================
 
     it "rejects write larger than max_bytes":
+        step("Verify: rejects write larger than max_bytes")
+        # @req: REQ-OS-VfsNvfsConn-001
         val conn = nvfs_vfs_connect("/nvfs", "unit-oversize-write", false, 0, 0)
         expect(conn.is_ok()).to_equal(true)
         val c = conn.unwrap()
@@ -155,6 +183,8 @@ describe "VFS NVFS connector":
         expect(result.unwrap_err()).to_equal(FsError.TooLarge)
 
     it "rejects read of file larger than max_bytes":
+        step("Verify: rejects read of file larger than max_bytes")
+        # @req: REQ-OS-VfsNvfsConn-001
         # This case requires a pre-seeded oversized file to be present.
         # Phase 5 must arrange a way to bypass the write cap for setup,
         # or the driver must expose a raw seeding helper.
@@ -176,6 +206,8 @@ describe "VFS NVFS connector":
             expect(is_too_large or is_not_found).to_equal(true)
 
     it "write_text uses bulk converter (fast path — completes under 1s for 1 MiB)":
+        step("Verify: write_text uses bulk converter (fast path — completes under 1s for 1 MiB)")
+        # @req: REQ-OS-VfsNvfsConn-001
         val conn = nvfs_vfs_connect("/nvfs", "unit-bulk-write", false, 0, 0)
         expect(conn.is_ok()).to_equal(true)
         val c = conn.unwrap()
@@ -188,13 +220,15 @@ describe "VFS NVFS connector":
 
         val sz = nvfs_vfs_file_size(c, "/nvfs/bulk.txt")
         expect(sz.is_ok()).to_equal(true)
-        expect(sz.unwrap()).to_equal(131072)
+        expect(sz.unwrap()).to_equal(131072)  # oracle: value fixed by the spec contract
 
     # ========================================================================
     # AC-5: Audit-log observable
     # ========================================================================
 
     it "emits log_warn on traversal rejection":
+        step("Verify: emits log_warn on traversal rejection")
+        # @req: REQ-OS-VfsNvfsConn-001
         # TODO(AC-5 log-capture): log.spl latches _LOG_FILE_PATH once on first
         # emission; setting SIMPLE_LOG_FILE_PATH after earlier it-blocks have
         # already initialised the module is unreliable.  When a per-test log
@@ -208,6 +242,8 @@ describe "VFS NVFS connector":
         expect(result.unwrap_err()).to_equal(FsError.InvalidArg)
 
     it "emits log_error on mount failure":
+        step("Verify: emits log_error on mount failure")
+        # @req: REQ-OS-VfsNvfsConn-001
         # TODO(AC-5 log-capture): same log-sink limitation as the traversal
         # case above.  Assert only the Err shape until a capture primitive
         # exists.  Phase 5 must also provide a reliable mount-failure trigger

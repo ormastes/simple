@@ -9,7 +9,14 @@ Covers three protocol-security hardening items on the WM IPC parse path:
      process_id, so a spoofed process_id cannot be used to hijack pid-keyed
      ownership queries (see shell.spl's window_owner_process_id /
      window_ids_for_process consumers).
+
+## Purpose and audience
+Purpose: rejects a focus request from a port that does not own the window
+Audience: compiler and tooling engineers who maintain this spec
+
 """
+
+# @req: REQ-OS-WmServFocuResiIdenSecu-001
 
 use std.spec
 use os.services.wm.wm_service.{WmService}
@@ -36,8 +43,11 @@ fn push_u64(buf: [u8], value: u64):
     buf.push(((value >> 48) & 0xFF).to_u8())
     buf.push(((value >> 56) & 0xFF).to_u8())
 
+use std.spec.step
 describe "WmService.parse_focus ownership (item 1)":
     it "rejects a focus request from a port that does not own the window":
+        step("Verify: rejects a focus request from a port that does not own the window")
+        # @req: REQ-OS-WmServFocuResiIdenSecu-001
         val wm = WmService.new()
         wm.register_window_owner(WindowId(value: 10), 100)
         var payload: [u8] = []
@@ -46,16 +56,20 @@ describe "WmService.parse_focus ownership (item 1)":
         expect(action.kind).to_equal("none")
 
     it "accepts a focus request from the owning port":
+        step("Verify: accepts a focus request from the owning port")
+        # @req: REQ-OS-WmServFocuResiIdenSecu-001
         val wm = WmService.new()
         wm.register_window_owner(WindowId(value: 10), 100)
         var payload: [u8] = []
         push_u64(payload, 10)
         val action = wm.parse_focus(100, unsafe_addr_of(payload), payload.len().to_u32())
         expect(action.kind).to_equal("focus")
-        expect(action.window_id).to_equal(10)
+        expect(action.window_id).to_equal(10)  # oracle: value fixed by the spec contract
 
 describe "WmService.parse_resize protocol + ECS wiring (item 2)":
     it "rejects a resize request from a non-owner port":
+        step("Verify: rejects a resize request from a non-owner port")
+        # @req: REQ-OS-WmServFocuResiIdenSecu-001
         val wm = WmService.new()
         wm.register_window_owner(WindowId(value: 20), 200)
         var payload: [u8] = []
@@ -66,6 +80,8 @@ describe "WmService.parse_resize protocol + ECS wiring (item 2)":
         expect(action.kind).to_equal("none")
 
     it "applies an owner resize and updates the ECS window world geometry":
+        step("Verify: applies an owner resize and updates the ECS window world geometry")
+        # @req: REQ-OS-WmServFocuResiIdenSecu-001
         val wm = WmService.new()
         wm.world.spawn_window(21, 210, 210, "app.resize")
         wm.register_window_owner(WindowId(value: 21), 210)
@@ -75,16 +91,18 @@ describe "WmService.parse_resize protocol + ECS wiring (item 2)":
         push_i32(payload, 768)
         val action = wm.parse_resize(210, unsafe_addr_of(payload), payload.len().to_u32())
         expect(action.kind).to_equal("resize")
-        expect(action.width).to_equal(1024)
-        expect(action.height).to_equal(768)
+        expect(action.width).to_equal(1024)  # oracle: value fixed by the spec contract
+        expect(action.height).to_equal(768)  # oracle: value fixed by the spec contract
         val e = wm.world.find_entity_for_window(21)
         val slot = wm.world.geometries.get_slot(e)
         expect(slot >= 0).to_equal(true)
-        expect(wm.world.geometries.dense[slot].w).to_equal(1024)
-        expect(wm.world.geometries.dense[slot].h).to_equal(768)
+        expect(wm.world.geometries.dense[slot].w).to_equal(1024)  # oracle: value fixed by the spec contract
+        expect(wm.world.geometries.dense[slot].h).to_equal(768)  # oracle: value fixed by the spec contract
 
 describe "WmService client identity spoofing (item 3)":
     it "keys ownership by authenticated sender PID instead of reply port or spoofed payload PID":
+        step("Verify: keys ownership by authenticated sender PID instead of reply port or spoofed payload PID")
+        # @req: REQ-OS-WmServFocuResiIdenSecu-001
         val wm = WmService.new()
         var create_payload: [u8] = []
         push_u32(create_payload, 5)
@@ -98,10 +116,10 @@ describe "WmService client identity spoofing (item 3)":
         val create_action = wm.parse_create_window_authenticated(
             42, 314, unsafe_addr_of(create_payload), create_payload.len().to_u32()
         )
-        expect(create_action.process_id).to_equal(314)
+        expect(create_action.process_id).to_equal(314)  # oracle: value fixed by the spec contract
 
         wm.register_window_owner_with_identity(WindowId(value: 1), create_action.owner_port, create_action.process_id, create_action.app_id)
-        expect(wm.window_owner_process_id(1)).to_equal(314)
+        expect(wm.window_owner_process_id(1)).to_equal(314)  # oracle: value fixed by the spec contract
 
         var destroy_from_spoofed_pid: [u8] = []
         push_u64(destroy_from_spoofed_pid, 1)

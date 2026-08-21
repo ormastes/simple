@@ -1,9 +1,15 @@
 # @cover src/os/sosix/share.spl 80%
 """
+## Purpose and audience
+Purpose: allows writes before seal and reads after seal
+Audience: compiler and tooling engineers who maintain this spec
+
 # SOSIX Share Specification
 
 SOSIX process sharing is immutable-data plus queue coordination.
 """
+
+# @req: REQ-OS-Shar-001
 
 use std.spec
 use os.posix.errno.{EAGAIN, EBADF, EINVAL}
@@ -32,28 +38,35 @@ use os.sosix.share.{
     sosix_queue_handle_generation
 }
 
+use std.spec.step
 describe "SOSIX immutable datasets":
     it "allows writes before seal and reads after seal":
+        step("Verify: allows writes before seal and reads after seal")
+        # @req: REQ-OS-Shar-001
         sosix_share_init()
         val handle = sosix_dataset_create(4u64, 0)
 
-        expect(handle).to_equal(0)
-        expect(sosix_dataset_write(handle as u64, 0u64, [1u8, 2u8, 3u8, 4u8])).to_equal(4)
-        expect(sosix_dataset_seal(handle as u64)).to_equal(0)
+        expect(handle).to_equal(0)  # oracle: value fixed by the spec contract
+        expect(sosix_dataset_write(handle as u64, 0u64, [1u8, 2u8, 3u8, 4u8])).to_equal(4)  # oracle: value fixed by the spec contract
+        expect(sosix_dataset_seal(handle as u64)).to_equal(0)  # oracle: value fixed by the spec contract
         expect(sosix_dataset_is_sealed(handle as u64)).to_equal(true)
         expect(sosix_dataset_size(handle as u64)).to_equal(4u64)
-        expect(sosix_dataset_handle_slot(handle as u64)).to_equal(0)
-        expect(sosix_dataset_handle_generation(handle as u64)).to_equal(0)
-        expect(sosix_dataset_read_byte(handle as u64, 2u64)).to_equal(3)
+        expect(sosix_dataset_handle_slot(handle as u64)).to_equal(0)  # oracle: value fixed by the spec contract
+        expect(sosix_dataset_handle_generation(handle as u64)).to_equal(0)  # oracle: value fixed by the spec contract
+        expect(sosix_dataset_read_byte(handle as u64, 2u64)).to_equal(3)  # oracle: value fixed by the spec contract
 
     it "rejects writes after seal":
+        step("Verify: rejects writes after seal")
+        # @req: REQ-OS-Shar-001
         sosix_share_init()
         val handle = sosix_dataset_create(2u64, 0)
 
-        expect(sosix_dataset_seal(handle as u64)).to_equal(0)
+        expect(sosix_dataset_seal(handle as u64)).to_equal(0)  # oracle: value fixed by the spec contract
         expect(sosix_dataset_write(handle as u64, 0u64, [9u8])).to_equal(0 - EINVAL as i64)
 
     it "rejects invalid dataset reads":
+        step("Verify: rejects invalid dataset reads")
+        # @req: REQ-OS-Shar-001
         sosix_share_init()
 
         expect(sosix_dataset_read_byte(99u64, 0u64)).to_equal(0 - EBADF as i64)
@@ -61,36 +74,42 @@ describe "SOSIX immutable datasets":
 
 describe "SOSIX process queues":
     it "sends and receives FIFO messages":
+        step("Verify: sends and receives FIFO messages")
+        # @req: REQ-OS-Shar-001
         sosix_share_init()
         val queue = sosix_queue_create(2u64, 8u64, 0)
 
-        expect(queue).to_equal(0)
+        expect(queue).to_equal(0)  # oracle: value fixed by the spec contract
         expect(sosix_queue_poll(queue as u64) & SOSIX_POLL_WRITE).to_equal(SOSIX_POLL_WRITE)
-        expect(sosix_queue_send(queue as u64, [10u8, 11u8], SOSIX_NO_DATASET)).to_equal(2)
+        expect(sosix_queue_send(queue as u64, [10u8, 11u8], SOSIX_NO_DATASET)).to_equal(2)  # oracle: value fixed by the spec contract
         expect(sosix_queue_poll(queue as u64) & SOSIX_POLL_READ).to_equal(SOSIX_POLL_READ)
 
         val recv = sosix_queue_recv(queue as u64)
-        expect(recv.status).to_equal(2)
+        expect(recv.status).to_equal(2)  # oracle: value fixed by the spec contract
         expect(recv.len).to_equal(2u64)
         expect(recv.attached_dataset).to_equal(SOSIX_NO_DATASET)
         expect(recv.data[0]).to_equal(10u8)
         expect(recv.data[1]).to_equal(11u8)
 
     it "attaches sealed datasets to queue messages":
+        step("Verify: attaches sealed datasets to queue messages")
+        # @req: REQ-OS-Shar-001
         sosix_share_init()
         val dataset = sosix_dataset_create(1u64, 0)
         val queue = sosix_queue_create(1u64, 4u64, 0)
 
-        expect(sosix_dataset_write(dataset as u64, 0u64, [55u8])).to_equal(1)
-        expect(sosix_dataset_seal(dataset as u64)).to_equal(0)
-        expect(sosix_queue_send(queue as u64, [1u8], dataset as u64)).to_equal(1)
+        expect(sosix_dataset_write(dataset as u64, 0u64, [55u8])).to_equal(1)  # oracle: value fixed by the spec contract
+        expect(sosix_dataset_seal(dataset as u64)).to_equal(0)  # oracle: value fixed by the spec contract
+        expect(sosix_queue_send(queue as u64, [1u8], dataset as u64)).to_equal(1)  # oracle: value fixed by the spec contract
 
         val recv = sosix_queue_recv(queue as u64)
-        expect(recv.status).to_equal(1)
+        expect(recv.status).to_equal(1)  # oracle: value fixed by the spec contract
         expect(recv.attached_dataset).to_equal(dataset as u64)
-        expect(sosix_dataset_read_byte(recv.attached_dataset, 0u64)).to_equal(55)
+        expect(sosix_dataset_read_byte(recv.attached_dataset, 0u64)).to_equal(55)  # oracle: value fixed by the spec contract
 
     it "rejects unsealed dataset attachments":
+        step("Verify: rejects unsealed dataset attachments")
+        # @req: REQ-OS-Shar-001
         sosix_share_init()
         val dataset = sosix_dataset_create(1u64, 0)
         val queue = sosix_queue_create(1u64, 4u64, 0)
@@ -98,45 +117,53 @@ describe "SOSIX process queues":
         expect(sosix_queue_send(queue as u64, [1u8], dataset as u64)).to_equal(0 - EINVAL as i64)
 
     it "reports full and empty queue readiness":
+        step("Verify: reports full and empty queue readiness")
+        # @req: REQ-OS-Shar-001
         sosix_share_init()
         val queue = sosix_queue_create(1u64, 4u64, 0)
 
         expect(sosix_queue_recv(queue as u64).status).to_equal(0 - EAGAIN as i64)
-        expect(sosix_queue_send(queue as u64, [1u8], SOSIX_NO_DATASET)).to_equal(1)
+        expect(sosix_queue_send(queue as u64, [1u8], SOSIX_NO_DATASET)).to_equal(1)  # oracle: value fixed by the spec contract
         expect(sosix_queue_send(queue as u64, [2u8], SOSIX_NO_DATASET)).to_equal(0 - EAGAIN as i64)
 
     it "reports HUP after send-side close":
+        step("Verify: reports HUP after send-side close")
+        # @req: REQ-OS-Shar-001
         sosix_share_init()
         val queue = sosix_queue_create(1u64, 4u64, 0)
 
-        expect(sosix_queue_close(queue as u64, SOSIX_QUEUE_CLOSE_SEND)).to_equal(0)
+        expect(sosix_queue_close(queue as u64, SOSIX_QUEUE_CLOSE_SEND)).to_equal(0)  # oracle: value fixed by the spec contract
         expect(sosix_queue_poll(queue as u64) & SOSIX_POLL_HUP).to_equal(SOSIX_POLL_HUP)
-        expect(sosix_queue_recv(queue as u64).status).to_equal(0)
+        expect(sosix_queue_recv(queue as u64).status).to_equal(0)  # oracle: value fixed by the spec contract
 
     it "closes datasets and rejects later use":
+        step("Verify: closes datasets and rejects later use")
+        # @req: REQ-OS-Shar-001
         sosix_share_init()
         val dataset = sosix_dataset_create(1u64, 0)
 
-        expect(sosix_dataset_close(dataset as u64)).to_equal(0)
+        expect(sosix_dataset_close(dataset as u64)).to_equal(0)  # oracle: value fixed by the spec contract
         expect(sosix_dataset_seal(dataset as u64)).to_equal(0 - EBADF as i64)
 
         val second = sosix_dataset_create(1u64, 0)
-        expect(sosix_dataset_handle_slot(second as u64)).to_equal(0)
-        expect(sosix_dataset_handle_generation(second as u64)).to_equal(1)
-        expect(second).to_equal(65536)
+        expect(sosix_dataset_handle_slot(second as u64)).to_equal(0)  # oracle: value fixed by the spec contract
+        expect(sosix_dataset_handle_generation(second as u64)).to_equal(1)  # oracle: value fixed by the spec contract
+        expect(second).to_equal(65536)  # oracle: value fixed by the spec contract
         expect(sosix_dataset_read_byte(dataset as u64, 0u64)).to_equal(0 - EBADF as i64)
 
     it "rejects stale queue handles after full close":
+        step("Verify: rejects stale queue handles after full close")
+        # @req: REQ-OS-Shar-001
         sosix_share_init()
         val queue = sosix_queue_create(1u64, 4u64, 0)
 
-        expect(sosix_queue_handle_slot(queue as u64)).to_equal(0)
-        expect(sosix_queue_handle_generation(queue as u64)).to_equal(0)
-        expect(sosix_queue_close(queue as u64, 0)).to_equal(0)
+        expect(sosix_queue_handle_slot(queue as u64)).to_equal(0)  # oracle: value fixed by the spec contract
+        expect(sosix_queue_handle_generation(queue as u64)).to_equal(0)  # oracle: value fixed by the spec contract
+        expect(sosix_queue_close(queue as u64, 0)).to_equal(0)  # oracle: value fixed by the spec contract
         expect(sosix_queue_send(queue as u64, [1u8], SOSIX_NO_DATASET)).to_equal(0 - EBADF as i64)
 
         val second = sosix_queue_create(1u64, 4u64, 0)
-        expect(sosix_queue_handle_slot(second as u64)).to_equal(0)
-        expect(sosix_queue_handle_generation(second as u64)).to_equal(1)
-        expect(second).to_equal(65536)
+        expect(sosix_queue_handle_slot(second as u64)).to_equal(0)  # oracle: value fixed by the spec contract
+        expect(sosix_queue_handle_generation(second as u64)).to_equal(1)  # oracle: value fixed by the spec contract
+        expect(second).to_equal(65536)  # oracle: value fixed by the spec contract
         expect(sosix_queue_recv(queue as u64).status).to_equal(0 - EBADF as i64)

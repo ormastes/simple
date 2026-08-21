@@ -1,6 +1,10 @@
 # @cover src/os/services/devfs_filesystem.spl 80%
 # @cover src/os/services/procfs_filesystem.spl 80%
 """
+## Purpose and audience
+Purpose: readdir /dev lists null, zero and urandom
+Audience: compiler and tooling engineers who maintain this spec
+
 # Pseudo-Filesystem VFS Mount Specification (H4)
 
 **Feature IDs:** #H4
@@ -15,6 +19,8 @@ VFS `Filesystem` trait exactly like FAT32/DBFS: readdir/read/write/stat behave
 per POSIX device semantics, unsupported/mutating ops fail closed, and both
 mount cleanly through `VfsManager.mount`.
 """
+
+# @req: REQ-OS-PseuMoun-001
 
 use std.spec
 use os.services.vfs.vfs.{VfsManager}
@@ -32,6 +38,7 @@ fn _entry_names(entries: [DirEntry]) -> [text]:
 fn _write_flags() -> FileFlags:
     FileFlags(read: false, write: true, append: false, create: false, truncate: false, directory: false)
 
+use std.spec.step
 describe "DevFs trait adapter":
     """
     ## /dev pseudo-filesystem
@@ -40,6 +47,8 @@ describe "DevFs trait adapter":
     """
 
     it "readdir /dev lists null, zero and urandom":
+        step("Verify: readdir /dev lists null, zero and urandom")
+        # @req: REQ-OS-PseuMoun-001
         """readdir on the /dev root must enumerate the well-known devices."""
         var fs = DevFs.new()
         val r = fs.readdir("/dev")
@@ -50,11 +59,13 @@ describe "DevFs trait adapter":
         expect(names).to_contain("urandom")
 
     it "read /dev/zero returns all zero bytes":
+        step("Verify: read /dev/zero returns all zero bytes")
+        # @req: REQ-OS-PseuMoun-001
         """Reading /dev/zero yields exactly `size` zero bytes."""
         var fs = DevFs.new()
         val h = fs.open("/dev/zero", FileFlags.read_only()).unwrap()
         val data = fs.read(h, 8 as u64).unwrap()
-        expect(data.len()).to_equal(8)
+        expect(data.len()).to_equal(8)  # oracle: value fixed by the spec contract
         var all_zero = true
         var i = 0
         while i < data.len():
@@ -64,22 +75,26 @@ describe "DevFs trait adapter":
         assert_true(all_zero)
 
     it "write /dev/null succeeds and discards":
+        step("Verify: write /dev/null succeeds and discards")
+        # @req: REQ-OS-PseuMoun-001
         """Writing to /dev/null accepts all bytes; a subsequent read is EOF."""
         var fs = DevFs.new()
         val h = fs.open("/dev/null", _write_flags()).unwrap()
         val payload = "hello".bytes()
         val w = fs.write(h, payload)
         assert_true(w.is_ok())
-        expect(w.unwrap() as i64).to_equal(5)
+        expect(w.unwrap() as i64).to_equal(5)  # oracle: value fixed by the spec contract
         val rd = fs.read(h, 16 as u64).unwrap()
-        expect(rd.len()).to_equal(0)
+        expect(rd.len()).to_equal(0)  # oracle: value fixed by the spec contract
 
     it "read /dev/urandom returns non-constant bytes":
+        step("Verify: read /dev/urandom returns non-constant bytes")
+        # @req: REQ-OS-PseuMoun-001
         """/dev/urandom must not return a constant stream (unlike /dev/zero)."""
         var fs = DevFs.new()
         val h = fs.open("/dev/urandom", FileFlags.read_only()).unwrap()
         val data = fs.read(h, 16 as u64).unwrap()
-        expect(data.len()).to_equal(16)
+        expect(data.len()).to_equal(16)  # oracle: value fixed by the spec contract
         var all_same = true
         var i = 1
         while i < data.len():
@@ -89,12 +104,16 @@ describe "DevFs trait adapter":
         assert_false(all_same)
 
     it "open of unknown device fails closed":
+        step("Verify: open of unknown device fails closed")
+        # @req: REQ-OS-PseuMoun-001
         """An unregistered /dev entry returns an error."""
         var fs = DevFs.new()
         val r = fs.open("/dev/nosuch", FileFlags.read_only())
         assert_true(r.is_err())
 
     it "mkdir under /dev fails closed":
+        step("Verify: mkdir under /dev fails closed")
+        # @req: REQ-OS-PseuMoun-001
         """/dev is not a general writable directory."""
         var fs = DevFs.new()
         val r = fs.mkdir("/dev/foo")
@@ -106,6 +125,8 @@ describe "ProcFs trait adapter":
     """
 
     it "readdir /proc lists a seeded pid":
+        step("Verify: readdir /proc lists a seeded pid")
+        # @req: REQ-OS-PseuMoun-001
         """The seeded PID 1 appears as a directory under /proc."""
         var fs = ProcFs.new()
         val r = fs.readdir("/proc")
@@ -114,6 +135,8 @@ describe "ProcFs trait adapter":
         expect(names).to_contain("1")
 
     it "stat /proc/1/status succeeds":
+        step("Verify: stat /proc/1/status succeeds")
+        # @req: REQ-OS-PseuMoun-001
         """A live task's status node stats as a file."""
         var fs = ProcFs.new()
         val r = fs.stat("/proc/1/status")
@@ -122,6 +145,8 @@ describe "ProcFs trait adapter":
         assert_true(node.kind == FsNodeKind.File)
 
     it "read /proc/1/status returns content":
+        step("Verify: read /proc/1/status returns content")
+        # @req: REQ-OS-PseuMoun-001
         """Reading the status node yields a non-empty text view."""
         var fs = ProcFs.new()
         val h = fs.open("/proc/1/status", FileFlags.read_only()).unwrap()
@@ -129,6 +154,8 @@ describe "ProcFs trait adapter":
         assert_true(data.len() > 0)
 
     it "write to /proc fails closed (read-only)":
+        step("Verify: write to /proc fails closed (read-only)")
+        # @req: REQ-OS-PseuMoun-001
         """Any write into /proc must be rejected."""
         var fs = ProcFs.new()
         val h = fs.open("/proc/1/status", FileFlags.read_only()).unwrap()
@@ -144,6 +171,8 @@ describe "VfsManager pseudo-fs mount":
     """
 
     it "mounts /dev and /proc":
+        step("Verify: mounts /dev and /proc")
+        # @req: REQ-OS-PseuMoun-001
         """register_devfs / register_procfs both report their mount path."""
         var mgr = VfsManager.new()
         val d = register_devfs(mgr)
@@ -154,6 +183,8 @@ describe "VfsManager pseudo-fs mount":
         expect(p.value).to_equal("/proc")
 
     it "readdir /dev routes through the manager":
+        step("Verify: readdir /dev routes through the manager")
+        # @req: REQ-OS-PseuMoun-001
         """VfsManager.readdir resolves the /dev mount and strips the prefix.
 
         Mounts via the same `VfsManager.mount` call `register_devfs` uses; the
@@ -169,6 +200,8 @@ describe "VfsManager pseudo-fs mount":
         expect(names).to_contain("zero")
 
     it "stat /proc/<pid>/status routes through the manager":
+        step("Verify: stat /proc/<pid>/status routes through the manager")
+        # @req: REQ-OS-PseuMoun-001
         """VfsManager.stat resolves the /proc mount by longest-prefix match."""
         var mgr = VfsManager.new()
         val _md = mgr.mount("/dev", "devfs", "", false, DevFs.new())

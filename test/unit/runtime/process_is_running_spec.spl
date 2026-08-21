@@ -6,10 +6,21 @@
 # Fix: try waitpid(WNOHANG) first to correctly reap and detect exited children,
 # then fall back to kill(pid,0)+errno for non-child processes.
 
+"""
+## Purpose and audience
+Purpose: reports async-spawned child as running while alive
+Audience: compiler and tooling engineers who maintain this spec
+"""
+
+# @req: REQ-RUNTIME-ProcIsRunn-001
+
 use std.io.{file_read, process_run_timeout, process_spawn_async, process_is_running, process_wait, process_kill}
 
+use std.spec.step
 describe "rt_process_is_running with async-spawned children":
     it "reports async-spawned child as running while alive":
+        step("Verify: reports async-spawned child as running while alive")
+        # @req: REQ-RUNTIME-ProcIsRunn-001
         # Spawn a child that sleeps for 5 seconds (long enough to check liveness)
         val pid = process_spawn_async("sleep", ["5"])
         expect(pid > 0).to_equal(true)
@@ -22,6 +33,8 @@ describe "rt_process_is_running with async-spawned children":
         process_wait(pid, 100)
 
     it "reports async-spawned child as not running after it exits":
+        step("Verify: reports async-spawned child as not running after it exits")
+        # @req: REQ-RUNTIME-ProcIsRunn-001
         # Spawn a child that exits immediately
         val pid = process_spawn_async("true", [])
         expect(pid > 0).to_equal(true)
@@ -35,14 +48,20 @@ describe "rt_process_is_running with async-spawned children":
         expect(running).to_equal(false)
 
     it "returns false for invalid pid zero":
+        step("Verify: returns false for invalid pid zero")
+        # @req: REQ-RUNTIME-ProcIsRunn-001
         val running = process_is_running(0)
         expect(running).to_equal(false)
 
     it "returns false for negative pid":
+        step("Verify: returns false for negative pid")
+        # @req: REQ-RUNTIME-ProcIsRunn-001
         val running = process_is_running(-1)
         expect(running).to_equal(false)
 
     it "keeps invalid wait and kill pids behind facade guards":
+        step("Verify: keeps invalid wait and kill pids behind facade guards")
+        # @req: REQ-RUNTIME-ProcIsRunn-001
         val src = file_read("src/lib/nogc_sync_mut/io/process_ops.spl")
         expect(src).to_contain("fn process_wait(pid: i64, timeout_ms: i64) -> i64:")
         expect(src).to_contain("if pid <= 0:")
@@ -52,10 +71,12 @@ describe "rt_process_is_running with async-spawned children":
         expect(src).to_contain("return false")
 
         val wait_code = process_wait(0, 1)
-        expect(wait_code).to_equal(-1)
+        expect(wait_code).to_equal(-1)  # oracle: value fixed by the spec contract
         expect(process_kill(0)).to_equal(false)
 
     it "times out without the external GNU timeout command":
+        step("Verify: times out without the external GNU timeout command")
+        # @req: REQ-RUNTIME-ProcIsRunn-001
         val src = file_read("src/lib/nogc_sync_mut/io/process_ops.spl")
         val c_runtime = file_read("src/runtime/platform/unix_common.h")
         val rust_runtime = file_read("src/compiler_rust/runtime/src/value/sffi/env_process.rs")
@@ -68,5 +89,5 @@ describe "rt_process_is_running with async-spawned children":
         expect(rust_runtime).to_contain("let reaped = child.wait().is_ok()")
 
         val (_stdout, stderr, exit_code) = process_run_timeout("sleep", ["2"], 50)
-        expect(exit_code).to_equal(-1)
+        expect(exit_code).to_equal(-1)  # oracle: value fixed by the spec contract
         expect(stderr).to_contain("[TIMEOUT:")
