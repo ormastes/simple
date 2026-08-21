@@ -47,15 +47,6 @@ impl IncrementalState:
                          dependents: {}, dirty_files: [],
                          interface_hashes: {})
 
-    me add_edge(edges: {text: [text]}, from_key: text, to_value: text) -> {text: [text]}:
-        """Append to_value to edges[from_key], creating the list if absent
-        and skipping the append if to_value is already present."""
-        if not edges.has(from_key):
-            edges[from_key] = []
-        val existing: [text] = edges[from_key]
-        if not existing.contains(to_value):
-            edges[from_key] = existing.push(to_value)
-        edges
 
     me register_file(path: text, content: text):
         extern fn rt_hash_text(t: text) -> i64
@@ -71,9 +62,18 @@ impl IncrementalState:
 
     me add_dependency(from_file: text, to_file: text):
         """Record that from_file depends on to_file."""
-        self.dependencies = self.add_edge(self.dependencies, from_file, to_file)
+        # Written through the owning field so the append touches only the small
+        # per-key list, never a copy of the whole edge dict (COW-alias class,
+        # doc/08_tracking/bug/value_semantics_cow_alias_perf_class_2026-08-21.md).
+        var forward: [text] = if self.dependencies.has(from_file): self.dependencies[from_file] else: []
+        if not forward.contains(to_file):
+            forward.push(to_file)
+        self.dependencies[from_file] = forward
         # Track reverse dependency
-        self.dependents = self.add_edge(self.dependents, to_file, from_file)
+        var reverse: [text] = if self.dependents.has(to_file): self.dependents[to_file] else: []
+        if not reverse.contains(from_file):
+            reverse.push(from_file)
+        self.dependents[to_file] = reverse
 
     me mark_dirty(path: text):
         """Mark a file and its transitive dependents as dirty."""
