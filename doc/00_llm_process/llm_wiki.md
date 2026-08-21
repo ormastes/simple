@@ -111,6 +111,11 @@ same-thread/typed-payload exclusions and the Stage-4 blocker.
   then drain the `0xAE` loopback probe from RX before accepting shell input.
   OVMF exposed this as `0xAEls /`; the corrected image now boots and completes
   a fresh VFS-backed `ls /`. This is host evidence, not physical CN16 proof.
+- **UP2 free RAM monitor:** after the shell command `gdb`, SimpleOS serves
+  checksummed GDB RSP `m`/`M` packets over CN16 for only
+  `0x0a000000..0x0b000000`, capped at 1024 bytes with write readback. OVMF
+  proves `SIMP` → `53494d50` and detach. Registers, run control, reset, binary
+  `X`, preboot DCI, and physical CN16 remain outside that PASS.
 - **Apollo Lake reset exception:** Intel's 2020 debugger notes say OpenRC warm
   reset can leave Apollo Lake cores unreleasable, with manual reset required.
   Never use it as the UP2 software-reset fallback. A Power-Good reset remains

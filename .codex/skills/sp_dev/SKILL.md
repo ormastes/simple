@@ -235,6 +235,12 @@ consume any loopback-test byte before normal input. Writing `0xAE` while MCR
 loopback is enabled without reading DATA afterward contaminates the first
 command (`0xAEls /`). Require an emulator transcript proving the first clean
 command, while retaining physical CN16 as a separate evidence gate.
+For the current free UP2 memory lane, enter the target monitor with shell
+command `gdb`. Admit only checksummed GDB RSP `m`/`M` requests inside the
+linker-owned `0x0a000000..0x0b000000` staging segment, cap transfers at 1024
+bytes, and read every write back before `OK`. An OVMF receipt may prove the
+packet/RAM path, but physical CN16 remains separate. Never promote unsupported
+register, breakpoint, continue, step, reset, or binary `X` packets to PASS.
 
 When a user asks to close an implementation phase with external verification
 still unavailable, record an **implementation handoff** in the plan and Todo

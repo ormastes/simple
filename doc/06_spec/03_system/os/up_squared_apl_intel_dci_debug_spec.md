@@ -2,9 +2,10 @@
 
 Executable source:
 `test/03_system/os/up_squared_apl_intel_dci_debug_spec.spl`.
-This is a manual companion because the deployed Stage 4 test/docgen runtime is
-currently absent; the executable source passed pure-Simple frontend and object
-generation, while core-C runtime archive creation blocked linking.
+This is a manually maintained companion because the deployed Stage 4
+test/docgen runtime is currently absent. The admitted Stage 3 compiler builds
+the freestanding UP2 closure, and the OVMF oracle executes the boot, shell, and
+RSP memory path.
 
 ## Admit the Intel DCI connection
 
@@ -31,6 +32,14 @@ The request binds one exact model/serial/transport/capacity and byte range to
 the image digest. Root, swap, mounted, held, identity-mismatched, unconfirmed,
 or out-of-bounds targets fail. Hardware must flush and verify exact readback.
 
+## Load and verify RAM with the free monitor
+
+After the shell command `gdb`, send checksummed GDB RSP packets. The monitor
+advertises `PacketSize=1000`, admits at most 1024 bytes per `m`/`M`, and confines
+access to `0x0a000000..0x0b000000`. The OVMF scenario writes ASCII `SIMP` and
+requires exact readback `53494d50` before detach. Register, breakpoint,
+continue, step, and reset requests remain unsupported rather than fabricated.
+
 ## Physical completion
 
 Connection, RAM load, boot/VFS `ls /`, and storage readback are separate receipt
@@ -45,3 +54,4 @@ physical evidence to PASS.
 | REQ-007 | reviewed three-segment physical ELF plan | RAM boot receipt pending |
 | REQ-009 | exact identity, busy-state, bounds policy | device enumeration pending |
 | REQ-010 | hash-bound challenge admission | flush/readback receipt pending |
+| REQ-013 | bounded `M` plus exact `m` readback under OVMF | physical CN16 receipt pending |

@@ -1,0 +1,76 @@
+use std.spec.{describe, it, expect}
+use os.kernel.arch.x86_64.up_squared.gdb_rsp_monitor.{
+    UP2_RSP_STAGING_START, UP2_RSP_STAGING_SIZE, UP2_RSP_MAX_TRANSFER,
+    Up2RspOperation, up2_rsp_plan, up2_rsp_checksum, up2_rsp_frame,
+    up2_rsp_decode_frame
+}
+
+describe "UP2 target-side GDB RSP framing":
+    it "round trips a checksummed query packet":
+        val frame = up2_rsp_frame("qSupported:multiprocess+")
+        expect(frame.starts_with("$qSupported:multiprocess+#")).to_equal(true)
+        val decoded = up2_rsp_decode_frame(frame)
+        expect(decoded.is_ok()).to_equal(true)
+        expect(decoded.unwrap()).to_equal("qSupported:multiprocess+")
+
+    it "rejects malformed, oversized, and mismatched checksums":
+        expect(up2_rsp_decode_frame("qSupported#00").unwrap_err()).to_equal("rsp-frame")
+        expect(up2_rsp_decode_frame("$qSupported#zz").unwrap_err()).to_equal("rsp-checksum-format")
+        expect(up2_rsp_decode_frame("$qSupported#00").unwrap_err()).to_equal("rsp-checksum")
+        expect(up2_rsp_decode_frame("$" + ("a" * 4094) + "#00").unwrap_err()).to_equal("rsp-frame")
+
+    it "uses the byte-sum modulo 256 checksum":
+        expect(up2_rsp_checksum("m0,1")).to_equal(0xfau8)
+
+describe "UP2 target-side GDB RSP query planning":
+    it "advertises only packet size and reports one attached thread":
+        expect(up2_rsp_plan("qSupported:xmlRegisters=i386").response).to_equal("PacketSize=1000")
+        expect(up2_rsp_plan("qAttached").response).to_equal("1")
+        expect(up2_rsp_plan("qC").response).to_equal("QC1")
+        expect(up2_rsp_plan("qfThreadInfo").response).to_equal("m1")
+        expect(up2_rsp_plan("qsThreadInfo").response).to_equal("l")
+        expect(up2_rsp_plan("Hg0").response).to_equal("OK")
+        expect(up2_rsp_plan("?").response).to_equal("S00")
+
+    it "fails closed for register, breakpoint, continue, and step packets":
+        expect(up2_rsp_plan("g").response).to_equal("")
+        expect(up2_rsp_plan("p0").response).to_equal("")
+        expect(up2_rsp_plan("Z0,a000000,1").response).to_equal("")
+        expect(up2_rsp_plan("c").response).to_equal("")
+        expect(up2_rsp_plan("s").response).to_equal("")
+
+    it "plans detach without treating it as target reset":
+        val plan = up2_rsp_plan("D")
+        expect(plan.operation).to_equal(Up2RspOperation.Detach)
+        expect(plan.response).to_equal("OK")
+
+describe "UP2 target-side GDB RSP bounded memory planning":
+    it "admits reads at both staging boundaries":
+        val first = up2_rsp_plan("m0a000000,1")
+        expect(first.operation).to_equal(Up2RspOperation.ReadMemory)
+        expect(first.address).to_equal(UP2_RSP_STAGING_START)
+        expect(first.length).to_equal(1)
+        val last = up2_rsp_plan("m0affffff,1")
+        expect(last.operation).to_equal(Up2RspOperation.ReadMemory)
+        expect(last.address).to_equal(UP2_RSP_STAGING_START + UP2_RSP_STAGING_SIZE - 1u64)
+
+    it "admits an exact write and decodes its bytes":
+        val plan = up2_rsp_plan("M0a000010,4:00a55aff")
+        expect(plan.operation).to_equal(Up2RspOperation.WriteMemory)
+        expect(plan.length).to_equal(4)
+        expect(plan.data).to_equal([0x00u8, 0xa5u8, 0x5au8, 0xffu8])
+
+    it "rejects zero, oversized, overflowed, and out-of-range reads":
+        expect(up2_rsp_plan("m0a000000,0").response).to_equal("E02")
+        expect(up2_rsp_plan("m0a000000,401").response).to_equal("E02")
+        expect(UP2_RSP_MAX_TRANSFER).to_equal(1024)
+        expect(up2_rsp_plan("m09ffffff,1").response).to_equal("E02")
+        expect(up2_rsp_plan("m0b000000,1").response).to_equal("E02")
+        expect(up2_rsp_plan("mffffffffffffffff,2").response).to_equal("E02")
+
+    it "rejects malformed and length-mismatched writes":
+        expect(up2_rsp_plan("M0a000000,2:00").response).to_equal("E01")
+        expect(up2_rsp_plan("M0a000000,1:zz").response).to_equal("E01")
+        expect(up2_rsp_plan("M0a000000:00").response).to_equal("E01")
+        expect(up2_rsp_plan("M0a000000,1").response).to_equal("E01")
+        expect(up2_rsp_plan("mxyz,1").response).to_equal("E01")

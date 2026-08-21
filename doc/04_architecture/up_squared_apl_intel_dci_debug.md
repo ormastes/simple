@@ -25,6 +25,10 @@ I/O. Those decisions remain target-side and independently testable.
    readback; debugger MMIO is never a storage backend.
 6. **Evidence owner:** connection, load, boot, and storage receipts remain
    separate and cannot promote one another.
+7. **Free post-boot monitor:** `gdb_rsp_monitor.spl` owns packet, checksum,
+   bounds, and readback policy. `gdb_rsp_uart.spl` alone owns CN16/COM1 framing.
+   The linker reserves `0x0a000000..0x0b000000` in the admitted writable
+   `PT_LOAD`; the monitor cannot address outside it.
 
 ## Pattern evaluation
 
@@ -36,6 +40,9 @@ I/O. Those decisions remain target-side and independently testable.
   identity checks.
 - **Deferred: xHCI DbC.** It is a different post-entry transport and was not
   selected.
+- **Selected free fallback: bounded GDB RSP memory access.** It supplies
+  post-boot staging without claiming DCI preboot halt, registers, breakpoints,
+  reset, or CPU-state boot.
 
 ## Trust boundaries
 
@@ -56,4 +63,5 @@ capability is physical reset; Power-Good reset is a separately qualified adapter
 Host-independent protocol and OVMF tests do not prove physical DCI, physical
 boot, or storage writes. Hardware PASS requires the exact receipts in REQ-003,
 REQ-010, and REQ-011.
-
+OVMF may independently prove REQ-013 packet write/readback behavior; physical
+CN16 still requires a fresh board transcript.

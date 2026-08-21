@@ -18,7 +18,7 @@ Public functions:
 
 - `dci_admit_mailbox(...)`: validates final commit, replay resistance, exact
   length, digest syntax, and independently observed SHA-256.
-- `dci_parse_x86_64_load_segments(bytes)`: parses physical `p_paddr`, unlike
+- `dci_parse_x86_64_elf(bytes)`: parses physical `p_paddr`, unlike
   the process-loader's virtual-only plan.
 - `dci_admit_load_plan(...)`: validates segment/file/memory arithmetic,
   allowlist containment, pairwise non-overlap, W^X, and executable entry.
@@ -59,3 +59,16 @@ All validation returns a stable reason. No validation function writes memory,
 registers, firmware, or storage. Hardware adapters must stop before mutation on
 any rejected admission.
 
+## Free GDB RSP memory monitor
+
+`gdb_rsp_monitor.spl` parses checksummed printable-ASCII packets independently
+of transport. It supports `qSupported`, attachment/thread discovery, `H`, `?`,
+detach, and bounded `m`/`M`; all register, breakpoint, continue, step, and reset
+packets return unsupported. Each request is limited to 1024 bytes and to the
+16 MiB linker-owned staging range `0x0a000000..0x0b000000`. `M` reads every
+written byte back before replying `OK`.
+
+`gdb_rsp_uart.spl` enters only after the shell command `gdb`, ACKs valid frames,
+NACKs malformed/checksum-failed frames, handles Ctrl-C as an already-stopped
+monitor indication, and returns to the shell on detach. It performs no reset or
+execution transition.
