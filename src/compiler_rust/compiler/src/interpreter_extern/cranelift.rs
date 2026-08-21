@@ -90,6 +90,28 @@ fn value_to_bool(val: &Value) -> bool {
     }
 }
 
+#[inline]
+fn expect_f64(args: &[Value], index: usize, symbol: &str) -> Result<f64, CompileError> {
+    match args.get(index) {
+        Some(Value::Float(value)) => Ok(*value),
+        Some(Value::Int(value)) => Ok(*value as f64),
+        _ => Err(CompileError::runtime(format!(
+            "{symbol}: argument {index} must be numeric"
+        ))),
+    }
+}
+
+#[inline]
+fn expect_bool(args: &[Value], index: usize, symbol: &str) -> Result<bool, CompileError> {
+    match args.get(index) {
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(Value::Int(value)) => Ok(*value != 0),
+        _ => Err(CompileError::runtime(format!(
+            "{symbol}: argument {index} must be boolean"
+        ))),
+    }
+}
+
 unsafe fn interpreter_cranelift_arg_handles(ptr: i64, len: i64) -> Result<Vec<i64>, CompileError> {
     if len < 0 || (len > 0 && ptr == 0) {
         return Err(CompileError::semantic("invalid Cranelift argument vector".to_string()));
@@ -407,11 +429,8 @@ pub fn rt_cranelift_create_block(args: &[Value]) -> Result<Value, CompileError> 
 /// Switch to a block
 /// Args: ctx (i64), block (i64)
 pub fn rt_cranelift_switch_to_block(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 2 {
-        return Ok(Value::Nil);
-    }
-    let ctx = value_to_i64(&args[0]);
-    let block = value_to_i64(&args[1]);
+    let ctx = expect_i64(args, 0, "rt_cranelift_switch_to_block")?;
+    let block = expect_i64(args, 1, "rt_cranelift_switch_to_block")?;
     unsafe { cranelift_sffi::rt_cranelift_switch_to_block(ctx, block) };
     Ok(Value::Nil)
 }
@@ -419,11 +438,8 @@ pub fn rt_cranelift_switch_to_block(args: &[Value]) -> Result<Value, CompileErro
 /// Seal a block
 /// Args: ctx (i64), block (i64)
 pub fn rt_cranelift_seal_block(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 2 {
-        return Ok(Value::Nil);
-    }
-    let ctx = value_to_i64(&args[0]);
-    let block = value_to_i64(&args[1]);
+    let ctx = expect_i64(args, 0, "rt_cranelift_seal_block")?;
+    let block = expect_i64(args, 1, "rt_cranelift_seal_block")?;
     unsafe { cranelift_sffi::rt_cranelift_seal_block(ctx, block) };
     Ok(Value::Nil)
 }
@@ -431,10 +447,7 @@ pub fn rt_cranelift_seal_block(args: &[Value]) -> Result<Value, CompileError> {
 /// Seal all blocks
 /// Args: ctx (i64)
 pub fn rt_cranelift_seal_all_blocks(args: &[Value]) -> Result<Value, CompileError> {
-    if args.is_empty() {
-        return Ok(Value::Nil);
-    }
-    let ctx = value_to_i64(&args[0]);
+    let ctx = expect_i64(args, 0, "rt_cranelift_seal_all_blocks")?;
     unsafe { cranelift_sffi::rt_cranelift_seal_all_blocks(ctx) };
     Ok(Value::Nil)
 }
@@ -442,12 +455,9 @@ pub fn rt_cranelift_seal_all_blocks(args: &[Value]) -> Result<Value, CompileErro
 /// Append a block parameter
 /// Args: ctx (i64), block (i64), type_ (i64)
 pub fn rt_cranelift_append_block_param(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 3 {
-        return Ok(Value::Int(0));
-    }
-    let ctx = value_to_i64(&args[0]);
-    let block = value_to_i64(&args[1]);
-    let type_ = value_to_i64(&args[2]);
+    let ctx = expect_i64(args, 0, "rt_cranelift_append_block_param")?;
+    let block = expect_i64(args, 1, "rt_cranelift_append_block_param")?;
+    let type_ = expect_i64(args, 2, "rt_cranelift_append_block_param")?;
     let handle = unsafe { cranelift_sffi::rt_cranelift_append_block_param(ctx, block, type_) };
     Ok(Value::Int(handle))
 }
@@ -455,12 +465,9 @@ pub fn rt_cranelift_append_block_param(args: &[Value]) -> Result<Value, CompileE
 /// Get a block parameter value
 /// Args: ctx (i64), block (i64), index (i64)
 pub fn rt_cranelift_block_param(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 3 {
-        return Ok(Value::Int(0));
-    }
-    let ctx = value_to_i64(&args[0]);
-    let block = value_to_i64(&args[1]);
-    let index = value_to_i64(&args[2]);
+    let ctx = expect_i64(args, 0, "rt_cranelift_block_param")?;
+    let block = expect_i64(args, 1, "rt_cranelift_block_param")?;
+    let index = expect_i64(args, 2, "rt_cranelift_block_param")?;
     let handle = unsafe { cranelift_sffi::rt_cranelift_block_param(ctx, block, index) };
     Ok(Value::Int(handle))
 }
@@ -472,12 +479,9 @@ pub fn rt_cranelift_block_param(args: &[Value]) -> Result<Value, CompileError> {
 /// Create an integer constant
 /// Args: ctx (i64), type_ (i64), value (i64)
 pub fn rt_cranelift_iconst(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 3 {
-        return Ok(Value::Int(0));
-    }
-    let ctx = value_to_i64(&args[0]);
-    let type_ = value_to_i64(&args[1]);
-    let val = value_to_i64(&args[2]);
+    let ctx = expect_i64(args, 0, "rt_cranelift_iconst")?;
+    let type_ = expect_i64(args, 1, "rt_cranelift_iconst")?;
+    let val = expect_i64(args, 2, "rt_cranelift_iconst")?;
     let handle = unsafe { cranelift_sffi::rt_cranelift_iconst(ctx, type_, val) };
     Ok(Value::Int(handle))
 }
@@ -485,12 +489,9 @@ pub fn rt_cranelift_iconst(args: &[Value]) -> Result<Value, CompileError> {
 /// Create a float constant
 /// Args: ctx (i64), type_ (i64), value (f64)
 pub fn rt_cranelift_fconst(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 3 {
-        return Ok(Value::Int(0));
-    }
-    let ctx = value_to_i64(&args[0]);
-    let type_ = value_to_i64(&args[1]);
-    let val = value_to_f64(&args[2]);
+    let ctx = expect_i64(args, 0, "rt_cranelift_fconst")?;
+    let type_ = expect_i64(args, 1, "rt_cranelift_fconst")?;
+    let val = expect_f64(args, 2, "rt_cranelift_fconst")?;
     let handle = unsafe { cranelift_sffi::rt_cranelift_fconst(ctx, type_, val) };
     Ok(Value::Int(handle))
 }
@@ -498,11 +499,8 @@ pub fn rt_cranelift_fconst(args: &[Value]) -> Result<Value, CompileError> {
 /// Create a boolean constant
 /// Args: ctx (i64), value (bool)
 pub fn rt_cranelift_bconst(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 2 {
-        return Ok(Value::Int(0));
-    }
-    let ctx = value_to_i64(&args[0]);
-    let val = value_to_bool(&args[1]);
+    let ctx = expect_i64(args, 0, "rt_cranelift_bconst")?;
+    let val = expect_bool(args, 1, "rt_cranelift_bconst")?;
     let handle = unsafe { cranelift_sffi::rt_cranelift_bconst(ctx, val) };
     Ok(Value::Int(handle))
 }
@@ -510,11 +508,8 @@ pub fn rt_cranelift_bconst(args: &[Value]) -> Result<Value, CompileError> {
 /// Create a null pointer constant
 /// Args: ctx (i64), type_ (i64)
 pub fn rt_cranelift_null(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 2 {
-        return Ok(Value::Int(0));
-    }
-    let ctx = value_to_i64(&args[0]);
-    let type_ = value_to_i64(&args[1]);
+    let ctx = expect_i64(args, 0, "rt_cranelift_null")?;
+    let type_ = expect_i64(args, 1, "rt_cranelift_null")?;
     let handle = unsafe { cranelift_sffi::rt_cranelift_null(ctx, type_) };
     Ok(Value::Int(handle))
 }
@@ -526,12 +521,10 @@ pub fn rt_cranelift_null(args: &[Value]) -> Result<Value, CompileError> {
 macro_rules! impl_binop_wrapper {
     ($wrapper_name:ident, $sffi_name:ident) => {
         pub fn $wrapper_name(args: &[Value]) -> Result<Value, CompileError> {
-            if args.len() < 3 {
-                return Ok(Value::Int(0));
-            }
-            let ctx = value_to_i64(&args[0]);
-            let a = value_to_i64(&args[1]);
-            let b = value_to_i64(&args[2]);
+            let symbol = stringify!($wrapper_name);
+            let ctx = expect_i64(args, 0, symbol)?;
+            let a = expect_i64(args, 1, symbol)?;
+            let b = expect_i64(args, 2, symbol)?;
             let handle = unsafe { cranelift_sffi::$sffi_name(ctx, a, b) };
             Ok(Value::Int(handle))
         }
@@ -941,6 +934,16 @@ mod tests {
         );
         assert!(super::rt_cranelift_define_function(&[Value::Int(1)]).is_err());
         assert!(super::rt_cranelift_create_block(&[]).is_err());
+    }
+
+    #[test]
+    fn block_constant_and_binary_sffi_reject_fabricated_operands() {
+        assert!(super::rt_cranelift_switch_to_block(&[Value::Int(1)]).is_err());
+        assert!(super::rt_cranelift_append_block_param(&[Value::Int(1), Value::Int(2), Value::Nil,]).is_err());
+        assert!(super::rt_cranelift_iconst(&[Value::Int(1), Value::Int(2)]).is_err());
+        assert!(super::rt_cranelift_fconst(&[Value::Int(1), Value::Int(2), Value::Bool(false),]).is_err());
+        assert!(super::rt_cranelift_bconst(&[Value::Int(1), Value::text("false")]).is_err());
+        assert!(super::rt_cranelift_iadd(&[Value::Int(1), Value::Int(2), Value::Nil]).is_err());
     }
 
     #[test]

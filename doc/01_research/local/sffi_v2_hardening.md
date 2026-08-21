@@ -255,6 +255,14 @@ null-with-positive-length descriptors before unsafe entry. One focused
 sabotage test exercises the group. Inline checks preserve the direct valid
 call shape and introduce no heap work or registry lookup.
 
+Cranelift block switching/sealing, block parameters, scalar constants, null
+constants, and the macro-generated binary arithmetic family now use checked
+integer/float/boolean extraction as well. Missing or mismatched operands can
+no longer become zero, `0.0`, or false before unsafe code generation. The
+helpers are inline, numeric widening remains explicit for valid float inputs,
+and every valid wrapper still makes exactly one backend call. A focused test
+covers block, constant, boolean, float, and generated binary rejection.
+
 All 15 remaining legacy sign/verify declarations in the canonical signature
 module are now explicitly `unsafe(ffi)` and document their sentinel contract:
 verification collapses malformed bridge input into `0`, while signing may
