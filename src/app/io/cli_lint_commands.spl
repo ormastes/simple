@@ -17,10 +17,17 @@ use app.io.cli_fix_options.{fix_option_error}
 use app.io.cli_fmt_options.{fmt_option_error}
 use common.text.{escape_json}
 
-fn lint_option_error(args: [text]) -> text:
+pub fn lint_option_error(args: [text]) -> text:
     var help_count = 0
     var other_count = 0
+    var expect_profile_tier = false
     for arg in args:
+        if expect_profile_tier:
+            if arg == "" or arg.starts_with("-"):
+                return "--profile requires a tier"
+            expect_profile_tier = false
+            other_count = other_count + 1
+            continue
         if arg == "lint":
             continue
         if arg == "--help" or arg == "-h":
@@ -36,9 +43,12 @@ fn lint_option_error(args: [text]) -> text:
                 return "--profile requires a tier"
             continue
         if arg == "--profile":
-            return "--profile requires a tier"
+            expect_profile_tier = true
+            continue
         if arg.starts_with("-"):
             return "unknown option: {arg}"
+    if expect_profile_tier:
+        return "--profile requires a tier"
     if help_count > 0 and (help_count != 1 or other_count > 0):
         return "help cannot be combined with files or other options"
     ""
@@ -61,7 +71,17 @@ fn run_lint_command(args: [text]) -> i64:
     var run_repo_gates = false
     var run_simd = false
     val json_output = args.contains("--json")
+    var normalized_args: [text] = []
+    var expect_profile_tier = false
     for arg in args:
+        if expect_profile_tier:
+            normalized_args.push("--profile=" + arg)
+            expect_profile_tier = false
+            continue
+        if arg == "--profile":
+            expect_profile_tier = true
+            continue
+        normalized_args.push(arg)
         if arg == "lint":
             val _ = 0
         elif arg == "--mcp-perf":
@@ -174,7 +194,7 @@ fn run_lint_command(args: [text]) -> i64:
             failed_files = failed_files + 1
             continue
 
-        val file_exit = run_lint_file(file_path, args)
+        val file_exit = run_lint_file(file_path, normalized_args)
         if file_exit == 3:
             not_linted_files = not_linted_files + 1
         if file_exit != 0:

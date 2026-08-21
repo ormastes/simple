@@ -323,6 +323,12 @@ server and web-framework thread calls now use lexical FFI blocks. Those blocks
 add no helper dispatch, allocation, lookup, or synchronization to the existing
 native call path.
 
+The lint launcher now accepts both `--profile=robust` and `--profile robust`,
+normalizes the latter before invoking the engine, and does not misclassify the
+tier as an input file. This is command-line setup work only; it does not enter
+compiled application or SFFI call paths. Production-launcher verification still
+requires redeploying the pure-Simple binary.
+
 Thread-pool construction no longer treats a zero/invalid native worker handle
 as a successfully degraded pool. The unused duplicate thread-create extern was
 removed; the remaining spawn ABI is explicitly FFI-unsafe, called in a lexical
