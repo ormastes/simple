@@ -1,0 +1,98 @@
+# @cover src/compiler/00.common/transition/validator.spl 60%
+"""
+# HirStmtKind -> MIR is a totally declared boundary
+
+**Category:** Compiler / completeness proofs
+**Plan:** doc/03_plan/compiler/hardening/critical_hardening_plan_2026-08-21.md (lane C6)
+**Design:** doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md sections 11.3-11.6
+
+## Purpose
+
+`spec/compiler_schema/transitions/hir_stmt_to_mir.sdn` records the statement
+boundary of `MirLowering.lower_stmt`. Unlike the expression boundary this one is
+fully implemented: all five `HirStmtKind` variants have real lowering arms.
+
+That makes this table's job a different one, and worth stating plainly. A
+boundary with no holes still needs a declared universe, because the failure mode
+here is not an unhandled variant TODAY — it is a variant added to `HirStmtKind`
+tomorrow with no lowering arm. Before lane C6 that variant would have landed in
+`case _: ()`: the statement was silently DROPPED from the function body, with no
+diagnostic, no crash and no trace. The program compiled clean and miscompiled.
+
+Two independent things now catch it. Statically, this table's universe goes
+stale against the registry and `check-compiler-transition-coverage.shs` reports
+the new variant as Missing. Dynamically, the wildcard raises
+`E-MIR-STMT-Unknown` with the statement's span and observed discriminant.
+
+## Scope
+
+Totality against the producer universe, the universe's size against the
+generated registry, and the assertion that the handled count equals the universe
+size — the property that distinguishes this boundary from the expression one.
+"""
+
+use std.spec
+use std.io_runtime.{file_read, file_exists}
+use compiler.common.transition.transition_table.{parse_transition_table, variant_name_of}
+use compiler.common.transition.validator.{
+    validate_transition_table, coverage_report_is_clean, coverage_report_handled
+}
+use compiler.common.transition.coverage_state.{coverage_state_tag}
+
+val TABLE_PATH = "spec/compiler_schema/transitions/hir_stmt_to_mir.sdn"
+val REGISTRY_PATH = "spec/compiler_schema/registry/compiler.hir.HirStmtKind.sdn"
+
+fn load_table_text() -> text:
+    if not file_exists(TABLE_PATH):
+        fail("transition table not found at {TABLE_PATH}; run from the repo root")
+        return ""
+    return file_read(TABLE_PATH)
+
+describe "hir_stmt_to_mir transition table":
+    it "loads without a single parse error":
+        step("Read the checked-in table")
+        val table = parse_transition_table(load_table_text())
+        expect(table.errors.len()).to_equal(0)
+        expect(table.name).to_equal("hir_stmt_to_mir")
+        expect(table.producer).to_equal("HirStmtKind")
+
+    it "declares all 5 HirStmtKind variants — Missing is empty":
+        step("The universe comes from the GENERATED registry, not from the dispatch")
+        expect(file_exists(REGISTRY_PATH)).to_equal(true)
+        val report = validate_transition_table(parse_transition_table(load_table_text()))
+        expect(report.universe_size).to_equal(5)
+        expect(report.declared).to_equal(5)
+        step("The build invariant: Missing = ProducerUniverse - declared = {}")
+        expect(report.missing.len()).to_equal(0)
+        expect(report.unknown.len()).to_equal(0)
+        expect(report.duplicated.len()).to_equal(0)
+        expect(coverage_report_is_clean(report)).to_equal(true)
+
+    it "names every variant the statement lowering handles":
+        val table = parse_transition_table(load_table_text())
+        var names: [text] = []
+        for row in table.rows:
+            names.push(variant_name_of(row.from_id))
+        expect(names.contains("Expr")).to_equal(true)
+        expect(names.contains("Let")).to_equal(true)
+        expect(names.contains("Assign")).to_equal(true)
+        expect(names.contains("Block")).to_equal(true)
+        expect(names.contains("AsmAssert")).to_equal(true)
+
+    it "has ZERO unsupported rows — handled equals the whole universe":
+        step("This is the property that separates the stmt boundary from the expr one")
+        val table = parse_transition_table(load_table_text())
+        var unsupported = 0
+        for row in table.rows:
+            if coverage_state_tag(row.state) == "unsupported":
+                unsupported = unsupported + 1
+        expect(unsupported).to_equal(0)
+        expect(coverage_report_handled(table)).to_equal(5)
+
+    it "gives every row a reason, so the recorded behaviour is auditable":
+        val table = parse_transition_table(load_table_text())
+        var attributed = 0
+        for row in table.rows:
+            if row.reason != "":
+                attributed = attributed + 1
+        expect(attributed).to_equal(5)

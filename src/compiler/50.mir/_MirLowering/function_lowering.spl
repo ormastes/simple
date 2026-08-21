@@ -66,6 +66,36 @@ fn mir_type_any_requires_hard_error(strictness_name: text) -> bool:
         _: false
 
 impl MirLowering:
+    me type_payload_decode_failed(variant: text, span: Span):
+        """Report that a discriminant-guarded type destructure did not bind.
+
+        Lane C6 (HIR -> MIR completeness, hardening plan 2026-08-21 sections
+        11.3-11.6), the type-side twin of `payload_decode_failed` in
+        _MirLoweringExpr/expr_dispatch.spl.
+
+        `lower_type` and the two GPU kernel-parameter lowerings all use the same
+        two-step shape: prove the variant with `rt_enum_discriminant`, then
+        re-match to bind the payload. The wildcard of that INNER match is
+        therefore unreachable for any well-formed node -- reaching it means the
+        discriminant said one variant and the payload decode produced another,
+        which is a real and already-observed defect in this tree (see the
+        `Optional` block's own stage-3 note a few hundred lines below).
+
+        Every one of those wildcards used to be a bare `pass`, so a misbinding
+        fell through to the generic dispatch and was indistinguishable from an
+        unhandled type -- the parameter silently lowered to i64/ptr and the
+        program miscompiled. Fall-through is preserved, so this cannot break a
+        path that already worked, but it is now LOUD.
+
+        NOTE the deliberate exclusion: the `case _: pass` on the
+        `HirTypeKind.Isolated` probe in `lower_function` is NOT converted. That
+        match is a genuine one-variant QUESTION over the open type universe
+        ("is this parameter iso-wrapped?"), not a guarded destructure, so its
+        wildcard is the ordinary answer "no" and firing a diagnostic there would
+        report every non-isolated parameter in the program."""
+        self.error("E-MIR-TYPE-PAYLOAD: discriminant-guarded destructure of {variant} did not bind its payload (enum payload decode disagreed with the discriminant)", Some(span))
+        eprint("[mir-lower-type] E-MIR-TYPE-PAYLOAD variant={variant} at={span.file}:{span.line}:{span.col}\n")
+
     fn mir_folded_const_type(expr: HirExpr, value: MirConstValue) -> MirType?:
         """Recover a concrete MIR type when HIR left a const type inferred.
 
@@ -595,11 +625,11 @@ impl MirLowering:
             if kind_disc == array_disc:
                 match kind:
                     case HirTypeKind.Array(array_element, _): element = array_element
-                    case _: pass
+                    case _: self.type_payload_decode_failed("HirTypeKind.Array", param.span)
             else:
                 match kind:
                     case HirTypeKind.Slice(slice_element): element = slice_element
-                    case _: pass
+                    case _: self.type_payload_decode_failed("HirTypeKind.Slice", param.span)
             val element_type = self.lower_type(element)
             if element_type.kind != MirTypeKind.U32:
                 self.error_fatal(
@@ -610,7 +640,7 @@ impl MirLowering:
         if kind_disc == int_disc:
             match kind:
                 case HirTypeKind.Int(32, false): return MirType(kind: MirTypeKind.U32)
-                case _: pass
+                case _: self.type_payload_decode_failed("HirTypeKind.Int", param.span)
         self.error_fatal(
             "Vulkan kernel parameters require U32 bounds or [u32] storage buffers",
             Some(param.span)
@@ -628,11 +658,11 @@ impl MirLowering:
             if kind_disc == array_disc:
                 match kind:
                     case HirTypeKind.Array(array_element, _): element = array_element
-                    case _: pass
+                    case _: self.type_payload_decode_failed("HirTypeKind.Array", param.span)
             else:
                 match kind:
                     case HirTypeKind.Slice(slice_element): element = slice_element
-                    case _: pass
+                    case _: self.type_payload_decode_failed("HirTypeKind.Slice", param.span)
             return MirType.ptr(self.lower_type(element), param.is_mutable)
         self.lower_type(param.type_)
 
@@ -733,7 +763,7 @@ impl MirLowering:
                 case HirTypeKind.Dict(key, value):
                     return MirType(kind: MirTypeKind.Dict(self.lower_type(key), self.lower_type(value)))
                 case _:
-                    pass
+                    self.type_payload_decode_failed("HirTypeKind.Dict", type_.span)
         val named_type_disc = rt_enum_discriminant(HirTypeKind.Named(SymbolId(id: -1), []))
         if rt_enum_discriminant(type_.kind) == named_type_disc:
             match type_.kind:
@@ -748,7 +778,7 @@ impl MirLowering:
                     return MirType(kind: MirTypeKind.Struct(
                         self.canonical_mir_type_symbol(symbol)))
                 case _:
-                    pass
+                    self.type_payload_decode_failed("HirTypeKind.Named", type_.span)
         # A bare flat-protocol Option has no recoverable inner tag and is
         # intentionally represented by HIR as Optional(Any). Any is the
         # compiler's existing pointer-width type-erasure slot at MIR level.
@@ -775,7 +805,7 @@ impl MirLowering:
                             case HirTypeKind.Named(inner_symbol, _):
                                 inner_symbol_id = self.symbol_id_value(inner_symbol)
                             case _:
-                                pass
+                                self.type_payload_decode_failed("HirTypeKind.Named", inner.span)
                     if mir_optional_inner_trace_state < 0:
                         if mir_trace_enabled():
                             mir_optional_inner_trace_state = 1
@@ -788,7 +818,7 @@ impl MirLowering:
                         self.lower_type(inner)
                     ]))
                 case _:
-                    pass
+                    self.type_payload_decode_failed("HirTypeKind.Optional", type_.span)
         match type_.kind:
             case HirTypeKind.Int(bits, signed):
                 if signed:

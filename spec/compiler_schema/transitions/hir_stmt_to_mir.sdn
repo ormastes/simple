@@ -1,0 +1,79 @@
+# Transition table: HirStmtKind -> MIR
+#
+# Boundary: `MirLowering.lower_stmt`, src/compiler/50.mir/mir_lowering_stmts.spl
+# Producer universe: `enum HirStmtKind`, src/compiler/20.hir/hir_definitions.spl
+# (5 variants), enumerated from the generated registry
+# spec/compiler_schema/registry/compiler.hir.HirStmtKind.sdn -- not from the
+# dispatch itself, which is what makes an omitted arm show up as Missing
+# instead of silently disappearing.
+#
+# Row shape is the shared `transition: from/to/state/reason/test` format defined
+# by src/compiler/00.common/transition/ (lane A3). Every row here is
+# `implemented`: unlike the expression boundary, MIR lowering really does lower
+# all five statement kinds.
+#
+# Lane C6 (HIR-expr/stmt -> MIR completeness, hardening plan 2026-08-21
+# sections 11.3-11.6).
+#
+# What C6 changed on this boundary is the WILDCARD, not the arms. The dispatch
+# ended in `case _: ()` -- the exact silent-fallback shape section 11.6 forbids.
+# Because all five variants already had arms, that wildcard was unreachable for
+# well-formed input, which is precisely why it was dangerous: the only two ways
+# to reach it were (a) a NEW HirStmtKind variant added upstream with no lowering
+# arm, and (b) a mis-decoded enum handle -- and in both cases the statement was
+# DROPPED from the function body with no diagnostic, no crash and no trace. The
+# program compiled clean and miscompiled. It now raises E-MIR-STMT-Unknown with
+# the statement's span and the observed discriminant.
+#
+# The wildcard is deliberately NOT a row: it is not a variant. Its job is to
+# catch the case where this table has gone stale against the registry, and the
+# transition gate catches the same staleness statically.
+#
+# Recorded state verified by source inspection 2026-08-21.
+
+table: hir_stmt_to_mir
+producer: HirStmtKind
+consumer: MirInstruction
+source: src/compiler/50.mir/mir_lowering_stmts.spl
+
+universe:
+  - AsmAssert
+  - Assign
+  - Block
+  - Expr
+  - Let
+
+transition:
+  from: HirStmtKind.Expr
+  to: MirInstruction
+  state: implemented
+  reason: "dedicated arm; also has an rt_enum_discriminant pre-dispatch that reads the payload directly, because the native worker can misbind this first-variant payload even after exact discriminator dispatch"
+  test: hir_stmt_to_mir_coverage_spec
+
+transition:
+  from: HirStmtKind.Let
+  to: MirInstruction
+  state: implemented
+  reason: "dedicated arm; binds the symbol to a local and lowers the initializer, rejecting an unresolved symbol with a spanned diagnostic"
+  test: hir_stmt_to_mir_coverage_spec
+
+transition:
+  from: HirStmtKind.Assign
+  to: MirInstruction
+  state: implemented
+  reason: "dedicated arm; lowers the value then routes the write-back through lower_assign"
+  test: hir_stmt_to_mir_coverage_spec
+
+transition:
+  from: HirStmtKind.Block
+  to: MirInstruction
+  state: implemented
+  reason: "dedicated arm delegating to lower_block"
+  test: hir_stmt_to_mir_coverage_spec
+
+transition:
+  from: HirStmtKind.AsmAssert
+  to: MirInstruction
+  state: implemented
+  reason: "dedicated arm delegating to lower_asm_assert"
+  test: hir_stmt_to_mir_coverage_spec

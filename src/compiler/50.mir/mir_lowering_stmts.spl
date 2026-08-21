@@ -1182,7 +1182,33 @@ impl MirLowering:
                         self.lower_asm_assert(spec, span)
 
                     case _:
-                        ()
+                        # Lane C6 (HIR-stmt -> MIR completeness, hardening plan
+                        # 2026-08-21 sections 11.3-11.6).
+                        #
+                        # All five HirStmtKind variants (Expr, Let, Assign,
+                        # Block, AsmAssert -- see
+                        # spec/compiler_schema/registry/compiler.hir.HirStmtKind.sdn
+                        # and the transition table
+                        # spec/compiler_schema/transitions/hir_stmt_to_mir.sdn)
+                        # have an explicit arm above, so this wildcard is
+                        # unreachable by any well-formed statement. Reaching it
+                        # means either a NEW variant was added to HirStmtKind
+                        # without a lowering arm, or the enum handle is
+                        # mis-decoded -- the same payload-decode defect the
+                        # discriminant pre-dispatch a few lines above exists to
+                        # work around.
+                        #
+                        # It used to be `()`. That is the exact silent-fallback
+                        # shape section 11.6 forbids: the statement was DROPPED
+                        # from the function body with no diagnostic, no crash
+                        # and no trace, so the program compiled clean and
+                        # miscompiled. Report it instead. `self.error`
+                        # accumulates rather than aborting, so a single stray
+                        # statement still yields a normal driver diagnostic
+                        # rather than a bare signal.
+                        val unknown_stmt_disc = rt_enum_discriminant(stmt_kind_value)
+                        self.error("E-MIR-STMT-Unknown: MIR lowering has no arm for this statement kind (discriminant {unknown_stmt_disc}); the statement would otherwise be silently dropped", Some(span))
+                        eprint("[mir-lower-stmt] E-MIR-STMT-Unknown disc={unknown_stmt_disc} at={span.file}:{span.line}:{span.col}\n")
 
     me lower_assign_var(symbol_id: i64, op: HirAssignOp?, value_local: LocalId, span: Span, value_kind: HirExprKind):
         """Emit the write-back for an assignment to a local variable target

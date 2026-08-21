@@ -2858,6 +2858,48 @@ impl MirLowering:
                 binop_result
 
 
+    me payload_decode_failed(variant: text, span: Span):
+        """Report that a discriminant-guarded destructure did not bind.
+
+        Lane C6. Each of the pre-dispatch blocks in `lower_expr_impl` first
+        proves the variant with `rt_enum_discriminant`, then re-matches to bind
+        the payload. Reaching the wildcard of THAT inner match therefore means
+        the discriminant said one variant and the payload decode produced
+        another -- a real, already-observed defect class in this file (see the
+        `Cast` arm's stage-3 blocker #9 note, where slot 1 decoded as nil).
+
+        Until now every one of those wildcards was `pass`: the block simply fell
+        through to the generic dispatch below, so a mis-decoded payload was
+        indistinguishable from an unhandled kind and the misbinding never
+        surfaced. Fall-through is preserved (the caller continues exactly as
+        before, so this cannot break a working path) but it is now LOUD."""
+        self.error("E-MIR-EXPR-PAYLOAD: discriminant-guarded destructure of {variant} did not bind its payload (enum payload decode disagreed with the discriminant)", Some(span))
+        eprint("[mir-lower-expr] E-MIR-EXPR-PAYLOAD variant={variant} at={span.file}:{span.line}:{span.col}\n")
+
+    me unsupported_expr_kind(code: text, description: text, span: Span) -> LocalId:
+        """Report a NAMED, spanned diagnostic for an HIR expression kind that
+        MIR lowering has an explicit arm for but does not implement, and hand
+        back a real unit temp so lowering continues.
+
+        Lane C6. This exists so `case _:` is never the thing that reports an
+        unimplemented variant. A shared wildcard can only interpolate the enum
+        value itself, which renders as an opaque `<enum@0x..>` handle -- the
+        operator learns that SOMETHING is unsupported but not WHAT, and cannot
+        grep for it. `code` is a stable E-MIR-EXPR-<Variant> identifier and
+        `description` names the surface construct, so the message is both
+        greppable and readable.
+
+        Returning a fresh unit temp rather than nil is deliberate and matches
+        the terminal arm: a nil LocalId flows to the first caller that reads
+        `local.id` and traps as `field access on nil receiver` (SIGILL) BEFORE
+        the accumulated diagnostics are ever flushed."""
+        self.error("{code}: MIR lowering does not support this {description}", Some(span))
+        eprint("[mir-lower-expr] {code} unsupported={description} at={span.file}:{span.line}:{span.col}\n")
+        var b_unsupported_named = self.builder
+        val t_unsupported_named = b_unsupported_named.new_temp(MirType.unit())
+        self.builder = b_unsupported_named
+        t_unsupported_named
+
     me lower_expr_impl(expr: HirExpr) -> LocalId:
         """Lower HIR expression to MIR, return result local. Body of
         lower_expr; only reached through the lower_expr wrapper above so
@@ -3131,7 +3173,7 @@ impl MirLowering:
                                         ()
                     return field_result
                 case _:
-                    pass
+                    self.payload_decode_failed("HirExprKind.Field", expr_value.span)
         val cast_disc = rt_enum_discriminant(HirExprKind.Cast(nil_expr, nil_expr.type_))
         if expr_disc == cast_disc:
             # Stage-3 blocker #9: the `case HirExprKind.Cast(operand, target)`
@@ -3185,10 +3227,10 @@ impl MirLowering:
                                 if (nv_name == "Some" or nv_name == "None") and self.enum_variant_index.contains("Option") and self.find_local(mir_expr_symbol_id_value(nv_symbol)).id < 0:
                                     return self.lower_enum_construct_named("Option", nv_name, args)
                             case _:
-                                pass
+                                self.payload_decode_failed("HirExprKind.NamedVar", expr_value.span)
                     return self.lower_call(callee, args)
                 case _:
-                    pass
+                    self.payload_decode_failed("HirExprKind.Call", expr_value.span)
         val block_disc = rt_enum_discriminant(HirExprKind.Block(HirBlock(stmts: [], has: false, value: nil_expr, span: nil_span)))
         if expr_disc == block_disc:
             match expr_value.kind:
@@ -3201,14 +3243,14 @@ impl MirLowering:
                     self.builder = block_builder
                     return block_temp
                 case _:
-                    pass
+                    self.payload_decode_failed("HirExprKind.Block", expr_value.span)
         val return_disc = rt_enum_discriminant(HirExprKind.Return(nil))
         if expr_disc == return_disc:
             match expr_value.kind:
                 case HirExprKind.Return(value):
                     return self.lower_return_expr(value)
                 case _:
-                    pass
+                    self.payload_decode_failed("HirExprKind.Return", expr_value.span)
         val index_disc = rt_enum_discriminant(HirExprKind.Index(nil_expr, nil_expr))
         if expr_disc == index_disc:
             return self.lower_index_expr_from_hir(expr_value)
@@ -3239,7 +3281,7 @@ impl MirLowering:
                         if val pre_var_glob = self.try_lower_global_read(pre_symbol_id):
                             return pre_var_glob
                 case _:
-                    pass
+                    self.payload_decode_failed("HirExprKind.Var", expr_value.span)
         val namedvar_pre_disc = rt_enum_discriminant(HirExprKind.NamedVar(SymbolId(id: -1), ""))
         if expr_disc == namedvar_pre_disc:
             val named_var_payload = rt_enum_payload(expr_value.kind)
@@ -4096,6 +4138,63 @@ impl MirLowering:
             case MatchCase(scrutinee, arms):
                 val expected_match_type: HirType? = if expr.has_type_: expr.type_ else: nil
                 self.lower_match_case(scrutinee, arms, expected_match_type)
+
+            # ----------------------------------------------------------------
+            # Lane C6 (HIR-expr -> MIR completeness, hardening plan 2026-08-21
+            # sections 11.3-11.6). Every remaining HirExprKind variant gets an
+            # EXPLICIT arm here, even the ones MIR lowering does not implement.
+            #
+            # Before this block these eleven variants reached the terminal
+            # `case _:` and were reported as `unsupported MIR expression:
+            # {expr_value.kind}` -- which interpolates a heap enum as an opaque
+            # `<enum@0x..>` handle (that arm's own comment says so). The variant
+            # was therefore NOT NAMED in the diagnostic: an operator hitting
+            # `x as T` or a struct literal in the self-hosted lane got an
+            # unreadable message and no way to find the construct.
+            #
+            # Each arm now raises its own named E-MIR-EXPR-<Variant> diagnostic
+            # carrying the real source span, and hands back a fresh unit temp so
+            # lowering continues and the driver flushes diagnostics normally --
+            # the same discipline the terminal arm already uses. The terminal
+            # `case _:` survives ONLY for a garbage/mis-decoded enum handle,
+            # which is a different failure with a different message.
+            #
+            # Recorded in spec/compiler_schema/transitions/hir_expr_to_mir.sdn
+            # as `state: unsupported`; an omission there shows up as Missing and
+            # fails check-compiler-transition-coverage.shs.
+            # ----------------------------------------------------------------
+            case As(_, _):
+                self.unsupported_expr_kind("E-MIR-EXPR-As", "as-cast expression (`expr as Type`)", expr_value.span)
+
+            case CharLit(_):
+                self.unsupported_expr_kind("E-MIR-EXPR-CharLit", "character literal", expr_value.span)
+
+            case Comprehension(_, _, _):
+                self.unsupported_expr_kind("E-MIR-EXPR-Comprehension", "comprehension expression", expr_value.span)
+
+            case Error:
+                self.unsupported_expr_kind("E-MIR-EXPR-Error", "error-recovery expression node (an earlier phase already reported the real error)", expr_value.span)
+
+            case Lambda(_, _, _):
+                self.unsupported_expr_kind("E-MIR-EXPR-Lambda", "lambda expression (closure conversion has not run)", expr_value.span)
+
+            case OptionalChain(_, _):
+                self.unsupported_expr_kind("E-MIR-EXPR-OptionalChain", "optional-chain field access (`base?.field`)", expr_value.span)
+
+            case StaticCall(_, _, _, _):
+                self.unsupported_expr_kind("E-MIR-EXPR-StaticCall", "static/associated method call (`Type::method(..)`)", expr_value.span)
+
+            case StructLit(_, _):
+                self.unsupported_expr_kind("E-MIR-EXPR-StructLit", "struct literal", expr_value.span)
+
+            case Throw(_):
+                self.unsupported_expr_kind("E-MIR-EXPR-Throw", "throw expression", expr_value.span)
+
+            case TupleIndex(_, _):
+                self.unsupported_expr_kind("E-MIR-EXPR-TupleIndex", "tuple index access (`t.0`)", expr_value.span)
+
+            case With(_, _):
+                self.unsupported_expr_kind("E-MIR-EXPR-With", "with-block expression", expr_value.span)
 
             case _:
                 # Loud-fail, but with a REAL local. Returning `nil` here made

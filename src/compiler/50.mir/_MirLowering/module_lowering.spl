@@ -264,6 +264,9 @@ impl MirLowering:
             struct_method_return_is_optional: {},
             enum_payload_struct_names: {},
             enum_single_payload_types: {},
+            enum_variant_payload_types: {},
+            enum_variant_payload_names: {},
+            enum_variant_payload_kind: {},
             enum_tuple_text_slots: {},
             runtime_array_locals: {},
             runtime_dict_locals: {},
@@ -394,6 +397,49 @@ impl MirLowering:
             rq[bare_name] = runtime_id
             self.enum_runtime_id_index_q = rq
 
+    me enum_variant_payload_arity(payload_key: text) -> i64:
+        """Declared payload slot count for "{enum}::{variant}", 0 when unknown.
+
+        Index-based counterpart to the arity-1-only
+        `enum_single_payload_types` lookup: a caller that needs slot N asks
+        this first and then `enum_variant_payload_type_at`."""
+        if val types = self.enum_variant_payload_types.get(payload_key):
+            return types.len()
+        return 0
+
+    me enum_variant_payload_type_at(payload_key: text, index: i64) -> HirType?:
+        """Declared type of payload slot `index`, nil when out of range.
+
+        Slot 0 of an arity-1 Tuple is the same HirType the pre-existing
+        `enum_single_payload_types[payload_key]` returns; that map is still
+        consulted FIRST by its callers, so its behaviour is unchanged."""
+        if val types = self.enum_variant_payload_types.get(payload_key):
+            if index >= 0 and index < types.len():
+                return Some(types[index])
+        return nil
+
+    me enum_variant_payload_name_at(payload_key: text, index: i64) -> text:
+        """Declared field name of payload slot `index`.
+
+        Empty for positional (Tuple) slots and for an out-of-range index."""
+        if val names = self.enum_variant_payload_names.get(payload_key):
+            if index >= 0 and index < names.len():
+                return names[index]
+        return ""
+
+    me enum_variant_payload_slot_of(payload_key: text, field_name: text) -> i64:
+        """Declared slot index of a NAMED payload field, -1 when absent.
+
+        Struct-variant field order is the source order recorded at
+        registration, so this is the index a positional payload read uses."""
+        if val names = self.enum_variant_payload_names.get(payload_key):
+            var ni = 0
+            while ni < names.len():
+                if names[ni] == field_name:
+                    return ni
+                ni = ni + 1
+        return -1
+
     me register_enum_variants(enum_def: HirEnum):
         """Register names and resolved portable runtime discriminants."""
         var names: [text] = []
@@ -424,13 +470,44 @@ impl MirLowering:
                 self.error_fatal("enum '{enum_def.name}' has duplicate discriminant {value}", Some(variant.span))
             names.push(variant.name)
             discriminants.push(value)
+            # Full payload registration (2026-08-21). The arity-1 Tuple write
+            # into enum_single_payload_types below is UNCHANGED -- its readers
+            # keep their exact previous behaviour -- and the three full-arity
+            # maps are written alongside it for every variant, so match
+            # lowering / payload extraction / layout can index slot N.
+            val payload_key = "{enum_def.name}::{variant.name}"
+            var full_types: [HirType] = []
+            var full_names: [text] = []
+            var payload_kind = "unit"
             match variant.kind:
                 case HirVariantKind.Tuple(payload_types):
+                    payload_kind = "tuple"
+                    var pti = 0
+                    while pti < payload_types.len():
+                        full_types.push(payload_types[pti])
+                        full_names.push("")
+                        pti = pti + 1
                     if payload_types.len() == 1:
                         var single_payload_types = self.enum_single_payload_types
-                        single_payload_types["{enum_def.name}::{variant.name}"] = payload_types[0]
+                        single_payload_types[payload_key] = payload_types[0]
                         self.enum_single_payload_types = single_payload_types
+                case HirVariantKind.Struct(payload_fields):
+                    payload_kind = "struct"
+                    var pfi = 0
+                    while pfi < payload_fields.len():
+                        full_types.push(payload_fields[pfi].type_)
+                        full_names.push(payload_fields[pfi].name)
+                        pfi = pfi + 1
                 case _: ()
+            var vpt = self.enum_variant_payload_types
+            vpt[payload_key] = full_types
+            self.enum_variant_payload_types = vpt
+            var vpn = self.enum_variant_payload_names
+            vpn[payload_key] = full_names
+            self.enum_variant_payload_names = vpn
+            var vpk = self.enum_variant_payload_kind
+            vpk[payload_key] = payload_kind
+            self.enum_variant_payload_kind = vpk
             next_value = value + 1
             vi = vi + 1
         # Bare-name collision registry (2026-08-01). enum_variant_index is keyed

@@ -1,0 +1,134 @@
+# @cover src/compiler/00.common/transition/validator.spl 60%
+"""
+# HirExprKind -> MIR is a totally declared boundary
+
+**Category:** Compiler / completeness proofs
+**Plan:** doc/03_plan/compiler/hardening/critical_hardening_plan_2026-08-21.md (lane C6)
+**Design:** doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md sections 11.3-11.6
+
+## Purpose
+
+`spec/compiler_schema/transitions/hir_expr_to_mir.sdn` records what
+`MirLowering.lower_expr_impl` ACTUALLY does today with each of the 56
+`HirExprKind` variants, not what it should do.
+
+Eleven of them (`As`, `CharLit`, `Comprehension`, `Error`, `Lambda`,
+`OptionalChain`, `StaticCall`, `StructLit`, `Throw`, `TupleIndex`, `With`) had
+NO arm before lane C6: they fell through to the terminal `case _:`, whose
+message interpolates the enum value itself and therefore renders a heap enum as
+an opaque `<enum@0x..>` handle. The construct was unsupported AND unnameable.
+
+Each now has an explicit arm raising its own `E-MIR-EXPR-<Variant>` diagnostic
+with the real source span, and is declared here as `unsupported` — covered,
+attributed, and NOT counted as handled. That honesty is the point: marking them
+`implemented` would be green and worthless, and omitting them would make them
+Missing and fail the build.
+
+## Scope
+
+Totality of the table against its own producer universe, the universe's size
+against the generated registry, and the handled/unhandled split. The counts are
+deliberately literal so that adding a variant to `HirExprKind` without adding a
+row turns this spec red rather than drifting silently.
+
+This spec does NOT assert that the eleven ought to STAY unsupported — when the
+lowering grows a real arm, the row flips to `implemented` and the counts below
+move with it. That is the intended lifecycle, exactly as the C5 type table
+already went through once.
+"""
+
+use std.spec
+use std.io_runtime.{file_read, file_exists}
+use compiler.common.transition.transition_table.{parse_transition_table, variant_name_of}
+use compiler.common.transition.validator.{
+    validate_transition_table, coverage_report_is_clean, coverage_report_handled
+}
+use compiler.common.transition.coverage_state.{coverage_state_tag}
+
+val TABLE_PATH = "spec/compiler_schema/transitions/hir_expr_to_mir.sdn"
+val REGISTRY_PATH = "spec/compiler_schema/registry/compiler.hir.HirExprKind.sdn"
+
+fn load_table_text() -> text:
+    if not file_exists(TABLE_PATH):
+        fail("transition table not found at {TABLE_PATH}; run from the repo root")
+        return ""
+    return file_read(TABLE_PATH)
+
+fn count_with_tag(tag: text) -> i64:
+    val table = parse_transition_table(load_table_text())
+    var n = 0
+    for row in table.rows:
+        if coverage_state_tag(row.state) == tag:
+            n = n + 1
+    return n
+
+fn unsupported_variants() -> [text]:
+    val table = parse_transition_table(load_table_text())
+    var names: [text] = []
+    for row in table.rows:
+        if coverage_state_tag(row.state) == "unsupported":
+            names.push(variant_name_of(row.from_id))
+    return names
+
+describe "hir_expr_to_mir transition table":
+    it "loads without a single parse error":
+        step("Read the checked-in table")
+        val table = parse_transition_table(load_table_text())
+        expect(table.errors.len()).to_equal(0)
+        expect(table.name).to_equal("hir_expr_to_mir")
+        expect(table.producer).to_equal("HirExprKind")
+
+    it "declares all 56 HirExprKind variants — Missing is empty":
+        step("The universe comes from the GENERATED registry, not from the dispatch")
+        expect(file_exists(REGISTRY_PATH)).to_equal(true)
+        val report = validate_transition_table(parse_transition_table(load_table_text()))
+        expect(report.universe_size).to_equal(56)
+        expect(report.declared).to_equal(56)
+        step("The build invariant: Missing = ProducerUniverse - declared = {}")
+        expect(report.missing.len()).to_equal(0)
+        expect(report.unknown.len()).to_equal(0)
+        expect(report.duplicated.len()).to_equal(0)
+        expect(coverage_report_is_clean(report)).to_equal(true)
+
+    it "names the exact eleven variants lower_expr_impl still cannot lower":
+        step("Before lane C6 these had no arm at all and reported as an opaque <enum@0x..> handle")
+        val unsupported = unsupported_variants()
+        expect(unsupported.len()).to_equal(11)
+        expect(unsupported.contains("As")).to_equal(true)
+        expect(unsupported.contains("CharLit")).to_equal(true)
+        expect(unsupported.contains("Comprehension")).to_equal(true)
+        expect(unsupported.contains("Error")).to_equal(true)
+        expect(unsupported.contains("Lambda")).to_equal(true)
+        expect(unsupported.contains("OptionalChain")).to_equal(true)
+        expect(unsupported.contains("StaticCall")).to_equal(true)
+        expect(unsupported.contains("StructLit")).to_equal(true)
+        expect(unsupported.contains("Throw")).to_equal(true)
+        expect(unsupported.contains("TupleIndex")).to_equal(true)
+        expect(unsupported.contains("With")).to_equal(true)
+
+    it "keeps every variant with a real arm OUT of the unsupported set":
+        step("A table that over-declares holes is as useless as one that hides them")
+        val unsupported = unsupported_variants()
+        expect(unsupported.contains("IntLit")).to_equal(false)
+        expect(unsupported.contains("Binary")).to_equal(false)
+        expect(unsupported.contains("MethodCall")).to_equal(false)
+        expect(unsupported.contains("Field")).to_equal(false)
+        expect(unsupported.contains("Call")).to_equal(false)
+        expect(unsupported.contains("Block")).to_equal(false)
+        expect(unsupported.contains("MatchCase")).to_equal(false)
+
+    it "gives every unsupported row a reason and an issue code, so the hole is auditable":
+        step("A hole with no stated behaviour is indistinguishable from an oversight")
+        val table = parse_transition_table(load_table_text())
+        var attributed = 0
+        for row in table.rows:
+            if coverage_state_tag(row.state) == "unsupported":
+                if row.reason != "":
+                    attributed = attributed + 1
+        expect(attributed).to_equal(11)
+
+    it "counts 45 handled variants — declared is not the same as handled":
+        step("45 implemented arms; the other 11 are declared but explicitly not handled")
+        expect(coverage_report_handled(parse_transition_table(load_table_text()))).to_equal(45)
+        expect(count_with_tag("implemented")).to_equal(45)
+        expect(count_with_tag("unsupported")).to_equal(11)
