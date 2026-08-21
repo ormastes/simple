@@ -779,30 +779,71 @@ Not fixed here, recorded instead:
   above is therefore analytic plus the RSS slopes already recorded; a measured
   number should be taken from the next bounded Stage-3 cycle's phase-5 log.
 
-## 2026-08-22 ARM64: prefix-sharing constructor mis-resolution
+## 2026-08-22 ARM64: ready scalar survived while surface owner was nil
 
 A fresh admitted ARM64 Phase2 compiler parsed, promoted, committed, and
 released all 665 Stage3 surfaces, proving the comparison-chain parser repair.
 It then segfaulted immediately after `phase3:hir_typecheck:start`. LLDB pinned
 the null dereference to
-`CompilerDriver.lower_and_check_streaming_surfaces_impl +356` while reading
-the newly constructed `HirLowering`.
+`CompilerDriver.lower_and_check_streaming_surfaces_impl +356`.
 
-Disassembly provides the decisive cause: source requested
-`hirlowering_for_module_with_diagnostics`, but the caller emitted a branch to
-its prefix-sharing shorter sibling `hirlowering_for_module`. Both symbols are
-present, and disassembly of the longer constructor itself is correct. The
-failure is therefore call-target mis-resolution, not a nullable parse result;
-adding a later nil check would only mask the wrong call.
+The first interpretation of that frame was wrong: the dereferenced register
+was claimed to hold a newly constructed `HirLowering`. Full-function
+disassembly and source mapping later proved it holds
+`self.streaming_module_surfaces_owner`; the constructor result is stored in a
+different stack slot. The short constructor call is exactly what the real
+streaming implementation requests. A later method-owned experiment compiled
+both changed call sites to their correct method symbol. There is no
+call-target mis-resolution at this crash, so those ineffective changes were
+removed.
 
-A disjoint exported-name containment, `streaming_hir_lowering_owner`, was then
-tried and rejected. A from-scratch Phase2 build compiled 722 units with zero
-cache hits and admitted successfully, but its machine code still called
-`hirlowering_for_module`; the unique replacement symbol was present but unused
-at this call site. This disproves both a stale object cache and a simple textual
-prefix collision. The ineffective source/test changes were removed.
+The actual invariant break is `streaming_surface_owner_ready == true` while
+the raw class-valued `streaming_module_surfaces_owner` is nil. The consumer
+trusted the scalar and immediately dereferenced the raw owner. This confirms
+the user-raised requirement: parsing/owner transfer can fail, so the value must
+be checked for absence and only then unwrapped.
 
-The next bounded experiment must bypass imported free-function resolution at
-this boundary, preferably with a method-owned diagnostic constructor, and
-must gate Stage3 on disassembly naming that exact target. No further build was
-started because this session's three-cycle limit was exhausted.
+The driver owner is now `ModuleSurfacesByName?`, initialized/reset to nil and
+committed as `Some(retained_surfaces)`. Phase 3 requires both the ready scalar
+and a non-nil owner, then calls `unwrap()` only after that check. Regression
+coverage owns both the normal retained-owner lifecycle and the adjacent
+`ready=true/owner=nil` inconsistent state, which must return a diagnostic
+instead of crashing. Acceptance requires a rebuilt admitted Phase2 and the
+exact Stage3 HIR-entry run.
+
+The first execution of that Option guard still crashed, 28 bytes later in the
+same function. LLDB and disassembly proved the Option tag was `Some`, but
+`rt_enum_payload` returned nil; the next dereference was the progress read of
+`surfaces.surfaces.len()`. The consumer now also checks the unwrapped payload
+before use, covering the exact `Some(nil)` state.
+
+The producer-side cause is a nested class-valued Result carrier in
+`module_surfaces_by_name_from_parts`: `module_surfaces_freeze(registry)` mutates
+the class owner in place, then source unwrapped its Result payload and wrapped
+that payload in another Result. The staged native ABI retained `Ok` while
+losing the inner class handle. After successful freeze, the function now
+returns the still-live original `registry` owner directly. The existing
+alignment/identity behavioral spec now asserts that its unwrapped registry is
+non-nil before reading it. A final cycle must rebuild Phase2 and repeat Stage3.
+
+The final allowed cycle admitted ARM64 Phase2 SHA-256
+`44165d7eb1dbe400050d17ab1f77641ca15cc8b2bbde0b66ff100aaa8a095a46`.
+Stage3 again parsed and released all 665 surfaces, then exited 1 rather than
+139 with the exact diagnostic:
+
+```
+Streaming module surface owner payload missing after phase 2
+```
+
+Thus the consumer hardening is accepted: the former HIR-entry SIGSEGV is now a
+deterministic fail-closed error. Returning `Ok(registry)` one layer earlier was
+insufficient; the outer `ModuleSurfaceBuilder.finish()` class-valued Result
+still loses its payload.
+
+No fourth cycle was started. The next correction must avoid returning the
+owner through Result entirely: add a mutation API shaped like
+`finish_into(existing_owner: ModuleSurfacesByName) -> text`, populate/freeze
+the caller-created owner in place, and return only an empty/error text scalar.
+The caller must retain and validate that same handle before wrapping it in
+`Some`. Rebuild Phase2, require a non-nil unwrapped owner, then resume Stage3.
+Kernel/QEMU rendering evidence remains unclaimed until that succeeds.

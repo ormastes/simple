@@ -40,6 +40,23 @@
   gate on exact disassembly, and only then resume Stage3. ARM64 image and real
   QEMU 2D/Web/GUI/WM evidence remain active and unclaimed.
 
+### 2026-08-22 corrected Stage3 owner diagnosis
+
+- Full disassembly disproved the recorded call-target theory. The actual crash
+  operand was `streaming_module_surfaces_owner`, not the HIR constructor.
+- The owner is now explicit `ModuleSurfacesByName?`; Phase3 checks the Option,
+  unwraps it, then checks the class payload before any field access.
+- Admitted Phase2 SHA-256:
+  `44165d7eb1dbe400050d17ab1f77641ca15cc8b2bbde0b66ff100aaa8a095a46`.
+- Stage3 parsed/released 665/665 surfaces and now exits cleanly with
+  `Streaming module surface owner payload missing after phase 2` instead of
+  SIGSEGV. The `Some` payload is still nil.
+- Three-cycle cap reached. Next session must replace
+  `ModuleSurfaceBuilder.finish() -> Result<class, text>` on this path with an
+  in-place `finish_into(existing_owner) -> text` owner mutation, rebuild
+  Phase2, then resume Stage3. ARM64 image and real QEMU 2D/Web/GUI/WM evidence
+  remain active and unclaimed.
+
 ## Raw Request
 > make deep research and plan with agents, simple os to have configs, 2d rendering
 > screen, web rendering screen, gui rendering screen, and existing default wm screen.
