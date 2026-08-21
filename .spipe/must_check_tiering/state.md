@@ -284,3 +284,8 @@ implementation-blocked-by-bootstrap-authority
   carry both expanded statements and a tail expression. The shared block
   converter now preserves both; the interrupted pre-admission Stage 2 build
   produced no verdict and was discarded before this correction.
+- cycle-2-progress: Generic block conversion passed all 664 surfaces and HIR
+  began. The next fault (`0x537356`) maps exactly to a field `HirType` copied
+  from retained field metadata: its embedded Span was stale after HIR
+  safepoints. Field lowering now retains the resolved kind but reconstructs
+  the type with the live expression span. Cycle count is 2/3.
