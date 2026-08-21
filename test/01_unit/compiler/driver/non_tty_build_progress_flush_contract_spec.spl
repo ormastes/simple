@@ -1,21 +1,30 @@
 use std.spec.*
 use std.io_runtime.{file_read}
 
+# Contract updated for b4872f73454 ("emit build progress to stdout so stage
+# logs are never 0 bytes"), which replaced the stderr emit + stderr_flush with
+# a stdout twin + rt_stdout_flush, and turned the `if path != ""` wrapper into
+# an early `if path == "": return` guard placed AFTER the emit. The invariant
+# asserted here is unchanged: the progress line is emitted and flushed BEFORE
+# the optional SIMPLE_BUILD_PROGRESS_EVENTS path is consulted, so progress can
+# never be suppressed by the env var being unset.
+
 describe("native-build non-tty progress flushing"):
     it("emits and flushes progress before consulting the optional event file"):
         val source = file_read("src/compiler/80.driver/driver_log_helpers.spl")
-        val emit_at = source.index_of("eprint(line)")
-        val flush_at = source.index_of("stderr_flush()")
-        val path_at = source.index_of("val path = _build_progress_path()")
-
-        expect(emit_at).to_be_greater_than(0)
-        expect(flush_at).to_be_greater_than(emit_at)
-        expect(path_at).to_be_greater_than(flush_at)
+        # Anchored as adjacent text so an unrelated earlier rt_stdout_flush()
+        # in this file cannot satisfy the ordering vacuously.
+        expect(source).to_contain("ms \{current\}\"\n    rt_stdout_flush()")
+        expect(source).to_contain("    rt_stdout_flush()\n    if path == \"\":\n        return")
         expect(source).to_contain("event=build_progress")
 
-    it("keeps the durable event-file append optional without suppressing stderr"):
+    it("keeps the durable event-file append optional without suppressing stdout"):
         val source = file_read("src/compiler/80.driver/driver_log_helpers.spl")
 
-        expect(source).to_contain("if path != \"\":")
         expect(source).to_contain("file_append(path, line)")
-        expect(source.contains("if path == \"\":\n        return")).to_equal(false)
+        # The early return may skip only the durable append -- never the emit.
+        val emit_at = source.index_of("print \"[build] ")
+        val guard_at = source.index_of("if path == \"\":")
+        val append_at = source.index_of("file_append(path, line)")
+        expect(guard_at).to_be_greater_than(emit_at)
+        expect(append_at).to_be_greater_than(guard_at)
