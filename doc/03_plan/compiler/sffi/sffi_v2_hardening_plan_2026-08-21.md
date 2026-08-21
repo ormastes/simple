@@ -305,15 +305,17 @@ Current evidence after the checked regex boundary migration:
 - 401 canonical symbols currently have more than one normalized declaration
   shape and require typed-resolution review before one ABI hash can be sealed;
 - 3,548 declared symbols require migration and 401 require conflict resolution;
-- among `rt_*`/`spl_*` declarations, 1,855 sites reference symbols classified
-  genuinely missing and 321 are backed only in owned C runtime source.
+- among `rt_*`/`spl_*` declarations, 1,723 sites reference symbols classified
+  genuinely missing and 318 are backed only in owned C runtime source;
+- the distinct-symbol backing census now classifies 698 symbols in the typed
+  interpreter registry and 1,190 as genuinely missing.
 
 The regex wrapper now exposes checked `Result` construction and boolean-match
-operations without adding lookup or allocation to the hot path. Its executable
-interpreter regression remains red because the deployed interpreter does not
-register `rt_regex_new` or `rt_regex_is_match_quick`; the fail-closed provider
-registration gap is tracked separately and no weak fallback or skipped test was
-introduced.
+operations. The interpreter registers all 15 `rt_regex_*` symbols to typed
+handlers backed by an O(1), generation-checked slab. Boolean handle calls borrow
+their text argument and add no allocation, hashing, dynamic loading, or
+string-name lookup. The rebuilt-interpreter regression passes all five examples;
+no weak fallback or skipped test was introduced.
 
 These are migration inputs, not 14,611 independent implementations. The audit
 now hashes normalized declaration shapes and groups them by symbol. The next

@@ -321,6 +321,23 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("sffi_regex_replace", regex::replace);
     insert_simple!("sffi_regex_split_n", regex::split_n);
     insert_simple!("sffi_regex_split", regex::split);
+    // Canonical legacy regex ABI. Handles are generation-checked O(1) slab
+    // indices; calls never enter dynamic_sffi or perform symbol-name lookup.
+    insert_simple!("rt_regex_new", regex::rt_regex_new);
+    insert_simple!("rt_regex_destroy", regex::rt_regex_destroy);
+    insert_simple!("rt_regex_is_match", regex::rt_regex_is_match);
+    insert_simple!("rt_regex_find", regex::rt_regex_find);
+    insert_simple!("rt_regex_find_all", regex::rt_regex_find_all);
+    insert_simple!("rt_regex_captures", regex::rt_regex_captures);
+    insert_simple!("rt_regex_captures_len", regex::rt_regex_captures_len);
+    insert_simple!("rt_regex_replace", regex::rt_regex_replace);
+    insert_simple!("rt_regex_replace_all", regex::rt_regex_replace_all);
+    insert_simple!("rt_regex_split", regex::rt_regex_split);
+    insert_simple!("rt_regex_is_match_quick", regex::rt_regex_is_match_quick);
+    insert_simple!("rt_regex_find_quick", regex::rt_regex_find_quick);
+    insert_simple!("rt_regex_replace_quick", regex::rt_regex_replace_quick);
+    insert_simple!("rt_regex_replace_all_quick", regex::rt_regex_replace_all_quick);
+    insert_simple!("rt_regex_split_quick", regex::rt_regex_split_quick);
     insert_simple!("floor", math::floor);
     insert_simple!("format_bytes", memory::format_bytes);
     insert_simple!("input", io::input::input);
