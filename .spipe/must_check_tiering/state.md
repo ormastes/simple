@@ -289,3 +289,9 @@ implementation-blocked-by-bootstrap-authority
   from retained field metadata: its embedded Span was stale after HIR
   safepoints. Field lowering now retains the resolved kind but reconstructs
   the type with the live expression span. Cycle count is 2/3.
+- verify-fail-blocked: Final cycle 3 admitted Stage 2 and its planner receipt,
+  passed all 664 Flat AST surfaces, and advanced HIR beyond the former field
+  crash. It then recorded deterministic unresolved `Span` type failures in
+  `driver_pipeline_passes.spl` (15) and `driver_pipeline_aop.spl` (19). The
+  already-failed long scan was terminated under the iteration/runaway guard.
+  Stage 4, deployment, lightweight pre-push, and GitHub push were refused.

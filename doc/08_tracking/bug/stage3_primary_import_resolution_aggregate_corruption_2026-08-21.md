@@ -73,3 +73,12 @@ exactly as the function-wide diagnostic `Span`, not a return `Type`: enum
 construction reused it after declaration-walk pool safepoints. Enum defaults,
 fields, variants, type parameters, and the enum owner now construct their empty
 spans at the use site. This is the bounded fix awaiting bootstrap admission.
+
+The next admitted runs proved both crash repairs: all Flat AST surfaces now
+complete, standalone block expressions retain their statements and tail value,
+and HIR advances beyond the resolved-field crash after re-rooting the returned
+field type with the live expression span. The third and final verification
+cycle still failed convergence: HIR recorded 15 unresolved `Span` errors in
+`driver_pipeline_passes.spl` and 19 in `driver_pipeline_aop.spl`. The scan was
+terminated once failure was certain; no Stage 4, deployment, hook PASS, or push
+is claimed.
