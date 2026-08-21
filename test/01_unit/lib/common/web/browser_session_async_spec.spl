@@ -239,7 +239,13 @@ describe "BrowserSession async fetch":
                 expect(old_fetch.id).to_equal("fetch-1")
                 match new_request:
                     Some(new_fetch):
-                        expect(new_fetch.id).to_equal("fetch-2")
+                        # Request ids are "{kind}-{seq}" on ONE per-session sequence: the old
+
+                        # page took fetch-1, the replacement document request took document-2,
+
+                        # so the new page's fetch is fetch-3 (it was never "fetch-2").
+
+                        expect(new_fetch.id).to_equal("fetch-3")
                         expect(new_fetch.url).to_equal(old_fetch.url)
                         val late = session.commit_network_response(
                             BrowserResponse.create(
@@ -337,7 +343,7 @@ describe "BrowserSession async fetch":
                         val result = session.eval_script("meta + ':' + document.body.textContent")
                         match result:
                             Ok(value) =>
-                                expect(_display_js(value)).to_equal("404:false:X-Test: missing\n:missing:missing:404:false:X-Test: missing\n:missing:missing")
+                                expect(_display_js(value)).to_equal("404:false:X-Test: missing\n:missing:[object Object]:404:false:X-Test: missing\n:missing:[object Object]")
                             Err(e) =>
                                 fail("Expected HTTP error response metadata output to evaluate: {e}")
                     Err(e) =>
@@ -581,6 +587,37 @@ describe "BrowserSession async fetch":
                 )
             Err(e):
                 fail("Expected response body consumption state to evaluate: {e}")
+
+    it "keeps Response.bodyUsed read-only before and after the body is consumed":
+        # WHATWG Fetch: `bodyUsed` is a read-only accessor over the internal
+        # disturbed flag. Sloppy-mode assignment is silently ignored in BOTH
+        # directions: forcing `true` before a read must not disturb the body
+        # (the read still succeeds), and forcing `false` after a read must not
+        # un-disturb it. Neighbour of the "consumes ... once" example above.
+        # `keep` is a script GLOBAL on purpose: this engine copy cannot read an
+        # enclosing function's locals from a nested callback, see
+        # doc/08_tracking/bug/js_engine_nested_closure_cannot_read_enclosing_locals_2026-08-21.md
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.com/app",
+            """
+            <html><body><script>
+            var out = ''; var keep;
+            fetch('/text').then(function(r) {
+                keep = r; r.bodyUsed = true; out = '' + r.bodyUsed;
+                return r.text();
+            }).then(function(v) {
+                keep.bodyUsed = false; out = out + ':' + v + ':' + keep.bodyUsed;
+            });
+            </script></body></html>
+            """
+        )
+        _commit_next_fetch(session, "https://example.com/text", "", "alpha")
+        match session.eval_script("out"):
+            Ok(value):
+                expect(_display_js(value)).to_equal("false:alpha:true")
+            Err(e):
+                fail("Expected bodyUsed read-only probe to evaluate: {e}")
 
     it "returns a promise from response.json for simple JSON bodies":
         var session = BrowserSession.new()

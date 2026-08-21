@@ -3429,9 +3429,20 @@ impl BrowserSession:
             val replace_document = (
                 structural_changed or dom_sync.identity_changed
             )
-            val published = self.publish_dom_snapshot(
-                candidate_dom, replace_document, Some(state)
-            )
+            # A runtime-derived candidate is only meaningful relative to the
+            # document it mutated. With no current identity index the session
+            # has no valid document to publish against, so the candidate is
+            # rejected as `invalid_document` BEFORE publish -- even a
+            # structural (replace_document) candidate, which would otherwise
+            # mint a fresh index and launder the invalid state into a commit.
+            # The rollback below then restores every mirror. See
+            # doc/08_tracking/bug/browser_session_fetch_body_not_disturbed_and_timer_rollback_2026-08-21.md
+            val published = match self.current_dom_identity_index():
+                Some(_):
+                    self.publish_dom_snapshot(
+                        candidate_dom, replace_document, Some(state)
+                    )
+                nil: Err("invalid_document")
             if val Err(error) = published:
                 self.current_title = previous_title
                 self.current_url = previous_url

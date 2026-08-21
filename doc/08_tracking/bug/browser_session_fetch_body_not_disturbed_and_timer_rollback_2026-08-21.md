@@ -1,7 +1,7 @@
 # Browser session: fetch body is never "disturbed", and a timer-rollback publication check fails
 
 - Date: 2026-08-21
-- Status: OPEN (genuine product defects; the specs are correct as written)
+- Status: RESOLVED 2026-08-21 (see final section; one spec pin WAS wrong — line 340 asserted the WHATWG violation)
 - Binary: `bin/release/x86_64-unknown-linux-gnu/simple` (tree-walk interpreter)
 
 ## 1. `Response` body can be consumed twice — WHATWG Fetch violation
@@ -138,3 +138,102 @@ The record suggests `browser_session.spl` should import the
 so the edge would be circular. Assembling the closure at the consumer is
 inherent to this partial-`impl` layout, not an oversight — any fix is a
 restructuring of the partials, not a missing `use` line.
+
+## 2026-08-21 (later) — RESOLVED: both specs green
+
+`browser_session_async_spec.spl`: **25 total, 25 passed** (24 before + one new
+neighbour). `browser_session_dom_generation_runtime_spec.spl`: **1 total, 1
+passed**. Verified on `bin/release/x86_64-unknown-linux-gnu/simple`.
+
+### 1b. `Response.bodyUsed` is now read-only — `true:false` -> `true:true`
+
+`src/lib/nogc_sync_mut/js/engine/interpreter_object.spl` `set_object_property`:
+a write to key `bodyUsed` on an object carrying `__simple_response_host` is
+coerced to the value of `__simple_internal_response_body_consumed`. This is
+narrower than a generic "read-only property" mechanism (which would touch every
+object write) and keeps one source of truth: `_consume_response_body` still
+writes `bodyUsed` through the same setter and gets the same answer. Per WHATWG
+Fetch (`bodyUsed` is a `readonly attribute` on the `Body` mixin) a sloppy-mode
+assignment is ignored, not an error — which is exactly what the spec's
+`r.bodyUsed = false; ... r.bodyUsed` now observes.
+
+Neighbour added (`keeps Response.bodyUsed read-only before and after the body
+is consumed`): forcing `true` BEFORE a read must not disturb the body (the
+read still succeeds) and forcing `false` AFTER must not un-disturb it
+(`false:alpha:true`).
+
+### 1c. Spec line 340 DID contradict WHATWG — expectation corrected
+
+The example `resolves http error responses with ok false and readable
+metadata` concatenates `r.text() + ':' + r.text()` and pinned
+`...:missing:missing`, i.e. a second `text()` re-yielding the body. WHATWG
+Fetch §"Body mixin" (`consume body`): *"If object is unusable, then return a
+promise rejected with a TypeError"*, where "unusable" means disturbed or
+locked, and `text()` disturbs the body. So the second call returns a
+**rejected promise** and cannot yield `missing` again. The pin asserted the
+violation and was green only while the rule was unimplemented.
+
+Now that the rule is established, the rendering under this engine is
+measured: a fulfilled `Response` promise string-concatenates as its value
+(`missing` — this engine's long-standing, non-standard convenience, kept), and
+a rejected one as `[object Object]`. The pin is now
+`...:missing:[object Object]:...` in both trees. This is explicitly a case
+where the spec was wrong and the standard is right.
+
+### 1d. Collateral stale pin in the same file (not a WHATWG matter)
+
+`rejects a late old-page response without consuming the new fetch` pinned the
+replacement page's fetch id as `fetch-2`. Request ids are
+`"{kind}-{self.next_request_seq}"` on ONE per-session sequence
+(`browser_session_runtime.spl:3536`): old page `fetch-1`, replacement document
+request `document-2`, new page `fetch-3`. It had been failing silently — see
+the runner defect below for why it never showed its real message. Pin
+corrected to `fetch-3` with a comment.
+
+### 2b. Timer rollback — real root cause was upstream of `advance_time`
+
+The restore-set fix above was real but not the failing one. Both "Rollback …
+when publication fails" steps force failure by setting
+`session.dom_identity_index = nil` and expect the next runtime-driven
+publication to be rejected as `invalid_document`. It was **accepted**: the
+rejected scripts set `document.body.innerHTML`, which makes the candidate
+*structural*, and `_sync_from_runtime` then publishes with
+`replace_document = true` — a path that **mints a fresh identity index** and so
+never consulted the (absent) current one. The nil index was laundered into a
+successful commit, and every "leak" (title, body, history, sessionStorage,
+cookie, and later the timer's cookie) was committed for real. The second
+`advance_time(1)` then returned `0` because the timer had genuinely fired and
+published on the first call.
+
+Fix (`browser_session_runtime.spl` `_sync_from_runtime`): a runtime-derived
+candidate is only meaningful relative to the document it mutated; with no
+current identity index it is rejected as `invalid_document` BEFORE publish,
+structural or not, and the existing rollback block restores every mirror.
+Loading paths are unaffected: `BrowserSession.new()` and the close-document
+path assign the index directly, and every other `publish_dom_snapshot(...,
+true, ...)` caller runs on a session that already has one.
+
+### Why the failures were misreported (filed separately)
+
+Both specs reported `expected subject to be truthy, got <falsy>` while the
+actual failing matcher was a `to_equal`. `expect(x)` on a falsy subject writes
+a *provisional* message into the shared `BDD_FAILURE_MSG` slot unconditionally
+(`compiler_rust/compiler/src/interpreter_call/bdd.rs:1103`), overwriting an
+earlier genuine matcher failure; a following `.to_equal(0)` clears the
+provisional flag but not the clobbered text. Filed as
+`doc/08_tracking/bug/spec_runner_provisional_truthy_message_clobbers_real_failure_2026-08-21.md`.
+A second engine defect found while writing the neighbour — a nested callback
+cannot read its enclosing function's locals/params — is filed as
+`doc/08_tracking/bug/js_engine_nested_closure_cannot_read_enclosing_locals_2026-08-21.md`.
+
+### Neighbour sweep
+
+All 39 `test/01_unit/lib/common/web/browser_session*_spec.spl` were run. 26
+green. The 13 with failures (`browser_session_spec` 42/89,
+`simple_script` 5/5, `wasm_script` 3/3, `form` 2/3, `html_ruby_tags` 2/2,
+`http_status` 2/12, `url` 2/5, `loading_history` 1/2,
+`script_navigation_scheme_security` 1/1, `wasm_host` 1/107,
+`fetch_wasm_chain` no verdict within 900s) were re-run against the pre-change
+sources and failed **identically** — pre-existing, not introduced here.
+
+- Status: **RESOLVED**

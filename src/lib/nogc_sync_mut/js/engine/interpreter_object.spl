@@ -110,7 +110,26 @@ impl JsInterpreter:
             self.logger.debug("Ignoring write to frozen object {obj_id}.{key}")
             return
 
-        var stored_value = value
+        # WHATWG Fetch: `Response.bodyUsed` is a read-only accessor that
+        # mirrors the internal "disturbed" flag. A script assignment
+        # (`r.bodyUsed = false`) is ignored in sloppy mode, not an error. The
+        # write is coerced to the internal flag rather than dropped so the
+        # engine's own `_consume_response_body` keeps a single source of truth.
+        # See doc/08_tracking/bug/browser_session_fetch_body_not_disturbed_and_timer_rollback_2026-08-21.md
+        var write_value = value
+        if key == "bodyUsed":
+            match self.get_object_property(obj_id, "__simple_response_host"):
+                JsValue.Boolean(true):
+                    val consumed = match self.get_object_property(
+                        obj_id, "__simple_internal_response_body_consumed"
+                    ):
+                        JsValue.Boolean(true): true
+                        _: false
+                    write_value = JsValue.Boolean(v: consumed)
+                _:
+                    pass_dn("not a Response host object")
+
+        var stored_value = write_value
         val indexed_key = key.parse_int() ?? -1
         if indexed_key >= 0:
             match self.get_object_property(obj_id, "__simple_typed_array_buffer"):
@@ -332,9 +351,6 @@ impl JsInterpreter:
         self._define_global_native("parseFloat", -11)
         self._define_global_native("isNaN", -12)
         self._define_global_native("isFinite", -13)
-        self._define_global_native("String", -14)
-        self._define_global_native("Number", -15)
-        self._define_global_native("Boolean", -16)
         self._define_global_native("Symbol", -44)
 
         # console object
