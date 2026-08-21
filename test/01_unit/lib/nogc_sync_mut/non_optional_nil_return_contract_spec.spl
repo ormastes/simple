@@ -7,6 +7,11 @@
 use std.spec
 use std.nogc_sync_mut.ffi.io.{file_read_lines}
 use std.nogc_sync_mut.concurrent.channel.{channel_new, channel_try_recv_by_id, channel_new_id}
+use std.nogc_sync_mut.ffi.io.{file_mmap_read_bytes as mmap_bytes}
+use std.nogc_sync_mut.ffi.system.{cwd as sys_cwd, args_get as sys_args_get}
+use std.nogc_sync_mut.io.env_ops.{env_get as env_ops_env_get, home as env_ops_home}
+use std.io_runtime.{home as io_home, platform_name as io_platform_name}
+use std.nogc_sync_mut.simd.profile.{profile_name as simd_profile_name}
 
 describe "non-optional return contract — stdlib wrappers stay total":
     it "file_read_lines on an unreadable path yields an empty list, not nil":
@@ -34,3 +39,41 @@ describe "non-optional return contract — stdlib wrappers stay total":
         assert_true(ch.try_recv() == nil)
         ch.send(7)
         assert_equal(ch.try_recv() ?? 0, 7)
+
+# --- class (b) sweep, 2026-08-21: nil-forwarding wrappers in
+# src/lib/nogc_sync_mut/** typed honestly (baseline entries removed). Each `it`
+# drives a wrapper whose body forwards an rt_* extern one hop away from a
+# Value::Nil path via runtime_to_value. Every one aborted the strict seed with
+# "nil is forbidden by the non-optional return contract of '<fn>'" pre-fix.
+describe "non-optional return contract — nogc_sync_mut nil-forwarding wrappers":
+    it "file_mmap_read_bytes on an unreadable path yields [], not nil":
+        # rt_file_mmap_read_bytes delegates to rt_file_read_bytes, which is nil
+        # on any fs::read error. Wrapper is `-> [i64]`, so it must be total.
+        assert_equal(mmap_bytes("/nonexistent/definitely/not/here.bin").len(), 0)
+
+    it "env_get on an unset variable yields \"\", not nil":
+        assert_equal(env_ops_env_get("SIMPLE_CONTRACT_PROBE_DEFINITELY_UNSET"), "")
+
+    it "home() is total even when HOME lookup yields nil":
+        # `-> text`; documented default "" rather than nil.
+        assert_true(env_ops_home().len() >= 0)
+
+    it "io_runtime home() and platform_name() are total":
+        assert_true(io_home().len() >= 0)
+        assert_true(io_platform_name().len() > 0)
+
+    it "cwd() is total with the documented \".\" default":
+        assert_true(sys_cwd().len() > 0)
+
+    it "args_get() is total with the documented [] default":
+        assert_true(sys_args_get().len() >= 0)
+
+    it "simd profile_name() is total and never a fabricated tier":
+        assert_true(simd_profile_name().len() > 0)
+
+    # NOTE: Mutex.lock()/mutex_lock() are now `-> Any?` (nil = dead handle;
+    # try_lock nil = contended). They are deliberately NOT exercised here:
+    # holding a real native lock across the spec harness reliably kills the
+    # child (see cross_module_closure_call_hangs_under_held_native_lock_
+    # 2026-07-28.md). The type change is pinned by
+    # scripts/check/check-non-optional-nil-return.shs instead.

@@ -2,7 +2,7 @@
 # Extracted from mod.spl for modularity
 
 # Extern fn declarations (runtime resolves at file level)
-extern fn rt_env_get(key: text) -> text
+extern fn rt_env_get(key: text) -> text?
 extern fn rt_env_vars() -> Dict<text, text>
 use std.io_runtime.{process_run, env_set as io_env_set}
 extern fn rt_env_cwd() -> text
@@ -32,8 +32,14 @@ fn _env_shell_output_trimmed(command: text, default: text) -> text:
 # Environment Functions
 # ============================================================================
 
+# `rt_env_get` yields nil for an UNSET variable. TOTAL with the documented
+# default "": this symbol is re-exported as `std.io.env_get` across a very
+# wide surface whose call sites index/concatenate the result, so it follows
+# std.io_runtime.env_get's established ""-for-unset convention rather than
+# widening. Callers that must tell unset from explicitly-empty use
+# std.io_runtime.env_get_opt, which is nil-for-unset by construction.
 fn env_get(key: text) -> text:
-    rt_env_get(key)
+    rt_env_get(key) ?? ""
 
 # reason: positional io env_ops API
 fn env_set(key: text, value: text) -> bool:
@@ -46,8 +52,11 @@ fn cwd() -> text:
     else:
         "."
 
+# TOTAL with the documented default "": HOME unset is reported as empty,
+# matching std.io_runtime.env_get's documented ""-for-unset convention.
+# Callers needing to distinguish unset use std.io_runtime.env_get_opt.
 fn home() -> text:
-    rt_env_get("HOME")
+    rt_env_get("HOME") ?? ""
 
 fn env_vars() -> Dict<text, text>:
     rt_env_vars()
@@ -55,7 +64,7 @@ fn env_vars() -> Dict<text, text>:
 fn host_arch() -> text:
     if _is_windows_platform():
         val proc_arch = env_get("PROCESSOR_ARCHITECTURE")
-        if proc_arch != nil:
+        if proc_arch != "":
             match proc_arch.lower():
                 case "amd64" | "x64": "x86_64"
                 case "x86": "i686"
