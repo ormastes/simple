@@ -106,12 +106,6 @@ fn _jit_key_list_contains(keys: [text], key: text) -> bool:
             return true
     false
 
-fn _jit_remove_text(values: [text], target: text) -> [text]:
-    var kept: [text] = []
-    for value in values:
-        if value != target:
-            kept.push(value)
-    kept
 
 class JitExecMapper:
     records: Dict
@@ -260,6 +254,20 @@ class JitInstantiator:
         self.exec_mapper.owners = kept_owners
         self.exec_mapper.addresses = kept_addrs
 
+    me _drop_in_progress(value: text):
+        """Drop `value` from in_progress by rebuilding into a fresh, unaliased
+        list — never a helper that takes and returns the field, which keeps the
+        old Arc live across the call and deep-copies it (COW-alias class,
+        doc/08_tracking/bug/value_semantics_cow_alias_perf_class_2026-08-21.md).
+        """
+        var kept: [text] = []
+        var index = 0
+        while index < self.in_progress.len():
+            if self.in_progress[index] != value:
+                kept.push(self.in_progress[index])
+            index = index + 1
+        self.in_progress = kept
+
     me try_jit_instantiate(name: text) -> JitInstantiationResult:
         if not self.config.enabled:
             return JitInstantiationResult.NotFound(symbol: name)
@@ -302,11 +310,11 @@ class JitInstantiator:
             match update_result:
                 case Ok(_): ()
                 case Err(update_error):
-                    self.in_progress = _jit_remove_text(self.in_progress, name)
+                    self._drop_in_progress(name)
                     self.depth = self.depth - 1
                     return JitInstantiationResult.UpdateFailed(symbol: name, error: update_error)
 
-        self.in_progress = _jit_remove_text(self.in_progress, name)
+        self._drop_in_progress(name)
         self.depth = self.depth - 1
         JitInstantiationResult.Success(code: compiled, symbol: name, address: Some(address))
 

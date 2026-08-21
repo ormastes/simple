@@ -16,12 +16,6 @@ fn mangle(template_name: text, type_args: [TemplateConcreteType]) -> text:
     val args_str = type_args.map(&:to_string).join(",")
     "{template_name}${args_str}"
 
-fn _template_remove_text(items: [text], value: text) -> [text]:
-    var kept: [text] = []
-    for item in items:
-        if item != value:
-            kept = kept.push(item)
-    kept
 
 # ============================================================================
 # TemplateInstantiator
@@ -32,6 +26,20 @@ class TemplateInstantiator:
     context: CompilationContext
     in_progress: [text]
     cache: Dict<text, Any>
+
+    me _drop_in_progress(value: text):
+        """Drop `value` from in_progress by rebuilding into a fresh, unaliased
+        list — never a helper that takes and returns the field, which keeps the
+        old Arc live across the call and deep-copies it (COW-alias class,
+        doc/08_tracking/bug/value_semantics_cow_alias_perf_class_2026-08-21.md).
+        """
+        var kept: [text] = []
+        var index = 0
+        while index < self.in_progress.len():
+            if self.in_progress[index] != value:
+                kept.push(self.in_progress[index])
+            index = index + 1
+        self.in_progress = kept
 
     me instantiate(template_name: text, type_args: [TemplateConcreteType]):
         val key = mangle(template_name, type_args)
@@ -49,30 +57,30 @@ class TemplateInstantiator:
         # 3. Load template from context
         val load_result = self.context.load_template(template_name)
         if load_result.is_err():
-            self.in_progress = _template_remove_text(self.in_progress, key)
+            self._drop_in_progress(key)
             return load_result
 
         val tmpl = match load_result:
             case Ok(value): value
             case Err(err):
-                self.in_progress = _template_remove_text(self.in_progress, key)
+                self._drop_in_progress(key)
                 return Err(err)
 
         # 4. Compile through full pipeline (context handles AOP/DI/contracts)
         val compile_result = self.context.compile_template(tmpl, type_args)
         if compile_result.is_err():
-            self.in_progress = _template_remove_text(self.in_progress, key)
+            self._drop_in_progress(key)
             return compile_result
 
         val compiled = match compile_result:
             case Ok(value): value
             case Err(err):
-                self.in_progress = _template_remove_text(self.in_progress, key)
+                self._drop_in_progress(key)
                 return Err(err)
 
         # 5. Cache
         self.cache[key] = compiled
-        self.in_progress = _template_remove_text(self.in_progress, key)
+        self._drop_in_progress(key)
         Ok(compiled)
 
     fn is_cached(template_name: text, type_args: [TemplateConcreteType]) -> bool:
