@@ -1,0 +1,39 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+rust_bridge="$root/src/compiler_rust/compiler/src/interpreter_extern/jit_native.rs"
+failed=0
+
+if grep -n -E 'fn value_to_(i64|str)|_ => (0|String::new\(\))|Err\(_\) => Ok\(Value::Int\(-1\)\)' "$rust_bridge"; then
+    echo "native JIT SFFI contains a fabricated argument/execution fallback" >&2
+    failed=1
+fi
+
+for file in \
+    "$root/src/compiler/95.interp/execution/tiered_jit_manager.spl" \
+    "$root/src/lib/nogc_sync_mut/jit/tiered_jit.spl" \
+    "$root/src/lib/nogc_sync_mut/jit/jit_arm_mixed.spl" \
+    "$root/src/lib/nogc_sync_mut/jit/jit_riscv_mixed.spl" \
+    "$root/src/lib/nogc_sync_mut/jit/jit_x86_mixed.spl"
+do
+    if ! awk '
+        /^[[:space:]]*extern fn rt_jit_/ {
+            if (previous !~ /@unsafe\(/ || previous !~ /capabilities:[[:space:]]*\[[^]]*ffi/) {
+                printf "%s:%d:%s\n", FILENAME, FNR, $0
+                failed = 1
+            }
+        }
+        { previous = $0 }
+        END { exit failed }
+    ' "$file"; then
+        echo "raw JIT declarations must carry explicit ffi unsafe metadata" >&2
+        failed=1
+    fi
+done
+
+if [ "$failed" -ne 0 ]; then
+    exit 1
+fi
+
+echo "native JIT SFFI fail-closed audit: PASS"

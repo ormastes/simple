@@ -282,6 +282,16 @@ pass, including malformed arguments, null-positive-length output, valid empty
 text, and scoped string ownership. A source-only TLS audit prevents permissive
 fallbacks or unowned runtime strings from returning.
 
+The native tiered-JIT bridge likewise converted malformed handles and names to
+zero/empty text and converted execution failure into `-1`, which collides with
+a legitimate compiled function result. Argument decoding and handle lookup now
+fail closed, while missing compiled functions remain an intentional boolean
+absence result. Execution failures are typed runtime errors, so all `i64`
+results remain representable. The valid hot path still performs the same map
+lookup and one execution call, without added allocation. A focused sabotage
+test passes. All raw JIT declarations in the compiler and four library manager
+modules are explicitly `unsafe(ffi)`, enforced by a source-only audit.
+
 All 15 remaining legacy sign/verify declarations in the canonical signature
 module are now explicitly `unsafe(ffi)` and document their sentinel contract:
 verification collapses malformed bridge input into `0`, while signing may

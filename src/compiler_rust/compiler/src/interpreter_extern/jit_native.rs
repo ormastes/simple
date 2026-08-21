@@ -32,17 +32,31 @@ fn next_handle() -> i64 {
     val
 }
 
-fn value_to_i64(val: &Value) -> i64 {
-    match val {
-        Value::Int(i) => *i,
-        _ => 0,
+#[inline]
+fn int_arg(args: &[Value], index: usize, symbol: &str) -> Result<i64, CompileError> {
+    match args.get(index) {
+        Some(Value::Int(value)) => Ok(*value),
+        _ => Err(CompileError::runtime(format!(
+            "{symbol}: argument {index} must be an integer"
+        ))),
     }
 }
 
-fn value_to_str(val: &Value) -> String {
-    match val {
-        Value::Str(s) => s.as_ref().clone(),
-        _ => String::new(),
+#[inline]
+fn text_arg<'a>(args: &'a [Value], index: usize, symbol: &str) -> Result<&'a str, CompileError> {
+    match args.get(index) {
+        Some(Value::Str(value)) => Ok(value.as_str()),
+        _ => Err(CompileError::runtime(format!(
+            "{symbol}: argument {index} must be text"
+        ))),
+    }
+}
+
+fn require_jit_handle(handle: i64, symbol: &str) -> Result<(), CompileError> {
+    if JIT_INSTANCES.lock().unwrap().contains_key(&handle) {
+        Ok(())
+    } else {
+        Err(CompileError::runtime(format!("{symbol}: invalid JIT handle {handle}")))
     }
 }
 
@@ -65,11 +79,8 @@ pub fn rt_jit_create(_args: &[Value]) -> Result<Value, CompileError> {
 /// Routes 32-bit targets through LLVM, 64-bit through Cranelift.
 /// Returns handle (>0) or -1 on failure.
 pub fn rt_jit_create_for_target(args: &[Value]) -> Result<Value, CompileError> {
-    if args.is_empty() {
-        return Ok(Value::Int(-1));
-    }
-    let arch_name = value_to_str(&args[0]);
-    let target = match arch_name_to_target(&arch_name) {
+    let arch_name = text_arg(args, 0, "rt_jit_create_for_target")?;
+    let target = match arch_name_to_target(arch_name) {
         Some(t) => t,
         None => return Ok(Value::Int(-2)),
     };
@@ -102,27 +113,23 @@ fn arch_name_to_target(name: &str) -> Option<simple_common::target::Target> {
 /// rt_jit_backend_name(handle: i64) -> text
 /// Returns the backend name ("cranelift-jit" or "llvm-jit") for a JIT instance.
 pub fn rt_jit_backend_name(args: &[Value]) -> Result<Value, CompileError> {
-    if args.is_empty() {
-        return Ok(Value::text("invalid"));
-    }
-    let handle = value_to_i64(&args[0]);
+    let handle = int_arg(args, 0, "rt_jit_backend_name")?;
     let instances = JIT_INSTANCES.lock().unwrap();
     match instances.get(&handle) {
         Some(em) => Ok(Value::text(em.backend_name().to_string())),
-        None => Ok(Value::text("invalid")),
+        None => Err(CompileError::runtime(format!(
+            "rt_jit_backend_name: invalid JIT handle {handle}"
+        ))),
     }
 }
 
 /// rt_jit_compile_source(handle: i64, source: text) -> text
 /// Compiles Simple source through full pipeline. Returns "" on success, error on failure.
 pub fn rt_jit_compile_source(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 2 {
-        return Ok(Value::text("missing arguments"));
-    }
-    let handle = value_to_i64(&args[0]);
-    let source = value_to_str(&args[1]);
+    let handle = int_arg(args, 0, "rt_jit_compile_source")?;
+    let source = text_arg(args, 1, "rt_jit_compile_source")?;
 
-    let mut parser = Parser::new(&source);
+    let mut parser = Parser::new(source);
     let ast = match parser.parse() {
         Ok(a) => a,
         Err(e) => return Ok(Value::text(format!("parse: {:?}", e))),
@@ -139,7 +146,11 @@ pub fn rt_jit_compile_source(args: &[Value]) -> Result<Value, CompileError> {
     let mut instances = JIT_INSTANCES.lock().unwrap();
     let em = match instances.get_mut(&handle) {
         Some(j) => j,
-        None => return Ok(Value::text("invalid handle")),
+        None => {
+            return Err(CompileError::runtime(format!(
+                "rt_jit_compile_source: invalid JIT handle {handle}"
+            )))
+        }
     };
     match em.compile_module(&mir_module) {
         Ok(_) => Ok(Value::text(String::new())),
@@ -150,93 +161,101 @@ pub fn rt_jit_compile_source(args: &[Value]) -> Result<Value, CompileError> {
 /// rt_jit_call_i64(handle: i64, name: text, arg: i64) -> i64
 /// Calls a compiled function with one i64 argument. Returns result or -1 on error.
 pub fn rt_jit_call_i64(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 3 {
-        return Ok(Value::Int(-1));
-    }
-    let handle = value_to_i64(&args[0]);
-    let name = value_to_str(&args[1]);
-    let arg0 = value_to_i64(&args[2]);
+    let handle = int_arg(args, 0, "rt_jit_call_i64")?;
+    let name = text_arg(args, 1, "rt_jit_call_i64")?;
+    let arg0 = int_arg(args, 2, "rt_jit_call_i64")?;
 
     let instances = JIT_INSTANCES.lock().unwrap();
     let em = match instances.get(&handle) {
         Some(j) => j,
-        None => return Ok(Value::Int(-1)),
+        None => {
+            return Err(CompileError::runtime(format!(
+                "rt_jit_call_i64: invalid JIT handle {handle}"
+            )))
+        }
     };
 
-    match em.execute(&name, &[arg0]) {
+    match em.execute(name, &[arg0]) {
         Ok(v) => Ok(Value::Int(v)),
-        Err(_) => Ok(Value::Int(-1)),
+        Err(error) => Err(CompileError::runtime(format!(
+            "rt_jit_call_i64: execution failed: {error}"
+        ))),
     }
 }
 
 /// rt_jit_call_void(handle: i64, name: text) -> i64
 /// Calls a compiled function with no arguments. Returns result or -1 on error.
 pub fn rt_jit_call_void(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 2 {
-        return Ok(Value::Int(-1));
-    }
-    let handle = value_to_i64(&args[0]);
-    let name = value_to_str(&args[1]);
+    let handle = int_arg(args, 0, "rt_jit_call_void")?;
+    let name = text_arg(args, 1, "rt_jit_call_void")?;
 
     let instances = JIT_INSTANCES.lock().unwrap();
     let em = match instances.get(&handle) {
         Some(j) => j,
-        None => return Ok(Value::Int(-1)),
+        None => {
+            return Err(CompileError::runtime(format!(
+                "rt_jit_call_void: invalid JIT handle {handle}"
+            )))
+        }
     };
 
-    match em.execute(&name, &[]) {
+    match em.execute(name, &[]) {
         Ok(v) => Ok(Value::Int(v)),
-        Err(_) => Ok(Value::Int(-1)),
+        Err(error) => Err(CompileError::runtime(format!(
+            "rt_jit_call_void: execution failed: {error}"
+        ))),
     }
 }
 
 /// rt_jit_call_i64_i64(handle: i64, name: text, arg0: i64, arg1: i64) -> i64
 /// Calls a compiled function with two i64 arguments.
 pub fn rt_jit_call_i64_i64(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 4 {
-        return Ok(Value::Int(-1));
-    }
-    let handle = value_to_i64(&args[0]);
-    let name = value_to_str(&args[1]);
-    let arg0 = value_to_i64(&args[2]);
-    let arg1 = value_to_i64(&args[3]);
+    let handle = int_arg(args, 0, "rt_jit_call_i64_i64")?;
+    let name = text_arg(args, 1, "rt_jit_call_i64_i64")?;
+    let arg0 = int_arg(args, 2, "rt_jit_call_i64_i64")?;
+    let arg1 = int_arg(args, 3, "rt_jit_call_i64_i64")?;
 
     let instances = JIT_INSTANCES.lock().unwrap();
     let em = match instances.get(&handle) {
         Some(j) => j,
-        None => return Ok(Value::Int(-1)),
+        None => {
+            return Err(CompileError::runtime(format!(
+                "rt_jit_call_i64_i64: invalid JIT handle {handle}"
+            )))
+        }
     };
 
-    match em.execute(&name, &[arg0, arg1]) {
+    match em.execute(name, &[arg0, arg1]) {
         Ok(v) => Ok(Value::Int(v)),
-        Err(_) => Ok(Value::Int(-1)),
+        Err(error) => Err(CompileError::runtime(format!(
+            "rt_jit_call_i64_i64: execution failed: {error}"
+        ))),
     }
 }
 
 /// rt_jit_has_function(handle: i64, name: text) -> bool
 pub fn rt_jit_has_function(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 2 {
-        return Ok(Value::Bool(false));
-    }
-    let handle = value_to_i64(&args[0]);
-    let name = value_to_str(&args[1]);
+    let handle = int_arg(args, 0, "rt_jit_has_function")?;
+    let name = text_arg(args, 1, "rt_jit_has_function")?;
 
     let instances = JIT_INSTANCES.lock().unwrap();
     let em = match instances.get(&handle) {
         Some(j) => j,
-        None => return Ok(Value::Bool(false)),
+        None => {
+            return Err(CompileError::runtime(format!(
+                "rt_jit_has_function: invalid JIT handle {handle}"
+            )))
+        }
     };
 
-    Ok(Value::Bool(em.has_function(&name)))
+    Ok(Value::Bool(em.has_function(name)))
 }
 
 /// rt_jit_cleanup(handle: i64) -> i64
 /// Drops the JIT instance and frees native code memory.
 pub fn rt_jit_cleanup(args: &[Value]) -> Result<Value, CompileError> {
-    if args.is_empty() {
-        return Ok(Value::Int(-1));
-    }
-    let handle = value_to_i64(&args[0]);
+    let handle = int_arg(args, 0, "rt_jit_cleanup")?;
+    require_jit_handle(handle, "rt_jit_cleanup")?;
     Ok(Value::Int(cleanup_handle(handle)))
 }
 
@@ -253,5 +272,19 @@ mod tests {
         assert!(JIT_INSTANCES.lock().unwrap().contains_key(&handle));
         assert_eq!(cleanup_handle(handle), 0);
         assert!(!JIT_INSTANCES.lock().unwrap().contains_key(&handle));
+    }
+
+    #[test]
+    fn jit_bridge_rejects_malformed_arguments_and_invalid_handles() {
+        assert!(rt_jit_create_for_target(&[]).is_err());
+        assert!(rt_jit_create_for_target(&[Value::Int(0)]).is_err());
+        assert!(rt_jit_backend_name(&[Value::Bool(false)]).is_err());
+        assert!(rt_jit_backend_name(&[Value::Int(i64::MAX)]).is_err());
+        assert!(rt_jit_compile_source(&[Value::Int(1)]).is_err());
+        assert!(rt_jit_call_i64(&[Value::Int(1), Value::text("function"), Value::Nil,]).is_err());
+        assert!(rt_jit_call_void(&[Value::Int(i64::MAX), Value::text("function")]).is_err());
+        assert!(rt_jit_has_function(&[Value::Int(i64::MAX), Value::text("function")]).is_err());
+        assert!(rt_jit_cleanup(&[]).is_err());
+        assert!(rt_jit_cleanup(&[Value::Int(i64::MAX)]).is_err());
     }
 }
