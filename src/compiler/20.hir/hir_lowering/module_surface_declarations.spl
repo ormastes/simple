@@ -2,7 +2,7 @@
 
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.frontend.parser_types.*
-use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfaceCallable, ModuleSurfaceComposite, ModuleSurfaceConst, ModuleSurfaceEnum, ModuleSurfaceField, ModuleSurfaceImpl, ModuleSurfaceParam, ModuleSurfaceTrait, ModuleSurfaceTypeAlias, module_surface_export_origin_index_empty, module_surface_export_origin_index_put}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfaceCallable, ModuleSurfaceComposite, ModuleSurfaceCompositeIndex, ModuleSurfaceConst, ModuleSurfaceEnum, ModuleSurfaceField, ModuleSurfaceImpl, ModuleSurfaceParam, ModuleSurfaceTrait, ModuleSurfaceTypeAlias, module_surface_export_origin_index_empty, module_surface_export_origin_index_put}
 use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_module_name, module_surface_canonical_path, module_surface_logical_name_from_path, module_surface_package_name_from_name}
 
 extern fn rt_hash_text(content: text) -> i64
@@ -249,6 +249,28 @@ pub fn module_surface_from_owner(
     if origin_hints_result.is_err():
         return Err(origin_hints_result.unwrap_err())
     val composite_names = composites.keys()
+    val composite_index = ModuleSurfaceCompositeIndex.empty()
+    for composite_name in composite_names:
+        val composite = composites[composite_name]
+        composite_index.kinds = composite_index.kinds.push(composite.kind)
+        composite_index.field_offsets = composite_index.field_offsets.push(
+            composite_index.field_names.len())
+        composite_index.field_counts = composite_index.field_counts.push(
+            composite.fields.len())
+        composite_index.dependency_offsets = composite_index.dependency_offsets.push(
+            composite_index.dependency_names.len())
+        val dependency_start = composite_index.dependency_names.len()
+        for field in composite.fields:
+            val shape = module_surface_projected_type_shape(field.type_)
+            composite_index.field_names = composite_index.field_names.push(field.name)
+            composite_index.field_shapes = composite_index.field_shapes.push(shape)
+            composite_index.field_type_names = composite_index.field_type_names.push(
+                module_surface_projected_type_name(field.type_, shape))
+            for dependency in parser_type_named_dependencies(field.type_):
+                composite_index.dependency_names = composite_index.dependency_names.push(
+                    dependency)
+        composite_index.dependency_counts = composite_index.dependency_counts.push(
+            composite_index.dependency_names.len() - dependency_start)
     val enum_names = enums.keys()
     val trait_names = traits.keys()
     val type_alias_names = type_aliases.keys()
@@ -313,6 +335,7 @@ pub fn module_surface_from_owner(
         export_route_target_names: [],
         export_route_is_glob: [],
         composite_names: composite_names,
+        composite_index: composite_index,
         enum_names: enum_names,
         trait_names: trait_names,
         callable_names: callable_names,
