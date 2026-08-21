@@ -1,0 +1,103 @@
+# @cover src/compiler/20.hir/hir_lowering/_Expressions/match_desugaring.spl
+#
+# Regression: `pattern_test_condition` must be EXHAUSTIVE over
+# HirPatternKind. It used to end in `case _: nil`, which swallowed Enum
+# (and Array, Error, CompleteRegion, DynRegion) and reported them as
+# UNCONDITIONAL. A tuple-scrutinee match with enum sub-patterns --
+#
+#     match (c, n):
+#         case (Color.Red, _): ...
+#         case (Color.Green, 0): ...
+#         case _: ...
+#
+# -- takes the if-chain fallback (no arm has a TOP-level Enum pattern, and
+# Tuple is not MIR-native), and build_if_chain treats a nil condition as
+# "always taken": the whole match collapsed to the FIRST arm's body and the
+# lowered HIR carried zero MatchCase nodes.
+#
+# See doc/08_tracking/bug/tuple_match_enum_subpattern_collapses_to_first_arm_2026-08-21.md
+#
+# tag: unit
+
+use std.spec
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.expressions.*
+
+fn wildcard_pat(sp: Span) -> HirPattern:
+    HirPattern(kind: HirPatternKind.Wildcard, type_: nil, span: sp)
+
+fn int_lit(v: i64, sp: Span) -> HirExpr:
+    HirExpr(kind: HirExprKind.IntLit(v, nil), type_: nil, span: sp)
+
+describe "pattern_test_condition is exhaustive over HirPatternKind":
+    it "produces a real test for a bare Enum pattern (was nil = unconditional)":
+        val sp = Span.default()
+        var hl = HirLowering.with_filename("testdata/tuple_enum_pat.spl")
+        val esym = hl.symbols.define("Color", SymbolKind.Variable, nil, sp, false, false, nil)
+        val etype = HirType(kind: HirTypeKind.Named(esym, []), span: sp)
+        val pat = HirPattern(kind: HirPatternKind.Enum(etype, "Red", nil), type_: nil, span: sp)
+        val v = int_lit(0, sp)
+        val cond = hl.pattern_test_condition(v, pat, sp)
+        expect(cond != nil).to_equal(true)
+
+    it "produces a real test for a TUPLE containing an enum sub-pattern":
+        val sp = Span.default()
+        var hl = HirLowering.with_filename("testdata/tuple_enum_pat.spl")
+        val esym = hl.symbols.define("Color", SymbolKind.Variable, nil, sp, false, false, nil)
+        val etype = HirType(kind: HirTypeKind.Named(esym, []), span: sp)
+        val epat = HirPattern(kind: HirPatternKind.Enum(etype, "Red", nil), type_: nil, span: sp)
+        val tpat = HirPattern(kind: HirPatternKind.Tuple([epat, wildcard_pat(sp)]), type_: nil, span: sp)
+        val cond = hl.pattern_test_condition(int_lit(0, sp), tpat, sp)
+        expect(cond != nil).to_equal(true)
+
+    it "produces a real test for an Array pattern (length check)":
+        val sp = Span.default()
+        var hl = HirLowering.with_filename("testdata/tuple_enum_pat.spl")
+        val apat = HirPattern(kind: HirPatternKind.Array([wildcard_pat(sp), wildcard_pat(sp)], nil), type_: nil, span: sp)
+        val cond = hl.pattern_test_condition(int_lit(0, sp), apat, sp)
+        expect(cond != nil).to_equal(true)
+
+    it "keeps genuinely irrefutable kinds unconditional (Wildcard, Binding)":
+        val sp = Span.default()
+        var hl = HirLowering.with_filename("testdata/tuple_enum_pat.spl")
+        expect(hl.pattern_test_condition(int_lit(0, sp), wildcard_pat(sp), sp) == nil).to_equal(true)
+        val bsym = hl.symbols.define("b", SymbolKind.Variable, nil, sp, false, false, nil)
+        val bpat = HirPattern(kind: HirPatternKind.Binding(bsym, false), type_: nil, span: sp)
+        expect(hl.pattern_test_condition(int_lit(0, sp), bpat, sp) == nil).to_equal(true)
+
+    it "raises E-HIR-MATCH-UNHANDLED-PATTERN instead of silently matching an Error pattern":
+        val sp = Span.default()
+        var hl = HirLowering.with_filename("testdata/tuple_enum_pat.spl")
+        val epat = HirPattern(kind: HirPatternKind.Error, type_: nil, span: sp)
+        val cond = hl.pattern_test_condition(int_lit(0, sp), epat, sp)
+        expect(cond != nil).to_equal(true)
+        var loud = false
+        for err in hl.errors:
+            if err.message.contains("E-HIR-MATCH-UNHANDLED-PATTERN"):
+                loud = true
+        expect(loud).to_equal(true)
+
+describe "a tuple match with enum sub-patterns does not collapse to the first arm":
+    it "keeps a real if/else chain (the lowered value is an If, not a bare Block)":
+        val sp = Span.default()
+        var hl = HirLowering.with_filename("testdata/tuple_enum_arm.spl")
+        val esym = hl.symbols.define("Color", SymbolKind.Variable, nil, sp, false, false, nil)
+        val etype = HirType(kind: HirTypeKind.Named(esym, []), span: sp)
+        val red = HirPattern(kind: HirPatternKind.Enum(etype, "Red", nil), type_: nil, span: sp)
+        val arm0_pat = HirPattern(kind: HirPatternKind.Tuple([red, wildcard_pat(sp)]), type_: nil, span: sp)
+        val body0 = HirBlock(stmts: [], has: true, value: int_lit(1, sp), span: sp, unsafe_caps: [])
+        val body1 = HirBlock(stmts: [], has: true, value: int_lit(2, sp), span: sp, unsafe_caps: [])
+        val arm0 = HirMatchArm(pattern: arm0_pat, has_guard: false, guard: nil, body: body0, span: sp)
+        val arm1 = HirMatchArm(pattern: wildcard_pat(sp), has_guard: false, guard: nil, body: body1, span: sp)
+        val scrut = HirExpr(kind: HirExprKind.Var(hl.symbols.define("__s", SymbolKind.Variable, nil, sp, false, false, nil)), type_: nil, span: sp)
+        val chain = hl.build_if_chain(scrut, [arm0, arm1], 0, sp)
+        var is_if = false
+        match chain.kind:
+            case HirExprKind.If(_, _, _):
+                is_if = true
+            case _:
+                ()
+        expect(is_if).to_equal(true)

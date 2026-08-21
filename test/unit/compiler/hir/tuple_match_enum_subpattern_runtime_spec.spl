@@ -1,0 +1,66 @@
+# @cover src/compiler/20.hir/hir_lowering/_Expressions/match_desugaring.spl
+#
+# Behavioural companion to tuple_match_enum_subpattern_spec.spl: a tuple
+# scrutinee whose arms carry ENUM sub-patterns must select the arm the
+# source says, not always the first one.
+#
+# NOTE ON WHICH BINARY THIS PROVES: `bin/simple` is currently the Rust
+# bootstrap seed, whose own interpreter lowers match correctly. These cases
+# therefore pass on the seed today; they exist to fence the PURE-SIMPLE
+# self-hosted lowering (match_desugaring.spl) the moment it is deployed --
+# where, pre-fix, every one of them returned the FIRST arm's value.
+#
+# tag: unit
+
+use std.spec
+
+enum Color:
+    Red
+    Green
+    Blue
+
+fn pick(c: Color, n: i64) -> text:
+    match (c, n):
+        case (Color.Red, _):
+            "red-any"
+        case (Color.Green, 0):
+            "green-zero"
+        case _:
+            "other"
+
+fn nested(o: i64?, flag: bool) -> text:
+    match (o, flag):
+        case (Some(v), true):
+            "some-true-{v}"
+        case (Some(_), false):
+            "some-false"
+        case _:
+            "none"
+
+fn ored(c: Color, n: i64) -> text:
+    match (c, n):
+        case (Color.Red | Color.Blue, 1):
+            "warm-one"
+        case _:
+            "rest"
+
+describe "tuple match with enum sub-patterns selects the right arm":
+    it "selects arm 1 only for Red":
+        expect(pick(Color.Red, 5)).to_equal("red-any")
+
+    it "selects arm 2 for (Green, 0)":
+        expect(pick(Color.Green, 0)).to_equal("green-zero")
+
+    it "falls through to the default for Blue":
+        expect(pick(Color.Blue, 7)).to_equal("other")
+
+    it "handles a nested Option inside the tuple":
+        expect(nested(Some(9), true)).to_equal("some-true-9")
+        expect(nested(Some(9), false)).to_equal("some-false")
+        expect(nested(nil, true)).to_equal("none")
+
+    it "handles an or-pattern inside the tuple":
+        expect(ored(Color.Red, 1)).to_equal("warm-one")
+        expect(ored(Color.Blue, 1)).to_equal("warm-one")
+        expect(ored(Color.Green, 1)).to_equal("rest")
+        expect(ored(Color.Red, 2)).to_equal("rest")

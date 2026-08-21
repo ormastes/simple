@@ -17,7 +17,7 @@ impl HirLowering:
         left alone here (no-op) -- callers that also need conditions use
         pattern_test_condition for that."""
         match pat.kind:
-            case PatternKind.Wildcard:
+            case HirPatternKind.Wildcard:
                 []
             case Binding(sym, _):
                 [HirStmt(kind: HirStmtKind.Let(sym, nil, value_expr), span: span)]
@@ -51,11 +51,43 @@ impl HirLowering:
                         stmts2 = stmts2.push(sub_stmts2[k])
                         k = k + 1
                 stmts2
-            case _:
-                # Literal/Range/Or/Enum/Error nested where only an
-                # irrefutable destructure is expected: no binding to
-                # produce. (Not exercised by the matchpat lane's probes;
-                # left as a documented no-op rather than guessed at.)
+            case Array(elements, _):
+                # `rest` deliberately unbound: HIR has no slice expression to
+                # bind it to. The element bindings are the part that is safe.
+                var stmts3: [HirStmt] = []
+                var ai = 0
+                while ai < elements.len():
+                    val ae = HirExpr(kind: HirExprKind.Index(value_expr, HirExpr(kind: HirExprKind.IntLit(ai, nil), type_: nil, span: span)), type_: nil, span: span)
+                    val subs3 = self.destructure_pattern_prelude(ae, elements[ai], span)
+                    var s3 = 0
+                    while s3 < subs3.len():
+                        stmts3 = stmts3.push(subs3[s3])
+                        s3 = s3 + 1
+                    ai = ai + 1
+                stmts3
+            case Enum(etype, variant, payload):
+                # Bindings nested inside an enum payload (e.g. the `x` of
+                # `case (Some(x), 0):`) are re-created through the same
+                # nested-MatchCase payload accessor the test condition uses.
+                # Without this they were left silently UNBOUND.
+                self.enum_payload_prelude(value_expr, etype, variant, payload, span)
+            case Literal(_):
+                # Genuinely test-only: no binding to produce. The caller pairs
+                # this with pattern_test_condition for the test itself.
+                []
+            case Range(_, _, _):
+                []
+            case Or(_):
+                # Alternatives may bind different symbols per branch; there is
+                # no single unconditional Let for that. The test comes from
+                # pattern_test_condition; bindings inside an Or are not
+                # supported here (and are not produced by this lane).
+                []
+            case Error:
+                []
+            case CompleteRegion(_):
+                []
+            case DynRegion(_):
                 []
 
     me literal_test_condition(value_expr: HirExpr, lit_expr: HirExpr, span: Span) -> HirExpr:
@@ -77,12 +109,153 @@ impl HirLowering:
             case _:
                 HirExpr(kind: HirExprKind.Binary(HirBinOp.Eq, value_expr, lit_expr), type_: nil, span: span)
 
+    me enum_payload_prelude(value_expr: HirExpr, etype: HirType, variant: text, payload: HirPatternPayload?, span: Span) -> [HirStmt]:
+        """Bindings nested inside an enum payload (e.g. the `x` of
+        `case (Some(x), 0):`), re-created through the same nested-MatchCase
+        payload accessor the test condition uses. Without this they were
+        left silently UNBOUND."""
+        var stmts: [HirStmt] = []
+        if val pl = payload:
+            match pl:
+                case Tuple(ps):
+                    var pi = 0
+                    while pi < ps.len():
+                        val slot_expr = self.enum_payload_extract(value_expr, etype, variant, payload, pi, "", span)
+                        val subs = self.destructure_pattern_prelude(slot_expr, ps[pi], span)
+                        var s = 0
+                        while s < subs.len():
+                            stmts = stmts.push(subs[s])
+                            s = s + 1
+                        pi = pi + 1
+                case Struct(fs):
+                    for f in fs:
+                        val fslot = self.enum_payload_extract(value_expr, etype, variant, payload, -1, f.0, span)
+                        val fsubs = self.destructure_pattern_prelude(fslot, f.1, span)
+                        var fs2 = 0
+                        while fs2 < fsubs.len():
+                            stmts = stmts.push(fsubs[fs2])
+                            fs2 = fs2 + 1
+        stmts
+
+    me enum_payload_conditions(value_expr: HirExpr, etype: HirType, variant: text, payload: HirPatternPayload?, span: Span) -> [HirExpr]:
+        """The sub-tests for an enum payload's sub-patterns (empty when every
+        slot is irrefutable, or when the variant carries no payload)."""
+        var conds: [HirExpr] = []
+        if val pl = payload:
+            match pl:
+                case Tuple(ps):
+                    var pi = 0
+                    while pi < ps.len():
+                        val slot_expr = self.enum_payload_extract(value_expr, etype, variant, payload, pi, "", span)
+                        val sub = self.pattern_test_condition(slot_expr, ps[pi], span)
+                        if val sc = sub:
+                            conds = conds.push(sc)
+                        pi = pi + 1
+                case Struct(fs):
+                    for f in fs:
+                        val fslot = self.enum_payload_extract(value_expr, etype, variant, payload, -1, f.0, span)
+                        val fsub = self.pattern_test_condition(fslot, f.1, span)
+                        if val fsc = fsub:
+                            conds = conds.push(fsc)
+        conds
+
+    me hir_wildcard_pattern(span: Span) -> HirPattern:
+        """A fresh `_` sub-pattern, used to fill the payload slots this
+        lane is not currently interrogating."""
+        HirPattern(kind: HirPatternKind.Wildcard, type_: nil, span: span)
+
+    me enum_wildcard_payload(payload: HirPatternPayload?, span: Span) -> HirPatternPayload?:
+        """The same payload SHAPE as `payload` with every sub-pattern
+        replaced by `_`. Used to build a pure discriminant test."""
+        var out: HirPatternPayload? = nil
+        if val pl = payload:
+            match pl:
+                case Tuple(ps):
+                    var w: [HirPattern] = []
+                    var i = 0
+                    while i < ps.len():
+                        w = w.push(self.hir_wildcard_pattern(span))
+                        i = i + 1
+                    out = Some(HirPatternPayload.Tuple(w))
+                case Struct(fs):
+                    var wf: [(text, HirPattern)] = []
+                    for f in fs:
+                        wf = wf.push((f.0, self.hir_wildcard_pattern(span)))
+                    out = Some(HirPatternPayload.Struct(wf))
+        out
+
+    me enum_variant_test(value_expr: HirExpr, etype: HirType, variant: text, payload: HirPatternPayload?, span: Span) -> HirExpr:
+        """The boolean DISCRIMINANT test for `value_expr is <etype>.<variant>`,
+        expressed as a nested single-level enum `match` yielding true/false.
+
+        HIR has no discriminant-compare expression, and inventing one would
+        need matching MIR support. A single-level enum MatchCase with an
+        all-wildcard payload and a trailing `_` arm is exactly the shape the
+        pre-existing, tested MIR enum lowering (lower_enum_match /
+        emit_enum_payload_deep, switch_operators_calls.spl) already handles,
+        so this reuses proven machinery instead of adding a new node."""
+        val pat = HirPattern(kind: HirPatternKind.Enum(etype, variant, self.enum_wildcard_payload(payload, span)), type_: nil, span: span)
+        val yes = HirBlock(stmts: [], has: true, value: HirExpr(kind: HirExprKind.BoolLit(true), type_: nil, span: span), span: span)
+        val no = HirBlock(stmts: [], has: true, value: HirExpr(kind: HirExprKind.BoolLit(false), type_: nil, span: span), span: span)
+        val arm_yes = HirMatchArm(pattern: pat, has_guard: false, guard: nil, body: yes, span: span)
+        val arm_no = HirMatchArm(pattern: self.hir_wildcard_pattern(span), has_guard: false, guard: nil, body: no, span: span)
+        HirExpr(kind: HirExprKind.MatchCase(value_expr, [arm_yes, arm_no]), type_: nil, span: span)
+
+    me enum_payload_extract(value_expr: HirExpr, etype: HirType, variant: text, payload: HirPatternPayload?, slot: i64, fname: text, span: Span) -> HirExpr:
+        """An expression yielding payload slot `slot` (positional) or field
+        `fname` (record payload, when `fname != ""`) of `value_expr`, or nil
+        when the value is a different variant. Same nested-MatchCase idiom as
+        enum_variant_test -- it is the only payload accessor HIR/MIR agree on
+        (there is no `Field`/`Index` path into an enum payload)."""
+        val fresh = self.symbols.define("__mp_enum_slot", SymbolKind.Variable, nil, span, false, false, nil)
+        val bind = HirPattern(kind: HirPatternKind.Binding(fresh, false), type_: nil, span: span)
+        var pl_out: HirPatternPayload? = nil
+        if val pl = payload:
+            match pl:
+                case Tuple(ps):
+                    var np: [HirPattern] = []
+                    var i = 0
+                    while i < ps.len():
+                        if i == slot:
+                            np = np.push(bind)
+                        else:
+                            np = np.push(self.hir_wildcard_pattern(span))
+                        i = i + 1
+                    pl_out = Some(HirPatternPayload.Tuple(np))
+                case Struct(fs):
+                    var nf: [(text, HirPattern)] = []
+                    for f in fs:
+                        if f.0 == fname:
+                            nf = nf.push((f.0, bind))
+                        else:
+                            nf = nf.push((f.0, self.hir_wildcard_pattern(span)))
+                    pl_out = Some(HirPatternPayload.Struct(nf))
+        val pat = HirPattern(kind: HirPatternKind.Enum(etype, variant, pl_out), type_: nil, span: span)
+        val hit = HirBlock(stmts: [], has: true, value: HirExpr(kind: HirExprKind.Var(fresh), type_: nil, span: span), span: span)
+        val miss = HirBlock(stmts: [], has: true, value: HirExpr(kind: HirExprKind.NilLit, type_: nil, span: span), span: span)
+        val arm_hit = HirMatchArm(pattern: pat, has_guard: false, guard: nil, body: hit, span: span)
+        val arm_miss = HirMatchArm(pattern: self.hir_wildcard_pattern(span), has_guard: false, guard: nil, body: miss, span: span)
+        HirExpr(kind: HirExprKind.MatchCase(value_expr, [arm_hit, arm_miss]), type_: nil, span: span)
+
+    me array_len_expr(value_expr: HirExpr, span: Span) -> HirExpr:
+        HirExpr(kind: HirExprKind.MethodCall(value_expr, "len", [], MethodResolution.Unresolved), type_: nil, span: span)
+
     me pattern_test_condition(value_expr: HirExpr, pat: HirPattern, span: Span) -> HirExpr?:
-        """The boolean runtime test for a pattern, or nil if the pattern is
-        unconditional (always matches: Wildcard/Binding, or a pure
-        Tuple/Struct destructure with no literal/range/or sub-test)."""
+        """The boolean runtime test for a pattern, or nil ONLY when the
+        pattern is genuinely irrefutable (Wildcard, Binding -- HIR's Binding
+        carries no sub-pattern -- or an aggregate all of whose sub-patterns
+        are themselves irrefutable).
+
+        EXHAUSTIVE over HirPatternKind by construction: there is deliberately
+        NO `case _`. An unhandled kind must be a loud
+        E-HIR-MATCH-UNHANDLED-PATTERN diagnostic, never a silent nil --
+        returning nil for a REFUTABLE kind makes build_if_chain treat the arm
+        as unconditional and collapse every later arm into it. That is exactly
+        how a missing `Enum` case here miscompiled
+        `match (c, n): case (Color.Red, _): ...` into "always the first arm"
+        (bug tuple_match_enum_subpattern_collapses_to_first_arm_2026-08-21)."""
         match pat.kind:
-            case PatternKind.Wildcard:
+            case HirPatternKind.Wildcard:
                 nil
             case Binding(_, _):
                 nil
@@ -142,8 +315,45 @@ impl HirLowering:
                     if val sc3 = sub_cond3:
                         conditions = conditions.push(sc3)
                 if conditions.len() == 0: nil else: self.combine_pattern_conditions(conditions, conditions.len(), HirBinOp.And, span)
-            case _:
-                nil
+            case Array(elements, rest):
+                # A fixed-length array pattern tests the length exactly; one
+                # with a `rest` binding tests `len >= <fixed count>`.
+                var conditions: [HirExpr] = []
+                val len_op = if rest == nil: HirBinOp.Eq else: HirBinOp.GtEq
+                val n_expr = HirExpr(kind: HirExprKind.IntLit(elements.len(), nil), type_: nil, span: span)
+                conditions = conditions.push(HirExpr(kind: HirExprKind.Binary(len_op, self.array_len_expr(value_expr, span), n_expr), type_: nil, span: span))
+                var ai = 0
+                while ai < elements.len():
+                    val ae = HirExpr(kind: HirExprKind.Index(value_expr, HirExpr(kind: HirExprKind.IntLit(ai, nil), type_: nil, span: span)), type_: nil, span: span)
+                    val asub = self.pattern_test_condition(ae, elements[ai], span)
+                    if val asc = asub:
+                        conditions = conditions.push(asc)
+                    ai = ai + 1
+                Some(self.combine_pattern_conditions(conditions, conditions.len(), HirBinOp.And, span))
+            case Enum(etype, variant, payload):
+                # ALWAYS refutable: the discriminant must be tested even when
+                # every payload sub-pattern is irrefutable. Returning nil here
+                # (the old catch-all) is the miscompile this bug records.
+                var conditions: [HirExpr] = []
+                conditions = conditions.push(self.enum_variant_test(value_expr, etype, variant, payload, span))
+                val payload_conds = self.enum_payload_conditions(value_expr, etype, variant, payload, span)
+                var ci = 0
+                while ci < payload_conds.len():
+                    conditions = conditions.push(payload_conds[ci])
+                    ci = ci + 1
+                Some(self.combine_pattern_conditions(conditions, conditions.len(), HirBinOp.And, span))
+            case Error:
+                # Error-recovery pattern: an earlier stage already reported
+                # something. Do NOT report it as unconditional -- a never-true
+                # test keeps the remaining arms reachable.
+                self.error("E-HIR-MATCH-UNHANDLED-PATTERN: error-recovery pattern reached match lowering; refusing to lower it as an unconditional arm", pat.span)
+                Some(HirExpr(kind: HirExprKind.BoolLit(false), type_: nil, span: span))
+            case CompleteRegion(_):
+                self.error("E-HIR-MATCH-UNHANDLED-PATTERN: `case complete b:` region arms are not lowered yet (HirPatternKind.CompleteRegion); refusing to lower it as an unconditional arm", pat.span)
+                Some(HirExpr(kind: HirExprKind.BoolLit(false), type_: nil, span: span))
+            case DynRegion(_):
+                self.error("E-HIR-MATCH-UNHANDLED-PATTERN: `case dyn b:` region arms are not lowered yet (HirPatternKind.DynRegion); refusing to lower it as an unconditional arm", pat.span)
+                Some(HirExpr(kind: HirExprKind.BoolLit(false), type_: nil, span: span))
 
     me build_if_chain(scrut_var: HirExpr, hir_arms: [HirMatchArm], idx: i64, span: Span) -> HirExpr:
         val arm = hir_arms[idx]
@@ -395,7 +605,7 @@ impl HirLowering:
                             var any_complex = false
                             for pat in patterns:
                                 match pat.kind:
-                                    case PatternKind.Wildcard:
+                                    case HirPatternKind.Wildcard:
                                         ()
                                     case Binding(_, _):
                                         ()
@@ -428,7 +638,7 @@ impl HirLowering:
                                 var prelude: [HirStmt] = []
                                 for pat in patterns:
                                     match pat.kind:
-                                        case PatternKind.Wildcard:
+                                        case HirPatternKind.Wildcard:
                                             new_patterns = new_patterns.push(pat)
                                         case Binding(_, _):
                                             new_patterns = new_patterns.push(pat)
