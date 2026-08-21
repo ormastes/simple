@@ -8,7 +8,7 @@ use compiler.core.tokens.{TOK_LPAREN, TOK_RPAREN, TOK_UNDERSCORE}
 use compiler.core.tokens.{TOK_COLON, TOK_COMMA, TOK_QUESTION}
 use compiler.core.tokens.{TOK_ASSIGN, TOK_LBRACKET, TOK_RBRACKET}
 use compiler.core.tokens.{TOK_INDENT, TOK_DEDENT, TOK_EOF}
-use compiler.core.ast.{decl_struct_def, decl_enum_def, decl_impl_block, module_add_decl}
+use compiler.core.ast.{decl_struct_def, decl_enum_def, decl_enum_payload_unnamed_marker, decl_impl_block, module_add_decl}
 use compiler.core.types.{type_tag_name, int_to_str}
 use compiler.core.types.{named_type_register}
 use compiler.core.parser.{par_kind_get, par_text_get, par_struct_names}
@@ -79,6 +79,9 @@ fn parse_enum_decl() -> i64:
     # See decl_enum_def's docstring in _Ast/decl_nodes.spl.
     var variant_payload_types_flat: [i64] = []
     var variant_payload_counts: [i64] = []
+    # S1 (hardening plan 15 Phase 4): parallel element-for-element to
+    # variant_payload_types_flat -- see decl_enum_def's docstring.
+    var variant_payload_field_names_flat: [text] = []
     var enum_method_ids: [i64] = []
 
     while true:
@@ -140,6 +143,10 @@ fn parse_enum_decl() -> i64:
         # _ParserDecls/enum_module_body.spl's copy instead) -- kept in sync
         # anyway per the bug doc, which names both discard sites.
         var variant_field_types: [i64] = []
+        # S1 (hardening plan 15 Phase 4): parallel to variant_field_types --
+        # the declared identifier for a NAMED payload field,
+        # decl_enum_payload_unnamed_marker() for a positional one.
+        var variant_field_names: [text] = []
         if par_kind_get() == TOK_LPAREN:
             parser_advance()
             while true:
@@ -147,19 +154,31 @@ fn parse_enum_decl() -> i64:
                     break
                 if par_kind_get() == TOK_EOF:
                     break
-                # Skip field_name: type pairs
+                # `field_name: type` and bare positional `type` both start on an
+                # identifier and this parser has NO lookahead, so parse a full
+                # type FIRST and only reinterpret the consumed identifier as a
+                # FIELD NAME if a `:` turns out to follow. Before S1 this arm
+                # dropped positional payload types outright (`A(i64, text)`
+                # recorded arity ZERO). Mirrors the live copy in
+                # _ParserDecls/enum_module_body.spl -- keep the two in sync.
                 if par_kind_get() == TOK_IDENT:
-                    parser_advance()
+                    val ident_text = par_text_get()
+                    val first_type = parser_parse_type()
                     if par_kind_get() == TOK_COLON:
                         parser_advance()
                         val fld_type = parser_parse_type()
                         variant_field_types.push(fld_type)
-                        # Handle optional ? after type
-                        if par_kind_get() == TOK_QUESTION:
-                            parser_advance()
+                        variant_field_names.push(ident_text)
+                    else:
+                        variant_field_types.push(first_type)
+                        variant_field_names.push(decl_enum_payload_unnamed_marker())
+                    # Handle optional ? after type
+                    if par_kind_get() == TOK_QUESTION:
+                        parser_advance()
                 elif par_kind_get() == TOK_LBRACKET:
                     val bracket_type = parser_parse_type()
                     variant_field_types.push(bracket_type)
+                    variant_field_names.push(decl_enum_payload_unnamed_marker())
                 else:
                     parser_advance()
                 if par_kind_get() == TOK_COMMA:
@@ -175,10 +194,11 @@ fn parse_enum_decl() -> i64:
         var vft_i = 0
         while vft_i < variant_field_types.len():
             variant_payload_types_flat.push(variant_field_types[vft_i])
+            variant_payload_field_names_flat.push(variant_field_names[vft_i])
             vft_i = vft_i + 1
         parser_skip_newlines_and_semicolons()
 
-    val enum_did = decl_enum_def(enum_name, variant_names, variant_discriminants, variant_payload_types_flat, variant_payload_counts, 0)
+    val enum_did = decl_enum_def(enum_name, variant_names, variant_discriminants, variant_payload_types_flat, variant_payload_counts, variant_payload_field_names_flat, 0)
 
     # If enum had methods, create an impl block for them
     if enum_method_ids.len() > 0:

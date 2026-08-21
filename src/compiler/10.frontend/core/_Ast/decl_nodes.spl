@@ -640,7 +640,19 @@ fn decl_export_names(names: [text], span_id: i64) -> i64:
     decl_imports[idx] = names
     idx
 
-fn decl_enum_def(name: text, variant_names: [text], variant_discriminants: [i64], variant_payload_types_flat: [i64], variant_payload_counts: [i64], span_id: i64) -> i64:
+fn decl_enum_payload_unnamed_marker() -> text:
+    """Sentinel stored in the enum payload field-NAME list for a POSITIONAL
+    payload field (S1 lane, hardening plan §15 Phase 4).
+
+    Positional and named payload fields must stay distinguishable after the
+    flat list is joined and split back apart, so a positional field cannot be
+    recorded as the empty string: `ast_text_list_join(["", ""])` is a
+    separator-only string that no longer round-trips to two elements, which
+    would silently shift every later field's name by one. `#` is not a legal
+    identifier, so it can never collide with a real field name."""
+    "#"
+
+fn decl_enum_def(name: text, variant_names: [text], variant_discriminants: [i64], variant_payload_types_flat: [i64], variant_payload_counts: [i64], variant_payload_field_names_flat: [text], span_id: i64) -> i64:
     """EPA1 (bug enum_payload_multi_arity, extends EPC1's single-payload
     capture to full arity): `variant_payload_counts` is parallel to
     `variant_names` -- one entry per variant giving how many payload fields
@@ -656,7 +668,21 @@ fn decl_enum_def(name: text, variant_names: [text], variant_discriminants: [i64]
     `decl_field_bits` (unused by enum decls -- structs use it for bitfield
     widths) carries the per-variant counts. Superseded EPC1's
     single-payload-only `variant_payload_types: [i64]` (one tag per
-    variant, extra fields discarded)."""
+    variant, extra fields discarded).
+
+    S1 (hardening plan §15 Phase 4, "preserve enum payload metadata end to
+    end") adds `variant_payload_field_names_flat`, parallel ELEMENT-FOR-ELEMENT
+    to `variant_payload_types_flat` (same flat, cross-variant, source-order
+    concatenation, so the same running-offset slice recovers both). A named
+    payload field (`B(name: text)`) stores its identifier; a POSITIONAL payload
+    field (`A(i64, text)`) stores `decl_enum_payload_unnamed_marker()`. Without
+    it a named payload was indistinguishable from a positional one downstream
+    -- `_FlatAstBridge/module_assembly.spl` could only ever rebuild
+    `VariantKind.Tuple`, so `VariantKind.Struct`/`HirVariantKind.Struct`, which
+    both already existed, were never constructed from source text.
+
+    It is the LAST parameter before `span_id` on purpose: the Rust seed fills
+    partial constructions POSITIONALLY, so appending is the only safe edit."""
     val idx = decl_alloc(DECL_ENUM, span_id)
     if not ast_decl_prefer_arena():
         ast_decl_direct_set(ast_decl_tag_key(idx), "8")
@@ -668,11 +694,17 @@ fn decl_enum_def(name: text, variant_names: [text], variant_discriminants: [i64]
         ast_decl_text_set(idx, "FIELD_TYPES", ast_i64_list_join(variant_payload_types_flat))
         ast_decl_direct_set(ast_decl_field_types_key(idx), ast_i64_list_join(variant_payload_types_flat))
         ast_decl_text_set(idx, "FIELD_BITS", ast_i64_list_join(variant_payload_counts))
+        # S1: payload field NAMES reuse the per-decl PARAM_NAMES slot, which is
+        # written only by function decls (decl_fn_def) and left empty for every
+        # enum decl -- the same "reuse an otherwise-unused slot" pattern EPA1
+        # applied to FIELD_TYPES/FIELD_BITS, rather than growing the arena.
+        ast_decl_text_set(idx, "PARAM_NAMES", ast_text_list_join(variant_payload_field_names_flat))
     decl_name[idx] = name
     decl_field_names[idx] = variant_names
     decl_field_defaults[idx] = variant_discriminants
     decl_field_types[idx] = variant_payload_types_flat
     decl_field_bits[idx] = variant_payload_counts
+    decl_param_names[idx] = variant_payload_field_names_flat
     idx
 
 fn decl_impl_block(target_name: text, method_decl_ids: [i64], span_id: i64) -> i64:

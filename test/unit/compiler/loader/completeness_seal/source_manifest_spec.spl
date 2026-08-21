@@ -1,0 +1,174 @@
+# @cover src/compiler/99.loader/completeness_seal/source_manifest.spl
+# @cover src/compiler/20.hir/hir_lowering/_Items/module_build.spl
+# @cover src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl
+# tag: unit
+#
+# D1 carry + extraction: the §6.2 extension axis declared in SOURCE must reach
+# HIR (`HirEnum.complete_open` / `dyn_open`, `HirModule.extend_enums`) and then
+# turn into the very manifest records D2's `parse_manifest_text` already reads.
+# Without this the seal can only ever select from hand-written fixtures.
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.loader.completeness_seal.source_manifest.{
+    SourceManifestOptions,
+    open_enums_of_module,
+    extension_manifests_from_module,
+    module_manifest_from_module,
+    render_extension_manifest,
+    render_source_manifest_documents,
+    payload_schema_hash
+}
+use compiler.loader.completeness_seal.manifest.{parse_manifest_text}
+
+fn lower(src: text, name: text) -> HirModule:
+    val parsed = parse_full_frontend(src, "testdata/" + name, name, Logger(level: 0))
+    var hl = HirLowering.with_filename("testdata/" + name)
+    hl.lower_module(parsed)
+
+fn opts() -> SourceManifestOptions:
+    SourceManifestOptions(
+        module_abi_hash: "abi-1",
+        required_core_abi_hash: "core-abi-v1",
+        schema_abi_version: 2,
+        linkage: "dynload",
+        activation: "first_use",
+        provides: ["HirVerify"],
+        provided_ops: ["verify", "serialize"]
+    )
+
+val CLOSED = "enum Shape:\n    Circle(r: i64)\n    Square(s: i64)\n\nfn main() -> i64:\n    0\n"
+val OPEN = "enum ExprKind:\n    Int(v: i64)\n    complete:\n    dyn:\n\nfn main() -> i64:\n    0\n"
+val EXTENDED = "enum ExprKind:\n    Int(v: i64)\n    complete:\n\nextend ExprKind:\n    complete:\n        async.Await(v: i64)\n        gpu.KernelLaunch(k: text)\n\nfn main() -> i64:\n    0\n"
+
+describe "the extension axis reaches HIR":
+    it "leaves a closed enum's HIR flags false and reports no open enum":
+        val hir = lower(CLOSED, "closed.spl")
+        # Byte-for-byte unchanged behaviour for enums written without the new
+        # syntax: this is the regression that matters most.
+        for key in hir.enums.keys():
+            expect(hir.enums[key].complete_open).to_equal(false)
+            expect(hir.enums[key].dyn_open).to_equal(false)
+        expect(open_enums_of_module(hir).len()).to_equal(0)
+
+    it "carries complete:/dyn: sections onto HirEnum":
+        val hir = lower(OPEN, "open.spl")
+        val open_enums = open_enums_of_module(hir)
+        expect(open_enums.len()).to_equal(1)
+        expect(open_enums[0].name).to_equal("ExprKind")
+        expect(open_enums[0].complete_open).to_equal(true)
+        expect(open_enums[0].dyn_open).to_equal(true)
+
+    it "carries extend sections onto HirModule.extend_enums":
+        val hir = lower(EXTENDED, "extended.spl")
+        expect(hir.extend_enums.len()).to_equal(1)
+        expect(hir.extend_enums[0].target).to_equal("ExprKind")
+        expect(hir.extend_enums[0].constructors.len()).to_equal(2)
+
+describe "source-derived extension manifests":
+    it "emits one record per constructor with extension-local ordinals":
+        val hir = lower(EXTENDED, "extended.spl")
+        val exts = extension_manifests_from_module(hir, opts())
+        expect(exts.len()).to_equal(2)
+        expect(exts[0].owner_enum).to_equal("ExprKind")
+        expect(exts[0].constructor).to_equal("async.Await")
+        expect(exts[0].closure).to_equal("complete")
+        expect(exts[0].provider_module).to_equal("async")
+        # §6.2: an extension never renumbers the static sequence, so these
+        # ordinals are extension-local and start at 0.
+        expect(exts[0].local_ordinal).to_equal(0)
+        expect(exts[1].constructor).to_equal("gpu.KernelLaunch")
+        expect(exts[1].local_ordinal).to_equal(1)
+        expect(exts[1].schema_abi_version).to_equal(2)
+
+    it "gives two constructors with different payloads different schema hashes":
+        val hir = lower(EXTENDED, "extended.spl")
+        val exts = extension_manifests_from_module(hir, opts())
+        expect(exts[0].payload_schema_hash == exts[1].payload_schema_hash).to_equal(false)
+
+    it "derives the handler table mechanically from the provider":
+        val hir = lower(EXTENDED, "extended.spl")
+        val exts = extension_manifests_from_module(hir, opts())
+        expect(exts[0].provides_op("verify")).to_equal(true)
+        match exts[0].handler_for("serialize"):
+            case Some(h):
+                expect(h).to_equal("async.serialize")
+            case None:
+                expect("missing").to_equal("async.serialize")
+
+    it "reports no module manifest when the module extends nothing":
+        val hir = lower(OPEN, "open.spl")
+        match module_manifest_from_module(hir, opts()):
+            case Some(_):
+                expect("some").to_equal("none")
+            case None:
+                expect(true).to_equal(true)
+
+    it "builds the §16.4 module record from the extend sections":
+        val hir = lower(EXTENDED, "extended.spl")
+        match module_manifest_from_module(hir, opts()):
+            case Some(m):
+                expect(m.linkage).to_equal("dynload")
+                expect(m.closure).to_equal("complete")
+                expect(m.activation).to_equal("first_use")
+                expect(m.extends_list.len()).to_equal(2)
+                expect(m.extends_list[0].constructor).to_equal("async.Await")
+                expect(m.provides_interface("HirVerify")).to_equal(true)
+            case None:
+                expect("none").to_equal("some")
+
+describe "the rendered manifest round-trips through the D2 reader":
+    it "parse_manifest_text reads back what the extractor emitted":
+        val hir = lower(EXTENDED, "extended.spl")
+        val docs = render_source_manifest_documents(hir, opts())
+        # One document per constructor: `parse_manifest_text` reads at most one
+        # `extension:` key, so a concatenated blob would silently drop the rest.
+        expect(docs.len()).to_equal(2)
+        match parse_manifest_text(docs[0], "generated/extended.sdn"):
+            case Ok(doc):
+                expect(doc.extensions.len()).to_equal(1)
+                expect(doc.extensions[0].constructor).to_equal("async.Await")
+                expect(doc.extensions[0].closure).to_equal("complete")
+                expect(doc.extensions[0].local_ordinal).to_equal(0)
+                expect(doc.extensions[0].provides_op("serialize")).to_equal(true)
+                expect(doc.modules.len()).to_equal(1)
+                expect(doc.modules[0].extends_list.len()).to_equal(2)
+            case Err(errs):
+                expect(errs.len()).to_equal(0)
+
+    it "sabotage: a record with no operation table omits `provides:` entirely":
+        # A bare `provides:` header is a non-mapping to the SDN reader, which
+        # reports WrongShape and hides the real defect: a constructor that
+        # proved nothing. The key must be absent so the MissingField
+        # diagnostic names `extension.provides`.
+        val hir = lower(EXTENDED, "extended.spl")
+        val bare = SourceManifestOptions(
+            module_abi_hash: "abi-1",
+            required_core_abi_hash: "core-abi-v1",
+            schema_abi_version: 2
+        )
+        val exts = extension_manifests_from_module(hir, bare)
+        val text_out = render_extension_manifest(exts[0])
+        expect(text_out.contains("provides")).to_equal(false)
+        match parse_manifest_text(text_out, "generated/bare.sdn"):
+            case Ok(_):
+                expect("accepted").to_equal("rejected")
+            case Err(errs):
+                var saw = false
+                for e in errs:
+                    saw = true
+                expect(saw).to_equal(true)
+
+describe "payload schema hash":
+    it "is stable for the same owner/constructor/payload and keyed on all three":
+        val hir = lower(EXTENDED, "extended.spl")
+        val ctor = hir.extend_enums[0].constructors[0]
+        val a = payload_schema_hash("ExprKind", "async.Await", ctor.payload_types)
+        val b = payload_schema_hash("ExprKind", "async.Await", ctor.payload_types)
+        val c = payload_schema_hash("OtherKind", "async.Await", ctor.payload_types)
+        expect(a).to_equal(b)
+        expect(a == c).to_equal(false)

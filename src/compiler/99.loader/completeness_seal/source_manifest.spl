@@ -1,0 +1,293 @@
+# Source-derived extension manifests — hardening plan §6.2, §13.2, §16.4.
+#
+# D2-D5 (admission, seal, registry) consume `ExtensionManifest` / `ModuleManifest`
+# records that `parse_manifest_text` reads out of hand-written `.sdn` files. That
+# is fine for fixtures and terrible for a whole-tree gate: nothing connects the
+# manifests to the SOURCE that actually declares the extension axis.
+#
+# This module closes that gap. It reads a lowered `HirModule` — whose enums now
+# carry the D1 `complete:` / `dyn:` region flags and whose `extend_enums` carry
+# the `provider.Name(payload)` constructors — and emits exactly the records the
+# seal path already understands, plus the SDN rendering of them so the result
+# round-trips through `parse_manifest_text` byte-for-byte compatibly.
+#
+# What source CANNOT tell us is folded into `SourceManifestOptions`: the ABI
+# hashes and the linkage/activation axes are build-plane facts, not source facts,
+# and inventing them here would fabricate identity. The payload schema hash IS a
+# source fact and is computed here.
+
+use compiler.hir.hir_types.{HirModule, HirExtendEnum, HirExtendConstructor}
+use compiler.hir.hir_definitions.{HirEnum}
+use compiler.frontend.parser_types_expr.{Type, TypeKind}
+use compiler.common.dynamic_identity.closure.{Closure}
+use compiler.loader.completeness_seal.manifest.{
+    ExtensionManifest,
+    ExtendsDecl,
+    ModuleManifest
+}
+use std.common.crypto.sha256.{sha256_text}
+
+# Build-plane facts that source cannot supply. Defaults are deliberately empty /
+# zero rather than plausible-looking: a caller that forgets to fill them gets a
+# manifest the seal rejects, not one that silently seals under a fake identity.
+pub class SourceManifestOptions:
+    module_abi_hash: text = ""
+    required_core_abi_hash: text = ""
+    schema_abi_version: i64 = 0
+    linkage: text = "static"
+    activation: text = "eager"
+    provides: [text] = []
+    # Operation table every emitted constructor claims. Source does not declare
+    # one, so it is a caller fact; the handler name is derived mechanically as
+    # `<provider>.<op>`. Left empty the emitted record has NO provides, which is
+    # exactly what the seal must reject — an unproven constructor, not a
+    # silently complete one.
+    provided_ops: [text] = []
+
+# One extensible enum DECLARED in this module (§6.2). `complete_open` /
+# `dyn_open` mirror the trailing `complete:` / `dyn:` sections; an enum with
+# neither is closed and never appears here.
+pub class OpenEnumDecl:
+    name: text
+    qualified_name: text
+    complete_open: bool
+    dyn_open: bool
+
+    fn closure(self) -> Closure:
+        # `dyn:` dominates: a region that never closes while running is the
+        # weakest guarantee the enum offers, and the seal must see that.
+        if self.dyn_open:
+            return Closure.Dyn
+        Closure.Complete
+
+# ---------------------------------------------------------------------------
+# Canonical payload spelling
+# ---------------------------------------------------------------------------
+
+fn _type_list_canonical(types: [Type]) -> text:
+    var parts: [text] = []
+    for t in types:
+        parts = parts + [type_canonical_text(t)]
+    parts.join(",")
+
+pub fn type_canonical_text(t: Type) -> text:
+    """Stable, order-preserving spelling of a payload type.
+
+    Exhaustive over every `TypeKind` — no wildcard arm, so a new type form is a
+    compile error here rather than a silent hash collision with an unrelated
+    type. Array LENGTH expressions are deliberately not spelled: a length is an
+    expression, not a schema, and hashing its source text would make an
+    identical schema hash differently after a harmless rename."""
+    var out = ""
+    match t.kind:
+        case TypeKind.Named(name, args):
+            if args.len() == 0:
+                out = name
+            else:
+                out = name + "<" + _type_list_canonical(args) + ">"
+        case TypeKind.Tuple(items):
+            out = "(" + _type_list_canonical(items) + ")"
+        case TypeKind.Array(elem, _size):
+            out = "[" + type_canonical_text(elem) + "]"
+        case TypeKind.Function(params, ret):
+            out = "fn(" + _type_list_canonical(params) + ")->" + type_canonical_text(ret)
+        case TypeKind.Optional(inner):
+            out = type_canonical_text(inner) + "?"
+        case TypeKind.Reference(inner, is_mut):
+            out = if is_mut: "&mut " + type_canonical_text(inner) else: "&" + type_canonical_text(inner)
+        case TypeKind.Atomic(inner):
+            out = "@" + type_canonical_text(inner)
+        case TypeKind.Isolated(inner):
+            out = "~" + type_canonical_text(inner)
+        case TypeKind.Union(items):
+            out = _type_list_canonical(items)
+        case TypeKind.Projection(base, item):
+            out = type_canonical_text(base) + "." + item
+        case TypeKind.Infer:
+            out = "_"
+        case TypeKind.Error:
+            out = "<error>"
+        case TypeKind.Pointer(inner, is_mut):
+            out = if is_mut: "*mut " + type_canonical_text(inner) else: "*const " + type_canonical_text(inner)
+        case TypeKind.Weak(inner):
+            out = "-" + type_canonical_text(inner)
+    out
+
+pub fn payload_schema_hash(owner_enum: text, constructor: text, payload_types: [Type]) -> text:
+    """§6.2: an extension cannot change the payload schema without an ABI bump.
+
+    The hash covers owner + constructor + ordered payload spelling, so moving a
+    payload type between two constructors changes both hashes."""
+    "PAYLOADV1-" + sha256_text(owner_enum + "\n" + constructor + "\n" + _type_list_canonical(payload_types))
+
+# ---------------------------------------------------------------------------
+# Extraction
+# ---------------------------------------------------------------------------
+
+pub fn open_enums_of_module(module: HirModule) -> [OpenEnumDecl]:
+    """Every enum in `module` that declared a `complete:` or `dyn:` region."""
+    var out: [OpenEnumDecl] = []
+    for key in module.enums.keys():
+        val e: HirEnum = module.enums[key]
+        if e.complete_open or e.dyn_open:
+            out = out + [OpenEnumDecl(
+                name: e.name,
+                qualified_name: if e.runtime_name != "": e.runtime_name else: e.name,
+                complete_open: e.complete_open,
+                dyn_open: e.dyn_open
+            )]
+    out
+
+fn _closure_text(c: Closure) -> text:
+    var out = ""
+    match c:
+        case Closure.Static:
+            out = "static"
+        case Closure.Complete:
+            out = "complete"
+        case Closure.Dyn:
+            out = "dyn"
+    out
+
+pub fn extension_manifests_from_module(
+    module: HirModule,
+    opts: SourceManifestOptions
+) -> [ExtensionManifest]:
+    """One `ExtensionManifest` per constructor of every `extend <Enum>:` section.
+
+    `local_ordinal` counts within the owning section, so the §6.2 rule that an
+    extension never renumbers the original static ordinal sequence holds by
+    construction: these ordinals are extension-local and start at 0."""
+    var out: [ExtensionManifest] = []
+    for section in module.extend_enums:
+        val closure = _closure_text(section.closure)
+        var ordinal: i64 = 0
+        for ctor in section.constructors:
+            val qualified = ctor.provider + "." + ctor.name
+            var handlers: [text] = []
+            for op in opts.provided_ops:
+                handlers = handlers + [ctor.provider + "." + op]
+            out = out + [ExtensionManifest(
+                owner_enum: section.target,
+                constructor: qualified,
+                closure: closure,
+                payload_schema_hash: payload_schema_hash(section.target, qualified, ctor.payload_types),
+                module_abi_hash: opts.module_abi_hash,
+                required_core_abi_hash: opts.required_core_abi_hash,
+                provider_module: ctor.provider,
+                local_ordinal: ordinal,
+                schema_abi_version: opts.schema_abi_version,
+                provided_ops: opts.provided_ops,
+                provided_handlers: handlers,
+                transition: None
+            )]
+            ordinal = ordinal + 1
+    out
+
+pub fn module_manifest_from_module(
+    module: HirModule,
+    opts: SourceManifestOptions
+) -> ModuleManifest?:
+    """The §16.4 `module:` record for a module that extends something.
+
+    `None` — never an empty record — when the module extends nothing: a module
+    manifest that claims no extends is not the same fact as no manifest."""
+    var extends_list: [ExtendsDecl] = []
+    for section in module.extend_enums:
+        for ctor in section.constructors:
+            extends_list = extends_list + [ExtendsDecl(
+                owner_enum: section.target,
+                constructor: ctor.provider + "." + ctor.name,
+                schema_abi: opts.schema_abi_version
+            )]
+    if extends_list.len() == 0:
+        return None
+    var closure = "static"
+    for section in module.extend_enums:
+        if _closure_text(section.closure) == "dyn":
+            closure = "dyn"
+        else:
+            if closure != "dyn":
+                closure = _closure_text(section.closure)
+    Some(ModuleManifest(
+        id: module.name,
+        linkage: opts.linkage,
+        closure: closure,
+        activation: opts.activation,
+        extends_list: extends_list,
+        provides: opts.provides
+    ))
+
+# ---------------------------------------------------------------------------
+# SDN rendering — the output must be readable by `parse_manifest_text`.
+# ---------------------------------------------------------------------------
+
+fn _q(s: text) -> text:
+    "\"" + s + "\""
+
+pub fn render_extension_manifest(ext: ExtensionManifest) -> text:
+    var lines: [text] = []
+    lines = lines + ["extension:"]
+    lines = lines + ["  owner_enum: " + ext.owner_enum]
+    lines = lines + ["  constructor: " + ext.constructor]
+    lines = lines + ["  closure: " + ext.closure]
+    lines = lines + ["  payload_schema_hash: " + _q(ext.payload_schema_hash)]
+    lines = lines + ["  module_abi_hash: " + _q(ext.module_abi_hash)]
+    lines = lines + ["  required_core_abi_hash: " + _q(ext.required_core_abi_hash)]
+    lines = lines + ["  provider_module: " + _q(ext.provider_module)]
+    lines = lines + ["  local_ordinal: " + "{ext.local_ordinal}"]
+    lines = lines + ["  schema_abi_version: " + "{ext.schema_abi_version}"]
+    # A bare `provides:` header with no entries is NOT an empty operation table
+    # to the SDN reader -- it is a non-mapping, which reports as WrongShape and
+    # hides the real defect (a constructor that proved nothing). Omit the key.
+    if ext.provided_ops.len() > 0:
+        lines = lines + [""]
+        lines = lines + ["  provides:"]
+        var i: i64 = 0
+        while i < ext.provided_ops.len():
+            lines = lines + ["    " + ext.provided_ops[i] + ": " + ext.provided_handlers[i]]
+            i = i + 1
+    lines.join("\n") + "\n"
+
+pub fn render_module_manifest(m: ModuleManifest) -> text:
+    var lines: [text] = []
+    lines = lines + ["module:"]
+    lines = lines + ["  id: " + m.id]
+    lines = lines + ["  linkage: " + m.linkage]
+    lines = lines + ["  closure: " + m.closure]
+    lines = lines + ["  activation: " + m.activation]
+    lines = lines + [""]
+    lines = lines + ["  extends:"]
+    for e in m.extends_list:
+        lines = lines + ["    - enum: " + e.owner_enum]
+        lines = lines + ["      constructor: " + e.constructor]
+        lines = lines + ["      schema_abi: " + "{e.schema_abi}"]
+    lines = lines + [""]
+    lines = lines + ["  provides:"]
+    for p in m.provides:
+        lines = lines + ["    - " + p]
+    lines.join("\n") + "\n"
+
+pub fn render_source_manifest_documents(module: HirModule, opts: SourceManifestOptions) -> [text]:
+    """One SDN document per extension constructor.
+
+    Deliberately a LIST, not one concatenated blob: `parse_manifest_text` reads
+    at most one `extension:` and one `module:` key per document, so gluing two
+    constructors into a single file would silently drop the second. The first
+    document also carries the §16.4 `module:` record. An empty list means the
+    module declares no extension, which is a different fact from an empty
+    document (`parse_manifest_text` rejects that as `E-MANIFEST-004`)."""
+    val exts = extension_manifests_from_module(module, opts)
+    var out: [text] = []
+    var first = true
+    for ext in exts:
+        var doc = render_extension_manifest(ext)
+        if first:
+            match module_manifest_from_module(module, opts):
+                case Some(m):
+                    doc = doc + "\n" + render_module_manifest(m)
+                case None:
+                    doc = doc
+            first = false
+        out = out + [doc]
+    out

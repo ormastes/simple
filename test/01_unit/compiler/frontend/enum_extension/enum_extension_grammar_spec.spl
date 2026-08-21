@@ -1,0 +1,127 @@
+# Enum completeness-extension GRAMMAR (D1).
+#
+# §2 of doc/05_design/compiler/hardening/critical_completeness_design_2026-08-21.md:
+# trailing `complete:` / `dyn:` sections in an enum body, `extend <Enum>:` with
+# dotted `provider.Name(payload)` constructors, and `case complete b:` /
+# `case dyn b:` region arms in `match`.
+#
+# @cover src/compiler/10.frontend/core/_ParserDecls/enum_module_body.spl
+# @cover src/compiler/10.frontend/core/_ParserDecls/extend_decls.spl
+# @cover src/compiler/10.frontend/core/parser_stmts.spl
+# @cover src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl
+# @cover src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl
+#
+# Exercises the self-hosted frontend directly via parse_and_build_module --
+# bin/simple currently resolves to the Rust seed, which does not read
+# src/compiler/10.frontend/ at all, so this in-process call is the only way to
+# observe this parser code running (same pattern as
+# test/01_unit/compiler/frontend/layer_decl_parse_spec.spl).
+
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.frontend.core.parser.{parser_has_errors}
+use compiler.common.dynamic_identity.closure.{Closure}
+
+describe "enum complete:/dyn: sections":
+    it "leaves a closed enum's region flags false":
+        val source = "enum Shape:\n    Circle(r: i64)\n    Square(s: i64)\n\nfn main() -> i64:\n    0\n"
+        val module = parse_and_build_module(source, "enum_closed.spl")
+
+        expect(parser_has_errors()).to_equal(false)
+        val e = module.enums["Shape"]
+        expect(e.variants.len()).to_equal(2)
+        expect(e.complete_open).to_equal(false)
+        expect(e.dyn_open).to_equal(false)
+
+    it "sets complete_open for a trailing empty 'complete:' section":
+        val source = "enum ExprKind:\n    Int(v: i64)\n    complete:\n\nfn main() -> i64:\n    0\n"
+        val module = parse_and_build_module(source, "enum_complete.spl")
+
+        expect(parser_has_errors()).to_equal(false)
+        val e = module.enums["ExprKind"]
+        expect(e.complete_open).to_equal(true)
+        expect(e.dyn_open).to_equal(false)
+        # The section is NOT a variant: the static ordinal sequence must be
+        # untouched by declaring a region open.
+        expect(e.variants.len()).to_equal(1)
+
+    it "sets both flags for 'complete:' and 'dyn:' sections":
+        val source = "enum ExprKind:\n    Int(v: i64)\n    complete:\n    dyn:\n\nfn main() -> i64:\n    0\n"
+        val module = parse_and_build_module(source, "enum_complete_dyn.spl")
+
+        expect(parser_has_errors()).to_equal(false)
+        val e = module.enums["ExprKind"]
+        expect(e.complete_open).to_equal(true)
+        expect(e.dyn_open).to_equal(true)
+        expect(e.variants.len()).to_equal(1)
+
+describe "extend <Enum>: declarations":
+    it "parses a complete: section with two dotted constructors":
+        val source = "enum ExprKind:\n    Int(v: i64)\n    complete:\n\nextend ExprKind:\n    complete:\n        async.Await(v: i64)\n        gpu.KernelLaunch(k: i64)\n\nfn main() -> i64:\n    0\n"
+        val module = parse_and_build_module(source, "extend_two.spl")
+
+        expect(parser_has_errors()).to_equal(false)
+        expect(module.extend_enums.len()).to_equal(1)
+        val sec = module.extend_enums[0]
+        expect(sec.target).to_equal("ExprKind")
+        expect(sec.closure).to_equal(Closure.Complete)
+        expect(sec.constructors.len()).to_equal(2)
+        expect(sec.constructors[0].provider).to_equal("async")
+        expect(sec.constructors[0].name).to_equal("Await")
+        expect(sec.constructors[1].provider).to_equal("gpu")
+        expect(sec.constructors[1].name).to_equal("KernelLaunch")
+
+    it "yields one record per subsection when both complete: and dyn: are present":
+        val source = "enum ExprKind:\n    Int(v: i64)\n    complete:\n    dyn:\n\nextend ExprKind:\n    complete:\n        async.Await(v: i64)\n    dyn:\n        ide.LiveProbe(p: i64)\n\nfn main() -> i64:\n    0\n"
+        val module = parse_and_build_module(source, "extend_both.spl")
+
+        expect(parser_has_errors()).to_equal(false)
+        expect(module.extend_enums.len()).to_equal(2)
+        expect(module.extend_enums[0].closure).to_equal(Closure.Complete)
+        expect(module.extend_enums[1].closure).to_equal(Closure.Dyn)
+        expect(module.extend_enums[1].constructors[0].provider).to_equal("ide")
+
+    it "sabotage: rejects an undotted constructor":
+        # The provider half is what persistent extension identity keys on, so
+        # a bare `Await(...)` must be an error, never a provider-less
+        # constructor silently recorded under "".
+        val source = "extend ExprKind:\n    complete:\n        Await(v: i64)\n\nfn main() -> i64:\n    0\n"
+        val module = parse_and_build_module(source, "extend_undotted.spl")
+
+        expect(parser_has_errors()).to_equal(true)
+
+describe "case complete / case dyn region arms":
+    it "parses both region arms as distinct pattern kinds":
+        val source = "enum ExprKind:\n    Int(v: i64)\n    complete:\n    dyn:\n\nfn describe_kind(k: ExprKind) -> i64:\n    match k:\n        case ExprKind.Int(v): v\n        case complete ext: 1\n        case dyn ext: 2\n\nfn main() -> i64:\n    0\n"
+        val module = parse_and_build_module(source, "case_regions.spl")
+
+        expect(parser_has_errors()).to_equal(false)
+        expect(module.functions.contains("describe_kind")).to_equal(true)
+
+    it "does not regress: 'complete' still works as an ordinary field name":
+        # `complete` is a SOFT keyword. It is only a region section when it is
+        # immediately followed by `:` inside an enum body, and only a region
+        # arm when followed by an identifier binder after `case`.
+        val source = "struct Job:\n    complete: bool\n\nfn main() -> i64:\n    0\n"
+        val module = parse_and_build_module(source, "complete_field.spl")
+
+        expect(parser_has_errors()).to_equal(false)
+        expect(module.structs.contains("Job")).to_equal(true)
+
+describe "misplaced sections":
+    it "sabotage: a 'complete:' section inside an `extend` that is really a bare constructor list is an error":
+        # `extend E:` must contain `complete:`/`dyn:` SUBSECTIONS. A bare
+        # constructor list has no closure axis, so accepting it would leave the
+        # record's `closure` unknowable.
+        val source = "extend Missing:\n    Await(v: i64)\n\nfn main() -> i64:\n    0\n"
+        val module = parse_and_build_module(source, "misplaced_extend_body.spl")
+
+        expect(parser_has_errors()).to_equal(true)
+
+    it "sabotage: a bare 'complete:' at module level (outside any enum) is a parse error":
+        # The section header is meaningful ONLY inside an enum body. At module
+        # scope it is not a declaration and must be reported, not silently
+        # swallowed as a stray label.
+        val source = "complete:\n\nfn main() -> i64:\n    0\n"
+        val module = parse_and_build_module(source, "misplaced_complete_toplevel.spl")
+
+        expect(parser_has_errors()).to_equal(true)

@@ -13,7 +13,7 @@ use compiler.core.ast.{DECL_VAL, DECL_VAR, DECL_ENUM, DECL_LAZY_VAL}
 use compiler.core.ast.{DECL_CE, decl_ce_block}
 use compiler.core.ast.{decl_fn, decl_extern_fn, decl_struct_def}
 use compiler.core.ast.{decl_val_binding, decl_lazy_val_binding, decl_var_binding, decl_type_alias}
-use compiler.core.ast.{decl_use_import, decl_export_names, decl_enum_def, decl_set_lazy}
+use compiler.core.ast.{decl_use_import, decl_export_names, decl_enum_def, decl_enum_payload_unnamed_marker, decl_set_lazy}
 use compiler.core.ast.{decl_set_hardware, decl_set_clocked_args, decl_set_vhdl_generic_args, decl_set_flatten_struct_output}
 use compiler.core.ast.{decl_impl_block}
 use compiler.core.ast.{decl_set_comptime}
@@ -38,7 +38,8 @@ use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_wa
 use compiler.core.parser.{parser_skip_newlines, parser_skip_newlines_and_semicolons}
 use compiler.core.parser.{parser_parse_type, parser_parse_type_with_union}
 use compiler.core.tokens.{TOK_KW_AS, TOK_KW_CE, TOK_PIPE, TOK_ASSIGN, tok_kind_name}
-use compiler.core.tokens.{TOK_KW_DYN}
+use compiler.core.tokens.{TOK_KW_DYN, TOK_KW_EXTEND}
+use compiler.frontend.core._ParserDecls.extend_decls.{parse_extend_enum_decl, parser_reset_extend_enums}
 use compiler.core.tokens.{TOK_IDENT, TOK_COMMA, TOK_MINUS}
 
 # Import from sibling split modules
@@ -295,6 +296,9 @@ fn parse_enum_decl() -> i64:
     # See decl_enum_def's docstring in _Ast/decl_nodes.spl.
     var variant_payload_types_flat: [i64] = []
     var variant_payload_counts: [i64] = []
+    # S1 (hardening plan 15 Phase 4): parallel element-for-element to
+    # variant_payload_types_flat -- see decl_enum_def's docstring.
+    var variant_payload_field_names_flat: [text] = []
     var parse_enum_method_ids: [i64] = []
     # §2 of doc/05_design/compiler/hardening/critical_completeness_design_2026-08-21.md:
     # trailing `complete:` / `dyn:` sections declare the OPEN regions of the
@@ -376,6 +380,10 @@ fn parse_enum_decl() -> i64:
         # variant_field_types; the count is recorded below so the flat
         # cross-variant list stays sliceable.
         var variant_field_types: [i64] = []
+        # S1 (hardening plan §15 Phase 4): parallel to variant_field_types,
+        # one entry per payload field -- the declared identifier for a NAMED
+        # field, decl_enum_payload_unnamed_marker() for a positional one.
+        var variant_field_names: [text] = []
         if par_kind_get() == 140:
             parser_advance()
             while true:
@@ -383,19 +391,35 @@ fn parse_enum_decl() -> i64:
                     break
                 if par_kind_get() == 190:
                     break
-                # Skip field_name: type pairs
+                # `field_name: type` and bare positional `type` both start on
+                # an identifier and this parser has NO lookahead (par_kind_get
+                # exposes the current token only, see parser.spl), so the two
+                # cannot be told apart before consuming it. Parse a full type
+                # FIRST -- correct as-is for the positional spelling, including
+                # generic ones like `Option<i64>` that a bare advance would
+                # have left half-consumed -- and only reinterpret the consumed
+                # identifier as a FIELD NAME if a `:` turns out to follow.
+                # Before S1 this arm advanced past the identifier and pushed a
+                # type only in the `:` case, so `A(i64, text)` recorded arity
+                # ZERO: positional payload types were dropped outright.
                 if par_kind_get() == 6:
-                    parser_advance()
+                    val ident_text = par_text_get()
+                    val first_type = parser_parse_type()
                     if par_kind_get() == 161:
                         parser_advance()
                         val fld_type = parser_parse_type()
                         variant_field_types.push(fld_type)
-                        # Handle optional ? after type
-                        if par_kind_get() == 130:
-                            parser_advance()
+                        variant_field_names.push(ident_text)
+                    else:
+                        variant_field_types.push(first_type)
+                        variant_field_names.push(decl_enum_payload_unnamed_marker())
+                    # Handle optional ? after type
+                    if par_kind_get() == 130:
+                        parser_advance()
                 elif par_kind_get() == 144:
                     val bracket_type = parser_parse_type()
                     variant_field_types.push(bracket_type)
+                    variant_field_names.push(decl_enum_payload_unnamed_marker())
                 else:
                     parser_advance()
                 if par_kind_get() == 160:
@@ -411,6 +435,7 @@ fn parse_enum_decl() -> i64:
         var vft_i = 0
         while vft_i < variant_field_types.len():
             variant_payload_types_flat.push(variant_field_types[vft_i])
+            variant_payload_field_names_flat.push(variant_field_names[vft_i])
             vft_i = vft_i + 1
         # G42: pipe-separated variants on the same line (e.g. `Escape | F1 | F2`).
         # Pure separator, no semantic change -- loop back to the top and parse
@@ -428,7 +453,7 @@ fn parse_enum_decl() -> i64:
 
     if saw_complete_section or saw_dyn_section:
         parser_record_enum_open_regions(enum_name, saw_complete_section, saw_dyn_section)
-    val enum_d = decl_enum_def(enum_name, variant_names, variant_discriminants, variant_payload_types_flat, variant_payload_counts, 0)
+    val enum_d = decl_enum_def(enum_name, variant_names, variant_discriminants, variant_payload_types_flat, variant_payload_counts, variant_payload_field_names_flat, 0)
     if parse_enum_method_ids.len() > 0:
         val enum_impl = decl_impl_block(enum_name, parse_enum_method_ids, 0)
         module_add_decl(enum_impl)
@@ -664,8 +689,15 @@ fn parser_enum_open_regions_for(enum_name: text) -> (bool, bool):
 # the parser has no general two-token peek: skip inline whitespace after the
 # current token and require the next source char to be ':'.
 fn parser_enum_section_colon_follows() -> bool:
-    val pos = lex_skip_inline_ws_after_token()
-    if pos < 0:
+    var pos = lex_token_end_get()
+    val source_len = lex_source_len()
+    while pos < source_len:
+        val ch = lex_source_char_at(pos)
+        if ch == " " or ch == "\t":
+            pos = pos + 1
+            continue
+        break
+    if pos >= source_len:
         return false
     lex_source_char_at(pos) == ":"
 
@@ -709,6 +741,8 @@ fn parse_module_body():
     parser_reset_pending_vhdl_decorators()
     UNSAFE_ANNOTATIONS = []
     ENUM_ATTRIBUTES = []
+    ENUM_OPEN_REGIONS = []
+    parser_reset_extend_enums()
     var i: i64 = 0 - 1
     # Forward-progress invariant (defense in depth).
     #
@@ -770,6 +804,12 @@ fn parse_module_body():
         if par_kind_get() == 182:
             # Stray dedent at module level -- skip it
             parser_advance()
+        elif par_kind_get() == TOK_KW_EXTEND:
+            # `extend <Enum>:` completeness extension (design §2). Records its
+            # facts in the extend_decls registry and emits no decl, so nothing
+            # is added to the module here.
+            parse_extend_enum_decl()
+            parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 53:
             # Async function: async fn name()
             parser_advance()
