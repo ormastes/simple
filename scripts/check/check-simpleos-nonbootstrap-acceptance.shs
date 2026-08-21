@@ -1,0 +1,577 @@
+#!/usr/bin/env sh
+# Canonical SimpleOS acceptance entrypoint after bootstrap has completed.
+# This script consumes an admitted self-hosted runtime and existing evidence.
+# It never builds a compiler, selects a seed, or falls back to another runtime.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
+export SIMPLE_BIN
+SUMMARY_PATH="${SUMMARY_PATH:-build/test-artifacts/simpleos-nonbootstrap-acceptance/summary.json}"
+TRACE_GATE="scripts/check/check-simpleos-umbrella-traceability.shs"
+EVIDENCE_ROOT="${SIMPLEOS_EVIDENCE_SOURCE_ROOT:-}"
+SNAPSHOT_DIR="${SIMPLEOS_EVIDENCE_SNAPSHOT_DIR:-build/test-artifacts/simpleos-nonbootstrap-acceptance/evidence-snapshot}"
+CANONICAL_EVIDENCE_ROOT="${SIMPLEOS_CANONICAL_EVIDENCE_ROOT:-build/test-artifacts/simpleos_complete_os_hardening}"
+RECEIPT_PRODUCER="${SIMPLEOS_EVIDENCE_RECEIPT_PRODUCER:-}"
+SIGNING_KEY="${SIMPLEOS_EVIDENCE_SIGNING_KEY:-}"
+TRUST_CONFIG="${SIMPLEOS_EVIDENCE_TRUST_CONFIG:-config/os/simpleos_evidence_trusted_signer_v1.conf}"
+RUN_ID=""
+LIVE_CAPTURE_ROOT=""
+mode="${1:---all}"
+phase="startup"
+completed=0
+status=fail
+reason=not-started
+
+. scripts/check/simpleos-nonbootstrap-case-registry.shs
+REGISTRY_CACHE="${TMPDIR:-/tmp}/simpleos-case-registry-cache.$$"
+case_registry_rows() {
+    if [ ! -f "$REGISTRY_CACHE" ]; then
+        simpleos_case_registry >"$REGISTRY_CACHE.tmp"
+        mv "$REGISTRY_CACHE.tmp" "$REGISTRY_CACHE"
+    fi
+    cat "$REGISTRY_CACHE"
+}
+
+json_escape() {
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g'
+}
+
+write_summary() {
+    rc="$?"
+    [ "$mode" = "--dry-run" ] && return "$rc"
+    if [ "$rc" -eq 0 ]; then status=pass; reason=none; fi
+    mkdir -p "$(dirname -- "$SUMMARY_PATH")"
+    printf '{"schema":"simpleos-nonbootstrap-acceptance-v1","status":"%s","mode":"%s","phase":"%s","completed_gates":%s,"reason":"%s"}\n' \
+        "$(json_escape "$status")" "$(json_escape "$mode")" \
+        "$(json_escape "$phase")" "$completed" "$(json_escape "$reason")" \
+        >"$SUMMARY_PATH"
+    printf 'simpleos_nonbootstrap_acceptance_status=%s\n' "$status"
+    printf 'simpleos_nonbootstrap_acceptance_phase=%s\n' "$phase"
+    printf 'simpleos_nonbootstrap_acceptance_completed_gates=%s\n' "$completed"
+    printf 'simpleos_nonbootstrap_acceptance_reason=%s\n' "$reason"
+    printf 'simpleos_nonbootstrap_acceptance_summary=%s\n' "$SUMMARY_PATH"
+}
+trap 'write_summary' EXIT
+
+fail() {
+    reason="$1"
+    echo "FAIL: $reason" >&2
+    exit 1
+}
+
+FOCUSED_SPECS='
+test/01_unit/os/kernel/loader/executable_crypto_authority_spec.spl
+test/03_system/os/simpleos_guest_llvm_hello_authority_spec.spl
+test/01_unit/os/tools/primary_userland_host_spec.spl
+test/01_unit/os/apps/dbd/dbd_provisioning_spec.spl
+test/03_system/os/ssh/ssh_sftp_credential_acceptance_spec.spl
+test/01_unit/os/compositor/wm_production_acceptance_spec.spl
+test/03_system/os/qemu/simpleos_multiarch_fs_acceptance_spec.spl
+test/03_system/os/qemu/rv64_authenticated_execution_evidence_live_spec.spl
+test/01_unit/lib/nogc_async_mut/http_server/h2_live_socket_acceptance_spec.spl
+'
+
+static_gates() {
+    phase=static
+    for spec in $FOCUSED_SPECS; do
+        [ -f "$spec" ] || fail "focused-spec-missing:$spec"
+        if grep -Eq 'pass_todo|expect\(true\)\.to_equal\(true\)' "$spec"; then
+            fail "placeholder-acceptance-forbidden:$spec"
+        fi
+    done
+    registry_file="$REGISTRY_CACHE"
+    case_registry_rows >/dev/null
+    [ "$(wc -l <"$registry_file" | tr -d ' ')" -eq 102 ] || fail "case-registry-row-count"
+    [ "$(cut -d '|' -f1,2 "$registry_file" | sort -u | wc -l | tr -d ' ')" -eq 102 ] || fail "case-registry-key-uniqueness"
+    while IFS='|' read -r req evidence_case spec oracle target abi environment filesystem protocol image_selector; do
+        [ -f "$spec" ] || fail "case-registry-spec-missing:$req:$evidence_case:$spec"
+        [ -n "$oracle" ] && [ -n "$target" ] && [ -n "$abi" ] &&
+            { [ "$environment" = qemu_system ] || [ "$environment" = native_host ]; } ||
+            fail "case-registry-incomplete:$req:$evidence_case"
+    done <"$registry_file"
+    simpleos_case_registry_requirements | while IFS='|' read -r req happy boundary rejection rest; do
+        [ "$happy" != "$boundary" ] && [ "$happy" != "$rejection" ] && [ "$boundary" != "$rejection" ] ||
+            fail "case-registry-command-reuse:$req"
+    done
+    sh -n "$0" || fail "entrypoint-shell-syntax"
+    sh "$TRACE_GATE" --selftest >/dev/null || fail "umbrella-traceability-selftest"
+    completed=$((completed + 1))
+}
+
+focused_gates() {
+    phase=focused
+    require_admitted_runtime
+    for spec in $FOCUSED_SPECS; do
+        "$SIMPLE_BIN" test "$spec" --mode=interpreter || fail "focused-spec-failed:$spec"
+        completed=$((completed + 1))
+    done
+}
+
+require_admitted_runtime() {
+    [ -x "$SIMPLE_BIN" ] || fail "admitted-self-hosted-runtime-missing:$SIMPLE_BIN"
+    case "$SIMPLE_BIN" in
+        */compiler_rust/*|*/build/bootstrap/*|*rust-seed*|*simple-seed*) fail "bootstrap-or-seed-runtime-forbidden:$SIMPLE_BIN" ;;
+    esac
+}
+
+live_gates() {
+    phase=live-evidence
+    require_admitted_runtime
+    require_live_input SIMPLEOS_EVIDENCE_SOURCE_ROOT "$EVIDENCE_ROOT"
+    require_live_input SIMPLEOS_X86_64_BUNDLE "${SIMPLEOS_X86_64_BUNDLE:-}"
+    require_live_input SIMPLEOS_ARM64_BUNDLE "${SIMPLEOS_ARM64_BUNDLE:-}"
+    require_live_input SIMPLEOS_RISCV64_BUNDLE "${SIMPLEOS_RISCV64_BUNDLE:-}"
+    require_live_input SIMPLEOS_TOOLCHAIN_IMAGE "${SIMPLEOS_TOOLCHAIN_IMAGE:-}"
+    run_nonce="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+    [ "${#run_nonce}" -eq 32 ] || fail "capture-run-nonce-generation"
+    RUN_ID="simpleos-acceptance-$(date +%s)-$$-$run_nonce"
+    LIVE_CAPTURE_ROOT="${TMPDIR:-/tmp}/$RUN_ID"
+    [ ! -e "$LIVE_CAPTURE_ROOT" ] || fail "capture-root-collision:$LIVE_CAPTURE_ROOT"
+    mkdir -p "$LIVE_CAPTURE_ROOT/gates" "$LIVE_CAPTURE_ROOT/cases"
+    [ -f build/os/simpleos_servers.elf ] || fail "provision-input-missing:build/os/simpleos_servers.elf"
+    [ -f build/os/hello/fat32-hello.img ] || fail "provision-input-missing:build/os/hello/fat32-hello.img"
+    [ -f build/os/simpleos_wm_simple_web_check_32.elf ] || fail "provision-input-missing:build/os/simpleos_wm_simple_web_check_32.elf"
+
+    run_gate receipt-snapshot-signing-collection \
+        sh scripts/check/collect-sosix-qemu-evidence.shs --source-root "$EVIDENCE_ROOT" --output "$SNAPSHOT_DIR"
+    run_gate qemu-x86_64-admission \
+        sh scripts/check/check-simpleos-three-arch-qemu-bundle.shs --check x86_64 "$SIMPLEOS_X86_64_BUNDLE"
+    run_gate qemu-arm64-admission \
+        sh scripts/check/check-simpleos-three-arch-qemu-bundle.shs --check arm64 "$SIMPLEOS_ARM64_BUNDLE"
+    run_gate qemu-riscv64-admission \
+        sh scripts/check/check-simpleos-three-arch-qemu-bundle.shs --check riscv64 "$SIMPLEOS_RISCV64_BUNDLE"
+    cat "$LIVE_CAPTURE_ROOT/gates/qemu-x86_64-admission.snapshot" \
+        "$LIVE_CAPTURE_ROOT/gates/qemu-arm64-admission.snapshot" \
+        "$LIVE_CAPTURE_ROOT/gates/qemu-riscv64-admission.snapshot" \
+        >"$LIVE_CAPTURE_ROOT/gates/qemu-multiarch-fs.snapshot"
+    run_gate qemu-riscv64-authenticated-execution-evidence \
+        env SIMPLE_BIN="$SIMPLE_BIN" sh scripts/check/check-rv64-authenticated-execution-qemu.shs \
+        --bundle "$SIMPLEOS_RISCV64_BUNDLE"
+    run_gate guest-toolchain \
+        sh scripts/check/check-simpleos-toolchain-desktop-boot.shs
+    run_gate servers-live \
+        env SKIP_KERNEL=1 SKIP_STAGE=1 sh scripts/check/check-simpleos-servers-qemu.shs
+    run_gate wm-capture-readback \
+        env SIMPLEOS_WM_VISIBLE_SKIP_BUILD=1 sh scripts/check/check-simpleos-wm-visible-display-evidence.shs
+    run_gate perf-fuzz-soak-evidence-matrix \
+        sh scripts/check/check-simpleos-hardening-evidence-matrix.shs
+    publish_canonical_owner_receipts
+    sh "$TRACE_GATE" || fail "live-evidence-admission-failed:$TRACE_GATE"
+    completed=$((completed + 1))
+}
+
+# The receipt producer is a separately admitted, pure-Simple executable.  This
+# wrapper never manufactures receipt bytes or signing material.  It gives the
+# producer immutable snapshots of the exact owner output and platform inputs;
+# the producer must hash, encode and Ed25519-sign the canonical v1 receipt and
+# publish all six files without following symlinks.
+require_receipt_authority() {
+    require_live_input SIMPLEOS_EVIDENCE_RECEIPT_PRODUCER "$RECEIPT_PRODUCER"
+    require_live_input SIMPLEOS_EVIDENCE_SIGNING_KEY "$SIGNING_KEY"
+    require_live_input SIMPLEOS_EVIDENCE_TRUST_CONFIG "$TRUST_CONFIG"
+    require_live_input SIMPLEOS_EVIDENCE_REVIEWER "${SIMPLEOS_EVIDENCE_REVIEWER:-}"
+    [ -x "$RECEIPT_PRODUCER" ] || fail "receipt-producer-not-executable:$RECEIPT_PRODUCER"
+    case "$RECEIPT_PRODUCER" in
+        */compiler_rust/*|*/build/bootstrap/*|*rust-seed*|*simple-seed*) fail "bootstrap-or-seed-receipt-producer-forbidden:$RECEIPT_PRODUCER" ;;
+    esac
+    [ ! -L "$SIGNING_KEY" ] || fail "signing-key-symlink-forbidden:$SIGNING_KEY"
+    [ ! -L "$TRUST_CONFIG" ] || fail "trust-config-symlink-forbidden:$TRUST_CONFIG"
+}
+
+binding_rows() {
+    awk '
+        match($0, /return _binding\(requirement, "[^"]*", "[^"]*"\)/) {
+            line = substr($0, RSTART, RLENGTH); split(line, q, "\"")
+            print req "\t" q[4]
+        }
+        match($0, /if requirement == "[^"]*":/) {
+            split($0, r, "\""); req = r[2]
+        }
+    ' test/helpers/simpleos_complete_os_hardening_steps.spl
+}
+
+canonical_paths() {
+    binding_rows | while IFS="$(printf '\t')" read -r req owner; do
+        [ -n "$req" ] || continue
+        for evidence_case in happy boundary rejection; do
+            printf '%s/%s/%s/receipt.v1.bin\n' "$CANONICAL_EVIDENCE_ROOT" "$req" "$evidence_case"
+        done
+    done
+}
+
+publish_canonical_owner_receipts() {
+    phase=live-canonical-receipt-publication
+    require_receipt_authority
+    trust_before="$(sha256sum "$TRUST_CONFIG" | awk '{print $1}')"
+    CASE_MANIFEST="$LIVE_CAPTURE_ROOT/cases.manifest"
+    : >"$CASE_MANIFEST"
+    binding_rows | while IFS="$(printf '\t')" read -r req owner; do
+        for evidence_case in happy boundary rejection; do
+            capture_case_row "$req" "$evidence_case"
+        done
+    done
+    validate_case_manifest "$CASE_MANIFEST"
+    binding_rows | while IFS="$(printf '\t')" read -r req owner; do
+        for evidence_case in happy boundary rejection; do
+            row="$(awk -F '|' -v r="$req" -v c="$evidence_case" '$1 == r && $2 == c { print }' "$CASE_MANIFEST")"
+            oldifs="$IFS"; IFS='|'; set -- $row; IFS="$oldifs"
+            producer_gate="$3"; semantics="$4"; producer_exit="$5"; descriptor="$6"
+            artifact="$7"; source="$8"; image="$9"; shift 9
+            binary="$1"; config="$2"; exact_argv="$3"; ledger="$4"
+            scenario_owner="$5"; target="$6"; target_abi="$7"; environment="$8"
+            filesystem="$9"; shift 9; protocol_profile="$1"; image_selector="$2"
+            scenario_oracle="$(case_registry_rows | awk -F '|' -v r="$req" -v c="$evidence_case" '$1 == r && $2 == c {print $4}')"
+            output="$CANONICAL_EVIDENCE_ROOT/$req/$evidence_case"
+            [ ! -e "$output" ] || fail "canonical-evidence-collision:$output"
+            mkdir -p "$CANONICAL_EVIDENCE_ROOT/$req"
+            "$RECEIPT_PRODUCER" \
+                --requirement "$req" --case "$evidence_case" \
+                --case-semantics "$semantics" --producer-gate "$producer_gate" \
+                --producer-exit-code "$producer_exit" --case-descriptor "$descriptor" \
+                --run-id "$RUN_ID" --capture-ledger "$ledger" \
+                --consumer simpleos-complete-os-umbrella \
+                --owner "$scenario_owner" --reviewer "$SIMPLEOS_EVIDENCE_REVIEWER" \
+                --scenario-oracle "$scenario_oracle" \
+                --owner-output "$artifact" --exact-argv "$exact_argv" \
+                --target "$target" --target-abi "$target_abi" \
+                --environment "$environment" \
+                --firmware-profile "${SIMPLEOS_EVIDENCE_FIRMWARE_PROFILE:-}" \
+                --board-identity "${SIMPLEOS_EVIDENCE_BOARD_IDENTITY:-}" \
+                --accelerator "${SIMPLEOS_EVIDENCE_ACCELERATOR:-}" \
+                --filesystem "$filesystem" \
+                --protocol-profile "$protocol_profile" \
+                --source-snapshot "$source" --image-snapshot "$image" \
+                --binary-snapshot "$binary" --config-snapshot "$config" \
+                --signing-key "$SIGNING_KEY" --trust-config "$TRUST_CONFIG" \
+                --output "$output" || fail "canonical-receipt-producer-failed:$req:$evidence_case"
+            for item in receipt.v1.bin source.snapshot image.snapshot binary.snapshot config.snapshot artifact-0.snapshot artifact-1.snapshot artifact-2.snapshot; do
+                [ -f "$output/$item" ] && [ ! -L "$output/$item" ] ||
+                    fail "canonical-producer-output-missing:$req:$evidence_case:$item"
+            done
+        done
+    done
+    [ "$(sha256sum "$TRUST_CONFIG" | awk '{print $1}')" = "$trust_before" ] ||
+        fail "trust-config-mutated-during-publication"
+    completed=$((completed + 1))
+}
+
+# Pipe-delimited runner-owned manifest (never accepted as an input):
+# req|case|gate|semantics|exit|descriptor|artifact|source|image|binary|config|argv|ledger|scenario-owner|target|ABI|environment|filesystem|protocol|image-selector
+validate_case_manifest() {
+    manifest="$1"
+    if [ "${2:-}" = selftest ]; then
+        case "$manifest" in "$LIVE_CAPTURE_ROOT"/*) : ;; *) fail "case-manifest-not-runner-owned" ;; esac
+    else
+        [ "$manifest" = "$LIVE_CAPTURE_ROOT/cases.manifest" ] || fail "case-manifest-not-runner-owned"
+    fi
+    [ "$(awk -F '|' 'NF == 20 { n++ } END { print n + 0 }' "$manifest")" -eq 102 ] ||
+        fail "case-manifest-row-count"
+    [ "$(cut -d '|' -f1,2 "$manifest" | sort -u | wc -l | tr -d ' ')" -eq 102 ] ||
+        fail "case-manifest-row-uniqueness"
+    binding_rows | while IFS="$(printf '\t')" read -r req owner; do
+        case "$req" in
+            REQ-001|REQ-020|NFR-001|NFR-007|NFR-012|NFR-014) expected_gate=receipt-snapshot-signing-collection ;;
+            REQ-002|REQ-003|REQ-004|REQ-005|REQ-006|REQ-007|REQ-008|NFR-006|NFR-011) expected_gate=qemu-multiarch-fs ;;
+            REQ-009|REQ-010|REQ-011|NFR-013) expected_gate=guest-toolchain ;;
+            REQ-012|REQ-013|REQ-014|REQ-015|REQ-016|NFR-010) expected_gate=servers-live ;;
+            REQ-017) expected_gate=wm-capture-readback ;;
+            REQ-018|REQ-019|NFR-002|NFR-003|NFR-004|NFR-005|NFR-008|NFR-009) expected_gate=perf-fuzz-soak-evidence-matrix ;;
+            *) fail "case-manifest-unmapped-requirement:$req" ;;
+        esac
+        for evidence_case in happy boundary rejection; do
+            expected_semantics=accepted
+            [ "$evidence_case" = boundary ] && expected_semantics=boundary-observed
+            [ "$evidence_case" = rejection ] && expected_semantics=rejection-observed
+            awk -F '|' -v r="$req" -v c="$evidence_case" -v s="$expected_semantics" -v g="$expected_gate" '
+                $1 == r && $2 == c && $3 == g && $4 == s && $5 == "0" { found++ }
+                END { exit(found == 1 ? 0 : 1) }' "$manifest" ||
+                fail "case-manifest-semantics:$req:$evidence_case"
+        done
+    done || return 1
+    cut -d '|' -f6-11 "$manifest" | tr '|' '\n' | while IFS= read -r input; do
+        [ -f "$input" ] && [ ! -L "$input" ] || fail "case-manifest-input:$input"
+    done || return 1
+    while IFS='|' read -r req evidence_case gate semantics producer_exit descriptor artifact source image binary config exact_argv ledger scenario_owner target target_abi environment filesystem protocol_profile image_selector; do
+        [ -f "$ledger" ] && [ ! -L "$ledger" ] || fail "capture-ledger-input:$req:$evidence_case"
+        field_value() { sed -n "s/^$1=//p" "$descriptor"; }
+        [ "$(field_value requirement_id)" = "$req" ] &&
+        [ "$(field_value evidence_case)" = "$evidence_case" ] &&
+        [ "$(field_value case_semantics)" = "$semantics" ] &&
+        [ "$(field_value producer_gate)" = "$gate" ] &&
+        [ "$(field_value producer_exit_code)" = "$producer_exit" ] &&
+        [ "$(field_value run_id)" = "$RUN_ID" ] &&
+        [ "$(field_value artifact_sha256)" = "$(sha256sum "$artifact" | awk '{print $1}')" ] &&
+        [ "$(field_value source_sha256)" = "$(sha256sum "$source" | awk '{print $1}')" ] &&
+        [ "$(field_value image_sha256)" = "$(sha256sum "$image" | awk '{print $1}')" ] &&
+        [ "$(field_value binary_sha256)" = "$(sha256sum "$binary" | awk '{print $1}')" ] &&
+        [ "$(field_value config_sha256)" = "$(sha256sum "$config" | awk '{print $1}')" ] &&
+        [ "$(field_value capture_ledger_sha256)" = "$(sha256sum "$ledger" | awk '{print $1}')" ] ||
+            fail "runner-capture-binding-mismatch:$req:$evidence_case"
+        registry_row="$(case_registry_rows | awk -F '|' -v r="$req" -v c="$evidence_case" '$1 == r && $2 == c {print}')"
+        [ -n "$registry_row" ] || fail "case-registry-row-absent:$req:$evidence_case"
+        [ "$(printf '%s\n' "$registry_row" | cut -d '|' -f3)" = "$scenario_owner" ] || fail "case-owner-registry-mismatch:$req:$evidence_case"
+        [ "$(printf '%s\n' "$registry_row" | cut -d '|' -f5)" = "$target" ] || fail "case-target-registry-mismatch:$req:$evidence_case"
+        [ "$(printf '%s\n' "$registry_row" | cut -d '|' -f6)" = "$target_abi" ] || fail "case-abi-registry-mismatch:$req:$evidence_case"
+        [ "$(printf '%s\n' "$registry_row" | cut -d '|' -f7)" = "$environment" ] || fail "case-environment-registry-mismatch:$req:$evidence_case"
+        [ "$(printf '%s\n' "$registry_row" | cut -d '|' -f8)" = "$filesystem" ] || fail "case-filesystem-registry-mismatch:$req:$evidence_case"
+        [ "$(printf '%s\n' "$registry_row" | cut -d '|' -f9)" = "$protocol_profile" ] || fail "case-protocol-registry-mismatch:$req:$evidence_case"
+        [ "$(printf '%s\n' "$registry_row" | cut -d '|' -f10)" = "$image_selector" ] || fail "case-image-selector-registry-mismatch:$req:$evidence_case"
+    done <"$manifest" || return 1
+    # Every row must name distinct case output and descriptor material.  A
+    # shared generic producer artifact cannot be relabelled into three cases.
+    [ "$(cut -d '|' -f6 "$manifest" | sort -u | wc -l | tr -d ' ')" -eq 102 ] ||
+        fail "case-descriptor-reuse"
+    [ "$(cut -d '|' -f7 "$manifest" | sort -u | wc -l | tr -d ' ')" -eq 102 ] ||
+        fail "case-artifact-reuse"
+    [ "$(cut -d '|' -f13 "$manifest" | sort -u | wc -l | tr -d ' ')" -eq 102 ] ||
+        fail "capture-ledger-reuse"
+    # Real artifacts may be shared only by naming the exact same registry path.
+    # Equal bytes reached through different paths are ambiguous and fail closed.
+    for field in 8 9 10 11; do
+        cut -d '|' -f"$field" "$manifest" | while IFS= read -r snapshot; do
+            printf '%s|%s\n' "$(sha256sum "$snapshot" | awk '{print $1}')" "$snapshot"
+        done >"${TMPDIR:-/tmp}/simpleos-snapshot-shares.$$"
+        awk -F '|' '!seen[$1]++ {path[$1]=$2; next} path[$1] != $2 {bad=1} END {exit bad}' \
+            "${TMPDIR:-/tmp}/simpleos-snapshot-shares.$$" || fail "ambiguous-snapshot-byte-share:field-$field"
+    done
+    cut -d '|' -f7 "$manifest" | while IFS= read -r artifact; do sha256sum "$artifact"; done |
+        awk '{print $1}' >"${TMPDIR:-/tmp}/simpleos-case-hashes.$$"
+    [ "$(sort -u "${TMPDIR:-/tmp}/simpleos-case-hashes.$$" | wc -l | tr -d ' ')" -eq 102 ] || {
+        rm -f "${TMPDIR:-/tmp}/simpleos-case-hashes.$$"
+        fail "case-artifact-hash-reuse"
+    }
+    rm -f "${TMPDIR:-/tmp}/simpleos-case-hashes.$$"
+}
+
+expected_gate_for() {
+    case "$1" in
+        REQ-001|REQ-020|NFR-001|NFR-007|NFR-012|NFR-014) printf '%s' receipt-snapshot-signing-collection ;;
+        REQ-002|REQ-003|REQ-004|REQ-005|REQ-006|REQ-007|REQ-008|NFR-006|NFR-011) printf '%s' qemu-multiarch-fs ;;
+        REQ-009|REQ-010|REQ-011|NFR-013) printf '%s' guest-toolchain ;;
+        REQ-012|REQ-013|REQ-014|REQ-015|REQ-016|NFR-010) printf '%s' servers-live ;;
+        REQ-017) printf '%s' wm-capture-readback ;;
+        REQ-018|REQ-019|NFR-002|NFR-003|NFR-004|NFR-005|NFR-008|NFR-009) printf '%s' perf-fuzz-soak-evidence-matrix ;;
+        *) return 1 ;;
+    esac
+}
+
+capture_case_row() {
+    req="$1"; evidence_case="$2"
+    gate="$(expected_gate_for "$req")" || fail "case-capture-unmapped:$req"
+    gate_capture="$LIVE_CAPTURE_ROOT/gates/$gate.snapshot"
+    [ -f "$gate_capture" ] || fail "preceding-gate-capture-missing:$req:$gate"
+    semantics=accepted
+    [ "$evidence_case" = boundary ] && semantics=boundary-observed
+    [ "$evidence_case" = rejection ] && semantics=rejection-observed
+    case_dir="$LIVE_CAPTURE_ROOT/cases/$req/$evidence_case"
+    mkdir -p "$case_dir"
+    raw="$case_dir/raw.snapshot"
+    registry_row="$(case_registry_rows | awk -F '|' -v r="$req" -v c="$evidence_case" '$1 == r && $2 == c {print}')"
+    [ -n "$registry_row" ] || fail "case-registry-row-absent:$req:$evidence_case"
+    scenario_owner="$(printf '%s\n' "$registry_row" | cut -d '|' -f3)"
+    scenario_oracle="$(printf '%s\n' "$registry_row" | cut -d '|' -f4)"
+    target="$(printf '%s\n' "$registry_row" | cut -d '|' -f5)"
+    target_abi="$(printf '%s\n' "$registry_row" | cut -d '|' -f6)"
+    environment="$(printf '%s\n' "$registry_row" | cut -d '|' -f7)"
+    filesystem="$(printf '%s\n' "$registry_row" | cut -d '|' -f8)"
+    protocol_profile="$(printf '%s\n' "$registry_row" | cut -d '|' -f9)"
+    image_selector="$(printf '%s\n' "$registry_row" | cut -d '|' -f10)"
+    [ -f "$scenario_owner" ] && [ ! -L "$scenario_owner" ] || fail "registered-case-owner-invalid:$req:$evidence_case"
+    case "$req" in
+        REQ-002|REQ-008|REQ-009|REQ-010|REQ-011|REQ-012|REQ-013|REQ-014|REQ-015|REQ-016|REQ-017|NFR-001)
+            [ "$environment" = qemu_system ] ||
+                fail "qemu-case-owner-not-provisioned:$req:$evidence_case:$scenario_owner"
+            ;;
+    esac
+    if [ "$environment" = qemu_system ]; then
+        case "$scenario_owner" in *.spl) fail "qemu-case-command-is-host-interpreter:$req:$evidence_case:$scenario_owner" ;; esac
+    fi
+    exact_argv="$SIMPLE_BIN test $scenario_owner --mode=interpreter"
+    if "$SIMPLE_BIN" test "$scenario_owner" --mode=interpreter >"$raw" 2>&1; then producer_exit=0; else producer_exit="$?"; fi
+    [ "$producer_exit" -eq 0 ] || fail "case-specific-acceptance-failed:$req:$evidence_case:$producer_exit"
+    grep -Fq "$scenario_oracle" "$raw" || fail "registered-case-oracle-not-observed:$req:$evidence_case"
+    grep -Eq "SPEC FILE VERDICT: $scenario_owner outcome=OK declared>=[0-9]+ executed=[1-9][0-9]* passed=[1-9][0-9]* failed=0 skipped=0 dropped=0" "$raw" ||
+        fail "registered-case-execution-not-proven:$req:$evidence_case"
+    artifact="$case_dir/artifact.snapshot"
+    {
+        printf 'run_id=%s\nrequirement_id=%s\nevidence_case=%s\ncase_semantics=%s\nproducer_gate=%s\nproducer_exit_code=%s\nexact_argv=%s\n' \
+            "$RUN_ID" "$req" "$evidence_case" "$semantics" "$gate" "$producer_exit" "$exact_argv"
+        printf '%s\n' '--- preceding-gate-capture ---'; cat "$gate_capture"
+        printf 'scenario_owner=%s\nscenario_oracle=%s\ntarget=%s\ntarget_abi=%s\nenvironment=%s\nfilesystem=%s\nprotocol_profile=%s\n' \
+            "$scenario_owner" "$scenario_oracle" "$target" "$target_abi" "$environment" "$filesystem" "$protocol_profile"
+        printf '%s\n' '--- registered-case-owner-stdout-stderr ---'; cat "$raw"
+    } >"$artifact"
+    # Bind exact real bytes. The producer copies and hashes these files; the
+    # runner never projects identities into metadata masquerading as snapshots.
+    source="$scenario_owner"
+    case "$image_selector" in
+        native-runtime) image="$SIMPLE_BIN" ;;
+        arm64-guest-image) image="${SIMPLEOS_ARM64_BUNDLE:-}/guest.img" ;;
+        x86_64-guest-image) image="${SIMPLEOS_X86_64_BUNDLE:-}/guest.img" ;;
+        riscv64-guest-image) image="${SIMPLEOS_RISCV64_BUNDLE:-}/guest.img" ;;
+        *) fail "case-real-guest-image-unprovisioned:$req:$evidence_case:$image_selector" ;;
+    esac
+    [ -f "$image" ] && [ ! -L "$image" ] || fail "case-real-image-invalid:$req:$evidence_case:$image"
+    binary="$SIMPLE_BIN"; config="$TRUST_CONFIG"
+    captured="$(date +%s)000000"
+    ah="$(sha256sum "$artifact" | awk '{print $1}')"; gh="$(sha256sum "$gate_capture" | awk '{print $1}')"
+    shash="$(sha256sum "$source" | awk '{print $1}')"; ih="$(sha256sum "$image" | awk '{print $1}')"
+    bh="$(sha256sum "$binary" | awk '{print $1}')"; ch="$(sha256sum "$config" | awk '{print $1}')"
+    ledger="$case_dir/capture-ledger.v1"
+    printf 'run_id=%s\nnonce=%s:%s:%s\nrequirement_id=%s\nevidence_case=%s\nproducer_gate=%s\ngate_capture_sha256=%s\nartifact_sha256=%s\nproducer_exit_code=%s\n' \
+        "$RUN_ID" "$RUN_ID" "$req" "$evidence_case" "$req" "$evidence_case" "$gate" "$gh" "$ah" "$producer_exit" >"$ledger"
+    lh="$(sha256sum "$ledger" | awk '{print $1}')"
+    descriptor="$case_dir/descriptor"
+    printf 'requirement_id=%s\nevidence_case=%s\ncase_semantics=%s\nproducer_gate=%s\nproducer_exit_code=%s\nrun_id=%s\nscenario_owner=%s\nscenario_oracle=%s\ntarget=%s\ntarget_abi=%s\nenvironment=%s\nfilesystem=%s\nprotocol_profile=%s\nexact_argv=%s\ncaptured_unix_us=%s\nartifact_sha256=%s\nsource_sha256=%s\nimage_sha256=%s\nbinary_sha256=%s\nconfig_sha256=%s\ncapture_ledger_sha256=%s\n' \
+        "$req" "$evidence_case" "$semantics" "$gate" "$producer_exit" "$RUN_ID" "$scenario_owner" "$scenario_oracle" "$target" "$target_abi" "$environment" "$filesystem" "$protocol_profile" "$exact_argv" "$captured" "$ah" "$shash" "$ih" "$bh" "$ch" "$lh" >"$descriptor"
+    printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+        "$req" "$evidence_case" "$gate" "$semantics" "$producer_exit" "$descriptor" "$artifact" "$source" "$image" "$binary" "$config" "$exact_argv" "$ledger" "$scenario_owner" "$target" "$target_abi" "$environment" "$filesystem" "$protocol_profile" "$image_selector" >>"$CASE_MANIFEST"
+}
+
+require_live_input() {
+    input_name="$1"
+    input_value="$2"
+    [ -n "$input_value" ] || fail "provision-input-not-set:$input_name"
+    [ -e "$input_value" ] || fail "provision-input-missing:$input_name:$input_value"
+}
+
+run_gate() {
+    gate_name="$1"
+    shift
+    phase="live-$gate_name"
+    capture="$LIVE_CAPTURE_ROOT/gates/$gate_name.snapshot"
+    if "$@" >"$capture" 2>&1; then
+        cat "$capture"
+    else
+        rc="$?"; cat "$capture" >&2; fail "producer-gate-failed:$gate_name:$rc"
+    fi
+    completed=$((completed + 1))
+}
+
+print_graph() {
+    printf '%s\n' \
+        '01 receipt-snapshot-signing-collection' \
+        '02 qemu-x86_64-admission' \
+        '03 qemu-arm64-admission' \
+        '04 qemu-riscv64-admission' \
+        '05 guest-toolchain' \
+        '06 servers-live' \
+        '07 wm-capture-readback' \
+        '08 perf-fuzz-soak-evidence-matrix' \
+        '09 canonical-owner-snapshot-and-sign (34 requirements x 3 cases)' \
+        '10 umbrella-authentic-admission'
+}
+
+self_test() {
+    phase=self-test
+    tmp="${TMPDIR:-/tmp}/simpleos-nonbootstrap-acceptance.$$"
+    mkdir -p "$tmp"
+    fake="$tmp/simple"
+    printf '#!/usr/bin/env sh\nexit 0\n' >"$fake"
+    chmod +x "$fake"
+    SIMPLE_BIN="$fake" SUMMARY_PATH="$tmp/summary.json" sh "$0" --focused-only >/dev/null
+    grep -Fq '"status":"pass"' "$tmp/summary.json" || fail "selftest-pass-summary"
+    if SIMPLE_BIN="$tmp/missing" SUMMARY_PATH="$tmp/fail.json" sh "$0" --focused-only >/dev/null 2>&1; then
+        fail "selftest-missing-runtime-was-accepted"
+    fi
+    grep -Fq '"status":"fail"' "$tmp/fail.json" || fail "selftest-fail-summary"
+    print_graph >"$tmp/graph"
+    expected='01 receipt-snapshot-signing-collection
+02 qemu-x86_64-admission
+03 qemu-arm64-admission
+04 qemu-riscv64-admission
+05 guest-toolchain
+06 servers-live
+07 wm-capture-readback
+08 perf-fuzz-soak-evidence-matrix
+09 canonical-owner-snapshot-and-sign (34 requirements x 3 cases)
+10 umbrella-authentic-admission'
+    [ "$(cat "$tmp/graph")" = "$expected" ] || fail "selftest-command-graph-order"
+    canonical_paths >"$tmp/canonical-paths"
+    [ "$(wc -l <"$tmp/canonical-paths" | tr -d ' ')" -eq 102 ] || fail "selftest-canonical-path-count"
+    [ "$(sort -u "$tmp/canonical-paths" | wc -l | tr -d ' ')" -eq 102 ] || fail "selftest-canonical-path-uniqueness"
+    while IFS= read -r path; do
+        case "$path" in
+            "$CANONICAL_EVIDENCE_ROOT"/REQ-*/happy/receipt.v1.bin|\
+            "$CANONICAL_EVIDENCE_ROOT"/REQ-*/boundary/receipt.v1.bin|\
+            "$CANONICAL_EVIDENCE_ROOT"/REQ-*/rejection/receipt.v1.bin|\
+            "$CANONICAL_EVIDENCE_ROOT"/NFR-*/happy/receipt.v1.bin|\
+            "$CANONICAL_EVIDENCE_ROOT"/NFR-*/boundary/receipt.v1.bin|\
+            "$CANONICAL_EVIDENCE_ROOT"/NFR-*/rejection/receipt.v1.bin) : ;;
+            *) fail "selftest-noncanonical-path:$path" ;;
+        esac
+    done <"$tmp/canonical-paths"
+    grep -Fq 'receipt.v1.bin' "$TRACE_GATE" || fail "selftest-consumer-receipt-name-drift"
+    grep -Fq 'source.snapshot' test/helpers/simpleos_complete_os_hardening_steps.spl || fail "selftest-consumer-snapshot-name-drift"
+    RUN_ID=selftest-run
+    LIVE_CAPTURE_ROOT="$tmp"
+    : >"$tmp/cases.manifest"
+    binding_rows | while IFS="$(printf '\t')" read -r req owner; do
+        case "$req" in
+            REQ-001|REQ-020|NFR-001|NFR-007|NFR-012|NFR-014) test_gate=receipt-snapshot-signing-collection ;;
+            REQ-002|REQ-003|REQ-004|REQ-005|REQ-006|REQ-007|REQ-008|NFR-006|NFR-011) test_gate=qemu-multiarch-fs ;;
+            REQ-009|REQ-010|REQ-011|NFR-013) test_gate=guest-toolchain ;;
+            REQ-012|REQ-013|REQ-014|REQ-015|REQ-016|NFR-010) test_gate=servers-live ;;
+            REQ-017) test_gate=wm-capture-readback ;;
+            *) test_gate=perf-fuzz-soak-evidence-matrix ;;
+        esac
+        for evidence_case in happy boundary rejection; do
+            test_semantics=accepted
+            [ "$evidence_case" = boundary ] && test_semantics=boundary-observed
+            [ "$evidence_case" = rejection ] && test_semantics=rejection-observed
+            base="$tmp/$req-$evidence_case"; mkdir -p "$base"
+            printf 'case-specific-output:%s:%s\n' "$req" "$evidence_case" >"$base/artifact"
+            for kind in source image binary config; do printf '%s:%s:%s\n' "$kind" "$req" "$evidence_case" >"$base/$kind"; done
+            ah="$(sha256sum "$base/artifact" | awk '{print $1}')"
+            shash="$(sha256sum "$base/source" | awk '{print $1}')"; ih="$(sha256sum "$base/image" | awk '{print $1}')"
+            bh="$(sha256sum "$base/binary" | awk '{print $1}')"; ch="$(sha256sum "$base/config" | awk '{print $1}')"
+            printf 'run_id=selftest-run\nrequirement_id=%s\nevidence_case=%s\nartifact_sha256=%s\nproducer_exit_code=0\n' \
+                "$req" "$evidence_case" "$ah" >"$base/ledger"
+            lh="$(sha256sum "$base/ledger" | awk '{print $1}')"
+            now_us="$(date +%s)000000"
+            printf 'requirement_id=%s\nevidence_case=%s\ncase_semantics=%s\nproducer_gate=%s\nproducer_exit_code=0\nrun_id=selftest-run\ncaptured_unix_us=%s\nartifact_sha256=%s\nsource_sha256=%s\nimage_sha256=%s\nbinary_sha256=%s\nconfig_sha256=%s\ncapture_ledger_sha256=%s\n' \
+                "$req" "$evidence_case" "$test_semantics" "$test_gate" "$now_us" "$ah" "$shash" "$ih" "$bh" "$ch" "$lh" >"$base/descriptor"
+            registry_row="$(case_registry_rows | awk -F '|' -v r="$req" -v c="$evidence_case" '$1 == r && $2 == c {print}')"
+            scenario_owner="$(printf '%s\n' "$registry_row" | cut -d '|' -f3)"
+            target="$(printf '%s\n' "$registry_row" | cut -d '|' -f5)"
+            target_abi="$(printf '%s\n' "$registry_row" | cut -d '|' -f6)"
+            environment="$(printf '%s\n' "$registry_row" | cut -d '|' -f7)"
+            filesystem="$(printf '%s\n' "$registry_row" | cut -d '|' -f8)"
+            protocol_profile="$(printf '%s\n' "$registry_row" | cut -d '|' -f9)"
+            image_selector="$(printf '%s\n' "$registry_row" | cut -d '|' -f10)"
+            printf '%s|%s|%s|%s|0|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$req" "$evidence_case" "$test_gate" "$test_semantics" \
+                "$base/descriptor" "$base/artifact" "$base/source" "$base/image" "$base/binary" "$base/config" "case-command-$req-$evidence_case" "$base/ledger" "$scenario_owner" "$target" "$target_abi" "$environment" "$filesystem" "$protocol_profile" "$image_selector" >>"$tmp/cases.manifest"
+        done
+    done
+    validate_case_manifest "$tmp/cases.manifest" selftest
+    cp "$tmp/cases.manifest" "$tmp/bad.manifest"
+    first_artifact="$(cut -d '|' -f7 "$tmp/bad.manifest" | sed -n '1p')"
+    awk -F '|' -v OFS='|' -v shared="$first_artifact" 'NR == 2 {$7 = shared} {print}' "$tmp/bad.manifest" >"$tmp/reused.manifest"
+    if (validate_case_manifest "$tmp/reused.manifest" selftest) >/dev/null 2>&1; then fail "selftest-reused-case-artifact-accepted"; fi
+    awk -F '|' -v OFS='|' 'NR == 3 {$4 = "accepted"} {print}' "$tmp/bad.manifest" >"$tmp/relabeled.manifest"
+    if (validate_case_manifest "$tmp/relabeled.manifest" selftest) >/dev/null 2>&1; then fail "selftest-relabeled-rejection-accepted"; fi
+    tamper_artifact="$(cut -d '|' -f7 "$tmp/bad.manifest" | sed -n '1p')"
+    printf 'tampered\n' >>"$tamper_artifact"
+    if (validate_case_manifest "$tmp/bad.manifest" selftest) >/dev/null 2>&1; then fail "selftest-tampered-capture-accepted"; fi
+    rm -rf "$tmp"
+    completed=$((completed + 1))
+}
+
+case "$mode" in
+    --all) static_gates; focused_gates; live_gates ;;
+    --static-only) static_gates ;;
+    --focused-only) focused_gates ;;
+    --live-only) live_gates ;;
+    --self-test) self_test ;;
+    --dry-run) canonical_paths; completed=102 ;;
+    --print-graph) print_graph; completed=10 ;;
+    *) fail "usage:$0 [--all|--static-only|--focused-only|--live-only|--dry-run|--print-graph|--self-test]" ;;
+esac
+
+phase=complete
+status=pass
+reason=none
+exit 0

@@ -1,0 +1,78 @@
+#!/usr/bin/env sh
+# Contract coverage for the one-command SimpleOS evidence publication graph.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)"
+cd "$ROOT_DIR"
+
+runner=scripts/check/check-simpleos-nonbootstrap-acceptance.shs
+rv64_runner=scripts/check/check-rv64-authenticated-execution-qemu.shs
+rv64_spec=test/03_system/os/qemu/rv64_authenticated_execution_evidence_live_spec.spl
+producer=src/app/simpleos_evidence_receipt_producer/main.spl
+registry=scripts/check/simpleos-nonbootstrap-case-registry.shs
+sh -n "$runner"
+sh -n "$rv64_runner"
+sh "$runner" --self-test >/dev/null
+[ -f "$producer" ]
+[ -f "$registry" ]
+grep -Fq 'encode_simpleos_evidence_receipt_v1_signing_bytes' "$producer"
+grep -Fq 'pure_ed25519_sign' "$producer"
+grep -Fq 'pure_ed25519_verify' "$producer"
+grep -Fq 'signing-key-not-provisioned-by-trust-config' "$producer"
+grep -Fq 'atomic-directory-publish' "$producer"
+grep -Fq 'case-descriptor-evidence-mismatch' "$producer"
+grep -Fq 'rejection-observed' "$producer"
+grep -Fq 'artifact-1.snapshot' "$producer"
+grep -Fq 'artifact-2.snapshot' "$producer"
+grep -Fq 'runner-capture-ledger-mismatch' "$producer"
+for field in scenario_owner scenario_oracle target target_abi environment filesystem protocol_profile exact_argv; do
+    grep -Fq "_trust_field(descriptor, \"$field=\")" "$producer"
+done
+grep -Fq 'case-manifest-not-runner-owned' "$runner"
+grep -Fq 'simpleos_case_registry' "$registry"
+grep -Fq 'registered-case-oracle-not-observed' "$runner"
+grep -Fq 'ambiguous-snapshot-byte-share' "$runner"
+grep -Fq 'qemu-case-owner-not-provisioned' "$runner"
+! grep -Fq 'SIMPLEOS_EVIDENCE_CASE_MANIFEST' "$runner"
+! grep -Eq 'pass_todo|expect\(true\)\.to_equal\(true\)' "$producer"
+grep -Fq -- '--bundle "$SIMPLEOS_RISCV64_BUNDLE"' "$runner"
+! grep -Fq 'SIMPLEOS_RV64_AUTH_EXEC_BUNDLE_NONCE' "$runner"
+! grep -Fq 'SIMPLEOS_RV64_AUTH_EXEC_IMAGE_HASH' "$runner"
+grep -Fq 'program_hash=$(sha256sum "$program"' "$rv64_runner"
+grep -Fq 'timeout -k 5 120 "$qemu"' "$rv64_runner"
+grep -Fq 'SIMPLEOS_RV64_AUTH_EXEC_BINDING_FILE="$binding"' "$rv64_runner"
+grep -Fq 'SIMPLEOS_RV64_AUTH_EXEC_BINDING_FILE' "$rv64_spec"
+! grep -Fq 'SIMPLEOS_RV64_AUTH_EXEC_BUNDLE_NONCE' "$rv64_spec"
+! grep -Fq 'SIMPLEOS_RV64_AUTH_EXEC_IMAGE_HASH' "$rv64_spec"
+
+tmp="${TMPDIR:-/tmp}/simpleos-nonbootstrap-contract.$$"
+trap 'rm -rf "$tmp"' EXIT
+mkdir -p "$tmp"
+. "$registry"
+simpleos_case_registry >"$tmp/registry"
+[ "$(wc -l <"$tmp/registry" | tr -d ' ')" -eq 102 ]
+[ "$(cut -d '|' -f1,2 "$tmp/registry" | sort -u | wc -l | tr -d ' ')" -eq 102 ]
+# Representative filesystem, protocol, and WM rows must execute different
+# owner programs for happy, exact-boundary, and malformed/rejection behavior.
+for req in REQ-004 REQ-013 REQ-015 REQ-017 NFR-010; do
+    [ "$(awk -F '|' -v r="$req" '$1 == r {print $3}' "$tmp/registry" | sort -u | wc -l | tr -d ' ')" -eq 3 ]
+    [ "$(awk -F '|' -v r="$req" '$1 == r {print $4}' "$tmp/registry" | sort -u | wc -l | tr -d ' ')" -eq 3 ]
+done
+while IFS='|' read -r req evidence_case spec oracle target abi environment filesystem protocol image_selector; do
+    [ -f "$spec" ]
+    [ -n "$oracle" ] && [ -n "$target" ] && [ -n "$abi" ]
+    [ "$environment" = native_host ] || [ "$environment" = qemu_system ]
+    [ -n "$image_selector" ]
+done <"$tmp/registry"
+sh "$runner" --dry-run >"$tmp/paths"
+[ "$(wc -l <"$tmp/paths" | tr -d ' ')" -eq 102 ]
+[ "$(sort -u "$tmp/paths" | wc -l | tr -d ' ')" -eq 102 ]
+[ "$(grep -Ec '/(happy|boundary|rejection)/receipt\.v1\.bin$' "$tmp/paths")" -eq 102 ]
+[ "$(grep -Ec '/REQ-[0-9]+/' "$tmp/paths")" -eq 60 ]
+[ "$(grep -Ec '/NFR-[0-9]+/' "$tmp/paths")" -eq 42 ]
+
+graph="$(sh "$runner" --print-graph)"
+printf '%s\n' "$graph" | grep -Fq '09 canonical-owner-snapshot-and-sign (34 requirements x 3 cases)'
+printf '%s\n' "$graph" | grep -Fq '10 umbrella-authentic-admission'
+
+echo 'PASS: SimpleOS non-bootstrap canonical producer graph contract'

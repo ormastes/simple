@@ -3,11 +3,90 @@
 use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.arch.user_entry_bridge.{dispatch_fs_exec_user_handoff}
 use os.kernel.loader.fs_exec_spawn.{fs_exec_prepare_spawn}
+use os.kernel.loader.fs_exec_spawn.{fs_exec_adopt_authenticated_v1}
+use std.fs_driver.mount_table.{MountTable}
+use os.kernel.loader.executable_authority_registry.{ExecutableAuthorityRegistryV1, ExecutableAuthorityTokenV1}
+use os.kernel.loader.executable_load_plan_v1.{ExecutableLoadConsumerV1}
+use os.kernel.scheduler.scheduler_types.{Scheduler}
+use os.kernel.scheduler.process_execution_observation.{
+    SchedulerExecutionEvidenceTokenV1, scheduler_execution_take_reaped_token_v1,
+    scheduler_execution_evidence_consume_once_v1
+}
+use std.fs_driver.bytes_util.{text_to_bytes_pure}
 use os.kernel.arch.riscv64.process_stdout_capture.{Rv64ProcessStdoutResult, rv64_process_stdout_begin, rv64_process_stdout_finish}
 use os.kernel.types.task_types.{TaskId}
 use os.kernel.scheduler.scheduler.{wait_collect_result_error, wait_collect_result_status}
 
 extern fn serial_println(msg: text)
+
+pub struct Rv64AuthenticatedExecutionResultV1:
+    exit_code: i64
+    evidence: SchedulerExecutionEvidenceTokenV1?
+
+pub fn riscv64_fs_exec_spawn_authenticated_capture_v1(
+    scheduler: Scheduler,
+    table: MountTable,
+    authorities: ExecutableAuthorityRegistryV1,
+    token: ExecutableAuthorityTokenV1,
+    consumer: ExecutableLoadConsumerV1,
+    entry_point: u64,
+    caller: i64,
+    path: text,
+    recipe: i64
+) -> Rv64AuthenticatedExecutionResultV1:
+    """Authenticated RV64 adoption, stdout capture, exit, reap, and token handoff."""
+    rv64_process_stdout_begin()
+    val prepared = fs_exec_adopt_authenticated_v1(
+        scheduler, table, authorities, token, consumer, entry_point, caller, path, recipe)
+    if prepared.pid <= 0:
+        return Rv64AuthenticatedExecutionResultV1(
+            exit_code: rv64_process_stdout_finish(prepared.pid).exit_code, evidence: nil)
+    serial_println("RV64_AUTH_EXEC_ADOPTION status=authorized")
+    val child = TaskId(id: prepared.pid.to_u64())
+    val exit_code = dispatch_fs_exec_user_handoff(Architecture.Riscv64, child.id, prepared.scheduler)
+    var owner = prepared.scheduler
+    owner.exit_task_by_id(child, exit_code.to_i32())
+    val collected = owner.wait_for_collect(TaskId(id: 0), child, false)
+    val captured = rv64_process_stdout_finish(exit_code)
+    if wait_collect_result_error(collected) != 0 or
+       wait_collect_result_status(collected) != exit_code.to_i32():
+        return Rv64AuthenticatedExecutionResultV1(exit_code: -10, evidence: nil)
+    serial_println("RV64_AUTH_EXEC_EXIT code={captured.exit_code}")
+    val evidence = scheduler_execution_take_reaped_token_v1(child.id)
+    if evidence.?:
+        serial_println("RV64_AUTH_EXEC_REAP count=1 token=issued")
+    Rv64AuthenticatedExecutionResultV1(
+        exit_code: captured.exit_code,
+        evidence: evidence)
+
+pub fn riscv64_authenticated_execution_acceptance_fixture_v1(
+    scheduler: Scheduler, table: MountTable,
+    authorities: ExecutableAuthorityRegistryV1, token: ExecutableAuthorityTokenV1,
+    consumer: ExecutableLoadConsumerV1, entry_point: u64, caller: i64,
+    path: text, recipe: i64, bundle_nonce: text, expected_image_hash: text
+) -> bool:
+    """In-guest live fixture; uses only the production adoption and evidence APIs."""
+    if bundle_nonce == "" or expected_image_hash == "":
+        return false
+    val run = riscv64_fs_exec_spawn_authenticated_capture_v1(
+        scheduler, table, authorities, token, consumer, entry_point, caller, path, recipe)
+    if run.exit_code != 0 or not run.evidence.?:
+        return false
+    val evidence_token = run.evidence.unwrap()
+    val consumed = scheduler_execution_evidence_consume_once_v1(evidence_token)
+    if not consumed.?:
+        return false
+    val evidence = consumed.unwrap()
+    if evidence.image_hash != expected_image_hash or
+       evidence.stdout_bytes != text_to_bytes_pure("hello from SimpleOS LLVM\n"):
+        return false
+    serial_println("RV64_AUTH_EXEC_STDOUT nonce={bundle_nonce} image={evidence.image_hash} value=hello from SimpleOS LLVM")
+    serial_println("RV64_AUTH_EXEC_TOKEN_CONSUME nonce={bundle_nonce} image={evidence.image_hash} count=1 status=pass")
+    if scheduler_execution_evidence_consume_once_v1(evidence_token).?:
+        return false
+    serial_println("RV64_AUTH_EXEC_TOKEN_REPLAY nonce={bundle_nonce} image={evidence.image_hash} status=rejected")
+    serial_println("RV64_AUTH_EXEC_ACCEPTANCE nonce={bundle_nonce} image={evidence.image_hash} status=pass")
+    true
 
 pub fn riscv64_fs_exec_spawn_ring3(path: text, argv: [text], envp: [text]) -> i64:
     """Prepare one filesystem image and block until its RV64 user task exits."""

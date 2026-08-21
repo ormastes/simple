@@ -47,6 +47,7 @@ use os.kernel.scheduler.scheduler_types.{
     _initial_user_task_context, scheduler_next_task_id_take
 }
 use os.kernel.scheduler.scheduler_task_mgmt.{_find_empty_slot_in}
+use os.kernel.scheduler.process_execution_observation.{scheduler_execution_observe_adoption_v1}
 use os.kernel.scheduler.capability_bridge.{cap_init_task_record}
 use os.kernel.ipc.capability.{register_task_vmspace}
 export use os.kernel.scheduler.scheduler_executable_adoption_transition.{
@@ -120,6 +121,17 @@ impl SchedulerExecutableAdoptionResultV1:
         out
 
 impl Scheduler:
+    fn _authenticated_consumer_arch_matches_v1(
+        consumer: ExecutableLoadConsumerV1, arch: Architecture
+    ) -> bool:
+        if arch == Architecture.X86_64:
+            return consumer.expected_arch == "x86_64"
+        if arch == Architecture.Riscv64:
+            return consumer.expected_arch == "riscv64"
+        if arch == Architecture.Arm64:
+            return consumer.expected_arch == "arm64"
+        false
+
     me _record_authenticated_executable_adoption_v1(
         state: SchedulerExecutableAdoptionOwnerStateV1,
         pid: u64,
@@ -169,7 +181,8 @@ impl Scheduler:
         self._record_authenticated_executable_adoption_v1(
             prepared_owner.state, 0u64, token)
         val handle = retrieved.unwrap().image_handle
-        if consumer.expected_arch != "x86_64" or get_arch() != Architecture.X86_64:
+        val active_arch = get_arch()
+        if not self._authenticated_consumer_arch_matches_v1(consumer, active_arch):
             self._record_authenticated_executable_adoption_v1(
                 SchedulerExecutableAdoptionOwnerStateV1.Quarantined, 0u64, token)
             return _scheduler_adoption_fail_and_close(
@@ -177,7 +190,7 @@ impl Scheduler:
                 ExecutableLoadConsumerErrorV1.RollbackUnavailable)
 
         val prepared = executable_prepare_image_v1(
-            table, handle, consumer, entry_point, Architecture.X86_64)
+            table, handle, consumer, entry_point, active_arch)
         if prepared.is_err():
             self._record_authenticated_executable_adoption_v1(
                 SchedulerExecutableAdoptionOwnerStateV1.Quarantined, 0u64, token)
@@ -224,6 +237,13 @@ impl Scheduler:
                 ExecutableLoadConsumerErrorV1.ConsumerExhausted)
 
         val id = TaskId(id: scheduler_next_task_id_take())
+        if not scheduler_execution_observe_adoption_v1(id.id, self.current.id, handle):
+            destroy_user_address_space(space)
+            self._record_authenticated_executable_adoption_v1(
+                SchedulerExecutableAdoptionOwnerStateV1.Quarantined, 0u64, token)
+            return _scheduler_adoption_fail_and_close(
+                table, authorities, token, consumer,
+                ExecutableLoadConsumerErrorV1.ConsumerExhausted)
         val user_ctx = _initial_user_task_context(entry_point, user_sp)
         val tcb = TaskControlBlock(
             id: id, name: "authenticated-user-{id.id}",

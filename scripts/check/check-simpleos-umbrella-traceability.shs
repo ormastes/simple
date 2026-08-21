@@ -138,9 +138,11 @@ while IFS="$(printf '\t')" read -r req owner; do
         missing_owner="$missing_owner $req=${owner:-none}"
         continue
     fi
-    if [ ! -d "$RECEIPT_DIR/$req" ]; then
-        blocked="$blocked $req"
-    fi
+    for evidence_case in happy boundary rejection; do
+        if [ ! -f "$RECEIPT_DIR/$req/$evidence_case/receipt.v1.bin" ]; then
+            blocked="$blocked $req:$evidence_case"
+        fi
+    done
 done <"$tmp"
 
 if [ "$checked" -eq 0 ]; then
@@ -158,6 +160,22 @@ if [ -n "$blocked" ]; then
     echo "FAIL — $checked binding(s) checked, $(printf '%s' "$blocked" | wc -w | tr -d ' ') BLOCKED (receipt-absent), 0 unbound, 0 missing owners"
     exit 1
 fi
+
+# File layout is only discovery.  The executable specs perform canonical
+# decode, exact-byte artifact rehash, Ed25519 trust-root verification, nonce
+# consumption, and serialized ledger admission for every declared row.
+SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
+if [ ! -x "$SIMPLE_BIN" ]; then
+    echo "ERROR — authentic admission was not run: Simple runtime unavailable at $SIMPLE_BIN"
+    exit 2
+fi
+for spec in "$SPEC_DIR"/simpleos_complete_os_hardening_*_spec.spl; do
+    [ -f "$spec" ] || continue
+    if ! "$SIMPLE_BIN" test "$spec" --mode=interpreter; then
+        echo "FAIL — authentic umbrella admission rejected by $spec"
+        exit 1
+    fi
+done
 
 echo "PASS — $checked binding(s) checked, 0 unbound, 0 missing owners, 0 blocked"
 exit 0

@@ -1,0 +1,90 @@
+# @cover src/os/services/evidence/umbrella_admission.spl 80%
+# @req REQ-001 NFR-007
+
+use std.spec.*
+use os.services.evidence.umbrella_admission.{
+    SIMPLEOS_UMBRELLA_MAX_RECEIPT_AGE_US,
+    simpleos_umbrella_admit_exact_evidence_v1,
+    simpleos_umbrella_receipt_freshness_reason_v1,
+    simpleos_umbrella_persist_nonce_once_v1,
+    simpleos_umbrella_persist_admitted_nonce_v1
+}
+use os.services.evidence.artifact_snapshot.{SimpleOsEvidenceArtifactSnapshotV1}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_delete}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+
+fn empty_snapshot() -> SimpleOsEvidenceArtifactSnapshotV1:
+    SimpleOsEvidenceArtifactSnapshotV1(
+        source_manifest_bytes: [], image_bytes: [], binary_bytes: [],
+        config_bytes: [], artifact_bytes: [],
+        performance_fixture_artifact_index: -1)
+
+describe "SimpleOS umbrella authentic evidence admission":
+    it "accepts only a current bounded receipt interval":
+        expect(simpleos_umbrella_receipt_freshness_reason_v1(
+            100, 120, 121)).to_equal("")
+        expect(simpleos_umbrella_receipt_freshness_reason_v1(
+            100, 120, 119)).to_equal("receipt-from-future")
+        expect(simpleos_umbrella_receipt_freshness_reason_v1(
+            100, 120, 120 + SIMPLEOS_UMBRELLA_MAX_RECEIPT_AGE_US + 1)).to_equal(
+                "receipt-expired")
+
+    it "persists nonce consumption across independent calls":
+        val path = "build/test-artifacts/simpleos-umbrella-test/replay-ledger.v1"
+        expect(dir_create_all("build/test-artifacts/simpleos-umbrella-test")).to_be(true)
+        file_delete(path)
+        file_delete(path + ".lock")
+        expect(simpleos_umbrella_persist_nonce_once_v1(
+            path, "persistent-replay-nonce")).to_equal("")
+        expect(simpleos_umbrella_persist_nonce_once_v1(
+            path, "persistent-replay-nonce")).to_equal(
+                "nonce-replay-persistent")
+
+    it "rejects more than the in-memory nonce bound without growing state":
+        val path = "build/test-artifacts/simpleos-umbrella-test/replay-stress.v1"
+        file_delete(path)
+        file_delete(path + ".lock")
+        expect(simpleos_umbrella_persist_nonce_once_v1(
+            path, "persistent-stress-nonce")).to_equal("")
+        var replay: i64 = 0
+        while replay < 4097:
+            expect(simpleos_umbrella_persist_nonce_once_v1(
+                path, "persistent-stress-nonce")).to_equal(
+                    "nonce-replay-persistent")
+            replay = replay + 1
+
+    it "does not burn a nonce when commit fails and permits its retry":
+        val path = "build/test-artifacts/simpleos-umbrella-test/commit-retry.v1"
+        file_delete(path)
+        file_delete(path + ".lock")
+        expect(simpleos_umbrella_persist_admitted_nonce_v1(
+            path, "failed-commit-retry-nonce", false)).to_equal(
+                "row-not-admitted")
+        expect(simpleos_umbrella_persist_admitted_nonce_v1(
+            path, "failed-commit-retry-nonce", true)).to_equal("")
+        expect(simpleos_umbrella_persist_admitted_nonce_v1(
+            path, "failed-commit-retry-nonce", true)).to_equal(
+                "nonce-replay-persistent")
+
+    it "recovers a crash-pending nonce as retryable rather than consumed":
+        val path = "build/test-artifacts/simpleos-umbrella-test/crash-retry.v1"
+        file_delete(path)
+        file_delete(path + ".lock")
+        expect(file_atomic_write(path, "P crash-retry-nonce\n")).to_be(true)
+        expect(simpleos_umbrella_persist_admitted_nonce_v1(
+            path, "crash-retry-nonce", true)).to_equal("")
+        expect(simpleos_umbrella_persist_admitted_nonce_v1(
+            path, "crash-retry-nonce", true)).to_equal(
+                "nonce-replay-persistent")
+    it "fails closed when a receipt is absent":
+        val result = simpleos_umbrella_admit_exact_evidence_v1(
+            "REQ-001", "simpleos-complete-os-umbrella", [], [], empty_snapshot())
+        expect(result.ok).to_be(false)
+        expect(result.reason).to_equal("receipt-decode")
+
+    it "fails closed when arbitrary bytes claim to be a receipt":
+        val result = simpleos_umbrella_admit_exact_evidence_v1(
+            "REQ-001", "simpleos-complete-os-umbrella", [],
+            [83u8, 79u8, 83u8, 49u8], empty_snapshot())
+        expect(result.ok).to_be(false)
+        expect(result.reason).to_equal("receipt-decode")

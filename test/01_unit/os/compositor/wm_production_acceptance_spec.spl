@@ -1,0 +1,81 @@
+# Contract fixtures only. A passing example proves admission logic, not a live
+# guest, physical input, QMP capture, or platform readiness.
+use std.spec
+use os.compositor.wm_production_acceptance.*
+
+val HASH_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+val HASH_B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+val HASH_C = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+val HASH_D = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+val HASH_E = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+
+fn candidate(architecture: text) -> WmProductionAcceptanceV1:
+    val target = wm_acceptance_target_v1(architecture)
+    WmProductionAcceptanceV1(
+        schema: WM_ACCEPTANCE_SCHEMA, run_id: "contract-fixture-1",
+        source_revision: "fixture-source", compiler_sha256: HASH_A,
+        kernel_sha256: HASH_B, disk_sha256: HASH_C, fallback_used: false,
+        clean_shutdown: true, orphan_process_count: 0, target: target,
+        capture: WmCaptureContractV1(
+            width: 1024, height: 768, before_revision: 10u64,
+            after_revision: 12u64, before_checksum: 100u64,
+            after_checksum: 200u64, before_artifact_sha256: HASH_D,
+            after_artifact_sha256: HASH_E, nonblank_pixels: 700000,
+            changed_pixels: 12000),
+        events: WmEventContractV1(
+            sequence: WM_REQUIRED_EVENT_SEQUENCE, first_input_sequence: 1u64,
+            last_input_sequence: 11u64, focused_window_id: 3u64,
+            semantic_mutation_revision: 11u64, presented_revision: 12u64,
+            physical_input_attested: architecture == "x86_64"),
+        performance: WmPerformanceContractV1(
+            boot_to_first_frame_ms: 12000, warmup_frames: 1,
+            measured_frames: 10, frame_p50_us: 12000, frame_p95_us: 24000,
+            input_to_present_p95_us: 21000,
+            guest_heap_high_water_bytes: 201326592,
+            guest_heap_delta_bytes: 0, host_max_rss_kib: 524288,
+            host_cpu_sample_count: 10))
+
+describe "production WM acceptance contract fixtures":
+    it "defines deterministic architecture profiles without claiming readiness":
+        expect(wm_acceptance_target_v1("x86_64").input_class).to_equal("physical-visible-window")
+        expect(wm_acceptance_target_v1("aarch64").capture_source).to_equal("qmp-ramfb-screendump")
+        expect(wm_acceptance_target_v1("riscv64").machine).to_equal("virt")
+        expect(wm_acceptance_target_v1("arm32").machine).to_equal("")
+
+    it "admits structurally complete contract fixtures for all declared architectures":
+        expect(wm_production_acceptance_admit_v1(candidate("x86_64")).reason).to_equal("accepted")
+        expect(wm_production_acceptance_admit_v1(candidate("aarch64")).reason).to_equal("accepted")
+        expect(wm_production_acceptance_admit_v1(candidate("riscv64")).reason).to_equal("accepted")
+
+    it "rejects event reordering and diagnostic input mislabeled as physical":
+        var reordered = candidate("x86_64")
+        reordered.events.sequence = "focus,pointer_down,pointer_move"
+        expect(wm_production_acceptance_admit_v1(reordered).reason).to_equal("event-sequence-mismatch")
+        var mislabeled = candidate("aarch64")
+        mislabeled.events.physical_input_attested = true
+        expect(wm_production_acceptance_admit_v1(mislabeled).reason).to_equal("diagnostic-input-mislabeled-physical")
+
+    it "rejects unchanged captures and uncorrelated presentation revisions":
+        var unchanged = candidate("aarch64")
+        unchanged.capture.after_checksum = unchanged.capture.before_checksum
+        expect(wm_production_acceptance_admit_v1(unchanged).reason).to_equal("capture-checksum-not-changed")
+        var stale = candidate("aarch64")
+        stale.events.presented_revision = 11u64
+        expect(wm_production_acceptance_admit_v1(stale).reason).to_equal("event-presentation-correlation-invalid")
+
+    it "rejects unbounded samples latency heap growth fallback and incomplete cleanup":
+        var samples = candidate("riscv64")
+        samples.performance.measured_frames = 257
+        expect(wm_production_acceptance_admit_v1(samples).reason).to_equal("frame-sample-bound-invalid")
+        var latency = candidate("riscv64")
+        latency.performance.frame_p95_us = 33401
+        expect(wm_production_acceptance_admit_v1(latency).reason).to_equal("frame-latency-budget-exceeded")
+        var heap = candidate("riscv64")
+        heap.performance.guest_heap_delta_bytes = 1
+        expect(wm_production_acceptance_admit_v1(heap).reason).to_equal("guest-heap-budget-exceeded")
+        var fallback = candidate("riscv64")
+        fallback.fallback_used = true
+        expect(wm_production_acceptance_admit_v1(fallback).reason).to_equal("fallback-forbidden")
+        var orphan = candidate("riscv64")
+        orphan.orphan_process_count = 1
+        expect(wm_production_acceptance_admit_v1(orphan).reason).to_equal("cleanup-incomplete")

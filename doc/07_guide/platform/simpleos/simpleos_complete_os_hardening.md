@@ -45,6 +45,30 @@ The continuation wave closes canonical ELF/SMF parsing but keeps hosted installe
 
 Release remains blocked by the admitted cryptographic verifier and privileged loader mapping consumer; real FAT32/DBFS/NVFS durability/recovery; three target-native SimpleOS role binaries; guest LLVM/Clang compile/run; expanded userland; TLS-backed HTTP/2 and HTTP/3/QUIC; DBFS/TLS/auth for `dbd`; complete SSH credential handling; production WM visual capture; all x86_64/AArch64/RISC-V QEMU/native/physical receipts; and performance/fuzz/soak evidence. The admitted self-hosted runtime is also required to execute the focused and release suites—Rust/bootstrap output is not substitute evidence.
 
+## Canonical non-bootstrap acceptance
+
+After the environment and admitted self-hosted `bin/simple` are ready, run:
+
+```sh
+sh scripts/check/check-simpleos-nonbootstrap-acceptance.shs
+```
+
+The entrypoint fails fast through static contract checks and the focused loader,
+guest-toolchain, userland, DBD, SSH/SFTP, WM, multi-architecture filesystem,
+and HTTP/2 specs. Its live phase then snapshots and collects signed evidence,
+admits x86_64/AArch64/RISC-V QEMU bundles, runs the guest toolchain, server,
+WM capture/readback, and performance/fuzz/soak matrix producers in dependency
+order, and finally performs authentic umbrella receipt admission. Required
+external provision inputs are reported by environment-variable name instead of
+being silently skipped; inspect the exact order with `--print-graph`.
+
+The runner only consumes an existing runtime, provisioned images, kernels, and
+raw evidence: it does not build, bootstrap, select a seed, or fall back. Server
+and WM producers are forced into their reuse-existing-artifact modes. Its final key/value lines and
+`build/test-artifacts/simpleos-nonbootstrap-acceptance/summary.json` are the
+machine-readable verdict. `--static-only`, `--focused-only`, and `--live-only`
+support diagnosis; none weakens the default `--all` acceptance command.
+
 Target-toolchain artifact candidates bind the canonical target ABI, exact
 role-specific ELF/SMF output path, unique target/output argv pairs, independently
 hashed build materials and rebuild bytes, plus a frozen whole-record digest.

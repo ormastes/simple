@@ -27,6 +27,8 @@ use os.port.initramfs_validate.{
     initramfs_tool_role_artifact_admission,
     validate_zstd_toolchain_archive,
 }
+export use os.port._initramfs_pack.archive.*
+export use os.port._initramfs_pack.support.*
 
 val DEFAULT_LLVM_PREFIX = "build/os/llvm/cross/bin"
 val DEFAULT_SYSROOT = "build/os/sysroot"
@@ -34,9 +36,6 @@ val DEFAULT_SOURCE_TREE = "src"
 val DEFAULT_OUTPUT = "build/os/initramfs.img.zst"
 val DEFAULT_STAGING = "build/os/initramfs-staging"
 val CLANG_RESOURCE_VER = "19"  # clang resource dir version
-val MAX_PACK_ENTRIES: i64 = 131072
-val MAX_PACK_INVENTORY_BYTES: i64 = 16777216
-val MAX_PACK_MANIFEST_BYTES: i64 = 16777216
 class SimpleToolchainRole:
     name: text
     artifact_path: text
@@ -181,16 +180,6 @@ fn parse_args(args: [text]) -> (text, PackConfig, text):
     )
     (command, config, validate_arg)
 
-fn ensure_dir(path: text):
-    if not dir_exists(path):
-        dir_create_all(path)
-
-fn parent_path(path: text) -> text:
-    val slash = path.last_index_of("/")
-    if slash <= 0:
-        return "."
-    path.slice(0, slash)
-
 fn stage_file(src: text, dst: text, optional: bool):
     if not file_exists(src):
         if optional:
@@ -256,14 +245,6 @@ fn _canonical_guest_path(path: text) -> text:
     if path.starts_with("/"):
         return path
     "/{path}"
-
-fn _guest_path_safe(path: text) -> bool:
-    val canonical = _canonical_guest_path(path)
-    path.starts_with("/") and canonical.len() > 1 and not canonical.contains("//") and
-        not canonical.contains("/./") and not canonical.contains("/../") and
-        not canonical.ends_with("/.") and not canonical.ends_with("/..") and
-        not canonical.contains("\0") and not canonical.contains("\n") and
-        not canonical.contains("\r") and not canonical.contains("\\")
 
 fn _pack_host_path_canonical(path: text) -> bool:
     path.len() > 0 and not path.starts_with("/") and not path.ends_with("/") and
@@ -421,57 +402,6 @@ fn write_simple_toolchain_manifest(path: text, roles: [SimpleToolchainRole]):
     ensure_dir(parent_path(path))
     file_write_text(path, simple_toolchain_manifest_text(roles))
 
-fn _zstd_chunk_all_same(data: [u8], start: i64, size: i64) -> bool:
-    if size == 0:
-        return false
-    val first = data[start]
-    var i: i64 = 1
-    while i < size:
-        if data[start + i] != first:
-            return false
-        i = i + 1
-    true
-
-fn compress_zstd(data: [u8]) -> [u8]:
-    if data.len() == 0 or data.len() > MAX_INITRAMFS_EXPANDED_BYTES:
-        print "error: initramfs cpio size outside bounded zstd policy"
-        process.exit(1)
-    var out: [u8] = [0x28u8, 0xB5u8, 0x2Fu8, 0xFDu8]
-    if data.len() < 256:
-        out.push(0x20u8)
-        out.push(data.len().to_u8())
-    elif data.len() < 65792:
-        out.push(0x60u8)
-        val encoded_size = data.len() - 256
-        out.push((encoded_size & 255).to_u8())
-        out.push(((encoded_size >> 8) & 255).to_u8())
-    else:
-        out.push(0xA0u8)
-        out.push((data.len() & 255).to_u8())
-        out.push(((data.len() >> 8) & 255).to_u8())
-        out.push(((data.len() >> 16) & 255).to_u8())
-        out.push(((data.len() >> 24) & 255).to_u8())
-    var pos: i64 = 0
-    while pos < data.len():
-        val remaining = data.len() - pos
-        val chunk_size = if remaining < 131072: remaining else: 131072
-        val last = pos + chunk_size == data.len()
-        val rle = _zstd_chunk_all_same(data, pos, chunk_size)
-        val block_type = if rle: 1 else: 0
-        val header = (if last: 1 else: 0) | (block_type << 1) | (chunk_size << 3)
-        out.push((header & 255).to_u8())
-        out.push(((header >> 8) & 255).to_u8())
-        out.push(((header >> 16) & 255).to_u8())
-        if rle:
-            out.push(data[pos])
-        else:
-            var i: i64 = 0
-            while i < chunk_size:
-                out.push(data[pos + i])
-                i = i + 1
-        pos = pos + chunk_size
-    out
-
 fn write_hello_c(path: text):
     ensure_dir(parent_path(path))
     file_write_text(path, "int main(void) { return 0; }\n")
@@ -565,176 +495,6 @@ fn populate_staging(config: PackConfig):
                 process.exit(1)
         else:
             add_payload(staging: s, host_path: entry.host_path, guest_path: entry.guest_path)
-
-class NewcArchiveWriter:
-    data: [u8]
-    inode: i64
-
-    me append_text(value: text):
-        for byte in value.bytes():
-            self.data.push(byte.to_u8())
-
-    me append_hex8(value: i64):
-        val digits = "0123456789abcdef"
-        var shift: i64 = 28
-        while shift >= 0:
-            val nibble = (value >> shift) & 15
-            self.append_text(digits.slice(nibble, nibble + 1))
-            shift = shift - 4
-
-    me align4():
-        while (self.data.len() & 3) != 0:
-            self.data.push(0u8)
-
-    me entry(path: text, mode: i64, payload: [u8]):
-        self.append_text("070701")
-        self.append_hex8(self.inode)
-        self.inode = self.inode + 1
-        self.append_hex8(mode)
-        self.append_hex8(0)
-        self.append_hex8(0)
-        self.append_hex8(1)
-        self.append_hex8(0)
-        self.append_hex8(payload.len())
-        self.append_hex8(0)
-        self.append_hex8(0)
-        self.append_hex8(0)
-        self.append_hex8(0)
-        self.append_hex8(path.bytes().len() + 1)
-        self.append_hex8(0)
-        self.append_text(path)
-        self.data.push(0u8)
-        self.align4()
-        for byte in payload:
-            self.data.push(byte)
-        self.align4()
-
-class InitramfsInventoryEntry:
-    host_path: text
-    relative_path: text
-    payload_size: i64
-    is_dir: bool
-fn initramfs_pack_newc_entry_size(path: text, payload_size: i64) -> Result<i64, text>:
-    val name_size = path.bytes().len() + 1
-    if payload_size < 0 or name_size < 2 or name_size > 4096:
-        return Err("newc-entry-size-invalid")
-    val data_start = (110 + name_size + 3) & (0 - 4)
-    if data_start > MAX_INITRAMFS_EXPANDED_BYTES or
-       payload_size > MAX_INITRAMFS_EXPANDED_BYTES - data_start:
-        return Err("newc-entry-budget-exceeded")
-    val unpadded = data_start + payload_size
-    val encoded = (unpadded + 3) & (0 - 4)
-    if encoded < unpadded or encoded > MAX_INITRAMFS_EXPANDED_BYTES:
-        return Err("newc-entry-budget-exceeded")
-    Ok(encoded)
-
-fn _bounded_inventory(staging: text) -> [InitramfsInventoryEntry]:
-    val (raw, _err, code) = process_run_bounded(
-        "/usr/bin/find", [staging, "-mindepth", "1", "-print0"], 60000, MAX_PACK_INVENTORY_BYTES)
-    if code != 0 or (raw != "" and not raw.ends_with("\0")):
-        print "error: bounded staging inventory failed or exceeded its byte budget"
-        process.exit(1)
-    var paths = raw.split("\0")
-    if paths.len() > 0 and paths[paths.len() - 1] == "":
-        paths.pop()
-    if paths.len() + 2 > MAX_PACK_ENTRIES:
-        print "error: staging entry count exceeds policy"
-        process.exit(1)
-    paths.sort()
-    var inventory: [InitramfsInventoryEntry] = []
-    var encoded_total = initramfs_pack_newc_entry_size(".", 0).unwrap()
-    val prefix = staging + "/"
-    for host_path in paths:
-        if not host_path.starts_with(prefix):
-            print "error: staging inventory escaped owned root"
-            process.exit(1)
-        val relative = host_path.slice(prefix.len(), host_path.len())
-        if not _guest_path_safe("/" + relative):
-            print "error: staging inventory returned unsafe path"
-            process.exit(1)
-        val is_directory = dir_exists(host_path)
-        if not is_directory and not file_exists(host_path):
-            print "error: staging entry type unsupported"
-            process.exit(1)
-        val size = if is_directory: 0 else: file_size(host_path)
-        val encoded = match initramfs_pack_newc_entry_size(relative, size):
-            case Ok(value): value
-            case Err(message):
-                print "error: {message}"
-                process.exit(1)
-                0
-        if encoded > MAX_INITRAMFS_EXPANDED_BYTES - encoded_total:
-            print "error: cumulative newc size exceeds policy"
-            process.exit(1)
-        encoded_total = encoded_total + encoded
-        inventory.push(InitramfsInventoryEntry(
-            host_path: host_path, relative_path: relative,
-            payload_size: size, is_dir: is_directory))
-    val trailer_size = initramfs_pack_newc_entry_size("TRAILER!!!", 0).unwrap()
-    if trailer_size > MAX_INITRAMFS_EXPANDED_BYTES - encoded_total:
-        print "error: final newc padding exceeds policy"
-        process.exit(1)
-    val unpadded_total = encoded_total + trailer_size
-    val final_size = (unpadded_total + 511) & (0 - 512)
-    if final_size < unpadded_total or final_size > MAX_INITRAMFS_EXPANDED_BYTES:
-        print "error: final newc padding exceeds policy"
-        process.exit(1)
-    inventory
-
-fn run_cpio(staging: text, cpio_path: text, inventory: [InitramfsInventoryEntry]):
-    """Create deterministic newc directly; no shell or interpolated command."""
-    ensure_dir(parent_path(cpio_path))
-    val (symlinks, _symlink_err, symlink_code) = process_run_bounded(
-        "/usr/bin/find", [staging, "-type", "l", "-print", "-quit"], 60000, 8192)
-    if symlink_code != 0 or symlinks.trim() != "":
-        print "error: staging tree contains or cannot exclude symlinks"
-        process.exit(1)
-    var writer = NewcArchiveWriter(data: [], inode: 1)
-    writer.entry(".", 0x41ED, [])
-    for entry in inventory:
-        if entry.is_dir:
-            writer.entry(entry.relative_path, 0x41ED, [])
-        else:
-            val payload = file_read_bytes(entry.host_path)
-            if payload.len() != entry.payload_size:
-                print "error: staged file changed after bounded inventory"
-                process.exit(1)
-            writer.entry(entry.relative_path, 0x81ED, payload)
-    writer.entry("TRAILER!!!", 0, [])
-    while (writer.data.len() & 511) != 0:
-        writer.data.push(0u8)
-    if writer.data.len() > MAX_INITRAMFS_EXPANDED_BYTES or not file_write_bytes(cpio_path, writer.data):
-        print "error: newc archive write failed"
-        process.exit(1)
-
-fn run_zstd(cpio_path: text, zst_path: text):
-    print "[pack] encoding bounded raw/RLE zstd frame: {zst_path}"
-    if not file_exists(cpio_path):
-        print "error: cpio input missing before zstd encoding"
-        process.exit(1)
-    val encoded = compress_zstd(file_read_bytes(cpio_path))
-    if encoded.len() > MAX_INITRAMFS_COMPRESSED_BYTES or not file_write_bytes(zst_path, encoded):
-        print "error: bounded zstd image write failed"
-        process.exit(1)
-
-fn emit_manifest(inventory: [InitramfsInventoryEntry], output: text):
-    """Emit <output>.sdn listing every staged entry with its size."""
-    val manifest = "{output}.sdn"
-    ensure_dir(parent_path(manifest))
-    var parts = ["initramfs_manifest {\n", "  image: \"{output}\"\n", "  entries: [\n"]
-    var bytes = parts[0].bytes().len() + parts[1].bytes().len() + parts[2].bytes().len() + 6
-    for entry in inventory:
-        if not entry.is_dir:
-            val line = "    { path: \"./{entry.relative_path}\", size: {entry.payload_size} }\n"
-            if line.bytes().len() > MAX_PACK_MANIFEST_BYTES - bytes:
-                print "error: initramfs manifest exceeds byte budget"
-                process.exit(1)
-            bytes = bytes + line.bytes().len()
-            parts.push(line)
-    parts.push("  ]\n")
-    parts.push("}\n")
-    file_write_text(manifest, parts.join(""))
-    print "[pack] manifest: {manifest}"
 
 fn cmd_build(config: PackConfig):
     print "=== initramfs build ==="

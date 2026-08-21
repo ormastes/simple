@@ -1,0 +1,294 @@
+# DesktopShell extension owner extracted from shell.spl.
+use os.desktop.shell.*
+
+impl DesktopShell:
+    me apply_wm_runtime_command_to_live_shell(command: WmRuntimeDispatchCommand):
+        if command.kind == "launcher_launch":
+            val display_name = self.pinned_display_name(command.app_id)
+            self.launch_app(
+                if display_name != "": display_name else: command.app_id
+            )
+            return
+        if command.kind == "pin_app":
+            self.pin_app(command.app_id, command.app_id, "app")
+            return
+        if command.kind == "unpin_app":
+            self.unpin_app(command.app_id)
+            return
+        if command.kind == "window_focus":
+            val window_id = command.window_id.to_i64()
+            if window_id > 0:
+                var next_compositor = self.compositor
+                var surface_index = -1
+                var scan_index = 0
+                while scan_index < next_compositor.surfaces.len():
+                    if next_compositor.surfaces[scan_index].id.to_i64() == window_id:
+                        surface_index = scan_index
+                    scan_index = scan_index + 1
+                if surface_index >= 0:
+                    if not next_compositor.surfaces[surface_index].visible:
+                        next_compositor.restore_window(window_id.to_u64())
+                    else:
+                        next_compositor.focus_window(window_id.to_i32())
+                    self.compositor = next_compositor
+            return
+        if command.kind == "window_drag_begin":
+            val window_id = command.window_id.to_i64()
+            if window_id > 0:
+                self.compositor.focus_window(window_id.to_i32())
+                self.compositor.dragging = true
+                self.compositor.drag_window_id = window_id.to_i32()
+            return
+        if command.kind == "desktop_background":
+            self.compositor.focused_idx = -1
+
+    me handle_wm_pointer_event_loop_step(x: i32, y: i32, button: text, kind: text) -> text:
+        val scene = self.runtime_scene_snapshot()
+        # Attribution receipt: a correctly decoded press (button_code=1
+        # kind_code=1) at a position genuinely inside the restored window still
+        # produced command=ignored handled=false with EMPTY target/app/window
+        # (rerun37, click at 730,274 vs window rect 520,260 420x260). Empty
+        # identity fields read as "hit-test found no window", so the suspect is
+        # the scene arriving empty: runtime_scene_snapshot is an immutable `fn`
+        # that reads self.compositor.surfaces and returns an aggregate holding
+        # a [SharedWmWindow] array — fn-receiver reads, [T] returns and
+        # aggregate returns are all documented broken channels on the
+        # freestanding entry-closure lane. Bind every field to a local (no
+        # chains) and print unconditionally, so a healthy scene is proven
+        # rather than assumed.
+        val dbg_scene_windows = scene.windows.len()
+        val dbg_scene_w = scene.width
+        val dbg_scene_h = scene.height
+        val dbg_live_surfaces = self.compositor.surfaces.len()
+        if _WM_TRACE: serial_println("[wm-pointer-dispatch] x={x} y={y} button='{button}' kind='{kind}' scene_windows={dbg_scene_windows} scene={dbg_scene_w}x{dbg_scene_h} live_surfaces={dbg_live_surfaces}")
+        if dbg_scene_windows > 0:
+            val dbg_w0 = scene.windows[0]
+            val dbg_w0_x = dbg_w0.x
+            val dbg_w0_y = dbg_w0.y
+            val dbg_w0_w = dbg_w0.width
+            val dbg_w0_h = dbg_w0.height
+            val dbg_w0_id = dbg_w0.window_id
+            val dbg_w0_min = if dbg_w0.minimized: 1 else: 0
+            if _WM_TRACE: serial_println("[wm-pointer-dispatch] w0 id='{dbg_w0_id}' rect={dbg_w0_x},{dbg_w0_y} {dbg_w0_w}x{dbg_w0_h} minimized={dbg_w0_min}")
+        val taskbar = self.runtime_taskbar_model()
+        val command = simpleos_wm_pointer_runtime_command(scene, taskbar, x, y, button, kind, 1000, self.clock_text, 2)
+        self.wm_runtime_state = simpleos_wm_apply_pointer(self.wm_runtime_state, scene, taskbar, x, y, button, kind, 1000, self.clock_text, 2)
+        self.apply_wm_runtime_command_to_live_shell(command)
+        var handled_text = "false"
+        if command.handled:
+            handled_text = "true"
+        self.last_wm_loop_marker = "[simpleos-wm] loop-step command={command.kind} target={command.target_id} app={command.app_id} window={command.window_id} handled={handled_text}"
+        self.last_wm_loop_marker
+
+    me ensure_baremetal_system_window():
+        """On an app-less baremetal boot (every spawn failed: no app binaries
+        on the boot medium) the compositor has ZERO surfaces, so F11 has no
+        window to maximize and the fullscreen evidence chain can never
+        correlate (f11-surfaces total=0, 2026-07-18). Create one genuine
+        system window — real compositor surface, real chrome, really
+        maximized/restored by the same WM paths apps use. Placed clear of the
+        pinned taskbar-clock oracle region (bottom-right 56x48)."""
+        if self.compositor.surfaces.len() > 0:
+            return
+        # Copy-commit idiom: stage3 materializes `self.compositor.method()`
+        # receivers as discardable copies (see the PS/2 poll comment above).
+        var boot_compositor = self.compositor
+        val sys_id = boot_compositor.create_window("System Console", 480, 320, 1600, 900)
+        self.compositor = boot_compositor
+        serial_println("[desktop-gui] system-window-created id={sys_id}")
+
+    me handle_pending_wm_pointer_step():
+        # Read the pending step by DIRECT FIELD ACCESS off a local copy, never
+        # through the compositor's `fn` accessors: immutable-fn receiver reads
+        # are miscompiled on the freestanding entry-closure lane and delivered
+        # garbage here, while the very same fields read correctly ~240 lines
+        # above in the event loop (which already uses this idiom).
+        # rerun38 dispatched x=2866688 y=162665157 button='none' for a press
+        # the loop had just receipted as x=730 y=274 button_code=1: the WM
+        # hit-test then found no window at those coordinates and answered
+        # command=ignored handled=false, which is exactly what blocked the
+        # pointer half of the evidence lane. kind_code survived the same call,
+        # so corruption is PER-FIELD and layout-dependent — do not trust any
+        # of those accessors on this lane.
+        # Copy-commit idiom (see ensure_baremetal_system_window below): a
+        # mutation invoked as self.compositor.method() lands on a discardable
+        # copy, so clear on the local and assign it back.
+        var pending_compositor = self.compositor
+        if not pending_compositor.pending_wm_pointer_valid:
+            return
+        val x = pending_compositor.pending_wm_pointer_x
+        val y = pending_compositor.pending_wm_pointer_y
+        # The compositor carries i32 codes (text through that struct field
+        # reached rt_string_eq as a raw integer on baremetal); convert to the
+        # literal strings at this call site via the pure decode helpers
+        # above (kept in sync with compositor.spl's encode side).
+        val button_code = pending_compositor.pending_wm_pointer_button_code
+        val kind_code = pending_compositor.pending_wm_pointer_kind_code
+        val target_window_id = pending_compositor.pending_wm_pointer_window_id
+        val local_x = pending_compositor.pending_wm_pointer_local_x
+        val local_y = pending_compositor.pending_wm_pointer_local_y
+        pending_compositor.clear_pending_wm_pointer_step()
+        self.compositor = pending_compositor
+        val button: text = wm_pointer_button_from_code(button_code)
+        val kind: text = wm_pointer_kind_from_code(kind_code)
+        self.handle_wm_pointer_event_loop_step(x, y, button, kind)
+        var routed_compositor = self.compositor
+        val gui_handled = routed_compositor.dispatch_gui_pointer_event(
+            target_window_id, x, y, button, kind
+        )
+        self.compositor = routed_compositor
+        if (not gui_handled and target_window_id > 0 and
+            self.wm.initialized and
+            self.compositor.window_owner_port(target_window_id.to_u64()) > 0):
+            val window_id = WindowId(value: target_window_id as u64)
+            if kind == "down":
+                if self.wm.commit_focus(window_id.value):
+                    self.wm.send_focus_changed(window_id.value, true)
+            val event = pointer_to_wm_mouse_event(
+                window_id,
+                kind,
+                local_x,
+                local_y,
+                Modifiers.none()
+            )
+            self.wm.send_input_to_owner(window_id.value, event)
+
+    me drain_wm_actions():
+        """Drain pending WM IPC requests into the compositor-owned shell state."""
+        while true:
+            val action = self.wm.poll_once()
+            if action == nil:
+                return
+            val next_action = action
+            if next_action.kind == "none":
+                continue
+            self.apply_wm_action(next_action)
+
+    pub me rv64_wm_pump_one_action() -> bool:
+        """Poll and apply at most one real WM IPC action."""
+        val action = self.wm.poll_once()
+        if action == nil:
+            return false
+        val next_action = action
+        if next_action.kind == "none":
+            return false
+        self.apply_wm_action(next_action)
+        true
+
+    pub me rv64_wm_render_inputs_for_snapshot(snapshot: Rv64ProcessOwnedScene) -> Rv64WmShellRenderInputs:
+        """Bind taskbar/content inputs to one unchanged process-owned snapshot."""
+        val empty_taskbar = TaskbarModel(pinned: [], running: [], tray: [])
+        val before = rv64_process_owned_scene(self.compositor, snapshot.process_id)
+        if before.scene_revision != snapshot.scene_revision or before.process_surface_count != snapshot.process_surface_count:
+            return Rv64WmShellRenderInputs(consistent: false, reason: "snapshot-changed-before-content", taskbar: empty_taskbar, content_frames: [], taskbar_revision: 0, clock_label: self.clock_text)
+        val taskbar = self.runtime_taskbar_model()
+        val content_frames = self.runtime_content_frames(snapshot.scene_revision)
+        val taskbar_revision = simpleos_runtime_taskbar_revision(taskbar, self.clock_text)
+        val after = rv64_process_owned_scene(self.compositor, snapshot.process_id)
+        if after.scene_revision != snapshot.scene_revision or after.process_surface_count != snapshot.process_surface_count:
+            return Rv64WmShellRenderInputs(consistent: false, reason: "snapshot-changed-during-content", taskbar: empty_taskbar, content_frames: [], taskbar_revision: 0, clock_label: self.clock_text)
+        Rv64WmShellRenderInputs(consistent: true, reason: "snapshot-consistent", taskbar: taskbar, content_frames: content_frames, taskbar_revision: taskbar_revision, clock_label: self.clock_text)
+
+    me handle_pending_shell_input(baremetal: bool):
+        """Consume compositor-owned global shortcuts and route them into shell actions."""
+        val meta_key = self.compositor.consume_pending_meta_key()
+        if meta_key > 0:
+            val launched = launcher_shortcut_dispatch(meta_key.to_u32(), MOD_META)
+            if launched and self.launcher_visible:
+                self.close_launcher()
+
+        val shortcut_key = self.compositor.consume_pending_shortcut()
+        if shortcut_key != "":
+            self.handle_shortcut("Ctrl+Alt", shortcut_key.lower(), baremetal)
+
+    me select_next_process():
+        val rows = _process_rows()
+        if rows.len() == 0:
+            self.selected_process_idx = 0
+            return
+        val current = _normalized_process_selection(self.selected_process_idx, rows.len())
+        self.selected_process_idx = ((current + 1) % rows.len()).to_i64()
+
+    me select_prev_process():
+        val rows = _process_rows()
+        if rows.len() == 0:
+            self.selected_process_idx = 0
+            return
+        val current = _normalized_process_selection(self.selected_process_idx, rows.len())
+        var next = current - 1
+        if next < 0:
+            next = rows.len() - 1
+        self.selected_process_idx = next.to_i64()
+
+    me focus_selected_process():
+        val selected = _selected_process_row(self.selected_process_idx)
+        if selected == nil:
+            return
+        val row = selected
+        val window_ids = self.wm.window_ids_for_process(row.pid)
+        if window_ids.len() == 0:
+            log_info("[desktop] " + "[shell] focus_selected_process: pid {row.pid} has no owned windows")
+            return
+        self.compositor.focus_window(window_ids[0])
+
+    me terminate_selected_process():
+        val selected = _selected_process_row(self.selected_process_idx)
+        if selected == nil:
+            return
+        val row = selected
+        if launcher_terminate(row.pid):
+            log_info("[desktop] " + "[shell] terminate_selected_process: pid {row.pid}")
+
+    me relaunch_selected_process(baremetal: bool):
+        val selected = _selected_process_row(self.selected_process_idx)
+        if selected == nil:
+            return
+        val row = selected
+        if _process_is_live(row.state):
+            self.focus_selected_process()
+            return
+        var app_name = row.name
+        val app_index = launcher_get_process_app_index(row.process_index)
+        if app_index >= 0:
+            val launcher_name = launcher_get_app_name(app_index.to_u64())
+            if launcher_name != "":
+                app_name = launcher_name
+        if baremetal:
+            self.launch_app_baremetal(app_name)
+        else:
+            self.launch_app(app_name)
+
+    me reconcile_dead_process_windows():
+        """Keep launcher/WM window state aligned with compositor-owned surfaces.
+
+        Step 1 reaps any tasks that have exited or crashed since the last
+        tick (so their process rows flip to `exited`/`crashed`/`terminated`
+        before step 2 purges their windows). Step 2 walks every tracked
+        process row and realigns launcher/WM/compositor bookkeeping.
+        """
+        if self.task_reaper_enabled:
+            launcher_poll_processes()
+        val rows = _process_rows()
+        for row in rows:
+            val compositor_windows = self.compositor.windows_for_process(row.pid)
+            val owned_windows = self.wm.window_ids_for_process(row.pid)
+            for window_id in owned_windows:
+                if not _contains_u64(compositor_windows, window_id):
+                    self.wm.remove_owner(window_id)
+
+            if _process_is_live(row.state):
+                val actual_window_count = compositor_windows.len().to_u64()
+                var tracked_window_count = row.windows
+                while tracked_window_count > actual_window_count:
+                    launcher_note_window_closed(row.pid)
+                    tracked_window_count = tracked_window_count - 1
+                while tracked_window_count < actual_window_count:
+                    launcher_note_window_opened(row.pid)
+                    tracked_window_count = tracked_window_count + 1
+                continue
+            val reaped_count = compositor_windows.len().to_u64()
+            for window_id in compositor_windows:
+                self.compositor.destroy_window(window_id)
+                self.wm.remove_owner(window_id)
+            if reaped_count > 0 or row.windows > 0:
+                log_info("[desktop] " + "[shell] reaped pid={row.pid} app_id={row.app_id} state={row.state} windows={reaped_count}")

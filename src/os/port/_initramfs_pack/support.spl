@@ -1,0 +1,79 @@
+# Shared path and bounded zstd helpers for the initramfs packager owners.
+use std.process
+use std.nogc_sync_mut.ffi.io.{dir_exists, dir_create_all}
+use os.port.initramfs_validate.{MAX_INITRAMFS_EXPANDED_BYTES}
+
+val MAX_PACK_ENTRIES: i64 = 131072
+val MAX_PACK_INVENTORY_BYTES: i64 = 16777216
+val MAX_PACK_MANIFEST_BYTES: i64 = 16777216
+
+fn ensure_dir(path: text):
+    if not dir_exists(path):
+        dir_create_all(path)
+
+fn parent_path(path: text) -> text:
+    val slash = path.last_index_of("/")
+    if slash <= 0:
+        return "."
+    path.slice(0, slash)
+
+fn _guest_path_safe(path: text) -> bool:
+    var canonical = path
+    if not path.starts_with("/"):
+        canonical = "/{path}"
+    path.starts_with("/") and canonical.len() > 1 and not canonical.contains("//") and
+        not canonical.contains("/./") and not canonical.contains("/../") and
+        not canonical.ends_with("/.") and not canonical.ends_with("/..") and
+        not canonical.contains("\0") and not canonical.contains("\n") and
+        not canonical.contains("\r") and not canonical.contains("\\")
+
+fn _zstd_chunk_all_same(data: [u8], start: i64, size: i64) -> bool:
+    if size == 0:
+        return false
+    val first = data[start]
+    var i: i64 = 1
+    while i < size:
+        if data[start + i] != first:
+            return false
+        i = i + 1
+    true
+
+fn compress_zstd(data: [u8]) -> [u8]:
+    if data.len() == 0 or data.len() > MAX_INITRAMFS_EXPANDED_BYTES:
+        print "error: initramfs cpio size outside bounded zstd policy"
+        process.exit(1)
+    var out: [u8] = [0x28u8, 0xB5u8, 0x2Fu8, 0xFDu8]
+    if data.len() < 256:
+        out.push(0x20u8)
+        out.push(data.len().to_u8())
+    elif data.len() < 65792:
+        out.push(0x60u8)
+        val encoded_size = data.len() - 256
+        out.push((encoded_size & 255).to_u8())
+        out.push(((encoded_size >> 8) & 255).to_u8())
+    else:
+        out.push(0xA0u8)
+        out.push((data.len() & 255).to_u8())
+        out.push(((data.len() >> 8) & 255).to_u8())
+        out.push(((data.len() >> 16) & 255).to_u8())
+        out.push(((data.len() >> 24) & 255).to_u8())
+    var pos: i64 = 0
+    while pos < data.len():
+        val remaining = data.len() - pos
+        val chunk_size = if remaining < 131072: remaining else: 131072
+        val last = pos + chunk_size == data.len()
+        val rle = _zstd_chunk_all_same(data, pos, chunk_size)
+        val block_type = if rle: 1 else: 0
+        val header = (if last: 1 else: 0) | (block_type << 1) | (chunk_size << 3)
+        out.push((header & 255).to_u8())
+        out.push(((header >> 8) & 255).to_u8())
+        out.push(((header >> 16) & 255).to_u8())
+        if rle:
+            out.push(data[pos])
+        else:
+            var i: i64 = 0
+            while i < chunk_size:
+                out.push(data[pos + i])
+                i = i + 1
+        pos = pos + chunk_size
+    out

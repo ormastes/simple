@@ -114,7 +114,12 @@ validate_image_mb_for_row() {
 
 sources_for_row() {
     case "$1" in
-        riscv32|riscv64) echo "--source build/os/generated --source examples/09_embedded/simple_os/arch/$1" ;;
+        riscv32) echo "--source build/os/generated --source examples/09_embedded/simple_os/arch/$1" ;;
+        # Authenticated RV64 filesystem execution is owned by the production
+        # loader/scheduler/crypto capsules.  Keeping this row on the old
+        # arch-only closure made it impossible for the boot entry to invoke
+        # that authority without a parallel synthetic implementation.
+        riscv64) echo "--source build/os/generated --source src/os --source src/lib --source examples/09_embedded/simple_os/arch/riscv64" ;;
         *) echo '--source build/os/generated --source src/os --source src/lib --source examples/09_embedded/simple_os' ;;
     esac
 }
@@ -156,6 +161,7 @@ self_test() {
     grep -q 'x86_64 full boot providers: scheduler-owned fs-exec reaches rt_extras.c' "$0" || fail "x86_64 full-provider contract absent"
     grep -q -- '--cpu x86-64-v1' "$0" || fail "x86_64 qemu64 baseline CPU policy absent"
     [ "$(sources_for_row x86_32)" = '--source build/os/generated --source src/os --source src/lib --source examples/09_embedded/simple_os' ] || fail "x86_32 parent source closure absent"
+    [ "$(sources_for_row riscv64)" = '--source build/os/generated --source src/os --source src/lib --source examples/09_embedded/simple_os/arch/riscv64' ] || fail "riscv64 authenticated-loader source closure absent"
     [ "$(row_minimum_image_mb x86_64)" -eq 135 ] || fail "x86_64 measured minimum drift"
     [ 256 -le "$IMAGE_HARD_MAX_MB" ] || fail "bounded construction exceeds hard maximum"
     validate_image_mb_for_row x86_64 135 || fail "x86_64 exact minimum rejected"
@@ -273,7 +279,7 @@ run_row() {
         "$image_mb" "$IMAGE_HARD_MAX_MB" >"$capacity_log"
     env SIMPLEOS_COMPILER_IN_FILESYSTEM="$compiler_in_filesystem" \
         SIMPLEOS_FSEXEC_BINARY="$fsexec_env" \
-    TMPDIR="$tmp_dir" sh scripts/os/make_os_disk.shs "$image_mb" "$image" "$kernel" "$row" fs-exec >"$image_log" 2>&1
+    TMPDIR="$tmp_dir" sh "$ROOT_DIR/scripts/os/make_os_disk.shs" "$image_mb" "$image" "$kernel" "$row" fs-exec >"$image_log" 2>&1
     [ -s "$image" ] || fail "$row image missing after build"
     slots=$(LC_ALL=C grep -aob 'SIMPLEOS_QEMU_NONCE=__SIMPLEOS_QEMU_NONCE_SLOT_V1__' "$image" | wc -l | tr -d ' ')
     [ "$slots" -eq 1 ] || fail "$row image nonce-slot count=$slots"

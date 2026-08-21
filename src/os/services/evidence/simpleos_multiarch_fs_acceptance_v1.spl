@@ -1,0 +1,182 @@
+# Multi-architecture filesystem execution acceptance profile.
+#
+# Producers cannot set a PASS bit here.  Admission is derived from a complete,
+# ordered lifecycle receipt and, for native rows, the canonical performance
+# evidence owner.  QEMU rows are correctness evidence only.
+
+use std.common.structural.digest.hash256.{hash256_hex_valid}
+use std.common.structural.receipt.simpleos_evidence_receipt_v1.{
+    SimpleOsEvidenceEnvironment,
+    SimpleOsEvidenceReceiptV1,
+    simpleos_evidence_receipt_validate
+}
+use std.common.contracts.execution.simpleos_performance_v1.{
+    SimpleOsPerformanceEvidenceV1,
+    SimpleOsPerformanceHostV1,
+    SimpleOsPerformanceWorkloadV1,
+    simpleos_performance_admit
+}
+
+pub enum SimpleOsMultiarchFsAcceptanceErrorV1:
+    None
+    InvalidArchitecture
+    InvalidEnvironment
+    InvalidReceipt
+    InvalidArtifactBinding
+    MissingLifecycleStep
+    InvalidLifecycleOutcome
+    ReapMismatch
+    ResourceLeak
+    PerformanceForbidden
+    MissingPerformanceWorkload
+    InvalidPerformanceEvidence
+
+pub struct SimpleOsMultiarchFsResourceSnapshotV1:
+    tasks: u64
+    address_spaces: u64
+    mappings: u64
+    handles: u64
+    executable_tokens: u64
+
+pub struct SimpleOsMultiarchFsAcceptanceCandidateV1:
+    architecture: text
+    environment: SimpleOsEvidenceEnvironment
+    lifecycle: SimpleOsEvidenceReceiptV1
+    before: SimpleOsMultiarchFsResourceSnapshotV1
+    after: SimpleOsMultiarchFsResourceSnapshotV1
+    child_exit_code: i64
+    reap_count: u64
+    performance: [SimpleOsPerformanceEvidenceV1]
+
+pub struct SimpleOsMultiarchFsAcceptanceCheckV1:
+    ok: bool
+    error: SimpleOsMultiarchFsAcceptanceErrorV1
+    detail: text
+
+fn _multiarch_fs_reject(error: SimpleOsMultiarchFsAcceptanceErrorV1,
+                        detail: text) -> SimpleOsMultiarchFsAcceptanceCheckV1:
+    SimpleOsMultiarchFsAcceptanceCheckV1(ok: false, error: error, detail: detail)
+
+fn _accepted() -> SimpleOsMultiarchFsAcceptanceCheckV1:
+    SimpleOsMultiarchFsAcceptanceCheckV1(
+        ok: true, error: SimpleOsMultiarchFsAcceptanceErrorV1.None,
+        detail: "accepted")
+
+fn _architecture_target(architecture: text) -> text:
+    if architecture == "x86_64": return "x86_64-simple-none"
+    if architecture == "arm64": return "aarch64-simple-none"
+    if architecture == "riscv64": return "riscv64gc-simple-none"
+    ""
+
+fn _required_behavior(index: i64) -> text:
+    if index == 0: return "firmware_boot"
+    if index == 1: return "filesystem_mount"
+    if index == 2: return "filesystem_lookup"
+    if index == 3: return "open_handle_authentication"
+    if index == 4: return "scheduler_adoption"
+    if index == 5: return "user_entry"
+    if index == 6: return "program_exit_37"
+    if index == 7: return "exact_reap"
+    if index == 8: return "address_space_reclaim"
+    if index == 9: return "source_handle_close"
+    if index == 10: return "terminal_pass"
+    ""
+
+fn _snapshots_equal(a: SimpleOsMultiarchFsResourceSnapshotV1,
+                    b: SimpleOsMultiarchFsResourceSnapshotV1) -> bool:
+    a.tasks == b.tasks and a.address_spaces == b.address_spaces and
+        a.mappings == b.mappings and a.handles == b.handles and
+        a.executable_tokens == b.executable_tokens
+
+fn _performance_workload_seen(values: [SimpleOsPerformanceEvidenceV1],
+                              wanted: SimpleOsPerformanceWorkloadV1) -> bool:
+    for value in values:
+        if value.budget.workload == wanted:
+            return true
+    false
+
+pub fn simpleos_multiarch_fs_acceptance_validate(
+    candidate: SimpleOsMultiarchFsAcceptanceCandidateV1
+) -> SimpleOsMultiarchFsAcceptanceCheckV1:
+    val target = _architecture_target(candidate.architecture)
+    if target == "":
+        return _multiarch_fs_reject(SimpleOsMultiarchFsAcceptanceErrorV1.InvalidArchitecture,
+                       "unsupported-architecture")
+    if candidate.environment != SimpleOsEvidenceEnvironment.QemuSystem and
+       candidate.environment != SimpleOsEvidenceEnvironment.NativeHost and
+       candidate.environment != SimpleOsEvidenceEnvironment.PhysicalBoard:
+        return _multiarch_fs_reject(SimpleOsMultiarchFsAcceptanceErrorV1.InvalidEnvironment,
+                       "unsupported-environment")
+    val receipt_check = simpleos_evidence_receipt_validate(candidate.lifecycle)
+    if not receipt_check.ok:
+        return _multiarch_fs_reject(SimpleOsMultiarchFsAcceptanceErrorV1.InvalidReceipt,
+                       "lifecycle-receipt-invalid")
+    if candidate.lifecycle.requirement_id != "REQ-008" or
+       candidate.lifecycle.capability != "filesystem-exec-lifecycle-v1" or
+       candidate.lifecycle.target != target or
+       candidate.lifecycle.environment != candidate.environment:
+        return _multiarch_fs_reject(SimpleOsMultiarchFsAcceptanceErrorV1.InvalidReceipt,
+                       "lifecycle-identity-mismatch")
+    if candidate.lifecycle.filesystem != "fat32" and
+       candidate.lifecycle.filesystem != "dbfs" and
+       candidate.lifecycle.filesystem != "nvfs":
+        return _multiarch_fs_reject(SimpleOsMultiarchFsAcceptanceErrorV1.InvalidReceipt,
+                       "filesystem-profile-invalid")
+    if candidate.lifecycle.source_hash == candidate.lifecycle.image_hash or
+       candidate.lifecycle.image_hash == candidate.lifecycle.binary_hash or
+       not hash256_hex_valid(candidate.lifecycle.source_hash) or
+       not hash256_hex_valid(candidate.lifecycle.image_hash) or
+       not hash256_hex_valid(candidate.lifecycle.binary_hash):
+        return _multiarch_fs_reject(SimpleOsMultiarchFsAcceptanceErrorV1.InvalidArtifactBinding,
+                       "source-image-binary-must-be-distinct-and-hash-bound")
+    if candidate.lifecycle.steps.len() != 11:
+        return _multiarch_fs_reject(SimpleOsMultiarchFsAcceptanceErrorV1.MissingLifecycleStep,
+                       "lifecycle-step-count")
+    var index: i64 = 0
+    while index < 11:
+        val step = candidate.lifecycle.steps[index]
+        if step.behavior_id != _required_behavior(index):
+            return _multiarch_fs_reject(SimpleOsMultiarchFsAcceptanceErrorV1.MissingLifecycleStep,
+                           "lifecycle-step-order")
+        if step.outcome != "pass" or step.exit_code != 0:
+            return _multiarch_fs_reject(SimpleOsMultiarchFsAcceptanceErrorV1.InvalidLifecycleOutcome,
+                           "lifecycle-step-not-pass")
+        index = index + 1
+    if candidate.child_exit_code != 37 or candidate.reap_count != 1u64:
+        return _multiarch_fs_reject(SimpleOsMultiarchFsAcceptanceErrorV1.ReapMismatch,
+                       "child-must-exit-37-and-be-reaped-exactly-once")
+    if not _snapshots_equal(candidate.before, candidate.after):
+        return _multiarch_fs_reject(SimpleOsMultiarchFsAcceptanceErrorV1.ResourceLeak,
+                       "post-reap-resource-snapshot-differs")
+    if candidate.environment == SimpleOsEvidenceEnvironment.QemuSystem:
+        if candidate.performance.len() != 0:
+            return _multiarch_fs_reject(SimpleOsMultiarchFsAcceptanceErrorV1.PerformanceForbidden,
+                           "qemu-cannot-satisfy-native-performance")
+        return _accepted()
+    for evidence in candidate.performance:
+        if evidence.host != SimpleOsPerformanceHostV1.Native:
+            return _multiarch_fs_reject(SimpleOsMultiarchFsAcceptanceErrorV1.InvalidPerformanceEvidence,
+                           "native-row-has-nonnative-performance-host")
+        val admitted = simpleos_performance_admit(evidence)
+        if not admitted.ok:
+            return _multiarch_fs_reject(SimpleOsMultiarchFsAcceptanceErrorV1.InvalidPerformanceEvidence,
+                           "canonical-performance-admission-rejected")
+    if not _performance_workload_seen(candidate.performance,
+        SimpleOsPerformanceWorkloadV1.FsMetadata):
+        return _multiarch_fs_reject(SimpleOsMultiarchFsAcceptanceErrorV1.MissingPerformanceWorkload,
+                       "missing-fs-metadata")
+    if not _performance_workload_seen(candidate.performance,
+        SimpleOsPerformanceWorkloadV1.FsSequentialThroughput):
+        return _multiarch_fs_reject(SimpleOsMultiarchFsAcceptanceErrorV1.MissingPerformanceWorkload,
+                       "missing-fs-throughput")
+    if not _performance_workload_seen(candidate.performance,
+        SimpleOsPerformanceWorkloadV1.SimpleCompileRun):
+        return _multiarch_fs_reject(SimpleOsMultiarchFsAcceptanceErrorV1.MissingPerformanceWorkload,
+                       "missing-simple-compile-run")
+    _accepted()
+
+export SimpleOsMultiarchFsAcceptanceErrorV1
+export SimpleOsMultiarchFsResourceSnapshotV1
+export SimpleOsMultiarchFsAcceptanceCandidateV1
+export SimpleOsMultiarchFsAcceptanceCheckV1
+export simpleos_multiarch_fs_acceptance_validate

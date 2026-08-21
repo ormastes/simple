@@ -1,0 +1,74 @@
+use std.spec.{describe, it, expect}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
+use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget, SimpleArtifactManifest}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.contracts.execution.simpleos_executable_admission_v1.{
+    ExecutableAdmissionDecisionV1, ExecutableAdmissionV1
+}
+use os.kernel.loader.artifact_manifest.{
+    manifest_for_kind, manifest_kind_elf, manifest_with_entrypoint,
+    manifest_with_signature
+}
+use os.kernel.loader.executable_crypto_authority.{
+    ExecutableTrustedSignerV1, executable_loader_trust_roots_initialize,
+    executable_manifest_signing_body_v1, executable_manifest_hash_v1,
+    executable_loader_signature_authorized_v1
+}
+
+fn seed() -> [u8]:
+    [
+        0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60,
+        0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec, 0x2c, 0xc4,
+        0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19,
+        0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae, 0x7f, 0x60
+    ]
+
+fn admission(trust_hash: text) -> ExecutableAdmissionV1:
+    ExecutableAdmissionV1(
+        schema_version: 1, admission_id: "acceptance-1",
+        decision: ExecutableAdmissionDecisionV1.Admitted, rejection_reason: "",
+        image_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        manifest_hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        kernel_hash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        trust_root_hash: trust_hash,
+        trust_epoch: 3u64,
+        target: ManifestTarget(os: "simpleos", arch: "x86_64", abi: "simpleos"),
+        firmware_profile: "uefi-secure", compiler_identity: "compiler-1",
+        source_identity: "source-1", config_identity: "config-1",
+        mount_id: 1u64, mount_generation: 2u64,
+        file_id: 3u64, file_generation: 4u64, effective_capabilities: 69u32)
+
+fn manifest(image_hash: text) -> SimpleArtifactManifest:
+    val entered = manifest_with_entrypoint(manifest_for_kind(manifest_kind_elf()), "main")
+    manifest_with_signature(entered, "ed25519:release-root", [image_hash])
+
+describe "loader-owned executable cryptographic authority":
+    it "accepts only the configured root and exact canonical admission body":
+        val pair = pure_ed25519_keypair_from_seed(seed())
+        expect(executable_loader_trust_roots_initialize([
+            ExecutableTrustedSignerV1(key_id: "release-root", public_key: pair.1)
+        ])).to_equal(true)
+        val a = admission(sha256_u8_hex(pair.1))
+        val m = manifest(a.image_hash)
+        val body = executable_manifest_signing_body_v1(m, a, a.image_hash)
+        val signature = pure_ed25519_sign(seed(), pair.1, body)
+        expect(executable_loader_signature_authorized_v1(
+            "release-root", m, a, a.image_hash, signature)).to_equal(true)
+        expect(executable_loader_signature_authorized_v1(
+            "caller-key", m, a, a.image_hash, signature)).to_equal(false)
+        var changed = a
+        changed.file_generation = changed.file_generation + 1u64
+        expect(executable_loader_signature_authorized_v1(
+            "release-root", m, changed, a.image_hash, signature)).to_equal(false)
+
+    it "rejects conflicting trust-root reconfiguration and hashes canonical content":
+        val pair = pure_ed25519_keypair_from_seed(seed())
+        expect(executable_loader_trust_roots_initialize([
+            ExecutableTrustedSignerV1(key_id: "release-root", public_key: pair.1)
+        ])).to_equal(true)
+        expect(executable_loader_trust_roots_initialize([
+            ExecutableTrustedSignerV1(key_id: "replacement", public_key: pair.1)
+        ])).to_equal(false)
+        val a = admission(sha256_u8_hex(pair.1))
+        val m = manifest(a.image_hash)
+        expect(executable_manifest_hash_v1(m, a, a.image_hash).len()).to_equal(64)

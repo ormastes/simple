@@ -1,0 +1,137 @@
+# Bounded DBD credential and TLS material owner.
+#
+# Boot/configuration code constructs this owner from an already authenticated
+# source.  Admission validates every resource before exposing a TLS config or
+# digest-only credential verifier.  Raw authentication bytes are wiped as soon
+# as the verifier is configured; TLS key material remains owned only while the
+# service is live and is wiped on close/reload failure.
+
+use os.apps.dbd.dbd_protocol.{
+    DbdCredentialProvider, DBD_MAX_PRINCIPAL_BYTES,
+    DBD_MIN_CREDENTIAL_BYTES, DBD_MAX_CREDENTIAL_BYTES
+}
+use os.tls13.server_types.{Tls13ServerConfig}
+
+pub val DBD_MAX_CERT_CHAIN_ENTRIES: i64 = 4
+pub val DBD_MAX_CERTIFICATE_BYTES: i64 = 65536
+pub val DBD_MAX_PRIVATE_KEY_BYTES: i64 = 16384
+
+pub enum DbdProvisioningStateV1:
+    Empty
+    Admitted
+    Closed
+    Quarantined
+
+pub class DbdProvisioningOwnerV1:
+    state: DbdProvisioningStateV1
+    principal: text
+    credential: [u8]
+    cert_chain: [[u8]]
+    private_key: [u8]
+    signature_scheme: u16
+    provider: DbdCredentialProvider
+    credential_wiped: bool
+    last_error: text
+
+    pub static fn new() -> DbdProvisioningOwnerV1:
+        DbdProvisioningOwnerV1(
+            state: DbdProvisioningStateV1.Empty,
+            principal: "", credential: [], cert_chain: [], private_key: [],
+            signature_scheme: 0u16, provider: DbdCredentialProvider.new(),
+            credential_wiped: false, last_error: "dbd-provisioning-empty")
+
+    me wipe_credential():
+        var i: u64 = 0u64
+        while i < self.credential.len():
+            self.credential[i] = 0u8
+            i = i + 1u64
+        self.credential_wiped = true
+        for byte in self.credential:
+            if byte != 0u8: self.credential_wiped = false
+        self.credential = []
+
+    me wipe_tls_material():
+        var chain_index: u64 = 0u64
+        while chain_index < self.cert_chain.len():
+            var byte_index: u64 = 0u64
+            while byte_index < self.cert_chain[chain_index].len():
+                self.cert_chain[chain_index][byte_index] = 0u8
+                byte_index = byte_index + 1u64
+            chain_index = chain_index + 1u64
+        var key_index: u64 = 0u64
+        while key_index < self.private_key.len():
+            self.private_key[key_index] = 0u8
+            key_index = key_index + 1u64
+        self.cert_chain = []
+        self.private_key = []
+
+    me quarantine(reason: text) -> bool:
+        self.wipe_credential()
+        self.wipe_tls_material()
+        self.provider.revoke()
+        self.state = DbdProvisioningStateV1.Quarantined
+        self.last_error = reason
+        false
+
+    pub me admit(
+        principal: text, credential: [u8], cert_chain: [[u8]],
+        private_key: [u8], signature_scheme: u16
+    ) -> bool:
+        if self.state == DbdProvisioningStateV1.Admitted:
+            return false
+        if principal.len() <= 0 or principal.len() > DBD_MAX_PRINCIPAL_BYTES:
+            return self.quarantine("dbd-principal-invalid")
+        if credential.len().to_i64() < DBD_MIN_CREDENTIAL_BYTES or
+            credential.len().to_i64() > DBD_MAX_CREDENTIAL_BYTES:
+            return self.quarantine("dbd-credential-boundary-invalid")
+        if cert_chain.len().to_i64() <= 0 or
+            cert_chain.len().to_i64() > DBD_MAX_CERT_CHAIN_ENTRIES:
+            return self.quarantine("dbd-certificate-chain-boundary-invalid")
+        var total_cert_bytes: i64 = 0
+        for cert in cert_chain:
+            if cert.len() == 0u64 or cert.len().to_i64() > DBD_MAX_CERTIFICATE_BYTES:
+                return self.quarantine("dbd-certificate-boundary-invalid")
+            total_cert_bytes = total_cert_bytes + cert.len().to_i64()
+            if total_cert_bytes > DBD_MAX_CERTIFICATE_BYTES:
+                return self.quarantine("dbd-certificate-chain-too-large")
+        if private_key.len() == 0u64 or
+            private_key.len().to_i64() > DBD_MAX_PRIVATE_KEY_BYTES or
+            signature_scheme == 0u16:
+            return self.quarantine("dbd-private-key-boundary-invalid")
+        self.principal = principal
+        self.credential = credential
+        self.cert_chain = cert_chain
+        self.private_key = private_key
+        self.signature_scheme = signature_scheme
+        if not self.provider.configure_bytes(principal, self.credential):
+            return self.quarantine("dbd-credential-provider-rejected")
+        self.wipe_credential()
+        self.state = DbdProvisioningStateV1.Admitted
+        self.last_error = ""
+        true
+
+    pub fn ready() -> bool:
+        self.state == DbdProvisioningStateV1.Admitted and provider.configured and
+            credential.len() == 0u64 and credential_wiped and
+            cert_chain.len() > 0u64 and private_key.len() > 0u64
+
+    pub fn tls_config() -> Result<Tls13ServerConfig, text>:
+        if not self.ready(): return Err(self.blocker())
+        Ok(Tls13ServerConfig(
+            cert_chain: self.cert_chain, server_pkcs8: self.private_key,
+            server_sig_scheme: self.signature_scheme, alpn_protocols: ["dbd-resp"]
+        ))
+
+    pub fn blocker() -> text:
+        if self.ready(): return ""
+        if self.last_error != "": return self.last_error
+        "dbd-provisioning-unavailable"
+
+    pub me close():
+        self.wipe_credential()
+        self.wipe_tls_material()
+        self.provider.revoke()
+        self.principal = ""
+        self.signature_scheme = 0u16
+        self.state = DbdProvisioningStateV1.Closed
+        self.last_error = "dbd-provisioning-closed"

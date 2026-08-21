@@ -1,0 +1,146 @@
+# Canonical host boundary for SimpleOS primary userland category commands.
+#
+# Read-only inspection is pure and always available from the supplied host
+# snapshot.  Operations which would mutate the host, access the network, or
+# write an archive/package fail closed until a real capability owner executes
+# them.  Callers must never translate Unsupported into success.
+
+pub const PRIMARY_USERLAND_HOST_V1: i64 = 1
+pub const PRIMARY_USERLAND_MAX_ITEMS_V1: i64 = 256
+pub const PRIMARY_USERLAND_MAX_ARG_LENGTH_V1: i64 = 1024
+
+pub enum PrimaryUserlandCategory:
+    Administration
+    Archive
+    Network
+    Package
+
+pub enum PrimaryUserlandDisposition:
+    Completed
+    Unsupported
+    Invalid
+
+pub struct PrimaryUserlandHostSnapshotV1:
+    hostname: text
+    current_user: text
+    network_interfaces: [text]
+    installed_packages: [text]
+    archive_entries: [text]
+
+pub struct PrimaryUserlandResultV1:
+    disposition: PrimaryUserlandDisposition
+    exit_code: i32
+    output: [text]
+    diagnostic: text
+    external_action_attempted: bool
+
+fn _result(
+    disposition: PrimaryUserlandDisposition,
+    exit_code: i32,
+    output: [text],
+    diagnostic: text,
+    external_action_attempted: bool
+) -> PrimaryUserlandResultV1:
+    PrimaryUserlandResultV1(
+        disposition: disposition,
+        exit_code: exit_code,
+        output: output,
+        diagnostic: diagnostic,
+        external_action_attempted: external_action_attempted)
+
+fn _invalid(reason: text) -> PrimaryUserlandResultV1:
+    _result(PrimaryUserlandDisposition.Invalid, 2, [], reason, false)
+
+fn _unsupported(category: text, operation: text) -> PrimaryUserlandResultV1:
+    _result(
+        PrimaryUserlandDisposition.Unsupported,
+        69,
+        [],
+        "{category}: operation '{operation}' requires an unavailable host capability",
+        false)
+
+fn _bounded_args(args: [text]) -> bool:
+    if args.len() > PRIMARY_USERLAND_MAX_ITEMS_V1:
+        return false
+    for arg in args:
+        if arg.len() > PRIMARY_USERLAND_MAX_ARG_LENGTH_V1 or arg.contains("\0") or
+           arg.contains("\n") or arg.contains("\r"):
+            return false
+    true
+
+fn _bounded_snapshot(snapshot: PrimaryUserlandHostSnapshotV1) -> bool:
+    snapshot.network_interfaces.len() <= PRIMARY_USERLAND_MAX_ITEMS_V1 and
+        snapshot.installed_packages.len() <= PRIMARY_USERLAND_MAX_ITEMS_V1 and
+        snapshot.archive_entries.len() <= PRIMARY_USERLAND_MAX_ITEMS_V1
+
+fn _completed(lines: [text]) -> PrimaryUserlandResultV1:
+    _result(PrimaryUserlandDisposition.Completed, 0, lines, "", false)
+
+fn _admin(snapshot: PrimaryUserlandHostSnapshotV1, args: [text]) -> PrimaryUserlandResultV1:
+    if args.len() == 1 and args[0] == "--version":
+        return _completed(["admin (SimpleOS primary tools) 1.0"])
+    if args.len() == 0 or (args.len() == 1 and args[0] == "--help"):
+        return _completed(["usage: admin status|hostname|whoami"])
+    if args.len() != 1:
+        return _invalid("admin: expected exactly one operation")
+    if args[0] == "status":
+        return _completed(["host={snapshot.hostname}", "user={snapshot.current_user}"])
+    if args[0] == "hostname":
+        return _completed([snapshot.hostname])
+    if args[0] == "whoami":
+        return _completed([snapshot.current_user])
+    _unsupported("admin", args[0])
+
+fn _archive(snapshot: PrimaryUserlandHostSnapshotV1, args: [text]) -> PrimaryUserlandResultV1:
+    if args.len() == 1 and args[0] == "--version":
+        return _completed(["archive (SimpleOS primary tools) 1.0"])
+    if args.len() == 0 or (args.len() == 1 and args[0] == "--help"):
+        return _completed(["usage: archive list"])
+    if args.len() == 1 and args[0] == "list":
+        return _completed(snapshot.archive_entries)
+    if args.len() != 1:
+        return _invalid("archive: expected exactly one operation")
+    _unsupported("archive", args[0])
+
+fn _network(snapshot: PrimaryUserlandHostSnapshotV1, args: [text]) -> PrimaryUserlandResultV1:
+    if args.len() == 1 and args[0] == "--version":
+        return _completed(["network (SimpleOS primary tools) 1.0"])
+    if args.len() == 0 or (args.len() == 1 and args[0] == "--help"):
+        return _completed(["usage: network interfaces"])
+    if args.len() == 1 and args[0] == "interfaces":
+        return _completed(snapshot.network_interfaces)
+    if args.len() != 1:
+        return _invalid("network: expected exactly one operation")
+    _unsupported("network", args[0])
+
+fn _package(snapshot: PrimaryUserlandHostSnapshotV1, args: [text]) -> PrimaryUserlandResultV1:
+    if args.len() == 1 and args[0] == "--version":
+        return _completed(["package (SimpleOS primary tools) 1.0"])
+    if args.len() == 0 or (args.len() == 1 and args[0] == "--help"):
+        return _completed(["usage: package list"])
+    if args.len() == 1 and args[0] == "list":
+        return _completed(snapshot.installed_packages)
+    if args.len() != 1:
+        return _invalid("package: expected exactly one operation")
+    _unsupported("package", args[0])
+
+pub fn primary_userland_dispatch_v1(
+    category: PrimaryUserlandCategory,
+    snapshot: PrimaryUserlandHostSnapshotV1,
+    args: [text]
+) -> PrimaryUserlandResultV1:
+    if not _bounded_args(args):
+        return _invalid("primary-userland: arguments exceed the bounded host contract")
+    if not _bounded_snapshot(snapshot):
+        return _invalid("primary-userland: host snapshot exceeds the bounded host contract")
+    match category:
+        PrimaryUserlandCategory.Administration: _admin(snapshot, args)
+        PrimaryUserlandCategory.Archive: _archive(snapshot, args)
+        PrimaryUserlandCategory.Network: _network(snapshot, args)
+        PrimaryUserlandCategory.Package: _package(snapshot, args)
+
+export PrimaryUserlandCategory, PrimaryUserlandDisposition
+export PrimaryUserlandHostSnapshotV1, PrimaryUserlandResultV1
+export primary_userland_dispatch_v1
+export PRIMARY_USERLAND_HOST_V1, PRIMARY_USERLAND_MAX_ITEMS_V1
+export PRIMARY_USERLAND_MAX_ARG_LENGTH_V1

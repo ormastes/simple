@@ -1,0 +1,147 @@
+# Canonical, side-effect-free admission contract for production WM evidence.
+#
+# This module never captures a screen and never manufactures evidence. Live
+# runners populate these values from retained artifacts; acceptance tests use
+# contract fixtures only. A PASS is meaningful only alongside those artifacts.
+
+pub val WM_ACCEPTANCE_SCHEMA: text = "simpleos-wm-production-acceptance-v1"
+pub val WM_REQUIRED_EVENT_SEQUENCE: text = "focus,pointer_move,pointer_down,pointer_drag,pointer_up,pointer_wheel,key_down,key_up,text_commit,ctrl_down,ctrl_up"
+
+pub struct WmAcceptanceTargetV1:
+    architecture: text
+    machine: text
+    capture_source: text
+    input_class: text
+
+pub struct WmCaptureContractV1:
+    width: i32
+    height: i32
+    before_revision: u64
+    after_revision: u64
+    before_checksum: u64
+    after_checksum: u64
+    before_artifact_sha256: text
+    after_artifact_sha256: text
+    nonblank_pixels: i64
+    changed_pixels: i64
+
+pub struct WmEventContractV1:
+    sequence: text
+    first_input_sequence: u64
+    last_input_sequence: u64
+    focused_window_id: u64
+    semantic_mutation_revision: u64
+    presented_revision: u64
+    physical_input_attested: bool
+
+pub struct WmPerformanceContractV1:
+    boot_to_first_frame_ms: i64
+    warmup_frames: i32
+    measured_frames: i32
+    frame_p50_us: i64
+    frame_p95_us: i64
+    input_to_present_p95_us: i64
+    guest_heap_high_water_bytes: i64
+    guest_heap_delta_bytes: i64
+    host_max_rss_kib: i64
+    host_cpu_sample_count: i32
+
+pub struct WmProductionAcceptanceV1:
+    schema: text
+    run_id: text
+    source_revision: text
+    compiler_sha256: text
+    kernel_sha256: text
+    disk_sha256: text
+    fallback_used: bool
+    clean_shutdown: bool
+    orphan_process_count: i32
+    target: WmAcceptanceTargetV1
+    capture: WmCaptureContractV1
+    events: WmEventContractV1
+    performance: WmPerformanceContractV1
+
+pub struct WmAcceptanceDecisionV1:
+    accepted: bool
+    reason: text
+
+fn _decision(accepted: bool, reason: text) -> WmAcceptanceDecisionV1:
+    WmAcceptanceDecisionV1(accepted: accepted, reason: reason)
+
+fn _sha256_shape(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    for byte in value.bytes():
+        val digit = byte >= 48u8 and byte <= 57u8
+        val lower = byte >= 97u8 and byte <= 102u8
+        if not digit and not lower:
+            return false
+    true
+
+pub fn wm_acceptance_target_v1(architecture: text) -> WmAcceptanceTargetV1:
+    if architecture == "x86_64":
+        return WmAcceptanceTargetV1(architecture: architecture, machine: "q35", capture_source: "qmp-screendump", input_class: "physical-visible-window")
+    if architecture == "aarch64":
+        return WmAcceptanceTargetV1(architecture: architecture, machine: "virt", capture_source: "qmp-ramfb-screendump", input_class: "qmp-diagnostic")
+    if architecture == "riscv64":
+        return WmAcceptanceTargetV1(architecture: architecture, machine: "virt", capture_source: "qmp-screendump", input_class: "qmp-diagnostic")
+    WmAcceptanceTargetV1(architecture: architecture, machine: "", capture_source: "", input_class: "")
+
+pub fn wm_production_acceptance_admit_v1(candidate: WmProductionAcceptanceV1) -> WmAcceptanceDecisionV1:
+    if candidate.schema != WM_ACCEPTANCE_SCHEMA:
+        return _decision(false, "schema-mismatch")
+    if candidate.run_id == "" or candidate.source_revision == "":
+        return _decision(false, "run-identity-missing")
+    if not _sha256_shape(candidate.compiler_sha256) or not _sha256_shape(candidate.kernel_sha256) or not _sha256_shape(candidate.disk_sha256):
+        return _decision(false, "artifact-identity-invalid")
+    val expected = wm_acceptance_target_v1(candidate.target.architecture)
+    if expected.machine == "":
+        return _decision(false, "unsupported-architecture")
+    if candidate.target.machine != expected.machine or candidate.target.capture_source != expected.capture_source or candidate.target.input_class != expected.input_class:
+        return _decision(false, "target-profile-mismatch")
+    if candidate.fallback_used:
+        return _decision(false, "fallback-forbidden")
+    if not candidate.clean_shutdown or candidate.orphan_process_count != 0:
+        return _decision(false, "cleanup-incomplete")
+
+    val capture = candidate.capture
+    if capture.width <= 0 or capture.height <= 0 or capture.nonblank_pixels <= 0:
+        return _decision(false, "capture-blank-or-invalid")
+    val pixel_count = capture.width.to_i64() * capture.height.to_i64()
+    if capture.nonblank_pixels > pixel_count or capture.changed_pixels <= 0 or capture.changed_pixels > pixel_count:
+        return _decision(false, "capture-pixel-count-invalid")
+    if capture.before_revision == 0u64 or capture.after_revision <= capture.before_revision:
+        return _decision(false, "capture-revision-not-advanced")
+    if capture.before_checksum == 0u64 or capture.after_checksum == 0u64 or capture.before_checksum == capture.after_checksum:
+        return _decision(false, "capture-checksum-not-changed")
+    if not _sha256_shape(capture.before_artifact_sha256) or not _sha256_shape(capture.after_artifact_sha256) or capture.before_artifact_sha256 == capture.after_artifact_sha256:
+        return _decision(false, "capture-artifact-identity-invalid")
+
+    val events = candidate.events
+    if events.sequence != WM_REQUIRED_EVENT_SEQUENCE:
+        return _decision(false, "event-sequence-mismatch")
+    if events.first_input_sequence == 0u64 or events.last_input_sequence <= events.first_input_sequence or events.focused_window_id == 0u64:
+        return _decision(false, "event-correlation-invalid")
+    if events.semantic_mutation_revision <= capture.before_revision or events.presented_revision != capture.after_revision or events.presented_revision < events.semantic_mutation_revision:
+        return _decision(false, "event-presentation-correlation-invalid")
+    if candidate.target.input_class == "physical-visible-window" and not events.physical_input_attested:
+        return _decision(false, "physical-input-attestation-missing")
+    if candidate.target.input_class != "physical-visible-window" and events.physical_input_attested:
+        return _decision(false, "diagnostic-input-mislabeled-physical")
+
+    val perf = candidate.performance
+    if perf.boot_to_first_frame_ms <= 0 or perf.boot_to_first_frame_ms > 30000:
+        return _decision(false, "boot-budget-exceeded")
+    if perf.warmup_frames < 1 or perf.measured_frames < 10 or perf.measured_frames > 256:
+        return _decision(false, "frame-sample-bound-invalid")
+    if perf.frame_p50_us <= 0 or perf.frame_p95_us < perf.frame_p50_us or perf.frame_p95_us > 33400:
+        return _decision(false, "frame-latency-budget-exceeded")
+    if perf.input_to_present_p95_us <= 0 or perf.input_to_present_p95_us > 33400:
+        return _decision(false, "input-latency-budget-exceeded")
+    if perf.guest_heap_high_water_bytes <= 0 or perf.guest_heap_high_water_bytes > 268435456 or perf.guest_heap_delta_bytes > 0:
+        return _decision(false, "guest-heap-budget-exceeded")
+    if perf.host_max_rss_kib <= 0 or perf.host_cpu_sample_count < 2 or perf.host_cpu_sample_count > 1024:
+        return _decision(false, "host-resource-samples-invalid")
+    _decision(true, "accepted")
+
+export WM_ACCEPTANCE_SCHEMA, WM_REQUIRED_EVENT_SEQUENCE, WmAcceptanceTargetV1, WmCaptureContractV1, WmEventContractV1, WmPerformanceContractV1, WmProductionAcceptanceV1, WmAcceptanceDecisionV1, wm_acceptance_target_v1, wm_production_acceptance_admit_v1

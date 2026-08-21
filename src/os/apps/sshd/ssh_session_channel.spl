@@ -7,7 +7,7 @@ use os.apps.sshd.ssh_session.{SshSession, SshSessionState}
 use os.apps.sshd.ssh_hex.{format_hex}
 use os.apps.sshd.ssh_packet.{ssh_ascii_text_to_bytes}
 use os.apps.sshd.ssh_transport.{SSH_MSG_DISCONNECT, SSH_MSG_IGNORE, SSH_MSG_KEXINIT}
-use os.apps.sshd.ssh_channel.{ChannelState, SSH_MSG_CHANNEL_REQUEST, SSH_INVALID_CHANNEL_ID, DEFAULT_WINDOW_SIZE, ssh_parse_channel_data, ssh_build_channel_window_adjust}
+use os.apps.sshd.ssh_channel.{ChannelState, SSH_MSG_CHANNEL_REQUEST, SSH_INVALID_CHANNEL_ID, SSH_MAX_CHANNELS_PER_SESSION, DEFAULT_WINDOW_SIZE, ssh_parse_channel_data, ssh_build_channel_window_adjust}
 use os.apps.sshd.ssh_remote_shell.{SshRemoteShell}
 use os.apps.sshd.ssh_sftp_v3.{SftpSessionV3}
 use os.apps.sshd.ssh_session_helpers.{_u8_at, _copy_bytes_stable, _push_u32_be_stable, _read_u32_stable, _read_text_field_fast, _bytes_to_hex, _build_channel_success_stable, _build_channel_failure_stable, _build_channel_eof_stable, _build_channel_close_stable, _build_channel_exit_status_stable}
@@ -103,6 +103,20 @@ pub fn ssh_channel_request_is_sftp(payload: [u8]) -> bool:
     ):
         return false
     subsystem_offset + 8 == payload.len()
+
+pub fn ssh_sftp_principal_admitted(
+    state: SshSessionState, principal: text, active_channels: i64
+) -> bool:
+    """Fail-closed SFTP admission at the canonical session/auth boundary.
+
+    Parsing an SFTP subsystem request is not authorization.  The session owner
+    admits it only after RFC 4252 authentication committed a non-empty
+    principal, and only while the bounded channel table is non-empty and within
+    its configured capacity.  This is deliberately independent of filesystem
+    access; SftpSessionV3 remains the sole bounded protocol owner.
+    """
+    state == SshSessionState.Interactive and principal != "" and
+        active_channels > 0 and active_channels <= SSH_MAX_CHANNELS_PER_SESSION
 
 # Phase 2e Inc 3: scp-source (`scp -f <path>`) file retrieval. The FAT read
 # below is a plain C buffer read (simpleos_fat32_stream_open/stream_read_at
@@ -362,6 +376,13 @@ impl SshSession:
                     0u32
 
         if ssh_channel_request_is_sftp(payload):
+            if not ssh_sftp_principal_admitted(
+                self.state, self.authenticated_user,
+                self.channels.channels.len().to_i64()
+            ):
+                if want_reply:
+                    self.send_packet(_build_channel_failure_stable(reply_remote_id))
+                return
             val channel = self.channels.find(recipient)
             if channel == nil or (self.sftp_enabled and self.sftp_local_channel_id != recipient):
                 if want_reply:
@@ -545,6 +566,16 @@ impl SshSession:
         self.state = SshSessionState.Closed
 
     me _handle_channel_data(payload: [u8]):
+        if self.sftp_enabled and not ssh_sftp_principal_admitted(
+            self.state, self.authenticated_user,
+            self.channels.channels.len().to_i64()
+        ):
+            # Authentication state is authoritative.  If it is absent or was
+            # revoked, tear down the subsystem before parsing any attacker data.
+            self.sftp = SftpSessionV3.new()
+            self.sftp_enabled = false
+            self.sftp_local_channel_id = SSH_INVALID_CHANNEL_ID
+            return
         val parsed = ssh_parse_channel_data(payload)
         if parsed.is_err():
             return

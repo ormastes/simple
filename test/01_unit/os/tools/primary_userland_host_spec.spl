@@ -1,0 +1,72 @@
+use os.tools.primary_userland_host.{
+    PrimaryUserlandCategory, PrimaryUserlandDisposition,
+    PrimaryUserlandHostSnapshotV1, primary_userland_dispatch_v1,
+    PRIMARY_USERLAND_MAX_ITEMS_V1
+}
+
+fn fixture() -> PrimaryUserlandHostSnapshotV1:
+    PrimaryUserlandHostSnapshotV1(
+        hostname: "simpleos-test",
+        current_user: "root",
+        network_interfaces: ["lo", "eth0"],
+        installed_packages: ["base", "shell"],
+        archive_entries: ["etc/config.sdn", "usr/bin/app"])
+
+describe "primary SimpleOS userland host acceptance":
+    it "serves useful administration inspection without an external action":
+        val result = primary_userland_dispatch_v1(
+            PrimaryUserlandCategory.Administration, fixture(), ["status"])
+        expect(result.disposition).to_equal(PrimaryUserlandDisposition.Completed)
+        expect(result.exit_code).to_equal(0)
+        expect(result.output).to_contain("host=simpleos-test")
+        expect(result.output).to_contain("user=root")
+        expect(result.external_action_attempted).to_be(false)
+
+    it "lists archive contents supplied by the canonical host snapshot":
+        val result = primary_userland_dispatch_v1(
+            PrimaryUserlandCategory.Archive, fixture(), ["list"])
+        expect(result.output).to_equal(["etc/config.sdn", "usr/bin/app"])
+        expect(result.exit_code).to_equal(0)
+
+    it "lists network interfaces without pretending to transmit packets":
+        val result = primary_userland_dispatch_v1(
+            PrimaryUserlandCategory.Network, fixture(), ["interfaces"])
+        expect(result.output).to_equal(["lo", "eth0"])
+        expect(result.external_action_attempted).to_be(false)
+
+    it "lists installed packages from a bounded host snapshot":
+        val result = primary_userland_dispatch_v1(
+            PrimaryUserlandCategory.Package, fixture(), ["list"])
+        expect(result.output).to_equal(["base", "shell"])
+        expect(result.exit_code).to_equal(0)
+
+    it "truthfully rejects unprovided mutation and external I/O capabilities":
+        val admin = primary_userland_dispatch_v1(
+            PrimaryUserlandCategory.Administration, fixture(), ["reboot"])
+        val archive = primary_userland_dispatch_v1(
+            PrimaryUserlandCategory.Archive, fixture(), ["create"])
+        val network = primary_userland_dispatch_v1(
+            PrimaryUserlandCategory.Network, fixture(), ["ping"])
+        val package = primary_userland_dispatch_v1(
+            PrimaryUserlandCategory.Package, fixture(), ["install"])
+        expect(admin.disposition).to_equal(PrimaryUserlandDisposition.Unsupported)
+        expect(archive.disposition).to_equal(PrimaryUserlandDisposition.Unsupported)
+        expect(network.disposition).to_equal(PrimaryUserlandDisposition.Unsupported)
+        expect(package.disposition).to_equal(PrimaryUserlandDisposition.Unsupported)
+        expect(admin.exit_code).to_equal(69)
+        expect(network.external_action_attempted).to_be(false)
+
+    it "rejects oversized host snapshots before any category handler runs":
+        var entries: [text] = []
+        var i: i64 = 0
+        while i <= PRIMARY_USERLAND_MAX_ITEMS_V1:
+            entries.push("entry-{i}")
+            i = i + 1
+        val oversized = PrimaryUserlandHostSnapshotV1(
+            hostname: "host", current_user: "user", network_interfaces: [],
+            installed_packages: [], archive_entries: entries)
+        val result = primary_userland_dispatch_v1(
+            PrimaryUserlandCategory.Archive, oversized, ["list"])
+        expect(result.disposition).to_equal(PrimaryUserlandDisposition.Invalid)
+        expect(result.exit_code).to_equal(2)
+        expect(result.external_action_attempted).to_be(false)

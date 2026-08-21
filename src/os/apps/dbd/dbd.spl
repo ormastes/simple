@@ -42,7 +42,7 @@
 # serve_connection()'s buffering logic (drain all complete commands per read,
 # retain a trailing partial fragment) on top of the freestanding primitives.
 
-use os.apps.dbd.dbd_protocol.{DbdEngine, DbdSessionBudget, DbdPersistenceBudget, DbdCredentialProvider, dbd_command_is_mutating, dbd_encode_journal_line, dbd_parse_next_authenticated_command, dbd_production_startup_ready, dbd_production_startup_blocker, dbd_redact_diagnostic, DBD_MAX_JOURNAL_BYTES, DBD_MAX_JOURNAL_LINE_BYTES}
+use os.apps.dbd.dbd_protocol.{DbdEngine, DbdSessionBudget, DbdPersistenceBudget, DbdCredentialProvider, dbd_command_is_mutating, dbd_encode_journal_line, dbd_parse_next_authenticated_command, dbd_redact_diagnostic, DBD_MAX_JOURNAL_BYTES, DBD_MAX_JOURNAL_LINE_BYTES}
 use os.apps.dbd.dbd_auth_ingress.{
     DbdMutableAuthRequestOwnerV1, DbdAuthIngressStatusV1
 }
@@ -50,6 +50,7 @@ use os.apps.dbd.dbd_command_ingress.{
     DbdAuthenticatedRespIngressV1, DbdCommandIngressStatusV1
 }
 use os.apps.dbd.dbd_dbfs_adapter.{DbdDbfsAdapter, dbd_dbfs_adapter_from_driver}
+use os.apps.dbd.dbd_provisioning.{DbdProvisioningOwnerV1}
 use os.apps.dbd.dbd_close_owner.{
     DbdCloseOwnerV1, DbdCloseStateV1, DbdCloseDispositionV1
 }
@@ -59,7 +60,7 @@ use os.apps.dbd.dbd_tls.{
 use os.services.vfs.vfs_init.{g_vfs_read_file_bytes, g_vfs_write_file_bytes, g_vfs_file_exists}
 use os.services.vfs.vfs_boot_init.{g_mount_table}
 use os.tls13.server.{
-    Tls13ServerConfig, Tls13ServerContext, Tls13AcceptResult, tls13_accept
+    Tls13ServerContext, Tls13AcceptResult, tls13_accept
 }
 use std.common.contracts.execution.simpleos_server_v1.{ServerLifecycleState, ServerLifecycleV1, server_lifecycle_v1_default}
 use std.common.string_core.{text_to_bytes}
@@ -205,6 +206,7 @@ pub class DbdServer:
     credential_provider: DbdCredentialProvider
     next_auth_session_id: i64
     dbfs_adapter: DbdDbfsAdapter
+    provisioning: DbdProvisioningOwnerV1
 
 impl DbdServer:
     static fn new() -> DbdServer:
@@ -217,7 +219,29 @@ impl DbdServer:
                   lifecycle: server_lifecycle_v1_default("simpleos-dbd"),
                   credential_provider: DbdCredentialProvider.new(),
                   next_auth_session_id: 1,
-                  dbfs_adapter: DbdDbfsAdapter.detached("dbfs-root-driver-unavailable"))
+                  dbfs_adapter: DbdDbfsAdapter.detached("dbfs-root-driver-unavailable"),
+                  provisioning: DbdProvisioningOwnerV1.new())
+
+    pub me provision_service(
+        principal: text, credential: [u8], cert_chain: [[u8]],
+        private_key: [u8], signature_scheme: u16
+    ) -> bool:
+        if not self.provisioning.admit(
+            principal, credential, cert_chain, private_key, signature_scheme):
+            self.credential_provider.revoke()
+            return false
+        self.credential_provider = self.provisioning.provider
+        true
+
+    pub fn service_ready() -> bool:
+        self.provisioning.ready() and self.credential_provider.configured and
+            self.dbfs_adapter.ready() and self.persistence.healthy
+
+    pub fn service_blocker() -> text:
+        if not self.provisioning.ready(): return self.provisioning.blocker()
+        if not self.dbfs_adapter.ready(): return self.dbfs_adapter.blocker()
+        if not self.persistence.healthy: return "dbd-persistence-quarantined"
+        ""
 
     me configure_authentication(principal: text, credential: [u8]) -> bool:
         """Hash a copied credential into the digest-only verifier.
@@ -274,9 +298,29 @@ impl DbdServer:
         """Load existing durable state at startup. Selects and logs the backend."""
         if self.try_dbfs_backend():
             self.backend_is_dbfs = true
-            self.persistence = DbdPersistenceBudget.new()
+            val recovered = self.dbfs_adapter.read_existing_bounded(
+                DBD_LOG_PATH, DBD_MAX_JOURNAL_BYTES)
+            if recovered.is_err():
+                if recovered.unwrap_err() == "dbfs-recovery-journal-not-found":
+                    self.log_text = ""
+                    self.persistence = DbdPersistenceBudget.new()
+                    self.quarantine_present = false
+                    _dbd_log("[dbd] backend=dbfs-engine (no existing log)")
+                    return
+                self.persistence = DbdPersistenceBudget.new()
+                self.persistence.mark_unhealthy()
+                _dbd_log("[dbd] DBFS recovery blocked reason=" + recovered.unwrap_err())
+                return
+            self.log_text = rt_string_from_byte_array(recovered.unwrap())
+            val replayed = self.engine.replay_journal(self.log_text)
+            if replayed < 0:
+                self.persistence = DbdPersistenceBudget.restored(0, self.log_text.len())
+                self.persistence.mark_unhealthy()
+                val _ = self.dbfs_adapter.quarantine("dbfs-recovery-corrupt-journal")
+                return
+            self.persistence = DbdPersistenceBudget.restored(replayed, self.log_text.len())
             self.quarantine_present = false
-            _dbd_log("[dbd] backend=dbfs-engine")
+            _dbd_log("[dbd] backend=dbfs-engine replayed={replayed}")
             return
         self.backend_is_dbfs = false
         if not g_vfs_file_exists(DBD_LOG_PATH):
@@ -356,9 +400,23 @@ impl DbdServer:
         if not dbd_command_is_mutating(args[0]):
             return self.engine.dispatch(args)
         if self.backend_is_dbfs:
-            # dbfs-engine path (Lane C1 integration point): not yet wired to
-            # a live engine handle; fail closed rather than pretend to persist.
-            return "-ERR dbfs backend unavailable\r\n"
+            val journal_line = dbd_encode_journal_line(args)
+            if journal_line == "" or journal_line.len() > DBD_MAX_LINE_BYTES:
+                return "-ERR command too long to journal\r\n"
+            val appended_bytes = journal_line.len() + 1
+            if not self.persistence.can_append(appended_bytes):
+                return "-ERR persist failed\r\n"
+            val updated = self.log_text + journal_line + "\n"
+            val committed = self.dbfs_adapter.commit_and_sync(
+                DBD_LOG_PATH, rt_string_to_byte_array(updated))
+            if committed.is_err():
+                self.persistence.mark_unhealthy()
+                return "-ERR persist failed\r\n"
+            self.log_text = updated
+            if not self.persistence.commit_verified(appended_bytes):
+                self.persistence.mark_unhealthy()
+                return "-ERR persist failed\r\n"
+            return self.engine.dispatch(args)
         val journal_line = dbd_encode_journal_line(args)
         if journal_line == "" or journal_line.len() > DBD_MAX_LINE_BYTES:
             return "-ERR command too long to journal\r\n"
@@ -376,10 +434,10 @@ impl DbdServer:
         if self.listener_close.owns_fd() or
             self.lifecycle.state != ServerLifecycleState.Created:
             return -16
-        if not dbd_production_startup_ready():
+        if not self.service_ready():
             val _ = self.lifecycle.fail(
-                dbd_production_startup_blocker(), self.lifecycle.generation)
-            _dbd_log("[dbd] startup blocked reason=" + dbd_production_startup_blocker())
+                self.service_blocker(), self.lifecycle.generation)
+            _dbd_log("[dbd] startup blocked reason=" + self.service_blocker())
             return DBD_STARTUP_BLOCKED_RC
         val validated = self.lifecycle.validate(self.lifecycle.generation)
         if validated.is_err():
@@ -411,9 +469,16 @@ impl DbdServer:
             if closed == DbdCloseDispositionV1.Closed:
                 self.finalize_listener_close_lifecycle()
             return -22
-        # Deliberately remains Bounded.  A future authenticated TLS owner must
-        # perform its real live probe and mark this lifecycle Ready before the
-        # accept path can consume the listener.
+        # Readiness is derived only from the already-owned provisioning,
+        # mounted durable DBFS adapter, and the successfully bound listener.
+        val ready = self.lifecycle.mark_ready(
+            "dbd-owned-provisioning-dbfs-probe",
+            "dbd-bounded-tls-auth-durable-commit-v1",
+            self.lifecycle.generation)
+        if ready.is_err():
+            self.listener_close_terminal_code = "lifecycle-ready-failed"
+            val _ = self.attempt_listener_resource_close()
+            return -22
         sock_fd
 
     me attempt_listener_resource_close() -> DbdCloseDispositionV1:
@@ -645,20 +710,23 @@ impl DbdServer:
         self.finish_client(client_fd, live.budget)
         true
 
-    me accept_and_handle_once(tls_config: Tls13ServerConfig) -> bool:
+    me accept_and_handle_once() -> bool:
         """Handle one connection on this owner's listener.
 
         The method mutates the canonical DbdServer, so verified journal state
         and record counts survive into every subsequent connection. The typed
-        TLS config must come from a future admitted boot certificate owner;
-        no readiness boolean can bypass the global auth/TLS/DBFS policy.
+        TLS config is obtained from this service's admitted provisioning owner;
+        a socket caller cannot substitute key material or a readiness flag.
         """
-        if not dbd_production_startup_ready() or
+        if not self.service_ready() or
             not self.credential_provider.configured or
             not self.listener_close.is_open() or self.client_close.owns_fd() or
             self.lifecycle.state != ServerLifecycleState.Ready or
             not self.lifecycle.ready_for_advertisement():
             return false
+        val tls_config_result = self.provisioning.tls_config()
+        if tls_config_result.is_err(): return false
+        val tls_config = tls_config_result.unwrap()
         val client_fd = _dbd_decode_i64(rt_net_accept(self.listener_close.fd))
         if client_fd < 0:
             return false

@@ -1,0 +1,53 @@
+# @tag:system
+# @tag:acceptance
+# @req REQ-009 REQ-010
+
+"""Live-only RV64 authenticated execution evidence admission.
+
+The provisioned guest fixture must directly invoke
+`riscv64_fs_exec_spawn_authenticated_capture_v1` with its mounted, signed ELF.
+The fixture prints the markers below only after consuming the returned
+scheduler token once and proving the copied token is rejected on replay.
+"""
+
+use std.spec.*
+
+extern fn rt_env_get(name: text) -> text?
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+
+fn _enabled() -> bool:
+    (rt_env_get("SIMPLEOS_RV64_AUTH_EXEC_QEMU_LIVE") ?? "") == "1"
+
+describe "RV64 authenticated execution evidence in QEMU":
+    it "admits only real adoption stdout exit reap and one-shot token evidence":
+        if not _enabled():
+            print "SKIP: set SIMPLEOS_RV64_AUTH_EXEC_QEMU_LIVE=1 with a provisioned serial log"
+            return
+        val log_path = rt_env_get("SIMPLEOS_RV64_AUTH_EXEC_SERIAL_LOG") ?? ""
+        expect(log_path != "").to_equal(true)
+        expect(rt_file_exists(log_path)).to_equal(true)
+        val serial = rt_file_read_text(log_path)
+        # This file is created by the canonical QEMU runner after it verifies
+        # the retained bundle record and hashes program.elf.  Deliberately do
+        # not accept nonce/hash strings from the invoking environment.
+        val binding_path = rt_env_get("SIMPLEOS_RV64_AUTH_EXEC_BINDING_FILE") ?? ""
+        expect(binding_path != "").to_equal(true)
+        expect(rt_file_exists(binding_path)).to_equal(true)
+        val binding_record = rt_file_read_text(binding_path)
+        val lines = binding_record.split("\n")
+        expect(lines.len() >= 2).to_equal(true)
+        expect(lines[0].starts_with("nonce=")).to_equal(true)
+        expect(lines[1].starts_with("image_hash=")).to_equal(true)
+        val nonce = lines[0].slice(6, lines[0].len())
+        val image_hash = lines[1].slice(11, lines[1].len())
+        expect(nonce != "").to_equal(true)
+        expect(image_hash.len()).to_equal(64)
+        val binding = "nonce=" + nonce + " image=" + image_hash
+        expect(serial).to_contain("RV64_AUTH_EXEC_ADOPTION status=authorized")
+        expect(serial).to_contain("RV64_AUTH_EXEC_STDOUT " + binding + " value=hello from SimpleOS LLVM")
+        expect(serial).to_contain("RV64_AUTH_EXEC_EXIT code=0")
+        expect(serial).to_contain("RV64_AUTH_EXEC_REAP count=1 token=issued")
+        expect(serial).to_contain("RV64_AUTH_EXEC_TOKEN_CONSUME " + binding + " count=1 status=pass")
+        expect(serial).to_contain("RV64_AUTH_EXEC_TOKEN_REPLAY " + binding + " status=rejected")
+        expect(serial).to_contain("RV64_AUTH_EXEC_ACCEPTANCE " + binding + " status=pass")

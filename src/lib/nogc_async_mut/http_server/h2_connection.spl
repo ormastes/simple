@@ -302,6 +302,14 @@ class H2Connection:
     pub(package) me consume_frames() -> bool:
         if self.goaway_sent:
             return false
+        # `handle_h2_recv` invokes this after every socket completion.  A TCP
+        # completion may contain fewer than the 24 client-preface bytes; those
+        # bytes are retained by `h2_on_data_received` and are not frame input.
+        # Parsing them early misclassifies ordinary fragmentation as a malformed
+        # frame and sends GOAWAY.  Wait until preface validation has consumed
+        # the complete prefix before entering the frame parser.
+        if not self.preface_validated:
+            return true
         var offset = 0
         var keep_going = true
         var parsing = true

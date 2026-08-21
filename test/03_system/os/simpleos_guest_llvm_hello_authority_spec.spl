@@ -1,0 +1,103 @@
+# @tag:system
+# @tag:acceptance
+# @req REQ-009 REQ-010
+
+"""Behavioral acceptance for process-manager-owned guest LLVM execution evidence."""
+
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use os.services.process_execution_evidence.{
+    ProcessExecutionStageV1, ProcessExecutionResultV1,
+    process_execution_result_v1_validate
+}
+use os.kernel.loader.guest_toolchain_execution_contract.{
+    GuestToolchainHelloExpectedV1,
+    guest_toolchain_hello_execution_chain_v1_validate
+}
+
+fn expected() -> GuestToolchainHelloExpectedV1:
+    GuestToolchainHelloExpectedV1(
+        target_triple: "x86_64-unknown-simpleos",
+        filesystem_name: "fat32",
+        llvm_path: "/usr/bin/llvm-ar", llvm_sha256: sha256_text("llvm"),
+        clang_path: "/usr/bin/clang", clang_sha256: sha256_text("clang"),
+        lld_path: "/usr/bin/ld.lld", lld_sha256: sha256_text("lld"),
+        source_path: "/work/hello.c", source_sha256: sha256_text("source"),
+        object_path: "/work/hello.o", object_sha256: sha256_text("object"),
+        executable_path: "/work/hello.elf", executable_sha256: sha256_text("elf"),
+        expected_stdout: "hello from SimpleOS LLVM\n")
+
+fn result_for(stage: ProcessExecutionStageV1) -> ProcessExecutionResultV1:
+    val want = expected()
+    if stage == ProcessExecutionStageV1.ClangCompile:
+        return ProcessExecutionResultV1(
+            stage: stage, child_id: 101u64, parent_id: 7u64,
+            executable_path: want.clang_path, executable_sha256: want.clang_sha256,
+            filesystem_name: want.filesystem_name, filesystem_generation: 42u64,
+            input_sha256: want.source_sha256, result_sha256: want.object_sha256,
+            exit_code: 0, captured_stdout: "", captured_stderr: "")
+    if stage == ProcessExecutionStageV1.LldLink:
+        return ProcessExecutionResultV1(
+            stage: stage, child_id: 102u64, parent_id: 7u64,
+            executable_path: want.lld_path, executable_sha256: want.lld_sha256,
+            filesystem_name: want.filesystem_name, filesystem_generation: 42u64,
+            input_sha256: want.object_sha256, result_sha256: want.executable_sha256,
+            exit_code: 0, captured_stdout: "", captured_stderr: "")
+    ProcessExecutionResultV1(
+        stage: stage, child_id: 103u64, parent_id: 7u64,
+        executable_path: want.executable_path, executable_sha256: want.executable_sha256,
+        filesystem_name: want.filesystem_name, filesystem_generation: 42u64,
+        input_sha256: want.executable_sha256, result_sha256: want.executable_sha256,
+        exit_code: 0, captured_stdout: want.expected_stdout, captured_stderr: "")
+
+describe "SimpleOS guest LLVM hello-world execution evidence":
+    it "accepts an exact process-manager child chain as diagnostic input":
+        val clang = result_for(ProcessExecutionStageV1.ClangCompile)
+        val lld = result_for(ProcessExecutionStageV1.LldLink)
+        val hello = result_for(ProcessExecutionStageV1.HelloRun)
+        expect(process_execution_result_v1_validate(clang)).to_be(true)
+        expect(process_execution_result_v1_validate(lld)).to_be(true)
+        expect(process_execution_result_v1_validate(hello)).to_be(true)
+        expect(guest_toolchain_hello_execution_chain_v1_validate(
+            expected(), clang, lld, hello)).to_be(true)
+
+    it "rejects caller-substituted stdout exit and executable identity":
+        val clang = result_for(ProcessExecutionStageV1.ClangCompile)
+        val lld = result_for(ProcessExecutionStageV1.LldLink)
+        var hello = result_for(ProcessExecutionStageV1.HelloRun)
+        hello.captured_stdout = "claimed by host\n"
+        expect(guest_toolchain_hello_execution_chain_v1_validate(
+            expected(), clang, lld, hello)).to_be(false)
+        hello = result_for(ProcessExecutionStageV1.HelloRun)
+        hello.exit_code = 1
+        expect(guest_toolchain_hello_execution_chain_v1_validate(
+            expected(), clang, lld, hello)).to_be(false)
+        hello = result_for(ProcessExecutionStageV1.HelloRun)
+        hello.executable_sha256 = sha256_text("host-elf")
+        expect(guest_toolchain_hello_execution_chain_v1_validate(
+            expected(), clang, lld, hello)).to_be(false)
+
+    it "rejects stale filesystem generation and child substitution":
+        val clang = result_for(ProcessExecutionStageV1.ClangCompile)
+        var lld = result_for(ProcessExecutionStageV1.LldLink)
+        val hello = result_for(ProcessExecutionStageV1.HelloRun)
+        lld.filesystem_generation = 41u64
+        expect(guest_toolchain_hello_execution_chain_v1_validate(
+            expected(), clang, lld, hello)).to_be(false)
+        lld = result_for(ProcessExecutionStageV1.LldLink)
+        lld.child_id = clang.child_id
+        expect(guest_toolchain_hello_execution_chain_v1_validate(
+            expected(), clang, lld, hello)).to_be(false)
+
+    it "rejects a different process tree and substituted link output":
+        val clang = result_for(ProcessExecutionStageV1.ClangCompile)
+        val lld = result_for(ProcessExecutionStageV1.LldLink)
+        var hello = result_for(ProcessExecutionStageV1.HelloRun)
+        hello.parent_id = 8u64
+        expect(guest_toolchain_hello_execution_chain_v1_validate(
+            expected(), clang, lld, hello)).to_be(false)
+        hello = result_for(ProcessExecutionStageV1.HelloRun)
+        var changed_lld = lld
+        changed_lld.result_sha256 = sha256_text("different-elf")
+        expect(guest_toolchain_hello_execution_chain_v1_validate(
+            expected(), clang, changed_lld, hello)).to_be(false)

@@ -1,10 +1,9 @@
 # Typed DBFS persistence adapter for the SimpleOS database daemon.
 #
-# The current DbFsDriver is usable for bounded recovery reads, but its fsync
-# and fdatasync methods return FsError.Unsupported.  Therefore this adapter
-# deliberately exposes no durable write success path.  It retains the exact
-# mounted driver identity and rejects commit before mutation until DBFS owns a
-# crash-atomic commit+device-flush contract.
+# A device-backed DbFsDriver now owns namespace persistence and an acknowledged
+# BlockDevice flush.  This adapter admits only that typed capability; hosted
+# and otherwise unserialized drivers remain useful for diagnostics but can
+# never make the daemon ready.
 
 use std.db.dbfs_driver.dbfs_driver.{DbFsDriver}
 use std.fs_driver.instance.{DriverInstance}
@@ -16,6 +15,7 @@ val DBD_DBFS_MAX_GENERATION: i64 = 9223372036854775807
 pub enum DbdDbfsAdapterState:
     Detached
     MountedSyncUnsupported
+    MountedDurable
     Quarantined
     Closed
 
@@ -43,6 +43,7 @@ pub class DbdDbfsAdapter:
         match self.state:
             case DbdDbfsAdapterState.Detached: false
             case DbdDbfsAdapterState.MountedSyncUnsupported: false
+            case DbdDbfsAdapterState.MountedDurable: true
             case DbdDbfsAdapterState.Quarantined: false
             case DbdDbfsAdapterState.Closed: false
 
@@ -51,25 +52,22 @@ pub class DbdDbfsAdapter:
             case DbdDbfsAdapterState.Detached:
                 if self.last_error != "": self.last_error else: "dbfs-root-driver-unavailable"
             case DbdDbfsAdapterState.MountedSyncUnsupported:
-                "dbfs-fsync-unsupported"
+                if self.last_error != "": self.last_error else: "dbfs-durable-sync-unavailable"
+            case DbdDbfsAdapterState.MountedDurable: ""
             case DbdDbfsAdapterState.Quarantined:
                 if self.last_error != "": self.last_error else: "dbfs-adapter-quarantined"
             case DbdDbfsAdapterState.Closed:
                 "dbfs-adapter-closed"
 
     pub me read_existing_bounded(path: text, max_bytes: i64) -> Result<[u8], text>:
-        if self.state != DbdDbfsAdapterState.MountedSyncUnsupported:
+        if self.state != DbdDbfsAdapterState.MountedSyncUnsupported and
+            self.state != DbdDbfsAdapterState.MountedDurable:
             return Err(self.blocker())
         if path != "/DBD.LOG" or max_bytes <= 0 or max_bytes > DBD_DBFS_MAX_RECOVERY_BYTES:
             return Err("dbfs-recovery-read-invalid-boundary")
         val driver = match self.driver:
             Some(value): value
             nil: return Err("dbfs-root-driver-unavailable")
-        if driver.arena_base >= 0:
-            # Device-backed read_bytes_handle currently falls back to its
-            # in-memory inode copy after a device read failure.  That is not a
-            # trustworthy recovery oracle, so production recovery stays shut.
-            return Err("dbfs-device-read-fallback-unverifiable")
         val stat = driver.stat_path(Path(raw: path))
         if stat.is_err():
             return Err("dbfs-recovery-journal-not-found")
@@ -100,13 +98,34 @@ pub class DbdDbfsAdapter:
         Ok(bytes)
 
     pub me commit_and_sync(path: text, bytes: [u8]) -> Result<(), text>:
-        # Reject before open/write. DbFsDriver.fsync is explicitly unsupported,
-        # so mutating first would create an unacknowledgeable partial commit.
-        if self.state != DbdDbfsAdapterState.MountedSyncUnsupported:
+        if self.state != DbdDbfsAdapterState.MountedDurable:
             return Err(self.blocker())
-        if path != "/DBD.LOG" or bytes.len().to_i64() > DBD_DBFS_MAX_RECOVERY_BYTES:
+        if path != "/DBD.LOG" or bytes.len().to_i64() <= 0 or
+            bytes.len().to_i64() > DBD_DBFS_MAX_RECOVERY_BYTES:
             return Err("dbfs-commit-invalid-boundary")
-        Err("dbfs-fsync-unsupported")
+        val driver = match self.driver:
+            Some(value): value
+            nil: return Err("dbfs-root-driver-unavailable")
+        val opened = driver.open_path(Path(raw: path), OpenFlags.read_write().with_create())
+        if opened.is_err(): return Err("dbfs-commit-open-failed")
+        val handle = opened.unwrap()
+        self.open_handles = self.open_handles + 1
+        val written = driver.write_bytes_handle(handle, bytes)
+        if written.is_err():
+            self.state = DbdDbfsAdapterState.Quarantined
+            self.last_error = "dbfs-commit-write-failed"
+        elif driver.fsync(handle).is_err():
+            self.state = DbdDbfsAdapterState.Quarantined
+            self.last_error = "dbfs-commit-sync-failed"
+        val closed = driver.close_handle(handle)
+        if closed.is_err():
+            self.state = DbdDbfsAdapterState.Quarantined
+            self.last_error = "dbfs-commit-close-failed"
+            return Err(self.last_error)
+        self.open_handles = self.open_handles - 1
+        if self.state == DbdDbfsAdapterState.Quarantined:
+            return Err(self.last_error)
+        Ok(())
 
     pub me quarantine(reason: text) -> bool:
         if reason.trim() == "" or self.open_handles != 0:
@@ -143,13 +162,22 @@ pub class DbdDbfsAdapter:
 pub fn dbd_dbfs_adapter_from_driver(driver: DriverInstance) -> DbdDbfsAdapter:
     match driver:
         case DriverInstance.DbFs(dbfs):
+            val durable = dbfs.durability_serialization_ready()
+            val mounted_state = if durable:
+                DbdDbfsAdapterState.MountedDurable
+            else:
+                DbdDbfsAdapterState.MountedSyncUnsupported
+            val mounted_error = if durable:
+                ""
+            else:
+                "dbfs-" + dbfs.durability_serialization_blocker()
             DbdDbfsAdapter(
-                state: DbdDbfsAdapterState.MountedSyncUnsupported,
+                state: mounted_state,
                 driver: Some(dbfs),
                 driver_instance_id: dbfs.inst_id,
                 generation: 1,
                 open_handles: 0,
-                last_error: "dbfs-fsync-unsupported"
+                last_error: mounted_error
             )
         case _:
             DbdDbfsAdapter.detached("mounted-root-is-not-dbfs")

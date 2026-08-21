@@ -1,0 +1,505 @@
+# DesktopShell extension owner extracted from shell.spl.
+use os.desktop.shell.*
+
+impl DesktopShell:
+    me run():
+        """Main desktop shell loop.
+
+        WORKAROUND: Simplified for baremetal — no taskbar updates,
+        no WM IPC, no launcher shortcuts. Just input + render.
+        """
+        log_info("[desktop] " + "[shell] entering event loop...")
+        self.compositor.running = true
+        while self.compositor.running:
+            self.drain_wm_actions()
+            self.compositor.handle_input()
+            self.handle_pending_wm_pointer_step()
+            self.handle_pending_shell_input(false)
+            self.reconcile_dead_process_windows()
+            self.compositor.render_all()
+
+    me launch_app_baremetal(name: text):
+        """Launch an app without inventing an overlay-only window.
+
+        Apps that own the remote-window protocol publish their surface through
+        WmService. Other successful launches are materialized immediately as a
+        compositor-owned surface. A failed launch leaves no visible window.
+        """
+        if not self.launcher_initialized:
+            launcher_init()
+            self.launcher_initialized = true
+        val pid = launcher_launch(name)
+        if pid >= 0:
+            log_info("[desktop] " + "[shell] launched (baremetal): {name} pid={pid}")
+            if not self.materialize_process_launch(name, pid.to_u64()):
+                log_info("[desktop] " + "[shell] baremetal materialization failed for {name} pid={pid}")
+        else:
+            log_info("[desktop] " + "[shell] launcher launch failed for {name}; no window created")
+
+    me render_baremetal_frame(executor: Engine2dWmFrameExecutor) -> i64:
+        """Render one authoritative WM snapshot through Draw IR + Engine2D."""
+        # Step receipts: the pointer RELEASE render never returns (seq 8 logged
+        # at=before-render and no at=after-render, then 300s of total guest
+        # silence — exactly the web render budget floor, which is not a spin
+        # cause since every _web_budget_expired() guard EXITS a loop early; the
+        # floor merely permits work to run that long). The press render on the
+        # identical path completed moments earlier, so one of these six calls
+        # is pathologically slow only in the post-drag-begin state. Six lines
+        # per frame is negligible next to a 4K repaint.
+        if _WM_TRACE: serial_println("[wm-render-step] at=scene-snapshot")
+        val scene = self.runtime_scene_snapshot()
+        if _WM_TRACE: serial_println("[wm-render-step] at=taskbar-model")
+        val taskbar = self.runtime_taskbar_model()
+        if _WM_TRACE: serial_println("[wm-render-step] at=scene-revision")
+        val scene_revision = self.runtime_scene_revision()
+        if _WM_TRACE: serial_println("[wm-render-step] at=taskbar-revision")
+        val taskbar_revision = self.runtime_taskbar_revision()
+        if _WM_TRACE: serial_println("[wm-render-step] at=content-frames scene_revision={scene_revision}")
+        val content_frames = if _WM_CONTENT_FRAMES_ENABLED:
+            self.runtime_content_frames(scene_revision)
+        else:
+            []
+        if _WM_TRACE: serial_println("[wm-render-step] at=executor-render")
+        val rendered_revision = executor.render(scene, taskbar, content_frames, scene_revision, taskbar_revision, self.clock_text)
+        if _WM_TRACE: serial_println("[wm-render-step] at=done rendered={rendered_revision}")
+        if rendered_revision <= 0:
+            return 0
+        self.last_rendered_scene_revision = scene_revision
+        self.last_rendered_taskbar_revision = taskbar_revision
+        rendered_revision
+
+    me render_baremetal_first_frame(executor: Engine2dWmFrameExecutor) -> i64:
+        """Render the first desktop frame BEFORE readiness markers
+        are announced, so the evidence baseline capture cannot race an
+        unpainted scanout."""
+        val revision = self.render_baremetal_frame(executor)
+        serial_println("[desktop-gui] first-frame-rendered scene_revision={revision}")
+        revision
+
+    me run_baremetal(executor: Engine2dWmFrameExecutor):
+        """Baremetal event loop rendering live compositor state through the
+        shared Draw IR/Engine2D path. Re-renders only when the scene/taskbar
+        revision changes (or on an explicit fullscreen action) so the input
+        poll cadence stays far inside the evidence wrapper's correlation
+        windows; scanout retains the last presented frame between changes."""
+        log_info("[desktop] " + "[shell] entering baremetal event loop...")
+        self.compositor.running = true
+        serial_println("[wm-loop] polling-active")
+
+        # ponytail: poll one envelope at a time during remote-app bootstrap;
+        # 256 x 4 KiB caps bump-heap cost at 1 MiB, then idle is allocation-free.
+        var remote_bootstrap_poll_ticks: i64 = 0
+        var remote_bootstrap_polls_left: i64 = 256
+        var remote_event_polls_left: i64 = 0
+        var remote_event_window_id: i64 = 0
+        var remote_event_input_seq: i64 = 0
+        # Keep the idle hot-loop gate scalar. Projecting pending fields from
+        # the nested compositor materializes aggregate temporaries on the
+        # freestanding target and exhausted the bump heap while idle.
+        var queued_input_active = false
+        while self.compositor.running:
+            # Idle path must stay ALLOCATION-FREE: the baremetal bump
+            # allocator never frees, revision/taskbar recomputation leaks
+            # megabytes per pass, and past the 144MB watermark every alloc
+            # emits heap-debug serial lines that slow the loop below the
+            # evidence wrapper's 10s input-correlation windows (proven live).
+            # Only a PS/2 poll runs when no input is pending.
+            #
+            # Hardware pre-check (proven live 2026-07-12): reading the i8042
+            # status register directly is a plain scalar extern call with NO
+            # heap allocation. Without this gate, the copy-commit idiom below
+            # ran on EVERY idle iteration (not just when a byte is actually
+            # waiting), deep-copying the whole Compositor (surfaces array +
+            # window content strings) on a tight busy-poll. That blew past
+            # the 144MB heap-debug watermark within seconds, flooding serial
+            # with millions of "[heap] alloc" lines and starving the loop so
+            # badly it never got back around to observe a QMP-injected key
+            # inside the evidence wrapper's 10s correlation window (zero
+            # [wm-input-irq]/[wm-state]/[wm-frame] markers ever fired).
+            # Skip the expensive copy when the controller has no byte and the
+            # prior hardware iteration left no logical receipt to drain.
+            val ps2_status = port_inb(0x64)
+            val ps2_byte_ready = ((ps2_status as i32) & 1) != 0
+            if not ps2_byte_ready and not queued_input_active:
+                if remote_bootstrap_polls_left > 0 or remote_event_polls_left > 0:
+                    remote_bootstrap_poll_ticks = remote_bootstrap_poll_ticks + 1
+                    if remote_bootstrap_poll_ticks >= 65536:
+                        remote_bootstrap_poll_ticks = 0
+                        if remote_event_polls_left > 0:
+                            remote_event_polls_left = remote_event_polls_left - 1
+                        else:
+                            remote_bootstrap_polls_left = remote_bootstrap_polls_left - 1
+                        val remote_action = self.wm.poll_once()
+                        if remote_action != nil:
+                            val next_remote_action = remote_action
+                            if next_remote_action.kind != "none":
+                                self.apply_wm_action(next_remote_action)
+                                if remote_event_polls_left > 0 and next_remote_action.kind == "update_tree" and next_remote_action.window_id == remote_event_window_id:
+                                    val presented_generation = self.render_baremetal_frame(executor)
+                                    if presented_generation > 0:
+                                        serial_println("[remote-browser-content-presented] window={next_remote_action.window_id} input_seq={remote_event_input_seq} generation={presented_generation}")
+                                    remote_event_polls_left = 0
+                                    remote_event_window_id = 0
+                                    remote_event_input_seq = 0
+                        if remote_bootstrap_polls_left > 0:
+                            for remote_surface in self.compositor.surfaces:
+                                if remote_surface.owner_port > 0 and remote_surface.app_id == APP_ID_BROWSER_DEMO and remote_surface.content_html != "":
+                                    serial_println("[remote-browser-ready] window={remote_surface.id} x={remote_surface.x} y={remote_surface.y} width={remote_surface.width} height={remote_surface.height} owner_port={remote_surface.owner_port}")
+                                    self.render_baremetal_frame(executor)
+                                    remote_bootstrap_polls_left = 0
+                continue
+            # Copy-commit idiom (same fix as materialize_process_launch_scalar
+            # / state.md "explicitly committing the nested compositor copy"):
+            # stage3 materializes `self.compositor.method()` receivers as
+            # discardable copies, so the PS/2 poll's pending_fullscreen_
+            # sequence write was lost and F11 never correlated (proven live).
+            # Mutate a local handle and commit it back on any input.
+            var input_compositor = self.compositor
+            if ps2_byte_ready:
+                input_compositor.handle_input_baremetal_ps2()
+            val fullscreen_sequence = input_compositor.pending_fullscreen_sequence
+            val fullscreen_release_sequence = input_compositor.pending_fullscreen_release_sequence
+            var pointer_sequence: i64 = 0
+            var pointer_x: i32 = 0
+            var pointer_y: i32 = 0
+            var pointer_button_code: i32 = 0
+            var pointer_kind_code: i32 = 0
+            var pointer_window_id: i32 = 0
+            if input_compositor.pending_wm_pointer_valid:
+                pointer_sequence = input_compositor.input_sequence
+                pointer_x = input_compositor.pending_wm_pointer_x
+                pointer_y = input_compositor.pending_wm_pointer_y
+                pointer_button_code = input_compositor.pending_wm_pointer_button_code
+                pointer_kind_code = input_compositor.pending_wm_pointer_kind_code
+                pointer_window_id = input_compositor.pending_wm_pointer_window_id
+                if pointer_kind_code == 1 and input_compositor.window_owner_port(input_compositor.pending_wm_pointer_window_id.to_u64()) > 0:
+                    remote_event_polls_left = 256
+                    remote_event_window_id = input_compositor.pending_wm_pointer_window_id
+                    remote_event_input_seq = pointer_sequence
+                    remote_bootstrap_poll_ticks = 0
+            if (input_compositor.pending_wm_key_valid and
+                input_compositor.window_owner_port(input_compositor.pending_wm_key_window_id.to_u64()) > 0):
+                remote_event_polls_left = 256
+                remote_event_window_id = input_compositor.pending_wm_key_window_id
+                remote_event_input_seq = input_compositor.input_sequence
+                remote_bootstrap_poll_ticks = 0
+            val input_active = (fullscreen_sequence > 0 or fullscreen_release_sequence > 0 or input_compositor.pending_meta_key > 0 or input_compositor.pending_shortcut != "" or input_compositor.pending_wm_pointer_valid or input_compositor.pending_wm_key_valid or input_compositor.pending_wm_text_valid)
+            queued_input_active = input_active
+            if not input_active:
+                # A partial PS/2 packet may not have produced a receipt yet,
+                # but its decoder state must survive until the next byte.
+                self.compositor = input_compositor
+                queued_input_active = false
+                continue
+            var fullscreen_action = ""
+            var fullscreen_window_id: i32 = 0
+            if fullscreen_sequence > 0:
+                input_compositor.pending_fullscreen_sequence = 0
+                serial_println("[wm-input-irq] input_seq={fullscreen_sequence} scancode=87 kind=press")
+                # Focus fallback: focused_idx can be -1 at F11 time (scene
+                # creation minimizes some windows, clearing focus), which
+                # silently skipped maximize and the correlation failed
+                # (proven live 2026-07-18). Prefer the topmost visible
+                # non-taskbar surface.
+                if input_compositor.focused_idx < 0 or input_compositor.focused_idx >= input_compositor.surfaces.len():
+                    var focus_scan = input_compositor.surfaces.len() - 1
+                    var focus_found = false
+                    while focus_scan >= 0 and not focus_found:
+                        val scan_surface = input_compositor.surfaces[focus_scan]
+                        if scan_surface.visible and scan_surface.id as u64 != self.taskbar_id:
+                            input_compositor.focused_idx = focus_scan
+                            focus_found = true
+                        focus_scan = focus_scan - 1
+                    if not focus_found:
+                        focus_scan = input_compositor.surfaces.len() - 1
+                        while focus_scan >= 0 and not focus_found:
+                            if input_compositor.surfaces[focus_scan].visible:
+                                input_compositor.focused_idx = focus_scan
+                                focus_found = true
+                            focus_scan = focus_scan - 1
+                if input_compositor.focused_idx >= 0 and input_compositor.focused_idx < input_compositor.surfaces.len():
+                    fullscreen_window_id = input_compositor.surfaces[input_compositor.focused_idx].id
+                    if input_compositor.surfaces[input_compositor.focused_idx].maximized:
+                        input_compositor.restore_window(fullscreen_window_id.to_u64())
+                        fullscreen_action = "restore"
+                    else:
+                        input_compositor.maximize_window(fullscreen_window_id.to_u64())
+                        fullscreen_action = "maximize"
+            if fullscreen_release_sequence > 0:
+                input_compositor.pending_fullscreen_release_sequence = 0
+                # Release is a device receipt only. It must never dispatch a
+                # second maximize/restore or require a synthetic frame.
+                serial_println("[wm-input-irq] input_seq={fullscreen_release_sequence} scancode=215 kind=release")
+            if pointer_sequence > 0:
+                serial_println("[wm-pointer-irq] input_seq={pointer_sequence} x={pointer_x} y={pointer_y} button_code={pointer_button_code} kind_code={pointer_kind_code}")
+            var remote_text_window_id: i32 = 0
+            var remote_text_scancode: i32 = 0
+            var remote_text_shift = false
+            var remote_key_window_id: i32 = 0
+            var remote_key_scancode: i32 = 0
+            var remote_key_shift = false
+            var remote_key_ctrl = false
+            var remote_key_alt = false
+            if input_compositor.pending_wm_key_valid:
+                remote_key_window_id = input_compositor.pending_wm_key_window_id
+                remote_key_scancode = input_compositor.pending_wm_key_scancode
+                remote_key_shift = input_compositor.pending_wm_key_shift
+                remote_key_ctrl = input_compositor.pending_wm_key_ctrl
+                remote_key_alt = input_compositor.pending_wm_key_alt
+                input_compositor.pending_wm_key_valid = false
+            if input_compositor.pending_wm_text_valid:
+                remote_text_window_id = input_compositor.pending_wm_text_window_id
+                remote_text_scancode = input_compositor.pending_wm_text_scancode
+                remote_text_shift = input_compositor.pending_wm_text_shift
+                input_compositor.pending_wm_text_valid = false
+            self.compositor = input_compositor
+            self.drain_wm_actions()
+            self.handle_pending_wm_pointer_step()
+            if (remote_key_window_id > 0 and
+                self.compositor.window_owner_port(remote_key_window_id.to_u64()) > 0):
+                val key_name = ps2_wm_key_name(remote_key_scancode)
+                if key_name != "":
+                    val key_code = match remote_key_scancode:
+                        0x01: 27u32
+                        0x0E: 8u32
+                        0x0F: 9u32
+                        0x1C: 13u32
+                        _: ascii_code_for_key(key_name)
+                    self.wm.send_input_to_owner(
+                        remote_key_window_id.to_u64(),
+                        WmInputEvent.key_down(
+                            WindowId(value: remote_key_window_id.to_u64()),
+                            KeyCode(code: key_code, name: key_name),
+                            Modifiers(
+                                shift: remote_key_shift,
+                                ctrl: remote_key_ctrl,
+                                alt: remote_key_alt,
+                                meta: false
+                            )
+                        )
+                    )
+            if (remote_text_window_id > 0 and
+                self.compositor.window_owner_port(remote_text_window_id.to_u64()) > 0):
+                val committed_text = ps2_wm_character(remote_text_scancode, remote_text_shift)
+                if committed_text != "":
+                    self.wm.send_input_to_owner(
+                        remote_text_window_id.to_u64(),
+                        WmInputEvent.text_input(
+                            WindowId(value: remote_text_window_id.to_u64()),
+                            committed_text
+                        )
+                    )
+            if pointer_sequence > 0:
+                serial_println("[wm-pointer-state] input_seq={pointer_sequence} window={pointer_window_id} marker={self.last_wm_loop_marker}")
+            # Step receipts between the pointer state and frame receipts. The
+            # pointer RELEASE (kind_code=2) hangs here: seq 8 printed its state
+            # line and then the guest emitted NOTHING for a full 300s — serial
+            # log last write 13:35:13, harness gave up 13:40:13, no panic, no
+            # fault, no reset, empty qemu.out, and not even a heap allocation.
+            # The identical path completed for the press (seq 7) moments
+            # earlier, so this is a state-dependent stall, NOT slow rendering
+            # (a 30s->300s budget raise changed nothing). Gated on
+            # pointer_sequence so only pointer steps pay the serial cost.
+            if pointer_sequence > 0:
+                if _WM_TRACE: serial_println("[wm-loop-step] seq={pointer_sequence} at=before-shell-input")
+            self.handle_pending_shell_input(true)
+            if pointer_sequence > 0:
+                if _WM_TRACE: serial_println("[wm-loop-step] seq={pointer_sequence} at=before-reconcile")
+            self.reconcile_dead_process_windows()
+            if pointer_sequence > 0:
+                if _WM_TRACE: serial_println("[wm-loop-step] seq={pointer_sequence} at=before-scene-revision")
+            val scene_revision = self.runtime_scene_revision()
+            if pointer_sequence > 0:
+                if _WM_TRACE: serial_println("[wm-loop-step] seq={pointer_sequence} at=before-taskbar-revision scene_revision={scene_revision}")
+            val taskbar_revision = self.runtime_taskbar_revision()
+            # A button-down can focus or begin a drag, so retain its explicit
+            # repaint. A passive move (kind 3) must retain the existing frame:
+            # cycle7 repainted unchanged revision 678551287 seventeen times and
+            # leaked ~22.4 MiB per repaint. Active drag/resize changes the scene
+            # revision and therefore still renders through the state-change
+            # gate. Button release alone also retains the existing frame.
+            val state_revision_changed = scene_revision != self.last_rendered_scene_revision
+            val pointer_down_needs_render = pointer_sequence > 0 and pointer_kind_code == 1
+            val pointer_move_needs_render = pointer_sequence > 0 and (pointer_kind_code == 3 or pointer_kind_code == 4) and state_revision_changed
+            val pointer_needs_render = pointer_down_needs_render or pointer_move_needs_render
+            val need_render = pointer_needs_render or (fullscreen_sequence > 0 and fullscreen_action != "") or state_revision_changed or taskbar_revision != self.last_rendered_taskbar_revision
+            var rendered_revision = scene_revision
+            if pointer_sequence > 0:
+                val need_render_code = if need_render: 1 else: 0
+                if _WM_TRACE: serial_println("[wm-loop-step] seq={pointer_sequence} at=before-render need_render={need_render_code} taskbar_revision={taskbar_revision}")
+            if need_render:
+                rendered_revision = self.render_baremetal_frame(executor)
+            if pointer_sequence > 0:
+                if _WM_TRACE: serial_println("[wm-loop-step] seq={pointer_sequence} at=after-render rendered={rendered_revision}")
+            if pointer_sequence > 0:
+                serial_println("[wm-pointer-frame] input_seq={pointer_sequence} generation={rendered_revision}")
+            if fullscreen_sequence > 0 and fullscreen_action != "":
+                # Interpolate bool as explicit text: baremetal bool
+                # interpolation prints 1/0, but the evidence wrapper's
+                # correlation regex requires literal maximized=true|false
+                # (proven live 2026-07-12: guest printed maximized=1 and
+                # the otherwise-complete irq/state/frame chain never
+                # matched).
+                var maximized_text = "false"
+                if fullscreen_action == "maximize":
+                    maximized_text = "true"
+                var state_x: i32 = 0
+                var state_y: i32 = 0
+                var state_width: i32 = 0
+                var state_height: i32 = 0
+                for state_surface in self.compositor.surfaces:
+                    if state_surface.id == fullscreen_window_id:
+                        state_x = state_surface.x
+                        state_y = state_surface.y
+                        state_width = state_surface.width
+                        state_height = state_surface.height
+                serial_println("[wm-state] input_seq={fullscreen_sequence} action={fullscreen_action} window={fullscreen_window_id} maximized={maximized_text} x={state_x} y={state_y} width={state_width} height={state_height}")
+                serial_println("[wm-frame] input_seq={fullscreen_sequence} generation={rendered_revision}")
+            queued_input_active = false
+
+    fn runtime_scene_revision() -> i64:
+        simpleos_runtime_scene_revision(self.compositor.surfaces, self.compositor.focused_idx)
+
+    fn runtime_taskbar_revision() -> i64:
+        simpleos_runtime_taskbar_revision(self.runtime_taskbar_model(), self.clock_text)
+
+    me runtime_content_frames(scene_revision: i64) -> [WmContentFrame]:
+        var frames: [WmContentFrame] = []
+        for surface in self.compositor.surfaces:
+            if surface.visible:
+                val content_w = surface.width - 8
+                val content_h = surface.height - 36
+                if content_w > 0 and content_h > 0:
+                    if surface.content_kind == WM_CONTENT_KIND_GUI_SESSION:
+                        val registry_index = self.compositor.gui_content_index(
+                            surface.content_handle
+                        )
+                        if registry_index >= 0:
+                            var session = UISession.new(
+                                self.compositor.gui_content_trees[registry_index]
+                            )
+                            val focused_id = self.compositor.gui_content_focused_ids[registry_index]
+                            if focused_id != "":
+                                session.dispatch(UIEvent.FocusEvent(
+                                    focused_id, "focus"
+                                ))
+                            frames.push(gui_session_content_frame(
+                                session, surface.id.to_text(), "", 0, 0,
+                                content_w, content_h, scene_revision,
+                                surface.content_revision, []
+                            ))
+                    elif surface.content_kind == WM_CONTENT_KIND_WEB_DOCUMENT:
+                        val installed_theme_id = active_wm_theme_id()
+                        val content_theme_id = if installed_theme_id != "":
+                            installed_theme_id
+                        else:
+                            default_theme_id()
+                        val render_h = content_paint_full_height(
+                            content_h, surface.scroll_y
+                        )
+                        var cache = WebRenderPixelArtifactCache.create(content_w, render_h, "software")
+                        var cache_index = -1
+                        var cache_scan = 0
+                        while cache_scan < self.baremetal_web_cache_ids.len():
+                            if self.baremetal_web_cache_ids[cache_scan] == surface.id as i64:
+                                cache_index = cache_scan
+                            cache_scan = cache_scan + 1
+                        if cache_index >= 0:
+                            cache = self.baremetal_web_caches[cache_index]
+                        if cache.width != content_w or cache.height != render_h:
+                            cache = WebRenderPixelArtifactCache.create(content_w, render_h, "software")
+                        val content_revision = simple_web_content_revision_with_theme(
+                            content_theme_id, surface.title, surface.content_html,
+                            content_w, content_h, surface.scroll_y
+                        )
+                        frames.push(simple_web_content_frame_cached(
+                            cache, "{surface.id}", scene_revision, content_revision,
+                            content_theme_id, surface.title, surface.content_html,
+                            content_w, content_h, surface.scroll_y
+                        ))
+                        if cache_index >= 0:
+                            self.baremetal_web_caches[cache_index] = cache
+                        else:
+                            self.baremetal_web_cache_ids.push(surface.id as i64)
+                            self.baremetal_web_caches.push(cache)
+                    elif surface.content_kind == WM_CONTENT_KIND_PIXEL_SURFACE:
+                        val length = pixel_content_store_length(
+                            self.compositor.pixel_content_registry_addr,
+                            surface.content_handle
+                        )
+                        if length == content_w * content_h:
+                            var pixels: [u32] = []
+                            var pixel: i64 = 0
+                            while pixel < length:
+                                pixels.push(pixel_content_store_color(
+                                    self.compositor.pixel_content_registry_addr,
+                                    surface.content_handle,
+                                    pixel
+                                ))
+                                pixel = pixel + 1
+                            frames.push(pixel_surface_content_frame(
+                                surface.id.to_text(),
+                                "",
+                                0,
+                                0,
+                                content_w,
+                                content_h,
+                                pixels,
+                                scene_revision,
+                                surface.content_revision
+                            ))
+        frames
+
+    fn runtime_scene_snapshot() -> SharedWmScene:
+        var windows: [SharedWmWindow] = []
+        var z = 0
+        for surface in self.compositor.surfaces:
+            val process_id = if surface.process_id > 0:
+                surface.process_id.to_u64()
+            else:
+                0u64
+            windows = windows.push(SharedWmWindow(
+                surface_id: "{surface.id}",
+                window_id: "{surface.id}",
+                surface_kind: "simpleos-compositor",
+                process_id: process_id,
+                app_id: surface.app_id,
+                title: surface.title,
+                language: "und",
+                x: surface.x,
+                y: surface.y,
+                width: surface.width,
+                height: surface.height,
+                tree: nil,
+                html: "",
+                minimized: not surface.visible,
+                focused: z == self.compositor.focused_idx,
+                z_index: z,
+                chrome_kind: WM_CHROME_KIND_TITLED
+            ))
+            z = z + 1
+        SharedWmScene(width: self.compositor.screen_width, height: self.compositor.screen_height, backend: "simpleos-compositor", windows: windows, background: shared_wm_background_color(wm_chrome_theme().compositor_bg))
+
+    fn runtime_taskbar_model() -> TaskbarModel:
+        var pinned: [AppRef] = []
+        var pinned_index = 0
+        while pinned_index < self.pinned_app_ids.len():
+            pinned.push(AppRef(
+                app_id: self.pinned_app_ids[pinned_index],
+                display_name: self.pinned_display_names[pinned_index],
+                icon: self.pinned_icons[pinned_index]
+            ))
+            pinned_index = pinned_index + 1
+        var running: [WindowRef] = []
+        for surface in self.compositor.surfaces:
+            running = running.push(WindowRef(
+                window_id: "{surface.id}",
+                app_id: surface.app_id,
+                title: surface.title,
+                minimized: not surface.visible
+            ))
+        TaskbarModel(
+            pinned: pinned,
+            running: running,
+            tray: [TrayItem(item_id: "clock", label: self.clock_text, icon: "clock")]
+        )

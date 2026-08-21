@@ -1,0 +1,222 @@
+"""
+# HTTP/2 live loopback acceptance and deterministic robustness gate
+
+Uses a real kernel TCP loopback socket and the production pure-Simple
+`H2Connection` wire consumer.  The fixture is deliberately single-process and
+bounded: no external h2 client, network service, random source, or sleep is
+required.  Failures return an empty receipt and therefore fail the concrete
+wire assertions below.
+"""
+
+use std.spec.*
+use std.http.h2.h2_preface.{h2_connection_preface_bytes}
+use std.http_server.h2_connection.{H2Connection, H2_MAX_RECV_BUFFER}
+use std.http_server.types.{HttpResponseData}
+use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
+use std.io_runtime.{time_now_unix_micros, file_read}
+use std.common.string_core.{bytes_to_text}
+
+val H2_LIVE_BODY = "h2-live-ok-731"
+
+class H2LiveReceipt:
+    connected: bool
+    request_count: i64
+    request_path: text
+    outbound: [u8]
+    retained_bytes: i64
+    goaway: bool
+    elapsed_us: i64
+
+fn empty_receipt() -> H2LiveReceipt:
+    H2LiveReceipt(
+        connected: false,
+        request_count: 0,
+        request_path: "",
+        outbound: [],
+        retained_bytes: 0,
+        goaway: false,
+        elapsed_us: 0
+    )
+
+fn append_bytes(dst: [u8], src: [u8]):
+    var i = 0
+    while i < src.len():
+        dst.push(src[i])
+        i = i + 1
+
+fn valid_get_wire() -> [u8]:
+    var wire = h2_connection_preface_bytes()
+    # Empty client SETTINGS.
+    append_bytes(wire, [0, 0, 0, 4, 0, 0, 0, 0, 0])
+    # HEADERS stream 1, END_HEADERS|END_STREAM. HPACK static indexes:
+    # :method GET (2), :scheme http (6), :path / (4).
+    append_bytes(wire, [0, 0, 3, 1, 5, 0, 0, 0, 1, 130, 134, 132])
+    wire
+
+fn response() -> HttpResponseData:
+    HttpResponseData(
+        status: 200,
+        reason: "OK",
+        headers: [
+            ("content-type", "text/plain"),
+            ("x-content-type-options", "nosniff"),
+            ("x-frame-options", "DENY")
+        ],
+        body: H2_LIVE_BODY,
+        body_bytes: [],
+        body_file: "",
+        body_offset: 0,
+        body_length: H2_LIVE_BODY.len(),
+        chunked: false
+    )
+
+fn live_exchange(input: [u8], fragment_size: i64) -> H2LiveReceipt:
+    val started = time_now_unix_micros()
+    match TcpListener.bind("127.0.0.1:0"):
+        Err(_): empty_receipt()
+        Ok(listener):
+            match listener.local_addr():
+                Err(_):
+                    val _ = listener.close()
+                    empty_receipt()
+                Ok(addr):
+                    match TcpStream.connect_timeout(addr, 1000):
+                        Err(_):
+                            val _ = listener.close()
+                            empty_receipt()
+                        Ok(client):
+                            val write_ok = match client.write_all(input):
+                                Ok(_): true
+                                Err(_): false
+                            match listener.accept_timeout(1000):
+                                Err(_):
+                                    val _ = client.close()
+                                    val _ = listener.close()
+                                    empty_receipt()
+                                Ok(server_stream):
+                                    var conn = H2Connection.new(91, "127.0.0.1", 1)
+                                    # Acceptance inspects protocol writes caused by input.
+                                    conn.take_pending_writes()
+                                    var offset = 0
+                                    var keep_going = write_ok
+                                    while keep_going and offset < input.len():
+                                        val take = if input.len() - offset < fragment_size: input.len() - offset else: fragment_size
+                                        match server_stream.read_exact(take):
+                                            Err(_): keep_going = false
+                                            Ok(chunk):
+                                                keep_going = conn.h2_on_data_received(chunk, offset + 2)
+                                                if keep_going:
+                                                    keep_going = conn.consume_frames()
+                                        offset = offset + take
+                                    val requests = conn.take_decoded_requests()
+                                    var path = ""
+                                    if requests.len() == 1:
+                                        path = requests[0].1.path
+                                        conn.queue_h2_response(requests[0].0, response())
+                                    val outbound = conn.take_pending_writes()
+                                    if outbound.len() > 0:
+                                        val _ = server_stream.write_all(outbound)
+                                        # Prove the peer can read every emitted byte from
+                                        # the socket; do not substitute the in-memory copy.
+                                        match client.read_exact(outbound.len()):
+                                            Err(_): keep_going = false
+                                            Ok(peer_wire):
+                                                if peer_wire != outbound:
+                                                    keep_going = false
+                                    val receipt = H2LiveReceipt(
+                                        connected: keep_going or conn.is_goaway_sent(),
+                                        request_count: requests.len(),
+                                        request_path: path,
+                                        outbound: outbound,
+                                        retained_bytes: conn.recv_buf.len(),
+                                        goaway: conn.is_goaway_sent(),
+                                        elapsed_us: time_now_unix_micros() - started
+                                    )
+                                    val _ = server_stream.close()
+                                    val _ = client.close()
+                                    val _ = listener.close()
+                                    receipt
+
+fn peak_rss_kib() -> i64:
+    val status = file_read("/proc/self/status")
+    for line in status.split("\n"):
+        if line.starts_with("VmHWM:"):
+            var value: i64 = 0
+            var seen = false
+            var i = 0
+            while i < line.len():
+                val c = line.char_code_at(i)
+                if c >= 48 and c <= 57:
+                    value = value * 10 + c - 48
+                    seen = true
+                elif seen:
+                    return value
+                i = i + 1
+            if seen:
+                return value
+    0
+
+describe "HTTP/2 pure-Simple live socket acceptance":
+    it "multiplexes a valid request through one-byte socket fragmentation":
+        val receipt = live_exchange(valid_get_wire(), 1)
+        expect(receipt.connected).to_be(true)
+        expect(receipt.request_count).to_equal(1)
+        expect(receipt.request_path).to_equal("/")
+        expect(receipt.retained_bytes).to_equal(0)
+        expect(receipt.goaway).to_be(false)
+        val wire_text = bytes_to_text(receipt.outbound)
+        expect(wire_text).to_contain(H2_LIVE_BODY)
+        expect(wire_text).to_contain("x-content-type-options")
+        expect(wire_text).to_contain("nosniff")
+        expect(wire_text).to_contain("x-frame-options")
+        expect(wire_text).to_contain("DENY")
+
+    it "rejects a forbidden zero WINDOW_UPDATE over a live socket":
+        var wire = h2_connection_preface_bytes()
+        append_bytes(wire, [0, 0, 4, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+        val receipt = live_exchange(wire, 3)
+        expect(receipt.connected).to_be(true)
+        expect(receipt.request_count).to_equal(0)
+        expect(receipt.goaway).to_be(true)
+        expect(receipt.retained_bytes).to_equal(0)
+        expect(receipt.outbound.len()).to_equal(17)
+
+    it "fuzzes deterministic bounded frame declarations without retention growth":
+        var seed: i64 = 731
+        var case_index = 0
+        while case_index < 32:
+            seed = (seed * 1103515245 + 12345) & 2147483647
+            var wire = h2_connection_preface_bytes()
+            # Unknown extension types must be ignored while the declared
+            # payload is fully present. Payload stays deterministically <= 31.
+            val payload_len = seed % 32
+            append_bytes(wire, [0, 0, payload_len, 10 + seed % 240, seed % 256, 0, 0, 0, 0])
+            var j = 0
+            while j < payload_len:
+                seed = (seed * 1103515245 + 12345) & 2147483647
+                wire.push(seed % 256)
+                j = j + 1
+            val receipt = live_exchange(wire, 1 + case_index % 7)
+            expect(receipt.connected).to_be(true)
+            expect(receipt.request_count).to_equal(0)
+            expect(receipt.retained_bytes).to_equal(0)
+            expect(receipt.retained_bytes).to_be_less_than(H2_MAX_RECV_BUFFER + 1)
+            case_index = case_index + 1
+
+    it "soaks repeated live connections with bounded latency and RSS":
+        var elapsed_samples: [i64] = []
+        var i = 0
+        while i < 40:
+            val receipt = live_exchange(valid_get_wire(), 1 + i % 13)
+            expect(receipt.connected).to_be(true)
+            expect(receipt.request_count).to_equal(1)
+            expect(receipt.retained_bytes).to_equal(0)
+            elapsed_samples.push(receipt.elapsed_us)
+            i = i + 1
+        elapsed_samples.sort()
+        # Nearest-rank p95: ceil(40 * .95) - 1 = 37. A generous CI bound
+        # catches stalls/deadlocks rather than benchmarking scheduler noise.
+        expect(elapsed_samples[37]).to_be_less_than(1000001)
+        val rss_kib = peak_rss_kib()
+        expect(rss_kib).to_be_greater_than(0)
+        expect(rss_kib).to_be_less_than(393217)

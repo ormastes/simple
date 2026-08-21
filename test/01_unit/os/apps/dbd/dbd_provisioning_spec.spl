@@ -1,0 +1,71 @@
+# @cover src/os/apps/dbd/dbd_provisioning.spl 90%
+"""
+# DBD production material provisioning
+
+Acceptance coverage for bounded credential/TLS ownership.  The service only
+receives a digest verifier after all TLS material passes admission, raw AUTH
+bytes are released immediately, and close/rejection revokes every capability.
+"""
+
+use std.spec
+use os.apps.dbd.dbd_provisioning.{
+    DbdProvisioningOwnerV1, DbdProvisioningStateV1,
+    DBD_MAX_CERTIFICATE_BYTES, DBD_MAX_PRIVATE_KEY_BYTES
+}
+
+fn _bytes(value: u8, count: i64) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < count:
+        out.push(value)
+        i = i + 1
+    out
+
+describe "DBD provisioning acceptance":
+    it "admits bounded credentials and TLS material without retaining AUTH bytes":
+        var owner = DbdProvisioningOwnerV1.new()
+        expect(owner.admit(
+            "operator", _bytes(31u8, 32), [[48u8, 1u8]],
+            [48u8, 2u8], 0x0807u16)).to_be(true)
+        expect(owner.ready()).to_be(true)
+        expect(owner.provider.configured).to_be(true)
+        expect(owner.credential.len()).to_equal(0u64)
+        expect(owner.credential_wiped).to_be(true)
+        val config = owner.tls_config()
+        expect(config.is_ok()).to_be(true)
+        expect(config.unwrap().cert_chain).to_equal([[48u8, 1u8]])
+
+    it "fails closed when any bounded secret or certificate boundary is invalid":
+        var short_secret = DbdProvisioningOwnerV1.new()
+        expect(short_secret.admit(
+            "operator", _bytes(1u8, 31), [[1u8]], [2u8], 0x0807u16
+        )).to_be(false)
+        expect(short_secret.state).to_equal(DbdProvisioningStateV1.Quarantined)
+        expect(short_secret.provider.configured).to_be(false)
+        expect(short_secret.tls_config().is_err()).to_be(true)
+
+        var huge_cert = DbdProvisioningOwnerV1.new()
+        expect(huge_cert.admit(
+            "operator", _bytes(1u8, 32),
+            [_bytes(2u8, DBD_MAX_CERTIFICATE_BYTES + 1)],
+            [3u8], 0x0807u16)).to_be(false)
+        expect(huge_cert.ready()).to_be(false)
+
+        var huge_key = DbdProvisioningOwnerV1.new()
+        expect(huge_key.admit(
+            "operator", _bytes(1u8, 32), [[2u8]],
+            _bytes(3u8, DBD_MAX_PRIVATE_KEY_BYTES + 1), 0x0807u16
+        )).to_be(false)
+        expect(huge_key.ready()).to_be(false)
+
+    it "revokes the verifier and releases TLS material on close":
+        var owner = DbdProvisioningOwnerV1.new()
+        expect(owner.admit(
+            "operator", _bytes(9u8, 32), [[1u8]], [2u8], 0x0807u16
+        )).to_be(true)
+        owner.close()
+        expect(owner.state).to_equal(DbdProvisioningStateV1.Closed)
+        expect(owner.provider.configured).to_be(false)
+        expect(owner.cert_chain.len()).to_equal(0u64)
+        expect(owner.private_key.len()).to_equal(0u64)
+        expect(owner.tls_config().is_err()).to_be(true)

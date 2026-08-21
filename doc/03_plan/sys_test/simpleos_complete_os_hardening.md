@@ -15,6 +15,15 @@ Prove REQ-001–REQ-020 and NFR-001–NFR-014 through live, fail-closed, nonce-b
 | `test/03_system/os/wm/simpleos_wm_behavior_evidence_spec.spl` | REQ-017 production-owner host behavior plus fail-closed canonical QEMU visual capture binding |
 | `test/03_system/os/simpleos/feature/simpleos_complete_os_hardening_evidence_manual_spec.spl` | ledger, ownership/duplication, freshness, traceability, manual-quality gates |
 
+REQ-008 is discharged by
+`test/03_system/os/qemu/simpleos_multiarch_fs_acceptance_spec.spl`.  Its common
+x86_64/ARM64/RV64 profile requires an ordered filesystem lookup, open-handle
+authentication, scheduler adoption, exit 37, exact-once reap, address-space
+reclamation, source-handle close, and an unchanged bounded resource snapshot.
+QEMU rows reject performance promotion.  Native/physical rows additionally
+require canonical admitted filesystem metadata, sequential-throughput, and
+Simple compile/run receipts with raw timing and RSS samples.
+
 Mirrors live under `doc/06_spec/03_system/os/...` after removing the leading `test/`. No executable `.spl` belongs under `doc/06_spec`.
 
 ## Frozen scenario vocabulary
@@ -52,8 +61,47 @@ fixed responder, tautological assertion, or todo-pass helper is allowed.
 The binding source of truth is
 `test/helpers/simpleos_complete_os_hardening_steps.spl`. Expected evidence is
 always the exact file
-`build/test-artifacts/simpleos_complete_os_hardening/<ID>/<case>.receipt.sdn`;
+`build/test-artifacts/simpleos_complete_os_hardening/<ID>/<case>/receipt.v1.bin`;
 `<case>` is `happy`, `boundary`, or `rejection`.
+
+The canonical non-bootstrap runner creates a nonce-scoped capture root, captures
+every preceding live gate itself, executes 102 repository-bound case commands,
+and constructs its 102-row case manifest internally. Production accepts no
+caller-supplied manifest. The runner then invokes the admitted receipt producer
+once for every one of the 34 IDs × 3 cases. Every row names a unique
+case descriptor and case output, its relevant producer gate, expected semantics
+(`accepted`, `boundary-observed`, or `rejection-observed`), successful oracle
+exit, exact argv, and case-specific source, image, binary, and configuration
+snapshots.  A boundary or rejection proof is therefore the successful output
+of that specific negative/boundary oracle, never a relabelled happy-path run.
+Each descriptor also binds the current acceptance run ID, capture timestamp,
+runner-owned capture-ledger hash, exact stdout/stderr bundle, exit code, and
+relevant preceding-gate capture hash;
+the producer rejects future evidence or evidence older than the umbrella's
+15-minute freshness bound instead of refreshing an old capture by re-signing it.
+The producer receives those immutable snapshots plus the case-output artifact and
+must atomically publish `receipt.v1.bin`, `source.snapshot`, `image.snapshot`,
+`binary.snapshot`, `config.snapshot`, `artifact-0.snapshot` (case output), and
+`artifact-1.snapshot` (case descriptor), and `artifact-2.snapshot`
+(runner-owned capture ledger). Receipt
+publication precedes umbrella admission in the dependency graph.  Existing
+output directories, symlinks, signer/trust substitution, a mutated trust
+configuration, and any bootstrap/seed receipt producer fail closed.
+
+`sh scripts/check/check-simpleos-nonbootstrap-acceptance.shs --dry-run` prints
+the exact 102 receipt destinations without creating evidence.  `--self-test`
+checks count, uniqueness, distinct case hashes and snapshot paths, outcome
+semantics, producer-gate mapping, graph order, and consumer filename agreement.
+Live publication additionally requires
+`SIMPLEOS_EVIDENCE_RECEIPT_PRODUCER`, `SIMPLEOS_EVIDENCE_SIGNING_KEY`,
+`SIMPLEOS_EVIDENCE_TRUST_CONFIG`, immutable platform snapshot inputs, plus
+reviewer and target identity variables;
+none may be inferred from source presence. The producer checks the descriptor's
+requirement, case, semantics, gate, exit status, and hashes against the exact
+supplied bytes, then signs both the case artifact and descriptor. The producer source is
+`src/app/simpleos_evidence_receipt_producer/main.spl`; provisioning compiles it
+with the admitted self-hosted runtime and supplies that cached executable via
+`SIMPLEOS_EVIDENCE_RECEIPT_PRODUCER`.
 
 | IDs | Executable acceptance owner |
 |---|---|

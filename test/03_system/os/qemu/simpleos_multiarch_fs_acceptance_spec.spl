@@ -1,0 +1,165 @@
+# codex-system-test
+# @tag: system, simpleos, qemu, native, filesystem, performance
+# @req REQ-002 REQ-008 REQ-018 NFR-001 NFR-002 NFR-003 NFR-005 NFR-012
+
+"""# Multi-architecture filesystem execution acceptance
+
+Validates the common x86_64, ARM64, and RV64 QEMU/native lifecycle contract.
+Rows fail closed unless filesystem lookup, authenticated adoption, exit 37,
+exact reap, address-space/handle reclamation, and canonical native performance
+receipts are all present.
+"""
+
+use std.spec.*
+use std.common.structural.receipt.simpleos_evidence_receipt_v1.*
+use std.common.contracts.execution.simpleos_performance_v1.*
+use os.services.evidence.simpleos_multiarch_fs_acceptance_v1.*
+
+val SOURCE_HASH = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+val IMAGE_HASH = "1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+val BINARY_HASH = "2123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+val CONFIG_HASH = "3123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+val FIXTURE_HASH = "4123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+val BASELINE_HASH = "5123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+val STEP_HASH = "6123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+fn lifecycle_steps() -> [SimpleOsEvidenceStepV1]:
+    val names = ["firmware_boot", "filesystem_mount", "filesystem_lookup",
+        "open_handle_authentication", "scheduler_adoption", "user_entry",
+        "program_exit_37", "exact_reap", "address_space_reclaim",
+        "source_handle_close", "terminal_pass"]
+    var result: [SimpleOsEvidenceStepV1] = []
+    var index: i64 = 0
+    for name in names:
+        result = result.push(SimpleOsEvidenceStepV1(
+            sequence: index, behavior_id: name, outcome: "pass",
+            exit_code: 0, artifact_hash: STEP_HASH))
+        index = index + 1
+    result
+
+fn target_for(architecture: text) -> text:
+    if architecture == "x86_64": return "x86_64-simple-none"
+    if architecture == "arm64": return "aarch64-simple-none"
+    "riscv64gc-simple-none"
+
+fn lifecycle_receipt(architecture: text,
+                     environment: SimpleOsEvidenceEnvironment) -> SimpleOsEvidenceReceiptV1:
+    val qemu = environment == SimpleOsEvidenceEnvironment.QemuSystem
+    SimpleOsEvidenceReceiptV1(
+        schema_version: 1, receipt_id: "fs-live-" + architecture,
+        nonce: "fresh-run-nonce", requirement_id: "REQ-008",
+        capability: "filesystem-exec-lifecycle-v1",
+        target: target_for(architecture), target_abi: "simpleos-elf64-v1",
+        environment: environment,
+        firmware_profile: if qemu then "canonical-firmware" else "",
+        board_identity: if qemu then "" else "native-board-cpu-serial",
+        accelerator: if qemu then "tcg" else "native",
+        filesystem: "fat32", protocol_profile: "authenticated-open-handle-v1",
+        source_hash: SOURCE_HASH, image_hash: IMAGE_HASH,
+        binary_hash: BINARY_HASH, config_hash: CONFIG_HASH,
+        exact_argv: ["simpleos-image", "--run", "/FSEXEC.ELF"],
+        artifact_hashes: [SOURCE_HASH, IMAGE_HASH, BINARY_HASH, CONFIG_HASH],
+        steps: lifecycle_steps(), performance_workload: "",
+        performance_unit: "", performance_warmup_count: 0,
+        performance_cpu_identity: "", performance_frequency_hz: 0,
+        performance_noise_profile: "", performance_comparable: false,
+        performance_samples: [], started_unix_us: 1000,
+        finished_unix_us: 2000, owner: "simpleos-lifecycle-owner",
+        reviewer: "independent-reviewer", signer_key_id: "test-key",
+        signature: "signature-bytes")
+
+fn resources() -> SimpleOsMultiarchFsResourceSnapshotV1:
+    SimpleOsMultiarchFsResourceSnapshotV1(
+        tasks: 1u64, address_spaces: 1u64, mappings: 8u64,
+        handles: 2u64, executable_tokens: 0u64)
+
+fn samples(value: u64) -> [u64]:
+    [value, value, value, value, value, value, value, value, value, value]
+
+fn performance(workload: SimpleOsPerformanceWorkloadV1,
+               value: u64) -> SimpleOsPerformanceEvidenceV1:
+    SimpleOsPerformanceEvidenceV1(
+        budget: simpleos_performance_canonical_budget(workload, 200000u64),
+        samples: samples(value), rss_samples: samples(100000u64),
+        warmup_samples: 2u64, cpu_identity: "native-cpu",
+        frequency_identity: "fixed-frequency", noise_identity: "isolated",
+        fixture_hash: FIXTURE_HASH, binary_hash: BINARY_HASH,
+        image_hash: IMAGE_HASH, config_hash: CONFIG_HASH,
+        accelerator_identity: "native", baseline_identity_hash: BASELINE_HASH,
+        artifact_hashes: [FIXTURE_HASH, BINARY_HASH, IMAGE_HASH, CONFIG_HASH,
+                          BASELINE_HASH],
+        host: SimpleOsPerformanceHostV1.Native, comparable_baseline: true,
+        baseline_value: value, max_rss_bytes: 100000u64,
+        baseline_rss_bytes: 100000u64)
+
+fn candidate(architecture: text,
+             environment: SimpleOsEvidenceEnvironment) -> SimpleOsMultiarchFsAcceptanceCandidateV1:
+    SimpleOsMultiarchFsAcceptanceCandidateV1(
+        architecture: architecture, environment: environment,
+        lifecycle: lifecycle_receipt(architecture, environment),
+        before: resources(), after: resources(), child_exit_code: 37,
+        reap_count: 1u64, performance: [])
+
+describe "REQ-008: QEMU filesystem launch adoption and reclamation":
+    it "accepts the same complete lifecycle on x86_64 ARM64 and RV64":
+        step("Admit filesystem launch, scheduler adoption, exact reap, and reclamation")
+        for architecture in ["x86_64", "arm64", "riscv64"]:
+            expect(simpleos_multiarch_fs_acceptance_validate(candidate(
+                architecture, SimpleOsEvidenceEnvironment.QemuSystem)).ok).to_be(true)
+
+    it "fails closed when launch evidence or resource reclamation is absent":
+        var missing = candidate("arm64", SimpleOsEvidenceEnvironment.QemuSystem)
+        var receipt = missing.lifecycle
+        receipt.steps = receipt.steps.slice(0, 10)
+        missing.lifecycle = receipt
+        expect(simpleos_multiarch_fs_acceptance_validate(missing).error).to_equal(
+            SimpleOsMultiarchFsAcceptanceErrorV1.MissingLifecycleStep)
+        var leaked = candidate("riscv64", SimpleOsEvidenceEnvironment.QemuSystem)
+        var after = leaked.after
+        after.mappings = after.mappings + 1u64
+        leaked.after = after
+        expect(simpleos_multiarch_fs_acceptance_validate(leaked).error).to_equal(
+            SimpleOsMultiarchFsAcceptanceErrorV1.ResourceLeak)
+
+    it "rejects wrong exit status double reap and QEMU timing promotion":
+        var wrong_exit = candidate("x86_64", SimpleOsEvidenceEnvironment.QemuSystem)
+        wrong_exit.child_exit_code = 0
+        expect(simpleos_multiarch_fs_acceptance_validate(wrong_exit).error).to_equal(
+            SimpleOsMultiarchFsAcceptanceErrorV1.ReapMismatch)
+        var double_reap = candidate("x86_64", SimpleOsEvidenceEnvironment.QemuSystem)
+        double_reap.reap_count = 2u64
+        expect(simpleos_multiarch_fs_acceptance_validate(double_reap).error).to_equal(
+            SimpleOsMultiarchFsAcceptanceErrorV1.ReapMismatch)
+        var qemu_timing = candidate("x86_64", SimpleOsEvidenceEnvironment.QemuSystem)
+        qemu_timing.performance = [performance(SimpleOsPerformanceWorkloadV1.FsMetadata, 1000u64)]
+        expect(simpleos_multiarch_fs_acceptance_validate(qemu_timing).error).to_equal(
+            SimpleOsMultiarchFsAcceptanceErrorV1.PerformanceForbidden)
+
+describe "NFR-002/003: native filesystem performance receipts":
+    it "accepts native rows only with all canonical filesystem execution workloads":
+        step("Validate raw native timing and RSS samples through the canonical performance owner")
+        for architecture in ["x86_64", "arm64", "riscv64"]:
+            var native = candidate(architecture, SimpleOsEvidenceEnvironment.NativeHost)
+            native.performance = [
+                performance(SimpleOsPerformanceWorkloadV1.FsMetadata, 1000u64),
+                performance(SimpleOsPerformanceWorkloadV1.FsSequentialThroughput, 120000000u64),
+                performance(SimpleOsPerformanceWorkloadV1.SimpleCompileRun, 1000000u64)]
+            expect(simpleos_multiarch_fs_acceptance_validate(native).ok).to_be(true)
+
+    it "fails closed on absent noisy short nonnative or incomplete receipts":
+        var absent = candidate("arm64", SimpleOsEvidenceEnvironment.NativeHost)
+        expect(simpleos_multiarch_fs_acceptance_validate(absent).error).to_equal(
+            SimpleOsMultiarchFsAcceptanceErrorV1.MissingPerformanceWorkload)
+        var incomplete = candidate("riscv64", SimpleOsEvidenceEnvironment.NativeHost)
+        incomplete.performance = [
+            performance(SimpleOsPerformanceWorkloadV1.FsMetadata, 1000u64),
+            performance(SimpleOsPerformanceWorkloadV1.FsSequentialThroughput, 120000000u64)]
+        expect(simpleos_multiarch_fs_acceptance_validate(incomplete).error).to_equal(
+            SimpleOsMultiarchFsAcceptanceErrorV1.MissingPerformanceWorkload)
+        var short = candidate("x86_64", SimpleOsEvidenceEnvironment.NativeHost)
+        var invalid = performance(SimpleOsPerformanceWorkloadV1.FsMetadata, 1000u64)
+        invalid.samples = [1000u64]
+        invalid.rss_samples = [100000u64]
+        short.performance = [invalid]
+        expect(simpleos_multiarch_fs_acceptance_validate(short).error).to_equal(
+            SimpleOsMultiarchFsAcceptanceErrorV1.InvalidPerformanceEvidence)

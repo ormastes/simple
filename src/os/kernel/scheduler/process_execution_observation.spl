@@ -1,0 +1,137 @@
+# Scheduler-owned, bounded execution observation slots.
+
+use std.common.contracts.execution.simpleos_executable_admission_v1.{ExecutableImageHandleV1}
+
+pub struct SchedulerExecutionEvidenceTokenV1:
+    slot: i64
+    generation: u64
+    nonce: u64
+
+pub struct SchedulerExecutionEvidenceV1:
+    child_id: u64
+    parent_id: u64
+    image_hash: text
+    mount_generation: u64
+    file_generation: u64
+    exit_code: i32
+    stdout_bytes: [u8]
+
+struct SchedulerExecutionObservationV1:
+    generation: u64
+    nonce: u64
+    child_id: u64
+    parent_id: u64
+    image_hash: text
+    mount_generation: u64
+    file_generation: u64
+    exit_code: i32
+    exited: bool
+    reaped: bool
+    delivered: bool
+    consumed: bool
+    stdout_bytes: [u8]
+
+val OBSERVATION_LIMIT: i64 = 256
+val STDOUT_LIMIT: i64 = 65536
+var _observations: [SchedulerExecutionObservationV1] = []
+var _active_child: u64 = 0u64
+var _nonce: u64 = 0x5343484544455649u64
+
+pub(package) fn scheduler_execution_observe_adoption_v1(
+    child_id: u64, parent_id: u64, handle: ExecutableImageHandleV1
+) -> bool:
+    if child_id == 0u64 or handle.image_hash == "" or handle.mount_generation == 0u64:
+        return false
+    _nonce = _nonce * 6364136223846793005u64 + 1u64
+    var reusable = -1
+    var i = 0
+    while i < _observations.len():
+        if _observations[i].consumed:
+            reusable = i
+            break
+        i = i + 1
+    if reusable < 0 and _observations.len() >= OBSERVATION_LIMIT:
+        return false
+    val generation = if reusable >= 0: _observations[reusable].generation + 1u64 else: 1u64
+    val fresh = SchedulerExecutionObservationV1(
+        generation: generation, nonce: _nonce, child_id: child_id, parent_id: parent_id,
+        image_hash: handle.image_hash, mount_generation: handle.mount_generation,
+        file_generation: handle.file_generation, exit_code: 0, exited: false,
+        reaped: false, delivered: false, consumed: false, stdout_bytes: [])
+    if reusable >= 0:
+        _observations[reusable] = fresh
+    else:
+        _observations.push(fresh)
+    _active_child = child_id
+    true
+
+pub(package) fn scheduler_execution_observe_stdout_byte_v1(byte: u8):
+    if _active_child == 0u64:
+        return
+    var i = 0
+    while i < _observations.len():
+        if _observations[i].child_id == _active_child and not _observations[i].exited and
+           _observations[i].stdout_bytes.len() < STDOUT_LIMIT:
+            _observations[i].stdout_bytes.push(byte)
+            return
+        i = i + 1
+
+pub(package) fn scheduler_execution_observe_exit_v1(child_id: u64, code: i32):
+    var i = 0
+    while i < _observations.len():
+        if _observations[i].child_id == child_id and not _observations[i].exited:
+            _observations[i].exit_code = code
+            _observations[i].exited = true
+            if _active_child == child_id:
+                _active_child = 0u64
+            return
+        i = i + 1
+
+pub(package) fn scheduler_execution_observe_reap_v1(child_id: u64) -> SchedulerExecutionEvidenceTokenV1?:
+    var i = 0
+    while i < _observations.len():
+        if _observations[i].child_id == child_id and _observations[i].exited and not _observations[i].reaped:
+            _observations[i].reaped = true
+            return Some(SchedulerExecutionEvidenceTokenV1(
+                slot: i, generation: _observations[i].generation, nonce: _observations[i].nonce))
+        i = i + 1
+    nil
+
+pub fn scheduler_execution_take_reaped_token_v1(child_id: u64) -> SchedulerExecutionEvidenceTokenV1?:
+    """Deliver the scheduler-minted reap token once to orchestration."""
+    var i = 0
+    while i < _observations.len():
+        if _observations[i].child_id == child_id and _observations[i].reaped and
+           not _observations[i].delivered:
+            _observations[i].delivered = true
+            return Some(SchedulerExecutionEvidenceTokenV1(
+                slot: i, generation: _observations[i].generation, nonce: _observations[i].nonce))
+        i = i + 1
+    nil
+
+pub fn scheduler_execution_evidence_consume_once_v1(
+    token: SchedulerExecutionEvidenceTokenV1
+) -> SchedulerExecutionEvidenceV1?:
+    if token.slot < 0 or token.slot >= _observations.len():
+        return nil
+    val observed = _observations[token.slot]
+    if observed.generation != token.generation or observed.nonce != token.nonce or
+       not observed.reaped or observed.consumed:
+        return nil
+    val evidence = SchedulerExecutionEvidenceV1(
+        child_id: observed.child_id, parent_id: observed.parent_id,
+        image_hash: observed.image_hash, mount_generation: observed.mount_generation,
+        file_generation: observed.file_generation, exit_code: observed.exit_code,
+        stdout_bytes: observed.stdout_bytes)
+    # Scrub authority-bearing and potentially sensitive capture material now;
+    # generation is retained so a stale copied token cannot address reuse.
+    _observations[token.slot] = SchedulerExecutionObservationV1(
+        generation: observed.generation, nonce: 0u64, child_id: 0u64, parent_id: 0u64,
+        image_hash: "", mount_generation: 0u64, file_generation: 0u64,
+        exit_code: 0, exited: false, reaped: false, delivered: false,
+        consumed: true, stdout_bytes: [])
+    Some(evidence)
+
+export SchedulerExecutionEvidenceTokenV1, SchedulerExecutionEvidenceV1
+export scheduler_execution_evidence_consume_once_v1
+export scheduler_execution_take_reaped_token_v1

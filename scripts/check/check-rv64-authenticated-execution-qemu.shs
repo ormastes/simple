@@ -1,0 +1,72 @@
+#!/bin/sh
+# Re-run the retained RV64 kernel/image pair and admit only guest-produced,
+# artifact-bound authenticated execution markers.  The bundle, not caller
+# strings, owns the nonce and loader image digest.
+set -eu
+
+die() { echo "rv64-auth-exec-qemu: $*" >&2; exit 2; }
+[ "${1:-}" = --bundle ] && [ "$#" -eq 2 ] || die 'usage: --bundle BUNDLE_DIR'
+bundle=$2
+record=$bundle/evidence.env
+[ -f "$record" ] && [ ! -L "$record" ] || die 'missing bundle evidence.env'
+
+field() {
+    count=$(awk -F= -v k="$1" '$1 == k { n++ } END { print n+0 }' "$record")
+    [ "$count" -eq 1 ] || die "field-count:$1:$count"
+    awk -F= -v k="$1" '$1 == k { print substr($0,index($0,"=")+1) }' "$record"
+}
+artifact() {
+    wanted=$1 count=$(field artifact_count) i=1 found=
+    while [ "$i" -le "$count" ]; do
+        path=$(field "artifact_${i}_path")
+        if [ "$path" = "$wanted" ]; then found=$bundle/$path; declared=$(field "artifact_${i}_sha256"); fi
+        i=$((i + 1))
+    done
+    [ -n "$found" ] && [ -f "$found" ] && [ ! -L "$found" ] || die "missing-artifact:$wanted"
+    actual=$(sha256sum "$found" | awk '{print $1}')
+    [ "$actual" = "$declared" ] || die "artifact-hash-mismatch:$wanted"
+    printf '%s' "$found"
+}
+
+[ "$(field schema_version)" = 2 ] || die 'schema-version'
+[ "$(field guest)" = riscv64 ] || die 'not-riscv64-bundle'
+nonce=$(field run_nonce)
+printf '%s\n' "$nonce" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{15,127}$' || die 'unsafe-run-nonce'
+kernel=$(artifact kernel.elf)
+image=$(artifact guest.img)
+program=$(artifact program.elf)
+firmware=$(artifact firmware.bin)
+program_hash=$(sha256sum "$program" | awk '{print $1}')
+[ "$(field program_identity)" = "sha256:$program_hash" ] || die 'program-identity-mismatch'
+[ "$(field image_identity)" = "sha256:$(sha256sum "$image" | awk '{print $1}')" ] || die 'image-identity-mismatch'
+[ "$(field kernel_identity)" = "sha256:$(sha256sum "$kernel" | awk '{print $1}')" ] || die 'kernel-identity-mismatch'
+
+admission=$(artifact host-admission.env)
+qemu=$(awk -F= '$1 == "qemu_binary_resolved" {print substr($0,index($0,"=")+1)}' "$admission")
+[ -x "$qemu" ] || die 'retained-qemu-unavailable'
+[ "$(sha256sum "$qemu" | awk '{print $1}')" = "$(awk -F= '$1 == "qemu_sha256" {print $2}' "$admission")" ] || die 'qemu-identity-mismatch'
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/rv64-auth-exec.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+serial=$work/serial.log
+binding=$work/binding.env
+printf 'nonce=%s\nimage_hash=%s\n' "$nonce" "$program_hash" > "$binding"
+
+# The image already contains program.elf as /FSEXEC.ELF.  This is a fresh boot
+# of the exact retained bytes; no retained/fabricated transcript is consulted.
+set +e
+timeout -k 5 120 "$qemu" -machine virt -cpu rv64 -m 2G -nographic \
+    -bios "$firmware" -global virtio-mmio.force-legacy=false \
+    -drive "file=$image,if=none,id=rvdisk,format=raw,readonly=on" \
+    -device virtio-blk-device,drive=rvdisk -kernel "$kernel" >"$serial" 2>&1
+qemu_rc=$?
+set -e
+case "$qemu_rc" in 0|124) ;; *) die "qemu-exit:$qemu_rc" ;; esac
+
+env SIMPLEOS_RV64_AUTH_EXEC_QEMU_LIVE=1 \
+    SIMPLEOS_RV64_AUTH_EXEC_SERIAL_LOG="$serial" \
+    SIMPLEOS_RV64_AUTH_EXEC_BINDING_FILE="$binding" \
+    "${SIMPLE_BIN:-bin/simple}" test \
+    test/03_system/os/qemu/rv64_authenticated_execution_evidence_live_spec.spl \
+    --mode=interpreter
+echo simpleos_rv64_authenticated_execution_qemu_status=pass

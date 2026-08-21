@@ -1,0 +1,41 @@
+use std.spec.*
+use std.common.contracts.execution.simpleos_executable_admission_v1.{ExecutableImageHandleV1}
+use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget}
+use os.kernel.scheduler.process_execution_observation.{
+    scheduler_execution_observe_adoption_v1, scheduler_execution_observe_exit_v1,
+    scheduler_execution_observe_reap_v1, scheduler_execution_take_reaped_token_v1,
+    scheduler_execution_evidence_consume_once_v1
+}
+
+fn _handle() -> ExecutableImageHandleV1:
+    ExecutableImageHandleV1(
+        schema_version: 1, open_handle_id: 11u64, mount_id: 2u64,
+        mount_generation: 3u64, file_id: 11u64, file_generation: 4u64,
+        size_bytes: 4096u64, role: "main-image",
+        target: ManifestTarget(os: "simpleos", arch: "riscv64", abi: "lp64d"),
+        verified_load_ranges: [],
+        image_hash: "1111111111111111111111111111111111111111111111111111111111111111",
+        admission_id: "observation-capacity", trust_epoch: 5u64,
+        read_count: 0u64, read_bytes: 0u64, consumed: false)
+
+describe "scheduler execution observation capacity":
+    it "reuses generation-safe slots for more than 256 sequential executions":
+        var i = 1u64
+        while i <= 300u64:
+            expect(scheduler_execution_observe_adoption_v1(i, 0u64, _handle())).to_equal(true)
+            scheduler_execution_observe_exit_v1(i, 0)
+            expect(scheduler_execution_observe_reap_v1(i).is_some()).to_equal(true)
+            val token = scheduler_execution_take_reaped_token_v1(i).unwrap()
+            expect(scheduler_execution_evidence_consume_once_v1(token).is_some()).to_equal(true)
+            expect(scheduler_execution_evidence_consume_once_v1(token).is_some()).to_equal(false)
+            i = i + 1u64
+
+    it "rejects the 257th concurrent reservation without an orphan token":
+        var i = 1000u64
+        while i < 1256u64:
+            expect(scheduler_execution_observe_adoption_v1(i, 0u64, _handle())).to_equal(true)
+            i = i + 1u64
+        expect(scheduler_execution_observe_adoption_v1(1256u64, 0u64, _handle())).to_equal(false)
+        scheduler_execution_observe_exit_v1(1256u64, 0)
+        expect(scheduler_execution_observe_reap_v1(1256u64).is_some()).to_equal(false)
+        expect(scheduler_execution_take_reaped_token_v1(1256u64).is_some()).to_equal(false)

@@ -1,0 +1,216 @@
+# Canonical SimpleOS acceptance receipt producer.  It only signs exact,
+# non-empty snapshots supplied by an already completed acceptance owner.
+use std.cli.cli_util.{get_cli_args}
+use std.io_runtime.{file_exists, file_read_bytes, file_read, file_write_bytes,
+    mkdir_p, file_rename, getpid, time_now_unix_micros, exit}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed,
+    pure_ed25519_sign, pure_ed25519_verify}
+use std.common.structural.receipt.simpleos_evidence_receipt_v1.{
+    SimpleOsEvidenceEnvironment, SimpleOsEvidenceStepV1,
+    SimpleOsEvidenceReceiptV1}
+use std.common.structural.receipt.simpleos_evidence_receipt_v1_codec.{
+    encode_simpleos_evidence_receipt_v1,
+    encode_simpleos_evidence_receipt_v1_signing_bytes}
+use os.services.evidence.signature_codec.{simpleos_evidence_public_key_hex_decode}
+
+fn _arg(args: [text], name: text) -> text:
+    var i: i64 = 0
+    while i + 1 < args.len():
+        if args[i] == name: return args[i + 1]
+        i = i + 1
+    ""
+
+fn _hex(bytes: [u8]) -> text:
+    val digits = "0123456789abcdef"
+    var out = ""
+    for byte in bytes:
+        val n = byte.to_i64()
+        out = out + digits.substring(n / 16, n / 16 + 1)
+        out = out + digits.substring(n % 16, n % 16 + 1)
+    out
+
+fn _same(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len(): return false
+    var i: i64 = 0
+    while i < a.len():
+        if a[i] != b[i]: return false
+        i = i + 1
+    true
+
+fn _trust_field(config: text, prefix: text) -> text:
+    for line in config.split("\n"):
+        if line.starts_with(prefix): return line.substring(prefix.len(), line.len())
+    ""
+
+fn _descriptor_matches(descriptor: text, requirement: text, evidence_case: text,
+                       semantics: text, gate: text, producer_exit: text,
+                       run_id: text, scenario_owner: text, scenario_oracle: text,
+                       target: text, target_abi: text, environment: text,
+                       filesystem: text, protocol_profile: text, exact_argv: text,
+                       artifact_hash: text, source_hash: text, image_hash: text,
+                       binary_hash: text, config_hash: text,
+                       capture_ledger_hash: text) -> bool:
+    _trust_field(descriptor, "requirement_id=") == requirement and
+    _trust_field(descriptor, "evidence_case=") == evidence_case and
+    _trust_field(descriptor, "case_semantics=") == semantics and
+    _trust_field(descriptor, "producer_gate=") == gate and
+    _trust_field(descriptor, "producer_exit_code=") == producer_exit and
+    _trust_field(descriptor, "run_id=") == run_id and
+    _trust_field(descriptor, "scenario_owner=") == scenario_owner and
+    _trust_field(descriptor, "scenario_oracle=") == scenario_oracle and
+    _trust_field(descriptor, "target=") == target and
+    _trust_field(descriptor, "target_abi=") == target_abi and
+    _trust_field(descriptor, "environment=") == environment and
+    _trust_field(descriptor, "filesystem=") == filesystem and
+    _trust_field(descriptor, "protocol_profile=") == protocol_profile and
+    _trust_field(descriptor, "exact_argv=") == exact_argv and
+    _trust_field(descriptor, "artifact_sha256=") == artifact_hash and
+    _trust_field(descriptor, "source_sha256=") == source_hash and
+    _trust_field(descriptor, "image_sha256=") == image_hash and
+    _trust_field(descriptor, "binary_sha256=") == binary_hash and
+    _trust_field(descriptor, "config_sha256=") == config_hash and
+    _trust_field(descriptor, "capture_ledger_sha256=") == capture_ledger_hash
+
+fn _environment(value: text) -> SimpleOsEvidenceEnvironment?:
+    if value == "qemu_system": return Some(SimpleOsEvidenceEnvironment.QemuSystem)
+    if value == "native_host": return Some(SimpleOsEvidenceEnvironment.NativeHost)
+    if value == "physical_board": return Some(SimpleOsEvidenceEnvironment.PhysicalBoard)
+    nil
+
+fn _die(reason: text):
+    print "simpleos-evidence-receipt-producer: " + reason
+    exit(2)
+
+fn _write(path: text, bytes: [u8]):
+    if bytes.len() == 0 or not file_write_bytes(path, bytes): _die("snapshot-write:" + path)
+
+fn main():
+    val args = get_cli_args()
+    val requirement = _arg(args, "--requirement")
+    val evidence_case = _arg(args, "--case")
+    val semantics = _arg(args, "--case-semantics")
+    val producer_gate = _arg(args, "--producer-gate")
+    val producer_exit = _arg(args, "--producer-exit-code")
+    val run_id = _arg(args, "--run-id")
+    val descriptor_path = _arg(args, "--case-descriptor")
+    val capture_ledger_path = _arg(args, "--capture-ledger")
+    val consumer = _arg(args, "--consumer")
+    val owner = _arg(args, "--owner")
+    val reviewer = _arg(args, "--reviewer")
+    val output = _arg(args, "--output")
+    val key_path = _arg(args, "--signing-key")
+    val trust_path = _arg(args, "--trust-config")
+    val source_path = _arg(args, "--source-snapshot")
+    val image_path = _arg(args, "--image-snapshot")
+    val binary_path = _arg(args, "--binary-snapshot")
+    val config_path = _arg(args, "--config-snapshot")
+    val artifact_path = _arg(args, "--owner-output")
+    val environment_text = _arg(args, "--environment")
+    val environment = _environment(environment_text)
+    val target = _arg(args, "--target")
+    val target_abi = _arg(args, "--target-abi")
+    val filesystem = _arg(args, "--filesystem")
+    val protocol_profile = _arg(args, "--protocol-profile")
+    val exact_argv = _arg(args, "--exact-argv")
+    if requirement == "" or consumer == "" or owner == "" or reviewer == "" or
+        output == "" or not environment.?: _die("missing-required-argument")
+    if evidence_case != "happy" and evidence_case != "boundary" and evidence_case != "rejection":
+        _die("invalid-case")
+    val expected_semantics = if evidence_case == "happy": "accepted" elif evidence_case == "boundary": "boundary-observed" else: "rejection-observed"
+    if semantics != expected_semantics or producer_gate == "" or producer_exit != "0" or run_id == "":
+        _die("case-outcome-semantics")
+    if owner == reviewer: _die("reviewer-conflict")
+    if file_exists(output): _die("output-collision")
+
+    val source = file_read_bytes(source_path)
+    val image = file_read_bytes(image_path)
+    val binary = file_read_bytes(binary_path)
+    val config = file_read_bytes(config_path)
+    val artifact = file_read_bytes(artifact_path)
+    val descriptor_bytes = file_read_bytes(descriptor_path)
+    val capture_ledger = file_read_bytes(capture_ledger_path)
+    val descriptor = file_read(descriptor_path)
+    if source.len() == 0 or image.len() == 0 or binary.len() == 0 or
+        config.len() == 0 or artifact.len() == 0 or descriptor_bytes.len() == 0 or capture_ledger.len() == 0:
+        _die("empty-or-missing-snapshot")
+
+    val seed = file_read_bytes(key_path)
+    if seed.len() != 32: _die("signing-key-must-be-raw-32-byte-seed")
+    val trust = file_read(trust_path)
+    val key_id = _trust_field(trust, "key_id=")
+    val trusted_public = simpleos_evidence_public_key_hex_decode(
+        _trust_field(trust, "public_key_ed25519_hex="))
+    val keypair = pure_ed25519_keypair_from_seed(seed)
+    val public_key = keypair.1
+    if key_id == "" or trusted_public.len() != 32 or not _same(public_key, trusted_public):
+        _die("signing-key-not-provisioned-by-trust-config")
+
+    val now = time_now_unix_micros()
+    val captured_text = _trust_field(descriptor, "captured_unix_us=")
+    val captured = captured_text.to_i64()
+    if captured <= 1 or captured > now or now - captured > 900000000:
+        _die("case-evidence-stale-or-future")
+    val artifact_hash = sha256_u8_hex(artifact)
+    val descriptor_hash = sha256_u8_hex(descriptor_bytes)
+    val capture_ledger_hash = sha256_u8_hex(capture_ledger)
+    val source_hash = sha256_u8_hex(source)
+    val image_hash = sha256_u8_hex(image)
+    val binary_hash = sha256_u8_hex(binary)
+    val config_hash = sha256_u8_hex(config)
+    if not _descriptor_matches(descriptor, requirement, evidence_case, semantics,
+        producer_gate, producer_exit, run_id, owner,
+        _arg(args, "--scenario-oracle"), target, target_abi, environment_text,
+        filesystem, protocol_profile, exact_argv,
+        artifact_hash, source_hash, image_hash,
+        binary_hash, config_hash, capture_ledger_hash): _die("case-descriptor-evidence-mismatch")
+    val ledger_text = file_read(capture_ledger_path)
+    if _trust_field(ledger_text, "run_id=") != run_id or
+        _trust_field(ledger_text, "requirement_id=") != requirement or
+        _trust_field(ledger_text, "evidence_case=") != evidence_case or
+        _trust_field(ledger_text, "artifact_sha256=") != artifact_hash or
+        _trust_field(ledger_text, "producer_exit_code=") != producer_exit:
+        _die("runner-capture-ledger-mismatch")
+    var receipt = SimpleOsEvidenceReceiptV1(
+        schema_version: 1,
+        receipt_id: requirement + ":" + evidence_case + ":" + now.to_text(),
+        nonce: requirement + ":" + evidence_case + ":" + now.to_text() + ":" + getpid().to_text(),
+        requirement_id: requirement, capability: semantics,
+        target: target, target_abi: target_abi,
+        environment: environment.unwrap(), firmware_profile: _arg(args, "--firmware-profile"),
+        board_identity: _arg(args, "--board-identity"), accelerator: _arg(args, "--accelerator"),
+        filesystem: filesystem, protocol_profile: protocol_profile,
+        source_hash: source_hash, image_hash: image_hash,
+        binary_hash: binary_hash, config_hash: config_hash,
+        exact_argv: [exact_argv],
+        artifact_hashes: [artifact_hash, descriptor_hash, capture_ledger_hash],
+        steps: [SimpleOsEvidenceStepV1(sequence: 0, behavior_id: requirement + ":" + evidence_case + ":" + semantics + ":" + producer_gate,
+            outcome: "validated", exit_code: 0, artifact_hash: artifact_hash)],
+        performance_workload: "", performance_unit: "", performance_warmup_count: 0,
+        performance_cpu_identity: "", performance_frequency_hz: 0,
+        performance_noise_profile: "", performance_comparable: false,
+        performance_samples: [], started_unix_us: captured, finished_unix_us: now,
+        owner: owner, reviewer: reviewer, signer_key_id: key_id, signature: "")
+    val signing = encode_simpleos_evidence_receipt_v1_signing_bytes(receipt)
+    if not signing.ok: _die("canonical-signing-encode")
+    val signature = pure_ed25519_sign(seed, public_key, signing.bytes)
+    if signature.len() != 64 or not pure_ed25519_verify(public_key, signing.bytes, signature):
+        _die("signature-self-verification")
+    receipt.signature = _hex(signature)
+    val encoded = encode_simpleos_evidence_receipt_v1(receipt)
+    if not encoded.ok: _die("canonical-receipt-encode")
+
+    val stage = output + ".part." + getpid().to_text()
+    if not mkdir_p(stage): _die("stage-create")
+    _write(stage + "/source.snapshot", source)
+    _write(stage + "/image.snapshot", image)
+    _write(stage + "/binary.snapshot", binary)
+    _write(stage + "/config.snapshot", config)
+    _write(stage + "/artifact-0.snapshot", artifact)
+    _write(stage + "/artifact-1.snapshot", descriptor_bytes)
+    _write(stage + "/artifact-2.snapshot", capture_ledger)
+    _write(stage + "/receipt.v1.bin", encoded.bytes)
+    if not file_rename(stage, output): _die("atomic-directory-publish")
+    print "simpleos_evidence_receipt_path=" + output + "/receipt.v1.bin"
+
+main()
