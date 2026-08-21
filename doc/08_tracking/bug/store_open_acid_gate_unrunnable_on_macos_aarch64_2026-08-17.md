@@ -411,3 +411,39 @@ stands unaffected — it needs no slice and is genuine native evidence.
 helper and assert its result, so the stage cannot pass while the code it claims
 to validate is dead-stripped. As written, stage 2 would have stayed green
 through a completely broken `str_*` implementation.
+
+---
+
+## Scope note: this gate is NOT the AC-5/AC-6 acceptance measure
+
+Recorded because the confusion recurred repeatedly: this gate's stage 2 has been
+read as a blocking acceptance criterion for AC-5/AC-6. It is not. The verbatim
+acceptance text in `.spipe/simple_enterprise_suite/state.md` is:
+
+> **AC-5:** A repository/unit-of-work/transaction/migration interface exists in
+> pure Simple with a SQLite adapter … migration version table, WAL +
+> busy-timeout, enforced foreign keys, prepared-statement repositories, typed
+> row mapping; **specs prove** commit/rollback, idempotency-key
+> unique-constraint rejection, and migration up/re-run no-op.
+>
+> **AC-6:** Transactional outbox + append-only audit record land in the same
+> transaction as a domain mutation; **spec proves** a command's domain write and
+> outbox row are atomic … and the audit record uses a real cryptographic digest.
+
+Neither mentions native compilation, standalone-native builds, or this gate.
+Both are **spec-measured**. Those specs pass, measured 2026-08-21 in a clean
+worktree at `ae8c960f5a`, one spec per process:
+
+```
+enterprise_store_spec.spl           Results: 10 total, 10 passed, 0 failed
+enterprise_store_harden_spec.spl    Results:  6 total,  6 passed, 0 failed
+outbox_worker_spec.spl              Results:  8 total,  8 passed, 0 failed
+```
+
+`check-store-open-acid.shs` was added later (lane W13-A) as **supplementary**
+native evidence beyond what AC-5/AC-6 requires. That is a good thing to have and
+worth finishing — stage 1 now passes natively against real sqlite — but its
+stage 2 measures "the store module compiles standalone-native", which is a
+compiler-completeness property. Treating it as an AC-5/AC-6 blocker mis-attributes
+a compiler gap (`native_codegen_missing_slice_lowering_2026-08-21.md`) to the
+database work, and sends people to fix the wrong lane.
