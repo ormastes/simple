@@ -295,10 +295,10 @@ Current evidence after the checked regex boundary migration:
 
 - 3,963 distinct symbols in the current backing census, including 3,961
   compiler-owned canonical symbols;
-- 14,467 declaration sites;
-- 13,852 sites have neither an explicit FFI-unsafe tag nor a local contract;
+- 14,391 declaration sites;
+- 13,699 sites have neither an explicit FFI-unsafe tag nor a local contract;
 - 509 sites declare a typed/documented contract but lack the unsafe tag;
-- 92 declarations now carry explicit FFI authority
+- 169 declarations now carry explicit FFI authority
   but still require canonical ABI-contract metadata;
 - 14 checked declarations carry both explicit FFI authority and a
   typed result contract; their cryptographic artifact evidence remains open;
@@ -308,7 +308,7 @@ Current evidence after the checked regex boundary migration:
 - among `rt_*`/`spl_*` declarations, 1,715 sites reference symbols classified
   genuinely missing and 318 are backed only in owned C runtime source;
 - the distinct-symbol backing census now classifies 698 symbols in the typed
-  interpreter registry and 1,187 as genuinely missing.
+  interpreter registry and 1,189 as genuinely missing.
 
 The regex wrapper now exposes checked `Result` construction and boolean-match
 operations. The interpreter registers all 15 `rt_regex_*` symbols to typed
@@ -348,11 +348,16 @@ been admitted by typed contracts and signed evidence.
 The legacy `std.ffi.codegen` Cranelift implementation is now an explicit
 re-export facade over `std.sffi.codegen`. This removes 400 lines of duplicate
 boundary code and 94 duplicate unauthorized raw calls without adding a wrapper,
-lookup, allocation, branch, or hash. The canonical Cranelift owner remains a
-migration target: its provider ABI and handle/null contracts are not yet sealed
-or bound to signed artifact evidence.
+lookup, allocation, branch, or hash. Its compatibility facade uses the approved
+`__init__.spl` re-export-module shape, avoiding a wildcard and the wide-public
+lint without changing runtime resolution. All 77 declarations and 75 direct
+wrappers in the canonical owner now carry `ffi`/`raw_ptr` authority and pass
+robust lint; an annotation-stripped comparison proves the executable bodies are
+unchanged. The provider ABI and handle/null contracts are not yet sealed or
+bound to signed artifact evidence, so this boundary remains unsafe rather than
+verified.
 
-These are migration inputs, not 14,477 independent implementations. The audit
+These are migration inputs, not 14,391 independent implementations. The audit
 now hashes normalized declaration shapes and groups them by symbol. The next
 tooling step replaces the text-derived shape with the resolved HIR ABI hash,
 rejects the 401 conflict groups, and converts compatibility modules to
@@ -384,8 +389,8 @@ call-site migration ledger at
 `doc/08_tracking/bug/data/sffi_call_authority_2026-08-21.tsv`. It recognizes
 file-local externs and explicit `rt_*`/`spl_*` imports from SFFI modules, tracks
 function and lexical FFI authority by indentation, and can fail CI with
-`SFFI_FAIL_ON_MISSING=1`. The current source/test census contains 21,164
-missing-authority calls, 51 lexical scopes, and 392 function scopes across 3,142
+`SFFI_FAIL_ON_MISSING=1`. The current source/test census contains 21,069
+missing-authority calls, 51 lexical scopes, and 487 function scopes across 3,142
 files. It completed in 24.21 seconds at 7,424 KiB maximum RSS. This is a
 migration index rather than ABI proof; aliases, generated bindings, and
 re-exports still require resolved-HIR identity.
