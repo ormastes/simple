@@ -132,7 +132,7 @@ The numeric block 015–022 is left reserved and untouched.
 - **Exit gate:** `sh scripts/check/check-completeness-seal.shs` →
   `PASS — <n> selected constructor(s) checked, missing-capabilities=0 id-collisions=0 dyn-in-critical=0`.
 
-### Phase 6 — Aspect compiler integration — `not started`
+### Phase 6 — Aspect compiler integration — `partial` (§13.7 steps 1-2 + exit gate landed 2026-08-21)
 - **Deliverables (in the research doc's §13.7 order):** typed facet grammar/HIR → binding
   completeness/uniqueness → witness/sidecar ABI → core public ABI comparison → signature/trust
   verification → atomic generation publication → weave-plan production → post-weave critical
@@ -143,6 +143,32 @@ The numeric block 015–022 is left reserved and untouched.
 - **Exit gate:** `sh scripts/check/check-aspect-seal.shs` →
   `PASS — <n> aspect(s) checked, unbound-required=0 late-activation=0 post-weave-recheck=ran`.
 - **Caution:** no signature-enforcement claim until a real verifier + authority are wired.
+- **Status 2026-08-21:** §13.7 steps 1-2 landed as
+  `src/compiler/35.semantics/aspect_seal/{facet_model,seal}.spl` (typed
+  facet/advice/pointcut model, `binding_completeness`, `AspectSeal` with a sorted
+  deterministic hash, closed `AspectSealReason` enum: `UnboundRequired`,
+  `DuplicateBinding`, `LateActivationInCritical`, `UnverifiedSignature`,
+  `OpenDynAdviceInCritical`, `EmptyPointcut`, `BadAxisValue` — no wildcard arms),
+  plus `src/app/check/aspect_seal_census.spl` and the exit gate
+  `scripts/check/check-aspect-seal.shs` (fatal `--selftest`, 5 fixtures under
+  `test/fixtures/aspect_seal/`, ERROR exit 2 on 0 aspects or 0 obligations).
+  Evidence: `--selftest` -> `PASS — 5 selftest fixture(s) checked, scanner detects
+  all four rejection classes`; default scan -> `PASS — 1 aspect(s) checked,
+  unbound-required=0 late-activation=0 post-weave-recheck=ran`; negatives ->
+  `FAIL — 1 aspect(s) checked, unbound-required=1 ...` (exit 1) and
+  `... unverified-signature=1 ...` (exit 1). 19 specs green
+  (`test/01_unit/compiler/semantics/aspect_seal/aspect_seal_spec.spl`, mirrored to
+  `test/unit/`).
+  **Scope: fixtures; weaver/witness ABI unlanded.** §13.7 steps 3-8 (witness/sidecar
+  ABI, core public ABI comparison, signature/trust verification, atomic generation
+  publication, weave-plan production, post-weave critical verification) are NOT
+  implemented. `post-weave-recheck=ran` in the verdict means a STUB pass re-ran
+  `binding_completeness` over the sealed set and re-derived the seal hash — no woven
+  HIR is re-verified, because no weaver is wired. `UnverifiedSignature` is a REFUSAL
+  of aspects that demand provenance, not a verification result: there is no verifier
+  and no trust authority in this tree, and nothing here may be described as signature
+  enforcement. Existing AOP/aspect-pack modules, parser, HIR, mono, MIR and the
+  runtime were not touched.
 
 ### Phase 7 — Seed/self-host parity and bootstrap closure — `not started`
 - **Deliverables:** identical generated schema/coverage tables from the Rust seed and the self-hosted

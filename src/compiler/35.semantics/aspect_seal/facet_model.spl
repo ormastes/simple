@@ -1,0 +1,468 @@
+# Typed facet/advice/pointcut data model — hardening plan 2026-08-21 Phase 6,
+# research doc §13.3 (aspect facets), §13.4 (aspect completeness seal),
+# §13.6 (advice modes).
+#
+# This is step 1+2 of the research doc's §13.7 order: the typed facet model and
+# the type-level binding completeness/uniqueness check. It deliberately does
+# NOT touch the existing aspect-pack catalog/container/routed-load slice, the
+# parser, HIR, mono, MIR or the runtime — the model here is fed from declared
+# aspect documents (fixtures today, real typed HIR once §13.7 step 1's grammar
+# lands) and answers one question: is this binding set complete, unique and
+# admissible under a profile.
+#
+# What is NOT modelled here, and is not pretended to be:
+#   * the witness/sidecar ABI (§13.7 step 3) — unlanded;
+#   * core public ABI comparison (step 4) — unlanded;
+#   * signature/trust verification (step 5) — there is NO verifier and NO trust
+#     authority anywhere in this tree, so a declared signature is only ever
+#     reported as "not verified". Nothing here may be read as enforcement.
+#   * weave-plan production (step 7) and the post-weave HIR hash (step 8).
+
+use std.common.crypto.sha256.{sha256_text}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.parser.{parse}
+
+# §13.6 advice modes. Closed set; the `critical` column of that table is
+# encoded by `advice_mode_critical_safe` below, not re-derived by callers.
+pub enum AdviceMode:
+    Omitted
+    ExplicitFacet
+    StaticWeave
+    SealedPatchpoint
+    OpenDynPatchpoint
+
+pub fn advice_mode_from_text(s: text) -> AdviceMode?:
+    if s == "omitted":
+        return Some(AdviceMode.Omitted)
+    if s == "explicit_facet":
+        return Some(AdviceMode.ExplicitFacet)
+    if s == "static_weave":
+        return Some(AdviceMode.StaticWeave)
+    if s == "sealed_patchpoint":
+        return Some(AdviceMode.SealedPatchpoint)
+    if s == "open_dyn_patchpoint":
+        return Some(AdviceMode.OpenDynPatchpoint)
+    None
+
+pub fn advice_mode_text(m: AdviceMode) -> text:
+    match m:
+        case Omitted: "omitted"
+        case ExplicitFacet: "explicit_facet"
+        case StaticWeave: "static_weave"
+        case SealedPatchpoint: "sealed_patchpoint"
+        case OpenDynPatchpoint: "open_dyn_patchpoint"
+
+# §13.6 table, `Critical` column. `sealed_patchpoint` is "only if included in
+# the seal and measured" — it is admitted here because inclusion in the seal is
+# exactly what this module computes, but the "and measured" half is NOT done by
+# any code in this tree.
+pub fn advice_mode_critical_safe(m: AdviceMode) -> bool:
+    match m:
+        case Omitted: true
+        case ExplicitFacet: true
+        case StaticWeave: true
+        case SealedPatchpoint: true
+        case OpenDynPatchpoint: false
+
+# §13.5 activation policy, restricted to the axis this phase needs. `late` is
+# the "aspect added after seal" case the critical profile forbids outright.
+pub enum FacetActivation:
+    Startup
+    FirstUse
+    Late
+
+pub fn activation_from_text(s: text) -> FacetActivation?:
+    if s == "startup":
+        return Some(FacetActivation.Startup)
+    if s == "first_use":
+        return Some(FacetActivation.FirstUse)
+    if s == "late":
+        return Some(FacetActivation.Late)
+    None
+
+pub fn activation_text(a: FacetActivation) -> text:
+    match a:
+        case Startup: "startup"
+        case FirstUse: "first_use"
+        case Late: "late"
+
+# A pointcut as declared, plus the joinpoint ids its expansion matched. The
+# expansion itself is NOT computed here: no weaver is wired, so the ids are
+# carried from the document. `matched` being empty is meaningful (a pointcut
+# that matched nothing) and is reported, never silently treated as fine.
+pub class Pointcut:
+    expr: text
+    matched: [text]
+
+# One required-or-optional facet an aspect declares. `required` facets must be
+# bound exactly once (§13.3 "required bindings are complete and unique").
+pub class FacetDecl:
+    facet: text
+    interface_name: text
+    required: bool
+
+pub class AdviceDecl:
+    name: text
+    mode: text
+    order: i64
+    pointcut: Pointcut
+
+pub class AspectDecl:
+    id: text
+    version: i64
+    provider_module: text
+    activation: text
+    # A declared signature blob and the authority that would have to vouch for
+    # it. Both are inert: nothing in this tree verifies either.
+    signature: text
+    signature_authority: text
+    # When true the aspect DEMANDS verified provenance. Since no verifier is
+    # wired, such an aspect can never be sealed — it is reported as
+    # `UnverifiedSignature`, never quietly admitted.
+    signature_required: bool
+    facets: [FacetDecl]
+    advice: [AdviceDecl]
+
+# One concrete facet binding: facet <- concrete type, provided by an aspect.
+pub class FacetBinding:
+    aspect_id: text
+    facet: text
+    concrete_type: text
+    handler: text
+    activation: text
+
+# The whole declared universe handed to the seal check.
+pub class AspectBindingSet:
+    aspects: [AspectDecl]
+    bindings: [FacetBinding]
+
+# --------------------------------------------------------------------------
+# §13.4 binding completeness
+# --------------------------------------------------------------------------
+
+# The raw findings of `binding_completeness`, before they are turned into typed
+# seal reasons by `seal.spl`. Each entry is a `<aspect>#<facet>` key plus the
+# detail needed to phrase a diagnostic.
+pub class BindingReport:
+    # required facets bound zero times
+    unbound: [text]
+    # facets bound more than once (same aspect+facet key)
+    duplicates: [text]
+    # bindings/aspects whose activation is not admissible in critical
+    late_activation: [text]
+    # advice whose §13.6 mode is not critical-safe
+    open_dyn_advice: [text]
+    # pointcuts that expanded to nothing
+    empty_pointcuts: [text]
+    # advice `mode:` / activation spellings outside the closed sets
+    bad_values: [text]
+    # how many (aspect, required-facet) obligations were examined; 0 means the
+    # check proved nothing, which callers must treat as ERROR, not PASS.
+    obligations: i64
+
+fn _binding_key(aspect_id: text, facet: text) -> text:
+    aspect_id + "#" + facet
+
+fn _count_bindings(set: AspectBindingSet, aspect_id: text, facet: text) -> i64:
+    var n: i64 = 0
+    for b in set.bindings:
+        if b.aspect_id == aspect_id and b.facet == facet:
+            n = n + 1
+    n
+
+fn _activation_admissible(a: FacetActivation) -> bool:
+    match a:
+        case Startup: true
+        # first_use may map/decompress already verified content but cannot
+        # change the seal (§13.5), so it stays admissible.
+        case FirstUse: true
+        case Late: false
+
+# Every required facet bound exactly once; no late activation under critical;
+# no open dyn patchpoint under critical. Runs every check before returning so a
+# caller sees the whole finding set at once.
+pub fn binding_completeness(set: AspectBindingSet, critical: bool) -> BindingReport:
+    var unbound: [text] = []
+    var duplicates: [text] = []
+    var late: [text] = []
+    var open_dyn: [text] = []
+    var empty_pc: [text] = []
+    var bad: [text] = []
+    var obligations: i64 = 0
+
+    for a in set.aspects:
+        match activation_from_text(a.activation):
+            case None:
+                bad = bad + [a.id + ":activation=" + a.activation]
+            case Some(act):
+                if critical and not _activation_admissible(act):
+                    late = late + [a.id + ":" + activation_text(act)]
+
+        for f in a.facets:
+            if f.required:
+                obligations = obligations + 1
+                val n = _count_bindings(set, a.id, f.facet)
+                if n == 0:
+                    unbound = unbound + [_binding_key(a.id, f.facet)]
+                elif n > 1:
+                    duplicates = duplicates + [_binding_key(a.id, f.facet)]
+
+        for ad in a.advice:
+            match advice_mode_from_text(ad.mode):
+                case None:
+                    bad = bad + [a.id + ":" + ad.name + ":mode=" + ad.mode]
+                case Some(m):
+                    if critical and not advice_mode_critical_safe(m):
+                        open_dyn = open_dyn + [a.id + ":" + ad.name + ":" + advice_mode_text(m)]
+            if ad.pointcut.matched.len() == 0:
+                empty_pc = empty_pc + [a.id + ":" + ad.name]
+
+    # An optional facet may also be bound twice; that is still a uniqueness
+    # violation, so unknown/extra bindings are checked from the binding side.
+    var seen: [text] = []
+    for b in set.bindings:
+        val key = _binding_key(b.aspect_id, b.facet)
+        var already = false
+        for k in seen:
+            if k == key:
+                already = true
+        if already:
+            var recorded = false
+            for d in duplicates:
+                if d == key:
+                    recorded = true
+            if not recorded:
+                duplicates = duplicates + [key]
+        seen = seen + [key]
+
+        match activation_from_text(b.activation):
+            case None:
+                bad = bad + [key + ":activation=" + b.activation]
+            case Some(act):
+                if critical and not _activation_admissible(act):
+                    late = late + [key + ":" + activation_text(act)]
+
+    BindingReport(
+        unbound: unbound,
+        duplicates: duplicates,
+        late_activation: late,
+        open_dyn_advice: open_dyn,
+        empty_pointcuts: empty_pc,
+        bad_values: bad,
+        obligations: obligations
+    )
+
+# --------------------------------------------------------------------------
+# Deterministic seal hash over the sorted binding set (§13.4)
+# --------------------------------------------------------------------------
+
+pub fn sorted_text(items: [text]) -> [text]:
+    var out: [text] = []
+    for k in items:
+        var inserted = false
+        var next: [text] = []
+        for existing in out:
+            if not inserted and k < existing:
+                next = next + [k]
+                inserted = true
+            next = next + [existing]
+        if not inserted:
+            next = next + [k]
+        out = next
+    out
+
+# One canonical line per binding and per advice row. Order-independent by
+# construction: the lines are sorted before hashing, so the same declared set
+# discovered in any order hashes identically.
+pub fn canonical_lines(set: AspectBindingSet) -> [text]:
+    var lines: [text] = []
+    for a in set.aspects:
+        lines = lines + ["aspect|" + a.id + "|" + a.version.to_text() + "|"
+            + a.provider_module + "|" + a.activation]
+        for ad in a.advice:
+            lines = lines + ["advice|" + a.id + "|" + ad.name + "|" + ad.mode
+                + "|" + ad.order.to_text() + "|" + ad.pointcut.expr
+                + "|" + sorted_text(ad.pointcut.matched).join(",")]
+    for b in set.bindings:
+        lines = lines + ["bind|" + b.aspect_id + "|" + b.facet + "|"
+            + b.concrete_type + "|" + b.handler + "|" + b.activation]
+    sorted_text(lines)
+
+pub fn binding_set_hash(set: AspectBindingSet, profile_tag: text) -> text:
+    "ASPECTSEALV1-" + sha256_text(profile_tag + "\n" + canonical_lines(set).join("\n"))
+
+# --------------------------------------------------------------------------
+# Fixture document parsing (SDN). Same shape discipline as the completeness
+# seal's `manifest.spl`: a file declaring neither `aspect:` nor `bindings:` is
+# an error, never a silently empty document.
+# --------------------------------------------------------------------------
+
+pub enum AspectDocError:
+    ParseFailed(text, text)
+    MissingField(text, text)
+    WrongShape(text, text)
+    EmptyDocument(text)
+
+pub fn aspect_doc_error_text(e: AspectDocError) -> text:
+    match e:
+        case ParseFailed(path, detail): "E-ASPECTDOC-001: " + path + ": SDN parse failed: " + detail
+        case MissingField(path, field): "E-ASPECTDOC-002: " + path + ": required field missing: " + field
+        case WrongShape(path, detail): "E-ASPECTDOC-003: " + path + ": " + detail
+        case EmptyDocument(path): "E-ASPECTDOC-004: " + path + ": declares neither `aspect:` nor `bindings:`"
+
+pub class AspectDoc:
+    path: text
+    aspects: [AspectDecl]
+    bindings: [FacetBinding]
+
+fn _text_at(v: SdnValue, key: text) -> text?:
+    match v.get(key):
+        case Some(item): item.as_str()
+        case None: None
+
+fn _required_text(v: SdnValue, key: text, path: text, prefix: text,
+        mut errors: [AspectDocError]) -> text:
+    match _text_at(v, key):
+        case Some(s): s
+        case None:
+            errors.push(AspectDocError.MissingField(path, prefix + key))
+            ""
+
+fn _opt_text(v: SdnValue, key: text, fallback: text) -> text:
+    match _text_at(v, key):
+        case Some(s): s
+        case None: fallback
+
+fn _opt_bool(v: SdnValue, key: text, fallback: bool) -> bool:
+    match v.get(key):
+        case None: fallback
+        case Some(item):
+            match item.as_bool():
+                case Some(b): b
+                case None: fallback
+
+fn _opt_int(v: SdnValue, key: text, fallback: i64) -> i64:
+    match v.get(key):
+        case None: fallback
+        case Some(item):
+            match item.as_i64():
+                case Some(n): n
+                case None: fallback
+
+fn _string_list(v: SdnValue, key: text) -> [text]:
+    var out: [text] = []
+    match v.get(key):
+        case None: out
+        case Some(lv):
+            match lv.as_array():
+                case None: out
+                case Some(items):
+                    for item in items:
+                        match item.as_str():
+                            case Some(s): out = out + [s]
+                            case None: out = out
+                    out
+
+fn _parse_facets(v: SdnValue, path: text, mut errors: [AspectDocError]) -> [FacetDecl]:
+    var out: [FacetDecl] = []
+    match v.get("requires_facets"):
+        case None: out
+        case Some(fv):
+            match fv.as_array():
+                case None:
+                    errors.push(AspectDocError.WrongShape(path, "`requires_facets:` must be a sequence"))
+                    out
+                case Some(items):
+                    for item in items:
+                        val name = _required_text(item, "facet", path, "aspect.requires_facets.", errors)
+                        val iface = _required_text(item, "interface", path, "aspect.requires_facets.", errors)
+                        out = out + [FacetDecl(
+                            facet: name,
+                            interface_name: iface,
+                            required: _opt_bool(item, "required", true)
+                        )]
+                    out
+
+fn _parse_advice(v: SdnValue, path: text, mut errors: [AspectDocError]) -> [AdviceDecl]:
+    var out: [AdviceDecl] = []
+    match v.get("advice"):
+        case None: out
+        case Some(av):
+            match av.as_array():
+                case None:
+                    errors.push(AspectDocError.WrongShape(path, "`advice:` must be a sequence"))
+                    out
+                case Some(items):
+                    for item in items:
+                        val name = _required_text(item, "name", path, "aspect.advice.", errors)
+                        val mode = _required_text(item, "mode", path, "aspect.advice.", errors)
+                        out = out + [AdviceDecl(
+                            name: name,
+                            mode: mode,
+                            order: _opt_int(item, "order", 0),
+                            pointcut: Pointcut(
+                                expr: _opt_text(item, "pointcut", ""),
+                                matched: _string_list(item, "joinpoints")
+                            )
+                        )]
+                    out
+
+fn _parse_aspect(v: SdnValue, path: text, mut errors: [AspectDocError]) -> AspectDecl:
+    AspectDecl(
+        id: _required_text(v, "id", path, "aspect.", errors),
+        version: _opt_int(v, "version", 1),
+        provider_module: _required_text(v, "provider_module", path, "aspect.", errors),
+        activation: _required_text(v, "activation", path, "aspect.", errors),
+        signature: _opt_text(v, "signature", ""),
+        signature_authority: _opt_text(v, "signature_authority", ""),
+        signature_required: _opt_bool(v, "signature_required", false),
+        facets: _parse_facets(v, path, errors),
+        advice: _parse_advice(v, path, errors)
+    )
+
+fn _parse_bindings(root: SdnValue, path: text, default_aspect: text,
+        mut errors: [AspectDocError]) -> [FacetBinding]:
+    var out: [FacetBinding] = []
+    match root.get("bindings"):
+        case None: out
+        case Some(bv):
+            match bv.as_array():
+                case None:
+                    errors.push(AspectDocError.WrongShape(path, "`bindings:` must be a sequence"))
+                    out
+                case Some(items):
+                    for item in items:
+                        val facet = _required_text(item, "facet", path, "bindings.", errors)
+                        val ctype = _required_text(item, "concrete_type", path, "bindings.", errors)
+                        val handler = _required_text(item, "handler", path, "bindings.", errors)
+                        out = out + [FacetBinding(
+                            aspect_id: _opt_text(item, "aspect", default_aspect),
+                            facet: facet,
+                            concrete_type: ctype,
+                            handler: handler,
+                            activation: _opt_text(item, "activation", "startup")
+                        )]
+                    out
+
+pub fn parse_aspect_doc(source: text, path: text) -> Result<AspectDoc, [AspectDocError]>:
+    var errors: [AspectDocError] = []
+    match parse(source):
+        case Err(msg):
+            errors.push(AspectDocError.ParseFailed(path, msg))
+            Err(errors)
+        case Ok(root):
+            var aspects: [AspectDecl] = []
+            var default_aspect = ""
+            match root.get("aspect"):
+                case Some(av):
+                    val a = _parse_aspect(av, path, errors)
+                    default_aspect = a.id
+                    aspects = aspects + [a]
+                case None:
+                    aspects = aspects
+            val bindings = _parse_bindings(root, path, default_aspect, errors)
+            if aspects.len() == 0 and bindings.len() == 0:
+                errors.push(AspectDocError.EmptyDocument(path))
+            if errors.len() > 0:
+                return Err(errors)
+            Ok(AspectDoc(path: path, aspects: aspects, bindings: bindings))

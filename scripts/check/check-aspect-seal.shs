@@ -1,0 +1,219 @@
+#!/bin/sh
+# check-aspect-seal.shs — Phase 6 exit gate for aspect compiler integration.
+#
+# Plan:   doc/03_plan/compiler/hardening/critical_hardening_plan_2026-08-21.md (Phase 6)
+# Design: doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md
+#         §13.3 (typed facets), §13.4 (completeness seal), §13.5 (lifecycle),
+#         §13.7 (integration order)
+#
+# WHAT IT MEASURES
+#   Runs the pure-Simple aspect seal (`src/compiler/35.semantics/aspect_seal/`)
+#   over the selected aspect documents under a CRITICAL profile and fails when
+#   any seal obligation is unmet:
+#     unbound-required      E-ASPECT-001  a required facet is bound zero times
+#     duplicate-binding     E-ASPECT-002  a facet is bound more than once
+#     late-activation       E-ASPECT-003  activation after the seal (§13.5)
+#     unverified-signature  E-ASPECT-004  provenance demanded, none verifiable
+#     open-dyn / empty-pointcut / bad-value — the remaining closed reasons.
+#
+#   Every decision is made by the real semantics modules, run via
+#   `bin/simple run`. Nothing here greps a fixture: a text scan cannot compute
+#   "every required facet bound exactly once" and cannot reproduce a seal hash.
+#
+# SCOPE, STATED PLAINLY
+#   This gate covers §13.7 steps 1-2 only: the typed facet model and binding
+#   completeness/uniqueness, over FIXTURE documents. The weaver, the
+#   witness/sidecar ABI, core public ABI comparison, atomic generation
+#   publication and weave-plan production are UNLANDED. `post-weave-recheck`
+#   in the verdict means a stub re-verify pass RAN (it re-runs
+#   binding_completeness over the sealed set and re-derives the seal hash) —
+#   it does NOT mean woven HIR was re-verified, and there is NO signature
+#   enforcement anywhere behind this verdict.
+#
+# WHY A HARD ZERO AND NOT A RATCHET
+#   The selected set is exactly the aspect documents a build chose to seal. A
+#   selected aspect that cannot be sealed is a build that must not ship, so
+#   there is no baseline file and no `--generate-baseline` escape.
+#
+# VERDICT (always the last line of stdout)
+#   PASS  — <n> aspect(s) checked, unbound-required=0 late-activation=0 post-weave-recheck=ran   exit 0
+#   FAIL  — ...                                                                                  exit 1
+#   ERROR — nothing was checked (<reason>)                                                       exit 2
+#
+#   A run that fed 0 aspects to the checker is ERROR, never a pass: absence of
+#   analysis is absence of evidence. A missing `bin/simple` is ERROR too.
+#
+# USAGE
+#   sh scripts/check/check-aspect-seal.shs
+#   sh scripts/check/check-aspect-seal.shs --selftest
+#   sh scripts/check/check-aspect-seal.shs --aspect <f.sdn> [--aspect <f.sdn> ...]
+#
+#   `--selftest` runs before every scan and is FATAL. A checker that reports
+#   zero because it never detected anything would otherwise be
+#   indistinguishable from a clean tree.
+
+set -u
+
+REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$REPO_ROOT" || { echo "ERROR — nothing was checked (cannot cd to repo root)"; exit 2; }
+
+SIMPLE_BIN="bin/simple"
+DRIVER="src/app/check/aspect_seal_census.spl"
+FIXTURES="test/fixtures/aspect_seal"
+
+DEFAULT_ASPECTS="$FIXTURES/audit_trace_clean.sdn"
+
+MODE="scan"
+ASPECTS=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) MODE="selftest"; shift ;;
+        --aspect) ASPECTS="$ASPECTS ${2:-}"; shift 2 ;;
+        *) echo "ERROR — nothing was checked (unknown argument: $1)"; exit 2 ;;
+    esac
+done
+[ -n "$ASPECTS" ] || ASPECTS="$DEFAULT_ASPECTS"
+
+if [ ! -x "$SIMPLE_BIN" ]; then
+    echo "ERROR — nothing was checked (no executable $SIMPLE_BIN; absence of a compiler is absence of evidence)"
+    exit 2
+fi
+if [ ! -f "$DRIVER" ]; then
+    echo "ERROR — nothing was checked (no driver at $DRIVER)"
+    exit 2
+fi
+
+TMPDIR_RUN=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -rf "$TMPDIR_RUN"' EXIT
+
+# ---------------------------------------------------------------------------
+# run_census <out-file> <aspect-paths...>
+# The driver's exit status is read DIRECTLY into a variable on the line after
+# the invocation, never through a pipe: a pipeline's $? is the last stage's
+# status, which has produced false greens in this repo before.
+# ---------------------------------------------------------------------------
+run_census() {
+    OUT="$1"; shift
+    ARGS=""
+    for f in $1; do ARGS="$ARGS --aspect $f"; done
+    # shellcheck disable=SC2086
+    nice -n 10 "$SIMPLE_BIN" run "$DRIVER" --critical $ARGS >"$OUT" 2>"$OUT.err"
+    RC=$?
+    return $RC
+}
+
+field() { # field <summary-line> <key>
+    echo "$1" | tr ' ' '\n' | grep "^$2=" | cut -d= -f2
+}
+
+# ---------------------------------------------------------------------------
+# SELFTEST — fatal, runs before every scan.
+#
+# Four fixtures, each proving one thing the scanner must be able to see:
+#   1. positive   a clean aspect SEALS, every counter 0, recheck ran+stable
+#   2. negative   a required facet bound zero times          (E-ASPECT-001)
+#   3. negative   a facet bound twice                        (E-ASPECT-002)
+#   4. negative   `late` activation under --critical         (E-ASPECT-003)
+# A fifth checks the honesty boundary: an aspect DEMANDING verified provenance
+# is refused, because nothing here can verify a signature.
+# ---------------------------------------------------------------------------
+selftest() {
+    FAILURES=""
+
+    run_census "$TMPDIR_RUN/pos.txt" "$FIXTURES/audit_trace_clean.sdn"
+    S=$(grep '^SUMMARY ' "$TMPDIR_RUN/pos.txt" | tail -1)
+    if [ -z "$S" ]; then
+        FAILURES="$FAILURES positive-fixture-produced-no-summary"
+    else
+        [ "$(field "$S" sealed)" = "1" ] || FAILURES="$FAILURES positive-fixture-not-sealed"
+        [ "$(field "$S" unbound_required)" = "0" ] || FAILURES="$FAILURES positive-fixture-unbound"
+        [ "$(field "$S" duplicate_binding)" = "0" ] || FAILURES="$FAILURES positive-fixture-duplicate"
+        [ "$(field "$S" late_activation)" = "0" ] || FAILURES="$FAILURES positive-fixture-late"
+        [ "$(field "$S" post_weave_recheck)" = "ran" ] || FAILURES="$FAILURES positive-fixture-recheck-not-run"
+        [ "$(field "$S" recheck_stable)" = "true" ] || FAILURES="$FAILURES positive-fixture-recheck-unstable"
+        grep -q '^SEAL ASPECTSEALV1-' "$TMPDIR_RUN/pos.txt" || FAILURES="$FAILURES positive-fixture-no-seal-hash"
+    fi
+
+    run_census "$TMPDIR_RUN/neg1.txt" "$FIXTURES/unbound_required.sdn"
+    S=$(grep '^SUMMARY ' "$TMPDIR_RUN/neg1.txt" | tail -1)
+    [ -n "$S" ] && [ "$(field "$S" unbound_required)" -ge 1 ] \
+        || FAILURES="$FAILURES unbound-required-not-detected"
+
+    run_census "$TMPDIR_RUN/neg2.txt" "$FIXTURES/duplicate_binding.sdn"
+    S=$(grep '^SUMMARY ' "$TMPDIR_RUN/neg2.txt" | tail -1)
+    [ -n "$S" ] && [ "$(field "$S" duplicate_binding)" -ge 1 ] \
+        || FAILURES="$FAILURES duplicate-binding-not-detected"
+
+    run_census "$TMPDIR_RUN/neg3.txt" "$FIXTURES/late_activation.sdn"
+    S=$(grep '^SUMMARY ' "$TMPDIR_RUN/neg3.txt" | tail -1)
+    [ -n "$S" ] && [ "$(field "$S" late_activation)" -ge 1 ] \
+        || FAILURES="$FAILURES late-activation-not-detected"
+
+    run_census "$TMPDIR_RUN/neg4.txt" "$FIXTURES/signature_required.sdn"
+    S=$(grep '^SUMMARY ' "$TMPDIR_RUN/neg4.txt" | tail -1)
+    [ -n "$S" ] && [ "$(field "$S" unverified_signature)" -ge 1 ] \
+        || FAILURES="$FAILURES unverified-signature-not-detected"
+
+    if [ -n "$FAILURES" ]; then
+        echo "ERROR — nothing was checked (selftest failed:$FAILURES)"
+        exit 2
+    fi
+}
+
+selftest
+if [ "$MODE" = "selftest" ]; then
+    echo "PASS — 5 selftest fixture(s) checked, scanner detects all four rejection classes"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# SCAN
+# ---------------------------------------------------------------------------
+run_census "$TMPDIR_RUN/scan.txt" "$ASPECTS"
+SUMMARY=$(grep '^SUMMARY ' "$TMPDIR_RUN/scan.txt" | tail -1)
+if [ -z "$SUMMARY" ]; then
+    echo "ERROR — nothing was checked (driver produced no SUMMARY record)"
+    sed -n '1,10p' "$TMPDIR_RUN/scan.txt.err"
+    exit 2
+fi
+
+ASPECT_N=$(field "$SUMMARY" aspects)
+OBLIGATIONS=$(field "$SUMMARY" obligations)
+UNBOUND=$(field "$SUMMARY" unbound_required)
+DUP=$(field "$SUMMARY" duplicate_binding)
+LATE=$(field "$SUMMARY" late_activation)
+UNVERIFIED=$(field "$SUMMARY" unverified_signature)
+OPENDYN=$(field "$SUMMARY" open_dyn)
+EMPTYPC=$(field "$SUMMARY" empty_pointcut)
+BADVAL=$(field "$SUMMARY" bad_value)
+RECHECK=$(field "$SUMMARY" post_weave_recheck)
+STABLE=$(field "$SUMMARY" recheck_stable)
+PARSEFAIL=$(field "$SUMMARY" parse_fail)
+
+if [ -z "$ASPECT_N" ] || [ "$ASPECT_N" -eq 0 ]; then
+    echo "ERROR — nothing was checked (0 aspects; absence of analysis is absence of evidence)"
+    exit 2
+fi
+if [ "$PARSEFAIL" -ne 0 ]; then
+    echo "ERROR — nothing was checked ($PARSEFAIL document(s) failed to parse; the selection is incomplete)"
+    grep '^PARSE-FAIL ' "$TMPDIR_RUN/scan.txt"
+    exit 2
+fi
+if [ -z "$OBLIGATIONS" ] || [ "$OBLIGATIONS" -eq 0 ]; then
+    echo "ERROR — nothing was checked (0 required-facet obligations examined; a vacuous seal is not a pass)"
+    exit 2
+fi
+
+if [ "$UNBOUND" -ne 0 ] || [ "$DUP" -ne 0 ] || [ "$LATE" -ne 0 ] || [ "$UNVERIFIED" -ne 0 ] \
+        || [ "$OPENDYN" -ne 0 ] || [ "$EMPTYPC" -ne 0 ] || [ "$BADVAL" -ne 0 ]; then
+    echo "FAIL — $ASPECT_N aspect(s) checked, unbound-required=$UNBOUND duplicate-binding=$DUP late-activation=$LATE unverified-signature=$UNVERIFIED open-dyn=$OPENDYN empty-pointcut=$EMPTYPC bad-value=$BADVAL"
+    grep -E '^(REJECT|PARSE-FAIL) ' "$TMPDIR_RUN/scan.txt" | sed -n '1,20p'
+    exit 1
+fi
+if [ "$RECHECK" != "ran" ] || [ "$STABLE" != "true" ]; then
+    echo "FAIL — $ASPECT_N aspect(s) checked, post-weave-recheck=$RECHECK recheck-stable=$STABLE"
+    exit 1
+fi
+
+echo "PASS — $ASPECT_N aspect(s) checked, unbound-required=0 late-activation=0 post-weave-recheck=ran"
+exit 0

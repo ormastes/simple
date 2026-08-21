@@ -1,0 +1,259 @@
+# @cover src/compiler/35.semantics/aspect_seal/facet_model.spl 80%
+# @cover src/compiler/35.semantics/aspect_seal/seal.spl 80%
+"""
+# Aspect facet model and completeness seal
+
+**Category:** Compiler / Semantics / Aspect seal
+
+## Overview
+
+The typed facet/advice/pointcut model (§13.3) plus the binding completeness
+check and the seal it freezes (§13.4, §13.5).
+
+Covered:
+- a clean aspect document seals, and the seal hash is order-independent
+- a required facet bound zero times is `E-ASPECT-001`
+- a facet bound twice is `E-ASPECT-002`
+- `late` activation under a critical profile is `E-ASPECT-003`, and is
+  admitted under a non-critical profile
+- an aspect demanding verified provenance is ALWAYS refused with
+  `E-ASPECT-004` "not verified" — no verifier and no authority is wired
+- an `open_dyn_patchpoint` advice mode is not critical-safe (§13.6)
+- the post-weave recheck is a stub that re-runs binding completeness and
+  re-derives the hash; it proves self-consistency, not weaving
+"""
+
+use std.spec.*
+use std.io_runtime.{read_file}
+use compiler.semantics.aspect_seal.facet_model.{
+    AdviceDecl,
+    AspectBindingSet,
+    AspectDecl,
+    FacetBinding,
+    FacetDecl,
+    Pointcut,
+    advice_mode_critical_safe,
+    advice_mode_from_text,
+    binding_completeness,
+    binding_set_hash,
+    canonical_lines,
+    parse_aspect_doc
+}
+use compiler.semantics.aspect_seal.seal.{
+    AspectSealProfile,
+    aspect_seal_check,
+    aspect_seal_reason_code,
+    aspect_seal_reason_text,
+    post_weave_recheck
+}
+
+val FIXTURE_DIR = "test/fixtures/aspect_seal/"
+
+fn load(name: text) -> AspectBindingSet:
+    val path = FIXTURE_DIR + name
+    match parse_aspect_doc(read_file(path), path):
+        case Ok(doc):
+            AspectBindingSet(aspects: doc.aspects, bindings: doc.bindings)
+        case Err(_):
+            AspectBindingSet(aspects: [], bindings: [])
+
+fn codes_of(name: text, critical: bool) -> [text]:
+    var out: [text] = []
+    match aspect_seal_check(load(name), AspectSealProfile(critical: critical)):
+        case Ok(_):
+            out
+        case Err(reasons):
+            for r in reasons:
+                out = out + [aspect_seal_reason_code(r)]
+            out
+
+fn contains(items: [text], needle: text) -> bool:
+    for i in items:
+        if i == needle:
+            return true
+    false
+
+describe "aspect seal — happy path":
+    it "parses the clean fixture into a typed model":
+        val set = load("audit_trace_clean.sdn")
+        assert_equal(set.aspects.len(), 1)
+        assert_equal(set.aspects[0].id, "audit.trace")
+        assert_equal(set.aspects[0].facets.len(), 2)
+        assert_equal(set.aspects[0].advice.len(), 2)
+        assert_equal(set.bindings.len(), 2)
+
+    it "seals a complete, unique binding set under a critical profile":
+        match aspect_seal_check(load("audit_trace_clean.sdn"), AspectSealProfile(critical: true)):
+            case Ok(s):
+                assert_true(s.profile_critical)
+                assert_equal(s.aspect_ids.len(), 1)
+                assert_equal(s.binding_count, 2)
+                assert_equal(s.obligation_count, 2)
+                assert_true(s.seal_hash.starts_with("ASPECTSEALV1-"))
+                assert_equal(s.advice_order.len(), 2)
+            case Err(reasons):
+                assert_equal(reasons.len(), 0)
+
+    it "carries the signature blob as NOT VERIFIED rather than checking it":
+        match aspect_seal_check(load("audit_trace_clean.sdn"), AspectSealProfile(critical: true)):
+            case Ok(s):
+                assert_equal(s.unverified_signatures.len(), 1)
+                assert_true(s.unverified_signatures[0].contains("NOT VERIFIED"))
+            case Err(_):
+                assert_true(false)
+
+describe "aspect seal — deterministic hash":
+    it "hashes the same set identically regardless of binding order":
+        val set = load("audit_trace_clean.sdn")
+        val reversed = AspectBindingSet(
+            aspects: set.aspects,
+            bindings: [set.bindings[1], set.bindings[0]]
+        )
+        assert_equal(
+            binding_set_hash(set, "profile=critical"),
+            binding_set_hash(reversed, "profile=critical")
+        )
+
+    it "separates profiles and reacts to any binding change":
+        val set = load("audit_trace_clean.sdn")
+        assert_true(binding_set_hash(set, "profile=critical")
+            != binding_set_hash(set, "profile=default"))
+        val changed = AspectBindingSet(
+            aspects: set.aspects,
+            bindings: set.bindings + [FacetBinding(
+                aspect_id: "audit.trace",
+                facet: "Extra",
+                concrete_type: "T",
+                handler: "h",
+                activation: "startup"
+            )]
+        )
+        assert_true(binding_set_hash(set, "profile=critical")
+            != binding_set_hash(changed, "profile=critical"))
+
+    it "sorts the canonical lines it hashes":
+        val lines = canonical_lines(load("audit_trace_clean.sdn"))
+        assert_equal(lines.len(), 5)
+        var i: i64 = 1
+        while i < lines.len():
+            assert_true(lines[i - 1] <= lines[i])
+            i = i + 1
+
+describe "aspect seal — closed rejection reasons":
+    it "rejects a required facet bound zero times":
+        val codes = codes_of("unbound_required.sdn", true)
+        assert_true(contains(codes, "E-ASPECT-001"))
+
+    it "rejects a facet bound more than once":
+        val codes = codes_of("duplicate_binding.sdn", true)
+        assert_true(contains(codes, "E-ASPECT-002"))
+
+    it "rejects late activation under a critical profile":
+        val codes = codes_of("late_activation.sdn", true)
+        assert_true(contains(codes, "E-ASPECT-003"))
+
+    it "admits late activation when the profile is not critical":
+        val codes = codes_of("late_activation.sdn", false)
+        assert_equal(codes.len(), 0)
+
+    it "names the unbound facet's required interface in the diagnostic":
+        match aspect_seal_check(load("unbound_required.sdn"), AspectSealProfile(critical: true)):
+            case Ok(_):
+                assert_true(false)
+            case Err(reasons):
+                var found = false
+                for r in reasons:
+                    if aspect_seal_reason_code(r) == "E-ASPECT-001":
+                        assert_true(aspect_seal_reason_text(r).contains("TraceFacet"))
+                        found = true
+                assert_true(found)
+
+describe "aspect seal — signatures are never enforced":
+    it "always refuses an aspect that demands verified provenance":
+        val codes = codes_of("signature_required.sdn", true)
+        assert_true(contains(codes, "E-ASPECT-004"))
+
+    it "says NOT VERIFIED instead of claiming a verification result":
+        match aspect_seal_check(load("signature_required.sdn"), AspectSealProfile(critical: true)):
+            case Ok(_):
+                assert_true(false)
+            case Err(reasons):
+                var found = false
+                for r in reasons:
+                    if aspect_seal_reason_code(r) == "E-ASPECT-004":
+                        assert_true(aspect_seal_reason_text(r).contains("NOT VERIFIED"))
+                        found = true
+                assert_true(found)
+
+    it "refuses it under a non-critical profile too":
+        val codes = codes_of("signature_required.sdn", false)
+        assert_true(contains(codes, "E-ASPECT-004"))
+
+describe "aspect seal — advice modes (§13.6)":
+    it "classifies every closed mode's critical safety":
+        match advice_mode_from_text("open_dyn_patchpoint"):
+            case Some(m): assert_true(not advice_mode_critical_safe(m))
+            case None: assert_true(false)
+        match advice_mode_from_text("static_weave"):
+            case Some(m): assert_true(advice_mode_critical_safe(m))
+            case None: assert_true(false)
+
+    it "has no mode outside the closed set":
+        match advice_mode_from_text("hot_reweave"):
+            case Some(_): assert_true(false)
+            case None: assert_true(true)
+
+    it "reports an open dyn patchpoint under a critical profile":
+        val set = AspectBindingSet(
+            aspects: [AspectDecl(
+                id: "a.dyn",
+                version: 1,
+                provider_module: "m",
+                activation: "startup",
+                signature: "",
+                signature_authority: "",
+                signature_required: false,
+                facets: [FacetDecl(facet: "F", interface_name: "IF", required: true)],
+                advice: [AdviceDecl(
+                    name: "adv",
+                    mode: "open_dyn_patchpoint",
+                    order: 1,
+                    pointcut: Pointcut(expr: "call(*)", matched: ["jp:1"])
+                )]
+            )],
+            bindings: [FacetBinding(
+                aspect_id: "a.dyn",
+                facet: "F",
+                concrete_type: "T",
+                handler: "h",
+                activation: "startup"
+            )]
+        )
+        val report = binding_completeness(set, true)
+        assert_equal(report.open_dyn_advice.len(), 1)
+        assert_equal(binding_completeness(set, false).open_dyn_advice.len(), 0)
+
+describe "aspect seal — post-weave recheck is a stub":
+    it "runs over the sealed set and is stable":
+        val set = load("audit_trace_clean.sdn")
+        val profile = AspectSealProfile(critical: true)
+        match aspect_seal_check(set, profile):
+            case Ok(s):
+                # STUB: re-runs binding_completeness and re-derives the hash.
+                # It does NOT re-verify woven HIR — no weaver is wired.
+                assert_true(post_weave_recheck(s, set, profile))
+            case Err(_):
+                assert_true(false)
+
+    it "reports false when the set drifts away from the sealed hash":
+        val set = load("audit_trace_clean.sdn")
+        val profile = AspectSealProfile(critical: true)
+        match aspect_seal_check(set, profile):
+            case Ok(s):
+                val drifted = AspectBindingSet(
+                    aspects: set.aspects,
+                    bindings: [set.bindings[0]]
+                )
+                assert_true(not post_weave_recheck(s, drifted, profile))
+            case Err(_):
+                assert_true(false)
