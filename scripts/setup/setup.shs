@@ -756,7 +756,11 @@ if [ -n "${repo_root}" ] && [ -d "${repo_root}/.git" ]; then
     fi
   done
 
-  install_hook pre-push scripts/check/pre-push-conflict-tree-guard.shs || true
+  if [ -f "${repo_root}/scripts/setup/install-must-check-hooks.shs" ]; then
+    sh "${repo_root}/scripts/setup/install-must-check-hooks.shs" --install || true
+  else
+    install_hook pre-push scripts/check/pre-push-conflict-tree-guard.shs || true
+  fi
 
   # scripts/hooks/pre-commit is deliberately NOT installed yet.
   #
@@ -791,5 +795,33 @@ if [ -n "${repo_root}" ] && [ -d "${repo_root}/.git" ]; then
     sh "${hook_check}" || echo "setup: WARNING: hook wiring check failed -- pre-push guards may not run (see above)"
   else
     echo "setup: WARNING: ${hook_check} missing; cannot verify hook wiring"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# LLVM/clang toolchain pin (see config/llvm_toolchain.sdn).
+#
+# This is a REPORT, not an export: setup.shs is run, not sourced, so anything
+# it exports dies with it. The pin is applied by sourcing the env script in the
+# shell that will do the building. Saying so here is the point -- a silent
+# setup would leave every caller on whatever bare `clang` the host happens to
+# have, which is exactly the drift this pin removes.
+# ---------------------------------------------------------------------------
+llvm_env="${repo_root}/scripts/setup/llvm-toolchain-env.shs"
+if [ -f "${llvm_env}" ]; then
+  llvm_report=$(
+    # Subshell: the exports must not leak into the rest of setup.
+    . "${llvm_env}" >/dev/null 2>&1 || true
+    if [ -n "${SIMPLE_LLVM_MAJOR:-}" ]; then
+      printf '%s|%s' "${SIMPLE_LLVM_MAJOR}" "$(${CC} --version 2>/dev/null | head -1)"
+    fi
+  )
+  if [ -n "${llvm_report}" ]; then
+    echo "setup: LLVM toolchain available: major ${llvm_report%%|*} (${llvm_report#*|})"
+    echo "setup: to use it, SOURCE it in your build shell:"
+    echo "setup:   . scripts/setup/llvm-toolchain-env.shs"
+  else
+    echo "setup: WARNING: no versioned clang found; C runtime + native-build will"
+    echo "setup:          fall back to the host's bare clang/cc (unpinned)"
   fi
 fi

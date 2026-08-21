@@ -175,9 +175,42 @@ bin/simple --version 2>&1 | head -2
   `scripts/check/check-pure-simple-lint-runnable.shs`. The real gap is that
   no FULL-CLI pure-Simple binary is deployed, not a missing lint port.
   `simple test` GREEN still does not prove self-hosted.
-- No pure-Simple binary can lint: `bootstrap/stage3/simple lint` is
-  `unknown command` (exit 1). `simple test` GREEN does not prove self-hosted.
 - Detail: `doc/07_guide/tooling/build_fast_path.md`
+
+## LLVM toolchain (pinned to 23.1.0, 2026-08-21)
+
+```bash
+. scripts/setup/llvm-toolchain-env.shs   # SOURCE it. Exports CC=clang-23,
+                                         # CXX=clang++-23, LD=ld.lld-23,
+                                         # LLVM_CONFIG=llvm-config-23, and puts
+                                         # LLVM 23's bin dirs first on PATH.
+SIMPLE_LLVM_VERSION=20 . scripts/setup/llvm-toolchain-env.shs   # explicit fallback
+```
+
+clang/LLD/llvm-config **23.1.0** (apt.llvm.org snapshot
+`1:23.1.0~++20260818083557+55feb0a3b6b7`), deployed WITHOUT root by extracting
+the `.deb`s into `/mnt/data/toolchains/llvm-23-root` — this host has no
+passwordless sudo. Old pin, clang 20.1.8, stays as the fallback.
+
+**Setting `CC` alone is not enough.** The seed's native link step picks its
+linker by probing PATH for a bare `ld.lld`
+(`src/compiler_rust/compiler/src/pipeline/native_project/linker.rs:1972`,
+`use_direct_lld`) and never reads `$CC`/`$LD` — so with only the suffixed
+binaries on PATH you get clang 23 compiling and LLD **18** linking. The env
+script fixes this by also putting the UNSUFFIXED `usr/lib/llvm-23/bin` ahead of
+`/usr/bin`; that is the no-root equivalent of update-alternatives and is why
+sourcing it (not just exporting `CC`) is the documented path.
+
+Measured 2026-08-21: the C runtime gate is **byte-identical** on 23 and 20
+(108 clean, same 1 pre-existing failure in
+`src/runtime/test/rt_browser_renderer_namespace_selfcheck.c:55,57` — undeclared
+`browser_renderer_*`, reproduces on clang-20, NOT caused by 23), the runtime
+archive builds clean under 23, `cargo check --release --bin simple` passes, and
+a hello-world `native-build` runs with `Linker: Ubuntu LLD 23.1.0`.
+**Still on LLVM 18: the seed's `llvm` cargo feature** — inkwell publishes no
+`llvm23-*` feature (0.10.0, latest, tops out at `llvm22-1`; `llvm-sys` has only
+`231.0.0-rc2`), so that pin was deliberately left alone.
+Detail: `doc/07_guide/infra/toolchain/llvm_23_deploy_2026-08-21.md`
 
 ## Setup
 ```bash
