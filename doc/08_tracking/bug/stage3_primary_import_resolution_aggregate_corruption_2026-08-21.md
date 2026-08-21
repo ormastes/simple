@@ -57,3 +57,7 @@ pending.
 ## Callable signature follow-up (2026-08-21)
 
 Fresh verification proved scalar primary routes were necessary but not sufficient: Stage 3 reached HIR and reproduced the early Span/OptimizationLevel/ProcessResult cascade. The remaining cross-stage consumers indexed retained callable dictionaries and impl/trait method aggregates. Module surfaces now freeze aligned scalar signature, dependency, and impl-to-trait projections. Free functions, concrete impl methods, and trait methods consume only those projections; unsupported complex shapes deliberately register without an eager HIR function type. Bootstrap re-verification is pending.
+
+## Flat AST parameter transport follow-up (2026-08-21)
+
+The next bounded run died in Phase 2 while converting the first typed extern-heavy module. Kernel symbolization mapped the fault to `flat_ast_to_module` and a 48-byte aggregate copy selected through an invalid pointer. Both ordinary and extern parameter conversion constructed `Param.type_` with an inline conditional returning rich `Type` values; the ordinary path did the same for `Expr` defaults. Conversion now materializes stable typed locals before constructing `Param`, with exact extern and adjacent ordinary/default regressions.

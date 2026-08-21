@@ -237,3 +237,9 @@ implementation-blocked-by-bootstrap-authority
   Stage-3 self-host compiler was killed by SIGSEGV (signal 11). Stage 4,
   deployment, the lightweight push hook, and GitHub push remain unavailable.
   The three-cycle cap is exhausted; no seed fallback or bypass was used.
+- blocker-correction: Kernel symbolization localized the Phase-2 SIGSEGV to
+  `flat_ast_to_module` copying an inline conditionally selected 48-byte Type
+  while converting typed extern parameters. Flat AST conversion now uses
+  stable Type locals for extern and ordinary parameters and a stable Expr
+  local for ordinary defaults, with exact and adjacent regressions. A fresh
+  bounded verification session is required.
