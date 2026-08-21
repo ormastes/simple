@@ -859,14 +859,37 @@ pub fn spl_fonts_call_layout_text_fn(args: &[Value]) -> Result<Value, CompileErr
 ///
 /// This is the shared call path used by both the main runtime dispatch and
 /// satellite library dispatch.
+/// Maximum arity the untyped dynamic dispatcher can transmute a signature for.
+/// Kept in lockstep with the `match nargs` arms in `call_fptr`.
+const MAX_DYNAMIC_SFFI_ARGS: usize = 13;
+
 fn call_fptr(fptr: usize, name: &str, evaluated_args: &[Value]) -> Result<Value, CompileError> {
     if fptr == 0 {
         return Err(null_function_pointer(name));
     }
 
-    // Marshal arguments to i64
-    let args: Vec<i64> = evaluated_args.iter().map(value_to_i64).collect::<Result<_, _>>()?;
-    let nargs = args.len();
+    // Marshal arguments to i64.
+    //
+    // Packed into a fixed-size stack array rather than a `Vec`: the arity is
+    // hard-capped at MAX_DYNAMIC_SFFI_ARGS by the dispatch match below, so a
+    // heap allocation per dynamic SFFI call bought nothing. See
+    // doc/08_tracking/bug/sffi_boundary_perf_memory_2026-08-21.md.
+    let nargs = evaluated_args.len();
+    if nargs > MAX_DYNAMIC_SFFI_ARGS {
+        // Preserve the pre-existing error precedence: an inadmissible argument
+        // type was reported before the arity error, so keep marshalling first.
+        for value in evaluated_args {
+            value_to_i64(value)?;
+        }
+        return Err(CompileError::runtime(format!(
+            "dynamic SFFI dispatch: function '{}' has {} arguments (max {} supported)",
+            name, nargs, MAX_DYNAMIC_SFFI_ARGS
+        )));
+    }
+    let mut args = [0i64; MAX_DYNAMIC_SFFI_ARGS];
+    for (slot, value) in args.iter_mut().zip(evaluated_args.iter()) {
+        *slot = value_to_i64(value)?;
+    }
 
     // Call the function pointer with the appropriate number of arguments.
     // Safety: We trust that the function exists in the runtime and that the
@@ -946,10 +969,11 @@ fn call_fptr(fptr: usize, name: &str, evaluated_args: &[Value]) -> Result<Value,
                     args[11], args[12],
                 )
             }
+            // Unreachable: arity was bounds-checked above, before marshalling.
             _ => {
                 return Err(CompileError::runtime(format!(
-                    "dynamic SFFI dispatch: function '{}' has {} arguments (max 13 supported)",
-                    name, nargs
+                    "dynamic SFFI dispatch: function '{}' has {} arguments (max {} supported)",
+                    name, nargs, MAX_DYNAMIC_SFFI_ARGS
                 )));
             }
         }
@@ -969,7 +993,10 @@ fn call_fptr(fptr: usize, name: &str, evaluated_args: &[Value]) -> Result<Value,
 /// `Some(Err(...))` if found but the call failed, or `None` if the function
 /// was not found in any library.
 pub fn try_call_dynamic(name: &str, evaluated_args: &[Value]) -> Option<Result<Value, CompileError>> {
-    if let Some(error) = plugin_manifest::manifest_error() {
+    // `manifest_ok()` reads the cached flag through a guard; `manifest_error()`
+    // clones the message and is only reached on the (cold) failure branch.
+    if !plugin_manifest::manifest_ok() {
+        let error = plugin_manifest::manifest_error().unwrap_or_default();
         return Some(Err(CompileError::runtime(format!("plugin manifest error: {}", error))));
     }
 
@@ -1039,6 +1066,48 @@ pub fn try_call_dynamic(name: &str, evaluated_args: &[Value]) -> Option<Result<V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    unsafe extern "C" fn sum13(
+        a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64, a6: i64, a7: i64, a8: i64, a9: i64, a10: i64,
+        a11: i64, a12: i64,
+    ) -> i64 {
+        a0 + a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9 + a10 + a11 + a12
+    }
+
+    /// MECHANISM PIN: argument marshalling uses a fixed `[i64; MAX_DYNAMIC_SFFI_ARGS]`
+    /// stack array, not a per-call heap `Vec<i64>`. The arity cap is what makes
+    /// that sound, so pin both ends of it: the maximum arity still dispatches
+    /// correctly, and one over the cap is still rejected with the arity error.
+    /// doc/08_tracking/bug/sffi_boundary_perf_memory_2026-08-21.md
+    #[test]
+    fn call_fptr_dispatches_at_the_arity_cap_and_rejects_one_over() {
+        assert_eq!(MAX_DYNAMIC_SFFI_ARGS, 13);
+
+        let args: Vec<Value> = (1..=13).map(Value::Int).collect();
+        let result = call_fptr(sum13 as usize, "sum13", &args).expect("max-arity call dispatches");
+        assert_eq!(result, Value::Int((1..=13).sum()));
+
+        let too_many: Vec<Value> = (1..=14).map(Value::Int).collect();
+        let error = call_fptr(sum13 as usize, "sum13", &too_many).expect_err("one over the cap is rejected");
+        assert!(
+            error.to_string().contains("14 arguments (max 13 supported)"),
+            "unexpected arity error: {error}"
+        );
+    }
+
+    /// The arity error must not preempt the pre-existing inadmissible-argument
+    /// error: marshalling ran first before the fixed-array rewrite, and callers
+    /// relying on that diagnostic must keep seeing it.
+    #[test]
+    fn over_arity_call_still_reports_an_inadmissible_argument_first() {
+        let mut args: Vec<Value> = (1..=13).map(Value::Int).collect();
+        args.push(Value::Str("nope".to_string().into()));
+        let error = call_fptr(sum13 as usize, "sum13", &args).expect_err("inadmissible argument is rejected");
+        assert!(
+            error.to_string().contains("does not admit argument type"),
+            "expected the conversion error to take precedence, got: {error}"
+        );
+    }
 
     unsafe extern "C" fn inspect_bytes(tag: i64, ptr: i64, len: i64, suffix: i64) -> i64 {
         if tag != 7 || suffix != 9 || ptr == 0 || len != 3 {

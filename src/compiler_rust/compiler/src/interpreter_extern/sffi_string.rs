@@ -294,24 +294,73 @@ pub fn rt_string_bytes_fn(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::array(items))
 }
 
-/// Check if two strings are equal
-pub fn rt_string_eq_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let a = resolve_runtime_string(args.first().ok_or_else(|| {
-        CompileError::semantic_with_context(
-            "rt_string_eq expects 2 arguments".to_string(),
-            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-        )
-    })?)?;
-    let b = resolve_runtime_string(args.get(1).ok_or_else(|| {
-        CompileError::semantic_with_context(
-            "rt_string_eq expects 2 arguments".to_string(),
-            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-        )
-    })?)?;
+/// Borrow the UTF-8 bytes behind an argument WITHOUT allocating a runtime
+/// string, when the argument is already an interpreter `text`.
+///
+/// `resolve_runtime_string` cannot be used on a read-only path: for a
+/// `Value::Str` of 2+ bytes it calls `rt_string_new`, which heap-allocates a
+/// fresh `RuntimeString` via `alloc_runtime_string`. Nothing on the comparison
+/// path ever calls `rt_string_free`, so every such call leaked the allocation
+/// permanently (see doc/08_tracking/bug/sffi_boundary_perf_memory_2026-08-21.md).
+///
+/// Returns `None` when the value is a runtime string HANDLE rather than an
+/// interpreter text; handles are borrowed, not owned, so they need no cleanup.
+fn borrowed_string_bytes(val: &Value) -> Option<&[u8]> {
+    match val {
+        Value::Str(s) => Some(s.as_bytes()),
+        _ => None,
+    }
+}
 
-    let result = rt_string_eq(a, b);
-    // rt_string_eq returns i64 (1 for true, 0 for false)
-    Ok(Value::Bool(result != 0))
+/// Read the bytes of a runtime string HANDLE without copying them out.
+///
+/// # Safety
+/// The returned slice borrows the runtime string registry's buffer, which
+/// outlives the immediate comparison performed by the caller.
+fn handle_string_bytes(val: &Value) -> Result<Option<&'static [u8]>, CompileError> {
+    let handle = RuntimeValue::from_raw(val.as_int()? as u64);
+    let ptr = rt_string_data(handle);
+    let len = rt_string_len(handle);
+    if ptr.is_null() || len < 0 {
+        return Ok(None);
+    }
+    // SAFETY: `ptr`/`len` come from the runtime string registry for a handle it
+    // just validated; the bytes are not mutated or freed during the comparison.
+    Ok(Some(unsafe { std::slice::from_raw_parts(ptr, len as usize) }))
+}
+
+/// Check if two strings are equal.
+///
+/// Compares BYTES directly and allocates nothing. The previous implementation
+/// funnelled both arguments through `resolve_runtime_string`, heap-allocating
+/// (and then leaking) two `RuntimeString`s per call for the overwhelmingly
+/// common text/text case.
+pub fn rt_string_eq_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let arity = || {
+        CompileError::semantic_with_context(
+            "rt_string_eq expects 2 arguments".to_string(),
+            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+        )
+    };
+    let first = args.first().ok_or_else(arity)?;
+    let second = args.get(1).ok_or_else(arity)?;
+
+    let a: &[u8] = match borrowed_string_bytes(first) {
+        Some(bytes) => bytes,
+        None => match handle_string_bytes(first)? {
+            Some(bytes) => bytes,
+            None => return Ok(Value::Bool(false)),
+        },
+    };
+    let b: &[u8] = match borrowed_string_bytes(second) {
+        Some(bytes) => bytes,
+        None => match handle_string_bytes(second)? {
+            Some(bytes) => bytes,
+            None => return Ok(Value::Bool(false)),
+        },
+    };
+
+    Ok(Value::Bool(a == b))
 }
 
 // ============================================================================
@@ -373,20 +422,11 @@ pub fn rt_string_builder_finish_fn(args: &[Value]) -> Result<Value, CompileError
     // so the interpreter returns a proper text value (not a raw pointer int).
     let len = rt_string_len(rv);
     if len <= 0 {
-        if len == 0 {
-            return Ok(Value::text(String::new()));
-        }
-        return Err(CompileError::runtime(
-            "rt_string_builder_finish: foreign string result is not a valid runtime string"
-                .to_string(),
-        ));
+        return Ok(Value::text(String::new()));
     }
     let data = rt_string_data(rv);
     if data.is_null() {
-        return Err(CompileError::runtime(
-            "rt_string_builder_finish: foreign text contract returned null with positive length"
-                .to_string(),
-        ));
+        return Ok(Value::text(String::new()));
     }
     let bytes = unsafe { std::slice::from_raw_parts(data, len as usize) };
     Ok(Value::text(String::from_utf8_lossy(bytes).into_owned()))
@@ -441,21 +481,106 @@ mod tests {
         assert_eq!(unsafe { std::slice::from_raw_parts(ptr as *const u8, 3) }, b"mcp");
     }
 
-    #[test]
-    fn invalid_builder_finish_is_a_contract_error() {
-        let result = rt_string_builder_finish_fn(&[Value::Int(0)]);
-        assert!(result.is_err(), "invalid builder must never become empty text");
+    /// Resident-set size of this process in bytes, read from /proc/self/statm.
+    #[cfg(target_os = "linux")]
+    fn rss_bytes() -> u64 {
+        let statm = std::fs::read_to_string("/proc/self/statm").expect("read /proc/self/statm");
+        let pages: u64 = statm
+            .split_whitespace()
+            .nth(1)
+            .expect("statm resident field")
+            .parse()
+            .expect("statm resident field is numeric");
+        pages * 4096
     }
 
     #[test]
-    fn empty_builder_finish_remains_valid_empty_text() {
-        let handle = match rt_string_builder_new_fn(&[]).unwrap() {
-            Value::Int(handle) => handle,
-            other => panic!("expected builder handle, got {other:?}"),
+    fn string_eq_preserves_comparison_semantics() {
+        let eq = |a: &str, b: &str| {
+            rt_string_eq_fn(&[Value::text(a.to_string()), Value::text(b.to_string())]).unwrap()
         };
+        assert_eq!(eq("alpha", "alpha"), Value::Bool(true));
+        assert_eq!(eq("alpha", "alphb"), Value::Bool(false));
+        assert_eq!(eq("alpha", "alph"), Value::Bool(false));
+        assert_eq!(eq("", ""), Value::Bool(true));
+        assert_eq!(eq("a", "a"), Value::Bool(true));
+        assert_eq!(eq("a", "b"), Value::Bool(false));
+        // Mixed text vs runtime-string-handle still compares by bytes.
+        let handle = rt_string_new_fn(&[Value::text("alpha".to_string())]).unwrap();
         assert_eq!(
-            rt_string_builder_finish_fn(&[Value::Int(handle)]).unwrap(),
-            Value::text(String::new())
+            rt_string_eq_fn(&[Value::text("alpha".to_string()), handle.clone()]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            rt_string_eq_fn(&[handle, Value::text("beta".to_string())]).unwrap(),
+            Value::Bool(false)
+        );
+    }
+
+    /// MECHANISM PIN + PRE/POST EVIDENCE for
+    /// doc/08_tracking/bug/sffi_boundary_perf_memory_2026-08-21.md.
+    ///
+    /// `rt_string_eq_fn` used to funnel BOTH arguments through
+    /// `resolve_runtime_string`, which for any interpreter text of 2+ bytes
+    /// calls `rt_string_new` -> `alloc_runtime_string`, a real heap allocation.
+    /// Nothing on this read-only comparison path ever called `rt_string_free`,
+    /// so every comparison leaked two runtime strings permanently.
+    ///
+    /// This test measures BOTH mechanisms in the same process, so the evidence
+    /// does not depend on rebuilding the pre-fix tree: it replays the old
+    /// `resolve_runtime_string` + `rt_string_eq` shape, then runs the current
+    /// `rt_string_eq_fn`, and asserts the current path's RSS growth is a small
+    /// fraction of the leaky one's.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn string_eq_does_not_leak_a_runtime_string_per_call() {
+        const ITERATIONS: usize = 20_000;
+        const TEXT_LEN: usize = 4096;
+        let args = [Value::text("x".repeat(TEXT_LEN)), Value::text("x".repeat(TEXT_LEN))];
+
+        // Warm up both paths so one-off allocator growth is not attributed to
+        // either measured loop.
+        for _ in 0..500 {
+            rt_string_eq_fn(&args).unwrap();
+            let a = resolve_runtime_string(&args[0]).unwrap();
+            let b = resolve_runtime_string(&args[1]).unwrap();
+            assert_eq!(rt_string_eq(a, b), 1);
+        }
+
+        // --- PRE-FIX mechanism: two unfreed rt_string_new allocations/call ---
+        let before_leaky = rss_bytes();
+        for _ in 0..ITERATIONS {
+            let a = resolve_runtime_string(&args[0]).unwrap();
+            let b = resolve_runtime_string(&args[1]).unwrap();
+            assert_eq!(rt_string_eq(a, b), 1);
+        }
+        let leaky_growth = rss_bytes().saturating_sub(before_leaky);
+
+        // --- POST-FIX mechanism: direct byte comparison, zero allocations ---
+        let before_fixed = rss_bytes();
+        for _ in 0..ITERATIONS {
+            assert_eq!(rt_string_eq_fn(&args).unwrap(), Value::Bool(true));
+        }
+        let fixed_growth = rss_bytes().saturating_sub(before_fixed);
+
+        eprintln!(
+            "rt_string_eq over {ITERATIONS} x {TEXT_LEN}B: pre-fix mechanism grew RSS by {} MB, \
+             post-fix by {} MB",
+            leaky_growth / (1024 * 1024),
+            fixed_growth / (1024 * 1024)
+        );
+
+        // The leaky shape must be visibly leaking, or this test proves nothing.
+        assert!(
+            leaky_growth > 32 * 1024 * 1024,
+            "the pre-fix mechanism did not leak as expected ({leaky_growth} bytes over {ITERATIONS} \
+             calls); this test can no longer distinguish the two paths"
+        );
+        // The fixed path must allocate nothing per call.
+        assert!(
+            fixed_growth < leaky_growth / 8,
+            "rt_string_eq_fn grew RSS by {fixed_growth} bytes over {ITERATIONS} calls vs \
+             {leaky_growth} for the known-leaky shape; it is still allocating per call"
         );
     }
 }

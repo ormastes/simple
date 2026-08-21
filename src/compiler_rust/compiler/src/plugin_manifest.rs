@@ -435,7 +435,18 @@ pub fn parse_plugin_manifest(path: &Path) -> Result<PluginManifest, String> {
     })
 }
 
-fn ensure_manifest_loaded() -> PluginManifestCache {
+/// Load the manifest once, then hand back a GUARD onto the process-wide cache.
+///
+/// This used to return `PluginManifestCache` by value, i.e. a deep clone of the
+/// whole manifest — `Vec<PluginEntry>` (each with nested `Vec<String>` function
+/// lists and class/method tables), a `HashSet<String>` of every registered
+/// symbol, and a `HashMap<String, String>` symbol->library index — on EVERY
+/// call. `try_call_dynamic` calls into it twice per dynamic SFFI dispatch
+/// (`manifest_error()` then `library_for_symbol()`), so any installed plugin
+/// manifest imposed two full O(manifest) deep clones on every extern call.
+/// Borrowing through the guard is behaviour-identical and allocates nothing.
+/// See doc/08_tracking/bug/sffi_boundary_perf_memory_2026-08-21.md.
+fn ensure_manifest_loaded() -> std::sync::MutexGuard<'static, PluginManifestCache> {
     let mut cache = PLUGIN_MANIFEST_CACHE.lock().expect("plugin manifest cache poisoned");
     if !cache.loaded {
         cache.loaded = true;
@@ -456,19 +467,27 @@ fn ensure_manifest_loaded() -> PluginManifestCache {
             }
         }
     }
-    cache.clone()
+    cache
 }
 
 pub fn registered_plugin_symbols() -> HashSet<String> {
-    ensure_manifest_loaded().manifest.symbols
+    // Cold path (interpreter startup registration): a clone is fine here.
+    ensure_manifest_loaded().manifest.symbols.clone()
 }
 
 pub fn library_for_symbol(symbol: &str) -> Option<String> {
     ensure_manifest_loaded().manifest.symbol_to_library.get(symbol).cloned()
 }
 
+/// True when no plugin manifest failed to load. Hot path: called once per
+/// dynamic SFFI dispatch, so it must not clone the error string (or anything
+/// else) in the overwhelmingly common no-error case.
+pub fn manifest_ok() -> bool {
+    ensure_manifest_loaded().error.is_none()
+}
+
 pub fn manifest_error() -> Option<String> {
-    ensure_manifest_loaded().error
+    ensure_manifest_loaded().error.clone()
 }
 
 #[cfg(test)]
@@ -481,6 +500,37 @@ pub fn clear_plugin_manifest_cache() {
 mod tests {
     use super::*;
     use std::fs;
+
+    /// MECHANISM PIN: `ensure_manifest_loaded` must BORROW the process-wide
+    /// cache, never clone it. It previously returned `PluginManifestCache` by
+    /// value, deep-cloning the plugin list, the symbol `HashSet` and the
+    /// symbol->library `HashMap` on every call — and `try_call_dynamic` calls
+    /// into it twice per dynamic SFFI dispatch. Comparing addresses is exact
+    /// and deterministic: a clone cannot share an address with the original.
+    /// doc/08_tracking/bug/sffi_boundary_perf_memory_2026-08-21.md
+    #[test]
+    fn ensure_manifest_loaded_borrows_the_cache_instead_of_cloning_it() {
+        let cache_addr = {
+            let guard = PLUGIN_MANIFEST_CACHE.lock().expect("plugin manifest cache poisoned");
+            std::ptr::addr_of!(guard.manifest) as usize
+        };
+        let borrowed_addr = {
+            let guard = ensure_manifest_loaded();
+            std::ptr::addr_of!(guard.manifest) as usize
+        };
+        assert_eq!(
+            cache_addr, borrowed_addr,
+            "ensure_manifest_loaded cloned the manifest instead of borrowing it"
+        );
+    }
+
+    /// `manifest_ok()` is the allocation-free hot-path predicate that replaced
+    /// `manifest_error().is_none()` in `try_call_dynamic`; it must agree with
+    /// `manifest_error()` in both directions.
+    #[test]
+    fn manifest_ok_agrees_with_manifest_error() {
+        assert_eq!(manifest_ok(), manifest_error().is_none());
+    }
 
     #[test]
     fn parses_valid_manifest() {

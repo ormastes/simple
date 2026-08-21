@@ -119,29 +119,46 @@ pub fn rt_array_concat_fn(args: &[Value]) -> Result<Value, CompileError> {
         return Ok(Value::byte_array(bytes));
     }
 
-    let mut items = match left {
-        Value::Array(values) | Value::FrozenArray(values) => values.as_ref().clone(),
-        Value::ByteArray(values) | Value::FrozenByteArray(values) => Value::byte_array_values(values),
-        Value::FixedSizeArray { data, .. } => data.clone(),
-        other => {
-            return Err(CompileError::semantic(format!(
+    // Borrow both sides where possible and size the destination ONCE.
+    //
+    // This used to clone the left side at exactly its own length, materialise a
+    // second full `Vec` for the right side, then `extend` — which reallocated
+    // the destination (its capacity was exact-fit) and threw the intermediate
+    // away. Three allocations plus a copy where two suffice.
+    // doc/08_tracking/bug/sffi_boundary_perf_memory_2026-08-21.md
+    enum Side<'a> {
+        Borrowed(&'a [Value]),
+        Owned(Vec<Value>),
+    }
+    impl Side<'_> {
+        fn as_slice(&self) -> &[Value] {
+            match self {
+                Side::Borrowed(items) => items,
+                Side::Owned(items) => items.as_slice(),
+            }
+        }
+    }
+    fn side<'v>(value: &'v Value) -> Result<Side<'v>, CompileError> {
+        match value {
+            Value::Array(values) | Value::FrozenArray(values) => Ok(Side::Borrowed(values.as_ref().as_slice())),
+            Value::ByteArray(values) | Value::FrozenByteArray(values) => {
+                Ok(Side::Owned(Value::byte_array_values(values)))
+            }
+            Value::FixedSizeArray { data, .. } => Ok(Side::Borrowed(data.as_slice())),
+            other => Err(CompileError::semantic(format!(
                 "rt_array_concat expects array arguments, got {}",
                 other.type_name()
-            )))
+            ))),
         }
-    };
-    let right_items = match right {
-        Value::Array(values) | Value::FrozenArray(values) => values.as_ref().clone(),
-        Value::ByteArray(values) | Value::FrozenByteArray(values) => Value::byte_array_values(values),
-        Value::FixedSizeArray { data, .. } => data.clone(),
-        other => {
-            return Err(CompileError::semantic(format!(
-                "rt_array_concat expects array arguments, got {}",
-                other.type_name()
-            )))
-        }
-    };
-    items.extend(right_items);
+    }
+    let left_side = side(left)?;
+    let right_side = side(right)?;
+    let left_items = left_side.as_slice();
+    let right_items = right_side.as_slice();
+
+    let mut items = Vec::with_capacity(left_items.len() + right_items.len());
+    items.extend_from_slice(left_items);
+    items.extend_from_slice(right_items);
     Ok(Value::array(items))
 }
 
