@@ -551,51 +551,15 @@ impl HirLowering:
             self.reexport_walk_valid = false
             return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
 
-        val root_entry = hir_reexport_parallel_find(
-            self.reexport_root_surface_indices, self.reexport_root_wanted,
-            facade_index, wanted)
-        if root_entry >= 0:
-            self.reexport_chase_memo_hits = self.reexport_chase_memo_hits + 1
-            val terminal_index = self.reexport_root_terminal_indices[root_entry]
-            if terminal_index < -1 or terminal_index >= self.module_surfaces.surfaces.len():
-                self.reexport_walk_valid = false
-                return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
-            var terminal_name = ""
-            if terminal_index >= 0 and
-               terminal_index < self.module_surfaces.surfaces.len():
-                terminal_name = self.module_surfaces.surfaces[terminal_index].preferred_registry_name
-            return HirReexportSource(
-                found: self.reexport_root_found[root_entry],
-                module_index: terminal_index,
-                module_name: terminal_name,
-                item_name: self.reexport_root_items[root_entry])
-
-        var visit_surface_indices = self.reexport_visit_surface_indices
-        var visit_wanted = self.reexport_visit_wanted
-        var visit_depths = self.reexport_visit_depths
-        visit_surface_indices.clear()
-        visit_wanted.clear()
-        visit_depths.clear()
+        # Cross-module memo arrays can change meaning after a native module
+        # scope transition. Resolve every root from promoted scalar routes and
+        # keep cycle detection local to this one walk.
+        val visit_surface_indices: [i64] = []
+        val visit_wanted: [text] = []
+        val visit_depths: [i64] = []
         self.reexport_visit_surface_indices = visit_surface_indices
         self.reexport_visit_wanted = visit_wanted
         self.reexport_visit_depths = visit_depths
 
         val result = self.find_reexport_source_walk(facade_index, wanted, 0)
-        # Array push retains prior backing stores in the no-GC bootstrap.
-        # Bound the cross-module memo so admission remains O(1) after the hot
-        # working set is populated instead of retaining quadratic growth.
-        val admit_root_cache = self.reexport_root_surface_indices.len() < 512
-        if result.found and admit_root_cache:
-            self.reexport_root_surface_indices = self.reexport_root_surface_indices.push(facade_index)
-            self.reexport_root_wanted = self.reexport_root_wanted.push(wanted)
-            self.reexport_root_found = self.reexport_root_found.push(true)
-            self.reexport_root_terminal_indices = self.reexport_root_terminal_indices.push(result.module_index)
-            self.reexport_root_items = self.reexport_root_items.push(result.item_name)
-        elif self.reexport_walk_complete and self.reexport_walk_valid and
-             admit_root_cache:
-            self.reexport_root_surface_indices = self.reexport_root_surface_indices.push(facade_index)
-            self.reexport_root_wanted = self.reexport_root_wanted.push(wanted)
-            self.reexport_root_found = self.reexport_root_found.push(false)
-            self.reexport_root_terminal_indices = self.reexport_root_terminal_indices.push(-1)
-            self.reexport_root_items = self.reexport_root_items.push("")
         result

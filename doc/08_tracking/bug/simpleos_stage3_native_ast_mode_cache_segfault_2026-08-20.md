@@ -1198,3 +1198,20 @@ bypass the flattened projection and explain why direct modules resolve while
 facade exports do not. All three must consume the validated offset/name/alias
 scalar arrays. This correction is queued after the three-cycle cap and remains
 unclaimed until a fresh admitted run.
+
+Diagnostic Cycle 2 captured the same `(facade, wanted)` query returning
+`found=true` during early lowering and `found=false` after module-scope
+transitions. The scalar route walk is correct; the cross-module root memo
+arrays are not retained authority. Re-export resolution must start with fresh
+visit arrays per root query and return the live scalar-route result without
+reading or publishing the transient root memo. This is another deliberate
+performance rollback until a retention-safe index exists.
+
+Cycle 3 showed that removing the memo does not restore facade matches. Combined
+with Cycle 2 diagnostics, the same import items are readable during early
+surface work but absent after the freeze/module transition. Their projections
+were constructed in the per-file surface scope, unlike the proven import target
+and export route arrays constructed in the registry freeze scope. The owner fix
+is to build flat import-item offsets/names/aliases during freeze, attach them
+beside the target routes, and explicitly promote them in
+`module_surfaces_promote`. Per-file construction is not an ownership boundary.
