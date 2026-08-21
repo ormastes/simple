@@ -1,0 +1,76 @@
+# LLM Caret - bounded parent-owned multi-agent process adapter
+
+use app.llm_caret.agent_plan.{AgentLaunchRequest}
+use app.llm_caret.agent_runtime.{AgentTeamProcess, launch_agent_team_with_all,
+    agent_team_status, stop_agent_team, summarize_agent_team}
+use app.llm_caret.agent_tmux.{AgentTmuxEmbed, build_agent_tmux_embed}
+
+struct MultiCaretManager:
+    manager_id: text
+    status: text
+    reason: text
+    capacity: i64
+    team: AgentTeamProcess
+    terminal_view: AgentTmuxEmbed
+
+fn _empty_team(manager_id: text) -> AgentTeamProcess:
+    summarize_agent_team(manager_id, [])
+
+fn _manager(manager_id: text, status: text, reason: text, capacity: i64,
+        team: AgentTeamProcess) -> MultiCaretManager:
+    # The process team is the canonical parent-owned state. The embedded
+    # terminal view is rebuilt from that state and never owns a PID or claims
+    # integration with the separate os.apps.smux service.
+    MultiCaretManager(manager_id: manager_id, status: status, reason: reason,
+        capacity: capacity, team: team,
+        terminal_view: build_agent_tmux_embed(team, []))
+
+pub fn launch_multi_caret_manager(manager_id: text,
+        requests: [AgentLaunchRequest], capacity: i64, claude_path: text,
+        codex_path: text, gemini_path: text, kimi_path: text,
+        opencode_path: text) -> MultiCaretManager:
+    if manager_id == "":
+        return _manager(manager_id, "not_started", "manager_id_required",
+            capacity, _empty_team(manager_id))
+    if capacity <= 0 or capacity > 16:
+        return _manager(manager_id, "not_started", "capacity_out_of_range",
+            capacity, _empty_team(manager_id))
+    if requests.len() == 0:
+        return _manager(manager_id, "not_started", "requests_required",
+            capacity, _empty_team(manager_id))
+    if requests.len() > capacity:
+        return _manager(manager_id, "not_started", "capacity_exceeded",
+            capacity, _empty_team(manager_id))
+
+    val launched = launch_agent_team_with_all(manager_id, requests,
+        claude_path, codex_path, gemini_path, kimi_path, opencode_path)
+    if launched.status != "started":
+        # Fail closed: the parent tears down every child from a partial batch.
+        val rolled_back = stop_agent_team(launched)
+        return _manager(manager_id, "not_started", "launch_rolled_back",
+            capacity, rolled_back)
+    _manager(manager_id, "running", "all_processes_started", capacity, launched)
+
+pub fn poll_multi_caret_manager(manager: MultiCaretManager) -> MultiCaretManager:
+    if manager.status != "running":
+        return manager
+    val polled = agent_team_status(manager.team)
+    var status = "running"
+    if polled.status != "started":
+        status = "exited"
+    _manager(manager.manager_id, status, "processes_polled", manager.capacity,
+        polled)
+
+pub fn stop_multi_caret_manager(manager: MultiCaretManager) -> MultiCaretManager:
+    if manager.status == "stopped":
+        return manager
+    if manager.team.processes.len() == 0:
+        return _manager(manager.manager_id, "stopped", "no_processes",
+            manager.capacity, manager.team)
+    val stopped = stop_agent_team(manager.team)
+    _manager(manager.manager_id, "stopped", "stop_attempted",
+        manager.capacity, stopped)
+
+export MultiCaretManager
+export launch_multi_caret_manager, poll_multi_caret_manager,
+    stop_multi_caret_manager

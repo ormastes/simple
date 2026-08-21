@@ -1,0 +1,94 @@
+#!/bin/sh
+# Bootstrap-owned LLM Caret suite gates. Never run from the push hook.
+set -u
+
+ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd -P)
+SIMPLE=${SIMPLE_BINARY:-$ROOT/bin/simple}
+GATE=""
+
+results_are_green() {
+    _results_file=$1
+    _results_line=$(grep -E '^Results: [0-9]+ total, [0-9]+ passed, [0-9]+ failed$' "$_results_file" | tail -n 1)
+    [ -n "$_results_line" ] || return 1
+    _counts=$(printf '%s\n' "$_results_line" | sed -n 's/^Results: \([0-9][0-9]*\) total, \([0-9][0-9]*\) passed, \([0-9][0-9]*\) failed$/\1 \2 \3/p')
+    set -- $_counts
+    [ "$#" -eq 3 ] && [ "$1" -gt 0 ] && [ "$1" -eq "$2" ] && [ "$3" -eq 0 ]
+}
+
+self_test_results_parser() {
+    _parser_tmp=$(mktemp -d) || return 2
+    printf '%s\n' 'Results: 4 total, 4 passed, 0 failed' > "$_parser_tmp/green"
+    printf '%s\n' 'Results: 4 total, 3 passed, 1 failed' > "$_parser_tmp/failed"
+    printf '%s\n' 'Results: 0 total, 0 passed, 0 failed' > "$_parser_tmp/empty"
+    printf '%s\n' 'Results: 4 total, 4 passed, 0 failed (ignored suffix)' > "$_parser_tmp/malformed"
+    results_are_green "$_parser_tmp/green" || { rm -rf "$_parser_tmp"; return 1; }
+    ! results_are_green "$_parser_tmp/failed" || { rm -rf "$_parser_tmp"; return 1; }
+    ! results_are_green "$_parser_tmp/empty" || { rm -rf "$_parser_tmp"; return 1; }
+    ! results_are_green "$_parser_tmp/malformed" || { rm -rf "$_parser_tmp"; return 1; }
+    rm -rf "$_parser_tmp"
+}
+
+case "${1:-}" in
+    --gate) GATE=${2:-}; shift 2 ;;
+    --self-test)
+        self_test_results_parser || { echo "STATUS: FAIL caret-suite results-parser"; exit 1; }
+        for path in \
+            src/app/llm_caret/main.spl \
+            src/app/llm_caret/local_torch.spl \
+            src/app/llm_caret/provider.spl \
+            test/01_unit/app/llm_caret/main_spec.spl \
+            test/01_unit/app/llm_caret/local_torch_spec.spl \
+            test/01_unit/app/llm_caret/provider_spec.spl \
+            test/01_unit/app/llm_caret/server_spec.spl \
+            test/01_unit/app/llm_caret/agent_runtime_provider_spec.spl \
+            test/03_system/llm_caret_agent_backends_spec.spl \
+            test/03_system/llm_caret_multi_manager_spec.spl \
+            test/03_system/app/llm_caret/feature/llm_caret_messaging_http_application_spec.spl \
+            test/03_system/app/llm_caret/feature/llm_caret_messaging_mcp_spec.spl; do
+            [ -f "$ROOT/$path" ] || { echo "STATUS: FAIL caret-suite missing=$path"; exit 1; }
+        done
+        echo "STATUS: PASS caret-suite-bootstrap-self-test"
+        exit 0 ;;
+    *) echo "usage: $0 --gate local-torch|provider-wrappers|agent-primitives|multi-manager | --self-test" >&2; exit 2 ;;
+esac
+
+run_spec() {
+    _spec=$1
+    _out=$(mktemp) || exit 2
+    "$SIMPLE" test "$ROOT/$_spec" --mode=interpreter >"$_out" 2>&1
+    _rc=$?
+    if [ "$_rc" -ne 0 ] || ! results_are_green "$_out"; then
+        tail -n 20 "$_out" >&2
+        rm -f "$_out"
+        return 1
+    fi
+    rm -f "$_out"
+    return 0
+}
+
+case "$GATE" in
+    local-torch)
+        # Canonical repo-local inference path: Caret's local_torch provider,
+        # launched through llm_caret main and exposed by its local HTTP server.
+        run_spec test/01_unit/app/llm_caret/main_spec.spl || exit 1
+        run_spec test/01_unit/app/llm_caret/local_torch_spec.spl || exit 1
+        run_spec test/01_unit/app/llm_caret/provider_spec.spl || exit 1
+        run_spec test/01_unit/app/llm_caret/server_spec.spl || exit 1
+        echo "STATUS: PASS caret-local-torch-launch"
+        ;;
+    provider-wrappers)
+        run_spec test/01_unit/app/llm_caret/agent_runtime_provider_spec.spl || exit 1
+        run_spec test/03_system/llm_caret_agent_backends_spec.spl || exit 1
+        echo "STATUS: PASS caret-provider-wrappers"
+        ;;
+    agent-primitives)
+        run_spec test/03_system/app/llm_caret/feature/llm_caret_messaging_http_application_spec.spl || exit 1
+        run_spec test/03_system/app/llm_caret/feature/llm_caret_messaging_mcp_spec.spl || exit 1
+        echo "STATUS: PASS caret-agent-manager-primitives"
+        ;;
+    multi-manager)
+        run_spec test/03_system/llm_caret_multi_manager_spec.spl || exit 1
+        echo "STATUS: PASS caret-multi-manager-launch"
+        ;;
+    *) echo "STATUS: FAIL caret-suite unknown-gate=$GATE"; exit 2 ;;
+esac

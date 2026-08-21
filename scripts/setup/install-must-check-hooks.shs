@@ -1,0 +1,67 @@
+#!/bin/sh
+# Install/check the local mandatory pre-push dispatcher on Unix-like hosts.
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd -P)
+SOURCE="$ROOT/scripts/hooks/pre-push"
+MODE=check
+
+case "${1:---check}" in
+    --check) MODE=check ;;
+    --install|--apply) MODE=install ;;
+    -h|--help)
+        echo "usage: sh scripts/setup/install-must-check-hooks.shs [--check|--install]"
+        exit 0 ;;
+    *) echo "install-must-check-hooks: unknown argument $1" >&2; exit 2 ;;
+esac
+
+HOOKS_DIR=$(git -C "$ROOT" rev-parse --git-path hooks 2>/dev/null) || {
+    echo "install-must-check-hooks: not a Git worktree" >&2; exit 2;
+}
+case "$HOOKS_DIR" in /*) : ;; *) HOOKS_DIR="$ROOT/$HOOKS_DIR" ;; esac
+DEST="$HOOKS_DIR/pre-push"
+
+is_current() {
+    [ -e "$DEST" ] || return 1
+    _dest_real=$(readlink -f "$DEST" 2>/dev/null || printf '%s' "$DEST")
+    _src_real=$(readlink -f "$SOURCE" 2>/dev/null || printf '%s' "$SOURCE")
+    [ "$_dest_real" = "$_src_real" ] || cmp -s "$SOURCE" "$DEST"
+}
+
+is_legacy_canonical() {
+    [ -e "$DEST" ] || return 1
+    _dest_real=$(readlink -f "$DEST" 2>/dev/null || printf '%s' "$DEST")
+    _legacy_real=$(readlink -f "$ROOT/scripts/check/pre-push-conflict-tree-guard.shs" 2>/dev/null || printf '%s' "$ROOT/scripts/check/pre-push-conflict-tree-guard.shs")
+    [ "$_dest_real" = "$_legacy_real" ]
+}
+
+if [ "$MODE" = check ]; then
+    if is_current && [ -x "$DEST" ]; then
+        echo "must-check pre-push hook: INSTALLED"
+        exit 0
+    fi
+    echo "must-check pre-push hook: NOT INSTALLED OR OUTDATED"
+    exit 1
+fi
+
+mkdir -p "$HOOKS_DIR"
+if [ -e "$DEST" ] && ! is_current; then
+    if is_legacy_canonical; then
+        rm -f "$DEST"
+    elif [ -e "$DEST.local" ]; then
+        echo "install-must-check-hooks: refusing to overwrite existing $DEST.local" >&2
+        exit 1
+    else
+        mv "$DEST" "$DEST.local"
+        echo "install-must-check-hooks: preserved existing hook as $DEST.local"
+    fi
+fi
+chmod +x "$SOURCE" "$ROOT/scripts/check/pre-push-conflict-tree-guard.shs" "$ROOT/scripts/check/check-push-must-pass.shs"
+rm -f "$DEST.new"
+ln -s "$SOURCE" "$DEST.new"
+mv -f "$DEST.new" "$DEST"
+is_current && [ -x "$DEST" ] || {
+    echo "install-must-check-hooks: installed hook failed verification" >&2
+    exit 1
+}
+echo "must-check pre-push hook: INSTALLED"

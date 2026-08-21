@@ -1,0 +1,43 @@
+#!/bin/sh
+# Bootstrap-only whole-tree sdoctest gate. A process exit code is not a verdict:
+# require a non-vacuous canonical summary with every discovered test passing.
+set -u
+
+ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd -P)
+SIMPLE=${SIMPLE_BINARY:-$ROOT/bin/simple}
+
+results_are_green() {
+    _results_file=$1
+    _results_line=$(grep -E '^Results: [0-9]+ total, [0-9]+ passed, [0-9]+ failed$' "$_results_file" | tail -n 1)
+    [ -n "$_results_line" ] || return 1
+    _counts=$(printf '%s\n' "$_results_line" | sed -n 's/^Results: \([0-9][0-9]*\) total, \([0-9][0-9]*\) passed, \([0-9][0-9]*\) failed$/\1 \2 \3/p')
+    set -- $_counts
+    [ "$#" -eq 3 ] && [ "$1" -gt 0 ] && [ "$1" -eq "$2" ] && [ "$3" -eq 0 ]
+}
+
+if [ "${1:-}" = --self-test ]; then
+    _tmp=$(mktemp -d) || exit 2
+    trap 'rm -rf "$_tmp"' EXIT INT TERM
+    printf '%s\n' 'Results: 8 total, 8 passed, 0 failed' > "$_tmp/green"
+    printf '%s\n' 'Results: 8 total, 7 passed, 1 failed' > "$_tmp/failed"
+    printf '%s\n' 'Results: 0 total, 0 passed, 0 failed' > "$_tmp/empty"
+    printf '%s\n' 'Results: 8 total, 8 passed, 0 failed trailing' > "$_tmp/malformed"
+    results_are_green "$_tmp/green" || exit 1
+    ! results_are_green "$_tmp/failed" || exit 1
+    ! results_are_green "$_tmp/empty" || exit 1
+    ! results_are_green "$_tmp/malformed" || exit 1
+    echo 'STATUS: PASS sdoctest-bootstrap-self-test'
+    exit 0
+fi
+[ "$#" -eq 0 ] || { echo "usage: $0 [--self-test]" >&2; exit 2; }
+
+_out=$(mktemp) || exit 2
+trap 'rm -f "$_out"' EXIT INT TERM
+(cd "$ROOT" && "$SIMPLE" test test --whole --mode=interpreter) > "$_out" 2>&1
+_rc=$?
+if [ "$_rc" -ne 0 ] || ! results_are_green "$_out"; then
+    tail -n 20 "$_out" >&2
+    echo 'STATUS: FAIL sdoctest-markdown-comments' >&2
+    exit 1
+fi
+echo 'STATUS: PASS sdoctest-markdown-comments'

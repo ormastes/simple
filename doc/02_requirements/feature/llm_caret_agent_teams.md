@@ -15,3 +15,7 @@ Date: 2026-07-01
 - REQ-011: Provide simple MCP/plugin manifest parsers and plugin install argument planning so agent handoffs can be populated consistently with SPipe without performing live installs.
 - REQ-012: Provide a pure team mailbox for `btw` and `side` messages with per-agent inbox and channel filtering.
 - REQ-013: Provide a TUI-readable handoff surface and executable SSpec system test for agent, skill, MCP, plugin, and team-message visibility.
+- REQ-014: Provide a bounded parent-owned multi-Caret adapter that rejects an
+  over-capacity batch before spawn, rolls back a partial launch, derives an
+  terminal pane view without transferring process ownership, and exposes
+  deterministic parent-only poll and terminal-stop transitions.
