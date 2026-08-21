@@ -2,8 +2,9 @@
 
 ## Status
 
-Pure-Simple owner fix implemented; bootstrap verification deferred to the next
-bounded session because the prior session exhausted its three-cycle cap.
+Callable ownership fix verified through all 664 Stage-3 surface parses. The
+remaining cross-stage import-route aggregate reads are replaced by frozen
+scalar projections; final bootstrap verification is pending.
 
 ## Evidence
 
@@ -33,9 +34,21 @@ duplicating the large nested struct value; names and membership remain
 unchanged. No callable is retained in a second aggregate array. A bootstrap
 source contract requires the class owner and forbids the rejected value array.
 
+The next receipt-bound run proved that fix: Phase 2 parsed and released all 664
+entry-closure surfaces without a segmentation fault. HIR then reported 1,352
+fatal diagnostics involving seven unresolved imported types. Both remaining
+route consumers still read nested `ParserImport`/`ImportItem` value aggregates
+from a staged `ModuleSurface`, even though target identity was already frozen
+into scalar arrays.
+
+`ModuleSurface` now freezes each import's item offset/count plus flattened
+source and local names. Alignment validation proves monotonic, in-bounds,
+exhaustive coverage. Explicit callable dependency materialization and recursive
+re-export traversal consume only those scalar projections; empty counts retain
+the existing glob/module-route meaning.
+
 ## Resume
 
-Run one fresh Stage-2 admission, produce its planner-admission-v2 receipt, then
-run one receipt-bound deploy. The first Stage-3 HIR module must contain zero
-`[hir-fatal]` records, and full Stage 4 plus bootstrap must-check must pass
-before the push ledger can be promoted.
+Run the third and final fresh Stage-2 admission and one receipt-bound deploy.
+Stage 3 must finish with zero `[hir-fatal]` records; full Stage 4 and bootstrap
+must-check must pass before the push ledger can be promoted.
