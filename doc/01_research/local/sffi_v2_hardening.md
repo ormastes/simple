@@ -63,3 +63,25 @@ P0 must repair each execution/link lane as one defect class. P1 must establish
 one compiler-owned typed contract and generated lift path. A grep inventory,
 per-lane registry, wrapper convention, or signature field alone cannot prove
 the boundary.
+
+## Post-P0 native bridge inventory
+
+The value-returning `spl_wffi_call_i64` family is not one semantic contract.
+Live callers use it for arbitrary scalars, statuses where zero is valid,
+pointers where zero is invalid, booleans, lengths, and ignored destructor
+returns. `spl_wffi_call_f64` serves plugins where `0.0` is valid, while the
+byte-descriptor variant has one counterpart-provider caller.
+
+No replacement sentinel is safe. The reusable repository convention is status
+plus caller-owned mutable output, already used by AES `*_into` runtime bridges:
+transport status zero means the bridge invoked the call and initialized the
+output; the unchanged foreign result lives in the out slot. The canonical safe
+owner is `src/lib/nogc_sync_mut/sffi/dynamic.spl`, exposing `Result` while the
+old value-returning names remain explicit legacy-unsafe ABI during migration.
+
+Assurance policy already defines `moderate`, `strict`, `robust`, `critical`,
+and `verified`, with child serialization through `SIMPLE_SAFETY_PROFILE`.
+Typed adapters run before `dynamic_sffi::try_call_dynamic`, making it the
+legacy-generic choke point. Until typed policy reaches Rust in process, generic
+dispatch requires a positive development opt-in; robust/critical/verified and
+unknown profiles deny before library or symbol resolution with `E-SFFI-014`.

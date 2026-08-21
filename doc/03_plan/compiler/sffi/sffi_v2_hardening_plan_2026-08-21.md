@@ -164,6 +164,30 @@ contract, generate shim/wrapper, attach analyzer/sanitizer/fuzz/proof evidence,
 run cross-lane tests, benchmark, then remove the legacy binding. Raw declarations
 remain internal and are never re-exported as safe APIs.
 
+### Checked generic-transport transition
+
+Add checked raw transports alongside—not in place of—the legacy value-returning
+ABI:
+
+```text
+spl_wffi_try_call_i64(fptr, args, nargs, out) -> transport_status
+spl_wffi_try_call_f64(fptr, args, nargs, out) -> transport_status
+spl_wffi_try_call_i64_with_bytes(..., out) -> transport_status
+```
+
+On status zero, `out[0]` contains the foreign return unchanged, including a
+legitimate `0`, `0.0`, or `-1`. Nonzero status represents only bridge rejection
+such as a null function pointer, invalid arity, or malformed descriptor. Add
+native exports first, interpreter parity second, canonical no-GC `Result`
+wrappers third, then migrate the single with-bytes caller, plugins, and each
+LLVM/font/T32/GPU contract family separately.
+
+At `try_call_dynamic`, generic dispatch also requires explicit development-only
+legacy opt-in. Robust, critical, verified, their aliases, and unknown profiles
+deny with `E-SFFI-014` before `dlopen`/`dlsym`. Replace this temporary serialized
+profile seam with typed policy carriage when the frozen registry reaches the
+Rust interpreter.
+
 ## P6 — Conformance and performance gates
 
 **Status: planned; focused P0/P1 reproduce-first evidence does not constitute
