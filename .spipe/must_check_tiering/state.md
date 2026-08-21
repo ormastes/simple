@@ -213,3 +213,8 @@ implementation-blocked-by-bootstrap-authority
   The exact owner, evidence, regression requirements, and next-session unblock
   are recorded in
   `stage3_primary_import_resolution_aggregate_corruption_2026-08-21.md`.
+- fix-pending-verification: A fresh bounded session claimed that owner. Frozen
+  surfaces now retain authored module spellings, primary registration and
+  private facade/glob expansion consume only scalar route arrays, invalid
+  projections fail closed, and `ProcessResult`-shaped return-only plus alias
+  regressions cover the exact and adjacent roots. Bootstrap cycle count is 0/3.

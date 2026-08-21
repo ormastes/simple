@@ -7,7 +7,7 @@ use compiler.hir.hir_lowering._Items.module_lowering.*
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
-use compiler.frontend.parser_types.{ParserFunction, ImportItem, Param}
+use compiler.frontend.parser_types.{ParserFunction, Param}
 use compiler.frontend.parser_types_expr.*
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
 use compiler.common.diagnostics.span.{Span}
@@ -204,103 +204,102 @@ impl HirLowering:
             imported_mod.trait_names.len() > 0 or
             imported_mod.callable_names.len() > 0 or
             imported_mod.constant_names.len() > 0
-        val facade_shape = not has_own_symbols and imported_mod.exports.len() == 0
+        val facade_shape = not has_own_symbols and
+            imported_mod.export_route_sources.len() == 0
         if include_private_named_imports:
+            if not module_surface_route_arrays_aligned(imported_mod):
+                self.error(
+                    "misaligned frozen import routes for `{imported_mod_name}`",
+                    import_span)
+                return
             var glob_imp_idx = 0
-            while glob_imp_idx < imported_mod.imports.len():
-                val glob_imp = imported_mod.imports[glob_imp_idx]
-                if glob_imp.items.len() == 0 and facade_shape:
-                    var nested_surface_index = -1
-                    if glob_imp_idx < imported_mod.import_target_indices.len():
-                        nested_surface_index = imported_mod.import_target_indices[glob_imp_idx]
-                    var nested_key = ""
-                    if glob_imp_idx < imported_mod.import_target_names.len():
-                        nested_key = imported_mod.import_target_names[glob_imp_idx]
-                    if nested_surface_index >= 0 and nested_surface_index != imported_mod.physical_index:
+            while glob_imp_idx < imported_mod.import_target_indices.len():
+                val item_offset = imported_mod.import_route_item_offsets[glob_imp_idx]
+                val item_count = imported_mod.import_route_item_counts[glob_imp_idx]
+                if item_count == 0 and facade_shape:
+                    val nested_surface_index = imported_mod.import_target_indices[glob_imp_idx]
+                    val nested_key = imported_mod.import_target_names[glob_imp_idx]
+                    if nested_surface_index >= self.module_surfaces.surfaces.len() or
+                       (nested_surface_index >= 0 and nested_key == ""):
+                        self.error(
+                            "invalid frozen import target for `{imported_mod_name}`",
+                            import_span)
+                        return
+                    if nested_surface_index >= 0 and
+                       nested_surface_index < self.module_surfaces.surfaces.len() and
+                       nested_surface_index != imported_mod.physical_index and
+                       nested_key != "":
                         self.register_glob_imported_symbols_depth(
                             self.module_surfaces.surfaces[nested_surface_index], nested_key,
                             import_span, depth + 1, include_private_named_imports,
                             materialize_enums)
                 var glob_it = 0
-                while glob_it < glob_imp.items.len():
-                    val glob_item = glob_imp.items[glob_it]
-                    val glob_local = if glob_item.has_alias: glob_item.alias else: glob_item.name
+                while glob_it < item_count:
+                    val flat_item_index = item_offset + glob_it
+                    val glob_local = imported_mod.import_route_item_local_names[flat_item_index]
                     self.register_imported_symbol(imported_mod, imported_mod_name, glob_local, glob_local, import_span, materialize_enums)
                     glob_it = glob_it + 1
                 glob_imp_idx = glob_imp_idx + 1
 
     me resolve_import_symbols(module: ParserModule):
+        # ParserImport/ImportItem are nested value aggregates retained across
+        # the Stage-3 parse/HIR boundary. Resolve the current physical surface
+        # once, then consume only its frozen scalar route projection.
+        var current_key = hir_module_logical_name_from_path(module.name)
+        var current_index = hir_module_surface_index(
+            self.module_surfaces, current_key)
+        if current_index < 0:
+            current_key = self.resolve_module_key(current_key)
+            current_index = hir_module_surface_index(
+                self.module_surfaces, current_key)
+        if current_index < 0 or
+           current_index >= self.module_surfaces.surfaces.len():
+            self.error(
+                "missing frozen module surface for `{module.name}`",
+                Span.empty())
+            return
+        val current_surface = self.module_surfaces.surfaces[current_index]
+        if not module_surface_route_arrays_aligned(current_surface):
+            self.error(
+                "misaligned frozen import routes for `{module.name}`",
+                Span.empty())
+            return
+
         var import_idx = 0
-        while import_idx < module.imports.len():
-            val imp = module.imports[import_idx]
-            # ParserStruct-valued Dict.get() corrupts native hit payloads. Track the
-            # winning key and read the value only with bracket indexing.
-            var imported_key = if self.module_surfaces.index_by_name.contains_key(imp.module): imp.module else: ""
+        while import_idx < current_surface.import_target_indices.len():
+            val authored_module_name =
+                current_surface.import_route_module_names[import_idx]
+            val imported_key = current_surface.import_target_names[import_idx]
+            val imported_index = current_surface.import_target_indices[import_idx]
+            val item_offset = current_surface.import_route_item_offsets[import_idx]
+            val item_count = current_surface.import_route_item_counts[import_idx]
             if (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
-                eprint("[imp] importer={module.name} module={imp.module} items={imp.items.len()} found={imported_key != ""}")
+                eprint("[imp] importer={module.name} module={authored_module_name} items={item_count} found={imported_index >= 0}")
             # Symbols must register under the DEFINING module's canonical name:
             # a relative alias like ".helper" would otherwise be baked into the
             # call symbol (@.helper.helper_val) while the definition object
             # mangles under the path-derived name -> lld undefined symbol.
-            var resolved_module_name = imp.module
-            if imported_key == "" and imp.module.starts_with("."):
-                # Relative import (`.sibling` / `..pkg.mod`): the module map is
-                # keyed by path-derived dotted names (app.mcp.main_lazy_json),
-                # so a raw leading-dot key always misses. Normalize against the
-                # importing module's own name. The entry module's name can be a
-                # FILE PATH (src/app/mcp/main.spl) — canonicalize to dotted.
-                var rel_base = module.name
-                if rel_base.ends_with(".spl"):
-                    rel_base = rel_base[0:rel_base.len() - 4]
-                rel_base = rel_base.replace("/", ".")
-                if rel_base.starts_with("src."):
-                    rel_base = rel_base.substring(4)
-                var rel_dots = 0
-                while rel_dots < imp.module.len() and imp.module.substring(rel_dots, rel_dots + 1) == ".":
-                    rel_dots = rel_dots + 1
-                val rel_tail = imp.module.substring(rel_dots)
-                # Drop the module's own last segment, plus one more per extra dot.
-                var rel_segs = rel_base.split(".")
-                var rel_keep = rel_segs.len() - rel_dots
-                if rel_keep < 0:
-                    rel_keep = 0
-                var rel_pkg = ""
-                var rel_si = 0
-                while rel_si < rel_keep:
-                    if rel_si > 0:
-                        rel_pkg = rel_pkg + "."
-                    rel_pkg = rel_pkg + rel_segs[rel_si]
-                    rel_si = rel_si + 1
-                val rel_abs = if rel_pkg == "": rel_tail else: rel_pkg + "." + rel_tail
-                if self.module_surfaces.index_by_name.contains_key(rel_abs):
-                    imported_key = rel_abs
-                    resolved_module_name = rel_abs
-            if imported_key == "":
-                # Canonical-key fallbacks (see resolve_module_key): closure
-                # files register ONLY under path-derived names, keeping
-                # resolved_module_name canonical so call symbols match the
-                # definition's mangled name.
-                val fb_key = self.resolve_module_key(imp.module)
-                if fb_key != "" and self.module_surfaces.index_by_name.contains_key(fb_key):
-                    imported_key = fb_key
-                    resolved_module_name = fb_key
-            if imported_key == "" and (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
-                eprint("[import-miss] importer={module.name} module={imp.module}")
-            if imported_key != "":
-                val imported_index = hir_module_surface_index(self.module_surfaces, imported_key)
-                if imported_index < 0:
-                    self.error("missing module surface for {imported_key}", imp.span)
-                    import_idx = import_idx + 1
-                    continue
+            val resolved_module_name = imported_key
+            if imported_index >= self.module_surfaces.surfaces.len() or
+               (imported_index >= 0 and imported_key == ""):
+                self.error(
+                    "invalid frozen import target for `{authored_module_name}`",
+                    Span.empty())
+                return
+            if imported_index < 0:
+                if (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
+                    eprint("[import-miss] importer={module.name} module={authored_module_name}")
+            else:
                 val imported_surface = self.module_surfaces.surfaces[imported_index]
-                if imp.items.len() == 0:
-                    self.register_glob_imported_symbols(imported_surface, resolved_module_name, imp.span)
+                if item_count == 0:
+                    self.register_glob_imported_symbols(
+                        imported_surface, resolved_module_name, Span.empty())
                     # A module-only import also provides a namespace for
                     # qualified calls such as `module.function()`. Its owner
                     # must match the retained surface identity used by the
                     # imported callables and emitted definitions. The lookup
                     # key may be only a canonical alias of that surface.
-                    val import_path_parts = imp.module.split(".")
+                    val import_path_parts = authored_module_name.split(".")
                     if import_path_parts.len() > 0:
                         val module_alias = import_path_parts[import_path_parts.len() - 1]
                         # Avoid Option<SymbolId> at this staged-native boundary.
@@ -308,13 +307,16 @@ impl HirLowering:
                         # Option and suppress the definition, leaving a later
                         # `module.member` receiver to decay into GlobalLoad.
                         if module_alias != "" and not self.symbols.lookup_or_invalid(module_alias).is_valid():
-                            self.symbols.define(module_alias, SymbolKind.Module, nil, imp.span, Visibility.Private, false, Some(imported_surface.module_name))
+                            self.symbols.define(module_alias, SymbolKind.Module, nil, Span.empty(), Visibility.Private, false, Some(imported_surface.module_name))
                 else:
                     var item_idx = 0
-                    while item_idx < imp.items.len():
-                        val item = imp.items[item_idx]
-                        val local_name = if item.has_alias: item.alias else: item.name
-                        self.register_imported_symbol(imported_surface, resolved_module_name, item.name, local_name, imp.span, true)
+                    while item_idx < item_count:
+                        val flat_item_index = item_offset + item_idx
+                        val item_name = current_surface.import_route_item_names[flat_item_index]
+                        val local_name = current_surface.import_route_item_local_names[flat_item_index]
+                        self.register_imported_symbol(
+                            imported_surface, resolved_module_name, item_name,
+                            local_name, Span.empty(), true)
                         item_idx = item_idx + 1
             import_idx = import_idx + 1
 
