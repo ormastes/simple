@@ -30,6 +30,14 @@ fingerprint_head() {
     return "$_rc"
 }
 
+hash_file() {
+    sha256sum -- "$1" 2>/dev/null | awk '{print $1}'
+}
+
+evidence_hash() {
+    case "$1" in /*) hash_file "$1" ;; *) hash_file "$ROOT/$1" ;; esac
+}
+
 write_ledger() {
     _rows=$1
     _fp=$2
@@ -39,17 +47,17 @@ write_ledger() {
     {
         echo '# Updated by scripts/check/check-bootstrap-must-pass.shs. TODO is visible debt, never PASS.'
         echo 'must_check_ledger:'
-        echo '  schema: "simple.must-check-ledger/v1"'
+        echo '  schema: "simple.must-check-ledger/v2"'
         echo "  source_fingerprint: \"$_fp\""
         echo "  completed_at_utc: \"$_at\""
-        echo 'must_check_results |id, status, passed_at_utc, command, evidence|'
+        echo 'must_check_results |id, status, passed_at_utc, command, evidence, evidence_sha256|'
         printf '%s\n' "$_rows"
     } > "$_tmp"
     mv "$_tmp" "$LEDGER"
 }
 
 manifest_rows() {
-    awk '/^[[:space:]]+[a-z0-9][a-z0-9-]*,[[:space:]]*(push|bootstrap),/ {print}' "$MANIFEST"
+    awk '/^[[:space:]]+[a-z0-9][a-z0-9-]*,[[:space:]]*bootstrap,/ {print}' "$MANIFEST"
 }
 
 row_value() {
@@ -79,12 +87,21 @@ validate_compiler_phases() {
        tail -n 1 "$_stage123_out" | grep -Eq '^PASS — [1-9][0-9]* assertion\(s\) checked, stage3 self-verified at .+' && \
        [ "$_stage4_rc" -eq 0 ] && grep -qx 'post_bootstrap_stage4_acceptance=true' "$_stage4_out"; then
         _stage3_provenance=$(tail -n 1 "$_stage123_out" | sed 's/^PASS — [1-9][0-9]* assertion(s) checked, stage3 self-verified at //')
+        _manifest_field() {
+            [ "$(grep -c "^$1=" "$_stage3_provenance" 2>/dev/null || true)" -eq 1 ] || return 1
+            sed -n "s/^$1=//p" "$_stage3_provenance"
+        }
+        _stage1_evidence=$(_manifest_field seed_inputs_stamp_path) || return 1
+        _stage2_evidence=$(_manifest_field stage2_admission_receipt_path) || return 1
+        for _phase_evidence in "$_stage1_evidence" "$_stage2_evidence" "$_stage3_provenance" "$STAGE4_PROVENANCE"; do
+            [ -f "$_phase_evidence" ] && [ ! -L "$_phase_evidence" ] || return 1
+        done
         printf '%s\n' compiler-stage1=pass compiler-stage2=pass compiler-stage3=pass compiler-stage4=pass
         printf '%s\n' \
-            "compiler-stage1-evidence=$_stage3_provenance#seed" \
-            "compiler-stage2-evidence=$_stage3_provenance#stage2" \
-            "compiler-stage3-evidence=$_stage3_provenance#stage3" \
-            "compiler-stage4-evidence=$STAGE4_PROVENANCE#post-bootstrap-stage4"
+            "compiler-stage1-evidence=$_stage1_evidence" \
+            "compiler-stage2-evidence=$_stage2_evidence" \
+            "compiler-stage3-evidence=$_stage3_provenance" \
+            "compiler-stage4-evidence=$STAGE4_PROVENANCE"
         rm -f "$_stage123_out" "$_stage4_out"
         return 0
     fi
@@ -107,11 +124,22 @@ run_automated_gate() {
     (cd "$ROOT" && sh -c "$_gate_command")
 }
 
+accepted_gate_verdict() {
+    _log=$1
+    _last=$(awk 'NF { line=$0 } END { print line }' "$_log")
+    printf '%s\n' "$_last" | grep -Eq '(^|: )PASS([[:space:]]|$)'
+}
+
 if [ "$MODE" = selftest ]; then
     _tmp=$(mktemp -d) || exit 2
     trap 'rm -rf "$_tmp"' EXIT INT TERM
+    printf '%s\n' 'setup PASS marker' 'STATUS: FAIL final-verdict' > "$_tmp/incidental-pass.log"
+    printf '%s\n' 'setup output' 'STATUS: PASS exact-verdict' > "$_tmp/exact-pass.log"
+    ! accepted_gate_verdict "$_tmp/incidental-pass.log" || exit 1
+    accepted_gate_verdict "$_tmp/exact-pass.log" || exit 1
+    for _phase in 1 2 3 4; do printf 'phase%s evidence\n' "$_phase" > "$_tmp/phase$_phase.receipt"; done
     printf '%s\n' '#!/bin/sh' 'printf "%s\n" compiler-stage1=pass compiler-stage2=pass compiler-stage3=pass compiler-stage4=pass' > "$_tmp/phase-validator"
-    printf '%s\n' 'printf "%s\n" compiler-stage1-evidence=selftest#seed compiler-stage2-evidence=selftest#stage2 compiler-stage3-evidence=selftest#stage3 compiler-stage4-evidence=selftest#stage4' >> "$_tmp/phase-validator"
+    printf '%s\n' "printf '%s\\n' compiler-stage1-evidence=$_tmp/phase1.receipt compiler-stage2-evidence=$_tmp/phase2.receipt compiler-stage3-evidence=$_tmp/phase3.receipt compiler-stage4-evidence=$_tmp/phase4.receipt" >> "$_tmp/phase-validator"
     printf '%s\n' '#!/bin/sh' 'echo "STATUS: PASS self-test automated gate"' > "$_tmp/gate-runner"
     chmod +x "$_tmp/phase-validator"
     chmod +x "$_tmp/gate-runner"
@@ -120,6 +148,7 @@ if [ "$MODE" = selftest ]; then
     grep -q 'compiler-stage2, pass' "$_tmp/ledger.sdn" || exit 1
     grep -q 'compiler-stage3, pass' "$_tmp/ledger.sdn" || exit 1
     grep -q 'compiler-stage4, pass' "$_tmp/ledger.sdn" || exit 1
+    ! grep -q 'push-conflict-tree,' "$_tmp/ledger.sdn" || exit 1
     grep -q 'rules-full, pass' "$_tmp/ledger.sdn" || exit 1
     grep -q 'caret-multi-manager-launch, pass' "$_tmp/ledger.sdn" || exit 1
     grep -q 'caret-smux-multi-launch, todo' "$_tmp/ledger.sdn" || exit 1
@@ -196,20 +225,23 @@ while IFS=, read -r _id _tier _blocking _gate_mode _command _description; do
     _status=todo
     _passed_at=never
     _evidence='not run'
+    _evidence_sha=never
     if [ "$MODE" = record-bootstrap ] && { [ "$_id" = compiler-stage1 ] || [ "$_id" = compiler-stage2 ] || [ "$_id" = compiler-stage3 ] || [ "$_id" = compiler-stage4 ]; }; then
         _status=pass; _passed_at=$_at
         _evidence=$(printf '%s\n' "$_phase_results" | sed -n "s/^$_id-evidence=//p")
         [ -n "$_evidence" ] || { echo "bootstrap-must-check: FAIL — missing $_id evidence reference" >&2; exit 1; }
         case "$_evidence" in "$ROOT/"*) _evidence=${_evidence#"$ROOT/"} ;; esac
+        _evidence_sha=$(evidence_hash "$_evidence") || exit 1
     elif { [ "$MODE" = run ] || [ "$MODE" = record-bootstrap ]; } && [ "$_gate_mode" = automated ]; then
         _out="$_evidence_dir/${_id}.log.tmp.$$"
         _final_out="$_evidence_dir/${_id}.log"
         run_automated_gate "$_command" >"$_out" 2>&1
         _rc=$?
-        if [ "$_rc" -eq 0 ] && tail -n 8 "$_out" | grep -q 'PASS'; then
+        if [ "$_rc" -eq 0 ] && accepted_gate_verdict "$_out"; then
             mv "$_out" "$_final_out"
             _status=pass; _passed_at=$_at; _evidence="$_final_out"
             case "$_evidence" in "$ROOT/"*) _evidence=${_evidence#"$ROOT/"} ;; esac
+            _evidence_sha=$(evidence_hash "$_evidence") || exit 1
         else
             mv "$_out" "$_final_out"
             _status=fail; _evidence="exit $_rc without accepted PASS at $_at"; _failed=1
@@ -219,11 +251,12 @@ while IFS=, read -r _id _tier _blocking _gate_mode _command _description; do
         if [ "$_carry_pass" -eq 1 ] && [ "$_old" = pass ]; then
             _status=pass
             _passed_at=$(row_value "$_id" 3)
+            _evidence_sha=$(row_value "$_id" 6)
         fi
         _evidence=$(row_value "$_id" 5)
         [ -n "$_evidence" ] || _evidence='pending required evidence'
     fi
-    printf '    %s, %s, %s, "%s", "%s"\n' "$_id" "$_status" "$_passed_at" "$_command" "$_evidence" >> "$_rows_tmp"
+    printf '    %s, %s, %s, "%s", "%s", "%s"\n' "$_id" "$_status" "$_passed_at" "$_command" "$_evidence" "$_evidence_sha" >> "$_rows_tmp"
 done < "$_manifest_tmp"
 
 write_ledger "$(cat "$_rows_tmp")" "$_fp" "$_at"

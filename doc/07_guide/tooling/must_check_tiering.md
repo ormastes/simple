@@ -8,10 +8,11 @@ The repository has two mandatory-check tiers:
 - `scripts/check/check-bootstrap-must-pass.shs` owns expensive compiler,
   native-build, full-test, device, QEMU, and benchmark evidence. It updates
   `doc/08_tracking/check/must_check_db.sdn` atomically. Each PASS retains its
-  own `passed_at_utc` and evidence reference; automated logs live under
+  own `passed_at_utc`, evidence reference, and evidence SHA-256; automated logs live under
   `build/must-check/<source-fingerprint>/`. TODO/blocked rows use `never`.
 
-The registry is `config/check/must_check_gates.sdn`. A `todo` or `blocked` row
+The registry is `config/check/must_check_gates.sdn`; it declares both bounded
+push commands and bootstrap evidence rows. A `todo` or `blocked` row
 is visible unfinished work and is never counted as pass. Only rows explicitly
 marked `push_blocking: true` block an interactive push; all four compiler phase
 rows are push-blocking.
@@ -20,10 +21,10 @@ rows are push-blocking.
 
 A bootstrap completion does not promote rows merely because control reached
 the end of the wrapper. The recorder first runs the Stage 2/3 full-provenance
-verifier and the exact Stage 4 post-bootstrap SSpec. These bind Stage 1 runtime
-authority, Stage 2 and Stage 3 sanity/admission receipts, and the Stage 4 binary
-and provenance sidecar. Missing or failed evidence leaves the ledger unchanged
-and fails the bootstrap.
+verifier and the exact Stage 4 post-bootstrap SSpec. Stage 1 records the seed
+input stamp, Stage 2 its admission receipt, Stage 3 its provenance manifest,
+and Stage 4 its provenance sidecar as separate hash-bound evidence. Missing or
+failed evidence leaves the ledger unchanged and fails the bootstrap.
 
 The bootstrap wrapper supplies the output directory, exact Stage 4 binary, and
 its provenance file. The completion recorder validates all four phases and then
@@ -55,7 +56,8 @@ provide a generation endpoint that Caret can call. The independent
 `local_torch` provider is not accepted as Slang evidence.
 
 Do not hand-edit a TODO to `pass`; promotion must come from its bootstrap-owned
-checker or retained receipt validator. PASS may carry forward only while the
+checker or retained receipt validator. The push consumer opens and rehashes the
+recorded evidence, so a missing or modified log/receipt rejects the push. PASS may carry forward only while the
 source fingerprint is unchanged; a changed fingerprint resets unrerun rows to
 TODO instead of laundering stale evidence into the new source state.
 

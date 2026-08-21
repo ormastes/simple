@@ -29,8 +29,12 @@ fi
 # Exercise the real pre-push ref-input path in an isolated committed fixture.
 fixture=$(mktemp -d)
 trap 'rm -rf "$fixture"' EXIT INT TERM
-mkdir -p "$fixture/scripts/check" "$fixture/config/check" "$fixture/doc/08_tracking/check"
+mkdir -p "$fixture/scripts/check" "$fixture/scripts/hooks" "$fixture/config/check" "$fixture/doc/08_tracking/check"
 cp "$PUSH" "$fixture/scripts/check/check-push-must-pass.shs"
+cp "$HOOK" "$fixture/scripts/check/pre-push-conflict-tree-guard.shs"
+cp "$ROOT/scripts/hooks/pre-push" "$fixture/scripts/hooks/pre-push"
+printf '%s\n' '#!/bin/sh' 'echo "check-hook-installation: PASS — fixture"' > "$fixture/scripts/check/check-hook-installation.shs"
+chmod +x "$fixture/scripts/check/check-hook-installation.shs" "$fixture/scripts/hooks/pre-push"
 for guard in check-no-conflict-tree-push check-tree-size-push check-no-conflict-markers-push check-rules-sdl; do
     printf '%s\n' '#!/bin/sh' 'echo "PASS — fixture guard"' > "$fixture/scripts/check/$guard.shs"
     chmod +x "$fixture/scripts/check/$guard.shs"
@@ -38,14 +42,21 @@ done
 printf '%s\n' \
     'must_check_gates |id, tier, push_blocking, mode, command, description|' \
     '    compiler-stage1, bootstrap, true, receipt, "", "fixture"' \
+    '    push-conflict-tree, push, true, range, "sh scripts/check/check-no-conflict-tree-push.shs", "fixture"' \
+    '    push-tree-size, push, true, range, "sh scripts/check/check-tree-size-push.shs", "fixture"' \
+    '    push-conflict-markers, push, true, range, "sh scripts/check/check-no-conflict-markers-push.shs", "fixture"' \
+    '    push-rules-quick, push, true, ref, "sh scripts/check/check-rules-sdl.shs --group quick --ref", "fixture"' \
     > "$fixture/config/check/must_check_gates.sdn"
 printf '%s\n' \
     'must_check_ledger:' \
-    '  schema: "simple.must-check-ledger/v1"' \
+    '  schema: "simple.must-check-ledger/v2"' \
     '  source_fingerprint: "pending"' \
-    'must_check_results |id, status, passed_at_utc, command, evidence|' \
-    '    compiler-stage1, pass, 2000-01-01T00:00:00Z, "fixture", "fixture"' \
+    'must_check_results |id, status, passed_at_utc, command, evidence, evidence_sha256|' \
     > "$fixture/doc/08_tracking/check/must_check_db.sdn"
+mkdir -p "$fixture/build"
+printf '%s\n' 'fixture evidence' > "$fixture/build/compiler-stage1.receipt"
+fixture_evidence_sha=$(sha256sum "$fixture/build/compiler-stage1.receipt" | awk '{print $1}')
+printf '    compiler-stage1, pass, 2000-01-01T00:00:00Z, "", "build/compiler-stage1.receipt", "%s"\n' "$fixture_evidence_sha" >> "$fixture/doc/08_tracking/check/must_check_db.sdn"
 git -C "$fixture" init -q
 git -C "$fixture" config user.name must-check-test
 git -C "$fixture" config user.email must-check-test@example.invalid
@@ -63,4 +74,9 @@ printf 'refs/heads/main %s refs/heads/main %s\n' "$tip" "$base" | MUST_CHECK_ROO
 ref_elapsed=$(($(date +%s) - start))
 [ "$ref_elapsed" -le 10 ] || { echo "FAIL: push must-check ref path took ${ref_elapsed}s"; exit 1; }
 
-echo "PASS: must-check tiering contract selftest=${elapsed}s ref-path=${ref_elapsed}s"
+start=$(date +%s)
+(cd "$fixture" && printf 'refs/heads/main %s refs/heads/main %s\n' "$tip" "$base" | sh scripts/hooks/pre-push origin fixture >/dev/null)
+hook_elapsed=$(($(date +%s) - start))
+[ "$hook_elapsed" -le 10 ] || { echo "FAIL: installed push hook path took ${hook_elapsed}s"; exit 1; }
+
+echo "PASS: must-check tiering contract selftest=${elapsed}s ref-path=${ref_elapsed}s installed-hook=${hook_elapsed}s"
