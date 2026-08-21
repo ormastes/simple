@@ -11,10 +11,10 @@ use simple_runtime::RuntimeValue;
 use crate::codegen::cranelift_sffi;
 
 /// Helper to convert Value::Str to RuntimeValue for SFFI
-fn value_to_runtime_string(val: &Value) -> RuntimeValue {
+fn value_to_runtime_string(val: &Value, symbol: &str) -> Result<RuntimeValue, CompileError> {
     match val {
-        Value::Str(s) => simple_runtime::value::rt_string_new(s.as_ptr(), s.len() as u64),
-        _ => RuntimeValue::NIL,
+        Value::Str(s) => Ok(simple_runtime::value::rt_string_new(s.as_ptr(), s.len() as u64)),
+        _ => Err(CompileError::runtime(format!("{symbol}: expected text argument"))),
     }
 }
 
@@ -97,9 +97,11 @@ unsafe fn interpreter_cranelift_arg_handles(ptr: i64, len: i64) -> Result<Vec<i6
 /// Returns: module handle (i64)
 pub fn rt_cranelift_module_new(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() < 2 {
-        return Ok(Value::Int(0));
+        return Err(CompileError::runtime(
+            "rt_cranelift_module_new: expected 2 arguments".to_string(),
+        ));
     }
-    let name = value_to_runtime_string(&args[0]);
+    let name = value_to_runtime_string(&args[0], "rt_cranelift_module_new")?;
     let target = value_to_i64(&args[1]);
     let handle = cranelift_sffi::rt_cranelift_module_new(name, target);
     Ok(Value::Int(handle))
@@ -171,10 +173,12 @@ pub fn rt_cranelift_free_module(args: &[Value]) -> Result<Value, CompileError> {
 /// Args: module (i64), path (text)
 pub fn rt_cranelift_emit_object(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() < 2 {
-        return Ok(Value::Bool(false));
+        return Err(CompileError::runtime(
+            "rt_cranelift_emit_object: expected 2 arguments".to_string(),
+        ));
     }
     let module = value_to_i64(&args[0]);
-    let path = value_to_runtime_string(&args[1]);
+    let path = value_to_runtime_string(&args[1], "rt_cranelift_emit_object")?;
     let result = unsafe { cranelift_sffi::rt_cranelift_emit_object(module, path) };
     Ok(Value::Bool(result))
 }
@@ -843,9 +847,9 @@ pub fn rt_cranelift_call_function_ptr(args: &[Value]) -> Result<Value, CompileEr
 /// Execute shell command
 pub fn rt_exec(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {
-        return Ok(Value::Int(-1));
+        return Err(CompileError::runtime("rt_exec: expected 1 argument".to_string()));
     }
-    let cmd = value_to_runtime_string(&args[0]);
+    let cmd = value_to_runtime_string(&args[0], "rt_exec")?;
     let result = simple_runtime::value::cli_sffi::rt_exec(cmd);
     Ok(Value::Int(result as i64))
 }
@@ -853,9 +857,9 @@ pub fn rt_exec(args: &[Value]) -> Result<Value, CompileError> {
 /// Get file hash
 pub fn rt_file_hash(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {
-        return Ok(Value::text(String::new()));
+        return Err(CompileError::runtime("rt_file_hash: expected 1 argument".to_string()));
     }
-    let path = value_to_runtime_string(&args[0]);
+    let path = value_to_runtime_string(&args[0], "rt_file_hash")?;
     let result = simple_runtime::value::cli_sffi::rt_file_hash(path);
     runtime_string_to_value(result, "rt_file_hash")
 }
@@ -863,10 +867,10 @@ pub fn rt_file_hash(args: &[Value]) -> Result<Value, CompileError> {
 /// Write file
 pub fn rt_write_file(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() < 2 {
-        return Ok(Value::Bool(false));
+        return Err(CompileError::runtime("rt_write_file: expected 2 arguments".to_string()));
     }
-    let path = value_to_runtime_string(&args[0]);
-    let content = value_to_runtime_string(&args[1]);
+    let path = value_to_runtime_string(&args[0], "rt_write_file")?;
+    let content = value_to_runtime_string(&args[1], "rt_write_file")?;
     let result = simple_runtime::value::cli_sffi::rt_write_file(path, content);
     Ok(Value::Bool(result))
 }
@@ -893,6 +897,18 @@ mod tests {
     #[test]
     fn interpreter_cranelift_emit_object_raw_validates_arity() {
         assert_eq!(rt_cranelift_emit_object_raw(&[]).unwrap(), Value::Bool(false));
+    }
+
+    #[test]
+    fn text_sffi_rejects_missing_or_wrong_typed_arguments() {
+        assert!(super::rt_cranelift_module_new(&[]).is_err());
+        assert!(super::rt_cranelift_module_new(&[Value::Int(1), Value::Int(0)]).is_err());
+        assert!(super::rt_exec(&[]).is_err());
+        assert!(super::rt_exec(&[Value::Nil]).is_err());
+        assert!(super::rt_file_hash(&[]).is_err());
+        assert!(super::rt_file_hash(&[Value::Bool(false)]).is_err());
+        assert!(super::rt_write_file(&[Value::text("path")]).is_err());
+        assert!(super::rt_write_file(&[Value::text("path"), Value::Int(0)]).is_err());
     }
 
     #[test]

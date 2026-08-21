@@ -227,6 +227,16 @@ direct RustCrypto operation and output allocation. Focused tests cover
 SHA-256/384/512 vectors plus malformed argument rejection; their test decoder
 now accepts the canonical packed byte-array representation.
 
+The shared Cranelift/bootstrap text converter returned `RuntimeValue::NIL` for
+every wrong-typed argument. That allowed malformed module names, object paths,
+shell commands, hash paths, and file contents to reach foreign providers as a
+null runtime string; their missing-argument branches separately fabricated
+zero, false, `-1`, or empty text. The common converter and these text-bearing
+handlers now return typed runtime errors. Valid calls still perform one type
+match and the same direct runtime call, with no lookup, copy, retry, or added
+allocation. Five focused Cranelift SFFI tests pass, including malformed text
+arguments and null-positive-length foreign result validation.
+
 All 15 remaining legacy sign/verify declarations in the canonical signature
 module are now explicitly `unsafe(ffi)` and document their sentinel contract:
 verification collapses malformed bridge input into `0`, while signing may
