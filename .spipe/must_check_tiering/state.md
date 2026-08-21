@@ -203,3 +203,13 @@ implementation-blocked-by-bootstrap-authority
   emits aligned scalar item offsets/counts/source/local names, and both callable
   dependency and re-export traversal consume only that projection. One final
   bounded bootstrap cycle remains.
+- verify-fail: Cycle 3 passed fresh Stage-2 admission and replay, then Stage 3
+  failed with 1,347 HIR fatals across 200 modules (six unresolved types and
+  seven unresolved names). Stage 4 was unavailable and seed fallback was
+  refused. No fourth cycle is permitted in this session.
+- blocker-correction: Primary import registration and private facade/glob
+  expansion in `module_import_resolution.spl` still read nested
+  `ParserImport`/`ImportItem` aggregates before the two converted consumers.
+  The exact owner, evidence, regression requirements, and next-session unblock
+  are recorded in
+  `stage3_primary_import_resolution_aggregate_corruption_2026-08-21.md`.
