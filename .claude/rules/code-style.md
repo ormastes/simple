@@ -8,6 +8,7 @@ alwaysApply: true
 - **Logs are NOT unused code** — never delete debug/probe/perf log inserts during cleanup; convert them to level-gated logs (default off). Delete only one-off non-reusable dumps. See doc/07_guide/infra/logging/log_retention_policy.md
 - **DO NOT ADD REPORT TO GIT** unless requested
 - **NEVER convert TODO/FIXME to NOTE** - implement or delete entirely
+- **Never mutate a collection through a temporary alias.** Simple's value semantics are copy-on-write, so `val t = self.table; t.push(x); self.table = t`, `self.xs = f(self.xs, v)`, and `.keys()`/`.values()` inside a loop body each deep-copy the WHOLE collection per write — O(n) per operation, invisible on small fixtures, catastrophic at real scale. Mutate through the single owner (`self.table.push(x)`, `self.a[i].b[k] = v`) and hoist `.keys()` above the loop. Ratcheted by `sh scripts/check/check-cow-alias-hotpath.shs`; analysis in `doc/08_tracking/bug/value_semantics_cow_alias_perf_class_2026-08-21.md`.
 - For MCP/LSP/tool-server work: review startup path, hot request paths, cache strategy, startup/latency/RSS targets
 - Production wrappers should execute cached compiled artifacts, not raw source
 - Verify perf-sensitive tooling with warm startup time, request latency, and max RSS

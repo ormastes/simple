@@ -1,0 +1,258 @@
+#!/bin/sh
+# check-cow-alias-hotpath.shs — ratchet on COW-alias hot-path shapes in Simple
+# compiler source.
+#
+# Verdict is ALWAYS the last stdout line: PASS exit 0 / FAIL exit 1 / ERROR exit 2.
+# A run that scanned 0 files is ERROR, never a pass.
+#
+# WHY THIS EXISTS
+# ---------------
+# Simple has value semantics implemented as copy-on-write: a collection is an
+# Arc-backed container and a mutation goes through Arc::make_mut, which
+# deep-copies the WHOLE collection whenever the Arc is aliased (strong_count > 1).
+# That is correct — two live bindings must not observe each other's writes — but
+# it is catastrophic when the "alias" is an accidental temporary the code did not
+# need. Three textual shapes create exactly that:
+#
+#   ROUNDTRIP  val t = self.table ... t.push(x) ... self.table = t
+#              The local and the field hold the same Arc across the write, so
+#              every single push deep-copies the whole table: O(n) per write,
+#              O(n^2) overall.
+#
+#   BYVALUE    self.xs = push_into(self.xs, v)
+#              The field still holds the Arc while the helper's parameter binding
+#              holds it too — same aliasing, same O(n) per call.
+#
+#   KEYSINLOOP .keys() / .values() inside a while/for body
+#              Materializes a fresh vector of every key on each iteration: O(n)
+#              per iteration, O(n^2) per loop. Hoist it above the loop.
+#
+# These are invisible on small fixtures (a 5-element table copies in nanoseconds)
+# and catastrophic on the real 667-module closure. Counters find them at runtime;
+# this script finds them before they land.
+#
+# This is a RATCHET, not a hard zero-bar: the tree already carries offenders, so
+# the current population is frozen in the baseline and any push that ADDS one
+# fails. A baselined offender that no longer exists is a STALE baseline and also
+# fails — a baseline that no longer describes the tree is how a ratchet silently
+# stops ratcheting.
+#
+# Deliberate-update path: --generate-baseline. For REVIEWED updates only. Do not
+# "fix" a FAIL with it without reading the diff.
+#
+# Usage: sh scripts/check/check-cow-alias-hotpath.shs [--root DIR] [--selftest-only]
+#                                                     [--list] [--generate-baseline]
+
+set -u
+
+ROOT="$(pwd)"
+SELFTEST_ONLY=0
+LIST=0
+GENERATE=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --root) shift; ROOT="${1:-}" ;;
+    --selftest-only) SELFTEST_ONLY=1 ;;
+    --list) LIST=1 ;;
+    --generate-baseline) GENERATE=1 ;;
+    *) echo "ERROR — unknown argument: $1"; exit 2 ;;
+  esac
+  shift
+done
+
+BASELINE="$ROOT/scripts/check/cow_alias_hotpath_baseline.txt"
+
+# scan <dir> -> stdout: one "KIND<TAB>relpath<TAB>detail" line per offender,
+# sorted. Also writes the scanned-file count to $COUNT_FILE.
+scan() {
+  s_root="$1"
+  s_count=0
+  for f in $(find "$s_root" -name '*.spl' -type f 2>/dev/null | sort); do
+    s_count=$((s_count + 1))
+    rel="${f#"$s_root"/}"
+    awk -v rel="$rel" '
+      # Function boundary: a top-level "fn "/"pub fn " resets the per-function
+      # state, so a `val t = self.x` in one function cannot pair with a
+      # `self.x = t` in the next.
+      /^[[:space:]]*(pub[[:space:]]+)?fn[[:space:]]/ {
+        delete taken; delete mutated; fname = $0
+        sub(/^[[:space:]]*(pub[[:space:]]+)?fn[[:space:]]+/, "", fname)
+        sub(/[(:].*$/, "", fname)
+        # loop depth resets with the function
+        next
+      }
+      # ROUNDTRIP part 1: val/var X = self.FIELD
+      match($0, /^[[:space:]]*(val|var)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*(:[^=]*)?=[[:space:]]*self\.[A-Za-z_][A-Za-z0-9_]*[[:space:]]*$/) {
+        line = $0
+        lhs = line; sub(/^[[:space:]]*(val|var)[[:space:]]+/, "", lhs); sub(/[[:space:]:=].*$/, "", lhs)
+        rhs = line; sub(/^.*self\./, "", rhs); sub(/[[:space:]]*$/, "", rhs)
+        taken[lhs] = rhs; takenline[lhs] = NR
+        next
+      }
+      # ROUNDTRIP part 2: X.push( / X[..] = / X.set( / X.insert(
+      {
+        for (v in taken) {
+          if ($0 ~ ("(^|[^A-Za-z0-9_])" v "\\.(push|set|insert|add|append|remove)\\(") ||
+              $0 ~ ("(^|[^A-Za-z0-9_])" v "\\[[^]]*\\][[:space:]]*=")) {
+            mutated[v] = 1
+          }
+        }
+      }
+      # ROUNDTRIP part 3: self.FIELD = X  (store-back closes the round trip)
+      match($0, /^[[:space:]]*self\.[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*$/) {
+        f2 = $0; sub(/^[[:space:]]*self\./, "", f2); sub(/[[:space:]]*=.*$/, "", f2)
+        r2 = $0; sub(/^.*=[[:space:]]*/, "", r2); sub(/[[:space:]]*$/, "", r2)
+        if ((r2 in taken) && taken[r2] == f2 && (r2 in mutated)) {
+          printf "ROUNDTRIP\t%s\t%s:%d:%s.%s\n", rel, fname, takenline[r2], "self", f2
+          delete taken[r2]; delete mutated[r2]
+        }
+        next
+      }
+      # BYVALUE: self.FIELD = helper(self.FIELD, ...)
+      match($0, /^[[:space:]]*self\.[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=[[:space:]]*[A-Za-z_][A-Za-z0-9_.]*\([[:space:]]*self\./) {
+        f3 = $0; sub(/^[[:space:]]*self\./, "", f3); sub(/[[:space:]]*=.*$/, "", f3)
+        a3 = $0; sub(/^.*\([[:space:]]*self\./, "", a3); sub(/[^A-Za-z0-9_].*$/, "", a3)
+        if (f3 == a3) printf "BYVALUE\t%s\t%s:%d:self.%s\n", rel, fname, NR, f3
+        next
+      }
+      # KEYSINLOOP: .keys()/.values() lexically inside a while/for body.
+      # Indentation-scoped: the loop header records its indent, and any deeper
+      # line until the indent returns is inside the body.
+      {
+        ind = match($0, /[^ ]/); if (ind == 0) ind = 999
+        if (loopind > 0 && ind <= loopind) loopind = 0
+        if ($0 ~ /^[[:space:]]*(while|for)[[:space:]].*:[[:space:]]*$/) { loopind = ind; next }
+        if (loopind > 0 && $0 ~ /\.(keys|values)\(\)/ && $0 !~ /^[[:space:]]*#/) {
+          printf "KEYSINLOOP\t%s\t%s:%d\n", rel, fname, NR
+        }
+      }
+    ' "$f"
+  done
+  echo "$s_count" > "$COUNT_FILE"
+}
+
+# ---------------------------------------------------------------- selftest
+selftest() {
+  st_dir="$(mktemp -d)"
+  trap 'rm -rf "$st_dir"' EXIT
+  mkdir -p "$st_dir/src"
+
+  cat > "$st_dir/src/roundtrip.spl" <<'EOF'
+fn add_one(self, v: i64):
+    val t = self.table
+    t.push(v)
+    self.table = t
+EOF
+  cat > "$st_dir/src/byvalue.spl" <<'EOF'
+fn add_two(self, v: i64):
+    self.xs = push_into(self.xs, v)
+EOF
+  cat > "$st_dir/src/keysinloop.spl" <<'EOF'
+fn walk(self):
+    var i = 0
+    while i < 10:
+        val ks = self.table.keys()
+        i = i + 1
+EOF
+  cat > "$st_dir/src/clean.spl" <<'EOF'
+fn add_three(self, v: i64):
+    self.table.push(v)
+
+fn walk2(self):
+    val ks = self.table.keys()
+    for k in ks:
+        print(k)
+EOF
+  # Cross-function: a take in one function and a store-back in the NEXT must
+  # not pair up into a false offender.
+  cat > "$st_dir/src/crossfn.spl" <<'EOF'
+fn take_only(self):
+    val t = self.table
+    t.push(1)
+
+fn store_only(self, t: [i64]):
+    self.table = t
+EOF
+
+  COUNT_FILE="$st_dir/count"
+  st_out="$(scan "$st_dir")"
+  st_files="$(cat "$COUNT_FILE")"
+
+  st_fail=0
+  echo "$st_out" | grep -q "^ROUNDTRIP	src/roundtrip.spl" || { echo "selftest: roundtrip fixture not flagged"; st_fail=1; }
+  echo "$st_out" | grep -q "^BYVALUE	src/byvalue.spl"     || { echo "selftest: by-value fixture not flagged"; st_fail=1; }
+  echo "$st_out" | grep -q "^KEYSINLOOP	src/keysinloop.spl" || { echo "selftest: keys-in-loop fixture not flagged"; st_fail=1; }
+  echo "$st_out" | grep -q "	src/clean.spl"              && { echo "selftest: clean fixture must not be flagged"; st_fail=1; }
+  echo "$st_out" | grep -q "	src/crossfn.spl"            && { echo "selftest: cross-function pair must not be flagged"; st_fail=1; }
+  [ "$st_files" -eq 5 ] || { echo "selftest: expected 5 scanned files, got $st_files"; st_fail=1; }
+
+  # Empty tree must scan 0 files, so the caller is forced to ERROR.
+  st_empty="$(mktemp -d)"
+  COUNT_FILE="$st_empty/count"
+  scan "$st_empty" >/dev/null
+  [ "$(cat "$COUNT_FILE")" -eq 0 ] || { echo "selftest: empty tree must scan 0 files"; st_fail=1; }
+  rm -rf "$st_empty"
+
+  rm -rf "$st_dir"; trap - EXIT
+  return $st_fail
+}
+
+if ! selftest; then
+  echo "ERROR — nothing was checked (selftest failed)"
+  exit 2
+fi
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+  echo "PASS — selftest only, 6 fixture(s) checked"
+  exit 0
+fi
+
+# ---------------------------------------------------------------- real scan
+SRC="$ROOT/src/compiler"
+if [ ! -d "$SRC" ]; then
+  echo "ERROR — nothing was checked (no $SRC)"
+  exit 2
+fi
+
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+COUNT_FILE="$TMP/count"
+scan "$SRC" | sort > "$TMP/current"
+FILES="$(cat "$COUNT_FILE")"
+
+if [ "$FILES" -eq 0 ]; then
+  echo "ERROR — nothing was checked (0 .spl files under $SRC)"
+  exit 2
+fi
+
+CURRENT_N="$(wc -l < "$TMP/current" | tr -d ' ')"
+
+if [ "$LIST" -eq 1 ]; then
+  cat "$TMP/current"
+fi
+
+if [ "$GENERATE" -eq 1 ]; then
+  cp "$TMP/current" "$BASELINE"
+  echo "PASS — $FILES file(s) scanned, baseline regenerated with $CURRENT_N offender(s)"
+  exit 0
+fi
+
+if [ ! -f "$BASELINE" ]; then
+  echo "ERROR — nothing was checked (no baseline at $BASELINE; run --generate-baseline)"
+  exit 2
+fi
+
+sort "$BASELINE" > "$TMP/base"
+NEW="$(comm -23 "$TMP/current" "$TMP/base")"
+STALE="$(comm -13 "$TMP/current" "$TMP/base")"
+NEW_N=$(printf '%s' "$NEW" | grep -c . || true)
+STALE_N=$(printf '%s' "$STALE" | grep -c . || true)
+
+if [ "$NEW_N" -gt 0 ] || [ "$STALE_N" -gt 0 ]; then
+  [ "$NEW_N" -gt 0 ] && { echo "newly introduced:"; printf '%s\n' "$NEW"; }
+  [ "$STALE_N" -gt 0 ] && { echo "stale baseline entries (offender gone — regenerate after review):"; printf '%s\n' "$STALE"; }
+  echo "FAIL — $FILES file(s) scanned, $CURRENT_N offender(s), $NEW_N new, $STALE_N stale"
+  exit 1
+fi
+
+echo "PASS — $FILES file(s) scanned, $CURRENT_N offender(s) checked, 0 new, 0 stale"
+exit 0
