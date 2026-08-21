@@ -227,7 +227,14 @@ seed_content_digest() {
     [ -n "$sd_ct" ] || return 1
     sd_rt=$(git -C "$sd_repo" rev-parse --verify --quiet "$sd_rev:src/runtime" 2>/dev/null) || sd_rt="none"
     sd_lk=$(git -C "$sd_repo" rev-parse --verify --quiet "$sd_rev:src/compiler_rust/Cargo.lock" 2>/dev/null) || sd_lk="none"
-    printf 'seed/v1 %s %s %s\n' "$sd_ct" "$sd_rt" "$sd_lk" \
+    # The recipe tag is part of the digest ON PURPOSE: the marker records
+    # "this content passed THIS guard's legs". Adding a leg (the 2026-08-21
+    # --features vulkan leg) must invalidate every marker written by the older,
+    # weaker recipe -- otherwise a tree already recorded green under seed/v1
+    # would skip the new leg forever and the fast path would launder exactly
+    # the fail-open this leg exists to close. Bump the tag whenever a leg is
+    # added or its selector changes.
+    printf 'seed/v2+vulkan %s %s %s\n' "$sd_ct" "$sd_rt" "$sd_lk" \
         | (sha256sum 2>/dev/null || shasum -a 256) | cut -c1-40
     return 0
 }
@@ -311,7 +318,7 @@ run_cargo_check() {
 # (E0432 unresolved import, E0599 missing enum variant / no method) and
 # that a clean fixture passes. Fatal if it does not pass.
 # ===========================================================================
-SELFTEST_EXPECTED=5
+SELFTEST_EXPECTED=6
 
 selftest() {
     st_dir="$TMPROOT/selftest-crate"
@@ -559,12 +566,71 @@ EOF
         st_fail=1
     fi
 
+    # --- Fixture F: the CFG gap that gating leg 3 exists to close ----------
+    # Replays doc/08_tracking/bug/seed_build_guard_never_compiles_vulkan_feature_2026-08-20.md:
+    # a crate with a stray unconditional `use` duplicating one that is already
+    # cfg-gated. With default features the cfg body is not compiled at all, so
+    # `cargo check` PASSES; with the feature enabled it is E0252 and FAILS.
+    # Both halves are asserted -- the default-features PASS is what proves the
+    # new leg is load-bearing rather than decorative, since a fixture that
+    # failed both ways would demonstrate nothing about cfg scope.
+    st_dir_f="$TMPROOT/selftest-crate-cfg"
+    rm -rf "$st_dir_f"
+    mkdir -p "$st_dir_f/src" || return 1
+    cat >"$st_dir_f/Cargo.toml" <<'EOF'
+[package]
+name = "seed-build-guard-selftest-cfg"
+version = "0.0.0"
+edition = "2021"
+
+[features]
+default = []
+gfx = []
+
+[lib]
+name = "sbgstcfg"
+path = "src/lib.rs"
+EOF
+    cat >"$st_dir_f/src/lib.rs" <<'EOF'
+pub mod inner {
+    pub struct Device;
+}
+
+#[cfg(feature = "gfx")]
+mod gated {
+    use crate::inner::Device;
+    // The incident's exact shape: a stray unconditional duplicate import left
+    // behind next to an already-gated one. E0252 -- but only when the cfg is on.
+    use crate::inner::Device;
+
+    pub fn make() -> Device { Device }
+}
+EOF
+    st_ran=$((st_ran + 1))
+    ( cd "$st_dir_f" && CARGO_TARGET_DIR="$TMPROOT/selftest-target-f" cargo check 2>&1 ) >"$TMPROOT/st_f_default.out"
+    st_got_f_default=$?
+    ( cd "$st_dir_f" && CARGO_TARGET_DIR="$TMPROOT/selftest-target-f" cargo check --features gfx 2>&1 ) >"$TMPROOT/st_f_feat.out"
+    st_got_f_feat=$?
+    if [ "$st_got_f_default" -ne 0 ]; then
+        echo "SELFTEST FAIL: cfg fixture's default-features check was expected to PASS (that is what makes the cfg gap a gap), it failed" >&2
+        cat "$TMPROOT/st_f_default.out" >&2
+        st_fail=1
+    fi
+    if [ "$st_got_f_feat" -eq 0 ]; then
+        echo "SELFTEST FAIL: cfg fixture was expected NOT to compile with --features gfx, cargo check exited 0" >&2
+        st_fail=1
+    elif ! $GREP -q 'E0252\|defined multiple times' "$TMPROOT/st_f_feat.out" 2>/dev/null; then
+        echo "SELFTEST FAIL: cfg fixture failed with --features gfx but not with the expected E0252 duplicate-import error" >&2
+        cat "$TMPROOT/st_f_feat.out" >&2
+        st_fail=1
+    fi
+
     if [ "$st_ran" -ne "$SELFTEST_EXPECTED" ]; then
         echo "SELFTEST FAIL: expected $SELFTEST_EXPECTED fixtures, ran $st_ran" >&2
         return 1
     fi
     [ "$st_fail" -eq 0 ] || return 1
-    echo "$SELF: selftest $st_ran/$SELFTEST_EXPECTED fixtures correct (E0432/E0599-shape FAIL, clean PASS, target-scope gap: --bin PASS + --tests FAIL, 2026-08-18 incident replay: docs-only range over a broken untouched seed must compile and FAIL, vacuous-range contract)"
+    echo "$SELF: selftest $st_ran/$SELFTEST_EXPECTED fixtures correct (E0432/E0599-shape FAIL, clean PASS, target-scope gap: --bin PASS + --tests FAIL, 2026-08-18 incident replay: docs-only range over a broken untouched seed must compile and FAIL, vacuous-range contract, cfg-gap: default-features PASS + --features FAIL with E0252)"
     return 0
 }
 
@@ -711,6 +777,50 @@ EOF
     exit 1
 fi
 
+# --- GATING LEG 3: cfg-gated feature bodies (`--features vulkan`) ----------
+# Legs 1 and 2 run with DEFAULT features, so every `#[cfg(feature = "vulkan")]`
+# body is never type-checked by them -- cfg-gated code that does not compile is
+# invisible BY CONSTRUCTION, which is the same fail-open shape as the old
+# path-filter: an absence of evidence laundered into a green verdict.
+# Measured incident (2026-08-20): vulkan_graphics_runtime_compute.rs and
+# ..._shader.rs carried 4 stray unconditional `use` lines duplicating cfg-gated
+# imports -- 4 x E0252 -- so `cargo check -p simple-runtime --features vulkan`
+# failed outright and had never compiled, while main looked green the whole
+# time. See doc/08_tracking/bug/seed_build_guard_never_compiles_vulkan_feature_2026-08-20.md
+#
+# `cargo check` (not `build`) means this needs NO GPU, no Vulkan loader and no
+# device: it is pure type-checking, which is exactly what was missing. The
+# existing device gates (check-engine2d-vulkan-*.shs) are RUNTIME gates and are
+# device-blocked on hosts without a GPU, so they never covered this.
+# Scoped to `-p simple-runtime` because that is the crate proven green
+# (2026-08-21, 40s warm). Other feature flags (llvm, wasm, pytorch, cuda,
+# monoio-*, ratatui-tui, and the compiler crate's own vulkan) are NOT gated
+# here: none has been proven green on this host, and gating on an unproven-red
+# condition gets routed around with --no-verify, which protects nothing. The
+# general form is a per-feature matrix; add each leg as it is proven.
+run_cargo_check "$WORKTREE" "-p simple-runtime --features vulkan" cargo_vulkan.out
+cv_st=$?
+
+if [ "$cv_st" -ne 0 ]; then
+    cat >&2 <<EOF
+
+DO NOT PUSH. src/compiler_rust compiles with default features but the
+cfg-gated \`vulkan\` bodies do not compile at $tip (cargo check --release
+-p simple-runtime --features vulkan failed). Code behind a cfg is not
+type-checked unless the cfg is enabled, so this is invisible to every
+default-features leg.
+
+$(tail -n 40 "$TMPROOT/cargo_vulkan.out")
+
+Re-run standalone to iterate:
+  cd $WORKTREE/src/compiler_rust && CARGO_TARGET_DIR=$CARGO_TARGET_ROOT cargo check --release -p simple-runtime --features vulkan
+EOF
+    VERDICT_EMITTED=1
+    err1=$($GREP -m1 -E '^error' "$TMPROOT/cargo_vulkan.out" 2>/dev/null)
+    echo "$SELF: FAIL — cargo check --features vulkan failed in $tip: ${err1:-see stderr above}"
+    exit 1
+fi
+
 # --- ADVISORY LEG: every remaining target (examples, benches) ---------------
 # Reported, never fatal. Kept separate from leg 2 so that a breakage in a probe
 # fixture is visible without turning a genuine product-code PASS into a FAIL
@@ -728,5 +838,5 @@ fi
 record_green_marker "$seed_digest"
 
 VERDICT_EMITTED=1
-echo "$SELF: PASS — $nfiles file(s) checked, seed bin + test targets compile cleanly at $tip (seed content $seed_digest recorded green; link NOT verified: cargo check does not link)$advisory"
+echo "$SELF: PASS — $nfiles file(s) checked, seed bin + test + vulkan-feature targets compile cleanly at $tip (seed content $seed_digest recorded green; link NOT verified: cargo check does not link)$advisory"
 exit 0

@@ -1,7 +1,7 @@
 # Seed-build guard never compiles `--features vulkan`, so cfg-gated code rots unseen
 
 - **Filed:** 2026-08-20
-- **Status:** OPEN
+- **Status:** RESOLVED (2026-08-21)
 - **Severity:** P2 — fail-open guard; silently admits non-compiling cfg-gated code
 - **Area:** infra / pre-push guards, GPU runtime
 
@@ -72,3 +72,43 @@ Add a `--selftest` fixture replaying this incident: a crate with a duplicate
 `use` inside a `#[cfg(feature = "x")]` body must FAIL the guard, and must pass
 a default-features-only check, proving the new leg is load-bearing rather than
 decorative.
+
+## Resolution (2026-08-21)
+
+`scripts/check/check-seed-builds-push.shs` gained **GATING LEG 3**:
+
+```
+GATING  cargo check --release -p simple-runtime --features vulkan
+```
+
+placed after the `--tests` leg and before the advisory `--all-targets` leg,
+with the same fail-loud shape (diagnostic block on stderr, `FAIL — cargo check
+--features vulkan failed in <sha>: <first error>`, exit 1). Needs no GPU,
+Vulkan loader or device — it is pure type-checking, which is exactly the thing
+that was missing.
+
+**Marker fast path made honest.** The green-marker digest recipe tag was bumped
+`seed/v1` -> `seed/v2+vulkan`. Without this, every tree already recorded green
+under the weaker recipe would skip the new leg forever, and the fast path would
+launder the exact fail-open the leg exists to close. The tag must be bumped
+whenever a leg is added or a selector changes.
+
+**Selftest fixture F** (`SELFTEST_EXPECTED` 5 -> 6) replays the incident: a
+crate with `[features] gfx`, a `#[cfg(feature = "gfx")]` module carrying a
+stray unconditional duplicate `use`. Both halves are asserted — the
+default-features `cargo check` must **PASS** (this is what proves the leg is
+load-bearing rather than decorative; a fixture failing both ways would
+demonstrate nothing about cfg scope) and `--features gfx` must **FAIL** with
+`E0252` / `defined multiple times`. Measured:
+`selftest 6/6 fixtures correct (... cfg-gap: default-features PASS + --features FAIL with E0252)`.
+
+**Leg proven green before gating:**
+`cargo check --release -p simple-runtime --features vulkan` -> `Finished
+release profile ... in 40.52s`, 2 warnings, 0 errors (2026-08-21, warm).
+
+**Deliberately not gated:** `llvm`, `wasm*`, `pytorch`, `cuda`, `monoio-*`,
+`ratatui-tui`, `tui`, `gui`, and the compiler crate's own `vulkan`/`vulkan-*`.
+None has been proven green on this host, and gating on an unproven-red
+condition gets routed around with `--no-verify`, which protects nothing. The
+general form is a per-feature matrix; add each leg as it is proven green, and
+bump the recipe tag with it.
