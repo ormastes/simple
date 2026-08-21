@@ -1229,29 +1229,29 @@ pub fn rt_call_ptr_0(args: &[Value]) -> Result<Value, CompileError> {
     }
     let addr = args[0].as_int()?;
     if addr <= 0 {
-        return Ok(Value::Int(0));
+        return Err(CompileError::runtime("rt_call_ptr_0 received a null or invalid function address"));
     }
     let f: extern "C" fn() -> i64 = unsafe { std::mem::transmute(addr as usize as *const ()) };
     Ok(Value::Int(f()))
 }
 
-fn call_ptr_args(name: &str, args: &[Value], arity: usize) -> Result<(i64, Vec<i64>), CompileError> {
-    if args.len() < arity + 1 {
-        return Err(CompileError::runtime(format!("{name} requires {} arguments", arity + 1)));
+fn call_ptr_args<const N: usize>(name: &str, args: &[Value]) -> Result<(i64, [i64; N]), CompileError> {
+    if args.len() != N + 1 {
+        return Err(CompileError::runtime(format!("{name} requires {} arguments", N + 1)));
     }
     let addr = args[0].as_int()?;
-    let mut out = Vec::with_capacity(arity);
-    for a in &args[1..=arity] {
-        out.push(a.as_int()?);
+    let mut out = [0; N];
+    for (index, value) in args[1..].iter().enumerate() {
+        out[index] = value.as_int()?;
     }
     Ok((addr, out))
 }
 
 /// `rt_call_ptr_1(addr: i64, a1: i64) -> i64`
 pub fn rt_call_ptr_1(args: &[Value]) -> Result<Value, CompileError> {
-    let (addr, a) = call_ptr_args("rt_call_ptr_1", args, 1)?;
+    let (addr, a) = call_ptr_args::<1>("rt_call_ptr_1", args)?;
     if addr <= 0 {
-        return Ok(Value::Int(0));
+        return Err(CompileError::runtime("rt_call_ptr_1 received a null or invalid function address"));
     }
     let f: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(addr as usize as *const ()) };
     Ok(Value::Int(f(a[0])))
@@ -1259,9 +1259,9 @@ pub fn rt_call_ptr_1(args: &[Value]) -> Result<Value, CompileError> {
 
 /// `rt_call_ptr_2(addr: i64, a1: i64, a2: i64) -> i64`
 pub fn rt_call_ptr_2(args: &[Value]) -> Result<Value, CompileError> {
-    let (addr, a) = call_ptr_args("rt_call_ptr_2", args, 2)?;
+    let (addr, a) = call_ptr_args::<2>("rt_call_ptr_2", args)?;
     if addr <= 0 {
-        return Ok(Value::Int(0));
+        return Err(CompileError::runtime("rt_call_ptr_2 received a null or invalid function address"));
     }
     let f: extern "C" fn(i64, i64) -> i64 =
         unsafe { std::mem::transmute(addr as usize as *const ()) };
@@ -1270,9 +1270,9 @@ pub fn rt_call_ptr_2(args: &[Value]) -> Result<Value, CompileError> {
 
 /// `rt_call_ptr_3(addr: i64, a1: i64, a2: i64, a3: i64) -> i64`
 pub fn rt_call_ptr_3(args: &[Value]) -> Result<Value, CompileError> {
-    let (addr, a) = call_ptr_args("rt_call_ptr_3", args, 3)?;
+    let (addr, a) = call_ptr_args::<3>("rt_call_ptr_3", args)?;
     if addr <= 0 {
-        return Ok(Value::Int(0));
+        return Err(CompileError::runtime("rt_call_ptr_3 received a null or invalid function address"));
     }
     let f: extern "C" fn(i64, i64, i64) -> i64 =
         unsafe { std::mem::transmute(addr as usize as *const ()) };
@@ -1517,5 +1517,79 @@ mod tests {
         // detail; this just exercises the extern wiring end to end.)
         let count = rt_mem_guard_stats(&[]).unwrap().as_int().unwrap();
         assert!(count >= 0);
+    }
+
+    #[test]
+    fn raw_function_calls_reject_null_without_fabricating_zero() {
+        assert!(rt_call_ptr_0(&[Value::Int(0)]).is_err());
+        assert!(rt_call_ptr_1(&[Value::Int(0), Value::Int(1)]).is_err());
+        assert!(rt_call_ptr_2(&[Value::Int(0), Value::Int(1), Value::Int(2)]).is_err());
+        assert!(rt_call_ptr_3(&[
+            Value::Int(0),
+            Value::Int(1),
+            Value::Int(2),
+            Value::Int(3),
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn raw_function_call_argument_shape_is_exact() {
+        assert!(rt_call_ptr_1(&[Value::Int(1)]).is_err());
+        assert!(rt_call_ptr_1(&[Value::Int(1), Value::Int(2), Value::Int(3)]).is_err());
+    }
+
+    #[test]
+    fn raw_integer_function_calls_preserve_legitimate_zero_and_arguments() {
+        extern "C" fn zero() -> i64 {
+            0
+        }
+        extern "C" fn add_one(value: i64) -> i64 {
+            value + 1
+        }
+        extern "C" fn add_two(left: i64, right: i64) -> i64 {
+            left + right
+        }
+        extern "C" fn add_three(a: i64, b: i64, c: i64) -> i64 {
+            a + b + c
+        }
+
+        assert_eq!(
+            rt_call_ptr_0(&[Value::Int(zero as usize as i64)])
+                .unwrap()
+                .as_int()
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            rt_call_ptr_1(&[Value::Int(add_one as usize as i64), Value::Int(8)])
+                .unwrap()
+                .as_int()
+                .unwrap(),
+            9
+        );
+        assert_eq!(
+            rt_call_ptr_2(&[
+                Value::Int(add_two as usize as i64),
+                Value::Int(8),
+                Value::Int(13),
+            ])
+            .unwrap()
+            .as_int()
+            .unwrap(),
+            21
+        );
+        assert_eq!(
+            rt_call_ptr_3(&[
+                Value::Int(add_three as usize as i64),
+                Value::Int(8),
+                Value::Int(13),
+                Value::Int(21),
+            ])
+            .unwrap()
+            .as_int()
+            .unwrap(),
+            42
+        );
     }
 }

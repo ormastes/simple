@@ -11,6 +11,10 @@ extern fn rt_ptr_write_u8(addr: i64, offset: i64, value: i64)
 extern fn rt_ptr_write_i32(addr: i64, offset: i64, value: i32)
 extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
 extern fn rt_ptr_read_u8(addr: i64, offset: i64) -> i64
+@unsafe(reason: "nullable sentinel pointer borrows packed byte-array storage for one synchronous foreign call", capabilities: [ffi, raw_ptr])
+extern fn rt_array_data_ptr(bytes: [u8]) -> i64
+@unsafe(reason: "nonnull borrowed source; written-length status reports the executable-memory copy", capabilities: [ffi, raw_ptr])
+extern fn rt_ptr_write_bytes_raw(addr: i64, offset: i64, src: i64, length: i64) -> i64
 
 # Low-level syscall SFFI (raw address-based wrappers in C runtime)
 extern fn rt_mmap_raw(addr: i64, length: i64, prot: i64, flags: i64, fd: i64, offset: i64) -> i64
@@ -202,14 +206,25 @@ fn native_write_exec_memory(address: i64, code: [u8], offset: i64) -> i64:
     """Write code to executable memory."""
     if address == 0 or offset < 0:
         return 0
-    unsafe:
-        val dest_ptr = (address + offset) as *u8
+    val length = code.len() as i64
+    if length == 0:
+        return 0
+    var source: i64 = 0
+    unsafe(capabilities: [ffi, raw_ptr]):
+        source = rt_array_data_ptr(code)
+    if source != 0:
+        var written: i64 = 0
+        unsafe(capabilities: [ffi, raw_ptr]):
+            written = rt_ptr_write_bytes_raw(address, offset, source, length)
+        return written
 
-        for i in 0..code_bytes_len(code):
-            val _asv_1 = i as i64
-            ptr_write_u8(dest_ptr, _asv_1, code[i])
-
-        code_bytes_len(code) as i64
+    # Interpreter boxed-array fallback. Packed/JIT/native arrays take the
+    # single-call bulk path above, so this does not affect the compiled hot path.
+    var i: i64 = 0
+    while i < length:
+        rt_ptr_write_u8(address, offset + i, code[i] as i64)
+        i = i + 1
+    length
 
 fn native_make_executable(address: i64, size: i64) -> bool:
     """Change protection to read-execute (W^X security)."""

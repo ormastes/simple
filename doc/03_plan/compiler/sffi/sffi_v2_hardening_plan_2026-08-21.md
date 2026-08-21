@@ -755,3 +755,19 @@ that error. Successful signing retains the same fixed-size inputs, one direct
 call, and 64-byte output construction; no lookup, hashing pass, allocation,
 lock, or dynamic dispatch was added beyond the cryptographic work already
 required.
+
+The four raw integer function-pointer bridges now have exact compiler-owned
+ABIs, moving coverage to 1,088/703. Null or negative addresses are runtime
+errors in the interpreter and process-fatal contract violations in native C;
+they can no longer become a legitimate integer zero. Legitimate foreign zero
+returns remain distinguishable and are covered alongside all four arities.
+The compatibility loader no longer maintains a fabricated byte-array address
+space or returns zero without executing code: it maps RW, bulk-copies packed
+code in one SFFI call, transitions RW->RX, and invokes the admitted address.
+Raw declarations and indirect-call wrappers carry `ffi`/`raw_ptr` authority,
+while module and join-point consumers contain that authority in narrow scopes
+and return `Result`. The interpreter call helper now uses fixed stack arrays
+instead of allocating a `Vec` per call. A live join-point positive control
+executed mapped unadvised and advised targets from the same call site. The
+compiled hot path remains a null comparison plus one direct indirect call;
+there is no registry lookup, allocation, lock, hash, or generic marshalling.

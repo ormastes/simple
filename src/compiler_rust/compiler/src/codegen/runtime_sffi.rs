@@ -319,6 +319,10 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_file_read_text_at_checked", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_mmap", &[I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_munmap", &[I64, I64], &[I8]),
+    RuntimeFuncSpec::new("rt_call_ptr_0", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_call_ptr_1", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_call_ptr_2", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_call_ptr_3", &[I64, I64, I64, I64], &[I64]),
     // =========================================================================
     // AOP runtime operations
     // =========================================================================
@@ -2437,6 +2441,24 @@ mod tests {
             .expect("rt_ed25519_sign_seed must be registered for native codegen");
         assert_eq!(spec.params, [I64, I64, I64]);
         assert_eq!(spec.returns, [I64]);
+    }
+
+    #[test]
+    fn raw_integer_function_pointer_abis_are_registered_exactly() {
+        let expected = [
+            ("rt_call_ptr_0", &[I64][..]),
+            ("rt_call_ptr_1", &[I64, I64][..]),
+            ("rt_call_ptr_2", &[I64, I64, I64][..]),
+            ("rt_call_ptr_3", &[I64, I64, I64, I64][..]),
+        ];
+        for (name, params) in expected {
+            let spec = RUNTIME_FUNCS
+                .iter()
+                .find(|spec| spec.name == name)
+                .unwrap_or_else(|| panic!("{name} must be registered for native codegen"));
+            assert_eq!(spec.params, params);
+            assert_eq!(spec.returns, [I64]);
+        }
     }
 
     #[test]

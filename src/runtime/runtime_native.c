@@ -10407,26 +10407,26 @@ int64_t rt_ptr_write_bytes_raw(int64_t addr, int64_t offset, const void* src, in
 /* Call a raw code address as a zero-argument int64_t function. */
 int64_t rt_call_ptr_0(int64_t addr) {
     typedef int64_t (*rt_call_ptr_0_fn)(void);
-    if (addr <= 0) return 0;
+    if (addr <= 0) abort();
     rt_call_ptr_0_fn f = (rt_call_ptr_0_fn)(uintptr_t)addr;
     return f();
 }
 
 int64_t rt_call_ptr_1(int64_t addr, int64_t a1) {
     typedef int64_t (*rt_call_ptr_1_fn)(int64_t);
-    if (addr <= 0) return 0;
+    if (addr <= 0) abort();
     return ((rt_call_ptr_1_fn)(uintptr_t)addr)(a1);
 }
 
 int64_t rt_call_ptr_2(int64_t addr, int64_t a1, int64_t a2) {
     typedef int64_t (*rt_call_ptr_2_fn)(int64_t, int64_t);
-    if (addr <= 0) return 0;
+    if (addr <= 0) abort();
     return ((rt_call_ptr_2_fn)(uintptr_t)addr)(a1, a2);
 }
 
 int64_t rt_call_ptr_3(int64_t addr, int64_t a1, int64_t a2, int64_t a3) {
     typedef int64_t (*rt_call_ptr_3_fn)(int64_t, int64_t, int64_t);
-    if (addr <= 0) return 0;
+    if (addr <= 0) abort();
     return ((rt_call_ptr_3_fn)(uintptr_t)addr)(a1, a2, a3);
 }
 
