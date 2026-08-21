@@ -19,6 +19,9 @@
   `53494d50` with `m`, detaches, and observes the resumed shell. Unit scenarios
   reject malformed checksums, overflow, out-of-range memory, and false run
   control.
+- REQ-014: physical evidence records Secure Boot state and distinguishes F7
+  one-time boot, DEL/ESC setup, and any EFI-shell fallback. No emulator-only
+  assertion promotes this physical requirement to PASS.
 
 ## Evidence levels
 
@@ -26,5 +29,5 @@ The executable spec proves pure policy only. The existing OVMF oracle proves
 firmware boot semantics. Physical DCI, boot, and storage scenarios remain
 visible as BLOCKED until their retained receipts exist; they are never skipped
 or counted as PASS.
-The OVMF oracle additionally proves RSP RAM write/readback within the reserved
-ELF segment; it does not prove physical CN16 wiring.
+The current-image OVMF oracle additionally proves RSP RAM write/readback within
+the reserved ELF segment; it does not prove physical CN16 wiring.

@@ -2,10 +2,11 @@
 
 ## Supported meaning
 
-Original Apollo Lake UP Squared can conditionally use Intel DCI USB 3.x Debug
-Class for JTAG-like run control and physical-memory access. This requires a
-qualified SuperSpeed DbC cable, firmware debug consent, an enabled/unlocked
-debug interface, and Intel System Debugger/System Bring-Up Toolkit. Smart KM
+Intel documents Apollo Lake processors in its USB 3.x DCI Debug Class matrix.
+Whether a particular original UP Squared exposes that JTAG-like run-control and
+accessible-memory lane depends on its exact FAB, BIOS routing/consent, enabled
+debug interface, Intel-qualified DCI DbC cable/probe, and the CNDA-controlled
+Intel System Debugger/System Bring-Up Toolkit. Smart KM
 Link, ordinary A-to-A USB, Tigard, CN22, GDB, and OpenOCD are not substitutes.
 
 Start with the read-only inventory:
@@ -38,8 +39,9 @@ unproven until the exact board menu or a successful target receipt confirms it.
 1. Record exact `UPS-APL` model, board FAB, BIOS version, RAM, and storage.
 2. Back up firmware with a verified external recovery path before considering
    any firmware change. Do not use the old FAB-A debug image by default.
-3. Install the licensed Intel toolkit on a supported host and its DCI udev
-   rules. Use a genuine Intel SVT DCI DbC2/3 or qualified SuperSpeed debug cable.
+3. Install the CNDA-controlled Intel toolkit on a supported host and its DCI
+   udev rules. Use a genuine Intel SVT DCI DbC2/3 cable/probe or another cable
+   explicitly qualified by Intel's target-connection documentation.
 4. In the board's existing BIOS, inspect only the board-specific DCI/debug
    consent settings. Menu names vary. Do not patch `IA32_DEBUG_INTERFACE` or
    flash firmware as part of this guide.
@@ -61,14 +63,17 @@ debugger-authored CPU-state boot and open xHCI DbC are excluded from this work.
 
 The recommended lane is DCI-assisted UEFI boot. Keep the existing removable
 GPT/FAT32 image and let UEFI/GRUB establish the boot contract. Use DCI only for
-reset, halt, breakpoints, and memory inspection. Accept boot only when CN16 UART
+the halt, breakpoint, accessible-memory, and reset capabilities separately
+proven on the exact target. OpenRC is never admitted; Power-Good is not admitted
+until exact-board proof. Accept boot only when CN16 UART
 shows the current loader/shim/entry/console/VFS/shell markers and a freshly
 injected `ls /` returns `/bin`, `/etc`, and `/README.txt`.
 
-Do not copy `simpleos.elf` to `0x08000000` and set RIP. Its three `PT_LOAD`
-segments use different file offsets/physical addresses, and the writable
-segment expands from 138 file bytes to `0x0180d000` memory bytes. The current
-entry is a 32-bit bootstrap contract; arbitrary debugger/UEFI state is
+Do not copy `simpleos.elf` to `0x08000000` and set RIP. Its three current
+`PT_LOAD` segments use different file offsets/physical addresses, and the
+writable segment expands from 250 file bytes to `0x02fd7000` memory bytes,
+ending at `0x0b000000`. The current entry is a 32-bit bootstrap contract;
+arbitrary debugger/UEFI state is
 incompatible.
 
 The preferred direct-memory design is a resident UEFI loader: it allocates and
@@ -100,9 +105,10 @@ NVMe Identify. The QEMU scratch proof is complete; physical UP2 is not.
 
 ## Open alternative
 
-SimpleOS may later implement xHCI DbC as a high-speed post-entry console/GDB
-remote endpoint. It uses similar cabling but is not Intel DCI and cannot provide
-pre-boot reset/halt/memory load before target software initializes xHCI.
+SimpleOS may later implement xHCI DbC as a high-speed post-entry byte transport
+for a console or resident GDB endpoint. The GNU-remote USB interface descriptor
+does not supply CPU debugging by itself. This lane is not Intel DCI and cannot
+provide pre-boot reset/halt/memory load before target software initializes xHCI.
 
 ## Free first-light and software-debug path
 
@@ -116,10 +122,13 @@ monitor after SimpleOS starts. Use this exact CN16 UART wiring:
 | 9 | UART RX, 3.3-V TTL | TX (only when input is needed) |
 | 10 | UART TX, 3.3-V TTL | RX |
 
-Never connect CN16 pins 1 or 5 (5 V). Configure 115200 8N1, no flow control.
+Never connect adapter VCC or CN16 pins 1 or 5 (5 V). Configure 115200 8N1, no
+flow control. CN22 pin 4 is 1.8 V and the documented JTAG path services the
+FPGA; the manual does not qualify its signal thresholds for a generic probe.
 Tigard interface 00 is Port A/Serial; interface 01 is Port B/JTAG. Do not send
-UART data through the JTAG interface and do not connect 3.3-V Tigard JTAG to the
-1.8-V CN22 CPLD/BIOS header.
+UART data through the JTAG interface, and do not connect Tigard JTAG to CN22:
+pin 4 alone establishes the 1.8-V service rail, not compatible thresholds for
+every signal.
 
 SimpleOS initializes COM1 before its first `UP2 entry` marker. Its loopback
 self-test must consume the injected `0xAE` byte before the shell starts; a raw
@@ -133,8 +142,11 @@ picocom --baud 115200 --flow none --databits 8 --parity n --stopbits 1 \
   /dev/serial/by-id/usb-Tigard_port_A:Serial_port_B:JTAG_*-if00-port0
 ```
 
-Insert the admitted UEFI USB image, use F7 for the one-time UEFI boot menu, and
-capture from power-on/reset through the fresh `ls /` response. A quiet UART is
+Insert the admitted UEFI USB image and record Secure Boot state. Use F7 for the
+one-time UEFI boot entry; use DEL or ESC when the firmware prompt requires setup.
+If the removable entry is absent, the EFI shell may launch the exact fallback
+path from its mapped FAT filesystem, but record that as a distinct manual-shell
+route. Capture from power-on/reset through the fresh `ls /` response. A quiet UART is
 not PASS: verify power, pin 10-to-RX and pin 8-to-GND first, then capture factory
 firmware output to separate wiring from a SimpleOS UART-routing problem.
 
@@ -164,6 +176,11 @@ access, not preboot DCI/JTAG or a direct CPU-state boot method.
 The canonical OVMF checker proves the sequence `qSupported` → write `SIMP` →
 read `53494d50` → detach while retaining the earlier boot/VFS/`ls /` evidence.
 Physical CN16 PASS still requires the exact board transcript.
+
+The 2026-08-22 current-image receipt binds kernel SHA-256 `31ce1fb4…e1fbdf`
+and USB-image SHA-256 `983b74b9…b9ae8`. Its separate scratch-NVMe receipt also
+passes Identify, GPT/FAT32, flush, fresh-adapter readback, and proof-file access.
+These are emulator receipts, not physical-board or physical-drive receipts.
 
 Do not install CHIPSEC on the host expecting remote access. CHIPSEC must execute
 on UP2 under a trusted Linux/Windows driver or UEFI agent. Linux xHCI DbC and the

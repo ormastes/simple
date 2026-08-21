@@ -9,8 +9,10 @@ Depending on product and endpoint, USB DCI can expose DFx/JTAG run control,
 trace, kernel-mode debug, and DMA to or from system memory. Intel explicitly
 warns that not every product implements every endpoint. Apollo Lake is listed
 for the USB 3.x Debug Class connection in Intel's Target Connection Agent
-matrix. Thus original UP2 can conditionally debug over USB in a JTAG-like way,
-but connector presence alone proves nothing.
+matrix. Thus Apollo Lake silicon has a conditional JTAG-like USB lane.
+Applicability to an original UP2 still requires proof for the exact FAB, BIOS
+routing/consent, cable, and physical connection; connector presence proves none
+of those conditions.
 
 The supported software path is Intel System Debugger/System Bring-Up Toolkit
 through Target Connection Agent. Current toolkit access requires an Intel CNDA,
@@ -28,8 +30,8 @@ evidence on the exact board can qualify it.
 
 ## Hardware and firmware gates
 
-A genuine SuperSpeed debug cable is required. A normal USB A-to-A cable, USB
-file-transfer/KVM bridge, phone data cable, and Tigard are not substitutes.
+A genuine Intel-qualified DCI DbC cable/probe is required. A normal USB A-to-A
+cable, USB file-transfer/KVM bridge, phone data cable, and Tigard are not substitutes.
 Debug cables are purpose-built and must not source ordinary VBUS between hosts.
 
 Community UP2 reports identify firmware controls such as `DCI Enable (HDCIEN)`,
@@ -58,12 +60,12 @@ UEFI USB image. A direct DCI RAM boot needs a small reviewed trampoline designed
 for the exact debugger entry state. It remains blocked until the proprietary
 toolchain and physical cable are present.
 
-The current SimpleOS ELF has three `PT_LOAD` ranges. File bytes occupy
-`0x08000000..0x0800608a`, while the final writable segment has a memory size of
-`0x0180d000`; its BSS/heap/stack tail must be zeroed through approximately
-`0x09813000`. The entry is `0x08000038`. This makes “write the 37,280-byte ELF
+The current SimpleOS ELF has three `PT_LOAD` ranges. Its last file-backed byte
+ends at physical `0x080290fa`, while the final writable segment has a memory
+size of `0x02fd7000`; its BSS/heap/stack/staging tail ends at `0x0b000000`.
+The entry is `0x08000038`. This makes “write the 225,152-byte ELF
 and set RIP” specifically incorrect: ELF file offsets differ from physical
-addresses and roughly 24 MiB of zero-fill state is part of the image contract.
+addresses and nearly 48 MiB of zero-fill state is part of the image contract.
 
 Intel Slim Bootloader provides public precedent for the safer architecture: its
 OS loader parses ELF and Multiboot/Multiboot2 images, loads segments, constructs
@@ -90,11 +92,13 @@ device-node spelling.
 
 ## Open xHCI DbC is a different lane
 
-Linux xHCI Debug Capability can expose a high-speed serial/GNU-remote-debug
-transport over a SuperSpeed debug cable after target software initializes the
-controller. It is an attractive future SimpleOS console/KGDB-like backend, but
-it cannot replace proprietary pre-boot DCI run control, reset, or arbitrary
-physical-memory access.
+Linux xHCI Debug Capability can expose a high-speed bidirectional byte transport
+over a SuperSpeed debug cable after target software initializes the controller.
+Its GNU Remote Debug interface descriptor does not itself implement CPU debug;
+a resident RSP/KGDB agent is still required. It is an attractive future
+SimpleOS console/KGDB-like backend, but
+it cannot replace proprietary pre-boot DCI run control, reset, or access to the
+physical-memory regions authorized by the target's DCI implementation.
 
 ## Free and open tooling audit (2026-08-22)
 
@@ -108,7 +112,7 @@ but not a free one.
 
 | Free component | What it can do | Earliest availability | Not provided |
 |---|---|---|---|
-| SimpleOS target GDB RSP stub | registers, memory, breakpoints, step/continue implemented by target | after the stub, exceptions, and UART/DbC transport start | reset-state/pre-agent halt, silicon trace, autonomous DMA |
+| SimpleOS target GDB RSP monitor | bounded `m`/`M` memory access with checksum and write readback | after SimpleOS and the UART monitor start | registers, breakpoints, step/continue/reset, pre-agent halt, silicon trace, autonomous DMA |
 | Linux KGDB/KDB | Linux kernel source debug over an initialized console | after Linux KGDB and its I/O driver start | UEFI/SEC/PEI or dead-target recovery |
 | Linux xHCI DbC | early-printk/runtime high-speed bidirectional TTY | after target xHCI DbC initialization | Intel DCI JTAG/run control/reset/DMA |
 | CHIPSEC | privileged live physical-memory, PCI/MMIO, and firmware inspection | after its Linux/Windows driver or UEFI agent starts | halt/step/breakpoints and external recovery |
@@ -156,11 +160,17 @@ a DCI mailbox, authenticate an ELF, or perform an OS handoff. A resident loader
 still must be built and executed explicitly.
 
 The original UP Squared manual identifies CN7 as M.2 E-key, CN8 as Mini Card,
-CN9/CN10 as SATA/data power, CN13 as USB3 OTG, CN14/CN15 as USB3, CN16 as the
+CN9/CN10 as SATA/data power, CN13 as USB3 OTG port 0, CN14 as USB3 ports 1/2,
+CN15 as USB3 port 3, CN16 as the
 USB/UART panel, and CN22 as CPLD/BIOS update. It documents no native M-key NVMe
 socket. A physical NVMe connected through an adapter is accepted only if PCI
 enumeration reports class/subclass `01:08` and NVMe Identify succeeds; connector
 shape or an adapter label is not evidence.
+
+Linux documentation says the DbC-capable receptacle is normally the first
+SuperSpeed port, but that does not prove CN13 is DCI on UP2. Discover the exact
+port through the Intel tool and a live connection; do not prescribe CN13 from
+port numbering alone.
 
 ## Primary sources
 
@@ -174,7 +184,9 @@ shape or an adapter label is not evidence.
 - [Intel E3900 UP2 UEFI firmware project](https://www.intel.com/content/www/us/en/developer/articles/tool/uefi-firmware-project-for-intel-atom-processor-e3900-series-processor-platforms.html)
 - [Intel Software Developer Manuals](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html)
 - [UP Squared user manual download](https://downloads.up-community.org/download/up-squared-user-manual/)
+- [UP Squared original-board manual, 5th edition](https://up-shop.org/media/productattach/u/p/up_squared_ups-apl_manual_5th_ed_0716c.pdf)
 - [UP Squared specifications](https://up-board.org/upsquared/specifications/)
+- [Zephyr UP Squared UEFI boot instructions](https://docs.zephyrproject.org/latest/boards/up-bridge-the-gap/up_squared/doc/index.html)
 - [Linux xHCI debug capability](https://cdn.kernel.org/doc/html/latest/driver-api/usb/usb3-debug-port.html)
 - [GDB remote-stub requirements](https://sourceware.org/gdb/current/onlinedocs/gdb.html/Remote-Stub.html)
 - [GDB remote protocol packets](https://sourceware.org/gdb/current/onlinedocs/gdb.html/Packets.html)

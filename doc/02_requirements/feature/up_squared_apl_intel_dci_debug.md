@@ -26,7 +26,8 @@ debugger-authored CPU-state boot and open xHCI DbC are excluded.
   Physical reset is the baseline recovery. Power-Good reset remains blocked
   until independently proven on the exact board and firmware.
 - **REQ-005 — DCI-assisted first boot:** UEFI/GRUB shall load the existing
-  SimpleOS removable image while DCI supplies breakpoints and inspection.
+  SimpleOS removable image while a physically qualified DCI endpoint supplies
+  only the run-control and inspection capabilities proven on this exact target.
 - **REQ-006 — Resident mailbox:** A UEFI-loaded, target-side Simple component
   shall publish an allowlisted staging region and descriptor containing schema,
   generation, nonce, payload length, SHA-256, and commit state. Payload data is
@@ -56,24 +57,34 @@ debugger-authored CPU-state boot and open xHCI DbC are excluded.
   It shall checksum packets, cap each transfer, verify writes by readback, and
   return unsupported for registers, breakpoints, continue, step, or reset until
   real x86 trap-frame/run-control support exists.
+- **REQ-014 — Firmware boot admission:** Physical removable boot shall record
+  Secure Boot state and either use the F7 one-time entry or enter setup with
+  DEL/ESC. An EFI-shell launch is a separate fallback and must identify the
+  mapped filesystem and exact `EFI/BOOT/BOOTX64.EFI` artifact.
 
 ## Acceptance
 
 Contract/OVMF evidence may prove implementation behavior but cannot satisfy
 REQ-002, REQ-003, REQ-005 physical execution, REQ-010 physical readback, or
-REQ-011. Those remain BLOCKED until the licensed Intel tool, qualified cable,
-and exact board connection exist.
+REQ-011. Those remain BLOCKED until the CNDA-controlled Intel tool,
+Intel-qualified cable/probe, and exact board connection exist.
 REQ-013 may pass under OVMF for protocol and RAM readback while physical CN16
 transport remains a separate hardware evidence gate.
 
 ## Current implementation status (2026-08-22)
 
 - REQ-001..005: documented/admitted gates; physical DCI remains BLOCKED because
-  the licensed toolkit, cable, enabled board, and connection receipt are absent.
+  the CNDA-controlled toolkit, qualified cable/probe, enabled board, and
+  connection receipt are absent.
 - REQ-006..008: policy parser and ELF admission exist; the executable UEFI
   mailbox publisher/consumer and boot transition do not exist yet.
 - REQ-009..010: the shared NVMe GPT/FAT32 provisioner passes on an isolated OVMF
-  scratch namespace; physical UP2 PCI/NVMe and persistence remain BLOCKED.
-- REQ-011: OVMF UART evidence passes; physical CN16 evidence is missing.
+  scratch namespace with the current image; strict full-image SHA-256 admission
+  and physical UP2 PCI/NVMe persistence remain incomplete/BLOCKED.
+- REQ-011: current-image OVMF UART evidence passes; physical CN16 evidence is
+  missing.
 - REQ-012: enforced by the current read-only boot and explicit challenges.
-- REQ-013: OVMF packet/write/readback passes; physical CN16 remains BLOCKED.
+- REQ-013: current-image OVMF packet/write/readback passes; physical CN16
+  remains BLOCKED.
+- REQ-014: procedure is documented; physical Secure Boot/menu/shell evidence is
+  missing.

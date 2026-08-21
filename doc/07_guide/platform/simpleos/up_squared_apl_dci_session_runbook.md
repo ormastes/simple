@@ -1,8 +1,8 @@
 # UP Squared Apollo Lake DCI session runbook
 
 This runbook records the steps that are public and safe. Intel's exact System
-Debug command/API documentation is NDA-controlled and bundled with the licensed
-toolkit; do not invent commands from another debugger.
+Debug command/API documentation is NDA-controlled and bundled with the
+CNDA-controlled toolkit; do not invent commands from another debugger.
 
 ## 1. Identify before connecting
 
@@ -10,7 +10,8 @@ Record original-board part number, FAB, CPU SKU, RAM, BIOS vendor/version, and
 all storage model/serial/capacity values. Remove secrets. Confirm an external
 SPI recovery path before any separately authorized firmware work.
 
-Use an Intel SVT DCI DbC2/3 qualified cable. Intel describes USB 3.x DCI as the
+Use an Intel SVT DCI DbC2/3 cable/probe or another cable explicitly qualified
+by Intel's target-connection documentation. Intel describes USB 3.x DCI as the
 target acting in the DFP/host role; original UP2 Type-A ports are host ports.
 The Micro-B OTG port is not assumed to be the DCI port. Determine the exact port
 through Target Connection Agent and board/tool documentation, not trial writes.
@@ -91,7 +92,8 @@ model, serial, transport, capacity, partition table, root/swap, mounts, holders,
 and byte bounds. Write, flush, re-enumerate, and hash exact readback. Never use
 debugger MMIO writes to operate a storage controller.
 
-The free SimpleOS NVMe path is executable. Run `nvme identify`, verify its PCI
+The free SimpleOS NVMe path is executable for a controller that really
+enumerates as PCI class `01:08`. Run `nvme identify`, verify its PCI
 identity, model, serial, firmware, NSID, LBA size/count, and capacity, then enter
 only the exact printed `nvme format FORMAT:...` command. Successful output must
 report GPT/FAT32, flush, fresh-adapter readback, and `/nvme/proof.txt` from
@@ -104,10 +106,13 @@ connection, memory read, or debugger screenshot cannot substitute for either.
 
 ## 6. Free fallback when Intel DCI is unavailable
 
-Use CN16 pins 8/9/10 (GND/RX/TX), 3.3-V TTL, 115200 8N1, no flow control. Board
-pin 10 goes to adapter RX; board pin 9 goes to adapter TX. Never attach CN16
-5-V pins 1/5, and never substitute the 1.8-V CN22 CPLD/BIOS header. Boot the
-admitted removable UEFI image with F7 and retain the entire UART transcript.
+Use CN16 pins 8/9/10 (GND/board-RX/board-TX), 3.3-V TTL, 115200 8N1, no flow
+control. Adapter RX connects to board pin 10; adapter TX connects to board pin
+9; adapter ground connects to pin 8. Never connect adapter VCC or CN16 5-V pins
+1/5. CN22 pin 4 is 1.8 V and its documented JTAG is FPGA service, not a CPU
+debug port; its full electrical thresholds are unpublished. Record Secure Boot
+state, use F7 for the one-time boot entry (DEL or ESC for setup), and retain the
+entire UART transcript. An EFI-shell launch is a separately recorded fallback.
 
 The current tree contains a bounded memory-only GDB RSP monitor: enter `gdb`,
 then use checksummed `M`/`m` packets only within

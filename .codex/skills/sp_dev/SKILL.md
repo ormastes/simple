@@ -174,8 +174,9 @@ wrapper as failed and repair it before diagnosing target wiring.
 
 For original UP Squared Apollo Lake bring-up, use removable x64 UEFI media and
 the fallback path `EFI/BOOT/BOOTX64.EFI`; never use the host system disk or the
-board's internal eMMC for first light. CN16 is 3.3 V TTL UART. CN22 is a 1.8 V
-CPLD/BIOS-update connector, not a proven Apollo Lake CPU JTAG port, so do not
+board's internal eMMC for first light. CN16 is 3.3 V TTL UART. CN22 pin 4 is
+1.8 V and its documented JTAG is FPGA/CPLD/BIOS service, not a proven Apollo
+Lake CPU JTAG port; complete signal thresholds are unpublished, so do not
 drive it with Tigard/OpenOCD. The retained handoff is
 `doc/03_plan/agent_tasks/up_squared_apl_simpleos.md`; its offline image and
 partial source state are not physical boot or `ls` evidence.
@@ -198,9 +199,10 @@ input to `--live`. The live checker must keep one UART session open from boot
 markers through the freshly injected public-VFS `ls /` window.
 
 For original-UP2 Intel DCI requests, distinguish proprietary Intel USB 3.x DCI
-DbC from open xHCI DbC and from USB bridge cables. A qualified SuperSpeed debug
-cable, firmware debug consent, enabled/unlocked architectural debug interface,
-and Intel System Debugger/System Bring-Up Toolkit are mandatory. Smart KM Link
+DbC from open xHCI DbC and from USB bridge cables. An Intel-qualified DCI DbC
+cable/probe, firmware debug consent, enabled/unlocked architectural debug
+interface, and Intel System Debugger/System Bring-Up Toolkit are mandatory.
+Smart KM Link
 `0ea0:2211`, Tigard `0403:6010`, CN22, generic GDB, and OpenOCD do not establish
 DCI. Inventory with `scripts/check/check-up-squared-apl-dci.shs --inventory`;
 missing tool, rules, or retained target receipt is BLOCKED. DCI run control and
@@ -215,6 +217,10 @@ Before any proposed RAM load, run
 `scripts/check/inspect-up-squared-apl-dci-elf.shs --inspect`; non-contiguous
 `PT_LOAD` ranges and `p_memsz - p_filesz` zero-fill must be honored. Prefer a
 UEFI-resident mailbox loader over debugger-authored CR/GDT/page-table state.
+Treat the inspector output as authoritative over copied sizes in manuals or
+tests. The 2026-08-22 admitted artifact is 225,152 bytes, and its writable
+segment ends at `0x0b000000`; when the kernel changes, update any fixture that
+claims to represent the "exact current" layout before accepting mailbox tests.
 For the retained UP2 A+B+D selection, reuse the pure-Simple admission policy in
 `src/os/kernel/arch/x86_64/up_squared/dci_mailbox.spl`: payload-before-commit,
 fresh generation/nonce, SHA-256 binding, physical `PT_LOAD`/BSS validation,
@@ -230,6 +236,9 @@ external debugger's memory discovery; they do not reserve a command mailbox,
 authenticate a payload, load ELF segments, exit boot services, or transfer
 control. Treat `dci_mailbox.spl` as admission policy, not a boot loader, until
 an executable UEFI adapter completes and proves that handoff.
+For UP2 physical boot, record Secure Boot state, use F7 for the one-time entry,
+and use DEL or ESC for firmware setup. Treat an EFI-shell launch as a distinct
+fallback with mapped-filesystem and artifact evidence.
 For the current UP2 image, `BOOTX64.EFI` is GRUB. Code first entered through
 the ELF32 Multiboot2 shim is post-UEFI and cannot truthfully claim ownership of
 page reservation, the final memory map, or `ExitBootServices`. A selected

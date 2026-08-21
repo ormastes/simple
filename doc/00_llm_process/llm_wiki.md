@@ -66,22 +66,25 @@ same-thread/typed-payload exclusions and the Stage-4 blocker.
 - **Original-board storage:** eMMC and SATA/mSATA are internal; the M.2 2230
   E-key is not a generic M-key NVMe slot. A USB NVMe enclosure normally appears
   through USB/SCSI, so admit identity, not node spelling.
-- **Debug:** CN16 3.3 V TTL UART. Do not use CN22 as CPU JTAG; it is documented
-  as a 1.8 V CPLD/BIOS-update connector.
-- **Never write:** host system disk, UP2 internal eMMC/NVMe, BIOS/SPI, or UEFI
+- **Debug:** CN16 3.3 V TTL UART. Do not use CN22 as CPU JTAG; pin 4 is 1.8 V
+  and its documented JTAG is FPGA/CPLD/BIOS service, with no published CPU TAP
+  or complete signal-threshold qualification.
+- **Never write:** host system disk, UP2 internal eMMC/SATA, adapter-attached
+  NVMe, BIOS/SPI, or UEFI
   variables during first light.
 - **Verdict rule:** offline image structure, Tigard enumeration, or retained
   partial source is not live board evidence. PASS requires ordered UART boot
   markers and a command-correlated VFS-backed `ls /` response.
-- **Current build state (2026-08-21):** the admitted build produced a
-  37,280-byte freestanding ELF and 256 MiB GPT/FAT32 UEFI image. OVMF reaches
+- **Current build state (2026-08-22):** the admitted build produced a
+  225,152-byte freestanding ELF and 256 MiB GPT/FAT32 UEFI image. OVMF reaches
   loader admission, shim, 32/64-bit bootstrap, entry, console, filesystem, and
   shell; injected `ls /` returns `/bin`, `/etc`, and `/README.txt`. Physical F7
   boot is still pending because the board-attached stick is not visible to the
   writer host.
-- **Intel DCI:** original Apollo Lake UP2 conditionally supports proprietary
-  Intel DCI USB 3.x DbC for JTAG-like run control and physical-memory access.
-  It requires a qualified SuperSpeed debug cable, enabled/unlocked firmware and
+- **Intel DCI:** Intel lists Apollo Lake processors for proprietary DCI USB 3.x
+  DbC JTAG-like run control and access to target-authorized physical-memory
+  regions. Exact original-UP2 FAB/BIOS applicability is not proven. It requires
+  an Intel-qualified DCI DbC cable/probe, enabled/unlocked firmware and
   architectural gates, and Intel System Debugger/System Bring-Up Toolkit. Smart
   KM Link `0ea0:2211`, Tigard `0403:6010`, CN22, GDB, and OpenOCD are not DCI.
   DCI can stage RAM but is not a block-storage writer; persistent I/O remains a
@@ -103,6 +106,9 @@ same-thread/typed-payload exclusions and the Stage-4 blocker.
   `dci_mailbox.spl` is admission policy; direct DCI RAM boot remains incomplete
   until a resident UEFI adapter reserves/publishes the mailbox, validates and
   loads the ELF, exits boot services, and transfers control.
+- **UP2 boot-menu evidence:** record Secure Boot state. F7 selects one-time boot;
+  DEL or ESC enters setup. EFI-shell launch of the fallback path is a distinct
+  route and must record the mapped filesystem and exact image.
 - **UP2 UEFI topology boundary:** the current `BOOTX64.EFI` is GRUB, and its
   ELF32 Multiboot2 child runs after the UEFI boot-services transition. Mailbox
   polling added only to that child is post-UEFI RAM loading, not the selected
@@ -128,15 +134,20 @@ same-thread/typed-payload exclusions and the Stage-4 blocker.
   `0x0a000000..0x0b000000`, capped at 1024 bytes with write readback. OVMF
   proves `SIMP` → `53494d50` and detach. Registers, run control, reset, binary
   `X`, preboot DCI, and physical CN16 remain outside that PASS.
+- **Fresh emulator evidence (2026-08-22):** current kernel `31ce1fb4…e1fbdf`
+  and image `983b74b9…b9ae8` pass OVMF boot, VFS `ls /`, GDB `M`/`m` readback,
+  plus the separate scratch-NVMe Identify/GPT/FAT32/flush/fresh-readback gate.
+  Physical UP2, CN16, DCI, and physical storage remain separate.
 - **Apollo Lake reset exception:** Intel's 2020 debugger notes say OpenRC warm
   reset can leave Apollo Lake cores unreleasable, with manual reset required.
   Never use it as the UP2 software-reset fallback. A Power-Good reset remains
   unqualified until proven on the exact FAB.
 - **Direct-load boundary:** the current ELF has three non-contiguous `PT_LOAD`
-  mappings and a 138-byte writable file payload expanding to `0x0180d000` in
-  memory. Contiguous ELF copy plus RIP assignment is invalid. Inspect the exact
-  artifact with `scripts/check/inspect-up-squared-apl-dci-elf.shs`; prefer a
-  UEFI-resident mailbox loader that performs ELF and Multiboot transitions.
+  mappings and a 250-byte writable file payload expanding to `0x02fd7000` in
+  memory, ending at `0x0b000000`. Contiguous ELF copy plus RIP assignment is
+  invalid. Inspect the exact artifact with
+  `scripts/check/inspect-up-squared-apl-dci-elf.shs`; prefer a UEFI-resident
+  mailbox loader that performs ELF and Multiboot transitions.
 - **Canonical tooling:** build the exact-kernel image receipt with
   `scripts/os/build-simpleos-up-squared-usb-image.shs`; admit/write only through
   `scripts/os/write-simpleos-up-squared-usb.shs`; accept hardware only through

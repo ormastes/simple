@@ -6,14 +6,15 @@ use os.kernel.arch.x86_64.up_squared.dci_mailbox.{
     dci_storage_confirmation, dci_admit_storage_write
 }
 
-val TEST_HASH: text = "1840191f50d032d9c3b4af9b012d211ce01c1cd77b3315961a9e4b486c1c48f3"
+val TEST_HASH: text = "31ce1fb45630f3442b9d789068fb13db8c66412428c71cee096e00ccc4e1fbdf"
+val UP2_IMAGE_SIZE: u64 = 225152u64
 
 fn mailbox(state: DciCommitState, generation: u64, nonce: u64) -> DciMailboxDescriptor:
     DciMailboxDescriptor(
         schema_version: 1u32,
         generation: generation,
         nonce: nonce,
-        payload_size: 37280u64,
+        payload_size: UP2_IMAGE_SIZE,
         payload_sha256: TEST_HASH,
         state: state
     )
@@ -22,20 +23,20 @@ fn up2_plan() -> DciElfPlan:
     DciElfPlan(
         entry: 0x08000038u64,
         segments: [
-            DciLoadSegment(file_offset: 0x1000u64, file_size: 0x4b6fu64,
-                physical_address: 0x08000000u64, memory_size: 0x4b6fu64,
+            DciLoadSegment(file_offset: 0x1000u64, file_size: 0x026719u64,
+                physical_address: 0x08000000u64, memory_size: 0x026719u64,
                 flags: 5u32, align: 0x1000u64),
-            DciLoadSegment(file_offset: 0x6000u64, file_size: 0x01feu64,
-                physical_address: 0x08005000u64, memory_size: 0x01feu64,
+            DciLoadSegment(file_offset: 0x28000u64, file_size: 0x001f9au64,
+                physical_address: 0x08027000u64, memory_size: 0x001f9au64,
                 flags: 4u32, align: 0x1000u64),
-            DciLoadSegment(file_offset: 0x7000u64, file_size: 0x008au64,
-                physical_address: 0x08006000u64, memory_size: 0x0180d000u64,
+            DciLoadSegment(file_offset: 0x2a000u64, file_size: 0x00fau64,
+                physical_address: 0x08029000u64, memory_size: 0x02fd7000u64,
                 flags: 6u32, align: 0x1000u64)
         ]
     )
 
 fn allowed_ram() -> [DciMemoryRange]:
-    [DciMemoryRange(start: 0x08000000u64, size: 0x02000000u64)]
+    [DciMemoryRange(start: 0x08000000u64, size: 0x03000000u64)]
 
 fn identity(root: bool, mounted: bool, held: bool) -> DciStorageIdentity:
     DciStorageIdentity(
@@ -113,15 +114,15 @@ fn minimal_physical_elf() -> [u8]:
 
 describe "UP2 DCI mailbox admission":
     it "admits a fresh committed exact-digest payload":
-        val result = dci_admit_mailbox(mailbox(DciCommitState.Committed, 2u64, 77u64), 1u64, 77u64, 37280u64, TEST_HASH)
+        val result = dci_admit_mailbox(mailbox(DciCommitState.Committed, 2u64, 77u64), 1u64, 77u64, UP2_IMAGE_SIZE, TEST_HASH)
         expect(result.accepted).to_equal(true)
         expect(result.reason).to_equal("admitted")
 
     it "rejects partial commit, replay, nonce mismatch, and digest mismatch":
-        expect(dci_admit_mailbox(mailbox(DciCommitState.PayloadWritten, 2u64, 77u64), 1u64, 77u64, 37280u64, TEST_HASH).reason).to_equal("mailbox-not-committed")
-        expect(dci_admit_mailbox(mailbox(DciCommitState.Committed, 1u64, 77u64), 1u64, 77u64, 37280u64, TEST_HASH).reason).to_equal("mailbox-generation-replayed")
-        expect(dci_admit_mailbox(mailbox(DciCommitState.Committed, 2u64, 78u64), 1u64, 77u64, 37280u64, TEST_HASH).reason).to_equal("mailbox-nonce")
-        expect(dci_admit_mailbox(mailbox(DciCommitState.Committed, 2u64, 77u64), 1u64, 77u64, 37280u64, "a" * 64).reason).to_equal("mailbox-payload-digest-mismatch")
+        expect(dci_admit_mailbox(mailbox(DciCommitState.PayloadWritten, 2u64, 77u64), 1u64, 77u64, UP2_IMAGE_SIZE, TEST_HASH).reason).to_equal("mailbox-not-committed")
+        expect(dci_admit_mailbox(mailbox(DciCommitState.Committed, 1u64, 77u64), 1u64, 77u64, UP2_IMAGE_SIZE, TEST_HASH).reason).to_equal("mailbox-generation-replayed")
+        expect(dci_admit_mailbox(mailbox(DciCommitState.Committed, 2u64, 78u64), 1u64, 77u64, UP2_IMAGE_SIZE, TEST_HASH).reason).to_equal("mailbox-nonce")
+        expect(dci_admit_mailbox(mailbox(DciCommitState.Committed, 2u64, 77u64), 1u64, 77u64, UP2_IMAGE_SIZE, "a" * 64).reason).to_equal("mailbox-payload-digest-mismatch")
 
 describe "UP2 DCI physical ELF plan":
     it "parses p_paddr and zero-fill size from an x86-64 ELF":
@@ -140,26 +141,26 @@ describe "UP2 DCI physical ELF plan":
         expect(dci_parse_x86_64_elf(bad).unwrap_err()).to_equal("elf-magic")
 
     it "admits the exact current UP2 three-segment physical plan":
-        val result = dci_admit_load_plan(37280u64, up2_plan(), allowed_ram())
+        val result = dci_admit_load_plan(UP2_IMAGE_SIZE, up2_plan(), allowed_ram())
         expect(result.accepted).to_equal(true)
 
     it "rejects W plus X and an entry outside executable file bytes":
         var wx = up2_plan()
         wx.segments[0].flags = 7u32
-        expect(dci_admit_load_plan(37280u64, wx, allowed_ram()).reason).to_equal("load-write-execute")
+        expect(dci_admit_load_plan(UP2_IMAGE_SIZE, wx, allowed_ram()).reason).to_equal("load-write-execute")
         var bad_entry = up2_plan()
         bad_entry.entry = 0x08004fffu64
-        expect(dci_admit_load_plan(37280u64, bad_entry, allowed_ram()).reason).to_equal("load-entry-not-executable")
+        expect(dci_admit_load_plan(UP2_IMAGE_SIZE, bad_entry, allowed_ram()).reason).to_equal("load-entry-not-executable")
 
     it "rejects file truncation, overlap, and non-allowlisted RAM":
         var truncated = up2_plan()
-        truncated.segments[2].file_offset = 40000u64
-        expect(dci_admit_load_plan(37280u64, truncated, allowed_ram()).reason).to_equal("load-file-range")
+        truncated.segments[2].file_offset = 300000u64
+        expect(dci_admit_load_plan(UP2_IMAGE_SIZE, truncated, allowed_ram()).reason).to_equal("load-file-range")
         var overlap = up2_plan()
         overlap.segments[1].physical_address = 0x08004000u64
         overlap.segments[1].align = 1u64
-        expect(dci_admit_load_plan(37280u64, overlap, allowed_ram()).reason).to_equal("load-segment-overlap")
-        expect(dci_admit_load_plan(37280u64, up2_plan(), [DciMemoryRange(start: 0x10000000u64, size: 0x1000u64)]).reason).to_equal("load-memory-not-allowed")
+        expect(dci_admit_load_plan(UP2_IMAGE_SIZE, overlap, allowed_ram()).reason).to_equal("load-segment-overlap")
+        expect(dci_admit_load_plan(UP2_IMAGE_SIZE, up2_plan(), [DciMemoryRange(start: 0x10000000u64, size: 0x1000u64)]).reason).to_equal("load-memory-not-allowed")
 
 describe "UP2 DCI-staged storage admission":
     it "admits an exact idle identity with its bound challenge":

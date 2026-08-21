@@ -6,8 +6,8 @@ Date: 2026-08-21
 
 This research is specific to original `UPS-APL` Apollo Lake boards. It does not
 generalize to UP Squared Pro, V2, 6000, or later products. The existing
-SimpleOS lane builds a 37,280-byte freestanding ELF and 256 MiB GPT/FAT32 UEFI
-image. Its OVMF oracle reaches the loader, 32-bit shim, 64-bit entry, console,
+SimpleOS lane currently builds a 225,152-byte freestanding ELF and 256 MiB
+GPT/FAT32 UEFI image. Its OVMF oracle reaches the loader, 32-bit shim, 64-bit entry, console,
 VFS, shell, and a command-correlated `ls /` containing `/bin`, `/etc`, and
 `/README.txt`. That is host-side firmware evidence, not a physical-board PASS.
 
@@ -23,12 +23,12 @@ The artifact's three loadable ranges are:
 
 | File offset | Physical address | File size | Memory size | Flags |
 |---:|---:|---:|---:|:---|
-| `0x1000` | `0x08000000` | `0x4b6f` | `0x4b6f` | R-X |
-| `0x6000` | `0x08005000` | `0x01fe` | `0x01fe` | R-- |
-| `0x7000` | `0x08006000` | `0x008a` | `0x0180d000` | RW- |
+| `0x1000` | `0x08000000` | `0x026719` | `0x026719` | R-X |
+| `0x28000` | `0x08027000` | `0x001f9a` | `0x001f9a` | R-- |
+| `0x2a000` | `0x08029000` | `0x0000fa` | `0x02fd7000` | RW- |
 
-Consequently, a direct loader must zero the last segment beyond its 138 file
-bytes up to its memory size. Loading the ELF file contiguously is not loading
+Consequently, a direct loader must zero the last segment beyond its 250 file
+bytes through `0x0b000000`. Loading the ELF file contiguously is not loading
 the program image.
 
 ## Connected-host inventory
@@ -38,8 +38,10 @@ HID keyboard/mouse bridge. Its small `SmartKMLink` CD image is read-only. It is
 not a USB 3.x DbC cable and does not expose Intel DCI.
 
 The Tigard `0403:6010` is an FT2232H UART/JTAG adapter. It remains useful for
-CN16 3.3 V TTL UART, but original-UP2 CN22 is a 1.8 V CPLD/BIOS service header,
-not a documented Apollo Lake CPU JTAG chain.
+CN16 3.3 V TTL UART. Original-UP2 CN22 is a CPLD/BIOS service header whose pin 4
+is 1.8 V and whose documented JTAG path is for the FPGA; it is not a documented
+Apollo Lake CPU JTAG chain. The manual does not publish VIH/VIL limits for every
+CN22 signal, so do not infer that a generic 1.8-V adapter makes the header safe.
 
 No Intel System Debugger/System Bring-Up Toolkit, Target Connection Agent,
 `99-dci.rules`, DCI device, or xHCI DbC host endpoint is installed or enumerated
@@ -63,10 +65,11 @@ SimpleOS boot are currently **blocked**, not failed and not passed.
 
 ## Blockers for physical proof
 
-1. Genuine Intel SVT DCI DbC2/3 or standards-compliant SuperSpeed debug cable.
+1. Genuine Intel SVT DCI DbC2/3 cable/probe, or another cable explicitly
+   qualified by Intel's target-connection documentation for this DCI lane.
 2. Exact UP2 board FAB and current firmware identified and recoverable.
 3. Firmware DCI/debug consent and `IA32_DEBUG_INTERFACE` enabled and unlocked.
-4. Licensed Intel System Debugger/System Bring-Up Toolkit plus supported host.
+4. CNDA-controlled Intel System Debugger/System Bring-Up Toolkit plus supported host.
 5. A retained connection receipt proving the target, rather than a USB bridge.
 6. A reviewed DCI bootstrap contract or standard UEFI media for actual boot.
 
@@ -139,3 +142,13 @@ transition into the existing 32-bit Multiboot shim.
 The current host inventory on 2026-08-22 again exposes only Smart KM Link
 `0ea0:2211`; Tigard `0403:6010`, `/dev/ttyUSB*`, Intel toolkit directories, and
 a retained DCI connection are absent.
+
+Fresh current-artifact evidence on 2026-08-22 binds kernel SHA-256
+`31ce1fb45630f3442b9d789068fb13db8c66412428c71cee096e00ccc4e1fbdf`
+and USB-image SHA-256
+`983b74b946a4b2d42e2a44f7b56eca688ad3202ff0a271827251ccc185db9ae8`.
+The OVMF boot gate passed ordered firmware/loader/kernel markers, VFS-backed
+`ls /`, and GDB `M`/`m` write/readback. The independent scratch-NVMe gate passed
+Identify-with-zero-writes, GPT, FAT32, flush, fresh-adapter readback, and
+`/nvme/proof.txt`. These replace stale emulator receipts but do not promote
+physical UP2, CN16, DCI, or physical-drive evidence.
