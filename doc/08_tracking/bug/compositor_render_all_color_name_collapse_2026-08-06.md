@@ -119,3 +119,18 @@ claimed. Note the trap the fleet brief flags: a run killed in this state exits
 without printing a header, which through a pipe launders as exit 0 with no
 `Results:` line — visually identical to a pass. It is not one. This row still
 needs a real reproduction on a host with a free test slot.
+
+## 2026-08-21 production-consumer disambiguation
+
+The production framebuffer consumers now import
+`os.drivers.framebuffer.fb_driver.Color as FbColor` and use that alias in their
+types and static constructor calls.  Unused framebuffer `Color` imports were
+removed.  This does not claim the compiler's duplicate short-name registry is
+fixed; it makes the production ownership explicit using supported language
+syntax.
+
+An admitted pure-Simple Stage-2 native build kept the common paint `Color` and
+production compositor decorations live together, compiled 21 modules with zero
+failures, and returned the exact framebuffer channel values.  The remaining
+closure condition for this row is a focused compiler diagnostic that rejects
+or fully qualifies genuinely ambiguous unaliased duplicate declarations.

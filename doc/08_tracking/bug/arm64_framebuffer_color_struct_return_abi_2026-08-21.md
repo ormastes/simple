@@ -1,7 +1,7 @@
 # ARM64 framebuffer `Color.rgb` struct return faults before SimpleOS desktop-ready
 
 Date: 2026-08-21
-Status: OPEN — exact reproducer restored; fresh native and QEMU evidence pending
+Status: OPEN — focused native owner fixed; fresh attested QEMU evidence pending
 Owner: native aggregate-return ABI / SimpleOS ARM64 rendering
 Severity: P0 for the resumed QEMU desktop-rendering goal
 
@@ -53,3 +53,30 @@ Adjacent class coverage remains in:
 Resume only after the concurrent Phase-2 compiler build finishes and exposes
 an immutable compiler path/hash/receipt.  Do not reuse the exhausted 2026-08-11
 three-cycle sequence or the overwritten evidence directory.
+
+## 2026-08-21 focused native result
+
+The admitted pure-Simple Stage-2 compiler
+`build/bootstrap/stage2/aarch64-apple-darwin/simple` (SHA-256
+`85a2c41c313c0072f5f311cfec77e30e40b7f9448813580bd0675f8a320c95bc`)
+passed both focused native controls:
+
+- the isolated duplicate-name fixture printed `4,17,31,47,255` and exported
+  `_framebuffer_color__Color_dot_rgb`;
+- the production `os.compositor.decorations` fixture compiled 21 modules with
+  zero failures and printed the exact title, close, and border channel values.
+
+The adjacent aggregate-return class fixture also printed every declared value
+(`3,77,11,13,11,13,17,19,23,29,31`).  The old diagnosis of a universally
+broken four-byte struct return is therefore not current on this compiler.
+
+The production repair aliases framebuffer `Color` as `FbColor` at every live
+consumer, removing the ambiguous short-name binding while leaving the common
+paint `Color` available.  The underlying compiler duplicate-type-registration
+defect remains tracked separately; this bug remains open only because the
+attested kernel/QEMU evidence has not yet run.
+
+A direct full-kernel diagnostic attempt exited 143 after 48 seconds with an
+empty retained log and no ELF, before the configured 870-second worker limit.
+It was not repeated.  QEMU host readiness independently passes with native HVF,
+`virt`, and `ramfb` support.
