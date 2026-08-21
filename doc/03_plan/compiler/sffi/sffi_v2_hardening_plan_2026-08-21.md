@@ -295,10 +295,10 @@ Current evidence after the thread synchronization boundary migration:
 
 - 3,964 distinct symbols in the current backing census, including 3,962
   compiler-owned canonical symbols;
-- 14,943 declaration sites;
-- 14,409 sites have neither an explicit FFI-unsafe tag nor a local contract;
+- 14,942 declaration sites;
+- 14,407 sites have neither an explicit FFI-unsafe tag nor a local contract;
 - 502 sites declare a typed/documented contract but lack the unsafe tag;
-- 20 thread/CPU synchronization declarations now carry explicit FFI authority
+- 21 thread/CPU synchronization declarations now carry explicit FFI authority
   but still require canonical ABI-contract metadata;
 - 12 checked declarations carry both explicit FFI authority and a
   typed result contract; their cryptographic artifact evidence remains open;
@@ -308,7 +308,7 @@ Current evidence after the thread synchronization boundary migration:
 - among `rt_*`/`spl_*` declarations, 1,855 sites reference symbols classified
   genuinely missing and 321 are backed only in owned C runtime source.
 
-These are migration inputs, not 14,943 independent implementations. The audit
+These are migration inputs, not 14,942 independent implementations. The audit
 now hashes normalized declaration shapes and groups them by symbol. The next
 tooling step replaces the text-derived shape with the resolved HIR ABI hash,
 rejects the 401 conflict groups, and converts compatibility modules to
@@ -322,6 +322,12 @@ contains `sffi`, closing the prior declaration-local blind spot. Imported HTTP
 server and web-framework thread calls now use lexical FFI blocks. Those blocks
 add no helper dispatch, allocation, lookup, or synchronization to the existing
 native call path.
+
+Thread-pool construction no longer treats a zero/invalid native worker handle
+as a successfully degraded pool. The unused duplicate thread-create extern was
+removed; the remaining spawn ABI is explicitly FFI-unsafe, called in a lexical
+block, and fails closed during pool initialization. Task submission and worker
+execution hot paths are unchanged.
 
 Performance constraint: the legacy native integer call remains allocation-free.
 The lint guard extracts its body and fails if `rt_array_new`, `Vec`, maps,

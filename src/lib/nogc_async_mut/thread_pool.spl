@@ -7,10 +7,8 @@ use std.thread_sffi.{thread_cpu_count, thread_sleep, thread_yield, ThreadHandle}
 use std.async_host.thread_safe_queue.{ThreadSafeQueue}
 use std.concurrent.multicore_green.{MulticoreGreenHandle, multicore_green_spawn}
 
-# Direct import of thread creation SFFI
-extern fn spl_thread_create(entry_point: i64, arg: i64) -> i64
-
 # Thread pool worker spawn helper (C wrapper)
+@unsafe(reason: "native thread-pool worker ABI", capabilities: [ffi])
 extern fn spl_thread_pool_spawn_worker(pool_id: i64) -> i64
 
 class ThreadPool:
@@ -74,19 +72,17 @@ class ThreadPool:
 
         # Spawn worker threads
         # NOTE: Thread spawning requires runtime rebuild (bin/simple build --release)
-        # Current limitation: extern functions not available in interpreter
-        # When runtime is rebuilt, workers will spawn automatically
         var handles: [ThreadHandle] = []
 
         # Spawn workers using C helper function
-        # Note: This only works in compiled mode (not interpreter)
         for i in 0..workers:
-            val handle_id = spl_thread_pool_spawn_worker(pool_id)
-            if handle_id > 0:
-                val handle = ThreadHandle.from_raw(handle_id)
-                handles = handles.push(handle)
-            # If handle_id is 0, worker spawn failed (interpreter mode or error)
-            # Continue anyway - pool can still work without threads for testing
+            var handle_id: i64 = 0
+            unsafe(capabilities: [ffi]):
+                handle_id = spl_thread_pool_spawn_worker(pool_id)
+            if handle_id <= 0:
+                panic("E-SFFI-THREAD-POOL-SPAWN: native worker provider failed for pool {pool_id}, worker {i}")
+            val handle = ThreadHandle.from_raw(handle_id)
+            handles = handles.push(handle)
 
         if not handles.is_empty():
             pool = ThreadPool(
