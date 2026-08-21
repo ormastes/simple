@@ -40,10 +40,24 @@ Priority order (highest value per effort first — specs already closest to mode
 
 | Batch | Files | What "modern" means here | Done |
 |---|---|---|---|
-| B1 binary layout specs | `binary_layout_spec`, `binary_layout_schema_spec`, `binary_compare_spec`, `binary_domains_spec`, `binary_embedded_domains_spec`, `binary_protocol_domains_spec`, `binary_algorithm_domains_spec`, `format/stacked_md_table_spec` | bind file-top `@req` IDs inside each scenario (`# @req: REQ-…`), authored purpose docstring, outcome-named its, step() in narrative scenarios | pending |
-| B2 evidence profiles/UI | `terminal_grid_spec`, `action_trace_spec`, `text_protocol_spec`, `scene_profile_spec`, `simulation_profile_spec`, `audio_profile_spec`, `ml_profile_spec`, `json_document_spec`, `typed_evidence_oracle_spec`, `untyped_capture_spec`, `legacy_facade_spec`, `manual_render_spec`, `regeneration_gate_spec`, `exec_capture_spec`, `file_capture_spec`, `format/*` (non-binary) | same | pending |
-| B3 spipe examples | `test/03_system/tools/spipe/examples/*.spl` (12 specs incl. live_* captures) | same; these are the reference manuals — keep byte-identical regeneration green | pending |
-| B4 pass_todo blockers | the 40 specs listed by `grep -rl pass_todo test/ --include='*_spec.spl'` | replace unconditional pending scaffold with a real oracle or delete the spec (per testing.md ORA-001 policy) | pending |
+| B1 binary layout specs | `binary_layout_spec`, `binary_layout_schema_spec`, `binary_compare_spec`, `binary_domains_spec`, `binary_embedded_domains_spec`, `binary_protocol_domains_spec`, `binary_algorithm_domains_spec`, `format/stacked_md_table_spec` | bind file-top `@req` IDs inside each scenario (`# @req: REQ-…`), authored purpose docstring, outcome-named its, step() in narrative scenarios | **DONE** `70d276e000f` — all 8 uncapped, raw 68-78 → 81-85; all green (66 examples, 0 failed) |
+| B2 evidence profiles/UI | `terminal_grid_spec`, `action_trace_spec`, `text_protocol_spec`, `scene_profile_spec`, `simulation_profile_spec`, `audio_profile_spec`, `ml_profile_spec`, `json_document_spec`, `typed_evidence_oracle_spec`, `untyped_capture_spec`, `legacy_facade_spec`, `manual_render_spec`, `regeneration_gate_spec`, `exec_capture_spec`, `file_capture_spec`, `format/*` (non-binary) | same | **DONE** `3d804e0fbc5` — 15 files, blockers 0, raw 68-80 → 72-89; 4 files keep TRC-001 (no REQ id exists to bind); 14/15 specs RED pre-existing (seed `undefined field 'mode'` bug, identical counts pre/post edit — NOT caused by this batch) |
+| B3 spipe examples | `test/03_system/tools/spipe/examples/*.spl` (12 specs incl. live_* captures) | same; these are the reference manuals — keep byte-identical regeneration green | **DONE** `e6ab8c5cdc6` — 5 TRC-003 blockers cleared, raw 74-82 → 83-89; regeneration gate `PASS — 4 example(s), 0 failed`; several specs RED pre-existing (same seed bug, verified against pristine HEAD) |
+| B4 pass_todo blockers | the 40 specs listed by `grep -rl pass_todo test/ --include='*_spec.spl'` | replace unconditional pending scaffold with a real oracle or delete the spec (per testing.md ORA-001 policy) | **DONE** `14121ffde6a` — 39/40 were scorer FALSE POSITIVES (`_is_pending` matched any mention of `pass_todo`/`pending`, incl. fixture strings and expect args); fixed to statement-position detection only. ORA-001 count 40 → 1. Remaining RED: `test/feature/usage/pass_variants_spec.spl` genuinely executes placeholder statements by design — needs an `@exercises:` scorer exemption (follow-up) |
+
+## Post-batch verification (2026-08-21)
+
+- Oracle blockers in `test/01_unit/lib/common/spec/evidence/`: 0 (grep ORA-001\|ORA-002 = 0 across all 23 specs).
+- `scoring_spec` 19/19, `rule_coverage_spec` 5/5 after the B4 scorer change (run in the main worktree).
+- B3 dir scan: 0 blockers across all 12 specs (cache cleared).
+- Pre-existing seed bug NOT fixed (out of scope, not easy): semantic error `undefined field 'mode': cannot access field on value of type 'function'` — fires in `std.common.spec.evidence.model` consumers (`check.mode` field access at model.spl:243+ resolves the field as a function under the current seed). Reds ~15 evidence specs + several spipe example specs, identical before/after all batches. Filed as the follow-up below.
+
+## Follow-ups (not done this session)
+
+1. Seed bug: `.mode` struct-field access mis-resolved as function in evidence model consumers.
+2. Scan-cache keying: fold scorer/rule version into `sspec_cache_identity` so cache invalidates on scorer change.
+3. `@exercises:` exemption directive for specs whose subject IS placeholder-statement execution (`pass_variants_spec`).
+4. TRC-001 for the 4 evidence specs with no REQ identity: author stable REQ ids, then bind.
 
 Rules for every batch: only edit the listed specs; never weaken assertions; each touched spec must still pass `bin/simple test <spec>` (results line required, not exit 0); rescan with `bin/simple src/app/sspec_maintain/main.spl scan <spec>` (cache cleared) and record before/after `raw=`; commit per batch on main via the main worktree.
 
