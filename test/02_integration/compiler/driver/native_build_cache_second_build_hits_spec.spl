@@ -1,0 +1,42 @@
+use std.spec
+use app.io.cli_compile.{cli_native_build}
+use std.io.{file_exists, file_read}
+use std.io_runtime.{dir_create_all}
+use app.io.sysinfo_ops.{getpid}
+
+# Object-cache regression (2026-08-21, stage-1 bootstrap lane): a second,
+# byte-identical native-build reported `0 hits, N misses` and rewrote every
+# object because `build_cache.sdn` was persisted with `entries: []`. The
+# per-capsule checkpoint (driver_native_collect_capsule_result_v1) received
+# the BuildCache as a call argument, so its update_entry never reached the
+# caller's instance, and the caller's final save() clobbered the file with an
+# empty cache. The entries are now recorded on the caller's cache before save.
+# Pre-fix: build_cache.sdn has no `source:` rows. Post-fix: one per module.
+
+val FIXTURE_ROOT = "test/02_integration/compiler/driver/fixtures/native_build_cache"
+
+fn build_args(root: text, entry: text, cache_dir: text, output: text) -> [text]:
+    ["native-build", "--source", root, "--entry-closure", "--threads", "2",
+     "--cache-dir", cache_dir, "--entry", entry, "--output", output]
+
+fn count_rows(content: text, needle: text) -> i64:
+    content.split(needle).len() - 1
+
+describe "native-build object cache":
+    slow_it "persists per-module entries so a second identical build hits":
+        val run_id = getpid()
+        val root = "build/tmp/native_build_cache_spec_{run_id}"
+        val cache_dir = "{root}/cache"
+        expect(dir_create_all(root)).to_equal(true)
+        val entry = "{FIXTURE_ROOT}/main.spl"
+        val first = cli_native_build(build_args(FIXTURE_ROOT, entry, cache_dir, "{root}/out1"))
+        expect(first).to_equal(0)
+        val cache_file = "{cache_dir}/build_cache.sdn"
+        expect(file_exists(cache_file)).to_equal(true)
+        val after_first = file_read(cache_file)
+        expect(count_rows(after_first, "source: \"")).to_equal(3)
+        expect(after_first.contains("util_a.spl")).to_equal(true)
+        val second = cli_native_build(build_args(FIXTURE_ROOT, entry, cache_dir, "{root}/out2"))
+        expect(second).to_equal(0)
+        expect(file_exists("{root}/out2")).to_equal(true)
+        expect(count_rows(file_read(cache_file), "source: \"")).to_equal(3)
