@@ -107,19 +107,22 @@ fn print_help():
     print "  --release            Release build"
     print "  -h, --help           Show this help"
 
-fn native_build_parse_secs(s: text) -> i64:
+pub fn native_build_parse_secs(s: text) -> i64:
     # Safe numeric parse (avoids int() erroring on a non-numeric --timeout value).
+    # Digit value = code point - 48, NOT `int(ch)`: on the seed interpreter
+    # `int("3")` is the code point 51, so `--timeout 36000` parsed as 569328 s
+    # (run6 stage-1, 2026-08-21) and `--timeout 1` as 49 s.
     var n = 0
     var ok = false
     for ch in s:
         if ch >= "0" and ch <= "9":
-            n = n * 10 + int(ch)
+            n = n * 10 + (ch.char_code_at(0) - 48)
             ok = true
         else:
             return -1
     if ok: n else: -1
 
-fn native_build_timeout_ms(args: [text]) -> i64:
+pub fn native_build_timeout_ms(args: [text]) -> i64:
     # Worker subprocess timeout. Honors --timeout <secs> (also forwarded to the
     # worker as its per-file budget); defaults large because the old hardcoded
     # 120s killed any real multi-file freestanding build mid-compile.
@@ -375,7 +378,13 @@ fn run_native_build_worker(args: [text]) -> i64:
         eprint_bounded(stderr)
         native_build_print_failure_hints(stdout, stderr)
         # Keep the real cause visible after stderr truncation.
-        if code == -1:
+        if code == -1 and not stderr.contains("[TIMEOUT:"):
+            # -1 without the wrapper's [TIMEOUT:] marker is NOT a timeout: the
+            # wrapper died by a signal (status.code() is None) or the wait
+            # itself failed. Say so instead of blaming --timeout (run6, 2026-08-21:
+            # reported "timed out after 569328s" at 2742 s of wall).
+            eprint "error: native-build worker wrapper exited abnormally (signal or wait failure, code -1) before producing a binary; its process group has been terminated."
+        elif code == -1:
             val secs = native_build_timeout_ms(args) / 1000
             eprint "error: native-build worker timed out after {secs}s before producing a binary."
             eprint "  The interpreted worker loads the whole compiler + LLVM import graph before any"

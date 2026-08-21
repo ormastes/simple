@@ -123,6 +123,8 @@ fn process_run_timeout_unix(cmd: text, args: [text], timeout_ms: i64) -> (text, 
         val arg_escaped = arg.replace("'", "'\\''")
         quoted_parts.push("'{arg_escaped}'")
     val cmd_line = quoted_parts.join(" ")
+    # cmd_line is single-quoted per part; inside the double-quoted inner `sh -c`
+    # string the outer shell must not expand anything, so escape \ " $ `.
     val redirected_cmd = "exec {cmd_line} > '{stdout_file}' 2> '{stderr_file}'"
 
     proc_slot_acquire()
@@ -203,6 +205,17 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
     val stdout_file = "{temp_dir}/simple_out_{pid_str}_{time_str}.txt"
     val stderr_file = "{temp_dir}/simple_err_{pid_str}_{time_str}.txt"
 
+    # The worker tree (timeout -> stdbuf -> cmd -> its children) runs in its
+    # own SESSION: `setsid -w sh -c 'echo $$ > pgid_file; exec timeout ...'`.
+    # The inner sh is the session/process-group leader and records its pid, so
+    # _process_kill_group can reach every descendant even after the wrapper
+    # itself is gone. Without this a wrapper killed by SIGKILL left the real
+    # native-build worker orphaned at 100% CPU for 25 min after the driver
+    # exited (run6, 2026-08-21). `setsid -w` keeps the wrapper alive (and its
+    # exit code = the tree's) whether setsid forks (spawned child already a
+    # group leader) or execs in place; GNU timeout 9.4 does NOT reliably
+    # create a group of its own, so the wrapper pid cannot be used as the gid.
+    val pgid_file = "{temp_dir}/simple_pgid_{pid_str}_{time_str}.txt"
     var quoted_parts: [text] = ["timeout", "--kill-after=10s", "{timeout_secs}s", "stdbuf", "-oL", "-eL"]
     val cmd_escaped = cmd.replace("'", "'\\''")
     quoted_parts.push("'{cmd_escaped}'")
@@ -210,7 +223,10 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
         val arg_escaped = arg.replace("'", "'\\''")
         quoted_parts.push("'{arg_escaped}'")
     val cmd_line = quoted_parts.join(" ")
-    val redirected_cmd = "exec {cmd_line} > '{stdout_file}' 2> '{stderr_file}'"
+    # cmd_line is single-quoted per part; inside the double-quoted inner `sh -c`
+    # string the outer shell must not expand anything, so escape  " $ `.
+    val inner_cmd = cmd_line.replace("\\", "\\\\").replace("\"", "\\\"").replace("$", "\\$").replace("`", "\\`")
+    val redirected_cmd = "exec setsid -w sh -c \"echo \\$\\$ > '{pgid_file}'; exec {inner_cmd}\" > '{stdout_file}' 2> '{stderr_file}'"
 
     proc_slot_acquire()
     val pid = rt_process_spawn_async("/bin/sh", ["-c", redirected_cmd])
@@ -261,6 +277,12 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
                     wrapper_code = rt_process_wait(pid, 5000)
                     break
     proc_slot_release()
+    if wrapper_code != 0:
+        # Timeout, relay error, or a wrapper killed by a signal (code -1): make
+        # sure nothing from the spawned tree survives the failure.
+        _process_kill_group(pgid_file)
+    if file_exists(pgid_file):
+        file_delete(pgid_file)
 
     var stdout = ""
     var stderr = ""
@@ -277,6 +299,24 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
         (stdout, stderr + "\n[TIMEOUT: Process killed after {timeout_secs}s]", -1)
     else:
         (stdout, stderr, wrapper_code)
+
+fn _process_kill_group(pgid_file: text):
+    # Best effort: the session leader recorded its pid (= the SESSION id of the
+    # whole worker tree) in pgid_file. Kill by session (`pkill -s`), not by
+    # process group: GNU timeout 9.4 puts its command into a fresh group of
+    # its own, so a group kill on the leader pid misses the real worker.
+    # TERM first, then KILL.
+    if not file_exists(pgid_file):
+        return
+    val pgid = rt_file_read_text(pgid_file).trim()
+    if pgid == "":
+        return
+    val debug = (env_get("SIMPLE_PROC_DEBUG") ?? "") == "1"
+    unsafe(capabilities: [ffi]):
+        val (_o1, e1, c1) = rt_process_run_timeout("pkill", ["-TERM", "-s", "{pgid}"], 2000)
+        val (_o2, e2, c2) = rt_process_run_timeout("sh", ["-c", "sleep 0.5; pkill -KILL -s {pgid} 2>/dev/null; true"], 5000)
+        if debug:
+            eprint("[proc-debug] kill-group pgid={pgid} term_code={c1} term_err={e1.trim()} kill_code={c2} kill_err={e2.trim()}")
 
 fn _process_run_with_limits(cmd: text, args: [text], timeout_ms: i64, memory_bytes: i64, cpu_seconds: i64, max_fds: i64, max_procs: i64, max_output_bytes: i64) -> ProcessResult:
     # Execute a process with resource limits enforced via ulimit.

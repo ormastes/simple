@@ -1,7 +1,7 @@
 # native-build worker timeout fires far earlier than the configured budget
 
 - **ID:** native_build_worker_timeout_misaccounted_2026-08-09
-- Status: OPEN (P2)
+- Status: FIXED 2026-08-21 (digit value = code point - 48; `native_build_parse_secs`/`native_build_timeout_ms` made `pub` so the spec can import them). See also doc/08_tracking/bug/native_build_timeout_not_forwarded_to_worker_2026-08-21.md for the run6 recurrence and the orphaned-worker half.
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Found by:** gui/web/2D vulkan showcase sweep, 2026-08-09
 - **Area:** `src/app/cli/native_build*` worker supervision

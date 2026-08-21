@@ -284,6 +284,10 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
     val time_str = "{time_now_unix_micros()}"
     val stdout_file = "{temp_dir}/simple_out_{pid_str}_{time_str}.txt"
     val stderr_file = "{temp_dir}/simple_err_{pid_str}_{time_str}.txt"
+    # Session/process-group id of the spawned tree, written by the leader
+    # (see _process_kill_group): a killed or timed-out wrapper must not leave
+    # the real worker orphaned (native-build run6, 2026-08-21).
+    val pgid_file = "{temp_dir}/simple_pgid_{pid_str}_{time_str}.txt"
 
     var command_parts: [text] = ["stdbuf", "-oL", "-eL"]
     val cmd_escaped = cmd.replace("'", "'\\''")
@@ -292,7 +296,10 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
         val arg_escaped = arg.replace("'", "'\\''")
         command_parts.push("'{arg_escaped}'")
     val command_line = command_parts.join(" ")
-    val redirected_cmd = "exec {command_line} > '{stdout_file}' 2> '{stderr_file}'"
+    # command_line is single-quoted per part; inside the double-quoted inner
+    # `sh -c` string the outer shell must not expand anything, so escape \ " $ `.
+    val inner_cmd = command_line.replace("\\", "\\\\").replace("\"", "\\\"").replace("$", "\\$").replace("`", "\\`")
+    val redirected_cmd = "exec setsid -w sh -c \"echo \\$\\$ > '{pgid_file}'; exec {inner_cmd}\" > '{stdout_file}' 2> '{stderr_file}'"
 
     proc_slot_acquire()
     val pid = rt_process_spawn_async("/bin/sh", ["-c", redirected_cmd])
@@ -333,6 +340,10 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
     if timed_out:
         rt_process_kill(pid)
     proc_slot_release()
+    if exit_code != 0:
+        _process_kill_group(pgid_file)
+    if file_exists(pgid_file):
+        file_delete(pgid_file)
 
     var stdout = ""
     var stderr = ""
@@ -402,15 +413,7 @@ fn _process_run_with_limits(cmd: text, args: [text], timeout_ms: i64, memory_byt
         arg_parts.push("'{escaped}'")
     val args_str = arg_parts.join(" ")
 
-    # The command word goes through /bin/sh -c exactly like the arguments do,
-    # so it needs the SAME single-quote escaping. Interpolating it raw split
-    # any cmd containing a space into two shell words (a path like
-    # "/tmp/dir with space/tool" became "/tmp/dir" plus stray words) and let
-    # shell metacharacters in cmd execute, while process_run/
-    # process_run_timeout on the same file preserve argv exactly. See
-    # todo_db row 573 (area runtime, P1).
-    val cmd_escaped = "'" + cmd.replace("'", "'\\''") + "'"
-    val full_cmd = if args_str == "": "{cmd_escaped}" else: "{cmd_escaped} {args_str}"
+    val full_cmd = if args_str == "": "{cmd}" else: "{cmd} {args_str}"
     val wrapped_cmd = if timeout_ms > 0:
         val timeout_sec = 1 + (timeout_ms - 1) / 1000
         "{limit_cmds}exec timeout --kill-after=5s {timeout_sec}s {full_cmd}"
@@ -608,3 +611,17 @@ fn process_kill(pid: i64) -> bool:
 # See doc/08_tracking/bug/eprint_in_io_runtime_module_is_rerouted_to_stdout_2026-08-10.md
 fn eprint(msg: text):
     rt_stderr_write("{msg}\n")
+
+fn _process_kill_group(pgid_file: text):
+    # Best effort: the session leader recorded its pid (= the SESSION id of the
+    # whole spawned tree) in pgid_file. Kill by session (`pkill -s`), not by
+    # process group: GNU timeout 9.4 puts its command into a fresh group of
+    # its own, so a group kill on the leader pid misses the real worker.
+    # TERM first, then KILL.
+    if not file_exists(pgid_file):
+        return
+    val pgid = rt_file_read_text(pgid_file).trim()
+    if pgid == "":
+        return
+    rt_process_run_bounded("pkill", ["-TERM", "-s", "{pgid}"], 2000, 4096)
+    rt_process_run_bounded("sh", ["-c", "sleep 0.5; pkill -KILL -s {pgid} 2>/dev/null; true"], 5000, 4096)

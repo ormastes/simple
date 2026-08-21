@@ -1,0 +1,32 @@
+use std.spec
+use app.io.process_ops.{process_run_timeout_live, process_run_timeout}
+
+# doc/08_tracking/bug/native_build_timeout_not_forwarded_to_worker_2026-08-21.md
+# process_run_timeout_live is the native-build worker runner. Three contracts:
+# a 2 s worker under a 60 s budget is NOT a timeout; a 3 s worker under a 1 s
+# budget IS one (code -1 + `[TIMEOUT:` marker); and when the wrapper dies by
+# an external SIGKILL the worker tree must not be left running (run6 2026-08-21
+# left the phase-2 worker at 100% CPU for 25 min after the driver exited).
+fn survivors(tag: text) -> i64:
+    val (out, _err, _code) = process_run_timeout("pgrep", ["-f", tag], 3000)
+    out.trim().split("\n").len() - (if out.trim() == "": 1 else: 0)
+
+describe "process_run_timeout_live":
+    it "does not time out a 2 s worker under a 60 s budget":
+        val (_out, err, code) = process_run_timeout_live("sleep", ["2"], 60000)
+        expect(code).to_equal(0)
+        expect(err.contains("[TIMEOUT:")).to_equal(false)
+
+    it "times out a 3 s worker under a 1 s budget with the marker":
+        val (_out, err, code) = process_run_timeout_live("sleep", ["3"], 1000)
+        expect(code).to_equal(-1)
+        expect(err.contains("[TIMEOUT:")).to_equal(true)
+
+    it "terminates the whole worker tree when the worker exits non-zero":
+        # A worker that leaves a background grandchild behind and fails: the
+        # grandchild must not outlive the call (run6 orphan shape).
+        val tag = "sleep 37.0731"
+        val (_out, err, code) = process_run_timeout_live("sh", ["-c", "{tag} & exit 3"], 60000)
+        expect(code).to_equal(3)
+        expect(err.contains("[TIMEOUT:")).to_equal(false)
+        expect(survivors(tag)).to_equal(0)
