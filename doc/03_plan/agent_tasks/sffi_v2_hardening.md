@@ -87,3 +87,8 @@ passing placeholder.
     O(1), zero-allocation hot path. Next replace poll/wait's ambiguous zero
     sentinel with typed status and migrate its raw compatibility consumers;
     keep those adapters unsafe until that migration is complete.
+14. SDL2 poll/wait now reserve negative status for provider failure, lift it
+    into `EventBatch.is_valid`, and disable direct consumers after failure with
+    no extra native call. Next distinguish SDL wait timeout from SDL internal
+    error and replace the remaining integer compatibility adapter with a typed
+    result before treating event admission as safe.

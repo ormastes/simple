@@ -869,7 +869,7 @@ static int64_t rt_sdl2_event_code(void) {
 }
 
 int64_t rt_sdl2_poll_event(void) {
-    SDL2_REQUIRE(0);
+    SDL2_REQUIRE(-1);
     while (SDL_PollEvent(&g_last_event)) {
         int64_t code;
         g_last_event_valid = 1;
@@ -881,7 +881,7 @@ int64_t rt_sdl2_poll_event(void) {
 }
 
 int64_t rt_sdl2_wait_event(int64_t timeout_ms) {
-    SDL2_REQUIRE(0);
+    SDL2_REQUIRE(-1);
     int timeout = timeout_ms < 0 ? -1 :
                   timeout_ms > INT_MAX ? INT_MAX : (int)timeout_ms;
     for (;;) {

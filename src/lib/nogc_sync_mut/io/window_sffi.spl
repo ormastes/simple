@@ -45,9 +45,9 @@ extern fn rt_sdl2_present_rgba(window_handle: i64, pixels: [i64], width: i64, he
 # Returns event type: 0=none, 1=quit, 2=keydown, 3=keyup,
 #   4=mousemotion, 5=mousedown, 6=mouseup, 7=mousewheel,
 #   8=windowevent, 9=textinput
-@unsafe(reason: "raw SDL2 provider ABI; zero sentinel means no supported event or unavailable provider", capabilities: [ffi])
+@unsafe(reason: "raw SDL2 provider ABI; negative status sentinel means unavailable provider and zero means no supported event", capabilities: [ffi])
 extern fn rt_sdl2_poll_event() -> i64
-@unsafe(reason: "raw SDL2 provider ABI; zero sentinel means timeout, no supported event, or unavailable provider", capabilities: [ffi])
+@unsafe(reason: "raw SDL2 provider ABI; negative status sentinel means unavailable provider and zero means timeout or no supported event", capabilities: [ffi])
 extern fn rt_sdl2_wait_event(timeout_ms: i64) -> i64
 @unsafe(reason: "raw SDL2 provider ABI; zero sentinel requires the cached event to be keyboard input", capabilities: [ffi])
 extern fn rt_sdl2_event_key_code() -> i64
@@ -179,22 +179,35 @@ struct EventBatch:
     handle: i64
     count: i64
     event_loop: EventLoop
+    is_valid: bool
 
-@unsafe(reason: "minimal direct SDL2 provider call", capabilities: [ffi])
 fn window_poll_events(event_loop: EventLoop, max_events: i64) -> EventBatch:
     if not event_loop.is_valid or max_events <= 0:
-        EventBatch(handle: 0, count: 0, event_loop: event_loop)
+        EventBatch(handle: 0, count: 0, event_loop: event_loop, is_valid: false)
     else:
-        val handle = rt_sdl2_poll_event()
-        EventBatch(handle: handle, count: if handle == 0: 0 else: 1, event_loop: event_loop)
+        var handle: i64 = -1
+        unsafe(capabilities: [ffi]):
+            handle = rt_sdl2_poll_event()
+        EventBatch(
+            handle: if handle < 0: 0 else: handle,
+            count: if handle < 0: 0 elif handle == 0: 0 else: 1,
+            event_loop: event_loop,
+            is_valid: handle >= 0
+        )
 
-@unsafe(reason: "minimal direct SDL2 provider call", capabilities: [ffi])
 fn window_wait_events(event_loop: EventLoop, timeout_ms: i64) -> EventBatch:
     if not event_loop.is_valid:
-        EventBatch(handle: 0, count: 0, event_loop: event_loop)
+        EventBatch(handle: 0, count: 0, event_loop: event_loop, is_valid: false)
     else:
-        val handle = rt_sdl2_wait_event(timeout_ms)
-        EventBatch(handle: handle, count: if handle == 0: 0 else: 1, event_loop: event_loop)
+        var handle: i64 = -1
+        unsafe(capabilities: [ffi]):
+            handle = rt_sdl2_wait_event(timeout_ms)
+        EventBatch(
+            handle: if handle < 0: 0 else: handle,
+            count: if handle < 0: 0 elif handle == 0: 0 else: 1,
+            event_loop: event_loop,
+            is_valid: handle >= 0
+        )
 
 # --- Window Configuration ---
 

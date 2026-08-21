@@ -468,3 +468,22 @@ added. Simple syntax and the dedicated event contract/performance-shape audit
 pass. The refreshed inventory records 173 `unsafe_contract_declared` rows and
 303 `unsafe_contract_missing` rows. Provider signing and the ambiguous poll
 sentinel remain open, so SDL event handling is contracted but not verified.
+
+SDL2 poll and wait previously used `0` both when no event was available and
+when the dynamic provider could not be loaded. The C ABI now reserves `-1` for
+provider admission failure without changing successful event codes. The
+canonical `EventBatch` carries an explicit `is_valid` bit, maps failure away
+from a usable event handle, and performs the raw call in a lexical unsafe
+scope. The compositor and Web UI direct consumers disable their provider after
+the first negative status, preventing both fabricated “no event” and a tight
+failure-retry loop.
+
+The event hot path still makes exactly one `SDL_PollEvent` or `SDL_WaitEvent`
+call and adds only scalar comparisons already required to classify the event;
+there is no allocation, lock, error-string query, hash, or lookup. The
+optimized C build, three Simple syntax checks, and poll/event source audits
+pass. Inventory classification remains 173 contracted and 303 uncontracted
+unsafe declarations because poll/wait were already documented in the previous
+slice. SDL internal wait errors are still indistinguishable from timeouts, and
+the raw compatibility adapter still exposes integer status, so this boundary
+is fail-closed for provider absence but not fully verified.
