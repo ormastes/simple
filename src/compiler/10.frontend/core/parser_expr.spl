@@ -795,11 +795,19 @@ fn try_skip_ident_generic_args():
     # limitation. Parity: Rust postfix.rs try_skip_ident_generic_args.
     # doc/08_tracking/bug/const_generic_argument_rejected_in_constructor_call_2026-08-17.md
     var saw_const_arg = false
+    # Once a numeric candidate has been consumed, only a comma or a closing
+    # angle may follow. Comparison chains such as `n < 0 or n > (limit)`
+    # otherwise walk through `or n` as if those tokens were more type args and
+    # falsely confirm a const-generic call at the final `>(`.
+    var const_arg_needs_separator = false
     while true:
         val k = par_kind_get()
         if k == TOK_INT_LIT:
+            if const_arg_needs_separator:
+                break
             saw_const_arg = true
             parser_advance()
+            const_arg_needs_separator = true
         elif k == 83:
             # TOK_GT '>' — depth decreases
             depth = depth - 1
@@ -832,11 +840,17 @@ fn try_skip_ident_generic_args():
             # TOK_LT / TOK_LT_GENERIC — nested generic opens
             depth = depth + 1
             parser_advance()
+            const_arg_needs_separator = false
+        elif k == 160:
+            # TOK_COMMA separates generic arguments.
+            parser_advance()
+            const_arg_needs_separator = false
+        elif const_arg_needs_separator:
+            # A token other than comma or a closing angle after a numeric
+            # candidate proves this was a comparison, not generic arguments.
+            break
         elif k == 6:
             # TOK_IDENT — type name
-            parser_advance()
-        elif k == 160:
-            # TOK_COMMA
             parser_advance()
         elif (k == 62 or k == 120 or k == 144 or k == 145 or
               k == 130 or k == 140 or k == 141 or k == 164 or k == 162):
