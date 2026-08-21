@@ -312,6 +312,16 @@ keeps one existing byte extraction and one OS operation. A focused sabotage
 test passes, all raw file declarations are tagged `unsafe(ffi)`, and a
 source-only audit enforces both properties.
 
+The low-level asynchronous I/O driver bridge indexed arguments directly and
+coerced wrong types to zero, empty text, or an empty C string. It now uses an
+explicit Rust `unsafe extern` block, checked scalar/text/C-string decoding,
+and bounded text spans for send/write operations. Embedded NUL paths,
+negative/overlong lengths, malformed handles, null-positive-length poll data,
+and null backend names fail before lifting or invocation. The dispatch helper
+is inline; valid payloads remain borrowed and each operation performs one FFI
+call without copying. A focused pre-FFI sabotage test and source-only audit
+pass.
+
 All 15 remaining legacy sign/verify declarations in the canonical signature
 module are now explicitly `unsafe(ffi)` and document their sentinel contract:
 verification collapses malformed bridge input into `0`, while signing may

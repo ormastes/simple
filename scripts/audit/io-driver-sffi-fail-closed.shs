@@ -1,0 +1,27 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+bridge="$root/src/compiler_rust/compiler/src/interpreter_extern/io_driver.rs"
+failed=0
+
+if grep -n -E '_ => (0|\(b"\\0"|CString::default\(\))|unwrap_or_default\(\)' "$bridge"; then
+    echo "I/O driver SFFI contains a fabricated argument fallback" >&2
+    failed=1
+fi
+if ! grep -q '^unsafe extern "C"' "$bridge"; then
+    echo "I/O driver foreign declarations must use an unsafe extern block" >&2
+    failed=1
+fi
+if ! grep -q 'contains an embedded NUL' "$bridge" ||
+   ! grep -q 'exceeds text byte length' "$bridge" ||
+   ! grep -q 'invalid foreign data descriptor' "$bridge"; then
+    echo "I/O driver string/span/result contracts are incomplete" >&2
+    failed=1
+fi
+
+if [ "$failed" -ne 0 ]; then
+    exit 1
+fi
+
+echo "I/O driver SFFI fail-closed audit: PASS"
