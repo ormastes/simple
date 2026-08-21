@@ -1057,8 +1057,6 @@ int         rt_mkdir_p(const char* path);
 int64_t spl_dlopen(int64_t path_value);
 int64_t spl_dlsym(int64_t handle, int64_t name_value);
 int64_t spl_dlclose(int64_t handle);
-int64_t spl_wffi_try_call_i64_c(void* fptr, const int64_t* args, int64_t nargs, int64_t* out);
-int64_t spl_wffi_call_i64_c(void* fptr, int64_t* args, int64_t nargs);
 
 /* ===== JIT Exec Manager (stubs) ===== */
 

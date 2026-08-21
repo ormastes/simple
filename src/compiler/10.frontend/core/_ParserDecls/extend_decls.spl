@@ -33,6 +33,7 @@ use compiler.core.parser.{parser_skip_newlines, parser_skip_newlines_and_semicol
 use compiler.core.parser.{parser_parse_type}
 use compiler.core.tokens.{TOK_KW_DYN, TOK_DOT}
 use compiler.core.types.{named_type_register, named_type_find}
+use compiler.frontend.core.flat_pool_codec.*
 
 # One entry per parsed `complete:`/`dyn:` SECTION, in source order.
 var EXTEND_TARGETS: [text] = []
@@ -236,3 +237,40 @@ export parse_extend_enum_decl, parser_reset_extend_enums
 export parser_extend_targets, parser_extend_closures, parser_extend_ctor_counts
 export parser_extend_ctor_providers, parser_extend_ctor_names
 export parser_extend_ctor_type_counts, parser_extend_ctor_type_ids
+
+
+# --- flat-AST pool codec: extend-enum registry ------------------------------
+#
+# Dump/restore for this file's per-parse state, in a FIXED SORTED ORDER that
+# dump and restore share. Order is the whole contract: the blob carries no
+# names, so a reordering on one side silently pairs each item with its
+# neighbour's data.
+#
+# Completeness is enforced by scripts/check/check-flat-ast-codec-complete.shs,
+# whose oracle is the per-parse RESET functions. Do not add state here by hand
+# without running it.
+
+pub fn flat_extend_pools_dump() -> text:
+    var out = ""
+    out = out + flat_pool_enc_text(EXTEND_CLOSURES)
+    out = out + flat_pool_enc_i64(EXTEND_CTOR_COUNTS)
+    out = out + flat_pool_enc_text(EXTEND_CTOR_NAMES)
+    out = out + flat_pool_enc_text(EXTEND_CTOR_PROVIDERS)
+    out = out + flat_pool_enc_i64(EXTEND_CTOR_TYPE_COUNTS)
+    out = out + flat_pool_enc_i64(EXTEND_CTOR_TYPE_IDS)
+    out = out + flat_pool_enc_text(EXTEND_TARGETS)
+    out
+
+# Returns false when the blob ran short or was malformed; the caller must
+# treat that as a cache MISS and reparse, never as an empty parse.
+pub fn flat_extend_pools_restore(r: FlatPoolReader) -> bool:
+    EXTEND_CLOSURES = flat_pool_dec_text(r)
+    EXTEND_CTOR_COUNTS = flat_pool_dec_i64(r)
+    EXTEND_CTOR_NAMES = flat_pool_dec_text(r)
+    EXTEND_CTOR_PROVIDERS = flat_pool_dec_text(r)
+    EXTEND_CTOR_TYPE_COUNTS = flat_pool_dec_i64(r)
+    EXTEND_CTOR_TYPE_IDS = flat_pool_dec_i64(r)
+    EXTEND_TARGETS = flat_pool_dec_text(r)
+    r.ok
+
+export flat_extend_pools_dump, flat_extend_pools_restore

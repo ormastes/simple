@@ -80,6 +80,7 @@ use compiler.frontend.effect_registry.{effect_registry_reset_module, effect_pend
 use compiler.frontend.aspect_registry.{aspect_registry_reset_module, aspect_pending_reset}
 use compiler.core.parser_decls.{parse_val_decl, parse_lazy_val_decl, parse_var_decl}
 use compiler.core.parser_decls.{parse_module_body}
+use compiler.frontend.core.flat_pool_codec.*
 
 # ===== Parser State =====
 
@@ -1198,3 +1199,59 @@ export parse_fn_decl, parse_extern_fn_decl, parse_struct_decl, parse_enum_decl
 export parse_impl_decl, parse_class_body_method
 export parse_use_decl, parse_export_decl, parse_ce_decl
 export parse_val_decl, parse_lazy_val_decl, parse_var_decl
+
+
+# WHY THE TOKEN SLOTS AND DIAGNOSTIC COUNTERS ARE RESTORED, NOT EXCLUDED
+# `par_had_error` is unambiguously an OUTPUT: the driver reads it through
+# par_had_error_get() AFTER parse_module_body returns, at four sites in
+# driver_source_pipeline_parsing.spl (:385, :592, :686, :760) and once in
+# driver_hir_pipeline_lowering.spl:57. A cache hit that left it false would
+# turn a file that failed to parse into a silently-accepted one.
+# The remaining nine are consumed only DURING the parse, so they could in
+# principle be excluded -- but they are a handful of short lists, restoring
+# them is free, and restoring the whole reset set is the version of this
+# contract that cannot rot: no future reader has to re-derive which half was
+# an output. An exclusion is reserved for state where restoring is WRONG
+# (see ast_reset_seq in the guard's allowlist), not merely unnecessary.
+
+# --- flat-AST pool codec: parser diagnostics + token slots ------------------------------
+#
+# Dump/restore for this file's per-parse state, in a FIXED SORTED ORDER that
+# dump and restore share. Order is the whole contract: the blob carries no
+# names, so a reordering on one side silently pairs each item with its
+# neighbour's data.
+#
+# Completeness is enforced by scripts/check/check-flat-ast-codec-complete.shs,
+# whose oracle is the per-parse RESET functions. Do not add state here by hand
+# without running it.
+
+pub fn flat_parser_state_dump() -> text:
+    var out = ""
+    out = out + flat_pool_enc_i64(par_col_slot)
+    out = out + flat_pool_enc_scalar_i64(par_diagnostic_emit_count)
+    out = out + flat_pool_enc_scalar_bool(par_diagnostics_suppressed)
+    out = out + flat_pool_enc_text(par_errors)
+    out = out + flat_pool_enc_scalar_bool(par_had_error)
+    out = out + flat_pool_enc_i64(par_kind_slot)
+    out = out + flat_pool_enc_i64(par_line_slot)
+    out = out + flat_pool_enc_text(par_struct_names)
+    out = out + flat_pool_enc_text(par_text_slot)
+    out = out + flat_pool_enc_text(par_warnings)
+    out
+
+# Returns false when the blob ran short or was malformed; the caller must
+# treat that as a cache MISS and reparse, never as an empty parse.
+pub fn flat_parser_state_restore(r: FlatPoolReader) -> bool:
+    par_col_slot = flat_pool_dec_i64(r)
+    par_diagnostic_emit_count = flat_pool_dec_scalar_i64(r)
+    par_diagnostics_suppressed = flat_pool_dec_scalar_bool(r)
+    par_errors = flat_pool_dec_text(r)
+    par_had_error = flat_pool_dec_scalar_bool(r)
+    par_kind_slot = flat_pool_dec_i64(r)
+    par_line_slot = flat_pool_dec_i64(r)
+    par_struct_names = flat_pool_dec_text(r)
+    par_text_slot = flat_pool_dec_text(r)
+    par_warnings = flat_pool_dec_text(r)
+    r.ok
+
+export flat_parser_state_dump, flat_parser_state_restore

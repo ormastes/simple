@@ -289,7 +289,49 @@ maintains them for its own correctness.
 now would lose the `extend` registry and pending-annotation state on every cache
 hit, silently.
 
-Still to do: close the 32 gaps (incl. dict encoders), then the full-closure round-trip gate (parse a real module, dump, reset,
+### Step 1 done (2026-08-21): guard is GREEN, 0 uncovered
+`PASS — 165 pool(s) checked, all encoded and decoded` (was `166 state items, 32
+uncovered`). What closed the gap:
+- **No dict encoders were needed after all.** The record predicted `text->i64` /
+  `text->[i64]` dicts; reading the actual declarations, all 32 items are
+  `i64` / `bool` / `text` / `[text]` / `[i64]`. The only genuinely new codec
+  shapes were **scalars**, so `flat_pool_codec.spl` gained
+  `flat_pool_{enc,dec}_scalar_{i64,bool,text}` (a scalar text is escaped
+  exactly like a pool element -- `PENDING_UNSAFE_REASON` carries author prose).
+- Three new dump/restore units beside their state, same fixed-sorted-order
+  contract as the four existing ones:
+  `flat_extend_pools_dump/restore` (`_ParserDecls/extend_decls.spl`, the 7
+  `EXTEND_*`), `flat_pending_pools_dump/restore`
+  (`_ParserDecls/enum_module_body.spl`, the 11 `PENDING_*` plus
+  `ENUM_ATTRIBUTES` / `ENUM_OPEN_REGIONS` / `UNSAFE_ANNOTATIONS`), and
+  `flat_parser_state_dump/restore` (`parser.spl`, the 10 `par_*`).
+- **`par_*` decision: restore all ten, exclude none.** `par_had_error` is
+  unambiguously an OUTPUT -- `par_had_error_get()` is read AFTER
+  `parse_module_body` returns at `driver_source_pipeline_parsing.spl:385,592,686,760`
+  and `driver_hir_pipeline_lowering.spl:57`, so a hit that left it false would
+  turn a file that failed to parse into a silently-accepted one. The other nine
+  (diagnostic lists, counters, token slots) are consumed only during the parse
+  and could be excluded, but they are a handful of short lists; restoring the
+  whole reset set is the version of the contract that cannot rot.
+- **One exclusion, `ast_reset_seq`.** It is a MONOTONIC diagnostic counter of
+  `ast_reset()` calls; it appears in the derived set only because `ast_reset`
+  *increments* it, which the guard's body scan cannot tell from a clear.
+  Restoring it would REWIND a process-lifetime counter -- i.e. wrong, not merely
+  unnecessary, which is the stated bar for an entry in that allowlist. The
+  guard's stale-exclusion check accepts it (the name still exists).
+- Round-trip spec extended by 5 examples for the scalar shapes (including
+  interleaved scalars-and-pools in one blob, the real
+  `flat_pending_pools_dump` shape): **17/17 green**, up from 12.
+
+Pre-existing failure noted, NOT caused by this change: the 3-module fixture spec
+`test/02_integration/compiler/driver/native_build_cache_second_build_hits_spec.spl`
+fails with `semantic: method 'replace' not found on type 'function' (function
+'hash_text' was not called)`, which comes from
+`src/lib/nogc_sync_mut/websocket/handshake.spl:265` shadowing the global
+`hash_text` with a local `val`. It is in the spec's transitive import graph and
+is unrelated to the codec.
+
+Still to do:  (incl. dict encoders), then the full-closure round-trip gate (parse a real module, dump, reset,
 restore, rebuild through the bridge, compare), the cache wiring at the `:379`
 hook, and parse sharding across `--threads` worker processes.
 

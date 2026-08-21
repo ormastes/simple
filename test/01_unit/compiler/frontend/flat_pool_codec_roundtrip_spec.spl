@@ -124,3 +124,54 @@ describe "flat pool codec fails closed on corruption":
         expect(r.ok).to_equal(true)
         val _past = r.next()
         expect(r.ok).to_equal(false)
+
+
+describe "flat pool codec scalar primitives":
+
+    # Not all per-parse state is a pool. The completeness guard's reset-function
+    # oracle turned up 31 further items across parser.spl, extend_decls.spl,
+    # enum_module_body.spl -- 11 of them plain i64/bool/text scalars
+    # (PENDING_UNSAFE, PENDING_UNSAFE_REASON, par_had_error, ...). They ride the
+    # same blob as one line each, so they need the same adversarial coverage.
+
+    it "round-trips i64 scalars including negatives and zero":
+        for v in [0, 1, -1, 7, -99999, 2147483648]:
+            val r = FlatPoolReader.new(flat_pool_enc_scalar_i64(v))
+            expect(flat_pool_dec_scalar_i64(r)).to_equal(v)
+            expect(r.ok).to_equal(true)
+
+    it "round-trips bool scalars in both states":
+        val rt = FlatPoolReader.new(flat_pool_enc_scalar_bool(true))
+        expect(flat_pool_dec_scalar_bool(rt)).to_equal(true)
+        val rf = FlatPoolReader.new(flat_pool_enc_scalar_bool(false))
+        expect(flat_pool_dec_scalar_bool(rf)).to_equal(false)
+
+    it "round-trips text scalars containing newlines and backslashes":
+        # PENDING_UNSAFE_REASON carries author-written prose straight from
+        # source, so an unescaped newline in it would desynchronise the blob.
+        for v in ["", "plain", "why\nnot", "back\\slash", "\n", "\\"]:
+            val r = FlatPoolReader.new(flat_pool_enc_scalar_text(v))
+            expect(flat_pool_dec_scalar_text(r)).to_equal(v)
+
+    it "keeps scalars and pools in step when interleaved in one blob":
+        # This is the real shape of flat_pending_pools_dump: [text] pools and
+        # i64/text scalars alternating. An off-by-one in either kind corrupts
+        # everything after it.
+        val blob = flat_pool_enc_text(["a", "b\nc"]) +
+                   flat_pool_enc_scalar_i64(-3) +
+                   flat_pool_enc_scalar_bool(true) +
+                   flat_pool_enc_scalar_text("re\\ason") +
+                   flat_pool_enc_i64([9, 8])
+        val r = FlatPoolReader.new(blob)
+        expect(flat_pool_dec_text(r)[1]).to_equal("b\nc")
+        expect(flat_pool_dec_scalar_i64(r)).to_equal(-3)
+        expect(flat_pool_dec_scalar_bool(r)).to_equal(true)
+        expect(flat_pool_dec_scalar_text(r)).to_equal("re\\ason")
+        expect(flat_pool_dec_i64(r)[1]).to_equal(8)
+        expect(r.ok).to_equal(true)
+
+    it "marks a blob truncated before a scalar not-ok":
+        val r = FlatPoolReader.new("")
+        val _ = r.next()
+        val _2 = flat_pool_dec_scalar_i64(r)
+        expect(r.ok).to_equal(false)
