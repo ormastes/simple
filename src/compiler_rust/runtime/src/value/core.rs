@@ -273,36 +273,6 @@ impl RuntimeValue {
         i >= MIN && i <= MAX
     }
 
-    /// Number of bits available to the inline signed-integer payload.
-    ///
-    /// `from_int` stores `(i as u64) << 3` and `as_int` recovers
-    /// `(bits as i64) >> 3`, so the payload is a 64 - 3 = 61-bit two's
-    /// complement field.
-    pub const INLINE_INT_BITS: u32 = 61;
-
-    /// Whether `i` survives the inline 61-bit payload without loss — i.e.
-    /// whether `from_int(i).as_int() == i` would hold for the inline encoding.
-    ///
-    /// The representable range is asymmetric, exactly as two's complement
-    /// requires: `-2^60 ..= 2^60 - 1`. In particular `-(1 << 60)` fits and
-    /// `1 << 60` does not.
-    ///
-    /// NOTE (2026-08-17): this predicate is the *specification* of the inline
-    /// channel's capacity. `from_int` above does NOT consult it — it shifts
-    /// unconditionally and never heap-boxes, so wide values are still
-    /// truncated. `HeapInt` / `HeapObjectType::Int` / `as_heap_i64` exist as
-    /// readers with no producer. See
-    /// `doc/08_tracking/bug/seed_jit_boxed_int_61bit_drops_high_bits_2026-07-22.md`
-    /// and `doc/08_tracking/bug/runtime_from_int_still_truncates_61bit_2026-08-17.md`.
-    /// The wide-int tests in `runtime/tests/boxed_int_wide_roundtrip.rs` are
-    /// therefore expected to be RED against this file; that is the point.
-    #[inline]
-    pub const fn fits_inline_int(i: i64) -> bool {
-        const MIN: i64 = -(1i64 << (RuntimeValue::INLINE_INT_BITS - 1));
-        const MAX: i64 = (1i64 << (RuntimeValue::INLINE_INT_BITS - 1)) - 1;
-        i >= MIN && i <= MAX
-    }
-
     /// Check if this is an integer
     #[inline]
     pub const fn is_int(self) -> bool {
