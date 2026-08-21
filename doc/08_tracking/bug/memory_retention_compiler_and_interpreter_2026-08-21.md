@@ -23,7 +23,7 @@ concurrent load from other lanes, so wall times are an envelope, not a floor.
 |---|---|---|---|
 | (a) | `lint src/compiler/80.driver/driver_types.spl` (JIT) | **0.44 GB** | 15.2s |
 | (b) | same + `SIMPLE_EXECUTION_MODE=interpret` on `50.mir/_MirLoweringExpr/switch_operators_calls.spl` | **0.69 GB** | 338s |
-| (c) | stage1 `native-build --threads 1`, parse phase | **0.95 MB/module, linear** | — |
+| (c) | stage1 `native-build --threads 1`, parse phase | **1.53 MB/module, linear** | — |
 
 ### (a) and (b) are already fixed, not open
 
@@ -53,9 +53,17 @@ counter, `--threads 1`, `SIMPLE_CACHE_SCOPE=mem`:
 | 247 | 0.228 GB |
 | 283 | 0.277 GB |
 | 336 | 0.322 GB |
+| 351 | 0.362 GB |
+| 431 | 0.548 GB |
 
-140 modules for 0.133 GB = **0.95 MB/module**, straight-line. Extrapolated to
-667 modules that is **~0.64 GB at end of parse**, not 3.7-5.3 GB.
+Linear, but measure the slope over the WIDE window, not the first few samples:
+196 -> 431 is 235 modules for 0.359 GB = **1.53 MB/module**. (The first four
+samples alone give 0.95 MB/module; that early figure understates it and should
+not be quoted. The recorded budget of 2.0 MB/module is set against 1.53.)
+
+Extrapolated to 667 modules that is **~0.9 GB at end of parse**, not 3.7-5.3 GB.
+The run was stopped at 431/667 to free host memory, so the endpoint is an
+extrapolation from a straight line, not a measurement — stated as such.
 
 So the reported 3.4-5.3 GB shard-worker RSS is **not** explained by per-module
 parse retention, and the "~40 MB per module in a shard" figure does not hold for
