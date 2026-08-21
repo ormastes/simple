@@ -1,4 +1,5 @@
 # HIR item lowering - module, import, and bootstrap-flat lowering.
+use compiler.hir.hir_lowering.hir_phase_profile.{hir_phase_profile_now, hir_phase_profile_add, hir_phase_profile_count_qtype, hir_phase_profile_count_explicit_scan, HIR_PROF_RIS_SIGTYPE, HIR_PROF_RIS_CALLABLE_DEPS, HIR_PROF_RIS_DECLARED_DEP, HIR_PROF_RIS_EXPLICIT_DEP, HIR_PROF_RIS_PAYLOAD, HIR_PROF_RIS_METHODS}
 use compiler.hir.hir_lowering._Items.module_lowering.*
 # HIR Lowering - Item Lowering
 #
@@ -295,6 +296,12 @@ impl HirLowering:
         true
 
     me register_materialized_payload_named_dependency(imported_mod: ModuleSurface, imported_mod_name: text, dependency: text, skipped: {text: bool}, import_span: Span):
+        """Profile wrapper (SIMPLE_HIR_PHASE_PROFILE=1, default off)."""
+        val started = hir_phase_profile_now()
+        self.register_materialized_payload_named_dependency_inner(imported_mod, imported_mod_name, dependency, skipped, import_span)
+        hir_phase_profile_add(HIR_PROF_RIS_PAYLOAD, started)
+
+    me register_materialized_payload_named_dependency_inner(imported_mod: ModuleSurface, imported_mod_name: text, dependency: text, skipped: {text: bool}, import_span: Span):
         if dependency == "" or skipped.contains_key(dependency): return
         val origin = self.resolve_materialized_enum_payload_origin(imported_mod, imported_mod_name, dependency)
         if not origin.found:
@@ -382,6 +389,19 @@ impl HirLowering:
         import_span: Span,
         materialize_enum: bool
     ):
+        """Profile wrapper (SIMPLE_HIR_PHASE_PROFILE=1, default off)."""
+        val started = hir_phase_profile_now()
+        self.materialize_imported_callable_declared_dependency_inner(
+            imported_mod, imported_mod_name, dependency, import_span, materialize_enum)
+        hir_phase_profile_add(HIR_PROF_RIS_DECLARED_DEP, started)
+
+    me materialize_imported_callable_declared_dependency_inner(
+        imported_mod: ModuleSurface,
+        imported_mod_name: text,
+        dependency: text,
+        import_span: Span,
+        materialize_enum: bool
+    ):
         val local_name = "{imported_mod.module_name}::{dependency}"
         self.register_imported_symbol(
             imported_mod, imported_mod_name, dependency, local_name,
@@ -397,47 +417,87 @@ impl HirLowering:
         import_span: Span,
         materialize_enum: bool
     ):
-        # Resolve only an explicit named import written by the callable owner.
-        # Glob/package inference is intentionally excluded here: the same short
-        # name may be present in multiple sibling modules (Span, TraitBound,
-        # TraitDef), and choosing one would silently rewrite the signature.
+        """Profile wrapper (SIMPLE_HIR_PHASE_PROFILE=1, default off)."""
+        val started = hir_phase_profile_now()
+        self.materialize_imported_callable_explicit_dependency_inner(
+            imported_mod, dependency, import_span, materialize_enum)
+        hir_phase_profile_add(HIR_PROF_RIS_EXPLICIT_DEP, started)
+
+    me materialize_imported_callable_explicit_dependency_inner(
+        imported_mod: ModuleSurface,
+        dependency: text,
+        import_span: Span,
+        materialize_enum: bool
+    ):
+        # RISFACT (2026-08-21): the SWEEP below is a pure function of the
+        # frozen registry and the DECLARING surface, so it is memoized on
+        # (declaring module, dependency); see the field comment in
+        # hir_lowering/types.spl for why the cached value is deliberately a
+        # registry index plus an item NAME and never a SymbolId. Everything
+        # after the memo -- register_imported_symbol and the two
+        # bind_qualified_type calls -- still runs per importer, against that
+        # importer's own symbol table.
+        val memo_key = imported_mod.module_name + " " + dependency
         var selected_target: i64 = -1
         var selected_item: text = ""
-        var import_index: i64 = 0
-        while import_index < imported_mod.imports.len() and
-              import_index < imported_mod.import_target_indices.len():
-            val target_index = imported_mod.import_target_indices[import_index]
-            val import_decl = imported_mod.imports[import_index]
-            var item_index: i64 = 0
-            while item_index < import_decl.items.len():
-                val item = import_decl.items[item_index]
-                val local_name = if item.has_alias: item.alias else: item.name
-                if local_name == dependency and target_index >= 0 and
-                   target_index < self.module_surfaces.surfaces.len():
-                    val target = self.module_surfaces.surfaces[target_index]
-                    var candidate_target = target_index
-                    var candidate_item = item.name
-                    var candidate_found = hir_module_declares_item(
-                        target, item.name)
-                    if not candidate_found:
-                        val hop = self.find_reexport_source(
-                            target, target.preferred_registry_name, item.name)
-                        if hop.found and hop.module_index >= 0:
-                            candidate_target = hop.module_index
-                            candidate_item = hop.item_name
-                            candidate_found = true
-                    if candidate_found:
-                        if selected_target >= 0 and
-                           (selected_target != candidate_target or
-                            selected_item != candidate_item):
-                            self.error(
-                                "ambiguous explicit callable dependency `{dependency}` in `{imported_mod.module_name}`",
-                                import_span)
-                            return
-                        selected_target = candidate_target
-                        selected_item = candidate_item
-                item_index = item_index + 1
-            import_index = import_index + 1
+        if self.explicit_dep_target_memo.contains_key(memo_key):
+            selected_target = self.explicit_dep_target_memo[memo_key]
+            selected_item = self.explicit_dep_item_memo[memo_key]
+        else:
+            self.explicit_dep_scan_count = self.explicit_dep_scan_count + 1
+            hir_phase_profile_count_explicit_scan(imported_mod.imports.len())
+            # Resolve only an explicit named import written by the callable
+            # owner. Glob/package inference is intentionally excluded here: the
+            # same short name may be present in multiple sibling modules (Span,
+            # TraitBound, TraitDef), and choosing one would silently rewrite the
+            # signature.
+            var import_index: i64 = 0
+            var ambiguous = false
+            while import_index < imported_mod.imports.len() and
+                  import_index < imported_mod.import_target_indices.len():
+                val target_index = imported_mod.import_target_indices[import_index]
+                val import_decl = imported_mod.imports[import_index]
+                var item_index: i64 = 0
+                while item_index < import_decl.items.len():
+                    val item = import_decl.items[item_index]
+                    val local_name = if item.has_alias: item.alias else: item.name
+                    if local_name == dependency and target_index >= 0 and
+                       target_index < self.module_surfaces.surfaces.len():
+                        val target = self.module_surfaces.surfaces[target_index]
+                        var candidate_target = target_index
+                        var candidate_item = item.name
+                        var candidate_found = hir_module_declares_item(
+                            target, item.name)
+                        if not candidate_found:
+                            val hop = self.find_reexport_source(
+                                target, target.preferred_registry_name, item.name)
+                            if hop.found and hop.module_index >= 0:
+                                candidate_target = hop.module_index
+                                candidate_item = hop.item_name
+                                candidate_found = true
+                        if candidate_found:
+                            if selected_target >= 0 and
+                               (selected_target != candidate_target or
+                                selected_item != candidate_item):
+                                ambiguous = true
+                            selected_target = candidate_target
+                            selected_item = candidate_item
+                    item_index = item_index + 1
+                import_index = import_index + 1
+            if ambiguous:
+                # -2 is the ambiguity sentinel, cached like any other fact so a
+                # later importer does not re-sweep to rediscover it. The
+                # DIAGNOSTIC is still emitted below, per importer, exactly as
+                # the pre-memo code did.
+                selected_target = -2
+                selected_item = ""
+            self.explicit_dep_target_memo[memo_key] = selected_target
+            self.explicit_dep_item_memo[memo_key] = selected_item
+        if selected_target == -2:
+            self.error(
+                "ambiguous explicit callable dependency `{dependency}` in `{imported_mod.module_name}`",
+                import_span)
+            return
         if selected_target < 0:
             return
         val terminal = self.module_surfaces.surfaces[selected_target]
@@ -565,6 +625,19 @@ impl HirLowering:
                 imported_mod.module_name, dependency, terminal_symbol)
 
     me materialize_imported_callable_type_dependencies(imported_mod: ModuleSurface, imported_mod_name: text, callable: ModuleSurfaceCallable, import_span: Span, materialize_enum: bool):
+        """Profile wrapper (SIMPLE_HIR_PHASE_PROFILE=1, default off)."""
+        val started = hir_phase_profile_now()
+        self.materialize_imported_callable_type_dependencies_inner(
+            imported_mod, imported_mod_name, callable, import_span, materialize_enum)
+        hir_phase_profile_add(HIR_PROF_RIS_CALLABLE_DEPS, started)
+
+    me qtype_raw_counted(module_name: text, name: text) -> i64:
+        """`lookup_qualified_type_raw` with miss counting for the RIS profile."""
+        val found = self.symbols.lookup_qualified_type_raw(module_name, name)
+        hir_phase_profile_count_qtype(found < 0)
+        found
+
+    me materialize_imported_callable_type_dependencies_inner(imported_mod: ModuleSurface, imported_mod_name: text, callable: ModuleSurfaceCallable, import_span: Span, materialize_enum: bool):
         """Pre-register every named type a cross-module method SIGNATURE
         depends on, before that signature is eagerly lowered.
 
@@ -592,52 +665,52 @@ impl HirLowering:
         (5th layer)."""
         for param in callable.params:
             if param.type_name != "":
-                if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, param.type_name) < 0:
+                if self.qtype_raw_counted(imported_mod.module_name, param.type_name) < 0:
                     self.materialize_imported_callable_declared_dependency(
                         imported_mod, imported_mod_name, param.type_name,
                         import_span, materialize_enum)
-                    if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, param.type_name) < 0:
+                    if self.qtype_raw_counted(imported_mod.module_name, param.type_name) < 0:
                         self.materialize_imported_callable_explicit_dependency(
                             imported_mod, param.type_name, import_span,
                             materialize_enum)
             elif param.array_element_name != "":
-                if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, param.array_element_name) < 0:
+                if self.qtype_raw_counted(imported_mod.module_name, param.array_element_name) < 0:
                     self.materialize_imported_callable_declared_dependency(
                         imported_mod, imported_mod_name,
                         param.array_element_name, import_span,
                         materialize_enum)
-                    if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, param.array_element_name) < 0:
+                    if self.qtype_raw_counted(imported_mod.module_name, param.array_element_name) < 0:
                         self.materialize_imported_callable_explicit_dependency(
                             imported_mod, param.array_element_name, import_span,
                             materialize_enum)
             else:
                 for dependency in parser_type_named_dependencies(param.type_):
-                    if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, dependency) < 0:
+                    if self.qtype_raw_counted(imported_mod.module_name, dependency) < 0:
                         self.materialize_imported_callable_declared_dependency(
                             imported_mod, imported_mod_name, dependency,
                             import_span, materialize_enum)
-                        if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, dependency) < 0:
+                        if self.qtype_raw_counted(imported_mod.module_name, dependency) < 0:
                             self.materialize_imported_callable_explicit_dependency(
                                 imported_mod, dependency, import_span,
                                 materialize_enum)
         if callable.has_return_type:
             if callable.return_type_name != "":
-                if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, callable.return_type_name) < 0:
+                if self.qtype_raw_counted(imported_mod.module_name, callable.return_type_name) < 0:
                     self.materialize_imported_callable_declared_dependency(
                         imported_mod, imported_mod_name,
                         callable.return_type_name, import_span,
                         materialize_enum)
-                    if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, callable.return_type_name) < 0:
+                    if self.qtype_raw_counted(imported_mod.module_name, callable.return_type_name) < 0:
                         self.materialize_imported_callable_explicit_dependency(
                             imported_mod, callable.return_type_name, import_span,
                             materialize_enum)
             elif callable.return_array_element_name != "":
-                if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, callable.return_array_element_name) < 0:
+                if self.qtype_raw_counted(imported_mod.module_name, callable.return_array_element_name) < 0:
                     self.materialize_imported_callable_declared_dependency(
                         imported_mod, imported_mod_name,
                         callable.return_array_element_name, import_span,
                         materialize_enum)
-                    if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, callable.return_array_element_name) < 0:
+                    if self.qtype_raw_counted(imported_mod.module_name, callable.return_array_element_name) < 0:
                         self.materialize_imported_callable_explicit_dependency(
                             imported_mod, callable.return_array_element_name,
                             import_span, materialize_enum)
@@ -653,11 +726,11 @@ impl HirLowering:
                 if (hir_module_env_get("SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE") ?? "") == "1":
                     eprint("[hir-callable-composite-return] owner={imported_mod.module_name} fn={callable.name} deps={composite_deps.len()}")
                 for dependency in composite_deps:
-                    if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, dependency) < 0:
+                    if self.qtype_raw_counted(imported_mod.module_name, dependency) < 0:
                         self.materialize_imported_callable_declared_dependency(
                             imported_mod, imported_mod_name, dependency,
                             import_span, materialize_enum)
-                        if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, dependency) < 0:
+                        if self.qtype_raw_counted(imported_mod.module_name, dependency) < 0:
                             self.materialize_imported_callable_explicit_dependency(
                                 imported_mod, dependency, import_span,
                                 materialize_enum)
@@ -701,8 +774,10 @@ impl HirLowering:
         if self.imported_type_methods_in_progress_has(reentry_key):
             return
         self.imported_type_methods_in_progress_push(reentry_key)
+        val started = hir_phase_profile_now()
         self.register_imported_type_methods_inner(
             imported_mod, imported_mod_name, imported_name, local_owner, import_span, materialize_enum)
+        hir_phase_profile_add(HIR_PROF_RIS_METHODS, started)
         self.imported_type_methods_in_progress_pop(reentry_key)
 
     me register_imported_type_methods_inner(imported_mod: ModuleSurface, imported_mod_name: text, imported_name: text, local_owner: SymbolId, import_span: Span, materialize_enum: bool):
@@ -722,8 +797,10 @@ impl HirLowering:
                 if not self.symbols.lookup_or_invalid(symbol_name).is_valid():
                     val kind = if method.is_static: SymbolKind.Function else: SymbolKind.Method
                     self.materialize_imported_callable_type_dependencies(imported_mod, imported_mod_name, method, import_span, materialize_enum)
+                    val sig_started = hir_phase_profile_now()
                     val method_type = self.declared_imported_surface_callable_type(
                         method, imported_mod.module_name, Some(local_owner))
+                    hir_phase_profile_add(HIR_PROF_RIS_SIGTYPE, sig_started)
                     self.symbols.define(symbol_name, kind, method_type, import_span, Visibility.Public, false, local_owner_defining_module)
             if impl_.has_trait_:
                 val trait_name = parser_type_kind_named_name(impl_.trait_.kind)

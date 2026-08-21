@@ -1,0 +1,165 @@
+# @tag: unit, compiler, hir, native-safe
+#
+# Pins the MECHANISM behind the import-registration half of the 2026-08-21 HIR
+# per-module cost work (doc/08_tracking/bug/hir_phase_per_module_cost_2026-08-21.md).
+#
+# On the real 662-module closure `register_imported_symbol` was 92% of
+# `compiler/driver/driver.spl`'s HIR time, and its PER-CALL cost rose with the
+# accumulated closure (1.7 -> 15.8 ms). The term that grows is the explicit
+# `use`-item sweep in `materialize_imported_callable_explicit_dependency`: it is
+# reached on every qualified-type MISS, per param, per callable, per IMPORTING
+# module, and it re-derives an answer that depends only on the frozen registry
+# and the DECLARING surface. A name that never resolves is the worst case,
+# because a negative result was never remembered and every importer re-swept to
+# rediscover it.
+#
+# The observable here is the sweep COUNT, not a wall clock, so this spec
+# discriminates the algorithm rather than the machine: it cannot pass on the
+# pre-fix code (the counter did not exist and the sweep really did repeat), and
+# a faster box cannot satisfy it.
+
+use std.io.{file_read}
+use std.spec.{describe, it, expect}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering._Items.module_reexport_materialization.*
+use compiler.hir.hir_lowering._Items.module_lowering.*
+use compiler.hir.hir_lowering.module_surface.{
+    ModuleSurface,
+    ModuleSurfacesByName
+}
+
+fn import_registry() -> ModuleSurfacesByName:
+    """One declaring surface plus three importers, the shape that made the
+    repeated resolution visible: N importers of ONE surface."""
+    val decl = ModuleSurface.empty("pkg.decl")
+    val i1 = ModuleSurface.empty("pkg.imp1")
+    val i2 = ModuleSurface.empty("pkg.imp2")
+    val i3 = ModuleSurface.empty("pkg.imp3")
+    val built = ModuleSurfacesByName.from_parts(
+        [decl, i1, i2, i3],
+        {"pkg.decl": 0, "pkg.imp1": 1, "pkg.imp2": 2, "pkg.imp3": 3},
+        ["pkg.decl", "pkg.imp1", "pkg.imp2", "pkg.imp3"],
+        [0, 1, 2, 3])
+    built.unwrap()
+
+describe("HIR import registration resolution facts", fn():
+    it("resolves a qualified type name once per (surface, name), not once per importer", fn():
+        val registry = import_registry()
+        var lowering = hirlowering_for_module("pkg/imp1.spl", registry)
+        val span = Span.empty()
+        val decl = registry.surfaces[0]
+        # Three importers of the SAME declaring surface, asking for the SAME
+        # signature dependency. One lowerer serves the whole phase
+        # (stage3_hir_lowerer_reuse_contract_spec.spl pins that), so the second
+        # and third importers must cost a dict probe.
+        lowering.begin_module("pkg/imp1.spl")
+        lowering.materialize_imported_callable_explicit_dependency(
+            decl, "Widget", span, false)
+        expect(lowering.explicit_dep_scan_count).to_equal(1)
+        lowering.begin_module("pkg/imp2.spl")
+        lowering.materialize_imported_callable_explicit_dependency(
+            decl, "Widget", span, false)
+        lowering.begin_module("pkg/imp3.spl")
+        lowering.materialize_imported_callable_explicit_dependency(
+            decl, "Widget", span, false)
+        expect(lowering.explicit_dep_scan_count).to_equal(1)
+    )
+
+    it("does not repeat a MISS -- the negative result is cached too", fn():
+        val registry = import_registry()
+        var lowering = hirlowering_for_module("pkg/imp1.spl", registry)
+        val span = Span.empty()
+        val decl = registry.surfaces[0]
+        # `pkg.decl` has no imports at all, so every query is a miss. A miss is
+        # exactly the case that used to re-sweep for every importer.
+        lowering.materialize_imported_callable_explicit_dependency(
+            decl, "NeverDeclared", span, false)
+        lowering.materialize_imported_callable_explicit_dependency(
+            decl, "NeverDeclared", span, false)
+        expect(lowering.explicit_dep_scan_count).to_equal(1)
+        expect(lowering.explicit_dep_target_memo["pkg.decl NeverDeclared"]).to_equal(-1)
+    )
+
+    it("still resolves a different dependency name, and a different surface", fn():
+        val registry = import_registry()
+        var lowering = hirlowering_for_module("pkg/imp1.spl", registry)
+        val span = Span.empty()
+        lowering.materialize_imported_callable_explicit_dependency(
+            registry.surfaces[0], "One", span, false)
+        lowering.materialize_imported_callable_explicit_dependency(
+            registry.surfaces[0], "Two", span, false)
+        lowering.materialize_imported_callable_explicit_dependency(
+            registry.surfaces[1], "One", span, false)
+        expect(lowering.explicit_dep_scan_count).to_equal(3)
+    )
+
+    it("caches only SymbolId-free facts", fn():
+        # The whole safety argument: the cached value is a registry INDEX plus
+        # an item NAME, both stable for the frozen phase. SymbolIds are
+        # allocated per module and restart at 0 on `symbols.reset_module()`, so
+        # caching one across importers would hand a later module ids belonging
+        # to a different table -- the reason the two memos proposed in the bug
+        # record were rejected. `begin_module` must therefore leave this cache
+        # alone while still wiping the symbol table.
+        val registry = import_registry()
+        var lowering = hirlowering_for_module("pkg/imp1.spl", registry)
+        val span = Span.empty()
+        lowering.materialize_imported_callable_explicit_dependency(
+            registry.surfaces[0], "Widget", span, false)
+        expect(lowering.explicit_dep_target_memo.len()).to_equal(1)
+        expect(lowering.explicit_dep_item_memo["pkg.decl Widget"]).to_equal("")
+        lowering.begin_module("pkg/imp2.spl")
+        expect(lowering.explicit_dep_target_memo.len()).to_equal(1)
+    )
+
+    it("leaves the lowered result unchanged: no symbol is defined for an unresolvable name", fn():
+        # Correctness half. The cache changes only how the answer is FOUND;
+        # every importer still runs its own registration against its own table.
+        # With no explicit import to follow, no importer gains a symbol and no
+        # diagnostic is raised -- identical to the pre-cache behaviour.
+        val registry = import_registry()
+        var lowering = hirlowering_for_module("pkg/imp1.spl", registry)
+        val span = Span.empty()
+        lowering.materialize_imported_callable_explicit_dependency(
+            registry.surfaces[0], "NeverDeclared", span, false)
+        expect(lowering.errors.len()).to_equal(0)
+        lowering.begin_module("pkg/imp2.spl")
+        lowering.materialize_imported_callable_explicit_dependency(
+            registry.surfaces[0], "NeverDeclared", span, false)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.symbols.lookup_or_invalid("pkg.decl::NeverDeclared").is_valid()).to_equal(false)
+    )
+
+    it("keeps SymbolTable.define free of a second owner of the scope dict", fn():
+        # ALIAS1 (2026-08-21). Measured with a 15-line probe: 8000 successive
+        # `define` calls cost 1818 ms for the first 1000 and 8335 ms for the
+        # eighth, i.e. per-call cost linear in the table already built -- the
+        # same growth law the real closure shows for `register_imported_symbol`
+        # (1.7 -> 15.8 ms/call). SIMPLE_PERF_COUNTERS=1 reports
+        # VT_OBJECT_FIELD_CLONES=8000, exactly one value-type object copy per
+        # define: the scope row is read out by value and written back, so its
+        # `symbols` Dict is cloned on every write.
+        #
+        # `define` used to hold TWO extra owners of that dict: a `scope_syms`
+        # local and a `self.root_scope_symbols` mirror. The mirror was dead --
+        # it is only ever read immediately after being reassigned, in
+        # `reset_module` and `new` -- and each extra owner forces another
+        # copy-on-write. Dropping both took the probe from 33.7 s to 27.6 s and
+        # the first block from 1818 ms to 904 ms.
+        #
+        # A source-shape contract rather than a clone counter because the
+        # counters live in the Rust seed and are not reachable from Simple. The
+        # remaining `var scope` round trip cannot be removed in Simple today:
+        # `self.scopes[i].symbols[name] = v` is rejected with
+        # "semantic: invalid assignment: complex field access not supported".
+        val source = file_read("src/compiler/20.hir/hir_types.spl")
+        val start = source.index_of("me define(name: text, kind: SymbolKind")
+        expect(start).to_be_greater_than(0)
+        val body = source.substring(start, source.index_of(
+            "me bind_qualified_function(", start))
+        expect(body.contains("var scope_syms = scope.symbols")).to_equal(false)
+        expect(body.contains("self.root_scope_symbols = scope_syms")).to_equal(false)
+        expect(body).to_contain("scope.symbols[name] = raw_id")
+    )
+)

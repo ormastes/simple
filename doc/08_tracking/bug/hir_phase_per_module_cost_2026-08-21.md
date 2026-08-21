@@ -215,3 +215,98 @@ Both were considered and rejected on code evidence, not preference:
    different table. Enum re-lowering is real cost (11.3 s of 161 s on
    `driver.spl`, 177 lowerings) but any fix must re-key the symbols, not reuse
    them.
+
+## Fourth session (2026-08-21): the sub-step split, and the real growth law
+
+### Sub-step instrumentation
+
+`SIMPLE_HIR_PHASE_PROFILE=1` now emits a second line, `[hir-prof-ris]`, splitting
+what `register_imported_symbol` reaches: `callable_deps` / `declared_dep` /
+`explicit_dep` (with the number of `use`-item sweeps and items compared) /
+`field_dep` / `payload` / `methods` / `sigtype` / `define` / `canon`, plus a
+qualified-type `queries/misses` pair. The RIS slots are nested inside `imports`
+and inside each other, so they are reported separately and never added to
+`measured` -- `other` stays a true residual.
+
+### The growth law is an ALIASING copy, not a miss
+
+The previous section's suspicion (repeated qualified-type MISSES) is real but
+secondary. The dominant term is that **`SymbolTable.define` copied the whole
+scope symbol dict on every call**, so registration cost is linear in the table
+already built and the phase is O(n^2) in a module's import count.
+
+Reproduced in a 15-line probe (8000 successive `define` calls, one process, one
+tree, one binary), block cost per 1000 defines:
+
+| defines | pre | post |
+|---|---|---|
+| 1000 | 1818 ms | 904 ms |
+| 4000 | 3792 ms | 3117 ms |
+| 8000 | 8335 ms | 6358 ms |
+| total | 33.7 s | 27.6 s |
+
+`SIMPLE_PERF_COUNTERS=1` on the same probe: `VT_OBJECT_FIELD_CLONES = 8000`,
+exactly one value-type object copy per define, with every array counter at 0.
+That is `copy_value_type_in_place` on the scope row, whose `symbols` Dict field
+is deep-copied with it.
+
+**Why it happens.** Value semantics + copy-on-write means a write through a
+collection with more than one owner clones it. `define`'s tail was
+
+    var scope = self.scopes[self.current_scope.id]
+    var scope_syms = scope.symbols          # owner 2
+    scope_syms[name] = raw_id               # write while aliased -> full clone
+    scope.symbols = scope_syms
+    self.scopes[self.current_scope.id] = scope
+    if self.current_scope.id == 0:
+        self.root_scope_symbols = scope_syms  # owner 3, permanent
+
+so scope 0 -- the scope every imported symbol lands in -- had a permanent second
+owner and therefore cloned on *every* write. The `root_scope_symbols` mirror was
+dead: it is only ever read immediately after being reassigned, in `new()` and
+`reset_module()`. Both extra owners are removed. **Why fixtures never showed
+it:** the cost is per-call linear in the table, and a 61- or 240-module fixture
+builds tables of tens of symbols while `driver.spl` registers 9,435. **How to
+spot the class:** per-call cost rising with an accumulated collection, plus a
+non-zero clone counter that tracks call count 1:1.
+
+What is NOT fixed: the remaining `var scope = ...` / write-back round trip still
+copies once per define. It cannot be removed in Simple today --
+`self.scopes[i].symbols[name] = v` is rejected with `semantic: invalid
+assignment: complex field access not supported`. A seed-side change that lets
+`Arc::make_mut` see a sole owner during self-update method calls is the general
+fix and is tracked by a separate lane; the language gap is recorded here rather
+than worked around.
+
+### Also landed: phase-invariant import-resolution facts
+
+`materialize_imported_callable_explicit_dependency` swept
+`imported_mod.imports` x `import.items` for ONE dependency name, on every
+qualified-type miss, per param, per callable, per IMPORTING module. The answer
+depends only on the frozen registry and the DECLARING surface, so it is now
+memoized on `(declaring module, dependency)` -> `(registry index, item name)`,
+with `-1` for "no explicit import declares it" and `-2` for ambiguous. Negative
+results are cached deliberately: a name that never resolves was the worst case,
+re-swept by every importer. The ambiguity DIAGNOSTIC is still emitted per
+importer, so no error changes.
+
+Deliberately SymbolId-free: a registry index and an item name are stable for the
+frozen phase, whereas SymbolIds restart at 0 on `symbols.reset_module()` -- the
+exact reason the two memos proposed in the previous section were rejected. Every
+importer still runs its own `register_imported_symbol` and `bind_qualified_type`
+against its own table; only the RESOLUTION is shared.
+
+Pin: `test/01_unit/compiler/hir/hir_import_registration_cost_spec.spl` (6/6,
+plus mirror) asserts the sweep COUNT, that a miss is not repeated, that a
+different name or surface still resolves, that `begin_module` leaves the cache
+alone, and the alias-free shape of `define`.
+
+### Not measured
+
+The pre/post on the REAL 662-module closure. Two `native-build --entry-closure`
+probes were run and both were killed in phase 1/6: the parse alone exceeded 25
+minutes per attempt on this shared box, and the host hit 107/125 GB with three
+lanes' shard workers resident, so the run could not be carried to
+`compiler.driver.driver` in phase 2/6. The numbers above are therefore a
+controlled single-tree A/B on the isolated mechanism, not a closure measurement.
+Re-measuring driver.spl and bootstrap_main.spl HIR `dt=` remains open.

@@ -209,6 +209,32 @@ class HirLowering:
     surface_index_by_name: {text: i64}
     surface_index_by_name_built: bool
     surface_index_by_name_build_count: i64
+    # RISFACT (2026-08-21): phase-invariant facts about a DECLARING module's
+    # own `use` items, reused across every importer.
+    # `materialize_imported_callable_explicit_dependency` swept
+    # `imported_mod.imports` x `import.items` for ONE dependency name, and it is
+    # reached on every qualified-type MISS -- per param, per callable, per
+    # importing module. The answer ("which surface, under which item name, does
+    # the DECLARING module explicitly import `dep` from") depends only on the
+    # frozen registry and the declaring surface, never on the importer, so the
+    # miss is recomputed identically 662 times in the bootstrap closure.
+    # Deliberately SymbolId-free: the value is a registry INDEX plus the item
+    # NAME. Registry indices are stable for the phase, whereas SymbolIds are
+    # allocated per module and restart at 0 on `symbols.reset_module()`
+    # (hir_types.spl), which is why the two previously proposed memos in
+    # hir_phase_per_module_cost_2026-08-21.md were rejected. Each importer
+    # re-runs the actual `register_imported_symbol` / `bind_qualified_type`
+    # against its OWN table using these facts; only the RESOLUTION is shared.
+    # Negative and ambiguous results are cached too -- they are the repeated
+    # cost, since a name that never resolves is re-swept by every importer.
+    # -1 = no explicit import declares it, -2 = ambiguous (the error is
+    # re-emitted per importer so diagnostics are unchanged).
+    explicit_dep_target_memo: {text: i64}
+    explicit_dep_item_memo: {text: text}
+    # Sweeps actually performed. Observable mechanism counter for the memo
+    # above; a spec pins that N importers of one surface cause exactly one
+    # sweep per (surface, dependency) pair.
+    explicit_dep_scan_count: i64
     # Parallel scalar re-export caches keyed by physical surface index and
     # wanted item. Registry aliases therefore share one cache entry and no
     # concatenated facade-name key is allocated during traversal.
@@ -266,6 +292,8 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
     val empty_package_sibling_names: {text: [text]} = {}
     val empty_package_sibling_canons: {text: [text]} = {}
     val empty_surface_index_by_name: {text: i64} = {}
+    val empty_explicit_dep_target_memo: {text: i64} = {}
+    val empty_explicit_dep_item_memo: {text: text} = {}
     val empty_reexport_root_surface_indices: [i64] = []
     val empty_imported_type_methods_in_progress: [text] = []
     val empty_reexport_root_wanted: [text] = []
@@ -319,6 +347,9 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         surface_index_by_name: empty_surface_index_by_name,
         surface_index_by_name_built: false,
         surface_index_by_name_build_count: 0,
+        explicit_dep_target_memo: empty_explicit_dep_target_memo,
+        explicit_dep_item_memo: empty_explicit_dep_item_memo,
+        explicit_dep_scan_count: 0,
         reexport_root_surface_indices: empty_reexport_root_surface_indices,
         reexport_root_wanted: empty_reexport_root_wanted,
         reexport_root_found: empty_reexport_root_found,

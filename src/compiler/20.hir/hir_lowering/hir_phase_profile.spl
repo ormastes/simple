@@ -28,10 +28,22 @@ val HIR_PROF_DECLARE: i64 = 1        # declare_module_symbols
 val HIR_PROF_ENUMS: i64 = 2          # lower_module_enum_definitions (incl. imported)
 val HIR_PROF_FUNCTIONS: i64 = 3      # lower_function over the module's own bodies
 val HIR_PROF_GLOB: i64 = 4           # register_glob_imported_symbols roots
-val HIR_PROF_SLOT_COUNT: i64 = 5
+# RIS* slots (2026-08-21): sub-steps reached from `register_imported_symbol`.
+# All are NESTED inside HIR_PROF_IMPORTS (and several inside each other), so
+# they are reported on their own line and never added to `measured`.
+val HIR_PROF_RIS_CALLABLE_DEPS: i64 = 5   # materialize_imported_callable_type_dependencies
+val HIR_PROF_RIS_DECLARED_DEP: i64 = 6    # ..._callable_declared_dependency
+val HIR_PROF_RIS_EXPLICIT_DEP: i64 = 7    # ..._callable_explicit_dependency (import sweep)
+val HIR_PROF_RIS_FIELD_DEP: i64 = 8       # materialize_imported_field_dependency
+val HIR_PROF_RIS_PAYLOAD: i64 = 9         # register_materialized_payload_named_dependency
+val HIR_PROF_RIS_METHODS: i64 = 10        # register_imported_type_methods_inner
+val HIR_PROF_RIS_SIGTYPE: i64 = 11        # declared_imported_surface_callable_type
+val HIR_PROF_RIS_DEFINE: i64 = 12         # SymbolTable.define from register_imported_symbol
+val HIR_PROF_RIS_CANON: i64 = 13          # name canonicalization (split/join) helpers
+val HIR_PROF_SLOT_COUNT: i64 = 14
 
-var _hir_prof_ms: [i64] = [0, 0, 0, 0, 0]
-var _hir_prof_calls: [i64] = [0, 0, 0, 0, 0]
+var _hir_prof_ms: [i64] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+var _hir_prof_calls: [i64] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 var _hir_prof_module_start_ms: i64 = 0
 # Nested-expansion counter for the glob walk: roots vs total expansions is
 # exactly the ratio the GLB3 note in module_import_resolution.spl argues
@@ -39,6 +51,12 @@ var _hir_prof_module_start_ms: i64 = 0
 var _hir_prof_glob_expansions: i64 = 0
 var _hir_prof_imported_symbol_calls: i64 = 0
 var _hir_prof_enum_lowerings: i64 = 0
+# Qualified-type resolution MISSES: the repeated work the RIS split exists to
+# locate. A miss is what triggers declared/explicit dependency materialization.
+var _hir_prof_qtype_queries: i64 = 0
+var _hir_prof_qtype_misses: i64 = 0
+var _hir_prof_explicit_scans: i64 = 0
+var _hir_prof_explicit_items: i64 = 0
 
 fn hir_phase_profile_enabled() -> bool:
     if _hir_prof_state == 0:
@@ -67,6 +85,20 @@ fn hir_phase_profile_count_imported_symbol():
     if hir_phase_profile_enabled():
         _hir_prof_imported_symbol_calls = _hir_prof_imported_symbol_calls + 1
 
+fn hir_phase_profile_count_qtype(missed: bool):
+    if hir_phase_profile_enabled():
+        _hir_prof_qtype_queries = _hir_prof_qtype_queries + 1
+        if missed:
+            _hir_prof_qtype_misses = _hir_prof_qtype_misses + 1
+
+fn hir_phase_profile_count_explicit_scan(items: i64):
+    """One full `use`-item sweep of a declaring surface, plus the number of
+    import items it compared. Items-per-scan is the term that grows with the
+    closure, so it is counted rather than inferred."""
+    if hir_phase_profile_enabled():
+        _hir_prof_explicit_scans = _hir_prof_explicit_scans + 1
+        _hir_prof_explicit_items = _hir_prof_explicit_items + items
+
 fn hir_phase_profile_count_enum_lowering():
     if hir_phase_profile_enabled():
         _hir_prof_enum_lowerings = _hir_prof_enum_lowerings + 1
@@ -82,6 +114,10 @@ fn hir_phase_profile_module_begin():
     _hir_prof_glob_expansions = 0
     _hir_prof_imported_symbol_calls = 0
     _hir_prof_enum_lowerings = 0
+    _hir_prof_qtype_queries = 0
+    _hir_prof_qtype_misses = 0
+    _hir_prof_explicit_scans = 0
+    _hir_prof_explicit_items = 0
     _hir_prof_module_start_ms = rt_time_now_monotonic_ms()
 
 fn hir_phase_profile_module_end(module_name: text):
@@ -96,7 +132,7 @@ fn hir_phase_profile_module_end(module_name: text):
     while slot < HIR_PROF_SLOT_COUNT:
         # The glob slot is nested INSIDE imports; counting it in `measured`
         # would double-count it and make `other` negative.
-        if slot != HIR_PROF_GLOB:
+        if slot != HIR_PROF_GLOB and slot <= HIR_PROF_FUNCTIONS:
             measured = measured + _hir_prof_ms[slot]
         slot = slot + 1
     eprint("[hir-prof] module={module_name} total={total}ms"
@@ -109,4 +145,16 @@ fn hir_phase_profile_module_end(module_name: text):
         + " (lowerings={_hir_prof_enum_lowerings})"
         + " functions={_hir_prof_ms[HIR_PROF_FUNCTIONS]}ms/{_hir_prof_calls[HIR_PROF_FUNCTIONS]}"
         + " other={total - measured}ms")
+    eprint("[hir-prof-ris] module={module_name}"
+        + " callable_deps={_hir_prof_ms[HIR_PROF_RIS_CALLABLE_DEPS]}ms/{_hir_prof_calls[HIR_PROF_RIS_CALLABLE_DEPS]}"
+        + " declared_dep={_hir_prof_ms[HIR_PROF_RIS_DECLARED_DEP]}ms/{_hir_prof_calls[HIR_PROF_RIS_DECLARED_DEP]}"
+        + " explicit_dep={_hir_prof_ms[HIR_PROF_RIS_EXPLICIT_DEP]}ms/{_hir_prof_calls[HIR_PROF_RIS_EXPLICIT_DEP]}"
+        + " (scans={_hir_prof_explicit_scans}, items={_hir_prof_explicit_items})"
+        + " field_dep={_hir_prof_ms[HIR_PROF_RIS_FIELD_DEP]}ms/{_hir_prof_calls[HIR_PROF_RIS_FIELD_DEP]}"
+        + " payload={_hir_prof_ms[HIR_PROF_RIS_PAYLOAD]}ms/{_hir_prof_calls[HIR_PROF_RIS_PAYLOAD]}"
+        + " methods={_hir_prof_ms[HIR_PROF_RIS_METHODS]}ms/{_hir_prof_calls[HIR_PROF_RIS_METHODS]}"
+        + " sigtype={_hir_prof_ms[HIR_PROF_RIS_SIGTYPE]}ms/{_hir_prof_calls[HIR_PROF_RIS_SIGTYPE]}"
+        + " define={_hir_prof_ms[HIR_PROF_RIS_DEFINE]}ms/{_hir_prof_calls[HIR_PROF_RIS_DEFINE]}"
+        + " canon={_hir_prof_ms[HIR_PROF_RIS_CANON]}ms/{_hir_prof_calls[HIR_PROF_RIS_CANON]}"
+        + " qtype={_hir_prof_qtype_queries}/{_hir_prof_qtype_misses} miss")
     rt_stdout_flush()

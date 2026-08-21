@@ -9,7 +9,7 @@ use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types.{ParserFunction, ImportItem, Param}
 use compiler.frontend.parser_types_expr.*
-use compiler.hir.hir_lowering.hir_phase_profile.{hir_phase_profile_count_imported_symbol}
+use compiler.hir.hir_lowering.hir_phase_profile.{hir_phase_profile_count_imported_symbol, hir_phase_profile_now, hir_phase_profile_add, HIR_PROF_RIS_FIELD_DEP, HIR_PROF_RIS_SIGTYPE, HIR_PROF_RIS_DEFINE}
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
@@ -36,6 +36,19 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 
 impl HirLowering:
     me materialize_imported_field_dependency(
+        imported_mod: ModuleSurface,
+        imported_mod_name: text,
+        dependency: text,
+        import_span: Span,
+        materialize_enum: bool
+    ):
+        """Profile wrapper (SIMPLE_HIR_PHASE_PROFILE=1, default off)."""
+        val started = hir_phase_profile_now()
+        self.materialize_imported_field_dependency_inner(
+            imported_mod, imported_mod_name, dependency, import_span, materialize_enum)
+        hir_phase_profile_add(HIR_PROF_RIS_FIELD_DEP, started)
+
+    me materialize_imported_field_dependency_inner(
         imported_mod: ModuleSurface,
         imported_mod_name: text,
         dependency: text,
@@ -97,7 +110,9 @@ impl HirLowering:
                 case other:
                     self.error("unknown imported composite kind `{other}` for `{imported_name}`", import_span)
                     return
+            val composite_define_started = hir_phase_profile_now()
             val imported_type = self.symbols.define(local_name, kind, nil, import_span, Visibility.Public, false, Some(imported_mod.module_name))
+            hir_phase_profile_add(HIR_PROF_RIS_DEFINE, composite_define_started)
             if not already_bound:
                 self.symbols.rename_symbol(imported_type, imported_name)
                 self.symbols.bind_qualified_type(imported_mod.module_name, imported_name, imported_type)
@@ -289,10 +304,14 @@ impl HirLowering:
                 imported_mod, imported_mod_name,
                 imported_mod.callable_values[callable_position], import_span,
                 materialize_enum)
+            val sig_started = hir_phase_profile_now()
             val fn_type = self.declared_imported_surface_callable_type(
                 imported_mod.callable_values[callable_position],
                 imported_mod.module_name, nil)
+            hir_phase_profile_add(HIR_PROF_RIS_SIGTYPE, sig_started)
+            val define_started = hir_phase_profile_now()
             val imported_fn_sym = self.symbols.define(local_name, SymbolKind.Function, fn_type, import_span, Visibility.Public, false, Some(imported_mod.module_name))
+            hir_phase_profile_add(HIR_PROF_RIS_DEFINE, define_started)
             self.qualify_imported_function_symbol(imported_fn_sym, imported_mod.module_name, imported_name)
         elif constant_position >= 0:
             self.symbols.define(local_name, SymbolKind.Const, nil, import_span, Visibility.Public, false, Some(imported_mod.module_name))
