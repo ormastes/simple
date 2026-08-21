@@ -92,13 +92,14 @@ stage2_backend=$(bootstrap_stage3_transcript_argv_value_after \
 stage2_threads=$(bootstrap_stage3_transcript_argv_value_after \
   "$stage2_transcript" --threads) || exit 1
 stage2_compile_stack_mib=$(bootstrap_stage3_transcript_argv_value_after \
-  "$stage2_transcript" --compile-stack-mib) || exit 1
+  "$stage2_transcript" --compile-stack-mib 2>/dev/null || true)
 stage2_progress=$(bootstrap_stage3_transcript_explicit_env_value \
   "$stage2_transcript" SIMPLE_BUILD_PROGRESS_EVENTS) || exit 1
 case "$stage2_backend" in llvm|llvm-lib|cranelift) ;; *) exit 1 ;; esac
 case "$stage2_threads" in ''|*[!0-9]*|0) exit 1 ;; esac
-case "$stage2_compile_stack_mib" in ''|*[!0-9]*|0) exit 1 ;; esac
-stage2_args=$(bootstrap_stage3_args_sha256 \
+case "$stage2_compile_stack_mib" in ''|*[!0-9]*|0) stage2_compile_stack_mib='' ;; esac
+if [ -n "$stage2_compile_stack_mib" ]; then
+  stage2_args=$(bootstrap_stage3_args_sha256 \
   "RUST_LOG=error" "LIBRARY_PATH=" "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent" \
   "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
   "SIMPLE_NATIVE_BUILD_RUST=1" "SIMPLE_NO_STUB_FALLBACK=1" \
@@ -109,6 +110,18 @@ stage2_args=$(bootstrap_stage3_args_sha256 \
   --compile-stack-mib "$stage2_compile_stack_mib" \
   --cache-dir "$stage2_cache" --mode dynload --entry src/app/cli/bootstrap_main.spl \
   --runtime-path "$runtime" -o "$stage2")
+else
+  stage2_args=$(bootstrap_stage3_args_sha256 \
+  "RUST_LOG=error" "LIBRARY_PATH=" "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent" \
+  "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
+  "SIMPLE_NATIVE_BUILD_RUST=1" "SIMPLE_NO_STUB_FALLBACK=1" \
+  "SIMPLE_BUILD_PROGRESS_EVENTS=$stage2_progress" "SIMPLE_BINARY=$seed" \
+  native-build --target "$platform" --backend "$stage2_backend" \
+  --runtime-bundle core-c-bootstrap --source src/compiler --source src/app \
+  --source src/lib --entry-closure --threads "$stage2_threads" \
+  --cache-dir "$stage2_cache" --mode dynload --entry src/app/cli/bootstrap_main.spl \
+  --runtime-path "$runtime" -o "$stage2")
+fi
 bootstrap_stage3_verify_sanity_evidence_receipt \
   "$stage2_sanity" "$stage2"
 bootstrap_stage3_verify_receiver_evidence_receipt \

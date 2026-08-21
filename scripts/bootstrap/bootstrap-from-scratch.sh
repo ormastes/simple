@@ -491,7 +491,7 @@ if [ -n "${resume_stage3_output}" ]; then
     exit 1
   }
   case "${jobs}" in ''|1) ;; *) echo "error: Stage 3 resume permits only --jobs=1 (it execs resume-stage3-from-admitted.sh, which takes no jobs argument and pins the stage-3 recompile to --threads 1; a jobs value here would be silently ignored)" >&2; exit 1 ;; esac
-  exec "$(dirname -- "$0")/resume-stage3-from-admitted.sh" "${resume_stage3_output}"
+  exec /bin/sh "$(dirname -- "$0")/resume-stage3-from-admitted.sh" "${resume_stage3_output}"
 fi
 
 if [ -n "${resume_stage4_output}" ]; then
