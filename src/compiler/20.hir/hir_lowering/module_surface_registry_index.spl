@@ -389,15 +389,65 @@ pub(package) fn module_surfaces_freeze(registry: ModuleSurfacesByName) -> Result
                 else:
                     var source_name = export_item
                     var local_name = export_item
+                    var route_target_name = ""
                     if export_item.contains(":"):
                         val parts = export_item.split(":")
                         source_name = parts[0]
                         if parts.len() > 1:
                             local_name = parts[1]
+                    elif export_item.contains("."):
+                        # QUALIFIED bare export -- `export module.Name`.
+                        # Stored verbatim, the route's local name is the whole
+                        # dotted string, so `find_reexport_source_walk`'s
+                        # `exp_local == wanted` test never matches the short
+                        # name a consumer actually writes and the route is
+                        # skipped outright. That surfaced as the hard
+                        # `unresolved type: CodegenTarget`
+                        # (`src/compiler/70.backend/backend/__init__.spl:326`
+                        # spells it `export backend_api.CodegenTarget`), blamed
+                        # on an innocent importing module. Split the qualifier
+                        # off and record the module it names as the route
+                        # target, exactly as the `.*` glob branch already does.
+                        val qualified_parts = export_item.split(".")
+                        val member_name = qualified_parts[qualified_parts.len() - 1]
+                        var qualifier = ""
+                        var qualifier_index = 0
+                        while qualifier_index < qualified_parts.len() - 1:
+                            if qualifier == "":
+                                qualifier = qualified_parts[qualifier_index]
+                            else:
+                                qualifier = qualifier + "." + qualified_parts[qualifier_index]
+                            qualifier_index = qualifier_index + 1
+                        if qualifier != "" and member_name != "":
+                            # The qualifier names a package SIBLING, so resolve
+                            # it against the facade's own package first (the
+                            # same relative rule the `.*` glob branch uses);
+                            # `surface.package_name` is filesystem-derived and
+                            # does not always agree with the registry key.
+                            val registry_package = module_surface_package_name_from_name(
+                                surface.preferred_registry_name)
+                            if registry_package != "":
+                                route_target_name = module_surface_resolve_absolute_key(
+                                    registry, registry_package + "." + qualifier)
+                            if route_target_name == "":
+                                route_target_name = module_surface_resolve_relative_key(
+                                    registry, surface, "." + qualifier)
+                            if route_target_name == "":
+                                route_target_name = module_surface_resolve_absolute_key(
+                                    registry, surface.package_name + "." + qualifier)
+                            if route_target_name == "":
+                                route_target_name = module_surface_resolve_absolute_key(
+                                    registry, qualifier)
+                            if route_target_name != "":
+                                source_name = member_name
+                                local_name = member_name
                     export_route_sources = export_route_sources.push(source_name)
                     export_route_locals = export_route_locals.push(local_name)
-                    export_route_target_indices = export_route_target_indices.push(-1)
-                    export_route_target_names = export_route_target_names.push("")
+                    var route_target_index = -1
+                    if route_target_name != "":
+                        route_target_index = module_surface_registry_index(registry, route_target_name)
+                    export_route_target_indices = export_route_target_indices.push(route_target_index)
+                    export_route_target_names = export_route_target_names.push(route_target_name)
                     export_route_is_glob = export_route_is_glob.push(false)
 
         surface.import_target_indices = import_target_indices

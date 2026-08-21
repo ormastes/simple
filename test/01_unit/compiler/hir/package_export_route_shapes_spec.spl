@@ -1,0 +1,66 @@
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+
+fn bare_export_logger() -> Logger:
+    Logger(level: 0)
+
+fn bare_export_module(source: text, name: text, log: Logger) -> Module:
+    parse_full_frontend(source, name, name, log)
+
+fn lower_bare_export_graph(package_source: text, alias_source: text) -> text:
+    val log = bare_export_logger()
+    val terminal_source = "enum CodegenTarget:\n    NativeExecutable\n    WasmModule"
+    val consumer_source = "use pkg.core.\{CodegenTarget\}\nfn aot(target: CodegenTarget) -> i64:\n    1"
+
+    var modules: Dict<text, Module> = {}
+    modules["pkg.backend.backend_types"] = bare_export_module(terminal_source, "pkg.backend.backend_types", log)
+    modules["pkg.core.backend_types"] = bare_export_module(alias_source, "pkg.core.backend_types", log)
+    modules["pkg.core.__init__"] = bare_export_module(package_source, "pkg.core.__init__", log)
+    modules["pkg.consumer"] = bare_export_module(consumer_source, "pkg.consumer", log)
+
+    val sources = [
+        SourceFile(path: "pkg/backend/backend_types.spl", content: terminal_source, module_name: "pkg.backend.backend_types"),
+        SourceFile(path: "pkg/core/backend_types.spl", content: alias_source, module_name: "pkg.core.backend_types"),
+        SourceFile(path: "pkg/core/__init__.spl", content: package_source, module_name: "pkg.core.__init__"),
+        SourceFile(path: "pkg/consumer.spl", content: consumer_source, module_name: "pkg.consumer")
+    ]
+
+    val surfaces_result = module_surfaces_from_modules(modules, sources)
+    expect(surfaces_result.is_ok()).to_be_truthy()
+    val surfaces = surfaces_result.unwrap()
+    val consumer = bare_export_module(consumer_source, "pkg.consumer", log)
+    var lowering = hirlowering_for_module("pkg.consumer", surfaces)
+    val hir = lowering.lower_module(consumer)
+    var joined = ""
+    for message in lowering.diagnostic_messages:
+        joined = joined + message + "|"
+    joined
+
+describe("package export route shapes resolve to their terminal declaration", fn():
+    it("resolves through a sibling that declares the type", fn():
+        val diagnostics = lower_bare_export_graph(
+            "export CodegenTarget",
+            "enum CodegenTarget:\n    NativeExecutable\n    WasmModule")
+        expect(diagnostics).to_equal("")
+    )
+
+    it("resolves through a sibling that re-exports the type", fn():
+        val diagnostics = lower_bare_export_graph(
+            "export CodegenTarget",
+            "export use pkg.backend.backend_types.\{CodegenTarget\}")
+        expect(diagnostics).to_equal("")
+    )
+
+    it("resolves a qualified bare export naming its sibling", fn():
+        val diagnostics = lower_bare_export_graph(
+            "export backend_types.CodegenTarget",
+            "enum CodegenTarget:\n    NativeExecutable\n    WasmModule")
+        expect(diagnostics).to_equal("")
+    )
+)

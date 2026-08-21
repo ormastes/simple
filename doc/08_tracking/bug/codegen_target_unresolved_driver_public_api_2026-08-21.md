@@ -122,3 +122,90 @@ to change runtime behaviour, for two independent reasons:
 
 Do not treat this as closed until a stage1 lowering of
 `compiler.driver.driver_public_api` is observed clean.
+
+---
+
+## Round 2 (2026-08-21) — the FIRST fix works; a SECOND export shape does not
+
+Stage1 run7 (tree `d1fd6255ecd`), which contains `4368a77f7fa`, still reported
+`unresolved type: CodegenTarget` against `driver_public_api.spl`. That is not a
+regression of the first fix — it is a *different* export shape on the same
+route.
+
+### The spec-harness blocker above was wrong
+
+The "`lookup_or_invalid` is undispatchable from a spec" claim is not what blocks
+the fixture. A fixture built on the same harness as
+`test/01_unit/compiler/hir/same_named_package_facade_reexport_spec.spl`
+(`module_surfaces_from_modules` + `hirlowering_for_module(...).lower_module`)
+executes the whole re-export resolution path fine. The real defect in the
+earlier attempt was that the **consumer module was omitted from the surface
+registry**: lowering then emits `missing importing module surface for
+<consumer>` and every subsequent name fails to resolve, which is what made the
+fixture look blocked. Adding the consumer to both `modules` and `sources` makes
+the fixture green/red on the actual defect. **No separate bug should be filed
+for `lookup_or_invalid`.**
+
+With a correct fixture, measured on the deployed seed:
+
+| shape | pre-`4368a77f7fa` | at HEAD (round 2) |
+|---|---|---|
+| bare `export CodegenTarget`, sibling DECLARES it | fail | **pass** |
+| bare `export CodegenTarget`, sibling only `export use`s it | fail | **pass** |
+| qualified `export backend_types.CodegenTarget` | fail | **fail** |
+
+So `4368a77f7fa` is real and load-bearing, and it covers both bare shapes. What
+it does not cover is the **qualified bare export**.
+
+### Root cause of the remaining shape
+
+`src/compiler/20.hir/hir_lowering/module_surface_registry_index.spl:391-400`
+(non-glob export branch) stores the export item verbatim. For
+`export backend_types.CodegenTarget` that records
+
+    export_route_sources[i] = "backend_types.CodegenTarget"
+    export_route_locals[i]  = "backend_types.CodegenTarget"
+    export_route_target_indices[i] = -1
+
+so in `find_reexport_source_walk`
+(`_Items/module_reexport_materialization.spl`) the guard `exp_local == wanted`
+compares the whole dotted string against the short name a consumer writes
+(`CodegenTarget`) and **the route is skipped outright** — it never reaches the
+declares-check, the alias recursion, or the round-1 package-sibling branch. The
+qualifier, which names the sibling that owns the name, is discarded.
+
+`src/compiler/70.backend/backend/__init__.spl:326` spells the CodegenTarget
+re-export exactly that way (`export backend_api.CodegenTarget`). The shape is
+not rare: `grep -rn '^export [a-z_][a-z_0-9.]*\.[A-Za-z]' src --include=*.spl`
+counts **509** qualified bare exports, including all of
+`src/compiler/00.common/diagnostics/__init__.spl` (`export span.Span`, …) and
+~90 lines of `70.backend/backend/__init__.spl`.
+
+### Fix
+
+Two lines of route structure, no new visibility and no import added to any
+driver module:
+
+1. `module_surface_registry_index.spl`, non-glob branch: when an export item
+   carries no `:` alias but does carry a `.`, split the last segment off as the
+   member name and resolve the qualifier to a module key — first against the
+   facade's own **registry** package (`preferred_registry_name` minus its last
+   segment; `surface.package_name` and `canonical_name` are filesystem-derived
+   and disagree with registry keys), then the relative rule, then absolute.
+   On success record `source = local = member` and the resolved module as the
+   route target, exactly as the `.*` glob branch already does. If the qualifier
+   resolves to nothing the route is stored verbatim as before — fail-safe.
+2. `_Items/module_reexport_materialization.spl`, non-glob branch: follow that
+   recorded target first (declares-check, then recurse), before the existing
+   facade-declares / alias / package-sibling attempts.
+
+### Verification
+
+- Reproduce spec: `test/01_unit/compiler/hir/package_export_route_shapes_spec.spl`,
+  three shapes. Pre-fix 2 pass / 1 fail (the qualified shape, with the exact
+  `unresolved type: CodegenTarget`); post-fix 3/3.
+- Neighbouring re-export specs
+  (`same_named_package_facade_reexport_spec`, `module_surface_glob_export_origin_spec`,
+  `reexport_physical_cache_spec`) have **byte-identical** pass/fail counts
+  before and after the change (2/3, 3/1, 1/15 — all pre-existing failures,
+  none introduced here).
