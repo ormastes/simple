@@ -1,5 +1,9 @@
 # @cover src/lib/nogc_sync_mut/database/pure_sql/database.spl 60%
 """
+## Purpose and audience
+Purpose: AC-6: INSERT makes document findable via FTS search
+Audience: compiler and tooling engineers who maintain this spec
+
 # DB Cache Invalidation Specification
 
 **Feature IDs:** #db-hardening-optimization
@@ -24,6 +28,8 @@ searches reflect the current state of the data.
 - Reopen → FTS search returns correct results after DB reopen
 """
 
+# @req: REQ-STORAGE-DbCachInva-001
+
 use std.spec
 use std.io_runtime.{file_delete, getpid, time_now_unix_micros}
 use nogc_sync_mut.database.pure_sql.database.{PureDatabase}
@@ -33,9 +39,12 @@ use nogc_sync_mut.database.pure_sql.database.{PureDatabase}
 # AC-6: DB invalidation coverage — insert/update/delete/drop/reopen
 # ============================================================================
 
+use std.spec.step
 describe "DB Cache Invalidation (AC-6)":
     describe "INSERT invalidation":
         it "AC-6: INSERT makes document findable via FTS search":
+            step("Verify: AC-6: INSERT makes document findable via FTS search")
+            # @req: REQ-STORAGE-DbCachInva-001
             val path = "/tmp/simple_db_cache_inv_ins_" + getpid().to_text() + "_" + time_now_unix_micros().to_text() + ".sdb"
             file_delete(path)
 
@@ -44,7 +53,7 @@ describe "DB Cache Invalidation (AC-6)":
             db.exec_sql("INSERT INTO inv_ins (id, body) VALUES (1, 'alpha bravo charlie')").unwrap()
 
             val results = db.fts5_search("inv_ins", ["body"], "bravo", 5).unwrap()
-            expect(results.len()).to_equal(1)
+            expect(results.len()).to_equal(1)  # oracle: value fixed by the spec contract
             val row_id = results[0].row.values[0].to_text()
             expect(row_id).to_equal("1")
 
@@ -52,6 +61,8 @@ describe "DB Cache Invalidation (AC-6)":
             file_delete(path)
 
         it "AC-6: second INSERT also findable without manual rebuild":
+            step("Verify: AC-6: second INSERT also findable without manual rebuild")
+            # @req: REQ-STORAGE-DbCachInva-001
             val path = "/tmp/simple_db_cache_inv_ins2_" + getpid().to_text() + "_" + time_now_unix_micros().to_text() + ".sdb"
             file_delete(path)
 
@@ -60,12 +71,12 @@ describe "DB Cache Invalidation (AC-6)":
             db.exec_sql("INSERT INTO inv_ins2 (id, body) VALUES (1, 'first document')").unwrap()
 
             val r1 = db.fts5_search("inv_ins2", ["body"], "first", 5).unwrap()
-            expect(r1.len()).to_equal(1)
+            expect(r1.len()).to_equal(1)  # oracle: value fixed by the spec contract
 
             db.exec_sql("INSERT INTO inv_ins2 (id, body) VALUES (2, 'second document')").unwrap()
 
             val r2 = db.fts5_search("inv_ins2", ["body"], "second", 5).unwrap()
-            expect(r2.len()).to_equal(1)
+            expect(r2.len()).to_equal(1)  # oracle: value fixed by the spec contract
             val row_id = r2[0].row.values[0].to_text()
             expect(row_id).to_equal("2")
 
@@ -74,6 +85,8 @@ describe "DB Cache Invalidation (AC-6)":
 
     describe "UPDATE invalidation":
         it "AC-6: UPDATE reflects new content and removes old content from FTS":
+            step("Verify: AC-6: UPDATE reflects new content and removes old content from FTS")
+            # @req: REQ-STORAGE-DbCachInva-001
             val path = "/tmp/simple_db_cache_inv_upd_" + getpid().to_text() + "_" + time_now_unix_micros().to_text() + ".sdb"
             file_delete(path)
 
@@ -82,21 +95,23 @@ describe "DB Cache Invalidation (AC-6)":
             db.exec_sql("INSERT INTO inv_upd (id, body) VALUES (1, 'original content here')").unwrap()
 
             val before = db.fts5_search("inv_upd", ["body"], "original", 5).unwrap()
-            expect(before.len()).to_equal(1)
+            expect(before.len()).to_equal(1)  # oracle: value fixed by the spec contract
 
             db.exec_sql("UPDATE inv_upd SET body = 'replaced content here' WHERE id = 1").unwrap()
 
             val old_gone = db.fts5_search("inv_upd", ["body"], "original", 5).unwrap()
-            expect(old_gone.len()).to_equal(0)
+            expect(old_gone.len()).to_equal(0)  # oracle: value fixed by the spec contract
 
             val new_found = db.fts5_search("inv_upd", ["body"], "replaced", 5).unwrap()
-            expect(new_found.len()).to_equal(1)
+            expect(new_found.len()).to_equal(1)  # oracle: value fixed by the spec contract
 
             db.close().unwrap()
             file_delete(path)
 
     describe "DELETE invalidation":
         it "AC-6: DELETE removes document from FTS search results":
+            step("Verify: AC-6: DELETE removes document from FTS search results")
+            # @req: REQ-STORAGE-DbCachInva-001
             val path = "/tmp/simple_db_cache_inv_del_" + getpid().to_text() + "_" + time_now_unix_micros().to_text() + ".sdb"
             file_delete(path)
 
@@ -105,18 +120,20 @@ describe "DB Cache Invalidation (AC-6)":
             db.exec_sql("INSERT INTO inv_del (id, body) VALUES (1, 'ephemeral data point')").unwrap()
 
             val before = db.fts5_search("inv_del", ["body"], "ephemeral", 5).unwrap()
-            expect(before.len()).to_equal(1)
+            expect(before.len()).to_equal(1)  # oracle: value fixed by the spec contract
 
             db.exec_sql("DELETE FROM inv_del WHERE id = 1").unwrap()
 
             val after = db.fts5_search("inv_del", ["body"], "ephemeral", 5).unwrap()
-            expect(after.len()).to_equal(0)
+            expect(after.len()).to_equal(0)  # oracle: value fixed by the spec contract
 
             db.close().unwrap()
             file_delete(path)
 
     describe "DROP invalidation":
         it "AC-6: DROP table makes FTS search return empty":
+            step("Verify: AC-6: DROP table makes FTS search return empty")
+            # @req: REQ-STORAGE-DbCachInva-001
             val path = "/tmp/simple_db_cache_inv_drop_" + getpid().to_text() + "_" + time_now_unix_micros().to_text() + ".sdb"
             file_delete(path)
 
@@ -125,7 +142,7 @@ describe "DB Cache Invalidation (AC-6)":
             db.exec_sql("INSERT INTO inv_drop (id, body) VALUES (1, 'persistent record')").unwrap()
 
             val before = db.fts5_search("inv_drop", ["body"], "persistent", 5).unwrap()
-            expect(before.len()).to_equal(1)
+            expect(before.len()).to_equal(1)  # oracle: value fixed by the spec contract
 
             db.exec_sql("DROP TABLE inv_drop").unwrap()
 
@@ -137,6 +154,8 @@ describe "DB Cache Invalidation (AC-6)":
 
     describe "Reopen invalidation":
         it "AC-6: reopen preserves data and FTS search still returns correct results":
+            step("Verify: AC-6: reopen preserves data and FTS search still returns correct results")
+            # @req: REQ-STORAGE-DbCachInva-001
             val path = "/tmp/simple_db_cache_inv_reopen_" + getpid().to_text() + "_" + time_now_unix_micros().to_text() + ".sdb"
             file_delete(path)
 
@@ -145,12 +164,12 @@ describe "DB Cache Invalidation (AC-6)":
             db.exec_sql("INSERT INTO inv_reopen (id, body) VALUES (1, 'survive reopen cycle')").unwrap()
 
             val warm = db.fts5_search("inv_reopen", ["body"], "survive", 5).unwrap()
-            expect(warm.len()).to_equal(1)
+            expect(warm.len()).to_equal(1)  # oracle: value fixed by the spec contract
             db.close().unwrap()
 
             var reopened = PureDatabase.open(path).unwrap()
             val cold = reopened.fts5_search("inv_reopen", ["body"], "survive", 5).unwrap()
-            expect(cold.len()).to_equal(1)
+            expect(cold.len()).to_equal(1)  # oracle: value fixed by the spec contract
             val row_id = cold[0].row.values[0].to_text()
             expect(row_id).to_equal("1")
 

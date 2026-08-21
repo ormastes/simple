@@ -9,6 +9,14 @@
 #
 # Run: bin/simple test test/perf/bench/pure_db_optimization_spec.spl
 
+"""
+## Purpose and audience
+Purpose: INSERT 100 rows with auto_checkpoint=false writes no disk until checkpoint
+Audience: compiler and tooling engineers who maintain this spec
+"""
+
+# @req: REQ-BENCH-PureDbOpti-001
+
 use std.spec
 use std.io_runtime.{file_delete, file_exists, getpid, time_now_unix_micros}
 use nogc_sync_mut.database.pure_sql.database.{PureDatabase}
@@ -24,8 +32,11 @@ fn opt_elapsed_ms(start_ns: i64, end_ns: i64) -> i64:
 
 # ── Optimization A: Deferred Persist ─────────────────────────────────────────
 
+use std.spec.step
 describe "Optimization A: Deferred Persist (AC-4, AC-5)":
     it "INSERT 100 rows with auto_checkpoint=false writes no disk until checkpoint":
+        step("Verify: INSERT 100 rows with auto_checkpoint=false writes no disk until checkpoint")
+        # @req: REQ-BENCH-PureDbOpti-001
         val path = opt_tmp_path("deferred_a1")
         file_delete(path)
 
@@ -63,6 +74,8 @@ describe "Optimization A: Deferred Persist (AC-4, AC-5)":
         file_delete(path)
 
     it "deferred INSERT is faster than auto-checkpoint INSERT":
+        step("Verify: deferred INSERT is faster than auto-checkpoint INSERT")
+        # @req: REQ-BENCH-PureDbOpti-001
         val path_fast = opt_tmp_path("deferred_fast")
         val path_slow = opt_tmp_path("deferred_slow")
         file_delete(path_fast)
@@ -116,6 +129,8 @@ describe "Optimization A: Deferred Persist (AC-4, AC-5)":
 
 describe "Optimization B: Incremental FTS (AC-4, AC-5)":
     it "INSERT row is findable via FTS without full rebuild":
+        step("Verify: INSERT row is findable via FTS without full rebuild")
+        # @req: REQ-BENCH-PureDbOpti-001
         val path = opt_tmp_path("incr_fts_ins")
         file_delete(path)
         var db = PureDatabase.open(path).unwrap()
@@ -124,7 +139,7 @@ describe "Optimization B: Incremental FTS (AC-4, AC-5)":
         # Seed with initial data and trigger FTS build
         db.exec_sql("INSERT INTO fts_b (id, body) VALUES (1, 'alpha bravo charlie')").unwrap()
         val warmup = db.fts5_search("fts_b", ["body"], "alpha", 5).unwrap()
-        expect(warmup.len()).to_equal(1)
+        expect(warmup.len()).to_equal(1)  # oracle: value fixed by the spec contract
 
         # Insert new row — incremental FTS should index it without full rebuild
         db.exec_sql("INSERT INTO fts_b (id, body) VALUES (2, 'delta echo foxtrot')").unwrap()
@@ -133,7 +148,7 @@ describe "Optimization B: Incremental FTS (AC-4, AC-5)":
         val found = db.fts5_search("fts_b", ["body"], "echo", 5).unwrap()
         val t1 = bench_now_ns()
 
-        expect(found.len()).to_equal(1)
+        expect(found.len()).to_equal(1)  # oracle: value fixed by the spec contract
         val found_id = found[0].row.values[0].to_text()
         expect(found_id).to_equal("2")
 
@@ -143,6 +158,8 @@ describe "Optimization B: Incremental FTS (AC-4, AC-5)":
         file_delete(path)
 
     it "DELETE row is removed from FTS without full rebuild":
+        step("Verify: DELETE row is removed from FTS without full rebuild")
+        # @req: REQ-BENCH-PureDbOpti-001
         val path = opt_tmp_path("incr_fts_del")
         file_delete(path)
         var db = PureDatabase.open(path).unwrap()
@@ -152,7 +169,7 @@ describe "Optimization B: Incremental FTS (AC-4, AC-5)":
 
         # Warm up FTS index
         val before = db.fts5_search("fts_d", ["body"], "golf", 5).unwrap()
-        expect(before.len()).to_equal(1)
+        expect(before.len()).to_equal(1)  # oracle: value fixed by the spec contract
 
         # Delete row 1
         db.exec_sql("DELETE FROM fts_d WHERE id = 1").unwrap()
@@ -161,11 +178,11 @@ describe "Optimization B: Incremental FTS (AC-4, AC-5)":
         val after = db.fts5_search("fts_d", ["body"], "golf", 5).unwrap()
         val t1 = bench_now_ns()
 
-        expect(after.len()).to_equal(0)
+        expect(after.len()).to_equal(0)  # oracle: value fixed by the spec contract
 
         # Row 2 should still be findable
         val still = db.fts5_search("fts_d", ["body"], "kilo", 5).unwrap()
-        expect(still.len()).to_equal(1)
+        expect(still.len()).to_equal(1)  # oracle: value fixed by the spec contract
 
         print("[OptB] Incremental FTS search after DELETE: " + opt_elapsed_ms(t0, t1).to_text() + " ms")
 
@@ -173,6 +190,8 @@ describe "Optimization B: Incremental FTS (AC-4, AC-5)":
         file_delete(path)
 
     it "mixed INSERT+DELETE maintains FTS correctness":
+        step("Verify: mixed INSERT+DELETE maintains FTS correctness")
+        # @req: REQ-BENCH-PureDbOpti-001
         val path = opt_tmp_path("incr_fts_mix")
         file_delete(path)
         var db = PureDatabase.open(path).unwrap()
@@ -186,7 +205,7 @@ describe "Optimization B: Incremental FTS (AC-4, AC-5)":
 
         # Warm up FTS
         val all_common = db.fts5_search("fts_m", ["body"], "common_word", 20).unwrap()
-        expect(all_common.len()).to_equal(10)
+        expect(all_common.len()).to_equal(10)  # oracle: value fixed by the spec contract
 
         # Delete rows 0–4
         var j = 0
@@ -202,15 +221,15 @@ describe "Optimization B: Incremental FTS (AC-4, AC-5)":
 
         # Verify: common_word should match 10 rows (5 surviving + 5 new)
         val after_mix = db.fts5_search("fts_m", ["body"], "common_word", 20).unwrap()
-        expect(after_mix.len()).to_equal(10)
+        expect(after_mix.len()).to_equal(10)  # oracle: value fixed by the spec contract
 
         # Verify: deleted term should not match
         val gone = db.fts5_search("fts_m", ["body"], "term_0", 5).unwrap()
-        expect(gone.len()).to_equal(0)
+        expect(gone.len()).to_equal(0)  # oracle: value fixed by the spec contract
 
         # Verify: new term should match
         val fresh = db.fts5_search("fts_m", ["body"], "fresh_12", 5).unwrap()
-        expect(fresh.len()).to_equal(1)
+        expect(fresh.len()).to_equal(1)  # oracle: value fixed by the spec contract
 
         db.close().unwrap()
         file_delete(path)

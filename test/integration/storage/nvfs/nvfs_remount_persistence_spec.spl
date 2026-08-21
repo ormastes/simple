@@ -5,6 +5,14 @@
 #
 # Run: bin/simple test test/integration/storage/nvfs/nvfs_remount_persistence_spec.spl
 
+"""
+## Purpose and audience
+Purpose: superblock survives format then re-read
+Audience: compiler and tooling engineers who maintain this spec
+"""
+
+# @req: REQ-STORAGE-NvfsRemoPers-001
+
 use std.spec
 use std.fs_driver.nvfs_arena.{
     arena_create_nvme_impl, arena_append_impl, arena_readv_impl,
@@ -30,9 +38,12 @@ fn _make_device() -> CachedRawImageBlockDevice:
     val r = CachedRawImageBlockDevice.from_bytes(root + "/disk.img", img, 512u32)
     r.unwrap()
 
+use std.spec.step
 describe "NVFS remount persistence — data survives across mount cycles":
 
     it "superblock survives format then re-read":
+        step("Verify: superblock survives format then re-read")
+        # @req: REQ-STORAGE-NvfsRemoPers-001
         var dev = _make_device()
         nvfs_arena_set_block_device(dev)
         nvfs_superblock_set_device(dev)
@@ -47,13 +58,15 @@ describe "NVFS remount persistence — data survives across mount cycles":
         expect(sb.mount_generation).to_equal(1u64)
 
     it "arena data written to NVMe sectors can be read back via raw sector read":
+        step("Verify: arena data written to NVMe sectors can be read back via raw sector read")
+        # @req: REQ-STORAGE-NvfsRemoPers-001
         var dev = _make_device()
         nvfs_arena_set_block_device(dev)
         val aid = arena_create_nvme_impl(0, 4096, 4, 32)
         expect(aid > 0).to_equal(true)
         val data: [u8] = [0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04]
         val w = arena_append_impl(aid, data, 0)
-        expect(w).to_equal(8)
+        expect(w).to_equal(8)  # oracle: value fixed by the spec contract
         val raw = nvfs_raw_read_sector(5u64)
         expect(raw.len() >= 8).to_equal(true)
         expect(raw[0]).to_equal(0xDE)
@@ -64,6 +77,8 @@ describe "NVFS remount persistence — data survives across mount cycles":
         expect(raw[7]).to_equal(0x04)
 
     it "full write-read cycle: format superblock + write arena + read both back":
+        step("Verify: full write-read cycle: format superblock + write arena + read both back")
+        # @req: REQ-STORAGE-NvfsRemoPers-001
         var dev = _make_device()
         nvfs_arena_set_block_device(dev)
         nvfs_superblock_set_device(dev)
@@ -73,27 +88,29 @@ describe "NVFS remount persistence — data survives across mount cycles":
         expect(aid > 0).to_equal(true)
         val payload: [u8] = [0x41, 0x42, 0x43, 0x44, 0x45]
         val w = arena_append_impl(aid, payload, 0)
-        expect(w).to_equal(5)
+        expect(w).to_equal(5)  # oracle: value fixed by the spec contract
         val sb = nvfs_superblock_read_from_disk()
         expect(sb.valid).to_equal(true)
         expect(sb.uuid_hi).to_equal(0x1111u64)
         val arena_data = arena_readv_impl(aid, 0, 5)
-        expect(arena_data.len() as i64).to_equal(5)
+        expect(arena_data.len() as i64).to_equal(5)  # oracle: value fixed by the spec contract
         expect(arena_data[0]).to_equal(0x41)
         expect(arena_data[4]).to_equal(0x45)
 
     it "multiple arena writes persist across reads":
+        step("Verify: multiple arena writes persist across reads")
+        # @req: REQ-STORAGE-NvfsRemoPers-001
         var dev = _make_device()
         nvfs_arena_set_block_device(dev)
         val aid = arena_create_nvme_impl(0, 4096, 16, 16)
         expect(aid > 0).to_equal(true)
         val d1: [u8] = [0x10, 0x20, 0x30]
         val w1 = arena_append_impl(aid, d1, 0)
-        expect(w1).to_equal(3)
+        expect(w1).to_equal(3)  # oracle: value fixed by the spec contract
         val d2: [u8] = [0x40, 0x50]
         val w2 = arena_append_impl(aid, d2, 0)
-        expect(w2).to_equal(2)
-        expect(arena_total_bytes_impl(aid)).to_equal(5)
+        expect(w2).to_equal(2)  # oracle: value fixed by the spec contract
+        expect(arena_total_bytes_impl(aid)).to_equal(5)  # oracle: value fixed by the spec contract
         val raw = nvfs_raw_read_sector(17u64)
         expect(raw[0]).to_equal(0x10)
         expect(raw[1]).to_equal(0x20)

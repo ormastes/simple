@@ -4,6 +4,10 @@
 # (currently in-memory only — R1 HIGH-risk gap from D12)
 
 """
+## Purpose and audience
+Purpose: records are present after remount (not lost in-memory)
+Audience: compiler and tooling engineers who maintain this spec
+
 DBFS Intent Log Disk Persistence Specification
 
 Verifies R1 HIGH-risk gap: intent-log records survive a simulated remount.
@@ -15,6 +19,8 @@ The in-memory placeholder must be replaced by disk persistence to META_DURABLE.
   4. intent-log head pointer is durable across remount
 """
 
+# @req: REQ-STORAGE-DbfsEngiInteLog-001
+
 use std.spipe.*
 use std.db.dbfs_engine.intent_log.{
     IntentLog, IntentLogRecord, IntentLogHead,
@@ -24,10 +30,13 @@ use std.db.dbfs_engine.intent_log.{
 use std.db.dbfs_engine.wal.{WalRecord, WAL_RECORD_COMMIT, WAL_RECORD_DATA}
 use std.storage.arena.{StorageClass}
 
+use std.spec.step
 describe "DBFS Intent Log — disk persistence after remount":
     """Records written before remount survive and are replayed."""
 
     it "records are present after remount (not lost in-memory)":
+        step("Verify: records are present after remount (not lost in-memory)")
+        # @req: REQ-STORAGE-DbfsEngiInteLog-001
         val log = IntentLog.new_persistent()
         val rec = IntentLogRecord(txn_id: 1, lsn: 100, committed: true)
         log.append(rec).unwrap()
@@ -35,22 +44,26 @@ describe "DBFS Intent Log — disk persistence after remount":
         log.close().unwrap()
         val log2 = IntentLog.reopen()
         val records = log2.scan_all().unwrap()
-        expect(records.len()).to_equal(1)
-        expect(records[0].txn_id).to_equal(1)
+        expect(records.len()).to_equal(1)  # oracle: value fixed by the spec contract
+        expect(records[0].txn_id).to_equal(1)  # oracle: value fixed by the spec contract
 
     it "tail LSN is correct after remount":
+        step("Verify: tail LSN is correct after remount")
+        # @req: REQ-STORAGE-DbfsEngiInteLog-001
         val log = IntentLog.new_persistent()
         log.append(IntentLogRecord(txn_id: 1, lsn: 42, committed: true)).unwrap()
         log.flush().unwrap()
         log.close().unwrap()
         val log2 = IntentLog.reopen()
         val head = log2.head().unwrap()
-        expect(head.tail_lsn).to_equal(42)
+        expect(head.tail_lsn).to_equal(42)  # oracle: value fixed by the spec contract
 
 describe "DBFS Intent Log — committed vs uncommitted replay":
     """Committed records replayed; uncommitted skipped."""
 
     it "only committed records appear in replay after remount":
+        step("Verify: only committed records appear in replay after remount")
+        # @req: REQ-STORAGE-DbfsEngiInteLog-001
         val log = IntentLog.new_persistent()
         log.append(IntentLogRecord(txn_id: 1, lsn: 10, committed: true)).unwrap()
         log.append(IntentLogRecord(txn_id: 2, lsn: 11, committed: false)).unwrap()
@@ -58,22 +71,26 @@ describe "DBFS Intent Log — committed vs uncommitted replay":
         log.close().unwrap()
         val log2 = IntentLog.reopen()
         val committed = log2.scan_committed().unwrap()
-        expect(committed.len()).to_equal(1)
-        expect(committed[0].txn_id).to_equal(1)
+        expect(committed.len()).to_equal(1)  # oracle: value fixed by the spec contract
+        expect(committed[0].txn_id).to_equal(1)  # oracle: value fixed by the spec contract
 
     it "uncommitted record count after remount is zero in committed scan":
+        step("Verify: uncommitted record count after remount is zero in committed scan")
+        # @req: REQ-STORAGE-DbfsEngiInteLog-001
         val log = IntentLog.new_persistent()
         log.append(IntentLogRecord(txn_id: 5, lsn: 20, committed: false)).unwrap()
         log.flush().unwrap()
         log.close().unwrap()
         val log2 = IntentLog.reopen()
         val committed = log2.scan_committed().unwrap()
-        expect(committed.len()).to_equal(0)
+        expect(committed.len()).to_equal(0)  # oracle: value fixed by the spec contract
 
 describe "DBFS Intent Log — storage class":
     """Intent log must write to META_DURABLE arena."""
 
     it "intent log uses META_DURABLE storage class":
+        step("Verify: intent log uses META_DURABLE storage class")
+        # @req: REQ-STORAGE-DbfsEngiInteLog-001
         val log = IntentLog.new_persistent()
         log.append(IntentLogRecord(txn_id: 1, lsn: 1, committed: true)).unwrap()
         log.flush().unwrap()
@@ -84,6 +101,8 @@ describe "DBFS Intent Log — head pointer durability":
     """Head pointer survives remount."""
 
     it "intent_log_head pointer matches after remount":
+        step("Verify: intent_log_head pointer matches after remount")
+        # @req: REQ-STORAGE-DbfsEngiInteLog-001
         val log = IntentLog.new_persistent()
         log.append(IntentLogRecord(txn_id: 7, lsn: 77, committed: true)).unwrap()
         log.flush().unwrap()
@@ -97,6 +116,8 @@ describe "DBFS Intent Log — callback persistence":
     """When callback is registered, writes go through the callback path."""
 
     it "callback path persists records across reopen":
+        step("Verify: callback path persists records across reopen")
+        # @req: REQ-STORAGE-DbfsEngiInteLog-001
         intent_clear_persist_callback()
         intent_register_persist_callback("arena:META_DURABLE")
         expect(intent_is_callback_registered()).to_equal(true)
@@ -105,16 +126,18 @@ describe "DBFS Intent Log — callback persistence":
         log.append(IntentLogRecord(txn_id: 4, lsn: 40, committed: false)).unwrap()
         log.flush().unwrap()
         log.close().unwrap()
-        expect(intent_cb_record_count()).to_equal(2)
+        expect(intent_cb_record_count()).to_equal(2)  # oracle: value fixed by the spec contract
         val log2 = IntentLog.reopen()
         val records = log2.scan_all().unwrap()
-        expect(records.len()).to_equal(2)
+        expect(records.len()).to_equal(2)  # oracle: value fixed by the spec contract
         val committed = log2.scan_committed().unwrap()
-        expect(committed.len()).to_equal(1)
-        expect(committed[0].txn_id).to_equal(3)
+        expect(committed.len()).to_equal(1)  # oracle: value fixed by the spec contract
+        expect(committed[0].txn_id).to_equal(3)  # oracle: value fixed by the spec contract
         intent_clear_persist_callback()
 
     it "callback registration is clearable":
+        step("Verify: callback registration is clearable")
+        # @req: REQ-STORAGE-DbfsEngiInteLog-001
         intent_register_persist_callback("test")
         expect(intent_is_callback_registered()).to_equal(true)
         intent_clear_persist_callback()

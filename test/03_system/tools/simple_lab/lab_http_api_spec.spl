@@ -1,4 +1,8 @@
 """
+## Purpose and audience
+Purpose: boots a real listening server process
+Audience: compiler and tooling engineers who maintain this spec
+
 # Simple Lab HTTP/WS API — real loopback system spec (Stream L, task L3)
 
 Drives `src/app/simple_lab/lab_server.spl` as a **separate OS process** over a
@@ -18,6 +22,8 @@ through L1's `snb_sdn.spl` on the server).
 Design: doc/05_design/app/tools/notebook_lanes_architecture.md §7.4
 Plan:   doc/03_plan/agent_tasks/notebook_lanes_parallel_plan_2026-08-07.md (Stream L, L3)
 """
+
+# @req: REQ-TOOLS-LabHttpApi-001
 
 # tag: slow, system
 
@@ -295,12 +301,16 @@ val NB_NAME = "http_api_test.snb.sdn"
 describe "Simple Lab HTTP/WS API (real loopback)":
 
     it "boots a real listening server process":
+        step("Verify: boots a real listening server process")
+        # @req: REQ-TOOLS-LabHttpApi-001
         step("spawn src/app/simple_lab/lab_server.spl as a subprocess on an ephemeral port")
         val server = start_lab_server(20)
         expect(server.started).to_equal(true)
         server.stop()
 
     it "drives the full create -> execute -> stream -> save flow over one real server":
+        step("Verify: drives the full create -> execute -> stream -> save flow over one real server")
+        # @req: REQ-TOOLS-LabHttpApi-001
         val server = start_lab_server(20)
         if not server.started:
             fail("lab_server subprocess did not start listening")
@@ -308,14 +318,14 @@ describe "Simple Lab HTTP/WS API (real loopback)":
         step("GET /api/lab/status carries the version header and reports zero sessions")
         val status_resp = http_request(server.addr, "GET", "/api/lab/status", "")
         expect(status_resp.ok).to_equal(true)
-        expect(status_resp.status).to_equal(200)
+        expect(status_resp.status).to_equal(200)  # oracle: value fixed by the spec contract
         expect(status_resp.headers.to_lower()).to_contain("x-lab-protocol-version: 1")
         expect(status_resp.body).to_contain("\"session_count\":0")
 
         step("POST /api/lab/sessions creates a real session")
         val create_resp = http_request(server.addr, "POST", "/api/lab/sessions", "{\"default_mode\":\"interpreter\"}")
         expect(create_resp.ok).to_equal(true)
-        expect(create_resp.status).to_equal(201)
+        expect(create_resp.status).to_equal(201)  # oracle: value fixed by the spec contract
         val session_id = json_field(create_resp.body, "id")
         expect(session_id).to_start_with("sess_")
 
@@ -323,7 +333,7 @@ describe "Simple Lab HTTP/WS API (real loopback)":
         val exec_path = "/api/lab/sessions/{session_id}/cells/c1/execute"
         val exec_resp = http_request(server.addr, "POST", exec_path, "{\"source\":\"print(\\\"lab-http-api-ok\\\")\"}")
         expect(exec_resp.ok).to_equal(true)
-        expect(exec_resp.status).to_equal(200)
+        expect(exec_resp.status).to_equal(200)  # oracle: value fixed by the spec contract
         expect(exec_resp.headers.to_lower()).to_contain("x-lab-protocol-version: 1")
         expect(exec_resp.body).to_contain("\"ok\":true")
         expect(exec_resp.body).to_contain("lab-http-api-ok")
@@ -331,7 +341,7 @@ describe "Simple Lab HTTP/WS API (real loopback)":
         step("GET .../events over a real WebSocket drains the stream+status frames the execute call buffered")
         val events_path = "/api/lab/sessions/{session_id}/events"
         val frames = ws_connect_and_drain(server.addr, events_path, 2)
-        expect(frames.len()).to_equal(2)
+        expect(frames.len()).to_equal(2)  # oracle: value fixed by the spec contract
         expect(frames[0]).to_contain("\"type\":\"stream\"")
         expect(frames[0]).to_contain("lab-http-api-ok")
         expect(frames[1]).to_contain("\"type\":\"status\"")
@@ -339,19 +349,19 @@ describe "Simple Lab HTTP/WS API (real loopback)":
 
         step("a second WS connect drains nothing — the buffer was cleared")
         val frames2 = ws_connect_and_drain(server.addr, events_path, 1)
-        expect(frames2.len()).to_equal(0)
+        expect(frames2.len()).to_equal(0)  # oracle: value fixed by the spec contract
 
         step("PUT .../notebooks/{name} saves a real .snb.sdn, validated by L1's snb_sdn.spl on the server")
         val nb_body = "{ snb_version: 1 nbformat_minor: 5 metadata_json: \"{}\" cells: [ { cell_type: \"code\" metadata_json: \"{}\" source: \"print(\\\"lab-http-api-ok\\\")\" has_execution_count: true execution_count: 1 outputs: [] } ] }"
         val put_resp = http_request(server.addr, "PUT", "/api/lab/notebooks/{NB_NAME}", nb_body)
         expect(put_resp.ok).to_equal(true)
-        expect(put_resp.status).to_equal(200)
+        expect(put_resp.status).to_equal(200)  # oracle: value fixed by the spec contract
         expect(put_resp.body).to_contain("\"saved\":true")
 
         step("GET .../notebooks/{name} reads back the exact bytes just saved")
         val get_resp = http_request(server.addr, "GET", "/api/lab/notebooks/{NB_NAME}", "")
         expect(get_resp.ok).to_equal(true)
-        expect(get_resp.status).to_equal(200)
+        expect(get_resp.status).to_equal(200)  # oracle: value fixed by the spec contract
         expect(get_resp.body).to_contain("lab-http-api-ok")
 
         step("the file landed on disk exactly where SIMPLE_LAB_NOTEBOOK_ROOT jailed it")
@@ -361,6 +371,8 @@ describe "Simple Lab HTTP/WS API (real loopback)":
         server.stop()
 
     it "rejects a malformed .snb.sdn PUT with 400 and the version header, and never panics":
+        step("Verify: rejects a malformed .snb.sdn PUT with 400 and the version header, and never panics")
+        # @req: REQ-TOOLS-LabHttpApi-001
         val server = start_lab_server(20)
         if not server.started:
             fail("lab_server subprocess did not start listening")
@@ -368,24 +380,26 @@ describe "Simple Lab HTTP/WS API (real loopback)":
         step("PUT .../notebooks/bad.snb.sdn with garbage body")
         val resp = http_request(server.addr, "PUT", "/api/lab/notebooks/bad.snb.sdn", "not valid sdn {{{")
         expect(resp.ok).to_equal(true)
-        expect(resp.status).to_equal(400)
+        expect(resp.status).to_equal(400)  # oracle: value fixed by the spec contract
         expect(resp.headers.to_lower()).to_contain("x-lab-protocol-version: 1")
 
         step("the server is still alive and answers the next request")
         val status_resp = http_request(server.addr, "GET", "/api/lab/status", "")
         expect(status_resp.ok).to_equal(true)
-        expect(status_resp.status).to_equal(200)
+        expect(status_resp.status).to_equal(200)  # oracle: value fixed by the spec contract
 
         server.stop()
 
     it "GET .../notebooks/{name} on a name that was never saved returns 404 with the version header":
+        step("Verify: GET .../notebooks/{name} on a name that was never saved returns 404 with the version header")
+        # @req: REQ-TOOLS-LabHttpApi-001
         val server = start_lab_server(20)
         if not server.started:
             fail("lab_server subprocess did not start listening")
 
         val resp = http_request(server.addr, "GET", "/api/lab/notebooks/never_saved.snb.sdn", "")
         expect(resp.ok).to_equal(true)
-        expect(resp.status).to_equal(404)
+        expect(resp.status).to_equal(404)  # oracle: value fixed by the spec contract
         expect(resp.headers.to_lower()).to_contain("x-lab-protocol-version: 1")
 
         server.stop()

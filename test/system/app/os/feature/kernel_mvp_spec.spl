@@ -3,6 +3,14 @@
 # Focused checks for x86_64 ring-3 entry, filesystem-backed exec, shell
 # dmesg exposure, and fault-path rejection contracts.
 
+"""
+## Purpose and audience
+Purpose: creates a ring-3 context with the user selectors and aligned stack
+Audience: compiler and tooling engineers who maintain this spec
+"""
+
+# @req: REQ-APP-KernMvp-001
+
 use std.spec
 use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.arch.x86_64.context.{X86ContextSwitch}
@@ -107,15 +115,20 @@ fn _contains_line(lines: [text], needle: text) -> bool:
         i = i + 1
     false
 
+use std.spec.step
 describe "x86_64_ring3_smoke":
     it "creates a ring-3 context with the user selectors and aligned stack":
+        step("Verify: creates a ring-3 context with the user selectors and aligned stack")
+        # @req: REQ-APP-KernMvp-001
         val ctx = X86ContextSwitch.create(0x401000, X86_64_USER_STACK_TOP, true)
         expect(ctx.cs).to_equal((GDT_USER_CS as u64) | 3)
         expect(ctx.ss).to_equal((GDT_USER_DS as u64) | 3)
-        expect(ctx.rsp % 16).to_equal(0)
+        expect(ctx.rsp % 16).to_equal(0)  # oracle: value fixed by the spec contract
         expect(ctx.rflags).to_equal(0x202)
 
     it "builds an x86_64 user image with the stable stack top":
+        step("Verify: builds an x86_64 user image with the stable stack top")
+        # @req: REQ-APP-KernMvp-001
         val image = build_user_process_image("/usr/bin/x86_exec_probe", _make_x86_64_exec(), Architecture.X86_64)
         expect(image.is_ok()).to_equal(true)
         val built = image.unwrap()
@@ -125,6 +138,8 @@ describe "x86_64_ring3_smoke":
 
 describe "x86_64_fat32_exec":
     it "resolves filesystem-backed x86_64 bytes and builds a process image":
+        step("Verify: resolves filesystem-backed x86_64 bytes and builds a process image")
+        # @req: REQ-APP-KernMvp-001
         _clear_synthetic_vfs_for_test()
         _set_synthetic_vfs_file_for_test("/sys/apps/hello_world", _make_x86_64_exec())
         val bytes = resolve_executable_bytes("/sys/apps/hello_world", Architecture.X86_64)
@@ -140,18 +155,24 @@ describe "x86_64_fat32_exec":
 
 describe "x86_64_shell_smoke":
     it "advertises dmesg in the shell help output":
+        step("Verify: advertises dmesg in the shell help output")
+        # @req: REQ-APP-KernMvp-001
         val shell = ShellApp.new()
         shell.output_lines = []
         shell.execute("help")
-        expect(shell.last_exit_code).to_equal(0)
+        expect(shell.last_exit_code).to_equal(0)  # oracle: value fixed by the spec contract
         expect(_contains_line(shell.output_lines, "dmesg [N]")).to_equal(true)
 
 describe "x86_64_fault_smoke":
     it "rejects ring-3 entry when no user task exists":
+        step("Verify: rejects ring-3 entry when no user task exists")
+        # @req: REQ-APP-KernMvp-001
         X86Interrupt.install_bootstrap_runtime(8)
-        expect(x86_dispatch_installed_syscall_abi(14, 0, 0, 0, 0, 0, 0)).to_equal(-22)
+        expect(x86_dispatch_installed_syscall_abi(14, 0, 0, 0, 0, 0, 0)).to_equal(-22)  # oracle: value fixed by the spec contract
 
     it "returns ENOSYS for an unknown installed syscall id":
+        step("Verify: returns ENOSYS for an unknown installed syscall id")
+        # @req: REQ-APP-KernMvp-001
         val runtime = X86TrapRuntime.new(Scheduler.new(), IpcManager.new(), KernelLog.new(8))
         X86Interrupt.install_runtime_bundle(runtime)
         val result = x86_dispatch_installed_syscall(SyscallArgs(
@@ -164,15 +185,17 @@ describe "x86_64_fault_smoke":
             arg5: 0
         ))
         expect(result.is_err()).to_equal(false)
-        expect(result.unwrap().value).to_equal(-1)
+        expect(result.unwrap().value).to_equal(-1)  # oracle: value fixed by the spec contract
 
 describe "kernel_log_and_dmesg_exposure":
     it "keeps ordered kernel log entries readable for dmesg-style consumers":
+        step("Verify: keeps ordered kernel log entries readable for dmesg-style consumers")
+        # @req: REQ-APP-KernMvp-001
         val log = KernelLog.new(4)
         log.write(3, 1, 101, "boot: service init")
         log.write(6, 1, 101, "boot: shell ready")
         val entries = log.read(0, 0, 4)
-        expect(entries.len()).to_equal(2)
+        expect(entries.len()).to_equal(2)  # oracle: value fixed by the spec contract
         expect(entries[0].message).to_equal("boot: service init")
         expect(entries[1].message).to_equal("boot: shell ready")
 
