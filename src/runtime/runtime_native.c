@@ -3694,6 +3694,13 @@ int64_t rt_char_from_code(int64_t code) {
     return rt_string_new(buf, len);
 }
 
+/* Rust-seed Cranelift emits this legacy helper name for Text.from_char_code.
+ * Keep it as a thin ABI alias so Stage-2-produced tools link against the
+ * core-C bootstrap runtime, including on macOS arm64. */
+int64_t text_dot_from_char_code(int64_t code) {
+    return rt_char_from_code(code);
+}
+
 int64_t rt_string_find(int64_t value, int64_t needle) {
     RtCoreString* s = rt_core_as_string(value);
     RtCoreString* n = rt_core_as_string(needle);
