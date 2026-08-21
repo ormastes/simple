@@ -465,6 +465,60 @@ fn handle_method_call_with_self_update_inner(
             return Ok((outer_result, inner_update));
         }
 
+        // Ownership-gated in-place fast path for `obj.field.push(x)` &c.
+        //
+        // Without this, `self.xs.push(v)` fell through to the general PLACE
+        // receiver path at the bottom of this function, which resolves the
+        // place by COPYING the field value into a temp, mutating the copy, and
+        // rebuilding the root — so the array Arc was aliased (object + temp)
+        // and `Arc::make_mut` deep-copied the whole backing `Vec` on EVERY
+        // push. Measured on a 2,000-push loop: 1,321 distinct backing buffers,
+        // i.e. O(N^2) accumulation into any struct field. The identifier
+        // receiver (`xs.push(v)`) never had this problem (3 buffers) because it
+        // mutates through the single owner in the env slot.
+        //
+        // `interpreter/expr/calls.rs` already had exactly this fast path, but
+        // it is downstream of here and was therefore unreachable for any
+        // statement routed through `handle_method_call_with_self_update` (a
+        // bare expression statement, a `val x = obj.f.pop()` initializer, a
+        // loop body). This reuses that same helper, so there is one kernel and
+        // no new semantics: the helper evaluates arguments first, re-reads the
+        // receiver through `env.get_mut`, and mutates via `Arc::make_mut`, so a
+        // genuinely aliased array still deep-copies exactly as before and value
+        // semantics are preserved.
+        //
+        // The helper only fires when the receiver resolves through `env` to an
+        // Object with an Array-valued field, so a receiver that lives only in
+        // MODULE_GLOBALS falls through untouched. When the name lives in BOTH,
+        // the module-global copy is written through here, exactly as
+        // `handle_method_call_with_self_update` does for the identifier shape.
+        if let Expr::FieldAccess {
+            receiver: parent_receiver,
+            field,
+        } = receiver.as_ref()
+        {
+            if let Expr::Identifier(parent_name) = parent_receiver.as_ref() {
+                if let Some(result) = try_field_array_mutation_in_place(
+                    parent_name,
+                    field,
+                    method,
+                    args,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )? {
+                    if !env.is_local(parent_name.as_str()) {
+                        if let Some(updated) = env.get(parent_name.as_str()).cloned() {
+                            sync_flat_global(parent_name.as_str(), &updated);
+                        }
+                    }
+                    return Ok((result, None));
+                }
+            }
+        }
+
         // Handle FieldAccess receivers: self.data.method()
         // When calling a mutating method on a nested object field, we need to:
         // 1. Get the parent object
@@ -1240,5 +1294,224 @@ pub(crate) fn bind_pattern_value(pat: &Pattern, val: Value, is_mutable: bool, en
 fn bind_collection_pattern(patterns: &[Pattern], values: Vec<Value>, is_mutable: bool, env: &mut Env) {
     for (pat, val) in patterns.iter().zip(values.into_iter()) {
         bind_pattern_value(pat, val, is_mutable, env);
+    }
+}
+
+/// Mechanism tests for the COW-alias performance class.
+///
+/// Simple has value semantics implemented as copy-on-write: a container is an
+/// `Arc<Vec<..>>` and a mutation goes through `Arc::make_mut`, which deep-copies
+/// the whole container whenever the Arc is ALIASED (strong_count > 1). That is
+/// correct — two live bindings must not observe each other's writes — but it is
+/// catastrophic when the only "alias" is the interpreter's own bookkeeping: the
+/// env slot / struct field it is about to write back to. Then every single write
+/// copies the whole container and list building is O(N^2).
+///
+/// These tests count DISTINCT BACKING BUFFERS across N mutations (pointer
+/// identity, not time), so they are deterministic on a loaded box. A sole owner
+/// must touch O(1) buffers (amortized `Vec` growth reallocates, but the buffer
+/// is reused between growths, so the count is O(log N), bounded well below N).
+/// A genuine alias must still copy exactly once and leave the alias untouched.
+#[cfg(test)]
+mod cow_alias_mechanism_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn arr_ptr(v: &Value) -> usize {
+        match v {
+            Value::Array(a) => a.as_ptr() as usize,
+            other => panic!("expected array, got {:?}", other),
+        }
+    }
+
+    fn arr_len(v: &Value) -> usize {
+        match v {
+            Value::Array(a) => a.len(),
+            other => panic!("expected array, got {:?}", other),
+        }
+    }
+
+    fn box_with_empty_xs() -> Value {
+        let mut fields: HashMap<String, Value> = HashMap::new();
+        fields.insert("xs".to_string(), Value::array(vec![]));
+        Value::Object {
+            class: "Box".to_string(),
+            fields: Arc::new(fields),
+        }
+    }
+
+    fn field_of<'e>(env: &'e Env, obj: &str, field: &str) -> &'e Value {
+        match env.get(obj).expect("object binding") {
+            Value::Object { fields, .. } => fields.get(field).expect("field"),
+            other => panic!("expected object, got {:?}", other),
+        }
+    }
+
+    fn ident(name: &str) -> Expr {
+        Expr::Identifier(name.to_string())
+    }
+
+    fn arg(e: Expr) -> simple_parser::ast::Argument {
+        simple_parser::ast::Argument::new(None, e)
+    }
+
+    fn push_call(receiver: Expr) -> Expr {
+        Expr::MethodCall {
+            receiver: Box::new(receiver),
+            method: "push".to_string(),
+            args: vec![arg(Expr::Integer(1))],
+            generic_args: vec![],
+        }
+    }
+
+    fn run(expr: &Expr, env: &mut Env) -> (Value, Option<(String, Value)>) {
+        handle_method_call_with_self_update(
+            expr,
+            env,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .expect("method call")
+    }
+
+    #[test]
+    fn local_array_push_mutates_the_single_owner_in_place() {
+        const N: usize = 2_000;
+        let mut env = Env::new();
+        env.insert("a".to_string(), Value::array(vec![]));
+        let call = push_call(ident("a"));
+        let mut seen: HashSet<usize> = HashSet::new();
+        for _ in 0..N {
+            let (_, update) = run(&call, &mut env);
+            if let Some((name, val)) = update {
+                env.insert(name, val);
+            }
+            seen.insert(arr_ptr(env.get("a").expect("a")));
+        }
+        assert_eq!(arr_len(env.get("a").expect("a")), N, "every push must land");
+        assert!(
+            seen.len() < 64,
+            "sole-owner push must reallocate O(log N) times (amortized Vec growth), \
+             got {} distinct buffers for {N} pushes; a value near {N} means the \
+             array Arc is aliased and Arc::make_mut is deep-copying per write",
+            seen.len()
+        );
+    }
+
+    #[test]
+    fn field_array_push_mutates_the_single_owner_in_place() {
+        const N: usize = 2_000;
+        let mut env = Env::new();
+        env.insert("o".to_string(), box_with_empty_xs());
+        let call = push_call(Expr::FieldAccess {
+            receiver: Box::new(ident("o")),
+            field: "xs".to_string(),
+        });
+        let mut seen: HashSet<usize> = HashSet::new();
+        for _ in 0..N {
+            let (_, update) = run(&call, &mut env);
+            if let Some((name, val)) = update {
+                env.insert(name, val);
+            }
+            seen.insert(arr_ptr(field_of(&env, "o", "xs")));
+        }
+        assert_eq!(arr_len(field_of(&env, "o", "xs")), N, "every push must land");
+        // Pre-fix this was 1,321 distinct buffers for N = 2,000: the general
+        // PLACE receiver path copied the field into a temp, aliasing the Arc,
+        // so `Arc::make_mut` deep-copied the whole Vec on every push.
+        assert!(
+            seen.len() < 64,
+            "`o.xs.push(v)` must mutate the field in place; got {} distinct \
+             buffers for {N} pushes (pre-fix: ~1321) — the field array Arc is \
+             aliased again and every write is an O(n) COW clone",
+            seen.len()
+        );
+    }
+
+    #[test]
+    fn genuinely_aliased_array_still_copies_on_write() {
+        // Value semantics must survive the optimization: a second LIVE binding
+        // to the same Arc must not observe the mutation, and must cost exactly
+        // one copy (not zero — that would be a semantic change — and not one
+        // per write).
+        let mut env = Env::new();
+        env.insert("a".to_string(), Value::array(vec![Value::Int(0)]));
+        let aliased = env.get("a").expect("a").clone();
+        env.insert("b".to_string(), aliased);
+        let call = push_call(ident("a"));
+        for _ in 0..3 {
+            let (_, update) = run(&call, &mut env);
+            if let Some((name, val)) = update {
+                env.insert(name, val);
+            }
+        }
+        assert_eq!(arr_len(env.get("a").expect("a")), 4, "a must have grown");
+        assert_eq!(arr_len(env.get("b").expect("b")), 1, "the alias must be unchanged");
+        assert_ne!(
+            arr_ptr(env.get("a").expect("a")),
+            arr_ptr(env.get("b").expect("b")),
+            "the aliased array must have been isolated by copy-on-write"
+        );
+    }
+
+    #[test]
+    fn genuinely_aliased_field_array_still_copies_on_write() {
+        let mut env = Env::new();
+        let mut fields: HashMap<String, Value> = HashMap::new();
+        fields.insert("xs".to_string(), Value::array(vec![Value::Int(0)]));
+        env.insert(
+            "o".to_string(),
+            Value::Object {
+                class: "Box".to_string(),
+                fields: Arc::new(fields),
+            },
+        );
+        let alias = field_of(&env, "o", "xs").clone();
+        env.insert("b".to_string(), alias);
+        let call = push_call(Expr::FieldAccess {
+            receiver: Box::new(ident("o")),
+            field: "xs".to_string(),
+        });
+        for _ in 0..3 {
+            let (_, update) = run(&call, &mut env);
+            if let Some((name, val)) = update {
+                env.insert(name, val);
+            }
+        }
+        assert_eq!(arr_len(field_of(&env, "o", "xs")), 4, "o.xs must have grown");
+        assert_eq!(arr_len(env.get("b").expect("b")), 1, "the alias must be unchanged");
+    }
+
+    #[test]
+    fn field_array_pop_and_remove_return_the_element_not_the_array() {
+        // The fast path routes through `apply_array_mutation_in_place`, the same
+        // kernel the slow path uses; pin that the RESULT contract is unchanged.
+        let mut env = Env::new();
+        let mut fields: HashMap<String, Value> = HashMap::new();
+        fields.insert(
+            "xs".to_string(),
+            Value::array(vec![Value::Int(7), Value::Int(8), Value::Int(9)]),
+        );
+        env.insert(
+            "o".to_string(),
+            Value::Object {
+                class: "Box".to_string(),
+                fields: Arc::new(fields),
+            },
+        );
+        let pop = Expr::MethodCall {
+            receiver: Box::new(Expr::FieldAccess {
+                receiver: Box::new(ident("o")),
+                field: "xs".to_string(),
+            }),
+            method: "pop".to_string(),
+            args: vec![],
+            generic_args: vec![],
+        };
+        let (result, _) = run(&pop, &mut env);
+        assert!(matches!(result, Value::Int(9)), "pop must return the element, got {:?}", result);
+        assert_eq!(arr_len(field_of(&env, "o", "xs")), 2, "pop must shrink the field array");
     }
 }
