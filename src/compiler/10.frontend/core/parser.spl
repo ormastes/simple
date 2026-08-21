@@ -72,6 +72,7 @@ use compiler.frontend.core.parser_stmts.{parse_if_stmt, parse_for_stmt, parse_wh
 use compiler.frontend.core.parser_stmts.{parse_receive_stmt, parse_bind_stmt}
 use compiler.frontend.core.parser_stmts.{parse_if_expr, parse_for_expr, parse_while_expr}
 use compiler.core.parser_decls.{parse_fn_decl, parse_extern_fn_decl, parse_struct_decl, parse_enum_decl}
+use compiler.core.parser_decls.{parser_generic_constraints_reset}
 use compiler.frontend.core.parser_decls_use.{parse_impl_decl, parse_class_body_method}
 use compiler.frontend.core.parser_decls_use.{parse_use_decl, parse_export_decl, parse_ce_decl}
 use compiler.frontend.resource_registry.{resource_registry_reset}
@@ -234,15 +235,15 @@ fn parser_init(source: text):
     parser_init_with_path(source, "")
 
 fn parser_init_with_path(source: text, path: text):
-    if par_errors == nil:
-        par_errors = []
-    par_errors.clear()
-    if par_warnings == nil:
-        par_warnings = []
-    par_warnings.clear()
-    if par_struct_names == nil:
-        par_struct_names = []
-    par_struct_names.clear()
+    # Whole-owner replacement is required across transient file scopes. These
+    # module-global array headers are process-lived, but push() can replace
+    # their backing storage while a transient scope is active. scope_end then
+    # reclaims that backing; clear() on the next file would reuse freed memory.
+    # Assignment discards the stale owner before any read and makes this
+    # file's scratch explicitly scope-local.
+    par_errors = []
+    par_warnings = []
+    par_struct_names = []
     if par_kind_slot == nil:
         par_kind_slot = [0]
     par_kind_slot[0] = 0
@@ -261,6 +262,7 @@ fn parser_init_with_path(source: text, path: text):
     if (rt_env_get("SIMPLE_TRACE_AST_RESET") ?? "") == "1":
         print "[parser_init_with_path] resetting for path={path}"
     ast_reset()
+    parser_generic_constraints_reset()
     # WP-C: reset the `resource` decl registry per parse, same reason
     # ast_reset() is here -- a second parse_module_body() in one process
     # (e.g. a spec that parses two source strings) must not leak the first
@@ -387,7 +389,7 @@ fn parser_error(msg: text):
     par_first_error_mirror_set(par_line_get(), par_col_get(), msg)
 
 # Append to the recorded-error list that backs parser_get_errors() and
-# parser_error_count(). `par_errors` was declared, cleared on init and exported,
+# parser_error_count(). `par_errors` was declared, replaced on init and exported,
 # but nothing ever pushed to it, so both accessors were hardcoded stubs
 # returning [] and 0 — a caller that gated on the COUNT saw a clean parse no
 # matter how many errors had been printed. Recorded regardless of

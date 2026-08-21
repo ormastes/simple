@@ -65,8 +65,11 @@ pub fn dtrace(msg: text) -> ():
         eprint(msg)
 
 pub fn driver_end_transient_parse_scope() -> bool:
-    lexer_release_parse_source_globals()
-    # ORDER IS LOAD-BEARING. End the transient array scope BEFORE ast_reset().
+    # ORDER IS LOAD-BEARING. End the transient array scope BEFORE replacing
+    # ANY process-lifetime frontend owner. lexer_release_parse_source_globals()
+    # allocates fresh empty arrays just like ast_reset(); doing either while
+    # the scope is active stamps those replacements with the dying scope id and
+    # hands the next source dangling globals.
     #
     # ast_reset() (re)allocates process-lifetime arena state: every
     # `if X == nil: X = []` guard in ast_reset/expr_reset/stmt_reset/_ast_slots_
@@ -84,6 +87,7 @@ pub fn driver_end_transient_parse_scope() -> bool:
     # scope actually owns is still reclaimed exactly as before.
     # See doc/08_tracking/bug/ast_arena_reset_inside_transient_scope_2026-08-01.md
     val ended = rt_transient_array_scope_end()
+    lexer_release_parse_source_globals()
     # The token interner retains short strings born in the just-ended parser
     # scope. Replace the whole owner only after that scope is closed so the new
     # dictionary is process-lived; resetting inside `lex_init_with_path` would
