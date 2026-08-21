@@ -193,6 +193,8 @@ self_test() {
     fi
     grep -q -- '--cache-dir "$cache_dir"' "$0" || fail "native build cache is not explicit"
     grep -q -- '--output "$kernel"' "$0" || fail "native build output authority is not explicit"
+    grep -q 'SIMPLE_BUILD_COMPILER="$compiler" SIMPLE_BINARY="$compiler" SIMPLE_BIN="$compiler"' "$0" ||
+        fail "image construction does not forward the admitted compiler authority"
     if grep -Eq 'native-build .* -o "\$kernel"' "$0"; then fail "short output option bypasses explicit authority"; fi
     grep -q 'publish_symlink_atomic "$kernel" "$public_kernel"' "$0" || fail "kernel atomic publish absent"
     grep -q 'publish_symlink_atomic "$image" "$public_image"' "$0" || fail "image atomic publish absent"
@@ -330,7 +332,13 @@ run_row() {
     validate_image_mb_for_row "$row" "$image_mb" || fail "$row fixed image size invalid: $image_mb"
     printf 'strategy=single-bounded-construction\nselected_mb=%s\nhard_max_mb=%s\n' \
         "$image_mb" "$IMAGE_HARD_MAX_MB" >"$capacity_log"
-    env SIMPLEOS_COMPILER_IN_FILESYSTEM="$compiler_in_filesystem" \
+    # make_os_disk may construct architecture-owned payloads (notably the
+    # ARM64 HTTP/DB server image).  Those nested builders must use the exact
+    # compiler already selected and hash-checked by this rebuild owner.  Keep
+    # all three canonical aliases paired so neither a nested Simple process nor
+    # a legacy builder can silently rediscover a different compiler.
+    env SIMPLE_BUILD_COMPILER="$compiler" SIMPLE_BINARY="$compiler" SIMPLE_BIN="$compiler" \
+        SIMPLEOS_COMPILER_IN_FILESYSTEM="$compiler_in_filesystem" \
         SIMPLEOS_FSEXEC_BINARY="$fsexec_env" \
         SIMPLEOS_AUTHHELLO_BINARY="${authhello_dir:+$authhello_dir/AUTHHELLO.ELF}" \
         SIMPLEOS_AUTHHELLO_MANIFEST="${authhello_dir:+$authhello_dir/AUTHHEL.MAN}" \

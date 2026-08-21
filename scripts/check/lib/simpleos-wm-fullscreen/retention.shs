@@ -1,0 +1,144 @@
+archive_previous_run() {
+    [ -f "$BUILD_DIR/evidence.env" ] || return 0
+    prev_status="$(sed -n 's/^simpleos_wm_fullscreen_status=//p' "$BUILD_DIR/evidence.env" | head -n 1)"
+    [ -n "$prev_status" ] || prev_status=unknown
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    dest="$EVIDENCE_RUNS_DIR/$stamp-$prev_status"
+    dup=0
+    while [ -e "$dest" ]; do
+        dup=$((dup + 1))
+        dest="$EVIDENCE_RUNS_DIR/$stamp-$prev_status.$dup"
+    done
+    mkdir -p "$dest" || return 0
+    for retained in "$BUILD_DIR/evidence.env" "$LAUNCH_OUT" "$SERIAL_LOG" \
+        "$CAPTURE_OUT" "$BASELINE_PPM" "$FULLSCREEN_PPM" "$RESTORED_PPM" \
+        "$BROWSER_EVENT_PPM" "$FONT_REGION_RGB"
+    do
+        if [ -f "$retained" ]; then
+            cp -p "$retained" "$dest/" 2>/dev/null || true
+        fi
+    done
+    {
+        echo "archived_at_utc=$stamp"
+        echo "archived_from=$BUILD_DIR"
+        echo "archived_run_status=$prev_status"
+        echo "archived_by_wrapper=$WRAPPER"
+        echo "note=retained copy of a PREVIOUS run; the current run writes only the canonical \$BUILD_DIR paths"
+    } >"$dest/RUN_INFO.env"
+    echo "simpleos_wm_fullscreen_retained_previous_run=$dest status=$prev_status"
+}
+
+prune_archived_runs() {
+    [ -d "$EVIDENCE_RUNS_DIR" ] || return 0
+    keep_pass="$(ls -1 "$EVIDENCE_RUNS_DIR" 2>/dev/null | grep -E -- '-pass(\.[0-9]+)?$' | sort | tail -n 1)"
+    total="$(ls -1 "$EVIDENCE_RUNS_DIR" 2>/dev/null | wc -l | tr -d ' ')"
+    [ "$total" -gt "$EVIDENCE_RETAIN" ] || return 0
+    excess=$((total - EVIDENCE_RETAIN))
+    for stale in $(ls -1 "$EVIDENCE_RUNS_DIR" 2>/dev/null | sort); do
+        [ "$excess" -gt 0 ] || break
+        [ "$stale" = "$keep_pass" ] && continue
+        rm -rf "$EVIDENCE_RUNS_DIR/$stale"
+        excess=$((excess - 1))
+    done
+}
+
+archive_previous_run
+prune_archived_runs
+
+rm -f "$LAUNCH_OUT" "$SERIAL_LOG" "$QMP_SOCKET" "$CAPTURE_OUT" \
+    "$BASELINE_PPM" "$FULLSCREEN_PPM" "$RESTORED_PPM" \
+    "$BROWSER_EVENT_PPM" "$BASELINE_RAW" "$FULLSCREEN_RAW" "$RESTORED_RAW" \
+    "$BROWSER_EVENT_RAW" \
+    "$FONT_REGION_RGB" "$FONT_REGION_CORRUPT_COPY" "$BUILD_DIR/evidence.env"
+
+resolve_path() {
+    if command -v realpath >/dev/null 2>&1; then
+        realpath "$1" 2>/dev/null || true
+    elif command -v readlink >/dev/null 2>&1; then
+        readlink -f "$1" 2>/dev/null || true
+    else
+        return 0
+    fi
+}
+
+is_rust_seed_path() {
+    case "$1" in
+        *"/src/compiler_rust/"*|*"/compiler_rust/target/"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+if [ -z "${SIMPLE_BIN:-}" ]; then
+    SIMPLE_BIN=""
+    SIMPLE_BIN_SOURCE=auto-cached-pure-simple
+    for candidate in \
+        "$ROOT_DIR"/build/bootstrap/stage3/*/stage2-admitted/simple
+    do
+        if [ -x "$candidate" ]; then
+            resolved="$(resolve_path "$candidate")"
+            if [ -n "$resolved" ] && ! is_rust_seed_path "$resolved" && \
+               simpleos_admitted_runtime_verify_auto "$resolved"; then
+                SIMPLE_BIN="$candidate"
+                SIMPLE_BIN_RUNTIME_ADMITTED=1
+                break
+            fi
+        fi
+    done
+fi
+export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS SIMPLE_BIN_RESOLVED SIMPLE_BIN_VERSION SIMPLE_BIN_SHA256
+
+cleanup() {
+    if [ -n "$QEMU_PID" ]; then
+        kill "$QEMU_PID" >/dev/null 2>&1 || true
+        wait "$QEMU_PID" >/dev/null 2>&1 || true
+    fi
+    pkill -f "qemu-system.*$QMP_SOCKET" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT INT TERM
+
+file_byte_count() {
+    if [ -f "$1" ]; then
+        wc -c <"$1" | tr -d ' '
+    else
+        echo 0
+    fi
+}
+
+file_sha256() {
+    if [ ! -f "$1" ]; then
+        echo ""
+    elif command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        echo ""
+    fi
+}
+
+wrapper_bundle_sha256() {
+    bundle_manifest="$BUILD_DIR/wrapper-components.sha256"
+    : >"$bundle_manifest"
+    for bundle_component in $WM_FULLSCREEN_COMPONENTS; do
+        bundle_component_sha256="$(file_sha256 "$bundle_component")"
+        is_sha256 "$bundle_component_sha256" || return 1
+        printf '%s  %s\n' "$bundle_component_sha256" "$bundle_component" >>"$bundle_manifest"
+    done
+    file_sha256 "$bundle_manifest"
+}
+
+font_region_oracle_status() {
+    if [ "$(file_byte_count "$1")" = "$FONT_REGION_EXPECTED_BYTES" ] && \
+       [ "$(file_sha256 "$1")" = "$FONT_REGION_EXPECTED_SHA256" ]; then
+        echo pass
+    else
+        echo fail
+    fi
+}
+
+is_sha256() {
+    [ "${#1}" -eq 64 ] && case "$1" in
+        *[!0-9a-f]*) false ;;
+        *) true ;;
+    esac
+}

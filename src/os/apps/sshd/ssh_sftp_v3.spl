@@ -1,27 +1,48 @@
-# Bounded SFTP protocol core for the SSH subsystem owner.
-# This lane advertises protocol v3 negotiation only; filesystem operations are
-# deliberately read-only and return OP_UNSUPPORTED until the VFS capability is
-# injected by the filesystem owner.
+# Bounded SFTP v3 protocol owner backed only by canonical SimpleOS VFS objects.
 
-use os.apps.sshd.ssh_packet.{ssh_get_u32, ssh_put_u32, ssh_put_text, ssh_get_text}
+use os.apps.sshd.ssh_packet.{ssh_get_u32, ssh_put_u32, ssh_put_text, ssh_put_string, ssh_get_text, ssh_get_string}
+use os.services.vfs.vfs_init.{g_vfs_file_size}
+use os.services.vfs.vfs_positioned_ops.{g_vfs_positioned_open, g_vfs_positioned_close, g_vfs_positioned_read_at, g_vfs_positioned_write_at}
+use std.fs_driver.types.{OpenFlags}
+use std.fs_driver.error.{FsError}
 
 val SSH_FXP_INIT: u8 = 1
 val SSH_FXP_VERSION: u8 = 2
 val SSH_FXP_OPEN: u8 = 3
 val SSH_FXP_CLOSE: u8 = 4
 val SSH_FXP_READ: u8 = 5
+val SSH_FXP_WRITE: u8 = 6
 val SSH_FXP_REALPATH: u8 = 16
 val SSH_FXP_STAT: u8 = 17
 val SSH_FXP_STATUS: u8 = 101
+val SSH_FXP_HANDLE: u8 = 102
+val SSH_FXP_DATA: u8 = 103
 val SSH_FXP_NAME: u8 = 104
+val SSH_FXP_ATTRS: u8 = 105
 val SSH_FX_OK: u32 = 0
+val SSH_FX_EOF: u32 = 1
+val SSH_FX_NO_SUCH_FILE: u32 = 2
+val SSH_FX_PERMISSION_DENIED: u32 = 3
+val SSH_FX_FAILURE: u32 = 4
+val SSH_FX_BAD_MESSAGE: u32 = 5
 val SSH_FX_OP_UNSUPPORTED: u32 = 8
+val SSH_FX_INVALID_HANDLE: u32 = 9
+val SSH_FX_FILE_ALREADY_EXISTS: u32 = 11
+val SSH_FX_WRITE_PROTECT: u32 = 12
 val SFTP_V3: u32 = 3
 val SFTP_MAX_PACKET: u32 = 35000
 val SFTP_MAX_PATH: u32 = 4096
 val SFTP_MAX_READ: u32 = 32768
 val SFTP_ACCUMULATOR_CAP: u64 = (SFTP_MAX_PACKET.to_u64() + 4u64) * 2u64
 val SFTP_COUNTER_MAX: u64 = 0xFFFFFFFFFFFFFFFFu64
+val SFTP_MAX_HANDLES: i64 = 64
+
+struct SftpHandleV3:
+    active: bool
+    id: u32
+    file_object_id: u64
+    readable: bool
+    writable: bool
 
 pub struct SftpAccumulatorWorkV3:
     admitted_ingress_bytes: u64
@@ -44,6 +65,7 @@ class SftpSessionV3:
     complete_frames: u64
     peak_retained_bytes: u64
     work_counter_saturated: bool
+    handles: [SftpHandleV3]
 
     pub static fn new() -> SftpSessionV3:
         SftpSessionV3(
@@ -58,7 +80,8 @@ class SftpSessionV3:
             header_scan_bytes: 0,
             complete_frames: 0,
             peak_retained_bytes: 0,
-            work_counter_saturated: false
+            work_counter_saturated: false,
+            handles: []
         )
 
 fn _record_work(current: u64, added: u64) -> (u64, bool):
@@ -74,26 +97,131 @@ fn _u32(value: u32) -> [u8]:
     out.push((value & 255u32).to_u8())
     out
 
+fn _u64(value: u64) -> [u8]:
+    var out = _u32((value >> 32).to_u32())
+    val low = _u32((value & 0xffffffffu64).to_u32())
+    for byte in low:
+        out.push(byte)
+    out
+
+fn _get_u64(data: [u8], offset: u64) -> u64:
+    (ssh_get_u32(data, offset).to_u64() << 32) |
+        ssh_get_u32(data, offset + 4u64).to_u64()
+
+fn _frame(body: [u8]) -> [u8]:
+    var out = _u32(body.len().to_u32())
+    for byte in body:
+        out.push(byte)
+    out
+
 fn _status(request_id: u32, code: u32, message: text) -> [u8]:
     var body: [u8] = [SSH_FXP_STATUS]
     body = ssh_put_u32(body, request_id)
     body = ssh_put_u32(body, code)
     body = ssh_put_text(body, message)
     body = ssh_put_text(body, "")
-    var framed = _u32(body.len().to_u32())
-    for byte in body:
-        framed.push(byte)
-    framed
+    _frame(body)
+
+fn _vfs_status(err: FsError) -> u32:
+    match err:
+        case FsError.NotFound: SSH_FX_NO_SUCH_FILE
+        case FsError.Permission: SSH_FX_PERMISSION_DENIED
+        case FsError.PathTraversal: SSH_FX_PERMISSION_DENIED
+        case FsError.AlreadyExists: SSH_FX_FILE_ALREADY_EXISTS
+        case FsError.ReadOnly: SSH_FX_WRITE_PROTECT
+        case FsError.StaleHandle: SSH_FX_INVALID_HANDLE
+        case FsError.InvalidArg: SSH_FX_BAD_MESSAGE
+        case FsError.Unsupported: SSH_FX_OP_UNSUPPORTED
+        case _: SSH_FX_FAILURE
 
 fn _path_safe(path: text) -> bool:
     if path.len() > SFTP_MAX_PATH.to_u64() or path == "":
         return false
     # No traversal or NUL bytes. Symlink resolution remains VFS-owner policy.
-    if path.contains("..") or path.contains("\u0000"):
+    if path.contains("..") or path.contains("\u0000") or path.contains("\\") or
+        path.contains("\n") or path.contains("\r"):
         return false
     true
 
+fn _canonical_path(path: text) -> text:
+    if path == ".": return "/"
+    if path.starts_with("/"): return path
+    "/" + path
+
+fn _handle_bytes(id: u32) -> [u8]: _u32(id)
+
+fn _handle_response(request_id: u32, id: u32) -> [u8]:
+    var body: [u8] = [SSH_FXP_HANDLE]
+    body = ssh_put_u32(body, request_id)
+    body = ssh_put_string(body, _handle_bytes(id))
+    _frame(body)
+
+fn _data_response(request_id: u32, data: [u8]) -> [u8]:
+    var body: [u8] = [SSH_FXP_DATA]
+    body = ssh_put_u32(body, request_id)
+    body = ssh_put_string(body, data)
+    _frame(body)
+
+fn _attrs_response(request_id: u32, size: u64) -> [u8]:
+    var body: [u8] = [SSH_FXP_ATTRS]
+    body = ssh_put_u32(body, request_id)
+    body = ssh_put_u32(body, 1u32) # SSH_FILEXFER_ATTR_SIZE
+    for byte in _u64(size): body.push(byte)
+    _frame(body)
+
+fn _name_response(request_id: u32, path: text) -> [u8]:
+    var body: [u8] = [SSH_FXP_NAME]
+    body = ssh_put_u32(body, request_id)
+    body = ssh_put_u32(body, 1u32)
+    body = ssh_put_text(body, path)
+    body = ssh_put_text(body, path)
+    body = ssh_put_u32(body, 0u32)
+    _frame(body)
+
 impl SftpSessionV3:
+    fn _handle_index(id: u32) -> i64:
+        var i: i64 = 0
+        while i < self.handles.len():
+            if self.handles[i].active and self.handles[i].id == id:
+                return i
+            i = i + 1
+        -1
+
+    me _bind_handle(file_object_id: u64, readable: bool, writable: bool) -> Result<u32, text>:
+        if self.next_handle == 0u32:
+            return Err("sftp handle capacity exhausted")
+        var reusable: i64 = -1
+        var i: i64 = 0
+        while i < self.handles.len():
+            if not self.handles[i].active and reusable < 0:
+                reusable = i
+            i = i + 1
+        if reusable < 0 and self.handles.len() >= SFTP_MAX_HANDLES:
+            return Err("sftp handle capacity exhausted")
+        val id = self.next_handle
+        if self.next_handle == 0xffffffffu32:
+            self.next_handle = 0u32
+        else:
+            self.next_handle = self.next_handle + 1u32
+        val binding = SftpHandleV3(
+            active: true, id: id, file_object_id: file_object_id,
+            readable: readable, writable: writable)
+        if reusable >= 0:
+            self.handles[reusable] = binding
+            return Ok(id)
+        self.handles.push(binding)
+        Ok(id)
+
+    pub me close_all():
+        var i: i64 = 0
+        while i < self.handles.len():
+            if self.handles[i].active:
+                val _ = g_vfs_positioned_close(self.handles[i].file_object_id)
+                var retired = self.handles[i]
+                retired.active = false
+                self.handles[i] = retired
+            i = i + 1
+
     fn _ring_byte(offset: u64) -> u8:
         self.rx_ring[(self.rx_head + offset) % SFTP_ACCUMULATOR_CAP]
 
@@ -185,7 +313,7 @@ impl SftpSessionV3:
             self.work_counter_saturated = true
         val kind = frame[4]
         if kind == SSH_FXP_INIT:
-            if frame.len() < 9u64:
+            if frame.len() != 9u64:
                 return _status(0, SSH_FX_OP_UNSUPPORTED, "invalid sftp init")
             if self.initialized:
                 return _status(0, SSH_FX_OP_UNSUPPORTED, "duplicate sftp init")
@@ -195,22 +323,113 @@ impl SftpSessionV3:
             val version_bytes = _u32(SFTP_V3)
             for byte in version_bytes:
                 version.push(byte)
-            var framed_version = _u32(version.len().to_u32())
-            for byte in version:
-                framed_version.push(byte)
-            return framed_version
+            return _frame(version)
         if not self.initialized or frame.len() < 9u64:
             return _status(0, SSH_FX_OP_UNSUPPORTED, "sftp not initialized")
         val request_id = ssh_get_u32(frame, 5)
-        if kind == SSH_FXP_REALPATH or kind == SSH_FXP_STAT:
+        if kind == SSH_FXP_REALPATH or kind == SSH_FXP_STAT or kind == SSH_FXP_OPEN:
             val parsed = ssh_get_text(frame, 9)
             match parsed:
                 Ok(value):
                     if not _path_safe(value.value):
-                        return _status(request_id, SSH_FX_OP_UNSUPPORTED, "unsafe path")
+                        return _status(request_id, SSH_FX_PERMISSION_DENIED, "unsafe path")
+                    val path = _canonical_path(value.value)
+                    if kind == SSH_FXP_REALPATH:
+                        if value.next_offset != frame.len():
+                            return _status(request_id, SSH_FX_BAD_MESSAGE, "invalid realpath request")
+                        return _name_response(request_id, path)
+                    if kind == SSH_FXP_STAT:
+                        if value.next_offset != frame.len():
+                            return _status(request_id, SSH_FX_BAD_MESSAGE, "invalid stat request")
+                        match g_vfs_file_size(path):
+                            case Some(size):
+                                return _attrs_response(request_id, size.to_i64().to_u64())
+                            case None:
+                                return _status(request_id, SSH_FX_NO_SUCH_FILE, "no such file")
+                    val next = value.next_offset
+                    if next + 8u64 != frame.len():
+                        return _status(request_id, SSH_FX_BAD_MESSAGE, "invalid open request")
+                    val pflags = ssh_get_u32(frame, next)
+                    val attrs_flags = ssh_get_u32(frame, next + 4u64)
+                    if attrs_flags != 0u32 or (pflags & 0xffffffc0u32) != 0u32:
+                        return _status(request_id, SSH_FX_OP_UNSUPPORTED, "unsupported open flags")
+                    # MountTable offers positioned writes, but not a serialized
+                    # append primitive.  A stat-then-pwrite sequence races with
+                    # other sessions, so SFTP v3 APPEND fails closed.
+                    if (pflags & 4u32) != 0u32:
+                        return _status(request_id, SSH_FX_OP_UNSUPPORTED, "atomic append unavailable")
+                    val readable = (pflags & 1u32) != 0u32
+                    val writable = (pflags & 2u32) != 0u32
+                    if not readable and not writable:
+                        return _status(request_id, SSH_FX_BAD_MESSAGE, "open requires access mode")
+                    if not writable and (pflags & 28u32) != 0u32:
+                        return _status(request_id, SSH_FX_PERMISSION_DENIED, "write flags require write access")
+                    if (pflags & 32u32) != 0u32 and (pflags & 8u32) == 0u32:
+                        return _status(request_id, SSH_FX_BAD_MESSAGE, "exclusive open requires create")
+                    var flags = if readable and writable: OpenFlags.read_write() else if writable: OpenFlags.write_only() else: OpenFlags.read_only()
+                    if (pflags & 8u32) != 0u32: flags = flags.with_create()
+                    if (pflags & 16u32) != 0u32: flags = flags.with_trunc()
+                    if (pflags & 32u32) != 0u32: flags = flags.with_excl()
+                    val opened = g_vfs_positioned_open(path, flags)
+                    match opened:
+                        Err(e): return _status(request_id, _vfs_status(e), "vfs open failed")
+                        Ok(file_object_id):
+                            val bound = self._bind_handle(
+                                file_object_id, readable, writable)
+                            if bound.is_err():
+                                val _ = g_vfs_positioned_close(file_object_id)
+                                return _status(request_id, SSH_FX_FAILURE, bound.unwrap_err())
+                            return _handle_response(request_id, bound.unwrap())
                 Err(_):
-                    return _status(request_id, SSH_FX_OP_UNSUPPORTED, "invalid path")
-        # OPEN/READ/CLOSE require a VFS capability and never fall back to host I/O.
+                    return _status(request_id, SSH_FX_BAD_MESSAGE, "invalid path")
+        if kind == SSH_FXP_CLOSE or kind == SSH_FXP_READ or kind == SSH_FXP_WRITE:
+            val parsed_handle = ssh_get_string(frame, 9)
+            if parsed_handle.is_err() or parsed_handle.unwrap().data.len() != 4u64:
+                return _status(request_id, SSH_FX_INVALID_HANDLE, "invalid handle")
+            val handle_id = ssh_get_u32(parsed_handle.unwrap().data, 0)
+            val index = self._handle_index(handle_id)
+            if index < 0:
+                return _status(request_id, SSH_FX_INVALID_HANDLE, "stale handle")
+            val owned = self.handles[index]
+            val next = parsed_handle.unwrap().next_offset
+            if kind == SSH_FXP_CLOSE:
+                if next != frame.len():
+                    return _status(request_id, SSH_FX_BAD_MESSAGE, "invalid close request")
+                val closed = g_vfs_positioned_close(owned.file_object_id)
+                if closed.is_err():
+                    return _status(request_id, _vfs_status(closed.unwrap_err()), "vfs close failed")
+                var retired = owned
+                retired.active = false
+                self.handles[index] = retired
+                return _status(request_id, SSH_FX_OK, "")
+            if next + 8u64 > frame.len():
+                return _status(request_id, SSH_FX_BAD_MESSAGE, "truncated offset")
+            val offset = _get_u64(frame, next)
+            if kind == SSH_FXP_READ:
+                if not owned.readable or next + 12u64 != frame.len():
+                    return _status(request_id, SSH_FX_PERMISSION_DENIED, "read not admitted")
+                val length = ssh_get_u32(frame, next + 8u64)
+                if length == 0u32 or length > SFTP_MAX_READ:
+                    return _status(request_id, SSH_FX_BAD_MESSAGE, "invalid read length")
+                val read = g_vfs_positioned_read_at(owned.file_object_id, offset, length.to_u64())
+                if read.is_err():
+                    return _status(request_id, _vfs_status(read.unwrap_err()), "vfs read failed")
+                if read.unwrap().len() == 0u64:
+                    return _status(request_id, SSH_FX_EOF, "end of file")
+                return _data_response(request_id, read.unwrap())
+            if not owned.writable:
+                return _status(request_id, SSH_FX_PERMISSION_DENIED, "write not admitted")
+            val parsed_data = ssh_get_string(frame, next + 8u64)
+            if parsed_data.is_err() or parsed_data.unwrap().next_offset != frame.len() or
+                parsed_data.unwrap().data.len() > SFTP_MAX_READ.to_u64():
+                return _status(request_id, SSH_FX_BAD_MESSAGE, "invalid write data")
+            val written = g_vfs_positioned_write_at(
+                owned.file_object_id, offset, parsed_data.unwrap().data)
+            if written.is_err():
+                return _status(request_id, _vfs_status(written.unwrap_err()), "vfs write failed")
+            if written.unwrap() != parsed_data.unwrap().data.len().to_u64():
+                return _status(request_id, SSH_FX_FAILURE, "short vfs write")
+            return _status(request_id, SSH_FX_OK, "")
         _status(request_id, SSH_FX_OP_UNSUPPORTED, "sftp operation unavailable")
 
 export SftpSessionV3, SftpAccumulatorWorkV3

@@ -1,10 +1,10 @@
-use os.smf.smf_dynlib.{DynLoadRequest, smf_dlopen, smf_dlopen_checked, smf_dlsym, smf_dlclose, smf_artifact_has_export}
+use os.smf.smf_dynlib.{DynLoadRequest, DynLoadResult, smf_dlopen, smf_dlopen_bytes, smf_dlsym, smf_dlclose, smf_artifact_has_export}
+use os.smf.dynsmf_snapshot.{dynsmf_snapshot_capture, dynsmf_snapshot_request_error}
+use os.smf.dynsmf_types.{DynSmfArtifactStatus}
 
 extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_read_bytes(path: text) -> [u8]
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_hash_text(s: text) -> i64
-
 class DynSmfManifestEntry:
     id: text
     path: text
@@ -55,16 +55,10 @@ class DynSmfBuildPlan:
     status: text
     reason: text
 
-class DynSmfArtifactStatus:
-    library_id: text
+class DynSmfArtifactSnapshot:
     path: text
-    ready: bool
-    reason: text
-    byte_count: int
-    magic_hex: text
-
-    me to_text() -> text:
-        return self.library_id + ":" + self.path + ":" + self.ready.to_text() + ":" + self.reason + ":bytes" + self.byte_count.to_text() + ":magic" + self.magic_hex
+    data: [u8]
+    file_present: bool
 
 fn dynsmf_default_manifest() -> [DynSmfManifestEntry]:
     [
@@ -323,13 +317,37 @@ fn dynsmf_artifact_status_with_hash(entry: DynSmfManifestEntry, file_present: bo
     DynSmfArtifactStatus(library_id: base.library_id, path: base.path, ready: false, reason: "stale_interface", byte_count: base.byte_count, magic_hex: base.magic_hex)
 
 fn dynsmf_artifact_status(entry: DynSmfManifestEntry) -> DynSmfArtifactStatus:
-    if entry.path == "":
-        return dynsmf_artifact_status_from_bytes(entry, false, [])
-    if not rt_file_exists(entry.path):
-        return dynsmf_artifact_status_from_bytes(entry, false, [])
-    val data = rt_file_read_bytes(entry.path) ?? []
-    val source_path = dynsmf_manifest_source_path(entry)
-    dynsmf_artifact_status_with_hash(entry, true, data, source_path)
+    dynsmf_artifact_snapshot_status(entry, dynsmf_artifact_snapshot(entry))
+
+fn dynsmf_artifact_snapshot_from_bytes(entry: DynSmfManifestEntry, file_present: bool, data: [u8]) -> DynSmfArtifactSnapshot:
+    DynSmfArtifactSnapshot(path: entry.path, data: data, file_present: file_present)
+
+fn dynsmf_artifact_snapshot(entry: DynSmfManifestEntry) -> DynSmfArtifactSnapshot:
+    val captured = dynsmf_snapshot_capture(entry.path)
+    dynsmf_artifact_snapshot_from_bytes(entry, captured.1, captured.0)
+
+fn dynsmf_artifact_snapshot_status(entry: DynSmfManifestEntry, snapshot: DynSmfArtifactSnapshot) -> DynSmfArtifactStatus:
+    if snapshot.path != entry.path:
+        return DynSmfArtifactStatus(library_id: entry.id, path: entry.path, ready: false, reason: "snapshot_path_mismatch", byte_count: snapshot.data.len(), magic_hex: dynsmf_artifact_magic_hex(snapshot.data))
+    dynsmf_artifact_status_with_hash(entry, snapshot.file_present, snapshot.data, dynsmf_manifest_source_path(entry))
+
+fn dynsmf_open_snapshot(entry: DynSmfManifestEntry, req: DynLoadRequest, next_handle: int, snapshot: DynSmfArtifactSnapshot) -> DynLoadResult:
+    # Validate the captured bytes exactly once, then logically open that same
+    # capture. No caller-supplied `ready` receipt can bypass validation.
+    val request_error = dynsmf_snapshot_request_error(entry.path, req.search_path, snapshot.path)
+    if request_error != "":
+        return DynLoadResult.fail(req.library_name, request_error)
+    val status = dynsmf_artifact_snapshot_status(entry, snapshot)
+    if not status.ready:
+        return DynLoadResult.fail(req.library_name, "artifact_" + status.reason)
+    smf_dlopen_bytes(req, next_handle, snapshot.data)
+
+fn dynsmf_open_captured_bytes(entry: DynSmfManifestEntry, req: DynLoadRequest, next_handle: int, file_present: bool, data: [u8]) -> DynLoadResult:
+    dynsmf_open_snapshot(entry, req, next_handle, dynsmf_artifact_snapshot_from_bytes(entry, file_present, data))
+
+fn dynsmf_checked_open_entry(entry: DynSmfManifestEntry, req: DynLoadRequest, next_handle: int) -> DynLoadResult:
+    val snapshot = dynsmf_artifact_snapshot(entry)
+    dynsmf_open_snapshot(entry, req, next_handle, snapshot)
 
 fn dynsmf_artifacts_ready(manifest: [DynSmfManifestEntry]) -> bool:
     var idx = 0
@@ -483,12 +501,8 @@ fn dynsmf_session_load_impl(session: DynSmfSession, manifest: [DynSmfManifestEnt
         if existing.id == id and existing.status == "loaded":
             return out
         loaded_idx = loaded_idx + 1
-    if require_artifact:
-        val artifact = dynsmf_artifact_status(entry)
-        if not artifact.ready:
-            return dynsmf_session_add_evidence(out, DynSmfEvidenceRow(library_id: id, action: "load", policy_source: out.policy.source, status: "failed", handle: 0, generation: out.generation, reason: "artifact_" + artifact.reason))
     val request = DynLoadRequest.lazy(entry.id, entry.path, out.session_id)
-    val load = if require_artifact: smf_dlopen_checked(request, out.next_handle) else: smf_dlopen(request, out.next_handle)
+    val load = if require_artifact: dynsmf_checked_open_entry(entry, request, out.next_handle) else: smf_dlopen(request, out.next_handle)
     if not load.success:
         return dynsmf_session_add_evidence(out, DynSmfEvidenceRow(library_id: id, action: "load", policy_source: out.policy.source, status: "failed", handle: 0, generation: out.generation, reason: load.error_msg))
     val handle = load.handle_id
@@ -773,6 +787,7 @@ export dynsmf_background_compile_action, dynsmf_session_add_evidence
 export dynsmf_default_manifest, dynsmf_manifest_all_precompiled, dynsmf_manifest_source_path
 export dynsmf_build_plan, dynsmf_build_plans, dynsmf_build_plans_ready
 export dynsmf_artifact_status_from_bytes, dynsmf_artifact_status, dynsmf_artifacts_ready
+export dynsmf_open_captured_bytes
 export dynsmf_srchash_path, dynsmf_source_hash_current, dynsmf_source_hash_stored, dynsmf_artifact_status_with_hash
 export dynsmf_known_stub_byte_count, dynsmf_artifact_size_exceeds_stub_floor, dynsmf_artifact_witnesses_exports
 export dynsmf_abi_path, dynsmf_abi_stored, dynsmf_ifacehash_path

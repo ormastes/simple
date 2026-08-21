@@ -9,9 +9,11 @@ runtime=examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c
 bridge=src/os/kernel/arch/x86_64/user_entry.spl
 validation=src/os/kernel/arch/x86_64/user_entry_validation.spl
 launcher=src/os/kernel/loader/x86_64_fs_exec_spawn.spl
+authenticated_owner=src/os/kernel/loader/fs_exec_spawn.spl
 user_as=src/os/kernel/memory/user_address_space.spl
 vmm_as=src/os/kernel/memory/vmm_address_space.spl
 matrix=src/os/qemu_systest_contract.spl
+ovmf_launcher=scripts/os/run_x86_64_fs_exec_ovmf.shs
 
 require() {
     needle=$1
@@ -39,8 +41,18 @@ require 'generation: u64' "$validation"
 require 'generation: task.isolation.capability_generation' "$validation"
 require 'entry: task.entry_point' "$validation"
 require 'initial_rsp: task.user_stack' "$validation"
-require 'scheduler.exit_task_by_id(child, rc as i32)' "$launcher"
-require 'scheduler.wait_for_collect(TaskId(id: 0), child, false)' "$launcher"
+# Path-only compatibility calls no longer create a scheduler child.  The
+# stronger executable-authority contract consumes a loader-issued token in the
+# shared owner before publishing the task; asserting the removed local
+# exit/wait sequence would encourage restoring an authentication bypass.
+require 'fs_exec_spawn_as(0, path, argv, envp)' "$launcher"
+require 'fs_exec_adopt_authenticated_v1(' "$authenticated_owner"
+require 'token: ExecutableAuthorityTokenV1' "$authenticated_owner"
+require 'consumer: ExecutableLoadConsumerV1' "$authenticated_owner"
+require 'owner.adopt_authenticated_executable_pid_v1(' "$authenticated_owner"
+if grep -Eq 'exit_task_by_id|wait_for_collect' "$launcher"; then
+    fail 'x86 compatibility facade must not own an unauthenticated child lifecycle'
+fi
 require 'if not vmm_clone_kernel_low_private(space.phys_root):' "$user_as"
 require 'return AddressSpace(phys_root: 0, id: 0)' "$user_as"
 require 'vmm_map_user_low_page(space, virt, phys, flags)' "$user_as"
@@ -52,6 +64,14 @@ require 'generation != _x86_exec_token_generation' "$runtime"
 require 'int64_t rt_qemu_nonce_echo(void)' "$runtime"
 require 'int64_t rt_x86_64_fs_ls_sys_apps(void)' "$runtime"
 require 'SIMPLEOS_FS_EXEC_OK arch=x86_64 nonce=' "$matrix"
+require 'scripts/os/run_x86_64_fs_exec_ovmf.shs' "$matrix"
+require 'grub-mkstandalone --format=x86_64-efi' "$ovmf_launcher"
+require 'multiboot (hd0)/boot/kernel.elf' "$ovmf_launcher"
+require 'if=pflash,format=raw,readonly=on' "$ovmf_launcher"
+if grep -Fq 'loader,file=build/os/simpleos_x86_64_fs_exec.elf' "$matrix"; then
+    echo 'x86_64-real-fs-exec-wiring: generic QEMU loader is not a Multiboot launcher' >&2
+    exit 1
+fi
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM

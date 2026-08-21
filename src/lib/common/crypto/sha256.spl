@@ -15,6 +15,7 @@
 
 use std.common.crypto.types.{rotr32}
 use std.common.crypto.sha256_core.{sha256_initial_hash, sha256_pad_message, sha256_process_block}
+use std.common.crypto.secure_memory.{secure_zero_i64_slots}
 
 # SHA-256 round constants (first 32 bits of fractional parts of cube roots of first 64 primes).
 fn _sha256_k() -> [i64]:
@@ -261,7 +262,7 @@ fn _sha256_padded_byte(data: [u8], data_len: i64, total_len: i64, j: i64) -> i64
 # input, and padding synthesized virtually for the final block(s) only.
 # Total allocations per call: 2 small arrays + the 64-char hex build,
 # independent of input size.
-fn sha256_u8_hex(data: [u8]) -> text:
+fn _sha256_u8_hex_owned(data: [u8], require_zeroization: bool) -> text:
     val mask32 = 4294967295  # 0xFFFFFFFF
     val k = _sha256_k()
     var w: [i64] = []
@@ -370,7 +371,26 @@ fn sha256_u8_hex(data: [u8]) -> text:
             result = result + digits[nibble:nibble + 1]
             shift = shift - 4
         out_i = out_i + 1
+    # `w` contains the expanded credential-derived message schedule and
+    # `words` contains the final working-state projection. On bump/no-GC
+    # targets their backing allocations otherwise survive for process life.
+    val schedule_wipe = secure_zero_i64_slots(w)
+    val words_wipe = secure_zero_i64_slots(words)
+    if require_zeroization and
+       (not schedule_wipe.verified() or not words_wipe.verified()):
+        return ""
     result
+
+fn sha256_u8_hex(data: [u8]) -> text:
+    _sha256_u8_hex_owned(data, false)
+
+fn sha256_u8_hex_zeroizing(data: [u8]) -> text?:
+    """Hash bytes only when schedule/workspace volatile wipe readback passes."""
+    val digest = _sha256_u8_hex_owned(data, true)
+    if digest.len() == 64:
+        Some(digest)
+    else:
+        nil
 
 # ============================================================================
 # MIR optimizer pattern-recognition hooks
@@ -415,3 +435,4 @@ fn sha256_bytes_scalar(data: [i64]) -> [i64]:
     result
 
 export sha256_u8_hex
+export sha256_u8_hex_zeroizing

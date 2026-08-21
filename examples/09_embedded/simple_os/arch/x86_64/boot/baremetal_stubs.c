@@ -5,6 +5,12 @@
 #include "embedded_ssh_host_rsa_crt.h"
 #include "x86_64_nonce_slot_contract.h"
 
+/* The freestanding build compiles this architecture runtime as its C owner.
+ * Pull in the shared atomic per-CPU implementation here so the Simple SMP
+ * capsule and the linked boot runtime cannot drift or leave unresolved ABI
+ * symbols. */
+#include "../../../../../../src/os/kernel/smp/percpu_atomic_owner.c"
+
 typedef int64_t RuntimeValue;
 
 void x25519_sc_reduce(uint8_t *s);

@@ -1,0 +1,145 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$root/scripts/check/lib/simpleos-admitted-runtime.shs"
+SIMPLEOS_ADMITTED_RUNTIME_ROOT=$root
+export SIMPLEOS_ADMITTED_RUNTIME_ROOT
+BOOTSTRAP_STAGE3_FACADE_PATH=$root/scripts/check/lib/bootstrap-stage3-provenance.shs
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/simpleos-admitted-runtime-test.XXXXXX")
+trap 'rm -rf "$work"' 0 HUP INT TERM
+stage=$work/stage3/test-triple
+mkdir -p "$stage/stage2-admitted"
+
+cat >"$work/runtime_mock.c" <<'EOF'
+#include <stdio.h>
+#include <string.h>
+int main(int argc, char **argv) {
+    int stale = strstr(argv[0], "stale") != NULL;
+    if (stale) return 139;
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "native-build") == 0) {
+            fputs("Build failed: failed to read intentional-missing.spl: No such file\n", stdout);
+            return 1;
+        }
+    }
+    return 2;
+}
+EOF
+cc "$work/runtime_mock.c" -o "$stage/stage2-admitted/simple"
+mkdir -p "$work/stale-stage/stage2-admitted" "$work/script-stage/stage2-admitted"
+cc "$work/runtime_mock.c" -o "$work/stale-stage/stage2-admitted/simple"
+
+make_admission() {
+    candidate=$1
+    stem=$2
+    row_hash=${3:-}
+    evidence=$stage/$stem-evidence
+    mkdir -p "$evidence"
+    sanity=$evidence/stage2-sanity.env
+    receiver=$evidence/stage2-receiver.env
+    receiver_log=$evidence/stage2-receiver.log
+    runtime=$evidence/runtime-admitted.txt
+    source=$evidence/source-before.txt
+    tool=$evidence/tool-before.txt
+    admission=$(dirname -- "$candidate")/admission.env
+    candidate_hash=$(sha256sum -- "$candidate" | awk '{print $1}')
+    [ -n "$row_hash" ] || row_hash=$candidate_hash
+    empty_hash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+    printf 'source-snapshot\n' >"$source"
+    printf 'tool-authority\n' >"$tool"
+    printf 'file-hex:73696d706c65:1:%s\n' "$row_hash" >"$runtime"
+    printf 'receiver-probe-pass\n' >"$receiver_log"
+    runtime_hash=$(sha256sum -- "$runtime" | awk '{print $1}')
+    receiver_log_hash=$(sha256sum -- "$receiver_log" | awk '{print $1}')
+    cat >"$sanity" <<EOF
+schema=simple-bootstrap-sanity-evidence-v1
+status=pass
+candidate_sha256_before=$candidate_hash
+version_status=0
+version_output=simple-bootstrap 1.0.0-RC
+unsupported_status=1
+unsupported_output_sha256=$empty_hash
+frontend_smoke_status=0
+frontend_smoke_bootstrap_mode_status=0
+frontend_smoke_output_sha256=$empty_hash
+candidate_sha256_after=$candidate_hash
+EOF
+    cat >"$receiver" <<EOF
+schema=simple-bootstrap-stage2-receiver-evidence-v1
+status=pass
+probe_exit=0
+candidate_sha256_before=$candidate_hash
+candidate_sha256_after=$candidate_hash
+runtime_snapshot_sha256=$runtime_hash
+probe_log=$receiver_log
+probe_log_sha256=$receiver_log_hash
+EOF
+    args_hash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    bootstrap_stage3_write_stage2_admission_receipt "$admission" "$candidate" \
+        "$source" "$runtime" "$tool" "$args_hash" "$sanity" "$receiver"
+    printf '%s\n' "$admission"
+}
+
+good=$stage/stage2-admitted/simple
+good_admission=$(make_admission "$good" good)
+SIMPLE_COMPILER_ADMISSION=$good_admission
+export SIMPLE_COMPILER_ADMISSION
+simpleos_admitted_runtime_verify_auto "$good" || {
+    echo "FAIL: canonical admitted native fixture rejected"
+    exit 1
+}
+
+stale=$work/stale-stage/stage2-admitted/simple
+stale_admission=$(make_admission "$stale" stale)
+if simpleos_admitted_runtime_verify "$stale" "$stale_admission"; then
+    echo "FAIL: signal-139 native fixture admitted"
+    exit 1
+fi
+
+script=$work/script-stage/stage2-admitted/simple
+printf '#!/bin/sh\necho "Build failed: failed to read intentional-missing.spl"\nexit 1\n' >"$script"
+chmod +x "$script"
+script_admission=$(make_admission "$script" script)
+if simpleos_admitted_runtime_verify "$script" "$script_admission"; then
+    echo "FAIL: shell-script candidate admitted"
+    exit 1
+fi
+
+replacement=$stage/stage2-admitted/replacement-simple
+cp "$good" "$replacement"
+printf '\000' >>"$replacement"
+if simpleos_admitted_runtime_verify "$replacement" "$good_admission"; then
+    echo "FAIL: candidate path/hash substitution admitted"
+    exit 1
+fi
+runtime_path=$(bootstrap_stage3_manifest_value runtime_snapshot_path "$good_admission")
+printf 'file-hex:756e72656c61746564:1:%s\n' \
+    'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' \
+    >"$runtime_path"
+if simpleos_admitted_runtime_verify "$good" "$good_admission"; then
+    echo "FAIL: unrelated runtime snapshot admitted"
+    exit 1
+fi
+
+mkdir -p "$work/unrelated-stage/stage2-admitted"
+unrelated=$work/unrelated-stage/stage2-admitted/simple
+cp "$good" "$unrelated"
+unrelated_admission=$(make_admission "$unrelated" unrelated \
+    bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)
+if simpleos_admitted_runtime_verify "$unrelated" "$unrelated_admission"; then
+    echo "FAIL: freshly forged receipt with unrelated executable row admitted"
+    exit 1
+fi
+
+grep -Fq 'simpleos_admitted_runtime_verify_auto "$SIMPLE_BIN_RESOLVED"' \
+    "$root/scripts/check/lib/simpleos-wm-fullscreen/admission.shs"
+grep -Fq 'simpleos_admitted_runtime_verify_auto "$SIMPLE_BIN"' \
+    "$root/scripts/check/check-simpleos-x86-64-wm-hello-lifecycle-evidence.shs"
+grep -Fq 'simpleos_admitted_runtime_verify_auto "$simple_bin"' \
+    "$root/scripts/check/check-native-scalar-metadata-copy.shs"
+
+echo "PASS: canonical SimpleOS runtime admission rejects forged and stale candidates"

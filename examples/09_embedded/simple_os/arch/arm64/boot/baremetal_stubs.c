@@ -1187,6 +1187,45 @@ RuntimeValue rt_native_cmp(RuntimeValue left, RuntimeValue right)
     return (RuntimeValue)((int64_t)left < (int64_t)right ? -1 : 1);
 }
 
+/* Erased text comparisons use the same three-way ordering owner. */
+int64_t rt_text_cmp_any(RuntimeValue left, RuntimeValue right)
+{
+    return (int64_t)rt_native_cmp(left, right);
+}
+
+RuntimeValue rt_platform_name(void)
+{
+    return rt_string_from_cstr("simpleos");
+}
+
+RuntimeValue text_dot_from_char_code(int64_t code)
+{
+    char bytes[4];
+    size_t len;
+    if (code < 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff))
+        return NIL_VALUE;
+    if (code <= 0x7f) {
+        bytes[0] = (char)code;
+        len = 1;
+    } else if (code <= 0x7ff) {
+        bytes[0] = (char)(0xc0 | ((uint64_t)code >> 6));
+        bytes[1] = (char)(0x80 | ((uint64_t)code & 0x3f));
+        len = 2;
+    } else if (code <= 0xffff) {
+        bytes[0] = (char)(0xe0 | ((uint64_t)code >> 12));
+        bytes[1] = (char)(0x80 | (((uint64_t)code >> 6) & 0x3f));
+        bytes[2] = (char)(0x80 | ((uint64_t)code & 0x3f));
+        len = 3;
+    } else {
+        bytes[0] = (char)(0xf0 | ((uint64_t)code >> 18));
+        bytes[1] = (char)(0x80 | (((uint64_t)code >> 12) & 0x3f));
+        bytes[2] = (char)(0x80 | (((uint64_t)code >> 6) & 0x3f));
+        bytes[3] = (char)(0x80 | ((uint64_t)code & 0x3f));
+        len = 4;
+    }
+    return rt_string_new((RuntimeValue)(uintptr_t)bytes, (RuntimeValue)len);
+}
+
 #define ECAM_BASE 0x4010000000ULL
 #define MAX_PCI_CACHED 32
 
@@ -2000,6 +2039,45 @@ RuntimeValue rt_array_remove(RuntimeValue arr, RuntimeValue idx) {
     a->len--; a->items[a->len] = NIL_VALUE; return removed;
 }
 
+RuntimeValue rt_collection_remove(RuntimeValue receiver, RuntimeValue key)
+{
+    return rt_array_remove(receiver, key);
+}
+
+RuntimeValue rt_pop(RuntimeValue receiver)
+{
+    if (IS_HEAP(receiver)) {
+        HeapHeader *header = (HeapHeader *)DECODE_PTR(receiver);
+        if (header && header->type == HEAP_ARRAY) return rt_array_pop(receiver);
+        if (header && header->type == HEAP_STRING) {
+            RuntimeString *text = (RuntimeString *)header;
+            if (text->len == 0) return rt_string_from_cstr("");
+            uint32_t begin = text->len - 1;
+            while (begin > 0 && ((uint8_t)text->data[begin] & 0xc0U) == 0x80U) begin--;
+            RuntimeValue result = rt_string_new(
+                (RuntimeValue)(uintptr_t)(text->data + begin),
+                (RuntimeValue)(text->len - begin));
+            text->len = begin;
+            text->data[begin] = '\0';
+            return result;
+        }
+    }
+    return NIL_VALUE;
+}
+
+RuntimeValue rt_string_from_byte_array(RuntimeValue array)
+{
+    return rt_bytes_to_text(array);
+}
+
+int64_t rt_string_byte_at(RuntimeValue value, int64_t index)
+{
+    if (index < 0 || !IS_HEAP(value)) return 0;
+    RuntimeString *text = (RuntimeString *)DECODE_PTR(value);
+    if (!text || text->hdr.type != HEAP_STRING || (uint64_t)index >= text->len) return 0;
+    return (uint8_t)text->data[index];
+}
+
 RuntimeValue rt_array_join(RuntimeValue arr, RuntimeValue sep) {
     if (!IS_HEAP(arr)) return rt_string_from_cstr(""); RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
     if (!a || a->hdr.type != HEAP_ARRAY || a->len == 0) return rt_string_from_cstr("");
@@ -2498,6 +2576,40 @@ RuntimeValue rt_cli(void) { __asm__ volatile("msr daifset, #0xF"); return NIL_VA
 S1(rt_lgdt) S1(rt_lidt) S1(rt_ltr) S1(rt_invlpg)
 S0(rt_read_cr0) S1(rt_write_cr0) S1(rt_read_cr2) S1(rt_read_cr3) S1(rt_write_cr3)
 S0(rt_read_cr4) S1(rt_write_cr4) S1(rt_read_msr) S2(rt_write_msr) S0(rt_cpuid) S0(rt_rdtsc)
+
+/* Shared modules can retain x86 address-space calls in a target closure.
+ * Reaching one on ARM is an architecture violation, not a successful zero. */
+uint64_t rt_read_cr3_raw(void)
+{
+    serial_puts("[arm64-runtime] forbidden x86 CR3 read\r\n");
+    for (;;) __asm__ volatile("wfe");
+}
+
+void rt_write_cr3_raw(uint64_t value)
+{
+    (void)value;
+    serial_puts("[arm64-runtime] forbidden x86 CR3 write\r\n");
+    for (;;) __asm__ volatile("wfe");
+}
+
+#define ARM64_MUTEX_HANDLE_MAX 4096U
+static uint8_t arm64_mutex_owned[ARM64_MUTEX_HANDLE_MAX];
+
+int8_t spl_mutex_lock(int64_t handle)
+{
+    if (handle <= 0 || (uint64_t)handle >= ARM64_MUTEX_HANDLE_MAX) return 0;
+    while (__atomic_test_and_set(&arm64_mutex_owned[handle], __ATOMIC_ACQUIRE))
+        __asm__ volatile("yield");
+    return 1;
+}
+
+int8_t spl_mutex_unlock(int64_t handle)
+{
+    if (handle <= 0 || (uint64_t)handle >= ARM64_MUTEX_HANDLE_MAX) return 0;
+    if (!__atomic_load_n(&arm64_mutex_owned[handle], __ATOMIC_RELAXED)) return 0;
+    __atomic_clear(&arm64_mutex_owned[handle], __ATOMIC_RELEASE);
+    return 1;
+}
 
 S2(rt_register_isr) S1(rt_send_eoi) S0(rt_get_interrupt_flag)
 
@@ -4721,6 +4833,18 @@ RuntimeValue rt_arm64_user_as_translate(RuntimeValue root_val, RuntimeValue virt
     uint64_t entry = entries[idxs[3]];
     if (!(entry & ARM64_PTE_VALID)) return 0;
     return (RuntimeValue)((entry & ARM64_PTE_OUTPUT_MASK) + (virt & 4095ULL));
+}
+
+uint8_t rt_copy_user_byte(uint64_t address)
+{
+    /* Syscalls run before TTBR0 is restored, so validate and translate through
+     * the exact recorded user address-space owner before touching memory. */
+    if (!arm64_recorded_user_root || address < 4096ULL ||
+        address >= 0x0000800000000000ULL) return 0;
+    uint64_t physical = (uint64_t)rt_arm64_user_as_translate(
+        (RuntimeValue)arm64_recorded_user_root, (RuntimeValue)address);
+    if (!physical) return 0;
+    return *(const volatile uint8_t *)(uintptr_t)physical;
 }
 
 static uint64_t arm64_user_translate_checked(uint64_t root, uint64_t virt,

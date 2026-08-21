@@ -1,0 +1,81 @@
+#!/bin/sh
+# Canonical x86_64 SimpleOS filesystem-exec launcher.
+#
+# QEMU's generic `loader` device only copies ELF segments; it does not provide
+# the Multiboot machine state required by the x86_64 kernel.  Build a private,
+# self-contained GRUB EFI application for each run and use the physical-board
+# boot chain: OVMF -> removable ESP -> GRUB EFI -> Multiboot1 -> SimpleOS.
+set -eu
+
+kernel=
+image=
+accelerator=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --kernel) shift; kernel=${1:-} ;;
+        --image) shift; image=${1:-} ;;
+        -accel) shift; accelerator=${1:-} ;;
+        *) printf '%s\n' "x86_64-fs-exec-ovmf: unsupported argument: $1" >&2; exit 64 ;;
+    esac
+    shift
+done
+
+[ -s "$kernel" ] || { printf '%s\n' "x86_64-fs-exec-ovmf: missing kernel: $kernel" >&2; exit 2; }
+[ -s "$image" ] || { printf '%s\n' "x86_64-fs-exec-ovmf: missing image: $image" >&2; exit 2; }
+case "$accelerator" in kvm|tcg) ;; *) printf '%s\n' 'x86_64-fs-exec-ovmf: accelerator must be kvm or tcg' >&2; exit 64 ;; esac
+
+qemu=${SIMPLEOS_X86_64_QEMU:-qemu-system-x86_64}
+ovmf_code=${SIMPLEOS_OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}
+ovmf_vars_source=${SIMPLEOS_OVMF_VARS:-/usr/share/OVMF/OVMF_VARS_4M.fd}
+command -v "$qemu" >/dev/null 2>&1 || { printf '%s\n' "x86_64-fs-exec-ovmf: missing QEMU: $qemu" >&2; exit 2; }
+command -v grub-mkstandalone >/dev/null 2>&1 || { printf '%s\n' 'x86_64-fs-exec-ovmf: missing grub-mkstandalone' >&2; exit 2; }
+[ -f "$ovmf_code" ] || { printf '%s\n' "x86_64-fs-exec-ovmf: missing OVMF code: $ovmf_code" >&2; exit 2; }
+[ -f "$ovmf_vars_source" ] || { printf '%s\n' "x86_64-fs-exec-ovmf: missing OVMF vars: $ovmf_vars_source" >&2; exit 2; }
+
+run_dir=$(mktemp -d "${TMPDIR:-/tmp}/simpleos-x86-ovmf.XXXXXXXX")
+case "$run_dir" in "${TMPDIR:-/tmp}"/simpleos-x86-ovmf.*) ;; *) exit 70 ;; esac
+esp=$run_dir/esp
+vars=$run_dir/OVMF_VARS_4M.fd
+mkdir -p "$esp/EFI/BOOT"
+mkdir -p "$esp/boot"
+cp "$ovmf_vars_source" "$vars"
+cp "$kernel" "$esp/boot/kernel.elf"
+
+printf '%s\n' \
+    'set timeout=0' \
+    'set default=0' \
+    'insmod multiboot' \
+    'menuentry "SimpleOS x86_64 filesystem execution" {' \
+    '  multiboot (hd0)/boot/kernel.elf' \
+    '  boot' \
+    '}' > "$run_dir/grub.cfg"
+
+grub-mkstandalone --format=x86_64-efi \
+    --output="$esp/EFI/BOOT/BOOTX64.EFI" \
+    --modules="multiboot normal echo search search_fs_file part_gpt fat" \
+    "boot/grub/grub.cfg=$run_dir/grub.cfg"
+
+child=
+cleanup() {
+    [ -z "$child" ] || kill "$child" 2>/dev/null || true
+    rm -r "$run_dir" 2>/dev/null || true
+}
+trap cleanup EXIT HUP INT TERM
+
+"$qemu" -no-user-config -monitor none -nographic -no-reboot \
+    -machine q35 -cpu qemu64 -m 512M -accel "$accelerator" \
+    -drive "if=pflash,format=raw,readonly=on,file=$ovmf_code" \
+    -drive "if=pflash,format=raw,file=$vars" \
+    -drive "file=fat:rw:$esp,format=raw,id=esp,if=none" \
+    -device virtio-blk-pci,drive=esp,bootindex=0 \
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+    -device nvme,id=fsexec,serial=x86-64-fs-exec \
+    -drive "file=$image,if=none,id=fsexecns1,format=raw" \
+    -device nvme-ns,drive=fsexecns1,bus=fsexec,nsid=1 &
+child=$!
+set +e
+wait "$child"
+status=$?
+set -e
+child=
+exit "$status"

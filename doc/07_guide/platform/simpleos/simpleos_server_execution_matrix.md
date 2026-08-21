@@ -45,9 +45,18 @@ the physical SimpleOS runtime/provider nor a filesystem server executable.
    evidence.
 
 The host image builder wipes its transient credential input buffer after copying
-it into the image. The current target runtime cannot guarantee secure zeroing of
-the immutable `[u8]` and `text` credential copies after policy registration;
-this remains an explicit blocker tracked in
+it into the image. The target process keeps the credential only in mutable array
+slots, hashes it into the capability policy, then overwrites every slot through
+runtime volatile stores, executes a full barrier, and reads every slot back
+through volatile loads. The credential-specific SHA-256 path uses the same
+facade to wipe and read back its 64-word message schedule and final word
+workspace before capability registration succeeds. Each boot must emit exactly one `loaded` target receipt
+with matching byte/overwrite counts and zero residual slots. The producer
+canonicalizes and hashes that target line into the signed
+receipt; missing, duplicated, malformed, residual-bearing, or unzeroized hash
+workspace evidence fails.
+The retained-artifact scan and ephemeral-image destruction remain mandatory.
+Live closure status is tracked in
 `doc/08_tracking/bug/simpleos_server_credential_zeroization_gap_2026-08-14.md`.
 
 Missing media, runtime, provider, driver, receipt field, or target identity is

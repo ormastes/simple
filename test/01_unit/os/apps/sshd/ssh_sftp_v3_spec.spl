@@ -2,6 +2,54 @@
 use std.spipe.*
 use os.apps.sshd.ssh_sftp_v3.{SftpSessionV3}
 use os.apps.sshd.ssh_session.{ssh_channel_request_is_sftp}
+use os.apps.sshd.ssh_packet.{ssh_put_u32, ssh_put_string, ssh_put_text, ssh_get_u32}
+use os.services.vfs.vfs_init.{_clear_vfs_rootfs_for_test, vfs_mount_rootfs}
+use std.db.dbfs_driver.{DbFsDriver}
+use std.fs_driver.instance.{DriverInstance}
+extern fn rt_file_read_text(path: text) -> text
+
+fn _frame(body: [u8]) -> [u8]:
+    var out: [u8] = []
+    out = ssh_put_u32(out, body.len().to_u32())
+    for byte in body: out.push(byte)
+    out
+
+fn _request(kind: u8, id: u32) -> [u8]:
+    var body: [u8] = [kind]
+    ssh_put_u32(body, id)
+
+fn _open_request(id: u32, path: text, pflags: u32) -> [u8]:
+    var body = _request(3u8, id)
+    body = ssh_put_text(body, path)
+    body = ssh_put_u32(body, pflags)
+    body = ssh_put_u32(body, 0u32)
+    _frame(body)
+
+fn _write_request(id: u32, handle: [u8], offset: u64, data: [u8]) -> [u8]:
+    var body = _request(6u8, id)
+    body = ssh_put_string(body, handle)
+    body = ssh_put_u32(body, (offset >> 32).to_u32())
+    body = ssh_put_u32(body, offset.to_u32())
+    body = ssh_put_string(body, data)
+    _frame(body)
+
+fn _read_request(id: u32, handle: [u8], offset: u64, length: u32) -> [u8]:
+    var body = _request(5u8, id)
+    body = ssh_put_string(body, handle)
+    body = ssh_put_u32(body, (offset >> 32).to_u32())
+    body = ssh_put_u32(body, offset.to_u32())
+    body = ssh_put_u32(body, length)
+    _frame(body)
+
+fn _close_request(id: u32, handle: [u8]) -> [u8]:
+    var body = _request(4u8, id)
+    body = ssh_put_string(body, handle)
+    _frame(body)
+
+fn _stat_request(id: u32, path: text) -> [u8]:
+    var body = _request(17u8, id)
+    body = ssh_put_text(body, path)
+    _frame(body)
 
 fn _sftp_subsystem_request(name: [u8]) -> [u8]:
     var payload: [u8] = [98, 0, 0, 0, 0, 0, 0, 0, 9]
@@ -79,6 +127,63 @@ describe "bounded SFTP v3 protocol core":
         expect(work.copied_bytes).to_equal(36)
         expect(work.header_scan_bytes).to_equal(8)
         expect(work.complete_frames).to_equal(2)
+
+    it "round-trips OPEN WRITE READ STAT and CLOSE through canonical DBFS VFS objects":
+        _clear_vfs_rootfs_for_test()
+        vfs_mount_rootfs(DriverInstance.DbFs(DbFsDriver.new_hosted())).unwrap()
+        var session = SftpSessionV3.new()
+        session.handle_packet([0, 0, 0, 5, 1, 0, 0, 0, 3])
+        val opened = session.handle_packet(_open_request(10u32, "/sftp.bin", 27u32))
+        expect(opened[4]).to_equal(102u8)
+        val handle: [u8] = [opened[13], opened[14], opened[15], opened[16]]
+        val wrote = session.handle_packet(_write_request(11u32, handle, 2u64, [65u8, 66u8, 67u8]))
+        expect(wrote[4]).to_equal(101u8)
+        expect(ssh_get_u32(wrote, 9)).to_equal(0u32)
+        val read = session.handle_packet(_read_request(12u32, handle, 0u64, 8u32))
+        expect(read[4]).to_equal(103u8)
+        expect([read[13], read[14], read[15], read[16], read[17]]).to_equal([0u8, 0u8, 65u8, 66u8, 67u8])
+        val stated = session.handle_packet(_stat_request(13u32, "/sftp.bin"))
+        expect(stated[4]).to_equal(105u8)
+        expect(stated[20]).to_equal(5u8)
+        val closed = session.handle_packet(_close_request(14u32, handle))
+        expect(ssh_get_u32(closed, 9)).to_equal(0u32)
+        val stale = session.handle_packet(_read_request(15u32, handle, 0u64, 1u32))
+        expect(ssh_get_u32(stale, 9)).to_equal(9u32)
+
+    it "rejects non-atomic append instead of racing stat against positioned write":
+        var session = SftpSessionV3.new()
+        session.handle_packet([0, 0, 0, 5, 1, 0, 0, 0, 3])
+        val response = session.handle_packet(
+            _open_request(20u32, "/append.bin", 15u32))
+        expect(response[4]).to_equal(101u8)
+        expect(ssh_get_u32(response, 9)).to_equal(8u32)
+
+    it "retires every live VFS object when the SFTP owner closes":
+        _clear_vfs_rootfs_for_test()
+        vfs_mount_rootfs(DriverInstance.DbFs(DbFsDriver.new_hosted())).unwrap()
+        var session = SftpSessionV3.new()
+        session.handle_packet([0, 0, 0, 5, 1, 0, 0, 0, 3])
+        val opened = session.handle_packet(
+            _open_request(21u32, "/terminal.bin", 27u32))
+        val handle: [u8] = [opened[13], opened[14], opened[15], opened[16]]
+        session.close_all()
+        val stale = session.handle_packet(
+            _read_request(22u32, handle, 0u64, 1u32))
+        expect(ssh_get_u32(stale, 9)).to_equal(9u32)
+
+    it "routes every SSH terminal transition through the cleanup owner":
+        val core = rt_file_read_text("src/os/apps/sshd/ssh_session.spl")
+        val lifecycle = rt_file_read_text("src/os/apps/sshd/ssh_session_lifecycle.spl")
+        val auth = rt_file_read_text("src/os/apps/sshd/ssh_session_auth.spl")
+        val channel = rt_file_read_text("src/os/apps/sshd/ssh_session_channel.spl")
+        expect(lifecycle).to_contain("pub me transition_closed():")
+        expect(lifecycle).to_contain("self.sftp.close_all()")
+        expect(lifecycle).to_contain("self.sftp_enabled = false")
+        expect(lifecycle).to_contain("self.sftp_local_channel_id = SSH_INVALID_CHANNEL_ID")
+        expect(lifecycle).to_contain("self.state = SshSessionState.Closed")
+        expect(core.contains("self.state = SshSessionState.Closed")).to_be(false)
+        expect(auth.contains("self.state = SshSessionState.Closed")).to_be(false)
+        expect(channel.contains("self.state = SshSessionState.Closed")).to_be(false)
 
 describe "live SSH SFTP subsystem routing":
     it "recognizes only the exact SFTP subsystem request":

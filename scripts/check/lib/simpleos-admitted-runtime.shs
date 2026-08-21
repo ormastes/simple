@@ -1,0 +1,103 @@
+#!/bin/sh
+
+# Shared fail-closed admission for host Simple binaries used to build SimpleOS.
+# A version string is not evidence: the historical 04a38e21 artifact answered
+# --version but linked the obsolete two-argument rt_env_set and crashed when a
+# current four-register text caller first exported SIMPLE_OS_LOG_MODE.
+
+SIMPLEOS_ADMITTED_RUNTIME_REASON=unchecked
+
+simpleos_admitted_runtime_sha256() {
+    sha256sum -- "$1" 2>/dev/null | awk '{print $1}'
+}
+
+simpleos_admitted_runtime_field() {
+    _sar_key=$1
+    _sar_file=$2
+    sed -n "s/^${_sar_key}=//p" "$_sar_file" | head -n 1
+}
+
+# simpleos_admitted_runtime_verify <candidate> <stage2-admitted/admission.env>
+simpleos_admitted_runtime_verify() (
+    _sar_candidate=$1
+    _sar_admission=$2
+
+    [ -x "$_sar_candidate" ] && [ ! -L "$_sar_candidate" ] || exit 10
+    [ -f "$_sar_admission" ] && [ ! -L "$_sar_admission" ] || exit 11
+    case "$_sar_candidate" in
+        */stage2-admitted/simple) ;;
+        *) exit 26 ;;
+    esac
+    [ "$_sar_admission" = "$(dirname -- "$_sar_candidate")/admission.env" ] || exit 28
+
+    # Native compilers only. A shell script can mimic every CLI response but
+    # is not the ELF/Mach-O artifact named by a bootstrap admission receipt.
+    _sar_magic=$(od -An -tx1 -N4 "$_sar_candidate" 2>/dev/null | tr -d ' \n')
+    case "$_sar_magic" in
+        7f454c46|cffaedfe|feedfacf|cafebabe|bebafeca) ;;
+        *) exit 12 ;;
+    esac
+
+    BOOTSTRAP_STAGE3_FACADE_PATH="${SIMPLEOS_ADMITTED_RUNTIME_ROOT:-.}/scripts/check/lib/bootstrap-stage3-provenance.shs"
+    export BOOTSTRAP_STAGE3_FACADE_PATH
+    . "$BOOTSTRAP_STAGE3_FACADE_PATH" || exit 13
+
+    _sar_source=$(bootstrap_stage3_manifest_value source_snapshot_path "$_sar_admission") || exit 14
+    _sar_runtime=$(bootstrap_stage3_manifest_value runtime_snapshot_path "$_sar_admission") || exit 15
+    _sar_tool=$(bootstrap_stage3_manifest_value tool_authority_path "$_sar_admission") || exit 16
+    _sar_args=$(bootstrap_stage3_manifest_value build_args_sha256 "$_sar_admission") || exit 17
+    _sar_sanity=$(bootstrap_stage3_manifest_value sanity_evidence_path "$_sar_admission") || exit 18
+    _sar_receiver=$(bootstrap_stage3_manifest_value receiver_evidence_path "$_sar_admission") || exit 19
+
+    # The canonical verifier binds exact candidate path/hash/role, source,
+    # runtime, tool authority, sanity, receiver evidence, and admission identity.
+    bootstrap_stage3_verify_stage2_admission_receipt \
+        "$_sar_admission" "$_sar_candidate" "$_sar_source" "$_sar_runtime" \
+        "$_sar_tool" "$_sar_args" "$_sar_sanity" "$_sar_receiver" || exit 20
+    _sar_hash=$(simpleos_admitted_runtime_sha256 "$_sar_candidate")
+    [ "$(grep -Fxc "file-hex:73696d706c65:1:${_sar_hash}" "$_sar_runtime" 2>/dev/null || true)" = 1 ] || exit 27
+
+    _sar_hash=$(simpleos_admitted_runtime_sha256 "$_sar_candidate")
+    [ -n "$_sar_hash" ] || exit 13
+    [ "$(simpleos_admitted_runtime_field schema "$_sar_sanity")" = \
+        simple-bootstrap-sanity-evidence-v1 ] || exit 14
+    [ "$(simpleos_admitted_runtime_field status "$_sar_sanity")" = pass ] || exit 15
+    [ "$(simpleos_admitted_runtime_field candidate_sha256_before "$_sar_sanity")" = \
+        "$_sar_hash" ] || exit 16
+    [ "$(simpleos_admitted_runtime_field candidate_sha256_after "$_sar_sanity")" = \
+        "$_sar_hash" ] || exit 17
+
+    _sar_timeout=$(command -v timeout || command -v gtimeout || true)
+    [ -n "$_sar_timeout" ] || exit 21
+    _sar_probe=$(mktemp -d "${TMPDIR:-/tmp}/simpleos-env-abi.XXXXXX") || exit 22
+    trap 'rm -rf "$_sar_probe"' 0 HUP INT TERM
+    _sar_log=$_sar_probe/probe.log
+    _sar_status=0
+    SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB="${SIMPLEOS_ADMITTED_RUNTIME_ROOT:-.}/src" \
+        "$_sar_timeout" -k 1s 5s "$_sar_candidate" native-build \
+        --backend cranelift --source "$_sar_probe" --entry-closure \
+        --entry "$_sar_probe/intentional-missing.spl" \
+        --output "$_sar_probe/unused" >"$_sar_log" 2>&1 || _sar_status=$?
+
+    # A current runtime reaches the intentional missing-file diagnostic.  The
+    # stale ABI dies with 139 before it can do so.  Any signal, timeout, success,
+    # or unrelated diagnostic is an admission failure.
+    [ "$_sar_status" -eq 1 ] || exit 23
+    grep -Fq 'intentional-missing.spl' "$_sar_log" || exit 24
+    grep -Fq 'failed to read' "$_sar_log" || exit 25
+)
+
+# Infer the canonical receipts for a bootstrap Stage-2 admitted candidate.
+# Explicit callers may override both paths, but may not omit either receipt.
+simpleos_admitted_runtime_verify_auto() {
+    _sar_candidate=$1
+    _sar_admission=${SIMPLE_COMPILER_ADMISSION:-$(dirname -- "$_sar_candidate")/admission.env}
+    if simpleos_admitted_runtime_verify "$_sar_candidate" "$_sar_admission"; then
+        SIMPLEOS_ADMITTED_RUNTIME_REASON=pass
+        return 0
+    else
+        _sar_status=$?
+    fi
+    SIMPLEOS_ADMITTED_RUNTIME_REASON="admission-or-env-abi-failed-${_sar_status}"
+    return 1
+}

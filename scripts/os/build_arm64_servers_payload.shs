@@ -34,6 +34,19 @@ for piece in "$SYSROOT/lib/crt0.o" "$SYSROOT/lib/libsimpleos_all.a" \
     }
 done
 
+# The generic array owner comes from simple-core/core_array.spl. The ARM kernel
+# stubs intentionally expose only their legacy `_text` aliases and are not part
+# of this user payload. Refuse a stale runtime archive before the expensive
+# native build.
+for runtime_symbol in rt_array_data_ptr rt_array_set_len_known; do
+    owner_count=$(nm -g --defined-only "$TARGET_RUNTIME" 2>/dev/null |
+        awk -v wanted="$runtime_symbol" '$3 == wanted { count++ } END { print count + 0 }')
+    [ "$owner_count" -eq 1 ] || {
+        echo "error: ARM64 simple-core runtime owner count for $runtime_symbol is $owner_count, expected 1" >&2
+        exit 1
+    }
+done
+
 mkdir -p "$OUT_DIR"
 rm -f "$OUT"
 CC="$SYSROOT/lib/cc-aarch64-simpleos" \
@@ -59,5 +72,24 @@ printf '%s\n' "$undefined_symbols" | grep -Eq '(bytes_to_string|rt_arm64_syscall
     echo "error: server payload retained an unresolved byte-conversion or syscall ABI symbol" >&2
     exit 1
 }
+
+# Array.data_ptr()/set_len_known() are compiler intrinsics on this target.  The
+# archive preflight above proves their fallback ABI owners are available, but a
+# correctly lowered final image has no reference to (and therefore does not
+# extract) those owners.  Gate the final image on the credential-zeroization
+# facade and its volatile primitives instead.
+for runtime_symbol in \
+    lib__common__crypto__secure_memory__secure_zero_u8_slots \
+    lib__common__crypto__secure_memory__secure_zero_i64_slots \
+    lib__common__crypto__sha256__sha256_u8_hex_zeroizing \
+    rt_volatile_read_u8 rt_volatile_write_u8 \
+    rt_volatile_read_u64 rt_volatile_write_u64 rt_memory_barrier; do
+    linked_count=$(nm -g --defined-only "$OUT" 2>/dev/null |
+        awk -v wanted="$runtime_symbol" '$3 == wanted { count++ } END { print count + 0 }')
+    [ "$linked_count" -eq 1 ] || {
+        echo "error: server payload strong owner count for $runtime_symbol is $linked_count, expected 1" >&2
+        exit 1
+    }
+done
 
 printf 'built=%s\nentry=%s\ntarget=%s\ncompiler=%s\n' "$OUT" "$ENTRY" "$TARGET" "$COMPILER"

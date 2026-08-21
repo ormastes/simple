@@ -7,6 +7,7 @@ set -eu
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 cd "$ROOT_DIR"
 POLICY="$ROOT_DIR/scripts/check/policy/simpleos-filesystem-server-receipt.env"
+. "$ROOT_DIR/scripts/check/lib/simpleos-server-zeroization-evidence.shs"
 
 fail() { printf 'simpleos-filesystem-servers-qemu: FAIL: %s\n' "$*" >&2; exit 1; }
 field() {
@@ -39,6 +40,16 @@ require_bound_file() {
     declared=$(field "$hash_key" "$receipt")
     observed=$(sha256sum "$path" | awk '{print $1}')
     [ "$declared" = "$observed" ] || fail "artifact-hash-mismatch:$hash_key"
+}
+
+require_target_zeroization() {
+    local serial=$1 hash_key=$2 receipt=$3 canonical observed declared
+    canonical=$(simpleos_server_zeroization_canonical "$serial") ||
+        fail "invalid-target-credential-zeroization:$(basename "$serial")"
+    observed=$(printf '%s\n' "$canonical" | sha256sum | awk '{print $1}')
+    require_sha256 "$hash_key" "$receipt"
+    declared=$(field "$hash_key" "$receipt")
+    [ "$declared" = "$observed" ] || fail "target-zeroization-hash-mismatch:$hash_key"
 }
 
 validate_receipt() {
@@ -78,6 +89,7 @@ validate_receipt() {
     require_eq shutdown_verified true "$receipt"
     require_eq credential_image_destroyed_after_run true "$receipt"
     require_eq target_credential_zeroization verified "$receipt"
+    require_eq target_credential_zeroization_method volatile-u8-exact-byte-readback-v1 "$receipt"
     require_eq fresh_qemu_processes 2 "$receipt"
     require_sha256 source_manifest_sha256 "$receipt"
     require_sha256 image_staged_sha256 "$receipt"
@@ -97,6 +109,10 @@ $(field boot2_serial_path "$receipt")"
     require_bound_file kernel_path kernel_sha256 "$receipt"
     require_bound_file boot1_serial_path boot1_serial_sha256 "$receipt"
     require_bound_file boot2_serial_path boot2_serial_sha256 "$receipt"
+    require_target_zeroization "$(field boot1_serial_path "$receipt")" \
+        target_credential_zeroization_boot1_sha256 "$receipt"
+    require_target_zeroization "$(field boot2_serial_path "$receipt")" \
+        target_credential_zeroization_boot2_sha256 "$receipt"
     grep -Fq 'executable read=ok path=/SERVERS.ELF bytes=' "$(field boot1_serial_path "$receipt")" ||
         fail "boot1-filesystem-read-marker-missing:$arch"
     grep -Fq 'path=/SERVERS.ELF' "$(field boot1_serial_path "$receipt")" ||
@@ -117,8 +133,10 @@ self_test() {
     printf 'executable\n' > "$tmp/executable"
     printf 'kernel\n' > "$tmp/kernel"
     printf 'disk-image\n' > "$tmp/image"
-    printf '%s\n' '[x] executable read=ok path=/SERVERS.ELF bytes=11' '[fs-exec] spawn:pid=1 path=/SERVERS.ELF' > "$tmp/boot1"
-    printf '%s\n' '[x] executable read=ok path=/SERVERS.ELF bytes=11' '[fs-exec] spawn:pid=1 path=/SERVERS.ELF' '[x] executable=/SERVERS.ELF launch=ok' > "$tmp/boot2"
+    printf '%s\n' '[x] executable read=ok path=/SERVERS.ELF bytes=11' '[fs-exec] spawn:pid=1 path=/SERVERS.ELF' \
+        '[simpleos-servers-user] credential-zeroization phase=loaded method=volatile-u8-exact-byte-readback-v1 bytes=32 overwritten=32 residual_nonzero=0 hash_workspace=verified status=verified' > "$tmp/boot1"
+    printf '%s\n' '[x] executable read=ok path=/SERVERS.ELF bytes=11' '[fs-exec] spawn:pid=1 path=/SERVERS.ELF' '[x] executable=/SERVERS.ELF launch=ok' \
+        '[simpleos-servers-user] credential-zeroization phase=loaded method=volatile-u8-exact-byte-readback-v1 bytes=32 overwritten=32 residual_nonzero=0 hash_workspace=verified status=verified' > "$tmp/boot2"
     hash() { sha256sum "$1" | awk '{print $1}'; }
     key_hash=$(hash "$tmp/trust.pem")
     cat > "$tmp/policy.env" <<EOF
@@ -148,6 +166,9 @@ db_reboot_verified=true
 shutdown_verified=true
 credential_image_destroyed_after_run=true
 target_credential_zeroization=verified
+target_credential_zeroization_method=volatile-u8-exact-byte-readback-v1
+target_credential_zeroization_boot1_sha256=$(simpleos_server_zeroization_canonical "$tmp/boot1" | sha256sum | awk '{print $1}')
+target_credential_zeroization_boot2_sha256=$(simpleos_server_zeroization_canonical "$tmp/boot2" | sha256sum | awk '{print $1}')
 fresh_qemu_processes=2
 source_manifest_path=$tmp/source.manifest
 source_manifest_sha256=$(hash "$tmp/source.manifest")
@@ -184,11 +205,12 @@ EOF
     if (validate_receipt arm64 "$tmp/forged.env" "$tmp/receipt.sig" "$tmp/trust.pem" "$tmp/policy.env" fixture) >/dev/null 2>&1; then
         fail "selftest-accepted-mutated-signed-receipt"
     fi
+    cp "$tmp/boot1" "$tmp/boot1.original"
     printf 'tampered\n' >> "$tmp/boot1"
     if (validate_receipt arm64 "$receipt" "$tmp/receipt.sig" "$tmp/trust.pem" "$tmp/policy.env" fixture) >/dev/null 2>&1; then
         fail "selftest-accepted-mutated-artifact"
     fi
-    printf '%s\n' '[x] executable read=ok path=/SERVERS.ELF bytes=11' '[fs-exec] spawn:pid=1 path=/SERVERS.ELF' > "$tmp/boot1"
+    mv "$tmp/boot1.original" "$tmp/boot1"
     sed 's#boot2_serial_path=.*#boot2_serial_path='"$tmp/boot1"'#; s#boot2_serial_sha256=.*#boot2_serial_sha256='"$(hash "$tmp/boot1")"'#' "$receipt" > "$tmp/alias.env"
     openssl dgst -sha256 -sign "$tmp/key.pem" -out "$tmp/alias.sig" "$tmp/alias.env"
     if (validate_receipt arm64 "$tmp/alias.env" "$tmp/alias.sig" "$tmp/trust.pem" "$tmp/policy.env" fixture) >/dev/null 2>&1; then
@@ -205,7 +227,29 @@ EOF
     if (validate_receipt arm64 "$tmp/unverified.env" "$tmp/unverified.sig" "$tmp/trust.pem" "$tmp/policy.env" fixture) >/dev/null 2>&1; then
         fail "selftest-accepted-unverified-target-credential-zeroization"
     fi
-    printf 'PASS simpleos-filesystem-servers-qemu-selftest checked=8\n'
+    cp "$tmp/boot1" "$tmp/bad-zeroization-boot1"
+    sed -i 's/residual_nonzero=0 hash_workspace=verified/residual_nonzero=1 hash_workspace=verified/' "$tmp/bad-zeroization-boot1"
+    sed \
+        -e 's#boot1_serial_path=.*#boot1_serial_path='"$tmp/bad-zeroization-boot1"'#' \
+        -e 's#boot1_serial_sha256=.*#boot1_serial_sha256='"$(hash "$tmp/bad-zeroization-boot1")"'#' \
+        -e 's#target_credential_zeroization_boot1_sha256=.*#target_credential_zeroization_boot1_sha256='"$(printf '%s\n' forged-zeroization | sha256sum | awk '{print $1}')"'#' \
+        "$receipt" > "$tmp/bad-zeroization.env"
+    openssl dgst -sha256 -sign "$tmp/key.pem" -out "$tmp/bad-zeroization.sig" "$tmp/bad-zeroization.env"
+    if (validate_receipt arm64 "$tmp/bad-zeroization.env" "$tmp/bad-zeroization.sig" "$tmp/trust.pem" "$tmp/policy.env" fixture) >/dev/null 2>&1; then
+        fail "selftest-accepted-target-zeroization-residual"
+    fi
+    cp "$tmp/boot1" "$tmp/bad-workspace-boot1"
+    sed -i 's/hash_workspace=verified/hash_workspace=failed/' "$tmp/bad-workspace-boot1"
+    sed \
+        -e 's#boot1_serial_path=.*#boot1_serial_path='"$tmp/bad-workspace-boot1"'#' \
+        -e 's#boot1_serial_sha256=.*#boot1_serial_sha256='"$(hash "$tmp/bad-workspace-boot1")"'#' \
+        -e 's#target_credential_zeroization_boot1_sha256=.*#target_credential_zeroization_boot1_sha256='"$(printf '%s\n' forged-workspace | sha256sum | awk '{print $1}')"'#' \
+        "$receipt" > "$tmp/bad-workspace.env"
+    openssl dgst -sha256 -sign "$tmp/key.pem" -out "$tmp/bad-workspace.sig" "$tmp/bad-workspace.env"
+    if (validate_receipt arm64 "$tmp/bad-workspace.env" "$tmp/bad-workspace.sig" "$tmp/trust.pem" "$tmp/policy.env" fixture) >/dev/null 2>&1; then
+        fail "selftest-accepted-unzeroized-hash-workspace"
+    fi
+    printf 'PASS simpleos-filesystem-servers-qemu-selftest checked=10\n'
 }
 
 case "${1:-}" in

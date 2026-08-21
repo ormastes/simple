@@ -9,6 +9,7 @@ val POSITIONED_DRIVER_MAX_BYTES: u64 = 0x7fffffffu64
 val MOUNT_TABLE_MAX_PATH_BYTES: i64 = 4096
 
 enum PositionedDriverKind:
+    Auto
     Fat32
     Nvfs
     Dbfs
@@ -58,6 +59,9 @@ fn _positioned_prefix(buf: [u8], count: i64) -> [u8]:
 fn driver_positioned_read_bytes(driver: DriverInstance, kind: PositionedDriverKind,
                                 handle: FileHandle, offset: i64, length: i64) -> Result<[u8], FsError>:
     match kind:
+        case PositionedDriverKind.Auto:
+            driver_positioned_read_bytes(
+                driver, driver_positioned_kind(driver)?, handle, offset, length)
         case PositionedDriverKind.Fat32:
             match driver:
                 case DriverInstance.Fat32(d):
@@ -87,6 +91,9 @@ fn driver_positioned_read_bytes(driver: DriverInstance, kind: PositionedDriverKi
 fn driver_positioned_write_bytes(driver: DriverInstance, kind: PositionedDriverKind,
                                  handle: FileHandle, offset: i64, data: [u8]) -> Result<i64, FsError>:
     match kind:
+        case PositionedDriverKind.Auto:
+            driver_positioned_write_bytes(
+                driver, driver_positioned_kind(driver)?, handle, offset, data)
         case PositionedDriverKind.Fat32:
             match driver:
                 case DriverInstance.Fat32(d): d.pwrite(handle, offset, data)
@@ -101,7 +108,17 @@ fn driver_positioned_write_bytes(driver: DriverInstance, kind: PositionedDriverK
                 case DriverInstance.DbFs(d): d.pwrite_bytes_handle(handle, offset, data)
                 case _: Err(FsError.Unsupported)
 
+fn driver_positioned_kind(driver: DriverInstance) -> Result<PositionedDriverKind, FsError>:
+    """Derive the positioned-I/O route from the binding's recorded mount."""
+    match driver:
+        case DriverInstance.Fat32(_): Ok(PositionedDriverKind.Fat32)
+        case DriverInstance.Nvfs(_): Ok(PositionedDriverKind.Nvfs)
+        case DriverInstance.NvfsPosix(_): Ok(PositionedDriverKind.Nvfs)
+        case DriverInstance.DbFs(_): Ok(PositionedDriverKind.Dbfs)
+        case _: Err(FsError.Unsupported)
+
 export PositionedDriverKind, POSITIONED_DRIVER_MAX_BYTES
 export mount_handle_encode, mount_handle_slot, mount_handle_generation
 export mount_path_canonical, text_has_mount_prefix
 export driver_positioned_read_bytes, driver_positioned_write_bytes
+export driver_positioned_kind

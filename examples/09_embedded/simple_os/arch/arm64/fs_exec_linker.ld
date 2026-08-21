@@ -10,7 +10,9 @@ OUTPUT_FORMAT("elf64-littleaarch64")
 ENTRY(_start)
 
 MEMORY {
-    RAM (rwx) : ORIGIN = 0x40200000, LENGTH = 254M
+    /* The canonical fs-exec descriptor provisions 384 MiB from 0x40000000.
+     * The first 2 MiB remain reserved for QEMU's generated DTB/firmware data. */
+    RAM (rwx) : ORIGIN = 0x40200000, LENGTH = 382M
 }
 
 SECTIONS {

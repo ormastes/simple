@@ -7,16 +7,20 @@ cd "$ROOT_DIR"
 
 OBJECT_DIR="${1:-.simple/native-objects-jWARot}"
 RUNTIME_ARCHIVE="${2:-build/os/simple-core-simpleos-aarch64/libsimple_runtime.a}"
+FINAL_ELF="${3:-build/os/arm64_servers/servers.elf}"
 NM="${NM:-llvm-nm}"
 LD="${LD:-ld.lld}"
+CC="${CC:-clang}"
 
 for path in "$OBJECT_DIR/mod_27.o" "$OBJECT_DIR/mod_47.o" "$RUNTIME_ARCHIVE"; do
     [ -s "$path" ] || { echo "FAIL missing=$path" >&2; exit 1; }
 done
 
-for symbol in rt_array_enumerate rt_unwrap_or_trap; do
-    "$NM" -g --defined-only "$RUNTIME_ARCHIVE" | awk '{print $3}' | grep -qx "$symbol" || {
-        echo "FAIL archive_missing=$symbol" >&2
+SYMBOLS='rt_array_enumerate rt_unwrap_or_trap rt_array_data_ptr rt_array_set_len_known'
+for symbol in $SYMBOLS; do
+    count=$("$NM" -g --defined-only "$RUNTIME_ARCHIVE" | awk -v wanted="$symbol" '$3 == wanted { count++ } END { print count + 0 }')
+    [ "$count" -eq 1 ] || {
+        echo "FAIL archive_owner_count=$symbol:$count" >&2
         exit 1
     }
     if grep -q "$symbol" "$OBJECT_DIR/_stubs_freestanding.c"; then
@@ -38,4 +42,60 @@ for symbol in rt_array_enumerate rt_unwrap_or_trap; do
     fi
 done
 
-echo "PASS target=aarch64-unknown-simpleos retained_objects=$OBJECT_DIR runtime=$RUNTIME_ARCHIVE symbols=rt_array_enumerate,rt_unwrap_or_trap"
+# Force archive extraction for the two credential-owner calls. This proves the
+# generic ABI names used by `[u8]` resolve; accepting only the `_text` aliases
+# would leave the filesystem server unlinked.
+cat > "$TMP_DIR/credential-owner-reference.S" <<'EOF'
+.section .data.runtime_contract,"aw"
+.global simpleos_credential_runtime_contract
+simpleos_credential_runtime_contract:
+    .xword rt_array_data_ptr
+    .xword rt_array_set_len_known
+EOF
+"$CC" -target aarch64-unknown-none-elf -c \
+    "$TMP_DIR/credential-owner-reference.S" -o "$TMP_DIR/credential-owner-reference.o"
+"$LD" -r "$TMP_DIR/credential-owner-reference.o" "$RUNTIME_ARCHIVE" \
+    -o "$TMP_DIR/credential-owner-link.o"
+for symbol in rt_array_data_ptr rt_array_set_len_known; do
+    count=$("$NM" -g --defined-only "$TMP_DIR/credential-owner-link.o" |
+        awk -v wanted="$symbol" '$3 == wanted { count++ } END { print count + 0 }')
+    [ "$count" -eq 1 ] || {
+        echo "FAIL linked_owner_count=$symbol:$count" >&2
+        exit 1
+    }
+    "$NM" -u "$TMP_DIR/credential-owner-link.o" | awk '{print $2}' | grep -qx "$symbol" && {
+        echo "FAIL unresolved_after_archive=$symbol" >&2
+        exit 1
+    }
+done
+
+# The compiler lowers Array.data_ptr()/set_len_known() intrinsically in the
+# actual payload, so those fallback archive members need not be extracted.
+# When a retained final image is available, require the facade-owned secure
+# wipe and hash entrypoints plus their volatile target primitives instead.
+if [ -s "$FINAL_ELF" ]; then
+    for symbol in \
+        lib__common__crypto__secure_memory__secure_zero_u8_slots \
+        lib__common__crypto__secure_memory__secure_zero_i64_slots \
+        lib__common__crypto__sha256__sha256_u8_hex_zeroizing \
+        rt_volatile_read_u8 rt_volatile_write_u8 \
+        rt_volatile_read_u64 rt_volatile_write_u64 rt_memory_barrier; do
+        count=$("$NM" -g --defined-only "$FINAL_ELF" |
+            awk -v wanted="$symbol" '$3 == wanted { count++ } END { print count + 0 }')
+        [ "$count" -eq 1 ] || {
+            echo "FAIL final_owner_count=$symbol:$count image=$FINAL_ELF" >&2
+            exit 1
+        }
+    done
+    unresolved=$("$NM" -u "$FINAL_ELF" 2>/dev/null || true)
+    for symbol in rt_array_data_ptr rt_array_set_len_known \
+                  rt_volatile_read_u8 rt_volatile_write_u8 \
+                  rt_volatile_read_u64 rt_volatile_write_u64 rt_memory_barrier; do
+        printf '%s\n' "$unresolved" | awk '{print $2}' | grep -qx "$symbol" && {
+            echo "FAIL final_unresolved=$symbol image=$FINAL_ELF" >&2
+            exit 1
+        }
+    done
+fi
+
+echo "PASS target=aarch64-unknown-simpleos retained_objects=$OBJECT_DIR runtime=$RUNTIME_ARCHIVE final=$FINAL_ELF symbols=rt_array_enumerate,rt_unwrap_or_trap,secure-zeroization"

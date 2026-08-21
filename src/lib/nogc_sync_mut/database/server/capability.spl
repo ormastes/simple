@@ -7,7 +7,7 @@
 # The check is a pure function of (capability, table, op) — no I/O, no store
 # access — so it is trivially testable and cannot be raced.
 
-use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex_zeroizing}
 
 val UNKNOWN_PRINCIPAL_DIGEST: text = sha256_text("db-server-unknown-principal")
 
@@ -110,7 +110,7 @@ class CapabilityTable:
         digests[capability.principal] = sha256_text(credential)
         self.credential_digests = digests
 
-    me register_authenticated_bytes(capability: DbCapability, credential: [u8]):
+    me register_authenticated_bytes(capability: DbCapability, credential: [u8]) -> bool:
         """Register a capability from credential BYTES the caller still owns.
 
         Identical policy to `register_authenticated`, but the secret never
@@ -129,11 +129,15 @@ class CapabilityTable:
         after this returns; nothing here retains it.
         """
         if credential.len() == 0u64:
-            return
+            return false
+        val digest = sha256_u8_hex_zeroizing(credential)
+        if not digest.?:
+            return false
         self.register(capability)
         var digests = self.credential_digests
-        digests[capability.principal] = sha256_u8_hex(credential)
+        digests[capability.principal] = digest.unwrap()
         self.credential_digests = digests
+        true
 
     fn authenticate_principal(principal: text, candidate: text) -> AuthenticatedPrincipal?:
         """Hash then compare exactly 64 digest characters for every attempt."""

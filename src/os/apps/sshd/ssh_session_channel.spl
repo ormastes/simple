@@ -286,7 +286,7 @@ impl SshSession:
                     rt_thread_sleep(5)
                     continue
                 serial_println("[sshd-session] interactive-inline empty payload closing recv_buf_len={self.recv_buf.len()} seq_c2s={self.cipher.seq_c2s} recv_seq={self.recv_seq}")
-                self.state = SshSessionState.Closed
+                self.transition_closed()
                 return
 
             val msg_type = _u8_at(payload, 0)
@@ -301,14 +301,14 @@ impl SshSession:
                     val recipient = _read_u32_stable(payload, 1u64)
                     val adjustment = _read_u32_stable(payload, 5u64)
                     if not self.channels.adjust_remote_window(recipient, adjustment):
-                        self.state = SshSessionState.Closed
+                        self.transition_closed()
                         return
                 continue
             elif msg_type == 96:
                 # Peer EOF is half-close notification; retain the channel
                 # until an explicit SSH_MSG_CHANNEL_CLOSE arrives.
                 if payload.len() < 5u64 or not self.channels.mark_peer_eof(_read_u32_stable(payload, 1u64)):
-                    self.state = SshSessionState.Closed
+                    self.transition_closed()
                     return
                 continue
             elif msg_type == 97:
@@ -316,7 +316,7 @@ impl SshSession:
             elif msg_type == 98:
                 self._handle_channel_request(payload)
             elif msg_type == SSH_MSG_DISCONNECT:
-                self.state = SshSessionState.Closed
+                self.transition_closed()
                 return
             elif msg_type == SSH_MSG_IGNORE:
                 # RFC 4253 defines IGNORE as intentionally response-free.
@@ -328,7 +328,7 @@ impl SshSession:
                 serial_println("[sshd-session] interactive-inline ignore msg_type=0x{format_hex(msg_type.to_i64())}")
 
         serial_println("[sshd-session] interactive-inline iteration limit closing")
-        self.state = SshSessionState.Closed
+        self.transition_closed()
 
     me _handle_channel_open(payload: [u8]):
         serial_println("[sshd-session] inline channel_open len={payload.len()}")
@@ -469,7 +469,7 @@ impl SshSession:
             self.pending_ring3_exec_local_id = local_id
             self.pending_ring3_exec = true
             self.pending_ring3_exec_command = command
-            self.state = SshSessionState.Closed
+            self.transition_closed()
             return
 
         # Phase 2e Inc 1/2: a command beginning with 'c' (e.g. `ssh ... clang
@@ -490,7 +490,7 @@ impl SshSession:
             self.pending_ring3_exec_local_id = local_id
             self.pending_ring3_exec = true
             self.pending_ring3_exec_command = command
-            self.state = SshSessionState.Closed
+            self.transition_closed()
             return
 
         # Phase 2e Inc 3 (getfile): `ssh root@host getfile /path` returns the raw
@@ -563,7 +563,7 @@ impl SshSession:
         self.pending_ring3_exec_local_id = local_id
         self.pending_ring3_exec = true
         self.pending_ring3_exec_command = command
-        self.state = SshSessionState.Closed
+        self.transition_closed()
 
     me _handle_channel_data(payload: [u8]):
         if self.sftp_enabled and not ssh_sftp_principal_admitted(
@@ -572,6 +572,7 @@ impl SshSession:
         ):
             # Authentication state is authoritative.  If it is absent or was
             # revoked, tear down the subsystem before parsing any attacker data.
+            self.sftp.close_all()
             self.sftp = SftpSessionV3.new()
             self.sftp_enabled = false
             self.sftp_local_channel_id = SSH_INVALID_CHANNEL_ID
@@ -588,7 +589,7 @@ impl SshSession:
         if self.sftp_enabled and recipient == self.sftp_local_channel_id:
             val channel = self.channels.find(recipient)
             if channel == nil:
-                self.state = SshSessionState.Closed
+                self.transition_closed()
                 return
             var response = self.sftp.handle_packet(data)
             # Drain every complete coalesced frame already admitted by the
@@ -596,10 +597,10 @@ impl SshSession:
             # request, so work remains linear in the received bytes.
             while response.len() > 0:
                 if response.len() > channel.remote_max_packet.to_u64():
-                    self.state = SshSessionState.Closed
+                    self.transition_closed()
                     return
                 if not self.channels.consume_remote_window(recipient, response.len().to_u32()):
-                    self.state = SshSessionState.Closed
+                    self.transition_closed()
                     return
                 self.send_packet(_build_channel_data_stable(channel.remote_id, response))
                 response = self.sftp.handle_packet([])
@@ -614,7 +615,7 @@ impl SshSession:
             return
         if val shell = self.shell:
             if not shell.feed_remote_input(rt_string_from_byte_array(data)):
-                self.state = SshSessionState.Closed
+                self.transition_closed()
             self._forward_shell_output()
 
     me _scp_step(payload: [u8]):
@@ -669,9 +670,10 @@ impl SshSession:
         val recipient = _read_u32_stable(payload, 1)
         val channel = self.channels.find(recipient)
         if channel == nil:
-            self.state = SshSessionState.Closed
+            self.transition_closed()
             return
         if self.sftp_enabled and recipient == self.sftp_local_channel_id:
+            self.sftp.close_all()
             self.sftp = SftpSessionV3.new()
             self.sftp_enabled = false
             self.sftp_local_channel_id = SSH_INVALID_CHANNEL_ID
@@ -680,7 +682,7 @@ impl SshSession:
         self.channels.close(recipient)
         self.channels.remove_closed()
         if self.channels.channels.len() == 0:
-            self.state = SshSessionState.Closed
+            self.transition_closed()
 
     me _mark_channel_shell(local_id: u32):
         var i: u64 = 0
@@ -714,7 +716,7 @@ impl SshSession:
         self.channels.close(local_id)
         self.channels.remove_closed()
         if self.channels.channels.len() == 0:
-            self.state = SshSessionState.Closed
+            self.transition_closed()
 
     me _send_deferred_ring3_exec_response():
         """Send the real exit status for a deferred ring-3 execution after the spawn completes.

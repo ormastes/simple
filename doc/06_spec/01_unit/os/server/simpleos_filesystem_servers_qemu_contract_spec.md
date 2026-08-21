@@ -13,6 +13,9 @@ QEMU gate; it does not itself claim a live guest pass.
   surviving reboot, and hashes binding artifacts and transcripts.
 - Reject aliased evidence files so one receipt cannot impersonate several
   architecture runs.
+- Require verified target credential zeroization for every architecture and
+  bind the first- and second-boot zeroization receipts by nonzero SHA-256.
+- Reject residual credential bytes, uncleared digest workspaces, unverified
+  target cleanup, and host-only destruction of a credential-bearing image.
 
 Production gate: `scripts/check/check-simpleos-filesystem-servers-qemu.shs`.
-

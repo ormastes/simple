@@ -3,16 +3,32 @@ use std.spec.*
 extern fn rt_file_read_text(path: text) -> text
 
 val WRAPPER = "scripts/check/check-simpleos-wm-fullscreen-evidence.shs"
+val WRAPPER_RETENTION = "scripts/check/lib/simpleos-wm-fullscreen/retention.shs"
+val WRAPPER_ADMISSION = "scripts/check/lib/simpleos-wm-fullscreen/admission.shs"
+val WRAPPER_BUILD = "scripts/check/lib/simpleos-wm-fullscreen/build.shs"
+val WRAPPER_RUNTIME = "scripts/check/lib/simpleos-wm-fullscreen/runtime.shs"
+val WRAPPER_REPORT = "scripts/check/lib/simpleos-wm-fullscreen/report.shs"
 val GUEST_ENTRY = "examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl"
 val NATIVE_FONT_EVIDENCE = "test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl"
 val GUEST_COMPOSITOR = "src/os/compositor/compositor.spl"
 val GUEST_SHELL = "src/os/desktop/shell.spl"
 
+fn _wrapper_source() -> text:
+    rt_file_read_text(WRAPPER) +
+        rt_file_read_text(WRAPPER_RETENTION) +
+        rt_file_read_text(WRAPPER_ADMISSION) +
+        rt_file_read_text(WRAPPER_BUILD) +
+        rt_file_read_text(WRAPPER_RUNTIME) +
+        rt_file_read_text(WRAPPER_REPORT)
+
 describe "SimpleOS WM QEMU evidence wrapper contract":
     it "hashes every executable artifact and rechecks it before pass":
-        val src = rt_file_read_text(WRAPPER)
+        val src = _wrapper_source()
         expect(src).to_contain("simpleos_wm_fullscreen_wrapper=$WRAPPER")
         expect(src).to_contain("simpleos_wm_fullscreen_wrapper_sha256=$WRAPPER_SHA256")
+        expect(src).to_contain("simpleos_wm_fullscreen_wrapper_bundle_sha256=$WRAPPER_BUNDLE_SHA256")
+        expect(src).to_contain("wrapper_bundle_sha256=$WRAPPER_BUNDLE_SHA256")
+        expect(src).to_contain("wrapper_bundle_sha256_now=\"$(wrapper_bundle_sha256 || true)\"")
         expect(src).to_contain("simpleos_wm_fullscreen_kernel=$KERNEL_OUTPUT")
         expect(src).to_contain("simpleos_wm_fullscreen_kernel_sha256=$KERNEL_SHA256")
         expect(src).to_contain("simpleos_wm_fullscreen_disk_image=$DISK_IMAGE")
@@ -27,12 +43,12 @@ describe "SimpleOS WM QEMU evidence wrapper contract":
         expect(src).to_contain("reason=artifact-sha256-mismatch")
 
     it "invalidates a cached kernel when any owned source dependency changes":
-        val src = rt_file_read_text(WRAPPER)
+        val src = _wrapper_source()
         expect(src).to_contain("find src/os src/lib build/os/generated examples/09_embedded/simple_os/arch/x86_64")
         expect(src).to_contain("-newer \"$KERNEL_OUTPUT\"")
 
     it "derives pmem capture geometry from validated guest scanout metadata":
-        val src = rt_file_read_text(WRAPPER)
+        val src = _wrapper_source()
         expect(src).to_contain("marker_line \"$SERIAL_LOG\" \"[scanout-evidence]\"")
         expect(src).to_contain("scanout_size=$((scanout_stride * scanout_height))")
         expect(src).to_contain("scanout_end=$((scanout_address + scanout_size))")
@@ -43,7 +59,7 @@ describe "SimpleOS WM QEMU evidence wrapper contract":
         expect(src.contains("P6\\n1024 768")).to_be(false)
 
     it "should require the cross-verified canonical taskbar clock DrawIR crop":
-        val src = rt_file_read_text(WRAPPER)
+        val src = _wrapper_source()
         val guest = rt_file_read_text(GUEST_ENTRY)
         val native = rt_file_read_text(NATIVE_FONT_EVIDENCE)
         val expected_hash = "addf76edf6d23ca9bea6d698ca1d30bc4bd8dd684bb50ff3158ef755bd2854fc"
@@ -62,7 +78,7 @@ describe "SimpleOS WM QEMU evidence wrapper contract":
         expect(guest.contains("engine.draw_text(64, 64")).to_be(false)
 
     it "injects emulated input and maps host nonce to guest sequence evidence":
-        val src = rt_file_read_text(WRAPPER)
+        val src = _wrapper_source()
         expect(src).to_contain("\"execute\":\"input-send-event\"")
         expect(src).to_contain("data\":\"f11\"")
         expect(src).to_contain("\"type\":\"rel\"")
@@ -78,7 +94,7 @@ describe "SimpleOS WM QEMU evidence wrapper contract":
         expect(src.contains("marker_line \"$SERIAL_LOG\" \"[wm-demo] fullscreen-exit\"")).to_be(false)
 
     it "fails closed on QMP input capture and metadata errors":
-        val src = rt_file_read_text(WRAPPER)
+        val src = _wrapper_source()
         expect(src).to_contain("dynamic-scanout-metadata-invalid")
         expect(src).to_contain("dynamic-scanout-bounds-or-byte-pitch-invalid")
         expect(src).to_contain("dynamic-scanout-address-range-invalid")
@@ -86,13 +102,13 @@ describe "SimpleOS WM QEMU evidence wrapper contract":
         expect(src).to_contain("if \"error\" in reply")
 
     it "distinguishes a self-hosted compiler crash from an ordinary build rejection":
-        val src = rt_file_read_text(WRAPPER)
+        val src = _wrapper_source()
         expect(src).to_contain("if [ \"$build_code\" -eq 124 ] or [ \"$build_code\" -eq 137 ]")
         expect(src).to_contain("elif [ \"$build_code\" -eq 139 ]; then")
         expect(src).to_contain("KERNEL_BUILD_STATUS=compiler-crash-signal-11-cache-preserved")
 
     it "loads the OVMF video modules before GRUB hands off to the kernel":
-        val src = rt_file_read_text(WRAPPER)
+        val src = _wrapper_source()
         expect(src).to_contain("insmod efi_gop")
         expect(src).to_contain("insmod all_video")
         expect(src).to_contain("set gfxpayload=text")
@@ -111,7 +127,7 @@ describe "SimpleOS WM QEMU evidence wrapper contract":
         expect(shell).to_contain("[wm-frame] input_seq=")
 
     it "routes AUX pointer packets through the shared guest sequence and frame owner":
-        val wrapper = rt_file_read_text(WRAPPER)
+        val wrapper = _wrapper_source()
         val compositor = rt_file_read_text(GUEST_COMPOSITOR)
         val shell = rt_file_read_text(GUEST_SHELL)
         expect(compositor).to_contain("if ((status as i32) & 0x20) != 0:")
@@ -129,7 +145,7 @@ describe "SimpleOS WM QEMU evidence wrapper contract":
         expect(wrapper).to_contain("simpleos_wm_fullscreen_pointer_release_input_seq=")
 
     it "rejects a one-byte corrupt copy through the production font crop oracle":
-        val wrapper = rt_file_read_text(WRAPPER)
+        val wrapper = _wrapper_source()
         expect(wrapper).to_contain("corrupt_region[0] ^= 1")
         expect(wrapper).to_contain("font_region_oracle_status()")
         expect(wrapper).to_contain("font_region_corrupt_copy_bytes")

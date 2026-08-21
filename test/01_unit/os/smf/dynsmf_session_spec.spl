@@ -8,17 +8,18 @@ Verifies selected low_dependency_ui_dynsmf session behavior for the requested
 stdlib-like dynSMF libraries. The spec covers manifest declaration, build-plan
 generation, artifact-readiness validation, argument/environment policy parsing,
 session-scoped autoload evidence, unload, stale symbol lookup, and reload
-generation changes.
+generation changes. Checked loading captures each artifact once, validates that
+snapshot, and opens the same bytes without reopening the mutable path.
 
 ## Examples
 
 The default manifest declares all requested stdlib-like dynSMF ids as
 precompiled SMF artifacts and autoloads enabled entries by default. A disabled
 policy records skip evidence, and an unloaded session reports stale symbol
-evidence until the library is loaded again. Checked sessions use
-`smf_dlopen_checked`, `smf_dlsym`, and `smf_dlclose` so the evidence proves the
-dynSMF path instead of a separate fake loader. Checked load validates missing,
-short, and invalid SMF artifacts before accepting a handle.
+evidence until the library is loaded again. Checked sessions use the
+single-read snapshot open, `smf_dlsym`, and `smf_dlclose` so the evidence proves
+the dynSMF path instead of a separate fake loader. Checked load validates
+missing, short, and invalid SMF artifacts before accepting a handle.
 
 **Requirements:** doc/02_requirements/feature/low_dependency_ui_dynsmf.md
 **Requirements:** doc/02_requirements/nfr/low_dependency_ui_dynsmf.md
@@ -29,8 +30,9 @@ short, and invalid SMF artifacts before accepting a handle.
 """
 
 use std.spec
-use app.io.mod.{file_write, file_delete}
+use app.io.mod.{file_write, file_delete, file_read_text}
 use std.common.string_core.{char_code}
+use os.smf.smf_dynlib.{DynLoadRequest}
 use os.smf.dynsmf_session.{
     DynSmfManifestEntry,
     DynSmfArtifactStatus,
@@ -38,6 +40,7 @@ use os.smf.dynsmf_session.{
     dynsmf_manifest_all_precompiled,
     dynsmf_artifact_status_from_bytes,
     dynsmf_artifact_status_with_hash,
+    dynsmf_open_captured_bytes,
     dynsmf_srchash_path,
     dynsmf_source_hash_current,
     dynsmf_abi_path,
@@ -100,6 +103,38 @@ fn spec_stub_honesty_witness_bytes(exports: [text]) -> [u8]:
     data
 
 describe "dynSMF manifest":
+    it "opens the one validated byte snapshot even if the path backing changes later":
+        val entry = DynSmfManifestEntry(id: "snapshot", path: "build/dynsmf/snapshot.smf", source_module: "test.snapshot", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: false, exports: [])
+        val captured = spec_stub_honesty_padded_bytes()
+
+        # Represents an attacker replacing/truncating the pathname after the
+        # capture. Checked open must consume captured, never this later view.
+        val replaced: [u8] = [0, 0, 0, 0]
+        val replaced_status = dynsmf_artifact_status_from_bytes(entry, true, replaced)
+        val request = DynLoadRequest.lazy(entry.id, entry.path, "snapshot-test")
+
+        file_write(dynsmf_abi_path(entry.path), entry.abi_version)
+        val opened = dynsmf_open_captured_bytes(entry, request, 41, true, captured)
+        val replaced_open = dynsmf_open_captured_bytes(entry, request, 42, true, replaced)
+        file_delete(dynsmf_abi_path(entry.path))
+        expect(opened.success).to_equal(true)
+        expect(opened.handle_id).to_equal(41)
+        expect(replaced_status.ready).to_equal(false)
+        expect(replaced_open.success).to_equal(false)
+
+    it "rejects a forged snapshot path without reopening files":
+        val entry = DynSmfManifestEntry(id: "snapshot", path: "build/dynsmf/snapshot.smf", source_module: "test.snapshot", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: false, exports: [])
+        val captured: [u8] = [83, 77, 70, 0]
+        val request = DynLoadRequest.lazy(entry.id, "build/dynsmf/other.smf", "snapshot-test")
+        expect(dynsmf_open_captured_bytes(entry, request, 43, true, captured).error_msg).to_equal("artifact snapshot path mismatch")
+
+    it "keeps checked session loading to one artifact read and a byte-consuming open":
+        val capture_source = file_read_text("src/os/smf/dynsmf_snapshot.spl") ?? ""
+        val session_source = file_read_text("src/os/smf/dynsmf_session.spl") ?? ""
+        expect(capture_source.split("rt_file_read_bytes(path)").len() - 1).to_equal(1)
+        expect(session_source.contains("smf_dlopen_checked")).to_equal(false)
+        expect(session_source.contains("smf_dlopen_bytes(req, next_handle, snapshot.data)")).to_equal(true)
+
     it "declares all requested stdlib-like library ids":
         val manifest = dynsmf_default_manifest()
         expect(manifest[0].id).to_equal("file_io")

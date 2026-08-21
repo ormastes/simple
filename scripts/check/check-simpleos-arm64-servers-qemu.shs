@@ -9,6 +9,7 @@ set -eu
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 cd "$ROOT_DIR"
 . scripts/check/lib/qemu-frozen-source-admission.shs
+. scripts/check/lib/simpleos-server-zeroization-evidence.shs
 
 OUT_DIR=${SIMPLEOS_ARM64_SERVERS_QEMU_OUT:-build/test-artifacts/simpleos-arm64-servers-qemu}
 case "$OUT_DIR" in build/test-artifacts/*) ;; *) fail_early=1 ;; esac
@@ -66,10 +67,11 @@ TRUST_KEY_SHA=$(receipt_field trusted_key_sha256 "$TRUST_POLICY") || fail "trust
 [ -n "$COMPILER_ADMISSION" ] || fail "SIMPLEOS_ARM64_SERVERS_COMPILER_ADMISSION_RECEIPT is required"
 [ -f "$COMPILER_ADMISSION" ] && [ ! -L "$COMPILER_ADMISSION" ] || fail "compiler admission receipt must be a regular non-symlink file"
 CURRENT_REVISION=$(git rev-parse HEAD)
-SOURCE_MANIFEST_ROOTS='src/compiler|src/lib|src/os|examples/09_embedded/simple_os|scripts/check/check-simpleos-arm64-servers-qemu.shs|scripts/check/simpleos-arm64-server-cap-status.spl|scripts/os/build_arm64_servers_payload.shs|scripts/os/make_os_disk.shs|scripts/os/make_os_disk.c|scripts/os/make_os_disk_support.inc.c|config/simpleos_arm64_servers_weak_undefined_allowlist.sdn'
+SOURCE_MANIFEST_ROOTS='src/compiler|src/lib|src/os|examples/09_embedded/simple_os|scripts/check/check-simpleos-arm64-servers-qemu.shs|scripts/check/lib/simpleos-server-zeroization-evidence.shs|scripts/check/simpleos-arm64-server-cap-status.spl|scripts/os/build_arm64_servers_payload.shs|scripts/os/make_os_disk.shs|scripts/os/make_os_disk.c|scripts/os/make_os_disk_support.inc.c|config/simpleos_arm64_servers_weak_undefined_allowlist.sdn'
 qemu_admission_source_snapshot \
     src/compiler src/lib src/os examples/09_embedded/simple_os \
     scripts/check/check-simpleos-arm64-servers-qemu.shs \
+    scripts/check/lib/simpleos-server-zeroization-evidence.shs \
     scripts/check/simpleos-arm64-server-cap-status.spl \
     scripts/os/build_arm64_servers_payload.shs \
     scripts/os/make_os_disk.shs scripts/os/make_os_disk.c scripts/os/make_os_disk_support.inc.c \
@@ -122,7 +124,13 @@ UNDEFINED_WEAK=$(nm -u "$SERVER_ELF" 2>/dev/null | awk '$1 == "w" || $1 == "v" {
 for weak_symbol in $UNDEFINED_WEAK; do
     grep -Fqx "$weak_symbol" "$WEAK_ALLOWLIST" || fail "unreviewed undefined weak symbol: $weak_symbol"
 done
-for required_provider in rt_file_create_excl rt_file_sync rt_simpleos_file_atomic_caps rt_time_now_unix_micros rt_sleep_ms rt_process_is_running; do
+for required_provider in rt_file_create_excl rt_file_sync rt_simpleos_file_atomic_caps \
+    rt_time_now_unix_micros rt_sleep_ms rt_process_is_running \
+    lib__common__crypto__secure_memory__secure_zero_u8_slots \
+    lib__common__crypto__secure_memory__secure_zero_i64_slots \
+    lib__common__crypto__sha256__sha256_u8_hex_zeroizing \
+    rt_volatile_read_u8 rt_volatile_write_u8 \
+    rt_volatile_read_u64 rt_volatile_write_u64 rt_memory_barrier; do
     nm "$SERVER_ELF" 2>/dev/null | awk -v symbol="$required_provider" '$2 ~ /^[TDBR]$/ && $3 == symbol { found=1 } END { exit(found ? 0 : 1) }' \
         || fail "SERVERS.ELF lacks strong target runtime provider: $required_provider"
 done
@@ -212,7 +220,11 @@ wait_ready() {
     serial=$1
     deadline=$(( $(date +%s) + BOOT_TIMEOUT ))
     while [ "$(date +%s)" -lt "$deadline" ]; do
-        grep -Fq '[arm64-servers-user] http=:8080 db=:5433 ready=ok' "$serial" 2>/dev/null && return 0
+        if grep -Fq '[arm64-servers-user] http=:8080 db=:5433 ready=ok' "$serial" 2>/dev/null; then
+            simpleos_server_zeroization_canonical "$serial" >/dev/null ||
+                fail "target credential zeroization evidence missing or invalid: $serial"
+            return 0
+        fi
         kill -0 "$QEMU_PID" 2>/dev/null || return 1
         sleep 1
     done
@@ -394,6 +406,7 @@ CRASH_MANIFEST_SHA=$(sha256_file "$CRASH_MANIFEST")
 qemu_admission_source_snapshot \
     src/compiler src/lib src/os examples/09_embedded/simple_os \
     scripts/check/check-simpleos-arm64-servers-qemu.shs \
+    scripts/check/lib/simpleos-server-zeroization-evidence.shs \
     scripts/check/simpleos-arm64-server-cap-status.spl \
     scripts/os/build_arm64_servers_payload.shs \
     scripts/os/make_os_disk.shs scripts/os/make_os_disk.c scripts/os/make_os_disk_support.inc.c \
@@ -410,6 +423,10 @@ DB_COMMIT_SHA=$(sha256_file "$OUT_DIR/db.commit")
 DB_REBOOT_SHA=$(sha256_file "$OUT_DIR/db.read.boot2")
 SERIAL1_SHA=$(sha256_file "$SERIAL1")
 SERIAL2_SHA=$(sha256_file "$SERIAL2")
+ZEROIZATION1_SHA=$(simpleos_server_zeroization_canonical "$SERIAL1" | sha256sum | awk '{print $1}') \
+    || fail "boot 1 target credential zeroization canonicalization failed"
+ZEROIZATION2_SHA=$(simpleos_server_zeroization_canonical "$SERIAL2" | sha256sum | awk '{print $1}') \
+    || fail "boot 2 target credential zeroization canonicalization failed"
 COMMAND_SHA=$(printf '%s' 'scripts/check/check-simpleos-arm64-servers-qemu.shs qemu-arm64-cpu' | sha256sum | awk '{print $1}')
 
 cat > "$RECEIPT" <<EOF
@@ -471,7 +488,10 @@ credential_bytes_retained=false
 credential_image_sensitive=true
 credential_image_ephemeral=true
 credential_image_destroyed_after_run=true
-target_credential_zeroization=unverified
+target_credential_zeroization=verified
+target_credential_zeroization_method=volatile-u8-exact-byte-readback-v1
+target_credential_zeroization_boot1_sha256=$ZEROIZATION1_SHA
+target_credential_zeroization_boot2_sha256=$ZEROIZATION2_SHA
 command=scripts/check/check-simpleos-arm64-servers-qemu.shs qemu-arm64-cpu
 EOF
 chmod 600 "$RECEIPT"

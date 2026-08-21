@@ -1,0 +1,83 @@
+# HTTP/2 request field-section validation — RFC 9113 sections 8.2-8.3.
+
+use std.common.hpack.encoder.{HpackHeader}
+
+val H2_MAX_HEADER_LIST_BYTES: i64 = 65536
+
+class H2RequestHeaderValidation:
+    valid: bool
+    reason: text
+
+fn _h2_is_lower_token_char(c: i64) -> bool:
+    if c >= 97 and c <= 122: return true
+    if c >= 48 and c <= 57: return true
+    c == 33 or c == 35 or c == 36 or c == 37 or c == 38 or c == 39 or c == 42 or c == 43 or c == 45 or c == 46 or c == 94 or c == 95 or c == 96 or c == 124 or c == 126
+
+pub fn h2_validate_request_headers(headers: [HpackHeader]) -> H2RequestHeaderValidation:
+    var saw_regular = false
+    var saw_method = false
+    var saw_scheme = false
+    var saw_path = false
+    var saw_authority = false
+    var method = ""
+    var header_list_size: i64 = 0
+    var i = 0
+    while i < headers.len():
+        val h = headers[i]
+        header_list_size = header_list_size + h.name.len() + h.value.len() + 32
+        if header_list_size > H2_MAX_HEADER_LIST_BYTES:
+            return H2RequestHeaderValidation(valid: false, reason: "header list exceeds connection limit")
+        if h.name.len() == 0:
+            return H2RequestHeaderValidation(valid: false, reason: "empty header name")
+        var ni = 0
+        while ni < h.name.len():
+            val c = h.name.byte_at(ni)
+            if not (ni == 0 and c == 58) and not _h2_is_lower_token_char(c):
+                return H2RequestHeaderValidation(valid: false, reason: "invalid or uppercase header name")
+            ni = ni + 1
+        var vi = 0
+        while vi < h.value.len():
+            val c = h.value.byte_at(vi)
+            if c == 0 or c == 10 or c == 13:
+                return H2RequestHeaderValidation(valid: false, reason: "invalid header value byte")
+            vi = vi + 1
+        val pseudo = h.name.byte_at(0) == 58
+        if pseudo:
+            if saw_regular:
+                return H2RequestHeaderValidation(valid: false, reason: "pseudo-header after regular header")
+            if h.name == ":method":
+                if saw_method: return H2RequestHeaderValidation(valid: false, reason: "duplicate :method")
+                if h.value.len() == 0: return H2RequestHeaderValidation(valid: false, reason: "empty :method")
+                saw_method = true
+                method = h.value
+            elif h.name == ":scheme":
+                if saw_scheme: return H2RequestHeaderValidation(valid: false, reason: "duplicate :scheme")
+                if h.value.len() == 0: return H2RequestHeaderValidation(valid: false, reason: "empty :scheme")
+                saw_scheme = true
+            elif h.name == ":path":
+                if saw_path: return H2RequestHeaderValidation(valid: false, reason: "duplicate :path")
+                saw_path = true
+                if h.value.len() == 0: return H2RequestHeaderValidation(valid: false, reason: "empty :path")
+            elif h.name == ":authority":
+                if saw_authority: return H2RequestHeaderValidation(valid: false, reason: "duplicate :authority")
+                if h.value.len() == 0: return H2RequestHeaderValidation(valid: false, reason: "empty :authority")
+                saw_authority = true
+            else:
+                return H2RequestHeaderValidation(valid: false, reason: "unknown request pseudo-header")
+        else:
+            saw_regular = true
+            if h.name == "connection" or h.name == "proxy-connection" or h.name == "keep-alive" or h.name == "upgrade" or h.name == "transfer-encoding":
+                return H2RequestHeaderValidation(valid: false, reason: "connection-specific header")
+            if h.name == "te" and h.value != "trailers":
+                return H2RequestHeaderValidation(valid: false, reason: "invalid TE value")
+        i = i + 1
+    if not saw_method:
+        return H2RequestHeaderValidation(valid: false, reason: "missing :method")
+    if method == "CONNECT":
+        if not saw_authority or saw_scheme or saw_path:
+            return H2RequestHeaderValidation(valid: false, reason: "invalid CONNECT pseudo-headers")
+    elif not saw_scheme or not saw_path:
+        return H2RequestHeaderValidation(valid: false, reason: "missing :scheme or :path")
+    H2RequestHeaderValidation(valid: true, reason: "")
+
+export H2RequestHeaderValidation, H2_MAX_HEADER_LIST_BYTES

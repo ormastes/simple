@@ -6,7 +6,7 @@
 # are all delegated to their canonical Pure-Simple owners.
 
 use os.userlib.net.{IpAddr, SockAddr, Socket, socket, bind, listen, accept, socket_send, socket_recv}
-use os.userlib.fs.{read_file_bytes_direct}
+use os.userlib.fs.{read_file_bytes_direct, read_file_bytes_direct_owned}
 use os.userlib.syscall_raw.{syscall}
 use os.kernel.net.http_route.{http_classify_request, HttpRouteKind}
 use std.nogc_sync_mut.http_server.types.{HttpResponse, HttpStatus}
@@ -19,6 +19,7 @@ use std.database.server.capability.{CapabilityTable, capability_with, grant_key}
 use std.database.server.server.{DbServerCapsule}
 use std.fs_driver.bytes_util.{text_to_bytes_pure}
 use std.nogc_sync_mut.binary_io.{bytes_to_string}
+use std.common.crypto.secure_memory.{SecureZeroReport, secure_zero_u8_slots}
 use os.apps.servers_user.database_persistence_adapter.{
     simpleos_database_persistence_caps,
     simpleos_database_persistence_ready,
@@ -159,64 +160,51 @@ fn server_store() -> SdnDatabase:
         ))
     store
 
-fn wipe_credential_bytes(bytes: [u8]):
-    var index: u64 = 0
-    while index < bytes.len() as u64:
-        bytes[index] = 0u8
-        index = index + 1u64
+fn publish_credential_zeroization(phase: text, report: SecureZeroReport, hash_workspace_zeroized: bool):
+    val status = if report.verified(): "verified" else: "failed"
+    val hash_status = if hash_workspace_zeroized: "verified" else: "failed"
+    debug_line("[simpleos-servers-user] credential-zeroization phase={phase} " +
+        "method=volatile-u8-exact-byte-readback-v1 bytes={report.slot_count} " +
+        "overwritten={report.overwritten_slots} " +
+        "residual_nonzero={report.residual_nonzero_slots} " +
+        "hash_workspace={hash_status} status={status}")
 
 fn credential_byte_is_space(b: u8) -> bool:
     # The exact set `text.trim()` strips, matched on bytes so the credential
     # never has to become a `text` to be trimmed.
     b == 32u8 or b == 9u8 or b == 10u8 or b == 13u8 or b == 11u8 or b == 12u8
 
-# Byte-domain equivalent of `bytes_to_string(bytes).trim()`, returning a fresh
-# MUTABLE buffer the caller can wipe.  Building a `text` here instead would
-# create immutable copies with no zeroization surface that outlive every wipe.
-fn trim_credential_bytes(bytes: [u8]) -> [u8]:
-    val total = bytes.len() as i64
-    var start = 0
-    while start < total and credential_byte_is_space(bytes[start as u64]):
-        start = start + 1
-    var end = total
-    while end > start and credential_byte_is_space(bytes[(end - 1) as u64]):
-        end = end - 1
-    var out: [u8] = []
-    var i = start
-    while i < end:
-        out.push(bytes[i as u64])
-        i = i + 1
-    out
-
 fn load_server_policy() -> CapabilityTable?:
     # The credential exists ONLY as mutable byte buffers, from the file read
     # through digest registration.  Nothing here builds a `text` from it: an
     # immutable `text` cannot be zeroized, so every copy would survive for the
     # process lifetime and could reach a core dump or a retained acceptance
-    # image.  Only the SHA-256 digest is retained, by CapabilityTable.  Both
-    # buffers are wiped on every path, including the rejection paths.
+    # image. Only the SHA-256 digest is retained, by CapabilityTable. The sole
+    # owned buffer is wiped on every path. Surrounding whitespace is rejected
+    # instead of trimmed, because trimming would create a second secret copy.
     # doc/08_tracking/bug/simpleos_server_credential_zeroization_gap_2026-08-14.md
-    match read_file_bytes_direct(DB_CREDENTIAL_PATH, MAX_DB_CREDENTIAL_BYTES + 1u64):
+    match read_file_bytes_direct_owned(DB_CREDENTIAL_PATH, MAX_DB_CREDENTIAL_BYTES + 1u64):
         Err(_): nil
         Ok(loaded_bytes):
             var bytes = loaded_bytes
-            if bytes.len() == 0u64 or bytes.len() > MAX_DB_CREDENTIAL_BYTES:
-                wipe_credential_bytes(bytes)
+            if (bytes.len() == 0u64 or bytes.len() > MAX_DB_CREDENTIAL_BYTES or
+                credential_byte_is_space(bytes[0u64]) or
+                credential_byte_is_space(bytes[bytes.len() - 1u64])):
+                if bytes.len() > 0u64:
+                    val rejected_report = secure_zero_u8_slots(bytes)
+                    publish_credential_zeroization("loaded-rejected", rejected_report, false)
                 nil
             else:
-                var credential = trim_credential_bytes(bytes)
-                if credential.len() == 0u64 or credential.len() > MAX_DB_CREDENTIAL_BYTES:
-                    wipe_credential_bytes(credential)
-                    wipe_credential_bytes(bytes)
-                    nil
-                else:
-                    var policy = CapabilityTable.new()
-                    policy.register_authenticated_bytes(capability_with("operator", [
-                        grant_key("records", "read"), grant_key("records", "write")
-                    ]), credential)
-                    wipe_credential_bytes(credential)
-                    wipe_credential_bytes(bytes)
+                var policy = CapabilityTable.new()
+                val registration_ok = policy.register_authenticated_bytes(capability_with("operator", [
+                    grant_key("records", "read"), grant_key("records", "write")
+                ]), bytes)
+                val loaded_report = secure_zero_u8_slots(bytes)
+                publish_credential_zeroization("loaded", loaded_report, registration_ok)
+                if registration_ok and loaded_report.verified():
                     Some(policy)
+                else:
+                    nil
 
 fn handle_db(listener: Socket, server: DbServerCapsule) -> bool:
     match accept(listener):

@@ -204,3 +204,16 @@ record already demands.
 the certificate/private-key owner, the boot credential source, the DBFS durable
 commit owner, and the wipe/native receipts in the closure list above are all
 untouched by this change.
+
+### 2026-08-21 capability correction
+
+The daemon's bounded provisioning, digest-only verifier, mutable-byte AUTH
+framing, authenticated-record ingress, and filesystem J1 write/readback path
+are implemented and wired in `src/os/apps/dbd/`.  The capability receipt now
+names the narrower code fact as
+`auth=DigestVerifierImplementedUnprovisionedV1`; it deliberately does not
+claim that boot material was provisioned. The existing
+`journal=ChecksummedBase64V1` continues to describe the J1 path. This does
+**not** promote production startup: `tls=Blocked` and
+`live_dbfs_durability=Blocked` remain explicit, and the first startup blocker
+continues to be `boot-mutable-credential-owner-unavailable`.

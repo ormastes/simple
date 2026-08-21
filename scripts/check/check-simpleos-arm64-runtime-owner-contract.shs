@@ -1,0 +1,41 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+source_file="$root/examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c"
+work=$(mktemp -d "${TMPDIR:-/tmp}/simpleos-arm64-runtime-owner.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+
+clang --target=aarch64-none-elf -ffreestanding -c \
+    -I "$root/examples/09_embedded/simple_os/arch/arm64/boot" \
+    "$source_file" -o "$work/runtime.o"
+llvm-nm --defined-only "$work/runtime.o" > "$work/symbols.txt"
+
+for symbol in rt_copy_user_byte spl_mutex_lock spl_mutex_unlock \
+    rt_read_cr3_raw rt_write_cr3_raw; do
+    awk -v expected="$symbol" '$NF == expected && $(NF - 1) ~ /^[Tt]$/ { found=1 } END { exit !found }' \
+        "$work/symbols.txt" || {
+        echo "FAIL arm64 runtime owner is not a function: $symbol" >&2
+        exit 1
+    }
+done
+
+if grep -Eq '[[:space:]]_g_vfs_root_read_file_bytes_once$' "$work/symbols.txt"; then
+    echo 'FAIL callable VFS owner was substituted by an ARM C symbol' >&2
+    exit 1
+fi
+grep -Fq 'rt_arm64_user_as_translate(' "$source_file"
+grep -Fq '__atomic_test_and_set(&arm64_mutex_owned[handle]' "$source_file"
+grep -Fq '__atomic_clear(&arm64_mutex_owned[handle]' "$source_file"
+
+for module in \
+    "$root/src/os/services/vfs/direct_fat32_boot_reader.spl" \
+    "$root/src/os/services/vfs/nvme_q35_lease_perf.spl" \
+    "$root/src/os/services/vfs/vfs_boot_state.spl"; do
+    if grep -Fq '_g_vfs_root_read_file_bytes_once' "$module"; then
+        echo "FAIL stale private VFS callable reference: $module" >&2
+        exit 1
+    fi
+done
+
+echo 'PASS simpleos ARM64 runtime owner contract'

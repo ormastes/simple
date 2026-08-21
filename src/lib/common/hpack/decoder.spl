@@ -77,6 +77,7 @@ fn hpack_decode(bytes: [u8], state: HpackDecoderState) -> Result<([HpackHeader],
     var headers: [HpackHeader] = []
     var cur_table = state.table
     var offset: i64 = 0
+    var saw_header_field = false
     var done = false
     while not done:
         if offset >= bytes.len():
@@ -84,6 +85,7 @@ fn hpack_decode(bytes: [u8], state: HpackDecoderState) -> Result<([HpackHeader],
         else:
             val first = bytes[offset].to_i64()
             if (first & 0x80) != 0:
+                saw_header_field = true
                 # §6.1 Indexed Header Field (1xxxxxxx)
                 val idx_pair = match decode_prefix_int(bytes, offset, 7):
                     case Ok(decoded): decoded
@@ -103,6 +105,7 @@ fn hpack_decode(bytes: [u8], state: HpackDecoderState) -> Result<([HpackHeader],
                 headers = headers + [h]
                 offset = offset + consumed
             else if (first & 0xc0) == 0x40:
+                saw_header_field = true
                 # §6.2.1 Literal w/ Incremental Indexing (01xxxxxx)
                 val idx_pair = match decode_prefix_int(bytes, offset, 6):
                     case Ok(decoded): decoded
@@ -133,14 +136,19 @@ fn hpack_decode(bytes: [u8], state: HpackDecoderState) -> Result<([HpackHeader],
                 cur_table = dynamic_table_insert(cur_table, name_text, value_text)
             else if (first & 0xe0) == 0x20:
                 # §6.3 Dynamic Table Size Update (001xxxxx)
+                if saw_header_field:
+                    return Err("hpack_decode §6.3: table size update after header field")
                 val sz_pair = match decode_prefix_int(bytes, offset, 5):
                     case Ok(decoded): decoded
                     case Err(reason): return Err("hpack_decode §6.3: " + reason)
                 val new_size = sz_pair.0
                 val consumed = sz_pair.1
+                if new_size > state.allowed_max_table_size:
+                    return Err("hpack_decode §6.3: table size exceeds decoder limit")
                 cur_table = dynamic_table_resize(cur_table, new_size)
                 offset = offset + consumed
             else if (first & 0xf0) == 0x10:
+                saw_header_field = true
                 # §6.2.3 Literal Never Indexed (0001xxxx)
                 val idx_pair = match decode_prefix_int(bytes, offset, 4):
                     case Ok(decoded): decoded
@@ -169,6 +177,7 @@ fn hpack_decode(bytes: [u8], state: HpackDecoderState) -> Result<([HpackHeader],
                 headers = headers + [h]
                 # Never insert into dynamic table (§6.2.3)
             else:
+                saw_header_field = true
                 # §6.2.2 Literal without Indexing (0000xxxx)
                 val idx_pair = match decode_prefix_int(bytes, offset, 4):
                     case Ok(decoded): decoded
@@ -196,7 +205,10 @@ fn hpack_decode(bytes: [u8], state: HpackDecoderState) -> Result<([HpackHeader],
                 val h = HpackHeader(name: name_text, value: value_text, sensitive: false)
                 headers = headers + [h]
                 # Do NOT insert into dynamic table (§6.2.2)
-    val new_state = HpackDecoderState(table: cur_table)
+    val new_state = HpackDecoderState(
+        table: cur_table,
+        allowed_max_table_size: state.allowed_max_table_size
+    )
     Ok((headers, new_state))
 
 export HpackDecoderState

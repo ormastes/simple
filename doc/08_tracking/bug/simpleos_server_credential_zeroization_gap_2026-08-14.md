@@ -2,9 +2,11 @@
 
 ## Status
 
-Open, but NARROWED 2026-08-17: the `text`-copy half is closed in source; the
-compiler-resistant-zeroization and no-credential-bytes-in-artifacts halves are
-still open. Still release-blocking for production credential handling.
+IMPLEMENTED, awaiting fresh ARM64 QEMU evidence (2026-08-21): immutable secret
+copies are eliminated, the sole target-owned buffer is overwritten and read
+back through compiler-resistant volatile runtime operations, and retained
+artifacts are scanned. Still release-blocking until the live signed receipt is
+produced by a freshly built target payload.
 
 ## Problem
 
@@ -90,17 +92,36 @@ Reverted to green afterwards. The two arms that bite are the interchangeability
 scenario and the survives-the-wipe scenario; the deny scenarios correctly stay
 green under sabotage, which is why they are not the oracle.
 
-## What remains open
+## 2026-08-21 implementation — awaiting fresh live ARM64 receipt
 
-1. **Compiler-resistant zeroization.** `wipe_credential_bytes` is an ordinary
-   store loop with no reader afterwards — a dead-store-eliminating optimizer may
-   legally delete it. Closing this needs a target-owned secret buffer whose wipe
-   the compiler cannot elide (an explicit barrier or a runtime-owned
-   `rt_secure_zero`), not a `.spl` loop. There is no owned secure-zero primitive
-   in the tree today: `git grep -l 'zeroiz\|secure_zero' src` returns only
-   vendored crates plus `src/compiler_rust/{compiler,runtime}/src/.../random.rs`.
-2. **Artifact scanning.** No gate yet proves logs, receipts, crash output, and
-   retained images contain no credential bytes.
+The compiler-resistant primitive already existed below the application layer:
+the target runtime exports volatile 64-bit load/store operations and a full
+memory barrier. `servers_user` now resolves the real array data pointer, writes
+zero to every 64-bit value slot through the volatile runtime owner, fences, then
+reads every slot back through volatile loads. Policy loading fails closed unless
+the single file-read buffer reports equal byte/overwrite counts and zero
+residual slots. Surrounding whitespace is rejected instead of copied for
+trimming. No address, credential, or credential-derived digest is
+printed.
 
-Until both land, keep the existing mitigation: ephemeral acceptance credentials
-only, restricted generated image, securely destroyed after the reboot probe.
+`sha256_u8_hex_zeroizing` also wipes and volatile-reads back the reusable
+64-word message schedule and final eight-word projection before returning the
+credential digest. Capability registration returns false before publishing the
+principal if either workspace wipe fails. Raw array-pointer, length, volatile,
+and barrier externs are owned by `std.common.crypto.secure_memory`; the server
+application and filesystem facade use typed operations only.
+
+The target emits exactly one structured `loaded` line per process, including
+`hash_workspace=verified`.
+The shared canonical parser rejects missing, duplicate, malformed, oversized,
+partial, or residual-bearing lines. The ARM producer runs it for every normal,
+crash, and recovery boot and binds the two primary-boot canonical hashes into
+the signed `SimpleOsServerExecutionReceiptV1`. The aggregate validator recomputes
+those hashes from the already hash-bound serial logs. Its self-test re-signs a
+receipt around a serial artifact with `residual_nonzero=1`; semantic validation
+must still reject it, so signature enforcement cannot mask a vacuous oracle.
+
+The existing retained-artifact credential scan and destruction of every
+credential-bearing normal/crash image remain in force. This record is not
+closed until a freshly built ARM64 payload completes the QEMU gate and produces
+the signed target readback receipt.

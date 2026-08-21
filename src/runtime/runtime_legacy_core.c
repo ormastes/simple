@@ -479,7 +479,7 @@ int rt_file_create_excl(const char* path, int64_t path_len,
     return 1;
 }
 
-#if !defined(_WIN32)
+#if !defined(_WIN32) && !defined(__simpleos__)
 static int rt_mem_snapshot_parent_fd(char* path, const char** leaf_out) {
     char* leaf = strrchr(path, '/'); int parent_fd;
     if (!leaf) { *leaf_out = path; return open(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC); }
@@ -499,9 +499,9 @@ static int rt_mem_snapshot_parent_fd(char* path, const char** leaf_out) {
     return parent_fd;
 }
 #endif
-
 int64_t rt_mem_snapshot_open(const char* path_ptr, int64_t path_len) {
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__simpleos__)
+    /* SimpleOS lacks secure openat path-walk authority; fail closed. */
     (void)path_ptr; (void)path_len; return -1;
 #else
     char path[4096];

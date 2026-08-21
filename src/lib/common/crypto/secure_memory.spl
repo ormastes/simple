@@ -1,0 +1,80 @@
+# Compiler-resistant mutable-secret memory owner.
+# Raw runtime array/volatile calls are confined here; applications consume the
+# typed facade and cannot fabricate successful readback.
+
+extern fn rt_array_set_len_known(collection: [u8], len: i64) -> i8
+extern fn rt_volatile_read_u8(addr: i64) -> i64
+extern fn rt_volatile_write_u8(addr: i64, value: i64)
+extern fn rt_volatile_read_u64(addr: i64) -> i64
+extern fn rt_volatile_write_u64(addr: i64, value: i64)
+extern fn rt_memory_barrier()
+
+struct SecureZeroReport:
+    slot_count: u64
+    overwritten_slots: u64
+    residual_nonzero_slots: u64
+
+    fn verified() -> bool:
+        self.slot_count > 0u64 and
+            self.overwritten_slots == self.slot_count and
+            self.residual_nonzero_slots == 0u64
+
+fn _secure_zero_slots(data_ptr: i64, slot_count: u64) -> SecureZeroReport:
+    if slot_count == 0u64 or data_ptr == 0:
+        return SecureZeroReport(
+            slot_count: slot_count, overwritten_slots: 0u64,
+            residual_nonzero_slots: slot_count)
+    var index: u64 = 0u64
+    while index < slot_count:
+        rt_volatile_write_u64(data_ptr + (index * 8u64) as i64, 0)
+        index = index + 1u64
+    rt_memory_barrier()
+    var residual: u64 = 0u64
+    index = 0u64
+    while index < slot_count:
+        if rt_volatile_read_u64(data_ptr + (index * 8u64) as i64) != 0:
+            residual = residual + 1u64
+        index = index + 1u64
+    rt_memory_barrier()
+    SecureZeroReport(
+        slot_count: slot_count, overwritten_slots: slot_count,
+        residual_nonzero_slots: residual)
+
+fn secure_zero_u8_slots(bytes: [u8]) -> SecureZeroReport:
+    secure_zero_u8_range(bytes, 0u64, bytes.len())
+
+fn secure_zero_u8_range(bytes: [u8], start: u64, byte_count: u64) -> SecureZeroReport:
+    # A [u8] has one byte per element. Never route its element count through
+    # the u64-slot helper: that would write eight times beyond the allocation.
+    if byte_count == 0u64 or start > bytes.len() or byte_count > bytes.len() - start:
+        return SecureZeroReport(
+            slot_count: byte_count, overwritten_slots: 0u64,
+            residual_nonzero_slots: byte_count)
+    val data_ptr = bytes.data_ptr().to_u64() as i64
+    if data_ptr == 0:
+        return SecureZeroReport(
+            slot_count: byte_count, overwritten_slots: 0u64,
+            residual_nonzero_slots: byte_count)
+    var index = 0u64
+    while index < byte_count:
+        rt_volatile_write_u8(data_ptr + (start + index) as i64, 0)
+        index = index + 1u64
+    rt_memory_barrier()
+    var residual = 0u64
+    index = 0u64
+    while index < byte_count:
+        if rt_volatile_read_u8(data_ptr + (start + index) as i64) != 0:
+            residual = residual + 1u64
+        index = index + 1u64
+    rt_memory_barrier()
+    SecureZeroReport(
+        slot_count: byte_count, overwritten_slots: byte_count,
+        residual_nonzero_slots: residual)
+
+fn secure_zero_i64_slots(words: [i64]) -> SecureZeroReport:
+    _secure_zero_slots(words.data_ptr().to_u64() as i64, words.len())
+
+fn secure_set_u8_length(bytes: [u8], length: i64) -> bool:
+    length >= 0 and rt_array_set_len_known(bytes, length) == 1i8
+
+export SecureZeroReport, secure_zero_u8_slots, secure_zero_u8_range, secure_zero_i64_slots, secure_set_u8_length
