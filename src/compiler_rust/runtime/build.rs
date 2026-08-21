@@ -99,7 +99,9 @@ fn main() {
             }
             let alias = runtime_symbol_alias(symbol);
             generated.push_str(&format!("        #[link_name = \"{symbol}\"]\n"));
-            generated.push_str(&format!("        pub fn {alias}();\n"));
+            generated.push_str("        ");
+            generated.push_str(&runtime_symbol_declaration(symbol, &alias));
+            generated.push('\n');
         }
     }
     generated.push_str("    }\n");
@@ -119,6 +121,30 @@ fn main() {
     generated.push_str("];\n");
 
     fs::write(out_dir.join("runtime_symbol_entries.rs"), generated).expect("write runtime symbol entries");
+}
+
+/// Emit the canonical callable ABI for symbols that are also declared by the
+/// Rust runtime. A mismatched declaration is undefined behavior if it is ever
+/// called and triggers `clashing_extern_declarations` even when used only as a
+/// linker anchor. Symbols not yet migrated retain the legacy address-anchor
+/// form and are tracked by the SFFI contract inventory.
+fn runtime_symbol_declaration(symbol: &str, alias: &str) -> String {
+    let signature = match symbol {
+        "rt_alloc" => "(size: i64) -> *mut u8",
+        "rt_free" => "(ptr: *mut u8)",
+        "rt_ptr_read_i64" => "(addr: i64, offset: i64) -> i64",
+        "rt_ptr_read_u8" => "(addr: i64, offset: i64) -> i64",
+        "rt_ptr_read_i32" => "(addr: i64, offset: i64) -> i32",
+        "rt_ptr_write_u8" => "(addr: i64, offset: i64, value: i64)",
+        "rt_ptr_write_i32" => "(addr: i64, offset: i64, value: i32)",
+        "rt_ptr_write_i64" => "(addr: i64, offset: i64, value: i64)",
+        "rt_ptr_write_bytes_raw" => "(addr: i64, offset: i64, src: *const u8, len: i64) -> i64",
+        "rt_memset" => "(dst: *mut u8, val: i8, n: i64) -> *mut u8",
+        "rt_memcpy" => "(dst: *mut u8, src: *const u8, n: i64) -> *mut u8",
+        "rt_time_now_nanos" | "rt_time_now_micros" | "rt_time_now_unix_micros" => "() -> i64",
+        _ => "()",
+    };
+    format!("pub fn {alias}{signature};")
 }
 
 fn compile_c_runtime_sources() {
@@ -340,12 +366,7 @@ fn collect_defined_runtime_symbols(
     exported
 }
 
-fn collect_c_runtime_exports(
-    root: &Path,
-    target_os: &str,
-    native_all_provider: bool,
-    exported: &mut HashSet<String>,
-) {
+fn collect_c_runtime_exports(root: &Path, target_os: &str, native_all_provider: bool, exported: &mut HashSet<String>) {
     const LINKED_C_SOURCES: &[&str] = &[
         "runtime_memory.c",
         "runtime_time.c",

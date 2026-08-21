@@ -576,3 +576,11 @@ only on failure. Capability-scoped unsafe blocks are parsed by the seed parser,
 and all nine packed-span functions are wired into the interpreter's static
 dispatch table. The focused parser/registration tests pass and the packed-span
 spec passes 25/25, including the one-check-per-batch performance assertion.
+
+The generated Rust runtime symbol table no longer redeclares the overlapping
+memory and time providers with a fabricated zero-argument ABI. The generator
+emits their canonical pointer, integer, and return signatures, eliminating all
+14 `clashing_extern_declarations` warnings while retaining the same static
+address table and lookup behavior. A focused runtime test resolves and invokes
+allocation, typed write/read/free, and all three time providers through the
+table. This migration adds no runtime allocation, hashing, locking, or lookup.

@@ -413,6 +413,34 @@ fn runtime_symbol_table_contains_monotonic_time() {
 
 #[cfg(all(test, feature = "runtime-symbol-table"))]
 #[test]
+fn runtime_symbol_table_typed_memory_contracts_dispatch() {
+    fn entry(name: &str) -> *const u8 {
+        RUNTIME_SYMBOL_ENTRIES
+            .iter()
+            .find(|entry| entry.name == name)
+            .unwrap_or_else(|| panic!("{name} provider must be registered"))
+            .ptr
+    }
+
+    let alloc: extern "C" fn(i64) -> *mut u8 = unsafe { std::mem::transmute(entry("rt_alloc")) };
+    let write: extern "C" fn(i64, i64, i64) = unsafe { std::mem::transmute(entry("rt_ptr_write_i64")) };
+    let read: extern "C" fn(i64, i64) -> i64 = unsafe { std::mem::transmute(entry("rt_ptr_read_i64")) };
+    let free: extern "C" fn(*mut u8) = unsafe { std::mem::transmute(entry("rt_free")) };
+
+    let ptr = alloc(8);
+    assert!(!ptr.is_null());
+    write(ptr as i64, 0, 0x1234_5678);
+    assert_eq!(read(ptr as i64, 0), 0x1234_5678);
+    free(ptr);
+
+    for name in ["rt_time_now_nanos", "rt_time_now_micros", "rt_time_now_unix_micros"] {
+        let now: extern "C" fn() -> i64 = unsafe { std::mem::transmute(entry(name)) };
+        assert!(now() >= 0, "{name} returned a negative timestamp");
+    }
+}
+
+#[cfg(all(test, feature = "runtime-symbol-table"))]
+#[test]
 fn runtime_symbol_table_keeps_struct_allocator_and_receiver_validator_paired() {
     let allocator = RUNTIME_SYMBOL_ENTRIES
         .iter()
