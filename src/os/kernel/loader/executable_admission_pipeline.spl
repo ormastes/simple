@@ -44,6 +44,8 @@ use os.kernel.loader.executable_crypto_authority.{
 }
 use std.common.crypto.sha256.{sha256_u8_hex}
 use std.fs_driver.bytes_util.{text_to_bytes_pure}
+use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.loader.elf_loader.{elf_authenticated_layout_v1}
 
 pub enum ExecutableLoaderAdmissionErrorV1:
     StaleBinding
@@ -83,6 +85,7 @@ pub struct ExecutableLoaderVerificationInputsV1:
 pub struct ExecutableLoaderAdmissionResultV1:
     authority_token: ExecutableAuthorityTokenV1
     namespace_generation: u64
+    entry_point: u64
 
 pub struct ExecutableLoaderImageRetrievalV1:
     # Diagnostic retrieval only. This value is not mapping/load authority.
@@ -316,6 +319,19 @@ pub fn executable_loader_admit_authenticated_open_binding_v1(
     if not executable_loader_signature_verify_trusted_v1(
         proof.signer_key_id, inputs.manifest, admission, actual_hash, proof.signature):
         return _loader_close_rejection(table, binding, ExecutableLoaderAdmissionErrorV1.SignatureInvalid)
+    val layout_arch = if inputs.target.arch == "riscv64":
+        Architecture.Riscv64
+    elif inputs.target.arch == "x86_64":
+        Architecture.X86_64
+    elif inputs.target.arch == "aarch64":
+        Architecture.Arm64
+    else:
+        return _loader_close_rejection(table, binding, ExecutableLoaderAdmissionErrorV1.TargetInvalid)
+    val layout = elf_authenticated_layout_v1(source.unwrap(), layout_arch)
+    if layout.is_err():
+        return _loader_close_rejection(table, binding, ExecutableLoaderAdmissionErrorV1.RangeInvalid)
+    var authoritative_inputs = inputs
+    authoritative_inputs.verified_load_ranges = layout.unwrap().load_ranges
     # Caller diagnostic booleans are deliberately ignored on this production
     # path. Authorization derives only from bytes, canonical values, the
     # configured trust root, and the loader-owned registry.
@@ -331,7 +347,7 @@ pub fn executable_loader_admit_authenticated_open_binding_v1(
     if (inputs.manifest.required_capabilities & admission.effective_capabilities) !=
         inputs.manifest.required_capabilities:
         return _loader_close_rejection(table, binding, ExecutableLoaderAdmissionErrorV1.CapabilityMismatch)
-    val candidate = _loader_handle_from_binding(binding, inputs, admission)
+    val candidate = _loader_handle_from_binding(binding, authoritative_inputs, admission)
     if not executable_image_handle_validate(candidate).ok or
         not executable_image_handle_matches_admission(candidate, admission).ok:
         return _loader_close_rejection(table, binding, ExecutableLoaderAdmissionErrorV1.AdmissionMismatch)
@@ -346,7 +362,8 @@ pub fn executable_loader_admit_authenticated_open_binding_v1(
         case Ok(token):
             Ok(ExecutableLoaderAdmissionResultV1(
                 authority_token: token,
-                namespace_generation: binding.namespace_generation))
+                namespace_generation: binding.namespace_generation,
+                entry_point: layout.unwrap().entry_point))
 
 pub fn executable_loader_authority_owner_initialize(
     slot_limit: i64,

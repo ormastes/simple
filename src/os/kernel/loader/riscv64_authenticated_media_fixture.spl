@@ -1,0 +1,198 @@
+# RV64 boot-media adapter for the canonical authenticated executable pipeline.
+#
+# The media owns four separate sidecars.  This adapter reads every byte through
+# MountTable, binds the admission to the already-open executable handle, installs
+# the provisioned public trust root, and passes the resulting opaque token to the
+# existing scheduler acceptance fixture.  No pathname or sidecar boolean is
+# executable authority.
+
+use std.fs_driver.mount_table.{MountTable, ExecuteOpenBinding}
+use std.fs_driver.types.{OpenFlags, ExecuteTrust}
+use std.fs_driver.bytes_util.{text_to_bytes_pure}
+use std.common.contracts.execution.simpleos_executable_v1.{
+    ManifestTarget, ManifestResourceLimits, SimpleArtifactManifest
+}
+use std.common.contracts.execution.simpleos_executable_admission_v1.{
+    ExecutableAdmissionDecisionV1, ExecutableAdmissionV1
+}
+use os.kernel.loader.executable_admission_pipeline.{
+    ExecutableLoaderVerificationInputsV1, ExecutableLoaderCryptographicProofV1,
+    executable_loader_admit_authenticated_open_binding_v1,
+    executable_loader_authority_owner_initialize
+}
+use os.kernel.loader.executable_crypto_authority.{
+    ExecutableTrustedSignerV1, executable_loader_trust_roots_initialize
+}
+use os.kernel.loader.executable_load_plan_v1.{executable_load_consumer_new_v1}
+use os.kernel.loader.riscv64_fs_exec_spawn.{riscv64_authenticated_execution_acceptance_fixture_v1}
+use os.kernel.loader.spawn_recipes.{SPAWN_RECIPE_APP_LAUNCHER}
+use os.kernel.scheduler.scheduler_types.{Scheduler}
+use os.kernel.loader.riscv64_authenticated_media_policy.{rv64_authenticated_media_root_matches_pin_v1}
+use rv64_auth_trust_config.{
+    rv64_authenticated_pinned_key_id_v1,
+    rv64_authenticated_pinned_public_key_hex_v1,
+    rv64_authenticated_pinned_public_key_hash_v1
+}
+
+fn _media_text(table: mut MountTable, path: text, maximum: i64) -> text?:
+    val opened = table.open(path, OpenFlags.read_only())
+    if opened.is_err(): return nil
+    val handle = opened.unwrap()
+    val stat = table.fstat(handle)
+    if stat.is_err() or stat.unwrap().size < 1u64 or stat.unwrap().size > maximum.to_u64():
+        _ = table.close(handle)
+        return nil
+    val read = table.read(handle, stat.unwrap().size.to_i64())
+    val closed = table.close(handle)
+    if read.is_err() or closed.is_err(): return nil
+    Some(read.unwrap())
+
+fn _field(record: text, key: text) -> text?:
+    val prefix = key + "="
+    var found = ""
+    var count = 0
+    for line in record.split("\n"):
+        if line.starts_with(prefix):
+            found = line.slice(prefix.len(), line.len())
+            count = count + 1
+    if count != 1 or found == "": return nil
+    Some(found)
+
+fn _u64_field(record: text, key: text) -> u64?:
+    val value = _field(record, key)
+    if not value.?: return nil
+    val parsed = value.unwrap().to_i64()
+    if parsed < 0: return nil
+    Some(parsed.to_u64())
+
+fn _hex_digit(value: text) -> i64:
+    if value == "0": return 0
+    if value == "1": return 1
+    if value == "2": return 2
+    if value == "3": return 3
+    if value == "4": return 4
+    if value == "5": return 5
+    if value == "6": return 6
+    if value == "7": return 7
+    if value == "8": return 8
+    if value == "9": return 9
+    if value == "a": return 10
+    if value == "b": return 11
+    if value == "c": return 12
+    if value == "d": return 13
+    if value == "e": return 14
+    if value == "f": return 15
+    -1
+
+fn _hex_bytes(value: text) -> [u8]:
+    if value.len() % 2 != 0: return []
+    var out: [u8] = []
+    var i = 0
+    while i + 1 < value.len():
+        val hi = _hex_digit(value.slice(i, i + 1))
+        val lo = _hex_digit(value.slice(i + 1, i + 2))
+        if hi < 0 or lo < 0: return []
+        out.push((hi * 16 + lo).to_u8())
+        i = i + 2
+    out
+
+pub fn riscv64_authenticated_media_acceptance_v1(
+    scheduler: Scheduler, table: MountTable
+) -> bool:
+    var owner = table
+    val binding_result = owner.open_for_execute("/SYS/APPS/AUTHHELLO.ELF", ExecuteTrust.Trusted)
+    if binding_result.is_err(): return false
+    val binding: ExecuteOpenBinding = binding_result.unwrap()
+    val manifest_record = _media_text(owner, "/AUTHHEL.MAN", 8192)
+    val admission_record = _media_text(owner, "/AUTHHEL.ADM", 8192)
+    val proof_record = _media_text(owner, "/AUTHHEL.SIG", 1024)
+    val root_record = _media_text(owner, "/AUTHHEL.PUB", 1024)
+    val nonce_record = _media_text(owner, "/QEMUNONC.TXT", 256)
+    if not manifest_record.? or not admission_record.? or not proof_record.? or
+       not root_record.? or not nonce_record.?:
+        _ = owner.close(binding.file_handle)
+        return false
+    val manifest_env = manifest_record.unwrap()
+    val admission_env = admission_record.unwrap()
+    val image_hash = _field(manifest_env, "image_hash")
+    val manifest_hash = _field(admission_env, "manifest_hash")
+    val kernel_hash = _field(admission_env, "kernel_hash")
+    val trust_hash = _field(admission_env, "trust_root_hash")
+    val nonce = _field(nonce_record.unwrap(), "SIMPLEOS_QEMU_NONCE")
+    val key_id = rv64_authenticated_pinned_key_id_v1()
+    val proof_key_id = _field(proof_record.unwrap(), "signer_key_id")
+    val root_key_id = _field(root_record.unwrap(), "key_id")
+    val signature_hex = _field(proof_record.unwrap(), "signature_hex")
+    val public_key_hex = _field(root_record.unwrap(), "public_key_hex")
+    val media_mount_id = _u64_field(admission_env, "mount_id")
+    val media_mount_generation = _u64_field(admission_env, "mount_generation")
+    val media_file_id = _u64_field(admission_env, "file_id")
+    val media_file_generation = _u64_field(admission_env, "file_generation")
+    if not image_hash.? or not manifest_hash.? or not kernel_hash.? or not trust_hash.? or
+       not nonce.? or not proof_key_id.? or not root_key_id.? or
+       proof_key_id.unwrap() != key_id or root_key_id.unwrap() != key_id or
+       not signature_hex.? or not public_key_hex.? or
+       not media_mount_id.? or not media_mount_generation.? or
+       not media_file_id.? or not media_file_generation.? or
+       media_mount_id.unwrap() != binding.mount_id.id.to_u64() or
+       media_mount_generation.unwrap() != binding.mount_generation or
+       media_file_id.unwrap() != binding.file_handle.id or
+       media_file_generation.unwrap() != binding.content_generation:
+        _ = owner.close(binding.file_handle)
+        return false
+    if not rv64_authenticated_media_root_matches_pin_v1(
+        key_id, rv64_authenticated_pinned_public_key_hex_v1(),
+        rv64_authenticated_pinned_public_key_hash_v1(), root_key_id.unwrap(),
+        public_key_hex.unwrap(), trust_hash.unwrap()):
+        _ = owner.close(binding.file_handle)
+        return false
+    val target = ManifestTarget(os: "simpleos", arch: "riscv64", abi: "simpleos")
+    val manifest = SimpleArtifactManifest(
+        format_version: 1, artifact_kind: "elf", target: target,
+        entrypoint: "main", required_abi_features: ["elf64", "w_xor_x"],
+        required_services: [], required_capabilities: 69u32,
+        resource_limits: ManifestResourceLimits(max_memory_bytes: 0, max_open_handles: 0, max_threads: 0, cpu_budget_us: 0),
+        namespace_template: "app_default", native_libraries: [], smf_libraries: [],
+        interpreter: "", argument_schema: [], startup_preloads: [],
+        content_hashes: [image_hash.unwrap()], signature: "ed25519:" + key_id,
+        debug_identity: "")
+    val admission = ExecutableAdmissionV1(
+        schema_version: 1, admission_id: "rv64-qemu-fs-exec-v1",
+        decision: ExecutableAdmissionDecisionV1.Admitted, rejection_reason: "",
+        image_hash: image_hash.unwrap(), manifest_hash: manifest_hash.unwrap(),
+        kernel_hash: kernel_hash.unwrap(), trust_root_hash: trust_hash.unwrap(),
+        trust_epoch: 1u64, target: target, firmware_profile: "opensbi-qemu-virt",
+        compiler_identity: "admitted-stage2", source_identity: "retained-source-tree",
+        config_identity: "rv64-authenticated-fs-exec-v1",
+        mount_id: media_mount_id.unwrap(), mount_generation: media_mount_generation.unwrap(),
+        file_id: media_file_id.unwrap(), file_generation: media_file_generation.unwrap(),
+        effective_capabilities: 69u32)
+    val root_bytes = _hex_bytes(rv64_authenticated_pinned_public_key_hex_v1())
+    val signature_bytes = _hex_bytes(signature_hex.unwrap())
+    if root_bytes.len() != 32 or signature_bytes.len() != 64 or
+       not executable_loader_trust_roots_initialize([
+           ExecutableTrustedSignerV1(key_id: key_id, public_key: root_bytes)]):
+        _ = owner.close(binding.file_handle)
+        return false
+    val authorities = executable_loader_authority_owner_initialize(4, 0x5256363441555448u64)
+    if authorities.is_err():
+        _ = owner.close(binding.file_handle)
+        return false
+    val inputs = ExecutableLoaderVerificationInputsV1(
+        manifest: manifest, manifest_hash: manifest_hash.unwrap(), image_hash: image_hash.unwrap(),
+        trust_root_hash: trust_hash.unwrap(), target: target, format: "elf", role: "main-image",
+        verified_load_ranges: [], manifest_verified: true, signature_verified: true,
+        trust_root_verified: true, target_verified: true, format_verified: true,
+        ranges_verified: true, image_digest_verified: true)
+    val admitted = executable_loader_admit_authenticated_open_binding_v1(
+        owner, authorities.unwrap(), binding, inputs, admission,
+        ExecutableLoaderCryptographicProofV1(
+            signer_key_id: key_id, signature: signature_bytes))
+    if admitted.is_err(): return false
+    riscv64_authenticated_execution_acceptance_fixture_v1(
+        scheduler, owner, authorities.unwrap(), admitted.unwrap().authority_token,
+        executable_load_consumer_new_v1("simpleos", "riscv64", "simpleos"),
+        admitted.unwrap().entry_point, 0, "/sys/apps/AUTHHELLO.ELF", SPAWN_RECIPE_APP_LAUNCHER,
+        nonce.unwrap(), image_hash.unwrap())
+
+export riscv64_authenticated_media_acceptance_v1

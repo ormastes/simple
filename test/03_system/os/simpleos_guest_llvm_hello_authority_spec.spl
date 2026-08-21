@@ -15,9 +15,9 @@ use os.kernel.loader.guest_toolchain_execution_contract.{
     guest_toolchain_hello_execution_chain_v1_validate
 }
 
-fn expected() -> GuestToolchainHelloExpectedV1:
+fn expected_for(target: text) -> GuestToolchainHelloExpectedV1:
     GuestToolchainHelloExpectedV1(
-        target_triple: "x86_64-unknown-simpleos",
+        target_triple: target,
         filesystem_name: "fat32",
         llvm_path: "/usr/bin/llvm-ar", llvm_sha256: sha256_text("llvm"),
         clang_path: "/usr/bin/clang", clang_sha256: sha256_text("clang"),
@@ -26,6 +26,9 @@ fn expected() -> GuestToolchainHelloExpectedV1:
         object_path: "/work/hello.o", object_sha256: sha256_text("object"),
         executable_path: "/work/hello.elf", executable_sha256: sha256_text("elf"),
         expected_stdout: "hello from SimpleOS LLVM\n")
+
+fn expected() -> GuestToolchainHelloExpectedV1:
+    expected_for("x86_64-unknown-simpleos")
 
 fn result_for(stage: ProcessExecutionStageV1) -> ProcessExecutionResultV1:
     val want = expected()
@@ -51,6 +54,27 @@ fn result_for(stage: ProcessExecutionStageV1) -> ProcessExecutionResultV1:
         exit_code: 0, captured_stdout: want.expected_stdout, captured_stderr: "")
 
 describe "SimpleOS guest LLVM hello-world execution evidence":
+    it "admits the shared x86_64 ARM64 and RV64 guest authority contract":
+        for target in [
+            "x86_64-unknown-simpleos",
+            "aarch64-unknown-simpleos",
+            "riscv64gc-unknown-simpleos",
+        ]:
+            val want = expected_for(target)
+            val clang = result_for(ProcessExecutionStageV1.ClangCompile)
+            val lld = result_for(ProcessExecutionStageV1.LldLink)
+            val hello = result_for(ProcessExecutionStageV1.HelloRun)
+            expect(guest_toolchain_hello_execution_chain_v1_validate(
+                want, clang, lld, hello)).to_be(true)
+
+    it "rejects a host Linux target on the guest authority route":
+        val want = expected_for("aarch64-unknown-linux-gnu")
+        expect(guest_toolchain_hello_execution_chain_v1_validate(
+            want,
+            result_for(ProcessExecutionStageV1.ClangCompile),
+            result_for(ProcessExecutionStageV1.LldLink),
+            result_for(ProcessExecutionStageV1.HelloRun))).to_be(false)
+
     it "accepts an exact process-manager child chain as diagnostic input":
         val clang = result_for(ProcessExecutionStageV1.ClangCompile)
         val lld = result_for(ProcessExecutionStageV1.LldLink)

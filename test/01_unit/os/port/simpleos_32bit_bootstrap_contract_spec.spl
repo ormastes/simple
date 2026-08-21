@@ -1,0 +1,74 @@
+use os.port.simpleos_32bit_bootstrap_contract.*
+
+val SHA1 = "1111111111111111111111111111111111111111111111111111111111111111"
+val SHA2 = "2222222222222222222222222222222222222222222222222222222222222222"
+val SHA3 = "3333333333333333333333333333333333333333333333333333333333333333"
+val SHA4 = "4444444444444444444444444444444444444444444444444444444444444444"
+
+fn host_evidence() -> BootstrapHostPhase12EvidenceV1:
+    BootstrapHostPhase12EvidenceV1(
+        host_triple: "x86_64-unknown-linux-gnu", stage1_kind: "rust-seed",
+        stage1_sha256: SHA1, stage2_kind: "pure-simple", stage2_sha256: SHA2,
+        stage2_parent_sha256: SHA1, stage2_sanity_status: "pass",
+        stub_fallback_disabled: true)
+
+fn guest_evidence(guest: SimpleOs32BitGuest) -> SimpleOs32BitGuestHelloEvidenceV1:
+    var triple = "armv7a-unknown-none-eabi"
+    var qemu = "qemu-system-arm"
+    var marker = "SIMPLEOS_FS_EXEC_OK arch=arm32 nonce=abc"
+    if guest == SimpleOs32BitGuest.Riscv32:
+        triple = "riscv32imac-unknown-none-elf"
+        qemu = "qemu-system-riscv32"
+        marker = "SIMPLEOS_FS_EXEC_OK arch=riscv32 nonce=abc"
+    if guest == SimpleOs32BitGuest.X86_32:
+        triple = "i686-unknown-none"
+        qemu = "qemu-system-x86_64"
+        marker = "SIMPLEOS_FS_EXEC_OK arch=x86_32 nonce=abc"
+    SimpleOs32BitGuestHelloEvidenceV1(
+        guest: guest, target_triple: triple, qemu_system: qemu,
+        compiler_sha256: SHA2, kernel_sha256: SHA3, filesystem_sha256: SHA4,
+        executable_sha256: SHA3, filesystem_path: "/FSEXEC.ELF",
+        serial_stdout: marker, exit_code: 0)
+
+describe "SimpleOS 32-bit bootstrap phase 1/2 evidence":
+    it "accepts bound host phases plus real per-guest filesystem hello evidence":
+        expect(SHA1.len()).to_equal(64)
+        expect(host_evidence().host_triple).to_equal("x86_64-unknown-linux-gnu")
+        expect(host_evidence().stage2_parent_sha256).to_equal(host_evidence().stage1_sha256)
+        expect(host_evidence().stage2_sha256 == host_evidence().stage1_sha256).to_be(false)
+        expect(bootstrap_host_phase12_evidence_v1_valid(host_evidence())).to_be(true)
+        expect(simpleos_32bit_cross_phase12_hello_v1_valid(host_evidence(), guest_evidence(SimpleOs32BitGuest.Arm32))).to_be(true)
+        expect(simpleos_32bit_cross_phase12_hello_v1_valid(host_evidence(), guest_evidence(SimpleOs32BitGuest.Riscv32))).to_be(true)
+        expect(simpleos_32bit_cross_phase12_hello_v1_valid(host_evidence(), guest_evidence(SimpleOs32BitGuest.X86_32))).to_be(true)
+
+    it "rejects a guest artifact not built by the admitted Stage 2 compiler":
+        val guest = guest_evidence(SimpleOs32BitGuest.Riscv32)
+        guest.compiler_sha256 = SHA1
+        expect(simpleos_32bit_cross_phase12_hello_v1_valid(host_evidence(), guest)).to_be(false)
+
+    it "rejects host evidence with stub fallback or forged stage lineage":
+        val fallback = host_evidence()
+        fallback.stub_fallback_disabled = false
+        expect(bootstrap_host_phase12_evidence_v1_valid(fallback)).to_be(false)
+        val forged = host_evidence()
+        forged.stage2_parent_sha256 = SHA4
+        expect(bootstrap_host_phase12_evidence_v1_valid(forged)).to_be(false)
+
+    it "rejects wrong target, qemu, filesystem path, marker, or exit status":
+        val guest = guest_evidence(SimpleOs32BitGuest.X86_32)
+        guest.qemu_system = "qemu-system-i386"
+        expect(simpleos_32bit_cross_phase12_hello_v1_valid(host_evidence(), guest)).to_be(false)
+        guest.qemu_system = "qemu-system-x86_64"
+        guest.filesystem_path = "/metadata-only"
+        expect(simpleos_32bit_cross_phase12_hello_v1_valid(host_evidence(), guest)).to_be(false)
+        guest.filesystem_path = "/FSEXEC.ELF"
+        guest.serial_stdout = "SIMPLEOS_FS_EXEC_OK arch=x86_32"
+        expect(simpleos_32bit_cross_phase12_hello_v1_valid(host_evidence(), guest)).to_be(false)
+        guest.serial_stdout = "SIMPLEOS_FS_EXEC_OK arch=x86_32 nonce=abc"
+        guest.exit_code = 1
+        expect(simpleos_32bit_cross_phase12_hello_v1_valid(host_evidence(), guest)).to_be(false)
+
+    it "never promotes cross-build evidence to target-native phase 1/2 proof":
+        expect(simpleos_32bit_target_native_phase12_v1_valid(host_evidence(), guest_evidence(SimpleOs32BitGuest.Arm32))).to_be(false)
+        expect(simpleos_32bit_target_native_phase12_v1_valid(host_evidence(), guest_evidence(SimpleOs32BitGuest.Riscv32))).to_be(false)
+        expect(simpleos_32bit_target_native_phase12_v1_valid(host_evidence(), guest_evidence(SimpleOs32BitGuest.X86_32))).to_be(false)

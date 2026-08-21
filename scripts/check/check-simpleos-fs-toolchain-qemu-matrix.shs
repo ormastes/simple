@@ -1,0 +1,118 @@
+#!/bin/sh
+# Six-ISA, three-operation SimpleOS filesystem toolchain evidence matrix.
+# One live guest transaction proves interpreter, compiler, and loader continuity;
+# hermetic runner overrides remain non-authorizing contract evidence.
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+CHECKER="$ROOT_DIR/scripts/check/check-simpleos-compiler-filesystem-qemu.shs"
+MODE=run
+ARCH_FILTER=
+OUTPUT_DIR="$ROOT_DIR/build/test-artifacts/simpleos-fs-toolchain-qemu-matrix"
+
+usage() {
+    echo "usage: $0 [--self-test] [--arch=x86_32|x86_64|arm32|arm64|riscv32|riscv64] [--output-dir=PATH]"
+}
+for arg in "$@"; do
+    case "$arg" in
+        --self-test) MODE=self-test ;;
+        --arch=x86_32|--arch=x86_64|--arch=arm32|--arch=arm64|--arch=riscv32|--arch=riscv64) ARCH_FILTER=${arg#--arch=} ;;
+        --output-dir=*) OUTPUT_DIR=${arg#--output-dir=} ;;
+        --help|-h) usage; exit 0 ;;
+        *) echo "unknown argument: $arg" >&2; usage >&2; exit 2 ;;
+    esac
+done
+
+arches='x86_32 x86_64 arm32 arm64 riscv32 riscv64'
+tools='interpreter compiler loader'
+checker_arch() { printf '%s' "$1"; }
+image_for() {
+    case "$1" in
+        x86_32) printf '%s/build/os/fat32-x86_32.img' "$ROOT_DIR" ;;
+        x86_64) printf '%s/build/os/fat32-x86_64.img' "$ROOT_DIR" ;;
+        arm32) printf '%s/build/os/fat32-arm32.img' "$ROOT_DIR" ;;
+        arm64) printf '%s/build/os/fat32-arm64.img' "$ROOT_DIR" ;;
+        riscv32) printf '%s/build/os/fat32-riscv32.img' "$ROOT_DIR" ;;
+        riscv64) printf '%s/build/os/fat32-riscv64.img' "$ROOT_DIR" ;;
+    esac
+}
+emit_cells() {
+    arch=$1 status=$2 evidence=$3 reason=$4
+    for tool in $tools; do
+        printf 'simpleos_fs_toolchain_%s_%s_status=%s\n' "$arch" "$tool" "$status"
+        printf 'simpleos_fs_toolchain_%s_%s_evidence=%s\n' "$arch" "$tool" "$evidence"
+        [ -z "$reason" ] || printf 'simpleos_fs_toolchain_%s_%s_reason=%s\n' "$arch" "$tool" "$reason"
+    done
+}
+
+if [ "$MODE" = self-test ]; then
+    cell_count=0
+    for arch in $arches; do
+        [ -n "$(checker_arch "$arch")" ]
+        [ -n "$(image_for "$arch")" ]
+        for tool in $tools; do
+            case "$arch:$tool" in
+                x86_32:interpreter|x86_32:compiler|x86_32:loader|x86_64:interpreter|x86_64:compiler|x86_64:loader|\
+                arm32:interpreter|arm32:compiler|arm32:loader|arm64:interpreter|arm64:compiler|arm64:loader|\
+                riscv32:interpreter|riscv32:compiler|riscv32:loader|riscv64:interpreter|riscv64:compiler|riscv64:loader) ;;
+                *) echo "simpleos_fs_toolchain_matrix_self_test=fail:unexpected-cell:$arch:$tool"; exit 1 ;;
+            esac
+            cell_count=$((cell_count + 1))
+        done
+    done
+    [ "$cell_count" -eq 18 ] || exit 1
+    echo 'simpleos_fs_toolchain_matrix_schema=1'
+    echo 'simpleos_fs_toolchain_matrix_cell_count=18'
+    echo 'simpleos_fs_toolchain_matrix_phase_1=filesystem-read-and-interpreter-hello'
+    echo 'simpleos_fs_toolchain_matrix_phase_2=compiler-output-and-loader-exec-hello'
+    echo 'simpleos_fs_toolchain_matrix_self_test=pass'
+    exit 0
+fi
+
+mkdir -p "$OUTPUT_DIR"
+live=0
+blocked=0
+failed=0
+selected=0
+for arch in $arches; do
+    [ -z "$ARCH_FILTER" ] || [ "$ARCH_FILTER" = "$arch" ] || continue
+    selected=$((selected + 1))
+    log="$OUTPUT_DIR/$arch.check.log"
+    set +e
+    sh "$CHECKER" --arch="$(checker_arch "$arch")" --image="$(image_for "$arch")" \
+        --output-dir="$OUTPUT_DIR/$arch" >"$log" 2>&1
+    rc=$?
+    set -e
+    status=$(sed -n 's/^simpleos_compiler_filesystem_qemu_status=//p' "$log" | tail -1)
+    reason=$(sed -n 's/^simpleos_compiler_filesystem_qemu_reason=//p' "$log" | tail -1)
+    case "$rc:$status" in
+        0:pass)
+            emit_cells "$arch" pass live-qemu ''
+            live=$((live + 1)) ;;
+        0:contract-pass)
+            emit_cells "$arch" blocked hermetic-contract non-authorizing-contract-evidence
+            blocked=$((blocked + 1)) ;;
+        3:blocked)
+            emit_cells "$arch" blocked none "${reason:-live-route-unavailable}"
+            blocked=$((blocked + 1)) ;;
+        *)
+            emit_cells "$arch" fail none "${reason:-checker-exit-$rc}"
+            failed=$((failed + 1)) ;;
+    esac
+done
+
+echo 'simpleos_fs_toolchain_matrix_schema=1'
+echo "simpleos_fs_toolchain_matrix_selected_arches=$selected"
+echo "simpleos_fs_toolchain_matrix_cell_count=$((selected * 3))"
+echo "simpleos_fs_toolchain_matrix_live_arches=$live"
+echo "simpleos_fs_toolchain_matrix_blocked_arches=$blocked"
+echo "simpleos_fs_toolchain_matrix_failed_arches=$failed"
+if [ "$failed" -ne 0 ]; then
+    echo 'simpleos_fs_toolchain_matrix_status=fail'
+    exit 1
+fi
+if [ "$blocked" -ne 0 ] || [ "$live" -ne "$selected" ]; then
+    echo 'simpleos_fs_toolchain_matrix_status=blocked'
+    exit 3
+fi
+echo 'simpleos_fs_toolchain_matrix_status=pass'

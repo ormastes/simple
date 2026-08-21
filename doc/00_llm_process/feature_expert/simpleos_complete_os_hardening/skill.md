@@ -41,3 +41,10 @@ Keep BLOCKED rows linked to a concrete tracker and resume condition. Update this
 expert, the SimpleOS platform layer expert, architecture/design, guide, and
 state whenever a canonical owner, blocker, evidence schema, or admission rule
 changes. Never substitute the Rust seed or an unadmitted self-hosted runtime.
+# Protocol honesty update (2026-08-21)
+
+For web/SSH hardening, use `doc/07_guide/os/simpleos_server_protocol_status.md`.
+The TCP/TLS HTTP owner rejects unknown ALPN and H3 without H1 downgrade. SFTP
+currently proves only authenticated bounded v3 negotiation; filesystem
+operations and live SFTP remain blocked on an injected VFS capability. Never
+promote `check-simpleos-servers-qemu.shs` while it uses the Rust seed/password.

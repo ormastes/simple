@@ -1,0 +1,86 @@
+# Fail-closed bootstrap evidence contract for 32-bit SimpleOS guests.
+#
+# Bootstrap Stage 1/2 compilers execute on the build host.  ARM32, RV32, and
+# i686 are guest output targets; a cross-built QEMU hello is not evidence that
+# either compiler executed inside the 32-bit guest.
+
+enum SimpleOs32BitGuest:
+    Arm32
+    Riscv32
+    X86_32
+
+pub struct BootstrapHostPhase12EvidenceV1:
+    host_triple: text
+    stage1_kind: text
+    stage1_sha256: text
+    stage2_kind: text
+    stage2_sha256: text
+    stage2_parent_sha256: text
+    stage2_sanity_status: text
+    stub_fallback_disabled: bool
+
+pub struct SimpleOs32BitGuestHelloEvidenceV1:
+    guest: SimpleOs32BitGuest
+    target_triple: text
+    qemu_system: text
+    compiler_sha256: text
+    kernel_sha256: text
+    filesystem_sha256: text
+    executable_sha256: text
+    filesystem_path: text
+    serial_stdout: text
+    exit_code: i64
+
+fn _sha256_is_bound(value: text) -> bool:
+    value.len() == 64 and value != "0000000000000000000000000000000000000000000000000000000000000000"
+
+fn _known_host_triple(host: text) -> bool:
+    host == "x86_64-unknown-linux-gnu" or host == "aarch64-unknown-linux-gnu" or
+        host == "x86_64-apple-darwin" or host == "aarch64-apple-darwin" or
+        host == "x86_64-pc-windows-msvc" or host == "x86_64-unknown-freebsd-elf"
+
+pub fn bootstrap_host_phase12_evidence_v1_valid(evidence: BootstrapHostPhase12EvidenceV1) -> bool:
+    if not _known_host_triple(evidence.host_triple): return false
+    if evidence.stage1_kind != "rust-seed": return false
+    if evidence.stage2_kind != "pure-simple": return false
+    if not _sha256_is_bound(evidence.stage1_sha256): return false
+    if not _sha256_is_bound(evidence.stage2_sha256): return false
+    if evidence.stage2_parent_sha256 != evidence.stage1_sha256: return false
+    if evidence.stage2_sha256 == evidence.stage1_sha256: return false
+    if evidence.stage2_sanity_status != "pass": return false
+    evidence.stub_fallback_disabled
+
+fn _guest_tuple_valid(evidence: SimpleOs32BitGuestHelloEvidenceV1) -> bool:
+    match evidence.guest:
+        SimpleOs32BitGuest.Arm32:
+            evidence.target_triple == "armv7a-unknown-none-eabi" and
+                evidence.qemu_system == "qemu-system-arm"
+        SimpleOs32BitGuest.Riscv32:
+            evidence.target_triple == "riscv32imac-unknown-none-elf" and
+                evidence.qemu_system == "qemu-system-riscv32"
+        SimpleOs32BitGuest.X86_32:
+            evidence.target_triple == "i686-unknown-none" and
+                evidence.qemu_system == "qemu-system-x86_64"
+
+fn _guest_marker(guest: SimpleOs32BitGuest) -> text:
+    match guest:
+        SimpleOs32BitGuest.Arm32: "SIMPLEOS_FS_EXEC_OK arch=arm32 nonce="
+        SimpleOs32BitGuest.Riscv32: "SIMPLEOS_FS_EXEC_OK arch=riscv32 nonce="
+        SimpleOs32BitGuest.X86_32: "SIMPLEOS_FS_EXEC_OK arch=x86_32 nonce="
+
+pub fn simpleos_32bit_cross_phase12_hello_v1_valid(host: BootstrapHostPhase12EvidenceV1, guest: SimpleOs32BitGuestHelloEvidenceV1) -> bool:
+    bootstrap_host_phase12_evidence_v1_valid(host) and _guest_tuple_valid(guest) and
+        guest.compiler_sha256 == host.stage2_sha256 and _sha256_is_bound(guest.kernel_sha256) and
+        _sha256_is_bound(guest.filesystem_sha256) and _sha256_is_bound(guest.executable_sha256) and
+        guest.filesystem_path == "/FSEXEC.ELF" and guest.exit_code == 0 and
+        guest.serial_stdout.contains(_guest_marker(guest))
+
+pub fn simpleos_32bit_target_native_phase12_v1_valid(host: BootstrapHostPhase12EvidenceV1, guest: SimpleOs32BitGuestHelloEvidenceV1) -> bool:
+    # No canonical ARM32/RV32/i686 target-native compiler stage exists today.
+    # Keep this separate from cross-build acceptance and fail closed.
+    false
+
+export SimpleOs32BitGuest, BootstrapHostPhase12EvidenceV1,
+    SimpleOs32BitGuestHelloEvidenceV1, bootstrap_host_phase12_evidence_v1_valid,
+    simpleos_32bit_cross_phase12_hello_v1_valid,
+    simpleos_32bit_target_native_phase12_v1_valid

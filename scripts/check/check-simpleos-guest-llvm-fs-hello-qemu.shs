@@ -1,0 +1,36 @@
+#!/bin/sh
+# Fresh-QEMU gate for the guest-native /usr/bin/{clang,ld.lld,llvm-ar} chain.
+set -eu
+fail() { echo "guest-llvm-qemu: $*" >&2; exit 1; }
+[ "$#" -eq 4 ] || fail "usage: $0 <arm64|riscv64> KERNEL IMAGE PROVISION_RECEIPT"
+arch=$1 kernel=$2 image=$3 receipt=$4
+[ -f "$receipt" ] && [ ! -L "$receipt" ] || fail "provision receipt missing or unsafe"
+grep -Fqx status=pass "$receipt" || fail "provision receipt is not passing"
+grep -Fqx execution_claim=false "$receipt" || fail "provisioning improperly claims execution"
+[ "$(awk -F= '$1=="image_sha256"{print $2}' "$receipt")" = "$(sha256sum "$image" | awk '{print $1}')" ] || fail "image digest mismatch"
+serial=$(mktemp "${TMPDIR:-/tmp}/simpleos-guest-llvm-${arch}.XXXXXX")
+trap 'rm -f "$serial"' EXIT HUP INT TERM
+case "$arch" in
+    arm64)
+        command -v qemu-system-aarch64 >/dev/null 2>&1 || fail "qemu-system-aarch64 missing"
+        set +e
+        timeout -k 5 180 qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 2G -nographic \
+            -drive "file=$image,if=none,id=toolfs,format=raw,readonly=off" \
+            -device virtio-blk-device,drive=toolfs -kernel "$kernel" >"$serial" 2>&1
+        rc=$?; set -e ;;
+    riscv64)
+        command -v qemu-system-riscv64 >/dev/null 2>&1 || fail "qemu-system-riscv64 missing"
+        set +e
+        timeout -k 5 180 qemu-system-riscv64 -machine virt -cpu rv64 -m 2G -nographic \
+            -drive "file=$image,if=none,id=toolfs,format=raw,readonly=off" \
+            -device virtio-blk-device,drive=toolfs -kernel "$kernel" >"$serial" 2>&1
+        rc=$?; set -e ;;
+    *) fail "unsupported architecture: $arch" ;;
+esac
+case "$rc" in 0|124) ;; *) fail "qemu exit=$rc" ;; esac
+target=$(awk -F= '$1=="target"{print $2}' "$receipt")
+grep -Fqx "SMOKE_LLVM_FS_HELLO_OK target=$target clang=/usr/bin/clang lld=/usr/bin/ld.lld llvm_ar=/usr/bin/llvm-ar" "$serial" || {
+    tail -80 "$serial" >&2
+    fail "fresh guest did not produce the exact filesystem toolchain marker"
+}
+echo "guest_llvm_qemu_status=pass target=$target"

@@ -25,8 +25,12 @@ extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_read_bytes(path: text) -> [u8]
 extern fn rt_text_to_bytes(value: text) -> [u8]
 
-val HELLO_C = "/usr/share/test/hello.c"
-val HELLO_OBJ = "/tmp/hello.o"
+val HELLO_C = "/work/hello.c"
+val HELLO_OBJ = "/work/hello.o"
+val HELLO_ELF = "/work/hello.elf"
+val CLANG_BIN = "/usr/bin/clang"
+val LLD_BIN = "/usr/bin/ld.lld"
+val LLVM_AR_BIN = "/usr/bin/llvm-ar"
 val HELLO_RUST_ELF = "/usr/share/test/hello_rust"
 val CORPUS_DIR = "/src/test/bootstrap_corpus"
 val SIMPLE_BIN = "/usr/bin/simple"
@@ -114,29 +118,39 @@ fn step_clang_smoke(have_exec: bool):
     if not have_exec:
         print "SMOKE_CLANG_SKIP reason=no-exec"
         return
-    if not fs.exists("/usr/bin/clang"):
+    if not fs.exists(CLANG_BIN) or not fs.exists(LLD_BIN) or not fs.exists(LLVM_AR_BIN):
         print "SMOKE_CLANG_SKIP reason=missing-clang"
         return
     if not fs.exists(HELLO_C):
         print "SMOKE_CLANG_SKIP reason=missing-source"
         return
-    val compile = process.run(
-        "/usr/bin/clang",
-        [
-            "--target=x86_64-simpleos",
-            "--sysroot=/usr",
-            "-c", HELLO_C,
-            "-o", HELLO_OBJ,
-        ],
-    )
+    val target = env_get("SIMPLEOS_TARGET_TRIPLE")
+    if target != "x86_64-unknown-simpleos" and
+       target != "aarch64-unknown-simpleos" and
+       target != "riscv64gc-unknown-simpleos":
+        print "SMOKE_CLANG_FAIL phase=target"
+        return
+    val compile = process.run(CLANG_BIN, ["-c", HELLO_C, "-o", HELLO_OBJ, "--target", target])
     if compile.exit_code != 0:
         print "SMOKE_CLANG_FAIL phase=compile exit={compile.exit_code}"
         return
-    val nm = process.run("/usr/bin/llvm-nm", [HELLO_OBJ])
-    if nm.exit_code != 0:
-        print "SMOKE_CLANG_FAIL phase=nm exit={nm.exit_code}"
+    val link = process.run(LLD_BIN, [
+        "-T", "/sysrt/simpleos.ld", "/usr/lib/crt0.o", HELLO_OBJ,
+        "-L", "/usr/lib", "-lsimpleos_c", "-lsimpleos_runtime",
+        "-o", HELLO_ELF,
+    ])
+    if link.exit_code != 0:
+        print "SMOKE_CLANG_FAIL phase=link exit={link.exit_code}"
         return
-    print "SMOKE_CLANG_OK"
+    val archive_tool = process.run(LLVM_AR_BIN, ["--version"])
+    if archive_tool.exit_code != 0:
+        print "SMOKE_CLANG_FAIL phase=llvm-ar exit={archive_tool.exit_code}"
+        return
+    val hello = process.run(HELLO_ELF, [])
+    if hello.exit_code != 0 or hello.stdout != "Hello World\n":
+        print "SMOKE_CLANG_FAIL phase=run exit={hello.exit_code}"
+        return
+    print "SMOKE_LLVM_FS_HELLO_OK target={target} clang={CLANG_BIN} lld={LLD_BIN} llvm_ar={LLVM_AR_BIN}"
 
 fn step_rust_smoke(have_exec: bool):
     if not have_exec:

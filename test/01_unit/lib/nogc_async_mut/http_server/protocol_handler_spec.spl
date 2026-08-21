@@ -68,7 +68,7 @@ describe "ALPN extension parsing and protocol dispatch":
 
     Validates parse_alpn_extension on raw ClientHello bytes, the
     negotiate_alpn server-side selection wired into perform_server_handshake,
-    and the protocol_from_alpn dispatch logic for H1, H2, and H3.
+    and the fail-closed protocol_from_alpn dispatch logic for H1 and H2.
     """
 
     it "parses ALPN extension from ClientHello bytes":
@@ -151,14 +151,15 @@ describe "ALPN extension parsing and protocol dispatch":
         val negotiated = negotiate_alpn(ch_extensions_h2_first())
         expect(protocol_handler_label(protocol_from_alpn(negotiated))).to_equal("h2")
 
-    it "returns h3 for h3 ALPN so a TCP connection can be rejected":
-        step("Verify: returns h3 for h3 ALPN so a TCP connection can be rejected")
+    it "rejects h3 and unknown ALPN on the TCP TLS owner":
+        step("Verify: rejects h3 and unknown ALPN on the TCP TLS owner")
         """
-        H3 runs over QUIC/UDP. dispatch_by_alpn closes a TCP connection
-        that negotiated 'h3', so the kind must stay distinguishable from
-        H1 rather than collapsing into the default. negotiate_alpn never
-        selects it on TCP, since 'h3' is not in the server's supported list.
+        H3 runs over QUIC/UDP and this production owner is TCP/TLS. Unknown
+        identifiers are also rejected rather than silently downgraded to H1.
+        negotiate_alpn never selects h3 because it is not supported here.
         """
-        expect(protocol_handler_label(protocol_from_alpn("h3"))).to_equal("h3")
+        expect(protocol_handler_label(protocol_from_alpn("h3"))).to_equal("unsupported")
+        expect(protocol_handler_label(protocol_from_alpn("H2"))).to_equal("unsupported")
+        expect(protocol_handler_label(protocol_from_alpn("acme/1"))).to_equal("unsupported")
         val h3_only: [i64] = [0, 9, 0, 16, 0, 5, 0, 3, 2, 104, 51]
         expect(negotiate_alpn(h3_only)).to_equal("")

@@ -92,6 +92,12 @@ extern char _stack_top[];
  * rt_qemu_exit_success, rt_native_eq/neq, rt_riscv_nvfs_probe). */
 #include "../../common/riscv_common.h"
 
+RuntimeValue rt_qemu_exit_failure(void)
+{
+    *(volatile uint32_t *)SIFIVE_TEST_BASE = 0x3333U;
+    return NIL_VALUE;
+}
+
 static RuntimeValue *runtime_array_inline_items(RuntimeArray *a)
 {
     return (RuntimeValue *)((unsigned char *)a + sizeof(RuntimeArray));

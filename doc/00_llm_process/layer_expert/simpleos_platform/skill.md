@@ -31,3 +31,10 @@ Canonical feature knowledge is in
 The full cross-subsystem hardening contract and current fail-closed boundary are
 also recorded in
 `doc/00_llm_process/feature_expert/simpleos_complete_os_hardening/skill.md`.
+# Server protocol boundary update (2026-08-21)
+
+SimpleOS protocol status is tracked in
+`doc/07_guide/os/simpleos_server_protocol_status.md`. Platform adapters must not
+turn unknown TLS ALPN into H1, advertise H3 without QUIC, or give SFTP ambient
+host filesystem access. Live server evidence requires admitted target tooling
+and configured credentials.

@@ -56,6 +56,7 @@ use std.fs_driver.extension.{Extension, DirectIoExt}
 use std.fs_driver.direct_io.{DirectIoRequest, DirectIoBatchRequest, DirectIoResult, DirectIoExtent, direct_io_read_request, direct_io_write_request, direct_io_read_batch_request, direct_io_write_batch_request, direct_io_validate_batch}
 use std.io.dma.{DmaDir, DmaOwner, DmaCachePolicy, dma_alloc, dma_free, dma_buffer_to_shared}
 use std.fs_driver.types.{Path, MountOptions, OpenFlags, FileHandle}
+use std.fs_driver.ops.{FsDriver}
 use os.kernel.types.fs_types.{FileFlags, DirEntry, FsNodeKind}
 use std.fs_driver.nvfs_hosted_driver.{NvfsHostedDriver}
 use os.kernel.log.klog_api.{log_raw_println}
@@ -1344,10 +1345,29 @@ pub fn vfs_boot_init_riscv64_virtio_fat32() -> bool:
     if adapter_result.is_err():
         log_raw_println("[vfs-init] RV64 VirtIO-BLK unavailable: {adapter_result.unwrap_err()}")
         return false
-    var root = Fat32Core.new(adapter_result.unwrap())
+    val adapter = adapter_result.unwrap()
+    var root = Fat32Core.new(adapter)
     val mount_result = root.mount("", "")
     if mount_result.is_err():
         log_raw_println("[vfs-init] RV64 VirtIO FAT32 mount failed: {mount_result.unwrap_err()}")
+        return false
+
+    # The legacy VFS view above is still used by desktop/font consumers.  The
+    # executable loader, however, accepts authority only from an owned
+    # MountTable ExecuteOpenBinding.  Mount the exact same block device bytes
+    # through the canonical FsDriver interface; never copy file bytes into a
+    # RAM filesystem or synthesize a binding from a pathname.
+    var execute_driver = FsFat32Driver.new("riscv64-virtio-fat32", adapter)
+    val execute_driver_mount = execute_driver.mount(MountOptions.default())
+    if execute_driver_mount.is_err():
+        log_raw_println("[vfs-init] RV64 canonical FAT32 driver mount failed")
+        _vfs_boot_reset_storage_state()
+        return false
+    val canonical_mount = g_mount_table.mount(
+        "/", DriverInstance.Fat32(execute_driver), MountOptions.default())
+    if canonical_mount.is_err():
+        log_raw_println("[vfs-init] RV64 canonical MountTable mount failed")
+        _vfs_boot_reset_storage_state()
         return false
 
     g_root_fat32 = Some(root)
@@ -1985,8 +2005,8 @@ fn vfs_boot_nvme_assign_discovered_user_namespace_hardware_driver_instance(
     val release_probe = vfs_boot_nvme_release_active_lease(probe_lease)
     if shared_interface.is_err():
         return Err("nvme-user-assign-shared-interface-not-ready:" + shared_interface.unwrap_err())
-    if not release_probe:
-        return Err("nvme-user-assign-probe-release-failed")
+    if release_probe != "ready":
+        return Err("nvme-user-assign-probe-release-failed:" + release_probe)
     vfs_boot_nvme_assign_user_namespace_hardware_driver_instance(
         name,
         evidence,

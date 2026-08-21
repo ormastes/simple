@@ -6,6 +6,7 @@
 
 use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.loader.byte_utils.{byte_at, lb_read_u16_le, lb_read_u32_le, lb_read_u64_le, in_range}
+use std.common.contracts.execution.simpleos_executable_admission_v1.{ExecutableLoadRangeV1}
 
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 @cfg(arm64)
@@ -384,6 +385,33 @@ pub fn elf_admit_executable(data: [u8], arch: Architecture) -> Result<(), text>:
         return Err("ELF entry is not inside an executable PT_LOAD segment")
     Ok(())
 
+pub struct ExecutableElfLayoutV1:
+    entry_point: u64
+    load_ranges: [ExecutableLoadRangeV1]
+
+pub fn elf_authenticated_layout_v1(
+    data: [u8], arch: Architecture
+) -> Result<ExecutableElfLayoutV1, text>:
+    """Parse the authoritative entry/PT_LOAD layout from authenticated bytes."""
+    elf_admit_executable(data, arch)?
+    val image = load_user_executable(data, arch)?
+    var ranges: [ExecutableLoadRangeV1] = []
+    for segment in image.segments:
+        if segment.file_size == 0u64 or segment.mem_size == 0u64:
+            continue
+        if ranges.len() >= 64:
+            return Err("ELF executable has too many PT_LOAD segments")
+        ranges.push(ExecutableLoadRangeV1(
+            file_offset: segment.file_offset,
+            file_size: segment.file_size,
+            virtual_address: segment.virt_addr,
+            memory_size: segment.mem_size,
+            writable: (segment.flags & 2u32) != 0u32,
+            executable: (segment.flags & 1u32) != 0u32))
+    if ranges.len() == 0:
+        return Err("ELF executable has no non-empty PT_LOAD segments")
+    Ok(ExecutableElfLayoutV1(entry_point: image.entry, load_ranges: ranges))
+
 fn load_riscv_executable(data: [u8], arch: Architecture) -> Result<ElfImage, text>:
     load_user_executable(data, arch)
 
@@ -433,4 +461,4 @@ fn load_user_executable_unchecked(data: [u8], arch: Architecture) -> ElfImage:
         case _:
             _load_user_executable_arm64_unchecked(data)
 
-export elf_admit_executable
+export ExecutableElfLayoutV1, elf_admit_executable, elf_authenticated_layout_v1

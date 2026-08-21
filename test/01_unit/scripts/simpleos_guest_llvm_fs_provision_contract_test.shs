@@ -1,0 +1,42 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+cd "$root"
+provision=scripts/os/provision_simpleos_guest_llvm_fs.shs
+live=scripts/check/check-simpleos-guest-llvm-fs-hello-qemu.shs
+media=scripts/os/make_os_disk.c
+[ -x "$provision" ] && [ -x "$live" ]
+grep -Fq 'guest_native' "$provision"
+grep -Fq 'target/bootstrap' "$provision"
+grep -Fq 'execution_claim=false' "$provision"
+grep -Fq 'Type:[[:space:]]+EXEC' "$provision"
+grep -Fq 'if readelf -l "$path" | grep -q '\''INTERP'\''' "$provision"
+grep -Fq 'SMOKE_LLVM_FS_HELLO_OK target=' "$live"
+grep -Fq 'SIMPLEOS_LLVM_AR_BINARY' "$media"
+grep -Fq '"clang++"' "$media"
+grep -Fq '"llvm-ar"' "$media"
+grep -Fq '"WORK       "' "$media"
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/guest-llvm-provision-test.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+printf kernel >"$tmp/kernel"
+digest=$(sha256sum /bin/true | awk '{print $1}')
+{
+    echo status=pass
+    echo target=aarch64-unknown-simpleos
+    echo guest_native=true
+    echo builder=/usr/bin/clang
+    echo clang_sha256="$digest"
+    echo lld_sha256="$digest"
+    echo llvm_ar_sha256="$digest"
+} >"$tmp/build.env"
+mkdir -p "$tmp/sysroot"
+if "$provision" arm64 "$tmp/kernel" /bin/true /bin/true /bin/true \
+    "$tmp/sysroot" "$tmp/build.env" "$tmp/image" "$tmp/provision.env" \
+    >"$tmp/out" 2>&1; then
+    echo "FAIL: host ELF was admitted as ARM64 guest-native LLVM" >&2
+    exit 1
+fi
+grep -Fq 'clang machine=' "$tmp/out"
+[ ! -e "$tmp/image" ] && [ ! -e "$tmp/provision.env" ]
+echo simpleos_guest_llvm_fs_provision_contract=pass
