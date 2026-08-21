@@ -339,6 +339,35 @@ fn mark_placeholder_pattern_tree(eid: i64, expr_limit: i64):
         mark_placeholder_pattern_tree(children[child_index], expr_limit)
         child_index = child_index + 1
 
+fn module_has_placeholder_ident(limit: i64) -> bool:
+    """Cheap exact precondition for the two post-interpolation transform passes.
+
+    A placeholder is ALWAYS an `EXPR_IDENT` whose name is `_` or `_N`
+    (`detect_placeholder_mode` above is the authority, and every other tag it
+    handles only recurses toward such an ident). Both passes below can change a
+    call argument only through `transform_placeholder_lambda`, which returns a
+    different node only when the argument's subtree holds one. So a module with
+    no placeholder ident anywhere is a guaranteed no-op for them.
+
+    Measured 2026-08-21 on `src/compiler/80.driver/driver_types.spl`: ZERO
+    placeholder args, yet `transform_placeholder_call_args_after_interpolation`
+    still cost 4.4 s of a 110 s parse -- it allocated an `initial_expr_count`
+    -long `[bool]` marks array one `.push` at a time, walked every arm pattern,
+    then walked the whole expression arena rebuilding argument arrays, all to
+    change nothing. This scan replaces that with ONE pass of two direct
+    module-global array reads per node and no allocation.
+    See doc/08_tracking/bug/frontend_parse_per_file_cost_2026-08-21.md
+    """
+    var i = 0
+    val n = if limit < expr_tag.len(): limit else: expr_tag.len()
+    while i < n:
+        if expr_tag[i] == EXPR_IDENT:
+            val name = expr_s_val[i]
+            if name == "_" or is_numbered_placeholder(name):
+                return true
+        i = i + 1
+    false
+
 fn transform_placeholder_call_args_after_interpolation():
     """Apply placeholder shorthand after string interpolation promotion.
 
@@ -350,6 +379,9 @@ fn transform_placeholder_call_args_after_interpolation():
     allocates new nodes, which must not be walked again by this pass.
     """
     val initial_expr_count = expr_tag.len()
+    # PERF: exact no-op precondition. See module_has_placeholder_ident above.
+    if not module_has_placeholder_ident(initial_expr_count):
+        return
     # Build the marks array in a LOCAL and assign the module-global ONCE. Under
     # the Rust-seed interpreter, `.push()` on a module-global array lands in a
     # per-call copy while `.len()` in a while condition (and later indexed
@@ -865,8 +897,11 @@ fn transform_interpolated_placeholder_args(start_expr: i64):
     Must run after expand_string_interpolations(), which is the only point at
     which such an argument stops being an opaque string literal.
     """
-    val prev = set_placeholder_transform_suppressed(false)
     val limit = expr_count()
+    # PERF: same exact no-op precondition as the pass above.
+    if not module_has_placeholder_ident(limit):
+        return
+    val prev = set_placeholder_transform_suppressed(false)
     var idx = start_expr
     while idx < limit:
         val tag = expr_tag[idx]

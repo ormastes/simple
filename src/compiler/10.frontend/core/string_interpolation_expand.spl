@@ -32,6 +32,41 @@ use compiler.frontend.desugar.placeholder_lambda.{
     transform_interpolated_placeholder_args
 }
 
+extern fn rt_env_get(key: text) -> text
+extern fn rt_time_now_unix_micros() -> i64
+
+# Level-gated operation counters (DEFAULT OFF; SIMPLE_PARSE_PHASE_PROFILE=1).
+# These count OPERATIONS, not milliseconds: how many string literals each pass
+# looks at, and how many of them pay a real lex+parse SUB-PARSE. That ratio is
+# the mechanism this file's performance work is pinned on -- a timing number
+# alone cannot tell a slow machine from a pass doing avoidable work.
+# NOT a throwaway probe -- do not delete.
+var _si_prof_cached: i64 = -1
+var si_stat_literals_seen: i64 = 0
+var si_stat_subparses: i64 = 0
+var si_stat_ph_args_seen: i64 = 0
+var si_stat_nodes_walked: i64 = 0
+var si_stat_subparse_us: i64 = 0
+
+fn si_prof_enabled() -> bool:
+    if _si_prof_cached < 0:
+        _si_prof_cached = if (rt_env_get("SIMPLE_PARSE_PHASE_PROFILE") ?? "") == "1": 1 else: 0
+    _si_prof_cached == 1
+
+pub fn si_stats_reset():
+    si_stat_literals_seen = 0
+    si_stat_subparses = 0
+    si_stat_ph_args_seen = 0
+    si_stat_nodes_walked = 0
+    si_stat_subparse_us = 0
+
+pub fn si_stat_subparse_count() -> i64: si_stat_subparses
+pub fn si_stat_literal_count() -> i64: si_stat_literals_seen
+
+pub fn si_stats_report(tag: text):
+    if si_prof_enabled():
+        print("PARSESTAT\t{tag}\tliterals\t{si_stat_literals_seen}\tsubparses\t{si_stat_subparses}\tph_args\t{si_stat_ph_args_seen}\tnodes_walked\t{si_stat_nodes_walked}\tsubparse_us\t{si_stat_subparse_us}")
+
 fn interpolation_fragment_is_brace_literal(inner: text) -> bool:
     """Bug interp_brace_literal_collides_with_string_interpolation: a `{...}`
     region whose whole content is ITSELF a brace-enclosed literal is literal
@@ -67,6 +102,8 @@ fn parse_interpolation_fragment(inner: text) -> i64:
     # new expression nodes append to the same AST arena.
     if interpolation_fragment_is_brace_literal(inner):
         return -1
+    si_stat_subparses = si_stat_subparses + 1
+    val _sp_t0 = if si_prof_enabled(): rt_time_now_unix_micros() else: 0
     val had_error_before = parser_has_errors()
     val diagnostics_before = parser_diagnostics_suppressed_get()
     val placeholder_before = set_placeholder_transform_suppressed(true)
@@ -82,6 +119,8 @@ fn parse_interpolation_fragment(inner: text) -> i64:
     parser_set_had_error(had_error_before)
     parser_diagnostics_suppressed_set(diagnostics_before)
     set_placeholder_transform_suppressed(placeholder_before)
+    if si_prof_enabled():
+        si_stat_subparse_us = si_stat_subparse_us + (rt_time_now_unix_micros() - _sp_t0)
     if not clean:
         return -1
     idx
@@ -183,6 +222,7 @@ fn expand_interpolated_placeholder_call_args(start_expr: i64):
                 val a = args[i]
                 if (a >= 0 and expr_get_tag(a) == EXPR_STRING_LIT and
                         expr_get_int(a) == 0 and expr_get_str(a).contains("_")):
+                    si_stat_ph_args_seen = si_stat_ph_args_seen + 1
                     val value = expr_get_str(a)
                     # PERF (exact): the ONLY outcome this walk acts on is
                     # `expr_has_placeholder(part)`, and a placeholder is spelled
@@ -214,7 +254,9 @@ fn expand_interpolated_placeholder_call_args(start_expr: i64):
 fn expand_string_interpolations(start_expr: i64):
     var idx = start_expr
     while idx < expr_count():
+        si_stat_nodes_walked = si_stat_nodes_walked + 1
         if expr_get_tag(idx) == EXPR_STRING_LIT and expr_get_int(idx) == 0:
+            si_stat_literals_seen = si_stat_literals_seen + 1
             val value = expr_get_str(idx)
             val parts = parse_string_interpolation_parts(value)
             if parts.len() > 0:

@@ -134,6 +134,67 @@ directions across repeat runs, so the honest statement is that the fixes remove
 provably-unnecessary work and remove the superlinear term, not that they
 deliver a specific speedup on that file.
 
+## Round 2 (same day): operation counters, and what the passes were really doing
+
+Timing alone could not say whether the interpolation passes were doing
+avoidable work or merely running on a slow host, so the profile gained
+OPERATION counters (`PARSESTAT`, same `SIMPLE_PARSE_PHASE_PROFILE=1` gate):
+string literals seen, real `lex_init_with_path` + `parse_expr` sub-parses,
+placeholder-bearing call arguments, nodes walked, and microseconds spent inside
+sub-parses. The `placeholder` bucket was also split into its two functions.
+
+`src/compiler/80.driver/driver_types.spl` (63 KB), after round 1:
+
+| counter | value |
+|---|---|
+| string literals seen | 225 |
+| sub-parses | 211 |
+| placeholder call args | **0** |
+| nodes walked | 3,446 |
+| µs inside sub-parses | 17,663,691 of the 19,279,708 µs `interp` phase (**92%**) |
+
+Two conclusions, both of which contradict the obvious guesses:
+
+- **`expand_string_interpolations` is NOT doing avoidable work.** 211
+  sub-parses for 225 literals is one per `{...}` region, each exactly once; the
+  walk itself is 3,446 nodes (~1.6 s, i.e. cross-module call overhead at the
+  same ~0.5 ms/node the rest of the interpreter runs at) and 92% of the phase
+  is inside genuine fragment parsing. It is proportional. There is no
+  re-walking of the full expr table per literal and no per-char rebuild left.
+- **The placeholder passes were doing work on a module with ZERO placeholders.**
+  `ph_args = 0`, yet `transform_placeholder_call_args_after_interpolation` cost
+  3.34 s: it allocated an `initial_expr_count`-long `[bool]` marks array one
+  `.push` at a time, walked every arm pattern, then walked the whole expression
+  arena rebuilding argument arrays — to change nothing.
+
+### D4 — placeholder transform passes ran unconditionally
+
+`src/compiler/10.frontend/desugar/placeholder_lambda.spl`,
+`transform_placeholder_call_args_after_interpolation` and
+`transform_interpolated_placeholder_args`.
+
+A placeholder is always an `EXPR_IDENT` named `_` or `_N`
+(`detect_placeholder_mode` is the authority; every other tag it handles only
+recurses toward such an ident), and both passes can change an argument only
+through `transform_placeholder_lambda`, which returns a different node only
+when the subtree holds one. So "no placeholder ident anywhere in the module" is
+an EXACT no-op precondition. Added `module_has_placeholder_ident(limit)`: one
+pass of two direct module-global array reads per node, no allocation, no
+cross-module call.
+
+| `driver_types.spl` phase | before D4 | after D4 |
+|---|---|---|
+| `transform_placeholder_call_args_after_interpolation` | 3,341,323 µs | **42,875 µs** (78x) |
+| `expand_interpolated_placeholder_call_args` | 869,058 µs | 330,292 µs |
+| `expand_string_interpolations` | 19,279,708 µs | 8,215,660 µs (unchanged in share) |
+| `parse_module_body` (load normaliser) | 103,377,959 µs | 48,491,817 µs |
+
+Normalised against `parse_module_body` in the same run (this host's load swings
+2x between runs of identical code, so shares are the honest unit), the
+placeholder transform fell from **3.23% of parse time to 0.088%** — a 37x
+reduction in share. `expand_string_interpolations` held its share, exactly as
+the counters predicted: its cost is real work.
+
 ## Still open
 
 `parse_module_body` remains the dominant term (70-91% of parse time in every
@@ -154,7 +215,14 @@ guard.
 
 ## Reproduce / regression pin
 
-`test/05_perf/frontend_interpolation_scaling_spec.spl` — doubles the number of
-call-argument interpolated string literals in a synthetic module and asserts
-the parse cost does not more than triple. Pins the MECHANISM (superlinear
-scaling), not a machine-specific millisecond number.
+`test/05_perf/frontend_interpolation_scaling_spec.spl`, two examples:
+
+1. **Scaling.** Doubles the number of call-argument interpolated string
+   literals and asserts parse cost does not more than triple (3.23 pre-fix ->
+   1.78/1.79 post). Pins the superlinearity, not a machine-specific number.
+2. **Sub-parse count.** Asserts that a 10-function module with 30 literals and
+   60 `{...}` regions performs **exactly 60** sub-parses — one per region and
+   not one more — read from the `si_stat_subparse_count()` counter. This is the
+   pin a wall-clock bound cannot be: it distinguishes avoidable work from a
+   slow host, and it is the counter that proved
+   `expand_string_interpolations` innocent and the placeholder passes guilty.
