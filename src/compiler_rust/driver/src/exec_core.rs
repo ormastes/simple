@@ -116,12 +116,65 @@ impl ExecutionMode {
     /// the value was accepted and discarded. `wasm` is now a real mode, so the
     /// wasm lane is selectable rather than merely spellable.
     pub fn parse_str(s: &str) -> Self {
+        Self::parse_str_checked(s).unwrap_or(ExecutionMode::Jit)
+    }
+
+    /// Every accepted spelling of `SIMPLE_EXECUTION_MODE`, in the order shown
+    /// to the user when a value is rejected.
+    /// Kept deliberately in sync with the pure-Simple CLI's own list in
+    /// `src/app/cli/_CliMain/args_and_os_commands.spl` (~:331-345), which
+    /// already recognised a LARGER set than this parser did. Rejecting a mode
+    /// that the Simple lane accepts and documents would break supported
+    /// workflows, so `interpret-optimized` and `vhdl` are accepted here too.
+    pub const VALID_MODES: &'static [&'static str] = &[
+        "jit",
+        "interpret",
+        "interpreter",
+        "interpret-optimized",
+        "cranelift",
+        "llvm",
+        "vhdl",
+        "wasm",
+        "wasm32",
+        "wasi",
+        "wasm32-wasi",
+    ];
+
+    /// Parse an execution-mode string, rejecting unknown values.
+    ///
+    /// Why this is fallible: the old `parse_str` mapped `_ => Jit`, so ANY
+    /// unrecognised value silently selected the JIT — the exact opposite of
+    /// what someone typing `SIMPLE_EXECUTION_MODE=interp` intends. That defect
+    /// produced a measured-and-published "interpreter" number on 2026-08-21
+    /// that was really a JIT run (0.86 GB / 15.4s, versus the true interpreter
+    /// figure of 0.69 GB / 338s); the only reason it was caught is that the
+    /// wall time matched the JIT run too closely to be a coincidence. A silent
+    /// fallback on a mode selector cannot be distinguished from a working one
+    /// by looking at the output, so it must fail loudly instead.
+    ///
+    /// Note `"jit"` is now listed explicitly. It previously "worked" only by
+    /// falling through the catch-all, so it was indistinguishable from a typo.
+    pub fn parse_str_checked(s: &str) -> Result<Self, String> {
         match s {
-            "interpret" | "interpreter" => ExecutionMode::Interpret,
-            "cranelift" => ExecutionMode::CraneliftJit,
-            "llvm" => ExecutionMode::LlvmJit,
-            "wasm" | "wasm32" | "wasi" | "wasm32-wasi" => ExecutionMode::Wasm,
-            _ => ExecutionMode::Jit,
+            "jit" => Ok(ExecutionMode::Jit),
+            // `interpret-optimized` is an INTERPRETER mode: the Simple CLI sets
+            // force_interpret=true for it and only varies interpreter_mode.
+            // This parser used to route it to the JIT via the catch-all, which
+            // is the same silent-substitution bug being fixed here, so it is
+            // corrected rather than preserved.
+            "interpret" | "interpreter" | "interpret-optimized" => Ok(ExecutionMode::Interpret),
+            // `vhdl` selects a BACKEND, not an execution lane; the Simple CLI
+            // handles it by setting backend="vhdl". There is no Vhdl variant in
+            // this enum, so accept the value (rather than hard-failing a
+            // supported mode) and keep today's JIT execution lane.
+            "vhdl" => Ok(ExecutionMode::Jit),
+            "cranelift" => Ok(ExecutionMode::CraneliftJit),
+            "llvm" => Ok(ExecutionMode::LlvmJit),
+            "wasm" | "wasm32" | "wasi" | "wasm32-wasi" => Ok(ExecutionMode::Wasm),
+            other => Err(format!(
+                "unknown SIMPLE_EXECUTION_MODE={other:?}; valid values are: {}",
+                Self::VALID_MODES.join(", ")
+            )),
         }
     }
 
@@ -163,9 +216,20 @@ impl ExecCore {
     pub fn with_gc_and_provider(gc: GcRuntime, provider: Arc<dyn RuntimeSymbolProvider>) -> Self {
         let gc = Arc::new(gc);
         // Check SIMPLE_EXECUTION_MODE env var for default mode
-        let mode = std::env::var("SIMPLE_EXECUTION_MODE")
-            .map(|s| ExecutionMode::parse_str(&s))
-            .unwrap_or(ExecutionMode::Jit); // JIT default (Stage 2+)
+        // Fail closed on a bad mode rather than silently running the JIT: an
+        // unrecognised value here is always a typo or a stale script, and
+        // silently substituting the default produces results that are labelled
+        // as one lane but measured on another. See parse_str_checked.
+        let mode = match std::env::var("SIMPLE_EXECUTION_MODE") {
+            Ok(s) => match ExecutionMode::parse_str_checked(&s) {
+                Ok(m) => m,
+                Err(msg) => {
+                    eprintln!("error: {msg}");
+                    std::process::exit(2);
+                }
+            },
+            Err(_) => ExecutionMode::Jit, // JIT default (Stage 2+)
+        };
         Self {
             loader: SmfLoader::new(),
             gc_alloc: gc.clone(),
@@ -1828,4 +1892,96 @@ fn run_module_init(module: &LoadedModule) -> Result<(), String> {
     };
     init();
     Ok(())
+}
+
+#[cfg(test)]
+mod execution_mode_validation_tests {
+    use super::ExecutionMode;
+
+    /// Every documented spelling must parse, and must parse to the lane its
+    /// name promises. The `interpret`/`interpreter` pair is the one that
+    /// actually caused a mismeasurement, so it is asserted explicitly.
+    #[test]
+    fn valid_modes_all_parse_to_their_named_lane() {
+        assert_eq!(ExecutionMode::parse_str_checked("jit"), Ok(ExecutionMode::Jit));
+        assert_eq!(
+            ExecutionMode::parse_str_checked("interpret"),
+            Ok(ExecutionMode::Interpret)
+        );
+        assert_eq!(
+            ExecutionMode::parse_str_checked("interpreter"),
+            Ok(ExecutionMode::Interpret)
+        );
+        assert_eq!(
+            ExecutionMode::parse_str_checked("cranelift"),
+            Ok(ExecutionMode::CraneliftJit)
+        );
+        assert_eq!(ExecutionMode::parse_str_checked("llvm"), Ok(ExecutionMode::LlvmJit));
+        // interpret-optimized is an interpreter mode, not a JIT mode.
+        assert_eq!(
+            ExecutionMode::parse_str_checked("interpret-optimized"),
+            Ok(ExecutionMode::Interpret)
+        );
+        assert_eq!(ExecutionMode::parse_str_checked("vhdl"), Ok(ExecutionMode::Jit));
+        for w in ["wasm", "wasm32", "wasi", "wasm32-wasi"] {
+            assert_eq!(ExecutionMode::parse_str_checked(w), Ok(ExecutionMode::Wasm));
+        }
+    }
+
+    /// Every value advertised by VALID_MODES must actually parse, so the error
+    /// message can never list a spelling the parser rejects.
+    #[test]
+    fn advertised_valid_modes_are_all_accepted() {
+        for m in ExecutionMode::VALID_MODES {
+            assert!(
+                ExecutionMode::parse_str_checked(m).is_ok(),
+                "VALID_MODES advertises {m:?} but the parser rejects it"
+            );
+        }
+    }
+
+    /// The regression itself: `interp` is a plausible abbreviation that is NOT
+    /// a valid value, and it must be rejected rather than silently yielding the
+    /// JIT. This exact typo produced a published "interpreter" measurement that
+    /// was really a JIT run on 2026-08-21.
+    #[test]
+    fn unknown_mode_is_rejected_not_silently_jit() {
+        let err = ExecutionMode::parse_str_checked("interp")
+            .expect_err("`interp` must be rejected, not silently mapped to JIT");
+        assert!(err.contains("interp"), "error must name the bad value: {err}");
+        assert!(
+            err.contains("interpret"),
+            "error must list the valid values so the typo is fixable: {err}"
+        );
+    }
+
+    /// The pure-Simple CLI keeps its own list of recognised modes in
+    /// src/app/cli/_CliMain/args_and_os_commands.spl. If this parser rejects a
+    /// mode that lane accepts, a documented workflow dies at exit code 2, so
+    /// every mode named in the Simple CLI's warning text must parse here.
+    #[test]
+    fn accepts_every_mode_the_pure_simple_cli_recognises() {
+        for m in [
+            "interpret",
+            "interpreter",
+            "interpret-optimized",
+            "jit",
+            "cranelift",
+            "llvm",
+            "vhdl",
+        ] {
+            assert!(
+                ExecutionMode::parse_str_checked(m).is_ok(),
+                "pure-Simple CLI accepts {m:?} but this parser rejects it"
+            );
+        }
+    }
+
+    /// Neither an empty value nor arbitrary junk may select a lane.
+    #[test]
+    fn empty_and_junk_modes_are_rejected() {
+        assert!(ExecutionMode::parse_str_checked("").is_err());
+        assert!(ExecutionMode::parse_str_checked("JIT").is_err(), "match is case-sensitive");
+        assert!(ExecutionMode::parse_str_checked("native").is_err());
+    }
 }

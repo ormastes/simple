@@ -124,6 +124,69 @@ Default off; costs one env lookup at exit when unset. Mechanism test: `[mem]`
 line count on run (a) goes **0 -> 36**. Peak RSS unchanged (451 MB -> 453 MB),
 i.e. the instrument does not perturb the thing it measures.
 
+## ANSWERED 2026-08-21: where the parse shard's other ~3 GB is
+
+The apparent contradiction — a `[parse-shard]` worker handling ~80 files sits at
+3.4-3.6 GB, while measured parse retention is 1.53 MB/module (~120 MB for a
+shard) and a base `lint` process is 0.44 GB — is resolved. **There is no
+contradiction, because the 3 GB is not retention at all.**
+
+Probe: 2-shard build, `--threads 2`, `SIMPLE_CACHE_SCOPE=memshard`,
+`SIMPLE_MEM_TRACE=1`, seed `/mnt/data/seedperf/simple.mem`.
+
+**It is a fixed startup cost, not accumulation.** Both shards reached 3.35 GB
+within 45 seconds of launch, and RSS then stayed FLAT while the parse counter
+went from 63 to 467:
+
+| parse lines emitted | shard 0 RSS |
+|---|---|
+| 63 | 3.36 GB |
+| 221 | 3.42 GB |
+| 319 | 3.33 GB |
+| 467 | 3.37 GB |
+
+Flat within noise. That alone refutes two of the four hypothesised candidates:
+sources + flat pools for all 667 modules, and front-end cache blobs kept after
+write, would both grow as parsing proceeds.
+
+The census attributes it exactly. Per shard process at exit:
+
+```
+[mem] process exit live=2431.6MB peak=2997.7MB rss=3466.5MB
+      allocs=399320094 total_alloc=70022.8MB
+[mem] phases: module_loads=662 source=11.0MB ast_items=15952
+      parse_retained=391.2MB eval_retained=2102.8MB
+      parse_bytes_per_source_byte=35.6 env_entries=949861
+[mem] globals census: module_envs=667 import_bindings=927167
+```
+
+**`module_loads=662` and `module_envs=667` in a shard that parses ~80 files.**
+Every shard loads and evaluates the entire compiler closure, because each shard
+IS a full compiler instance — the seed running the pure-Simple compiler. The
+breakdown of the 3.35 GB:
+
+- **`eval_retained` = 2.10 GB** — dominant. Loading/evaluating all 662 compiler
+  modules.
+- `parse_retained` = 0.39 GB.
+- 927,167 import bindings and 949,861 env entries, versus 48,646 / 53,227 in a
+  base `lint` process — **19x**, which is the whole difference between 0.44 GB
+  and 3.35 GB.
+
+The shard's own ~80 files of work is a rounding error on top of this.
+
+**Not fixed here, and it is not a retention bug.** Nothing is being held past
+its usefulness: the shard needs the compiler loaded in order to be a compiler.
+The waste is structural — 8 shards x ~2.5 GB of *identical* compiler closure is
+~20 GB of the ~27 GB an 8-way build costs, duplicated once per process. Removing
+it means sharing one loaded closure across shards (threads rather than
+processes, or a shared/`fork`-inherited image), which is an architecture change
+and is out of scope under the standing constraint.
+
+The cheap operational lever, available today with no code change: **shard count
+costs ~2.5 GB of fixed overhead each**, so the RSS of a build is roughly
+`0.9 GB + 2.5 GB x threads`. Choose `--threads` against available memory, not
+against core count.
+
 ## Open: per-module env/export materialisation
 
 With the census working, run (a) attributes retention to per-module environments
