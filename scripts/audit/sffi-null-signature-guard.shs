@@ -299,7 +299,7 @@ aes_handler_region=$(sed -n \
     '/pub fn rt_aes128_encrypt_block_pure(/,/pub fn rt_tls13_aes256_gcm_encrypt(/p' \
     "$root/src/compiler_rust/compiler/src/interpreter_extern/simd.rs")
 if printf '%s\n' "$aes_handler_region" | rg -q \
-    'unwrap_or\(\[0u8; 16\]\)|return Ok\(Value::array\(vec!\[\]\)\)'; then
+    'unwrap_or\(\[0u8; 16\]\)|unwrap_or_default\(\)|return Ok\(Value::array\(vec!\[\]\)\)|InvalidInput => out = Vec::new\(\)'; then
     echo "SFFI lint: interpreter AES bridge fabricates empty/zero output on failure" >&2
     failed=1
 fi
@@ -348,6 +348,19 @@ do
 done
 require_fixed 'runtime_symbol_table_signature_contracts_resolve_exact_providers' \
     src/compiler_rust/runtime/src/lib.rs
+
+for symbol in \
+    rt_tls13_aes128_gcm_decrypt \
+    rt_tls13_aes256_gcm_encrypt \
+    rt_tls13_aes256_gcm_decrypt
+do
+    require_fixed "RuntimeFuncSpec::new(\"$symbol\"" \
+        src/compiler_rust/compiler/src/codegen/runtime_sffi.rs
+    require_fixed "pub unsafe extern \"C\" fn $symbol" \
+        src/compiler_rust/runtime/src/value/aes.rs
+done
+require_fixed 'tls_aes_gcm_bridges_reject_invalid_shapes_instead_of_empty_payloads' \
+    src/compiler_rust/compiler/src/interpreter_extern/simd.rs
 
 if [ "$failed" -ne 0 ]; then
     exit 1

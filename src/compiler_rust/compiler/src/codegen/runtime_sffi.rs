@@ -301,6 +301,12 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_ecdsa_p256_sign", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_ecdsa_p256_sign_checked", &[I64, I64], &[I64]),
     // =========================================================================
+    // Implemented TLS 1.3 AES-GCM payload bridges
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_tls13_aes128_gcm_decrypt", &[I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_tls13_aes256_gcm_encrypt", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_tls13_aes256_gcm_decrypt", &[I64, I64, I64, I64, I64], &[I64]),
+    // =========================================================================
     // AOP runtime operations
     // =========================================================================
     RuntimeFuncSpec::new("rt_aop_invoke_around", &[I64, I64, I64, I64, I64], &[I64]),

@@ -310,7 +310,9 @@ pub fn rt_tls13_aes128_gcm_encrypt(args: &[Value]) -> Result<Value, CompileError
     let nonce = expect_byte_array("rt_tls13_aes128_gcm_encrypt", &args[1])?;
     let plaintext = expect_byte_array("rt_tls13_aes128_gcm_encrypt", &args[2])?;
     let aad = expect_byte_array("rt_tls13_aes128_gcm_encrypt", &args[3])?;
-    let result = aes128_gcm_encrypt_bytes(&key, &nonce, &plaintext, &aad).unwrap_or_default();
+    let result = aes128_gcm_encrypt_bytes(&key, &nonce, &plaintext, &aad).ok_or_else(|| {
+        CompileError::runtime("rt_tls13_aes128_gcm_encrypt rejected its inputs".to_string())
+    })?;
     Ok(Value::array(
         result.into_iter().map(|byte| Value::Int(byte as i64)).collect(),
     ))
@@ -371,7 +373,9 @@ pub fn rt_tls13_aes256_gcm_encrypt(args: &[Value]) -> Result<Value, CompileError
     let nonce = expect_byte_array("rt_tls13_aes256_gcm_encrypt", &args[1])?;
     let plaintext = expect_byte_array("rt_tls13_aes256_gcm_encrypt", &args[2])?;
     let aad = expect_byte_array("rt_tls13_aes256_gcm_encrypt", &args[3])?;
-    let result = aes256_gcm_encrypt_bytes(&key, &nonce, &plaintext, &aad).unwrap_or_default();
+    let result = aes256_gcm_encrypt_bytes(&key, &nonce, &plaintext, &aad).ok_or_else(|| {
+        CompileError::runtime("rt_tls13_aes256_gcm_encrypt rejected its inputs".to_string())
+    })?;
     Ok(Value::array(
         result.into_iter().map(|byte| Value::Int(byte as i64)).collect(),
     ))
@@ -399,7 +403,11 @@ pub fn rt_tls13_aes128_gcm_decrypt(args: &[Value]) -> Result<Value, CompileError
     let tag = expect_byte_array("rt_tls13_aes128_gcm_decrypt", &args[4])?;
     let mut out: Vec<u8>;
     match aes128_gcm_decrypt_bytes(&key, &nonce, &ciphertext, &aad, &tag) {
-        AesGcmDecryptOutcome::InvalidInput => out = Vec::new(),
+        AesGcmDecryptOutcome::InvalidInput => {
+            return Err(CompileError::runtime(
+                "rt_tls13_aes128_gcm_decrypt rejected its inputs".to_string(),
+            ));
+        }
         AesGcmDecryptOutcome::TagMismatch => out = vec![0x00],
         AesGcmDecryptOutcome::Plaintext(pt) => {
             out = Vec::with_capacity(1 + pt.len());
@@ -425,7 +433,11 @@ pub fn rt_tls13_aes256_gcm_decrypt(args: &[Value]) -> Result<Value, CompileError
     let tag = expect_byte_array("rt_tls13_aes256_gcm_decrypt", &args[4])?;
     let mut out: Vec<u8>;
     match aes256_gcm_decrypt_bytes(&key, &nonce, &ciphertext, &aad, &tag) {
-        AesGcmDecryptOutcome::InvalidInput => out = Vec::new(),
+        AesGcmDecryptOutcome::InvalidInput => {
+            return Err(CompileError::runtime(
+                "rt_tls13_aes256_gcm_decrypt rejected its inputs".to_string(),
+            ));
+        }
         AesGcmDecryptOutcome::TagMismatch => out = vec![0x00],
         AesGcmDecryptOutcome::Plaintext(pt) => {
             out = Vec::with_capacity(1 + pt.len());
@@ -2274,7 +2286,11 @@ mod engine2d_span_tests {
 
 #[cfg(test)]
 mod aes_bridge_contract_tests {
-    use super::{expect_byte_array, rt_aes128_decrypt_block_pure, rt_aes128_encrypt_block_pure, rt_aes256_encrypt_block_pure};
+    use super::{
+        expect_byte_array, rt_aes128_decrypt_block_pure, rt_aes128_encrypt_block_pure,
+        rt_aes256_encrypt_block_pure, rt_tls13_aes128_gcm_decrypt, rt_tls13_aes128_gcm_encrypt,
+        rt_tls13_aes256_gcm_decrypt, rt_tls13_aes256_gcm_encrypt,
+    };
     use crate::value::Value;
 
     #[test]
@@ -2297,6 +2313,36 @@ mod aes_bridge_contract_tests {
                 0x2b, 0x2e,
             ]
         );
+    }
+
+    #[test]
+    fn tls_aes_gcm_bridges_reject_invalid_shapes_instead_of_empty_payloads() {
+        let empty = Value::byte_array(vec![]);
+        let nonce = Value::byte_array(vec![0; 12]);
+        let block = Value::byte_array(vec![0; 16]);
+        assert!(rt_tls13_aes128_gcm_encrypt(&[
+            empty.clone(),
+            nonce.clone(),
+            empty.clone(),
+            empty.clone(),
+        ])
+        .is_err());
+        assert!(rt_tls13_aes256_gcm_encrypt(&[
+            empty.clone(),
+            nonce.clone(),
+            empty.clone(),
+            empty.clone(),
+        ])
+        .is_err());
+        assert!(rt_tls13_aes128_gcm_decrypt(&[
+            empty.clone(),
+            nonce.clone(),
+            empty.clone(),
+            empty.clone(),
+            block.clone(),
+        ])
+        .is_err());
+        assert!(rt_tls13_aes256_gcm_decrypt(&[empty.clone(), nonce, empty.clone(), empty, block]).is_err());
     }
 }
 

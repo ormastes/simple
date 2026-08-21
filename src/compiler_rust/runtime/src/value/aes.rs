@@ -795,7 +795,7 @@ pub fn aes128_gcm_encrypt_bytes(key: &[u8], nonce: &[u8], plaintext: &[u8], aad:
 }
 
 #[no_mangle]
-pub extern "C" fn rt_tls13_aes128_gcm_encrypt(
+pub unsafe extern "C" fn rt_tls13_aes128_gcm_encrypt(
     key: RuntimeValue,
     nonce: RuntimeValue,
     plaintext: RuntimeValue,
@@ -1093,7 +1093,7 @@ pub fn aes256_gcm_encrypt_bytes(key: &[u8], nonce: &[u8], plaintext: &[u8], aad:
 }
 
 #[no_mangle]
-pub extern "C" fn rt_tls13_aes256_gcm_encrypt(
+pub unsafe extern "C" fn rt_tls13_aes256_gcm_encrypt(
     key: RuntimeValue,
     nonce: RuntimeValue,
     plaintext: RuntimeValue,
@@ -1249,7 +1249,7 @@ fn encode_decrypt_outcome(outcome: AesGcmDecryptOutcome) -> Vec<u8> {
 }
 
 #[no_mangle]
-pub extern "C" fn rt_tls13_aes128_gcm_decrypt(
+pub unsafe extern "C" fn rt_tls13_aes128_gcm_decrypt(
     key: RuntimeValue,
     nonce: RuntimeValue,
     ciphertext: RuntimeValue,
@@ -1276,7 +1276,7 @@ pub extern "C" fn rt_tls13_aes128_gcm_decrypt(
 }
 
 #[no_mangle]
-pub extern "C" fn rt_tls13_aes256_gcm_decrypt(
+pub unsafe extern "C" fn rt_tls13_aes256_gcm_decrypt(
     key: RuntimeValue,
     nonce: RuntimeValue,
     ciphertext: RuntimeValue,

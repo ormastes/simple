@@ -650,3 +650,16 @@ checked transports retain their tri-state verification and status/payload
 semantics; legacy payload-only entries remain compatibility-only. This is
 build-time metadata and provider-identity validation only, adding no per-call
 lookup, hashing, allocation, lock, or crypto operation.
+
+The three previously uncovered implemented TLS 1.3 AES-GCM payload providers
+now have ABI contracts, moving coverage to 1,074/716. All four AES-128/AES-256
+TLS payload exports are explicitly Rust-unsafe because their legacy raw ABI
+still uses empty arrays for invalid native input. Interpreter encryption and
+decryption now return `CompileError` for invalid shapes rather than fabricating
+an empty result; authentication mismatch remains `[0]` and successful decrypt
+remains `[1, plaintext...]`, including valid empty plaintext. Three focused AES
+bridge tests pass and the runtime symbol-table build is warning-free. No AES,
+GHASH, allocation, or valid-path control flow changed, so this adds no runtime
+cost. The remaining 16 `rt_tls13_*` names have no runtime provider definition
+in the inspected Rust/C tree and are not falsely promoted merely because an
+interpreter helper or symbol-list entry exists.
