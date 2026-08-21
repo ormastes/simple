@@ -322,6 +322,16 @@ is inline; valid payloads remain borrowed and each operation performs one FFI
 call without copying. A focused pre-FFI sabotage test and source-only audit
 pass.
 
+The cached `spl_winit` buffer router replaced embedded-NUL text, BMP paths,
+and configured provider paths with empty C strings or silently skipped them.
+All caller-controlled C strings now reject embedded NUL, and the `dlopen`
+declarations use an explicit Rust unsafe extern block. The successful buffer
+path retains cached symbol resolution and one native call; no pixel copy or
+lookup was added. The GUI-feature focused test and source-only audit pass.
+This router is still an unverified dynamic provider because artifact signature
+admission is not yet wired here; its Rust calls therefore remain explicitly
+unsafe and it must not be classified as verified/critical-safe.
+
 All 15 remaining legacy sign/verify declarations in the canonical signature
 module are now explicitly `unsafe(ffi)` and document their sentinel contract:
 verification collapses malformed bridge input into `0`, while signing may

@@ -41,7 +41,7 @@ const BUFFER_SYMBOLS: &[&str] = &[
 ];
 
 #[cfg(unix)]
-extern "C" {
+unsafe extern "C" {
     fn dlopen(filename: *const c_char, flag: i32) -> *mut c_void;
     fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
     fn dlerror() -> *const c_char;
@@ -59,6 +59,10 @@ struct LoadedLib {
     // campaign — see dlopen_conversion_lanes.md ground rule 4).
     path: String,
     fns: Mutex<HashMap<&'static str, usize>>,
+}
+
+fn checked_cstring(value: String, symbol: &str, argument: &str) -> Result<CString, CompileError> {
+    CString::new(value).map_err(|_| CompileError::runtime(format!("{symbol}: {argument} contains an embedded NUL")))
 }
 // Raw fn-pointer addresses (usize) are Send+Sync; the Mutex only guards the
 // HashMap's interior mutability during population, never re-entered after.
@@ -82,9 +86,8 @@ fn candidate_paths() -> Vec<String> {
 fn load_library() -> Result<LoadedLib, String> {
     let mut tried = Vec::new();
     for path in candidate_paths() {
-        let Ok(cpath) = CString::new(path.clone()) else {
-            continue;
-        };
+        let cpath = CString::new(path.clone())
+            .map_err(|_| format!("spl_winit candidate path contains an embedded NUL: {path:?}"))?;
         let handle = unsafe { dlopen(cpath.as_ptr(), RTLD_NOW | RTLD_LOCAL) };
         if handle.is_null() {
             let err = unsafe {
@@ -182,7 +185,10 @@ pub(super) fn dispatch_buffer(name: &str, args: &[Value]) -> Result<Value, Compi
             None => {
                 return Ok(unavailable(
                     name,
-                    &format!("export not found in '{}' (loaded, but symbol table is missing it)", lib.path),
+                    &format!(
+                        "export not found in '{}' (loaded, but symbol table is missing it)",
+                        lib.path
+                    ),
                 ));
             }
         }
@@ -195,7 +201,9 @@ pub(super) fn dispatch_buffer(name: &str, args: &[Value]) -> Result<Value, Compi
             let color = get_i64(args, 2, name)?;
             let id = call7(sym_addr, [width, height, color, 0, 0, 0, 0]);
             if id == 0 {
-                set_last_error(format!("{name}: no live winit surface (headless host or event-loop init failed)"));
+                set_last_error(format!(
+                    "{name}: no live winit surface (headless host or event-loop init failed)"
+                ));
             }
             Ok(int_value(id))
         }
@@ -235,7 +243,7 @@ pub(super) fn dispatch_buffer(name: &str, args: &[Value]) -> Result<Value, Compi
             let text = get_string(args, 3, name)?;
             let fg = get_i64(args, 4, name)?;
             let bg = get_i64(args, 5, name)?;
-            let ctext = CString::new(text).unwrap_or_default();
+            let ctext = checked_cstring(text, name, "text")?;
             let ptr = ctext.as_ptr() as i64;
             let ok = call7(sym_addr, [buf, x, y, ptr, fg, bg, 0]);
             drop(ctext);
@@ -258,7 +266,7 @@ pub(super) fn dispatch_buffer(name: &str, args: &[Value]) -> Result<Value, Compi
         "rt_winit_buffer_save_bmp" => {
             let buf = get_i64(args, 0, name)?;
             let path = get_string(args, 1, name)?;
-            let cpath = CString::new(path).unwrap_or_default();
+            let cpath = checked_cstring(path, name, "path")?;
             let ptr = cpath.as_ptr() as i64;
             let ok = call7(sym_addr, [buf, ptr, 0, 0, 0, 0, 0]);
             drop(cpath);
@@ -338,7 +346,7 @@ pub(super) fn dispatch_buffer(name: &str, args: &[Value]) -> Result<Value, Compi
             let width = get_i64(args, 1, name)?;
             let height = get_i64(args, 2, name)?;
             let pixels = get_pixels(args, 3, name)?;
-            let cpath = CString::new(path).unwrap_or_default();
+            let cpath = checked_cstring(path, name, "path")?;
             let path_ptr = cpath.as_ptr() as i64;
             let pixels_ptr = pixels.as_ptr() as i64;
             let pixels_len = pixels.len() as i64;
@@ -351,5 +359,22 @@ pub(super) fn dispatch_buffer(name: &str, args: &[Value]) -> Result<Value, Compi
             Ok(bool_value(ok != 0))
         }
         _ => Err(super::unknown_function(name)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cstring_arguments_reject_embedded_nul() {
+        assert!(checked_cstring("bad\0text".to_string(), "rt_winit_buffer_draw_text", "text").is_err());
+        assert!(checked_cstring("bad\0path".to_string(), "rt_winit_buffer_save_bmp", "path").is_err());
+        assert_eq!(
+            checked_cstring("valid.bmp".to_string(), "rt_winit_buffer_save_bmp", "path")
+                .unwrap()
+                .to_bytes(),
+            b"valid.bmp"
+        );
     }
 }
