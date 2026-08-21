@@ -75,7 +75,7 @@ scan() {
       # state, so a `val t = self.x` in one function cannot pair with a
       # `self.x = t` in the next.
       /^[[:space:]]*(pub[[:space:]]+)?fn[[:space:]]/ {
-        delete taken; delete mutated; fname = $0
+        delete taken; delete mutated; delete varying; ltop = 0; fname = $0
         sub(/^[[:space:]]*(pub[[:space:]]+)?fn[[:space:]]+/, "", fname)
         sub(/[(:].*$/, "", fname)
         # loop depth resets with the function
@@ -115,15 +115,71 @@ scan() {
         if (f3 == a3) printf "BYVALUE\t%s\t%s:%d:self.%s\n", rel, fname, NR, f3
         next
       }
-      # KEYSINLOOP: .keys()/.values() lexically inside a while/for body.
-      # Indentation-scoped: the loop header records its indent, and any deeper
-      # line until the indent returns is inside the body.
+      # KEYSINLOOP: .keys()/.values() inside a while/for body, on a receiver
+      # that does NOT change with the loop.
+      #
+      # Indentation-scoped: a loop header pushes its indent, and any deeper line
+      # until the indent returns is inside that body (a stack, so leaving an
+      # inner loop does not lose the outer one).
+      #
+      # The loop-INVARIANT qualifier is load-bearing, not a softening. The cost
+      # this rule exists to catch is re-materializing THE SAME key array on
+      # every iteration: O(n) per iteration, O(n^2) per loop. When the receiver
+      # is rebound each iteration -- `for surface in ...` then
+      # `surface.callables.keys()`, or `val module = mods[i]` then
+      # `module.structs.keys()` -- each materialization is of a DIFFERENT dict,
+      # every key is visited exactly once, and the total is O(total entries):
+      # optimal, and not rewritable into anything cheaper. Flagging those was a
+      # false positive that made the baseline describe cost that is not there.
+      #
+      # (Direct dict iteration is NOT the alternative: `for (k, v) in d` exists
+      # and matches keys() order exactly, but the interpreter iter_to_vec helper
+      # materializes a Vec of (k, v) tuples and the runtime offers only
+      # rt_dict_keys / rt_dict_values / rt_dict_entries -- all materializing.
+      # There is no cursor/view iteration anywhere, so rewriting a keys() loop
+      # into a (k, v) loop allocates strictly more, not less.)
+      #
+      # "Varying" = bound inside the loop: a for-pattern name, or a val/var
+      # declared at an indent deeper than the innermost enclosing loop header.
       {
         ind = match($0, /[^ ]/); if (ind == 0) ind = 999
-        if (loopind > 0 && ind <= loopind) loopind = 0
-        if ($0 ~ /^[[:space:]]*(while|for)[[:space:]].*:[[:space:]]*$/) { loopind = ind; next }
-        if (loopind > 0 && $0 ~ /\.(keys|values)\(\)/ && $0 !~ /^[[:space:]]*#/) {
-          printf "KEYSINLOOP\t%s\t%s:%d\n", rel, fname, NR
+        while (ltop > 0 && ind <= lind[ltop]) {
+          # Strictly deeper than the closing header = bound inside its body.
+          # A val at the SAME indent as the header is a sibling in the ENCLOSING
+          # body and must survive; the loop pattern names are recorded at
+          # header+0.5 so they are dropped here while siblings are not.
+          for (v in varying) if (varying[v] > lind[ltop]) delete varying[v]
+          ltop--
+        }
+        if ($0 ~ /^[[:space:]]*(while|for)[[:space:]].*:[[:space:]]*$/) {
+          if ($0 ~ /^[[:space:]]*for[[:space:]]/) {
+            pat = $0
+            sub(/^[[:space:]]*for[[:space:]]+/, "", pat)
+            sub(/[[:space:]]+in[[:space:]].*$/, "", pat)
+            gsub(/[()]/, "", pat)
+            n = split(pat, pv, /[[:space:]]*,[[:space:]]*/)
+            for (pi = 1; pi <= n; pi++)
+              if (pv[pi] ~ /^[A-Za-z_][A-Za-z0-9_]*$/) varying[pv[pi]] = ind + 0.5
+          }
+          ltop++; lind[ltop] = ind
+          next
+        }
+        if (ltop > 0 && $0 ~ /^[[:space:]]*(val|var)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/) {
+          lv = $0
+          sub(/^[[:space:]]*(val|var)[[:space:]]+/, "", lv)
+          sub(/[^A-Za-z0-9_].*$/, "", lv)
+          if (lv != "") varying[lv] = ind
+        }
+        if (ltop > 0 && $0 ~ /\.(keys|values)\(\)/ && $0 !~ /^[[:space:]]*#/) {
+          # Receiver root: walk left from ".keys()"/".values()" over the
+          # member/index chain and take the leading identifier.
+          kp = match($0, /\.(keys|values)\(\)/)
+          pre = substr($0, 1, kp - 1)
+          sub(/^.*[^A-Za-z0-9_.\]\[]/, "", pre)
+          root = pre
+          sub(/[^A-Za-z0-9_].*$/, "", root)
+          if (!(root in varying))
+            printf "KEYSINLOOP\t%s\t%s:%d\n", rel, fname, NR
         }
       }
     ' "$f"
@@ -174,6 +230,36 @@ fn store_only(self, t: [i64]):
     self.table = t
 EOF
 
+  # Loop-VARYING receiver: each iteration materializes the keys of a DIFFERENT
+  # dict, so the total is O(total entries), not O(n^2). Must NOT be flagged --
+  # both the for-pattern binding and the val-bound-inside-the-loop shape.
+  cat > "$st_dir/src/varying.spl" <<'EOF'
+fn walk_surfaces(self):
+    for surface in self.surfaces:
+        val names = surface.callables.keys()
+        print(names.len())
+
+fn walk_modules(self, mods: [Module]):
+    var i = 0
+    while i < mods.len():
+        val module = mods[i]
+        val struct_names = module.structs.keys()
+        print(struct_names.len())
+        i = i + 1
+EOF
+  # Nested loops: an invariant receiver in the INNER body must be flagged, and
+  # so must one that sits in the OUTER body AFTER the inner loop closes -- that
+  # second line is the one a single non-stacked loop indent silently loses.
+  cat > "$st_dir/src/nestedloop.spl" <<'EOF'
+fn walk_nested(self):
+    for a in self.outer:
+        for b in self.inner:
+            val ks = self.table.keys()
+            print(ks.len())
+        val ks2 = self.table.keys()
+        print(ks2.len())
+EOF
+
   COUNT_FILE="$st_dir/count"
   st_out="$(scan "$st_dir")"
   st_files="$(cat "$COUNT_FILE")"
@@ -184,7 +270,10 @@ EOF
   echo "$st_out" | grep -q "^KEYSINLOOP	src/keysinloop.spl" || { echo "selftest: keys-in-loop fixture not flagged"; st_fail=1; }
   echo "$st_out" | grep -q "	src/clean.spl"              && { echo "selftest: clean fixture must not be flagged"; st_fail=1; }
   echo "$st_out" | grep -q "	src/crossfn.spl"            && { echo "selftest: cross-function pair must not be flagged"; st_fail=1; }
-  [ "$st_files" -eq 5 ] || { echo "selftest: expected 5 scanned files, got $st_files"; st_fail=1; }
+  echo "$st_out" | grep -q "	src/varying.spl"            && { echo "selftest: loop-varying keys() receiver must not be flagged"; st_fail=1; }
+  st_nested="$(echo "$st_out" | grep -c "^KEYSINLOOP	src/nestedloop.spl")"
+  [ "$st_nested" -eq 2 ] || { echo "selftest: expected 2 nested-loop offenders, got $st_nested"; st_fail=1; }
+  [ "$st_files" -eq 7 ] || { echo "selftest: expected 7 scanned files, got $st_files"; st_fail=1; }
 
   # Empty tree must scan 0 files, so the caller is forced to ERROR.
   st_empty="$(mktemp -d)"
@@ -202,7 +291,7 @@ if ! selftest; then
   exit 2
 fi
 if [ "$SELFTEST_ONLY" -eq 1 ]; then
-  echo "PASS — selftest only, 6 fixture(s) checked"
+  echo "PASS — selftest only, 8 fixture(s) checked"
   exit 0
 fi
 
