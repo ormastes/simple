@@ -369,6 +369,15 @@ null comparison only on SDL text-return calls; scalar/event paths are unchanged.
 The boundary is still not verified or signed, and unrelated pre-existing stub
 and wide-public lint findings remain open.
 
+The Rust TLS-client interpreter lift now distinguishes a valid zero-length
+runtime string from the corrupt combination `len > 0 && data == NULL`. The
+former remains empty text; the latter is a typed provider-contract error rather
+than fabricated success. Both focused sabotage/empty-value tests pass. The
+success path retains the existing length check, data lookup, and copy and adds
+no hashing, lookup, allocation, or branch; error text is allocated only on the
+contract-violation path. The null/signature guard now locks both SDL and TLS
+fail-closed lifting rules.
+
 These are migration inputs, not 14,391 independent implementations. The audit
 now hashes normalized declaration shapes and groups them by symbol. The next
 tooling step replaces the text-derived shape with the resolved HIR ABI hash,

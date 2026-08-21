@@ -43,18 +43,28 @@ fn int_arg(args: &[Value], index: usize) -> i64 {
     }
 }
 
-fn runtime_text_out(rv: RuntimeValue) -> Value {
+fn runtime_text_out(rv: RuntimeValue, symbol: &str) -> Result<Value, CompileError> {
     let len = simple_runtime::value::rt_string_len(rv);
+    let data = if len <= 0 {
+        std::ptr::null()
+    } else {
+        simple_runtime::value::rt_string_data(rv)
+    };
+    unsafe { text_from_runtime_parts(data, len, symbol) }
+}
+
+unsafe fn text_from_runtime_parts(data: *const u8, len: i64, symbol: &str) -> Result<Value, CompileError> {
     if len <= 0 {
-        return Value::text(String::new());
+        return Ok(Value::text(String::new()));
     }
-    let data = simple_runtime::value::rt_string_data(rv);
     if data.is_null() {
-        return Value::text(String::new());
+        return Err(CompileError::runtime(format!(
+            "{symbol}: foreign text contract returned null with length {len}"
+        )));
     }
     unsafe {
         let slice = std::slice::from_raw_parts(data, len as usize);
-        Value::text(String::from_utf8_lossy(slice).to_string())
+        Ok(Value::text(String::from_utf8_lossy(slice).to_string()))
     }
 }
 
@@ -106,19 +116,18 @@ pub fn rt_tls_client_write_timeout(args: &[Value]) -> Result<Value, CompileError
 
 /// `rt_tls_client_read(conn, max_bytes) -> text`
 pub fn rt_tls_client_read(args: &[Value]) -> Result<Value, CompileError> {
-    Ok(runtime_text_out(net::rt_tls_client_read(
-        int_arg(args, 0),
-        int_arg(args, 1),
-    )))
+    runtime_text_out(
+        net::rt_tls_client_read(int_arg(args, 0), int_arg(args, 1)),
+        "rt_tls_client_read",
+    )
 }
 
 /// `rt_tls_client_read_timeout(conn, max_bytes, timeout_ms) -> text`
 pub fn rt_tls_client_read_timeout(args: &[Value]) -> Result<Value, CompileError> {
-    Ok(runtime_text_out(net::rt_tls_client_read_timeout(
-        int_arg(args, 0),
-        int_arg(args, 1),
-        int_arg(args, 2),
-    )))
+    runtime_text_out(
+        net::rt_tls_client_read_timeout(int_arg(args, 0), int_arg(args, 1), int_arg(args, 2)),
+        "rt_tls_client_read_timeout",
+    )
 }
 
 /// `rt_tls_client_close(conn) -> bool`
@@ -128,7 +137,25 @@ pub fn rt_tls_client_close(args: &[Value]) -> Result<Value, CompileError> {
 
 /// `rt_tls_get_protocol_version(conn) -> text`
 pub fn rt_tls_get_protocol_version(args: &[Value]) -> Result<Value, CompileError> {
-    Ok(runtime_text_out(net::rt_tls_get_protocol_version(int_arg(
-        args, 0,
-    ))))
+    runtime_text_out(
+        net::rt_tls_get_protocol_version(int_arg(args, 0)),
+        "rt_tls_get_protocol_version",
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn null_positive_length_text_is_a_contract_error() {
+        let result = unsafe { text_from_runtime_parts(std::ptr::null(), 1, "rt_tls_client_read") };
+        assert!(result.is_err(), "null foreign text must never become empty text");
+    }
+
+    #[test]
+    fn zero_length_text_remains_valid_empty_text() {
+        let result = unsafe { text_from_runtime_parts(std::ptr::null(), 0, "rt_tls_client_read") };
+        assert!(result.is_ok(), "zero-length text may use a null data pointer");
+    }
 }
