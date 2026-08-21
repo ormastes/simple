@@ -1165,6 +1165,14 @@ conversion, local inference readiness, and streaming integration. It is
 distinct from Caret's current `local_torch` provider, the external vLLM
 compatibility surface, the Slang shader language, and Raku Slang modules.
 
+## Sdoctest
+
+A documentation test discovered and executed by the full Simple test runner.
+A **Markdown sdoctest** is a closed, non-empty `simple`, `spl`, or `sdoctest`
+fence in Markdown. A **comment sdoctest** is a runnable fenced example or
+`sdoctest:` section in Simple source documentation comments. Text-only examples
+use a `text` fence and are not executable.
+
 ## LLM Fraud Prevention (rules.sdl)
 
 **rules.sdl** — Root-level registry (SDN syntax, `.sdl` extension) enumerating the
