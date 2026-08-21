@@ -295,10 +295,10 @@ Current evidence after the checked regex boundary migration:
 
 - 3,963 distinct symbols in the current backing census, including 3,961
   compiler-owned canonical symbols;
-- 14,477 declaration sites;
-- 13,872 sites have neither an explicit FFI-unsafe tag nor a local contract;
+- 14,467 declaration sites;
+- 13,852 sites have neither an explicit FFI-unsafe tag nor a local contract;
 - 509 sites declare a typed/documented contract but lack the unsafe tag;
-- 82 declarations now carry explicit FFI authority
+- 92 declarations now carry explicit FFI authority
   but still require canonical ABI-contract metadata;
 - 14 checked declarations carry both explicit FFI authority and a
   typed result contract; their cryptographic artifact evidence remains open;
@@ -345,6 +345,13 @@ the hot path. The LLVM integer dispatcher remains unsafe and unverified: its
 zero sentinel, ABI shape, pointer ownership, and provider artifact have not yet
 been admitted by typed contracts and signed evidence.
 
+The legacy `std.ffi.codegen` Cranelift implementation is now an explicit
+re-export facade over `std.sffi.codegen`. This removes 400 lines of duplicate
+boundary code and 94 duplicate unauthorized raw calls without adding a wrapper,
+lookup, allocation, branch, or hash. The canonical Cranelift owner remains a
+migration target: its provider ABI and handle/null contracts are not yet sealed
+or bound to signed artifact evidence.
+
 These are migration inputs, not 14,477 independent implementations. The audit
 now hashes normalized declaration shapes and groups them by symbol. The next
 tooling step replaces the text-derived shape with the resolved HIR ABI hash,
@@ -377,7 +384,7 @@ call-site migration ledger at
 `doc/08_tracking/bug/data/sffi_call_authority_2026-08-21.tsv`. It recognizes
 file-local externs and explicit `rt_*`/`spl_*` imports from SFFI modules, tracks
 function and lexical FFI authority by indentation, and can fail CI with
-`SFFI_FAIL_ON_MISSING=1`. The current source/test census contains 21,258
+`SFFI_FAIL_ON_MISSING=1`. The current source/test census contains 21,164
 missing-authority calls, 51 lexical scopes, and 392 function scopes across 3,142
 files. It completed in 24.21 seconds at 7,424 KiB maximum RSS. This is a
 migration index rather than ABI proof; aliases, generated bindings, and
