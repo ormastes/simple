@@ -12,12 +12,18 @@ use compiler.hir.hir_lowering.module_surface.{
     module_surface_export_origin_index_put,
     module_surface_index_for_source,
     module_surface_index_by_name,
+    module_surface_registry_index,
+    module_surfaces_promote,
+    module_surfaces_retained_alignment,
     module_surfaces_by_name_from_parts
 }
 
 extern fn rt_heap_array_capacity_bytes() -> i64
 extern fn rt_hash_text(content: text) -> i64
 extern fn rt_path_absolute(path: text) -> text
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_transient_array_scope_end() -> bool
 
 describe "module surface aligned scalar index":
     it "preserves discovery order and deduplicates a same-target alias":
@@ -51,6 +57,31 @@ describe "module surface aligned scalar index":
         val finish_error = builder.finish_into(destination)
         expect(finish_error).to_contain("builder is frozen")
         expect(destination.ordered_names).to_equal(["existing"])
+
+    it "retains exact names aliases and misses after registry scope teardown":
+        val began = rt_transient_array_scope_begin()
+        var builder = ModuleSurfaceBuilder.new()
+        val first_added = builder.add_indexed_name("first", 0).is_ok()
+        val alias_added = builder.add_indexed_name("first_alias", 0).is_ok()
+        builder.surfaces = [ModuleSurface.empty("first")]
+        val registry = ModuleSurfacesByName(
+            surfaces: [], index_by_name: {},
+            ordered_names: [], ordered_indices: [], generation: 0, frozen: false)
+        val finish_error = builder.finish_into(registry)
+        val paused = rt_transient_array_scope_pause()
+        val promoted = if paused: module_surfaces_promote(registry) else: false
+        val ended = rt_transient_array_scope_end()
+        expect(began).to_equal(true)
+        expect(first_added).to_equal(true)
+        expect(alias_added).to_equal(true)
+        expect(finish_error).to_equal("")
+        expect(paused).to_equal(true)
+        expect(promoted).to_equal(true)
+        expect(ended).to_equal(true)
+        expect(module_surfaces_retained_alignment(registry)).to_equal(true)
+        expect(module_surface_registry_index(registry, "first")).to_equal(0)
+        expect(module_surface_registry_index(registry, "first_alias")).to_equal(0)
+        expect(module_surface_registry_index(registry, "missing")).to_equal(-1)
 
     it "rejects an alias that changes its existing target":
         var builder = ModuleSurfaceBuilder.new()

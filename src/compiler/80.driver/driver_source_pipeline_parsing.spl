@@ -22,7 +22,9 @@ use compiler.hir.hir_lowering.module_surface.{
     ModuleSurfaceParserOwner,
     module_surface_canonical_path,
     module_surface_from_owner,
-    module_surface_promote
+    module_surface_promote,
+    module_surfaces_promote,
+    module_surfaces_retained_alignment
 }
 use compiler.driver.driver_source_loading.{
     _driver_is_bootstrap_entry_source,
@@ -353,15 +355,41 @@ impl CompilerDriver:
             self.ctx.add_error(
                 "Module surface extraction error: {origin_result.unwrap_err()}")
             return false
-        # Retain the class owner in this frame. The staged native ABI can keep
-        # a class-valued Result's Ok tag while dropping its payload.
+        # Build the completed owner inside one dedicated transient scope, then
+        # deep-promote the whole registry graph before committing it. Promoting
+        # individual surfaces is insufficient: the registry's Dict and aligned
+        # name/index arrays are allocated only during finalization.
+        if not rt_transient_array_scope_begin():
+            self.ctx.add_error(
+                "Module surface retention scope unavailable after phase 2")
+            return false
         val retained_surfaces = ModuleSurfacesByName(
             surfaces: [], index_by_name: {},
             ordered_names: [], ordered_indices: [], generation: 0, frozen: false)
         val finish_error = builder.finish_into(retained_surfaces)
         if finish_error != "":
+            val _paused = rt_transient_array_scope_pause()
+            val _ended = rt_transient_array_scope_end()
             self.ctx.add_error(
                 "Module surface alignment error: {finish_error}")
+            return false
+        if not rt_transient_array_scope_pause():
+            val _ended = rt_transient_array_scope_end()
+            self.ctx.add_error(
+                "Module surface retention scope pause failed after phase 2")
+            return false
+        if not module_surfaces_promote(retained_surfaces):
+            val _ended = rt_transient_array_scope_end()
+            self.ctx.add_error(
+                "Module surface registry graph promotion failed after phase 2")
+            return false
+        if not rt_transient_array_scope_end():
+            self.ctx.add_error(
+                "Module surface retention scope end failed after phase 2")
+            return false
+        if not module_surfaces_retained_alignment(retained_surfaces):
+            self.ctx.add_error(
+                "Module surface registry graph lost after phase 2 retention: surfaces={retained_surfaces.surfaces.len()} names={retained_surfaces.ordered_names.len()} indices={retained_surfaces.ordered_indices.len()} dict={retained_surfaces.index_by_name.len()}")
             return false
         # Commit the retained surface owner directly to the mutable driver
         # context.  Assigning it through a copied `streaming_ctx` returned

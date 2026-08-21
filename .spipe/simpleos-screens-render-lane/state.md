@@ -88,6 +88,18 @@
   regressions, rebuild Stage 2/3, then resume ARM64 image and real QEMU
   2D/Web/GUI/WM evidence. No QEMU PASS is claimed.
 
+### 2026-08-22 promoted scalar registry handoff
+
+- Deep promotion retains `surfaces=665 names=943 indices=943`; the Dict alone
+  remains invalid (`dict=-1`) after scope teardown.
+- Rebuilding/reassigning the Dict after teardown was also ineffective and was
+  removed.
+- Final Phase 2 SHA-256:
+  `3dc08dd7fd7157d7cb69b69774553ef518b9ac873fa20e1cfe1e95194494b61b`.
+- Next fresh cycle must combine the accepted deep promotion with scalar-array
+  post-retention lookup and alignment, leaving Dict use construction-only.
+  Then rebuild Stage 2/3 and resume ARM64/QEMU; no render PASS is claimed.
+
 > make deep research and plan with agents, simple os to have configs, 2d rendering
 > screen, web rendering screen, gui rendering screen, and existing default wm screen.
 > in 2d showcase check events/click/drag/keytype, panel with scrollbar, linked panels,

@@ -944,3 +944,36 @@ scope, pause it, deeply promote the registry graph through a module-surface
 owner facade, end the scope, and only then commit the Option to the driver.
 Exact and adjacent tests must prove post-scope name, alias, miss, and malformed
 index behavior. Stage 3, ARM64 image, and QEMU remain unclaimed.
+
+The first registry-promotion cycle admitted Phase 2 at SHA-256
+`d32fc781caaddb4706c2d5f519edb662a0678027497dc5fbc995fa628e6e7ab6`.
+Deep promotion returned success, but Stage 3 still reported missing imported
+surfaces from the first dependent module and later segfaulted. Cycle 2 adds a
+post-scope `module_surfaces_frozen_alignment` gate before driver commit. It
+checks the complete frozen registry invariant and reports retained surface,
+name, index, and Dict counts on failure, so HIR cannot consume a partially
+retained graph.
+
+Cycle 2 admitted Phase 2 at SHA-256
+`7054048f76a927c76d7ebaf800688de362b91e152d6ff8f7695367325d44a1f7` and
+failed cleanly before HIR with exact retained counts:
+`surfaces=665 names=943 indices=943 dict=-1`. Deep promotion therefore retains
+the complete class and scalar arrays; only the Dict carrier is invalid after
+scope teardown. Cycle 3 rebuilds that compatibility Dict directly from the
+retained arrays after the transient scope has ended, then requires the full
+frozen-alignment invariant before committing the registry.
+
+Cycle 3 admitted Phase 2 at SHA-256
+`3dc08dd7fd7157d7cb69b69774553ef518b9ac873fa20e1cfe1e95194494b61b` and
+reported the identical clean pre-HIR state. Rebuilding a Dict after teardown
+was ineffective because assigning any Dict carrier into the registry class
+field is lost on this staged path; that attempted rebuild was removed.
+
+The retained evidence now supports one combined correction: keep the deep
+promotion that preserves all 665 surfaces and 943 aligned scalar entries;
+make post-retention name lookup and retained-alignment validation use those
+scalar arrays; and treat `index_by_name` as construction/freeze-only. The prior
+scalar-only experiment ran before the registry graph was promoted, so its text
+elements were not retained; repeating it on the promoted graph is a distinct
+root-cause fix, not a retry. No fourth cycle was started. Stage 3, ARM64 image,
+and QEMU remain unclaimed.
