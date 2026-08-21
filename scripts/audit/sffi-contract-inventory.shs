@@ -12,7 +12,13 @@ symbols_out=${2:-}
 if [ -z "$symbols_out" ] && [ "$out" != "/dev/stdout" ]; then
     symbols_out=${out%.tsv}.symbols.tsv
 fi
-simple_bin=${SIMPLE_BIN:-$root/bin/release/x86_64-unknown-linux-gnu/simple}
+if [ -n "${SIMPLE_BIN:-}" ]; then
+    simple_bin=$SIMPLE_BIN
+elif [ -x "$root/bin/release/x86_64-unknown-linux-gnu/simple" ]; then
+    simple_bin=$root/bin/release/x86_64-unknown-linux-gnu/simple
+else
+    simple_bin=$root/bin/simple
+fi
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT INT TERM
 
@@ -76,8 +82,10 @@ xargs -0 -r -n 200 perl -MDigest::SHA=sha256_hex -0ne '
                         $symbol =~ /(?:^|_)(?:try|checked)(?:_|$)/) ? "typed_result" :
                        ($context =~ /(?:nonnull|nullability|ownership|status[_ -]out|sentinel)/i) ? "documented" :
                        "missing";
+        # Source metadata is only a claim. This source census cannot verify a
+        # receipt, signature, trust anchor, ABI hash, or loaded artifact.
         my $evidence = ($context =~ /(?:evidence|receipt|artifact_sha256|abi_hash|signature_verified)/i)
-            ? "declared" : "missing";
+            ? "claim_present_unverified" : "missing";
         my $state = $unsafe eq "tagged"
             ? ($contract eq "missing" ? "unsafe_contract_missing" : "unsafe_contract_declared")
             : ($contract eq "missing" ? "unsafe_tag_and_contract_missing" : "unsafe_tag_missing");
@@ -112,6 +120,7 @@ if [ -n "$symbols_out" ]; then
             if ($6 == "missing") unsafe_missing[symbol]++
             if ($7 == "missing") contract_missing[symbol]++
             if ($8 == "missing") evidence_missing[symbol]++
+            if ($8 == "claim_present_unverified") evidence_claim[symbol]++
         }
         END {
             print "symbol", "backing", "declarations", "distinct_signatures", \
@@ -119,7 +128,7 @@ if [ -n "$symbols_out" ]; then
             for (symbol in declarations) {
                 state = signatures[symbol] > 1 ? "signature_conflict" : \
                     (unsafe_missing[symbol] || contract_missing[symbol] ? "migration_required" : \
-                    (evidence_missing[symbol] ? "evidence_required" : "declared_complete"))
+                    (evidence_missing[symbol] ? "evidence_required" : "evidence_claim_unverified"))
                 print symbol, backing[symbol], declarations[symbol], signatures[symbol], \
                       unsafe_missing[symbol] + 0, contract_missing[symbol] + 0, \
                       evidence_missing[symbol] + 0, state
@@ -130,3 +139,14 @@ fi
 
 awk -F '\t' 'NR > 1 { count[$9]++ } END { for (state in count) print count[state], state }' "$out" \
     | sort -nr >&2
+
+if [ -n "$symbols_out" ]; then
+    signature_conflicts=$(awk -F '\t' 'NR > 1 && $8 == "signature_conflict" { n++ } END { print n + 0 }' "$symbols_out")
+    migration_required=$(awk -F '\t' 'NR > 1 && $8 == "migration_required" { n++ } END { print n + 0 }' "$symbols_out")
+    max_signature_conflicts=${SFFI_MAX_SIGNATURE_CONFLICTS:-399}
+    max_migration_required=${SFFI_MAX_MIGRATION_REQUIRED:-3546}
+    if [ "$signature_conflicts" -gt "$max_signature_conflicts" ] || [ "$migration_required" -gt "$max_migration_required" ]; then
+        echo "SFFI contract inventory: FAIL conflicts=$signature_conflicts/$max_signature_conflicts migration=$migration_required/$max_migration_required" >&2
+        exit 1
+    fi
+fi

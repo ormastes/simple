@@ -295,20 +295,31 @@ Current evidence after the checked regex boundary migration:
 
 - 3,963 distinct symbols in the current backing census, including 3,961
   compiler-owned canonical symbols;
-- 14,391 declaration sites;
-- 13,634 sites have neither an explicit FFI-unsafe tag nor a local contract;
-- 508 sites declare a typed/documented contract but lack the unsafe tag;
-- 234 declarations now carry explicit FFI authority
+- 14,398 declaration sites;
+- 13,598 sites have neither an explicit FFI-unsafe tag nor a local contract;
+- 521 sites declare a typed/documented contract but lack the unsafe tag;
+- 259 declarations now carry explicit FFI authority
   but still require canonical ABI-contract metadata;
-- 15 checked declarations carry both explicit FFI authority and a
+- 20 checked declarations carry both explicit FFI authority and a
   typed result contract; their cryptographic artifact evidence remains open;
-- 401 canonical symbols currently have more than one normalized declaration
+- 399 canonical symbols currently have more than one normalized declaration
   shape and require typed-resolution review before one ABI hash can be sealed;
-- 3,547 declared symbols require migration and 401 require conflict resolution;
+- 3,546 declared symbols require migration and 399 require conflict resolution;
 - among `rt_*`/`spl_*` declarations, 1,715 sites reference symbols classified
   genuinely missing and 318 are backed only in owned C runtime source;
-- the distinct-symbol backing census now classifies 698 symbols in the typed
+- the distinct-symbol backing census now classifies 699 symbols in the typed
   interpreter registry and 1,189 as genuinely missing.
+
+The inventory tools now fall back to the repository `bin/simple` when no
+release-path executable exists, so a missing deployment layout cannot suppress
+the census. Source evidence annotations are reported only as
+`claim_present_unverified`; no declaration or symbol can become
+`declared_complete` without cryptographic verification outside this source
+scanner. Monotonic gates reject growth beyond 399 signature conflicts, 3,546
+migration-required symbols, or 20,976 raw call sites lacking lexical FFI
+authority. These ceilings describe debt, not acceptance: the end state remains
+zero, and the generated declaration and symbol ledgers are refreshed in
+`doc/08_tracking/bug/data/` on every baseline change.
 
 The regex wrapper now exposes checked `Result` construction and boolean-match
 operations. The interpreter registers all 15 `rt_regex_*` symbols to typed
