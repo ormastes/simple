@@ -531,6 +531,22 @@ impl CowEnv {
         }
     }
 
+    /// The `Arc` whose address `template_key` reports, when this env has one.
+    /// The template cache holds a `Weak` clone of it and verifies identity on
+    /// every hit: `template_key` is a raw ADDRESS, and an address is reusable
+    /// once the allocation dies, so a key alone admits an ABA hit on a
+    /// different env that happens to land at the same address. A `Weak` keeps
+    /// the allocation (not its contents) alive, so the address cannot be
+    /// recycled while the entry exists, and a dead base fails `upgrade()`.
+    /// Returns `None` for both "no base" and "not a template-able env" --
+    /// callers pair it with `template_key`, which distinguishes the two.
+    pub fn template_base(&self) -> Option<Arc<HashMap<String, Value>>> {
+        if !self.overlay.is_empty() || !self.tombstones.is_empty() {
+            return None;
+        }
+        self.base.clone()
+    }
+
     /// Check if the environment is empty.
     pub fn is_empty(&self) -> bool {
         if !self.overlay.is_empty() {

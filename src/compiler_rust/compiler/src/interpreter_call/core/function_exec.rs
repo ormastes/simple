@@ -19,7 +19,7 @@ use simple_parser::ast::{
 use simple_runtime::value::diagram_sffi;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, Weak};
 use std::time::Instant;
 
 type Enums = HashMap<String, Arc<EnumDef>>;
@@ -51,6 +51,13 @@ fn sffi_return_contract(return_type: Option<&Type>) -> SffiReturnContract {
         Some(Type::Tuple(elements)) if elements.is_empty() => SffiReturnContract::Unit,
         Some(Type::Simple(name)) if name == "()" => SffiReturnContract::Unit,
         Some(Type::Optional(_)) => SffiReturnContract::Optional,
+        // Explicit generic spelling `Option<T>` / `Optional<T>` is equivalent
+        // to the `T?` sugar (which parses to `Type::Optional`) and must be
+        // classified the same way, or `return nil` faults under the
+        // non-optional contract for a semantically-optional return type.
+        Some(Type::Generic { name, args }) if args.len() == 1 && (name == "Option" || name == "Optional") => {
+            SffiReturnContract::Optional
+        }
         Some(_) => SffiReturnContract::NonOptional,
     }
 }
@@ -154,12 +161,74 @@ struct EnvTemplate {
     seq: usize,
     env: Env,
     by_source: HashMap<(Arc<str>, String), Vec<String>>,
+    // ABA guard. The key's second half is `Arc::as_ptr` of the captured env's
+    // base -- a raw address, which the allocator may hand out again once that
+    // base dies, so a key match alone can hit a template built for a
+    // completely different env. Holding a `Weak` of the base keeps the
+    // ALLOCATION (not its contents) alive for as long as the entry lives, so
+    // the address cannot be recycled underneath us, and a base that has been
+    // dropped fails `upgrade()` and is treated as a miss. `None` is the empty
+    // env (key 0), which has no base and therefore no identity to confuse.
+    base_guard: Option<Weak<HashMap<String, Value>>>,
+}
+
+// Bounded insert: the map is dropped wholesale once it reaches the cap. A
+// wholesale clear is O(1) amortised and needs no recency bookkeeping on the
+// hot path; a HashMap has no ordering to make "evict the oldest half" mean
+// anything, so half-clearing would evict arbitrarily at the same cost.
+fn insert_env_template(cache: &mut HashMap<(Arc<str>, usize), EnvTemplate>, key: (Arc<str>, usize), template: EnvTemplate) {
+    if cache.len() >= *OWNED_ENV_TEMPLATE_CACHE_CAP {
+        cache.clear();
+    }
+    cache.insert(key, template);
+}
+
+// Does `template` describe the env we were actually handed?
+fn env_template_base_matches(template: &EnvTemplate, captured_base: Option<&Arc<HashMap<String, Value>>>) -> bool {
+    match (&template.base_guard, captured_base) {
+        (None, None) => true,
+        (Some(weak), Some(base)) => weak.upgrade().is_some_and(|alive| Arc::ptr_eq(&alive, base)),
+        _ => false,
+    }
 }
 
 thread_local! {
     static OWNED_ENV_TEMPLATE_CACHE: std::cell::RefCell<HashMap<(Arc<str>, usize), EnvTemplate>> =
         std::cell::RefCell::new(HashMap::new());
 }
+
+// The cache key's second component is `Env::template_key()`, i.e. the ADDRESS
+// of the captured env's immutable base (`Arc::as_ptr`). A fresh base is
+// allocated for every closure/call frame that owns one, so the key space is
+// unbounded even though the number of MODULES is small: interpreting a large
+// file mints a new key per distinct base and each entry retains a full `Env`
+// clone plus its `by_source` reverse index. Measured 2026-08-21 on
+// `lint src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl`:
+// RSS climbed past 7.5 GB and the run did not finish inside 900 s, against
+// 220 s / 863 MB for a seed without this growth. The cache is a hot-path
+// optimisation, not a correctness requirement, so it is bounded here: a module
+// in steady state uses far fewer than CAP distinct bases, and blowing past CAP
+// means the base identities are churning, which is exactly the case where the
+// entries would never be hit again anyway. Dropping the whole map (rather than
+// evicting one victim) keeps this O(1) and needs no recency bookkeeping on the
+// hot path.
+// `SIMPLE_INTERP_ENV_CACHE_CAP` overrides the bound; 0 means UNBOUNDED and
+// reproduces the pre-fix behaviour exactly, which is what the perf gate uses to
+// prove the fix is load-bearing rather than measuring two runs of the same code.
+const OWNED_ENV_TEMPLATE_CACHE_CAP_DEFAULT: usize = 4096;
+
+static OWNED_ENV_TEMPLATE_CACHE_CAP: LazyLock<usize> = LazyLock::new(|| {
+    std::env::var("SIMPLE_INTERP_ENV_CACHE_CAP")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .map_or(OWNED_ENV_TEMPLATE_CACHE_CAP_DEFAULT, |v| {
+            if v == 0 {
+                usize::MAX
+            } else {
+                v
+            }
+        })
+});
 
 static INTERP_ENV_CACHE_ENABLED: LazyLock<bool> =
     LazyLock::new(|| std::env::var("SIMPLE_INTERP_ENV_CACHE").map_or(true, |v| v != "0"));
@@ -218,6 +287,7 @@ pub(crate) fn captured_env_with_live_globals(func: &FunctionDef, captured_env: &
     // 0.08 ms in a light one, which made interpreted phase 1/2 of a stage
     // build look like a hang.
     let template_key = captured_env.template_key();
+    let captured_base = captured_env.template_base();
     let cache_ok = *INTERP_ENV_CACHE_ENABLED && template_key.is_some();
     let cache_key = (Arc::clone(&owner), template_key.unwrap_or(usize::MAX));
     if cache_ok {
@@ -226,6 +296,13 @@ pub(crate) fn captured_env_with_live_globals(func: &FunctionDef, captured_env: &
         let log_base = global_write_log_base();
         let cached = OWNED_ENV_TEMPLATE_CACHE.with(|cell| {
             let mut cache = cell.borrow_mut();
+            if cache
+                .get(&cache_key)
+                .is_some_and(|t| !env_template_base_matches(t, captured_base.as_ref()))
+            {
+                // Recycled address: drop the stale entry rather than serving it.
+                cache.remove(&cache_key);
+            }
             let template = cache.get_mut(&cache_key)?;
             if template.generation != generation || template.seq < log_base {
                 return None;
@@ -336,8 +413,9 @@ pub(crate) fn captured_env_with_live_globals(func: &FunctionDef, captured_env: &
             seq: global_write_seq(),
             env: env.clone(),
             by_source,
+            base_guard: captured_base.as_ref().map(Arc::downgrade),
         };
-        OWNED_ENV_TEMPLATE_CACHE.with(|cell| cell.borrow_mut().insert(cache_key, template));
+        OWNED_ENV_TEMPLATE_CACHE.with(|cell| insert_env_template(&mut cell.borrow_mut(), cache_key, template));
     }
     env
 }
@@ -1758,6 +1836,25 @@ mod tests {
     }
 
     #[test]
+    fn sffi_return_contract_preserves_explicit_generic_option_nil() {
+        // Explicit generic spelling `Option<T>` (as opposed to the `T?` sugar,
+        // which parses to `Type::Optional`) must be classified as Optional
+        // too, or `return nil` faults with the non-optional contract error.
+        let generic_option = Type::Generic {
+            name: "Option".to_string(),
+            args: vec![Type::Simple("i64".to_string())],
+        };
+        let value = validate_sffi_return_contract(
+            "generic_option_fn",
+            Some(&generic_option),
+            SffiReturnOrigin::ExplicitOptionalNone,
+            Some(Value::Nil),
+        )
+        .expect("explicit Option<T> nil is valid");
+        assert_eq!(value, Value::Nil);
+    }
+
+    #[test]
     fn sffi_return_contract_rejects_explicit_nil_for_non_optional_return() {
         let error = validate_sffi_return_contract(
             "non_optional_text",
@@ -1861,5 +1958,64 @@ mod tests {
         });
         MODULE_GLOBALS.with(|cell| cell.borrow_mut().clear());
         CURRENT_EXEC_MODULE.with(|cell| *cell.borrow_mut() = None);
+    }
+}
+
+#[cfg(test)]
+mod env_template_cache_tests {
+    use super::*;
+
+    fn template_for(base: Option<&Arc<HashMap<String, Value>>>) -> EnvTemplate {
+        EnvTemplate {
+            generation: 0,
+            seq: 0,
+            env: Env::new(),
+            by_source: HashMap::new(),
+            base_guard: base.map(Arc::downgrade),
+        }
+    }
+
+    // Mechanism pin for the bound: pushing far more DISTINCT keys than the cap
+    // must never let the map exceed it. Asserts structure, not wall time.
+    #[test]
+    fn owned_env_template_cache_stays_within_cap() {
+        let cap = *OWNED_ENV_TEMPLATE_CACHE_CAP;
+        assert!(cap < usize::MAX, "test requires a bounded cap (SIMPLE_INTERP_ENV_CACHE_CAP unset)");
+        let owner: Arc<str> = Arc::from("owner");
+        let mut cache: HashMap<(Arc<str>, usize), EnvTemplate> = HashMap::new();
+        let mut bases = Vec::new();
+        for i in 0..(cap * 2 + 7) {
+            let base = Arc::new(HashMap::new());
+            let key = (Arc::clone(&owner), Arc::as_ptr(&base) as *const u8 as usize + i);
+            insert_env_template(&mut cache, key, template_for(Some(&base)));
+            bases.push(base);
+            assert!(cache.len() <= cap, "cache grew to {} over cap {}", cache.len(), cap);
+        }
+        assert!(!cache.is_empty(), "cache must still be usable after eviction");
+    }
+
+    // ABA pin: an entry whose base has been dropped must not be served, even
+    // when a fresh allocation reuses the same address (which is exactly what
+    // the raw-pointer key cannot distinguish on its own).
+    #[test]
+    fn dropped_base_is_not_a_hit_even_at_the_same_address() {
+        let old = Arc::new(HashMap::new());
+        let template = template_for(Some(&old));
+        assert!(env_template_base_matches(&template, Some(&old)));
+        drop(old);
+        let replacement: Arc<HashMap<String, Value>> = Arc::new(HashMap::new());
+        assert!(
+            !env_template_base_matches(&template, Some(&replacement)),
+            "a different base must never match, address reuse or not"
+        );
+        assert!(!env_template_base_matches(&template, None));
+    }
+
+    #[test]
+    fn empty_env_template_matches_only_the_empty_env() {
+        let template = template_for(None);
+        assert!(env_template_base_matches(&template, None));
+        let base: Arc<HashMap<String, Value>> = Arc::new(HashMap::new());
+        assert!(!env_template_base_matches(&template, Some(&base)));
     }
 }

@@ -99,3 +99,41 @@ Existing easy_fix specs re-run clean under the fix:
 regression). `test/01_unit/compiler/lint/lint_cli_duplicate_typed_args_contract_check.spl`
 fails both before and after this change (verified via `git stash` on an
 unmodified tree) — a pre-existing, unrelated failure, not introduced here.
+
+## Seed-side root cause (2026-08-21)
+
+The `.spl`-side fix above was only half the defect. The other half is in the
+seed itself: `sffi_return_contract()`
+(`src/compiler_rust/compiler/src/interpreter_call/core/function_exec.rs:46-60`)
+classified a return type as optional **only** for `Type::Optional`, i.e. the
+`T?` sugar. A return type spelled explicitly as `Option<T>` / `Optional<T>`
+parses to `Type::Generic { name: "Option", args: [T] }`, fell through to the
+`Some(_) => NonOptional` arm, and so any `return nil` in such a function
+faulted with
+
+```
+error: semantic: nil is forbidden by the non-optional return contract of '<fn>'
+```
+
+`T?` and `Option<T>` are the same type spelled two ways, so this was purely a
+classification miss, not a real contract violation. Fix: an arm matching
+`Type::Generic { name, args }` with `args.len() == 1` and `name` in
+`{Option, Optional}`, mapping to `SffiReturnContract::Optional`.
+
+Pinned by cargo test
+`interpreter::interpreter_call::core::function_exec::tests::sffi_return_contract_preserves_explicit_generic_option_nil`
+(asserts `validate_sffi_return_contract` accepts `Value::Nil` for an explicit
+`Option<i64>` return), alongside the pre-existing
+`sffi_return_contract_rejects_explicit_nil_for_non_optional_return`, which
+must keep failing — so the pair proves the arm widened classification without
+disabling the contract. End-to-end: a three-line
+`fn f() -> Option<i64>:\n    return nil` program now runs clean under the
+rebuilt seed and prints `nil`; before the fix it aborted with the message
+above.
+
+Consequence for the sibling bug: this is exactly what blocked the post-fix
+measurement in
+`doc/08_tracking/bug/seed_interp_env_template_cache_unbounded_2026-08-21.md`
+("Every seed buildable from today's tree refuses to lint anything"). With this
+arm in place the same seed lints real compiler modules again, which is what
+made those numbers obtainable.
