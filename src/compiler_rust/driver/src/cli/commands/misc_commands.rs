@@ -1213,3 +1213,133 @@ fn main() -> i64:
 
     crate::cli::basic::run_code(&code, false, false)
 }
+
+#[cfg(test)]
+mod bootstrap_determinism_tests {
+    //! Reproduce checks for
+    //! `doc/08_tracking/bug/bootstrap_determinism_check_races_live_working_tree_2026-08-21.md`.
+    //!
+    //! The gate asserted "deterministic output" while re-reading a MUTABLE input
+    //! on each of three ~15-minute trials, so its control (identical input) was
+    //! never held: a MISMATCH could mean nondeterministic codegen or an edit
+    //! landing mid-run, and the two are indistinguishable. These tests pin the
+    //! race detector that makes the verdict interpretable — it is the piece
+    //! whose silent removal would restore the fail-open without any other
+    //! visible change.
+    use super::{bootstrap_closure_digest, bootstrap_closure_fingerprint};
+    use std::path::{Path, PathBuf};
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "bootstrap-determinism-{}-{}-{:?}",
+            tag,
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("compiler")).unwrap();
+        std::fs::write(dir.join("app.spl"), "fn main():\n    print \"a\"\n").unwrap();
+        std::fs::write(dir.join("compiler/mono.spl"), "fn lower():\n    0\n").unwrap();
+        std::fs::write(dir.join("compiler/reg.sdn"), "name: reg\n").unwrap();
+        dir
+    }
+
+    fn digest_of(root: &Path) -> String {
+        bootstrap_closure_digest(&bootstrap_closure_fingerprint(root))
+    }
+
+    #[test]
+    fn fingerprint_is_stable_when_the_tree_does_not_move() {
+        let dir = scratch("stable");
+        assert_eq!(
+            digest_of(&dir),
+            digest_of(&dir),
+            "a tree that did not change must fingerprint identically; \
+             otherwise the race detector would cry wolf on every run"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fingerprint_moves_when_a_closure_source_is_edited_mid_run() {
+        // The incident's exact shape: files under src/compiler/40.mono and
+        // 50.mir were edited BETWEEN the stage1 and stage2 artifacts.
+        let dir = scratch("edited");
+        let before = digest_of(&dir);
+        std::fs::write(dir.join("compiler/mono.spl"), "fn lower():\n    1\n").unwrap();
+        let after = digest_of(&dir);
+        assert_ne!(
+            before, after,
+            "an edit to a closure source between two stages MUST be detectable; \
+             this is what turns an uninterpretable MISMATCH/PARTIAL into \
+             'ERROR — inputs changed during the run'"
+        );
+
+        let fp_before = bootstrap_closure_fingerprint(&dir);
+        std::fs::write(dir.join("compiler/mono.spl"), "fn lower():\n    0\n").unwrap();
+        let fp_restored = bootstrap_closure_fingerprint(&dir);
+        assert_eq!(
+            fp_restored.len(),
+            fp_before.len(),
+            "restoring content must not change the file set"
+        );
+        assert_eq!(
+            digest_of(&dir),
+            before,
+            "the digest is content-addressed, not order- or time-dependent"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_new_closure_file_moves_the_fingerprint() {
+        let dir = scratch("added");
+        let before = digest_of(&dir);
+        std::fs::write(dir.join("compiler/added.spl"), "fn extra():\n    0\n").unwrap();
+        assert_ne!(
+            before,
+            digest_of(&dir),
+            "a source file appearing mid-run changes the compiled closure and \
+             must be caught, not just an edit to an existing one"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn non_closure_files_do_not_move_the_fingerprint() {
+        // Build outputs and C sources are inputs to the LINK, not to codegen,
+        // and churn constantly. If they counted, the detector would be
+        // permanently red and would get routed around.
+        let dir = scratch("noise");
+        let before = digest_of(&dir);
+        std::fs::write(dir.join("compiler/obj.o"), "not source").unwrap();
+        std::fs::write(dir.join("compiler/runtime.c"), "int main(void){return 0;}").unwrap();
+        std::fs::create_dir_all(dir.join("target")).unwrap();
+        std::fs::write(dir.join("target/generated.spl"), "fn gen():\n    0\n").unwrap();
+        assert_eq!(
+            before,
+            digest_of(&dir),
+            "only .spl/.sdn outside the skipped directories are the pinned closure"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_empty_closure_fingerprints_to_nothing_so_the_caller_must_error() {
+        // Non-vacuity: the caller emits `ERROR — nothing was checked` on an
+        // empty closure. A fingerprint that quietly returned a stable digest
+        // for an empty tree would make that branch unreachable and let a
+        // bootstrap over zero source files report VERIFIED.
+        let dir = std::env::temp_dir().join(format!(
+            "bootstrap-determinism-empty-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(
+            bootstrap_closure_fingerprint(&dir).is_empty(),
+            "an empty closure must fingerprint to zero files"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

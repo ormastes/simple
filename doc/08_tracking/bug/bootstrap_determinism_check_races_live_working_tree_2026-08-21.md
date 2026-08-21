@@ -1,7 +1,7 @@
 # Bootstrap "determinism check" compares builds of DIFFERENT source trees; PARTIAL then deploys
 
 - Date: 2026-08-21
-- Status: OPEN
+- Status: PARTIALLY RESOLVED (steps 1+2 landed and now covered by tests; steps 3+4 open)
 - Area: `src/compiler_rust/driver/src/cli/commands/misc_commands.rs` (bootstrap gate)
 - Severity: high — the gate's central claim ("deterministic output") is unfalsifiable as written, and its
   fallback verdict deploys on the strength of that claim.
@@ -153,3 +153,44 @@ Steps 1 and 2 landed in `src/compiler_rust/driver/src/cli/commands/misc_commands
 - **`PARTIAL` -> deploy left in place**, with a `TODO(bootstrap-determinism)` naming this record and the
   removal precondition (one VERIFIED run on a pinned snapshot). Step 3 of this record — the actual
   re-run — is still outstanding; a bootstrap was in flight and was not disturbed.
+
+## Reproduce check (2026-08-21)
+
+Steps 1 and 2 had landed with no test. They now have one:
+`bootstrap_determinism_tests` in
+`src/compiler_rust/driver/src/cli/commands/misc_commands.rs` — 5 unit tests
+over `bootstrap_closure_fingerprint` / `bootstrap_closure_digest`, the race
+detector whose silent removal would restore the fail-open with no other visible
+change. Run:
+
+```
+cargo test --release -p simple-driver --lib bootstrap_determinism
+-> test result: ok. 5 passed; 0 failed; ... finished in 0.02s
+```
+
+What each pins:
+
+1. **stable tree -> identical digest** — otherwise the detector cries wolf on
+   every run and gets routed around.
+2. **an edited closure source -> different digest** — the incident's exact
+   shape (files under `40.mono`/`50.mir` edited between the stage1 and stage2
+   artifacts). This is what converts an uninterpretable `MISMATCH`/`PARTIAL`
+   into `ERROR — inputs changed during the run`. Also asserts the digest is
+   content-addressed: restoring the original bytes restores the original digest.
+3. **a NEW closure file -> different digest** — a file appearing mid-run changes
+   the compiled closure too, not only an edit to an existing one.
+4. **non-closure churn -> SAME digest** — `.o`, C sources and anything under the
+   skipped directories must not count, or the detector is permanently red.
+   This is the test that fails if `BOOTSTRAP_PINNED_EXTS` or
+   `BOOTSTRAP_SNAPSHOT_SKIP_DIRS` is widened carelessly.
+5. **empty closure -> zero files** — non-vacuity: keeps the caller's
+   `ERROR — nothing was checked` branch reachable, so a bootstrap over zero
+   source files can never report VERIFIED.
+
+**Still open, and deliberately so:** step 3 (actually re-run the three stages on
+a pinned snapshot to find out whether codegen nondeterminism exists at all) and
+step 4 (remove the `PARTIAL` -> deploy branch, which is gated on step 3 being
+green). Step 3 is a ~45-minute exclusive bootstrap; a bootstrap was in flight
+and was not disturbed. Until step 3 runs, no determinism claim in this repo is
+supported by evidence — the difference now is that the gate can no longer emit
+a confident verdict over a moving tree.
