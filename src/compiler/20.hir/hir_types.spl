@@ -221,6 +221,14 @@ class SymbolTable:
     qualified_functions: Dict<text, i64>
     qualified_types: Dict<text, i64>
     exact_symbols: Dict<text, i64>
+    # MODCALLIDX (2026-08-21): "{defining_module}#{name}" -> raw symbol id for
+    # every symbol that carries a defining_module, plus the same row under the
+    # name's last dotted segment. Answers field_module_callable in O(1); the
+    # sweep it replaces materialized Dict.keys() over the WHOLE symbol table
+    # per module-qualified expression, so the real 662-module closure paid
+    # O(bodies x exprs x symbols). Last write wins, matching the old
+    # reverse-order scan (latest registration answered).
+    module_callables: Dict<text, i64>
     # Persistent root owner reused by reset_module. The Scope row is a small
     # routing value; its symbol backing never crosses reset by value.
     root_scope_symbols: Dict<text, i64>
@@ -239,6 +247,7 @@ impl SymbolTable:
             qualified_functions: {},
             qualified_types: {},
             exact_symbols: {},
+            module_callables: {},
             root_scope_symbols: root_scope_symbols
         )
         # Create root scope (direct mutation avoids copy-modify-reassign bug)
@@ -251,34 +260,11 @@ impl SymbolTable:
         table
 
     me reset_module():
-        """Reset module-local symbol state without replacing this table.
-
-        DO NOT spell these resets as `self.<field>.clear()`. A Dict-typed
-        CLASS FIELD receiver does not reach the Dict dispatch on the
-        self-hosted native backend: the field projection carries no HIR type
-        and its MIR temp is typed `i64`, so `receiver_is_dict` stays false and
-        the `local_is_runtime_dict` probe misses
-        (`50.mir/_MirLoweringExpr/expr_dispatch.spl:361-372`, proved by
-        disassembly of the stage-2 compiler). The call then falls into the
-        string arm and the clear NEVER HAPPENS, while the scalar resets below
-        (`next_symbol_id = 0`) always do. That combination is the whole
-        Stage 3 `enum payload dependency ... resolved to non-type binding`
-        flood: symbol NAMES from every previously-lowered module survived in
-        the scope/index maps while ids restarted at 0, so each new module
-        silently re-used ids that stale names still pointed at and
-        `lookup_or_invalid(name)` returned the id of an unrelated declaration
-        in another module. (`3c31fc3aa8b` added the `rt_dict_clear` dispatch
-        arm but could not fix the receiver TYPING, so for `self.<dict>.clear()`
-        that arm is unreachable and the defect survived it.)
-
-        A plain field STORE of a fresh Dict is unambiguous at every layer and
-        cannot be mis-dispatched. Nothing outside this class holds a handle to
-        these dicts across a module boundary: every consumer re-reads the
-        field (`self.symbols[...]`, `self.exact_symbols[...]`), and the one
-        internal alias, `root_scope_symbols`, is re-published into the root
-        Scope row below in the same breath.
-        doc/08_tracking/bug/stage3_lookup_or_invalid_returns_unrelated_symbol_id_2026-08-18.md
-        """
+        """Reset module-local symbol state without replacing this table."""
+        # Do not call clear() through a Dict-typed class field here. On the
+        # staged native path that receiver can lose its Dict type and dispatch
+        # as a string operation, leaving stale names alive while the scalar id
+        # counters below restart at zero. Fresh field stores are unambiguous.
         self.root_scope_symbols = {}
         self.symbols = {}
         self.scopes = {}
@@ -287,6 +273,7 @@ impl SymbolTable:
         self.qualified_functions = {}
         self.qualified_types = {}
         self.exact_symbols = {}
+        self.module_callables = {}
         self.current_scope = ScopeId(id: 0)
         self.next_symbol_id = 0
         self.next_scope_id = 1
@@ -369,6 +356,8 @@ impl SymbolTable:
         self.symbols[raw_id] = symbol
         if not self.exact_symbols.has(name):
             self.exact_symbols[name] = raw_id
+        if val defining_module_name = defining_module:
+            self.index_module_callable(defining_module_name, name, raw_id)
 
         # Copy-modify-reassign for interpreter compatibility
         var scope = self.scopes[self.current_scope.id]

@@ -15,7 +15,35 @@ fn _hir_symbol_owner_module(path: text) -> text:
     val source_relative = if relative.starts_with("src/"): relative.substring(4) else: relative
     source_relative.replace(".spl", "").replace(".sdn", "").replace("/", ".")
 
+fn _hir_module_callable_key(module_name: text, field_name: text) -> text:
+    module_name + "#" + field_name
+
+fn _hir_symbol_last_segment(name: text) -> text:
+    var cut: i64 = -1
+    var index: i64 = 0
+    while index < name.len():
+        if name.substring(index, index + 1) == ".":
+            cut = index
+        index = index + 1
+    if cut < 0: name else: name.substring(cut + 1)
+
 impl SymbolTable:
+    me index_module_callable(module_name: text, symbol_name: text, raw_id: i64):
+        """MODCALLIDX: record one (defining_module, name) row for
+        field_module_callable. Both the full name and its last dotted segment
+        are indexed because the sweep this replaces matched either
+        `candidate.name == field` or `candidate.name.ends_with("." + field)`.
+        Last write wins, matching that sweep's reverse-order scan."""
+        self.module_callables[_hir_module_callable_key(module_name, symbol_name)] = raw_id
+        val last_segment = _hir_symbol_last_segment(symbol_name)
+        if last_segment != symbol_name:
+            self.module_callables[_hir_module_callable_key(module_name, last_segment)] = raw_id
+
+    fn module_callable_raw(module_name: text, field_name: text) -> i64:
+        """O(1) answer for field_module_callable; -1 when nothing is indexed."""
+        val key = _hir_module_callable_key(module_name, field_name)
+        if self.module_callables.has(key): self.module_callables[key] else: -1
+
     me register_preserved_symbol(symbol: HirSymbol):
         """Register a pre-numbered flat/bootstrap symbol without losing the
         exact-name index used by lowering hot paths."""
@@ -23,6 +51,8 @@ impl SymbolTable:
         self.symbols[raw_id] = symbol
         if not self.exact_symbols.has(symbol.name):
             self.exact_symbols[symbol.name] = raw_id
+        if val preserved_module = symbol.defining_module:
+            self.index_module_callable(preserved_module, symbol.name, raw_id)
         if raw_id >= self.next_symbol_id:
             self.next_symbol_id = raw_id + 1
 
@@ -165,21 +195,6 @@ impl SymbolTable:
             return self.symbols[raw]
         nil
 
-    fn exact_local_value_binding_raw(raw: i64, payload_name: text) -> bool:
-        """Whether `raw` names the exact local value authored by a Var or
-        NamedVar payload. Keep the record inspection inside SymbolTable so a
-        staged-native HirSymbol? payload never crosses the method boundary."""
-        if raw < 0 or payload_name == "" or not self.symbols.has(raw):
-            return false
-        val symbol = self.symbols[raw]
-        if symbol.name != payload_name:
-            return false
-        match symbol.kind:
-            case SymbolKind.Variable | SymbolKind.Parameter:
-                return true
-            case _:
-                return false
-
     me symbol_display_name(id: SymbolId, fallback: text) -> text:
         """Return the CURRENT stored `.name` for `id` (reflecting any
         `rename_symbol` call), or `fallback` if the id isn't found.
@@ -231,6 +246,15 @@ impl SymbolTable:
                     self.symbols[raw] = renamed
                     if not self.exact_symbols.has(new_name):
                         self.exact_symbols[new_name] = raw
+                    # MODCALLIDX: the rename changes the name the sweep in
+                    # field_module_callable would have matched on, so the
+                    # index must follow it. The pre-rename row is left in
+                    # place: the old sweep saw only the CURRENT name, but a
+                    # stale row can only be reached by a field spelling that
+                    # no symbol answers, and dropping it would need a reverse
+                    # index for no behavioural gain.
+                    if val renamed_module = sym.defining_module:
+                        self.index_module_callable(renamed_module, new_name, raw)
             case _:
                 pass
 

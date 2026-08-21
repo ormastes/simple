@@ -1,0 +1,75 @@
+# @tag: unit, compiler, hir, native-safe
+#
+# Pins the MECHANISM behind the 2026-08-21 MODCALLIDX fix
+# (doc/08_tracking/bug/hir_phase_per_module_cost_2026-08-21.md):
+# HirLowering.field_module_callable used to materialize
+# `self.symbols.symbols.keys()` -- an array over the WHOLE symbol table -- and
+# scan it in reverse, on every module-qualified field/method expression in
+# every body. Fixtures hid it because their symbol tables are tiny; the real
+# 662-module closure carries tens of thousands of symbols, so HIR lowering was
+# O(exprs x symbols).
+#
+# Two observables, neither of them a wall clock:
+#   1. the sweep is GONE from the source of field_module_callable (0 whole-
+#      table key materializations per lookup), and
+#   2. SymbolTable.module_callables answers the same question, with the same
+#      semantics the sweep had (exact name, dotted-suffix name, last
+#      registration wins, foreign module -> no answer).
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
+use compiler.hir.hir_types.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+
+fn expression_support_source() -> text:
+    file_read("src/compiler/20.hir/hir_lowering/_Expressions/expression_support.spl")
+
+describe("HIR module-callable index", fn():
+    it("never materializes the whole symbol table per lookup", fn():
+        # `self.symbols.symbols.keys()` was the sweep, and this file is the
+        # only place it ever appeared. Its absence, together with the index
+        # call that replaced it, is the mechanism assertion.
+        val source = expression_support_source()
+        expect(source.contains("me field_module_callable(module_name: text, field_name: text) -> SymbolId?:")).to_equal(true)
+        expect(source.contains("val candidate_keys = self.symbols.symbols.keys()")).to_equal(false)
+        expect(source.contains("self.symbols.module_callable_raw(module_name, field_name)")).to_equal(true)
+    )
+
+    it("answers an exact cross-module name in O(1)", fn():
+        var table = SymbolTable.new()
+        val id = table.define("answer", SymbolKind.Function, nil, Span.empty(),
+            Visibility.Public, false, Some("pkg.provider"))
+        expect(table.module_callable_raw("pkg.provider", "answer")).to_equal(id.id)
+    )
+
+    it("answers a dotted name by its last segment, as the sweep did", fn():
+        var table = SymbolTable.new()
+        val id = table.define("pkg.provider.answer", SymbolKind.Function, nil,
+            Span.empty(), Visibility.Public, false, Some("pkg.provider"))
+        expect(table.module_callable_raw("pkg.provider", "answer")).to_equal(id.id)
+    )
+
+    it("lets the latest registration win, as the reverse scan did", fn():
+        var table = SymbolTable.new()
+        val _first = table.define("answer", SymbolKind.Function, nil, Span.empty(),
+            Visibility.Public, false, Some("pkg.provider"))
+        val second = table.define("answer", SymbolKind.Function, nil, Span.empty(),
+            Visibility.Public, false, Some("pkg.provider"))
+        expect(table.module_callable_raw("pkg.provider", "answer")).to_equal(second.id)
+    )
+
+    it("does not answer for a different defining module", fn():
+        var table = SymbolTable.new()
+        val _id = table.define("answer", SymbolKind.Function, nil, Span.empty(),
+            Visibility.Public, false, Some("pkg.provider"))
+        expect(table.module_callable_raw("pkg.other", "answer")).to_equal(-1)
+    )
+
+    it("indexes nothing for a module-less local symbol", fn():
+        var table = SymbolTable.new()
+        val _id = table.define("local_only", SymbolKind.Variable, nil, Span.empty(),
+            Visibility.Private, true, nil)
+        expect(table.module_callables.len()).to_equal(0)
+    )
+)

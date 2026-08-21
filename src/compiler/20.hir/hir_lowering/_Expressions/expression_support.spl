@@ -168,15 +168,23 @@ impl HirLowering:
         # local variable/parameter never has `defining_module` set (nil), so
         # this loop only ever matches symbols that came from a real cross-
         # module import registration in the first place.
-        val candidate_keys = self.symbols.symbols.keys()
-        var index = candidate_keys.len()
-        while index > 0:
-            index = index - 1
-            val candidate = self.symbols.symbols[candidate_keys[index]]
-            if val candidate_module = candidate.defining_module:
-                if candidate_module == module_name:
-                    if candidate.name == field_name or candidate.name.ends_with("." + field_name):
-                        return candidate.id
+        # MODCALLIDX (2026-08-21): this used to materialize
+        # `self.symbols.symbols.keys()` -- an array over the WHOLE symbol
+        # table -- and scan it in reverse, on EVERY module-qualified field or
+        # method expression in every body. Fixtures hid it (tiny tables); the
+        # real 662-module closure carries tens of thousands of symbols, making
+        # HIR lowering O(exprs x symbols) and costing 60-136 s per module.
+        # SymbolTable.module_callables answers the same (defining_module,
+        # name-or-last-segment) question in O(1). The hit is re-verified
+        # against the live symbol below so a later rename cannot make a stale
+        # index row answer a spelling the old sweep would have rejected.
+        val indexed_raw = self.symbols.module_callable_raw(module_name, field_name)
+        if indexed_raw >= 0:
+            if val candidate = self.symbols.get_symbol_raw(indexed_raw):
+                if val candidate_module = candidate.defining_module:
+                    if candidate_module == module_name:
+                        if candidate.name == field_name or candidate.name.ends_with("." + field_name):
+                            return candidate.id
         nil
 
     me field_tuple_element_type(base_kind: HirExprKind, index: i64) -> HirType?:
