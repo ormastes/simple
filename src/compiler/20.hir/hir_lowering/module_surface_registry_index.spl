@@ -45,12 +45,28 @@ pub(package) fn module_surfaces_validate_index_alignment(
 
 
 pub(package) fn module_surface_registry_index(registry: ModuleSurfacesByName, name: text) -> i64:
-    if not registry.index_by_name.contains_key(name):
+    # Construction and freeze keep an O(1) compatibility Dict. The staged
+    # transient teardown can invalidate only that carrier (`len() == -1`)
+    # while deep promotion retains the aligned scalar arrays. Use the Dict
+    # whenever valid, then fall back to the retained authority after teardown.
+    if registry.index_by_name.len() >= 0:
+        if not registry.index_by_name.contains_key(name):
+            return -1
+        val dict_index = registry.index_by_name[name]
+        if dict_index < 0 or dict_index >= registry.surfaces.len():
+            return -1
+        return dict_index
+    if registry.ordered_names.len() != registry.ordered_indices.len():
         return -1
-    val index = registry.index_by_name[name]
-    if index < 0 or index >= registry.surfaces.len():
-        return -1
-    index
+    var position = 0
+    while position < registry.ordered_names.len():
+        if registry.ordered_names[position] == name:
+            val scalar_index = registry.ordered_indices[position]
+            if scalar_index < 0 or scalar_index >= registry.surfaces.len():
+                return -1
+            return scalar_index
+        position = position + 1
+    -1
 
 pub(package) fn module_surface_resolve_absolute_key(
     registry: ModuleSurfacesByName,

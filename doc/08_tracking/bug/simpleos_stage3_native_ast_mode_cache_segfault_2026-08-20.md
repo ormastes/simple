@@ -977,3 +977,10 @@ scalar-only experiment ran before the registry graph was promoted, so its text
 elements were not retained; repeating it on the promoted graph is a distinct
 root-cause fix, not a retry. No fourth cycle was started. Stage 3, ARM64 image,
 and QEMU remain unclaimed.
+
+The next fresh cycle implements that combined correction without slowing the
+construction path: `module_surface_registry_index` uses the compatibility Dict
+when `len() >= 0`, and otherwise scans the deeply promoted aligned arrays. The
+existing full frozen-alignment check then becomes a post-retention scalar
+invariant automatically, while exact name, alias, miss, and malformed-index
+coverage remain bound to the same public registry lookup.
