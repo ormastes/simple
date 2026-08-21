@@ -343,12 +343,14 @@ enforces the contract). Shards run ≤2 concurrent, output grepped for
 |---|---|---|
 | test/01_unit/compiler/frontend | 3460 | 0 |
 | test/01_unit/compiler/hir | 3520 | 0 |
-| test/01_unit/compiler/driver | 3171 | 0 |
+| test/01_unit/compiler/driver | 3584 | 0 |
 | test/01_unit/lib/common | 3859 | 0 |
-| test/01_unit/lib/nogc_sync_mut | 3260 | 0 |
+| test/01_unit/lib/nogc_sync_mut | 3682 | 0 |
 
-**Zero dynamic hits.** Two caveats stated rather than glossed: `compiler/hir`
-was cut off by the shard's own 3000s `timeout` (rc=143) after 3520 lines, and
+**Zero dynamic hits, all 5 shards complete.** Two caveats stated rather than
+glossed: `compiler/hir`
+and `compiler/driver` were each cut off by the shard's own 3000s `timeout`
+(rc=143) after 3520 and 3584 lines respectively, and
 the non-zero shard exit codes (rc=1, rc=42) are the **pre-existing SSPEC
 documentization score gate** ("SSPEC score gate: 38 below 80"), not contract
 aborts — every shard log greps to 0 for both the message and the code.
