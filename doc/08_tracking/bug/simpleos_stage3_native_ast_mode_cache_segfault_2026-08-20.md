@@ -1319,3 +1319,28 @@ first local export-index failures at source 177. This is real forward progress,
 but not a trusted Stage 3 compiler. The session's three-cycle verification cap
 is exhausted; the next owner fix and rerun must start in a fresh session before
 ARM64 or QEMU evidence can be claimed.
+
+## Scalar import materialization cycles (2026-08-22)
+
+A fresh three-cycle admitted session extended the scalar physical-index
+boundary through all imported-symbol registration call sites. Each cycle's
+Stage 2 passed compiler sanity and the struct-receiver/runtime capability gate;
+each Stage 3 remained strict (`SIMPLE_NO_STUB_FALLBACK=1`) and exited 139 in
+HIR. Cycle 1 reached 81/666 modules, Cycle 2 reached 74/666, and Cycle 3 reached
+56/666. All three retained the same first fatal family at source 1:
+`HirImpl`, `HirStaticAssert`, `HirAopAdvice`, `HirDiBinding`, `HirArchRule`, and
+`HirMockDecl` unresolved while lowering `driver.spl`. Therefore the differing
+crash endpoints are downstream/non-deterministic and do not prove progress.
+
+The session also replaced direct `lookup(...).?` presence checks in import
+registration with `lookup_or_invalid(...).is_valid()` and made same-owner
+composite revisits close dependencies instead of returning early. Neither
+removed the source-1 family. The retained trace establishes the remaining
+semantic gap: a chase from facade `compiler.hir.hir_types` finds declarations
+in terminal `compiler.hir.hir_definitions`; registration binds only the terminal
+qualified identity, then field projection immediately queries the facade-
+qualified identity and reports it unresolved. A queued owner fix now publishes
+the successfully registered terminal type under the facade-qualified alias in
+the re-export branch. It is intentionally unclaimed until a fresh admitted
+session; the three-cycle cap forbids another run here. ARM64 and QEMU remain
+pending on a trusted Stage 3.

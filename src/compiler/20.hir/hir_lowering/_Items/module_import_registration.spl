@@ -73,7 +73,7 @@ impl HirLowering:
         if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, dependency) >= 0:
             return
         self.register_imported_symbol(
-            imported_mod, imported_mod_name, dependency, dependency,
+            imported_mod.physical_index, imported_mod_name, dependency, dependency,
             import_span, materialize_enum)
         if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, dependency) >= 0:
             return
@@ -84,7 +84,19 @@ impl HirLowering:
         self.materialize_imported_field_package_dependency(
             imported_mod, dependency, import_span, materialize_enum)
 
-    me register_imported_symbol(imported_mod: ModuleSurface, imported_mod_name: text, imported_name: text, local_name: text, import_span: Span, materialize_enum: bool):
+    me register_imported_symbol(imported_index: i64, imported_mod_name: text, imported_name: text, local_name: text, import_span: Span, materialize_enum: bool):
+        # Keep the recursive import/materialization boundary scalar. Passing a
+        # retained ModuleSurface by value through nested native calls can copy
+        # stale array projections; every caller supplies its validated physical
+        # index and this owner reloads the canonical frozen surface once.
+        if imported_index < 0 or imported_index >= self.module_surfaces.surfaces.len():
+            self.error("invalid imported module surface index {imported_index} for `{imported_name}`", import_span)
+            return
+        val imported_mod = self.module_surfaces.surfaces[imported_index]
+        if imported_mod.physical_index != imported_index or
+           imported_mod.generation != self.module_surfaces.generation:
+            self.error("stale imported module surface index {imported_index} for `{imported_name}`", import_span)
+            return
         # RISDONE (2026-08-21): registering one (declaring module, imported
         # name, local name, materialize_enum) tuple is idempotent within one
         # IMPORTER -- every branch below re-checks `already_bound` /
@@ -120,11 +132,12 @@ impl HirLowering:
             hir_phase_profile_count_imported_symbol_skip()
             return
         self.register_imported_symbol_inner(
-            imported_mod, imported_mod_name, imported_name, local_name,
+            imported_index, imported_mod_name, imported_name, local_name,
             import_span, materialize_enum)
         self.registered_import_memo[registered_key] = true
 
-    me register_imported_symbol_inner(imported_mod: ModuleSurface, imported_mod_name: text, imported_name: text, local_name: text, import_span: Span, materialize_enum: bool):
+    me register_imported_symbol_inner(imported_index: i64, imported_mod_name: text, imported_name: text, local_name: text, import_span: Span, materialize_enum: bool):
+        val imported_mod = self.module_surfaces.surfaces[imported_index]
         hir_phase_profile_count_imported_symbol()
         val composite_position = module_surface_name_position(
             imported_mod.composite_names, imported_name)
@@ -140,7 +153,22 @@ impl HirLowering:
             imported_mod.constant_names, imported_name)
         if composite_position >= 0:
             val composite = imported_mod.composite_values[composite_position]
-            val already_bound = self.symbols.lookup(local_name).?
+            val existing_id = self.symbols.lookup_or_invalid(local_name)
+            val already_bound = existing_id.is_valid()
+            var same_owner = false
+            if already_bound and self.symbols.symbols.has(existing_id.id):
+                val existing: HirSymbol = self.symbols.symbols[existing_id.id]
+                if val existing_owner = existing.defining_module:
+                    same_owner = existing_owner == imported_mod.module_name
+            if already_bound and not same_owner:
+                val qualified_local = "{imported_mod.module_name}::{imported_name}"
+                if local_name == qualified_local:
+                    return
+                self.register_imported_symbol(
+                    imported_mod.physical_index, imported_mod_name,
+                    imported_name, qualified_local, import_span,
+                    materialize_enum)
+                return
             val kind = match composite.kind:
                 case "class": SymbolKind.Class
                 case "struct": SymbolKind.Struct
@@ -155,9 +183,10 @@ impl HirLowering:
             hir_phase_profile_add(HIR_PROF_RIS_DEFINE, composite_define_started)
             if not already_bound:
                 self.symbols.rename_symbol(imported_type, imported_name)
-                self.symbols.bind_qualified_type(imported_mod.module_name, imported_name, imported_type)
-            else:
-                return
+            # Repeated visits to the same owner are not a reason to skip its
+            # qualified identity or dependency closure. Package prebinding can
+            # create the short symbol before an explicit/re-export import.
+            self.symbols.bind_qualified_type(imported_mod.module_name, imported_name, imported_type)
             # A public composite field can name another type from the same
             # defining module inside a container (`[Cell]`, `Cell?`, ...).
             # Materialize those identities before lowering the field type so
@@ -220,10 +249,10 @@ impl HirLowering:
                     if (hir_module_env_get("SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE") ?? "") == "1":
                         eprint("[hir-payload-shortname-collision] local={local_name} requalified={qualified_local} owner={imported_mod.module_name}")
                     self.register_imported_symbol(
-                        imported_mod, imported_mod_name, imported_name,
+                        imported_mod.physical_index, imported_mod_name, imported_name,
                         qualified_local, import_span, materialize_enum)
                     return
-            val already_bound = self.symbols.lookup(local_name).?
+            val already_bound = self.symbols.lookup_or_invalid(local_name).is_valid()
             val imported_type = self.symbols.define(local_name, SymbolKind.Enum, nil, import_span, Visibility.Public, false, Some(imported_mod.module_name))
             if not already_bound:
                 self.symbols.rename_symbol(imported_type, imported_name)
@@ -243,7 +272,7 @@ impl HirLowering:
                 self.imported_enum_owners[local_name] = imported_mod.module_name
                 self.register_materialized_enum_payload_dependencies(imported_mod, imported_mod_name, surface_enum, import_span)
         elif trait_position >= 0:
-            val already_bound = self.symbols.lookup(local_name).?
+            val already_bound = self.symbols.lookup_or_invalid(local_name).is_valid()
             val imported_trait = self.symbols.define(local_name, SymbolKind.Trait, nil, import_span, Visibility.Public, false, Some(imported_mod.module_name))
             if not already_bound:
                 # Preserve the physical declaration name in the symbol while
@@ -310,7 +339,7 @@ impl HirLowering:
                 if alias_target != imported_name and
                    module_surface_name_position(imported_mod.type_alias_names, alias_target) < 0 and
                    hir_module_declares_item(imported_mod, alias_target):
-                    self.register_imported_symbol(imported_mod, imported_mod_name, alias_target, local_name, import_span, materialize_enum)
+                    self.register_imported_symbol(imported_mod.physical_index, imported_mod_name, alias_target, local_name, import_span, materialize_enum)
                     return
             val already_bound = self.symbols.lookup_or_invalid(local_name).is_valid()
             if not already_bound:
@@ -376,9 +405,23 @@ impl HirLowering:
                 val source_index = hop.module_index
                 if source_index >= 0:
                     self.register_imported_symbol(
-                        self.module_surfaces.surfaces[source_index],
+                        source_index,
                         self.module_surfaces.surfaces[source_index].preferred_registry_name,
                         hop.item_name, local_name, import_span, materialize_enum)
+                    # Field/callable projection remains expressed in the
+                    # facade owner's qualified scope. The terminal register
+                    # above binds `terminal.module.Item`; publish the same type
+                    # identity as `facade.module.Item` so the caller's immediate
+                    # projected lookup does not lose a successfully chased
+                    # re-export (hir_types -> hir_definitions is the Stage-3
+                    # HirImpl/HirStaticAssert family).
+                    val terminal_module = self.module_surfaces.surfaces[source_index].module_name
+                    val terminal_type = self.symbols.lookup_qualified_type_raw(
+                        terminal_module, hop.item_name)
+                    if terminal_type >= 0:
+                        self.symbols.bind_qualified_type(
+                            imported_mod.module_name, imported_name,
+                            SymbolId(id: terminal_type))
 
     me report_reexport_chase_stats():
         """Level-gated (SIMPLE_HIR_REEXPORT_STATS=1, default off) readout for the
@@ -395,7 +438,7 @@ impl HirLowering:
         """Resolve one uniquely owned flat-global bootstrap declaration."""
         if (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
             return false
-        if self.symbols.lookup(name).?:
+        if self.symbols.lookup_or_invalid(name).is_valid():
             return true
         # PKGIDX (2026-08-21): this runs per UNBOUND NAME in every function
         # body, and the sweep it replaces had no early exit (it must prove the
@@ -436,9 +479,9 @@ impl HirLowering:
         # doc/08_tracking/bug/t3_full_bootstrap_stage3_unresolved_type_byteorder_cache_validator_2026-08-06.md
         val saved_registering_import_symbols = self.registering_import_symbols
         self.registering_import_symbols = true
-        self.register_imported_symbol(owner, owner.module_name, name, name, span, true)
+        self.register_imported_symbol(matching_index, owner.module_name, name, name, span, true)
         self.registering_import_symbols = saved_registering_import_symbols
-        self.symbols.lookup(name).?
+        self.symbols.lookup_or_invalid(name).is_valid()
 
     me resolve_module_key(name: text) -> text:
         """Canonical modules_by_name key for an import path, or "".
