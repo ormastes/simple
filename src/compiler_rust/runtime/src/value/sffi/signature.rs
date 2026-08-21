@@ -511,6 +511,27 @@ fn _empty_bytes() -> RuntimeValue {
     unsafe { crate::value::collections::rt_string_new(std::ptr::null(), 0) }
 }
 
+fn signature_bytes_value(bytes: &[u8]) -> RuntimeValue {
+    unsafe { crate::value::collections::rt_string_new(bytes.as_ptr(), bytes.len() as u64) }
+}
+
+fn checked_sign_result(result: Result<RuntimeValue, i64>) -> RuntimeValue {
+    let pair = crate::value::collections::rt_array_new(2);
+    if pair.is_nil() {
+        return RuntimeValue::NIL;
+    }
+    let (status, payload) = match result {
+        Ok(payload) => (0, payload),
+        Err(status) => (status, RuntimeValue::NIL),
+    };
+    if !crate::value::collections::rt_array_push(pair, RuntimeValue::from_int(status))
+        || !crate::value::collections::rt_array_push(pair, payload)
+    {
+        return RuntimeValue::NIL;
+    }
+    pair
+}
+
 // ---------------------------------------------------------------------------
 // Signing
 //
@@ -521,28 +542,42 @@ fn _empty_bytes() -> RuntimeValue {
 // baremetal.
 // ---------------------------------------------------------------------------
 
-fn rsa_sign_impl(
+fn rsa_sign_bytes(
     pkcs8: RuntimeValue,
     message: RuntimeValue,
     enc: &'static dyn ring::signature::RsaEncoding,
-) -> RuntimeValue {
+) -> Result<Vec<u8>, i64> {
+    if pkcs8.is_nil() || message.is_nil() {
+        return Err(1);
+    }
     let Some(key_bytes) = runtime_byte_array_to_vec(pkcs8) else {
-        return _empty_bytes();
+        return Err(1);
     };
     let Some(msg_bytes) = runtime_byte_array_to_vec(message) else {
-        return _empty_bytes();
+        return Err(1);
     };
 
     let Ok(keypair) = RsaKeyPair::from_pkcs8(&key_bytes) else {
-        return _empty_bytes();
+        return Err(2);
     };
 
     let rng = SystemRandom::new();
     let mut signature = vec![0u8; keypair.public().modulus_len()];
     if keypair.sign(enc, &rng, &msg_bytes, &mut signature).is_err() {
-        return _empty_bytes();
+        return Err(3);
     }
-    unsafe { crate::value::collections::rt_string_new(signature.as_ptr(), signature.len() as u64) }
+    Ok(signature)
+}
+
+fn rsa_sign_impl(
+    pkcs8: RuntimeValue,
+    message: RuntimeValue,
+    enc: &'static dyn ring::signature::RsaEncoding,
+) -> RuntimeValue {
+    match rsa_sign_bytes(pkcs8, message, enc) {
+        Ok(signature) => signature_bytes_value(&signature),
+        Err(_) => _empty_bytes(),
+    }
 }
 
 /// Sign `message` with RSA-PKCS1 SHA-256 using a PKCS#8-v1 DER private
@@ -562,6 +597,13 @@ pub extern "C" fn rt_rsa_sha256_sign(pkcs8: RuntimeValue, message: RuntimeValue)
     rsa_sign_impl(pkcs8, message, &RSA_PKCS1_SHA256)
 }
 
+#[no_mangle]
+pub extern "C" fn rt_rsa_sha256_sign_checked(pkcs8: RuntimeValue, message: RuntimeValue) -> RuntimeValue {
+    checked_sign_result(
+        rsa_sign_bytes(pkcs8, message, &RSA_PKCS1_SHA256).map(|signature| signature_bytes_value(&signature)),
+    )
+}
+
 /// Sign `message` with RSA-PKCS1 SHA-512 using a PKCS#8-v1 DER private
 /// key (RFC 8332 `rsa-sha2-512`).
 ///
@@ -569,6 +611,13 @@ pub extern "C" fn rt_rsa_sha256_sign(pkcs8: RuntimeValue, message: RuntimeValue)
 #[no_mangle]
 pub extern "C" fn rt_rsa_sha512_sign(pkcs8: RuntimeValue, message: RuntimeValue) -> RuntimeValue {
     rsa_sign_impl(pkcs8, message, &RSA_PKCS1_SHA512)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_rsa_sha512_sign_checked(pkcs8: RuntimeValue, message: RuntimeValue) -> RuntimeValue {
+    checked_sign_result(
+        rsa_sign_bytes(pkcs8, message, &RSA_PKCS1_SHA512).map(|signature| signature_bytes_value(&signature)),
+    )
 }
 
 /// Sign `message` with Ed25519 using a PKCS#8-v1 DER private key
@@ -581,24 +630,38 @@ pub extern "C" fn rt_rsa_sha512_sign(pkcs8: RuntimeValue, message: RuntimeValue)
 /// Hosted-only: requires `ring::signature::Ed25519KeyPair`.
 #[no_mangle]
 pub extern "C" fn rt_ed25519_sign(pkcs8: RuntimeValue, message: RuntimeValue) -> RuntimeValue {
+    match ed25519_sign_value(pkcs8, message) {
+        Ok(signature) => signature,
+        Err(_) => _empty_bytes(),
+    }
+}
+
+fn ed25519_sign_value(pkcs8: RuntimeValue, message: RuntimeValue) -> Result<RuntimeValue, i64> {
+    if pkcs8.is_nil() || message.is_nil() {
+        return Err(1);
+    }
     let Some(key_bytes) = runtime_byte_array_to_vec(pkcs8) else {
-        return _empty_bytes();
+        return Err(1);
     };
     let Some(msg_bytes) = runtime_byte_array_to_vec(message) else {
-        return _empty_bytes();
+        return Err(1);
     };
 
     let Some(seed) = ed25519_pkcs8_v1_seed(&key_bytes) else {
-        return _empty_bytes();
+        return Err(2);
     };
     let keypair = match ring::signature::Ed25519KeyPair::from_seed_unchecked(seed) {
         Ok(kp) => kp,
-        Err(_) => return _empty_bytes(),
+        Err(_) => return Err(2),
     };
 
     let sig = keypair.sign(&msg_bytes);
-    let bytes = sig.as_ref();
-    unsafe { crate::value::collections::rt_string_new(bytes.as_ptr(), bytes.len() as u64) }
+    Ok(signature_bytes_value(sig.as_ref()))
+}
+
+#[no_mangle]
+pub extern "C" fn rt_ed25519_sign_checked(pkcs8: RuntimeValue, message: RuntimeValue) -> RuntimeValue {
+    checked_sign_result(ed25519_sign_value(pkcs8, message))
 }
 
 /// Sign `message` with ECDSA P-256 SHA-256 using a PKCS#8-v1 DER
@@ -612,23 +675,37 @@ pub extern "C" fn rt_ed25519_sign(pkcs8: RuntimeValue, message: RuntimeValue) ->
 /// Hosted-only: requires `ring::rand::SystemRandom`.
 #[no_mangle]
 pub extern "C" fn rt_ecdsa_p256_sign(pkcs8: RuntimeValue, message: RuntimeValue) -> RuntimeValue {
+    match ecdsa_p256_sign_value(pkcs8, message) {
+        Ok(signature) => signature,
+        Err(_) => _empty_bytes(),
+    }
+}
+
+fn ecdsa_p256_sign_value(pkcs8: RuntimeValue, message: RuntimeValue) -> Result<RuntimeValue, i64> {
+    if pkcs8.is_nil() || message.is_nil() {
+        return Err(1);
+    }
     let Some(key_bytes) = runtime_byte_array_to_vec(pkcs8) else {
-        return _empty_bytes();
+        return Err(1);
     };
     let Some(msg_bytes) = runtime_byte_array_to_vec(message) else {
-        return _empty_bytes();
+        return Err(1);
     };
 
     let rng = SystemRandom::new();
     let Ok(keypair) = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &key_bytes, &rng) else {
-        return _empty_bytes();
+        return Err(2);
     };
 
     let Ok(sig) = keypair.sign(&rng, &msg_bytes) else {
-        return _empty_bytes();
+        return Err(3);
     };
-    let bytes = sig.as_ref();
-    unsafe { crate::value::collections::rt_string_new(bytes.as_ptr(), bytes.len() as u64) }
+    Ok(signature_bytes_value(sig.as_ref()))
+}
+
+#[no_mangle]
+pub extern "C" fn rt_ecdsa_p256_sign_checked(pkcs8: RuntimeValue, message: RuntimeValue) -> RuntimeValue {
+    checked_sign_result(ecdsa_p256_sign_value(pkcs8, message))
 }
 
 #[cfg(test)]
@@ -705,5 +782,24 @@ mod tests {
         assert_eq!(rt_rsa_pss_sha384_verify_checked(nil, nil, nil), -1);
         assert_eq!(rt_rsa_pss_sha512_verify_checked(nil, nil, nil), -1);
         assert_eq!(rt_ecdsa_p256_verify_checked(nil, nil, nil), -1);
+    }
+
+    fn checked_sign_status(value: RuntimeValue) -> i64 {
+        assert_eq!(crate::value::collections::rt_array_len(value), 2);
+        crate::value::collections::rt_array_get(value, 0).as_int()
+    }
+
+    #[test]
+    fn checked_signing_distinguishes_success_from_bridge_failure() {
+        let signed = rt_ed25519_sign_checked(bytes_value(ED25519_PKCS8_V1), bytes_value(MSG));
+        assert_eq!(checked_sign_status(signed), 0);
+        let payload = crate::value::collections::rt_array_get(signed, 1);
+        assert_eq!(crate::value::collections::rt_string_len(payload), 64);
+
+        let nil = RuntimeValue::NIL;
+        assert_eq!(checked_sign_status(rt_rsa_sha256_sign_checked(nil, nil)), 1);
+        assert_eq!(checked_sign_status(rt_rsa_sha512_sign_checked(nil, nil)), 1);
+        assert_eq!(checked_sign_status(rt_ed25519_sign_checked(nil, nil)), 1);
+        assert_eq!(checked_sign_status(rt_ecdsa_p256_sign_checked(nil, nil)), 1);
     }
 }

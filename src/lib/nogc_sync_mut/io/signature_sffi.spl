@@ -60,18 +60,26 @@ extern fn rt_rsa_pss_sha512_verify_checked(pubkey: [u8], message: [u8], signatur
 # Sign `message` with RSA-PKCS1-SHA256 using a PKCS#8-v1 DER private key.
 # Returns the signature bytes, or an empty array on any error.
 extern fn rt_rsa_sha256_sign(pkcs8: [u8], message: [u8]) -> [u8]
+@unsafe(reason: "checked RSA SHA-256 signing ABI", capabilities: [ffi])
+extern fn rt_rsa_sha256_sign_checked(pkcs8: [u8], message: [u8]) -> [Any]
 
 # Sign `message` with RSA-PKCS1-SHA512 using a PKCS#8-v1 DER private key.
 # Returns the signature bytes, or an empty array on any error.
 extern fn rt_rsa_sha512_sign(pkcs8: [u8], message: [u8]) -> [u8]
+@unsafe(reason: "checked RSA SHA-512 signing ABI", capabilities: [ffi])
+extern fn rt_rsa_sha512_sign_checked(pkcs8: [u8], message: [u8]) -> [Any]
 
 # Sign `message` with Ed25519 using a PKCS#8-v1 DER private key (RFC 8032).
 # Returns 64-byte Ed25519 signature, or an empty array on any error.
 extern fn rt_ed25519_sign(pkcs8: [u8], message: [u8]) -> [u8]
+@unsafe(reason: "checked Ed25519 signing ABI", capabilities: [ffi])
+extern fn rt_ed25519_sign_checked(pkcs8: [u8], message: [u8]) -> [Any]
 
 # Sign `message` with ECDSA P-256 SHA-256 using a PKCS#8-v1 DER private
 # key. Returns 64-byte fixed-width r||s, or an empty array on error.
 extern fn rt_ecdsa_p256_sign(pkcs8: [u8], message: [u8]) -> [u8]
+@unsafe(reason: "checked ECDSA P-256 signing ABI", capabilities: [ffi])
+extern fn rt_ecdsa_p256_sign_checked(pkcs8: [u8], message: [u8]) -> [Any]
 
 # Verify an ECDSA P-384 SHA-384 fixed-width (96-byte r||s) signature.
 # Returns 1 if valid, 0 otherwise.
@@ -145,6 +153,51 @@ fn rsa_pss_sha384_verify_checked(pubkey: [u8], message: [u8], signature: [u8]) -
 
 fn rsa_pss_sha512_verify_checked(pubkey: [u8], message: [u8], signature: [u8]) -> Result<bool, text>:
     _checked_verify_result(_rsa_pss_sha512_verify_raw_checked(pubkey, message, signature), "RSA-PSS SHA-512")
+
+fn _checked_sign_result(raw: [Any], algorithm: text) -> Result<[u8], text>:
+    if raw.len() != 2:
+        return Err("E-SFFI-017: corrupt {algorithm} signing result descriptor")
+    val status = raw[0] as i64
+    if status == 1:
+        return Err("E-SFFI-010: malformed {algorithm} signing bridge input")
+    if status == 2:
+        return Err("E-SFFI-010: invalid {algorithm} private key")
+    if status == 3:
+        return Err("E-SFFI-017: {algorithm} provider signing failure")
+    if status != 0:
+        return Err("E-SFFI-017: unknown {algorithm} signing status {status}")
+    val signature = raw[1] as [u8]
+    if signature.len() == 0:
+        return Err("E-SFFI-017: {algorithm} succeeded with an empty signature")
+    Ok(signature)
+
+@unsafe(reason: "minimal checked RSA SHA-256 signing call", capabilities: [ffi])
+fn _rsa_sha256_sign_raw_checked(pkcs8: [u8], message: [u8]) -> [Any]:
+    rt_rsa_sha256_sign_checked(pkcs8, message)
+
+@unsafe(reason: "minimal checked RSA SHA-512 signing call", capabilities: [ffi])
+fn _rsa_sha512_sign_raw_checked(pkcs8: [u8], message: [u8]) -> [Any]:
+    rt_rsa_sha512_sign_checked(pkcs8, message)
+
+@unsafe(reason: "minimal checked Ed25519 signing call", capabilities: [ffi])
+fn _ed25519_sign_raw_checked(pkcs8: [u8], message: [u8]) -> [Any]:
+    rt_ed25519_sign_checked(pkcs8, message)
+
+@unsafe(reason: "minimal checked ECDSA P-256 signing call", capabilities: [ffi])
+fn _ecdsa_p256_sign_raw_checked(pkcs8: [u8], message: [u8]) -> [Any]:
+    rt_ecdsa_p256_sign_checked(pkcs8, message)
+
+fn rsa_sha256_sign_checked(pkcs8: [u8], message: [u8]) -> Result<[u8], text>:
+    _checked_sign_result(_rsa_sha256_sign_raw_checked(pkcs8, message), "RSA SHA-256")
+
+fn rsa_sha512_sign_checked(pkcs8: [u8], message: [u8]) -> Result<[u8], text>:
+    _checked_sign_result(_rsa_sha512_sign_raw_checked(pkcs8, message), "RSA SHA-512")
+
+fn ed25519_sign_pkcs8_checked(pkcs8: [u8], message: [u8]) -> Result<[u8], text>:
+    _checked_sign_result(_ed25519_sign_raw_checked(pkcs8, message), "Ed25519")
+
+fn ecdsa_p256_sign_checked(pkcs8: [u8], message: [u8]) -> Result<[u8], text>:
+    _checked_sign_result(_ecdsa_p256_sign_raw_checked(pkcs8, message), "ECDSA P-256")
 
 fn rsa_sha256_verify(pubkey: [u8], message: [u8], signature: [u8]) -> bool:
     """Verify an RSA-PKCS1-SHA256 signature.

@@ -149,22 +149,36 @@ fn normalize_rsa_public_key(pubkey: &[u8]) -> Option<Vec<u8>> {
 // RSA sign
 // ---------------------------------------------------------------------------
 
-fn rsa_sign_impl(args: &[Value], enc: &'static dyn ring::signature::RsaEncoding) -> Result<Value, CompileError> {
+fn checked_sign_value(result: Result<Value, i64>) -> Value {
+    match result {
+        Ok(payload) => Value::Array(vec![Value::Int(0), payload]),
+        Err(status) => Value::Array(vec![Value::Int(status), Value::Nil]),
+    }
+}
+
+fn rsa_sign_bytes(args: &[Value], enc: &'static dyn ring::signature::RsaEncoding) -> Result<Vec<u8>, i64> {
     let Some(pkcs8) = extract_bytes(args, 0) else {
-        return Ok(empty_bytes());
+        return Err(1);
     };
     let Some(msg) = extract_bytes(args, 1) else {
-        return Ok(empty_bytes());
+        return Err(1);
     };
     let Ok(keypair) = RsaKeyPair::from_pkcs8(&pkcs8) else {
-        return Ok(empty_bytes());
+        return Err(2);
     };
     let rng = SystemRandom::new();
     let mut sig = vec![0u8; keypair.public().modulus_len()];
     if keypair.sign(enc, &rng, &msg, &mut sig).is_err() {
-        return Ok(empty_bytes());
+        return Err(3);
     }
-    Ok(bytes_to_value(&sig))
+    Ok(sig)
+}
+
+fn rsa_sign_impl(args: &[Value], enc: &'static dyn ring::signature::RsaEncoding) -> Result<Value, CompileError> {
+    Ok(match rsa_sign_bytes(args, enc) {
+        Ok(signature) => bytes_to_value(&signature),
+        Err(_) => empty_bytes(),
+    })
 }
 
 /// `rt_rsa_sha256_sign(pkcs8: [u8], message: [u8]) -> [u8]`
@@ -172,9 +186,21 @@ pub fn rt_rsa_sha256_sign(args: &[Value]) -> Result<Value, CompileError> {
     rsa_sign_impl(args, &RSA_PKCS1_SHA256)
 }
 
+pub fn rt_rsa_sha256_sign_checked(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(checked_sign_value(
+        rsa_sign_bytes(args, &RSA_PKCS1_SHA256).map(|signature| bytes_to_value(&signature)),
+    ))
+}
+
 /// `rt_rsa_sha512_sign(pkcs8: [u8], message: [u8]) -> [u8]`
 pub fn rt_rsa_sha512_sign(args: &[Value]) -> Result<Value, CompileError> {
     rsa_sign_impl(args, &RSA_PKCS1_SHA512)
+}
+
+pub fn rt_rsa_sha512_sign_checked(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(checked_sign_value(
+        rsa_sign_bytes(args, &RSA_PKCS1_SHA512).map(|signature| bytes_to_value(&signature)),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -376,21 +402,32 @@ pub fn rt_ed25519_verify_checked(args: &[Value]) -> Result<Value, CompileError> 
 
 /// `rt_ed25519_sign(pkcs8: [u8], message: [u8]) -> [u8]` (64-byte signature)
 pub fn rt_ed25519_sign(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(match ed25519_sign_value(args) {
+        Ok(signature) => signature,
+        Err(_) => empty_bytes(),
+    })
+}
+
+fn ed25519_sign_value(args: &[Value]) -> Result<Value, i64> {
     let Some(pkcs8) = extract_bytes(args, 0) else {
-        return Ok(empty_bytes());
+        return Err(1);
     };
     let Some(msg) = extract_bytes(args, 1) else {
-        return Ok(empty_bytes());
+        return Err(1);
     };
     let Some(seed) = ed25519_pkcs8_v1_seed(&pkcs8) else {
-        return Ok(empty_bytes());
+        return Err(2);
     };
     let keypair = match ring::signature::Ed25519KeyPair::from_seed_unchecked(seed) {
         Ok(kp) => kp,
-        Err(_) => return Ok(empty_bytes()),
+        Err(_) => return Err(2),
     };
     let sig = keypair.sign(&msg);
     Ok(bytes_to_value(sig.as_ref()))
+}
+
+pub fn rt_ed25519_sign_checked(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(checked_sign_value(ed25519_sign_value(args)))
 }
 
 // ---------------------------------------------------------------------------
@@ -399,20 +436,31 @@ pub fn rt_ed25519_sign(args: &[Value]) -> Result<Value, CompileError> {
 
 /// `rt_ecdsa_p256_sign(pkcs8: [u8], message: [u8]) -> [u8]` (64-byte r‖s)
 pub fn rt_ecdsa_p256_sign(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(match ecdsa_p256_sign_value(args) {
+        Ok(signature) => signature,
+        Err(_) => empty_bytes(),
+    })
+}
+
+fn ecdsa_p256_sign_value(args: &[Value]) -> Result<Value, i64> {
     let Some(pkcs8) = extract_bytes(args, 0) else {
-        return Ok(empty_bytes());
+        return Err(1);
     };
     let Some(msg) = extract_bytes(args, 1) else {
-        return Ok(empty_bytes());
+        return Err(1);
     };
     let rng = SystemRandom::new();
     let Ok(keypair) = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &pkcs8, &rng) else {
-        return Ok(empty_bytes());
+        return Err(2);
     };
     let Ok(sig) = keypair.sign(&rng, &msg) else {
-        return Ok(empty_bytes());
+        return Err(3);
     };
     Ok(bytes_to_value(sig.as_ref()))
+}
+
+pub fn rt_ecdsa_p256_sign_checked(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(checked_sign_value(ecdsa_p256_sign_value(args)))
 }
 
 /// `rt_ecdsa_p256_verify(spki: [u8], message: [u8], signature: [u8]) -> i64`
@@ -517,6 +565,29 @@ mod tests {
         ];
         for result in checked {
             assert!(matches!(result, Ok(Value::Int(-1))));
+        }
+    }
+
+    #[test]
+    fn checked_signing_distinguishes_success_from_bridge_failure() {
+        let signed = rt_ed25519_sign_checked(&[bytes_to_value(ED25519_PKCS8_V1), bytes_to_value(MSG)])
+            .expect("checked signing should not raise an interpreter error");
+        let Value::Array(pair) = signed else {
+            panic!("expected checked pair")
+        };
+        assert!(matches!(pair.first(), Some(Value::Int(0))));
+
+        let malformed = [Value::Nil, Value::Nil];
+        for result in [
+            rt_rsa_sha256_sign_checked(&malformed),
+            rt_rsa_sha512_sign_checked(&malformed),
+            rt_ed25519_sign_checked(&malformed),
+            rt_ecdsa_p256_sign_checked(&malformed),
+        ] {
+            let Value::Array(pair) = result.expect("checked signer should return a status") else {
+                panic!("expected checked pair")
+            };
+            assert!(matches!(pair.first(), Some(Value::Int(1))));
         }
     }
 }

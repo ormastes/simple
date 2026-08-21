@@ -293,12 +293,12 @@ symbol/signature roll-up is
 
 Current evidence:
 
-- 3,966 distinct symbols in the backing census and 3,964 with owned Simple
+- 3,970 distinct symbols in the backing census and 3,968 with owned Simple
   declaration sites;
-- 14,919 declaration sites;
-- 14,426 sites have neither an explicit FFI-unsafe tag nor a local contract;
+- 14,928 declaration sites;
+- 14,431 sites have neither an explicit FFI-unsafe tag nor a local contract;
 - 486 sites declare a typed/documented contract but lack the unsafe tag;
-- 7 checked verification declarations carry both explicit FFI authority and a
+- 11 checked signing/verification declarations carry both explicit FFI authority and a
   typed result contract; their cryptographic artifact evidence remains open;
 - 399 canonical symbols currently have more than one normalized declaration
   shape and require typed-resolution review before one ABI hash can be sealed;
@@ -331,6 +331,15 @@ client host-key path uses the checked dispatcher. P-384/P-521 remain rejected by
 that dispatcher until checked providers exist. The additional status branch is
 constant-time transport work relative to the existing cryptographic operation;
 no registry lookup, hashing, mutex, or wrapper allocation was added.
+
+Checked signature generation now covers RSA PKCS#1 SHA-256/SHA-512, Ed25519,
+and ECDSA P-256. Its descriptor carries status plus payload so malformed bridge
+input, invalid keys, provider failures, and successful signatures remain
+distinct. Legacy entry points retain their original payload-only ABI and do not
+allocate the checked descriptor. The Ed25519/ECDSA shared helpers return the
+runtime payload directly; a guard rejects temporary `Vec` copies or descriptor
+allocation on those legacy paths. The TLS client CertificateVerify Ed25519 path
+uses the checked Result wrapper.
 
 ## Requirement decision
 
