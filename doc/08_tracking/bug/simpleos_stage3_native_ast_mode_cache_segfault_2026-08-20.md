@@ -1138,3 +1138,31 @@ presence check reproduces the struct/optional ABI hazard at surface creation.
 The queued correction unwraps `alias` only when `has_alias` is true and stores
 an empty scalar otherwise. It is intentionally unclaimed until a fresh scoped
 session runs the next admitted Stage-3 cycle.
+
+## Flattened import-item Cycle 1 (2026-08-22)
+
+The fresh admitted cycle proved the nullable-alias guard: the first surface
+completed construction, promotion, commit, and release. The next surface
+(`compiler.driver.driver`) parsed, then crashed during surface construction.
+Inspection found the projection loop incorrectly reading `source.imports` from
+`SourceFile`, whose authoritative fields are only path/content/module metadata.
+Parsed imports belong to `owner.value.imports`. This invalid structural field
+read explains the file-dependent SIGSEGV and must be corrected at the owner
+boundary before Cycle 2.
+
+Cycle 2 completed all surface construction and entered HIR, then failed
+cleanly because every importer lookup used raw `src/.../*.spl` paths against a
+registry keyed by dotted logical module names. The existing relative-import
+path already defines the correct canonicalization: remove `.spl`, replace `/`
+with `.`, and remove the leading `src.`. The importer surface must be resolved
+with that canonical key before its validated flat import-item ranges are read.
+
+Cycle 3 proved the canonical key for the entry module, then every later module
+again reported a missing importer surface. The one-time per-lowerer
+`surface_index_by_name` cache is a transient Dict: it works for source 0 but
+false-negatives after that module's scope transition. The registry's promoted
+ordered name/index arrays remain authoritative. `surface_index_for_name` must
+therefore treat a cache miss as inconclusive and fall back to
+`module_surface_registry_index`, which already scans those retained scalar
+arrays when the construction Dict is unavailable. The three-cycle cap prevents
+claiming this queued correction until the next fresh session.
