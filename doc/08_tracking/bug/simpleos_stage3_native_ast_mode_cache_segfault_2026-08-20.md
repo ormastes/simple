@@ -984,3 +984,33 @@ when `len() >= 0`, and otherwise scans the deeply promoted aligned arrays. The
 existing full frozen-alignment check then becomes a post-retention scalar
 invariant automatically, while exact name, alias, miss, and malformed-index
 coverage remain bound to the same public registry lookup.
+
+## Stage-2 trust-root refresh blocker (2026-08-22)
+
+The first post-fallback bootstrap attempt used the older admitted Phase-2
+parent and failed while lowering `src/lib/nogc_sync_mut/io/file_ops.spl` with
+an undeclared `ffi` global. A direct probe distinguishes that symptom from the
+source contract: the retained admitted compiler crashes during parse, while a
+newer unreceipted compiler parses the same six-module closure and crashes only
+after entering HIR. The FFI annotations must therefore remain intact.
+
+The canonical `--full-bootstrap --stop-after-stage2` trust-root refresh then
+stopped before producing a compiler: Rust LLVM lowering destructured
+`MirInst::ClosureCreate` without its newly added `return_type` field
+(`E0027`, `compiler/src/codegen/llvm/functions.rs:1072`). Sibling dispatch and
+instruction lowerers already ignore that metadata explicitly. The bootstrap
+fix is to make the LLVM pattern equally exhaustive; `cargo check` is the exact
+regression because this mismatch cannot compile, and the sibling closure
+lowerers are the adjacent consistency evidence.
+
+The exhaustive-pattern correction passed `cargo check -p simple-compiler`.
+The third and final bootstrap cycle then completed the canonical Stage-2
+trust-root refresh and admitted a pure-Simple compiler at SHA-256
+`913990d1192ade4ca1828714619b0f7ae78dccbf52f774ddb912953757fd25a3`.
+Its `stage2-provenance.receipt` reports
+`authority=explicit-full-bootstrap-stage2-trust-root`, and its independently
+bound `stage2-sanity.receipt` reports `stage2-sanity: pass`; both bind the same
+candidate and admission receipt. The earlier undeclared-`ffi` symptom did not
+recur. The mandatory three-cycle cap stops this session before Stage 3. The
+admitted Stage-2 artifact is the exact next-session parent; Stage 3, the ARM64
+image, and all real-QEMU rendering surfaces remain unclaimed.

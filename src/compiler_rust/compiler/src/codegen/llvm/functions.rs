@@ -1078,6 +1078,7 @@ impl LlvmBackend {
                 captures,
                 lambda_params: _,
                 body_block: _,
+                return_type: _,
             } => {
                 self.compile_closure_create(
                     *dest,
