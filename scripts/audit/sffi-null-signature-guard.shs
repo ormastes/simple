@@ -409,6 +409,39 @@ if printf '%s\n' "$checked_read_region" | rg -q \
     failed=1
 fi
 
+if rg -q 'extern fn rt_file_read_text_at\(' \
+    "$root/src/app" "$root/src/lib" "$root/src/compiler_rust/lib"; then
+    echo "SFFI lint: safe-looking Simple code still declares the ambiguous legacy offset-read ABI" >&2
+    failed=1
+fi
+for legacy_owner in \
+    src/runtime/runtime.h \
+    src/runtime/runtime_native.c \
+    src/runtime/platform/unix_common.h \
+    src/runtime/platform/platform_win.h
+do
+    require_fixed 'SFFI_LEGACY_UNSAFE' "$legacy_owner"
+done
+require_fixed 'fn file_read_text_at(path: text, offset: i64, size: i64) -> Result<text, text>' \
+    src/lib/nogc_sync_mut/io/file_ops.spl
+require_fixed 'fn fb_read(path: text) -> Result<text, text>' \
+    src/lib/nogc_sync_mut/enterprise_store/file_backend.spl
+require_fixed 'fn read_bounded_temp_output(path: text) -> Result<text, text>' \
+    src/lib/nogc_sync_mut/test_runner/test_runner_async.spl
+require_fixed 'fn rt_file_read_text_at_checked(path: text, offset: i64, size: i64) -> text?' \
+    src/os/userlib/rt_file_facade.spl
+require_fixed 'body_file: path' src/lib/nogc_async_mut/http_server/static_file.spl
+require_fixed 'reason: "Internal Server Error"' \
+    src/lib/nogc_async_mut/http_server/range.spl
+
+static_range_region=$(sed -n \
+    '/fn static_file_serve_range(/,/fn strip_prefix(/p' \
+    "$root/src/lib/nogc_async_mut/http_server/static_file.spl")
+if printf '%s\n' "$static_range_region" | rg -q 'file_read_text_at\('; then
+    echo "SFFI lint: single HTTP range regained an eager read before body-file streaming" >&2
+    failed=1
+fi
+
 # Cryptographic sign/verify symbols must resolve through the same typed static
 # registry as their checked tri-state/status-payload wrappers.
 for symbol in \

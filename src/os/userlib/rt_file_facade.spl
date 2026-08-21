@@ -106,23 +106,30 @@ fn rt_file_size(path: text) -> i64:
 
 @export("C")
 fn rt_file_read_text_at(path: text, offset: i64, size: i64) -> text:
+    rt_file_read_text_at_checked(path, offset, size) ?? ""
+
+@export("C")
+fn rt_file_read_text_at_checked(path: text, offset: i64, size: i64) -> text?:
     """Read `size` bytes of path starting at byte `offset`, as text.
 
     Whole-file read then byte slice: enterprise stores are small
     append-only files; a seek syscall is not warranted yet.
-    Out-of-range requests clamp; errors return "".
+    Out-of-range requests clamp; failures return nil and valid empty reads
+    return an allocated empty text.
     """
-    if offset < 0 or size <= 0:
+    if offset < 0 or size < 0:
+        return nil
+    if size == 0:
         return ""
     val fd = _open(path, VFS_OPEN_O_RDONLY as u64)
     if fd < 0:
-        return ""
+        return nil
     val bytes = _read_all(fd, _MAX_FILE_BYTES)
     _close(fd)
     val total = bytes.len().to_i64()
     if offset >= total:
         return ""
-    var stop = offset + size
+    var stop = if size > 0x7fffffffffffffff - offset: total else: offset + size
     if stop > total:
         stop = total
     var out: [u8] = []

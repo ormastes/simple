@@ -13,7 +13,8 @@ extern fn rt_file_hash_sha256(path: text) -> text
 extern fn rt_file_lock(path: text, timeout_secs: i64) -> i64
 @unsafe(reason: "consumes a raw OS file-lock descriptor", capabilities: [ffi])
 extern fn rt_file_unlock(handle: i64) -> bool
-extern fn rt_file_read_text_at(path: text, offset: i64, size: i64) -> text
+@unsafe(reason: "checked managed-text SFFI returns nil only for a foreign I/O contract failure", capabilities: [ffi])
+extern fn rt_file_read_text_at_checked(path: text, offset: i64, size: i64) -> text?
 extern fn rt_file_write_text_at(path: text, offset: i64, data: text) -> i64
 extern fn rt_mmap(path: text, size: i64, offset: i64, readonly: i64) -> i64
 extern fn rt_munmap(addr: i64, size: i64) -> bool
@@ -161,9 +162,15 @@ fn file_mmap_read_bytes(path: text) -> [i64]:
 # --- Offset-based File I/O ---
 
 # reason positional io file_ops API
-fn file_read_text_at(path: text, offset: i64, size: i64) -> text:
+fn file_read_text_at(path: text, offset: i64, size: i64) -> Result<text, text>:
     # Read text from file at specific offset without changing file position.
-    rt_file_read_text_at(path, offset, size)
+    var value: text? = nil
+    unsafe(capabilities: [ffi]):
+        value = rt_file_read_text_at_checked(path, offset, size)
+    if value.?:
+        Ok(value.unwrap())
+    else:
+        Err("offset file read failed for '{path}' at {offset} ({size} bytes)")
 
 # reason positional io file_ops API
 fn file_write_text_at(path: text, offset: i64, data: text) -> i64:

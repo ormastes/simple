@@ -28,7 +28,7 @@ use std.http_server.response.{
 use std.http_server.error.{HttpServerError}
 use std.http_server.compression.{compress_response_body, supported_encodings}
 use std.nogc_async_mut.http.accept_encoding.{negotiate_encoding}
-use std.nogc_async_mut.io.file_ops.{file_exists, file_size, file_read_text, file_stat, file_read_text_at}
+use std.nogc_async_mut.io.file_ops.{file_exists, file_size, file_read_text, file_stat}
 use std.nogc_async_mut.io.dir_ops.{is_dir}
 use std.crypto.types.{crypto_text_to_bytes as text_to_bytes}
 
@@ -562,8 +562,8 @@ fn _range_digit_value(ch: text) -> i64:
 fn static_file_serve_range(path: text, start: i64, end: i64, file_size: i64, etag: text, mime: text) -> HttpResponseData:
     """Build a 206 Partial Content response for a valid byte range.
 
-    Reads the slice [start, end] inclusive from the file on disk using
-    file_read_text_at() and returns it as body_bytes.
+    Streams the slice [start, end] from the file using the response's bounded
+    body-file contract; it does not allocate or reread the range here.
 
     Args:
         path:      Absolute file path
@@ -574,7 +574,6 @@ fn static_file_serve_range(path: text, start: i64, end: i64, file_size: i64, eta
         mime:      MIME type for Content-Type header
     """
     val length = end - start + 1
-    val content = file_read_text_at(path, start, length)
     val content_range = "bytes " + start.to_text() + "-" + end.to_text() + "/" + file_size.to_text()
     HttpResponseData(
         status: 206,
@@ -586,11 +585,11 @@ fn static_file_serve_range(path: text, start: i64, end: i64, file_size: i64, eta
             ("Accept-Ranges", "bytes"),
             ("Server", "SimpleServer")
         ],
-        body: content,
+        body: "",
         body_bytes: [],
-        body_file: "",
-        body_offset: 0,
-        body_length: 0,
+        body_file: path,
+        body_offset: start,
+        body_length: length,
         chunked: false
     )
 

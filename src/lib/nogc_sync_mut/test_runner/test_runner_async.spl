@@ -113,15 +113,17 @@ fn cleanup_temp_files(stdout_file: text, stderr_file: text):
     if file_exists(stderr_file):
         file_delete(stderr_file)
 
-fn read_bounded_temp_output(path: text) -> text:
+fn read_bounded_temp_output(path: text) -> Result<text, text>:
     val size = file_size(path)
+    if size < 0:
+        return Err("cannot determine captured-output size: {path}")
     if size <= TEST_OUTPUT_CAPTURE_BYTES:
         return file_read_text_at(path, 0, size)
     val head_size = (TEST_OUTPUT_CAPTURE_BYTES + 1) / 2
     val tail_size = TEST_OUTPUT_CAPTURE_BYTES - head_size
-    val head = file_read_text_at(path, 0, head_size)
-    val tail = file_read_text_at(path, size - tail_size, tail_size)
-    head + "\n[output truncated: {size - TEST_OUTPUT_CAPTURE_BYTES} bytes omitted]\n" + tail
+    val head = file_read_text_at(path, 0, head_size)?
+    val tail = file_read_text_at(path, size - tail_size, tail_size)?
+    Ok(head + "\n[output truncated: {size - TEST_OUTPUT_CAPTURE_BYTES} bytes omitted]\n" + tail)
 
 fn _wait_poll_sleep_ms(poll_iteration: i64) -> i64:
     """Adaptive backoff for process polling."""
@@ -200,12 +202,17 @@ fn collect_async_result(run: AsyncTestRun, observed_exit_code: i64, deadline_exp
     # Read stdout/stderr from temp files
     var stdout = ""
     var stderr = ""
+    var capture_error = ""
 
     if file_exists(run.stdout_file):
-        stdout = read_bounded_temp_output(run.stdout_file)
+        match read_bounded_temp_output(run.stdout_file):
+            case Ok(value): stdout = value
+            case Err(message): capture_error = message
 
     if file_exists(run.stderr_file):
-        stderr = read_bounded_temp_output(run.stderr_file)
+        match read_bounded_temp_output(run.stderr_file):
+            case Ok(value): stderr = value
+            case Err(message): capture_error = message
 
     # Cleanup temp files
     cleanup_temp_files(stdout_file: run.stdout_file, stderr_file: run.stderr_file)
@@ -225,6 +232,10 @@ fn collect_async_result(run: AsyncTestRun, observed_exit_code: i64, deadline_exp
             timed_out: true,
             cached: false
         )
+
+    if capture_error != "":
+        stderr = stderr + "\n[ERROR: {capture_error}]"
+        exit_code = -1
 
     # Build normal completions using the same logic as sync execution.
     make_result_from_output(

@@ -64,6 +64,7 @@ bool rt_file_unlock(int64_t handle);
  * @param size Bytes to read
  * @return Heap string on success, empty string on error
  */
+/* SFFI_LEGACY_UNSAFE: mixed static/heap ownership; do not use from safe code. */
 const char* rt_file_read_text_at(const char* path, int64_t offset, int64_t size);
 
 /**

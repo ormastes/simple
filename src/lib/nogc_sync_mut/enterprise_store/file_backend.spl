@@ -30,7 +30,8 @@ use std.nogc_sync_mut.io.sqlite_sffi.{SqliteRow}
 # src/lib/nogc_sync_mut/shell/file.spl, terminal/credential/store.spl.
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_size(path: text) -> i64
-extern fn rt_file_read_text_at(path: text, offset: i64, size: i64) -> text
+@unsafe(reason: "checked managed-text SFFI returns nil only for a foreign I/O contract failure", capabilities: [ffi])
+extern fn rt_file_read_text_at_checked(path: text, offset: i64, size: i64) -> text?
 extern fn rt_file_atomic_write(path: text, content: text) -> bool
 
 fn file_exists(path: text) -> bool:
@@ -44,8 +45,17 @@ val FB_MAGIC = "SPLSTORE1"
 # fb_read: whole-file read via the offset facade — deliberately NOT
 # file_read/file_read_text, whose `??` TryOperator blocks standalone-SMF
 # cross-compilation for the SimpleOS target (AC-17).
-fn fb_read(path: text) -> text:
-    rt_file_read_text_at(path, 0, rt_file_size(path))
+fn fb_read(path: text) -> Result<text, text>:
+    val size = rt_file_size(path)
+    if size < 0:
+        return Err("cannot determine enterprise-store size: {path}")
+    var value: text? = nil
+    unsafe(capabilities: [ffi]):
+        value = rt_file_read_text_at_checked(path, 0, size)
+    if value.?:
+        Ok(value.unwrap())
+    else:
+        Err("cannot read enterprise store: {path}")
 
 # --- value encoding (tab/newline/percent/equals-safe) ---
 
@@ -61,7 +71,9 @@ fn fb_decode(v: text) -> text:
 fn fb_is_store(path: text) -> bool:
     if not file_exists(path):
         return false
-    fb_read(path).starts_with(FB_MAGIC)
+    match fb_read(path):
+        case Ok(content): content.starts_with(FB_MAGIC)
+        case Err(_): false
 
 # fb_open creates the store file when absent. Fail closed on an existing
 # file that is not a store (blank/truncated/foreign — never adopt it).
@@ -83,7 +95,9 @@ fn fb_insert(path: text, table: text, columns: [text], values: [text]) -> bool:
     while i < columns.len():
         line = line + "\t" + columns[i] + "=" + fb_encode(values[i])
         i = i + 1
-    file_atomic_write(path, fb_read(path) + line + "\n")
+    match fb_read(path):
+        case Ok(content): file_atomic_write(path, content + line + "\n")
+        case Err(_): false
 
 # fb_rows returns all rows of `table` with the requested columns, append
 # order, as SqliteRow so records.spl's sqlite_row_get works unchanged.
@@ -94,7 +108,10 @@ fn fb_rows(path: text, table: text, columns: [text]) -> [SqliteRow]:
     if not fb_is_store(path):
         return out
     var next_id = 1
-    for line in fb_read(path).split("\n"):
+    val content = match fb_read(path):
+        case Ok(value): value
+        case Err(_): return out
+    for line in content.split("\n"):
         if line == "" or line == FB_MAGIC:
             continue
         val fields = line.split("\t")
@@ -126,7 +143,10 @@ fn fb_count(path: text, table: text) -> text:
     if not fb_is_store(path):
         return ""
     var n = 0
-    for line in fb_read(path).split("\n"):
+    val content = match fb_read(path):
+        case Ok(value): value
+        case Err(_): return ""
+    for line in content.split("\n"):
         if line == "" or line == FB_MAGIC:
             continue
         if line.split("\t")[0] == table:

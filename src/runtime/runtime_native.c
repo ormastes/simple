@@ -9625,6 +9625,8 @@ static ssize_t rt_file_write_at_fd(int fd, const void* data, size_t size, int64_
 #endif
 }
 
+/* SFFI_LEGACY_UNSAFE: mixed static/heap ownership. Kept only for binary
+ * compatibility; safe Simple code binds rt_file_read_text_at_checked. */
 const char* rt_file_read_text_at(const char* path_value, int64_t offset, int64_t size) {
     char* path = rt_core_string_to_cpath((int64_t)(uintptr_t)path_value);
     if (!path || offset < 0) {

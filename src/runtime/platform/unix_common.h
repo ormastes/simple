@@ -222,6 +222,8 @@ bool rt_file_unlock(int64_t handle) {
  * Offset-based File I/O
  * ---------------------------------------------------------------- */
 
+/* SFFI_LEGACY_UNSAFE: mixed static/heap ownership; checked managed-text callers
+ * must not bind this compatibility export. */
 const char* rt_file_read_text_at(const char* path, int64_t offset, int64_t size) {
     if (!path || size <= 0 || offset < 0) return "";
 

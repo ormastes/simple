@@ -701,3 +701,23 @@ and generated dispatch is bound to the exact provider. The successful path
 retains one bounded read and the managed text construction already required by
 the caller; it adds no status-array allocation, registry, hashing, locking,
 dynamic symbol lookup, whole-file reread, or per-byte validation pass.
+
+All Simple application/library declarations of the ambiguous legacy
+`rt_file_read_text_at` symbol are now removed. The canonical file API exposes
+`Result<text,text>` over the checked optional transport; enterprise-store reads
+propagate failure before parsing or rewriting; SimpleOS exports the same
+empty-versus-failure contract with overflow-safe clamping; multipart HTTP range
+failure becomes HTTP 500 rather than a corrupt 206 response. The single-range
+HTTP path no longer eagerly reads data that its existing bounded body-file
+route streams afterward, removing an allocation and duplicate I/O. The raw
+C-string-returning compatibility exports remain outside safe Simple code and
+need a later ABI removal/release-ownership migration; the guard now prevents
+their reintroduction as safe-looking Simple extern declarations.
+Test-runner capture now also returns `Result` and converts capture failure into
+a failed process result; it cannot turn an unreadable output file into empty
+stdout/stderr that might support a false pass. Source checks for every migrated
+module pass. The focused source-contract SSpec reaches 13/14 examples: its SFFI
+bounded-read assertion passes, while a pre-existing timeout-diagnostic substring
+assertion fails outside this change. The deployed `bin/simple` is still the
+Rust bootstrap seed and does not contain the newly added checked symbol, so the
+runtime behavior SSpec must be rerun after the pure-Simple binary is rebuilt.
