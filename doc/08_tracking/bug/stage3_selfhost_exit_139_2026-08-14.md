@@ -350,3 +350,31 @@ five-probe gate once; only if all five rows pass may the materially changed,
 cache-preserving Stage-3 resume run once with retained driver console and
 symbolized crash output. Until then status remains OPEN / ADMISSION BLOCKED;
 there is no further evidence-backed source correction in this row.
+
+## 2026-08-22 macOS arm64 retained reproduction
+
+Current-source Phase 2 admitted on macOS arm64 with the SDK-aware Clang
+23.1.0-rc3 shim.  The admitted candidate SHA-256 was
+`48d7fe033386893f03a0d95a1f003bca38360bd75dc17900b41daf8db078a976`
+from source authority `db6ec6e4594c470fa9589cefa02aebb5daae691f` plus the
+uncommitted imported-composite wildcard dependency lane.  Stage 3 parsed and
+retained all 665 physical / 957 logical surfaces, then died at HIR entry with
+`EXC_BAD_ACCESS`, `SIGSEGV`, and `KERN_INVALID_ADDRESS at 0x0`.
+
+The retained macOS reports are:
+
+- `simple-2026-08-22-021119.ips`: fault in
+  `CompilerDriver.lower_and_check_streaming_surfaces_impl+308`, loading through
+  a null `streaming_module_surfaces_owner` while the ready scalar was true.
+- `simple-2026-08-22-022447.ips`: a stable-owner experiment moved the fault to
+  `ModuleSurfacesByName.adopt_from+4`, proving the driver field was already null
+  before the final owner commit.
+- `simple-2026-08-22-023122.ips`: routing through the in-place
+  `CompileContext.module_surfaces` optional still faulted at
+  `lower_and_check_streaming_surfaces_impl+360`.
+
+Both owner-routing experiments were disproved and removed.  No speculative
+fix was committed.  The session's three Stage-3 repair cycles are exhausted;
+the next lane must fix the native class/optional reference-field store or its
+underlying aggregate layout with a smaller arm64 reproducer before another
+full bootstrap.
