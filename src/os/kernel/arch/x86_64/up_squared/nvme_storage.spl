@@ -12,10 +12,39 @@ use os.kernel.types.capability_types.{SIMPLEOS_NVME_SYSTEM_QUEUE_ID}
 use std.fs_driver.block_device.{BlockDevice}
 use std.fs_driver.gpt_partition.{GptSinglePartitionRequest, gpt_format_plan, gpt_create_single_partition}
 use std.fs_driver.fat32_format.{Fat32FormatAuthorization, Fat32FormatPlan, fat32_format_plan, fat32_format}
+use os.kernel.arch.x86_64.up_squared.dci_mailbox.{
+    DciStorageIdentity, DciStorageWrite, dci_storage_confirmation,
+    dci_admit_storage_write
+}
+use os.kernel.arch.x86_64.up_squared.gdb_rsp_monitor.{
+    UP2_RSP_STAGING_SIZE, up2_rsp_copy_staging
+}
+use os.services.storage_image_provision.{
+    storage_image_plan, storage_image_write_chunk, storage_image_flush,
+    storage_image_verify_readback
+}
+
+val UP2_NVME_IMAGE_MAX_CHUNK: u64 = 1048576u64
 
 var g_up2_nvme_device: Up2NvmeLiveDevice? = nil
 var g_up2_nvme_partition_first_lba: u64 = 0u64
 var g_up2_nvme_partition_lba_count: u64 = 0u64
+var g_up2_nvme_pci_vendor: u16 = 0u16
+var g_up2_nvme_pci_device: u16 = 0u16
+var g_up2_nvme_pci_bus: u8 = 0u8
+var g_up2_nvme_pci_dev: u8 = 0u8
+var g_up2_nvme_pci_func: u8 = 0u8
+var g_up2_nvme_image_planned: bool = false
+var g_up2_nvme_image_active: bool = false
+var g_up2_nvme_image_byte_start: u64 = 0u64
+var g_up2_nvme_image_size: u64 = 0u64
+var g_up2_nvme_image_sha256: text = ""
+var g_up2_nvme_image_next_offset: u64 = 0u64
+var g_up2_nvme_image_expected_model: text = ""
+var g_up2_nvme_image_expected_serial: text = ""
+var g_up2_nvme_image_expected_transport: text = ""
+var g_up2_nvme_image_expected_capacity: u64 = 0u64
+var g_up2_nvme_image_confirmation: text = ""
 
 struct Up2NvmeLiveDevice:
     driver: NvmeDriver
@@ -66,6 +95,11 @@ fn up2_nvme_init_read_only() -> Result<text, text>:
         lba_count: driver.sector_count
     )
     g_up2_nvme_device = device
+    g_up2_nvme_pci_vendor = grant.pci_vendor
+    g_up2_nvme_pci_device = grant.pci_device
+    g_up2_nvme_pci_bus = grant.pci_bus
+    g_up2_nvme_pci_dev = grant.pci_dev
+    g_up2_nvme_pci_func = grant.pci_func
     Ok("model=" + device.model + " serial=" + device.serial + " nsid=" + device.nsid.to_text() + " lba_size=" + device.lba_size.to_text() + " lba_count=" + device.lba_count.to_text() + " media_writes=0")
 
 fn up2_nvme_format_challenge() -> Result<text, text>:
@@ -79,19 +113,22 @@ fn up2_nvme_identity_summary() -> Result<text, text>:
         return Err("up2-nvme-not-identified")
     val device = g_up2_nvme_device.unwrap()
     val lba_bytes = device.lba_size.to_u64()
-    if lba_bytes == 0u64 or device.lba_count > 0xffffffffffffffffu64 / lba_bytes:
+    if lba_bytes == 0u64:
+        return Err("up2-nvme-capacity-overflow")
+    val capacity = device.lba_count * lba_bytes
+    if device.lba_count != 0u64 and capacity / device.lba_count != lba_bytes:
         return Err("up2-nvme-capacity-overflow")
     Ok(
         "nvme_identity_status=pass" +
-        " pci=" + device.pci_vendor.to_text() + ":" + device.pci_device.to_text() +
-        " bdf=" + device.bus.to_text() + ":" + device.device.to_text() + "." + device.func.to_text() +
+        " pci=" + g_up2_nvme_pci_vendor.to_text() + ":" + g_up2_nvme_pci_device.to_text() +
+        " bdf=" + g_up2_nvme_pci_bus.to_text() + ":" + g_up2_nvme_pci_dev.to_text() + "." + g_up2_nvme_pci_func.to_text() +
         " model=" + device.model +
         " serial=" + device.serial +
         " firmware=" + device.firmware +
         " nsid=" + device.nsid.to_text() +
         " lba_size=" + device.lba_size.to_text() +
         " lba_count=" + device.lba_count.to_text() +
-        " capacity_bytes=" + (device.lba_count * lba_bytes).to_text() +
+        " capacity_bytes=" + capacity.to_text() +
         " completion=polling media_writes=0"
     )
 
@@ -109,6 +146,210 @@ fn _up2_nvme_adapter(device: Up2NvmeLiveDevice, base_lba: u64, lba_count: u64) -
     if initialized.is_err():
         return Err(initialized.unwrap_err())
     Ok(adapter)
+
+fn _up2_nvme_storage_identity(device: Up2NvmeLiveDevice) -> Result<DciStorageIdentity, text>:
+    val sector_bytes = device.lba_size.to_u64()
+    if sector_bytes == 0u64:
+        return Err("up2-nvme-capacity-overflow")
+    val capacity = device.lba_count * sector_bytes
+    if device.lba_count != 0u64 and capacity / device.lba_count != sector_bytes:
+        return Err("up2-nvme-capacity-overflow")
+    Ok(DciStorageIdentity(
+        model: device.model,
+        serial: device.serial,
+        transport: "pci-nvme:" + g_up2_nvme_pci_vendor.to_text() + ":" +
+            g_up2_nvme_pci_device.to_text() + ":" + g_up2_nvme_pci_bus.to_text() + ":" +
+            g_up2_nvme_pci_dev.to_text() + "." + g_up2_nvme_pci_func.to_text(),
+        capacity: capacity,
+        root_device: false,
+        swap_device: false,
+        mounted: g_up2_nvme_partition_lba_count != 0u64,
+        held: false
+    ))
+
+fn _up2_nvme_clear_image_session():
+    g_up2_nvme_image_planned = false
+    g_up2_nvme_image_active = false
+    g_up2_nvme_image_byte_start = 0u64
+    g_up2_nvme_image_size = 0u64
+    g_up2_nvme_image_sha256 = ""
+    g_up2_nvme_image_next_offset = 0u64
+    g_up2_nvme_image_expected_model = ""
+    g_up2_nvme_image_expected_serial = ""
+    g_up2_nvme_image_expected_transport = ""
+    g_up2_nvme_image_expected_capacity = 0u64
+    g_up2_nvme_image_confirmation = ""
+
+fn up2_nvme_image_plan(
+    byte_start: u64,
+    image_size: u64,
+    image_sha256: text
+) -> Result<text, text>:
+    """Prepare but do not authorize a bounded raw-image write."""
+    if g_up2_nvme_device == nil:
+        return Err("up2-nvme-not-identified")
+    if g_up2_nvme_partition_lba_count != 0u64:
+        return Err("up2-nvme-device-mounted")
+    if g_up2_nvme_image_planned or g_up2_nvme_image_active:
+        return Err("up2-nvme-image-session-active")
+    val device = g_up2_nvme_device.unwrap()
+    val plan = storage_image_plan(
+        device.lba_size, device.lba_count, byte_start, image_size, image_sha256)
+    if plan.is_err():
+        return Err(plan.unwrap_err())
+    val identity = _up2_nvme_storage_identity(device)
+    if identity.is_err():
+        return Err(identity.unwrap_err())
+    val confirmation = dci_storage_confirmation(
+        identity.unwrap(), byte_start, image_size, image_sha256)
+    g_up2_nvme_image_planned = true
+    g_up2_nvme_image_byte_start = byte_start
+    g_up2_nvme_image_size = image_size
+    g_up2_nvme_image_sha256 = image_sha256
+    g_up2_nvme_image_expected_model = identity.unwrap().model
+    g_up2_nvme_image_expected_serial = identity.unwrap().serial
+    g_up2_nvme_image_expected_transport = identity.unwrap().transport
+    g_up2_nvme_image_expected_capacity = identity.unwrap().capacity
+    g_up2_nvme_image_confirmation = confirmation
+    Ok("nvme_image_challenge=" + confirmation +
+        " staging_bytes=" + UP2_RSP_STAGING_SIZE.to_text() +
+        " max_chunk=" + UP2_NVME_IMAGE_MAX_CHUNK.to_text() +
+        " media_writes=0")
+
+fn _up2_nvme_admit_image_confirmation(confirmation: text) -> Result<bool, text>:
+    if g_up2_nvme_device == nil or not g_up2_nvme_image_planned:
+        return Err("up2-nvme-image-plan-missing")
+    val observed = _up2_nvme_storage_identity(g_up2_nvme_device.unwrap())
+    if observed.is_err():
+        return Err(observed.unwrap_err())
+    val expected = DciStorageIdentity(
+        model: g_up2_nvme_image_expected_model,
+        serial: g_up2_nvme_image_expected_serial,
+        transport: g_up2_nvme_image_expected_transport,
+        capacity: g_up2_nvme_image_expected_capacity,
+        root_device: false,
+        swap_device: false,
+        mounted: false,
+        held: false
+    )
+    val write = DciStorageWrite(
+        observed: observed.unwrap(),
+        expected: expected,
+        byte_start: g_up2_nvme_image_byte_start,
+        byte_length: g_up2_nvme_image_size,
+        image_size: g_up2_nvme_image_size,
+        image_sha256: g_up2_nvme_image_sha256,
+        confirmation: confirmation,
+        persistent_allowed: true
+    )
+    val admitted = dci_admit_storage_write(write)
+    if not admitted.accepted:
+        return Err(admitted.reason +
+            ":source_capacity=" + observed.unwrap().capacity.to_text() +
+            ":request_capacity=" + write.observed.capacity.to_text() +
+            ":source_start=" + g_up2_nvme_image_byte_start.to_text() +
+            ":request_start=" + write.byte_start.to_text() +
+            ":source_length=" + g_up2_nvme_image_size.to_text() +
+            ":request_length=" + write.byte_length.to_text())
+    Ok(true)
+
+fn up2_nvme_image_confirm(confirmation: text) -> Result<text, text>:
+    """Activate the exact identity/range/digest plan after explicit confirmation."""
+    if g_up2_nvme_image_active:
+        return Err("up2-nvme-image-session-active")
+    val admitted = _up2_nvme_admit_image_confirmation(confirmation)
+    if admitted.is_err() or confirmation != g_up2_nvme_image_confirmation:
+        if admitted.is_err():
+            return Err(admitted.unwrap_err())
+        return Err("storage-confirmation")
+    g_up2_nvme_image_active = true
+    g_up2_nvme_image_next_offset = 0u64
+    Ok("nvme_image_session=ready next_offset=0 media_writes=0")
+
+fn up2_nvme_image_chunk(
+    staging_offset: u64,
+    image_offset: u64,
+    byte_length: u64,
+    chunk_sha256: text
+) -> Result<text, text>:
+    """Hash one staged chunk before committing its ordered sectors."""
+    if not g_up2_nvme_image_active or g_up2_nvme_device == nil:
+        return Err("up2-nvme-image-session-missing")
+    if image_offset != g_up2_nvme_image_next_offset:
+        return Err("up2-nvme-image-offset-order")
+    if byte_length == 0u64 or byte_length > UP2_NVME_IMAGE_MAX_CHUNK:
+        return Err("up2-nvme-image-chunk-size")
+    if (staging_offset > UP2_RSP_STAGING_SIZE or
+        byte_length > UP2_RSP_STAGING_SIZE - staging_offset):
+        return Err("up2-nvme-image-staging-range")
+    val admitted = _up2_nvme_admit_image_confirmation(g_up2_nvme_image_confirmation)
+    if admitted.is_err():
+        _up2_nvme_clear_image_session()
+        return Err(admitted.unwrap_err())
+    val staged = up2_rsp_copy_staging(staging_offset, byte_length)
+    if staged.is_err():
+        return Err(staged.unwrap_err())
+    val device = g_up2_nvme_device.unwrap()
+    val plan = storage_image_plan(
+        device.lba_size, device.lba_count, g_up2_nvme_image_byte_start,
+        g_up2_nvme_image_size, g_up2_nvme_image_sha256)
+    if plan.is_err():
+        _up2_nvme_clear_image_session()
+        return Err(plan.unwrap_err())
+    val adapter = _up2_nvme_adapter(device, 0u64, device.lba_count)
+    if adapter.is_err():
+        _up2_nvme_clear_image_session()
+        return Err(adapter.unwrap_err())
+    val dev: BlockDevice = adapter.unwrap()
+    val written = storage_image_write_chunk(
+        dev, plan.unwrap(), image_offset, staged.unwrap(), chunk_sha256)
+    if written.is_err():
+        _up2_nvme_clear_image_session()
+        return Err(written.unwrap_err() + ":session-aborted")
+    g_up2_nvme_image_next_offset = written.unwrap()
+    Ok("nvme_image_chunk=pass image_offset=" + image_offset.to_text() +
+        " bytes=" + byte_length.to_text() +
+        " next_offset=" + written.unwrap().to_text())
+
+fn up2_nvme_image_finish() -> Result<text, text>:
+    """Flush, reopen through a fresh adapter, and hash every written sector."""
+    if not g_up2_nvme_image_active or g_up2_nvme_device == nil:
+        return Err("up2-nvme-image-session-missing")
+    val admitted = _up2_nvme_admit_image_confirmation(g_up2_nvme_image_confirmation)
+    if admitted.is_err():
+        _up2_nvme_clear_image_session()
+        return Err(admitted.unwrap_err())
+    val device = g_up2_nvme_device.unwrap()
+    val plan = storage_image_plan(
+        device.lba_size, device.lba_count, g_up2_nvme_image_byte_start,
+        g_up2_nvme_image_size, g_up2_nvme_image_sha256)
+    if plan.is_err():
+        _up2_nvme_clear_image_session()
+        return Err(plan.unwrap_err())
+    val write_adapter = _up2_nvme_adapter(device, 0u64, device.lba_count)
+    if write_adapter.is_err():
+        _up2_nvme_clear_image_session()
+        return Err(write_adapter.unwrap_err())
+    val write_dev: BlockDevice = write_adapter.unwrap()
+    val flushed = storage_image_flush(
+        write_dev, plan.unwrap(), g_up2_nvme_image_next_offset)
+    if flushed.is_err():
+        _up2_nvme_clear_image_session()
+        return Err(flushed.unwrap_err())
+    val fresh_adapter = _up2_nvme_adapter(device, 0u64, device.lba_count)
+    if fresh_adapter.is_err():
+        _up2_nvme_clear_image_session()
+        return Err(fresh_adapter.unwrap_err())
+    val fresh_dev: BlockDevice = fresh_adapter.unwrap()
+    val verified = storage_image_verify_readback(fresh_dev, plan.unwrap())
+    _up2_nvme_clear_image_session()
+    if verified.is_err():
+        return Err(verified.unwrap_err())
+    Ok("nvme_image_status=pass " + verified.unwrap())
+
+fn up2_nvme_image_abort() -> text:
+    _up2_nvme_clear_image_session()
+    "nvme_image_session=aborted"
 
 fn _up2_bytes_equal(a: [u8], b: [u8]) -> bool:
     if a.len() != b.len():
@@ -197,6 +438,8 @@ fn up2_nvme_provision_fat32(challenge: text) -> Result<text, text>:
         return Err("up2-nvme-format-challenge-mismatch")
     if g_up2_nvme_partition_lba_count != 0u64:
         return Err("up2-nvme-already-mounted")
+    if g_up2_nvme_image_planned or g_up2_nvme_image_active:
+        return Err("up2-nvme-image-session-active")
     val device = g_up2_nvme_device.unwrap()
     if device.lba_size != 512u32 and device.lba_size != 4096u32:
         return Err("up2-nvme-format-unsupported-lba-size")
@@ -288,3 +531,5 @@ fn up2_nvme_verify_proof() -> Result<text, text>:
     Ok("/nvme/proof.txt")
 
 export Up2NvmeLiveDevice, up2_nvme_init_read_only, up2_nvme_format_challenge, up2_nvme_identity_summary, up2_nvme_provision_fat32, up2_nvme_verify_proof
+export UP2_NVME_IMAGE_MAX_CHUNK, up2_nvme_image_plan, up2_nvme_image_confirm
+export up2_nvme_image_chunk, up2_nvme_image_finish, up2_nvme_image_abort

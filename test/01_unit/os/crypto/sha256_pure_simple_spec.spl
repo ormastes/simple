@@ -1,4 +1,7 @@
-use os.crypto.sha256.{sha256_with_len, sha256_hmac_with_len}
+use os.crypto.sha256.{
+    sha256_with_len, sha256_hmac_with_len,
+    sha256_stream_new, sha256_stream_update, sha256_stream_finish
+}
 
 fn _hex_digit(v: i64) -> text:
     if v == 0: return "0"
@@ -48,3 +51,39 @@ describe "OS pure Simple SHA-256":
         val data: [u8] = [0x48u8, 0x69u8, 0x20u8, 0x54u8, 0x68u8, 0x65u8, 0x72u8, 0x65u8]
         val mac = sha256_hmac_with_len(_hmac_tc1_key(), 20, data, 8)
         expect(_bytes_to_hex(mac)).to_equal("b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7")
+
+    it "matches the one-shot digest across ordered partial and full blocks":
+        var data: [u8] = []
+        var index: i64 = 0
+        while index < 130:
+            data.push((index & 0xff) as u8)
+            index = index + 1
+        var first: [u8] = []
+        var second: [u8] = []
+        var third: [u8] = []
+        index = 0
+        while index < 7:
+            first.push(data[index])
+            index = index + 1
+        while index < 71:
+            second.push(data[index])
+            index = index + 1
+        while index < data.len():
+            third.push(data[index])
+            index = index + 1
+        val stream = sha256_stream_new()
+        sha256_stream_update(stream, first).unwrap()
+        sha256_stream_update(stream, second).unwrap()
+        sha256_stream_update(stream, third).unwrap()
+        expect(sha256_stream_finish(stream).unwrap()).to_equal(sha256_with_len(data, 130u64))
+
+    it "handles empty input and the two-block final-padding boundary":
+        expect(_bytes_to_hex(sha256_stream_finish(sha256_stream_new()).unwrap())).to_equal("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+        var data: [u8] = []
+        var index: i64 = 0
+        while index < 60:
+            data.push(0x61u8)
+            index = index + 1
+        val stream = sha256_stream_new()
+        sha256_stream_update(stream, data).unwrap()
+        expect(sha256_stream_finish(stream).unwrap()).to_equal(sha256_with_len(data, 60u64))

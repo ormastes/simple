@@ -5,112 +5,113 @@ use os.kernel.arch.x86.com1_common.{
 }
 use os.kernel.arch.x86_64.up_squared.gdb_rsp_monitor.{
     Up2RspOperation, up2_rsp_decode_frame, up2_rsp_execute,
-    up2_rsp_frame, up2_rsp_plan
+    up2_rsp_frame, up2_rsp_plan, up2_rsp_write_staging_byte,
+    UP2_RSP_STAGING_START, UP2_RSP_STAGING_SIZE, UP2_RSP_MAX_TRANSFER
 }
 
 val UP2_RSP_UART_MAX_FRAME: i64 = 4096
 
-fn _up2_rsp_uart_ascii(byte: u8) -> text:
-    match byte:
-        0x20u8: " "
-        0x21u8: "!"
-        0x22u8: "\""
-        0x23u8: "#"
-        0x24u8: "$"
-        0x25u8: "%"
-        0x26u8: "&"
-        0x27u8: "'"
-        0x28u8: "("
-        0x29u8: ")"
-        0x2au8: "*"
-        0x2bu8: "+"
-        0x2cu8: ","
-        0x2du8: "-"
-        0x2eu8: "."
-        0x2fu8: "/"
-        0x30u8: "0"
-        0x31u8: "1"
-        0x32u8: "2"
-        0x33u8: "3"
-        0x34u8: "4"
-        0x35u8: "5"
-        0x36u8: "6"
-        0x37u8: "7"
-        0x38u8: "8"
-        0x39u8: "9"
-        0x3au8: ":"
-        0x3bu8: ";"
-        0x3cu8: "<"
-        0x3du8: "="
-        0x3eu8: ">"
-        0x3fu8: "?"
-        0x40u8: "@"
-        0x41u8: "A"
-        0x42u8: "B"
-        0x43u8: "C"
-        0x44u8: "D"
-        0x45u8: "E"
-        0x46u8: "F"
-        0x47u8: "G"
-        0x48u8: "H"
-        0x49u8: "I"
-        0x4au8: "J"
-        0x4bu8: "K"
-        0x4cu8: "L"
-        0x4du8: "M"
-        0x4eu8: "N"
-        0x4fu8: "O"
-        0x50u8: "P"
-        0x51u8: "Q"
-        0x52u8: "R"
-        0x53u8: "S"
-        0x54u8: "T"
-        0x55u8: "U"
-        0x56u8: "V"
-        0x57u8: "W"
-        0x58u8: "X"
-        0x59u8: "Y"
-        0x5au8: "Z"
-        0x5bu8: "["
-        0x5cu8: "\\"
-        0x5du8: "]"
-        0x5eu8: "^"
-        0x5fu8: "_"
-        0x60u8: "`"
-        0x61u8: "a"
-        0x62u8: "b"
-        0x63u8: "c"
-        0x64u8: "d"
-        0x65u8: "e"
-        0x66u8: "f"
-        0x67u8: "g"
-        0x68u8: "h"
-        0x69u8: "i"
-        0x6au8: "j"
-        0x6bu8: "k"
-        0x6cu8: "l"
-        0x6du8: "m"
-        0x6eu8: "n"
-        0x6fu8: "o"
-        0x70u8: "p"
-        0x71u8: "q"
-        0x72u8: "r"
-        0x73u8: "s"
-        0x74u8: "t"
-        0x75u8: "u"
-        0x76u8: "v"
-        0x77u8: "w"
-        0x78u8: "x"
-        0x79u8: "y"
-        0x7au8: "z"
-        0x7bu8: "{"
-        0x7cu8: "|"
-        0x7du8: "}"
-        0x7eu8: "~"
-        _: ""
+extern fn rt_bytes_to_text(data: [u8]) -> text
 
 fn _up2_rsp_uart_send(payload: text):
     x86_com1_write(up2_rsp_frame(payload))
+
+fn _up2_rsp_uart_hex_value(byte: u8) -> i64:
+    if byte >= 0x30u8 and byte <= 0x39u8:
+        return (byte - 0x30u8) as i64
+    if byte >= 0x61u8 and byte <= 0x66u8:
+        return (byte - 0x61u8 + 10u8) as i64
+    if byte >= 0x41u8 and byte <= 0x46u8:
+        return (byte - 0x41u8 + 10u8) as i64
+    -1
+
+fn _up2_rsp_uart_drain_frame():
+    var count: i64 = 0
+    while count < UP2_RSP_UART_MAX_FRAME:
+        if x86_com1_read_byte() == 0x23u8:
+            x86_com1_read_byte()
+            x86_com1_read_byte()
+            return
+        count = count + 1
+
+fn _up2_rsp_uart_write_memory() -> bool:
+    # Parse GDB's M packet directly from UART. The freestanding heap is
+    # monotonic, so materializing and slicing a 2 KiB text packet per chunk
+    # eventually exhausts it. This path uses only scalar state and writes only
+    # to the bounded staging window; a bad checksum is NACKed for retransmit.
+    var checksum: i64 = 0x4d
+    var address: u64 = 0u64
+    var address_digits: i64 = 0
+    while true:
+        val byte = x86_com1_read_byte()
+        checksum = (checksum + byte as i64) & 0xff
+        if byte == 0x2cu8:
+            break
+        val digit = _up2_rsp_uart_hex_value(byte)
+        if digit < 0 or address_digits >= 16:
+            _up2_rsp_uart_drain_frame()
+            x86_com1_write_byte(0x2du8)
+            return true
+        address = address * 16u64 + digit as u64
+        address_digits = address_digits + 1
+    if address_digits == 0:
+        _up2_rsp_uart_drain_frame()
+        x86_com1_write_byte(0x2du8)
+        return true
+
+    var length: i64 = 0
+    var length_digits: i64 = 0
+    while true:
+        val byte = x86_com1_read_byte()
+        checksum = (checksum + byte as i64) & 0xff
+        if byte == 0x3au8:
+            break
+        val digit = _up2_rsp_uart_hex_value(byte)
+        if digit < 0 or length_digits >= 8:
+            _up2_rsp_uart_drain_frame()
+            x86_com1_write_byte(0x2du8)
+            return true
+        length = length * 16 + digit
+        length_digits = length_digits + 1
+    if (length_digits == 0 or length <= 0 or length > UP2_RSP_MAX_TRANSFER or
+        address < UP2_RSP_STAGING_START or
+        address - UP2_RSP_STAGING_START > UP2_RSP_STAGING_SIZE or
+        length as u64 > UP2_RSP_STAGING_SIZE -
+            (address - UP2_RSP_STAGING_START)):
+        _up2_rsp_uart_drain_frame()
+        x86_com1_write("+$E02#a7")
+        return true
+
+    var offset: i64 = 0
+    var write_ok = true
+    while offset < length:
+        val high_byte = x86_com1_read_byte()
+        val low_byte = x86_com1_read_byte()
+        checksum = (checksum + high_byte as i64 + low_byte as i64) & 0xff
+        val high = _up2_rsp_uart_hex_value(high_byte)
+        val low = _up2_rsp_uart_hex_value(low_byte)
+        if high < 0 or low < 0:
+            _up2_rsp_uart_drain_frame()
+            x86_com1_write_byte(0x2du8)
+            return true
+        if not up2_rsp_write_staging_byte(address + offset as u64,
+            (high * 16 + low) as u8):
+            write_ok = false
+        offset = offset + 1
+
+    if x86_com1_read_byte() != 0x23u8:
+        _up2_rsp_uart_drain_frame()
+        x86_com1_write_byte(0x2du8)
+        return true
+    val expected_high = _up2_rsp_uart_hex_value(x86_com1_read_byte())
+    val expected_low = _up2_rsp_uart_hex_value(x86_com1_read_byte())
+    if expected_high < 0 or expected_low < 0 or checksum != expected_high * 16 + expected_low:
+        x86_com1_write_byte(0x2du8)
+    elif not write_ok:
+        x86_com1_write("+$E03#a8")
+    else:
+        x86_com1_write("+$OK#9a")
+    true
 
 fn _up2_rsp_uart_read_frame() -> text:
     while true:
@@ -118,32 +119,39 @@ fn _up2_rsp_uart_read_frame() -> text:
         if byte == 0x03u8:
             _up2_rsp_uart_send("S02")
         elif byte == 0x24u8:
-            var frame = "$"
+            val first = x86_com1_read_byte()
+            if first == 0x4du8:
+                _up2_rsp_uart_write_memory()
+                return "@"
+            var frame: [u8] = [0x24u8, first]
             var overflow = false
             while true:
                 val next = x86_com1_read_byte()
                 if frame.len() >= UP2_RSP_UART_MAX_FRAME - 3:
                     overflow = true
                 elif not overflow:
-                    val char = _up2_rsp_uart_ascii(next)
-                    if char == "":
+                    if next < 0x20u8 or next > 0x7eu8:
                         overflow = true
                     else:
-                        frame = frame + char
+                        frame.push(next)
                 if next == 0x23u8:
                     val checksum_high = x86_com1_read_byte()
                     val checksum_low = x86_com1_read_byte()
-                    if overflow:
+                    if (overflow or checksum_high < 0x20u8 or
+                        checksum_high > 0x7eu8 or checksum_low < 0x20u8 or
+                        checksum_low > 0x7eu8):
                         return ""
-                    frame = frame + _up2_rsp_uart_ascii(checksum_high)
-                    frame = frame + _up2_rsp_uart_ascii(checksum_low)
-                    return frame
+                    frame.push(checksum_high)
+                    frame.push(checksum_low)
+                    return rt_bytes_to_text(frame)
     ""
 
 fn up2_gdb_rsp_uart_main():
     while true:
         val frame = _up2_rsp_uart_read_frame()
-        if frame == "":
+        if frame == "@":
+            pass
+        elif frame == "":
             x86_com1_write_byte(0x2du8)
         else:
             val decoded = up2_rsp_decode_frame(frame)

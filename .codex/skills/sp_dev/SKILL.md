@@ -1193,6 +1193,23 @@ partition for FAT32). Verify flush plus fresh-adapter readback and an external
 FAT reader on a dedicated scratch image before claiming interoperability.
 Never test against the development host's system NVMe.
 
+For full UP2 disk images, keep `os.services.storage_image_provision`
+host-neutral and the UP2 leaf identity/staging-specific. The protocol is plan,
+exact `UP2-STORAGE-WRITE` confirmation, ordered <=1 MiB chunks, then finish.
+Use SHA-256 of length-delimited canonical identity fields in the confirmation;
+print the complete identity separately so long hex-rendered Identify strings do
+not overflow the serial line buffer.
+Hash every staged chunk before write, flush, and compute streaming whole-image
+SHA-256 over the exact range through a fresh adapter. Abort on identity,
+ordering, hash, I/O, or readback change. Do not reuse the FAT32 challenge for a
+raw image or promote emulator evidence to physical persistence.
+On the UP2 freestanding RSP transport, parse high-volume `M` packets with
+scalar state directly into the admitted staging window and immediately read
+each byte back. Do not materialize or slice repeated 2 KiB text packets: the
+monotonic 16 MiB heap cannot reclaim that traffic. Keep checksum ACK distinct
+from storage authorization, and never bypass a target SHA mismatch merely
+because an RSP `m` readback passed.
+
 For UP Squared debug-tool admission, distinguish software availability from a
 usable transport. GNU GDB/OpenOCD/picocom are the free baseline, but OpenOCD
 does not decode Apollo Lake's proprietary Intel DCI ExI protocol. Admit Tigard

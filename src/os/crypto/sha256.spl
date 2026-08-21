@@ -341,6 +341,89 @@ fn sha256_with_len(data: [u8], data_len: u64) -> [u8]:
         hi = hi + 1
     out
 
+# ============================================================================
+# Incremental SHA-256
+# ============================================================================
+
+pub class Sha256Stream:
+    state: [u32]
+    pending: [u8]
+    total_bytes: u64
+
+fn sha256_stream_new() -> Sha256Stream:
+    var state: [u32] = []
+    var index: u64 = 0u64
+    while index < 8u64:
+        state.push(_sha256_h(index))
+        index = index + 1u64
+    Sha256Stream(state: state, pending: [], total_bytes: 0u64)
+
+fn sha256_stream_update(stream: Sha256Stream, data: [u8]) -> Result<bool, text>:
+    """Consume one ordered byte chunk without retaining the complete message."""
+    val data_len = data.len().to_u64()
+    if data_len > 0x1fffffffffffffffu64 - stream.total_bytes:
+        return Err("sha256-stream-length-overflow")
+
+    var state = stream.state
+    var pending = stream.pending
+    var input_offset: u64 = 0u64
+
+    if pending.len() > 0:
+        while pending.len() < 64 and input_offset < data_len:
+            pending.push(_u8_at(data, input_offset))
+            input_offset = input_offset + 1u64
+        if pending.len() == 64:
+            state = sha256_process_block(pending, 0u64, state)
+            pending = []
+
+    while data_len - input_offset >= 64u64:
+        state = sha256_process_block(data, input_offset, state)
+        input_offset = input_offset + 64u64
+
+    while input_offset < data_len:
+        pending.push(_u8_at(data, input_offset))
+        input_offset = input_offset + 1u64
+
+    stream.state = state
+    stream.pending = pending
+    stream.total_bytes = stream.total_bytes + data_len
+    Ok(true)
+
+fn _sha256_state_bytes(state: [u32]) -> [u8]:
+    var out: [u8] = []
+    var index: u64 = 0u64
+    while index < 8u64:
+        val word = state[index]
+        out.push(((word >> 24) & 0xffu32).to_u8())
+        out.push(((word >> 16) & 0xffu32).to_u8())
+        out.push(((word >> 8) & 0xffu32).to_u8())
+        out.push((word & 0xffu32).to_u8())
+        index = index + 1u64
+    out
+
+fn sha256_stream_finish(stream: Sha256Stream) -> Result<[u8], text>:
+    """Finalize a stream once using the FIPS 180-4 length encoding."""
+    var tail = stream.pending
+    tail.push(0x80u8)
+    while (tail.len() % 64) != 56:
+        tail.push(0u8)
+    val bit_len = stream.total_bytes * 8u64
+    tail.push(((bit_len >> 56) & 0xffu64).to_u8())
+    tail.push(((bit_len >> 48) & 0xffu64).to_u8())
+    tail.push(((bit_len >> 40) & 0xffu64).to_u8())
+    tail.push(((bit_len >> 32) & 0xffu64).to_u8())
+    tail.push(((bit_len >> 24) & 0xffu64).to_u8())
+    tail.push(((bit_len >> 16) & 0xffu64).to_u8())
+    tail.push(((bit_len >> 8) & 0xffu64).to_u8())
+    tail.push((bit_len & 0xffu64).to_u8())
+
+    var state = stream.state
+    var offset: u64 = 0u64
+    while offset < tail.len().to_u64():
+        state = sha256_process_block(tail, offset, state)
+        offset = offset + 64u64
+    Ok(_sha256_state_bytes(state))
+
 fn _normalize_hmac_key(key: [u8], key_len: u64) -> [u8]:
     val block_size: u64 = 64
     var k_prime: [u8] = []
@@ -403,4 +486,5 @@ fn sha256_hmac_with_len(key: [u8], key_len: u64, data: [u8], data_len: u64) -> [
     _sha256_hmac_with_norm_key(k_prime, data, data_len)
 
 export sha256, sha256_with_len, sha256_pad_with_len, sha256_process_block
+export Sha256Stream, sha256_stream_new, sha256_stream_update, sha256_stream_finish
 export sha256_hmac, sha256_hmac_with_len, sha256_hmac_from_list, _copy_block64

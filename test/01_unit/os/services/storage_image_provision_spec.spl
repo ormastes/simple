@@ -1,0 +1,74 @@
+use std.spec.{describe, it, expect}
+use std.fs_driver.block_device.{BlockDevice}
+use std.fs_driver.mem_block_device.{MemBlockDevice}
+use os.services.storage_image_provision.{
+    storage_sha256_hex, storage_image_plan, storage_image_write_chunk,
+    storage_image_flush,
+    storage_image_verify_readback
+}
+
+val ZERO_512_SHA256: text = "076a27c79e5ace2a3d47f9dd2e83e4ff6ea8872b3c2218f66c92b89b55f36560"
+val ZERO_1024_SHA256: text = "5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef"
+
+fn _zero_bytes(count: i64) -> [u8]:
+    var out: [u8] = []
+    var index: i64 = 0
+    while index < count:
+        out.push(0u8)
+        index = index + 1
+    out
+
+fn _one_bytes(count: i64) -> [u8]:
+    var out: [u8] = []
+    var index: i64 = 0
+    while index < count:
+        out.push(1u8)
+        index = index + 1
+    out
+
+describe "host-neutral block image provision planning":
+    it "accepts one aligned bounded image and rejects unsafe geometry":
+        val plan = storage_image_plan(512u32, 8u64, 512u64, 1024u64, ZERO_1024_SHA256)
+        expect(plan.is_ok()).to_equal(true)
+        expect(plan.unwrap().byte_start).to_equal(512u64)
+        expect(storage_image_plan(0u32, 8u64, 0u64, 512u64, ZERO_512_SHA256).unwrap_err()).to_equal("storage-image-device-geometry")
+        expect(storage_image_plan(512u32, 8u64, 1u64, 512u64, ZERO_512_SHA256).unwrap_err()).to_equal("storage-image-sector-alignment")
+        expect(storage_image_plan(512u32, 8u64, 4096u64, 512u64, ZERO_512_SHA256).unwrap_err()).to_equal("storage-image-range")
+        expect(storage_image_plan(512u32, 8u64, 0u64, 512u64, "bad").unwrap_err()).to_equal("storage-image-digest-format")
+
+    it "hashes a complete sector with the standard SHA-256 value":
+        expect(storage_sha256_hex(_zero_bytes(512)).unwrap()).to_equal(ZERO_512_SHA256)
+
+describe "host-neutral block image write and durable readback":
+    it "writes ordered chunks, flushes, and hashes exact fresh reads":
+        val mem = MemBlockDevice.new(8u64, 512u32)
+        val dev: BlockDevice = mem
+        val plan = storage_image_plan(512u32, 8u64, 512u64, 1024u64, ZERO_1024_SHA256).unwrap()
+        var next_offset = storage_image_write_chunk(
+            dev, plan, 0u64, _zero_bytes(512), ZERO_512_SHA256).unwrap()
+        expect(next_offset).to_equal(512u64)
+        next_offset = storage_image_write_chunk(
+            dev, plan, next_offset, _zero_bytes(512), ZERO_512_SHA256).unwrap()
+        expect(storage_image_flush(dev, plan, next_offset).unwrap()).to_equal(true)
+        val fresh_dev: BlockDevice = mem
+        val proof = storage_image_verify_readback(fresh_dev, plan).unwrap()
+        expect(proof).to_contain("sha256=" + ZERO_1024_SHA256)
+        expect(proof).to_contain("flush=pass fresh_readback=pass")
+
+    it "rejects a mismatched chunk before writing and incomplete finalization":
+        val mem = MemBlockDevice.new(8u64, 512u32)
+        val dev: BlockDevice = mem
+        val plan = storage_image_plan(512u32, 8u64, 0u64, 1024u64, ZERO_1024_SHA256).unwrap()
+        expect(storage_image_write_chunk(dev, plan, 0u64, _zero_bytes(512), ZERO_1024_SHA256).unwrap_err()).to_equal("storage-image-chunk-digest-mismatch")
+        expect(storage_image_flush(dev, plan, 0u64).unwrap_err()).to_equal("storage-image-incomplete")
+        expect(dev.read_sector(0u64).unwrap()).to_equal(_zero_bytes(512))
+
+    it "detects media corruption during full readback":
+        val mem = MemBlockDevice.new(8u64, 512u32)
+        val dev: BlockDevice = mem
+        val plan = storage_image_plan(512u32, 8u64, 0u64, 512u64, ZERO_512_SHA256).unwrap()
+        val next_offset = storage_image_write_chunk(
+            dev, plan, 0u64, _zero_bytes(512), ZERO_512_SHA256).unwrap()
+        expect(storage_image_flush(dev, plan, next_offset).unwrap()).to_equal(true)
+        dev.write_sector(0u64, _one_bytes(512))
+        expect(storage_image_verify_readback(dev, plan).unwrap_err()).to_equal("storage-image-readback-digest-mismatch")

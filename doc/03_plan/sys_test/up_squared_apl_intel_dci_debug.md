@@ -15,6 +15,10 @@
   out-of-range, W+X, and non-executable-entry plans fail.
 - REQ-009/010/012: exact storage identity/challenge passes policy; system,
   mounted, held, mismatched, overflowed, and unconfirmed writes fail.
+  The common image scenario additionally proves ordered chunk hashes,
+  whole-image digest, flush, and exact fresh-view readback on an isolated block
+  device. The UP2 OVMF gate must repeat this through the NVMe adapter before
+  implementation PASS; physical persistence remains a separate receipt.
 - REQ-013: OVMF enters the serial RSP monitor, writes `SIMP` with `M`, reads
   `53494d50` with `m`, detaches, and observes the resumed shell. Unit scenarios
   reject malformed checksums, overflow, out-of-range memory, and false run

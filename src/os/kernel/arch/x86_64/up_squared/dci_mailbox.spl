@@ -2,6 +2,7 @@
 
 use os.kernel.loader.byte_utils.{byte_at, lb_read_u16_le, lb_read_u32_le, lb_read_u64_le, in_range}
 use std.common.structural.digest.hash256.{hash256_hex_valid}
+use os.crypto.sha256.{sha256_with_len}
 
 val DCI_MAILBOX_SCHEMA_VERSION: u32 = 1u32
 val DCI_MAX_PAYLOAD_BYTES: u64 = 268435456u64
@@ -75,7 +76,58 @@ fn _dci_add_overflows(start: u64, size: u64) -> bool:
 
 fn _dci_identity_text_valid(value: text) -> bool:
     val trimmed = value.trim()
-    trimmed != "" and trimmed.len() <= 256
+    if trimmed == "" or trimmed.len() > 256:
+        return false
+    var index: i64 = 0
+    while index < trimmed.len():
+        val code = trimmed.char_code_at(index)
+        if code < 32 or code > 126:
+            return false
+        index = index + 1
+    true
+
+fn _dci_hex_digit(value: i64) -> text:
+    match value:
+        0: "0"
+        1: "1"
+        2: "2"
+        3: "3"
+        4: "4"
+        5: "5"
+        6: "6"
+        7: "7"
+        8: "8"
+        9: "9"
+        10: "a"
+        11: "b"
+        12: "c"
+        13: "d"
+        14: "e"
+        15: "f"
+        _: ""
+
+fn _dci_ascii_bytes(value: text) -> [u8]:
+    var out: [u8] = []
+    var index: i64 = 0
+    while index < value.len():
+        out.push(value.char_code_at(index) as u8)
+        index = index + 1
+    out
+
+fn _dci_storage_identity_fingerprint(identity: DciStorageIdentity) -> text:
+    val canonical = (identity.model.len().to_text() + ":" + identity.model +
+        "|" + identity.serial.len().to_text() + ":" + identity.serial +
+        "|" + identity.transport.len().to_text() + ":" + identity.transport +
+        "|" + identity.capacity.to_text())
+    val bytes = _dci_ascii_bytes(canonical)
+    val digest = sha256_with_len(bytes, bytes.len().to_u64())
+    var out = ""
+    var index: i64 = 0
+    while index < digest.len():
+        val value = digest[index] as i64
+        out = out + _dci_hex_digit((value >> 4) & 15) + _dci_hex_digit(value & 15)
+        index = index + 1
+    out
 
 pub fn dci_admit_mailbox(
     descriptor: DciMailboxDescriptor,
@@ -92,20 +144,20 @@ pub fn dci_admit_mailbox(
         return _dci_reject("mailbox-generation-replayed")
     if expected_nonce == 0u64 or descriptor.nonce != expected_nonce:
         return _dci_reject("mailbox-nonce")
-    if descriptor.payload_size == 0u64 or
+    if (descriptor.payload_size == 0u64 or
         descriptor.payload_size > DCI_MAX_PAYLOAD_BYTES or
-        descriptor.payload_size != observed_payload_size:
+        descriptor.payload_size != observed_payload_size):
         return _dci_reject("mailbox-payload-size")
-    if not hash256_hex_valid(descriptor.payload_sha256) or
-        not hash256_hex_valid(observed_payload_sha256):
+    if (not hash256_hex_valid(descriptor.payload_sha256) or
+        not hash256_hex_valid(observed_payload_sha256)):
         return _dci_reject("mailbox-payload-digest-format")
     if descriptor.payload_sha256 != observed_payload_sha256:
         return _dci_reject("mailbox-payload-digest-mismatch")
     _dci_accept()
 
 fn _dci_range_valid(range: DciMemoryRange) -> bool:
-    range.start != 0u64 and range.size != 0u64 and
-        not _dci_add_overflows(range.start, range.size)
+    (range.start != 0u64 and range.size != 0u64 and
+        not _dci_add_overflows(range.start, range.size))
 
 fn _dci_segment_in_range(segment: DciLoadSegment, range: DciMemoryRange) -> bool:
     if not _dci_range_valid(range) or segment.physical_address < range.start:
@@ -136,8 +188,8 @@ fn _dci_align_valid(segment: DciLoadSegment) -> bool:
         return true
     if (segment.align & (segment.align - 1u64)) != 0u64:
         return false
-    (segment.physical_address % segment.align) ==
-        (segment.file_offset % segment.align)
+    ((segment.physical_address % segment.align) ==
+        (segment.file_offset % segment.align))
 
 pub fn dci_admit_load_plan(
     payload_size: u64,
@@ -158,23 +210,23 @@ pub fn dci_admit_load_plan(
         val segment = plan.segments[i]
         if segment.memory_size == 0u64 or segment.file_size > segment.memory_size:
             return _dci_reject("load-segment-size")
-        if segment.file_offset > payload_size or
-            segment.file_size > payload_size - segment.file_offset:
+        if (segment.file_offset > payload_size or
+            segment.file_size > payload_size - segment.file_offset):
             return _dci_reject("load-file-range")
-        if _dci_add_overflows(segment.file_offset, segment.file_size) or
-            _dci_add_overflows(segment.physical_address, segment.memory_size):
+        if (_dci_add_overflows(segment.file_offset, segment.file_size) or
+            _dci_add_overflows(segment.physical_address, segment.memory_size)):
             return _dci_reject("load-range-overflow")
         if not _dci_align_valid(segment):
             return _dci_reject("load-alignment")
-        if (segment.flags & DCI_PF_X) != 0u32 and
-            (segment.flags & DCI_PF_W) != 0u32:
+        if ((segment.flags & DCI_PF_X) != 0u32 and
+            (segment.flags & DCI_PF_W) != 0u32):
             return _dci_reject("load-write-execute")
         if not _dci_segment_allowed(segment, allowed):
             return _dci_reject("load-memory-not-allowed")
         var j: i64 = 0
         while j < i:
-            if _dci_segments_overlap_memory(segment, plan.segments[j]) or
-                _dci_segments_overlap_file(segment, plan.segments[j]):
+            if (_dci_segments_overlap_memory(segment, plan.segments[j]) or
+                _dci_segments_overlap_file(segment, plan.segments[j])):
                 return _dci_reject("load-segment-overlap")
             j = j + 1
         if (segment.flags & DCI_PF_X) != 0u32 and segment.file_size > 0u64:
@@ -189,11 +241,11 @@ pub fn dci_admit_load_plan(
 pub fn dci_parse_x86_64_elf(bytes: [u8]) -> Result<DciElfPlan, text>:
     if bytes.len() < 64:
         return Err("elf-header-truncated")
-    if byte_at(bytes, 0) != 0x7fu8 or byte_at(bytes, 1) != 0x45u8 or
-        byte_at(bytes, 2) != 0x4cu8 or byte_at(bytes, 3) != 0x46u8:
+    if (byte_at(bytes, 0) != 0x7fu8 or byte_at(bytes, 1) != 0x45u8 or
+        byte_at(bytes, 2) != 0x4cu8 or byte_at(bytes, 3) != 0x46u8):
         return Err("elf-magic")
-    if byte_at(bytes, 4) != 2u8 or byte_at(bytes, 5) != 1u8 or
-        byte_at(bytes, 6) != 1u8:
+    if (byte_at(bytes, 4) != 2u8 or byte_at(bytes, 5) != 1u8 or
+        byte_at(bytes, 6) != 1u8):
         return Err("elf-ident")
     if lb_read_u16_le(bytes, 16) != 2 or lb_read_u16_le(bytes, 18) != 62:
         return Err("elf-target")
@@ -219,8 +271,8 @@ pub fn dci_parse_x86_64_elf(bytes: [u8]) -> Result<DciElfPlan, text>:
             val file_size = lb_read_u64_le(bytes, offset + 32)
             val memory_size = lb_read_u64_le(bytes, offset + 40)
             val align = lb_read_u64_le(bytes, offset + 48)
-            if file_offset < 0 or physical_address < 0 or file_size < 0 or
-                memory_size < 0 or align < 0:
+            if (file_offset < 0 or physical_address < 0 or file_size < 0 or
+                memory_size < 0 or align < 0):
                 return Err("elf-program-value-overflow")
             if file_size > memory_size or not in_range(bytes, file_offset, file_size):
                 return Err("elf-segment-truncated")
@@ -238,8 +290,8 @@ pub fn dci_parse_x86_64_elf(bytes: [u8]) -> Result<DciElfPlan, text>:
     Ok(DciElfPlan(entry: entry_raw as u64, segments: segments))
 
 fn _dci_storage_identity_equal(a: DciStorageIdentity, b: DciStorageIdentity) -> bool:
-    a.model == b.model and a.serial == b.serial and
-        a.transport == b.transport and a.capacity == b.capacity
+    (a.model == b.model and a.serial == b.serial and
+        a.transport == b.transport and a.capacity == b.capacity)
 
 pub fn dci_storage_confirmation(
     identity: DciStorageIdentity,
@@ -247,16 +299,15 @@ pub fn dci_storage_confirmation(
     byte_length: u64,
     image_sha256: text
 ) -> text:
-    "UP2-STORAGE-WRITE:" + identity.model + ":" + identity.serial + ":" +
-        identity.transport + ":" + identity.capacity.to_text() + ":" +
-        byte_start.to_text() + ":" + byte_length.to_text() + ":" + image_sha256
+    ("UP2-STORAGE-WRITE:" + _dci_storage_identity_fingerprint(identity) + ":" +
+        byte_start.to_text() + ":" + byte_length.to_text() + ":" + image_sha256)
 
 pub fn dci_admit_storage_write(write: DciStorageWrite) -> DciAdmission:
     if not write.persistent_allowed:
         return _dci_reject("storage-persistent-not-authorized")
-    if not _dci_identity_text_valid(write.observed.model) or
+    if (not _dci_identity_text_valid(write.observed.model) or
         not _dci_identity_text_valid(write.observed.serial) or
-        not _dci_identity_text_valid(write.observed.transport):
+        not _dci_identity_text_valid(write.observed.transport)):
         return _dci_reject("storage-identity-missing")
     if not _dci_storage_identity_equal(write.observed, write.expected):
         return _dci_reject("storage-identity-mismatch")
@@ -264,12 +315,12 @@ pub fn dci_admit_storage_write(write: DciStorageWrite) -> DciAdmission:
         return _dci_reject("storage-system-device")
     if write.observed.mounted or write.observed.held:
         return _dci_reject("storage-device-busy")
-    if write.observed.capacity == 0u64 or write.byte_length == 0u64 or
-        write.image_size != write.byte_length:
+    if (write.observed.capacity == 0u64 or write.byte_length == 0u64 or
+        write.image_size != write.byte_length):
         return _dci_reject("storage-write-size")
-    if write.byte_start > write.observed.capacity or
+    if (write.byte_start > write.observed.capacity or
         write.byte_length > write.observed.capacity - write.byte_start or
-        _dci_add_overflows(write.byte_start, write.byte_length):
+        _dci_add_overflows(write.byte_start, write.byte_length)):
         return _dci_reject("storage-write-range")
     if not hash256_hex_valid(write.image_sha256):
         return _dci_reject("storage-image-digest")

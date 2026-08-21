@@ -25,6 +25,12 @@ I/O. Those decisions remain target-side and independently testable.
    lease-backed block adapter, GPT, and FAT32 owners for write/flush/fresh-
    adapter readback; debugger MMIO is never a storage backend. Physical-board
    evidence remains separate from the passed QEMU scratch-device proof.
+   Raw-image I/O is owned by host-neutral
+   `os.services.storage_image_provision`: it depends only on `BlockDevice` and
+   streaming SHA-256 and owns alignment, ordered chunk writes, flush, and exact
+   full readback. UP2 owns PCI/Identify identity, confirmation, staging-memory
+   copy, and fresh NVMe adapters; StarFive can reuse the common owner without
+   copying its JH7110 PCIe/PHY/cache-coherency port.
 6. **Evidence owner:** connection, load, boot, and storage receipts remain
    separate and cannot promote one another.
 7. **Free post-boot monitor:** `gdb_rsp_monitor.spl` owns packet, checksum,

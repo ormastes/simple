@@ -78,13 +78,17 @@ transport remains a separate hardware evidence gate.
   connection receipt are absent.
 - REQ-006..008: policy parser and ELF admission exist; the executable UEFI
   mailbox publisher/consumer and boot transition do not exist yet.
-- REQ-009..010: the shared NVMe GPT/FAT32 provisioner passes on an isolated OVMF
-  scratch namespace with the current image; strict full-image SHA-256 admission
-  and physical UP2 PCI/NVMe persistence remain incomplete/BLOCKED.
+- REQ-009..010: GPT/FAT32 proof and the new shared chunked raw-image owner are
+  implemented. The latter binds DCI storage admission to live UP2 identity,
+  hashes chunks before writes, maintains whole-image SHA-256, flushes, and
+  performs exact fresh-adapter readback. Freestanding build and RSP staging pass,
+  but the target streaming SHA rejects independently verified staging bytes;
+  the three-cycle retry cap was reached with `media_writes=0`. Flush/readback
+  and physical UP2 PCI/NVMe persistence remain BLOCKED.
 - REQ-011: current-image OVMF UART evidence passes; physical CN16 evidence is
   missing.
 - REQ-012: enforced by the current read-only boot and explicit challenges.
-- REQ-013: current-image OVMF packet/write/readback passes; physical CN16
-  remains BLOCKED.
+- REQ-013: current-image OVMF accepts four consecutive maximum `M` packets and
+  exact `m` readback; physical CN16 remains BLOCKED.
 - REQ-014: procedure is documented; physical Secure Boot/menu/shell evidence is
   missing.

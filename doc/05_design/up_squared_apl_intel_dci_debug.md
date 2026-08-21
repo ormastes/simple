@@ -57,9 +57,22 @@ The landed UP2 NVMe provisioner is the first concrete hardware adapter. Boot
 performs PCI grant plus Identify only. `nvme format <exact live challenge>`
 creates mirrored GPT and a FAT32 partition lease, writes `PROOF.TXT`, flushes,
 constructs a fresh adapter, and verifies bytes before `ls /nvme` succeeds. It
-does not consume `DciStorageWrite` image-write admission because this operation
-formats a named filesystem rather than copying an external disk image; both
-paths preserve the same no-debugger-MMIO boundary.
+remains the named-filesystem path.
+
+The raw-image path is separate and consumes `DciStorageWrite`. The UP2 leaf
+captures immutable Identify/PCI identity and an exact plan, prints the full
+identity plus a line-bounded confirmation containing SHA-256 of its canonical
+model/serial/transport/capacity, and copies at most 1 MiB from the 16 MiB RSP staging window per
+ordered command. `os.services.storage_image_provision` is host-neutral: it
+validates sector geometry/range, verifies each chunk hash before writing,
+flushes, and computes streaming whole-image SHA-256 over every sector from a
+fresh adapter. Any device/admission/write error aborts the session; restart
+requires a new plan and confirmation. The same common owner is available to a
+future StarFive adapter without copying PCIe/PHY/cache-coherency logic.
+
+The UP2 leaf retains long-lived plan/session/expected-identity state only in
+module-owned scalar and text globals. Transient value-semantic plans cross into
+the shared owner for one call; no aggregate survives through an optional global.
 
 ## Error behavior
 
@@ -79,7 +92,9 @@ written byte back before replying `OK`.
 `gdb_rsp_uart.spl` enters only after the shell command `gdb`, ACKs valid frames,
 NACKs malformed/checksum-failed frames, handles Ctrl-C as an already-stopped
 monitor indication, and returns to the shell on detach. It performs no reset or
-execution transition.
+execution transition. Frame assembly uses one append-only byte array and one
+final bytes-to-text conversion; per-character text concatenation is forbidden
+because the freestanding 16 MiB monotonic heap cannot reclaim those copies.
 
 ## Missing UEFI adapter
 

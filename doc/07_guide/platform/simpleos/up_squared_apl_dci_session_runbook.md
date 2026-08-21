@@ -100,6 +100,34 @@ report GPT/FAT32, flush, fresh-adapter readback, and `/nvme/proof.txt` from
 `ls /nvme`. The original board has no native M-key slot; an adapter is accepted
 only after live PCI class `01:08` and NVMe Identify, never by connector shape.
 
+For a complete raw disk image, use the separate image session. Values are
+decimal; hashes are lowercase SHA-256:
+
+```text
+nvme identify
+nvme image plan 0 <exact-image-bytes> <whole-image-sha256>
+nvme image confirm <copy-the-entire-printed-UP2-STORAGE-WRITE-challenge>
+```
+
+The confirmation contains SHA-256 of the canonical full identity rather than
+repeating long hex-rendered model/serial strings, so it fits the target line
+buffer. It remains bound to the full identity printed by `nvme identify`.
+
+For each ordered chunk (maximum 1 MiB), enter `gdb`, fill staging memory from
+`0x0a000000` using checksummed `M` packets of at most 1024 bytes, read back the
+last packet, and detach. Then run:
+
+```text
+nvme image chunk 0 <ordered-image-offset> <chunk-bytes> <chunk-sha256>
+```
+
+Repeat to the exact planned length and run `nvme image finish`. PASS requires
+the whole staged digest, NVMe Flush, a fresh adapter, and exact full-range
+readback SHA-256. `nvme image abort` clears session state but cannot undo
+sectors already written. Any chunk/write error requires a new plan. Never use
+this path against the development host NVMe, mounted media, or an unverified
+physical identity.
+
 Boot PASS still requires a fresh CN16 transcript through VFS-backed `ls /`.
 Storage PASS additionally requires the identity and readback receipt. A DCI
 connection, memory read, or debugger screenshot cannot substitute for either.
@@ -130,3 +158,9 @@ continue, step, reset, and binary `X` remain unsupported. The tree still lacks
 an xHCI DbC transport. Host KGDB, CHIPSEC, and EDK II debug agents become useful
 only after corresponding target software starts. Record such evidence as
 software-debug, not DCI run-control or external-memory evidence.
+
+Current OVMF status (2026-08-22): four consecutive maximum 1024-byte nonzero
+`M` packets and independent `m` readback pass without heap exhaustion. Raw-image
+commit remains BLOCKED before media write because freestanding streaming SHA-256
+does not match the independently hashed staging bytes. See
+`doc/08_tracking/bug/up2_sha256_stream_freestanding_mismatch_2026-08-22.md`.

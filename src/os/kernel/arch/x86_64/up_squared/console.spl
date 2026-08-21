@@ -3,7 +3,14 @@
 
 use os.kernel.arch.x86_64.up_squared.vfs.{up2_vfs_readdir}
 use os.kernel.arch.x86_64.up_squared.gdb_rsp_uart.{up2_gdb_rsp_uart_main}
-use os.kernel.arch.x86_64.up_squared.nvme_storage.{up2_nvme_format_challenge, up2_nvme_identity_summary, up2_nvme_provision_fat32, up2_nvme_verify_proof}
+use os.kernel.arch.x86_64.up_squared.nvme_storage.{
+    up2_nvme_format_challenge, up2_nvme_identity_summary,
+    up2_nvme_provision_fat32, up2_nvme_verify_proof,
+    up2_nvme_image_plan, up2_nvme_image_confirm, up2_nvme_image_chunk,
+    up2_nvme_image_finish, up2_nvme_image_abort
+}
+
+val UP2_CONSOLE_U64_MAX: u64 = 0xffffffffffffffffu64
 
 extern fn serial_println(msg: text)
 extern fn rt_serial_readline() -> text
@@ -22,6 +29,27 @@ fn _up2_print_nvme():
     serial_println(proof.unwrap())
     serial_println("UP2 nvme-ls-end status=pass")
 
+fn _up2_parse_decimal_u64(raw: text) -> Result<u64, text>:
+    if raw == "":
+        return Err("decimal-empty")
+    var value: u64 = 0u64
+    var index: i64 = 0
+    while index < raw.len():
+        val digit = raw.char_code_at(index) - 48
+        if digit < 0 or digit > 9:
+            return Err("decimal-format")
+        if value > (UP2_CONSOLE_U64_MAX - digit as u64) / 10u64:
+            return Err("decimal-overflow")
+        value = value * 10u64 + digit as u64
+        index = index + 1
+    Ok(value)
+
+fn _up2_print_image_result(result: Result<text, text>):
+    if result.is_ok():
+        serial_println(result.unwrap())
+    else:
+        serial_println("nvme_image_status=blocked reason=" + result.unwrap_err())
+
 fn up2_serial_shell_main():
     while true:
         serial_println("simpleos:/$ ")
@@ -39,14 +67,50 @@ fn up2_serial_shell_main():
                 serial_println(identity.unwrap())
                 serial_println("nvme_format_challenge=" + challenge.unwrap())
                 serial_println("WARNING: next command destroys the identified NVMe namespace")
+            elif identity.is_err():
+                serial_println("nvme identify blocked reason=" + identity.unwrap_err())
             else:
-                serial_println("nvme identify blocked")
+                serial_println("nvme identify blocked reason=" + challenge.unwrap_err())
         elif command == "help":
-            serial_println("commands: ls /, ls /nvme, nvme identify, gdb, help")
+            serial_println("commands: ls /, ls /nvme, nvme identify, nvme image plan|confirm|chunk|finish|abort, gdb, help")
         elif command == "gdb":
             serial_println("UP2 gdb-rsp-ready range=0x0a000000+0x01000000 max=1024")
             up2_gdb_rsp_uart_main()
             serial_println("UP2 gdb-rsp-detached")
+        elif command.starts_with("nvme image plan "):
+            val parts = command.split(" ")
+            if parts.len() != 6:
+                serial_println("nvme_image_status=blocked reason=usage: nvme image plan <byte-start> <image-size> <sha256>")
+            else:
+                val byte_start = _up2_parse_decimal_u64(parts[3])
+                val image_size = _up2_parse_decimal_u64(parts[4])
+                if byte_start.is_err() or image_size.is_err():
+                    serial_println("nvme_image_status=blocked reason=decimal-format")
+                else:
+                    _up2_print_image_result(up2_nvme_image_plan(
+                        byte_start.unwrap(), image_size.unwrap(), parts[5]))
+        elif command.starts_with("nvme image confirm "):
+            val prefix = "nvme image confirm "
+            _up2_print_image_result(up2_nvme_image_confirm(
+                command.substring(prefix.len(), command.len())))
+        elif command.starts_with("nvme image chunk "):
+            val parts = command.split(" ")
+            if parts.len() != 7:
+                serial_println("nvme_image_status=blocked reason=usage: nvme image chunk <staging-offset> <image-offset> <length> <chunk-sha256>")
+            else:
+                val staging_offset = _up2_parse_decimal_u64(parts[3])
+                val image_offset = _up2_parse_decimal_u64(parts[4])
+                val byte_length = _up2_parse_decimal_u64(parts[5])
+                if staging_offset.is_err() or image_offset.is_err() or byte_length.is_err():
+                    serial_println("nvme_image_status=blocked reason=decimal-format")
+                else:
+                    _up2_print_image_result(up2_nvme_image_chunk(
+                        staging_offset.unwrap(), image_offset.unwrap(),
+                        byte_length.unwrap(), parts[6]))
+        elif command == "nvme image finish":
+            _up2_print_image_result(up2_nvme_image_finish())
+        elif command == "nvme image abort":
+            serial_println(up2_nvme_image_abort())
         elif command != "":
             val challenge = up2_nvme_format_challenge()
             if challenge.is_ok() and command == "nvme format " + challenge.unwrap():

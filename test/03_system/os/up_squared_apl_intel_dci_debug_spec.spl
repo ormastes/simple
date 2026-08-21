@@ -17,9 +17,25 @@ use os.kernel.arch.x86_64.up_squared.dci_mailbox.{
 use os.kernel.arch.x86_64.up_squared.gdb_rsp_monitor.{
     Up2RspOperation, up2_rsp_plan, up2_rsp_frame, up2_rsp_decode_frame
 }
+use std.fs_driver.block_device.{BlockDevice}
+use std.fs_driver.mem_block_device.{MemBlockDevice}
+use os.services.storage_image_provision.{
+    storage_image_plan, storage_image_write_chunk, storage_image_flush,
+    storage_image_verify_readback
+}
 
 val IMAGE_HASH: text = "31ce1fb45630f3442b9d789068fb13db8c66412428c71cee096e00ccc4e1fbdf"
 val IMAGE_SIZE: u64 = 225152u64
+val ZERO_SECTOR_HASH: text = "076a27c79e5ace2a3d47f9dd2e83e4ff6ea8872b3c2218f66c92b89b55f36560"
+val ZERO_IMAGE_HASH: text = "5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef"
+
+fn zero_sector() -> [u8]:
+    var out: [u8] = []
+    var index: i64 = 0
+    while index < 512:
+        out.push(0u8)
+        index = index + 1
+    out
 
 fn descriptor(state: DciCommitState, generation: u64) -> DciMailboxDescriptor:
     DciMailboxDescriptor(
@@ -110,6 +126,27 @@ describe "UP2 target-side storage admission":
             confirmation: challenge, persistent_allowed: true
         ))
         expect(accepted.accepted).to_equal(true)
+
+    it "writes ordered image chunks and requires flush plus exact full readback":
+        # @step: Create an isolated device and an aligned hash-bound image plan.
+        val memory = MemBlockDevice.new(8u64, 512u32)
+        val device: BlockDevice = memory
+        val plan = storage_image_plan(
+            512u32, 8u64, 512u64, 1024u64, ZERO_IMAGE_HASH).unwrap()
+        var next_offset: u64 = 0u64
+
+        # @step: Commit two ordered, independently hashed staging chunks.
+        next_offset = storage_image_write_chunk(
+            device, plan, next_offset, zero_sector(), ZERO_SECTOR_HASH).unwrap()
+        next_offset = storage_image_write_chunk(
+            device, plan, next_offset, zero_sector(), ZERO_SECTOR_HASH).unwrap()
+
+        # @step: Cross the durability boundary and hash every byte from a fresh view.
+        expect(storage_image_flush(device, plan, next_offset).unwrap()).to_equal(true)
+        val fresh_device: BlockDevice = memory
+        val proof = storage_image_verify_readback(fresh_device, plan).unwrap()
+        expect(proof).to_contain("sha256=" + ZERO_IMAGE_HASH)
+        expect(proof).to_contain("flush=pass fresh_readback=pass")
 
 describe "UP2 free post-boot RAM loading":
     it "accepts only framed operations inside the loader-owned staging range":

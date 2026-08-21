@@ -1,0 +1,181 @@
+# Host-neutral raw block-image provisioning.
+#
+# Board leaves own device discovery, immutable identity, user confirmation, and
+# staging-memory access. This owner performs ordered sector writes, durability,
+# and exact whole-image readback through the shared BlockDevice interface.
+
+use std.fs_driver.block_device.{BlockDevice}
+use std.common.structural.digest.hash256.{hash256_hex_valid}
+use os.crypto.sha256.{
+    sha256_stream_new, sha256_stream_update, sha256_stream_finish
+}
+
+pub struct StorageImagePlan:
+    lba_size: u32
+    lba_count: u64
+    byte_start: u64
+    image_size: u64
+    expected_sha256: text
+
+fn _storage_hex_digit(value: i64) -> text:
+    match value:
+        0: "0"
+        1: "1"
+        2: "2"
+        3: "3"
+        4: "4"
+        5: "5"
+        6: "6"
+        7: "7"
+        8: "8"
+        9: "9"
+        10: "a"
+        11: "b"
+        12: "c"
+        13: "d"
+        14: "e"
+        15: "f"
+        _: ""
+
+fn storage_sha256_hex(bytes: [u8]) -> Result<text, text>:
+    val stream = sha256_stream_new()
+    val updated = sha256_stream_update(stream, bytes)
+    if updated.is_err():
+        return Err(updated.unwrap_err())
+    val digest = sha256_stream_finish(stream)
+    if digest.is_err():
+        return Err(digest.unwrap_err())
+    var out = ""
+    var index: i64 = 0
+    while index < digest.unwrap().len():
+        val value = digest.unwrap()[index] as i64
+        out = (out + _storage_hex_digit((value >> 4) & 15) +
+            _storage_hex_digit(value & 15))
+        index = index + 1
+    Ok(out)
+
+fn storage_image_plan(
+    lba_size: u32,
+    lba_count: u64,
+    byte_start: u64,
+    image_size: u64,
+    expected_sha256: text
+) -> Result<StorageImagePlan, text>:
+    val sector_bytes = lba_size.to_u64()
+    if sector_bytes == 0u64 or lba_count == 0u64:
+        return Err("storage-image-device-geometry")
+    val capacity = lba_count * sector_bytes
+    if capacity / lba_count != sector_bytes:
+        return Err("storage-image-capacity-overflow")
+    if image_size == 0u64:
+        return Err("storage-image-empty")
+    if (byte_start % sector_bytes) != 0u64 or (image_size % sector_bytes) != 0u64:
+        return Err("storage-image-sector-alignment")
+    if byte_start > capacity or image_size > capacity - byte_start:
+        return Err("storage-image-range")
+    if not hash256_hex_valid(expected_sha256):
+        return Err("storage-image-digest-format")
+    Ok(StorageImagePlan(
+        lba_size: lba_size,
+        lba_count: lba_count,
+        byte_start: byte_start,
+        image_size: image_size,
+        expected_sha256: expected_sha256
+    ))
+
+fn _storage_image_device_matches(dev: BlockDevice, plan: StorageImagePlan) -> bool:
+    dev.sector_size() == plan.lba_size
+
+fn storage_image_write_chunk(
+    dev: BlockDevice,
+    plan: StorageImagePlan,
+    image_offset: u64,
+    chunk: [u8],
+    expected_chunk_sha256: text
+) -> Result<u64, text>:
+    if not _storage_image_device_matches(dev, plan):
+        return Err("storage-image-device-changed")
+    val chunk_size = chunk.len().to_u64()
+    if chunk_size == 0u64 or (chunk_size % plan.lba_size.to_u64()) != 0u64:
+        return Err("storage-image-chunk-alignment")
+    if (image_offset > plan.image_size or
+        chunk_size > plan.image_size - image_offset):
+        return Err("storage-image-chunk-range")
+    if not hash256_hex_valid(expected_chunk_sha256):
+        return Err("storage-image-chunk-digest-format")
+    val observed_chunk_sha256 = storage_sha256_hex(chunk)
+    if observed_chunk_sha256.is_err() or observed_chunk_sha256.unwrap() != expected_chunk_sha256:
+        return Err("storage-image-chunk-digest-mismatch")
+
+    val sector_size = plan.lba_size.to_u64()
+    val first_lba = (plan.byte_start + image_offset) / sector_size
+    var chunk_offset: u64 = 0u64
+    while chunk_offset < chunk_size:
+        var sector: [u8] = []
+        var byte_index: u64 = 0u64
+        while byte_index < sector_size:
+            sector.push(chunk[chunk_offset + byte_index])
+            byte_index = byte_index + 1u64
+        val wrote = dev.write_sector(first_lba + chunk_offset / sector_size, sector)
+        if wrote.is_err() or not wrote.unwrap():
+            return Err("storage-image-sector-write")
+        chunk_offset = chunk_offset + sector_size
+
+    Ok(image_offset + chunk_size)
+
+fn storage_image_flush(
+    dev: BlockDevice,
+    plan: StorageImagePlan,
+    completed_bytes: u64
+) -> Result<bool, text>:
+    if not _storage_image_device_matches(dev, plan):
+        return Err("storage-image-device-changed")
+    if completed_bytes != plan.image_size:
+        return Err("storage-image-incomplete")
+    val flushed = dev.flush()
+    if flushed.is_err() or not flushed.unwrap():
+        return Err("storage-image-flush")
+    Ok(true)
+
+fn storage_sha256_hex_from_digest(digest: [u8]) -> text:
+    var out = ""
+    var index: i64 = 0
+    while index < digest.len():
+        val value = digest[index] as i64
+        out = (out + _storage_hex_digit((value >> 4) & 15) +
+            _storage_hex_digit(value & 15))
+        index = index + 1
+    out
+
+fn storage_image_verify_readback(
+    dev: BlockDevice,
+    plan: StorageImagePlan
+) -> Result<text, text>:
+    if not _storage_image_device_matches(dev, plan):
+        return Err("storage-image-device-changed")
+    val sector_size = plan.lba_size.to_u64()
+    val first_lba = plan.byte_start / sector_size
+    val sector_count = plan.image_size / sector_size
+    val stream = sha256_stream_new()
+    var sector_index: u64 = 0u64
+    while sector_index < sector_count:
+        val readback = dev.read_sector(first_lba + sector_index)
+        if readback.is_err() or readback.unwrap().len().to_u64() != sector_size:
+            return Err("storage-image-readback")
+        val updated = sha256_stream_update(stream, readback.unwrap())
+        if updated.is_err():
+            return Err(updated.unwrap_err())
+        sector_index = sector_index + 1u64
+    val digest = sha256_stream_finish(stream)
+    if digest.is_err():
+        return Err(digest.unwrap_err())
+    val observed = storage_sha256_hex_from_digest(digest.unwrap())
+    if observed != plan.expected_sha256:
+        return Err("storage-image-readback-digest-mismatch")
+    Ok("sha256=" + observed + " bytes=" + plan.image_size.to_text() +
+        " flush=pass fresh_readback=pass")
+
+export StorageImagePlan
+export storage_sha256_hex, storage_image_plan
+export storage_image_write_chunk, storage_image_flush
+export storage_image_verify_readback

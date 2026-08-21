@@ -30,7 +30,9 @@ valid plan.
 
 The request binds one exact model/serial/transport/capacity and byte range to
 the image digest. Root, swap, mounted, held, identity-mismatched, unconfirmed,
-or out-of-bounds targets fail. Hardware must flush and verify exact readback.
+or out-of-bounds targets fail. The executable scenario then writes two ordered,
+independently hashed sectors through the common block-image owner, flushes, and
+requires the exact 1024-byte SHA-256 from a fresh device view.
 
 ## Load and verify RAM with the free monitor
 
@@ -53,5 +55,5 @@ physical evidence to PASS.
 | REQ-006 | partial/final mailbox admission | DCI mailbox write receipt pending |
 | REQ-007 | reviewed three-segment physical ELF plan | RAM boot receipt pending |
 | REQ-009 | exact identity, busy-state, bounds policy | device enumeration pending |
-| REQ-010 | hash-bound challenge admission | flush/readback receipt pending |
+| REQ-010 | hash-bound challenge plus ordered write/flush/full readback | physical flush/readback receipt pending |
 | REQ-013 | bounded `M` plus exact `m` readback under OVMF | physical CN16 receipt pending |

@@ -859,6 +859,22 @@ convergence and DDC remain explicit release/trust targets. Canonical guide:
 - Storage proof is GPT + bounded FAT32 + flush + fresh-adapter byte readback +
   `ls /nvme`; emulator interoperability additionally requires host `mdir` and
   `mtype` on a dedicated scratch image. Never point this proof at host NVMe.
+- Full raw images use a separate session: plan exact range/hash, confirm the
+  complete live-identity challenge, transfer ordered <=1 MiB RSP-staged chunks,
+  verify each chunk before write, then require NVMe Flush and streaming
+  whole-image SHA-256 over exact fresh-adapter readback. The common `BlockDevice` owner
+  is portable; UP2 owns PCI/Identify/admission/staging.
+- Keep the confirmation line bounded by hashing length-delimited canonical
+  identity fields; print full model/serial/transport/capacity separately. Keep
+  long-lived native plan/session state in module-owned scalar/text fields, not
+  aggregates stored through module-global optionals.
+- UP2 RSP UART `M` packets must be parsed with scalar state directly into the
+  bounded staging window. Materializing/slicing repeated 2 KiB text frames can
+  exhaust the 16 MiB monotonic freestanding heap. Require immediate byte
+  readback and checksum ACK; a bad checksum never authorizes storage commit.
+- A correct RSP RAM receipt does not prove the target hashing path. If staged
+  bytes pass `m` readback but chunk SHA fails, retain `media_writes=0`, stop at
+  the retry cap, and investigate the freestanding hash/array ABI separately.
 
 ## UP Squared free debug transport qualification
 
