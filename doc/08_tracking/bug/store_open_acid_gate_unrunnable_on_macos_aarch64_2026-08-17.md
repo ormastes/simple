@@ -231,3 +231,115 @@ be a third, separate Darwin gap.
 The AC-5/AC-6 native-ACID row remains **blocked**, but the blocker is now
 located three stages further in and is a concrete, named compiler defect
 rather than an environment condition.
+
+---
+
+## 2026-08-21 (later): STAGE 1 NOW PASSES — first native ACID evidence on macOS
+
+### Retraction first
+
+The section above proposed archive ORDERING as the cause of the undefined
+`_rt_alloc` / `_rt_pool_safepoint`, and suggested "place libsimple_runtime.a
+after all objects". **That diagnosis was wrong and the suggested fix would have
+changed correct code.** Reading `compiler/src/linker/native.rs`: object files
+are appended at :311-313 and `-l` libraries at :339-352 — objects already
+precede archives, and the code carries a comment explaining exactly that
+left-to-right requirement. The clue that should have ruled ordering out at the
+time: only TWO symbols were undefined. A completely unpulled archive would have
+left nearly every `rt_*` reference unresolved.
+
+### Actual cause of the two undefined symbols: a stale archive symbol index
+
+`nm` scans archive MEMBERS directly; `ld` resolves through the archive's
+`__.SYMDEF` index. The two disagreed — `nm -gUA` showed
+`T _rt_alloc` in `runtime_memory.o` and `T _rt_pool_safepoint` in
+`runtime_pool.o`, while ld64 called both undefined. Running plain `ranlib` on a
+copy of the archive rebuilt the index and **both errors disappeared**:
+
+```
+cp libsimple_runtime.a /tmp/rp_fix/ && ranlib /tmp/rp_fix/libsimple_runtime.a
+```
+
+Anyone debugging a "defined but undefined" link error in this repo should
+suspect the index before the link line. `SIMPLE_RUNTIME_PATH` must point at the
+directory CONTAINING the archive (cargo puts it in `target/<profile>/deps`, not
+`target/<profile>` — pointing at the latter yields
+`ld: library 'simple_runtime' not found`).
+
+### Then: four missing Darwin framework groups, found by iteration
+
+Each fix revealed the next layer. In order: ObjC runtime (`-lobjc`,
+`Foundation`) <- `objc2`; `Security`/`CoreFoundation`/`SystemConfiguration`
+<- `rustls_platform_verifier` (`_SecTrustSetOCSPResponse`,
+`_SecTrustSetVerifyDate`); `AppKit`; then `Metal`/`MetalKit`/`QuartzCore`/
+`CoreGraphics`/`IOKit` <- the Metal graphics runtime (`_rt_metal_is_available`,
+`rt_metal_device_memory`). None of these is supplied by the native link path on
+macOS. They were injected for this run through `SIMPLE_LINK_OBJECTS`, which
+appends its colon-separated entries as raw linker args (`native.rs:316-323`) —
+a workaround, not a fix: there is no env hook for arbitrary link flags
+(`SIMPLE_LINKER`, `SIMPLE_LINKER_DEBUG`, `SIMPLE_LINKER_FLAVOR`,
+`SIMPLE_LINKER_THREADS`, `SIMPLE_LINK_OBJECTS` are the complete set).
+
+### RESULT — stage 1 ACID PASSES natively
+
+Full working configuration on macOS aarch64:
+
+```sh
+SIMPLE_LINKER=ld \
+SIMPLE_RUNTIME_PATH=<dir containing a ranlib'd libsimple_runtime.a> \
+SIMPLE_LINK_OBJECTS="-lobjc:-framework:Foundation:-framework:Security:-framework:CoreFoundation:-framework:SystemConfiguration:-framework:AppKit:-framework:Metal:-framework:MetalKit:-framework:QuartzCore:-framework:CoreGraphics:-framework:IOKit" \
+sh scripts/check/check-store-open-acid.shs
+```
+
+A 4,919,176-byte native binary is produced and RUNS, against real sqlite:
+
+```
+D before=[1]
+D begin=true err=[not an error]
+D insert=true mid=[2]
+D rollback=true err=[not an error]
+D after=[1] eq=true eq_lit=false len=1/1
+acidD=true
+```
+
+Rollback removed the inserted row (2 -> 1). **This is the first native ACID
+evidence for enterprise_store on macOS aarch64**, and it never reached this
+stage before today. The recorded `rt_sqlite_open` blocker did not appear at any
+point — it was never the frontier on this host.
+
+### New frontier: stage 2 is the W12-C compilability rejection
+
+The gate's stage 2 (the store module itself, natively) now fails with a clean,
+precise diagnosis rather than a link error:
+
+```
+FAIL — native store link stage: error: semantic: cannot compile to standalone
+native binary: 13 function(s) contain constructs that require the interpreter:
+  - str_char_at, str_ends_with, str_index_of, str_last_index_of,
+    str_replace_all, str_reverse, str_safe_slice, str_slice, str_starts_with,
+    str_to_lower, str_to_upper, str_trim_left, str_trim_right   [all CollectionOps]
+```
+
+All 13 are `[CollectionOps]` — the `Expr::Slice -> CollectionOps` rejection at
+`compiler_rust/compiler/src/compilability.rs:529` that lane W12-C already
+analysed and deliberately declined to relax. Note W12-C's own finding makes
+this the tractable half: `rt_slice` IS threaded into the standalone
+symbol-emission path at four sites in `codegen/common_backend.rs`, whereas
+`rt_array_repeat` (the :879 `ArrayRepeat` rejection) appears in exactly one
+file and would link-fail. These 13 need Slice only, not ArrayRepeat.
+
+### Corrected resume sequence (supersedes both earlier ones)
+
+1. Relax `compilability.rs:529` (`Expr::Slice`) with tests, per W12-C's own
+   sequencing — `rt_slice` is already wired, so this is the half that can land
+   without the `rt_array_repeat` allowlist work.
+2. Fix the Darwin link path properly instead of via `SIMPLE_LINK_OBJECTS`:
+   auto-detect should not pick ELF-mode lld on macOS (`native.rs:48-63` tries
+   `Lld` before `Ld`), the `linkers` help text should stop calling macOS `ld`
+   "GNU ld", and the Apple frameworks above belong in the macOS link defaults.
+3. Ensure the runtime archive is `ranlib`'d (or find why cargo's index is
+   incomplete for those members).
+
+AC-5/AC-6 status: the ACID PROPERTY is now natively demonstrated (stage 1,
+above). The store-module-native stage remains blocked, on a named compiler
+rejection with a known tractable fix.
