@@ -190,3 +190,9 @@ implementation-blocked-by-bootstrap-authority
   Surfaces now retain aligned callable name/value arrays and registration uses
   their scalar index, with a source contract and tracked resume command. No
   fourth bootstrap was launched after the three-cycle cap.
+- blocker-correction: The aligned aggregate array caused a fresh Phase-2 SEGV
+  after 11 released surfaces because it duplicated nested callable ownership.
+  That representation is removed. `ModuleSurfaceCallable` is now a single
+  promoted class owner in the existing dictionary, so staged lookup transports
+  a reference rather than a large value aggregate. Verification cycle 2 is
+  pending.

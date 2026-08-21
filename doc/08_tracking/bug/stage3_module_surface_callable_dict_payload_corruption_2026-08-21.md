@@ -22,12 +22,16 @@ name and the wrong signature dependencies.
 
 ## Fix
 
-`ModuleSurface` now constructs aligned `callable_names` and `callable_values`
-arrays in one pass before promotion. Import registration finds the scalar name
-index and reads the matching array payload; it fails closed if the projections
-are misaligned. The retained dictionary remains for membership and other
-same-stage consumers. A bootstrap source contract prevents restoring the two
-cross-stage dictionary payload reads.
+The first attempted fix constructed aligned `callable_names` and
+`callable_values` arrays. A fresh Stage 3 then segfaulted during Phase-2 surface
+parsing after 11 releases: duplicating the same nested value aggregate in a
+dictionary and array was not a safe promotion graph.
+
+`ModuleSurfaceCallable` is now a reference-semantic class. The dictionary
+therefore transports one promoted owner pointer instead of returning or
+duplicating the large nested struct value; names and membership remain
+unchanged. No callable is retained in a second aggregate array. A bootstrap
+source contract requires the class owner and forbids the rejected value array.
 
 ## Resume
 
