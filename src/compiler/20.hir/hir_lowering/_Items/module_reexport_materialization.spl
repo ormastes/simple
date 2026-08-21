@@ -142,6 +142,65 @@ impl HirLowering:
                         facade_index, exp_source, depth + 1)
                     if alias_source.found:
                         return alias_source
+                else:
+                    # BARE `export Name` -- no `use`, no `from`, no alias.
+                    # module_surface_registry_index.spl:288-291 pushes target
+                    # index -1 and target name "" for EVERY non-glob export
+                    # item, so this form records no source module at all. The
+                    # two attempts above cover only a facade that DECLARES the
+                    # name itself and an aliased `export src:local`, which
+                    # leaves the bare form resolving to nothing -- and the
+                    # silent not-found resurfaced much later as a hard
+                    # `unresolved type: {wanted}` (hir_lowering/types.spl)
+                    # attributed to whichever module was being lowered, an
+                    # innocent importer that never names the type.
+                    #
+                    # Stage 1 hit this as `unresolved type: CodegenTarget`
+                    # against src/compiler/80.driver/driver_public_api.spl (a
+                    # three-line `pub use` facade whose whole import closure has
+                    # ZERO occurrences of the name): the route runs through
+                    # src/compiler/70.backend/backend/__init__.spl:7, which
+                    # spells the re-export as
+                    # `export BackendKind, CodegenTarget, OptimizationLevel,
+                    # BuildMode`. The same type re-exported as `export use
+                    # ...backend_types.{CodegenTarget}` always resolved, which
+                    # is why the defect looked type-specific rather than
+                    # SHAPE-specific.
+                    #
+                    # Resolve it the only way the form can mean: the package
+                    # sibling that physically DECLARES the name. Package
+                    # siblings already see each other without an import edge
+                    # (`resolve_package_sibling_symbols`), so this adds no new
+                    # visibility -- it only follows a route the surface builder
+                    # could not record. AMBIGUITY STAYS UNRESOLVED: if two
+                    # siblings declare the same short name, return not-found
+                    # rather than guess, matching the payload path's stance on
+                    # package inference (`resolve_materialized_enum_payload_*`).
+                    val facade_package = self.cached_surface_package_name(facade_mod)
+                    if facade_package != "":
+                        val sibling_names = self.package_sibling_registry_names(facade_package)
+                        var sibling_match_index = -1
+                        var sibling_match_count = 0
+                        var sibling_idx = 0
+                        while sibling_idx < sibling_names.len():
+                            val sibling_index = hir_module_surface_index(
+                                self.module_surfaces, sibling_names[sibling_idx])
+                            if sibling_index >= 0 and
+                               sibling_index < self.module_surfaces.surfaces.len() and
+                               sibling_index != facade_index:
+                                val sibling = self.module_surfaces.surfaces[sibling_index]
+                                if hir_module_declares_item(sibling, wanted):
+                                    if sibling_match_index != sibling_index:
+                                        sibling_match_count = sibling_match_count + 1
+                                        sibling_match_index = sibling_index
+                            sibling_idx = sibling_idx + 1
+                        if sibling_match_count == 1 and sibling_match_index >= 0:
+                            val terminal = self.module_surfaces.surfaces[sibling_match_index]
+                            return HirReexportSource(
+                                found: true,
+                                module_index: sibling_match_index,
+                                module_name: terminal.preferred_registry_name,
+                                item_name: wanted)
             route_index = route_index + 1
 
         HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
