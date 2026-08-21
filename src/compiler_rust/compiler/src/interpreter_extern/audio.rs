@@ -147,13 +147,16 @@ fn as_text(name: &str, args: &[Value], i: usize) -> Result<CString, CompileError
     }
 }
 
-/// Read a C string return value into an owned `Value::Str`.
-fn c_str_to_value(ptr: *const c_char) -> Value {
+/// The owned audio provider always returns a static backend-name string.
+/// NULL is therefore a provider-contract violation, not empty text.
+fn c_str_to_value(ptr: *const c_char, symbol: &str) -> Result<Value, CompileError> {
     if ptr.is_null() {
-        return Value::Str(std::sync::Arc::new(String::new()));
+        return Err(CompileError::runtime(format!(
+            "{symbol}: foreign text contract returned null"
+        )));
     }
     let owned = unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned();
-    Value::Str(std::sync::Arc::new(owned))
+    Ok(Value::Str(std::sync::Arc::new(owned)))
 }
 
 /// Dispatch a `rt_audio_*` call. Returns the family-scoped refusal for any
@@ -251,7 +254,7 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
         }
         "rt_audio_backend_name" => {
             expect_arity(name, args, 0)?;
-            Ok(c_str_to_value(unsafe { rt_audio_backend_name() }))
+            c_str_to_value(unsafe { rt_audio_backend_name() }, name)
         }
         "rt_audio_backend_is_real" => {
             expect_arity(name, args, 0)?;
@@ -364,6 +367,12 @@ mod tests {
     #[test]
     fn backend_name_returns_a_string_not_an_error() {
         assert!(matches!(dispatch("rt_audio_backend_name", &[]).unwrap(), Value::Str(_)));
+    }
+
+    #[test]
+    fn null_backend_name_is_a_contract_error() {
+        let result = c_str_to_value(std::ptr::null(), "rt_audio_backend_name");
+        assert!(result.is_err(), "null foreign text must never become empty text");
     }
 
     #[test]

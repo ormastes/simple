@@ -385,6 +385,12 @@ including both descriptor sabotage cases and the existing argument/arity
 validation. The success path keeps the prior length/data/copy sequence and adds
 no admission work or dynamic lookup.
 
+The Rust audio interpreter now enforces the owned C provider's non-null backend
+name contract. NULL becomes a typed contract error rather than empty text; all
+five focused audio registration, arity, backend, and sabotage tests pass. The
+change adds only the existing-required null comparison on the backend-name
+query and does not touch audio processing or scalar hot paths.
+
 These are migration inputs, not 14,391 independent implementations. The audit
 now hashes normalized declaration shapes and groups them by symbol. The next
 tooling step replaces the text-derived shape with the resolved HIR ABI hash,
