@@ -56,7 +56,7 @@ use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_wa
 use compiler.core.parser.{parser_parse_type}
 
 # Forward declarations for mutual recursion
-use compiler.frontend.core.parser_stmts.{parse_block, parse_match_stmt, parse_if_expr}
+use compiler.frontend.core.parser_stmts.{parse_block, parse_if_expr}
 use compiler.frontend.core.parser_expr.{parse_expr, parse_not, parse_unary}
 
 fn parse_optional_rationale_args() -> text:
@@ -211,81 +211,4 @@ fn parse_legacy_parenthesized_asm() -> i64:
         if par_kind_get() == 160:
             parser_advance()
     parser_expect(141)
-    expr_asm_operands(asm_lines.join("\n"), values, names, kinds, locations, outputs, clobbers, 0)
-
-fn parse_legacy_indented_asm() -> i64:
-    # The legacy colon form uses the same operand grammar as the parenthesized
-    # form.  Previously this loop accepted strings only, so the canonical
-    # `in(reg) value` line in RISC-V cache operations failed after its first
-    # instruction.  Keep parsing here rather than discarding the remainder of
-    # each line: malformed directives must still diagnose and recover.
-    parser_skip_newlines()
-    if par_kind_get() != TOK_INDENT:
-        parser_error("expected indented asm block after 'asm:'")
-        return expr_asm("", 0)
-    parser_advance()
-
-    var asm_lines: [text] = []
-    var values: [i64] = []
-    var names: [text] = []
-    var kinds: [text] = []
-    var locations: [text] = []
-    var clobbers: [text] = []
-    var outputs: [i64] = []
-    while true:
-        parser_skip_newlines()
-        if par_kind_get() == TOK_DEDENT:
-            parser_advance()
-            break
-        if par_kind_get() == TOK_EOF:
-            break
-        if par_kind_get() == TOK_STRING_LIT:
-            asm_lines.push(par_text_get())
-            parser_advance()
-            continue
-
-        var name = ""
-        var directive = par_text_get()
-        if directive != "in" and directive != "out" and directive != "inout" and directive != "lateout" and directive != "clobber" and directive != "clobber_abi" and directive != "options":
-            name = directive
-            parser_advance()
-            if par_kind_get() != TOK_ASSIGN:
-                parser_error("expected string literal or asm constraint in asm block")
-                while par_kind_get() != TOK_NEWLINE and par_kind_get() != TOK_DEDENT and par_kind_get() != TOK_EOF:
-                    parser_advance()
-                continue
-            parser_advance()
-            directive = par_text_get()
-        if directive == "clobber" or directive == "clobber_abi" or directive == "options":
-            parser_advance()
-            parser_expect(TOK_LPAREN)
-            var directive_depth = 1
-            var directive_parts: [text] = []
-            while directive_depth > 0 and par_kind_get() != TOK_EOF:
-                if par_kind_get() == TOK_LPAREN: directive_depth = directive_depth + 1
-                elif par_kind_get() == TOK_RPAREN: directive_depth = directive_depth - 1
-                if directive_depth > 0: directive_parts.push(par_text_get())
-                parser_advance()
-            clobbers.push(directive + ":" + directive_parts.join(""))
-            continue
-        if directive != "in" and directive != "out" and directive != "inout" and directive != "lateout":
-            parser_error("expected in/out/inout/lateout inline-asm operand")
-            while par_kind_get() != TOK_NEWLINE and par_kind_get() != TOK_DEDENT and par_kind_get() != TOK_EOF:
-                parser_advance()
-            continue
-        parser_advance()
-        parser_expect(TOK_LPAREN)
-        val location = par_text_get()
-        parser_advance()
-        parser_expect(TOK_RPAREN)
-        val value = parse_expr()
-        var output = -1
-        if directive == "inout" and par_kind_get() == 168:
-            parser_advance()
-            output = parse_expr()
-        values.push(value)
-        names.push(name)
-        kinds.push(directive)
-        locations.push(location)
-        outputs.push(output)
     expr_asm_operands(asm_lines.join("\n"), values, names, kinds, locations, outputs, clobbers, 0)

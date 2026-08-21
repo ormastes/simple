@@ -6,7 +6,8 @@
 
 use app.compiler_schema.grammar_extract.{
     ProductionRow, GrammarModel, TagIndex,
-    production_id, extract_productions, build_grammar_model,
+    production_id, extract_productions, extract_rows, collect_call_sites,
+    build_grammar_model, grammar_reserved_tags, GRAMMAR_ENTRY_POINTS,
     render_grammar, render_index_grammar, grammar_report, grammar_file_name
 }
 use std.io_runtime.{cwd}
@@ -71,7 +72,7 @@ describe "compiler_schema grammar extractor":
 describe "compiler_schema grammar cross-check":
     it "flags a flat-AST tag no production stamps as E-GRAMMAR-ORPHAN-TAG":
         val model = GrammarModel(_rows(), ["EXPR_WHILE", "STMT_RETURN", "EXPR_NEVER_BUILT"],
-                                 ["EXPR_NEVER_BUILT"], [])
+                                 ["EXPR_NEVER_BUILT"], [], [], [])
         val body = render_grammar(model)
         assert_contains(body, "E-GRAMMAR-ORPHAN-TAG")
         assert_contains(body, "tag: EXPR_NEVER_BUILT")
@@ -79,29 +80,87 @@ describe "compiler_schema grammar cross-check":
 
     it "flags an unreachable production as E-GRAMMAR-DEAD-PRODUCTION":
         val model = GrammarModel(_rows(), ["EXPR_WHILE", "STMT_RETURN"], [],
-                                 ["spl:production@parser_fixture.spl:parse_orphaned"])
+                                 ["spl:production@parser_fixture.spl:parse_orphaned"], [], [])
         val body = render_grammar(model)
         assert_contains(body, "E-GRAMMAR-DEAD-PRODUCTION")
         assert_contains(body, "parse_orphaned")
         assert_contains(body, "dead_production_count: 1")
 
     it "emits no issue rows when both cross-checks are clean":
-        val model = GrammarModel(_rows(), ["EXPR_WHILE", "STMT_RETURN"], [], [])
+        val model = GrammarModel(_rows(), ["EXPR_WHILE", "STMT_RETURN"], [], [], [], [])
         val body = render_grammar(model)
         expect(body.find("E-GRAMMAR-")).to_be_less_than(0)
 
     it "renders the same body twice — the registry is deterministic":
-        val model = GrammarModel(_rows(), ["EXPR_WHILE"], [], [])
+        val model = GrammarModel(_rows(), ["EXPR_WHILE"], [], [], [], [])
         expect(render_grammar(model)).to_equal(render_grammar(model))
 
     it "names the grammar registry file after its owner":
         expect(grammar_file_name()).to_equal("compiler.frontend.Grammar.sdn")
+
+# A speculative production, a non-production helper that calls a production,
+# and a self-recursive production (the self-call must not count as a caller).
+val CALLERS_FIXTURE = "use compiler.core.ast.{{parse_imported_only}}\n\nfn try_parse_contract(p: i64) -> i64:\n    stmt_alloc(STMT_RETURN, 0)\n\nfn helper_not_a_production(p: i64) -> i64:\n    parse_leaf(p)  # comment mentioning parse_in_comment\n\nfn parse_self_rec(p: i64) -> i64:\n    parse_self_rec(p)\n"
+
+# A desugar-style module: one fn that stamps a tag via a constructor, one that
+# does not. Only the stamping fn becomes a row.
+val DESUGAR_FIXTURE = "fn replace_placeholders(eid: i64) -> i64:\n    expr_while(eid, 0)\n\nfn untouched(eid: i64) -> i64:\n    eid\n"
+
+describe "compiler_schema grammar extractor — reachability evidence":
+    it "recognises try_parse_* as a production":
+        val rows = extract_productions("/repo", "/repo/callers.spl", CALLERS_FIXTURE, _fixture_index())
+        expect(rows.len()).to_equal(2)
+        expect(rows[0].name).to_equal("try_parse_contract")
+        expect(rows[0].kind).to_equal("parser")
+        expect(rows[0].produces[0]).to_equal("STMT_RETURN")
+
+    it "collects call sites from any fn body, minus use lines, comments and self-recursion":
+        val calls = collect_call_sites(CALLERS_FIXTURE)
+        expect(calls.len()).to_equal(1)
+        expect(calls[0]).to_equal("parse_leaf")
+
+    it "records an auxiliary-root fn only when it stamps a tag, as kind desugar":
+        val rows = extract_rows("/repo", "/repo/desugar.spl", DESUGAR_FIXTURE, _fixture_index(), "desugar")
+        expect(rows.len()).to_equal(1)
+        expect(rows[0].name).to_equal("replace_placeholders")
+        expect(rows[0].kind).to_equal("desugar")
+        expect(rows[0].produces[0]).to_equal("EXPR_WHILE")
+
+    it "renders reserved tags with their reason and never as an issue":
+        val model = GrammarModel(_rows(), ["EXPR_WHILE", "STMT_RETURN", "STMT_ASSIGN"], [], [],
+                                 ["STMT_ASSIGN: parser emits EXPR_ASSIGN"], [])
+        val body = render_grammar(model)
+        assert_contains(body, "reserved:\n  tag: STMT_ASSIGN\n  reason: parser emits EXPR_ASSIGN")
+        assert_contains(body, "reserved_tag_count: 1")
+        expect(body.find("E-GRAMMAR-")).to_be_less_than(0)
+
+    it "renders a stale reservation or entry point as a fatal issue row":
+        val model = GrammarModel(_rows(), ["EXPR_WHILE", "STMT_RETURN"], [], [], [],
+                                 ["E-GRAMMAR-STALE-RESERVED STMT_ASSIGN: now stamped by a production"])
+        val body = render_grammar(model)
+        assert_contains(body, "code: E-GRAMMAR-STALE-RESERVED")
+        assert_contains(body, "subject: STMT_ASSIGN")
+        assert_contains(body, "stale_count: 1")
+        assert_contains(grammar_report(model), "1 stale row(s)")
+
+    it "every reserved tag names a reason, and every entry point is a parse_ name":
+        val reserved = grammar_reserved_tags()
+        for tag in reserved.keys():
+            expect(reserved[tag].len()).to_be_greater_than(10)
+        for e in GRAMMAR_ENTRY_POINTS:
+            expect(e.starts_with("parse_")).to_equal(true)
 
 describe "compiler_schema grammar over the real frontend tree":
     it "finds parser productions and flat-AST tags in the live compiler":
         val model = build_grammar_model(cwd())
         expect(model.productions.len()).to_be_greater_than(50)
         expect(model.tags.len()).to_be_greater_than(50)
+
+    it "has a clean cross-check over the live compiler — no orphan, dead or stale rows":
+        val model = build_grammar_model(cwd())
+        expect(model.orphan_tags.len()).to_equal(0)
+        expect(model.dead_productions.len()).to_equal(0)
+        expect(model.stale.len()).to_equal(0)
 
     it "reports the cross-check counts in the index block":
         val model = build_grammar_model(cwd())

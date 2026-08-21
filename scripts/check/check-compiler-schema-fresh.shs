@@ -7,9 +7,11 @@
 # missing enum source (nothing to extract) is an ERROR, never a pass.
 #
 # Verdict is always the LAST line of stdout:
-#   PASS — <n> variant(s) across <k> enum(s), <p> production(s) (<o> orphan
-#          tag(s), <d> dead production(s)), registry fresh              exit 0
+#   PASS — <n> variant(s) across <k> enum(s), <p> production(s), 0 orphan
+#          tag(s), 0 dead production(s), 0 stale row(s), registry fresh  exit 0
 #   FAIL — stale: <files>                                          exit 1
+#   FAIL — grammar cross-check: <o> orphan tag(s), <d> dead
+#          production(s), <s> stale row(s): <names>                 exit 1
 #   ERROR — nothing was checked (<reason>)                         exit 2
 #
 # --root <dir> checks an alternate tree (both the enum SOURCES and the
@@ -19,10 +21,13 @@
 # The GRAMMAR axis (hardening plan §11.3, lane C1) is part of the same
 # registry: `generate` emits spec/compiler_schema/registry/
 # compiler.frontend.Grammar.sdn alongside the enum registries, so a stale
-# grammar registry is a stale registry. The cross-check counts
-# (E-GRAMMAR-ORPHAN-TAG / E-GRAMMAR-DEAD-PRODUCTION rows) are reported in the
-# verdict rather than being fatal: both populations are non-zero today and
-# freezing them at zero would just make the gate unlandable. What IS fatal is
+# grammar registry is a stale registry. The cross-check is FATAL (since
+# 2026-08-21, when the 19-orphan / 11-dead backlog was driven to zero): any
+# E-GRAMMAR-ORPHAN-TAG, E-GRAMMAR-DEAD-PRODUCTION, E-GRAMMAR-STALE-RESERVED or
+# E-GRAMMAR-STALE-ENTRY row is a FAIL naming the offenders. A reserved tag
+# (parser never stamps it, downstream still matches on it) is listed with a
+# reason in the extractor, never silently excused: the moment it is stamped or
+# its const disappears the reservation itself goes stale and FAILs. Also fatal:
 # a grammar registry that disagrees with the tree, or a run that extracted
 # ZERO productions (missing parser sources) — absence of evidence is not a
 # pass.
@@ -83,6 +88,8 @@ scan() {
     _prod=$(grep -o 'grammar: [0-9]* production' "$_out.log" | head -1 | awk '{print $2}')
     _orph=$(grep -o '[0-9]* orphan tag' "$_out.log" | head -1 | awk '{print $1}')
     _dead=$(grep -o '[0-9]* dead production' "$_out.log" | head -1 | awk '{print $1}')
+    _stl=$(grep -o '[0-9]* stale row' "$_out.log" | head -1 | awk '{print $1}')
+    [ -n "$_stl" ] || _stl=0
     if [ -z "$_prod" ]; then
         rm -rf "$_tmp"
         verdict_error "generator emitted no grammar report"
@@ -104,6 +111,10 @@ scan() {
             _stale="$_stale $_name(orphan)"
         fi
     done
+    _offenders=""
+    if [ "$_orph" -gt 0 ] || [ "$_dead" -gt 0 ] || [ "$_stl" -gt 0 ]; then
+        _offenders=$(grep -E '^  (tag|production|subject): ' "$_out/compiler.frontend.Grammar.sdn" | grep -v '^  tag: .*: ' | awk '{print $2}' | sort -u | tr '\n' ' ')
+    fi
     rm -rf "$_tmp"
     # Receipts are minted only for a scan of the REAL repo root. The selftest
     # runs this same function against fixture repos; a receipt from a fixture
@@ -114,7 +125,13 @@ scan() {
         [ "$_root" = "$REPO_ROOT" ] && { emit_receipt "check-compiler-schema-fresh" "$_verdict" || true; }
         exit 1
     fi
-    _verdict="PASS — $_count variant(s) across $_enums enum(s), $_prod production(s) ($_orph orphan tag(s), $_dead dead production(s)), registry fresh"
+    if [ -n "$_offenders" ]; then
+        _verdict="FAIL — grammar cross-check: $_orph orphan tag(s), $_dead dead production(s), $_stl stale row(s): $_offenders"
+        echo "$_verdict"
+        [ "$_root" = "$REPO_ROOT" ] && { emit_receipt "check-compiler-schema-fresh" "$_verdict" || true; }
+        exit 1
+    fi
+    _verdict="PASS — $_count variant(s) across $_enums enum(s), $_prod production(s), $_orph orphan tag(s), $_dead dead production(s), $_stl stale row(s), registry fresh"
     echo "$_verdict"
     [ "$_root" = "$REPO_ROOT" ] && { emit_receipt "check-compiler-schema-fresh" "$_verdict" || true; }
     exit 0
@@ -126,6 +143,7 @@ selftest() {
     mkdir -p "$_fix"
     # Fixture repo: the real generator sources + the real compiler enum sources.
     ( cd "$REPO_ROOT" && tar cf - src/app/compiler_schema src/compiler/10.frontend/core \
+        src/compiler/10.frontend/desugar \
         src/compiler/10.frontend/ast.spl \
         src/compiler/10.frontend/parser_types_expr.spl \
         src/compiler/20.hir/hir_definitions.spl src/compiler/20.hir/hir_types.spl \
@@ -173,8 +191,22 @@ selftest() {
     esac
     [ "$_rc" -eq 1 ] || { echo "selftest FAIL: deleted-parser exit $_rc (want 1)"; rm -rf "$_st"; exit 2; }
 
+    # 5. The cross-check is FATAL: a flat-AST tag no production stamps must
+    #    FAIL even when the registry is perfectly fresh. Restore the parser
+    #    source, inject an orphan const, regenerate the fixture's own registry
+    #    so freshness cannot be what fails, then scan.
+    ( cd "$REPO_ROOT" && tar cf - src/compiler/10.frontend/core/parser_stmts.spl ) | ( cd "$_fix" && tar xf - )
+    echo "const EXPR_SELFTEST_ORPHAN = 9901" >> "$_fix/src/compiler/10.frontend/core/_AstExpr/nodes.spl"
+    _fresh=$(regen "$_fix" "$_fix/$REG_DIR") || { echo "selftest FAIL: fixture regen failed"; rm -rf "$_st"; exit 2; }
+    _r=$( scan "$_fix" ); _rc=$?
+    case "$_r" in
+        "FAIL — grammar cross-check: 1 orphan tag(s)"*EXPR_SELFTEST_ORPHAN*) : ;;
+        *) echo "selftest FAIL: orphan tag did not FAIL the cross-check: $_r"; rm -rf "$_st"; exit 2 ;;
+    esac
+    [ "$_rc" -eq 1 ] || { echo "selftest FAIL: orphan-tag exit $_rc (want 1)"; rm -rf "$_st"; exit 2; }
+
     rm -rf "$_st"
-    echo "selftest: 4/4 fixtures OK"
+    echo "selftest: 5/5 fixtures OK"
 }
 
 SCAN_ROOT="$REPO_ROOT"

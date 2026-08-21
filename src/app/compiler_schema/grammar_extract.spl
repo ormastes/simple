@@ -17,7 +17,8 @@
 #     constructors call `decl_alloc(1, ...)` with the tag's numeric VALUE
 #     rather than its name — to the tag whose `const` value matches that
 #     literal, resolved per prefix (DECL/EXPR/STMT).
-#   - `fn parse_x(`                             -> a production
+#   - `fn parse_x(` / `fn try_parse_x(`          -> a production
+#   - any fn under GRAMMAR_AUX_ROOTS that stamps a tag -> a `desugar` row
 # and classifies identifiers inside a production body by prefix. Anything it
 # cannot classify is skipped, never invented.
 
@@ -26,8 +27,35 @@ use std.io_runtime.{read_file_text, file_exists, file_write, dir_create_all, dir
 val GRAMMAR_ROOT = "src/compiler/10.frontend/core"
 val GRAMMAR_OWNER = "compiler.frontend.Grammar"
 
+# Auxiliary roots: trees OUTSIDE core/** whose functions legitimately stamp
+# flat-AST tags (the placeholder-lambda desugar rebuilds interpolated strings).
+# Every fn there that stamps >=1 tag is recorded as a `kind: desugar` row, so
+# a tag only such a pass produces is attributed rather than reported orphan.
+val GRAMMAR_AUX_ROOTS = ["src/compiler/10.frontend/desugar"]
+
+# Productions whose callers live outside the scanned roots (driver, lint,
+# specs): `parse_module_silent` (lint, app/cli) and `_checked` (src/lib, lint).
+# They stamp no tag themselves and nothing in core calls them, yet
+# they are the public parse API. Listed explicitly; an entry that no longer
+# names a production is reported as E-GRAMMAR-STALE-ENTRY, never ignored.
+val GRAMMAR_ENTRY_POINTS = ["parse_module_silent", "parse_module_silent_checked"]
+
+# Tags the parser never stamps but downstream passes still match on (bridge,
+# backend, lints, interpreter, eval specs). Deleting them would touch trees
+# owned elsewhere, so they are RESERVED with a reason. A reserved tag that
+# becomes produced, or whose const disappears, is E-GRAMMAR-STALE-RESERVED.
+fn grammar_reserved_tags() -> {text: text}:
+    var r: {text: text} = {}
+    r["DECL_CLASS"] = "parser emits classes as DECL_STRUCT with is_class; tag matched by 35.semantics/lint and 80.driver/shb"
+    r["EXPR_OPTIONAL_CHAIN"] = "no expr_optional_chain caller in the parser; tag matched by _FlatAstBridge, 70.backend and 35.semantics/lint"
+    r["STMT_ASSIGN"] = "parser emits EXPR_ASSIGN as a statement-expression; tag matched by _FlatAstBridge, 70.backend, lints and eval_spec"
+    r["STMT_COMPOUND_ASSIGN"] = "parser emits EXPR_COMPOUND_ASSIGN as a statement-expression; tag matched by 35.semantics/lint and eval_spec"
+    r
+
 struct ProductionRow:
-    """One `parse_*` production."""
+    """One `parse_*` / `try_parse_*` production (kind `parser`), or one
+    auxiliary-root function that stamps a tag (kind `desugar`)."""
+    kind: text
     path: text
     line: i64
     name: text
@@ -41,6 +69,8 @@ struct GrammarModel:
     tags: [text]
     orphan_tags: [text]
     dead_productions: [text]
+    reserved: [text]
+    stale: [text]
 
 fn production_id(row: ProductionRow) -> text:
     """Stable identity: spl:production@<path>:<name>."""
@@ -177,19 +207,22 @@ struct TagIndex:
     ctor_tag: {text: text}
 
 fn build_tag_index(sources: [text]) -> TagIndex:
+    """Two passes over the sources, because constructors resolve numeric
+    `_alloc(33, ...)` literals against the const table: `_AstExpr/accessors.spl`
+    sorts BEFORE `_AstExpr/nodes.spl`, so a single pass saw `expr_unit` before
+    `const EXPR_UNIT = 33` existed and silently left it unmapped (that is how
+    EXPR_UNIT / EXPR_PASS* were reported orphan, 2026-08-21)."""
     var tags: [text] = []
     var seen: {text: i64} = {}
-    var ctor_tag: {text: text} = {}
     var by_value: {text: text} = {}
+    var bodies: [text] = []
     for path in sources:
         if not file_exists(path):
             continue
-        var current_ctor = ""
-        for raw in read_file_text(path).split("\n"):
-            val stripped = _strip_comment(raw)
-            val trimmed = stripped.trim()
-            if trimmed == "":
-                continue
+        val body = read_file_text(path)
+        bodies.push(body)
+        for raw in body.split("\n"):
+            val trimmed = _strip_comment(raw).trim()
             if trimmed.starts_with("const ") and trimmed.find("=") > 0:
                 val name = _fn_name_of("fn " + trimmed.substring(6, trimmed.len()).trim())
                 if _is_tag_name(name) and seen[name] == nil:
@@ -200,6 +233,17 @@ fn build_tag_index(sources: [text]) -> TagIndex:
                         val vkey = _tag_prefix(name) + ":" + value
                         if by_value[vkey] == nil:
                             by_value[vkey] = name
+    var ctor_tag: {text: text} = {}
+    # ctor -> first OTHER ctor its body calls, for one-hop inheritance
+    # (`expr_interpolated_string_with_text` delegates to a sibling ctor).
+    var ctor_delegate: {text: text} = {}
+    for body in bodies:
+        var current_ctor = ""
+        for raw in body.split("\n"):
+            val trimmed = _strip_comment(raw).trim()
+            if trimmed == "":
+                continue
+            if trimmed.starts_with("const "):
                 continue
             if trimmed.starts_with("fn "):
                 val fname = _fn_name_of(trimmed)
@@ -214,6 +258,8 @@ fn build_tag_index(sources: [text]) -> TagIndex:
                     if _is_tag_name(w):
                         resolved = w
                         break
+                    if _is_ctor_name(w) and w != current_ctor and ctor_delegate[current_ctor] == nil:
+                        ctor_delegate[current_ctor] = w
                 if resolved == "":
                     val ap = trimmed.find("_alloc(")
                     if ap > 0:
@@ -225,6 +271,13 @@ fn build_tag_index(sources: [text]) -> TagIndex:
                 if resolved != "":
                     ctor_tag[current_ctor] = resolved
                     current_ctor = ""
+    for name in ctor_delegate.keys():
+        if ctor_tag[name] == nil:
+            val target = ctor_delegate[name]
+            if target != nil:
+                val inherited = ctor_tag[target]
+                if inherited != nil:
+                    ctor_tag[name] = inherited
     TagIndex(_sort_texts(tags), ctor_tag)
 
 # ===== pass 2: productions =====
@@ -237,8 +290,17 @@ fn _push_unique(items: [text], value: text) -> [text]:
     out.push(value)
     out
 
-fn extract_productions(repo_root: text, path: text, source: text, index: TagIndex) -> [ProductionRow]:
-    """Extract every `fn parse_*` production in one file."""
+fn _is_production_name(name: text) -> bool:
+    """`parse_*` and the speculative `try_parse_*` form (contract clauses are
+    stamped only inside `try_parse_contract_stmt`)."""
+    name.starts_with("parse_") or name.starts_with("try_parse_")
+
+fn _is_fn_start(trimmed: text) -> bool:
+    trimmed.starts_with("fn ") or trimmed.starts_with("me ") or trimmed.starts_with("pub fn ")
+
+fn extract_rows(repo_root: text, path: text, source: text, index: TagIndex, kind: text) -> [ProductionRow]:
+    """Row extraction shared by both kinds. `parser`: every `parse_*` /
+    `try_parse_*` fn. `desugar`: every fn, kept only when it stamps a tag."""
     var rows: [ProductionRow] = []
     val rel = _relative_path(repo_root: repo_root, path: path)
     val lines = source.split("\n")
@@ -263,9 +325,10 @@ fn extract_productions(repo_root: text, path: text, source: text, index: TagInde
             continue
         val indent = _indent_of(stripped)
         if in_fn and indent <= fn_indent:
-            rows.push(ProductionRow(path: rel, line: start_line, name: name, dispatch: _sort_texts(dispatch), produces: _sort_texts(produces), calls: _sort_texts(calls)))
+            if kind == "parser" or produces.len() > 0:
+                rows.push(ProductionRow(kind: kind, path: rel, line: start_line, name: name, dispatch: _sort_texts(dispatch), produces: _sort_texts(produces), calls: _sort_texts(calls)))
             in_fn = false
-        if trimmed.starts_with("fn parse_"):
+        if trimmed.starts_with("fn ") and (kind == "desugar" or _is_production_name(_fn_name_of(trimmed))):
             in_fn = true
             fn_indent = indent
             name = _fn_name_of(trimmed)
@@ -281,45 +344,116 @@ fn extract_productions(repo_root: text, path: text, source: text, index: TagInde
                 dispatch = _push_unique(dispatch, w)
             elif tagset[w] != nil:
                 produces = _push_unique(produces, w)
-            elif w.starts_with("parse_"):
+            elif _is_production_name(w):
                 calls = _push_unique(calls, w)
             else:
                 val mapped = index.ctor_tag[w]
                 if mapped != nil:
                     produces = _push_unique(produces, mapped)
-    if in_fn:
-        rows.push(ProductionRow(path: rel, line: start_line, name: name, dispatch: _sort_texts(dispatch), produces: _sort_texts(produces), calls: _sort_texts(calls)))
+    if in_fn and (kind == "parser" or produces.len() > 0):
+        rows.push(ProductionRow(kind: kind, path: rel, line: start_line, name: name, dispatch: _sort_texts(dispatch), produces: _sort_texts(produces), calls: _sort_texts(calls)))
     rows
 
+fn extract_productions(repo_root: text, path: text, source: text, index: TagIndex) -> [ProductionRow]:
+    """Extract every parser production in one file."""
+    extract_rows(repo_root: repo_root, path: path, source: source, index: index, kind: "parser")
+
+fn collect_call_sites(source: text) -> [text]:
+    """Every production name CALLED anywhere in `source` — from any fn body,
+    not only from productions — minus self-recursion and `use`/`export`
+    lines. A production reached only from a non-`parse_` helper (the
+    interpreter calling `parse_float_text`, `primitive_integer_bit_width_from_name`
+    calling `parse_positive_int_text_digits`) is live, and the old
+    productions-only view mis-reported eight of them dead."""
+    var out: [text] = []
+    var seen: {text: i64} = {}
+    var current_fn = ""
+    for raw in source.split("\n"):
+        val trimmed = _strip_comment(raw).trim()
+        if trimmed == "":
+            continue
+        if trimmed.starts_with("fn "):
+            current_fn = _fn_name_of(trimmed)
+            continue
+        if trimmed.starts_with("use ") or trimmed.starts_with("export "):
+            continue
+        for w in _words(trimmed):
+            if _is_production_name(w) and w != current_fn and seen[w] == nil:
+                seen[w] = 1
+                out.push(w)
+    out
+
+fn aux_sources(repo_root: text) -> [text]:
+    var out: [text] = []
+    for root in GRAMMAR_AUX_ROOTS:
+        val dir = repo_root + "/" + root
+        for p in dir_walk(dir):
+            if p.ends_with(".spl"):
+                out.push(p)
+    _sort_texts(out)
+
 fn build_grammar_model(repo_root: text) -> GrammarModel:
-    """Extract every production and run the tag<->production cross-check."""
+    """Extract every production and run the tag<->production cross-checks."""
     val sources = grammar_sources(repo_root)
     val index = build_tag_index(sources)
     var productions: [ProductionRow] = []
+    var called: {text: i64} = {}
     for path in sources:
         if file_exists(path):
-            for row in extract_productions(repo_root: repo_root, path: path, source: read_file_text(path), index: index):
+            val body = read_file_text(path)
+            for row in extract_productions(repo_root: repo_root, path: path, source: body, index: index):
                 productions.push(row)
-    # Cross-check A: every flat-AST tag must be produced by >=1 production.
+            for c in collect_call_sites(body):
+                called[c] = 1
+    for path in aux_sources(repo_root):
+        if file_exists(path):
+            val body = read_file_text(path)
+            for row in extract_rows(repo_root: repo_root, path: path, source: body, index: index, kind: "desugar"):
+                productions.push(row)
+            for c in collect_call_sites(body):
+                called[c] = 1
     var produced: {text: i64} = {}
-    var called: {text: i64} = {}
+    var declared_names: {text: i64} = {}
     for row in productions:
+        declared_names[row.name] = 1
         for t in row.produces:
             produced[t] = 1
-        for c in row.calls:
-            if c != row.name:
-                called[c] = 1
+    var tagset: {text: i64} = {}
+    for t in index.tags:
+        tagset[t] = 1
+    val reserved_map = grammar_reserved_tags()
+    var reserved: [text] = []
+    var stale: [text] = []
+    for t in _sort_texts(reserved_map.keys()):
+        val reason = reserved_map[t]
+        if reason == nil:
+            continue
+        reserved.push(t + ": " + reason)
+        if tagset[t] == nil:
+            stale.push("E-GRAMMAR-STALE-RESERVED " + t + ": const no longer declared")
+        elif produced[t] != nil:
+            stale.push("E-GRAMMAR-STALE-RESERVED " + t + ": now stamped by a production")
+    var entry: {text: i64} = {}
+    for e in GRAMMAR_ENTRY_POINTS:
+        entry[e] = 1
+        if declared_names[e] == nil:
+            stale.push("E-GRAMMAR-STALE-ENTRY " + e + ": no such production")
+        elif called[e] != nil:
+            stale.push("E-GRAMMAR-STALE-ENTRY " + e + ": called inside the scanned roots")
+    # Cross-check A: every flat-AST tag must be produced by >=1 row, or be
+    # reserved with a reason.
     var orphans: [text] = []
     for t in index.tags:
-        if produced[t] == nil:
+        if produced[t] == nil and reserved_map[t] == nil:
             orphans.push(t)
-    # Cross-check B: a production that stamps no tag AND is called by no other
-    # production in the scanned set is unreachable grammar.
+    # Cross-check B: a parser production that stamps no tag, is called from
+    # nowhere in the scanned roots, and is not a declared entry point is
+    # unreachable grammar.
     var dead: [text] = []
     for row in productions:
-        if row.produces.len() == 0 and called[row.name] == nil:
+        if row.kind == "parser" and row.produces.len() == 0 and called[row.name] == nil and entry[row.name] == nil:
             dead.push(production_id(row))
-    GrammarModel(productions, index.tags, _sort_texts(orphans), _sort_texts(dead))
+    GrammarModel(productions, index.tags, _sort_texts(orphans), _sort_texts(dead), reserved, _sort_texts(stale))
 
 # ===== rendering =====
 
@@ -330,6 +464,14 @@ fn _join_words(items: [text]) -> text:
         return "-"
     items.join(" ")
 
+fn _split_issue(item: text) -> [text]:
+    # "CODE subject: detail" -> [CODE, subject, detail]
+    val sp = item.find(" ")
+    val code = item.substring(0, sp)
+    val rest = item.substring(sp + 1, item.len())
+    val c = rest.find(": ")
+    [code, rest.substring(0, c), rest.substring(c + 2, rest.len())]
+
 fn render_grammar(model: GrammarModel) -> text:
     """SDN body for the grammar registry. Rows sorted by id; no timestamps."""
     var by_id: {text: ProductionRow} = {}
@@ -339,6 +481,9 @@ fn render_grammar(model: GrammarModel) -> text:
         by_id[id] = row
         ids.push(id)
     val sorted = _sort_texts(ids)
+    var entry: {text: i64} = {}
+    for e in GRAMMAR_ENTRY_POINTS:
+        entry[e] = 1
     # Parts builder, joined once: concatenating in the loop is O(n^2) and is
     # denied by lint COLL006.
     var parts: [text] = []
@@ -347,19 +492,30 @@ fn render_grammar(model: GrammarModel) -> text:
     parts.push("# Freshness gate: scripts/check/check-compiler-schema-fresh.shs\n")
     parts.push("owner: " + GRAMMAR_OWNER + "\n")
     parts.push("scanned_root: " + GRAMMAR_ROOT + "\n")
+    parts.push("aux_roots: " + _join_words(GRAMMAR_AUX_ROOTS) + "\n")
     parts.push("production_count: {sorted.len()}\n")
     parts.push("tag_count: {model.tags.len()}\n")
+    parts.push("reserved_tag_count: {model.reserved.len()}\n")
     parts.push("orphan_tag_count: {model.orphan_tags.len()}\n")
     parts.push("dead_production_count: {model.dead_productions.len()}\n")
+    parts.push("stale_count: {model.stale.len()}\n")
     for id in sorted:
         val row = by_id[id]
         if row != nil:
             parts.push("\nproduction:\n")
             parts.push("  id: " + id + "\n")
             parts.push("  name: " + row.name + "\n")
+            parts.push("  kind: " + row.kind + "\n")
+            if entry[row.name] != nil:
+                parts.push("  entry_point: yes\n")
             parts.push("  declared_in: " + row.path + ":{row.line}\n")
             parts.push("  dispatch: " + _join_words(row.dispatch) + "\n")
             parts.push("  produces: " + _join_words(row.produces) + "\n")
+    for item in model.reserved:
+        val c = item.find(": ")
+        parts.push("\nreserved:\n")
+        parts.push("  tag: " + item.substring(0, c) + "\n")
+        parts.push("  reason: " + item.substring(c + 2, item.len()) + "\n")
     for tag in model.orphan_tags:
         parts.push("\nissue:\n")
         parts.push("  code: E-GRAMMAR-ORPHAN-TAG\n")
@@ -369,7 +525,13 @@ fn render_grammar(model: GrammarModel) -> text:
         parts.push("\nissue:\n")
         parts.push("  code: E-GRAMMAR-DEAD-PRODUCTION\n")
         parts.push("  production: " + pid + "\n")
-        parts.push("  detail: stamps no tag and no other production calls it\n")
+        parts.push("  detail: stamps no tag and nothing in the scanned roots calls it\n")
+    for item in model.stale:
+        val f = _split_issue(item)
+        parts.push("\nissue:\n")
+        parts.push("  code: " + f[0] + "\n")
+        parts.push("  subject: " + f[1] + "\n")
+        parts.push("  detail: " + f[2] + "\n")
     parts.join("")
 
 fn render_index_grammar(model: GrammarModel) -> text:
@@ -380,8 +542,10 @@ fn render_index_grammar(model: GrammarModel) -> text:
     out = out + "  domain: grammar\n"
     out = out + "  production_count: {model.productions.len()}\n"
     out = out + "  tag_count: {model.tags.len()}\n"
+    out = out + "  reserved_tag_count: {model.reserved.len()}\n"
     out = out + "  orphan_tag_count: {model.orphan_tags.len()}\n"
     out = out + "  dead_production_count: {model.dead_productions.len()}\n"
+    out = out + "  stale_count: {model.stale.len()}\n"
     out = out + "  registry: " + GRAMMAR_OWNER + ".sdn\n"
     out
 
@@ -390,7 +554,8 @@ fn grammar_file_name() -> text:
 
 fn grammar_report(model: GrammarModel) -> text:
     "grammar: {model.productions.len()} production(s), {model.tags.len()} tag(s), "
-        + "{model.orphan_tags.len()} orphan tag(s), {model.dead_productions.len()} dead production(s)"
+        + "{model.reserved.len()} reserved, {model.orphan_tags.len()} orphan tag(s), "
+        + "{model.dead_productions.len()} dead production(s), {model.stale.len()} stale row(s)"
 
 fn generate_grammar_into(repo_root: text, out_dir: text) -> GrammarModel:
     """Write the grammar registry and append its index block. Returns the model."""
@@ -408,7 +573,7 @@ fn generate_grammar_into(repo_root: text, out_dir: text) -> GrammarModel:
         file_write(index_path, body + render_index_grammar(model))
     model
 
-export ProductionRow, GrammarModel, TagIndex, GRAMMAR_ROOT, GRAMMAR_OWNER
-export production_id, grammar_sources, build_tag_index, extract_productions
+export ProductionRow, GrammarModel, TagIndex, GRAMMAR_ROOT, GRAMMAR_OWNER, GRAMMAR_AUX_ROOTS, GRAMMAR_ENTRY_POINTS
+export production_id, grammar_sources, aux_sources, build_tag_index, extract_productions, extract_rows, collect_call_sites, grammar_reserved_tags
 export build_grammar_model, render_grammar, render_index_grammar
 export grammar_file_name, grammar_report, generate_grammar_into
