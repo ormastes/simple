@@ -616,9 +616,8 @@ void rt_ptr_write_i64(int64_t addr, int64_t offset, int64_t value) {
  * next to the other rt_ptr_write_* primitives.
  * Returns the number of bytes written, 0 for a rejected descriptor. */
 int64_t rt_ptr_write_bytes_raw(int64_t addr, int64_t offset, const uint8_t* src, int64_t len) {
-    if (addr == 0 || src == NULL || offset < 0 || len <= 0) {
-        return 0;
-    }
+    if (len == 0) return 0;
+    if (addr <= 0 || (intptr_t)src <= 0 || offset < 0 || len < 0) abort();
     memcpy((char*)(uintptr_t)addr + offset, src, (size_t)len);
     return len;
 }

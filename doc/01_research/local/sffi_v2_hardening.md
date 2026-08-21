@@ -162,3 +162,12 @@ two-byte stores, rejects invalid descriptors, and is called through a narrow
 runtime-symbol and ABI registries now include it. Coverage advances to 1,094
 of 1,792 runtime symbols, while the missing-contract count remains 698 because
 the previously absent symbol became a newly enumerated covered contract.
+
+The performance-critical `rt_ptr_write_bytes_raw` path is now exact-arity and
+return-origin aware: length zero is the only zero-result success, while a
+nonempty copy with a nonpositive source/destination, negative offset, or
+negative length fails closed. The Rust shim and both C providers use the same
+rule. The accepted hot path remains one bulk `memcpy` plus descriptor branches;
+it does not regress to per-byte boxing or copying. The exact pointer-memory
+source gate now covers both owned bulk-copy declarations as well as scalar
+reads/writes (67 declarations total).

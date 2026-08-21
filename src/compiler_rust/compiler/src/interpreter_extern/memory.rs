@@ -1247,7 +1247,7 @@ pub fn rt_array_data_ptr(args: &[Value]) -> Result<Value, CompileError> {
 /// cross the JIT->interpreter bridge that boxes a `[u8]` argument element by
 /// element. Mirrors `rt_ptr_write_bytes_raw` in src/runtime/runtime_memory.c.
 pub fn rt_ptr_write_bytes_raw(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 4 {
+    if args.len() != 4 {
         return Err(CompileError::runtime(
             "rt_ptr_write_bytes_raw requires 4 arguments (addr, offset, src, len)",
         ));
@@ -1256,8 +1256,13 @@ pub fn rt_ptr_write_bytes_raw(args: &[Value]) -> Result<Value, CompileError> {
     let offset = args[1].as_int()?;
     let src = args[2].as_int()?;
     let len = args[3].as_int()?;
-    if addr == 0 || src == 0 || offset < 0 || len <= 0 {
+    if len == 0 {
         return Ok(Value::Int(0));
+    }
+    if addr <= 0 || src <= 0 || offset < 0 || len < 0 {
+        return Err(CompileError::runtime(
+            "rt_ptr_write_bytes_raw requires nonnull buffers, nonnegative offset, and nonnegative length",
+        ));
     }
     unsafe {
         std::ptr::copy_nonoverlapping(
@@ -1720,5 +1725,42 @@ mod tests {
                 .unwrap(),
             0x0102_0304_0506_0708
         );
+    }
+
+    #[test]
+    fn raw_pointer_bulk_copy_distinguishes_empty_success_from_invalid_descriptors() {
+        assert_eq!(
+            rt_ptr_write_bytes_raw(&[
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(0),
+            ])
+            .unwrap()
+            .as_int()
+            .unwrap(),
+            0
+        );
+        assert!(rt_ptr_write_bytes_raw(&[
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(1),
+            Value::Int(1),
+        ])
+        .is_err());
+
+        let source = [1u8, 2, 3, 4];
+        let mut destination = [0u8; 4];
+        let written = rt_ptr_write_bytes_raw(&[
+            Value::Int(destination.as_mut_ptr() as usize as i64),
+            Value::Int(0),
+            Value::Int(source.as_ptr() as usize as i64),
+            Value::Int(source.len() as i64),
+        ])
+        .unwrap()
+        .as_int()
+        .unwrap();
+        assert_eq!(written, 4);
+        assert_eq!(destination, source);
     }
 }
