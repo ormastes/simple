@@ -55,6 +55,32 @@ describe "DBFS FsDriver — open, write, read":
         val r = mt.read(fh, 5)
         expect(r.is_err()).to_equal(true)
 
+    it "read-only open of a missing file is side-effect free":
+        val mt = make_mounted()
+        val opened = mt.open("/data/missing.bin", OpenFlags.read_only())
+        expect(opened.is_err()).to_equal(true)
+        expect(mt.stat("/data/missing.bin").is_err()).to_equal(true)
+
+    it "create-exclusive rejects an existing file without replacing content":
+        val mt = make_mounted()
+        val first = mt.open("/data/exclusive.bin", OpenFlags.create_write()).unwrap()
+        mt.write(first, "original").unwrap()
+        mt.close(first).unwrap()
+        val exclusive = OpenFlags.create_write().with_excl()
+        expect(mt.open("/data/exclusive.bin", exclusive).is_err()).to_equal(true)
+        val reopened = mt.open("/data/exclusive.bin", OpenFlags.read_only()).unwrap()
+        expect(mt.read(reopened, 8).unwrap()).to_equal("original")
+
+    it "writable truncate-open publishes an empty replacement generation":
+        val mt = make_mounted()
+        val first = mt.open("/data/truncate.bin", OpenFlags.create_write()).unwrap()
+        mt.write(first, "old-content").unwrap()
+        mt.close(first).unwrap()
+        val truncated = mt.open("/data/truncate.bin", OpenFlags.write_only().with_trunc()).unwrap()
+        expect(mt.stat("/data/truncate.bin").unwrap().size).to_equal(0)
+        mt.close(truncated).unwrap()
+        expect(mt.open("/data/truncate.bin", OpenFlags.read_only().with_trunc()).is_err()).to_equal(true)
+
 describe "DBFS FsDriver — readdir":
     it "readdir on mounted dir returns created entries":
         val mt = make_mounted()

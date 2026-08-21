@@ -1,0 +1,36 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../../../.." && pwd)
+src="$root/examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c"
+tmp=$(mktemp "${TMPDIR:-/tmp}/arm64-runtime-owner.XXXXXX.o")
+trap 'rm -f "$tmp"' EXIT HUP INT TERM
+
+clang --target=aarch64-none-elf -ffreestanding -fno-builtin \
+    -fno-stack-protector -c "$src" -o "$tmp"
+
+grep -q '#define HEAP_UINT 8' "$src"
+grep -q 'boxed->hdr.type == HEAP_UINT && boxed->hdr.size == sizeof(\*boxed)' "$src"
+grep -q '#define ARM64_IPC_TRANSFER_MAX (64U \* 1024U)' "$src"
+grep -q 'static uint8_t arm64_ipc_send_buffer\[ARM64_IPC_TRANSFER_MAX\]' "$src"
+grep -q 'static uint8_t arm64_ipc_recv_buffer\[ARM64_IPC_TRANSFER_MAX\]' "$src"
+grep -q '__atomic_test_and_set(&arm64_ipc_send_owned, __ATOMIC_ACQUIRE)' "$src"
+grep -q '__atomic_clear(&arm64_ipc_recv_owned, __ATOMIC_RELEASE)' "$src"
+grep -q '#define ARM64_STRUCT_ALLOCATION_MAX 4096U' "$src"
+grep -q 'ptr == allocation.base && offset <= allocation.size' "$src"
+grep -q 'width <= allocation.size - offset' "$src"
+grep -q 'arm64_struct_allocations\[slot\].base = (uintptr_t)allocation' "$src"
+
+receiver_region=$(sed -n '/int8_t rt_struct_receiver_valid/,/void \*rt_struct_alloc/p' "$src")
+if printf '%s\n' "$receiver_region" | grep -q 'arm64_heap_contains'; then
+    echo 'ARM64 struct receiver still authorizes arbitrary bump-heap ranges' >&2
+    exit 1
+fi
+
+ipc_region=$(sed -n '/int64_t rt_ipc_send_bytes/,/void c_pcimgr_init/p' "$src")
+if printf '%s\n' "$ipc_region" | grep -q 'malloc('; then
+    echo 'ARM64 IPC transient path allocates from the non-reclaiming heap' >&2
+    exit 1
+fi
+
+echo 'PASS ARM64 boxed-u64 ownership and bounded no-allocation IPC transfer contract'

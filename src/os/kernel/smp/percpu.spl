@@ -4,6 +4,13 @@
 
 val MAX_CPUS: u32 = 32
 
+# The online set crosses CPU execution domains and is therefore owned by the
+# freestanding atomic boundary, not by Simple aggregate frame synchronization.
+extern fn rt_simpleos_percpu_online_reset()
+extern fn rt_simpleos_percpu_online_count() -> u32
+extern fn rt_simpleos_percpu_mark_online(cpu_id: u32) -> bool
+extern fn rt_simpleos_percpu_is_online(cpu_id: u32) -> bool
+
 fn percpu_max_cpus() -> u32:
     MAX_CPUS
 
@@ -74,6 +81,7 @@ fn percpu_init():
     )
     g_percpu = table
     g_num_cpus = 1
+    rt_simpleos_percpu_online_reset()
     g_percpu_initialized = true
 
 fn percpu_ensure_init():
@@ -150,19 +158,16 @@ fn percpu_startup_sent(cpu_id: u32) -> bool:
 
 fn percpu_online_count() -> u32:
     percpu_ensure_init()
-    var c: u32 = 0
-    var i: u32 = 0
-    while i < MAX_CPUS:
-        if g_percpu[i].online:
-            c = c + 1
-        i = i + 1
-    c
+    rt_simpleos_percpu_online_count()
 
 fn percpu_mark_online(cpu_id: u32) -> bool:
     percpu_ensure_init()
     if cpu_id >= MAX_CPUS:
         return false
     val current = g_percpu[cpu_id]
+    # Atomically claim the offline->online transition before publishing the
+    # descriptive aggregate. Duplicate AP notifications are idempotent.
+    rt_simpleos_percpu_mark_online(cpu_id)
     percpu_store_entry(cpu_id, PerCpu(
         cpu_id: current.cpu_id,
         present: true,
@@ -183,7 +188,7 @@ fn percpu_is_online(cpu_id: u32) -> bool:
     percpu_ensure_init()
     if cpu_id >= MAX_CPUS:
         return false
-    g_percpu[cpu_id].online
+    rt_simpleos_percpu_is_online(cpu_id)
 
 fn percpu_preempt_disable(cpu_id: u32):
     percpu_ensure_init()

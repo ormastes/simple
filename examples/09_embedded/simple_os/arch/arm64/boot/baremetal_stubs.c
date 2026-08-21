@@ -117,6 +117,12 @@ _Static_assert(sizeof(RuntimeArray) == 32, "RuntimeArray header ABI");
 #define HEAP_OBJECT 4
 #define HEAP_ENUM   7
 
+#define HEAP_UINT 8
+typedef struct {
+    HeapHeader hdr;
+    uint64_t value;
+} RuntimeUInt;
+
 static uint64_t simpleos_raw_or_encoded_int(RuntimeValue value)
 {
     return IS_INT(value) ? (uint64_t)DECODE_INT(value) : (uint64_t)value;
@@ -157,6 +163,15 @@ void rt_print_value(RuntimeValue val);
 static char   _heap[160 * 1024 * 1024] __attribute__((aligned(16)));
 static size_t _heap_off = 0;
 
+#define ARM64_STRUCT_ALLOCATION_MAX 4096U
+typedef struct {
+    uintptr_t base;
+    size_t size;
+} Arm64StructAllocation;
+static Arm64StructAllocation arm64_struct_allocations[ARM64_STRUCT_ALLOCATION_MAX];
+static uint32_t arm64_struct_allocation_count;
+static uint8_t arm64_struct_allocation_owned;
+
 static void *_heap_alloc(size_t sz)
 {
     sz = (sz + 15) & ~(size_t)15;
@@ -181,6 +196,78 @@ static int arm64_heap_contains(const void *p, size_t min_size)
     uintptr_t base = (uintptr_t)_heap;
     uintptr_t used_end = base + _heap_off;
     return addr >= base && addr + min_size >= addr && addr + min_size <= used_end;
+}
+
+static RuntimeUInt *arm64_heap_uint(RuntimeValue value)
+{
+    if (!IS_HEAP(value)) return (RuntimeUInt *)0;
+    RuntimeUInt *boxed = (RuntimeUInt *)DECODE_PTR(value);
+    if (!arm64_heap_contains(boxed, sizeof(*boxed))) return (RuntimeUInt *)0;
+    return boxed->hdr.type == HEAP_UINT && boxed->hdr.size == sizeof(*boxed) ? boxed : (RuntimeUInt *)0;
+}
+
+RuntimeValue rt_value_int(RuntimeValue value) { return ENCODE_INT(value); }
+
+RuntimeValue rt_value_u64(RuntimeValue bits)
+{
+    RuntimeUInt *boxed = (RuntimeUInt *)_heap_alloc(sizeof(*boxed));
+    if (!boxed) return NIL_VALUE;
+    boxed->hdr.type = HEAP_UINT;
+    boxed->hdr.size = (uint32_t)sizeof(*boxed);
+    boxed->value = (uint64_t)bits;
+    return ENCODE_PTR(boxed);
+}
+
+RuntimeValue rt_value_as_u64(RuntimeValue value)
+{
+    RuntimeUInt *boxed = arm64_heap_uint(value);
+    return boxed ? (RuntimeValue)boxed->value : (IS_INT(value) ? DECODE_INT(value) : 0);
+}
+
+RuntimeValue rt_value_unbox_int(RuntimeValue value)
+{
+    RuntimeUInt *boxed = arm64_heap_uint(value);
+    if (boxed) return (RuntimeValue)boxed->value;
+    return IS_INT(value) ? DECODE_INT(value) : value;
+}
+
+int8_t rt_struct_receiver_valid(RuntimeValue receiver, RuntimeValue byte_offset,
+                                RuntimeValue access_width)
+{
+    if (receiver == 0 || byte_offset < 0 || access_width <= 0) return 0;
+    uintptr_t ptr = (uintptr_t)((uint64_t)receiver & ~TAG_MASK);
+    size_t offset = (size_t)byte_offset;
+    size_t width = (size_t)access_width;
+    if (offset + width < offset) return 0;
+    if (__atomic_test_and_set(&arm64_struct_allocation_owned, __ATOMIC_ACQUIRE)) return 0;
+    int8_t valid = 0;
+    for (uint32_t i = 0; i < arm64_struct_allocation_count; ++i) {
+        Arm64StructAllocation allocation = arm64_struct_allocations[i];
+        if (ptr == allocation.base && offset <= allocation.size &&
+            width <= allocation.size - offset) {
+            valid = 1;
+            break;
+        }
+    }
+    __atomic_clear(&arm64_struct_allocation_owned, __ATOMIC_RELEASE);
+    return valid;
+}
+
+void *rt_struct_alloc(int64_t size)
+{
+    if (size <= 0 || (uint64_t)size > 0x1000000ULL) return (void *)0;
+    if (__atomic_test_and_set(&arm64_struct_allocation_owned, __ATOMIC_ACQUIRE))
+        return (void *)0;
+    if (arm64_struct_allocation_count >= ARM64_STRUCT_ALLOCATION_MAX) {
+        __atomic_clear(&arm64_struct_allocation_owned, __ATOMIC_RELEASE);
+        return (void *)0;
+    }
+    void *allocation = _heap_alloc((size_t)size);
+    uint32_t slot = arm64_struct_allocation_count++;
+    arm64_struct_allocations[slot].base = (uintptr_t)allocation;
+    arm64_struct_allocations[slot].size = (size_t)size;
+    __atomic_clear(&arm64_struct_allocation_owned, __ATOMIC_RELEASE);
+    return allocation;
 }
 
 void *malloc(size_t sz)
@@ -1324,6 +1411,58 @@ int64_t syscall(uint64_t id, uint64_t a0, uint64_t a1,
     return userlib__syscall_raw__syscall(id, a0, a1, a2, a3, a4);
 }
 
+int64_t simpleos_syscall(uint64_t id, uint64_t a0, uint64_t a1,
+                         uint64_t a2, uint64_t a3, uint64_t a4)
+{
+    return userlib__syscall_raw__syscall(id, a0, a1, a2, a3, a4);
+}
+
+#define ARM64_IPC_TRANSFER_MAX (64U * 1024U)
+static uint8_t arm64_ipc_send_buffer[ARM64_IPC_TRANSFER_MAX];
+static uint8_t arm64_ipc_recv_buffer[ARM64_IPC_TRANSFER_MAX];
+static uint8_t arm64_ipc_send_owned;
+static uint8_t arm64_ipc_recv_owned;
+
+int64_t rt_ipc_send_bytes(uint64_t port, uint64_t method, RuntimeValue data)
+{
+    if (!IS_HEAP(data)) return -22;
+    RuntimeArray *arr = (RuntimeArray *)DECODE_PTR(data);
+    if (!arm64_heap_contains(arr, sizeof(*arr)) || arr->hdr.type != HEAP_ARRAY ||
+        arr->len > arr->cap || arr->len > ARM64_IPC_TRANSFER_MAX - 4U) return -22;
+    size_t len = (size_t)arr->len + 4U;
+    if (__atomic_test_and_set(&arm64_ipc_send_owned, __ATOMIC_ACQUIRE)) return -11;
+    uint8_t *raw = arm64_ipc_send_buffer;
+    raw[0] = (uint8_t)method;
+    raw[1] = (uint8_t)(method >> 8);
+    raw[2] = (uint8_t)(method >> 16);
+    raw[3] = (uint8_t)(method >> 24);
+    for (uint64_t i = 0; i < arr->len; ++i)
+        raw[i + 4U] = (uint8_t)(IS_INT(arr->items[i]) ? DECODE_INT(arr->items[i]) : arr->items[i]);
+    int64_t result = userlib__syscall_raw__syscall(20, port, (uint64_t)(uintptr_t)raw,
+                                                   (uint64_t)len, 0, 0);
+    __atomic_clear(&arm64_ipc_send_owned, __ATOMIC_RELEASE);
+    return result;
+}
+
+RuntimeValue rt_ipc_recv_bytes(uint64_t port, int64_t max_len)
+{
+    if (max_len <= 0 || max_len > ARM64_IPC_TRANSFER_MAX) return rt_array_new(ENCODE_INT(0));
+    if (__atomic_test_and_set(&arm64_ipc_recv_owned, __ATOMIC_ACQUIRE))
+        return rt_array_new(ENCODE_INT(0));
+    uint8_t *raw = arm64_ipc_recv_buffer;
+    int64_t received = userlib__syscall_raw__syscall(21, port,
+        (uint64_t)(uintptr_t)raw, (uint64_t)max_len, 0, 0);
+    if (received <= 0 || received > max_len) {
+        __atomic_clear(&arm64_ipc_recv_owned, __ATOMIC_RELEASE);
+        return rt_array_new(ENCODE_INT(0));
+    }
+    RuntimeValue result = rt_array_new(ENCODE_INT(received));
+    for (int64_t i = 0; i < received; ++i)
+        rt_array_push(result, ENCODE_INT((int64_t)raw[i]));
+    __atomic_clear(&arm64_ipc_recv_owned, __ATOMIC_RELEASE);
+    return result;
+}
+
 void c_pcimgr_init(void)
 {
     _pci_scan();
@@ -1896,6 +2035,20 @@ RuntimeValue rt_array_clone(RuntimeValue arr) {
     return result;
 }
 
+RuntimeValue rt_array_copy(RuntimeValue arr)
+{
+    if (!IS_HEAP(arr)) return NIL_VALUE;
+    RuntimeArray *src = (RuntimeArray *)DECODE_PTR(arr);
+    if (!arm64_heap_contains(src, sizeof(*src)) || src->hdr.type != HEAP_ARRAY ||
+        src->len > src->cap || src->cap > 0x100000ULL) return NIL_VALUE;
+    RuntimeValue result = rt_array_new(ENCODE_INT((int64_t)(src->cap ? src->cap : 1)));
+    if (!IS_HEAP(result)) return NIL_VALUE;
+    RuntimeArray *dst = (RuntimeArray *)DECODE_PTR(result);
+    for (uint64_t i = 0; i < src->len; ++i) dst->items[i] = src->items[i];
+    dst->len = src->len;
+    return result;
+}
+
 RuntimeValue rt_enum_new(RuntimeValue enum_id_rv, RuntimeValue disc_rv, RuntimeValue payload)
 {
     RuntimeEnum *e = (RuntimeEnum *)malloc(sizeof(RuntimeEnum));
@@ -1924,12 +2077,40 @@ RuntimeValue rt_enum_payload(RuntimeValue value)
     return e->payload;
 }
 
+RuntimeValue rt_enum_id(RuntimeValue value)
+{
+    if (!IS_HEAP(value)) return 0;
+    RuntimeEnum *e = (RuntimeEnum *)DECODE_PTR(value);
+    if (!arm64_heap_contains(e, sizeof(*e)) || e->hdr.type != HEAP_ENUM ||
+        e->hdr.size < sizeof(*e)) return 0;
+    return (RuntimeValue)(uint64_t)e->enum_id;
+}
+
 RuntimeValue rt_enum_check_discriminant(RuntimeValue value, RuntimeValue expected)
 {
     if (!IS_HEAP(value)) return 0;
     RuntimeEnum *e = (RuntimeEnum *)DECODE_PTR(value);
     if (!e || e->hdr.type != HEAP_ENUM) return 0;
     return (e->discriminant == (uint32_t)(int32_t)expected) ? 1 : 0;
+}
+
+RuntimeValue rt_unwrap_or_trap(RuntimeValue value)
+{
+    if (!IS_HEAP(value)) return value;
+    RuntimeEnum *e = (RuntimeEnum *)DECODE_PTR(value);
+    if (!arm64_heap_contains(e, sizeof(*e)) || e->hdr.type != HEAP_ENUM) return value;
+    const uint32_t disc_ok = 2405352012u;
+    const uint32_t disc_err = 4200179024u;
+    const uint32_t disc_some = 4053299545u;
+    const uint32_t disc_none = 2371748697u;
+    if ((e->enum_id == 1u && e->discriminant == disc_some) ||
+        (e->enum_id != 1u && e->discriminant == disc_ok)) return e->payload;
+    if ((e->enum_id == 1u && e->discriminant == disc_none) ||
+        (e->enum_id != 1u && e->discriminant == disc_err)) {
+        serial_puts("[PANIC] unwrap failed\r\n");
+        for (;;) __asm__ volatile("wfe");
+    }
+    return value;
 }
 
 RuntimeValue rt_is_none(RuntimeValue value)

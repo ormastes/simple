@@ -16,6 +16,7 @@
 
 use std.nogc_sync_mut.redis.server.{RedisServer, parse_next_request}
 use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.base_encoding.base64.{base64_encode, base64_decode}
 
 pub val DBD_MAX_JOURNAL_BYTES: i64 = 1024 * 1024
 pub val DBD_MAX_JOURNAL_RECORDS: i64 = 4096
@@ -46,7 +47,7 @@ val DBD_DBFS_OWNER_VERIFIED: bool = false
 
 # Advertised capabilities are intentionally conservative: features without a
 # verified implementation must remain visibly blocked.
-pub val DBD_CAPABILITY_STATE: text = "protocol=RESP;profile=basic;limits=bounded;filesystem_launch=VerifiedArtifactSecurityGatedV1;close_owner=RetryableQuarantineV1;auth=BlockedBootCredentialOwner;auth_provider=ConfiguredTokenV1;auth_framing=DbdMutableAuthRequestOwnerV1;command_framing=DbdAuthenticatedRespIngressV1;tls=Blocked;tls_record_owner=AuthenticatedV1;tls_handshake_authority=BlockedCertificatePrivateKeyEntropyOwner;transactions=Blocked;dbfs_adapter=DiagnosticReadOnly;live_dbfs_durability=Blocked"
+pub val DBD_CAPABILITY_STATE: text = "protocol=RESP;profile=basic;limits=bounded;journal=ChecksummedBase64V1;filesystem_launch=VerifiedArtifactSecurityGatedV1;close_owner=RetryableQuarantineV1;auth=BlockedBootCredentialOwner;auth_provider=ConfiguredTokenV1;auth_framing=DbdMutableAuthRequestOwnerV1;command_framing=DbdAuthenticatedRespIngressV1;tls=Blocked;tls_record_owner=AuthenticatedV1;tls_handshake_authority=BlockedCertificatePrivateKeyEntropyOwner;transactions=Blocked;dbfs_adapter=DiagnosticReadOnly;live_dbfs_durability=Blocked"
 
 pub fn dbd_production_startup_ready() -> bool:
     """True only after real auth, TLS, and DBFS owners verify admission."""
@@ -338,14 +339,8 @@ pub fn dbd_command_is_mutating(cmd: text) -> bool:
     u == "SET" or u == "DEL"
 
 fn _dbd_journal_scalar_safe(value: text) -> bool:
-    if value.len() == 0 or value.len() > DBD_MAX_JOURNAL_LINE_BYTES:
+    if value.len() > DBD_MAX_JOURNAL_LINE_BYTES:
         return false
-    var i: i64 = 0
-    while i < value.len():
-        val code = value.char_code_at(i)
-        if code < 33 or code > 126:
-            return false
-        i = i + 1
     true
 
 pub fn dbd_journal_args_valid(args: [text]) -> bool:
@@ -356,39 +351,68 @@ pub fn dbd_journal_args_valid(args: [text]) -> bool:
             return false
     val cmd = args[0].upper()
     if cmd == "SET":
-        args.len() == 3
+        args.len() == 3 and args[1].len() > 0
     elif cmd == "DEL":
-        args.len() == 2
+        args.len() == 2 and args[1].len() > 0
     else:
         false
 
 pub fn dbd_encode_journal_line(args: [text]) -> text:
-    """Encode one mutating command as a single journal line: SPACE-joined args.
+    """Encode one mutation as a checksummed, delimiter-safe J1 record.
 
-    Returns "" (caller rejects) if any arg contains a space or newline, so the
-    line-oriented journal round-trips unambiguously through split(" ")/split("\\n").
+    Each argument is canonical base64 with a non-empty ``B`` tag, so spaces,
+    empty values, CR/LF, and Unicode remain unambiguous within one journal
+    line.  The digest covers the exact encoded argument sequence; replay
+    rejects torn or modified records before applying any mutation.
     """
     if not dbd_journal_args_valid(args):
         return ""
-    var out = ""
-    var i: u64 = 0
-    while i < args.len():
-        if i > 0:
-            out = out + " "
-        out = out + args[i]
-        if out.len() > DBD_MAX_JOURNAL_LINE_BYTES:
+    var body = ""
+    for arg in args:
+        body = body + " B" + base64_encode(arg)
+        # Reserve the fixed ``J1 `` prefix, 64-byte SHA-256, and separator.
+        if body.len() + 68 > DBD_MAX_JOURNAL_LINE_BYTES:
             return ""
+    "J1 " + sha256_text(body) + body
+
+fn _dbd_decode_j1_journal_line(line: text) -> [text]:
+    var rejected: [text] = []
+    val fields = line.split(" ")
+    if fields.len() < 4 or fields[0] != "J1" or fields[1].len() != 64:
+        return rejected
+    var body = ""
+    var args: [text] = []
+    var i: u64 = 2
+    while i < fields.len():
+        val field = fields[i]
+        if not field.starts_with("B"):
+            return rejected
+        val encoded = field.substring(1, field.len())
+        val decoded = base64_decode(encoded)
+        # Require the one canonical representation; permissive or malformed
+        # base64 must never be normalized into a different durable command.
+        if base64_encode(decoded) != encoded:
+            return rejected
+        body = body + " " + field
+        args.push(decoded)
         i = i + 1
-    out
+    if sha256_text(body) != fields[1] or not dbd_journal_args_valid(args):
+        return rejected
+    args
 
 pub fn dbd_decode_journal_line(line: text) -> [text]:
-    """Decode one journal line back into command args (whitespace split)."""
+    """Decode only an integrity-bound J1 record.
+
+    Pre-J1 scalar records are intentionally rejected.  Accepting them beside
+    J1 would let an injected ``SET``/``DEL`` line bypass the record digest.
+    Any future legacy importer must be an offline, one-shot migration owner
+    that rewrites the complete journal before production replay.
+    """
     var args: [text] = []
     if line.len() == 0 or line.len() > DBD_MAX_JOURNAL_LINE_BYTES:
         return args
-    for tok in line.split(" "):
-        if tok.len() > 0:
-            args.push(tok)
+    if line.starts_with("J1 "):
+        return _dbd_decode_j1_journal_line(line)
     args
 
 pub class DbdEngine:

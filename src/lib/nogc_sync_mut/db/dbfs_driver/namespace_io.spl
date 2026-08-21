@@ -60,13 +60,19 @@ impl DbFsDriver:
     # --- open ---
 
     fn _open_path_locked(path: Path, flags: OpenFlags) -> Result<FileHandle, FsError>:
-        """Open a file by path. Creates inode if not present."""
+        """Open a file by path, creating it only when O_CREAT is present."""
         val raw = path.raw
+        if (flags.bits & 512u32) != 0u32 and not flags.is_writable():
+            return Err(FsError.InvalidArg)
         var inode_id: u64 = 0
         val idx = _find_inode_idx_locked(self.inst_id, raw)
         if idx >= 0:
+            if (flags.bits & 64u32) != 0u32 and (flags.bits & 128u32) != 0u32:
+                return Err(FsError.AlreadyExists)
             inode_id = _dbfs_inodes[idx].id
         else:
+            if (flags.bits & 64u32) == 0u32:
+                return Err(FsError.NotFound)
             inode_id = _alloc_inode_id_locked(self.inst_id)
             _dbfs_inodes.push(DbFsInode(
                 inst_id:  self.inst_id,
@@ -91,7 +97,15 @@ impl DbFsDriver:
             is_dir:     false,
             closed:     false,
         ))
-        Ok(FileHandle(id: hid))
+        val handle = FileHandle(id: hid)
+        if idx >= 0 and (flags.bits & 512u32) != 0u32:
+            val truncated = self._ftruncate_handle_locked(handle, 0)
+            if truncated.is_err():
+                val fd_idx = _find_fd_idx_locked(self.inst_id, hid)
+                if fd_idx >= 0:
+                    _dbfs_fds.remove(fd_idx)
+                return Err(truncated.unwrap_err())
+        Ok(handle)
 
     # --- opendir ---
 

@@ -10,7 +10,8 @@ use os.services.vfs.vfs.{VfsManager, Filesystem}
 use os.services.vfs.vfs_boot_init.{
     g_root_fat32, g_root_nvfs_hosted, g_vfs_initialized, g_mount_table, g_vfs,
     vfs_boot_storage_is_pure_simple,
-    vfs_ambient_allows, vfs_ambient_in_container
+    vfs_ambient_allows, vfs_ambient_in_container,
+    vfs_state_commit_root_nvfs, vfs_state_mount, vfs_state_unmount
 }
 use os.services.vfs.vfs_dispatch.{
     g_vfs_dispatch_write_file_text, g_vfs_dispatch_write_file_bytes,
@@ -73,18 +74,18 @@ fn _g_vfs_root_nvfs_hosted_write_file_text(path: text, content: text) -> bool:
     val relpath = Path(raw: path)
     val open_r = driver.open(relpath, OpenFlags.write_only().with_append().with_create())
     if open_r.is_err():
-        g_root_nvfs_hosted = Some(driver)
+        vfs_state_commit_root_nvfs(driver)
         return false
     val handle = open_r.unwrap()
     val trunc_r = driver.ftruncate(handle, 0)
     if trunc_r.is_err():
         driver.close(handle)
-        g_root_nvfs_hosted = Some(driver)
+        vfs_state_commit_root_nvfs(driver)
         return false
     val (write_driver, write_r) = nvfs_hosted_write_owned(driver, handle, 0, _vfs_text_to_bytes(content))
     driver = write_driver
     driver.close(handle)
-    g_root_nvfs_hosted = Some(driver)
+    vfs_state_commit_root_nvfs(driver)
     write_r.is_ok()
 
 fn _g_vfs_root_nvfs_hosted_write_file_bytes(path: text, data: [u8]) -> bool:
@@ -94,18 +95,18 @@ fn _g_vfs_root_nvfs_hosted_write_file_bytes(path: text, data: [u8]) -> bool:
     val relpath = Path(raw: path)
     val open_r = driver.open(relpath, OpenFlags.write_only().with_append().with_create())
     if open_r.is_err():
-        g_root_nvfs_hosted = Some(driver)
+        vfs_state_commit_root_nvfs(driver)
         return false
     val handle = open_r.unwrap()
     val trunc_r = driver.ftruncate(handle, 0)
     if trunc_r.is_err():
         driver.close(handle)
-        g_root_nvfs_hosted = Some(driver)
+        vfs_state_commit_root_nvfs(driver)
         return false
     val (write_driver, write_r) = nvfs_hosted_write_owned(driver, handle, 0, data)
     driver = write_driver
     driver.close(handle)
-    g_root_nvfs_hosted = Some(driver)
+    vfs_state_commit_root_nvfs(driver)
     write_r.is_ok()
 
 fn g_vfs_root_write_file_bytes(driver: Fat32Core, path: text, data: [u8]) -> bool:
@@ -240,7 +241,7 @@ pub fn g_vfs_delete_file(name: text) -> bool:
         var d = g_root_nvfs_hosted.unwrap()
         val p = Path(raw: g_vfs_root_path(name))
         val r = d.unlink(p)
-        g_root_nvfs_hosted = Some(d)
+        vfs_state_commit_root_nvfs(d)
         return r.is_ok()
     val abs = g_vfs_abs_path(name)
     val entry_opt = g_mount_table.lookup(abs)
@@ -372,7 +373,7 @@ pub fn vfs_mount_removable(device_index: u64, mount_path: text) -> bool:
         return false
     val fs_driver = FsFat32Driver.new("removable-{mount_path}", dev)
     val driver_inst = DriverInstance.Fat32(driver: fs_driver)
-    val mount_r = g_mount_table.mount(mount_path, driver_inst, MountOptions.default())
+    val mount_r = vfs_state_mount(mount_path, driver_inst, MountOptions.default())
     if mount_r.is_err():
         serial_println("[removable] mount failed path={mount_path}")
         return false
@@ -388,7 +389,7 @@ pub fn vfs_unmount_removable(mount_path: text) -> bool:
     if vfs_ambient_in_container():
         serial_println("[removable] refused: unmount not permitted in container namespace")
         return false
-    val unmount_r = g_mount_table.unmount(mount_path)
+    val unmount_r = vfs_state_unmount(mount_path)
     if unmount_r.is_err():
         serial_println("[removable] unmount failed path={mount_path}")
         return false
@@ -410,7 +411,7 @@ fn _g_vfs_root_nvfs_hosted_file_size(path: text) -> i64:
         return -1
     val driver = g_root_nvfs_hosted.unwrap()
     val stat_r = driver.stat(Path(raw: path))
-    g_root_nvfs_hosted = Some(driver)
+    vfs_state_commit_root_nvfs(driver)
     if stat_r.is_err():
         return -1
     stat_r.unwrap().size.to_i64()

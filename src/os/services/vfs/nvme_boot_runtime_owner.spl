@@ -1,0 +1,702 @@
+# Canonical NVMe boot runtime owner. This is the sole module that declares NvmeDriver, lease, and direct-adapter mutable state.
+# VFS Boot Initialization — module state and boot init functions
+#
+# MDSOC: feature dimension, vfs layer
+#
+# Owns the module-level globals (g_vfs, g_nvme, g_adapter, etc.) and
+# the boot init functions that bring up the storage stack.
+
+use os.services.vfs.vfs.{VfsManager, Filesystem}
+use os.kernel.loader.container_namespace.{ContainerNamespaceView}
+use os.services.vfs.vfs_service.{VfsService}
+use os.services.vfs.q35_pure_nvme_perf_boot.{_elapsed_us, _iops}
+use common.string_core.{char_from_code}
+use os.services.vfs.nvme_filesystem_mounts.{vfs_nvme_driver_instance_for_lease, vfs_nvme_buffered_driver_instance_for_lease, vfs_nvme_driver_instance_for_adapter_lease}
+use os.services.vfs.vfs_block_adapters.{
+    NvmeBlockAdapter
+}
+use os.services.vfs.riscv64_virtio_blk_adapter.{Riscv64VirtioBlkAdapter}
+use os.services.vfs.c_nvme_block_adapter.{
+    CNvmeBlockAdapter,
+    simpleos_fat32_path_read_buffer_addr, simpleos_fat32_read_path,
+    simpleos_fat32_read_path_size, simpleos_fat32_read_path_array,
+    FAT32_PATH_READ_BUFFER_MAX
+}
+use os.services.fat32.shared_fat32_driver.{SharedFat32Driver as Fat32Core}
+use os.services.block_device.{BlockDevice}
+use os.drivers.virtio.virtio_blk.{VirtioBlkDriver}
+use os.drivers.nvme.nvme_driver.{NvmeDriver, DmaAddrs}
+use os.drivers.nvme.nvme_namespace_assignment.{nvme_user_assigned_filesystem_lease_from_grant_checked}
+use os.drivers.nvme.nvme_storage_model.{
+    NvmeQueueRole, NvmeNamespaceMode, NvmeFilesystemConsumer,
+    NvmeNamespaceIdentity, NvmeQueueAssignment, NvmeFilesystemLease,
+    NvmeTransferEvidence,
+    nvme_filesystem_lease, nvme_filesystem_lease_from_transfer_evidence,
+    nvme_filesystem_lease_reason,
+    nvme_filesystem_lease_set_acceptance_reason,
+    nvme_filesystem_lease_same_identity
+}
+use os.drivers.real_device_readiness.{
+    real_device_q35_pure_simple_access_marker,
+    real_device_q35_pure_simple_perf_marker_from_measurements
+}
+use os.services.pcimgr.pcimgr.{pcimgr_init, pcimgr_find_by_class, pcimgr_find_by_class_i64, pcimgr_find_nvme_storage, pcimgr_find_qemu_nvme, pcimgr_grant_device}
+use os.services.pcimgr.driver_match.{PCI_CLASS_STORAGE, PCI_SUBCLASS_NVME}
+use os.kernel.types.capability_types.{CAP_RIGHT_READ, CAP_RIGHT_WRITE, CAP_RIGHT_QUEUE_SUBMIT, SIMPLEOS_NVME_SYSTEM_QUEUE_ID}
+use os.kernel.types.device_mem_types.{DeviceGrant, device_grant_resource_set_label, device_grant_is_isolated}
+use os.kernel.boot.boot_nvme_production_handoff.{boot_nvme_production_handoff_provision}
+use os.kernel.boot.mmio.{mmio_read32, mmio_write32, mmio_read64, mmio_read16, mmio_read8, mmio_write8}
+use os.kernel.memory.memory_swap_runtime.{memory_swap_runtime_install_block_device}
+use std.io.dma.{DmaDir, DmaOwner, DmaCachePolicy, SharedDmaBuffer, dma_alloc}
+use std.fs_driver.mount_table.{MountTable}
+use std.fs_driver.fat32_stub.{FsFat32Driver}
+use std.fs_driver.instance.{DriverInstance}
+use std.fs_driver.error.{FsError}
+use std.fs_driver.capability.{Capability}
+use std.fs_driver.extension.{Extension, DirectIoExt}
+use std.fs_driver.direct_io.{DirectIoRequest, DirectIoBatchRequest, DirectIoResult, DirectIoExtent, direct_io_read_request, direct_io_write_request, direct_io_read_batch_request, direct_io_write_batch_request, direct_io_validate_batch}
+use std.io.dma.{DmaDir, DmaOwner, DmaCachePolicy, dma_alloc, dma_free, dma_buffer_to_shared}
+use std.fs_driver.types.{Path, MountOptions, OpenFlags, FileHandle}
+use std.fs_driver.ops.{FsDriver}
+use os.kernel.types.fs_types.{FileFlags, DirEntry, FsNodeKind}
+use std.fs_driver.nvfs_hosted_driver.{NvfsHostedDriver}
+use os.kernel.log.klog_api.{log_raw_println}
+use os.kernel.loader.app_registry.{app_registry_load, app_registry_load_hardcoded_fallback, app_registry_fat32_alias, app_registry_root_alias, app_registry_cached_bytes, app_registry_cache_bytes, app_registry_cache_boot_app_id, app_registry_boot_seed_entries, app_registry_leaf_for_canonical}
+
+val PURE_FAT32_FILE_READ_MAX: u64 = 33554432
+extern fn serial_println(msg: text)
+extern fn rt_text_to_bytes(s: text) -> [u8]
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_array_new_with_cap(cap: i64) -> [u8]
+extern fn rt_byte_array_new(cap: i64) -> [u8]
+extern fn rt_typed_bytes_u8_push(array: [u8], value: i64) -> bool
+extern fn rt_bytes_u8_at(array: [u8], index: i64) -> i64
+
+
+
+var g_nvme: NvmeDriver = NvmeDriver.new()
+
+class BootNvmeBlockDevice:
+    sector_size_bytes: u32
+
+impl BlockDevice for BootNvmeBlockDevice:
+    me fn read_sector(lba: u64) -> Result<[u8], text>:
+        _vfs_boot_nvme_read_sector_bytes(lba, self.sector_size_bytes)
+
+    me fn write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
+        _vfs_boot_nvme_write_sector_bytes(lba, data, self.sector_size_bytes)
+
+    me fn sector_size() -> u32:
+        self.sector_size_bytes
+
+var g_adapter: NvmeBlockAdapter = NvmeBlockAdapter.new(g_nvme)
+var g_pure_nvme_root_fat32: Fat32Core = Fat32Core.new(g_adapter)
+var g_pure_nvme_root_fat32_ready: bool = false
+var g_vfs_nvme_active_leases: [NvmeFilesystemLease] = []
+var g_vfs_nvme_direct_adapter_leases: [NvmeFilesystemLease] = []
+var g_vfs_nvme_direct_adapters: [NvmeBlockAdapter] = []
+
+# The mutable driver never leaves this module.  Callers receive immutable
+# facts, transfer evidence, DMA leases, or adapters that have already been
+# bound to an admitted namespace.  In particular, no caller receives a copy
+# of g_nvme and therefore cannot accidentally become a second controller
+# owner under Simple's value semantics.
+fn nvme_boot_runtime_reset():
+    g_nvme = NvmeDriver.new()
+
+fn nvme_boot_runtime_reset_leases():
+    g_vfs_nvme_active_leases = []
+    g_vfs_nvme_direct_adapter_leases = []
+    g_vfs_nvme_direct_adapters = []
+
+fn nvme_boot_runtime_init(grant: DeviceGrant) -> Result<bool, text>:
+    g_nvme.init_from_grant(grant)
+
+fn nvme_boot_runtime_sector_size() -> u32:
+    g_nvme.get_sector_size()
+
+fn nvme_boot_runtime_sector_count() -> u64:
+    g_nvme.get_sector_count()
+
+fn nvme_boot_runtime_transfer_evidence(grant_isolated: bool) -> Result<NvmeTransferEvidence, text>:
+    g_nvme.transfer_evidence_from_reversible_probe(
+        0u64,
+        "system-driver",
+        "kernel-owned-resource",
+        "system-kernel-namespace",
+        grant_isolated,
+        grant_isolated
+    )
+
+fn nvme_boot_runtime_system_adapter() -> NvmeBlockAdapter:
+    NvmeBlockAdapter.for_identified_namespace_unchecked(
+        g_nvme,
+        1u32,
+        SIMPLEOS_NVME_SYSTEM_QUEUE_ID,
+        0u64,
+        g_nvme.get_sector_count(),
+        g_nvme.get_sector_size(),
+        "fat32"
+    )
+
+fn nvme_boot_runtime_commit_system_fat32(adapter: NvmeBlockAdapter, lease: NvmeFilesystemLease) -> Result<bool, text>:
+    # The adapter is committed once by the runtime owner after its namespace
+    # lease and bounce buffer have been validated by boot orchestration.
+    g_adapter = adapter
+    g_pure_nvme_root_fat32 = Fat32Core.new(g_adapter)
+    val mounted = g_pure_nvme_root_fat32.mount("", "")
+    if mounted.is_err():
+        return Err(mounted.unwrap_err())
+    g_pure_nvme_root_fat32_ready = true
+    g_vfs_nvme_active_leases = [lease]
+    g_vfs_nvme_direct_adapter_leases = [lease]
+    g_vfs_nvme_direct_adapters = [g_adapter]
+    Ok(true)
+
+fn nvme_boot_runtime_read_system_shared(lba: u64, count: u32, buf: SharedDmaBuffer) -> Result<bool, text>:
+    g_nvme.read_shared_dma_in_namespace_on_queue(
+        1u32, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, lba, count, buf)
+fn _vfs_boot_nvme_shared_dma(sector_size: u32) -> Result<SharedDmaBuffer, text>:
+    val byte_len = if sector_size.to_u64() < 4096u64: 4096u64 else: sector_size.to_u64()
+    val dma = g_nvme.alloc_dma(byte_len)
+    if dma.is_err():
+        return Err(dma.unwrap_err())
+    val buf = dma.unwrap()
+    Ok(SharedDmaBuffer(
+        cpu_virt_addr: buf.virt,
+        host_phys_addr: buf.phys,
+        device_addr: buf.phys,
+        byte_len: byte_len,
+        cache_policy: DmaCachePolicy.Coherent,
+        owner: DmaOwner(task_id: 0u64, bdf_bus: 0u8, bdf_device: 0u8, bdf_function: 0u8),
+        allocation_id: 1u64
+    ))
+
+fn _vfs_boot_nvme_read_sector_bytes(lba: u64, sector_size: u32) -> Result<[u8], text>:
+    val shared_result = _vfs_boot_nvme_shared_dma(sector_size)
+    if shared_result.is_err():
+        return Err(shared_result.unwrap_err())
+    val shared = shared_result.unwrap()
+    val read = g_nvme.read_shared_dma_in_namespace_on_queue(1u32, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, lba, 1u32, shared)
+    if read.is_err():
+        return Err(read.unwrap_err())
+    if lba == 96u64:
+        serial_println("[vfs-init] lba96 raw32={mmio_read32(shared.cpu_virt_addr)} addr={shared.cpu_virt_addr}")
+    var bytes: [u8] = rt_array_new_with_cap(sector_size.to_i64())
+    var i: u64 = 0
+    val limit = sector_size.to_u64()
+    while i < limit:
+        _ = rt_typed_bytes_u8_push(bytes, (_vfs_boot_mem_byte(shared.cpu_virt_addr, i) & 0xFFu32).to_i64())
+        i = i + 1u64
+    Ok(bytes)
+
+fn _vfs_boot_nvme_write_sector_bytes(lba: u64, data: [u8], sector_size: u32) -> Result<bool, text>:
+    val shared_result = _vfs_boot_nvme_shared_dma(sector_size)
+    if shared_result.is_err():
+        return Err(shared_result.unwrap_err())
+    val shared = shared_result.unwrap()
+    var i: u64 = 0
+    val limit = sector_size.to_u64()
+    while i < limit:
+        val byte = if i.to_i32() < data.len(): data[i.to_i32()] else: 0u8
+        mmio_write8(shared.cpu_virt_addr + i, byte)
+        i = i + 1u64
+    val write = g_nvme.write_shared_dma_in_namespace_on_queue(1u32, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, lba, 1u32, shared)
+    if write.is_err():
+        return Err(write.unwrap_err())
+    write
+
+fn vfs_boot_nvme_system_fat32_lease(sector_size: u32, sector_count: u64, grant: DeviceGrant) -> NvmeFilesystemLease:
+    """Build the system FAT32 lease used by the pure-Simple boot path."""
+    val ns = NvmeNamespaceIdentity(
+        controller_id: 0u32,
+        nsid: 1u32,
+        lba_size: sector_size,
+        lba_count: sector_count,
+        eui64: 0u64,
+        nguid_lo: 0u64,
+        nguid_hi: 0u64,
+        uuid_lo: 0u64,
+        uuid_hi: 0u64
+    )
+    val queue = NvmeQueueAssignment(
+        queue_id: SIMPLEOS_NVME_SYSTEM_QUEUE_ID,
+        role: NvmeQueueRole.System,
+        controller_id: 0u32,
+        nsid: 1u32,
+        owner_task: 0u64,
+        max_depth: 128u16,
+        rights: CAP_RIGHT_READ + CAP_RIGHT_WRITE + CAP_RIGHT_QUEUE_SUBMIT
+    )
+    nvme_filesystem_lease(
+        ns,
+        0u64,
+        sector_count,
+        NvmeNamespaceMode.System,
+        queue,
+        "simple-driver",
+        device_grant_resource_set_label(grant),
+        true,
+        device_grant_is_isolated(grant)
+    )
+
+fn vfs_boot_nvme_system_fat32_lease_from_transfer_evidence(
+    sector_size: u32,
+    sector_count: u64,
+    evidence: NvmeTransferEvidence
+) -> Result<NvmeFilesystemLease, text>:
+    """Build the production boot FAT32 lease only after NVMe transfer evidence is ready."""
+    val ns = NvmeNamespaceIdentity(
+        controller_id: 0u32,
+        nsid: 1u32,
+        lba_size: sector_size,
+        lba_count: sector_count,
+        eui64: 0u64,
+        nguid_lo: 0u64,
+        nguid_hi: 0u64,
+        uuid_lo: 0u64,
+        uuid_hi: 0u64
+    )
+    val queue = NvmeQueueAssignment(
+        queue_id: SIMPLEOS_NVME_SYSTEM_QUEUE_ID,
+        role: NvmeQueueRole.System,
+        controller_id: 0u32,
+        nsid: 1u32,
+        owner_task: 0u64,
+        max_depth: 128u16,
+        rights: CAP_RIGHT_READ + CAP_RIGHT_WRITE + CAP_RIGHT_QUEUE_SUBMIT
+    )
+    nvme_filesystem_lease_from_transfer_evidence(
+        evidence,
+        ns,
+        0u64,
+        sector_count,
+        queue,
+        NvmeFilesystemConsumer.Fat32
+    )
+
+fn vfs_boot_nvme_active_lease_count_for_test() -> u64:
+    g_vfs_nvme_active_leases.len()
+
+fn vfs_boot_nvme_direct_adapter_count_for_test() -> u64:
+    g_vfs_nvme_direct_adapters.len()
+
+fn vfs_boot_nvme_reset_active_leases_for_test():
+    g_vfs_nvme_active_leases = []
+    g_vfs_nvme_direct_adapter_leases = []
+    g_vfs_nvme_direct_adapters = []
+
+fn vfs_boot_nvme_record_active_lease_for_test(lease: NvmeFilesystemLease) -> text:
+    val reason = nvme_filesystem_lease_set_acceptance_reason(g_vfs_nvme_active_leases, lease)
+    if reason != "ready":
+        return reason
+    g_vfs_nvme_active_leases = g_vfs_nvme_active_leases.push(lease)
+    "ready"
+
+fn vfs_boot_nvme_active_lease_acceptance_reason(lease: NvmeFilesystemLease) -> text:
+    nvme_filesystem_lease_set_acceptance_reason(g_vfs_nvme_active_leases, lease)
+
+fn nvme_boot_runtime_driver_ready_for_user_assignment() -> text:
+    if not g_nvme.is_initialized():
+        return "nvme-user-assign-driver-not-initialized"
+    if g_nvme.get_sector_count() == 0u64:
+        return "nvme-user-assign-driver-empty-namespace"
+    if g_nvme.get_sector_size() < 512u32:
+        return "nvme-user-assign-driver-invalid-sector-size"
+    "ready"
+
+fn vfs_boot_nvme_release_user_queue_owner_for_failed_assignment(lease: NvmeFilesystemLease) -> text:
+    val released = g_nvme.release_user_data_queue_owner(
+        lease.queue.queue_id,
+        lease.namespace_identity.controller_id,
+        lease.namespace_identity.nsid,
+        lease.queue.owner_task
+    )
+    if not released:
+        return "nvme-user-assign-queue-owner-release-failed"
+    "ready"
+
+fn vfs_boot_nvme_release_active_lease(lease: NvmeFilesystemLease) -> text:
+    var remaining: [NvmeFilesystemLease] = []
+    var remaining_adapter_leases: [NvmeFilesystemLease] = []
+    var remaining_adapters: [NvmeBlockAdapter] = []
+    var removed = false
+    for active in g_vfs_nvme_active_leases:
+        if not removed and nvme_filesystem_lease_same_identity(active, lease):
+            removed = true
+        else:
+            remaining = remaining.push(active)
+    if not removed:
+        return "nvme-fs-active-lease-not-found"
+
+    var adapter_idx: i32 = 0
+    var removed_direct_adapter = false
+    for adapter_lease in g_vfs_nvme_direct_adapter_leases:
+        if not nvme_filesystem_lease_same_identity(adapter_lease, lease):
+            remaining_adapter_leases = remaining_adapter_leases.push(adapter_lease)
+            if adapter_idx < g_vfs_nvme_direct_adapters.len():
+                remaining_adapters = remaining_adapters.push(g_vfs_nvme_direct_adapters[adapter_idx])
+        else:
+            removed_direct_adapter = true
+        adapter_idx = adapter_idx + 1
+
+    g_vfs_nvme_active_leases = remaining
+    g_vfs_nvme_direct_adapter_leases = remaining_adapter_leases
+    g_vfs_nvme_direct_adapters = remaining_adapters
+    if lease.mode == NvmeNamespaceMode.UserAssigned and removed_direct_adapter:
+        val released_queue_owner = g_nvme.release_user_data_queue_owner(
+            lease.queue.queue_id,
+            lease.namespace_identity.controller_id,
+            lease.namespace_identity.nsid,
+            lease.queue.owner_task
+        )
+        if not released_queue_owner:
+            return "nvme-fs-user-queue-owner-release-failed"
+    "ready"
+
+fn vfs_boot_nvme_submit_active_lease_direct_4k(lease: NvmeFilesystemLease, req: DirectIoRequest) -> Result<DirectIoResult, FsError>:
+    """Submit 4KiB direct I/O through the concrete adapter for an admitted NVMe filesystem lease."""
+    var idx: i32 = 0
+    for adapter_lease in g_vfs_nvme_direct_adapter_leases:
+        if nvme_filesystem_lease_same_identity(adapter_lease, lease):
+            if idx >= g_vfs_nvme_direct_adapters.len():
+                return Err(FsError.StaleHandle)
+            return g_vfs_nvme_direct_adapters[idx].submit_direct_4k_shared_dma(req)
+        idx = idx + 1
+    Err(FsError.NotFound)
+
+fn vfs_boot_nvme_submit_active_lease_direct_4k_batch(lease: NvmeFilesystemLease, req: DirectIoBatchRequest) -> Result<DirectIoResult, FsError>:
+    """Submit batched 4KiB direct I/O through the concrete adapter for an admitted NVMe filesystem lease."""
+    var idx: i32 = 0
+    for adapter_lease in g_vfs_nvme_direct_adapter_leases:
+        if nvme_filesystem_lease_same_identity(adapter_lease, lease):
+            if idx >= g_vfs_nvme_direct_adapters.len():
+                return Err(FsError.StaleHandle)
+            return g_vfs_nvme_direct_adapters[idx].submit_direct_4k_shared_dma_batch(req)
+        idx = idx + 1
+    Err(FsError.NotFound)
+
+fn vfs_boot_nvme_submit_active_lease_direct_4k_batch_write_through(lease: NvmeFilesystemLease, req: DirectIoBatchRequest) -> Result<DirectIoResult, FsError>:
+    """Submit batched 4KiB direct write-through I/O through an admitted NVMe filesystem lease."""
+    var idx: i32 = 0
+    for adapter_lease in g_vfs_nvme_direct_adapter_leases:
+        if nvme_filesystem_lease_same_identity(adapter_lease, lease):
+            if idx >= g_vfs_nvme_direct_adapters.len():
+                return Err(FsError.StaleHandle)
+            return g_vfs_nvme_direct_adapters[idx].submit_direct_4k_shared_dma_batch_write_through(req)
+        idx = idx + 1
+    Err(FsError.NotFound)
+
+fn vfs_boot_nvme_assign_user_namespace_lease(
+    evidence: NvmeTransferEvidence,
+    grant: DeviceGrant,
+    controller_id: u32,
+    nsid: u32,
+    namespace_lba_size: u32,
+    namespace_lba_count: u64,
+    base_lba: u64,
+    lease_lba_count: u64,
+    queue_id: u16,
+    owner_task: u64,
+    max_depth: u16,
+    consumer: NvmeFilesystemConsumer
+) -> Result<NvmeFilesystemLease, text>:
+    val lease_result = nvme_user_assigned_filesystem_lease_from_grant_checked(
+        evidence,
+        grant,
+        controller_id,
+        nsid,
+        namespace_lba_size,
+        namespace_lba_count,
+        base_lba,
+        lease_lba_count,
+        queue_id,
+        owner_task,
+        max_depth,
+        consumer,
+        g_vfs_nvme_active_leases
+    )
+    if lease_result.is_err():
+        return lease_result
+    val lease = lease_result.unwrap()
+    g_vfs_nvme_active_leases = g_vfs_nvme_active_leases.push(lease)
+    Ok(lease)
+
+fn vfs_boot_nvme_assign_user_namespace_driver_instance(
+    name: text,
+    dev: BlockDevice,
+    evidence: NvmeTransferEvidence,
+    grant: DeviceGrant,
+    controller_id: u32,
+    nsid: u32,
+    namespace_lba_size: u32,
+    namespace_lba_count: u64,
+    base_lba: u64,
+    lease_lba_count: u64,
+    queue_id: u16,
+    owner_task: u64,
+    max_depth: u16,
+    consumer: NvmeFilesystemConsumer
+) -> Result<DriverInstance, text>:
+    val lease_result = nvme_user_assigned_filesystem_lease_from_grant_checked(
+        evidence,
+        grant,
+        controller_id,
+        nsid,
+        namespace_lba_size,
+        namespace_lba_count,
+        base_lba,
+        lease_lba_count,
+        queue_id,
+        owner_task,
+        max_depth,
+        consumer,
+        g_vfs_nvme_active_leases
+    )
+    if lease_result.is_err():
+        return Err(lease_result.unwrap_err())
+    val lease = lease_result.unwrap()
+    val driver_result = vfs_nvme_buffered_driver_instance_for_lease(name, dev, lease, consumer)
+    if driver_result.is_err():
+        return driver_result
+    g_vfs_nvme_active_leases = g_vfs_nvme_active_leases.push(lease)
+    driver_result
+
+fn vfs_boot_nvme_system_namespace_nsid_for_user_assignment() -> u32:
+    for lease in g_vfs_nvme_active_leases:
+        if lease.mode == NvmeNamespaceMode.System:
+            return lease.namespace_identity.nsid
+    g_nvme.get_namespace_id()
+
+fn nvme_boot_runtime_assign_user_namespace_hardware_driver_instance(
+    name: text,
+    evidence: NvmeTransferEvidence,
+    grant: DeviceGrant,
+    controller_id: u32,
+    nsid: u32,
+    namespace_lba_size: u32,
+    namespace_lba_count: u64,
+    base_lba: u64,
+    lease_lba_count: u64,
+    queue_id: u16,
+    owner_task: u64,
+    max_depth: u16,
+    consumer: NvmeFilesystemConsumer
+) -> Result<DriverInstance, text>:
+    val driver_ready = nvme_boot_runtime_driver_ready_for_user_assignment()
+    if driver_ready != "ready":
+        return Err(driver_ready)
+    val lease_result = nvme_user_assigned_filesystem_lease_from_grant_checked(
+        evidence,
+        grant,
+        controller_id,
+        nsid,
+        namespace_lba_size,
+        namespace_lba_count,
+        base_lba,
+        lease_lba_count,
+        queue_id,
+        owner_task,
+        max_depth,
+        consumer,
+        g_vfs_nvme_active_leases
+    )
+    if lease_result.is_err():
+        return Err(lease_result.unwrap_err())
+    val lease = lease_result.unwrap()
+    val previous_nsid = g_nvme.get_namespace_id()
+    val identify = g_nvme.identify_namespace_id(lease.namespace_identity.nsid)
+    if identify.is_err():
+        return Err("nvme-user-assign-namespace-identify-failed:" + identify.unwrap_err())
+    val queue_ready = g_nvme.ensure_user_data_queue_for_assignment(
+        lease.queue.queue_id,
+        lease.queue.max_depth,
+        lease.namespace_identity.controller_id,
+        lease.namespace_identity.nsid,
+        lease.queue.owner_task
+    )
+    if queue_ready.is_err():
+        if previous_nsid != lease.namespace_identity.nsid:
+            val restore_after_queue = g_nvme.identify_namespace_id(previous_nsid)
+            if restore_after_queue.is_err():
+                return Err("nvme-user-assign-namespace-restore-failed:" + restore_after_queue.unwrap_err())
+        return Err("nvme-user-assign-queue-create-failed:" + queue_ready.unwrap_err())
+    val adapter_result = NvmeBlockAdapter.for_filesystem_lease(g_nvme, lease, consumer)
+    if adapter_result.is_err():
+        if previous_nsid != lease.namespace_identity.nsid:
+            val restore_after_adapter = g_nvme.identify_namespace_id(previous_nsid)
+            if restore_after_adapter.is_err():
+                val _release_after_restore_fail = vfs_boot_nvme_release_user_queue_owner_for_failed_assignment(lease)
+                return Err("nvme-user-assign-namespace-restore-failed:" + restore_after_adapter.unwrap_err())
+        val queue_release = vfs_boot_nvme_release_user_queue_owner_for_failed_assignment(lease)
+        if queue_release != "ready":
+            return Err(queue_release)
+        return Err(adapter_result.unwrap_err())
+    if previous_nsid != lease.namespace_identity.nsid:
+        val restore_identify = g_nvme.identify_namespace_id(previous_nsid)
+        if restore_identify.is_err():
+            return Err("nvme-user-assign-namespace-restore-failed:" + restore_identify.unwrap_err())
+    var adapter = adapter_result.unwrap()
+    val bounce = adapter.init_bounce_buffer()
+    if bounce.is_err():
+        val queue_release = vfs_boot_nvme_release_user_queue_owner_for_failed_assignment(lease)
+        if queue_release != "ready":
+            return Err(queue_release)
+        return Err(bounce.unwrap_err())
+    val driver_result = vfs_nvme_driver_instance_for_adapter_lease(name, adapter, lease, consumer)
+    if driver_result.is_err():
+        val queue_release = vfs_boot_nvme_release_user_queue_owner_for_failed_assignment(lease)
+        if queue_release != "ready":
+            return Err(queue_release)
+        return driver_result
+    g_vfs_nvme_active_leases = g_vfs_nvme_active_leases.push(lease)
+    g_vfs_nvme_direct_adapter_leases = g_vfs_nvme_direct_adapter_leases.push(lease)
+    g_vfs_nvme_direct_adapters = g_vfs_nvme_direct_adapters.push(adapter)
+    driver_result
+
+fn nvme_boot_runtime_assign_discovered_user_namespace_hardware_driver_instance(
+    name: text,
+    evidence: NvmeTransferEvidence,
+    grant: DeviceGrant,
+    queue_id: u16,
+    owner_task: u64,
+    max_depth: u16,
+    consumer: NvmeFilesystemConsumer
+) -> Result<DriverInstance, text>:
+    val system_nsid = vfs_boot_nvme_system_namespace_nsid_for_user_assignment()
+    val user_namespace = g_nvme.identify_first_assignable_user_namespace(system_nsid)
+    if user_namespace.is_err():
+        return Err("nvme-user-assign-namespace-discovery-failed:" + user_namespace.unwrap_err())
+    val facts = user_namespace.unwrap()
+    val interface_probe = vfs_boot_nvme_assign_user_namespace_lease(
+        evidence,
+        grant,
+        0u32,
+        facts.nsid,
+        facts.formatted_lba_size,
+        facts.lba_count,
+        0u64,
+        facts.lba_count,
+        queue_id,
+        owner_task,
+        max_depth,
+        consumer
+    )
+    if interface_probe.is_err():
+        return Err(interface_probe.unwrap_err())
+    val probe_lease = interface_probe.unwrap()
+    val shared_interface = vfs_boot_nvme_shared_consumer_interface_reason(probe_lease)
+    val release_probe = vfs_boot_nvme_release_active_lease(probe_lease)
+    if shared_interface.is_err():
+        return Err("nvme-user-assign-shared-interface-not-ready:" + shared_interface.unwrap_err())
+    if release_probe != "ready":
+        return Err("nvme-user-assign-probe-release-failed:" + release_probe)
+    nvme_boot_runtime_assign_user_namespace_hardware_driver_instance(
+        name,
+        evidence,
+        grant,
+        0u32,
+        facts.nsid,
+        facts.formatted_lba_size,
+        facts.lba_count,
+        0u64,
+        facts.lba_count,
+        queue_id,
+        owner_task,
+        max_depth,
+        consumer
+    )
+
+
+# Dedicated root probe is owned here so no NvmeDriver value crosses modules.
+pub fn vfs_boot_probe_pure_simple_nvme_adapter() -> Result<BlockDevice, text>:
+    """Acquire a pure-Simple NVMe BlockDevice dedicated to root-filesystem
+    superblock probing (NVFS/DBFS), independent of the FAT32 boot path.
+
+    Fails closed (returns Err) on any grant/init/evidence/bounce-buffer
+    error so callers can cheaply fall through to the next probe. Uses a
+    LOCAL NvmeDriver instance and does not touch the FAT32 boot globals
+    (g_nvme/g_adapter) -- the FAT32 path (vfs_boot_init_production) still
+    performs its own independent pure-Simple NVMe acquisition afterwards
+    and is unaffected by this call. NvmeDriver.init_from_grant() resets the
+    controller as part of its init sequence, so a second acquisition by the
+    FAT32 path after a probe miss reinitializes cleanly (at the cost of the
+    probe adapter's DMA allocations, which are not the FAT32 path's and are
+    only ever made once per boot).
+    """
+    pcimgr_init()
+    val nvme_class: i64 = 1
+    val nvme_sub: i64 = 8
+    var nvme_idx = pcimgr_find_nvme_storage()
+    if nvme_idx < 0:
+        nvme_idx = pcimgr_find_by_class_i64(nvme_class, nvme_sub)
+    if nvme_idx < 0:
+        nvme_idx = pcimgr_find_qemu_nvme()
+    if nvme_idx < 0:
+        return Err("root-probe: no NVMe device found")
+    val grant_result = pcimgr_grant_device(nvme_idx.to_u64(), 0)
+    if grant_result.is_err():
+        return Err("root-probe: NVMe grant failed: {grant_result.unwrap_err()}")
+    val grant = grant_result.unwrap()
+    var probe_nvme = NvmeDriver.new()
+    val nvme_init = probe_nvme.init_from_grant(grant)
+    if nvme_init.is_err():
+        return Err("root-probe: NVMe init failed: {nvme_init.unwrap_err()}")
+    val transfer_evidence_result = probe_nvme.transfer_evidence_from_reversible_probe(
+        0u64,
+        "system-driver",
+        "kernel-owned-resource",
+        "system-kernel-namespace",
+        device_grant_is_isolated(grant),
+        device_grant_is_isolated(grant)
+    )
+    if transfer_evidence_result.is_err():
+        return Err("root-probe: transfer probe failed: {transfer_evidence_result.unwrap_err()}")
+    val transfer_evidence = transfer_evidence_result.unwrap()
+    val ns = NvmeNamespaceIdentity(
+        controller_id: 0u32,
+        nsid: 1u32,
+        lba_size: probe_nvme.get_sector_size(),
+        lba_count: probe_nvme.get_sector_count(),
+        eui64: 0u64,
+        nguid_lo: 0u64,
+        nguid_hi: 0u64,
+        uuid_lo: 0u64,
+        uuid_hi: 0u64
+    )
+    val queue = NvmeQueueAssignment(
+        queue_id: SIMPLEOS_NVME_SYSTEM_QUEUE_ID,
+        role: NvmeQueueRole.System,
+        controller_id: 0u32,
+        nsid: 1u32,
+        owner_task: 0u64,
+        max_depth: 128u16,
+        rights: CAP_RIGHT_READ + CAP_RIGHT_WRITE + CAP_RIGHT_QUEUE_SUBMIT
+    )
+    val lease_result = nvme_filesystem_lease_from_transfer_evidence(
+        transfer_evidence,
+        ns,
+        0u64,
+        probe_nvme.get_sector_count(),
+        queue,
+        NvmeFilesystemConsumer.Dbfs
+    )
+    if lease_result.is_err():
+        return Err("root-probe: lease policy degraded: {lease_result.unwrap_err()}")
+    val lease = lease_result.unwrap()
+    var adapter = NvmeBlockAdapter.for_identified_namespace_unchecked(
+        probe_nvme,
+        1u32,
+        SIMPLEOS_NVME_SYSTEM_QUEUE_ID,
+        0u64,
+        probe_nvme.get_sector_count(),
+        probe_nvme.get_sector_size(),
+        "root-probe"
+    )
+    val bounce_init = adapter.init_bounce_buffer()
+    if bounce_init.is_err():
+        return Err("root-probe: bounce buffer failed: {bounce_init.unwrap_err()}")
+    boot_nvme_production_handoff_provision(adapter, transfer_evidence, lease)
+    log_raw_println("[vfs-init] root-probe: pure-Simple NVMe adapter ready for NVFS/DBFS probing")
+    val dev: BlockDevice = adapter
+    Ok(dev)

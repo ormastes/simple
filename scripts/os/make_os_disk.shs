@@ -53,6 +53,7 @@ stamp_value() {
 
 validate_simple_payload_provenance() {
     simple_path="$1"
+    expected_target="${2:-x86_64-unknown-simpleos}"
     stamp_path="${simple_path}.build_stamp"
     if [ ! -f "$stamp_path" ]; then
         echo "missing SimpleOS Simple payload build stamp: $stamp_path" >&2
@@ -63,7 +64,7 @@ validate_simple_payload_provenance() {
         return 1
     fi
     for field in \
-        "target=x86_64-unknown-simpleos" \
+        "target=$expected_target" \
         "entry=src/app/simpleos_tool/main.spl" \
         "entry_closure=true"
     do
@@ -95,6 +96,26 @@ validate_simple_payload_provenance() {
             return 1
             ;;
     esac
+    if ! builder_admission_receipt="$(stamp_value builder_admission_receipt "$stamp_path")"; then
+        echo "missing SimpleOS Simple payload builder admission receipt: $stamp_path" >&2
+        return 1
+    fi
+    if ! sh scripts/os/provision_simpleos_guest_simple_fs.shs --validate-builder \
+        "$compiler" "$builder_admission_receipt" >/dev/null 2>&1; then
+        echo "invalid SimpleOS Simple payload builder authority: $stamp_path" >&2
+        return 1
+    fi
+    for binding in \
+        "builder_sha256:$(sha256_file "$compiler")" \
+        "builder_admission_receipt_sha256:$(sha256_file "$builder_admission_receipt")"
+    do
+        key=${binding%%:*}
+        expected=${binding#*:}
+        if ! actual="$(stamp_value "$key" "$stamp_path")" || [ "$actual" != "$expected" ]; then
+            echo "invalid SimpleOS Simple payload build stamp $key: $stamp_path" >&2
+            return 1
+        fi
+    done
     if ! stamped_sha256="$(stamp_value artifact_sha256 "$stamp_path")"; then
         echo "missing SimpleOS Simple payload build stamp artifact_sha256: $stamp_path" >&2
         return 1
@@ -171,7 +192,7 @@ run_self_test() {
 
     self_test_expect_pass "valid ELF shape" validate_elf_payload "$payload" 62 Simple
     write_self_test_stamp "$payload" x86_64-unknown-simpleos src/app/simpleos_tool/main.spl true cranelift bin/release/host/simple "$digest"
-    self_test_expect_pass "valid provenance" validate_simple_payload_provenance "$payload"
+    self_test_expect_fail "unsigned adjacent stamp is not provenance" validate_simple_payload_provenance "$payload" x86_64-unknown-simpleos
 
     self_test_expect_fail "missing payload" validate_elf_payload "$tmp_dir/missing" 62 Simple
     printf 'not ELF\n' > "$tmp_dir/not-elf"
@@ -196,7 +217,7 @@ run_self_test() {
     self_test_expect_fail "stale stamp" validate_simple_payload_provenance "$payload"
 
     write_self_test_stamp "$payload" bad-target src/app/simpleos_tool/main.spl true cranelift bin/release/host/simple "$digest"
-    self_test_expect_fail "wrong target" validate_simple_payload_provenance "$payload"
+    self_test_expect_fail "wrong target" validate_simple_payload_provenance "$payload" x86_64-unknown-simpleos
     write_self_test_stamp "$payload" x86_64-unknown-simpleos bad-entry true cranelift bin/release/host/simple "$digest"
     self_test_expect_fail "wrong entry" validate_simple_payload_provenance "$payload"
     write_self_test_stamp "$payload" x86_64-unknown-simpleos src/app/simpleos_tool/main.spl false cranelift bin/release/host/simple "$digest"
@@ -256,9 +277,13 @@ case "$platform:$profile" in
         SIMPLEOS_SIMPLE_BINARY=""
         ;;
     x86_64:fs-exec)
+        if [ "$compiler_in_filesystem" = true ] && [ -z "$EXPLICIT_SIMPLE_BINARY" ]; then
+            echo "missing explicit x86_64 Simple payload" >&2
+            exit 1
+        fi
         if [ -n "$EXPLICIT_SIMPLE_BINARY" ]; then
             validate_elf_payload "$SIMPLEOS_SIMPLE_BINARY" 62 Simple
-            validate_simple_payload_provenance "$SIMPLEOS_SIMPLE_BINARY"
+            validate_simple_payload_provenance "$SIMPLEOS_SIMPLE_BINARY" x86_64-unknown-simpleos
         fi
         ;;
     arm64:fs-exec)
@@ -266,8 +291,10 @@ case "$platform:$profile" in
             [ -n "$EXPLICIT_SIMPLE_BINARY" ] || {
                 echo "missing explicit ARM64 Simple payload" >&2; exit 1; }
             validate_elf_payload "$SIMPLEOS_SIMPLE_BINARY" 183 Simple
+            validate_simple_payload_provenance "$SIMPLEOS_SIMPLE_BINARY" aarch64-unknown-simpleos
         elif [ -n "$EXPLICIT_SIMPLE_BINARY" ]; then
             validate_elf_payload "$SIMPLEOS_SIMPLE_BINARY" 183 Simple
+            validate_simple_payload_provenance "$SIMPLEOS_SIMPLE_BINARY" aarch64-unknown-simpleos
         else
             SIMPLEOS_SIMPLE_BINARY=""
         fi
@@ -290,6 +317,7 @@ case "$platform:$profile" in
         fi
         if [ -n "$EXPLICIT_SIMPLE_BINARY" ]; then
             validate_elf_payload "$SIMPLEOS_SIMPLE_BINARY" 243 Simple
+            validate_simple_payload_provenance "$SIMPLEOS_SIMPLE_BINARY" riscv64-unknown-simpleos
         else
             SIMPLEOS_SIMPLE_BINARY=""
         fi

@@ -18,6 +18,10 @@ SERVER_ELF=build/os/arm64_servers/servers.elf
 KERNEL="$OUT_DIR/kernel.elf"
 IMAGE="$OUT_DIR/server-disk.img"
 RECEIPT="$OUT_DIR/receipt.env"
+RECEIPT_SIGNATURE="$OUT_DIR/receipt.sig"
+SIGNING_KEY=${SIMPLEOS_FS_SERVERS_SIGNING_KEY:-}
+TRUST_KEY=${SIMPLEOS_FS_SERVERS_TRUST_KEY:-}
+TRUST_POLICY="$ROOT_DIR/scripts/check/policy/simpleos-filesystem-server-receipt.env"
 SERIAL1="$OUT_DIR/boot1.serial.log"
 SERIAL2="$OUT_DIR/boot2.serial.log"
 QMP="$OUT_DIR/qmp.sock"
@@ -48,7 +52,15 @@ receipt_field() {
 
 mkdir -p "$OUT_DIR" "$CACHE" "$GENERATED_SOURCE/generated"
 chmod 700 "$OUT_DIR"
-for cmd in qemu-system-aarch64 nc socat timeout sha256sum readelf nm cc ss git cmp sed; do require_cmd "$cmd"; done
+for cmd in qemu-system-aarch64 nc socat timeout sha256sum readelf nm cc ss git cmp sed openssl; do require_cmd "$cmd"; done
+[ -n "$SIGNING_KEY" ] && [ -f "$SIGNING_KEY" ] && [ ! -L "$SIGNING_KEY" ] || fail "regular signing key is required"
+[ -n "$TRUST_KEY" ] && [ -f "$TRUST_KEY" ] && [ ! -L "$TRUST_KEY" ] || fail "regular trust key is required"
+[ -f "$TRUST_POLICY" ] && [ ! -L "$TRUST_POLICY" ] || fail "regular trust policy is required"
+[ "$(receipt_field schema "$TRUST_POLICY")" = simpleos-filesystem-server-receipt-policy-v1 ] || fail "invalid trust policy schema"
+[ "$(receipt_field provisioning_status "$TRUST_POLICY")" = provisioned ] || fail "filesystem server trust policy is unprovisioned"
+TRUST_KEY_ID=$(receipt_field trusted_key_id "$TRUST_POLICY") || fail "trust policy key id missing"
+TRUST_KEY_SHA=$(receipt_field trusted_key_sha256 "$TRUST_POLICY") || fail "trust policy key hash missing"
+[ "$(sha256_file "$TRUST_KEY")" = "$TRUST_KEY_SHA" ] || fail "unpinned filesystem server trust key"
 [ -n "$COMPILER" ] || fail "SIMPLE_BUILD_COMPILER is required; no compiler default is admitted"
 [ -x "$COMPILER" ] || fail "admitted current-source compiler is not executable: $COMPILER"
 [ -n "$COMPILER_ADMISSION" ] || fail "SIMPLEOS_ARM64_SERVERS_COMPILER_ADMISSION_RECEIPT is required"
@@ -65,6 +77,10 @@ qemu_admission_source_snapshot \
     || fail "current worktree content manifest failed"
 SOURCE_MANIFEST_SHA=$QEMU_ADMISSION_SOURCE_FINGERPRINT
 SOURCE_MANIFEST_FILES=$QEMU_ADMISSION_SOURCE_FILE_COUNT
+SOURCE_MANIFEST_FILE="$OUT_DIR/source.manifest"
+printf 'schema=SimpleOsFilesystemServerSourceManifestV1\nsource_tree_fingerprint=%s\nsource_file_count=%s\nsource_roots=%s\n' \
+    "$SOURCE_MANIFEST_SHA" "$SOURCE_MANIFEST_FILES" "$SOURCE_MANIFEST_ROOTS" > "$SOURCE_MANIFEST_FILE"
+SOURCE_MANIFEST_FILE_SHA=$(sha256_file "$SOURCE_MANIFEST_FILE")
 COMPILER_SHA=$(sha256_file "$COMPILER")
 COMPILER_CANONICAL=$(canonical_path "$COMPILER")
 COMPILER_VERSION=$("$COMPILER" --version 2>/dev/null) || fail "compiler version probe failed"
@@ -203,6 +219,18 @@ wait_ready() {
     return 1
 }
 
+require_filesystem_launch_markers() {
+    serial=$1
+    grep -Fq '[arm64-servers] executable read=ok path=/SERVERS.ELF bytes=' "$serial" \
+        || fail "filesystem server executable read marker missing"
+    grep -Fq '[fs-exec] spawn:pid=' "$serial" \
+        || fail "filesystem server scheduler spawn marker missing"
+    grep -Fq 'path=/SERVERS.ELF' "$serial" \
+        || fail "filesystem server launch path marker missing"
+    grep -Fq '[arm64-servers-user] executable=/SERVERS.ELF launch=ok' "$serial" \
+        || fail "filesystem server user-entry marker missing"
+}
+
 qemu_stop() {
     printf '{"execute":"qmp_capabilities"}\n{"execute":"quit"}\n' | socat - UNIX-CONNECT:"$QMP" >/dev/null 2>&1 \
         || fail "QMP shutdown request failed"
@@ -255,6 +283,7 @@ EOF
 
 qemu_start "$SERIAL1"
 wait_ready "$SERIAL1" || fail "boot 1 server readiness marker missing"
+require_filesystem_launch_markers "$SERIAL1"
 printf 'GET /files/SERVER.HTM HTTP/1.1\r\nHost: simpleos\r\nConnection: close\r\n\r\n' > "$OUT_DIR/http.request"
 tcp_request "$HTTP_PORT" "$OUT_DIR/http.request" "$OUT_DIR/http.response"
 sed '1,/^\r$/d' "$OUT_DIR/http.response" > "$OUT_DIR/http.body"
@@ -277,6 +306,7 @@ IMAGE_COMMIT_SHA=$(sha256_file "$IMAGE")
 
 qemu_start "$SERIAL2"
 wait_ready "$SERIAL2" || fail "boot 2 server readiness marker missing"
+require_filesystem_launch_markers "$SERIAL2"
 db_command "OPEN as=operator credential=$CREDENTIAL" "$OUT_DIR/db.reboot.open"
 [ "$(one_line "$OUT_DIR/db.reboot.open")" = 'OK session=1' ] || fail "reboot authenticated DB OPEN failed"
 db_command 'BEGIN session=1' "$OUT_DIR/db.reboot.begin"
@@ -381,20 +411,27 @@ DB_REBOOT_SHA=$(sha256_file "$OUT_DIR/db.read.boot2")
 SERIAL1_SHA=$(sha256_file "$SERIAL1")
 SERIAL2_SHA=$(sha256_file "$SERIAL2")
 COMMAND_SHA=$(printf '%s' 'scripts/check/check-simpleos-arm64-servers-qemu.shs qemu-arm64-cpu' | sha256sum | awk '{print $1}')
-for sensitive_image in $SENSITIVE_IMAGES; do rm -f "$sensitive_image"; done
-for sensitive_image in $SENSITIVE_IMAGES; do
-    [ ! -e "$sensitive_image" ] || fail "sensitive credential-bearing image was not destroyed: $sensitive_image"
-done
-for sensitive_file in $SENSITIVE_FILES; do rm -f "$sensitive_file"; done
-if grep -R -a -F -q -- "$CREDENTIAL" "$OUT_DIR"; then
-    fail "retained artifact contains the database credential"
-fi
 
 cat > "$RECEIPT" <<EOF
 schema=SimpleOsServerExecutionReceiptV1
+trust_key_id=$TRUST_KEY_ID
+trust_key_sha256=$TRUST_KEY_SHA
 mode=qemu-arm64-cpu
+architecture=arm64
+filesystem_launch_verified=true
+filesystem_launch_path=/SERVERS.ELF
+filesystem_type=fat32
+host_fallback_used=false
+producer_path=$(canonical_path scripts/check/check-simpleos-arm64-servers-qemu.shs)
+producer_sha256=$(sha256_file scripts/check/check-simpleos-arm64-servers-qemu.shs)
+executable_path=$(canonical_path "$SERVER_ELF")
+kernel_path=$(canonical_path "$KERNEL")
+boot1_serial_path=$(canonical_path "$SERIAL1")
+boot2_serial_path=$(canonical_path "$SERIAL2")
 source_revision=$SOURCE_REVISION
-source_manifest_sha256=$SOURCE_MANIFEST_SHA
+source_manifest_path=$(canonical_path "$SOURCE_MANIFEST_FILE")
+source_manifest_sha256=$SOURCE_MANIFEST_FILE_SHA
+source_tree_fingerprint=$SOURCE_MANIFEST_SHA
 source_manifest_file_count=$SOURCE_MANIFEST_FILES
 source_manifest_roots=$SOURCE_MANIFEST_ROOTS
 target_identity=qemu-system-aarch64:virt:cortex-a72:tcg
@@ -404,6 +441,7 @@ compiler_admission_schema=simpleos-arm64-current-source-compiler-admission-v1
 compiler_admission_receipt_sha256=$ADMISSION_SHA
 kernel_sha256=$KERNEL_SHA
 image_sha256=$IMAGE_REBOOT_SHA
+image_staged_path=$(canonical_path "$IMAGE")
 image_staged_sha256=$IMAGE_STAGED_SHA
 image_after_commit_sha256=$IMAGE_COMMIT_SHA
 command_sha256=$COMMAND_SHA
@@ -437,5 +475,19 @@ target_credential_zeroization=unverified
 command=scripts/check/check-simpleos-arm64-servers-qemu.shs qemu-arm64-cpu
 EOF
 chmod 600 "$RECEIPT"
+openssl dgst -sha256 -sign "$SIGNING_KEY" -out "$RECEIPT_SIGNATURE" "$RECEIPT" \
+    || fail "receipt signing failed"
+openssl dgst -sha256 -verify "$TRUST_KEY" -signature "$RECEIPT_SIGNATURE" "$RECEIPT" >/dev/null 2>&1 \
+    || fail "receipt signature self-verification failed"
+sh scripts/check/check-simpleos-filesystem-servers-qemu.shs --validate arm64 \
+    "$RECEIPT" "$RECEIPT_SIGNATURE" "$TRUST_KEY" >/dev/null || fail "receipt/artifact binding validation failed"
+for sensitive_image in $SENSITIVE_IMAGES; do rm -f "$sensitive_image"; done
+for sensitive_image in $SENSITIVE_IMAGES; do
+    [ ! -e "$sensitive_image" ] || fail "sensitive credential-bearing image was not destroyed: $sensitive_image"
+done
+for sensitive_file in $SENSITIVE_FILES; do rm -f "$sensitive_file"; done
+if grep -R -a -F -q -- "$CREDENTIAL" "$OUT_DIR"; then
+    fail "retained artifact contains the database credential"
+fi
 rm -f "$CREDENTIAL_FILE" "$OUT_DIR/db.request" "$OUT_DIR/http.request"
 printf 'PASS SimpleOsServerExecutionReceiptV1=%s\n' "$RECEIPT"

@@ -1,0 +1,232 @@
+#!/bin/sh
+# Fail-closed admission for filesystem-launched HTTP and DB servers on the
+# production x86_64, ARM64, and RISC-V 64 QEMU lanes.  A kernel-resident server
+# or bind-only marker is intentionally not admissible.
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$ROOT_DIR"
+POLICY="$ROOT_DIR/scripts/check/policy/simpleos-filesystem-server-receipt.env"
+
+fail() { printf 'simpleos-filesystem-servers-qemu: FAIL: %s\n' "$*" >&2; exit 1; }
+field() {
+    local key=$1 receipt=$2
+    awk -F= -v wanted="$key" '
+        $1 == wanted { count++; value = substr($0, length(wanted) + 2) }
+        END { if (count == 1 && value != "") print value; else exit 1 }
+    ' "$receipt"
+}
+require_eq() {
+    local key=$1 expected=$2 eq_file=$3 actual
+    actual=$(field "$key" "$eq_file") || fail "missing-or-duplicate-field:$key:$eq_file"
+    [ "$actual" = "$expected" ] || fail "field-mismatch:$key:expected=$expected:actual=$actual"
+}
+require_sha256() {
+    local key=$1 receipt=$2 value
+    value=$(field "$key" "$receipt") || fail "missing-or-duplicate-field:$key:$receipt"
+    case "$value" in *[!0-9a-f]*|'') fail "invalid-sha256:$key" ;; esac
+    [ "${#value}" -eq 64 ] || fail "invalid-sha256-length:$key"
+    [ "$value" != 0000000000000000000000000000000000000000000000000000000000000000 ] ||
+        fail "zero-sha256-forbidden:$key"
+}
+
+require_bound_file() {
+    local path_key=$1 hash_key=$2 receipt=$3 path declared observed
+    path=$(field "$path_key" "$receipt") || fail "missing-or-duplicate-field:$path_key:$receipt"
+    case "$path" in /*) ;; *) fail "artifact-path-not-absolute:$path_key" ;; esac
+    [ -f "$path" ] && [ ! -L "$path" ] || fail "artifact-not-regular:$path_key:$path"
+    require_sha256 "$hash_key" "$receipt"
+    declared=$(field "$hash_key" "$receipt")
+    observed=$(sha256sum "$path" | awk '{print $1}')
+    [ "$declared" = "$observed" ] || fail "artifact-hash-mismatch:$hash_key"
+}
+
+validate_receipt() {
+    local arch=$1 receipt=$2 signature=$3 trust_key=$4 policy=$5 mode=${6:-live}
+    local key_hash expected_key_hash expected_key_id evidence_paths
+    [ -f "$receipt" ] && [ ! -L "$receipt" ] || fail "receipt-not-regular:$arch:$receipt"
+    [ -f "$signature" ] && [ ! -L "$signature" ] || fail "signature-not-regular:$arch:$signature"
+    [ -f "$trust_key" ] && [ ! -L "$trust_key" ] || fail "trust-key-not-regular:$trust_key"
+    [ -f "$policy" ] && [ ! -L "$policy" ] || fail "trust-policy-not-regular:$policy"
+    require_eq schema simpleos-filesystem-server-receipt-policy-v1 "$policy"
+    if [ "$mode" = live ]; then
+        require_eq provisioning_status provisioned "$policy"
+    else
+        require_eq provisioning_status fixture "$policy"
+    fi
+    key_hash=$(sha256sum "$trust_key" | awk '{print $1}')
+    expected_key_hash=$(field trusted_key_sha256 "$policy") || fail "trust-policy-key-hash-missing"
+    expected_key_id=$(field trusted_key_id "$policy") || fail "trust-policy-key-id-missing"
+    [ "$key_hash" = "$expected_key_hash" ] || fail "unpinned-trust-key:$arch"
+    [ "$(LC_ALL=C stat -c '%a' "$receipt")" -le 600 ] || fail "receipt-permissions-too-open:$arch"
+    openssl dgst -sha256 -verify "$trust_key" -signature "$signature" "$receipt" >/dev/null 2>&1 ||
+        fail "receipt-signature-invalid:$arch"
+    require_eq schema SimpleOsServerExecutionReceiptV1 "$receipt"
+    require_eq trust_key_id "$expected_key_id" "$receipt"
+    require_eq trust_key_sha256 "$expected_key_hash" "$receipt"
+    require_eq architecture "$arch" "$receipt"
+    require_eq filesystem_launch_verified true "$receipt"
+    require_eq filesystem_launch_path /SERVERS.ELF "$receipt"
+    require_eq filesystem_type fat32 "$receipt"
+    require_eq host_fallback_used false "$receipt"
+    require_eq exit_status 0 "$receipt"
+    require_eq http_file_verified true "$receipt"
+    require_eq db_commit_verified true "$receipt"
+    require_eq db_boot1_read_verified true "$receipt"
+    require_eq db_boot2_read_verified true "$receipt"
+    require_eq db_reboot_verified true "$receipt"
+    require_eq shutdown_verified true "$receipt"
+    require_eq credential_image_destroyed_after_run true "$receipt"
+    require_eq target_credential_zeroization verified "$receipt"
+    require_eq fresh_qemu_processes 2 "$receipt"
+    require_sha256 source_manifest_sha256 "$receipt"
+    require_sha256 image_staged_sha256 "$receipt"
+    evidence_paths="$(field source_manifest_path "$receipt")
+$(field image_staged_path "$receipt")
+$(field producer_path "$receipt")
+$(field executable_path "$receipt")
+$(field kernel_path "$receipt")
+$(field boot1_serial_path "$receipt")
+$(field boot2_serial_path "$receipt")"
+    [ "$(printf '%s\n' "$evidence_paths" | sort -u | wc -l | tr -d ' ')" -eq 7 ] ||
+        fail "aliased-evidence-paths:$arch"
+    require_bound_file source_manifest_path source_manifest_sha256 "$receipt"
+    require_bound_file image_staged_path image_staged_sha256 "$receipt"
+    require_bound_file producer_path producer_sha256 "$receipt"
+    require_bound_file executable_path executable_sha256 "$receipt"
+    require_bound_file kernel_path kernel_sha256 "$receipt"
+    require_bound_file boot1_serial_path boot1_serial_sha256 "$receipt"
+    require_bound_file boot2_serial_path boot2_serial_sha256 "$receipt"
+    grep -Fq 'executable read=ok path=/SERVERS.ELF bytes=' "$(field boot1_serial_path "$receipt")" ||
+        fail "boot1-filesystem-read-marker-missing:$arch"
+    grep -Fq 'path=/SERVERS.ELF' "$(field boot1_serial_path "$receipt")" ||
+        fail "boot1-filesystem-launch-marker-missing:$arch"
+    grep -Fq 'executable=/SERVERS.ELF launch=ok' "$(field boot2_serial_path "$receipt")" ||
+        fail "boot2-user-entry-marker-missing:$arch"
+    printf 'PASS filesystem-server-receipt arch=%s receipt=%s\n' "$arch" "$receipt"
+}
+
+self_test() {
+    tmp=$(mktemp -d "${TMPDIR:-/tmp}/simpleos-fs-servers.XXXXXX")
+    trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+    receipt="$tmp/receipt.env"
+    openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$tmp/key.pem" >/dev/null 2>&1
+    openssl pkey -in "$tmp/key.pem" -pubout -out "$tmp/trust.pem" >/dev/null 2>&1
+    printf 'producer\n' > "$tmp/producer"
+    printf 'source-entry=%s\n' "$(sha256sum "$tmp/producer" | awk '{print $1}')" > "$tmp/source.manifest"
+    printf 'executable\n' > "$tmp/executable"
+    printf 'kernel\n' > "$tmp/kernel"
+    printf 'disk-image\n' > "$tmp/image"
+    printf '%s\n' '[x] executable read=ok path=/SERVERS.ELF bytes=11' '[fs-exec] spawn:pid=1 path=/SERVERS.ELF' > "$tmp/boot1"
+    printf '%s\n' '[x] executable read=ok path=/SERVERS.ELF bytes=11' '[fs-exec] spawn:pid=1 path=/SERVERS.ELF' '[x] executable=/SERVERS.ELF launch=ok' > "$tmp/boot2"
+    hash() { sha256sum "$1" | awk '{print $1}'; }
+    key_hash=$(hash "$tmp/trust.pem")
+    cat > "$tmp/policy.env" <<EOF
+schema=simpleos-filesystem-server-receipt-policy-v1
+provisioning_status=fixture
+authority=contract-selftest
+trusted_key_id=contract-fixture-key
+trusted_key_sha256=$key_hash
+EOF
+    make_receipt() {
+        architecture=$1
+        cat > "$receipt" <<EOF
+schema=SimpleOsServerExecutionReceiptV1
+trust_key_id=contract-fixture-key
+trust_key_sha256=$key_hash
+architecture=$architecture
+filesystem_launch_verified=true
+filesystem_launch_path=/SERVERS.ELF
+filesystem_type=fat32
+host_fallback_used=false
+exit_status=0
+http_file_verified=true
+db_commit_verified=true
+db_boot1_read_verified=true
+db_boot2_read_verified=true
+db_reboot_verified=true
+shutdown_verified=true
+credential_image_destroyed_after_run=true
+target_credential_zeroization=verified
+fresh_qemu_processes=2
+source_manifest_path=$tmp/source.manifest
+source_manifest_sha256=$(hash "$tmp/source.manifest")
+producer_path=$tmp/producer
+producer_sha256=$(hash "$tmp/producer")
+executable_path=$tmp/executable
+executable_sha256=$(hash "$tmp/executable")
+kernel_path=$tmp/kernel
+kernel_sha256=$(hash "$tmp/kernel")
+image_staged_path=$tmp/image
+image_staged_sha256=$(hash "$tmp/image")
+boot1_serial_path=$tmp/boot1
+boot1_serial_sha256=$(hash "$tmp/boot1")
+boot2_serial_path=$tmp/boot2
+boot2_serial_sha256=$(hash "$tmp/boot2")
+EOF
+        chmod 600 "$receipt"
+        openssl dgst -sha256 -sign "$tmp/key.pem" -out "$tmp/receipt.sig" "$receipt"
+    }
+    make_receipt arm64
+    validate_receipt arm64 "$receipt" "$tmp/receipt.sig" "$tmp/trust.pem" "$tmp/policy.env" fixture >/dev/null
+    sed 's/filesystem_launch_verified=true/filesystem_launch_verified=false/' "$receipt" > "$tmp/reject.env"
+    chmod 600 "$tmp/reject.env"
+    if (validate_receipt arm64 "$tmp/reject.env" "$tmp/receipt.sig" "$tmp/trust.pem" "$tmp/policy.env" fixture) >/dev/null 2>&1; then
+        fail "selftest-accepted-kernel-resident-evidence"
+    fi
+    sed 's/architecture=arm64/architecture=riscv64/' "$receipt" > "$tmp/wrong-arch.env"
+    chmod 600 "$tmp/wrong-arch.env"
+    if (validate_receipt x86_64 "$tmp/wrong-arch.env" "$tmp/receipt.sig" "$tmp/trust.pem" "$tmp/policy.env" fixture) >/dev/null 2>&1; then
+        fail "selftest-accepted-cross-architecture-receipt"
+    fi
+    cp "$receipt" "$tmp/forged.env"
+    sed -i 's/http_file_verified=true/http_file_verified=false/' "$tmp/forged.env"
+    if (validate_receipt arm64 "$tmp/forged.env" "$tmp/receipt.sig" "$tmp/trust.pem" "$tmp/policy.env" fixture) >/dev/null 2>&1; then
+        fail "selftest-accepted-mutated-signed-receipt"
+    fi
+    printf 'tampered\n' >> "$tmp/boot1"
+    if (validate_receipt arm64 "$receipt" "$tmp/receipt.sig" "$tmp/trust.pem" "$tmp/policy.env" fixture) >/dev/null 2>&1; then
+        fail "selftest-accepted-mutated-artifact"
+    fi
+    printf '%s\n' '[x] executable read=ok path=/SERVERS.ELF bytes=11' '[fs-exec] spawn:pid=1 path=/SERVERS.ELF' > "$tmp/boot1"
+    sed 's#boot2_serial_path=.*#boot2_serial_path='"$tmp/boot1"'#; s#boot2_serial_sha256=.*#boot2_serial_sha256='"$(hash "$tmp/boot1")"'#' "$receipt" > "$tmp/alias.env"
+    openssl dgst -sha256 -sign "$tmp/key.pem" -out "$tmp/alias.sig" "$tmp/alias.env"
+    if (validate_receipt arm64 "$tmp/alias.env" "$tmp/alias.sig" "$tmp/trust.pem" "$tmp/policy.env" fixture) >/dev/null 2>&1; then
+        fail "selftest-accepted-aliased-evidence-files"
+    fi
+    openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$tmp/forged-key.pem" >/dev/null 2>&1
+    openssl pkey -in "$tmp/forged-key.pem" -pubout -out "$tmp/forged-trust.pem" >/dev/null 2>&1
+    openssl dgst -sha256 -sign "$tmp/forged-key.pem" -out "$tmp/forged.sig" "$receipt"
+    if (validate_receipt arm64 "$receipt" "$tmp/forged.sig" "$tmp/forged-trust.pem" "$tmp/policy.env" fixture) >/dev/null 2>&1; then
+        fail "selftest-accepted-forged-trust-key"
+    fi
+    sed 's/target_credential_zeroization=verified/target_credential_zeroization=unverified/' "$receipt" > "$tmp/unverified.env"
+    openssl dgst -sha256 -sign "$tmp/key.pem" -out "$tmp/unverified.sig" "$tmp/unverified.env"
+    if (validate_receipt arm64 "$tmp/unverified.env" "$tmp/unverified.sig" "$tmp/trust.pem" "$tmp/policy.env" fixture) >/dev/null 2>&1; then
+        fail "selftest-accepted-unverified-target-credential-zeroization"
+    fi
+    printf 'PASS simpleos-filesystem-servers-qemu-selftest checked=8\n'
+}
+
+case "${1:-}" in
+    --self-test) self_test; exit 0 ;;
+    --validate)
+        [ "$#" -eq 5 ] || fail "usage:--validate ARCH RECEIPT SIGNATURE TRUST_KEY"
+        validate_receipt "$2" "$3" "$4" "$5" "$POLICY" live
+        exit 0
+        ;;
+    '') ;;
+    *) fail "unknown-argument:$1" ;;
+esac
+
+[ -n "${SIMPLEOS_X86_64_FS_SERVERS_RECEIPT:-}" ] || fail "missing-receipt:x86_64"
+[ -n "${SIMPLEOS_ARM64_FS_SERVERS_RECEIPT:-}" ] || fail "missing-receipt:arm64"
+[ -n "${SIMPLEOS_RISCV64_FS_SERVERS_RECEIPT:-}" ] || fail "missing-receipt:riscv64"
+[ -n "${SIMPLEOS_FS_SERVERS_TRUST_KEY:-}" ] || fail "missing-trust-key"
+[ -n "${SIMPLEOS_X86_64_FS_SERVERS_SIGNATURE:-}" ] || fail "missing-signature:x86_64"
+[ -n "${SIMPLEOS_ARM64_FS_SERVERS_SIGNATURE:-}" ] || fail "missing-signature:arm64"
+[ -n "${SIMPLEOS_RISCV64_FS_SERVERS_SIGNATURE:-}" ] || fail "missing-signature:riscv64"
+validate_receipt x86_64 "$SIMPLEOS_X86_64_FS_SERVERS_RECEIPT" "$SIMPLEOS_X86_64_FS_SERVERS_SIGNATURE" "$SIMPLEOS_FS_SERVERS_TRUST_KEY" "$POLICY" live
+validate_receipt arm64 "$SIMPLEOS_ARM64_FS_SERVERS_RECEIPT" "$SIMPLEOS_ARM64_FS_SERVERS_SIGNATURE" "$SIMPLEOS_FS_SERVERS_TRUST_KEY" "$POLICY" live
+validate_receipt riscv64 "$SIMPLEOS_RISCV64_FS_SERVERS_RECEIPT" "$SIMPLEOS_RISCV64_FS_SERVERS_SIGNATURE" "$SIMPLEOS_FS_SERVERS_TRUST_KEY" "$POLICY" live
+printf 'PASS simpleos-filesystem-servers-qemu architectures=x86_64,arm64,riscv64\n'

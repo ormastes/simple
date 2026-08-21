@@ -1,0 +1,22 @@
+extern fn rt_file_read_text(path: text) -> text
+
+describe "SOSIX spawn hot-path contract":
+    it "passes the existing path buffer directly to the spawn syscall":
+        val source = rt_file_read_text("src/os/sosix/process.spl")
+        val spawn_start = source.index_of("fn sosix_process_spawn(")
+        val wait_start = source.index_of("fn sosix_process_waitpid(")
+        expect(spawn_start).to_be_greater_than(-1)
+        expect(wait_start).to_be_greater_than(spawn_start)
+        val spawn = source.slice(spawn_start, wait_start)
+
+        expect(spawn).to_contain("val path_ptr = rt_string_data(path) as u64")
+        expect(spawn).to_contain("syscall(_SOSIX_SYS_SPAWN_BINARY, path_ptr, path.len().to_u64(), priority as u64, 0, 0)")
+        expect(spawn.contains("rt_copy_user_byte")).to_equal(false)
+        expect(spawn.contains("rt_string_from_byte_array")).to_equal(false)
+        expect(spawn.contains("copied:")).to_equal(false)
+        expect(spawn.contains("log_info")).to_equal(false)
+
+    it "keeps kernel argv marshaling byte access outside the spawn hot path":
+        val source = rt_file_read_text("src/os/sosix/process.spl")
+        expect(source).to_contain("fn sosix_marshal_string_vector_kern(")
+        expect(source).to_contain("buf.push(rt_copy_user_byte(s_ptr + ci))")

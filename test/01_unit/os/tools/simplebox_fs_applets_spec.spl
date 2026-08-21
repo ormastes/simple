@@ -1,0 +1,49 @@
+use std.spec
+use os.tools.simplebox.simplebox_fs_applets.{
+    SimpleboxWordCount, simplebox_count_bytes, simplebox_head_prefix_bytes,
+    SIMPLEBOX_FILE_LIMIT, SIMPLEBOX_FILE_BYTES_LIMIT, SIMPLEBOX_READ_CHUNK_BYTES
+}
+
+fn empty_count() -> SimpleboxWordCount:
+    SimpleboxWordCount(lines: 0u64, words: 0u64, bytes: 0u64, in_word: false)
+
+describe "streaming simplebox filesystem applet cores":
+    it "carries a word across chunk boundaries without double counting":
+        val first = simplebox_count_bytes(empty_count(), [97u8, 108u8, 112u8])
+        val final = simplebox_count_bytes(first, [104u8, 97u8, 32u8, 98u8, 10u8])
+        expect(final.lines).to_equal(1)
+        expect(final.words).to_equal(2)
+        expect(final.bytes).to_equal(8)
+        expect(final.in_word).to_equal(false)
+
+    it "uses byte semantics for invalid UTF-8 and all POSIX whitespace":
+        val count = simplebox_count_bytes(empty_count(),
+            [255u8, 11u8, 254u8, 12u8, 253u8, 13u8, 10u8])
+        expect(count.lines).to_equal(1)
+        expect(count.words).to_equal(3)
+        expect(count.bytes).to_equal(7)
+
+    it "returns only the prefix through the requested newline":
+        val (prefix, remaining, reached) =
+            simplebox_head_prefix_bytes([97u8, 10u8, 98u8, 10u8, 99u8], 2)
+        expect(prefix).to_equal(4)
+        expect(remaining).to_equal(0)
+        expect(reached).to_equal(true)
+
+    it "carries the remaining line count into the next chunk":
+        val (prefix, remaining, reached) =
+            simplebox_head_prefix_bytes([97u8, 10u8, 98u8], 3)
+        expect(prefix).to_equal(3)
+        expect(remaining).to_equal(2)
+        expect(reached).to_equal(false)
+
+    it "writes nothing and requests no next chunk at zero lines":
+        val (prefix, remaining, reached) = simplebox_head_prefix_bytes([97u8], 0)
+        expect(prefix).to_equal(0)
+        expect(remaining).to_equal(0)
+        expect(reached).to_equal(true)
+
+    it "keeps file count byte count and reads explicitly bounded":
+        expect(SIMPLEBOX_FILE_LIMIT).to_equal(128)
+        expect(SIMPLEBOX_FILE_BYTES_LIMIT).to_equal(67108864)
+        expect(SIMPLEBOX_READ_CHUNK_BYTES).to_equal(65536)

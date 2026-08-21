@@ -102,6 +102,14 @@ describe "dbd RESP framing: an empty command is rejected by the engine":
         expect(eng.dispatch(["GET", "k"])).to_equal("$-1\r\n")
 
 describe "dbd journal replay: corrupt records do not corrupt the store":
+    it "rejects unsigned SET injection before applying preceding J1 records":
+        val first = dbd_encode_journal_line(["SET", "safe", "yes"])
+        var eng = DbdEngine.new()
+        expect(eng.replay_journal(
+            first + "\nSET attacker injected\n")).to_equal(0i64 - 1i64)
+        expect(eng.dispatch(["GET", "safe"])).to_equal("$-1\r\n")
+        expect(eng.dispatch(["GET", "attacker"])).to_equal("$-1\r\n")
+
     it "rejects the complete journal before applying any partial state":
         val journal = "SET alpha 1\nSET beta 2\nGARBAGE junk\nSET alpha 9\n"
         var eng = DbdEngine.new()
@@ -128,11 +136,14 @@ describe "dbd journal replay: corrupt records do not corrupt the store":
         expect(eng.dispatch(["GET", "persisted"])).to_equal("$-1\r\n")
 
 describe "dbd journal encoding: ambiguous / oversized args":
-    it "an arg containing a space is rejected (returns empty line)":
-        expect(dbd_encode_journal_line(["SET", "k", "a b"])).to_equal("")
-
-    it "an arg containing a newline is rejected (returns empty line)":
-        expect(dbd_encode_journal_line(["SET", "k", "line1\nline2"])).to_equal("")
+    it "delimiter-bearing values are encoded without journal injection":
+        val spaced = dbd_encode_journal_line(["SET", "k", "a b"])
+        val multiline = dbd_encode_journal_line(["SET", "k", "line1\nline2"])
+        expect(dbd_decode_journal_line(spaced)).to_equal(["SET", "k", "a b"])
+        expect(dbd_decode_journal_line(multiline)).to_equal(
+            ["SET", "k", "line1\nline2"])
+        expect(spaced.contains("a b")).to_be(false)
+        expect(multiline.contains("\n")).to_be(false)
 
     it "an oversized space-free value round-trips through the engine intact":
         val bigv = _big(5000)
@@ -151,10 +162,14 @@ describe "dbd journal encoding: ambiguous / oversized args":
         expect(dbd_encode_journal_line(["SET", "key"])).to_equal("")
         expect(dbd_encode_journal_line(["DEL", "key", "extra"])).to_equal("")
 
-    it "empty and control-bearing journal fields fail closed":
+    it "empty keys fail closed while control-bearing values remain framed":
         expect(dbd_encode_journal_line(["SET", "", "value"])).to_equal("")
-        expect(dbd_encode_journal_line(["SET", "key", "value\rforged"])).to_equal("")
-        expect(dbd_encode_journal_line(["SET", "key", "value\0forged"])).to_equal("")
+        val cr = dbd_encode_journal_line(["SET", "key", "value\rforged"])
+        val nul = dbd_encode_journal_line(["SET", "key", "value\0forged"])
+        expect(dbd_decode_journal_line(cr)).to_equal(
+            ["SET", "key", "value\rforged"])
+        expect(dbd_decode_journal_line(nul)).to_equal(
+            ["SET", "key", "value\0forged"])
 
 describe "dbd production startup admission":
     it "fails closed while the authenticated transport owners are absent":
@@ -165,6 +180,8 @@ describe "dbd production startup admission":
             "auth=BlockedBootCredentialOwner"))
         assert_true(DBD_CAPABILITY_STATE.contains(
             "filesystem_launch=VerifiedArtifactSecurityGatedV1"))
+        assert_true(DBD_CAPABILITY_STATE.contains(
+            "journal=ChecksummedBase64V1"))
         assert_true(DBD_CAPABILITY_STATE.contains(
             "auth_framing=DbdMutableAuthRequestOwnerV1"))
         assert_true(DBD_CAPABILITY_STATE.contains("tls=Blocked"))

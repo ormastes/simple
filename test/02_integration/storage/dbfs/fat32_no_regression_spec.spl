@@ -13,6 +13,7 @@ Verifies the currently implemented FAT32 mount-table surface:
 use std.spipe.*
 use std.io_runtime.{read_file}
 use std.fs_driver.block_device.{BlockDevice}
+use std.fs_driver.ops.{FsDriver}
 use std.fs_driver.fat32_stub.{FsFat32Driver}
 use std.fs_driver.types.{OpenFlags, MountOptions}
 use std.fs_driver.instance.{DriverInstance}
@@ -90,6 +91,20 @@ describe "FAT32 hosted seam — mount table registration":
         expect(source.contains("=" + legacy_type + ".new(")).to_equal(false)
         expect(source.contains("(" + legacy_type + ".new(")).to_equal(false)
         expect(source.contains("FsFat32Driver.new(")).to_equal(true)
+
+    it "routes atomic replace lifecycle operations through the shared mount table":
+        var driver = FsFat32Driver.new_ram_backed_with_file("OLD.BIN", "hello")
+        driver.mount(MountOptions.default()).unwrap()
+        var table = MountTable.new()
+        table.mount("/boot", DriverInstance.Fat32(driver), MountOptions.default()).unwrap()
+        table.rename("/boot/OLD.BIN", "/boot/NEW.BIN").unwrap()
+        expect(table.stat("/boot/OLD.BIN").is_err()).to_equal(true)
+        expect(table.stat("/boot/NEW.BIN").is_ok()).to_equal(true)
+        val opened = table.open("/boot/NEW.BIN", OpenFlags.read_only()).unwrap()
+        table.ftruncate(opened, 3).unwrap()
+        table.close(opened).unwrap()
+        table.unlink("/boot/NEW.BIN").unwrap()
+        expect(table.stat("/boot/NEW.BIN").is_err()).to_equal(true)
 
 describe "FAT32 hosted seam — DBFS co-existence":
     it "FAT32 and DBFS can both be mounted simultaneously":

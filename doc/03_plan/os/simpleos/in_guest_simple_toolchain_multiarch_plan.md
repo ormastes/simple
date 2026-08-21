@@ -4,6 +4,29 @@ Status: ACTIVE 2026-07-13. Goal: the Simple toolchain (interpreter + compiler)
 runs as a SimpleOS FS executable, board-proven on all three 64-bit arches, with
 Simple CI building the per-arch SimpleOS binaries.
 
+## Filesystem admission update (2026-08-21)
+
+`scripts/os/provision_simpleos_guest_simple_fs.shs` is now the canonical
+staging boundary for the 64-bit lanes. It accepts only an explicitly named
+pure-Simple-built, static little-endian ELF64 whose build stamp binds the exact
+target and artifact SHA-256. The builder must be the canonical `simple` beside
+a Stage-2 `admission.env`; the existing bootstrap authority verifier replays
+that receipt's source/runtime/tool/sanity/receiver hash graph. The payload stamp
+and image receipt bind its admission identity, builder SHA-256, admission
+receipt SHA-256, and source snapshot revision. An adjacent self-issued stamp or
+unkeyed image receipt therefore cannot authorize a payload. It rejects Rust/bootstrap seeds, wrong-machine
+ELFs, dynamic interpreters, stale stamps, and mutated payloads. The resulting
+FAT image binds the same CLI bytes to `/usr/bin/simple`, the interpreter role,
+the compiler role, and the loader role and emits a hash-bound receipt beside
+the image. `check-simpleos-fs-toolchain-qemu-matrix.shs` requires that receipt
+for x86_64, aarch64, and riscv64 before it permits a live phase-1/phase-2 claim.
+
+This is admission and staging evidence, not execution evidence. A PASS still
+requires the fresh QEMU transaction to interpret the guest source, compile a
+new guest ELF, and execute that exact ELF through the guest loader. Current
+workspace prerequisites for x86_64 and riscv64 sysroots/runtime archives are
+absent, so no new target artifact or live receipt was claimed in this update.
+
 ## Where we are (verified 2026-07-13)
 
 - x86_64: `bin/release/x86_64-unknown-simpleos/simple` (3.8MB static ELF, entry

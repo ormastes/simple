@@ -6,6 +6,7 @@ set -eu
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 CHECKER="$ROOT_DIR/scripts/check/check-simpleos-compiler-filesystem-qemu.shs"
+PROVISIONER="$ROOT_DIR/scripts/os/provision_simpleos_guest_simple_fs.shs"
 MODE=run
 ARCH_FILTER=
 OUTPUT_DIR="$ROOT_DIR/build/test-artifacts/simpleos-fs-toolchain-qemu-matrix"
@@ -36,6 +37,14 @@ image_for() {
         riscv64) printf '%s/build/os/fat32-riscv64.img' "$ROOT_DIR" ;;
     esac
 }
+target_for() {
+    case "$1" in
+        x86_64) printf '%s' x86_64-unknown-simpleos ;;
+        arm64) printf '%s' aarch64-unknown-simpleos ;;
+        riscv64) printf '%s' riscv64-unknown-simpleos ;;
+        *) return 1 ;;
+    esac
+}
 emit_cells() {
     arch=$1 status=$2 evidence=$3 reason=$4
     for tool in $tools; do
@@ -46,6 +55,13 @@ emit_cells() {
 }
 
 if [ "$MODE" = self-test ]; then
+    [ "$(target_for x86_64)" = x86_64-unknown-simpleos ]
+    [ "$(target_for arm64)" = aarch64-unknown-simpleos ]
+    [ "$(target_for riscv64)" = riscv64-unknown-simpleos ]
+    if target_for x86_32 >/dev/null 2>&1; then
+        echo 'simpleos_fs_toolchain_matrix_self_test=fail:32bit-target-receipt-must-not-be-inferred'
+        exit 1
+    fi
     cell_count=0
     for arch in $arches; do
         [ -n "$(checker_arch "$arch")" ]
@@ -78,8 +94,17 @@ for arch in $arches; do
     [ -z "$ARCH_FILTER" ] || [ "$ARCH_FILTER" = "$arch" ] || continue
     selected=$((selected + 1))
     log="$OUTPUT_DIR/$arch.check.log"
+    image=$(image_for "$arch")
+    if target=$(target_for "$arch" 2>/dev/null); then
+        receipt="${image}.simple-toolchain.sdn"
+        if ! sh "$PROVISIONER" --validate-receipt "$receipt" >"$log" 2>&1; then
+            emit_cells "$arch" blocked none "target-native-simple-filesystem-receipt-unavailable:$target"
+            blocked=$((blocked + 1))
+            continue
+        fi
+    fi
     set +e
-    sh "$CHECKER" --arch="$(checker_arch "$arch")" --image="$(image_for "$arch")" \
+    sh "$CHECKER" --arch="$(checker_arch "$arch")" --image="$image" \
         --output-dir="$OUTPUT_DIR/$arch" >"$log" 2>&1
     rc=$?
     set -e

@@ -17,8 +17,10 @@ Verifies the live NVFS driver surfaces still work after the blob-backend refacto
 
 use std.spipe.*
 use std.fs_driver.ops.{FsDriver}
-use std.fs_driver.types.{Path, OpenFlags, MountOptions}
+use std.fs_driver.types.{Path, OpenFlags, MountOptions, ExecuteTrust}
 use std.fs_driver.error.{FsError}
+use std.fs_driver.instance.{DriverInstance}
+use std.fs_driver.mount_table.{MountTable}
 use std.fs_driver.nvfs_driver.{NvfsDriver}
 use std.fs_driver.nvfs_posix_driver.{NvfsPosixDriver}
 
@@ -45,7 +47,7 @@ describe "NVFS no-regression — NvfsDriver":
         step("Verify: NvfsDriver open + write + read round-trips bytes")
         # @req: REQ-STORAGE-NvfsNoRegr-001
         val d = make_nvfs()
-        val fh = d.open(Path(raw: "/nvfs_reg.bin"), OpenFlags(bits: 2)).unwrap()
+        val fh = d.open(Path(raw: "/nvfs_reg.bin"), OpenFlags.create_write()).unwrap()
         val payload: [u8] = [110, 118, 102, 115, 45, 111, 107]
         d.write(fh, 0, payload).unwrap()
         var got: [u8] = [0, 0, 0, 0, 0, 0, 0]
@@ -58,7 +60,7 @@ describe "NVFS no-regression — NvfsDriver":
         step("Verify: NvfsDriver stat returns correct size after write")
         # @req: REQ-STORAGE-NvfsNoRegr-001
         val d = make_nvfs()
-        val fh = d.open(Path(raw: "/size_test.bin"), OpenFlags(bits: 2)).unwrap()
+        val fh = d.open(Path(raw: "/size_test.bin"), OpenFlags.create_write()).unwrap()
         val payload: [u8] = [49, 50, 51, 52, 53]
         d.write(fh, 0, payload).unwrap()
         d.close(fh).unwrap()
@@ -69,7 +71,7 @@ describe "NVFS no-regression — NvfsDriver":
         step("Verify: NvfsDriver pwrite updates the requested range without moving data")
         # @req: REQ-STORAGE-NvfsNoRegr-001
         val d = make_nvfs()
-        val fh = d.open(Path(raw: "/append_only.bin"), OpenFlags(bits: 2)).unwrap()
+        val fh = d.open(Path(raw: "/append_only.bin"), OpenFlags.create_write()).unwrap()
         val payload: [u8] = [1, 2, 3, 4]
         d.write(fh, 0, payload).unwrap()
         val patch: [u8] = [9]
@@ -81,7 +83,7 @@ describe "NVFS no-regression — NvfsDriver":
 
     it "NvfsDriver rejects negative and overflowing positioned ranges":
         val d = make_nvfs()
-        val fh = d.open(Path(raw: "/range.bin"), OpenFlags(bits: 2)).unwrap()
+        val fh = d.open(Path(raw: "/range.bin"), OpenFlags.create_write()).unwrap()
         var one: [u8] = [0]
         expect(d.pread(fh, -1, one).unwrap_err()).to_equal(FsError.InvalidArg)
         expect(d.pwrite(fh, 9223372036854775807, [1u8]).unwrap_err()).to_equal(FsError.InvalidArg)
@@ -98,7 +100,7 @@ describe "NVFS no-regression — NvfsPosixDriver":
         step("Verify: NvfsPosixDriver open + write + read round-trips bytes")
         # @req: REQ-STORAGE-NvfsNoRegr-001
         val d = make_nvfs_posix()
-        val fh = d.open(Path(raw: "/posix_reg.txt"), OpenFlags.write_only().with_append()).unwrap()
+        val fh = d.open(Path(raw: "/posix_reg.txt"), OpenFlags.create_write().with_append()).unwrap()
         val payload: [u8] = [112, 111, 115, 105, 120, 45, 111, 107]
         d.write(fh, 0, payload).unwrap()
         var got: [u8] = [0, 0, 0, 0, 0, 0, 0, 0]
@@ -111,7 +113,7 @@ describe "NVFS no-regression — NvfsPosixDriver":
         step("Verify: NvfsPosixDriver pwrite updates bytes in place")
         # @req: REQ-STORAGE-NvfsNoRegr-001
         val d = make_nvfs_posix()
-        val fh = d.open(Path(raw: "/rewrite.txt"), OpenFlags.write_only().with_append()).unwrap()
+        val fh = d.open(Path(raw: "/rewrite.txt"), OpenFlags.create_write().with_append()).unwrap()
         val seed: [u8] = [65, 65, 65, 65]
         d.write(fh, 0, seed).unwrap()
         val patch: [u8] = [66, 66]
@@ -126,7 +128,7 @@ describe "NVFS no-regression — NvfsPosixDriver":
         step("Verify: NvfsPosixDriver stat returns updated size after ftruncate")
         # @req: REQ-STORAGE-NvfsNoRegr-001
         val d = make_nvfs_posix()
-        val fh = d.open(Path(raw: "/file.txt"), OpenFlags.write_only().with_append()).unwrap()
+        val fh = d.open(Path(raw: "/file.txt"), OpenFlags.create_write().with_append()).unwrap()
         val payload: [u8] = [1, 2, 3, 4]
         d.write(fh, 0, payload).unwrap()
         d.ftruncate(fh, 10).unwrap()
@@ -147,3 +149,16 @@ describe "NVFS no-regression — NvfsPosixDriver":
         var one: [u8] = [0]
         expect(d.pread(fh, -1, one).unwrap_err()).to_equal(FsError.InvalidArg)
         expect(d.pwrite(fh, 9223372036854775807, [1u8]).unwrap_err()).to_equal(FsError.InvalidArg)
+
+    it "opens an existing NVFS file for execution without creating misses":
+        var table = MountTable.new()
+        table.mount("/nvfs", DriverInstance.NvfsPosix(make_nvfs_posix()), MountOptions.default()).unwrap()
+        val created = table.open("/nvfs/program.smf", OpenFlags.create_write()).unwrap()
+        table.write(created, "SMF1").unwrap()
+        table.close(created).unwrap()
+        val binding = table.open_for_execute("/nvfs/program.smf", ExecuteTrust.Trusted).unwrap()
+        expect(binding.backend_name).to_equal("nvfs-posix-regression")
+        expect(binding.size).to_equal(4)
+        table.close(binding.file_handle).unwrap()
+        expect(table.open_for_execute("/nvfs/missing.smf", ExecuteTrust.Trusted).is_err()).to_equal(true)
+        expect(table.stat("/nvfs/missing.smf").is_err()).to_equal(true)

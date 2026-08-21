@@ -32,7 +32,9 @@ use os.services.vfs.vfs_boot_init.{
     vfs_is_ready, vfs_get_manager,
     vfs_ambient_allows, vfs_ambient_in_container, vfs_ambient_enforce,
     vfs_ambient_enter_container, vfs_ambient_enter_container_view,
-    vfs_ambient_enter_rootless_container, vfs_ambient_leave_container
+    vfs_ambient_enter_rootless_container, vfs_ambient_leave_container,
+    vfs_state_reset_rootfs, vfs_state_commit_root_nvfs, vfs_state_mount,
+    vfs_state_mark_rootfs_ready
 }
 use os.services.vfs.vfs_dispatch.{
     g_vfs_dispatch_read_file_text, g_vfs_dispatch_read_file_bytes,
@@ -111,20 +113,18 @@ fn _clone_bytes(buf: [u8]) -> [u8]:
 
 pub fn _clear_vfs_rootfs_for_test():
     """Reset rootfs-related globals so hosted driver tests start clean."""
-    g_root_fat32 = nil
-    g_root_nvfs_hosted = nil
-    g_mount_table = MountTable.new()
+    vfs_state_reset_rootfs()
 
 pub fn vfs_mount_rootfs(driver: DriverInstance) -> Result<(), text>:
     """Mount an already constructed root driver; production NVMe callers should use vfs_mount_rootfs_from_nvme_lease_checked."""
     match driver:
         case NvfsPosix(d):
-            g_root_nvfs_hosted = Some(d)
+            vfs_state_commit_root_nvfs(d)
         case _:
-            val mount_r = g_mount_table.mount("/", driver, MountOptions.default())
+            val mount_r = vfs_state_mount("/", driver, MountOptions.default())
             if mount_r.is_err():
                 return Err("vfs_mount_rootfs: mount failed")
-    g_vfs_initialized = true
+    vfs_state_mark_rootfs_ready()
     Ok(())
 
 pub fn vfs_mount_rootfs_from_nvme_lease_checked(
@@ -157,15 +157,15 @@ fn _g_vfs_root_nvfs_hosted_read_file_bytes(path: text) -> [u8]:
     val relpath = Path(raw: path)
     val stat_r = driver.stat(relpath)
     if stat_r.is_err():
-        g_root_nvfs_hosted = Some(driver)
+        vfs_state_commit_root_nvfs(driver)
         return []
     val size = stat_r.unwrap().size.to_i64()
     if size <= 0:
-        g_root_nvfs_hosted = Some(driver)
+        vfs_state_commit_root_nvfs(driver)
         return []
     val open_r = driver.open(relpath, OpenFlags.read_only())
     if open_r.is_err():
-        g_root_nvfs_hosted = Some(driver)
+        vfs_state_commit_root_nvfs(driver)
         return []
     val handle = open_r.unwrap()
     var buf: [u8] = []
@@ -176,7 +176,7 @@ fn _g_vfs_root_nvfs_hosted_read_file_bytes(path: text) -> [u8]:
     val (read_driver, read_r) = nvfs_hosted_read_owned(driver, handle, 0, buf)
     driver = read_driver
     driver.close(handle)
-    g_root_nvfs_hosted = Some(driver)
+    vfs_state_commit_root_nvfs(driver)
     if read_r.is_err():
         return []
     val n = read_r.unwrap()
@@ -200,7 +200,7 @@ fn _g_vfs_root_nvfs_hosted_file_size(path: text) -> i64:
         return -1
     val driver = g_root_nvfs_hosted.unwrap()
     val stat_r = driver.stat(Path(raw: path))
-    g_root_nvfs_hosted = Some(driver)
+    vfs_state_commit_root_nvfs(driver)
     if stat_r.is_err():
         return -1
     stat_r.unwrap().size.to_i64()

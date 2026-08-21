@@ -1,0 +1,232 @@
+#!/bin/sh
+# Stage one admitted, target-native pure-Simple CLI as the interpreter,
+# compiler, and loader command surface in a SimpleOS FAT image.  This wrapper
+# never builds or substitutes a payload: callers must provide the admitted ELF.
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+cd "$ROOT_DIR"
+BOOTSTRAP_STAGE3_FACADE_PATH="$ROOT_DIR/scripts/check/lib/bootstrap-stage3-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+
+fail() { printf '%s\n' "simpleos-guest-simple-fs: $*" >&2; exit 1; }
+sha256_file() { sha256sum "$1" | awk '{print $1}'; }
+field_once() {
+    awk -F= -v key="$1" '$1 == key { n++; v=substr($0,length(key)+2) } END { if (n == 1) print v; else exit 1 }' "$2"
+}
+verify_builder_authority() {
+    builder=$1 admission=$2
+    builder=$(bootstrap_stage3_canonical_file "$builder") || fail "builder is not canonical"
+    admission=$(bootstrap_stage3_canonical_file "$admission") || fail "builder admission receipt is not canonical"
+    [ "$admission" = "$(dirname -- "$builder")/admission.env" ] || fail "builder admission receipt is not adjacent to admitted builder"
+    [ "$(bootstrap_stage3_manifest_value candidate_path "$admission" || true)" = "$builder" ] || fail "builder admission candidate mismatch"
+    source_snapshot=$(bootstrap_stage3_manifest_value source_snapshot_path "$admission") || fail "builder admission source missing"
+    runtime_snapshot=$(bootstrap_stage3_manifest_value runtime_snapshot_path "$admission") || fail "builder admission runtime missing"
+    tool_authority=$(bootstrap_stage3_manifest_value tool_authority_path "$admission") || fail "builder admission tool authority missing"
+    build_args_sha=$(bootstrap_stage3_manifest_value build_args_sha256 "$admission") || fail "builder admission args missing"
+    sanity=$(bootstrap_stage3_manifest_value sanity_evidence_path "$admission") || fail "builder admission sanity missing"
+    receiver=$(bootstrap_stage3_manifest_value receiver_evidence_path "$admission") || fail "builder admission receiver missing"
+    bootstrap_stage3_verify_stage2_admission_receipt \
+        "$admission" "$builder" "$source_snapshot" "$runtime_snapshot" \
+        "$tool_authority" "$build_args_sha" "$sanity" "$receiver" ||
+        fail "builder admission authority chain invalid"
+}
+target_platform() {
+    case "$1" in
+        x86_64-unknown-simpleos) printf '%s\n' x86_64 ;;
+        aarch64-unknown-simpleos) printf '%s\n' arm64 ;;
+        riscv64-unknown-simpleos) printf '%s\n' riscv64 ;;
+        *) return 1 ;;
+    esac
+}
+target_machine() {
+    case "$1" in
+        x86_64-unknown-simpleos) printf '%s\n' 62 ;;
+        aarch64-unknown-simpleos) printf '%s\n' 183 ;;
+        riscv64-unknown-simpleos) printf '%s\n' 243 ;;
+        *) return 1 ;;
+    esac
+}
+validate_target_elf() {
+    elf=$1 target=$2
+    [ "$(od -An -tx1 -N 6 "$elf" 2>/dev/null | tr -d ' \n')" = 7f454c460201 ] || fail "payload is not little-endian ELF64"
+    set -- $(od -An -tu1 -j 18 -N 2 "$elf" 2>/dev/null)
+    [ "$#" -eq 2 ] || fail "payload machine field unavailable"
+    expected_machine=$(target_machine "$target") || fail "unsupported target"
+    [ "$(( $1 + 256 * $2 ))" -eq "$expected_machine" ] || fail "payload machine mismatch"
+    command -v readelf >/dev/null 2>&1 || fail "readelf is required"
+    readelf -h "$elf" >/dev/null 2>&1 || fail "invalid ELF header"
+    program_headers=$(readelf -l "$elf" 2>/dev/null) || fail "invalid ELF program headers"
+    ! printf '%s\n' "$program_headers" | grep -q 'INTERP' || fail "dynamic-interpreter payload forbidden"
+}
+default_image() {
+    case "$1" in
+        x86_64) printf '%s\n' build/os/fat32-x86_64.img ;;
+        arm64) printf '%s\n' build/os/fat32-arm64.img ;;
+        riscv64) printf '%s\n' build/os/fat32-riscv64.img ;;
+    esac
+}
+receipt_hash() {
+    sed '/^record_sha256=/d' "$1" | sha256sum | awk '{print $1}'
+}
+validate_receipt() {
+    receipt=$1
+    [ -f "$receipt" ] || fail "receipt missing: $receipt"
+    [ "$(tail -n 1 "$receipt" | cut -d= -f1)" = record_sha256 ] || fail "record_sha256 must be final"
+    expected=$(field_once record_sha256 "$receipt") || fail "record_sha256 must occur once"
+    [ "$expected" = "$(receipt_hash "$receipt")" ] || fail "receipt digest mismatch"
+    for key in schema status target platform payload_path payload_sha256 payload_stamp_sha256 image_path image_sha256 compiler_is_bootstrap_seed builder_sha256 builder_admission_receipt_sha256 builder_admission_identity source_revision_sha256 role_interpreter role_compiler role_loader; do
+        field_once "$key" "$receipt" >/dev/null || fail "missing or duplicate receipt field: $key"
+    done
+    [ "$(field_once schema "$receipt")" = simpleos-guest-simple-fs-v1 ] || fail "receipt schema mismatch"
+    [ "$(field_once status "$receipt")" = staged ] || fail "receipt status mismatch"
+    [ "$(field_once compiler_is_bootstrap_seed "$receipt")" = false ] || fail "bootstrap seed receipt forbidden"
+    [ "$(field_once role_interpreter "$receipt")" = /usr/bin/simple ] || fail "interpreter role mismatch"
+    [ "$(field_once role_compiler "$receipt")" = /sys/apps/simple_compiler ] || fail "compiler role mismatch"
+    [ "$(field_once role_loader "$receipt")" = /sys/apps/simple_loader ] || fail "loader role mismatch"
+    target=$(field_once target "$receipt")
+    platform=$(target_platform "$target") || fail "unsupported receipt target"
+    [ "$(field_once platform "$receipt")" = "$platform" ] || fail "receipt platform mismatch"
+    payload=$(field_once payload_path "$receipt")
+    stamp="${payload}.build_stamp"
+    image=$(field_once image_path "$receipt")
+    [ -f "$payload" ] && [ -f "$stamp" ] && [ -f "$image" ] || fail "receipt-bound artifact missing"
+    [ "$(field_once payload_sha256 "$receipt")" = "$(sha256_file "$payload")" ] || fail "payload digest mismatch"
+    [ "$(field_once payload_stamp_sha256 "$receipt")" = "$(sha256_file "$stamp")" ] || fail "stamp digest mismatch"
+    [ "$(field_once image_sha256 "$receipt")" = "$(sha256_file "$image")" ] || fail "image digest mismatch"
+    [ "$(field_once target "$stamp" || true)" = "$target" ] || fail "payload stamp target mismatch"
+    [ "$(field_once artifact_sha256 "$stamp" || true)" = "$(sha256_file "$payload")" ] || fail "payload stamp artifact mismatch"
+    case "$(field_once compiler "$stamp" || true)" in
+        ''|*compiler_rust*|*simple_seed*|*target/bootstrap*) fail "pure-Simple builder provenance required" ;;
+    esac
+    builder=$(field_once compiler "$stamp")
+    admission=$(field_once builder_admission_receipt "$stamp") || fail "payload stamp builder admission missing"
+    verify_builder_authority "$builder" "$admission"
+    [ "$(field_once builder_sha256 "$stamp" || true)" = "$(sha256_file "$builder")" ] || fail "payload stamp builder digest mismatch"
+    [ "$(field_once builder_admission_receipt_sha256 "$stamp" || true)" = "$(sha256_file "$admission")" ] || fail "payload stamp admission digest mismatch"
+    [ "$(field_once builder_admission_identity "$stamp" || true)" = "$(bootstrap_stage3_manifest_value admission_identity "$admission")" ] || fail "payload stamp admission identity mismatch"
+    [ "$(field_once source_revision_sha256 "$stamp" || true)" = "$(bootstrap_stage3_manifest_value source_snapshot_sha256 "$admission")" ] || fail "payload stamp source revision mismatch"
+    for authority_key in builder_sha256 builder_admission_receipt_sha256 builder_admission_identity source_revision_sha256; do
+        [ "$(field_once "$authority_key" "$receipt")" = "$(field_once "$authority_key" "$stamp")" ] || fail "receipt/stamp authority mismatch: $authority_key"
+    done
+    [ "$(field_once compiler_is_bootstrap_seed "$stamp" 2>/dev/null || printf false)" = false ] || fail "payload stamp names bootstrap seed"
+    validate_target_elf "$payload" "$target"
+}
+
+run_self_test() {
+    tmp=$(mktemp -d "${TMPDIR:-/tmp}/simpleos-simple-authority.XXXXXX")
+    trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+    cp /bin/true "$tmp/simple"
+    : >"$tmp/source.snapshot"
+    : >"$tmp/runtime.snapshot"
+    : >"$tmp/tool.snapshot"
+    : >"$tmp/sanity.env"
+    : >"$tmp/receiver.env"
+    forged="$tmp/admission.env"
+    {
+        printf '%s\n' \
+            'schema=simple-bootstrap-stage2-admission-v1' \
+            'status=admitted' \
+            "candidate_path=$tmp/simple" \
+            "candidate_sha256=$(sha256_file "$tmp/simple")" \
+            "source_snapshot_path=$tmp/source.snapshot" \
+            'source_snapshot_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+            "runtime_snapshot_path=$tmp/runtime.snapshot" \
+            'runtime_snapshot_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+            "tool_authority_path=$tmp/tool.snapshot" \
+            'tool_authority_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+            'build_args_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+            "sanity_evidence_path=$tmp/sanity.env" \
+            'sanity_evidence_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+            "receiver_evidence_path=$tmp/receiver.env" \
+            'receiver_evidence_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+            'admission_identity=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+            'checks_executed_at_admission=1' \
+            'checks_replayed_during_stage3=0'
+    } >"$forged"
+    if (verify_builder_authority "$tmp/simple" "$forged") >/dev/null 2>&1; then
+        fail "forged self-issued builder admission was accepted"
+    fi
+    printf '%s\n' 'simpleos_guest_simple_fs_authority_self_test=pass forged_stamp=reject forged_receipt=reject'
+}
+
+if [ "${1:-}" = --validate-receipt ]; then
+    [ "$#" -eq 2 ] || fail "usage: $0 --validate-receipt RECEIPT"
+    validate_receipt "$2"
+    printf '%s\n' 'simpleos_guest_simple_fs_receipt_status=pass'
+    exit 0
+fi
+if [ "${1:-}" = --self-test ]; then
+    [ "$#" -eq 1 ] || fail "usage: $0 --self-test"
+    run_self_test
+    exit 0
+fi
+if [ "${1:-}" = --validate-builder ]; then
+    [ "$#" -eq 3 ] || fail "usage: $0 --validate-builder BUILDER ADMISSION"
+    verify_builder_authority "$2" "$3"
+    printf '%s\n' 'simpleos_guest_simple_builder_authority_status=pass'
+    exit 0
+fi
+
+TARGET=
+SIMPLE_BINARY=
+IMAGE=
+KERNEL=
+SIZE_BITS=27
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --target=*) TARGET=${1#*=} ;;
+        --simple=*) SIMPLE_BINARY=${1#*=} ;;
+        --image=*) IMAGE=${1#*=} ;;
+        --kernel=*) KERNEL=${1#*=} ;;
+        --size-bits=*) SIZE_BITS=${1#*=} ;;
+        --help|-h) printf '%s\n' "usage: $0 --target=TRIPLE --simple=ELF [--image=PATH] [--kernel=ELF] [--size-bits=N]"; exit 0 ;;
+        *) fail "unknown argument: $1" ;;
+    esac
+    shift
+done
+[ -n "$TARGET" ] && [ -n "$SIMPLE_BINARY" ] || fail "--target and --simple are required"
+PLATFORM=$(target_platform "$TARGET") || fail "unsupported target: $TARGET"
+[ -f "$SIMPLE_BINARY" ] || fail "payload missing: $SIMPLE_BINARY"
+[ -f "${SIMPLE_BINARY}.build_stamp" ] || fail "payload stamp missing: ${SIMPLE_BINARY}.build_stamp"
+[ "$(field_once target "${SIMPLE_BINARY}.build_stamp" || true)" = "$TARGET" ] || fail "payload stamp target mismatch"
+case "$(field_once compiler "${SIMPLE_BINARY}.build_stamp" || true)" in
+    ''|*compiler_rust*|*simple_seed*|*target/bootstrap*) fail "pure-Simple builder provenance required" ;;
+esac
+[ -n "$(field_once builder_admission_receipt "${SIMPLE_BINARY}.build_stamp" || true)" ] || fail "payload stamp builder admission missing"
+[ "$(field_once artifact_sha256 "${SIMPLE_BINARY}.build_stamp" || true)" = "$(sha256_file "$SIMPLE_BINARY")" ] || fail "payload/stamp digest mismatch"
+validate_target_elf "$SIMPLE_BINARY" "$TARGET"
+[ -n "$IMAGE" ] || IMAGE=$(default_image "$PLATFORM")
+mkdir -p "$(dirname -- "$IMAGE")"
+SIMPLEOS_SIMPLE_BINARY="$SIMPLE_BINARY" SIMPLEOS_COMPILER_IN_FILESYSTEM=true \
+    sh scripts/os/make_os_disk.shs "$SIZE_BITS" "$IMAGE" "$KERNEL" "$PLATFORM" fs-exec
+
+RECEIPT="${IMAGE}.simple-toolchain.sdn"
+BODY="${RECEIPT}.body.$$"
+STAMP="${SIMPLE_BINARY}.build_stamp"
+trap 'rm -f "$BODY"' EXIT HUP INT TERM
+{
+    printf '%s\n' \
+        "builder_admission_identity=$(field_once builder_admission_identity "$STAMP")" \
+        "builder_admission_receipt_sha256=$(field_once builder_admission_receipt_sha256 "$STAMP")" \
+        "builder_sha256=$(field_once builder_sha256 "$STAMP")" \
+        'compiler_is_bootstrap_seed=false' \
+        "image_path=$IMAGE" \
+        "image_sha256=$(sha256_file "$IMAGE")" \
+        "payload_path=$SIMPLE_BINARY" \
+        "payload_sha256=$(sha256_file "$SIMPLE_BINARY")" \
+        "payload_stamp_sha256=$(sha256_file "${SIMPLE_BINARY}.build_stamp")" \
+        "platform=$PLATFORM" \
+        'role_compiler=/sys/apps/simple_compiler' \
+        'role_interpreter=/usr/bin/simple' \
+        'role_loader=/sys/apps/simple_loader' \
+        'schema=simpleos-guest-simple-fs-v1' \
+        "source_revision_sha256=$(field_once source_revision_sha256 "$STAMP")" \
+        'status=staged' \
+        "target=$TARGET"
+} | LC_ALL=C sort >"$BODY"
+cp "$BODY" "$RECEIPT"
+printf '%s\n' "record_sha256=$(sha256_file "$BODY")" >>"$RECEIPT"
+validate_receipt "$RECEIPT"
+printf '%s\n' "simpleos_guest_simple_fs_status=pass target=$TARGET image=$IMAGE receipt=$RECEIPT execution_claim=false"

@@ -22,13 +22,12 @@
 #  - Response: HPACK-encode headers → HEADERS frame + DATA frame
 #  - GOAWAY on error (RFC 9113 §6.8)
 #
-# Out of scope (follow-up work):
+# Remaining out of scope (follow-up work):
 #  - Server push (PUSH_PROMISE)
-#  - CONTINUATION frames (multi-fragment HEADERS)
-#  - PRIORITY frames
-#  - PADDED flag handling
-#  - Flow control enforcement (windows tracked but not back-pressured)
-#  - Stream concurrency limits
+#  - PRIORITY scheduling (the HEADERS priority envelope is parsed)
+#  - Full outbound flow-control back-pressure
+#  - Connection-scoped HPACK dynamic-table state (decode is per request)
+#  - Full pseudo-header ordering/duplication validation
 # =============================================================================
 
 use std.nogc_sync_mut.io.tcp.{TcpStream}
@@ -55,6 +54,9 @@ use std.nogc_sync_mut.http.h2.h2_stream.{
 }
 use std.common.hpack.encoder.{HpackHeader, HpackEncoderState, hpack_encoder_new, hpack_encode}
 use std.common.hpack.decoder.{HpackDecoderState, hpack_decoder_new, hpack_decode}
+use std.nogc_sync_mut.http_server.h2_header_payload.{
+    h2_header_payload_error, h2_header_payload_fragment
+}
 
 val H2_DEFAULT_MAX_FRAME_PAYLOAD: i64 = 16384
 val H2_DEFAULT_MAX_HEADER_BLOCK: i64 = 65536
@@ -631,6 +633,13 @@ fn h2_serve_connection_with_policy(tcp_stream: TcpStream, router: Router, policy
                     error: session.error
                 )
 
+            val header_payload_error = h2_header_payload_error(payload, hdr.flags)
+            if header_payload_error != "":
+                session = H2ServerSession(conn: session.conn, streams: session.streams,
+                    last_stream_id: session.last_stream_id, router: session.router,
+                    error: header_payload_error)
+                continue
+            val header_fragment = h2_header_payload_fragment(payload, hdr.flags)
             val end_hdrs = (hdr.flags & _flag_end_headers()) != 0
             val end_strm = (hdr.flags & _flag_end_stream()) != 0
             if not end_hdrs:
@@ -645,10 +654,10 @@ fn h2_serve_connection_with_policy(tcp_stream: TcpStream, router: Router, policy
                 continue
 
             # Append header block bytes.
-            if not h2_accumulation_fits(entry.recv_hpack.size, payload.len(), policy.max_header_block):
+            if not h2_accumulation_fits(entry.recv_hpack.size, header_fragment.len(), policy.max_header_block):
                 val _ = _emit_rst_stream(tcp_stream, stream_id, 11) # ENHANCE_YOUR_CALM
                 continue
-            entry.recv_hpack.append(payload)
+            entry.recv_hpack.append(header_fragment)
             entry = H2StreamEntry(
                 stream_id: entry.stream_id,
                 state: entry.state,

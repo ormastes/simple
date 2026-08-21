@@ -36,6 +36,8 @@ SECTIONS {
         *(.data*)
     } > RAM
 
+    _kernel_load_end = .;
+
     .bss (NOLOAD) : ALIGN(4K) {
         _sbss = .;
         *(.bss*)
@@ -56,4 +58,5 @@ SECTIONS {
     } > RAM
 
 INCLUDE "examples/09_embedded/simple_os/arch/common/linker_arm_common.ld"
+    _image_size = _kernel_end - _start;
 }

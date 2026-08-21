@@ -8,6 +8,9 @@ use std.nogc_sync_mut.http_server.h2_server.{
 }
 use std.nogc_sync_mut.http.h2.h2_connection.{h2_connection_new}
 use std.nogc_sync_mut.http_server.router.{Router}
+use std.nogc_sync_mut.http_server.h2_header_payload.{
+    h2_header_payload_error, h2_header_payload_fragment
+}
 
 describe "HTTP/2 server resource policy":
     it "accepts the production limits and rejects invalid limits":
@@ -55,3 +58,16 @@ describe "HTTP/2 server resource policy":
         val retained = h2_session_remove_stream(session, 1)
         expect(retained.streams.len()).to_equal(1)
         expect(retained.streams[0].stream_id).to_equal(3)
+
+    it "extracts HPACK bytes from padded and priority HEADERS envelopes":
+        expect(h2_header_payload_error([2, 10, 11, 0, 0], 8)).to_equal("")
+        expect(h2_header_payload_fragment([2, 10, 11, 0, 0], 8)).to_equal([10, 11])
+        expect(h2_header_payload_error([0, 0, 0, 0, 0, 20, 21], 32)).to_equal("")
+        expect(h2_header_payload_fragment([0, 0, 0, 0, 0, 20, 21], 32)).to_equal([20, 21])
+        expect(h2_header_payload_error([1, 0, 0, 0, 0, 0, 30, 0], 40)).to_equal("")
+        expect(h2_header_payload_fragment([1, 0, 0, 0, 0, 0, 30, 0], 40)).to_equal([30])
+
+    it "rejects malformed HEADERS envelopes before HPACK decoding":
+        expect(h2_header_payload_error([], 8)).to_contain("padding length")
+        expect(h2_header_payload_error([0, 1, 2, 3, 4], 32)).to_contain("five-byte")
+        expect(h2_header_payload_error([3, 10, 0], 8)).to_contain("exceeds")
