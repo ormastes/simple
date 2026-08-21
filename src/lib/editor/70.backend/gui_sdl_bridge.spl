@@ -38,31 +38,47 @@ use std.common.encoding.font_registry.{simpleos_default_font_asset_candidate}
 # ============================================================
 
 # --- Initialization ---
+@unsafe(reason: "SDL initialization status ABI; zero is the failure sentinel", capabilities: [ffi])
 extern fn rt_sdl_init() -> i64
+@unsafe(reason: "SDL global ownership shutdown ABI with no returned value", capabilities: [ffi])
 extern fn rt_sdl_quit()
 
 # --- Window Management ---
+@unsafe(reason: "SDL window ownership ABI; zero is the allocation failure sentinel", capabilities: [ffi])
 extern fn rt_sdl_create_window(title: text, width: i64, height: i64) -> i64
+@unsafe(reason: "SDL window ownership release ABI; stale handles are rejected by the provider", capabilities: [ffi])
 extern fn rt_sdl_destroy_window(handle: i64)
+@unsafe(reason: "SDL window dimension ABI; zero is the invalid-handle sentinel", capabilities: [ffi])
 extern fn rt_sdl_get_window_width(handle: i64) -> i64
+@unsafe(reason: "SDL window dimension ABI; zero is the invalid-handle sentinel", capabilities: [ffi])
 extern fn rt_sdl_get_window_height(handle: i64) -> i64
 
 # --- Framebuffer Present ---
 # pixels is [i64] (SplArray* of packed RGBA i64 values)
+@unsafe(reason: "SDL borrowed pixel-array status ABI; false is the invalid descriptor or presentation sentinel", capabilities: [ffi])
 extern fn rt_sdl_present_rgba(window_handle: i64, pixels: [i64], width: i64, height: i64) -> bool
 
 # --- Event Polling ---
 # Returns event type: 0=none, 1=quit, 2=keydown, 3=keyup,
 #   4=mousemotion, 5=mousedown, 6=mouseup, 7=mousewheel,
 #   8=windowevent, 9=textinput
+@unsafe(reason: "SDL event status ABI; zero is the no-event sentinel", capabilities: [ffi])
 extern fn rt_sdl_poll_event() -> i64
+@unsafe(reason: "SDL borrowed event-state ABI; zero is the unavailable sentinel", capabilities: [ffi])
 extern fn rt_sdl_event_key_sym() -> i64
+@unsafe(reason: "SDL borrowed event-state ABI; zero is the unavailable sentinel", capabilities: [ffi])
 extern fn rt_sdl_event_key_mod() -> i64
+@unsafe(reason: "SDL borrowed event-text ABI; empty text is the unavailable sentinel", capabilities: [ffi])
 extern fn rt_sdl_event_text() -> text
+@unsafe(reason: "SDL borrowed event-state ABI; zero is an ambiguous coordinate sentinel", capabilities: [ffi])
 extern fn rt_sdl_event_mouse_x() -> i64
+@unsafe(reason: "SDL borrowed event-state ABI; zero is an ambiguous coordinate sentinel", capabilities: [ffi])
 extern fn rt_sdl_event_mouse_y() -> i64
+@unsafe(reason: "SDL borrowed window-event ABI; zero is the unavailable sentinel", capabilities: [ffi])
 extern fn rt_sdl_event_window_event_id() -> i64
+@unsafe(reason: "SDL borrowed window-event ABI; zero is the unavailable sentinel", capabilities: [ffi])
 extern fn rt_sdl_event_window_data1() -> i64
+@unsafe(reason: "SDL borrowed window-event ABI; zero is the unavailable sentinel", capabilities: [ffi])
 extern fn rt_sdl_event_window_data2() -> i64
 
 # --- Window State ---
@@ -94,15 +110,25 @@ fn _sdl_engine_pixels(pixels: [u32]) -> [i64]:
 # Initialise SDL and create a window.
 # Returns the window handle (0 on failure).
 fn gui_sdl_init(title: text, width: i64, height: i64) -> i64:
-    val ok = rt_sdl_init()
+    var ok: i64 = 0
+    unsafe(capabilities: [ffi]):
+        ok = rt_sdl_init()
     if ok == 0:
         return 0
-    rt_sdl_create_window(title, width, height)
+    var window: i64 = 0
+    unsafe(capabilities: [ffi]):
+        window = rt_sdl_create_window(title, width, height)
+    if window == 0:
+        unsafe(capabilities: [ffi]):
+            rt_sdl_quit()
+    window
 
 # Destroy a window and shut down SDL.
 fn gui_sdl_shutdown(window: i64):
-    rt_sdl_destroy_window(window)
-    rt_sdl_quit()
+    unsafe(capabilities: [ffi]):
+        rt_sdl_destroy_window(window)
+    unsafe(capabilities: [ffi]):
+        rt_sdl_quit()
 
 fn _sdl_text_command(component_id: text, x: i32, y: i32, value: text, color: u32, font_size: i32) -> DrawIrCommand:
     val candidate = simpleos_default_font_asset_candidate()
@@ -153,8 +179,12 @@ fn gui_sdl_frame_draw_ir(frame: GuiFrame, w: i32, h: i32) -> DrawIrComposition:
 fn gui_sdl_present_frame(window: i64, frame: GuiFrame) -> bool:
     if window == 0:
         return false
-    val w = rt_sdl_get_window_width(window)
-    val h = rt_sdl_get_window_height(window)
+    var w: i64 = 0
+    unsafe(capabilities: [ffi]):
+        w = rt_sdl_get_window_width(window)
+    var h: i64 = 0
+    unsafe(capabilities: [ffi]):
+        h = rt_sdl_get_window_height(window)
     if w <= 0 or h <= 0 or w > 2147483647 or h > 2147483647:
         return false
 
@@ -163,18 +193,25 @@ fn gui_sdl_present_frame(window: i64, frame: GuiFrame) -> bool:
     engine.shutdown()
     if result.skipped_command_count != 0 or result.pixels.len() != w * h:
         return false
-    rt_sdl_present_rgba(window, _sdl_engine_pixels(result.pixels), w, h)
+    unsafe(capabilities: [ffi]):
+        rt_sdl_present_rgba(window, _sdl_engine_pixels(result.pixels), w, h)
 
 # Poll one SDL event and translate it to a GuiEvent.
 fn gui_sdl_poll() -> GuiEvent:
-    val ev = rt_sdl_poll_event()
+    var ev: i64 = 0
+    unsafe(capabilities: [ffi]):
+        ev = rt_sdl_poll_event()
     if ev == 0:
         return GuiEvent(kind: "", data: "")
     if ev == 1:
         return GuiEvent(kind: "close", data: "")
     if ev == 2:
-        val sym = rt_sdl_event_key_sym()
-        val mods = rt_sdl_event_key_mod()
+        var sym: i64 = 0
+        unsafe(capabilities: [ffi]):
+            sym = rt_sdl_event_key_sym()
+        var mods: i64 = 0
+        unsafe(capabilities: [ffi]):
+            mods = rt_sdl_event_key_mod()
         val ctrl = (mods & 192) != 0
         val shift = (mods & 3) != 0
         val alt = (mods & 768) != 0
@@ -204,22 +241,39 @@ fn gui_sdl_poll() -> GuiEvent:
             return GuiEvent(kind: "key", data: char_from_code(sym))
         return GuiEvent(kind: "key", data: str(sym))
     if ev == 4:
-        val mx = rt_sdl_event_mouse_x()
-        val my = rt_sdl_event_mouse_y()
+        var mx: i64 = 0
+        unsafe(capabilities: [ffi]):
+            mx = rt_sdl_event_mouse_x()
+        var my: i64 = 0
+        unsafe(capabilities: [ffi]):
+            my = rt_sdl_event_mouse_y()
         return GuiEvent(kind: "mouse-move", data: str(mx) + "," + str(my))
     if ev == 5:
-        val mx = rt_sdl_event_mouse_x()
-        val my = rt_sdl_event_mouse_y()
+        var mx: i64 = 0
+        unsafe(capabilities: [ffi]):
+            mx = rt_sdl_event_mouse_x()
+        var my: i64 = 0
+        unsafe(capabilities: [ffi]):
+            my = rt_sdl_event_mouse_y()
         return GuiEvent(kind: "mouse-down", data: str(mx) + "," + str(my))
     if ev == 6:
         return GuiEvent(kind: "mouse-up", data: "")
     if ev == 9:
-        return GuiEvent(kind: "text", data: rt_sdl_event_text())
+        var event_text = ""
+        unsafe(capabilities: [ffi]):
+            event_text = rt_sdl_event_text()
+        return GuiEvent(kind: "text", data: event_text)
     if ev == 8:
-        val window_event = rt_sdl_event_window_event_id()
+        var window_event: i64 = 0
+        unsafe(capabilities: [ffi]):
+            window_event = rt_sdl_event_window_event_id()
         if window_event == 5 or window_event == 6:
-            val w = rt_sdl_event_window_data1()
-            val h = rt_sdl_event_window_data2()
+            var w: i64 = 0
+            unsafe(capabilities: [ffi]):
+                w = rt_sdl_event_window_data1()
+            var h: i64 = 0
+            unsafe(capabilities: [ffi]):
+                h = rt_sdl_event_window_data2()
             return GuiEvent(kind: "resize", data: str(w) + "," + str(h))
         if window_event == 12:
             return GuiEvent(kind: "focus", data: "")

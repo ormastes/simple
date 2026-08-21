@@ -22,6 +22,7 @@
 
 #include <limits.h>
 #include <stddef.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -666,7 +667,9 @@ bool rt_sdl2_present_rgba(int64_t window_handle, SplArray* pixels,
     SDL_Window* win = (SDL_Window*)(uintptr_t)window_handle;
 
     int64_t expected = width * height;
-    if (pixels->len < expected) return false;
+    if (pixels->len < expected || pixels->len < 0 || pixels->cap < pixels->len)
+        return false;
+    if (expected > 0 && !pixels->items) return false;
     if ((uint64_t)expected > SIZE_MAX / 4) return false;
 
     /* Allocate a temporary 32-bit RGBA pixel buffer */
@@ -1256,82 +1259,214 @@ int64_t rt_sdl2_get_display_usable_h(int64_t index) {
 
 /* ===== SDL editor-facing aliases ===== */
 
+/* Editor aliases expose generation-checked integer resources instead of raw
+ * SDL_Window pointers. Lookup is O(1) on the present hot path; only creation
+ * scans for a free slot. SDL window operations remain main-thread confined. */
+#define SDL_ALIAS_MAX_WINDOWS 64u
+#define SDL_ALIAS_INDEX_MASK (SDL_ALIAS_MAX_WINDOWS - 1u)
+#define SDL_ALIAS_MAX_GENERATION ((uint64_t)(INT64_MAX - SDL_ALIAS_MAX_WINDOWS) / SDL_ALIAS_MAX_WINDOWS)
+
+typedef struct {
+    int64_t raw_handle;
+    uint64_t generation;
+} SdlAliasWindowSlot;
+
+static SdlAliasWindowSlot g_sdl_alias_windows[SDL_ALIAS_MAX_WINDOWS];
+static uint64_t g_sdl_alias_next_generation = 1;
+#if defined(_MSC_VER)
+__declspec(thread) static int g_sdl_alias_thread_token;
+#else
+static _Thread_local int g_sdl_alias_thread_token;
+#endif
+static _Atomic uintptr_t g_sdl_alias_owner_thread;
+
+static uintptr_t sdl_alias_current_thread(void) {
+    return (uintptr_t)&g_sdl_alias_thread_token;
+}
+
+static bool sdl_alias_on_owner_thread(void) {
+    return atomic_load_explicit(&g_sdl_alias_owner_thread, memory_order_acquire) ==
+           sdl_alias_current_thread();
+}
+
+static int64_t sdl_alias_window_register(int64_t raw_handle) {
+    if (raw_handle == 0) return 0;
+    for (uint64_t index = 0; index < SDL_ALIAS_MAX_WINDOWS; index++) {
+        SdlAliasWindowSlot *slot = &g_sdl_alias_windows[index];
+        if (slot->raw_handle != 0) continue;
+        uint64_t generation = g_sdl_alias_next_generation++;
+        if (generation == 0 || generation > SDL_ALIAS_MAX_GENERATION) {
+            generation = 1;
+            g_sdl_alias_next_generation = 2;
+        }
+        slot->raw_handle = raw_handle;
+        slot->generation = generation;
+        return (int64_t)(generation * SDL_ALIAS_MAX_WINDOWS + index + 1);
+    }
+    return 0;
+}
+
+static SdlAliasWindowSlot *sdl_alias_window_slot(int64_t handle) {
+    if (handle <= 0) return NULL;
+    uint64_t encoded = (uint64_t)handle - 1;
+    uint64_t index = encoded & SDL_ALIAS_INDEX_MASK;
+    uint64_t generation = encoded / SDL_ALIAS_MAX_WINDOWS;
+    SdlAliasWindowSlot *slot = &g_sdl_alias_windows[index];
+    if (generation == 0 || slot->generation != generation || slot->raw_handle == 0)
+        return NULL;
+    return slot;
+}
+
+static int64_t sdl_alias_window_get(int64_t handle) {
+    SdlAliasWindowSlot *slot = sdl_alias_window_slot(handle);
+    return slot ? slot->raw_handle : 0;
+}
+
+static int64_t sdl_alias_window_remove(int64_t handle) {
+    SdlAliasWindowSlot *slot = sdl_alias_window_slot(handle);
+    if (!slot) return 0;
+    int64_t raw_handle = slot->raw_handle;
+    slot->raw_handle = 0;
+    return raw_handle;
+}
+
 int64_t rt_sdl_init(void) {
-    return rt_sdl2_init();
+    uintptr_t thread = sdl_alias_current_thread();
+    uintptr_t owner = atomic_load_explicit(&g_sdl_alias_owner_thread, memory_order_acquire);
+    if (owner != 0 && owner != thread) return 0;
+    if (owner == 0 && !atomic_compare_exchange_strong_explicit(
+            &g_sdl_alias_owner_thread, &owner, thread,
+            memory_order_acq_rel, memory_order_acquire))
+        return 0;
+    int64_t initialized = rt_sdl2_init();
+    if (initialized == 0)
+        atomic_store_explicit(&g_sdl_alias_owner_thread, 0, memory_order_release);
+    return initialized;
 }
 
 void rt_sdl_quit(void) {
+    if (!sdl_alias_on_owner_thread()) return;
+    for (uint64_t index = 0; index < SDL_ALIAS_MAX_WINDOWS; index++) {
+        int64_t raw_handle = g_sdl_alias_windows[index].raw_handle;
+        if (raw_handle != 0) {
+            g_sdl_alias_windows[index].raw_handle = 0;
+            rt_sdl2_destroy_window(raw_handle);
+        }
+    }
     rt_sdl2_quit();
+    atomic_store_explicit(&g_sdl_alias_owner_thread, 0, memory_order_release);
 }
 
 int64_t rt_sdl_create_window(const char* title, int64_t width, int64_t height) {
-    return rt_sdl2_create_window(title, width, height);
+    if (!sdl_alias_on_owner_thread()) return 0;
+    int64_t raw_handle = rt_sdl2_create_window(title, width, height);
+    int64_t handle = sdl_alias_window_register(raw_handle);
+    if (handle == 0 && raw_handle != 0) rt_sdl2_destroy_window(raw_handle);
+    return handle;
 }
 
 void rt_sdl_destroy_window(int64_t handle) {
-    rt_sdl2_destroy_window(handle);
+    if (!sdl_alias_on_owner_thread()) return;
+    int64_t raw_handle = sdl_alias_window_remove(handle);
+    if (raw_handle != 0) rt_sdl2_destroy_window(raw_handle);
 }
 
 int64_t rt_sdl_get_window_width(int64_t handle) {
-    return rt_sdl2_get_window_width(handle);
+    if (!sdl_alias_on_owner_thread()) return 0;
+    int64_t raw_handle = sdl_alias_window_get(handle);
+    return raw_handle != 0 ? rt_sdl2_get_window_width(raw_handle) : 0;
 }
 
 int64_t rt_sdl_get_window_height(int64_t handle) {
-    return rt_sdl2_get_window_height(handle);
+    if (!sdl_alias_on_owner_thread()) return 0;
+    int64_t raw_handle = sdl_alias_window_get(handle);
+    return raw_handle != 0 ? rt_sdl2_get_window_height(raw_handle) : 0;
 }
 
 void rt_sdl_set_window_title(int64_t handle, const char* title) {
-    rt_sdl2_set_window_title(handle, title);
+    if (!sdl_alias_on_owner_thread()) return;
+    int64_t raw_handle = sdl_alias_window_get(handle);
+    if (raw_handle != 0) rt_sdl2_set_window_title(raw_handle, title);
 }
 
 bool rt_sdl_present_rgba(int64_t window_handle, SplArray* pixels, int64_t width, int64_t height) {
-    return rt_sdl2_present_rgba(window_handle, pixels, width, height);
+    if (!sdl_alias_on_owner_thread()) return false;
+    int64_t raw_handle = sdl_alias_window_get(window_handle);
+    return raw_handle != 0 && rt_sdl2_present_rgba(raw_handle, pixels, width, height);
 }
 
 int64_t rt_sdl_poll_event(void) {
+    if (!sdl_alias_on_owner_thread()) return 0;
     return rt_sdl2_poll_event();
 }
 
 int64_t rt_sdl_event_key_sym(void) {
+    if (!sdl_alias_on_owner_thread()) return 0;
     return rt_sdl2_event_key_sym();
 }
 
 int64_t rt_sdl_event_key_mod(void) {
+    if (!sdl_alias_on_owner_thread()) return 0;
     return rt_sdl2_event_key_mod();
 }
 
 const char* rt_sdl_event_text(void) {
+    if (!sdl_alias_on_owner_thread()) return "";
     return rt_sdl2_event_text();
 }
 
 int64_t rt_sdl_event_mouse_x(void) {
+    if (!sdl_alias_on_owner_thread()) return 0;
     return rt_sdl2_event_mouse_x();
 }
 
 int64_t rt_sdl_event_mouse_y(void) {
+    if (!sdl_alias_on_owner_thread()) return 0;
     return rt_sdl2_event_mouse_y();
 }
 
 int64_t rt_sdl_event_mouse_button(void) {
+    if (!sdl_alias_on_owner_thread()) return 0;
     return rt_sdl2_event_mouse_button();
 }
 
 int64_t rt_sdl_window_should_close(void) {
+    if (!sdl_alias_on_owner_thread()) return 0;
     return rt_sdl2_window_should_close();
 }
 
 void rt_sdl_clear_quit(void) {
+    if (!sdl_alias_on_owner_thread()) return;
     rt_sdl2_clear_quit();
 }
 
 int64_t rt_sdl_event_window_event_id(void) {
+    if (!sdl_alias_on_owner_thread()) return 0;
     return rt_sdl2_event_window_event_id();
 }
 
 int64_t rt_sdl_event_window_data1(void) {
+    if (!sdl_alias_on_owner_thread()) return 0;
     return rt_sdl2_event_window_data1();
 }
 
 int64_t rt_sdl_event_window_data2(void) {
+    if (!sdl_alias_on_owner_thread()) return 0;
     return rt_sdl2_event_window_data2();
 }
+
+#ifdef SIMPLE_SDL_ALIAS_HANDLE_SELFTEST
+int main(void) {
+    int64_t first = sdl_alias_window_register(0x1234);
+    if (first <= 0 || sdl_alias_window_get(first) != 0x1234) return 1;
+    if (sdl_alias_window_get(first + SDL_ALIAS_MAX_WINDOWS) != 0) return 2;
+    if (sdl_alias_window_remove(first) != 0x1234) return 3;
+    if (sdl_alias_window_get(first) != 0 || sdl_alias_window_remove(first) != 0) return 4;
+
+    for (uint64_t index = 0; index < SDL_ALIAS_MAX_WINDOWS; index++) {
+        if (sdl_alias_window_register((int64_t)index + 1) <= 0) return 5;
+    }
+    if (sdl_alias_window_register(0x5678) != 0) return 6;
+    return 0;
+}
+#endif

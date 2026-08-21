@@ -68,3 +68,7 @@ passing placeholder.
    arithmetic. Before `Verified`, run macOS real-provider race/sanitizer tests,
    bind the selected provider artifact, and replace ambiguous pixel/event
    sentinels with typed results.
+10. Editor `rt_sdl_*` aliases now use O(1) generation-checked resources and
+    validated pixel descriptors. Next migrate the canonical `rt_sdl2_*`
+    declaration owner and its consumers, then bind the dynamically loaded SDL
+    artifact and sanitizer receipts before assigning verified assurance.

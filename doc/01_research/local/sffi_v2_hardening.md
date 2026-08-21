@@ -386,3 +386,27 @@ The rebuilt inventory now records 124 `unsafe_contract_declared` rows and
 13,456 missing both tag and contract. Twelve Cocoa declarations are in the
 declared state. Metadata and lexical unsafe scopes compile away and have no
 call-path cost.
+
+The editor SDL bridge exposed raw `SDL_Window*` values as public `i64`
+handles. A stale or forged value could therefore reach SDL without validation.
+Its editor-facing C aliases now use a bounded 64-slot generation table:
+creation performs the only linear free-slot scan, while width/height,
+destruction, and frame presentation decode and validate a slot in O(1). The
+provider rejects stale generations, invalid pixel length/capacity/data
+relations, and table exhaustion; failed window creation also shuts down the
+initialized subsystem. All 16 declarations now document their
+ownership/sentinel contracts and all 19 raw calls have minimal lexical
+`unsafe(ffi)` scopes. A compiled C sabotage self-test covers valid, forged,
+stale, removed, and full-table handles; Simple syntax, presentation failure
+integration, and the source audit pass. A release/acquire owner-thread token
+also rejects off-thread access without exposing the non-atomic table to a data
+race. The added hot-path work is one atomic load, constant integer arithmetic,
+and one bounded array lookup, with no mutex, map, scan, allocation, hashing, or
+extra native call. This protects the editor alias; the
+broader canonical `rt_sdl2_*` API still needs the same resource migration and
+artifact evidence before SDL can be called fully verified.
+
+The refreshed inventory records 140 `unsafe_contract_declared` rows and
+13,440 rows missing both tag and contract. All 16 editor SDL declarations are
+now in the declared state; this is contract evidence, not semantic or artifact
+verification.

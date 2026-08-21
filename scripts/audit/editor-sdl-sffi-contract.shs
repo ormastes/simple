@@ -1,0 +1,52 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+simple="$root/src/lib/editor/70.backend/gui_sdl_bridge.spl"
+provider="$root/src/runtime/runtime_sdl2.c"
+failed=0
+
+externs=$(grep -c '^extern fn rt_sdl_' "$simple" || true)
+tags=$(grep -c '^@unsafe(reason: "SDL' "$simple" || true)
+calls=$(grep 'rt_sdl_' "$simple" | grep -v -E 'extern fn|#' | wc -l | tr -d ' ')
+scopes=$(grep -c 'unsafe(capabilities: \[ffi\]):' "$simple" || true)
+if [ "$externs" -ne 16 ] || [ "$tags" -ne "$externs" ]; then
+    echo "every editor SDL extern must carry its FFI-unsafe sentinel/ownership contract" >&2
+    failed=1
+fi
+if [ "$calls" -ne "$scopes" ]; then
+    echo "every raw editor SDL call must have one minimal lexical unsafe(ffi) scope" >&2
+    failed=1
+fi
+
+if ! grep -q '#define SDL_ALIAS_MAX_WINDOWS 64u' "$provider" ||
+   ! grep -q 'sdl_alias_window_get(window_handle)' "$provider"; then
+    echo "editor SDL windows must use bounded generation-checked handles" >&2
+    failed=1
+fi
+if ! grep -q 'static _Atomic uintptr_t g_sdl_alias_owner_thread' "$provider" ||
+   ! grep -q 'memory_order_acquire' "$provider" ||
+   ! grep -q 'if (!sdl_alias_on_owner_thread()) return false' "$provider"; then
+    echo "editor SDL aliases must enforce their single-owner thread contract" >&2
+    failed=1
+fi
+if grep -A8 'static SdlAliasWindowSlot \*sdl_alias_window_slot' "$provider" |
+   grep -qE '\bfor[[:space:]]*\(|\bwhile[[:space:]]*\('; then
+    echo "editor SDL hot lookup must remain O(1)" >&2
+    failed=1
+fi
+if ! grep -q 'pixels->cap < pixels->len' "$provider" ||
+   ! grep -q 'expected > 0 && !pixels->items' "$provider"; then
+    echo "editor SDL pixel descriptor checks are missing" >&2
+    failed=1
+fi
+if ! grep -q 'SIMPLE_SDL_ALIAS_HANDLE_SELFTEST' "$provider"; then
+    echo "editor SDL generation-handle sabotage test is missing" >&2
+    failed=1
+fi
+
+if [ "$failed" -ne 0 ]; then
+    exit 1
+fi
+
+echo "editor SDL SFFI contract audit: PASS"
