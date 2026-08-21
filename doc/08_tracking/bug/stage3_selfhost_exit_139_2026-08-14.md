@@ -378,3 +378,29 @@ fix was committed.  The session's three Stage-3 repair cycles are exhausted;
 the next lane must fix the native class/optional reference-field store or its
 underlying aggregate layout with a smaller arm64 reproducer before another
 full bootstrap.
+
+### 2026-08-22 disassembly correction
+
+The earlier field-store attribution above is too broad.  ARM64 disassembly of
+the admitted candidate proves `compiler_driver_create` constructs a non-null
+`ModuleSurfacesByName` and stores it at `CompilerDriver + 0x8`.  The reset at
+the beginning of `parse_all_streaming_surfaces_in_place_impl` is absent because
+it is a valid dead store before the final replacement, not because arbitrary
+class-field stores are dropped.
+
+The retained experimental candidate gives the decisive register evidence:
+`ModuleSurfacesByName.adopt_from(self, other)` faulted at its first
+`ldr [other]` with `self != 0` and `other == 0`.  The caller obtained `other`
+from `rt_unwrap_or_trap(builder.finish())`.  The production path contains two
+consecutive `Result<ModuleSurfacesByName, text>` payload boundaries:
+`module_surfaces_freeze` returns `Ok(registry)`, then
+`module_surfaces_by_name_from_parts` unwraps and re-wraps that same class before
+`builder.finish` is unwrapped by the driver.  The inner class payload is null
+while the `Ok` discriminant survives.
+
+The prepared source repair changes the inner freeze verdict to
+`Result<(), text>` because the registry is already reference-owned and mutated
+in place, then wraps the original registry exactly once at the outer API.  A
+regression now unwraps `builder.finish()` and reads both the retained surface
+count and frozen flag.  This repair is not admitted until a fresh bounded
+bootstrap session passes Stage 3 and Stage 4.
