@@ -174,6 +174,24 @@ port numbering alone.
 
 ## Primary sources
 
+## Free-tool conclusion and live cable qualification (2026-08-22)
+
+The legitimate no-cost host stack is GNU GDB/GDB multiarch plus OpenOCD for
+supported probes, and picocom for CN16 UART. It does **not** implement Intel
+DCI: Intel describes DCI run control and memory DMA as a closed, proprietary
+ExI transport, while OpenOCD's documented Intel target support is Intel Quark,
+not Apollo Lake DCI. A target-resident GDB Remote Serial Protocol stub remains
+the free route for SimpleOS memory read/write after boot.
+
+The attached `0ea0:2211` Smart KM Link was descriptor-qualified as USB 2.0 with
+only SCSI mass-storage, HID mouse, and HID keyboard interfaces. It exposes no
+CDC/ACM UART, FTDI interface, USB 3.x Debug Capability, or Intel DCI endpoint.
+An OpenOCD probe with the packaged Tigard configuration failed at FTDI discovery
+because `0403:6010` is absent. This is a missing physical debug transport, not a
+permissions or target-configuration failure. Community UP2 reports also warn
+that DCI appeared only in some BIOS revisions and could connect/reset without
+reliable halt, so exact-board physical qualification remains mandatory.
+
 - [Intel Debug Technology](https://www.intel.com/content/www/us/en/developer/articles/technical/software-security-guidance/secure-coding/intel-debug-technology.html)
 - [Intel Target Connection Agent](https://www.intel.com/content/www/us/en/developer/articles/technical/isd-easily-configureconnect-to-different-hw-platforms-via-tca-target-connection-agent.html)
 - [Intel System Bring-Up Toolkit](https://www.intel.com/content/www/us/en/developer/tools/oneapi/system-bring-up-toolkit.html)

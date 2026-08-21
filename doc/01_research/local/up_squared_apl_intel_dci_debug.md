@@ -143,6 +143,14 @@ The current host inventory on 2026-08-22 again exposes only Smart KM Link
 `0ea0:2211`; Tigard `0403:6010`, `/dev/ttyUSB*`, Intel toolkit directories, and
 a retained DCI connection are absent.
 
+The free host tools are now complete: OpenOCD 0.12.0, GNU GDB 15.1,
+`gdb-multiarch` 15.1, and picocom 3.1. `lsusb -v` proves the Smart KM Link has
+only mass-storage and HID keyboard/mouse interfaces. The packaged
+`interface/ftdi/tigard.cfg` probe reaches OpenOCD but returns `no device found`
+for FTDI `0403:6010`. Therefore no current host tool can reach the UP2 through
+the attached cable; the next physical prerequisite is CN16 3.3-V UART or a
+qualified USB3 DCI cable/tool, not another software install.
+
 Fresh current-artifact evidence on 2026-08-22 binds kernel SHA-256
 `31ce1fb45630f3442b9d789068fb13db8c66412428c71cee096e00ccc4e1fbdf`
 and USB-image SHA-256

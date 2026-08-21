@@ -106,6 +106,15 @@ connection, memory read, or debugger screenshot cannot substitute for either.
 
 ## 6. Free fallback when Intel DCI is unavailable
 
+Install/use GNU GDB, OpenOCD, and picocom. Before opening a debug session,
+qualify the cable with `lsusb -v`: a usable Tigard must enumerate as FTDI
+`0403:6010`; CN16 UART must create a tty device; a DCI/DbC path must enumerate
+through the intended USB3 debug interface. A Smart KM Link `0ea0:2211` with
+mass-storage plus HID keyboard/mouse interfaces is not a UART, Tigard, or DCI
+cable. `openocd -f interface/ftdi/tigard.cfg -c init -c shutdown` returning
+`no device found` is a physical-transport BLOCKED result; do not retry it as a
+reset loop.
+
 Use CN16 pins 8/9/10 (GND/board-RX/board-TX), 3.3-V TTL, 115200 8N1, no flow
 control. Adapter RX connects to board pin 10; adapter TX connects to board pin
 9; adapter ground connects to pin 8. Never connect adapter VCC or CN16 5-V pins

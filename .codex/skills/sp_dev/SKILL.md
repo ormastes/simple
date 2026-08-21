@@ -1192,3 +1192,12 @@ serial/NSID/LBA-count challenge and two bounded leases (namespace for GPT,
 partition for FAT32). Verify flush plus fresh-adapter readback and an external
 FAT reader on a dedicated scratch image before claiming interoperability.
 Never test against the development host's system NVMe.
+
+For UP Squared debug-tool admission, distinguish software availability from a
+usable transport. GNU GDB/OpenOCD/picocom are the free baseline, but OpenOCD
+does not decode Apollo Lake's proprietary Intel DCI ExI protocol. Admit Tigard
+only when FTDI `0403:6010` enumerates, CN16 UART only when a tty appears, and
+DCI/DbC only with a qualified USB3 debug interface and a retained connection
+receipt. Reject Smart KM Link `0ea0:2211`: its storage/HID descriptors provide
+no UART or debug endpoint. A missing USB device is BLOCKED, not grounds for
+repeated software-reset attempts.

@@ -859,3 +859,16 @@ convergence and DDC remain explicit release/trust targets. Canonical guide:
 - Storage proof is GPT + bounded FAT32 + flush + fresh-adapter byte readback +
   `ls /nvme`; emulator interoperability additionally requires host `mdir` and
   `mtype` on a dedicated scratch image. Never point this proof at host NVMe.
+
+## UP Squared free debug transport qualification
+
+- GNU GDB/GDB multiarch, OpenOCD, and picocom are the legitimate free host
+  baseline; they do not turn an arbitrary USB cable into Intel DCI.
+- Intel DCI run control/DMA uses a closed proprietary ExI transport. Free GDB
+  works with the resident SimpleOS RSP monitor only after an admitted byte
+  transport exists.
+- Admit by descriptors: Tigard is FTDI `0403:6010`, CN16 UART yields a tty, and
+  DCI/DbC requires the intended USB3 debug interface. Smart KM Link
+  `0ea0:2211` exposes storage/HID only and must be rejected.
+- If OpenOCD reports the FTDI device absent, stop. Do not substitute CN22 CPLD
+  service JTAG, guess CPU TAP wiring, or loop software resets.
