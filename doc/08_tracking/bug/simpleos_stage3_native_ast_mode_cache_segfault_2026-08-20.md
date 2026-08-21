@@ -1014,3 +1014,42 @@ candidate and admission receipt. The earlier undeclared-`ffi` symptom did not
 recur. The mandatory three-cycle cap stops this session before Stage 3. The
 admitted Stage-2 artifact is the exact next-session parent; Stage 3, the ARM64
 image, and all real-QEMU rendering surfaces remain unclaimed.
+
+## Retained export-origin index diagnosis (2026-08-22)
+
+The next canonical Stage-3 cycle rebuilt and admitted its Stage-2 capsule, then
+failed cleanly after parsing and individually promoting all 665 surfaces. The
+post-retention diagnostic again reported `surfaces=665 names=943 indices=943
+dict=-1`. Inspection shows the top-level name lookup already has its scalar
+fallback, but `module_surface_route_arrays_aligned` still calls
+`export_origin_index.origins.contains_key` for every retained surface, and
+`module_surface_export_origin_index_lookup` still depends exclusively on its
+nested `index_by_name` Dict. Those nested compatibility Dicts share the same
+transient-carrier failure mode even though their aligned name/owner/source/kind
+arrays survive.
+
+The owner fix is to give export-origin lookup the same construction-fast,
+retention-safe policy: use the Dict while valid, otherwise scan the aligned
+scalar names; validate the selected position against every scalar payload
+array; and make retained route validation exercise that public scalar-aware
+position lookup. Exact regression evidence adds a non-empty export-origin
+entry to the existing promote/end-scope registry test and proves hit, miss,
+and retained alignment after teardown. Misaligned payload arrays remain a
+fail-closed adjacent case.
+
+Cycle 2 retained the same aggregate failure, so cycle 3 added a first-failing
+invariant diagnostic instead of guessing. The final permitted run identified
+surface 0 precisely: `imports=6`, while its post-freeze route arrays reported
+garbage lengths from `5863548` through `5875862`; its pre-freeze export-origin
+scalar arrays all remained length 0. This proves the remaining lifetime split.
+Each `ModuleSurface` raw object is promoted during its per-file scope, but
+freeze attaches newly allocated import/export route arrays later, inside the
+registry retention scope. Promoting the registry cannot traverse through an
+already-promoted raw surface allocation, so those new children are reclaimed.
+
+The queued owner correction explicitly promotes every post-freeze route array
+while the registry scope is paused, before promoting the registry carrier and
+ending the scope. This source correction is intentionally left unclaimed in
+this session: the mandatory third-cycle stop was reached. The next cycle must
+rebuild Phase 2 and require the detailed retained-alignment diagnostic to be
+empty before Stage 3 may proceed.

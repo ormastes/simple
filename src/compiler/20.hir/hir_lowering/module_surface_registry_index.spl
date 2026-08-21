@@ -1,6 +1,6 @@
 # Frozen registry indexes and import/export route projections.
 
-use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfacesByName, module_surface_allocate_generation}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfacesByName, module_surface_allocate_generation, module_surface_export_origin_index_position}
 use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_module_name, module_surface_logical_name_from_path, module_surface_package_name_from_name}
 
 pub(package) fn module_surfaces_validate_index_alignment(
@@ -180,38 +180,52 @@ pub(package) fn module_surface_route_arrays_aligned(surface: ModuleSurface) -> b
        surface.export_origin_index.names.len() != surface.export_origin_index.source_names.len() or
        surface.export_origin_index.names.len() != surface.export_origin_index.resolution_kinds.len():
         return false
-    val origin_map = surface.export_origin_index.origins
     var origin_index = 0
     while origin_index < surface.export_origin_index.names.len():
-        if not origin_map.contains_key(
-            surface.export_origin_index.names[origin_index]):
+        if module_surface_export_origin_index_position(
+            surface.export_origin_index,
+            surface.export_origin_index.names[origin_index]) != origin_index:
             return false
         origin_index = origin_index + 1
     true
 
-pub(package) fn module_surfaces_frozen_alignment(registry: ModuleSurfacesByName) -> bool:
+pub(package) fn module_surfaces_frozen_alignment_error(
+    registry: ModuleSurfacesByName
+) -> text:
     if not registry.frozen or registry.generation == 0:
-        return false
+        return "registry freeze metadata invalid: frozen={registry.frozen} generation={registry.generation}"
     if registry.ordered_names.len() != registry.ordered_indices.len():
-        return false
+        return "registry scalar arrays misaligned: names={registry.ordered_names.len()} indices={registry.ordered_indices.len()}"
     var alias_index = 0
     while alias_index < registry.ordered_indices.len():
         if registry.ordered_indices[alias_index] < 0 or
            registry.ordered_indices[alias_index] >= registry.surfaces.len():
-            return false
+            return "registry scalar index invalid: position={alias_index} value={registry.ordered_indices[alias_index]} surfaces={registry.surfaces.len()}"
         alias_index = alias_index + 1
     var surface_index = 0
     while surface_index < registry.surfaces.len():
         val surface = registry.surfaces[surface_index]
-        if not surface.frozen or not surface.export_origin_index.frozen or
-           surface.physical_index != surface_index or
-           surface.generation != registry.generation or
-           surface.preferred_registry_name == "" or
-           module_surface_registry_index(registry, surface.preferred_registry_name) != surface_index or
-           not module_surface_route_arrays_aligned(surface):
-            return false
+        if not surface.frozen:
+            return "surface not frozen: index={surface_index}"
+        if not surface.export_origin_index.frozen:
+            return "surface export-origin index not frozen: index={surface_index}"
+        if surface.physical_index != surface_index:
+            return "surface physical index mismatch: position={surface_index} value={surface.physical_index}"
+        if surface.generation != registry.generation:
+            return "surface generation mismatch: index={surface_index} surface={surface.generation} registry={registry.generation}"
+        if surface.preferred_registry_name == "":
+            return "surface preferred registry name missing: index={surface_index}"
+        val preferred_index = module_surface_registry_index(
+            registry, surface.preferred_registry_name)
+        if preferred_index != surface_index:
+            return "surface preferred registry lookup mismatch: index={surface_index} resolved={preferred_index} name={surface.preferred_registry_name}"
+        if not module_surface_route_arrays_aligned(surface):
+            return "surface route arrays invalid: index={surface_index} imports={surface.imports.len()} import_indices={surface.import_target_indices.len()} import_names={surface.import_target_names.len()} export_sources={surface.export_route_sources.len()} export_locals={surface.export_route_locals.len()} export_indices={surface.export_route_target_indices.len()} export_names={surface.export_route_target_names.len()} export_globs={surface.export_route_is_glob.len()} origin_names={surface.export_origin_index.names.len()} origin_owners={surface.export_origin_index.owner_modules.len()} origin_sources={surface.export_origin_index.source_names.len()} origin_kinds={surface.export_origin_index.resolution_kinds.len()} origin_dict={surface.export_origin_index.origins.len()} origin_index_dict={surface.export_origin_index.index_by_name.len()}"
         surface_index = surface_index + 1
-    true
+    ""
+
+pub(package) fn module_surfaces_frozen_alignment(registry: ModuleSurfacesByName) -> bool:
+    module_surfaces_frozen_alignment_error(registry) == ""
 
 pub(package) fn module_surfaces_freeze(registry: ModuleSurfacesByName) -> Result<ModuleSurfacesByName, text>:
     if registry.frozen:
