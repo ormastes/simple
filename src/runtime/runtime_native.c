@@ -2455,6 +2455,11 @@ int64_t rt_string_new(const uint8_t* bytes, uint64_t len) {
         : rt_core_nil();
 }
 
+int64_t rt_cstring_to_text(const char* cstr) {
+    if (!cstr) return rt_string_new(NULL, 0);
+    return rt_string_new((const uint8_t*)cstr, (uint64_t)strlen(cstr));
+}
+
 /* Interned boxing for compile-time string LITERALS only.
  *
  * Codegen emits one boxing call per literal *evaluation* and this runtime

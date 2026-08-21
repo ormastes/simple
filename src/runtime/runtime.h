@@ -351,6 +351,7 @@ void     simple_contract_check_msg(
     int64_t message_len
 );
 int64_t  rt_string_new(const uint8_t* bytes, uint64_t len);
+int64_t  rt_cstring_to_text(const char* cstr);
 int64_t  rt_string_free(int64_t value);
 /* Interned literal boxing: same ABI as rt_string_new but caches by the
  * literal's stable rodata (ptr, len). Static literal data ONLY. */

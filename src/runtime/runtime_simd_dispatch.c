@@ -1857,7 +1857,12 @@ static void engine2d_blend_boxed_neon(int64_t* dst, const int64_t* src,
                    vandq_u32(vshrq_n_u32(dv, shift), mask), inv)
         uint32x4_t racc = ENGINE2D_BLEND_CHANNEL_NEON(16);
         uint32x4_t gacc = ENGINE2D_BLEND_CHANNEL_NEON(8);
-        uint32x4_t bacc = ENGINE2D_BLEND_CHANNEL_NEON(0);
+        /* ARM's immediate right-shift intrinsic rejects a zero count.  Blue is
+         * already in the low byte, so mask it directly instead of expressing
+         * the identity operation as vshrq_n_u32(..., 0). */
+        uint32x4_t bacc = vmlaq_u32(
+            vmulq_u32(vandq_u32(sv, mask), sa),
+            vandq_u32(dv, mask), inv);
 #undef ENGINE2D_BLEND_CHANNEL_NEON
         if (use_const) {
             uint32_t rv[4], gv[4], bv[4];

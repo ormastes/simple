@@ -80,3 +80,32 @@ A direct full-kernel diagnostic attempt exited 143 after 48 seconds with an
 empty retained log and no ELF, before the configured 870-second worker limit.
 It was not repeated.  QEMU host readiness independently passes with native HVF,
 `virt`, and `ramfb` support.
+
+## 2026-08-21 current-main bootstrap continuation
+
+Three guarded bootstrap cycles were used and then stopped as required by the
+runaway guard. They exposed and fixed four independent current-main blockers
+before any new QEMU claim could be made:
+
+1. ARM64 NEON Engine2D blending used the illegal immediate intrinsic
+   `vshrq_n_u32(..., 0)` for the blue channel. The blue lanes now use their
+   already-low-byte representation directly; current-source planner compilation
+   advanced past the core-C runtime archive build.
+2. The split HIR driver and mono verifier package imported the physical
+   `40.mono/verify` owner as nonexistent `compiler.verify`; both now use
+   `compiler.mono.verify`.
+3. The Rust seed runtime contained two identical definitions of
+   `INLINE_INT_BITS` and `fits_inline_int`. Removing the duplicate restored
+   `cargo check -p simple-runtime` and allowed the canonical full seed rebuild.
+4. The Phase-2 frontend admission fixture then failed closed on unresolved
+   `_rt_cstring_to_text`. The Rust runtime already owned that ABI, but the
+   core-C bootstrap runtime did not. `runtime_native.c` now provides the same
+   null-safe C-string-to-Simple-text conversion and `runtime.h` declares it.
+
+After item 4, the preserved rejected Phase-2 candidate passes the bounded
+two-line `candidate_frontend_smoke` against the corrected current runtime. That
+is diagnostic proof of the runtime-symbol repair, not admission of the rejected
+binary. A fresh Stage-2 admission and Stage-3 build remain required in a new
+guarded session. Consequently the ARM64 kernel build, QEMU framebuffer capture,
+and fail-closed 2D/Web/GUI/WM backend evidence remain pending; no historical or
+host-only result is promoted to QEMU proof.
