@@ -28,12 +28,38 @@ pub(super) fn cast_value(val: Value, target_type: &Type) -> Result<Value, Compil
                 cast_value(val, inner)
             }
         }
+        Type::Array { element, size: None } => cast_to_dynamic_array(val, element),
         _ => {
             let ctx = ErrorContext::new()
                 .with_code(codes::TYPE_MISMATCH)
                 .with_help("supported cast targets: simple types (bool, str, i64, f64, etc.) and optional types");
             Err(CompileError::semantic_with_context(
                 format!("type mismatch: unsupported cast target type: {:?}", target_type),
+                ctx,
+            ))
+        }
+    }
+}
+
+/// Runtime array type assertion used by heterogeneous SFFI descriptors.
+///
+/// A checked signing descriptor stores a packed byte array in an `[Any]` slot.
+/// Extracting that slot as `[u8]` is an identity assertion, not a conversion or
+/// copy. Keep packed storage intact so the lift adds no per-byte work.
+fn cast_to_dynamic_array(val: Value, element: &Type) -> Result<Value, CompileError> {
+    match (element, val) {
+        (
+            Type::Simple(name),
+            value @ (Value::ByteArray(_) | Value::FrozenByteArray(_)),
+        ) if name == "u8" => Ok(value),
+        (_, value @ (Value::Array(_) | Value::FrozenArray(_))) => Ok(value),
+        (_, value) => {
+            let actual = value.type_name();
+            let ctx = ErrorContext::new()
+                .with_code(codes::TYPE_MISMATCH)
+                .with_help("array casts require an existing array value with compatible packed storage");
+            Err(CompileError::semantic_with_context(
+                format!("type mismatch: cannot cast {actual} to array"),
                 ctx,
             ))
         }
@@ -223,5 +249,21 @@ fn cast_to_char(val: Value) -> Result<Value, CompileError> {
                 ctx,
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn packed_u8_array_type_assertion_is_zero_copy() {
+        let original = Value::byte_array(vec![1, 2, 3]);
+        let target = Type::Array {
+            element: Box::new(Type::Simple("u8".to_string())),
+            size: None,
+        };
+        let cast = cast_value(original, &target).expect("packed byte array assertion");
+        assert_eq!(cast.byte_array_view(), Some(&[1, 2, 3][..]));
     }
 }

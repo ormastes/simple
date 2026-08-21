@@ -1,7 +1,7 @@
 # Result propagation mis-lowers checked TLS signature arrays
 
 **Date:** 2026-08-21
-**Status:** Open compiler bug; explicit-match workaround applied
+**Status:** Compiler cast fixed; deployed bootstrap verification pending
 
 ## Reproduction
 
@@ -20,14 +20,19 @@ semantic: type mismatch: unsupported cast target type:
 Array { element: Simple("u8"), size: None }
 ```
 
-The explicit `match Ok(signature) / Err(error)` form checks successfully and
-preserves the intended typed-error contract. The compiler should lower both
-forms equivalently for `Result<[u8], text>`.
+The compact propagation reaches the common runtime type assertion for `[u8]`.
+That assertion previously rejected the packed `ByteArray` representation even
+though it already is the canonical dynamic byte-array value. The interpreter
+now treats packed `[u8]` and ordinary dynamic-array assertions as identity
+casts. This is zero-copy and does not add allocation or traversal to the TLS
+signing path. The explicit `match Ok(signature) / Err(error)` remains because
+it preserves the foreign diagnostic at the handshake boundary.
 
 ## Verification status
 
-The TLS unit spec was run three times while isolating the diagnostic, reaching
-the session verify/fix cap. It was not rerun after applying the explicit-match
-workaround. The changed builder passes `bin/simple check`, and the checked-call
-source audit passes. A future fresh session must rerun
+The focused Rust unit `packed_u8_array_type_assertion_is_zero_copy` passes.
+The TLS unit spec still reports the old cast error because `bin/simple` is a
+previously deployed bootstrap executable and does not contain the current Rust
+compiler source change. Its three-run session cap has been reached, so it was
+not rerun again. After deploying a fresh compiler, a future session must run
 `test/01_unit/os/tls13/server_accept_spec.spl` once.

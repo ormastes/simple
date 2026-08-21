@@ -202,11 +202,22 @@ is forbidden on the live handshake path by `crypto-sffi-checked-callers.shs`.
 This removes a redundant cryptographic retry from failure cases and adds no
 work to successful signing.
 
-The compact `Result<[u8], text>` propagation form exposed a compiler array-cast
-bug during the TLS spec. The explicit-match equivalent is used and documented
-in `result_propagation_array_cast_tls_checked_signing_2026-08-21.md`; the spec
-reached its three-run cap before the workaround, so only file-check and static
-checked-call evidence are claimed for the final source in this session.
+The compact `Result<[u8], text>` propagation form exposed a common interpreter
+array-assertion bug during the TLS spec. Packed byte arrays asserted as `[u8]`
+now use a tested identity cast, avoiding a copy, allocation, or traversal. The
+focused Rust unit passes. The deployed `bin/simple` predates this compiler
+change, so the TLS spec still observes the old behavior and reached its
+three-run cap; fresh-bootstrap integration evidence remains pending. Details
+are recorded in
+`result_propagation_array_cast_tls_checked_signing_2026-08-21.md`.
+
+The TLS CertificateVerify and certificate-chain RSA-PSS verification paths
+also used legacy boolean wrappers that collapsed malformed bridge input and
+provider failure into an invalid-signature result. They now use the existing
+Result-bearing checked wrappers for SHA-256, SHA-384, and SHA-512. Each success
+path still performs exactly one foreign verification operation; no retry,
+hashing, lookup, or extra cryptographic operation was introduced. The static
+crypto audit now forbids legacy RSA-PSS wrappers throughout `_CertVerify`.
 
 All 15 remaining legacy sign/verify declarations in the canonical signature
 module are now explicitly `unsafe(ffi)` and document their sentinel contract:
