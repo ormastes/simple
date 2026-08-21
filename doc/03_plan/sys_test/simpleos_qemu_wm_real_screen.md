@@ -1192,3 +1192,29 @@ Resume without repeating the failed direct kernel diagnostic:
 Owner: ARM64 SimpleOS QEMU rendering lane. Merge owner and final reviewer:
 normal/highest-capability Codex. No generated manual or done mark is accepted
 until the live QEMU receipt exists.
+
+### Stage-3 producer audit (same day)
+
+The workspace-local planner admission was produced and validated for
+`//bootstrap:stage3` with reason `seed-missing`.  Three bounded pipeline cycles
+then failed before compilation:
+
+1. the fresh workspace lacked the sanctioned Rust seed/runtime archive;
+2. copying only `simple` and `libsimple_native_all.a` was rejected as an
+   incomplete immutable authority tuple;
+3. copying the complete observed generation (`simple`, native runtime,
+   compiler backfill, dependency capsule, and input stamp) was rejected because
+   its stamp is stale for this workspace's Rust-source fingerprint.
+
+The seed binary SHA-256 was
+`8d02c245691e4c87a0faa5f6f38a66a86cf19532abd7387f31a4e4115fa0888c`;
+the runtime archive SHA-256 was
+`85df00522531ee8bd85172019dbf6875c6f065e309a245d7f308c4e94a51586b`.
+No Stage-3 compile started and no candidate exists.
+
+The next fresh session must produce a new Stage-3 planner admission, then run
+the canonical pipeline with `--full-bootstrap --stop-after-stage3` so the Rust
+authority tuple is rebuilt from the same frozen source.  Do not repeat the
+three commands above or reuse `dd4c-stage3-admission.env`, whose bound inputs
+belong to this exhausted attempt.  After Stage 3, continue to a provenance-
+accepted full CLI before invoking the ARM64 attested producer.
