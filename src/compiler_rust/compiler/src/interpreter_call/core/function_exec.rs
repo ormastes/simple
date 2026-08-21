@@ -7,9 +7,8 @@ use crate::error::CompileError;
 use crate::interpreter::{
     exec_block_fn, Control, CONST_NAMES, IMMUTABLE_VARS, IN_IMMUTABLE_FN_METHOD, GENERATOR_YIELDS, CURRENT_EXEC_MODULE,
     FUNCTION_MODULE_OWNER, MODULE_ENV_BY_OWNER, MODULE_GLOBALS, MODULE_GLOBAL_BINDINGS_BY_OWNER,
-    MODULE_GLOBALS_BY_OWNER, MODULE_GLOBALS_INITIAL_BY_OWNER, module_globals_generation,
-    for_each_global_write_since, global_write_log_base, global_write_seq, record_global_write,
-    visit_pattern_binding_names,
+    MODULE_GLOBALS_BY_OWNER, MODULE_GLOBALS_INITIAL_BY_OWNER, module_globals_generation, for_each_global_write_since,
+    global_write_log_base, global_write_seq, record_global_write, visit_pattern_binding_names,
 };
 use crate::interpreter_unit::{is_unit_type, validate_unit_type};
 use crate::value::*;
@@ -25,6 +24,95 @@ use std::time::Instant;
 
 type Enums = HashMap<String, Arc<EnumDef>>;
 type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
+
+/// Origin of the value presented to the SFFI v2 return-contract boundary.
+/// Keeping this separate from `Value` prevents fallthrough from first being
+/// laundered into `Value::Nil` (and then into `Option::None`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SffiReturnOrigin {
+    ExplicitReturn,
+    TailValue,
+    UnitFallthrough,
+    ExplicitOptionalNone,
+    ForeignRawResult,
+    MissingReturn,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SffiReturnContract {
+    Unit,
+    Optional,
+    NonOptional,
+}
+
+fn sffi_return_contract(return_type: Option<&Type>) -> SffiReturnContract {
+    match return_type {
+        None => SffiReturnContract::Unit,
+        Some(Type::Tuple(elements)) if elements.is_empty() => SffiReturnContract::Unit,
+        Some(Type::Simple(name)) if name == "()" => SffiReturnContract::Unit,
+        Some(Type::Optional(_)) => SffiReturnContract::Optional,
+        Some(_) => SffiReturnContract::NonOptional,
+    }
+}
+
+fn is_language_unit_return_type(return_type: Option<&Type>) -> bool {
+    matches!(sffi_return_contract(return_type), SffiReturnContract::Unit)
+}
+
+pub(crate) fn validate_sffi_return_contract(
+    function_name: &str,
+    return_type: Option<&Type>,
+    origin: SffiReturnOrigin,
+    value: Option<Value>,
+) -> Result<Value, CompileError> {
+    let contract = sffi_return_contract(return_type);
+    match (origin, contract, value) {
+        (SffiReturnOrigin::UnitFallthrough, SffiReturnContract::Unit, None) => Ok(Value::Nil),
+        (SffiReturnOrigin::MissingReturn, _, None) => {
+            let ctx = crate::error::ErrorContext::new()
+                .with_code(crate::error::codes::SFFI_MISSING_RETURN)
+                .with_help("return a contract-valid value explicitly");
+            Err(CompileError::semantic_with_context(
+                format!("missing return in non-unit function '{function_name}'"),
+                ctx,
+            ))
+        }
+        (_, SffiReturnContract::NonOptional, Some(Value::Nil)) => {
+            let ctx = crate::error::ErrorContext::new()
+                .with_code(crate::error::codes::SFFI_NULL_FORBIDDEN)
+                .with_help("return a non-nil value or declare an optional return type");
+            Err(CompileError::semantic_with_context(
+                format!("nil is forbidden by the non-optional return contract of '{function_name}'"),
+                ctx,
+            ))
+        }
+        (_, _, Some(value)) => {
+            if let Some(Type::Simple(type_name)) = return_type {
+                if is_unit_type(type_name) {
+                    if let Err(error) = validate_unit_type(&value, type_name) {
+                        let ctx = crate::error::ErrorContext::new()
+                            .with_code(crate::error::codes::TYPE_MISMATCH)
+                            .with_help("ensure the value matches the expected unit type");
+                        return Err(CompileError::semantic_with_context(
+                            format!("return type mismatch in '{function_name}': {error}"),
+                            ctx,
+                        ));
+                    }
+                }
+            }
+            Ok(value)
+        }
+        (_, _, None) => {
+            let ctx = crate::error::ErrorContext::new()
+                .with_code(crate::error::codes::SFFI_MISSING_RETURN)
+                .with_help("return a contract-valid value explicitly");
+            Err(CompileError::semantic_with_context(
+                format!("missing return in non-unit function '{function_name}'"),
+                ctx,
+            ))
+        }
+    }
+}
 
 fn function_module_owner(func: &FunctionDef) -> Option<Arc<str>> {
     let key = func as *const FunctionDef as usize;
@@ -810,13 +898,33 @@ pub(crate) fn execute_function_body(
     }
 
     // Now extract result, potentially returning error
-    let result = match exec_result {
-        Ok((Control::Return(v), _)) => v,
-        Ok((_, Some(v))) => v,
-        Ok((_, None)) => Value::Nil,
-        Err(CompileError::TryError(val)) => *val,
+    let (return_origin, result) = match exec_result {
+        Ok((Control::Return(v), _)) => {
+            let origin = if matches!(&v, Value::Nil) && matches!(func.return_type.as_ref(), Some(Type::Optional(_))) {
+                SffiReturnOrigin::ExplicitOptionalNone
+            } else {
+                SffiReturnOrigin::ExplicitReturn
+            };
+            (origin, Some(v))
+        }
+        Ok((_, Some(v))) => {
+            let origin = if matches!(&v, Value::Nil) && matches!(func.return_type.as_ref(), Some(Type::Optional(_))) {
+                SffiReturnOrigin::ExplicitOptionalNone
+            } else {
+                SffiReturnOrigin::TailValue
+            };
+            (origin, Some(v))
+        }
+        Ok((_, None)) if is_language_unit_return_type(func.return_type.as_ref()) => {
+            (SffiReturnOrigin::UnitFallthrough, None)
+        }
+        Ok((_, None)) => (SffiReturnOrigin::MissingReturn, None),
+        // `?` produces an explicit early Result return; it is not a foreign
+        // raw value and must follow the declared function return contract.
+        Err(CompileError::TryError(val)) => (SffiReturnOrigin::ExplicitReturn, Some(*val)),
         Err(e) => return Err(e),
     };
+    let result = validate_sffi_return_contract(&func.name, func.return_type.as_ref(), return_origin, result)?;
 
     // Auto-wrap return value in Some() when the declared return type is T? (Optional)
     // and the actual return value is not already an Option enum.
@@ -864,13 +972,6 @@ pub(crate) fn execute_function_body(
     } else {
         result
     };
-
-    // Validate return type
-    validate_unit!(
-        &result,
-        func.return_type.as_ref(),
-        format!("return type mismatch in '{}'", func.name)
-    );
 
     // Wrap in Promise if async and requested
     let result = if wrap_async && is_async_function(func) {
@@ -1134,8 +1235,14 @@ fn is_value_type_struct(v: &Value, classes: &HashMap<String, Arc<ClassDef>>) -> 
 /// handle — are carried back, which is exactly what makes the three engines
 /// agree.
 fn merge_shared_collection_fields(caller_val: &mut Value, callee_val: &Value) {
-    let (Value::Object { fields: caller_fields, .. }, Value::Object { fields: callee_fields, .. }) =
-        (&mut *caller_val, callee_val)
+    let (
+        Value::Object {
+            fields: caller_fields, ..
+        },
+        Value::Object {
+            fields: callee_fields, ..
+        },
+    ) = (&mut *caller_val, callee_val)
     else {
         return;
     };
@@ -1602,6 +1709,67 @@ fn exec_function_with_bound_args_inner(
 mod tests {
     use super::*;
     use simple_parser::Parser;
+
+    #[test]
+    fn sffi_return_contract_rejects_missing_non_optional_return() {
+        let error = validate_sffi_return_contract(
+            "missing_text",
+            Some(&Type::Simple("text".to_string())),
+            SffiReturnOrigin::MissingReturn,
+            None,
+        )
+        .expect_err("non-optional fallthrough must fail closed");
+        assert!(error
+            .to_string()
+            .contains("missing return in non-unit function 'missing_text'"));
+    }
+
+    #[test]
+    fn sffi_return_contract_preserves_unit_fallthrough() {
+        let value = validate_sffi_return_contract("unit_fn", None, SffiReturnOrigin::UnitFallthrough, None)
+            .expect("unit fallthrough is valid");
+        assert_eq!(value, Value::Nil);
+    }
+
+    #[test]
+    fn sffi_return_contract_preserves_explicit_unit_fallthrough() {
+        let explicit_unit = Type::Tuple(Vec::new());
+        let value = validate_sffi_return_contract(
+            "explicit_unit_fn",
+            Some(&explicit_unit),
+            SffiReturnOrigin::UnitFallthrough,
+            None,
+        )
+        .expect("explicit Unit fallthrough is valid");
+        assert_eq!(value, Value::Nil);
+    }
+
+    #[test]
+    fn sffi_return_contract_preserves_explicit_optional_nil() {
+        let optional = Type::Optional(Box::new(Type::Simple("text".to_string())));
+        let value = validate_sffi_return_contract(
+            "optional_fn",
+            Some(&optional),
+            SffiReturnOrigin::ExplicitOptionalNone,
+            Some(Value::Nil),
+        )
+        .expect("explicit optional nil is valid");
+        assert_eq!(value, Value::Nil);
+    }
+
+    #[test]
+    fn sffi_return_contract_rejects_explicit_nil_for_non_optional_return() {
+        let error = validate_sffi_return_contract(
+            "non_optional_text",
+            Some(&Type::Simple("text".to_string())),
+            SffiReturnOrigin::ExplicitReturn,
+            Some(Value::Nil),
+        )
+        .expect_err("non-optional return must reject nil");
+        assert!(error
+            .to_string()
+            .contains("nil is forbidden by the non-optional return contract"));
+    }
 
     #[test]
     fn refreshed_globals_do_not_clobber_newer_callee_writes() {

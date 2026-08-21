@@ -153,7 +153,10 @@ pub extern "C" fn spl_dlsym(handle: i64, name_rv: RuntimeValue) -> i64 {
 #[no_mangle]
 pub extern "C" fn spl_dlclose(handle: i64) -> i64 {
     if handle == 0 {
-        return 0;
+        // This ABI is status-valued: zero means that a library was closed.
+        // A null handle closes nothing, so returning success would fabricate
+        // an operation result and hide an invalid-handle defect.
+        return -1;
     }
     #[cfg(unix)]
     {
@@ -268,9 +271,7 @@ unsafe fn call_i64_raw(fptr: i64, args: &[i64]) -> i64 {
         [a, b, c, d, e] => std::mem::transmute::<usize, Fn5>(fptr as usize)(*a, *b, *c, *d, *e),
         [a, b, c, d, e, f] => std::mem::transmute::<usize, Fn6>(fptr as usize)(*a, *b, *c, *d, *e, *f),
         [a, b, c, d, e, f, g] => std::mem::transmute::<usize, Fn7>(fptr as usize)(*a, *b, *c, *d, *e, *f, *g),
-        [a, b, c, d, e, f, g, h] => {
-            std::mem::transmute::<usize, Fn8>(fptr as usize)(*a, *b, *c, *d, *e, *f, *g, *h)
-        }
+        [a, b, c, d, e, f, g, h] => std::mem::transmute::<usize, Fn8>(fptr as usize)(*a, *b, *c, *d, *e, *f, *g, *h),
         _ => 0,
     }
 }
@@ -280,7 +281,11 @@ fn runtime_i64_values(value: RuntimeValue) -> Option<Vec<i64>> {
     if len > 6 {
         return None;
     }
-    Some((0..len).map(|index| rt_array_get(value, index as i64).as_int()).collect())
+    Some(
+        (0..len)
+            .map(|index| rt_array_get(value, index as i64).as_int())
+            .collect(),
+    )
 }
 
 /// One-call dynamic dispatch with a byte descriptor inserted between scalar
@@ -315,7 +320,11 @@ pub extern "C" fn spl_wffi_call_i64_with_bytes(
     if args.len() + 2 + suffix.len() > 8 {
         return 0;
     }
-    let ptr = if length == 0 { 0 } else { owner[offset..end].as_ptr() as i64 };
+    let ptr = if length == 0 {
+        0
+    } else {
+        owner[offset..end].as_ptr() as i64
+    };
     args.push(ptr);
     args.push(length as i64);
     args.extend_from_slice(&suffix);
@@ -330,7 +339,12 @@ pub extern "C" fn spl_fonts_call_init_blob(fptr: i64, blob: RuntimeValue, digest
     let (Some(blob), Some(digest)) = (byte_array_bytes(blob), byte_array_bytes(digest)) else {
         return 0;
     };
-    let args = [blob.as_ptr() as i64, blob.len() as i64, digest.as_ptr() as i64, digest.len() as i64];
+    let args = [
+        blob.as_ptr() as i64,
+        blob.len() as i64,
+        digest.as_ptr() as i64,
+        digest.len() as i64,
+    ];
     unsafe { call_i64_raw(fptr, &args) }
 }
 
@@ -347,12 +361,7 @@ pub extern "C" fn spl_fonts_call_init_path(fptr: i64, path: RuntimeValue) -> i64
 }
 
 #[no_mangle]
-pub extern "C" fn spl_fonts_call_layout_text(
-    fptr: i64,
-    text: RuntimeValue,
-    size_px: i64,
-    max_width: i64,
-) -> i64 {
+pub extern "C" fn spl_fonts_call_layout_text(fptr: i64, text: RuntimeValue, size_px: i64, max_width: i64) -> i64 {
     if fptr == 0 {
         return 0;
     }
@@ -501,5 +510,20 @@ mod tests {
     fn spl_wffi_call_f64_invokes_no_arg_function_pointer() {
         let result = spl_wffi_call_f64(f64_no_args as usize as i64, RuntimeValue::NIL, 0);
         assert_eq!(result, 6.25);
+    }
+
+    #[test]
+    fn spl_dlclose_rejects_null_handle_instead_of_fabricating_success() {
+        assert_eq!(spl_dlclose(0), -1);
+        assert_eq!(rt_host_dynlib_close(0), -1);
+    }
+
+    #[test]
+    fn font_init_status_bridges_report_failure_for_null_function_pointer() {
+        // The font initialization contract uses 1 for success and 0 for
+        // failure, so zero is an explicit failure status here, not a
+        // fabricated value-return sentinel.
+        assert_eq!(spl_fonts_call_init_blob(0, RuntimeValue::NIL, RuntimeValue::NIL), 0);
+        assert_eq!(spl_fonts_call_init_path(0, RuntimeValue::NIL), 0);
     }
 }

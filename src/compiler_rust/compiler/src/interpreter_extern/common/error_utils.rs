@@ -18,7 +18,7 @@ pub fn semantic_error(msg: impl Into<String>) -> CompileError {
 #[inline]
 pub fn unknown_function(name: &str) -> CompileError {
     let ctx = ErrorContext::new()
-        .with_code(codes::UNDEFINED_FUNCTION)
+        .with_code(codes::SFFI_UNRESOLVED_SYMBOL)
         .with_help("check that the extern function name is spelled correctly");
     let msg = format!("unknown extern function: {}", name);
     CompileError::semantic_with_context(msg, ctx)

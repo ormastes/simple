@@ -50,6 +50,9 @@ All notable changes to Simple Language will be documented in this file.
   existing rendered-payload routes.
 
 ### Fixed
+- **Fail-closed SFFI returns and dynamic dispatch** — reject missing or null
+  non-optional returns, unresolved/null foreign symbols, and unsupported
+  generic ABI conversions instead of fabricating `nil` or integer zero.
 - **SPipe docgen nested string dispatch** — normalize paths and imports through
   typed intermediate values so the self-hosted generator no longer fails on
   chained `replace(...).split(...)` calls.

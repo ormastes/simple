@@ -17,12 +17,11 @@ The original file has been split into 8 focused modules:
 
 **Contents:**
 - `wrap_trait_object!` - Wraps values in TraitObject for DynTrait parameters
-- `validate_unit!` - Validates unit types for parameters/return types
+- `validate_unit!` - Validates physical unit types for parameters
 - `with_effect_check!` - Checks effect compatibility and executes with effect context
-- `extract_block_result!` - Extracts results from exec_block_fn returns
 
 **Key Features:**
-- All macros properly re-exported for use in other modules
+- All remaining macros are properly re-exported for use in other modules
 - Imports required types for macro expansion
 
 ### 2. `async_support.rs` (71 lines)

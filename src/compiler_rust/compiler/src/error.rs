@@ -43,6 +43,14 @@ pub mod codes {
     pub const CONFLICTING_TRAIT_BOUNDS: &str = "E1029";
     pub const INVALID_LIFETIME_ON_TRAIT: &str = "E1030";
     pub const MISSING_TRAIT_METHOD: &str = "E1031";
+    /// SFFI v2 return-contract violation: a declared value return fell through.
+    pub const SFFI_MISSING_RETURN: &str = "E-SFFI-016";
+    /// SFFI v2 return-contract violation: nil reached a non-optional return.
+    pub const SFFI_NULL_FORBIDDEN: &str = "E-SFFI-007";
+    /// SFFI v2 admission failure: a required foreign symbol was unresolved.
+    pub const SFFI_UNRESOLVED_SYMBOL: &str = "E-SFFI-001";
+    /// SFFI v2 conversion failure: no typed ABI conversion admits the value.
+    pub const SFFI_UNSUPPORTED_CONVERSION: &str = "E-SFFI-006";
     pub const SELF_IN_STATIC: &str = "E1032";
     pub const INVALID_SELF_IMPORT: &str = "E1033";
     pub const UNRESOLVED_IMPORT: &str = "E1034";

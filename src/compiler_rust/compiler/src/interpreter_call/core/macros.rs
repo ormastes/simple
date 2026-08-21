@@ -45,20 +45,6 @@ macro_rules! with_effect_check {
     }};
 }
 
-/// Extract result from exec_block_fn return value
-macro_rules! extract_block_result {
-    ($block_exec:expr) => {
-        match $block_exec {
-            Ok((crate::interpreter::Control::Return(v), _)) => v,
-            Ok((_, Some(v))) => v,
-            Ok((_, None)) => Value::Nil,
-            Err(crate::error::CompileError::TryError(val)) => *val,
-            Err(e) => return Err(e),
-        }
-    };
-}
-
-pub(crate) use extract_block_result;
 pub(crate) use validate_unit;
 pub(crate) use with_effect_check;
 pub(crate) use wrap_trait_object;

@@ -18,14 +18,12 @@
 //! directly to `i64` in C ABI. The interpreter's `Value` enum is marshalled
 //! to/from `i64` at the boundary:
 //! - `Value::Int(n)` -> `n as i64`
-//! - `Value::Float(f)` -> `f64::to_bits(f) as i64` (for raw pass-through)
 //! - `Value::Bool(b)` -> `b as i64`
-//! - `Value::Nil` -> `0i64`
-//! - `Value::Str(s)` -> pointer to leaked CString as i64
+//! - every value without an admitted integer representation is rejected
 //!
 //! Return values are interpreted as `i64` and wrapped back as `Value::Int`.
 
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::plugin_manifest;
 use crate::value::Value;
 use simple_simd::{active_simd_tier, SimdTier};
@@ -51,6 +49,23 @@ static DYNAMIC_RUNTIME: std::sync::LazyLock<Mutex<DynamicRuntime>> = std::sync::
         symbols: HashMap::new(),
     })
 });
+
+fn unsupported_conversion(message: impl Into<String>) -> CompileError {
+    let context = ErrorContext::new()
+        .with_code(codes::SFFI_UNSUPPORTED_CONVERSION)
+        .with_help("use a generated typed SFFI adapter for this ABI value");
+    CompileError::semantic_with_context(message, context)
+}
+
+fn null_function_pointer(name: &str) -> CompileError {
+    let context = ErrorContext::new()
+        .with_code(codes::SFFI_NULL_FORBIDDEN)
+        .with_help("resolve and validate the required symbol before invocation");
+    CompileError::semantic_with_context(
+        format!("dynamic SFFI dispatch: function '{name}' has a null function pointer"),
+        context,
+    )
+}
 
 /// Known satellite library prefixes.
 ///
@@ -365,7 +380,7 @@ fn try_call_satellite(prefix: &str, name: &str, evaluated_args: &[Value]) -> Opt
     drop(satellites);
 
     // Marshal arguments and call
-    call_fptr(fptr, name, evaluated_args)
+    Some(call_fptr(fptr, name, evaluated_args))
 }
 
 /// Resolved class bundle: constructor, destructor, and method function pointers.
@@ -481,13 +496,13 @@ fn try_call_manifest_class_method(
             // Check constructor
             if class.constructor == name {
                 if let Some(bundle) = resolve_manifest_class(library_path, class) {
-                    return call_fptr(bundle.constructor_fptr, name, evaluated_args);
+                    return Some(call_fptr(bundle.constructor_fptr, name, evaluated_args));
                 }
             }
             // Check destructor
             if class.destructor == name {
                 if let Some(bundle) = resolve_manifest_class(library_path, class) {
-                    return call_fptr(bundle.destructor_fptr, name, evaluated_args);
+                    return Some(call_fptr(bundle.destructor_fptr, name, evaluated_args));
                 }
             }
             // Check methods
@@ -495,7 +510,7 @@ fn try_call_manifest_class_method(
                 if method.symbol == name {
                     if let Some(bundle) = resolve_manifest_class(library_path, class) {
                         if let Some(&fptr) = bundle.method_fptrs.get(&method.name) {
-                            return call_fptr(fptr, name, evaluated_args);
+                            return Some(call_fptr(fptr, name, evaluated_args));
                         }
                     }
                 }
@@ -572,7 +587,7 @@ fn try_call_manifest_library(
     };
 
     drop(libraries);
-    call_fptr(fptr, name, evaluated_args)
+    Some(call_fptr(fptr, name, evaluated_args))
 }
 
 /// Try to dlopen a library path, returning the handle or None.
@@ -643,41 +658,30 @@ fn dlsym_lookup(handle: usize, name: &str) -> Option<usize> {
     }
 }
 
-/// Marshal a `Value` to an `i64` for passing to C functions.
+/// Marshal an admitted integer scalar to an `i64` for passing to C functions.
 ///
 /// The runtime functions generally operate on `RuntimeValue` which is a
 /// `#[repr(transparent)]` wrapper around `u64`. For the interpreter, we
-/// do a best-effort conversion:
+/// The generic dispatcher has no authoritative signature or ownership
+/// contract. It therefore accepts only values whose representation is already
+/// the narrow integer ABI supported by this legacy path. Other values must use
+/// a typed interpreter adapter.
 /// - Int -> direct i64
-/// - Float -> f64 bits as i64 (matches RuntimeValue float encoding)
 /// - Bool -> 0 or 1
-/// - Nil -> 0
-/// - Str -> pointer to null-terminated C string (leaked)
-fn value_to_i64(val: &Value) -> i64 {
+fn value_to_i64(val: &Value) -> Result<i64, CompileError> {
     match val {
-        Value::Int(n) => *n,
-        Value::Float(f) => f.to_bits() as i64,
+        Value::Int(n) => Ok(*n),
         Value::Bool(b) => {
             if *b {
-                1
+                Ok(1)
             } else {
-                0
+                Ok(0)
             }
         }
-        Value::Nil => 0,
-        Value::Str(s) => {
-            // Create a null-terminated C string and leak it for the SFFI call.
-            // This is intentionally leaked because the runtime may hold onto
-            // the pointer. For short-lived interpreter processes this is acceptable.
-            match CString::new(s.as_str()) {
-                Ok(c) => c.into_raw() as usize as i64,
-                Err(_) => 0,
-            }
-        }
-        // For complex types (Array, Object, etc.), pass 0 as a fallback.
-        // These won't work correctly through raw SFFI, but the built-in
-        // dispatch table should handle them.
-        _ => 0,
+        other => Err(unsupported_conversion(format!(
+            "dynamic SFFI dispatch does not admit argument type '{}' without a typed ABI contract",
+            other.type_name()
+        ))),
     }
 }
 
@@ -734,11 +738,7 @@ pub fn rt_provider_query_v1_call_fn(args: &[Value]) -> Result<Value, CompileErro
             "rt_provider_query_v1_call expects 3 arguments".to_string(),
         ));
     }
-    let status = simple_runtime::rt_provider_query_v1_call(
-        args[0].as_int()?,
-        args[1].as_int()?,
-        args[2].as_int()?,
-    );
+    let status = simple_runtime::rt_provider_query_v1_call(args[0].as_int()?, args[1].as_int()?, args[2].as_int()?);
     Ok(Value::Int(i64::from(status)))
 }
 
@@ -751,7 +751,7 @@ pub fn spl_wffi_call_i64_with_bytes_fn(args: &[Value]) -> Result<Value, CompileE
     }
     let fptr = args[0].as_int()?;
     if fptr == 0 {
-        return Ok(Value::Int(0));
+        return Err(null_function_pointer("spl_wffi_call_i64_with_bytes"));
     }
     let mut raw_args = strict_i64_array(&args[1], "spl_wffi_call_i64_with_bytes prefix")?;
     let owner = strict_owned_bytes(&args[2], "spl_wffi_call_i64_with_bytes")?;
@@ -769,40 +769,52 @@ pub fn spl_wffi_call_i64_with_bytes_fn(args: &[Value]) -> Result<Value, CompileE
             "spl_wffi_call_i64_with_bytes supports at most 8 foreign arguments".to_string(),
         ));
     }
-    let ptr = if length == 0 { 0 } else { owner[offset..end].as_ptr() as i64 };
+    let ptr = if length == 0 {
+        0
+    } else {
+        owner[offset..end].as_ptr() as i64
+    };
     raw_args.push(ptr);
     raw_args.push(length as i64);
     raw_args.extend(suffix);
     let values: Vec<Value> = raw_args.into_iter().map(Value::Int).collect();
     call_fptr(fptr as usize, "spl_wffi_call_i64_with_bytes", &values)
-        .unwrap_or_else(|| Ok(Value::Int(0)))
 }
 
 pub fn spl_fonts_call_init_blob_fn(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 3 {
-        return Err(CompileError::semantic("spl_fonts_call_init_blob expects 3 arguments".to_string()));
+        return Err(CompileError::semantic(
+            "spl_fonts_call_init_blob expects 3 arguments".to_string(),
+        ));
     }
     let fptr = args[0].as_int()?;
     let blob = strict_owned_bytes(&args[1], "spl_fonts_call_init_blob blob")?;
     let digest = strict_owned_bytes(&args[2], "spl_fonts_call_init_blob digest")?;
     if fptr == 0 {
-        return Ok(Value::Int(0));
+        return Err(null_function_pointer("spl_fonts_call_init_blob"));
     }
     type Init = unsafe extern "C" fn(i64, i64, i64, i64) -> i64;
     let function = unsafe { std::mem::transmute::<usize, Init>(fptr as usize) };
     Ok(Value::Int(unsafe {
-        function(blob.as_ptr() as i64, blob.len() as i64, digest.as_ptr() as i64, digest.len() as i64)
+        function(
+            blob.as_ptr() as i64,
+            blob.len() as i64,
+            digest.as_ptr() as i64,
+            digest.len() as i64,
+        )
     }))
 }
 
 pub fn spl_fonts_call_init_path_fn(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 2 {
-        return Err(CompileError::semantic("spl_fonts_call_init_path expects 2 arguments".to_string()));
+        return Err(CompileError::semantic(
+            "spl_fonts_call_init_path expects 2 arguments".to_string(),
+        ));
     }
     let fptr = args[0].as_int()?;
     let path = strict_owned_bytes(&args[1], "spl_fonts_call_init_path path")?;
     if fptr == 0 {
-        return Ok(Value::Int(0));
+        return Err(null_function_pointer("spl_fonts_call_init_path"));
     }
     type Init = unsafe extern "C" fn(i64, i64) -> i64;
     let function = unsafe { std::mem::transmute::<usize, Init>(fptr as usize) };
@@ -811,27 +823,35 @@ pub fn spl_fonts_call_init_path_fn(args: &[Value]) -> Result<Value, CompileError
 
 pub fn spl_fonts_call_layout_text_fn(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 4 {
-        return Err(CompileError::semantic("spl_fonts_call_layout_text expects 4 arguments".to_string()));
+        return Err(CompileError::semantic(
+            "spl_fonts_call_layout_text expects 4 arguments".to_string(),
+        ));
     }
     let fptr = args[0].as_int()?;
     let text = strict_owned_bytes(&args[1], "spl_fonts_call_layout_text text")?;
     let size = args[2].as_int()?;
     let max_width = args[3].as_int()?;
     if fptr == 0 {
-        return Ok(Value::Int(0));
+        return Err(null_function_pointer("spl_fonts_call_layout_text"));
     }
     type Layout = unsafe extern "C" fn(i64, i64, i64, i64) -> i64;
     let function = unsafe { std::mem::transmute::<usize, Layout>(fptr as usize) };
-    Ok(Value::Int(unsafe { function(text.as_ptr() as i64, text.len() as i64, size, max_width) }))
+    Ok(Value::Int(unsafe {
+        function(text.as_ptr() as i64, text.len() as i64, size, max_width)
+    }))
 }
 
 /// Marshal arguments and call a resolved function pointer.
 ///
 /// This is the shared call path used by both the main runtime dispatch and
 /// satellite library dispatch.
-fn call_fptr(fptr: usize, name: &str, evaluated_args: &[Value]) -> Option<Result<Value, CompileError>> {
+fn call_fptr(fptr: usize, name: &str, evaluated_args: &[Value]) -> Result<Value, CompileError> {
+    if fptr == 0 {
+        return Err(null_function_pointer(name));
+    }
+
     // Marshal arguments to i64
-    let args: Vec<i64> = evaluated_args.iter().map(value_to_i64).collect();
+    let args: Vec<i64> = evaluated_args.iter().map(value_to_i64).collect::<Result<_, _>>()?;
     let nargs = args.len();
 
     // Call the function pointer with the appropriate number of arguments.
@@ -913,15 +933,15 @@ fn call_fptr(fptr: usize, name: &str, evaluated_args: &[Value]) -> Option<Result
                 )
             }
             _ => {
-                return Some(Err(CompileError::runtime(format!(
+                return Err(CompileError::runtime(format!(
                     "dynamic SFFI dispatch: function '{}' has {} arguments (max 13 supported)",
                     name, nargs
-                ))));
+                )));
             }
         }
     };
 
-    Some(Ok(i64_to_value(result)))
+    Ok(i64_to_value(result))
 }
 
 /// Try to call a function dynamically via the runtime shared library.
@@ -991,7 +1011,7 @@ pub fn try_call_dynamic(name: &str, evaluated_args: &[Value]) -> Option<Result<V
     }; // rt lock dropped here
 
     if let Some(fptr) = runtime_result {
-        return call_fptr(fptr, name, evaluated_args);
+        return Some(call_fptr(fptr, name, evaluated_args));
     }
 
     // --- Step 2: Try satellite libraries ---
@@ -1012,6 +1032,10 @@ mod tests {
         }
         let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
         bytes.iter().map(|value| i64::from(*value)).sum()
+    }
+
+    extern "C" fn echo_i64(value: i64) -> i64 {
+        value
     }
 
     fn ints(values: &[i64]) -> Value {
@@ -1044,6 +1068,62 @@ mod tests {
         ])
         .expect_err("out-of-bounds descriptor must fail closed");
         assert!(error.to_string().contains("out of bounds"));
+    }
+
+    #[test]
+    fn generic_dispatch_rejects_values_without_typed_contracts() {
+        for unsupported in [
+            Value::Nil,
+            Value::Float(1.5),
+            Value::Str("text".to_string().into()),
+            ints(&[1, 2]),
+        ] {
+            let error = call_fptr(echo_i64 as usize, "echo_i64", &[unsupported])
+                .expect_err("untyped dynamic values must fail closed");
+            assert!(error.to_string().contains("does not admit argument type"));
+            assert!(error.to_string().contains(codes::SFFI_UNSUPPORTED_CONVERSION));
+        }
+    }
+
+    #[test]
+    fn generic_dispatch_rejects_embedded_nul_text_instead_of_zero() {
+        let error = call_fptr(echo_i64 as usize, "echo_i64", &[Value::Str("a\0b".to_string().into())])
+            .expect_err("embedded-NUL text has no admitted generic ABI");
+        assert!(error.to_string().contains("does not admit argument type"));
+        assert!(error.to_string().contains(codes::SFFI_UNSUPPORTED_CONVERSION));
+    }
+
+    #[test]
+    fn generic_dispatch_rejects_null_function_pointer() {
+        let error = call_fptr(0, "missing", &[Value::Int(1)]).expect_err("null function pointer must fail closed");
+        assert!(error.to_string().contains("null function pointer"));
+        assert!(error.to_string().contains(codes::SFFI_NULL_FORBIDDEN));
+    }
+
+    #[test]
+    fn scoped_byte_adapter_rejects_null_function_pointer() {
+        let error = spl_wffi_call_i64_with_bytes_fn(&[
+            Value::Int(0),
+            ints(&[]),
+            Value::byte_array(Vec::new()),
+            Value::Int(0),
+            Value::Int(0),
+            ints(&[]),
+        ])
+        .expect_err("null function pointer must fail closed");
+        assert!(error.to_string().contains("null function pointer"));
+    }
+
+    #[test]
+    fn generic_dispatch_retains_integer_and_bool_scalars() {
+        assert_eq!(
+            call_fptr(echo_i64 as usize, "echo_i64", &[Value::Int(42)]).unwrap(),
+            Value::Int(42)
+        );
+        assert_eq!(
+            call_fptr(echo_i64 as usize, "echo_i64", &[Value::Bool(true)]).unwrap(),
+            Value::Int(1)
+        );
     }
 
     #[test]
