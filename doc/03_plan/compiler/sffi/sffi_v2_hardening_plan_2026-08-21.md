@@ -308,7 +308,7 @@ Current evidence after the checked regex boundary migration:
 - among `rt_*`/`spl_*` declarations, 1,715 sites reference symbols classified
   genuinely missing and 318 are backed only in owned C runtime source;
 - the distinct-symbol backing census now classifies 698 symbols in the typed
-  interpreter registry and 1,190 as genuinely missing.
+  interpreter registry and 1,187 as genuinely missing.
 
 The regex wrapper now exposes checked `Result` construction and boolean-match
 operations. The interpreter registers all 15 `rt_regex_*` symbols to typed
@@ -334,6 +334,16 @@ methods carry `ffi`/`raw_ptr` authority and pass robust lint. This is a zero-cos
 source alias: no wrapper, additional lookup, allocation, or branch is emitted.
 The integer-only dispatcher remains unsafe and ineligible for verified/critical
 admission until replaced by generated typed thunks bound to signed ABI evidence.
+
+The legacy `std.ffi.llvm_loader` implementation is now an explicit facade over
+the canonical `std.sffi.llvm_loader` owner. The canonical raw memory, symbol
+resolution, and integer-call declarations and their direct callers carry
+`ffi`/`raw_ptr` authority and pass robust SFFI lint. The existing function-pointer
+cache and <=8-element scratch buffer are unchanged, and the facade is a source
+re-export, so this migration adds no call, allocation, lookup, branch, or hash to
+the hot path. The LLVM integer dispatcher remains unsafe and unverified: its
+zero sentinel, ABI shape, pointer ownership, and provider artifact have not yet
+been admitted by typed contracts and signed evidence.
 
 These are migration inputs, not 14,477 independent implementations. The audit
 now hashes normalized declaration shapes and groups them by symbol. The next
@@ -367,8 +377,8 @@ call-site migration ledger at
 `doc/08_tracking/bug/data/sffi_call_authority_2026-08-21.tsv`. It recognizes
 file-local externs and explicit `rt_*`/`spl_*` imports from SFFI modules, tracks
 function and lexical FFI authority by indentation, and can fail CI with
-`SFFI_FAIL_ON_MISSING=1`. The current source/test census contains 21,284
-missing-authority calls, 51 lexical scopes, and 379 function scopes across 3,142
+`SFFI_FAIL_ON_MISSING=1`. The current source/test census contains 21,258
+missing-authority calls, 51 lexical scopes, and 392 function scopes across 3,142
 files. It completed in 24.21 seconds at 7,424 KiB maximum RSS. This is a
 migration index rather than ABI proof; aliases, generated bindings, and
 re-exports still require resolved-HIR identity.
