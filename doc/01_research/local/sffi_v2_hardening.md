@@ -237,6 +237,15 @@ match and the same direct runtime call, with no lookup, copy, retry, or added
 allocation. Five focused Cranelift SFFI tests pass, including malformed text
 arguments and null-positive-length foreign result validation.
 
+The adjacent Cranelift module-management boundary had the same issue for
+integer handles and raw pointer/length descriptors. Module construction,
+finalization, release, object emission, function declaration, and string-data
+declaration now reject missing/wrong-typed integers, negative lengths, and
+null pointers paired with positive lengths before entering unsafe runtime code.
+The checked helpers are inline and the valid path remains direct; validation
+adds only type/descriptor branches, not allocation, lookup, or copying. The
+focused raw-object descriptor regression passes.
+
 All 15 remaining legacy sign/verify declarations in the canonical signature
 module are now explicitly `unsafe(ffi)` and document their sentinel contract:
 verification collapses malformed bridge input into `0`, while signing may

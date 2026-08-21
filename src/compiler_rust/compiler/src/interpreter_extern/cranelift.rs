@@ -52,6 +52,26 @@ fn value_to_i64(val: &Value) -> i64 {
     }
 }
 
+#[inline]
+fn expect_i64(args: &[Value], index: usize, symbol: &str) -> Result<i64, CompileError> {
+    match args.get(index) {
+        Some(Value::Int(value)) => Ok(*value),
+        _ => Err(CompileError::runtime(format!(
+            "{symbol}: argument {index} must be an integer"
+        ))),
+    }
+}
+
+#[inline]
+fn validate_raw_span(ptr: i64, len: i64, symbol: &str) -> Result<(), CompileError> {
+    if len < 0 || (len > 0 && ptr == 0) {
+        return Err(CompileError::runtime(format!(
+            "{symbol}: invalid raw span (pointer {ptr}, length {len})"
+        )));
+    }
+    Ok(())
+}
+
 /// Helper to get f64 from Value
 fn value_to_f64(val: &Value) -> f64 {
     match val {
@@ -102,7 +122,7 @@ pub fn rt_cranelift_module_new(args: &[Value]) -> Result<Value, CompileError> {
         ));
     }
     let name = value_to_runtime_string(&args[0], "rt_cranelift_module_new")?;
-    let target = value_to_i64(&args[1]);
+    let target = expect_i64(args, 1, "rt_cranelift_module_new")?;
     let handle = cranelift_sffi::rt_cranelift_module_new(name, target);
     Ok(Value::Int(handle))
 }
@@ -112,11 +132,14 @@ pub fn rt_cranelift_module_new(args: &[Value]) -> Result<Value, CompileError> {
 /// Returns: module handle (i64)
 pub fn rt_cranelift_new_module(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() < 3 {
-        return Ok(Value::Int(0));
+        return Err(CompileError::runtime(
+            "rt_cranelift_new_module: expected 3 arguments".to_string(),
+        ));
     }
-    let name_ptr = value_to_i64(&args[0]);
-    let name_len = value_to_i64(&args[1]);
-    let target = value_to_i64(&args[2]);
+    let name_ptr = expect_i64(args, 0, "rt_cranelift_new_module")?;
+    let name_len = expect_i64(args, 1, "rt_cranelift_new_module")?;
+    let target = expect_i64(args, 2, "rt_cranelift_new_module")?;
+    validate_raw_span(name_ptr, name_len, "rt_cranelift_new_module")?;
     let handle = unsafe { cranelift_sffi::rt_cranelift_new_module(name_ptr, name_len, target) };
     Ok(Value::Int(handle))
 }
@@ -126,11 +149,14 @@ pub fn rt_cranelift_new_module(args: &[Value]) -> Result<Value, CompileError> {
 /// Returns: module handle (i64)
 pub fn rt_cranelift_new_aot_module(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() < 3 {
-        return Ok(Value::Int(0));
+        return Err(CompileError::runtime(
+            "rt_cranelift_new_aot_module: expected 3 arguments".to_string(),
+        ));
     }
-    let name_ptr = value_to_i64(&args[0]);
-    let name_len = value_to_i64(&args[1]);
-    let target = value_to_i64(&args[2]);
+    let name_ptr = expect_i64(args, 0, "rt_cranelift_new_aot_module")?;
+    let name_len = expect_i64(args, 1, "rt_cranelift_new_aot_module")?;
+    let target = expect_i64(args, 2, "rt_cranelift_new_aot_module")?;
+    validate_raw_span(name_ptr, name_len, "rt_cranelift_new_aot_module")?;
     let handle = unsafe { cranelift_sffi::rt_cranelift_new_aot_module(name_ptr, name_len, target) };
     Ok(Value::Int(handle))
 }
@@ -138,12 +164,16 @@ pub fn rt_cranelift_new_aot_module(args: &[Value]) -> Result<Value, CompileError
 /// Create a new AOT module for an exact target triple.
 pub fn rt_cranelift_new_aot_module_triple(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() < 4 {
-        return Ok(Value::Int(0));
+        return Err(CompileError::runtime(
+            "rt_cranelift_new_aot_module_triple: expected 4 arguments".to_string(),
+        ));
     }
-    let name_ptr = value_to_i64(&args[0]);
-    let name_len = value_to_i64(&args[1]);
-    let target_ptr = value_to_i64(&args[2]);
-    let target_len = value_to_i64(&args[3]);
+    let name_ptr = expect_i64(args, 0, "rt_cranelift_new_aot_module_triple")?;
+    let name_len = expect_i64(args, 1, "rt_cranelift_new_aot_module_triple")?;
+    let target_ptr = expect_i64(args, 2, "rt_cranelift_new_aot_module_triple")?;
+    let target_len = expect_i64(args, 3, "rt_cranelift_new_aot_module_triple")?;
+    validate_raw_span(name_ptr, name_len, "rt_cranelift_new_aot_module_triple name")?;
+    validate_raw_span(target_ptr, target_len, "rt_cranelift_new_aot_module_triple target")?;
     let handle =
         unsafe { cranelift_sffi::rt_cranelift_new_aot_module_triple(name_ptr, name_len, target_ptr, target_len) };
     Ok(Value::Int(handle))
@@ -152,9 +182,11 @@ pub fn rt_cranelift_new_aot_module_triple(args: &[Value]) -> Result<Value, Compi
 /// Finalize module (JIT: compile; AOT: finalize)
 pub fn rt_cranelift_finalize_module(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {
-        return Ok(Value::Int(0));
+        return Err(CompileError::runtime(
+            "rt_cranelift_finalize_module: expected 1 argument".to_string(),
+        ));
     }
-    let module = value_to_i64(&args[0]);
+    let module = expect_i64(args, 0, "rt_cranelift_finalize_module")?;
     let result = unsafe { cranelift_sffi::rt_cranelift_finalize_module(module) };
     Ok(Value::Int(result))
 }
@@ -162,9 +194,11 @@ pub fn rt_cranelift_finalize_module(args: &[Value]) -> Result<Value, CompileErro
 /// Free module resources
 pub fn rt_cranelift_free_module(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {
-        return Ok(Value::Nil);
+        return Err(CompileError::runtime(
+            "rt_cranelift_free_module: expected 1 argument".to_string(),
+        ));
     }
-    let module = value_to_i64(&args[0]);
+    let module = expect_i64(args, 0, "rt_cranelift_free_module")?;
     unsafe { cranelift_sffi::rt_cranelift_free_module(module) };
     Ok(Value::Nil)
 }
@@ -177,7 +211,7 @@ pub fn rt_cranelift_emit_object(args: &[Value]) -> Result<Value, CompileError> {
             "rt_cranelift_emit_object: expected 2 arguments".to_string(),
         ));
     }
-    let module = value_to_i64(&args[0]);
+    let module = expect_i64(args, 0, "rt_cranelift_emit_object")?;
     let path = value_to_runtime_string(&args[1], "rt_cranelift_emit_object")?;
     let result = unsafe { cranelift_sffi::rt_cranelift_emit_object(module, path) };
     Ok(Value::Bool(result))
@@ -187,11 +221,14 @@ pub fn rt_cranelift_emit_object(args: &[Value]) -> Result<Value, CompileError> {
 /// Args: module (i64), path_ptr (i64), path_len (i64)
 pub fn rt_cranelift_emit_object_raw(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() < 3 {
-        return Ok(Value::Bool(false));
+        return Err(CompileError::runtime(
+            "rt_cranelift_emit_object_raw: expected 3 arguments".to_string(),
+        ));
     }
-    let module = value_to_i64(&args[0]);
-    let path_ptr = value_to_i64(&args[1]);
-    let path_len = value_to_i64(&args[2]);
+    let module = expect_i64(args, 0, "rt_cranelift_emit_object_raw")?;
+    let path_ptr = expect_i64(args, 1, "rt_cranelift_emit_object_raw")?;
+    let path_len = expect_i64(args, 2, "rt_cranelift_emit_object_raw")?;
+    validate_raw_span(path_ptr, path_len, "rt_cranelift_emit_object_raw")?;
     let result = unsafe { cranelift_sffi::rt_cranelift_emit_object_raw(module, path_ptr, path_len) };
     Ok(Value::Bool(result))
 }
@@ -200,13 +237,16 @@ pub fn rt_cranelift_emit_object_raw(args: &[Value]) -> Result<Value, CompileErro
 /// Args: module (i64), name_ptr (i64), name_len (i64), sig (i64), linkage (i64)
 pub fn rt_cranelift_declare_function(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() < 5 {
-        return Ok(Value::Int(0));
+        return Err(CompileError::runtime(
+            "rt_cranelift_declare_function: expected 5 arguments".to_string(),
+        ));
     }
-    let module = value_to_i64(&args[0]);
-    let name_ptr = value_to_i64(&args[1]);
-    let name_len = value_to_i64(&args[2]);
-    let sig = value_to_i64(&args[3]);
-    let linkage = value_to_i64(&args[4]);
+    let module = expect_i64(args, 0, "rt_cranelift_declare_function")?;
+    let name_ptr = expect_i64(args, 1, "rt_cranelift_declare_function")?;
+    let name_len = expect_i64(args, 2, "rt_cranelift_declare_function")?;
+    let sig = expect_i64(args, 3, "rt_cranelift_declare_function")?;
+    let linkage = expect_i64(args, 4, "rt_cranelift_declare_function")?;
+    validate_raw_span(name_ptr, name_len, "rt_cranelift_declare_function")?;
     let handle = unsafe { cranelift_sffi::rt_cranelift_declare_function(module, name_ptr, name_len, sig, linkage) };
     Ok(Value::Int(handle))
 }
@@ -216,11 +256,14 @@ pub fn rt_cranelift_declare_function(args: &[Value]) -> Result<Value, CompileErr
 /// Returns: data handle (i64), or 0 on failure.
 pub fn rt_cranelift_declare_string_data(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() < 3 {
-        return Ok(Value::Int(0));
+        return Err(CompileError::runtime(
+            "rt_cranelift_declare_string_data: expected 3 arguments".to_string(),
+        ));
     }
-    let module = value_to_i64(&args[0]);
-    let bytes_ptr = value_to_i64(&args[1]);
-    let bytes_len = value_to_i64(&args[2]);
+    let module = expect_i64(args, 0, "rt_cranelift_declare_string_data")?;
+    let bytes_ptr = expect_i64(args, 1, "rt_cranelift_declare_string_data")?;
+    let bytes_len = expect_i64(args, 2, "rt_cranelift_declare_string_data")?;
+    validate_raw_span(bytes_ptr, bytes_len, "rt_cranelift_declare_string_data")?;
     let handle = unsafe { cranelift_sffi::rt_cranelift_declare_string_data(module, bytes_ptr, bytes_len) };
     Ok(Value::Int(handle))
 }
@@ -896,7 +939,10 @@ mod tests {
 
     #[test]
     fn interpreter_cranelift_emit_object_raw_validates_arity() {
-        assert_eq!(rt_cranelift_emit_object_raw(&[]).unwrap(), Value::Bool(false));
+        assert!(rt_cranelift_emit_object_raw(&[]).is_err());
+        assert!(rt_cranelift_emit_object_raw(&[Value::Int(1), Value::Int(0), Value::Int(4),]).is_err());
+        assert!(rt_cranelift_emit_object_raw(&[Value::Int(1), Value::Int(1), Value::Int(-1),]).is_err());
+        assert!(rt_cranelift_emit_object_raw(&[Value::Int(1), Value::Bool(false), Value::Int(0),]).is_err());
     }
 
     #[test]
