@@ -1,0 +1,92 @@
+#!/bin/sh
+# Fast source-only census of raw SFFI calls and their lexical authority.
+#
+# This is a migration index, not ABI proof. It recognizes declarations local
+# to a file plus rt_*/spl_* names explicitly imported from an `sffi` module,
+# matching the bounded source lint. Resolved HIR ownership remains the final
+# authority for aliases, re-exports, and generated declarations.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+out=${1:-/dev/stdout}
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT INT TERM
+
+export SFFI_ROOT=$root
+find "$root/src" "$root/test" -type f -name '*.spl' ! -path '*/vendor/*' -print0 >"$work/files.bin"
+
+xargs -0 -r -n 200 perl -0ne '
+    my $file = $ARGV;
+    my @lines = split /\n/, $_, -1;
+    my %raw;
+    my $in_sffi_use = 0;
+
+    for my $line (@lines) {
+        next if $line =~ /^\s*#/;
+        if ($line =~ /^\s*(?:pub\s+)?(?:unsafe\s+)?extern\s+fn\s+([A-Za-z_]\w*)/) {
+            $raw{$1} = 1;
+        }
+        if ($line =~ /^\s*use\s+[^\n]*sffi[^\n]*\{(.*)$/) {
+            $in_sffi_use = 1;
+            my $tail = $1;
+            while ($tail =~ /\b((?:rt|spl)_[A-Za-z_]\w*)\b/g) { $raw{$1} = 1; }
+            $in_sffi_use = 0 if $tail =~ /\}/;
+            next;
+        }
+        if ($in_sffi_use) {
+            while ($line =~ /\b((?:rt|spl)_[A-Za-z_]\w*)\b/g) { $raw{$1} = 1; }
+            $in_sffi_use = 0 if $line =~ /\}/;
+        }
+    }
+
+    for (my $i = 0; $i <= $#lines; $i++) {
+        my $header = $lines[$i];
+        next unless $header =~ /^(\s*)(?:(?:pub|static)\s+)*(?:fn|me)\s+[A-Za-z_]\w*/;
+        my $header_indent = length($1);
+        my $fn_unsafe = 0;
+        for (my $p = $i - 1; $p >= 0 && $i - $p <= 8; $p--) {
+            next if $lines[$p] =~ /^\s*$/;
+            if ($lines[$p] =~ /^\s*\@unsafe\b.*capabilities.*\bffi\b/i) {
+                $fn_unsafe = 1;
+            }
+            last if $lines[$p] !~ /^\s*\@/;
+        }
+        my $lexical_indent = -1;
+        for (my $j = $i + 1; $j <= $#lines; $j++) {
+            my $body = $lines[$j];
+            next if $body =~ /^\s*$/;
+            my ($spaces) = $body =~ /^(\s*)/;
+            my $indent = length($spaces);
+            last if $indent <= $header_indent;
+            $lexical_indent = -1 if $lexical_indent >= 0 && $indent <= $lexical_indent;
+            if ($body =~ /unsafe\s*\([^\n]*capabilities[^\n]*\bffi\b[^\n]*\)\s*:\s*(?:#.*)?$/i) {
+                $lexical_indent = $indent;
+                next;
+            }
+            my $code = $body;
+            $code =~ s/#.*$//;
+            while ($code =~ /(?<![A-Za-z0-9_])([A-Za-z_]\w*)\s*\(/g) {
+                my $name = $1;
+                next unless $raw{$name};
+                my $state = $fn_unsafe ? "function_unsafe" :
+                    ($lexical_indent >= 0 ? "lexical_unsafe" : "missing");
+                (my $relative = $file) =~ s/^\Q$ENV{SFFI_ROOT}\E\///;
+                print join("\t", $relative, $j + 1, $name, $state), "\n";
+            }
+        }
+    }
+' <"$work/files.bin" | sort -u >"$work/calls.tsv"
+
+{
+    printf 'file\tline\tsymbol\tauthority\n'
+    cat "$work/calls.tsv"
+} >"$out"
+
+awk -F '\t' 'NR > 1 { count[$4]++ } END { for (state in count) print count[state], state }' "$out" \
+    | sort -nr >&2
+
+missing=$(awk -F '\t' 'NR > 1 && $4 == "missing" { count++ } END { print count + 0 }' "$out")
+if [ "${SFFI_FAIL_ON_MISSING:-0}" = "1" ] && [ "$missing" -ne 0 ]; then
+    echo "SFFI call authority census: FAIL ($missing raw call sites lack explicit FFI authority)" >&2
+    exit 1
+fi

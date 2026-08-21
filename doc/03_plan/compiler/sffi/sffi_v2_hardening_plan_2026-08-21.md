@@ -296,9 +296,9 @@ Current evidence after the thread synchronization boundary migration:
 - 3,964 distinct symbols in the current backing census, including 3,962
   compiler-owned canonical symbols;
 - 14,942 declaration sites;
-- 14,407 sites have neither an explicit FFI-unsafe tag nor a local contract;
+- 14,404 sites have neither an explicit FFI-unsafe tag nor a local contract;
 - 502 sites declare a typed/documented contract but lack the unsafe tag;
-- 21 thread/CPU synchronization declarations now carry explicit FFI authority
+- 24 declarations now carry explicit FFI authority
   but still require canonical ABI-contract metadata;
 - 12 checked declarations carry both explicit FFI authority and a
   typed result contract; their cryptographic artifact evidence remains open;
@@ -334,6 +334,23 @@ for the migrated HTTP-server and thread-pool modules. Its required-comment
 admission prefilter was repaired as a small allocation-free scan over the
 dangerous-keyword registry; this affects lint time only and avoids per-keyword
 temporary string construction.
+
+`scripts/audit/sffi-call-authority-census.shs` now supplies the scalable raw
+call-site migration ledger at
+`doc/08_tracking/bug/data/sffi_call_authority_2026-08-21.tsv`. It recognizes
+file-local externs and explicit `rt_*`/`spl_*` imports from SFFI modules, tracks
+function and lexical FFI authority by indentation, and can fail CI with
+`SFFI_FAIL_ON_MISSING=1`. The current source/test census contains 22,680
+missing-authority calls, 51 lexical scopes, and 24 function scopes across 3,167
+files. It completed in 24.21 seconds at 7,424 KiB maximum RSS. This is a
+migration index rather than ABI proof; aliases, generated bindings, and
+re-exports still require resolved-HIR identity.
+
+The bare-metal CLI is the first dense production migration selected from this
+ledger: its three raw declarations are explicitly FFI-unsafe and all 24 direct
+calls now sit in minimal lexical blocks. No helper dispatch was introduced;
+the stdout/stderr/exit ABI calls remain direct and the module passes robust
+SFFI lint.
 
 Thread-pool construction no longer treats a zero/invalid native worker handle
 as a successfully degraded pool. The unused duplicate thread-create extern was
