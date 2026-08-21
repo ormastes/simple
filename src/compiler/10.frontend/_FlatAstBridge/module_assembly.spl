@@ -36,7 +36,7 @@ use compiler.frontend.parser_types_expr.*
 use compiler.frontend.parser_types_expr.{ComprehensionClause, ComprehensionKind, GpuLaunchConfig}
 use compiler.frontend.desugar.collection_desugar.{desugar_collections}
 use compiler.frontend.core.string_interpolation_expand.{expand_interpolated_placeholder_call_args}
-use compiler.frontend.lexer_types.{Span}
+use compiler.common.diagnostics.span.{Span}
 use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
 use compiler.frontend.resource_registry.{resource_registry_declare}
 use compiler.frontend.layer_eq_registry.{layer_eq_registry_declare}
@@ -44,6 +44,11 @@ use compiler.frontend.effect_registry.{effect_registry_declare}
 use compiler.frontend.aspect_registry.{aspect_registry_declare}
 use compiler.common.dependency.visibility.{Visibility}
 use std.nogc_sync_mut.io.process_ops.{eprint}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader, FLAT_POOL_CODEC_VERSION}
+use compiler.core.types.{flat_type_pools_dump, flat_type_pools_restore}
+use compiler.core.parser.{flat_parser_state_dump, flat_parser_state_restore}
+use compiler.core.parser_decls.{flat_extend_pools_dump, flat_extend_pools_restore}
+use compiler.core.parser_decls.{flat_pending_pools_dump, flat_pending_pools_restore}
 extern fn rt_env_get(key: text) -> text
 extern fn rt_time_now_unix_micros() -> i64
 
@@ -1046,11 +1051,87 @@ fn flat_ast_to_module(path: text) -> ParserModule:
         print "[flat-bridge] built frontend module path={path}"
     built_module
 
+
+# ===== Flat-AST pool snapshot: whole-parse dump/restore ======================
+#
+# The seven per-file dump/restore units, composed in ONE fixed order. This is
+# the unit the front-end cache stores and the unit the round-trip gate
+# compares. The version line is first so a blob written by an older codec is a
+# clean MISS rather than a misparse.
+#
+# Completeness (does every piece of per-parse state appear at all?) is enforced
+# by scripts/check/check-flat-ast-codec-complete.shs. Fidelity (does a restore
+# reproduce the dump byte-for-byte over real modules?) is enforced by
+# scripts/check/check-flat-ast-roundtrip.shs, which drives the self-check
+# below over the whole src/app bootstrap closure.
+
+pub fn flat_pools_dump_all() -> text:
+    var out = FLAT_POOL_CODEC_VERSION + "\n"
+    out = out + flat_decl_pools_dump()
+    out = out + flat_expr_pools_dump()
+    out = out + flat_stmt_pools_dump()
+    out = out + flat_type_pools_dump()
+    out = out + flat_parser_state_dump()
+    out = out + flat_extend_pools_dump()
+    out = out + flat_pending_pools_dump()
+    out
+
+# Returns false when the blob is truncated, malformed, or written by a
+# different codec version. A false here MUST be treated as a cache miss and a
+# reparse -- never as a successfully-restored empty parse, which is exactly the
+# silent-miscompile shape this whole design has to avoid.
+#
+# Every unit is invoked and its verdict AND-ed at the end rather than being
+# short-circuited: a restore that stops halfway leaves the pools in a torn
+# state that a later `and` would hide.
+pub fn flat_pools_restore_all(blob: text) -> bool:
+    val r = FlatPoolReader.new(blob)
+    val version = r.next()
+    if version != FLAT_POOL_CODEC_VERSION:
+        return false
+    val ok_decl = flat_decl_pools_restore(r)
+    val ok_expr = flat_expr_pools_restore(r)
+    val ok_stmt = flat_stmt_pools_restore(r)
+    val ok_type = flat_type_pools_restore(r)
+    val ok_par = flat_parser_state_restore(r)
+    val ok_ext = flat_extend_pools_restore(r)
+    val ok_pend = flat_pending_pools_restore(r)
+    ok_decl and ok_expr and ok_stmt and ok_type and ok_par and ok_ext and ok_pend and r.ok
+
+var _fab_roundtrip_cached: i64 = -1
+fn flat_roundtrip_enabled() -> bool:
+    if _fab_roundtrip_cached < 0:
+        _fab_roundtrip_cached = if (rt_env_get("SIMPLE_FLAT_POOL_ROUNDTRIP") ?? "") == "1": 1 else: 0
+    _fab_roundtrip_cached == 1
+
+# Round-trip self-check, DEFAULT OFF (SIMPLE_FLAT_POOL_ROUNDTRIP=1).
+#
+# Runs in situ, immediately before flat_ast_to_module, so it exercises the real
+# pools of a real module in a real build rather than a fixture. Three facts per
+# module, all on one line:
+#   reset=  restoring the pristine pre-parse snapshot really does clear the
+#           pools (otherwise "stable" would be vacuous -- B could equal A just
+#           because nothing was ever cleared between them)
+#   ok=     the restore of the post-parse snapshot reported success
+#   stable= the re-dump is BYTE-equal to the original dump
+# and then it leaves the RESTORED pools in place, so the build that follows is
+# built from restored state. A lossy codec therefore also breaks the build
+# loudly, not just this line.
+fn flat_pools_roundtrip_selfcheck(path: text, zero: text):
+    val a = flat_pools_dump_all()
+    val cleared = flat_pools_restore_all(zero)
+    val z2 = flat_pools_dump_all()
+    val restored = flat_pools_restore_all(a)
+    val b = flat_pools_dump_all()
+    val reset_ok = cleared and (z2 == zero)
+    print("FLATROUNDTRIP\treset={reset_ok}\tok={restored}\tstable={a == b}\tbytes={a.len()}\tpath={path}")
+
 pub fn parse_and_build_module_scoped(source: text, path: text, streaming_scope: bool) -> ParserModule:
     val saved_lex_source = rt_env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE") ?? ""
     val saved_lex_path = rt_env_get("SIMPLE_BOOTSTRAP_LEX_PATH") ?? ""
     reset_all_pools()
     parser_init_with_path(source, path)
+    val _rt_zero = if flat_roundtrip_enabled(): flat_pools_dump_all() else: ""
     # The caller has already admitted this only for the experimental Stage4
     # AOT low-memory path. Keep the scope alive while the rich ParserModule is
     # copied out of the flat AST, then promote that retained graph before the
@@ -1087,6 +1168,8 @@ pub fn parse_and_build_module_scoped(source: text, path: text, streaming_scope: 
             ei = ei + 1
     if transient_scope:
         val _paused = rt_transient_array_scope_pause()
+    if flat_roundtrip_enabled():
+        flat_pools_roundtrip_selfcheck(path, _rt_zero)
     val built_module = flat_ast_to_module(path)
     if fab_phase_prof_enabled():
         val _pp_t6 = rt_time_now_unix_micros()
