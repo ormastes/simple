@@ -269,18 +269,13 @@ pub fn rt_cranelift_declare_string_data(args: &[Value]) -> Result<Value, Compile
 }
 
 pub fn rt_cranelift_declare_global_data(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 5 {
-        return Ok(Value::Int(0));
-    }
-    let handle = unsafe {
-        cranelift_sffi::rt_cranelift_declare_global_data(
-            value_to_i64(&args[0]),
-            value_to_i64(&args[1]),
-            value_to_i64(&args[2]),
-            value_to_i64(&args[3]),
-            value_to_i64(&args[4]),
-        )
-    };
+    let module = expect_i64(args, 0, "rt_cranelift_declare_global_data")?;
+    let name_ptr = expect_i64(args, 1, "rt_cranelift_declare_global_data")?;
+    let name_len = expect_i64(args, 2, "rt_cranelift_declare_global_data")?;
+    let writable = expect_i64(args, 3, "rt_cranelift_declare_global_data")?;
+    let tls = expect_i64(args, 4, "rt_cranelift_declare_global_data")?;
+    validate_raw_span(name_ptr, name_len, "rt_cranelift_declare_global_data")?;
+    let handle = unsafe { cranelift_sffi::rt_cranelift_declare_global_data(module, name_ptr, name_len, writable, tls) };
     Ok(Value::Int(handle))
 }
 
@@ -289,37 +284,25 @@ pub fn rt_cranelift_declare_global_data(args: &[Value]) -> Result<Value, Compile
 /// Args: ctx (i64), data_handle (i64)
 /// Returns: value handle (i64), or 0 on failure.
 pub fn rt_cranelift_data_addr_in_func(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 2 {
-        return Ok(Value::Int(0));
-    }
-    let ctx = value_to_i64(&args[0]);
-    let data_handle = value_to_i64(&args[1]);
+    let ctx = expect_i64(args, 0, "rt_cranelift_data_addr_in_func")?;
+    let data_handle = expect_i64(args, 1, "rt_cranelift_data_addr_in_func")?;
     let value = unsafe { cranelift_sffi::rt_cranelift_data_addr_in_func(ctx, data_handle) };
     Ok(Value::Int(value))
 }
 
 pub fn rt_cranelift_function_addr_in_func(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 3 {
-        return Ok(Value::Int(0));
-    }
-    let value = unsafe {
-        cranelift_sffi::rt_cranelift_function_addr_in_func(
-            value_to_i64(&args[0]),
-            value_to_i64(&args[1]),
-            value_to_i64(&args[2]),
-        )
-    };
+    let ctx = expect_i64(args, 0, "rt_cranelift_function_addr_in_func")?;
+    let func_handle = expect_i64(args, 1, "rt_cranelift_function_addr_in_func")?;
+    let colocated = expect_i64(args, 2, "rt_cranelift_function_addr_in_func")?;
+    let value = unsafe { cranelift_sffi::rt_cranelift_function_addr_in_func(ctx, func_handle, colocated) };
     Ok(Value::Int(value))
 }
 
 /// Import a declared function into the active function builder.
 /// Args: ctx (i64), func_handle (i64)
 pub fn rt_cranelift_import_function(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 2 {
-        return Ok(Value::Int(0));
-    }
-    let ctx = value_to_i64(&args[0]);
-    let func_handle = value_to_i64(&args[1]);
+    let ctx = expect_i64(args, 0, "rt_cranelift_import_function")?;
+    let func_handle = expect_i64(args, 1, "rt_cranelift_import_function")?;
     let func_ref = unsafe { cranelift_sffi::rt_cranelift_import_function(ctx, func_handle) };
     Ok(Value::Int(func_ref))
 }
@@ -327,11 +310,8 @@ pub fn rt_cranelift_import_function(args: &[Value]) -> Result<Value, CompileErro
 /// Append function parameters as block params.
 /// Args: ctx (i64), block (i64)
 pub fn rt_cranelift_append_func_params(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 2 {
-        return Ok(Value::Nil);
-    }
-    let ctx = value_to_i64(&args[0]);
-    let block = value_to_i64(&args[1]);
+    let ctx = expect_i64(args, 0, "rt_cranelift_append_func_params")?;
+    let block = expect_i64(args, 1, "rt_cranelift_append_func_params")?;
     unsafe { cranelift_sffi::rt_cranelift_append_func_params(ctx, block) };
     Ok(Value::Nil)
 }
@@ -339,13 +319,11 @@ pub fn rt_cranelift_append_func_params(args: &[Value]) -> Result<Value, CompileE
 /// Define a finished function in an AOT module.
 /// Args: module (i64), name_ptr (i64), name_len (i64), ctx (i64)
 pub fn rt_cranelift_aot_define_function(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 4 {
-        return Ok(Value::Bool(false));
-    }
-    let module = value_to_i64(&args[0]);
-    let name_ptr = value_to_i64(&args[1]);
-    let name_len = value_to_i64(&args[2]);
-    let ctx = value_to_i64(&args[3]);
+    let module = expect_i64(args, 0, "rt_cranelift_aot_define_function")?;
+    let name_ptr = expect_i64(args, 1, "rt_cranelift_aot_define_function")?;
+    let name_len = expect_i64(args, 2, "rt_cranelift_aot_define_function")?;
+    let ctx = expect_i64(args, 3, "rt_cranelift_aot_define_function")?;
+    validate_raw_span(name_ptr, name_len, "rt_cranelift_aot_define_function")?;
     let defined = unsafe { cranelift_sffi::rt_cranelift_aot_define_function(module, name_ptr, name_len, ctx) };
     Ok(Value::Bool(defined))
 }
@@ -357,10 +335,7 @@ pub fn rt_cranelift_aot_define_function(args: &[Value]) -> Result<Value, Compile
 /// Create a new function signature
 /// Args: call_conv (i64)
 pub fn rt_cranelift_new_signature(args: &[Value]) -> Result<Value, CompileError> {
-    if args.is_empty() {
-        return Ok(Value::Int(0));
-    }
-    let call_conv = value_to_i64(&args[0]);
+    let call_conv = expect_i64(args, 0, "rt_cranelift_new_signature")?;
     let handle = unsafe { cranelift_sffi::rt_cranelift_new_signature(call_conv) };
     Ok(Value::Int(handle))
 }
@@ -368,11 +343,8 @@ pub fn rt_cranelift_new_signature(args: &[Value]) -> Result<Value, CompileError>
 /// Add parameter to signature
 /// Args: sig (i64), type_ (i64)
 pub fn rt_cranelift_sig_add_param(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 2 {
-        return Ok(Value::Nil);
-    }
-    let sig = value_to_i64(&args[0]);
-    let type_code = value_to_i64(&args[1]);
+    let sig = expect_i64(args, 0, "rt_cranelift_sig_add_param")?;
+    let type_code = expect_i64(args, 1, "rt_cranelift_sig_add_param")?;
     unsafe { cranelift_sffi::rt_cranelift_sig_add_param(sig, type_code) };
     Ok(Value::Nil)
 }
@@ -380,11 +352,8 @@ pub fn rt_cranelift_sig_add_param(args: &[Value]) -> Result<Value, CompileError>
 /// Set return type of signature
 /// Args: sig (i64), type_ (i64)
 pub fn rt_cranelift_sig_set_return(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 2 {
-        return Ok(Value::Nil);
-    }
-    let sig = value_to_i64(&args[0]);
-    let type_code = value_to_i64(&args[1]);
+    let sig = expect_i64(args, 0, "rt_cranelift_sig_set_return")?;
+    let type_code = expect_i64(args, 1, "rt_cranelift_sig_set_return")?;
     unsafe { cranelift_sffi::rt_cranelift_sig_set_return(sig, type_code) };
     Ok(Value::Nil)
 }
@@ -396,13 +365,11 @@ pub fn rt_cranelift_sig_set_return(args: &[Value]) -> Result<Value, CompileError
 /// Begin building a function
 /// Args: module (i64), name_ptr (i64), name_len (i64), sig (i64)
 pub fn rt_cranelift_begin_function(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 4 {
-        return Ok(Value::Int(0));
-    }
-    let module = value_to_i64(&args[0]);
-    let name_ptr = value_to_i64(&args[1]);
-    let name_len = value_to_i64(&args[2]);
-    let sig = value_to_i64(&args[3]);
+    let module = expect_i64(args, 0, "rt_cranelift_begin_function")?;
+    let name_ptr = expect_i64(args, 1, "rt_cranelift_begin_function")?;
+    let name_len = expect_i64(args, 2, "rt_cranelift_begin_function")?;
+    let sig = expect_i64(args, 3, "rt_cranelift_begin_function")?;
+    validate_raw_span(name_ptr, name_len, "rt_cranelift_begin_function")?;
     let handle = unsafe { cranelift_sffi::rt_cranelift_begin_function(module, name_ptr, name_len, sig) };
     Ok(Value::Int(handle))
 }
@@ -410,10 +377,7 @@ pub fn rt_cranelift_begin_function(args: &[Value]) -> Result<Value, CompileError
 /// End function building
 /// Args: ctx (i64)
 pub fn rt_cranelift_end_function(args: &[Value]) -> Result<Value, CompileError> {
-    if args.is_empty() {
-        return Ok(Value::Int(0));
-    }
-    let ctx = value_to_i64(&args[0]);
+    let ctx = expect_i64(args, 0, "rt_cranelift_end_function")?;
     let result = unsafe { cranelift_sffi::rt_cranelift_end_function(ctx) };
     Ok(Value::Int(result))
 }
@@ -421,12 +385,9 @@ pub fn rt_cranelift_end_function(args: &[Value]) -> Result<Value, CompileError> 
 /// Define function in module
 /// Args: module (i64), func_id (i64), ctx (i64)
 pub fn rt_cranelift_define_function(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 3 {
-        return Ok(Value::Bool(false));
-    }
-    let module = value_to_i64(&args[0]);
-    let func_id = value_to_i64(&args[1]);
-    let ctx = value_to_i64(&args[2]);
+    let module = expect_i64(args, 0, "rt_cranelift_define_function")?;
+    let func_id = expect_i64(args, 1, "rt_cranelift_define_function")?;
+    let ctx = expect_i64(args, 2, "rt_cranelift_define_function")?;
     let result = unsafe { cranelift_sffi::rt_cranelift_define_function(module, func_id, ctx) };
     Ok(Value::Bool(result))
 }
@@ -438,10 +399,7 @@ pub fn rt_cranelift_define_function(args: &[Value]) -> Result<Value, CompileErro
 /// Create a new block
 /// Args: ctx (i64)
 pub fn rt_cranelift_create_block(args: &[Value]) -> Result<Value, CompileError> {
-    if args.is_empty() {
-        return Ok(Value::Int(0));
-    }
-    let ctx = value_to_i64(&args[0]);
+    let ctx = expect_i64(args, 0, "rt_cranelift_create_block")?;
     let handle = unsafe { cranelift_sffi::rt_cranelift_create_block(ctx) };
     Ok(Value::Int(handle))
 }
@@ -955,6 +913,34 @@ mod tests {
         assert!(super::rt_file_hash(&[Value::Bool(false)]).is_err());
         assert!(super::rt_write_file(&[Value::text("path")]).is_err());
         assert!(super::rt_write_file(&[Value::text("path"), Value::Int(0)]).is_err());
+    }
+
+    #[test]
+    fn declaration_and_context_sffi_reject_fabricated_handles_and_spans() {
+        assert!(super::rt_cranelift_declare_global_data(&[]).is_err());
+        assert!(super::rt_cranelift_declare_global_data(&[
+            Value::Int(1),
+            Value::Int(0),
+            Value::Int(4),
+            Value::Int(0),
+            Value::Int(0),
+        ])
+        .is_err());
+        assert!(super::rt_cranelift_data_addr_in_func(&[Value::Nil, Value::Int(1)]).is_err());
+        assert!(super::rt_cranelift_aot_define_function(&[
+            Value::Int(1),
+            Value::Int(1),
+            Value::Int(-1),
+            Value::Int(1),
+        ])
+        .is_err());
+        assert!(super::rt_cranelift_new_signature(&[]).is_err());
+        assert!(super::rt_cranelift_sig_add_param(&[Value::Int(1), Value::Bool(false)]).is_err());
+        assert!(
+            super::rt_cranelift_begin_function(&[Value::Int(1), Value::Int(0), Value::Int(2), Value::Int(1),]).is_err()
+        );
+        assert!(super::rt_cranelift_define_function(&[Value::Int(1)]).is_err());
+        assert!(super::rt_cranelift_create_block(&[]).is_err());
     }
 
     #[test]

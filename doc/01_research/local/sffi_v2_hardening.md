@@ -246,6 +246,15 @@ The checked helpers are inline and the valid path remains direct; validation
 adds only type/descriptor branches, not allocation, lookup, or copying. The
 focused raw-object descriptor regression passes.
 
+The next Cranelift declaration/context group is now covered by the same
+fail-closed decoder: global data, data/function address import, function
+imports and parameter attachment, AOT definition, signature creation/update,
+function begin/end/definition, and block creation no longer turn absent or
+wrong-typed handles into zero/nil/false. Name spans reject negative lengths and
+null-with-positive-length descriptors before unsafe entry. One focused
+sabotage test exercises the group. Inline checks preserve the direct valid
+call shape and introduce no heap work or registry lookup.
+
 All 15 remaining legacy sign/verify declarations in the canonical signature
 module are now explicitly `unsafe(ffi)` and document their sentinel contract:
 verification collapses malformed bridge input into `0`, while signing may
