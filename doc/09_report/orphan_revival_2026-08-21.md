@@ -115,3 +115,105 @@ remaining registered worktrees — no worktree directory was removed, because a
 bootstrap and several agent sessions are running against this repo and a
 per-directory liveness check across 356 trees was not affordable on a loaded
 host. Nothing was pushed; no branch was created.
+
+## Deep pass — 2026-08-21 (second session)
+
+Inventory at start: 608 local branches, 357 worktrees, main = 1915e1f916a.
+
+### Method
+
+- `git for-each-ref --format='%(ahead-behind:main)'` classified all 608 branches in <1s (the per-branch `git cherry` loop was ~12s/branch and infeasible at this scale).
+- Buckets: ZERO/merged 8, SMALL (1-6 ahead) 69, BULK (>6 ahead) 531.
+- BULK mining was done globally rather than per branch: all 28,075 off-main commits were enumerated once, filtered to `fix(`/`test(` subjects <14 days old and <=10 files (657 unique by patch-id).
+- **Anti-revert filter (rules/vcs.md §Sync must never clobber):** a candidate was only cherry-picked when, for every file it touches, the blob at its PARENT is byte-identical to main's current blob — i.e. a true forward delta that cannot rewind another session's work. 60 of 657 passed; 597 were base-drifted or already present and were left alone.
+- Each landed commit was verified by running the spec files it touches individually with `bin/simple test` (57 spec runs).
+
+### Branch actions
+
+| Class | Count | Action |
+|---|---|---|
+| fully merged (ancestor of main) | 7 | `git branch -d` (4 deleted; 3 refused — checked out in a worktree) |
+| superseded (all patch-ids on main, `git cherry` all `-`) | 22 | `git branch -D` (20 deleted) |
+| junk (`_stash_*`/`land*`/`session-*`/`rescue/*` >7d, or empty/WIP subject) | 35 | `git branch -D` (33 deleted) |
+| BULK / still-live forks | 551 | kept — carry unique unmined content; mined individually above |
+
+608 -> 551 branches.
+
+### Revived commits (45 landed)
+
+| revived sha | source branch | subject |
+|---|---|---|
+| 6f28264b716 | — | revive(land3): test(fonts): first unit specs for the nogc text_layout stack — bitmap, placement, vector (15/15) |
+| 2fcc8f9fd76 | — | revive(land3): test(rendering): sync backend_matrix_spec mirror — clears the newly introduced divergence |
+| 27b65673362 | — | revive(land3): fix(interpreter): propagate captured-object self-mutations out of lambda bodies (6th write-back site) |
+| d053b939086 | — | revive(land3): fix(web): compound selector #id.class matched as a single id in two selector paths |
+| c968217db58 | — | revive(land3): fix(web): font-cache parallel-array bounds guard + alpha-aware gradient stops + load browser_session_loading |
+| 40979cf4896 | — | revive(land-rendering): test(aspect_pack): executable gap ledger — 8 acceptance items, 7 pending with named blockers |
+| 3d0d072ca41 | — | revive(land-rendering): fix(loader): resolve duplicate type names shadowing the real loader classes |
+| d33c4a2e5bf | — | revive(land-rendering): test(bitfield): de-vacuify the legacy twin too; record pre-push divergence offenders |
+| 890514c99e7 | — | revive(land-rendering): fix(driver): wire smf_manifest_entry_verifies into load_smf_manifest — whole-entry verify on load, fail closed |
+| c2141a846d3 | — | revive(_stash_extra): fix(test-runner): aggregate Results: line fails closed on timed-out specs |
+| 859f1cbff64 | — | revive(_stash_extra): fix(test): port perf-spec fixes to 05_perf mirrors (tauri_equiv report, ui_access hot paths) |
+| c2d1d2f201c | — | revive(_stash_extra): fix(perf-specs): entry-closure source-root fast path, fail-closed mode receipts, spec interpolation |
+| 1c292d5c4d8 | — | revive(_stash_extra): test(perf): fix ui_access hot-paths spec imports and builder API usage |
+| 84b86db03ec | — | revive(_stash_extra): fix(test): repair tauri_equiv report_spec — parse error, percentile off-by-one, set-free sort |
+| 627354f4f2d | — | revive(_stash_extra): fix(test): lean package-root spec used undefined `none`; Simple's null literal is `nil` |
+| aa27a5148cb | — | revive(_stash_extra): test(control_flow): fn_lambda BDD case must not rely on unsupported closure write-back |
+| 7a5a79edff4 | — | revive(_stash_extra): fix(verification): format_all loop var shadowed by module alias |
+| d08de8b2559 | — | revive(_stash_extra): fix(guard): make lint-binary staleness FAIL self-diagnosing, not just red |
+| 6b37fc7c37c | — | revive(_stash_extra): fix(spec-gen): stop silent spec drops and flattened mirror paths |
+| 67179d8e910 | — | revive(_stash_extra): fix(check): jit-module-drop fence bucketed a truncated diagnostic |
+| bfc953d5600 | — | revive(_stash_extra): fix(monitor): each kill reason names its own guard, limit and env var |
+| 59ab2b2c8a4 | — | revive(_stash_extra): fix(native-build): fail closed instead of returning 0 unconditionally |
+| aebb8f86a7d | — | revive(_stash_extra): fix(guards): make a misplaced --expect-files an ERROR; file three verified guard defects |
+| e1d0a11585b | — | revive(_stash_extra): test(cli): fix brace interpolation and stale argv-ABI claim in main_part2 depth guard spec |
+| 19d9dd22497 | — | revive(_stash_extra): test(cli): escape literal braces in test_entry numeric guard spec |
+| 4415da044ff | — | revive(_stash_extra): test(cli): escape literal braces in args_after_command dedupe spec |
+| e416077889c | — | revive(_stash_extra): test(runtime): refute the rt_clear Dict-arm misclassification hypothesis by C measurement |
+| 05ab7e6602f | — | revive(_stash_extra): fix(native_all): align per-file timeout default with library (60s -> 300s) |
+| e2c5ff641a3 | — | revive(_stash_extra): fix(guards): verdict contracts for the gpu and bootstrap guards; os/runtime triage |
+| 808901bc7c0 | — | revive(_stash_extra): fix(runtime): restore the 61-bit boxed-integer writer clobbered by e14a2ffb4df |
+| d336a55d37f | — | revive(_stash_extra): fix(check): let the outcome-reason guard find a compiler from a fresh worktree |
+| 99149cbd33b | — | revive(_stash_extra): fix(docs): restore 9 bug docs my previous commit clobbered |
+| bca4c5b73ee | — | revive(_stash_extra): fix(sheets): FLOOR/CEILING silently inverted for a negative significance |
+| 547bec3a094 | — | revive(_stash_extra): fix(perf): make 8K receipt aggregator portable |
+| e1b52ff1719 | — | revive(_stash_extra): fix(bootstrap): refuse recursive release delegation |
+| 3f00d1eec46 | — | revive(_stash_extra): fix(macos): canonicalize GPU runtime rpath admission |
+| 75d3e5cf9b6 | — | revive(_stash_extra): fix(runtime): restore macOS C compile guard |
+| d7e7bb91a01 | — | revive(_stash_extra): fix(mcp): keep installed project launchers portable |
+| ea85ee6bf24 | — | revive(codex/migrate-compiler-perf-b-202): test(compiler): add capsule sort system coverage |
+| 69a34f6261d | — | revive(_stash_extra): fix(riscv): require complete RVFI readiness ports |
+| 563be1124ca | — | revive(codex/restart12-infra-recovery): fix(infra): fail closed on SSpec count checks |
+| 7af7bcadcda | — | revive(codex/allocator-patch-reconstruct-final): fix(llvm): register global struct receivers |
+| 4afcca51d72 | — | revive(codex/option-config-f64-candidate-b791): fix(config): parse float values through Option semantics |
+| 0129f385cb7 | — | revive(codex/authority-preflight-order-fix): fix(driver): hoist Tier-5 header owners |
+| b11e764b12d | — | revive(codex/stage4-io-self-cycle-fix): fix(bootstrap): type duplicate token cache returns |
+
+### Not landed
+
+| origin sha | reason |
+|---|---|
+| 2868db243df | red-spec: test(compiler): execute float alias runtime contracts |
+| 137cc2a66c9 | red-spec: fix(ui): remove persistence callback captures |
+| 2d3e885cdd7 | red-spec: test(infra): specify SSpec count truthfulness |
+| fc70c3c3794 | red-spec: test(io): add fail-closed SCV/render file-read byte contract coverage |
+| df8e9afe9d7 | red-spec: test(smux): add fail-closed system SSpec for smux/caret spec quality |
+| aef9bac7969 | red-spec: test(render): add 8K80 A1 system coverage |
+| db2f57131a9 | red-spec: fix(parser): close compiled-checker syntax gaps |
+| 96a260a5a62 | red-spec: test(hir): cover env path import ownership |
+| b93044e05eb | red-spec: test(startup-perf): wire the startup budget detector into `bin/simple test`; record aspect-weave spec timeouts |
+| cb06d7ddbde | red-spec: fix(check): engine-differential i64 container divergence was a stale seed |
+| 9d9049d5691 | red-spec: fix(parser): require commas between generic args so a comparison chain closed by '(' backtracks |
+| c731c72e396 | red-spec: fix(test): t32_hw DebugConfig literals drop undeclared args/debugger/remote |
+| de90b608a20 | red-spec: fix(web_framework): make session signing + CSRF tokens executable; 3 specs left RED on real defects |
+| 6d0ddc8a611 | red-spec: fix(semantics): wire forbidden_io_checker into a real scan driver — it protected nothing |
+| 52b6c4dd44b | cherry-pick conflict (codex/authority-preflight-order-fix) |
+
+14 commits were picked, found to leave a spec RED, and dropped (`reset --hard`); the chain was rebuilt without them. 11 of those 14 ADD a new deliberately-red spec (e.g. `session_csrf_signing_spec`, `sspec_count_truthfulness_spec`, `forbidden_io_context_scan_spec`) — real defects worth landing later with their fixes, but not green today.
+
+### Worktrees
+
+- 357 registered. 5 protected by name (`simple-main`, `orphan-triage`, `land-*`, `simple-boot-snap`).
+- 298 have HEADs NOT on main -> kept (unmerged work).
+- 54 had HEAD on main, no live process (`pgrep -af` + `/proc/*/cwd` cross-check), mtime >2h, and a clean `git status` -> `git worktree remove --force`, then `git worktree prune`.
+- 0 were dirty; none was removed with uncommitted content.
