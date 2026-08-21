@@ -1126,6 +1126,66 @@ fn flat_pools_roundtrip_selfcheck(path: text, zero: text):
     val reset_ok = cleared and (z2 == zero)
     print("FLATROUNDTRIP\treset={reset_ok}\tok={restored}\tstable={a == b}\tbytes={a.len()}\tpath={path}")
 
+
+# ===== Front-end cache entrypoints ==========================================
+#
+# Capture: the driver asks for the post-parse pool blob for THIS parse, taken
+# at exactly the point a hit will restore it -- after every desugar pass, just
+# before the bridge. Taking it anywhere else would store a different program.
+#
+# The flag is a var rather than a parameter because
+# parse_and_build_module_scoped has many callers and only one of them caches;
+# threading a parameter through all of them would be churn for no behaviour.
+# Counts real parses. The front-end cache spec asserts this is 0 on an
+# all-hit rebuild -- a hit count alone would not prove the parser was skipped.
+var _fab_parse_module_body_calls: i64 = 0
+
+pub fn flat_parse_module_body_calls() -> i64:
+    _fab_parse_module_body_calls
+
+var _fab_capture_pools: i64 = 0
+var _fab_captured_blob: text = ""
+
+pub fn flat_pool_capture_arm():
+    _fab_capture_pools = 1
+    _fab_captured_blob = ""
+
+# Reads AND disarms, so a blob can never be attributed to a later module: a
+# caller that forgets to re-arm gets "" (a store that does not happen), never
+# the previous module's parse.
+pub fn flat_pool_capture_take() -> text:
+    val blob = _fab_captured_blob
+    _fab_capture_pools = 0
+    _fab_captured_blob = ""
+    blob
+
+# Cache HIT path: rebuild the identical ParserModule from a stored blob without
+# parsing. Returns nil on any decode failure, which the caller MUST treat as a
+# miss and reparse.
+#
+# parser_init_with_path still runs: it installs the lexer source globals the
+# bridge reads for spans and slices, and it clears the per-parse state that the
+# restore is about to overwrite. The restore comes after it, so nothing init
+# sets can survive into the rebuilt module.
+pub fn build_module_from_flat_pool_blob(blob: text, source: text, path: text) -> ParserModule?:
+    if blob == "":
+        return nil
+    val saved_lex_source = rt_env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE") ?? ""
+    val saved_lex_path = rt_env_get("SIMPLE_BOOTSTRAP_LEX_PATH") ?? ""
+    reset_all_pools()
+    parser_init_with_path(source, path)
+    if not flat_pools_restore_all(blob):
+        # Leave nothing half-restored behind for the reparse that follows.
+        reset_all_pools()
+        parser_init_with_path(source, path)
+        rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", saved_lex_source)
+        rt_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", saved_lex_path)
+        return nil
+    val built = flat_ast_to_module(path)
+    rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", saved_lex_source)
+    rt_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", saved_lex_path)
+    Some(built)
+
 pub fn parse_and_build_module_scoped(source: text, path: text, streaming_scope: bool) -> ParserModule:
     val saved_lex_source = rt_env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE") ?? ""
     val saved_lex_path = rt_env_get("SIMPLE_BOOTSTRAP_LEX_PATH") ?? ""
@@ -1138,6 +1198,7 @@ pub fn parse_and_build_module_scoped(source: text, path: text, streaming_scope: 
     # arena is cleared.
     val transient_scope = if streaming_scope: rt_transient_array_scope_begin() else: false
     val _pp_t0 = if fab_phase_prof_enabled(): rt_time_now_unix_micros() else: 0
+    _fab_parse_module_body_calls = _fab_parse_module_body_calls + 1
     parse_module_body()
     val _pp_t1 = if fab_phase_prof_enabled(): rt_time_now_unix_micros() else: 0
     if fab_phase_prof_enabled():
@@ -1170,6 +1231,12 @@ pub fn parse_and_build_module_scoped(source: text, path: text, streaming_scope: 
         val _paused = rt_transient_array_scope_pause()
     if flat_roundtrip_enabled():
         flat_pools_roundtrip_selfcheck(path, _rt_zero)
+    # A parse that reported errors is never stored: the driver poisons that
+    # module and keeps going, and a stored error-parse would come back as a
+    # HIT on the next build with par_had_error restored true but no parser
+    # diagnostics re-emitted -- a build that fails with no message.
+    if _fab_capture_pools == 1 and not parser_has_errors():
+        _fab_captured_blob = flat_pools_dump_all()
     val built_module = flat_ast_to_module(path)
     if fab_phase_prof_enabled():
         val _pp_t6 = rt_time_now_unix_micros()

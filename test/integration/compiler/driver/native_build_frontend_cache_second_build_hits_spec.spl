@@ -1,0 +1,144 @@
+use std.spec
+use std.io.{file_exists, file_read, file_write}
+use std.io_runtime.{dir_create_all}
+use app.io.sysinfo_ops.{getpid}
+
+# Per-module FRONT-END cache
+# (doc/08_tracking/bug/native_build_frontend_not_incremental_2026-08-21.md).
+#
+# The object cache only skips CODEGEN: its lookup runs in step 5/6, by which
+# time parse, HIR and MIR have already run for every module, so a 100%-hit
+# rebuild still paid the whole front end. This cache skips parse_module_body
+# itself: a hit restores the flat AST pools and runs the same bridge, so the
+# rebuilt ParserModule is identical and surfaces/HIR/type-checking still run.
+#
+# `parses=` in the summary line is the load-bearing assertion. A hit COUNT
+# alone would not prove the parser was skipped -- it only proves the lookup
+# said "hit". parses= is incremented at the parse_module_body call site itself,
+# so parses=0 on an all-hit build is direct evidence.
+#
+# The build runs as a SUBPROCESS rather than through cli_native_build in
+# process: native-build already forks a worker, so the counters live in the
+# child and the only place they are observable is its stdout.
+
+val FIXTURE_ROOT = "test/02_integration/compiler/driver/fixtures/native_build_cache"
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_env_set(key: text, value: text)
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_dir_list(path: text) -> [text]
+extern fn rt_file_delete(path: text) -> bool
+
+fn run_build(root: text, entry: text, cache_dir: text, fe_dir: text, output: text) -> (text, i64):
+    rt_env_set("SIMPLE_FRONTEND_CACHE_DIR", fe_dir)
+    val (out, err, code) = rt_process_run("bin/simple",
+        ["native-build", "--source", root, "--entry-closure", "--threads", "2",
+         "--cache-dir", cache_dir, "--entry", entry, "--output", output])
+    (out + "\n" + err, code)
+
+fn summary_line(blob: text) -> text:
+    for line in blob.split("\n"):
+        if line.contains("[frontend-cache]"):
+            return line.trim()
+    ""
+
+fn entry_files(dir: text) -> [text]:
+    var out: [text] = []
+    for name in rt_dir_list(dir) ?? []:
+        if name.ends_with(".fpc"):
+            out = out.push(name)
+    out
+
+describe "native-build front-end cache":
+
+    slow_it "misses every module on a cold build and stores one entry each":
+        val run_id = getpid()
+        val root = "build/tmp/fe_cache_spec_{run_id}"
+        expect(dir_create_all(root)).to_equal(true)
+        val fe_dir = "{root}/frontend"
+        val (blob, code) = run_build(FIXTURE_ROOT, "{FIXTURE_ROOT}/main.spl",
+            "{root}/cache", fe_dir, "{root}/out1")
+        expect(code).to_equal(0)
+        val line = summary_line(blob)
+        expect(line.contains("misses=3")).to_equal(true)
+        expect(line.contains("hits=0")).to_equal(true)
+        expect(entry_files(fe_dir).len()).to_equal(3)
+
+    slow_it "hits every module on an identical second build and parses nothing":
+        val run_id = getpid()
+        val root = "build/tmp/fe_cache_hit_spec_{run_id}"
+        expect(dir_create_all(root)).to_equal(true)
+        val fe_dir = "{root}/frontend"
+        val entry = "{FIXTURE_ROOT}/main.spl"
+        val (_b1, c1) = run_build(FIXTURE_ROOT, entry, "{root}/cache", fe_dir, "{root}/out1")
+        expect(c1).to_equal(0)
+        val (b2, c2) = run_build(FIXTURE_ROOT, entry, "{root}/cache", fe_dir, "{root}/out2")
+        expect(c2).to_equal(0)
+        val line = summary_line(b2)
+        expect(line.contains("hits=3")).to_equal(true)
+        expect(line.contains("misses=0")).to_equal(true)
+        # The whole point: parse_module_body ran zero times.
+        expect(line.contains("parses=0")).to_equal(true)
+
+    slow_it "produces byte-identical output on a hit and on a miss":
+        # A cache that is fast and wrong is worse than no cache. The rebuilt
+        # ParserModule must drive the same HIR, MIR and codegen, so the emitted
+        # binary must not differ by one byte.
+        val run_id = getpid()
+        val root = "build/tmp/fe_cache_ident_spec_{run_id}"
+        expect(dir_create_all(root)).to_equal(true)
+        val entry = "{FIXTURE_ROOT}/main.spl"
+        val (_b1, c1) = run_build(FIXTURE_ROOT, entry, "{root}/cache1", "{root}/fe", "{root}/miss.bin")
+        expect(c1).to_equal(0)
+        # A FRESH object cache dir, so the second build really re-codegens from
+        # the restored parse instead of reusing the first build's objects.
+        val (_b2, c2) = run_build(FIXTURE_ROOT, entry, "{root}/cache2", "{root}/fe", "{root}/hit.bin")
+        expect(c2).to_equal(0)
+        expect(file_exists("{root}/miss.bin")).to_equal(true)
+        expect(file_exists("{root}/hit.bin")).to_equal(true)
+        expect(file_read("{root}/hit.bin")).to_equal(file_read("{root}/miss.bin"))
+
+    slow_it "re-parses exactly the edited module and keeps hitting the rest":
+        val run_id = getpid()
+        val root = "build/tmp/fe_cache_edit_spec_{run_id}"
+        val src = "{root}/src"
+        expect(dir_create_all(src)).to_equal(true)
+        expect(file_write("{src}/util_a.spl", file_read("{FIXTURE_ROOT}/util_a.spl"))).to_equal(true)
+        expect(file_write("{src}/util_b.spl", file_read("{FIXTURE_ROOT}/util_b.spl"))).to_equal(true)
+        expect(file_write("{src}/main.spl", file_read("{FIXTURE_ROOT}/main.spl"))).to_equal(true)
+        val fe_dir = "{root}/frontend"
+        val entry = "{src}/main.spl"
+        val (_b1, c1) = run_build(src, entry, "{root}/cache", fe_dir, "{root}/out1")
+        expect(c1).to_equal(0)
+        # Touch one module's CONTENT (a comment is enough -- the key is the
+        # file's sha256, not its mtime, so a no-op rewrite must still hit).
+        expect(file_write("{src}/util_a.spl",
+            file_read("{src}/util_a.spl") + "\n# edited\n")).to_equal(true)
+        val (b2, c2) = run_build(src, entry, "{root}/cache", fe_dir, "{root}/out2")
+        expect(c2).to_equal(0)
+        val line = summary_line(b2)
+        expect(line.contains("misses=1")).to_equal(true)
+        expect(line.contains("hits=2")).to_equal(true)
+        expect(line.contains("parses=1")).to_equal(true)
+
+    slow_it "treats a corrupted entry as a miss instead of crashing":
+        # Fail closed is the whole contract: a truncated or garbled entry must
+        # reparse, never become a module. Truncating mid-blob is the realistic
+        # shape (a write interrupted by a full disk or a killed build).
+        val run_id = getpid()
+        val root = "build/tmp/fe_cache_corrupt_spec_{run_id}"
+        expect(dir_create_all(root)).to_equal(true)
+        val fe_dir = "{root}/frontend"
+        val entry = "{FIXTURE_ROOT}/main.spl"
+        val (_b1, c1) = run_build(FIXTURE_ROOT, entry, "{root}/cache", fe_dir, "{root}/out1")
+        expect(c1).to_equal(0)
+        val names = entry_files(fe_dir)
+        expect(names.len()).to_equal(3)
+        val victim = "{fe_dir}/{names[0]}"
+        val whole = file_read(victim)
+        expect(file_write(victim, whole.substring(0, whole.len() / 2))).to_equal(true)
+        val (b2, c2) = run_build(FIXTURE_ROOT, entry, "{root}/cache", fe_dir, "{root}/out2")
+        expect(c2).to_equal(0)
+        val line = summary_line(b2)
+        expect(line.contains("misses=1")).to_equal(true)
+        expect(line.contains("hits=2")).to_equal(true)

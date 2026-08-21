@@ -1,0 +1,153 @@
+# Per-module FRONT-END cache: skip parse_module_body for an unchanged module.
+#
+# WHAT A HIT SKIPS, AND WHAT IT STILL RUNS
+# A hit restores the flat AST pools verbatim and then runs the EXISTING bridge
+# (flat_ast_to_module), so it produces the identical ParserModule. Module
+# surfaces, HIR lowering, type checking and every diagnostic downstream still
+# run exactly as on a miss. Nothing is silenced. That is what makes this cache
+# sound without any dependency-invalidation prerequisite -- unlike skipping
+# HIR/MIR on an object-cache hit, which would suppress type errors introduced
+# by a changed dependency interface.
+#
+# Measured 2026-08-21: parse_module_body plus the desugar passes are 96-99% of
+# per-file front-end cost and the bridge is 1-4%, so the ceiling is ~25x on the
+# parse phase. See doc/08_tracking/bug/native_build_frontend_not_incremental_2026-08-21.md
+#
+# FAIL CLOSED, ALWAYS
+# Every failure mode -- absent entry, unreadable file, wrong version byte,
+# truncated or malformed blob, missing scope -- is a MISS that reparses. There
+# is no path on which a bad entry becomes a module. A wrong module here is a
+# silent miscompile of the bootstrap compiler, so "reparse" is the only
+# acceptable answer to any doubt.
+#
+# KEYING
+#   sha256(source file bytes)  -- the module's own content
+#   + the scope the DRIVER publishes in SIMPLE_FRONTEND_CACHE_SCOPE, which
+#     folds native_build_cache_scope_key (lane from SIMPLE_CACHE_SCOPE,
+#     backend, cpu, features, opt) together with the compiler SOURCE
+#     fingerprint. The source fingerprint is not optional: under native-build
+#     the front end runs INTERPRETED from src/compiler/**, so the executable
+#     hash does not move when a parser edit changes what a parse produces.
+#   + FLAT_POOL_CODEC_VERSION, so a codec format change cannot read old blobs.
+# No scope published => the cache is OFF. A frontend that cannot see the
+# driver's scope has no way to know what it would be sharing entries with, and
+# guessing is exactly how a stale-parser hit becomes a wrong module.
+
+use compiler.frontend.core.flat_pool_codec.{FLAT_POOL_CODEC_VERSION}
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_hash_sha256(path: text) -> text
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_getpid() -> i64
+extern fn rt_file_move(src: text, dst: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+
+# Entry format version. Bumping this invalidates every stored entry without
+# anyone having to delete a directory: an old entry's first line no longer
+# matches and is a miss.
+val FRONTEND_CACHE_ENTRY_VERSION: text = "spl-fecache-v1"
+
+var _fe_cache_scope_memo: text = "@@unset@@"
+var _fe_cache_hits: i64 = 0
+var _fe_cache_misses: i64 = 0
+
+pub fn frontend_parse_cache_scope() -> text:
+    if _fe_cache_scope_memo != "@@unset@@":
+        return _fe_cache_scope_memo
+    if (rt_env_get("SIMPLE_FRONTEND_CACHE") ?? "") == "0":
+        _fe_cache_scope_memo = ""
+        return ""
+    val published = rt_env_get("SIMPLE_FRONTEND_CACHE_SCOPE") ?? ""
+    _fe_cache_scope_memo = published
+    published
+
+pub fn frontend_parse_cache_enabled() -> bool:
+    frontend_parse_cache_scope() != ""
+
+# One directory per scope, so a cross-scope lookup cannot even NAME an
+# out-of-scope entry -- the same partitioning the object cache uses. The
+# default root matches the bootstrap lane's other caches.
+pub fn frontend_parse_cache_dir() -> text:
+    val root = rt_env_get("SIMPLE_FRONTEND_CACHE_DIR") ?? ""
+    if root != "":
+        return root
+    val lane = rt_env_get("SIMPLE_CACHE_SCOPE") ?? ""
+    val lane_name = if lane == "": "default" else: lane
+    "build/bootstrap/native_cache/{lane_name}/frontend"
+
+# The key is the module's own content hash; the scope rides in the entry
+# header and in the directory, not in the filename, so a scope mismatch is a
+# loud version mismatch rather than a silent miss on a differently-named file.
+pub fn frontend_parse_cache_key(file_path: text) -> text:
+    if not rt_file_exists(file_path):
+        return ""
+    val digest = rt_file_hash_sha256(file_path)
+    if digest.len() != 64:
+        return ""
+    digest
+
+fn frontend_parse_cache_path(key: text) -> text:
+    frontend_parse_cache_dir() + "/" + key + ".fpc"
+
+fn frontend_parse_cache_header() -> text:
+    FRONTEND_CACHE_ENTRY_VERSION + " " + FLAT_POOL_CODEC_VERSION + " " + frontend_parse_cache_scope()
+
+# Returns the stored pool blob, or "" for a miss. "" is also what a corrupt or
+# foreign entry returns: the caller cannot tell the difference and must not
+# need to, because both answers are "reparse".
+pub fn frontend_parse_cache_load(key: text) -> text:
+    if key == "" or not frontend_parse_cache_enabled():
+        return ""
+    val path = frontend_parse_cache_path(key)
+    if not rt_file_exists(path):
+        return ""
+    val raw = rt_file_read_text(path) ?? ""
+    if raw == "":
+        return ""
+    val nl = raw.index_of("\n")
+    if nl < 0:
+        return ""
+    val header = raw.substring(0, nl)
+    if header != frontend_parse_cache_header():
+        return ""
+    raw.substring(nl + 1, raw.len())
+
+# Written via a pid-unique temp file then renamed, so a concurrent reader (the
+# shard workers of step 4 run in parallel processes over one cache dir) can
+# never observe a half-written entry. A failed write is silently no-op: a cache
+# that cannot store is a slow build, not a wrong one.
+pub fn frontend_parse_cache_store(key: text, blob: text) -> bool:
+    if key == "" or blob == "" or not frontend_parse_cache_enabled():
+        return false
+    val dir = frontend_parse_cache_dir()
+    val _made = rt_dir_create_all(dir)
+    val final_path = frontend_parse_cache_path(key)
+    val tmp = final_path + ".{rt_getpid()}.tmp"
+    if not rt_file_write_text(tmp, frontend_parse_cache_header() + "\n" + blob):
+        return false
+    if rt_file_move(tmp, final_path):
+        return true
+    val _cleaned = rt_file_delete(tmp)
+    false
+
+pub fn frontend_parse_cache_note_hit():
+    _fe_cache_hits = _fe_cache_hits + 1
+
+pub fn frontend_parse_cache_note_miss():
+    _fe_cache_misses = _fe_cache_misses + 1
+
+pub fn frontend_parse_cache_hits() -> i64:
+    _fe_cache_hits
+
+pub fn frontend_parse_cache_misses() -> i64:
+    _fe_cache_misses
+
+export FRONTEND_CACHE_ENTRY_VERSION
+export frontend_parse_cache_scope, frontend_parse_cache_enabled
+export frontend_parse_cache_dir, frontend_parse_cache_key
+export frontend_parse_cache_load, frontend_parse_cache_store
+export frontend_parse_cache_note_hit, frontend_parse_cache_note_miss
+export frontend_parse_cache_hits, frontend_parse_cache_misses

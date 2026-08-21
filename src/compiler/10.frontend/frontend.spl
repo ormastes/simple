@@ -8,6 +8,10 @@
 
 use compiler.frontend.parser_types.{ParserModule, DomainBlock}
 use compiler.frontend.flat_ast_bridge.{parse_and_build_module_scoped}
+use compiler.frontend.flat_ast_bridge.{build_module_from_flat_pool_blob, flat_pool_capture_arm, flat_pool_capture_take}
+use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_enabled, frontend_parse_cache_key}
+use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_load, frontend_parse_cache_store}
+use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_note_hit, frontend_parse_cache_note_miss}
 use compiler.frontend.desugar.desugar_async.{desugar_module}
 use compiler.common.diagnostics.span.{Span}
 use std.nogc_sync_mut.io.process_ops.{eprint}
@@ -66,6 +70,29 @@ fn frontend_strip_domain_block_lines(source: text) -> text:
             lines.push(raw_line)
     lines.join("\n")
 
+
+# Front-end cache boundary. A HIT restores the flat pools and runs the same
+# bridge, so what comes back is the identical ParserModule and everything after
+# this point -- domain blocks, async desugar, surfaces, HIR, type checking --
+# runs unchanged. See src/compiler/10.frontend/frontend_parse_cache.spl for why
+# that makes the cache sound with no dependency-invalidation prerequisite.
+#
+# Every doubt is a MISS. A missing key (source not on disk), an absent entry, a
+# foreign scope, a torn blob: all fall through to a real parse.
+fn frontend_parse_or_restore(parse_source: text, file_path: text, streaming_scope: bool) -> ParserModule:
+    val key = if frontend_parse_cache_enabled(): frontend_parse_cache_key(file_path) else: ""
+    if key != "":
+        if val hit = build_module_from_flat_pool_blob(
+                frontend_parse_cache_load(key), parse_source, file_path):
+            frontend_parse_cache_note_hit()
+            return hit
+        frontend_parse_cache_note_miss()
+        flat_pool_capture_arm()
+        val fresh = parse_and_build_module_scoped(parse_source, file_path, streaming_scope)
+        val _stored = frontend_parse_cache_store(key, flat_pool_capture_take())
+        return fresh
+    parse_and_build_module_scoped(parse_source, file_path, streaming_scope)
+
 fn parse_full_frontend_with_scope(source: text, file_path: text, module_name: text, log: Logger, streaming_scope: bool) -> ParserModule:
     val preprocessed = preprocess_conditionals(source)
     var domain_blocks: [DomainBlock] = []
@@ -77,7 +104,7 @@ fn parse_full_frontend_with_scope(source: text, file_path: text, module_name: te
     frontend_log_trace(log, "2: core parser bridge...")
     if frontend_phase_trace_enabled():
         eprint("[frontend] parse_and_build:start path={file_path}")
-    var module = parse_and_build_module_scoped(parse_source, file_path, streaming_scope)
+    var module = frontend_parse_or_restore(parse_source, file_path, streaming_scope)
     if domain_blocks.len() > 0:
         module.domain_blocks = domain_blocks
     if frontend_phase_trace_enabled():

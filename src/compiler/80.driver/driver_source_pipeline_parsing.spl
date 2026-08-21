@@ -10,15 +10,18 @@ use compiler.frontend.aspect_registry.{aspect_registry_promote_transient_owner}
 use compiler.frontend.effect_registry.{effect_registry_promote_transient_owner}
 use compiler.frontend.layer_eq_registry.{layer_eq_registry_promote_transient_owner}
 use compiler.core.ast.{ast_reset}
+use compiler.frontend.flat_ast_bridge.{flat_parse_module_body_calls}
 use compiler.core.parser.{par_had_error_get}
+use compiler.driver.driver_build.incremental.{native_build_cache_scope_key, native_build_compiler_identity}
+use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_enabled, frontend_parse_cache_hits, frontend_parse_cache_misses}
 use compiler.frontend.parser_types.*
 use compiler.hir.hir_lowering.module_surface.{
     ModuleSurfaceBuilder,
     ModuleSurfaceParserOwner,
     module_surface_canonical_path,
-    module_surface_from_owner
+    module_surface_from_owner,
+    module_surface_promote
 }
-use compiler.hir.hir_lowering.module_surface_registry.{module_surface_promote}
 use compiler.driver.driver_source_loading.{
     _driver_is_bootstrap_entry_source,
     _driver_physical_source_key,
@@ -38,9 +41,31 @@ use compiler.semantics.layer_call_wiring.{check_project_layer_calls}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
 extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value: text)
 extern fn rt_transient_array_scope_begin() -> bool
 extern fn rt_transient_array_scope_pause() -> bool
 extern fn rt_transient_array_scope_end() -> bool
+
+
+# The front-end cache lives in 10.frontend and must not import 80.driver, so
+# the driver PUBLISHES the scope it may cache under and the frontend reads it.
+# No scope published => the frontend cache is off. That is deliberate: a
+# frontend that cannot see the driver's scope has no way to know what it would
+# be sharing entries with, and guessing is how a stale-parser hit becomes a
+# wrong module.
+#
+# The scope folds native_build_cache_scope_key (lane from SIMPLE_CACHE_SCOPE)
+# over native_build_compiler_identity(), which itself folds the compiler SOURCE
+# fingerprint -- load-bearing here, because under native-build the front end
+# runs INTERPRETED from src/compiler/**, so the executable hash does not move
+# when a parser edit changes what a parse produces. When the compiler identity
+# is unknown that function returns "uncacheable-<pid>-<time>", which is unique
+# per process and therefore reuses nothing: fail closed.
+fn _driver_publish_frontend_cache_scope():
+    if (rt_env_get("SIMPLE_FRONTEND_CACHE_SCOPE") ?? "") != "":
+        return
+    val scope = native_build_cache_scope_key(nil, nil, [], 0, native_build_compiler_identity())
+    rt_env_set("SIMPLE_FRONTEND_CACHE_SCOPE", scope)
 
 pub fn driver_promote_frontend_registry_owners() -> bool:
     val aspect_ok = aspect_registry_promote_transient_owner()
@@ -355,6 +380,7 @@ impl CompilerDriver:
             # already use for the index table, so it can't alias.
             var poisoned_physical_keys: [text] = []
             var progress_parse_done = 0
+            _driver_publish_frontend_cache_scope()
             log_build_progress("parse", "files", 0,
                 unique_entry_sources.len(), "pending", 1, 6, 0, 0, "running")
             for source in unique_entry_sources:
@@ -453,6 +479,11 @@ impl CompilerDriver:
             # one append per unit against a multi-minute phase, in exchange for
             # the slow sub-step naming itself.
             # doc/08_tracking/bug/stage3_post_parse_surface_window_has_no_receipts_2026-08-17.md
+            # One summary per build, same shape as the object-cache summary and
+            # emitted only when the cache is actually on, so a non-caching build
+            # does not grow a line that always reads hits=0.
+            if frontend_parse_cache_enabled():
+                print "[frontend-cache] hits={frontend_parse_cache_hits()} misses={frontend_parse_cache_misses()} parses={flat_parse_module_body_calls()}"
             var entry_surface_builder = ModuleSurfaceBuilder.new()
             var entry_surface_source_index: i64 = 0
             log_build_progress("surface_build", "files", 0,

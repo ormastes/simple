@@ -372,6 +372,67 @@ commit your work and re-probe from a private worktree, or you will "fix"
 phantoms (this session renamed three innocent `val hash_text` locals before
 catching it, and reverted them).
 
+### Step 3 done (2026-08-21): the cache is WIRED and an unchanged module is not parsed
+Measured live on the 3-module fixture, consecutive builds, same tree:
+
+```
+[frontend-cache] hits=0 misses=3 parses=3     <- cold
+[frontend-cache] hits=3 misses=0 parses=0     <- warm
+```
+
+`parses=` is the load-bearing number and is why the summary carries it: a hit
+COUNT alone only proves the lookup said "hit". `parses=` is incremented at the
+`parse_module_body()` call site itself, so `parses=0` is direct evidence the
+parser did not run.
+
+Shape of the wiring:
+- Hook is `frontend_parse_or_restore` in `src/compiler/10.frontend/frontend.spl`,
+  around the `parse_and_build_module_scoped` call — one level below the
+  driver's `:379` site named earlier in this record, which is strictly better:
+  it also covers `parse_full_frontend_stage4_streaming`, and it sits INSIDE the
+  point where `parse_source` (post-`@cfg`, post-domain-block-strip) exists.
+  Everything after it — domain blocks, async desugar, surfaces, HIR, type
+  checking — runs unchanged on a hit.
+- `build_module_from_flat_pool_blob` (`module_assembly.spl`) is the hit path:
+  `reset_all_pools` -> `parser_init_with_path` (installs the lexer globals the
+  bridge reads) -> `flat_pools_restore_all` -> the same `flat_ast_to_module`.
+  Any decode failure re-resets and returns nil, so a torn blob leaves nothing
+  half-restored for the reparse that follows.
+- Capture is armed per-parse and `flat_pool_capture_take()` DISARMS as it
+  reads, so a blob can never be attributed to a later module.
+- **A parse that reported errors is never stored.** Otherwise it would come
+  back as a hit with `par_had_error` restored true and no parser diagnostics
+  re-emitted: a build that fails with no message.
+- Keying: `sha256(source file)` for the entry name, and a header line carrying
+  `FRONTEND_CACHE_ENTRY_VERSION`, `FLAT_POOL_CODEC_VERSION` and the scope the
+  DRIVER publishes in `SIMPLE_FRONTEND_CACHE_SCOPE`. No scope published => the
+  cache is OFF, because a front end that cannot see the driver's scope cannot
+  know what it would share entries with.
+- **The compiler SOURCE fingerprint in that scope is not optional**, and this
+  was observed live rather than reasoned about: mid-session another agent
+  edited `src/compiler` in the shared working copy, and the very next build
+  correctly went back to `hits=0 misses=3` — because under native-build the
+  front end runs INTERPRETED from `src/compiler/**`, so the executable hash
+  does not move when a parser edit changes what a parse produces.
+  `native_build_compiler_identity()` already folds it, and fails closed to
+  `uncacheable-<pid>-<time>` (unique per process, reuses nothing) when the
+  compiler identity is unknown.
+- Entries are written to a pid-unique temp and renamed, so the parallel shard
+  workers of step 4 cannot observe a half-written entry. A failed write is a
+  silent no-op: a cache that cannot store is a slow build, not a wrong one.
+- Directory: `build/bootstrap/native_cache/<lane>/frontend/`, lane from
+  `SIMPLE_CACHE_SCOPE`; `SIMPLE_FRONTEND_CACHE_DIR` overrides,
+  `SIMPLE_FRONTEND_CACHE=0` disables.
+
+Spec: `test/02_integration/compiler/driver/native_build_frontend_cache_second_build_hits_spec.spl`
+(+ mirror), five `slow_it` cases: cold misses=3 and three entries stored; warm
+hits=3 misses=0 parses=0; output bytes identical hit-vs-miss (fresh object-cache
+dir on the second build so it really re-codegens from the restored parse); edit
+one file -> exactly misses=1 hits=2 parses=1; a truncated entry -> misses=1
+hits=2, not a crash. It shells out rather than calling `cli_native_build`
+in-process because native-build forks a worker and the counters live in the
+child, whose stdout is the only place they are observable.
+
 Still to do:  (incl. dict encoders), then the full-closure round-trip gate (parse a real module, dump, reset,
 restore, rebuild through the bridge, compare), the cache wiring at the `:379`
 hook, and parse sharding across `--threads` worker processes.
