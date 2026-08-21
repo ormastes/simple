@@ -1081,7 +1081,10 @@ mod tests {
             let error = call_fptr(echo_i64 as usize, "echo_i64", &[unsupported])
                 .expect_err("untyped dynamic values must fail closed");
             assert!(error.to_string().contains("does not admit argument type"));
-            assert!(error.to_string().contains(codes::SFFI_UNSUPPORTED_CONVERSION));
+            assert_eq!(
+                error.context().and_then(|context| context.code.as_deref()),
+                Some(codes::SFFI_UNSUPPORTED_CONVERSION)
+            );
         }
     }
 
@@ -1090,14 +1093,20 @@ mod tests {
         let error = call_fptr(echo_i64 as usize, "echo_i64", &[Value::Str("a\0b".to_string().into())])
             .expect_err("embedded-NUL text has no admitted generic ABI");
         assert!(error.to_string().contains("does not admit argument type"));
-        assert!(error.to_string().contains(codes::SFFI_UNSUPPORTED_CONVERSION));
+        assert_eq!(
+            error.context().and_then(|context| context.code.as_deref()),
+            Some(codes::SFFI_UNSUPPORTED_CONVERSION)
+        );
     }
 
     #[test]
     fn generic_dispatch_rejects_null_function_pointer() {
         let error = call_fptr(0, "missing", &[Value::Int(1)]).expect_err("null function pointer must fail closed");
         assert!(error.to_string().contains("null function pointer"));
-        assert!(error.to_string().contains(codes::SFFI_NULL_FORBIDDEN));
+        assert_eq!(
+            error.context().and_then(|context| context.code.as_deref()),
+            Some(codes::SFFI_NULL_FORBIDDEN)
+        );
     }
 
     #[test]

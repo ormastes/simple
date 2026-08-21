@@ -96,6 +96,10 @@ pub(crate) use coverage_helpers::{
     record_condition_coverage, decision_id_from_span, is_coverage_enabled,
 };
 
+// Optional AST dispatch profiling. The implementation is level-gated and
+// called from `interpreter/expr.rs`; keep the tracked owner in the module tree.
+pub(crate) mod dispatch_profile;
+
 // Place (lvalue) model: identifier root + arbitrary field/index projections.
 // Backs both deep field assignment and mutating-method receivers.
 mod place;
