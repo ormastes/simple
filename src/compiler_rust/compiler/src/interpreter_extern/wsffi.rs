@@ -429,6 +429,43 @@ pub fn spl_wffi_call_f64(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Float(result))
 }
 
+pub fn spl_wffi_call_f64_checked(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 3 {
+        return Ok(Value::array(vec![Value::Int(1), Value::Int(0)]));
+    }
+    if !matches!(args[0], Value::Int(p) if p != 0) {
+        return Ok(Value::array(vec![Value::Int(2), Value::Int(0)]));
+    }
+    let supplied = match &args[1] {
+        Value::Array(values)
+            if values.iter().all(|value| matches!(value, Value::Float(_) | Value::Int(_))) =>
+        {
+            values.len()
+        }
+        _ => return Ok(Value::array(vec![Value::Int(1), Value::Int(0)])),
+    };
+    let nargs = match args[2] {
+        Value::Int(n) => match usize::try_from(n) {
+            Ok(n) => n,
+            Err(_) => return Ok(Value::array(vec![Value::Int(1), Value::Int(0)])),
+        },
+        _ => return Ok(Value::array(vec![Value::Int(1), Value::Int(0)])),
+    };
+    if nargs > 8 {
+        return Ok(Value::array(vec![Value::Int(3), Value::Int(0)]));
+    }
+    if nargs > supplied {
+        return Ok(Value::array(vec![Value::Int(1), Value::Int(0)]));
+    }
+    match spl_wffi_call_f64(args)? {
+        Value::Float(value) => Ok(Value::array(vec![
+            Value::Int(0),
+            Value::Int(value.to_bits() as i64),
+        ])),
+        _ => Ok(Value::array(vec![Value::Int(1), Value::Int(0)])),
+    }
+}
+
 /// Convert f64 to its bit representation as i64.
 ///
 /// Callable from Simple as: `spl_f64_to_bits(f: f64) -> i64`
