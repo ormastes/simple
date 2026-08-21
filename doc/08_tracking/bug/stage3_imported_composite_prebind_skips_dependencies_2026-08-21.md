@@ -2,7 +2,8 @@
 
 ## Status
 
-Pure-Simple fix implemented; final bootstrap verification pending.
+The idempotence hardening is implemented, but final bootstrap verification
+failed. This was not the root cause of the staged unresolved-type cascade.
 
 ## Evidence
 
@@ -20,9 +21,17 @@ branch then returned before walking its public fields. Field types such as
 explicit dependency route. An Optional symbol lookup also made the branch
 unsafe under staged native projection.
 
-## Fix and regression
+## Hardening and regression
 
 Use scalar `lookup_or_invalid`; define only when absent, but always execute the
 idempotent field dependency closure and imported-method registration. A
-bootstrap source contract prevents restoring the early return. The final gate
-is a fresh receipt-bound Stage 3/4 convergence run.
+bootstrap source contract prevents restoring the early return.
+
+## Verification result
+
+The third receipt-bound run again emitted the original first diagnostics in
+`driver.spl`: nine unresolved `Span` dependencies surrounding one unresolved
+`OptimizationLevel`, followed by `ProcessResult` in `file_ops.spl`. The run was
+stopped after this exact recurrence under the three-cycle verification cap.
+Stage 3/4 and the bootstrap must-check therefore remain blocked; no push is
+permitted.
