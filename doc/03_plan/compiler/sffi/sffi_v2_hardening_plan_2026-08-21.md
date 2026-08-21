@@ -295,12 +295,12 @@ Current evidence after the checked regex boundary migration:
 
 - 3,963 distinct symbols in the current backing census, including 3,961
   compiler-owned canonical symbols;
-- 14,481 declaration sites;
-- 13,880 sites have neither an explicit FFI-unsafe tag nor a local contract;
-- 510 sites declare a typed/documented contract but lack the unsafe tag;
-- 78 declarations now carry explicit FFI authority
+- 14,477 declaration sites;
+- 13,872 sites have neither an explicit FFI-unsafe tag nor a local contract;
+- 509 sites declare a typed/documented contract but lack the unsafe tag;
+- 82 declarations now carry explicit FFI authority
   but still require canonical ABI-contract metadata;
-- 13 checked declarations carry both explicit FFI authority and a
+- 14 checked declarations carry both explicit FFI authority and a
   typed result contract; their cryptographic artifact evidence remains open;
 - 401 canonical symbols currently have more than one normalized declaration
   shape and require typed-resolution review before one ABI hash can be sealed;
@@ -327,7 +327,15 @@ TRACE32 declarations and direct-call functions now carry explicit `ffi` and
 nullability, bounds, ownership, ABI hashes, and signed artifact evidence still
 need executable contracts before any safe facade can be published.
 
-These are migration inputs, not 14,481 independent implementations. The audit
+The legacy `std.ffi.dynamic` implementation is now an explicit facade over the
+canonical `std.sffi.dynamic` owner, removing its divergent missing-symbol
+zero fallbacks. The canonical raw loader declarations and direct invocation
+methods carry `ffi`/`raw_ptr` authority and pass robust lint. This is a zero-cost
+source alias: no wrapper, additional lookup, allocation, or branch is emitted.
+The integer-only dispatcher remains unsafe and ineligible for verified/critical
+admission until replaced by generated typed thunks bound to signed ABI evidence.
+
+These are migration inputs, not 14,477 independent implementations. The audit
 now hashes normalized declaration shapes and groups them by symbol. The next
 tooling step replaces the text-derived shape with the resolved HIR ABI hash,
 rejects the 401 conflict groups, and converts compatibility modules to
@@ -359,8 +367,8 @@ call-site migration ledger at
 `doc/08_tracking/bug/data/sffi_call_authority_2026-08-21.tsv`. It recognizes
 file-local externs and explicit `rt_*`/`spl_*` imports from SFFI modules, tracks
 function and lexical FFI authority by indentation, and can fail CI with
-`SFFI_FAIL_ON_MISSING=1`. The current source/test census contains 21,318
-missing-authority calls, 51 lexical scopes, and 361 function scopes across 3,143
+`SFFI_FAIL_ON_MISSING=1`. The current source/test census contains 21,284
+missing-authority calls, 51 lexical scopes, and 379 function scopes across 3,142
 files. It completed in 24.21 seconds at 7,424 KiB maximum RSS. This is a
 migration index rather than ABI proof; aliases, generated bindings, and
 re-exports still require resolved-HIR identity.
