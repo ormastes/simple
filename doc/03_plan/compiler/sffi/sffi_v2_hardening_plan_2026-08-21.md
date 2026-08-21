@@ -295,8 +295,8 @@ Current evidence after the thread synchronization boundary migration:
 
 - 3,964 distinct symbols in the current backing census, including 3,962
   compiler-owned canonical symbols;
-- 14,889 declaration sites;
-- 14,351 sites have neither an explicit FFI-unsafe tag nor a local contract;
+- 14,820 declaration sites;
+- 14,282 sites have neither an explicit FFI-unsafe tag nor a local contract;
 - 502 sites declare a typed/documented contract but lack the unsafe tag;
 - 24 declarations now carry explicit FFI authority
   but still require canonical ABI-contract metadata;
@@ -308,7 +308,7 @@ Current evidence after the thread synchronization boundary migration:
 - among `rt_*`/`spl_*` declarations, 1,855 sites reference symbols classified
   genuinely missing and 321 are backed only in owned C runtime source.
 
-These are migration inputs, not 14,889 independent implementations. The audit
+These are migration inputs, not 14,820 independent implementations. The audit
 now hashes normalized declaration shapes and groups them by symbol. The next
 tooling step replaces the text-derived shape with the resolved HIR ABI hash,
 rejects the 401 conflict groups, and converts compatibility modules to
@@ -340,8 +340,8 @@ call-site migration ledger at
 `doc/08_tracking/bug/data/sffi_call_authority_2026-08-21.tsv`. It recognizes
 file-local externs and explicit `rt_*`/`spl_*` imports from SFFI modules, tracks
 function and lexical FFI authority by indentation, and can fail CI with
-`SFFI_FAIL_ON_MISSING=1`. The current source/test census contains 22,621
-missing-authority calls, 51 lexical scopes, and 24 function scopes across 3,166
+`SFFI_FAIL_ON_MISSING=1`. The current source/test census contains 22,552
+missing-authority calls, 51 lexical scopes, and 24 function scopes across 3,164
 files. It completed in 24.21 seconds at 7,424 KiB maximum RSS. This is a
 migration index rather than ABI proof; aliases, generated bindings, and
 re-exports still require resolved-HIR identity.
@@ -359,6 +359,13 @@ re-exports only safe wrapper types/functions—not raw `rt_sdl2_*` or
 calls. Re-export resolution is static, so this consolidation adds no per-call
 lookup or wrapper layer. A real three-case compatibility spec replaces the old
 always-skipped placeholder.
+
+The identical `app.io.gamepad_ffi` and `app.io.graphics2d_ffi` boundaries are
+now explicit safe-surface facades over their canonical `_sffi` owners. Together
+they remove another 69 duplicate declarations and 69 duplicate raw calls, do
+not export raw provider symbols, and replace two always-skipped legacy specs
+with six passing structural cases. These are static re-exports and add no
+runtime wrapper or lookup.
 
 Thread-pool construction no longer treats a zero/invalid native worker handle
 as a successfully degraded pool. The unused duplicate thread-create extern was
