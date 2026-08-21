@@ -78,9 +78,15 @@
 - Imported lookups fail from the first dependent module because the hot
   `module_surface_registry_index` still trusts the compatibility Dict instead
   of the retained `ordered_names`/`ordered_indices` scalar representation.
-- Three-cycle cap reached. Next cycle: switch that lookup to the aligned scalar
-  arrays, add registry hit/miss/alias regressions, rebuild Stage 2/3, then resume
-  ARM64 image and real QEMU 2D/Web/GUI/WM evidence. No QEMU PASS is claimed.
+- The next three cycles proved both Dict mutation and scalar lookup remain
+  frame-owned after `finish_into`; both ineffective workarounds were removed.
+- Final Phase 2 SHA-256:
+  `28dd6579acbdfe5eebfd9618687ee9d39d9de50940d24b68017628d8bf613031`.
+- Next cycle: build the completed registry inside a dedicated transient scope,
+  pause, deeply promote its class/array/Dict graph through the module-surface
+  owner, end the scope, and only then commit it. Add post-scope name/alias/miss
+  regressions, rebuild Stage 2/3, then resume ARM64 image and real QEMU
+  2D/Web/GUI/WM evidence. No QEMU PASS is claimed.
 
 > make deep research and plan with agents, simple os to have configs, 2d rendering
 > screen, web rendering screen, gui rendering screen, and existing default wm screen.

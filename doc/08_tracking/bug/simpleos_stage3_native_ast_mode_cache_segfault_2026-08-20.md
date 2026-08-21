@@ -897,3 +897,50 @@ construction-time-only. The next fresh cycle must make the registry lookup scan
 the aligned ordered arrays, add exact hit/miss plus adjacent alias tests through
 the registry API, and only then rebuild. No fourth cycle was started. Stage 3,
 the ARM64 image, and QEMU rendering evidence remain unclaimed.
+
+Fresh-turn source review refined that handoff before implementation. An ordered
+scan would restore correctness but regress every import lookup from O(1) to
+O(module-count). Freeze validation proves the builder dictionary is complete;
+the loss happens because `finish_into` replaces the caller-owned dictionary
+with the value-struct builder's dictionary and that storage expires after the
+method returns. The implemented fix retains the destination dictionary object
+and fills it in place from the aligned ordered arrays. Exact name, adjacent
+alias, and miss regressions read through the retained dictionary after return.
+
+The first retained-index cycle admitted Phase 2 at SHA-256
+`7caf97ba784f18084227058a015ce8469b78d8333a5f60780d7194178a35bf38`.
+Stage 3 still lost every imported lookup from the first dependent module. This
+proves indexed assignment through the `registry` class-valued parameter mutates
+a temporary Dict field value. Cycle 2 moves that mutation onto a
+`ModuleSurfacesByName` mutable receiver and checks each inserted name/index
+immediately; a failed retained write now returns a scalar alignment diagnostic
+before HIR instead of permitting a missing-import cascade.
+
+Cycle 2 admitted Phase 2 at SHA-256
+`15a5762c72684001d83f67dcb5dc74dfab7f4fa8d332906dc4f5916ed5ddbea7`.
+The per-write receiver check succeeded during freeze, yet post-return HIR again
+lost imported names from the first dependent module. The nested Dict therefore
+cannot be authoritative after the builder frame ends. Cycle 3 switches the
+post-freeze `module_surface_registry_index` to the retained aligned scalar
+arrays with malformed-alignment/index rejection and direct exact/alias/miss
+coverage. Export-origin fixpoint lookup remains on its live construction Dict;
+only bounded HIR module-name lookup uses the scalar scan.
+
+Cycle 3 admitted Phase 2 at SHA-256
+`28dd6579acbdfe5eebfd9618687ee9d39d9de50940d24b68017628d8bf613031`.
+The scalar arrays were also empty after `finish_into` returned, so lookup still
+failed from the first dependent module and later segfaulted. Both current-turn
+lookup experiments were removed: neither fixed the owner lifetime, and the
+linear scan would have added a performance regression.
+
+Runtime/source tracing identifies the actual missing ownership transition.
+Each individual `ModuleSurface` is deeply promoted while its per-file transient
+scope is paused, explaining why `surfaces` remains iterable. The final registry
+class and its Dict/text-array graph are created after those scopes end and are
+never passed to `rt_transient_heap_promote`. That runtime API explicitly walks
+raw/class aggregates and all reachable arrays and dictionaries. The next fresh
+cycle must create the completed registry inside a dedicated transient retention
+scope, pause it, deeply promote the registry graph through a module-surface
+owner facade, end the scope, and only then commit the Option to the driver.
+Exact and adjacent tests must prove post-scope name, alias, miss, and malformed
+index behavior. Stage 3, ARM64 image, and QEMU remain unclaimed.
