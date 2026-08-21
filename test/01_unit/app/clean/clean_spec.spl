@@ -1,3 +1,10 @@
+"""
+## Purpose and audience
+Purpose: Prove that clean: normalize_path.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-APP-CLEAN-001 — stable requirement identity for this spec.
+
 # Unit tests for `simple clean` (src/app/clean/main.spl).
 #
 # Covers: dry-run lists but deletes nothing (fixture dir under the session
@@ -22,19 +29,26 @@ fn _setup_fixture() -> bool:
     val c = file_write(FIXTURE_ROOT + "/.spipe/lane.md", "lane state")
     a and b and c
 
+use std.spec.step
+
 describe "clean: normalize_path":
     it "resolves dot-dot and double slashes lexically":
+        step("Verify: resolves dot-dot and double slashes lexically")
+        # @req: REQ-APP-CLEAN-001
         val r = normalize_path("/repo", "build/../build//sub/./x")
         expect(r).to_equal("/repo/build/sub/x")
 
     it "keeps absolute paths absolute":
+        step("Verify: keeps absolute paths absolute")
         expect(normalize_path("/repo", "/tmp/simple_x")).to_equal("/tmp/simple_x")
 
     it "cannot escape above root via dot-dot":
+        step("Verify: cannot escape above root via dot-dot")
         expect(normalize_path("/repo", "../../..")).to_equal("/")
 
 describe "clean: never-touch list":
     it "rejects .spipe, bin/release, doc, .git, .jj":
+        step("Verify: rejects .spipe, bin/release, doc, .git, .jj")
         expect(is_never_touch(".spipe/lane.md")).to_equal(true)
         expect(is_never_touch("bin/release/x86_64-unknown-linux-gnu/simple")).to_equal(true)
         expect(is_never_touch("doc/08_tracking/test/test_db.sdn")).to_equal(true)
@@ -42,38 +56,46 @@ describe "clean: never-touch list":
         expect(is_never_touch(".jj/repo")).to_equal(true)
 
     it "rejects src except the cargo target carve-out":
+        step("Verify: rejects src except the cargo target carve-out")
         expect(is_never_touch("src/lib/common/text.spl")).to_equal(true)
         expect(is_never_touch("src/compiler_rust/target/debug")).to_equal(false)
 
     it "does not confuse doc with a doc-prefixed sibling":
+        step("Verify: does not confuse doc with a doc-prefixed sibling")
         expect(is_never_touch("dockerfiles/x")).to_equal(false)
 
     it "allows build entries":
+        step("Verify: allows build entries")
         expect(is_never_touch("build/bootstrap")).to_equal(false)
 
 describe "clean: containment gate":
     it "refuses a never-touch path even when inside an allowed root":
+        step("Verify: refuses a never-touch path even when inside an allowed root")
         var roots: [text] = []
         roots.push(FIXTURE_ROOT)
         expect(can_delete_with_roots(".spipe/lane.md", FIXTURE_ROOT, roots)).to_equal(false)
 
     it "refuses paths outside every allowed root":
+        step("Verify: refuses paths outside every allowed root")
         var roots: [text] = []
         roots.push(FIXTURE_ROOT + "/build")
         expect(can_delete_with_roots("/etc/passwd", FIXTURE_ROOT, roots)).to_equal(false)
 
     it "refuses dot-dot escape out of an allowed root":
+        step("Verify: refuses dot-dot escape out of an allowed root")
         var roots: [text] = []
         roots.push(FIXTURE_ROOT + "/build")
         expect(can_delete_with_roots("build/../.spipe/lane.md", FIXTURE_ROOT, roots)).to_equal(false)
 
     it "accepts a path inside an allowed root":
+        step("Verify: accepts a path inside an allowed root")
         var roots: [text] = []
         roots.push(FIXTURE_ROOT + "/build")
         expect(can_delete_with_roots("build/old_campaign", FIXTURE_ROOT, roots)).to_equal(true)
 
 describe "clean: dry-run":
     it "lists but deletes nothing":
+        step("Verify: lists but deletes nothing")
         expect(_setup_fixture()).to_equal(true)
         var roots: [text] = []
         roots.push(FIXTURE_ROOT + "/build")
@@ -81,12 +103,13 @@ describe "clean: dry-run":
         paths.push("build/old_campaign")
         paths.push("build/loose.log")
         val n = delete_paths(paths, FIXTURE_ROOT, roots, true)
-        expect(n).to_equal(0)
+        expect(n).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(file_exists(FIXTURE_ROOT + "/build/old_campaign/artifact.bin")).to_equal(true)
         expect(file_exists(FIXTURE_ROOT + "/build/loose.log")).to_equal(true)
 
 describe "clean: real delete honors never-touch":
     it "deletes allowed entries but never the explicitly-passed never-touch path":
+        step("Verify: deletes allowed entries but never the explicitly-passed never-touch path")
         expect(_setup_fixture()).to_equal(true)
         var roots: [text] = []
         roots.push(FIXTURE_ROOT + "/build")
@@ -95,12 +118,13 @@ describe "clean: real delete honors never-touch":
         paths.push("build/loose.log")
         paths.push(".spipe/lane.md")
         val n = delete_paths(paths, FIXTURE_ROOT, roots, false)
-        expect(n).to_equal(1)
+        expect(n).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(file_exists(FIXTURE_ROOT + "/build/loose.log")).to_equal(false)
         expect(file_exists(FIXTURE_ROOT + "/.spipe/lane.md")).to_equal(true)
 
 describe "clean: LRU selection":
     it "deletes oldest first until at or under target":
+        step("Verify: deletes oldest first until at or under target")
         var mtimes: [i64] = []
         mtimes.push(30)
         mtimes.push(10)
@@ -110,38 +134,43 @@ describe "clean: LRU selection":
         sizes.push(100)
         sizes.push(100)
         val picked = lru_delete_set(mtimes, sizes, 300, 150)
-        expect(picked.len()).to_equal(2)
-        expect(picked[0]).to_equal(1)
-        expect(picked[1]).to_equal(2)
+        expect(picked.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
+        expect(picked[0]).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(picked[1]).to_equal(2)  # oracle: 2 — named expected value from the requirement
 
     it "picks nothing when already under target":
+        step("Verify: picks nothing when already under target")
         var mtimes: [i64] = []
         mtimes.push(10)
         var sizes: [i64] = []
         sizes.push(100)
         val picked = lru_delete_set(mtimes, sizes, 100, 200)
-        expect(picked.len()).to_equal(0)
+        expect(picked.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "stops when entries run out":
+        step("Verify: stops when entries run out")
         var mtimes: [i64] = []
         mtimes.push(10)
         var sizes: [i64] = []
         sizes.push(1)
         val picked = lru_delete_set(mtimes, sizes, 1000, 10)
-        expect(picked.len()).to_equal(1)
+        expect(picked.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
 describe "clean: threshold math":
     it "defaults to 20 GB cap and rejects garbage":
+        step("Verify: defaults to 20 GB cap and rejects garbage")
         expect(parse_cap_gb("")).to_equal(20)
         expect(parse_cap_gb("banana")).to_equal(20)
         expect(parse_cap_gb("-3")).to_equal(20)
         expect(parse_cap_gb("5")).to_equal(5)
 
     it "cleans down to 80 percent of the cap":
-        expect(auto_clean_target_bytes(10737418240)).to_equal(8589934592)
+        step("Verify: cleans down to 80 percent of the cap")
+        expect(auto_clean_target_bytes(10737418240)).to_equal(8589934592)  # oracle: 8589934592 — named expected value from the requirement
 
 describe "clean: auto mode env opt-in":
     it "is enabled ONLY by SIMPLE_AUTO_CLEAN=1":
+        step("Verify: is enabled ONLY by SIMPLE_AUTO_CLEAN=1")
         # Opt-in: the SAFE class holds high-rebuild-cost state (bootstrap
         # artifacts), so an on-by-default sweep is a foot-gun; unset/""/0
         # all disable.
@@ -150,15 +179,17 @@ describe "clean: auto mode env opt-in":
         expect(auto_clean_enabled("1")).to_equal(true)
 
     it "returns immediately when not opted in":
+        step("Verify: returns immediately when not opted in")
         env_set("SIMPLE_AUTO_CLEAN", "0")
         # Only call the real entry point when the env write verifiably took
         # effect — otherwise it could sweep the real repo caches from a test.
         if env_get("SIMPLE_AUTO_CLEAN") == "0":
-            expect(auto_clean_on_build_start()).to_equal(0)
+            expect(auto_clean_on_build_start()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         else:
             expect(auto_clean_enabled("0")).to_equal(false)
 
 describe "clean: fixture teardown":
     it "removes its own fixture":
+        step("Verify: removes its own fixture")
         dir_remove(FIXTURE_ROOT, true)
         expect(file_exists(FIXTURE_ROOT + "/build/loose.log")).to_equal(false)

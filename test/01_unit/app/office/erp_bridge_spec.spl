@@ -1,3 +1,10 @@
+"""
+## Purpose and audience
+Purpose: Prove that erp_sale_header: schema.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-APP-OFFICE-001 — stable requirement identity for this spec.
+
 """ERP <-> office bridge spec.
 
 ERP schema findings (cited, from a reference clone of the standalone
@@ -78,18 +85,22 @@ fn _fixture_records_text() -> text:
 
 describe "erp_sale_header: schema":
     it "matches the ERP Sale struct field order (src/lanes/sale.spl)":
+        step("Verify: matches the ERP Sale struct field order (src/lanes/sale.spl)")
+        # @req: REQ-APP-OFFICE-001
         val header = erp_sale_header()
-        expect(header.len()).to_equal(7)
+        expect(header.len()).to_equal(7)  # oracle: 7 — named expected value from the requirement
         expect(header.get(0)).to_equal("id")
         expect(header.get(1)).to_equal("channel")
         expect(header.get(6)).to_equal("audit_note")
 
 describe "sheet_to_erp_records: ERP ubslog v1 serialization":
     it "produces a ubslog v1 header with the correct event count":
+        step("Verify: produces a ubslog v1 header with the correct event count")
         val text = _fixture_records_text()
         assert_true(text.starts_with("ubslog v1 count=3 checksum="))
 
     it "encodes each row as a sale.write event with entity = id":
+        step("Verify: encodes each row as a sale.write event with entity = id")
         val text = _fixture_records_text()
         expect(text).to_contain("|sale.write|1|retail,10000,800,TRUE,paid,checkout-alice")
         expect(text).to_contain("|sale.write|2|online,5000,400,FALSE,pending,checkout-bob")
@@ -97,6 +108,7 @@ describe "sheet_to_erp_records: ERP ubslog v1 serialization":
 
 describe "erp_records_to_sheet: ERP records -> Sheet":
     it "parses header + 3 data rows exactly":
+        step("Verify: parses header + 3 data rows exactly")
         val sheet = erp_records_to_sheet(_fixture_records_text(), "sales")
         expect(cell_display_text(sheet.get_cell("A1"))).to_equal("id")
         expect(cell_display_text(sheet.get_cell("G1"))).to_equal("audit_note")
@@ -107,6 +119,7 @@ describe "erp_records_to_sheet: ERP records -> Sheet":
         expect(cell_display_text(sheet.get_cell("G4"))).to_equal("checkout-carol")
 
     it "fails closed (header-only Sheet) on a tampered checksum":
+        step("Verify: fails closed (header-only Sheet) on a tampered checksum")
         val text = _fixture_records_text()
         val bad = text + "9"
         val sheet = erp_records_to_sheet(bad, "sales")
@@ -114,6 +127,7 @@ describe "erp_records_to_sheet: ERP records -> Sheet":
         expect(cell_display_text(sheet.get_cell("A2"))).to_equal("")
 
     it "skips non-sale.write event kinds, keeping only sale.write rows (documented ceiling)":
+        step("Verify: skips non-sale.write event kinds, keeping only sale.write rows (documented ceiling)")
         """Mixed-kind file (checksum computed in scratchpad/checksum_probe.spl,
         same algorithm as _erp_log_checksum): a crm.write event followed by
         a sale.write event. Only the sale.write row should appear."""
@@ -125,6 +139,7 @@ describe "erp_records_to_sheet: ERP records -> Sheet":
 
 describe "round trip: Sheet -> ERP records -> Sheet -> ERP records":
     it "is byte-exact for the representative fixture":
+        step("Verify: is byte-exact for the representative fixture")
         val text1 = _fixture_records_text()
         val sheet2 = erp_records_to_sheet(text1, "sales2")
         val text2 = sheet_to_erp_records(sheet2)
@@ -132,6 +147,7 @@ describe "round trip: Sheet -> ERP records -> Sheet -> ERP records":
 
 describe "SUMIFS over the imported ledger columns":
     it "sums subtotal for channel=retail (hand-computed 10000+7500=17500)":
+        step("Verify: sums subtotal for channel=retail (hand-computed 10000+7500=17500)")
         var sheet = erp_records_to_sheet(_fixture_records_text(), "sales")
         sheet.set_value("H1", "=SUMIFS(C2:C4,B2:B4,\"retail\")")
         sheet = recalculate_formula_cells(sheet)
@@ -139,9 +155,10 @@ describe "SUMIFS over the imported ledger columns":
 
 describe "pivot_build over the imported sheet":
     it "groups subtotal by channel (hand-computed retail=17500, online=5000, grand=22500)":
+        step("Verify: groups subtotal by channel (hand-computed retail=17500, online=5000, grand=22500)")
         val sheet = erp_records_to_sheet(_fixture_records_text(), "sales")
         val result = pivot_build(sheet, "A2:G4", 1, -1, 2, "sum")
-        expect(result.len()).to_equal(4)
+        expect(result.len()).to_equal(4)  # oracle: 4 — named expected value from the requirement
         expect(result[0][0]).to_equal("Row")
         expect(result[1][0]).to_equal("retail")
         expect(result[1][1]).to_equal("17500")
@@ -152,6 +169,7 @@ describe "pivot_build over the imported sheet":
 
 describe "default_invoice_template + erp_invoice_to_document: mail merge":
     it "renders an invoice with the expected merged lines":
+        step("Verify: renders an invoice with the expected merged lines")
         val doc = erp_invoice_to_document("1", "retail", "10000", "800", "TRUE", "paid", "checkout-alice", default_invoice_template())
         val md = document_to_markdown(doc)
         expect(md).to_contain("# Invoice 1")
@@ -164,6 +182,7 @@ describe "default_invoice_template + erp_invoice_to_document: mail merge":
 
 describe "erp_invoice_from_sheet: invoice directly from an ERP-imported Sheet":
     it "merges row 2 (id=2, online/pending) matching the sheet's own data":
+        step("Verify: merges row 2 (id=2, online/pending) matching the sheet's own data")
         val sheet = erp_records_to_sheet(_fixture_records_text(), "sales")
         val doc = erp_invoice_from_sheet(sheet, 2, default_invoice_template())
         val md = document_to_markdown(doc)
@@ -173,11 +192,12 @@ describe "erp_invoice_from_sheet: invoice directly from an ERP-imported Sheet":
 
 describe "CLI: erp-to-sheet (E2E)":
     it "writes an ERP records file to CSV via the office CLI":
+        step("Verify: writes an ERP records file to CSV via the office CLI")
         val in_path = "{_scratch}/erp_bridge_spec_records.ubslog"
         val out_path = "{_scratch}/erp_bridge_spec_out.csv"
         write_file(in_path, _fixture_records_text())
         val code = run_office(["erp-to-sheet", in_path, out_path])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: 0 — named expected value from the requirement
         assert_true(file_exists(out_path))
         val csv = read_file(out_path)
         expect(csv).to_contain("retail")
@@ -192,11 +212,12 @@ describe "CLI: erp-to-sheet (E2E)":
 
 describe "CLI: erp-invoice (E2E)":
     it "writes one ERP row as a markdown invoice via the office CLI":
+        step("Verify: writes one ERP row as a markdown invoice via the office CLI")
         val in_path = "{_scratch}/erp_bridge_spec_records.ubslog"
         val out_path = "{_scratch}/erp_bridge_spec_invoice.md"
         write_file(in_path, _fixture_records_text())
         val code = run_office(["erp-invoice", in_path, "1", out_path])
-        expect(code).to_equal(0)
+        expect(code).to_equal(0)  # oracle: 0 — named expected value from the requirement
         assert_true(file_exists(out_path))
         val md = read_file(out_path)
         expect(md).to_contain("# Invoice 1")

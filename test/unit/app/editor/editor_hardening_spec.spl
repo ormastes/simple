@@ -1,3 +1,10 @@
+"""
+## Purpose and audience
+Purpose: Prove that keymap dispatch: command mode safety.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-APP-EDITOR-001 — stable requirement identity for this spec.
+
 # Editor Hardening Spec
 #
 # Robustness / contract tests for the IDE layer, motivated by a SIGSEGV that
@@ -48,6 +55,8 @@ validation, and keymap unknown-command handling.  All tests drive
 real production functions; no hardware or real processes are accessed.
 """
 
+use std.spec.step
+
 describe "keymap dispatch: command mode safety":
     """
     ## ctrl_handle_command_key robustness
@@ -57,43 +66,52 @@ describe "keymap dispatch: command mode safety":
     Exercises the real function with pure text inputs.
     """
     it "ESC cancels and returns empty commandline":
+        step("Verify: ESC cancels and returns empty commandline")
+        # @req: REQ-APP-EDITOR-001
         val r = ctrl_handle_command_key("\x1b", "wq")
         expect(r.cancelled).to_equal(true)
         expect(r.done).to_equal(false)
         expect(r.commandline).to_equal("")
 
     it "enter on non-empty commandline marks done":
+        step("Verify: enter on non-empty commandline marks done")
         val r = ctrl_handle_command_key("\r", "wq")
         expect(r.done).to_equal(true)
         expect(r.cancelled).to_equal(false)
         expect(r.commandline).to_equal("wq")
 
     it "newline also marks done":
+        step("Verify: newline also marks done")
         val r = ctrl_handle_command_key("\n", "save")
         expect(r.done).to_equal(true)
 
     it "backspace on non-empty commandline shortens by one char":
+        step("Verify: backspace on non-empty commandline shortens by one char")
         val r = ctrl_handle_command_key("\x7f", "wq")
         expect(r.cancelled).to_equal(false)
         expect(r.done).to_equal(false)
         expect(r.commandline).to_equal("w")
 
     it "backspace on empty commandline cancels without underflow":
+        step("Verify: backspace on empty commandline cancels without underflow")
         val r = ctrl_handle_command_key("\x7f", "")
         expect(r.cancelled).to_equal(true)
         expect(r.commandline).to_equal("")
 
     it "backspace (BS) on empty commandline also cancels":
+        step("Verify: backspace (BS) on empty commandline also cancels")
         val r = ctrl_handle_command_key("\b", "")
         expect(r.cancelled).to_equal(true)
 
     it "printable ascii character is appended to commandline":
+        step("Verify: printable ascii character is appended to commandline")
         val r = ctrl_handle_command_key("q", "w")
         expect(r.done).to_equal(false)
         expect(r.cancelled).to_equal(false)
         expect(r.commandline).to_equal("wq")
 
     it "non-printable non-special control char is a no-op":
+        step("Verify: non-printable non-special control char is a no-op")
         # SOH (0x01) is below 32, not an escape/enter/backspace — must be silently ignored
         val r = ctrl_handle_command_key("\x01", "abc")
         expect(r.done).to_equal(false)
@@ -101,6 +119,7 @@ describe "keymap dispatch: command mode safety":
         expect(r.commandline).to_equal("abc")
 
     it "NUL byte is also a no-op":
+        step("Verify: NUL byte is also a no-op")
         val r = ctrl_handle_command_key("\x00", "abc")
         expect(r.done).to_equal(false)
         expect(r.cancelled).to_equal(false)
@@ -115,38 +134,45 @@ describe "keymap dispatch: normal mode unknown key fallthrough":
     Locks the fallthrough so future additions can't silently break it.
     """
     it "unknown printable key returns quit=false":
+        step("Verify: unknown printable key returns quit=false")
         val buf = EditorBuffer.new()
         val r = ctrl_handle_normal_key(buf, "Z")
         expect(r.quit).to_equal(false)
 
     it "unknown printable key returns enter_insert=false":
+        step("Verify: unknown printable key returns enter_insert=false")
         val buf = EditorBuffer.new()
         val r = ctrl_handle_normal_key(buf, "Z")
         expect(r.enter_insert).to_equal(false)
 
     it "unknown printable key returns enter_command=false":
+        step("Verify: unknown printable key returns enter_command=false")
         val buf = EditorBuffer.new()
         val r = ctrl_handle_normal_key(buf, "Z")
         expect(r.enter_command).to_equal(false)
 
     it "q key signals quit":
+        step("Verify: q key signals quit")
         val buf = EditorBuffer.new()
         val r = ctrl_handle_normal_key(buf, "q")
         expect(r.quit).to_equal(true)
 
     it "i key enters insert mode":
+        step("Verify: i key enters insert mode")
         val buf = EditorBuffer.new()
         val r = ctrl_handle_normal_key(buf, "i")
         expect(r.enter_insert).to_equal(true)
         expect(r.quit).to_equal(false)
 
     it "colon enters command mode":
+        step("Verify: colon enters command mode")
         val buf = EditorBuffer.new()
         val r = ctrl_handle_normal_key(buf, ":")
         expect(r.enter_command).to_equal(true)
         expect(r.quit).to_equal(false)
 
     it "NUL byte is treated as unknown (non-printable fallthrough)":
+        step("Verify: NUL byte is treated as unknown (non-printable fallthrough)")
         val buf = EditorBuffer.new()
         val r = ctrl_handle_normal_key(buf, "\x00")
         expect(r.quit).to_equal(false)
@@ -154,6 +180,7 @@ describe "keymap dispatch: normal mode unknown key fallthrough":
         expect(r.enter_command).to_equal(false)
 
     it "ESC in normal mode is unknown — falls through safely":
+        step("Verify: ESC in normal mode is unknown — falls through safely")
         # ESC is handled in insert mode; in normal mode it is not bound
         val buf = EditorBuffer.new()
         val r = ctrl_handle_normal_key(buf, "\x1b")
@@ -167,21 +194,25 @@ describe "keymap dispatch: insert mode safety":
     are silently ignored; multi-key sequences fall through without crash.
     """
     it "ESC exits insert mode":
+        step("Verify: ESC exits insert mode")
         val buf = EditorBuffer.new()
         val r = ctrl_handle_insert_key(buf, "\x1b")
         expect(r.exit_insert).to_equal(true)
 
     it "printable char does not exit insert mode":
+        step("Verify: printable char does not exit insert mode")
         val buf = EditorBuffer.new()
         val r = ctrl_handle_insert_key(buf, "a")
         expect(r.exit_insert).to_equal(false)
 
     it "enter key inserts newline and stays in insert mode":
+        step("Verify: enter key inserts newline and stays in insert mode")
         val buf = EditorBuffer.new()
         val r = ctrl_handle_insert_key(buf, "\r")
         expect(r.exit_insert).to_equal(false)
 
     it "control char SOH below 32 is silently ignored in insert mode":
+        step("Verify: control char SOH below 32 is silently ignored in insert mode")
         val buf = EditorBuffer.new()
         val r = ctrl_handle_insert_key(buf, "\x01")
         expect(r.exit_insert).to_equal(false)
@@ -195,30 +226,37 @@ describe "command dispatch: editor_parse_commandline unknown input":
     and not crash.  This tests the real parser.
     """
     it "known command 'w' maps to save":
+        step("Verify: known command 'w' maps to save")
         val cmd = editor_parse_commandline("w")
         expect(cmd.name).to_equal("save")
 
     it "known command 'q' maps to quit":
+        step("Verify: known command 'q' maps to quit")
         val cmd = editor_parse_commandline("q")
         expect(cmd.name).to_equal("quit")
 
     it "known command 'wq' maps to save":
+        step("Verify: known command 'wq' maps to save")
         val cmd = editor_parse_commandline("wq")
         expect(cmd.name).to_equal("save")
 
     it "known command 'q!' maps to force-quit":
+        step("Verify: known command 'q!' maps to force-quit")
         val cmd = editor_parse_commandline("q!")
         expect(cmd.name).to_equal("force-quit")
 
     it "unknown command returns non-empty name without crash":
+        step("Verify: unknown command returns non-empty name without crash")
         val cmd = editor_parse_commandline("xyzzy")
         expect(cmd.name.len()).to_be_greater_than(0)
 
     it "empty commandline does not crash":
+        step("Verify: empty commandline does not crash")
         val cmd = editor_parse_commandline("")
         expect(cmd.name.len()).to_be_greater_than(0)
 
     it "commandline with only whitespace does not crash":
+        step("Verify: commandline with only whitespace does not crash")
         val cmd = editor_parse_commandline("   ")
         expect(cmd.name.len()).to_be_greater_than(0)
 
@@ -231,16 +269,19 @@ describe "debug process: binary path resolution contract":
     callers know they must guard with rt_file_exists before spawn.
     """
     it "returned path is non-empty":
+        step("Verify: returned path is non-empty")
         # The function always returns a non-empty string (fallback or real path).
         # We test the contract, not the filesystem — result varies by env.
         val path = editor_debug_process_find_simple_binary()
         expect(path.len()).to_be_greater_than(0)
 
     it "returned path starts with 'bin/'":
+        step("Verify: returned path starts with 'bin/'")
         val path = editor_debug_process_find_simple_binary()
         expect(path.starts_with("bin/")).to_equal(true)
 
     it "returned path contains 'simple'":
+        step("Verify: returned path contains 'simple'")
         val path = editor_debug_process_find_simple_binary()
         expect(path.contains("simple")).to_equal(true)
 
@@ -255,30 +296,37 @@ describe "debug process: pid validation contract (BUG-3)":
     Tests call the REAL functions to verify the guard is in place.
     """
     it "write_frame with pid=0 returns false without crashing":
+        step("Verify: write_frame with pid=0 returns false without crashing")
         val result = editor_debug_process_write_frame(0, "{}")
         expect(result).to_equal(false)
 
     it "write_frame with pid=-1 returns false without crashing":
+        step("Verify: write_frame with pid=-1 returns false without crashing")
         val result = editor_debug_process_write_frame(-1, "{\"command\":\"continue\"}")
         expect(result).to_equal(false)
 
     it "start_simple_adapter with pid=0 returns false":
+        step("Verify: start_simple_adapter with pid=0 returns false")
         val result = editor_debug_process_start_simple_adapter(0)
         expect(result).to_equal(false)
 
     it "start_simple_adapter with pid=-1 returns false":
+        step("Verify: start_simple_adapter with pid=-1 returns false")
         val result = editor_debug_process_start_simple_adapter(-1)
         expect(result).to_equal(false)
 
     it "poll_simple_stopped with pid=0 returns false":
+        step("Verify: poll_simple_stopped with pid=0 returns false")
         val result = editor_debug_process_poll_simple_stopped(0)
         expect(result).to_equal(false)
 
     it "wait_simple_stopped with pid=0 returns false":
+        step("Verify: wait_simple_stopped with pid=0 returns false")
         val result = editor_debug_process_wait_simple_stopped(0)
         expect(result).to_equal(false)
 
     it "frame header includes Content-Length for non-empty json":
+        step("Verify: frame header includes Content-Length for non-empty json")
         # Validate the framing format used by write_frame for a real pid scenario.
         val json = "{\"command\":\"continue\"}"
         val frame = "Content-Length: " + str(json.len()) + "\r\n\r\n" + json
@@ -286,6 +334,7 @@ describe "debug process: pid validation contract (BUG-3)":
         expect(frame.contains(json)).to_equal(true)
 
     it "frame Content-Length matches json byte length":
+        step("Verify: frame Content-Length matches json byte length")
         val json = "{}"
         val expected_len = json.len()
         val header = "Content-Length: " + str(expected_len)
@@ -307,36 +356,43 @@ describe "LSP connection guard: empty session":
             return LspResponse(error_text: "no file open")
     """
     it "empty session has active_index -1 (out of bounds)":
+        step("Verify: empty session has active_index -1 (out of bounds)")
         val session = EditSession.new()
         val idx = session.active_index
         val is_out_of_bounds = idx < 0 or idx >= session.documents.len()
         expect(is_out_of_bounds).to_equal(true)
 
     it "empty session has zero documents":
+        step("Verify: empty session has zero documents")
         val session = EditSession.new()
-        expect(session.documents.len()).to_equal(0)
+        expect(session.documents.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "empty session has zero buffers":
+        step("Verify: empty session has zero buffers")
         val session = EditSession.new()
-        expect(session.buffers.len()).to_equal(0)
+        expect(session.buffers.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "active_index bounds check fails when index equals document count":
+        step("Verify: active_index bounds check fails when index equals document count")
         val session = EditSession.new()
         val idx = session.documents.len()
         val in_bounds = idx >= 0 and idx < session.documents.len()
         expect(in_bounds).to_equal(false)
 
     it "language_id 'simple' satisfies known-language guard":
+        step("Verify: language_id 'simple' satisfies known-language guard")
         val lang = "simple"
         val known = lang == "simple" or lang == "shell" or lang == "markdown"
         expect(known).to_equal(true)
 
     it "language_id 'typescript' fails known-language guard":
+        step("Verify: language_id 'typescript' fails known-language guard")
         val lang = "typescript"
         val known = lang == "simple" or lang == "shell" or lang == "markdown"
         expect(known).to_equal(false)
 
     it "empty language_id fails known-language guard":
+        step("Verify: empty language_id fails known-language guard")
         val lang = ""
         val known = lang == "simple" or lang == "shell" or lang == "markdown"
         expect(known).to_equal(false)
@@ -350,33 +406,38 @@ describe "workspace path: open_file with invalid path":
     sentinel) without SIGSEGV — the path is stored but the content is empty.
     """
     it "open_file with empty path does not crash":
+        step("Verify: open_file with empty path does not crash")
         val session = EditSession.new()
         session.open_file("")
         # If we get here, no crash occurred.  The session now has one document.
-        expect(session.documents.len()).to_equal(1)
+        expect(session.documents.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "open_file with empty path sets active_index to 0":
+        step("Verify: open_file with empty path sets active_index to 0")
         val session = EditSession.new()
         session.open_file("")
-        expect(session.active_index).to_equal(0)
+        expect(session.active_index).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "open_file with non-existent path does not crash":
+        step("Verify: open_file with non-existent path does not crash")
         # A path that does not exist on disk is valid input — document is
         # opened with empty content.  No SIGSEGV, no nil deref.
         val session = EditSession.new()
         session.open_file("/nonexistent/path/file.spl")
-        expect(session.documents.len()).to_equal(1)
+        expect(session.documents.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "open_file with path traversal does not crash":
+        step("Verify: open_file with path traversal does not crash")
         val session = EditSession.new()
         session.open_file("../../etc/passwd")
-        expect(session.documents.len()).to_equal(1)
+        expect(session.documents.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "second open_file with same empty path reuses document (no dup)":
+        step("Verify: second open_file with same empty path reuses document (no dup)")
         val session = EditSession.new()
         session.open_file("")
         session.open_file("")
-        expect(session.documents.len()).to_equal(1)
+        expect(session.documents.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
 describe "GUI click coordinate parse guard (BUG-5)":
     """
@@ -388,16 +449,19 @@ describe "GUI click coordinate parse guard (BUG-5)":
     internally, but the parse layer must not forward garbage.
     """
     it "missing comma in click data is detected by index_of returning -1":
+        step("Verify: missing comma in click data is detected by index_of returning -1")
         val data = "42"
         val comma_idx = data.index_of(",")
-        expect(comma_idx).to_equal(-1)
+        expect(comma_idx).to_equal(-1)  # oracle: -1 — named expected value from the requirement
 
     it "empty click data also has no comma":
+        step("Verify: empty click data also has no comma")
         val data = ""
         val comma_idx = data.index_of(",")
-        expect(comma_idx).to_equal(-1)
+        expect(comma_idx).to_equal(-1)  # oracle: -1 — named expected value from the requirement
 
     it "valid 'line,col' data parses correctly":
+        step("Verify: valid 'line,col' data parses correctly")
         val data = "10,5"
         val comma_idx = data.index_of(",")
         val line_text = data.slice(0, comma_idx)
@@ -406,30 +470,35 @@ describe "GUI click coordinate parse guard (BUG-5)":
         expect(col_text).to_equal("5")
 
     it "negative parsed line must be rejected before move_cursor (guard contract)":
+        step("Verify: negative parsed line must be rejected before move_cursor (guard contract)")
         val line = -1
         val col = 0
         val valid = line >= 0 and col >= 0
         expect(valid).to_equal(false)
 
     it "negative parsed col must be rejected (guard contract)":
+        step("Verify: negative parsed col must be rejected (guard contract)")
         val line = 0
         val col = -5
         val valid = line >= 0 and col >= 0
         expect(valid).to_equal(false)
 
     it "non-negative coordinates pass the guard":
+        step("Verify: non-negative coordinates pass the guard")
         val line = 3
         val col = 12
         val valid = line >= 0 and col >= 0
         expect(valid).to_equal(true)
 
     it "EditorBuffer.move_cursor clamps negative row to 0 internally":
+        step("Verify: EditorBuffer.move_cursor clamps negative row to 0 internally")
         # Verify the buffer's own clamp so tests relying on it are justified.
         val buf = EditorBuffer.from_text(EditorBufferId(value: 1), "hello\nworld")
         buf.move_cursor(-5, 0)
-        expect(buf.cursor_row).to_equal(0)
+        expect(buf.cursor_row).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "EditorBuffer.move_cursor clamps over-large row to last line":
+        step("Verify: EditorBuffer.move_cursor clamps over-large row to last line")
         val buf = EditorBuffer.from_text(EditorBufferId(value: 2), "line1\nline2\nline3")
         buf.move_cursor(999, 0)
-        expect(buf.cursor_row).to_equal(2)
+        expect(buf.cursor_row).to_equal(2)  # oracle: 2 — named expected value from the requirement

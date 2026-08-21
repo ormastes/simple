@@ -1,3 +1,10 @@
+"""
+## Purpose and audience
+Purpose: Prove that GdbMiParser.parse_line() record classification.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-APP-DEBUG-001 — stable requirement identity for this spec.
+
 # GDB MI streaming-parser + token-table specification.
 #
 # Exercises GdbMiParser.parse_line() (the record classifier) and
@@ -12,30 +19,36 @@
 
 use app.debug.remote.protocol.gdb_mi_parser.{GdbMiParser, GdbMiRecord, GdbBreakpoint}
 
+use std.spec.step
+
 describe "GdbMiParser.parse_line() record classification":
     it "classifies a ^done result record and keeps its token":
+        step("Verify: classifies a ^done result record and keeps its token")
+        # @req: REQ-APP-DEBUG-001
         val record = GdbMiParser.parse_line('3^done,value="42"')
         expect(record.is_result()).to_equal(true)
         expect(record.is_done()).to_equal(true)
         match record:
             GdbMiRecord.Result(token, cls, data):
-                expect(token).to_equal(3)
+                expect(token).to_equal(3)  # oracle: 3 — named expected value from the requirement
                 expect(cls).to_equal("done")
                 expect(data.get("value") ?? "").to_equal("42")
             _:
                 expect(true).to_equal(false)
 
     it "classifies a ^error result record with a message":
+        step("Verify: classifies a ^error result record with a message")
         val record = GdbMiParser.parse_line('7^error,msg="No symbol table is loaded"')
         expect(record.is_error()).to_equal(true)
         match record:
             GdbMiRecord.Result(token, cls, data):
-                expect(token).to_equal(7)
+                expect(token).to_equal(7)  # oracle: 7 — named expected value from the requirement
                 expect(data.get("msg") ?? "").to_equal("No symbol table is loaded")
             _:
                 expect(true).to_equal(false)
 
     it "classifies a *stopped async record":
+        step("Verify: classifies a *stopped async record")
         val record = GdbMiParser.parse_line('*stopped,reason="breakpoint-hit",bkptno="1"')
         expect(record.is_stopped()).to_equal(true)
         match record:
@@ -46,6 +59,7 @@ describe "GdbMiParser.parse_line() record classification":
                 expect(true).to_equal(false)
 
     it "classifies an = event record separately from *stopped":
+        step("Verify: classifies an = event record separately from *stopped")
         val record = GdbMiParser.parse_line('=thread-created,id="1"')
         expect(record.is_stopped()).to_equal(false)
         match record:
@@ -55,6 +69,7 @@ describe "GdbMiParser.parse_line() record classification":
                 expect(true).to_equal(false)
 
     it "classifies a ~console stream record and unescapes it":
+        step("Verify: classifies a ~console stream record and unescapes it")
         val record = GdbMiParser.parse_line('~"Reading symbols from a.out...\\n"')
         match record:
             GdbMiRecord.Stream(kind, content):
@@ -64,6 +79,7 @@ describe "GdbMiParser.parse_line() record classification":
                 expect(true).to_equal(false)
 
     it "classifies a (gdb) prompt line":
+        step("Verify: classifies a (gdb) prompt line")
         val record = GdbMiParser.parse_line("(gdb)")
         match record:
             GdbMiRecord.Prompt:
@@ -72,52 +88,58 @@ describe "GdbMiParser.parse_line() record classification":
                 expect(true).to_equal(false)
 
     it "does not confuse two different tokens on interleaved output":
+        step("Verify: does not confuse two different tokens on interleaved output")
         val first = GdbMiParser.parse_line('1^done,foo="a"')
         val second = GdbMiParser.parse_line('2^done,foo="b"')
         match first:
             GdbMiRecord.Result(token, _, data):
-                expect(token).to_equal(1)
+                expect(token).to_equal(1)  # oracle: 1 — named expected value from the requirement
                 expect(data.get("foo") ?? "").to_equal("a")
             _:
                 expect(true).to_equal(false)
         match second:
             GdbMiRecord.Result(token, _, data):
-                expect(token).to_equal(2)
+                expect(token).to_equal(2)  # oracle: 2 — named expected value from the requirement
                 expect(data.get("foo") ?? "").to_equal("b")
             _:
                 expect(true).to_equal(false)
 
 describe "GdbBreakpoint.from_tuple() rich-field preservation":
     it "keeps id, location, and enabled state":
+        step("Verify: keeps id, location, and enabled state")
         val raw = 'number="1",type="breakpoint",disp="keep",enabled="y",addr="0x0000000000401136",func="main",file="main.c",fullname="/tmp/main.c",line="5",thread-groups=["i1"],times="0",original-location="main.c:5"'
         val tuple = GdbMiParser.parse_kv_pairs(raw)
         val bp = GdbBreakpoint.from_tuple(tuple)
-        expect(bp.id).to_equal(1)
+        expect(bp.id).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(bp.func_name).to_equal("main")
         expect(bp.file).to_equal("main.c")
-        expect(bp.line).to_equal(5)
+        expect(bp.line).to_equal(5)  # oracle: 5 — named expected value from the requirement
         expect(bp.enabled).to_equal(true)
         expect(bp.original_location).to_equal("main.c:5")
 
     it "does not discard the condition field on a conditional breakpoint":
+        step("Verify: does not discard the condition field on a conditional breakpoint")
         val raw = 'number="2",type="breakpoint",disp="keep",enabled="y",addr="0x0000000000401150",func="loop",file="main.c",fullname="/tmp/main.c",line="12",cond="i == 10",times="0",original-location="main.c:12"'
         val tuple = GdbMiParser.parse_kv_pairs(raw)
         val bp = GdbBreakpoint.from_tuple(tuple)
         expect(bp.condition).to_equal("i == 10")
 
     it "does not discard the hit count (times) field after breakpoints fire":
+        step("Verify: does not discard the hit count (times) field after breakpoints fire")
         val raw = 'number="3",type="breakpoint",disp="keep",enabled="y",addr="0x0000000000401160",func="tick",file="main.c",fullname="/tmp/main.c",line="20",times="4",original-location="main.c:20"'
         val tuple = GdbMiParser.parse_kv_pairs(raw)
         val bp = GdbBreakpoint.from_tuple(tuple)
-        expect(bp.hit_count).to_equal(4)
+        expect(bp.hit_count).to_equal(4)  # oracle: 4 — named expected value from the requirement
 
     it "reports disabled breakpoints correctly":
+        step("Verify: reports disabled breakpoints correctly")
         val raw = 'number="4",type="breakpoint",disp="keep",enabled="n",addr="0x0000000000401170",func="skip",file="main.c",fullname="/tmp/main.c",line="30",times="0",original-location="main.c:30"'
         val tuple = GdbMiParser.parse_kv_pairs(raw)
         val bp = GdbBreakpoint.from_tuple(tuple)
         expect(bp.enabled).to_equal(false)
 
     it "keeps the full raw field dict so nothing is silently dropped":
+        step("Verify: keeps the full raw field dict so nothing is silently dropped")
         val raw = 'number="5",type="breakpoint",disp="keep",enabled="y",addr="0x0000000000401180",func="extra",file="main.c",fullname="/tmp/main.c",line="40",times="0",original-location="main.c:40"'
         val tuple = GdbMiParser.parse_kv_pairs(raw)
         val bp = GdbBreakpoint.from_tuple(tuple)

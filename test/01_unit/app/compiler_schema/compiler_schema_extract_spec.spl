@@ -1,3 +1,10 @@
+"""
+## Purpose and audience
+Purpose: Prove that compiler_schema extractor.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-APP-COMPILER-SCHEMA-001 — stable requirement identity for this spec.
+
 # Compiler schema generator — extractor, id format, and determinism specs.
 #
 # Hardening plan §11.2 (doc/01_research/compiler/hardening/
@@ -14,12 +21,17 @@ use std.io_runtime.{cwd}
 
 val FIXTURE = "# leading noise\nfn unrelated() -> i64:\n    1\n\n\"\"\"Docs.\"\"\"\nenum FixtureKind:\n    \"\"\"A doc line.\n    still doc.\n    \"\"\"\n    # a comment\n    Bare\n    WithPayload(a: i64, b: text)   # trailing note\n    Multi(first: FixtureKind,\n          second: [FixtureKind])\n    Last\n\nstruct After:\n    Ignored(x: i64)\n"
 
+use std.spec.step
+
 describe "compiler_schema extractor":
     it "extracts every variant of the fixture enum":
+        step("Verify: extracts every variant of the fixture enum")
+        # @req: REQ-APP-COMPILER-SCHEMA-001
         val rows = extract_enum_variants(FIXTURE, "FixtureKind", "test.fixture")
-        expect(rows.len()).to_equal(4)
+        expect(rows.len()).to_equal(4)  # oracle: 4 — named expected value from the requirement
 
     it "names variants without their payload":
+        step("Verify: names variants without their payload")
         val rows = extract_enum_variants(FIXTURE, "FixtureKind", "test.fixture")
         expect(rows[0].variant).to_equal("Bare")
         expect(rows[1].variant).to_equal("WithPayload")
@@ -27,14 +39,17 @@ describe "compiler_schema extractor":
         expect(rows[3].variant).to_equal("Last")
 
     it "keeps the payload schema and drops trailing comments":
+        step("Verify: keeps the payload schema and drops trailing comments")
         val rows = extract_enum_variants(FIXTURE, "FixtureKind", "test.fixture")
         expect(rows[1].payload_schema).to_equal("WithPayload(a: i64, b: text)")
 
     it "folds a multi-line payload onto one line":
+        step("Verify: folds a multi-line payload onto one line")
         val rows = extract_enum_variants(FIXTURE, "FixtureKind", "test.fixture")
         expect(rows[2].payload_schema).to_equal("Multi(first: FixtureKind, second: [FixtureKind])")
 
     it "stops at the end of the enum block":
+        step("Verify: stops at the end of the enum block")
         val rows = extract_enum_variants(FIXTURE, "FixtureKind", "test.fixture")
         var found = false
         for r in rows:
@@ -43,28 +58,34 @@ describe "compiler_schema extractor":
         expect(found).to_equal(false)
 
     it "returns nothing for an absent enum":
+        step("Verify: returns nothing for an absent enum")
         val rows = extract_enum_variants(FIXTURE, "NoSuchKind", "test.fixture")
-        expect(rows.len()).to_equal(0)
+        expect(rows.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
 describe "compiler_schema stable ids":
     it "uses the spl:variant@<module>.<Enum>.<Variant> form":
+        step("Verify: uses the spl:variant@<module>.<Enum>.<Variant> form")
         val rows = extract_enum_variants(FIXTURE, "FixtureKind", "test.fixture")
         expect(variant_id(rows[0])).to_equal("spl:variant@test.fixture.FixtureKind.Bare")
 
     it "derives the owner from module and enum":
+        step("Verify: derives the owner from module and enum")
         val rows = extract_enum_variants(FIXTURE, "FixtureKind", "test.fixture")
         expect(variant_owner(rows[0])).to_equal("test.fixture.FixtureKind")
 
     it "names the registry file after the owner":
+        step("Verify: names the registry file after the owner")
         expect(registry_file_name(EnumSource("p.spl", "test.fixture", "FixtureKind"))).to_equal("test.fixture.FixtureKind.sdn")
 
 describe "compiler_schema determinism":
     it "renders the same registry text twice":
+        step("Verify: renders the same registry text twice")
         val src = EnumSource("p.spl", "test.fixture", "FixtureKind")
         val rows = extract_enum_variants(FIXTURE, "FixtureKind", "test.fixture")
         expect(render_registry(src, rows)).to_equal(render_registry(src, rows))
 
     it "sorts variant ids so the diff is stable":
+        step("Verify: sorts variant ids so the diff is stable")
         val src = EnumSource("p.spl", "test.fixture", "FixtureKind")
         val rows = extract_enum_variants(FIXTURE, "FixtureKind", "test.fixture")
         val text_out = render_registry(src, rows)
@@ -75,27 +96,32 @@ describe "compiler_schema determinism":
         expect(last < multi).to_equal(true)
 
     it "emits no timestamp or host path":
+        step("Verify: emits no timestamp or host path")
         val src = EnumSource("p.spl", "test.fixture", "FixtureKind")
         val rows = extract_enum_variants(FIXTURE, "FixtureKind", "test.fixture")
         expect(render_registry(src, rows).find("/mnt/") < 0).to_equal(true)
 
 describe "compiler_schema real compiler enums":
     it "tracks at least the twelve authoritative enums":
+        step("Verify: tracks at least the twelve authoritative enums")
         expect(enum_sources().len() >= 12).to_equal(true)
 
     it "extracts a non-empty variant set from every tracked enum":
+        step("Verify: extracts a non-empty variant set from every tracked enum")
         var empty = 0
         for r in extract_all(cwd()):
             if r.rows.len() == 0:
                 empty = empty + 1
-        expect(empty).to_equal(0)
+        expect(empty).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
 describe "compiler_schema coverage report":
     it "says so when no transition table is declared":
+        step("Verify: says so when no transition table is declared")
         val out = render_coverage(extract_all(cwd()), [])
         expect(out.find("transitions: none declared") > 0).to_equal(true)
 
     it "parses the A3 transition row shape":
+        step("Verify: parses the A3 transition row shape")
         val rows = parse_transitions("transition:\n  from: compiler.hir.HirTypeKind\n  to: compiler.mir.MirTypeKind\n  state: covered\n  reason: lowered\n  test: test/x_spec.spl\n")
-        expect(rows.len()).to_equal(1)
+        expect(rows.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(rows[0].state).to_equal("covered")

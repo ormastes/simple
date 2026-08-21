@@ -1,3 +1,10 @@
+"""
+## Purpose and audience
+Purpose: Prove that trait group header parsing.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-APP-DESUGAR-001 — stable requirement identity for this spec.
+
 # Trait Group Desugar Tests
 #
 # Covers `trait G with A, B:` -- the group form of the trait header, which
@@ -27,55 +34,69 @@ fn group_fixture() -> text:
     src = src + "    pass_dn" + "\n"
     src
 
+use std.spec.step
+
 describe "trait group header parsing":
 
     context "AC1 -- the group form parses":
         it "reads the group name without the with-clause":
+            step("Verify: reads the group name without the with-clause")
+            # @req: REQ-APP-DESUGAR-001
             expect(parse_trait_header("trait DebugProfiler with DebugTarget, ProfileTarget:")).to_equal("DebugProfiler")
 
         it "extracts every group member in order":
+            step("Verify: extracts every group member in order")
             val ms = parse_trait_group_members("trait DebugProfiler with DebugTarget, ProfileTarget:")
-            expect(ms.len()).to_equal(2)
+            expect(ms.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
             expect(ms[0]).to_equal("DebugTarget")
             expect(ms[1]).to_equal("ProfileTarget")
 
         it "records the members on the scanned trait":
+            step("Verify: records the members on the scanned trait")
             val traits = scan_traits(group_fixture())
             val g = find_trait("DebugProfiler", traits)
             expect(g.name).to_equal("DebugProfiler")
-            expect(g.group_members.len()).to_equal(2)
+            expect(g.group_members.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
 
     context "AC7 -- existing forms are untouched":
         it "a plain trait header still yields its name":
+            step("Verify: a plain trait header still yields its name")
             expect(parse_trait_header("trait Printable:")).to_equal("Printable")
 
         it "a plain trait has no group members":
+            step("Verify: a plain trait has no group members")
             val ms = parse_trait_group_members("trait Printable:")
-            expect(ms.len()).to_equal(0)
+            expect(ms.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
         it "the supertrait form still yields only the trait name":
+            step("Verify: the supertrait form still yields only the trait name")
             expect(parse_trait_header("trait Copy: Clone:")).to_equal("Copy")
 
         it "the supertrait form is not treated as a group":
+            step("Verify: the supertrait form is not treated as a group")
             val ms = parse_trait_group_members("trait Copy: Clone:")
-            expect(ms.len()).to_equal(0)
+            expect(ms.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
 describe "return type capture":
 
     context "accessor matching needs the declared return type":
         it "captures a generic Option return type":
+            step("Verify: captures a generic Option return type")
             expect(extract_ret_type("debug() -> Option<DebugTarget>")).to_equal("Option<DebugTarget>")
 
         it "stops at the body colon":
+            step("Verify: stops at the body colon")
             expect(extract_ret_type("size() -> i64: self.n")).to_equal("i64")
 
         it "is empty when no return type is declared":
+            step("Verify: is empty when no return type is declared")
             expect(extract_ret_type("reset()")).to_equal("")
 
         it "records ret_type on scanned trait methods":
+            step("Verify: records ret_type on scanned trait methods")
             val traits = scan_traits(group_fixture())
             val core = find_trait("SessionCore", traits)
-            expect(core.methods.len()).to_equal(3)
+            expect(core.methods.len()).to_equal(3)  # oracle: 3 — named expected value from the requirement
             expect(core.methods[0].ret_type).to_equal("Option<DebugTarget>")
             expect(core.methods[1].ret_type).to_equal("Option<ProfileTarget>")
             expect(core.methods[2].ret_type).to_equal("Option<DebugProfiler>")
@@ -84,28 +105,34 @@ describe "group desugar":
 
     context "AC3 -- members concatenate into the group struct":
         it "emits the group as a struct":
+            step("Verify: emits the group as a struct")
             val out = desugar_traits(group_fixture())
             expect(out.contains("struct DebugProfiler:")).to_equal(true)
 
         it "carries the first member's fn-fields":
+            step("Verify: carries the first member's fn-fields")
             val out = desugar_traits(group_fixture())
             expect(out.contains("set_breakpoint_fn:")).to_equal(true)
             expect(out.contains("resume_fn:")).to_equal(true)
 
         it "carries the second member's fn-fields":
+            step("Verify: carries the second member's fn-fields")
             val out = desugar_traits(group_fixture())
             expect(out.contains("profile_begin_fn:")).to_equal(true)
 
         it "does not leave the with-clause in the emitted struct header":
+            step("Verify: does not leave the with-clause in the emitted struct header")
             val out = desugar_traits(group_fixture())
             expect(out.contains("struct DebugProfiler with")).to_equal(false)
 
     context "AC5 -- generated .from() acquisition":
         it "generates the static under the TypeName__method convention":
+            step("Verify: generates the static under the TypeName__method convention")
             val out = desugar_traits(group_fixture())
             expect(out.contains("fn DebugProfiler__from(src: SessionCore) -> Option<DebugProfiler>:")).to_equal(true)
 
         it "capability-checks through the accessor matched by Option<Member> return type":
+            step("Verify: capability-checks through the accessor matched by Option<Member> return type")
             val out = desugar_traits(group_fixture())
             # `_fn` suffix is load-bearing: after desugaring the accessor is a
             # fn-FIELD, so `src.debug()` fails with "method not found".
@@ -113,17 +140,20 @@ describe "group desugar":
             expect(out.contains("src.profile_fn()")).to_equal(true)
 
         it "returns None when any member fails to acquire":
+            step("Verify: returns None when any member fails to acquire")
             # The generated body falls through to a bare `nil` after the nested
             # `if val` chain, so a None from ANY accessor yields None.
             val out = desugar_traits(group_fixture())
             expect(out.contains("    nil")).to_equal(true)
 
         it "acquires the group from a SINGLE Option<Group> accessor":
+            step("Verify: acquires the group from a SINGLE Option<Group> accessor")
             # Classes are VALUE types, so the group must come off ONE value.
             val out = desugar_traits(group_fixture())
             expect(out.contains("return src.debug_profiler_fn()")).to_equal(true)
 
         it "never pairs per-member copies into a constructed group":
+            step("Verify: never pairs per-member copies into a constructed group")
             # The unsound shape: building `G(field: __m0.field, ...)` from two
             # independently acquired copies. Its absence is the fix.
             val out = desugar_traits(group_fixture())
@@ -133,6 +163,7 @@ describe "group desugar":
 
     context "AC6 -- a missing accessor blocks generation":
         it "does not generate .from() when no Option<Group> accessor exists":
+            step("Verify: does not generate .from() when no Option<Group> accessor exists")
             var src = "trait DebugTarget:" + "\n"
             src = src + "    fn resume() -> bool" + "\n"
             src = src + "\n"
@@ -149,6 +180,7 @@ describe "group desugar":
             expect(out.contains("fn DebugProfiler__from")).to_equal(false)
 
         it "does not generate .from() when no Option<Member> accessor exists":
+            step("Verify: does not generate .from() when no Option<Member> accessor exists")
             var src = "trait DebugTarget:" + "\n"
             src = src + "    fn resume() -> bool" + "\n"
             src = src + "\n"
@@ -164,6 +196,7 @@ describe "group desugar":
             expect(out.contains("fn DebugProfiler__from")).to_equal(false)
 
         it "still emits the group struct with the concatenated fields":
+            step("Verify: still emits the group struct with the concatenated fields")
             var src = "trait DebugTarget:" + "\n"
             src = src + "    fn resume() -> bool" + "\n"
             src = src + "\n"
@@ -179,7 +212,8 @@ describe "group desugar":
 
 describe "parse_trait_group_members with multi-arg generic members":
     it "splits only at top-level commas, not generic argument commas":
+        step("Verify: splits only at top-level commas, not generic argument commas")
         val members = parse_trait_group_members("trait Store with Reader<K, V>, Writer:")
-        expect(members.len()).to_equal(2)
+        expect(members.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
         expect(members[0]).to_equal("Reader<K, V>")
         expect(members[1]).to_equal("Writer")

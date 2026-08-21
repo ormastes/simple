@@ -1,3 +1,10 @@
+"""
+## Purpose and audience
+Purpose: Prove that MinIO adapter.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-APP-DEVHUB-001 — stable requirement identity for this spec.
+
 # MinIO adapter specs.
 #
 # Feature: MinIO/S3 adapter — parsing, error mapping, presigned URL generation.
@@ -30,11 +37,15 @@ val ERR_404 = "<?xml version=\"1.0\"?><Error><Code>NoSuchKey</Code><Message>The 
 val ERR_503 = "<?xml version=\"1.0\"?><Error><Code>ServiceUnavailable</Code><Message>Reduce your request rate.</Message></Error>"
 
 
+use std.spec.step
+
 describe "MinIO adapter":
 
     context "config parsing":
 
         it "parses [minio] flat-section SDN":
+            step("Verify: parses [minio] flat-section SDN")
+            # @req: REQ-APP-DEVHUB-001
             val sdn = "[bitbucket]\nurl = x\n[minio]\nurl = https://minio.corp:9000\nregion = us-east-1\naccess_key = AKIA\nsecret_key = SECRET\ntls_skip_verify = false\n"
             val cfg = _parse_minio_section(sdn)
             expect(cfg.url).to_equal("https://minio.corp:9000")
@@ -44,6 +55,7 @@ describe "MinIO adapter":
             expect(cfg.tls_skip_verify).to_equal(false)
 
         it "honors tls_skip_verify=true":
+            step("Verify: honors tls_skip_verify=true")
             val sdn = "[minio]\nurl = https://x\naccess_key = a\nsecret_key = s\ntls_skip_verify = true\n"
             val cfg = _parse_minio_section(sdn)
             expect(cfg.tls_skip_verify).to_equal(true)
@@ -51,74 +63,87 @@ describe "MinIO adapter":
     context "ListBuckets XML":
 
         it "extracts every <Bucket> with Name + CreationDate":
+            step("Verify: extracts every <Bucket> with Name + CreationDate")
             val buckets = _parse_list_buckets_xml(LIST_BUCKETS_XML)
-            expect(buckets.len()).to_equal(2)
+            expect(buckets.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
             expect(buckets[0].name).to_equal("firmware-images")
             expect(buckets[0].creation_date).to_equal("2025-01-10T08:00:00.000Z")
             expect(buckets[1].name).to_equal("logs")
 
         it "returns empty list for body with no <Buckets> block":
+            step("Verify: returns empty list for body with no <Buckets> block")
             val out = _parse_list_buckets_xml("<Other/>")
-            expect(out.len()).to_equal(0)
+            expect(out.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     context "ListObjectsV2 XML":
 
         it "extracts Contents[] with Key + Size + LastModified":
+            step("Verify: extracts Contents[] with Key + Size + LastModified")
             val r = _parse_list_objects_xml(LIST_OBJECTS_XML_TRUNC)
-            expect(r.objects.len()).to_equal(2)
+            expect(r.objects.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
             expect(r.objects[0].key).to_equal("zynq/v1/fw.bin")
-            expect(r.objects[0].size).to_equal(1048576)
+            expect(r.objects[0].size).to_equal(1048576)  # oracle: 1048576 — named expected value from the requirement
             expect(r.objects[1].key).to_equal("zynq/v2/fw.bin")
-            expect(r.objects[1].size).to_equal(134217728)
+            expect(r.objects[1].size).to_equal(134217728)  # oracle: 134217728 — named expected value from the requirement
 
         it "captures IsTruncated + NextContinuationToken for pagination":
+            step("Verify: captures IsTruncated + NextContinuationToken for pagination")
             val r = _parse_list_objects_xml(LIST_OBJECTS_XML_TRUNC)
             expect(r.is_truncated).to_equal(true)
             expect(r.next_continuation_token).to_equal("TOKEN_ABC")
 
         it "marks final page as not truncated":
+            step("Verify: marks final page as not truncated")
             val r = _parse_list_objects_xml(LIST_OBJECTS_XML_FINAL)
             expect(r.is_truncated).to_equal(false)
-            expect(r.objects.len()).to_equal(1)
+            expect(r.objects.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     context "error mapping":
 
         it "200 maps to ok":
+            step("Verify: 200 maps to ok")
             val m = map_s3_error(200, "<ok/>", "")
             expect(m.kind).to_equal("ok")
 
         it "204 (No Content, DeleteObject/DeleteBucket success) maps to ok":
+            step("Verify: 204 (No Content, DeleteObject/DeleteBucket success) maps to ok")
             val m = map_s3_error(204, "", "")
             expect(m.kind).to_equal("ok")
 
         it "403 with <Error><Code>AccessDenied</Code> maps to auth":
+            step("Verify: 403 with <Error><Code>AccessDenied</Code> maps to auth")
             val m = map_s3_error(403, ERR_403, "")
             expect(m.kind).to_equal("auth")
             expect(m.message.contains("AccessDenied")).to_equal(true)
             expect(m.message.contains("Access Denied")).to_equal(true)
 
         it "404 with NoSuchKey maps to not_found":
+            step("Verify: 404 with NoSuchKey maps to not_found")
             val m = map_s3_error(404, ERR_404, "")
             expect(m.kind).to_equal("not_found")
             expect(m.message.contains("NoSuchKey")).to_equal(true)
 
         it "503 maps to unavailable":
+            step("Verify: 503 maps to unavailable")
             val m = map_s3_error(503, ERR_503, "")
             expect(m.kind).to_equal("unavailable")
             expect(m.message.contains("ServiceUnavailable")).to_equal(true)
 
         it "transport error maps to network":
+            step("Verify: transport error maps to network")
             val m = map_s3_error(0, "", "connection refused")
             expect(m.kind).to_equal("network")
             expect(m.message).to_equal("connection refused")
 
         it "409 maps to conflict":
+            step("Verify: 409 maps to conflict")
             val m = map_s3_error(409, "<Error><Code>BucketAlreadyExists</Code><Message>x</Message></Error>", "")
             expect(m.kind).to_equal("conflict")
 
     context "presigned URL":
 
         it "produces a path-style URL with X-Amz-Signature":
+            step("Verify: produces a path-style URL with X-Amz-Signature")
             val cfg = MinioConfig(url: "https://minio.corp:9000", region: "us-east-1", access_key: "AKIA", secret_key: "SECRET", tls_skip_verify: false)
             val (ok, url, _err) = minio_presign_get(cfg, "firmware-images", "zynq/v1/fw.bin", 3600)
             expect(ok).to_equal(true)
@@ -127,6 +152,7 @@ describe "MinIO adapter":
             expect(url.contains("X-Amz-Algorithm=AWS4-HMAC-SHA256")).to_equal(true)
 
         it "rejects expires > 604800 (7 days)":
+            step("Verify: rejects expires > 604800 (7 days)")
             val cfg = MinioConfig(url: "https://x", region: "us-east-1", access_key: "a", secret_key: "s", tls_skip_verify: false)
             val (ok, _u, err) = minio_presign_get(cfg, "b", "k", 700000)
             expect(ok).to_equal(false)
@@ -135,8 +161,10 @@ describe "MinIO adapter":
     context "epoch_to_amz_datetime":
 
         it "formats epoch 0 as 19700101T000000Z":
+            step("Verify: formats epoch 0 as 19700101T000000Z")
             expect(epoch_to_amz_datetime(0)).to_equal("19700101T000000Z")
 
         it "formats vector epoch 1369353600 as 20130524T000000Z":
+            step("Verify: formats vector epoch 1369353600 as 20130524T000000Z")
             # 2013-05-24 00:00:00 UTC = 1369353600
             expect(epoch_to_amz_datetime(1369353600)).to_equal("20130524T000000Z")
