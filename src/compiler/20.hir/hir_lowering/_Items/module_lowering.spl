@@ -420,3 +420,40 @@ impl HirLowering:
             return self.package_sibling_canons[package_name]
         val empty: [text] = []
         empty
+
+    me build_surface_index_by_name():
+        """One pass over the aligned registry arrays: registry KEY -> surface
+        index, with the same bounds check hir_module_surface_index applies.
+
+        Built FROM ordered_names/ordered_indices, which stay the truth (see the
+        note on hir_module_surface_index about ModuleSurface payloads dropping
+        through native Dict reads -- the values cached here are i64, not
+        surfaces)."""
+        self.surface_index_by_name_build_count = self.surface_index_by_name_build_count + 1
+        var by_name: {text: i64} = {}
+        val names = self.module_surfaces.ordered_names
+        val indices = self.module_surfaces.ordered_indices
+        var position = 0
+        while position < names.len() and position < indices.len():
+            val key = names[position]
+            if not by_name.contains_key(key):
+                # First alias wins, exactly like the linear scan's first hit.
+                val index = indices[position]
+                if index >= 0 and index < self.module_surfaces.surfaces.len():
+                    by_name[key] = index
+                else:
+                    by_name[key] = -1
+            position = position + 1
+        self.surface_index_by_name = by_name
+        self.surface_index_by_name_built = true
+
+    me surface_index_for_name(name: text) -> i64:
+        """O(1) replacement for hir_module_surface_index over this lowerer's
+        frozen registry. The linear form compared every registry KEY (~2 per
+        module, so ~1300 text compares in a full bootstrap) and was called per
+        import, per sibling and per re-export hop."""
+        if not self.surface_index_by_name_built:
+            self.build_surface_index_by_name()
+        if self.surface_index_by_name.contains_key(name):
+            return self.surface_index_by_name[name]
+        -1

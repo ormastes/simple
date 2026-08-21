@@ -99,6 +99,20 @@ Pin: two further examples in the same spec assert that the declaration-owner
 index and the package-sibling index are each built exactly ONCE no matter how
 many distinct names or packages are queried.
 
+## Third commit: registry KEY lookup was also linear
+`hir_module_surface_index` (`_Items/module_lowering.spl:131`) compared every
+registry key in `ordered_names` (~2 per module, ~1300 in a full bootstrap) to
+resolve ONE name, and is called per import, per package sibling and per
+re-export hop. Replaced at the five in-lowerer call sites by
+`surface_index_for_name`, a dict probe over an index built once from the same
+aligned arrays (values are i64, so the ModuleSurface-payload hazard documented
+on the linear form does not apply). First-alias-wins and the out-of-range
+bounds check are preserved exactly.
+
+240-module fixture, `[build] hir` span: 32 s -> **27 s** (0.133 -> 0.113 s per
+module). Cumulative for the day on that fixture: 54 s -> 27 s, 2.0x, with the
+per-module cost now flat in registry size. Diagnostics unchanged.
+
 ## Not fixed here
 `hir_module_declares_item` is still a linear probe of six dicts when called
 directly (the index calls it implicitly, once per surface, at build time), and
