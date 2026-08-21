@@ -10,12 +10,18 @@ use compiler.common.diagnostics.span.{Span}
 
 
 class TypeSubstitution:
-    """Maps type parameter names to concrete HirTypes."""
+    """Maps type parameter names to concrete HirTypes.
+
+    `by_symbol` maps a type parameter's SYMBOL id instead: HIR lowering
+    encodes a reference to a function's own `T` as `Named(sym_of_T, [])`
+    rather than `TypeParam("T")` (measured 2026-08-21 on `fn ident<T>(v: T)`),
+    so the same parameter can be met under either spelling."""
     mapping: Dict<text, HirType>
+    by_symbol: Dict<i64, HirType>
 
 
 fn typesubstitution_empty() -> TypeSubstitution:
-    TypeSubstitution(mapping: {})
+    TypeSubstitution(mapping: {}, by_symbol: {})
 
 
 fn typesubstitution_from_params(type_params: [HirTypeParam], type_args: [HirType]) -> TypeSubstitution:
@@ -26,7 +32,7 @@ fn typesubstitution_from_params(type_params: [HirTypeParam], type_args: [HirType
         if i < type_args.len():
             map[param.name] = type_args[i]
         i = i + 1
-    TypeSubstitution(mapping: map)
+    TypeSubstitution(mapping: map, by_symbol: {})
 
 
 fn concrete_to_hir_type(ct: ConcreteType, span: Span) -> HirType:
@@ -68,7 +74,7 @@ fn typesubstitution_from_concrete(type_params: [HirTypeParam], type_args: [Concr
         if i < type_args.len():
             map[param.name] = concrete_to_hir_type(type_args[i], param.span)
         i = i + 1
-    TypeSubstitution(mapping: map)
+    TypeSubstitution(mapping: map, by_symbol: {})
 
 
 fn substitute_type(ty: HirType, subst: TypeSubstitution) -> HirType:
@@ -108,6 +114,12 @@ fn substitute_type(ty: HirType, subst: TypeSubstitution) -> HirType:
         case Result(ok, err):
             HirType(kind: HirTypeKind.Result(substitute_type(ok, subst), substitute_type(err, subst)), span: ty.span)
         case Named(symbol, args):
+            val nsym: SymbolId = symbol
+            if subst.by_symbol.has(nsym.id):
+                # A reference to a type PARAMETER by its symbol (the spelling
+                # HIR lowering produces); only a bare reference can be one.
+                if args == nil or args.len() == 0:
+                    return subst.by_symbol[nsym.id]
             var nargs: [HirType] = []
             for a in args:
                 nargs = nargs.push(substitute_type(a, subst))
@@ -122,8 +134,25 @@ fn substitute_type(ty: HirType, subst: TypeSubstitution) -> HirType:
             for p in params:
                 ps = ps.push(substitute_type(p, subst))
             HirType(kind: HirTypeKind.Function(ps, substitute_type(ret, subst), effects), span: ty.span)
-        case _:
-            ty
+        case Projection(base, assoc_name):
+            HirType(kind: HirTypeKind.Projection(substitute_type(base, subst), assoc_name), span: ty.span)
+        case Tensor(element, dims, device):
+            HirType(kind: HirTypeKind.Tensor(substitute_type(element, subst), dims, device), span: ty.span)
+        # Leaves: no HirType inside, nothing to substitute. Named one by one
+        # (plan section 9.4) so a NEW HirTypeKind variant is a compile-time
+        # non-exhaustive match here, not a silent identity.
+        case Int(_, _): ty
+        case Float(_): ty
+        case Bool: ty
+        case Char: ty
+        case Str: ty
+        case Unit: ty
+        case DynTrait(_): ty
+        case Layer(_, _): ty
+        case Infer(_, _): ty
+        case Never: ty
+        case Any: ty
+        case Error: ty
 
 
 fn substitute_type_opt(ty: HirType?, subst: TypeSubstitution) -> HirType?:
@@ -578,6 +607,10 @@ fn substitute_function(func: HirFunction, subst: TypeSubstitution, mangled_name:
     var specialized = func
     specialized.name = mangled_name
     specialized.type_params = []
+    # A specialization is never a template: clear the HIR flag too, or the
+    # post-mono sweep (which honours the flag as well as `type_params`) would
+    # still count it as an emittable generic definition.
+    specialized.is_generic_template = false
     var new_params: [HirParam] = []
     for p in func.params:
         new_params = new_params.push(substitute_param(p, subst))
@@ -585,3 +618,34 @@ fn substitute_function(func: HirFunction, subst: TypeSubstitution, mangled_name:
     specialized.return_type = substitute_type(func.return_type, subst)
     specialized.body = substitute_block(func.body, subst)
     specialized
+
+
+fn typesubstitution_canonical(type_params: [HirTypeParam]) -> TypeSubstitution:
+    """Substitution that rewrites every symbol-spelled reference to one of
+    `type_params` (`Named(sym_of_T, [])`) into the canonical `TypeParam("T")`.
+
+    HIR lowering registers a function's type parameters as type symbols and
+    lowers `v: T` to `Named(sym, [])`; name-keyed substitution and call-site
+    unification both need the `TypeParam` spelling, and the post-mono verifier
+    only counts `TypeParam` as an unresolved parameter."""
+    var by_sym: Dict<i64, HirType> = {}
+    for tp in type_params:
+        val tpt: HirTypeParam = tp
+        val s: SymbolId = tpt.symbol
+        by_sym[s.id] = HirType(kind: HirTypeKind.TypeParam(tpt.name, tpt.bounds), span: tpt.span)
+    TypeSubstitution(mapping: {}, by_symbol: by_sym)
+
+
+fn canonicalize_template(func: HirFunction) -> HirFunction:
+    """Return `func` with every symbol-spelled type-parameter reference in its
+    signature and body rewritten to `TypeParam(name)`. Name, symbol,
+    `type_params` and template-ness are unchanged."""
+    val subst = typesubstitution_canonical(func.type_params)
+    var out = func
+    var new_params: [HirParam] = []
+    for p in func.params:
+        new_params = new_params.push(substitute_param(p, subst))
+    out.params = new_params
+    out.return_type = substitute_type(func.return_type, subst)
+    out.body = substitute_block(func.body, subst)
+    out

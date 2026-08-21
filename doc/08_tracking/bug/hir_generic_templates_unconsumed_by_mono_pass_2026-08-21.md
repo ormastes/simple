@@ -342,3 +342,91 @@ what catches it.
 - The four Phase A HIR gates stay closed; nothing here is demonstrated from
   SOURCE.
 - `substitute_expr` still does not recurse into sub-expressions.
+
+## Update 2026-08-21 (lane M7/M3): the pass consumes SOURCE-lowered templates on a REAL module
+
+**Two further reasons nothing was consumed on real HIR**, both measured on
+`fn ident<T>(v: T) -> T` + `val x: i64 = ident(7)` lowered through
+`parse_full_frontend` -> `HirLowering`:
+
+1. HIR lowering spells a reference to the function's own `T` as
+   `Named(sym_of_T, [])` (the type-param symbol, `HirTypeParam.symbol`), NOT
+   `TypeParam("T")`. Name-keyed substitution therefore matched nothing, and the
+   verifier (which counts only `TypeParam`) could not even see the leftover.
+2. Every expression has `has_type_ == nil`: the HM pass in
+   `driver_hir_pipeline_passes.spl` is diagnostic-only and annotates nothing,
+   and a source call `ident(7)` carries no `type_args`, so
+   `check_generic_call` never fired (`specs=0 calls=0`,
+   `generic_emitted_definition=1`).
+
+**What landed (all `src/compiler/40.mono/**`):**
+
+- `monomorphize/type_subst.spl`: `TypeSubstitution.by_symbol` +
+  `canonicalize_template` rewrite the symbol spelling to `TypeParam` once at
+  collection; the `case _: ty` catch-all in `substitute_type` is GONE -
+  `Projection`/`Tensor` now recurse and every leaf kind is named, so a new
+  `HirTypeKind` is a non-exhaustive match, not a silent identity;
+  `substitute_function` clears `is_generic_template`.
+- `monomorphize_integration.spl` (rewritten): deterministic worklist fixed
+  point (roots = non-template functions in module-key then symbol-id order;
+  FIFO of specializations whose bodies are re-walked; dedup by mangled name;
+  `E-MONO-030` refusal past type depth 16); local argument-type inference
+  (`infer_expr_type`: literals incl. suffixes, params, annotated/inferable
+  lets, lambda params, casts, constructors, array/tuple literals, calls to
+  non-generic fns AND to already-emitted specializations) unified against the
+  template's parameter types (`bind_type_params`, structural through
+  Array/Slice/Optional/Dict/Result/Tuple/Union/Named/Function/...); an
+  exhaustive `rewrite_expr` mirroring `substitute_expr` (if/match/loops/
+  closures/collections/...); `E-MONO-032` diagnostic + `unresolved_generic_calls`
+  stat for any call it cannot rewrite, and such a template is NEVER pruned.
+  New entry `run_monomorphization_with_diagnostics` returns the diagnostics.
+- `verify/post_mono_verify.spl`: `generic_call` now also counts a call whose
+  callee symbol is still a template in the module (the inferred-argument form
+  has EMPTY type args, which the old rule could not see).
+
+**Executed evidence (seed `bin/simple`, 2026-08-21):**
+
+- `sh scripts/check/check-post-mono-invariants.shs` ->
+  `PASS — 10 fixture(s) checked, 0 unexpected`, including the new
+  `test/fixtures/mono/post_mono/real_module_unload_ownership.spl`: the REAL
+  `src/compiler/99.loader/unload_ownership.spl` read from disk and lowered from
+  source (two generic free fns) plus a five-line root appended to the same
+  compilation unit (standalone `HirLowering` does not resolve cross-module
+  `use`). A/B with the three `40.mono` files reverted to HEAD:
+  `MONO_STATS specializations=0 call_sites=0 POST_MONO_COUNTERS=generic_emitted_definition=2`
+  -> `MONO_STATS specializations=2 call_sites=2 POST_MONO_COUNTERS=clean`
+  (unresolved-typeparam=0 generic-call=0 any-erasure=0 error-type=0).
+- `test/01_unit/compiler/mono/mono_source_inference_fixed_point_spec.spl`
+  (mirrored to `test/unit/`): `5 total, 5 passed` - inferred i64 arg,
+  call inside an `if` arm, fixed point `wrap(wrap(1))` -> `wrap$i64` +
+  `wrap$arr_i64`, dedup, and the fail-closed uninferable case (template kept,
+  `E-MONO-032`, verifier `generic_call=1 generic_emitted_definition=1`).
+  With `40.mono` reverted: `5 total, 0 passed, 5 failed` (compile error on
+  the new `MonoStats` field; the behavioural pre-fix numbers are the probe
+  figures above and the fixture A/B).
+- Unchanged/green: `hir_monomorphization_rewrite_spec` 3/3,
+  `hir_monomorphization_body_subst_spec` 3/3, `mono_template_pruning_spec`
+  4/4, `monomorphize_integration_spec` 18/18, `monomorphize_spec` 1/1,
+  `generic_template_spec` 20/20, `verify/post_mono_verify_spec` 9/9.
+  `monomorphization_native_build_regression_spec` 2/2 after updating one
+  assertion in place: a template body is no longer scanned on its own
+  (templates are not roots, plan 9.3 step 3), so its self-call is
+  `call_sites_found=0`, not 1.
+
+### Still open
+
+- The four Phase A HIR gates stay closed (not this lane's files). The gate
+  records an error but still lowers the template, which is what the fixture
+  relies on; opening it needs the integrator to surface
+  `run_monomorphization_with_diagnostics`' list as hard errors first.
+- Generic methods (`MethodCall`/`StaticCall`), generic struct/class
+  instantiation and trait-bound projections are not specialized; only free
+  functions are. Their ARGUMENTS are still rewritten.
+- Inference is local: a `let` without annotation whose initializer is a
+  method call, a field read, or an index stays unknown (fail-closed,
+  `E-MONO-032`). A typed-HIR annotation pass would make these inferable.
+- MIR lowering's missing template skip (`module_lowering.spl:981`) is unchanged.
+- `doc/08_tracking/bug/generic_struct_field_untagged_payload_seed_2026-08-21.md`
+  (`ident(1)+1 -> 9` under `bin/simple run`) is SEED-side: the Rust seed's
+  JIT/interpreter never executes the pure-Simple `40.mono` pass, so nothing
+  here can reach it.

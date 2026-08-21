@@ -1,0 +1,128 @@
+"""
+# Mono pass consumes SOURCE-lowered generic templates (inferred type args, fixed point)
+
+Hardening plan section 9.3 steps 3-12 / bug
+`doc/08_tracking/bug/hir_generic_templates_unconsumed_by_mono_pass_2026-08-21.md`.
+
+Before this change the pass only requested a specialization for a call that
+carried EXPLICIT type arguments, and only from a hand-built HIR. On real,
+source-lowered HIR every one of these examples left the template emittable:
+
+- HIR lowering records no expression types (`has_type_` is nil) and spells a
+  reference to the function's own `T` as `Named(sym_of_T, [])`, not
+  `TypeParam("T")`, so nothing matched;
+- `ident(7)` has no type args, so it was never a request;
+- `rewrite_expr` did not descend into `if` arms, so a call inside one was
+  never repointed;
+- a specialization's body was never re-scanned, so `wrap(wrap(1))` could not
+  reach `wrap$arr_i64`.
+
+Every `it` block lowers real SOURCE through `parse_full_frontend` ->
+`HirLowering`, runs `run_monomorphization`, and checks the section 9.5
+verifier counters. Pre-fix verdict (with `40.mono` reverted):
+`5 total, 1 passed, 4 failed` - only the fail-closed example passed.
+
+## Harness landmine
+The parse -> HIR pipeline is inlined in each `it` block on purpose, mirroring
+`test/01_unit/compiler/hir/generic_template_marking_spec.spl`: the same code
+in a module-level helper loses recorded lowering state.
+"""
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mono.monomorphize_integration.{run_monomorphization, run_monomorphization_with_diagnostics}
+use compiler.verify.post_mono_verify.*
+
+fn count_named(m: HirModule, name: text) -> i64:
+    var n = 0
+    for k in m.functions.keys():
+        val f: HirFunction = m.functions[k]
+        if f.name == name:
+            n = n + 1
+    n
+
+describe "mono pass on source-lowered generics":
+    it "specializes a free fn whose single type argument is INFERRED from an i64 literal":
+        val src = "fn ident<T>(v: T) -> T:\n    v\n\nfn main() -> i64:\n    val x: i64 = ident(7)\n    x\n"
+        val parsed = parse_full_frontend(src, "testdata/mono_infer_ident.spl", "mono_infer_ident", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/mono_infer_ident.spl")
+        val hir = hl.lower_module(parsed)
+        var mods: Dict<text, HirModule> = {}
+        mods["m"] = hir
+        val (out, stats) = run_monomorphization(mods)
+        expect(stats.specializations_created).to_equal(1)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        val om: HirModule = out["m"]
+        expect(count_named(om, "ident$i64")).to_equal(1)
+        expect(count_named(om, "ident")).to_equal(0)
+        val r = post_mono_verify_modules(out)
+        expect(post_mono_report_total(r)).to_equal(0)
+
+    it "rewrites a generic call nested inside an if arm":
+        val src = "fn ident<T>(v: T) -> T:\n    v\n\nfn pick(b: bool) -> i64:\n    if b:\n        ident(1)\n    else:\n        2\n"
+        val parsed = parse_full_frontend(src, "testdata/mono_infer_if.spl", "mono_infer_if", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/mono_infer_if.spl")
+        val hir = hl.lower_module(parsed)
+        var mods: Dict<text, HirModule> = {}
+        mods["m"] = hir
+        val (out, stats) = run_monomorphization(mods)
+        expect(stats.specializations_created).to_equal(1)
+        val r = post_mono_verify_modules(out)
+        expect(r.generic_call).to_equal(0)
+        expect(r.generic_emitted_definition).to_equal(0)
+        expect(post_mono_report_total(r)).to_equal(0)
+
+    it "reaches a fixed point: a specialization's body requests a deeper instantiation":
+        val src = "fn wrap<T>(v: T) -> [T]:\n    [v]\n\nfn root() -> [[i64]]:\n    wrap(wrap(1))\n"
+        val parsed = parse_full_frontend(src, "testdata/mono_fixed_point.spl", "mono_fixed_point", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/mono_fixed_point.spl")
+        val hir = hl.lower_module(parsed)
+        var mods: Dict<text, HirModule> = {}
+        mods["m"] = hir
+        val (out, stats) = run_monomorphization(mods)
+        expect(stats.specializations_created).to_equal(2)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        val om: HirModule = out["m"]
+        expect(count_named(om, "wrap$i64")).to_equal(1)
+        expect(count_named(om, "wrap$arr_i64")).to_equal(1)
+        expect(count_named(om, "wrap")).to_equal(0)
+        val r = post_mono_verify_modules(out)
+        expect(post_mono_report_total(r)).to_equal(0)
+
+    it "deduplicates: two call sites at the same type share one specialization":
+        val src = "fn ident<T>(v: T) -> T:\n    v\n\nfn a() -> i64:\n    ident(1)\n\nfn b() -> i64:\n    ident(2)\n"
+        val parsed = parse_full_frontend(src, "testdata/mono_dedup.spl", "mono_dedup", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/mono_dedup.spl")
+        val hir = hl.lower_module(parsed)
+        var mods: Dict<text, HirModule> = {}
+        mods["m"] = hir
+        val (out, stats) = run_monomorphization(mods)
+        expect(stats.call_sites_found).to_equal(2)
+        expect(stats.specializations_created).to_equal(1)
+        val r = post_mono_verify_modules(out)
+        expect(post_mono_report_total(r)).to_equal(0)
+
+    it "fails closed: an uninferable call keeps the template, is diagnosed, and the verifier counts it":
+        # `y` has no annotation and its initializer is a method call whose
+        # result type this pass cannot know, so `T` stays unbound.
+        val src = "fn ident<T>(v: T) -> T:\n    v\n\nfn root(d: Dict<text, i64>) -> i64:\n    val y = d.get(\"k\")\n    ident(y)\n"
+        val parsed = parse_full_frontend(src, "testdata/mono_unresolved.spl", "mono_unresolved", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/mono_unresolved.spl")
+        val hir = hl.lower_module(parsed)
+        var mods: Dict<text, HirModule> = {}
+        mods["m"] = hir
+        val (out, stats, diags) = run_monomorphization_with_diagnostics(mods)
+        expect(stats.specializations_created).to_equal(0)
+        expect(stats.unresolved_generic_calls).to_equal(1)
+        expect(diags.len()).to_equal(1)
+        expect(diags[0]).to_contain("E-MONO-032")
+        val om: HirModule = out["m"]
+        expect(count_named(om, "ident")).to_equal(1)
+        val r = post_mono_verify_modules(out)
+        expect(r.generic_emitted_definition).to_equal(1)
+        expect(r.generic_call).to_equal(1)

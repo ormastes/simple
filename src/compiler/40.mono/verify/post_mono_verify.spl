@@ -105,13 +105,19 @@ class PostMonoVerifier:
     symbol: text
     chain: text
     in_specialization: bool
+    # Symbol id -> name of every function in the module under verification
+    # that is still a generic TEMPLATE. A call whose callee names one of these
+    # is a generic call even with EMPTY type args (the inferred-argument form
+    # the mono pass failed to rewrite).
+    template_syms: Dict<i64, text>
 
     static fn create() -> PostMonoVerifier:
         PostMonoVerifier(
             r: post_mono_report_empty(),
             symbol: "",
             chain: "",
-            in_specialization: false
+            in_specialization: false,
+            template_syms: {}
         )
 
     me record(counter: text, detail: text):
@@ -264,6 +270,7 @@ class PostMonoVerifier:
                 self.walk_expr(right)
             case Unary(_, operand): self.walk_expr(operand)
             case Call(callee, args, type_args):
+                self.check_template_callee(callee)
                 # `rewrite_expr` empties `type_args` when a call site is
                 # repointed at its specialization, so ANY surviving type
                 # argument is an unrewritten generic call.
@@ -572,6 +579,24 @@ class PostMonoVerifier:
         else:
             self.chain = "{module_name}.{def_name}"
 
+    me check_template_callee(callee: HirExpr):
+        if callee == nil:
+            return
+        var sid: i64 = -1
+        match callee.kind:
+            case Var(s):
+                val st: SymbolId = s
+                sid = st.id
+            case NamedVar(s, _):
+                val st2: SymbolId = s
+                sid = st2.id
+            case _: pass_do_nothing("not a symbol callee")
+        if sid < 0:
+            return
+        if self.template_syms.has(sid):
+            self.r.generic_call = self.r.generic_call + 1
+            self.record("generic call", "call site still targets generic template `{self.template_syms[sid]}` (type arguments neither written nor inferred)")
+
     me flag_template(kind: text, def_name: text):
         self.r.generic_emitted_definition = self.r.generic_emitted_definition + 1
         self.record("generic emitted definition", "{kind} `{def_name}` is still a generic template and is still emittable")
@@ -580,6 +605,12 @@ class PostMonoVerifier:
         if module == nil:
             return self.r
         val mname: text = module.name
+        self.template_syms = {}
+        for key in module.functions.keys():
+            val tf: HirFunction = module.functions[key]
+            if self.is_template(tf.type_params, tf.is_generic_template):
+                val ts: SymbolId = tf.symbol
+                self.template_syms[ts.id] = tf.name
         for key in module.functions.keys():
             val f: HirFunction = module.functions[key]
             self.enter(mname, f.name)

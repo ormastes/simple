@@ -1,0 +1,54 @@
+# @expect: clean
+# The REAL mono pass over a REAL compiler module, lowered from SOURCE.
+#
+# `src/compiler/99.loader/unload_ownership.spl` (read from disk, not
+# hand-built HIR) declares two generic free functions,
+# `owned_global_symbol_names<T>` and `global_symbols_without_names<T>`, and is
+# parsed + lowered through the same `parse_full_frontend` -> `HirLowering`
+# pipeline the driver uses. A minimal five-line ROOT function (its real callers
+# live in `module_loader_compat.spl`, which drags in the whole loader) is
+# appended to that source and calls both with NO explicit type arguments, so
+# the pass must INFER `T = i64` from the annotated argument type
+# `Dict<text, (text, i64)>`.
+#
+# Clean means: both templates consumed (specialized at i64 and pruned), both
+# call sites repointed with empty type args, zero surviving TypeParam in the
+# specialized bodies, zero Any/Error introduced by substitution.
+#
+# Run from the repo root (the check script's default); a missing input is
+# reported as its own counter so a wrong cwd can never look like a pass.
+use std.io_runtime.{read_file_text}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mono.monomorphize_integration.{run_monomorphization}
+use compiler.verify.post_mono_verify.*
+use post_mono_fixture_support.*
+
+fn main():
+    val real_path = "src/compiler/99.loader/unload_ownership.spl"
+    val real_src = read_file_text(real_path)
+    if real_src == nil or real_src.len() == 0:
+        print "POST_MONO_COUNTERS=fixture_input_missing={real_path}"
+        print "POST_MONO_TOTAL=1"
+        return
+    val root_src = "fn root() -> i64:\n" +
+        "    val d: Dict<text, (text, i64)> = {}\n" +
+        "    val names: [text] = owned_global_symbol_names(d, \"p\")\n" +
+        "    val kept: Dict<text, (text, i64)> = global_symbols_without_names(d, names)\n" +
+        "    names.len()\n"
+    # Standalone HirLowering resolves names only within one compilation unit
+    # (cross-module `use` resolution is a driver concern), so the root is
+    # appended to the real module's source text verbatim.
+    val parsed = parse_full_frontend(real_src + "\n" + root_src, real_path, "unload_ownership", Logger(level: 0))
+    var hl = HirLowering.with_filename(real_path)
+    val hir = hl.lower_module(parsed)
+
+    var modules: Dict<text, HirModule> = {}
+    modules["unload_ownership"] = hir
+    val (result, stats) = run_monomorphization(modules)
+    print "MONO_STATS specializations={stats.specializations_created} call_sites={stats.call_sites_found}"
+    fx_emit(post_mono_verify_modules(result))
