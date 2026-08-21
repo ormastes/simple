@@ -785,20 +785,36 @@ pub unsafe extern "C" fn rt_file_mmap_read_bytes_rv(path: RuntimeValue) -> Runti
 
 #[no_mangle]
 pub extern "C" fn rt_file_read_text_at(path: i64, offset: i64, size: i64) -> i64 {
+    rt_file_read_text_at_checked(path, offset, size)
+}
+
+/// Checked offset read. A managed empty text is a successful zero-byte read;
+/// `RuntimeValue::NIL` is the only failure result.
+#[no_mangle]
+pub extern "C" fn rt_file_read_text_at_checked(path: i64, offset: i64, size: i64) -> i64 {
     let Some(path) = tagged_text_to_str(path) else {
         return RuntimeValue::NIL.to_raw() as i64;
     };
-    if size <= 0 {
+    if offset < 0 || size < 0 {
+        return RuntimeValue::NIL.to_raw() as i64;
+    }
+    if size == 0 {
         return string_to_tagged_text("");
     }
     let Ok(mut file) = std::fs::File::open(Path::new(path)) else {
         return RuntimeValue::NIL.to_raw() as i64;
     };
-    let start = offset.max(0) as usize;
-    if file.seek(SeekFrom::Start(start as u64)).is_err() {
+    if file.seek(SeekFrom::Start(offset as u64)).is_err() {
         return RuntimeValue::NIL.to_raw() as i64;
     }
-    let mut buf = vec![0; size as usize];
+    let Ok(size) = usize::try_from(size) else {
+        return RuntimeValue::NIL.to_raw() as i64;
+    };
+    let mut buf = Vec::new();
+    if buf.try_reserve_exact(size).is_err() {
+        return RuntimeValue::NIL.to_raw() as i64;
+    }
+    buf.resize(size, 0);
     match file.read(&mut buf) {
         Ok(read_len) => {
             buf.truncate(read_len);
@@ -1939,6 +1955,12 @@ sandbox_lowering:
         let result = RuntimeValue::from_raw(rt_file_read_text_at(path, 3, 4) as u64);
         let text = unsafe { extract_string(result) };
         assert_eq!(text, "3456");
+
+        let empty = RuntimeValue::from_raw(rt_file_read_text_at_checked(path, 10, 0) as u64);
+        assert!(!empty.is_nil(), "valid empty reads must not become failure");
+        assert_eq!(unsafe { extract_string(empty) }, "");
+        assert!(RuntimeValue::from_raw(rt_file_read_text_at_checked(path, -1, 1) as u64).is_nil());
+        assert!(RuntimeValue::from_raw(rt_file_read_text_at_checked(0, 0, 1) as u64).is_nil());
     }
 
     #[test]

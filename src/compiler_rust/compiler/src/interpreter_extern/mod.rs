@@ -1352,6 +1352,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_file_read_lines", file_io::rt_file_read_lines);
     insert_simple!("rt_file_read_text", file_io::rt_file_read_text);
     insert_simple!("rt_file_read_text_at", file_io::rt_file_read_text_at);
+    insert_simple!("rt_file_read_text_at_checked", file_io::rt_file_read_text_at_checked);
     // rt_file_read_text_rv is the RuntimeValue-ABI variant of rt_file_read_text
     // (same logical signature `(path: text) -> text`). The compiler frontend
     // reads bootstrap source through it (parser.spl -> parser_get_bootstrap_source,

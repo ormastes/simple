@@ -382,6 +382,33 @@ if printf '%s\n' "$file_lock_provider_region" | rg -q \
     failed=1
 fi
 
+# Offset reads used by live process relay preserve valid empty text while
+# reporting I/O/shape failures as nil to a typed Option/Result wrapper. The
+# checked path uses the existing managed-text allocation only—no status array,
+# registry, hash, lock, or dynamic lookup on each polling read.
+require_fixed 'RuntimeFuncSpec::new("rt_file_read_text_at_checked", &[I64, I64, I64], &[I64])' \
+    src/compiler_rust/compiler/src/codegen/runtime_sffi.rs
+require_fixed 'pub extern "C" fn rt_file_read_text_at_checked' \
+    src/compiler_rust/runtime/src/value/sffi/file_io/file_ops.rs
+require_fixed 'pub fn rt_file_read_text_at_checked' \
+    src/compiler_rust/compiler/src/interpreter_extern/file_io.rs
+require_fixed 'int64_t rt_file_read_text_at_checked' src/runtime/runtime_native.c
+require_fixed 'runtime_symbol_table_checked_offset_read_resolves_exact_provider' \
+    src/compiler_rust/runtime/src/lib.rs
+require_fixed 'checked_offset_read_distinguishes_empty_success_from_failure' \
+    src/compiler_rust/compiler/src/interpreter_extern/file_io.rs
+require_fixed 'fn _read_text_at_checked(path: text, offset: i64, size: i64) -> Result<text, text>' \
+    src/app/io/process_ops.spl
+
+checked_read_region=$(sed -n \
+    '/pub extern "C" fn rt_file_read_text_at_checked(/,/pub extern "C" fn rt_file_write_text_at/p' \
+    "$root/src/compiler_rust/runtime/src/value/sffi/file_io/file_ops.rs")
+if printf '%s\n' "$checked_read_region" | rg -q \
+    'HashMap|Mutex|RwLock|sha|dlsym|dlopen|RuntimeValue::NIL.*size == 0'; then
+    echo "SFFI lint: checked offset read regressed empty semantics or gained registry work" >&2
+    failed=1
+fi
+
 # Cryptographic sign/verify symbols must resolve through the same typed static
 # registry as their checked tri-state/status-payload wrappers.
 for symbol in \

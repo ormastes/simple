@@ -588,6 +588,42 @@ pub fn rt_file_read_text_at(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// Checked offset read: `nil` denotes failure while an allocated empty text is
+/// a valid zero-byte/EOF result.
+pub fn rt_file_read_text_at_checked(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    let offset = match args.get(1) {
+        Some(Value::Int(n)) if *n >= 0 => *n as u64,
+        _ => return Ok(Value::Nil),
+    };
+    let size = match args.get(2) {
+        Some(Value::Int(n)) if *n >= 0 => usize::try_from(*n).ok(),
+        _ => None,
+    };
+    let Some(size) = size else {
+        return Ok(Value::Nil);
+    };
+    let mut file = match OpenOptions::new().read(true).open(&path) {
+        Ok(file) => file,
+        Err(_) => return Ok(Value::Nil),
+    };
+    if file.seek(SeekFrom::Start(offset)).is_err() {
+        return Ok(Value::Nil);
+    }
+    let mut buf = Vec::new();
+    if buf.try_reserve_exact(size).is_err() {
+        return Ok(Value::Nil);
+    }
+    buf.resize(size, 0);
+    match file.read(&mut buf) {
+        Ok(n) => {
+            buf.truncate(n);
+            Ok(Value::text(String::from_utf8_lossy(&buf).to_string()))
+        }
+        Err(_) => Ok(Value::Nil),
+    }
+}
+
 fn atomic_write_parent(path: &Path) -> &Path {
     path.parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -1438,6 +1474,26 @@ mod tests {
     use super::*;
 
     static FILE_EXISTS_PROBE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn checked_offset_read_distinguishes_empty_success_from_failure() {
+        let path = std::env::temp_dir().join(format!(
+            "simple_checked_offset_read_{}",
+            std::process::id()
+        ));
+        std::fs::write(&path, "abc").unwrap();
+        let path_value = Value::text(path.to_string_lossy().to_string());
+
+        assert_eq!(
+            rt_file_read_text_at_checked(&[path_value.clone(), Value::Int(3), Value::Int(0)]).unwrap(),
+            Value::text(String::new())
+        );
+        assert_eq!(
+            rt_file_read_text_at_checked(&[path_value, Value::Int(-1), Value::Int(1)]).unwrap(),
+            Value::Nil
+        );
+        let _ = std::fs::remove_file(path);
+    }
 
     #[test]
     fn file_exists_probe_interpreter_packs_exact_facade_totals() {

@@ -523,6 +523,20 @@ fn runtime_symbol_table_file_lock_contracts_resolve_exact_providers() {
 
 #[cfg(all(test, feature = "runtime-symbol-table"))]
 #[test]
+fn runtime_symbol_table_checked_offset_read_resolves_exact_provider() {
+    let actual = RUNTIME_SYMBOL_ENTRIES
+        .iter()
+        .find(|entry| entry.name == "rt_file_read_text_at_checked")
+        .expect("checked offset-read provider must be registered")
+        .ptr;
+    assert_eq!(
+        actual,
+        value::sffi::file_io::rt_file_read_text_at_checked as *const u8
+    );
+}
+
+#[cfg(all(test, feature = "runtime-symbol-table"))]
+#[test]
 fn runtime_symbol_table_keeps_struct_allocator_and_receiver_validator_paired() {
     let allocator = RUNTIME_SYMBOL_ENTRIES
         .iter()

@@ -9657,6 +9657,37 @@ const char* rt_file_read_text_at(const char* path_value, int64_t offset, int64_t
     return buffer;
 }
 
+int64_t rt_file_read_text_at_checked(int64_t path_value, int64_t offset, int64_t size) {
+    char* path = rt_core_string_to_cpath(path_value);
+    if (!path || offset < 0 || size < 0 || (uint64_t)size > SIZE_MAX) {
+        if (path) free(path);
+        return 0;
+    }
+    if (size == 0) {
+        free(path);
+        return rt_string_new(NULL, 0);
+    }
+
+    int fd = open(path, O_RDONLY);
+    free(path);
+    if (fd < 0) return 0;
+
+    uint8_t* buffer = (uint8_t*)malloc((size_t)size);
+    if (!buffer) {
+        close(fd);
+        return 0;
+    }
+    ssize_t bytes_read = rt_file_read_at_fd(fd, buffer, (size_t)size, offset);
+    close(fd);
+    if (bytes_read < 0) {
+        free(buffer);
+        return 0;
+    }
+    int64_t result = rt_string_new(buffer, (uint64_t)bytes_read);
+    free(buffer);
+    return result;
+}
+
 int64_t rt_file_write_text_at(int64_t path_value, int64_t offset_value, int64_t data_value) {
     char* path = rt_core_string_to_cpath(path_value);
     uint64_t data_len = 0;

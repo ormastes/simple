@@ -688,3 +688,16 @@ wrapper no longer misdeclares handles as text. Focused lifecycle/contention and
 static-provider identity tests cover the boundary. Acquisition performs the
 unavoidable path-to-C-string conversion and OS calls; it adds no handle map,
 mutex, hashing, dynamic lookup, or work to unrelated file operations.
+
+A new checked offset-read provider moves coverage to 1,081/710 while leaving
+the incompatible legacy raw-C-string symbol explicitly unsafe compatibility.
+Rust, interpreter, and native-C providers now expose managed optional text:
+`nil` means invalid path/offset/size, allocation failure, open/seek/read failure,
+while a distinct allocated empty text represents a successful zero-byte or EOF
+read. The live process-output relay lifts that optional into
+`Result<text,text>` and reports failure instead of silently treating it as no
+new output. Focused Rust/interpreter tests prove the empty/failure distinction,
+and generated dispatch is bound to the exact provider. The successful path
+retains one bounded read and the managed text construction already required by
+the caller; it adds no status-array allocation, registry, hashing, locking,
+dynamic symbol lookup, whole-file reread, or per-byte validation pass.

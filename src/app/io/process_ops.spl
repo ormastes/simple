@@ -20,7 +20,10 @@ extern fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64
 extern fn rt_process_is_running(pid: i64) -> bool
 extern fn rt_process_kill(pid: i64) -> bool
 extern fn rt_file_read_text(path: text) -> text
+@unsafe(reason: "legacy offset-read ABI cannot distinguish an empty read from failure", capabilities: [ffi])
 extern fn rt_file_read_text_at(path: text, offset: i64, size: i64) -> text
+@unsafe(reason: "checked managed-text SFFI returns nil only for a foreign I/O contract failure", capabilities: [ffi])
+extern fn rt_file_read_text_at_checked(path: text, offset: i64, size: i64) -> text?
 extern fn rt_file_size(path: text) -> i64
 use std.io_runtime.{file_delete}
 use std.io_runtime.{file_exists}
@@ -28,6 +31,15 @@ use std.io_runtime.{time_now_unix_micros}
 use std.io_runtime.{getpid}
 extern fn rt_stdout_flush()
 extern fn rt_stderr_flush()
+
+fn _read_text_at_checked(path: text, offset: i64, size: i64) -> Result<text, text>:
+    var value: text? = nil
+    unsafe(capabilities: [ffi]):
+        value = rt_file_read_text_at_checked(path, offset, size)
+    if value.?:
+        Ok(value.unwrap())
+    else:
+        Err("offset file read failed for '{path}' at {offset} ({size} bytes)")
 
 # Platform detection - inlined to avoid bootstrap runtime limitations
 fn _is_windows_platform() -> bool:
@@ -216,6 +228,7 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
     var stdout_relayed = 0
     var stderr_relayed = 0
     var wrapper_code: i64 = -2
+    var relay_error = ""
     while wrapper_code == -2:
         wrapper_code = rt_process_wait(pid, 500)
         # Read only the bytes appended since the last poll. Reading the WHOLE
@@ -225,18 +238,30 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
         # cost is now proportional to the NEW bytes only.
         val out_size = rt_file_size(stdout_file)
         if out_size > stdout_relayed:
-            val chunk = rt_file_read_text_at(stdout_file, stdout_relayed, out_size - stdout_relayed)
-            if chunk.len() > 0:
-                print chunk
-                rt_stdout_flush()
-                stdout_relayed = stdout_relayed + chunk.len()
+            match _read_text_at_checked(stdout_file, stdout_relayed, out_size - stdout_relayed):
+                case Ok(chunk):
+                    if chunk.len() > 0:
+                        print chunk
+                        rt_stdout_flush()
+                        stdout_relayed = stdout_relayed + chunk.len()
+                case Err(message):
+                    relay_error = message
+                    rt_process_kill(pid)
+                    wrapper_code = rt_process_wait(pid, 5000)
+                    break
         val err_size = rt_file_size(stderr_file)
         if err_size > stderr_relayed:
-            val chunk_err = rt_file_read_text_at(stderr_file, stderr_relayed, err_size - stderr_relayed)
-            if chunk_err.len() > 0:
-                eprint(chunk_err)
-                rt_stderr_flush()
-                stderr_relayed = stderr_relayed + chunk_err.len()
+            match _read_text_at_checked(stderr_file, stderr_relayed, err_size - stderr_relayed):
+                case Ok(chunk_err):
+                    if chunk_err.len() > 0:
+                        eprint(chunk_err)
+                        rt_stderr_flush()
+                        stderr_relayed = stderr_relayed + chunk_err.len()
+                case Err(message):
+                    relay_error = message
+                    rt_process_kill(pid)
+                    wrapper_code = rt_process_wait(pid, 5000)
+                    break
     proc_slot_release()
 
     var stdout = ""
@@ -248,7 +273,9 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
         stderr = rt_file_read_text(stderr_file)
         file_delete(stderr_file)
 
-    if wrapper_code == 124:
+    if relay_error != "":
+        (stdout, stderr + "\n[ERROR: {relay_error}]", -1)
+    elif wrapper_code == 124:
         (stdout, stderr + "\n[TIMEOUT: Process killed after {timeout_secs}s]", -1)
     else:
         (stdout, stderr, wrapper_code)

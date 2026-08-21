@@ -211,6 +211,7 @@ bool     rt_file_unlock(int64_t handle);
 /* ===== Offset-based File I/O ===== */
 
 const char* rt_file_read_text_at(const char* path, int64_t offset, int64_t size);
+int64_t  rt_file_read_text_at_checked(int64_t path_value, int64_t offset, int64_t size);
 int64_t     rt_file_write_text_at(int64_t path_value, int64_t offset_value, int64_t data_value);
 int         rt_file_fsync(const uint8_t* path_ptr, uint64_t path_len);
 int         rt_file_fsync_cached(const uint8_t* path_ptr, uint64_t path_len);

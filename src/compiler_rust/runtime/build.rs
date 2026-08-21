@@ -174,6 +174,7 @@ fn runtime_symbol_declaration(
         "rt_file_lock" =>
             "(path_ptr: *const u8, path_len: u64, timeout_secs: i64) -> i64",
         "rt_file_unlock" => "(handle: i64) -> bool",
+        "rt_file_read_text_at_checked" => "(path: i64, offset: i64, size: i64) -> i64",
         "rt_time_now_nanos" | "rt_time_now_micros" | "rt_time_now_unix_micros" => "() -> i64",
         _ => return canonical_runtime_symbol_declaration(alias, canonical),
     };

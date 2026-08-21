@@ -430,6 +430,7 @@ pub use sffi::{
     rt_file_mmap_read_bytes,
     rt_file_mmap_read_bytes_rv,
     rt_file_read_text_at,
+    rt_file_read_text_at_checked,
     rt_file_write_text_at,
     rt_file_write_text_at_cached,
     rt_file_write_text_at_cached_repeat,
