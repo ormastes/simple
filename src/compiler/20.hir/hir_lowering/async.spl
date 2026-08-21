@@ -381,6 +381,24 @@ impl HirLowering:
         # compared EQUAL to `[i32; 4]`.
         hir_types_equal(a, b)
 
+    # Explicit loop instead of `types.map(self.format_type(_))`.
+    #
+    # NOT a style preference: the placeholder-lambda form makes the enclosing
+    # function "creates a lambda/closure", and the seed's Cranelift JIT refuses
+    # to compile any module containing one -- its closure ABI does not tag-box
+    # lambda arguments/results and is incompatible with the runtime's
+    # RuntimeClosure layout, so it de-JITs the WHOLE program to the interpreter.
+    # These three `.map` calls alone were enough to keep the entire self-hosted
+    # native-build worker off the JIT. The underlying JIT gap is a real defect
+    # and is tracked separately -- see
+    # doc/08_tracking/bug/seed_jit_coverage_self_hosted_compiler_2026-08-21.md;
+    # this loop is the local unblock, not the fix.
+    me format_types(hir_types: [HirType]) -> [text]:
+        var out: [text] = []
+        for t in hir_types:
+            out = out.push(self.format_type(t))
+        out
+
     me format_type(hir_type: HirType) -> text:
         match hir_type.kind:
             case HirTypeKind.Int(bits, signed):
@@ -411,13 +429,13 @@ impl HirLowering:
                         if args.len() == 0:
                             sym.name
                         else:
-                            val arg_strs = args.map(self.format_type(_))
+                            val arg_strs = self.format_types(args)
                             "{sym.name}<{arg_strs.join(\", \")}>"
                     case nil:
                         "<?>"
 
             case HirTypeKind.Tuple(elements):
-                val elem_strs = elements.map(self.format_type(_))
+                val elem_strs = self.format_types(elements)
                 "({elem_strs.join(\", \")})"
 
             case HirTypeKind.Array(elem, size):
@@ -430,7 +448,7 @@ impl HirLowering:
                 "Result<{self.format_type(ok)}, {self.format_type(err)}>"
 
             case HirTypeKind.Function(params, ret, effects):
-                val param_strs = params.map(self.format_type(_))
+                val param_strs = self.format_types(params)
                 "fn({param_strs.join(\", \")}) -> {self.format_type(ret)}"
 
             case HirTypeKind.Infer(id, level):

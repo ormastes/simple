@@ -18,11 +18,6 @@ val SMF_VERSION_MAJOR: i64 = 1
 val SMF_VERSION_MINOR: i64 = 1
 val SMF_FLAG_EXECUTABLE: i64 = 0x1
 
-# Header flag bits, mirroring smf_header.spl's SMF_FLAG_* (u32 there, i64 here
-# because the byte helpers in this module are i64-based).
-val SMF_WRITER_FLAG_EXECUTABLE: i64 = 0x1
-val SMF_WRITER_FLAG_ASPECT_PACK: i64 = 0x20
-
 val SECTION_FLAG_READ: i64 = 0x1
 val SECTION_FLAG_WRITE: i64 = 0x2
 val SECTION_FLAG_EXEC: i64 = 0x4
@@ -71,7 +66,6 @@ enum SectionType:
     # Startup launch metadata section. Payload is the same SDN text used by
     # native sidecars, embedded for SMF/script launchers. Wire byte = 15.
     LaunchMeta
-    AspectPackDirectory
 
 impl SectionType:
     fn name() -> text:
@@ -87,7 +81,6 @@ impl SectionType:
             case Debug: ".debug"
             case DrvManifest: ".drv_manifest"
             case LaunchMeta: ".launch_meta"
-            case AspectPackDirectory: ".aspect_pack"
 
     """Map to wire byte value (Rust-runtime compatible)."""
     fn to_wire_u8() -> u8:
@@ -103,7 +96,6 @@ impl SectionType:
             case SymTab: 9
             case DrvManifest: 14
             case LaunchMeta: 15
-            case AspectPackDirectory: 16
 
 enum SmfWriterSymbolBinding:
     Local
@@ -285,24 +277,6 @@ impl SmfWriter:
             flags: SECTION_FLAG_READ,
             data: payload,
             alignment: 4
-        )
-        self.sections = self.sections.push(section)
-        self.sections.len() - 1
-
-    me add_aspect_pack_section(data: [u8]) -> i64:
-        """Add the `.aspect_pack` section carrying an aspect-pack container
-        (design §12.1). Presence of this section is what makes write() stamp
-        SMF_FLAG_ASPECT_PACK into the header, so the flag and the section table
-        can never disagree."""
-        var payload: [i64] = []
-        for b in data:
-            payload.push(b as i64)
-        val section = SmfSection(
-            name: SectionType.AspectPackDirectory.name(),
-            section_type: SectionType.AspectPackDirectory,
-            flags: SECTION_FLAG_READ,
-            data: payload,
-            alignment: 8
         )
         self.sections = self.sections.push(section)
         self.sections.len() - 1
@@ -495,7 +469,6 @@ impl SmfWriter:
         # trailer lookup).
         var header: SmfHeader = SmfHeader.new_v1_1(Platform.Linux, Arch.X86_64)
         header.set_executable(true)
-        header.set_aspect_pack(smf_sections_have_aspect_pack(self.sections))
         header.section_count = section_count as u32
         header.section_table_offset = section_table_offset as u64
         header.symbol_table_offset = symbol_table_offset as u64
@@ -539,61 +512,6 @@ impl SmfWriter:
 # ============================================================================
 # Byte serialization helpers (u8 output)
 # ============================================================================
-
-fn smf_sections_have_aspect_pack(sections: [SmfSection]) -> bool:
-    for section in sections:
-        if section.section_type.to_wire_u8() as i64 == 16:
-            return true
-    false
-
-fn smf_build_aspect_pack_image(pack: [u8]) -> Result<[u8], text>:
-    if pack.len() == 0:
-        return Err("aspect pack payload is empty")
-    var buf: [u8] = []
-    for b in pack:
-        buf.push(b)
-    while buf.len() % 8 != 0:
-        buf.push(0)
-    val section_table_offset = buf.len()
-    val apk_type = SectionType.AspectPackDirectory
-    val entry = smf_build_section_entry_bytes(apk_type.to_wire_u8(), SECTION_FLAG_READ, 0, pack.len(), 8, apk_type.name())
-    for b in entry:
-        buf.push(b)
-    val symbol_table_offset = buf.len()
-    buf.push(0)
-    for b in smf_aspect_pack_header_bytes(section_table_offset, symbol_table_offset):
-        buf.push(b)
-    Ok(buf)
-
-fn smf_aspect_pack_header_bytes(section_table_offset: i64, symbol_table_offset: i64) -> [u8]:
-    var h: [u8] = []
-    h.push(83 as u8)
-    h.push(77 as u8)
-    h.push(70 as u8)
-    h.push(0 as u8)
-    h.push(1 as u8)
-    h.push(1 as u8)
-    h.push(0 as u8)
-    h.push(1 as u8)
-    for b in u32_to_bytes_u8(SMF_WRITER_FLAG_EXECUTABLE + SMF_WRITER_FLAG_ASPECT_PACK):
-        h.push(b)
-    for b in u32_to_bytes_u8(0):
-        h.push(b)
-    for b in u32_to_bytes_u8(1):
-        h.push(b)
-    for b in u64_to_bytes_u8(section_table_offset):
-        h.push(b)
-    for b in u64_to_bytes_u8(symbol_table_offset):
-        h.push(b)
-    for b in u32_to_bytes_u8(0):
-        h.push(b)
-    for b in u32_to_bytes_u8(0):
-        h.push(b)
-    for b in u64_to_bytes_u8(0):
-        h.push(b)
-    while h.len() < 128:
-        h.push(0 as u8)
-    h
 
 fn u32_to_bytes_u8(value: i64) -> [u8]:
     [

@@ -11,12 +11,7 @@ use compiler.loader.metadata_symbols.{loaded_metadata_instantiation_symbol_names
 use compiler.loader.unload_ownership.{owned_global_symbol_names, global_symbols_without_names}
 use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
 use compiler.backend.linker.obj_taker.{SymbolType}
-use compiler.loader.smf_mmap_native.{native_reloc_write_i32, native_reloc_write_i64, native_call_function_0}
-use compiler.loader.segment_mapper.{SegmentMapper, SegmentMapperStats, segment_load_plan, segment_load_receipt}
-use compiler.loader.smf_segment_load.{SmfSectionExtent, smf_section_extent, smf_section_bytes}
-use compiler.loader.aspect_pack_section.{smf_register_aspect_pack}
-use std.common.aspect_pack.{apk_loader_new, apk_load_facet, apk_try_facet, ApkFacetLoadV1}
-use app.startup.load_plan_receipt.{LoadReceiptV1, load_receipt_check_against_plan, load_receipt_to_sdn}
+use compiler.loader.smf_mmap_native.{native_alloc_exec_memory, native_write_exec_memory, native_make_executable, native_make_rw, native_flush_icache, native_reloc_write_i32, native_reloc_write_i64, native_call_function_0}
 use std.io_runtime.{file_read_bytes}
 
 fn _path_tag(path: text) -> text:
@@ -205,23 +200,6 @@ struct ModuleLoader:
     semantic_dependencies: Dict<text, [text]>
     semantic_fingerprints: Dict<text, text>
     dependency_semantic_fingerprints: Dict<text, Dict<text, text>>
-    # Evidence of the last SMF load (startup_perf_architecture §8.11).
-    # segment_count is the number of MAPPINGS made; it is O(sections) and
-    # must not track symbol count. plan_ok is the verdict of checking the
-    # receipt against the load plan.
-    last_load_segment_count: i64
-    last_load_symbol_count: i64
-    last_load_bytes_mapped: i64
-    last_load_protection_transitions: i64
-    last_load_receipt_sdn: text
-    last_load_plan_ok: bool
-    # Aspect-facet dynload design §12.1/§23. `aspect_loader` is the handle of
-    # the aspect-pack loader every `.aspect_pack` section found on the load
-    # path is registered into; `last_load_aspect_pack_modules` is the module
-    # count of the pack the last load registered (-1 = the module carried no
-    # aspect pack), so the wiring is observable evidence, not a side effect.
-    aspect_loader: i64
-    last_load_aspect_pack_modules: i64
 
 impl ModuleLoader:
     static fn new(config: ModuleLoaderConfig) -> ModuleLoader:
@@ -237,15 +215,6 @@ impl ModuleLoader:
             jit_stats: {"cached_count": self.jit.jit_cache.keys().len() as i64},
             cache_stats: {"template_count": 0, "instance_count": 0}
         )
-
-    # Aspect-facet acquisition (design 6.7, 14.3) against the packs THIS
-    # loader registered from `.aspect_pack` sections during load().
-    fn aspect_facet(catalog: [u8], facet_key: text) -> ApkFacetLoadV1:
-        apk_load_facet(self.aspect_loader, catalog, facet_key)
-
-    """Resident-only acquisition: never opens a pack, never does I/O."""
-    fn resident_aspect_facet(facet_key: text) -> ApkFacetLoadV1:
-        apk_try_facet(self.aspect_loader, facet_key)
 
     fn is_loaded(path: text) -> bool:
         self.modules.has(path)
@@ -281,72 +250,35 @@ impl ModuleLoader:
                 # compat loader contract, register it as a source-only
                 # module: no native symbols, but tracked as loaded so JIT
                 # metadata can still rehydrate from its sidecar.
-                self.last_load_aspect_pack_modules = -1
                 val m = LoadedModule(path: path, reader: "", symbols: {}, load_time: 0, version: 1)
                 self.modules[path] = m
                 val _ = self.jit.load_smf_metadata(path)
                 return LoadResult.Success(module: m)
             case Ok(reader):
-                # Aspect-pack routing (design §12.1, §23 "Existing SMF and
-                # loader"): a `.aspect_pack` section is registered with the
-                # aspect-pack provider BEFORE ordinary segment mapping, so a
-                # facet acquired later routes through a pack this load path
-                # actually opened. A module without the section is unaffected
-                # (registration returns -1 and nothing else changes).
-                self.last_load_aspect_pack_modules = smf_register_aspect_pack(
-                    self.aspect_loader, path, reader)
-
-                # ONE MAPPING PER SEGMENT (startup_perf_architecture §8.4).
-                # Every exported symbol of a section shares that section's
-                # single executable mapping; a symbol is an OFFSET into it,
-                # never its own mmap. Mapping cost is O(sections) and does
-                # not move when the symbol count moves.
                 var symbols: Dict<text, LoadedSymbol> = {}
                 val exported_smf_symbols: [SmfSymbol] = reader.exported_symbols()
-
-                var section_indices: [i32] = []
                 for smf_sym in exported_smf_symbols:
-                    var seen = false
-                    for existing in section_indices:
-                        if existing == smf_sym.section_index:
-                            seen = true
-                    if not seen:
-                        section_indices.push(smf_sym.section_index)
-
-                var mapper = SegmentMapper.new()
-                var planned_bytes = 0i64
-                for section_index in section_indices:
-                    val extent = match smf_section_extent(reader, section_index):
+                    val code_result = reader.read_code(smf_sym)
+                    val code = match code_result:
                         case Ok(value):
                             value
                         case Err(err):
                             return LoadResult.Error(message: err)
-                    val seg_bytes = match smf_section_bytes(reader, extent):
-                        case Ok(value):
-                            value
-                        case Err(err):
-                            return LoadResult.Error(message: err)
-                    planned_bytes = planned_bytes + extent.size
-                    match mapper.map_segment(path, section_index, seg_bytes, extent.alignment):
-                        case Ok(_):
-                            pass
-                        case Err(err):
-                            _ = mapper.unmap_owner(path)
-                            return LoadResult.Error(message: err)
-
-                for smf_sym in exported_smf_symbols:
+                    val addr = native_alloc_exec_memory(code.len() as i64)
+                    if addr == 0:
+                        return LoadResult.Error(message: "Failed to allocate executable memory for {smf_sym.name}")
+                    val written = native_write_exec_memory(addr, code, 0)
+                    if written != code.len() as i64:
+                        return LoadResult.Error(message: "Failed to copy executable bytes for {smf_sym.name}")
+                    if not native_make_executable(addr, code.len() as i64):
+                        return LoadResult.Error(message: "Failed to mark executable memory for {smf_sym.name}")
+                    native_flush_icache(addr, code.len() as i64)
                     val symbol_size: i64 = smf_sym.size as i64
-                    val symbol_file_offset: i64 = smf_sym.offset as i64
-                    val bound = match mapper.bind_symbol(path, smf_sym.section_index, smf_sym.name, symbol_file_offset, symbol_size):
-                        case Ok(value):
-                            value
-                        case Err(err):
-                            _ = mapper.unmap_owner(path)
-                            return LoadResult.Error(message: err)
                     val symbol_ty = _loader_symbol_type_from_smf(smf_sym.ty)
+                    val symbol_file_offset: i64 = smf_sym.offset as i64
                     val loaded_sym = LoadedSymbol(
                         name: smf_sym.name,
-                        address: bound,
+                        address: addr,
                         size: symbol_size,
                         ty: symbol_ty,
                         is_jit: false,
@@ -367,22 +299,13 @@ impl ModuleLoader:
                         value
                     case Err(err):
                         return LoadResult.Error(message: err)
-                var applied_relocs = 0i64
                 if relocs.len() > 0:
-                    # Relocation is segment-scoped: offsets are section-
-                    # relative (the format's own frame), so each segment is
-                    # flipped RX->RW once, patched, and flipped back once.
-                    for section_index in section_indices:
-                        val seg_base = mapper.segment_base(path, section_index)
-                        val seg_size = mapper.segment_size(path, section_index)
-                        match mapper.begin_relocation(path, section_index):
-                            case Ok(_):
-                                pass
-                            case Err(err):
-                                _ = mapper.unmap_owner(path)
-                                return LoadResult.Error(message: err)
+                    for sym_name in symbols.keys():
+                        val loaded_sym = symbols[sym_name]
+                        if not native_make_rw(loaded_sym.address, loaded_sym.size):
+                            return LoadResult.Error(message: "Failed to make memory writable for relocation at {sym_name}")
                         for reloc in relocs:
-                            if reloc.offset < 0 or reloc.offset >= seg_size:
+                            if reloc.offset < 0 or reloc.offset >= loaded_sym.size:
                                 return LoadResult.Error(message: "Relocation offset {reloc.offset} out of bounds")
                             var target_addr = 0i64
                             if reloc.symbol_index >= 0 and reloc.symbol_index < ordered_symbols.len():
@@ -396,54 +319,20 @@ impl ModuleLoader:
                                 return LoadResult.Error(message: "Unresolved symbol at index {reloc.symbol_index}")
                             match reloc.reloc_type:
                                 1:
-                                    native_reloc_write_i64(seg_base, reloc.offset, target_addr + reloc.addend)
+                                    native_reloc_write_i64(loaded_sym.address, reloc.offset, target_addr + reloc.addend)
                                 2:
-                                    native_reloc_write_i32(seg_base, reloc.offset, (target_addr - (seg_base + reloc.offset) + reloc.addend) as i32)
+                                    native_reloc_write_i32(loaded_sym.address, reloc.offset, (target_addr - (loaded_sym.address + reloc.offset) + reloc.addend) as i32)
                                 3:
-                                    native_reloc_write_i32(seg_base, reloc.offset, (target_addr - (seg_base + reloc.offset) + reloc.addend) as i32)
+                                    native_reloc_write_i32(loaded_sym.address, reloc.offset, (target_addr - (loaded_sym.address + reloc.offset) + reloc.addend) as i32)
                                 4:
-                                    native_reloc_write_i32(seg_base, reloc.offset, (target_addr - (seg_base + reloc.offset) + reloc.addend) as i32)
+                                    native_reloc_write_i32(loaded_sym.address, reloc.offset, (target_addr - (loaded_sym.address + reloc.offset) + reloc.addend) as i32)
                                 5:
-                                    native_reloc_write_i32(seg_base, reloc.offset, (target_addr + reloc.addend) as i32)
+                                    native_reloc_write_i32(loaded_sym.address, reloc.offset, (target_addr + reloc.addend) as i32)
                                 _:
                                     return LoadResult.Error(message: "Unknown relocation type: {reloc.reloc_type}")
-                            applied_relocs = applied_relocs + 1
-                        match mapper.end_relocation(path, section_index):
-                            case Ok(_):
-                                pass
-                            case Err(err):
-                                _ = mapper.unmap_owner(path)
-                                return LoadResult.Error(message: err)
-
-                # Receipt (§8.11): the mapping-count claim becomes evidence.
-                # planned_segment_count is the number of DISTINCT sections,
-                # so a regression back to per-symbol mapping makes
-                # load_receipt_check_against_plan report a segment_count
-                # deviation instead of passing silently.
-                val load_plan = segment_load_plan(
-                    path,
-                    "host",
-                    section_indices.len() as i64,
-                    planned_bytes,
-                    applied_relocs,
-                    0,
-                    symbols.keys().len() as i64)
-                val mapper_stats = mapper.stats()
-                val receipt = segment_load_receipt(
-                    load_plan,
-                    "",
-                    mapper_stats,
-                    smf_bytes.len() as i64,
-                    applied_relocs,
-                    0,
-                    "ok",
-                    "")
-                self.last_load_segment_count = mapper_stats.segment_count
-                self.last_load_symbol_count = mapper_stats.symbol_count
-                self.last_load_bytes_mapped = mapper_stats.bytes_mapped
-                self.last_load_protection_transitions = mapper_stats.protection_transitions
-                self.last_load_receipt_sdn = load_receipt_to_sdn(receipt)
-                self.last_load_plan_ok = load_receipt_check_against_plan(load_plan, receipt).ok
+                        if not native_make_executable(loaded_sym.address, loaded_sym.size):
+                            return LoadResult.Error(message: "Failed to restore executable memory for {sym_name}")
+                        native_flush_icache(loaded_sym.address, loaded_sym.size)
 
                 val metadata_result = self.jit.load_smf_metadata(path)
                 match metadata_result:
@@ -635,15 +524,7 @@ fn moduleloader_new(config: ModuleLoaderConfig) -> ModuleLoader:
             semantic_exports: {},
             semantic_dependencies: {},
             semantic_fingerprints: {},
-            dependency_semantic_fingerprints: {},
-            last_load_segment_count: 0,
-            last_load_symbol_count: 0,
-            last_load_bytes_mapped: 0,
-            last_load_protection_transitions: 0,
-            last_load_receipt_sdn: "",
-            last_load_plan_ok: false,
-            aspect_loader: apk_loader_new(),
-            last_load_aspect_pack_modules: -1
+            dependency_semantic_fingerprints: {}
     )
 
 fn moduleloader_with_defaults() -> ModuleLoader:

@@ -35,7 +35,7 @@ extern fn rt_file_write_text(path: text, content: text) -> bool
 # Result Types
 # ============================================================================
 
-enum LdrJitInstantiationResult:
+enum JitInstantiationResult:
     """Result of JIT instantiation attempt."""
     Success(code: [u8], symbol: text, address: i64?)
     NotFound(symbol: text)
@@ -43,7 +43,7 @@ enum LdrJitInstantiationResult:
     CompilationError(message: text)
     UpdateFailed(symbol: text, error: text)
 
-impl LdrJitInstantiationResult:
+impl JitInstantiationResult:
     fn is_success() -> bool:
         match self:
             case Success(_, _, _): true
@@ -60,16 +60,16 @@ impl LdrJitInstantiationResult:
 # Configuration
 # ============================================================================
 
-struct LdrJitInstantiatorConfig:
+struct JitInstantiatorConfig:
     """Configuration for JIT instantiation."""
     update_smf: bool
     max_depth: i32
     enabled: bool
     verbose: bool
 
-impl LdrJitInstantiatorConfig:
-    static fn default() -> LdrJitInstantiatorConfig:
-        LdrJitInstantiatorConfig(
+impl JitInstantiatorConfig:
+    static fn default() -> JitInstantiatorConfig:
+        JitInstantiatorConfig(
             update_smf: true,
             max_depth: 50,
             enabled: true,
@@ -80,18 +80,18 @@ impl LdrJitInstantiatorConfig:
 # Simplified Metadata Types (SFFI-friendly)
 # ============================================================================
 
-struct LdrLoadedMetadata:
+struct LoadedMetadata:
     """Simplified metadata for SFFI (no complex compiler types)."""
-    possible: [LdrPossibleInstantiation]
-    instantiations: [LdrInstantiationRecord]
+    possible: [PossibleInstantiation]
+    instantiations: [LoaderInstantiationRecord]
 
-struct LdrPossibleInstantiation:
+struct PossibleInstantiation:
     """A possible generic instantiation."""
     template_name: text
     type_args: text
     mangled_name: text
 
-struct LdrInstantiationRecord:
+struct LoaderInstantiationRecord:
     """A recorded instantiation."""
     id: i32
     template_name: text
@@ -144,11 +144,11 @@ fn text_list_contains(items: [text], needle: text) -> bool:
 # JIT Instantiator
 # ============================================================================
 
-struct LdrJitInstantiator:
+struct JitInstantiator:
     """JIT instantiator for load-time template instantiation."""
-    config: LdrJitInstantiatorConfig
+    config: JitInstantiatorConfig
     compiler_ctx_handle: i64  # Compiler context handle (i64, not CompilerContext to avoid constructor issues)
-    loaded_metadata: Dict<text, LdrLoadedMetadata>  # Simplified metadata
+    loaded_metadata: Dict<text, LoadedMetadata>  # Simplified metadata
     in_progress: Set<text>
     depth: i32
     compile_count: i32
@@ -160,10 +160,10 @@ struct LdrJitInstantiator:
     jit_mapper: JitMapper
     smf_cache: SmfCache  # Memory-mapped SMF file cache
 
-impl LdrJitInstantiator:
-    static fn new(config: LdrJitInstantiatorConfig) -> LdrJitInstantiator:
+impl JitInstantiator:
+    static fn new(config: JitInstantiatorConfig) -> JitInstantiator:
         """Create a new JIT instantiator."""
-        LdrJitInstantiator(
+        JitInstantiator(
             config: config,
             compiler_ctx_handle: compiler_create_context(),  # Direct i64 handle
             loaded_metadata: {},
@@ -188,7 +188,7 @@ impl LdrJitInstantiator:
         self.loaded_metadata[smf_path] = metadata
         Ok(())
 
-    me set_metadata_for_test(smf_path: text, metadata: LdrLoadedMetadata):
+    me set_metadata_for_test(smf_path: text, metadata: LoadedMetadata):
         """Set metadata directly (for testing only)."""
         self.loaded_metadata[smf_path] = metadata
 
@@ -226,25 +226,25 @@ impl LdrJitInstantiator:
         # Previously this was missing, causing JIT exec pages to leak.
         _ = self.exec_mapper.unmap_symbol(symbol)
 
-    me read_note_sdn_from_file(smf_path: text) -> Result<LdrLoadedMetadata, text>:
+    me read_note_sdn_from_file(smf_path: text) -> Result<LoadedMetadata, text>:
         """Read note.sdn section from SMF file using mmap cache."""
         # Get mapped SMF file from the shared cache (auto-loads if not cached).
         val mapped_smf = self.smf_cache.get(smf_path)?
         val note_metadata = mapped_smf.read_note_sdn()?
 
         # Convert shared note.sdn metadata to the local JIT bookkeeping shape.
-        var possible: [LdrPossibleInstantiation] = []
+        var possible: [PossibleInstantiation] = []
         for entry in note_metadata.possible:
-            possible = possible.push(LdrPossibleInstantiation(
+            possible = possible.push(PossibleInstantiation(
                 template_name: entry.template_name,
                 type_args: entry.type_args,
                 mangled_name: entry.mangled_name
             ))
 
-        var instantiations: [LdrInstantiationRecord] = []
+        var instantiations: [LoaderInstantiationRecord] = []
         var id = 0
         for entry in note_metadata.instantiations:
-            instantiations = instantiations.push(LdrInstantiationRecord(
+            instantiations = instantiations.push(LoaderInstantiationRecord(
                 id: id,
                 template_name: entry.template_name,
                 type_args: entry.type_args,
@@ -258,7 +258,7 @@ impl LdrJitInstantiator:
             ))
             id = id + 1
 
-        Ok(LdrLoadedMetadata(possible: possible, instantiations: instantiations))
+        Ok(LoadedMetadata(possible: possible, instantiations: instantiations))
 
     fn can_jit_instantiate(symbol: text) -> bool:
         """Check if a symbol can be JIT-instantiated."""
@@ -273,7 +273,7 @@ impl LdrJitInstantiator:
                     return true
         false
 
-    fn find_possible(symbol: text) -> (text, LdrPossibleInstantiation)?:
+    fn find_possible(symbol: text) -> (text, PossibleInstantiation)?:
         """Find possible instantiation for a symbol."""
         # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
         for path in self.loaded_metadata.keys():
@@ -283,21 +283,21 @@ impl LdrJitInstantiator:
                     return Some((path, entry))
         nil
 
-    me try_jit_instantiate(symbol: text) -> LdrJitInstantiationResult:
+    me try_jit_instantiate(symbol: text) -> JitInstantiationResult:
         """Try to JIT-instantiate a missing symbol."""
         if not self.config.enabled:
-            return LdrJitInstantiationResult.NotFound(symbol)
+            return JitInstantiationResult.NotFound(symbol)
 
         # Check depth limit
         if self.depth >= self.config.max_depth:
-            return LdrJitInstantiationResult.CompilationError(
+            return JitInstantiationResult.CompilationError(
                 "Maximum JIT depth ({self.config.max_depth}) exceeded"
             )
 
         # Check cache
         if self.jit_cache.has(symbol):
             val (code, address) = self.jit_cache[symbol]
-            return LdrJitInstantiationResult.Success(
+            return JitInstantiationResult.Success(
                 code: code,
                 symbol: symbol,
                 address: Some(address)
@@ -310,16 +310,16 @@ impl LdrJitInstantiator:
             for sym in self.in_progress:
                 cycle = cycle.push(sym)
             cycle = cycle.push(symbol)  # Add current symbol to show cycle
-            return LdrJitInstantiationResult.CircularDependency(cycle)
+            return JitInstantiationResult.CircularDependency(cycle)
 
         # Find possible entry
         val found = self.find_possible(symbol)
         if not found.?:
-            return LdrJitInstantiationResult.NotFound(symbol)
+            return JitInstantiationResult.NotFound(symbol)
 
         val (smf_path, entry) = match found:
             case Some(found_entry): found_entry
-            case nil: return LdrJitInstantiationResult.NotFound(symbol)
+            case nil: return JitInstantiationResult.NotFound(symbol)
 
         # Start JIT compilation
         self.in_progress = self.in_progress.insert(symbol)
@@ -336,7 +336,7 @@ impl LdrJitInstantiator:
 
         result
 
-    me do_jit_compile(entry: LdrPossibleInstantiation, smf_path: text) -> LdrJitInstantiationResult:
+    me do_jit_compile(entry: PossibleInstantiation, smf_path: text) -> JitInstantiationResult:
         """Perform JIT compilation via compiler SFFI."""
         # Parse type args from comma-separated string
         val type_arg_strs = entry.type_args.split(",")
@@ -367,7 +367,7 @@ impl LdrJitInstantiator:
                 val fn_pointer = match map_result:
                     case Ok(mapped_pointer): mapped_pointer
                     case Err(map_error):
-                        return LdrJitInstantiationResult.CompilationError(
+                        return JitInstantiationResult.CompilationError(
                             "Failed to map executable memory: {map_error}"
                         )
 
@@ -386,21 +386,21 @@ impl LdrJitInstantiator:
                     match update_result:
                         case Ok(_): ()
                         case Err(update_error):
-                            return LdrJitInstantiationResult.UpdateFailed(
+                            return JitInstantiationResult.UpdateFailed(
                                 symbol: entry.mangled_name,
                                 error: update_error
                             )
 
-                LdrJitInstantiationResult.Success(
+                JitInstantiationResult.Success(
                     code: compiled_code,
                     symbol: entry.mangled_name,
                     address: Some(fn_pointer)
                 )
 
             case Err(msg):
-                LdrJitInstantiationResult.CompilationError(msg)
+                JitInstantiationResult.CompilationError(msg)
 
-    me update_smf_note_sdn(smf_path: text, entry: LdrPossibleInstantiation) -> Result<(), text>:
+    me update_smf_note_sdn(smf_path: text, entry: PossibleInstantiation) -> Result<(), text>:
         """Update note.sdn in SMF file after JIT compilation.
 
         Persists updated metadata to a sidecar file next to the SMF so the
@@ -415,7 +415,7 @@ impl LdrJitInstantiator:
             metadata.possible = metadata.possible.filter(_.mangled_name != entry.mangled_name)
 
             # Add to instantiations
-            val new_inst = LdrInstantiationRecord(
+            val new_inst = LoaderInstantiationRecord(
                 id: metadata.instantiations.len() as i32,
                 template_name: entry.template_name,
                 type_args: entry.type_args,
@@ -440,10 +440,10 @@ impl LdrJitInstantiator:
 
         Ok(())
 
-    fn stats() -> LdrJitStats:
+    fn stats() -> JitStats:
         """Get JIT statistics."""
         val cache_stats = self.smf_cache.get_stats()
-        LdrJitStats(
+        JitStats(
             cached_count: self.jit_cache.keys().len(),
             compile_count: self.compile_count,
             loaded_smf_count: self.loaded_metadata.keys().len(),
@@ -453,20 +453,20 @@ impl LdrJitInstantiator:
             smf_memory_mapped: cache_stats.total_memory
         )
 
-fn loader__jit_instantiator__JitInstantiator_dot_new(config: LdrJitInstantiatorConfig) -> LdrJitInstantiator:
-    LdrJitInstantiator.new(config)
+fn loader__jit_instantiator__JitInstantiator_dot_new(config: JitInstantiatorConfig) -> JitInstantiator:
+    JitInstantiator.new(config)
 
-fn loader__jit_instantiator__JitInstantiator_dot_load_smf_metadata(instantiator: LdrJitInstantiator, smf_path: text) -> Result<(), text>:
+fn loader__jit_instantiator__JitInstantiator_dot_load_smf_metadata(instantiator: JitInstantiator, smf_path: text) -> Result<(), text>:
     instantiator.load_smf_metadata(smf_path)
 
-fn loader__jit_instantiator__JitInstantiator_dot_try_jit_instantiate(instantiator: LdrJitInstantiator, symbol: text) -> LdrJitInstantiationResult:
+fn loader__jit_instantiator__JitInstantiator_dot_try_jit_instantiate(instantiator: JitInstantiator, symbol: text) -> JitInstantiationResult:
     instantiator.try_jit_instantiate(symbol)
 
 # ============================================================================
 # Statistics
 # ============================================================================
 
-struct LdrJitStats:
+struct JitStats:
     """JIT instantiation statistics."""
     cached_count: i32
     compile_count: i32
@@ -476,7 +476,7 @@ struct LdrJitStats:
     smf_files_mapped: i32
     smf_memory_mapped: i64
 
-fn serialize_loaded_metadata(metadata: LdrLoadedMetadata) -> text:
+fn serialize_loaded_metadata(metadata: LoadedMetadata) -> text:
     var lines: [text] = []
     for item in metadata.possible:
         lines.push("P|" + item.template_name + "|" + item.type_args + "|" + item.mangled_name)
@@ -494,14 +494,14 @@ fn serialize_loaded_metadata(metadata: LdrLoadedMetadata) -> text:
 
 struct JitSymbolResolver:
     """Symbol resolver that integrates JIT instantiation."""
-    jit: LdrJitInstantiator
+    jit: JitInstantiator
     symbols: Dict<text, i64>
 
 impl JitSymbolResolver:
-    static fn new(config: LdrJitInstantiatorConfig) -> JitSymbolResolver:
+    static fn new(config: JitInstantiatorConfig) -> JitSymbolResolver:
         """Create a new JIT symbol resolver."""
         JitSymbolResolver(
-            jit: LdrJitInstantiator.new(config),
+            jit: JitInstantiator.new(config),
             symbols: {}
         )
 

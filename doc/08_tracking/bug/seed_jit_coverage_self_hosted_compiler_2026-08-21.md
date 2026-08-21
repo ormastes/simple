@@ -115,3 +115,86 @@ a bare bool, so the reason could not be asserted.
 failed JIT attempt, so the difference is scheduling noise on a contended box, not
 a JIT win. The census delta is the primary evidence; no JIT speedup was obtained,
 because no module was successfully JIT-compiled.
+
+---
+
+## Update 2026-08-21 — lint is ON the JIT; worker is blocked on the closure ABI
+
+Follow-ups 1 and 2 above are done, plus eleven further blockers found by
+iterating. Measured with `bin/simple` (the deployed seed), target
+`src/compiler/80.driver/driver_types.spl`:
+
+| stage | wall | lane actually taken |
+|---|---|---|
+| interpreter (`SIMPLE_EXECUTION_MODE=interpret`) | 29.7s | interpreter |
+| jit, before any fix | 23.8s | **interpreter** (silent de-JIT) |
+| jit, after the `Span` rename only | 38.3s | interpreter (3 codegen stub fallbacks) |
+| jit, after the `std.path` fix | **11.0s** | **JIT** |
+
+2.7x on lint, and the verdict is byte-identical (0 errors, 8 warnings,
+`Lint passed`). Pinned by `scripts/check/check-lint-runs-on-jit.shs`.
+
+### The blocker chain, in the order the JIT hit it
+
+Every entry below is the SAME defect class: the JIT flattens all imports into
+one bare-name namespace, so two same-named types anywhere in the whole-program
+closure collide and HIR lowering hard-fails with `Cannot infer field type:
+struct 'X' field 'f'`, de-JITing the ENTIRE program with no user-visible error.
+
+1. `Span` — lexer (`start,end_pos,line,col`) vs diagnostics
+   (`start,end,line,col,file,length`). Lexer one renamed `LexSpan`. Five
+   compiler files imported `Span` from `lexer_types` while *constructing* it
+   with diagnostics fields; those imports were repointed.
+2. `path_separator`/`search_path`/`path_find_all` in `src/lib/*/env/paths.spl`
+   used deprecated `import std.path` + module-qualified `path.join2(...)`.
+   Cranelift has no module objects: `GlobalLoad: unresolved identifier 'path'`.
+   3 failed bodies de-JIT the whole program. Converted to named `use` imports.
+3. `Type` — blocks placeholder vs parser AST -> `BlockType`.
+4. `LoopInfo` — two structs vs `loop_detect`'s class -> `VectorLoopInfo`,
+   `SimdLoopInfo`.
+5. `Bitfield`/`BitfieldField` -> `ResolvedBitfield`/`ResolvedBitfieldField`.
+6. The whole treesitter subsystem annotated token spans as `Span` and called
+   `span_new` (which builds a DIAGNOSTICS span) while reading `.end_pos`
+   -> `LexSpan` + `lex_span_new`.
+7. `JitStats` -> `TieredJitStats`.
+8. `InstantiationRecord` (3 defs) -> `JitInstantiatorRecord`,
+   `LoaderInstantiationRecord`, `JitContextRecord`.
+9. `CompiledModule` -> `CraneliftCompiledModule`.
+10. `TraitDef`/`TraitBound`/`TraitBoundKind` -> `Solver*`.
+11. `CompiledUnit` (3 defs) -> `TemplateCompiledUnit`, `EngineCompiledUnit`.
+12. `SmfHeader` -> `SmfReaderHeader`.
+
+### Remaining chain for `run src/app/cli/native_build_worker.spl`
+
+After 12 the worker clears HIR lowering entirely and reaches codegen, where it
+hits a **different and much larger** blocker:
+
+```
+Cranelift JIT compile: Module error: function 'SdnBackendImpl.is_allowed'
+creates a lambda/closure; the JIT closure ABI does not tag-box lambda arguments
+or results and is incompatible with the runtime's RuntimeClosure layout, so JIT
+would return wrong values or crash; deferring to interpreter
+```
+
+This is a **whole-module** bail on ANY function anywhere in the closure that
+creates a lambda. `HirLowering.format_type` was the first; its three
+`types.map(self.format_type(_))` placeholder-lambdas were rewritten to an
+explicit `format_types` loop, which merely advanced the error to the next
+lambda. There are hundreds of such functions in the compiler + stdlib closure,
+so rewriting them one by one is neither tractable nor correct.
+
+**The real fix is seed-side: make the JIT closure ABI tag-box lambda arguments
+and results so it matches the runtime's `RuntimeClosure` layout.** Until then
+`native_build_worker` cannot reach the JIT. Recorded here rather than worked
+around, per the "don't silently normalise a workaround" rule — the
+`format_types` loop carries an in-source comment pointing back at this record.
+
+### Still-open duplicate-name census (not in the worker's closure yet)
+
+`src/compiler` alone still has **48** duplicate STRUCT names whose field sets
+differ (the census excludes classes and enums, which collide identically —
+`LoopInfo` above was exactly such a struct-vs-class case, so the true number is
+higher). Twelve were cleared here because the worker's closure reached them.
+Reproduce the census with a `^struct X:` scan over `src/compiler`. Each one is a
+latent whole-program de-JIT for whichever entry point first pulls both halves
+into one closure.
