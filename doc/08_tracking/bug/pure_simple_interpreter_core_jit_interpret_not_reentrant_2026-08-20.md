@@ -163,3 +163,37 @@ reproducer that flips a verdict rather than merely erroring.
   `src/compiler/10.frontend/core/_AstExpr/accessors.spl` (`expr_kind_name` did
   not even name the tag). Case B now answers `B class optional field = REF`.
 - `doc/03_plan/ui/perf/f1_class_identity_kind_propagation_plan_2026-08-09.md` (S2)
+
+## Re-verification 2026-08-21 — this fix still stands, but the GATE is now RED for a DIFFERENT reason
+
+Re-ran `sh scripts/check/check-interp-reentrancy.shs` on the deployed seed
+`bin/release/x86_64-unknown-linux-gnu/simple` (59,947,080 bytes,
+2026-08-21 14:27:35 UTC):
+
+```
+FAIL — 13 case verdict(s) compared, offenders: first_if_else second_if_else
+       no-verdict:a_class_trait_field.spl ... no-verdict:k_struct_method_returned.spl
+```
+
+**Not a regression of the elif-arena fix.** `elif_arena_clear()` is present and
+called (`_Ast/decl_nodes.spl:1325`, `_Ast/module_state.spl:602`). The driver
+never gets as far as evaluating the requested cases: it prints
+
+```
+[lexer_fatal] empty source handed to lexer for path '.../interp_reentrancy/Alice'
+[case] Alice rc=0        (twice)
+```
+
+The loop variable `name` in
+`scripts/check/class_identity_pure_simple_driver.spl:182`
+(`for name in ordered.split(","):`) reads back as **`Alice`** — the value of the
+module-level global `val name = "Alice"` in
+`src/compiler/10.frontend/core/test_lang_basics.spl:78`, which the driver
+wildcard-imports at line 123. So a module global is clobbering a function-local
+binding after a cross-module call returns. Renaming the loop variable moves the
+failure to a different local (`error: semantic: type mismatch: cannot convert
+dict to int`), which is the same defect hitting a different name.
+
+Filed separately as
+`doc/08_tracking/bug/seed_interpreter_module_global_clobbers_function_local_2026-08-21.md`.
+This record stays FIXED; the gate cannot go green until that one is fixed.
