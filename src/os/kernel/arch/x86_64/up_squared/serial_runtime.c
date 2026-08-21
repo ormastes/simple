@@ -1,7 +1,7 @@
 /* UP Squared first-light serial input provider.
  *
  * Output remains owned by the shared freestanding runtime. This board-owned
- * adapter supplies the missing input ABI over the firmware-initialized legacy
+ * adapter supplies the missing input ABI over the explicitly initialized legacy
  * COM1 candidate. Live CN16 evidence decides whether a later provider must use
  * Apollo Lake LPSS PCI discovery instead.
  */

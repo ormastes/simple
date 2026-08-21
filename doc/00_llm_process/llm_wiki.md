@@ -107,6 +107,10 @@ same-thread/typed-payload exclusions and the Stage-4 blocker.
   command, and five-minute reset-window captures returned zero bytes; Tigard
   was subsequently disconnected. Physical power/reset and CN16 wiring remain
   the next evidence gate.
+- **UP2 COM1 first-read rule:** initialize COM1 before the first kernel marker,
+  then drain the `0xAE` loopback probe from RX before accepting shell input.
+  OVMF exposed this as `0xAEls /`; the corrected image now boots and completes
+  a fresh VFS-backed `ls /`. This is host evidence, not physical CN16 proof.
 - **Apollo Lake reset exception:** Intel's 2020 debugger notes say OpenRC warm
   reset can leave Apollo Lake cores unreleasable, with manual reset required.
   Never use it as the UP2 software-reset fallback. A Power-Good reset remains
