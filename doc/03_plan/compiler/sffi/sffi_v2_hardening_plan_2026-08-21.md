@@ -295,8 +295,8 @@ Current evidence after the thread synchronization boundary migration:
 
 - 3,964 distinct symbols in the current backing census, including 3,962
   compiler-owned canonical symbols;
-- 14,942 declaration sites;
-- 14,404 sites have neither an explicit FFI-unsafe tag nor a local contract;
+- 14,889 declaration sites;
+- 14,351 sites have neither an explicit FFI-unsafe tag nor a local contract;
 - 502 sites declare a typed/documented contract but lack the unsafe tag;
 - 24 declarations now carry explicit FFI authority
   but still require canonical ABI-contract metadata;
@@ -308,7 +308,7 @@ Current evidence after the thread synchronization boundary migration:
 - among `rt_*`/`spl_*` declarations, 1,855 sites reference symbols classified
   genuinely missing and 321 are backed only in owned C runtime source.
 
-These are migration inputs, not 14,942 independent implementations. The audit
+These are migration inputs, not 14,889 independent implementations. The audit
 now hashes normalized declaration shapes and groups them by symbol. The next
 tooling step replaces the text-derived shape with the resolved HIR ABI hash,
 rejects the 401 conflict groups, and converts compatibility modules to
@@ -340,8 +340,8 @@ call-site migration ledger at
 `doc/08_tracking/bug/data/sffi_call_authority_2026-08-21.tsv`. It recognizes
 file-local externs and explicit `rt_*`/`spl_*` imports from SFFI modules, tracks
 function and lexical FFI authority by indentation, and can fail CI with
-`SFFI_FAIL_ON_MISSING=1`. The current source/test census contains 22,680
-missing-authority calls, 51 lexical scopes, and 24 function scopes across 3,167
+`SFFI_FAIL_ON_MISSING=1`. The current source/test census contains 22,621
+missing-authority calls, 51 lexical scopes, and 24 function scopes across 3,166
 files. It completed in 24.21 seconds at 7,424 KiB maximum RSS. This is a
 migration index rather than ABI proof; aliases, generated bindings, and
 re-exports still require resolved-HIR identity.
@@ -351,6 +351,14 @@ ledger: its three raw declarations are explicitly FFI-unsafe and all 24 direct
 calls now sit in minimal lexical blocks. No helper dispatch was introduced;
 the stdout/stderr/exit ABI calls remain direct and the module passes robust
 SFFI lint.
+
+The byte-for-byte duplicate `app.io.window_ffi` implementation has been
+replaced by an explicit compatibility facade over `app.io.window_sffi`. It
+re-exports only safe wrapper types/functions—not raw `rt_sdl2_*` or
+`rt_winit_*` symbols—removing 53 duplicate declarations and 59 duplicate raw
+calls. Re-export resolution is static, so this consolidation adds no per-call
+lookup or wrapper layer. A real three-case compatibility spec replaces the old
+always-skipped placeholder.
 
 Thread-pool construction no longer treats a zero/invalid native worker handle
 as a successfully degraded pool. The unused duplicate thread-create extern was
