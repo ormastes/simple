@@ -302,9 +302,11 @@ Current evidence after the checked regex boundary migration:
   but still require canonical ABI-contract metadata;
 - 20 checked declarations carry both explicit FFI authority and a
   typed result contract; their cryptographic artifact evidence remains open;
-- 399 canonical symbols currently have more than one normalized declaration
-  shape and require typed-resolution review before one ABI hash can be sealed;
-- 3,546 declared symbols require migration and 399 require conflict resolution;
+- 399 canonical symbols currently have more than one normalized source
+  declaration shape and require typed lowering before one ABI hash can be
+  compared; this count is not itself proof of an ABI conflict;
+- 3,546 declared symbols require migration and 399 have source-signature
+  variants requiring compiler-resolved review;
 - among `rt_*`/`spl_*` declarations, 1,715 sites reference symbols classified
   genuinely missing and 318 are backed only in owned C runtime source;
 - the distinct-symbol backing census now classifies 699 symbols in the typed
@@ -320,6 +322,12 @@ migration-required symbols, or 20,976 raw call sites lacking lexical FFI
 authority. These ceilings describe debt, not acceptance: the end state remains
 zero, and the generated declaration and symbol ledgers are refreshed in
 `doc/08_tracking/bug/data/` on every baseline change.
+
+The ledger names these hashes `source_signature_sha256` and reports
+`source_signature_variants`, not `signature_conflict`. High-level `text`, raw
+`(ptr,len)`, managed `RuntimeValue`, and local `@extern` adapters can legitimately
+spell the same lowered ABI differently. Only compiler-resolved contract metadata
+may diagnose an ABI mismatch; the source ledger is a routing inventory.
 
 The regex wrapper now exposes checked `Result` construction and boolean-match
 operations. The interpreter registers all 15 `rt_regex_*` symbols to typed
