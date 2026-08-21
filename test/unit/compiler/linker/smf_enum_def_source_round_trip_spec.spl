@@ -1,0 +1,198 @@
+"""
+# SMF EnumDef population + substitution + GTPL header gate (record v2 follow-ons)
+
+Follow-ons of doc/08_tracking/bug/smf_enum_def_serializes_variant_names_only_2026-08-21.md:
+
+1. POPULATE -- the v2 fields were serialized but nothing filled them from a
+   lowered enum, so every template carried empty (correctly versioned)
+   metadata. `compiler.mono.monomorphize.hir_bridge.enum_def_from_hir` now
+   flattens `HirEnum` into `EnumDef`. Pinned here from SOURCE TEXT through
+   the REAL pipeline: parse_full_frontend -> HirLowering.lower_module ->
+   hir_bridge -> partition_generic_constructs -> serialize_templates ->
+   DeferredMonomorphizer.deserialize_templates. No hand-built EnumDef.
+2. `_specialize_enum_def` dropped every v2 field and never substituted type
+   params inside `variant_payload_type_names`.
+3. `deserialize_templates` read the GTPL header version and never checked it.
+
+HARNESS NOTE: `use compiler.hir.hir_lowering.statements.*` is REQUIRED for
+lower_module (see enum_lowering_end_to_end_spec.spl).
+"""
+# tag: unit
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.frontend.ast.{EnumDef, AstModule, Node}
+use compiler.mono.monomorphize.hir_bridge.{enum_def_from_hir, ast_module_enums_from_hir}
+use compiler.mono.monomorphize.partition.{GenericTemplates, partition_generic_constructs}
+use compiler.mono.monomorphize.types.{ConcreteType}
+use compiler.mono.monomorphize.deferred.{DeferredMonomorphizer, InstantiationMode, GenericTemplate}
+use compiler.mono.monomorphize.deferred_subst.{deferred_clear_error, _specialize_enum_def}
+use compiler.mono.monomorphize.deferred_deserialize.{deserialize_enum_def, deserialize_last_error}
+use compiler.driver.smf_serialization.{serialize_enum_placeholder, serialize_templates}
+
+fn lower(src: text) -> HirModule:
+    val parsed = parse_full_frontend(src, "spec.spl", "spec", Logger(level: 0))
+    var hl = HirLowering.with_filename("spec.spl")
+    hl.lower_module(parsed)
+
+fn only_enum_def(src: text) -> EnumDef:
+    val hm = lower(src)
+    var out: [EnumDef] = []
+    for e in hm.enums.values():
+        out = out.push(enum_def_from_hir(e, hm.symbols))
+    expect(out.len()).to_equal(1)
+    out[0]
+
+# Non-generic: tuple + named + unit-with-explicit-discriminant, decorated, complete:
+val CLOSED_SRC = "@closed\n@evolving(repr: u16)\nenum E:\n    A(i64, text)\n    B(name: text, n: i64)\n    C = 7\n    D\n    complete:\n"
+
+# Generic template: payload type name must carry the type param by NAME.
+val GENERIC_SRC = "enum Opt<T>:\n    Some(T)\n    Nothing\n"
+
+fn source_round_trip(src: text) -> EnumDef:
+    """write one populated record -> read it back (single-record path)."""
+    deferred_clear_error()
+    val e = only_enum_def(src)
+    val bytes = serialize_enum_placeholder(e)
+    val r = deserialize_enum_def(bytes, 0)
+    match r:
+        case Some(pair):
+            expect(pair.1).to_equal(bytes.len())
+            pair.0
+        case nil:
+            expect(deserialize_last_error()).to_equal("")
+            e
+
+fn template_round_trip(src: text) -> EnumDef:
+    """Full path: bridge -> partition -> serialize_templates -> deserialize_templates."""
+    deferred_clear_error()
+    val hm = lower(src)
+    var module = ast_module_enums_from_hir(hm)
+    # Until the flat AST carries enum type params (see KNOWN RED below), the
+    # source enum partitions as non-generic; force template-ness so the
+    # serialize_templates -> deserialize_templates leg is exercised.
+    var forced: [Node] = []
+    for item in module.items:
+        match item:
+            case Node.Enum(d):
+                var g = d
+                g.is_generic_template = true
+                g.generic_params = ["T"]
+                forced = forced.push(Node.Enum(g))
+            case _: forced = forced.push(item)
+    module = AstModule(name: module.name, items: forced)
+    val parts = partition_generic_constructs(module)
+    # partition_generic_constructs returns an array literal, not a tuple.
+    val templates: GenericTemplates = parts[0]
+    expect(templates.enums.len()).to_equal(1)
+    val bytes = serialize_templates(templates)
+    var mono = DeferredMonomorphizer.new(InstantiationMode.LinkTime)
+    val ok = mono.deserialize_templates(bytes)
+    expect(deserialize_last_error()).to_equal("")
+    expect(ok).to_equal(true)
+    val t = mono.template_cache["Opt"]
+    match t:
+        case GenericTemplate.Enum(e): e
+        case _:
+            expect("template kind").to_equal("Enum")
+            templates.enums[0]
+
+describe "SMF enum population from source (hir_bridge)":
+    it "fills payload arity and kind per variant from the parsed enum":
+        val e = source_round_trip(CLOSED_SRC)
+        expect(e.name).to_equal("E")
+        expect(e.variants).to_equal(["A", "B", "C", "D"])
+        expect(e.variant_payload_counts).to_equal([2, 2, 0, 0])
+        expect(e.variant_payload_kinds.len()).to_equal(4)
+        expect(e.variant_payload_kinds[0] as i64).to_equal(1)
+        expect(e.variant_payload_kinds[1] as i64).to_equal(2)
+        expect(e.variant_payload_kinds[2] as i64).to_equal(0)
+
+    it "fills flat positional type names and named-field names in source order":
+        val e = source_round_trip(CLOSED_SRC)
+        expect(e.variant_payload_type_names).to_equal(["i64", "text", "text", "i64"])
+        expect(e.variant_payload_field_names).to_equal(["", "", "name", "n"])
+
+    it "fills discriminants: implicit 0/1, explicit 7, then continues at 8":
+        val e = source_round_trip(CLOSED_SRC)
+        expect(e.variant_discriminants).to_equal([0, 1, 7, 8])
+        expect(e.has_explicit_discriminant).to_equal([false, false, true, false])
+
+    it "fills decorators with raw argument text and the complete: openness":
+        val e = source_round_trip(CLOSED_SRC)
+        expect(e.attribute_names).to_equal(["closed", "evolving"])
+        expect(e.attribute_args).to_equal(["", "repr:u16"])
+        expect(e.complete_open).to_equal(true)
+        expect(e.dyn_open).to_equal(false)
+
+    it "marks a parameterised enum as a template with its params (KNOWN RED: flat AST drops enum type params)":
+        # doc/08_tracking/bug/enum_payload_type_param_erased_to_any_in_flat_ast_2026-08-21.md
+        # enum_module_body.spl:268 parses `<T>` but decl_enum_def (decl_nodes.spl:655)
+        # has no type_params slot, so HirEnum.type_params is always empty.
+        val e = only_enum_def(GENERIC_SRC)
+        expect(e.variant_payload_counts).to_equal([1, 0])
+        expect(e.generic_params).to_equal(["T"])
+        expect(e.is_generic_template).to_equal(true)
+
+    it "names the payload type param T (KNOWN RED: flat AST erases enum payload type params to Any)":
+        # doc/08_tracking/bug/enum_payload_type_param_erased_to_any_in_flat_ast_2026-08-21.md
+        # enum_module_body.spl:437 pushes a type TAG per payload slot; `T` has
+        # no tag, so lower_type sees a bare single letter and erases it to Any.
+        val e = only_enum_def(GENERIC_SRC)
+        expect(e.variant_payload_type_names).to_equal(["T"])
+
+    it "round-trips a populated template through partition -> serialize_templates -> deserialize_templates":
+        val e = template_round_trip(GENERIC_SRC)
+        expect(e.name).to_equal("Opt")
+        expect(e.generic_params).to_equal(["T"])
+        expect(e.variants).to_equal(["Some", "Nothing"])
+        expect(e.variant_payload_counts).to_equal([1, 0])
+        expect(e.variant_payload_type_names.len()).to_equal(1)
+        expect(e.variant_payload_field_names).to_equal([""])
+        expect(e.variant_discriminants).to_equal([0, 1])
+
+describe "_specialize_enum_def carries and substitutes v2 metadata":
+    it "substitutes T inside variant_payload_type_names (Some(T) at i64 -> i64)":
+        # Template carries `T` by name (what the bridge emits once the flat-AST
+        # erasure above is fixed); the unit under test here is the substitution.
+        var tmpl = only_enum_def(GENERIC_SRC)
+        tmpl.generic_params = ["T"]
+        tmpl.variant_payload_type_names = ["T"]
+        val spec = _specialize_enum_def(tmpl, [ConcreteType.Named("i64")])
+        expect(spec.variant_payload_type_names).to_equal(["i64"])
+        expect(spec.is_generic_template).to_equal(false)
+        expect(spec.has_specialization_of).to_equal(true)
+        expect(spec.specialization_of).to_equal("Opt")
+
+    it "carries shape, discriminant, and attribute lists through unchanged":
+        val tmpl = only_enum_def(CLOSED_SRC)
+        val spec = _specialize_enum_def(tmpl, [])
+        expect(spec.variant_payload_counts).to_equal(tmpl.variant_payload_counts)
+        expect(spec.variant_payload_field_names).to_equal(tmpl.variant_payload_field_names)
+        expect(spec.variant_discriminants).to_equal(tmpl.variant_discriminants)
+        expect(spec.has_explicit_discriminant).to_equal(tmpl.has_explicit_discriminant)
+        expect(spec.attribute_names).to_equal(tmpl.attribute_names)
+        expect(spec.attribute_args).to_equal(tmpl.attribute_args)
+        expect(spec.complete_open).to_equal(true)
+
+describe "deserialize_templates GTPL header version gate":
+    it "rejects a v1 header with a named error before reading any record":
+        deferred_clear_error()
+        # "GTPL", version 1, count 0 -- a well-formed v1 header.
+        val v1: [u8] = [0x47, 0x54, 0x50, 0x4C, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00]
+        var mono = DeferredMonomorphizer.new(InstantiationMode.LinkTime)
+        expect(mono.deserialize_templates(v1)).to_equal(false)
+        expect(deserialize_last_error().contains("version 1")).to_equal(true)
+        expect(deserialize_last_error().contains("version 2")).to_equal(true)
+
+    it "accepts the v2 header the writer emits":
+        deferred_clear_error()
+        val bytes = serialize_templates(GenericTemplates(functions: [], structs: [], classes: [], enums: [], traits: []))
+        var mono = DeferredMonomorphizer.new(InstantiationMode.LinkTime)
+        expect(mono.deserialize_templates(bytes)).to_equal(true)
+        expect(deserialize_last_error()).to_equal("")

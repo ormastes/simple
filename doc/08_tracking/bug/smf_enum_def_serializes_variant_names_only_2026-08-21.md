@@ -167,15 +167,26 @@ works (`match`/`!` pass, tuple-destructure of an optional does not).
 - Pre-fix: the spec cannot even construct the fixture (fields absent) and the v1 reader
   accepted the v1 bytes as a well-formed payload-less enum — the exact silent loss.
 
-**Still open (follow-ons, other lanes' files):**
-- The *population* site (record point 4): nothing yet fills the new `EnumDef` fields
-  from `decl_enum_def`'s parser lists / `HirEnum.attributes` / `complete_open` /
-  `dyn_open` — the flat-AST bridge that builds `Node.Enum(EnumDef)` consumed by
-  `partition_enum` (`40.mono/monomorphize/partition.spl:126`) is outside this change.
-  Until it does, templates carry empty (but correctly versioned) metadata.
-- `deferred_subst.spl` `_substitute_in_enum` builds a specialized `EnumDef` without
-  copying the new fields (and should substitute type params inside
-  `variant_payload_type_names`).
-- `deferred.spl` `deserialize_templates` reads the GTPL header `version` and never checks
-  it; the per-record marker is what gates today. A header check (`version != 2 ->
-  error`) belongs there.
+**Follow-ons — DELIVERED 2026-08-21 (same day, second change):**
+- POPULATE: `src/compiler/40.mono/monomorphize/hir_bridge.spl` — `enum_def_from_hir(HirEnum, SymbolTable) -> EnumDef`
+  and `ast_module_enums_from_hir(HirModule) -> AstModule` flatten payload kinds/types/field names,
+  discriminants (implicit = previous+1 from 0, matching MIR `register_enum_variants`), decorators and
+  `complete:`/`dyn:` into the v2 fields; `partition_generic_constructs` consumes the result.
+  HIR lowers a payload-less variant as `Tuple([])`, which the bridge records as kind 0.
+- `_specialize_enum_def` (`deferred_subst.spl`) now carries every v2 field and substitutes type params
+  inside `variant_payload_type_names` (`Some(T)` at `i64` -> `"i64"`), and sets `has_specialization_of`.
+- `deserialize_templates` (`deferred.spl`) rejects a GTPL header whose version != 2 with a named error.
+- Three more latent defects found by running the path for the first time, all fixed: `partition.spl`
+  called `.clone()` on plain structs (13 sites; no method exists, so partition had never run);
+  `deferred.spl deserialize_full_template` matched a `u8` kind against bare integer arms (every kind
+  fell to "Unknown template kind"); and `deferred.spl` did `result.0` on optional tuples at 5 sites
+  (the same class the first change fixed in `deferred_deserialize.spl`).
+- Spec: `test/01_unit/compiler/linker/smf_enum_def_source_round_trip_spec.spl` (mirrored) drives the
+  REAL pipeline from source text: `parse_full_frontend` -> `HirLowering.lower_module` -> bridge ->
+  partition -> `serialize_templates` -> `DeferredMonomorphizer.deserialize_templates`. 9/11 green;
+  the 2 RED examples are deliberate and pin a frontend gap filed separately:
+  `doc/08_tracking/bug/enum_payload_type_param_erased_to_any_in_flat_ast_2026-08-21.md`
+  (the flat AST drops enum `<T>` and erases payload `T` to `Any`, so a generic enum from source
+  cannot yet carry `"T"` in its payload type names).
+
+**Still open:** the frontend gap above (other lanes' files).
