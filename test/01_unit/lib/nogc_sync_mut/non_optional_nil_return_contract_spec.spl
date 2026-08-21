@@ -1,0 +1,36 @@
+# Reproduce specs for the SFFI non-optional return contract (E-SFFI-016),
+# wired by 2a59ff7f5e5. A Simple `fn` declared `-> T` (non-optional) that
+# evaluates to nil now aborts with
+#   nil is forbidden by the non-optional return contract of '<fn>'
+# Each `it` below drives a stdlib wrapper down its runtime nil path; every one
+# of them aborted the whole spec file on the strict seed before the fix.
+use std.spec
+use std.nogc_sync_mut.ffi.io.{file_read_lines}
+use std.nogc_sync_mut.concurrent.channel.{channel_new, channel_try_recv_by_id, channel_new_id}
+
+describe "non-optional return contract — stdlib wrappers stay total":
+    it "file_read_lines on an unreadable path yields an empty list, not nil":
+        # rt_file_read_lines returns nil on a failed read; the wrapper is
+        # declared `-> [text]` so it must collapse that to [].
+        val lines = file_read_lines("/nonexistent/definitely/not/here.txt")
+        assert_equal(lines.len(), 0)
+
+    it "file_read_lines on a directory path yields an empty list, not nil":
+        val lines = file_read_lines("/")
+        assert_equal(lines.len(), 0)
+
+    it "channel try_recv on an empty channel returns nil through an optional":
+        # rt_channel_try_recv returns nil when no value is queued; try_recv is
+        # declared `-> Any?` so the nil is contract-valid rather than fatal.
+        val ch = channel_new()
+        assert_true(ch.try_recv() == nil)
+
+    it "channel try_recv by id on an empty channel returns nil":
+        val id = channel_new_id()
+        assert_true(channel_try_recv_by_id(id) == nil)
+
+    it "channel try_recv still delivers a sent value after a nil poll":
+        val ch = channel_new()
+        assert_true(ch.try_recv() == nil)
+        ch.send(7)
+        assert_equal(ch.try_recv() ?? 0, 7)
