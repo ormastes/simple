@@ -118,3 +118,14 @@ payloads. All 41 now match the compiler/runtime void ABI. The new
 so reintroducing either mismatch fails before build or execution. This is a
 source/ABI guarantee only; declarations still lacking lexical unsafe metadata
 and call-site bounds proofs remain in the unsafe-tag migration queue.
+
+All 41 owned declarations in this pointer-write family now also carry explicit
+`ffi` and `raw_ptr` unsafe capabilities plus an ownership/bounds obligation.
+The audit rejects an exact signature whose immediately preceding declaration
+metadata omits either capability. The implementation batches source parsing
+rather than spawning once per file; the measured focused audit completes in
+about five seconds and has zero runtime hot-path cost. Inventory state improves
+from 40 to 70 `unsafe_contract_declared` rows and reduces declarations missing
+both tag and contract from 13,599 to 13,569. Call-site lexical enforcement is
+still incomplete in the bootstrap compiler, so the tags are honest review
+metadata, not evidence that every pointer operation is memory-safe.

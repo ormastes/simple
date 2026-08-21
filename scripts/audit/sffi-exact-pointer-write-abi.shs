@@ -12,6 +12,7 @@ trap 'rm -rf "$temp_dir"' EXIT HUP INT TERM
 
 declarations="$temp_dir/declarations"
 violations="$temp_dir/violations"
+unsafe_violations="$temp_dir/unsafe-violations"
 
 git -C "$root" grep -n -E \
     '^[[:space:]]*extern fn rt_ptr_write_(u8|i32|i64)\b' \
@@ -43,10 +44,30 @@ function compact(value) {
 }
 ' "$declarations" > "$violations"
 
+find "$root/src" -type f -name '*.spl' \
+    ! -path '*/compiler_rust/vendor/*' \
+    ! -path '*/runtime/vendor/*' \
+    -exec awk '
+        FNR == 1 { previous = "" }
+        /^[[:space:]]*extern fn rt_ptr_write_(u8|i32|i64)[[:space:]]*\(/ {
+            if (previous !~ /@unsafe\(/ ||
+                previous !~ /capabilities:[[:space:]]*\[[^]]*ffi/ ||
+                previous !~ /raw_ptr/) {
+                printf "%s:%d:%s\n", FILENAME, FNR, $0
+            }
+        }
+        { previous = $0 }
+    ' {} + > "$unsafe_violations"
+
 count=$(wc -l < "$declarations" | tr -d ' ')
 if [ -s "$violations" ]; then
     echo "SFFI pointer-write declarations disagree with the canonical void ABI:" >&2
     cat "$violations" >&2
+    exit 1
+fi
+if [ -s "$unsafe_violations" ]; then
+    echo "SFFI pointer-write declarations lack explicit ffi/raw_ptr unsafe metadata:" >&2
+    cat "$unsafe_violations" >&2
     exit 1
 fi
 
