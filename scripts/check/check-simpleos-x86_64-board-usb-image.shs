@@ -27,6 +27,7 @@ err()  { printf 'ERROR — nothing was checked (%s)\n' "$1"; exit 2; }
 
 command -v sgdisk >/dev/null 2>&1 || err "sgdisk not installed"
 command -v mdir >/dev/null 2>&1 || err "mtools (mdir) not installed"
+command -v llvm-readobj >/dev/null 2>&1 || err "llvm-readobj not installed"
 [ -f "$DISK" ] || err "no image at $DISK — run scripts/os/build-simpleos-x86_64-board-usb.shs first"
 
 CHECKS=0
@@ -77,6 +78,7 @@ export MTOOLS_SKIP_CHECK
 EFI_LISTING=$(mdir -i "${DISK}@@${OFFSET_BYTES}" "::EFI/BOOT" 2>&1) \
     || fail "could not list EFI/BOOT directory in ESP"
 echo "$EFI_LISTING" | grep -qi "BOOTX64" || fail "BOOTX64.EFI missing from EFI/BOOT"
+echo "$EFI_LISTING" | grep -qi "GRUBX64" || fail "GRUBX64.EFI fallback missing from EFI/BOOT"
 CHECKS=$((CHECKS + 1))
 
 # 5. BOOTX64.EFI is non-trivially sized (a truncated/zero-byte write must not
@@ -90,24 +92,32 @@ esac
 [ "$BOOTX64_SIZE" -gt 1024 ] || fail "BOOTX64.EFI is only $BOOTX64_SIZE bytes (< 1024 floor)"
 CHECKS=$((CHECKS + 1))
 
-# 6. The standalone loader contains the admitted ELF64 Multiboot2 contract and
-#    serial phase markers. Merely finding a PE file does not prove it embeds the
-#    intended loader command.
+# 6. BOOTX64 is the resident mailbox publisher and GRUBX64 is the self-contained
+#    fallback carrying the admitted Multiboot2/module contract.
 EFI_COPY=$(mktemp "${TMPDIR:-/tmp}/simpleos-bootx64.XXXXXX")
-trap 'rm -f "$EFI_COPY"' EXIT HUP INT TERM
+GRUB_COPY=$(mktemp "${TMPDIR:-/tmp}/simpleos-grubx64.XXXXXX")
+trap 'rm -f "$EFI_COPY" "$GRUB_COPY"' EXIT HUP INT TERM
 mcopy -i "${DISK}@@${OFFSET_BYTES}" "::EFI/BOOT/BOOTX64.EFI" "$EFI_COPY" >/dev/null 2>&1 \
     || fail "could not extract BOOTX64.EFI for loader-contract verification"
-strings "$EFI_COPY" | grep -Fq 'multiboot2 /boot/loader.elf' \
-    || fail "BOOTX64.EFI does not embed the ELF32 Multiboot2 loader command"
-strings "$EFI_COPY" | grep -Fq 'module2 /boot/kernel.elf simpleos-kernel' \
-    || fail "BOOTX64.EFI does not embed the ELF64 kernel module command"
-strings "$EFI_COPY" | grep -Fq '[UP2-SHIM] elf64-loaded' \
-    || fail "BOOTX64.EFI does not embed the ELF64 loader shim"
-strings "$EFI_COPY" | grep -Fq 'UP2 loader-ready' \
-    || fail "BOOTX64.EFI does not embed the serial loader-ready marker"
-strings "$EFI_COPY" | grep -Fq 'UP2 kernel-admitted' \
-    || fail "BOOTX64.EFI does not embed the serial kernel-admitted marker"
-rm -f "$EFI_COPY"
+llvm-readobj --file-headers "$EFI_COPY" | grep -q 'Subsystem: IMAGE_SUBSYSTEM_EFI_APPLICATION' \
+    || fail "BOOTX64.EFI is not a PE32+ EFI application"
+strings "$EFI_COPY" | grep -Fq 'UP2 DCI UEFI resident-ready mailbox=0x' \
+    || fail "BOOTX64.EFI does not publish the resident mailbox marker"
+strings "$EFI_COPY" | grep -Fq 'UP2 DCI UEFI fallback=grub' \
+    || fail "BOOTX64.EFI does not carry the fail-closed GRUB fallback marker"
+mcopy -i "${DISK}@@${OFFSET_BYTES}" "::EFI/BOOT/GRUBX64.EFI" "$GRUB_COPY" >/dev/null 2>&1 \
+    || fail "could not extract GRUBX64.EFI for fallback-contract verification"
+strings "$GRUB_COPY" | grep -Fq 'multiboot2 /boot/loader.elf' \
+    || fail "GRUBX64.EFI does not embed the ELF32 Multiboot2 loader command"
+strings "$GRUB_COPY" | grep -Fq 'module2 /boot/kernel.elf simpleos-kernel' \
+    || fail "GRUBX64.EFI does not embed the ELF64 kernel module command"
+strings "$GRUB_COPY" | grep -Fq '[UP2-SHIM] elf64-loaded' \
+    || fail "GRUBX64.EFI does not embed the ELF64 loader shim"
+strings "$GRUB_COPY" | grep -Fq 'UP2 loader-ready' \
+    || fail "GRUBX64.EFI does not embed the serial loader-ready marker"
+strings "$GRUB_COPY" | grep -Fq 'UP2 kernel-admitted' \
+    || fail "GRUBX64.EFI does not embed the serial kernel-admitted marker"
+rm -f "$EFI_COPY" "$GRUB_COPY"
 trap - EXIT HUP INT TERM
 CHECKS=$((CHECKS + 1))
 

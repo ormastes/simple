@@ -10,8 +10,9 @@
 # block device behind it, so it cannot be dd'd to a USB stick and booted on
 # real firmware. This script produces an actual raw disk image: a GPT
 # partition table with one EFI System Partition, formatted FAT32, containing
-# the same self-contained BOOTX64.EFI (grub-mkstandalone, kernel embedded via
-# memdisk) that the OVMF lane already proves boots correctly.
+# a directly entered resident BOOTX64.EFI plus self-contained GRUBX64.EFI
+# fallback (grub-mkstandalone, kernel embedded via memdisk), both exercised by
+# the OVMF lanes.
 #
 # ---------------------------------------------------------------------------
 # DESIGN — mirrors scripts/os/build-simpleos-aarch64-efi-esp.shs
@@ -76,6 +77,7 @@ mkdir -p "$OUT_DIR"
 DISK="$OUT_DIR/board-usb.img"
 ESP_STAGE="$OUT_DIR/esp-stage"
 EFIAPP="$ESP_STAGE/EFI/BOOT/BOOTX64.EFI"
+GRUBAPP="$ESP_STAGE/EFI/BOOT/GRUBX64.EFI"
 LOADER_OBJ_DIR="$OUT_DIR/multiboot2-loader-objects"
 LOADER_ELF="$OUT_DIR/multiboot2-elf64-loader.elf"
 
@@ -100,9 +102,7 @@ ld.lld -m elf_i386 -nostdlib -static -T "$LOADER_LD" \
 grub-file --is-x86-multiboot2 "$LOADER_ELF" || die "loader shim is not a valid x86 Multiboot2 image"
 file "$LOADER_ELF" | grep -q 'ELF 32-bit.*Intel 80386' || die "loader shim is not ELF32 i386"
 
-# --- 1. Build the self-contained BOOTX64.EFI (kernel embedded via memdisk,
-#        same recipe scp_retrieve_over_ssh_uefi.shs already proves boots
-#        under real OVMF firmware) -------------------------------------------
+# --- 1. Build the self-contained GRUB fallback and resident BOOTX64.EFI -----
 rm -rf "$ESP_STAGE"; mkdir -p "$ESP_STAGE/EFI/BOOT"
 MEMDISK_DIR=$(mktemp -d)
 mkdir -p "$MEMDISK_DIR/boot/grub"
@@ -120,15 +120,21 @@ module2 /boot/kernel.elf simpleos-kernel
 echo UP2 kernel-admitted
 boot
 EOF
-echo "[usb] building self-contained BOOTX64.EFI (embeds kernel via memdisk) ..."
-grub-mkstandalone --format=x86_64-efi --output="$EFIAPP" \
+echo "[usb] building GRUBX64.EFI fallback (embeds kernel via memdisk) ..."
+grub-mkstandalone --format=x86_64-efi --output="$GRUBAPP" \
     --directory=/usr/lib/grub/x86_64-efi \
     "/boot/grub/grub.cfg=$MEMDISK_DIR/boot/grub/grub.cfg" \
     "/boot/loader.elf=$MEMDISK_DIR/boot/loader.elf" \
     "/boot/kernel.elf=$MEMDISK_DIR/boot/kernel.elf" \
     2>&1 | sed 's/^/[grub-mkstandalone] /' \
     || die "grub-mkstandalone failed"
-[ -s "$EFIAPP" ] || die "grub-mkstandalone did not produce $EFIAPP"
+[ -s "$GRUBAPP" ] || die "grub-mkstandalone did not produce $GRUBAPP"
+UP2_DCI_UEFI_OUTPUT="$EFIAPP" \
+UP2_DCI_UEFI_OBJ_DIR="$OUT_DIR/dci-uefi-loader-objects" \
+UP2_DCI_SHIM_ELF="$LOADER_ELF" \
+    sh "$REPO_ROOT/scripts/os/build-up2-dci-uefi-loader.shs" \
+    || die "resident DCI UEFI loader build failed"
+[ -s "$EFIAPP" ] || die "resident loader did not produce $EFIAPP"
 rm -rf "$MEMDISK_DIR"
 STARTUP_NSH="$ESP_STAGE/startup.nsh"
 printf 'FS0:\\EFI\\BOOT\\BOOTX64.EFI\r\n' > "$STARTUP_NSH"
@@ -155,6 +161,7 @@ command -v mcopy >/dev/null 2>&1 || die "mcopy not available (install mtools)"
 export MTOOLS_SKIP_CHECK=1
 mmd -i "$ESP_IMG" "::EFI" "::EFI/BOOT" >/dev/null 2>&1 || die "mmd failed populating ESP"
 mcopy -i "$ESP_IMG" "$EFIAPP" "::EFI/BOOT/BOOTX64.EFI" || die "mcopy BOOTX64.EFI failed"
+mcopy -i "$ESP_IMG" "$GRUBAPP" "::EFI/BOOT/GRUBX64.EFI" || die "mcopy GRUBX64.EFI failed"
 mcopy -i "$ESP_IMG" "$STARTUP_NSH" "::startup.nsh" || die "mcopy startup.nsh failed"
 
 dd if="$ESP_IMG" of="$DISK" bs=512 seek="$ESP_OFFSET_SECT" conv=notrunc status=none \

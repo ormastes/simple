@@ -59,8 +59,8 @@ _entry32:
     /* Disable interrupts */
     cli
 
-    /* Save multiboot info (EBX) on the stack later -- preserve in ESI */
-    movl %ebx, %esi
+    /* Preserve the Multiboot info pointer in EBX until long mode.  ESI is the
+     * source register for the early serial routine and must not own it. */
 
     /* Set up a temporary 32-bit stack */
     movl $_stack_top, %esp
@@ -336,9 +336,8 @@ long_mode_entry:
     /* Run Simple module-global initializers before the entry point.
      * Freestanding builds have no C main wrapper to call this, so do it here.
      * Weak: skip if the linker didn't provide an aggregator. Preserve the
-     * multiboot info pointer (ESI) in RBX (callee-saved) across the call. */
+     * multiboot info pointer already held in RBX (callee-saved). */
     .weak __simple_call_module_inits
-    movl %esi, %ebx
     leaq __simple_call_module_inits(%rip), %rax
     testq %rax, %rax
     jz .skip_module_inits

@@ -74,6 +74,11 @@ The UP2 leaf retains long-lived plan/session/expected-identity state only in
 module-owned scalar and text globals. Transient value-semantic plans cross into
 the shared owner for one call; no aggregate survives through an optional global.
 
+`Sha256Stream` owns one preallocated block and schedule for its lifetime. Update
+copies input bytes into that block, processes full blocks in place, and never
+returns aggregate state per block. This keeps target hashing bounded on the
+16 MiB monotonic freestanding heap.
+
 ## Error behavior
 
 All validation returns a stable reason. No validation function writes memory,
@@ -96,21 +101,25 @@ execution transition. Frame assembly uses one append-only byte array and one
 final bytes-to-text conversion; per-character text concatenation is forbidden
 because the freestanding 16 MiB monotonic heap cannot reclaim those copies.
 
-## Missing UEFI adapter
+## UEFI adapter
 
-No current executable consumes `DciMailboxDescriptor`. The required adapter
-must still reserve/publish storage through UEFI boot services, generate a
-per-boot nonce, snapshot the descriptor twice around SHA-256, apply the admitted
-ELF plan, obtain the final memory map, retry `ExitBootServices` only for a stale
-map key, park APs, and invoke the reviewed shim. Until that code and an OVMF
-producer/consumer test exist, the mailbox layer is policy evidence only.
+`up2_dci_uefi_loader.c` implements the PE32+ firmware boundary with GNU-EFI.
+Before publishing it reserves the 128-byte mailbox page, 16 MiB payload window,
+48 MiB kernel window, 256 KiB Multiboot-info/map window, and 64 KiB embedded-shim
+window. The host writes payload, non-commit descriptor bytes, then the aligned
+32-bit commit word. The consumer requires the published nonce and fixed ranges,
+stable snapshots around two payload hashes, zero reserved/control fields, exact
+SHA-256, bounded non-overlapping ELF64 load segments, and an executable entry.
+The nonce comes from UEFI RNG or hardware RDRAND. Time/TSC is labeled
+diagnostic-only, and a committed request with only that weak fallback is denied.
 
-The implementation must replace the mailbox portion of the GRUB-first topology,
-not patch the later ELF32 shim and call it UEFI-resident. The required capsule
-is a PE32+ EFI application with the firmware's Microsoft x64 calling convention.
-It reserves the descriptor, payload, destination, stack, and transition pages
-before publishing their addresses; after stable double-snapshot and SHA-256/ELF
-admission it obtains the final memory map, performs the bounded
-`ExitBootServices` retry, and enters a reviewed 64-to-32-bit transition that
-supplies the Multiboot2 magic and information pointer. The existing GRUB image
-remains the fallback first-boot path until that capsule passes OVMF.
+The final memory-map call writes an EFI memory-map Multiboot2 tag beside a
+module tag for the staged kernel. `ExitBootServices` retries once only for a
+stale key. `up2_dci_uefi_transition.S` disables paging and long mode in the
+architected order and enters the embedded existing ELF32 shim with Multiboot2
+magic and information pointer. The shim independently reloads the module and
+enters the kernel `_entry32`. An uncommitted ten-second timeout chainloads
+`GRUBX64.EFI`; committed invalid input fails closed. `--ovmf-dci-admission`
+proves the full RAM-authored boot with `-smp 1`; physical multi-core AP state is
+not inferred. PI firmware owns the ExitBootServices AP-idle transition;
+physical evidence must bind firmware MP topology and later kernel AP policy.

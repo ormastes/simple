@@ -3,7 +3,11 @@ use os.kernel.arch.x86_64.up_squared.dci_mailbox.{
     DciCommitState, DciMailboxDescriptor, DciMemoryRange, DciLoadSegment,
     DciElfPlan, DciStorageIdentity, DciStorageWrite,
     dci_admit_mailbox, dci_parse_x86_64_elf, dci_admit_load_plan,
-    dci_storage_confirmation, dci_admit_storage_write
+    dci_storage_confirmation, dci_admit_storage_write,
+    dci_mailbox_wire_v1_encode, dci_mailbox_wire_v1_decode,
+    dci_mailbox_wire_v1_decode_stable,
+    DCI_MAILBOX_WIRE_V1_SIZE, DCI_MAILBOX_WIRE_V1_COMMIT_OFFSET,
+    DCI_MAILBOX_WIRE_V1_COMMAND_BOOT
 }
 
 val TEST_HASH: text = "31ce1fb45630f3442b9d789068fb13db8c66412428c71cee096e00ccc4e1fbdf"
@@ -123,6 +127,55 @@ describe "UP2 DCI mailbox admission":
         expect(dci_admit_mailbox(mailbox(DciCommitState.Committed, 1u64, 77u64), 1u64, 77u64, UP2_IMAGE_SIZE, TEST_HASH).reason).to_equal("mailbox-generation-replayed")
         expect(dci_admit_mailbox(mailbox(DciCommitState.Committed, 2u64, 78u64), 1u64, 77u64, UP2_IMAGE_SIZE, TEST_HASH).reason).to_equal("mailbox-nonce")
         expect(dci_admit_mailbox(mailbox(DciCommitState.Committed, 2u64, 77u64), 1u64, 77u64, UP2_IMAGE_SIZE, "a" * 64).reason).to_equal("mailbox-payload-digest-mismatch")
+
+describe "UP2 DCI mailbox wire v1":
+    it "round-trips the fixed packed record with commit in the final word":
+        val wire = dci_mailbox_wire_v1_encode(
+            0x0c100000u64, 0x01000000u64,
+            mailbox(DciCommitState.Committed, 2u64, 77u64),
+            DCI_MAILBOX_WIRE_V1_COMMAND_BOOT, 0u32, 0u32).unwrap()
+        expect(wire.len()).to_equal(DCI_MAILBOX_WIRE_V1_SIZE)
+        expect(DCI_MAILBOX_WIRE_V1_COMMIT_OFFSET).to_equal(124)
+        expect(wire[124]).to_equal(2u8)
+        expect(wire[125]).to_equal(0u8)
+        val decoded = dci_mailbox_wire_v1_decode(wire).unwrap()
+        expect(decoded.payload_address).to_equal(0x0c100000u64)
+        expect(decoded.payload_capacity).to_equal(0x01000000u64)
+        expect(decoded.descriptor.payload_sha256).to_equal(TEST_HASH)
+        expect(decoded.descriptor.state).to_equal(DciCommitState.Committed)
+
+    it "rejects torn snapshots and a descriptor not committed last":
+        val committed = dci_mailbox_wire_v1_encode(
+            0x0c100000u64, 0x01000000u64,
+            mailbox(DciCommitState.Committed, 2u64, 77u64),
+            DCI_MAILBOX_WIRE_V1_COMMAND_BOOT, 0u32, 0u32).unwrap()
+        var torn = dci_mailbox_wire_v1_encode(
+            0x0c100000u64, 0x01000000u64,
+            mailbox(DciCommitState.Committed, 3u64, 77u64),
+            DCI_MAILBOX_WIRE_V1_COMMAND_BOOT, 0u32, 0u32).unwrap()
+        expect(dci_mailbox_wire_v1_decode_stable(committed, torn).unwrap_err()).to_equal("mailbox-wire-torn")
+
+        val partial = dci_mailbox_wire_v1_encode(
+            0x0c100000u64, 0x01000000u64,
+            mailbox(DciCommitState.PayloadWritten, 2u64, 77u64),
+            DCI_MAILBOX_WIRE_V1_COMMAND_BOOT, 0u32, 0u32).unwrap()
+        expect(dci_mailbox_wire_v1_decode_stable(partial, partial).unwrap_err()).to_equal("mailbox-wire-not-committed")
+
+    it "rejects bad magic, reserved bytes, command, and payload bounds":
+        val good = dci_mailbox_wire_v1_encode(
+            0x0c100000u64, 0x01000000u64,
+            mailbox(DciCommitState.Committed, 2u64, 77u64),
+            DCI_MAILBOX_WIRE_V1_COMMAND_BOOT, 0u32, 0u32).unwrap()
+        var bad_magic = good
+        bad_magic[0] = 0u8
+        expect(dci_mailbox_wire_v1_decode(bad_magic).unwrap_err()).to_equal("mailbox-wire-magic")
+        var bad_reserved = good
+        bad_reserved[100] = 1u8
+        expect(dci_mailbox_wire_v1_decode(bad_reserved).unwrap_err()).to_equal("mailbox-wire-reserved")
+        expect(dci_mailbox_wire_v1_encode(
+            0x0c100001u64, 0x01000000u64,
+            mailbox(DciCommitState.Committed, 2u64, 77u64),
+            DCI_MAILBOX_WIRE_V1_COMMAND_BOOT, 0u32, 0u32).unwrap_err()).to_equal("mailbox-wire-payload-range")
 
 describe "UP2 DCI physical ELF plan":
     it "parses p_paddr and zero-fill size from an x86-64 ELF":

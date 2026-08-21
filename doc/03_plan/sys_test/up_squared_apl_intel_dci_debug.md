@@ -17,8 +17,9 @@
   mounted, held, mismatched, overflowed, and unconfirmed writes fail.
   The common image scenario additionally proves ordered chunk hashes,
   whole-image digest, flush, and exact fresh-view readback on an isolated block
-  device. The UP2 OVMF gate must repeat this through the NVMe adapter before
-  implementation PASS; physical persistence remains a separate receipt.
+  device. `--ovmf-image-provision` repeats this through the NVMe adapter and
+  retains independent host SHA plus unchanged surrounding-range evidence;
+  physical persistence remains a separate receipt.
 - REQ-013: OVMF enters the serial RSP monitor, writes `SIMP` with `M`, reads
   `53494d50` with `m`, detaches, and observes the resumed shell. Unit scenarios
   reject malformed checksums, overflow, out-of-range memory, and false run
@@ -35,3 +36,15 @@ visible as BLOCKED until their retained receipts exist; they are never skipped
 or counted as PASS.
 The current-image OVMF oracle additionally proves RSP RAM write/readback within
 the reserved ELF segment; it does not prove physical CN16 wiring.
+The NVMe-only OVMF oracle boots the current 256 MiB image with no USB device and
+requires VFS-backed `ls /`; it does not prove the physical UP2 boot menu or SSD.
+The `--ovmf-dci-admission` oracle starts OVMF halted at reset, uses GNU GDB's
+remote memory transport to continue into the resident PE32+ loader, preserves
+the published nonce, writes the exact current SimpleOS ELF and raw digest, and
+commits the aligned word last. It requires admission, the embedded ELF32 shim,
+`_entry32`, kernel, filesystem, and shell markers without GRUB fallback. This
+proves REQ-006/007 and the single-CPU software portion of REQ-008; physical DCI
+and UP2 firmware/kernel application-processor state remain separate evidence.
+The paired `--ovmf-dci-rejection` oracle publishes the same complete kernel with
+an all-zero descriptor digest and requires `blocked=payload-sha256` with no
+admission, transition, or GRUB fallback.

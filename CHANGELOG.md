@@ -5,6 +5,11 @@ All notable changes to Simple Language will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **UP Squared resident RAM boot and storage evidence** — add a free GNU-EFI
+  PE32+ mailbox loader with strong per-boot nonce, commit-last SHA-256/ELF64
+  admission, final EFI-map/Multiboot2 construction, embedded ELF32 shim, and
+  x64-to-i386 handoff; add OVMF GDB admission/rejection, NVMe-only boot, and
+  flushed image-provision receipts while keeping physical Intel DCI separate.
 - **Fail-closed MIR coverage evidence** — represent typed decision and condition
   probes explicitly, preserve their operand liveness through MIR optimization,
   serialize them deterministically, and reject unlowered probes in interpreter
@@ -50,6 +55,9 @@ All notable changes to Simple Language will be documented in this file.
   existing rendered-payload routes.
 
 ### Fixed
+- **Freestanding streaming SHA-256 and Multiboot pointer preservation** — use
+  fixed in-place SHA state across nonzero chunks and preserve the Multiboot
+  information pointer through early x86 serial output.
 - **Fail-closed SFFI returns and dynamic dispatch** — reject missing or null
   non-optional returns, unresolved/null foreign symbols, and unsupported
   generic ABI conversions instead of fabricating `nil` or integer zero.

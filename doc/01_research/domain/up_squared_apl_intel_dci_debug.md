@@ -30,7 +30,7 @@ evidence on the exact board can qualify it.
 
 ## Hardware and firmware gates
 
-A genuine Intel-qualified DCI DbC cable/probe is required. A normal USB A-to-A
+A qualified/compliant SuperSpeed DCI debug cable or probe is required. A normal USB A-to-A
 cable, USB file-transfer/KVM bridge, phone data cable, and Tigard are not substitutes.
 Debug cables are purpose-built and must not source ordinary VBUS between hosts.
 
@@ -223,3 +223,68 @@ reliable halt, so exact-board physical qualification remains mandatory.
 - [Microsoft USB 3 debug-cable setup](https://github.com/MicrosoftDocs/windows-driver-docs/blob/staging/windows-driver-docs-pr/debugger/setting-up-a-usb-3-0-debug-cable-connection.md)
 - [UP community DCI discussion](https://forum.up-community.org/discussion/3701/dci-debug-for-upsquared) (community evidence)
 - [UP community firmware compatibility discussion](https://forum.up-community.org/discussion/4806/opensource-uefi-bios-by-intel-appears-to-be-unusable-now) (community evidence)
+
+## Resident UEFI loader primary-source refinement (2026-08-22)
+
+UEFI x64 applications are PE32+ (`Machine=0x8664`, subsystem 10) and enter via
+the Microsoft x64 ABI. The loader must allocate staging, mailbox, loaded
+segments, Multiboot2 information, map buffer, GDT, transition stack, and
+trampoline before its final memory map. After final `GetMemoryMap`, it may only
+retry `ExitBootServices` with a fresh map key on `EFI_INVALID_PARAMETER`; no
+other map-changing service belongs in that window.
+
+The UEFI Debug Support Table only leads an external debugger to loaded PE image
+bases through memory-resident tables. It is not DCI transport, a breakpoint
+engine, a RAM loader, or a mailbox. A project GUID configuration-table entry can
+publish a loader-owned mailbox pointer while Boot Services exists, but physical
+DCI still needs either the system-table locator or an independently printed/
+configured mailbox physical address.
+
+The mailbox is project wire protocol, not a native Simple object. It needs a
+fixed little-endian packed record with magic/version/header size, payload
+physical address/capacity/valid length, generation, nonce, raw 32-byte digest,
+status/error, and an aligned atomic commit field written last. The loader must
+double-snapshot noncommit bytes around hashing and define compiler/cache
+visibility barriers before decoding into `DciMailboxDescriptor`.
+
+UEFI Block I/O is the strongest free controller-neutral preboot provisioner:
+it standardizes exact-block Read/Write/Flush semantics without debugger MMIO.
+NVMe Pass Thru is optional and usable only when firmware exposes it. Intel's
+open UP2 firmware validated eMMC, USB, and SATA boot—not NVMe—so physical NVMe
+boot requires adapter, PCI/NVMe enumeration, and firmware-driver evidence.
+
+Primary sources: [UEFI x64 ABI](https://uefi.org/specs/UEFI/2.11/02_Overview.html#x64-platforms),
+[configuration tables](https://uefi.org/specs/UEFI/2.11/04_EFI_System_Table.html#efi-configuration-table-properties-table),
+[Boot Services](https://uefi.org/specs/UEFI/2.10_A/07_Services_Boot_Services.html#efi-boot-services-exitbootservices),
+[debug support](https://uefi.org/specs/UEFI/2.10_A/18_Protocols_Debugger_Support.html),
+[UEFI media protocols](https://uefi.org/specs/UEFI/2.10/13_Protocols_Media_Access.html),
+[Multiboot2 machine state](https://www.gnu.org/software/grub/manual/multiboot2/html_node/Machine-state.html),
+and [Intel E3900 UP2 firmware release notes](https://cdrdv2-public.intel.com/671069/intelatome3900-0-71-releasenotes.pdf).
+
+## Applied architecture conclusion (2026-08-22)
+
+The implemented free boundary follows the primary-source constraints: a
+firmware-entered PE32+ GNU-EFI owner publishes a fixed physical mailbox;
+debugger transport writes only payload and wire data; the target validates and
+loads ELF, constructs Multiboot2 module plus EFI-memory-map tags from the final
+map, calls `ExitBootServices`, and transitions through an embedded ELF32 shim.
+GNU GDB/QEMU proves that transport-neutral software sequence. It is not an
+open-source implementation of Intel DCI and does not change the conclusion that
+physical Apollo Lake DCI needs Intel's qualified connection stack. OVMF uses one
+CPU, so firmware/board-specific AP rendezvous remains a separate requirement.
+
+## Application-processor ownership refinement (2026-08-22)
+
+PI 1.9 §13.4 requires the MP Services producer, before the ExitBootServices
+event, to place APs that are disabled or not executing dispatched work into an
+idle state. `StartupAllAPs` is a work-dispatch API, not a permanent parking API:
+on timeout the failed AP work is terminated and the processors become available
+for later dispatch. Therefore a loader must not send a non-returning halt loop
+through `StartupAllAPs` and infer ownership of AP state. The physical acceptance
+gate should instead record firmware MP-services/topology state and prove the
+post-transition kernel AP policy on the exact board. An SMP4 OVMF experiment
+that called blocking `StartupAllAPs` from the removable application hung before
+mailbox publication and was removed; the verified SMP1 loader remains the
+software receipt.
+
+Primary source: [UEFI PI 1.9 MP Services Protocol](https://uefi.org/specs/PI/1.9/V2_DXE_Boot_Services_Protocols.html#efi-mp-services-protocol).

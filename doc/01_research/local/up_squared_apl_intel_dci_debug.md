@@ -160,3 +160,55 @@ The OVMF boot gate passed ordered firmware/loader/kernel markers, VFS-backed
 Identify-with-zero-writes, GPT, FAT32, flush, fresh-adapter readback, and
 `/nvme/proof.txt`. These replace stale emulator receipts but do not promote
 physical UP2, CN16, DCI, or physical-drive evidence.
+
+Subsequent current-source evidence supersedes those artifact hashes. Kernel
+build remains 58 compiled / 0 failed; the self-contained image SHA-256 is
+`9be0dd3b3e89b1be330826a216a38de820e8144dcdb60a4aa100a3cd05b2aa89`.
+`--ovmf-image-provision` now passes constant-memory target SHA, scratch-NVMe
+write, Flush, fresh-adapter exact readback, independent host SHA, and unchanged
+adjacent ranges. `--ovmf-nvme-boot` boots that image as the sole NVMe device
+with USB absent and completes VFS-backed `ls /`.
+
+The smallest resident-loader boundary is currently C/COFF plus assembly, not a
+native Simple UEFI target: Simple x86-64 codegen is SysV and has no qualified
+PE32+/Microsoft-ABI personality. Clang/LLD can emit a valid EFI application,
+and free `gnu-efi` headers are installed. The existing ELF32 shim can be reused
+only after constructing a below-4-GiB Multiboot2 module record and performing a
+reviewed post-`ExitBootServices` long-mode-to-i386 transition.
+
+Two local blockers precede that transition. First, the Simple policy descriptor
+is not a packed wire record and lacks physical pointer, endian, commit alignment,
+and coherency rules. Second, kernel `_entry32` saves EBX in ESI and then reuses
+ESI for a serial string before forwarding boot info; current UP2 startup ignores
+the argument, masking the loss. Wire-v1 must land first, then MBI preservation
+and parsing, before a resident-loader boot receipt can be trusted.
+
+## Resident-loader implementation result (2026-08-22)
+
+This section supersedes the earlier “blockers precede transition” status and
+artifact hashes without deleting that research history. Wire-v1 is now a packed
+128-byte record with an aligned commit word at offset 124. The PE32+ GNU-EFI
+loader reserves fixed mailbox, payload, kernel, Multiboot-info, and embedded
+shim windows; verifies nonce, stable snapshots, two exact payload hashes and
+bounded non-overlapping ELF64 segments; obtains the final EFI map; exits boot
+services; and enters the existing ELF32 shim through a dedicated x64-to-i386
+trampoline. The EBX/ESI loss in `_entry32` is fixed.
+
+The authoritative current kernel is 298,648 bytes with SHA-256
+`0a8afd63b50bc57792d43cf6e06a643fc2d22d62e7de608b8629137c92293c08`;
+the latest 256 MiB structural image SHA-256 is
+`6d947ef3f2ec65d417f5e3a6740e4dddbf3dbab23d19ed99adaee54fadc2e6b5`.
+The direct-boot runtime receipt used image `652d5d53…cdf08d` with identical
+loader PE `2b116981…a936e` and kernel bytes.
+`--ovmf-dci-admission` halted OVMF at reset through GNU GDB, continued to the
+resident publisher, wrote the entire kernel and descriptor/commit into RAM,
+and reached shim, `_entry32`, kernel, filesystem, and shell markers with no
+GRUB fallback. The separate no-commit OVMF path still chainloads GRUB and passes
+VFS `ls /`. These close the single-CPU software path only; physical Apollo Lake
+DCI and multi-core AP parking remain open.
+
+An attempted SMP4 OVMF MP-services rendezvous never reached mailbox publication;
+the loader printed only its temporary entry diagnostic before blocking. After
+three bounded audit cycles the experiment was removed rather than shipping a
+multi-core regression. The retained loader/verifier stays SMP1, and physical
+UP2 AP/topology evidence remains explicit.

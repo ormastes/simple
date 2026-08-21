@@ -7,7 +7,8 @@
 use std.fs_driver.block_device.{BlockDevice}
 use std.common.structural.digest.hash256.{hash256_hex_valid}
 use os.crypto.sha256.{
-    sha256_stream_new, sha256_stream_update, sha256_stream_finish
+    sha256_with_len, sha256_stream_new, sha256_stream_update,
+    sha256_stream_finish
 }
 
 pub struct StorageImagePlan:
@@ -53,6 +54,17 @@ fn storage_sha256_hex(bytes: [u8]) -> Result<text, text>:
             _storage_hex_digit(value & 15))
         index = index + 1
     Ok(out)
+
+fn _storage_sha256_one_shot_hex(bytes: [u8]) -> text:
+    val digest = sha256_with_len(bytes, bytes.len().to_u64())
+    var out = ""
+    var index: i64 = 0
+    while index < digest.len():
+        val value = digest[index] as i64
+        out = (out + _storage_hex_digit((value >> 4) & 15) +
+            _storage_hex_digit(value & 15))
+        index = index + 1
+    out
 
 fn storage_image_plan(
     lba_size: u32,
@@ -104,8 +116,14 @@ fn storage_image_write_chunk(
     if not hash256_hex_valid(expected_chunk_sha256):
         return Err("storage-image-chunk-digest-format")
     val observed_chunk_sha256 = storage_sha256_hex(chunk)
-    if observed_chunk_sha256.is_err() or observed_chunk_sha256.unwrap() != expected_chunk_sha256:
-        return Err("storage-image-chunk-digest-mismatch")
+    if observed_chunk_sha256.is_err():
+        return Err("storage-image-chunk-digest-failed:" +
+            observed_chunk_sha256.unwrap_err())
+    if observed_chunk_sha256.unwrap() != expected_chunk_sha256:
+        return Err("storage-image-chunk-digest-mismatch:observed=" +
+            observed_chunk_sha256.unwrap() + ":expected=" +
+            expected_chunk_sha256 + ":one-shot=" +
+            _storage_sha256_one_shot_hex(chunk))
 
     val sector_size = plan.lba_size.to_u64()
     val first_lba = (plan.byte_start + image_offset) / sector_size

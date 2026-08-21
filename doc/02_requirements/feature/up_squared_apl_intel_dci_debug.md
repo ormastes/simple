@@ -37,8 +37,11 @@ debugger-authored CPU-state boot and open xHCI DbC are excluded.
   `PT_LOAD` from `p_offset` to `p_paddr`, and zero `p_memsz - p_filesz`.
 - **REQ-008 — Boot transition:** Target-side code shall obtain the current UEFI
   memory map, exclude firmware/SMRAM/ACPI/MMIO/DMA-owned ranges, exit boot
-  services, park application processors, and enter the reviewed Multiboot2
-  32-bit shim. Direct contiguous ELF copy plus RIP assignment is forbidden.
+  services, verify the firmware MP-services/topology contract, and enter the
+  reviewed Multiboot2 32-bit shim. It shall not misuse `StartupAllAPs` as a
+  permanent park operation; PI firmware owns the ExitBootServices AP-idle
+  transition and the kernel owns later AP startup. Direct contiguous ELF copy
+  plus RIP assignment is forbidden.
 - **REQ-009 — Storage provisioner:** A RAM-resident target-side driver shall
   enumerate storage and admit exactly one device by model, serial, transport,
   capacity, partitions, root/swap, mounts, holders, and explicit byte bounds.
@@ -76,15 +79,23 @@ transport remains a separate hardware evidence gate.
 - REQ-001..005: documented/admitted gates; physical DCI remains BLOCKED because
   the CNDA-controlled toolkit, qualified cable/probe, enabled board, and
   connection receipt are absent.
-- REQ-006..008: policy parser and ELF admission exist; the executable UEFI
-  mailbox publisher/consumer and boot transition do not exist yet.
+- REQ-006..008: the executable GNU-EFI PE32+ publisher/consumer now reserves
+  fixed mailbox, payload, shim, Multiboot-info, and kernel windows; enforces a
+  nonce-bound commit-last wire-v1 descriptor; performs stable snapshots,
+  SHA-256 and bounded ELF64 `PT_LOAD` admission; builds the final UEFI memory-map
+  tag; retries `ExitBootServices` only on a stale key; and enters the embedded
+  reviewed ELF32 shim through the x64-to-i386 trampoline. The
+  `--ovmf-dci-admission` receipt proves an actual GDB-authored RAM payload boots
+  SimpleOS without GRUB. Physical DCI transport and application-processor state
+  on a multi-core UP2 remain open hardware gates, so REQ-008 is not yet
+  a physical PASS.
 - REQ-009..010: GPT/FAT32 proof and the new shared chunked raw-image owner are
   implemented. The latter binds DCI storage admission to live UP2 identity,
   hashes chunks before writes, maintains whole-image SHA-256, flushes, and
-  performs exact fresh-adapter readback. Freestanding build and RSP staging pass,
-  but the target streaming SHA rejects independently verified staging bytes;
-  the three-cycle retry cap was reached with `media_writes=0`. Flush/readback
-  and physical UP2 PCI/NVMe persistence remain BLOCKED.
+  performs exact fresh-adapter readback. The constant-memory streaming SHA fix
+  passes the dedicated OVMF scratch-NVMe gate: target chunk hash, write, Flush,
+  fresh-adapter exact readback, independent host SHA, and surrounding-range
+  integrity all pass. Physical UP2 PCI/NVMe persistence remains BLOCKED.
 - REQ-011: current-image OVMF UART evidence passes; physical CN16 evidence is
   missing.
 - REQ-012: enforced by the current read-only boot and explicit challenges.
@@ -92,3 +103,6 @@ transport remains a separate hardware evidence gate.
   exact `m` readback; physical CN16 remains BLOCKED.
 - REQ-014: procedure is documented; physical Secure Boot/menu/shell evidence is
   missing.
+- The current 256 MiB board image also boots as the only attached NVMe device
+  under OVMF (`usb_attached=false`) and completes VFS-backed `ls /` without a
+  media write. This is emulator boot-path evidence, not physical-board proof.

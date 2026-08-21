@@ -17,9 +17,13 @@ I/O. Those decisions remain target-side and independently testable.
 3. **Load-plan owner:** the same pure capsule parses x86-64 ELF `PT_LOAD`
    metadata, enforces file/physical bounds and non-overlap, and requires the
    entry to lie in an executable segment inside one allowed UEFI RAM range.
-4. **UEFI adapter (not implemented):** a future board capability supplies the current memory map,
-   reserves the mailbox/load ranges, performs copy/zero, exits boot services,
-   parks APs, and invokes the existing Multiboot2 shim.
+4. **UEFI adapter:** `up2_dci_uefi_loader.c` is a directly entered GNU-EFI
+   PE32+ application. It reserves all fixed ranges before publication,
+   authenticates wire-v1, validates/copies the ELF64 segments, builds the final
+   UEFI memory-map tag, exits boot services, and calls
+   `up2_dci_uefi_transition.S`, which enters the embedded existing Multiboot2
+   ELF32 shim. OVMF exercises this with one CPU; physical-UP2 MP topology and
+   the PI ExitBootServices AP-idle contract remain an open board evidence gate.
 5. **Storage-policy owner:** pure Simple admits one observed device and bounded
    write request. The implemented UP2 NVMe adapter uses the common controller,
    lease-backed block adapter, GPT, and FAT32 owners for write/flush/fresh-
@@ -27,8 +31,8 @@ I/O. Those decisions remain target-side and independently testable.
    evidence remains separate from the passed QEMU scratch-device proof.
    Raw-image I/O is owned by host-neutral
    `os.services.storage_image_provision`: it depends only on `BlockDevice` and
-   streaming SHA-256 and owns alignment, ordered chunk writes, flush, and exact
-   full readback. UP2 owns PCI/Identify identity, confirmation, staging-memory
+   constant-memory streaming SHA-256 and owns alignment, ordered chunk writes,
+   flush, and exact full readback. UP2 owns PCI/Identify identity, confirmation, staging-memory
    copy, and fresh NVMe adapters; StarFive can reuse the common owner without
    copying its JH7110 PCIe/PHY/cache-coherency port.
 6. **Evidence owner:** connection, load, boot, and storage receipts remain
@@ -36,7 +40,8 @@ I/O. Those decisions remain target-side and independently testable.
 7. **Free post-boot monitor:** `gdb_rsp_monitor.spl` owns packet, checksum,
    bounds, and readback policy. `gdb_rsp_uart.spl` alone owns CN16/COM1 framing.
    The linker reserves `0x0a000000..0x0b000000` in the admitted writable
-   `PT_LOAD`; the monitor cannot address outside it.
+   `PT_LOAD`; the monitor cannot address outside it. High-volume `M` packets
+   use scalar parsing directly into staging; generic packets retain text framing.
 
 ## Pattern evaluation
 
@@ -60,6 +65,10 @@ ranges are authoritative only for the current boot generation. Storage identity
 is re-read before and after write. Integer arithmetic uses subtraction-based
 bounds tests to avoid wraparound.
 
+Streaming SHA owns one preallocated 64-byte block and 64-word schedule and
+mutates its eight state words in place. Per-block allocation and large-array
+reads at changing offsets are outside the freestanding monotonic-heap contract.
+
 ## Reset
 
 Apollo Lake OpenRC warm reset is architecturally forbidden because Intel
@@ -73,15 +82,11 @@ boot, or storage writes. Hardware PASS requires the exact receipts in REQ-003,
 REQ-010, and REQ-011.
 OVMF may independently prove REQ-013 packet write/readback behavior; physical
 CN16 still requires a fresh board transcript.
-The mailbox parser/admission capsule alone does not satisfy REQ-006..008: those
-requirements remain open until an executable UEFI adapter publishes and
-consumes the mailbox and completes the handoff.
-
-`BOOTX64.EFI` is currently GRUB, not a Simple UEFI adapter. The resident owner
-must therefore be a separate PE/COFF application entered directly by firmware;
-putting the consumer in the ELF32 Multiboot shim is architecturally too late
-because GRUB already owns the UEFI memory-map and `ExitBootServices` transition.
-The adapter needs an explicit x86-64 UEFI/MS-ABI capsule and a reviewed
-long-mode-to-Multiboot transition boundary. Neither capability exists in the
-current Simple target matrix, so this dependency remains visible rather than
-being hidden behind a post-UEFI fallback.
+The pure mailbox capsule alone is not boot evidence. The separate PE32+ adapter
+is now `EFI/BOOT/BOOTX64.EFI`; GRUB moved to `EFI/BOOT/GRUBX64.EFI` and is
+chainloaded only after an uncommitted timeout. The adapter is C/assembly because
+the current Simple target matrix does not expose the UEFI Microsoft x64 ABI or
+COFF application boundary. Its embedded ELF32 shim remains the independent
+post-UEFI ELF loader. The OVMF receipt proves this software topology, while a
+physical DCI receipt and firmware/kernel AP-state evidence are still required
+for the multi-core board claim.

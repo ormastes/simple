@@ -1,6 +1,6 @@
 # UP2 freestanding streaming SHA-256 mismatch
 
-Status: open; retry cap reached, no NVMe media write occurred
+Status: fixed and verified under OVMF
 
 ## Reproducer
 
@@ -21,7 +21,17 @@ therefore precedes `BlockDevice.write_sector`; `media_writes` remains zero.
 2. Replaced `M` frame materialization with a scalar, allocation-free parser.
 3. Changed `Sha256Stream` from a returned value struct to a mutable class.
 
-The mandatory three-cycle cap is reached. A fresh scoped session should expose
-the observed target digest, compare one-shot and streaming SHA on the same
-staging bytes in freestanding mode, and inspect array/value ABI behavior at the
-`sha256_process_block` boundary. Do not weaken or bypass the digest gate.
+The next scoped session exposed streaming digest `8a0e5bf3...7409` and one-shot
+digest `c8f5d034...f193` for the same target array. The one-shot result matched
+the host, isolating the failure to the streaming block path: it repeatedly
+passed a large byte array with nonzero offsets through the freestanding ABI and
+returned newly allocated state/schedule arrays.
+
+The fix preallocates one 64-byte block and one 64-word schedule in
+`Sha256Stream`, fills them in place, and mutates the eight state words without
+per-block allocations or nonzero-offset large-array calls. This is constant
+memory for a full disk image.
+
+`--ovmf-image-provision` now proves four nonzero 1024-byte RSP writes, exact
+chunk SHA, NVMe write, Flush, fresh-adapter full-range SHA, independent host
+SHA, and unchanged 512-byte ranges immediately before and after the write.

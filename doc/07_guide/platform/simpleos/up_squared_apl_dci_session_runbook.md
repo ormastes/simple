@@ -69,10 +69,34 @@ Write payload bytes first, then a descriptor containing exact length and SHA-256
 last. Resume target code; it validates the descriptor, parses every `PT_LOAD`,
 zeros `p_memsz - p_filesz`, obtains the current memory map, exits boot services,
 constructs Multiboot state, and transfers through the existing 32-bit shim.
-This loader is **not implemented yet**. `dci_mailbox.spl` validates policy only;
-do not treat its tests or the post-boot RSP staging area as a boot loader. UEFI's
-Debug Support Table may help an external debugger find loaded images when
-firmware publishes it, but it does not supply the missing loader.
+This loader is now `EFI/BOOT/BOOTX64.EFI`; the media fallback is
+`EFI/BOOT/GRUBX64.EFI`. It publishes wire-v1 at physical `0x0c000000`, payload
+capacity `0x0c100000+0x01000000`, and a per-boot nonce. The debugger must
+preserve the published schema/nonce/addresses, write the payload, write bytes
+0..123 of the descriptor, and write the aligned commit word at offset 124 last.
+Committed invalid input fails closed; no commit for ten seconds chainloads GRUB.
+Committed boot also requires the loader to report
+`nonce-source=firmware-or-rdrand`; a time/TSC diagnostic fallback cannot boot a
+RAM payload.
+UEFI's Debug Support Table can help image discovery but is not this mailbox.
+
+Free software-path proof (GDB stands in for the physical memory transport):
+
+```sh
+sh scripts/check/check-simpleos-up-squared-apollo-lake.shs --ovmf-dci-admission
+sh scripts/check/check-simpleos-up-squared-apollo-lake.shs --ovmf-dci-rejection
+```
+
+The receipt requires nonce preservation, exact SimpleOS ELF SHA-256, stable
+mailbox/payload checks, final UEFI memory-map construction, embedded ELF32 shim
+entry, `_entry32`, kernel, console, filesystem, and shell markers, and no GRUB
+fallback. It is transport-neutral software evidence, not proof that Apollo Lake
+DCI enumerated or that application processors were parked on physical UP2.
+PI firmware, rather than a non-returning loader callback, owns the
+ExitBootServices AP-idle transition; retain firmware topology and kernel AP
+evidence on the board.
+The rejection companion uses the complete kernel with a deliberately wrong
+digest and requires fail-closed behavior before ELF load or fallback.
 
 Inspect the exact current ELF/receipt and obtain its segment manifest without
 touching hardware:
@@ -160,7 +184,19 @@ only after corresponding target software starts. Record such evidence as
 software-debug, not DCI run-control or external-memory evidence.
 
 Current OVMF status (2026-08-22): four consecutive maximum 1024-byte nonzero
-`M` packets and independent `m` readback pass without heap exhaustion. Raw-image
-commit remains BLOCKED before media write because freestanding streaming SHA-256
-does not match the independently hashed staging bytes. See
-`doc/08_tracking/bug/up2_sha256_stream_freestanding_mismatch_2026-08-22.md`.
+`M` packets, target SHA, scratch-NVMe write, Flush, fresh-adapter readback,
+independent host SHA, and unchanged adjacent ranges pass. Run:
+
+```sh
+sh scripts/check/check-simpleos-up-squared-apollo-lake.shs --ovmf-image-provision
+```
+
+The current board image also boots with no USB device when attached as the sole
+OVMF NVMe boot device and completes VFS-backed `ls /`:
+
+```sh
+sh scripts/check/check-simpleos-up-squared-apollo-lake.shs --ovmf-nvme-boot
+```
+
+These receipts qualify software paths only; physical CN16, DCI, SSD persistence,
+and boot-menu evidence remain separate gates.

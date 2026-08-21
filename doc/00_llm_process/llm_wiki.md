@@ -76,7 +76,7 @@ same-thread/typed-payload exclusions and the Stage-4 blocker.
   partial source is not live board evidence. PASS requires ordered UART boot
   markers and a command-correlated VFS-backed `ls /` response.
 - **Current build state (2026-08-22):** the admitted build produced a
-  225,152-byte freestanding ELF and 256 MiB GPT/FAT32 UEFI image. OVMF reaches
+  298,648-byte freestanding ELF and 256 MiB GPT/FAT32 UEFI image. OVMF reaches
   loader admission, shim, 32/64-bit bootstrap, entry, console, filesystem, and
   shell; injected `ls /` returns `/bin`, `/etc`, and `/README.txt`. Physical F7
   boot is still pending because the board-attached stick is not visible to the
@@ -102,18 +102,22 @@ same-thread/typed-payload exclusions and the Stage-4 blocker.
 - **Capability evidence boundary (2026-08-22):** Intel's Target Connection
   Agent matrix includes Apollo Lake, but that proves silicon/tool support rather
   than UP2 port routing or BIOS consent. UEFI Debug Support and its discovery
-  table also do not implement a RAM mailbox or boot handoff. The current
-  `dci_mailbox.spl` is admission policy; direct DCI RAM boot remains incomplete
-  until a resident UEFI adapter reserves/publishes the mailbox, validates and
-  loads the ELF, exits boot services, and transfers control.
+  table also do not implement a RAM mailbox or boot handoff. The tree now adds
+  that separate capability as a directly entered GNU-EFI PE32+ application:
+  it publishes wire-v1, admits an exact debugger-authored ELF, exits boot
+  services, enters the embedded ELF32 shim, and boots SimpleOS under OVMF.
+  This is software-path proof; physical Apollo Lake DCI and MP/AP state remain
+  unproven.
 - **UP2 boot-menu evidence:** record Secure Boot state. F7 selects one-time boot;
   DEL or ESC enters setup. EFI-shell launch of the fallback path is a distinct
   route and must record the mapped filesystem and exact image.
-- **UP2 UEFI topology boundary:** the current `BOOTX64.EFI` is GRUB, and its
-  ELF32 Multiboot2 child runs after the UEFI boot-services transition. Mailbox
-  polling added only to that child is post-UEFI RAM loading, not the selected
-  UEFI-resident loader. The real adapter needs PE32+, Microsoft x64 firmware
-  ABI calls, and a reviewed long-mode-to-Multiboot transition.
+- **UP2 UEFI topology boundary:** `BOOTX64.EFI` is now the resident GNU-EFI
+  mailbox owner; `GRUBX64.EFI` is its no-commit timeout fallback. The resident
+  image embeds the existing ELF32 shim, constructs its Multiboot2 module and
+  EFI-memory-map tags, and owns the reviewed x64-to-i386 transition. Do not
+  describe the later shim itself as UEFI-resident.
+  Its boot nonce must come from UEFI RNG or RDRAND; time/TSC fallback is
+  diagnostic-only and cannot authorize a committed payload.
 - **Free UP2 debug boundary (2026-08-22):** no open tool found implements
   Apollo Lake's proprietary DCI ExI/JTAG/DMA plane. The practical free lane is
   removable UEFI boot plus CN16 UART, followed by a target-resident SimpleOS
@@ -134,9 +138,15 @@ same-thread/typed-payload exclusions and the Stage-4 blocker.
   `0x0a000000..0x0b000000`, capped at 1024 bytes with write readback. OVMF
   proves `SIMP` → `53494d50` and detach. Registers, run control, reset, binary
   `X`, preboot DCI, and physical CN16 remain outside that PASS.
-- **Fresh emulator evidence (2026-08-22):** current kernel `31ce1fb4…e1fbdf`
-  and image `983b74b9…b9ae8` pass OVMF boot, VFS `ls /`, GDB `M`/`m` readback,
-  plus the separate scratch-NVMe Identify/GPT/FAT32/flush/fresh-readback gate.
+- **Fresh emulator evidence (2026-08-22):** current kernel
+  `0a8afd63…293c08`; the latest structurally admitted image is
+  `6d947ef3…c2e6b5`. The runtime receipt used image `652d5d53…cdf08d` with the
+  identical loader PE `2b116981…a936e` and kernel, and passes GRUB-fallback OVMF boot,
+  VFS `ls /`, GDB `M`/`m` readback, the separate scratch-NVMe
+  Identify/GPT/FAT32/flush/fresh-readback gate, and direct resident-mailbox
+  boot where GDB writes the whole kernel to RAM and no GRUB fallback occurs.
+  The paired rejection gate proves a wrong committed digest cannot admit,
+  transition, or silently fall through to GRUB.
   Physical UP2, CN16, DCI, and physical storage remain separate.
 - **Apollo Lake reset exception:** Intel's 2020 debugger notes say OpenRC warm
   reset can leave Apollo Lake cores unreleasable, with manual reset required.
@@ -147,7 +157,9 @@ same-thread/typed-payload exclusions and the Stage-4 blocker.
   memory, ending at `0x0b000000`. Contiguous ELF copy plus RIP assignment is
   invalid. Inspect the exact artifact with
   `scripts/check/inspect-up-squared-apl-dci-elf.shs`; prefer a UEFI-resident
-  mailbox loader that performs ELF and Multiboot transitions.
+  mailbox loader that performs ELF and Multiboot transitions. That loader is
+  now implemented and exercised through `--ovmf-dci-admission`; physical DCI
+  and multi-core firmware/kernel AP-state evidence remain required.
 - **Canonical tooling:** build the exact-kernel image receipt with
   `scripts/os/build-simpleos-up-squared-usb-image.shs`; admit/write only through
   `scripts/os/write-simpleos-up-squared-usb.shs`; accept hardware only through
@@ -875,6 +887,12 @@ convergence and DDC remain explicit release/trust targets. Canonical guide:
 - A correct RSP RAM receipt does not prove the target hashing path. If staged
   bytes pass `m` readback but chunk SHA fails, retain `media_writes=0`, stop at
   the retry cap, and investigate the freestanding hash/array ABI separately.
+- For monotonic-heap bare metal, incremental SHA must reuse a fixed 64-byte
+  block and 64-word schedule and mutate state in place. Do not allocate a
+  schedule/result per block or rely on large-array reads at changing offsets.
+- Separate raw-image persistence from bootability: retain one receipt for
+  target write/Flush/fresh-readback plus independent host SHA, and another for
+  firmware boot from NVMe with USB absent and command-correlated VFS `ls /`.
 
 ## UP Squared free debug transport qualification
 

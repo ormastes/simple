@@ -11,6 +11,10 @@ val DCI_U64_MAX: u64 = 0xffffffffffffffffu64
 val DCI_PT_LOAD: i64 = 1
 val DCI_PF_X: u32 = 1u32
 val DCI_PF_W: u32 = 2u32
+val DCI_MAILBOX_WIRE_V1_MAGIC: u64 = 0x3130494344325055u64
+val DCI_MAILBOX_WIRE_V1_SIZE: i64 = 128
+val DCI_MAILBOX_WIRE_V1_COMMIT_OFFSET: i64 = 124
+val DCI_MAILBOX_WIRE_V1_COMMAND_BOOT: u32 = 1u32
 
 pub enum DciCommitState:
     Empty
@@ -24,6 +28,14 @@ pub struct DciMailboxDescriptor:
     payload_size: u64
     payload_sha256: text
     state: DciCommitState
+
+pub struct DciMailboxWireV1:
+    payload_address: u64
+    payload_capacity: u64
+    descriptor: DciMailboxDescriptor
+    command: u32
+    status: u32
+    error: u32
 
 pub struct DciMemoryRange:
     start: u64
@@ -105,6 +117,205 @@ fn _dci_hex_digit(value: i64) -> text:
         14: "e"
         15: "f"
         _: ""
+
+fn _dci_hex_value(value: text) -> i64:
+    match value:
+        "0": 0
+        "1": 1
+        "2": 2
+        "3": 3
+        "4": 4
+        "5": 5
+        "6": 6
+        "7": 7
+        "8": 8
+        "9": 9
+        "a": 10
+        "A": 10
+        "b": 11
+        "B": 11
+        "c": 12
+        "C": 12
+        "d": 13
+        "D": 13
+        "e": 14
+        "E": 14
+        "f": 15
+        "F": 15
+        _: -1
+
+fn _dci_wire_push_u16(bytes: [u8], value: u64) -> [u8]:
+    var out = bytes
+    out.push((value & 0xffu64) as u8)
+    out.push(((value >> 8u64) & 0xffu64) as u8)
+    out
+
+fn _dci_wire_push_u32(bytes: [u8], value: u64) -> [u8]:
+    var out = bytes
+    var shift: u64 = 0u64
+    while shift < 32u64:
+        out.push(((value >> shift) & 0xffu64) as u8)
+        shift = shift + 8u64
+    out
+
+fn _dci_wire_push_u64(bytes: [u8], value: u64) -> [u8]:
+    var out = bytes
+    var shift: u64 = 0u64
+    while shift < 64u64:
+        out.push(((value >> shift) & 0xffu64) as u8)
+        shift = shift + 8u64
+    out
+
+fn _dci_wire_read_u32(bytes: [u8], offset: i64) -> u32:
+    (byte_at(bytes, offset).to_u32() |
+        (byte_at(bytes, offset + 1).to_u32() << 8) |
+        (byte_at(bytes, offset + 2).to_u32() << 16) |
+        (byte_at(bytes, offset + 3).to_u32() << 24))
+
+fn _dci_wire_read_u64(bytes: [u8], offset: i64) -> u64:
+    var value: u64 = 0u64
+    var index: i64 = 0
+    while index < 8:
+        value = value | (byte_at(bytes, offset + index).to_u64() <<
+            (index * 8) as u64)
+        index = index + 1
+    value
+
+fn _dci_wire_digest_hex(bytes: [u8], offset: i64) -> text:
+    var out = ""
+    var index: i64 = 0
+    while index < 32:
+        val value = byte_at(bytes, offset + index) as i64
+        out = out + _dci_hex_digit((value >> 4) & 15) +
+            _dci_hex_digit(value & 15)
+        index = index + 1
+    out
+
+fn _dci_wire_commit_value(state: DciCommitState) -> u32:
+    if state == DciCommitState.Empty:
+        return 0u32
+    if state == DciCommitState.PayloadWritten:
+        return 1u32
+    2u32
+
+pub fn dci_mailbox_wire_v1_encode(
+    payload_address: u64,
+    payload_capacity: u64,
+    descriptor: DciMailboxDescriptor,
+    command: u32,
+    status: u32,
+    error: u32
+) -> Result<[u8], text>:
+    """Reference encoder; transports publish bytes 0..123 before commit 124..127."""
+    if (payload_address == 0u64 or payload_address % 4096u64 != 0u64 or
+        payload_capacity == 0u64 or payload_capacity > DCI_MAX_PAYLOAD_BYTES or
+        descriptor.payload_size == 0u64 or
+        descriptor.payload_size > payload_capacity or
+        _dci_add_overflows(payload_address, payload_capacity)):
+        return Err("mailbox-wire-payload-range")
+    if descriptor.schema_version != DCI_MAILBOX_SCHEMA_VERSION:
+        return Err("mailbox-wire-schema")
+    if command != DCI_MAILBOX_WIRE_V1_COMMAND_BOOT:
+        return Err("mailbox-wire-command")
+    if not hash256_hex_valid(descriptor.payload_sha256):
+        return Err("mailbox-wire-digest")
+
+    var out: [u8] = []
+    out = _dci_wire_push_u64(out, DCI_MAILBOX_WIRE_V1_MAGIC)
+    out = _dci_wire_push_u16(out, DCI_MAILBOX_SCHEMA_VERSION as u64)
+    out = _dci_wire_push_u16(out, DCI_MAILBOX_WIRE_V1_SIZE as u64)
+    out = _dci_wire_push_u32(out, DCI_MAILBOX_WIRE_V1_SIZE as u64)
+    out = _dci_wire_push_u64(out, descriptor.generation)
+    out = _dci_wire_push_u64(out, descriptor.nonce)
+    out = _dci_wire_push_u64(out, payload_address)
+    out = _dci_wire_push_u64(out, payload_capacity)
+    out = _dci_wire_push_u64(out, descriptor.payload_size)
+    var digest_index: i64 = 0
+    while digest_index < 64:
+        val high = _dci_hex_value(descriptor.payload_sha256.char_at(digest_index))
+        val low = _dci_hex_value(descriptor.payload_sha256.char_at(digest_index + 1))
+        out.push((high * 16 + low) as u8)
+        digest_index = digest_index + 2
+    out = _dci_wire_push_u32(out, command as u64)
+    out = _dci_wire_push_u32(out, status as u64)
+    out = _dci_wire_push_u32(out, error as u64)
+    while out.len() < DCI_MAILBOX_WIRE_V1_COMMIT_OFFSET:
+        out.push(0u8)
+    out = _dci_wire_push_u32(out, _dci_wire_commit_value(descriptor.state) as u64)
+    Ok(out)
+
+pub fn dci_mailbox_wire_v1_decode(bytes: [u8]) -> Result<DciMailboxWireV1, text>:
+    if bytes.len() != DCI_MAILBOX_WIRE_V1_SIZE:
+        return Err("mailbox-wire-size")
+    if _dci_wire_read_u64(bytes, 0) != DCI_MAILBOX_WIRE_V1_MAGIC:
+        return Err("mailbox-wire-magic")
+    if (_dci_wire_read_u32(bytes, 8) & 0xffffu32) != DCI_MAILBOX_SCHEMA_VERSION:
+        return Err("mailbox-wire-schema")
+    if ((_dci_wire_read_u32(bytes, 8) >> 16) !=
+        DCI_MAILBOX_WIRE_V1_SIZE as u32 or
+        _dci_wire_read_u32(bytes, 12) != DCI_MAILBOX_WIRE_V1_SIZE as u32):
+        return Err("mailbox-wire-header-size")
+    val generation = _dci_wire_read_u64(bytes, 16)
+    val nonce = _dci_wire_read_u64(bytes, 24)
+    val payload_address = _dci_wire_read_u64(bytes, 32)
+    val payload_capacity = _dci_wire_read_u64(bytes, 40)
+    val payload_size = _dci_wire_read_u64(bytes, 48)
+    if (payload_address == 0u64 or payload_address % 4096u64 != 0u64 or
+        payload_capacity == 0u64 or payload_capacity > DCI_MAX_PAYLOAD_BYTES or
+        payload_size == 0u64 or payload_size > payload_capacity or
+        _dci_add_overflows(payload_address, payload_capacity)):
+        return Err("mailbox-wire-payload-range")
+    val command = _dci_wire_read_u32(bytes, 88)
+    if command != DCI_MAILBOX_WIRE_V1_COMMAND_BOOT:
+        return Err("mailbox-wire-command")
+    var reserved_index: i64 = 100
+    while reserved_index < DCI_MAILBOX_WIRE_V1_COMMIT_OFFSET:
+        if byte_at(bytes, reserved_index) != 0u8:
+            return Err("mailbox-wire-reserved")
+        reserved_index = reserved_index + 1
+    val commit = _dci_wire_read_u32(bytes, DCI_MAILBOX_WIRE_V1_COMMIT_OFFSET)
+    var state = DciCommitState.Empty
+    if commit == 1u32:
+        state = DciCommitState.PayloadWritten
+    elif commit == 2u32:
+        state = DciCommitState.Committed
+    elif commit != 0u32:
+        return Err("mailbox-wire-commit")
+    Ok(DciMailboxWireV1(
+        payload_address: payload_address,
+        payload_capacity: payload_capacity,
+        descriptor: DciMailboxDescriptor(
+            schema_version: DCI_MAILBOX_SCHEMA_VERSION,
+            generation: generation,
+            nonce: nonce,
+            payload_size: payload_size,
+            payload_sha256: _dci_wire_digest_hex(bytes, 56),
+            state: state
+        ),
+        command: command,
+        status: _dci_wire_read_u32(bytes, 92),
+        error: _dci_wire_read_u32(bytes, 96)
+    ))
+
+pub fn dci_mailbox_wire_v1_decode_stable(
+    before_hash: [u8],
+    after_hash: [u8]
+) -> Result<DciMailboxWireV1, text>:
+    """Admit two descriptor snapshots taken immediately before and after SHA."""
+    if (before_hash.len() != DCI_MAILBOX_WIRE_V1_SIZE or
+        after_hash.len() != DCI_MAILBOX_WIRE_V1_SIZE):
+        return Err("mailbox-wire-size")
+    var index: i64 = 0
+    while index < DCI_MAILBOX_WIRE_V1_COMMIT_OFFSET:
+        if byte_at(before_hash, index) != byte_at(after_hash, index):
+            return Err("mailbox-wire-torn")
+        index = index + 1
+    val first = dci_mailbox_wire_v1_decode(before_hash)?
+    val second = dci_mailbox_wire_v1_decode(after_hash)?
+    if (first.descriptor.state != DciCommitState.Committed or
+        second.descriptor.state != DciCommitState.Committed):
+        return Err("mailbox-wire-not-committed")
+    Ok(second)
 
 fn _dci_ascii_bytes(value: text) -> [u8]:
     var out: [u8] = []
@@ -334,7 +545,12 @@ pub fn dci_admit_storage_write(write: DciStorageWrite) -> DciAdmission:
         return _dci_reject("storage-confirmation")
     _dci_accept()
 
-export DciCommitState, DciMailboxDescriptor, DciMemoryRange, DciLoadSegment
+export DCI_MAILBOX_WIRE_V1_MAGIC, DCI_MAILBOX_WIRE_V1_SIZE
+export DCI_MAILBOX_WIRE_V1_COMMIT_OFFSET, DCI_MAILBOX_WIRE_V1_COMMAND_BOOT
+export DciCommitState, DciMailboxDescriptor, DciMailboxWireV1
+export DciMemoryRange, DciLoadSegment
 export DciElfPlan, DciStorageIdentity, DciStorageWrite, DciAdmission
 export dci_admit_mailbox, dci_parse_x86_64_elf, dci_admit_load_plan
 export dci_storage_confirmation, dci_admit_storage_write
+export dci_mailbox_wire_v1_encode, dci_mailbox_wire_v1_decode
+export dci_mailbox_wire_v1_decode_stable

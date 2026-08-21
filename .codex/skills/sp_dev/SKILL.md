@@ -218,7 +218,7 @@ Before any proposed RAM load, run
 `PT_LOAD` ranges and `p_memsz - p_filesz` zero-fill must be honored. Prefer a
 UEFI-resident mailbox loader over debugger-authored CR/GDT/page-table state.
 Treat the inspector output as authoritative over copied sizes in manuals or
-tests. The 2026-08-22 admitted artifact is 225,152 bytes, and its writable
+tests. The 2026-08-22 admitted artifact is 298,648 bytes, and its writable
 segment ends at `0x0b000000`; when the kernel changes, update any fixture that
 claims to represent the "exact current" layout before accepting mailbox tests.
 For the retained UP2 A+B+D selection, reuse the pure-Simple admission policy in
@@ -234,16 +234,27 @@ the DCI port or that its BIOS enables and unlocks debug consent. Likewise, the
 UEFI Debug Support protocol and Debug Support Table aid a resident agent or an
 external debugger's memory discovery; they do not reserve a command mailbox,
 authenticate a payload, load ELF segments, exit boot services, or transfer
-control. Treat `dci_mailbox.spl` as admission policy, not a boot loader, until
-an executable UEFI adapter completes and proves that handoff.
+control. `dci_mailbox.spl` remains policy rather than a loader, but the separate
+GNU-EFI `up2_dci_uefi_loader.c` now implements that boundary. Require
+`scripts/check/check-simpleos-up-squared-apollo-lake.shs --ovmf-dci-admission`
+to prove commit-last GDB RAM authorship, nonce/SHA/ELF admission, final EFI map,
+embedded ELF32 shim entry, and SimpleOS shell without GRUB; retain physical DCI
+and multi-core firmware/kernel AP-state evidence as separate gates. PI firmware
+owns the ExitBootServices AP-idle transition; do not dispatch a non-returning
+`StartupAllAPs` procedure and call it parking.
+Pair it with `--ovmf-dci-rejection`, which must reject a fully written kernel
+whose committed descriptor carries the wrong digest before transition or GRUB.
+Require `nonce-source=firmware-or-rdrand` for committed boot. A time/TSC nonce
+may preserve diagnostics and GRUB fallback but must not authorize RAM execution.
 For UP2 physical boot, record Secure Boot state, use F7 for the one-time entry,
 and use DEL or ESC for firmware setup. Treat an EFI-shell launch as a distinct
 fallback with mapped-filesystem and artifact evidence.
-For the current UP2 image, `BOOTX64.EFI` is GRUB. Code first entered through
-the ELF32 Multiboot2 shim is post-UEFI and cannot truthfully claim ownership of
-page reservation, the final memory map, or `ExitBootServices`. A selected
-UEFI-resident mailbox therefore requires a directly entered PE32+ application,
-the Microsoft x64 firmware ABI, and a reviewed 64-to-32-bit Multiboot handoff.
+For the current UP2 image, `BOOTX64.EFI` is the directly entered PE32+ resident
+loader and `GRUBX64.EFI` is its uncommitted-timeout fallback. Code first entered
+through the embedded ELF32 Multiboot2 shim is post-UEFI and cannot truthfully
+claim ownership of page reservation, the final memory map, or
+`ExitBootServices`; those remain owned by the PE32+ layer and its reviewed
+64-to-32-bit handoff.
 When Intel DCI is unavailable, do not claim that OpenOCD, CHIPSEC, KGDB, xHCI
 DbC, or host GDB replaces it. The free UP2 lane is removable UEFI boot plus a
 target-resident debugger over CN16 UART (and later xHCI DbC). Wire CN16 pin 8
@@ -1209,6 +1220,11 @@ each byte back. Do not materialize or slice repeated 2 KiB text packets: the
 monotonic 16 MiB heap cannot reclaim that traffic. Keep checksum ACK distinct
 from storage authorization, and never bypass a target SHA mismatch merely
 because an RSP `m` readback passed.
+For freestanding streaming hashes, require one reusable fixed block and
+schedule with in-place state updates; per-block arrays are incompatible with a
+monotonic heap at disk-image scale. Keep target write/Flush/fresh-readback,
+independent host SHA, unchanged surrounding ranges, and USB-absent NVMe boot as
+separate receipts.
 
 For UP Squared debug-tool admission, distinguish software availability from a
 usable transport. GNU GDB/OpenOCD/picocom are the free baseline, but OpenOCD
