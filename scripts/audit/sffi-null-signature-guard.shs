@@ -17,6 +17,15 @@ require_text() {
     fi
 }
 
+require_fixed() {
+    needle=$1
+    file=$2
+    if ! rg -F -q -- "$needle" "$root/$file"; then
+        echo "SFFI lint: missing '$needle' in $file" >&2
+        failed=1
+    fi
+}
+
 for owner in \
     src/compiler_rust/runtime/src/value/wsffi_native.rs \
     src/compiler_rust/compiler/src/interpreter_extern/wsffi.rs \
@@ -191,6 +200,34 @@ do
         failed=1
     fi
 done
+
+# Packed-span resolution may use zero as its raw C sentinel, but the public
+# Simple boundary must immediately lift it into a typed Result. The success
+# path stays one raw call plus one comparison; the verdict lookup is failure-only.
+require_fixed 'fn packed_span_resolve_base(backing: [u8], r: BufferSpanRef) -> Result<i64, i64>:' \
+    src/lib/common/memory/packed_span.spl
+require_fixed 'return Ok(base)' src/lib/common/memory/packed_span.spl
+require_fixed 'Err(rt_packed_span_v1_last_verdict())' src/lib/common/memory/packed_span.spl
+require_text 'pub mod packed_span;' \
+    src/compiler_rust/compiler/src/interpreter_extern/mod.rs
+require_text 'packed_span_contract_family_is_registered' \
+    src/compiler_rust/compiler/src/interpreter_extern/mod.rs
+require_text 'parse_capability_scoped_unsafe_block' \
+    src/compiler_rust/parser/tests/control_flow.rs
+
+packed_resolve_body=$(sed -n \
+    '/fn packed_span_resolve_base(/,/^$/p' \
+    "$root/src/lib/common/memory/packed_span.spl")
+raw_resolve_calls=$(printf '%s\n' "$packed_resolve_body" | \
+    rg -c 'rt_packed_span_v1_resolve_base\(' || true)
+if [ "$raw_resolve_calls" -ne 1 ]; then
+    echo "SFFI lint: packed-span safe resolve must perform exactly one raw resolve call" >&2
+    failed=1
+fi
+if printf '%s\n' "$packed_resolve_body" | rg -q 'HashMap|Mutex|sha|dlsym'; then
+    echo "SFFI lint: packed-span resolve hot path gained lookup, locking, or hashing" >&2
+    failed=1
+fi
 
 if [ "$failed" -ne 0 ]; then
     exit 1

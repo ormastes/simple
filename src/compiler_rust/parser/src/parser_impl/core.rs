@@ -934,6 +934,19 @@ impl<'a> Parser<'a> {
                     self.expect(&TokenKind::Colon)?;
                     let block = self.parse_block()?;
                     Ok(Node::Expression(Expr::UnsafeBlock(block.statements)))
+                } else if self.peek_is(&TokenKind::LParen) {
+                    // Capability-scoped form:
+                    // `unsafe(capabilities: [ffi, raw_ptr]): ...`
+                    //
+                    // The seed AST records the unsafe block but does not yet
+                    // carry capability names. Parse the complete call-shaped
+                    // header so execution never mistakes `unsafe` for a
+                    // runtime function; the self-hosted HIR owns capability
+                    // preservation and enforcement.
+                    let _capability_header = self.parse_expression()?;
+                    self.expect(&TokenKind::Colon)?;
+                    let block = self.parse_block()?;
+                    Ok(Node::Expression(Expr::UnsafeBlock(block.statements)))
                 } else {
                     self.parse_expression_or_assignment()
                 }

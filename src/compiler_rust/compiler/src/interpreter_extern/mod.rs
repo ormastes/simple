@@ -115,6 +115,7 @@ pub mod net_tls_client;
 pub mod i18n;
 pub mod native_sffi;
 pub mod package;
+pub mod packed_span;
 pub mod regex;
 pub mod hosted;
 pub mod ast_sffi;
@@ -1610,6 +1611,15 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_package_mkdir_all", package::mkdir_all);
     insert_simple!("rt_package_remove_dir_all", package::remove_dir_all);
     insert_simple!("rt_package_sha256", package::sha256);
+    insert_simple!("rt_packed_span_v1_resolve_base", packed_span::rt_packed_span_v1_resolve_base_fn);
+    insert_simple!("rt_packed_span_v1_probe_verdict", packed_span::rt_packed_span_v1_probe_verdict_fn);
+    insert_simple!("rt_packed_span_v1_flags_bits", packed_span::rt_packed_span_v1_flags_bits_fn);
+    insert_simple!("rt_packed_span_v1_last_verdict", packed_span::rt_packed_span_v1_last_verdict_fn);
+    insert_simple!("rt_packed_span_v1_last_rejection", packed_span::rt_packed_span_v1_last_rejection_fn);
+    insert_simple!("rt_packed_span_v1_rejected_count", packed_span::rt_packed_span_v1_rejected_count_fn);
+    insert_simple!("rt_packed_span_v1_resolve_count", packed_span::rt_packed_span_v1_resolve_count_fn);
+    insert_simple!("rt_packed_span_v1_admitted_element_count", packed_span::rt_packed_span_v1_admitted_element_count_fn);
+    insert_simple!("rt_packed_span_v1_struct_size", packed_span::rt_packed_span_v1_struct_size_fn);
     insert_simple!("rt_path_absolute", file_io::rt_path_absolute);
     insert_simple!("rt_path_basename", file_io::rt_path_basename);
     insert_simple!("rt_path_dirname", file_io::rt_path_dirname);
@@ -3381,6 +3391,23 @@ mod tests {
         let enums = HashMap::new();
         let impl_methods = HashMap::new();
         assert!(handler(&[], &mut env, &mut functions, &mut classes, &enums, &impl_methods).is_err());
+    }
+
+    #[test]
+    fn packed_span_contract_family_is_registered() {
+        for symbol in [
+            "rt_packed_span_v1_resolve_base",
+            "rt_packed_span_v1_probe_verdict",
+            "rt_packed_span_v1_flags_bits",
+            "rt_packed_span_v1_last_verdict",
+            "rt_packed_span_v1_last_rejection",
+            "rt_packed_span_v1_rejected_count",
+            "rt_packed_span_v1_resolve_count",
+            "rt_packed_span_v1_admitted_element_count",
+            "rt_packed_span_v1_struct_size",
+        ] {
+            assert!(EXTERN_DISPATCH.contains_key(symbol), "missing {symbol}");
+        }
     }
 
     #[test]

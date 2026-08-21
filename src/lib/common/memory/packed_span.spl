@@ -54,13 +54,21 @@
 # C-only refusals: -6 WRONG_BASIS (backing is not a bytes array), -7 NO_BASE
 # (this engine has no contiguous buffer to expose — the tree-walk interpreter
 # boxes `[u8]` elements), -8 BAD_ARGS.
+@unsafe(reason: "raw packed-byte allocation ABI", capabilities: [ffi])
 extern fn rt_bytes_alloc(len: i64) -> [u8]
+@unsafe(reason: "raw packed-span pointer projection ABI", capabilities: [ffi])
 extern fn rt_packed_span_v1_resolve_base(arr: [u8], byte_offset: u32, byte_length: u32, element_count: u32, element_stride: u32) -> i64
+@unsafe(reason: "raw packed-span verdict ABI", capabilities: [ffi])
 extern fn rt_packed_span_v1_probe_verdict(basis_len: i64, byte_offset: u32, byte_length: u32, element_count: u32, element_stride: u32) -> i64
+@unsafe(reason: "raw packed-span flags ABI", capabilities: [ffi])
 extern fn rt_packed_span_v1_flags_bits() -> i64
+@unsafe(reason: "raw packed-span verdict ABI", capabilities: [ffi])
 extern fn rt_packed_span_v1_last_verdict() -> i64
+@unsafe(reason: "raw packed-span rejection ABI", capabilities: [ffi])
 extern fn rt_packed_span_v1_last_rejection() -> i64
+@unsafe(reason: "raw packed-span counter ABI", capabilities: [ffi])
 extern fn rt_packed_span_v1_rejected_count() -> i64
+@unsafe(reason: "raw packed-span layout ABI", capabilities: [ffi])
 extern fn rt_packed_span_v1_struct_size() -> i64
 
 # C-side verdicts (negated Simple codes, plus the C-only refusals).
@@ -204,7 +212,8 @@ fn packed_span_make(slot: i64, generation: u32, byte_offset: u32, element_count:
         element_count: element_count,
         element_stride: element_stride)
 
-# Turn an already-OK registry verdict into a real base address, or 0.
+# Turn an already-OK registry verdict into a real base address or a typed C
+# refusal. This performs exactly one C resolve and one base comparison.
 #
 # The caller MUST have obtained PACKED_SPAN_OK from `registry.resolve(r)`
 # first: this function performs the MEMORY half of the check (basis, bounds,
@@ -212,11 +221,16 @@ fn packed_span_make(slot: i64, generation: u32, byte_offset: u32, element_count:
 # (slot liveness, generation). Calling it without the registry verdict skips
 # the stale-generation gate, which C cannot see.
 #
-# Returns 0 on any refusal. A refusal is never silent: read
-# `packed_span_last_verdict()` for the typed code and
-# `packed_span_rejected_count()` for the counter.
-fn packed_span_resolve_base(backing: [u8], r: BufferSpanRef) -> i64:
-    rt_packed_span_v1_resolve_base(backing, r.byte_offset, r.byte_length, r.element_count, r.element_stride)
+# The verdict is read only on the failure branch; success does not perform a
+# second lookup, validation pass, allocation, or hash.
+fn packed_span_resolve_base(backing: [u8], r: BufferSpanRef) -> Result<i64, i64>:
+    var base: i64 = 0
+    unsafe(capabilities: [ffi]):
+        base = rt_packed_span_v1_resolve_base(backing, r.byte_offset, r.byte_length, r.element_count, r.element_stride)
+    if base != 0:
+        return Ok(base)
+    unsafe(capabilities: [ffi]):
+        Err(rt_packed_span_v1_last_verdict())
 
 # Allocate a zeroed BYTES-BASIS buffer for probes and specs.
 #
@@ -229,31 +243,38 @@ fn packed_span_resolve_base(backing: [u8], r: BufferSpanRef) -> i64:
 # now confirmed to extend to push-built `[u8]`. Do not "simplify" this back to
 # a push loop: it silently turns every resolve into a refusal.
 fn packed_span_probe_bytes(n: i64) -> [u8]:
-    rt_bytes_alloc(n)
+    unsafe(capabilities: [ffi]):
+        rt_bytes_alloc(n)
 
 # Adjudicate a window against a declared basis length with NO base pointer.
 # `basis_len < 0` means "not a bytes basis" (verdict -6). This can never return
 # OK — the best verdict reachable is -7 NO_BASE — so it is a verdict oracle,
 # never a way to obtain a pointer.
 fn packed_span_probe_verdict(basis_len: i64, byte_offset: u32, byte_length: u32, element_count: u32, element_stride: u32) -> i64:
-    rt_packed_span_v1_probe_verdict(basis_len, byte_offset, byte_length, element_count, element_stride)
+    unsafe(capabilities: [ffi]):
+        rt_packed_span_v1_probe_verdict(basis_len, byte_offset, byte_length, element_count, element_stride)
 
 fn packed_span_last_verdict() -> i64:
-    rt_packed_span_v1_last_verdict()
+    unsafe(capabilities: [ffi]):
+        rt_packed_span_v1_last_verdict()
 
 fn packed_span_last_rejection() -> i64:
-    rt_packed_span_v1_last_rejection()
+    unsafe(capabilities: [ffi]):
+        rt_packed_span_v1_last_rejection()
 
 fn packed_span_rejected_count() -> i64:
-    rt_packed_span_v1_rejected_count()
+    unsafe(capabilities: [ffi]):
+        rt_packed_span_v1_rejected_count()
 
 fn packed_span_flags() -> i64:
-    rt_packed_span_v1_flags_bits()
+    unsafe(capabilities: [ffi]):
+        rt_packed_span_v1_flags_bits()
 
 # sizeof(SimplePackedSpanV1). 40 on LP64 — asserted by the spec so a silent
 # layout change cannot slip through.
 fn packed_span_abi_struct_size() -> i64:
-    rt_packed_span_v1_struct_size()
+    unsafe(capabilities: [ffi]):
+        rt_packed_span_v1_struct_size()
 
 # Which backend an OK verdict actually authorises — MEASURED, never asserted.
 #
@@ -268,10 +289,10 @@ fn packed_span_abi_struct_size() -> i64:
 # exists" made executable: the capability is proven per call, per engine.
 fn packed_span_backend_name() -> text:
     val probe = packed_span_probe_bytes(64)
-    val base = rt_packed_span_v1_resolve_base(probe, 0, 64, 16, 4)
-    if base != 0:
-        return "native-packed-v1"
-    "scalar-oracle"
+    val r = BufferSpanRef(object_slot: 0, object_generation: 0, byte_offset: 0, byte_length: 64, element_count: 16, element_stride: 4)
+    match packed_span_resolve_base(probe, r):
+        case Ok(_): "native-packed-v1"
+        case Err(_): "scalar-oracle"
 
 export PackedSpanRegistry, BufferSpanRef, packed_span_make, packed_span_backend_name
 export packed_span_resolve_base, packed_span_last_verdict, packed_span_last_rejection

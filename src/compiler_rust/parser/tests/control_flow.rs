@@ -25,6 +25,20 @@ fn parse_if_else_statement() {
 }
 
 #[test]
+fn parse_capability_scoped_unsafe_block() {
+    let items = parse(
+        "fn call_raw():\n    unsafe(capabilities: [ffi, raw_ptr]):\n        raw_call()",
+    );
+    let Node::Function(function) = &items[0] else {
+        panic!("expected function");
+    };
+    assert!(matches!(
+        &function.body.statements[0],
+        Node::Expression(simple_parser::ast::Expr::UnsafeBlock(_))
+    ));
+}
+
+#[test]
 fn parse_method_statement_after_trailing_or_condition() {
     parse_ok(
         "class Session:\n    me reload():\n        if is_http() or\n            is_https():\n            return self.begin_reload()\n        self.begin_navigation()\n",

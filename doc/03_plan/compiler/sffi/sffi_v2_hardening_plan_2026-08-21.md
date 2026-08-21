@@ -568,3 +568,11 @@ shim, generated unsafe raw declaration, generated validation/lift wrapper, and
 safe typed API. P0/P1 requirements and NFRs are final in the linked documents.
 Detailed P4 signing/trust deployment and P5 migration scheduling remain planned
 decisions; they must not delay P0 fail-closed behavior or be claimed complete.
+
+Packed-span resolution now exposes `Result<i64, i64>` instead of allowing the
+raw zero sentinel to escape as a usable address. The Simple wrapper performs
+one raw resolve and one success comparison; it queries the thread-local verdict
+only on failure. Capability-scoped unsafe blocks are parsed by the seed parser,
+and all nine packed-span functions are wired into the interpreter's static
+dispatch table. The focused parser/registration tests pass and the packed-span
+spec passes 25/25, including the one-check-per-batch performance assertion.
