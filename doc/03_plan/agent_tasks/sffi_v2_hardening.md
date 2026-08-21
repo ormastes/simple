@@ -82,3 +82,8 @@ passing placeholder.
     no extra hot-path call. Replace the two explicitly unsafe legacy plain
     adapters, migrate remaining event/input declarations, and bind signed
     artifact plus sanitizer evidence before classifying SDL2 as verified.
+13. SDL2 cached-event details now have exact precondition/lifetime contracts
+    and nine safe wrappers use minimal lexical FFI scopes without changing the
+    O(1), zero-allocation hot path. Next replace poll/wait's ambiguous zero
+    sentinel with typed status and migrate its raw compatibility consumers;
+    keep those adapters unsafe until that migration is complete.

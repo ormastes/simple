@@ -451,3 +451,20 @@ additional native call was added. The refreshed inventory records 159
 contracts are locally checked but the dynamically loaded SDL artifact is still
 unsigned and lacks sanitizer/proof receipts, so the SDL2 family is not fully
 verified.
+
+The canonical SDL2 cached-event detail boundary had 14 declarations carrying
+only a generic unsafe label, and nine otherwise validating Simple wrappers
+were themselves broadly unsafe. Each declaration now records its exact zero
+sentinel/precondition or borrowed-text lifetime, while the validating wrappers
+confine authority to nine lexical `unsafe(ffi)` call scopes. The legacy raw
+poll and winit-compatibility adapters remain unsafe because their zero sentinel
+still conflates provider absence with “no event”; the metadata documents that
+limitation rather than claiming a safe result.
+
+This slice deliberately preserves the hot path: event details still read the
+single cached `SDL_Event` in O(1), event text remains a borrowed zero-allocation
+view, and no native call, validity probe, lock, allocation, hash, or lookup was
+added. Simple syntax and the dedicated event contract/performance-shape audit
+pass. The refreshed inventory records 173 `unsafe_contract_declared` rows and
+303 `unsafe_contract_missing` rows. Provider signing and the ambiguous poll
+sentinel remain open, so SDL event handling is contracted but not verified.

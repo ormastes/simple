@@ -45,27 +45,27 @@ extern fn rt_sdl2_present_rgba(window_handle: i64, pixels: [i64], width: i64, he
 # Returns event type: 0=none, 1=quit, 2=keydown, 3=keyup,
 #   4=mousemotion, 5=mousedown, 6=mouseup, 7=mousewheel,
 #   8=windowevent, 9=textinput
-@unsafe(reason: "raw SDL2 provider ABI", capabilities: [ffi])
+@unsafe(reason: "raw SDL2 provider ABI; zero sentinel means no supported event or unavailable provider", capabilities: [ffi])
 extern fn rt_sdl2_poll_event() -> i64
-@unsafe(reason: "raw SDL2 provider ABI", capabilities: [ffi])
+@unsafe(reason: "raw SDL2 provider ABI; zero sentinel means timeout, no supported event, or unavailable provider", capabilities: [ffi])
 extern fn rt_sdl2_wait_event(timeout_ms: i64) -> i64
-@unsafe(reason: "raw SDL2 provider ABI", capabilities: [ffi])
+@unsafe(reason: "raw SDL2 provider ABI; zero sentinel requires the cached event to be keyboard input", capabilities: [ffi])
 extern fn rt_sdl2_event_key_code() -> i64
-@unsafe(reason: "raw SDL2 provider ABI", capabilities: [ffi])
+@unsafe(reason: "raw SDL2 provider ABI; zero sentinel requires the cached event to be keyboard input", capabilities: [ffi])
 extern fn rt_sdl2_event_key_sym() -> i64
-@unsafe(reason: "raw SDL2 provider ABI", capabilities: [ffi])
+@unsafe(reason: "raw SDL2 provider ABI; zero sentinel requires the cached event to be keyboard input", capabilities: [ffi])
 extern fn rt_sdl2_event_key_mod() -> i64
-@unsafe(reason: "raw SDL2 provider ABI", capabilities: [ffi])
+@unsafe(reason: "raw SDL2 provider ABI; nonnull borrowed text is valid until the next event poll", capabilities: [ffi])
 extern fn rt_sdl2_event_text() -> text
-@unsafe(reason: "raw SDL2 provider ABI", capabilities: [ffi])
+@unsafe(reason: "raw SDL2 provider ABI; zero sentinel requires the cached event to be mouse input", capabilities: [ffi])
 extern fn rt_sdl2_event_mouse_x() -> i64
-@unsafe(reason: "raw SDL2 provider ABI", capabilities: [ffi])
+@unsafe(reason: "raw SDL2 provider ABI; zero sentinel requires the cached event to be mouse input", capabilities: [ffi])
 extern fn rt_sdl2_event_mouse_y() -> i64
-@unsafe(reason: "raw SDL2 provider ABI", capabilities: [ffi])
+@unsafe(reason: "raw SDL2 provider ABI; zero sentinel requires the cached event to be a mouse button event", capabilities: [ffi])
 extern fn rt_sdl2_event_mouse_button() -> i64
-@unsafe(reason: "raw SDL2 provider ABI", capabilities: [ffi])
+@unsafe(reason: "raw SDL2 provider ABI; zero sentinel requires the cached event to be mouse wheel input", capabilities: [ffi])
 extern fn rt_sdl2_event_wheel_x() -> i64
-@unsafe(reason: "raw SDL2 provider ABI", capabilities: [ffi])
+@unsafe(reason: "raw SDL2 provider ABI; zero sentinel requires the cached event to be mouse wheel input", capabilities: [ffi])
 extern fn rt_sdl2_event_wheel_y() -> i64
 
 # --- Keyboard State (polled) ---
@@ -93,11 +93,11 @@ extern fn rt_sdl2_window_should_close() -> i64
 extern fn rt_sdl2_clear_quit()
 
 # --- Window Events ---
-@unsafe(reason: "raw SDL2 provider ABI", capabilities: [ffi])
+@unsafe(reason: "raw SDL2 provider ABI; zero sentinel requires the cached event to be a window event", capabilities: [ffi])
 extern fn rt_sdl2_event_window_event_id() -> i64
-@unsafe(reason: "raw SDL2 provider ABI", capabilities: [ffi])
+@unsafe(reason: "raw SDL2 provider ABI; zero sentinel requires the cached event to be a window event", capabilities: [ffi])
 extern fn rt_sdl2_event_window_data1() -> i64
-@unsafe(reason: "raw SDL2 provider ABI", capabilities: [ffi])
+@unsafe(reason: "raw SDL2 provider ABI; zero sentinel requires the cached event to be a window event", capabilities: [ffi])
 extern fn rt_sdl2_event_window_data2() -> i64
 
 # --- Window Properties ---
@@ -522,7 +522,6 @@ fn event_get_type_code(event: Event) -> i64:
     else:
         event.handle
 
-@unsafe(reason: "minimal direct SDL2 provider call", capabilities: [ffi])
 fn event_parse_type(type_code: i64) -> EventType:
     if type_code == 1:
         EventType.WindowCloseRequested
@@ -539,7 +538,9 @@ fn event_parse_type(type_code: i64) -> EventType:
     elif type_code == 7:
         EventType.MouseWheel
     elif type_code == 8:
-        val window_event = rt_sdl2_event_window_event_id()
+        var window_event: i64 = 0
+        unsafe(capabilities: [ffi]):
+            window_event = rt_sdl2_event_window_event_id()
         if window_event == 4:
             EventType.WindowMoved
         elif window_event == 5 or window_event == 6:
@@ -567,65 +568,78 @@ fn event_destroy(event: Event) -> bool:
 
 # --- Window Event Detail Wrappers ---
 
-@unsafe(reason: "minimal direct SDL2 provider call", capabilities: [ffi])
 fn event_window_resized(event: Event) -> Size:
     if not event.is_valid:
         Size(width: 0, height: 0)
     else:
-        val w = rt_sdl2_event_window_data1()
-        val h = rt_sdl2_event_window_data2()
+        var w: i64 = 0
+        var h: i64 = 0
+        unsafe(capabilities: [ffi]):
+            w = rt_sdl2_event_window_data1()
+            h = rt_sdl2_event_window_data2()
         Size(width: w, height: h)
 
-@unsafe(reason: "minimal direct SDL2 provider call", capabilities: [ffi])
 fn event_window_moved(event: Event) -> Position:
     if not event.is_valid:
         Position(x: 0, y: 0)
     else:
-        val px = rt_sdl2_event_window_data1()
-        val py = rt_sdl2_event_window_data2()
+        var px: i64 = 0
+        var py: i64 = 0
+        unsafe(capabilities: [ffi]):
+            px = rt_sdl2_event_window_data1()
+            py = rt_sdl2_event_window_data2()
         Position(x: px, y: py)
 
-@unsafe(reason: "minimal direct SDL2 provider call", capabilities: [ffi])
 fn event_window_focused(event: Event) -> bool:
     if not event.is_valid:
         false
     else:
         # SDL_WINDOWEVENT_FOCUS_GAINED = 12
-        rt_sdl2_event_window_event_id() == 12
+        var event_id: i64 = 0
+        unsafe(capabilities: [ffi]):
+            event_id = rt_sdl2_event_window_event_id()
+        event_id == 12
 
 fn event_window_scale_factor(event: Event) -> f64:
     1.0
 
 # --- Keyboard Event Detail Wrappers ---
 
-@unsafe(reason: "minimal direct SDL2 provider call", capabilities: [ffi])
 fn event_keyboard_input(event: Event) -> KeyboardEvent:
     if not event.is_valid:
         KeyboardEvent(scancode: 0, virtual_key: VirtualKey.Unknown, state: KeyState.Released, modifiers: 0)
     else:
-        val scancode = rt_sdl2_event_key_code()
-        val keysym = rt_sdl2_event_key_sym()
+        var scancode: i64 = 0
+        var keysym: i64 = 0
+        var raw_modifiers: i64 = 0
+        unsafe(capabilities: [ffi]):
+            scancode = rt_sdl2_event_key_code()
+            keysym = rt_sdl2_event_key_sym()
+            raw_modifiers = rt_sdl2_event_key_mod()
         val vkey = parse_virtual_key(keysym)
         # event.handle stores the SDL2 event type code (2=keydown, 3=keyup)
         val state = if event.handle == 2: KeyState.Pressed else: KeyState.Released
-        val mods = sdl2_normalize_modifiers(rt_sdl2_event_key_mod())
+        val mods = sdl2_normalize_modifiers(raw_modifiers)
         KeyboardEvent(scancode: scancode, virtual_key: vkey, state: state, modifiers: mods)
 
-@unsafe(reason: "minimal direct SDL2 provider call", capabilities: [ffi])
 fn event_received_character(event: Event) -> text:
     if event.is_valid and event.handle == 9:
-        rt_sdl2_event_text()
+        var value = ""
+        unsafe(capabilities: [ffi]):
+            value = rt_sdl2_event_text()
+        value
     else:
         ""
 
 # --- Mouse Event Detail Wrappers ---
 
-@unsafe(reason: "minimal direct SDL2 provider call", capabilities: [ffi])
 fn event_mouse_button(event: Event) -> MouseButtonEvent:
     if not event.is_valid:
         MouseButtonEvent(button: MouseButton.Left, state: KeyState.Released)
     else:
-        val btn_code = rt_sdl2_event_mouse_button()
+        var btn_code: i64 = 0
+        unsafe(capabilities: [ffi]):
+            btn_code = rt_sdl2_event_mouse_button()
         val button = if btn_code == 0:
             MouseButton.Left
         elif btn_code == 1:
@@ -638,22 +652,26 @@ fn event_mouse_button(event: Event) -> MouseButtonEvent:
         val state = if event.handle == 5: KeyState.Pressed else: KeyState.Released
         MouseButtonEvent(button: button, state: state)
 
-@unsafe(reason: "minimal direct SDL2 provider call", capabilities: [ffi])
 fn event_mouse_moved(event: Event) -> MousePosition:
     if not event.is_valid:
         MousePosition(x: 0.0, y: 0.0)
     else:
-        val mx = rt_sdl2_event_mouse_x()
-        val my = rt_sdl2_event_mouse_y()
+        var mx: i64 = 0
+        var my: i64 = 0
+        unsafe(capabilities: [ffi]):
+            mx = rt_sdl2_event_mouse_x()
+            my = rt_sdl2_event_mouse_y()
         MousePosition(x: mx * 1.0, y: my * 1.0)
 
-@unsafe(reason: "minimal direct SDL2 provider call", capabilities: [ffi])
 fn event_mouse_wheel(event: Event) -> MouseWheel:
     if not event.is_valid:
         MouseWheel(delta_x: 0.0, delta_y: 0.0)
     else:
-        val wx = rt_sdl2_event_wheel_x()
-        val wy = rt_sdl2_event_wheel_y()
+        var wx: i64 = 0
+        var wy: i64 = 0
+        unsafe(capabilities: [ffi]):
+            wx = rt_sdl2_event_wheel_x()
+            wy = rt_sdl2_event_wheel_y()
         MouseWheel(delta_x: wx * 1.0, delta_y: wy * 1.0)
 
 # --- Keyboard Events ---
