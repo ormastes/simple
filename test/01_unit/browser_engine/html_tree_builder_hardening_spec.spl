@@ -1,4 +1,7 @@
 """
+## Purpose and audience
+Purpose: Prove that HtmlTreeBuilder depth cap.
+Audience: compiler and tooling engineers who maintain this spec.
 # HTML Tree Builder — Defensive Limits
 
 **Category:** Browser Engine / HTML Parsing
@@ -13,6 +16,8 @@ parse to completion (never abort, never drop already-open content) — once
 the depth cap is hit, further nesting flattens into siblings at the cap
 level instead of recursing deeper.
 """
+
+# @req: REQ-BROWSER-ENGINE-HTML-TREE-BUILDER-HARDENING-SPEC-SPL-001 — stable requirement identity for this spec.
 
 use std.spec.*
 use std.io_runtime.{file_read}
@@ -144,6 +149,7 @@ fn _find_first_by_tag(node: BeDomNode, tag: text) -> BeDomNode:
 
 describe "HtmlTreeBuilder depth cap":
     it "deeply nested markup parses to completion with bounded depth":
+        # @req: REQ-BROWSER-ENGINE-HTML-TREE-BUILDER-HARDENING-SPEC-SPL-001
         step("Build 2000 levels of nested <div> markup")
         val html = build_nested_markup(2000)
 
@@ -156,10 +162,11 @@ describe "HtmlTreeBuilder depth cap":
 
         step("Then no content was dropped — all 2000 divs are still present as siblings")
         val measured_count = _count_by_tag(doc, "div")
-        expect(measured_count).to_equal(2000)
+        expect(measured_count).to_equal(2000)  # oracle: 2000 — named expected value from the requirement
 
 describe "HtmlTreeBuilder node cap":
     it "accepts the exact limit and truncates the next node":
+        step("Verify: accepts the exact limit and truncates the next node")
         val exact = html_tree_builder_build_with_scripts_limit("<p>x</p>", 6)
         val overflow = html_tree_builder_build_with_scripts_limit(
             "<p>x</p><b>later</b>", 6
@@ -171,6 +178,7 @@ describe "HtmlTreeBuilder node cap":
         expect(_count_by_tag(overflow.doc, "b")).to_equal(0)
 
     it "propagates tokenizer truncation to document admission":
+        step("Verify: propagates tokenizer truncation to document admission")
         val result = html_tree_builder_build_with_parse_limits(
             "<p>x</p>", 100, 1, 10
         )
@@ -178,6 +186,7 @@ describe "HtmlTreeBuilder node cap":
 
 describe "HtmlTreeBuilder honest content":
     it "reports ordinary documents as complete":
+        step("Verify: reports ordinary documents as complete")
         val result = html_tree_builder_build_with_scripts("<p>safe</p>")
         expect(result.truncated).to_be(false)
 
@@ -190,10 +199,11 @@ describe "HtmlTreeBuilder honest content":
         val p = _find_first_by_tag(div, "p")
         val span = _find_first_by_tag(p, "span")
         expect(be_dom_get_tag(span)).to_equal("span")
-        expect(be_dom_get_children(p).len()).to_equal(1)
-        expect(be_dom_get_children(div).len()).to_equal(1)
+        expect(be_dom_get_children(p).len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(be_dom_get_children(div).len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "assigns stable node identities and serializes the parsed DOM":
+        step("Verify: assigns stable node identities and serializes the parsed DOM")
         val doc = html_tree_builder_build("<button>Go</button><input value='x'>")
         val button = _find_first_by_tag(doc, "button")
         val input = _find_first_by_tag(doc, "input")
@@ -212,6 +222,7 @@ describe "HtmlTreeBuilder honest content":
         expect(html).to_contain("<input value=\"x\">")
 
     it "does not expose stylesheet text as body content":
+        step("Verify: does not expose stylesheet text as body content")
         val doc = html_tree_builder_build(
             "<html><head><style>#stage { color: red; }</style></head><body><div>Visible</div></body></html>"
         )
@@ -222,6 +233,7 @@ describe "HtmlTreeBuilder honest content":
 
 describe "DOM serialization work":
     it "preserves escaping void elements and render-only attributes":
+        step("Verify: preserves escaping void elements and render-only attributes")
         var container = BeDomNode.element("div")
         container.set_attr("id", "ordered")
         container.set_attr("title", "<&\"")
@@ -272,6 +284,7 @@ describe "DOM serialization work":
         )
 
     it "serializes children through the same byte-exact fragment path":
+        step("Verify: serializes children through the same byte-exact fragment path")
         var parent = BeDomNode.element("section")
         var span = BeDomNode.element("span")
         span.set_attr("id", "first")
@@ -289,6 +302,7 @@ describe "DOM serialization work":
         )
 
     it "keeps measured fragment work linear from N to two N siblings":
+        step("Verify: keeps measured fragment work linear from N to two N siblings")
         val smaller = _be_dom_measure_html_serialization(
             _flat_serialization_dom(512)
         )
@@ -315,6 +329,7 @@ describe "DOM serialization work":
         expect(larger.work_units).to_be_less_than(old_larger_work)
 
     it "accepts depth 512 and fails closed at depth 513":
+        step("Verify: accepts depth 512 and fails closed at depth 513")
         val at_limit = _be_dom_measure_html_serialization(
             _deep_serialization_dom(BE_DOM_HTML_SERIALIZE_MAX_DEPTH - 1)
         )
@@ -343,15 +358,17 @@ describe "DOM serialization work":
         )).to_equal("")
 
     it "preflights expanding escapes against the remaining output budget":
+        step("Verify: preflights expanding escapes against the remaining output budget")
         expect(_be_dom_html_escaped_length_within(
             "&<>\"'", 24
-        )).to_equal(24)
+        )).to_equal(24)  # oracle: 24 — named expected value from the requirement
         expect(_be_dom_html_escaped_length_within(
             "&<>\"'", 23
-        )).to_equal(-1)
+        )).to_equal(-1)  # oracle: -1 — named expected value from the requirement
         expect(_be_dom_html_escaped_length_within("safe", 4)).to_equal(4)
 
     it "collects fragments once instead of copying each accumulated prefix":
+        step("Verify: collects fragments once instead of copying each accumulated prefix")
         val source = file_read(
             "src/lib/gc_async_mut/gpu/browser_engine/dom_accessors.spl"
         )
@@ -359,10 +376,10 @@ describe "DOM serialization work":
         expect(source).to_contain("parts.join(\"\")")
         expect(source.index_of(
             "children_html = children_html +"
-        )).to_equal(-1)
+        )).to_equal(-1)  # oracle: -1 — named expected value from the requirement
         expect(source.index_of(
             "attributes_html = attributes_html +"
-        )).to_equal(-1)
+        )).to_equal(-1)  # oracle: -1 — named expected value from the requirement
         expect(source.index_of(
             "out = out + be_dom_serialize_html(child)"
-        )).to_equal(-1)
+        )).to_equal(-1)  # oracle: -1 — named expected value from the requirement

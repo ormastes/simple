@@ -1,3 +1,10 @@
+"""
+## Purpose and audience
+Purpose: Prove that cross-document access is refused at the call site.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+
+# @req: REQ-BROWSER-ENGINE-SECURITY-001 — stable requirement identity for this spec.
 # @cover src/lib/gc_async_mut/gpu/browser_engine/browsing_context.spl 80%
 # @cover src/lib/gc_async_mut/gpu/browser_engine/script/storage_api.spl 60%
 # @cover src/lib/gc_async_mut/gpu/browser_engine/script/clipboard_api.spl 60%
@@ -112,6 +119,8 @@ fn secure_cookie(name: text, value: text) -> Cookie:
 # ============================================================================
 # 1. Cross-document access
 # ============================================================================
+use std.spec.step
+
 
 describe "cross-document access is refused at the call site":
     """
@@ -124,36 +133,44 @@ describe "cross-document access is refused at the call site":
     """
 
     it "the owning origin reads its own document text":
+        step("Verify: the owning origin reads its own document text")
+        # @req: REQ-BROWSER-ENGINE-SECURITY-001
         val ctx = context_with_alice_document()
         val got = ctx.read_document_text(alice_origin(), "alice-page")
         expect(got).to_equal("BANK-BALANCE-4242")
 
     it "a different host reads the empty text, not the content":
+        step("Verify: a different host reads the empty text, not the content")
         val ctx = context_with_alice_document()
         val got = ctx.read_document_text(bob_origin(), "alice-page")
         expect(got).to_equal("")
 
     it "a different scheme on the same host is still refused":
+        step("Verify: a different scheme on the same host is still refused")
         val ctx = context_with_alice_document()
         val got = ctx.read_document_text(alice_http_origin(), "alice-page")
         expect(got).to_equal("")
 
     it "a different port on the same host and scheme is still refused":
+        step("Verify: a different port on the same host and scheme is still refused")
         val ctx = context_with_alice_document()
         val got = ctx.read_document_text(alice_other_port_origin(), "alice-page")
         expect(got).to_equal("")
 
     it "a refused root read yields an empty document node":
+        step("Verify: a refused root read yields an empty document node")
         val ctx = context_with_alice_document()
         val root = ctx.read_document_root(bob_origin(), "alice-page")
-        expect(root.children.len()).to_equal(0)
+        expect(root.children.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "the granted root read yields the real tree":
+        step("Verify: the granted root read yields the real tree")
         val ctx = context_with_alice_document()
         val root = ctx.read_document_root(alice_origin(), "alice-page")
-        expect(root.children.len()).to_equal(1)
+        expect(root.children.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "an unknown document name is refused rather than defaulted":
+        step("Verify: an unknown document name is refused rather than defaulted")
         val ctx = context_with_alice_document()
         val allowed = ctx.can_access(alice_origin(), "no-such-page")
         expect(allowed).to_equal(false)
@@ -174,36 +191,43 @@ describe "response reads are gated by CORS":
     """
 
     it "a same-origin body is readable with no CORS header at all":
+        step("Verify: a same-origin body is readable with no CORS header at all")
         val ctx = BrowsingContext.create()
         val got = ctx.read_response(alice_origin(), alice_origin(), "", false, "PAYLOAD")
         expect(got.body).to_equal("PAYLOAD")
 
     it "a cross-origin body with no grant is empty":
+        step("Verify: a cross-origin body with no grant is empty")
         val ctx = BrowsingContext.create()
         val got = ctx.read_response(alice_origin(), bob_origin(), "", false, "PAYLOAD")
         expect(got.body).to_equal("")
 
     it "a cross-origin body with no grant is marked refused":
+        step("Verify: a cross-origin body with no grant is marked refused")
         val ctx = BrowsingContext.create()
         val got = ctx.read_response(alice_origin(), bob_origin(), "", false, "PAYLOAD")
         assert_false(got.allowed)
 
     it "an exact Access-Control-Allow-Origin echo admits the read":
+        step("Verify: an exact Access-Control-Allow-Origin echo admits the read")
         val ctx = BrowsingContext.create()
         val got = ctx.read_response(alice_origin(), bob_origin(), "https://alice.example", false, "PAYLOAD")
         expect(got.body).to_equal("PAYLOAD")
 
     it "a grant addressed to somebody else does not admit the read":
+        step("Verify: a grant addressed to somebody else does not admit the read")
         val ctx = BrowsingContext.create()
         val got = ctx.read_response(alice_origin(), bob_origin(), "https://mallory.example", false, "PAYLOAD")
         expect(got.body).to_equal("")
 
     it "wildcard with credentials is refused":
+        step("Verify: wildcard with credentials is refused")
         val ctx = BrowsingContext.create()
         val got = ctx.read_response(alice_origin(), bob_origin(), "*", true, "PAYLOAD")
         expect(got.body).to_equal("")
 
     it "the CorsChecker reaches the same verdict as the context":
+        step("Verify: the CorsChecker reaches the same verdict as the context")
         val checker = CorsChecker.new("https://alice.example")
         val target = Url(
             scheme: "https", host: "bob.example", port: 443,
@@ -213,6 +237,7 @@ describe "response reads are gated by CORS":
         expect(allowed).to_equal(true)
 
     it "the CorsChecker refuses a body with no grant":
+        step("Verify: the CorsChecker refuses a body with no grant")
         val checker = CorsChecker.new("https://alice.example")
         val target = Url(
             scheme: "https", host: "bob.example", port: 443,
@@ -235,24 +260,28 @@ describe "cookie attachment is gated by the cookie policy":
     """
 
     it "a plain cookie is visible to script":
+        step("Verify: a plain cookie is visible to script")
         var ctx = BrowsingContext.create()
         ctx.set_cookie_from(plain_cookie("sid", "s1"), alice_origin(), 0)
         val seen = ctx.document_cookie(alice_origin(), "/", 0)
         expect(seen).to_equal("sid=s1")
 
     it "an HttpOnly cookie is invisible to script at the point script reads it":
+        step("Verify: an HttpOnly cookie is invisible to script at the point script reads it")
         var ctx = BrowsingContext.create()
         ctx.set_cookie_from(http_only_cookie("auth", "TOKEN"), alice_origin(), 0)
         val seen = ctx.document_cookie(alice_origin(), "/", 0)
         expect(seen).to_equal("")
 
     it "the same HttpOnly cookie is still attached to a network request":
+        step("Verify: the same HttpOnly cookie is still attached to a network request")
         var ctx = BrowsingContext.create()
         ctx.set_cookie_from(http_only_cookie("auth", "TOKEN"), alice_origin(), 0)
         val header = ctx.request_cookie_header(alice_origin(), "/", Some(alice_origin()), "GET", true, 0)
         expect(header).to_equal("auth=TOKEN")
 
     it "a host-only cookie stays on the host that set it":
+        step("Verify: a host-only cookie stays on the host that set it")
         var ctx = BrowsingContext.create()
         ctx.set_cookie_from(plain_cookie("sid", "s1"), alice_origin(), 0)
         val network_header = ctx.request_cookie_header(
@@ -262,18 +291,21 @@ describe "cookie attachment is gated by the cookie policy":
         expect(ctx.document_cookie(bob_origin(), "/", 0)).to_equal("")
 
     it "a Secure cookie is attached over https":
+        step("Verify: a Secure cookie is attached over https")
         var ctx = BrowsingContext.create()
         ctx.set_cookie_from(secure_cookie("sec", "S"), alice_origin(), 0)
         val header = ctx.request_cookie_header(alice_origin(), "/", Some(alice_origin()), "GET", true, 0)
         expect(header).to_equal("sec=S")
 
     it "a Secure cookie is NOT attached over a non-secure scheme":
+        step("Verify: a Secure cookie is NOT attached over a non-secure scheme")
         var ctx = BrowsingContext.create()
         ctx.set_cookie_from(secure_cookie("sec", "S"), alice_origin(), 0)
         val header = ctx.request_cookie_header(alice_http_origin(), "/", Some(alice_http_origin()), "GET", true, 0)
         expect(header).to_equal("")
 
     it "a Secure cookie cannot even be set from a non-secure origin":
+        step("Verify: a Secure cookie cannot even be set from a non-secure origin")
         var ctx = BrowsingContext.create()
         val verdict = ctx.set_cookie_from(secure_cookie("sec", "S"), alice_http_origin(), 0)
         expect(verdict.reason).to_equal("secure-attribute-requires-secure-origin")
@@ -292,24 +324,28 @@ describe "storage is partitioned per origin":
     """
 
     it "an origin reads back what it wrote":
+        step("Verify: an origin reads back what it wrote")
         var ctx = BrowsingContext.create()
         ctx.storage_set(alice_origin(), "k", "alice-value")
         val got = ctx.storage_get(alice_origin(), "k")
         expect(got).to_equal("alice-value")
 
     it "another origin does not see it":
+        step("Verify: another origin does not see it")
         var ctx = BrowsingContext.create()
         ctx.storage_set(alice_origin(), "k", "alice-value")
         val got = ctx.storage_get(bob_origin(), "k")
         expect(got).to_equal("")
 
     it "a different port is a different partition":
+        step("Verify: a different port is a different partition")
         var ctx = BrowsingContext.create()
         ctx.storage_set(alice_origin(), "k", "alice-value")
         val got = ctx.storage_get(alice_other_port_origin(), "k")
         expect(got).to_equal("")
 
     it "writes from two origins do not overwrite each other":
+        step("Verify: writes from two origins do not overwrite each other")
         var ctx = BrowsingContext.create()
         ctx.storage_set(alice_origin(), "k", "alice-value")
         ctx.storage_set(bob_origin(), "k", "bob-value")
@@ -317,16 +353,19 @@ describe "storage is partitioned per origin":
         expect(got).to_equal("alice-value")
 
     it "the partition key is the serialized origin":
+        step("Verify: the partition key is the serialized origin")
         val ctx = BrowsingContext.create()
         val key = ctx.storage_partition_key(alice_origin())
         expect(key).to_equal("https://alice.example")
 
     it "two identical origins share a partition":
+        step("Verify: two identical origins share a partition")
         val ctx = BrowsingContext.create()
         val shared = ctx.shares_storage_with(alice_origin(), alice_origin())
         expect(shared).to_equal(true)
 
     it "two different origins do not share a partition":
+        step("Verify: two different origins do not share a partition")
         val ctx = BrowsingContext.create()
         val shared = ctx.shares_storage_with(alice_origin(), bob_origin())
         expect(shared).to_equal(false)
@@ -345,6 +384,7 @@ describe "permission-gated calls are default-deny":
     """
 
     it "clipboard read from an ungranted origin returns the empty text":
+        step("Verify: clipboard read from an ungranted origin returns the empty text")
         var clip = BrowserClipboard.new()
         clipboard_write_text(clip, "COPIED-SECRET")
         val perms = PermissionSet.create()
@@ -352,6 +392,7 @@ describe "permission-gated calls are default-deny":
         expect(got).to_equal("")
 
     it "clipboard read from a granted origin returns the content":
+        step("Verify: clipboard read from a granted origin returns the content")
         var clip = BrowserClipboard.new()
         clipboard_write_text(clip, "COPIED-SECRET")
         var perms = PermissionSet.create()
@@ -360,6 +401,7 @@ describe "permission-gated calls are default-deny":
         expect(got).to_equal("COPIED-SECRET")
 
     it "a grant to one origin does not admit another origin":
+        step("Verify: a grant to one origin does not admit another origin")
         var clip = BrowserClipboard.new()
         clipboard_write_text(clip, "COPIED-SECRET")
         var perms = PermissionSet.create()
@@ -368,6 +410,7 @@ describe "permission-gated calls are default-deny":
         expect(got).to_equal("")
 
     it "an ungranted clipboard write is refused and leaves the buffer alone":
+        step("Verify: an ungranted clipboard write is refused and leaves the buffer alone")
         var clip = BrowserClipboard.new()
         clipboard_write_text(clip, "ORIGINAL")
         val perms = PermissionSet.create()
@@ -375,6 +418,7 @@ describe "permission-gated calls are default-deny":
         expect(ok).to_equal(false)
 
     it "the buffer really is unchanged after a refused write":
+        step("Verify: the buffer really is unchanged after a refused write")
         var clip = BrowserClipboard.new()
         clipboard_write_text(clip, "ORIGINAL")
         val perms = PermissionSet.create()
@@ -383,23 +427,27 @@ describe "permission-gated calls are default-deny":
         expect(got).to_equal("ORIGINAL")
 
     it "geolocation is denied to an ungranted origin":
+        step("Verify: geolocation is denied to an ungranted origin")
         val perms = PermissionSet.create()
         val allowed = navigator_geolocation_allowed(perms, alice_origin())
         expect(allowed).to_equal(false)
 
     it "geolocation is allowed once granted to that origin":
+        step("Verify: geolocation is allowed once granted to that origin")
         var perms = PermissionSet.create()
         perms.grant(alice_origin(), "geolocation")
         val allowed = navigator_geolocation_allowed(perms, alice_origin())
         expect(allowed).to_equal(true)
 
     it "geolocation cannot be granted to a non-secure origin at all":
+        step("Verify: geolocation cannot be granted to a non-secure origin at all")
         var perms = PermissionSet.create()
         perms.grant(alice_http_origin(), "geolocation")
         val allowed = navigator_geolocation_allowed(perms, alice_http_origin())
         expect(allowed).to_equal(false)
 
     it "revoking removes the grant":
+        step("Verify: revoking removes the grant")
         var perms = PermissionSet.create()
         perms.grant(alice_origin(), "geolocation")
         perms.revoke(alice_origin(), "geolocation")
@@ -421,22 +469,26 @@ describe "an opaque origin gets nothing":
     """
 
     it "a data: URL has no storage partition key":
+        step("Verify: a data: URL has no storage partition key")
         val ctx = BrowsingContext.create()
         val key = ctx.storage_partition_key(opaque_data_origin())
         expect(key).to_equal("")
 
     it "a data: URL cannot write storage":
+        step("Verify: a data: URL cannot write storage")
         var ctx = BrowsingContext.create()
         val ok = ctx.storage_set(opaque_data_origin(), "k", "v")
         expect(ok).to_equal(false)
 
     it "a data: URL reads the empty text from storage":
+        step("Verify: a data: URL reads the empty text from storage")
         var ctx = BrowsingContext.create()
         ctx.storage_set(opaque_data_origin(), "k", "v")
         val got = ctx.storage_get(opaque_data_origin(), "k")
         expect(got).to_equal("")
 
     it "two opaque origins do not share a storage partition":
+        step("Verify: two opaque origins do not share a storage partition")
         val ctx = BrowsingContext.create()
         val left = context_origin_from_url("data:text/html,a", "spec-op-1")
         val right = context_origin_from_url("data:text/html,a", "spec-op-2")
@@ -444,27 +496,32 @@ describe "an opaque origin gets nothing":
         expect(shared).to_equal(false)
 
     it "an opaque origin cannot set a cookie":
+        step("Verify: an opaque origin cannot set a cookie")
         var ctx = BrowsingContext.create()
         val verdict = ctx.set_cookie_from(plain_cookie("sid", "s1"), opaque_data_origin(), 0)
         expect(verdict.reason).to_equal("opaque-or-malformed-origin")
 
     it "an opaque origin is sent no cookies":
+        step("Verify: an opaque origin is sent no cookies")
         var ctx = BrowsingContext.create()
         ctx.set_cookie_from(plain_cookie("sid", "s1"), alice_origin(), 0)
         val header = ctx.request_cookie_header(opaque_data_origin(), "/", Some(opaque_data_origin()), "GET", true, 0)
         expect(header).to_equal("")
 
     it "an opaque origin cannot be granted a permission":
+        step("Verify: an opaque origin cannot be granted a permission")
         var perms = PermissionSet.create()
         perms.grant(opaque_data_origin(), "notifications")
-        expect(perms.granted_count()).to_equal(0)
+        expect(perms.granted_count()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "an opaque origin cannot read another document":
+        step("Verify: an opaque origin cannot read another document")
         val ctx = context_with_alice_document()
         val got = ctx.read_document_text(opaque_data_origin(), "alice-page")
         expect(got).to_equal("")
 
     it "an opaque origin cannot read a cross-origin response even with a null grant":
+        step("Verify: an opaque origin cannot read a cross-origin response even with a null grant")
         val ctx = BrowsingContext.create()
         val got = ctx.read_response(opaque_data_origin(), alice_origin(), "null", false, "PAYLOAD")
         expect(got.body).to_equal("")
