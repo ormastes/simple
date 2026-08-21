@@ -132,3 +132,12 @@ implementation-blocked-by-bootstrap-authority
   last to preserve ordinal ABI, and the stage-log diagnoser now recognizes the
   uppercase native-build summary (11 fixtures PASS). A fourth bootstrap run is
   prohibited by the three-cycle cap, so Stage 2-4 evidence remains pending.
+- progress: A fresh measured run admitted Stage 2, produced a canonical
+  planner-admission-v2 receipt, and replayed Stage 2 successfully under the
+  Stage-4 authorization. Explicit sibling-impl imports removed all prior
+  Stage-2 link failures.
+- blocker: Stage 3 now fails closed in HIR lowering with 410 distinct
+  file/type failures across 197 modules for seven imported types. This is a
+  broad self-host import/re-export resolution defect, not justification for
+  consumer-by-consumer imports or seed fallback. See
+  `stage3_selfhost_imported_type_resolution_cascade_2026-08-21.md`.
