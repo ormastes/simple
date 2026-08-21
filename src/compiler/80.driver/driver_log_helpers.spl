@@ -5,7 +5,6 @@
 
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.nogc_sync_mut.io.file_ops.{file_append}
-use std.nogc_sync_mut.io.stderr_ops.{stderr_flush}
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_stdout_flush()
@@ -31,6 +30,14 @@ var _g_phase_t0_ms: i64 = 0
 var _g_phase_t0_set: bool = false
 var _g_progress_path: text = ""
 var _g_progress_path_set: bool = false
+# Wall-clock of the previous log_build_progress line, so every [build] receipt
+# carries the cost of the unit that just finished. Without this a stage log
+# names the slow file but never says how slow: the parse phase emits one line
+# per file (662 in stage 1) with no timestamps at all, so "phase 1 is the
+# bottleneck" could only ever be established by sampling the log from outside
+# with `date`. `dt=` makes each file self-timing, which is the input any
+# front-end caching/sharding work has to be judged against.
+var _g_progress_prev_ms: i64 = -1
 var _g_phase_profile_fd: i64 = -2
 var _g_phase_profile_seq: i64 = 0
 
@@ -139,7 +146,10 @@ pub fn log_build_progress(
     # stage log for its whole run -- a stage that dies leaves no trail at all.
     # Emitted BEFORE the path check so progress does not depend on the env var,
     # and flushed because stage logs are files (block-buffered), not terminals.
-    print "[build] {phase} {_build_progress_number(done)}/{_build_progress_number(total)} step {_build_progress_number(tasks_done)}/{_build_progress_number(tasks_total)} {current}"
+    val now_ms = _phase_elapsed_ms()
+    val dt_ms = if _g_progress_prev_ms >= 0: now_ms - _g_progress_prev_ms else: 0
+    _g_progress_prev_ms = now_ms
+    print "[build] {phase} {_build_progress_number(done)}/{_build_progress_number(total)} step {_build_progress_number(tasks_done)}/{_build_progress_number(tasks_total)} +{now_ms}ms dt={dt_ms}ms {current}"
     rt_stdout_flush()
     if path == "":
         return
@@ -153,16 +163,8 @@ pub fn log_build_progress(
         if delta > 0: delta else: 0
     else:
         -1
-    val line = "event=build_progress phase={_build_progress_token(phase)} unit_kind={_build_progress_token(unit_kind)} done={_build_progress_number(done)} total={_build_progress_number(total)} remaining={_build_progress_number(remaining)} tasks_done={_build_progress_number(tasks_done)} tasks_total={_build_progress_number(tasks_total)} tasks_remaining={_build_progress_number(tasks_remaining)} failed={_build_progress_number(failed)} cached={_build_progress_number(cached)} current={_build_progress_token(current)} terminal={_build_progress_token(terminal)}\n"
-    # A native-build can spend minutes here with stdout/stderr redirected to a
-    # stage log.  Emit and flush every already-cadenced progress event even
-    # when no optional SIMPLE_BUILD_PROGRESS_EVENTS file was configured, so a
-    # crash cannot leave a misleading zero-byte build log.
-    eprint(line)
-    stderr_flush()
-    val path = _build_progress_path()
-    if path != "":
-        val _ = file_append(path, line)
+    val line = "event=build_progress phase={_build_progress_token(phase)} unit_kind={_build_progress_token(unit_kind)} done={_build_progress_number(done)} total={_build_progress_number(total)} remaining={_build_progress_number(remaining)} tasks_done={_build_progress_number(tasks_done)} tasks_total={_build_progress_number(tasks_total)} tasks_remaining={_build_progress_number(tasks_remaining)} failed={_build_progress_number(failed)} cached={_build_progress_number(cached)} elapsed_ms={_build_progress_number(now_ms)} dt_ms={_build_progress_number(dt_ms)} current={_build_progress_token(current)} terminal={_build_progress_token(terminal)}\n"
+    val _ = file_append(path, line)
 
 pub fn log_module_surface_released(path: text, seq: i64):
     eprint("phase2:surface:file:released path={path} seq={seq}\n")
