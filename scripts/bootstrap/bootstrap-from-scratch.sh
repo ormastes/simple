@@ -116,7 +116,9 @@ Options:
                      phase verification; full inventories every eligible build
                      and test to a terminal summary even after task crashes.
   --stop-after-stage2
-                     Build and admit Stage 2, then stop before Stage 3.
+                     With --full-bootstrap, build and admit the measured
+                     Stage-2 trust root, then stop before Stage 3. This is the
+                     sole receipt-free bootstrap lane.
   --resume-stage3-from-admitted=<output>
                      Resume only Stage 3 from OUTPUT's frozen admitted Stage 2
                      using a new one-thread recovery transcript/evidence lane.
@@ -411,7 +413,7 @@ fi
 if [ "${bootstrap_stage2_trust_root}" -eq 0 ]; then
   case "${bootstrap_receipt_path}" in
     /*) ;;
-    *) bootstrap_receipt_path="${PWD}/${bootstrap_receipt_path}" ;;
+    *) bootstrap_receipt_path="$(pwd -P)/${bootstrap_receipt_path}" ;;
   esac
   bootstrap_receipt_target='//bootstrap:stage4'
   if [ "${stop_after_stage2}" -eq 1 ]; then
@@ -2329,6 +2331,7 @@ else
             echo 'schema=simple-bootstrap-stage2-parent-sanity-v1'
             echo 'stage2-sanity: pass'
             echo "candidate_sha256=${stage2_origin_sha_before}"
+            echo "admission_receipt_path=${stage2_admission_receipt_absolute}"
             echo "admission_receipt_sha256=$(bootstrap_stage3_hash_file "${stage2_admission_receipt_absolute}")"
           } >"${stage2_parent_sanity_tmp}"
           {
@@ -2336,6 +2339,7 @@ else
             echo 'stage2-provenance: pure-simple'
             echo 'authority=explicit-full-bootstrap-stage2-trust-root'
             echo "candidate_sha256=${stage2_origin_sha_before}"
+            echo "admission_receipt_path=${stage2_admission_receipt_absolute}"
             echo "source_snapshot_sha256=$(bootstrap_stage3_hash_file "${stage3_source_before}")"
             echo "runtime_snapshot_sha256=$(bootstrap_stage3_hash_file "${runtime_admitted_snapshot}")"
             echo "tool_authority_sha256=$(bootstrap_stage3_hash_file "${tool_authority_before}")"
@@ -3181,4 +3185,17 @@ fi
   echo "ERROR: current Stage 3 acceptance was not bound to verified Stage 4 evidence." >&2
   exit 2
 }
+
+# Refresh the textual evidence consumed by the lightweight push hook only
+# after every requested bootstrap phase and the Stage-3/4 acceptance binding
+# have succeeded. An ad-hoc successful bootstrap therefore admits the next
+# push without moving expensive compilation into the hook.
+if ! sh "${repo_root}/scripts/check/check-bootstrap-must-pass.shs" \
+  --record-bootstrap-success \
+  --output-dir "${output_dir}" \
+  --stage4-binary "${full_bin}" \
+  --stage4-provenance "${full_bin}.provenance.env"; then
+  echo "ERROR: bootstrap completed but mandatory-check evidence was not recorded." >&2
+  exit 1
+fi
 bootstrap_progress_mark complete ""
