@@ -1,0 +1,95 @@
+"""
+# Time Clock-Epoch Convergence
+
+Pins the EPOCH of each runtime time primitive so the engines cannot diverge
+again. Discovered by stream G2 (commit `47adbf730ca`) and measured on
+2026-08-10: the Rust interpreter's extern table returned WALL-CLOCK for
+`rt_time_now_nanos` / `rt_time_now_micros` (~1.786e18) while every other lane
+(runtime_native.c, runtime_time.c, unix_common.h, platform_win.h, and the
+pure-Simple `src/runtime/simple_core/core_process.spl`) returned
+CLOCK_MONOTONIC. A ~50-year gap behind one symbol name.
+
+Contract pinned here (matches `src/runtime/runtime.h:251-252` and the
+docstrings in `src/lib/nogc_sync_mut/io/time_ops.spl`):
+
+  * `rt_time_now_nanos`  -> MONOTONIC nanoseconds.  Durations only.
+  * `rt_time_now_micros` -> MONOTONIC microseconds. Durations only.
+  * `rt_time_now_unix_micros` -> WALL-CLOCK microseconds since the Unix epoch.
+
+Every in-tree caller of the two monotonic names uses the reading as a DELTA
+(`now - started`), so monotonic is the correct convergence target and the
+wall-clock/absolute split already has a correctly-named home in
+`rt_time_now_unix_micros`.
+
+The discriminator is a magnitude band, not a symbol sweep: a wall-clock nanos
+reading is ~1.8e18 and a monotonic one is at most a machine uptime (< 1e17,
+i.e. under ~3 years of nanoseconds). Swapping the clock source in any lane
+moves the reading across that band by ~5 orders of magnitude, so this oracle
+cannot pass on the wrong clock.
+"""
+
+use std.spec
+
+extern fn rt_time_now_nanos() -> i64
+extern fn rt_time_now_micros() -> i64
+extern fn rt_time_now_unix_micros() -> i64
+
+# A monotonic nanos reading is bounded by machine uptime. 1e17 ns is ~3.2
+# years of continuous uptime -- comfortably above any real box, and ~18x
+# below a wall-clock nanos reading (1.786e18 on 2026-08-10).
+val MONOTONIC_NANOS_CEILING: i64 = 100000000000000000
+
+# Same band one thousandth down, for the micros variant.
+val MONOTONIC_MICROS_CEILING: i64 = 100000000000000
+
+# A wall-clock micros reading must be after 2020-01-01 (1.577e15).
+val WALLCLOCK_MICROS_FLOOR: i64 = 1577836800000000
+
+describe "runtime time primitives have pinned, convergent epochs":
+
+    it "rt_time_now_nanos is MONOTONIC, not wall-clock":
+        val n = rt_time_now_nanos()
+        expect(n >= 0).to_equal(true)
+        # RED if the lane is wired to CLOCK_REALTIME / SystemTime::UNIX_EPOCH.
+        expect(n < MONOTONIC_NANOS_CEILING).to_equal(true)
+
+    it "rt_time_now_micros is MONOTONIC, not wall-clock":
+        val u = rt_time_now_micros()
+        expect(u >= 0).to_equal(true)
+        expect(u < MONOTONIC_MICROS_CEILING).to_equal(true)
+
+    it "rt_time_now_unix_micros is WALL-CLOCK, not monotonic":
+        # The mirror-image defect: a wall-clock name wired to a monotonic
+        # source. `src/compiler_rust/compiler/src/linker/native_binary/stubs.rs`
+        # does exactly this in the native-binary stub lane.
+        val w = rt_time_now_unix_micros()
+        expect(w > WALLCLOCK_MICROS_FLOOR).to_equal(true)
+
+    it "the monotonic and wall-clock families are separated by their epochs":
+        # The whole point of the convergence: the two families must NOT be
+        # interchangeable, and must be distinguishable at a glance.
+        val mono = rt_time_now_micros()
+        val wall = rt_time_now_unix_micros()
+        expect(wall > mono).to_equal(true)
+        expect(wall - mono > WALLCLOCK_MICROS_FLOOR / 2).to_equal(true)
+
+    it "monotonic readings are non-decreasing and usable as durations":
+        val t0 = rt_time_now_nanos()
+        var spin = 0
+        for i in 0..2000:
+            spin = spin + i
+        val t1 = rt_time_now_nanos()
+        expect(t1 >= t0).to_equal(true)
+        # A single spin loop cannot take an hour; catches a lane that mixes
+        # two different epochs across two calls to the SAME function.
+        expect(t1 - t0 < 3600000000000).to_equal(true)
+        expect(spin >= 0).to_equal(true)
+
+    it "nanos and micros agree with each other to within a second":
+        # Both must be on the SAME monotonic epoch, not two different ones.
+        val n = rt_time_now_nanos()
+        val u = rt_time_now_micros()
+        var skew = n / 1000 - u
+        if skew < 0:
+            skew = 0 - skew
+        expect(skew < 1000000).to_equal(true)
