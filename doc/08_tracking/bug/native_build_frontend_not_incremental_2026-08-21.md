@@ -433,6 +433,47 @@ hits=2, not a crash. It shells out rather than calling `cli_native_build`
 in-process because native-build forks a worker and the counters live in the
 child, whose stdout is the only place they are observable.
 
+### Step 4 done (2026-08-21): parse sharding across `--threads` worker processes
+Measured live on the 3-module fixture, cold cache, `--threads 2`:
+
+```
+[frontend-cache] hits=0 misses=1 parses=1     <- shard 0/2
+[parse-shard] done shard=0/2 parses=1
+[frontend-cache] hits=0 misses=2 parses=2     <- shard 1/2
+[parse-shard] done shard=1/2 parses=2
+[parse-shard] 2/2 shard(s) completed
+[frontend-cache] hits=3 misses=0 parses=0     <- the real build
+```
+
+Disjoint (1 + 2 = 3, no module parsed twice) and the real build then parsed
+nothing. The sharded binary is **byte-identical** to an unsharded, uncached
+build (`SIMPLE_PARSE_SHARDING=0 SIMPLE_FRONTEND_CACHE=0`), verified with
+`cmp` — 29,496 bytes both ways.
+
+- **Processes, not threads.** The flat AST pools are module-level globals, so
+  no shared mutable parser state may cross a boundary. Each shard is an
+  ordinary `native_build_worker.spl` child carrying `--parse-shard=<i>/<n>`.
+- **Ownership is a pure function of the module PATH** (djb2 over the path,
+  spelled out in `driver_source_pipeline_parsing.spl` rather than reusing
+  `rt_hash_text`, because the split must agree ACROSS PROCESSES and a seeded
+  or implementation-defined runtime hash would silently give two shards
+  different answers). Not the position in the discovered source list: the
+  closure walk can legitimately yield the same set in a different order
+  between processes, and a position split would then have two shards parse one
+  file and none parse another.
+- **A malformed shard spec owns EVERYTHING, not nothing.** A shard that
+  silently parsed no files would look like a fast success and leave the cache
+  empty — the hardest failure to notice.
+- **A failed shard is not fatal.** Its modules simply have no cache entry and
+  the real build parses them itself. Observed for real: before
+  `--parse-shard=` was added to the CLI validator, both shards died with
+  `unknown option` and the build still completed correctly at
+  `hits=0 misses=3 parses=3`. Sharding is a pure optimisation and must never
+  turn a working build into a broken one.
+- Spec: `test/02_integration/compiler/driver/native_build_parse_sharding_spec.spl`
+  (+ mirror): cold split then `parses=0`; byte-identical to unsharded; and the
+  same shard owns the same modules across two independent runs.
+
 Still to do:  (incl. dict encoders), then the full-closure round-trip gate (parse a real module, dump, reset,
 restore, rebuild through the bridge, compare), the cache wiring at the `:379`
 hook, and parse sharding across `--threads` worker processes.

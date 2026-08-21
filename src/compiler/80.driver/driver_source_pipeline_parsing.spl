@@ -10,6 +10,7 @@ use compiler.frontend.aspect_registry.{aspect_registry_promote_transient_owner}
 use compiler.frontend.effect_registry.{effect_registry_promote_transient_owner}
 use compiler.frontend.layer_eq_registry.{layer_eq_registry_promote_transient_owner}
 use compiler.core.ast.{ast_reset}
+use std.string_core.{char_code}
 use compiler.frontend.flat_ast_bridge.{flat_parse_module_body_calls}
 use compiler.core.parser.{par_had_error_get}
 use compiler.driver.driver_build.incremental.{native_build_cache_scope_key, native_build_compiler_identity}
@@ -40,6 +41,8 @@ use compiler.driver.driver_bootstrap.{bootstrap_entry_source_index}
 use compiler.semantics.layer_call_wiring.{check_project_layer_calls}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
+extern fn rt_exit(code: i64)
+extern fn rt_stdout_flush()
 extern fn rt_env_get(key: text) -> text
 extern fn rt_env_set(key: text, value: text)
 extern fn rt_transient_array_scope_begin() -> bool
@@ -61,6 +64,59 @@ extern fn rt_transient_array_scope_end() -> bool
 # when a parser edit changes what a parse produces. When the compiler identity
 # is unknown that function returns "uncacheable-<pid>-<time>", which is unique
 # per process and therefore reuses nothing: fail closed.
+
+# ===== Parse sharding =======================================================
+#
+# SIMPLE_PARSE_SHARD="<index>/<count>" (set from --parse-shard=, which only the
+# orchestrator passes). A shard child parses ONLY the modules it owns, which
+# stores their front-end cache entries, and then exits 0 before HIR. The real
+# build that follows hits every entry.
+#
+# Ownership is a pure function of the module PATH, not of its position in the
+# discovered source list. That matters for determinism: the closure walk can
+# legitimately yield the same set in a different order between processes, and a
+# position-based split would then have two shards parse the same file and a
+# third parse none. A path hash cannot drift that way, and needs no sorted
+# index (which would be O(n^2) over 662 interpreted-Simple modules).
+#
+# The hash is spelled out here rather than reusing rt_hash_text because the
+# split must agree ACROSS PROCESSES; a runtime hash that is seeded or
+# implementation-defined would silently give two shards different answers.
+fn _driver_parse_shard_hash(path: text) -> i64:
+    var h: i64 = 5381
+    var i: i64 = 0
+    while i < path.len():
+        h = ((h * 33) + char_code(path[i:i + 1])) % 1000000007
+        i = i + 1
+    h
+
+var _driver_parse_shard_memo: text = "@@unset@@"
+
+fn _driver_parse_shard_spec() -> text:
+    if _driver_parse_shard_memo != "@@unset@@":
+        return _driver_parse_shard_memo
+    _driver_parse_shard_memo = rt_env_get("SIMPLE_PARSE_SHARD") ?? ""
+    _driver_parse_shard_memo
+
+pub fn driver_parse_shard_active() -> bool:
+    _driver_parse_shard_spec() != ""
+
+# A malformed spec owns EVERYTHING rather than nothing. A shard that silently
+# parses no files would look like a fast success and leave the cache empty,
+# which is the failure mode that is hardest to notice.
+fn _driver_parse_shard_owns(path: text) -> bool:
+    val spec = _driver_parse_shard_spec()
+    if spec == "":
+        return true
+    val slash = spec.index_of("/")
+    if slash <= 0:
+        return true
+    val index = spec.substring(0, slash).to_i64() ?? -1
+    val count = spec.substring(slash + 1, spec.len()).to_i64() ?? 0
+    if count <= 0 or index < 0 or index >= count:
+        return true
+    (_driver_parse_shard_hash(path) % count) == index
+
 fn _driver_publish_frontend_cache_scope():
     if (rt_env_get("SIMPLE_FRONTEND_CACHE_SCOPE") ?? "") != "":
         return
@@ -401,6 +457,9 @@ impl CompilerDriver:
                 log_build_progress("parse", "files", progress_parse_done,
                     unique_entry_sources.len(), source.path,
                     1, 6, 0, 0, "running")
+                if not _driver_parse_shard_owns(source.path):
+                    progress_parse_done = progress_parse_done + 1
+                    continue
                 val entry_module = parse_full_frontend(
                     source.content,
                     source.path,
@@ -484,6 +543,13 @@ impl CompilerDriver:
             # does not grow a line that always reads hits=0.
             if frontend_parse_cache_enabled():
                 print "[frontend-cache] hits={frontend_parse_cache_hits()} misses={frontend_parse_cache_misses()} parses={flat_parse_module_body_calls()}"
+            if driver_parse_shard_active():
+                # Shard children exist only to warm the cache. Everything after
+                # this point (surfaces, HIR, MIR, codegen, link) is the real
+                # build's job and must not be duplicated N times.
+                print "[parse-shard] done shard={rt_env_get(\"SIMPLE_PARSE_SHARD\") ?? \"\"} parses={flat_parse_module_body_calls()}"
+                rt_stdout_flush()
+                rt_exit(0)
             var entry_surface_builder = ModuleSurfaceBuilder.new()
             var entry_surface_source_index: i64 = 0
             log_build_progress("surface_build", "files", 0,

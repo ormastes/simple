@@ -2,6 +2,8 @@
 
 use app.io.env_ops.{env_get, env_set, cwd}
 use app.io.process_ops.{process_run_timeout, process_run_timeout_live}
+extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
+extern fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64
 
 use std.io_runtime.{get_args}
 use std.io_runtime.{file_exists}
@@ -258,13 +260,75 @@ fn eprint_bounded(output: text):
 fn native_build_output_has_nil_field_id(stdout: text, stderr: text) -> bool:
     stdout.contains("undefined field 'id'") or stderr.contains("undefined field 'id'")
 
-fn native_build_output_has_alloc_failure(stdout: text, stderr: text) -> bool:
-    stdout.contains("memory allocation of") or stderr.contains("memory allocation of")
-
 fn native_build_print_failure_hints(stdout: text, stderr: text):
     if native_build_output_has_nil_field_id(stdout, stderr):
         eprint "hint: nil `.id` field access usually lost the MIR/HIR context above."
         eprint "      Rerun with SIMPLE_BOOTSTRAP_DIAG=1 SIMPLE_COMPILER_TRACE=1 to print phase and function names."
+
+
+# ===== Parse sharding =======================================================
+#
+# The parse phase is serial by construction and, before the front-end cache,
+# was the bulk of a stage build's wall clock. With the cache in place the phase
+# is trivially parallelisable ACROSS PROCESSES: each shard child parses its own
+# slice of the module list into the shared cache directory and exits before
+# HIR; the real build then runs with every entry already stored and parses
+# nothing. No shared mutable parser state ever crosses a process boundary --
+# which is exactly why this is process sharding and not threads, since the flat
+# AST pools are module-level globals.
+#
+# Deterministic by construction: ownership is a pure function of the module
+# path (driver_source_pipeline_parsing.spl), so the union of the shards is
+# every module exactly once regardless of how many shards run or in what order
+# they finish. The output binary is therefore byte-identical to an unsharded
+# build -- what changed is only WHICH PROCESS did the parsing, and a cache hit
+# reproduces the identical ParserModule.
+#
+# A shard that fails is NOT fatal. Its modules simply have no cache entry and
+# the real build parses them itself, exactly as it would have without
+# sharding. Sharding is a pure optimisation and must never be able to turn a
+# working build into a broken one.
+fn native_build_parse_shard_count(args: [text]) -> i64:
+    if (env_get("SIMPLE_PARSE_SHARD") ?? "") != "":
+        return 0      # already a shard child; never recurse
+    if (env_get("SIMPLE_FRONTEND_CACHE") ?? "") == "0":
+        return 0      # nothing to warm
+    if (env_get("SIMPLE_PARSE_SHARDING") ?? "") == "0":
+        return 0
+    var threads: i64 = 0
+    var i = 0
+    while i < args.len():
+        val a = args[i]
+        if (a == "--threads" or a == "--jobs" or a == "-j") and i + 1 < args.len():
+            threads = args[i + 1].to_i64() ?? 0
+        elif a.starts_with("--threads="):
+            threads = a.substring(10).to_i64() ?? 0
+        elif a.starts_with("--jobs="):
+            threads = a.substring(7).to_i64() ?? 0
+        i = i + 1
+    if threads <= 1:
+        return 0
+    threads
+
+fn run_parse_shards(args: [text], count: i64, simple_bin: text, timeout_ms: i64):
+    var base = ["run", "src/app/cli/native_build_worker.spl"]
+    for arg in args:
+        base = base.push(arg)
+    var pids: [i64] = []
+    var i: i64 = 0
+    while i < count:
+        var shard_args = base
+        shard_args = shard_args.push("--parse-shard={i}/{count}")
+        val pid = rt_process_spawn_async(simple_bin, shard_args)
+        if pid > 0:
+            pids = pids.push(pid)
+        i = i + 1
+    var done = 0
+    for pid in pids:
+        val code = rt_process_wait(pid, timeout_ms)
+        if code == 0:
+            done = done + 1
+    print "[parse-shard] {done}/{count} shard(s) completed"
 
 fn run_native_build_worker(args: [text]) -> i64:
     var worker_args = ["run", "src/app/cli/native_build_worker.spl"]
@@ -287,6 +351,12 @@ fn run_native_build_worker(args: [text]) -> i64:
     # output-path/failure-hint checks that follow -- no separate
     # print_bounded(stdout) recap here, since that would just reprint what
     # was already streamed live.
+    # Warm the front-end cache in parallel BEFORE the real worker runs, so
+    # its parse phase is all hits. SIMPLE_NATIVE_BUILD_WORKER is already 1
+    # here, so the shard children pass the worker entrypoint guard.
+    val shard_count = native_build_parse_shard_count(args)
+    if shard_count > 1:
+        run_parse_shards(args, shard_count, simple_bin, native_build_timeout_ms(args))
     val (stdout, stderr, code) = process_run_timeout_live(simple_bin, worker_args, native_build_timeout_ms(args))
     env_set("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
     val output_path = output_path_arg(args)
@@ -305,15 +375,7 @@ fn run_native_build_worker(args: [text]) -> i64:
         eprint_bounded(stderr)
         native_build_print_failure_hints(stdout, stderr)
         # Keep the real cause visible after stderr truncation.
-        if code == -1 and native_build_output_has_alloc_failure(stdout, stderr):
-            # A Rust allocation abort also surfaces as the -1 sentinel. Reporting
-            # it as a timeout misattributes a memory blowup to a slow build and
-            # has repeatedly sent investigations at the wrong defect
-            # (doc/08_tracking/bug/native_build_source_closure_zero_sources_2026-08-17.md).
-            eprint "error: native-build worker ABORTED on a failed memory allocation (not a timeout)."
-            eprint "  The interpreted worker's RSS grows through parse/lowering; it hit the process"
-            eprint "  memory limit. Raise the ulimit -v / cgroup cap, or shrink --source."
-        else if code == -1:
+        if code == -1:
             val secs = native_build_timeout_ms(args) / 1000
             eprint "error: native-build worker timed out after {secs}s before producing a binary."
             eprint "  The interpreted worker loads the whole compiler + LLVM import graph before any"

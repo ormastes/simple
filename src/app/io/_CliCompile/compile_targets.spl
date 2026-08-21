@@ -220,6 +220,13 @@ fn cli_native_build_option_error(args: [text]) -> text:
         elif arg.starts_with("--opt-level="):
             val error = cli_native_build_inline_value_error(arg, "--opt-level=", "--opt-level", false)
             if error != "": return error
+        elif arg.starts_with("--parse-shard="):
+            # Internal flag, emitted only by the parse-shard orchestrator
+            # (src/app/cli/native_build_main.spl). Validated like any other
+            # inline-value option so a malformed spec is a loud CLI error
+            # rather than a shard that silently owns everything.
+            val error = cli_native_build_inline_value_error(arg, "--parse-shard=", "--parse-shard", false)
+            if error != "": return error
         elif arg.starts_with("-"):
             return "unknown option: {arg}"
         i = i + 1
@@ -542,10 +549,21 @@ fn _nb_resolve_under_root(root: text, segs: [text]) -> text:
         return p3
     ""
 
-fn _nb_resolve_direct_source_roots(segs: [text], source_dirs: [text]) -> text:
-    # Probe the explicitly declared --source roots directly. This is the cheap
-    # lane: a plain file-exists check per root, no cwd/importer compatibility
-    # probes. Returns "" when no declared root holds the module.
+fn _nb_resolve_segs(segs: [text], source_dirs: [text], importer_path: text) -> text:
+    # Resolve a module segment list to an .spl file under a --source root.
+    # Mirrors the Rust discovery FS-fallback: strip a leading segment matching
+    # the root's dir name. Returns "" if unresolved.
+    val module_path = _nb_join_segments(segs)
+    val entry_dir = _driver_entry_import_dirname(importer_path)
+    if segs.len() > 0:
+        val resolved = _driver_resolve_entry_import(module_path, entry_dir)
+        if resolved != "":
+            val resolved_abs = rt_path_absolute(resolved).replace("\\", "/")
+            for root in source_dirs:
+                val root_abs = _nb_trim_trailing_slashes(rt_path_absolute(root).replace("\\", "/"))
+                val root_prefix = if root_abs.ends_with("/"): root_abs else: root_abs + "/"
+                if resolved_abs.starts_with(root_prefix):
+                    return resolved
     for root in source_dirs:
         val dir_name = _nb_basename(root)
         val public_lib_alias = dir_name == "lib" and segs.len() > 0 and segs[0] == "std"
@@ -561,29 +579,6 @@ fn _nb_resolve_direct_source_roots(segs: [text], source_dirs: [text]) -> text:
         val direct_path = _nb_resolve_under_root(root, segs)
         if direct_path != "":
             return direct_path
-    ""
-
-fn _nb_resolve_segs(segs: [text], source_dirs: [text], importer_path: text) -> text:
-    # Resolve a module segment list to an .spl file under a --source root.
-    # Mirrors the Rust discovery FS-fallback: strip a leading segment matching
-    # the root's dir name. Returns "" if unresolved.
-    val module_path = _nb_join_segments(segs)
-    val entry_dir = _driver_entry_import_dirname(importer_path)
-    # Explicit --source roots win before the compatibility resolver: a hit here
-    # is one file-exists probe, while _driver_resolve_entry_import pays cwd,
-    # src, and importer-relative probes for every unique import.
-    val direct_source_path = _nb_resolve_direct_source_roots(segs, source_dirs)
-    if direct_source_path != "":
-        return direct_source_path
-    if segs.len() > 0:
-        val resolved = _driver_resolve_entry_import(module_path, entry_dir)
-        if resolved != "":
-            val resolved_abs = rt_path_absolute(resolved).replace("\\", "/")
-            for root in source_dirs:
-                val root_abs = _nb_trim_trailing_slashes(rt_path_absolute(root).replace("\\", "/"))
-                val root_prefix = if root_abs.ends_with("/"): root_abs else: root_abs + "/"
-                if resolved_abs.starts_with(root_prefix):
-                    return resolved
     if segs.len() > 0 and not _nb_source_dirs_cover_workspace(source_dirs):
         val src_path = _nb_resolve_under_root("src", segs)
         if src_path != "":
@@ -835,6 +830,7 @@ fn cli_native_build(args: [text]) -> i64:
         var build_mode = "dynload"
         var cache_dir = "build/native_cache"
         var native_threads = 0
+        var parse_shard: text = ""
         var runtime_path = ""
         var optimization_requested = false
         var no_borrow_check = false
@@ -909,6 +905,12 @@ fn cli_native_build(args: [text]) -> i64:
                 if native_threads <= 0:
                     _cli_eprint("Error: {a} requires a positive integer")
                     return 1
+            elif a.starts_with("--parse-shard="):
+                # Internal, set by the parse-sharding orchestrator, never by a
+                # user: "<index>/<count>". The shard child parses only its slice
+                # of the module list into the front-end cache and exits before
+                # HIR, so the real build that follows hits every entry.
+                parse_shard = a.substring(14)
             elif a.starts_with("--threads="):
                 native_threads = a.substring(10).to_i64() ?? 0
                 if native_threads <= 0:
@@ -1141,6 +1143,8 @@ fn cli_native_build(args: [text]) -> i64:
             return 1
         if native_threads > 0:
             env_set("SIMPLE_NATIVE_BUILD_THREADS", "{native_threads}")
+        if parse_shard != "":
+            env_set("SIMPLE_PARSE_SHARD", parse_shard)
         env_set("SIMPLE_NATIVE_ARENA_DECLS", "1")
         if not env_set("SIMPLE_NATIVE_BUILD_ENTRY", entry_point):
             env_set("SIMPLE_OS_LOG_MODE", old_log_mode)

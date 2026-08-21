@@ -1,0 +1,102 @@
+use std.spec
+use std.io.{file_exists, file_read}
+use std.io_runtime.{dir_create_all}
+use app.io.sysinfo_ops.{getpid}
+
+# Parse sharding across --threads worker processes
+# (doc/08_tracking/bug/native_build_frontend_not_incremental_2026-08-21.md).
+#
+# The parse phase is serial by construction and, before the front-end cache,
+# was the bulk of a stage build's wall clock. With the cache in place it is
+# parallelisable ACROSS PROCESSES: each shard child parses its own slice into
+# the shared cache directory and exits before HIR, then the real build parses
+# nothing.
+#
+# Processes, not threads: the flat AST pools are module-level globals, so no
+# shared mutable parser state may cross a boundary.
+#
+# Ownership is a pure function of the module PATH, not of its position in the
+# discovered source list -- the closure walk can legitimately yield the same
+# set in a different order between processes, and a position-based split would
+# then have two shards parse one file and none parse another.
+
+val FIXTURE_ROOT = "test/02_integration/compiler/driver/fixtures/native_build_cache"
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_env_set(key: text, value: text)
+
+fn run_build(cache_dir: text, fe_dir: text, output: text, sharding: text, fe_cache: text) -> (text, i64):
+    rt_env_set("SIMPLE_FRONTEND_CACHE_DIR", fe_dir)
+    rt_env_set("SIMPLE_PARSE_SHARDING", sharding)
+    rt_env_set("SIMPLE_FRONTEND_CACHE", fe_cache)
+    val (out, err, code) = rt_process_run("bin/simple",
+        ["native-build", "--source", FIXTURE_ROOT, "--entry-closure", "--threads", "2",
+         "--cache-dir", cache_dir, "--entry", "{FIXTURE_ROOT}/main.spl", "--output", output])
+    (out + "\n" + err, code)
+
+fn last_summary(blob: text) -> text:
+    var found = ""
+    for line in blob.split("\n"):
+        if line.contains("[frontend-cache]"):
+            found = line.trim()
+    found
+
+fn count_of(blob: text, needle: text) -> i64:
+    blob.split(needle).len() - 1
+
+describe "native-build parse sharding":
+
+    slow_it "splits a cold parse across shard processes and then parses nothing":
+        val run_id = getpid()
+        val root = "build/tmp/parse_shard_spec_{run_id}"
+        expect(dir_create_all(root)).to_equal(true)
+        val (blob, code) = run_build("{root}/cache", "{root}/fe", "{root}/out", "1", "1")
+        expect(code).to_equal(0)
+        # Both shards ran and reported.
+        expect(count_of(blob, "[parse-shard] done shard=")).to_equal(2)
+        expect(blob.contains("[parse-shard] 2/2 shard(s) completed")).to_equal(true)
+        # The REAL build's summary is the last one: every module already cached.
+        val summary = last_summary(blob)
+        expect(summary.contains("hits=3")).to_equal(true)
+        expect(summary.contains("misses=0")).to_equal(true)
+        expect(summary.contains("parses=0")).to_equal(true)
+
+    slow_it "produces a binary byte-identical to an unsharded, uncached build":
+        # Sharding may only change WHICH PROCESS parsed a module. If the bytes
+        # move, a restored parse is not the parse it replaced, and the whole
+        # design is unsound -- so this is the acceptance test, not a nicety.
+        val run_id = getpid()
+        val root = "build/tmp/parse_shard_ident_spec_{run_id}"
+        expect(dir_create_all(root)).to_equal(true)
+        val (_a, ca) = run_build("{root}/c1", "{root}/fe", "{root}/sharded.bin", "1", "1")
+        expect(ca).to_equal(0)
+        val (_b, cb) = run_build("{root}/c2", "{root}/fe2", "{root}/plain.bin", "0", "0")
+        expect(cb).to_equal(0)
+        expect(file_exists("{root}/sharded.bin")).to_equal(true)
+        expect(file_exists("{root}/plain.bin")).to_equal(true)
+        expect(file_read("{root}/sharded.bin")).to_equal(file_read("{root}/plain.bin"))
+
+    slow_it "is deterministic: the same shard owns the same modules every run":
+        # Two independent sharded builds must split the work identically. A
+        # path-hash split cannot drift; a position-based one could, and would
+        # show up here as a different per-shard parse count.
+        val run_id = getpid()
+        val root = "build/tmp/parse_shard_det_spec_{run_id}"
+        expect(dir_create_all(root)).to_equal(true)
+        val (a, ca) = run_build("{root}/c1", "{root}/fe1", "{root}/a.bin", "1", "1")
+        expect(ca).to_equal(0)
+        val (b, cb) = run_build("{root}/c2", "{root}/fe2", "{root}/b.bin", "1", "1")
+        expect(cb).to_equal(0)
+        var shard_lines_a: [text] = []
+        for line in a.split("\n"):
+            if line.contains("[parse-shard] done shard="):
+                shard_lines_a = shard_lines_a.push(line.trim())
+        var shard_lines_b: [text] = []
+        for line in b.split("\n"):
+            if line.contains("[parse-shard] done shard="):
+                shard_lines_b = shard_lines_b.push(line.trim())
+        expect(shard_lines_a.len()).to_equal(2)
+        expect(shard_lines_b.len()).to_equal(2)
+        # Same shard index, same parse count, both runs. The union is always
+        # every module exactly once, so the counts must sum to 3.
+        expect(shard_lines_a.join("|")).to_equal(shard_lines_b.join("|"))
