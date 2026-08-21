@@ -1215,3 +1215,36 @@ and export route arrays constructed in the registry freeze scope. The owner fix
 is to build flat import-item offsets/names/aliases during freeze, attach them
 beside the target routes, and explicitly promote them in
 `module_surfaces_promote`. Per-file construction is not an ownership boundary.
+
+## Freeze-owned import-item Cycle 1 (2026-08-22)
+
+The fresh admitted run rebuilt Stage 2 and passed its compiler sanity and
+struct-receiver/runtime capability gates. Stage 3 entered HIR, but the original
+facade declarations (`CompileOptions`, `BootLogger`, and `SourceFile`) were
+again unresolved from source 1 and the process exited 139 at source 31.
+
+The freeze-owned implementation still traversed `ParserImport.items` while
+freezing. That nested parser array already belongs to the ended per-file scope;
+moving the traversal later therefore moved the stale read instead of removing
+it. The corrected ownership handoff flattens items while each parser payload is
+alive, explicitly retains those scalar arrays to freeze, validates their
+offsets, then clones them into fresh registry-scope arrays. Freeze never reads
+`ParserImport.items`, and the registry promotion retains only the fresh clones.
+Nullable aliases remain read only after `has_alias` is true.
+
+Cycle 2 passed the new pre-freeze offset/range gate but reproduced the same
+source-1 facade failures and exited 139. Cycle 3 enabled the existing import
+diagnostics. They proved `driver.spl` retained all 19 imports, including three
+items from `compiler.common.driver_core_types`; that re-export route returned
+`found=true` while lowering source 0, then `found=false` for the identical
+`CompileOptions` query while lowering source 1. The item projection correction
+is therefore sound, but it exposed the next lifetime boundary.
+
+`find_reexport_source_walk` tests the target through aligned declaration name
+arrays. Those arrays and their value peers are still allocated in per-file
+scopes. Explicit promotion carries them to freeze, but does not republish them
+under the registry scope that survives successive HIR module teardowns. The
+queued correction shallow-copies every declaration name/value array during
+freeze and explicitly promotes those new registry-scope carriers. This is left
+unclaimed because Cycle 3 exhausted the session cap; the next fresh session
+must prove that the identical query remains `found=true` after source 0.

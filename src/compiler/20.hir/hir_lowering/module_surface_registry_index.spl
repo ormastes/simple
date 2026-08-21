@@ -306,13 +306,35 @@ pub(package) fn module_surfaces_freeze(registry: ModuleSurfacesByName) -> Result
             return Err(preferred_result.unwrap_err())
         surface.preferred_registry_name = preferred_result.unwrap()
 
+        # Per-file promotion keeps these projections readable until freeze,
+        # but their backing arrays still belong to the file scope. Publish
+        # fresh registry-scope carriers before any HIR module scope can end.
+        surface.composite_names = surface.composite_names.copy()
+        surface.enum_names = surface.enum_names.copy()
+        surface.trait_names = surface.trait_names.copy()
+        surface.callable_names = surface.callable_names.copy()
+        surface.type_alias_names = surface.type_alias_names.copy()
+        surface.constant_names = surface.constant_names.copy()
+        surface.composite_values = surface.composite_values.copy()
+        surface.enum_values = surface.enum_values.copy()
+        surface.trait_values = surface.trait_values.copy()
+        surface.callable_values = surface.callable_values.copy()
+        surface.type_alias_values = surface.type_alias_values.copy()
+        surface.constant_values = surface.constant_values.copy()
+
         var import_target_indices: [i64] = []
         var import_target_names: [text] = []
         var import_item_offsets: [i64] = [0]
         var import_item_names: [text] = []
         var import_item_aliases: [text] = []
         var import_item_has_alias: [bool] = []
-        for import_decl in surface.imports:
+        if (surface.import_item_offsets.len() != surface.imports.len() + 1 or
+            surface.import_item_names.len() != surface.import_item_aliases.len() or
+            surface.import_item_names.len() != surface.import_item_has_alias.len()):
+            return Err("pre-freeze import item projections are misaligned: {surface_index}")
+        var import_index = 0
+        while import_index < surface.imports.len():
+            val import_decl = surface.imports[import_index]
             val target_name = module_surface_resolve_import_key(
                 registry, surface, import_decl.module)
             var target_index = -1
@@ -320,12 +342,22 @@ pub(package) fn module_surfaces_freeze(registry: ModuleSurfacesByName) -> Result
                 target_index = module_surface_registry_index(registry, target_name)
             import_target_indices = import_target_indices.push(target_index)
             import_target_names = import_target_names.push(target_name)
-            for import_item in import_decl.items:
-                import_item_names = import_item_names.push(import_item.name)
-                val import_alias = if import_item.has_alias: import_item.alias else: ""
-                import_item_aliases = import_item_aliases.push(import_alias)
-                import_item_has_alias = import_item_has_alias.push(import_item.has_alias)
+            val item_start = surface.import_item_offsets[import_index]
+            val item_end = surface.import_item_offsets[import_index + 1]
+            if (item_start < 0 or item_start > item_end or
+                item_end > surface.import_item_names.len()):
+                return Err("pre-freeze import item range is invalid: surface={surface_index} import={import_index}")
+            var item_index = item_start
+            while item_index < item_end:
+                import_item_names = import_item_names.push(
+                    surface.import_item_names[item_index])
+                import_item_aliases = import_item_aliases.push(
+                    surface.import_item_aliases[item_index])
+                import_item_has_alias = import_item_has_alias.push(
+                    surface.import_item_has_alias[item_index])
+                item_index = item_index + 1
             import_item_offsets = import_item_offsets.push(import_item_names.len())
+            import_index = import_index + 1
 
         var export_route_sources: [text] = []
         var export_route_locals: [text] = []
