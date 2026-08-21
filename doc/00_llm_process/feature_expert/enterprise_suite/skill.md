@@ -102,22 +102,25 @@ The spec list is:
 ```bash
 # unit
 bin/simple test test/01_unit/lib/common/net/http_core_spec.spl
-bin/simple test test/01_unit/lib/nogc_async_mut/http_server/async_parser_limits_spec.spl
-bin/simple test test/01_unit/lib/nogc_async_mut/http_server/async_path_safety_spec.spl
-bin/simple test test/01_unit/lib/nogc_async_mut/http_server/async_dynamic_dispatch_spec.spl
-bin/simple test test/01_unit/lib/http_server/chunked_rejection_spec.spl
-bin/simple test test/01_unit/lib/http_server/parser_limits_spec.spl
-bin/simple test test/01_unit/lib/http_server/path_safety_spec.spl
 # http_server tier — DISCOVERY-BASED, do not hand-list (lane W14-C, 2026-08-17).
 # The suite IS the glob: any new */http_server/*_spec.spl file is in the suite
 # the moment it lands. `test/unit/**` is the legacy mirror and is excluded.
 # Enforced by scripts/check/check-http-server-suite-enumeration.shs.
 #
-# DO NOT re-add hand-listed http_server lines here. Six of them (async_parser_limits,
-# async_path_safety, async_dynamic_dispatch, chunked_rejection, parser_limits,
-# path_safety) were reintroduced above this loop on 2026-08-17 and removed again:
-# every one is already matched by the glob, so listing them ran those specs TWICE
-# and re-opened the drift hole the loop exists to close. The glob is the list.
+# DO NOT re-add hand-listed http_server lines here. The same six
+# (async_parser_limits, async_path_safety, async_dynamic_dispatch,
+# chunked_rejection, parser_limits, path_safety) have now been resurrected
+# THREE times by 3-way merges — the third time (2026-08-21) sitting directly
+# above this very comment. Every one is already matched by the glob, so listing
+# them runs those specs TWICE per sweep and re-opens the drift hole the loop
+# exists to close. The glob is the list.
+#
+# Deleting them a fourth time is not the fix, and the note you are reading was
+# not enough either. As of 2026-08-21 the gate DETECTS the condition: a doc
+# carrying the loop AND a live `bin/simple test <http_server spec>` line now
+# FAILs, naming each redundant path (selftest fixture 5). Commented paths — like
+# the ones in this very note — are excluded, so the warning cannot trip its own
+# gate (fixture 6). If a merge brings them back, the gate says so.
 #
 # This SUPERSEDES the 49/49-green count above for the http_server tier. Current
 # sweep, measured one-per-process in a CLEAN WORKTREE at origin/main (not the

@@ -68,6 +68,24 @@ doc_recorded_specs() {
       | grep -v '^test/unit/' | sort -u
 }
 
+# doc_redundant_handlist DOCFILE -> literal http_server spec paths that are STILL
+# hand-listed as live `bin/simple test ...` commands even though the discovery
+# loop is present. Commented-out lines (the "do not re-add these" note) are
+# excluded, otherwise the warning against the practice would trip the check.
+#
+# Why this exists: the six lines were deleted twice (2026-08-17) and a 3-way
+# merge resurrected them BOTH times — the third time directly above the comment
+# forbidding it. A doc carrying the loop AND the hand list passes the
+# discovery check while running those six specs twice per sweep and re-opening
+# the drift hole for anything added to the list later. Detecting the condition
+# is the only thing that has a chance of holding; deleting the lines again does
+# not.
+doc_redundant_handlist() {
+    grep -E '^[[:space:]]*bin/simple[[:space:]]+test[[:space:]]+[^#]*http_server[^#]*_spec\.spl' "$1" 2>/dev/null \
+      | grep -o 'test/[A-Za-z0-9_./-]*http_server[A-Za-z0-9_./-]*_spec\.spl' \
+      | grep -v '^test/unit/' | sort -u
+}
+
 # scan ROOTDIR DOCFILE -> prints verdict, returns 0/1/2.
 scan() {
     s_root=$1; s_doc=$2
@@ -87,7 +105,13 @@ scan() {
     fi
 
     if doc_has_discovery "$s_doc"; then
-        echo "PASS — $s_n spec(s) checked, list matches tree (discovery loop present in $s_doc; every http_server spec is in the suite by construction)"
+        s_dup=$(doc_redundant_handlist "$s_doc")
+        if [ -n "$s_dup" ]; then
+            s_dupn=$(printf '%s' "$s_dup" | grep -c .)
+            echo "FAIL — $s_n spec(s) checked, $s_dupn hand-listed http_server line(s) coexist with the discovery loop in $s_doc (each runs twice per sweep and re-opens the drift hole): $(printf '%s' "$s_dup" | tr '\n' ' ')"
+            return 1
+        fi
+        echo "PASS — $s_n spec(s) checked, list matches tree (discovery loop present in $s_doc, no redundant hand-listed lines; every http_server spec is in the suite by construction)"
         return 0
     fi
 
@@ -115,11 +139,15 @@ scan() {
 }
 
 # ---------------------------------------------------------------------------
-# Selftest — runs before every scan, fatal. Four fixtures:
+# Selftest — runs before every scan, fatal. Six fixtures:
 #   1 discovery-loop doc          -> PASS
 #   2 hand list missing one spec  -> FAIL naming it
 #   3 hand list naming a deleted spec -> FAIL naming it
 #   4 tree with 0 http_server specs   -> ERROR (never a vacuous pass)
+#   5 discovery loop + live hand-listed line -> FAIL naming it (the recurring
+#     regression: a doc with BOTH passes the loop check while double-running)
+#   6 discovery loop + COMMENTED hand-listed path -> PASS (the do-not-re-add
+#     note must not trip its own gate)
 # ---------------------------------------------------------------------------
 selftest() {
     st_tmp=$(mktemp -d "${TMPDIR:-/tmp}/httpsuite_st.XXXXXX") || return 1
@@ -169,9 +197,29 @@ selftest() {
     esac
     [ $st_rc -eq 2 ] || { echo "selftest FIXTURE 4 exit $st_rc, want 2"; st_fail=1; }
 
+    # fixture 5 — the recurring regression: discovery loop AND a live hand-listed
+    # line. Must FAIL naming the redundant spec, not pass on the loop alone.
+    printf 'bin/simple test test/01_unit/lib/http_server/alpha_spec.spl\n%s\n' "$DISCOVERY_LINE" > "$st_tmp/doc_both.md"
+    st_out=$(scan "$st_tree" "$st_tmp/doc_both.md"); st_rc=$?
+    case "$st_out" in
+        FAIL*alpha_spec.spl*) : ;;
+        *) echo "selftest FIXTURE 5 (loop + hand list) expected FAIL naming alpha_spec, got: $st_out"; st_fail=1 ;;
+    esac
+    [ $st_rc -eq 1 ] || { echo "selftest FIXTURE 5 exit $st_rc, want 1"; st_fail=1; }
+
+    # fixture 6 — a COMMENTED hand-listed path (the "do not re-add" note itself)
+    # must NOT trip fixture 5's check, or the warning would fail its own gate.
+    printf '# bin/simple test test/01_unit/lib/http_server/alpha_spec.spl <- do not re-add\n%s\n' "$DISCOVERY_LINE" > "$st_tmp/doc_comment.md"
+    st_out=$(scan "$st_tree" "$st_tmp/doc_comment.md"); st_rc=$?
+    case "$st_out" in
+        "PASS — 2 spec(s) checked"*) : ;;
+        *) echo "selftest FIXTURE 6 (commented hand list) expected PASS, got: $st_out"; st_fail=1 ;;
+    esac
+    [ $st_rc -eq 0 ] || { echo "selftest FIXTURE 6 exit $st_rc, want 0"; st_fail=1; }
+
     rm -rf "$st_tmp"
     if [ $st_fail -eq 0 ]; then
-        echo "selftest: 4/4 fixtures OK"
+        echo "selftest: 6/6 fixtures OK"
         return 0
     fi
     return 1
