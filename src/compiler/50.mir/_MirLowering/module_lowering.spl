@@ -387,19 +387,11 @@ impl MirLowering:
         Seeds only what is missing, exactly like the bare seeds it accompanies,
         so user code that legitimately declares its own `Option` still wins."""
         if not self.enum_variant_index_q.has(bare_name):
-            var vq = self.enum_variant_index_q
-            vq[bare_name] = names
-            self.enum_variant_index_q = vq
-            var dq = self.enum_variant_discriminants_q
-            dq[bare_name] = discriminants
-            self.enum_variant_discriminants_q = dq
-            var rb = self.enum_runtime_to_bare
-            rb[bare_name] = bare_name
-            self.enum_runtime_to_bare = rb
+            self.enum_variant_index_q[bare_name] = names
+            self.enum_variant_discriminants_q[bare_name] = discriminants
+            self.enum_runtime_to_bare[bare_name] = bare_name
         if not self.enum_runtime_id_index_q.has(bare_name):
-            var rq = self.enum_runtime_id_index_q
-            rq[bare_name] = runtime_id
-            self.enum_runtime_id_index_q = rq
+            self.enum_runtime_id_index_q[bare_name] = runtime_id
 
     me enum_variant_payload_arity(payload_key: text) -> i64:
         """Declared payload slot count for "{enum}::{variant}", 0 when unknown.
@@ -492,9 +484,7 @@ impl MirLowering:
                         full_names.push("")
                         pti = pti + 1
                     if payload_types.len() == 1:
-                        var single_payload_types = self.enum_single_payload_types
-                        single_payload_types[payload_key] = payload_types[0]
-                        self.enum_single_payload_types = single_payload_types
+                        self.enum_single_payload_types[payload_key] = payload_types[0]
                 case HirVariantKind.Struct(payload_fields):
                     payload_kind = "struct"
                     var pfi = 0
@@ -503,15 +493,9 @@ impl MirLowering:
                         full_names.push(payload_fields[pfi].name)
                         pfi = pfi + 1
                 case _: ()
-            var vpt = self.enum_variant_payload_types
-            vpt[payload_key] = full_types
-            self.enum_variant_payload_types = vpt
-            var vpn = self.enum_variant_payload_names
-            vpn[payload_key] = full_names
-            self.enum_variant_payload_names = vpn
-            var vpk = self.enum_variant_payload_kind
-            vpk[payload_key] = payload_kind
-            self.enum_variant_payload_kind = vpk
+            self.enum_variant_payload_types[payload_key] = full_types
+            self.enum_variant_payload_names[payload_key] = full_names
+            self.enum_variant_payload_kind[payload_key] = payload_kind
             next_value = value + 1
             vi = vi + 1
         # Bare-name collision registry (2026-08-01). enum_variant_index is keyed
@@ -525,31 +509,21 @@ impl MirLowering:
             if not _text_list_eq(prior_names, names):
                 val prior_text = prior_names.join(", ")
                 val new_text = names.join(", ")
-                var collisions = self.enum_bare_name_collisions
-                collisions[enum_def.name] = "previously registered as [{prior_text}], now overwritten by [{new_text}] (runtime_name '{enum_def.runtime_name}')"
-                self.enum_bare_name_collisions = collisions
+                self.enum_bare_name_collisions[enum_def.name] = "previously registered as [{prior_text}], now overwritten by [{new_text}] (runtime_name '{enum_def.runtime_name}')"
                 # Step (c) ambiguity flag. Readers that could not derive a
                 # runtime_name and fell back to the bare key consult this to
                 # tell "one enum owns this name" from "the survivor of a
                 # contest". Set only on DIVERGENCE, so the 192 benign identical
                 # re-registrations never raise it.
-                var ambiguous = self.enum_bare_ambiguous
-                ambiguous[enum_def.name] = true
-                self.enum_bare_ambiguous = ambiguous
+                self.enum_bare_ambiguous[enum_def.name] = true
         # Dual key (step c): the qualified maps are keyed by runtime_name, which
         # is unique per declaration, so BOTH sides of a bare-name contest are
         # retained here in full. Written before the bare maps below purely so a
         # reader observing a half-updated state sees the complete set, never a
         # partial one.
-        var variant_index_q = self.enum_variant_index_q
-        variant_index_q[enum_def.runtime_name] = names
-        self.enum_variant_index_q = variant_index_q
-        var variant_discriminants_q = self.enum_variant_discriminants_q
-        variant_discriminants_q[enum_def.runtime_name] = discriminants
-        self.enum_variant_discriminants_q = variant_discriminants_q
-        var runtime_to_bare = self.enum_runtime_to_bare
-        runtime_to_bare[enum_def.runtime_name] = enum_def.name
-        self.enum_runtime_to_bare = runtime_to_bare
+        self.enum_variant_index_q[enum_def.runtime_name] = names
+        self.enum_variant_discriminants_q[enum_def.runtime_name] = discriminants
+        self.enum_runtime_to_bare[enum_def.runtime_name] = enum_def.name
         # Captured BEFORE the bare-key write below, which is last-wins: these
         # are the variant leaves this owner currently contributes to
         # `enum_variant_owners` and must be withdrawn before the new set is
@@ -558,13 +532,9 @@ impl MirLowering:
             self.enum_variant_index[enum_def.name]
         else:
             []
-        var variant_index = self.enum_variant_index
-        variant_index[enum_def.name] = names
-        self.enum_variant_index = variant_index
+        self.enum_variant_index[enum_def.name] = names
         self.reindex_enum_variant_owners(enum_def.name, prior_variant_names, names)
-        var variant_discriminants = self.enum_variant_discriminants
-        variant_discriminants[enum_def.name] = discriminants
-        self.enum_variant_discriminants = variant_discriminants
+        self.enum_variant_discriminants[enum_def.name] = discriminants
 
     # O(1) inverse of `enum_variant_index`, maintained at every bare-key write.
     # `prior_names` is the variant set this owner previously had registered
@@ -578,17 +548,16 @@ impl MirLowering:
     # here. The scan itself ran once per method call and allocated a fresh
     # `.keys()` array each time -- the phase-5 MIR allocation runaway.
     me reindex_enum_variant_owners(owner_name: text, prior_names: [text], names: [text]):
-        var owners = self.enum_variant_owners
         for prior_variant in prior_names:
-            if owners.has(prior_variant):
+            if self.enum_variant_owners.has(prior_variant):
                 var kept_owners: [text] = []
-                for existing_owner in owners[prior_variant]:
+                for existing_owner in self.enum_variant_owners[prior_variant]:
                     if existing_owner != owner_name:
                         kept_owners.push(existing_owner)
-                owners[prior_variant] = kept_owners
+                self.enum_variant_owners[prior_variant] = kept_owners
         for variant_name in names:
-            var current_owners: [text] = if owners.has(variant_name):
-                owners[variant_name]
+            var current_owners: [text] = if self.enum_variant_owners.has(variant_name):
+                self.enum_variant_owners[variant_name]
             else:
                 []
             var owner_already_listed = false
@@ -597,8 +566,7 @@ impl MirLowering:
                     owner_already_listed = true
             if not owner_already_listed:
                 current_owners.push(owner_name)
-            owners[variant_name] = current_owners
-        self.enum_variant_owners = owners
+            self.enum_variant_owners[variant_name] = current_owners
 
     fn hir_bitfield_fields(bitfield_def: HirBitfield) -> [HirBitfieldField]:
         match bitfield_def:

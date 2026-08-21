@@ -348,11 +348,6 @@ struct MirLowering:
     # lowered functions, which silently skipped the coercion. lower_function
     # has fn_.return_type in hand, so it records the answer here instead.
     current_fn_returns_bool: bool
-    # Scalar sidecar for the most recently completed lower_block_expected.
-    # A LocalId? returned across that method boundary can retain presence but
-    # lose its payload in a staged native compiler. The function-body owner
-    # consumes this raw id instead of coalescing the damaged optional to l0.
-    last_block_result_local_id: i64
     # Compilation-wide identity for named types. HIR SymbolIds are local to
     # each module, so cross-module Struct/Enum references need one shared key.
     canonical_type_symbols: Dict<text, i64>
@@ -432,19 +427,14 @@ impl MirLowering:
     me bind_local(symbol_id: i64, local: LocalId):
         if symbol_id < 0 or local.id < 0:
             return
-        var ids = self.local_symbol_ids
-        var values = self.local_symbol_values
         var i = 0
-        while i < ids.len():
-            if ids[i] == symbol_id:
-                values[i] = local
-                self.local_symbol_values = values
+        while i < self.local_symbol_ids.len():
+            if self.local_symbol_ids[i] == symbol_id:
+                self.local_symbol_values[i] = local
                 return
             i = i + 1
-        ids.push(symbol_id)
-        values.push(local)
-        self.local_symbol_ids = ids
-        self.local_symbol_values = values
+        self.local_symbol_ids.push(symbol_id)
+        self.local_symbol_values.push(local)
 
     fn find_local(symbol_id: i64) -> LocalId:
         var i = self.local_symbol_ids.len() - 1
@@ -455,10 +445,6 @@ impl MirLowering:
         LocalId(id: -1)
 
     me remember_local_hir_type(local_id: i64, type_: HirType, isolation_state: i64, resource_state: i64):
-        var ids = self.local_hir_type_ids
-        var values = self.local_hir_type_values
-        var states = self.local_hir_type_isolation_states
-        var resource_states = self.local_hir_type_resource_states
         val normalized_state = if isolation_state == 1:
             1
         elif isolation_state == 2:
@@ -467,24 +453,17 @@ impl MirLowering:
             0
         val normalized_resource_state = if resource_state == 1: 1 else 0
         var i = 0
-        while i < ids.len():
-            if ids[i] == local_id:
-                values[i] = type_
-                states[i] = normalized_state
-                resource_states[i] = normalized_resource_state
-                self.local_hir_type_values = values
-                self.local_hir_type_isolation_states = states
-                self.local_hir_type_resource_states = resource_states
+        while i < self.local_hir_type_ids.len():
+            if self.local_hir_type_ids[i] == local_id:
+                self.local_hir_type_values[i] = type_
+                self.local_hir_type_isolation_states[i] = normalized_state
+                self.local_hir_type_resource_states[i] = normalized_resource_state
                 return
             i = i + 1
-        ids.push(local_id)
-        values.push(type_)
-        states.push(normalized_state)
-        resource_states.push(normalized_resource_state)
-        self.local_hir_type_ids = ids
-        self.local_hir_type_values = values
-        self.local_hir_type_isolation_states = states
-        self.local_hir_type_resource_states = resource_states
+        self.local_hir_type_ids.push(local_id)
+        self.local_hir_type_values.push(type_)
+        self.local_hir_type_isolation_states.push(normalized_state)
+        self.local_hir_type_resource_states.push(normalized_resource_state)
 
     me copy_local_hir_type_metadata(source_local_id: i64, destination_local_id: i64):
         """Copy aligned HIR metadata without transporting HirType as an ABI arg.
@@ -504,36 +483,30 @@ impl MirLowering:
         if source_index < 0:
             return
 
-        var ids = self.local_hir_type_ids
-        var values = self.local_hir_type_values
-        var states = self.local_hir_type_isolation_states
-        var resource_states = self.local_hir_type_resource_states
-        val source_type = values[source_index]
+        val source_type = self.local_hir_type_values[source_index]
         # Match find_local_hir_type's fail-closed sentinel contract. A raw
         # staged-native zero is not valid HIR metadata and must not be copied
         # into a second local.
         if source_type == nil or source_type == 0:
             return
+        val source_state = self.local_hir_type_isolation_states[source_index]
+        val source_resource_state = self.local_hir_type_resource_states[source_index]
         var destination_index: i64 = -1
-        i = ids.len() - 1
+        i = self.local_hir_type_ids.len() - 1
         while i >= 0:
-            if ids[i] == destination_local_id:
+            if self.local_hir_type_ids[i] == destination_local_id:
                 destination_index = i
                 break
             i = i - 1
         if destination_index >= 0:
-            values[destination_index] = source_type
-            states[destination_index] = states[source_index]
-            resource_states[destination_index] = resource_states[source_index]
+            self.local_hir_type_values[destination_index] = source_type
+            self.local_hir_type_isolation_states[destination_index] = source_state
+            self.local_hir_type_resource_states[destination_index] = source_resource_state
         else:
-            ids.push(destination_local_id)
-            values.push(source_type)
-            states.push(states[source_index])
-            resource_states.push(resource_states[source_index])
-        self.local_hir_type_ids = ids
-        self.local_hir_type_values = values
-        self.local_hir_type_isolation_states = states
-        self.local_hir_type_resource_states = resource_states
+            self.local_hir_type_ids.push(destination_local_id)
+            self.local_hir_type_values.push(source_type)
+            self.local_hir_type_isolation_states.push(source_state)
+            self.local_hir_type_resource_states.push(source_resource_state)
 
     fn find_local_hir_type(local_id: i64) -> HirType?:
         var i = self.local_hir_type_ids.len() - 1
@@ -593,9 +566,7 @@ impl MirLowering:
     me mark_runtime_value_local(local_id: i64):
         if self.is_runtime_value_local(local_id):
             return
-        var ids = self.runtime_value_local_ids
-        ids.push(local_id)
-        self.runtime_value_local_ids = ids
+        self.runtime_value_local_ids.push(local_id)
 
     me mark_tagged_text_local(local_id: i64):
         self.tagged_text_locals[local_id] = true
