@@ -22,6 +22,4 @@ The SFFI boundary is a layered validation pipeline, not a name-based dispatcher.
 - Loaders publish the full required provider atomically; partial publication is
   forbidden.
 - Hot calls use typed direct/immutable slots plus retained boundary checks.
-
 For P0/P1 IDs and evidence, use the feature-expert note and canonical design.
-

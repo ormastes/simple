@@ -96,4 +96,3 @@ fabricated value or provider was published”.
 P2 lexical enforcement completion, P3 provider registries/typed slots, P4
 cryptographic evidence, P5 provider migration, and P6 full matrix/performance
 remain planned. This design leaves extension fields but makes no PASS claim.
-

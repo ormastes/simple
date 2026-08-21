@@ -23,4 +23,3 @@
 
 P4 signature/provenance latency, revocation, reproducibility, and trust-store
 targets remain planned until the P4 requirement decision is separately frozen.
-

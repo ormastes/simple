@@ -42,4 +42,3 @@ manual quality, generated evidence, or done marks.
 Maximum three verify/fix cycles per phase. A lane with unavailable tooling
 records a fail-fast blocker; it does not substitute seed/static evidence or a
 passing placeholder.
-

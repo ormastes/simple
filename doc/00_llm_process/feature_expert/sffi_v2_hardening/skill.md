@@ -28,4 +28,3 @@ provider loading, generated bindings, or SFFI assurance.
 
 Start with the existing RED return/weak-stub/byte-array fixtures. Preserve
 positive controls and require cross-lane category parity.
-
