@@ -48,6 +48,7 @@ diagnostic (`E-MC-DYN-001`, design §17).
 | `E-MC-DYN-0xx` | dyn closure in critical build | design §17 only — `UNLANDED` |
 | `FV2-E-ASPECT-*` | aspect proof/seal | `src/compiler/00.common/assurance/formal_interfaces.spl` |
 | generated per-enum ranges | one range per registry enum | design §11 — `UNLANDED` |
+| `E-GRAMMAR-ORPHAN-TAG` / `E-GRAMMAR-DEAD-PRODUCTION` | grammar-axis cross-check: every flat-AST tag is stamped by >=1 parser production, and every production is reachable | `src/app/compiler_schema/grammar_extract.spl`, `spec/compiler_schema/registry/compiler.frontend.Grammar.sdn` (gate: `scripts/check/check-compiler-schema-fresh.shs`) |
 
 ## 5. Evidence receipt format
 

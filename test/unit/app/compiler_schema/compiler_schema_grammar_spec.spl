@@ -1,0 +1,116 @@
+# Compiler schema generator — GRAMMAR axis: production extraction, the
+# tag<->production cross-check, and the rendered registry rows.
+#
+# Hardening plan §11.3 (doc/01_research/compiler/hardening/
+# simple_hardening_plan_2026-08-21.md), Wave 2A lane C1.
+
+use app.compiler_schema.grammar_extract.{
+    ProductionRow, GrammarModel, TagIndex,
+    production_id, extract_productions, build_grammar_model,
+    render_grammar, render_index_grammar, grammar_report, grammar_file_name
+}
+use std.io_runtime.{cwd}
+
+# A fixture parser module: two real productions, one nested helper, one
+# non-production function, and a trailing declaration that must not be swept
+# into the last production's body.
+val FIXTURE = "use compiler.core.tokens.{TOK_KW_WHILE, TOK_KW_RETURN}\n\nfn helper_not_a_production() -> i64:\n    expr_ident(\"x\")\n\nfn parse_while_stmt(p: i64) -> i64:\n    # dispatch comment mentioning TOK_KW_NEVER\n    if par_kind_get(p) == TOK_KW_WHILE:\n        val body = parse_block(p)\n        return expr_while(body, 0)\n    0\n\nfn parse_return_stmt(p: i64) -> i64:\n    parser_expect(p, TOK_KW_RETURN)\n    stmt_alloc(STMT_RETURN, 0)\n\nconst TRAILING = 1\n"
+
+fn _fixture_index() -> TagIndex:
+    var ctors: {text: text} = {}
+    ctors["expr_while"] = "EXPR_WHILE"
+    ctors["expr_ident"] = "EXPR_IDENT"
+    TagIndex(["DECL_FN", "EXPR_IDENT", "EXPR_WHILE", "STMT_RETURN"], ctors)
+
+fn _rows() -> [ProductionRow]:
+    extract_productions("/repo", "/repo/parser_fixture.spl", FIXTURE, _fixture_index())
+
+describe "compiler_schema grammar extractor":
+    it "extracts only parse_* entry points":
+        val rows = _rows()
+        expect(rows.len()).to_equal(2)
+        expect(rows[0].name).to_equal("parse_while_stmt")
+        expect(rows[1].name).to_equal("parse_return_stmt")
+
+    it "records the declaring file relative to the repo root, with its line":
+        val rows = _rows()
+        expect(rows[0].path).to_equal("parser_fixture.spl")
+        expect(rows[0].line).to_equal(6)
+
+    it "records the tokens a production dispatches on, ignoring comments":
+        val rows = _rows()
+        expect(rows[0].dispatch.len()).to_equal(1)
+        expect(rows[0].dispatch[0]).to_equal("TOK_KW_WHILE")
+        expect(rows[1].dispatch[0]).to_equal("TOK_KW_RETURN")
+
+    it "maps a node constructor call to the tag it stamps":
+        val rows = _rows()
+        expect(rows[0].produces.len()).to_equal(1)
+        expect(rows[0].produces[0]).to_equal("EXPR_WHILE")
+
+    it "records a directly named tag constant too":
+        val rows = _rows()
+        expect(rows[1].produces[0]).to_equal("STMT_RETURN")
+
+    it "records the productions a production calls":
+        val rows = _rows()
+        assert_contains(rows[0].calls, "parse_block")
+
+    it "does not sweep a trailing declaration into the last production":
+        val rows = _rows()
+        var saw_trailing = false
+        for t in rows[1].produces:
+            if t == "DECL_FN":
+                saw_trailing = true
+        assert_false(saw_trailing)
+
+    it "gives every production a stable id":
+        val rows = _rows()
+        expect(production_id(rows[0])).to_equal("spl:production@parser_fixture.spl:parse_while_stmt")
+
+describe "compiler_schema grammar cross-check":
+    it "flags a flat-AST tag no production stamps as E-GRAMMAR-ORPHAN-TAG":
+        val model = GrammarModel(_rows(), ["EXPR_WHILE", "STMT_RETURN", "EXPR_NEVER_BUILT"],
+                                 ["EXPR_NEVER_BUILT"], [])
+        val body = render_grammar(model)
+        assert_contains(body, "E-GRAMMAR-ORPHAN-TAG")
+        assert_contains(body, "tag: EXPR_NEVER_BUILT")
+        assert_contains(body, "orphan_tag_count: 1")
+
+    it "flags an unreachable production as E-GRAMMAR-DEAD-PRODUCTION":
+        val model = GrammarModel(_rows(), ["EXPR_WHILE", "STMT_RETURN"], [],
+                                 ["spl:production@parser_fixture.spl:parse_orphaned"])
+        val body = render_grammar(model)
+        assert_contains(body, "E-GRAMMAR-DEAD-PRODUCTION")
+        assert_contains(body, "parse_orphaned")
+        assert_contains(body, "dead_production_count: 1")
+
+    it "emits no issue rows when both cross-checks are clean":
+        val model = GrammarModel(_rows(), ["EXPR_WHILE", "STMT_RETURN"], [], [])
+        val body = render_grammar(model)
+        expect(body.find("E-GRAMMAR-")).to_be_less_than(0)
+
+    it "renders the same body twice — the registry is deterministic":
+        val model = GrammarModel(_rows(), ["EXPR_WHILE"], [], [])
+        expect(render_grammar(model)).to_equal(render_grammar(model))
+
+    it "names the grammar registry file after its owner":
+        expect(grammar_file_name()).to_equal("compiler.frontend.Grammar.sdn")
+
+describe "compiler_schema grammar over the real frontend tree":
+    it "finds parser productions and flat-AST tags in the live compiler":
+        val model = build_grammar_model(cwd())
+        expect(model.productions.len()).to_be_greater_than(50)
+        expect(model.tags.len()).to_be_greater_than(50)
+
+    it "reports the cross-check counts in the index block":
+        val model = build_grammar_model(cwd())
+        val block = render_index_grammar(model)
+        assert_contains(block, "owner: compiler.frontend.Grammar")
+        assert_contains(block, "orphan_tag_count:")
+        assert_contains(block, "dead_production_count:")
+
+    it "summarises the model for the freshness gate to quote":
+        val model = build_grammar_model(cwd())
+        assert_contains(grammar_report(model), "production(s)")
+        assert_contains(grammar_report(model), "orphan tag(s)")

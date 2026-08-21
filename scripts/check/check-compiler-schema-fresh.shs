@@ -7,7 +7,8 @@
 # missing enum source (nothing to extract) is an ERROR, never a pass.
 #
 # Verdict is always the LAST line of stdout:
-#   PASS — <n> variant(s) across <k> enum(s), registry fresh      exit 0
+#   PASS — <n> variant(s) across <k> enum(s), <p> production(s) (<o> orphan
+#          tag(s), <d> dead production(s)), registry fresh              exit 0
 #   FAIL — stale: <files>                                          exit 1
 #   ERROR — nothing was checked (<reason>)                         exit 2
 #
@@ -15,9 +16,24 @@
 # registry are resolved under it); default is the repo root. The generator
 # itself always runs from the repo, since module resolution needs the stdlib.
 #
+# The GRAMMAR axis (hardening plan §11.3, lane C1) is part of the same
+# registry: `generate` emits spec/compiler_schema/registry/
+# compiler.frontend.Grammar.sdn alongside the enum registries, so a stale
+# grammar registry is a stale registry. The cross-check counts
+# (E-GRAMMAR-ORPHAN-TAG / E-GRAMMAR-DEAD-PRODUCTION rows) are reported in the
+# verdict rather than being fatal: both populations are non-zero today and
+# freezing them at zero would just make the gate unlandable. What IS fatal is
+# a grammar registry that disagrees with the tree, or a run that extracted
+# ZERO productions (missing parser sources) — absence of evidence is not a
+# pass.
+#
 # --selftest runs first and is fatal.
 
 set -u
+
+# Phase 9: mint an evidence receipt for this gate's verdict (additive; never
+# changes the verdict or the exit status). See scripts/check/lib/emit_receipt.shs.
+. "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/lib/emit_receipt.shs"
 
 REPO_ROOT=${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}
 SIMPLE_BIN=${SIMPLE_BIN:-"$REPO_ROOT/bin/simple"}
@@ -64,6 +80,17 @@ scan() {
         exit 1
     fi
     _enums=$(grep -c '^enum:' "$_out/index.sdn")
+    _prod=$(grep -o 'grammar: [0-9]* production' "$_out.log" | head -1 | awk '{print $2}')
+    _orph=$(grep -o '[0-9]* orphan tag' "$_out.log" | head -1 | awk '{print $1}')
+    _dead=$(grep -o '[0-9]* dead production' "$_out.log" | head -1 | awk '{print $1}')
+    if [ -z "$_prod" ]; then
+        rm -rf "$_tmp"
+        verdict_error "generator emitted no grammar report"
+    fi
+    if [ "$_prod" -eq 0 ]; then
+        rm -rf "$_tmp"
+        verdict_error "generator extracted 0 parser productions (missing frontend core sources?)"
+    fi
     _stale=""
     for f in "$_out"/*.sdn; do
         _name=$(basename "$f")
@@ -78,11 +105,18 @@ scan() {
         fi
     done
     rm -rf "$_tmp"
+    # Receipts are minted only for a scan of the REAL repo root. The selftest
+    # runs this same function against fixture repos; a receipt from a fixture
+    # would be evidence about a temp dir, which is worse than no evidence.
     if [ -n "$_stale" ]; then
-        echo "FAIL — stale:$_stale"
+        _verdict="FAIL — stale:$_stale"
+        echo "$_verdict"
+        [ "$_root" = "$REPO_ROOT" ] && { emit_receipt "check-compiler-schema-fresh" "$_verdict" || true; }
         exit 1
     fi
-    echo "PASS — $_count variant(s) across $_enums enum(s), registry fresh"
+    _verdict="PASS — $_count variant(s) across $_enums enum(s), $_prod production(s) ($_orph orphan tag(s), $_dead dead production(s)), registry fresh"
+    echo "$_verdict"
+    [ "$_root" = "$REPO_ROOT" ] && { emit_receipt "check-compiler-schema-fresh" "$_verdict" || true; }
     exit 0
 }
 
@@ -91,7 +125,8 @@ selftest() {
     _fix="$_st/repo"
     mkdir -p "$_fix"
     # Fixture repo: the real generator sources + the real compiler enum sources.
-    ( cd "$REPO_ROOT" && tar cf - src/app/compiler_schema src/compiler/10.frontend/ast.spl \
+    ( cd "$REPO_ROOT" && tar cf - src/app/compiler_schema src/compiler/10.frontend/core \
+        src/compiler/10.frontend/ast.spl \
         src/compiler/10.frontend/parser_types_expr.spl \
         src/compiler/20.hir/hir_definitions.spl src/compiler/20.hir/hir_types.spl \
         src/compiler/50.mir/mir_instruction_kinds.spl \
@@ -128,8 +163,18 @@ selftest() {
     esac
     [ "$_rc" -eq 2 ] || { echo "selftest FAIL: missing-source exit $_rc (want 2)"; rm -rf "$_st"; exit 2; }
 
+    # 4. Deleting a parser source must FAIL (proves the grammar axis is really
+    #    in the diff set, not just carried along).
+    rm -f "$_fix/src/compiler/10.frontend/core/parser_stmts.spl"
+    _r=$( scan "$_fix" ); _rc=$?
+    case "$_r" in
+        FAIL*) : ;;
+        *) echo "selftest FAIL: deleted parser source did not FAIL: $_r"; rm -rf "$_st"; exit 2 ;;
+    esac
+    [ "$_rc" -eq 1 ] || { echo "selftest FAIL: deleted-parser exit $_rc (want 1)"; rm -rf "$_st"; exit 2; }
+
     rm -rf "$_st"
-    echo "selftest: 3/3 fixtures OK"
+    echo "selftest: 4/4 fixtures OK"
 }
 
 SCAN_ROOT="$REPO_ROOT"
