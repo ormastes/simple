@@ -232,7 +232,7 @@ pub(super) fn exec_block_closure(
 /// Like `exec_block_closure`, but runs directly against `out_env`. Lambda
 /// execution uses this so mutations remain observable on every control-flow
 /// exit. The wrapper above supplies a throwaway clone when isolation is needed.
-pub(super) fn exec_block_closure_into(
+pub(crate) fn exec_block_closure_into(
     nodes: &[Node],
     out_env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,

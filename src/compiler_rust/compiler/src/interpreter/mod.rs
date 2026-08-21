@@ -142,7 +142,7 @@ mod interpreter_helpers;
 pub(crate) use interpreter_helpers::{
     bind_pattern, bind_pattern_value, comprehension_iterate, control_to_value, create_range_object,
     create_range_object_opt, eval_arg, eval_arg_int, eval_arg_usize, eval_array_all, eval_array_any, eval_array_filter,
-    eval_array_find, eval_array_map, eval_array_reduce, eval_dict_filter, eval_dict_map_values, eval_option_and_then,
+    eval_array_find, eval_array_map, eval_array_reduce, eval_dict_filter, eval_dict_for_each, eval_dict_map_values, eval_option_and_then,
     eval_option_filter, eval_option_map, eval_option_or_else, eval_result_and_then, eval_result_map,
     eval_result_map_err, eval_result_or_else, find_and_exec_method, handle_functional_update,
     handle_method_call_with_self_update, iter_to_vec, message_to_value, normalize_index, slice_collection,
@@ -155,6 +155,7 @@ pub(crate) use interpreter_helpers::{
 mod interpreter_call;
 pub(crate) use interpreter_call::IN_NEW_METHOD;
 pub(crate) use interpreter_call::exec_block_value;
+pub(crate) use interpreter_call::exec_block_closure_into;
 pub(crate) use interpreter_call::{
     captured_env_with_live_globals, execute_function_body, publish_live_bound_globals, sync_owned_captured_globals,
 };
