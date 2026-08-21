@@ -101,3 +101,12 @@ Several still claim fabricated i64/optional returns or widen the i32 argument.
 Those declarations and their callers remain an explicit migration item; this
 provider hardening does not establish caller-owned allocation bounds or prove
 all raw-pointer users safe.
+
+The first caller migration covers CUDA/OpenCL argument packing, Metal host
+packing, GPU-lane canary writes, and WM measurement buffers. These declarations
+now use the exact void result and exact i32 payload, and calls are confined to
+narrow `unsafe(ffi, raw_ptr)` scopes. Removing the fabricated result also
+removes optional-value construction from these per-element paths. The source
+inventory improved from 33 to 40 fully tagged/contracted declarations, but 517
+remain contract-documented without an unsafe tag and 13,599 remain missing
+both; therefore repository-wide SFFI is still neither safe nor verified.
