@@ -1,0 +1,285 @@
+#!/bin/sh
+# check-owned-process-runtime-wiring.shs
+#
+# Fail-closed reproduce check for
+#   doc/08_tracking/bug/owned_process_runtime_lost_in_tree_wipe_restore_2026-08-21.md
+#
+# WHAT HAPPENED
+#
+# The tree-wipe restore `ae55a746719` silently dropped an ENTIRE feature: the
+# owned-process runtime. Every producer of `rt_process_run_owned_bounded_value`
+# went with it -- the C implementation (1292 lines), its three selfcheck files,
+# its ABI block in runtime.h, its build wiring, its four symbol-manifest rows,
+# and its codegen spec -- and ALL SEVEN push guards were green over the result.
+# They were green because a tree that has coherently lost a feature is
+# structurally perfect: no conflict entries, no marker text, the file count band
+# holds, the `rt_*` symbol-set guard greps for DEFINITIONS and cannot miss what
+# is no longer referenced anywhere, and `-fsyntax-only` happily compiles the
+# remaining files. The only thing that noticed was one Rust unit test.
+#
+# WHAT THIS GUARD CHECKS
+#
+# Not "does it compile" -- that was never the failing property. It checks that
+# the feature's producers are all PRESENT and mutually CONSISTENT, i.e. that
+# every entry point declared in the runtime.h ABI block is
+#
+#   1. DEFINED in src/runtime/runtime_process_owned.c, and
+#   2. that file is wired into the runtime build (`c_sources` + rerun-if-changed
+#      in src/compiler_rust/runtime/build.rs), and
+#   3. every symbol-manifest row the feature had is still in runtime_symbols.rs,
+#      and
+#   4. the codegen RuntimeFuncSpec for rt_process_run_owned_bounded_value is
+#      still registered in runtime_sffi.rs.
+#
+# The required symbol set is DERIVED from the header block, never hardcoded, so
+# an entry point added tomorrow is covered the day it lands -- and deleting the
+# header block does not silently empty the requirement, because an empty derived
+# set is ERROR (see NON-VACUITY).
+#
+# NON-VACUITY: a run that checked 0 symbols is ERROR, never a pass. A missing
+# source file is an offender, not a skip. Absence of a thing to check is absence
+# of evidence.
+#
+# VERDICT (last line of stdout):
+#   PASS  — <n> wiring invariant(s) checked, 0 broken            exit 0
+#   FAIL  — <n> wiring invariant(s) checked, <k> broken: <what>  exit 1
+#   ERROR — nothing was checked (<reason>)                       exit 2
+#
+# USAGE
+#   sh scripts/check/check-owned-process-runtime-wiring.shs [--root DIR]
+#   sh scripts/check/check-owned-process-runtime-wiring.shs --selftest
+#
+# --selftest runs before every scan and is fatal.
+
+set -u
+SELF=check-owned-process-runtime-wiring
+GREP=/usr/bin/grep
+[ -x "$GREP" ] || GREP=grep
+
+C_REL=src/runtime/runtime_process_owned.c
+H_REL=src/runtime/runtime.h
+BUILD_REL=src/compiler_rust/runtime/build.rs
+SYMS_REL=src/compiler_rust/common/src/runtime_symbols.rs
+SFFI_REL=src/compiler_rust/compiler/src/codegen/runtime_sffi.rs
+
+# Manifest rows the wipe removed. Kept explicit BECAUSE they are what was lost:
+# deriving them from the file would make the check circular.
+MANIFEST_SYMS="rt_process_owned_cancel rt_process_owned_cancel_value rt_process_owned_terminate rt_process_run_owned_bounded_value"
+CODEGEN_SPEC_SYM=rt_process_run_owned_bounded_value
+
+# scan <root> -> prints "checked broken <details>"; sets nothing global.
+scan() {
+    sc_root=$1
+    sc_checked=0
+    sc_broken=0
+    sc_detail=""
+
+    for rel in "$C_REL" "$H_REL" "$BUILD_REL" "$SYMS_REL" "$SFFI_REL"; do
+        sc_checked=$((sc_checked + 1))
+        if [ ! -f "$sc_root/$rel" ]; then
+            sc_broken=$((sc_broken + 1))
+            sc_detail="$sc_detail missing-file:$rel"
+        fi
+    done
+
+    # Required entry points, derived from the header's declarations.
+    sc_req=""
+    if [ -f "$sc_root/$H_REL" ]; then
+        sc_req=$($GREP -oE 'rt_process_(owned|run_owned)[a-z0-9_]*' "$sc_root/$H_REL" 2>/dev/null \
+                 | $GREP -v '_test_force_' | sort -u | tr '\n' ' ')
+    fi
+    if [ -z "$sc_req" ]; then
+        echo "0 0 no-abi-block"
+        return 0
+    fi
+
+    for sym in $sc_req; do
+        sc_checked=$((sc_checked + 1))
+        if [ -f "$sc_root/$C_REL" ] \
+           && $GREP -qE "^[A-Za-z_].*[^a-zA-Z0-9_]${sym}\(" "$sc_root/$C_REL" 2>/dev/null; then
+            :
+        else
+            sc_broken=$((sc_broken + 1))
+            sc_detail="$sc_detail undefined:$sym"
+        fi
+    done
+
+    # Build wiring: the .c must be in c_sources AND in rerun-if-changed.
+    sc_checked=$((sc_checked + 1))
+    if [ ! -f "$sc_root/$BUILD_REL" ] \
+       || [ "$($GREP -c 'runtime_process_owned\.c' "$sc_root/$BUILD_REL" 2>/dev/null)" -lt 2 ]; then
+        sc_broken=$((sc_broken + 1))
+        sc_detail="$sc_detail unwired-build:runtime_process_owned.c"
+    fi
+
+    for sym in $MANIFEST_SYMS; do
+        sc_checked=$((sc_checked + 1))
+        if [ ! -f "$sc_root/$SYMS_REL" ] \
+           || ! $GREP -q "$sym" "$sc_root/$SYMS_REL" 2>/dev/null; then
+            sc_broken=$((sc_broken + 1))
+            sc_detail="$sc_detail no-manifest-row:$sym"
+        fi
+    done
+
+    sc_checked=$((sc_checked + 1))
+    if [ ! -f "$sc_root/$SFFI_REL" ] \
+       || ! $GREP -q "$CODEGEN_SPEC_SYM" "$sc_root/$SFFI_REL" 2>/dev/null; then
+        sc_broken=$((sc_broken + 1))
+        sc_detail="$sc_detail no-codegen-spec:$CODEGEN_SPEC_SYM"
+    fi
+
+    echo "$sc_checked $sc_broken$sc_detail"
+}
+
+# ---------------------------------------------------------------------------
+# SELFTEST — six fixtures, all run through the real scanner.
+# ---------------------------------------------------------------------------
+SELFTEST_EXPECTED=6
+
+make_fixture() {
+    mf=$1
+    rm -rf "$mf"
+    mkdir -p "$mf/src/runtime" "$mf/src/compiler_rust/runtime" \
+             "$mf/src/compiler_rust/common/src" \
+             "$mf/src/compiler_rust/compiler/src/codegen" || return 1
+    cat >"$mf/$H_REL" <<'EOF'
+bool rt_process_owned_cancel(unsigned long a, unsigned long b);
+bool rt_process_owned_terminate(long pid, unsigned long identity);
+bool rt_process_owned_cancel_value(unsigned long s, unsigned long g);
+long* rt_process_run_owned_bounded_value(const char* c, unsigned long n);
+EOF
+    cat >"$mf/$C_REL" <<'EOF'
+bool rt_process_owned_cancel(unsigned long a, unsigned long b) { return true; }
+bool rt_process_owned_terminate(long pid, unsigned long identity) { return true; }
+bool rt_process_owned_cancel_value(unsigned long s, unsigned long g) { return true; }
+long* rt_process_run_owned_bounded_value(const char* c, unsigned long n) { return 0; }
+EOF
+    cat >"$mf/$BUILD_REL" <<'EOF'
+let c_sources = ["runtime_process_owned.c"];
+println!("cargo:rerun-if-changed=../../runtime/runtime_process_owned.c");
+EOF
+    cat >"$mf/$SYMS_REL" <<'EOF'
+"rt_process_owned_cancel", "rt_process_owned_cancel_value",
+"rt_process_owned_terminate", "rt_process_run_owned_bounded_value",
+EOF
+    cat >"$mf/$SFFI_REL" <<'EOF'
+RuntimeFuncSpec::new("rt_process_run_owned_bounded_value", &[I64; 5], &[I64]),
+EOF
+    return 0
+}
+
+st_expect() {
+    se_name=$1; se_root=$2; se_want=$3   # se_want: ok | broken
+    se_out=$(scan "$se_root")
+    se_broken=$(echo "$se_out" | awk '{print $2}')
+    se_checked=$(echo "$se_out" | awk '{print $1}')
+    case "$se_want" in
+        ok)
+            if [ "$se_checked" -le 0 ] || [ "$se_broken" -ne 0 ]; then
+                echo "SELFTEST FAIL: $se_name expected clean, got: $se_out" >&2
+                return 1
+            fi ;;
+        broken)
+            if [ "$se_broken" -eq 0 ]; then
+                echo "SELFTEST FAIL: $se_name expected a broken invariant, got: $se_out" >&2
+                return 1
+            fi ;;
+        vacuous)
+            if [ "$se_checked" -ne 0 ]; then
+                echo "SELFTEST FAIL: $se_name expected 0 checked, got: $se_out" >&2
+                return 1
+            fi ;;
+    esac
+    return 0
+}
+
+selftest() {
+    st_root=$(mktemp -d) || return 1
+    st_ran=0
+    st_fail=0
+
+    make_fixture "$st_root/a" || return 1
+    st_ran=$((st_ran + 1)); st_expect "complete fixture" "$st_root/a" ok || st_fail=1
+
+    # The incident itself: the C implementation deleted wholesale.
+    make_fixture "$st_root/b" || return 1
+    rm -f "$st_root/b/$C_REL"
+    st_ran=$((st_ran + 1)); st_expect "C implementation deleted" "$st_root/b" broken || st_fail=1
+
+    # Build wiring dropped while the file survives -- the half that would make
+    # the feature dead code without deleting a byte of it.
+    make_fixture "$st_root/c" || return 1
+    : >"$st_root/c/$BUILD_REL"
+    st_ran=$((st_ran + 1)); st_expect "build.rs wiring dropped" "$st_root/c" broken || st_fail=1
+
+    make_fixture "$st_root/d" || return 1
+    : >"$st_root/d/$SYMS_REL"
+    st_ran=$((st_ran + 1)); st_expect "symbol-manifest rows dropped" "$st_root/d" broken || st_fail=1
+
+    make_fixture "$st_root/e" || return 1
+    : >"$st_root/e/$SFFI_REL"
+    st_ran=$((st_ran + 1)); st_expect "codegen spec dropped" "$st_root/e" broken || st_fail=1
+
+    # Non-vacuity: an empty tree must yield 0 checked so the caller is FORCED
+    # to ERROR. A guard that silently passes on nothing protects nothing.
+    mkdir -p "$st_root/f"
+    st_ran=$((st_ran + 1)); st_expect "empty tree" "$st_root/f" vacuous || st_fail=1
+
+    rm -rf "$st_root"
+    if [ "$st_ran" -ne "$SELFTEST_EXPECTED" ]; then
+        echo "SELFTEST FAIL: expected $SELFTEST_EXPECTED fixtures, ran $st_ran" >&2
+        return 1
+    fi
+    [ "$st_fail" -eq 0 ] || return 1
+    echo "$SELF: selftest $st_ran/$SELFTEST_EXPECTED fixtures correct (complete PASS; C file / build wiring / manifest rows / codegen spec each individually FAIL; empty tree checks 0 so the caller must ERROR)"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# MAIN
+# ---------------------------------------------------------------------------
+ROOT=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) DO_SELFTEST_ONLY=1 ;;
+        --root) shift; ROOT="${1:-}" ;;
+        *) echo "$SELF: ERROR — unknown argument '$1'" >&2
+           echo "$SELF: ERROR — nothing was checked (bad usage)"; exit 2 ;;
+    esac
+    shift
+done
+
+if ! selftest; then
+    echo "$SELF: ERROR — selftest failed; the detector is not trustworthy" >&2
+    echo "$SELF: ERROR — nothing was checked (selftest failed)"
+    exit 2
+fi
+
+if [ "${DO_SELFTEST_ONLY:-0}" = 1 ]; then
+    echo "$SELF: PASS — $SELFTEST_EXPECTED fixture(s) checked (selftest only, scan skipped)"
+    exit 0
+fi
+
+if [ -z "$ROOT" ]; then
+    ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || ROOT=""
+fi
+if [ -z "$ROOT" ] || [ ! -d "$ROOT" ]; then
+    echo "$SELF: ERROR — nothing was checked (no repo root; run from a clone or pass --root)"
+    exit 2
+fi
+
+OUT=$(scan "$ROOT")
+CHECKED=$(echo "$OUT" | awk '{print $1}')
+BROKEN=$(echo "$OUT" | awk '{print $2}')
+DETAIL=$(echo "$OUT" | cut -d' ' -f3-)
+
+if [ "$CHECKED" -eq 0 ]; then
+    echo "$SELF: ERROR — nothing was checked (no owned-process ABI block in $H_REL; the feature's header contract is gone)"
+    exit 2
+fi
+if [ "$BROKEN" -ne 0 ]; then
+    echo "$SELF: FAIL — $CHECKED wiring invariant(s) checked, $BROKEN broken:$DETAIL"
+    exit 1
+fi
+echo "$SELF: PASS — $CHECKED wiring invariant(s) checked, 0 broken"
+exit 0

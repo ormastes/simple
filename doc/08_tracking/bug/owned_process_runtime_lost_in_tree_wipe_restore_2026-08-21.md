@@ -1,7 +1,7 @@
 # Owned-process runtime lost in tree-wipe restore `ae55a746719`
 
 - **Date:** 2026-08-21
-- **Status:** FIXED (restored)
+- **Status:** RESOLVED (restored 2026-08-21; reproduce check landed 2026-08-21)
 - **Last good content:** `f11bd8f0d6b` ("fix(jit): register struct-field runtime funcs + link owned-process C into seed runtime")
 - **Surfaced by:** seed test sweep — `cargo test --release -p simple-compiler --lib owned_process`
 
@@ -131,3 +131,36 @@ fails with `stage4_sqlite_probe failed: status=exit status: 2 stdout="" stderr="
 (`test result: FAILED. 0 passed; 1 failed ... finished in 13.59s`). This is a
 linked-probe runtime failure, a different defect from the duplicate-symbol
 contract failure, and is left unfixed and unclaimed here.
+
+## Reproduce check (2026-08-21)
+
+`scripts/check/check-owned-process-runtime-wiring.shs` — fail-closed, with a
+fatal `--selftest` (6 fixtures) that runs before every scan.
+
+It deliberately does **not** check "does it compile": that was never the failing
+property. A tree that has coherently lost a feature is structurally perfect, and
+that is exactly why all seven push guards were green. It checks that the
+feature's producers are PRESENT and mutually CONSISTENT: every entry point
+declared in the `runtime.h` ABI block is defined in `runtime_process_owned.c`;
+that file is in `build.rs` `c_sources` *and* `rerun-if-changed`; the four
+symbol-manifest rows are in `runtime_symbols.rs`; the codegen spec for
+`rt_process_run_owned_bounded_value` is in `runtime_sffi.rs`.
+
+The required symbol set is **derived from the header block, never hardcoded**,
+so an entry point added tomorrow is covered the day it lands. Deleting the block
+cannot empty the requirement silently: an empty derived set is `ERROR — nothing
+was checked`, exit 2, never a pass.
+
+Evidence:
+- current tree: `PASS — 21 wiring invariant(s) checked, 0 broken` (exit 0)
+- the real incident commit `ae55a746719`, materialised read-only into a temp
+  root: `ERROR — nothing was checked (no owned-process ABI block in
+  src/runtime/runtime.h; the feature's header contract is gone)` (exit 2, i.e.
+  do-not-push) — at that rev `runtime_process_owned.c` does not exist at all.
+- selftest: `6/6 fixtures correct (complete PASS; C file / build wiring /
+  manifest rows / codegen spec each individually FAIL; empty tree checks 0 so
+  the caller must ERROR)`.
+
+Not wired into `pre-push-conflict-tree-guard.shs` yet — it is a
+single-feature guard, and the general form (a per-feature wiring ledger) is the
+right shape before adding one script per feature to the push path.
