@@ -295,8 +295,8 @@ Current evidence after the checked regex boundary migration:
 
 - 3,963 distinct symbols in the current backing census, including 3,961
   compiler-owned canonical symbols;
-- 14,603 declaration sites;
-- 14,042 sites have neither an explicit FFI-unsafe tag nor a local contract;
+- 14,495 declaration sites;
+- 13,934 sites have neither an explicit FFI-unsafe tag nor a local contract;
 - 510 sites declare a typed/documented contract but lack the unsafe tag;
 - 38 declarations now carry explicit FFI authority
   but still require canonical ABI-contract metadata;
@@ -317,7 +317,15 @@ their text argument and add no allocation, hashing, dynamic loading, or
 string-name lookup. The rebuilt-interpreter regression passes all five examples;
 no weak fallback or skipped test was introduced.
 
-These are migration inputs, not 14,603 independent implementations. The audit
+The TRACE32 boundary now has one physical implementation owner. Eight sync
+`t32_ffi` compatibility modules and eight async `t32_sffi` copies are explicit
+re-export facades over `std.nogc_sync_mut.debug.remote.t32_sffi`; this removes
+108 duplicate raw declarations and 682 duplicate unauthorised call sites with
+no runtime wrapper, allocation, lookup, or code-size duplication. The remaining
+canonical TRACE32 raw-memory ABI is still unverified and must be tagged and
+contracted before it can be treated as safe.
+
+These are migration inputs, not 14,495 independent implementations. The audit
 now hashes normalized declaration shapes and groups them by symbol. The next
 tooling step replaces the text-derived shape with the resolved HIR ABI hash,
 rejects the 401 conflict groups, and converts compatibility modules to
@@ -349,8 +357,8 @@ call-site migration ledger at
 `doc/08_tracking/bug/data/sffi_call_authority_2026-08-21.tsv`. It recognizes
 file-local externs and explicit `rt_*`/`spl_*` imports from SFFI modules, tracks
 function and lexical FFI authority by indentation, and can fail CI with
-`SFFI_FAIL_ON_MISSING=1`. The current source/test census contains 22,341
-missing-authority calls, 51 lexical scopes, and 43 function scopes across 3,157
+`SFFI_FAIL_ON_MISSING=1`. The current source/test census contains 21,659
+missing-authority calls, 51 lexical scopes, and 43 function scopes across 3,143
 files. It completed in 24.21 seconds at 7,424 KiB maximum RSS. This is a
 migration index rather than ABI proof; aliases, generated bindings, and
 re-exports still require resolved-HIR identity.
