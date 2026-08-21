@@ -141,3 +141,10 @@ implementation-blocked-by-bootstrap-authority
   broad self-host import/re-export resolution defect, not justification for
   consumer-by-consumer imports or seed fallback. See
   `stage3_selfhost_imported_type_resolution_cascade_2026-08-21.md`.
+- fix: Root-cause analysis found Phase 3 dispatch trusted a native-unstable
+  readiness boolean after Phase 2 intentionally emptied `ctx.modules`. Routing
+  now uses stable streaming configuration, rebuilds only from the frozen
+  surface owner, and fails closed before an empty parser-cache read. The focused
+  lifecycle regression invokes the production dispatcher. Bootstrap rerun is
+  deferred to a fresh session because this session reached its verification
+  cycle cap.

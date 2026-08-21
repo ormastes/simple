@@ -2,7 +2,8 @@
 
 ## Status
 
-Open, release-blocking. Measured Stage 2 passes compilation, sanity, receiver
+Fix committed locally; bootstrap re-verification pending in a fresh session.
+Measured Stage 2 passes compilation, sanity, receiver
 capability, immutable admission, and receipt-bound replay. Stage 3 fails closed
 during HIR lowering before it can emit a provenance-qualified compiler.
 
@@ -24,13 +25,17 @@ files. The unresolved types are `Backend`, `CodegenBarrierScope`,
 `ProcessResult` in `src/std/nogc_sync_mut/io/file_ops.spl`; compiler driver,
 backend, linker, and VHDL modules then lose shared compiler types.
 
-This is not the earlier missing sibling-impl link defect: Stage 2 links after
-explicit owner imports. It is a Stage-3 self-host module/import/re-export type
-resolution failure affecting a broad closure.
+This is not the earlier missing sibling-impl link defect. Phase 2 intentionally
+clears `ctx.modules` after freezing streaming module surfaces, but production
+Phase 3 selected its cached-module path from an adjacent mutable readiness flag
+that native value semantics did not retain. It then read the empty module map;
+package sibling surfaces amplified the result into package-uniform diagnostics.
 
 ## Unblock condition
 
-Identify and fix the single import/re-export or module-index invariant that
-causes the admitted Stage-2 compiler to lose imported types. Add a focused
-multi-module regression that fails on the Stage-2 compiler, then rerun Stage 3
-once. Do not patch 197 consumers individually or accept a seed fallback.
+The fix routes from stable streaming configuration, recovers the frozen owner,
+uses positive dictionary membership, and fails closed if a non-streaming path
+ever sees sources with an empty parser cache. A lifecycle regression exercises
+the production dispatcher with the readiness flag deliberately reset. Rerun
+Stage 3 once in a fresh bounded verification session; do not patch 197
+consumers individually or accept a seed fallback.
