@@ -146,13 +146,3 @@ pre-existing and independent of this change. It affects the whole
 `filter`/`map`/`any`/`all` family and produces wrong ANSWERS with no
 diagnostic. Filed as
 `doc/08_tracking/bug/multiline_lambda_body_unforced_blockclosure_2026-08-21.md`.
-
-## 2026-08-21 current-main bootstrap regression
-
-Commit `fd40b997a913` retained the helper implementation and its
-`interpreter_helpers` export, but omitted `eval_dict_for_each` from the parent
-`interpreter` module's explicit re-export list. `interpreter_method::collections`
-imports through that parent, so a canonical fresh Rust-seed build failed with
-Rust `E0432` before Phase 2. Current `main` independently restores the parent
-re-export. A bootstrap-profile Cargo check and the subsequent admitted Phase 2
-build confirm that the seed now compiles with the restored export.

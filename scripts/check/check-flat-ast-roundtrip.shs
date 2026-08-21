@@ -1,0 +1,200 @@
+#!/bin/sh
+# check-flat-ast-roundtrip.shs — the flat-AST pool codec must reproduce every
+# real module's pools BYTE-for-BYTE through a dump -> reset -> restore -> dump
+# cycle, over the whole src/app bootstrap closure.
+#
+# WHY THIS EXISTS, AND WHY IT IS NOT THE SAME AS THE COMPLETENESS GUARD
+# check-flat-ast-codec-complete.shs answers "is every piece of per-parse state
+# mentioned by the codec at all?" — a static question about source text. It
+# cannot answer "does a restore actually reproduce the parse?", because that
+# depends on ORDER (dump and restore must walk the same fixed sequence),
+# ESCAPING (a newline inside a string literal must not split a line), and
+# LENGTH FRAMING (an off-by-one in one pool silently shifts every later pool).
+# Those defects are invisible to a text scan and are SILENT MISCOMPILES of the
+# bootstrap compiler, not crashes. Only running a real parse finds them.
+#
+# Pool dumps are a sufficient comparison. The bridge (flat_ast_to_module) is a
+# pure function of the pools, so identical pools give an identical
+# ParserModule; there is nothing to compare downstream that the pools do not
+# already determine. The self-check goes further at no extra cost: it leaves
+# the RESTORED pools in place, so the build that follows is built from restored
+# state and a lossy codec also breaks the build loudly.
+#
+# MECHANISM
+# The per-module work runs INSIDE the compiler process
+# (flat_pools_roundtrip_selfcheck, _FlatAstBridge/module_assembly.spl, gated by
+# SIMPLE_FLAT_POOL_ROUNDTRIP=1 and DEFAULT OFF). It has to: the pools are
+# module-private state of a running parse and there is no way to reach them
+# from a shell. Each module emits one line:
+#
+#   FLATROUNDTRIP<TAB>reset=<bool><TAB>ok=<bool><TAB>stable=<bool><TAB>bytes=<n><TAB>path=<p>
+#
+# reset= is not decoration. Without it "stable" would be vacuous: B could equal
+# A merely because nothing was ever cleared between the two dumps. reset=true
+# says restoring the pristine pre-parse snapshot really does empty the pools.
+#
+# Verdict convention (verdict line is always the LAST line of stdout):
+#   PASS — <n> module(s) round-tripped, 0 mismatches   exit 0
+#   FAIL — ...naming every offending module            exit 1
+#   ERROR — nothing was checked                        exit 2
+# A run that round-tripped 0 modules is ERROR, never a pass: absence of modules
+# is absence of evidence, and a build that died before the parse phase would
+# otherwise read as green. --selftest runs before every scan and is fatal.
+
+set -u
+
+ROOT="${ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
+SIMPLE_BIN="${SIMPLE_BIN:-$ROOT/bin/simple}"
+BUILD_SOURCE="${BUILD_SOURCE:-$ROOT/src/app}"
+BUILD_ENTRY="${BUILD_ENTRY:-$ROOT/src/app/cli/bootstrap_main.spl}"
+BUILD_THREADS="${BUILD_THREADS:-8}"
+BUILD_TIMEOUT="${BUILD_TIMEOUT:-14400}"
+
+# Reads a log and classifies every FLATROUNDTRIP line.
+# Sets SCAN_CHECKED / SCAN_OFFENDERS. An offender is any line where reset, ok,
+# or stable is not exactly "true" — a missing or unparsable field counts as an
+# offender too, never as a pass.
+classify() {
+    _log="$1"
+    SCAN_CHECKED=$(grep -c '^FLATROUNDTRIP	' "$_log" 2>/dev/null || true)
+    [ -n "$SCAN_CHECKED" ] || SCAN_CHECKED=0
+    SCAN_OFFENDERS=$(awk -F'\t' '
+        $1 == "FLATROUNDTRIP" {
+            reset = ""; ok = ""; stable = ""; path = "?"
+            for (i = 2; i <= NF; i++) {
+                split($i, kv, "=")
+                k = kv[1]
+                v = substr($i, length(k) + 2)
+                if (k == "reset")  reset = v
+                if (k == "ok")     ok = v
+                if (k == "stable") stable = v
+                if (k == "path")   path = v
+            }
+            if (reset != "true" || ok != "true" || stable != "true") {
+                why = ""
+                if (reset  != "true") why = why "reset"
+                if (ok     != "true") why = (why == "" ? "" : why ",") "restore"
+                if (stable != "true") why = (why == "" ? "" : why ",") "unstable"
+                printf " %s(%s)", path, why
+            }
+        }
+    ' "$_log" 2>/dev/null)
+}
+
+selftest() {
+    _tmp=$(mktemp -d)
+    _fail=0
+
+    # A: three clean modules -> 3 checked, no offenders.
+    printf 'noise\nFLATROUNDTRIP\treset=true\tok=true\tstable=true\tbytes=10\tpath=a.spl\nFLATROUNDTRIP\treset=true\tok=true\tstable=true\tbytes=11\tpath=b.spl\nFLATROUNDTRIP\treset=true\tok=true\tstable=true\tbytes=12\tpath=c.spl\nmore noise\n' > "$_tmp/a.log"
+    classify "$_tmp/a.log"
+    if [ "$SCAN_CHECKED" -ne 3 ] || [ -n "$SCAN_OFFENDERS" ]; then
+        echo "selftest: clean log must pass (checked=$SCAN_CHECKED offenders=$SCAN_OFFENDERS)"; _fail=1
+    fi
+
+    # B: stable=false -> the headline defect (restore does not reproduce the
+    # dump). Must be named, and the other two modules must still be counted.
+    printf 'FLATROUNDTRIP\treset=true\tok=true\tstable=true\tbytes=1\tpath=a.spl\nFLATROUNDTRIP\treset=true\tok=true\tstable=false\tbytes=1\tpath=bad.spl\n' > "$_tmp/b.log"
+    classify "$_tmp/b.log"
+    case "$SCAN_OFFENDERS" in
+        *bad.spl*unstable*) : ;;
+        *) echo "selftest: stable=false must FAIL (offenders=$SCAN_OFFENDERS)"; _fail=1 ;;
+    esac
+    [ "$SCAN_CHECKED" -eq 2 ] || { echo "selftest: offender must still be counted (checked=$SCAN_CHECKED)"; _fail=1; }
+
+    # C: ok=false -> the restore itself reported a truncated/malformed blob.
+    printf 'FLATROUNDTRIP\treset=true\tok=false\tstable=true\tbytes=1\tpath=r.spl\n' > "$_tmp/c.log"
+    classify "$_tmp/c.log"
+    case "$SCAN_OFFENDERS" in
+        *r.spl*restore*) : ;;
+        *) echo "selftest: ok=false must FAIL (offenders=$SCAN_OFFENDERS)"; _fail=1 ;;
+    esac
+
+    # D: reset=false -> "stable" is VACUOUS here, because nothing was cleared
+    # between the two dumps. A guard that only read stable= would call this
+    # green. It must not.
+    printf 'FLATROUNDTRIP\treset=false\tok=true\tstable=true\tbytes=1\tpath=vac.spl\n' > "$_tmp/d.log"
+    classify "$_tmp/d.log"
+    case "$SCAN_OFFENDERS" in
+        *vac.spl*reset*) : ;;
+        *) echo "selftest: reset=false must FAIL even when stable=true (offenders=$SCAN_OFFENDERS)"; _fail=1 ;;
+    esac
+
+    # E: a line missing the stable= field entirely must be an offender, not a
+    # pass. An absent verdict is not a good verdict.
+    printf 'FLATROUNDTRIP\treset=true\tok=true\tbytes=1\tpath=short.spl\n' > "$_tmp/e.log"
+    classify "$_tmp/e.log"
+    case "$SCAN_OFFENDERS" in
+        *short.spl*) : ;;
+        *) echo "selftest: a line missing stable= must FAIL (offenders=$SCAN_OFFENDERS)"; _fail=1 ;;
+    esac
+
+    # F: no FLATROUNDTRIP lines at all -> 0 checked, forcing the caller to
+    # ERROR. This is the shape of a build that died before the parse phase.
+    printf 'compiler exploded\n' > "$_tmp/f.log"
+    classify "$_tmp/f.log"
+    [ "$SCAN_CHECKED" -eq 0 ] || { echo "selftest: empty log must check 0 (checked=$SCAN_CHECKED)"; _fail=1; }
+
+    rm -rf "$_tmp"
+    if [ "$_fail" -ne 0 ]; then
+        echo "ERROR — nothing was checked (selftest failed)"
+        exit 2
+    fi
+}
+
+case "${1:-}" in
+    --selftest)
+        selftest
+        echo "PASS — 6 selftest fixture(s) checked, all behaved as specified"
+        exit 0
+        ;;
+esac
+
+selftest
+
+if [ ! -x "$SIMPLE_BIN" ]; then
+    echo "ERROR — nothing was checked (no compiler at $SIMPLE_BIN)"
+    exit 2
+fi
+if [ ! -f "$BUILD_ENTRY" ]; then
+    echo "ERROR — nothing was checked (no entry at $BUILD_ENTRY)"
+    exit 2
+fi
+
+WORK=$(mktemp -d)
+LOG="$WORK/build.log"
+OUT="$WORK/roundtrip.bin"
+
+_t0=$(date +%s)
+SIMPLE_FLAT_POOL_ROUNDTRIP=1 SIMPLE_CACHE_SCOPE="${SIMPLE_CACHE_SCOPE:-flatroundtrip}" \
+    timeout "$BUILD_TIMEOUT" "$SIMPLE_BIN" native-build \
+    --source "$BUILD_SOURCE" --entry-closure --entry "$BUILD_ENTRY" \
+    -o "$OUT" --threads "$BUILD_THREADS" > "$LOG" 2>&1
+BUILD_RC=$?
+_t1=$(date +%s)
+WALL=$((_t1 - _t0))
+
+classify "$LOG"
+
+if [ "$SCAN_CHECKED" -eq 0 ]; then
+    echo "ERROR — nothing was checked (build rc=$BUILD_RC emitted no FLATROUNDTRIP lines; log kept at $LOG)"
+    exit 2
+fi
+
+if [ -n "$SCAN_OFFENDERS" ]; then
+    _n=$(printf '%s\n' "$SCAN_OFFENDERS" | tr ' ' '\n' | grep -c '(')
+    echo "FAIL — $SCAN_CHECKED module(s) round-tripped in ${WALL}s, $_n mismatched:$SCAN_OFFENDERS"
+    exit 1
+fi
+
+# A clean round-trip on every module while the BUILD failed is still a FAIL:
+# the self-check leaves the restored pools in place, so a build that dies after
+# them is evidence against the codec, not noise to be discarded.
+if [ "$BUILD_RC" -ne 0 ]; then
+    echo "FAIL — $SCAN_CHECKED module(s) round-tripped cleanly in ${WALL}s but the build itself exited rc=$BUILD_RC (log kept at $LOG)"
+    exit 1
+fi
+
+rm -rf "$WORK"
+echo "PASS — $SCAN_CHECKED module(s) round-tripped in ${WALL}s, 0 mismatches"
+exit 0

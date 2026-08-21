@@ -331,6 +331,47 @@ fails with `semantic: method 'replace' not found on type 'function' (function
 `hash_text` with a local `val`. It is in the spec's transitive import graph and
 is unrelated to the codec.
 
+### Step 2 done (2026-08-21): full-closure round-trip gate
+`scripts/check/check-flat-ast-roundtrip.shs` — a FIDELITY gate, distinct in
+kind from the completeness guard. The completeness guard asks a static
+question ("is every piece of per-parse state mentioned by the codec?") and is
+structurally blind to the three defects that actually corrupt a restore:
+ORDER (dump and restore must walk the same sequence), ESCAPING (a newline
+inside a string literal splitting a line), and LENGTH FRAMING (an off-by-one
+in one pool shifting every later pool). Those are silent miscompiles, and only
+running a real parse finds them.
+
+The per-module work runs INSIDE the compiler
+(`flat_pools_roundtrip_selfcheck`, `_FlatAstBridge/module_assembly.spl`, gated
+by `SIMPLE_FLAT_POOL_ROUNDTRIP=1`, DEFAULT OFF) because the pools are
+module-private state of a running parse and unreachable from a shell. One line
+per module: `FLATROUNDTRIP reset= ok= stable= bytes= path=`.
+- `reset=` is load-bearing, not decoration: without it `stable=` would be
+  VACUOUS, since B could equal A merely because nothing was cleared between the
+  two dumps. It asserts that restoring the pristine pre-parse snapshot really
+  does empty the pools. A selftest fixture pins exactly this
+  (`reset=false stable=true` must FAIL).
+- The self-check leaves the RESTORED pools in place, so the build that follows
+  is built from restored state: a lossy codec breaks the build loudly too, and
+  the gate FAILs a clean-round-trip run whose build exited non-zero.
+- Composition lives in `flat_pools_dump_all` / `flat_pools_restore_all`
+  (version line first, seven units in one fixed order, every unit invoked and
+  its verdict AND-ed at the end rather than short-circuited so a torn restore
+  cannot hide). These are also the unit the cache will store in step 3.
+- `--selftest` fatal, 6 fixtures; 0 modules is ERROR; verdict line last.
+
+**IMPORTANT ENVIRONMENT NOTE for anyone continuing this lane.** The repo
+working copy is shared with other concurrent sessions that edit `src/` live.
+Two different build failures observed while smoke-testing this gate
+(`semantic: method 'replace' not found on type 'function' (function
+'hash_text' ...)`, then `error[E1002]: function 'dependency_interface_fold'
+not found`) were BOTH other sessions' in-flight edits, not this lane's --
+proven by running the same build from a clean `git worktree` at this lane's
+own commits, where it exits 0. Do not chase such an error in the shared tree:
+commit your work and re-probe from a private worktree, or you will "fix"
+phantoms (this session renamed three innocent `val hash_text` locals before
+catching it, and reverted them).
+
 Still to do:  (incl. dict encoders), then the full-closure round-trip gate (parse a real module, dump, reset,
 restore, rebuild through the bridge, compare), the cache wiring at the `:379`
 hook, and parse sharding across `--threads` worker processes.
