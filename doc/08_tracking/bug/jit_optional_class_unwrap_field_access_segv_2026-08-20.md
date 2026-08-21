@@ -1,7 +1,8 @@
 # BUG: JIT SEGV — `!` unwrap of an optional CLASS, then a field access
 
-Status: FIXED 2026-08-21 (class/struct + user-enum pointees; fix in tree, NOT yet
-deployed to the shared seed)
+Status: RESOLVED 2026-08-21 (class/struct + user-enum pointees; fix in tree AND
+now verified GREEN on the deployed shared seed — see "Verification on the
+deployed seed" at the end of this record)
 Severity: P1 — crashed the process and blocked all pushes
 
 ## Symptom
@@ -218,3 +219,27 @@ running concurrently on this box. The gate is therefore RED on the shared seed
 (`jit:enum-unwrap-match`) until a redeploy. Build note: `/mnt/data` was 100%
 full and the linker died with `collect2: ld terminated with signal 7 [Bus
 error]`; building with `CARGO_TARGET_DIR` on the root filesystem works.
+
+
+## Verification on the deployed seed (2026-08-21, closing this record)
+
+The "Deployment" note above said the gate stayed RED on the shared seed until a
+redeploy. That redeploy has since happened. Re-run, no rebuild, no private
+target dir:
+
+```
+binary: bin/release/x86_64-unknown-linux-gnu/simple  (59,947,080 bytes, 2026-08-21 14:27:35 UTC)
+$ sh scripts/check/check-optional-class-unwrap-field.shs
+jit      | OK   field-unwrap-field / unwrap-method-call / unwrap-nested-field
+jit      | OK   unwrap-optional-of-optional / unwrap-struct-field / unwrap-assign-field
+jit      | OK   optional-holds-reference
+jit      | OK   enum-unwrap-match
+interp   | OK   enum-unwrap-match
+PASS — 4 engine(s) executed, 0 crashes, unwrap-then-field holds     (exit 0)
+```
+
+The one non-OK line is the deliberately REPORT-ONLY interpreter
+`optional-holds-reference` reading, which belongs to the separately tracked
+class-value-identity divergence listed under "Not fixed here". Both engines run
+all eight assertions without a crash and the enum shape answers correctly.
+Status therefore moves FIXED -> RESOLVED.

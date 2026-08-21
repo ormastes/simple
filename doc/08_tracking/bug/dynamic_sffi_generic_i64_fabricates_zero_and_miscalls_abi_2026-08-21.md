@@ -2,7 +2,9 @@
 
 Date: 2026-08-21
 
-Status: CLAIMED — `/root`, SFFI v2 hardening lane
+Status: RESOLVED 2026-08-21 — interpreter-side dispatch fails closed; the native
+`spl_wffi_call_i64`/`_f64` zero-sentinel migration stays OPEN as a separate P1
+(carve-out was already stated in "Required fix" below). Evidence at the end.
 
 Severity: critical (silent wrong value, leak, and ABI undefined behavior)
 
@@ -79,3 +81,43 @@ lift. Legacy value-returning functions remain only for source compatibility and
 must be migrated by provider family; they are not evidence of robust/critical
 admission. Focused Rust tests prove that a legitimate foreign zero has status
 zero while a null pointer or short argument array has a nonzero status.
+
+## Resolution evidence (2026-08-21)
+
+`src/compiler_rust/compiler/src/interpreter_extern/dynamic_sffi.rs` now fails
+closed on every shape this record named:
+
+- `value_to_i64` (`:671`) admits **only** `Value::Int` and `Value::Bool`; every
+  other value — `Nil`, text (embedded NUL included), arrays, objects — returns
+  `unsupported_conversion("... does not admit argument type '<t>' without a
+  typed ABI contract")`. No `Value::Int(0)` fabrication and no `CString` is
+  created on this path at all, so the leak is gone with it.
+- `call_fptr` (`:848`) rejects a null pointer up front (`null_function_pointer`)
+  and rejects arity > 13 with a typed runtime error instead of falling through.
+- the typed byte/font helpers (`spl_wffi_call_i64_with_bytes`,
+  `spl_fonts_call_init_blob` / `_init_path` / `_layout_text`) each guard
+  `fptr == 0` and marshal through the fallible `strict_i64_array` /
+  `strict_owned_bytes`, which bounds-check the byte descriptor
+  (`offset + length <= owner.len()`) and reject non-byte values.
+- no `unwrap_or_else(|| Ok(Value::Int(0)))` remains in the file.
+
+Unit coverage in the same file pins all of it, including the adjacent
+regressions this record asked for: `generic_dispatch_rejects_values_without_typed_contracts`,
+`generic_dispatch_rejects_embedded_nul_text_instead_of_zero`,
+`generic_dispatch_rejects_null_function_pointer`,
+`scoped_byte_adapter_rejects_null_function_pointer`,
+`generic_dispatch_retains_integer_and_bool_scalars`,
+`packed_byte_foreign_descriptor_rejects_out_of_bounds`,
+`packed_byte_foreign_capability_cannot_escape_call`.
+
+Seed rebuilt clean with these in place (`cargo build --release --bin simple`,
+rc=0, 2026-08-21 14:53).
+
+**Still open, deliberately (see the checked-transport update above, which
+supersedes part of this):** the LEGACY value-returning `spl_wffi_call_i64` /
+`spl_wffi_call_f64` in
+`src/compiler_rust/runtime/src/value/wsffi_native.rs` still return zero for a
+null pointer / unsupported arity / invalid descriptor. As this record already
+states, that cannot be repaired by picking another sentinel and needs a
+`Result`/status-out ABI migration; it must not be admitted as a robust/critical
+typed thunk until then. Tracked as the remaining P1 of this lane.
