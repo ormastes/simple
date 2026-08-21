@@ -1,0 +1,43 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+simple="$root/src/lib/nogc_sync_mut/desktop/display.spl"
+provider="$root/src/runtime/runtime_sdl2.c"
+failed=0
+
+externs=$(grep -c '^extern fn rt_sdl2_get_.*display' "$simple" || true)
+tags=$(grep -c '^@unsafe(reason: "SDL2' "$simple" || true)
+if [ "$externs" -ne 11 ] || [ "$tags" -ne "$externs" ]; then
+    echo "all SDL2 display externs must carry exact FFI sentinel contracts" >&2
+    failed=1
+fi
+if [ "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$simple" || true)" -ne 2 ]; then
+    echo "SDL2 display calls must remain in the two minimal wrapper scopes" >&2
+    failed=1
+fi
+if ! grep -q 'fn get_display_count() -> i64?' "$simple" ||
+   ! grep -q 'fn get_primary_display() -> DisplayInfo?' "$simple" ||
+   ! grep -q 'fn get_all_displays() -> \[DisplayInfo\]?' "$simple" ||
+   ! grep -q 'fn build_display_info(index: i64) -> DisplayInfo?' "$simple"; then
+    echo "SDL2 display provider failure must remain typed absence" >&2
+    failed=1
+fi
+
+if grep -A5 '^const char\* rt_sdl2_get_display_name' "$provider" | grep -q 'Unknown' ||
+   grep -A6 '^double rt_sdl2_get_display_dpi' "$provider" | grep -q '96\.0'; then
+    echo "SDL2 display provider must not fabricate names or DPI" >&2
+    failed=1
+fi
+if ! grep -A4 '^const char\* rt_sdl2_get_display_name' "$provider" | grep -q 'SDL2_REQUIRE(NULL)' ||
+   ! grep -A4 '^double rt_sdl2_get_display_dpi' "$provider" | grep -q 'SDL2_REQUIRE(-1.0)' ||
+   ! grep -A3 '^int64_t rt_sdl2_get_display_bounds_x' "$provider" | grep -q 'INT64_MIN'; then
+    echo "SDL2 display provider sentinels are missing" >&2
+    failed=1
+fi
+
+if [ "$failed" -ne 0 ]; then
+    exit 1
+fi
+
+echo "SDL2 display SFFI contract audit: PASS"

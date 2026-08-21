@@ -1,17 +1,26 @@
 # Multi-monitor display information via SDL2.
 
-use common.ui.capability.{NotSupported}
-
+@unsafe(reason: "SDL2 display count ABI; negative is the provider failure sentinel", capabilities: [ffi])
 extern fn rt_sdl2_get_num_displays() -> i64
-extern fn rt_sdl2_get_display_name(index: i64) -> text
+@unsafe(reason: "SDL2 borrowed display-name ABI; null is the provider failure sentinel", capabilities: [ffi])
+extern fn rt_sdl2_get_display_name(index: i64) -> text?
+@unsafe(reason: "SDL2 display coordinate ABI; i64 minimum is the failure sentinel", capabilities: [ffi])
 extern fn rt_sdl2_get_display_bounds_x(index: i64) -> i64
+@unsafe(reason: "SDL2 display coordinate ABI; i64 minimum is the failure sentinel", capabilities: [ffi])
 extern fn rt_sdl2_get_display_bounds_y(index: i64) -> i64
+@unsafe(reason: "SDL2 display extent ABI; negative is the failure sentinel", capabilities: [ffi])
 extern fn rt_sdl2_get_display_bounds_w(index: i64) -> i64
+@unsafe(reason: "SDL2 display extent ABI; negative is the failure sentinel", capabilities: [ffi])
 extern fn rt_sdl2_get_display_bounds_h(index: i64) -> i64
+@unsafe(reason: "SDL2 display DPI ABI; negative is the failure sentinel", capabilities: [ffi])
 extern fn rt_sdl2_get_display_dpi(index: i64) -> f64
+@unsafe(reason: "SDL2 usable coordinate ABI; i64 minimum is the failure sentinel", capabilities: [ffi])
 extern fn rt_sdl2_get_display_usable_x(index: i64) -> i64
+@unsafe(reason: "SDL2 usable coordinate ABI; i64 minimum is the failure sentinel", capabilities: [ffi])
 extern fn rt_sdl2_get_display_usable_y(index: i64) -> i64
+@unsafe(reason: "SDL2 usable extent ABI; negative is the failure sentinel", capabilities: [ffi])
 extern fn rt_sdl2_get_display_usable_w(index: i64) -> i64
+@unsafe(reason: "SDL2 usable extent ABI; negative is the failure sentinel", capabilities: [ffi])
 extern fn rt_sdl2_get_display_usable_h(index: i64) -> i64
 
 struct DisplayInfo:
@@ -29,35 +38,74 @@ struct DisplayInfo:
     usable_width: i64
     usable_height: i64
 
-fn get_display_count() -> i64:
-    rt_sdl2_get_num_displays()
+fn get_display_count() -> i64?:
+    var count: i64 = -1
+    unsafe(capabilities: [ffi]):
+        count = rt_sdl2_get_num_displays()
+    if count < 0:
+        return nil
+    count
 
-fn get_primary_display() -> DisplayInfo:
+fn get_primary_display() -> DisplayInfo?:
     build_display_info(0)
 
-fn get_all_displays() -> [DisplayInfo]:
-    val count = rt_sdl2_get_num_displays()
+fn get_all_displays() -> [DisplayInfo]?:
+    val maybe_count = get_display_count()
+    if not maybe_count.?:
+        return nil
+    val count = maybe_count.unwrap()
     var displays: [DisplayInfo] = []
-    var i = 0
+    var i: i64 = 0
     while i < count:
-        displays = displays + [build_display_info(i)]
+        val maybe_display = build_display_info(i)
+        if not maybe_display.?:
+            return nil
+        displays.push(maybe_display.unwrap())
         i = i + 1
     displays
 
-fn build_display_info(index: i64) -> DisplayInfo:
-    val dpi = rt_sdl2_get_display_dpi(index)
+fn build_display_info(index: i64) -> DisplayInfo?:
+    if index < 0:
+        return nil
+    val invalid_coordinate: i64 = -9223372036854775807 - 1
+    var name: text? = nil
+    var width: i64 = -1
+    var height: i64 = -1
+    var x: i64 = invalid_coordinate
+    var y: i64 = invalid_coordinate
+    var dpi: f64 = -1.0
+    var usable_x: i64 = invalid_coordinate
+    var usable_y: i64 = invalid_coordinate
+    var usable_width: i64 = -1
+    var usable_height: i64 = -1
+    unsafe(capabilities: [ffi]):
+        name = rt_sdl2_get_display_name(index)
+        width = rt_sdl2_get_display_bounds_w(index)
+        height = rt_sdl2_get_display_bounds_h(index)
+        x = rt_sdl2_get_display_bounds_x(index)
+        y = rt_sdl2_get_display_bounds_y(index)
+        dpi = rt_sdl2_get_display_dpi(index)
+        usable_x = rt_sdl2_get_display_usable_x(index)
+        usable_y = rt_sdl2_get_display_usable_y(index)
+        usable_width = rt_sdl2_get_display_usable_w(index)
+        usable_height = rt_sdl2_get_display_usable_h(index)
+    if (not name.? or width < 0 or height < 0 or dpi <= 0.0 or
+        x == invalid_coordinate or y == invalid_coordinate or
+        usable_x == invalid_coordinate or usable_y == invalid_coordinate or
+        usable_width < 0 or usable_height < 0):
+        return nil
     DisplayInfo(
         id: index,
-        name: rt_sdl2_get_display_name(index),
-        width: rt_sdl2_get_display_bounds_w(index),
-        height: rt_sdl2_get_display_bounds_h(index),
-        x: rt_sdl2_get_display_bounds_x(index),
-        y: rt_sdl2_get_display_bounds_y(index),
+        name: name.unwrap(),
+        width: width,
+        height: height,
+        x: x,
+        y: y,
         dpi: dpi,
         scale_factor: dpi / 96.0,
         is_primary: index == 0,
-        usable_x: rt_sdl2_get_display_usable_x(index),
-        usable_y: rt_sdl2_get_display_usable_y(index),
-        usable_width: rt_sdl2_get_display_usable_w(index),
-        usable_height: rt_sdl2_get_display_usable_h(index)
+        usable_x: usable_x,
+        usable_y: usable_y,
+        usable_width: usable_width,
+        usable_height: usable_height
     )

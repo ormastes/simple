@@ -1276,77 +1276,98 @@ bool rt_sdl2_clipboard_has_text(void) {
 /* ===== Display Info ===== */
 
 int64_t rt_sdl2_get_num_displays(void) {
-    SDL2_REQUIRE(0);
+    SDL2_REQUIRE(-1);
+    if (!sdl2_on_owner_thread()) return -1;
     int n = SDL_GetNumVideoDisplays();
-    return n > 0 ? (int64_t)n : 0;
+    return n >= 0 ? (int64_t)n : -1;
 }
 
 const char* rt_sdl2_get_display_name(int64_t index) {
-    SDL2_REQUIRE("Unknown");
+    SDL2_REQUIRE(NULL);
+    if (!sdl2_on_owner_thread() ||
+        index < 0 || index > INT_MAX) return NULL;
     const char* name = SDL_GetDisplayName((int)index);
-    return name ? name : "Unknown";
+    return name;
 }
 
 int64_t rt_sdl2_get_display_bounds_x(int64_t index) {
-    SDL2_REQUIRE(0);
+    SDL2_REQUIRE(INT64_MIN);
+    if (!sdl2_on_owner_thread() ||
+        index < 0 || index > INT_MAX) return INT64_MIN;
     SDL_Rect r;
-    if (SDL_GetDisplayBounds((int)index, &r) != 0) return 0;
+    if (SDL_GetDisplayBounds((int)index, &r) != 0) return INT64_MIN;
     return (int64_t)r.x;
 }
 
 int64_t rt_sdl2_get_display_bounds_y(int64_t index) {
-    SDL2_REQUIRE(0);
+    SDL2_REQUIRE(INT64_MIN);
+    if (!sdl2_on_owner_thread() ||
+        index < 0 || index > INT_MAX) return INT64_MIN;
     SDL_Rect r;
-    if (SDL_GetDisplayBounds((int)index, &r) != 0) return 0;
+    if (SDL_GetDisplayBounds((int)index, &r) != 0) return INT64_MIN;
     return (int64_t)r.y;
 }
 
 int64_t rt_sdl2_get_display_bounds_w(int64_t index) {
-    SDL2_REQUIRE(0);
+    SDL2_REQUIRE(-1);
+    if (!sdl2_on_owner_thread() ||
+        index < 0 || index > INT_MAX) return -1;
     SDL_Rect r;
-    if (SDL_GetDisplayBounds((int)index, &r) != 0) return 0;
+    if (SDL_GetDisplayBounds((int)index, &r) != 0) return -1;
     return (int64_t)r.w;
 }
 
 int64_t rt_sdl2_get_display_bounds_h(int64_t index) {
-    SDL2_REQUIRE(0);
+    SDL2_REQUIRE(-1);
+    if (!sdl2_on_owner_thread() ||
+        index < 0 || index > INT_MAX) return -1;
     SDL_Rect r;
-    if (SDL_GetDisplayBounds((int)index, &r) != 0) return 0;
+    if (SDL_GetDisplayBounds((int)index, &r) != 0) return -1;
     return (int64_t)r.h;
 }
 
 double rt_sdl2_get_display_dpi(int64_t index) {
-    SDL2_REQUIRE(96.0);
+    SDL2_REQUIRE(-1.0);
+    if (!sdl2_on_owner_thread() ||
+        index < 0 || index > INT_MAX) return -1.0;
     float ddpi = 0.0f;
-    if (SDL_GetDisplayDPI((int)index, &ddpi, NULL, NULL) != 0) return 96.0;
+    if (SDL_GetDisplayDPI((int)index, &ddpi, NULL, NULL) != 0 || ddpi <= 0.0f) return -1.0;
     return (double)ddpi;
 }
 
 int64_t rt_sdl2_get_display_usable_x(int64_t index) {
-    SDL2_REQUIRE(0);
+    SDL2_REQUIRE(INT64_MIN);
+    if (!sdl2_on_owner_thread() ||
+        index < 0 || index > INT_MAX) return INT64_MIN;
     SDL_Rect r;
-    if (SDL_GetDisplayUsableBounds((int)index, &r) != 0) return 0;
+    if (SDL_GetDisplayUsableBounds((int)index, &r) != 0) return INT64_MIN;
     return (int64_t)r.x;
 }
 
 int64_t rt_sdl2_get_display_usable_y(int64_t index) {
-    SDL2_REQUIRE(0);
+    SDL2_REQUIRE(INT64_MIN);
+    if (!sdl2_on_owner_thread() ||
+        index < 0 || index > INT_MAX) return INT64_MIN;
     SDL_Rect r;
-    if (SDL_GetDisplayUsableBounds((int)index, &r) != 0) return 0;
+    if (SDL_GetDisplayUsableBounds((int)index, &r) != 0) return INT64_MIN;
     return (int64_t)r.y;
 }
 
 int64_t rt_sdl2_get_display_usable_w(int64_t index) {
-    SDL2_REQUIRE(0);
+    SDL2_REQUIRE(-1);
+    if (!sdl2_on_owner_thread() ||
+        index < 0 || index > INT_MAX) return -1;
     SDL_Rect r;
-    if (SDL_GetDisplayUsableBounds((int)index, &r) != 0) return 0;
+    if (SDL_GetDisplayUsableBounds((int)index, &r) != 0) return -1;
     return (int64_t)r.w;
 }
 
 int64_t rt_sdl2_get_display_usable_h(int64_t index) {
-    SDL2_REQUIRE(0);
+    SDL2_REQUIRE(-1);
+    if (!sdl2_on_owner_thread() ||
+        index < 0 || index > INT_MAX) return -1;
     SDL_Rect r;
-    if (SDL_GetDisplayUsableBounds((int)index, &r) != 0) return 0;
+    if (SDL_GetDisplayUsableBounds((int)index, &r) != 0) return -1;
     return (int64_t)r.h;
 }
 
@@ -1434,6 +1455,12 @@ int64_t rt_sdl_event_window_data2(void) {
 
 #ifdef SIMPLE_SDL2_HANDLE_SELFTEST
 int main(void) {
+    if (rt_sdl2_get_num_displays() != -1 || rt_sdl2_get_display_name(0) != NULL ||
+        rt_sdl2_get_display_bounds_x(0) != INT64_MIN ||
+        rt_sdl2_get_display_bounds_w(0) != -1 ||
+        rt_sdl2_get_display_dpi(0) != -1.0 ||
+        rt_sdl2_get_display_usable_y(0) != INT64_MIN ||
+        rt_sdl2_get_display_usable_h(0) != -1) return 8;
     atomic_store_explicit(&g_sdl2_owner_thread, sdl2_current_thread(), memory_order_release);
     SDL_Window *fake = (SDL_Window *)(uintptr_t)0x1234;
     int64_t first = sdl2_window_register(fake);

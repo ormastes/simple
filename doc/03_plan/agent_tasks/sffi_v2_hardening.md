@@ -73,3 +73,7 @@ passing placeholder.
     collapsed. Next replace the library owner's 66 generic unsafe contracts
     with exact per-function metadata and lexical wrapper scopes, then bind the
     dynamically loaded SDL artifact and sanitizer receipts before `Verified`.
+11. SDL2 display discovery now returns typed absence instead of fabricated
+    names/DPI/bounds and all 11 declarations have exact sentinels. Continue
+    through the canonical event/input/clipboard declarations, then implement
+    signed admission for the dynamically loaded SDL artifact.

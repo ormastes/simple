@@ -415,3 +415,18 @@ SDL2 therefore remains contract-hardened but not fully verified.
 The refreshed inventory records 145 `unsafe_contract_declared` rows and
 13,378 rows missing both tag and contract. Removing duplicate declarations is
 an assurance improvement rather than merely changing ledger classifications.
+
+SDL2 display discovery previously converted provider/load failures into valid
+looking values: zero displays, the name `"Unknown"`, zero bounds, and `96.0`
+DPI. The C boundary now returns disjoint failure sentinels (`-1`, null,
+`INT64_MIN`, or `-1.0`) and rejects invalid indices/off-owner-thread calls.
+The Simple boundary declares all 11 exact sentinel contracts, confines calls
+to two lexical `unsafe(ffi)` regions, and exposes `Option` for count, primary
+display, complete lists, and individual records. A partial record fails as a
+whole instead of mixing fabricated and real fields. The compiled C sabotage
+self-test covers unavailable display sentinels, and Simple syntax plus a
+source audit pass. Existing enumeration still performs the same SDL field
+queries; safety adds only the already-required owner-token load and scalar
+comparisons, with no hashing, allocation, lookup table, or extra native query.
+The inventory now records 156 `unsafe_contract_declared` rows and 13,367 rows
+missing both tag and contract. SDL artifact admission remains unsigned.
