@@ -1,0 +1,128 @@
+# Lexical scope chain of the pure-Simple JS engine
+# (`src/lib/nogc_sync_mut/js/engine/`, the copy `BrowserSession` resolves to).
+#
+# Regression spec for
+# doc/08_tracking/bug/js_engine_nested_closure_cannot_read_enclosing_locals_2026-08-21.md
+# — `Environment` carried no parent link, so `EnvironmentStack.get_var` searched
+# only the callee's own frame plus the global frame. A function nested one level
+# deeper therefore read its ENCLOSING function's parameters and `var` locals as
+# `undefined`. Rows G/I/H/J/E/A below are the six-row repro table from that
+# record, in the same order.
+use std.spec.*
+use std.gc_async_mut.web.browser_session.{BrowserSession, BrowserResponse}
+use std.gc_async_mut.web.browser_session_loading.*
+use std.gc_async_mut.web.browser_session_runtime.*
+use std.js.types.js_types.{JsValue}
+
+fn _display_js(v: JsValue) -> text:
+    match v:
+        JsValue.Undefined: "undefined"
+        JsValue.Null: "null"
+        JsValue.Boolean(b): if b: "true" else: "false"
+        JsValue.Number(n):
+            var s = "{n}"
+            if s.ends_with(".0"):
+                s = s.slice(0, s.len() - 2)
+            s
+        JsValue.String(s): s
+        JsValue.Object(id): "[object Object]"
+        JsValue.Array(id): "[object Array]"
+        JsValue.Function(id): "[Function]"
+        JsValue.Symbol(id): "Symbol()"
+
+fn _eval_script_html(script: text) -> text:
+    var session = BrowserSession.new()
+    session.open_html(
+        "https://example.com/app",
+        "<html><body><script>var out = 'unset'; {script}</script></body></html>"
+    )
+    match session.eval_script("out"):
+        Ok(value): _display_js(value)
+        Err(e): "ERROR: {e}"
+
+describe "JS engine lexical scope chain":
+
+    it "row G: reads a function's own parameter directly":
+        expect(_eval_script_html("function f(x) { out = '' + x; } f(5);")).to_equal("5")
+
+    it "row I: a nested callback reads the enclosing function's parameter":
+        expect(
+            _eval_script_html(
+                "function f(x) { [1].forEach(function(v) { out = '' + x; }); } f(5);"
+            )
+        ).to_equal("5")
+
+    it "row H: a nested callback reads the enclosing function's var local and parameter":
+        expect(
+            _eval_script_html(
+                "function f(x) { var y = x; [1].forEach(function(v) { out = '' + y + ':' + x; }); } f(5);"
+            )
+        ).to_equal("5:5")
+
+    it "row J: the same capture works for a function expression":
+        expect(
+            _eval_script_html(
+                "var g = function(x) { [1].forEach(function(v) { out = '' + x; }); }; g(5);"
+            )
+        ).to_equal("5")
+
+    it "row E: a promise job callback captures the enclosing parameter":
+        expect(
+            _eval_script_html(
+                "function f(x) { return Promise.resolve(1).then(function(v) { out = '' + (typeof x) + ':' + x; }); } f(5);"
+            )
+        ).to_equal("number:5")
+
+    it "row A: a nested then callback keeps the enclosing Response in scope":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.com/app",
+            """
+            <html><body><script>
+            var out = 'unset';
+            fetch('/t').then(function(r) {
+                return r.text().then(function(v) {
+                    out = v + ':' + (typeof r) + ':' + r.status;
+                });
+            });
+            </script></body></html>
+            """
+        )
+        match session.take_pending_request():
+            Some(request):
+                expect(request.url).to_equal("https://example.com/t")
+                match session.commit_network_response(
+                    BrowserResponse.create(
+                        request_id: request.id,
+                        kind: "fetch",
+                        url: request.url,
+                        status: 200,
+                        headers: "",
+                        body: "alpha",
+                        error: ""
+                    )
+                ):
+                    Ok(_): expect(request.kind).to_equal("fetch")
+                    Err(e): fail("Expected fetch response commit to succeed: {e}")
+            nil:
+                fail("Expected a pending fetch request for https://example.com/t")
+
+        match session.eval_script("out"):
+            Ok(value):
+                expect(_display_js(value)).to_equal("alpha:object:200")
+            Err(e):
+                fail("Expected nested-then capture probe to evaluate: {e}")
+
+    it "an inner binding shadows the enclosing one and does not leak outward":
+        expect(
+            _eval_script_html(
+                "function f(x) { [1].forEach(function(v) { var x = 9; }); out = '' + x; } f(5);"
+            )
+        ).to_equal("5")
+
+    it "an assignment in a nested callback writes through to the enclosing local":
+        expect(
+            _eval_script_html(
+                "function f(x) { var y = 1; [1].forEach(function(v) { y = x + 1; }); out = '' + y; } f(5);"
+            )
+        ).to_equal("6")

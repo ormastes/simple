@@ -1,7 +1,7 @@
 # JS engine (nogc_sync_mut copy): a nested function cannot read its enclosing function's locals or parameters
 
 - Date: 2026-08-21
-- Status: OPEN
+- Status: RESOLVED 2026-08-21
 - Engine copy: `src/lib/nogc_sync_mut/js/engine/` (the copy `BrowserSession` resolves to)
 - Found while: adding a `bodyUsed` neighbour to `test/01_unit/lib/common/web/browser_session_async_spec.spl`
 
@@ -41,3 +41,49 @@ A `//` line comment containing an apostrophe (`function's`) inside the inline
 treats `'` inside `//` comments as a string opener; verify when fixing.
 
 ## No seed (Rust) change is required.
+
+## Resolution (2026-08-21)
+
+Root cause: `src/lib/nogc_sync_mut/js/engine/interpreter_types.spl` — `class
+Environment` carried no parent link, `EnvironmentStack.create_env(parent)`
+DISCARDED its `parent` argument, and `get_var`/`set_var` searched only the
+given frame plus frame 0 (globals). Every call site already passed the correct
+lexical parent (`create_env(js_fn.closure_env)` in `interpreter_eval.spl:207,
+470, 1391`, `interpreter_string_methods.spl:442`, `interpreter_async.spl:355`),
+so the whole defect was the dropped link. That is exactly the reported shape:
+own params fine, global writes fine, enclosing params/`var` locals undefined.
+
+The engine fix landed in commit `bdc18a13495` ("fix(js): function-scope chain +
+global String/Number/Boolean constructors in the JS engine") from a parallel
+lane: `Environment.parent`, `create_env` storing it, and a chain-walking
+`_resolve_env` used by both `get_var` and `set_var`. No further engine change
+was needed here, so none was made.
+
+What this change adds:
+- `test/01_unit/lib/common/web/browser_session_js_closure_scope_spec.spl` (new,
+  mirrored to `test/unit/lib/common/web/`): the six repro rows G/I/H/J/E/A above,
+  plus two neighbours — an inner `var` must shadow without leaking outward, and
+  an assignment in a nested callback must write THROUGH to the enclosing local
+  (the `set_var` half of the same defect).
+- `test/01_unit/lib/common/web/browser_session_async_spec.spl`: the `keep`
+  script-global hoist in "keeps Response.bodyUsed read-only ..." is removed; the
+  Response is now held by a genuinely nested `r.text().then(function (v) {...})`
+  callback, the idiomatic Fetch shape.
+
+Evidence (same spec file, same binary, only the engine file toggled):
+
+    engine at bdc18a13495~1 (pre-fix):  8 total, 2 passed, 6 failed
+        row I  expected undefined to equal 5
+        row H  expected undefined:undefined to equal 5:5
+        row J  expected undefined to equal 5
+        row E  expected undefined:undefined to equal number:5
+        row A  expected alpha:undefined:undefined to equal alpha:object:200
+        write-through  expected 1 to equal 6
+    engine at HEAD (fixed):             8 total, 8 passed, 0 failed
+
+Neighbours, all on the fixed engine:
+- `browser_session_async_spec.spl` (with the hoist removed): 25 total, 25 passed
+- `browser_session_dom_generation_runtime_spec.spl`: 1 total, 1 passed
+
+The "also observed" lexer note (an apostrophe inside a `//` comment breaking the
+script) is NOT covered here and is not resolved by this change.
