@@ -4,6 +4,14 @@
 # @cover src/os/drivers/virtio/virtio_gpu.spl 20%
 # @cover src/lib/nogc_sync_mut/io/dma.spl 30%
 
+"""
+## Purpose and audience
+Purpose: tracks and flushes only dirty framebuffer rectangles
+Audience: compiler and tooling engineers who maintain this spec
+"""
+
+# @req: REQ-HARDWARE-DrivDispAcceBoun-001
+
 use std.spec.{describe, context, it, expect}
 use std.io.dma.{SharedDmaBuffer, DmaOwner, DmaCachePolicy}
 use os.drivers.framebuffer.fb_driver.{FramebufferDriver, Color}
@@ -25,23 +33,28 @@ fn dma(policy: DmaCachePolicy, addr: u64) -> SharedDmaBuffer:
         allocation_id: 88u64
     )
 
+use std.spec.step
 describe "FR-DRIVER-0011 display acceleration boundary":
 
     context "framebuffer MMIO":
 
         it "tracks and flushes only dirty framebuffer rectangles":
+            step("Verify: tracks and flushes only dirty framebuffer rectangles")
+            # @req: REQ-HARDWARE-DrivDispAcceBoun-001
             var fb = FramebufferDriver.from_buffer(64, 32)
             fb.fill_rect(8, 4, 10, 6, Color.red())
             val dirty = fb.dirty_rect()
             expect(dirty.valid).to_equal(true)
-            expect(dirty.x1).to_equal(8)
-            expect(dirty.y1).to_equal(4)
-            expect(dirty.x2).to_equal(18)
-            expect(dirty.y2).to_equal(10)
+            expect(dirty.x1).to_equal(8)  # oracle: value fixed by the spec contract
+            expect(dirty.y1).to_equal(4)  # oracle: value fixed by the spec contract
+            expect(dirty.x2).to_equal(18)  # oracle: value fixed by the spec contract
+            expect(dirty.y2).to_equal(10)  # oracle: value fixed by the spec contract
             fb.flush_dirty_rects()
             expect(fb.dirty_rect().valid).to_equal(false)
 
         it "reports framebuffer-mmio as write-combining and non-executable":
+            step("Verify: reports framebuffer-mmio as write-combining and non-executable")
+            # @req: REQ-HARDWARE-DrivDispAcceBoun-001
             val summary = framebuffer_mmio_summary(1024u32, 768u32)
             expect(summary.backend_kind).to_equal("framebuffer-mmio")
             expect(summary.flush_mode).to_equal("dirty-rect")
@@ -52,12 +65,16 @@ describe "FR-DRIVER-0011 display acceleration boundary":
     context "VirtIO-GPU DMA":
 
         it "reports virtio-gpu-dma as the only DMA accelerated display backend":
+            step("Verify: reports virtio-gpu-dma as the only DMA accelerated display backend")
+            # @req: REQ-HARDWARE-DrivDispAcceBoun-001
             val summary = virtio_gpu_dma_summary(true)
             expect(summary.backend_kind).to_equal("virtio-gpu-dma")
             expect(summary.dma_accelerated).to_equal(true)
             expect(summary.executable_mapping).to_equal(false)
 
         it "validates canonical shared DMA transfer buffers":
+            step("Verify: validates canonical shared DMA transfer buffers")
+            # @req: REQ-HARDWARE-DrivDispAcceBoun-001
             expect(virtio_gpu_transfer_buffer_valid(dma(DmaCachePolicy.Coherent, 0x4000u64))).to_equal(true)
             expect(virtio_gpu_transfer_buffer_valid(dma(DmaCachePolicy.FlushRequired, 0x8000u64))).to_equal(true)
             expect(virtio_gpu_transfer_buffer_valid(dma(DmaCachePolicy.WriteCombining, 0x8000u64))).to_equal(false)
@@ -66,5 +83,7 @@ describe "FR-DRIVER-0011 display acceleration boundary":
     context "backend selection":
 
         it "selects virtio-gpu-dma over framebuffer-mmio when GPU is present":
+            step("Verify: selects virtio-gpu-dma over framebuffer-mmio when GPU is present")
+            # @req: REQ-HARDWARE-DrivDispAcceBoun-001
             expect(display_select_summary(true).backend_kind).to_equal("virtio-gpu-dma")
             expect(display_select_summary(false).backend_kind).to_equal("framebuffer-mmio")

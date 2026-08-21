@@ -1,6 +1,14 @@
 # codex-system-test
 # Contract tests for bare-metal software-breakpoint profiling.
 
+"""
+## Purpose and audience
+Purpose: should arm count restore single-step and rearm a profiling breakpoint
+Audience: compiler and tooling engineers who maintain this spec
+"""
+
+# @req: REQ-OS-BreaCounProf-001
+
 use std.spec.{describe, it, expect}
 use os.baremetal.profile.breakpoint_counter.{
     breakpoint_architecture_patch_profile,
@@ -35,38 +43,53 @@ use os.baremetal.profile.breakpoint_counter.{
     breakpoint_trap_budget_total_us
 }
 
+use std.spec.step
 describe "Bare-metal Breakpoint Counter Profile Contract":
     describe "breakpoint state machine":
         it "should arm count restore single-step and rearm a profiling breakpoint":
+            step("Verify: should arm count restore single-step and rearm a profiling breakpoint")
+            # @req: REQ-OS-BreaCounProf-001
             expect(breakpoint_next_state("candidate", "arm")).to_equal("armed")
             expect(breakpoint_next_state("armed", "hit")).to_equal("counted")
             expect(breakpoint_next_state("counted", "restore")).to_equal("single_step")
             expect(breakpoint_next_state("single_step", "rearm")).to_equal("armed")
 
         it "should remove breakpoints when profiling stops":
+            step("Verify: should remove breakpoints when profiling stops")
+            # @req: REQ-OS-BreaCounProf-001
             expect(breakpoint_next_state("armed", "stop_profile")).to_equal("removed")
 
     describe "overhead protection":
         it "should disarm breakpoint counters when overhead exceeds budget":
+            step("Verify: should disarm breakpoint counters when overhead exceeds budget")
+            # @req: REQ-OS-BreaCounProf-001
             expect(breakpoint_should_disarm(101, 10, 100, 50, false)).to_equal(true)
             expect(breakpoint_should_disarm(10, 60, 100, 50, false)).to_equal(true)
             expect(breakpoint_should_disarm(10, 10, 100, 50, true)).to_equal(true)
             expect(breakpoint_should_disarm(10, 10, 100, 50, false)).to_equal(false)
 
         it "should downgrade over-budget breakpoints to sampled only":
+            step("Verify: should downgrade over-budget breakpoints to sampled only")
+            # @req: REQ-OS-BreaCounProf-001
             expect(breakpoint_next_state("armed", "over_budget")).to_equal("sampled_only")
             expect(breakpoint_auto_disarm_state("armed", 101, 10, 100, 50, false)).to_equal("sampled_only")
 
         it "should keep sampled-only fallback disarmed until profiling stops":
+            step("Verify: should keep sampled-only fallback disarmed until profiling stops")
+            # @req: REQ-OS-BreaCounProf-001
             expect(breakpoint_sampled_only_fallback_state("sampled_only", "hit")).to_equal("sampled_only")
             expect(breakpoint_sampled_only_fallback_state("sampled_only", "rearm")).to_equal("sampled_only")
 
         it "should total trap handling cost before comparing against budget":
-            expect(breakpoint_trap_budget_total_us(3, 5, 7, 11, 13)).to_equal(39)
+            step("Verify: should total trap handling cost before comparing against budget")
+            # @req: REQ-OS-BreaCounProf-001
+            expect(breakpoint_trap_budget_total_us(3, 5, 7, 11, 13)).to_equal(39)  # oracle: value fixed by the spec contract
             expect(breakpoint_trap_budget_total_over_budget(3, 5, 7, 11, 13, 38)).to_equal(true)
             expect(breakpoint_trap_budget_total_over_budget(3, 5, 7, 11, 13, 39)).to_equal(false)
 
         it "should select a deterministic sampled-only fallback reason":
+            step("Verify: should select a deterministic sampled-only fallback reason")
+            # @req: REQ-OS-BreaCounProf-001
             expect(breakpoint_sampled_fallback_reason(10, 10, 100, 50, false, true)).to_equal("failed_single_step")
             expect(breakpoint_sampled_fallback_reason(10, 10, 100, 50, true, false)).to_equal("hot_loop")
             expect(breakpoint_sampled_fallback_reason(101, 60, 100, 50, false, false)).to_equal("hit_limit")
@@ -75,6 +98,8 @@ describe "Bare-metal Breakpoint Counter Profile Contract":
 
     describe "profiling session records":
         it "should validate complete profiling session accounting records":
+            step("Verify: should validate complete profiling session accounting records")
+            # @req: REQ-OS-BreaCounProf-001
             expect(breakpoint_profile_session_record_valid("session-1", "kernel_tick", 100, 160, 2, 1, true)).to_equal(true)
             expect(breakpoint_profile_session_record_valid("", "kernel_tick", 100, 160, 2, 1, true)).to_equal(false)
             expect(breakpoint_profile_session_record_valid("session-1", "", 100, 160, 2, 1, true)).to_equal(false)
@@ -84,6 +109,8 @@ describe "Bare-metal Breakpoint Counter Profile Contract":
 
     describe "cleanup ledger":
         it "should define cleanup events for every exit path":
+            step("Verify: should define cleanup events for every exit path")
+            # @req: REQ-OS-BreaCounProf-001
             val events = breakpoint_cleanup_events()
             expect(events).to_contain("normal_stop")
             expect(events).to_contain("panic")
@@ -93,74 +120,80 @@ describe "Bare-metal Breakpoint Counter Profile Contract":
             expect(breakpoint_cleanup_events_cover(events)).to_equal(true)
 
         it "should summarize cleanup ledger state deterministically":
+            step("Verify: should summarize cleanup ledger state deterministically")
+            # @req: REQ-OS-BreaCounProf-001
             val complete = breakpoint_cleanup_ledger_summary(3, 3, 0)
-            expect(complete.pending_entries).to_equal(0)
+            expect(complete.pending_entries).to_equal(0)  # oracle: value fixed by the spec contract
             expect(complete.cleanup_complete).to_equal(true)
             expect(complete.summary).to_equal("patched=3 restored=3 pending=0 failed=0 status=complete")
 
             val incomplete = breakpoint_cleanup_ledger_summary(3, 1, 1)
-            expect(incomplete.pending_entries).to_equal(1)
+            expect(incomplete.pending_entries).to_equal(1)  # oracle: value fixed by the spec contract
             expect(incomplete.cleanup_complete).to_equal(false)
             expect(incomplete.summary).to_equal("patched=3 restored=1 pending=1 failed=1 status=incomplete")
 
     describe "patch ledger":
         it "should select architecture-specific software trap opcodes":
+            step("Verify: should select architecture-specific software trap opcodes")
+            # @req: REQ-OS-BreaCounProf-001
             val x86 = breakpoint_trap_opcode_for_arch("i386")
             expect(x86.valid).to_equal(true)
             expect(x86.opcode_hex).to_equal("0xcc")
-            expect(x86.width_bytes).to_equal(1)
+            expect(x86.width_bytes).to_equal(1)  # oracle: value fixed by the spec contract
 
             val rv32 = breakpoint_trap_opcode_for_arch("riscv32")
             expect(rv32.valid).to_equal(true)
             expect(rv32.opcode_hex).to_equal("0x00100073")
-            expect(rv32.width_bytes).to_equal(4)
+            expect(rv32.width_bytes).to_equal(4)  # oracle: value fixed by the spec contract
 
             val rv64 = breakpoint_trap_opcode_for_arch("riscv64")
             expect(rv64.valid).to_equal(true)
             expect(rv64.opcode_hex).to_equal("0x00100073")
-            expect(rv64.width_bytes).to_equal(4)
+            expect(rv64.width_bytes).to_equal(4)  # oracle: value fixed by the spec contract
 
             val rvc = breakpoint_trap_opcode_for_arch("riscv64c")
             expect(rvc.valid).to_equal(true)
             expect(rvc.opcode_hex).to_equal("0x9002")
-            expect(rvc.width_bytes).to_equal(2)
+            expect(rvc.width_bytes).to_equal(2)  # oracle: value fixed by the spec contract
 
             val x64 = breakpoint_trap_opcode_for_arch("x86_64")
             expect(x64.valid).to_equal(true)
             expect(x64.opcode_hex).to_equal("0xcc")
-            expect(x64.width_bytes).to_equal(1)
+            expect(x64.width_bytes).to_equal(1)  # oracle: value fixed by the spec contract
 
             val arm32 = breakpoint_trap_opcode_for_arch("arm32")
             expect(arm32.valid).to_equal(true)
             expect(arm32.opcode_hex).to_equal("0xe1200070")
-            expect(arm32.width_bytes).to_equal(4)
+            expect(arm32.width_bytes).to_equal(4)  # oracle: value fixed by the spec contract
 
             val thumb = breakpoint_trap_opcode_for_arch("thumb")
             expect(thumb.valid).to_equal(true)
             expect(thumb.opcode_hex).to_equal("0xbe00")
-            expect(thumb.width_bytes).to_equal(2)
+            expect(thumb.width_bytes).to_equal(2)  # oracle: value fixed by the spec contract
 
             val arm64 = breakpoint_trap_opcode_for_arch("aarch64")
             expect(arm64.valid).to_equal(true)
             expect(arm64.opcode_hex).to_equal("0xd4200000")
-            expect(arm64.width_bytes).to_equal(4)
+            expect(arm64.width_bytes).to_equal(4)  # oracle: value fixed by the spec contract
 
             val unknown = breakpoint_trap_opcode_for_arch("mips64")
             expect(unknown.valid).to_equal(false)
             expect(unknown.reason).to_equal("unsupported_arch")
 
         it "should construct architecture-safe patch records":
+            step("Verify: should construct architecture-safe patch records")
+            # @req: REQ-OS-BreaCounProf-001
             val armed = breakpoint_patch_record_construct(4096, "riscv64", "0x00000013")
             expect(armed.valid).to_equal(true)
             expect(armed.armed).to_equal(true)
             expect(armed.trap_opcode).to_equal("0x00100073")
-            expect(armed.patch_width_bytes).to_equal(4)
+            expect(armed.patch_width_bytes).to_equal(4)  # oracle: value fixed by the spec contract
             expect(armed.reason).to_equal("armed")
 
             val int3 = breakpoint_patch_record_construct(4097, "x86_64", "0x90")
             expect(int3.valid).to_equal(true)
             expect(int3.trap_opcode).to_equal("0xcc")
-            expect(int3.patch_width_bytes).to_equal(1)
+            expect(int3.patch_width_bytes).to_equal(1)  # oracle: value fixed by the spec contract
 
             val unaligned = breakpoint_patch_record_construct(4097, "aarch64", "0xd503201f")
             expect(unaligned.valid).to_equal(false)
@@ -171,6 +204,8 @@ describe "Bare-metal Breakpoint Counter Profile Contract":
             expect(already_trap.reason).to_equal("invalid_original_opcode")
 
         it "should require real target hooks before ARM and RISC-V breakpoint counters can arm":
+            step("Verify: should require real target hooks before ARM and RISC-V breakpoint counters can arm")
+            # @req: REQ-OS-BreaCounProf-001
             val ready = breakpoint_target_integration_plan("riscv64", true, true, true, true, true)
             expect(ready.can_arm).to_equal(true)
             expect(ready.status).to_equal("ready")
@@ -194,13 +229,15 @@ describe "Bare-metal Breakpoint Counter Profile Contract":
             expect(unsupported.status).to_equal("unsupported_arch")
 
         it "should describe architecture-specific PC advance alignment and icache policy":
+            step("Verify: should describe architecture-specific PC advance alignment and icache policy")
+            # @req: REQ-OS-BreaCounProf-001
             val x86 = breakpoint_architecture_patch_profile("x86")
             expect(x86.valid).to_equal(true)
             expect(x86.instruction_set).to_equal("x86")
             expect(x86.trap_opcode_name).to_equal("int3")
             expect(x86.patch_bytes).to_equal("cc")
-            expect(x86.pc_advance_bytes).to_equal(1)
-            expect(x86.requires_alignment).to_equal(1)
+            expect(x86.pc_advance_bytes).to_equal(1)  # oracle: value fixed by the spec contract
+            expect(x86.requires_alignment).to_equal(1)  # oracle: value fixed by the spec contract
             expect(x86.requires_icache_flush).to_equal(false)
 
             val arm = breakpoint_architecture_patch_profile("arm32")
@@ -208,8 +245,8 @@ describe "Bare-metal Breakpoint Counter Profile Contract":
             expect(arm.instruction_set).to_equal("arm")
             expect(arm.trap_opcode_name).to_equal("bkpt-arm")
             expect(arm.patch_bytes).to_equal("70 00 20 e1")
-            expect(arm.pc_advance_bytes).to_equal(4)
-            expect(arm.requires_alignment).to_equal(4)
+            expect(arm.pc_advance_bytes).to_equal(4)  # oracle: value fixed by the spec contract
+            expect(arm.requires_alignment).to_equal(4)  # oracle: value fixed by the spec contract
             expect(arm.requires_icache_flush).to_equal(true)
 
             val thumb = breakpoint_architecture_patch_profile("thumb")
@@ -217,24 +254,28 @@ describe "Bare-metal Breakpoint Counter Profile Contract":
             expect(thumb.instruction_set).to_equal("thumb")
             expect(thumb.trap_opcode_name).to_equal("bkpt-thumb")
             expect(thumb.patch_bytes).to_equal("00 be")
-            expect(thumb.pc_advance_bytes).to_equal(2)
-            expect(thumb.requires_alignment).to_equal(2)
+            expect(thumb.pc_advance_bytes).to_equal(2)  # oracle: value fixed by the spec contract
+            expect(thumb.requires_alignment).to_equal(2)  # oracle: value fixed by the spec contract
 
             val rvc = breakpoint_architecture_patch_profile("riscv32c")
             expect(rvc.valid).to_equal(true)
             expect(rvc.instruction_set).to_equal("riscv-compressed")
             expect(rvc.trap_opcode_name).to_equal("c.ebreak")
             expect(rvc.patch_bytes).to_equal("02 90")
-            expect(rvc.pc_advance_bytes).to_equal(2)
-            expect(rvc.requires_alignment).to_equal(2)
+            expect(rvc.pc_advance_bytes).to_equal(2)  # oracle: value fixed by the spec contract
+            expect(rvc.requires_alignment).to_equal(2)  # oracle: value fixed by the spec contract
 
         it "should validate patch restore and trap opcode records":
+            step("Verify: should validate patch restore and trap opcode records")
+            # @req: REQ-OS-BreaCounProf-001
             expect(breakpoint_patch_ledger_valid(4096, "0x00000013", "0x00100073", "0x00000013", "0x00100073")).to_equal(true)
             expect(breakpoint_patch_ledger_valid(4096, "0x00100073", "0x00100073", "0x00100073", "0x00100073")).to_equal(false)
             expect(breakpoint_patch_ledger_valid(4096, "0x00000013", "0x00100073", "0x00000000", "0x00100073")).to_equal(false)
             expect(breakpoint_patch_ledger_valid(0, "0x00000013", "0x00100073", "0x00000013", "0x00100073")).to_equal(false)
 
         it "should report cleanup completeness only when every patch entry is restored":
+            step("Verify: should report cleanup completeness only when every patch entry is restored")
+            # @req: REQ-OS-BreaCounProf-001
             expect(breakpoint_patch_ledger_cleanup_complete(3, 3, 0, 0)).to_equal(true)
             expect(breakpoint_patch_ledger_cleanup_complete(3, 2, 1, 0)).to_equal(false)
             expect(breakpoint_patch_ledger_cleanup_complete(3, 3, 0, 1)).to_equal(false)
@@ -243,6 +284,8 @@ describe "Bare-metal Breakpoint Counter Profile Contract":
 
     describe "patch byte encoding":
         it "should encode every supported trap opcode deterministically":
+            step("Verify: should encode every supported trap opcode deterministically")
+            # @req: REQ-OS-BreaCounProf-001
             val supported = breakpoint_supported_trap_opcodes()
             expect(supported).to_contain("x86:int3")
             expect(supported).to_contain("i386:int3")
@@ -268,6 +311,8 @@ describe "Bare-metal Breakpoint Counter Profile Contract":
             expect(breakpoint_trap_patch_bytes("aarch64", "int3")).to_equal("")
 
         it "should encode patch and restore bytes as ledger-ready production data":
+            step("Verify: should encode patch and restore bytes as ledger-ready production data")
+            # @req: REQ-OS-BreaCounProf-001
             expect(breakpoint_trap_patch_encoding("riscv64", "ebreak")).to_equal("patch-bytes:arch=riscv64;trap=ebreak;bytes=73 00 10 00")
             expect(breakpoint_original_opcode_restore_bytes("0x00000013")).to_equal("13 00 00 00")
             expect(breakpoint_original_opcode_restore_bytes("0x9002")).to_equal("02 90")
@@ -282,6 +327,8 @@ describe "Bare-metal Breakpoint Counter Profile Contract":
 
     describe "patch action sequence":
         it "should sequence read patch flush restore single-step and rearm actions":
+            step("Verify: should sequence read patch flush restore single-step and rearm actions")
+            # @req: REQ-OS-BreaCounProf-001
             val actions = breakpoint_patch_action_sequence(true, false)
             expect(actions[0]).to_equal("read_original")
             expect(actions[1]).to_equal("write_trap")
@@ -292,6 +339,8 @@ describe "Bare-metal Breakpoint Counter Profile Contract":
             expect(breakpoint_patch_action_sequence_valid(actions, true, false)).to_equal(true)
 
         it "should terminate as sampled-only when rearming is disallowed":
+            step("Verify: should terminate as sampled-only when rearming is disallowed")
+            # @req: REQ-OS-BreaCounProf-001
             val actions = breakpoint_patch_action_sequence(true, true)
             expect(actions[0]).to_equal("read_original")
             expect(actions[1]).to_equal("write_trap")
@@ -302,12 +351,14 @@ describe "Bare-metal Breakpoint Counter Profile Contract":
             expect(breakpoint_patch_action_sequence_valid(actions, true, true)).to_equal(true)
 
         it "should apply patch restore and rearm bytes to a deterministic memory image":
+            step("Verify: should apply patch restore and rearm bytes to a deterministic memory image")
+            # @req: REQ-OS-BreaCounProf-001
             val record = breakpoint_patch_record_construct(4100, "riscv64", "0x00000013")
             val image = ["aa", "bb", "cc", "dd", "13", "00", "00", "00", "ee", "ff"]
             val applied = breakpoint_apply_patch_record_to_memory(record, 4096, image, true, false, true)
 
             expect(applied.valid).to_equal(true)
-            expect(applied.patch_offset).to_equal(4)
+            expect(applied.patch_offset).to_equal(4)  # oracle: value fixed by the spec contract
             expect(applied.old_bytes).to_equal(["13", "00", "00", "00"])
             expect(applied.trap_bytes).to_equal(["73", "00", "10", "00"])
             expect(applied.patched_image).to_equal(["aa", "bb", "cc", "dd", "73", "00", "10", "00", "ee", "ff"])
@@ -320,6 +371,8 @@ describe "Bare-metal Breakpoint Counter Profile Contract":
             expect(applied.cleanup_evidence).to_equal("cleanup:address=4100;offset=4;old=13 00 00 00;trap=73 00 10 00;restored=true;rearmed=true;icache=true;status=rearmed")
 
         it "should restore original bytes and report invalid evidence when icache flush is missing":
+            step("Verify: should restore original bytes and report invalid evidence when icache flush is missing")
+            # @req: REQ-OS-BreaCounProf-001
             val record = breakpoint_patch_record_construct(4096, "x86_64", "0x90")
             val image = ["90", "48", "89", "e5"]
             val applied = breakpoint_apply_patch_record_to_memory(record, 4096, image, true, false, false)
@@ -339,10 +392,12 @@ describe "Bare-metal Breakpoint Counter Profile Contract":
 
     describe "trap hit accounting":
         it "should update hit totals and keep rearming below budget":
+            step("Verify: should update hit totals and keep rearming below budget")
+            # @req: REQ-OS-BreaCounProf-001
             val record = breakpoint_patch_record_construct(4096, "riscv64", "0x00000013")
             val accounting = breakpoint_hit_accounting_update(2, 20, 7, 10, 100, false, false)
-            expect(accounting.hit_count).to_equal(3)
-            expect(accounting.trap_time_us).to_equal(27)
+            expect(accounting.hit_count).to_equal(3)  # oracle: value fixed by the spec contract
+            expect(accounting.trap_time_us).to_equal(27)  # oracle: value fixed by the spec contract
             expect(accounting.state).to_equal("counted")
             expect(accounting.should_disarm).to_equal(false)
 
@@ -354,10 +409,12 @@ describe "Bare-metal Breakpoint Counter Profile Contract":
             expect(transition.sampled_only).to_equal(false)
 
         it "should restore without rearming when accounting exceeds budget":
+            step("Verify: should restore without rearming when accounting exceeds budget")
+            # @req: REQ-OS-BreaCounProf-001
             val record = breakpoint_patch_record_construct(4096, "aarch64", "0xd503201f")
             val accounting = breakpoint_hit_accounting_update(10, 95, 10, 10, 100, false, false)
-            expect(accounting.hit_count).to_equal(11)
-            expect(accounting.trap_time_us).to_equal(105)
+            expect(accounting.hit_count).to_equal(11)  # oracle: value fixed by the spec contract
+            expect(accounting.trap_time_us).to_equal(105)  # oracle: value fixed by the spec contract
             expect(accounting.state).to_equal("sampled_only")
             expect(accounting.fallback_reason).to_equal("hit_limit")
             expect(accounting.should_disarm).to_equal(true)

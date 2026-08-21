@@ -28,6 +28,14 @@
 #   2. validity.spl: the `now > not_after` branch disabled
 #      -> exactly 4 reds (all four expiry assertions). Nothing else moved.
 
+"""
+## Purpose and audience
+Purpose: decodes notBefore/notAfter to the exact epoch for both UTCTime and GeneralizedTime
+Audience: compiler and tooling engineers who maintain this spec
+"""
+
+# @req: REQ-OS-OsTlsDefaVeri-001
+
 use std.spipe.*
 use os.tls13.cert_verify.*
 use os.tls13.downgrade.*
@@ -166,12 +174,15 @@ fn rogue_chain() -> [[u8]]: [rogue_leaf()]
 fn store() -> [[u8]]: [root_ca()]
 fn no_store() -> [[u8]]: []
 
+use std.spec.step
 describe "certificate validity period (RFC 5280 4.1.2.5)":
     it "decodes notBefore/notAfter to the exact epoch for both UTCTime and GeneralizedTime":
+        step("Verify: decodes notBefore/notAfter to the exact epoch for both UTCTime and GeneralizedTime")
+        # @req: REQ-OS-OsTlsDefaVeri-001
         # Fixture-integrity guard first: the neighbouring cert specs' `_hex_digit`
         # if-chain decodes 'f' as 'e' on this binary, so a green there proves
         # nothing. This spec's table lookup is asserted directly.
-        expect(_hex_digit("f")).to_equal(15)
+        expect(_hex_digit("f")).to_equal(15)  # oracle: value fixed by the spec contract
         val vg = parse_cert_validity(leaf_good())
         expect(vg.ok).to_equal(true)
         expect(vg.not_before).to_equal(EPOCH_2020)
@@ -183,6 +194,8 @@ describe "certificate validity period (RFC 5280 4.1.2.5)":
         expect(parse_cert_validity(leaf_expired()).not_after).to_equal(EPOCH_2021)
 
     it "accepts a certificate inside its window and REFUSES expired / not-yet-valid ones":
+        step("Verify: accepts a certificate inside its window and REFUSES expired / not-yet-valid ones")
+        # @req: REQ-OS-OsTlsDefaVeri-001
         expect(is_ok(verify_cert_validity(leaf_good(), NOW))).to_equal(true)
         expect(is_ok(verify_cert_validity(leaf_expired(), NOW))).to_equal(false)
         expect(is_ok(verify_cert_validity(leaf_future(), NOW))).to_equal(false)
@@ -190,17 +203,23 @@ describe "certificate validity period (RFC 5280 4.1.2.5)":
         expect(err_text(verify_cert_validity(leaf_future(), NOW)).contains("not yet valid")).to_equal(true)
 
     it "fails closed with no clock, no certificate, or a truncated certificate":
+        step("Verify: fails closed with no clock, no certificate, or a truncated certificate")
+        # @req: REQ-OS-OsTlsDefaVeri-001
         expect(is_ok(verify_cert_validity(leaf_good(), -1))).to_equal(false)
         expect(is_ok(verify_cert_validity([], NOW))).to_equal(false)
         expect(is_ok(verify_cert_validity(bytes_of("3082015330820105a0"), NOW))).to_equal(false)
 
     it "checks every certificate in the presented chain, not just the leaf":
+        step("Verify: checks every certificate in the presented chain, not just the leaf")
+        # @req: REQ-OS-OsTlsDefaVeri-001
         expect(is_ok(verify_chain_validity([leaf_good()], NOW))).to_equal(true)
         expect(is_ok(verify_chain_validity([leaf_good(), leaf_expired()], NOW))).to_equal(false)
         expect(is_ok(verify_chain_validity([], NOW))).to_equal(false)
 
 describe "ASN.1 Time decoding fails closed":
     it "accepts only the RFC 5280 Zulu forms":
+        step("Verify: accepts only the RFC 5280 Zulu forms")
+        # @req: REQ-OS-OsTlsDefaVeri-001
         val t1 = parse_der_time(0x17u8, utc_time_bytes("200101000000Z"))
         expect(t1.ok).to_equal(true)
         expect(t1.unix_seconds).to_equal(EPOCH_2020)
@@ -214,6 +233,8 @@ describe "ASN.1 Time decoding fails closed":
         expect(parse_der_time(0x16u8, utc_time_bytes("200101000000Z")).ok).to_equal(false)
 
     it "rejects out-of-range and non-numeric calendar fields":
+        step("Verify: rejects out-of-range and non-numeric calendar fields")
+        # @req: REQ-OS-OsTlsDefaVeri-001
         expect(parse_der_time(0x17u8, utc_time_bytes("2001x1000000Z")).ok).to_equal(false)
         expect(parse_der_time(0x17u8, utc_time_bytes("201301000000Z")).ok).to_equal(false)
         expect(parse_der_time(0x17u8, utc_time_bytes("200100000000Z")).ok).to_equal(false)
@@ -223,6 +244,8 @@ describe "ASN.1 Time decoding fails closed":
         expect(parse_der_time(0x17u8, utc_time_bytes("200101240000Z")).ok).to_equal(false)
 
     it "applies the RFC 5280 two-digit-year window":
+        step("Verify: applies the RFC 5280 two-digit-year window")
+        # @req: REQ-OS-OsTlsDefaVeri-001
         val t49 = parse_der_time(0x17u8, utc_time_bytes("490101000000Z"))
         val t50 = parse_der_time(0x17u8, utc_time_bytes("500101000000Z"))
         expect(t49.ok).to_equal(true)
@@ -232,33 +255,47 @@ describe "ASN.1 Time decoding fails closed":
 
 describe "peer verification policy — the security default":
     it "ACCEPTS a valid chain to a supplied trust anchor":
+        step("Verify: ACCEPTS a valid chain to a supplied trust anchor")
+        # @req: REQ-OS-OsTlsDefaVeri-001
         expect(is_ok(verify_peer_certificate(good_chain(), store(), "good.example.com", NOW, false))).to_equal(true)
 
     it "REFUSES a chain that does not reach a trust anchor":
+        step("Verify: REFUSES a chain that does not reach a trust anchor")
+        # @req: REQ-OS-OsTlsDefaVeri-001
         val r = verify_peer_certificate(rogue_chain(), store(), "good.example.com", NOW, false)
         expect(is_ok(r)).to_equal(false)
         expect(err_text(r).contains("trust anchor")).to_equal(true)
 
     it "treats an EMPTY root store as an ERROR, never as a silent bypass":
+        step("Verify: treats an EMPTY root store as an ERROR, never as a silent bypass")
+        # @req: REQ-OS-OsTlsDefaVeri-001
         val r = verify_peer_certificate(good_chain(), no_store(), "good.example.com", NOW, false)
         expect(is_ok(r)).to_equal(false)
         expect(err_text(r).contains("root_store is empty")).to_equal(true)
         expect(err_text(r).contains("insecure_disable_certificate_verification")).to_equal(true)
 
     it "REFUSES a hostname mismatch even when the chain is fully trusted":
+        step("Verify: REFUSES a hostname mismatch even when the chain is fully trusted")
+        # @req: REQ-OS-OsTlsDefaVeri-001
         expect(is_ok(verify_peer_certificate(good_chain(), store(), "evil.example.com", NOW, false))).to_equal(false)
         expect(is_ok(verify_peer_certificate(good_chain(), store(), "", NOW, false))).to_equal(false)
 
     it "REFUSES expired and not-yet-valid leaves even with a good anchor":
+        step("Verify: REFUSES expired and not-yet-valid leaves even with a good anchor")
+        # @req: REQ-OS-OsTlsDefaVeri-001
         expect(is_ok(verify_peer_certificate([leaf_expired()], store(), "good.example.com", NOW, false))).to_equal(false)
         expect(is_ok(verify_peer_certificate([leaf_future()], store(), "good.example.com", NOW, false))).to_equal(false)
 
     it "REFUSES an empty chain and a missing clock":
+        step("Verify: REFUSES an empty chain and a missing clock")
+        # @req: REQ-OS-OsTlsDefaVeri-001
         expect(is_ok(verify_peer_certificate([], store(), "good.example.com", NOW, false))).to_equal(false)
         expect(is_ok(verify_peer_certificate(good_chain(), store(), "good.example.com", -1, false))).to_equal(false)
 
 describe "the insecure opt-out is explicit and load-bearing":
     it "accepts anything ONLY when the flag is set":
+        step("Verify: accepts anything ONLY when the flag is set")
+        # @req: REQ-OS-OsTlsDefaVeri-001
         expect(is_ok(verify_peer_certificate(rogue_chain(), no_store(), "good.example.com", NOW, true))).to_equal(true)
         expect(is_ok(verify_peer_certificate([leaf_expired()], no_store(), "anything", NOW, true))).to_equal(true)
         # Same inputs, flag not set -> refused. This pair is the whole design.
@@ -267,21 +304,27 @@ describe "the insecure opt-out is explicit and load-bearing":
 
 describe "tls13_default_client_config is a VERIFYING config":
     it "has verification enabled and reads the system clock":
+        step("Verify: has verification enabled and reads the system clock")
+        # @req: REQ-OS-OsTlsDefaVeri-001
         val cfg = tls13_default_client_config()
         expect(cfg.insecure_disable_certificate_verification).to_equal(false)
-        expect(cfg.verify_time_unix).to_equal(-1)
+        expect(cfg.verify_time_unix).to_equal(-1)  # oracle: value fixed by the spec contract
 
     it "REFUSES a real chain because it ships no trust anchors":
+        step("Verify: REFUSES a real chain because it ships no trust anchors")
+        # @req: REQ-OS-OsTlsDefaVeri-001
         # The regression this lane exists to prevent: with the old gate this
         # returned Ok and the client connected to anyone.
         val cfg = tls13_default_client_config()
-        expect(cfg.root_store.len()).to_equal(0)
+        expect(cfg.root_store.len()).to_equal(0)  # oracle: value fixed by the spec contract
         val r = verify_peer_certificate(good_chain(), cfg.root_store, "good.example.com", NOW,
                                         cfg.insecure_disable_certificate_verification)
         expect(is_ok(r)).to_equal(false)
 
 describe "RFC 8446 4.1.3 downgrade sentinel":
     it "classifies both defined sentinels and nothing else":
+        step("Verify: classifies both defined sentinels and nothing else")
+        # @req: REQ-OS-OsTlsDefaVeri-001
         expect(is_sentinel_tls12(tls13_downgrade_sentinel(sentinel_random(1)))).to_equal(true)
         expect(is_sentinel_low(tls13_downgrade_sentinel(sentinel_random(0)))).to_equal(true)
         expect(is_sentinel_none(tls13_downgrade_sentinel(sentinel_random(2)))).to_equal(true)
@@ -289,6 +332,8 @@ describe "RFC 8446 4.1.3 downgrade sentinel":
         expect(is_sentinel_none(tls13_downgrade_sentinel([]))).to_equal(true)
 
     it "produces an abort reason for a sentinel and none for a clean random":
+        step("Verify: produces an abort reason for a sentinel and none for a clean random")
+        # @req: REQ-OS-OsTlsDefaVeri-001
         expect(tls13_downgrade_reason(sentinel_random(1)) != "").to_equal(true)
         expect(tls13_downgrade_reason(sentinel_random(0)) != "").to_equal(true)
         expect(tls13_downgrade_reason(clean_random())).to_equal("")

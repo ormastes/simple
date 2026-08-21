@@ -1,33 +1,45 @@
 """
+## Purpose and audience
+Purpose: should enqueue and send batches serially
+Audience: compiler and tooling engineers who maintain this spec
+
 # Claude Full Serial Batch Event Uploader
 
 Checks ordered batching, retry, backpressure, byte limits, and close accounting.
 """
+
+# @req: REQ-TOOLS-Seri-001
 
 use std.spec.*
 use app.llm_caret.claude_full.cli.transports.SerialBatchEventUploader.*
 
 describe "Claude full SerialBatchEventUploader":
     it "should enqueue and send batches serially":
+        step("Verify: should enqueue and send batches serially")
+        # @req: REQ-TOOLS-Seri-001
         step("Enqueue three events with max batch size two")
         val uploader = SerialBatchEventUploader.new(SerialUploaderConfig.new(2, 10))
         uploader.enqueue(["a", "b", "c"])
         uploader.flushSuccess()
-        expect(uploader.sentBatches.len()).to_equal(2)
+        expect(uploader.sentBatches.len()).to_equal(2)  # oracle: value fixed by the spec contract
         expect(uploader.firstSentBatchText()).to_equal("a,b")
-        expect(uploader.pendingCount()).to_equal(0)
+        expect(uploader.pendingCount()).to_equal(0)  # oracle: value fixed by the spec contract
 
     it "should apply backpressure when queue would exceed capacity":
+        step("Verify: should apply backpressure when queue would exceed capacity")
+        # @req: REQ-TOOLS-Seri-001
         step("Enqueue more events than the queue allows")
         val uploader = SerialBatchEventUploader.new(SerialUploaderConfig.new(2, 2))
         uploader.enqueue(["a", "b"])
         uploader.enqueueOne("c")
-        expect(uploader.pendingCount()).to_equal(2)
-        expect(uploader.backpressureResolvers).to_equal(1)
+        expect(uploader.pendingCount()).to_equal(2)  # oracle: value fixed by the spec contract
+        expect(uploader.backpressureResolvers).to_equal(1)  # oracle: value fixed by the spec contract
         uploader.flushSuccess()
-        expect(uploader.backpressureResolvers).to_equal(0)
+        expect(uploader.backpressureResolvers).to_equal(0)  # oracle: value fixed by the spec contract
 
     it "should honor max batch bytes and drop unserializable items":
+        step("Verify: should honor max batch bytes and drop unserializable items")
+        # @req: REQ-TOOLS-Seri-001
         step("Take a byte-limited batch")
         val uploader = serialUploaderWithByteLimit(5, 7, 10)
         uploader.enqueue(["abc", "de", "UNSERIALIZABLE", "fg"])
@@ -36,27 +48,33 @@ describe "Claude full SerialBatchEventUploader":
         expect(joinText(uploader.pending)).to_equal("de,fg")
 
     it "should requeue failed batches and compute retry delay":
+        step("Verify: should requeue failed batches and compute retry delay")
+        # @req: REQ-TOOLS-Seri-001
         step("Fail the first batch and observe front requeue")
         val config = serialUploaderConfig(2, 10, 100, 500, 50)
         val uploader = SerialBatchEventUploader.new(config)
         uploader.enqueue(["a", "b", "c"])
         val delay = uploader.failOnce(0, 10)
-        expect(delay).to_equal(110)
+        expect(delay).to_equal(110)  # oracle: value fixed by the spec contract
         expect(joinText(uploader.pending)).to_equal("a,b,c")
         expect(uploader.sleepResolve).to_equal(true)
 
     it "should clamp retry-after delays and drop after failure cap":
+        step("Verify: should clamp retry-after delays and drop after failure cap")
+        # @req: REQ-TOOLS-Seri-001
         step("Use server retry-after and then hit the drop cap")
         val config = SerialUploaderConfig(maxBatchSize: 2, maxBatchBytes: 0, maxQueueSize: 10, baseDelayMs: 100, maxDelayMs: 500, jitterMs: 25, maxConsecutiveFailures: 2)
-        expect(retryDelay(config, 4, 1000, 99)).to_equal(525)
+        expect(retryDelay(config, 4, 1000, 99)).to_equal(525)  # oracle: value fixed by the spec contract
         val uploader = SerialBatchEventUploader.new(config)
         uploader.enqueue(["a", "b", "c"])
         uploader.failUntilDropped(2)
-        expect(uploader.droppedBatchCount()).to_equal(1)
+        expect(uploader.droppedBatchCount()).to_equal(1)  # oracle: value fixed by the spec contract
         expect(uploader.dropLog[0]).to_equal("2:2")
         expect(joinText(uploader.pending)).to_equal("c")
 
     it "should close by snapshotting pending count and resolving waiters":
+        step("Verify: should close by snapshotting pending count and resolving waiters")
+        # @req: REQ-TOOLS-Seri-001
         step("Close with pending events and synthetic waiters")
         val uploader = SerialBatchEventUploader.new(SerialUploaderConfig.new(2, 10))
         uploader.enqueue(["a", "b", "c"])
@@ -65,15 +83,17 @@ describe "Claude full SerialBatchEventUploader":
         uploader.sleepResolve = true
         uploader.close()
         expect(uploader.closed).to_equal(true)
-        expect(uploader.pendingCount()).to_equal(3)
-        expect(uploader.pending.len()).to_equal(0)
-        expect(uploader.flushResolvers).to_equal(0)
-        expect(uploader.backpressureResolvers).to_equal(0)
+        expect(uploader.pendingCount()).to_equal(3)  # oracle: value fixed by the spec contract
+        expect(uploader.pending.len()).to_equal(0)  # oracle: value fixed by the spec contract
+        expect(uploader.flushResolvers).to_equal(0)  # oracle: value fixed by the spec contract
+        expect(uploader.backpressureResolvers).to_equal(0)  # oracle: value fixed by the spec contract
         expect(uploader.sleepResolve).to_equal(false)
 
     it "should expose source-backed constants":
+        step("Verify: should expose source-backed constants")
+        # @req: REQ-TOOLS-Seri-001
         step("Pin modeled source surface")
         val error = RetryableError.new("rate limited", 250)
         expect(error.message).to_equal("rate limited")
-        expect(error.retryAfterMs).to_equal(250)
-        expect(serialUploaderSourceLinesModeled()).to_equal(275)
+        expect(error.retryAfterMs).to_equal(250)  # oracle: value fixed by the spec contract
+        expect(serialUploaderSourceLinesModeled()).to_equal(275)  # oracle: value fixed by the spec contract

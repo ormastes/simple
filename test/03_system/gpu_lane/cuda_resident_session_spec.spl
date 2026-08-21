@@ -36,6 +36,14 @@
 # SKIPs here (verified below) even though sections 1-3 fully exercise the
 # protocol logic that section 4 would otherwise drive.
 
+"""
+## Purpose and audience
+Purpose: refuses when the device attribute reports watchdog ENABLED and not forced
+Audience: compiler and tooling engineers who maintain this spec
+"""
+
+# @req: REQ-GPU_LANE-CudaResiSess-001
+
 use std.spipe.*
 use std.sffi.io.{file_read_bytes}
 use std.nogc_sync_mut.io.env_ops.{env_get}
@@ -57,26 +65,38 @@ describe "cuda resident session -- watchdog-device refusal gate (host-independen
     `watchdog_attr` value -- no real watchdog hardware required.
     """
     it "refuses when the device attribute reports watchdog ENABLED and not forced":
+        step("Verify: refuses when the device attribute reports watchdog ENABLED and not forced")
+        # @req: REQ-GPU_LANE-CudaResiSess-001
         val reason = resident_refusal_gate(WATCHDOG_ENABLED, "")
         expect(reason).to_equal("refuse:cuda-resident-watchdog-enabled")
 
     it "proceeds when watchdog ENABLED but CUDA_RESIDENT_FORCE=1 (explicit override)":
+        step("Verify: proceeds when watchdog ENABLED but CUDA_RESIDENT_FORCE=1 (explicit override)")
+        # @req: REQ-GPU_LANE-CudaResiSess-001
         val reason = resident_refusal_gate(WATCHDOG_ENABLED, "1")
         expect(reason).to_equal("")
 
     it "refuses (fail-safe) when the watchdog attribute is UNKNOWN and not forced":
+        step("Verify: refuses (fail-safe) when the watchdog attribute is UNKNOWN and not forced")
+        # @req: REQ-GPU_LANE-CudaResiSess-001
         val reason = resident_refusal_gate(WATCHDOG_UNKNOWN, "")
         expect(reason).to_equal("refuse:cuda-resident-watchdog-attr-unavailable")
 
     it "proceeds when watchdog is confirmed DISABLED":
+        step("Verify: proceeds when watchdog is confirmed DISABLED")
+        # @req: REQ-GPU_LANE-CudaResiSess-001
         val reason = resident_refusal_gate(WATCHDOG_DISABLED, "")
         expect(reason).to_equal("")
 
     it "proceeds when forced regardless of watchdog state (including UNKNOWN)":
+        step("Verify: proceeds when forced regardless of watchdog state (including UNKNOWN)")
+        # @req: REQ-GPU_LANE-CudaResiSess-001
         expect(resident_refusal_gate(WATCHDOG_DISABLED, "1")).to_equal("")
         expect(resident_refusal_gate(WATCHDOG_UNKNOWN, "1")).to_equal("")
 
     it "documents the SFFI gap: unknown_watchdog_attr() always returns WATCHDOG_UNKNOWN on this build":
+        step("Verify: documents the SFFI gap: unknown_watchdog_attr() always returns WATCHDOG_UNKNOWN on this build")
+        # @req: REQ-GPU_LANE-CudaResiSess-001
         step("No cuDeviceGetAttribute binding exists yet -- confirmed by grep against src/lib/nogc_sync_mut/cuda/sffi.spl")
         expect(unknown_watchdog_attr()).to_equal(WATCHDOG_UNKNOWN)
 
@@ -87,6 +107,8 @@ describe "cuda resident session -- 8-slot command ring / doorbell protocol (host
     then doorbell (release)." Pure byte-buffer state machine, no CUDA.
     """
     it "starts with all 8 slots free":
+        step("Verify: starts with all 8 slots free")
+        # @req: REQ-GPU_LANE-CudaResiSess-001
         val ring = CommandRing.new()
         var i = 0
         while i < RING_SLOTS:
@@ -94,43 +116,55 @@ describe "cuda resident session -- 8-slot command ring / doorbell protocol (host
             i = i + 1
 
     it "write_command claims a free slot, rings the doorbell, and is observable":
+        step("Verify: write_command claims a free slot, rings the doorbell, and is observable")
+        # @req: REQ-GPU_LANE-CudaResiSess-001
         var ring = CommandRing.new()
         val slot = ring.next_free_slot()
-        expect(slot).to_equal(0)
+        expect(slot).to_equal(0)  # oracle: value fixed by the spec contract
         assert_true(ring.write_command(slot, 42u32))
         assert_false(ring.is_free(slot))
         expect(ring.doorbell(slot)).to_equal(DOORBELL_RUNG)
         expect(ring.sgp_offset(slot)).to_equal(42u32)
 
     it "write_command refuses to clobber an already-rung slot":
+        step("Verify: write_command refuses to clobber an already-rung slot")
+        # @req: REQ-GPU_LANE-CudaResiSess-001
         var ring = CommandRing.new()
         assert_true(ring.write_command(0, 1u32))
         assert_false(ring.write_command(0, 2u32))
         expect(ring.sgp_offset(0)).to_equal(1u32)
 
     it "service_next clears the doorbell and frees the slot (device-side ack)":
+        step("Verify: service_next clears the doorbell and frees the slot (device-side ack)")
+        # @req: REQ-GPU_LANE-CudaResiSess-001
         var ring = CommandRing.new()
         assert_true(ring.write_command(3, 7u32))
         val serviced = ring.service_next()
-        expect(serviced).to_equal(3)
+        expect(serviced).to_equal(3)  # oracle: value fixed by the spec contract
         assert_true(ring.is_free(3))
         expect(ring.doorbell(3)).to_equal(DOORBELL_CLEAR)
 
     it "next_free_slot returns -1 once all 8 slots are occupied (ring-full backpressure)":
+        step("Verify: next_free_slot returns -1 once all 8 slots are occupied (ring-full backpressure)")
+        # @req: REQ-GPU_LANE-CudaResiSess-001
         var ring = CommandRing.new()
         var i = 0
         while i < RING_SLOTS:
             assert_true(ring.write_command(i, i as u32))
             i = i + 1
-        expect(ring.next_free_slot()).to_equal(-1)
+        expect(ring.next_free_slot()).to_equal(-1)  # oracle: value fixed by the spec contract
 
     it "write_shutdown enqueues the SHUTDOWN(0x7E) sentinel, distinguishable from real program offsets":
+        step("Verify: write_shutdown enqueues the SHUTDOWN(0x7E) sentinel, distinguishable from real program offsets")
+        # @req: REQ-GPU_LANE-CudaResiSess-001
         var ring = CommandRing.new()
         assert_true(ring.write_shutdown(0))
         assert_true(ring.is_shutdown_slot(0))
         expect(ring.sgp_offset(0)).to_equal(SGP_OFFSET_SHUTDOWN)
 
     it "SABOTAGE PROBE: an inverted is_free() would make write_command clobber a busy slot -- proves the guard is load-bearing":
+        step("Verify: SABOTAGE PROBE: an inverted is_free() would make write_command clobber a busy slot -- proves the guard is load-bearing")
+        # @req: REQ-GPU_LANE-CudaResiSess-001
         step("Baseline: guard correctly blocks a second write to a rung slot")
         var ring = CommandRing.new()
         assert_true(ring.write_command(0, 1u32))
@@ -149,6 +183,8 @@ describe "cuda resident session -- interactive servicer (A2's service_trigger, h
     end to end without needing a real device to drive TRIGGER.
     """
     it "services a PUTC trigger and accumulates it into log_text immediately":
+        step("Verify: services a PUTC trigger and accumulates it into log_text immediately")
+        # @req: REQ-GPU_LANE-CudaResiSess-001
         step("NOTE: MailboxArena's `bytes` field is an array (value type) -- constructing InteractiveServicer.create(arena) copies it into servicer.arena, so the device-side simulation must fire commands THROUGH servicer.arena, not a separately-held outer handle (verified by an earlier failing draft of this spec: firing on a divergent outer copy left servicer.arena permanently untriggered)")
         var servicer = InteractiveServicer.create(MailboxArena.new(ARENA_SIZE))
         servicer.arena.init_log_ring(0x1000)
@@ -159,6 +195,8 @@ describe "cuda resident session -- interactive servicer (A2's service_trigger, h
         assert_false(servicer.arena.is_triggered())   # TRIGGER cleared after service
 
     it "preserves live PUTC ORDER across three sequential triggers ('A', 'B', 'C')":
+        step("Verify: preserves live PUTC ORDER across three sequential triggers ('A', 'B', 'C')")
+        # @req: REQ-GPU_LANE-CudaResiSess-001
         var servicer = InteractiveServicer.create(MailboxArena.new(ARENA_SIZE))
         servicer.arena.init_log_ring(0x1000)
         servicer.arena.fire_command(CMD_PUTC, 65u32, 0u32, 1u32)   # 'A'
@@ -168,9 +206,11 @@ describe "cuda resident session -- interactive servicer (A2's service_trigger, h
         servicer.arena.fire_command(CMD_PUTC, 67u32, 0u32, 3u32)   # 'C'
         val _o3 = servicer.poll_once()
         expect(servicer.log_text).to_equal("ABC")
-        expect(servicer.triggers_serviced).to_equal(3)
+        expect(servicer.triggers_serviced).to_equal(3)  # oracle: value fixed by the spec contract
 
     it "latches EXIT and stops service_until_exit early":
+        step("Verify: latches EXIT and stops service_until_exit early")
+        # @req: REQ-GPU_LANE-CudaResiSess-001
         step("A single-slot TRIGGER register holds one pending command at a time, so drive PUTC then EXIT one at a time")
         var servicer2 = InteractiveServicer.create(MailboxArena.new(ARENA_SIZE))
         servicer2.arena.init_log_ring(0x1000)
@@ -179,17 +219,19 @@ describe "cuda resident session -- interactive servicer (A2's service_trigger, h
         servicer2.arena.fire_command(CMD_EXIT, 5u32, 0u32, 2u32)
         val exited = servicer2.service_until_exit(10)
         assert_true(exited)
-        expect(servicer2.exit_code).to_equal(5)
+        expect(servicer2.exit_code).to_equal(5)  # oracle: value fixed by the spec contract
         expect(servicer2.log_text).to_equal("X")
 
     it "records a CMD_RESULT":
+        step("Verify: records a CMD_RESULT")
+        # @req: REQ-GPU_LANE-CudaResiSess-001
         var servicer = InteractiveServicer.create(MailboxArena.new(ARENA_SIZE))
         servicer.arena.init_log_ring(0x1000)
         servicer.arena.init_record_ring(8)
         servicer.arena.fire_command(CMD_RESULT, 1u32, 99u32, 7u32)
         val _o = servicer.poll_once()
-        expect(servicer.records.len()).to_equal(1)
-        expect(servicer.records[0].seq).to_equal(7)
+        expect(servicer.records.len()).to_equal(1)  # oracle: value fixed by the spec contract
+        expect(servicer.records[0].seq).to_equal(7)  # oracle: value fixed by the spec contract
         assert_true(servicer.records[0].pass)
 
 describe "cuda resident session -- >=3 programs through ONE resident session (Task B4 verify)":
@@ -204,6 +246,8 @@ describe "cuda resident session -- >=3 programs through ONE resident session (Ta
     per the `probe()`/refusal-gate contract established across B1-B3.
     """
     it "runs 3 programs preserving PUTC order on a live host; SKIPs cleanly (refused/no-device) elsewhere":
+        step("Verify: runs 3 programs preserving PUTC order on a live host; SKIPs cleanly (refused/no-device) elsewhere")
+        # @req: REQ-GPU_LANE-CudaResiSess-001
         step("Read the checked-in SVM-G resident kernel PTX artifact (B3's per-launch entry, reused here)")
         val kernel_bytes = file_read_bytes(_SVMG_KERNEL_PTX)
         assert_true(kernel_bytes.len() > 0)
@@ -235,7 +279,7 @@ describe "cuda resident session -- >=3 programs through ONE resident session (Ta
             expect(r1.log_text).to_equal("A")
             expect(r2.log_text).to_equal("B")
             expect(r3.log_text).to_equal("C")
-            expect(session.programs_run).to_equal(3)
+            expect(session.programs_run).to_equal(3)  # oracle: value fixed by the spec contract
 
             step("Tear down the resident session cleanly (SHUTDOWN(0x7E) slot)")
             val _shutdown_result = session.shutdown()

@@ -5,6 +5,10 @@
 # @cover src/lib/nogc_sync_mut/game_net/loopback.spl 80%
 # @cover src/lib/nogc_sync_mut/game_net/interpolator.spl 80%
 """
+## Purpose and audience
+Purpose: client predicts N steps ahead of last server tick
+Audience: compiler and tooling engineers who maintain this spec
+
 # Netcode: prediction, reconciliation & transactions
 
 **Requirements:** N/A
@@ -33,6 +37,8 @@ reconcile(predictor, authoritative_snapshot, dt)  # rewind + replay unacked
 ```
 """
 
+# @req: REQ-GAME_NET-NetcPred-001
+
 use std.spec.{describe, it, expect}
 use std.nogc_sync_mut.game_net.demo_sim.{SimState, sim_state_new, sim_step}
 use std.nogc_sync_mut.game_net.wire.{
@@ -56,6 +62,8 @@ fn _entity_of(state: SimState) -> EntityState:
 describe "Netcode: client prediction + server reconciliation":
 
     it "client predicts N steps ahead of last server tick":
+        step("Verify: client predicts N steps ahead of last server tick")
+        # @req: REQ-GAME_NET-NetcPred-001
         var predictor = Predictor.new(1u32)
         var i = 0
         while i < 5:
@@ -67,6 +75,8 @@ describe "Netcode: client prediction + server reconciliation":
         expect(predictor.prediction_ahead()).to_equal(5u32)
 
     it "server correction converges to server state within K steps":
+        step("Verify: server correction converges to server state within K steps")
+        # @req: REQ-GAME_NET-NetcPred-001
         var predictor = Predictor.new(1u32)
         var i = 0
         while i < 5:
@@ -101,6 +111,8 @@ describe "Netcode: client prediction + server reconciliation":
         expect(predictor.state.pos_x).to_equal(2.5)   # |err| == 0
 
     it "un-corrected steady state stays byte-identical (no jitter)":
+        step("Verify: un-corrected steady state stays byte-identical (no jitter)")
+        # @req: REQ-GAME_NET-NetcPred-001
         var a = Predictor.new(7u32)
         var b = Predictor.new(7u32)
         var i = 0
@@ -125,6 +137,8 @@ describe "Netcode: client prediction + server reconciliation":
 describe "Netcode: lossy channel recovery":
 
     it "dropped input frame recovered via next ack + replay":
+        step("Verify: dropped input frame recovered via next ack + replay")
+        # @req: REQ-GAME_NET-NetcPred-001
         val clock = VirtualClock.new()
         val channel = LoopbackChannel.new(42, 10u64, 0u64, 0u64)   # 10ms fixed latency, no jitter/loss knob used here
         var predictor = Predictor.new(1u32)
@@ -175,6 +189,8 @@ describe "Netcode: lossy channel recovery":
         expect(final_snap.entities[0].pos_x).to_equal(baseline.pos_x)
 
     it "reordered snapshots apply by tick, older ignored":
+        step("Verify: reordered snapshots apply by tick, older ignored")
+        # @req: REQ-GAME_NET-NetcPred-001
         var predictor = Predictor.new(1u32)
         var newer_state = sim_state_new(1u32)
         newer_state = sim_step(newer_state, 1.0, 0.0, DT)
@@ -196,12 +212,14 @@ describe "Netcode: lossy channel recovery":
 describe "Netcode: transactional inventory op":
 
     it "accepted op commits authoritative state":
+        step("Verify: accepted op commits authoritative state")
+        # @req: REQ-GAME_NET-NetcPred-001
         var client = TxnClient.new()
         val wallet = Wallet(gold: 100)
         val result = client.begin_spend(wallet, 30)
         val msg = result.msg
         val optimistic = result.wallet
-        expect(optimistic.gold).to_equal(70)
+        expect(optimistic.gold).to_equal(70)  # oracle: value fixed by the spec contract
         expect(validate_spend(wallet.gold, 30)).to_equal(true)
         client.accept(msg.op_seq)
         # Server and client agree exactly: both settle on gold=70.
@@ -210,12 +228,14 @@ describe "Netcode: transactional inventory op":
         expect(client.pending_count()).to_equal(0u64)
 
     it "rejected op rolls client back byte-identical to pre-op":
+        step("Verify: rejected op rolls client back byte-identical to pre-op")
+        # @req: REQ-GAME_NET-NetcPred-001
         var client = TxnClient.new()
         val wallet = Wallet(gold: 20)
         val result = client.begin_spend(wallet, 30)   # optimistic spend, server will reject (insufficient funds)
         val msg = result.msg
         val optimistic = result.wallet
-        expect(optimistic.gold).to_equal(-10)
+        expect(optimistic.gold).to_equal(-10)  # oracle: value fixed by the spec contract
         expect(validate_spend(wallet.gold, 30)).to_equal(false)
         val pre_bytes = wallet_to_bytes(wallet)
         val restored = client.reject(msg.op_seq)
@@ -229,12 +249,14 @@ describe "Netcode: transactional inventory op":
                     identical = false
                 k = k + 1
             expect(identical).to_equal(true)
-            expect(w.gold).to_equal(20)
+            expect(w.gold).to_equal(20)  # oracle: value fixed by the spec contract
         else:
             assert_true(false)
         expect(client.pending_count()).to_equal(0u64)
 
     it "cancel before ack restores pre-op snapshot":
+        step("Verify: cancel before ack restores pre-op snapshot")
+        # @req: REQ-GAME_NET-NetcPred-001
         var client = TxnClient.new()
         val wallet = Wallet(gold: 50)
         val result = client.begin_spend(wallet, 15)
@@ -250,13 +272,15 @@ describe "Netcode: transactional inventory op":
                     identical = false
                 k = k + 1
             expect(identical).to_equal(true)
-            expect(w.gold).to_equal(50)
+            expect(w.gold).to_equal(50)  # oracle: value fixed by the spec contract
         else:
             assert_true(false)
 
 describe "Netcode: two-client convergence":
 
     it "two clients converge to identical world hash":
+        step("Verify: two clients converge to identical world hash")
+        # @req: REQ-GAME_NET-NetcPred-001
         # One authoritative server, two owned entities (A=1, B=2). Both
         # clients predict only their own entity and interpolate the other.
         var server = GameNetServer.new(DT)
