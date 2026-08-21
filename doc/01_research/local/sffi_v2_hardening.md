@@ -389,24 +389,29 @@ call-path cost.
 
 The editor SDL bridge exposed raw `SDL_Window*` values as public `i64`
 handles. A stale or forged value could therefore reach SDL without validation.
-Its editor-facing C aliases now use a bounded 64-slot generation table:
-creation performs the only linear free-slot scan, while width/height,
-destruction, and frame presentation decode and validate a slot in O(1). The
-provider rejects stale generations, invalid pixel length/capacity/data
-relations, and table exhaustion; failed window creation also shuts down the
-initialized subsystem. All 16 declarations now document their
-ownership/sentinel contracts and all 19 raw calls have minimal lexical
-`unsafe(ffi)` scopes. A compiled C sabotage self-test covers valid, forged,
-stale, removed, and full-table handles; Simple syntax, presentation failure
-integration, and the source audit pass. A release/acquire owner-thread token
-also rejects off-thread access without exposing the non-atomic table to a data
-race. The added hot-path work is one atomic load, constant integer arithmetic,
-and one bounded array lookup, with no mutex, map, scan, allocation, hashing, or
-extra native call. This protects the editor alias; the
-broader canonical `rt_sdl2_*` API still needs the same resource migration and
-artifact evidence before SDL can be called fully verified.
+The bounded 64-slot generation table now belongs to canonical `rt_sdl2_*`
+rather than only the editor aliases, so every C SDL2 window consumer receives
+the same validation. Creation performs the only linear free-slot scan;
+width/height, destruction, properties, and presentation decode a slot in O(1).
+The provider rejects stale generations, off-owner-thread calls, invalid pixel
+length/capacity/data relations, invalid dimensions, and table exhaustion.
+App `window_sffi` is now a facade over the library-owned declaration/call
+boundary, removing 53 duplicate raw declarations and their drift risk. The
+hosted compositor removed four unused declarations; its five remaining externs
+carry ownership/sentinel contracts and its six calls have minimal lexical
+`unsafe(ffi)` scopes. The 16 editor declarations and 19 calls remain similarly
+contracted/scoped.
 
-The refreshed inventory records 140 `unsafe_contract_declared` rows and
-13,440 rows missing both tag and contract. All 16 editor SDL declarations are
-now in the declared state; this is contract evidence, not semantic or artifact
-verification.
+A compiled C sabotage self-test covers valid, wrong-thread, forged, stale,
+removed, and full-table handles. Simple syntax, presentation failure
+integration, and the source audit pass. The hot path performs one acquire
+load, constant integer arithmetic, and one bounded array lookup, with no
+mutex, map, scan, allocation, hashing, double wrapping, or extra native call.
+The canonical library owner still has 66 generic unsafe declarations whose
+exact per-function sentinel/borrow contracts and lexical wrapper scopes must
+be migrated, and the dynamically loaded SDL artifact lacks signed admission;
+SDL2 therefore remains contract-hardened but not fully verified.
+
+The refreshed inventory records 145 `unsafe_contract_declared` rows and
+13,378 rows missing both tag and contract. Removing duplicate declarations is
+an assurance improvement rather than merely changing ledger classifications.

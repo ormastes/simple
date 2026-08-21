@@ -3,6 +3,7 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 simple="$root/src/lib/editor/70.backend/gui_sdl_bridge.spl"
+app_facade="$root/src/app/io/window_sffi.spl"
 provider="$root/src/runtime/runtime_sdl2.c"
 failed=0
 
@@ -18,21 +19,32 @@ if [ "$calls" -ne "$scopes" ]; then
     echo "every raw editor SDL call must have one minimal lexical unsafe(ffi) scope" >&2
     failed=1
 fi
-
-if ! grep -q '#define SDL_ALIAS_MAX_WINDOWS 64u' "$provider" ||
-   ! grep -q 'sdl_alias_window_get(window_handle)' "$provider"; then
-    echo "editor SDL windows must use bounded generation-checked handles" >&2
+if grep -q '^extern fn rt_sdl2_' "$app_facade" ||
+   ! grep -q 'export use std.nogc_sync_mut.io.window_sffi' "$app_facade"; then
+    echo "app SDL2 surface must remain a facade over the canonical library owner" >&2
     failed=1
 fi
-if ! grep -q 'static _Atomic uintptr_t g_sdl_alias_owner_thread' "$provider" ||
+
+if ! grep -q '#define SDL2_MAX_WINDOWS 64u' "$provider" ||
+   ! grep -q 'sdl2_window_get(window_handle)' "$provider"; then
+    echo "canonical SDL2 windows must use bounded generation-checked handles" >&2
+    failed=1
+fi
+if ! grep -q 'static _Atomic uintptr_t g_sdl2_owner_thread' "$provider" ||
    ! grep -q 'memory_order_acquire' "$provider" ||
-   ! grep -q 'if (!sdl_alias_on_owner_thread()) return false' "$provider"; then
+   ! grep -q 'if (!sdl2_on_owner_thread()' "$provider"; then
     echo "editor SDL aliases must enforce their single-owner thread contract" >&2
     failed=1
 fi
-if grep -A8 'static SdlAliasWindowSlot \*sdl_alias_window_slot' "$provider" |
+if grep -A8 'static Sdl2WindowSlot \*sdl2_window_slot' "$provider" |
    grep -qE '\bfor[[:space:]]*\(|\bwhile[[:space:]]*\('; then
     echo "editor SDL hot lookup must remain O(1)" >&2
+    failed=1
+fi
+if sed '/#ifdef SIMPLE_SDL2_HANDLE_SELFTEST/,$d' "$provider" |
+   grep -qE '\(SDL_Window[[:space:]]*\*\)\(uintptr_t\)' ||
+   grep -q 'SDL_ALIAS_MAX_WINDOWS' "$provider"; then
+    echo "SDL2 consumers must not receive raw or double-wrapped window pointers" >&2
     failed=1
 fi
 if ! grep -q 'pixels->cap < pixels->len' "$provider" ||
@@ -40,8 +52,8 @@ if ! grep -q 'pixels->cap < pixels->len' "$provider" ||
     echo "editor SDL pixel descriptor checks are missing" >&2
     failed=1
 fi
-if ! grep -q 'SIMPLE_SDL_ALIAS_HANDLE_SELFTEST' "$provider"; then
-    echo "editor SDL generation-handle sabotage test is missing" >&2
+if ! grep -q 'SIMPLE_SDL2_HANDLE_SELFTEST' "$provider"; then
+    echo "canonical SDL2 generation-handle sabotage test is missing" >&2
     failed=1
 fi
 

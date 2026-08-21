@@ -456,13 +456,91 @@ static int64_t g_audio_handle = 0;
 static int64_t g_audio_submitted_frames = 0;
 static int g_audio_owns_subsystem = 0;
 
+/* Generation-checked SDL_Window resources. All table access is confined to
+ * the thread that successfully initialized the video/event subsystem. */
+#define SDL2_MAX_WINDOWS 64u
+#define SDL2_WINDOW_INDEX_MASK (SDL2_MAX_WINDOWS - 1u)
+#define SDL2_WINDOW_MAX_GENERATION ((uint64_t)(INT64_MAX - SDL2_MAX_WINDOWS) / SDL2_MAX_WINDOWS)
+
+typedef struct {
+    SDL_Window *window;
+    uint64_t generation;
+} Sdl2WindowSlot;
+
+static Sdl2WindowSlot g_sdl2_windows[SDL2_MAX_WINDOWS];
+static uint64_t g_sdl2_next_window_generation = 1;
+#if defined(_MSC_VER)
+__declspec(thread) static int g_sdl2_thread_token;
+#else
+static _Thread_local int g_sdl2_thread_token;
+#endif
+static _Atomic uintptr_t g_sdl2_owner_thread;
+
+static uintptr_t sdl2_current_thread(void) {
+    return (uintptr_t)&g_sdl2_thread_token;
+}
+
+static bool sdl2_on_owner_thread(void) {
+    return atomic_load_explicit(&g_sdl2_owner_thread, memory_order_acquire) ==
+           sdl2_current_thread();
+}
+
+static int64_t sdl2_window_register(SDL_Window *window) {
+    if (!window || !sdl2_on_owner_thread()) return 0;
+    for (uint64_t index = 0; index < SDL2_MAX_WINDOWS; index++) {
+        Sdl2WindowSlot *slot = &g_sdl2_windows[index];
+        if (slot->window) continue;
+        uint64_t generation = g_sdl2_next_window_generation++;
+        if (generation == 0 || generation > SDL2_WINDOW_MAX_GENERATION) {
+            generation = 1;
+            g_sdl2_next_window_generation = 2;
+        }
+        slot->window = window;
+        slot->generation = generation;
+        return (int64_t)(generation * SDL2_MAX_WINDOWS + index + 1);
+    }
+    return 0;
+}
+
+static Sdl2WindowSlot *sdl2_window_slot(int64_t handle) {
+    if (handle <= 0 || !sdl2_on_owner_thread()) return NULL;
+    uint64_t encoded = (uint64_t)handle - 1;
+    uint64_t index = encoded & SDL2_WINDOW_INDEX_MASK;
+    uint64_t generation = encoded / SDL2_MAX_WINDOWS;
+    Sdl2WindowSlot *slot = &g_sdl2_windows[index];
+    if (generation == 0 || slot->generation != generation || !slot->window)
+        return NULL;
+    return slot;
+}
+
+static SDL_Window *sdl2_window_get(int64_t handle) {
+    Sdl2WindowSlot *slot = sdl2_window_slot(handle);
+    return slot ? slot->window : NULL;
+}
+
+static SDL_Window *sdl2_window_remove(int64_t handle) {
+    Sdl2WindowSlot *slot = sdl2_window_slot(handle);
+    if (!slot) return NULL;
+    SDL_Window *window = slot->window;
+    slot->window = NULL;
+    return window;
+}
+
 /* ================================================================
  * Initialization
  * ================================================================ */
 
 int64_t rt_sdl2_init(void) {
     SDL2_REQUIRE(0);
+    uintptr_t thread = sdl2_current_thread();
+    uintptr_t owner = atomic_load_explicit(&g_sdl2_owner_thread, memory_order_acquire);
+    if (owner != 0 && owner != thread) return 0;
+    if (owner == 0 && !atomic_compare_exchange_strong_explicit(
+            &g_sdl2_owner_thread, &owner, thread,
+            memory_order_acq_rel, memory_order_acquire))
+        return 0;
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0) {
+        atomic_store_explicit(&g_sdl2_owner_thread, 0, memory_order_release);
         fprintf(stderr, "[rt_sdl2] SDL_Init failed: %s\n", SDL_GetError());
         return 0;
     }
@@ -475,6 +553,14 @@ int64_t rt_sdl2_init(void) {
 
 void rt_sdl2_quit(void) {
     SDL2_REQUIRE_VOID();
+    if (!sdl2_on_owner_thread()) return;
+    for (uint64_t index = 0; index < SDL2_MAX_WINDOWS; index++) {
+        SDL_Window *window = g_sdl2_windows[index].window;
+        if (window) {
+            g_sdl2_windows[index].window = NULL;
+            SDL_DestroyWindow(window);
+        }
+    }
     if (g_audio_handle != 0) {
         rt_audio_sdl2_close(g_audio_handle);
     }
@@ -482,6 +568,7 @@ void rt_sdl2_quit(void) {
     SDL_Quit();
     g_quit_requested = 0;
     g_last_event_valid = 0;
+    atomic_store_explicit(&g_sdl2_owner_thread, 0, memory_order_release);
 }
 
 /* ================================================================
@@ -605,6 +692,8 @@ int64_t rt_audio_sdl2_close(int64_t handle) {
 
 int64_t rt_sdl2_create_window(const char* title, int64_t width, int64_t height) {
     SDL2_REQUIRE(0);
+    if (!sdl2_on_owner_thread() || width <= 0 || height <= 0 ||
+        width > INT_MAX || height > INT_MAX) return 0;
     if (!title) title = "Simple Window";
     SDL_Window* win = SDL_CreateWindow(
         title,
@@ -616,34 +705,36 @@ int64_t rt_sdl2_create_window(const char* title, int64_t width, int64_t height) 
         fprintf(stderr, "[rt_sdl2] SDL_CreateWindow failed: %s\n", SDL_GetError());
         return 0;
     }
-    return (int64_t)(uintptr_t)win;
+    int64_t handle = sdl2_window_register(win);
+    if (handle == 0) SDL_DestroyWindow(win);
+    return handle;
 }
 
 void rt_sdl2_destroy_window(int64_t handle) {
-    if (handle == 0) return;
-    SDL_Window* win = (SDL_Window*)(uintptr_t)handle;
+    SDL_Window* win = sdl2_window_remove(handle);
+    if (!win) return;
     SDL_DestroyWindow(win);
 }
 
 int64_t rt_sdl2_get_window_width(int64_t handle) {
-    if (handle == 0) return 0;
-    SDL_Window* win = (SDL_Window*)(uintptr_t)handle;
+    SDL_Window* win = sdl2_window_get(handle);
+    if (!win) return 0;
     int w = 0, h = 0;
     SDL_GetWindowSize(win, &w, &h);
     return (int64_t)w;
 }
 
 int64_t rt_sdl2_get_window_height(int64_t handle) {
-    if (handle == 0) return 0;
-    SDL_Window* win = (SDL_Window*)(uintptr_t)handle;
+    SDL_Window* win = sdl2_window_get(handle);
+    if (!win) return 0;
     int w = 0, h = 0;
     SDL_GetWindowSize(win, &w, &h);
     return (int64_t)h;
 }
 
 void rt_sdl2_set_window_title(int64_t handle, const char* title) {
-    if (handle == 0 || !title) return;
-    SDL_Window* win = (SDL_Window*)(uintptr_t)handle;
+    SDL_Window* win = sdl2_window_get(handle);
+    if (!win || !title) return;
     SDL_SetWindowTitle(win, title);
 }
 
@@ -664,7 +755,8 @@ bool rt_sdl2_present_rgba(int64_t window_handle, SplArray* pixels,
     if (width > INT_MAX / 4 || height > INT_MAX) return false;
     if (height > INT64_MAX / width) return false;
 
-    SDL_Window* win = (SDL_Window*)(uintptr_t)window_handle;
+    SDL_Window* win = sdl2_window_get(window_handle);
+    if (!win) return false;
 
     int64_t expected = width * height;
     if (pixels->len < expected || pixels->len < 0 || pixels->cap < pixels->len)
@@ -1002,108 +1094,110 @@ int64_t rt_sdl2_event_window_data2(void) {
  * ================================================================ */
 
 void rt_sdl2_set_window_resizable(int64_t handle, int64_t resizable) {
-    if (handle == 0) return;
-    SDL_Window* win = (SDL_Window*)(uintptr_t)handle;
+    SDL_Window* win = sdl2_window_get(handle);
+    if (!win) return;
     SDL_SetWindowResizable(win, resizable ? SDL_TRUE : SDL_FALSE);
 }
 
 void rt_sdl2_set_window_fullscreen(int64_t handle, int64_t fullscreen) {
-    if (handle == 0) return;
-    SDL_Window* win = (SDL_Window*)(uintptr_t)handle;
+    SDL_Window* win = sdl2_window_get(handle);
+    if (!win) return;
     SDL_SetWindowFullscreen(win, fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
 }
 
 int64_t rt_sdl2_set_window_fullscreen_checked(int64_t handle, int64_t fullscreen) {
-    if (handle == 0) return 0;
-    return SDL_SetWindowFullscreen(
-        (SDL_Window*)(uintptr_t)handle,
-        fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0
-    ) == 0;
+    SDL_Window* win = sdl2_window_get(handle);
+    if (!win) return 0;
+    return SDL_SetWindowFullscreen(win, fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0) == 0;
 }
 
 void rt_sdl2_set_window_size(int64_t handle, int64_t width, int64_t height) {
-    if (handle == 0) return;
-    SDL_Window* win = (SDL_Window*)(uintptr_t)handle;
+    SDL_Window* win = sdl2_window_get(handle);
+    if (!win || width <= 0 || height <= 0 || width > INT_MAX || height > INT_MAX) return;
     SDL_SetWindowSize(win, (int)width, (int)height);
 }
 
 void rt_sdl2_set_window_position(int64_t handle, int64_t x, int64_t y) {
-    if (handle == 0) return;
-    SDL_Window* win = (SDL_Window*)(uintptr_t)handle;
+    SDL_Window* win = sdl2_window_get(handle);
+    if (!win || x < INT_MIN || x > INT_MAX || y < INT_MIN || y > INT_MAX) return;
     SDL_SetWindowPosition(win, (int)x, (int)y);
 }
 
 int64_t rt_sdl2_get_window_position_x(int64_t handle) {
-    if (handle == 0) return 0;
-    SDL_Window* win = (SDL_Window*)(uintptr_t)handle;
+    SDL_Window* win = sdl2_window_get(handle);
+    if (!win) return 0;
     int x = 0, y = 0;
     SDL_GetWindowPosition(win, &x, &y);
     return (int64_t)x;
 }
 
 int64_t rt_sdl2_get_window_position_y(int64_t handle) {
-    if (handle == 0) return 0;
-    SDL_Window* win = (SDL_Window*)(uintptr_t)handle;
+    SDL_Window* win = sdl2_window_get(handle);
+    if (!win) return 0;
     int x = 0, y = 0;
     SDL_GetWindowPosition(win, &x, &y);
     return (int64_t)y;
 }
 
 void rt_sdl2_show_window(int64_t handle) {
-    if (handle == 0) return;
-    SDL_Window* win = (SDL_Window*)(uintptr_t)handle;
+    SDL_Window* win = sdl2_window_get(handle);
+    if (!win) return;
     SDL_ShowWindow(win);
 }
 
 void rt_sdl2_hide_window(int64_t handle) {
-    if (handle == 0) return;
-    SDL_Window* win = (SDL_Window*)(uintptr_t)handle;
+    SDL_Window* win = sdl2_window_get(handle);
+    if (!win) return;
     SDL_HideWindow(win);
 }
 
 int64_t rt_sdl2_set_window_minimum_size(int64_t handle, int64_t width, int64_t height) {
-    if (handle == 0 || width <= 0 || height <= 0 ||
+    SDL_Window* win = sdl2_window_get(handle);
+    if (!win || width <= 0 || height <= 0 ||
         width > INT_MAX || height > INT_MAX) return 0;
-    SDL_SetWindowMinimumSize((SDL_Window*)(uintptr_t)handle, (int)width, (int)height);
+    SDL_SetWindowMinimumSize(win, (int)width, (int)height);
     return 1;
 }
 
 int64_t rt_sdl2_set_window_maximum_size(int64_t handle, int64_t width, int64_t height) {
-    if (handle == 0 || width <= 0 || height <= 0 ||
+    SDL_Window* win = sdl2_window_get(handle);
+    if (!win || width <= 0 || height <= 0 ||
         width > INT_MAX || height > INT_MAX) return 0;
-    SDL_SetWindowMaximumSize((SDL_Window*)(uintptr_t)handle, (int)width, (int)height);
+    SDL_SetWindowMaximumSize(win, (int)width, (int)height);
     return 1;
 }
 
 int64_t rt_sdl2_minimize_window(int64_t handle) {
-    if (handle == 0) return 0;
-    SDL_MinimizeWindow((SDL_Window*)(uintptr_t)handle);
+    SDL_Window* win = sdl2_window_get(handle);
+    if (!win) return 0;
+    SDL_MinimizeWindow(win);
     return 1;
 }
 
 int64_t rt_sdl2_maximize_window(int64_t handle) {
-    if (handle == 0) return 0;
-    SDL_MaximizeWindow((SDL_Window*)(uintptr_t)handle);
+    SDL_Window* win = sdl2_window_get(handle);
+    if (!win) return 0;
+    SDL_MaximizeWindow(win);
     return 1;
 }
 
 int64_t rt_sdl2_restore_window(int64_t handle) {
-    if (handle == 0) return 0;
-    SDL_RestoreWindow((SDL_Window*)(uintptr_t)handle);
+    SDL_Window* win = sdl2_window_get(handle);
+    if (!win) return 0;
+    SDL_RestoreWindow(win);
     return 1;
 }
 
 int64_t rt_sdl2_set_window_bordered(int64_t handle, int64_t bordered) {
-    if (handle == 0) return 0;
-    SDL_SetWindowBordered(
-        (SDL_Window*)(uintptr_t)handle,
-        bordered ? SDL_TRUE : SDL_FALSE
-    );
+    SDL_Window* win = sdl2_window_get(handle);
+    if (!win) return 0;
+    SDL_SetWindowBordered(win, bordered ? SDL_TRUE : SDL_FALSE);
     return 1;
 }
 
 int64_t rt_sdl2_set_window_always_on_top(int64_t handle, int64_t on_top) {
-    if (handle == 0) return 0;
+    SDL_Window* win = sdl2_window_get(handle);
+    if (!win) return 0;
     SDL2_REQUIRE(0);
     /*
      * Added in SDL 2.0.16. With dynamic loading this is a RUNTIME capability
@@ -1113,23 +1207,22 @@ int64_t rt_sdl2_set_window_always_on_top(int64_t handle, int64_t on_top) {
      */
     if (!p_SDL_SetWindowAlwaysOnTop) return 0;
     p_SDL_SetWindowAlwaysOnTop(
-        (SDL_Window*)(uintptr_t)handle,
+        win,
         on_top ? SDL_TRUE : SDL_FALSE
     );
     return 1;
 }
 
 int64_t rt_sdl2_focus_window(int64_t handle) {
-    SDL_Window* win;
-    if (handle == 0) return 0;
-    win = (SDL_Window*)(uintptr_t)handle;
+    SDL_Window* win = sdl2_window_get(handle);
+    if (!win) return 0;
     SDL_RaiseWindow(win);
     return (SDL_GetWindowFlags(win) & SDL_WINDOW_INPUT_FOCUS) != 0;
 }
 
 int64_t rt_sdl2_window_flags(int64_t handle) {
-    if (handle == 0) return 0;
-    return (int64_t)SDL_GetWindowFlags((SDL_Window*)(uintptr_t)handle);
+    SDL_Window* win = sdl2_window_get(handle);
+    return win ? (int64_t)SDL_GetWindowFlags(win) : 0;
 }
 
 const char* rt_sdl2_last_error(void) {
@@ -1148,14 +1241,14 @@ void rt_sdl2_set_cursor_visible(int64_t visible) {
 }
 
 void rt_sdl2_set_cursor_grab(int64_t handle, int64_t grab) {
-    if (handle == 0) return;
-    SDL_Window* win = (SDL_Window*)(uintptr_t)handle;
+    SDL_Window* win = sdl2_window_get(handle);
+    if (!win) return;
     SDL_SetWindowGrab(win, grab ? SDL_TRUE : SDL_FALSE);
 }
 
 void rt_sdl2_warp_mouse(int64_t handle, int64_t x, int64_t y) {
-    if (handle == 0) return;
-    SDL_Window* win = (SDL_Window*)(uintptr_t)handle;
+    SDL_Window* win = sdl2_window_get(handle);
+    if (!win || x < INT_MIN || x > INT_MAX || y < INT_MIN || y > INT_MAX) return;
     SDL_WarpMouseInWindow(win, (int)x, (int)y);
 }
 
@@ -1259,214 +1352,103 @@ int64_t rt_sdl2_get_display_usable_h(int64_t index) {
 
 /* ===== SDL editor-facing aliases ===== */
 
-/* Editor aliases expose generation-checked integer resources instead of raw
- * SDL_Window pointers. Lookup is O(1) on the present hot path; only creation
- * scans for a free slot. SDL window operations remain main-thread confined. */
-#define SDL_ALIAS_MAX_WINDOWS 64u
-#define SDL_ALIAS_INDEX_MASK (SDL_ALIAS_MAX_WINDOWS - 1u)
-#define SDL_ALIAS_MAX_GENERATION ((uint64_t)(INT64_MAX - SDL_ALIAS_MAX_WINDOWS) / SDL_ALIAS_MAX_WINDOWS)
-
-typedef struct {
-    int64_t raw_handle;
-    uint64_t generation;
-} SdlAliasWindowSlot;
-
-static SdlAliasWindowSlot g_sdl_alias_windows[SDL_ALIAS_MAX_WINDOWS];
-static uint64_t g_sdl_alias_next_generation = 1;
-#if defined(_MSC_VER)
-__declspec(thread) static int g_sdl_alias_thread_token;
-#else
-static _Thread_local int g_sdl_alias_thread_token;
-#endif
-static _Atomic uintptr_t g_sdl_alias_owner_thread;
-
-static uintptr_t sdl_alias_current_thread(void) {
-    return (uintptr_t)&g_sdl_alias_thread_token;
-}
-
-static bool sdl_alias_on_owner_thread(void) {
-    return atomic_load_explicit(&g_sdl_alias_owner_thread, memory_order_acquire) ==
-           sdl_alias_current_thread();
-}
-
-static int64_t sdl_alias_window_register(int64_t raw_handle) {
-    if (raw_handle == 0) return 0;
-    for (uint64_t index = 0; index < SDL_ALIAS_MAX_WINDOWS; index++) {
-        SdlAliasWindowSlot *slot = &g_sdl_alias_windows[index];
-        if (slot->raw_handle != 0) continue;
-        uint64_t generation = g_sdl_alias_next_generation++;
-        if (generation == 0 || generation > SDL_ALIAS_MAX_GENERATION) {
-            generation = 1;
-            g_sdl_alias_next_generation = 2;
-        }
-        slot->raw_handle = raw_handle;
-        slot->generation = generation;
-        return (int64_t)(generation * SDL_ALIAS_MAX_WINDOWS + index + 1);
-    }
-    return 0;
-}
-
-static SdlAliasWindowSlot *sdl_alias_window_slot(int64_t handle) {
-    if (handle <= 0) return NULL;
-    uint64_t encoded = (uint64_t)handle - 1;
-    uint64_t index = encoded & SDL_ALIAS_INDEX_MASK;
-    uint64_t generation = encoded / SDL_ALIAS_MAX_WINDOWS;
-    SdlAliasWindowSlot *slot = &g_sdl_alias_windows[index];
-    if (generation == 0 || slot->generation != generation || slot->raw_handle == 0)
-        return NULL;
-    return slot;
-}
-
-static int64_t sdl_alias_window_get(int64_t handle) {
-    SdlAliasWindowSlot *slot = sdl_alias_window_slot(handle);
-    return slot ? slot->raw_handle : 0;
-}
-
-static int64_t sdl_alias_window_remove(int64_t handle) {
-    SdlAliasWindowSlot *slot = sdl_alias_window_slot(handle);
-    if (!slot) return 0;
-    int64_t raw_handle = slot->raw_handle;
-    slot->raw_handle = 0;
-    return raw_handle;
-}
-
 int64_t rt_sdl_init(void) {
-    uintptr_t thread = sdl_alias_current_thread();
-    uintptr_t owner = atomic_load_explicit(&g_sdl_alias_owner_thread, memory_order_acquire);
-    if (owner != 0 && owner != thread) return 0;
-    if (owner == 0 && !atomic_compare_exchange_strong_explicit(
-            &g_sdl_alias_owner_thread, &owner, thread,
-            memory_order_acq_rel, memory_order_acquire))
-        return 0;
-    int64_t initialized = rt_sdl2_init();
-    if (initialized == 0)
-        atomic_store_explicit(&g_sdl_alias_owner_thread, 0, memory_order_release);
-    return initialized;
+    return rt_sdl2_init();
 }
 
 void rt_sdl_quit(void) {
-    if (!sdl_alias_on_owner_thread()) return;
-    for (uint64_t index = 0; index < SDL_ALIAS_MAX_WINDOWS; index++) {
-        int64_t raw_handle = g_sdl_alias_windows[index].raw_handle;
-        if (raw_handle != 0) {
-            g_sdl_alias_windows[index].raw_handle = 0;
-            rt_sdl2_destroy_window(raw_handle);
-        }
-    }
     rt_sdl2_quit();
-    atomic_store_explicit(&g_sdl_alias_owner_thread, 0, memory_order_release);
 }
 
 int64_t rt_sdl_create_window(const char* title, int64_t width, int64_t height) {
-    if (!sdl_alias_on_owner_thread()) return 0;
-    int64_t raw_handle = rt_sdl2_create_window(title, width, height);
-    int64_t handle = sdl_alias_window_register(raw_handle);
-    if (handle == 0 && raw_handle != 0) rt_sdl2_destroy_window(raw_handle);
-    return handle;
+    return rt_sdl2_create_window(title, width, height);
 }
 
 void rt_sdl_destroy_window(int64_t handle) {
-    if (!sdl_alias_on_owner_thread()) return;
-    int64_t raw_handle = sdl_alias_window_remove(handle);
-    if (raw_handle != 0) rt_sdl2_destroy_window(raw_handle);
+    rt_sdl2_destroy_window(handle);
 }
 
 int64_t rt_sdl_get_window_width(int64_t handle) {
-    if (!sdl_alias_on_owner_thread()) return 0;
-    int64_t raw_handle = sdl_alias_window_get(handle);
-    return raw_handle != 0 ? rt_sdl2_get_window_width(raw_handle) : 0;
+    return rt_sdl2_get_window_width(handle);
 }
 
 int64_t rt_sdl_get_window_height(int64_t handle) {
-    if (!sdl_alias_on_owner_thread()) return 0;
-    int64_t raw_handle = sdl_alias_window_get(handle);
-    return raw_handle != 0 ? rt_sdl2_get_window_height(raw_handle) : 0;
+    return rt_sdl2_get_window_height(handle);
 }
 
 void rt_sdl_set_window_title(int64_t handle, const char* title) {
-    if (!sdl_alias_on_owner_thread()) return;
-    int64_t raw_handle = sdl_alias_window_get(handle);
-    if (raw_handle != 0) rt_sdl2_set_window_title(raw_handle, title);
+    rt_sdl2_set_window_title(handle, title);
 }
 
 bool rt_sdl_present_rgba(int64_t window_handle, SplArray* pixels, int64_t width, int64_t height) {
-    if (!sdl_alias_on_owner_thread()) return false;
-    int64_t raw_handle = sdl_alias_window_get(window_handle);
-    return raw_handle != 0 && rt_sdl2_present_rgba(raw_handle, pixels, width, height);
+    return rt_sdl2_present_rgba(window_handle, pixels, width, height);
 }
 
 int64_t rt_sdl_poll_event(void) {
-    if (!sdl_alias_on_owner_thread()) return 0;
     return rt_sdl2_poll_event();
 }
 
 int64_t rt_sdl_event_key_sym(void) {
-    if (!sdl_alias_on_owner_thread()) return 0;
     return rt_sdl2_event_key_sym();
 }
 
 int64_t rt_sdl_event_key_mod(void) {
-    if (!sdl_alias_on_owner_thread()) return 0;
     return rt_sdl2_event_key_mod();
 }
 
 const char* rt_sdl_event_text(void) {
-    if (!sdl_alias_on_owner_thread()) return "";
     return rt_sdl2_event_text();
 }
 
 int64_t rt_sdl_event_mouse_x(void) {
-    if (!sdl_alias_on_owner_thread()) return 0;
     return rt_sdl2_event_mouse_x();
 }
 
 int64_t rt_sdl_event_mouse_y(void) {
-    if (!sdl_alias_on_owner_thread()) return 0;
     return rt_sdl2_event_mouse_y();
 }
 
 int64_t rt_sdl_event_mouse_button(void) {
-    if (!sdl_alias_on_owner_thread()) return 0;
     return rt_sdl2_event_mouse_button();
 }
 
 int64_t rt_sdl_window_should_close(void) {
-    if (!sdl_alias_on_owner_thread()) return 0;
     return rt_sdl2_window_should_close();
 }
 
 void rt_sdl_clear_quit(void) {
-    if (!sdl_alias_on_owner_thread()) return;
     rt_sdl2_clear_quit();
 }
 
 int64_t rt_sdl_event_window_event_id(void) {
-    if (!sdl_alias_on_owner_thread()) return 0;
     return rt_sdl2_event_window_event_id();
 }
 
 int64_t rt_sdl_event_window_data1(void) {
-    if (!sdl_alias_on_owner_thread()) return 0;
     return rt_sdl2_event_window_data1();
 }
 
 int64_t rt_sdl_event_window_data2(void) {
-    if (!sdl_alias_on_owner_thread()) return 0;
     return rt_sdl2_event_window_data2();
 }
 
-#ifdef SIMPLE_SDL_ALIAS_HANDLE_SELFTEST
+#ifdef SIMPLE_SDL2_HANDLE_SELFTEST
 int main(void) {
-    int64_t first = sdl_alias_window_register(0x1234);
-    if (first <= 0 || sdl_alias_window_get(first) != 0x1234) return 1;
-    if (sdl_alias_window_get(first + SDL_ALIAS_MAX_WINDOWS) != 0) return 2;
-    if (sdl_alias_window_remove(first) != 0x1234) return 3;
-    if (sdl_alias_window_get(first) != 0 || sdl_alias_window_remove(first) != 0) return 4;
+    atomic_store_explicit(&g_sdl2_owner_thread, sdl2_current_thread(), memory_order_release);
+    SDL_Window *fake = (SDL_Window *)(uintptr_t)0x1234;
+    int64_t first = sdl2_window_register(fake);
+    if (first <= 0 || sdl2_window_get(first) != fake) return 1;
+    atomic_store_explicit(&g_sdl2_owner_thread, sdl2_current_thread() ^ 1u, memory_order_release);
+    if (sdl2_window_get(first) != NULL) return 2;
+    atomic_store_explicit(&g_sdl2_owner_thread, sdl2_current_thread(), memory_order_release);
+    if (sdl2_window_get(first + SDL2_MAX_WINDOWS) != NULL) return 3;
+    if (sdl2_window_remove(first) != fake) return 4;
+    if (sdl2_window_get(first) != NULL || sdl2_window_remove(first) != NULL) return 5;
 
-    for (uint64_t index = 0; index < SDL_ALIAS_MAX_WINDOWS; index++) {
-        if (sdl_alias_window_register((int64_t)index + 1) <= 0) return 5;
+    for (uintptr_t index = 0; index < SDL2_MAX_WINDOWS; index++) {
+        if (sdl2_window_register((SDL_Window *)(index + 1)) <= 0) return 6;
     }
-    if (sdl_alias_window_register(0x5678) != 0) return 6;
+    if (sdl2_window_register((SDL_Window *)(uintptr_t)0x5678) != 0) return 7;
     return 0;
 }
 #endif

@@ -15,14 +15,15 @@ use os.compositor.display_backend_core.{CompositorBackend, CompositorGlassCapabl
 # whole-frame `present_rgba`), `get_event_type`, `get_key_code`,
 # `get_mouse_button` (event-decode accessors unused by this file — event
 # handling lives in hosted_input_sdl2.spl).
+@unsafe(reason: "SDL2 initialization status ABI; zero is the failure sentinel", capabilities: [ffi])
 extern fn rt_sdl2_init() -> i64
-extern fn rt_sdl2_quit()
+@unsafe(reason: "SDL2 window ownership ABI; zero is the allocation failure sentinel", capabilities: [ffi])
 extern fn rt_sdl2_create_window(title: text, width: i64, height: i64) -> i64
+@unsafe(reason: "SDL2 generation-checked window ownership release ABI", capabilities: [ffi])
 extern fn rt_sdl2_destroy_window(handle: i64)
+@unsafe(reason: "SDL2 borrowed pixel-array status ABI; false is the invalid descriptor or presentation sentinel", capabilities: [ffi])
 extern fn rt_sdl2_present_rgba(window_handle: i64, pixels: [i64], width: i64, height: i64) -> bool
-extern fn rt_sdl2_poll_event() -> i64
-extern fn rt_sdl2_get_mouse_x() -> i64
-extern fn rt_sdl2_get_mouse_y() -> i64
+@unsafe(reason: "SDL2 generation-checked window ownership resize ABI with no status result", capabilities: [ffi])
 extern fn rt_sdl2_set_window_size(handle: i64, width: i64, height: i64)
 
 var _sdl2_initialized: bool = false
@@ -49,11 +50,15 @@ class HostedSdl2Backend:
         if w <= 0 or h <= 0:
             return nil
         if not _sdl2_initialized:
-            val ok = rt_sdl2_init()
+            var ok: i64 = 0
+            unsafe(capabilities: [ffi]):
+                ok = rt_sdl2_init()
             if ok == 0:
                 return nil
             _sdl2_initialized = true
-        val handle = rt_sdl2_create_window(title, w.to_i64(), h.to_i64())
+        var handle: i64 = 0
+        unsafe(capabilities: [ffi]):
+            handle = rt_sdl2_create_window(title, w.to_i64(), h.to_i64())
         if handle == 0:
             return nil
         val total = w * h
@@ -112,7 +117,8 @@ class HostedSdl2Backend:
         buf
 
     me present():
-        rt_sdl2_present_rgba(self.window_handle, self._packed_pixels(), self.w.to_i64(), self.h.to_i64())
+        unsafe(capabilities: [ffi]):
+            rt_sdl2_present_rgba(self.window_handle, self._packed_pixels(), self.w.to_i64(), self.h.to_i64())
 
     me present_rect(x: i32, y: i32, w: i32, h: i32):
         self.present()
@@ -134,7 +140,8 @@ class HostedSdl2Backend:
         # precondition this can honestly check before requesting the resize.
         if self.window_handle == 0:
             return false
-        rt_sdl2_set_window_size(self.window_handle, w.to_i64(), h.to_i64())
+        unsafe(capabilities: [ffi]):
+            rt_sdl2_set_window_size(self.window_handle, w.to_i64(), h.to_i64())
         self.w = w
         self.h = h
         val total = w * h
@@ -143,7 +150,8 @@ class HostedSdl2Backend:
 
     me free():
         if self.window_handle != 0:
-            rt_sdl2_destroy_window(self.window_handle)
+            unsafe(capabilities: [ffi]):
+                rt_sdl2_destroy_window(self.window_handle)
             self.window_handle = 0
 
 impl CompositorBackend for HostedSdl2Backend:
@@ -201,7 +209,8 @@ impl CompositorBackend for HostedSdl2Backend:
             row = row + 1
 
     me present():
-        rt_sdl2_present_rgba(self.window_handle, self._packed_pixels(), self.w.to_i64(), self.h.to_i64())
+        unsafe(capabilities: [ffi]):
+            rt_sdl2_present_rgba(self.window_handle, self._packed_pixels(), self.w.to_i64(), self.h.to_i64())
 
     me present_rect(x: i32, y: i32, w: i32, h: i32):
         self.present()
