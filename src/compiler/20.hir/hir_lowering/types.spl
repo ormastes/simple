@@ -164,6 +164,32 @@ class HirLowering:
     # depth 8 can still be re-expanded from a shallower arrival, which is what
     # keeps the depth cap's reachable set intact.
     glob_expand_memo: {text: i64}
+    # PKGDEP (2026-08-21): package-sibling FIELD-dependency resolution memo.
+    # `materialize_imported_field_package_dependency` scans every surface in
+    # the frozen registry (662 in a full bootstrap) for each unresolved field
+    # dependency, calling module_surface_package_name (split/join alloc) and
+    # hir_module_declares_item per candidate. The registry is frozen for the
+    # whole HIR phase, so the answer for a (package, dependency) pair never
+    # changes; without this memo the same scan is repeated once per importing
+    # module, making the pass O(modules x registry x deps). Value is the
+    # selected surface index, or -1 for "no unique declaring sibling" (which
+    # covers both the not-found and the ambiguous case -- both are no-ops).
+    field_package_dep_memo: {text: i64}
+    # Per-surface package name cache for the same scan (keyed by module_name).
+    surface_package_name_memo: {text: text}
+    # Full-registry scans actually performed by the package-dependency
+    # fallback. Observable mechanism counter for the memo above; a spec
+    # pins that repeated identical queries do not raise it.
+    field_package_dep_scan_count: i64
+    # PKGDEP (2026-08-21): owner memo for try_register_bootstrap_global_symbol.
+    # That resolver is called LAZILY from BODY lowering for every unbound name
+    # (see BGS1 in _Items/module_import_registration.spl) and scans the whole
+    # frozen surface registry with no early exit, since it must prove the owner
+    # is unique. Same name, same registry, same answer -- so the scan is memoized
+    # by name. Value is the owning surface index, or -1 for none/ambiguous.
+    bootstrap_global_owner_memo: {text: i64}
+    # Full-registry scans actually performed by the resolver above.
+    bootstrap_global_scan_count: i64
     # Parallel scalar re-export caches keyed by physical surface index and
     # wanted item. Registry aliases therefore share one cache entry and no
     # concatenated facade-name key is allocated during traversal.
@@ -215,6 +241,9 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
     val empty_enum_variant_names: {text: bool} = {}
     val empty_fn_tuple_returns: {text: [HirType]} = {}
     val empty_glob_expand_memo: {text: i64} = {}
+    val empty_field_package_dep_memo: {text: i64} = {}
+    val empty_surface_package_name_memo: {text: text} = {}
+    val empty_bootstrap_global_owner_memo: {text: i64} = {}
     val empty_reexport_root_surface_indices: [i64] = []
     val empty_imported_type_methods_in_progress: [text] = []
     val empty_reexport_root_wanted: [text] = []
@@ -255,6 +284,11 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         registering_import_symbols: false,
         fn_tuple_returns: empty_fn_tuple_returns,
         glob_expand_memo: empty_glob_expand_memo,
+        field_package_dep_memo: empty_field_package_dep_memo,
+        surface_package_name_memo: empty_surface_package_name_memo,
+        field_package_dep_scan_count: 0,
+        bootstrap_global_owner_memo: empty_bootstrap_global_owner_memo,
+        bootstrap_global_scan_count: 0,
         reexport_root_surface_indices: empty_reexport_root_surface_indices,
         reexport_root_wanted: empty_reexport_root_wanted,
         reexport_root_found: empty_reexport_root_found,

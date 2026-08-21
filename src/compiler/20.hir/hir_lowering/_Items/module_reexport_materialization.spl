@@ -374,6 +374,20 @@ impl HirLowering:
                 imported_mod.module_name, dependency,
                 terminal_symbol)
 
+    me cached_surface_package_name(surface: ModuleSurface) -> text:
+        """Package name of `surface`, memoized by module name.
+
+        module_surface_package_name canonicalizes and then split/joins the
+        dotted name, allocating on every call. The full-registry scan in
+        materialize_imported_field_package_dependency called it once per
+        candidate per query; the registry is frozen for the whole HIR phase,
+        so one computation per surface is enough."""
+        if self.surface_package_name_memo.contains_key(surface.module_name):
+            return self.surface_package_name_memo[surface.module_name]
+        val computed = module_surface_package_name(surface)
+        self.surface_package_name_memo[surface.module_name] = computed
+        computed
+
     me materialize_imported_field_package_dependency(
         imported_mod: ModuleSurface,
         dependency: text,
@@ -410,20 +424,35 @@ impl HirLowering:
         ambiguous short name (Span, TraitBound) leaves the dependency alone
         rather than silently choosing, exactly as the explicit-import chase
         does."""
-        val package_name = module_surface_package_name(imported_mod)
+        val package_name = self.cached_surface_package_name(imported_mod)
         if package_name == "":
             return
+        # PKGDEP (2026-08-21): the registry is frozen for the whole HIR phase,
+        # so "which unique sibling in <package> declares <dependency>" is a
+        # constant. Without this memo the full-registry scan below re-ran for
+        # every importing module: O(modules x registry x field-deps), with a
+        # split/join allocation per candidate. See types.spl field_package_dep_memo.
+        val memo_key = imported_mod.module_name + " " + package_name + " " + dependency
         var selected: i64 = -1
-        var index: i64 = 0
-        while index < self.module_surfaces.surfaces.len():
-            val candidate = self.module_surfaces.surfaces[index]
-            if candidate.module_name != imported_mod.module_name and
-               module_surface_package_name(candidate) == package_name and
-               hir_module_declares_item(candidate, dependency):
-                if selected >= 0:
-                    return
-                selected = index
-            index = index + 1
+        if self.field_package_dep_memo.contains_key(memo_key):
+            selected = self.field_package_dep_memo[memo_key]
+        else:
+            self.field_package_dep_scan_count = self.field_package_dep_scan_count + 1
+            var index: i64 = 0
+            var ambiguous = false
+            while index < self.module_surfaces.surfaces.len():
+                val candidate = self.module_surfaces.surfaces[index]
+                if candidate.module_name != imported_mod.module_name and
+                   self.cached_surface_package_name(candidate) == package_name and
+                   hir_module_declares_item(candidate, dependency):
+                    if selected >= 0:
+                        ambiguous = true
+                        break
+                    selected = index
+                index = index + 1
+            if ambiguous:
+                selected = -1
+            self.field_package_dep_memo[memo_key] = selected
         if selected < 0:
             return
         val terminal = self.module_surfaces.surfaces[selected]

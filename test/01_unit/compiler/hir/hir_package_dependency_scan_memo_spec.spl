@@ -1,0 +1,65 @@
+# @tag: unit, compiler, hir, native-safe
+#
+# Pins the MECHANISM behind the 2026-08-21 HIR per-module cost fix
+# (doc/08_tracking/bug/hir_phase_per_module_cost_2026-08-21.md): the
+# package-sibling field-dependency fallback used to re-scan the ENTIRE frozen
+# module-surface registry for every unresolved dependency of every importing
+# module. The registry is frozen for the whole HIR phase, so the answer is a
+# constant; the memo makes the scan happen once per (declaring module,
+# dependency) pair. The observable is the scan counter, not a wall clock, so
+# this spec discriminates the algorithm rather than the machine.
+
+use std.spec.{describe, it, expect}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering._Items.module_reexport_materialization.*
+use compiler.hir.hir_lowering.module_surface.{
+    ModuleSurface,
+    ModuleSurfacesByName
+}
+
+fn package_registry() -> ModuleSurfacesByName:
+    val a = ModuleSurface.empty("pkg.a")
+    val b = ModuleSurface.empty("pkg.b")
+    val c = ModuleSurface.empty("pkg.c")
+    val built = ModuleSurfacesByName.from_parts(
+        [a, b, c],
+        {"pkg.a": 0, "pkg.b": 1, "pkg.c": 2},
+        ["pkg.a", "pkg.b", "pkg.c"],
+        [0, 1, 2])
+    built.unwrap()
+
+describe("HIR package-dependency scan memo", fn():
+    it("scans the frozen registry once per (module, dependency) pair", fn():
+        val registry = package_registry()
+        var lowering = hirlowering_for_module("pkg/a.spl", registry)
+        val span = Span.empty()
+        lowering.materialize_imported_field_package_dependency(
+            registry.surfaces[0], "Missing", span, false)
+        expect(lowering.field_package_dep_scan_count).to_equal(1)
+        lowering.materialize_imported_field_package_dependency(
+            registry.surfaces[0], "Missing", span, false)
+        lowering.materialize_imported_field_package_dependency(
+            registry.surfaces[0], "Missing", span, false)
+        expect(lowering.field_package_dep_scan_count).to_equal(1)
+    )
+
+    it("still scans for a different dependency name", fn():
+        val registry = package_registry()
+        var lowering = hirlowering_for_module("pkg/a.spl", registry)
+        val span = Span.empty()
+        lowering.materialize_imported_field_package_dependency(
+            registry.surfaces[0], "One", span, false)
+        lowering.materialize_imported_field_package_dependency(
+            registry.surfaces[0], "Two", span, false)
+        expect(lowering.field_package_dep_scan_count).to_equal(2)
+    )
+
+    it("memoizes each surface's package name", fn():
+        val registry = package_registry()
+        var lowering = hirlowering_for_module("pkg/a.spl", registry)
+        expect(lowering.cached_surface_package_name(registry.surfaces[0])).to_equal("pkg")
+        expect(lowering.cached_surface_package_name(registry.surfaces[0])).to_equal("pkg")
+        expect(lowering.surface_package_name_memo.len()).to_equal(1)
+    )
+)
