@@ -574,3 +574,23 @@ its stage2/stage3 dirs the same way.
 - Still open and blocking self-host parity: `stage3_native_build_and_compile_segv_on_hello_world_2026-08-18.md`
 
 **Depending feature expert:** `feature_expert/compiler_hardening/skill.md` (Phase 7 parity).
+
+## 2026-08-21 — streaming parse repaired; named/glob HIR routing pending
+
+A receipt-bound Stage 3 completed all 954 streaming surface parses after
+`reset_all_pools()` changed from retained-backing `clear()` to whole-owner
+replacement. The parser SEGV family is resolved by that run.
+
+The first HIR diagnostic was then `unresolved type:
+FrontendAsmTargetSpec`. That spelling came from an attempted alias workaround
+for an earlier `ambiguous explicit callable dependency AsmTargetSpec` error.
+The correct rule is explicit named import precedence over overlapping glob
+routes, while conflicts among two named routes or two glob routes remain
+errors. The source types retain their authored `AsmTargetSpec`,
+`AsmConstraintKind`, and `AsmLocation` names. See
+`doc/08_tracking/bug/stage3_callable_dependency_named_glob_precedence_2026-08-21.md`.
+
+Do not diagnose later `Span`, `Type`, `ProcessResult`, or directory-symbol
+messages as independent first causes until a fresh run proves the initial ASM
+dependency is gone. Resume with a new Stage-2 admission and receipt-bound
+Stage-3/4 run; never substitute the seed or bypass must-check.

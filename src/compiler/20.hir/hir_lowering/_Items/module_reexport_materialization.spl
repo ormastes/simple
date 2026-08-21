@@ -317,10 +317,11 @@ impl HirLowering:
         materialize_enum: bool
     ):
         # Resolve only imports explicitly written by the callable owner. Named
-        # imports are exact; explicit glob/module routes are accepted only when
-        # every matching route agrees on one terminal declaration. Implicit
-        # package inference remains excluded because choosing among same-named
-        # siblings would silently rewrite the signature.
+        # imports are exact. A named route takes precedence over a glob route,
+        # matching ordinary import resolution; routes at the same precedence
+        # must still agree on one terminal declaration. Implicit package
+        # inference remains excluded because choosing among same-named siblings
+        # would silently rewrite the signature.
         # ModuleSurface is a large value aggregate. The staged native ABI can
         # retain scalar declaration maps while losing adjacent nested import
         # routes across sibling registration. Read routes from the canonical
@@ -333,6 +334,7 @@ impl HirLowering:
             return
         var selected_target: i64 = -1
         var selected_item: text = ""
+        var selected_route_is_named = false
         var import_index: i64 = 0
         while import_index < self.module_surfaces.surfaces[owner_index].imports.len() and
               import_index < self.module_surfaces.surfaces[owner_index].import_target_indices.len():
@@ -354,15 +356,16 @@ impl HirLowering:
                         candidate_item = hop.item_name
                         candidate_found = true
                 if candidate_found:
-                    if selected_target >= 0 and
+                    if selected_target >= 0 and not selected_route_is_named and
                        (selected_target != candidate_target or
                         selected_item != candidate_item):
                         self.error(
                             "ambiguous explicit callable dependency `{dependency}` in `{imported_mod.module_name}`",
                             import_span)
                         return
-                    selected_target = candidate_target
-                    selected_item = candidate_item
+                    if selected_target < 0:
+                        selected_target = candidate_target
+                        selected_item = candidate_item
             var item_index: i64 = 0
             while item_index < import_decl.items.len():
                 val item = import_decl.items[item_index]
@@ -382,7 +385,7 @@ impl HirLowering:
                             candidate_item = hop.item_name
                             candidate_found = true
                     if candidate_found:
-                        if selected_target >= 0 and
+                        if selected_target >= 0 and selected_route_is_named and
                            (selected_target != candidate_target or
                             selected_item != candidate_item):
                             self.error(
@@ -391,6 +394,7 @@ impl HirLowering:
                             return
                         selected_target = candidate_target
                         selected_item = candidate_item
+                        selected_route_is_named = true
                 item_index = item_index + 1
             import_index = import_index + 1
         if selected_target < 0:

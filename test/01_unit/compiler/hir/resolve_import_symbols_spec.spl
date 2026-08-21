@@ -114,6 +114,32 @@ describe "resolve_import_symbols 2-pass import resolver":
         expect(hir.symbols.lookup("glob_token").?).to_be_truthy()
         expect(hir.symbols.lookup("named_token").?).to_be_truthy()
 
+    it "gives a named signature dependency route precedence over an overlapping glob":
+        val log = make_logger()
+        val named_source = "pub struct RouteToken:\n    value: i64"
+        val glob_source = "pub struct RouteToken:\n    other: text"
+        val owner_source = "use route.glob.*\nuse route.named.\{RouteToken\}\npub fn keep_route(value: RouteToken) -> RouteToken:\n    value"
+        val consumer_source = "use route.owner.\{keep_route\}\nfn main(value: RouteToken) -> RouteToken:\n    keep_route(value)"
+        val named = parse_full_frontend(named_source, "route.named", "route.named", log)
+        val glob = parse_full_frontend(glob_source, "route.glob", "route.glob", log)
+        val owner = parse_full_frontend(owner_source, "route.owner", "route.owner", log)
+        val consumer = parse_full_frontend(consumer_source, "route.consumer", "route.consumer", log)
+        var modules: Dict<text, Module> = {}
+        modules["route.named"] = named
+        modules["route.glob"] = glob
+        modules["route.owner"] = owner
+        val sources = [
+            SourceFile(path: "route/named.spl", content: named_source, module_name: "route.named"),
+            SourceFile(path: "route/glob.spl", content: glob_source, module_name: "route.glob"),
+            SourceFile(path: "route/owner.spl", content: owner_source, module_name: "route.owner")
+        ]
+        val surfaces = resolve_import_symbols_spec_build_surfaces(modules, sources)
+        var lowering = hirlowering_for_module("route.consumer", surfaces)
+        val hir = lowering.lower_module(consumer)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(hir.symbols.lookup("keep_route").?).to_be_truthy()
+        expect(hir.symbols.lookup("RouteToken").?).to_be_truthy()
+
     it "resolves plain facade exports to their unique package sibling":
         val log = make_logger()
         val provider_source = "struct TickSpan:\n    value: i64\npub fn tick() -> i64:\n    42\npub fn locate() -> TickSpan:\n    TickSpan(value: 1)"

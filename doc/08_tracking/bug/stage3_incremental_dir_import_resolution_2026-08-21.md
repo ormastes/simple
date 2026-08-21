@@ -2,28 +2,29 @@
 
 ## Status
 
-Open, deterministic bootstrap blocker. The third bounded verify/fix cycle was
-stopped after establishing the first HIR failure; no fourth bootstrap attempt
-is permitted by the repository iteration guard.
+Reclassified as a downstream cascade symptom. The direct runtime-backed import
+is retained as a defensive compiler hot-path route, but it was not the first
+Stage-3 HIR failure.
 
 ## Evidence
 
-The receipt-bound Stage-3 compiler completed all 954 streaming surface parses,
-proving that whole-owner replacement removed the preceding transient pool
-SEGV. HIR lowering then reported four errors in
+The receipt-bound Stage-3 compiler completed all 954 streaming surface parses.
+HIR lowering later reported four errors in
 `src/compiler/80.driver/driver_build/incremental.spl`:
 
 - unresolved name `dir_list` at the named `std.io_runtime` import;
 - unresolved name `dir_create_all` at the same import.
 
-The source already has the explicit import
-`use std.io_runtime.{dir_create_all, dir_list}`. This is therefore an imported
-callable materialization/routing failure, not a missing source import.
+The full log begins earlier with unresolved `FrontendAsmTargetSpec`, followed by
+shared `Span`, `Type`, and `ProcessResult` failures. The directory errors cannot
+serve as an independent first-cause diagnosis. The compiler fingerprint path
+now imports the runtime-backed owner directly to avoid a compatibility-facade
+hop without changing behavior.
 
 ## Next bounded action
 
-Audit the `std.io_runtime` export origins for these two callables and compare
-them with their canonical `std.nogc_sync_mut.io.dir_ops` declarations. Apply
-one explicit, unambiguous route fix, then begin a fresh session and run one new
-Stage-2 admission plus receipt-bound Stage-3/4 attempt. Do not use the Rust seed
-as a verifier and do not bypass the must-check push gate.
+Verify the named-over-glob callable dependency fix recorded in
+`stage3_callable_dependency_named_glob_precedence_2026-08-21.md`. If directory
+symbols remain unresolved after the imported-type cascade is gone, reopen this
+record with the new first-cause log. Do not route fingerprint traversal through
+`std.nogc_sync_mut.io.dir_ops`: its listing implementation shells out to `ls`.
