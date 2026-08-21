@@ -332,6 +332,15 @@ This router is still an unverified dynamic provider because artifact signature
 admission is not yet wired here; its Rust calls therefore remain explicitly
 unsafe and it must not be classified as verified/critical-safe.
 
+The router also ignored `rt_winit_buffer_free`'s result and always reported
+success, while invalid or failed pixel readback became an empty array. The
+consumer now preserves the provider's free result and verifies both phases of
+the pixel-count/fill protocol. The Rust provider reports false for missing
+buffers and rejects undersized output capacity rather than returning a
+success-sized count without writing. A display-independent provider contract
+test passes. These checks are constant-time metadata comparisons around the
+existing allocation/copy and add no extra native call.
+
 All 15 remaining legacy sign/verify declarations in the canonical signature
 module are now explicitly `unsafe(ffi)` and document their sentinel contract:
 verification collapses malformed bridge input into `0`, while signing may

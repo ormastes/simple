@@ -22,6 +22,7 @@
 //! non-bundled process (the confirmed root cause of the "window not frontmost /
 //! clicks fall through" gap).
 
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::ffi::CStr;
@@ -29,7 +30,6 @@ use std::num::NonZeroU32;
 use std::os::raw::c_char;
 use std::sync::Arc;
 use std::time::Duration;
-use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 
 use softbuffer::{Context, Surface};
 use winit::application::ApplicationHandler;
@@ -55,11 +55,27 @@ const EVENT_MOUSE_WHEEL: i64 = 22;
 
 #[derive(Clone)]
 enum StoredEvent {
-    Resized { window_id: i64, width: i64, height: i64 },
-    Moved { window_id: i64, x: i64, y: i64 },
-    Close { window_id: i64 },
-    Focused { window_id: i64, focused: bool },
-    ScaleFactor { window_id: i64, scale_factor: f64 },
+    Resized {
+        window_id: i64,
+        width: i64,
+        height: i64,
+    },
+    Moved {
+        window_id: i64,
+        x: i64,
+        y: i64,
+    },
+    Close {
+        window_id: i64,
+    },
+    Focused {
+        window_id: i64,
+        focused: bool,
+    },
+    ScaleFactor {
+        window_id: i64,
+        scale_factor: f64,
+    },
     Keyboard {
         window_id: i64,
         scancode: i64,
@@ -73,9 +89,23 @@ enum StoredEvent {
         origin_keycode: i64,
         origin_pressed: bool,
     },
-    MouseButton { window_id: i64, button: i64, pressed: bool, x: f64, y: f64 },
-    MouseMoved { window_id: i64, x: f64, y: f64 },
-    MouseWheel { window_id: i64, x: f64, y: f64 },
+    MouseButton {
+        window_id: i64,
+        button: i64,
+        pressed: bool,
+        x: f64,
+        y: f64,
+    },
+    MouseMoved {
+        window_id: i64,
+        x: f64,
+        y: f64,
+    },
+    MouseWheel {
+        window_id: i64,
+        x: f64,
+        y: f64,
+    },
 }
 
 impl StoredEvent {
@@ -248,10 +278,12 @@ impl Inner {
                 window_id: wid,
                 focused,
             }),
-            WindowEvent::ScaleFactorChanged { scale_factor, .. } => Some(StoredEvent::ScaleFactor {
-                window_id: wid,
-                scale_factor,
-            }),
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                Some(StoredEvent::ScaleFactor {
+                    window_id: wid,
+                    scale_factor,
+                })
+            }
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.shift_key = modifiers.state().shift_key();
                 None
@@ -285,14 +317,12 @@ impl Inner {
                 }
                 None
             }
-            WindowEvent::Ime(Ime::Commit(text)) if !text.is_empty() => {
-                Some(StoredEvent::Text {
-                    window_id: wid,
-                    text,
-                    origin_keycode: 0,
-                    origin_pressed: false,
-                })
-            }
+            WindowEvent::Ime(Ime::Commit(text)) if !text.is_empty() => Some(StoredEvent::Text {
+                window_id: wid,
+                text,
+                origin_keycode: 0,
+                origin_pressed: false,
+            }),
             WindowEvent::CursorMoved { position, .. } => {
                 self.last_cursor = (position.x, position.y);
                 Some(StoredEvent::MouseMoved {
@@ -313,7 +343,11 @@ impl Inner {
                     MouseScrollDelta::LineDelta(dx, dy) => (dx as f64, dy as f64),
                     MouseScrollDelta::PixelDelta(p) => (p.x, p.y),
                 };
-                Some(StoredEvent::MouseWheel { window_id: wid, x, y })
+                Some(StoredEvent::MouseWheel {
+                    window_id: wid,
+                    x,
+                    y,
+                })
             }
             _ => None,
         };
@@ -335,7 +369,12 @@ impl<'a> ApplicationHandler for Handler<'a> {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.inner.drain_create(event_loop);
     }
-    fn window_event(&mut self, _event_loop: &ActiveEventLoop, window_id: WindowId, event: WindowEvent) {
+    fn window_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) {
         self.inner.handle_window_event(window_id, event);
     }
 }
@@ -399,31 +438,85 @@ fn activate_frontmost(window: &Window, activated: &mut bool) {
 // ---- Input mappings (must match the seed's winit_sffi_input.rs) -------------
 fn keycode_to_simple(code: KeyCode) -> Option<i64> {
     Some(match code {
-        KeyCode::KeyA => 65, KeyCode::KeyB => 66, KeyCode::KeyC => 67, KeyCode::KeyD => 68,
-        KeyCode::KeyE => 69, KeyCode::KeyF => 70, KeyCode::KeyG => 71, KeyCode::KeyH => 72,
-        KeyCode::KeyI => 73, KeyCode::KeyJ => 74, KeyCode::KeyK => 75, KeyCode::KeyL => 76,
-        KeyCode::KeyM => 77, KeyCode::KeyN => 78, KeyCode::KeyO => 79, KeyCode::KeyP => 80,
-        KeyCode::KeyQ => 81, KeyCode::KeyR => 82, KeyCode::KeyS => 83, KeyCode::KeyT => 84,
-        KeyCode::KeyU => 85, KeyCode::KeyV => 86, KeyCode::KeyW => 87, KeyCode::KeyX => 88,
-        KeyCode::KeyY => 89, KeyCode::KeyZ => 90,
-        KeyCode::Digit0 => 48, KeyCode::Digit1 => 49, KeyCode::Digit2 => 50, KeyCode::Digit3 => 51,
-        KeyCode::Digit4 => 52, KeyCode::Digit5 => 53, KeyCode::Digit6 => 54, KeyCode::Digit7 => 55,
-        KeyCode::Digit8 => 56, KeyCode::Digit9 => 57,
-        KeyCode::ArrowLeft => 37, KeyCode::ArrowUp => 38, KeyCode::ArrowRight => 39, KeyCode::ArrowDown => 40,
-        KeyCode::Tab => 9, KeyCode::Backspace => 8, KeyCode::Delete => 127, KeyCode::Home => 36,
-        KeyCode::End => 35, KeyCode::PageUp => 33, KeyCode::PageDown => 34, KeyCode::Space => 32,
-        KeyCode::Escape => 27, KeyCode::Enter => 13,
+        KeyCode::KeyA => 65,
+        KeyCode::KeyB => 66,
+        KeyCode::KeyC => 67,
+        KeyCode::KeyD => 68,
+        KeyCode::KeyE => 69,
+        KeyCode::KeyF => 70,
+        KeyCode::KeyG => 71,
+        KeyCode::KeyH => 72,
+        KeyCode::KeyI => 73,
+        KeyCode::KeyJ => 74,
+        KeyCode::KeyK => 75,
+        KeyCode::KeyL => 76,
+        KeyCode::KeyM => 77,
+        KeyCode::KeyN => 78,
+        KeyCode::KeyO => 79,
+        KeyCode::KeyP => 80,
+        KeyCode::KeyQ => 81,
+        KeyCode::KeyR => 82,
+        KeyCode::KeyS => 83,
+        KeyCode::KeyT => 84,
+        KeyCode::KeyU => 85,
+        KeyCode::KeyV => 86,
+        KeyCode::KeyW => 87,
+        KeyCode::KeyX => 88,
+        KeyCode::KeyY => 89,
+        KeyCode::KeyZ => 90,
+        KeyCode::Digit0 => 48,
+        KeyCode::Digit1 => 49,
+        KeyCode::Digit2 => 50,
+        KeyCode::Digit3 => 51,
+        KeyCode::Digit4 => 52,
+        KeyCode::Digit5 => 53,
+        KeyCode::Digit6 => 54,
+        KeyCode::Digit7 => 55,
+        KeyCode::Digit8 => 56,
+        KeyCode::Digit9 => 57,
+        KeyCode::ArrowLeft => 37,
+        KeyCode::ArrowUp => 38,
+        KeyCode::ArrowRight => 39,
+        KeyCode::ArrowDown => 40,
+        KeyCode::Tab => 9,
+        KeyCode::Backspace => 8,
+        KeyCode::Delete => 127,
+        KeyCode::Home => 36,
+        KeyCode::End => 35,
+        KeyCode::PageUp => 33,
+        KeyCode::PageDown => 34,
+        KeyCode::Space => 32,
+        KeyCode::Escape => 27,
+        KeyCode::Enter => 13,
         // Preserve side identity for modifiers.  These values deliberately
         // live outside the legacy ASCII/DOM-key range used above; consumers
         // must not collapse left/right Ctrl or Alt into a boolean modifier.
-        KeyCode::ControlLeft => 1001, KeyCode::ControlRight => 1002,
-        KeyCode::AltLeft => 1003, KeyCode::AltRight => 1004,
-        KeyCode::F1 => 112, KeyCode::F2 => 113, KeyCode::F3 => 114, KeyCode::F4 => 115,
-        KeyCode::F5 => 116, KeyCode::F6 => 117, KeyCode::F7 => 118, KeyCode::F8 => 119,
-        KeyCode::F9 => 120, KeyCode::F10 => 121, KeyCode::F11 => 122, KeyCode::F12 => 123,
-        KeyCode::Minus => 189, KeyCode::Equal => 187, KeyCode::BracketLeft => 219,
-        KeyCode::BracketRight => 221, KeyCode::Backslash => 220, KeyCode::Semicolon => 186,
-        KeyCode::Quote => 222, KeyCode::Comma => 188, KeyCode::Period => 190, KeyCode::Slash => 191,
+        KeyCode::ControlLeft => 1001,
+        KeyCode::ControlRight => 1002,
+        KeyCode::AltLeft => 1003,
+        KeyCode::AltRight => 1004,
+        KeyCode::F1 => 112,
+        KeyCode::F2 => 113,
+        KeyCode::F3 => 114,
+        KeyCode::F4 => 115,
+        KeyCode::F5 => 116,
+        KeyCode::F6 => 117,
+        KeyCode::F7 => 118,
+        KeyCode::F8 => 119,
+        KeyCode::F9 => 120,
+        KeyCode::F10 => 121,
+        KeyCode::F11 => 122,
+        KeyCode::F12 => 123,
+        KeyCode::Minus => 189,
+        KeyCode::Equal => 187,
+        KeyCode::BracketLeft => 219,
+        KeyCode::BracketRight => 221,
+        KeyCode::Backslash => 220,
+        KeyCode::Semicolon => 186,
+        KeyCode::Quote => 222,
+        KeyCode::Comma => 188,
+        KeyCode::Period => 190,
+        KeyCode::Slash => 191,
         KeyCode::Backquote => 192,
         _ => return None,
     })
@@ -787,9 +880,17 @@ pub extern "C" fn rt_winit_window_set_position(win: i64, x: i64, y: i64) -> i64 
 pub extern "C" fn rt_winit_window_set_fullscreen(win: i64, enabled: i64) -> i64 {
     PUMP.with(|cell| {
         let borrow = cell.borrow();
-        let Some(ps) = borrow.as_ref() else { return 0; };
-        let Some(slot) = ps.inner.windows.get(&win) else { return 0; };
-        let mode = if enabled != 0 { Some(Fullscreen::Borderless(None)) } else { None };
+        let Some(ps) = borrow.as_ref() else {
+            return 0;
+        };
+        let Some(slot) = ps.inner.windows.get(&win) else {
+            return 0;
+        };
+        let mode = if enabled != 0 {
+            Some(Fullscreen::Borderless(None))
+        } else {
+            None
+        };
         slot.window.set_fullscreen(mode);
         1
     })
@@ -799,8 +900,11 @@ pub extern "C" fn rt_winit_window_set_fullscreen(win: i64, enabled: i64) -> i64 
 pub extern "C" fn rt_winit_window_is_fullscreen(win: i64) -> i64 {
     PUMP.with(|cell| {
         let borrow = cell.borrow();
-        borrow.as_ref().and_then(|ps| ps.inner.windows.get(&win))
-            .map(|slot| slot.window.fullscreen().is_some() as i64).unwrap_or(0)
+        borrow
+            .as_ref()
+            .and_then(|ps| ps.inner.windows.get(&win))
+            .map(|slot| slot.window.fullscreen().is_some() as i64)
+            .unwrap_or(0)
     })
 }
 
@@ -808,8 +912,11 @@ pub extern "C" fn rt_winit_window_is_fullscreen(win: i64) -> i64 {
 pub extern "C" fn rt_winit_window_inner_width(win: i64) -> i64 {
     PUMP.with(|cell| {
         let borrow = cell.borrow();
-        borrow.as_ref().and_then(|ps| ps.inner.windows.get(&win))
-            .map(|slot| slot.window.inner_size().width as i64).unwrap_or(0)
+        borrow
+            .as_ref()
+            .and_then(|ps| ps.inner.windows.get(&win))
+            .map(|slot| slot.window.inner_size().width as i64)
+            .unwrap_or(0)
     })
 }
 
@@ -817,8 +924,11 @@ pub extern "C" fn rt_winit_window_inner_width(win: i64) -> i64 {
 pub extern "C" fn rt_winit_window_inner_height(win: i64) -> i64 {
     PUMP.with(|cell| {
         let borrow = cell.borrow();
-        borrow.as_ref().and_then(|ps| ps.inner.windows.get(&win))
-            .map(|slot| slot.window.inner_size().height as i64).unwrap_or(0)
+        borrow
+            .as_ref()
+            .and_then(|ps| ps.inner.windows.get(&win))
+            .map(|slot| slot.window.inner_size().height as i64)
+            .unwrap_or(0)
     })
 }
 
@@ -828,10 +938,16 @@ pub extern "C" fn rt_winit_window_inner_height(win: i64) -> i64 {
 pub extern "C" fn rt_winit_window_surface_kind(win: i64) -> i64 {
     PUMP.with(|cell| {
         let borrow = cell.borrow();
-        let Some(slot) = borrow.as_ref().and_then(|ps| ps.inner.windows.get(&win)) else { return 0; };
+        let Some(slot) = borrow.as_ref().and_then(|ps| ps.inner.windows.get(&win)) else {
+            return 0;
+        };
         match (slot.window.display_handle(), slot.window.window_handle()) {
-            (Ok(display), Ok(window)) if matches!(display.as_raw(), RawDisplayHandle::Xlib(_))
-                && matches!(window.as_raw(), RawWindowHandle::Xlib(_)) => 1,
+            (Ok(display), Ok(window))
+                if matches!(display.as_raw(), RawDisplayHandle::Xlib(_))
+                    && matches!(window.as_raw(), RawWindowHandle::Xlib(_)) =>
+            {
+                1
+            }
             _ => 0,
         }
     })
@@ -841,10 +957,13 @@ pub extern "C" fn rt_winit_window_surface_kind(win: i64) -> i64 {
 pub extern "C" fn rt_winit_window_surface_display(win: i64) -> i64 {
     PUMP.with(|cell| {
         let borrow = cell.borrow();
-        let Some(slot) = borrow.as_ref().and_then(|ps| ps.inner.windows.get(&win)) else { return 0; };
+        let Some(slot) = borrow.as_ref().and_then(|ps| ps.inner.windows.get(&win)) else {
+            return 0;
+        };
         match slot.window.display_handle().map(|h| h.as_raw()) {
-            Ok(RawDisplayHandle::Xlib(handle)) =>
-                handle.display.map(|p| p.as_ptr() as i64).unwrap_or(0),
+            Ok(RawDisplayHandle::Xlib(handle)) => {
+                handle.display.map(|p| p.as_ptr() as i64).unwrap_or(0)
+            }
             _ => 0,
         }
     })
@@ -854,7 +973,9 @@ pub extern "C" fn rt_winit_window_surface_display(win: i64) -> i64 {
 pub extern "C" fn rt_winit_window_surface_window(win: i64) -> i64 {
     PUMP.with(|cell| {
         let borrow = cell.borrow();
-        let Some(slot) = borrow.as_ref().and_then(|ps| ps.inner.windows.get(&win)) else { return 0; };
+        let Some(slot) = borrow.as_ref().and_then(|ps| ps.inner.windows.get(&win)) else {
+            return 0;
+        };
         match slot.window.window_handle().map(|h| h.as_raw()) {
             Ok(RawWindowHandle::Xlib(handle)) => handle.window as i64,
             _ => 0,
@@ -866,8 +987,11 @@ pub extern "C" fn rt_winit_window_surface_window(win: i64) -> i64 {
 pub extern "C" fn rt_winit_window_scale_factor_milli(win: i64) -> i64 {
     PUMP.with(|cell| {
         let borrow = cell.borrow();
-        borrow.as_ref().and_then(|ps| ps.inner.windows.get(&win))
-            .map(|slot| (slot.window.scale_factor() * 1000.0).round() as i64).unwrap_or(1000)
+        borrow
+            .as_ref()
+            .and_then(|ps| ps.inner.windows.get(&win))
+            .map(|slot| (slot.window.scale_factor() * 1000.0).round() as i64)
+            .unwrap_or(1000)
     })
 }
 
@@ -1182,60 +1306,162 @@ fn glyph_8x16(codepoint: i32) -> [u8; 16] {
 
 fn glyph_5x7_ascii(ch: u8) -> [u8; 7] {
     match ch {
-        b'A' => [0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001],
-        b'B' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110],
-        b'C' => [0b01111, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b01111],
-        b'D' => [0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110],
-        b'E' => [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111],
-        b'F' => [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000],
-        b'G' => [0b01111, 0b10000, 0b10000, 0b10111, 0b10001, 0b10001, 0b01111],
-        b'H' => [0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001],
-        b'I' => [0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b11111],
-        b'J' => [0b00001, 0b00001, 0b00001, 0b00001, 0b10001, 0b10001, 0b01110],
-        b'K' => [0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001],
-        b'L' => [0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111],
-        b'M' => [0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001],
-        b'N' => [0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001],
-        b'O' => [0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
-        b'P' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000],
-        b'Q' => [0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101],
-        b'R' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001],
-        b'S' => [0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110],
-        b'T' => [0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100],
-        b'U' => [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
-        b'V' => [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100],
-        b'W' => [0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b10101, 0b01010],
-        b'X' => [0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001],
-        b'Y' => [0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100],
-        b'Z' => [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111],
-        b'0' => [0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110],
-        b'1' => [0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110],
-        b'2' => [0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111],
-        b'3' => [0b11110, 0b00001, 0b00001, 0b01110, 0b00001, 0b00001, 0b11110],
-        b'4' => [0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010],
-        b'5' => [0b11111, 0b10000, 0b10000, 0b11110, 0b00001, 0b00001, 0b11110],
-        b'6' => [0b01110, 0b10000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110],
-        b'7' => [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000],
-        b'8' => [0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110],
-        b'9' => [0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00001, 0b01110],
-        b':' => [0b00000, 0b00100, 0b00100, 0b00000, 0b00100, 0b00100, 0b00000],
-        b'.' => [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b01100, 0b01100],
-        b'/' => [0b00001, 0b00010, 0b00010, 0b00100, 0b01000, 0b01000, 0b10000],
-        b'-' => [0b00000, 0b00000, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000],
-        b'_' => [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b11111],
-        b'$' => [0b00100, 0b01111, 0b10100, 0b01110, 0b00101, 0b11110, 0b00100],
-        b'>' => [0b10000, 0b01000, 0b00100, 0b00010, 0b00100, 0b01000, 0b10000],
-        b'<' => [0b00001, 0b00010, 0b00100, 0b01000, 0b00100, 0b00010, 0b00001],
-        b'=' => [0b00000, 0b00000, 0b11111, 0b00000, 0b11111, 0b00000, 0b00000],
-        b'?' => [0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b00000, 0b00100],
-        _ => [0b11111, 0b00001, 0b00010, 0b00100, 0b00100, 0b00000, 0b00100],
+        b'A' => [
+            0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
+        ],
+        b'B' => [
+            0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110,
+        ],
+        b'C' => [
+            0b01111, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b01111,
+        ],
+        b'D' => [
+            0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110,
+        ],
+        b'E' => [
+            0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111,
+        ],
+        b'F' => [
+            0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000,
+        ],
+        b'G' => [
+            0b01111, 0b10000, 0b10000, 0b10111, 0b10001, 0b10001, 0b01111,
+        ],
+        b'H' => [
+            0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
+        ],
+        b'I' => [
+            0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b11111,
+        ],
+        b'J' => [
+            0b00001, 0b00001, 0b00001, 0b00001, 0b10001, 0b10001, 0b01110,
+        ],
+        b'K' => [
+            0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001,
+        ],
+        b'L' => [
+            0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111,
+        ],
+        b'M' => [
+            0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001,
+        ],
+        b'N' => [
+            0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001,
+        ],
+        b'O' => [
+            0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
+        ],
+        b'P' => [
+            0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000,
+        ],
+        b'Q' => [
+            0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101,
+        ],
+        b'R' => [
+            0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001,
+        ],
+        b'S' => [
+            0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110,
+        ],
+        b'T' => [
+            0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100,
+        ],
+        b'U' => [
+            0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
+        ],
+        b'V' => [
+            0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100,
+        ],
+        b'W' => [
+            0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b10101, 0b01010,
+        ],
+        b'X' => [
+            0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001,
+        ],
+        b'Y' => [
+            0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100,
+        ],
+        b'Z' => [
+            0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111,
+        ],
+        b'0' => [
+            0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110,
+        ],
+        b'1' => [
+            0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110,
+        ],
+        b'2' => [
+            0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111,
+        ],
+        b'3' => [
+            0b11110, 0b00001, 0b00001, 0b01110, 0b00001, 0b00001, 0b11110,
+        ],
+        b'4' => [
+            0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010,
+        ],
+        b'5' => [
+            0b11111, 0b10000, 0b10000, 0b11110, 0b00001, 0b00001, 0b11110,
+        ],
+        b'6' => [
+            0b01110, 0b10000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110,
+        ],
+        b'7' => [
+            0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000,
+        ],
+        b'8' => [
+            0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110,
+        ],
+        b'9' => [
+            0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00001, 0b01110,
+        ],
+        b':' => [
+            0b00000, 0b00100, 0b00100, 0b00000, 0b00100, 0b00100, 0b00000,
+        ],
+        b'.' => [
+            0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b01100, 0b01100,
+        ],
+        b'/' => [
+            0b00001, 0b00010, 0b00010, 0b00100, 0b01000, 0b01000, 0b10000,
+        ],
+        b'-' => [
+            0b00000, 0b00000, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000,
+        ],
+        b'_' => [
+            0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b11111,
+        ],
+        b'$' => [
+            0b00100, 0b01111, 0b10100, 0b01110, 0b00101, 0b11110, 0b00100,
+        ],
+        b'>' => [
+            0b10000, 0b01000, 0b00100, 0b00010, 0b00100, 0b01000, 0b10000,
+        ],
+        b'<' => [
+            0b00001, 0b00010, 0b00100, 0b01000, 0b00100, 0b00010, 0b00001,
+        ],
+        b'=' => [
+            0b00000, 0b00000, 0b11111, 0b00000, 0b11111, 0b00000, 0b00000,
+        ],
+        b'?' => [
+            0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b00000, 0b00100,
+        ],
+        _ => [
+            0b11111, 0b00001, 0b00010, 0b00100, 0b00100, 0b00000, 0b00100,
+        ],
     }
 }
 
 /// Allocate a pixel buffer. Requires a live winit event loop (see module
 /// doc above) — returns 0 on a headless host, never a fake id.
 #[no_mangle]
-pub extern "C" fn rt_winit_buffer_create(width: i64, height: i64, fill_color: i64, _d: i64, _e: i64, _f: i64, _g: i64) -> i64 {
+pub extern "C" fn rt_winit_buffer_create(
+    width: i64,
+    height: i64,
+    fill_color: i64,
+    _d: i64,
+    _e: i64,
+    _f: i64,
+    _g: i64,
+) -> i64 {
     if rt_winit_event_loop_new() == 0 {
         return 0;
     }
@@ -1256,7 +1482,15 @@ pub extern "C" fn rt_winit_buffer_create(width: i64, height: i64, fill_color: i6
 }
 
 #[no_mangle]
-pub extern "C" fn rt_winit_buffer_fill_rect(buf_id: i64, x: i64, y: i64, w: i64, h: i64, color: i64, _g: i64) -> i64 {
+pub extern "C" fn rt_winit_buffer_fill_rect(
+    buf_id: i64,
+    x: i64,
+    y: i64,
+    w: i64,
+    h: i64,
+    color: i64,
+    _g: i64,
+) -> i64 {
     with_buffers(|bufs| {
         let Some(buf) = bufs.get_mut(&buf_id) else {
             return 0;
@@ -1281,11 +1515,21 @@ pub extern "C" fn rt_winit_buffer_fill_rect(buf_id: i64, x: i64, y: i64, w: i64,
 }
 
 #[no_mangle]
-pub extern "C" fn rt_winit_buffer_blit_pixels(buf_id: i64, x: i64, y: i64, w: i64, h: i64, pixels_ptr: i64, pixels_len: i64) -> i64 {
+pub extern "C" fn rt_winit_buffer_blit_pixels(
+    buf_id: i64,
+    x: i64,
+    y: i64,
+    w: i64,
+    h: i64,
+    pixels_ptr: i64,
+    pixels_len: i64,
+) -> i64 {
     if pixels_ptr == 0 || pixels_len <= 0 {
         return 0;
     }
-    let src: &[u32] = unsafe { std::slice::from_raw_parts(pixels_ptr as usize as *const u32, pixels_len as usize) };
+    let src: &[u32] = unsafe {
+        std::slice::from_raw_parts(pixels_ptr as usize as *const u32, pixels_len as usize)
+    };
     with_buffers(|bufs| {
         let Some(buf) = bufs.get_mut(&buf_id) else {
             return 0;
@@ -1316,7 +1560,15 @@ pub extern "C" fn rt_winit_buffer_blit_pixels(buf_id: i64, x: i64, y: i64, w: i6
 }
 
 #[no_mangle]
-pub extern "C" fn rt_winit_buffer_draw_text(buf_id: i64, x: i64, y: i64, text_ptr: i64, fg: i64, bg: i64, _g: i64) -> i64 {
+pub extern "C" fn rt_winit_buffer_draw_text(
+    buf_id: i64,
+    x: i64,
+    y: i64,
+    text_ptr: i64,
+    fg: i64,
+    bg: i64,
+    _g: i64,
+) -> i64 {
     if text_ptr == 0 {
         return 0;
     }
@@ -1336,8 +1588,19 @@ pub extern "C" fn rt_winit_buffer_draw_text(buf_id: i64, x: i64, y: i64, text_pt
 /// (0) unless `window_id` names a live WindowSlot AND `buf_id` names a live
 /// buffer — never reports success without touching a real surface.
 #[no_mangle]
-pub extern "C" fn rt_winit_buffer_present(window_id: i64, buf_id: i64, _c: i64, _d: i64, _e: i64, _f: i64, _g: i64) -> i64 {
-    let src = with_buffers(|bufs| bufs.get(&buf_id).map(|b| (b.width, b.height, b.pixels.clone())));
+pub extern "C" fn rt_winit_buffer_present(
+    window_id: i64,
+    buf_id: i64,
+    _c: i64,
+    _d: i64,
+    _e: i64,
+    _f: i64,
+    _g: i64,
+) -> i64 {
+    let src = with_buffers(|bufs| {
+        bufs.get(&buf_id)
+            .map(|b| (b.width, b.height, b.pixels.clone()))
+    });
     let Some((bw, bh, pixels)) = src else {
         return 0;
     };
@@ -1389,14 +1652,25 @@ pub extern "C" fn rt_winit_buffer_present(window_id: i64, buf_id: i64, _c: i64, 
 }
 
 #[no_mangle]
-pub extern "C" fn rt_winit_buffer_save_bmp(buf_id: i64, path_ptr: i64, _c: i64, _d: i64, _e: i64, _f: i64, _g: i64) -> i64 {
+pub extern "C" fn rt_winit_buffer_save_bmp(
+    buf_id: i64,
+    path_ptr: i64,
+    _c: i64,
+    _d: i64,
+    _e: i64,
+    _f: i64,
+    _g: i64,
+) -> i64 {
     if path_ptr == 0 {
         return 0;
     }
     let path = unsafe { CStr::from_ptr(path_ptr as usize as *const c_char) }
         .to_string_lossy()
         .into_owned();
-    let data = with_buffers(|bufs| bufs.get(&buf_id).map(|buf| encode_bmp(buf.width, buf.height, &buf.pixels)));
+    let data = with_buffers(|bufs| {
+        bufs.get(&buf_id)
+            .map(|buf| encode_bmp(buf.width, buf.height, &buf.pixels))
+    });
     match data {
         Some(bytes) => match std::fs::write(&path, &bytes) {
             Ok(()) => 1,
@@ -1407,7 +1681,15 @@ pub extern "C" fn rt_winit_buffer_save_bmp(buf_id: i64, path_ptr: i64, _c: i64, 
 }
 
 #[no_mangle]
-pub extern "C" fn rt_winit_buffer_read_pixel(buf_id: i64, x: i64, y: i64, _d: i64, _e: i64, _f: i64, _g: i64) -> i64 {
+pub extern "C" fn rt_winit_buffer_read_pixel(
+    buf_id: i64,
+    x: i64,
+    y: i64,
+    _d: i64,
+    _e: i64,
+    _f: i64,
+    _g: i64,
+) -> i64 {
     with_buffers(|bufs| {
         let Some(buf) = bufs.get(&buf_id) else {
             return 0;
@@ -1424,7 +1706,15 @@ pub extern "C" fn rt_winit_buffer_read_pixel(buf_id: i64, x: i64, y: i64, _d: i6
 }
 
 #[no_mangle]
-pub extern "C" fn rt_winit_buffer_blend_rect(buf_id: i64, x: i64, y: i64, w: i64, h: i64, color: i64, alpha: i64) -> i64 {
+pub extern "C" fn rt_winit_buffer_blend_rect(
+    buf_id: i64,
+    x: i64,
+    y: i64,
+    w: i64,
+    h: i64,
+    color: i64,
+    alpha: i64,
+) -> i64 {
     with_buffers(|bufs| {
         let Some(buf) = bufs.get_mut(&buf_id) else {
             return 0;
@@ -1463,7 +1753,15 @@ pub extern "C" fn rt_winit_buffer_blend_rect(buf_id: i64, x: i64, y: i64, w: i64
 }
 
 #[no_mangle]
-pub extern "C" fn rt_winit_buffer_blur(buf_id: i64, bx: i64, by: i64, bw: i64, bh: i64, radius: i64, _g: i64) -> i64 {
+pub extern "C" fn rt_winit_buffer_blur(
+    buf_id: i64,
+    bx: i64,
+    by: i64,
+    bw: i64,
+    bh: i64,
+    radius: i64,
+    _g: i64,
+) -> i64 {
     let radius = radius.clamp(1, 50) as usize;
     with_buffers(|bufs| {
         let Some(buf) = bufs.get_mut(&buf_id) else {
@@ -1548,7 +1846,15 @@ pub extern "C" fn rt_winit_buffer_blur(buf_id: i64, bx: i64, by: i64, bw: i64, b
 }
 
 #[no_mangle]
-pub extern "C" fn rt_winit_buffer_gradient_v(buf_id: i64, gx: i64, gy: i64, gw: i64, gh: i64, c1: i64, c2: i64) -> i64 {
+pub extern "C" fn rt_winit_buffer_gradient_v(
+    buf_id: i64,
+    gx: i64,
+    gy: i64,
+    gw: i64,
+    gh: i64,
+    c1: i64,
+    c2: i64,
+) -> i64 {
     with_buffers(|bufs| {
         let Some(buf) = bufs.get_mut(&buf_id) else {
             return 0;
@@ -1568,7 +1874,11 @@ pub extern "C" fn rt_winit_buffer_gradient_v(buf_id: i64, gx: i64, gy: i64, gw: 
             if py < 0 || py >= sh {
                 continue;
             }
-            let t = if gh > 1 { row as f64 / (gh - 1) as f64 } else { 0.0 };
+            let t = if gh > 1 {
+                row as f64 / (gh - 1) as f64
+            } else {
+                0.0
+            };
             let r = (r1 as f64 + (r2 - r1) as f64 * t) as u32;
             let g = (g1 as f64 + (g2 - g1) as f64 * t) as u32;
             let b = (b1 as f64 + (b2 - b1) as f64 * t) as u32;
@@ -1589,14 +1899,27 @@ pub extern "C" fn rt_winit_buffer_gradient_v(buf_id: i64, gx: i64, gy: i64, gw: 
 /// (or -1 for an invalid handle); call again with a caller-allocated buffer
 /// of at least that many u32s to fill it.
 #[no_mangle]
-pub extern "C" fn rt_winit_buffer_get_pixels(buf_id: i64, out_ptr: i64, out_cap: i64, _d: i64, _e: i64, _f: i64, _g: i64) -> i64 {
+pub extern "C" fn rt_winit_buffer_get_pixels(
+    buf_id: i64,
+    out_ptr: i64,
+    out_cap: i64,
+    _d: i64,
+    _e: i64,
+    _f: i64,
+    _g: i64,
+) -> i64 {
     with_buffers(|bufs| {
         let Some(buf) = bufs.get(&buf_id) else {
             return -1;
         };
         let count = buf.pixels.len() as i64;
-        if out_ptr != 0 && out_cap >= count {
-            let dst = unsafe { std::slice::from_raw_parts_mut(out_ptr as usize as *mut u32, count as usize) };
+        if out_ptr != 0 {
+            if out_cap < count {
+                return -1;
+            }
+            let dst = unsafe {
+                std::slice::from_raw_parts_mut(out_ptr as usize as *mut u32, count as usize)
+            };
             dst.copy_from_slice(&buf.pixels);
         }
         count
@@ -1604,15 +1927,28 @@ pub extern "C" fn rt_winit_buffer_get_pixels(buf_id: i64, out_ptr: i64, out_cap:
 }
 
 #[no_mangle]
-pub extern "C" fn rt_winit_buffer_free(buf_id: i64, _b: i64, _c: i64, _d: i64, _e: i64, _f: i64, _g: i64) -> i64 {
-    with_buffers(|bufs| {
-        bufs.remove(&buf_id);
-    });
-    1
+pub extern "C" fn rt_winit_buffer_free(
+    buf_id: i64,
+    _b: i64,
+    _c: i64,
+    _d: i64,
+    _e: i64,
+    _f: i64,
+    _g: i64,
+) -> i64 {
+    with_buffers(|bufs| i64::from(bufs.remove(&buf_id).is_some()))
 }
 
 #[no_mangle]
-pub extern "C" fn rt_winit_save_pixels_bmp(path_ptr: i64, width: i64, height: i64, pixels_ptr: i64, pixels_len: i64, _f: i64, _g: i64) -> i64 {
+pub extern "C" fn rt_winit_save_pixels_bmp(
+    path_ptr: i64,
+    width: i64,
+    height: i64,
+    pixels_ptr: i64,
+    pixels_len: i64,
+    _f: i64,
+    _g: i64,
+) -> i64 {
     if path_ptr == 0 || pixels_ptr == 0 {
         return 0;
     }
@@ -1621,10 +1957,53 @@ pub extern "C" fn rt_winit_save_pixels_bmp(path_ptr: i64, width: i64, height: i6
         .into_owned();
     let w = width.max(1) as u32;
     let h = height.max(1) as u32;
-    let pixels: &[u32] = unsafe { std::slice::from_raw_parts(pixels_ptr as usize as *const u32, pixels_len.max(0) as usize) };
+    let pixels: &[u32] = unsafe {
+        std::slice::from_raw_parts(
+            pixels_ptr as usize as *const u32,
+            pixels_len.max(0) as usize,
+        )
+    };
     let data = encode_bmp(w, h, pixels);
     match std::fs::write(&path, &data) {
         Ok(()) => 1,
         Err(_) => 0,
+    }
+}
+
+#[cfg(test)]
+mod sffi_contract_tests {
+    use super::*;
+
+    #[test]
+    fn buffer_free_and_readback_fail_closed() {
+        let id = next_buffer_id();
+        with_buffers(|buffers| {
+            buffers.insert(
+                id,
+                PixelBuf {
+                    width: 2,
+                    height: 2,
+                    pixels: vec![0; 4],
+                },
+            );
+        });
+        assert_eq!(rt_winit_buffer_get_pixels(id, 0, 0, 0, 0, 0, 0), 4);
+
+        let mut undersized = [0u32; 3];
+        assert_eq!(
+            rt_winit_buffer_get_pixels(
+                id,
+                undersized.as_mut_ptr() as i64,
+                undersized.len() as i64,
+                0,
+                0,
+                0,
+                0,
+            ),
+            -1
+        );
+        assert_eq!(rt_winit_buffer_free(id, 0, 0, 0, 0, 0, 0), 1);
+        assert_eq!(rt_winit_buffer_free(id, 0, 0, 0, 0, 0, 0), 0);
+        assert_eq!(rt_winit_buffer_get_pixels(id, 0, 0, 0, 0, 0, 0), -1);
     }
 }

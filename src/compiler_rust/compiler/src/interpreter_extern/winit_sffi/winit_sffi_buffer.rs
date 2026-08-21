@@ -163,7 +163,7 @@ fn honest_failure_for(name: &str) -> Value {
         // (rt_winit_buffer_free always reports 1: removing an absent key
         // from a HashMap is not an error). This is not a lie: "freed" here
         // only ever means "no longer tracked," which trivially holds.
-        "rt_winit_buffer_free" => bool_value(true),
+        "rt_winit_buffer_free" => bool_value(false),
         _ => bool_value(false),
     }
 }
@@ -327,19 +327,25 @@ pub(super) fn dispatch_buffer(name: &str, args: &[Value]) -> Result<Value, Compi
             let buf = get_i64(args, 0, name)?;
             let count = call7(sym_addr, [buf, 0, 0, 0, 0, 0, 0]);
             if count <= 0 {
-                set_last_error(format!("invalid buffer handle: {buf}"));
-                return Ok(Value::Array(Arc::new(vec![])));
+                return Err(CompileError::runtime(format!(
+                    "rt_winit_buffer_get_pixels: invalid buffer handle or count: handle={buf}, count={count}"
+                )));
             }
             let mut out: Vec<u32> = vec![0u32; count as usize];
             let ptr = out.as_mut_ptr() as i64;
-            let _ = call7(sym_addr, [buf, ptr, count, 0, 0, 0, 0]);
+            let written = call7(sym_addr, [buf, ptr, count, 0, 0, 0, 0]);
+            if written != count {
+                return Err(CompileError::runtime(format!(
+                    "rt_winit_buffer_get_pixels: provider wrote {written} pixels, expected {count}"
+                )));
+            }
             let values: Vec<Value> = out.iter().map(|&p| Value::Int(p as i64)).collect();
             Ok(Value::Array(Arc::new(values)))
         }
         "rt_winit_buffer_free" => {
             let buf = get_i64(args, 0, name)?;
-            let _ = call7(sym_addr, [buf, 0, 0, 0, 0, 0, 0]);
-            Ok(bool_value(true))
+            let freed = call7(sym_addr, [buf, 0, 0, 0, 0, 0, 0]);
+            Ok(bool_value(freed != 0))
         }
         "rt_winit_save_pixels_bmp" => {
             let path = get_string(args, 0, name)?;
