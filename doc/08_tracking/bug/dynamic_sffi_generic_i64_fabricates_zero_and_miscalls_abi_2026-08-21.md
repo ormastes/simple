@@ -65,3 +65,17 @@ robust/critical typed thunks in the interim.
 All exact/adjacent tests pass, cross-lane unknown/null errors agree, and
 sabotaging either fallible conversion or null-pointer guard makes the relevant
 test red.
+
+## 2026-08-21 checked-transport implementation update
+
+The native and interpreter lanes now expose `spl_wffi_call_i64_checked` as a
+portable `[transport_status, foreign_value]` result and the native lane also
+exposes status/out `spl_wffi_try_call_i64`. The byte-descriptor family has the
+same checked pair transport. Argument counts are validated against both the
+eight-argument ABI ceiling and the actual argument array before indexing.
+
+`std.sffi.dynamic.DynLib.call_checked` is the canonical `Result<i64, text>`
+lift. Legacy value-returning functions remain only for source compatibility and
+must be migrated by provider family; they are not evidence of robust/critical
+admission. Focused Rust tests prove that a legitimate foreign zero has status
+zero while a null pointer or short argument array has a nonzero status.

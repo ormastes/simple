@@ -29,6 +29,7 @@ extern fn spl_dlopen(path: text) -> i64
 extern fn spl_dlsym(handle: i64, name: text) -> i64
 extern fn spl_dlclose(handle: i64) -> i64
 extern fn spl_wffi_call_i64(fptr: i64, args: [i64], nargs: i64) -> i64
+extern fn spl_wffi_call_i64_checked(fptr: i64, args: [i64], nargs: i64) -> [i64]
 
 use std.io_runtime.{env_get}
 
@@ -41,6 +42,12 @@ class DynLib:
     path: text
 
 impl DynLib:
+    static fn load_checked(path: text) -> Result<DynLib, text>:
+        val h = spl_dlopen(path)
+        if h <= 0:
+            return Err("E-SFFI-001: failed to load provider: {path}")
+        Ok(DynLib(handle: h, path: path))
+
     # Load a shared library from the given path.
     # Returns nil if dlopen fails.
     static fn load(path: text) -> DynLib?:
@@ -119,6 +126,22 @@ impl DynLib:
             return 0
         val nargs = args.len()
         spl_wffi_call_i64(fptr, args, nargs)
+
+    # Canonical checked dispatch. The raw transport returns [status, value]
+    # so a valid foreign zero remains distinct from a bridge failure.
+    fn call_checked(name: text, args: [i64]) -> Result<i64, text>:
+        if self.handle <= 0:
+            return Err("E-SFFI-001: provider is not loaded: {self.path}")
+        val fptr = spl_dlsym(self.handle, name)
+        if fptr <= 0:
+            return Err("E-SFFI-001: unresolved foreign symbol: {name}")
+        val result = spl_wffi_call_i64_checked(fptr, args, args.len())
+        if result.len() != 2:
+            return Err("E-SFFI-017: corrupt checked transport result: {name}")
+        val status = result[0]
+        if status == 0:
+            return Ok(result[1])
+        Err("E-SFFI-014: foreign bridge rejected {name} with status {status}")
 
     # Close the library and zero the handle.
     me close():
@@ -259,5 +282,5 @@ fn sffi_call(func_name: text, args: [i64]) -> i64:
     var loader = DynLoader.instance()
     loader.call(lib_path, func_name, args)
 
-export spl_dlopen, spl_dlsym, spl_dlclose, spl_wffi_call_i64
+export spl_dlopen, spl_dlsym, spl_dlclose, spl_wffi_call_i64, spl_wffi_call_i64_checked
 export DynLib, DynLoader

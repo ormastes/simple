@@ -179,18 +179,18 @@ pub extern "C" fn rt_rsa_sha256_verify(pubkey: RuntimeValue, message: RuntimeVal
 /// Verify an Ed25519 signature.
 ///
 /// # Arguments
-/// * `pubkey`    — `[u8]` 32-byte Ed25519 public key
 /// * `message`   — `[u8]` message bytes that were signed
+/// * `pubkey`    — `[u8]` 32-byte Ed25519 public key
 /// * `signature` — `[u8]` 64-byte Ed25519 signature
 ///
 /// # Returns
 /// `1` if the signature is valid, `0` otherwise (including on any error).
 #[no_mangle]
-pub extern "C" fn rt_ed25519_verify(pubkey: RuntimeValue, message: RuntimeValue, signature: RuntimeValue) -> i64 {
-    let Some(pk_bytes) = runtime_byte_array_to_vec(pubkey) else {
+pub extern "C" fn rt_ed25519_verify(message: RuntimeValue, pubkey: RuntimeValue, signature: RuntimeValue) -> i64 {
+    let Some(msg_bytes) = runtime_byte_array_to_vec(message) else {
         return 0;
     };
-    let Some(msg_bytes) = runtime_byte_array_to_vec(message) else {
+    let Some(pk_bytes) = runtime_byte_array_to_vec(pubkey) else {
         return 0;
     };
     let Some(sig_bytes) = runtime_byte_array_to_vec(signature) else {
@@ -201,6 +201,35 @@ pub extern "C" fn rt_ed25519_verify(pubkey: RuntimeValue, message: RuntimeValue,
     match key.verify(&msg_bytes, &sig_bytes) {
         Ok(()) => 1,
         Err(_) => 0,
+    }
+}
+
+/// Checked Ed25519 verification: `1` valid, `0` cryptographically invalid,
+/// `-1` malformed bridge input. Unlike the legacy boolean ABI, malformed
+/// runtime values cannot be mistaken for a valid verification decision.
+#[no_mangle]
+pub extern "C" fn rt_ed25519_verify_checked(
+    message: RuntimeValue,
+    pubkey: RuntimeValue,
+    signature: RuntimeValue,
+) -> i64 {
+    let Some(msg_bytes) = runtime_byte_array_to_vec(message) else {
+        return -1;
+    };
+    let Some(pk_bytes) = runtime_byte_array_to_vec(pubkey) else {
+        return -1;
+    };
+    let Some(sig_bytes) = runtime_byte_array_to_vec(signature) else {
+        return -1;
+    };
+    if pk_bytes.len() != 32 || sig_bytes.len() != 64 {
+        return -1;
+    }
+    let key = UnparsedPublicKey::new(&ED25519, pk_bytes);
+    if key.verify(&msg_bytes, &sig_bytes).is_ok() {
+        1
+    } else {
+        0
     }
 }
 
@@ -533,5 +562,33 @@ mod tests {
         assert_eq!(bytes, ED25519_SIG_HELLO);
         let key = UnparsedPublicKey::new(&ED25519, ED25519_PUBKEY);
         key.verify(MSG, bytes).expect("fixture signature should verify");
+    }
+
+    #[test]
+    fn ed25519_checked_verify_matches_simple_argument_order() {
+        assert_eq!(
+            rt_ed25519_verify_checked(
+                bytes_value(MSG),
+                bytes_value(ED25519_PUBKEY),
+                bytes_value(ED25519_SIG_HELLO),
+            ),
+            1
+        );
+        assert_eq!(
+            rt_ed25519_verify(
+                bytes_value(MSG),
+                bytes_value(ED25519_PUBKEY),
+                bytes_value(ED25519_SIG_HELLO),
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn ed25519_checked_verify_rejects_malformed_lengths() {
+        assert_eq!(
+            rt_ed25519_verify_checked(bytes_value(MSG), bytes_value(&[]), bytes_value(&[])),
+            -1
+        );
     }
 }
