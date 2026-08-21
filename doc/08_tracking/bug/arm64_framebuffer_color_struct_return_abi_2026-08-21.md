@@ -136,36 +136,3 @@ captures the three-module shape at
 The three-cycle cap was then reached, so the new regression and Stage 3 were not
 rerun in this session. Stage-3 admission, ARM64 kernel production, and real QEMU
 2D/Web/GUI/WM evidence remain pending and unclaimed.
-
-## 2026-08-21 recovered current-main Phase-2 evidence
-
-A later isolated recovery rebased the lane to `68a4eea1c13d`, repaired the
-missing Rust-seed `dict.for_each` helper needed by the bootstrap driver, and
-proved its exact interpreter regression (`map_for_each_spec.spl`, 8/8). The
-canonical no-stub bootstrap then produced and admitted a fresh Phase-2 compiler:
-
-- candidate SHA-256:
-  `d2d89487dbba5249003f5f7c85b1deda96b31980d3b133ce10112121c0c914e2`;
-- Stage 2 native build: 714 compiled, 0 cached, 0 failed;
-- bootstrap sanity: PASS;
-- struct receiver/runtime capability: PASS.
-
-The admitted compiler exposed only `compile` and `native-build`, as required
-for Phase 2. A direct SMF compilation of
-`hir_imported_composite_explicit_field_dependency.spl` failed closed before
-artifact creation on three unresolved `Module` dependencies and one unresolved
-`BlockValue`; this is retained as incomplete Phase-2 evidence, not a PASS.
-
-A new planner admission for `//bootstrap:stage3` was produced from the exact
-candidate. Stage 3 started with the admitted compiler, but the external cleanup
-of `/private/tmp/simple-dd4c-qemu-recover` removed the workspace and ignored
-build evidence while the process was running. No Stage-3 candidate was produced
-or claimed. The source edit survived in jj, but current `main` subsequently
-landed the stronger superseding implementation in `fd40b997a913`; the recovery
-commit was therefore dropped during rebase rather than duplicated.
-
-Resume from current `main` in the persistent workspace
-`/Users/ormastes/simple-dd4c-qemu-recover`. Rebuild one current-source Phase-2
-candidate, produce a new bound planner receipt, then run Stage 3 once. Historical
-hashes above are diagnostic provenance only and must not be reused as current
-admission after the source-base change.

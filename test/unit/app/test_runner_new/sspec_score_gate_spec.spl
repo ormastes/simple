@@ -1,0 +1,86 @@
+"""
+## Purpose and audience
+Purpose: verify the modern-sspec score gate wired into the test runner —
+below-minimum documentization scores must fail the run, unchanged specs must
+be served from the hash-keyed cache, and the SIMPLE_SSPEC_MIN_SCORE override
+must disable or raise the bar.
+Audience: compiler/tooling engineers maintaining the test runner and the
+sspec-maintain scorer.
+"""
+use std.spec.*
+use app.test_runner_new.sspec_score_gate.*
+use std.nogc_sync_mut.io.file_ops.{file_write, file_read}
+use std.nogc_sync_mut.env.{env_set}
+
+# @req: REQ-TEST-RUNNER-GATE-001
+
+fn weak_spec_source() -> text:
+    "describe \"weak\":\n    it \"is unresolved\":\n        pass_todo\n"
+
+fn professional_spec_source() -> text:
+    "\"\"\"\n## Purpose and audience\n## Operator workflow\n## Compatibility and limitations\n# @manual: primary\nREQ-TEST-RUNNER-GATE-001 \ndoc/01_research/local/x.md\ndoc/03_plan/sys_test/x.md\ndoc/04_architecture/x.md\ndoc/05_design/x.md\n\"\"\"\ndescribe \"documented behavior\":\n    it \"returns the documented result\":\n        # @req: REQ-TEST-RUNNER-GATE-001 \n        step(\"Exercise the production behavior\")\n        capture_text(\"result\", \"ready\")\n        val production_result = run_product()\n        expect(production_result).to_equal(\"ready\")\n"
+
+describe "sspec score gate":
+    it "keys the cache identity on path and source content":
+        # @req: REQ-TEST-RUNNER-GATE-001
+        step("Compare identities across paths and sources")
+        val base = sspec_score_gate_identity("a_spec.spl", "source")
+        val same = sspec_score_gate_identity("a_spec.spl", "source")
+        val other_path = sspec_score_gate_identity("b_spec.spl", "source")
+        val other_source = sspec_score_gate_identity("a_spec.spl", "source2")
+        expect(base == same).to_equal(true)
+        expect(base == other_path).to_equal(false)
+        expect(base == other_source).to_equal(false)
+
+    it "scores a weak spec below the bar and a professional spec at or above it":
+        # @req: REQ-TEST-RUNNER-GATE-001
+        step("Analyze weak and professional fixture files")
+        file_write("build/gate_fixture_weak_spec.spl", weak_spec_source())
+        file_write("build/gate_fixture_good_spec.spl", professional_spec_source())
+        val (weak_score, weak_cached) = sspec_score_gate_check("build/gate_fixture_weak_spec.spl")
+        val (good_score, good_cached) = sspec_score_gate_check("build/gate_fixture_good_spec.spl")
+        expect(weak_score).to_be_less_than(sspec_score_gate_min())
+        expect(good_score).to_be_greater_than(weak_score)
+
+    it "serves a repeated check from the hash-keyed cache":
+        # @req: REQ-TEST-RUNNER-GATE-001
+        step("Check the same unchanged fixture twice")
+        file_write("build/gate_fixture_cache_spec.spl", weak_spec_source())
+        val (first_score, first_cached) = sspec_score_gate_check("build/gate_fixture_cache_spec.spl")
+        val (second_score, second_cached) = sspec_score_gate_check("build/gate_fixture_cache_spec.spl")
+        expect(second_cached).to_equal(true)
+        expect(second_score).to_equal(first_score)
+
+    it "invalidates the cache when the source changes":
+        # @req: REQ-TEST-RUNNER-GATE-001
+        step("Edit the fixture source and re-check")
+        file_write("build/gate_fixture_invalidate_spec.spl", weak_spec_source())
+        val (before, _) = sspec_score_gate_check("build/gate_fixture_invalidate_spec.spl")
+        file_write("build/gate_fixture_invalidate_spec.spl", professional_spec_source())
+        val (after, after_cached) = sspec_score_gate_check("build/gate_fixture_invalidate_spec.spl")
+        expect(after).to_be_greater_than(before)
+
+    it "returns no score for an unreadable file instead of failing the run":
+        # @req: REQ-TEST-RUNNER-GATE-001
+        step("Check a path that does not exist")
+        val (score, cached) = sspec_score_gate_check("build/gate_fixture_absent_spec.spl")
+        expect(score).to_equal(-1)  # oracle: sentinel for unreadable
+        expect(cached).to_equal(false)
+
+    it "reads the minimum from SIMPLE_SSPEC_MIN_SCORE and disables on zero":
+        # @req: REQ-TEST-RUNNER-GATE-001
+        step("Toggle the env override and read the threshold")
+        env_set("SIMPLE_SSPEC_MIN_SCORE", "0")
+        expect(sspec_score_gate_min()).to_equal(0)  # oracle: 0 disables the gate
+        env_set("SIMPLE_SSPEC_MIN_SCORE", "95")
+        expect(sspec_score_gate_min()).to_equal(95)  # oracle: exact env value
+        env_set("SIMPLE_SSPEC_MIN_SCORE", "-7")
+        expect(sspec_score_gate_min()).to_equal(0)  # oracle: 0 disables the gate
+        env_set("SIMPLE_SSPEC_MIN_SCORE", "")
+
+    it "reports a below-minimum spec and skips non-spec paths":
+        # @req: REQ-TEST-RUNNER-GATE-001
+        step("Run the report over mixed paths")
+        file_write("build/gate_fixture_report_spec.spl", weak_spec_source())
+        expect(sspec_score_gate_report(["build/gate_fixture_report_spec.spl"])).to_be_greater_than(0)
+        expect(sspec_score_gate_report(["build/not_a_spec.spl"])).to_equal(0)  # oracle: non-spec paths are skipped
