@@ -82,6 +82,23 @@ var loaded_module_file_paths: [text] = []
 var loaded_module_exports: [[text]] = []
 # Dict for O(1) module loaded check
 var loaded_module_set = {}
+# PERF (2026-08-21): file_path -> FIRST index in the parallel arrays, and
+# module_name -> file_path. Without these, `module_find_by_file_path` (reached
+# from `module_alias_loaded` on EVERY import) and `module_get_file_path` walked
+# `loaded_module_file_paths` linearly, so a run that loads N modules with M
+# imports cost O(N*M) interpreted iterations. Both fall back to the linear scan
+# when the memoized index names a module that has since been unloaded, so the
+# observable semantics (first *currently loaded* match wins) are unchanged.
+# Pinned by test/01_unit/compiler/frontend/module_registry_lookup_o1_spec.spl.
+var loaded_module_file_index = {}
+var loaded_module_name_to_file = {}
+# Counts elements visited by the linear fallback. A registry that is O(1) per
+# lookup leaves this at 0; the spec asserts on it rather than on wall time.
+var loaded_module_scan_steps: i64 = 0
+
+pub fn module_registry_scan_steps() -> i64:
+    """Elements visited by the linear registry fallback since init (perf probe)."""
+    loaded_module_scan_steps
 
 # ===== Deferred (Lazy) Module Tracking =====
 
@@ -151,6 +168,9 @@ fn module_loader_init():
     loaded_module_file_paths = []
     loaded_module_exports = []
     loaded_module_set = {}
+    loaded_module_file_index = {}
+    loaded_module_name_to_file = {}
+    loaded_module_scan_steps = 0
     deferred_module_names = []
     deferred_module_files = []
     deferred_module_imports = []
@@ -167,22 +187,40 @@ fn module_is_loaded(module_path: text) -> i64:
     0
 
 fn module_mark_loaded(module_path: text, file_path: text, exports: [text]):
+    val idx = loaded_module_paths.len()
     loaded_module_paths.push(module_path)
     loaded_module_file_paths.push(file_path)
     loaded_module_exports.push(exports)
     loaded_module_set[module_path] = true
+    if not loaded_module_name_to_file.has(module_path):
+        loaded_module_name_to_file[module_path] = file_path
+    if file_path != "" and not loaded_module_file_index.has(file_path):
+        loaded_module_file_index[file_path] = idx
 
 fn module_get_file_path(module_name: text) -> text:
+    if loaded_module_name_to_file.has(module_name):
+        return loaded_module_name_to_file[module_name]
     var i: i64 = 0
     for path in loaded_module_paths:
+        loaded_module_scan_steps = loaded_module_scan_steps + 1
         if path == module_name:
             return loaded_module_file_paths[i]
         i = i + 1
     ""
 
 fn module_find_by_file_path(file_path: text) -> i64:
+    if file_path == "":
+        return -1
+    # Fast path: the first registration for this physical file, if it is still
+    # loaded. A stale hit (module later unloaded) falls through to the scan so
+    # a live alias registered afterwards is still found.
+    if loaded_module_file_index.has(file_path):
+        val hit = loaded_module_file_index[file_path]
+        if module_is_loaded(loaded_module_paths[hit]) == 1:
+            return hit
     var i: i64 = 0
     for loaded_path in loaded_module_file_paths:
+        loaded_module_scan_steps = loaded_module_scan_steps + 1
         val module_name = loaded_module_paths[i]
         if loaded_path == file_path and loaded_path != "" and module_is_loaded(module_name) == 1:
             return i

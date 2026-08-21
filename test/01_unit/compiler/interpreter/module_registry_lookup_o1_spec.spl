@@ -1,0 +1,76 @@
+"""
+# Module registry lookups are O(1), not a linear scan
+
+Reproduce for doc/08_tracking/bug/native_build_per_file_driver_overhead_2026-08-21.md.
+
+`module_alias_loaded` runs on EVERY import and called `module_find_by_file_path`,
+which walked `loaded_module_file_paths` element by element (calling the Dict-backed
+`module_is_loaded` per element). `module_get_file_path` walked the same array.
+With N registered modules and M imports that is O(N*M) interpreted iterations,
+paid before the build loop ever emits its first `[build] parse` receipt.
+
+The mechanism is pinned by a COUNTER, not by wall time: `module_registry_scan_steps()`
+counts elements visited by the linear fallback. A registry that answers from its
+hash index never advances it. Pre-fix this spec fails with ~N/2 steps per lookup.
+
+Each scenario runs in an ordinary function returning "" on success (interpreter-mode
+`it` closures observe stale module state — same constraint as module_loader_lazy_spec).
+"""
+
+use compiler.core.interpreter.module_loader_core.{
+    module_find_by_file_path,
+    module_get_file_path,
+    module_loader_init,
+    module_mark_loaded,
+    module_registry_scan_steps
+}
+
+fn _register_many(count: i64):
+    var i: i64 = 0
+    while i < count:
+        module_mark_loaded("mod.n{i}", "/tmp/spec/n{i}.spl", [])
+        i = i + 1
+
+fn check_find_by_file_path_is_o1() -> text:
+    module_loader_init()
+    _register_many(400)
+    # The LAST registration is the worst case for a linear scan.
+    val idx = module_find_by_file_path("/tmp/spec/n399.spl")
+    if idx != 399:
+        return "expected index 399, got {idx}"
+    val steps = module_registry_scan_steps()
+    if steps != 0:
+        return "linear fallback visited {steps} elements; expected 0 (hash index)"
+    ""
+
+fn check_get_file_path_is_o1() -> text:
+    module_loader_init()
+    _register_many(400)
+    val path = module_get_file_path("mod.n399")
+    if path != "/tmp/spec/n399.spl":
+        return "expected /tmp/spec/n399.spl, got '{path}'"
+    val steps = module_registry_scan_steps()
+    if steps != 0:
+        return "linear fallback visited {steps} elements; expected 0 (hash index)"
+    ""
+
+fn check_missing_lookups_are_answered() -> text:
+    module_loader_init()
+    _register_many(8)
+    if module_find_by_file_path("/tmp/spec/absent.spl") != -1:
+        return "absent file path must resolve to -1"
+    if module_find_by_file_path("") != -1:
+        return "empty file path must resolve to -1"
+    if module_get_file_path("mod.absent") != "":
+        return "absent module name must resolve to empty text"
+    ""
+
+describe "module registry lookups":
+    it "finds a module by file path without scanning the registry":
+        expect(check_find_by_file_path_is_o1()).to_equal("")
+
+    it "finds a module file path by name without scanning the registry":
+        expect(check_get_file_path_is_o1()).to_equal("")
+
+    it "still answers misses correctly":
+        expect(check_missing_lookups_are_answered()).to_equal("")

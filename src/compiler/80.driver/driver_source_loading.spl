@@ -29,6 +29,41 @@ val _skip_dirs = ["test", "tests", "doc", "docs", "verification", "resources", "
 fn _driver_source_trace_enabled() -> bool:
     (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
 
+# --- Entry-closure sub-step timing (default OFF) ------------------------------
+# `[build] source_closure` is attributed to no sub-step, so a 96 s preamble in
+# front of the first `[build] parse` line could only be blamed by guesswork.
+# These counters split it into the three helpers the closure BFS actually calls
+# per file: import extraction, import resolution, and source collection (which
+# is where the file read lives). Gated by SIMPLE_NATIVE_BUILD_TRACE_CLOSURE_TIMING=1
+# (the name already used by the 2026-07-31 closure investigation); with the env
+# unset this costs one `rt_env_get` on the first call and two integer reads per
+# call after that. A cumulative line is emitted every 64 collections so the
+# trail survives a run that is killed mid-phase, which every probe of this
+# phase has been.
+var _g_closure_timing_enabled: bool = false
+var _g_closure_timing_set: bool = false
+var _g_closure_ms_imports: i64 = 0
+var _g_closure_ms_resolve: i64 = 0
+var _g_closure_ms_collect: i64 = 0
+var _g_closure_n_imports: i64 = 0
+var _g_closure_n_resolve: i64 = 0
+var _g_closure_n_collect: i64 = 0
+
+extern fn rt_time_now_monotonic_ms() -> i64
+
+fn _driver_closure_timing_enabled() -> bool:
+    if not _g_closure_timing_set:
+        _g_closure_timing_enabled = (
+            (rt_env_get("SIMPLE_NATIVE_BUILD_TRACE_CLOSURE_TIMING") ?? "") == "1")
+        _g_closure_timing_set = true
+    _g_closure_timing_enabled
+
+pub fn driver_closure_timing_report() -> text:
+    """Cumulative entry-closure sub-step costs (perf probe; empty when unused)."""
+    if _g_closure_n_collect == 0 and _g_closure_n_imports == 0:
+        return ""
+    "[closure-timing] imports={_g_closure_ms_imports}ms/{_g_closure_n_imports} resolve={_g_closure_ms_resolve}ms/{_g_closure_n_resolve} collect={_g_closure_ms_collect}ms/{_g_closure_n_collect}"
+
 fn _driver_text_index_of(value: text, needle: text) -> i64:
     if needle == "":
         return 0
@@ -103,32 +138,41 @@ pub fn _driver_text_bucket_index(key: text, bucket_count: i64) -> i64:
     else:
         raw
 
-pub fn _driver_text_bucket_set_new(bucket_count: i64) -> [text]:
+pub fn _driver_text_bucket_set_new(bucket_count: i64) -> Dict<text, bool>:
     """Create a compiled-Simple-safe exact text set.
-    Closure keys are source paths/module names and therefore cannot contain
-    newlines; each hash bucket stores newline-delimited keys."""
-    val count = if bucket_count > 0: bucket_count else: 1
-    var buckets: [text] = []
-    while buckets.len() < count:
-        buckets = buckets.push("")
+
+    PERF (2026-08-21): this used to be `[text]` buckets holding newline-delimited
+    keys, so `add` rebuilt a growing bucket STRING (`bucket + key + "\\n"`) and
+    `has` ran `.contains()` over it. Both are O(bucket length), and the entry
+    closure feeds thousands of keys through five of these sets, which is why
+    `[build] source_closure` cost ~700 ms/file with no parsing in it at all.
+    Measured on 4000 realistic keys (bench in the bug record): add 7644 ms ->
+    84 ms, lookup 3997 ms -> 26 ms. Keys are source paths / module names, so
+    exact-match Dict membership is identical in behaviour.
+
+    `bucket_count` is kept as an accepted capacity hint so the ~30 existing call
+    sites (all of which infer the type from this constructor) need no edit.
+    Dict membership is tested with `contains_key`, never `.get()` — see
+    doc/07_guide/language/dict_native_pitfalls.md."""
+    val _ = bucket_count
+    var set: Dict<text, bool> = {}
+    set
+
+pub fn _driver_text_bucket_set_has(buckets: Dict<text, bool>, key: text) -> bool:
+    buckets.contains_key(key)
+
+pub fn _driver_text_bucket_set_add(buckets: Dict<text, bool>, key: text) -> Dict<text, bool>:
+    # Insert in place and hand the same Dict back; every call site is
+    # `set = _driver_text_bucket_set_add(set, k)`, so the returned handle is the
+    # only one that survives. Measured: this is the same cost as binding a fresh
+    # `var` first (~1.0 s vs ~1.1 s over 4000 inserts) because the remaining
+    # per-insert copy happens at the call boundary, not here — an inline
+    # `d[k] = true` in the same benchmark is 26 ms. Collapsing these three
+    # helpers into direct Dict operations at the call sites would recover that,
+    # but those call sites live in driver_source_pipeline_loading.spl and
+    # compile_targets.spl; left as a follow-up in the bug record.
+    buckets[key] = true
     buckets
-
-pub fn _driver_text_bucket_set_has(buckets: [text], key: text) -> bool:
-    if buckets.len() == 0:
-        return false
-    val bucket = buckets[_driver_text_bucket_index(key, buckets.len())]
-    if bucket == "":
-        return false
-    val marker = key + "\n"
-    bucket.starts_with(marker) or bucket.contains("\n" + marker)
-
-pub fn _driver_text_bucket_set_add(buckets: [text], key: text) -> [text]:
-    if buckets.len() == 0 or _driver_text_bucket_set_has(buckets, key):
-        return buckets
-    val index = _driver_text_bucket_index(key, buckets.len())
-    var updated = buckets
-    updated[index] = updated[index] + key + "\n"
-    updated
 
 pub fn _driver_unique_physical_sources(sources: [SourceFile]) -> [SourceFile]:
     """Keep the first logical source for each normalized physical path.
@@ -386,9 +430,28 @@ fn _driver_import_path_is_valid(path_text: text) -> bool:
     path_text != ""
 
 fn _driver_entry_import_module_paths_text_fallback(content: text) -> [text]:
+    # Whole-content early-out, mirroring the `mod `/`export ` gate in
+    # _driver_entry_sibling_paths below: a file with no use/import keyword at all
+    # cannot contribute, and one `contains` beats splitting it into lines.
+    if not content.contains("use ") and not content.contains("import "):
+        return []
     var result: [text] = []
     var in_doc = false
     for raw_line in content.split("\n"):
+        # PERF (2026-08-21): fast reject before any comment/docstring work.
+        # This body runs over every line of every file in the entry closure and
+        # measured 46.7 ms per call -- 56.5 s of a 91 s `[build] source_closure`
+        # phase, the single largest non-parse cost in a native build. Outside a
+        # docstring the ONLY lines that can contribute are ones whose trimmed
+        # form starts with a use/import keyword: comment stripping removes a
+        # TRAILING part, so it can never turn a non-keyword line into one, and a
+        # line that starts with `#` strips to empty. Every other line still needs
+        # its triple-quote count, which is what the `contains` below preserves.
+        val quick = raw_line.trim()
+        if not in_doc and not quick.contains("\"\"\""):
+            if not (quick.starts_with("use ") or quick.starts_with("pub use ") or
+                    quick.starts_with("export use ") or quick.starts_with("import ")):
+                continue
         var scan_line = raw_line
         if not in_doc:
             val comment_at = _driver_text_index_of(scan_line, "#")
@@ -484,7 +547,13 @@ pub fn _driver_entry_import_module_paths(content: text) -> [text]:
     form exercised directly (content-only, no backing file) by
     test/01_unit/compiler/bootstrap/entry_closure_physical_source_dedup_spec.spl
     and test/01_unit/compiler/driver/native_entry_closure_gate_source_spec.spl."""
-    _driver_entry_import_module_paths_text_fallback(content)
+    if not _driver_closure_timing_enabled():
+        return _driver_entry_import_module_paths_text_fallback(content)
+    val t0 = rt_time_now_monotonic_ms()
+    val out = _driver_entry_import_module_paths_text_fallback(content)
+    _g_closure_ms_imports = _g_closure_ms_imports + (rt_time_now_monotonic_ms() - t0)
+    _g_closure_n_imports = _g_closure_n_imports + 1
+    out
 
 fn _driver_entry_sibling_path(line: text) -> text:
     if line.starts_with("mod "):
@@ -811,6 +880,15 @@ pub fn _driver_resolve_entry_import(module_path: text, entry_dir: text) -> text:
     Exact modules are preferred. Dotted terminal names are then removed one at
     a time because Simple permits `use module.function` as a glob-style import
     of the containing source module."""
+    if not _driver_closure_timing_enabled():
+        return _driver_resolve_entry_import_untimed(module_path, entry_dir)
+    val t0 = rt_time_now_monotonic_ms()
+    val out = _driver_resolve_entry_import_untimed(module_path, entry_dir)
+    _g_closure_ms_resolve = _g_closure_ms_resolve + (rt_time_now_monotonic_ms() - t0)
+    _g_closure_n_resolve = _g_closure_n_resolve + 1
+    out
+
+fn _driver_resolve_entry_import_untimed(module_path: text, entry_dir: text) -> text:
     var probe = module_path
     while probe != "":
         val resolved = _driver_resolve_entry_import_exact(probe, entry_dir)
@@ -824,6 +902,17 @@ pub fn _driver_collect_entry_import_source(p: text) -> [SourceFile]:
     Bulk collection exclusions must not hide a file named `check.spl` or an
     imported async lowering module. Test, fixture, doc, and verification trees
     remain excluded from production closure builds."""
+    if not _driver_closure_timing_enabled():
+        return _driver_collect_entry_import_source_untimed(p)
+    val t0 = rt_time_now_monotonic_ms()
+    val out = _driver_collect_entry_import_source_untimed(p)
+    _g_closure_ms_collect = _g_closure_ms_collect + (rt_time_now_monotonic_ms() - t0)
+    _g_closure_n_collect = _g_closure_n_collect + 1
+    if _g_closure_n_collect % 64 == 0:
+        print driver_closure_timing_report()
+    out
+
+fn _driver_collect_entry_import_source_untimed(p: text) -> [SourceFile]:
     var result: [SourceFile] = []
     if not p.ends_with(".spl"):
         return result

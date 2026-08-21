@@ -1,0 +1,97 @@
+"""
+# Entry-closure import scan: per-line work is rejected early
+
+Reproduce for doc/08_tracking/bug/native_build_per_file_driver_overhead_2026-08-21.md.
+
+`_driver_entry_import_module_paths` runs once per file in the native-build entry
+closure. Measured with SIMPLE_NATIVE_BUILD_TRACE_CLOSURE_TIMING=1 on
+`native-build --source src/app --entry-closure --entry src/app/cli/bootstrap_main.spl`
+it cost 56.5 s over 1211 calls (46.7 ms each) — 62% of a 91 s `[build] source_closure`
+phase that contains no parsing at all. The body ran a comment scan (contains + split
++ length), a triple-quote scan, a trim and four prefix tests on EVERY line, when only
+lines whose trimmed form starts with a use/import keyword (or that carry a triple
+quote) can affect the result.
+
+Two properties are pinned. BEHAVIOUR: the returned module list must be unchanged
+for imports, comments, docstrings, lazy forms, and the `pub use` / `export use` /
+`import` spellings — the fast reject must not swallow a real import nor let a
+commented one through. MECHANISM: the whole-content early-out and the per-line
+fast reject must both be present, with the reject ahead of the comment scan.
+(A wall-clock budget is deliberately NOT used — see check_fast_reject_is_wired.)
+"""
+
+use compiler.driver.driver_source_loading.{_driver_entry_import_module_paths}
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn _fixture_source() -> text:
+    var lines: [text] = [
+        "\"\"\"",
+        "Module docstring. use std.not_an_import must be ignored here.",
+        "\"\"\"",
+        "use std.common.text",
+        "pub use std.common.json",
+        "export use std.common.sdn",
+        "import std.common.math",
+        "use lazy std.common.deferred",
+        "use lazy std.common.named.{alpha, beta}",
+        "# use std.common.commented",
+        "use std.common.trailing  # trailing comment",
+        "val x = 1  # use std.common.inline_comment"
+    ]
+    var i: i64 = 0
+    while i < 1200:
+        lines = lines.push("    val body_{i} = compute(body_{i}) + 1")
+        i = i + 1
+    lines.join("\n")
+
+fn check_scan_behaviour() -> text:
+    val found = _driver_entry_import_module_paths(_fixture_source())
+    val joined = "|" + found.join("|") + "|"
+    for wanted in ["std.common.text", "std.common.json", "std.common.sdn",
+                   "std.common.math", "std.common.named", "std.common.trailing"]:
+        if not joined.contains("|" + wanted + "|"):
+            return "missing import '{wanted}' in {joined}"
+    for unwanted in ["std.not_an_import", "std.common.commented",
+                     "std.common.deferred", "std.common.inline_comment"]:
+        if joined.contains("|" + unwanted + "|"):
+            return "import '{unwanted}' must not be collected; got {joined}"
+    ""
+
+fn check_fast_reject_is_wired() -> text:
+    """Pin the MECHANISM, not wall time.
+
+    A wall-clock budget cannot discriminate here: run through the JIT (as a spec
+    is) the fix measures 471 ms -> 303 ms over 8 scans of a 1212-line file, a
+    1.55x gap far too narrow to threshold without flaking. The 4.6x that matters
+    (56.5 s -> 12.4 s over 1209 calls) is paid by the INTERPRETED native-build
+    worker, which a spec does not run in. So assert the structure that produces
+    it, in the same idiom entry_closure_physical_source_dedup_spec.spl uses for
+    the bucket set: the whole-content early-out, and a trimmed-line fast reject
+    that returns BEFORE the comment scan on every non-import line."""
+    val loading = rt_file_read_text("src/compiler/80.driver/driver_source_loading.spl") ?? ""
+    if loading == "":
+        return "could not read driver_source_loading.spl"
+    if not loading.contains("if not content.contains(\"use \") and not content.contains(\"import \"):"):
+        return "whole-content early-out missing from the import scan"
+    if not loading.contains("val quick = raw_line.trim()"):
+        return "per-line fast reject missing from the import scan"
+    val reject_at = _spec_index_of(loading, "val quick = raw_line.trim()")
+    val comment_at = _spec_index_of(loading, "val comment_at = _driver_text_index_of(scan_line, \"#\")")
+    if reject_at < 0 or comment_at < 0:
+        return "could not locate both the fast reject and the comment scan"
+    if reject_at > comment_at:
+        return "fast reject must precede the per-line comment scan"
+    ""
+
+fn _spec_index_of(haystack: text, needle: text) -> i64:
+    if not haystack.contains(needle):
+        return -1
+    haystack.split(needle)[0].len()
+
+describe "entry-closure import scan":
+    it "collects exactly the real imports":
+        expect(check_scan_behaviour()).to_equal("")
+
+    it "rejects non-import lines before doing per-line comment work":
+        expect(check_fast_reject_is_wired()).to_equal("")

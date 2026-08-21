@@ -1,0 +1,79 @@
+"""
+# Driver text set: membership is hash-keyed, not a substring scan
+
+Reproduce for doc/08_tracking/bug/native_build_per_file_driver_overhead_2026-08-21.md.
+
+`_driver_text_bucket_set_{new,add,has}` back five sets in the native-build entry
+closure (seen_sources, closure_seen_mods, closure_loaded_mods,
+closure_queued_paths, discovered). They used to store newline-delimited keys in
+`[text]` buckets, so `add` rebuilt a growing bucket STRING and `has` ran
+`.contains()` over it — both O(bucket length). That is the whole of the
+`[build] source_closure` phase, which measured 104.3 s for 149 files (~700 ms per
+file) with no parsing in it at all.
+
+This spec pins the two properties that matter and are stable across machines:
+behaviour (exact membership, including keys that are substrings/prefixes of other
+keys — the case the newline-marker encoding was hand-rolled to get right), and
+cost SHAPE: 4000 lookups must complete well inside a budget the O(bucket-length)
+version could not meet. Pre-fix the timing case takes ~4.0 s; post-fix ~0.06 s.
+The budget is set at 1.5 s so it fails loudly on the old shape without being
+flaky on a loaded box.
+"""
+
+use compiler.driver.driver_source_loading.{
+    _driver_text_bucket_set_add,
+    _driver_text_bucket_set_has,
+    _driver_text_bucket_set_new
+}
+
+extern fn rt_time_now_monotonic_ms() -> i64
+
+fn check_membership_is_exact() -> text:
+    var s = _driver_text_bucket_set_new(512)
+    s = _driver_text_bucket_set_add(s, "src/a.spl::mod.a")
+    s = _driver_text_bucket_set_add(s, "src/ab.spl::mod.ab")
+    if not _driver_text_bucket_set_has(s, "src/a.spl::mod.a"):
+        return "exact key must be present"
+    if not _driver_text_bucket_set_has(s, "src/ab.spl::mod.ab"):
+        return "second exact key must be present"
+    # A prefix of a stored key is NOT a member.
+    if _driver_text_bucket_set_has(s, "src/a.spl::mod."):
+        return "prefix of a stored key must not be a member"
+    if _driver_text_bucket_set_has(s, "src/b.spl::mod.b"):
+        return "absent key must not be a member"
+    # An empty set answers false rather than trapping.
+    if _driver_text_bucket_set_has(_driver_text_bucket_set_new(512), "anything"):
+        return "empty set must have no members"
+    # Re-adding an existing key is a no-op, not a duplicate.
+    s = _driver_text_bucket_set_add(s, "src/a.spl::mod.a")
+    if not _driver_text_bucket_set_has(s, "src/a.spl::mod.a"):
+        return "re-adding a key must keep it present"
+    ""
+
+fn check_lookup_cost_is_not_length_bound() -> text:
+    val n = 4000
+    var s = _driver_text_bucket_set_new(512)
+    var i: i64 = 0
+    while i < n:
+        s = _driver_text_bucket_set_add(s, "/repo/src/compiler/mod{i}.spl::compiler.mod{i}")
+        i = i + 1
+    val t0 = rt_time_now_monotonic_ms()
+    var hits: i64 = 0
+    i = 0
+    while i < n:
+        if _driver_text_bucket_set_has(s, "/repo/src/compiler/mod{i}.spl::compiler.mod{i}"):
+            hits = hits + 1
+        i = i + 1
+    val elapsed = rt_time_now_monotonic_ms() - t0
+    if hits != n:
+        return "expected {n} hits, got {hits}"
+    if elapsed > 1500:
+        return "{n} membership tests took {elapsed}ms; budget is 1500ms (O(bucket length) scan regressed)"
+    ""
+
+describe "driver text set":
+    it "answers exact membership, not substring membership":
+        expect(check_membership_is_exact()).to_equal("")
+
+    it "answers 4000 lookups without scanning bucket contents":
+        expect(check_lookup_cost_is_not_length_bound()).to_equal("")
