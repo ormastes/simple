@@ -25,6 +25,19 @@ describe "SFFI009: raw calls require minimal ffi-unsafe scope":
         val findings = check_raw_sffi_calls(source, "src/app/demo.spl")
         expect(findings.len()).to_equal(0)
 
+    it "accepts only calls nested in a lexical ffi-unsafe block":
+        """An inline block avoids an extra hot-path helper call while keeping
+        the validation and lift code outside foreign authority."""
+        val source = "extern fn rt_widget_open() -> i64\n\nfn open_widget() -> i64:\n    val raw = unsafe(capabilities: [ffi]):\n        rt_widget_open()\n    if raw <= 0:\n        return -1\n    raw\n"
+        expect(check_raw_sffi_calls(source, "src/app/demo.spl").len()).to_equal(0)
+
+    it "does not let lexical ffi authority escape its indentation scope":
+        """A sibling raw call after the block remains a violation."""
+        val source = "extern fn rt_widget_open() -> i64\n\nfn open_widget() -> i64:\n    unsafe(capabilities: [ffi]):\n        rt_widget_open()\n    rt_widget_open()\n"
+        val findings = check_raw_sffi_calls(source, "src/app/demo.spl")
+        expect(findings.len()).to_equal(1)
+        expect(findings[0].line_num).to_equal(6)
+
     it "does not accept an unrelated unsafe capability":
         """Raw-pointer authority does not imply permission to invoke foreign code."""
         val source = "extern fn rt_widget_open() -> i64\n\n@unsafe(reason: \"memory only\", capabilities: [raw_ptr])\nfn _open_raw() -> i64:\n    rt_widget_open()\n"

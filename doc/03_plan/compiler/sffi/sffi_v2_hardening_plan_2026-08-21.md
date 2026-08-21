@@ -291,18 +291,20 @@ Its generated ledger is
 symbol/signature roll-up is
 `doc/08_tracking/bug/data/sffi_contract_symbols_2026-08-21.tsv`.
 
-Current evidence:
+Current evidence after the thread synchronization boundary migration:
 
-- 3,970 distinct symbols in the backing census and 3,968 with owned Simple
-  declaration sites;
-- 14,928 declaration sites;
-- 14,431 sites have neither an explicit FFI-unsafe tag nor a local contract;
-- 486 sites declare a typed/documented contract but lack the unsafe tag;
-- 11 checked signing/verification declarations carry both explicit FFI authority and a
+- 3,964 distinct symbols in the current backing census, including 3,962
+  compiler-owned canonical symbols;
+- 14,941 declaration sites;
+- 14,424 sites have neither an explicit FFI-unsafe tag nor a local contract;
+- 488 sites declare a typed/documented contract but lack the unsafe tag;
+- 17 thread synchronization declarations now carry explicit FFI authority but
+  still require canonical ABI-contract metadata;
+- 12 checked declarations carry both explicit FFI authority and a
   typed result contract; their cryptographic artifact evidence remains open;
 - 399 canonical symbols currently have more than one normalized declaration
   shape and require typed-resolution review before one ABI hash can be sealed;
-- 3,558 declared symbols require migration and 399 require conflict resolution;
+- 3,551 declared symbols require migration and 399 require conflict resolution;
 - among `rt_*`/`spl_*` declarations, 1,855 sites reference symbols classified
   genuinely missing and 321 are backed only in owned C runtime source.
 
@@ -362,6 +364,16 @@ package-private token for the exact open handle; missing/invalid owner state
 still closes the handle and rejects admission. The privileged bounded mapping
 consumer remains intentionally blocked. The native fixture compile-cost blocker is recorded
 in `doc/08_tracking/bug/sffi_manifest_signature_native_test_compile_cost_2026-08-21.md`.
+
+The raw-SFFI lint now understands lexical `unsafe(capabilities: [ffi])` block
+indentation, including value-binding forms, and proves that authority ends when
+the block indentation ends. The canonical thread/mutex/condition-variable
+declarations are explicitly FFI-unsafe and their wrapper calls use lexical
+blocks, avoiding an extra helper call on synchronization hot paths. The current
+parser cannot bind an unsafe block expression directly, so two create paths use
+a typed local assignment; the optimizer/codegen evidence needed to prove away
+that initialization is tracked in
+`doc/08_tracking/bug/unsafe_block_expression_binding_parser_gap_2026-08-21.md`.
 
 ## Requirement decision
 
