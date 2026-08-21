@@ -3,8 +3,10 @@
 ## Status
 
 Callable ownership fix verified through all 664 Stage-3 surface parses. The
-remaining cross-stage import-route aggregate reads are replaced by frozen
-scalar projections; final bootstrap verification is pending.
+two later cross-stage import-route readers are replaced by frozen scalar
+projections. Final verification found an earlier primary-import reader still
+using parser aggregates; see
+`stage3_primary_import_resolution_aggregate_corruption_2026-08-21.md`.
 
 ## Evidence
 
@@ -49,6 +51,6 @@ the existing glob/module-route meaning.
 
 ## Resume
 
-Run the third and final fresh Stage-2 admission and one receipt-bound deploy.
-Stage 3 must finish with zero `[hir-fatal]` records; full Stage 4 and bootstrap
-must-check must pass before the push ledger can be promoted.
+Callable ownership is verified, but the broader bootstrap remains blocked by
+the primary-import owner above. No further bootstrap is permitted in this
+bounded session.
