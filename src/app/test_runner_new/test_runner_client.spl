@@ -4,6 +4,7 @@ use std.sffi.cli.{cli_get_args}
 use app.io.process_ops.{process_run, process_run_bounded, process_run_timeout}
 use app.io.mod.{env_get}
 use app.test_runner_new.timeout_budget.{client_default_timeout_secs}
+use app.test_runner_new.daemon_backlog.{daemon_backlog_bypass}
 use std.test_runner.test_runner_args.{parse_test_args}
 use std.test_runner.test_config.{load_test_config}
 use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES}
@@ -11,6 +12,7 @@ use std.test_runner.test_runner_modes.{run_spl_doctest_mode}
 use app.test_daemon.light_protocol.{LIGHT_REQUEST_RESPONSE_GRACE_MS, light_request_encode, light_request_expiry_micros, light_request_timeout_ms_from_seconds, timeout_verdict_line, no_response_verdict_line, has_verdict_line, exit_code_reason}
 
 use std.io_runtime.{dir_create_all}
+use std.io_runtime.{dir_list}
 use std.io_runtime.{file_exists}
 extern fn rt_file_read_text(path: text) -> text
 use std.io_runtime.{read_file_text}
@@ -617,7 +619,19 @@ fn main() -> i64:
     # A --timeout beyond the daemon protocol cap cannot ride the daemon lane
     # (the request would be clamped and the spec killed at ~600s); run
     # directly so the full requested timeout is honored.
-    val daemon_ok = if cov_bypass or binary_override_bypass or long_timeout_bypass or invoker_bypass or require_gpu_bypass or env_gate_bypass: false else: ensure_daemon()
+    # HEAD-OF-LINE BLOCKING. The light daemon drains its request FIFO with a
+    # SINGLE worker (light_daemon.spl main(): `handle_request` blocks inside
+    # process_run_bounded for the served spec's whole budget), so N concurrent
+    # `simple test` clients are executed strictly one at a time no matter how
+    # many cores are free. Measured: every client parks waiting for its .resp
+    # at ~0% CPU while exactly one spec computes, and clients then die together
+    # as their request deadlines expire while still queued.
+    # daemon_backlog.spl already decided the policy and pinned it with a unit
+    # spec, but had ZERO production call sites -- the decision was never
+    # consulted, so clients joined the queue unconditionally. This is that wiring.
+    val backlog_pending = if file_exists(LIGHT_REQ_DIR): dir_list(LIGHT_REQ_DIR).len() else: 0
+    val backlog_bypass = daemon_backlog_bypass(backlog_pending)
+    val daemon_ok = if cov_bypass or binary_override_bypass or long_timeout_bypass or invoker_bypass or require_gpu_bypass or env_gate_bypass or backlog_bypass: false else: ensure_daemon()
     var binary = ""
     if not daemon_ok:
         if cov_bypass:
@@ -630,6 +644,8 @@ fn main() -> i64:
             print "invoking-binary: live test daemon runs {daemon_binary} but this process is {invoker}; bypassing daemon so the invoking binary executes the spec"
         elif binary_override_bypass:
             print "binary-override: {_binary_override_names()} set; bypassing test daemon so the override reaches the spec"
+        elif backlog_bypass:
+            print "daemon-backlog: {backlog_pending} request(s) queued on the single-worker test daemon; running directly"
         elif long_timeout_bypass:
             print "timeout: --timeout {run.timeout_secs}s exceeds daemon cap; running directly"
         else:
