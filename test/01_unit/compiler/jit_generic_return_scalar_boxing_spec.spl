@@ -1,0 +1,76 @@
+"""
+# Generic Scalar Return / Generic Struct Field Boxing (JIT lane)
+
+A generic type parameter resolves to `TypeId::ANY`
+(hir/lower/type_resolver.rs), so a generic function's RETURN slot is a
+tagged slot and `HirStmt::Return` boxes into it. Nothing unboxed on the way
+back: a scalar `T` picked up one `<< 3` per generic hop, so
+`ai = ident(ai) + 1` twice yielded 72 instead of 2. A generic struct's field
+is the same slot in a different coat -- the raw scalar was stored into an
+`ANY` field and read back as a tagged word, printing `<value:0x5>`.
+
+Regression cover for
+doc/08_tracking/bug/generic_struct_field_untagged_payload_seed_2026-08-21.md.
+
+**This spec must shell out.** `bin/simple test` overwrites
+SIMPLE_EXECUTION_MODE to "interpret" before every child spec
+(src/lib/nogc_sync_mut/test_runner/test_runner_execute.spl), and the
+interpreter was always CORRECT here -- an in-process assertion would be
+green on a broken compiler. So it runs the fixture through `simple run`
+under both engines, exactly like
+scripts/check/check_jit_interpreter_differential.spl, and requires the JIT
+lane to agree with the interpreter AND with pinned ground truth.
+Set SIMPLE_BIN to target a specific binary; default `bin/simple`.
+"""
+
+use std.spipe.*
+use std.io.{process_run, env_get}
+
+fn simple_binary() -> text:
+    val configured = env_get("SIMPLE_BIN") ?? ""
+    if configured.len() > 0:
+        return configured
+    "bin/simple"
+
+fn fixture_path() -> text:
+    "test/fixtures/jit_differential/generic_return_scalar.spl"
+
+fn run_engine(mode_env: text) -> text:
+    val command = mode_env + " " + simple_binary() + " run " + fixture_path()
+    val (stdout, stderr, _code) = process_run("/bin/sh", ["-c", command])
+    stdout + stderr
+
+fn jit_output() -> text:
+    # The JIT engine must be named EXPLICITLY. The test runner exports
+    # SIMPLE_EXECUTION_MODE=interpret before every child spec, and a plain
+    # `simple run` inherits it -- an empty prefix silently ran the
+    # INTERPRETER, which is correct here, and the spec passed against a
+    # binary carrying the bug. Verified: with "" this file was 6/6 green on
+    # the pre-fix seed.
+    run_engine("SIMPLE_EXECUTION_MODE=jit")
+
+fn interp_output() -> text:
+    run_engine("SIMPLE_EXECUTION_MODE=interpreter")
+
+describe "generic scalar return and generic struct field under the JIT":
+
+    it "returns an i64 through a generic fn without a per-hop tag shift":
+        expect(jit_output()).to_contain("i64chain=2")
+
+    it "returns an f64 through a generic fn as a real double":
+        expect(jit_output()).to_contain("f64chain=1.5")
+
+    it "returns bool and text through a generic fn unchanged":
+        val out = jit_output()
+        expect(out).to_contain("bool=true")
+        expect(out).to_contain("text=hi")
+
+    it "reads an i64 field of a generic struct as a number":
+        expect(jit_output()).to_contain("ifield=5")
+
+    it "reads an f64 field of a generic struct as a double":
+        expect(jit_output()).to_contain("ffield=1.5")
+
+    it "agrees with the interpreter, which was always correct here":
+        expect(interp_output()).to_contain("i64chain=2")
+        expect(interp_output()).to_contain("ifield=5")

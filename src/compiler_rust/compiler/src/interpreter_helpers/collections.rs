@@ -7,6 +7,7 @@ use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, LambdaParam, Patt
 use std::collections::HashMap;
 
 use super::super::{evaluate_expr, exec_function, Control, Enums, ImplMethods};
+use super::lambda_body::eval_lambda_body;
 use super::args::apply_lambda_to_vec;
 use super::patterns::bind_pattern;
 use crate::interpreter::interpreter_call::exec_function_with_values;
@@ -105,7 +106,7 @@ pub(crate) fn eval_array_filter(
             for item in arr {
                 crate::interpreter::check_execution_limit()?;
                 let mut local_env = bind_lambda_param(captured, params, item);
-                let pred_val = evaluate_expr(body, &mut local_env, functions, classes, enums, impl_methods)?;
+                let pred_val = eval_lambda_body(body, &mut local_env, functions, classes, enums, impl_methods)?;
                 if is_condition_present(body, &pred_val) {
                     results.push(item.clone());
                 }
@@ -162,7 +163,7 @@ pub(crate) fn eval_array_reduce(
                 } else if let Some(param) = params.first() {
                     local_env.insert(param.clone(), item.clone());
                 }
-                acc = evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods)?;
+                acc = eval_lambda_body(&body, &mut local_env, functions, classes, enums, impl_methods)?;
             }
             Ok(acc)
         }
@@ -215,7 +216,7 @@ pub(crate) fn eval_array_find(
             for item in arr {
                 crate::interpreter::check_execution_limit()?;
                 let mut local_env = bind_lambda_param(captured, params, item);
-                let pred_val = evaluate_expr(body, &mut local_env, functions, classes, enums, impl_methods)?;
+                let pred_val = eval_lambda_body(body, &mut local_env, functions, classes, enums, impl_methods)?;
                 if is_condition_present(body, &pred_val) {
                     return Ok(item.clone());
                 }
@@ -262,7 +263,7 @@ pub(crate) fn eval_array_any(
             for item in arr {
                 crate::interpreter::check_execution_limit()?;
                 let mut local_env = bind_lambda_param(captured, params, item);
-                let pred_val = evaluate_expr(body, &mut local_env, functions, classes, enums, impl_methods)?;
+                let pred_val = eval_lambda_body(body, &mut local_env, functions, classes, enums, impl_methods)?;
                 if is_condition_present(body, &pred_val) {
                     return Ok(Value::Bool(true));
                 }
@@ -309,7 +310,7 @@ pub(crate) fn eval_array_all(
             for item in arr {
                 crate::interpreter::check_execution_limit()?;
                 let mut local_env = bind_lambda_param(captured, params, item);
-                let pred_val = evaluate_expr(body, &mut local_env, functions, classes, enums, impl_methods)?;
+                let pred_val = eval_lambda_body(body, &mut local_env, functions, classes, enums, impl_methods)?;
                 if !is_condition_present(body, &pred_val) {
                     return Ok(Value::Bool(false));
                 }
@@ -350,7 +351,7 @@ pub(crate) fn eval_dict_map_values(
         for (k, v) in map {
             crate::interpreter::check_execution_limit()?;
             let mut local_env = bind_lambda_param(captured, params, v);
-            let new_val = evaluate_expr(body, &mut local_env, functions, classes, enums, impl_methods)?;
+            let new_val = eval_lambda_body(body, &mut local_env, functions, classes, enums, impl_methods)?;
             new_map.insert(k.clone(), new_val);
         }
         Ok(Value::Dict(Arc::new(new_map)))
@@ -377,13 +378,122 @@ pub(crate) fn eval_dict_filter(
             } else if let Some(param) = params.first() {
                 local_env.insert(param.clone(), v.clone());
             }
-            let pred_val = evaluate_expr(body, &mut local_env, functions, classes, enums, impl_methods)?;
+            let pred_val = eval_lambda_body(body, &mut local_env, functions, classes, enums, impl_methods)?;
             if is_condition_present(body, &pred_val) {
                 new_map.insert(k.clone(), v.clone());
             }
         }
         Ok(Value::Dict(Arc::new(new_map)))
     })
+}
+
+/// Dict `for_each`/`each`: invoke the lambda once per entry for its side
+/// effects, discarding the result. Returns the receiver unchanged so the call
+/// can sit in expression position.
+///
+/// Visits entries in `dict_entries_sorted` order — the SAME order as
+/// `for (k, v) in dict`, `keys()`, `values()` and `entries()` — so a traversal
+/// written with `for_each` and one written with a `for` loop agree. Keys are
+/// recovered through `dict_entry_key_for_iteration`, so a composite
+/// (struct/enum/tuple) key arrives as the original value rather than the
+/// internal map string, matching `entries()`.
+/// Unlike `filter`/`map_values`, which build a NEW collection from each
+/// lambda's return value, `for_each` exists ONLY for its side effects — the
+/// canonical use is accumulating into a variable of the enclosing scope
+/// (`map.for_each(\k, v: total = total + v)`). Evaluating the body against a
+/// CLONE of the lambda's captured env, the way the pure `filter`/`map_values`
+/// helpers do, would discard exactly that accumulation and make every such
+/// call a silent no-op. So the body runs against the CALLER's `env`, with the
+/// parameter names bound for the duration of each entry and restored
+/// afterwards, so an assignment inside the body lands where the author wrote
+/// it. Captured names the caller's scope does not already define are layered
+/// in temporarily and removed again, so a capture cannot leak out of the call.
+pub(crate) fn eval_dict_for_each(
+    map: &HashMap<String, Value>,
+    func: Value,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Value, CompileError> {
+    let (params, body, captured) = match func {
+        Value::Lambda { params, body, env } => (params, body, env),
+        _ => return Err(crate::error::factory::expects_lambda("for_each")),
+    };
+
+    // Layer in captured names the caller's scope does not already bind, so the
+    // body can still READ its closure environment. A name the caller already
+    // binds is deliberately NOT shadowed — the caller's binding is the one an
+    // assignment in the body must reach.
+    let mut injected: Vec<String> = Vec::new();
+    for (name, value) in captured.iter() {
+        if env.get(name).is_none() {
+            env.insert(name.clone(), value.clone());
+            injected.push(name.clone());
+        }
+    }
+
+    let bound: Vec<String> = if params.len() >= 2 {
+        vec![params[0].clone(), params[1].clone()]
+    } else if let Some(p) = params.first() {
+        vec![p.clone()]
+    } else {
+        Vec::new()
+    };
+    // Remember what the parameter names meant before the call so the binding
+    // cannot outlive the traversal.
+    let saved: Vec<(String, Option<Value>)> = bound.iter().map(|n| (n.clone(), env.get(n).cloned())).collect();
+
+    let result = (|| -> Result<(), CompileError> {
+        for (k, stored) in crate::value::dict_entries_sorted(map) {
+            crate::interpreter::check_execution_limit()?;
+            // A two-param lambda takes (key, value); a one-param lambda takes
+            // the value alone, matching `filter`/`map_values` above.
+            if params.len() >= 2 {
+                env.insert(params[0].clone(), Value::dict_entry_key_for_iteration(stored, k));
+                env.insert(params[1].clone(), Value::dict_entry_value_for_iteration(stored));
+            } else if let Some(param) = params.first() {
+                env.insert(param.clone(), Value::dict_entry_value_for_iteration(stored));
+            }
+            // A MULTI-LINE lambda body parses to `Expr::DoBlock` (see
+            // parser `parse_lambda_body`), and evaluating a `DoBlock` as an
+            // expression yields an unforced `Value::BlockClosure`
+            // (interpreter/expr/control.rs) rather than running it — so the
+            // body's statements would never execute and the traversal would be
+            // a silent no-op. Execute the statements directly against `env`
+            // instead. A single-line body is an ordinary expression.
+            match body.as_ref() {
+                Expr::DoBlock(nodes) | Expr::UnsafeBlock(nodes) => {
+                    for node in nodes {
+                        crate::interpreter::exec_node(node, env, functions, classes, enums, impl_methods)?;
+                    }
+                }
+                other => {
+                    evaluate_expr(other, env, functions, classes, enums, impl_methods)?;
+                }
+            }
+        }
+        Ok(())
+    })();
+
+    // Restore on BOTH the success and the error path — an error mid-traversal
+    // must not leave the caller's scope carrying the loop variables.
+    for (name, prev) in saved {
+        match prev {
+            Some(v) => {
+                env.insert(name, v);
+            }
+            None => {
+                env.remove(&name);
+            }
+        }
+    }
+    for name in injected {
+        env.remove(&name);
+    }
+    result?;
+    Ok(Value::Dict(Arc::new(map.clone())))
 }
 
 // === Helper functions for comprehensions and slicing ===

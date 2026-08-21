@@ -1,8 +1,8 @@
 # A multi-line lambda body is never executed — collection builtins silently get the wrong answer
 
 - **Date:** 2026-08-21
-- **Status:** OPEN (root-caused, minimal fixture below; fix is seed-side,
-  `src/compiler_rust`)
+- **Status:** RESOLVED 2026-08-21 (fix + RED-first spec landed; evidence at
+  the bottom of this file)
 - **Found by:** fixing `map_for_each_missing_on_dict_2026-08-21.md` — the dict
   `for_each` arm was implemented, dispatched correctly, and still did nothing
 - **Binaries:** reproduces identically on the deployed seed `bin/simple` AND on
@@ -122,3 +122,50 @@ fix, and this record is the file:line + unblock condition it points at.
 Implement the shared lambda-body forcing helper above, route the collection
 helpers through it, then add the RED-first spec for multi-line `filter`/`map`
 predicates alongside it.
+
+
+## Resolution 2026-08-21
+
+**Fix.** One shared helper, exactly as the sketch above required, rather than a
+patch per method:
+`src/compiler_rust/compiler/src/interpreter_helpers/lambda_body.rs`
+(new) — `eval_lambda_body(body, env, ..)` forces an `Expr::DoBlock` /
+`Expr::UnsafeBlock` body through `interpreter::block_exec::exec_block_fn`
+against the environment the caller already prepared (so a side-effecting body
+reaches the caller's scope) and yields the block's last value (so a pure
+predicate gets its result); anything else falls through to `evaluate_expr`
+unchanged. A `return` inside the body propagates out of the enclosing function
+via the existing `CompileError::TryError` early-return channel, the same one
+if/match expression arms use — otherwise it would silently become the body's
+value.
+
+Routed through it (`evaluate_expr(body, ..)` -> `eval_lambda_body(body, ..)`):
+- `interpreter_helpers/collections.rs` — 7 call sites, covering
+  `eval_array_filter`, `eval_array_find`, `eval_array_any`, `eval_array_all`,
+  `eval_array_reduce`, `eval_dict_filter`, `eval_dict_map_values` and the
+  option/result helpers that share those bodies.
+- `interpreter_helpers/args.rs` — `apply_lambda_to_vec`, which is what
+  `eval_array_map` actually uses.
+- Exported as `interpreter_helpers::eval_lambda_body`
+  (`interpreter_helpers/mod.rs`).
+
+`eval_dict_for_each`'s existing local `exec_node` loop is deliberately LEFT in
+place: it must run against the CALLER's env with the parameter names saved and
+restored around the traversal, which is a stronger contract than the shared
+helper's, and it is already correct and covered by
+`test/01_unit/lib/nogc_sync_mut/map_for_each_spec.spl`.
+
+**Spec (RED-first).**
+`test/01_unit/lib/nogc_sync_mut/multiline_lambda_body_spec.spl`, mirrored to
+`test/unit/lib/nogc_sync_mut/multiline_lambda_body_spec.spl`. 8 examples,
+each pairing the single-line form with the multi-line form so a future
+regression cannot hide by breaking both consistently: array
+`filter`/`map`/`any`/`all`/`find`/`reduce`, dict `filter`/`map_values`.
+
+| binary | result |
+|---|---|
+| deployed seed `bin/simple` (pre-fix) | `8 total, 1 passed, 7 failed` |
+| seed rebuilt with this fix | `8 total, 8 passed, 0 failed` |
+
+(`map_values` passes pre-fix because that example asserts only the entry
+count, which the identity-closure bug preserves; the other seven discriminate.)

@@ -41,6 +41,22 @@ impl<'a> MirLowerer<'a> {
             }
         }
 
+        // A field DECLARED as a tagged slot (`ANY` -- which is what a generic
+        // type parameter `T` resolves to, see hir/lower/type_resolver.rs -- or
+        // `T?`) must receive a TAGGED value, exactly like a tagged local or a
+        // generic return slot. Storing the raw scalar left `Pair(a: 5).a`
+        // reading back a word whose low 3 bits are decoded as a value tag, so
+        // it printed `<value:0x5>`; a non-generic `struct IPair: a: i64` was
+        // unaffected because its field slot is raw on both sides.
+        // See doc/08_tracking/bug/generic_struct_field_untagged_payload_seed_2026-08-21.md.
+        if let Some(HirType::Struct { fields: decl_fields, .. }) = self.type_registry.and_then(|tr| tr.get(ty)).cloned() {
+            for (i, field) in fields.iter().enumerate() {
+                let Some((_, decl_ty)) = decl_fields.get(i) else { continue };
+                let boxed = self.box_scalar_for_tagged_slot(*decl_ty, field.ty, field_regs[i])?;
+                field_regs[i] = boxed;
+            }
+        }
+
         // Check if this type has an @inject constructor (ClassName.new)
         // If so, we need to call the constructor with DI injection
         let type_name = self

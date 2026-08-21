@@ -256,6 +256,16 @@ impl<'a> MirLowerer<'a> {
                     // what fixes `val x: i64? = 42` printing a denormal float.
                     let vreg = self.box_scalar_for_tagged_slot(effective_declared_ty, value_ty, vreg)?;
 
+                    // ...and the exact mirror. A RAW scalar slot fed by a
+                    // TAGGED value must be untagged, or the local keeps
+                    // `v << 3`. A generic function's return slot is `ANY`
+                    // (a single-uppercase type parameter resolves to
+                    // TypeId::ANY, type_resolver.rs), so `HirStmt::Return`
+                    // boxes it on the way out; without this mirror
+                    // `var n: i64 = ident(3)` stores 24. See
+                    // doc/08_tracking/bug/generic_struct_field_untagged_payload_seed_2026-08-21.md.
+                    let vreg = self.unbox_scalar_for_raw_slot(effective_declared_ty, value_ty, vreg)?;
+
                     // Track tagged status: if storing a tagged VReg, mark the local as tagged
                     if self.tagged_vregs.contains(&vreg) {
                         self.tagged_locals.insert(local_idx);
@@ -856,6 +866,24 @@ impl<'a> MirLowerer<'a> {
                             // Assigning a raw scalar into a `T?`/`Any` local is
                             // the same tagged-slot store the `Let` arm boxes for.
                             self.box_scalar_for_tagged_slot(target.ty, ty, val_reg)?
+                        };
+                        // Static-type mirror of the dynamic `tagged_vregs`
+                        // check above: that set only tracks vregs this
+                        // lowering itself marked, so a tagged value arriving
+                        // from a slot the TYPE says is tagged (`ANY`, `T?`)
+                        // slipped through raw. A generic call returns exactly
+                        // such a slot (`-> T` resolves to `TypeId::ANY`, and
+                        // `HirStmt::Return` boxes into it), so
+                        // `ai = ident(ai) + 1` re-stored `(v << 3)` and the
+                        // error compounded on every generic hop. No-op unless
+                        // the value's static type is a tagged slot, and bool
+                        // is excluded there (it is tagged via `rt_value_bool`,
+                        // whose inverse is not `UnboxInt`). See
+                        // doc/08_tracking/bug/generic_struct_field_untagged_payload_seed_2026-08-21.md.
+                        let store_val = if is_tagged_val {
+                            store_val
+                        } else {
+                            self.unbox_scalar_for_raw_slot(target.ty, ty, store_val)?
                         };
 
                         let addr_reg = self.lower_lvalue(target)?;

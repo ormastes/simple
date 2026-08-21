@@ -10,6 +10,7 @@
 
 pub mod args;
 pub mod collections;
+pub mod lambda_body;
 pub mod method_dispatch;
 pub mod objects;
 pub mod patterns;
@@ -22,11 +23,13 @@ pub(crate) use method_dispatch::{
 
 pub(crate) use objects::{create_range_object, create_range_object_opt, spawn_actor_with_expr};
 
+pub(crate) use lambda_body::eval_lambda_body;
+
 pub(crate) use args::{eval_arg, eval_arg_int, eval_arg_usize};
 
 pub(crate) use collections::{
     eval_array_all, eval_array_any, eval_array_filter, eval_array_find, eval_array_map, eval_array_reduce,
-    eval_dict_filter, eval_dict_map_values, eval_option_and_then, eval_option_filter, eval_option_map,
+    eval_dict_filter, eval_dict_for_each, eval_dict_map_values, eval_option_and_then, eval_option_filter, eval_option_map,
     eval_option_or_else, eval_result_and_then, eval_result_map, eval_result_map_err, eval_result_or_else, iter_to_vec,
     message_to_value, OptionResultEvalContext,
 };
