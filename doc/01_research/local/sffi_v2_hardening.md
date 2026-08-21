@@ -207,3 +207,13 @@ bug during the TLS spec. The explicit-match equivalent is used and documented
 in `result_propagation_array_cast_tls_checked_signing_2026-08-21.md`; the spec
 reached its three-run cap before the workaround, so only file-check and static
 checked-call evidence are claimed for the final source in this session.
+
+All 15 remaining legacy sign/verify declarations in the canonical signature
+module are now explicitly `unsafe(ffi)` and document their sentinel contract:
+verification collapses malformed bridge input into `0`, while signing may
+produce an empty signature. The crypto audit rejects any future raw
+sign/verify declaration without adjacent FFI-unsafe metadata. These legacy
+ABIs are not thereby verified or safe; the tags prevent them from masquerading
+as ordinary safe interfaces while callers migrate to checked `Result` APIs.
+Inventory improves to 108 `unsafe_contract_declared` rows and 13,529 missing
+both tag and contract. An annotation-only change has no call-path cost.

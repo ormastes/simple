@@ -8,7 +8,22 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 builder="$root/src/os/tls13/server_builders.spl"
 handshake="$root/src/os/tls13/server_handshake.spl"
+declarations="$root/src/lib/nogc_sync_mut/io/signature_sffi.spl"
 failed=0
+
+if ! awk '
+    /^[[:space:]]*extern fn rt_.*(sign|verify)/ {
+        if (previous !~ /@unsafe\(/ || previous !~ /capabilities:[[:space:]]*\[[^]]*ffi/) {
+            printf "%s:%d:%s\n", FILENAME, FNR, $0
+            failed = 1
+        }
+    }
+    { previous = $0 }
+    END { exit failed }
+' "$declarations"; then
+    echo "raw crypto declarations must carry explicit ffi unsafe metadata" >&2
+    failed=1
+fi
 
 if grep -n -E 'extern fn rt_.*(sign|verify)|rt_ed25519_sign\(' "$builder"; then
     echo "TLS CertificateVerify builder calls raw crypto SFFI" >&2
