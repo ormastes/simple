@@ -930,7 +930,13 @@ impl ExecCore {
         match extension {
             "smf" => self.run_smf_with_args(path, args),
             "spl" | "simple" | "sscript" | "shs" | "" => {
-                if self.execution_mode.is_jit() && should_prefer_interpreter_for_source(path, extension) {
+                if self.execution_mode.is_jit()
+                    && should_prefer_interpreter_for_source(
+                        path,
+                        extension,
+                        self.jit_runtime_provides_cli_args(),
+                    )
+                {
                     return self.run_file_interpreted_with_args(path, args);
                 }
                 if self.execution_mode.is_jit() {
@@ -984,6 +990,21 @@ impl ExecCore {
                 other
             )),
         }
+    }
+
+    /// Does THIS build's runtime actually provide the argv accessor the JIT
+    /// lane needs?
+    ///
+    /// A real capability check, not a source-text heuristic: it asks the same
+    /// symbol provider `run_file_jit` uses to decide whether an extern can be
+    /// linked. If none of the argv entry points resolves, a JIT'd
+    /// `get_cli_args()` would link as a null pointer, so such sources still go
+    /// to the interpreter -- but on a normal build all of them resolve and the
+    /// JIT lane is taken.
+    fn jit_runtime_provides_cli_args(&self) -> bool {
+        ["rt_get_args", "sys_get_args", "rt_cli_get_args"]
+            .iter()
+            .any(|name| self.symbol_provider.get_symbol(name).is_some())
     }
 
     /// Run a .spl file using JIT compilation via ExecutionManager.
@@ -1410,8 +1431,12 @@ fn should_force_interpreter_for_source(path: &Path) -> bool {
     normalized.ends_with("src/app/simpleos_nvme_serial_check/main.spl")
 }
 
-fn should_prefer_interpreter_for_source(path: &Path, extension: &str) -> bool {
-    match interpreter_preference_reason(path, extension) {
+fn should_prefer_interpreter_for_source(
+    path: &Path,
+    extension: &str,
+    cli_args_backed: bool,
+) -> bool {
+    match interpreter_preference_reason(path, extension, cli_args_backed) {
         Some(reason) => {
             jit_coverage_report(path, reason);
             true
@@ -1430,7 +1455,11 @@ fn should_prefer_interpreter_for_source(path: &Path, extension: &str) -> bool {
 /// per-function JIT/interpreter split on this path. Because it fired silently,
 /// the cost it imposes on the self-hosted compiler sat unmeasured; see
 /// doc/08_tracking/bug/seed_jit_coverage_self_hosted_compiler_2026-08-21.md.
-fn interpreter_preference_reason(path: &Path, extension: &str) -> Option<&'static str> {
+fn interpreter_preference_reason(
+    path: &Path,
+    extension: &str,
+    cli_args_backed: bool,
+) -> Option<&'static str> {
     if should_force_interpreter_for_source(path) {
         return Some("forced-source-allowlist");
     }
@@ -1440,8 +1469,24 @@ fn interpreter_preference_reason(path: &Path, extension: &str) -> Option<&'stati
     if std::env::var_os("SIMPLE_EXECUTION_MODE").is_some() {
         return None;
     }
-    if source_uses_cli_args(path) {
-        return Some("cli-args-substring");
+    // Was an unconditional SUBSTRING gate ("cli-args-substring"): any entry file
+    // merely MENTIONING `std.cli` / `get_cli_args` / `sys_get_args` was diverted
+    // to the interpreter before the JIT was ever attempted. That swept in every
+    // pure-Simple CLI app -- lint, fmt, test, the whole self-hosted compiler
+    // surface -- and cost `lint` 2.7x (29.7s interpreted vs 11.0s JIT, measured
+    // 2026-08-21 on src/compiler/80.driver/driver_types.spl).
+    //
+    // The gate existed because the JIT lane had no argv hook. It does now:
+    // `run_file_with_args` calls `simple_runtime::value::rt_set_args_vec(&args)`
+    // for EVERY lane before choosing one, so the hosted runtime's argv store is
+    // populated identically for JIT and interpreter. `cli_args_backed` is the
+    // real capability check -- the caller asks the symbol provider whether that
+    // store's accessor is actually linked into THIS build -- so the gate now
+    // fires only when the capability is genuinely absent, instead of whenever a
+    // string appears in a file. See
+    // doc/08_tracking/bug/seed_jit_coverage_self_hosted_compiler_2026-08-21.md.
+    if !cli_args_backed && source_uses_cli_args(path) {
+        return Some("cli-args-unbacked-runtime");
     }
     if source_uses_jit_unsafe_graphics_runtime(path) {
         return Some("jit-unsafe-graphics");
@@ -1520,19 +1565,31 @@ mod tests {
     /// pins the reason strings the census emits; without them the divert is
     /// silent, which is exactly why the cost went unmeasured.
     #[test]
-    fn interpreter_preference_reason_names_the_cli_args_substring_gate() {
+    fn interpreter_preference_reason_names_the_unbacked_cli_args_gate() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("entry.spl");
         fs::write(&path, "use std.cli.cli_util (get_cli_args)\n\nfn main():\n    print \"hi\"\n")
             .expect("write fixture");
         // Guard against a stray ambient override in the test environment.
         std::env::remove_var("SIMPLE_EXECUTION_MODE");
+        // Capability ABSENT: the divert still happens, and is still named.
         assert_eq!(
-            interpreter_preference_reason(&path, "spl"),
-            Some("cli-args-substring"),
-            "a source merely MENTIONING std.cli must be reported as de-JIT'd, with its reason named"
+            interpreter_preference_reason(&path, "spl", false),
+            Some("cli-args-unbacked-runtime"),
+            "with no argv accessor linked, a std.cli source must be de-JIT'd, reason named"
         );
-        assert!(should_prefer_interpreter_for_source(&path, "spl"));
+        assert!(should_prefer_interpreter_for_source(&path, "spl", false));
+
+        // Capability PRESENT (the normal build): the same source must now take
+        // the JIT lane and report NO reason. This is the regression that the old
+        // substring gate made impossible -- see
+        // doc/08_tracking/bug/seed_jit_coverage_self_hosted_compiler_2026-08-21.md.
+        assert_eq!(
+            interpreter_preference_reason(&path, "spl", true),
+            None,
+            "a std.cli source must NOT be de-JIT'd when the runtime provides argv"
+        );
+        assert!(!should_prefer_interpreter_for_source(&path, "spl", true));
     }
 
     /// The complement: a source with no gate trigger must take the JIT lane and
@@ -1544,8 +1601,8 @@ mod tests {
         let path = dir.path().join("plain.spl");
         fs::write(&path, "fn main():\n    print \"hi\"\n").expect("write fixture");
         std::env::remove_var("SIMPLE_EXECUTION_MODE");
-        assert_eq!(interpreter_preference_reason(&path, "spl"), None);
-        assert!(!should_prefer_interpreter_for_source(&path, "spl"));
+        assert_eq!(interpreter_preference_reason(&path, "spl", true), None);
+        assert!(!should_prefer_interpreter_for_source(&path, "spl", true));
     }
 
     /// `.shs` and the forced allowlist are separate gates and must not be
@@ -1555,7 +1612,10 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("script.shs");
         fs::write(&path, "fn main():\n    print \"hi\"\n").expect("write fixture");
-        assert_eq!(interpreter_preference_reason(&path, "shs"), Some("shs-extension"));
+        assert_eq!(
+            interpreter_preference_reason(&path, "shs", true),
+            Some("shs-extension")
+        );
     }
     use std::fs;
     use std::path::Path;
@@ -1619,7 +1679,9 @@ mod tests {
         .unwrap();
 
         assert!(source_uses_cli_args(&script));
-        assert!(should_prefer_interpreter_for_source(&script, "spl"));
+        assert!(should_prefer_interpreter_for_source(&script, "spl", false));
+        // ...but not once the runtime actually backs argv.
+        assert!(!should_prefer_interpreter_for_source(&script, "spl", true));
     }
 
     #[test]
@@ -1633,7 +1695,9 @@ mod tests {
         .unwrap();
 
         assert!(source_uses_cli_args(&script));
-        assert!(should_prefer_interpreter_for_source(&script, "spl"));
+        assert!(should_prefer_interpreter_for_source(&script, "spl", false));
+        // ...but not once the runtime actually backs argv.
+        assert!(!should_prefer_interpreter_for_source(&script, "spl", true));
     }
 
     #[test]
@@ -1642,7 +1706,8 @@ mod tests {
         assert!(source_uses_cli_args(Path::new("/repo/src/app/cli/main.spl")));
         assert!(should_prefer_interpreter_for_source(
             Path::new("src/app/cli/main.spl"),
-            "spl"
+            "spl",
+            false
         ));
     }
 
@@ -1653,14 +1718,15 @@ mod tests {
         fs::write(&script, "fn main():\n    print \"ok\"\n").unwrap();
 
         assert!(!source_uses_cli_args(&script));
-        assert!(!should_prefer_interpreter_for_source(&script, "spl"));
+        assert!(!should_prefer_interpreter_for_source(&script, "spl", true));
     }
 
     #[test]
     fn shell_scripts_use_interpreter_path() {
         assert!(should_prefer_interpreter_for_source(
             Path::new("scripts/check.shs"),
-            "shs"
+            "shs",
+            true
         ));
     }
 
@@ -1675,7 +1741,7 @@ mod tests {
         .unwrap();
 
         assert!(source_uses_jit_unsafe_graphics_runtime(&script));
-        assert!(should_prefer_interpreter_for_source(&script, "spl"));
+        assert!(should_prefer_interpreter_for_source(&script, "spl", true));
     }
 
     #[test]
@@ -1689,7 +1755,7 @@ mod tests {
         .unwrap();
 
         assert!(!source_uses_jit_unsafe_graphics_runtime(&script));
-        assert!(!should_prefer_interpreter_for_source(&script, "spl"));
+        assert!(!should_prefer_interpreter_for_source(&script, "spl", true));
     }
 
     #[test]
