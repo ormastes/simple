@@ -3316,10 +3316,21 @@ pub(super) fn exec_for(
 ) -> Result<Control, CompileError> {
     let mut bound_names = Vec::new();
     collect_pattern_names(&for_stmt.pattern, &mut bound_names);
+    // Mark the loop binding BLOCK-LOCAL for the whole loop (same precedent as
+    // match-arm bindings, interpreter_control.rs `enter_block_local`). Without
+    // this, `env.is_local(name)` is false for the loop variable, so a
+    // same-named module global reachable through the frame's scope (e.g. a
+    // wildcard-imported `val name = "Alice"`) is treated as an alias of it:
+    // the globals write-back after any call in the body
+    // (`sync_owned_captured_globals` / `refresh_bound_global`) overwrites the
+    // live loop variable with the module global's value, and publishes the
+    // loop value into that module global on the way out. See
+    // doc/08_tracking/bug/seed_interpreter_module_global_clobbers_function_local_2026-08-21.md
     let saved: Vec<(String, Option<Value>)> = bound_names
         .into_iter()
         .map(|name| {
             let prior = env.get(&name).cloned();
+            env.enter_block_local(name.clone());
             (name, prior)
         })
         .collect();
@@ -3331,6 +3342,7 @@ pub(super) fn exec_for(
     // come back through here as a `Control` value, so there is no escape route
     // that skips this.
     for (name, prior) in saved {
+        env.exit_block_local(&name);
         match prior {
             Some(value) => {
                 env.insert(name, value);

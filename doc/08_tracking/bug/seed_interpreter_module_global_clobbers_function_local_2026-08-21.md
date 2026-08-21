@@ -1,7 +1,7 @@
 # Seed interpreter: a module-level global clobbers a same-named function LOCAL
 
 Date: 2026-08-21
-Status: OPEN — filed, not fixed (root cause not yet isolated)
+Status: RESOLVED 2026-08-21 (root cause: `for`-loop bindings were never marked local)
 Severity: high (silent wrong value, no diagnostic)
 
 ## Symptom
@@ -69,3 +69,84 @@ after" shape.
 Bisect with the real driver (it is a deterministic reproducer): dump the
 binding for `name` immediately before and immediately after the
 `core_jit_interpret` call, then walk the globals-writeback path above.
+
+## RESOLVED 2026-08-21 — root cause and fix
+
+### Minimised reproducer (2 files, 11 lines)
+
+`<tmp>/src/pkg/lib.spl`:
+
+```
+fn touch(label: text, actual: i64, expected: i64):
+    if actual != expected:
+        print "FAIL: {label}"
+
+val name = "Alice"
+touch("seed", 1, 1)
+```
+
+`<tmp>/entry.spl` — the entry file MUST sit outside the package directory; an
+entry inside `src/pkg/` resolves the import differently and does not reproduce:
+
+```
+use pkg.lib.*
+
+fn main() -> i32:
+    for name in "aa,bb".split(","):
+        touch("x", 1, 1)
+        print "seen={name}"
+    return 0
+```
+
+Pre-fix: `seen=Alice` twice. Post-fix: `seen=aa`, `seen=bb`.
+The scale of the original driver (70+ wildcard imports, `core_jit_interpret`)
+was irrelevant — all that is needed is a `for`-loop variable colliding with a
+wildcard-imported module global plus ONE cross-module call in the loop body.
+
+### Mechanism
+
+`exec_for` (`src/compiler_rust/compiler/src/interpreter_control.rs:3309`) saved
+and restored the loop binding's prior value but never called
+`env.mark_local` / `env.enter_block_local` for it — unlike match-arm bindings
+(same file, `enter_block_local` at the arm), function params
+(`interpreter_call/core/function_exec.rs:669`) and lambda params
+(`interpreter_call/core/lambda.rs:42`).
+
+`CowEnv::is_local` (`compiler/src/value.rs:616`) was therefore false for the
+loop variable. Every globals write-back path keys off exactly that predicate:
+
+* `publish_live_bound_globals` / `sync_owned_captured_globals`
+  (`interpreter_call/core/function_exec.rs:205,279`) filter on
+  `!env.is_local(name)`, so on the call in the loop body the loop variable's
+  value was PUBLISHED into `pkg.lib`'s global `name`;
+* `refresh_bound_global` (`value.rs:956`) then treats every non-local overlay
+  entry aliasing that owner/global as a stale copy and OVERWRITES it — putting
+  `"Alice"` back into the live loop variable.
+
+Hence "correct before the call, wrong after", and hence renaming the local only
+moved the collision to whichever other unmarked binding matched next.
+
+### Fix
+
+Mark the loop binding block-local for the duration of the loop
+(`enter_block_local` before `exec_for_inner`, `exit_block_local` in the
+unconditional restore loop). Two lines plus a comment, same precedent as
+match-arm bindings. No rename, no special-casing of names.
+
+### Tests
+
+`src/compiler_rust/compiler/tests/interpreter_for_loop_local_shadow.rs`
+(3 cases: the loop variable is not clobbered — FAILS pre-fix; the module global
+is not published over by the loop variable; nested loops keep their own
+bindings).
+
+### Still failing, separately
+
+`sh scripts/check/check-interp-reentrancy.shs` is NOT green after this fix. The
+class-identity driver now gets past the clobber and dies in a fresh, single-case
+process with `array index out of bounds: index is N but length is 0` — a
+different defect (empty exported arena arrays), unrelated to local shadowing and
+not introduced here: the pre-fix binary fails the same run earlier, with the
+clobber symptom `type mismatch: cannot convert dict to int`. That failure
+belongs to
+`pure_simple_interpreter_core_jit_interpret_not_reentrant_2026-08-20.md`.
