@@ -1,4 +1,8 @@
 """
+## Purpose and audience
+Purpose: Verify gl vertical — an unbalanced entry is rejected (the core invariant).
+Audience: compiler and tooling engineers who maintain this spec.
+
 # Enterprise General Ledger Vertical — balanced double-entry posting over the store
 
 ## Overview
@@ -30,6 +34,8 @@ reads only tenant-B lines).
 
 Lane: .spipe/simple_enterprise_suite (W22-A).
 """
+
+# @req: REQ-LIB-ENTERPRISE-GL-001 — stable requirement identity for this spec.
 
 use std.spec.*
 use std.io_runtime.{file_exists, file_delete, dir_create_all}
@@ -76,6 +82,7 @@ fn fresh_store(name: text):
 
 describe "gl vertical — an unbalanced entry is rejected (the core invariant)":
     it "reproduce: debits 1000 vs credits 900 -> invalid-record, nothing posted":
+        # @req: REQ-LIB-ENTERPRISE-GL-001
         val store = fresh_store("unbalanced")
         val t = tenant_a()
         val cfo = cfo_a()
@@ -92,8 +99,8 @@ describe "gl vertical — an unbalanced entry is rejected (the core invariant)":
         expect(reason_allowed(r.reason)).to_be(true)
 
         step("No lines were posted — every account balance is 0")
-        expect(gl_account_balance_of(store, "tenant-a", "cash")).to_equal(0)
-        expect(gl_account_balance_of(store, "tenant-a", "revenue")).to_equal(0)
+        expect(gl_account_balance_of(store, "tenant-a", "cash")).to_equal(0)  # oracle: authoritative expected value documented by this spec's contract
+        expect(gl_account_balance_of(store, "tenant-a", "revenue")).to_equal(0)  # oracle: authoritative expected value documented by this spec's contract
         store_close(store)
 
 describe "gl vertical — a balanced entry is accepted and folds prove balances":
@@ -111,16 +118,16 @@ describe "gl vertical — a balanced entry is accepted and folds prove balances"
         expect(reason_allowed(r.reason)).to_be(true)
 
         step("Account-balance fold: cash is +1000 (debit-normal), revenue -1000 (credit-normal)")
-        expect(gl_account_balance(store, s, t, cfo, "cash")).to_equal(1000)
-        expect(gl_account_balance(store, s, t, cfo, "revenue")).to_equal(-1000)
+        expect(gl_account_balance(store, s, t, cfo, "cash")).to_equal(1000)  # oracle: authoritative expected value documented by this spec's contract
+        expect(gl_account_balance(store, s, t, cfo, "revenue")).to_equal(-1000)  # oracle: authoritative expected value documented by this spec's contract
 
         step("A second balanced entry accumulates into the same accounts")
         val r2 = gl_post(store, s, t, cfo, envelope("e-2"), "je-2", [
             GlLine(account: "cash", debit_cents: 250, credit_cents: 0),
             GlLine(account: "revenue", debit_cents: 0, credit_cents: 250)])
         expect(r2.reason).to_equal("accepted")
-        expect(gl_account_balance(store, s, t, cfo, "cash")).to_equal(1250)
-        expect(gl_account_balance(store, s, t, cfo, "revenue")).to_equal(-1250)
+        expect(gl_account_balance(store, s, t, cfo, "cash")).to_equal(1250)  # oracle: authoritative expected value documented by this spec's contract
+        expect(gl_account_balance(store, s, t, cfo, "revenue")).to_equal(-1250)  # oracle: authoritative expected value documented by this spec's contract
 
         step("The audit chain recomputes end to end")
         expect(audit_verify_chain(store, "tenant-a")).to_be(true)
@@ -144,13 +151,14 @@ describe "gl vertical — the trial balance nets to zero":
 
         step("Trial balance: total debits (1000+300+400=1700) == total credits (1000+700=1700)")
         val tb = gl_trial_balance(store, s, t, cfo)
-        expect(tb.debit_total).to_equal(1700)
-        expect(tb.credit_total).to_equal(1700)
+        expect(tb.debit_total).to_equal(1700)  # oracle: authoritative expected value documented by this spec's contract
+        expect(tb.credit_total).to_equal(1700)  # oracle: authoritative expected value documented by this spec's contract
         expect(tb.balanced).to_be(true)
         store_close(store)
 
 describe "gl vertical — session gate rejects an inactive session":
     it "reproduce: an inactive session cannot post (invalid-session)":
+        step("Verify: reproduce: an inactive session cannot post (invalid-session)")
         val store = fresh_store("session")
         val t = tenant_a()
         val cfo = cfo_a()
@@ -161,11 +169,12 @@ describe "gl vertical — session gate rejects an inactive session":
         expect(r.ok).to_be(false)
         expect(r.reason).to_equal("invalid-session")
         expect(reason_allowed(r.reason)).to_be(true)
-        expect(gl_account_balance_of(store, "tenant-a", "cash")).to_equal(0)
+        expect(gl_account_balance_of(store, "tenant-a", "cash")).to_equal(0)  # oracle: authoritative expected value documented by this spec's contract
         store_close(store)
 
 describe "gl vertical — rbac denies an unauthorized actor":
     it "reproduce: a sales actor cannot post a journal entry (forbidden)":
+        step("Verify: reproduce: a sales actor cannot post a journal entry (forbidden)")
         val store = fresh_store("rbac")
         val t = tenant_a()
         val clerk = clerk_a()
@@ -175,7 +184,7 @@ describe "gl vertical — rbac denies an unauthorized actor":
         expect(r.ok).to_be(false)
         expect(r.reason).to_equal("forbidden")
         expect(reason_allowed(r.reason)).to_be(true)
-        expect(gl_account_balance_of(store, "tenant-a", "cash")).to_equal(0)
+        expect(gl_account_balance_of(store, "tenant-a", "cash")).to_equal(0)  # oracle: authoritative expected value documented by this spec's contract
         store_close(store)
 
 describe "gl vertical — idempotent replay produces exactly one effect":
@@ -201,7 +210,7 @@ describe "gl vertical — idempotent replay produces exactly one effect":
         expect(reason_allowed(replay.reason)).to_be(true)
 
         step("No second effect — cash still 1000, outbox unchanged")
-        expect(gl_account_balance_of(store, "tenant-a", "cash")).to_equal(1000)
+        expect(gl_account_balance_of(store, "tenant-a", "cash")).to_equal(1000)  # oracle: authoritative expected value documented by this spec's contract
         expect(outbox_pending(store, "tenant-a").len()).to_equal(outbox_after_first)
         store_close(store)
 
@@ -224,8 +233,8 @@ describe "gl vertical — tenant isolation":
             GlLine(account: "revenue", debit_cents: 0, credit_cents: 2000)])
 
         step("Each tenant's fold reads only its own lines")
-        expect(gl_account_balance(store, sa, ta, cfo_a_actor, "cash")).to_equal(1000)
-        expect(gl_account_balance(store, sb, tb, cfo_b, "cash")).to_equal(2000)
-        expect(gl_trial_balance_of(store, "tenant-a").debit_total).to_equal(1000)
-        expect(gl_trial_balance_of(store, "tenant-b").debit_total).to_equal(2000)
+        expect(gl_account_balance(store, sa, ta, cfo_a_actor, "cash")).to_equal(1000)  # oracle: authoritative expected value documented by this spec's contract
+        expect(gl_account_balance(store, sb, tb, cfo_b, "cash")).to_equal(2000)  # oracle: authoritative expected value documented by this spec's contract
+        expect(gl_trial_balance_of(store, "tenant-a").debit_total).to_equal(1000)  # oracle: authoritative expected value documented by this spec's contract
+        expect(gl_trial_balance_of(store, "tenant-b").debit_total).to_equal(2000)  # oracle: authoritative expected value documented by this spec's contract
         store_close(store)

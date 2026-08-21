@@ -22,6 +22,14 @@
 #   fixed64_to_ssh_mpint_pair(sig: [u8]) -> [u8]
 #   ssh_mpint_pair_to_fixed64(blob: [u8]) -> [u8]
 
+"""
+## Purpose and audience
+Purpose: Verify ECDSA-P256 SSH mpint round-trip (pure Simple).
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+
+# @req: REQ-LIB-ECDSA-P256-001 — stable requirement identity for this spec.
+
 use std.spipe.*
 use os.crypto.ecdsa_p256.{
     ecdsa_p256_sign_fixed,
@@ -105,37 +113,45 @@ fn _flip_byte(bytes: [u8], idx: i64) -> [u8]:
 # Path D — SSH mpint round-trip (pure Simple, no runtime crypto backend)
 # ============================================================================
 
+use std.spec.step
+
 describe "ECDSA-P256 SSH mpint round-trip (pure Simple)":
 
     it "fixed64_to_ssh_mpint_pair produces non-empty output for well-formed 64-byte sig":
+        step("Verify: fixed64_to_ssh_mpint_pair produces non-empty output for well-formed 64-byte sig")
+        # @req: REQ-LIB-ECDSA-P256-001
         val sig = _mpint_fixed64()
         val wire = fixed64_to_ssh_mpint_pair(sig)
         expect(wire.len() > 0).to_equal(true)
 
     it "ssh_mpint_pair_to_fixed64 inverts fixed64_to_ssh_mpint_pair":
+        step("Verify: ssh_mpint_pair_to_fixed64 inverts fixed64_to_ssh_mpint_pair")
         val sig = _mpint_fixed64()
         val wire = fixed64_to_ssh_mpint_pair(sig)
         val recovered = ssh_mpint_pair_to_fixed64(wire)
         expect(recovered).to_equal(sig)
 
     it "fixed64_to_ssh_mpint_pair pads high-bit-set s component with 0x00":
+        step("Verify: fixed64_to_ssh_mpint_pair pads high-bit-set s component with 0x00")
         # s starts with 0x81 (high bit set), so mpint length must be 33
         val sig = _mpint_fixed64()
         val wire = fixed64_to_ssh_mpint_pair(sig)
         # r: no high bit — mpint len = 32; r consumes 4+32 = 36 bytes
         # s: high bit set — mpint len = 33; s offset = 36; s len prefix at [36..39]
         val s_len: i64 = (wire[36u64].to_i64() << 24) | (wire[37u64].to_i64() << 16) | (wire[38u64].to_i64() << 8) | wire[39u64].to_i64()
-        expect(s_len).to_equal(33)
+        expect(s_len).to_equal(33)  # oracle: authoritative expected value documented by this spec's contract
 
     it "fixed64_to_ssh_mpint_pair returns empty for sig shorter than 64 bytes":
+        step("Verify: fixed64_to_ssh_mpint_pair returns empty for sig shorter than 64 bytes")
         val short_sig: [u8] = [0x01u8, 0x02u8, 0x03u8]
         val result = fixed64_to_ssh_mpint_pair(short_sig)
-        expect(result.len()).to_equal(0)
+        expect(result.len()).to_equal(0)  # oracle: authoritative expected value documented by this spec's contract
 
     it "ssh_mpint_pair_to_fixed64 returns empty for truncated wire input":
+        step("Verify: ssh_mpint_pair_to_fixed64 returns empty for truncated wire input")
         val truncated: [u8] = [0x00u8, 0x00u8, 0x00u8, 0x04u8, 0x01u8, 0x02u8, 0x03u8, 0x04u8]
         val result = ssh_mpint_pair_to_fixed64(truncated)
-        expect(result.len()).to_equal(0)
+        expect(result.len()).to_equal(0)  # oracle: authoritative expected value documented by this spec's contract
 
 # ============================================================================
 # Path B — Round-trip sign + verify (non-deterministic, fixed PKCS#8 test key)
@@ -144,21 +160,25 @@ describe "ECDSA-P256 SSH mpint round-trip (pure Simple)":
 describe "ECDSA-P256-SHA-256 round-trip sign + verify":
 
     it "sign returns a 64-byte signature":
+        step("Verify: sign returns a 64-byte signature")
         val sig = ecdsa_p256_sign_fixed(_pkcs8(), [])
-        expect(sig.len()).to_equal(64)
+        expect(sig.len()).to_equal(64)  # oracle: authoritative expected value documented by this spec's contract
 
     it "signs and verifies an empty message":
+        step("Verify: signs and verifies an empty message")
         val sig = ecdsa_p256_sign_fixed(_pkcs8(), [])
         val ok = ecdsa_p256_verify_fixed(_spki(), [], sig)
         expect(ok).to_equal(true)
 
     it "signs and verifies a short ASCII message":
+        step("Verify: signs and verifies a short ASCII message")
         val msg: [u8] = [0x68u8, 0x65u8, 0x6cu8, 0x6cu8, 0x6fu8]
         val sig = ecdsa_p256_sign_fixed(_pkcs8(), msg)
         val ok = ecdsa_p256_verify_fixed(_spki(), msg, sig)
         expect(ok).to_equal(true)
 
     it "signature is rejected under a different public key":
+        step("Verify: signature is rejected under a different public key")
         val msg: [u8] = [0x68u8, 0x65u8, 0x6cu8, 0x6cu8, 0x6fu8]
         val sig = ecdsa_p256_sign_fixed(_pkcs8(), msg)
         # Use CAVP public key — different from the signer's key
@@ -166,6 +186,7 @@ describe "ECDSA-P256-SHA-256 round-trip sign + verify":
         expect(ok).to_equal(false)
 
     it "signature is rejected when the first byte is flipped":
+        step("Verify: signature is rejected when the first byte is flipped")
         val msg: [u8] = [0x68u8, 0x65u8, 0x6cu8, 0x6cu8, 0x6fu8]
         val sig = ecdsa_p256_sign_fixed(_pkcs8(), msg)
         val bad_sig = _flip_byte(sig, 0)
@@ -173,6 +194,7 @@ describe "ECDSA-P256-SHA-256 round-trip sign + verify":
         expect(ok).to_equal(false)
 
     it "signature is rejected when the message is modified":
+        step("Verify: signature is rejected when the message is modified")
         val msg: [u8] = [0x68u8, 0x65u8, 0x6cu8, 0x6cu8, 0x6fu8]
         val sig = ecdsa_p256_sign_fixed(_pkcs8(), msg)
         val bad_msg: [u8] = [0x68u8, 0x65u8, 0x6cu8, 0x6cu8, 0x6fu8, 0x21u8]
@@ -186,15 +208,18 @@ describe "ECDSA-P256-SHA-256 round-trip sign + verify":
 describe "ECDSA-P256-SHA-256 NIST CAVP SigVer":
 
     it "NIST CAVP P-256 SHA-256 vector verifies (Result = P)":
+        step("Verify: NIST CAVP P-256 SHA-256 vector verifies (Result = P)")
         val ok = ecdsa_p256_verify_fixed(_cavp_spki(), _cavp_msg(), _cavp_sig_fixed64())
         expect(ok).to_equal(true)
 
     it "NIST CAVP vector is rejected when signature r-byte is flipped":
+        step("Verify: NIST CAVP vector is rejected when signature r-byte is flipped")
         val bad_sig = _flip_byte(_cavp_sig_fixed64(), 0)
         val ok = ecdsa_p256_verify_fixed(_cavp_spki(), _cavp_msg(), bad_sig)
         expect(ok).to_equal(false)
 
     it "NIST CAVP vector is rejected when message is truncated":
+        step("Verify: NIST CAVP vector is rejected when message is truncated")
         val full_msg = _cavp_msg()
         var short_msg: [u8] = []
         var i: i64 = 0

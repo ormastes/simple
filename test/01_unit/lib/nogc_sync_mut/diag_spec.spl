@@ -11,6 +11,14 @@
 # SIMPLE_DIAG is read once and cached, so env changes mid-process are
 # intentionally invisible.
 
+"""
+## Purpose and audience
+Purpose: Verify std.diag disabled by default.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+
+# @req: REQ-LIB-DIAG-001 — stable requirement identity for this spec.
+
 use std.diag.{
     dbg_stage, dbg_stage_on, dbg_watchdog_on, dbg_timers_on, dbg_events_on,
     dbg_force_facet, dbg_diag_reset, dbg_last_emit,
@@ -26,8 +34,12 @@ use std.io_runtime.{file_read}
 
 val DIAG_SOURCE: text = "src/lib/nogc_sync_mut/diag.spl"
 
+use std.spec.step
+
 describe "std.diag disabled by default":
     it "emits nothing when no SIMPLE_DIAG facet is enabled":
+        step("Verify: emits nothing when no SIMPLE_DIAG facet is enabled")
+        # @req: REQ-LIB-DIAG-001
         dbg_diag_reset()
         expect(dbg_stage_on()).to_equal(false)
         expect(dbg_watchdog_on()).to_equal(false)
@@ -42,12 +54,13 @@ describe "std.diag disabled by default":
         dbg_stage("browser", "first_frame_done")
 
         expect(dbg_last_emit()).to_equal("")
-        expect(dbg_stage_history().len()).to_equal(0)
-        expect(dbg_deadline_breach_count()).to_equal(0)
-        expect(dbg_timer_stats("reflow").count).to_equal(0)
+        expect(dbg_stage_history().len()).to_equal(0)  # oracle: authoritative expected value documented by this spec's contract
+        expect(dbg_deadline_breach_count()).to_equal(0)  # oracle: authoritative expected value documented by this spec's contract
+        expect(dbg_timer_stats("reflow").count).to_equal(0)  # oracle: authoritative expected value documented by this spec's contract
 
 describe "std.diag facet filtering":
     it "stage facet emits stage lines but leaves events silent":
+        step("Verify: stage facet emits stage lines but leaves events silent")
         dbg_diag_reset()
         dbg_force_facet("stage")
 
@@ -60,6 +73,7 @@ describe "std.diag facet filtering":
         expect(dbg_last_emit()).to_equal(before)
 
     it "events facet emits hop lines in the contract format":
+        step("Verify: events facet emits hop lines in the contract format")
         dbg_diag_reset()
         dbg_force_facet("events")
 
@@ -68,6 +82,7 @@ describe "std.diag facet filtering":
 
 describe "std.diag stage ring + monotonicity":
     it "records history in order with non-decreasing timestamps":
+        step("Verify: records history in order with non-decreasing timestamps")
         dbg_diag_reset()
         dbg_force_facet("stage")
 
@@ -76,7 +91,7 @@ describe "std.diag stage ring + monotonicity":
         dbg_stage("wm", "c")
 
         val hist = dbg_stage_history()
-        expect(hist.len()).to_equal(3)
+        expect(hist.len()).to_equal(3)  # oracle: authoritative expected value documented by this spec's contract
         expect(hist[0].stage).to_equal("a")
         expect(hist[2].stage).to_equal("c")
         expect(hist[1].t_ms >= hist[0].t_ms).to_equal(true)
@@ -84,6 +99,7 @@ describe "std.diag stage ring + monotonicity":
 
 describe "std.diag cooperative watchdog":
     it "fires exactly once with stage history in the breach block":
+        step("Verify: fires exactly once with stage history in the breach block")
         dbg_diag_reset()
         dbg_force_facet("watchdog")
         dbg_force_facet("stage")
@@ -94,20 +110,21 @@ describe "std.diag cooperative watchdog":
         # budget -1 guarantees elapsed (>= 0) > budget on the next check,
         # without real sleeps.
         dbg_deadline("first-frame", -1)
-        expect(dbg_deadline_active_count()).to_equal(1)
+        expect(dbg_deadline_active_count()).to_equal(1)  # oracle: authoritative expected value documented by this spec's contract
 
         dbg_stage("browser", "render_next")
 
-        expect(dbg_deadline_breach_count()).to_equal(1)
-        expect(dbg_deadline_active_count()).to_equal(0)
+        expect(dbg_deadline_breach_count()).to_equal(1)  # oracle: authoritative expected value documented by this spec's contract
+        expect(dbg_deadline_active_count()).to_equal(0)  # oracle: authoritative expected value documented by this spec's contract
         expect(dbg_last_breach()).to_contain("DEADLINE EXCEEDED first-frame budget=-1ms")
         expect(dbg_last_breach()).to_contain("stage render_mid")
 
         # fire-once: further stages do not re-fire
         dbg_stage("browser", "render_after")
-        expect(dbg_deadline_breach_count()).to_equal(1)
+        expect(dbg_deadline_breach_count()).to_equal(1)  # oracle: authoritative expected value documented by this spec's contract
 
     it "does not fire when cleared on the success path":
+        step("Verify: does not fire when cleared on the success path")
         dbg_diag_reset()
         dbg_force_facet("watchdog")
 
@@ -115,20 +132,22 @@ describe "std.diag cooperative watchdog":
         dbg_deadline_clear("safe-op")
         dbg_stage("browser", "after_clear")
 
-        expect(dbg_deadline_breach_count()).to_equal(0)
-        expect(dbg_deadline_active_count()).to_equal(0)
+        expect(dbg_deadline_breach_count()).to_equal(0)  # oracle: authoritative expected value documented by this spec's contract
+        expect(dbg_deadline_active_count()).to_equal(0)  # oracle: authoritative expected value documented by this spec's contract
 
     it "explicit dbg_deadline_check reports and fires the breach":
+        step("Verify: explicit dbg_deadline_check reports and fires the breach")
         dbg_diag_reset()
         dbg_force_facet("watchdog")
 
         dbg_deadline("explicit", -1)
         expect(dbg_deadline_check("explicit")).to_equal(true)
         expect(dbg_deadline_check("explicit")).to_equal(false)
-        expect(dbg_deadline_breach_count()).to_equal(1)
+        expect(dbg_deadline_breach_count()).to_equal(1)  # oracle: authoritative expected value documented by this spec's contract
 
 describe "std.diag timers and counters":
     it "accumulates count/total/max across begin-end pairs":
+        step("Verify: accumulates count/total/max across begin-end pairs")
         dbg_diag_reset()
         dbg_force_facet("timers")
 
@@ -140,21 +159,23 @@ describe "std.diag timers and counters":
         dbg_time_end("css_apply")
 
         val stats = dbg_timer_stats("css_apply")
-        expect(stats.count).to_equal(3)
+        expect(stats.count).to_equal(3)  # oracle: authoritative expected value documented by this spec's contract
         expect(stats.total_ms >= 0).to_equal(true)
         expect(stats.total_ms >= stats.max_ms).to_equal(true)
 
     it "adds counter deltas and reports them in the summary":
+        step("Verify: adds counter deltas and reports them in the summary")
         dbg_diag_reset()
         dbg_force_facet("timers")
 
         dbg_count("bytes_sent", 5)
         dbg_count("bytes_sent", 3)
 
-        expect(dbg_counter_value("bytes_sent")).to_equal(8)
+        expect(dbg_counter_value("bytes_sent")).to_equal(8)  # oracle: authoritative expected value documented by this spec's contract
         expect(dbg_summary()).to_contain("counter bytes_sent = 8")
 
     it "summary formats timer lines per contract":
+        step("Verify: summary formats timer lines per contract")
         dbg_diag_reset()
         dbg_force_facet("timers")
 
@@ -165,6 +186,7 @@ describe "std.diag timers and counters":
         expect(dbg_summary()).to_contain("max=")
 
     it "summary handles multiple labels (sorted-by-total path)":
+        step("Verify: summary handles multiple labels (sorted-by-total path)")
         dbg_diag_reset()
         dbg_force_facet("timers")
 
@@ -179,6 +201,7 @@ describe "std.diag timers and counters":
         expect(dbg_summary()).to_contain("style count=1")
 
     it "orders summary lines by total_ms descending":
+        step("Verify: orders summary lines by total_ms descending")
         # The assertions above check only that both labels APPEAR, so they stay
         # green even with the sort deleted outright. This one pins the order,
         # which is the actual contract of `_sorted_timer_stats`.
@@ -218,26 +241,29 @@ describe "std.diag timers and counters":
 
 describe "std.diag provenance (always-on)":
     it "reports a mismatch even with every facet disabled":
+        step("Verify: reports a mismatch even with every facet disabled")
         dbg_diag_reset()
         expect(dbg_stage_on()).to_equal(false)
 
         val ok = dbg_provenance("device_readback", "cpu_mirror", "readback")
 
         expect(ok).to_equal(false)
-        expect(dbg_provenance_mismatches()).to_equal(1)
+        expect(dbg_provenance_mismatches()).to_equal(1)  # oracle: authoritative expected value documented by this spec's contract
         expect(dbg_last_mismatch()).to_equal(
             "DIAG-PROVENANCE context=readback claimed=device_readback actual=cpu_mirror")
 
     it "returns true and stays silent when provenance matches":
+        step("Verify: returns true and stays silent when provenance matches")
         dbg_diag_reset()
         val ok = dbg_provenance("metal", "metal", "backend_resolve")
 
         expect(ok).to_equal(true)
-        expect(dbg_provenance_mismatches()).to_equal(0)
+        expect(dbg_provenance_mismatches()).to_equal(0)  # oracle: authoritative expected value documented by this spec's contract
         expect(dbg_last_emit()).to_equal("")
 
 describe "std.diag durable file sink contract":
     it "mirrors emitted lines to the opt-in SIMPLE_DIAG_FILE":
+        step("Verify: mirrors emitted lines to the opt-in SIMPLE_DIAG_FILE")
         val s = file_read(DIAG_SOURCE)
         # std.diag now reaches the environment and the filesystem through the
         # stdlib wrappers rather than raw `rt_*` externs (the direction

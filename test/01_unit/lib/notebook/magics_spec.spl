@@ -1,4 +1,8 @@
 """
+## Purpose and audience
+Purpose: Verify parse_magics — stripping magic lines from raw cell source.
+Audience: compiler and tooling engineers who maintain this spec.
+
 Notebook magics unit spec (Stream K, task K3).
 
 Covers parsing/stripping of every magic (%mode, %%mode, %lanes, %reset,
@@ -8,6 +12,8 @@ Covers parsing/stripping of every magic (%mode, %%mode, %lanes, %reset,
 Design: doc/05_design/app/tools/notebook_lanes_architecture.md §3
 Plan:   doc/03_plan/agent_tasks/notebook_lanes_parallel_plan_2026-08-07.md (Stream K, K3)
 """
+
+# @req: REQ-LIB-MAGICS-001 — stable requirement identity for this spec.
 
 use std.spec
 use std.notebook.types.{CellResult, SessionOpts, LaneStatus, cell_result_ok}
@@ -68,6 +74,8 @@ fn manager_with_fake_factory() -> KernelSessionManager:
 describe "parse_magics — stripping magic lines from raw cell source":
 
     it "a cell with no magics is returned untouched":
+        step("Verify: a cell with no magics is returned untouched")
+        # @req: REQ-LIB-MAGICS-001
         val parsed = parse_magics("val x = 1\nprint(x)")
         expect(parsed.error).to_equal("")
         expect(parsed.code).to_equal("val x = 1\nprint(x)")
@@ -75,12 +83,14 @@ describe "parse_magics — stripping magic lines from raw cell source":
         expect(parsed.cell_mode_override).to_equal("")
 
     it "%mode is stripped and recorded, code preserved":
+        step("Verify: %mode is stripped and recorded, code preserved")
         val parsed = parse_magics("%mode interpreter(remote(baremetal(riscv32)))\nval x = 1")
         expect(parsed.error).to_equal("")
         expect(parsed.mode).to_equal("interpreter(remote(baremetal(riscv32)))")
         expect(parsed.code).to_equal("val x = 1")
 
     it "%%mode as the first line is stripped and recorded as a cell override":
+        step("Verify: %%mode as the first line is stripped and recorded as a cell override")
         val parsed = parse_magics("%%mode interpreter(remote(vulkan(spv15)))\nval x = 1")
         expect(parsed.error).to_equal("")
         expect(parsed.cell_mode_override).to_equal("interpreter(remote(vulkan(spv15)))")
@@ -89,62 +99,73 @@ describe "parse_magics — stripping magic lines from raw cell source":
         expect(parsed.mode).to_equal("")
 
     it "%%mode NOT on the first line is an unknown-magic-position error":
+        step("Verify: %%mode NOT on the first line is an unknown-magic-position error")
         val parsed = parse_magics("%mode interpreter\n%%mode interpreter(remote(vulkan(spv15)))\nval x = 1")
         expect_not(parsed.error == "")
         assert_true(parsed.error.contains("%%mode"))
         assert_true(parsed.error.contains("first line"))
 
     it "a bare %lanes cell strips to empty code":
+        step("Verify: a bare %lanes cell strips to empty code")
         val parsed = parse_magics("%lanes")
         expect(parsed.error).to_equal("")
         assert_true(parsed.lanes)
         expect(parsed.code).to_equal("")
 
     it "%reset is recognized":
+        step("Verify: %reset is recognized")
         val parsed = parse_magics("%reset\nval x = 1")
         expect(parsed.error).to_equal("")
         assert_true(parsed.reset)
         expect(parsed.code).to_equal("val x = 1")
 
     it "%budget parses its integer argument":
+        step("Verify: %budget parses its integer argument")
         val parsed = parse_magics("%budget 100000000\nval x = 1")
         expect(parsed.error).to_equal("")
-        expect(parsed.budget).to_equal(100000000)
+        expect(parsed.budget).to_equal(100000000)  # oracle: authoritative expected value documented by this spec's contract
 
     it "%timeout parses its integer argument":
+        step("Verify: %timeout parses its integer argument")
         val parsed = parse_magics("%timeout 60000\nval x = 1")
         expect(parsed.error).to_equal("")
-        expect(parsed.timeout_ms).to_equal(60000)
+        expect(parsed.timeout_ms).to_equal(60000)  # oracle: authoritative expected value documented by this spec's contract
 
     it "%onfault parses its argument":
+        step("Verify: %onfault parses its argument")
         val parsed = parse_magics("%onfault reset\nval x = 1")
         expect(parsed.error).to_equal("")
         expect(parsed.onfault).to_equal("reset")
 
     it "%budget with a non-integer argument is a diagnostic error":
+        step("Verify: %budget with a non-integer argument is a diagnostic error")
         val parsed = parse_magics("%budget nope")
         expect_not(parsed.error == "")
         assert_true(parsed.error.contains("%budget"))
 
     it "%timeout with no argument is a diagnostic error":
+        step("Verify: %timeout with no argument is a diagnostic error")
         val parsed = parse_magics("%timeout")
         expect_not(parsed.error == "")
         assert_true(parsed.error.contains("%timeout"))
 
     it "%onfault with no argument is a diagnostic error":
+        step("Verify: %onfault with no argument is a diagnostic error")
         val parsed = parse_magics("%onfault")
         expect_not(parsed.error == "")
         assert_true(parsed.error.contains("%onfault"))
 
     it "multiple leading magics combine, then the real cell body follows":
+        step("Verify: multiple leading magics combine, then the real cell body follows")
         val parsed = parse_magics("%budget 5\n%timeout 10\n%onfault reset\nval x = 1\nval y = 2")
         expect(parsed.error).to_equal("")
-        expect(parsed.budget).to_equal(5)
-        expect(parsed.timeout_ms).to_equal(10)
+        expect(parsed.budget).to_equal(5)  # oracle: authoritative expected value documented by this spec's contract
+        expect(parsed.timeout_ms).to_equal(10)  # oracle: authoritative expected value documented by this spec's contract
         expect(parsed.onfault).to_equal("reset")
         expect(parsed.code).to_equal("val x = 1\nval y = 2")
 
     it "an unknown magic errors with the supported list, not silent ignore":
+        step("Verify: an unknown magic errors with the supported list, not silent ignore")
         val parsed = parse_magics("%frobnicate 1\nval x = 1")
         expect_not(parsed.error == "")
         assert_true(parsed.error.contains("Unknown magic"))
@@ -157,11 +178,13 @@ describe "parse_magics — stripping magic lines from raw cell source":
         assert_true(parsed.error.contains("%onfault"))
 
     it "a percent sign that is not a leading magic line is left alone (not treated as a magic)":
+        step("Verify: a percent sign that is not a leading magic line is left alone (not treated as a magic)")
         val parsed = parse_magics("val x = 10 % 3\nprint(x)")
         expect(parsed.error).to_equal("")
         expect(parsed.code).to_equal("val x = 10 % 3\nprint(x)")
 
     it "a near-miss keyword with no word boundary is treated as unknown, not misparsed":
+        step("Verify: a near-miss keyword with no word boundary is treated as unknown, not misparsed")
         val parsed = parse_magics("%modexyz 1")
         expect_not(parsed.error == "")
         assert_true(parsed.error.contains("%modexyz"))
@@ -170,6 +193,7 @@ describe "parse_magics — stripping magic lines from raw cell source":
 describe "dispatch_magics — integration against KernelSessionManager":
 
     it "%mode changes the session default via the manager and confirms it":
+        step("Verify: %mode changes the session default via the manager and confirms it")
         val mgr = manager_with_fake_factory()
         val _ = mgr.create_session("s1", "interpreter")
         val state = MagicsState.create()
@@ -180,6 +204,7 @@ describe "dispatch_magics — integration against KernelSessionManager":
         assert_true(result.message.contains("interpreter(remote(baremetal(riscv32)))"))
 
     it "an invalid %mode spec surfaces the manager's diagnostic, session default unchanged":
+        step("Verify: an invalid %mode spec surfaces the manager's diagnostic, session default unchanged")
         val mgr = manager_with_fake_factory()
         val _ = mgr.create_session("s1", "interpreter")
         val state = MagicsState.create()
@@ -188,6 +213,7 @@ describe "dispatch_magics — integration against KernelSessionManager":
         expect(mgr.default_mode_of("s1")).to_equal("interpreter")
 
     it "%reset resets every cached lane executor for the session":
+        step("Verify: %reset resets every cached lane executor for the session")
         val mgr = manager_with_fake_factory()
         val _ = mgr.create_session("s1", "interpreter")
         val r1 = mgr.execute_cell("s1", "code-a", "cell-1", "")
@@ -198,6 +224,7 @@ describe "dispatch_magics — integration against KernelSessionManager":
         assert_true(result.message.contains("reset"))
 
     it "%%mode cell isolation: the override runs on its own lane without changing the session default, and does not leak state to the next default-lane cell":
+        step("Verify: %%mode cell isolation: the override runs on its own lane without changing the session default, and does not leak state to the next default-lane cell")
         val mgr = manager_with_fake_factory()
         val _ = mgr.create_session("s1", "interpreter")
         val state = MagicsState.create()
@@ -228,19 +255,21 @@ describe "dispatch_magics — integration against KernelSessionManager":
         expect(r3.stdout_delta).to_equal("echo(interpreter): cell-three-code")
 
     it "%budget/%timeout/%onfault update MagicsState and are echoed in the confirmation message":
+        step("Verify: %budget/%timeout/%onfault update MagicsState and are echoed in the confirmation message")
         val mgr = manager_with_fake_factory()
         val _ = mgr.create_session("s1", "interpreter")
         val state = MagicsState.create()
         val result = dispatch_magics(mgr, "s1", state, "%budget 100000000\n%timeout 60000\n%onfault reset")
         expect(result.error).to_equal("")
-        expect(state.budget).to_equal(100000000)
-        expect(state.timeout_ms).to_equal(60000)
+        expect(state.budget).to_equal(100000000)  # oracle: authoritative expected value documented by this spec's contract
+        expect(state.timeout_ms).to_equal(60000)  # oracle: authoritative expected value documented by this spec's contract
         assert_true(state.onfault_reset)
         assert_true(result.message.contains("100000000"))
         assert_true(result.message.contains("60000"))
         assert_true(result.message.contains("reset"))
 
     it "%lanes reports the session default and any cached lane executors, probed live":
+        step("Verify: %lanes reports the session default and any cached lane executors, probed live")
         val mgr = manager_with_fake_factory()
         val _ = mgr.create_session("s1", "interpreter")
         val _ = mgr.execute_cell("s1", "warm up the default lane", "cell-1", "")
@@ -251,6 +280,7 @@ describe "dispatch_magics — integration against KernelSessionManager":
         assert_true(result.message.contains("interpreter: available"))
 
     it "an unknown magic never reaches the executor and stops the cell":
+        step("Verify: an unknown magic never reaches the executor and stops the cell")
         val mgr = manager_with_fake_factory()
         val _ = mgr.create_session("s1", "interpreter")
         val state = MagicsState.create()

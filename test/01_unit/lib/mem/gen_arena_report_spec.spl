@@ -4,82 +4,95 @@
 # the raw allocator dump (src/lib/nogc_sync_mut/mem/dump.spl) so 'simple mem'
 # tooling can cover all three allocator models: gc, nogc, and index-based.
 
+"""
+## Purpose and audience
+Purpose: Verify GenArena<T> observability.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+
+# @req: REQ-LIB-GEN-ARENA-REPORT-001 — stable requirement identity for this spec.
+
 use std.spec
 use std.mem.gen_arena.{GenArena, GenHandle}
 
 describe "GenArena<T> observability":
 
     it "counts allocs, frees, live, and peak across a known sequence":
+        step("Verify: counts allocs, frees, live, and peak across a known sequence")
+        # @req: REQ-LIB-GEN-ARENA-REPORT-001
         var arena = GenArena<i64>.new()
-        expect(arena.alloc_count).to_equal(0)
-        expect(arena.free_count).to_equal(0)
-        expect(arena.live_count).to_equal(0)
-        expect(arena.peak_count).to_equal(0)
+        expect(arena.alloc_count).to_equal(0)  # oracle: authoritative expected value documented by this spec's contract
+        expect(arena.free_count).to_equal(0)  # oracle: authoritative expected value documented by this spec's contract
+        expect(arena.live_count).to_equal(0)  # oracle: authoritative expected value documented by this spec's contract
+        expect(arena.peak_count).to_equal(0)  # oracle: authoritative expected value documented by this spec's contract
 
         val h1 = arena.alloc(1)
         val h2 = arena.alloc(2)
         val h3 = arena.alloc(3)
-        expect(arena.alloc_count).to_equal(3)
-        expect(arena.live_count).to_equal(3)
-        expect(arena.peak_count).to_equal(3)
+        expect(arena.alloc_count).to_equal(3)  # oracle: authoritative expected value documented by this spec's contract
+        expect(arena.live_count).to_equal(3)  # oracle: authoritative expected value documented by this spec's contract
+        expect(arena.peak_count).to_equal(3)  # oracle: authoritative expected value documented by this spec's contract
 
         arena.free(h2)
-        expect(arena.free_count).to_equal(1)
-        expect(arena.live_count).to_equal(2)
+        expect(arena.free_count).to_equal(1)  # oracle: authoritative expected value documented by this spec's contract
+        expect(arena.live_count).to_equal(2)  # oracle: authoritative expected value documented by this spec's contract
         # Peak stays at the high-water mark even after a free.
-        expect(arena.peak_count).to_equal(3)
+        expect(arena.peak_count).to_equal(3)  # oracle: authoritative expected value documented by this spec's contract
 
         # Reusing the freed slot must not push live_count above the prior
         # peak (it re-occupies slot h2's index, net live count is still 3).
         val h4 = arena.alloc(4)
-        expect(arena.alloc_count).to_equal(4)
-        expect(arena.live_count).to_equal(3)
-        expect(arena.peak_count).to_equal(3)
+        expect(arena.alloc_count).to_equal(4)  # oracle: authoritative expected value documented by this spec's contract
+        expect(arena.live_count).to_equal(3)  # oracle: authoritative expected value documented by this spec's contract
+        expect(arena.peak_count).to_equal(3)  # oracle: authoritative expected value documented by this spec's contract
 
         arena.free(h1)
         arena.free(h3)
         arena.free(h4)
-        expect(arena.free_count).to_equal(4)
-        expect(arena.live_count).to_equal(0)
-        expect(arena.peak_count).to_equal(3)
+        expect(arena.free_count).to_equal(4)  # oracle: authoritative expected value documented by this spec's contract
+        expect(arena.live_count).to_equal(0)  # oracle: authoritative expected value documented by this spec's contract
+        expect(arena.peak_count).to_equal(3)  # oracle: authoritative expected value documented by this spec's contract
 
     it "a stale-generation get() increments stale_count instead of just rejecting silently":
+        step("Verify: a stale-generation get() increments stale_count instead of just rejecting silently")
         var arena = GenArena<i64>.new()
         val h_old = arena.alloc(10)
-        expect(arena.stale_count).to_equal(0)
+        expect(arena.stale_count).to_equal(0)  # oracle: authoritative expected value documented by this spec's contract
         arena.free(h_old)
 
         val h_new = arena.alloc(20)
 
         # Fresh handle: no stale hit.
-        expect(arena.get(h_new) ?? -1).to_equal(20)
-        expect(arena.stale_count).to_equal(0)
+        expect(arena.get(h_new) ?? -1).to_equal(20)  # oracle: authoritative expected value documented by this spec's contract
+        expect(arena.stale_count).to_equal(0)  # oracle: authoritative expected value documented by this spec's contract
 
         # Stale (pre-free) handle to the recycled slot: rejected AND counted.
         expect(arena.get(h_old)).to_be_nil()
-        expect(arena.stale_count).to_equal(1)
+        expect(arena.stale_count).to_equal(1)  # oracle: authoritative expected value documented by this spec's contract
 
         # A second stale access on the same stale handle counts again.
         expect(arena.get(h_old)).to_be_nil()
-        expect(arena.stale_count).to_equal(2)
+        expect(arena.stale_count).to_equal(2)  # oracle: authoritative expected value documented by this spec's contract
 
     it "a stale-generation set() and free() also increment stale_count":
+        step("Verify: a stale-generation set() and free() also increment stale_count")
         var arena = GenArena<i64>.new()
         val h_old = arena.alloc(100)
         arena.free(h_old)
         val h_new = arena.alloc(200)
 
         expect(arena.set(h_old, 999)).to_equal(false)
-        expect(arena.stale_count).to_equal(1)
+        expect(arena.stale_count).to_equal(1)  # oracle: authoritative expected value documented by this spec's contract
 
         expect(arena.free(h_old)).to_equal(false)
-        expect(arena.stale_count).to_equal(2)
+        expect(arena.stale_count).to_equal(2)  # oracle: authoritative expected value documented by this spec's contract
 
         # New handle unaffected.
-        expect(arena.get(h_new) ?? -1).to_equal(200)
-        expect(arena.stale_count).to_equal(2)
+        expect(arena.get(h_new) ?? -1).to_equal(200)  # oracle: authoritative expected value documented by this spec's contract
+        expect(arena.stale_count).to_equal(2)  # oracle: authoritative expected value documented by this spec's contract
 
     it "report() renders a fixed-format GEN_ARENA TSV snapshot line":
+        step("Verify: report() renders a fixed-format GEN_ARENA TSV snapshot line")
         var arena = GenArena<i64>.new()
         val h1 = arena.alloc(1)
         arena.alloc(2)
@@ -89,7 +102,7 @@ describe "GenArena<T> observability":
         val line = arena.report("test_arena")
         val fields = line.trim().split("\t")
 
-        expect(fields.len()).to_equal(7)
+        expect(fields.len()).to_equal(7)  # oracle: authoritative expected value documented by this spec's contract
         expect(fields[0]).to_equal("GEN_ARENA")
         expect(fields[1]).to_equal("test_arena")
         expect(fields[2]).to_equal("1")

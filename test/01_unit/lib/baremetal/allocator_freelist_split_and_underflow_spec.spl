@@ -1,4 +1,8 @@
 """
+## Purpose and audience
+Purpose: Verify FreeListAllocator split path.
+Audience: compiler and tooling engineers who maintain this spec.
+
 # Bare-Metal Allocator — free-list split path + unsigned-underflow family
 
 **Category:** Baremetal
@@ -27,6 +31,8 @@ The underflow examples need no such workaround: `sat_sub()` is a plain `u32`
 function, and `FixedBlockAllocator.available()` touches no memory at all, so
 both are exercised directly against the real module.
 """
+
+# @req: REQ-LIB-ALLOCATOR-FREELIST-SPLIT-001 — stable requirement identity for this spec.
 
 use std.baremetal.allocator.{FixedBlockAllocator, sat_sub}
 
@@ -130,9 +136,13 @@ fn sim_alloc_buggy(mem: [i64], free_list: i64, req_size: i64) -> (i64, i64):
 
     (result, new_free_list)
 
+use std.spec.step
+
 describe "FreeListAllocator split path":
     context "reproduction of the pre-fix algorithm (transcribed over i64 memory)":
         it "orphans the remainder after the first splitting alloc — confirms the filed bug":
+            step("Verify: orphans the remainder after the first splitting alloc — confirms the filed bug")
+            # @req: REQ-LIB-ALLOCATOR-FREELIST-SPLIT-001
             # `bin/simple test` runs the tree-walk interpreter, where array
             # `.push()` is O(n) per call (documented seed limitation), so
             # these sizes are kept deliberately small — the algorithm being
@@ -145,11 +155,12 @@ describe "FreeListAllocator split path":
             expect(addr1).to_be_greater_than(0)
             # This is the defect: the free list has collapsed to 0 even
             # though most of the heap remains, so every later alloc fails.
-            expect(fl1).to_equal(0)
-            expect(addr2).to_equal(-1)
+            expect(fl1).to_equal(0)  # oracle: authoritative expected value documented by this spec's contract
+            expect(addr2).to_equal(-1)  # oracle: authoritative expected value documented by this spec's contract
 
     context "fixed algorithm (transcribed over i64 memory)":
         it "keeps the remainder block reachable after a splitting alloc":
+            step("Verify: keeps the remainder block reachable after a splitting alloc")
             val mem = make_sim_mem(150)
             val fl0 = sim_init(mem, 10, 100)
             val (addr1, fl1) = sim_alloc_fixed(mem, fl0, 8)
@@ -160,6 +171,7 @@ describe "FreeListAllocator split path":
             expect(fl1).to_equal(addr1 - HEADER_WORDS + (HEADER_WORDS + 8))
 
         it "serves many further allocations out of the remainder":
+            step("Verify: serves many further allocations out of the remainder")
             # 10 allocs of 5 words (total_size 8 with the header) need >= 80
             # words; 150 leaves room for split remainders.
             val mem = make_sim_mem(200)
@@ -174,20 +186,23 @@ describe "FreeListAllocator split path":
                 i = i + 1
 
             # Pre-fix, only the very first alloc succeeds (successes == 1).
-            expect(successes).to_equal(10)
+            expect(successes).to_equal(10)  # oracle: authoritative expected value documented by this spec's contract
 
 describe "u32 unsigned-underflow guards (sat_sub family)":
     context "sat_sub() — the shared saturating-subtraction helper":
         it "floors at 0 instead of wrapping when b > a":
-            expect(sat_sub(0u32, 1u32).to_i64()).to_equal(0)
-            expect(sat_sub(2u32, 5u32).to_i64()).to_equal(0)
+            step("Verify: floors at 0 instead of wrapping when b > a")
+            expect(sat_sub(0u32, 1u32).to_i64()).to_equal(0)  # oracle: authoritative expected value documented by this spec's contract
+            expect(sat_sub(2u32, 5u32).to_i64()).to_equal(0)  # oracle: authoritative expected value documented by this spec's contract
 
         it "behaves like ordinary subtraction when a >= b":
-            expect(sat_sub(5u32, 2u32).to_i64()).to_equal(3)
-            expect(sat_sub(5u32, 5u32).to_i64()).to_equal(0)
+            step("Verify: behaves like ordinary subtraction when a >= b")
+            expect(sat_sub(5u32, 2u32).to_i64()).to_equal(3)  # oracle: authoritative expected value documented by this spec's contract
+            expect(sat_sub(5u32, 5u32).to_i64()).to_equal(0)  # oracle: authoritative expected value documented by this spec's contract
 
     context "FixedBlockAllocator.available() — real code, no memory access needed":
         it "does not wrap to ~4 billion when allocated exceeds capacity":
+            step("Verify: does not wrap to ~4 billion when allocated exceeds capacity")
             # Pathological but reachable state (e.g. after a caller double-
             # counts or a future bug over-increments `allocated`): before the
             # fix, `capacity - allocated` on u32 wraps to 4294967293.
@@ -198,9 +213,10 @@ describe "u32 unsigned-underflow guards (sat_sub family)":
                 free_list: 0u32,
                 allocated: 5u32
             )
-            expect(pool.available().to_i64()).to_equal(0)
+            expect(pool.available().to_i64()).to_equal(0)  # oracle: authoritative expected value documented by this spec's contract
 
         it "returns the ordinary remaining count in the normal case":
+            step("Verify: returns the ordinary remaining count in the normal case")
             val pool = FixedBlockAllocator(
                 base: 0u32,
                 block_size: 8u32,
@@ -208,4 +224,4 @@ describe "u32 unsigned-underflow guards (sat_sub family)":
                 free_list: 0u32,
                 allocated: 3u32
             )
-            expect(pool.available().to_i64()).to_equal(7)
+            expect(pool.available().to_i64()).to_equal(7)  # oracle: authoritative expected value documented by this spec's contract

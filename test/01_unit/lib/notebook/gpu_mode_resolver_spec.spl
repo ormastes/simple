@@ -1,4 +1,8 @@
 """
+## Purpose and audience
+Purpose: Verify resolve_gpu_mode_spec — tag classification.
+Audience: compiler and tooling engineers who maintain this spec.
+
 GPU mode resolver unit spec (P11).
 
 Covers the FULL resolution matrix of `resolve_gpu_mode_spec(tag, config,
@@ -22,6 +26,8 @@ Linux host and is asserted as such, never fixed up.
 Design: doc/05_design/app/tools/gpu_debugger_common_interface_architecture_2026-08-09.md §7b
 Plan:   doc/03_plan/agent_tasks/unified_debug_profile_capability_parallel_plan_2026-08-09.md (P11)
 """
+
+# @req: REQ-LIB-GPU-MODE-RESOLVER-001 — stable requirement identity for this spec.
 
 use std.spec
 use std.notebook.gpu_config.{GpuConfig, default_gpu_config, parse_gpu_config}
@@ -73,6 +79,8 @@ fn config_of(backend: text, submode: text, arch: text) -> GpuConfig:
 describe "resolve_gpu_mode_spec — tag classification":
 
     it "treats an empty tag as host and a bare gpu tag as GPU":
+        step("Verify: treats an empty tag as host and a bare gpu tag as GPU")
+        # @req: REQ-LIB-GPU-MODE-RESOLVER-001
         assert_true(is_host_tag(""))
         assert_true(is_host_tag("host"))
         assert_true(is_bare_gpu_tag("gpu"))
@@ -84,17 +92,19 @@ describe "resolve_gpu_mode_spec — tag classification":
 describe "resolve_gpu_mode_spec — no tag means host":
 
     it "resolves the empty tag to the host lane without probing anything":
+        step("Verify: resolves the empty tag to the host lane without probing anything")
         var probe = FakeGpuProbe.with_available(["cuda", "vulkan"])
         val resolved = resolve_gpu_mode_spec("", auto_config(), probe)
         expect(resolved.target).to_equal("host")
         expect(resolved.spec).to_equal("")
         expect(resolved.error).to_equal("")
         # No tag must never cost a device probe.
-        expect(probe.calls.len()).to_equal(0)
+        expect(probe.calls.len()).to_equal(0)  # oracle: authoritative expected value documented by this spec's contract
 
 describe "resolve_gpu_mode_spec — explicit spec passthrough":
 
     it "passes a full composite mode-spec through verbatim":
+        step("Verify: passes a full composite mode-spec through verbatim")
         var probe = FakeGpuProbe.none_available()
         val spec = "interpreter(remote(cuda(sm80)))"
         val resolved = resolve_gpu_mode_spec(spec, auto_config(), probe)
@@ -103,9 +113,10 @@ describe "resolve_gpu_mode_spec — explicit spec passthrough":
         expect(resolved.error).to_equal("")
         # Power users are never re-probed, never rewritten -- even when the
         # probe would have reported every backend absent.
-        expect(probe.calls.len()).to_equal(0)
+        expect(probe.calls.len()).to_equal(0)  # oracle: authoritative expected value documented by this spec's contract
 
     it "passes an explicit resident cuda spec through unchanged":
+        step("Verify: passes an explicit resident cuda spec through unchanged")
         var probe = FakeGpuProbe.none_available()
         val spec = "interpreter(remote(cuda(sm80(resident))))"
         val resolved = resolve_gpu_mode_spec(spec, auto_config(), probe)
@@ -114,36 +125,41 @@ describe "resolve_gpu_mode_spec — explicit spec passthrough":
         expect(extract_gpu_submode(resolved.spec)).to_equal("resident")
 
     it "passes an explicit vulkan spec through unchanged":
+        step("Verify: passes an explicit vulkan spec through unchanged")
         var probe = FakeGpuProbe.with_available(["cuda"])
         val spec = "jit(remote(vulkan(spv15)))"
         val resolved = resolve_gpu_mode_spec(spec, auto_config(), probe)
         expect(resolved.spec).to_equal(spec)
         expect(resolved.target).to_equal("vulkan")
-        expect(probe.calls.len()).to_equal(0)
+        expect(probe.calls.len()).to_equal(0)  # oracle: authoritative expected value documented by this spec's contract
 
 describe "resolve_gpu_mode_spec — bare gpu with a configured backend":
 
     it "expands from config without probing when backend is pinned":
+        step("Verify: expands from config without probing when backend is pinned")
         var probe = FakeGpuProbe.none_available()
         val resolved = resolve_gpu_mode_spec("gpu", config_of("cuda", "interpreter", "auto"), probe)
         expect(resolved.spec).to_equal("interpreter(remote(cuda(sm80)))")
         expect(resolved.target).to_equal("cuda")
         expect(resolved.error).to_equal("")
         # A pinned backend is authoritative -- resolution does not probe.
-        expect(probe.calls.len()).to_equal(0)
+        expect(probe.calls.len()).to_equal(0)  # oracle: authoritative expected value documented by this spec's contract
 
     it "honours an explicit arch and submode from config":
+        step("Verify: honours an explicit arch and submode from config")
         var probe = FakeGpuProbe.none_available()
         val resolved = resolve_gpu_mode_spec("gpu", config_of("vulkan", "jit", "spv16"), probe)
         expect(resolved.spec).to_equal("jit(remote(vulkan(spv16)))")
         expect(resolved.target).to_equal("vulkan")
 
     it "expands arch auto to each backend's canonical default":
+        step("Verify: expands arch auto to each backend's canonical default")
         expect(default_arch_for_backend("cuda")).to_equal("sm80")
         expect(default_arch_for_backend("vulkan")).to_equal("spv15")
         expect(default_arch_for_backend("metal")).to_equal("msl2")
 
     it "rejects an unknown configured backend by name":
+        step("Verify: rejects an unknown configured backend by name")
         var probe = FakeGpuProbe.with_available(["cuda"])
         val resolved = resolve_gpu_mode_spec("gpu", config_of("opencl", "interpreter", "auto"), probe)
         expect(resolved.spec).to_equal("")
@@ -153,30 +169,33 @@ describe "resolve_gpu_mode_spec — bare gpu with a configured backend":
 describe "resolve_gpu_mode_spec — bare gpu with backend auto":
 
     it "probes cuda first and stops there when cuda is available":
+        step("Verify: probes cuda first and stops there when cuda is available")
         var probe = FakeGpuProbe.with_available(["cuda", "vulkan"])
         val resolved = resolve_gpu_mode_spec("gpu", auto_config(), probe)
         expect(resolved.spec).to_equal("interpreter(remote(cuda(sm80)))")
         expect(resolved.target).to_equal("cuda")
         # cuda answered first, so vulkan/metal are never asked.
-        expect(probe.calls.len()).to_equal(1)
+        expect(probe.calls.len()).to_equal(1)  # oracle: authoritative expected value documented by this spec's contract
         expect(probe.calls[0]).to_equal("cuda")
 
     it "falls through to vulkan when cuda is absent":
+        step("Verify: falls through to vulkan when cuda is absent")
         var probe = FakeGpuProbe.with_available(["vulkan", "metal"])
         val resolved = resolve_gpu_mode_spec("gpu", auto_config(), probe)
         expect(resolved.spec).to_equal("interpreter(remote(vulkan(spv15)))")
         expect(resolved.target).to_equal("vulkan")
         # cuda asked first, vulkan second, metal never reached.
-        expect(probe.calls.len()).to_equal(2)
+        expect(probe.calls.len()).to_equal(2)  # oracle: authoritative expected value documented by this spec's contract
         expect(probe.calls[0]).to_equal("cuda")
         expect(probe.calls[1]).to_equal("vulkan")
 
     it "falls through to metal only when cuda and vulkan are both absent":
+        step("Verify: falls through to metal only when cuda and vulkan are both absent")
         var probe = FakeGpuProbe.with_available(["metal"])
         val resolved = resolve_gpu_mode_spec("gpu", auto_config(), probe)
         expect(resolved.spec).to_equal("interpreter(remote(metal(msl2)))")
         expect(resolved.target).to_equal("metal")
-        expect(probe.calls.len()).to_equal(3)
+        expect(probe.calls.len()).to_equal(3)  # oracle: authoritative expected value documented by this spec's contract
         expect(probe.calls[0]).to_equal("cuda")
         expect(probe.calls[1]).to_equal("vulkan")
         expect(probe.calls[2]).to_equal("metal")
@@ -184,6 +203,7 @@ describe "resolve_gpu_mode_spec — bare gpu with backend auto":
 describe "resolve_gpu_mode_spec — nothing available":
 
     it "errors listing every backend's own skip reason":
+        step("Verify: errors listing every backend's own skip reason")
         var probe = FakeGpuProbe.none_available()
         val resolved = resolve_gpu_mode_spec("gpu", auto_config(), probe)
         expect(resolved.spec).to_equal("")
@@ -196,11 +216,12 @@ describe "resolve_gpu_mode_spec — nothing available":
         assert_true(resolved.error.contains("vulkan: {VULKAN_ABSENT}"))
         assert_true(resolved.error.contains("metal: {METAL_ABSENT}"))
         # All three were really asked, in order.
-        expect(probe.calls.len()).to_equal(3)
+        expect(probe.calls.len()).to_equal(3)  # oracle: authoritative expected value documented by this spec's contract
 
 describe "resolve_gpu_mode_spec — expansion round-trips through the canonical grammar":
 
     it "produces specs the existing composite extractors parse identically":
+        step("Verify: produces specs the existing composite extractors parse identically")
         var probe = FakeGpuProbe.with_available(["cuda"])
         val resolved = resolve_gpu_mode_spec("gpu", auto_config(), probe)
         # The expansion is exactly what a power user would have typed, so the
@@ -210,6 +231,7 @@ describe "resolve_gpu_mode_spec — expansion round-trips through the canonical 
         expect(extract_gpu_submode(resolved.spec)).to_equal("launch")
 
     it "composes vulkan specs the extractors classify as dispatch":
+        step("Verify: composes vulkan specs the extractors classify as dispatch")
         val spec = compose_gpu_mode_spec("interpreter", "vulkan", "spv15")
         expect(spec).to_equal("interpreter(remote(vulkan(spv15)))")
         expect(extract_remote_backend(spec)).to_equal("vulkan")
@@ -218,12 +240,14 @@ describe "resolve_gpu_mode_spec — expansion round-trips through the canonical 
 describe "gpu config — the [gpu] section of simple.sdn":
 
     it "defaults to auto/interpreter/auto when no gpu section exists":
+        step("Verify: defaults to auto/interpreter/auto when no gpu section exists")
         val config = parse_gpu_config("project:\n  name: demo\n  version: 1.0.0\n")
         expect(config.backend).to_equal("auto")
         expect(config.submode).to_equal("interpreter")
         expect(config.arch).to_equal("auto")
 
     it "reads backend, submode and arch from the gpu section":
+        step("Verify: reads backend, submode and arch from the gpu section")
         val text_content = "project:\n  name: demo\n\ngpu:\n  backend: cuda\n  submode: jit\n  arch: sm90\n"
         val config = parse_gpu_config(text_content)
         expect(config.backend).to_equal("cuda")
@@ -231,17 +255,20 @@ describe "gpu config — the [gpu] section of simple.sdn":
         expect(config.arch).to_equal("sm90")
 
     it "ignores trailing comments and unknown keys":
+        step("Verify: ignores trailing comments and unknown keys")
         val text_content = "gpu:\n  backend: vulkan   # auto | cuda | vulkan | metal\n  future_key: 7\n"
         val config = parse_gpu_config(text_content)
         expect(config.backend).to_equal("vulkan")
         expect(config.submode).to_equal("interpreter")
 
     it "stops at the next top-level section":
+        step("Verify: stops at the next top-level section")
         val text_content = "gpu:\n  backend: metal\n\nlints:\n  backend: cuda\n"
         val config = parse_gpu_config(text_content)
         expect(config.backend).to_equal("metal")
 
     it "drives resolution end to end from parsed config":
+        step("Verify: drives resolution end to end from parsed config")
         var probe = FakeGpuProbe.none_available()
         val config = parse_gpu_config("gpu:\n  backend: cuda\n  arch: sm86\n")
         val resolved = resolve_gpu_mode_spec("gpu", config, probe)

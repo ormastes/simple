@@ -1,3 +1,11 @@
+"""
+## Purpose and audience
+Purpose: Verify shared Fat32Core long filename directory reads.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+
+# @req: REQ-LIB-FAT32-CORE-LFN-001 — stable requirement identity for this spec.
+
 use std.spec.{describe, it, expect}
 use std.fs_driver.block_device.{BlockDevice}
 use std.fs_driver.fat32_core.{Fat32Core}
@@ -232,27 +240,33 @@ fn _mounted_simpleos_lfn_driver(root: [u8]) -> SharedFat32Driver:
     expect(mounted.is_ok()).to_equal(true)
     driver
 
+use std.spec.step
+
 describe "shared Fat32Core long filename directory reads":
     it "lists a UTF-16LE LFN instead of the backing 8.3 alias":
+        step("Verify: lists a UTF-16LE LFN instead of the backing 8.3 alias")
+        # @req: REQ-LIB-FAT32-CORE-LFN-001
         var driver = _mounted_lfn_driver()
         val entries = driver.read_dir_entries(2u32)
         expect(entries.is_ok()).to_equal(true)
         val listed = entries.unwrap()
-        expect(listed.len()).to_equal(2)
+        expect(listed.len()).to_equal(2)  # oracle: authoritative expected value documented by this spec's contract
         expect(listed[0].name).to_equal("café.txt")
-        expect(listed[0].inode.id).to_equal(5u64)
-        expect(listed[0].size).to_equal(5)
+        expect(listed[0].inode.id).to_equal(5u64)  # oracle: authoritative expected value documented by this spec's contract
+        expect(listed[0].size).to_equal(5)  # oracle: authoritative expected value documented by this spec's contract
 
     it "keeps distinct Unicode LFNs distinct during lookup":
+        step("Verify: keeps distinct Unicode LFNs distinct during lookup")
         var driver = _mounted_lfn_driver()
         val lower = driver.resolve_path("/browser_demo")
         val upper = driver.resolve_path("/BROWSER_DEMO")
         expect(lower.is_ok()).to_equal(true)
         expect(upper.is_ok()).to_equal(true)
         expect(lower.unwrap().name).to_equal("browser_demo")
-        expect(upper.unwrap().inode.id).to_equal(5u64)
+        expect(upper.unwrap().inode.id).to_equal(5u64)  # oracle: authoritative expected value documented by this spec's contract
 
     it "assembles and resolves an ordered two-slot LFN chain":
+        step("Verify: assembles and resolves an ordered two-slot LFN chain")
         var driver = _mounted_with_root(_root_with_two_slot_lfn())
         val entry = driver.resolve_path("/browser_demo.spl")
         expect(entry.is_ok()).to_equal(true)
@@ -260,6 +274,7 @@ describe "shared Fat32Core long filename directory reads":
         expect(driver.resolve_path("/browse~1.spl").is_ok()).to_equal(true)
 
     it "assembles an ordered LFN chain split across directory clusters":
+        step("Verify: assembles an ordered LFN chain split across directory clusters")
         var second = _zero_sector()
         second = _write_short_entry(second, 32, "BROWSE~1SPL", 5u8, 5u32, FAT32_ATTR_ARCHIVE)
         val checksum = _short_name_checksum(second, 32)
@@ -274,9 +289,10 @@ describe "shared Fat32Core long filename directory reads":
         expect(driver.mount().is_ok()).to_equal(true)
         val entry = driver.resolve_path("/browser_demo.spl")
         expect(entry.is_ok()).to_equal(true)
-        expect(entry.unwrap().inode.id).to_equal(5u64)
+        expect(entry.unwrap().inode.id).to_equal(5u64)  # oracle: authoritative expected value documented by this spec's contract
 
     it "accepts the FAT32 maximum 255-character LFN":
+        step("Verify: accepts the FAT32 maximum 255-character LFN")
         val name = _ascii_name(255)
         val directory = _twenty_slot_root(name)
         var dev = Fat32LfnMockBlockDevice.new()
@@ -287,9 +303,10 @@ describe "shared Fat32Core long filename directory reads":
         expect(driver.mount().is_ok()).to_equal(true)
         val entry = driver.resolve_path("/" + name)
         expect(entry.is_ok()).to_equal(true)
-        expect(entry.unwrap().name.len()).to_equal(255)
+        expect(entry.unwrap().name.len()).to_equal(255)  # oracle: authoritative expected value documented by this spec's contract
 
     it "rejects a 260-character LFN and keeps its 8.3 alias":
+        step("Verify: rejects a 260-character LFN and keeps its 8.3 alias")
         val directory = _twenty_slot_root(_ascii_name(260))
         var dev = Fat32LfnMockBlockDevice.new()
         dev = dev.with_sector(32u64, _fat_sector_with_root_chain())
@@ -301,6 +318,7 @@ describe "shared Fat32Core long filename directory reads":
         expect(driver.resolve_path("/longna~1.txt").is_ok()).to_equal(true)
 
     it "resolves a nested LFN directory and LFN leaf":
+        step("Verify: resolves a nested LFN directory and LFN leaf")
         var dev = Fat32LfnMockBlockDevice.new()
         dev = dev.with_sector(32u64, _fat_sector())
         dev = dev.with_sector(2048u64, _root_with_nested_lfn_dir())
@@ -312,6 +330,7 @@ describe "shared Fat32Core long filename directory reads":
         expect(entry.unwrap().name).to_equal("browser_demo.spl")
 
     it "drops cached LFN names across unmount and media replacement":
+        step("Verify: drops cached LFN names across unmount and media replacement")
         var driver = _mounted_lfn_driver()
         expect(driver.resolve_path("/browser_demo").is_ok()).to_equal(true)
         expect(driver.unmount().is_ok()).to_equal(true)
@@ -324,6 +343,7 @@ describe "shared Fat32Core long filename directory reads":
         expect(driver.resolve_path("/editor_notes").is_ok()).to_equal(true)
 
     it "falls back to the 8.3 alias when the LFN checksum is wrong":
+        step("Verify: falls back to the 8.3 alias when the LFN checksum is wrong")
         var root = _root_with_browser_demo_lfn()
         root[13] = root[13] + 1u8
         var driver = _mounted_with_root(root)
@@ -331,6 +351,7 @@ describe "shared Fat32Core long filename directory reads":
         expect(driver.resolve_path("/browse~1").is_ok()).to_equal(true)
 
     it "falls back to the 8.3 alias when LFN slots are out of order":
+        step("Verify: falls back to the 8.3 alias when LFN slots are out of order")
         var root = _root_with_two_slot_lfn()
         root[32] = 0x02u8
         var driver = _mounted_with_root(root)
@@ -338,6 +359,7 @@ describe "shared Fat32Core long filename directory reads":
         expect(driver.resolve_path("/browse~1.spl").is_ok()).to_equal(true)
 
     it "rejects missing LAST markers and reserved sequence bits":
+        step("Verify: rejects missing LAST markers and reserved sequence bits")
         var missing_last = _root_with_two_slot_lfn()
         missing_last[0] = 0x02u8
         var missing_last_driver = _mounted_with_root(missing_last)
@@ -350,6 +372,7 @@ describe "shared Fat32Core long filename directory reads":
         expect(reserved_bit_driver.resolve_path("/browse~1.spl").is_ok()).to_equal(true)
 
     it "falls back to the 8.3 alias when one LFN slot checksum differs":
+        step("Verify: falls back to the 8.3 alias when one LFN slot checksum differs")
         var root = _root_with_two_slot_lfn()
         root[45] = root[45] + 1u8
         var driver = _mounted_with_root(root)
@@ -357,6 +380,7 @@ describe "shared Fat32Core long filename directory reads":
         expect(driver.resolve_path("/browse~1.spl").is_ok()).to_equal(true)
 
     it "falls back to the 8.3 alias when an LFN chain is interrupted":
+        step("Verify: falls back to the 8.3 alias when an LFN chain is interrupted")
         var root = _root_with_two_slot_lfn()
         root[32] = 0xE5u8
         var driver = _mounted_with_root(root)
@@ -364,6 +388,7 @@ describe "shared Fat32Core long filename directory reads":
         expect(driver.resolve_path("/browse~1.spl").is_ok()).to_equal(true)
 
     it "rejects a redundant empty highest LFN slot":
+        step("Verify: rejects a redundant empty highest LFN slot")
         var root = _root_with_two_slot_lfn()
         val checksum = root[13]
         root = _write_lfn_slot(root, 0, 0x42u8, "", checksum)
@@ -372,6 +397,7 @@ describe "shared Fat32Core long filename directory reads":
         expect(driver.resolve_path("/browse~1.spl").is_ok()).to_equal(true)
 
     it "falls back to the 8.3 alias when LFN reserved metadata is malformed":
+        step("Verify: falls back to the 8.3 alias when LFN reserved metadata is malformed")
         var root = _root_with_browser_demo_lfn()
         root[26] = 0x01u8
         var driver = _mounted_with_root(root)
@@ -379,6 +405,7 @@ describe "shared Fat32Core long filename directory reads":
         expect(driver.resolve_path("/browse~1").is_ok()).to_equal(true)
 
     it "falls back to the 8.3 alias for unsupported non-ASCII code units":
+        step("Verify: falls back to the 8.3 alias for unsupported non-ASCII code units")
         var root = _root_with_browser_demo_lfn()
         root[2] = 0x01u8
         var driver = _mounted_with_root(root)
@@ -387,15 +414,16 @@ describe "shared Fat32Core long filename directory reads":
 
 describe "SimpleOS shared FAT32 adapter long filename reads":
     it "uses the validated shared LFN for readdir, stat, open, read, and close":
+        step("Verify: uses the validated shared LFN for readdir, stat, open, read, and close")
         var driver = _mounted_simpleos_lfn_driver(_root_with_two_slot_lfn())
         val entries = driver.readdir("/")
         expect(entries.is_ok()).to_equal(true)
-        expect(entries.unwrap().len()).to_equal(1)
+        expect(entries.unwrap().len()).to_equal(1)  # oracle: authoritative expected value documented by this spec's contract
         expect(entries.unwrap()[0].name).to_equal("browser_demo.spl")
         val stat = driver.stat("/BROWSER_DEMO.SPL")
         expect(stat.is_ok()).to_equal(true)
         expect(stat.unwrap().kind).to_equal(FsNodeKind.File)
-        expect(stat.unwrap().size).to_equal(5u64)
+        expect(stat.unwrap().size).to_equal(5u64)  # oracle: authoritative expected value documented by this spec's contract
         val opened = driver.open("/browser_demo.spl", FileFlags.read_only())
         expect(opened.is_ok()).to_equal(true)
         val handle = opened.unwrap()

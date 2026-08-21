@@ -1,4 +1,8 @@
 """
+## Purpose and audience
+Purpose: Verify subscription vertical — create, recurring-bill, invoiced-total end to end.
+Audience: compiler and tooling engineers who maintain this spec.
+
 # Subscriptions / Recurring-Billing Vertical — end to end on the durable store
 
 ## Overview
@@ -38,6 +42,8 @@ is not touched. A `procurement`-role actor therefore fails the rbac rung with
 
 Lane: .spipe/simple_enterprise_suite (W22-D).
 """
+
+# @req: REQ-LIB-ENTERPRISE-SUBSCRIPTION-001 — stable requirement identity for this spec.
 
 use std.spec.*
 use std.io_runtime.{file_exists, file_delete, dir_create_all}
@@ -95,6 +101,7 @@ fn seed_active(name: text):
 
 describe "subscription vertical — create, recurring-bill, invoiced-total end to end":
     it "creates an active subscription, bills period 1 and 2, and proves the invoiced total":
+        # @req: REQ-LIB-ENTERPRISE-SUBSCRIPTION-001
         step("Open a clean store; sales creates subscription sub-1 (pro, 1500c)")
         val store = fresh_store("e2e")
         val t = tenant_a()
@@ -104,19 +111,19 @@ describe "subscription vertical — create, recurring-bill, invoiced-total end t
         expect(cr.reason).to_equal("accepted")
         expect(reason_allowed(cr.reason)).to_be(true)
         expect(sub_status(store, "tenant-a", "sub-1")).to_equal("active")
-        expect(sub_plan_amount(store, "tenant-a", "sub-1")).to_equal(1500)
-        expect(sub_invoiced_total(store, "tenant-a", "sub-1")).to_equal(0)
+        expect(sub_plan_amount(store, "tenant-a", "sub-1")).to_equal(1500)  # oracle: authoritative expected value documented by this spec's contract
+        expect(sub_invoiced_total(store, "tenant-a", "sub-1")).to_equal(0)  # oracle: authoritative expected value documented by this spec's contract
 
         step("Bill period 1 -> one immutable invoice for 1500c")
         expect(sub_bill(store, s, t, a, envelope("e2e-b1", "sub.bill"), "sub-1", 1).reason).to_equal("accepted")
         expect(sub_period_billed(store, "tenant-a", "sub-1", 1)).to_be(true)
-        expect(sub_invoiced_total(store, "tenant-a", "sub-1")).to_equal(1500)
+        expect(sub_invoiced_total(store, "tenant-a", "sub-1")).to_equal(1500)  # oracle: authoritative expected value documented by this spec's contract
         expect(sub_status(store, "tenant-a", "sub-1")).to_equal("active")
 
         step("Bill period 2 -> invoiced total is now 1500 + 1500 = 3000")
         expect(sub_bill(store, s, t, a, envelope("e2e-b2", "sub.bill"), "sub-1", 2).reason).to_equal("accepted")
         expect(sub_period_billed(store, "tenant-a", "sub-1", 2)).to_be(true)
-        expect(sub_invoiced_total(store, "tenant-a", "sub-1")).to_equal(3000)
+        expect(sub_invoiced_total(store, "tenant-a", "sub-1")).to_equal(3000)  # oracle: authoritative expected value documented by this spec's contract
 
         step("Audit chain recomputes end to end")
         expect(audit_verify_chain(store, "tenant-a")).to_be(true)
@@ -132,10 +139,11 @@ describe "subscription vertical — guarded denials":
         expect(r.ok).to_be(false)
         expect(r.reason).to_equal("forbidden")
         step("No invoice was raised")
-        expect(sub_invoiced_total(store, "tenant-a", "sub-1")).to_equal(0)
+        expect(sub_invoiced_total(store, "tenant-a", "sub-1")).to_equal(0)  # oracle: authoritative expected value documented by this spec's contract
         store_close(store)
 
     it "denies an inactive session before any domain check":
+        step("Verify: denies an inactive session before any domain check")
         val store = seed_active("session")
         val t = tenant_a()
         val a = sales_a()
@@ -146,6 +154,7 @@ describe "subscription vertical — guarded denials":
         store_close(store)
 
     it "denies billing an unknown subscription as not-found":
+        step("Verify: denies billing an unknown subscription as not-found")
         val store = fresh_store("unknown_bill")
         val t = tenant_a()
         val a = sales_a()
@@ -155,6 +164,7 @@ describe "subscription vertical — guarded denials":
         store_close(store)
 
     it "denies cancelling an unknown subscription as not-found":
+        step("Verify: denies cancelling an unknown subscription as not-found")
         val store = fresh_store("unknown_cancel")
         val t = tenant_a()
         val a = sales_a()
@@ -176,7 +186,7 @@ describe "subscription vertical — guarded denials":
         expect(r.reason).to_equal("duplicate-key")
         expect(r.detail).to_equal("sub-1:period=1")
         step("No second invoice — total is still a single 1500c period")
-        expect(sub_invoiced_total(store, "tenant-a", "sub-1")).to_equal(1500)
+        expect(sub_invoiced_total(store, "tenant-a", "sub-1")).to_equal(1500)  # oracle: authoritative expected value documented by this spec's contract
         store_close(store)
 
     it "denies billing AFTER cancel as an illegal transition (reproduce first)":
@@ -193,7 +203,7 @@ describe "subscription vertical — guarded denials":
         expect(r.reason).to_equal("invalid-transition")
         expect(r.detail).to_equal("sub-1:cancelled")
         step("No effect — nothing invoiced")
-        expect(sub_invoiced_total(store, "tenant-a", "sub-1")).to_equal(0)
+        expect(sub_invoiced_total(store, "tenant-a", "sub-1")).to_equal(0)  # oracle: authoritative expected value documented by this spec's contract
         store_close(store)
 
     it "denies cancelling twice as an illegal transition":
@@ -235,7 +245,7 @@ describe "subscription vertical — tenant isolation":
         val store = seed_active("isolation")
         step("Tenant B sees no subscription state")
         expect(sub_status(store, "tenant-b", "sub-1")).to_equal("")
-        expect(sub_invoiced_total(store, "tenant-b", "sub-1")).to_equal(0)
+        expect(sub_invoiced_total(store, "tenant-b", "sub-1")).to_equal(0)  # oracle: authoritative expected value documented by this spec's contract
         step("A tenant-B actor billing sub-1 sees it as unknown -> not-found")
         val tb = tenant_b()
         val b = ActorContext(actor_id: "sales-b", role: "sales")
@@ -246,5 +256,5 @@ describe "subscription vertical — tenant isolation":
         expect(sub_bill(store, session_for(b, tb), ta, b, envelope("iso-b2", "sub.bill"), "sub-1", 1).reason).to_equal("invalid-session")
         step("Tenant A's subscription is untouched — still active, nothing invoiced")
         expect(sub_status(store, "tenant-a", "sub-1")).to_equal("active")
-        expect(sub_invoiced_total(store, "tenant-a", "sub-1")).to_equal(0)
+        expect(sub_invoiced_total(store, "tenant-a", "sub-1")).to_equal(0)  # oracle: authoritative expected value documented by this spec's contract
         store_close(store)

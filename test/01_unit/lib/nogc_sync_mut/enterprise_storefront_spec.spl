@@ -1,4 +1,8 @@
 """
+## Purpose and audience
+Purpose: Verify storefront vertical — browse, cart, checkout, receipt end to end.
+Audience: compiler and tooling engineers who maintain this spec.
+
 # Storefront Vertical — browse -> cart -> checkout -> receipt
 
 ## Overview
@@ -32,6 +36,8 @@ A non-sales actor therefore fails the rbac rung with `forbidden`.
 
 Lane: .spipe/simple_enterprise_suite (W21-B).
 """
+
+# @req: REQ-LIB-ENTERPRISE-STOREFRONT-001 — stable requirement identity for this spec.
 
 use std.spec.*
 use std.io_runtime.{file_exists, file_delete, dir_create_all}
@@ -87,6 +93,7 @@ fn seed_cart(name: text):
 
 describe "storefront vertical — browse, cart, checkout, receipt end to end":
     it "adds lines, removes one, checks out with a folded total and chained audit":
+        # @req: REQ-LIB-ENTERPRISE-STOREFRONT-001
         step("Open a clean store; customer builds a cart")
         val store = fresh_store("e2e")
         val t = tenant_a()
@@ -97,20 +104,20 @@ describe "storefront vertical — browse, cart, checkout, receipt end to end":
         expect(reason_allowed(a1.reason)).to_be(true)
         cart_add(store, s, t, c, envelope("e2e-a2", "storefront.cart.add"), "cart-1", "SKU-2", 1, 500)
         cart_add(store, s, t, c, envelope("e2e-a3", "storefront.cart.add"), "cart-1", "SKU-3", 4, 100)
-        expect(sf_cart_count(store, "tenant-a", "cart-1")).to_equal(3)
-        expect(sf_cart_total(store, "tenant-a", "cart-1")).to_equal(1500)
+        expect(sf_cart_count(store, "tenant-a", "cart-1")).to_equal(3)  # oracle: authoritative expected value documented by this spec's contract
+        expect(sf_cart_total(store, "tenant-a", "cart-1")).to_equal(1500)  # oracle: authoritative expected value documented by this spec's contract
 
         step("Remove SKU-3 -> total drops by 400")
         expect(cart_remove(store, s, t, c, envelope("e2e-rm", "storefront.cart.remove"), "cart-1", "SKU-3").reason).to_equal("accepted")
-        expect(sf_cart_count(store, "tenant-a", "cart-1")).to_equal(2)
-        expect(sf_cart_total(store, "tenant-a", "cart-1")).to_equal(1100)
+        expect(sf_cart_count(store, "tenant-a", "cart-1")).to_equal(2)  # oracle: authoritative expected value documented by this spec's contract
+        expect(sf_cart_total(store, "tenant-a", "cart-1")).to_equal(1100)  # oracle: authoritative expected value documented by this spec's contract
 
         step("Checkout emits an order + receipt with the folded total")
         val co = checkout(store, s, t, c, envelope("e2e-co", "storefront.checkout"), "cart-1", "e2e-co")
         expect(co.reason).to_equal("accepted")
         expect(co.detail).to_equal("order-cart-1")
         expect(sf_order_id_of(store, "tenant-a", "cart-1")).to_equal("order-cart-1")
-        expect(receipt_of(store, "tenant-a", "order-cart-1")).to_equal(1100)
+        expect(receipt_of(store, "tenant-a", "order-cart-1")).to_equal(1100)  # oracle: authoritative expected value documented by this spec's contract
 
         step("Audit chain recomputes end to end")
         expect(audit_verify_chain(store, "tenant-a")).to_be(true)
@@ -126,10 +133,11 @@ describe "storefront vertical — guarded denials":
         expect(r.ok).to_be(false)
         expect(r.reason).to_equal("forbidden")
         step("Nothing was added")
-        expect(sf_cart_count(store, "tenant-a", "cart-1")).to_equal(0)
+        expect(sf_cart_count(store, "tenant-a", "cart-1")).to_equal(0)  # oracle: authoritative expected value documented by this spec's contract
         store_close(store)
 
     it "denies an inactive session before any domain check":
+        step("Verify: denies an inactive session before any domain check")
         val store = fresh_store("session")
         val t = tenant_a()
         val c = shopper_a()
@@ -180,15 +188,15 @@ describe "storefront vertical — idempotent checkout produces exactly one order
         expect(replay.detail).to_equal("order-cart-1")
         step("No second order — outbox unchanged, receipt total stable")
         expect(outbox_pending(store, "tenant-a").len()).to_equal(outbox_after)
-        expect(receipt_of(store, "tenant-a", "order-cart-1")).to_equal(1100)
+        expect(receipt_of(store, "tenant-a", "order-cart-1")).to_equal(1100)  # oracle: authoritative expected value documented by this spec's contract
         store_close(store)
 
 describe "storefront vertical — tenant isolation":
     it "tenant B sees none of tenant A's cart and cannot check it out":
         val store = seed_cart("isolation")
         step("Tenant B sees an empty cart")
-        expect(sf_cart_count(store, "tenant-b", "cart-1")).to_equal(0)
-        expect(sf_cart_total(store, "tenant-b", "cart-1")).to_equal(0)
+        expect(sf_cart_count(store, "tenant-b", "cart-1")).to_equal(0)  # oracle: authoritative expected value documented by this spec's contract
+        expect(sf_cart_total(store, "tenant-b", "cart-1")).to_equal(0)  # oracle: authoritative expected value documented by this spec's contract
         step("A tenant-B shopper checking out cart-1 sees it as empty -> invalid-record")
         val tb = tenant_b()
         val cb = ActorContext(actor_id: "cust-b", role: "sales")
@@ -198,6 +206,6 @@ describe "storefront vertical — tenant isolation":
         val ta = tenant_a()
         expect(checkout(store, session_for(cb, tb), ta, cb, envelope("iso-co2", "storefront.checkout"), "cart-1", "iso-co2").reason).to_equal("invalid-session")
         step("Tenant A's cart is untouched")
-        expect(sf_cart_total(store, "tenant-a", "cart-1")).to_equal(1100)
+        expect(sf_cart_total(store, "tenant-a", "cart-1")).to_equal(1100)  # oracle: authoritative expected value documented by this spec's contract
         expect(sf_order_id_of(store, "tenant-a", "cart-1")).to_equal("")
         store_close(store)
