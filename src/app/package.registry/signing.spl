@@ -1,8 +1,8 @@
 """Package Signing — Ed25519 cryptographic signatures for packages
 
-Provides key generation, package signing, and signature data types for
-the Simple package registry. Uses Ed25519 for signatures (with HMAC-SHA256
-fallback when the Ed25519 SFFI is not available).
+Provides key loading, package signing, and signature data types for the Simple
+package registry. Cryptographic-provider failures are fail-closed; no fallback
+algorithm is relabeled as Ed25519.
 
 Key storage:
     ~/.simple/signing_key.pem   (private key, chmod 600)
@@ -14,15 +14,10 @@ Usage:
     val sig = sign_package("my_pkg-1.0.0.spk", key_pair)?
 """
 
-use std.crypto.{hash_sha256, hmac_sha256, generate_key_hex, random_hex}
+use std.crypto.{hash_sha256}
 use std.fs.{read_file, write_file, is_file, file_exists}
 use std.io.{time_now_unix_micros, timestamp_year, timestamp_month, timestamp_day, timestamp_hour, timestamp_minute, timestamp_second}
-
-# --- Ed25519 SFFI (optional — falls back to HMAC-SHA256) ---
-
-extern fn rt_ed25519_generate_keypair() -> text
-extern fn rt_ed25519_sign(private_key: text, data: text) -> text
-extern fn rt_ed25519_verify(public_key: text, data: text, signature: text) -> i64
+use std.nogc_sync_mut.io.signature_sffi.{ed25519_sign_pkcs8_checked}
 
 # --- Data Types ---
 
@@ -46,27 +41,7 @@ class SigningKeyPair:
         Returns a key pair with the private key stored at a temporary
         path. Call save() to persist to a specific directory.
         """
-        # Try native Ed25519 first
-        val native_result = try_ed25519_generate()
-        if native_result != "":
-            return parse_generated_keypair(native_result)
-
-        # Fallback: generate HMAC-based key pair (256-bit key)
-        val private_hex = generate_key_hex(32)
-        val public_hex = hash_sha256(private_hex)
-        val fp = hash_sha256(public_hex)
-
-        # Write private key to temp file
-        val temp_path = "/tmp/.simple_signing_key_{random_hex(8)}.pem"
-        val pem_content = "-----BEGIN SIMPLE SIGNING KEY-----\nalgorithm: hmac-sha256-fallback\n{private_hex}\n-----END SIMPLE SIGNING KEY-----\n"
-        write_file(temp_path, pem_content)
-
-        val pub_bytes = hex_to_bytes(public_hex)
-        Ok(SigningKeyPair(
-            public_key: pub_bytes,
-            fingerprint: fp,
-            _private_key_path: temp_path
-        ))
+        Err("E-SFFI-001: checked Ed25519 key-generation provider unavailable")
 
     static fn load(key_path: text) -> Result<SigningKeyPair, text>:
         """Load a signing key pair from disk.
@@ -91,16 +66,7 @@ class SigningKeyPair:
         if private_hex == "":
             return Err("could not parse private key from: {key_path}")
 
-        # Derive public key
-        val public_hex = hash_sha256(private_hex)
-        val fp = hash_sha256(public_hex)
-        val pub_bytes = hex_to_bytes(public_hex)
-
-        Ok(SigningKeyPair(
-            public_key: pub_bytes,
-            fingerprint: fp,
-            _private_key_path: key_path
-        ))
+        Err("E-SFFI-006: signing key lacks a cryptographically bound Ed25519 public key")
 
     fn sign(data: [u8]) -> Result<[u8], text>:
         """Sign data with this key pair.
@@ -116,17 +82,7 @@ class SigningKeyPair:
         if private_hex == "":
             return Err("could not read private key")
 
-        # Compute data hash
-        val data_hex = bytes_to_hex(data)
-
-        # Try native Ed25519
-        val native_sig = try_ed25519_sign(private_hex, data_hex)
-        if native_sig != "":
-            return Ok(hex_to_bytes(native_sig))
-
-        # Fallback: HMAC-SHA256 signature
-        val sig_hex = hmac_sha256(private_hex, data_hex)
-        Ok(hex_to_bytes(sig_hex))
+        ed25519_sign_pkcs8_checked(hex_to_bytes(private_hex), data)
 
     fn save(dir: text) -> Result<(), text>:
         """Save the key pair to a directory.
@@ -220,39 +176,6 @@ fn fingerprint_key(public_key: [u8]) -> text:
     hash_sha256(pub_hex)
 
 # --- Internal Helpers ---
-
-fn try_ed25519_generate() -> text:
-    """Attempt native Ed25519 key generation. Returns empty on failure."""
-    # The extern fn may be auto-stubbed if the runtime does not include it.
-    # In that case it returns "" or crashes — we catch via simple check.
-    ""
-
-fn try_ed25519_sign(private_hex: text, data_hex: text) -> text:
-    """Attempt native Ed25519 signing. Returns empty on failure."""
-    ""
-
-fn parse_generated_keypair(raw: text) -> Result<SigningKeyPair, text>:
-    """Parse the output of rt_ed25519_generate_keypair."""
-    # Expected format: "private_hex:public_hex"
-    if not raw.contains(":"):
-        return Err("invalid keypair format from native Ed25519")
-    val parts = raw.split(":")
-    if parts.len() < 2:
-        return Err("invalid keypair format: expected private:public")
-    val private_hex = parts[0]
-    val public_hex = parts[1]
-    val fp = hash_sha256(public_hex)
-
-    val temp_path = "/tmp/.simple_signing_key_{random_hex(8)}.pem"
-    val pem_content = "-----BEGIN SIMPLE SIGNING KEY-----\nalgorithm: ed25519\n{private_hex}\n-----END SIMPLE SIGNING KEY-----\n"
-    write_file(temp_path, pem_content)
-
-    val pub_bytes = hex_to_bytes(public_hex)
-    Ok(SigningKeyPair(
-        public_key: pub_bytes,
-        fingerprint: fp,
-        _private_key_path: temp_path
-    ))
 
 fn parse_private_key_hex(content: text) -> text:
     """Extract the hex-encoded private key from PEM-like content."""

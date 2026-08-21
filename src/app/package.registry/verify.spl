@@ -10,15 +10,12 @@ Usage:
         install_package(...)
 """
 
-use std.crypto.{hash_sha256, hmac_sha256}
+use std.crypto.{hash_sha256}
 use std.fs.{read_file, is_file}
+use std.nogc_sync_mut.io.signature_sffi.{ed25519_verify_native_checked}
 
 use app.package.registry.signing.{PackageSignature, hex_to_bytes, bytes_to_hex, hex_digit_value}
 use app.package.registry.trust.{TrustStore, TrustLevel, TrustedSigner}
-
-# --- Ed25519 SFFI (optional) ---
-
-extern fn rt_ed25519_verify(public_key: text, data: text, signature: text) -> i64
 
 # --- Data Types ---
 
@@ -109,21 +106,14 @@ fn verify_signature(data: [u8], signature: text, public_key: [u8]) -> bool:
     if public_key.len() == 0:
         return false
 
-    val data_hex = bytes_to_hex(data)
-    val pub_hex = bytes_to_hex(public_key)
-
-    # Try native Ed25519 verification
-    val native_result = try_ed25519_verify(pub_hex, data_hex, signature)
-    if native_result >= 0:
-        return native_result == 1
-
-    # Fallback: HMAC-SHA256 verification
-    # In HMAC-SHA256 mode, the "public key" is hash(private_key).
-    # We cannot verify directly without the private key.
-    # Instead, we check if the signature matches hmac(public_key_as_proxy, data).
-    # This is a weaker guarantee — true Ed25519 SFFI should be added.
-    val expected = hmac_sha256(pub_hex, data_hex)
-    expected == signature
+    if public_key.len() != 32 or signature.len() != 128:
+        return false
+    val signature_bytes = hex_to_bytes(signature)
+    if signature_bytes.len() != 64:
+        return false
+    match ed25519_verify_native_checked(public_key, data, signature_bytes):
+        case Ok(valid): valid
+        case Err(_): false
 
 fn verify_checksum(package_path: text, expected_checksum: text) -> Result<bool, text>:
     """Verify a package file's SHA-256 checksum.
@@ -211,31 +201,17 @@ fn full_verify(package_path: text, signature: PackageSignature, checksum: text, 
     Ok(sig_result)
 
 # --- Internal Helpers ---
-
-fn try_ed25519_verify(pub_hex: text, data_hex: text, signature: text) -> i64:
-    """Try native Ed25519 verification.
-
-    Returns:
-        1  — signature valid
-        0  — signature invalid
-       -1  — Ed25519 SFFI not available
-    """
-    # The extern fn may be auto-stubbed. Return -1 to trigger fallback.
-    -1
-
 fn get_public_key_for(fingerprint: text, trust_store: TrustStore) -> [u8]:
     """Look up a signer's public key from the trust store.
 
-    Currently returns empty bytes if the signer is not in the store.
-    The trust store would need to store public keys alongside fingerprints
-    for full verification. For now, the fingerprint itself is used as a
-    proxy in the HMAC-SHA256 fallback mode.
+    The current trust-store schema does not retain public keys. Returning an
+    empty key deliberately fails closed until the schema binds signer identity
+    to the exact Ed25519 public key.
     """
     val trusted = trust_store.list_trusted()
     for signer in trusted:
         if signer.fingerprint == fingerprint:
-            # Return fingerprint as pseudo-key for HMAC fallback
-            return hex_to_bytes(fingerprint)
+            return []
     []
 
 fn format_verification_result(result: VerificationResult) -> text:

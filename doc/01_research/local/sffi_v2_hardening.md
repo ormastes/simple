@@ -171,3 +171,23 @@ rule. The accepted hot path remains one bulk `memcpy` plus descriptor branches;
 it does not regress to per-byte boxing or copying. The exact pointer-memory
 source gate now covers both owned bulk-copy declarations as well as scalar
 reads/writes (67 declarations total).
+
+## Package-signature admission audit
+
+The package registry declared text-shaped Ed25519 externs that did not match the
+canonical byte-array ABI, but its helpers never invoked them: signing returned
+an empty text sentinel and silently produced HMAC instead, while verification
+returned an unavailable sentinel and could accept a proxy-HMAC result. The
+result was then labeled `ed25519`. This was neither Ed25519 authentication nor
+a safe provider fallback.
+
+Package signing and verification now route only through the existing checked
+Ed25519 wrappers. Malformed keys, malformed signatures, provider errors, and
+the current trust-store schema's missing public-key binding all fail closed.
+Legacy key generation/loading reports typed SFFI/evidence errors rather than
+minting mislabeled signatures. A zero-runtime-cost audit forbids direct crypto
+externs, availability stubs, and HMAC-as-Ed25519 fallback in these modules.
+Removing the four false declarations reduces the global missing-both inventory
+to 13,545. Valid verification performs fixed-size checks followed by the same
+single Ed25519 operation; no hashing, lookup, allocation, or fallback crypto
+was added to the successful checked-wrapper path.
