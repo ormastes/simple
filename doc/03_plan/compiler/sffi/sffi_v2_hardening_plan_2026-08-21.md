@@ -311,12 +311,17 @@ Current evidence after the thread synchronization boundary migration:
 These are migration inputs, not 14,943 independent implementations. The audit
 now hashes normalized declaration shapes and groups them by symbol. The next
 tooling step replaces the text-derived shape with the resolved HIR ABI hash,
-rejects the 399 conflict groups, and converts compatibility modules to
+rejects the 401 conflict groups, and converts compatibility modules to
 re-export the canonical no-GC owner. Safety is then discharged once per
 symbol/ABI hash while every raw call site retains a minimal lexical
 `unsafe(ffi)` scope. `SFFI009` rejects raw calls outside such a helper and
 `SFFI010` rejects raw declarations without explicit FFI authority in robust
-and critical lint profiles; both checks are source-time only.
+and critical lint profiles; both checks are source-time only. The call lint now
+also carries raw `rt_*`/`spl_*` identities imported from modules whose name
+contains `sffi`, closing the prior declaration-local blind spot. Imported HTTP
+server and web-framework thread calls now use lexical FFI blocks. Those blocks
+add no helper dispatch, allocation, lookup, or synchronization to the existing
+native call path.
 
 Performance constraint: the legacy native integer call remains allocation-free.
 The lint guard extracts its body and fails if `rt_array_new`, `Vec`, maps,

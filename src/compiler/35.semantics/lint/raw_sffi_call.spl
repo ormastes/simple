@@ -49,6 +49,40 @@ fn _rsc_calls_name(line: text, name: text) -> bool:
         line.contains("," + needle) or line.contains("=" + needle) or
         line.contains(": " + needle)
 
+fn _rsc_add_import_names(fragment: text, existing: [text]) -> [text]:
+    var externs = existing
+    for raw_part in fragment.split(","):
+        var part = raw_part.trim()
+        if part.starts_with("{"):
+            part = part.substring(1, part.len()).trim()
+        val close = part.find("}")
+        if close >= 0:
+            part = part.substring(0, close).trim()
+        if (part.starts_with("rt_") or part.starts_with("spl_")) and
+            not externs.contains(part):
+            externs.push(part)
+    externs
+
+fn _rsc_collect_imported_raw_names(lines: [CodeLine], existing: [text]) -> [text]:
+    var externs = existing
+    var in_sffi_use = false
+    for line in lines:
+        val source = line.trimmed
+        if source.starts_with("use "):
+            in_sffi_use = source.contains("sffi") and source.contains("{")
+            if in_sffi_use:
+                val open = source.find("{")
+                externs = _rsc_add_import_names(
+                    source.substring(open + 1, source.len()), externs)
+                if source.contains("}"):
+                    in_sffi_use = false
+            continue
+        if in_sffi_use:
+            externs = _rsc_add_import_names(source, externs)
+            if source.contains("}"):
+                in_sffi_use = false
+    externs
+
 fn _rsc_has_ffi_unsafe_boundary(lines: [CodeLine], header_index: i64) -> bool:
     var i = header_index - 1
     while i >= 0:
@@ -118,6 +152,7 @@ pub fn check_raw_sffi_calls(source: text, file_path: text) -> [RawSffiCallFindin
         val name = _rsc_extern_name(line.trimmed)
         if name != "" and not externs.contains(name):
             externs.push(name)
+    externs = _rsc_collect_imported_raw_names(lines, externs)
 
     var i = 0
     while i < lines.len():
