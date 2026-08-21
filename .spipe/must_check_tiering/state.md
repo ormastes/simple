@@ -168,3 +168,12 @@ implementation-blocked-by-bootstrap-authority
   separately canonicalized and both invariants have source contracts.
   Re-verification is deferred because the current session exhausted its
   three-cycle cap.
+- verify: A fresh bounded run proved the type-pool whole-owner fix by releasing
+  all 954 streaming surfaces and entering HIR. The prior parser SEGV record is
+  resolved.
+- blocker-correction: Full-log review showed the first HIR failure was
+  `FrontendAsmTargetSpec`; later directory and shared-type errors were cascade
+  symptoms. The alias workaround is removed. Callable dependency routing now
+  gives explicit named imports precedence over overlapping globs while keeping
+  same-precedence ambiguity fail-closed, with behavioral and source-contract
+  regressions. Fresh bootstrap verification remains pending.
