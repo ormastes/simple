@@ -431,7 +431,7 @@ impl HirLowering:
                 imported_mod.module_name, dependency,
                 terminal_symbol)
 
-    me materialize_imported_callable_type_dependencies(imported_mod: ModuleSurface, imported_mod_name: text, callable: ModuleSurfaceCallable, import_span: Span, materialize_enum: bool):
+    me materialize_imported_signature_dependencies(imported_mod: ModuleSurface, imported_mod_name: text, signature_index: i64, import_span: Span, materialize_enum: bool):
         """Pre-register every named type a cross-module method SIGNATURE
         depends on, before that signature is eagerly lowered.
 
@@ -457,67 +457,20 @@ impl HirLowering:
         with no cross-module import at all -- see
         doc/08_tracking/bug/native_build_cross_module_result_payload_struct_name_collision_2026-08-09.md
         (5th layer)."""
-        for param in callable.params:
-            if param.type_name != "":
-                if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, param.type_name) < 0:
-                    self.materialize_imported_callable_declared_dependency(
-                        imported_mod, imported_mod_name, param.type_name,
-                        import_span, materialize_enum)
-                    if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, param.type_name) < 0:
-                        self.materialize_imported_callable_explicit_dependency(
-                            imported_mod, imported_mod_name, param.type_name, import_span,
-                            materialize_enum)
-            elif param.array_element_name != "":
-                if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, param.array_element_name) < 0:
-                    self.materialize_imported_callable_declared_dependency(
-                        imported_mod, imported_mod_name,
-                        param.array_element_name, import_span,
+        val offset = imported_mod.signature_dependency_offsets[signature_index]
+        val count = imported_mod.signature_dependency_counts[signature_index]
+        var dependency_index = offset
+        while dependency_index < offset + count:
+            val dependency = imported_mod.signature_dependency_names[dependency_index]
+            if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, dependency) < 0:
+                self.materialize_imported_callable_declared_dependency(
+                    imported_mod, imported_mod_name, dependency,
+                    import_span, materialize_enum)
+                if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, dependency) < 0:
+                    self.materialize_imported_callable_explicit_dependency(
+                        imported_mod, imported_mod_name, dependency, import_span,
                         materialize_enum)
-                    if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, param.array_element_name) < 0:
-                        self.materialize_imported_callable_explicit_dependency(
-                            imported_mod, imported_mod_name, param.array_element_name, import_span,
-                            materialize_enum)
-            else:
-                for dependency in parser_type_named_dependencies(param.type_):
-                    if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, dependency) < 0:
-                        self.materialize_imported_callable_declared_dependency(
-                            imported_mod, imported_mod_name, dependency,
-                            import_span, materialize_enum)
-                        if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, dependency) < 0:
-                            self.materialize_imported_callable_explicit_dependency(
-                                imported_mod, imported_mod_name, dependency, import_span,
-                                materialize_enum)
-        if callable.has_return_type:
-            if callable.return_type_name != "":
-                if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, callable.return_type_name) < 0:
-                    self.materialize_imported_callable_declared_dependency(
-                        imported_mod, imported_mod_name,
-                        callable.return_type_name, import_span,
-                        materialize_enum)
-                    if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, callable.return_type_name) < 0:
-                        self.materialize_imported_callable_explicit_dependency(
-                            imported_mod, imported_mod_name, callable.return_type_name, import_span,
-                            materialize_enum)
-            elif callable.return_array_element_name != "":
-                if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, callable.return_array_element_name) < 0:
-                    self.materialize_imported_callable_declared_dependency(
-                        imported_mod, imported_mod_name,
-                        callable.return_array_element_name, import_span,
-                        materialize_enum)
-                    if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, callable.return_array_element_name) < 0:
-                        self.materialize_imported_callable_explicit_dependency(
-                            imported_mod, imported_mod_name, callable.return_array_element_name,
-                            import_span, materialize_enum)
-            else:
-                for dependency in parser_type_named_dependencies(callable.return_type):
-                    if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, dependency) < 0:
-                        self.materialize_imported_callable_declared_dependency(
-                            imported_mod, imported_mod_name, dependency,
-                            import_span, materialize_enum)
-                        if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, dependency) < 0:
-                            self.materialize_imported_callable_explicit_dependency(
-                                imported_mod, imported_mod_name, dependency, import_span,
-                                materialize_enum)
+            dependency_index = dependency_index + 1
 
     me register_imported_type_methods(imported_mod: ModuleSurface, imported_mod_name: text, imported_name: text, local_owner: SymbolId, import_span: Span, materialize_enum: bool):
         # RE-ENTRANCY BREAKER. This method sits in a three-node cycle:
@@ -570,24 +523,35 @@ impl HirLowering:
                 local_owner_module = module_name
                 local_owner_defining_module = Some(module_name)
         val owner_module = hir_module_logical_name_from_path(local_owner_module)
-        for impl_ in imported_mod.impls:
-            if parser_type_kind_named_name(impl_.type_.kind) != imported_name:
+        var impl_index = 0
+        while impl_index < imported_mod.impl_owner_names.len():
+            if imported_mod.impl_owner_names[impl_index] != imported_name:
+                impl_index = impl_index + 1
                 continue
-            for method_name in impl_.methods.keys():
-                val method = impl_.methods[method_name]
+            var signature_index = 0
+            while signature_index < imported_mod.signature_names.len():
+                if imported_mod.signature_owner_kinds[signature_index] != "impl" or
+                   imported_mod.signature_owner_names[signature_index] != imported_name:
+                    signature_index = signature_index + 1
+                    continue
+                val method_name = imported_mod.signature_names[signature_index]
                 val symbol_name = "{owner_module}.{imported_name}::{method_name}"
                 if not self.symbols.lookup_or_invalid(symbol_name).is_valid():
-                    val kind = if method.is_static: SymbolKind.Function else: SymbolKind.Method
-                    self.materialize_imported_callable_type_dependencies(imported_mod, imported_mod_name, method, import_span, materialize_enum)
-                    val method_type = self.declared_imported_surface_callable_type(
-                        method, imported_mod.module_name, Some(local_owner))
+                    val kind = if imported_mod.signature_is_static[signature_index]: SymbolKind.Function else: SymbolKind.Method
+                    self.materialize_imported_signature_dependencies(
+                        imported_mod, imported_mod_name, signature_index,
+                        import_span, materialize_enum)
+                    val method_type = self.declared_imported_surface_signature_type(
+                        imported_mod, signature_index, imported_mod.module_name,
+                        Some(local_owner), import_span)
                     self.symbols.define(symbol_name, kind, method_type, import_span, Visibility.Public, false, local_owner_defining_module)
-            if impl_.has_trait_:
-                val trait_name = parser_type_kind_named_name(impl_.trait_.kind)
+                signature_index = signature_index + 1
+            if imported_mod.impl_has_traits[impl_index]:
+                val trait_name = imported_mod.impl_trait_names[impl_index]
                 var trait_module = imported_mod
                 var trait_module_found = true
                 var trait_source_name = trait_name
-                if not imported_mod.traits.contains_key(trait_source_name):
+                if not imported_mod.trait_names.contains(trait_source_name):
                     val trait_source = self.find_reexport_source(imported_mod, imported_mod_name, trait_name)
                     if trait_source.found:
                         val trait_module_index = trait_source.module_index
@@ -595,21 +559,28 @@ impl HirLowering:
                         if trait_module_found:
                             trait_module = self.module_surfaces.surfaces[trait_module_index]
                         trait_source_name = trait_source.item_name
-                    if trait_module_found and trait_module.traits.contains_key(trait_source_name):
-                        val trait_ = trait_module.traits[trait_source_name]
-                        for trait_method in trait_.methods:
-                            val symbol_name = "{owner_module}.{imported_name}::{trait_method.name}"
+                    if trait_module_found and trait_module.trait_names.contains(trait_source_name):
+                        var trait_signature_index = 0
+                        while trait_signature_index < trait_module.signature_names.len():
+                            if trait_module.signature_owner_kinds[trait_signature_index] != "trait" or
+                               trait_module.signature_owner_names[trait_signature_index] != trait_source_name:
+                                trait_signature_index = trait_signature_index + 1
+                                continue
+                            val trait_method_name = trait_module.signature_names[trait_signature_index]
+                            val symbol_name = "{owner_module}.{imported_name}::{trait_method_name}"
                             if not self.symbols.lookup_or_invalid(symbol_name).is_valid():
-                                val kind = if trait_method.is_static: SymbolKind.Function else: SymbolKind.Method
+                                val kind = if trait_module.signature_is_static[trait_signature_index]: SymbolKind.Function else: SymbolKind.Method
                                 # The signature belongs to the trait's physical
                                 # declaration, not the implementing type's
                                 # module. Resolve its dependencies through that
                                 # owner so imported names such as ContractMode
                                 # cannot be looked up in an unrelated impl file.
-                                self.materialize_imported_callable_type_dependencies(
+                                self.materialize_imported_signature_dependencies(
                                     trait_module, trait_module.preferred_registry_name,
-                                    trait_method, import_span, materialize_enum)
-                                val method_type = self.declared_imported_surface_callable_type(
-                                    trait_method, trait_module.module_name,
-                                    Some(local_owner))
+                                    trait_signature_index, import_span, materialize_enum)
+                                val method_type = self.declared_imported_surface_signature_type(
+                                    trait_module, trait_signature_index,
+                                    trait_module.module_name, Some(local_owner), import_span)
                                 self.symbols.define(symbol_name, kind, method_type, import_span, Visibility.Public, false, local_owner_defining_module)
+                            trait_signature_index = trait_signature_index + 1
+            impl_index = impl_index + 1

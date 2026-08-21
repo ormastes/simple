@@ -54,3 +54,6 @@ The exact `ProcessResult` shape is covered by explicit and aliased structs used
 only in return annotations. A source contract rejects `.imports[...]` and
 `.items[...]` reads in the staged primary resolver. Fresh bootstrap evidence is
 pending.
+## Callable signature follow-up (2026-08-21)
+
+Fresh verification proved scalar primary routes were necessary but not sufficient: Stage 3 reached HIR and reproduced the early Span/OptimizationLevel/ProcessResult cascade. The remaining cross-stage consumers indexed retained callable dictionaries and impl/trait method aggregates. Module surfaces now freeze aligned scalar signature, dependency, and impl-to-trait projections. Free functions, concrete impl methods, and trait methods consume only those projections; unsupported complex shapes deliberately register without an eager HIR function type. Bootstrap re-verification is pending.

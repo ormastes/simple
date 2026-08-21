@@ -190,61 +190,47 @@ impl HirLowering:
                 # cycle or competing import cannot shadow the first binding.
                 val imported_type = self.symbols.define(local_name, SymbolKind.TypeAlias, nil, import_span, Visibility.Public, false, Some(imported_mod.module_name))
                 self.symbols.rename_symbol(imported_type, imported_name)
-        elif imported_mod.callables.contains_key(imported_name):
-            # Repeated glob roots and physical module aliases can revisit the
-            # same local callable. Function symbols are not first-write-wins,
-            # so guard an exact repeat before define rather than accumulating
-            # duplicate rows. Do not suppress a different callable/module that
-            # intentionally competes for the same local alias.
-            val existing_id = self.symbols.lookup_or_invalid(local_name)
-            var exact_repeat = false
-            if existing_id.is_valid() and self.symbols.symbols.has(existing_id.id):
-                val existing: HirSymbol = self.symbols.symbols[existing_id.id]
-                var same_owner = false
-                if val existing_owner = existing.defining_module:
-                    same_owner = existing_owner == imported_mod.module_name
-                val qualified_name = imported_mod.module_name + "." + imported_name
-                val same_source_name = (existing.name == qualified_name or
-                    (imported_name == local_name and existing.name == local_name))
-                exact_repeat = (existing.kind == SymbolKind.Function and
-                    same_owner and same_source_name)
-            if exact_repeat:
-                return
-            val imported_callable = imported_mod.callables[imported_name]
-            # Imported free functions have the same cross-module signature
-            # dependency requirement as imported methods.  Materialize the
-            # callable owner's explicit named imports before lowering the
-            # signature; otherwise a type such as OptimizationLevel imported
-            # by llvm_backend is queried in that owner's qualified scope
-            # before its alias exists.
-            self.materialize_imported_callable_type_dependencies(
-                imported_mod, imported_mod_name,
-                imported_callable, import_span,
-                materialize_enum)
-            val fn_type = self.declared_imported_surface_callable_type(
-                imported_callable, imported_mod.module_name, nil)
-            val imported_fn_sym = self.symbols.define(local_name, SymbolKind.Function, fn_type, import_span, Visibility.Public, false, Some(imported_mod.module_name))
-            self.qualify_imported_function_symbol(imported_fn_sym, imported_mod.module_name, imported_name)
-        elif imported_mod.constants.contains_key(imported_name):
-            self.symbols.define(local_name, SymbolKind.Const, nil, import_span, Visibility.Public, false, Some(imported_mod.module_name))
         else:
-            # Re-export facade chase: the imported module does not declare
-            # `imported_name` itself — it may re-export it (`export use
-            # backend.{name}`), e.g. std.env.types forwarding the rt_env_*
-            # externs from std.nogc_sync_mut.env.types. Without this, the
-            # import silently registered NOTHING and every use site died
-            # later with "unresolved name: rt_env_get" (native-build
-            # entry-closure path; parity case dynload_tagged_text).
-            val hop = self.find_reexport_source(imported_mod, imported_mod_name, imported_name)
-            if (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
-                eprint("[reexport-chase] mod={imported_mod_name} wanted={imported_name} imports={imported_mod.import_target_indices.len()} exports={imported_mod.export_route_sources.len()} found={hop.found} mname={imported_mod.module_name} fns={imported_mod.callable_names.len()}")
-            if hop.found:
-                val source_index = hop.module_index
-                if source_index >= 0:
-                    self.register_imported_symbol(
-                        self.module_surfaces.surfaces[source_index],
-                        self.module_surfaces.surfaces[source_index].preferred_registry_name,
-                        hop.item_name, local_name, import_span, materialize_enum)
+            val imported_signature_index = module_surface_signature_index(
+                imported_mod, "free", "", imported_name)
+            if imported_signature_index >= 0:
+                # Repeated glob roots and physical module aliases can revisit
+                # the same local callable. Guard exact repeats before define.
+                val existing_id = self.symbols.lookup_or_invalid(local_name)
+                var exact_repeat = false
+                if existing_id.is_valid() and self.symbols.symbols.has(existing_id.id):
+                    val existing: HirSymbol = self.symbols.symbols[existing_id.id]
+                    var same_owner = false
+                    if val existing_owner = existing.defining_module:
+                        same_owner = existing_owner == imported_mod.module_name
+                    val qualified_name = imported_mod.module_name + "." + imported_name
+                    val same_source_name = (existing.name == qualified_name or
+                        (imported_name == local_name and existing.name == local_name))
+                    exact_repeat = (existing.kind == SymbolKind.Function and
+                        same_owner and same_source_name)
+                if exact_repeat:
+                    return
+                self.materialize_imported_signature_dependencies(
+                    imported_mod, imported_mod_name,
+                    imported_signature_index, import_span, materialize_enum)
+                val fn_type = self.declared_imported_surface_signature_type(
+                    imported_mod, imported_signature_index,
+                    imported_mod.module_name, nil, import_span)
+                val imported_fn_sym = self.symbols.define(local_name, SymbolKind.Function, fn_type, import_span, Visibility.Public, false, Some(imported_mod.module_name))
+                self.qualify_imported_function_symbol(imported_fn_sym, imported_mod.module_name, imported_name)
+            elif imported_mod.constants.contains_key(imported_name):
+                self.symbols.define(local_name, SymbolKind.Const, nil, import_span, Visibility.Public, false, Some(imported_mod.module_name))
+            else:
+                val hop = self.find_reexport_source(imported_mod, imported_mod_name, imported_name)
+                if (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
+                    eprint("[reexport-chase] mod={imported_mod_name} wanted={imported_name} imports={imported_mod.import_target_indices.len()} exports={imported_mod.export_route_sources.len()} found={hop.found} mname={imported_mod.module_name} fns={imported_mod.callable_names.len()}")
+                if hop.found:
+                    val source_index = hop.module_index
+                    if source_index >= 0:
+                        self.register_imported_symbol(
+                            self.module_surfaces.surfaces[source_index],
+                            self.module_surfaces.surfaces[source_index].preferred_registry_name,
+                            hop.item_name, local_name, import_span, materialize_enum)
 
     me report_reexport_chase_stats():
         """Level-gated (SIMPLE_HIR_REEXPORT_STATS=1, default off) readout for the

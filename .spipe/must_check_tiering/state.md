@@ -218,3 +218,11 @@ implementation-blocked-by-bootstrap-authority
   private facade/glob expansion consume only scalar route arrays, invalid
   projections fail closed, and `ProcessResult`-shaped return-only plus alias
   regressions cover the exact and adjacent roots. Bootstrap cycle count is 0/3.
+- verify-fail: Fresh cycle 1 passed Stage-2 admission and replay, then Stage 3
+  reproduced the early Span/OptimizationLevel/ProcessResult HIR cascade. No
+  crash occurred; Stage 4 was unavailable and seed fallback was refused.
+- fix-pending-verification: The remaining free-function, concrete-impl, and
+  trait-method consumers read retained callable aggregates across the staged
+  boundary. Surfaces now freeze aligned scalar signatures, dependencies, and
+  impl-to-trait relations; unsupported complex shapes fail soft. Bootstrap
+  cycle count is 1/3.

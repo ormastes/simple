@@ -7,6 +7,102 @@ use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_can
 
 extern fn rt_hash_text(content: text) -> i64
 
+class ModuleSurfaceSignatureBuilder:
+    names: [text]
+    owner_kinds: [text]
+    owner_names: [text]
+    type_param_counts: [i64]
+    has_return_types: [bool]
+    is_static: [bool]
+    param_offsets: [i64]
+    param_counts: [i64]
+    return_shapes: [text]
+    return_type_names: [text]
+    dependency_offsets: [i64]
+    dependency_counts: [i64]
+    param_names: [text]
+    param_has_types: [bool]
+    param_shapes: [text]
+    param_type_names: [text]
+    dependency_names: [text]
+
+    static fn empty() -> ModuleSurfaceSignatureBuilder:
+        ModuleSurfaceSignatureBuilder(
+            names: [], owner_kinds: [], owner_names: [],
+            type_param_counts: [], has_return_types: [], is_static: [],
+            param_offsets: [], param_counts: [], return_shapes: [],
+            return_type_names: [], dependency_offsets: [],
+            dependency_counts: [], param_names: [], param_has_types: [],
+            param_shapes: [], param_type_names: [], dependency_names: [])
+
+fn module_surface_projected_type_shape(type_: Type) -> text:
+    val named_name = parser_type_kind_named_name(type_.kind)
+    if named_name != "":
+        if parser_type_kind_named_args(type_.kind).len() == 0:
+            return "named"
+        return "unsupported"
+    val array_name = parser_type_kind_array_element_name(type_.kind)
+    if array_name != "":
+        val fallback = Type(kind: TypeKind.Infer, span: type_.span)
+        val element = parser_type_kind_array_element(type_.kind, fallback)
+        if parser_type_kind_named_args(element.kind).len() == 0:
+            return "named_array"
+    "unsupported"
+
+fn module_surface_projected_type_name(type_: Type, shape: text) -> text:
+    if shape == "named":
+        return parser_type_kind_named_name(type_.kind)
+    if shape == "named_array":
+        return parser_type_kind_array_element_name(type_.kind)
+    ""
+
+fn module_surface_signature_append(
+    builder: ModuleSurfaceSignatureBuilder,
+    callable: ModuleSurfaceCallable,
+    owner_kind: text,
+    owner_name: text
+):
+    builder.names = builder.names.push(callable.name)
+    builder.owner_kinds = builder.owner_kinds.push(owner_kind)
+    builder.owner_names = builder.owner_names.push(owner_name)
+    builder.type_param_counts = builder.type_param_counts.push(
+        callable.type_params.len())
+    builder.has_return_types = builder.has_return_types.push(
+        callable.has_return_type)
+    builder.is_static = builder.is_static.push(callable.is_static)
+    builder.param_offsets = builder.param_offsets.push(
+        builder.param_names.len())
+    builder.param_counts = builder.param_counts.push(callable.params.len())
+    builder.dependency_offsets = builder.dependency_offsets.push(
+        builder.dependency_names.len())
+    val dependency_start = builder.dependency_names.len()
+    for param in callable.params:
+        val shape = if param.has_type_:
+            module_surface_projected_type_shape(param.type_)
+        else:
+            "unsupported"
+        builder.param_names = builder.param_names.push(param.name)
+        builder.param_has_types = builder.param_has_types.push(param.has_type_)
+        builder.param_shapes = builder.param_shapes.push(shape)
+        builder.param_type_names = builder.param_type_names.push(
+            module_surface_projected_type_name(param.type_, shape))
+        if param.has_type_:
+            for dependency in parser_type_named_dependencies(param.type_):
+                builder.dependency_names = builder.dependency_names.push(
+                    dependency)
+    val return_shape = if callable.has_return_type:
+        module_surface_projected_type_shape(callable.return_type)
+    else:
+        "unsupported"
+    builder.return_shapes = builder.return_shapes.push(return_shape)
+    builder.return_type_names = builder.return_type_names.push(
+        module_surface_projected_type_name(callable.return_type, return_shape))
+    if callable.has_return_type:
+        for dependency in parser_type_named_dependencies(callable.return_type):
+            builder.dependency_names = builder.dependency_names.push(dependency)
+    builder.dependency_counts = builder.dependency_counts.push(
+        builder.dependency_names.len() - dependency_start)
+
 fn module_surface_callable_from_function(function_: ParserFunction) -> ModuleSurfaceCallable:
     var params: [ModuleSurfaceParam] = []
     for param in function_.params:
@@ -158,6 +254,7 @@ pub fn module_surface_from_owner(
 ) -> Result<ModuleSurface, text>:
     var callables: Dict<text, ModuleSurfaceCallable> = {}
     var callable_names: [text] = []
+    val signature_builder = ModuleSurfaceSignatureBuilder.empty()
     for name in owner.value.functions.keys():
         val callable = if owner.value.function_headers.contains_key(name):
             module_surface_callable_from_header(owner.value.function_headers[name])
@@ -167,6 +264,8 @@ pub fn module_surface_from_owner(
             module_surface_callable_from_function(owner.value.functions[name])
         callables[name] = callable
         callable_names = callable_names.push(name)
+        module_surface_signature_append(
+            signature_builder, callable, "free", "")
 
     var composites: Dict<text, ModuleSurfaceComposite> = {}
     for name in owner.value.classes.keys():
@@ -207,11 +306,32 @@ pub fn module_surface_from_owner(
 
     var traits: Dict<text, ModuleSurfaceTrait> = {}
     for name in owner.value.traits.keys():
-        traits[name] = module_surface_trait_from_trait(owner.value.traits[name])
+        val surface_trait = module_surface_trait_from_trait(
+            owner.value.traits[name])
+        traits[name] = surface_trait
+        for method in surface_trait.methods:
+            module_surface_signature_append(
+                signature_builder, method, "trait", name)
 
     var impls: [ModuleSurfaceImpl] = []
+    var impl_owner_names: [text] = []
+    var impl_has_traits: [bool] = []
+    var impl_trait_names: [text] = []
     for impl_ in owner.value.impls:
-        impls = impls.push(module_surface_impl_from_impl(impl_))
+        val surface_impl = module_surface_impl_from_impl(impl_)
+        impls = impls.push(surface_impl)
+        val impl_owner_name = parser_type_kind_named_name(impl_.type_.kind)
+        val impl_trait_name = if impl_.has_trait_:
+            parser_type_kind_named_name(impl_.trait_.kind)
+        else:
+            ""
+        impl_owner_names = impl_owner_names.push(impl_owner_name)
+        impl_has_traits = impl_has_traits.push(impl_.has_trait_)
+        impl_trait_names = impl_trait_names.push(impl_trait_name)
+        for method_name in surface_impl.methods.keys():
+            module_surface_signature_append(
+                signature_builder, surface_impl.methods[method_name],
+                "impl", impl_owner_name)
 
     var type_aliases: Dict<text, ModuleSurfaceTypeAlias> = {}
     for name in owner.value.type_aliases.keys():
@@ -287,6 +407,26 @@ pub fn module_surface_from_owner(
         callable_names: callable_names,
         type_alias_names: type_alias_names,
         constant_names: constant_names,
+        signature_names: signature_builder.names,
+        signature_owner_kinds: signature_builder.owner_kinds,
+        signature_owner_names: signature_builder.owner_names,
+        signature_type_param_counts: signature_builder.type_param_counts,
+        signature_has_return_types: signature_builder.has_return_types,
+        signature_is_static: signature_builder.is_static,
+        signature_param_offsets: signature_builder.param_offsets,
+        signature_param_counts: signature_builder.param_counts,
+        signature_return_shapes: signature_builder.return_shapes,
+        signature_return_type_names: signature_builder.return_type_names,
+        signature_dependency_offsets: signature_builder.dependency_offsets,
+        signature_dependency_counts: signature_builder.dependency_counts,
+        signature_param_names: signature_builder.param_names,
+        signature_param_has_types: signature_builder.param_has_types,
+        signature_param_shapes: signature_builder.param_shapes,
+        signature_param_type_names: signature_builder.param_type_names,
+        signature_dependency_names: signature_builder.dependency_names,
+        impl_owner_names: impl_owner_names,
+        impl_has_traits: impl_has_traits,
+        impl_trait_names: impl_trait_names,
         callables: callables,
         composites: composites,
         enums: enums,

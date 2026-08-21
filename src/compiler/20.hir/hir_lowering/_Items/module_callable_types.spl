@@ -212,6 +212,60 @@ impl HirLowering:
                     imported_module_name),
                 []),
             span: callable.span)
+
+    me imported_surface_projected_name_type(shape: text, type_name: text, imported_module_name: text, span: Span) -> HirType?:
+        if shape != "named" and shape != "named_array":
+            return nil
+        val raw_symbol_id = self.symbols.lookup_qualified_type_raw(
+            imported_module_name, type_name)
+        val element = if raw_symbol_id >= 0:
+            HirType(kind: HirTypeKind.Named(SymbolId(id: raw_symbol_id), []), span: span)
+        else:
+            HirType(kind: self.lower_named_kind(type_name, [], span), span: span)
+        if shape == "named_array":
+            return Some(HirType(kind: HirTypeKind.Array(element, nil), span: span))
+        Some(element)
+
+    me declared_imported_surface_signature_type(surface: ModuleSurface, signature_index: i64, imported_module_name: text, owner_symbol: SymbolId?, import_span: Span) -> HirType?:
+        if not module_surface_signature_arrays_aligned(surface) or
+           signature_index < 0 or signature_index >= surface.signature_names.len() or
+           surface.signature_type_param_counts[signature_index] > 0 or
+           not surface.signature_has_return_types[signature_index]:
+            return nil
+        var param_types: [HirType] = []
+        val offset = surface.signature_param_offsets[signature_index]
+        val count = surface.signature_param_counts[signature_index]
+        var relative_index = 0
+        if val owner_id = owner_symbol:
+            if not surface.signature_is_static[signature_index]:
+                param_types = param_types.push(HirType(
+                    kind: HirTypeKind.Named(owner_id, []), span: import_span))
+                if count > 0:
+                    val receiver_name = surface.signature_param_names[offset]
+                    if receiver_name == "self" or receiver_name == "me":
+                        relative_index = 1
+        while relative_index < count:
+            val param_index = offset + relative_index
+            if not surface.signature_param_has_types[param_index]:
+                return nil
+            val projected = self.imported_surface_projected_name_type(
+                surface.signature_param_shapes[param_index],
+                surface.signature_param_type_names[param_index],
+                imported_module_name, import_span)
+            if val projected_type = projected:
+                param_types = param_types.push(projected_type)
+            else:
+                return nil
+            relative_index = relative_index + 1
+        val projected_return = self.imported_surface_projected_name_type(
+            surface.signature_return_shapes[signature_index],
+            surface.signature_return_type_names[signature_index],
+            imported_module_name, import_span)
+        if val return_type = projected_return:
+            return Some(HirType(
+                kind: HirTypeKind.Function(param_types, return_type, []),
+                span: import_span))
+        nil
     me infer_simple_type_name_ast(e: Expr, params: [Param]) -> text?:
         match e.kind:
             case ExprKind.IntLit(_):

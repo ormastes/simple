@@ -151,7 +151,100 @@ pub(package) fn module_surface_preferred_registry_name(
         return Err("preferred registry alias is not mapped to its physical surface: {selected}")
     Ok(selected)
 
+pub(package) fn module_surface_signature_index(
+    surface: ModuleSurface,
+    owner_kind: text,
+    owner_name: text,
+    callable_name: text
+) -> i64:
+    var index = 0
+    while index < surface.signature_names.len():
+        if surface.signature_owner_kinds[index] == owner_kind and
+           surface.signature_owner_names[index] == owner_name and
+           surface.signature_names[index] == callable_name:
+            return index
+        index = index + 1
+    -1
+
+pub(package) fn module_surface_signature_arrays_aligned(
+    surface: ModuleSurface
+) -> bool:
+    val signature_count = surface.signature_names.len()
+    if surface.signature_owner_kinds.len() != signature_count or
+       surface.signature_owner_names.len() != signature_count or
+       surface.signature_type_param_counts.len() != signature_count or
+       surface.signature_has_return_types.len() != signature_count or
+       surface.signature_is_static.len() != signature_count or
+       surface.signature_param_offsets.len() != signature_count or
+       surface.signature_param_counts.len() != signature_count or
+       surface.signature_return_shapes.len() != signature_count or
+       surface.signature_return_type_names.len() != signature_count or
+       surface.signature_dependency_offsets.len() != signature_count or
+       surface.signature_dependency_counts.len() != signature_count:
+        return false
+    if surface.signature_param_names.len() != surface.signature_param_has_types.len() or
+       surface.signature_param_names.len() != surface.signature_param_shapes.len() or
+       surface.signature_param_names.len() != surface.signature_param_type_names.len():
+        return false
+    if surface.impl_owner_names.len() != surface.impl_has_traits.len() or
+       surface.impl_owner_names.len() != surface.impl_trait_names.len():
+        return false
+    var expected_param_offset = 0
+    var expected_dependency_offset = 0
+    var signature_index = 0
+    while signature_index < signature_count:
+        val owner_kind = surface.signature_owner_kinds[signature_index]
+        val owner_name = surface.signature_owner_names[signature_index]
+        if owner_kind != "free" and owner_kind != "impl" and
+           owner_kind != "trait":
+            return false
+        if (owner_kind == "free" and owner_name != "") or
+           (owner_kind != "free" and owner_name == ""):
+            return false
+        val param_offset = surface.signature_param_offsets[signature_index]
+        val param_count = surface.signature_param_counts[signature_index]
+        if param_offset != expected_param_offset or param_count < 0 or
+           param_offset + param_count > surface.signature_param_names.len():
+            return false
+        expected_param_offset = param_offset + param_count
+        val dependency_offset =
+            surface.signature_dependency_offsets[signature_index]
+        val dependency_count =
+            surface.signature_dependency_counts[signature_index]
+        if dependency_offset != expected_dependency_offset or
+           dependency_count < 0 or
+           dependency_offset + dependency_count >
+               surface.signature_dependency_names.len():
+            return false
+        expected_dependency_offset = dependency_offset + dependency_count
+        val return_shape = surface.signature_return_shapes[signature_index]
+        val return_name = surface.signature_return_type_names[signature_index]
+        if return_shape != "named" and return_shape != "named_array" and
+           return_shape != "unsupported":
+            return false
+        if (return_shape == "unsupported" and return_name != "") or
+           (return_shape != "unsupported" and return_name == ""):
+            return false
+        signature_index = signature_index + 1
+    if expected_param_offset != surface.signature_param_names.len() or
+       expected_dependency_offset != surface.signature_dependency_names.len():
+        return false
+    var param_index = 0
+    while param_index < surface.signature_param_names.len():
+        val shape = surface.signature_param_shapes[param_index]
+        val type_name = surface.signature_param_type_names[param_index]
+        if shape != "named" and shape != "named_array" and
+           shape != "unsupported":
+            return false
+        if (shape == "unsupported" and type_name != "") or
+           (shape != "unsupported" and type_name == ""):
+            return false
+        param_index = param_index + 1
+    true
+
 pub(package) fn module_surface_route_arrays_aligned(surface: ModuleSurface) -> bool:
+    if not module_surface_signature_arrays_aligned(surface):
+        return false
     if surface.import_target_indices.len() != surface.import_target_names.len() or
        surface.import_target_indices.len() != surface.import_route_module_names.len() or
        surface.import_target_indices.len() != surface.import_route_item_offsets.len() or
