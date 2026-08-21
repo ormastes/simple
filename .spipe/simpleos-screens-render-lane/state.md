@@ -13,6 +13,16 @@
 - Resume with the exact command recorded in
   `doc/08_tracking/bug/arm64_framebuffer_color_struct_return_abi_2026-08-21.md`.
 
+### Refreshed continuation
+
+- Post-rebase provenance rejection was honest; refreshed Phase 2 is admitted
+  at `acd84663e494a8046bc8745b3bd380f03b22dacc15ef710c905beeb4d3fb53fd`.
+- The prior imported-composite HIR cascade is cleared. Stage 3 now stops at one
+  pure-parser defect: comparison `n < 0 or n > (...)` is misread as const
+  generics in `flat_pool_codec.spl`.
+- Three-cycle cap reached. Parser fix, new Phase 2/3 admission, ARM64 image, and
+  real QEMU 2D/Web/GUI/WM rows remain active and unclaimed.
+
 ## Raw Request
 > make deep research and plan with agents, simple os to have configs, 2d rendering
 > screen, web rendering screen, gui rendering screen, and existing default wm screen.

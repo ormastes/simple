@@ -173,3 +173,26 @@ caffeinate -dimsu env SIMPLE_NO_STUB_FALLBACK=1 \
 
 Only an admitted Phase 3 may proceed to the ARM64 SimpleOS image and real QEMU
 2D/Web/GUI/WM evidence. None of those rows is promoted yet.
+
+## 2026-08-22 refreshed current-main admission and Stage-3 parser blocker
+
+The post-rebase Phase-2 receipt was correctly rejected by Stage-3 source/git
+preflight. A current-main Rust checked-sign bridge then failed to construct the
+now-Arc-backed `Value::Array`; both result branches now convert their vectors
+into the owned Arc representation. A fresh strict build admitted Phase 2 at
+SHA-256 `acd84663e494a8046bc8745b3bd380f03b22dacc15ef710c905beeb4d3fb53fd`.
+
+Stage 3 accepted the new receipt and cache ownership, parsed 663 surfaces, and
+then rejected only `src/compiler/frontend/core/flat_pool_codec.spl:94`. The
+pure-Simple generic-argument lookahead misreads the valid comparison
+`n < 0 or n > (...)` as a const-generic call. The existing Rust twin already
+has the required comma ratchet; the pure twin does not. This supersedes the old
+20-unresolved-type Stage-3 blocker: imported composite materialization advanced
+past that boundary.
+
+The three-cycle cap was reached, so no parser edit or retry was made. Next
+session: port the existing `need_comma` ratchet to
+`src/compiler/10.frontend/core/parser_expr.spl`, run the existing
+`comparison_chain_then_paren_group_spec.spl` plus the real
+`flat_pool_codec.spl` parse, rebuild/admit Phase 2, regenerate the Phase-3
+receipt, and resume. QEMU evidence remains pending and unclaimed.
