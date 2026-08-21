@@ -65,3 +65,11 @@ The next bounded run died in Phase 2 while converting the first typed extern-hea
 Fresh verification then released all streaming surfaces and entered HIR, proving that repair. The original Span/Type cascade remained. Two surviving staged boundaries were identified: composite registration selected a scalar name but reopened the retained composite/field/Type dictionary payload, and qualified symbol bind/lookup depended on class-field Dict membership already known to mis-dispatch in self-hosted native code. Surfaces now freeze one reference-semantic scalar composite index, registration consumes only its kinds/field shapes/dependencies, and SymbolTable maintains scalar first-write qualified name/id indexes (including id zero) as the lookup authority.
 
 The final bounded cycle moved composite projection emission into each live parser owner, eliminating the projection builder's Dict-value reopen, but Stage 3 again faulted after five released surfaces at `io_runtime.spl` parse-start. Because an earlier source layout with the stable Flat AST locals parsed the full closure, the remaining Phase-2 defect is source-layout-sensitive generated aggregate transport rather than a genuine syntax error in that module. No Stage-4 or push PASS is claimed.
+
+Kernel symbolization and disassembly refined that final fault: `0x4bc8e6` is a conditionally selected 48-byte copy in `flat_ast_to_module`. Parameter Type/default construction was already stable, but both ordinary and extern return Types still used inline rich-value conditionals. Those return values now use stable typed locals as well; the regression contract forbids every remaining parameter/default/return instance of this lowering shape.
+
+A subsequent instruction-level audit identified the copied 48-byte value
+exactly as the function-wide diagnostic `Span`, not a return `Type`: enum
+construction reused it after declaration-walk pool safepoints. Enum defaults,
+fields, variants, type parameters, and the enum owner now construct their empty
+spans at the use site. This is the bounded fix awaiting bootstrap admission.

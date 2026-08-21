@@ -264,3 +264,14 @@ implementation-blocked-by-bootstrap-authority
   the stable Flat AST local fix, so source-layout-sensitive aggregate transport
   remains in the self-hosted Phase-2 path. Stage 4, deployment, push hook, and
   GitHub push were refused. The three-cycle cap is exhausted.
+- blocker-correction: Kernel fault `0x4bc8e6` symbolized to
+  `flat_ast_to_module`; disassembly shows a conditionally selected 48-byte
+  Type copy. Parameter Type/default locals were already stable, but ordinary
+  and extern return Types still used the same inline conditional shape.
+  Both now use stable typed locals, and the source contract forbids all four
+  rich conditional transport forms. Fresh verification is pending.
+- blocker-correction: Exact instruction mapping supersedes the preliminary
+  Type inference above. Address `0x4bc8e6` is the enum path copying the
+  function-wide six-word `Span` after a pool safepoint. Enum construction now
+  creates empty spans at each use instead of retaining that aggregate across
+  the declaration walk. Fresh verification is pending.
