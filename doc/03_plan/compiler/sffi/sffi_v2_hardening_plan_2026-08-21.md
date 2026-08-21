@@ -293,10 +293,10 @@ symbol/signature roll-up is
 
 Current evidence after the checked regex boundary migration:
 
-- 3,964 distinct symbols in the current backing census, including 3,962
+- 3,963 distinct symbols in the current backing census, including 3,961
   compiler-owned canonical symbols;
-- 14,611 declaration sites;
-- 14,050 sites have neither an explicit FFI-unsafe tag nor a local contract;
+- 14,603 declaration sites;
+- 14,042 sites have neither an explicit FFI-unsafe tag nor a local contract;
 - 510 sites declare a typed/documented contract but lack the unsafe tag;
 - 38 declarations now carry explicit FFI authority
   but still require canonical ABI-contract metadata;
@@ -304,8 +304,8 @@ Current evidence after the checked regex boundary migration:
   typed result contract; their cryptographic artifact evidence remains open;
 - 401 canonical symbols currently have more than one normalized declaration
   shape and require typed-resolution review before one ABI hash can be sealed;
-- 3,548 declared symbols require migration and 401 require conflict resolution;
-- among `rt_*`/`spl_*` declarations, 1,723 sites reference symbols classified
+- 3,547 declared symbols require migration and 401 require conflict resolution;
+- among `rt_*`/`spl_*` declarations, 1,715 sites reference symbols classified
   genuinely missing and 318 are backed only in owned C runtime source;
 - the distinct-symbol backing census now classifies 698 symbols in the typed
   interpreter registry and 1,190 as genuinely missing.
@@ -317,7 +317,7 @@ their text argument and add no allocation, hashing, dynamic loading, or
 string-name lookup. The rebuilt-interpreter regression passes all five examples;
 no weak fallback or skipped test was introduced.
 
-These are migration inputs, not 14,611 independent implementations. The audit
+These are migration inputs, not 14,603 independent implementations. The audit
 now hashes normalized declaration shapes and groups them by symbol. The next
 tooling step replaces the text-derived shape with the resolved HIR ABI hash,
 rejects the 401 conflict groups, and converts compatibility modules to
@@ -349,8 +349,8 @@ call-site migration ledger at
 `doc/08_tracking/bug/data/sffi_call_authority_2026-08-21.tsv`. It recognizes
 file-local externs and explicit `rt_*`/`spl_*` imports from SFFI modules, tracks
 function and lexical FFI authority by indentation, and can fail CI with
-`SFFI_FAIL_ON_MISSING=1`. The current source/test census contains 22,366
-missing-authority calls, 51 lexical scopes, and 24 function scopes across 3,157
+`SFFI_FAIL_ON_MISSING=1`. The current source/test census contains 22,341
+missing-authority calls, 51 lexical scopes, and 43 function scopes across 3,157
 files. It completed in 24.21 seconds at 7,424 KiB maximum RSS. This is a
 migration index rather than ABI proof; aliases, generated bindings, and
 re-exports still require resolved-HIR identity.
