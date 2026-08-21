@@ -258,3 +258,9 @@ implementation-blocked-by-bootstrap-authority
 - fix-pending-verification: Composite scalar rows are now emitted directly
   from each parser class/actor/struct while its owner is live; surface
   construction never reopens a composite Dict value. Cycle count is 2/3.
+- verify-fail-blocked: Final cycle 3 passed Stage 2 and replay, then Stage 3
+  again received SIGSEGV after five released surfaces at parse-start for
+  `std/nogc_sync_mut/io_runtime.spl`. The same source previously passed after
+  the stable Flat AST local fix, so source-layout-sensitive aggregate transport
+  remains in the self-hosted Phase-2 path. Stage 4, deployment, push hook, and
+  GitHub push were refused. The three-cycle cap is exhausted.
