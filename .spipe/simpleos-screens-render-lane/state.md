@@ -1,5 +1,18 @@
 # Feature: SimpleOS Screens + Render Lane Runnable & Hardened
 
+## 2026-08-22 bootstrap handoff
+
+- Current pure-Simple ARM64 Phase 2: **ADMITTED**, SHA-256
+  `2090f5506fc5ba218d3526f3ae49f121b16e97a04b70a4c9ec1674a5773a315b`.
+- Fixed current-main `PatternKind.TypeTest` declaration loss and missing native
+  closure edges for the union-narrowing/MethodResolver split impl providers.
+- Fresh Phase-3 planner receipt:
+  `build/bootstrap/planner-admission/simpleos-render-stage3/admission.env`.
+- Three-cycle bootstrap cap reached; Stage 3, kernel image, and real QEMU
+  2D/Web/GUI/WM evidence remain active and unclaimed.
+- Resume with the exact command recorded in
+  `doc/08_tracking/bug/arm64_framebuffer_color_struct_return_abi_2026-08-21.md`.
+
 ## Raw Request
 > make deep research and plan with agents, simple os to have configs, 2d rendering
 > screen, web rendering screen, gui rendering screen, and existing default wm screen.

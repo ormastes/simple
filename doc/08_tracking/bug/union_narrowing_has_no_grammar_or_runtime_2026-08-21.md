@@ -4,6 +4,18 @@
 - **Lane:** Wave 2D / Phase 4, S4 (union normalization)
 - **Status:** RESOLVED (2026-08-21) for grammar, lowering and exhaustiveness; the RUNTIME-EXECUTION claim is explicitly NOT made — see "What is still not proven" below.
 
+## Bootstrap regression claimed 2026-08-22
+
+Current `main` retained the `PatternKind.TypeTest` construction, lowering,
+generated visitors, schema row, and union-narrowing specs, but the physical
+`PatternKind` enum declaration no longer contained that variant. A fresh ARM64
+trust-root Phase 2 therefore failed on
+`10.frontend/_FlatAstBridge/convert_nodes.spl` with `unknown variant or method
+'TypeTest' on enum PatternKind`. The declaration is restored as the final
+variant so all pre-existing discriminants remain unchanged. This record remains
+claimed by the SimpleOS bootstrap lane until the fresh Phase 2 admission and the
+existing union-narrowing/generated-visitor regressions pass.
+
 ## What works after S4
 
 `i64 | f64 | bool | text` now survives the flat-AST bridge as a real

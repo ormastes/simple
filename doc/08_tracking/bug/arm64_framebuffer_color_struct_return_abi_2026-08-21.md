@@ -136,3 +136,40 @@ captures the three-module shape at
 The three-cycle cap was then reached, so the new regression and Stage 3 were not
 rerun in this session. Stage-3 admission, ARM64 kernel production, and real QEMU
 2D/Web/GUI/WM evidence remain pending and unclaimed.
+
+## 2026-08-22 current-main Phase-2 admission
+
+The next guarded three-cycle session found two newer current-main bootstrap
+regressions before QEMU work could resume:
+
+1. `PatternKind.TypeTest` remained in 25 consumers, generated/schema metadata,
+   and tests but had disappeared from the physical frontend enum. Restoring it
+   as the final variant preserved all earlier discriminants and removed the
+   exact `convert_nodes.spl` MIR failure.
+2. Split impl providers for `HirLowering.union_narrow_arms` and five
+   `MethodResolver` helpers had no import edge into the native entry closure.
+   Explicit owner-to-provider imports removed all six undefined link symbols.
+
+The final bounded cycle admitted a fresh pure-Simple Phase-2 compiler at
+`build/bootstrap/stage2/aarch64-apple-darwin/simple`, SHA-256
+`2090f5506fc5ba218d3526f3ae49f121b16e97a04b70a4c9ec1674a5773a315b`.
+Bootstrap sanity and struct-receiver/runtime capability both passed. A new
+Phase-3 planner admission was produced at
+`build/bootstrap/planner-admission/simpleos-render-stage3/admission.env` for
+that exact parent.
+
+A standalone full-compiler regression link remains fail-closed on 16 unresolved
+runtime symbols even with the canonical core-C bootstrap runtime; no unsafe
+unresolved-runtime bypass was used. This does not contradict the canonical
+Phase-2 admission, but it means the standalone regression executable is not
+claimed as PASS. The next fresh guarded session must run exactly:
+
+```sh
+caffeinate -dimsu env SIMPLE_NO_STUB_FALLBACK=1 \
+  sh scripts/bootstrap/bootstrap-from-scratch.sh \
+  --bootstrap-receipt=build/bootstrap/planner-admission/simpleos-render-stage3/admission.env \
+  --resume-stage3-from-admitted=build/bootstrap --jobs=1
+```
+
+Only an admitted Phase 3 may proceed to the ARM64 SimpleOS image and real QEMU
+2D/Web/GUI/WM evidence. None of those rows is promoted yet.
