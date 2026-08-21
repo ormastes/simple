@@ -35,17 +35,19 @@ fn read_u32(data: [u8], offset: i64) -> (i64, i64)?:
 
 fn read_text_field(data: [u8], offset: i64) -> (text, i64)?:
     """Read a length-prefixed text field. Returns (text, new_offset)."""
-    val len_result = read_u32(data, offset)
-    if len_result == nil:
+    val len_result_opt = read_u32(data, offset)
+    if len_result_opt == nil:
         return nil
+    val len_result = len_result_opt!
     val text_len = len_result.0
     val pos = len_result.1
     if pos + text_len > data.len():
         deferred_set_error("Unexpected end of data reading text at offset {pos}")
         return nil
-    val text_value = deferred_utf8_bytes_to_text(data[pos..(pos + text_len)])
-    if text_value == nil:
+    val text_value_opt = deferred_utf8_bytes_to_text(data[pos..(pos + text_len)])
+    if text_value_opt == nil:
         return nil
+    val text_value = text_value_opt!
     (text_value, pos + text_len)
 
 fn deferred_utf8_bytes_to_text(text_bytes: [u8]) -> text?:
@@ -123,45 +125,51 @@ fn read_optional_text_field(data: [u8], offset: i64) -> (text?, i64)?:
         return nil
     val tag = data[offset]
     if tag == 0x01:
-        val result = read_text_field(data, offset + 1)
-        if result == nil:
+        val result_opt = read_text_field(data, offset + 1)
+        if result_opt == nil:
             return nil
+        val result = result_opt!
         (result.0, result.1)
     else:
         (nil, offset + 1)
 
 fn read_text_list(data: [u8], offset: i64) -> ([text], i64)?:
     """Read a list of length-prefixed text items. Returns (list, new_offset)."""
-    val count_result = read_u32(data, offset)
-    if count_result == nil:
+    val count_result_opt = read_u32(data, offset)
+    if count_result_opt == nil:
         return nil
+    val count_result = count_result_opt!
     val count = count_result.0
     var pos = count_result.1
     var items: [text] = []
     for _ in 0..count:
-        val item_result = read_text_field(data, pos)
-        if item_result == nil:
+        val item_result_opt = read_text_field(data, pos)
+        if item_result_opt == nil:
             return nil
+        val item_result = item_result_opt!
         items.push(item_result.0)
         pos = item_result.1
     (items, pos)
 
 fn read_text_dict(data: [u8], offset: i64) -> ({text: text}, i64)?:
     """Read a text-to-text dictionary. Returns (dict, new_offset)."""
-    val count_result = read_u32(data, offset)
-    if count_result == nil:
+    val count_result_opt = read_u32(data, offset)
+    if count_result_opt == nil:
         return nil
+    val count_result = count_result_opt!
     val count = count_result.0
     var pos = count_result.1
     var dict: {text: text} = {}
     for _ in 0..count:
-        val key_result = read_text_field(data, pos)
-        if key_result == nil:
+        val key_result_opt = read_text_field(data, pos)
+        if key_result_opt == nil:
             return nil
+        val key_result = key_result_opt!
         pos = key_result.1
-        val value_result = read_text_field(data, pos)
-        if value_result == nil:
+        val value_result_opt = read_text_field(data, pos)
+        if value_result_opt == nil:
             return nil
+        val value_result = value_result_opt!
         pos = value_result.1
         dict[key_result.0] = value_result.0
     (dict, pos)
@@ -175,9 +183,10 @@ fn read_generic_params(data: [u8], offset: i64) -> ([text], i64)?:
     var pos = offset + 1
     var params: [text] = []
     for _ in 0..param_count:
-        val param_result = read_text_field(data, pos)
-        if param_result == nil:
+        val param_result_opt = read_text_field(data, pos)
+        if param_result_opt == nil:
             return nil
+        val param_result = param_result_opt!
         params.push(param_result.0)
         pos = param_result.1
     (params, pos)
@@ -191,10 +200,18 @@ fn read_generic_params(data: [u8], offset: i64) -> ([text], i64)?:
 fn _read_def_prefix(data: [u8], offset: i64) -> (text, [text], i64)?:
     """Read the common prefix of struct/class/enum/trait deserializers:
     name (text-field) followed by generic_params. Returns (name, generic_params, new_offset)."""
-    val name_result = read_text_field(data, offset)?
+    val name_result_opt_opt = read_text_field(data, offset)
+    if name_result_opt_opt == nil:
+        return nil
+    val name_result_opt = name_result_opt_opt!
+    val name_result = name_result_opt!
     val name = name_result.0
     var pos = name_result.1
-    val gp_result = read_generic_params(data, pos)?
+    val gp_result_opt_opt = read_generic_params(data, pos)
+    if gp_result_opt_opt == nil:
+        return nil
+    val gp_result_opt = gp_result_opt_opt!
+    val gp_result = gp_result_opt!
     val generic_params = gp_result.0
     pos = gp_result.1
     (name, generic_params, pos)
@@ -203,10 +220,18 @@ fn _read_def_suffix(data: [u8], offset: i64) -> (text?, {text: text}, i64)?:
     """Read the common suffix shared by struct/class/enum deserializers:
     optional specialization_of + type_bindings dict.
     Returns (specialization_of, type_bindings, new_offset)."""
-    val spec_result = read_optional_text_field(data, offset)?
+    val spec_result_opt_opt = read_optional_text_field(data, offset)
+    if spec_result_opt_opt == nil:
+        return nil
+    val spec_result_opt = spec_result_opt_opt!
+    val spec_result = spec_result_opt!
     val specialization_of = spec_result.0
     var pos = spec_result.1
-    val bindings_result = read_text_dict(data, pos)?
+    val bindings_result_opt_opt = read_text_dict(data, pos)
+    if bindings_result_opt_opt == nil:
+        return nil
+    val bindings_result_opt = bindings_result_opt_opt!
+    val bindings_result = bindings_result_opt!
     val type_bindings = bindings_result.0
     pos = bindings_result.1
     (specialization_of, type_bindings, pos)
@@ -214,37 +239,42 @@ fn _read_def_suffix(data: [u8], offset: i64) -> (text?, {text: text}, i64)?:
 fn deserialize_function_def(data: [u8], offset: i64) -> (FunctionDef, i64)?:
     """Deserialize a FunctionDef from binary data."""
     # Name
-    val name_result = read_text_field(data, offset)
-    if name_result == nil:
+    val name_result_opt = read_text_field(data, offset)
+    if name_result_opt == nil:
         return nil
+    val name_result = name_result_opt!
     val name = name_result.0
     var pos = name_result.1
 
     # Generic params
-    val gp_result = read_generic_params(data, pos)
-    if gp_result == nil:
+    val gp_result_opt = read_generic_params(data, pos)
+    if gp_result_opt == nil:
         return nil
+    val gp_result = gp_result_opt!
     val generic_params = gp_result.0
     pos = gp_result.1
 
     # Params
-    val params_result = read_text_list(data, pos)
-    if params_result == nil:
+    val params_result_opt = read_text_list(data, pos)
+    if params_result_opt == nil:
         return nil
+    val params_result = params_result_opt!
     val params = params_result.0
     pos = params_result.1
 
     # Return type
-    val ret_result = read_optional_text_field(data, pos)
-    if ret_result == nil:
+    val ret_result_opt = read_optional_text_field(data, pos)
+    if ret_result_opt == nil:
         return nil
+    val ret_result = ret_result_opt!
     val return_type = ret_result.0
     pos = ret_result.1
 
     # Body
-    val body_result = read_text_list(data, pos)
-    if body_result == nil:
+    val body_result_opt = read_text_list(data, pos)
+    if body_result_opt == nil:
         return nil
+    val body_result = body_result_opt!
     val body = body_result.0
     pos = body_result.1
 
@@ -256,16 +286,18 @@ fn deserialize_function_def(data: [u8], offset: i64) -> (FunctionDef, i64)?:
     pos = pos + 1
 
     # Specialization of
-    val spec_result = read_optional_text_field(data, pos)
-    if spec_result == nil:
+    val spec_result_opt = read_optional_text_field(data, pos)
+    if spec_result_opt == nil:
         return nil
+    val spec_result = spec_result_opt!
     val specialization_of = spec_result.0
     pos = spec_result.1
 
     # Type bindings
-    val bindings_result = read_text_dict(data, pos)
-    if bindings_result == nil:
+    val bindings_result_opt = read_text_dict(data, pos)
+    if bindings_result_opt == nil:
         return nil
+    val bindings_result = bindings_result_opt!
     val type_bindings = bindings_result.0
     pos = bindings_result.1
 
@@ -284,13 +316,21 @@ fn deserialize_function_def(data: [u8], offset: i64) -> (FunctionDef, i64)?:
 fn deserialize_struct_def(data: [u8], offset: i64) -> (StructDef, i64)?:
     """Deserialize a StructDef from binary data."""
     # Name + generic params
-    val prefix = _read_def_prefix(data, offset)?
+    val prefix_opt_opt = _read_def_prefix(data, offset)
+    if prefix_opt_opt == nil:
+        return nil
+    val prefix_opt = prefix_opt_opt!
+    val prefix = prefix_opt!
     val name = prefix.0
     val generic_params = prefix.1
     var pos = prefix.2
 
     # Fields
-    val fields_result = read_text_list(data, pos)?
+    val fields_result_opt_opt = read_text_list(data, pos)
+    if fields_result_opt_opt == nil:
+        return nil
+    val fields_result_opt = fields_result_opt_opt!
+    val fields_result = fields_result_opt!
     val fields = fields_result.0
     pos = fields_result.1
 
@@ -301,7 +341,11 @@ fn deserialize_struct_def(data: [u8], offset: i64) -> (StructDef, i64)?:
     pos = pos + 1
 
     # Specialization of + type bindings
-    val suffix = _read_def_suffix(data, pos)?
+    val suffix_opt_opt = _read_def_suffix(data, pos)
+    if suffix_opt_opt == nil:
+        return nil
+    val suffix_opt = suffix_opt_opt!
+    val suffix = suffix_opt!
     val specialization_of = suffix.0
     val type_bindings = suffix.1
     pos = suffix.2
@@ -319,18 +363,30 @@ fn deserialize_struct_def(data: [u8], offset: i64) -> (StructDef, i64)?:
 fn deserialize_class_def(data: [u8], offset: i64) -> (ClassDef, i64):
     """Deserialize a ClassDef from binary data."""
     # Name + generic params
-    val prefix = _read_def_prefix(data, offset)?
+    val prefix_opt_opt = _read_def_prefix(data, offset)
+    if prefix_opt_opt == nil:
+        return nil
+    val prefix_opt = prefix_opt_opt!
+    val prefix = prefix_opt!
     val name = prefix.0
     val generic_params = prefix.1
     var pos = prefix.2
 
     # Fields
-    val fields_result = read_text_list(data, pos)?
+    val fields_result_opt_opt = read_text_list(data, pos)
+    if fields_result_opt_opt == nil:
+        return nil
+    val fields_result_opt = fields_result_opt_opt!
+    val fields_result = fields_result_opt!
     val fields = fields_result.0
     pos = fields_result.1
 
     # Methods
-    val methods_result = read_text_list(data, pos)?
+    val methods_result_opt_opt = read_text_list(data, pos)
+    if methods_result_opt_opt == nil:
+        return nil
+    val methods_result_opt = methods_result_opt_opt!
+    val methods_result = methods_result_opt!
     val methods = methods_result.0
     pos = methods_result.1
 
@@ -341,7 +397,11 @@ fn deserialize_class_def(data: [u8], offset: i64) -> (ClassDef, i64):
     pos = pos + 1
 
     # Specialization of + type bindings
-    val suffix = _read_def_suffix(data, pos)?
+    val suffix_opt_opt = _read_def_suffix(data, pos)
+    if suffix_opt_opt == nil:
+        return nil
+    val suffix_opt = suffix_opt_opt!
+    val suffix = suffix_opt!
     val specialization_of = suffix.0
     val type_bindings = suffix.1
     pos = suffix.2
@@ -357,30 +417,188 @@ fn deserialize_class_def(data: [u8], offset: i64) -> (ClassDef, i64):
     )
     (class_def, pos)
 
+fn read_i64_list(data: [u8], offset: i64) -> ([i64], i64)?:
+    """Read u32 count + 8-byte little-endian two's-complement i64 items."""
+    val count_result_opt = read_u32(data, offset)
+    if count_result_opt == nil:
+        return nil
+    val count_result = count_result_opt!
+    val count = count_result.0
+    var pos = count_result.1
+    if pos + count * 8 > data.len():
+        deferred_set_error("Unexpected end of data reading i64 list at offset {pos}")
+        return nil
+    var items: [i64] = []
+    for _ in 0..count:
+        var v: i64 = 0
+        for k in 0..8:
+            v = v | ((data[pos + k] as i64) << (8 * k))
+        items.push(v)
+        pos = pos + 8
+    (items, pos)
+
+fn read_u8_list(data: [u8], offset: i64) -> ([u8], i64)?:
+    """Read u32 count + raw bytes."""
+    val count_result_opt = read_u32(data, offset)
+    if count_result_opt == nil:
+        return nil
+    val count_result = count_result_opt!
+    val count = count_result.0
+    var pos = count_result.1
+    if pos + count > data.len():
+        deferred_set_error("Unexpected end of data reading u8 list at offset {pos}")
+        return nil
+    var items: [u8] = []
+    for _ in 0..count:
+        items.push(data[pos])
+        pos = pos + 1
+    (items, pos)
+
+fn read_bool_list(data: [u8], offset: i64) -> ([bool], i64)?:
+    """Read u32 count + 0x01/0x00 bytes."""
+    val raw_opt = read_u8_list(data, offset)
+    if raw_opt == nil:
+        return nil
+    val raw = raw_opt!
+    var items: [bool] = []
+    for b in raw.0:
+        items.push(b == 0x01)
+    (items, raw.1)
+
+fn read_flag_byte(data: [u8], offset: i64, what: text) -> (bool, i64)?:
+    """Read one 0x01/0x00 flag byte, failing closed at end of data."""
+    if offset >= data.len():
+        deferred_set_error("Unexpected end of data reading {what}")
+        return nil
+    (data[offset] == 0x01, offset + 1)
+
+# Enum record v2 marker ("ENV2"); mirrors SMF_ENUM_RECORD_V2_MARKER in
+# compiler.driver.smf_serialization. As a u32 name length it is ~845M, so a
+# v1 record (which starts with its name length) can never collide with it.
+val SMF_ENUM_RECORD_V2_MARKER: [u8] = [0x45, 0x4E, 0x56, 0x32]
+
+fn deserialize_last_error() -> text:
+    """Last deserialization error message ("" when none); readable across modules."""
+    deferred_last_error
+
+fn _enum_record_has_v2_marker(data: [u8], offset: i64) -> bool:
+    if offset + 4 > data.len():
+        return false
+    for k in 0..4:
+        if data[offset + k] != SMF_ENUM_RECORD_V2_MARKER[k]:
+            return false
+    true
+
 fn deserialize_enum_def(data: [u8], offset: i64) -> (EnumDef, i64)?:
-    """Deserialize an EnumDef from binary data."""
+    """Deserialize an EnumDef from binary data (enum record v2 only).
+
+    Fails closed on a v1 (names-only) record: reading it as v2 would silently
+    drop payload arity/types/discriminants -- the exact defect v2 fixes -- so
+    the error names the version skew and asks for a rebuild.
+    """
+    if not _enum_record_has_v2_marker(data, offset):
+        deferred_set_error("SMF enum record at offset {offset} is not format v2 (missing ENV2 marker): this .smf was written by an older compiler that serialized variant names only; rebuild it -- refusing to read enum payload metadata from a v1 record")
+        return nil
     # Name + generic params
-    val prefix = _read_def_prefix(data, offset)?
+    val prefix_opt = _read_def_prefix(data, offset + 4)
+    if prefix_opt == nil:
+        return nil
+    val prefix = prefix_opt!
     val name = prefix.0
     val generic_params = prefix.1
     var pos = prefix.2
 
     # Variants
-    val variants_result = read_text_list(data, pos)?
+    val variants_result_opt = read_text_list(data, pos)
+    if variants_result_opt == nil:
+        return nil
+    val variants_result = variants_result_opt!
     val variants = variants_result.0
     pos = variants_result.1
 
     # Flags
     if pos >= data.len():
         deferred_set_error("Unexpected end of data reading enum flags")
+        return nil
     val is_generic = data[pos] == 0x01
     pos = pos + 1
 
     # Specialization of + type bindings
-    val suffix = _read_def_suffix(data, pos)?
+    val suffix_opt = _read_def_suffix(data, pos)
+    if suffix_opt == nil:
+        return nil
+    val suffix = suffix_opt!
     val specialization_of = suffix.0
     val type_bindings = suffix.1
     pos = suffix.2
+
+    # --- v2 payload / attribute block ---
+    val counts_r_opt = read_i64_list(data, pos)
+    if counts_r_opt == nil:
+        return nil
+    val counts_r = counts_r_opt!
+    pos = counts_r.1
+    val kinds_r_opt = read_u8_list(data, pos)
+    if kinds_r_opt == nil:
+        return nil
+    val kinds_r = kinds_r_opt!
+    pos = kinds_r.1
+    val type_names_r_opt = read_text_list(data, pos)
+    if type_names_r_opt == nil:
+        return nil
+    val type_names_r = type_names_r_opt!
+    pos = type_names_r.1
+    val field_names_r_opt = read_text_list(data, pos)
+    if field_names_r_opt == nil:
+        return nil
+    val field_names_r = field_names_r_opt!
+    pos = field_names_r.1
+    val discr_r_opt = read_i64_list(data, pos)
+    if discr_r_opt == nil:
+        return nil
+    val discr_r = discr_r_opt!
+    pos = discr_r.1
+    val explicit_r_opt = read_bool_list(data, pos)
+    if explicit_r_opt == nil:
+        return nil
+    val explicit_r = explicit_r_opt!
+    pos = explicit_r.1
+    val attr_names_r_opt = read_text_list(data, pos)
+    if attr_names_r_opt == nil:
+        return nil
+    val attr_names_r = attr_names_r_opt!
+    pos = attr_names_r.1
+    val attr_args_r_opt = read_text_list(data, pos)
+    if attr_args_r_opt == nil:
+        return nil
+    val attr_args_r = attr_args_r_opt!
+    pos = attr_args_r.1
+    val complete_r_opt = read_flag_byte(data, pos, "enum complete_open flag")
+    if complete_r_opt == nil:
+        return nil
+    val complete_r = complete_r_opt!
+    pos = complete_r.1
+    val dyn_r_opt = read_flag_byte(data, pos, "enum dyn_open flag")
+    if dyn_r_opt == nil:
+        return nil
+    val dyn_r = dyn_r_opt!
+    pos = dyn_r.1
+
+    # Structural invariants: per-variant lists are parallel to `variants`, the
+    # two flat lists are parallel to each other and sum to the arities.
+    val n = variants.len()
+    if counts_r.0.len() != n or kinds_r.0.len() != n or discr_r.0.len() != n or explicit_r.0.len() != n:
+        deferred_set_error("SMF enum record '{name}': per-variant metadata lists are not parallel to its {n} variant(s)")
+        return nil
+    var total_slots: i64 = 0
+    for c in counts_r.0:
+        total_slots = total_slots + c
+    if type_names_r.0.len() != total_slots or field_names_r.0.len() != total_slots:
+        deferred_set_error("SMF enum record '{name}': flat payload lists ({type_names_r.0.len()} types, {field_names_r.0.len()} field names) do not match total arity {total_slots}")
+        return nil
+    if attr_names_r.0.len() != attr_args_r.0.len():
+        deferred_set_error("SMF enum record '{name}': attribute name/arg lists are not parallel")
+        return nil
 
     val enum_def = EnumDef(
         name: name,
@@ -388,20 +606,38 @@ fn deserialize_enum_def(data: [u8], offset: i64) -> (EnumDef, i64)?:
         variants: variants,
         is_generic_template: is_generic,
         specialization_of: specialization_of,
-        type_bindings: type_bindings
+        type_bindings: type_bindings,
+        variant_payload_counts: counts_r.0,
+        variant_payload_kinds: kinds_r.0,
+        variant_payload_type_names: type_names_r.0,
+        variant_payload_field_names: field_names_r.0,
+        variant_discriminants: discr_r.0,
+        has_explicit_discriminant: explicit_r.0,
+        attribute_names: attr_names_r.0,
+        attribute_args: attr_args_r.0,
+        complete_open: complete_r.0,
+        dyn_open: dyn_r.0
     )
     (enum_def, pos)
 
 fn deserialize_trait_def(data: [u8], offset: i64) -> (TraitDef, i64)?:
     """Deserialize a TraitDef from binary data."""
     # Name + generic params
-    val prefix = _read_def_prefix(data, offset)?
+    val prefix_opt_opt = _read_def_prefix(data, offset)
+    if prefix_opt_opt == nil:
+        return nil
+    val prefix_opt = prefix_opt_opt!
+    val prefix = prefix_opt!
     val name = prefix.0
     val generic_params = prefix.1
     var pos = prefix.2
 
     # Methods
-    val methods_result = read_text_list(data, pos)?
+    val methods_result_opt_opt = read_text_list(data, pos)
+    if methods_result_opt_opt == nil:
+        return nil
+    val methods_result_opt = methods_result_opt_opt!
+    val methods_result = methods_result_opt!
     val methods = methods_result.0
     pos = methods_result.1
 

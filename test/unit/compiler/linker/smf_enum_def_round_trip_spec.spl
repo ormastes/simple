@@ -1,0 +1,187 @@
+"""
+# SMF EnumDef Round-Trip (enum record v2)
+
+Pins the SMF boundary for enum payload metadata — the same four properties
+S1 pinned at the parser and S2 pinned at MIR: arity, positional types,
+named-field names/order, explicit discriminants — plus decorators
+(`@closed`, `@evolving`) and `complete:` / `dyn:` closure state.
+
+Bug: doc/08_tracking/bug/smf_enum_def_serializes_variant_names_only_2026-08-21.md
+Plan: doc/03_plan/compiler/hardening/critical_hardening_plan_2026-08-21.md (Phase 4,
+"enum payload metadata preserved end to end").
+
+A round-trip that only compares variant NAMES passed before the fix and must
+not be written that way; every `it` below asserts a field the v1 format dropped.
+"""
+
+use std.spec
+use compiler.frontend.ast.{EnumDef}
+use compiler.mono.monomorphize.partition.{GenericTemplates}
+use compiler.driver.smf_serialization.{serialize_enum_placeholder, serialize_templates, serialize_text_field, serialize_text_list, serialize_optional_text_field, serialize_text_dict}
+use compiler.mono.monomorphize.deferred_deserialize.{deserialize_enum_def, deserialize_last_error}
+use compiler.mono.monomorphize.deferred_subst.{deferred_clear_error}
+
+# enum E:            -- @closed @evolving(repr:u16)
+#     A(i64, text)   -- tuple payload, implicit discriminant 0
+#     B(name: text, n: i64)  -- named payload, implicit discriminant 1
+#     C = 7          -- unit, explicit discriminant
+#     complete:      -- open constructor universe
+fn fixture_enum() -> EnumDef:
+    EnumDef(
+        name: "E",
+        generic_params: [],
+        variants: ["A", "B", "C"],
+        is_generic_template: false,
+        has_specialization_of: false,
+        specialization_of: "",
+        type_bindings: {},
+        variant_payload_counts: [2, 2, 0],
+        variant_payload_kinds: [1, 2, 0],
+        variant_payload_type_names: ["i64", "text", "text", "i64"],
+        variant_payload_field_names: ["", "", "name", "n"],
+        variant_discriminants: [0, 1, 7],
+        has_explicit_discriminant: [false, false, true],
+        attribute_names: ["closed", "evolving"],
+        attribute_args: ["", "repr:u16"],
+        complete_open: true,
+        dyn_open: false
+    )
+
+fn round_trip(e: EnumDef) -> EnumDef:
+    deferred_clear_error()
+    val bytes = serialize_enum_placeholder(e)
+    val r = deserialize_enum_def(bytes, 0)
+    match r:
+        case Some(pair):
+            expect(pair.1).to_equal(bytes.len())
+            pair.0
+        case nil:
+            expect(deserialize_last_error()).to_equal("")
+            e
+
+# Bytes exactly as the v1 writer emitted them (names only, no marker).
+fn v1_record(e: EnumDef) -> [u8]:
+    var buf: [u8] = []
+    buf = serialize_text_field(buf, e.name)
+    buf = buf.push(e.generic_params.len().to_u8())
+    for p in e.generic_params:
+        buf = serialize_text_field(buf, p)
+    buf = serialize_text_list(buf, e.variants)
+    buf = buf.push(if e.is_generic_template: 0x01 else: 0x00)
+    buf = serialize_optional_text_field(buf, e.specialization_of)
+    buf = serialize_text_dict(buf, e.type_bindings)
+    buf
+
+describe "SMF EnumDef round-trip (record v2)":
+    """write -> read -> equal for tuple payload, named payload, unit variant, decorators, closure."""
+
+    it "preserves variant names and the v1 body":
+        val e = round_trip(fixture_enum())
+        expect(e.name).to_equal("E")
+        expect(e.variants).to_equal(["A", "B", "C"])
+        expect(e.is_generic_template).to_equal(false)
+
+    it "preserves payload arity per variant (tuple=2, named=2, unit=0)":
+        val e = round_trip(fixture_enum())
+        expect(e.variant_payload_counts).to_equal([2, 2, 0])
+
+    it "preserves payload kind per variant (unit/tuple/struct)":
+        val e = round_trip(fixture_enum())
+        expect(e.variant_payload_kinds.len()).to_equal(3)
+        expect(e.variant_payload_kinds[0] as i64).to_equal(1)
+        expect(e.variant_payload_kinds[1] as i64).to_equal(2)
+        expect(e.variant_payload_kinds[2] as i64).to_equal(0)
+
+    it "preserves positional payload types in source order":
+        val e = round_trip(fixture_enum())
+        expect(e.variant_payload_type_names).to_equal(["i64", "text", "text", "i64"])
+
+    it "preserves named payload field names, order, and empty positional slots":
+        val e = round_trip(fixture_enum())
+        expect(e.variant_payload_field_names).to_equal(["", "", "name", "n"])
+
+    it "preserves explicit discriminants and distinguishes 0 from unspecified":
+        val e = round_trip(fixture_enum())
+        expect(e.variant_discriminants).to_equal([0, 1, 7])
+        expect(e.has_explicit_discriminant).to_equal([false, false, true])
+
+    it "preserves negative discriminants (8-byte two's complement)":
+        var src = fixture_enum()
+        src.variant_discriminants = [-1, -300, 9000000000]
+        src.has_explicit_discriminant = [true, true, true]
+        val e = round_trip(src)
+        expect(e.variant_discriminants).to_equal([-1, -300, 9000000000])
+
+    it "preserves @closed / @evolving decorators with their arguments":
+        val e = round_trip(fixture_enum())
+        expect(e.attribute_names).to_equal(["closed", "evolving"])
+        expect(e.attribute_args).to_equal(["", "repr:u16"])
+
+    it "preserves complete:/dyn: closure state":
+        val e = round_trip(fixture_enum())
+        expect(e.complete_open).to_equal(true)
+        expect(e.dyn_open).to_equal(false)
+        var src = fixture_enum()
+        src.complete_open = false
+        src.dyn_open = true
+        val e2 = round_trip(src)
+        expect(e2.complete_open).to_equal(false)
+        expect(e2.dyn_open).to_equal(true)
+
+    it "round-trips a generic template enum with bindings":
+        var src = fixture_enum()
+        src.name = "Opt"
+        src.generic_params = ["T"]
+        src.variants = ["Some", "None"]
+        src.is_generic_template = true
+        src.type_bindings = {"T": "i64"}
+        src.variant_payload_counts = [1, 0]
+        src.variant_payload_kinds = [1, 0]
+        src.variant_payload_type_names = ["T"]
+        src.variant_payload_field_names = [""]
+        src.variant_discriminants = [0, 1]
+        src.has_explicit_discriminant = [false, false]
+        val e = round_trip(src)
+        expect(e.generic_params).to_equal(["T"])
+        expect(e.type_bindings["T"]).to_equal("i64")
+        expect(e.variant_payload_type_names).to_equal(["T"])
+
+    it "emits GTPL header version 2":
+        val bytes = serialize_templates(GenericTemplates(functions: [], structs: [], classes: [], enums: [fixture_enum()], traits: []))
+        expect(bytes[4] as i64).to_equal(2)
+        expect(bytes[5] as i64).to_equal(0)
+
+describe "SMF EnumDef version skew (v1 bytes into v2 reader)":
+    """Old-layout bytes must produce a loud error, never a silently payload-less enum."""
+
+    it "refuses a v1 names-only record with an error naming the skew":
+        deferred_clear_error()
+        val bytes = v1_record(fixture_enum())
+        val r = deserialize_enum_def(bytes, 0)
+        expect(r).to_be_nil()
+        val err = deserialize_last_error()
+        expect(err).to_contain("ENV2")
+        expect(err).to_contain("older compiler")
+
+    it "refuses a record whose per-variant lists are not parallel to variants":
+        deferred_clear_error()
+        var src = fixture_enum()
+        src.variant_payload_counts = [2, 2]   # one short
+        val bytes = serialize_enum_placeholder(src)
+        expect(deserialize_enum_def(bytes, 0)).to_be_nil()
+        expect(deserialize_last_error()).to_contain("not parallel")
+
+    it "refuses a record whose flat payload lists disagree with total arity":
+        deferred_clear_error()
+        var src = fixture_enum()
+        src.variant_payload_type_names = ["i64", "text", "text"]   # arity sums to 4
+        val bytes = serialize_enum_placeholder(src)
+        expect(deserialize_enum_def(bytes, 0)).to_be_nil()
+        expect(deserialize_last_error()).to_contain("total arity")
+
+    it "refuses a truncated v2 record instead of reading past the end":
+        deferred_clear_error()
+        val full = serialize_enum_placeholder(fixture_enum())
+        val cut = full[0..(full.len() - 3)]
+        expect(deserialize_enum_def(cut, 0)).to_be_nil()
+        expect(deserialize_last_error()).to_contain("Unexpected end of data")

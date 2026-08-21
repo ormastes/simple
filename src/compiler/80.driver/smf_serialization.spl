@@ -27,7 +27,7 @@ fn serialize_templates(templates: GenericTemplates) -> [u8]:
 
     # Header
     buf = buf.concat([0x47, 0x54, 0x50, 0x4C])  # "GTPL" magic
-    buf = buf.concat([0x01, 0x00])  # version 1
+    buf = buf.concat([0x02, 0x00])  # version 2: enum records carry the ENV2 payload/attribute block
 
     val total_count = (tmpl_functions.len() +
         tmpl_structs.len() +
@@ -143,7 +143,7 @@ fn serialize_note_sdn(note_sdn: NoteSdnMetadata) -> [u8]:
 fn serialize_text_field(buf: [u8], value: text) -> [u8]:
     """Serialize a text field as length-prefixed bytes."""
     var out = buf
-    val bytes = value.to_bytes()
+    val bytes = value.bytes()
     out = out.concat(smf_u32_to_bytes(bytes.len()))
     out = out.concat(bytes)
     out
@@ -176,6 +176,37 @@ fn serialize_text_dict(buf: [u8], dict: {text: text}) -> [u8]:
         val value = dict[key]
         out = serialize_text_field(out, key)
         out = serialize_text_field(out, value)
+    out
+
+# Enum record v2 marker: "ENV2". As a little-endian u32 this is 0x32564E45
+# (~845M), an impossible name length, so v1/v2 records are unambiguous.
+val SMF_ENUM_RECORD_V2_MARKER: [u8] = [0x45, 0x4E, 0x56, 0x32]
+
+fn serialize_i64_list(buf: [u8], items: [i64]) -> [u8]:
+    """Serialize a list of i64 as u32 count + 8 little-endian bytes each (two's complement)."""
+    var out = buf
+    out = out.concat(smf_u32_to_bytes(items.len()))
+    for item in items:
+        var v = item
+        for _ in 0..8:
+            out = out.push((v & 0xFF).to_u8())
+            v = v >> 8
+    out
+
+fn serialize_u8_list(buf: [u8], items: [u8]) -> [u8]:
+    """Serialize a list of u8 as u32 count + raw bytes."""
+    var out = buf
+    out = out.concat(smf_u32_to_bytes(items.len()))
+    for item in items:
+        out = out.push(item)
+    out
+
+fn smf_serialize_bool_list(buf: [u8], items: [bool]) -> [u8]:
+    """Serialize a list of bool as u32 count + 0x01/0x00 bytes."""
+    var out = buf
+    out = out.concat(smf_u32_to_bytes(items.len()))
+    for item in items:
+        out = out.push(if item: 0x01 else: 0x00)
     out
 
 fn serialize_function_placeholder(func: FunctionDef) -> [u8]:
@@ -266,8 +297,20 @@ fn serialize_class_placeholder(class_def: ClassDef) -> [u8]:
     buf
 
 fn serialize_enum_placeholder(enum_def: EnumDef) -> [u8]:
-    """Serialize a full EnumDef including variants and bindings."""
+    """Serialize a full EnumDef: variants, bindings, payload arity/types/field
+    names, discriminants, decorators and `complete:`/`dyn:` closure state.
+
+    Enum record v2 layout (bug smf_enum_def_serializes_variant_names_only):
+      ENV2 marker (4 bytes) | v1 body (name, generic params, variant names,
+      flags, specialization_of, type_bindings) | payload block. The marker is
+      the version gate: a v1 record starts with a u32 name length, which can
+      never equal the marker, so a v2 reader refuses v1 bytes loudly and a v1
+      reader fails on an impossible name length instead of half-reading.
+    """
     var buf: [u8] = []
+
+    # Record-format marker (see docstring)
+    buf = buf.concat(SMF_ENUM_RECORD_V2_MARKER)
 
     # Name
     buf = serialize_text_field(buf, enum_def.name)
@@ -288,6 +331,18 @@ fn serialize_enum_placeholder(enum_def: EnumDef) -> [u8]:
 
     # Type bindings
     buf = serialize_text_dict(buf, enum_def.type_bindings)
+
+    # --- v2 payload / attribute block ---
+    buf = serialize_i64_list(buf, enum_def.variant_payload_counts)
+    buf = serialize_u8_list(buf, enum_def.variant_payload_kinds)
+    buf = serialize_text_list(buf, enum_def.variant_payload_type_names)
+    buf = serialize_text_list(buf, enum_def.variant_payload_field_names)
+    buf = serialize_i64_list(buf, enum_def.variant_discriminants)
+    buf = smf_serialize_bool_list(buf, enum_def.has_explicit_discriminant)
+    buf = serialize_text_list(buf, enum_def.attribute_names)
+    buf = serialize_text_list(buf, enum_def.attribute_args)
+    buf = buf.push(if enum_def.complete_open: 0x01 else: 0x00)
+    buf = buf.push(if enum_def.dyn_open: 0x01 else: 0x00)
 
     buf
 

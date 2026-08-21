@@ -1,7 +1,7 @@
 # SMF `EnumDef` serializes variant NAMES only — arity, types, field names and discriminants are dropped
 
 - **Filed:** 2026-08-21
-- **Status:** OPEN — recorded, deliberately NOT implemented in this lane
+- **Status:** RESOLVED 2026-08-21 — struct + writer + reader landed atomically (enum record v2, GTPL header v2); see "Resolution" at the bottom
 - **Severity:** medium (silent metadata loss across a module boundary)
 - **Area:** `src/compiler/80.driver/smf_serialization.spl`,
   `src/compiler/40.mono/monomorphize/deferred_deserialize.spl`,
@@ -134,3 +134,48 @@ those two without the writer produces exactly the failure mode the record's
 point 3 warns about — a reader that expects fields no writer emits — which is
 worse than the current honest lossiness. Deliberately left OPEN and
 untouched; needs to be picked up by a lane that owns 80.driver, as one change.
+
+## Resolution (2026-08-21)
+
+Landed as ONE change across the three files the record names:
+
+| Layer | File | Change |
+|---|---|---|
+| struct | `src/compiler/10.frontend/ast.spl` `EnumDef` | 10 new trailing, defaulted fields: `variant_payload_counts: [i64]`, `variant_payload_kinds: [u8]` (0 unit / 1 tuple / 2 struct), `variant_payload_type_names: [text]` (flat), `variant_payload_field_names: [text]` (flat, parallel, `""` = positional), `variant_discriminants: [i64]`, `has_explicit_discriminant: [bool]`, `attribute_names: [text]`, `attribute_args: [text]` (`@closed` / `@evolving(repr:u16)` as HIR carries them), `complete_open: bool`, `dyn_open: bool`. Trailing + defaulted so every existing `EnumDef(...)` site (partition, subst, reader) keeps compiling — the seed fills partial named constructions positionally. |
+| writer | `src/compiler/80.driver/smf_serialization.spl` | GTPL header version `1 -> 2`. `serialize_enum_placeholder` now emits **enum record v2**: 4-byte marker `ENV2` (`0x45 0x4E 0x56 0x32`), then the unchanged v1 body, then the ten fields above (`serialize_i64_list` = u32 count + 8-byte LE two's complement, `serialize_u8_list`, `serialize_bool_list`, text lists, two flag bytes). Also `serialize_text_field` used `text.to_bytes()`, which does not exist on either engine — switched to `.bytes()` (same call `smf_writer.spl` uses); the writer had never been executed by a spec. |
+| reader | `src/compiler/40.mono/monomorphize/deferred_deserialize.spl` | `deserialize_enum_def` **refuses** any record without the `ENV2` marker: `deferred_set_error("SMF enum record ... is not format v2 (missing ENV2 marker): this .smf was written by an older compiler that serialized variant names only; rebuild it ...")` and returns nil — never reads v1 bytes as v2. The marker is the version gate because a v1 record begins with its u32 name length and `0x32564E45` (~845M) is not a plausible length, so the two layouts cannot collide. After reading the v2 block it checks the structural invariants (per-variant lists parallel to `variants`, flat lists sum to total arity, attribute lists parallel) and fails closed with a named error on each. Added `deserialize_last_error()` getter (module `var` was not importable into specs). Pre-existing enum `flags` read now returns nil at end-of-data instead of indexing past it. |
+
+**Second defect found and fixed in the reader while writing the spec:** the whole
+`deferred_deserialize.spl` file used `val r = read_x(...)` / `if r == nil: return nil` /
+`r.0`, which the semantic checker rejects on both `test` (interpreter) and `run` (JIT)
+with `invalid operation: tuple index access on non-tuple type enum` — i.e. no template
+had ever been deserialized through this file on either engine. Every such site (58)
+now force-unwraps after the nil check (`val r = r_opt!`), the idiom a probe confirmed
+works (`match`/`!` pass, tuple-destructure of an optional does not).
+
+**Evidence**
+
+- `bin/simple test test/01_unit/compiler/linker/smf_enum_def_round_trip_spec.spl` —
+  `Results: 15 total, 15 passed, 0 failed` (mirrored byte-identical at
+  `test/unit/compiler/linker/`). Round-trip asserts arity, kinds, positional types,
+  named field names/order with empty positional slots, discriminants incl. negative and
+  >32-bit, `0` vs unspecified, `@closed`/`@evolving(repr:u16)`, `complete:`/`dyn:`,
+  generic template bindings, and GTPL header byte `2`. Version skew: v1 names-only bytes
+  (re-emitted exactly as the old writer did) -> nil + error naming `ENV2` and
+  `older compiler`; non-parallel lists -> `not parallel`; arity mismatch -> `total arity`;
+  truncated record -> `Unexpected end of data`.
+- Pre-fix: the spec cannot even construct the fixture (fields absent) and the v1 reader
+  accepted the v1 bytes as a well-formed payload-less enum — the exact silent loss.
+
+**Still open (follow-ons, other lanes' files):**
+- The *population* site (record point 4): nothing yet fills the new `EnumDef` fields
+  from `decl_enum_def`'s parser lists / `HirEnum.attributes` / `complete_open` /
+  `dyn_open` — the flat-AST bridge that builds `Node.Enum(EnumDef)` consumed by
+  `partition_enum` (`40.mono/monomorphize/partition.spl:126`) is outside this change.
+  Until it does, templates carry empty (but correctly versioned) metadata.
+- `deferred_subst.spl` `_substitute_in_enum` builds a specialized `EnumDef` without
+  copying the new fields (and should substitute type params inside
+  `variant_payload_type_names`).
+- `deferred.spl` `deserialize_templates` reads the GTPL header `version` and never checks
+  it; the per-record marker is what gates today. A header check (`version != 2 ->
+  error`) belongs there.
