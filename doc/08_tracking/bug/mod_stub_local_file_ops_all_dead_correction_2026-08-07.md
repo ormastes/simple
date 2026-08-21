@@ -77,6 +77,6 @@ The two live Rust arms are genuine SHA256
 (`runtime/src/value/sffi/file_io/file_ops.rs:491` via `sha2`,
 `compiler/src/interpreter_extern/file_io.rs:145` via `ring`). The template arm
 is already tracked as
-`doc/05_design/ml/svllm/fs_requests/FS-REQ-003-sha256-runtime-primitive.md`
+`doc/05_design/ml/slang/fs_requests/FS-REQ-003-sha256-runtime-primitive.md`
 ("stub only — returns a 16-char..."). Left as-is: it is Rust, and it belongs to
 that request.

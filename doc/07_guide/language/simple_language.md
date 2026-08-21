@@ -235,7 +235,7 @@ Tracked submodule gitlinks:
 | `.spipe/spipe` | External SPipe runner and BDD workflow source | Pinned to `c2a50b9f7b00` |
 | `examples/06_io/restaurant_webapp` | Restaurant web application example | Pinned to `58d124eec8af` |
 | `examples/07_ml/simple_deeplearning_study` | Deep-learning study examples | Pinned to `1d274135da84` |
-| `examples/07_ml/svllm` | Simple-based LLM experiments | Pinned to `4de0f9256cc8` |
+| `examples/07_ml/slang` | Simple-based LLM experiments | Pinned to `4de0f9256cc8` |
 | `examples/08_gpu/simple_cuda_example` | CUDA/GPU example project | Pinned to `e74405599b8a` |
 | `examples/09_embedded/simple_os` | SimpleOS example tree and platform bring-up fixtures | Pinned to `823f04dec344` |
 | `examples/09_embedded/fpga_riscv` | RISC-V/FPGA RTL, firmware, and board collateral | Pinned to `3a1414ff77d1` |

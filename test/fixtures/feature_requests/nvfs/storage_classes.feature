@@ -1,16 +1,16 @@
 # Feature: NVFS virtual storage classes (authoritative enum)
-# Anchors: doc/05_design/nvfs_design.md §3.1 (class table), §3.2 (svllm taxonomy mapping)
+# Anchors: doc/05_design/nvfs_design.md §3.1 (class table), §3.2 (slang taxonomy mapping)
 # Target: src/lib/nogc_sync_mut/fs/nvfs/ (StorageClass enum declaration)
-# Status: pending — Phase 5 lands the enum; svllm/spostgre consume it.
+# Status: pending — Phase 5 lands the enum; slang/spostgre consume it.
 
 Feature: The six NVFS storage classes from §3.1 are declared as the authoritative enum
   As a fs-API consumer
   I want StorageClass to be a single enum with exactly 6 variants matching §3.1
-  So that svllm's 7-name taxonomy aliases onto these via §3.2 without duplicating the enum
+  So that slang's 7-name taxonomy aliases onto these via §3.2 without duplicating the enum
 
   Background:
     Given §3.1 defines 6 virtual storage classes
-    And   §3.2 maps svllm's 7 names (tensor_pack, manifest, adapter, append_only, temp, kv_spill, mutable) onto the 6 classes
+    And   §3.2 maps slang's 7 names (tensor_pack, manifest, adapter, append_only, temp, kv_spill, mutable) onto the 6 classes
     And   design §3 is the single source of truth for this enum
 
   Scenario: StorageClass is declared in src/lib/nogc_sync_mut/fs/nvfs/ or shared storage crate
@@ -25,7 +25,7 @@ Feature: The six NVFS storage classes from §3.1 are declared as the authoritati
     Then  variant "META_DURABLE" is declared
 
   Scenario: DB_WAL variant exists
-    Given §3.1 row 2 names DB_WAL for spostgre WAL and svllm append_only logs
+    Given §3.1 row 2 names DB_WAL for spostgre WAL and slang append_only logs
     When  the StorageClass enum is inspected
     Then  variant "DB_WAL" is declared
 
@@ -35,12 +35,12 @@ Feature: The six NVFS storage classes from §3.1 are declared as the authoritati
     Then  variant "DB_TEMP" is declared
 
   Scenario: MODEL_IMMUTABLE variant exists
-    Given §3.1 row 4 names MODEL_IMMUTABLE for svllm tensor_pack / adapter and spostgre blob fork
+    Given §3.1 row 4 names MODEL_IMMUTABLE for slang tensor_pack / adapter and spostgre blob fork
     When  the StorageClass enum is inspected
     Then  variant "MODEL_IMMUTABLE" is declared
 
   Scenario: GENERAL_MUTABLE variant exists
-    Given §3.1 row 5 names GENERAL_MUTABLE for rel.main/pmap/vmap/fmap and svllm mutable state
+    Given §3.1 row 5 names GENERAL_MUTABLE for rel.main/pmap/vmap/fmap and slang mutable state
     When  the StorageClass enum is inspected
     Then  variant "GENERAL_MUTABLE" is declared
 
@@ -53,7 +53,7 @@ Feature: The six NVFS storage classes from §3.1 are declared as the authoritati
     Given §3.1 authoritatively enumerates exactly six classes
     When  the StorageClass enum is inspected
     Then  the variant count equals 6
-    And   svllm's 7 names do NOT appear as extra variants — they alias via §3.2
+    And   slang's 7 names do NOT appear as extra variants — they alias via §3.2
 
   Scenario: Durability defaults per §3.1 are documented on each variant
     Given §3.1 assigns DURABLE_ON_RETURN, DURABLE_GROUP_COMMIT, BUFFERED defaults per class

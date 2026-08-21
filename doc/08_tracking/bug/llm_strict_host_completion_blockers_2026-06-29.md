@@ -17,7 +17,7 @@ Default aggregate:
 - `STATUS: PASS llm-goal-evidence warn_count=2`
 - `warn_gates=vllm_host|torch_optimizer`
 - local provenance hardening: context/Ponytail replacement, dashboard route,
-  vLLM host, svLLM local readiness, Torch optimizer, and fine-tune guard
+  vLLM host, Slang local readiness, Torch optimizer, and fine-tune guard
   evidence now include checked surface/input manifests with size/SHA-256
   metadata and focused log hashes. Public absence rendering also records
   `vllm_surface_manifest_sha256=9571bfd9aa7148b23a6ebcf7ba5539bf290b9b02c2d2034e04fa8019f7a8842f`,
@@ -30,7 +30,7 @@ Default aggregate:
 Strict-host aggregate:
 
 - `STATUS: FAIL llm-goal-evidence warn_count=0 fail_count=5`
-- `failed_gates=dashboard|vllm_host|svllm_local|torch_optimizer|finetune_guard`
+- `failed_gates=dashboard|vllm_host|slang_local|torch_optimizer|finetune_guard`
 
 Canonical strict completion evidence remains
 `scripts/check/check-llm-goal-evidence.shs --strict-host`. For operator setup
@@ -68,21 +68,21 @@ prerequisite summary and must not be treated as a completion pass.
 - next action: install or expose local vLLM, then rerun
   `scripts/check/check-llm-runtime-vllm-host-probe.shs --strict`.
 
-### svLLM Native Streaming
+### Slang Native Streaming
 
 - primary blocker: `native_read_range`
 - current evidence: local readiness passes, local file-backed byte reads are
   ready, but native `read_range`, pinned-buffer registration, and device
   staging are `unsupported`
-- local proof already hardened: svLLM local readiness has a checked spec/log
+- local proof already hardened: Slang local readiness has a checked spec/log
   manifest and per-log hashes; native streaming evidence also records a checked
   wrapper/source/spec/doc surface manifest so strict failures identify the
   exact native capability contract they consumed
-- required evidence: `svllm_native_streaming_status=pass`
+- required evidence: `slang_native_streaming_status=pass`
 - next action: implement native streaming capability evidence and rerun
-  `scripts/check/check-llm-runtime-svllm-native-streaming-evidence.shs` with
-  `SVLLM_NATIVE_CAPABILITY_SOURCE` and a non-empty
-  schema-v1 `SVLLM_NATIVE_CAPABILITY_EVIDENCE_PATH` from the native probe
+  `scripts/check/check-llm-runtime-slang-native-streaming-evidence.shs` with
+  `SLANG_NATIVE_CAPABILITY_SOURCE` and a non-empty
+  schema-v1 `SLANG_NATIVE_CAPABILITY_EVIDENCE_PATH` from the native probe
   artifact; the artifact must report probe event/status/exit and native
   capability statuses matching the wrapper inputs.
 
@@ -122,7 +122,7 @@ prerequisite summary and must not be treated as a completion pass.
 ## Re-verification 2026-08-09
 
 Status confirmed **ARCHITECTURAL-OPEN**. All five blockers
-(`dashboard`/`vllm_host`/`svllm_local`/`torch_optimizer`/`finetune_guard`)
+(`dashboard`/`vllm_host`/`slang_local`/`torch_optimizer`/`finetune_guard`)
 require live external resources not present in this environment: a reachable
 dashboard base URL + auth, a locally-installed `vllm` binary/Python module,
 native `read_range`/pinned-buffer device staging support, a
@@ -138,5 +138,5 @@ This tracker can close only when:
 - `sh scripts/check/check-llm-goal-evidence.shs --strict-host` reports
   `STATUS: PASS`
 - strict `failed_gates` is empty
-- the strict report shows context/Ponytail replacement, dashboard, vLLM, svLLM,
+- the strict report shows context/Ponytail replacement, dashboard, vLLM, Slang,
   Torch optimizer, and fine-tune lanes all passing

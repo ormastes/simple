@@ -31,4 +31,4 @@ Source: `test/01_unit/lib/common/torch/dyn_sffi_ops_readiness_spec.spl`
 - Real libtorch installation or ABI loading.
 - Successful linalg solve with real tensor handles.
 - Torch manual seed support.
-- svLLM tensor-pack manifest parsing or model-pack loading.
+- Slang tensor-pack manifest parsing or model-pack loading.

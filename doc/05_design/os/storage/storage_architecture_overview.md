@@ -11,7 +11,7 @@
 
 ```
  ┌──────────────────────────────────────────────────────────────┐
- │  Applications (svllm, user services, POSIX tools, Rust FFI)  │
+ │  Applications (slang, user services, POSIX tools, Rust FFI)  │
  └─────────────────┬─────────────────────────┬──────────────────┘
                    │ SQL / page API           │ POSIX (open/read/write/mmap)
  ┌─────────────────▼──────────┐ ┌────────────▼──────────────────┐
@@ -99,7 +99,7 @@ are immutable once sealed. This is the key design choice that enables:
 Each upstream consumer of NVFS filed a requirements document before NVFS was designed:
 
 - **Simple DB** filed S1–S7 in `nvfs/from_simple_db.md`.
-- **svllm** filed R1–R9 in `nvfs/svllm_requirements.md` (note: svllm explicitly does
+- **slang** filed R1–R9 in `nvfs/slang_requirements.md` (note: slang explicitly does
   NOT need POSIX semantics).
 
 The NVFS designer reconciled both in one pass. Post-hoc requests go to

@@ -497,7 +497,7 @@ enum AsyncDriverInstance:
     # FAT32 does not have an async implementation (no async use case for FAT32)
 ```
 
-svllm uses `AsyncNvfsDriver` via `src/lib/gc_async_mut/nvfs_client/` (GPU async path).
+slang uses `AsyncNvfsDriver` via `src/lib/gc_async_mut/nvfs_client/` (GPU async path).
 
 ---
 

@@ -1,12 +1,12 @@
 # LLM Runtime vLLM/Torch Guide
 
-Operator guide for the LLM runtime vLLM, Torch, svLLM, and dashboard-control
+Operator guide for the LLM runtime vLLM, Torch, Slang, and dashboard-control
 evidence surfaces.
 
 ## Purpose
 
 This guide covers the current runtime evidence boundary. It is not a claim that
-local vLLM serving, CUDA Torch execution, or svLLM NVFS streaming are live on a
+local vLLM serving, CUDA Torch execution, or Slang NVFS streaming are live on a
 host. Those gates require host-specific proof and remain separate from
 intent/readiness JSONL.
 
@@ -34,7 +34,7 @@ Current implemented evidence includes:
 - runtime-owner dashboard control JSONL for side-effect action requests
 - Torch owner readiness classification as `ready`, `unavailable`, or
   `unsupported`
-- svLLM local file-backed read-range readiness classification
+- Slang local file-backed read-range readiness classification
 
 ## Dashboard Controls
 
@@ -81,7 +81,7 @@ real evidence:
 - local vLLM endpoint proof for serving readiness
 - dashboard start, poll, probe, and stop execution against an installed local
   vLLM process
-- svLLM NVFS streaming with async scheduling, pinned buffer registration, and
+- Slang NVFS streaming with async scheduling, pinned buffer registration, and
   device staging
 - live CUDA optimizer execution through libtorch/CUDA
 - PEFT/TRL fine-tuning orchestration and acceptance evidence
@@ -106,16 +106,16 @@ as the `prereq_doctor_contract` lane.
 
 The doctor does not replace the strict aggregate or the per-lane evidence
 wrappers. It only reports whether this host has the dashboard auth/url, local
-vLLM, native svLLM capability artifact, Simple-visible libtorch/CUDA, and
+vLLM, native Slang capability artifact, Simple-visible libtorch/CUDA, and
 fine-tune retry artifacts needed before the strict wrappers can pass. Its
 Markdown report mirrors the actionable env fields: the primary blocked gate,
 dashboard URL/auth readiness, local vLLM command/module/GPU readiness, native
-svLLM read-range/pinned-buffer/device-staging readiness, native svLLM
+Slang read-range/pinned-buffer/device-staging readiness, native Slang
 capability source/evidence schema-event-source-status matching, Torch/libtorch
 readiness including Python Torch/CUDA visibility and system libtorch match
 count, fine-tune retry artifact readiness, manifest metadata, a global next
 operator action, and per-lane `*_next_action` fields for dashboard, vLLM,
-svLLM, Torch, and fine-tune unblock routing. The vLLM prereq section also
+Slang, Torch, and fine-tune unblock routing. The vLLM prereq section also
 records the base model and endpoint values, plus whether each came from
 defaults or explicit env, but the
 doctor does not contact the endpoint; endpoint reachability and `/v1/models`
@@ -144,11 +144,11 @@ Strict-host unblock checklist:
    editing the host probe to verify the documented `LLM_VLLM_*` env names still
    drive the base model and endpoint evidence; the main LLM goal aggregate also
    runs it as the `vllm_host_env_contract` lane.
-3. svLLM native: produce a non-default native capability artifact with matching
-   `SVLLM_NATIVE_CAPABILITY_SOURCE` and
-   `SVLLM_NATIVE_CAPABILITY_EVIDENCE_PATH`, then run
-   `scripts/check/check-llm-runtime-svllm-native-streaming-evidence.shs` and
-   `SVLLM_NATIVE_EVIDENCE_ENV=build/llm_runtime_svllm_native_streaming/evidence.env sh scripts/check/check-llm-runtime-svllm-local-readiness.shs --strict-native`.
+3. Slang native: produce a non-default native capability artifact with matching
+   `SLANG_NATIVE_CAPABILITY_SOURCE` and
+   `SLANG_NATIVE_CAPABILITY_EVIDENCE_PATH`, then run
+   `scripts/check/check-llm-runtime-slang-native-streaming-evidence.shs` and
+   `SLANG_NATIVE_EVIDENCE_ENV=build/llm_runtime_slang_native_streaming/evidence.env sh scripts/check/check-llm-runtime-slang-local-readiness.shs --strict-native`.
 4. Torch/libtorch: run
    `scripts/setup/setup-llm-runtime-torch-sffi-bridge.shs` to build
    `libspl_torch.so` from the local Python Torch package, export the reported
@@ -254,20 +254,20 @@ instructions.
 Run the wrapper with `--strict` when unavailable or readiness-incomplete hosts must
 fail the lane.
 
-Latest svLLM local readiness evidence:
-`doc/09_report/2026/06/llm_runtime_svllm_local_readiness_2026-06-29.md`
-records `scripts/check/check-llm-runtime-svllm-local-readiness.shs` passing the
+Latest Slang local readiness evidence:
+`doc/09_report/2026/06/llm_runtime_slang_local_readiness_2026-06-29.md`
+records `scripts/check/check-llm-runtime-slang-local-readiness.shs` passing the
 pack CLI, manifest, tensor-byte, stream-plan, std_fs local-read, and
 streaming-readiness contracts with per-spec timeout handling through
-`SVLLM_READINESS_SPEC_TIMEOUT_SECONDS` (default `120`). It also records a
+`SLANG_READINESS_SPEC_TIMEOUT_SECONDS` (default `120`). It also records a
 surface manifest count, size, and SHA-256 for the eight checked local readiness
 specs plus their produced logs, and the focused env/report include per-log size
 and SHA-256 values. The aggregate forwards those local manifest fields in
-`llm_goal_evidence_svllm_local_detail`. Keep
-`src/app/svllm_pack/main.spl` as a thin entrypoint over
-`src/app/svllm_pack/core.spl`; unit specs import `core.run` so app entrypoint
+`llm_goal_evidence_slang_local_detail`. Keep
+`src/app/slang_pack/main.spl` as a thin entrypoint over
+`src/app/slang_pack/core.spl`; unit specs import `core.run` so app entrypoint
 discovery cannot turn passing examples into a file-level failure. The local
-readiness wrapper also treats the two svLLM pack specs as pass when their logs
+readiness wrapper also treats the two Slang pack specs as pass when their logs
 contain `examples, 0 failures` and no failed-example marker, private helper
 collision warning, or short-grammar "Common mistake detected" diagnostic; it
 keeps the raw nonzero runner exit in the evidence fields so that warning-exit
@@ -276,67 +276,67 @@ Keep
 `FR-LLM-RUNTIME-0002` open because that wrapper proves only local file-backed
 readiness; native NVFS async scheduling, pinned buffer registration, device
 staging, and true streaming model loads still need live evidence. Run
-`scripts/check/check-llm-runtime-svllm-native-streaming-evidence.shs` to produce
+`scripts/check/check-llm-runtime-slang-native-streaming-evidence.shs` to produce
 the native evidence env. It records concrete blockers such as
 `native_read_range_unavailable` and only passes when native read_range, pinned
 buffer registration, and device staging are all ready. Native evidence records
-`svllm_native_streaming_local_spec_timeout_seconds` so nested local-readiness
+`slang_native_streaming_local_spec_timeout_seconds` so nested local-readiness
 timeouts remain visible when strict aggregate evidence is collected.
-It also writes `svllm_native_streaming_blocked_gates`,
-`svllm_native_streaming_primary_blocked_gate`, and
-`svllm_native_streaming_next_action`; strict local readiness forwards those
-fields as `llm_runtime_svllm_local_readiness_native_*` so aggregate reports use
+It also writes `slang_native_streaming_blocked_gates`,
+`slang_native_streaming_primary_blocked_gate`, and
+`slang_native_streaming_next_action`; strict local readiness forwards those
+fields as `llm_runtime_slang_local_readiness_native_*` so aggregate reports use
 the producer's canonical blocker contract instead of re-deriving it.
 The native wrapper also records SHA-256 and size metadata for the nested
 local-readiness env, log, and report, making strict native evidence traceable to
 the exact local readiness run it consumed.
-It also writes `svllm_native_streaming_surface_manifest`,
-`svllm_native_streaming_surface_manifest_count`,
-`svllm_native_streaming_surface_manifest_size`, and
-`svllm_native_streaming_surface_manifest_sha256` for the wrapper, local
+It also writes `slang_native_streaming_surface_manifest`,
+`slang_native_streaming_surface_manifest_count`,
+`slang_native_streaming_surface_manifest_size`, and
+`slang_native_streaming_surface_manifest_sha256` for the wrapper, local
 readiness wrapper, streaming readiness implementation, stream/transport
 helpers, focused specs, and this guide. Strict aggregate detail forwards those
-native manifest fields when `--strict-host` collects native svLLM evidence.
+native manifest fields when `--strict-host` collects native Slang evidence.
 Configured native hosts provide those native capability results through
-`SVLLM_NATIVE_READ_RANGE_STATUS`, `SVLLM_NATIVE_PINNED_BUFFER_STATUS`, and
-`SVLLM_NATIVE_DEVICE_STAGING_STATUS`. Values normalize to `ready`,
+`SLANG_NATIVE_READ_RANGE_STATUS`, `SLANG_NATIVE_PINNED_BUFFER_STATUS`, and
+`SLANG_NATIVE_DEVICE_STAGING_STATUS`. Values normalize to `ready`,
 `unsupported`, `unavailable`, or `unchecked`; omitted values default to
-`unsupported`. When callers do not provide `SVLLM_NATIVE_CAPABILITY_SOURCE` or
-`SVLLM_NATIVE_CAPABILITY_EVIDENCE_PATH`, the native streaming wrapper runs
-`scripts/check/check-llm-runtime-svllm-native-capability-probe.shs` and consumes
+`unsupported`. When callers do not provide `SLANG_NATIVE_CAPABILITY_SOURCE` or
+`SLANG_NATIVE_CAPABILITY_EVIDENCE_PATH`, the native streaming wrapper runs
+`scripts/check/check-llm-runtime-slang-native-capability-probe.shs` and consumes
 its schema-v1 artifact. That local probe is fail-closed: it records
 `unsupported` for read-range, pinned-buffer, and device-staging support with
-`svllm_native_capability_source=local_simple_svllm_capability_probe`, so reports
+`slang_native_capability_source=local_simple_slang_capability_probe`, so reports
 show a probed unsupported state instead of ambiguous missing provenance. The
 same probe also executes the StdFs NVFS client spec and records
-`svllm_native_capability_local_read_range_bytes_status` plus
-`svllm_native_capability_local_read_range_bytes_reason`. A `ready` value there
+`slang_native_capability_local_read_range_bytes_status` plus
+`slang_native_capability_local_read_range_bytes_reason`. A `ready` value there
 only proves the bounded local `read_range_bytes` helper through checked-in
 specs; it does not satisfy native caller-buffer `read_range`, pinned-buffer
 registration, or device staging. The native streaming wrapper forwards those
 fields as
-`svllm_native_streaming_capability_evidence_local_read_range_bytes_status` and
-`svllm_native_streaming_capability_evidence_local_read_range_bytes_reason` so
+`slang_native_streaming_capability_evidence_local_read_range_bytes_status` and
+`slang_native_streaming_capability_evidence_local_read_range_bytes_reason` so
 strict reports can show local file-backed progress without turning the native
 streaming gate green. The
 native streaming report records
-`svllm_native_streaming_capability_source` and
-`svllm_native_streaming_capability_provenance_status` so reviewers can
+`slang_native_streaming_capability_source` and
+`slang_native_streaming_capability_provenance_status` so reviewers can
 distinguish an explicit host probe from the default fallback. A strict native
-PASS requires either `SVLLM_NATIVE_CAPABILITY_SOURCE` to name the probe or
+PASS requires either `SLANG_NATIVE_CAPABILITY_SOURCE` to name the probe or
 artifact that proved the ready native capabilities, or a non-empty
-`SVLLM_NATIVE_CAPABILITY_EVIDENCE_PATH` whose schema-v1 artifact carries
-`svllm_native_capability_source`; the wrapper derives the source from that
+`SLANG_NATIVE_CAPABILITY_EVIDENCE_PATH` whose schema-v1 artifact carries
+`slang_native_capability_source`; the wrapper derives the source from that
 artifact when the env source is omitted.
-It also writes `svllm_native_streaming_pass_integrity_status` and
-`svllm_native_streaming_pass_integrity_reason`; PASS integrity requires local
+It also writes `slang_native_streaming_pass_integrity_status` and
+`slang_native_streaming_pass_integrity_reason`; PASS integrity requires local
 readiness, all three native capability statuses, provenance, and the evidence
 artifact to be present together. The artifact is a line-oriented schema-v1 env
-file with `svllm_native_capability_source` matching the explicit or
+file with `slang_native_capability_source` matching the explicit or
 artifact-derived capability source,
-`svllm_native_capability_probe_event=svllm_native_capability_probe`,
-`svllm_native_capability_probe_status=pass`,
-`svllm_native_capability_probe_exit=0`, and reported read-range, pinned-buffer,
+`slang_native_capability_probe_event=slang_native_capability_probe`,
+`slang_native_capability_probe_status=pass`,
+`slang_native_capability_probe_exit=0`, and reported read-range, pinned-buffer,
 and device-staging statuses that match the wrapper inputs. The wrapper records
 the artifact SHA-256, size, mtime, source, schema version,
 probe event/status/exit, and the artifact-reported read-range, pinned-buffer,
@@ -347,9 +347,9 @@ and device-staging statuses. Strict aggregate detail forwards those fields as
 `capability_evidence_reported_device_staging_status`, so a top-level report can
 prove the artifact matched the claimed native capability inputs without opening
 the nested native evidence env. It also forwards
-`svllm_native_streaming_capability_probe_report`,
-`svllm_native_streaming_capability_probe_report_size`, and
-`svllm_native_streaming_capability_probe_report_sha256` when the local
+`slang_native_streaming_capability_probe_report`,
+`slang_native_streaming_capability_probe_report_size`, and
+`slang_native_streaming_capability_probe_report_sha256` when the local
 fail-closed probe produced the default artifact.
 
 Latest Torch/CUDA host probe:
@@ -431,7 +431,7 @@ provenance, and a concrete `next_action` for unconfigured hosts.
 ## Focused Checks
 
 Use the aggregate local LLM evidence wrapper when checking the current
-context/Ponytail, dashboard, vLLM, svLLM, Torch, fine-tune, and public-absence
+context/Ponytail, dashboard, vLLM, Slang, Torch, fine-tune, and public-absence
 lanes together:
 
 ```bash
@@ -456,21 +456,21 @@ dashboard evidence env/log size and SHA-256, live HTTP status, live HTTP
 auth source type, response hashes, and the live dashboard next action,
 `llm_goal_evidence_vllm_host_detail` for local
 vLLM/GPU/preflight/endpoint/model statuses and pass-log integrity, and
-`llm_goal_evidence_svllm_local_detail` for native svLLM streaming status,
+`llm_goal_evidence_slang_local_detail` for native Slang streaming status,
 native blocker reason, local readiness, native `read_range`, pinned-buffer,
 device-staging, capability source, capability provenance, capability evidence
 artifact status, source, and hash metadata, probe event/status/exit, pass integrity,
 local file-backed byte-read states, native blocked gates, primary blocked gate,
 and next action.
-In default mode, dashboard live HTTP and svLLM native streaming evidence are
+In default mode, dashboard live HTTP and Slang native streaming evidence are
 collected as non-blocking diagnostic producers. The default dashboard lane still
 passes or fails on route/collector evidence, but its detail row forwards live
 HTTP blocked gates, auth source, response hashes, surface manifest, and next
-action. The default svLLM lane still passes or fails on local file-backed
+action. The default Slang lane still passes or fails on local file-backed
 readiness, but its detail row forwards the native producer's blocked gates,
 capability provenance, surface manifest, and next action. Strict host mode
 consumes the same live dashboard and native streaming evidence as
-release-completion gates. The svLLM blocker table is mode-aware too: default mode
+release-completion gates. The Slang blocker table is mode-aware too: default mode
 reports the `local_readiness` gate with no lane-blocking native gates, while
 strict host mode reports the native producer's `blocked_gates` and
 `next_action` contract. It
@@ -599,7 +599,7 @@ sh scripts/check/check-llm-goal-evidence.shs --strict-host
 Strict host mode first runs the live dashboard HTTP producer, then generates
 authenticated dashboard route evidence and fine-tune retry7 acceptance evidence,
 reuses the same repo-local context/Ponytail full-replacement contract, and
-passes the focused strict flags to the context/Ponytail, dashboard, vLLM, svLLM,
+passes the focused strict flags to the context/Ponytail, dashboard, vLLM, Slang,
 Torch optimizer, and fine-tune wrappers. It clears each strict producer's
 canonical `evidence.env` before the producer runs so stale results cannot mask a
 timeout or early producer failure. When no dashboard URL is configured, strict
@@ -642,7 +642,7 @@ current mode. It also copies focused blocker details into
 `llm_goal_evidence_<lane>_blocked_gates`, and
 `llm_goal_evidence_<lane>_primary_blocked_gate`, and
 `llm_goal_evidence_<lane>_blocker_reason` for strict context/Ponytail
-replacement, strict live dashboard, vLLM, svLLM, Torch optimizer, and fine-tune
+replacement, strict live dashboard, vLLM, Slang, Torch optimizer, and fine-tune
 lanes so operators can triage strict failures from the aggregate report without
 opening every focused env first; the Markdown Blocker Details table shows the
 same primary blocked gate as a dedicated column. It also writes
@@ -651,7 +651,7 @@ all aggregate lanes, including context/Ponytail replacement, live dashboard,
 host runtime, fine-tune, and public absence rendering triage. The detail table also includes
 context/Ponytail replacement subfields including the replacement primary
 blocked gate, live dashboard route and live HTTP subfields including the live
-dashboard primary blocked gate and non-secret auth source type, svLLM native streaming subfields, Torch
+dashboard primary blocked gate and non-secret auth source type, Slang native streaming subfields, Torch
 optimizer subfields, and
 fine-tune acceptance subfields needed to distinguish missing replacement
 surfaces, dashboard route/auth gaps, missing authenticated live HTTP proof,
@@ -694,8 +694,8 @@ The guard writes `build/llm_feature_db_reference_integrity/evidence.env` and
 only the LLM, SPipe LLM, and dashboard feature rows in
 `doc/08_tracking/feature/feature_db.sdn`, verifies every referenced local
 `doc/`, `test/`, `src/`, `scripts/`, `.spipe/`, and `examples/` path exists,
-and fails if the known stale svLLM generated-spec paths under
-`doc/06_spec/01_unit/lib/gc_async_mut/svllm/...` reappear instead of the real
+and fails if the known stale Slang generated-spec paths under
+`doc/06_spec/01_unit/lib/gc_async_mut/slang/...` reappear instead of the real
 `doc/06_spec/test/01_unit/...` generated docs. The aggregate forwards this as
 `llm_goal_evidence_feature_db_reference_detail`, so a passing aggregate also
 proves LLM feature tracking rows do not point at missing local evidence.
@@ -707,50 +707,50 @@ environment detection, dashboard control JSONL, or host preflight behavior:
 sh scripts/check/check-llm-runtime-vllm-host-probe.shs
 ```
 
-Use the focused svLLM local readiness gate after changing svLLM pack manifests,
+Use the focused Slang local readiness gate after changing Slang pack manifests,
 tensor byte loading, stream planning, std_fs local reads, or readiness evidence:
 
 ```bash
-sh scripts/check/check-llm-runtime-svllm-local-readiness.shs
+sh scripts/check/check-llm-runtime-slang-local-readiness.shs
 ```
 
 Use strict native mode on hosts or CI lanes that are supposed to prove real
-svLLM streaming:
+Slang streaming:
 
 ```bash
-sh scripts/check/check-llm-runtime-svllm-native-streaming-evidence.shs
-SVLLM_NATIVE_EVIDENCE_ENV=build/llm_runtime_svllm_native_streaming/evidence.env \
-  sh scripts/check/check-llm-runtime-svllm-local-readiness.shs --strict-native
+sh scripts/check/check-llm-runtime-slang-native-streaming-evidence.shs
+SLANG_NATIVE_EVIDENCE_ENV=build/llm_runtime_slang_native_streaming/evidence.env \
+  sh scripts/check/check-llm-runtime-slang-local-readiness.shs --strict-native
 ```
 
-`scripts/check/check-llm-runtime-svllm-setup-contract.shs` is the focused
+`scripts/check/check-llm-runtime-slang-setup-contract.shs` is the focused
 diagnostic contract for this lane. It runs the default native streaming wrapper
 and local readiness wrapper, then verifies local-readiness proof, native
 read-range/pinned-buffer/device-staging blocker diagnostics, capability
 provenance fields, surface-manifest hashes, and `next_action` fields remain
-present. It does not mark native svLLM streaming complete.
+present. It does not mark native Slang streaming complete.
 
 The strict native gate requires the evidence env to report
-`svllm_native_streaming_status=pass`; local file-backed bytes are recorded as
+`slang_native_streaming_status=pass`; local file-backed bytes are recorded as
 bring-up evidence but are not enough for native streaming completion. Ready
 native capability env values require matching structured evidence; the artifact
 must record the same source string as the explicit or artifact-derived source,
 and strict aggregate detail forwards that artifact source as
 `capability_evidence_source`. Status-only ready claims fail as
 `capability_evidence`. Strict local readiness requires
-`svllm_native_streaming_status=pass` and
-`svllm_native_streaming_pass_integrity_status=pass` plus complete native
+`slang_native_streaming_status=pass` and
+`slang_native_streaming_pass_integrity_status=pass` plus complete native
 provenance fields. It exposes
-`llm_runtime_svllm_local_readiness_native_evidence_completeness_status`,
-`llm_runtime_svllm_local_readiness_native_capability_provenance_status`,
-`llm_runtime_svllm_local_readiness_native_capability_evidence_status`,
-`llm_runtime_svllm_local_readiness_native_surface_manifest_count`, and
-`llm_runtime_svllm_local_readiness_native_surface_manifest_sha256`, so a
+`llm_runtime_slang_local_readiness_native_evidence_completeness_status`,
+`llm_runtime_slang_local_readiness_native_capability_provenance_status`,
+`llm_runtime_slang_local_readiness_native_capability_evidence_status`,
+`llm_runtime_slang_local_readiness_native_surface_manifest_count`, and
+`llm_runtime_slang_local_readiness_native_surface_manifest_sha256`, so a
 status-only native env cannot satisfy strict completion.
 The native evidence env also exposes the strict contract manifest fields
-`svllm_native_streaming_surface_manifest_count`,
-`svllm_native_streaming_surface_manifest_size`, and
-`svllm_native_streaming_surface_manifest_sha256`; use them to confirm a stale
+`slang_native_streaming_surface_manifest_count`,
+`slang_native_streaming_surface_manifest_size`, and
+`slang_native_streaming_surface_manifest_sha256`; use them to confirm a stale
 wrapper/spec/doc bundle was not mixed with a newer native capability artifact.
 
 Use the focused Torch optimizer gate after changing Torch SFFI, CUDA placement,
@@ -785,7 +785,7 @@ Latest strict-completion audit:
 `doc/09_report/2026/06/llm_goal_strict_completion_audit_2026-06-29.md`.
 Default aggregate evidence passes with host-dependent WARN lanes for vLLM and
 Torch. Strict-host completion still fails live dashboard HTTP auth/base URL,
-local vLLM serving, native svLLM streaming, Simple-visible libtorch optimizer
+local vLLM serving, native Slang streaming, Simple-visible libtorch optimizer
 execution, and fine-tune retry6/7 acceptance. Context/Ponytail full replacement
 is passing.
 Track those blockers in

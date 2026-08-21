@@ -524,7 +524,7 @@ Format: module path → file, consumers, expected symbols
 - Imported by 4 file(s):
   - `src/lib/nogc_sync_mut/security/audit_chain.spl`
   - `src/lib/nogc_sync_mut/aws_sigv4.spl`
-  - `src/lib/gc_async_mut/svllm/model_executor/model_loader/tensor_pack.spl`
+  - `src/lib/gc_async_mut/slang/model_executor/model_loader/tensor_pack.spl`
   - `src/lib/nogc_async_mut/aws_sigv4.spl`
 - Symbols: (inline/qualified usage — check consumer files)
 
@@ -532,7 +532,7 @@ Format: module path → file, consumers, expected symbols
 - File: `src/lib/common/crypto/types.spl`
 - Imported by 2 file(s):
   - `src/app/itf/adapter_minio.spl`
-  - `src/lib/gc_async_mut/svllm/model_executor/model_loader/tensor_pack.spl`
+  - `src/lib/gc_async_mut/slang/model_executor/model_loader/tensor_pack.spl`
 - Symbols: (inline/qualified usage — check consumer files)
 
 ### std.common.drawing

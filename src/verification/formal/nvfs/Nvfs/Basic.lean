@@ -30,7 +30,7 @@ abbrev Checksum : Type := Nat
 /-- The six NVFS storage classes (design §3.1).
 
 * `METADURABLE` — superblock, manifests, pmap roots, catalogs.
-* `DBWAL`       — spostgre WAL, svllm append-only logs.
+* `DBWAL`       — spostgre WAL, slang append-only logs.
 * `DBTEMP`      — temp forks, sort/hash spill; discarded on restart.
 * `GENERALMUT`  — general mutable (out-of-place) data extents.
 * `IMMUTABLE`   — tensor packs, manifests, model blobs (sealed on first close).

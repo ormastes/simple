@@ -9,7 +9,7 @@
   - `../01_research/simple_db_research.md` — Phase 2 research (1358 lines)
   - `./nvfs_design.md` — NVFS filesystem design (companion)
   - `./nvfs/from_simple_db.md` — upfront fs-API contribution from this engine
-  - `./nvfs/svllm_requirements.md` — parallel upfront contribution from svllm
+  - `./nvfs/slang_requirements.md` — parallel upfront contribution from slang
   - `../04_architecture/mdsoc_architecture_tobe.md` — MDSOC+ architecture (§MDSOC+ userland for cross-refs)
 
 ---
@@ -707,7 +707,7 @@ Six primary FR candidates from research (§11.7) map thus:
 
 **Acceptance:**
 - On FDP-capable drive, device WAF ≤ 1.3 on mixed OLTP workload.
-- On ZNS-capable drive, Simple DB + svllm coexist without zone-budget starvation.
+- On ZNS-capable drive, Simple DB + slang coexist without zone-budget starvation.
 
 ---
 
@@ -731,7 +731,7 @@ Carried from Phase 2 research (§12: OQ-1..OQ-15) plus new OQs raised here:
 - **OQ-14.** MVCC × pmap-generation concurrency. Design: each Txn pins its `pinned_pmap_gen`; `arena_discard` respects this; snapshots drain over time.
 - **OQ-15.** Vacuum granularity: per-relation (M1) → per-arena (M3).
 - **OQ-16 (new).** What is the cost model for `arena_clone_range` in a no-copy-offload world? Quantify per-page CPU cost at M2 so M4 planner knows.
-- **OQ-17 (new).** Interaction between Simple DB checkpointer and svllm tensor_pack seals on a shared NVFS mount — do they interfere on open-zone budget in ZNS mode? Coordinate with svllm in Phase 5.
+- **OQ-17 (new).** Interaction between Simple DB checkpointer and slang tensor_pack seals on a shared NVFS mount — do they interfere on open-zone budget in ZNS mode? Coordinate with slang in Phase 5.
 - **OQ-18 (new).** Should `sys_vacuum` be a system at all, or a separate mini-capsule? Keeping it inline simplifies change-detection; isolating it improves fault containment. Tentatively inline.
 
 ---

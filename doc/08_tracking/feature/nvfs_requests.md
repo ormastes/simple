@@ -7,7 +7,7 @@ filesystem. See `README.md` for the primary vs secondary channel rule.
 - **Owning design doc:** `doc/05_design/nvfs_design.md`
 - **Upfront contributions (primary channel):**
   - `doc/05_design/nvfs/from_simple_db.md`
-  - `doc/05_design/nvfs/svllm_requirements.md`
+  - `doc/05_design/nvfs/slang_requirements.md`
 
 ## Schema
 
@@ -23,7 +23,7 @@ Entries use the fields in `TEMPLATE.md`:
 | Status | `Open` / `Accepted` / `Implemented` / `Rejected` |
 | Requested-semantics | one-paragraph description |
 | Acceptance-criteria | observable bullets |
-| Related-upfront | `from_simple_db.md §S#`, `svllm_requirements.md §R#`, or `none` |
+| Related-upfront | `from_simple_db.md §S#`, `slang_requirements.md §R#`, or `none` |
 | Related-design-doc | `nvfs_design.md §#`, or `tbd` |
 | Related-issue | GH issue URL (optional) |
 

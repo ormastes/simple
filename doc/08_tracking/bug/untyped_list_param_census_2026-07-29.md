@@ -208,7 +208,7 @@ through `list`-typed parameters) but not directly money/signature-bearing.
 `devhub/cmd_{bb,tasks,wiki}.spl`, `mcp/jj/tools_git_{branch,misc}.spl` (x2
 tiers), `runtime/value.spl` (x2 tiers), `test/scaffold.spl`,
 `test_runner/test_runner_args.spl`,
-`svllm/model_executor/model_loader/tensor_pack.spl`. Lowest priority:
+`slang/model_executor/model_loader/tensor_pack.spl`. Lowest priority:
 internal tooling and CLI ergonomics, not externally-facing security
 artifacts. A wrong value here is more likely to be a visible CLI/test
 malfunction than a silent security defect.

@@ -57,12 +57,12 @@ dirty working-copy change, not from `pkmpz`.
 Current dirty `@` includes unrelated deletions such as:
 
 ```text
-doc/06_spec/test/01_unit/app/svllm_pack/main_spec.md
-doc/06_spec/test/02_integration/app/svllm_pack_log_modes_spec.md
+doc/06_spec/test/01_unit/app/slang_pack/main_spec.md
+doc/06_spec/test/02_integration/app/slang_pack_log_modes_spec.md
 doc/09_report/2026/06/llm_goal_evidence_2026-06-28.md
-doc/09_report/2026/06/llm_runtime_svllm_local_readiness_2026-06-28.md
+doc/09_report/2026/06/llm_runtime_slang_local_readiness_2026-06-28.md
 scripts/check/check-llm-goal-evidence.shs
-scripts/check/check-llm-runtime-svllm-local-readiness.shs
+scripts/check/check-llm-runtime-slang-local-readiness.shs
 ```
 
 An attempt to rebase dirty `@` onto `pkmpz` produced unrelated conflicts in

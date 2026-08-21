@@ -7,7 +7,7 @@
 Feature: NVFS arena_* trait surface exists and matches §4.1 / §4.2
   As a Phase 5 engineer
   I want the arena_* trait signatures in src/lib/nogc_sync_mut/fs/nvfs/api.spl
-  So that spostgre and svllm can depend on the NVFS contract before impl lands
+  So that spostgre and slang can depend on the NVFS contract before impl lands
 
   Background:
     Given §4.1 enumerates 11 core signatures and query helpers

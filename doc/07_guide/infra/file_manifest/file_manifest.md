@@ -48,7 +48,7 @@ section listing path, upstream URL, and a short description:
 
 | Path | URL | Description |
 |---|---|---|
-| `07_ml/svllm` | `ormastes/svllm` | Simple vLLM inference engine |
+| `07_ml/slang` | `ormastes/slang` | Simple vLLM inference engine |
 ```
 
 This section is documentary (not enforced by the root guard) but helps tools

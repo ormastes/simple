@@ -66,7 +66,7 @@ facades, generated bindings, or startup caches.
   `src/app/test_cache_shared.spl`, `src/app/exp`, `src/app/replay`,
   `src/app/gen_lean`, `src/app/qemu`, `src/app/sim`, `src/app/js`, and
   `src/app/repl`.
-- The latest pass migrated `src/app/cli`, `src/app/svllm_pack`,
+- The latest pass migrated `src/app/cli`, `src/app/slang_pack`,
   `src/app/spipe_docgen`, `src/app/sj_daemon`, `src/app/itf/main.spl`, and
   `src/app/package.registry` away from app-level `rt_*` calls. Package registry
   Ed25519 acceleration now goes through
@@ -125,7 +125,7 @@ touched feature lane.
   `143` by `rg -l 'extern fn rt_|\brt_[A-Za-z0-9_]+\(' src/app | wc -l`.
   The largest groups remain `src/app/io`, `src/app/wm_compare`,
   `src/app/ui.web`, `src/app/gui_perf`, `src/app/ui`, and `src/app/debug`.
-- Targeted direct-runtime scans now pass for `src/app/cli`, `src/app/svllm_pack`,
+- Targeted direct-runtime scans now pass for `src/app/cli`, `src/app/slang_pack`,
   `src/app/spipe_docgen`, `src/app/sj_daemon`, `src/app/itf/main.spl`, and
   `src/app/package.registry`.
 - Targeted direct-runtime scans also pass for `src/app/test_daemon`,

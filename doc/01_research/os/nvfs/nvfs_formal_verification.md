@@ -22,7 +22,7 @@ depend on the filesystem's integrity story:
   — WAL-before-pmap-publish, sealed-checkpoint-arena, MVCC generation
   pinning.  A filesystem that violates any of these invariants silently
   corrupts committed data.
-* **svllm** (model-serving runtime, `doc/05_design/nvfs/svllm_requirements.md`)
+* **slang** (model-serving runtime, `doc/05_design/nvfs/slang_requirements.md`)
   — atomic manifest publish, tensor-pack immutability, warm-switch
   semantics.  A silently-corrupted `arena_seal` breaks model-swap
   atomicity.
@@ -389,7 +389,7 @@ crash relation.  Both are ~100 lines and out of the 60-minute budget.
   `doc/01_research/btrfs_deep_dive.md`.
 - NVFS design: `doc/05_design/nvfs_design.md` (v1).
 - Simple DB requirements against NVFS: `doc/05_design/nvfs/from_simple_db.md`.
-- svllm requirements against NVFS: `doc/05_design/nvfs/svllm_requirements.md`.
+- slang requirements against NVFS: `doc/05_design/nvfs/slang_requirements.md`.
 
 ---
 

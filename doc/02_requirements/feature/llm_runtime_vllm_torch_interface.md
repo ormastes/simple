@@ -21,7 +21,7 @@ Selection source: user requested the first implementation option.
   by SPipe/dashboard diagnostics.
 - REQ-006: Evidence shall not expose prompts, tool payloads, credentials, API
   keys, or secret file paths.
-- REQ-007: Known Torch/SFFI or svLLM placeholder readiness shall be represented
+- REQ-007: Known Torch/SFFI or Slang placeholder readiness shall be represented
   as `blocked`, not normalized into `ready`.
 - REQ-008: Live vLLM request planning shall sanitize `/v1/models` and
   `/v1/chat/completions` metadata before any transport call, reject invalid
@@ -36,9 +36,9 @@ Selection source: user requested the first implementation option.
 - REQ-011: Local vLLM/GPU resource detection shall be bounded and optional.
   Missing resources must produce explicit `skipped` or `blocked` evidence before
   spawn/fetch behavior is attempted.
-- REQ-012: Torch/svLLM owner-module readiness shall expose explicit unavailable
+- REQ-012: Torch/Slang owner-module readiness shall expose explicit unavailable
   or unsupported statuses for placeholder or host-missing capabilities, including
-  dynamic Torch SFFI tensor operations and svLLM streaming readiness.
+  dynamic Torch SFFI tensor operations and Slang streaming readiness.
 - REQ-013: The LLM Caret provider surface shall support an OpenCode CLI backend
   shaped like the Claude CLI wrapper: deterministic argument construction,
   JSON/raw response classification, provider registration, and no subprocess
@@ -58,7 +58,7 @@ Selection source: user requested the first implementation option.
   host.
 - Dynamic LoRA adapter resolver plugins.
 - PEFT/TRL fine-tuning orchestration.
-- Full svLLM streaming through native NVFS scheduling, pinned-buffer
+- Full Slang streaming through native NVFS scheduling, pinned-buffer
   registration, and device staging.
 - Live CUDA optimizer execution against a local libtorch/CUDA installation.
 - Full OpenCode server attach/session management beyond non-interactive

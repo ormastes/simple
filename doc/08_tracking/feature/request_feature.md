@@ -43,5 +43,5 @@
 | STATIC_FILE_COMPRESSION_CACHE_INTEGRATION_2026_05_01 | static | P2 | Wire StaticCompressionCache into StaticFileHandler.handle() | - | - |
 | FR-SPIPE-LLM-0006 | spipe_llm_fine-tune_retry_loop_/_medgemma_korean | P1 | Promote retry7 acceptance only after real evidence | [link](doc/02_requirements/language/tools/spipe_llm_finetune_process.md; doc/02_requirements/nfr/spipe_llm_finetune_process.md) | - |
 | FR-LLM-RUNTIME-0001 | llm_runtime_vllm_torch_interface | P1 | Prove live local vLLM serving | [link](doc/02_requirements/feature/llm_runtime_vllm_torch_interface.md; doc/02_requirements/nfr/llm_runtime_vllm_torch_interface.md) | - |
-| FR-LLM-RUNTIME-0002 | llm_runtime_vllm_torch_interface | P1 | Complete svLLM NVFS streaming adapters | [link](doc/02_requirements/feature/llm_runtime_vllm_torch_interface.md; doc/02_requirements/nfr/llm_runtime_vllm_torch_interface.md) | - |
+| FR-LLM-RUNTIME-0002 | llm_runtime_vllm_torch_interface | P1 | Complete Slang NVFS streaming adapters | [link](doc/02_requirements/feature/llm_runtime_vllm_torch_interface.md; doc/02_requirements/nfr/llm_runtime_vllm_torch_interface.md) | - |
 | FR-LLM-RUNTIME-0003 | llm_runtime_vllm_torch_interface | P1 | Prove live CUDA Torch optimizer execution | [link](doc/02_requirements/feature/llm_runtime_vllm_torch_interface.md; doc/02_requirements/nfr/llm_runtime_vllm_torch_interface.md) | - |

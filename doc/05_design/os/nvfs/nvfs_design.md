@@ -11,7 +11,7 @@
 > **Related designs (cross-refs, unchanged from v2):**
 > - `doc/05_design/fs_driver_interface.md`
 > - `doc/05_design/nvfs_posix_wrapper.md`
-> - `doc/05_design/nvfs/svllm_requirements.md`
+> - `doc/05_design/nvfs/slang_requirements.md`
 > - `doc/05_design/nvfs/from_simple_db.md`
 > - `doc/05_design/simple_db_design.md`
 >

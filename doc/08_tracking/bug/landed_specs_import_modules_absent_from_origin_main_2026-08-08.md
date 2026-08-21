@@ -138,7 +138,7 @@ to zero (or with an explicit grandfather list).
 - test/integration/lib/std/doctest/discovery_spec.spl -> std.doctest.discovery.
 - test/system/features/parser/parser_deprecation_warnings_spec.spl -> std.parser.
 - test/system/features/treesitter/treesitter_parser_spec.spl -> std.parser.treesitter.
-- test/unit/app/svllm_pack/main_spec.spl -> std.app.svllm_pack.main.
+- test/unit/app/slang_pack/main_spec.spl -> std.app.slang_pack.main.
 - test/unit/app/tooling/ds_utils_spec.spl -> std.ds_utils.
 - test/unit/app/tooling/probability_utils_spec.spl -> std.probability_utils.
 - test/unit/compiler/blocks/builder_api_basic_spec.spl -> std.test.

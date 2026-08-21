@@ -6,7 +6,7 @@
 > - `doc/05_design/nvfs_design_v2.md` — NVFS native driver; the POSIX shim sits above it.
 > - `doc/05_design/fs_driver_interface.md` — defines `DriverInstance::NvfsPosix`,
 >   `Capability::PosixCompat`, and `Extension::PosixCompat(PosixCompatExt)`.
-> - `doc/05_design/nvfs/svllm_requirements.md` §120 — svllm explicitly does NOT need POSIX
+> - `doc/05_design/nvfs/slang_requirements.md` §120 — slang explicitly does NOT need POSIX
 >   semantics and will not use this shim.
 
 ---
@@ -207,7 +207,7 @@ cost, and correctness caveats.
 
 ### 5.2 Acceptable workloads for the POSIX shim
 
-- **Read-mostly** — databases opening NVFS files for read; ML model loading (svllm uses
+- **Read-mostly** — databases opening NVFS files for read; ML model loading (slang uses
   native API, but a legacy POSIX loader could use the shim).
 - **Append-heavy** — log files, WAL files where writes are always at end of file.
 - **Small files with infrequent overwrites** — config files, metadata blobs (< 1 MiB).

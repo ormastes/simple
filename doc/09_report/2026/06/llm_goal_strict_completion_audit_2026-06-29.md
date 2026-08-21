@@ -6,7 +6,7 @@
 - default_warn_gates: `vllm_host|torch_optimizer`
 - strict_status: `FAIL`
 - strict_fail_count: `5`
-- strict_failed_gates: `dashboard|vllm_host|svllm_local|torch_optimizer|finetune_guard`
+- strict_failed_gates: `dashboard|vllm_host|slang_local|torch_optimizer|finetune_guard`
 - context_ponytail_replacement: `pass`
 - blocker_tracker: `doc/08_tracking/bug/llm_strict_host_completion_blockers_2026-06-29.md`
 
@@ -18,7 +18,7 @@ completion gates still require live host/runtime/model evidence.
 |------|-----------------|-------------|
 | dashboard | `live_http_authenticated_request` | Set `LLM_DASHBOARD_LIVE_BASE_URL` and auth env, then rerun strict dashboard HTTP/live evidence. |
 | vLLM host | `local_vllm` | Install or expose local `vllm` executable and Python module; then prove serve preflight, endpoint reachability, and `/v1/models`. |
-| svLLM native | `native_read_range` | Implement native `read_range`, pinned buffer registration, and device staging evidence. |
+| Slang native | `native_read_range` | Implement native `read_range`, pinned buffer registration, and device staging evidence. |
 | Torch optimizer | `libtorch` | Build or install Simple-visible libtorch; Python Torch/CUDA is available, but system libtorch is missing. |
 | fine-tune | `retry6_training_eval` | Complete retry5 licensed cache/checksum review, retry6 model/eval artifacts, target eval, and retry7 acceptance evidence. |
 
@@ -40,7 +40,7 @@ but local proof is no longer status-only for the completed repo-local lanes:
   plus local `vllm`, Python module, GPU, and readiness-log hashes; a local
   `vllm` executable, importable Python `vllm` module, and live endpoint proof
   are still required.
-- svLLM local readiness records a checked local-readiness spec/log manifest and
+- Slang local readiness records a checked local-readiness spec/log manifest and
   per-log hashes; native `read_range`, pinned-buffer, and device-staging proof
   is still required.
 - Torch optimizer evidence records a checked live probe/source/spec/doc manifest

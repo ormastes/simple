@@ -45,7 +45,7 @@ propagation through the native pipeline, or (b) switching native `--compile` to
 a real type checker **and** fixing variant-payload extraction there
 (`30.types/type_system/_StmtCheck/bindings_check.spl:365` `EnumPattern` also assigns the
 whole subject type, not the payload). Both are major compiler subsystems —
-disproportionate to the payoff (un-gating two svllm byte tests).
+disproportionate to the payoff (un-gating two slang byte tests).
 
 ## 2026-07-15 resolution
 
@@ -65,7 +65,7 @@ explicitly out of scope.
 
 ## Historical mitigation
 
-Production svllm previously avoided the erased leaf with typed `[[u8]]`
+Production slang previously avoided the erased leaf with typed `[[u8]]`
 containers and gated byte-value tests behind `native_u8_fixed`. Those named
 gates are no longer present in the current tree; the focused dual-backend
 checker above is their replacement regression.
