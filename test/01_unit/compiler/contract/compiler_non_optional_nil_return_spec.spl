@@ -1,0 +1,66 @@
+"""
+# Compiler functions widened to satisfy the non-optional return contract
+
+**Category:** Compiler internals / return-type contracts
+**Bug:** doc/08_tracking/bug/ (E-SFFI-016 sweep, src/compiler/**)
+
+## Overview
+
+The strict seed traps at runtime with "nil is forbidden by the non-optional
+return contract of '<fn>' [E-SFFI-016]" whenever a function declared
+`-> T` (no trailing `?`) has a code path that tails off into `nil`. A sweep
+across `src/compiler/**` found 42 such sites; each was either (a) widened to
+`T?` because the nil is a legitimate "not found" / "no info" outcome that
+callers already distinguish, or (b) made total by returning a valid default.
+
+This spec exercises a representative sample of the widened (`T?`) functions
+on their nil path, plus one totalized (non-optional) function, to prove the
+fix compiles and behaves sanely under the strict seed.
+
+## Coverage
+
+- `get_extension_config` (src/compiler/99.loader/module_resolver/types.spl):
+  unknown extension -> nil, known extension -> Some(config).
+- `backend_for_name` (src/compiler/70.backend/backend/backend_helpers.spl):
+  unknown name -> nil, known name -> Some(BackendKind).
+- `shb_find_fn` (src/compiler/80.driver/shb/shb_hash.spl): missing name -> nil,
+  present name -> Some(entry).
+- `unwrap_promise` (src/compiler/30.types/type_system/effects.spl): totalized
+  to return the input unchanged when it is not a `Promise<T>` wrapper, instead
+  of nil.
+"""
+
+use std.spec
+use compiler.loader.module_resolver.types.{get_extension_config}
+use compiler.backend.backend_helpers.{backend_for_name}
+use compiler.shb.shb_hash.{shb_find_fn, ShbFnEntry}
+use compiler.types.type_system.{unwrap_promise}
+
+describe "non-optional return contract fixes":
+    it "get_extension_config returns nil for an unknown extension and a value for a known one":
+        val missing = get_extension_config("not_a_real_extension_xyz")
+        assert_true(missing == nil)
+        val found = get_extension_config("spl")
+        assert_true(found != nil)
+        val cfg = found!
+        assert_equal(cfg.extension, "spl")
+
+    it "backend_for_name returns nil for an unknown name and a value for a known one":
+        val missing = backend_for_name("not_a_real_backend_xyz")
+        assert_true(missing == nil)
+        val found = backend_for_name("lua")
+        assert_true(found != nil)
+
+    it "shb_find_fn returns nil for a missing name and the entry for a present one":
+        val entries: [ShbFnEntry] = [
+            ShbFnEntry(name: "alpha", params: [], return_type: "i64", flags: 0)
+        ]
+        val missing = shb_find_fn(entries, "beta")
+        assert_true(missing == nil)
+        val found = shb_find_fn(entries, "alpha")
+        assert_true(found != nil)
+        assert_equal(found!.name, "alpha")
+
+    it "unwrap_promise is total: non-Promise input passes through unchanged":
+        assert_equal(unwrap_promise("i64"), "i64")
+        assert_equal(unwrap_promise("Promise<text>"), "text")
