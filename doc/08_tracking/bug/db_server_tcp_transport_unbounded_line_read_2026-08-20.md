@@ -1,7 +1,7 @@
 # DB server TCP transport buffers an unbounded request line before the byte bound is checked
 
 **Date:** 2026-08-20
-**Status:** OPEN
+**Status:** RESOLVED 2026-08-21
 **Severity:** Medium (remote memory-exhaustion vector on the production transport)
 **Component:** `std.database.server` transport
 
@@ -35,6 +35,31 @@ Add a bounded line-read to `TcpStream` (or a wrapper), use it from
 bound-crossing read as a connection-fatal error (close, never re-frame).
 Regression spec should drive a >8192-byte no-newline payload against
 `serve_tcp` and assert the connection closes without unbounded buffering.
+
+## Resolution 2026-08-21
+
+Added `TcpStream.read_line_bounded(max_bytes)` in
+`src/lib/nogc_sync_mut/io/tcp.spl:278` — reads one byte at a time via the
+existing `rt_io_tcp_read`, appends via `io_append_chunk`, and fails closed
+(`Err`) the instant the accumulated line exceeds `max_bytes`, before a
+newline is ever required. `TcpDbTransport.read_message`
+(`src/lib/nogc_sync_mut/database/server/transport.spl`) now calls
+`stream.read_line_bounded(MAX_REQUEST_BYTES + 1)` instead of the unbounded
+`read_line_nullable()`; any bound-crossing (or other) read error closes the
+connection and returns `nil` rather than re-framing partial data as a bogus
+request — connection-fatal, never a partial reparse, per the unblock
+condition above.
+
+Reproduce spec (real sockets, not mocks):
+`test/01_unit/lib/nogc_sync_mut/database/server/db_server_tcp_bounded_line_spec.spl`
+— `Results: 3 total, 3 passed, 0 failed`. Covers: a normal line at/under the
+bound still succeeds; `TcpStream.read_line_bounded` fails closed on an
+over-cap no-newline payload; `TcpDbTransport.read_message` closes the
+connection (returns `nil`) rather than buffering an unbounded no-newline
+line sent over a real `TcpDbListener`/`TcpStream` pair.
+
+Regression: `test/01_unit/lib/nogc_async_mut/net/net_tcp_facade_spec.spl` ->
+`Results: 4 total, 4 passed, 0 failed`.
 
 ## Related
 

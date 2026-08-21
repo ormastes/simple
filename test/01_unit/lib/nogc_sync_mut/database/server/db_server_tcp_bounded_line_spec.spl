@@ -1,0 +1,121 @@
+# @cover src/lib/nogc_sync_mut/io/tcp.spl 40%
+# @cover src/lib/nogc_sync_mut/database/server/transport.spl 40%
+# @req REQ-DBSERVER-002
+"""
+# DB server TCP transport — bounded request line read
+
+`TcpDbTransport.read_message` used to call `read_line_nullable()`, which has
+no byte bound: a client that sends bytes forever without a newline makes the
+server buffer all of it before `protocol.spl`'s `MAX_REQUEST_BYTES` check ever
+runs. This pins the fix at the stream layer (`TcpStream.read_line_bounded`)
+and at the transport call site, using a real socket pair — not a mock — so
+the bound is proven against the actual blocking read path.
+"""
+
+use std.spec
+use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
+use std.nogc_sync_mut.database.server.transport.{TcpDbListener, TcpDbTransport}
+
+describe "TcpStream.read_line_bounded":
+
+    it "returns a line at or under the bound":
+        val bind_result = TcpListener.bind("127.0.0.1:0")
+        var listener = match bind_result:
+            Err(e): panic("bind failed: {e.message}")
+            Ok(l): l
+        val addr = match listener.local_addr():
+            Err(e): panic("local_addr failed: {e.message}")
+            Ok(a): a
+        var client = match TcpStream.connect(addr):
+            Err(e): panic("connect failed: {e.message}")
+            Ok(c): c
+        match client.write_all("hello\n".bytes()):
+            Err(e): panic("write failed: {e.message}")
+            Ok(_): pass
+        val _ = client.flush()
+        var server = match listener.accept():
+            Err(e): panic("accept failed: {e.message}")
+            Ok(s): s
+
+        val got = match server.read_line_bounded(8192):
+            Err(e): panic("read_line_bounded failed: {e.message}")
+            Ok(line): line
+        expect(got).to_equal("hello\n")
+
+        val _ = server.close()
+        val _ = client.close()
+        val _ = listener.close()
+
+    it "fails closed instead of buffering an over-cap line with no newline":
+        val bind_result = TcpListener.bind("127.0.0.1:0")
+        var listener = match bind_result:
+            Err(e): panic("bind failed: {e.message}")
+            Ok(l): l
+        val addr = match listener.local_addr():
+            Err(e): panic("local_addr failed: {e.message}")
+            Ok(a): a
+        var client = match TcpStream.connect(addr):
+            Err(e): panic("connect failed: {e.message}")
+            Ok(c): c
+
+        # Send MAX_REQUEST_BYTES(8192) + 1 bytes, no newline. Over the
+        # (max_bytes = 8192) bound the read must fail rather than buffer.
+        var payload: [u8] = []
+        var i = 0
+        while i < 8193:
+            payload = payload.append(65)
+            i = i + 1
+        match client.write_all(payload):
+            Err(e): panic("write failed: {e.message}")
+            Ok(_): pass
+        val _ = client.flush()
+        var server = match listener.accept():
+            Err(e): panic("accept failed: {e.message}")
+            Ok(s): s
+
+        val result = server.read_line_bounded(8192)
+        val failed_closed = match result:
+            Err(_e): true
+            Ok(_line): false
+        expect(failed_closed).to_equal(true)
+
+        val _ = server.close()
+        val _ = client.close()
+        val _ = listener.close()
+
+describe "TcpDbTransport.read_message — byte-level bound":
+
+    it "closes the connection rather than buffering an unbounded no-newline line":
+        val bind_result = TcpDbListener.bind("127.0.0.1:0")
+        var listener = match bind_result:
+            Err(e): panic("bind failed: {e.message}")
+            Ok(l): l
+        val addr = match listener.listener.local_addr():
+            Err(e): panic("local_addr failed: {e.message}")
+            Ok(a): a
+        var client = match TcpStream.connect(addr):
+            Err(e): panic("connect failed: {e.message}")
+            Ok(c): c
+
+        # Well over MAX_REQUEST_BYTES(8192) + 1, still no newline, so the
+        # bound trips without needing to wait on the read timeout for EOF.
+        var payload: [u8] = []
+        var i = 0
+        while i < 20000:
+            payload = payload.append(65)
+            i = i + 1
+        match client.write_all(payload):
+            Err(e): panic("write failed: {e.message}")
+            Ok(_): pass
+        val _ = client.flush()
+
+        var transport = match listener.accept_timeout(5000):
+            Err(e): panic("accept failed: {e.message}")
+            Ok(t): t
+
+        val message = transport.read_message()
+        val closed = message == nil
+        expect(closed).to_equal(true)
+
+        val _ = client.close()
+        val _ = listener.close()

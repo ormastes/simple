@@ -285,6 +285,35 @@ class TcpStream with Read, Write, Close:
             return nil
         rt_io_tcp_read_line(self.fd)
 
+    fn read_line_bounded(max_bytes: i64) -> Result<text, IoError>:
+        """Read one line, but fail closed once more than max_bytes have
+        arrived without a newline, instead of buffering an unbounded amount
+        of attacker-controlled input.
+
+        Args:
+            max_bytes: maximum line length (including the trailing newline)
+                before this read is treated as a connection-fatal error
+
+        Returns:
+            Result with the line (including newline) on success, or an
+            error if the stream ended with no data or the bound was crossed
+        """
+        if not self.open:
+            return Err(IoError(kind: IoErrorKind.Other, message: "stream is closed", source: nil))
+        var buf: [u8] = []
+        while true:
+            val chunk = rt_io_tcp_read(self.fd, 1)
+            if chunk.len() == 0:
+                if buf.len() == 0:
+                    return Err(IoError(kind: IoErrorKind.UnexpectedEof, message: "end of stream", source: nil))
+                break
+            val _copied = io_append_chunk(buf, chunk)
+            if buf.len() > max_bytes:
+                return Err(IoError(kind: IoErrorKind.Other, message: "line exceeds max_bytes ({max_bytes})", source: nil))
+            if chunk[0] == 10:
+                break
+        Ok(bytes_to_text(buf))
+
     fn read_line_or_empty() -> text:
         """Read one line through a non-optional Phase-3 ABI boundary."""
         if not self.open:

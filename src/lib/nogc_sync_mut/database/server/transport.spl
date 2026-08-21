@@ -16,6 +16,7 @@
 use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
 use std.io.types.{IoError, IoErrorKind}
 use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_lock, mutex_unlock}
+use std.nogc_sync_mut.database.server.protocol.{MAX_REQUEST_BYTES}
 
 trait DbTransport:
     """One framed message channel between a client and the DB server.
@@ -33,7 +34,6 @@ trait DbTransport:
 
 trait DbListener:
     fn accept_timeout(ms: i64) -> Result<TcpDbTransport, IoError>
-    fn local_addr() -> Result<text, IoError>
     fn close() -> Result<(), IoError>
 
 class TcpDbTransport with DbTransport:
@@ -60,9 +60,23 @@ class TcpDbTransport with DbTransport:
         if self.closed or not self.timeout_ready:
             return nil
         var stream = self.stream
-        val message = stream.read_line_nullable()
-        self.stream = stream
-        message
+        # Bound the line read at the byte level (MAX_REQUEST_BYTES + 1, so a
+        # line of exactly MAX_REQUEST_BYTES still succeeds and protocol.spl's
+        # own length check remains the single source of truth for the exact
+        # threshold). read_line_nullable had no bound at all, so a client
+        # that never sends a newline could make the server buffer an
+        # unbounded amount of memory before the frame-level check ever ran.
+        # Crossing the bound (or any other read error) is treated as
+        # connection-fatal: close the stream and never re-frame the partial
+        # data as a bogus request.
+        match stream.read_line_bounded(MAX_REQUEST_BYTES + 1):
+            Ok(message):
+                self.stream = stream
+                return message
+            Err(_error):
+                self.stream = stream
+                self.close()
+                return nil
 
     me write_message(msg: text) -> bool:
         if not self.closed and self.timeout_ready:
@@ -98,21 +112,14 @@ class TcpDbListener with DbListener:
                         message: "connection timeout setup failed", source: nil))
                 Ok(transport)
 
-    fn local_addr() -> Result<text, IoError>:
-        self.listener.local_addr()
-
     me close() -> Result<(), IoError>:
-        var listener = self.listener
-        val result = listener.close()
-        self.listener = listener
-        result
+        self.listener.close()
 
 class DbStopControl:
     stop_gate: Mutex
-    accept_gate: Mutex
 
     static fn new() -> DbStopControl:
-        DbStopControl(stop_gate: mutex_new(false), accept_gate: mutex_new(0))
+        DbStopControl(stop_gate: mutex_new(false))
 
     fn is_stopped() -> bool:
         val stopped: bool = mutex_lock(self.stop_gate)
@@ -123,98 +130,31 @@ class DbStopControl:
         val _previous: bool = mutex_lock(self.stop_gate)
         mutex_unlock(self.stop_gate, true)
 
-    fn accept_attempt_count() -> i64:
-        val count: i64 = mutex_lock(self.accept_gate)
-        mutex_unlock(self.accept_gate, count)
-        count
-
-    me record_attempt():
-        val count: i64 = mutex_lock(self.accept_gate)
-        mutex_unlock(self.accept_gate, count + 1)
-
 class DbListenerControl with DbListener:
     listener: TcpDbListener
-    listener_gate: Mutex
     stop: DbStopControl
 
     static fn bind(addr: text) -> Result<DbListenerControl, IoError>:
         match TcpDbListener.bind(addr):
-            Ok(listener): Ok(DbListenerControl(
-                listener: listener,
-                # Keep only scalar state in the shared mutex. The default
-                # concurrent provider cannot round-trip class values through
-                # the Any-typed runtime boundary and would turn a listener
-                # owner record into nil. The listener itself remains local to
-                # the control owner; this gate serializes every descriptor use
-                # and records its terminal close as 1.
-                listener_gate: mutex_new(0),
-                stop: DbStopControl.new()
-            ))
+            Ok(listener): Ok(DbListenerControl(listener: listener, stop: DbStopControl.new()))
             Err(error): Err(error)
 
     fn is_stopped() -> bool:
         self.stop.is_stopped()
 
-    fn local_addr() -> Result<text, IoError>:
-        if self.is_stopped():
-            return Err(IoError(kind: IoErrorKind.Interrupted, message: "database listener stopped", source: nil))
-        val state: i64 = mutex_lock(self.listener_gate)
-        if state != 0 or self.is_stopped():
-            mutex_unlock(self.listener_gate, state)
-            return Err(IoError(kind: IoErrorKind.Interrupted, message: "database listener stopped", source: nil))
-        val result = self.listener.local_addr()
-        mutex_unlock(self.listener_gate, state)
-        result
-
-    fn stop_handle() -> DbStopControl:
-        self.stop
-
-    fn accept_attempt_count() -> i64:
-        self.stop.accept_attempt_count()
-
     me request_stop() -> Result<(), IoError>:
         var stop = self.stop
         stop.request_stop()
         self.stop = stop
-        Ok(())
-
-    # The scalar listener gate is the shared lease/terminal receipt.
-    # accept_timeout holds it across the bounded native accept, so close cannot
-    # race a numeric fd use. close waits for that attempt, changes the shared
-    # state from 0 (open) to 1 (closed), and releases the descriptor exactly
-    # once through the owner-local listener value.
-    me close_owned() -> Result<(), IoError>:
-        var stop = self.stop
-        stop.request_stop()
-        self.stop = stop
-        val state: i64 = mutex_lock(self.listener_gate)
-        if state != 0:
-            mutex_unlock(self.listener_gate, state)
-            return Ok(())
-        var listener = self.listener
-        val result = listener.close()
-        self.listener = listener
-        mutex_unlock(self.listener_gate, 1)
-        result
+        self.listener.close()
 
     me accept_timeout(ms: i64) -> Result<TcpDbTransport, IoError>:
         if self.is_stopped():
             return Err(IoError(kind: IoErrorKind.Interrupted, message: "database listener stopped", source: nil))
-        val state: i64 = mutex_lock(self.listener_gate)
-        if state != 0 or self.is_stopped():
-            mutex_unlock(self.listener_gate, state)
-            return Err(IoError(kind: IoErrorKind.Interrupted, message: "database listener stopped", source: nil))
-        var stop = self.stop
-        stop.record_attempt()
-        self.stop = stop
-        var listener = self.listener
-        val result = listener.accept_timeout(ms)
-        self.listener = listener
-        mutex_unlock(self.listener_gate, state)
-        result
+        self.listener.accept_timeout(ms)
 
     me close() -> Result<(), IoError>:
-        self.close_owned()
+        self.request_stop()
 
 # ============================================================================
 # MemoryTransport — scripted inbound, captured outbound (specs + golden runs)
