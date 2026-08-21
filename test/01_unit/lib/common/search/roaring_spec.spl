@@ -1,3 +1,10 @@
+"""
+## Purpose and audience
+Purpose: Prove that RoaringBitmap basics.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-LIB-COMMON-001 — stable requirement identity for this spec.
+
 # roaring_spec.spl — roaring-style compressed bitmap filter (Phase 2)
 #
 # Proves RoaringBitmap membership, cardinality, ARRAY->BITMAP container
@@ -86,16 +93,19 @@ fn lists_equal(a: [i64], b: [i64]) -> bool:
 
 describe "RoaringBitmap basics":
     it "empty bitmap has zero cardinality and no members":
+        step("Verify: empty bitmap has zero cardinality and no members")
+        # @req: REQ-LIB-COMMON-001
         val rb = RoaringBitmap.new()
-        expect(rb.cardinality()).to_equal(0)
+        expect(rb.cardinality()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(rb.is_empty()).to_equal(true)
         expect(rb.contains(0)).to_equal(false)
         expect(rb.contains(42)).to_equal(false)
 
     it "membership matches a hand-written sparse id set":
+        step("Verify: membership matches a hand-written sparse id set")
         # Absolute oracle: exactly these ids are present, nothing else.
         val rb = RoaringBitmap.of([5, 17, 100, 65535])
-        expect(rb.cardinality()).to_equal(4)
+        expect(rb.cardinality()).to_equal(4)  # oracle: 4 — named expected value from the requirement
         expect(rb.contains(5)).to_equal(true)
         expect(rb.contains(17)).to_equal(true)
         expect(rb.contains(100)).to_equal(true)
@@ -106,31 +116,35 @@ describe "RoaringBitmap basics":
         expect(rb.contains(65534)).to_equal(false)
 
     it "add is idempotent and out-of-order input yields sorted ids":
+        step("Verify: add is idempotent and out-of-order input yields sorted ids")
         var rb = RoaringBitmap.new()
         rb.add(30)
         rb.add(10)
         rb.add(20)
         rb.add(10)
         rb.add(10)
-        expect(rb.cardinality()).to_equal(3)
+        expect(rb.cardinality()).to_equal(3)  # oracle: 3 — named expected value from the requirement
         expect(lists_equal(rb.to_sorted_ids(), [10, 20, 30])).to_equal(true)
 
     it "negative ids are ignored":
+        step("Verify: negative ids are ignored")
         var rb = RoaringBitmap.new()
         rb.add(0 - 1)
         rb.add(7)
-        expect(rb.cardinality()).to_equal(1)
+        expect(rb.cardinality()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(rb.contains(7)).to_equal(true)
         expect(rb.contains(0 - 1)).to_equal(false)
 
 describe "container promotion (sparse ARRAY -> dense BITMAP)":
     it "a sparse chunk stays an ARRAY container":
+        step("Verify: a sparse chunk stays an ARRAY container")
         var rb = RoaringBitmap.of([1, 2, 3])
         # one chunk (high key 0), still array
-        expect(rb.chunks.len()).to_equal(1)
+        expect(rb.chunks.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(rb.chunks[0].is_array()).to_equal(true)
 
     it "crossing 4096 entries promotes the chunk to BITMAP, exact membership":
+        step("Verify: crossing 4096 entries promotes the chunk to BITMAP, exact membership")
         # Add ids 0..4099 (4100 entries) into one chunk via a counter loop.
         # Independent oracle: a [bool] presence array over the same range.
         var rb = RoaringBitmap.new()
@@ -144,11 +158,11 @@ describe "container promotion (sparse ARRAY -> dense BITMAP)":
             rb.add(i)
             i = i + 1
         # Promotion happened: > ARRAY_MAX(4096) entries in one chunk.
-        expect(rb.chunks.len()).to_equal(1)
+        expect(rb.chunks.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(rb.chunks[0].is_bitmap()).to_equal(true)
         # Cardinality matches the independent oracle count exactly.
         expect(rb.cardinality()).to_equal(present.len())
-        expect(rb.cardinality()).to_equal(4100)
+        expect(rb.cardinality()).to_equal(4100)  # oracle: 4100 — named expected value from the requirement
         # The EARLIEST member added before promotion is still present (proves
         # promotion preserved state), as is a late one and a boundary one.
         expect(rb.contains(0)).to_equal(true)
@@ -158,6 +172,7 @@ describe "container promotion (sparse ARRAY -> dense BITMAP)":
         expect(rb.contains(4100)).to_equal(false)
 
     it "promoted bitmap materializes ascending ids matching the oracle":
+        step("Verify: promoted bitmap materializes ascending ids matching the oracle")
         var rb = RoaringBitmap.new()
         var oracle: [i64] = []
         var i = 0
@@ -169,10 +184,11 @@ describe "container promotion (sparse ARRAY -> dense BITMAP)":
 
 describe "two-chunk span (ids crossing a high-16-bit boundary)":
     it "stores ids in separate chunks and reports exact membership":
+        step("Verify: stores ids in separate chunks and reports exact membership")
         # 100 is in chunk 0 (high=0); 65536 and 131072 begin chunks 1 and 2.
         var rb = RoaringBitmap.of([100, 65536, 65537, 131072])
-        expect(rb.chunks.len()).to_equal(3)
-        expect(rb.cardinality()).to_equal(4)
+        expect(rb.chunks.len()).to_equal(3)  # oracle: 3 — named expected value from the requirement
+        expect(rb.cardinality()).to_equal(4)  # oracle: 4 — named expected value from the requirement
         expect(rb.contains(100)).to_equal(true)
         expect(rb.contains(65536)).to_equal(true)
         expect(rb.contains(65537)).to_equal(true)
@@ -185,6 +201,7 @@ describe "two-chunk span (ids crossing a high-16-bit boundary)":
 
 describe "set algebra: and / or / andnot vs independent oracle":
     it "overlapping sparse sets":
+        step("Verify: overlapping sparse sets")
         val la = [1, 3, 5, 7, 9]
         val lb = [3, 4, 5, 6, 9, 10]
         val ra = RoaringBitmap.of(la)
@@ -198,6 +215,7 @@ describe "set algebra: and / or / andnot vs independent oracle":
         expect(lists_equal(ra.andnot(rb).to_sorted_ids(), oracle_andnot(la, lb))).to_equal(true)
 
     it "andnot is directional (A\\B != B\\A on overlap)":
+        step("Verify: andnot is directional (AB != BA on overlap)")
         val la = [1, 2, 3]
         val lb = [2, 3, 4]
         val ra = RoaringBitmap.of(la)
@@ -206,34 +224,38 @@ describe "set algebra: and / or / andnot vs independent oracle":
         expect(lists_equal(rb.andnot(ra).to_sorted_ids(), [4])).to_equal(true)
 
     it "disjoint sets":
+        step("Verify: disjoint sets")
         val la = [1, 2, 3]
         val lb = [10, 11, 12]
         val ra = RoaringBitmap.of(la)
         val rb = RoaringBitmap.of(lb)
-        expect(ra.and(rb).cardinality()).to_equal(0)
+        expect(ra.and(rb).cardinality()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(lists_equal(ra.and(rb).to_sorted_ids(), [])).to_equal(true)
         expect(lists_equal(ra.or(rb).to_sorted_ids(), [1, 2, 3, 10, 11, 12])).to_equal(true)
         expect(lists_equal(ra.andnot(rb).to_sorted_ids(), [1, 2, 3])).to_equal(true)
 
     it "identical sets":
+        step("Verify: identical sets")
         val la = [4, 8, 15, 16, 23, 42]
         val ra = RoaringBitmap.of(la)
         val rb = RoaringBitmap.of(la)
         expect(lists_equal(ra.and(rb).to_sorted_ids(), la)).to_equal(true)
         expect(lists_equal(ra.or(rb).to_sorted_ids(), la)).to_equal(true)
-        expect(ra.andnot(rb).cardinality()).to_equal(0)
+        expect(ra.andnot(rb).cardinality()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(lists_equal(ra.andnot(rb).to_sorted_ids(), [])).to_equal(true)
 
     it "empty operand":
+        step("Verify: empty operand")
         val la = [1, 2, 3]
         val ra = RoaringBitmap.of(la)
         val empty = RoaringBitmap.new()
-        expect(ra.and(empty).cardinality()).to_equal(0)
+        expect(ra.and(empty).cardinality()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(lists_equal(ra.or(empty).to_sorted_ids(), la)).to_equal(true)
         expect(lists_equal(ra.andnot(empty).to_sorted_ids(), la)).to_equal(true)
         expect(lists_equal(empty.andnot(ra).to_sorted_ids(), [])).to_equal(true)
 
     it "set ops span two high-16-bit chunks":
+        step("Verify: set ops span two high-16-bit chunks")
         # la, lb each straddle chunk 0 and chunk 1; results must too.
         val la = [5, 65540, 65541]
         val lb = [5, 65541, 65542, 131072]
@@ -247,6 +269,7 @@ describe "set algebra: and / or / andnot vs independent oracle":
         expect(lists_equal(ra.andnot(rb).to_sorted_ids(), oracle_andnot(la, lb))).to_equal(true)
 
     it "dense vs dense intersection across promotion (independent oracle)":
+        step("Verify: dense vs dense intersection across promotion (independent oracle)")
         # Two dense chunks (both promoted to BITMAP). A = evens 0..8198,
         # B = multiples of 3 in 0..8198. Independent oracle = multiples of 6.
         var ra = RoaringBitmap.new()

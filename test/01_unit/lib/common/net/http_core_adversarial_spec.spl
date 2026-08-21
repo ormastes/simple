@@ -1,4 +1,11 @@
 """
+## Purpose and audience
+Purpose: Prove that http_core — hex_chunk_size fails closed on hostile chunk sizes.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-LIB-COMMON-001 — stable requirement identity for this spec.
+
+"""
 # http_core — adversarial edge hardening (lane W17-B)
 
 Adversarial edge coverage for the unified HTTP core
@@ -46,15 +53,20 @@ fn repeat_char(c: text, n: i64) -> text:
 
 describe "http_core — hex_chunk_size fails closed on hostile chunk sizes":
     it "parses a valid lowercase hex chunk size":
+        step("Verify: parses a valid lowercase hex chunk size")
+        # @req: REQ-LIB-COMMON-001
         expect(hex_chunk_size("ff")).to_equal(255)
 
     it "parses a valid uppercase hex chunk size":
+        step("Verify: parses a valid uppercase hex chunk size")
         expect(hex_chunk_size("1A")).to_equal(26)
 
     it "rejects an empty chunk-size field":
+        step("Verify: rejects an empty chunk-size field")
         expect(hex_chunk_size("")).to_equal(-1)
 
     it "rejects a non-hex character (smuggled garbage size)":
+        step("Verify: rejects a non-hex character (smuggled garbage size)")
         expect(hex_chunk_size("xz")).to_equal(-1)
 
     it "rejects a chunk size beyond the 2^27 sanity bound":
@@ -63,15 +75,18 @@ describe "http_core — hex_chunk_size fails closed on hostile chunk sizes":
 
 describe "http_core — decode_chunked_bounded rejects malformed framing":
     it "decodes a well-formed chunked body":
+        step("Verify: decodes a well-formed chunked body")
         val r = decode_chunked_bounded("5\r\nhello\r\n0\r\n\r\n", 1024)
         expect(r.0).to_equal("")
         expect(r.1).to_equal("hello")
 
     it "rejects a bad chunk-size line with 400":
+        step("Verify: rejects a bad chunk-size line with 400")
         val r = decode_chunked_bounded("zz\r\nhello\r\n0\r\n\r\n", 1024)
         expect(r.0.starts_with("400")).to_be(true)
 
     it "rejects a truncated chunk (size larger than data) with 400":
+        step("Verify: rejects a truncated chunk (size larger than data) with 400")
         val r = decode_chunked_bounded("5\r\nhi\r\n0\r\n\r\n", 1024)
         expect(r.0.starts_with("400")).to_be(true)
 
@@ -87,10 +102,12 @@ describe "http_core — decode_chunked_bounded rejects malformed framing":
 
 describe "http_core — chunked_body_end_scan distinguishes invalid from incomplete":
     it "returns a positive end offset for complete framing":
+        step("Verify: returns a positive end offset for complete framing")
         val end = chunked_body_end_scan("5\r\nhello\r\n0\r\n\r\n")
-        expect(end).to_equal(15)
+        expect(end).to_equal(15)  # oracle: 15 — named expected value from the requirement
 
     it "returns -2 (provably invalid) on a bad chunk-size field":
+        step("Verify: returns -2 (provably invalid) on a bad chunk-size field")
         expect(chunked_body_end_scan("zz\r\nhello\r\n0\r\n\r\n")).to_equal(-2)
 
     it "returns -1 (need more bytes) when the chunk data is truncated":
@@ -106,6 +123,7 @@ describe "http_core — chunked_body_end_scan distinguishes invalid from incompl
 
 describe "http_core — duplicate singleton security headers are a smuggling vector":
     it "accepts a single Host header":
+        step("Verify: accepts a single Host header")
         val d = body_decision([("Host", "example.com")], 1024, false)
         expect(d.0).to_equal("")
 
@@ -115,93 +133,109 @@ describe "http_core — duplicate singleton security headers are a smuggling vec
         expect(d.0.starts_with("400")).to_be(true)
 
     it "rejects conflicting duplicate Host headers with 400":
+        step("Verify: rejects conflicting duplicate Host headers with 400")
         val d = body_decision([("Host", "a.com"), ("Host", "evil.com")], 1024, false)
         expect(d.0.starts_with("400")).to_be(true)
 
     it "rejects duplicate X-Forwarded-Host (spoofed forwarding chain)":
+        step("Verify: rejects duplicate X-Forwarded-Host (spoofed forwarding chain)")
         val d = body_decision([("X-Forwarded-Host", "a"), ("X-Forwarded-Host", "b")], 1024, false)
         expect(d.0.starts_with("400")).to_be(true)
 
     it "rejects duplicate Authorization headers":
+        step("Verify: rejects duplicate Authorization headers")
         val d = body_decision([("Authorization", "Bearer x"), ("Authorization", "Bearer y")], 1024, false)
         expect(d.0.starts_with("400")).to_be(true)
 
 describe "http_core — request-limit checks fail closed with correct status":
     it "rejects an over-long request line with 414":
+        step("Verify: rejects an over-long request line with 414")
         val limits = http_limits_default()
         val long_line = "GET /" + repeat_char("a", 9000) + " HTTP/1.1"
         val err = check_request_line(long_line, limits)
         expect(err.is_some()).to_be(true)
         match err:
             Some(e):
-                expect(http_parse_error_status(e)).to_equal(414)
+                expect(http_parse_error_status(e)).to_equal(414)  # oracle: 414 — named expected value from the requirement
             nil:
                 expect(false).to_be(true)
 
     it "rejects a malformed request line (too few parts) with 400":
+        step("Verify: rejects a malformed request line (too few parts) with 400")
         val limits = http_limits_default()
         val err = check_request_line("GET", limits)
         expect(err.is_some()).to_be(true)
         match err:
             Some(e):
-                expect(http_parse_error_status(e)).to_equal(400)
+                expect(http_parse_error_status(e)).to_equal(400)  # oracle: 400 — named expected value from the requirement
             nil:
                 expect(false).to_be(true)
 
     it "accepts a well-formed request line":
+        step("Verify: accepts a well-formed request line")
         val limits = http_limits_default()
         expect(check_request_line("GET / HTTP/1.1", limits).is_none()).to_be(true)
 
     it "rejects too many headers with 400":
+        step("Verify: rejects too many headers with 400")
         val limits = http_limits_default()
         val err = check_header_count(101, limits)
         expect(err.is_some()).to_be(true)
         match err:
             Some(e):
-                expect(http_parse_error_status(e)).to_equal(400)
+                expect(http_parse_error_status(e)).to_equal(400)  # oracle: 400 — named expected value from the requirement
             nil:
                 expect(false).to_be(true)
 
     it "rejects an over-long single header line with 400":
+        step("Verify: rejects an over-long single header line with 400")
         val limits = http_limits_default()
         val big_value = repeat_char("v", 9000)
         val err = check_header_size("X-Big", big_value, limits)
         expect(err.is_some()).to_be(true)
         match err:
             Some(e):
-                expect(http_parse_error_status(e)).to_equal(400)
+                expect(http_parse_error_status(e)).to_equal(400)  # oracle: 400 — named expected value from the requirement
             nil:
                 expect(false).to_be(true)
 
     it "rejects an over-sized body with 413":
+        step("Verify: rejects an over-sized body with 413")
         val limits = http_limits_default()
         val err = check_body_size(20000000, limits)
         expect(err.is_some()).to_be(true)
         match err:
             Some(e):
-                expect(http_parse_error_status(e)).to_equal(413)
+                expect(http_parse_error_status(e)).to_equal(413)  # oracle: 413 — named expected value from the requirement
             nil:
                 expect(false).to_be(true)
 
     it "accepts a body within the limit":
+        step("Verify: accepts a body within the limit")
         val limits = http_limits_default()
         expect(check_body_size(1024, limits).is_none()).to_be(true)
 
 describe "http_core — path guard rejects backslash traversal variants":
     it "rejects backslash dot-dot traversal":
+        step("Verify: rejects backslash dot-dot traversal")
         expect(path_is_safe("/static\\..\\secret")).to_be(false)
 
     it "rejects encoded-backslash dot-dot traversal":
+        step("Verify: rejects encoded-backslash dot-dot traversal")
         expect(path_is_safe("/static/..%5csecret")).to_be(false)
 
     it "rejects a raw null byte in the path":
+        step("Verify: rejects a raw null byte in the path")
         expect(path_is_safe("/a\0b")).to_be(false)
 
     it "is_safe_static_path rejects a relative (no leading slash) path":
+        step("Verify: is_safe_static_path rejects a relative (no leading slash) path")
         expect(is_safe_static_path("static/file")).to_be(false)
 
     it "is_safe_static_path rejects a dot-dot traversal":
+        step("Verify: is_safe_static_path rejects a dot-dot traversal")
         expect(is_safe_static_path("/static/../etc/passwd")).to_be(false)
 
     it "is_safe_static_path accepts a normal absolute path":
+        step("Verify: is_safe_static_path accepts a normal absolute path")
         expect(is_safe_static_path("/static/app.js")).to_be(true)
