@@ -296,11 +296,11 @@ Current evidence after the checked regex boundary migration:
 - 3,963 distinct symbols in the current backing census, including 3,961
   compiler-owned canonical symbols;
 - 14,391 declaration sites;
-- 13,699 sites have neither an explicit FFI-unsafe tag nor a local contract;
-- 509 sites declare a typed/documented contract but lack the unsafe tag;
-- 169 declarations now carry explicit FFI authority
+- 13,634 sites have neither an explicit FFI-unsafe tag nor a local contract;
+- 508 sites declare a typed/documented contract but lack the unsafe tag;
+- 234 declarations now carry explicit FFI authority
   but still require canonical ABI-contract metadata;
-- 14 checked declarations carry both explicit FFI authority and a
+- 15 checked declarations carry both explicit FFI authority and a
   typed result contract; their cryptographic artifact evidence remains open;
 - 401 canonical symbols currently have more than one normalized declaration
   shape and require typed-resolution review before one ABI hash can be sealed;
@@ -357,6 +357,18 @@ unchanged. The provider ABI and handle/null contracts are not yet sealed or
 bound to signed artifact evidence, so this boundary remains unsafe rather than
 verified.
 
+The canonical SDL2 window boundary now tags all 66 raw declarations and only
+the 52 functions that directly invoke them with the minimal `ffi` capability;
+pure event/value helpers remain safe and no `raw_ptr` capability is granted.
+An annotation-stripped comparison proves its executable Simple bodies are
+unchanged. The Rust interpreter no longer converts a NULL text result into
+successful empty text: because the owned C provider supplies explicit non-null
+fallback strings, NULL now produces a typed provider-contract error. A sabotage
+test plus the five existing SDL registration/shape tests pass. This adds one
+null comparison only on SDL text-return calls; scalar/event paths are unchanged.
+The boundary is still not verified or signed, and unrelated pre-existing stub
+and wide-public lint findings remain open.
+
 These are migration inputs, not 14,391 independent implementations. The audit
 now hashes normalized declaration shapes and groups them by symbol. The next
 tooling step replaces the text-derived shape with the resolved HIR ABI hash,
@@ -389,8 +401,8 @@ call-site migration ledger at
 `doc/08_tracking/bug/data/sffi_call_authority_2026-08-21.tsv`. It recognizes
 file-local externs and explicit `rt_*`/`spl_*` imports from SFFI modules, tracks
 function and lexical FFI authority by indentation, and can fail CI with
-`SFFI_FAIL_ON_MISSING=1`. The current source/test census contains 21,069
-missing-authority calls, 51 lexical scopes, and 487 function scopes across 3,142
+`SFFI_FAIL_ON_MISSING=1`. The current source/test census contains 20,990
+missing-authority calls, 51 lexical scopes, and 566 function scopes across 3,142
 files. It completed in 24.21 seconds at 7,424 KiB maximum RSS. This is a
 migration index rather than ABI proof; aliases, generated bindings, and
 re-exports still require resolved-HIR identity.

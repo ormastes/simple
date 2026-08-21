@@ -237,15 +237,17 @@ fn arg_text(args: &[Value], idx: usize, name: &str) -> Result<String, CompileErr
 
 /// Read a C string return value into an owned `Value::Str`.
 ///
-/// A NULL return becomes empty text rather than nil, matching how the C
-/// wrappers treat "no value" (`rt_sdl2_last_error` returns `""` when SDL has
-/// no pending error).
-unsafe fn text_from_ptr(ptr: *const std::os::raw::c_char) -> Value {
+/// The owned C provider returns explicit non-null fallback strings for every
+/// text API. NULL therefore means the loaded provider violated its contract;
+/// it must not be fabricated into a successful empty string.
+unsafe fn text_from_ptr(ptr: *const std::os::raw::c_char, symbol: &str) -> Result<Value, CompileError> {
     if ptr.is_null() {
-        return Value::Str(std::sync::Arc::new(String::new()));
+        return Err(CompileError::runtime(format!(
+            "{symbol}: foreign text contract returned null"
+        )));
     }
     let owned = unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned();
-    Value::Str(std::sync::Arc::new(owned))
+    Ok(Value::Str(std::sync::Arc::new(owned)))
 }
 
 /// Dispatch an `rt_sdl2_*` call to the C implementation.
@@ -342,11 +344,11 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             }
             (Ret::T, 0) => {
                 let f: extern "C" fn() -> *const std::os::raw::c_char = std::mem::transmute(fptr);
-                text_from_ptr(f())
+                text_from_ptr(f(), name)?
             }
             (Ret::T, 1) => {
                 let f: extern "C" fn(i64) -> *const std::os::raw::c_char = std::mem::transmute(fptr);
-                text_from_ptr(f(raw[0]))
+                text_from_ptr(f(raw[0]), name)?
             }
             (Ret::D, 1) => {
                 let f: extern "C" fn(i64) -> f64 = std::mem::transmute(fptr);
@@ -375,6 +377,12 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn null_text_return_is_a_contract_error() {
+        let result = unsafe { text_from_ptr(std::ptr::null(), "rt_sdl2_event_text") };
+        assert!(result.is_err(), "null foreign text must never become empty text");
+    }
 
     /// The table must cover exactly the exported family in the C source.
     ///
