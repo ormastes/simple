@@ -168,6 +168,62 @@ impl HirLowering:
                         item_name: hop.item_name,
                         item_kind: kind,
                         module_key: terminal.preferred_registry_name)
+        # Step 3: an explicit named `use other.mod.{Dep}` written by the enum's
+        # OWNER. The two steps above only cover a declaration in the owner
+        # itself and a single `export use` re-export hop, so an owner that
+        # reaches its payload type by a plain (non-exporting) `use` resolved to
+        # nothing at all -- and the silent `return` in
+        # `register_materialized_payload_named_dependency` turned that into a
+        # later `unresolved type: {name}` attributed to whichever module
+        # imported the ENUM, never to the owner. This mirrors the twin step in
+        # `materialize_imported_callable_explicit_dependency`; glob and package
+        # inference stay excluded there and here, because the same short name
+        # can live in several sibling modules and picking one would silently
+        # rewrite the payload type.
+        # See doc/08_tracking/bug/hir_enum_payload_blockvalue_unresolved_2026-08-21.md
+        val explicit = self.resolve_materialized_enum_payload_explicit_import(
+            imported_mod, dependency)
+        if explicit.found:
+            return explicit
+        HirMaterializedPayloadOrigin(found: false, module_name: "", item_name: "", item_kind: "", module_key: "")
+
+    me resolve_materialized_enum_payload_explicit_import(imported_mod: ModuleSurface, dependency: text) -> HirMaterializedPayloadOrigin:
+        """Resolve `dependency` through an explicit named import of `imported_mod`."""
+        var import_index: i64 = 0
+        while import_index < imported_mod.imports.len() and
+              import_index < imported_mod.import_target_indices.len():
+            val target_index = imported_mod.import_target_indices[import_index]
+            val import_decl = imported_mod.imports[import_index]
+            var item_index: i64 = 0
+            while item_index < import_decl.items.len():
+                val item = import_decl.items[item_index]
+                val local_name = if item.has_alias: item.alias else: item.name
+                if local_name == dependency and target_index >= 0 and
+                   target_index < self.module_surfaces.surfaces.len():
+                    val target = self.module_surfaces.surfaces[target_index]
+                    if hir_module_declares_item(target, item.name):
+                        val kind = hir_module_item_terminal_kind(target, item.name)
+                        if kind != "":
+                            return HirMaterializedPayloadOrigin(
+                                found: true,
+                                module_name: hir_pkg_canonical_module_name(target.module_name),
+                                item_name: item.name,
+                                item_kind: kind,
+                                module_key: target.preferred_registry_name)
+                    val hop = self.find_reexport_source(
+                        target, target.preferred_registry_name, item.name)
+                    if hop.found and hop.module_index >= 0:
+                        val terminal = self.module_surfaces.surfaces[hop.module_index]
+                        val hop_kind = hir_module_item_terminal_kind(terminal, hop.item_name)
+                        if hop_kind != "":
+                            return HirMaterializedPayloadOrigin(
+                                found: true,
+                                module_name: hir_pkg_canonical_module_name(terminal.module_name),
+                                item_name: hop.item_name,
+                                item_kind: hop_kind,
+                                module_key: terminal.preferred_registry_name)
+                item_index = item_index + 1
+            import_index = import_index + 1
         HirMaterializedPayloadOrigin(found: false, module_name: "", item_name: "", item_kind: "", module_key: "")
 
     me claim_materialized_payload_binding(local_name: text, origin: HirMaterializedPayloadOrigin, import_span: Span) -> bool:
@@ -228,7 +284,19 @@ impl HirLowering:
     me register_materialized_payload_named_dependency(imported_mod: ModuleSurface, imported_mod_name: text, dependency: text, skipped: {text: bool}, import_span: Span):
         if dependency == "" or skipped.contains_key(dependency): return
         val origin = self.resolve_materialized_enum_payload_origin(imported_mod, imported_mod_name, dependency)
-        if not origin.found: return
+        if not origin.found:
+            # NEVER silent. An unresolved payload origin used to return with no
+            # trace at all, and the failure resurfaced much later as a hard
+            # `unresolved type: {name}` (hir_lowering/types.spl) attributed to
+            # whichever module imported the ENUM -- an innocent third party that
+            # never names the payload type. Name the real owner and the payload
+            # here so the class can never land on an innocent importer again.
+            # Advisory (eprint, not self.error) on purpose: a payload the
+            # consumer already has in scope is still lowerable, so failing the
+            # build here would be a regression, not a fix.
+            # See doc/08_tracking/bug/hir_enum_payload_blockvalue_unresolved_2026-08-21.md
+            eprint("[hir-payload-origin-unresolved] owner={imported_mod.module_name} owner_key={imported_mod_name} payload={dependency}: no declaration, re-export hop, or explicit import of this name in the owner; a later `unresolved type: {dependency}` will be reported against an importing module instead")
+            return
         if not self.claim_materialized_payload_binding(dependency, origin, import_span): return
         val identity = hir_payload_terminal_identity(origin.module_name, origin.item_name, origin.item_kind)
         val expanded = self.materialized_payload_origins.contains_key(identity)
