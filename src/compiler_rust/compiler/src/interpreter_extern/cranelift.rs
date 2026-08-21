@@ -18,19 +18,29 @@ fn value_to_runtime_string(val: &Value) -> RuntimeValue {
     }
 }
 
-/// Helper to convert RuntimeValue string back to Value::Str
-fn runtime_string_to_value(rv: RuntimeValue) -> Value {
+/// Convert a runtime string without fabricating empty text from a corrupt
+/// positive-length/null-data descriptor.
+fn runtime_string_to_value(rv: RuntimeValue, symbol: &str) -> Result<Value, CompileError> {
     let len = simple_runtime::value::rt_string_len(rv);
     if len <= 0 {
-        return Value::text(String::new());
+        return Ok(Value::text(String::new()));
     }
     let data = simple_runtime::value::rt_string_data(rv);
+    unsafe { runtime_string_parts_to_value(data, len, symbol) }
+}
+
+unsafe fn runtime_string_parts_to_value(data: *const u8, len: i64, symbol: &str) -> Result<Value, CompileError> {
+    if len <= 0 {
+        return Ok(Value::text(String::new()));
+    }
     if data.is_null() {
-        return Value::text(String::new());
+        return Err(CompileError::runtime(format!(
+            "{symbol}: foreign text contract returned null with length {len}"
+        )));
     }
     unsafe {
         let slice = std::slice::from_raw_parts(data, len as usize);
-        Value::text(String::from_utf8_lossy(slice).to_string())
+        Ok(Value::text(String::from_utf8_lossy(slice).to_string()))
     }
 }
 
@@ -847,7 +857,7 @@ pub fn rt_file_hash(args: &[Value]) -> Result<Value, CompileError> {
     }
     let path = value_to_runtime_string(&args[0]);
     let result = simple_runtime::value::cli_sffi::rt_file_hash(path);
-    Ok(runtime_string_to_value(result))
+    runtime_string_to_value(result, "rt_file_hash")
 }
 
 /// Write file
@@ -863,7 +873,7 @@ pub fn rt_write_file(args: &[Value]) -> Result<Value, CompileError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{interpreter_cranelift_arg_handles, rt_cranelift_emit_object_raw};
+    use super::{interpreter_cranelift_arg_handles, rt_cranelift_emit_object_raw, runtime_string_parts_to_value};
     use crate::value::Value;
 
     #[test]
@@ -883,5 +893,17 @@ mod tests {
     #[test]
     fn interpreter_cranelift_emit_object_raw_validates_arity() {
         assert_eq!(rt_cranelift_emit_object_raw(&[]).unwrap(), Value::Bool(false));
+    }
+
+    #[test]
+    fn runtime_string_null_positive_length_is_a_contract_error() {
+        let result = unsafe { runtime_string_parts_to_value(std::ptr::null(), 1, "rt_file_hash") };
+        assert!(result.is_err(), "null foreign text must never become empty text");
+    }
+
+    #[test]
+    fn runtime_string_zero_length_remains_valid_empty_text() {
+        let result = unsafe { runtime_string_parts_to_value(std::ptr::null(), 0, "rt_file_hash") };
+        assert!(result.is_ok(), "zero-length text may use a null data pointer");
     }
 }

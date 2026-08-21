@@ -378,6 +378,13 @@ no hashing, lookup, allocation, or branch; error text is allocated only on the
 contract-violation path. The null/signature guard now locks both SDL and TLS
 fail-closed lifting rules.
 
+The Rust Cranelift interpreter now applies the same descriptor rule to the
+`rt_file_hash` text result: zero length remains valid empty text, while positive
+length with NULL data is a typed contract error. Its four focused tests pass,
+including both descriptor sabotage cases and the existing argument/arity
+validation. The success path keeps the prior length/data/copy sequence and adds
+no admission work or dynamic lookup.
+
 These are migration inputs, not 14,391 independent implementations. The audit
 now hashes normalized declaration shapes and groups them by symbol. The next
 tooling step replaces the text-derived shape with the resolved HIR ABI hash,
