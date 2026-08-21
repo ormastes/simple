@@ -1,0 +1,264 @@
+# @cover src/compiler/99.loader/completeness_seal/admission.spl 80%
+# @cover src/compiler/99.loader/completeness_seal/registry.spl 80%
+"""
+# Loader admission and the atomic extension registry
+
+**Category:** Compiler / Loader / Completeness seal
+
+## Overview
+
+Sealing freezes a universe; admission decides whether a module that shows up
+AFTERWARDS may join it, and the registry publishes the admitted set without
+ever being observable half-installed.
+
+Covered:
+- a clean post-seal candidate is admitted and publishes at generation 1
+- a candidate built against a different seal hash is rejected, and that
+  rejection short-circuits every later check
+- a constructor missing a required operation is rejected with `E-COMPLETE-021`
+- a second provider claiming a sealed constructor is rejected with
+  `E-COMPLETE-020`
+- an open `dyn` provider is admitted under a normal profile and rejected under
+  a critical one with `E-MC-DYN-001`
+- publish is all-or-nothing: a duplicate operation key, a seal drift, and an
+  empty publish each leave the live registry untouched
+"""
+
+use std.spec.*
+use std.io_runtime.{read_file}
+use compiler.loader.completeness_seal.manifest.{
+    ExtensionManifest,
+    ModuleManifest,
+    parse_manifest_text
+}
+use compiler.common.dynamic_identity.dense_tag_map.{DenseTagMap}
+use compiler.loader.completeness_seal.seal.{
+    SealConfig,
+    CompletenessSeal,
+    seal,
+    default_capacity
+}
+use compiler.loader.completeness_seal.admission.{
+    AdmissionCandidate,
+    AdmissionProfile,
+    AdmittedModule,
+    admit_module,
+    admission_reason_code,
+    admission_reason_text
+}
+use compiler.loader.completeness_seal.registry.{
+    Registry,
+    RegistryEntry,
+    empty_registry,
+    publish,
+    registry_error_code
+}
+
+val FIXTURE_DIR = "spec/compiler_schema/extensions/"
+val CORE_ABI = "core-abi-v1"
+
+fn load(name: text) -> ([ExtensionManifest], [ModuleManifest]):
+    val path = FIXTURE_DIR + name
+    match parse_manifest_text(read_file(path), path):
+        case Ok(doc):
+            (doc.extensions, doc.modules)
+        case Err(_):
+            ([], [])
+
+# A seal that failed to freeze is represented explicitly rather than papered
+# over: the specs assert on `seal_hash` so a broken fixture fails loudly on the
+# hash instead of on some downstream symptom.
+fn no_seal() -> CompletenessSeal:
+    CompletenessSeal(
+        tags: DenseTagMap(entries: [], static_count: 0, sealed_count: 0, seal_hash: "<none>"),
+        module_ids: [],
+        canonical_lines: [],
+        seal_hash: "<seal-failed>"
+    )
+
+fn frozen_universe(base: text) -> CompletenessSeal:
+    val parts = load(base)
+    var verified: [text] = []
+    for m in parts.1:
+        verified = verified + [m.id]
+    val config = SealConfig(
+        critical: true,
+        core_abi_hash: CORE_ABI,
+        extensions: parts.0,
+        modules: parts.1,
+        verified_sealed_modules: verified,
+        capacity: default_capacity()
+    )
+    match seal(config):
+        case Ok(s):
+            s
+        case Err(_):
+            no_seal()
+
+fn candidate(name: text, seal_hash: text) -> AdmissionCandidate:
+    val parts = load(name)
+    var mid = name
+    if parts.1.len() > 0:
+        mid = parts.1[0].id
+    AdmissionCandidate(
+        module_id: mid,
+        expects_seal_hash: seal_hash,
+        extensions: parts.0,
+        modules: parts.1
+    )
+
+fn codes_of(name: text, base: text, critical: bool) -> [text]:
+    val s = frozen_universe(base)
+    var out: [text] = []
+    match admit_module(s, candidate(name, s.seal_hash), AdmissionProfile(critical: critical)):
+        case Ok(_):
+            out
+        case Err(reasons):
+            for r in reasons:
+                out = out + [admission_reason_code(r)]
+            out
+
+fn contains(items: [text], needle: text) -> bool:
+    for i in items:
+        if i == needle:
+            return true
+    false
+
+describe "loader admission — happy path":
+    it "admits a clean candidate against the frozen seal":
+        val s = frozen_universe("hir_async.sdn")
+        assert_true(s.seal_hash != "<seal-failed>")
+        match admit_module(s, candidate("hir_gpu_candidate.sdn", s.seal_hash),
+                AdmissionProfile(critical: true)):
+            case Ok(am):
+                assert_equal(am.module_id, "hir_gpu")
+                assert_equal(am.identities.len(), 1)
+                # All eight §13.2 operations arrive flattened into the table.
+                assert_equal(am.op_keys.len(), 8)
+                assert_equal(am.seal_hash, s.seal_hash)
+            case Err(reasons):
+                assert_equal(reasons.len(), 0)
+
+    it "publishes the admitted module as generation 1":
+        val s = frozen_universe("hir_async.sdn")
+        match admit_module(s, candidate("hir_gpu_candidate.sdn", s.seal_hash),
+                AdmissionProfile(critical: true)):
+            case Err(_):
+                assert_true(false)
+            case Ok(am):
+                match publish(empty_registry(s.seal_hash), [am]):
+                    case Ok(reg):
+                        assert_equal(reg.generation, 1)
+                        assert_equal(reg.entries.len(), 8)
+                        assert_true(reg.has_module("hir_gpu"))
+                    case Err(_):
+                        assert_true(false)
+
+describe "loader admission — seal hash mismatch":
+    it "rejects a candidate built against a different universe":
+        val s = frozen_universe("hir_async.sdn")
+        val cand = candidate("hir_gpu_candidate.sdn", "COMPLETESEALV1-deadbeef")
+        match admit_module(s, cand, AdmissionProfile(critical: true)):
+            case Ok(_):
+                assert_true(false)
+            case Err(reasons):
+                # Short-circuits: once the two disagree about which universe
+                # they are in, no later comparison is meaningful.
+                assert_equal(reasons.len(), 1)
+                assert_equal(admission_reason_code(reasons[0]), "E-COMPLETE-025")
+                assert_true(admission_reason_text(reasons[0]).contains("different completeness seal"))
+
+describe "loader admission — E-COMPLETE-021 missing required operation":
+    it "rejects a constructor that never provides `serialize`":
+        val codes = codes_of("hir_async_missing_serialize.sdn", "hir_gpu_candidate.sdn", true)
+        assert_true(contains(codes, "E-COMPLETE-021"))
+
+describe "loader admission — E-COMPLETE-020 id collision":
+    it "rejects a second provider claiming a sealed constructor":
+        val codes = codes_of("hir_async_shadow_collision.sdn", "hir_async.sdn", true)
+        assert_true(contains(codes, "E-COMPLETE-020"))
+
+    it "names the holder of the identity in the diagnostic":
+        val s = frozen_universe("hir_async.sdn")
+        match admit_module(s, candidate("hir_async_shadow_collision.sdn", s.seal_hash),
+                AdmissionProfile(critical: true)):
+            case Ok(_):
+                assert_true(false)
+            case Err(reasons):
+                var seen = false
+                for r in reasons:
+                    if admission_reason_code(r) == "E-COMPLETE-020":
+                        assert_true(admission_reason_text(r).contains("hir_async"))
+                        seen = true
+                assert_true(seen)
+
+describe "loader admission — E-MC-DYN-001 open dyn under a critical profile":
+    it "rejects an open dyn provider when the profile is critical":
+        val codes = codes_of("ide_live_probe_dyn.sdn", "hir_gpu_candidate.sdn", true)
+        assert_true(contains(codes, "E-MC-DYN-001"))
+
+    it "admits the same provider when the profile is not critical":
+        val codes = codes_of("ide_live_probe_dyn.sdn", "hir_gpu_candidate.sdn", false)
+        assert_false(contains(codes, "E-MC-DYN-001"))
+
+describe "registry — atomic publish":
+    it "refuses an empty publish rather than bumping a generation for nothing":
+        val reg = empty_registry("COMPLETESEALV1-abc")
+        var empty_list: [AdmittedModule] = []
+        match publish(reg, empty_list):
+            case Ok(_):
+                assert_true(false)
+            case Err(errs):
+                assert_equal(registry_error_code(errs[0]), "E-REGISTRY-004")
+
+    it "refuses a module admitted under a different seal and leaves the live table intact":
+        val live = empty_registry("COMPLETESEALV1-abc")
+        val drifted = AdmittedModule(
+            module_id: "hir_drift",
+            seal_hash: "COMPLETESEALV1-xyz",
+            identities: [],
+            op_keys: ["k#verify"],
+            op_handlers: ["drift.verify"]
+        )
+        match publish(live, [drifted]):
+            case Ok(_):
+                assert_true(false)
+            case Err(errs):
+                assert_equal(registry_error_code(errs[0]), "E-REGISTRY-001")
+        assert_equal(live.generation, 0)
+        assert_equal(live.entries.len(), 0)
+
+    it "refuses a publish whose operation key is already installed":
+        val live = empty_registry("COMPLETESEALV1-abc")
+        val first = AdmittedModule(
+            module_id: "mod_a",
+            seal_hash: "COMPLETESEALV1-abc",
+            identities: [],
+            op_keys: ["k#verify"],
+            op_handlers: ["a.verify"]
+        )
+        val second = AdmittedModule(
+            module_id: "mod_b",
+            seal_hash: "COMPLETESEALV1-abc",
+            identities: [],
+            op_keys: ["k#verify"],
+            op_handlers: ["b.verify"]
+        )
+        match publish(live, [first]):
+            case Err(_):
+                assert_true(false)
+            case Ok(gen1):
+                assert_equal(gen1.generation, 1)
+                match publish(gen1, [second]):
+                    case Ok(_):
+                        assert_true(false)
+                    case Err(errs):
+                        assert_equal(registry_error_code(errs[0]), "E-REGISTRY-002")
+                # The rejected publish is not visible anywhere: generation 1
+                # still answers with mod_a's handler.
+                match gen1.handler_for("k#verify"):
+                    case Some(h):
+                        assert_equal(h, "a.verify")
+                    case None:
+                        assert_true(false)
+                assert_false(gen1.has_module("mod_b"))

@@ -1,0 +1,217 @@
+# Loader admission — hardening plan 2026-08-21 §13.1, §5.3, §17.4, §17.6.
+#
+# D3 (`seal.spl`) FREEZES a universe. This module is the gate that runs
+# afterwards, every time a candidate module wants to join an already-frozen
+# universe: given the frozen `CompletenessSeal` and a candidate module's
+# manifests, it either admits the candidate or returns the closed set of
+# reasons it cannot be admitted.
+#
+# The two are deliberately not the same code path. Sealing decides what a
+# universe IS; admission decides whether a LATER arrival is compatible with a
+# universe that already exists and whose hash other artifacts already quote.
+# That is why `SealHashMismatch` exists here and not there: a candidate built
+# against a different seal is not a semantic error in the candidate, it is a
+# statement that the two were never talking about the same universe.
+#
+# Every rejection names a constructor and a cause (§11.6). There is no
+# wildcard arm and no silent fallback anywhere in this module.
+
+use compiler.common.dynamic_identity.closure.{Closure}
+use compiler.common.dynamic_identity.persistent_id.{PersistentExtensionId}
+use compiler.loader.completeness_seal.axis_parse.{closure_from_text}
+use compiler.loader.completeness_seal.manifest.{
+    ExtensionManifest,
+    ModuleManifest
+}
+use compiler.loader.completeness_seal.required_interfaces.{
+    missing_operations,
+    missing_module_interfaces,
+    operation_interface_name
+}
+use compiler.loader.completeness_seal.seal.{CompletenessSeal, identity_of}
+
+# Closed rejection enum. One variant per §13.1 admission failure.
+pub enum AdmissionReason:
+    # §17.4 E-COMPLETE-021 — the negative space of §11.4: Required - Provided.
+    MissingRequiredOperation(text, text, text)
+    # A module-level facade (§16.4) the candidate never declares.
+    MissingRequiredInterface(text, text, text)
+    # §7.2 stable identity: the tuple is already spoken for.
+    IdCollision(text, text, text)
+    # §17.6 E-MC-DYN-001 — an open `dyn` provider under a critical profile.
+    OpenDynInCritical(text, text)
+    # The candidate was built against a different frozen universe.
+    SealHashMismatch(text, text, text)
+    # A `closure:` spelling that is not one of the three §5.1 values.
+    BadAxisValue(text, text, text)
+
+pub fn admission_reason_code(r: AdmissionReason) -> text:
+    match r:
+        case MissingRequiredOperation(_, _, _): "E-COMPLETE-021"
+        case MissingRequiredInterface(_, _, _): "E-COMPLETE-021"
+        case IdCollision(_, _, _): "E-COMPLETE-020"
+        case OpenDynInCritical(_, _): "E-MC-DYN-001"
+        case SealHashMismatch(_, _, _): "E-COMPLETE-025"
+        case BadAxisValue(_, _, _): "E-COMPLETE-024"
+
+pub fn admission_reason_text(r: AdmissionReason) -> text:
+    match r:
+        case MissingRequiredOperation(constructor, op, provider):
+            "E-COMPLETE-021:\ncandidate " + constructor + " cannot be admitted\n\nrequired interface missing:\n  "
+                + operation_interface_name(op) + " (operation `" + op + "`)\n\nprovider:\n  " + provider
+        case MissingRequiredInterface(module_id, iface, owner):
+            "E-COMPLETE-021:\ncandidate module " + module_id + " cannot be admitted\n\nrequired interface missing:\n  "
+                + iface + "\n\nowner enum:\n  " + owner
+        case IdCollision(constructor, provider, holder):
+            "E-COMPLETE-020:\nstable identity is already claimed in the frozen seal\n\nconstructor:\n  "
+                + constructor + "\n\ncandidate provider:\n  " + provider + "\nheld by:\n  " + holder
+        case OpenDynInCritical(owner, provider):
+            "E-MC-DYN-001:\nopen dynamic semantic extension is reachable in a critical build\n\nenum:\n  "
+                + owner + "\n\nprovider:\n  " + provider
+                + "\n\nseal the provider as `complete` before admitting it into a critical profile."
+        case SealHashMismatch(module_id, expected, found):
+            "E-COMPLETE-025:\ncandidate was built against a different completeness seal\n\nmodule:\n  "
+                + module_id + "\n\nfrozen seal:\n  " + expected + "\ncandidate expects:\n  " + found
+        case BadAxisValue(provider, axis, value):
+            "E-COMPLETE-024:\nunknown value on the `" + axis + ":` axis\n\nprovider:\n  "
+                + provider + "\nvalue:\n  " + value
+
+# A candidate module as it arrives at the loader: its manifests plus the seal
+# hash it was built against. The hash is carried by the CANDIDATE, not inferred
+# from the running universe — inferring it would make the check vacuous.
+pub class AdmissionCandidate:
+    module_id: text
+    expects_seal_hash: text
+    extensions: [ExtensionManifest]
+    modules: [ModuleManifest]
+
+pub class AdmissionProfile:
+    critical: bool
+
+# What the registry (D5) publishes: the candidate, plus the flattened operation
+# table admission proved complete. Constructing this value is the ONLY way to
+# get one, so an unadmitted module cannot be published by accident.
+pub class AdmittedModule:
+    module_id: text
+    seal_hash: text
+    identities: [PersistentExtensionId]
+    op_keys: [text]
+    op_handlers: [text]
+
+fn _identity_key(id: PersistentExtensionId) -> text:
+    id.canonical_text()
+
+fn _sealed_holder(seal: CompletenessSeal, id: PersistentExtensionId) -> text?:
+    for entry in seal.tags.entries:
+        if entry.owner_enum == id.owner_enum
+                and entry.constructor_name == id.constructor_name:
+            return Some(entry.provider_module)
+    None
+
+fn _check_seal_hash(seal: CompletenessSeal, cand: AdmissionCandidate,
+        mut reasons: [AdmissionReason]):
+    if cand.expects_seal_hash != seal.seal_hash:
+        reasons.push(AdmissionReason.SealHashMismatch(
+            cand.module_id, seal.seal_hash, cand.expects_seal_hash))
+
+fn _check_operations(cand: AdmissionCandidate, mut reasons: [AdmissionReason]):
+    for ext in cand.extensions:
+        for op in missing_operations(ext):
+            reasons.push(AdmissionReason.MissingRequiredOperation(
+                ext.constructor, op, ext.provider_module))
+    for m in cand.modules:
+        for decl in m.extends_list:
+            for iface in missing_module_interfaces(decl.owner_enum, m.provides):
+                reasons.push(AdmissionReason.MissingRequiredInterface(
+                    m.id, iface, decl.owner_enum))
+
+fn _check_collisions(seal: CompletenessSeal, cand: AdmissionCandidate,
+        mut reasons: [AdmissionReason]):
+    var seen: [text] = []
+    for ext in cand.extensions:
+        val id = identity_of(ext)
+        match _sealed_holder(seal, id):
+            case Some(holder):
+                reasons.push(AdmissionReason.IdCollision(
+                    ext.constructor, ext.provider_module, holder))
+            case None:
+                val key = _identity_key(id)
+                var dup = false
+                for k in seen:
+                    if k == key:
+                        dup = true
+                if dup:
+                    reasons.push(AdmissionReason.IdCollision(
+                        ext.constructor, ext.provider_module, cand.module_id))
+                seen = seen + [key]
+
+fn _check_closure(cand: AdmissionCandidate, profile: AdmissionProfile,
+        mut reasons: [AdmissionReason]):
+    for ext in cand.extensions:
+        match closure_from_text(ext.closure):
+            case None:
+                reasons.push(AdmissionReason.BadAxisValue(
+                    ext.provider_module, "closure", ext.closure))
+            case Some(c):
+                match c:
+                    Closure.Dyn:
+                        if profile.critical:
+                            reasons.push(AdmissionReason.OpenDynInCritical(
+                                ext.owner_enum, ext.provider_module))
+                    Closure.Static:
+                        reasons = reasons
+                    Closure.Complete:
+                        reasons = reasons
+    for m in cand.modules:
+        var owner = "<unknown>"
+        if m.extends_list.len() > 0:
+            owner = m.extends_list[0].owner_enum
+        match closure_from_text(m.closure):
+            case None:
+                reasons.push(AdmissionReason.BadAxisValue(m.id, "closure", m.closure))
+            case Some(c):
+                match c:
+                    Closure.Dyn:
+                        if profile.critical:
+                            reasons.push(AdmissionReason.OpenDynInCritical(owner, m.id))
+                    Closure.Static:
+                        reasons = reasons
+                    Closure.Complete:
+                        reasons = reasons
+
+fn _flatten(cand: AdmissionCandidate) -> AdmittedModule:
+    var ids: [PersistentExtensionId] = []
+    var keys: [text] = []
+    var handlers: [text] = []
+    for ext in cand.extensions:
+        val id = identity_of(ext)
+        ids = ids + [id]
+        var i: i64 = 0
+        while i < ext.provided_ops.len():
+            keys = keys + [_identity_key(id) + "#" + ext.provided_ops[i]]
+            handlers = handlers + [ext.provided_handlers[i]]
+            i = i + 1
+    AdmittedModule(
+        module_id: cand.module_id,
+        seal_hash: cand.expects_seal_hash,
+        identities: ids,
+        op_keys: keys,
+        op_handlers: handlers
+    )
+
+# The §13.1 admission gate. All checks run before any is reported so a caller
+# sees the whole rejection set at once, not one reason per retry — except the
+# seal-hash check, which short-circuits: if the two sides disagree about which
+# universe they are in, every later comparison is meaningless.
+pub fn admit_module(seal: CompletenessSeal, cand: AdmissionCandidate,
+        profile: AdmissionProfile) -> Result<AdmittedModule, [AdmissionReason]>:
+    var reasons: [AdmissionReason] = []
+    _check_seal_hash(seal, cand, reasons)
+    if reasons.len() > 0:
+        return Err(reasons)
+    _check_operations(cand, reasons)
+    _check_collisions(seal, cand, reasons)
+    _check_closure(cand, profile, reasons)
+    if reasons.len() > 0:
+        return Err(reasons)
+    Ok(_flatten(cand))

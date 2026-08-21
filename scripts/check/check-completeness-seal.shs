@@ -1,0 +1,207 @@
+#!/bin/sh
+# check-completeness-seal.shs — Phase 5 exit gate for the completeness seal.
+#
+# Plan:   doc/03_plan/compiler/hardening/critical_hardening_plan_2026-08-21.md (Phase 5)
+# Design: doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md
+#         §5 (closure/linkage/activation), §7 (stable identity),
+#         §13.1 (admission steps), §13.2 (operation contract)
+#
+# WHAT IT MEASURES
+#   Freezes a semantic universe from the BASE manifests with the pure-Simple
+#   sealer (D3), then runs the pure-Simple loader admission gate (D4) over
+#   every SELECTED candidate manifest and publishes the admitted set through
+#   the atomic registry (D5). It fails when any selected constructor is
+#   inadmissible:
+#     missing-capabilities  E-COMPLETE-021  Required - Provided is non-empty
+#     id-collisions         E-COMPLETE-020  a stable identity is already claimed
+#     dyn-in-critical       E-MC-DYN-001    an open `dyn` provider in critical
+#   plus seal-hash mismatch (E-COMPLETE-025) and unknown axis values
+#   (E-COMPLETE-024), which are counted but are not the three headline axes.
+#
+#   Every decision is made by the real compiler modules under
+#   `src/compiler/99.loader/completeness_seal/`, run via `bin/simple run`.
+#   Nothing here greps a manifest: a text scan cannot compute Required minus
+#   Provided, cannot compare persistent identity tuples, and cannot reproduce
+#   a seal hash.
+#
+# WHY A HARD ZERO AND NOT A RATCHET
+#   Unlike the `Any` census, this population is not a migration backlog: the
+#   SELECTED set is exactly the manifests a build chose to seal, and a
+#   selected constructor that cannot be admitted is a build that must not
+#   ship. There is no legitimate non-zero value, so there is no baseline file
+#   and no `--generate-baseline` escape.
+#
+# VERDICT (always the last line of stdout)
+#   PASS  — <n> selected constructor(s) checked, missing-capabilities=0 id-collisions=0 dyn-in-critical=0   exit 0
+#   FAIL  — ...                                                                                             exit 1
+#   ERROR — nothing was checked (<reason>)                                                                  exit 2
+#
+#   A run that fed 0 constructors to the checker is ERROR, never a pass:
+#   absence of analysis is absence of evidence. A missing `bin/simple` is
+#   ERROR too.
+#
+# USAGE
+#   sh scripts/check/check-completeness-seal.shs
+#   sh scripts/check/check-completeness-seal.shs --selftest
+#   sh scripts/check/check-completeness-seal.shs --base <f.sdn> --candidate <f.sdn> ...
+#
+#   `--selftest` runs before every scan and is FATAL. It is not decoration:
+#   a checker that reports zero because it never detected anything would
+#   otherwise be indistinguishable from a clean tree.
+
+set -u
+
+REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$REPO_ROOT" || { echo "ERROR — nothing was checked (cannot cd to repo root)"; exit 2; }
+
+SIMPLE_BIN="bin/simple"
+DRIVER="src/app/check/completeness_seal_census.spl"
+FIXTURES="spec/compiler_schema/extensions"
+CORE_ABI="core-abi-v1"
+
+# Default selection: the shipped valid universe (hir_async) frozen as the base,
+# with the post-seal candidate (hir_gpu) asking for admission under a critical
+# profile. Both must be clean.
+DEFAULT_BASE="$FIXTURES/hir_async.sdn"
+DEFAULT_CANDIDATES="$FIXTURES/hir_gpu_candidate.sdn"
+
+MODE="scan"
+BASE=""
+CANDIDATES=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) MODE="selftest"; shift ;;
+        --base) BASE="$BASE ${2:-}"; shift 2 ;;
+        --candidate) CANDIDATES="$CANDIDATES ${2:-}"; shift 2 ;;
+        *) echo "ERROR — nothing was checked (unknown argument: $1)"; exit 2 ;;
+    esac
+done
+[ -n "$BASE" ] || BASE="$DEFAULT_BASE"
+[ -n "$CANDIDATES" ] || CANDIDATES="$DEFAULT_CANDIDATES"
+
+if [ ! -x "$SIMPLE_BIN" ]; then
+    echo "ERROR — nothing was checked (no executable $SIMPLE_BIN; absence of a compiler is absence of evidence)"
+    exit 2
+fi
+if [ ! -f "$DRIVER" ]; then
+    echo "ERROR — nothing was checked (no driver at $DRIVER)"
+    exit 2
+fi
+
+TMPDIR_RUN=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -rf "$TMPDIR_RUN"' EXIT
+
+# ---------------------------------------------------------------------------
+# run_census <out-file> <base...> -- <candidate...>
+# The driver's exit status is read DIRECTLY into a variable on the line after
+# the invocation, never through a pipe: a pipeline's $? is the last stage's
+# status, which has produced false greens in this repo before.
+# ---------------------------------------------------------------------------
+run_census() {
+    OUT="$1"; shift
+    ARGS=""
+    for f in $1; do ARGS="$ARGS --base $f"; done
+    shift
+    for f in $1; do ARGS="$ARGS --candidate $f"; done
+    # shellcheck disable=SC2086
+    nice -n 10 "$SIMPLE_BIN" run "$DRIVER" --core-abi "$CORE_ABI" --critical $ARGS >"$OUT" 2>"$OUT.err"
+    RC=$?
+    return $RC
+}
+
+field() { # field <summary-line> <key>
+    echo "$1" | tr ' ' '\n' | grep "^$2=" | cut -d= -f2
+}
+
+# ---------------------------------------------------------------------------
+# SELFTEST — fatal, runs before every scan.
+#
+# Four fixtures, each proving one thing the scanner must be able to see:
+#   1. positive   a clean candidate is ADMITTED and every counter is 0
+#   2. negative   a constructor missing `serialize` is counted as a
+#                 missing-capability (E-COMPLETE-021)
+#   3. negative   an open `dyn` provider under --critical is counted as
+#                 dyn-in-critical (E-MC-DYN-001)
+#   4. negative   a second provider claiming a sealed constructor is counted
+#                 as an id-collision (E-COMPLETE-020)
+# ---------------------------------------------------------------------------
+selftest() {
+    FAILURES=""
+
+    run_census "$TMPDIR_RUN/pos.txt" "$FIXTURES/hir_async.sdn" "$FIXTURES/hir_gpu_candidate.sdn"
+    S=$(grep '^SUMMARY ' "$TMPDIR_RUN/pos.txt" | tail -1)
+    if [ -z "$S" ]; then
+        FAILURES="$FAILURES positive-fixture-produced-no-summary"
+    else
+        [ "$(field "$S" admitted)" = "1" ] || FAILURES="$FAILURES positive-fixture-not-admitted"
+        [ "$(field "$S" missing_capabilities)" = "0" ] || FAILURES="$FAILURES positive-fixture-missing-caps"
+        [ "$(field "$S" id_collisions)" = "0" ] || FAILURES="$FAILURES positive-fixture-collision"
+        [ "$(field "$S" dyn_in_critical)" = "0" ] || FAILURES="$FAILURES positive-fixture-dyn"
+        grep -q '^PUBLISH generation=1 ' "$TMPDIR_RUN/pos.txt" || FAILURES="$FAILURES positive-fixture-not-published"
+    fi
+
+    run_census "$TMPDIR_RUN/neg1.txt" "$FIXTURES/hir_gpu_candidate.sdn" "$FIXTURES/hir_async_missing_serialize.sdn"
+    S=$(grep '^SUMMARY ' "$TMPDIR_RUN/neg1.txt" | tail -1)
+    [ -n "$S" ] && [ "$(field "$S" missing_capabilities)" -ge 1 ] \
+        || FAILURES="$FAILURES missing-serialize-not-detected"
+
+    run_census "$TMPDIR_RUN/neg2.txt" "$FIXTURES/hir_gpu_candidate.sdn" "$FIXTURES/ide_live_probe_dyn.sdn"
+    S=$(grep '^SUMMARY ' "$TMPDIR_RUN/neg2.txt" | tail -1)
+    [ -n "$S" ] && [ "$(field "$S" dyn_in_critical)" -ge 1 ] \
+        || FAILURES="$FAILURES open-dyn-in-critical-not-detected"
+
+    run_census "$TMPDIR_RUN/neg3.txt" "$FIXTURES/hir_async.sdn" "$FIXTURES/hir_async_shadow_collision.sdn"
+    S=$(grep '^SUMMARY ' "$TMPDIR_RUN/neg3.txt" | tail -1)
+    [ -n "$S" ] && [ "$(field "$S" id_collisions)" -ge 1 ] \
+        || FAILURES="$FAILURES id-collision-not-detected"
+
+    if [ -n "$FAILURES" ]; then
+        echo "ERROR — nothing was checked (selftest failed:$FAILURES)"
+        exit 2
+    fi
+}
+
+selftest
+if [ "$MODE" = "selftest" ]; then
+    echo "PASS — 4 selftest fixture(s) checked, scanner detects all three rejection classes"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# SCAN
+# ---------------------------------------------------------------------------
+run_census "$TMPDIR_RUN/scan.txt" "$BASE" "$CANDIDATES"
+SUMMARY=$(grep '^SUMMARY ' "$TMPDIR_RUN/scan.txt" | tail -1)
+if [ -z "$SUMMARY" ]; then
+    echo "ERROR — nothing was checked (driver produced no SUMMARY record)"
+    sed -n '1,10p' "$TMPDIR_RUN/scan.txt.err"
+    exit 2
+fi
+
+SELECTED=$(field "$SUMMARY" selected)
+MISSING=$(field "$SUMMARY" missing_capabilities)
+COLLISIONS=$(field "$SUMMARY" id_collisions)
+DYNCRIT=$(field "$SUMMARY" dyn_in_critical)
+MISMATCH=$(field "$SUMMARY" seal_mismatch)
+OTHER=$(field "$SUMMARY" other)
+PARSEFAIL=$(field "$SUMMARY" parse_fail)
+
+if [ -z "$SELECTED" ] || [ "$SELECTED" -eq 0 ]; then
+    echo "ERROR — nothing was checked (0 selected constructors; absence of analysis is absence of evidence)"
+    exit 2
+fi
+if [ "$PARSEFAIL" -ne 0 ]; then
+    echo "ERROR — nothing was checked ($PARSEFAIL manifest(s) failed to parse; the selection is incomplete)"
+    grep '^PARSE-FAIL ' "$TMPDIR_RUN/scan.txt"
+    exit 2
+fi
+
+if [ "$MISSING" -ne 0 ] || [ "$COLLISIONS" -ne 0 ] || [ "$DYNCRIT" -ne 0 ] \
+        || [ "$MISMATCH" -ne 0 ] || [ "$OTHER" -ne 0 ]; then
+    echo "FAIL — $SELECTED selected constructor(s) checked, missing-capabilities=$MISSING id-collisions=$COLLISIONS dyn-in-critical=$DYNCRIT seal-mismatch=$MISMATCH other=$OTHER"
+    grep -E '^(REJECT|PUBLISH-FAIL|SEAL-FAIL) ' "$TMPDIR_RUN/scan.txt" | sed -n '1,20p'
+    exit 1
+fi
+
+echo "PASS — $SELECTED selected constructor(s) checked, missing-capabilities=0 id-collisions=0 dyn-in-critical=0"
+exit 0

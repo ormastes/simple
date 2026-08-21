@@ -1,0 +1,165 @@
+# Atomic extension registry — hardening plan 2026-08-21 §13.1, §5.3.
+#
+# Publishing an admitted module must never be observable half-done: a reader
+# that looks at the registry while a generation is landing must see either the
+# whole previous generation or the whole new one, never a table with some of
+# the new module's operations installed and some not.
+#
+# The mechanism here is build-validate-swap, in that order and with no other
+# order possible:
+#
+#   1. BUILD   a complete new table off to the side, from the current
+#              generation plus the admitted modules. The live generation is
+#              never written to.
+#   2. VALIDATE the new table as a whole (seal agreement, no duplicate
+#              operation keys, monotone generation number).
+#   3. SWAP    by returning the new `Registry` value. A `Registry` is
+#              immutable, so a caller's single assignment of the returned
+#              value IS the publish, and a rejected publish returns the reason
+#              while leaving the caller holding the untouched old value.
+#
+# Only an `AdmittedModule` can be published, and `admission.spl` is the only
+# thing that produces one — so the gate cannot be walked around by calling the
+# registry directly.
+
+use compiler.loader.completeness_seal.admission.{AdmittedModule}
+
+# Closed error enum — no wildcard arms.
+pub enum RegistryError:
+    # The module was admitted against a different frozen universe than the one
+    # this registry serves.
+    SealDrift(text, text, text)
+    # Two modules claim the same constructor#operation key.
+    DuplicateOperation(text, text, text)
+    # A publish that would not advance the generation counter.
+    NonMonotoneGeneration(i64, i64)
+    # A publish carrying nothing. Refused rather than treated as a no-op: an
+    # empty generation bump is indistinguishable from a lost payload.
+    EmptyPublish(i64)
+
+pub fn registry_error_code(e: RegistryError) -> text:
+    match e:
+        case SealDrift(_, _, _): "E-REGISTRY-001"
+        case DuplicateOperation(_, _, _): "E-REGISTRY-002"
+        case NonMonotoneGeneration(_, _): "E-REGISTRY-003"
+        case EmptyPublish(_): "E-REGISTRY-004"
+
+pub fn registry_error_text(e: RegistryError) -> text:
+    match e:
+        case SealDrift(module_id, expected, found):
+            "E-REGISTRY-001: module " + module_id + " was admitted under seal " + found
+                + " but this registry serves seal " + expected
+        case DuplicateOperation(key, holder, claimant):
+            "E-REGISTRY-002: operation key " + key + " is already provided by "
+                + holder + "; " + claimant + " may not replace it"
+        case NonMonotoneGeneration(current, proposed):
+            "E-REGISTRY-003: generation " + proposed.to_text()
+                + " does not advance the live generation " + current.to_text()
+        case EmptyPublish(generation):
+            "E-REGISTRY-004: publish of generation " + generation.to_text()
+                + " carries no admitted module"
+
+# One installed dispatch row.
+pub class RegistryEntry:
+    op_key: text
+    handler: text
+    module_id: text
+
+# An immutable, fully-built generation. There is no partially-built state a
+# reader can reach, because a `Registry` value is only ever constructed at the
+# end of a successful `publish`.
+pub class Registry:
+    seal_hash: text
+    generation: i64
+    module_ids: [text]
+    entries: [RegistryEntry]
+
+    fn handler_for(self, op_key: text) -> text?:
+        for e in self.entries:
+            if e.op_key == op_key:
+                return Some(e.handler)
+        None
+
+    fn provider_of(self, op_key: text) -> text?:
+        for e in self.entries:
+            if e.op_key == op_key:
+                return Some(e.module_id)
+        None
+
+    fn has_module(self, module_id: text) -> bool:
+        for m in self.module_ids:
+            if m == module_id:
+                return true
+        false
+
+# Generation 0: an empty registry pinned to one frozen seal.
+pub fn empty_registry(seal_hash: text) -> Registry:
+    Registry(seal_hash: seal_hash, generation: 0, module_ids: [], entries: [])
+
+fn _find_holder(entries: [RegistryEntry], op_key: text) -> text?:
+    for e in entries:
+        if e.op_key == op_key:
+            return Some(e.module_id)
+    None
+
+# Step 1 — BUILD. Produces the candidate table without touching `current`.
+fn _build(current: Registry, admitted: [AdmittedModule]) -> ([RegistryEntry], [text]):
+    var entries: [RegistryEntry] = []
+    for e in current.entries:
+        entries = entries + [e]
+    var ids: [text] = []
+    for m in current.module_ids:
+        ids = ids + [m]
+    for a in admitted:
+        ids = ids + [a.module_id]
+        var i: i64 = 0
+        while i < a.op_keys.len():
+            entries = entries + [RegistryEntry(
+                op_key: a.op_keys[i],
+                handler: a.op_handlers[i],
+                module_id: a.module_id
+            )]
+            i = i + 1
+    (entries, ids)
+
+# Step 2 — VALIDATE. The whole new table, not the delta: a table that is
+# internally inconsistent must never become visible even if every individual
+# addition looked fine in isolation.
+fn _validate(current: Registry, admitted: [AdmittedModule], next_generation: i64,
+        entries: [RegistryEntry], mut errors: [RegistryError]):
+    if next_generation <= current.generation:
+        errors.push(RegistryError.NonMonotoneGeneration(current.generation, next_generation))
+    if admitted.len() == 0:
+        errors.push(RegistryError.EmptyPublish(next_generation))
+    for a in admitted:
+        if a.seal_hash != current.seal_hash:
+            errors.push(RegistryError.SealDrift(a.module_id, current.seal_hash, a.seal_hash))
+    var seen: [RegistryEntry] = []
+    for e in entries:
+        match _find_holder(seen, e.op_key):
+            case Some(holder):
+                # Same-module re-registration is a duplicate too: a module that
+                # lists one operation twice has an ambiguous dispatch row, and
+                # silently keeping the first is how a table stops being a
+                # function.
+                errors.push(RegistryError.DuplicateOperation(e.op_key, holder, e.module_id))
+            case None:
+                seen = seen + [e]
+
+# Step 3 — SWAP. The new `Registry` is constructed only after validation
+# passed, and it is the function's only success value: there is no path that
+# returns a table built from a rejected publish.
+pub fn publish(current: Registry, admitted: [AdmittedModule])
+        -> Result<Registry, [RegistryError]>:
+    val next_generation = current.generation + 1
+    val built = _build(current, admitted)
+    var errors: [RegistryError] = []
+    _validate(current, admitted, next_generation, built.0, errors)
+    if errors.len() > 0:
+        return Err(errors)
+    Ok(Registry(
+        seal_hash: current.seal_hash,
+        generation: next_generation,
+        module_ids: built.1,
+        entries: built.0
+    ))

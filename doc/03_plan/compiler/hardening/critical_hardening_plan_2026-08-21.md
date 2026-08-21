@@ -35,7 +35,7 @@ The numeric block 015–022 is left reserved and untouched.
 
 ## Phases
 
-### Phase 0 — Contract lock and truth inventory — `not started`
+### Phase 0 — Contract lock and truth inventory — `partial` (lock landed 2026-08-21; gate honestly RED on registry freshness)
 - **Deliverables:** canonical schema-registry format; `CoverageState`; static/complete/dyn semantics;
   stable extension identity; `type_erasure` capability; `MonoSemanticKey`/`MonoArtifactKey`; aspect
   seal schema; diagnostic id ranges; package migration inventory. Machine-readable census of: `Any`
@@ -47,6 +47,15 @@ The numeric block 015–022 is left reserved and untouched.
   `src/compiler/00.common/dynamic_identity/**`, `spec/compiler_schema/**`.
 - **Exit gate:** `sh scripts/check/check-completeness-contract-lock.shs` →
   `PASS — <n> contract artifact(s) checked, census regenerates byte-identically`. No behavior change.
+- **Status 2026-08-21:** contract docs, `scripts/check/check-completeness-contract-lock.shs`
+  (fatal `--selftest`, `--update-lock`, `--no-census`), `spec/compiler_schema/contract_lock.sdn`
+  (32 artifacts hashed) and `test/01_unit/scripts/completeness_contract_lock_gate_test.shs` landed.
+  Evidence: `--no-census` -> `PASS — 32 contract artifact(s) checked, hash locked`; a one-line doc
+  edit -> `FAIL — ... contract hash drifted` exit 1. Full gate is RED, not by this lane: delegated
+  `check-compiler-schema-fresh.shs` reports `FAIL — stale: compiler.frontend.PatternKind.sdn
+  compiler.hir.HirPatternKind.sdn index.sdn` (uncommitted registry edits from a parallel session).
+  Remaining for `done`: registry regenerated + full gate green; `UNLANDED` rows (E-MC-DYN codes,
+  per-enum diagnostic ranges, aspect seal file schema) stay contract-only until their phases.
 
 ### Phase 1 — Make missing paths loud everywhere — `partial` (C2, C5 landed 2026-08-21)
 - **Deliverables:** replace silent FlatAst/AST/HIR/MIR fallbacks with explicit diagnostics; total
@@ -104,7 +113,7 @@ The numeric block 015–022 is left reserved and untouched.
   `PASS — <n> match(es) checked, non-exhaustive=0 wildcard-closed-critical=0`.
 - **Existing requirement:** REQ-MC-003 (enum contracts) already blocks on payload metadata.
 
-### Phase 5 — Complete/dyn extension infrastructure — `partial` (D2/D3 landed 2026-08-21)
+### Phase 5 — Complete/dyn extension infrastructure — `partial` (D2/D3/D4/D5 landed 2026-08-21)
 - **Deliverables:** `complete:` / `dyn:` grammar; extension manifests; required-interface
   verification; dense local id freeze; per-config seals; cache keyed by seal hash; persistent ids in
   serialized HIR/SMF; open `dyn` prohibited in critical.
@@ -174,7 +183,7 @@ SDN block (`id/allow/deny/inputs/outputs/red_tests/exit_gate`) and CI rejects ou
 | **2B** Any hardening | Y1 inventory, Y2 HIR checker, Y3 RuntimeValue ABI (**locks before Y4/Y5**), Y4 seed parity, Y5 self-hosted boxing parity, Y6 migration wrappers, Y7 boundary tests. | `partial` — Y1/Y2 landed 2026-08-21 (`35.semantics/any_escape/**`, `check-any-escape-census.shs`) |
 | **2C** typed monomorphization | M1 types/table, M2 type substitution, M3 HIR substitution, M4 collector, M5 rewriter, M6 layout/type instances, M7 post-mono verifier, M8 seed parity, M9 code-size/cache. Integrator alone touches `driver_hir_pipeline_passes.spl` and relaxes gates after M1–M7. | `partial` — M1 (`table.spl:29,39`), M2 (`type_subst.spl:74-128`) and most of M5 (`monomorphize_integration.spl:457,527`) already landed |
 | **2D** sum types / enum contracts | S1 payload preservation, S2 `@closed`, S3 `@evolving`, S4 union normalization, S5 layout/serialization, S6 Any→sum migration. | `partial` — S2/S3 landed 2026-08-21 (generated attributes on `HirEnum` + `35.semantics/enum_contract/**`) |
-| **2E** complete/dyn + aspects | D1 extension grammar, D2 manifest generator, D3 sealer, D4 loader admission, D5 atomic registry, D6 facet grammar/HIR, D7 witness/sidecar, D8 pointcut/weave plan, D9 typed weaver, D10 aspect-pack integration, D11 critical aspect policy, D12 aspect evidence. | `partial` — catalog/container/routed-load slice exists (`doc/09_report/aspect_pack_design_coverage_2026-08-18.md`) |
+| **2E** complete/dyn + aspects | D1 extension grammar, D2 manifest generator, D3 sealer, D4 loader admission, D5 atomic registry, D6 facet grammar/HIR, D7 witness/sidecar, D8 pointcut/weave plan, D9 typed weaver, D10 aspect-pack integration, D11 critical aspect policy, D12 aspect evidence. | `partial` — D2/D3/D4/D5 landed 2026-08-21 (`99.loader/completeness_seal/**`, `check-completeness-seal.shs`); catalog/container/routed-load slice exists (`doc/09_report/aspect_pack_design_coverage_2026-08-18.md`) |
 | **3** migration | P1..P12 package shards, one agent per package: census → convert → pin → engine+negative tests → no shared-root edits. | `not started` |
 | **4** parallel validation | V1 structural mutation, V2 Any red-team, V3 mono red-team, V4 dynamic red-team, V5 aspect red-team, V6 engine differential, V7 bootstrap parity, V8 fuzz/property, V9 perf/memory, V10 evidence forgery, V11 formal, V12 parallel ownership. | `not started` |
 | **5** serial integration + release gate | I0 owns root exports, shared parser dispatch, driver ordering, profile severity table, registry inclusion, release aggregate, default escalation. R1 independently verifies: generated files reproducible, no out-of-scope edits, no bypass env flag honoured in critical, no checker ran advisory under critical, every receipt fresh and bound to artifact+seal hash. | `not started` |
@@ -215,6 +224,9 @@ last stdout line of each guard; every guard has a fatal `--selftest` and is ERRO
 | C5 HIR→MIR types | `done` | explicit arm per `HirTypeKind` in `50.mir/mir_lowering_types.spl` + `_MirLoweringExpr/expr_dispatch.spl`; gated by `check-critical-wildcard-ban.shs` → `PASS — <n> site(s) checked, forbidden=<k> (baseline <k>)` |
 | D2 manifest generator | `done` | `99.loader/completeness_seal/{manifest,axis_parse,required_interfaces}.spl` — `parse_manifest_text`, `required_operations`, `missing_module_interfaces` |
 | D3 sealer | `done` | `99.loader/completeness_seal/seal.spl` (`seal_error_code`, `missing_operations`) |
+| D4 loader admission | `done` | `99.loader/completeness_seal/admission.spl` — `admit_module` + closed `AdmissionReason` (`E-COMPLETE-021` missing operation, `E-COMPLETE-020` id collision, `E-MC-DYN-001` open `dyn` in critical, `E-COMPLETE-025` seal-hash mismatch, `E-COMPLETE-024` bad axis); no `case _` anywhere |
+| D5 atomic registry | `done` | `99.loader/completeness_seal/registry.spl` — build/validate/swap `publish`; a rejected publish leaves the live generation untouched (`E-REGISTRY-001..004`) |
+| Phase 5 exit gate | `done` (fixture scope) | `scripts/check/check-completeness-seal.shs` → `PASS — 2 selected constructor(s) checked, missing-capabilities=0 id-collisions=0 dyn-in-critical=0`; `--selftest` → `PASS — 4 selftest fixture(s) checked, scanner detects all three rejection classes`. Decisions come from the real pure-Simple sealer/admission modules via `bin/simple run src/app/check/completeness_seal_census.spl`, never from grepping manifests. Scope is the shipped manifest fixtures under `spec/compiler_schema/extensions/` — D1 (`complete:`/`dyn:` grammar) has not landed, so no whole-tree manifest population exists yet to select from. Specs: `test/01_unit/compiler/loader/completeness_seal/loader_admission_spec.spl` → `Results: 11 total, 11 passed, 0 failed` |
 | M7 post-mono verifier | `partial` | `40.mono/verify/post_mono_verify.spl` + template pruning in `monomorphize_integration.spl`; `check-post-mono-invariants.shs` → `PASS — 9 fixture(s) checked, 0 unexpected` — **fixtures only**, `doc/08_tracking/bug/hir_generic_templates_unconsumed_by_mono_pass_2026-08-21.md` OPEN |
 | S2 `@closed` / S3 `@evolving` | `done` | generated attributes on `HirEnum` (`20.hir/hir_definitions.spl`) consumed by `35.semantics/enum_contract/{contract_model,declaration_check,match_check,attribute_source,check}.spl` |
 | decorators → HIR | `partial` | filed and being carried: `doc/08_tracking/bug/enum_decorators_dropped_before_hir_2026-08-21.md` |
