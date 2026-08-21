@@ -1,0 +1,33 @@
+# @cover src/compiler/20.hir/hir_types.spl
+# @cover src/compiler/20.hir/hir_symbol_table_methods.spl
+# Regression for doc/08_tracking/bug/
+# symbol_table_second_impl_block_unreachable_interpreted_2026-08-21.md
+#
+# `SymbolTable` carries two `impl SymbolTable` blocks in two files:
+# `hir_types.spl:228` (the constructor) and `hir_symbol_table_methods.spl:18`
+# (`lookup`, `lookup_or_invalid`). A report claimed the second block was
+# unreachable when interpreted. It is NOT: the block is reachable through every
+# import shape below. What actually made it look unreachable is that method
+# tables are populated only for modules IN THE IMPORT CLOSURE -- a spec that
+# imports the TYPE without importing the module carrying the second `impl` gets
+# `method not found`. `hir_types.spl:15` does `use
+# compiler.hir.hir_symbol_table_methods.*`, so importing `hir_types` (directly,
+# via the package facade, or transitively through `hir_lowering`) is enough.
+
+use std.spec
+use compiler.hir.hir_types.{SymbolTable}
+use compiler.hir.{SymbolTable as FacadeSymbolTable}
+use compiler.hir.hir_lowering.{HirLowering}
+
+describe "SymbolTable methods across two impl blocks in two files":
+    it "reaches the second block through a direct module import":
+        var t = SymbolTable.new()
+        expect(t.lookup_or_invalid("absent").id).to_equal(-1)
+
+    it "reaches the second block through the package facade":
+        var t = FacadeSymbolTable.new()
+        expect(t.lookup_or_invalid("absent").id).to_equal(-1)
+
+    it "reaches the second block on a transitively owned SymbolTable":
+        var lowering = HirLowering.new()
+        expect(lowering.symbols.lookup_or_invalid("absent").id).to_equal(-1)
