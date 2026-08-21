@@ -48,6 +48,11 @@ full-range SHA, independent host readback, and unchanged adjacent ranges. A
 separate oracle boots the current disk image from NVMe with no USB device and
 requires VFS-backed `ls /`.
 
+The image reproducibility oracle performs two fresh builds with a pinned epoch,
+GPT identifiers, and FAT serial/timestamps; their complete 256 MiB images and
+ESP/loader/fallback/shim components must compare byte-for-byte. Current PASS:
+SHA-256 `abffdd3f668f075385756b1e528605950d782ee95f821bca241c13f259de93fe`.
+
 ## Physical completion
 
 Connection, RAM load, boot/VFS `ls /`, and storage readback are separate receipt
@@ -60,7 +65,8 @@ physical evidence to PASS.
 |---|---|---|
 | REQ-006 | wire-v1 policy plus OVMF GDB payload/descriptor/commit-last admission | physical DCI mailbox receipt pending |
 | REQ-007 | reviewed plan plus resident PE load and embedded-shim reload | physical DCI RAM boot receipt pending |
-| REQ-008 | final EFI map, ExitBootServices, x64→i386 shim, SimpleOS shell under OVMF SMP1 | physical AP parking and DCI boot pending |
+| REQ-008 | final EFI map, ExitBootServices, x64→i386 shim, SimpleOS shell under OVMF SMP1 | physical MP/AP state and DCI boot pending |
 | REQ-009 | exact identity, busy-state, bounds policy | device enumeration pending |
 | REQ-010 | hash-bound challenge plus ordered write/flush/full readback | physical flush/readback receipt pending |
 | REQ-013 | bounded `M` plus exact `m` readback under OVMF | physical CN16 receipt pending |
+| NFR-012 | two fresh byte-identical image builds plus fixed GPT/FAT identity | N/A |

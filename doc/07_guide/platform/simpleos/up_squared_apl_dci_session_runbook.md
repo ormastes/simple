@@ -83,6 +83,7 @@ UEFI's Debug Support Table can help image discovery but is not this mailbox.
 Free software-path proof (GDB stands in for the physical memory transport):
 
 ```sh
+sh scripts/check/check-simpleos-up-squared-apollo-lake.shs --image-reproducibility
 sh scripts/check/check-simpleos-up-squared-apollo-lake.shs --ovmf-dci-admission
 sh scripts/check/check-simpleos-up-squared-apollo-lake.shs --ovmf-dci-rejection
 ```
@@ -97,6 +98,9 @@ ExitBootServices AP-idle transition; retain firmware topology and kernel AP
 evidence on the board.
 The rejection companion uses the complete kernel with a deliberately wrong
 digest and requires fail-closed behavior before ELF load or fallback.
+The reproducibility receipt must precede physical media writing: it binds two
+fresh byte-identical images to SHA-256 `abffdd3f…de93fe`, epoch `1704067200`,
+fixed GPT identifiers, and FAT serial `5349-4D50`.
 
 Inspect the exact current ELF/receipt and obtain its segment manifest without
 touching hardware:

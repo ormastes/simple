@@ -37,6 +37,9 @@ I/O. Those decisions remain target-side and independently testable.
    copying its JH7110 PCIe/PHY/cache-coherency port.
 6. **Evidence owner:** connection, load, boot, and storage receipts remain
    separate and cannot promote one another.
+   Deployment-image evidence first requires two fresh byte-identical builds;
+   deterministic GPT/FAT identities and timestamps are build inputs rather than
+   post-build normalization.
 7. **Free post-boot monitor:** `gdb_rsp_monitor.spl` owns packet, checksum,
    bounds, and readback policy. `gdb_rsp_uart.spl` alone owns CN16/COM1 framing.
    The linker reserves `0x0a000000..0x0b000000` in the admitted writable

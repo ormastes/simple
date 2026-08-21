@@ -246,6 +246,11 @@ Pair it with `--ovmf-dci-rejection`, which must reject a fully written kernel
 whose committed descriptor carries the wrong digest before transition or GRUB.
 Require `nonce-source=firmware-or-rdrand` for committed boot. A time/TSC nonce
 may preserve diagnostics and GRUB fallback but must not authorize RAM execution.
+Before using a UP2 image hash in a media/storage challenge, run
+`scripts/check/check-simpleos-up-squared-apollo-lake.shs --image-reproducibility`.
+It must build twice in fresh directories and compare the full GPT/FAT image;
+pin SOURCE_DATE_EPOCH, disk/ESP GUIDs, FAT ID, and copied-file timestamps rather
+than treating stable kernel/PE hashes as proof of a stable container.
 For UP2 physical boot, record Secure Boot state, use F7 for the one-time entry,
 and use DEL or ESC for firmware setup. Treat an EFI-shell launch as a distinct
 fallback with mapped-filesystem and artifact evidence.

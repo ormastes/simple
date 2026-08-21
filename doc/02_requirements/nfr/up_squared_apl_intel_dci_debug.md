@@ -29,3 +29,8 @@ Selection: Safety baseline and evidence levels confirmed with A + B + D.
   packet size and bounded RAM operations. Missing register and run-control
   capabilities return the standard empty unsupported response, never fabricated
   state or a false halt/reset result.
+- **NFR-012 — Reproducible deployment image:** Identical admitted kernel,
+  resident loader, fallback, epoch, and geometry inputs shall produce a
+  byte-identical GPT/FAT32 image. The builder pins GPT identifiers, FAT volume
+  identity, and timestamps; a two-build fresh-directory gate compares the full
+  image and retained components before a hash may be used for media admission.

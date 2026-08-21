@@ -21,6 +21,10 @@ set -eu
 
 REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 DISK=${DISK:-$REPO_ROOT/build/os/x86_64_board_usb/board-usb.img}
+EXPECTED_DISK_GUID=${UP2_DISK_GUID:-53494D50-4C45-4F53-A550-325545464930}
+EXPECTED_ESP_GUID=${UP2_ESP_GUID:-53494D50-4C45-4F53-A550-324553503031}
+EXPECTED_FAT_ID=${UP2_FAT_VOLUME_ID:-53494D50}
+EXPECTED_FAT_SERIAL=$(printf '%s' "$EXPECTED_FAT_ID" | sed -E 's/^(.{4})(.{4})$/\1-\2/')
 
 fail() { printf 'FAIL — %s\n' "$1"; exit 1; }
 err()  { printf 'ERROR — nothing was checked (%s)\n' "$1"; exit 2; }
@@ -51,6 +55,11 @@ CHECKS=$((CHECKS + 1))
 PART2_LINE=$(grep -E "^   2 " "$GPT_CHECK" || true)
 [ -z "$PART2_LINE" ] || fail "expected exactly one partition, found a second: $PART2_LINE"
 CHECKS=$((CHECKS + 1))
+DISK_GUID=$(awk -F': ' '/Disk identifier \(GUID\)/ {print $2; exit}' "$GPT_CHECK")
+[ "$(printf '%s' "$DISK_GUID" | tr '[:lower:]' '[:upper:]')" = \
+  "$(printf '%s' "$EXPECTED_DISK_GUID" | tr '[:lower:]' '[:upper:]')" ] || \
+    fail "disk GUID $DISK_GUID does not match deterministic $EXPECTED_DISK_GUID"
+CHECKS=$((CHECKS + 1))
 rm -f "$GPT_CHECK"
 trap - EXIT HUP INT TERM
 
@@ -58,6 +67,11 @@ trap - EXIT HUP INT TERM
 #    so `dd ... seek=2048` in the builder actually lands inside it).
 START_SECT=$(sgdisk --info=1 "$DISK" 2>/dev/null | grep "First sector" | sed -E 's/.*: ([0-9]+) .*/\1/')
 [ "$START_SECT" = "2048" ] || fail "partition 1 starts at sector $START_SECT, expected 2048"
+CHECKS=$((CHECKS + 1))
+ESP_GUID=$(sgdisk --info=1 "$DISK" 2>/dev/null | awk -F': ' '/Partition unique GUID/ {print $2; exit}')
+[ "$(printf '%s' "$ESP_GUID" | tr '[:lower:]' '[:upper:]')" = \
+  "$(printf '%s' "$EXPECTED_ESP_GUID" | tr '[:lower:]' '[:upper:]')" ] || \
+    fail "ESP GUID $ESP_GUID does not match deterministic $EXPECTED_ESP_GUID"
 CHECKS=$((CHECKS + 1))
 
 # 4. FAT32 filesystem at that offset holds the expected boot files.
@@ -71,6 +85,8 @@ LISTING=$(MTOOLSRC="$DRIVE_CFG" mdir -i "${DISK}@@${OFFSET_BYTES}" "::" 2>&1) \
     || fail "could not read FAT filesystem at partition offset in $DISK"
 rm -f "$DRIVE_CFG"
 echo "$LISTING" | grep -qi "STARTUP" || fail "startup.nsh missing from ESP filesystem"
+echo "$LISTING" | grep -Fq "Volume Serial Number is $EXPECTED_FAT_SERIAL" || \
+    fail "FAT serial does not match deterministic $EXPECTED_FAT_SERIAL"
 CHECKS=$((CHECKS + 1))
 
 MTOOLS_SKIP_CHECK=1

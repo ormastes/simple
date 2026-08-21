@@ -196,10 +196,12 @@ trampoline. The EBX/ESI loss in `_entry32` is fixed.
 
 The authoritative current kernel is 298,648 bytes with SHA-256
 `0a8afd63b50bc57792d43cf6e06a643fc2d22d62e7de608b8629137c92293c08`;
-the latest 256 MiB structural image SHA-256 is
-`6d947ef3f2ec65d417f5e3a6740e4dddbf3dbab23d19ed99adaee54fadc2e6b5`.
-The direct-boot runtime receipt used image `652d5d53…cdf08d` with identical
-loader PE `2b116981…a936e` and kernel bytes.
+the byte-reproducible 256 MiB image SHA-256 is
+`abffdd3f668f075385756b1e528605950d782ee95f821bca241c13f259de93fe`.
+Two fresh builds compare byte-for-byte after pinning the build epoch, GPT
+disk/ESP GUIDs, FAT serial, and mtools timestamps. That exact image passed both
+GRUB-fallback boot/VFS `ls /` and direct resident mailbox boot with loader PE
+`2b116981…a936e` and the kernel bytes above.
 `--ovmf-dci-admission` halted OVMF at reset through GNU GDB, continued to the
 resident publisher, wrote the entire kernel and descriptor/commit into RAM,
 and reached shim, `_entry32`, kernel, filesystem, and shell markers with no

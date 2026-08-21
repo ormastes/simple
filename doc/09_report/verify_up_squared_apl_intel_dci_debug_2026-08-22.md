@@ -4,7 +4,9 @@
 
 - PASS: admitted Stage-3 freestanding build, 58 compiled / 0 failed.
 - PASS: self-contained 256 MiB UEFI USB image structural gate; SHA-256
-  `6d947ef3f2ec65d417f5e3a6740e4dddbf3dbab23d19ed99adaee54fadc2e6b5`.
+  `abffdd3f668f075385756b1e528605950d782ee95f821bca241c13f259de93fe`.
+- PASS: `--image-reproducibility` builds twice into fresh directories and
+  requires byte-identical full images plus ESP/PE/GRUB/startup/shim components.
 - PASS: fresh OVMF boot, VFS entries `bin,etc,README.txt`, exact QEMU NVMe
   identity, and `media_writes=0` before admission.
 - PASS: four consecutive nonzero 1024-byte RSP `M` packets return `+$OK#9a`;
@@ -19,9 +21,8 @@
   windows; the PE32+ loader preserves the nonce, verifies SHA-256 and ELF
   bounds, constructs the final EFI map, exits boot services, enters the
   embedded ELF32 shim, and reaches the SimpleOS shell without GRUB fallback.
-  That runtime receipt binds image `652d5d53…cdf08d`; the latest rebuild differs
-  in container metadata but has the identical loader PE `2b116981…a936e` and
-  kernel `0a8afd63…293c08`.
+  The receipt binds the deterministic image `abffdd3f…de93fe`, loader PE
+  `2b116981…a936e`, and kernel `0a8afd63…293c08`.
 - PASS: `--ovmf-dci-rejection` uses the same complete payload with an all-zero
   descriptor digest and proves rejection before admission, transition, or GRUB.
 - PASS: the no-commit PE32+ timeout still chainloads `GRUBX64.EFI`, which boots

@@ -48,3 +48,9 @@ and UP2 firmware/kernel application-processor state remain separate evidence.
 The paired `--ovmf-dci-rejection` oracle publishes the same complete kernel with
 an all-zero descriptor digest and requires `blocked=payload-sha256` with no
 admission, transition, or GRUB fallback.
+The `--image-reproducibility` oracle builds twice concurrently into fresh
+directories at epoch `1704067200`, requires byte-identical GPT/FAT32 images and
+stable ESP/PE/GRUB/shim components, and retains the common SHA-256. The normal
+structural checker separately requires the pinned disk GUID, ESP GUID, FAT
+serial, and boot contracts. The gate also binds the executable DCI policy
+fixture's kernel hash and byte length to the admitted kernel receipt.

@@ -584,6 +584,92 @@ ovmf_nvme_boot() {
     echo ovmf_nvme_boot_receipt="$RECEIPT"
 }
 
+image_reproducibility() {
+    test -s "$KERNEL" -a -s "$KERNEL.receipt" || blocked kernel-or-receipt-missing
+    POLICY_SPEC="$ROOT_DIR/test/03_system/os/up_squared_apl_intel_dci_debug_spec.spl"
+    test -s "$POLICY_SPEC" || blocked dci-policy-spec-missing
+    FIXTURE_HASH="$(awk -F'"' '/^val IMAGE_HASH:/ {print $2; exit}' "$POLICY_SPEC")"
+    FIXTURE_BYTES="$(sed -n 's/^val IMAGE_SIZE: u64 = \([0-9][0-9]*\)u64$/\1/p' "$POLICY_SPEC")"
+    KERNEL_HASH="$(sha256sum "$KERNEL" | awk '{print $1}')"
+    KERNEL_BYTES="$(wc -c < "$KERNEL" | tr -d ' ')"
+    test "$FIXTURE_HASH" = "$KERNEL_HASH" || fail dci-policy-fixture-hash-stale
+    test "$FIXTURE_BYTES" = "$KERNEL_BYTES" || fail dci-policy-fixture-size-stale
+    mkdir -p "$RUN_DIR"
+    TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/simpleos-up2-repro.XXXXXX")"
+    test -n "$TMP_ROOT" -a -d "$TMP_ROOT" || fail reproducibility-temp-missing
+    trap 'rm -rf -- "$TMP_ROOT"' EXIT HUP INT TERM
+    REPRO_A="$TMP_ROOT/a"
+    REPRO_B="$TMP_ROOT/b"
+    LOG_A="$RUN_DIR/repro-build-a.log"
+    LOG_B="$RUN_DIR/repro-build-b.log"
+    REPRO_EPOCH="${SOURCE_DATE_EPOCH:-1704067200}"
+    REPRO_DISK_GUID="${UP2_DISK_GUID:-53494D50-4C45-4F53-A550-325545464930}"
+    REPRO_ESP_GUID="${UP2_ESP_GUID:-53494D50-4C45-4F53-A550-324553503031}"
+    REPRO_FAT_ID="${UP2_FAT_VOLUME_ID:-53494D50}"
+    REPRO_FAT_SERIAL="$(printf '%s' "$REPRO_FAT_ID" | sed -E 's/^(.{4})(.{4})$/\1-\2/')"
+    set +e
+    SOURCE_DATE_EPOCH="$REPRO_EPOCH" UP2_DISK_GUID="$REPRO_DISK_GUID" \
+        UP2_ESP_GUID="$REPRO_ESP_GUID" UP2_FAT_VOLUME_ID="$REPRO_FAT_ID" \
+        UP2_USB_OUT_DIR="$REPRO_A" \
+        sh "$ROOT_DIR/scripts/os/build-simpleos-up-squared-usb-image.shs" \
+        > "$LOG_A" 2>&1 &
+    PID_A=$!
+    SOURCE_DATE_EPOCH="$REPRO_EPOCH" UP2_DISK_GUID="$REPRO_DISK_GUID" \
+        UP2_ESP_GUID="$REPRO_ESP_GUID" UP2_FAT_VOLUME_ID="$REPRO_FAT_ID" \
+        UP2_USB_OUT_DIR="$REPRO_B" \
+        sh "$ROOT_DIR/scripts/os/build-simpleos-up-squared-usb-image.shs" \
+        > "$LOG_B" 2>&1 &
+    PID_B=$!
+    wait "$PID_A"
+    RC_A=$?
+    wait "$PID_B"
+    RC_B=$?
+    set -e
+    test "$RC_A" -eq 0 -a "$RC_B" -eq 0 || {
+        tail -40 "$LOG_A" "$LOG_B"
+        fail reproducibility-build-failed
+    }
+    IMAGE_A="$REPRO_A/board-usb.img"
+    IMAGE_B="$REPRO_B/board-usb.img"
+    test -s "$IMAGE_A" -a -s "$IMAGE_B" || fail reproducibility-image-missing
+    cmp -s "$IMAGE_A" "$IMAGE_B" || fail reproducibility-image-mismatch
+    for COMPONENT in \
+        esp.img \
+        esp-stage/EFI/BOOT/BOOTX64.EFI \
+        esp-stage/EFI/BOOT/GRUBX64.EFI \
+        esp-stage/startup.nsh \
+        multiboot2-elf64-loader.elf; do
+        cmp -s "$REPRO_A/$COMPONENT" "$REPRO_B/$COMPONENT" || \
+            fail reproducibility-component-mismatch
+    done
+    REPRO_SHA="$(sha256sum "$IMAGE_A" | awk '{print $1}')"
+    REPRO_BYTES="$(wc -c < "$IMAGE_A" | tr -d ' ')"
+    RECEIPT="$RUN_DIR/image-reproducibility.receipt"
+    {
+        echo schema=up2-image-reproducibility-v1
+        echo status=pass
+        echo source_date_epoch="$REPRO_EPOCH"
+        echo disk_guid="$REPRO_DISK_GUID"
+        echo esp_guid="$REPRO_ESP_GUID"
+        echo fat_serial="$REPRO_FAT_SERIAL"
+        echo image_sha256="$REPRO_SHA"
+        echo image_bytes="$REPRO_BYTES"
+        echo kernel_sha256="$KERNEL_HASH"
+        echo kernel_bytes="$KERNEL_BYTES"
+        echo dci_policy_fixture=current
+        echo full_image_cmp=identical
+        echo stable_components=esp,bootx64,grubx64,startup,elf32-shim
+        echo build_a_log="$LOG_A"
+        echo build_b_log="$LOG_B"
+    } > "$RECEIPT"
+    chmod 0444 "$RECEIPT"
+    rm -rf -- "$TMP_ROOT"
+    trap - EXIT HUP INT TERM
+    echo up2_image_reproducibility_status=pass
+    echo image_sha256="$REPRO_SHA"
+    echo image_reproducibility_receipt="$RECEIPT"
+}
+
 live() {
     case "$BOOT_SECONDS" in ''|*[!0-9]*) fail invalid-boot-timeout ;; esac
     validate_receipts
@@ -676,6 +762,7 @@ case "$MODE" in
     --ovmf-dci-rejection) ovmf_dci_rejection ;;
     --ovmf-image-provision) ovmf_image_provision ;;
     --ovmf-nvme-boot) ovmf_nvme_boot ;;
+    --image-reproducibility) image_reproducibility ;;
     --live) live ;;
-    *) echo "usage: $0 --contract|--self-test|--ovmf|--ovmf-dci-admission|--ovmf-dci-rejection|--ovmf-storage|--ovmf-image-provision|--ovmf-nvme-boot|--live" >&2; exit 1 ;;
+    *) echo "usage: $0 --contract|--self-test|--image-reproducibility|--ovmf|--ovmf-dci-admission|--ovmf-dci-rejection|--ovmf-storage|--ovmf-image-provision|--ovmf-nvme-boot|--live" >&2; exit 1 ;;
 esac

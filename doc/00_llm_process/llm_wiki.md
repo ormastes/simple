@@ -139,21 +139,24 @@ same-thread/typed-payload exclusions and the Stage-4 blocker.
   proves `SIMP` → `53494d50` and detach. Registers, run control, reset, binary
   `X`, preboot DCI, and physical CN16 remain outside that PASS.
 - **Fresh emulator evidence (2026-08-22):** current kernel
-  `0a8afd63…293c08`; the latest structurally admitted image is
-  `6d947ef3…c2e6b5`. The runtime receipt used image `652d5d53…cdf08d` with the
-  identical loader PE `2b116981…a936e` and kernel, and passes GRUB-fallback OVMF boot,
+  `0a8afd63…293c08`; the byte-reproducible admitted image is
+  `abffdd3f…de93fe` with loader PE `2b116981…a936e`. Two fresh parallel builds
+  compare byte-for-byte, and that exact image passes GRUB-fallback OVMF boot,
   VFS `ls /`, GDB `M`/`m` readback, the separate scratch-NVMe
   Identify/GPT/FAT32/flush/fresh-readback gate, and direct resident-mailbox
   boot where GDB writes the whole kernel to RAM and no GRUB fallback occurs.
   The paired rejection gate proves a wrong committed digest cannot admit,
   transition, or silently fall through to GRUB.
+  Image admission pins epoch `1704067200`, GPT disk/ESP GUIDs, FAT serial, and
+  mtools timestamps; require `--image-reproducibility` before copying its hash
+  into a storage challenge or physical-media receipt.
   Physical UP2, CN16, DCI, and physical storage remain separate.
 - **Apollo Lake reset exception:** Intel's 2020 debugger notes say OpenRC warm
   reset can leave Apollo Lake cores unreleasable, with manual reset required.
   Never use it as the UP2 software-reset fallback. A Power-Good reset remains
   unqualified until proven on the exact FAB.
 - **Direct-load boundary:** the current ELF has three non-contiguous `PT_LOAD`
-  mappings and a 250-byte writable file payload expanding to `0x02fd7000` in
+  mappings and a `0x152`-byte writable file payload expanding to `0x02fc7000` in
   memory, ending at `0x0b000000`. Contiguous ELF copy plus RIP assignment is
   invalid. Inspect the exact artifact with
   `scripts/check/inspect-up-squared-apl-dci-elf.shs`; prefer a UEFI-resident

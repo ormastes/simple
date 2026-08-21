@@ -55,6 +55,9 @@ All notable changes to Simple Language will be documented in this file.
   existing rendered-payload routes.
 
 ### Fixed
+- **Reproducible UP2 deployment image** — pin the build epoch, GPT identifiers,
+  FAT identity, and copied-file timestamps, validate them structurally, and
+  require two independent full images to compare byte-for-byte.
 - **Freestanding streaming SHA-256 and Multiboot pointer preservation** — use
   fixed in-place SHA state across nonzero chunks and preserve the Multiboot
   information pointer through early x86 serial output.
