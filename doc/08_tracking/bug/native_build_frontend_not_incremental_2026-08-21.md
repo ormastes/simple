@@ -267,7 +267,29 @@ design, and it is repaid many times over once the cache is wired — but until
 then it is a real regression for short one-off invocations and must not be
 cited as free.
 
-Still to do: the full-closure round-trip gate (parse a real module, dump, reset,
+**CORRECTION (same day, `16821906d78`): the 151/151 green was FALSE.** The
+guard defined per-parse state as "every array-typed var in four files". Two
+independent holes: the name regex was lowercase-only, so the uppercase
+`EXTEND_*` registry was invisible, and the file list was hand-scoped to four
+files while `parser_reset_extend_enums` lives in `_ParserDecls/`, three files
+away from what it clears. The guard now derives state from the per-parse RESET
+functions across every file under `frontend/core` — the compiler's own
+definition of the set — and is honestly **RED: 166 items, 32 uncovered**: the 7
+`EXTEND_*` vars, `ENUM_ATTRIBUTES` / `ENUM_OPEN_REGIONS` / `UNSAFE_ANNOTATIONS`,
+11 `PENDING_*` (sffi/unsafe/hardware/vhdl/clocked/decl-attrs), and the `par_*`
+diagnostic and token slots. Several are dict-typed and need encoders the codec
+does not have.
+
+The lesson generalises beyond this codec: a completeness guard is only as good
+as its oracle, and "every declaration matching a regex in a hand-picked file
+list" is not one. Deriving from the reset functions is, because the compiler
+maintains them for its own correctness.
+
+**The front-end cache MUST NOT be wired until that guard is green.** Wiring it
+now would lose the `extend` registry and pending-annotation state on every cache
+hit, silently.
+
+Still to do: close the 32 gaps (incl. dict encoders), then the full-closure round-trip gate (parse a real module, dump, reset,
 restore, rebuild through the bridge, compare), the cache wiring at the `:379`
 hook, and parse sharding across `--threads` worker processes.
 
