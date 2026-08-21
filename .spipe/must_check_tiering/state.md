@@ -194,5 +194,12 @@ implementation-blocked-by-bootstrap-authority
   after 11 released surfaces because it duplicated nested callable ownership.
   That representation is removed. `ModuleSurfaceCallable` is now a single
   promoted class owner in the existing dictionary, so staged lookup transports
-  a reference rather than a large value aggregate. Verification cycle 2 is
-  pending.
+  a reference rather than a large value aggregate.
+- verify: Cycle 2 parsed and released all 664 Stage-3 surfaces without a SEGV,
+  proving the callable class owner fix. HIR then failed closed with 1,352
+  diagnostics across seven unresolved imported types.
+- fix-pending-verification: The surviving route consumers read nested
+  `ParserImport`/`ImportItem` aggregates across the staged boundary. Freeze now
+  emits aligned scalar item offsets/counts/source/local names, and both callable
+  dependency and re-export traversal consume only that projection. One final
+  bounded bootstrap cycle remains.
