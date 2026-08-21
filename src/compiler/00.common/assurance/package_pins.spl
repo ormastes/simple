@@ -136,7 +136,7 @@ pub class CriticalCheck:
 pub fn check_is_mandatory(c: CriticalCheck) -> bool:
     c.status == "mandatory"
 
-pub fn check_covers(c: CriticalCheck, package: text) -> bool:
+pub fn critical_check_covers(c: CriticalCheck, package: text) -> bool:
     var hit = false
     for p in c.covers:
         if p == package:
@@ -257,12 +257,12 @@ fn _text_at(v: SdnValue, key: text) -> text?:
         case Some(item): item.as_str()
         case None: None
 
-fn _opt_text(v: SdnValue, key: text, fallback: text) -> text:
+fn _pin_opt_text(v: SdnValue, key: text, fallback: text) -> text:
     match _text_at(v, key):
         case Some(s): s
         case None: fallback
 
-fn _opt_bool(v: SdnValue, key: text, fallback: bool) -> bool:
+fn _pin_opt_bool(v: SdnValue, key: text, fallback: bool) -> bool:
     match v.get(key):
         case None: fallback
         case Some(item):
@@ -298,13 +298,13 @@ fn _parse_waivers(root: SdnValue, path: text, mut errors: [PinDocError]) -> [Wai
                             out
                         case Some(items):
                             for item in items:
-                                val rule = _opt_text(item, "rule", "")
+                                val rule = _pin_opt_text(item, "rule", "")
                                 if rule == "":
                                     errors.push(PinDocError.MissingField(path, "assurance.waivers.rule"))
                                 out = out + [Waiver(
                                     rule: rule,
-                                    owner: _opt_text(item, "owner", ""),
-                                    expires: _opt_text(item, "expires", "")
+                                    owner: _pin_opt_text(item, "owner", ""),
+                                    expires: _pin_opt_text(item, "expires", "")
                                 )]
                             out
 
@@ -319,8 +319,8 @@ fn _parse_deps(project: SdnValue, path: text, mut errors: [PinDocError]) -> [Dep
                     out
                 case Some(items):
                     for item in items:
-                        val proj = _opt_text(item, "project", "")
-                        val pkg = _opt_text(item, "package", "")
+                        val proj = _pin_opt_text(item, "project", "")
+                        val pkg = _pin_opt_text(item, "package", "")
                         if proj == "" and pkg == "":
                             errors.push(PinDocError.WrongShape(path,
                                 "`project.dependencies` entry declares neither `project:` nor `package:`"))
@@ -343,7 +343,7 @@ pub fn parse_package_pin(source: text, path: text, dir: text) -> Result<PackageP
                 case Some(pv): project = pv
                 case None:
                     errors.push(PinDocError.MissingField(path, "project"))
-            val name = _opt_text(project, "name", "")
+            val name = _pin_opt_text(project, "name", "")
             if name == "":
                 errors.push(PinDocError.MissingField(path, "project.name"))
 
@@ -353,8 +353,8 @@ pub fn parse_package_pin(source: text, path: text, dir: text) -> Result<PackageP
             # contradiction the reader reports as a wrong shape.
             var profile = default_profile_name()
             var explicit = false
-            val raw_profile = _opt_text(project, "profile", "")
-            val sugar = _opt_bool(project, "critical", false)
+            val raw_profile = _pin_opt_text(project, "profile", "")
+            val sugar = _pin_opt_bool(project, "critical", false)
             if raw_profile != "":
                 val canon = normalize_profile_name(raw_profile)
                 if canon == "":
@@ -399,17 +399,17 @@ pub fn parse_critical_checks(source: text, path: text) -> Result<[CriticalCheck]
                             errors.push(PinDocError.WrongShape(path, "`checks:` must be a sequence"))
                         case Some(items):
                             for item in items:
-                                val nm = _opt_text(item, "name", "")
+                                val nm = _pin_opt_text(item, "name", "")
                                 if nm == "":
                                     errors.push(PinDocError.MissingField(path, "checks.name"))
-                                val st = _opt_text(item, "status", "")
+                                val st = _pin_opt_text(item, "status", "")
                                 if st != "mandatory" and st != "advisory":
                                     errors.push(PinDocError.UnknownCheckStatus(path, st))
                                 out = out + [CriticalCheck(
                                     name: nm,
                                     status: st,
                                     covers: _string_list(item, "covers"),
-                                    differential: _opt_bool(item, "differential", false)
+                                    differential: _pin_opt_bool(item, "differential", false)
                                 )]
             if errors.len() > 0:
                 return Err(errors)
@@ -422,7 +422,7 @@ pub fn parse_critical_checks(source: text, path: text) -> Result<[CriticalCheck]
 # Dependency closure
 # --------------------------------------------------------------------------
 
-fn _find_by_name(pins: [PackagePin], name: text) -> PackagePin?:
+fn _pin_find_by_name(pins: [PackagePin], name: text) -> PackagePin?:
     for p in pins:
         if p.package == name:
             return Some(p)
@@ -452,7 +452,7 @@ pub fn resolve_edges(pins: [PackagePin], p: PackagePin) -> [text]:
     var out: [text] = []
     for e in p.dependencies:
         if e.package_name != "":
-            match _find_by_name(pins, e.package_name):
+            match _pin_find_by_name(pins, e.package_name):
                 case Some(dep): out = out + [dep.package]
                 case None: out = out + [_unresolved(p.package, "package: " + e.package_name)]
         else:
@@ -479,7 +479,7 @@ pub fn dependency_closure(pins: [PackagePin], p: PackagePin) -> [text]:
         for name in frontier:
             if not _contains(seen, name) and name != p.package:
                 seen = seen + [name]
-                match _find_by_name(pins, name):
+                match _pin_find_by_name(pins, name):
                     case Some(dep):
                         for e in resolve_edges(pins, dep):
                             next = next + [e]
@@ -537,7 +537,7 @@ pub fn check_critical_preconditions(pins: [PackagePin], p: PackagePin,
         if is_unresolved(dep_name):
             out = out + [PinReason.DependencyBelowRobust(p.package, dep_name, "unresolved")]
         else:
-            match _find_by_name(pins, dep_name):
+            match _pin_find_by_name(pins, dep_name):
                 case None:
                     out = out + [PinReason.DependencyBelowRobust(p.package, dep_name, "unknown")]
                 case Some(dep):
@@ -546,7 +546,7 @@ pub fn check_critical_preconditions(pins: [PackagePin], p: PackagePin,
 
     var differential = false
     for c in checks:
-        if check_covers(c, p.package):
+        if critical_check_covers(c, p.package):
             if not check_is_mandatory(c):
                 out = out + [PinReason.AdvisoryCheckInCritical(p.package, c.name)]
             if c.differential and check_is_mandatory(c):
@@ -576,7 +576,7 @@ pub fn check_package_pins(pins: [PackagePin], checks: [CriticalCheck],
             critical = critical + 1
             deps = deps + dependency_closure(pins, p).len()
             for c in checks:
-                if check_covers(c, p.package):
+                if critical_check_covers(c, p.package):
                     covering = covering + 1
             for r in check_critical_preconditions(pins, p, checks):
                 reasons = reasons + [r]
@@ -596,7 +596,7 @@ pub fn check_package_pins(pins: [PackagePin], checks: [CriticalCheck],
 # island during Phase 8.
 pub fn blockers_for_critical(pins: [PackagePin], package: text,
         checks: [CriticalCheck], today: text) -> [PinReason]:
-    match _find_by_name(pins, package):
+    match _pin_find_by_name(pins, package):
         case None: []
         case Some(p):
             var out: [PinReason] = []
