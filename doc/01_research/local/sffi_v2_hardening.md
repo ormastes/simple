@@ -292,6 +292,16 @@ lookup and one execution call, without added allocation. A focused sabotage
 test passes. All raw JIT declarations in the compiler and four library manager
 modules are explicitly `unsafe(ffi)`, enforced by a source-only audit.
 
+The interpreter SHA-1/base64 boundary accepted missing, wrong-typed, and legacy
+raw-pointer inputs as empty bytes; invalid hasher handles returned nil. Checked
+text/byte/integer decoding now rejects those states, while explicit empty input
+remains valid. Stateful finish operations distinguish invalid handles and
+consume their state. The WebSocket accept path no longer attempts a redundant
+free after consuming finish, and all raw SHA-1 declarations are explicitly
+`unsafe(ffi)`. Focused malformed-input and empty-input tests pass. The valid
+path retains one hash/encoding operation; the removed double cleanup reduces
+work. A source-only audit gates the decoder, unsafe tags, and ownership rule.
+
 All 15 remaining legacy sign/verify declarations in the canonical signature
 module are now explicitly `unsafe(ffi)` and document their sentinel contract:
 verification collapses malformed bridge input into `0`, while signing may
