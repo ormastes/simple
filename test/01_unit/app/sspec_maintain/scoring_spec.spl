@@ -25,7 +25,11 @@ describe "SSpec maintenance scoring":
             "expect(1).to_equal(1)")
         val report = analyze_sspec_text("tautology_spec.spl", source)
         expect(report.real_assertion_count).to_equal(0)
-        expect(report.score.blocker_count).to_equal(1)
+        # A tautology legitimately trips BOTH blockers: ORA-001 (no real
+        # assertion survived) and ORA-002 (locally constructed arithmetic).
+        expect(report.score.blocker_count).to_equal(2)
+        expect(finding_ids(report).contains("SSDOC-ORA-001")).to_equal(true)
+        expect(finding_ids(report).contains("SSDOC-ORA-002")).to_equal(true)
 
     it "extracts scenario source and rendered manual facts separately":
         val source_facts = extract_sspec_source_facts("x_spec.spl", professional_source())
@@ -172,6 +176,45 @@ describe "SSpec maintenance scoring":
             [first, second]).is_err()).to_equal(true)
         expect(sspec_source_is_stale("before", "after")).to_equal(true)
         expect(sspec_source_is_stale("same", "same")).to_equal(false)
+
+    it "scores typed binary and TUI evidence as real captures on both sides":
+        # Source side: modern typed-evidence calls (compare_evidence,
+        # evidence_manifest, binary_layout, terminal_grid) must count as
+        # captures — regression for the scorer's binary/UI blind spot.
+        val binary_source = "\"\"\"\n## Purpose and audience\n## Operator workflow\n" +
+            "# @manual: primary\nREQ-011\ndoc/01_research/local/x.md\ndoc/03_plan/sys_test/x.md\n" +
+            "doc/04_architecture/x.md\ndoc/05_design/x.md\n\"\"\"\n" +
+            "describe \"page-table entries\":\n" +
+            "    it \"decodes the entry into the documented bit table\":\n" +
+            "        # @req: REQ-011\n" +
+            "        step(\"Encode the page-table entry\")\n" +
+            "        val pte = encode_pte()\n" +
+            "        val evidence = decode_u64(pte, pte_layout())\n" +
+            "        val result = compare_evidence(evidence, expected_pte_oracle())\n" +
+            "        expect(result.passed).to_equal(true)\n" +
+            "        val manifest = evidence_manifest(\"sha\", \"run\", [])\n" +
+            "        expect(manifest.spec_sha256.len()).to_equal(64)\n"
+        val binary_report = analyze_sspec_text("binary_spec.spl", binary_source)
+        expect(binary_report.capture_count).to_be_greater_than(0)
+        expect(finding_ids(binary_report).contains("SSDOC-EVD-001")).to_equal(false)
+        # Manual side: the real renderer emits ```text fences (terminal grid),
+        # ## Provenance, and images — none of which say "textgrid"/"protocol".
+        val manual = "# Workflow\n\n1. Encode the entry\n\n## Evidence\n\n" +
+            "### Bit table\n\n```text\n| bits | value |\n```\n\n" +
+            "## Provenance\n\n- spec sha-256: abc\n\n## Verification\n\n" +
+            "## Troubleshooting\n\nSource SHA-256: abc\n"
+        val manual_facts = extract_sspec_manual_facts("binary_spec.md", manual)
+        expect(manual_facts.evidence_block_count).to_be_greater_than(0)
+        expect(analyze_sspec_pair_text("binary_spec.spl", binary_source,
+            Some(manual + binary_report.source_hash)).mirror_state).to_equal("current")
+        expect(finding_ids(analyze_sspec_pair_text("binary_spec.spl", binary_source,
+            Some(manual + binary_report.source_hash))).contains("SSDOC-EVD-003")).to_equal(false)
+        # GUI action-trace evidence counts too.
+        val tui_facts = extract_sspec_source_facts("tui_spec.spl",
+            "describe \"surface\":\n    it \"renders the grid\":\n" +
+            "        step(\"Render\")\n        capture_terminal_grid(snapshot)\n" +
+            "        expect(grid_ok(snapshot)).to_equal(true)\n")
+        expect(tui_facts.capture_count).to_be_greater_than(0)
 
 fn finding_ids(report: SspecDocumentizationReport) -> [text]:
     var ids: [text] = []
