@@ -35,9 +35,15 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 
 impl HirLowering:
     me register_imported_symbol(imported_mod: ModuleSurface, imported_mod_name: text, imported_name: text, local_name: text, import_span: Span, materialize_enum: bool):
-        if imported_mod.composite_names.contains(imported_name):
-            val composite = imported_mod.composites[imported_name]
-            val kind = match composite.kind:
+        val imported_composite_index = module_surface_composite_index(
+            imported_mod, imported_name)
+        if imported_composite_index >= 0:
+            if not module_surface_composite_arrays_aligned(imported_mod):
+                self.error("misaligned imported composite projection", import_span)
+                return
+            val composite_projection = imported_mod.composite_index
+            val composite_kind = composite_projection.kinds[imported_composite_index]
+            val kind = match composite_kind:
                 case "class": SymbolKind.Class
                 case "struct": SymbolKind.Struct
                 case "actor":
@@ -58,30 +64,41 @@ impl HirLowering:
             # callable signature dependency materialization below; searching
             # only imported_mod left CompileContext fields such as OutputFormat,
             # WeavingConfig, Span, and parser Type unresolved in Stage 3.
-            for field in composite.fields:
-                for dependency in parser_type_named_dependencies(field.type_):
-                    if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, dependency) < 0:
-                        self.materialize_imported_callable_declared_dependency(
-                            imported_mod, imported_mod_name, dependency,
-                            import_span, materialize_enum)
-                    if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, dependency) < 0:
-                        self.materialize_imported_callable_explicit_dependency(
-                            imported_mod, imported_mod_name, dependency, import_span,
-                            materialize_enum)
-                if field.array_element_name != "" and self.symbols.lookup_qualified_type_raw(
-                        imported_mod.module_name, field.array_element_name) < 0:
+            val dependency_offset = composite_projection.dependency_offsets[
+                imported_composite_index]
+            val dependency_count = composite_projection.dependency_counts[
+                imported_composite_index]
+            var dependency_index = dependency_offset
+            while dependency_index < dependency_offset + dependency_count:
+                val dependency = composite_projection.dependency_names[dependency_index]
+                if self.symbols.lookup_qualified_type_raw(
+                        imported_mod.module_name, dependency) < 0:
                     self.materialize_imported_callable_declared_dependency(
-                        imported_mod, imported_mod_name,
-                        field.array_element_name, import_span, materialize_enum)
-                    if self.symbols.lookup_qualified_type_raw(
-                            imported_mod.module_name, field.array_element_name) < 0:
-                        self.materialize_imported_callable_explicit_dependency(
-                            imported_mod, imported_mod_name, field.array_element_name, import_span,
-                            materialize_enum)
+                        imported_mod, imported_mod_name, dependency,
+                        import_span, materialize_enum)
+                if self.symbols.lookup_qualified_type_raw(
+                        imported_mod.module_name, dependency) < 0:
+                    self.materialize_imported_callable_explicit_dependency(
+                        imported_mod, imported_mod_name, dependency,
+                        import_span, materialize_enum)
+                dependency_index = dependency_index + 1
             var imported_field_types: Dict<text, HirType> = {}
-            for field in composite.fields:
-                imported_field_types[field.name] = self.imported_surface_type_projected(
-                    field.type_, field.type_name, field.array_element_name, imported_mod.module_name)
+            val field_offset = composite_projection.field_offsets[
+                imported_composite_index]
+            val field_count = composite_projection.field_counts[
+                imported_composite_index]
+            var field_index = field_offset
+            while field_index < field_offset + field_count:
+                val projected = self.imported_surface_projected_name_type(
+                    composite_projection.field_shapes[field_index],
+                    composite_projection.field_type_names[field_index],
+                    imported_mod.module_name, import_span)
+                val field_type = if val projected_type = projected:
+                    projected_type
+                else:
+                    HirType(kind: HirTypeKind.Any, span: import_span)
+                imported_field_types[composite_projection.field_names[field_index]] = field_type
+                field_index = field_index + 1
             val canonical_composite_name = imported_mod.module_name + "." + imported_name
             self.struct_field_types_by_name[canonical_composite_name] = imported_field_types
             if not self.struct_field_types_by_name.has(imported_name):

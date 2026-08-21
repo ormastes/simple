@@ -243,3 +243,11 @@ implementation-blocked-by-bootstrap-authority
   stable Type locals for extern and ordinary parameters and a stable Expr
   local for ordinary defaults, with exact and adjacent regressions. A fresh
   bounded verification session is required.
+- verify-fail: Fresh cycle 1 proved the Flat AST repair by releasing every
+  streaming surface and entering HIR. The run then reproduced the original
+  Span/Type import cascade; it was terminated after the gate was definitively
+  failed rather than collecting hundreds of duplicate diagnostics.
+- fix-pending-verification: Composite registration now consumes a frozen
+  scalar kind/field/dependency projection instead of retained Dict payloads.
+  Qualified function/type bind and lookup now use aligned scalar first-write
+  indexes, avoiding staged class-field Dict membership. Cycle count is 1/3.

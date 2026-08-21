@@ -170,6 +170,65 @@ pub(package) fn module_surface_signature_index(
         index = index + 1
     -1
 
+pub(package) fn module_surface_composite_index(
+    surface: ModuleSurface, composite_name: text
+) -> i64:
+    var index = 0
+    while index < surface.composite_names.len():
+        if surface.composite_names[index] == composite_name:
+            return index
+        index = index + 1
+    -1
+
+pub(package) fn module_surface_composite_arrays_aligned(
+    surface: ModuleSurface
+) -> bool:
+    val composite_count = surface.composite_names.len()
+    val index = surface.composite_index
+    if index.kinds.len() != composite_count or
+       index.field_offsets.len() != composite_count or
+       index.field_counts.len() != composite_count or
+       index.dependency_offsets.len() != composite_count or
+       index.dependency_counts.len() != composite_count or
+       index.field_names.len() != index.field_shapes.len() or
+       index.field_names.len() != index.field_type_names.len():
+        return false
+    var expected_field_offset = 0
+    var expected_dependency_offset = 0
+    var composite_index = 0
+    while composite_index < composite_count:
+        val field_offset = index.field_offsets[composite_index]
+        val field_count = index.field_counts[composite_index]
+        val dependency_offset = index.dependency_offsets[composite_index]
+        val dependency_count = index.dependency_counts[composite_index]
+        if field_offset != expected_field_offset or field_count < 0 or
+           field_offset + field_count > index.field_names.len() or
+           dependency_offset != expected_dependency_offset or
+           dependency_count < 0 or dependency_offset + dependency_count >
+               index.dependency_names.len():
+            return false
+        val kind = index.kinds[composite_index]
+        if kind != "class" and kind != "struct" and kind != "actor":
+            return false
+        expected_field_offset = field_offset + field_count
+        expected_dependency_offset = dependency_offset + dependency_count
+        composite_index = composite_index + 1
+    if expected_field_offset != index.field_names.len() or
+       expected_dependency_offset != index.dependency_names.len():
+        return false
+    var field_index = 0
+    while field_index < index.field_names.len():
+        val shape = index.field_shapes[field_index]
+        val type_name = index.field_type_names[field_index]
+        if shape != "named" and shape != "named_array" and
+           shape != "unsupported":
+            return false
+        if (shape == "unsupported" and type_name != "") or
+           (shape != "unsupported" and type_name == ""):
+            return false
+        field_index = field_index + 1
+    true
+
 pub(package) fn module_surface_signature_arrays_aligned(
     surface: ModuleSurface
 ) -> bool:
@@ -247,6 +306,8 @@ pub(package) fn module_surface_signature_arrays_aligned(
     true
 
 pub(package) fn module_surface_route_arrays_aligned(surface: ModuleSurface) -> bool:
+    if not module_surface_composite_arrays_aligned(surface):
+        return false
     if not module_surface_signature_arrays_aligned(surface):
         return false
     if surface.import_target_indices.len() != surface.import_target_names.len() or
