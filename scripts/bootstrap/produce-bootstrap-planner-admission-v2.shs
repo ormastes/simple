@@ -26,6 +26,9 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 root=$(CDPATH= cd -- "$root/.." && pwd -P)
 . "$root/scripts/check/lib/bootstrap-planner-admission-bound.shs"
+. "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+. "$root/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
+. "$root/scripts/check/lib/bootstrap-stage3/sanity.shs"
 
 adm_fail() {
     echo "bootstrap-admission-error: $1" >&2
@@ -73,16 +76,17 @@ fi
 adm_root=$(bootstrap_planner_v2_canonical_dir "$adm_root") || adm_fail root-not-canonical
 bootstrap_planner_v2_reason_allowed "$adm_target" "$adm_reason" || adm_fail typed-reason-not-allowed-for-target
 
+physical_cwd=$(pwd -P) || adm_fail cwd-not-canonical
 if [ -z "$adm_bootstrap_output" ]; then
     adm_bootstrap_output="$adm_root/build/bootstrap"
 fi
-case "$adm_bootstrap_output" in /*) ;; *) adm_bootstrap_output="$PWD/$adm_bootstrap_output" ;; esac
+case "$adm_bootstrap_output" in /*) ;; *) adm_bootstrap_output="$physical_cwd/$adm_bootstrap_output" ;; esac
 adm_bootstrap_output=$(bootstrap_planner_v2_canonical_dir "$adm_bootstrap_output") || adm_fail bootstrap-output-missing
 case "$adm_bootstrap_output" in "$adm_root"/build/*) ;; *) adm_fail bootstrap-output-outside-build-root ;; esac
 
-case "$adm_parent" in /*) ;; *) adm_parent="$PWD/$adm_parent" ;; esac
+case "$adm_parent" in /*) ;; *) adm_parent="$physical_cwd/$adm_parent" ;; esac
 if [ -z "$adm_runtime" ]; then adm_runtime="$adm_root/src/runtime"; fi
-case "$adm_runtime" in /*) ;; *) adm_runtime="$PWD/$adm_runtime" ;; esac
+case "$adm_runtime" in /*) ;; *) adm_runtime="$physical_cwd/$adm_runtime" ;; esac
 
 # --- 2. parent authority -----------------------------------------------------
 # The parent must be a stage2 artifact carrying sanity + provenance evidence.
@@ -100,9 +104,39 @@ sanity_file="$parent_dir/stage2-sanity.receipt"
 prov_file="$parent_dir/stage2-provenance.receipt"
 bootstrap_planner_v2_canonical_file "$sanity_file" >/dev/null 2>&1 || adm_fail parent-stage2-sanity-unavailable
 bootstrap_planner_v2_canonical_file "$prov_file" >/dev/null 2>&1 || adm_fail parent-stage2-provenance-unavailable
-grep -Fq 'stage2-sanity: pass' "$sanity_file" || adm_fail parent-stage2-sanity-not-pass
-if grep -Fq 'rust-seed' "$prov_file"; then adm_fail parent-compiler-is-rust-seed; fi
-grep -Fq 'stage2-provenance: pure-simple' "$prov_file" || adm_fail parent-stage2-provenance-not-pure-simple
+
+parent_field() {
+    pf_file=$1 pf_key=$2
+    [ "$(grep -c "^${pf_key}=" "$pf_file" 2>/dev/null || true)" -eq 1 ] || return 1
+    sed -n "s/^${pf_key}=//p" "$pf_file"
+}
+parent_sha=$(bootstrap_planner_v2_hash_file "$parent_file")
+[ "$(parent_field "$sanity_file" schema || true)" = simple-bootstrap-stage2-parent-sanity-v1 ] || adm_fail parent-stage2-sanity-schema-mismatch
+[ "$(grep -c '^stage2-sanity: pass$' "$sanity_file" 2>/dev/null || true)" -eq 1 ] || adm_fail parent-stage2-sanity-not-pass
+[ "$(parent_field "$sanity_file" candidate_sha256 || true)" = "$parent_sha" ] || adm_fail parent-stage2-sanity-candidate-mismatch
+[ "$(parent_field "$prov_file" schema || true)" = simple-bootstrap-stage2-parent-provenance-v1 ] || adm_fail parent-stage2-provenance-schema-mismatch
+[ "$(grep -c '^stage2-provenance: pure-simple$' "$prov_file" 2>/dev/null || true)" -eq 1 ] || adm_fail parent-stage2-provenance-not-pure-simple
+[ "$(parent_field "$prov_file" authority || true)" = explicit-full-bootstrap-stage2-trust-root ] || adm_fail parent-stage2-provenance-authority-mismatch
+[ "$(parent_field "$prov_file" candidate_sha256 || true)" = "$parent_sha" ] || adm_fail parent-stage2-provenance-candidate-mismatch
+admission_file=$(parent_field "$sanity_file" admission_receipt_path || true)
+[ -n "$admission_file" ] && [ "$admission_file" = "$(parent_field "$prov_file" admission_receipt_path || true)" ] || adm_fail parent-stage2-admission-path-mismatch
+admission_file=$(bootstrap_planner_v2_canonical_file "$admission_file") || adm_fail parent-stage2-admission-unavailable
+case "$admission_file" in "$adm_root/build/bootstrap"/*) ;; *) adm_fail parent-stage2-admission-outside-bootstrap ;; esac
+admission_sha=$(bootstrap_planner_v2_hash_file "$admission_file")
+[ "$(parent_field "$sanity_file" admission_receipt_sha256 || true)" = "$admission_sha" ] || adm_fail parent-stage2-sanity-admission-mismatch
+[ "$(parent_field "$prov_file" admission_receipt_sha256 || true)" = "$admission_sha" ] || adm_fail parent-stage2-provenance-admission-mismatch
+admission_candidate=$(parent_field "$admission_file" candidate_path || true)
+admission_source=$(parent_field "$admission_file" source_snapshot_path || true)
+admission_runtime=$(parent_field "$admission_file" runtime_snapshot_path || true)
+admission_tool=$(parent_field "$admission_file" tool_authority_path || true)
+admission_args_sha=$(parent_field "$admission_file" build_args_sha256 || true)
+admission_sanity=$(parent_field "$admission_file" sanity_evidence_path || true)
+admission_receiver=$(parent_field "$admission_file" receiver_evidence_path || true)
+bootstrap_stage3_verify_stage2_admission_receipt \
+    "$admission_file" "$admission_candidate" "$admission_source" \
+    "$admission_runtime" "$admission_tool" "$admission_args_sha" \
+    "$admission_sanity" "$admission_receiver" || adm_fail parent-stage2-admission-invalid
+[ "$(bootstrap_planner_v2_hash_file "$admission_candidate")" = "$parent_sha" ] || adm_fail parent-stage2-admission-candidate-mismatch
 
 planner_source="$adm_root/src/app/cli/bootstrap_reason_planner.spl"
 bootstrap_planner_v2_canonical_file "$planner_source" >/dev/null || adm_fail planner-source-missing
@@ -116,7 +150,6 @@ mkdir "$lock_dir" 2>/dev/null || adm_fail admission-lock-held
 trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT HUP INT TERM
 
 # --- 3. measure --------------------------------------------------------------
-parent_sha=$(bootstrap_planner_v2_hash_file "$parent_file")
 sanity_sha=$(bootstrap_planner_v2_hash_file "$sanity_file")
 prov_sha=$(bootstrap_planner_v2_hash_file "$prov_file")
 planner_source_sha=$(bootstrap_planner_v2_hash_file "$planner_source")
