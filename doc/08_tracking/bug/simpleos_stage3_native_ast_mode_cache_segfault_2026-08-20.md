@@ -1053,3 +1053,49 @@ ending the scope. This source correction is intentionally left unclaimed in
 this session: the mandatory third-cycle stop was reached. The next cycle must
 rebuild Phase 2 and require the detailed retained-alignment diagnostic to be
 empty before Stage 3 may proceed.
+
+The next Stage-3 cycle cleared that retained-alignment gate and entered HIR,
+proving the explicit route-payload promotion. HIR then failed from source 1
+with `missing module surface` for almost every import and eventually exited
+139. The first failing path still queried
+`self.module_surfaces.index_by_name.contains_key(...)` directly in six import
+resolution/key-normalization branches. That Dict is intentionally invalid
+after retention (`len() == -1`), so it can report a spurious hit; the subsequent
+scalar-built `surface_index_for_name` correctly returns `-1`, producing the
+observed contradiction.
+
+All retained HIR membership decisions must use `surface_index_for_name`, whose
+per-lowerer Dict is rebuilt from the promoted ordered name/index arrays. The
+construction/freeze owner remains the only code allowed to access the original
+compatibility Dict directly.
+
+Cycle 2 removed all `missing module surface` failures, but imported types and
+functions remained unresolved from source 1. The retained module identities
+and routes are therefore sound; the next layer is each surface's declaration
+payload. `register_imported_symbol` reads `composites`, `enums`, `traits`,
+`callables`, and `constants`, while the existing per-file promotion relies on
+walking through the `ModuleSurface` raw class carrier. The route-array result
+already proved that raw-carrier traversal is not a sufficient ownership
+boundary.
+
+The per-file promotion facade now promotes every declaration name array,
+declaration Dict, import/export array, impl array, and export-origin index
+carrier explicitly before promoting the surface class. Retained alignment
+also requires each declaration Dict length to equal its scalar name projection,
+so Stage 3 fails before HIR with exact counts if any declaration carrier is
+lost.
+
+Cycle 3 proved that direct promotion is not a viable Dict transport: surface 0
+retained `callable_names=26`, but `callables.len()=-1`; every other declaration
+Dict also reported `-1` while its scalar name array remained valid. The new
+alignment gate therefore failed cleanly before HIR rather than repeating the
+unresolved-symbol cascade. No fourth cycle was started.
+
+The required next owner change is structural, not another promotion retry.
+`ModuleSurface` needs aligned value arrays beside `composite_names`,
+`enum_names`, `trait_names`, `callable_names`, `type_alias_names`, and
+`constant_names`. Construction may retain Dicts as fast mutable builders, but
+freeze must publish name/value arrays and all post-retention declaration
+membership and payload reads must use those arrays. This follows the existing
+route-array rule already documented on the class: no
+`Dict<text, aggregate>` crosses the native Stage-3 boundary.
