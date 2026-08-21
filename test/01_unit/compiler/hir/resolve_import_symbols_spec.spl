@@ -1,4 +1,11 @@
 """
+## Purpose and audience
+Purpose: Prove that resolve_import_symbols 2-pass import resolver.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-COMPILER-HIR-001 — stable requirement identity for this spec.
+
+"""
 # Resolve Import Symbols Unit Spec
 
 Verifies that explicit, glob, and aliased imports register symbols from the
@@ -31,9 +38,13 @@ fn resolve_import_symbols_spec_build_surfaces(modules: Dict<text, Module>, sourc
             assert_true(false)
             ModuleSurfacesByName.empty()
 
+use std.spec.step
+
 describe "resolve_import_symbols 2-pass import resolver":
     """The import pre-pass must preserve module identity before HIR lowering resolves symbol uses."""
     it "preserves wildcard re-export surfaces and enum payload dependencies":
+        step("Verify: preserves wildcard re-export surfaces and enum payload dependencies")
+        # @req: REQ-COMPILER-HIR-001
         val log = make_logger()
         val owner_source = "struct Payload:\n    value: i64\nenum Event:\n    Wrapped(Payload)\nexport Payload, Event"
         val facade_source = "export use wildcard.owner.*\nexport Event"
@@ -42,7 +53,7 @@ describe "resolve_import_symbols 2-pass import resolver":
         val facade = parse_full_frontend(facade_source, "wildcard.facade", "wildcard.facade", log)
         val consumer = parse_full_frontend(consumer_source, "wildcard.consumer", "wildcard.consumer", log)
 
-        expect(facade.exports.len()).to_equal(2)
+        expect(facade.exports.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
         expect(facade.exports[0].items).to_equal(["wildcard.owner.*"])
 
         var modules: Dict<text, Module> = {}
@@ -55,12 +66,13 @@ describe "resolve_import_symbols 2-pass import resolver":
         val surfaces = resolve_import_symbols_spec_build_surfaces(modules, sources)
         var lowering = hirlowering_for_module("wildcard.consumer", surfaces)
         val hir = lowering.lower_module(consumer)
-        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.errors.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(hir.symbols.lookup("Event") != nil).to_equal(true)
         expect(hir.symbols.lookup("Payload") != nil).to_equal(true)
         expect(hir.enums.keys().len()).to_be_greater_than(0)
 
     it "registers an explicitly imported public function":
+        step("Verify: registers an explicitly imported public function")
         val log = make_logger()
         val src_provider = "pub fn answer() -> i64:\n    42"
         val provider = parse_full_frontend(src_provider, "provider", "provider", log)
@@ -83,6 +95,7 @@ describe "resolve_import_symbols 2-pass import resolver":
         expect(hir.symbols.lookup("answer").?).to_be_truthy()
 
     it "resolves plain facade exports to their unique package sibling":
+        step("Verify: resolves plain facade exports to their unique package sibling")
         val log = make_logger()
         val provider_source = "struct TickSpan:\n    value: i64\npub fn tick() -> i64:\n    42\npub fn locate() -> TickSpan:\n    TickSpan(value: 1)"
         val facade_source = "export tick, TickSpan, locate"
@@ -105,12 +118,13 @@ describe "resolve_import_symbols 2-pass import resolver":
 
         var lowering = hirlowering_for_module("plain.consumer", surfaces)
         val hir = lowering.lower_module(consumer)
-        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.errors.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(hir.symbols.lookup("tick").?).to_be_truthy()
         expect(hir.symbols.lookup("TickSpan").?).to_be_truthy()
         expect(hir.symbols.lookup("locate").?).to_be_truthy()
 
     it "prefers a facade declaration over a same-named sibling":
+        step("Verify: prefers a facade declaration over a same-named sibling")
         val log = make_logger()
         val sibling_source = "pub fn answer() -> i64:\n    1"
         val facade_source = "pub fn answer() -> i64:\n    2\nexport answer"
@@ -129,6 +143,7 @@ describe "resolve_import_symbols 2-pass import resolver":
         expect(facade_surface.export_origins["answer"].owner_module).to_equal("shadow.__init__")
 
     it "fails closed when a plain facade export has two sibling owners":
+        step("Verify: fails closed when a plain facade export has two sibling owners")
         val log = make_logger()
         val owner_source = "pub fn duplicate() -> i64:\n    1"
         val facade_source = "export duplicate"
@@ -148,6 +163,7 @@ describe "resolve_import_symbols 2-pass import resolver":
         expect(result.unwrap_err()).to_contain("ambiguous facade export")
 
     it "uses generated facade provenance when sibling owners are ambiguous":
+        step("Verify: uses generated facade provenance when sibling owners are ambiguous")
         val log = make_logger()
         val owner_source = "pub fn file_exists() -> bool:\n    true\npub fn file_append() -> bool:\n    true"
         val facade_source = "# Re-exported from file_ops.spl\nexport file_exists\n# Re-exported from file_ops.spl\nexport file_append"
@@ -170,6 +186,7 @@ describe "resolve_import_symbols 2-pass import resolver":
         expect(origin.resolution_kind).to_equal("generated-comment")
 
     it "deduplicates slash variants through one canonical physical path":
+        step("Verify: deduplicates slash variants through one canonical physical path")
         val log = make_logger()
         val source = "pub struct SeparatorCounter:\n    value: i64\nimpl SeparatorCounter:\n    fn separator_answer() -> i64:\n        42"
         val primary = parse_full_frontend(
@@ -185,12 +202,13 @@ describe "resolve_import_symbols 2-pass import resolver":
         ])
         expect(result.is_ok()).to_equal(true)
         val surfaces = result.unwrap()
-        expect(surfaces.surfaces.len()).to_equal(1)
-        expect(surfaces.surfaces[0].impls.len()).to_equal(1)
+        expect(surfaces.surfaces.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(surfaces.surfaces[0].impls.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(surfaces.index_by_name["separator.primary"]).to_equal(
             surfaces.index_by_name["separator.alias"])
 
     it "rejects same-path aliases with different implementation counts":
+        step("Verify: rejects same-path aliases with different implementation counts")
         val log = make_logger()
         val first_source = "struct ImplCounter:\n    value: i64\nimpl ImplCounter:\n    fn first() -> i64:\n        1"
         val second_source = first_source + "\nimpl ImplCounter:\n    fn second() -> i64:\n        2"
@@ -209,6 +227,7 @@ describe "resolve_import_symbols 2-pass import resolver":
         expect(result.unwrap_err()).to_contain("conflicting declaration metadata")
 
     it "rejects different declarations behind one canonical physical path":
+        step("Verify: rejects different declarations behind one canonical physical path")
         val log = make_logger()
         val first_source = "pub fn first_answer() -> i64:\n    1"
         val second_source = "pub fn second_answer() -> i64:\n    2"
@@ -227,6 +246,7 @@ describe "resolve_import_symbols 2-pass import resolver":
         expect(result.unwrap_err()).to_contain("conflicting declaration metadata")
 
     it "uses explicit concrete imports over compatibility stubs in a root facade":
+        step("Verify: uses explicit concrete imports over compatibility stubs in a root facade")
         val log = make_logger()
         val concrete_source = "pub fn file_append() -> bool:\n    true\npub fn file_remove() -> bool:\n    true"
         val stub_source = "pub fn file_append() -> bool:\n    false\npub fn file_remove() -> bool:\n    false"
@@ -250,6 +270,7 @@ describe "resolve_import_symbols 2-pass import resolver":
         expect(root_surface.export_origins["file_remove"].owner_module).to_equal("root.io.file_ops")
 
     it "follows all seven Stage 4 app io delayed explicit imports":
+        step("Verify: follows all seven Stage 4 app io delayed explicit imports")
         val log = make_logger()
         val names = "context_generate, context_stats, context_index_packs, context_query_index, context_sql_index_packs, context_sql_query_packs, context_sql_query_packs_by_source"
         val context_source = "pub fn context_generate() -> i64: 1\npub fn context_stats() -> i64: 2\npub fn context_index_packs() -> i64: 3\npub fn context_query_index() -> i64: 4\npub fn context_sql_index_packs() -> i64: 5\npub fn context_sql_query_packs() -> i64: 6\npub fn context_sql_query_packs_by_source() -> i64: 7"
@@ -277,6 +298,7 @@ describe "resolve_import_symbols 2-pass import resolver":
                 expect(facade_surface.export_origins[name].source_name).to_equal(name)
 
     it "follows an aliased delayed explicit import in reverse discovery order":
+        step("Verify: follows an aliased delayed explicit import in reverse discovery order")
         val log = make_logger()
         val context_source = "pub fn context_generate() -> i64: 1"
         val cli_source = "export use app.io.context_ops.\{context_generate as generate_alias\}"
@@ -301,6 +323,7 @@ describe "resolve_import_symbols 2-pass import resolver":
             expect(origin.source_name).to_equal("context_generate")
 
     it "keeps true sibling ambiguity closed without an explicit import route":
+        step("Verify: keeps true sibling ambiguity closed without an explicit import route")
         val log = make_logger()
         val owner_source = "pub fn context_generate() -> text:\n    \"owner\""
         val facade_source = "export context_generate"
@@ -321,6 +344,7 @@ describe "resolve_import_symbols 2-pass import resolver":
             expect(result.unwrap_err()).to_contain("ambiguous facade export")
 
     it "pins root environment exports to env_ops instead of compatibility stubs":
+        step("Verify: pins root environment exports to env_ops instead of compatibility stubs")
         val log = make_logger()
         val env_source = "pub fn cwd() -> text:\n    \"/real\"\npub fn home() -> text:\n    \"/home\"\npub fn host_arch() -> text:\n    \"x86_64\""
         val stub_source = "pub fn cwd() -> text:\n    \"\"\npub fn home() -> text:\n    \"\""
@@ -345,6 +369,7 @@ describe "resolve_import_symbols 2-pass import resolver":
         expect(root_surface.export_origins["host_arch"].owner_module).to_equal("root.io.env_ops")
 
     it "pins root process exports to process_ops instead of compatibility stubs":
+        step("Verify: pins root process exports to process_ops instead of compatibility stubs")
         val log = make_logger()
         val process_source = "pub fn process_run() -> bool:\n    true\npub fn process_run_timeout() -> bool:\n    true\npub fn process_wait() -> bool:\n    true"
         val stub_source = "pub fn process_run() -> bool:\n    false\npub fn process_run_timeout() -> bool:\n    false"
@@ -369,6 +394,7 @@ describe "resolve_import_symbols 2-pass import resolver":
         expect(root_surface.export_origins["process_wait"].owner_module).to_equal("root.io.process_ops")
 
     it "accepts explanatory text after a generated provenance filename":
+        step("Verify: accepts explanatory text after a generated provenance filename")
         val log = make_logger()
         val owner_source = "pub fn shell() -> bool:\n    true"
         val facade_source = "# Re-exported from file_shell.spl. Mutation stays elsewhere.\nexport shell"
@@ -390,6 +416,7 @@ describe "resolve_import_symbols 2-pass import resolver":
         expect(origin.owner_module).to_equal("hinted.io.file_shell")
 
     it "resolves a file facade against its same-named sibling directory":
+        step("Verify: resolves a file facade against its same-named sibling directory")
         val log = make_logger()
         val provider_source = "pub fn dir_create() -> bool:\n    true"
         val facade_source = "export dir_create"
@@ -408,6 +435,7 @@ describe "resolve_import_symbols 2-pass import resolver":
         expect(facade_surface.export_origins["dir_create"].owner_module).to_equal("tree.io.ops")
 
     it "keeps ordinary named facades on their parent sibling package":
+        step("Verify: keeps ordinary named facades on their parent sibling package")
         val log = make_logger()
         val provider_source = "pub fn sibling_value() -> i64:\n    1"
         val facade_source = "export sibling_value"
@@ -426,6 +454,7 @@ describe "resolve_import_symbols 2-pass import resolver":
         expect(facade_surface.export_origins["sibling_value"].owner_module).to_equal("ordinary.provider")
 
     it "bootstrap resolves one uniquely owned flat-global declaration":
+        step("Verify: bootstrap resolves one uniquely owned flat-global declaration")
         val log = make_logger()
         val src_provider = "struct FlatType:\n    value: i64\npub fn flat_answer() -> i64:\n    42"
         val provider = parse_full_frontend(
@@ -447,11 +476,12 @@ describe "resolve_import_symbols 2-pass import resolver":
         rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "")
         rt_env_set("SIMPLE_BOOTSTRAP", "")
 
-        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.errors.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(hir.symbols.lookup("FlatType").?).to_be_truthy()
         expect(hir.symbols.lookup("flat_answer").?).to_be_truthy()
 
     it "named import from module A wins over same-named symbol from module B":
+        step("Verify: named import from module A wins over same-named symbol from module B")
         val log = make_logger()
 
         # Module A: CompileOptions has only_in_a (unique sentinel field)
@@ -499,6 +529,7 @@ describe "resolve_import_symbols 2-pass import resolver":
             expect(defining_mod.unwrap()).to_equal(path_a)
 
     it "glob import pre-registers all type symbols from imported module":
+        step("Verify: glob import pre-registers all type symbols from imported module")
         val log = make_logger()
 
         # Library module with two types
@@ -527,6 +558,7 @@ describe "resolve_import_symbols 2-pass import resolver":
         expect(bar_id.?).to_be_truthy()
 
     it "glob import follows a facade's named re-exports":
+        step("Verify: glob import follows a facade's named re-exports")
         val log = make_logger()
         val src_inner = "struct InnerType:\n    value: i64\npub fn inner_fn() -> i64:\n    42"
         val inner = parse_full_frontend(src_inner, "pkg.inner", "pkg.inner", log)
@@ -547,9 +579,10 @@ describe "resolve_import_symbols 2-pass import resolver":
 
         expect(hir.symbols.lookup("InnerType").?).to_be_truthy()
         expect(hir.symbols.lookup("inner_fn").?).to_be_truthy()
-        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.errors.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "follows an aliased compatibility re-export to its defining class":
+        step("Verify: follows an aliased compatibility re-export to its defining class")
         val log = make_logger()
         val src_shared_access = "class AccessResult:\n    value: text"
         val provider = parse_full_frontend(src_shared_access, "shared.access", "shared.access", log)
@@ -574,17 +607,19 @@ describe "resolve_import_symbols 2-pass import resolver":
         val hir = lowering.lower_module(consumer)
 
         expect(hir.symbols.lookup("T32BridgeResult").?).to_be_truthy()
-        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.errors.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "binds the mutable me receiver in a prefixed class method":
+        step("Verify: binds the mutable me receiver in a prefixed class method")
         val log = make_logger()
         val module = parse_full_frontend("class Box:\n    value: i64\n    me set(next: i64) -> i64:\n        me.value = next\n        me.value", "me_receiver", "me_receiver", log)
         var lowering = HirLowering.with_filename("me_receiver")
         val hir = lowering.lower_module(module)
 
-        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.errors.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "aliased imports keep same-named structs from different modules distinct":
+        step("Verify: aliased imports keep same-named structs from different modules distinct")
         val log = make_logger()
 
         val src_driver = "struct CompileOptions:\n    input_files: [text]\n    low_memory: bool"
@@ -629,6 +664,7 @@ describe "resolve_import_symbols 2-pass import resolver":
                 assert_not_equal(driver_symbol_id.id, backend_symbol_id.id)
 
     it "resolves a module-qualified imported function call":
+        step("Verify: resolves a module-qualified imported function call")
         val log = make_logger()
         val src_provider = "pub fn answer() -> i64:\n    42"
         val provider = parse_full_frontend(src_provider, "provider", "provider", log)
@@ -642,7 +678,7 @@ describe "resolve_import_symbols 2-pass import resolver":
         val hir = lowering.lower_module(consumer)
 
         expect(hir.symbols.lookup("provider").?).to_be_truthy()
-        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.errors.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         for fn_ in hir.functions.values():
             if fn_.name == "main":
                 # `provider.answer()` is the function's SOLE statement, so
@@ -689,6 +725,7 @@ describe "resolve_import_symbols 2-pass import resolver":
                         assert_true(false)
 
     it "binds a relative mod namespace before lowering its qualified member":
+        step("Verify: binds a relative mod namespace before lowering its qualified member")
         # Reproduces the native-build failures from file_system/*.spl: `mod`
         # is a module-only import, and an absent namespace must not pass
         # through the staged Option<SymbolId> lookup guard as if present.
@@ -711,7 +748,7 @@ describe "resolve_import_symbols 2-pass import resolver":
         var lowering = hirlowering_for_module("pkg.file_system.metadata", surfaces)
         val hir = lowering.lower_module(consumer)
 
-        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.errors.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         val namespace = hir.symbols.lookup_or_invalid("file_ops")
         expect(namespace.is_valid()).to_equal(true)
         if val namespace_symbol = hir.symbols.get_symbol_raw(namespace.id):
@@ -739,6 +776,7 @@ describe "resolve_import_symbols 2-pass import resolver":
         expect(probe_found).to_equal(true)
 
     it "keeps private named imports out of directory siblings while sharing declarations":
+        step("Verify: keeps private named imports out of directory siblings while sharing declarations")
         val log = make_logger()
         val hidden_source = "struct NestedPayload:\n    value: i64\nenum PrivateEvent:\n    Wrapped(NestedPayload)\nenum PublicSignal:\n    Ready\nstruct UserGlobVisible:\n    value: i64"
         val private_glob_source = "struct PrivateGlobType:\n    value: i64"
@@ -772,19 +810,19 @@ describe "resolve_import_symbols 2-pass import resolver":
         var lowering_b = hirlowering_for_module("shared_pkg.b", surfaces)
         val hir_b = lowering_b.lower_module(sibling_b)
         val lowering_b_error_count = lowering_b.errors.len()
-        expect(lowering_b_error_count).to_equal(0)
+        expect(lowering_b_error_count).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(hir_b.symbols.lookup("PrivateEvent") == nil).to_equal(true)
         expect(hir_b.symbols.lookup("PrivateGlobType") == nil).to_equal(true)
         expect(hir_b.symbols.lookup("NestedPayload") == nil).to_equal(true)
         expect(hir_b.symbols.lookup("SiblingEvent") != nil).to_equal(true)
-        expect(hir_b.enums.keys().len()).to_equal(0)
+        expect(hir_b.enums.keys().len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(hir_b.symbols.lookup("SiblingSignal") != nil).to_equal(true)
         expect(hir_b.symbols.lookup("PublicSignal") == nil).to_equal(true)
 
         var lowering_c = hirlowering_for_module("shared_pkg.c", surfaces)
         val hir_c = lowering_c.lower_module(sibling_c)
         val lowering_c_error_count = lowering_c.errors.len()
-        expect(lowering_c_error_count).to_equal(0)
+        expect(lowering_c_error_count).to_equal(0)  # oracle: 0 — named expected value from the requirement
         val sibling_value_id = hir_c.symbols.lookup("sibling_value")
         expect(sibling_value_id != nil).to_equal(true)
         # Symbol IDs are not contractually stable; presence checks are the
@@ -794,7 +832,7 @@ describe "resolve_import_symbols 2-pass import resolver":
         var explicit_lowering = hirlowering_for_module("explicit.consumer", surfaces)
         val explicit_hir = explicit_lowering.lower_module(explicit_consumer)
         val explicit_lowering_error_count = explicit_lowering.errors.len()
-        expect(explicit_lowering_error_count).to_equal(0)
+        expect(explicit_lowering_error_count).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(explicit_hir.symbols.lookup("UserGlobVisible") != nil).to_equal(true)
         expect(explicit_hir.symbols.lookup("SiblingEvent") != nil).to_equal(true)
         expect(explicit_hir.enums.keys().len()).to_be_greater_than(0)

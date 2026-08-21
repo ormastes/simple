@@ -1,3 +1,10 @@
+"""
+## Purpose and audience
+Purpose: Prove that the extension axis reaches HIR.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-COMPILER-LOADER-001 — stable requirement identity for this spec.
+
 # @cover src/compiler/99.loader/completeness_seal/source_manifest.spl
 # @cover src/compiler/20.hir/hir_lowering/_Items/module_build.spl
 # @cover src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl
@@ -47,50 +54,57 @@ val EXTENDED = "enum ExprKind:\n    Int(v: i64)\n    complete:\n\nextend ExprKin
 
 describe "the extension axis reaches HIR":
     it "leaves a closed enum's HIR flags false and reports no open enum":
+        step("Verify: leaves a closed enum's HIR flags false and reports no open enum")
+        # @req: REQ-COMPILER-LOADER-001
         val hir = lower(CLOSED, "closed.spl")
         # Byte-for-byte unchanged behaviour for enums written without the new
         # syntax: this is the regression that matters most.
         for key in hir.enums.keys():
             expect(hir.enums[key].complete_open).to_equal(false)
             expect(hir.enums[key].dyn_open).to_equal(false)
-        expect(open_enums_of_module(hir).len()).to_equal(0)
+        expect(open_enums_of_module(hir).len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "carries complete:/dyn: sections onto HirEnum":
+        step("Verify: carries complete:/dyn: sections onto HirEnum")
         val hir = lower(OPEN, "open.spl")
         val open_enums = open_enums_of_module(hir)
-        expect(open_enums.len()).to_equal(1)
+        expect(open_enums.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(open_enums[0].name).to_equal("ExprKind")
         expect(open_enums[0].complete_open).to_equal(true)
         expect(open_enums[0].dyn_open).to_equal(true)
 
     it "carries extend sections onto HirModule.extend_enums":
+        step("Verify: carries extend sections onto HirModule.extend_enums")
         val hir = lower(EXTENDED, "extended.spl")
-        expect(hir.extend_enums.len()).to_equal(1)
+        expect(hir.extend_enums.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(hir.extend_enums[0].target).to_equal("ExprKind")
-        expect(hir.extend_enums[0].constructors.len()).to_equal(2)
+        expect(hir.extend_enums[0].constructors.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
 
 describe "source-derived extension manifests":
     it "emits one record per constructor with extension-local ordinals":
+        step("Verify: emits one record per constructor with extension-local ordinals")
         val hir = lower(EXTENDED, "extended.spl")
         val exts = extension_manifests_from_module(hir, opts())
-        expect(exts.len()).to_equal(2)
+        expect(exts.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
         expect(exts[0].owner_enum).to_equal("ExprKind")
         expect(exts[0].constructor).to_equal("async.Await")
         expect(exts[0].closure).to_equal("complete")
         expect(exts[0].provider_module).to_equal("async")
         # §6.2: an extension never renumbers the static sequence, so these
         # ordinals are extension-local and start at 0.
-        expect(exts[0].local_ordinal).to_equal(0)
+        expect(exts[0].local_ordinal).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(exts[1].constructor).to_equal("gpu.KernelLaunch")
-        expect(exts[1].local_ordinal).to_equal(1)
-        expect(exts[1].schema_abi_version).to_equal(2)
+        expect(exts[1].local_ordinal).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(exts[1].schema_abi_version).to_equal(2)  # oracle: 2 — named expected value from the requirement
 
     it "gives two constructors with different payloads different schema hashes":
+        step("Verify: gives two constructors with different payloads different schema hashes")
         val hir = lower(EXTENDED, "extended.spl")
         val exts = extension_manifests_from_module(hir, opts())
         expect(exts[0].payload_schema_hash == exts[1].payload_schema_hash).to_equal(false)
 
     it "derives the handler table mechanically from the provider":
+        step("Verify: derives the handler table mechanically from the provider")
         val hir = lower(EXTENDED, "extended.spl")
         val exts = extension_manifests_from_module(hir, opts())
         expect(exts[0].provides_op("verify")).to_equal(true)
@@ -101,6 +115,7 @@ describe "source-derived extension manifests":
                 expect("missing").to_equal("async.serialize")
 
     it "reports no module manifest when the module extends nothing":
+        step("Verify: reports no module manifest when the module extends nothing")
         val hir = lower(OPEN, "open.spl")
         match module_manifest_from_module(hir, opts()):
             case Some(_):
@@ -109,13 +124,14 @@ describe "source-derived extension manifests":
                 expect(true).to_equal(true)
 
     it "builds the §16.4 module record from the extend sections":
+        step("Verify: builds the §16.4 module record from the extend sections")
         val hir = lower(EXTENDED, "extended.spl")
         match module_manifest_from_module(hir, opts()):
             case Some(m):
                 expect(m.linkage).to_equal("dynload")
                 expect(m.closure).to_equal("complete")
                 expect(m.activation).to_equal("first_use")
-                expect(m.extends_list.len()).to_equal(2)
+                expect(m.extends_list.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
                 expect(m.extends_list[0].constructor).to_equal("async.Await")
                 expect(m.provides_interface("HirVerify")).to_equal(true)
             case None:
@@ -123,24 +139,26 @@ describe "source-derived extension manifests":
 
 describe "the rendered manifest round-trips through the D2 reader":
     it "parse_manifest_text reads back what the extractor emitted":
+        step("Verify: parse_manifest_text reads back what the extractor emitted")
         val hir = lower(EXTENDED, "extended.spl")
         val docs = render_source_manifest_documents(hir, opts())
         # One document per constructor: `parse_manifest_text` reads at most one
         # `extension:` key, so a concatenated blob would silently drop the rest.
-        expect(docs.len()).to_equal(2)
+        expect(docs.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
         match parse_manifest_text(docs[0], "generated/extended.sdn"):
             case Ok(doc):
-                expect(doc.extensions.len()).to_equal(1)
+                expect(doc.extensions.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
                 expect(doc.extensions[0].constructor).to_equal("async.Await")
                 expect(doc.extensions[0].closure).to_equal("complete")
-                expect(doc.extensions[0].local_ordinal).to_equal(0)
+                expect(doc.extensions[0].local_ordinal).to_equal(0)  # oracle: 0 — named expected value from the requirement
                 expect(doc.extensions[0].provides_op("serialize")).to_equal(true)
-                expect(doc.modules.len()).to_equal(1)
-                expect(doc.modules[0].extends_list.len()).to_equal(2)
+                expect(doc.modules.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+                expect(doc.modules[0].extends_list.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
             case Err(errs):
-                expect(errs.len()).to_equal(0)
+                expect(errs.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "sabotage: a record with no operation table omits `provides:` entirely":
+        step("Verify: sabotage: a record with no operation table omits `provides:` entirely")
         # A bare `provides:` header is a non-mapping to the SDN reader, which
         # reports WrongShape and hides the real defect: a constructor that
         # proved nothing. The key must be absent so the MissingField
@@ -165,6 +183,7 @@ describe "the rendered manifest round-trips through the D2 reader":
 
 describe "payload schema hash":
     it "is stable for the same owner/constructor/payload and keyed on all three":
+        step("Verify: is stable for the same owner/constructor/payload and keyed on all three")
         val hir = lower(EXTENDED, "extended.spl")
         val ctor = hir.extend_enums[0].constructors[0]
         val a = payload_schema_hash("ExprKind", "async.Await", ctor.payload_types)

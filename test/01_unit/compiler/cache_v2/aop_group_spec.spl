@@ -1,4 +1,11 @@
 """
+## Purpose and audience
+Purpose: Prove that AOP selection/weave key stability (core invariant).
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-COMPILER-CACHE-V2-001 — stable requirement identity for this spec.
+
+"""
 # AOP Cache Group Specification (Semantic Incremental Build v2, C4)
 
 **Design:** doc/05_design/compiler/semantic_incremental_build_cache_aop_formal_2026-08-09.md §16
@@ -36,6 +43,8 @@ fn weave_key_for(selection_digest: text, descriptor: text) -> AopWeaveKey:
 
 describe "AOP selection/weave key stability (core invariant)":
     it "advice body-only change preserves selection key and weave key":
+        step("Verify: advice body-only change preserves selection key and weave key")
+        # @req: REQ-COMPILER-CACHE-V2-001
         val r = rule_log(10)
         val iface = aop_advice_interface_digest(r)
         val roots = ["root-a", "root-b"]
@@ -53,6 +62,7 @@ describe "AOP selection/weave key stability (core invariant)":
         expect(w1).to_equal(w2)
 
     it "advice interface change (form) changes the selection key":
+        step("Verify: advice interface change (form) changes the selection key")
         val r1 = rule_log(10)
         var r2 = rule_log(10)
         r2.form = AdviceForm.Around
@@ -62,35 +72,39 @@ describe "AOP selection/weave key stability (core invariant)":
         expect(s1 == s2).to_equal(false)
 
     it "advice ordering (priority) change changes the selection key":
+        step("Verify: advice ordering (priority) change changes the selection key")
         val roots = ["root-a"]
         val s1 = aop_selection_key_digest(aop_selection_key_today("p", roots, [aop_advice_interface_digest(rule_log(10))]))
         val s2 = aop_selection_key_digest(aop_selection_key_today("p", roots, [aop_advice_interface_digest(rule_log(20))]))
         expect(s1 == s2).to_equal(false)
 
     it "predicate whitespace-only respelling preserves the selector digest":
+        step("Verify: predicate whitespace-only respelling preserves the selector digest")
         expect(aop_selector_digest("  module_path ==   app.core ")).to_equal(aop_selector_digest("module_path == app.core"))
 
 describe "Candidate Merkle partitioning":
     it "a new candidate changes only its own partition root, siblings unchanged":
+        step("Verify: a new candidate changes only its own partition root, siblings unchanged")
         val a1 = ctx("mod.a", "f1", "fn()")
         val a2 = ctx("mod.a", "f2", "fn()")
         val b1 = ctx("mod.b", "g1", "fn()")
         val parts1 = aop_partition_candidates([a1, b1], ["execution", "execution"])
         val parts2 = aop_partition_candidates([a1, a2, b1], ["execution", "execution", "execution"])
-        expect(parts1.len()).to_equal(2)
-        expect(parts2.len()).to_equal(2)
+        expect(parts1.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
+        expect(parts2.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
         # Partitions are sorted by bucket id, so mod.a precedes mod.b in both.
         expect(parts1[0].root == parts2[0].root).to_equal(false)   # mod.a root moved
         expect(parts1[1].root).to_equal(parts2[1].root)            # mod.b untouched
         # And the sorted root set differs overall.
         val roots1 = aop_partition_roots(parts1)
         val roots2 = aop_partition_roots(parts2)
-        expect(roots1.len()).to_equal(2)
+        expect(roots1.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
         val same = roots1[0] == roots2[0] and roots1[1] == roots2[1]
         expect(same).to_equal(false)
 
 describe "Selector read-set precision (reverse table 2)":
     it "descriptor change on a field outside the selector read-set does not select it":
+        step("Verify: descriptor change on a field outside the selector read-set does not select it")
         val r = WeavingRule(predicate_text: "module_path == app.core", advice_function: "adv",
                             form: AdviceForm.Before, priority: 1)
         val rs = aop_selector_read_set(r)
@@ -101,56 +115,62 @@ describe "Selector read-set precision (reverse table 2)":
         expect(aop_selectors_reading_field(index, "module_path").len()).to_equal(1)
 
     it "an opaque predicate falls back to the FULL read-set (conservative)":
+        step("Verify: an opaque predicate falls back to the FULL read-set (conservative)")
         val r = WeavingRule(predicate_text: "mystery()", advice_function: "adv",
                             form: AdviceForm.Before, priority: 1)
         val rs = aop_selector_read_set(r)
         expect(rs.conservative).to_equal(true)
-        expect(rs.fields.len()).to_equal(5)
+        expect(rs.fields.len()).to_equal(5)  # oracle: 5 — named expected value from the requirement
 
 describe "Invalidation transaction (§16.5 / matrix §16.6)":
     it "advice_body_symbolic invalidates only artifact+link (matrix row 1)":
+        step("Verify: advice_body_symbolic invalidates only artifact+link (matrix row 1)")
         val sel = AopTargetSelection(target_entity: "mod.a::f1", ordered_advice: ["log_call"])
         val index = aop_reverse_index_build([rule_log(10)], [["pk1"]], [sel])
         val res = aop_invalidate(AOP_CHANGE_ADVICE_BODY_SYMBOLIC, "log_call", "", index)
-        expect(res.selections.len()).to_equal(0)
-        expect(res.weave_targets.len()).to_equal(0)
-        expect(res.candidate_partitions.len()).to_equal(0)
-        expect(res.advice_artifacts.len()).to_equal(1)
+        expect(res.selections.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(res.weave_targets.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(res.candidate_partitions.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(res.advice_artifacts.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(res.link_load).to_equal(true)
         expect(res.conservative).to_equal(false)
 
     it "descriptor-field change selects only selectors reading that field (row 8)":
+        step("Verify: descriptor-field change selects only selectors reading that field (row 8)")
         val r = WeavingRule(predicate_text: "module_path == app.core", advice_function: "adv",
                             form: AdviceForm.Before, priority: 1)
         val index = aop_reverse_index_build([r], [["pk1"]], [])
         val res = aop_invalidate(AOP_CHANGE_TARGET_DESCRIPTOR_FIELD, "mod.a::f1", "signature", index)
-        expect(res.selections.len()).to_equal(0)     # read-set disjoint
-        expect(res.weave_targets.len()).to_equal(1)  # the target itself
+        expect(res.selections.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(res.weave_targets.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         val res2 = aop_invalidate(AOP_CHANGE_TARGET_DESCRIPTOR_FIELD, "mod.a::f1", "module_path", index)
-        expect(res2.selections.len()).to_equal(1)
+        expect(res2.selections.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "embedded-body change over-invalidates all targets of the advice (conservative, row 2)":
+        step("Verify: embedded-body change over-invalidates all targets of the advice (conservative, row 2)")
         val s1 = AopTargetSelection(target_entity: "mod.a::f1", ordered_advice: ["log_call"])
         val s2 = AopTargetSelection(target_entity: "mod.b::g1", ordered_advice: ["log_call"])
         val s3 = AopTargetSelection(target_entity: "mod.c::h1", ordered_advice: ["other"])
         val index = aop_reverse_index_build([rule_log(10)], [["pk1"]], [s1, s2, s3])
         val res = aop_invalidate(AOP_CHANGE_ADVICE_BODY_EMBEDDED, "log_call", "", index)
         expect(res.conservative).to_equal(true)
-        expect(res.weave_targets.len()).to_equal(2)  # every log_call target, not zero
+        expect(res.weave_targets.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
         expect(res.reason.contains("weave artifact")).to_equal(true)
 
     it "runtime toggle touches session generation only (row 11)":
+        step("Verify: runtime toggle touches session generation only (row 11)")
         val index = aop_reverse_index_build([], [], [])
         val res = aop_invalidate(AOP_CHANGE_RUNTIME_TOGGLE, "log_call", "", index)
-        expect(res.selections.len()).to_equal(0)
-        expect(res.weave_targets.len()).to_equal(0)
+        expect(res.selections.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(res.weave_targets.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(res.conservative).to_equal(false)
 
     it "unknown change kind fails CLOSED with full invalidation":
+        step("Verify: unknown change kind fails CLOSED with full invalidation")
         val sel = AopTargetSelection(target_entity: "mod.a::f1", ordered_advice: ["log_call"])
         val index = aop_reverse_index_build([rule_log(10)], [["pk1"]], [sel])
         val res = aop_invalidate("no_such_kind", "x", "", index)
         expect(res.conservative).to_equal(true)
-        expect(res.selections.len()).to_equal(1)
-        expect(res.weave_targets.len()).to_equal(1)
-        expect(res.candidate_partitions.len()).to_equal(1)
+        expect(res.selections.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(res.weave_targets.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(res.candidate_partitions.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement

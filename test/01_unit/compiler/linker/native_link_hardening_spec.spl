@@ -1,3 +1,10 @@
+"""
+## Purpose and audience
+Purpose: Prove that Native linker hardening.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-COMPILER-LINKER-001 — stable requirement identity for this spec.
+
 """Unit tests for native linker hardening helpers."""
 
 use compiler.backend.linker.linker_wrapper.{
@@ -18,8 +25,12 @@ use testing.{describe, it, expect}
 
 extern fn rt_file_read_text(path: text) -> text
 
+use std.spec.step
+
 describe "Native linker hardening":
     it "recognizes only strong Vulkan provider definitions":
+        step("Verify: recognizes only strong Vulkan provider definitions")
+        # @req: REQ-COMPILER-LINKER-001
         expect(llvm_nm_output_has_strong_definition(
             "weak.o:\n                 w rt_vulkan_provider_is_available\nstrong.o:\n0000000000000000 T rt_vulkan_provider_is_available\n",
             "rt_vulkan_provider_is_available"
@@ -38,6 +49,7 @@ describe "Native linker hardening":
         )).to_be(true)
 
     it "renders archive roots for each native linker family":
+        step("Verify: renders archive roots for each native linker family")
         val roots = ["rt_vulkan_provider_is_available"]
         expect(native_retained_symbol_direct_args(roots, "linux")).to_equal([
             "--undefined=rt_vulkan_provider_is_available",
@@ -64,11 +76,13 @@ describe "Native linker hardening":
         ])
 
     it "preserves every object in cc fallback arguments":
+        step("Verify: preserves every object in cc fallback arguments")
         expect(cc_fallback_object_args(["user.o", "runtime.o", "entry.o"])).to_equal([
             "user.o", "runtime.o", "entry.o"
         ])
 
     it "allows duplicate symbols without ignoring unresolved ELF symbols":
+        step("Verify: allows duplicate symbols without ignoring unresolved ELF symbols")
         expect(unresolved_symbol_flags_for_unix_linker("linux")).to_equal([
             "--allow-multiple-definition"
         ])
@@ -77,10 +91,12 @@ describe "Native linker hardening":
         ])
 
     it "skips ELF unresolved-symbol flags on non-ELF direct linkers":
+        step("Verify: skips ELF unresolved-symbol flags on non-ELF direct linkers")
         expect(unresolved_symbol_flags_for_unix_linker("macos")).to_equal([])
         expect(unresolved_symbol_flags_for_unix_linker("darwin")).to_equal([])
 
     it "allows duplicate symbols without ignoring unresolved cc symbols":
+        step("Verify: allows duplicate symbols without ignoring unresolved cc symbols")
         expect(unresolved_symbol_flags_for_cc("Linux")).to_equal([
             "-Wl,--allow-multiple-definition"
         ])
@@ -89,10 +105,12 @@ describe "Native linker hardening":
         ])
 
     it "keeps unresolved Windows symbols fatal":
+        step("Verify: keeps unresolved Windows symbols fatal")
         expect(msvc_duplicate_symbol_flag()).to_equal("/FORCE:MULTIPLE")
         expect(msvc_duplicate_symbol_flag().contains("UNRESOLVED")).to_equal(false)
 
     it "lets strict links disable duplicate forgiveness and cc fallback":
+        step("Verify: lets strict links disable duplicate forgiveness and cc fallback")
         val native = rt_file_read_text("src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl") ?? ""
         val llvm = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
         expect(native).to_contain("if config.allow_duplicate_definitions:")
@@ -101,12 +119,14 @@ describe "Native linker hardening":
         expect(llvm).to_contain("allow_cc_fallback: not stage4_requested")
 
     it "makes strict SimpleOS links disable fabrication debt baselines":
+        step("Verify: makes strict SimpleOS links disable fabrication debt baselines")
         val llvm = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
         expect(llvm).to_contain("env_get(\"SIMPLE_NO_STUB_FALLBACK\")")
         expect(llvm).to_contain("if flight_closure: {} else: simpleos_simple_symbol_baseline(entry_key)")
         expect(llvm).to_contain("if flight_closure: {} else: simpleos_fabricated_baseline(entry_key)")
 
     it "WP-10: a flight-closure link (critical profile OR strict env) disables the fabrication baseline exactly like strict_no_stub_fallback":
+        step("Verify: WP-10: a flight-closure link (critical profile OR strict env) disables the fabrication baseline exactly like strict_no_stub_fallback")
         """
         doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md
         WP-10: `simpleos_check_no_fabricated_rt_stubs`'s baseline exemption
@@ -129,19 +149,23 @@ describe "Native linker hardening":
         expect(llvm.contains("val baseline = if flight_closure: {} else: simpleos_fabricated_baseline(entry_key)")).to_equal(true)
 
     it "requires complete CRT endpoints before direct linking":
+        step("Verify: requires complete CRT endpoints before direct linking")
         val crt = rt_file_read_text("src/compiler/70.backend/linker/crt_discovery.spl") ?? ""
         expect(crt).to_contain("found: found_crtbegin != \"\" and found_crtend != \"\"")
         expect(crt.contains("found: true")).to_equal(false)
 
     it "uses configured and architecture-default Homebrew prefixes":
+        step("Verify: uses configured and architecture-default Homebrew prefixes")
         expect(macos_homebrew_prefix("/custom/brew", "x86_64")).to_equal("/custom/brew")
         expect(macos_homebrew_prefix("", "x86_64")).to_equal("/usr/local")
         expect(macos_homebrew_prefix("", "aarch64")).to_equal("/opt/homebrew")
 
     it "skips cc fallback unresolved-symbol flags on Darwin":
+        step("Verify: skips cc fallback unresolved-symbol flags on Darwin")
         expect(unresolved_symbol_flags_for_cc("Darwin")).to_equal([])
 
     it "recognizes only canonical native-all archive leaves":
+        step("Verify: recognizes only canonical native-all archive leaves")
         expect(native_all_input_present(["/tmp/libsimple_native_all.a"])).to_be(true)
         expect(native_all_input_present(["C:\\runtime\\SIMPLE_NATIVE_ALL.LIB"])).to_be(true)
         expect(native_all_input_present(["/tmp/libsimple_runtime.a"])).to_be(false)
@@ -150,11 +174,13 @@ describe "Native linker hardening":
         expect(native_all_input_present(["/tmp/my_libsimple_native_all.a"])).to_be(false)
 
     it "keeps native-all support out of core-only links":
+        step("Verify: keeps native-all support out of core-only links")
         for os in ["linux", "macos", "freebsd", "windows-mingw"]:
             expect(native_all_gnu_support_args(["runtime.o"], os, "/brew")).to_equal([])
         expect(native_all_msvc_support_libraries(["runtime.obj"])).to_equal([])
 
     it "supplies hosted native-all transitive dependencies":
+        step("Verify: supplies hosted native-all transitive dependencies")
         val archive = ["/runtime/libsimple_native_all.a"]
         expect(native_all_gnu_support_args(archive, "linux", "")).to_equal([
             "-u", "rt_vulkan_provider_is_available", "-lstdc++", "-lunwind", "-lsqlite3", "-lz", "-lzstd", "-ltinfo", "-lffi", "-lxml2", "-lncurses"
@@ -183,6 +209,7 @@ describe "Native linker hardening":
         expect(msvc).to_contain("vcruntime.lib")
 
     it "wires the shared policy into every native and shared linker path":
+        step("Verify: wires the shared policy into every native and shared linker path")
         val native = rt_file_read_text("src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl")
         val shared = rt_file_read_text("src/compiler/70.backend/linker/_LinkerWrapper/shared_linking.spl")
         expect(native.split("native_all_gnu_support_args").len() - 1).to_equal(4)

@@ -1,4 +1,11 @@
 """
+## Purpose and audience
+Purpose: Prove that returning an already-moved iso value (`val c = a; a`) is a real Move.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-COMPILER-BORROW-001 — stable requirement identity for this spec.
+
+"""
 # `iso` (Isolated) capability -- returning an iso value is a real Move
 
 **Bug:** `doc/08_tracking/bug/iso_transfer_sites_missing_move_return_assign_field_2026-08-06.md`,
@@ -121,6 +128,8 @@ fn lower_and_check(fn_: HirFunction) -> [NLLError]:
 
 describe "returning an already-moved iso value (`val c = a; a`) is a real Move":
     it "reports a borrow diagnostic for `fn take(a: iso i64) -> i64: val c = a; a`":
+        step("Verify: reports a borrow diagnostic for `fn take(a: iso i64) -> i64: val c = a; a`")
+        # @req: REQ-COMPILER-BORROW-001
         # val c = a  -- place-read let-binding move of the iso param
         # (already-landed LANE ISO1 site).
         val let_c = HirStmt(kind: HirStmtKind.Let(SymbolId(id: 4), nil, var_read(SymbolId(id: 1), 15)), span: mk_span(15))
@@ -132,41 +141,46 @@ describe "returning an already-moved iso value (`val c = a; a`) is a real Move":
 
 describe "scalar local isolation metadata":
     it "distinguishes missing, ordinary, and isolated local HIR types without optional transport":
+        step("Verify: distinguishes missing, ordinary, and isolated local HIR types without optional transport")
         var lowering = MirLowering.new(SymbolTable.new())
-        expect(lowering.local_hir_type_isolation_state(901)).to_equal(0)
+        expect(lowering.local_hir_type_isolation_state(901)).to_equal(0)  # oracle: 0 — named expected value from the requirement
         lowering.remember_local_hir_type(901, i64_type(), 2, 0)
-        expect(lowering.local_hir_type_isolation_state(901)).to_equal(2)
+        expect(lowering.local_hir_type_isolation_state(901)).to_equal(2)  # oracle: 2 — named expected value from the requirement
         lowering.remember_local_hir_type(901, iso_i64_type(), 1, 0)
-        expect(lowering.local_hir_type_isolation_state(901)).to_equal(1)
+        expect(lowering.local_hir_type_isolation_state(901)).to_equal(1)  # oracle: 1 — named expected value from the requirement
         lowering.remember_local_hir_type(901, i64_type(), 2, 0)
-        expect(lowering.local_hir_type_isolation_state(901)).to_equal(2)
-        expect(lowering.local_hir_type_resource_state(901)).to_equal(0)
+        expect(lowering.local_hir_type_isolation_state(901)).to_equal(2)  # oracle: 2 — named expected value from the requirement
+        expect(lowering.local_hir_type_resource_state(901)).to_equal(0)  # oracle: 0 — named expected value from the requirement
         lowering.forget_local_hir_type(901)
-        expect(lowering.local_hir_type_isolation_state(901)).to_equal(0)
-        expect(lowering.local_hir_type_resource_state(901)).to_equal(0)
+        expect(lowering.local_hir_type_isolation_state(901)).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(lowering.local_hir_type_resource_state(901)).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "keeps caller-supplied resource state aligned without HIR inspection":
+        step("Verify: keeps caller-supplied resource state aligned without HIR inspection")
         var lowering = MirLowering.new(SymbolTable.new())
         lowering.remember_local_hir_type(902, i64_type(), 1, 1)
-        expect(lowering.local_hir_type_isolation_state(902)).to_equal(1)
-        expect(lowering.local_hir_type_resource_state(902)).to_equal(1)
+        expect(lowering.local_hir_type_isolation_state(902)).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(lowering.local_hir_type_resource_state(902)).to_equal(1)  # oracle: 1 — named expected value from the requirement
         lowering.remember_local_hir_type(902, i64_type(), 0, 0)
-        expect(lowering.local_hir_type_isolation_state(902)).to_equal(0)
-        expect(lowering.local_hir_type_resource_state(902)).to_equal(0)
+        expect(lowering.local_hir_type_isolation_state(902)).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(lowering.local_hir_type_resource_state(902)).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "reports no borrow diagnostic for the identical non-iso shape (`a: i64`)":
+        step("Verify: reports no borrow diagnostic for the identical non-iso shape (`a: i64`)")
         val let_c = HirStmt(kind: HirStmtKind.Let(SymbolId(id: 4), nil, var_read(SymbolId(id: 1), 15)), span: mk_span(15))
         val fn_ = make_fn([non_iso_param(SymbolId(id: 1))], [let_c], var_read(SymbolId(id: 1), 20))
         val errors = lower_and_check(fn_)
         assert_true(errors.len() == 0)
 
     it "reports no borrow diagnostic for a plain return of an unmoved iso value (`fn take(a: iso i64) -> i64: a`)":
+        step("Verify: reports no borrow diagnostic for a plain return of an unmoved iso value (`fn take(a: iso i64) -> i64: a`)")
         val fn_ = make_fn([iso_param(SymbolId(id: 1))], [], var_read(SymbolId(id: 1), 20))
         val errors = lower_and_check(fn_)
         assert_true(errors.len() == 0)
 
 describe "an EXPLICIT early `return a` inside an if-branch is a real Move too":
     it "reports a borrow diagnostic for `fn take(a: iso i64) -> i64: if 1: return a; val c = a; 0`":
+        step("Verify: reports a borrow diagnostic for `fn take(a: iso i64) -> i64: if 1: return a; val c = a; 0`")
         # This is the distinguishing scenario for the explicit-`return`
         # lowering site (expr_dispatch.spl's lower_return_expr): the
         # checker's `record_use` on a bare Copy operand already flags a
@@ -190,6 +204,7 @@ describe "an EXPLICIT early `return a` inside an if-branch is a real Move too":
         assert_true(errors.len() > 0)
 
     it "reports no borrow diagnostic for the identical non-iso shape (`a: i64`)":
+        step("Verify: reports no borrow diagnostic for the identical non-iso shape (`a: i64`)")
         val cond = int_lit(1, 15)
         val return_a = HirExpr(kind: HirExprKind.Return(Some(var_read(SymbolId(id: 1), 16))), has_type_: true, type_: i64_type(), span: mk_span(16))
         val then_block = HirBlock(stmts: [], has: true, value: return_a, span: mk_span(16))
