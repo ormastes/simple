@@ -252,7 +252,6 @@ impl JitCompiler {
     /// encoding at an untyped boundary can be right for both an i64 and an f64,
     /// which is the exact defect that reverted the previous attempt.
     fn first_unsupported_lambda(mir: &MirModule) -> Option<(String, String)> {
-        use crate::hir::TypeId;
         use crate::mir::MirInst;
 
         for func in &mir.functions {
@@ -267,89 +266,83 @@ impl JitCompiler {
             // `val f = \x: ...` binding lowers to, which
             // `mir::closure_call_types` already tracks. Every other use is
             // runtime-facing (case 2).
-            let body_blocks = crate::mir::closure_call_types::outlined_body_block_ids(func);
-            let mut local_closure_addrs = std::collections::HashSet::new();
-            for block in func.blocks.iter().filter(|b| !body_blocks.contains(&b.id)) {
+            // NOT filtered to the closure's own registers, and NOT filtered to
+            // the non-body blocks. Once a module contains a lambda, ANY
+            // indirect call in it may reach a closure — through a capture, a
+            // struct field, a parameter, another module — and every such call
+            // now boxes its arguments and unboxes its result. An `ANY`
+            // boundary leaves that transport undefined in BOTH directions: the
+            // nested `\y: inner(y) * 2` case answered 64 instead of 8 because
+            // the callee's tagged result (4 << 3 == 32) was multiplied raw.
+            for block in &func.blocks {
                 for inst in &block.instructions {
-                    match inst {
-                        MirInst::LocalAddr { dest, .. } => {
-                            // Not itself a closure use; recorded so a Store of a
-                            // closure INTO a local is distinguishable from a
-                            // store into a heap object field.
-                            local_closure_addrs.insert(*dest);
+                    // The only remaining refusal is a JIT-INTERNAL call whose
+                    // boundary types are not carryable. Every runtime-FACING
+                    // shape — passed as an argument, stored into a heap object,
+                    // returned, captured by another closure — is now compiled:
+                    // `compile_closure_create` builds a real
+                    // `HeapObjectType::Closure` whose `func_ptr` is the lambda's
+                    // boxed entry (codegen/closure_boxed_entry.rs), so any
+                    // caller reaching it through `rt_closure_func_ptr` gets the
+                    // all-`RuntimeValue` convention it expects.
+                    // A closure HANDLE that reaches a scalar boxing
+                    // instruction is being widened as if it were a number.
+                    // `BoxInt` shifts it left by 3 whenever it cannot see a
+                    // heap-shaped vreg type, which destroys the pointer; the
+                    // later `rt_closure_func_ptr` then answers NULL and the
+                    // indirect call jumps to 0. Measured: SIGSEGV on
+                    // `fn mk() -> any: return \\x: x + 100`, where the `any`
+                    // return slot inserts exactly this boxing. Refused and
+                    // named rather than silently crashing.
+                    if let MirInst::BoxInt { value, .. } | MirInst::BoxFloat { value, .. } = inst {
+                        if closure_regs.contains(value) {
+                            return Some((
+                                func.name.clone(),
+                                "the closure handle is scalar-boxed (an `any`-typed slot), which \
+                                 shifts the pointer and corrupts it"
+                                    .to_string(),
+                            ));
                         }
-                        MirInst::Store { addr, value, .. } => {
-                            if closure_regs.contains(value) && !local_closure_addrs.contains(addr) {
-                                return Some((
-                                    func.name.clone(),
-                                    "the closure is stored into a heap object, so it would be \
-                                     called through the runtime's RuntimeClosure convention"
-                                        .to_string(),
-                                ));
-                            }
-                        }
-                        MirInst::IndirectCall {
-                            callee,
-                            args,
-                            param_types,
-                            return_type,
-                            ..
-                        } => {
-                            if args.iter().any(|arg| closure_regs.contains(arg)) {
-                                return Some((
-                                    func.name.clone(),
-                                    "the closure is passed as a call argument (runtime-facing \
-                                     RuntimeClosure convention)"
-                                        .to_string(),
-                                ));
-                            }
-                            if closure_regs.contains(callee)
-                                && !(crate::codegen::jit_closure_abi_supports(*return_type)
-                                    && param_types
-                                        .iter()
-                                        .all(|ty| crate::codegen::jit_closure_abi_supports(*ty)))
-                            {
-                                return Some((
-                                    func.name.clone(),
-                                    format!(
-                                        "the call boundary types {param_types:?} -> {return_type:?} \
-                                         are not carryable by the unboxed closure ABI (ANY means no \
-                                         encoding is correct for both an integer and a float; a \
-                                         sub-register type such as BOOL is not handled uniformly by \
-                                         the surrounding codegen)"
-                                    ),
-                                ));
-                            }
-                        }
-                        // A scope `Drop` of the closure local neither calls the
-                        // closure nor hands it to anything that could.
-                        MirInst::Drop { .. } => {}
-                        other => {
-                            // Any other instruction that READS a closure
-                            // register hands the value somewhere this backend
-                            // does not control.
-                            if other
-                                .uses()
-                                .iter()
-                                .any(|reg| closure_regs.contains(reg))
-                            {
-                                return Some((
-                                    func.name.clone(),
-                                    format!(
-                                        "the closure value escapes into `{other:?}`, which would \
-                                         call it through the runtime's RuntimeClosure convention"
-                                    ),
-                                ));
-                            }
+                    }
+                    if let MirInst::IndirectCall {
+                        callee,
+                        param_types,
+                        return_type,
+                        ..
+                    } = inst
+                    {
+                        let _ = callee;
+                        if !(crate::codegen::jit_closure_abi_supports(*return_type)
+                                && param_types
+                                    .iter()
+                                    .all(|ty| crate::codegen::jit_closure_abi_supports(*ty)))
+                        {
+                            return Some((
+                                func.name.clone(),
+                                format!(
+                                    "the call boundary types {param_types:?} -> {return_type:?} \
+                                     are not carryable across the closure ABI (ANY means no \
+                                     encoding is correct for both an integer and a float)"
+                                ),
+                            ));
                         }
                     }
                 }
+                // A closure handed back to the CALLER still has to survive the
+                // return slot, and when that slot is typed `any` the MIR
+                // lowering boxes it — `BoxInt` shifts a handle whose vreg type
+                // it cannot see, corrupting the pointer, after which
+                // `rt_closure_func_ptr` answers NULL and the indirect call
+                // jumps to 0 (measured: SIGSEGV on `fn mk() -> any: return
+                // \\x: x + 100`). The object convention is right; the boxing of
+                // the HANDLE on the way out is not, so this one shape stays
+                // refused and named.
                 if let crate::mir::Terminator::Return(Some(reg)) = &block.terminator {
                     if closure_regs.contains(reg) {
                         return Some((
                             func.name.clone(),
-                            "the closure is returned from the function, so its caller would use \
-                             the runtime's RuntimeClosure convention"
+                            "the closure is returned from the function, whose return slot boxes \
+                             the handle and corrupts it"
                                 .to_string(),
                         ));
                     }

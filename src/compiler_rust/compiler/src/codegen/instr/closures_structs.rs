@@ -10,8 +10,8 @@ use crate::mir::VReg;
 use super::super::shared::platform_call_conv;
 use super::super::types_util::type_id_to_cranelift;
 use super::helpers::{
-    adapted_call, call_runtime_1, call_runtime_2, call_runtime_2_void, create_string_constant, get_vreg_or_default,
-    indirect_call_with_result, inline_runtime_len_value,
+    adapted_call, call_runtime_1, call_runtime_2, call_runtime_2_void, call_runtime_3, create_string_constant,
+    get_vreg_or_default, indirect_call_with_result, inline_runtime_len_value,
 };
 use super::{InstrContext, InstrResult};
 
@@ -214,14 +214,32 @@ pub(crate) fn compile_closure_create<M: Module>(
     capture_offsets: &[u32],
     captures: &[VReg],
 ) {
-    let allocation_size = closure_size.max(16);
-    let size_val = builder.ins().iconst(types::I64, allocation_size as i64);
-    let closure_ptr = call_runtime_1(ctx, builder, "rt_alloc", size_val);
+    let _ = closure_size;
 
-    if let Some(&func_id) = ctx.func_ids.get(func_name) {
-        let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
-        let fn_addr = builder.ins().func_addr(types::I64, func_ref);
-        builder.ins().store(MemFlags::new(), fn_addr, closure_ptr, 0);
+    // Runtime-facing closure convention (2026-08-21). The closure VALUE is a
+    // real `HeapObjectType::Closure`, so anything holding it — a runtime
+    // collection helper (`rt_array_map` and friends `transmute` `func_ptr` to
+    // `fn(RuntimeValue, RuntimeValue) -> RuntimeValue`), another JIT function,
+    // a struct field it was stored into, a caller it was returned to — can call
+    // it. `func_ptr` is the lambda's BOXED ENTRY (codegen/closure_boxed_entry.rs),
+    // which unboxes to the body's real parameter types and boxes the result, so
+    // the one door serves every caller. The previous bare `rt_alloc` block with
+    // a raw code address at offset 0 was not a Closure at all:
+    // `rt_closure_func_ptr` rejected it and every `arr.map(lambda)` silently
+    // answered an EMPTY array, which is why such shapes were refused outright.
+    let boxed_name = crate::codegen::boxed_entry_name(func_name);
+    let entry_addr: Option<cranelift_codegen::ir::Value> = ctx
+        .func_ids
+        .get(boxed_name.as_str())
+        .or_else(|| ctx.func_ids.get(func_name))
+        .copied()
+        .map(|func_id| {
+            let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
+            builder.ins().func_addr(types::I64, func_ref)
+        });
+
+    let fn_addr = if let Some(addr) = entry_addr {
+        addr
     } else {
         // Cross-module closure: resolve via use_map → import_map
         let mut resolved_name = ctx
@@ -269,13 +287,9 @@ pub(crate) fn compile_closure_create<M: Module>(
             match fid_result {
                 Ok(fid) => {
                     let func_ref = ctx.module.declare_func_in_func(fid, builder.func);
-                    let fn_addr = builder.ins().func_addr(types::I64, func_ref);
-                    builder.ins().store(MemFlags::new(), fn_addr, closure_ptr, 0);
+                    builder.ins().func_addr(types::I64, func_ref)
                 }
-                Err(_) => {
-                    let null = builder.ins().iconst(types::I64, 0);
-                    builder.ins().store(MemFlags::new(), null, closure_ptr, 0);
-                }
+                Err(_) => builder.ins().iconst(types::I64, 0),
             }
         } else {
             eprintln!(
@@ -283,24 +297,27 @@ pub(crate) fn compile_closure_create<M: Module>(
                 func_name,
                 ctx.func_ids.len()
             );
-            let null = builder.ins().iconst(types::I64, 0);
-            builder.ins().store(MemFlags::new(), null, closure_ptr, 0);
+            builder.ins().iconst(types::I64, 0)
         }
+    };
+
+    let _ = capture_offsets;
+    let count_val = builder.ins().iconst(types::I32, captures.len() as i64);
+    let closure_val = call_runtime_2(ctx, builder, "rt_closure_new", fn_addr, count_val);
+
+    // Captures are seated through `rt_closure_set_capture`, which stores the
+    // word VERBATIM. That is deliberate: the transport is bit-preserving, so a
+    // capture keeps whatever representation the parent function had for it
+    // (raw scalar or tagged handle) and the outlined body reads the identical
+    // bits back with `rt_closure_get_capture`. Nothing in the runtime ever
+    // interprets a capture, so no boxing is owed at this boundary.
+    for (i, cap) in captures.iter().enumerate() {
+        let cap_val = get_vreg_or_default(ctx, builder, cap);
+        let idx_val = builder.ins().iconst(types::I32, i as i64);
+        call_runtime_3(ctx, builder, "rt_closure_set_capture", closure_val, idx_val, cap_val);
     }
 
-    if closure_size < 16 {
-        let null_marker = builder.ins().iconst(types::I64, 0);
-        builder.ins().store(MemFlags::new(), null_marker, closure_ptr, 8);
-    }
-
-    for (i, offset) in capture_offsets.iter().enumerate() {
-        let cap_val = get_vreg_or_default(ctx, builder, &captures[i]);
-        builder
-            .ins()
-            .store(MemFlags::new(), cap_val, closure_ptr, *offset as i32);
-    }
-
-    ctx.vreg_values.insert(dest, closure_ptr);
+    ctx.vreg_values.insert(dest, closure_val);
 }
 
 pub(crate) fn compile_indirect_call<M: Module>(
@@ -312,26 +329,123 @@ pub(crate) fn compile_indirect_call<M: Module>(
     return_type: TypeId,
     args: &[VReg],
 ) {
+    // A closure VALUE reaching an indirect call has unknown provenance: it may
+    // have been built here, loaded from a struct field, handed in as an
+    // argument, or produced by another module. So the call goes through the
+    // one uniform door — `rt_closure_func_ptr` (which validates the heap-object
+    // type and untags the handle, answering NULL for a non-closure instead of
+    // dereferencing garbage) to the BOXED ENTRY, whose signature is
+    // all-`RuntimeValue`. Arguments are boxed and the result unboxed here,
+    // mirroring codegen/closure_boxed_entry.rs on the other side.
     let closure_ptr = get_vreg_or_default(ctx, builder, &callee);
-    let fn_ptr = builder.ins().load(types::I64, MemFlags::new(), closure_ptr, 0);
+    let fn_ptr = call_runtime_1(ctx, builder, "rt_closure_func_ptr", closure_ptr);
 
     let mut sig = Signature::new(platform_call_conv());
     sig.params.push(AbiParam::new(types::I64));
-    for param_ty in param_types {
-        sig.params.push(AbiParam::new(type_id_to_cranelift(*param_ty)));
+    for _ in param_types {
+        sig.params.push(AbiParam::new(types::I64));
     }
-    if return_type != TypeId::VOID {
-        sig.returns.push(AbiParam::new(type_id_to_cranelift(return_type)));
-    }
+    sig.returns.push(AbiParam::new(types::I64));
 
     let sig_ref = builder.import_signature(sig);
 
     let mut call_args = vec![closure_ptr];
-    for arg in args {
-        call_args.push(get_vreg_or_default(ctx, builder, arg));
+    for (i, arg) in args.iter().enumerate() {
+        let raw = get_vreg_or_default(ctx, builder, arg);
+        let ty = param_types.get(i).copied().unwrap_or(TypeId::ANY);
+        call_args.push(box_for_closure_boundary(ctx, builder, raw, ty));
     }
 
-    indirect_call_with_result(ctx, builder, sig_ref, fn_ptr, &call_args, dest);
+    let call = builder.ins().call_indirect(sig_ref, fn_ptr, &call_args);
+    if let Some(d) = dest {
+        let tagged = builder.inst_results(call)[0];
+        let raw = if return_type == TypeId::VOID {
+            tagged
+        } else {
+            unbox_from_closure_boundary(ctx, builder, tagged, return_type)
+        };
+        ctx.vreg_values.insert(*d, raw);
+    }
+}
+
+/// Encode a raw value as a tagged `RuntimeValue` for the closure boundary.
+/// Exact mirror of `closure_boxed_entry::unbox_arg`.
+fn box_for_closure_boundary<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    val: cranelift_codegen::ir::Value,
+    ty: TypeId,
+) -> cranelift_codegen::ir::Value {
+    let vt = builder.func.dfg.value_type(val);
+    match ty {
+        TypeId::F32 | TypeId::F64 => {
+            let f = if vt == types::F32 {
+                builder.ins().fpromote(types::F64, val)
+            } else if vt == types::I64 {
+                builder.ins().bitcast(types::F64, MemFlags::new(), val)
+            } else {
+                val
+            };
+            call_runtime_1(ctx, builder, "rt_value_float", f)
+        }
+        TypeId::BOOL => {
+            // Full-width 0/1, never a bare i8 in a 64-bit RuntimeValue slot.
+            let widened = if vt == types::I64 {
+                val
+            } else {
+                builder.ins().uextend(types::I64, val)
+            };
+            call_runtime_1(ctx, builder, "rt_value_bool", widened)
+        }
+        TypeId::I8
+        | TypeId::I16
+        | TypeId::I32
+        | TypeId::I64
+        | TypeId::U8
+        | TypeId::U16
+        | TypeId::U32
+        | TypeId::U64 => {
+            let widened = match vt {
+                types::I8 | types::I16 | types::I32 => builder.ins().sextend(types::I64, val),
+                types::F64 => builder.ins().bitcast(types::I64, MemFlags::new(), val),
+                types::F32 => {
+                    let p = builder.ins().fpromote(types::F64, val);
+                    builder.ins().bitcast(types::I64, MemFlags::new(), p)
+                }
+                _ => val,
+            };
+            call_runtime_1(ctx, builder, "rt_value_int", widened)
+        }
+        // Heap-shaped or unknown: the value already IS a tagged word.
+        _ => val,
+    }
+}
+
+/// Decode a tagged `RuntimeValue` answered by a boxed entry back to `ty`'s raw
+/// representation. Exact mirror of `closure_boxed_entry::box_result`.
+fn unbox_from_closure_boundary<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    tagged: cranelift_codegen::ir::Value,
+    ty: TypeId,
+) -> cranelift_codegen::ir::Value {
+    match ty {
+        TypeId::F32 => {
+            let f = call_runtime_1(ctx, builder, "rt_value_as_float", tagged);
+            builder.ins().fdemote(types::F32, f)
+        }
+        TypeId::F64 => call_runtime_1(ctx, builder, "rt_value_as_float", tagged),
+        TypeId::BOOL => {
+            let raw = call_runtime_1(ctx, builder, "rt_value_unbox_int", tagged);
+            builder.ins().icmp_imm(IntCC::NotEqual, raw, 0)
+        }
+        TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::U8 | TypeId::U16 | TypeId::U32 => {
+            let raw = call_runtime_1(ctx, builder, "rt_value_unbox_int", tagged);
+            builder.ins().ireduce(type_id_to_cranelift(ty), raw)
+        }
+        TypeId::I64 | TypeId::U64 => call_runtime_1(ctx, builder, "rt_value_unbox_int", tagged),
+        _ => tagged,
+    }
 }
 
 #[allow(clippy::too_many_arguments)] // reason: struct init requires all field context

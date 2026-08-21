@@ -701,10 +701,20 @@ pub fn compile_function_body<M: Module>(
     if let Some(meta) = func.outlined_bodies.get(&func.entry_block) {
         if meta.is_lambda && !meta.lambda_capture_local_indices.is_empty() {
             let closure_param = builder.block_params(entry_block)[0];
+            // Runtime-facing closure convention (2026-08-21): the ctx pointer is
+            // now a TAGGED handle to a real `HeapObjectType::Closure`, not a raw
+            // `rt_alloc` block, so captures are read through
+            // `rt_closure_get_capture` rather than by open-coded pointer
+            // arithmetic. That helper untags and type-checks the handle and
+            // stores/returns the word verbatim, so the capture transport stays
+            // bit-preserving — exactly the bits `rt_closure_set_capture` seated
+            // in `compile_closure_create`.
+            let get_capture_id = runtime_funcs["rt_closure_get_capture"];
+            let get_capture_ref = module.declare_func_in_func(get_capture_id, builder.func);
             for (idx, local_index) in meta.lambda_capture_local_indices.iter().enumerate() {
-                let val = builder
-                    .ins()
-                    .load(types::I64, MemFlags::new(), closure_param, 8 + (idx as i32 * 8));
+                let idx_val = builder.ins().iconst(types::I32, idx as i64);
+                let cap_call = adapted_call(&mut builder, get_capture_ref, &[closure_param, idx_val]);
+                let val = builder.inst_results(cap_call)[0];
                 let var = if let Some(&var) = variables.get(local_index) {
                     var
                 } else if let Some(&var) = extra_variables.get(local_index) {

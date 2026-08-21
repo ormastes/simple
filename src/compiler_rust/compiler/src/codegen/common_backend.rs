@@ -684,6 +684,35 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             // JIT reports "unresolved external symbol" and drops the whole
             // module to the interpreter.
             | "rt_value_unbox_int"
+            | "rt_value_as_float"
+            // Runtime-facing closure convention (2026-08-21): ClosureCreate now
+            // allocates a real `HeapObjectType::Closure` via rt_closure_new and
+            // seats its captures with rt_closure_set_capture; the outlined body
+            // reads them back with rt_closure_get_capture, and every indirect
+            // call resolves its target with rt_closure_func_ptr. All four are
+            // emitted straight from codegen, never as MIR call nodes, so they
+            // must be codegen roots or the JIT reports "unresolved external
+            // symbol" and drops the whole module to the interpreter.
+            | "rt_closure_new"
+            | "rt_closure_set_capture"
+            | "rt_closure_get_capture"
+            | "rt_closure_func_ptr"
+            // Closure-taking collection helpers. These are emitted by the
+            // `MethodCallStatic`/builtin-method dispatch table in
+            // codegen/instr/closures_structs.rs straight from a method NAME
+            // ("Array.map" -> rt_map), never as a MIR call node, so they are
+            // absent from `referenced_call_names`. Without them here the table
+            // arm silently answers `Ok(None)` and dispatch falls through to
+            // "Function 'Array.map' not found" at RUNTIME — the exact failure
+            // that appeared the moment the runtime-facing closure convention
+            // stopped bailing such modules to the interpreter.
+            | "rt_map"
+            | "rt_array_map"
+            | "rt_array_filter"
+            | "rt_find"
+            | "rt_array_find"
+            | "rt_array_reduce"
+            | "rt_option_map"
     )
 }
 
@@ -2096,6 +2125,12 @@ impl<M: Module> CodegenBackend<M> {
         // The struct_name entry in vtable_data_ids is used by compile_struct_init
         // to write vtable_ptr at offset 0.
         self.emit_vtable_data_objects(&mir.vtable_impls)?;
+
+        // Boxed entry thunks for the runtime-facing closure convention. Must
+        // run after `declare_functions` (every outlined lambda must already be
+        // in `func_ids`) and before any body that references one.
+        // See codegen/closure_boxed_entry.rs.
+        self.emit_boxed_closure_entries(&functions)?;
         if native_trace {
             eprintln!("[rust-jit] compile_all function bodies start");
         }
