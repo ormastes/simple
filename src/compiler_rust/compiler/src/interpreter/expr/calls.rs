@@ -115,7 +115,7 @@ pub(super) fn eval_call_expr(
                     // Sync mutating method updates to MODULE_GLOBALS so that
                     // module-level vars (e.g., arrays used as global state)
                     // persist across function calls within an imported module.
-                    if MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(var_name)) {
+                    if !env.is_local(var_name) && MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(var_name)) {
                         MODULE_GLOBALS.with(|cell| {
                             cell.borrow_mut().insert(var_name.clone(), new_self);
                         });
@@ -257,7 +257,7 @@ pub(super) fn eval_call_expr(
                                     new_arr[real_idx as usize] = updated_elem;
                                     let new_arr_val = Value::Array(std::sync::Arc::new(new_arr));
                                     env.insert(arr_name.clone(), new_arr_val.clone());
-                                    if super::super::MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(arr_name)) {
+                                    if !env.is_local(arr_name) && super::super::MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(arr_name)) {
                                         super::super::MODULE_GLOBALS.with(|cell| {
                                             cell.borrow_mut().insert(arr_name.clone(), new_arr_val);
                                         });

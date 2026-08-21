@@ -356,12 +356,26 @@ pub(crate) fn handle_method_call_with_self_update(
     // gives the method-call path the same write-through, at one thread-local
     // `contains_key` per actual mutation (no cost on the read path).
     // doc/08_tracking/bug/native_build_worker_oom_global_array_len_stale_in_while_2026-08-18.md
+    // A frame-LOCAL that merely shares its name with a module global must not
+    // be written through: `var arm_body_flat: [i64]` in parser_stmts.spl
+    // shadowed the `[text]` global of the same name in decl_nodes.spl, and the
+    // write-through turned the global into ints -> `method split not found on
+    // type i64` while parsing driver.spl (2026-08-21 stage-1 build).
     if let (_, Some((ref name, ref new_value))) = out {
+        if env.is_local(name.as_str()) {
+            return Ok(out);
+        }
         crate::interpreter::MODULE_GLOBALS.with(|cell| {
-            let mut globals = cell.borrow_mut();
-            if globals.contains_key(name.as_str()) {
-                globals.insert(name.clone(), new_value.clone());
+            // Peek before the write borrow: borrow_mut() on this generation-tracked
+            // cell invalidates every owned-env template, so an unconditional
+            // write borrow here made EVERY `xs = xs.push(v)` in a loop that also
+            // calls a module fn rebuild the callee env (~1.5 ms) on the next call
+            // (2026-08-21 stall record, fingerprint/parse phases).
+            if !cell.borrow().contains_key(name.as_str()) {
+                return;
             }
+            let mut globals = cell.borrow_mut();
+            globals.insert(name.clone(), new_value.clone());
         });
     }
     Ok(out)

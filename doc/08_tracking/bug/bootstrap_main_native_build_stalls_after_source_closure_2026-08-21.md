@@ -178,3 +178,96 @@ sibling's plain-path build also sat for 27+ min CPU.
 Commit bisect (stage3-base worktree at c089809a253) became moot: the defect is
 in the seed binary's interpreter and is independent of today's commits; the
 "290s at 05:10" run could not be reproduced or located in any log.
+
+## Follow-up (2026-08-21, stage-1 lane, second pass): three more seed-interpreter defects behind the same symptom
+
+Measured with the 08:13 rebuilt seed (env-cache bump fix in) on a full
+`native-build --source src/app --entry-closure --threads 8 --entry src/app/cli/bootstrap_main.spl`
+(`SIMPLE_CACHE_SCOPE=bootstrap`, phase-profile on, scratchpad `p1/stage1.run1.*`):
+
+| phase | time | note |
+|---|---|---|
+| source closure (656 files) | ~190 s | load 8-11 |
+| `load_sources` fingerprint (942 sources) | **543 s** | 0.58 s/source; standalone it is ~20 ms/source |
+| phase 2 parse, `bootstrap_main.spl` (23 KB) | **128 s** | then `driver.spl` aborted (defect 3 below) |
+
+Isolated probes (`scratchpad/fpeq/*`, `scratchpad/parsebug/*`) on the 130 KB
+`src/compiler/50.mir/hwir/zca_rows.spl` (1,902 lines):
+
+| probe (inside a driver-sized module) | before | after |
+|---|---|---|
+| 1,902 intra-module calls (`is_def_start` per line) | 405-418 ms | 21 ms |
+| loop that both pushes a local array and calls a module fn | 3,140 ms | 55 ms |
+| `driver_native_source_interface_text` (the fingerprint body) | 269-349 ms | 64 ms |
+| `SIMPLE_INTERP_ENV_CACHE_STATS=1` during the push+call loop | all misses | `hits=990 misses=10` |
+
+### Defect 1 — `bind_args` scanned every class on every call (seed)
+
+`interpreter_call/core/arg_binding.rs` (`bind_args` and `bind_args_with_values`)
+built `value_type_names: HashSet<String>` by iterating and cloning the name of
+EVERY entry of `classes` (thousands in the self-hosted compiler) on EVERY call,
+only to decide whether an `Object` argument is a value type. gdb sampling
+(`scratchpad/fpeq/gdb.out`, SIGINT-driven batch sampling since attach is
+blocked) put the top frames in `bind_args_with_values -> RawIterRange ->
+String::clone`. Fix: drop the set; copy value-type objects in a post-pass over
+the bound map with a by-name `classes.get(..).is_value_type` lookup
+(`copy_value_type_params`). ~0.2 ms/call -> ~0.01 ms/call.
+
+### Defect 2 — method-call write-through bumped the env-cache generation unconditionally (seed)
+
+`interpreter_helpers/patterns.rs::handle_method_call_with_self_update` took
+`MODULE_GLOBALS.borrow_mut()` (a `GenTrackedCell`, so every borrow_mut bumps
+the generation) on EVERY `(name, new_value)` self-update, even when `name` was
+a frame local. So `out = out.push(line)` in a loop that also calls a module fn
+invalidated the callee's env template on every iteration: 1,902 calls went
+from 60 ms to 3,140 ms just by adding a local push to the loop. Fix: peek with
+`borrow()` first, exactly like the sibling sites already did.
+
+### Defect 3 — a frame local sharing a module global's name was written through (seed + parser)
+
+`src/compiler/10.frontend/core/parser_stmts.spl:1242` declared
+`var arm_body_flat: [i64] = []` inside a function, while
+`_Ast/decl_nodes.spl:1261` owns the module global `arm_body_flat: [text]`.
+The seed's mutating-method write-through (`x.push(v)` -> `MODULE_GLOBALS` by
+NAME, patterns.rs / expr/calls.rs) copied the local's ints into the global, so
+the next `arm_body_flat[idx].split(",")` (`arm_get_body ->
+ast_i64_list_split`) died with
+
+    error: semantic: method `split` not found on type `i64` (receiver value: 30)
+
+while parsing `src/compiler/driver/driver.spl` — the FIRST file after
+`bootstrap_main.spl` in the plain parse loop, so every stage-1 build of today
+aborted there (`SIMPLE_INTERPRETER_CALL_TRACE=1` tail in
+`scratchpad/parsebug/trace_tail.out`). Fixes: (a) the local is renamed
+`arm_body_stmt_buf`; (b) the write-through in `patterns.rs` and both sites in
+`interpreter/expr/calls.rs` now skip names for which `env.is_local(name)`.
+
+### Specs (fail on the 05:10 seed, pass on the rebuilt one)
+
+- `test/05_perf/interp/push_call_loop_env_cache_spec.spl` (+ fixture fn
+  `push_and_call_loop`): old seed `16772ms < 600ms: false`, new 1 passed.
+- `test/01_unit/compiler/interpreter/local_shadows_module_global_write_through_spec.spl`
+  (+ `fixtures/shadowed_global_arena.spl`): old seed FAIL (global corrupted),
+  new PASS.
+- `test/05_perf/interp/intra_module_call_env_cache_spec.spl` still passes.
+
+### Still open after these three
+
+With all three fixed (seed rebuilt 08:58 into `/mnt/data/.cargo-target-fable`),
+phase 1 of the same build drops to ~70 s total (fingerprint 15 s), but phase 2
+parse still runs at **20-50 s per file** (`run3`: 22 files in 9 min, ETA >4 h).
+`SIMPLE_INTERP_ENV_CACHE_STATS=1` on a standalone parse of `driver.spl`
+(7 KB, 16 s): `hits=82708 misses=17292` — the remaining misses are REAL global
+writes by the parser (`publish_live_bound_globals` / `sync_owned_captured_globals`
+on every arena push / position update), each of which bumps the single
+generation and forces a full template rebuild (`MODULE_ENV_BY_OWNER` clone
+1.36 s + imported-binding re-resolution 3.1 s over 17.9k misses, measured with
+a temporary probe). The owner binding sets are not large (lexer_struct 163,
+parser.spl 605, nodes.spl 119+91), so the fix is finer-grained invalidation
+(dirty-name patching of the cached template instead of whole-template rebuild
+on any value write), not smaller imports. Handed to the dedicated seed lane.
+
+Note on the "fingerprint hangs on `ast_stmt.spl` (idx=256)" reading of
+`p1/stage1.run2.log`: that run was killed by this lane at that moment to swap
+seeds; the fingerprint marker loop completed in every un-killed run
+(run1 543 s, run3 15 s).

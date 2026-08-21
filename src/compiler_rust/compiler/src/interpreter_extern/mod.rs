@@ -694,6 +694,14 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_f32_array_alloc", file_io::rt_f32_array_alloc);
     insert_simple!("rt_i64_array_alloc", file_io::rt_i64_array_alloc);
     insert_simple!("rt_i32_array_alloc", file_io::rt_i32_array_alloc);
+    // CPU identity + CPUID. Defined only in src/runtime/runtime_native.c until
+    // 2026-08-21, so interpreter mode reported "unknown extern function" and
+    // simd_capabilities.spl's detect_capabilities() could not run. See
+    // doc/08_tracking/bug/interpreter_raw_array_and_glob_import_gaps_2026-08-21.md item 6.
+    insert_simple!("rt_cpu_is_x86_64", simd::rt_cpu_is_x86_64);
+    insert_simple!("rt_cpu_is_aarch64", simd::rt_cpu_is_aarch64);
+    insert_simple!("rt_cpu_is_riscv64", simd::rt_cpu_is_riscv64);
+    insert_simple!("rt_cpuid", simd::rt_cpuid);
     insert_simple!("rt_cargo_build", cargo::rt_cargo_build);
     insert_simple!("rt_cargo_check", cargo::rt_cargo_check);
     insert_simple!("rt_cargo_clean", cargo::rt_cargo_clean);

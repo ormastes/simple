@@ -204,33 +204,9 @@ pub fn driver_native_capsule_result_valid_v1(capsule: FrozenNativeModuleCapsuleV
         expected = "native-capsule-result-v1\n{capsule.capsule_identity}\n{capsule.object_path}\n{fp.size}\n{fp.content_hash}\n"
     (rt_file_read_text(receipt_path) ?? "") == expected
 
-# Dependency source paths for a module's cache entry (Phase D interface-digest
-# wiring): each parsed import that maps to a UNIQUE on-disk source contributes
-# its path; the entry's deps_iface fold is then computed over their interface
-# digests by BuildCache.update_entry. Imports with no unique file backing
-# (synthetic modules, alias-ambiguous paths — the same fail-closed rule
-# driver_native_module_cache_source applies to the module itself) contribute
-# nothing.
-fn driver_native_module_dep_sources(ctx: CompileContext, module_name: text) -> [text]:
-    var deps: [text] = []
-    if not ctx.modules.has(module_name):
-        return deps
-    val own_path = driver_native_module_cache_source(ctx, module_name)
-    for imp in ctx.modules[module_name].imports:
-        val dep_path = driver_native_module_cache_source(ctx, imp.module)
-        if dep_path == "" or dep_path == own_path:
-            continue
-        var seen = false
-        for existing in deps:
-            if existing == dep_path:
-                seen = true
-        if not seen:
-            deps.push(dep_path)
-    deps
-
 pub fn driver_native_collect_capsule_result_v1(
-    ctx: CompileContext, batch: FrozenNativeModuleCapsuleBatchV1,
-    build_cache: BuildCache, module_name: text, object_path: text
+    batch: FrozenNativeModuleCapsuleBatchV1, build_cache: BuildCache,
+    module_name: text, object_path: text
 ) -> text:
     """Owner-only authenticated cache checkpoint for one completed capsule."""
     val capsule = batch.find(module_name)
@@ -241,8 +217,7 @@ pub fn driver_native_collect_capsule_result_v1(
     if capsule.cache_source == "": return ""
     val source_fp = FileFingerprint.from_file(capsule.cache_source)
     if val source_fp_val = source_fp:
-        val dep_sources = driver_native_module_dep_sources(ctx, module_name)
-        build_cache.update_entry(capsule.cache_source, source_fp_val, dep_sources, [object_path])
+        build_cache.update_entry(capsule.cache_source, source_fp_val, [], [object_path])
         build_cache.save()
         return ""
     "native-capsule-fingerprint-failed:{module_name}"
@@ -318,11 +293,27 @@ pub fn driver_native_source_interface_text(content: text) -> text:
     var sig_indent: i64 = 0
     var paren_depth: i64 = 0
     var skip_until_indent: i64 = -1
+    # Perf (2026-08-21): the per-line helpers (leading_spaces / count_char)
+    # are inlined here on purpose. Under the seed interpreter every
+    # intra-module call rebuilds/clones the owner env (~0.3 ms in a driver
+    # module with thousands of imported globals), and this function runs
+    # over every line of every source in the closure (~1M lines): three
+    # helper calls per line made the fingerprint phase take 543 s for 942
+    # sources (measured stage-1 build). Inline loops over builtin
+    # char_code_at pay no such per-call tax.
     for line in lines:
         val trimmed = line.trim()
         if mode_capturing_sig:
             out = out.push(line)
-            paren_depth = paren_depth + driver_native_count_char(trimmed, 40) - driver_native_count_char(trimmed, 41)
+            var ci: i64 = 0
+            val cn = trimmed.len()
+            while ci < cn:
+                val cc = trimmed.char_code_at(ci)
+                if cc == 40:
+                    paren_depth = paren_depth + 1
+                elif cc == 41:
+                    paren_depth = paren_depth - 1
+                ci = ci + 1
             if paren_depth <= 0:
                 mode_capturing_sig = false
                 if trimmed.ends_with(":"):
@@ -331,7 +322,10 @@ pub fn driver_native_source_interface_text(content: text) -> text:
         if skip_until_indent >= 0:
             if trimmed == "":
                 continue
-            val indent = driver_native_leading_spaces(line)
+            var indent: i64 = 0
+            val ln = line.len()
+            while indent < ln and line.char_code_at(indent) == 32:
+                indent = indent + 1
             if indent > skip_until_indent:
                 continue
             skip_until_indent = -1
@@ -342,8 +336,21 @@ pub fn driver_native_source_interface_text(content: text) -> text:
             continue
         if driver_native_is_def_start(trimmed):
             out = out.push(line)
-            sig_indent = driver_native_leading_spaces(line)
-            paren_depth = driver_native_count_char(trimmed, 40) - driver_native_count_char(trimmed, 41)
+            var si: i64 = 0
+            val sn = line.len()
+            while si < sn and line.char_code_at(si) == 32:
+                si = si + 1
+            sig_indent = si
+            paren_depth = 0
+            var pi: i64 = 0
+            val pn = trimmed.len()
+            while pi < pn:
+                val pc = trimmed.char_code_at(pi)
+                if pc == 40:
+                    paren_depth = paren_depth + 1
+                elif pc == 41:
+                    paren_depth = paren_depth - 1
+                pi = pi + 1
             if paren_depth <= 0:
                 if trimmed.ends_with(":"):
                     skip_until_indent = sig_indent
@@ -831,7 +838,7 @@ impl CompilerDriver:
                 match direct_result:
                     case Ok(obj_path):
                         val collect_error = driver_native_collect_capsule_result_v1(
-                            ctx, capsules, build_cache, name, obj_path)
+                            capsules, build_cache, name, obj_path)
                         if collect_error != "":
                             module_unit_id = module_unit_id + 1
                             driver_native_record_module_failure(module_outcomes,
@@ -859,7 +866,7 @@ impl CompilerDriver:
                 )
                 var builder = ParallelBuilder.create(parallel_cfg)
                 builder.set_owner_collect(driver_native_collect_capsule_result_v1(
-                    ctx, capsules, build_cache, _1, _2))
+                    capsules, build_cache, _1, _2))
 
                 for name in uncached_names:
                     builder.add_unit(name, [])
