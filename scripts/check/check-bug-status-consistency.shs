@@ -14,7 +14,7 @@
 # reads is text that drifts.
 #
 # Checks (all fail-closed):
-#   A no-status          doc has no parseable `Status:` line in its first 60 lines
+#   A no-status          doc has no parseable `Status:` line ANYWHERE in the file
 #   B open-without-row   doc says OPEN (Pn) but has no row in bug_db.sdn
 #   C db-open-doc-done   bug_db.sdn says `open`, doc says FIXED/CLOSED/DUPLICATE
 #   D db-done-doc-open   bug_db.sdn says fixed/resolved/closed, doc says OPEN (Pn)
@@ -32,6 +32,13 @@
 #
 # Usage:
 #   sh scripts/check/check-bug-status-consistency.shs [--root DIR] [--selftest]
+#
+# Scan window: the whole file. It was the first 60 lines until 2026-08-21, when
+# a census found 21 of the 356 `no-status` offenders were FALSE POSITIVES -- they
+# carry a real `Status:` line that simply sits past line 60 (long records put the
+# header block after the symptom transcript). A window that silently mislabels a
+# documented status as "missing" is worse than no window: it inflates the class
+# that everyone triages last. Reading a whole bug doc costs nothing measurable.
 
 set -u
 
@@ -94,7 +101,7 @@ scan() {
             while ((getline l < path) > 0) {
                 n++
                 if (n <= 6 && l ~ /\*\*Generated:\*\*|^Generated:/) { generated = 1; break }
-                if (n <= 60 && !found &&
+                if (!found &&
                     l ~ /^[ \t]*(-[ \t]*)?[*_]*[ \t]*[Ss]tatus[ \t]*[*_]*[ \t]*:/) {
                     val = l
                     sub(/^[^:]*:[ \t]*/, "", val)
@@ -102,7 +109,6 @@ scan() {
                     gsub(/^[ \t]+|[ \t]+$/, "", val)
                     found = n
                 }
-                if (n > 60) break
             }
             close(path)
             if (generated) continue
@@ -110,7 +116,7 @@ scan() {
             checked++
             id = base; sub(/\.md$/, "", id)
 
-            if (!found) { bad++; print "no-status\t" base "\t(no parseable Status: line in first 60 lines)"; continue }
+            if (!found) { bad++; print "no-status\t" base "\t(no parseable Status: line anywhere in the file)"; continue }
 
             dc = normdoc(val)
             hasrow = (id in dbstatus)
@@ -202,12 +208,25 @@ DBEOF
         fails=$((fails + 1))
     fi
 
+    # 9 a Status: line past line 60 is FOUND, not reported as no-status.
+    #   Regression fixture for the 2026-08-21 window removal: 21 real records
+    #   were mislabelled `no-status` purely because their header block sits
+    #   after a long symptom transcript.
+    d="$tdir/f9"; mkdir -p "$d"; mk_db "$d"
+    { printf '# x\n'; i=0; while [ $i -lt 90 ]; do echo "filler line $i"; i=$((i + 1)); done; printf 'Status: OPEN (P1)\n'; } > "$d/fixture_open_bug.md"
+    expect "late-status-is-found" "$d" 0
+
+    # 10 a late Status: line still DISAGREES loudly when it should
+    d="$tdir/f10"; mkdir -p "$d"; mk_db "$d"
+    { printf '# x\n'; i=0; while [ $i -lt 90 ]; do echo "filler line $i"; i=$((i + 1)); done; printf 'Status: FIXED\n'; } > "$d/fixture_open_bug.md"
+    expect "late-status-still-conflicts" "$d" 1
+
     rm -rf "$tdir"
     if [ "$fails" -ne 0 ]; then
         echo "selftest: $fails fixture(s) failed"
         return 1
     fi
-    echo "selftest: 8 fixtures passed"
+    echo "selftest: 10 fixtures passed"
     return 0
 }
 
@@ -219,7 +238,7 @@ if [ "$SELFTEST_RC" -ne 0 ]; then
     exit 2
 fi
 if [ "$SELFTEST_ONLY" -eq 1 ]; then
-    echo "PASS — 8 fixture(s) checked, 0 disagreement(s)"
+    echo "PASS — 10 fixture(s) checked, 0 disagreement(s)"
     exit 0
 fi
 

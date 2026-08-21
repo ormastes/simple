@@ -35,7 +35,7 @@ export use os.tls13.server_handshake.*
 
 use os.tls13.handshake13.{GROUP_X25519, GROUP_SECP256R1}
 use os.tls13.key_schedule.{tls13_finished_key}
-use os.crypto.random.{random_bytes}
+use os.crypto.entropy.{crypto_entropy_bytes}
 
 extern fn rt_tls13_recv_record(sock_fd: i64) -> [u8]
 extern fn rt_net_send_bytes(sock_fd: i64, data: [u8]) -> i64
@@ -81,6 +81,36 @@ fn _slice(data: [u8], offset: u64, length: u64) -> [u8]:
         out.push(data[offset + i])
         i = i + 1
     out
+
+pub fn tls13_server_entropy_admits(material: [u8]) -> text:
+    """Admit one 32-byte server handshake secret, or name why it is unusable.
+
+    `tls13_accept` used to draw its ServerHello random and its ECDH private
+    scalar from `os.crypto.random.random_bytes`, whose API cannot report an
+    entropy failure: a short or zeroed draw was indistinguishable from a good
+    one and would have been used as a private scalar. The canonical owner
+    `os.crypto.entropy.crypto_entropy_bytes` returns a typed failure, and this
+    admission rejects a degenerate draw before it reaches key derivation.
+    """
+    if material.len() != 32u64:
+        return "server_entropy_wrong_length"
+    var i: u64 = 0
+    while i < material.len():
+        if material[i] != 0u8:
+            return ""
+        i = i + 1u64
+    "server_entropy_all_zero"
+
+fn _entropy_pair_distinct(a: [u8], b: [u8]) -> bool:
+    """The ServerHello random and the private scalar must not be the same draw."""
+    if a.len() != b.len():
+        return true
+    var i: u64 = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return true
+        i = i + 1u64
+    false
 
 fn _validate_server_config(server_config: Tls13ServerConfig) -> text:
     if server_config.cert_chain.len() == 0:
@@ -164,11 +194,30 @@ fn tls13_accept(socket_fd: i64, server_config: Tls13ServerConfig) -> Tls13Accept
     val ch_result = validate_client_hello_record_sh(ch_record)
     if ch_result.is_err():
         return Tls13AcceptResult.Failed(ch_result.err().unwrap())
+    # Draw both server secrets through the canonical typed entropy owner and
+    # fail the handshake closed on any entropy fault. Never derive keys from a
+    # short, zeroed, or duplicated draw.
+    val random_draw = crypto_entropy_bytes(32u64)
+    if random_draw.is_err():
+        return Tls13AcceptResult.Failed("server_entropy_unavailable")
+    val scalar_draw = crypto_entropy_bytes(32u64)
+    if scalar_draw.is_err():
+        return Tls13AcceptResult.Failed("server_entropy_unavailable")
+    val server_random = random_draw.unwrap()
+    val server_scalar = scalar_draw.unwrap()
+    val random_error = tls13_server_entropy_admits(server_random)
+    if random_error != "":
+        return Tls13AcceptResult.Failed(random_error)
+    val scalar_error = tls13_server_entropy_admits(server_scalar)
+    if scalar_error != "":
+        return Tls13AcceptResult.Failed(scalar_error)
+    if not _entropy_pair_distinct(server_random, server_scalar):
+        return Tls13AcceptResult.Failed("server_entropy_repeated_draw")
     val prep = prepare_server_handshake_from_client_hello_record(
         ch_result.unwrap(),
         server_config,
-        random_bytes(32u64),
-        random_bytes(32u64)
+        server_random,
+        server_scalar
     )
     match prep:
         case Tls13ServerHandshakeResult.Failed(reason):

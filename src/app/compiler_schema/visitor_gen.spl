@@ -1,0 +1,475 @@
+# HIR visitor generator — src/app/compiler_schema/visitor_gen.spl
+#
+# Hardening plan §11.5 / §20.4 row C4
+# (doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md):
+# the read-only recursive visitor, the child enumeration and the structural
+# hash over HIR are GENERATED from the same authoritative enum declarations
+# that feed A1's variant registry, so a new variant cannot be silently ignored
+# by a hand-written walker (the failure mode
+# src/compiler/40.mono/verify/post_mono_verify.spl guards against by hand).
+#
+# WHY line-based, and why it reuses A1's extractor: identical reasoning to
+# src/app/compiler_schema/extract.spl — a generator that needs the compiler
+# frontend to run is useless exactly when a new variant does not parse yet.
+# The struct-field scanner below is the same narrow shape: it understands
+# `struct Name:` blocks with `field: Type` at exactly 4-space indent and it
+# refuses to guess. Anything it cannot classify becomes an opaque scalar,
+# never an invented child edge.
+
+use std.io_runtime.{read_file_text, file_exists, file_write, dir_create_all}
+use app.compiler_schema.extract.{VariantRow, extract_enum_variants}
+
+val GEN_HEADER = "# GENERATED — do not edit; regenerate with: bin/simple run src/app/compiler_schema/main.spl visitors\n"
+
+# ============================================================================
+# Declaration model
+# ============================================================================
+
+struct FieldDecl:
+    """One `name: Type` pair, from a struct body or an enum payload."""
+    binder: text
+    type_text: text
+
+struct FieldClass:
+    """How a field participates in the walk.
+
+    cat is one of:
+      prim      — i64/f64/bool/text/char (+`?`): hashed, never traversed
+      opaque    — anything else that is not a HIR node: ignored entirely
+      node      — a single HIR node (`a` holds the node type name)
+      list      — `[NodeType]` (`a` holds the node type name)
+      pair      — `[(A, B)]` (`a`/`b` hold the two side type names, "" if not a node)
+    """
+    cat: text
+    a: text
+    b: text
+
+struct NodeDecl:
+    """One expandable HIR declaration: a struct body or an enum's variants."""
+    name: text
+    is_enum: bool
+    fields: [FieldDecl]
+    variants: [VariantRow]
+
+# The four base carrier structs and their kind enums. Fixed order = the
+# deterministic emission order of the generated files.
+fn base_pairs() -> [[text]]:
+    [
+        ["HirExpr", "HirExprKind", "expr"],
+        ["HirStmt", "HirStmtKind", "stmt"],
+        ["HirType", "HirTypeKind", "type"],
+        ["HirPattern", "HirPatternKind", "pattern"]
+    ]
+
+fn decl_sources() -> [text]:
+    ["src/compiler/20.hir/hir_definitions.spl", "src/compiler/20.hir/hir_types.spl"]
+
+fn opaque_types() -> [text]:
+    """Declared in the scanned files but deliberately NOT descended into.
+
+    These are top-level item/symbol structures, not expression-tree nodes; a
+    HIR expression that mentions one is referring to a declaration, and
+    descending would make "the children of an expression" mean the whole
+    module. Recorded here rather than silently dropped."""
+    [
+        "HirModule", "HirFunction", "HirClass", "HirStruct", "HirEnum",
+        "HirTrait", "HirImpl", "HirConst", "HirSymbol", "HirVariant",
+        "HirField", "HirAttribute", "HirTypeParam", "HirTraitBound",
+        "Scope", "SymbolTable", "HirImport", "HirImportItem",
+        "HirDomainBlock", "HirStaticAssert", "HirAopAdvice", "HirDiBinding",
+        "HirArchRule", "HirMockDecl", "HirContractBlock", "HirContractClause",
+        "HirAssocTypeDecl", "HirAssocTypeImpl", "HirBitfield",
+        "HirBitfieldField"
+    ]
+
+fn prim_types() -> [text]:
+    ["i64", "i32", "i16", "i8", "u64", "u32", "u16", "u8",
+     "f64", "f32", "bool", "text", "char", "usize", "isize"]
+
+# ============================================================================
+# Small text helpers (deterministic, no host state)
+# ============================================================================
+
+fn _contains(items: [text], needle: text) -> bool:
+    for it in items:
+        if it == needle:
+            return true
+    false
+
+fn _strip_opt(t: text) -> text:
+    var s = t.trim()
+    while s.ends_with("?"):
+        s = s.substring(0, s.len() - 1).trim()
+    s
+
+fn _is_prim(t: text) -> bool:
+    _contains(prim_types(), _strip_opt(t))
+
+fn _snake(name: text) -> text:
+    var s = name
+    if s.starts_with("Hir") and s.len() > 3:
+        s = s.substring(3, s.len())
+    var out = ""
+    var i = 0
+    while i < s.len():
+        val ch = s.char_at(i)
+        if ch >= "A" and ch <= "Z":
+            if i > 0:
+                out = out + "_"
+            out = out + ch.to_lower()
+        else:
+            out = out + ch
+        i = i + 1
+    if out == "":
+        return "node"
+    out
+
+fn _split_top(s: text) -> [text]:
+    """Split on commas that are not inside (), [] or {}."""
+    var parts: [text] = []
+    var depth = 0
+    var cur = ""
+    var i = 0
+    while i < s.len():
+        val ch = s.char_at(i)
+        if ch == "(" or ch == "[" or ch == "{":
+            depth = depth + 1
+            cur = cur + ch
+        elif ch == ")" or ch == "]" or ch == "}":
+            depth = depth - 1
+            cur = cur + ch
+        elif ch == "," and depth == 0:
+            parts.push(cur.trim())
+            cur = ""
+        else:
+            cur = cur + ch
+        i = i + 1
+    if cur.trim() != "":
+        parts.push(cur.trim())
+    parts
+
+fn _indent_of(line: text) -> i64:
+    var n = 0
+    var i = 0
+    while i < line.len():
+        if line.char_at(i) == " ":
+            n = n + 1
+            i = i + 1
+        else:
+            return n
+    n
+
+fn _no_comment(line: text) -> text:
+    val idx = line.find("#")
+    if idx < 0:
+        return line
+    line.substring(0, idx)
+
+# ============================================================================
+# Struct-field extraction (the half A1's extractor does not cover)
+# ============================================================================
+
+fn extract_struct_fields(source: text, name: text) -> [FieldDecl]:
+    """Fields of `struct <name>:` — `field: Type` at exactly 4-space indent."""
+    var out: [FieldDecl] = []
+    val header = "struct " + name + ":"
+    val lines = source.split("\n")
+    var inside = false
+    var in_doc = false
+    for raw in lines:
+        if not inside:
+            if raw.trim() == header:
+                inside = true
+            continue
+        val stripped = _no_comment(raw)
+        val trimmed = stripped.trim()
+        if trimmed == "":
+            continue
+        if _indent_of(stripped) == 0:
+            break
+        if in_doc:
+            if trimmed.ends_with("\"\"\""):
+                in_doc = false
+            continue
+        if trimmed.starts_with("\"\"\""):
+            if not (trimmed.len() > 5 and trimmed.ends_with("\"\"\"")):
+                in_doc = true
+            continue
+        if _indent_of(stripped) != 4:
+            continue
+        if trimmed.starts_with("fn ") or trimmed.starts_with("me ") or trimmed.starts_with("static ") or trimmed.starts_with("@"):
+            continue
+        val colon = trimmed.find(":")
+        if colon < 0:
+            continue
+        val fname = trimmed.substring(0, colon).trim()
+        val ftype = trimmed.substring(colon + 1, trimmed.len()).trim()
+        if fname == "" or ftype == "" or fname.find(" ") >= 0:
+            continue
+        out.push(FieldDecl(fname, ftype))
+    out
+
+fn parse_payload_fields(payload_schema: text) -> [FieldDecl]:
+    """`Call(callee: HirExpr, args: [HirExpr])` -> the two FieldDecls."""
+    var out: [FieldDecl] = []
+    val open = payload_schema.find("(")
+    if open < 0:
+        return out
+    val close = payload_schema.last_index_of(")")
+    if close <= open:
+        return out
+    val inner = payload_schema.substring(open + 1, close)
+    var i = 0
+    for part in _split_top(inner):
+        val colon = part.find(":")
+        var binder = "f{i}"
+        var ftype = part.trim()
+        if colon > 0 and part.substring(0, colon).find("(") < 0:
+            binder = part.substring(0, colon).trim()
+            ftype = part.substring(colon + 1, part.len()).trim()
+        out.push(FieldDecl(binder, ftype))
+        i = i + 1
+    out
+
+# ============================================================================
+# Declaration universe
+# ============================================================================
+
+class DeclUniverse:
+    """Every declaration the generator may descend into."""
+    sources: [text]
+    struct_names: [text]
+    enum_names: [text]
+
+    static fn load(repo_root: text) -> DeclUniverse:
+        var texts: [text] = []
+        var snames: [text] = []
+        var enames: [text] = []
+        for rel in decl_sources():
+            val path = repo_root + "/" + rel
+            if not file_exists(path):
+                continue
+            val body = read_file_text(path)
+            texts = texts.push(body)
+            for line in body.split("\n"):
+                val t = line.trim()
+                if _indent_of(line) == 0 and t.starts_with("struct ") and t.ends_with(":"):
+                    snames = snames.push(t.substring(7, t.len() - 1).trim())
+                if _indent_of(line) == 0 and t.starts_with("enum ") and t.ends_with(":"):
+                    enames = enames.push(t.substring(5, t.len() - 1).trim())
+        DeclUniverse(sources: texts, struct_names: snames, enum_names: enames)
+
+    me is_struct(name: text) -> bool:
+        _contains(self.struct_names, name)
+
+    me is_enum(name: text) -> bool:
+        _contains(self.enum_names, name)
+
+    me is_node(name: text) -> bool:
+        """A type the walk descends into."""
+        if _contains(opaque_types(), name):
+            return false
+        self.is_struct(name) or self.is_enum(name)
+
+    me decl_of(name: text) -> NodeDecl:
+        if self.is_enum(name):
+            var rows: [VariantRow] = []
+            for body in self.sources:
+                if rows.len() == 0:
+                    rows = extract_enum_variants(body, name, "compiler.hir")
+            return NodeDecl(name: name, is_enum: true, fields: [], variants: rows)
+        var fields: [FieldDecl] = []
+        for body in self.sources:
+            if fields.len() == 0:
+                fields = extract_struct_fields(body, name)
+        NodeDecl(name: name, is_enum: false, fields: fields, variants: [])
+
+    me classify(type_text: text) -> FieldClass:
+        val t = _strip_opt(type_text)
+        if t.starts_with("[") and t.ends_with("]"):
+            val elem = _strip_opt(t.substring(1, t.len() - 1))
+            if elem.starts_with("(") and elem.ends_with(")"):
+                val sides = _split_top(elem.substring(1, elem.len() - 1))
+                if sides.len() == 2:
+                    val la = _strip_opt(sides[0])
+                    val lb = _strip_opt(sides[1])
+                    val ka = if self.is_node(la): la else: ""
+                    val kb = if self.is_node(lb): lb else: ""
+                    if ka == "" and kb == "":
+                        return FieldClass("opaque", "", "")
+                    return FieldClass("pair", ka, kb)
+                return FieldClass("opaque", "", "")
+            if self.is_node(elem):
+                return FieldClass("list", elem, "")
+            return FieldClass("opaque", "", "")
+        if self.is_node(t):
+            return FieldClass("node", t, "")
+        if _is_prim(t):
+            return FieldClass("prim", t, "")
+        FieldClass("opaque", "", "")
+
+    me guard_of(decl: NodeDecl, field: FieldDecl) -> text:
+        """`# DESUGARED:` optionals are a `has_x: bool` + `x: T` pair; the walk
+        must not descend into the placeholder stored while the bit is false."""
+        val want = "has_" + field.binder
+        for f in decl.fields:
+            if f.binder == want and _strip_opt(f.type_text) == "bool":
+                return want
+        if field.binder == "value":
+            for f in decl.fields:
+                if f.binder == "has" and _strip_opt(f.type_text) == "bool":
+                    return "has"
+        ""
+
+# ============================================================================
+# Node closure — every declaration reachable from the four base kinds
+# ============================================================================
+
+fn _push_unique(items: [text], name: text) -> [text]:
+    if _contains(items, name):
+        return items
+    items.push(name)
+
+fn node_closure(u: DeclUniverse) -> [text]:
+    """Reachable declaration names, in deterministic discovery order."""
+    var work: [text] = []
+    var seen: [text] = []
+    for pair in base_pairs():
+        work = _push_unique(work, pair[0])
+        work = _push_unique(work, pair[1])
+    var i = 0
+    while i < work.len():
+        val name = work[i]
+        i = i + 1
+        if _contains(seen, name):
+            continue
+        seen = seen.push(name)
+        val decl = u.decl_of(name)
+        if decl.is_enum:
+            for row in decl.variants:
+                for f in parse_payload_fields(row.payload_schema):
+                    val c = u.classify(f.type_text)
+                    if c.a != "":
+                        work = _push_unique(work, c.a)
+                    if c.b != "":
+                        work = _push_unique(work, c.b)
+        else:
+            for f in decl.fields:
+                val c = u.classify(f.type_text)
+                if c.a != "":
+                    work = _push_unique(work, c.a)
+                if c.b != "":
+                    work = _push_unique(work, c.b)
+    seen
+
+fn _is_base_carrier(name: text) -> bool:
+    for pair in base_pairs():
+        if pair[0] == name:
+            return true
+    false
+
+fn _base_short(name: text) -> text:
+    for pair in base_pairs():
+        if pair[0] == name:
+            return pair[2]
+    ""
+
+fn _kind_enum_of(carrier: text) -> text:
+    for pair in base_pairs():
+        if pair[0] == carrier:
+            return pair[1]
+    ""
+
+fn visit_fn_name(name: text) -> text:
+    if _is_base_carrier(name):
+        return "hir_visit_" + _base_short(name)
+    "hir_visit_" + _snake(name)
+
+fn children_fn_name(name: text) -> text:
+    if _is_base_carrier(name):
+        return "hir_children_of_" + _base_short(name)
+    "hir_children_of_" + _snake(name)
+
+fn hash_fn_name(name: text) -> text:
+    if _is_base_carrier(name):
+        return "hir_hash_" + _base_short(name)
+    "hir_hash_" + _snake(name)
+
+# ============================================================================
+# Arm binder rendering
+# ============================================================================
+
+fn _binders(u: DeclUniverse, fields: [FieldDecl], keep_prims: bool) -> text:
+    """`(callee, args)` — `_` for anything this visitor does not read."""
+    if fields.len() == 0:
+        return ""
+    var out = "("
+    var i = 0
+    while i < fields.len():
+        if i > 0:
+            out = out + ", "
+        val f = fields[i]
+        val c = u.classify(f.type_text)
+        var used = c.cat == "node" or c.cat == "list" or c.cat == "pair"
+        if keep_prims and c.cat == "prim":
+            used = true
+        if used:
+            out = out + "b_" + f.binder
+        else:
+            out = out + "_"
+        i = i + 1
+    out + ")"
+
+fn _node_ctor(name: text) -> text:
+    """HirNode constructor for a base carrier; "" for a wrapper type."""
+    if name == "HirExpr":
+        return "Expr"
+    if name == "HirStmt":
+        return "Stmt"
+    if name == "HirType":
+        return "Type_"
+    if name == "HirPattern":
+        return "Pattern"
+    ""
+
+fn _one_call(mode: text, type_name: text, v: text) -> text:
+    """The statement that consumes ONE reachable value `v` of `type_name`."""
+    if mode == "visit":
+        return visit_fn_name(type_name) + "(" + v + ", visitor)"
+    if mode == "hash":
+        return "h = _hir_mix_i64(h, " + hash_fn_name(type_name) + "(" + v + "))"
+    # children: base carriers ARE the child; wrappers are transparent and
+    # contribute the HIR nodes they hold, so `children_of(Call)` is the callee
+    # and the argument expressions, not an opaque HirCallArg.
+    val ctor = _node_ctor(type_name)
+    if ctor != "":
+        return "out = out.push(HirNode." + ctor + "(" + v + "))"
+    return "out = _hir_extend(out, " + children_fn_name(type_name) + "(" + v + "))"
+
+fn _recurse_lines(u: DeclUniverse, f: FieldDecl, indent: text, mode: text, idx: i64) -> text:
+    """Emit the traversal for one field, for one of visit/children/hash."""
+    val c = u.classify(f.type_text)
+    val v = "b_" + f.binder
+    if c.cat == "node":
+        return indent + _one_call(mode, c.a, v) + "\n"
+    if c.cat == "list":
+        var out = indent + "for it{idx} in " + v + ":\n"
+        out = out + indent + "    " + _one_call(mode, c.a, "it{idx}") + "\n"
+        return out
+    if c.cat == "pair":
+        var out = indent + "for (ka{idx}, kb{idx}) in " + v + ":\n"
+        if c.a != "":
+            out = out + indent + "    " + _one_call(mode, c.a, "ka{idx}") + "\n"
+        if c.b != "":
+            out = out + indent + "    " + _one_call(mode, c.b, "kb{idx}") + "\n"
+        return out
+    if c.cat == "prim" and mode == "hash":
+        return indent + "h = _hir_mix_text(h, \"{" + v + "}\")\n"
+    ""
+
+export GEN_HEADER, FieldDecl, FieldClass, NodeDecl, DeclUniverse
+export base_pairs, decl_sources, opaque_types, prim_types
+export extract_struct_fields, parse_payload_fields, node_closure
+export visit_fn_name, children_fn_name, hash_fn_name
+export _snake, _split_top, _is_base_carrier, _kind_enum_of, _base_short
+export _binders, _recurse_lines, _contains, _strip_opt, _is_prim

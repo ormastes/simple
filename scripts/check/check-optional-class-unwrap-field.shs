@@ -19,8 +19,9 @@
 # INVOCATION, never through a pipe — a pipeline's `$?` is the last stage's
 # status and has produced false greens in this repo.
 #
-# SCOPE. Checks 1 and 2 (unwrap-then-field, from a local and from a field) are
-# asserted on BOTH engines. Check 3 (the optional holds the REFERENCE) is
+# SCOPE. All checks except `optional-holds-reference` are asserted on BOTH
+# engines, including `unwrap-assign-field` (`m!.n = 44`) and the nullable
+# USER ENUM case — two interpreter-side divergences fixed 2026-08-21. Check 3 (the optional holds the REFERENCE) is
 # asserted on the JIT only: the seed interpreter answers COPY here, which is
 # the separately-tracked class-value-identity divergence
 # (doc/08_tracking/bug/interpreter_binding_class_typed_field_snapshots_instead_of_aliasing_2026-08-10.md,
@@ -38,6 +39,7 @@ cd "$ROOT" || exit 2
 
 BIN="${SIMPLE_BIN:-bin/simple}"
 FIXTURE=test/fixtures/repro/compiler/optional_class_unwrap/optional_class_unwrap_field.spl
+ENUM_FIXTURE=test/fixtures/repro/compiler/optional_class_unwrap/optional_enum_unwrap_match.spl
 TIMEOUT="${SIMPLE_TIMEOUT:-120}"
 
 if [ ! -x "$BIN" ] && ! command -v "$BIN" >/dev/null 2>&1; then
@@ -46,6 +48,10 @@ if [ ! -x "$BIN" ] && ! command -v "$BIN" >/dev/null 2>&1; then
 fi
 if [ ! -f "$FIXTURE" ]; then
     printf 'ERROR — nothing was checked (fixture missing: %s)\n' "$FIXTURE"
+    exit 2
+fi
+if [ ! -f "$ENUM_FIXTURE" ]; then
+    printf 'ERROR — nothing was checked (fixture missing: %s)\n' "$ENUM_FIXTURE"
     exit 2
 fi
 
@@ -91,7 +97,10 @@ run_engine() {
         return
     fi
 
-    for check in local-unwrap-field field-unwrap-field; do
+    for check in local-unwrap-field field-unwrap-field \
+                 unwrap-method-call unwrap-nested-field \
+                 unwrap-optional-of-optional unwrap-struct-field \
+                 unwrap-assign-field; do
         if printf '%s\n' "$out" | grep -q "^OK $check$"; then
             printf '%-8s | OK   %s\n' "$label" "$check"
         else
@@ -113,10 +122,49 @@ run_engine() {
     fi
 }
 
+# Nullable USER ENUM: same defect class, asserted on BOTH engines since
+# 2026-08-21. The seed interpreter used to raise `force unwrap failed: expected
+# Some or Ok, got Color::Green` here; that engine divergence is now fixed
+# (`try_unwrap_option_or_result` treats a non-Option/non-Result enum as
+# present, the identity, exactly as the JIT's lower_try does).
+run_enum_engine() {
+    label=$1
+    assert=$2
+
+    if [ "$label" = interp ]; then
+        out=$(SIMPLE_BOOTSTRAP=1 SIMPLE_EXECUTION_MODE=interpret \
+              timeout "$TIMEOUT" "$BIN" run "$ENUM_FIXTURE" 2>&1)
+        rc=$?
+    else
+        out=$(SIMPLE_BOOTSTRAP=1 timeout "$TIMEOUT" "$BIN" run "$ENUM_FIXTURE" 2>&1)
+        rc=$?
+    fi
+    CHECKED=$((CHECKED + 1))
+
+    if [ "$rc" -ge 128 ] || [ "$rc" -eq 124 ]; then
+        printf '%-8s | CRASHED rc=%s on enum-unwrap-match\n' "$label" "$rc"
+        OFFENDERS="$OFFENDERS ${label}:enum-crash(rc=$rc)"
+        return
+    fi
+    if printf '%s\n' "$out" | grep -q '^OK enum-unwrap-match$'; then
+        printf '%-8s | OK   enum-unwrap-match\n' "$label"
+    elif [ "$assert" = 1 ]; then
+        printf '%-8s | FAIL enum-unwrap-match -- %s\n' "$label" \
+            "$(printf '%s\n' "$out" | grep -E 'enum-unwrap-match|force unwrap' | head -1)"
+        OFFENDERS="$OFFENDERS ${label}:enum-unwrap-match"
+    else
+        printf '%-8s | note enum-unwrap-match not held -- %s\n' "$label" \
+            "$(printf '%s\n' "$out" | grep -E 'enum-unwrap-match|force unwrap' | head -1)"
+        printf '%-8s |      (separately tracked interpreter-side defect, not asserted here)\n' "$label"
+    fi
+}
+
 printf '%-8s | result\n' "engine"
 printf -- '---------+------------------------------------------------------\n'
 run_engine jit 1
 run_engine interp 0
+run_enum_engine jit 1
+run_enum_engine interp 1
 printf '\n'
 
 if [ "$CHECKED" -eq 0 ]; then

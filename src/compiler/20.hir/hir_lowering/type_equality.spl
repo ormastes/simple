@@ -1,0 +1,167 @@
+# HIR Type Structural Equality
+#
+# Single reusable structural-equality oracle for `HirType` (Phase 1B.4 -
+# TODO #87). Lives outside `async.spl` so every consumer that needs to ask
+# "are these two HIR types the same type?" shares one definition instead of
+# re-deriving a partial one.
+#
+# TERMINATION: `HirType` as built by HIR lowering is a finite acyclic TREE.
+# A recursive user type (`class Node: next: Node?`) is represented as
+# `Named(SymbolId, args)` and this comparison NEVER expands a `SymbolId` into
+# the symbol's definition -- it compares the id and the explicit type
+# arguments only. Every recursive call therefore descends into a strict
+# syntactic sub-term of its argument, so the recursion depth is bounded by
+# the (finite) depth of the two type terms and cannot cycle.
+
+use compiler.hir.hir_types.*
+
+# ================================================================
+# Dimension equality (needed by Tensor/Layer)
+# ================================================================
+
+fn hir_dim_exprs_equal(a: DimExpr, b: DimExpr) -> bool:
+    """Structural equality for tensor dimension expressions."""
+    match (a.kind, b.kind):
+        case (Literal(va), Literal(vb)): va == vb
+        case (Named(na, lo_a, hi_a), Named(nb, lo_b, hi_b)):
+            na == nb and lo_a == lo_b and hi_a == hi_b
+        case (Var(ia), Var(ib)): ia == ib
+        case (Dynamic, Dynamic): true
+        case (Broadcast, Broadcast): true
+        case (ConstParam(na), ConstParam(nb)): na == nb
+        case (Add(la, ra), Add(lb, rb)):
+            hir_dim_exprs_equal(la, lb) and hir_dim_exprs_equal(ra, rb)
+        case (Mul(la, ra), Mul(lb, rb)):
+            hir_dim_exprs_equal(la, lb) and hir_dim_exprs_equal(ra, rb)
+        case (Div(la, ra), Div(lb, rb)):
+            hir_dim_exprs_equal(la, lb) and hir_dim_exprs_equal(ra, rb)
+        case _: false
+
+fn hir_dim_lists_equal(a: [DimExpr], b: [DimExpr]) -> bool:
+    """Element-wise structural equality for dimension lists."""
+    if a.len() != b.len():
+        return false
+    for i in 0..(a.len()):
+        if not hir_dim_exprs_equal(a[i], b[i]):
+            return false
+    true
+
+fn hir_devices_equal(a: DeviceType?, b: DeviceType?) -> bool:
+    """Equality for the optional tensor device annotation."""
+    match (a, b):
+        case (nil, nil): true
+        case (Some(da), Some(db)):
+            match (da, db):
+                case (CPU, CPU): true
+                case (CUDA(ia), CUDA(ib)): ia == ib
+                case (Vulkan(ia), Vulkan(ib)): ia == ib
+                case _: false
+        case _: false
+
+# ================================================================
+# Type equality
+# ================================================================
+
+fn hir_type_lists_equal(a: [HirType], b: [HirType]) -> bool:
+    """Element-wise structural equality for type lists (tuple/args/params)."""
+    if a.len() != b.len():
+        return false
+    for i in 0..(a.len()):
+        if not hir_types_equal(a[i], b[i]):
+            return false
+    true
+
+fn hir_types_equal(a: HirType, b: HirType) -> bool:
+    """Structural equality for HIR types.
+
+    Two types are equal when they use the same constructor and all of their
+    components are recursively equal. Spans are IGNORED -- two structurally
+    identical types written at different source locations are equal.
+    See the module header for the termination argument.
+    """
+    match (a.kind, b.kind):
+        # --- primitives -------------------------------------------------
+        case (Int(bits_a, signed_a), Int(bits_b, signed_b)):
+            bits_a == bits_b and signed_a == signed_b
+        case (Float(bits_a), Float(bits_b)):
+            bits_a == bits_b
+        case (Bool, Bool): true
+        case (Char, Char): true
+        case (Str, Str): true
+        case (Unit, Unit): true
+        case (Never, Never): true
+        case (Error, Error): true
+        case (Any, Any): true
+
+        # --- composites -------------------------------------------------
+        case (Tuple(fields_a), Tuple(fields_b)):
+            hir_type_lists_equal(fields_a, fields_b)
+
+        case (Array(elem_a, size_a), Array(elem_b, size_b)):
+            # The declared length is part of the type: [i32; 3] != [i32; 4].
+            size_a == size_b and hir_types_equal(elem_a, elem_b)
+
+        case (Slice(elem_a), Slice(elem_b)):
+            hir_types_equal(elem_a, elem_b)
+
+        case (Dict(key_a, val_a), Dict(key_b, val_b)):
+            hir_types_equal(key_a, key_b) and hir_types_equal(val_a, val_b)
+
+        # --- references / capability wrappers ---------------------------
+        case (Ref(inner_a, mut_a), Ref(inner_b, mut_b)):
+            mut_a == mut_b and hir_types_equal(inner_a, inner_b)
+
+        case (Ptr(inner_a, mut_a), Ptr(inner_b, mut_b)):
+            mut_a == mut_b and hir_types_equal(inner_a, inner_b)
+
+        case (Optional(inner_a), Optional(inner_b)):
+            hir_types_equal(inner_a, inner_b)
+
+        case (Isolated(inner_a), Isolated(inner_b)):
+            hir_types_equal(inner_a, inner_b)
+
+        case (Result(ok_a, err_a), Result(ok_b, err_b)):
+            hir_types_equal(ok_a, ok_b) and hir_types_equal(err_a, err_b)
+
+        # --- user-defined ------------------------------------------------
+        case (Named(sym_a, args_a), Named(sym_b, args_b)):
+            val symbol_a: SymbolId = sym_a
+            val symbol_b: SymbolId = sym_b
+            symbol_a.id == symbol_b.id and hir_type_lists_equal(args_a, args_b)
+
+        case (TypeParam(name_a, bounds_a), TypeParam(name_b, bounds_b)):
+            name_a == name_b and hir_type_lists_equal(bounds_a, bounds_b)
+
+        case (Union(members_a), Union(members_b)):
+            hir_type_lists_equal(members_a, members_b)
+
+        case (DynTrait(trait_a), DynTrait(trait_b)):
+            val ta: SymbolId = trait_a
+            val tb: SymbolId = trait_b
+            ta.id == tb.id
+
+        case (Projection(base_a, assoc_a), Projection(base_b, assoc_b)):
+            assoc_a == assoc_b and hir_types_equal(base_a, base_b)
+
+        # --- functions ----------------------------------------------------
+        # Effects are deliberately NOT compared: they are an orthogonal
+        # annotation, and no current caller distinguishes on them.
+        case (Function(params_a, ret_a, _), Function(params_b, ret_b, _)):
+            hir_type_lists_equal(params_a, params_b) and hir_types_equal(ret_a, ret_b)
+
+        # --- tensor / layer ------------------------------------------------
+        case (Tensor(elem_a, dims_a, dev_a), Tensor(elem_b, dims_b, dev_b)):
+            hir_types_equal(elem_a, elem_b)
+                and hir_dim_lists_equal(dims_a, dims_b)
+                and hir_devices_equal(dev_a, dev_b)
+
+        case (Layer(in_a, out_a), Layer(in_b, out_b)):
+            hir_dim_lists_equal(in_a, in_b) and hir_dim_lists_equal(out_a, out_b)
+
+        # --- inference ------------------------------------------------------
+        case (Infer(id_a, _), Infer(id_b, _)):
+            id_a == id_b
+
+        case _:
+            # Different type constructors.
+            false

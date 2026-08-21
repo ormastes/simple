@@ -1,0 +1,46 @@
+# Launcher-owned checksum artifact gate.
+#
+# The current loader has no admitted target artifact/token lookup that can be
+# consumed here. The launcher therefore exposes the canonical identity while
+# refusing execution. It must not fall back to the shell builtin or host PATH.
+
+use os.packages.checksum_tool_package_identity.{
+    checksum_tool_package_identity_v1,
+    checksum_tool_package_identity_blocked_v1
+}
+use os.services.launcher.primary_tool_artifact_gate.{
+    LauncherPrimaryToolResultV1,
+    primary_tool_blocked_result_v1,
+    primary_tool_unknown_result_v1,
+    LAUNCHER_PRIMARY_TOOL_BLOCKED,
+    LAUNCHER_PRIMARY_TOOL_UNKNOWN
+}
+
+pub const LAUNCHER_CHECKSUM_TOOL_BLOCKED: i32 = LAUNCHER_PRIMARY_TOOL_BLOCKED
+pub const LAUNCHER_CHECKSUM_TOOL_UNKNOWN: i32 = LAUNCHER_PRIMARY_TOOL_UNKNOWN
+
+pub fn launcher_dispatch_checksum_tool_v1(
+    command: text,
+    _args: [text]
+) -> LauncherPrimaryToolResultV1:
+    val identity = checksum_tool_package_identity_v1(command)
+    match identity:
+        case Err(_):
+            primary_tool_unknown_result_v1("CHECKSUM_TOOL_COMMAND_UNKNOWN")
+        case Ok(package):
+            # Only a loader-owned, target-bound authority lookup may cross from
+            # this declaration to launcher_launch_path_with_args. That lookup
+            # does not exist yet, so reaching the legacy spawn path is unsafe.
+            if not checksum_tool_package_identity_blocked_v1(package):
+                return primary_tool_blocked_result_v1(
+                    "CHECKSUM_TOOL_PACKAGE_IDENTITY_INVALID",
+                    package.artifact.canonical_path,
+                    "",
+                    "",
+                )
+            primary_tool_blocked_result_v1(
+                "CHECKSUM_TOOL_TARGET_ARTIFACT_TOKEN_UNAVAILABLE",
+                package.artifact.canonical_path,
+                package.artifact_digest,
+                package.admission_receipt_id,
+            )

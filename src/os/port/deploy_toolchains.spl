@@ -19,13 +19,23 @@
 use std.fs
 use std.process
 use std.text
+use std.io_runtime.{dir_exists, file_exists}
+use std.io.file.{FileHandle}
 use os.port.guest_toolchain_execution_gate.{guest_toolchain_execution_gate_detail}
+use os.port.guest_toolchain_artifact_build_receipt.{
+    GuestToolchainArtifactBuildAdmissionErrorV1,
+    GuestToolchainArtifactBuildReceiptV1,
+    guest_toolchain_artifact_build_admit_v1
+}
+use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.loader.elf_loader.{elf_admit_executable}
 
 extern fn rt_cli_get_args() -> [text]
 extern fn rt_dir_exists(path: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
 
 val VERSION = "1.0.0"
+val MAX_GUEST_TOOL_BYTES: i64 = 268435456
 
 # Supported architectures
 val TARGETS = [
@@ -114,8 +124,59 @@ fn print_help():
 
 class StageStatus:
     name: text
-    status: text    # "READY", "NOT BUILT", "PARTIAL", "ERROR"
+    status: text    # Construction/admission state; READY requires typed evidence.
     detail: text
+
+fn guest_static_tool_candidate_admit(data: [u8]) -> Result<(), text>:
+    elf_admit_executable(data, Architecture.X86_64)
+
+fn deploy_toolchain_artifact_build_admit_v1(
+    receipt: GuestToolchainArtifactBuildReceiptV1,
+    builder_bytes: [u8],
+    builder_source_bytes: [u8],
+    builder_provenance_bytes: [u8],
+    source_revision_bytes: [u8],
+    dependency_manifest_bytes: [u8],
+    build_environment_bytes: [u8],
+    output_bytes: [u8],
+    rebuild_output_bytes: [u8]
+) -> Result<(), GuestToolchainArtifactBuildAdmissionErrorV1>:
+    """Structural candidate boundary; success never authorizes deployment."""
+    guest_toolchain_artifact_build_admit_v1(
+        receipt, builder_bytes, builder_source_bytes,
+        builder_provenance_bytes, source_revision_bytes,
+        dependency_manifest_bytes, build_environment_bytes,
+        output_bytes, rebuild_output_bytes)
+
+fn _guest_static_tool_file_admit(path: text) -> Result<(), text>:
+    # Open first, then derive the bound and read from that same handle. A
+    # pathname replacement or concurrent growth can no longer widen the
+    # allocation after admission.
+    val opened = FileHandle.read_file(path)
+    if opened.is_err():
+        return Err("cannot open {path}")
+    val handle = opened.unwrap()
+    val size_result = handle.size()
+    if size_result.is_err():
+        if handle.close().is_err():
+            return Err("cannot stat or close opened {path}")
+        return Err("cannot stat opened {path}")
+    val size = size_result.unwrap()
+    if size <= 0:
+        if handle.close().is_err():
+            return Err("empty {path}; close failed")
+        return Err("empty {path}")
+    if size > MAX_GUEST_TOOL_BYTES:
+        if handle.close().is_err():
+            return Err("{path} exceeds limit; close failed")
+        return Err("{path} exceeds 256 MiB status-admission limit")
+    val read = handle.read_exact(size)
+    val closed = handle.close()
+    if closed.is_err():
+        return Err("cannot close opened {path}")
+    if read.is_err():
+        return Err("short read for {path}")
+    guest_static_tool_candidate_admit(read.unwrap())
 
 fn check_status() -> List<StageStatus>:
     """Check the status of all toolchain stages."""
@@ -131,7 +192,8 @@ fn check_status() -> List<StageStatus>:
         var have_ld = rt_file_exists("build/os/sysroot/share/simpleos/simpleos.ld")
 
         if have_headers and have_lib and have_crt0 and have_ld:
-            sysroot_status = "READY"
+            sysroot_status = "PARTIAL"
+            sysroot_detail = "files present; typed per-target build receipts required"
         else:
             sysroot_status = "PARTIAL"
             var missing: List<text> = []
@@ -148,22 +210,26 @@ fn check_status() -> List<StageStatus>:
 
     # 2. Libc (source build)
     var libc_status = "NOT BUILT"
-    if rt_file_exists("src/os/libc/libsimpleos_c.a"):
-        libc_status = "READY"
+    if file_exists("src/os/libc/libsimpleos_c.a"):
+        libc_status = "PARTIAL"
     stages = stages + [StageStatus(name: "libc", status: libc_status, detail: "")]
 
     # 3. LLVM/Clang (host build for cross-compilation)
     var llvm_status = "NOT BUILT"
     if rt_dir_exists("build/os/llvm/host-tools/bin"):
         llvm_status = "HOST TOOLS ONLY"
-    if rt_dir_exists("build/os/llvm/cross/bin"):
-        llvm_status = "READY"
-    stages = stages + [StageStatus(name: "llvm-cross", status: llvm_status, detail: "")]
+    if dir_exists("build/os/llvm/cross/bin"):
+        llvm_status = "PARTIAL"
+    stages = stages + [StageStatus(
+        name: "llvm-cross",
+        status: llvm_status,
+        detail: if llvm_status == "PARTIAL": "directory present; typed target artifact build receipts required" else: "",
+    )]
 
     # 4. Compiler-RT
     var rt_status = "NOT BUILT"
-    if rt_dir_exists("build/os/llvm/compiler-rt"):
-        rt_status = "READY"
+    if dir_exists("build/os/llvm/compiler-rt"):
+        rt_status = "PARTIAL"
     stages = stages + [StageStatus(name: "compiler-rt", status: rt_status, detail: "")]
 
     # 5. Rust target specs
@@ -178,7 +244,7 @@ fn check_status() -> List<StageStatus>:
     for spec in spec_files:
         if rt_file_exists(spec):
             specs_found = specs_found + 1
-    var rust_spec_status = if specs_found == spec_files.len(): "READY" else if specs_found > 0: "PARTIAL ({specs_found}/{spec_files.len()})" else: "NOT FOUND"
+    var rust_spec_status = if specs_found == spec_files.len(): "PRESENT" else if specs_found > 0: "PARTIAL ({specs_found}/{spec_files.len()})" else: "NOT FOUND"
     stages = stages + [StageStatus(name: "rust-specs", status: rust_spec_status, detail: "")]
 
     # 6. Rust examples
@@ -186,7 +252,7 @@ fn check_status() -> List<StageStatus>:
     var hello_built = rt_file_exists("build/os/rust/hello")
     var ipc_built = rt_file_exists("build/os/rust/ipc_sample")
     if hello_built and ipc_built:
-        rust_ex_status = "READY"
+        rust_ex_status = "PARTIAL"
     else if hello_built or ipc_built:
         rust_ex_status = "PARTIAL"
     stages = stages + [StageStatus(name: "rust-examples", status: rust_ex_status, detail: "")]
@@ -195,38 +261,59 @@ fn check_status() -> List<StageStatus>:
     var clang_static_status = "NOT BUILT"
     var clang_static_detail = "missing build/os/clang_static/bin/clang_static"
     var clang_static_ready = false
-    if rt_file_exists("build/os/clang_static/bin/clang_static"):
-        clang_static_status = "READY"
-        clang_static_detail = ""
-        clang_static_ready = true
+    val clang_candidate = _guest_static_tool_file_admit("build/os/clang_static/bin/clang_static")
+    match clang_candidate:
+        case Ok(()):
+            clang_static_status = "PARTIAL"
+            clang_static_detail = "structural x86_64 ELF candidate; typed build and target execution receipts required"
+            clang_static_ready = true
+        case Err(reason):
+            if file_exists("build/os/clang_static/bin/clang_static"):
+                clang_static_status = "ERROR"
+                clang_static_detail = reason
     stages = stages + [StageStatus(name: "clang-static-guest", status: clang_static_status, detail: clang_static_detail)]
 
     var rustc_static_status = "NOT BUILT"
     var rustc_static_detail = "missing build/os/rust_static/bin/rustc_static"
     var rustc_static_ready = false
-    if rt_file_exists("build/os/rust_static/bin/rustc_static"):
-        rustc_static_status = "READY"
-        rustc_static_detail = ""
-        rustc_static_ready = true
+    val rust_candidate = _guest_static_tool_file_admit("build/os/rust_static/bin/rustc_static")
+    match rust_candidate:
+        case Ok(()):
+            rustc_static_status = "PARTIAL"
+            rustc_static_detail = "structural x86_64 ELF candidate; typed build and target execution receipts required"
+            rustc_static_ready = true
+        case Err(reason):
+            if file_exists("build/os/rust_static/bin/rustc_static"):
+                rustc_static_status = "ERROR"
+                rustc_static_detail = reason
     stages = stages + [StageStatus(name: "rustc-static-guest", status: rustc_static_status, detail: rustc_static_detail)]
 
     var bake_status = "DISABLED"
     var bake_detail = "touch build/os/.bake_include_toolchain to embed guest compiler payloads"
     var bake_enabled = false
-    if rt_file_exists("build/os/.bake_include_toolchain"):
-        bake_status = "ENABLED"
-        bake_detail = ""
+    if file_exists("build/os/.bake_include_toolchain"):
+        bake_status = "REQUESTED"
+        bake_detail = "marker is policy input only; typed artifact build receipts still required"
         bake_enabled = true
     stages = stages + [StageStatus(name: "toolchain-disk-bake", status: bake_status, detail: bake_detail)]
+
+    stages = stages + [StageStatus(
+        name: "artifact-build-admission",
+        status: "BLOCKED",
+        detail: "authoritative GuestToolchainArtifactBuildReceiptV1 producer and loader-owned consume-once token absent",
+    )]
 
     val exec_gate_detail = guest_toolchain_execution_gate_detail(clang_static_ready, rustc_static_ready, bake_enabled)
     stages = stages + [StageStatus(
         name: "guest-toolchain-exec-gate",
-        status: if exec_gate_detail == "READY": "READY" else: "BLOCKED",
-        detail: if exec_gate_detail == "READY": "" else: exec_gate_detail,
+        status: "BLOCKED",
+        detail: exec_gate_detail,
     )]
 
     stages
+
+export guest_static_tool_candidate_admit
+export deploy_toolchain_artifact_build_admit_v1
 
 fn print_status():
     """Print formatted status of all toolchain stages."""
@@ -293,7 +380,7 @@ fn stage_build_sysroot() -> bool:
             ok = false
 
     if ok:
-        print "[deploy] Sysroot ready at build/os/sysroot/"
+        print "[deploy] Sysroot constructed at build/os/sysroot/; typed artifact build receipts required"
     ok
 
 # ===========================================================================
@@ -320,7 +407,7 @@ fn stage_build_llvm(config: DeployConfig) -> bool:
         print result.stderr
         return false
 
-    print "[deploy] LLVM build complete"
+    print "[deploy] LLVM raw build complete; typed artifact build receipts required before staging"
     true
 
 # ===========================================================================
@@ -404,7 +491,7 @@ fn stage_cross_build(config: DeployConfig) -> bool:
         print result.stderr
         return false
 
-    print "[deploy] LLVM cross-build complete (self-hosting ready)"
+    print "[deploy] LLVM cross-build complete; target artifact remains unadmitted"
     true
 
 # ===========================================================================
@@ -510,11 +597,21 @@ fn main():
             detail: "",
         )]
 
+    # Construction cannot promote deployment without immutable, re-hashed,
+    # reproducible build receipts. The producer is intentionally not inferred
+    # from directories, markers, or successful process exit.
+    results = results + [StageStatus(
+        name: "artifact-admission",
+        status: "BLOCKED",
+        detail: "authoritative GuestToolchainArtifactBuildReceiptV1 producer and loader-owned consume-once token absent",
+    )]
+
     print_final_report(results)
 
-    # Exit with error if any stage failed
+    # A blocked admission is a nonzero deployment result even when raw
+    # construction succeeded.
     for result in results:
-        if result.status == "FAILED":
+        if result.status == "FAILED" or result.status == "BLOCKED":
             process.exit(1)
 
 fn print_final_report(results: List<StageStatus>):
@@ -527,10 +624,11 @@ fn print_final_report(results: List<StageStatus>):
 
     var ok_count = 0
     var fail_count = 0
+    var blocked_count = 0
     var skip_count = 0
 
     for result in results:
-        var icon = if result.status == "OK": "  [OK]     " else if result.status == "FAILED": "  [FAIL]   " else: "  [SKIP]   "
+        var icon = if result.status == "OK": "  [OK]     " else if result.status == "FAILED": "  [FAIL]   " else if result.status == "BLOCKED": "  [BLOCK]  " else: "  [SKIP]   "
         var line = "{icon}{result.name}"
         if result.detail != "":
             line = line + " ({result.detail})"
@@ -540,15 +638,19 @@ fn print_final_report(results: List<StageStatus>):
             ok_count = ok_count + 1
         else if result.status == "FAILED":
             fail_count = fail_count + 1
+        else if result.status == "BLOCKED":
+            blocked_count = blocked_count + 1
         else:
             skip_count = skip_count + 1
 
     print ""
-    print "  Total: {ok_count} OK, {fail_count} failed, {skip_count} skipped"
+    print "  Total: {ok_count} OK, {fail_count} failed, {blocked_count} blocked, {skip_count} skipped"
     print ""
 
-    if fail_count == 0:
+    if fail_count == 0 and blocked_count == 0:
         print "  Deployment successful!"
+    else if fail_count == 0:
+        print "  Construction finished, but deployment admission is BLOCKED."
     else:
         print "  Deployment had failures. Check output above."
     print ""

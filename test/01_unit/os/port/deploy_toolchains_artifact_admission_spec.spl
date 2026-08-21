@@ -1,0 +1,79 @@
+use std.spec.*
+use os.port.deploy_toolchains.{guest_static_tool_candidate_admit}
+
+fn x86_64_exec_candidate() -> [u8]:
+    var data: [u8] = []
+    while data.len() < 121:
+        data.push(0u8)
+    data[0] = 0x7fu8
+    data[1] = 0x45u8
+    data[2] = 0x4cu8
+    data[3] = 0x46u8
+    data[4] = 2u8
+    data[5] = 1u8
+    data[6] = 1u8
+    data[16] = 2u8
+    data[18] = 62u8
+    data[20] = 1u8
+    data[26] = 0x40u8
+    data[32] = 64u8
+    data[52] = 64u8
+    data[54] = 56u8
+    data[56] = 1u8
+    data[64] = 1u8
+    data[68] = 5u8
+    data[72] = 120u8
+    data[82] = 0x40u8
+    data[96] = 1u8
+    data[104] = 1u8
+    data[113] = 0x10u8
+    data[120] = 0xc3u8
+    data
+
+describe "SimpleOS guest toolchain artifact admission":
+    it "admits a bounded x86_64 executable candidate structurally":
+        expect(guest_static_tool_candidate_admit(x86_64_exec_candidate())).to_equal(Ok(()))
+
+    it "rejects the current all-zero placeholder shape":
+        expect(guest_static_tool_candidate_admit([0u8, 0u8, 0u8, 0u8])).to_equal(
+            Err("ELF too small for ident")
+        )
+
+    it "rejects a truncated program-header table":
+        val truncated = x86_64_exec_candidate().slice(0, 100)
+        expect(guest_static_tool_candidate_admit(truncated)).to_equal(
+            Err("ELF64 program header table is truncated")
+        )
+
+    it "rejects a valid header for the wrong target machine":
+        var wrong_target = x86_64_exec_candidate()
+        wrong_target[18] = 183u8
+        expect(guest_static_tool_candidate_admit(wrong_target)).to_equal(
+            Err("ELF64 machine is not the expected target architecture")
+        )
+
+    it "requires the entry to lie in an executable load segment":
+        var non_exec = x86_64_exec_candidate()
+        non_exec[68] = 4u8
+        expect(guest_static_tool_candidate_admit(non_exec)).to_equal(
+            Err("ELF entry is not inside an executable PT_LOAD segment")
+        )
+
+    it "rejects an entry that points only into the zero-filled BSS tail":
+        var bss_entry = x86_64_exec_candidate()
+        # p_filesz=1, p_memsz=2, entry=vaddr+1.
+        bss_entry[24] = 1u8
+        bss_entry[104] = 2u8
+        expect(guest_static_tool_candidate_admit(bss_entry)).to_equal(
+            Err("ELF entry is not inside an executable PT_LOAD segment")
+        )
+
+    it "rejects an overflowing in-memory load range":
+        var overflowing = x86_64_exec_candidate()
+        var i = 104
+        while i < 112:
+            overflowing[i] = 0xffu8
+            i = i + 1
+        expect(guest_static_tool_candidate_admit(overflowing)).to_equal(
+            Err("ELF PT_LOAD virtual range overflows")
+        )

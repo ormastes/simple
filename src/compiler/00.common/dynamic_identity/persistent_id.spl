@@ -1,0 +1,110 @@
+# PersistentExtensionId — the load-order-INDEPENDENT identity of one extension
+# constructor (plan §7.1, §7.2).
+#
+# §7.1: "Two machines loading modules in different orders could serialize
+# different IDs for the same constructor." So nothing here is derived from a
+# registration counter, a list position, or a dense tag. Every field is a fact
+# about the DECLARATION.
+#
+# §7.2: the hash `SimpleVariantIdentityV1` is an index/check. The full TUPLE
+# stays in the manifest and remains the collision authority — which is why
+# `equals()` compares the tuple and never the hash, and why the seal check for
+# a claimed-vs-computed hash mismatch exists at all (§7.5).
+
+use std.common.crypto.sha256.{sha256_text}
+
+struct PersistentExtensionId:
+    """Persistent identity of one extension constructor.
+
+    Fields (the §7.2 canonical hash inputs, in this order):
+    - owner_enum: canonical SymbolId text of the enum being extended.
+    - provider_module: canonical SymbolId text of the providing module.
+    - constructor_name: canonical constructor name.
+    - local_ordinal: provider-assigned stable local ordinal. Stable means the
+      PROVIDER pins it in its own manifest; it is not a load counter.
+    - schema_abi_version: payload schema ABI version.
+    """
+    owner_enum: text
+    provider_module: text
+    constructor_name: text
+    local_ordinal: i64
+    schema_abi_version: i64
+
+impl PersistentExtensionId:
+    # Fixed field order with a length-prefixed separator so that no pair of
+    # distinct tuples can produce the same canonical text by moving a `|` from
+    # one field into the next. Plain `a|b` concatenation is ambiguous
+    # ("a|b","c" vs "a","b|c"); the field count prefix plus per-field lengths
+    # removes that.
+    fn canonical_text() -> text:
+        ("SimpleVariantIdentityV1"
+            + "|owner_enum:" + self.owner_enum.len().to_text() + ":" + self.owner_enum
+            + "|provider_module:" + self.provider_module.len().to_text() + ":" + self.provider_module
+            + "|constructor_name:" + self.constructor_name.len().to_text() + ":" + self.constructor_name
+            + "|local_ordinal:" + self.local_ordinal.to_text()
+            + "|schema_abi_version:" + self.schema_abi_version.to_text())
+
+    # The §7.2 index. NOT the collision authority -- see the header.
+    fn identity_hash() -> text:
+        "SVIDV1-" + sha256_text(self.canonical_text())
+
+    # Tuple equality. The authoritative comparison.
+    fn equals(other: PersistentExtensionId) -> bool:
+        if self.owner_enum != other.owner_enum:
+            return false
+        if self.provider_module != other.provider_module:
+            return false
+        if self.constructor_name != other.constructor_name:
+            return false
+        if self.local_ordinal != other.local_ordinal:
+            return false
+        self.schema_abi_version == other.schema_abi_version
+
+    # Total order for the canonical seal ordering (plan §7.3: the dense range
+    # is assigned after a freeze, so it must not depend on insertion order).
+    # Returns -1, 0, 1.
+    fn compare(other: PersistentExtensionId) -> i64:
+        if self.owner_enum != other.owner_enum:
+            if self.owner_enum < other.owner_enum:
+                return -1
+            return 1
+        if self.provider_module != other.provider_module:
+            if self.provider_module < other.provider_module:
+                return -1
+            return 1
+        if self.constructor_name != other.constructor_name:
+            if self.constructor_name < other.constructor_name:
+                return -1
+            return 1
+        if self.local_ordinal != other.local_ordinal:
+            if self.local_ordinal < other.local_ordinal:
+                return -1
+            return 1
+        if self.schema_abi_version != other.schema_abi_version:
+            if self.schema_abi_version < other.schema_abi_version:
+                return -1
+            return 1
+        0
+
+    # Provider-scoped ordinal key, for the §7.5 "provider-local ID reuse"
+    # check. Two constructors from the same provider for the same owner enum
+    # may not claim the same local ordinal.
+    fn provider_ordinal_key() -> text:
+        self.owner_enum + "|" + self.provider_module + "|" + self.local_ordinal.to_text()
+
+# Canonical ascending sort by the persistent tuple. Insertion sort: the input
+# is a seal-time constructor list (tens to low hundreds), and a deterministic,
+# obviously-stable order matters far more here than asymptotics.
+pub fn sort_persistent_ids(ids: [PersistentExtensionId]) -> [PersistentExtensionId]:
+    var out: [PersistentExtensionId] = []
+    var i = 0
+    while i < ids.len():
+        val item = ids[i]
+        var j = out.len()
+        out.push(item)
+        while j > 0 and out[j - 1].compare(item) > 0:
+            out[j] = out[j - 1]
+            out[j - 1] = item
+            j = j - 1
+        i = i + 1
+    out

@@ -1,0 +1,32 @@
+use std.spec
+
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolKind, SymbolTable, Visibility}
+
+describe "SymbolTable module reset owns fresh name and id state":
+    it "drops prior-module names before reusing symbol ids":
+        var symbols = SymbolTable.new()
+        val old_id = symbols.define(
+            "OldModuleType", SymbolKind.Struct, nil, Span.empty(),
+            Visibility.Private, false, nil)
+        expect(old_id.id).to_equal(0)
+
+        symbols.reset_module()
+
+        val new_id = symbols.define(
+            "NewModuleValue", SymbolKind.Variable, nil, Span.empty(),
+            Visibility.Private, false, nil)
+        expect(new_id.id).to_equal(0)
+        expect(symbols.lookup_or_invalid("OldModuleType").is_valid()).to_be(false)
+        expect(symbols.lookup_or_invalid("NewModuleValue").id).to_equal(0)
+
+    it "fails closed when a stale name points outside the live id interval":
+        var symbols = SymbolTable.new()
+        symbols.root_scope_symbols["Stale"] = 41
+        var root = symbols.scopes[0]
+        root.symbols["Stale"] = 41
+        symbols.scopes[0] = root
+
+        val found = symbols.lookup_or_invalid("Stale")
+        expect(found.is_valid()).to_be(false)
+        expect(found.id).to_equal(-1)

@@ -292,10 +292,26 @@ class SdnTable:
 
         parts.join("")
 
+    # Name of the primary-key column.
+    #
+    # Only the `strings` table literally has an `id` column; every other table
+    # in the test DB keys on its FIRST column (`run_id`, `test_id`, ...). Keying
+    # lookups on a hardcoded "id" made update_row/get_row/mark_deleted match
+    # nothing at all, so every in-place update was silently dropped — test runs
+    # stayed `running` forever. See
+    # doc/08_tracking/bug/test_db_update_row_keys_nonexistent_id_column_2026-08-21.md
+    fn primary_key_column() -> text:
+        for col in self.columns:
+            if col == "id":
+                return "id"
+        if self.columns.len() > 0:
+            return self.columns[0]
+        "id"
+
     # Add row
     me add_row(row: SdnRow) -> bool:
-        # If has primary key (id field), add to index
-        val id = row.get("id")
+        # If has primary key, add to index
+        val id = row.get(self.primary_key_column())
         if id.?:
             self.index[id ?? ""] = self.rows.len()
 
@@ -306,26 +322,44 @@ class SdnTable:
         self.rows = rows
         true
 
-    # Update row by primary key
-    me update_row(key: text, row: SdnRow) -> bool:
+    # Update row by primary key, reporting a LOST WRITE as an error.
+    #
+    # Prefer this over `update_row`: a caller that wanted to change a row and
+    # matched nothing has lost data, and the old bool return was discarded at
+    # every call site — which is precisely why the `"id"` key defect stayed
+    # invisible for days.
+    me update_row_checked(key: text, row: SdnRow) -> Result<(), text>:
+        val pk = self.primary_key_column()
         var i = 0
         while i < self.rows.len():
             val current = self.rows[i]
             val current_row: SdnRow = current
-            if current_row.get("id") == Some(key):
+            if current_row.get(pk) == Some(key):
                 self.rows[i] = row
                 self.index[key] = i
-                return true
+                return Ok(())
             i = i + 1
-        false
+        Err("lost write: table '{self.name}' has no row with {pk}={key}")
+
+    # Update row by primary key.
+    #
+    # Kept for call sites where a miss is legitimate (upserts). A miss is still
+    # never silent: it is announced on stderr as well as returned as `false`.
+    me update_row(key: text, row: SdnRow) -> bool:
+        match self.update_row_checked(key, row):
+            case Ok(_): true
+            case Err(reason):
+                print "[db] {reason}"
+                false
 
     # Update row only if current version matches expected_version (optimistic locking)
     me update_row_if(key: text, row: SdnRow, expected_version: i64) -> Result<bool, text>:
+        val pk = self.primary_key_column()
         var i = 0
         while i < self.rows.len():
             val current = self.rows[i]
             val current_row: SdnRow = current
-            if current_row.get("id") == Some(key):
+            if current_row.get(pk) == Some(key):
                 if current_row._version != expected_version:
                     return Err("version mismatch: expected {expected_version}, got {current_row._version}")
                 val new_row = SdnRow(fields: row.fields, _version: expected_version + 1)
@@ -337,18 +371,20 @@ class SdnTable:
 
     # Get row by primary key
     fn get_row(key: text) -> SdnRow?:
+        val pk = self.primary_key_column()
         for row in self.rows:
-            if row.get("id") == Some(key):
+            if row.get(pk) == Some(key):
                 return Some(row)
         nil
 
     # Soft delete (set valid=false)
     me mark_deleted(key: text) -> bool:
+        val pk = self.primary_key_column()
         var i = 0
         while i < self.rows.len():
             val current = self.rows[i]
             val current_row: SdnRow = current
-            if current_row.get("id") == Some(key):
+            if current_row.get(pk) == Some(key):
                 # NOTE: self.rows[idx].set() modifies a copy in bootstrap runtime
                 # Must read, modify, write back
                 var row: SdnRow = current_row

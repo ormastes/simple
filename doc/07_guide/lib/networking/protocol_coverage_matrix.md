@@ -1,14 +1,15 @@
 # Network Protocol Coverage Matrix (Dan Nanni stack)
 
-Evidence-based status of every protocol in the Dan Nanni layer diagram, verified
-**module-by-module against the repo** on 2026-06-16. Each protocol has a
-committed implementation module and at least one spec; this table records the
-source location, source size, and spec count. "Specs" counts `*_spec.spl` files
-matching the protocol across `test/`.
+Evidence-based status of every protocol in the Dan Nanni layer diagram. Module
+and spec presence proves only the named layer; it does not prove an
+authenticated live service. Wire codecs, state profiles, transport integration,
+and production readiness are reported separately.
 
-> This document exists because the implementation status is sometimes
-> mis-summarized from a single session transcript as "not yet implemented." The
-> repo evidence below is authoritative: the stack is implemented and tested.
+> A protocol must not be advertised from a source/spec count alone. In
+> particular, HTTP/3 remains blocked until an authenticated QUIC-TLS handshake
+> installs application keys and behaviorally carries request/response data.
+> Typed bounds and integration rules are in
+> [Modern web protocol profiles](modern_web_protocol_profiles.md).
 
 ## Layer 3 — Internet / addressing
 
@@ -49,7 +50,7 @@ matching the protocol across `test/`.
 |----------|--------|----------:|------:|
 | TLS | `src/lib/nogc_sync_mut/tls/` (+ `io/tls_stream.spl` over real TCP) | 2588 | 82 |
 | DTLS | `src/lib/nogc_sync_mut/dtls/` | 256 | ✅ |
-| QUIC | `src/lib/nogc_async_mut/io/quic/` (+ UDP carrier) | 3764 | 7 |
+| QUIC wire/profile (live TLS blocked) | `src/lib/nogc_async_mut/io/quic/` (+ UDP carrier) | 3764 | 7 |
 | SSH | `src/lib/nogc_sync_mut/io/ssh_*.spl` + `src/os/apps/sshd/` | — | ✅ |
 | BGP | `src/lib/nogc_sync_mut/bgp/` | 531 | 29 |
 
@@ -57,7 +58,7 @@ matching the protocol across `test/`.
 
 | Protocol | Module | Src lines | Specs |
 |----------|--------|----------:|------:|
-| HTTP/1/2/3 + WebSocket | `src/lib/nogc_sync_mut/http/` (`h2/`, `h3/`, `ws/`) | 2469 | 83 |
+| HTTP/1 + WebSocket; HTTP/2 typed framing/profile; HTTP/3 bounded framing only | `src/lib/nogc_sync_mut/http/` + async facades | 2469 | 83 |
 | DNS | `src/lib/nogc_sync_mut/dns/` (+ `wire.spl` RFC 1035) | 1178 | ✅ |
 | NTP | `src/lib/nogc_sync_mut/ntp/` | 333 | 10 |
 | RTP | `src/lib/nogc_sync_mut/rtp/` | 303 | ✅ |
@@ -90,8 +91,16 @@ sockets:
   byte-exact round-trip + auth-fail reject. **X25519 ECDHE** key agreement
   fixed 2026-06-16 (RFC 7748 vectors). AEAD (AES-GCM, ChaCha20-Poly1305),
   HKDF/HMAC, RSA PKCS#1, X.509 DER parser all present and KAT-verified.
-- **QUIC** — Initial packets round-trip over real UDP (RFC 9000 wire bytes).
+- **HTTP/2 profile** — bounded typed parsing distinguishes incomplete,
+  rejected, and ignorable extension frames; SETTINGS and WINDOW_UPDATE limits
+  are checked. This row does not claim a production TLS/ALPN service.
+- **HTTP/3 framing** — bounded frame and atomic SETTINGS parsing are available.
+- **QUIC** — long-header structure and Initial key primitives are implemented,
+  but authenticated live transport is **BLOCKED**. Plaintext Handshake/1-RTT
+  data cannot authorize state transitions or application emission.
 
-Remaining handshake-crypto follow-ups (documented in `doc/08_tracking/bug/`):
-Ed25519 signature output, full QUIC/DTLS handshake AEAD wiring, RSA-2048 modexp
-interpreter performance.
+Remaining handshake-crypto blockers are documented in
+`doc/08_tracking/bug/quic_h3_transport_tls_blocker_2026-08-20.md`: certificate
+and transcript verification, Finished verification, protected packet ingress,
+application-key installation, and a live H3 lifecycle. Ed25519 output and
+RSA-2048 interpreter performance remain separate crypto follow-ups.

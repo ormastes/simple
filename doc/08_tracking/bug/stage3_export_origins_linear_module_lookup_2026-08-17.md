@@ -176,3 +176,44 @@ reported the completed file, so a stall named its predecessor.
 - `ModuleSurfaceBuilder.add_indexed_name()` (`:324`) does two linear scans of
   `ordered_names` per add, so surface building is O(M^2). Same reasoning: the
   `surface_build` step never appeared in the sample series.
+
+## Re-verification 2026-08-21 — still FIXED, now with an executed guard
+
+Re-confirmed by source inspection AND by a green spec run (the 2026-08-17
+entry above rested on an ablation harness, not on a committed regression
+guard, so a later refactor could have silently reverted the lookup).
+
+Code state: the linear scan is gone. The hot lookup is now
+`module_surface_index_by_name()` at
+`src/compiler/20.hir/hir_lowering/module_surface_export_index.spl:610-618` —
+a `contains_key` guard plus a single subscript on the `Dict<text, i64>` built
+once by `module_surface_name_index_build()` (`:595-608`). The registry-side
+lookup `module_surface_registry_index()`
+(`module_surface_registry_index.spl:47-53`) is the same shape, with an
+additional bounds check against `surfaces.len()`. No linear name scan remains
+on either path. `module_surface.spl` itself is now a 6-line facade.
+
+The one surviving `keys()`/`values()` scan is inside
+`module_surfaces_validate_index_alignment()`
+(`module_surface_registry_index.spl:6-45`), which is the *cold* alignment
+validator — called once at construction/finalize, never from the hot lookup,
+exactly as the "Not fixed by this change" section above already states.
+
+Guard spec verdict (this is the part that was missing before):
+
+```
+SPEC FILE VERDICT: test/01_unit/compiler/hir/module_surface_index_alignment_spec.spl
+  outcome=OK declared>=6 executed=6 passed=6 failed=0 skipped=0 dropped=0
+```
+
+All six green, including the two that pin this row's cost property rather than
+mere correctness: `does not allocate array capacity during repeated scalar
+lookup` (the non-linearity pin — a linear rescan or a `keys()`/`values()`
+materialization in the hot path fails it) and `resolves exact source identity
+without fallback allocation`.
+
+Mirror check: `diff -rq src/compiler/20.hir/ src/compiler/hir/` is clean, so
+the fix is present in both copies and cannot regress through mirror drift.
+
+No code change was needed this session; this entry records the executed
+evidence that the earlier ablation-only claim lacked.

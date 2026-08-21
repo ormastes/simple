@@ -32,13 +32,20 @@ server.stop()
 
 use std.concurrent.channel.{Channel, channel_new}
 use std.thread_sffi.{
-    spl_thread_create, spl_thread_join, spl_thread_cpu_count,
-    spl_thread_sleep
+    spl_thread_create, spl_thread_join,
+    spl_thread_sleep,
+    mutex_raw_create, mutex_raw_lock, mutex_raw_unlock
 }
 use std.nogc_async_mut.io.time_ops.{current_time_ms}
 
 fn _http_time_now_ms() -> i64:
     current_time_ms()
+
+fn _http_live_probe_addr(addr: text) -> text:
+    if addr.starts_with("0.0.0.0:"):
+        "127.0.0.1:" + addr.substring(8)
+    else:
+        addr
 use std.supervisor.{
     Supervisor, SupervisorConfig, ChildSpec,
     STRATEGY_ONE_FOR_ONE, RESTART_PERMANENT,
@@ -61,20 +68,42 @@ use std.http_server.error.{HttpServerError}
 use std.nogc_async_mut.io.tls_common.{TlsConfig}
 use std.tls.certificate.{TlsCertificateChain, TlsPrivateKey}
 use std.nogc_async_mut.io.file_ops.{file_exists}
+use std.nogc_sync_mut.io.tcp.{TcpStream}
 
 # Module-level worker storage for thread entry points.
 # Each spawned worker is stored here so the thread callback can retrieve it.
+val MAX_HTTP_SERVER_WORKERS: i64 = 256
+val MAX_HTTP_SERVER_QUEUE_BYTES: i64 = 268435456
+val MAX_HTTP_SERVER_RESULTS: i64 = 1048576
+val MAX_HTTP_SERVER_GENERATION: i64 = 9223372036854775807
+
 var _workers: Dict<i64, Worker> = {}
+var _free_worker_slots: [i64] = []
 var _next_worker_slot: i64 = 0
+val _worker_registry_mutex: i64 = mutex_raw_create()
 
 fn worker_thread_entry(slot_id: i64):
     """Thread entry point. Runs the worker stored at slot_id."""
+    # The registry is the only state shared by parent and worker domains.
+    # Copy the independently-owned Worker while locked, run it unlocked, then
+    # return only the scalar slot result under the same lock.
+    if not mutex_raw_lock(_worker_registry_mutex):
+        return
+    if not _workers.contains_key(slot_id):
+        mutex_raw_unlock(_worker_registry_mutex)
+        return
     # Native codegen: Dict.get() corrupts struct payloads. Index-read instead.
-    if _workers.contains_key(slot_id):
-        var w = _workers[slot_id]
-        w.run()
+    var w = _workers[slot_id]
+    mutex_raw_unlock(_worker_registry_mutex)
+    w.run()
+    if not mutex_raw_lock(_worker_registry_mutex):
+        return
+    _workers.remove(slot_id)
+    if _free_worker_slots.len() < MAX_HTTP_SERVER_WORKERS:
+        _free_worker_slots.push(slot_id)
+    mutex_raw_unlock(_worker_registry_mutex)
 
-fn spawn_worker(worker: Worker) -> i64:
+fn spawn_worker(worker: Worker) -> Result<i64, HttpServerError>:
     """Spawn a worker in a new OS thread.
 
     Stores the worker in a module-level dict so the thread entry
@@ -84,14 +113,46 @@ fn spawn_worker(worker: Worker) -> i64:
         worker: Initialized worker ready to run
 
     Returns:
-        Thread handle from spl_thread_create
+        Bounded thread handle or a typed startup failure.
     """
-    val slot = _next_worker_slot
-    _next_worker_slot = _next_worker_slot + 1
+    if not mutex_raw_lock(_worker_registry_mutex):
+        return Err(HttpServerError.Internal("worker registry lock unavailable"))
+    var slot = -1
+    if _free_worker_slots.len() > 0:
+        val free_index = _free_worker_slots.len() - 1
+        slot = _free_worker_slots[free_index]
+        _free_worker_slots.pop()
+    else:
+        if _next_worker_slot < 0 or _next_worker_slot >= MAX_HTTP_SERVER_WORKERS:
+            mutex_raw_unlock(_worker_registry_mutex)
+            return Err(HttpServerError.Internal("worker slot capacity exhausted"))
+        slot = _next_worker_slot
+        _next_worker_slot = _next_worker_slot + 1
     _workers[slot] = worker
+    mutex_raw_unlock(_worker_registry_mutex)
 
     val closure = \: worker_thread_entry(slot)
-    spl_thread_create(closure, 0)
+    val handle = spl_thread_create(closure, 0)
+    if handle <= 0:
+        if mutex_raw_lock(_worker_registry_mutex):
+            _workers.remove(slot)
+            _free_worker_slots.push(slot)
+            mutex_raw_unlock(_worker_registry_mutex)
+        return Err(HttpServerError.Internal("worker thread creation failed"))
+    Ok(handle)
+
+fn _http_server_supervisor() -> Supervisor:
+    val sup_config = SupervisorConfig(
+        strategy: STRATEGY_ONE_FOR_ONE,
+        max_restarts: 10,
+        max_seconds: 60
+    )
+    Supervisor(
+        config: sup_config,
+        children: [],
+        restart_counts: [],
+        running: false
+    )
 
 # ============================================================================
 # HttpServer
@@ -113,30 +174,48 @@ class HttpServer:
     supervisor: Supervisor
     running: bool
     handler_registry: HandlerRegistry
+    bound: bool
+    draining: bool
+    drain_complete: bool
+    drained_workers: [bool]
+    status_channels: [Channel]
+    worker_started: [bool]
+    closed: bool
+    cancel_requested: bool
+    generation: i64
+    worker_reservations: i64
+    queue_bytes_reserved: i64
+    result_reservations: i64
+    bind_identity: text
+    probe_identity: text
+    evidence_identity: text
 
     static fn new(config: ServerConfig) -> HttpServer:
         """Create server from a ServerConfig."""
-        val sup_config = SupervisorConfig(
-            strategy: STRATEGY_ONE_FOR_ONE,
-            max_restarts: 10,
-            max_seconds: 60
-        )
-        val sup = Supervisor(
-            config: sup_config,
-            children: [],
-            restart_counts: [],
-            running: false
-        )
-
         val registry = create_default_registry(".")
 
         HttpServer(
             config: config,
             workers: [],
             control_channels: [],
-            supervisor: sup,
+            supervisor: _http_server_supervisor(),
             running: false,
-            handler_registry: registry
+            handler_registry: registry,
+            bound: false,
+            draining: false,
+            drain_complete: false,
+            drained_workers: [],
+            status_channels: [],
+            worker_started: [],
+            closed: false,
+            cancel_requested: false,
+            generation: 0,
+            worker_reservations: 0,
+            queue_bytes_reserved: 0,
+            result_reservations: 0,
+            bind_identity: "",
+            probe_identity: "",
+            evidence_identity: ""
         )
 
     static fn from_config_file(path: text) -> Result<HttpServer, HttpServerError>:
@@ -151,18 +230,39 @@ class HttpServer:
     me start() -> Result<(), HttpServerError>:
         """Start the server and all worker threads.
 
-        Determines worker count (0 = CPU count), creates
-        control channels, builds router and middleware pipeline,
-        then spawns worker threads.
+        Requires an explicit bounded worker count, creates control channels,
+        builds the router and middleware pipeline, then spawns every worker.
+        The call returns after all listeners have bound; worker loops remain
+        owned by this server and are joined by stop()/wait().
         """
-        if self.running:
+        if self.running or self.closed:
             return Err(HttpServerError.Internal("Server already running"))
 
-        val worker_count = if self.config.worker_count <= 0:
-            val cpus = spl_thread_cpu_count()
-            if cpus > 0: cpus else: 4
-        else:
-            self.config.worker_count
+        if self.config.worker_count <= 0 or self.config.worker_count > MAX_HTTP_SERVER_WORKERS:
+            return Err(HttpServerError.ConfigError(
+                "worker_count must be explicitly bounded between 1 and {MAX_HTTP_SERVER_WORKERS}"
+            ))
+        if self.config.max_connections <= 0:
+            return Err(HttpServerError.ConfigError("max_connections must be positive"))
+        if self.config.client_max_body_size < 0:
+            return Err(HttpServerError.ConfigError("client_max_body_size must not be negative"))
+        if self.generation >= MAX_HTTP_SERVER_GENERATION:
+            return Err(HttpServerError.Internal("server generation exhausted"))
+
+        val worker_count = self.config.worker_count
+        self.supervisor = _http_server_supervisor()
+        self.workers = []
+        self.control_channels = []
+        self.generation = self.generation + 1
+        self.cancel_requested = false
+        self.draining = false
+        self.drain_complete = false
+        self.drained_workers = []
+        self.status_channels = []
+        self.worker_started = []
+        self.bind_identity = ""
+        self.probe_identity = ""
+        self.evidence_identity = ""
 
         # Validate TLS configuration early (fail fast before spawning workers)
         if self.config.tls_enabled:
@@ -179,60 +279,97 @@ class HttpServer:
         var workers: [WorkerHandle] = []
         var channels: [Channel] = []
 
-        var last_worker: Worker? = nil
         var i = 0
         while i < worker_count:
             val control = channel_new()
+            val status = channel_new()
             channels.push(control)
+            self.status_channels.push(status)
+            self.worker_started.push(false)
 
             val worker_result = Worker.create(
                 i, self.config, router, pipeline,
-                self.handler_registry, control
+                self.handler_registry, control, Some(status)
             )
             match worker_result:
                 Ok(worker):
-                    if i < worker_count - 1:
-                        val handle = spawn_worker(worker)
-                        workers.push(WorkerHandle(
-                            worker_id: i,
-                            thread_handle: handle,
-                            is_alive: true
-                        ))
-                    else:
-                        last_worker = worker
-                        workers.push(WorkerHandle(
-                            worker_id: i,
-                            thread_handle: 0,
-                            is_alive: true
-                        ))
+                    val spawned = spawn_worker(worker)
+                    match spawned:
+                        Ok(handle):
+                            workers.push(WorkerHandle(
+                                worker_id: i,
+                                thread_handle: handle,
+                                is_alive: true
+                            ))
+                            self.workers = workers
+                            self.control_channels = channels
 
-                    val child = ChildSpec(
-                        id: "worker_{i}",
-                        restart: RESTART_PERMANENT,
-                        shutdown: SHUTDOWN_TIMEOUT,
-                        shutdown_ms: 5000
-                    )
-                    self.supervisor.add_child(child)
+                            val child = ChildSpec(
+                                id: "worker_{i}",
+                                restart: RESTART_PERMANENT,
+                                shutdown: SHUTDOWN_TIMEOUT,
+                                shutdown_ms: 5000
+                            )
+                            self.supervisor.add_child(child)
+                        Err(error):
+                            worker.abort_start()
+                            self.cleanup_failed_start(channels)
+                            return Err(error)
 
                 Err(e):
-                    self.stop_workers(channels)
+                    self.cleanup_failed_start(channels)
                     return Err(e)
 
             i = i + 1
 
         self.workers = workers
         self.control_channels = channels
+        self.drained_workers = []
+        var drain_index = 0
+        while drain_index < worker_count:
+            self.drained_workers.push(false)
+            drain_index = drain_index + 1
+        self.worker_reservations = worker_count
+        self.queue_bytes_reserved = 0
+        self.result_reservations = 0
+        self.bound = true
         self.running = true
         self.supervisor.start()
+
+        val ready_deadline = _http_time_now_ms() + 1000
+        var ready_count = 0
+        var startup_failed = false
+        while ready_count < worker_count and not startup_failed and _http_time_now_ms() < ready_deadline:
+            var ready_index = 0
+            while ready_index < worker_count:
+                if not self.worker_started[ready_index]:
+                    val status = self.status_channels[ready_index].try_recv()
+                    if status.?:
+                        val status_text = status as text
+                        if status_text == "ready":
+                            self.worker_started[ready_index] = true
+                            ready_count = ready_count + 1
+                        elif status_text == "failed":
+                            startup_failed = true
+                ready_index = ready_index + 1
+            if ready_count < worker_count:
+                spl_thread_sleep(1)
+        if startup_failed or ready_count != worker_count:
+            self.cancel_requested = true
+            self.supervisor.stop()
+            self.cleanup_failed_start(self.control_channels)
+            if startup_failed:
+                return Err(HttpServerError.Internal("worker initial accept registration failed"))
+            return Err(HttpServerError.Internal("worker readiness timeout"))
+
+        self.bind_identity = self.config.listen_addr
+        self.evidence_identity = "bind={self.bind_identity};generation={self.generation};workers={worker_count}"
 
         val proto = if self.config.tls_enabled: "https" else: "http"
         if worker_count > 1:
             print "[SimpleServer] Listening on {proto}://{self.config.listen_addr} with {worker_count} workers (SO_REUSEPORT)"
         else:
             print "[SimpleServer] Listening on {proto}://{self.config.listen_addr} with 1 worker"
-
-        if val Some(w) = last_worker:
-            w.run()
 
         Ok(())
 
@@ -245,43 +382,197 @@ class HttpServer:
         if not self.running:
             return
 
-        print "[SimpleServer] Draining connections (timeout={self.config.drain_timeout_ms}ms)..."
-
-        for ch in self.control_channels:
-            ch.send("drain")
-
+        self.begin_drain(self.generation)
         val drain_start = _http_time_now_ms()
         val drain_deadline = drain_start + self.config.drain_timeout_ms
-        var all_drained = false
-
-        while _http_time_now_ms() < drain_deadline and not all_drained:
-            spl_thread_sleep(100)
-            all_drained = true
-            for ch in self.control_channels:
-                val status = ch.try_recv()
-                if status.?:
-                    val s = status as text
-                    if s != "drained":
-                        all_drained = false
-
-        if not all_drained:
-            print "[SimpleServer] Drain timeout reached, forcing shutdown..."
-
+        while not self.poll_drain() and _http_time_now_ms() < drain_deadline:
+            spl_thread_sleep(10)
+        if not self.drain_complete:
+            self.cancel_requested = true
         self.stop_workers(self.control_channels)
+        self.mark_workers_stopped()
         self.supervisor.stop()
         self.running = false
+        self.bound = false
+        self.draining = false
+        self.drain_complete = true
+        self.worker_reservations = 0
+        self.queue_bytes_reserved = 0
+        self.result_reservations = 0
 
         print "[SimpleServer] Stopped"
+
+    me begin_drain(expected_generation: i64) -> Result<(), HttpServerError>:
+        if self.closed or not self.running:
+            return Err(HttpServerError.Internal("server is not running"))
+        if expected_generation != self.generation:
+            return Err(HttpServerError.Internal("server generation mismatch"))
+        if self.draining:
+            return Ok(())
+        for ch in self.control_channels:
+            ch.send("drain")
+        self.draining = true
+        self.drain_complete = false
+        Ok(())
+
+    me poll_drain() -> bool:
+        if not self.draining:
+            return false
+        var i = 0
+        while i < self.status_channels.len():
+            if not self.drained_workers[i]:
+                val status = self.status_channels[i].try_recv()
+                if val msg = status:
+                    if (msg as text) == "drained":
+                        self.drained_workers[i] = true
+            i = i + 1
+        var all_drained = true
+        for drained in self.drained_workers:
+            if not drained:
+                all_drained = false
+        self.drain_complete = all_drained
+        all_drained
+
+    me cancel(expected_generation: i64) -> Result<(), HttpServerError>:
+        if self.closed:
+            return Err(HttpServerError.Internal("server is closed"))
+        if expected_generation != self.generation:
+            return Err(HttpServerError.Internal("server generation mismatch"))
+        if self.running:
+            self.cancel_requested = true
+            self.stop_workers(self.control_channels)
+            self.mark_workers_stopped()
+            self.supervisor.stop()
+            self.running = false
+        self.bound = false
+        self.draining = false
+        self.drain_complete = true
+        self.worker_reservations = 0
+        self.queue_bytes_reserved = 0
+        self.result_reservations = 0
+        Ok(())
+
+    me close(expected_generation: i64) -> Result<(), HttpServerError>:
+        if self.closed:
+            return Err(HttpServerError.Internal("server is closed"))
+        if expected_generation != self.generation:
+            return Err(HttpServerError.Internal("server generation mismatch"))
+        if self.running:
+            self.stop()
+        if self.worker_reservations != 0 or self.queue_bytes_reserved != 0 or
+            self.result_reservations != 0:
+            return Err(HttpServerError.Internal("server resources remain admitted"))
+        self.closed = true
+        self.bound = false
+        self.drain_complete = true
+        self.workers = []
+        self.control_channels = []
+        self.status_channels = []
+        self.worker_started = []
+        self.drained_workers = []
+        Ok(())
 
     me wait():
         """Block until all workers exit."""
         for wh in self.workers:
             if wh.is_alive:
                 spl_thread_join(wh.thread_handle)
+        self.mark_workers_stopped()
 
     fn is_running() -> bool:
         """Check if the server is running."""
         self.running
+
+    fn is_bound() -> bool:
+        self.bound
+
+    fn is_closed() -> bool:
+        self.closed
+
+    fn is_ready() -> bool:
+        self.running and self.bound and not self.draining and
+        self.workers.len() == self.config.worker_count and
+        self.worker_reservations == self.workers.len() and
+        self.worker_started.len() == self.workers.len() and
+        self._all_workers_started()
+
+    fn _all_workers_started() -> bool:
+        for started in self.worker_started:
+            if not started:
+                return false
+        true
+
+    fn generation() -> i64:
+        self.generation
+
+    fn bind_identity() -> text:
+        self.bind_identity
+
+    fn evidence_identity() -> text:
+        self.evidence_identity
+
+    me live_probe() -> Result<text, HttpServerError>:
+        if not self.is_ready():
+            return Err(HttpServerError.Internal("server is not ready for live probe"))
+        val probe_addr = _http_live_probe_addr(self.bind_identity)
+        val connection = TcpStream.connect_timeout(probe_addr, 100)
+        match connection:
+            Err(_): Err(HttpServerError.Internal("live loopback probe failed"))
+            Ok(stream):
+                stream.close()
+                self.probe_identity = "live-tcp={probe_addr};generation={self.generation}"
+                Ok(self.probe_identity)
+
+    fn drain_complete() -> bool:
+        self.drain_complete
+
+    fn active_worker_reservations() -> i64:
+        self.worker_reservations
+
+    fn queue_bytes_reserved() -> i64:
+        self.queue_bytes_reserved
+
+    fn result_reservations() -> i64:
+        self.result_reservations
+
+    me reserve_worker() -> bool:
+        if not self.running or self.worker_reservations >= self.config.worker_count:
+            return false
+        self.worker_reservations = self.worker_reservations + 1
+        true
+
+    me release_worker() -> bool:
+        if self.worker_reservations <= 0:
+            return false
+        self.worker_reservations = self.worker_reservations - 1
+        true
+
+    me reserve_queue_bytes(bytes: i64) -> bool:
+        if not self.running or self.closed or bytes < 0 or bytes > MAX_HTTP_SERVER_QUEUE_BYTES:
+            return false
+        val remaining = MAX_HTTP_SERVER_QUEUE_BYTES - self.queue_bytes_reserved
+        if bytes > remaining:
+            return false
+        self.queue_bytes_reserved = self.queue_bytes_reserved + bytes
+        true
+
+    me release_queue_bytes(bytes: i64) -> bool:
+        if not self.running or self.closed or bytes < 0 or bytes > self.queue_bytes_reserved:
+            return false
+        self.queue_bytes_reserved = self.queue_bytes_reserved - bytes
+        true
+
+    me reserve_result() -> bool:
+        if not self.running or self.closed or self.result_reservations >= MAX_HTTP_SERVER_RESULTS:
+            return false
+        self.result_reservations = self.result_reservations + 1
+        true
+
+    me release_result() -> bool:
+        if not self.running or self.closed or self.result_reservations <= 0:
+            return false
+        self.result_reservations = self.result_reservations - 1
+        true
 
     fn worker_count() -> i64:
         """Get the number of running workers."""
@@ -299,6 +590,28 @@ class HttpServer:
         for wh in self.workers:
             if wh.is_alive:
                 spl_thread_join(wh.thread_handle)
+
+    me cleanup_failed_start(channels: [Channel]):
+        self.stop_workers(channels)
+        self.mark_workers_stopped()
+        self.workers = []
+        self.control_channels = []
+        self.status_channels = []
+        self.worker_started = []
+        self.drained_workers = []
+        self.running = false
+        self.bound = false
+        self.draining = false
+        self.drain_complete = true
+        self.worker_reservations = 0
+        self.queue_bytes_reserved = 0
+        self.result_reservations = 0
+
+    me mark_workers_stopped():
+        var i = 0
+        while i < self.workers.len():
+            self.workers[i].is_alive = false
+            i = i + 1
 
 # ============================================================================
 # Default Pipeline

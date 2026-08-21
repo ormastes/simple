@@ -526,7 +526,7 @@ fn convert_flat_type(type_expr_idx: i64) -> Type:
     else:
         Type(kind: TypeKind.Infer, span: make_span())
 
-fn op_kind_to_binop(kind: i64) -> BinOp:
+pub fn op_kind_to_binop(kind: i64) -> BinOp:
     if kind == 55: return BinOp.And
     if kind == 56: return BinOp.Or
     if kind == 60: return BinOp.Add
@@ -547,8 +547,7 @@ fn op_kind_to_binop(kind: i64) -> BinOp:
     if kind == 121: return BinOp.BitOr
     if kind == 122: return BinOp.BitXor
     if kind == 39: return BinOp.Is
-    assert false, "unsupported flat binary operator kind {kind}"
-    BinOp.Add
+    BinOp.Invalid
 
 fn flat_compound_assign_op(kind: i64) -> AssignOp:
     # Op codes match parse_assignment()'s expr_compound_assign() calls in
@@ -948,7 +947,19 @@ fn convert_flat_expr(idx: i64) -> Expr:
         var current = idx
         var terminal_else_idx = -1
         var walking = true
+        val live_expr_count = expr_count()
+        var walked_arms = 0
         while walking:
+            # Expression elif nodes are allocated tail-first just like the
+            # statement form below: each next arm is an older, smaller arena
+            # index. Bound and validate the scalar walk before recursively
+            # converting either branch. This keeps corrupt/cyclic flat input
+            # from repeatedly copying a growing ExprKind.IfChain payload in
+            # the no-GC Stage-3 compiler.
+            if current < 0 or current >= live_expr_count or walked_arms >= live_expr_count:
+                flat_bridge_report_unhandled_node("if-expr-chain", current)
+                return Expr(kind: ExprKind.NilLit, span: span)
+            walked_arms = walked_arms + 1
             val arm_span = make_span()
             arms.push(IfArm(
                 cond: convert_flat_expr(expr_get_left(current)),
@@ -957,6 +968,9 @@ fn convert_flat_expr(idx: i64) -> Expr:
             ))
             val next_idx = expr_get_extra(current)
             if next_idx >= 0 and expr_get_tag(next_idx) == EXPR_IF:
+                if next_idx >= current:
+                    flat_bridge_report_unhandled_node("if-expr-chain-order", next_idx)
+                    return Expr(kind: ExprKind.NilLit, span: span)
                 current = next_idx
             else:
                 terminal_else_idx = next_idx
@@ -1571,7 +1585,18 @@ fn convert_flat_if_stmt(root_idx: i64) -> Stmt:
     var current = root_idx
     var terminal_else: [i64] = []
     var walking = true
+    val live_stmt_count = stmt_count()
+    var walked_arms = 0
     while walking:
+        # The parser constructs an elif chain from its tail, so every nested
+        # STMT_IF is an older, strictly smaller statement index.  Enforce that
+        # ownership/order invariant and a live-arena bound before touching the
+        # arenas.  A corrupt/cyclic chain must fail loudly instead of spinning
+        # forever in the no-GC Stage-3 compiler.
+        if current < 0 or current >= live_stmt_count or walked_arms >= live_stmt_count:
+            flat_bridge_report_unhandled_node("if-chain", current)
+            return defer_unsupported_marker(make_span())
+        walked_arms = walked_arms + 1
         val arm_span = make_span()
         val condition = convert_flat_expr(stmt_get_expr(current))
         val then_stmts = stmt_get_body(current)
@@ -1586,11 +1611,23 @@ fn convert_flat_if_stmt(root_idx: i64) -> Stmt:
             ti = ti + 1
         arms.push(IfArm(cond: condition, then_: Block(stmts: then_body, span: arm_span), span: arm_span))
 
-        val else_stmts = elif_get_else(stmt_get_type(current))
-        if else_stmts.len() == 1 and stmt_get_tag(else_stmts[0]) == STMT_IF:
-            current = else_stmts[0]
+        val elif_idx = stmt_get_type(current)
+        # Ask the elif arena owner for the canonical singleton projection.
+        # Pulling the nested array across the module boundary merely to inspect
+        # len() causes the Stage-3 value-copy path to classify real arms as
+        # terminal and recursively copy the rest of the chain.
+        var next_if = -1
+        val candidate = stmt_get_if_single_else(current)
+        if candidate >= 0:
+            if stmt_get_tag(candidate) == 6:
+                next_if = candidate
+        if next_if >= 0:
+            if next_if >= current:
+                flat_bridge_report_unhandled_node("if-chain-order", next_if)
+                return defer_unsupported_marker(arm_span)
+            current = next_if
         else:
-            terminal_else = else_stmts
+            terminal_else = elif_get_else(elif_idx)
             walking = false
 
     if terminal_else.len() > 0:
@@ -1652,7 +1689,9 @@ fn convert_flat_stmt(idx: i64) -> Stmt:
             return Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.NilLit, span: span)), span: span)
         val value = convert_flat_expr(body[0])
         return Stmt(kind: StmtKind.Assign(target, nil, value), span: span)
-    elif tag == STMT_IF:
+    # Inline the frozen STMT_IF wire value for the same Stage-3 reason as the
+    # nested-arm test in convert_flat_if_stmt.
+    elif tag == 6:
         return convert_flat_if_stmt(idx)
     elif tag == STMT_WHILE:
         val cond = convert_flat_expr(stmt_get_expr(idx))
@@ -1700,6 +1739,14 @@ fn convert_flat_stmt(idx: i64) -> Stmt:
             bi = bi + 1
         return Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.Block(Block(stmts: body, span: span)), span: span)), span: span)
     elif tag == STMT_GPU_LAUNCH:
+        # Lane C2: this arm EXISTS but is a silent no-op -- it discards the
+        # launch config and the kernel call and returns a bare NilLit, i.e. the
+        # generic catch-all's behaviour wearing a dedicated arm's clothes, so
+        # the loud fallback below never sees it. (module_assembly.spl has the
+        # real GPU-launch conversion; a launch statement reaching THIS function
+        # means it did not route through that path.) Report it through the same
+        # channel as every other unhandled kind rather than dropping it mutely.
+        flat_bridge_report_unhandled_node("stmt", tag)
         return Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.NilLit, span: span)), span: span)
     elif tag == STMT_MATCH:
         # Ordinary `match s: Pat => body` was previously dropped to NilLit here,

@@ -1,0 +1,193 @@
+# Attribute channel for enum contracts (S2/S3, hardening plan §10.1/§10.2).
+#
+# WHY THIS FILE EXISTS AT ALL:
+#
+# `@closed` and `@evolving(...)` PARSE today -- the seed accepts any decorator
+# above an `enum` declaration -- but nothing carries them past the parser.
+# `HirEnum` (src/compiler/20.hir/hir_definitions.spl:204) has no decorator or
+# attribute field, and `/usr/bin/grep -rn decorators src/compiler/20.hir/`
+# returns ZERO lines, so a decorator on an enum is silently dropped on the way
+# to HIR. Verified 2026-08-21: `@totally_bogus_decorator_xyz` above an enum
+# also compiles and runs clean, i.e. the parser does not even validate the
+# name. Filed as
+# doc/08_tracking/bug/enum_decorators_dropped_before_hir_2026-08-21.md.
+#
+# FIXED 2026-08-21: `HirEnum` now carries `attributes: [HirAttribute]`,
+# populated by declaration lowering from the parser's recorded decorators, and
+# `enum_contract_table_from_hir` below is the PREFERRED channel -- it reads the
+# annotation itself rather than re-deriving it from characters.
+#
+# `enum_contract_table_from_source` is retained, unchanged in behaviour and
+# signature, for the callers that hold only source text (check.spl's
+# `read_module_source` path, and every spec that feeds a source snippet). It is
+# deliberately narrow and fail-closed: it recognises exactly the two documented
+# spellings immediately above an `enum NAME:` line and ignores everything else,
+# so it cannot invent a contract. Both functions produce the same
+# `EnumContractTable`, and every checker below takes that table and never looks
+# at source text itself.
+
+use compiler.hir.{HirEnum, HirAttribute}
+use compiler.semantics.enum_contract.contract_model.{
+    EnumContractKind, EnumContract, EnumContractTable
+}
+
+struct DecoratorScan:
+    """Result of inspecting one source line for an enum contract decorator.
+
+    An explicit `found` flag rather than a `EnumContractKind?` return: a nil
+    optional-of-enum returned from this module tested TRUTHY at the call site
+    (`if kind:` took the then-branch for a plainly non-decorator line), so an
+    optional here silently attached a contract to the next enum. See
+    doc/08_tracking/bug/nil_optional_enum_return_truthy_2026-08-21.md. The
+    flag is also the clearer contract: `kind` is meaningless unless `found`."""
+    found: bool
+    kind: EnumContractKind
+
+fn strip_spaces(line: text) -> text:
+    var out = line
+    while out.starts_with(" ") or out.starts_with("\t"):
+        out = out.substring(1, out.len())
+    while out.ends_with(" ") or out.ends_with("\t") or out.ends_with("\r"):
+        out = out.substring(0, out.len() - 1)
+    out
+
+fn enum_name_of_line(line: text) -> text:
+    """`enum Foo:` -> "Foo"; anything else -> "". Generic heads (`enum Foo<T>:`)
+    yield the bare name, since a contract is declared on the nominal enum."""
+    val t = strip_spaces(line)
+    if not t.starts_with("enum "):
+        return ""
+    var rest = strip_spaces(t.substring(5, t.len()))
+    if not rest.ends_with(":"):
+        return ""
+    rest = rest.substring(0, rest.len() - 1)
+    var name = ""
+    for ch in rest:
+        if ch == "<" or ch == " " or ch == "(":
+            return name
+        name = name + ch
+    name
+
+fn parse_named_arg(args: text, key: text) -> text:
+    """Value of `key: value` inside a decorator argument list, "" if absent."""
+    var depth = 0
+    var current = ""
+    var parts: [text] = []
+    for ch in args:
+        if ch == "(" or ch == "<":
+            depth = depth + 1
+            current = current + ch
+        else:
+            if ch == ")" or ch == ">":
+                depth = depth - 1
+                current = current + ch
+            else:
+                if ch == "," and depth == 0:
+                    parts = parts.push(current)
+                    current = ""
+                else:
+                    current = current + ch
+    parts = parts.push(current)
+    for p in parts:
+        val t = strip_spaces(p)
+        if t.starts_with(key + ":"):
+            return strip_spaces(t.substring(key.len() + 1, t.len()))
+    ""
+
+fn repr_bits_of(repr: text) -> i64:
+    """`u8`/`u16`/`u32`/`u64` -> width. Anything else -> 0, which the
+    declaration checker reports as E-EVOLVING-001 rather than guessing."""
+    if repr == "u8":
+        return 8
+    if repr == "u16":
+        return 16
+    if repr == "u32":
+        return 32
+    if repr == "u64":
+        return 64
+    0
+
+fn contract_of_decorator_line(line: text) -> DecoratorScan:
+    """Recognise `@closed` / `@evolving(repr: uN, unknown: V)`.
+
+    `found: false` for every other line, including an unrecognised decorator:
+    this scanner must never invent a contract."""
+    val t = strip_spaces(line)
+    if t == "@closed":
+        return DecoratorScan(found: true, kind: EnumContractKind.Closed)
+    if t.starts_with("@evolving(") and t.ends_with(")"):
+        val args = t.substring(10, t.len() - 1)
+        val repr = parse_named_arg(args, "repr")
+        val unknown = parse_named_arg(args, "unknown")
+        return DecoratorScan(found: true, kind: EnumContractKind.Evolving(
+            repr_bits: repr_bits_of(repr), unknown_variant: unknown))
+    DecoratorScan(found: false, kind: EnumContractKind.Closed)
+
+fn contract_of_attribute(name: text, args: text) -> DecoratorScan:
+    """Recognise a HIR attribute as an enum contract.
+
+    `args` is the raw decorator argument text as carried on HirAttribute
+    ("repr:u16,unknown:Unknown"). Same fail-closed rule as the source scanner:
+    an unrecognised decorator name yields `found: false`, never a contract."""
+    if name == "closed":
+        return DecoratorScan(found: true, kind: EnumContractKind.Closed)
+    if name == "evolving":
+        val repr = parse_named_arg(args, "repr")
+        val unknown = parse_named_arg(args, "unknown")
+        return DecoratorScan(found: true, kind: EnumContractKind.Evolving(
+            repr_bits: repr_bits_of(repr), unknown_variant: unknown))
+    DecoratorScan(found: false, kind: EnumContractKind.Closed)
+
+fn enum_contract_table_from_hir(enums: [HirEnum]) -> EnumContractTable:
+    """Recover every enum contract from lowered HIR attributes.
+
+    The channel the source scanner below was standing in for. Later decorators
+    win over earlier ones on the same enum, matching the source scanner, where
+    a second decorator line replaces the pending one."""
+    var contracts: [EnumContract] = []
+    for e in enums:
+        var has_found = false
+        var found = EnumContractKind.Closed
+        for a in e.attributes:
+            val scan = contract_of_attribute(a.name, a.args)
+            if scan.found:
+                has_found = true
+                found = scan.kind
+        if has_found:
+            contracts = contracts.push(EnumContract(enum_name: e.name, kind: found))
+    EnumContractTable(contracts: contracts)
+
+fn enum_contract_table_from_source(source: text) -> EnumContractTable:
+    """Recover every enum contract declared in one module's source text.
+
+    A decorator binds to the next `enum NAME:` line, skipping blank lines and
+    comment lines between them (a doc comment above an enum is routine). Any
+    other intervening line drops the pending decorator, so a decorator on some
+    other declaration can never leak onto an unrelated enum."""
+    var contracts: [EnumContract] = []
+    var has_pending = false
+    var pending = EnumContractKind.Closed
+    for raw in source.split("\n"):
+        val line = strip_spaces(raw)
+        if line == "":
+            continue
+        val name = enum_name_of_line(line)
+        if name != "":
+            if has_pending:
+                contracts = contracts.push(EnumContract(enum_name: name, kind: pending))
+            has_pending = false
+            continue
+        val scan = contract_of_decorator_line(line)
+        if scan.found:
+            has_pending = true
+            pending = scan.kind
+            continue
+        if line.starts_with("#"):
+            continue
+        has_pending = false
+    EnumContractTable(contracts: contracts)
+
+export DecoratorScan
+export enum_contract_table_from_source, enum_name_of_line, contract_of_decorator_line
+export enum_contract_table_from_hir, contract_of_attribute
+export parse_named_arg, repr_bits_of, strip_spaces

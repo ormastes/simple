@@ -1,0 +1,188 @@
+#!/bin/sh
+# Transition-completeness gate (hardening plan sections 11.3-11.4).
+#
+# Runs the pure-Simple negative-space validator over every transition table in
+# spec/compiler_schema/transitions/ and reports:
+#
+#   PASS  — <n> transition(s) checked across <k> table(s), 0 missing
+#   FAIL  — <n> transition(s) checked across <k> table(s), <m> missing: <names>
+#   ERROR — nothing was checked (<reason>)
+#
+# exit 0 / 1 / 2. The verdict is always the LAST line of stdout.
+#
+# Non-vacuity is absolute: a run that fed 0 transitions to the validator is
+# ERROR, never a pass, and a missing/unrunnable `bin/simple` is ERROR too —
+# absence of a validator is absence of evidence.
+#
+# --selftest runs first and is FATAL. It drives the real runner over four
+# fixture trees: a full table must PASS, the same table with one row removed
+# must FAIL and NAME the removed variant, a table with no transition rows must
+# yield 0 checked so the caller is forced to ERROR, and a table declaring a
+# variant absent from the producer universe must FAIL.
+#
+# Every fixture is built from the FROZEN table at $FROZEN_FIXTURE. The selftest
+# must never read spec/compiler_schema/transitions/: a selftest built from the
+# live tables requires them to PASS, so a genuine missing row in a real table
+# would abort the guard as `ERROR — nothing was checked (selftest failure)`
+# (exit 2) instead of the `FAIL — ... <m> missing: <names>` (exit 1) this
+# convention demands — inverting the two states the caller most needs to tell
+# apart. The frozen fixture is also what proves the guard can detect a hole AT
+# ALL, which a live table cannot do while it is green.
+
+set -u
+
+REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+RUNNER="$REPO_ROOT/src/compiler/00.common/transition/check_main.spl"
+DEFAULT_DIR="$REPO_ROOT/spec/compiler_schema/transitions"
+FROZEN_FIXTURE="$REPO_ROOT/test/fixtures/compiler_transition/frozen_table.sdn"
+SIMPLE="${SIMPLE_BIN:-$REPO_ROOT/bin/simple}"
+RUN_TIMEOUT="${TRANSITION_CHECK_TIMEOUT:-600}"
+
+TARGET_DIR="$DEFAULT_DIR"
+SELFTEST_ONLY=0
+for arg in "$@"; do
+    case "$arg" in
+        --selftest) SELFTEST_ONLY=1 ;;
+        --dir=*) TARGET_DIR=${arg#--dir=} ;;
+        -h|--help)
+            sed -n '2,25p' "$0"
+            exit 0
+            ;;
+        *)
+            echo "ERROR — nothing was checked (unknown argument: $arg)"
+            exit 2
+            ;;
+    esac
+done
+
+# Print the validator's verdict line (the last non-empty line of its stdout).
+run_validator() {
+    _dir=$1
+    _out=$(timeout "$RUN_TIMEOUT" "$SIMPLE" run "$RUNNER" "$_dir" 2>/dev/null)
+    printf '%s\n' "$_out" | grep -E '^(PASS|FAIL|ERROR) ' | tail -1
+}
+
+fixture_fail() {
+    echo "SELFTEST FAILED: $1"
+    echo "ERROR — nothing was checked (selftest failure)"
+    exit 2
+}
+
+selftest() {
+    _tmp=$(mktemp -d "${TMPDIR:-/tmp}/transition-selftest.XXXXXX") || \
+        fixture_fail "could not create a temp dir"
+
+    # Fixture 1: the frozen table, unmodified. Must PASS.
+    mkdir -p "$_tmp/full"
+    cp "$FROZEN_FIXTURE" "$_tmp/full/" || \
+        fixture_fail "frozen fixture table missing: $FROZEN_FIXTURE"
+    _v=$(run_validator "$_tmp/full")
+    case "$_v" in
+        PASS\ *) : ;;
+        *) fixture_fail "full table did not PASS, got: ${_v:-<no verdict>}" ;;
+    esac
+
+    # Fixture 2: same table with the Tensor row deleted. Must FAIL naming Tensor.
+    mkdir -p "$_tmp/hole"
+    awk '
+        /^transition:$/ { block=""; inblock=1 }
+        inblock { block = block $0 "\n"
+                  if ($0 ~ /^  test:/) { if (block !~ /FrozenKind\.Tensor/) printf "%s", block; inblock=0 }
+                  next }
+        { print }
+    ' "$FROZEN_FIXTURE" > "$_tmp/hole/frozen_table.sdn"
+    _v=$(run_validator "$_tmp/hole")
+    case "$_v" in
+        FAIL\ *Tensor*) : ;;
+        *) fixture_fail "one-row-removed did not FAIL naming Tensor, got: ${_v:-<no verdict>}" ;;
+    esac
+
+    # Fixture 3: a table with headers and a universe but no transition rows.
+    # Must yield ERROR (0 checked), not a vacuous pass.
+    mkdir -p "$_tmp/empty"
+    cat > "$_tmp/empty/empty_table.sdn" <<'EOF'
+table: empty_table
+producer: FixtureKind
+consumer: OtherKind
+
+universe:
+  - Alpha
+  - Beta
+EOF
+    _v=$(run_validator "$_tmp/empty")
+    case "$_v" in
+        ERROR\ *) : ;;
+        *) fixture_fail "empty table did not ERROR, got: ${_v:-<no verdict>}" ;;
+    esac
+
+    # Fixture 4: every universe entry declared, PLUS one row naming a variant
+    # that is not in the universe. Must FAIL.
+    mkdir -p "$_tmp/extra"
+    cat > "$_tmp/extra/extra_table.sdn" <<'EOF'
+table: extra_table
+producer: FixtureKind
+consumer: OtherKind
+
+universe:
+  - Alpha
+
+transition:
+  from: FixtureKind.Alpha
+  to: OtherKind.Alpha
+  state: implemented
+  reason: "direct arm"
+  test: fixture_spec
+
+transition:
+  from: FixtureKind.Ghost
+  to: OtherKind.Alpha
+  state: implemented
+  reason: "declares a variant the producer cannot emit"
+  test: fixture_spec
+EOF
+    _v=$(run_validator "$_tmp/extra")
+    case "$_v" in
+        FAIL\ *Ghost*) : ;;
+        *) fixture_fail "out-of-universe variant did not FAIL naming Ghost, got: ${_v:-<no verdict>}" ;;
+    esac
+
+    rm -rf "$_tmp"
+}
+
+if [ ! -x "$SIMPLE" ]; then
+    echo "ERROR — nothing was checked (no runnable simple binary at $SIMPLE)"
+    exit 2
+fi
+if [ ! -f "$FROZEN_FIXTURE" ]; then
+    echo "ERROR — nothing was checked (frozen selftest fixture missing: $FROZEN_FIXTURE)"
+    exit 2
+fi
+if [ ! -f "$RUNNER" ]; then
+    echo "ERROR — nothing was checked (validator entry point missing: $RUNNER)"
+    exit 2
+fi
+
+selftest
+
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+    echo "PASS — 4 selftest fixture(s) checked across 4 table(s), 0 missing"
+    exit 0
+fi
+
+if [ ! -d "$TARGET_DIR" ]; then
+    echo "ERROR — nothing was checked (no such directory: $TARGET_DIR)"
+    exit 2
+fi
+
+VERDICT=$(run_validator "$TARGET_DIR")
+if [ -z "$VERDICT" ]; then
+    echo "ERROR — nothing was checked (validator produced no verdict line)"
+    exit 2
+fi
+
+echo "$VERDICT"
+case "$VERDICT" in
+    PASS\ *) exit 0 ;;
+    FAIL\ *) exit 1 ;;
+    *) exit 2 ;;
+esac

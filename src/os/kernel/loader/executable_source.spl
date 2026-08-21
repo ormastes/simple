@@ -9,7 +9,7 @@
 
 use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.loader.zstd_decompress.{zstd_decompress}
-use os.kernel.loader.cpio_newc.{CpioEntry, cpio_parse, cpio_lookup}
+use os.kernel.loader.cpio_newc.{CpioEntry, cpio_parse_bounded}
 use os.kernel.loader.app_registry.{app_registry_fat32_alias, app_registry_root_alias, app_registry_canonical_from_bytes}
 use os.services.vfs.vfs_init.{g_vfs_read_executable_bytes}
 use common.string_core.{str_char_at}
@@ -147,15 +147,21 @@ fn _initramfs_read_file_bytes_or_empty(path: text) -> [u8]:
         if decomp.is_err():
             log_raw_println("[exec-source] initramfs decompress-fail path={path}")
             return []
-        g_cpio_entries = cpio_parse(decomp.unwrap())
+        val parsed = cpio_parse_bounded(decomp.unwrap(), 131072, 4096, 536870912)
+        if parsed.is_err():
+            log_raw_println("[exec-source] initramfs cpio-parse-fail path={path}")
+            g_cpio_entries = []
+            g_cpio_decoded = true
+            return []
+        g_cpio_entries = parsed.unwrap()
         g_cpio_decoded = true
 
-    val found = cpio_lookup(g_cpio_entries, path)
-    if found == nil:
-        log_raw_println("[exec-source] initramfs miss path={path}")
-        return []
-    log_raw_println("[exec-source] initramfs hit path={path}")
-    found.unwrap()
+    for entry in g_cpio_entries:
+        if entry.path == path:
+            log_raw_println("[exec-source] initramfs hit path={path}")
+            return entry.data
+    log_raw_println("[exec-source] initramfs miss path={path}")
+    []
 
 fn _initramfs_read_file(path: text) -> Result<[u8], text>:
     val bytes = _initramfs_read_file_bytes_or_empty(path)

@@ -1,0 +1,122 @@
+# @cover src/os/apps/dbd/dbd_command_ingress.spl 90%
+"""
+# DBD authenticated command byte ingress
+
+Exercises the fixed-capacity post-authentication RESP owner without inspecting
+its source.  Complete frames are returned in order, incomplete bytes remain
+mutable, repeated AUTH is classified before text conversion, and one-byte
+fragmentation has bounded byte work.
+"""
+
+use std.spec
+use os.apps.dbd.dbd_command_ingress.{
+    DbdAuthenticatedRespIngressV1, DbdCommandIngressStatusV1
+}
+use os.apps.dbd.dbd_protocol.DBD_MAX_SESSION_BYTES
+
+fn _append(target: [u8], suffix: [u8]) -> [u8]:
+    var out = target
+    for byte in suffix:
+        out.push(byte)
+    out
+
+fn _large_set() -> [u8]:
+    var out = "*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$1024\r\n".bytes()
+    var index: i64 = 0
+    while index < 1024:
+        out.push(120u8)
+        index = index + 1
+    out.push(13u8)
+    out.push(10u8)
+    out
+
+describe "DBD authenticated command byte framing":
+    it "frames a command fragmented one byte at a time with linear work":
+        val command = _large_set()
+        val owner = DbdAuthenticatedRespIngressV1.new()
+        var index: i64 = 0
+        while index < command.len().to_i64():
+            expect(owner.ingest(command.slice(
+                index.to_u64(), (index + 1).to_u64()
+            ))).to_equal(DbdCommandIngressStatusV1.Accepted)
+            index = index + 1
+        match owner.take_next():
+            case nil:
+                fail("complete one-byte-fragmented command was not published")
+            case Some(frame):
+                expect(frame.bytes).to_equal(command)
+                expect(frame.auth_command).to_be(false)
+                expect(frame.zeroize_owned_bytes()).to_equal(
+                    command.len().to_i64())
+                expect(frame.retained_nonzero_byte_count()).to_equal(0i64)
+        expect(owner.byte_work()).to_be_less_than(
+            command.len().to_i64() * 3 + 1)
+        expect(owner.remaining_byte_count()).to_equal(0i64)
+        expect(owner.last_take_zeroized_owned_bytes()).to_be(true)
+
+    it "publishes coalesced commands in wire order":
+        val ping = "*1\r\n$4\r\nPING\r\n".bytes()
+        val get = "*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n".bytes()
+        val owner = DbdAuthenticatedRespIngressV1.new()
+        expect(owner.ingest(_append(ping, get))).to_equal(
+            DbdCommandIngressStatusV1.Accepted)
+        match owner.take_next():
+            case nil: fail("first coalesced command missing")
+            case Some(frame): expect(frame.bytes).to_equal(ping)
+        match owner.take_next():
+            case nil: fail("second coalesced command missing")
+            case Some(frame): expect(frame.bytes).to_equal(get)
+        expect(owner.take_next()).to_be_nil()
+
+    it "retains an incomplete frame without publishing it":
+        val owner = DbdAuthenticatedRespIngressV1.new()
+        val partial = "*2\r\n$3\r\nGET\r\n$5\r\npar".bytes()
+        expect(owner.ingest(partial)).to_equal(
+            DbdCommandIngressStatusV1.Accepted)
+        expect(owner.take_next()).to_be_nil()
+        expect(owner.remaining_byte_count()).to_equal(partial.len().to_i64())
+
+    it "rejects malformed framing and a buffer larger than its fixed bound":
+        val malformed_owner = DbdAuthenticatedRespIngressV1.new()
+        expect(malformed_owner.ingest("*1\rX".bytes())).to_equal(
+            DbdCommandIngressStatusV1.Malformed)
+        expect(malformed_owner.take_next()).to_be_nil()
+        expect(malformed_owner.last_failure_zeroized_owned_bytes()).to_be(true)
+        expect(malformed_owner.remaining_byte_count()).to_equal(0i64)
+
+        var oversized: [u8] = []
+        var index: i64 = 0
+        while index <= DBD_MAX_SESSION_BYTES:
+            oversized.push(65u8)
+            index = index + 1
+        val bounded_owner = DbdAuthenticatedRespIngressV1.new()
+        expect(bounded_owner.ingest(oversized)).to_equal(
+            DbdCommandIngressStatusV1.Overflow)
+        expect(bounded_owner.last_failure_zeroized_owned_bytes()).to_be(true)
+        expect(bounded_owner.remaining_byte_count()).to_equal(0i64)
+
+    it "classifies RESP and inline AUTH before immutable parsing":
+        val resp_auth = "*2\r\n$4\r\nAUTH\r\n$1\r\nx\r\n".bytes()
+        val inline_auth = "auth x\r\n".bytes()
+        val owner = DbdAuthenticatedRespIngressV1.new()
+        expect(owner.ingest(_append(resp_auth, inline_auth))).to_equal(
+            DbdCommandIngressStatusV1.Accepted)
+        match owner.take_next():
+            case nil: fail("RESP AUTH frame missing")
+            case Some(frame): expect(frame.auth_command).to_be(true)
+        match owner.take_next():
+            case nil: fail("inline AUTH frame missing")
+            case Some(frame): expect(frame.auth_command).to_be(true)
+
+    it "wipes incomplete owned bytes when the session closes":
+        val owner = DbdAuthenticatedRespIngressV1.new()
+        val partial = "*2\r\n$3\r\nGET\r\n$8\r\nsecret".bytes()
+        expect(owner.ingest(partial)).to_equal(
+            DbdCommandIngressStatusV1.Accepted)
+        owner.close()
+        expect(owner.last_close_wiped_byte_count()).to_equal(
+            partial.len().to_i64())
+        expect(owner.last_close_zeroized_owned_bytes()).to_be(true)
+        expect(owner.remaining_byte_count()).to_equal(0i64)
+        expect(owner.ingest([1u8])).to_equal(
+            DbdCommandIngressStatusV1.Closed)

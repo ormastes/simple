@@ -1,7 +1,7 @@
 # `core_jit_interpret` is not re-entrant — a second eval in one process silently returns WRONG answers
 
 - **Filed:** 2026-08-20
-- **Status:** OPEN (worked around at the call site; the defect itself is unfixed)
+- **Status:** FIXED 2026-08-21 — root cause was the elif arena, not an interpreter reset. Evidence below.
 - **Component:** `src/compiler/10.frontend/core/interpreter/**` (pure-Simple frontend tree-walk interpreter)
 - **Entry point:** `core_jit_interpret(source, path, threshold)` — `src/compiler/10.frontend/core/interpreter/mod.spl:249`
 - **Binary measured on:** `bin/release/x86_64-unknown-linux-gnu/simple`, 59,860,872 bytes, 2026-08-20 06:26:37 UTC
@@ -76,7 +76,77 @@ This costs one full module load per case and does nothing for any other caller
 that evaluates twice in one process. The interpreter still must be made
 re-entrant.
 
-## Next step
+## Root cause (2026-08-21)
+
+Not a missing `eval_init()` reset. The surviving state was the **elif arena**
+(`elif_cond` / `elif_body` / `elif_else`, `src/compiler/10.frontend/core/_Ast/decl_nodes.spl`).
+
+`ast_reset()` cleared it with a CROSS-MODULE `elif_cond.clear()` from
+`_Ast/module_state.spl`. That clear does not reach the arena `elif_new()`
+appends to — the same ownership rule already documented in that file for
+`module_decl_slots` ("a cross-module `module_decl_slots = []` from here is
+dropped anyway", which is why `ast_module_decl_slots_clear()` exists). So the
+second parse appended AFTER the first file's entries while the if-statement
+nodes were renumbered from 0: the interpreter read the PREVIOUS file's
+condition expression id out of `elif_cond[0]`, then indexed the freshly reset
+expr arena with it.
+
+Measured with the arena dumped at eval time (`c` then a minimal if/else):
+
+```
+[DBG] phase=eval elif_len=1 conds=[19]        # file 1
+[DBG] phase=eval elif_len=2 conds=[19, 3]     # file 2 — entry 0 is still file 1's
+[DBG expr_get OOB] idx=19 len=10
+error: semantic: array index out of bounds: index is 19 but length is 10
+```
+
+That explains both observed shapes at once: an out-of-range stale id crashes,
+an in-range stale id silently evaluates the WRONG condition — which is exactly
+the `ALIAS(n=10)` verdict (`got` printed 10 while `got == 10` "was false": the
+`if` never evaluated case G's condition at all).
+
+## Fix
+
+- `src/compiler/10.frontend/core/_Ast/decl_nodes.spl` — new `elif_arena_clear()`,
+  owned by the module that owns the arrays.
+- `src/compiler/10.frontend/core/_Ast/module_state.spl` — `ast_reset()` calls it
+  instead of the three inert cross-module `.clear()`s.
+- `src/compiler/10.frontend/core/interpreter/eval.spl` — same defect class,
+  found on the way: `eval_reset()` cleared `enum_reg_names`/`enum_reg_variants`
+  but left `enum_hm_buckets`/`enum_hm_nexts` pointing at the emptied arrays; it
+  now calls `enum_table_reset()`.
+
+## Evidence after the fix
+
+All 11 corpus cases in ONE process, `SIMPLE_NO_JIT=1`:
+A,B,C,D,E = REF; F,G,H,I,J,K = VAL; every `rc=0`. Each case re-run
+one-per-process gives byte-identical verdicts — that equality IS the
+re-entrancy property, and it is what the new gate asserts. (`d` reads REF, not
+the `COPY(n=141)` in the table above; both lanes agree, so the difference is
+from other landed work, not from contamination.)
+
+## Regression gate
+
+`sh scripts/check/check-interp-reentrancy.shs` — fail-closed, verdict is the
+last stdout line (`PASS — <n> case verdict(s) compared, in-process ==
+fresh-process` / `FAIL — ...` / `ERROR — nothing was checked`). It runs the
+two-file reproduce
+(`test/fixtures/repro/compiler/interp_reentrancy/{first,second}_if_else.spl`,
+which FAILS before this fix) and then compares every corpus verdict
+in-process vs fresh-process. Driven through a new ordered multi-case mode in
+`scripts/check/class_identity_pure_simple_driver.spl`
+(`CLASS_IDENTITY_CASES`, `CLASS_IDENTITY_DIR`).
+
+## Known neighbouring defect, still open
+
+The match-arm arena (`arm_pattern`/`arm_guard`/`arm_body`/... in the same file)
+is cleared by `ast_reset()` the same cross-module way. A module containing a
+`match` fails under `core_jit_interpret` with `array index out of bounds: index
+is 0 but length is 0` on the FIRST eval — so it is a single-eval defect, not a
+re-entrancy one, and adding `arm_arena_clear()` did NOT fix it. Left untouched
+here rather than shipping an unverified change; needs its own record.
+
+## Original next step (superseded)
 
 Bisect the surviving global. Suggested approach: add each unreset table
 (`enum_table_reset`, `phantom_reg_reset`, the `resolve.spl` caches

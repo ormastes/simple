@@ -22,7 +22,7 @@ The `m{}` math block supports torch-compatible tensor operations for numerical c
 | Difficulty | 4/5 |
 | Status | Implemented |
 | Source | `test/feature/usage/math_blocks_spec.spl` |
-| Updated | 2026-08-18 |
+| Updated | 2026-08-21 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

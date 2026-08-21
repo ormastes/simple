@@ -1,0 +1,151 @@
+# CUDA intrinsic arity table vs emitter — reproducing + defect-CLASS detection
+#
+# DEFECT (found 2026-08-17, src/compiler/70.backend/backend/cuda_backend.spl):
+# `validate_intrinsic` carries a hand-maintained `required_args` table that is
+# entirely independent of `emit_intrinsic`, the code that actually consumes the
+# arguments. The two drifted apart:
+#
+#   gpu_warp_ballot   — emitter reads only args[0] (:1167, `vote.sync.ballot.b32
+#                       {d9}, {pred9}, 0xffffffff;` — the warp mask is a PTX
+#                       literal, not an operand), yet the table demanded 2.
+#   gpu_warp_scan_add — emitter reads only args[0] (:1204, the 5 shfl.sync.up
+#                       steps are unrolled constants), yet the table demanded 2.
+#
+# Both are unary in the OpenCL backend too (opencl_backend.spl:737 routes ballot
+# to `emit_subgroup_ballot`, :744 routes scan_add to `emit_subgroup_unary`), so
+# the table — not the emitters — was the wrong side. Effect: a CORRECT unary
+# call `gpu_warp_ballot(pred)` was rejected with the false diagnostic
+# "CUDA intrinsic 'gpu_warp_ballot' requires exactly 2 arguments"; a caller who
+# obeyed that message and passed a second argument got it silently ignored by
+# the emitter.
+#
+# WHY THIS SHAPE OF SPEC. `validate_intrinsic` is a private `me` method on the
+# CUDA backend; reaching it through the real API needs a constructed backend,
+# a MIR function and a CUDA-capable host, none of which are available on a CI
+# lane without a GPU. But the defect is not a runtime behaviour at all — it is a
+# DISAGREEMENT BETWEEN TWO REGIONS OF ONE SOURCE FILE, and that is decidable by
+# reading the file. So the oracle here is the source itself, which also makes
+# the check total: it covers EVERY intrinsic in the table at once rather than
+# the two that happened to be noticed, so the next drift fails here instead of
+# shipping as a false arity diagnostic.
+#
+# The generalisation is the point. This is a class, not two typos: any new
+# intrinsic added to `emit_intrinsic` without a matching table entry, or moved
+# between arity groups on one side only, is caught by the same assertion.
+
+use std.spec.*
+use std.io_runtime.{read_file_text}
+
+val CUDA_BACKEND: text = "src/compiler/70.backend/backend/cuda_backend.spl"
+
+# Highest N appearing as `args[N]` inside the emitter arm for `name`, i.e. the
+# arity the emitted PTX actually depends on. Returns -1 when the arm reads no
+# arguments at all. Scans from the arm's `case "name":` to the next `case "` at
+# the same nesting, which is how these match arms are laid out.
+fn emitter_max_arg_index(source: text, name: text) -> i64:
+    val marker = "case \"" + name + "\":"
+    val start = source.find(marker)
+    if start < 0:
+        return -2                      # arm absent entirely
+    val rest = source.substring(start + marker.len(), source.len())
+    val next_case = rest.find("case \"")
+    val body = if next_case < 0: rest else: rest.substring(0, next_case)
+
+    var highest = -1
+    var probe = 0
+    while probe < 8:
+        if body.contains("args[" + probe.to_text() + "]"):
+            highest = probe
+        probe = probe + 1
+    highest
+
+# The `required_args` value the validation table assigns to `name`. The table is
+# a match over `|`-joined string literals with `required_args = N` as the arm
+# body, so we find the arm that mentions the name and read its trailing literal.
+fn table_required_args(source: text, name: text) -> i64:
+    val quoted = "\"" + name + "\""
+    for line in source.split("\n"):
+        if line.contains("required_args =") and line.contains(quoted) and line.contains("case "):
+            if line.contains("required_args = 1") or line.contains("else: 1"):
+                return 1
+            if line.contains("required_args = 2"):
+                return 2
+            if line.contains("required_args = 3"):
+                return 3
+            if line.contains("required_args = 6"):
+                return 6
+            if line.contains("required_args = 4"):
+                return 4
+    -1
+
+describe "CUDA intrinsic arity table agrees with the emitter":
+
+    # Guard against a vacuous pass: if the file moved or the layout changed, the
+    # helpers above would return -2/-1 for everything and every comparison would
+    # trivially hold. Anchor on a known-good binary intrinsic first.
+    it "reads the backend source and sees a known binary intrinsic":
+        val source = read_file_text(CUDA_BACKEND)
+        expect(source.len()).to_be_greater_than(1000)
+        # gpu_warp_broadcast genuinely consumes args[0] and args[1] (:1197).
+        expect(emitter_max_arg_index(source, "gpu_warp_broadcast")).to_equal(1)
+        expect(table_required_args(source, "gpu_warp_broadcast")).to_equal(2)
+
+    # REPRODUCING: these two are the filed defect. Before the fix the table said
+    # 2 while the emitter reads only args[0].
+    it "declares gpu_warp_ballot unary, matching its emitter":
+        val source = read_file_text(CUDA_BACKEND)
+        expect(emitter_max_arg_index(source, "gpu_warp_ballot")).to_equal(0)
+        expect(table_required_args(source, "gpu_warp_ballot")).to_equal(1)
+
+    it "declares gpu_warp_scan_add unary, matching its emitter":
+        val source = read_file_text(CUDA_BACKEND)
+        expect(emitter_max_arg_index(source, "gpu_warp_scan_add")).to_equal(0)
+        expect(table_required_args(source, "gpu_warp_scan_add")).to_equal(1)
+
+    # DETECTION (defect class): every warp/vector intrinsic at once, so a future
+    # arity drift on ANY of them fails here rather than reaching a user as a
+    # false "requires exactly N arguments" diagnostic.
+    it "keeps every warp intrinsic's table arity equal to its emitter arity":
+        val source = read_file_text(CUDA_BACKEND)
+        val names = [
+            "gpu_warp_shuffle",
+            "gpu_warp_shuffle_down",
+            "gpu_warp_shuffle_up",
+            "gpu_warp_shuffle_xor",
+            "gpu_warp_ballot",
+            "gpu_warp_broadcast",
+            "gpu_warp_scan_add",
+            "gpu_warp_reduce_add"
+        ]
+        var mismatches: [text] = []
+        for name in names:
+            val emitter_arity = emitter_max_arg_index(source, name) + 1
+            val declared = table_required_args(source, name)
+            # Only compare when both sides were actually located; a -2/-1 is a
+            # parse miss and is reported as its own failure below.
+            if emitter_arity > 0 and declared > 0 and emitter_arity != declared:
+                mismatches = mismatches + [
+                    name + " (emitter reads " + emitter_arity.to_text() +
+                    ", table demands " + declared.to_text() + ")"
+                ]
+        expect(mismatches.len()).to_equal(0)
+
+    it "locates both an emitter arm and a table entry for every warp intrinsic":
+        val source = read_file_text(CUDA_BACKEND)
+        val names = [
+            "gpu_warp_shuffle",
+            "gpu_warp_shuffle_down",
+            "gpu_warp_shuffle_up",
+            "gpu_warp_shuffle_xor",
+            "gpu_warp_ballot",
+            "gpu_warp_broadcast",
+            "gpu_warp_scan_add",
+            "gpu_warp_reduce_add"
+        ]
+        var unlocated: [text] = []
+        for name in names:
+            if emitter_max_arg_index(source, name) < -1:
+                unlocated = unlocated + [name + " (no emitter arm)"]
+            if table_required_args(source, name) < 0:
+                unlocated = unlocated + [name + " (no table entry)"]
+        expect(unlocated.len()).to_equal(0)

@@ -74,9 +74,9 @@ class VfsManager:
     next_fd: i32
     ai_cli_manifest: AiCliManifest?
     handles: VfsHandleTable
-    # Close replays use VfsHandleTable's monotonic issue range.  A handle is
-    # never reused, so an issued-but-no-longer-open handle is terminal without
-    # retaining one entry per prior close.
+    # Close replays use VfsHandleTable's per-slot generation. A released slot
+    # can be reused, but the old generation remains a terminal receipt and can
+    # never route to the replacement file.
     # The container namespace this manager resolves lookups on behalf of.
     # `nil` == HOST context: every lookup behaves exactly as it did before
     # container enforcement existed. Never omit this field at construction —
@@ -285,7 +285,17 @@ impl VfsManager:
             return Err(result.unwrap_err())
         val driver_handle = result.unwrap()
         var table = self.handles
-        val vfs_handle = table.register(mount_index, entry.point.path, driver_handle)
+        val registered = table.register(mount_index, entry.point.path, driver_handle)
+        if registered.is_err():
+            # Driver-open succeeded but global admission did not.  Close the
+            # driver handle before returning so a full/exhausted VFS table
+            # cannot leak backend resources.
+            val admission_error = registered.unwrap_err()
+            val rollback = entry.fs.close(driver_handle)
+            if rollback.is_err():
+                return Err("{admission_error}; driver close rollback failed: {rollback.unwrap_err()}")
+            return Err(admission_error)
+        val vfs_handle = registered.unwrap()
         self.handles = table
         val fd = FileDescriptor(
             fd: self.next_fd,
@@ -448,14 +458,8 @@ impl VfsManager:
         Err("no filesystem mounted for path: {link_path}")
 
     fn _was_issued_handle(handle: u64) -> bool:
-        """True for a nonzero VFS handle issued by this never-reusing table.
-
-        This is a bounded close-receipt representation: `next_handle` is the
-        sole watermark instead of an unbounded retired-handle list.  Handles
-        released by a close or by a successful unmount are terminal; zero and
-        future values were never valid and must still fail closed.
-        """
-        handle != 0u64 and handle < self.handles.next_handle
+        """True for a current or stale generation issued by this table."""
+        self.handles.was_issued(handle)
 
     me _retire_handle(handle: u64):
         """Make one completed driver-close attempt permanently idempotent."""
@@ -467,9 +471,8 @@ impl VfsManager:
         """Close one VFS handle with a stable terminal receipt.
 
         A driver result, including an error, is a confirmed close attempt and
-        retires the VFS handle.  A retry after a lost reply therefore succeeds
-        without calling the driver again.  The monotonic issue watermark keeps
-        that receipt bounded while zero and future handles still fail.
+        retires the VFS handle generation. A retry after a lost reply therefore
+        succeeds without calling the driver or a later slot occupant again.
         """
         val found = self.handles.lookup(handle)
         if not found.found:
@@ -544,6 +547,49 @@ impl VfsManager:
             return Err(read_result.unwrap_err())
         val bytes = read_result.unwrap()
         Ok(bytes_to_string(bytes))
+
+    me read_bytes_bounded(path: text, max_bytes: u64, chunk_bytes: u64) -> Result<[u8], text>:
+        """Read a regular file without allowing unbounded allocation.
+
+        The driver handle is closed on success, read failure, and limit
+        rejection. Data is accumulated with amortized list append and never
+        exceeds `max_bytes`; one bounded read may observe the byte beyond the
+        limit only inside the driver's returned chunk.
+        """
+        if max_bytes == 0 or chunk_bytes == 0:
+            return Err("bounded read limits must be greater than zero")
+        val opened = self.open(path, FileFlags(
+            read: true, write: false, append: false, create: false,
+            truncate: false, directory: false,
+        ))
+        if opened.is_err():
+            return Err(opened.unwrap_err())
+        val handle = opened.unwrap().node
+        var data: [u8] = []
+        loop:
+            val chunk_result = self.read(handle, chunk_bytes)
+            if chunk_result.is_err():
+                val read_error = chunk_result.unwrap_err()
+                val closed = self.close(handle)
+                if closed.is_err():
+                    return Err("{read_error}; close failed: {closed.unwrap_err()}")
+                return Err(read_error)
+            val chunk = chunk_result.unwrap()
+            if chunk.len() == 0:
+                break
+            val used = data.len().to_u64()
+            val incoming = chunk.len().to_u64()
+            if used > max_bytes or incoming > max_bytes - used:
+                val closed = self.close(handle)
+                if closed.is_err():
+                    return Err("file exceeds bounded read limit; close failed: {closed.unwrap_err()}")
+                return Err("file exceeds bounded read limit")
+            for byte in chunk:
+                data.push(byte)
+        val closed = self.close(handle)
+        if closed.is_err():
+            return Err("close failed: {closed.unwrap_err()}")
+        Ok(data)
 
     me preload_file_pages(path: text, page_size: u64) -> Result<u64, text>:
         """Warm the filesystem/block cache for a file by reading page-sized chunks.
@@ -641,3 +687,5 @@ fn vfs_mount(manager: VfsManager, path: text, fs: Filesystem) -> Result<bool, te
     """
     val fs_type = fs.fs_name()
     manager.mount(path, fs_type, "", false, fs)
+
+export Filesystem, SeekWhence, VfsManager

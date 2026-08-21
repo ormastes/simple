@@ -1,58 +1,216 @@
-## Spec for Phase-2 I5 disk-image bake harness.
+## Behavioral admission and manifest continuity for the disk-image bake.
 ##
-## Heavy bake examples are disabled by default because they shell out, create
-## 32 MiB images, and can exceed the interpreter watchdog. Keep this spec's
-## default path to static contract checks.
-##
-## Run:
-##   bin/simple run src/os/port/disk_image_bake.spl
+## The heavyweight image build remains a manual, artifact-gated row. These
+## tests exercise the pure boundary that must hold before either image is
+## constructed.
 
 use std.spec
-use std.io_runtime.{file_read}
+use os.port.disk_image_bake.{
+    SimpleRoleAdmissionError,
+    SimpleRoleInput,
+    SimpleRolePayload,
+    simpleos_admit_role_artifact_path,
+    simpleos_admit_role_payloads,
+    simpleos_render_toolchain_manifest,
+    simpleos_role_payload_digest,
+}
 
-describe "SimpleOS I5 disk-image bake harness":
-    """Static bake contracts plus disabled heavyweight examples."""
+fn role_input(role: text, path: text, data: [u8]) -> SimpleRoleInput:
+    SimpleRoleInput(role: role, host_path: path, exists: true, data: data)
 
-    it "requires clang_static when the toolchain bake marker is enabled":
-        val src = file_read("src/os/port/disk_image_bake.spl")
-        expect(src).to_contain("if io.file_exists(\"build/os/.bake_include_toolchain\"):")
-        expect(src).to_contain("toolchain marker set but clang_static missing")
-        expect(src).to_contain("return Err(\"bake: toolchain marker set but clang_static missing: \" + clang_static_path)")
+fn missing_role_input(role: text, path: text) -> SimpleRoleInput:
+    SimpleRoleInput(role: role, host_path: path, exists: false, data: [])
 
-    it "requires rustc_static when the toolchain bake marker is enabled":
-        val src = file_read("src/os/port/disk_image_bake.spl")
-        expect(src).to_contain("toolchain marker set but rustc_static missing")
-        expect(src).to_contain("return Err(\"bake: toolchain marker set but rustc_static missing: \" + rustc_static_path)")
+fn valid_smf(seed: u8) -> [u8]:
+    var bytes: [u8] = []
+    bytes.push(0x7F.to_u8())
+    bytes.push(0x45.to_u8())
+    bytes.push(0x4C.to_u8())
+    bytes.push(0x46.to_u8())
+    bytes.push(2.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(1.to_u8())
+    while bytes.len() < 18:
+        bytes.push(0.to_u8())
+    bytes.push(62.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(seed)
+    while bytes.len() < 64:
+        bytes.push(0.to_u8())
+    bytes.push(83.to_u8())
+    bytes.push(77.to_u8())
+    bytes.push(70.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(1.to_u8())
+    while bytes.len() < 64 + 52:
+        bytes.push(0.to_u8())
+    bytes.push(64.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(64.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(1.to_u8())
+    while bytes.len() < 192:
+        bytes.push(0.to_u8())
+    bytes
 
-    it "stages the Simple payload independently at real nested paths":
-        val src = file_read("src/os/port/disk_image_bake.spl")
-        val toolchain = src.index_of("if io.file_exists(\"build/os/.bake_include_toolchain\"):")
-        val simple = src.index_of("if _simple_payload_required():")
-        expect(simple).to_be_greater_than(toolchain)
-        expect(src).to_contain("if spec.guest_path == \"\":")
-        expect(src).to_contain("nested_payloads.push(e)")
+fn admitted_roles() -> [SimpleRolePayload]:
+    val result = simpleos_admit_role_payloads([
+        role_input("compiler", "/artifacts/compiler.smf", valid_smf(1.to_u8())),
+        role_input("interpreter", "/artifacts/interpreter.smf", valid_smf(2.to_u8())),
+        role_input("loader", "/artifacts/loader.smf", valid_smf(3.to_u8())),
+    ])
+    match result:
+        case Ok(roles): roles
+        case Err(_):
+            fail("fixture role admission failed")
+            []
 
-    it "skips heavyweight bake examples in interpreter spec":
-        """Always green on CI because heavyweight bake verification is manual."""
-        return "skip: heavyweight bake examples are disabled in interpreter spec"
+describe "SimpleOS target-native image bake admission":
+    it "uses pure-Simple SHA-256 for role artifacts":
+        expect(simpleos_role_payload_digest([97u8, 98u8, 99u8])).to_equal(
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        )
 
-    it "bake() returns Ok and produces both artifact files":
-        """Call bake() and assert both output paths exist with minimum sizes."""
-        return "skip: heavyweight bake examples are disabled in interpreter spec"
+    it "admits three explicit non-empty role artifacts":
+        val roles = admitted_roles()
+        expect(roles.len()).to_equal(3)
+        expect(roles[0].role).to_equal("compiler")
+        expect(roles[1].role).to_equal("interpreter")
+        expect(roles[2].role).to_equal("loader")
+        expect(roles[0].guest_paths.len()).to_be_greater_than(0)
+        expect(roles[1].guest_paths.len()).to_be_greater_than(0)
+        expect(roles[2].guest_paths.len()).to_be_greater_than(0)
 
-    it "disk image is at least 32 MiB":
-        """Verify the FAT32 image has the expected minimum size."""
-        return "skip: heavyweight bake examples are disabled in interpreter spec"
+    it "returns a typed rejection when a role artifact is missing":
+        val result = simpleos_admit_role_payloads([
+            missing_role_input("compiler", "/artifacts/missing-compiler.smf"),
+            role_input("interpreter", "/artifacts/interpreter.smf", valid_smf(2.to_u8())),
+            role_input("loader", "/artifacts/loader.smf", valid_smf(3.to_u8())),
+        ])
+        match result:
+            case Ok(_): fail("missing compiler artifact was admitted")
+            case Err(error): expect(error).to_equal(SimpleRoleAdmissionError.MissingArtifact)
 
-    it "initramfs artifact exists with non-zero size":
-        """Verify the initramfs output file was written."""
-        return "skip: heavyweight bake examples are disabled in interpreter spec"
+    it "rejects empty artifacts and the general compiler fallback":
+        val empty_result = simpleos_admit_role_payloads([
+            role_input("compiler", "/artifacts/empty.smf", []),
+            role_input("interpreter", "/artifacts/interpreter.smf", valid_smf(2.to_u8())),
+            role_input("loader", "/artifacts/loader.smf", valid_smf(3.to_u8())),
+        ])
+        match empty_result:
+            case Ok(_): fail("empty compiler artifact was admitted")
+            case Err(error): expect(error).to_equal(SimpleRoleAdmissionError.EmptyArtifact)
 
-    it "initramfs artifact validates as a real archive":
-        """Verify the packed output can be decompressed and listed."""
-        return "skip: heavyweight bake examples are disabled in interpreter spec"
+        val fallback_result = simpleos_admit_role_payloads([
+            role_input("compiler", "/build/simple_simpleos", valid_smf(1.to_u8())),
+            role_input("interpreter", "/artifacts/interpreter.smf", valid_smf(2.to_u8())),
+            role_input("loader", "/artifacts/loader.smf", valid_smf(3.to_u8())),
+        ])
+        match fallback_result:
+            case Ok(_): fail("general compiler fallback was admitted")
+            case Err(error): expect(error).to_equal(SimpleRoleAdmissionError.GeneralPayload)
 
-    it "writes multi-payload disk image":
-        """Create a config with 2 payloads and assert both directory entries
-        are present in the raw image bytes (first two 32-byte dir entries)."""
-        return "skip: heavyweight bake examples are disabled in interpreter spec"
+    it "rejects malformed executable bytes before image construction":
+        val result = simpleos_admit_role_payloads([
+            role_input("compiler", "/artifacts/malformed.smf", [1.to_u8(), 2.to_u8(), 3.to_u8()]),
+            role_input("interpreter", "/artifacts/interpreter.smf", valid_smf(2.to_u8())),
+            role_input("loader", "/artifacts/loader.smf", valid_smf(3.to_u8())),
+        ])
+        match result:
+            case Ok(_): fail("malformed executable bytes were admitted")
+            case Err(error): expect(error).to_equal(SimpleRoleAdmissionError.InvalidExecutableFormat)
+
+    it "rejects duplicate role paths and duplicate artifact digests":
+        val duplicate_path = simpleos_admit_role_payloads([
+            role_input("compiler", "/artifacts/shared.smf", valid_smf(1.to_u8())),
+            role_input("interpreter", "/artifacts/shared.smf", valid_smf(2.to_u8())),
+            role_input("loader", "/artifacts/loader.smf", valid_smf(3.to_u8())),
+        ])
+        match duplicate_path:
+            case Ok(_): fail("duplicate role path was admitted")
+            case Err(error): expect(error).to_equal(SimpleRoleAdmissionError.DuplicatePath)
+
+        val duplicate_digest = simpleos_admit_role_payloads([
+            role_input("compiler", "/artifacts/compiler.smf", valid_smf(1.to_u8())),
+            role_input("interpreter", "/artifacts/other.smf", valid_smf(1.to_u8())),
+            role_input("loader", "/artifacts/loader.smf", valid_smf(3.to_u8())),
+        ])
+        match duplicate_digest:
+            case Ok(_): fail("duplicate artifact digest was admitted")
+            case Err(error): expect(error).to_equal(SimpleRoleAdmissionError.DuplicateDigest)
+
+    it "rejects empty, control, quote, backslash, and noncanonical paths":
+        val unsafe_paths: [text] = [
+            "",
+            " /artifacts/compiler.smf",
+            "/artifacts/compiler\"payload.smf",
+            "/artifacts/compiler\\payload.smf",
+            "/artifacts/compiler\npayload.smf",
+            "build/os/../compiler.smf",
+            "/artifacts//compiler.smf",
+        ]
+        for path in unsafe_paths:
+            val result = simpleos_admit_role_artifact_path(path)
+            match result:
+                case Ok(()): fail("unsafe artifact path was admitted: {path}")
+                case Err(error): expect(error).to_equal(SimpleRoleAdmissionError.InvalidArtifactPath)
+
+    it "fails closed if a manifest role carries an unsafe artifact path":
+        val roles = admitted_roles()
+        val unsafe = SimpleRolePayload(
+            role: roles[0].role,
+            host_path: "/artifacts/compiler\"payload.smf",
+            digest: roles[0].digest,
+            data: roles[0].data,
+            guest_paths: roles[0].guest_paths,
+        )
+        val result = simpleos_render_toolchain_manifest([unsafe, roles[1], roles[2]])
+        match result:
+            case Ok(_): fail("unsafe artifact path reached SIMPLETOOL.SDN rendering")
+            case Err(error): expect(error).to_equal(SimpleRoleAdmissionError.InvalidArtifactPath)
+
+    it "revalidates every caller-constructed manifest role field":
+        val roles = admitted_roles()
+
+        var forged_role = roles[0]
+        forged_role.role = "compiler\" } injected"
+        match simpleos_render_toolchain_manifest([forged_role, roles[1], roles[2]]):
+            case Ok(_): fail("forged role reached SIMPLETOOL.SDN rendering")
+            case Err(error): expect(error).to_equal(SimpleRoleAdmissionError.UnknownRole)
+
+        var forged_digest = roles[0]
+        forged_digest.digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        match simpleos_render_toolchain_manifest([forged_digest, roles[1], roles[2]]):
+            case Ok(_): fail("forged digest reached SIMPLETOOL.SDN rendering")
+            case Err(error): expect(error).to_equal(SimpleRoleAdmissionError.InvalidDigest)
+
+        var forged_guest = roles[0]
+        forged_guest.guest_paths = ["/bin/simple\" } injected"]
+        match simpleos_render_toolchain_manifest([forged_guest, roles[1], roles[2]]):
+            case Ok(_): fail("forged guest path reached SIMPLETOOL.SDN rendering")
+            case Err(error): expect(error).to_equal(SimpleRoleAdmissionError.InvalidGuestPath)
+
+    it "renders canonical role, guest path, artifact, and digest bindings":
+        val roles = admitted_roles()
+        val manifest = match simpleos_render_toolchain_manifest(roles):
+            case Ok(value): value
+            case Err(_):
+                fail("valid role paths were rejected during manifest rendering")
+                ""
+        expect(manifest).to_start_with("simple_toolchain {")
+        expect(manifest).to_contain("role: \"compiler\"")
+        expect(manifest).to_contain("role: \"interpreter\"")
+        expect(manifest).to_contain("role: \"loader\"")
+        expect(manifest).to_contain("guest_path: \"/bin/simple\"")
+        expect(manifest).to_contain("guest_path: \"/sys/apps/simple_interpreter\"")
+        expect(manifest).to_contain("guest_path: \"/sys/apps/simple_loader\"")
+        expect(manifest).to_contain(roles[0].digest)
+        expect(manifest).to_contain(roles[1].digest)
+        expect(manifest).to_contain(roles[2].digest)

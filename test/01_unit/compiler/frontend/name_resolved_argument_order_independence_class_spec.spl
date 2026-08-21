@@ -1,0 +1,109 @@
+"""
+# Class-detection spec: name-resolved arguments must be order-independent
+
+Defect class (generalized from
+doc/08_tracking/bug/struct_shorthand_arg_order_binds_wrong_field_2026-07-20.md):
+
+An argument that is bound by NAME -- either an explicit `name: value` argument
+or a shorthand `name` argument whose identifier is the field/parameter name --
+must resolve to the same slot regardless of what precedes it in the argument
+list. Any binder that keeps a separate positional index alongside a
+name-keyed pass can desynchronise the two once a named argument appears, and
+then silently binds later arguments to the wrong slot (or to the type default,
+which for i64 is 0 and for text is "" -- both silent wrong answers, not errors).
+
+This spec probes the whole class, not just the one reported shape: shorthand at
+every index, named args written out of declaration order, wide structs, text
+and bool fields (whose defaults are NOT 0, so an index-desync shows up as a
+different wrong value), and nested construction.
+
+Runs interpreted -- the defect lives in the interpreter's argument binder.
+"""
+
+struct NrTriple:
+    a: i64
+    b: i64
+    c: i64
+
+struct NrWide:
+    one: i64
+    two: text
+    three: bool
+    four: i64
+    five: text
+
+struct NrInner:
+    v: i64
+
+struct NrOuter:
+    label: text
+    inner: NrInner
+
+describe "name-resolved arguments bind independently of argument order":
+
+    it "resolves a shorthand at each index after a leading named argument":
+        val b = 2
+        val c = 3
+        val t1 = NrTriple(a: 1, b, c)
+        expect t1.a == 1
+        expect t1.b == 2
+        expect t1.c == 3
+
+    it "resolves a shorthand sandwiched between two named arguments":
+        val b = 2
+        val t2 = NrTriple(a: 1, b, c: 3)
+        expect t2.a == 1
+        expect t2.b == 2
+        expect t2.c == 3
+
+    it "resolves a trailing named argument after leading shorthands":
+        val a = 1
+        val b = 2
+        val t3 = NrTriple(a, b, c: 3)
+        expect t3.a == 1
+        expect t3.b == 2
+        expect t3.c == 3
+
+    it "resolves named arguments written out of declaration order":
+        val t4 = NrTriple(c: 3, a: 1, b: 2)
+        expect t4.a == 1
+        expect t4.b == 2
+        expect t4.c == 3
+
+    it "resolves a shorthand after an out-of-order named argument":
+        val a = 1
+        val b = 2
+        val t5 = NrTriple(c: 3, a, b)
+        expect t5.a == 1
+        expect t5.b == 2
+        expect t5.c == 3
+
+    it "keeps non-integer fields off the zero-default masking path":
+        # text and bool defaults differ from 0, so an index desync produces a
+        # visibly different wrong value here rather than a plausible 0.
+        val two = "two"
+        val three = true
+        val five = "five"
+        val w = NrWide(one: 1, two, three, four: 4, five)
+        expect w.one == 1
+        expect w.two == "two"
+        expect w.three == true
+        expect w.four == 4
+        expect w.five == "five"
+
+    it "resolves a shorthand whose value is a struct":
+        val inner = NrInner(v: 7)
+        val o = NrOuter(label: "outer", inner)
+        expect o.label == "outer"
+        expect o.inner.v == 7
+
+    it "resolves shorthands whose values come from expressions and calls":
+        val b = 1 + 1
+        val c = compute_three()
+        val t6 = NrTriple(a: 1, b, c)
+        expect t6.a == 1
+        expect t6.b == 2
+        expect t6.c == 3
+
+fn compute_three() -> i64:
+    return 3

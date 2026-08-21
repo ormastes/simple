@@ -112,6 +112,25 @@ struct FileStat:
     birth_time_ns: u64
 ```
 
+### 2.4 Durability boundary
+
+`Capability.DurableSync` is promoted only by a backend whose device owner
+acknowledges ordered Flush or FUA completion. The shared block layer exposes
+`BlockDevice.flush()` as the existing fail-closed seam and
+`BlockDeviceDurabilityPortV1` as the explicit device-owner contract.
+`block_device_owner.spl` is the one process-local trait-object registry shared
+by NVFS arena and superblock code. Default flush methods fail closed;
+successful writes, WAL counters, and remounts cannot imply persistence.
+
+FAT32 probes this boundary at mount and advertises `DurableSync` only for that
+mounted instance when the concrete owner acknowledges it; fsync/fdatasync then
+write dirty clusters before another acknowledged flush. NVFS arena commits use
+two checksummed sequence slots and data-before-metadata barriers, but the
+mounted NVFS and NVFS-POSIX drivers remain `Unsupported` until their namespace
+and file writes are bound to that recovery owner. RamFS is always volatile.
+The canonical behavioral matrix is
+`test/02_integration/storage/fs_recovery_conformance_spec.spl`.
+
 ---
 
 ## 3. `DriverInstance` enum and mount table

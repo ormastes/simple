@@ -363,6 +363,34 @@ thread_local! {
         std::cell::RefCell::new(std::collections::HashSet::new());
 }
 
+/// Priority-2 precedence: does the free-function builtin `name` win over a
+/// same-named user definition?
+///
+/// A user-defined module-level `fn` wins, except for process-control names in
+/// `PRELUDE_UNSHADOWABLE`.
+/// See doc/08_tracking/bug/module_fn_shadowed_by_builtin_name_2026-08-21.md
+pub fn builtin_wins_over_user_fn(name: &str, user_defined: bool) -> bool {
+    !user_defined || super::interpreter_eval::PRELUDE_UNSHADOWABLE.contains(&name)
+}
+
+#[cfg(test)]
+mod precedence_tests {
+    use super::builtin_wins_over_user_fn;
+
+    /// doc/08_tracking/bug/module_fn_shadowed_by_builtin_name_2026-08-21.md:
+    /// a module-level `fn freeze`/`fn len` must beat the interpreter builtin.
+    #[test]
+    fn user_defined_function_wins_over_builtin() {
+        assert!(builtin_wins_over_user_fn("freeze", false));
+        assert!(builtin_wins_over_user_fn("len", false));
+        assert!(!builtin_wins_over_user_fn("freeze", true));
+        assert!(!builtin_wins_over_user_fn("len", true));
+        for name in crate::interpreter::PRELUDE_UNSHADOWABLE {
+            assert!(builtin_wins_over_user_fn(name, true));
+        }
+    }
+}
+
 /// Report, once per name, that a user `fn` shadows a prelude builtin.
 ///
 /// `fenced` distinguishes the two policies: a `PRELUDE_UNSHADOWABLE` name is
@@ -478,8 +506,28 @@ pub(crate) fn evaluate_call(
         // 51 in the JIT lane). The fences added at Priority 1 are what actually
         // protects the names listed in `PRELUDE_UNSHADOWABLE`; every other
         // prelude name remains shadowable *by design*, but now warns.
-        if let Some(result) = builtins::eval_builtin(name, args, env, functions, classes, enums, impl_methods)? {
-            return Ok(result);
+        //
+        // 2026-08-21: a user-defined module-level `fn` of the same name now
+        // wins over a free-function builtin (`freeze`, `len`, ...), except for
+        // process-control names in `PRELUDE_UNSHADOWABLE`. The gate is on the
+        // CALL, not on its result: several `eval_builtin` arms evaluate their
+        // arguments and have side effects. Warn once so it is never silent.
+        // See doc/08_tracking/bug/module_fn_shadowed_by_builtin_name_2026-08-21.md
+        let user_defined = functions.contains_key(name.as_str())
+            || FUNCTION_OVERLOADS.with(|cell| cell.borrow().contains_key(name.as_str()));
+        let builtin_wins = builtin_wins_over_user_fn(name.as_str(), user_defined);
+        if user_defined
+            && !builtin_wins
+            && super::interpreter_eval::is_user_facing_prelude(name.as_str())
+        {
+            warn_prelude_shadow_once(name.as_str(), functions, false);
+        }
+        if builtin_wins {
+            if let Some(result) =
+                builtins::eval_builtin(name, args, env, functions, classes, enums, impl_methods)?
+            {
+                return Ok(result);
+            }
         }
 
         // Priority 3: Try BDD framework for spec DSL names (describe/it/before_each/…).

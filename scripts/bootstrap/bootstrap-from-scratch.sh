@@ -377,6 +377,16 @@ elif [ "${stop_after_stage3}" -eq 1 ]; then
   }
 fi
 
+# Reject malformed diagnostics options before planner admission. Option syntax
+# errors are non-executing and must remain diagnosable without a stage receipt.
+case "${diagnostics_mode}" in
+  off|test|debug) ;;
+  *)
+    echo "error: --diagnostics requires off, debug, or test (got '${diagnostics_mode}')" >&2
+    exit 1
+    ;;
+esac
+
 # This is the common staged-bootstrap boundary, including Windows forwarding
 # and admitted Stage 3 resume. A direct/ad-hoc invocation cannot start even
 # Stage 1 without the canonical receipt produced by the pure-Simple planner.
@@ -480,7 +490,7 @@ if [ -n "${resume_stage3_output}" ]; then
     echo "error: Stage 3 resume is mutually exclusive with rebuild/deploy/diagnostic options" >&2
     exit 1
   }
-  case "${jobs}" in ''|1) ;; *) echo "error: Stage 3 resume permits only --jobs=1" >&2; exit 1 ;; esac
+  case "${jobs}" in ''|1) ;; *) echo "error: Stage 3 resume permits only --jobs=1 (it execs resume-stage3-from-admitted.sh, which takes no jobs argument and pins the stage-3 recompile to --threads 1; a jobs value here would be silently ignored)" >&2; exit 1 ;; esac
   exec "$(dirname -- "$0")/resume-stage3-from-admitted.sh" "${resume_stage3_output}"
 fi
 
@@ -492,7 +502,7 @@ if [ -n "${resume_stage4_output}" ]; then
     echo "error: Stage 4 resume requires --deploy and excludes rebuild/release/diagnostic options" >&2
     exit 1
   }
-  case "${jobs}" in ''|1) jobs=1 ;; *) echo "error: Stage 4 resume permits only --jobs=1" >&2; exit 1 ;; esac
+  case "${jobs}" in ''|1) jobs=1 ;; *) echo "error: Stage 4 resume permits only --jobs=1 (resume reuses the already-admitted stage-3 artifact and only relinks the full CLI; a jobs value here would be silently ignored)" >&2; exit 1 ;; esac
   output_dir=${resume_stage4_output}
   full_cli=1
 fi
@@ -1248,6 +1258,9 @@ bootstrap_stage_sanity() (
       echo "checks_run=${sanity_checks_run}"
     } >"${evidence_tmp}" || return 1
     mv "${evidence_tmp}" "${evidence_path}"
+  fi
+  if [ "${sanity_status}" != pass ]; then
+    echo "bootstrap-sanity-error: version_status=${version_status} version_output=${version} unsupported_status=${unsupported_status} frontend_status=${frontend_status} candidate_unchanged=$([ "${candidate_sha_before}" = "${candidate_sha_after}" ] && echo true || echo false)" >&2
   fi
   rm -f "${frontend_log}"
   [ "${sanity_status}" = pass ]

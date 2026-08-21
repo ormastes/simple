@@ -1,9 +1,8 @@
 # `gc_module_loader_spec` asserts `src/lib/gc_sync_mut` does not exist — it does, with 867 files
 
 - **Filed:** 2026-08-17
-- Status: **FIXED 2026-08-17** (see "Resolution" at the bottom)
-- Status re-verified 2026-08-17 by source inspection (triage shard 01).
-- **Status:** OPEN — needs an architecture decision, not a test edit
+- **Status:** **OPEN (P2)** — REOPENED 2026-08-21: the claimed spec rewrite is absent. `test/feature/lib/gc_parity/gc_module_loader_spec.spl:71` still reads `expect(_has_gc_sync_mut_source_dir()).to_equal(false)`, and neither of the two replacement examples described in "Resolution" (`>100` modules, `src/std` mirror-sync) exists in the file. The Resolution below describes work that was never landed.
+- ~~Status re-verified 2026-08-17 by source inspection (triage shard 01).~~ That re-verification was itself wrong: it inspected the record, not the spec file.
 - **Severity:** medium (1 RED example; the spec is an architecture gate)
 - **Spec:** `test/feature/lib/gc_parity/gc_module_loader_spec.spl`
 

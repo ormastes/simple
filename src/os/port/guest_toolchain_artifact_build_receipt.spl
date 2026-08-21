@@ -1,0 +1,408 @@
+# Frozen target-toolchain artifact build receipt (REQ-009/010).
+#
+# This is a structural build-admission boundary, not capability-ledger PASS.
+# All supplied material is re-hashed here. Guest execution, signature/trust,
+# freshness, and ledger commit remain owned by the evidence service.
+
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.structural.digest.hash256.{hash256_hex_valid, hash256_is_zero}
+use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.loader.elf_loader.{elf_admit_executable}
+use os.kernel.loader.smf.{smf_admit_explicit_simpleos_executable}
+use std.common.contracts.execution.simpleos_target_v1.{
+    simpleos_target_v1_abi_for_triple
+}
+
+pub const GUEST_TOOLCHAIN_ARTIFACT_BUILD_RECEIPT_V1: i64 = 1
+pub const GUEST_TOOLCHAIN_ARTIFACT_BUILD_MAX_BYTES: i64 = 536870912
+pub const GUEST_TOOLCHAIN_ARTIFACT_BUILD_MAX_SOURCE_REVISION_BYTES: i64 = 67108864
+pub const GUEST_TOOLCHAIN_ARTIFACT_BUILD_MAX_METADATA_BYTES: i64 = 4194304
+pub const GUEST_TOOLCHAIN_ARTIFACT_BUILD_MAX_ARGV: i64 = 64
+pub const GUEST_TOOLCHAIN_ARTIFACT_BUILD_MAX_SCALAR_BYTES: i64 = 1024
+
+pub enum GuestToolchainArtifactRoleV1:
+    SimpleCompiler
+    SimpleInterpreter
+    SimpleLoader
+    Llvm
+    Clang
+    Clangxx
+    Lld
+
+pub enum GuestToolchainArtifactFormatV1:
+    Elf
+    Smf
+
+pub enum GuestToolchainArtifactBuildAdmissionErrorV1:
+    InvalidSchema
+    InvalidReceiptIdentity
+    InvalidTarget
+    InvalidAbi
+    InvalidRoleFormat
+    InvalidBuilderPath
+    ForbiddenBootstrapBuilder
+    InvalidBuilderSourcePath
+    InvalidOutputPath
+    InvalidDigest
+    InvalidBuilderBytes
+    BuilderDigestMismatch
+    BuilderSourceDigestMismatch
+    ProvenanceDigestMismatch
+    InvalidProvenanceMaterial
+    SourceRevisionDigestMismatch
+    DependencyManifestDigestMismatch
+    BuildEnvironmentDigestMismatch
+    InvalidArgv
+    BuildCommandDigestMismatch
+    PathLookupForbidden
+    HostFallbackForbidden
+    InvalidOutputSize
+    OutputDigestMismatch
+    RebuildDigestMismatch
+    ReceiptPayloadDigestMismatch
+    InvalidElfStructure
+    InvalidSmfStructure
+
+pub struct GuestToolchainArtifactBuildReceiptV1:
+    schema_version: i64
+    receipt_id: text
+    target_triple: text
+    target_abi: text
+    role: GuestToolchainArtifactRoleV1
+    artifact_format: GuestToolchainArtifactFormatV1
+    builder_path: text
+    builder_sha256: text
+    builder_source_path: text
+    builder_source_sha256: text
+    builder_provenance_sha256: text
+    source_revision_sha256: text
+    dependency_manifest_sha256: text
+    build_environment_sha256: text
+    builder_argv: [text]
+    build_command_sha256: text
+    output_path: text
+    output_sha256: text
+    output_size: i64
+    rebuild_output_sha256: text
+    rebuild_output_size: i64
+    # Frozen structural payload for a future authoritative producer signature.
+    # This detects candidate mutation; it is not itself proof of provenance.
+    receipt_payload_sha256: text
+    # Candidate declarations only. The signed execution receipt must bind and
+    # independently verify the actual process-launch path before ledger PASS.
+    used_path_lookup: bool
+    used_host_fallback: bool
+
+fn _safe_scalar(value: text) -> bool:
+    value.len() > 0 and value.len() <= GUEST_TOOLCHAIN_ARTIFACT_BUILD_MAX_SCALAR_BYTES and
+        not value.contains("\0") and not value.contains("\n") and
+        not value.contains("\r")
+
+fn _safe_path(value: text) -> bool:
+    _safe_scalar(value) and not value.contains("//") and
+        not value.contains("/./") and not value.contains("/../") and
+        not value.ends_with("/.") and not value.ends_with("/..") and
+        not value.contains("\\")
+
+fn _explicit_builder_path(value: text) -> bool:
+    _safe_path(value) and value.contains("/") and not value.ends_with("/")
+
+fn _builder_source_path(value: text) -> bool:
+    _safe_path(value) and
+        (value.starts_with("src/") or value.starts_with("scripts/")) and
+        (value.ends_with(".spl") or value.ends_with(".shs"))
+
+fn _builder_forbidden(value: text) -> bool:
+    val lower = value.to_lower()
+    lower.contains("compiler_rust") or lower.contains("/target/bootstrap/") or
+        lower.ends_with("/bootstrap/simple") or lower.contains("rust-seed")
+
+fn _target_arch(target: text) -> Architecture?:
+    if target == "x86_64-unknown-simpleos":
+        return Some(Architecture.X86_64)
+    if target == "aarch64-unknown-simpleos":
+        return Some(Architecture.Arm64)
+    if target == "riscv64gc-unknown-simpleos":
+        return Some(Architecture.Riscv64)
+    nil
+
+fn _nonzero_digest(value: text) -> bool:
+    hash256_hex_valid(value) and not hash256_is_zero(value)
+
+fn _bounded_nonzero_bytes(bytes: [u8], maximum: i64) -> bool:
+    if bytes.len() == 0 or bytes.len() > maximum:
+        return false
+    for byte in bytes:
+        if byte != 0u8:
+            return true
+    false
+
+fn _output_prefix(target: text) -> text:
+    "build/os/toolchain-artifacts/{target}/"
+
+fn _role_output_name(
+    role: GuestToolchainArtifactRoleV1,
+    format: GuestToolchainArtifactFormatV1
+) -> text:
+    val suffix = if format == GuestToolchainArtifactFormatV1.Smf: ".smf" else: ""
+    match role:
+        GuestToolchainArtifactRoleV1.SimpleCompiler: "simple_compiler" + suffix
+        GuestToolchainArtifactRoleV1.SimpleInterpreter: "simple_interpreter" + suffix
+        GuestToolchainArtifactRoleV1.SimpleLoader: "simple_loader" + suffix
+        GuestToolchainArtifactRoleV1.Llvm: "llvm"
+        GuestToolchainArtifactRoleV1.Clang: "clang"
+        GuestToolchainArtifactRoleV1.Clangxx: "clang++"
+        GuestToolchainArtifactRoleV1.Lld: "ld.lld"
+
+pub fn guest_toolchain_artifact_canonical_output_path_v1(
+    target: text,
+    role: GuestToolchainArtifactRoleV1,
+    format: GuestToolchainArtifactFormatV1
+) -> text:
+    _output_prefix(target) + _role_output_name(role, format)
+
+fn _output_path_valid(
+    path: text,
+    target: text,
+    role: GuestToolchainArtifactRoleV1,
+    format: GuestToolchainArtifactFormatV1
+) -> bool:
+    _safe_path(path) and
+        path == guest_toolchain_artifact_canonical_output_path_v1(
+            target, role, format)
+
+fn _role_format_valid(
+    role: GuestToolchainArtifactRoleV1,
+    format: GuestToolchainArtifactFormatV1
+) -> bool:
+    if role == GuestToolchainArtifactRoleV1.SimpleCompiler or
+       role == GuestToolchainArtifactRoleV1.SimpleInterpreter or
+       role == GuestToolchainArtifactRoleV1.SimpleLoader:
+        return format == GuestToolchainArtifactFormatV1.Elf or
+            format == GuestToolchainArtifactFormatV1.Smf
+    format == GuestToolchainArtifactFormatV1.Elf
+
+pub fn guest_toolchain_artifact_build_command_sha256_v1(argv: [text]) -> text:
+    var canonical = "guest-toolchain-build-command-v1|argc={argv.len()}|"
+    for arg in argv:
+        canonical = canonical + "arg={arg.len()}:{arg}|"
+    sha256_text(canonical)
+
+fn _role_name(role: GuestToolchainArtifactRoleV1) -> text:
+    match role:
+        GuestToolchainArtifactRoleV1.SimpleCompiler: "simple-compiler"
+        GuestToolchainArtifactRoleV1.SimpleInterpreter: "simple-interpreter"
+        GuestToolchainArtifactRoleV1.SimpleLoader: "simple-loader"
+        GuestToolchainArtifactRoleV1.Llvm: "llvm"
+        GuestToolchainArtifactRoleV1.Clang: "clang"
+        GuestToolchainArtifactRoleV1.Clangxx: "clangxx"
+        GuestToolchainArtifactRoleV1.Lld: "lld"
+
+fn _format_name(format: GuestToolchainArtifactFormatV1) -> text:
+    if format == GuestToolchainArtifactFormatV1.Smf: "smf" else: "elf"
+
+fn _bool_name(value: bool) -> text:
+    if value: "1" else: "0"
+
+pub fn guest_toolchain_artifact_build_receipt_payload_sha256_v1(
+    receipt: GuestToolchainArtifactBuildReceiptV1
+) -> text:
+    # Length-prefix every free-form scalar so this is unambiguous and safe for
+    # a future producer signature without parsing diagnostic text.
+    val scalars = [
+        receipt.receipt_id, receipt.target_triple, receipt.target_abi,
+        _role_name(receipt.role), _format_name(receipt.artifact_format),
+        receipt.builder_path, receipt.builder_sha256,
+        receipt.builder_source_path, receipt.builder_source_sha256,
+        receipt.builder_provenance_sha256, receipt.source_revision_sha256,
+        receipt.dependency_manifest_sha256, receipt.build_environment_sha256,
+        receipt.build_command_sha256, receipt.output_path,
+        receipt.output_sha256, receipt.rebuild_output_sha256,
+        _bool_name(receipt.used_path_lookup),
+        _bool_name(receipt.used_host_fallback)
+    ]
+    var canonical = "guest-toolchain-artifact-build-receipt-v1|" +
+        "schema={receipt.schema_version}|output-size={receipt.output_size}|" +
+        "rebuild-size={receipt.rebuild_output_size}|fields={scalars.len()}|"
+    for scalar in scalars:
+        canonical = canonical + "field={scalar.len()}:{scalar}|"
+    canonical = canonical + "argc={receipt.builder_argv.len()}|"
+    for arg in receipt.builder_argv:
+        canonical = canonical + "arg={arg.len()}:{arg}|"
+    sha256_text(canonical)
+
+fn _argv_valid(receipt: GuestToolchainArtifactBuildReceiptV1) -> bool:
+    if receipt.builder_argv.len() == 0 or
+       receipt.builder_argv.len() > GUEST_TOOLCHAIN_ARTIFACT_BUILD_MAX_ARGV or
+       receipt.builder_argv[0] != receipt.builder_path:
+        return false
+    var target_bindings = 0
+    var output_bindings = 0
+    var target_values = 0
+    var output_values = 0
+    var i = 0
+    while i < receipt.builder_argv.len():
+        val arg = receipt.builder_argv[i]
+        if not _safe_scalar(arg):
+            return false
+        if arg == receipt.target_triple:
+            target_values = target_values + 1
+        if arg == receipt.output_path:
+            output_values = output_values + 1
+        if arg == "--target":
+            if i + 1 >= receipt.builder_argv.len() or
+               receipt.builder_argv[i + 1] != receipt.target_triple:
+                return false
+            target_bindings = target_bindings + 1
+        elif arg.starts_with("--target="):
+            return false
+        if arg == "--output":
+            if i + 1 >= receipt.builder_argv.len() or
+               receipt.builder_argv[i + 1] != receipt.output_path:
+                return false
+            output_bindings = output_bindings + 1
+        elif arg.starts_with("--output="):
+            return false
+        i = i + 1
+    target_bindings == 1 and output_bindings == 1 and
+        target_values == 1 and output_values == 1
+
+fn _read_u32_le(bytes: [u8], offset: i64) -> i64:
+    if offset < 0 or offset > bytes.len() - 4:
+        return 0 - 1
+    bytes[offset].to_i64() |
+        (bytes[offset + 1].to_i64() << 8) |
+        (bytes[offset + 2].to_i64() << 16) |
+        (bytes[offset + 3].to_i64() << 24)
+
+fn _admit_structure(
+    receipt: GuestToolchainArtifactBuildReceiptV1,
+    output_bytes: [u8],
+    arch: Architecture
+) -> Result<(), GuestToolchainArtifactBuildAdmissionErrorV1>:
+    if receipt.artifact_format == GuestToolchainArtifactFormatV1.Elf:
+        if elf_admit_executable(output_bytes, arch).is_err():
+            return Err(GuestToolchainArtifactBuildAdmissionErrorV1.InvalidElfStructure)
+        return Ok(())
+    if smf_admit_explicit_simpleos_executable(output_bytes).is_err():
+        return Err(GuestToolchainArtifactBuildAdmissionErrorV1.InvalidSmfStructure)
+    if output_bytes.len() < 128:
+        return Err(GuestToolchainArtifactBuildAdmissionErrorV1.InvalidSmfStructure)
+    val header_offset = output_bytes.len() - 128
+    val stub_size = _read_u32_le(output_bytes, header_offset + 52)
+    if stub_size < 64 or stub_size > header_offset:
+        return Err(GuestToolchainArtifactBuildAdmissionErrorV1.InvalidSmfStructure)
+    val stub = output_bytes.slice(0, stub_size)
+    if elf_admit_executable(stub, arch).is_err():
+        return Err(GuestToolchainArtifactBuildAdmissionErrorV1.InvalidSmfStructure)
+    Ok(())
+
+pub fn guest_toolchain_artifact_build_admit_v1(
+    receipt: GuestToolchainArtifactBuildReceiptV1,
+    builder_bytes: [u8],
+    builder_source_bytes: [u8],
+    builder_provenance_bytes: [u8],
+    source_revision_bytes: [u8],
+    dependency_manifest_bytes: [u8],
+    build_environment_bytes: [u8],
+    output_bytes: [u8],
+    rebuild_output_bytes: [u8]
+) -> Result<(), GuestToolchainArtifactBuildAdmissionErrorV1>:
+    if receipt.schema_version != GUEST_TOOLCHAIN_ARTIFACT_BUILD_RECEIPT_V1:
+        return Err(GuestToolchainArtifactBuildAdmissionErrorV1.InvalidSchema)
+    if not _safe_scalar(receipt.receipt_id):
+        return Err(GuestToolchainArtifactBuildAdmissionErrorV1.InvalidReceiptIdentity)
+    val arch = _target_arch(receipt.target_triple) ??
+        return Err(GuestToolchainArtifactBuildAdmissionErrorV1.InvalidTarget)
+    if receipt.target_abi != simpleos_target_v1_abi_for_triple(receipt.target_triple):
+        return Err(GuestToolchainArtifactBuildAdmissionErrorV1.InvalidAbi)
+    if not _role_format_valid(receipt.role, receipt.artifact_format):
+        return Err(GuestToolchainArtifactBuildAdmissionErrorV1.InvalidRoleFormat)
+    if not _explicit_builder_path(receipt.builder_path):
+        return Err(GuestToolchainArtifactBuildAdmissionErrorV1.InvalidBuilderPath)
+    if _builder_forbidden(receipt.builder_path):
+        return Err(GuestToolchainArtifactBuildAdmissionErrorV1.ForbiddenBootstrapBuilder)
+    if not _builder_source_path(receipt.builder_source_path):
+        return Err(GuestToolchainArtifactBuildAdmissionErrorV1.InvalidBuilderSourcePath)
+    if not _output_path_valid(
+        receipt.output_path, receipt.target_triple, receipt.role,
+        receipt.artifact_format):
+        return Err(GuestToolchainArtifactBuildAdmissionErrorV1.InvalidOutputPath)
+    if not _nonzero_digest(receipt.builder_sha256) or
+       not _nonzero_digest(receipt.builder_source_sha256) or
+       not _nonzero_digest(receipt.builder_provenance_sha256) or
+       not _nonzero_digest(receipt.source_revision_sha256) or
+       not _nonzero_digest(receipt.dependency_manifest_sha256) or
+       not _nonzero_digest(receipt.build_environment_sha256) or
+       not _nonzero_digest(receipt.build_command_sha256) or
+       not _nonzero_digest(receipt.output_sha256) or
+       not _nonzero_digest(receipt.rebuild_output_sha256) or
+       not _nonzero_digest(receipt.receipt_payload_sha256):
+        return Err(GuestToolchainArtifactBuildAdmissionErrorV1.InvalidDigest)
+    if not _bounded_nonzero_bytes(builder_bytes, GUEST_TOOLCHAIN_ARTIFACT_BUILD_MAX_BYTES) or
+       not _bounded_nonzero_bytes(builder_source_bytes, GUEST_TOOLCHAIN_ARTIFACT_BUILD_MAX_SOURCE_REVISION_BYTES) or
+       not _bounded_nonzero_bytes(builder_provenance_bytes, GUEST_TOOLCHAIN_ARTIFACT_BUILD_MAX_METADATA_BYTES):
+        return Err(GuestToolchainArtifactBuildAdmissionErrorV1.InvalidBuilderBytes)
+    if sha256_u8_hex(builder_bytes) != receipt.builder_sha256:
+        return Err(GuestToolchainArtifactBuildAdmissionErrorV1.BuilderDigestMismatch)
+    if sha256_u8_hex(builder_source_bytes) != receipt.builder_source_sha256:
+        return Err(GuestToolchainArtifactBuildAdmissionErrorV1.BuilderSourceDigestMismatch)
+    if sha256_u8_hex(builder_provenance_bytes) != receipt.builder_provenance_sha256:
+        return Err(GuestToolchainArtifactBuildAdmissionErrorV1.ProvenanceDigestMismatch)
+    if not _bounded_nonzero_bytes(
+        source_revision_bytes,
+        GUEST_TOOLCHAIN_ARTIFACT_BUILD_MAX_SOURCE_REVISION_BYTES
+    ) or not _bounded_nonzero_bytes(
+        dependency_manifest_bytes,
+        GUEST_TOOLCHAIN_ARTIFACT_BUILD_MAX_METADATA_BYTES
+    ) or not _bounded_nonzero_bytes(
+        build_environment_bytes,
+        GUEST_TOOLCHAIN_ARTIFACT_BUILD_MAX_METADATA_BYTES
+    ):
+        return Err(GuestToolchainArtifactBuildAdmissionErrorV1.InvalidProvenanceMaterial)
+    if sha256_u8_hex(source_revision_bytes) != receipt.source_revision_sha256:
+        return Err(GuestToolchainArtifactBuildAdmissionErrorV1.SourceRevisionDigestMismatch)
+    if sha256_u8_hex(dependency_manifest_bytes) != receipt.dependency_manifest_sha256:
+        return Err(GuestToolchainArtifactBuildAdmissionErrorV1.DependencyManifestDigestMismatch)
+    if sha256_u8_hex(build_environment_bytes) != receipt.build_environment_sha256:
+        return Err(GuestToolchainArtifactBuildAdmissionErrorV1.BuildEnvironmentDigestMismatch)
+    if not _argv_valid(receipt):
+        return Err(GuestToolchainArtifactBuildAdmissionErrorV1.InvalidArgv)
+    if guest_toolchain_artifact_build_command_sha256_v1(receipt.builder_argv) !=
+       receipt.build_command_sha256:
+        return Err(GuestToolchainArtifactBuildAdmissionErrorV1.BuildCommandDigestMismatch)
+    if receipt.used_path_lookup:
+        return Err(GuestToolchainArtifactBuildAdmissionErrorV1.PathLookupForbidden)
+    if receipt.used_host_fallback:
+        return Err(GuestToolchainArtifactBuildAdmissionErrorV1.HostFallbackForbidden)
+    if receipt.output_size <= 0 or
+       receipt.output_size > GUEST_TOOLCHAIN_ARTIFACT_BUILD_MAX_BYTES or
+       receipt.output_size != output_bytes.len() or
+       receipt.rebuild_output_size != rebuild_output_bytes.len() or
+       receipt.rebuild_output_size != receipt.output_size:
+        return Err(GuestToolchainArtifactBuildAdmissionErrorV1.InvalidOutputSize)
+    if not _bounded_nonzero_bytes(output_bytes, GUEST_TOOLCHAIN_ARTIFACT_BUILD_MAX_BYTES) or
+       sha256_u8_hex(output_bytes) != receipt.output_sha256:
+        return Err(GuestToolchainArtifactBuildAdmissionErrorV1.OutputDigestMismatch)
+    if not _bounded_nonzero_bytes(rebuild_output_bytes, GUEST_TOOLCHAIN_ARTIFACT_BUILD_MAX_BYTES) or
+       sha256_u8_hex(rebuild_output_bytes) != receipt.rebuild_output_sha256 or
+       receipt.rebuild_output_sha256 != receipt.output_sha256:
+        return Err(GuestToolchainArtifactBuildAdmissionErrorV1.RebuildDigestMismatch)
+    if receipt.receipt_payload_sha256 !=
+       guest_toolchain_artifact_build_receipt_payload_sha256_v1(receipt):
+        return Err(GuestToolchainArtifactBuildAdmissionErrorV1.ReceiptPayloadDigestMismatch)
+    _admit_structure(receipt, output_bytes, arch)
+
+export GuestToolchainArtifactRoleV1, GuestToolchainArtifactFormatV1
+export GuestToolchainArtifactBuildAdmissionErrorV1
+export GuestToolchainArtifactBuildReceiptV1
+export guest_toolchain_artifact_build_command_sha256_v1
+export guest_toolchain_artifact_build_receipt_payload_sha256_v1
+export guest_toolchain_artifact_canonical_output_path_v1
+export guest_toolchain_artifact_build_admit_v1
+export GUEST_TOOLCHAIN_ARTIFACT_BUILD_RECEIPT_V1
+export GUEST_TOOLCHAIN_ARTIFACT_BUILD_MAX_BYTES
+export GUEST_TOOLCHAIN_ARTIFACT_BUILD_MAX_SOURCE_REVISION_BYTES
+export GUEST_TOOLCHAIN_ARTIFACT_BUILD_MAX_METADATA_BYTES
+export GUEST_TOOLCHAIN_ARTIFACT_BUILD_MAX_ARGV
+export GUEST_TOOLCHAIN_ARTIFACT_BUILD_MAX_SCALAR_BYTES

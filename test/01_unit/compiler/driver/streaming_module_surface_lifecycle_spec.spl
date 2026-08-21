@@ -21,16 +21,24 @@ fn streaming_driver() -> CompilerDriver:
         streaming_source("build/streaming/alpha.spl", alpha, "fixture.alpha_alias"),
         streaming_source("build/streaming/beta.spl", "fn beta() -> i64:\n    return 2\n", "fixture.beta")
     ]
+    driver.ctx.source_paths_owner = [
+        "build/streaming/alpha.spl",
+        "build/streaming/alpha.spl",
+        "build/streaming/beta.spl"]
+    driver.ctx.source_authored_paths_owner = ["", "", ""]
+    driver.ctx.source_contents_owner = [
+        alpha, alpha, "fn beta() -> i64:\n    return 2\n"]
+    driver.ctx.source_module_names_owner = [
+        "fixture.alpha", "fixture.alpha_alias", "fixture.beta"]
     driver
 
 describe "streaming module-surface driver lifecycle":
     it "preserves physical-source order and aliases through phase 2":
         var driver = streaming_driver()
-        val (phase2_ctx, phase2_ok) = driver.parse_all_streaming_surfaces_impl()
-        driver.ctx = phase2_ctx
-        expect(phase2_ok).to_equal(true)
+        val phase2_ok = driver.parse_all_committing_impl()
+        expect(phase2_ok).to_be(true)
         expect(driver.ctx.modules.len()).to_equal(0)
-        expect(driver.ctx.module_surfaces != nil).to_equal(true)
+        expect(driver.ctx.module_surfaces != nil).to_be(true)
         val surfaces = driver.ctx.module_surfaces.unwrap()
         expect(surfaces.surfaces.len()).to_equal(2)
         expect(surfaces.surfaces[0].module_name).to_equal("fixture.alpha")
@@ -38,29 +46,27 @@ describe "streaming module-surface driver lifecycle":
 
     it "reparses each physical source once and preserves alias HIR through phase 3":
         var driver = streaming_driver()
-        val (phase2_ctx, phase2_ok) = driver.parse_all_streaming_surfaces_impl()
-        driver.ctx = phase2_ctx
-        expect(phase2_ok).to_equal(true)
+        val phase2_ok = driver.parse_all_committing_impl()
+        expect(phase2_ok).to_be(true)
         val (phase3_ctx, phase3_ok) = driver.lower_and_check_streaming_surfaces_impl()
-        expect(phase3_ok).to_equal(true)
+        expect(phase3_ok).to_be(true)
         expect(phase3_ctx.modules.keys().len()).to_equal(0)
-        expect(phase3_ctx.hir_modules.contains_key("fixture.alpha")).to_equal(true)
-        expect(phase3_ctx.hir_modules.contains_key("fixture.alpha_alias")).to_equal(true)
-        expect(phase3_ctx.hir_modules.contains_key("fixture.beta")).to_equal(true)
+        expect(phase3_ctx.hir_modules.contains_key("fixture.alpha")).to_be(true)
+        expect(phase3_ctx.hir_modules.contains_key("fixture.alpha_alias")).to_be(true)
+        expect(phase3_ctx.hir_modules.contains_key("fixture.beta")).to_be(true)
         expect(phase3_ctx.hir_modules["fixture.alpha"].functions.keys().len()).to_be_greater_than(0)
         expect(phase3_ctx.hir_modules["fixture.alpha_alias"].functions.keys().len()).to_be_greater_than(0)
         expect(phase3_ctx.hir_modules["fixture.beta"].functions.keys().len()).to_be_greater_than(0)
 
     it "retains source and surface state after a phase-3 fingerprint failure":
         var driver = streaming_driver()
-        val (phase2_ctx, phase2_ok) = driver.parse_all_streaming_surfaces_impl()
-        driver.ctx = phase2_ctx
-        expect(phase2_ok).to_equal(true)
+        val phase2_ok = driver.parse_all_committing_impl()
+        expect(phase2_ok).to_be(true)
         var sources = driver.ctx.sources
         sources[0] = streaming_source("build/streaming/alpha.spl", "fn alpha() -> i64:\n    return 99\n", "fixture.alpha")
         driver.ctx.sources = sources
         val (_, phase3_ok) = driver.lower_and_check_streaming_surfaces_impl()
-        expect(phase3_ok).to_equal(false)
+        expect(phase3_ok).to_be(false)
         expect(driver.ctx.sources.len()).to_equal(3)
-        expect(driver.ctx.module_surfaces != nil).to_equal(true)
+        expect(driver.ctx.module_surfaces != nil).to_be(true)
         expect(driver.ctx.errors[0]).to_contain("fingerprint mismatch")

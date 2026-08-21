@@ -1,0 +1,497 @@
+# HIR item lowering - module, import, and bootstrap-flat lowering.
+use compiler.hir.hir_lowering._Items.module_lowering.*
+# HIR Lowering - Item Lowering
+#
+# This module handles lowering of top-level items (functions, classes, structs, enums, traits, impls) from AST to HIR.
+
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.frontend.parser_types.*
+use compiler.frontend.parser_types.{ParserFunction, ImportItem, Param}
+use compiler.frontend.parser_types_expr.*
+use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.context_helpers.*
+use compiler.hir.hir_lowering.module_surface.*
+use compiler.hir.hir_lowering.expressions.*
+use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
+use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind, PlatformParseResult, PlatformDiagnosticLevel, PlatformLayoutDiagnostic}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.module_path_naming.{module_logical_name_from_path}
+use compiler.core.{decl_get_body, decl_get_name, decl_get_param_names, decl_get_param_types, decl_get_ret_type}
+use compiler.core.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_RETURN, stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_type}
+
+extern fn rt_enum_discriminant(value: Any) -> i64
+extern fn rt_enum_payload(value: StmtKind) -> Expr
+use compiler.core.{EXPR_INT_LIT, EXPR_STRING_LIT, EXPR_INTERPOLATED_STRING, EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT, EXPR_BINARY, EXPR_CALL, EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_BLOCK, EXPR_RETURN, expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_arg_names, expr_get_stmts}
+use compiler.frontend.core._AstExpr.accessors.{expr_get_arg_names}
+use compiler.core.{TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_PERCENT, TOK_EQ, TOK_NOT_EQ, TOK_LT, TOK_LT_EQ, TOK_GT, TOK_GT_EQ}
+use compiler.frontend.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_TEXT, TYPE_DICT, custom_primitive_bind_symbol, custom_primitive_is_name}
+use compiler.frontend.core.types.{is_dict_tag, dict_tag_to_id, dict_type_get_key, dict_type_get_value}
+use compiler.frontend.core.types.{primitive_integer_bit_width_from_name, custom_primitive_integer_bit_width_by_name}
+use compiler.core.{int_to_str}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+
+impl HirLowering:
+    me register_imported_symbol(imported_mod: ModuleSurface, imported_mod_name: text, imported_name: text, local_name: text, import_span: Span, materialize_enum: bool):
+        if imported_mod.composites.contains_key(imported_name):
+            val composite = imported_mod.composites[imported_name]
+            val already_bound = self.symbols.lookup(local_name).?
+            val kind = match composite.kind:
+                case "class": SymbolKind.Class
+                case "struct": SymbolKind.Struct
+                case "actor":
+                    self.error("imported actor `{imported_name}` has no HIR SymbolKind surface mapping", import_span)
+                    return
+                case other:
+                    self.error("unknown imported composite kind `{other}` for `{imported_name}`", import_span)
+                    return
+            val imported_type = self.symbols.define(local_name, kind, nil, import_span, Visibility.Public, false, Some(imported_mod.module_name))
+            if not already_bound:
+                self.symbols.rename_symbol(imported_type, imported_name)
+                self.symbols.bind_qualified_type(imported_mod.module_name, imported_name, imported_type)
+            else:
+                return
+            # A public composite field can name another type from the same
+            # defining module inside a container (`[Cell]`, `Cell?`, ...).
+            # Materialize those identities before lowering the field type so
+            # resolution is independent of the consumer's import item order.
+            for field in composite.fields:
+                for dependency in parser_type_named_dependencies(field.type_):
+                    if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, dependency) < 0:
+                        self.register_imported_symbol(imported_mod, imported_mod_name, dependency, dependency, import_span, materialize_enum)
+                if field.array_element_name != "" and self.symbols.lookup_qualified_type_raw(
+                        imported_mod.module_name, field.array_element_name) < 0:
+                    self.register_imported_symbol(
+                        imported_mod, imported_mod_name, field.array_element_name,
+                        field.array_element_name, import_span, materialize_enum)
+            var imported_field_types: Dict<text, HirType> = {}
+            for field in composite.fields:
+                imported_field_types[field.name] = self.imported_surface_type_projected(
+                    field.type_, field.type_name, field.array_element_name, imported_mod.module_name)
+            val canonical_composite_name = imported_mod.module_name + "." + imported_name
+            self.struct_field_types_by_name[canonical_composite_name] = imported_field_types
+            if not self.struct_field_types_by_name.has(imported_name):
+                self.struct_field_types_by_name[imported_name] = imported_field_types
+            self.register_imported_type_methods(imported_mod, imported_mod_name, imported_name, imported_type, import_span, materialize_enum)
+        elif imported_mod.enums.contains_key(imported_name):
+            if materialize_enum:
+                val root_origin = HirMaterializedPayloadOrigin(
+                    found: true,
+                    module_name: hir_pkg_canonical_module_name(imported_mod.module_name),
+                    item_name: imported_name,
+                    item_kind: "enum",
+                    module_key: imported_mod_name)
+                if not self.claim_materialized_payload_binding(local_name, root_origin, import_span):
+                    return
+            val already_bound = self.symbols.lookup(local_name).?
+            val imported_type = self.symbols.define(local_name, SymbolKind.Enum, nil, import_span, Visibility.Public, false, Some(imported_mod.module_name))
+            if not already_bound:
+                self.symbols.rename_symbol(imported_type, imported_name)
+                self.symbols.bind_qualified_type(imported_mod.module_name, imported_name, imported_type)
+            # Directory-sibling prebinding can create the enum symbol before
+            # an explicit import reaches this branch.  Methods are a separate
+            # idempotent surface and must be registered on both paths; keeping
+            # this inside `not already_bound` silently routed calls such as
+            # imported `DbValue.to_text()` to generic enum stringification.
+            self.register_imported_type_methods(imported_mod, imported_mod_name, imported_name, imported_type, import_span, materialize_enum)
+            # A directory-sibling declaration-only prebind may already own the
+            # symbol. A later explicit import must still transition the enum
+            # into materialized state and close over its payload dependencies.
+            if materialize_enum and not self.imported_enums.contains_key(local_name):
+                val surface_enum = imported_mod.enums[imported_name]
+                self.imported_enums[local_name] = hir_surface_enum_to_enum(surface_enum, local_name)
+                self.imported_enum_owners[local_name] = imported_mod.module_name
+                self.register_materialized_enum_payload_dependencies(imported_mod, imported_mod_name, surface_enum, import_span)
+        elif imported_mod.traits.contains_key(imported_name):
+            val already_bound = self.symbols.lookup(local_name).?
+            val imported_trait = self.symbols.define(local_name, SymbolKind.Trait, nil, import_span, Visibility.Public, false, Some(imported_mod.module_name))
+            if not already_bound:
+                # Preserve the physical declaration name in the symbol while
+                # retaining local_name as its lookup key. Payload-closure
+                # collision identity must compare terminal items, not aliases.
+                self.symbols.rename_symbol(imported_trait, imported_name)
+            if not self.imported_traits.contains_key(local_name):
+                self.imported_traits[local_name] = hir_surface_trait_to_trait(imported_mod.traits[imported_name], local_name)
+            # lower_impl materializes defaults only when this trait is used.
+        elif imported_mod.type_aliases.contains_key(imported_name):
+            # TAL3 (2026-08-04): an IMPORTED `type X = Y` alias was never entered
+            # into the importing module's symbol table, so every use of it in
+            # type position died with "unresolved type: X". This is the import-
+            # side twin of TAL2 below, which fixed the same asymmetry for a
+            # module's OWN aliases.
+            #
+            # The mechanism is `lookup(..).?`: it builds an Option<SymbolId>, and
+            # that Option's nil case does not survive the staged native ABI -- it
+            # reads as PRESENT even when the name is unbound. claim_materialized_
+            # payload_binding below already documents exactly this hazard and
+            # already uses lookup_or_invalid to dodge it ("Avoid constructing or
+            # unwrapping Option<SymbolId> on the staged native ABI").
+            #
+            # Why only aliases broke: the composite / enum / trait branches above
+            # call `define` UNCONDITIONALLY and use `already_bound` only to guard
+            # the rename, so a false "already bound" is harmless there. This
+            # branch guarded the DEFINE itself, so the false positive meant the
+            # alias was never defined at all.
+            #
+            # Repro (probe m4): module A declares `type Prov2Alias = Prov2Thing`
+            # and exports it; module B in a DIFFERENT directory does
+            # `use ...prov2.{Prov2Thing, Prov2Alias}` and annotates a parameter
+            # `v: Prov2Alias` -> "unresolved type: Prov2Alias". Stage-3 hit this
+            # as `unresolved type: Symbol` in backend/interpreter.spl, which
+            # imports `type Symbol = HirSymbol` from compiler.hir.hir_types.
+            #
+            # The guard itself is kept (not dropped in favour of an unconditional
+            # define): SymbolTable.define's first-write-wins list does not cover
+            # TypeAlias, so an alias cycle or a competing import could otherwise
+            # shadow the first binding.
+            #
+            # Binding the alias to its TARGET's declaration (rather than to a
+            # bare TypeAlias symbol with a nil type) is the other half of the
+            # fix. `define(.., SymbolKind.TypeAlias, nil, ..)` records the NAME
+            # but no type, so the name resolved and then every field access
+            # through it died with "runtime error: field access on nil receiver"
+            # -- the alias-shaped crash simply replaced the alias-shaped
+            # "unresolved type". Re-registering the alias under the target's own
+            # decl kind gives the local name a real type, so `v.field` and
+            # method dispatch behave exactly as they do through the target name.
+            #
+            # Only a single-name target that the SAME module declares as a
+            # NON-alias is followed. That keeps this strictly non-recursive (the
+            # re-entry can only land on a composite / enum / trait / callable /
+            # const branch, never back here), so an `type A = B` / `type B = A`
+            # cycle cannot spin. Generic and compound targets (`type M = {text:
+            # V}`, `type Symbol = text`) have no single declared target and keep
+            # the plain TypeAlias binding below.
+            val alias_decl = imported_mod.type_aliases[imported_name]
+            val alias_targets = parser_type_named_dependencies(alias_decl.type_)
+            if alias_decl.type_params.len() == 0 and alias_targets.len() == 1:
+                val alias_target = alias_targets[0]
+                if alias_target != imported_name and not imported_mod.type_aliases.contains_key(alias_target) and hir_module_declares_item(imported_mod, alias_target):
+                    self.register_imported_symbol(imported_mod, imported_mod_name, alias_target, local_name, import_span, materialize_enum)
+                    return
+            val already_bound = self.symbols.lookup_or_invalid(local_name).is_valid()
+            if not already_bound:
+                # SymbolTable.define's type-level first-write-wins list does
+                # not include TypeAlias. Guard the define itself so an alias
+                # cycle or competing import cannot shadow the first binding.
+                val imported_type = self.symbols.define(local_name, SymbolKind.TypeAlias, nil, import_span, Visibility.Public, false, Some(imported_mod.module_name))
+                self.symbols.rename_symbol(imported_type, imported_name)
+        elif imported_mod.callables.contains_key(imported_name):
+            # Repeated glob roots and physical module aliases can revisit the
+            # same local callable. Function symbols are not first-write-wins,
+            # so guard an exact repeat before define rather than accumulating
+            # duplicate rows. Do not suppress a different callable/module that
+            # intentionally competes for the same local alias.
+            val existing_id = self.symbols.lookup_or_invalid(local_name)
+            var exact_repeat = false
+            if existing_id.is_valid() and self.symbols.symbols.has(existing_id.id):
+                val existing: HirSymbol = self.symbols.symbols[existing_id.id]
+                var same_owner = false
+                if val existing_owner = existing.defining_module:
+                    same_owner = existing_owner == imported_mod.module_name
+                val qualified_name = imported_mod.module_name + "." + imported_name
+                val same_source_name = (existing.name == qualified_name or
+                    (imported_name == local_name and existing.name == local_name))
+                exact_repeat = (existing.kind == SymbolKind.Function and
+                    same_owner and same_source_name)
+            if exact_repeat:
+                return
+            # Imported free functions have the same cross-module signature
+            # dependency requirement as imported methods.  Materialize the
+            # callable owner's explicit named imports before lowering the
+            # signature; otherwise a type such as OptimizationLevel imported
+            # by llvm_backend is queried in that owner's qualified scope
+            # before its alias exists.
+            self.materialize_imported_callable_type_dependencies(
+                imported_mod, imported_mod_name,
+                imported_mod.callables[imported_name], import_span,
+                materialize_enum)
+            val fn_type = self.declared_imported_surface_callable_type(
+                imported_mod.callables[imported_name], imported_mod.module_name, nil)
+            val imported_fn_sym = self.symbols.define(local_name, SymbolKind.Function, fn_type, import_span, Visibility.Public, false, Some(imported_mod.module_name))
+            self.qualify_imported_function_symbol(imported_fn_sym, imported_mod.module_name, imported_name)
+        elif imported_mod.constants.contains_key(imported_name):
+            self.symbols.define(local_name, SymbolKind.Const, nil, import_span, Visibility.Public, false, Some(imported_mod.module_name))
+        else:
+            # Re-export facade chase: the imported module does not declare
+            # `imported_name` itself — it may re-export it (`export use
+            # backend.{name}`), e.g. std.env.types forwarding the rt_env_*
+            # externs from std.nogc_sync_mut.env.types. Without this, the
+            # import silently registered NOTHING and every use site died
+            # later with "unresolved name: rt_env_get" (native-build
+            # entry-closure path; parity case dynload_tagged_text).
+            val hop = self.find_reexport_source(imported_mod, imported_mod_name, imported_name)
+            if (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
+                eprint("[reexport-chase] mod={imported_mod_name} wanted={imported_name} imports={imported_mod.imports.len()} exports={imported_mod.exports.len()} found={hop.found} mname={imported_mod.module_name} fns={imported_mod.callables.keys().len()}")
+            if hop.found:
+                val source_index = hop.module_index
+                if source_index >= 0:
+                    self.register_imported_symbol(
+                        self.module_surfaces.surfaces[source_index],
+                        self.module_surfaces.surfaces[source_index].preferred_registry_name,
+                        hop.item_name, local_name, import_span, materialize_enum)
+
+    me report_reexport_chase_stats():
+        """Level-gated (SIMPLE_HIR_REEXPORT_STATS=1, default off) readout for the
+        re-export chase. Emitted every 200k calls so a non-terminating run still
+        shows its work rate; the counters are two i64 increments, so the gate
+        costs nothing beyond one env probe per reporting boundary."""
+        if self.reexport_chase_calls % 20000 != 0:
+            return
+        if (hir_module_env_get("SIMPLE_HIR_REEXPORT_STATS") ?? "") != "1":
+            return
+        eprint("[reexport-chase] calls={self.reexport_chase_calls} memo_hits={self.reexport_chase_memo_hits} memo={self.reexport_root_surface_indices.len()}\n")
+
+    me try_register_bootstrap_global_symbol(name: text, span: Span) -> bool:
+        """Resolve one uniquely owned flat-global bootstrap declaration."""
+        if (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+            return false
+        if self.symbols.lookup(name).?:
+            return true
+        var matching_index: i64 = -1
+        var surface_index: i64 = 0
+        while surface_index < self.module_surfaces.surfaces.len():
+            val surface = self.module_surfaces.surfaces[surface_index]
+            if hir_module_declares_item(surface, name):
+                if matching_index >= 0:
+                    return false
+                matching_index = surface_index
+            surface_index = surface_index + 1
+        if matching_index < 0:
+            return false
+        val owner = self.module_surfaces.surfaces[matching_index]
+        # BGS1 (2026-08-06): this is an IMPORT REGISTRATION performed LAZILY,
+        # from BODY lowering (types.spl:673 in lower_named_kind, and
+        # expressions.spl:394), not from Pass 0. Pass 0 sets
+        # `registering_import_symbols` for exactly the span of
+        # resolve_import_symbols (:1858-1861), and that flag makes
+        # declared_surface_callable_type return nil outright (:430-431) — so a
+        # top-level import NEVER lowers the imported type's METHOD SIGNATURES
+        # in the consumer's scope. This lazy path left the flag false, so
+        # register_imported_type_methods (:1336) DID lower them here, and any
+        # parameter/return type that the OWNER module imports but the CONSUMER
+        # does not have in scope died as "unresolved type: X".
+        #
+        # Stage 3 hit this as `unresolved type: ByteOrder`, 8x per use site, in
+        # driver/cache/cache_validator.spl and driver/watcher/watcher_client.spl.
+        # Both reach `ShbReader` through a FUNCTION-LOCAL `use`, which the parser
+        # DISCARDS outright (10.frontend/core/parser_stmts.spl:371 ->
+        # parse_use_stmt_inline, which returns a bare `pass`), so the name is
+        # unbound when the body is lowered and lands here. driver/shb/shb_cache.spl
+        # imports the SAME `ShbReader` at top level, goes through Pass 0 with the
+        # flag set, and does not fail. That asymmetry is the whole defect: the
+        # error depends on HOW a name was bound, not on what the code does with it.
+        #
+        # Saved and RESTORED rather than cleared: Pass 0 walks composite fields
+        # and lowers their types, which can re-enter lower_named_kind and arrive
+        # here with the flag ALREADY true; clearing it unconditionally would
+        # corrupt the in-progress Pass 0 registration.
+        # doc/08_tracking/bug/t3_full_bootstrap_stage3_unresolved_type_byteorder_cache_validator_2026-08-06.md
+        val saved_registering_import_symbols = self.registering_import_symbols
+        self.registering_import_symbols = true
+        self.register_imported_symbol(owner, owner.module_name, name, name, span, true)
+        self.registering_import_symbols = saved_registering_import_symbols
+        self.symbols.lookup(name).?
+
+    me resolve_module_key(name: text) -> text:
+        """Canonical modules_by_name key for an import path, or "".
+        Closure files register ONLY under path-derived names
+        (src/lib/nogc_sync_mut/io_runtime.spl -> lib.nogc_sync_mut.io_runtime;
+        a package __init__.spl carries a .__init__ suffix), while import lines
+        say std.io_runtime / nogc_sync_mut.io_runtime / std.common.json.
+        Try the literal key, then the package facade, the lib.-prefix mirror,
+        and the std.->lib. swap (each with .__init__)."""
+        if self.module_surfaces.index_by_name.contains_key(name):
+            return name
+        var cands: [text] = []
+        cands = cands.push(name + ".__init__")
+        cands = cands.push("lib." + name)
+        cands = cands.push("lib." + name + ".__init__")
+        if name.starts_with("std."):
+            val std_tail = name.substring(4)
+            val lib_tail = "lib." + std_tail
+            cands = cands.push(lib_tail)
+            cands = cands.push(lib_tail + ".__init__")
+            # std.X also flattens the concurrency-tier dirs (seed interpreter
+            # family-fallback order): std.mcp_sdk.server.method_detect
+            # registers as lib.nogc_sync_mut.mcp_sdk.server.method_detect.
+            for tier in ["nogc_async_mut", "nogc_sync_mut", "nogc_async_immut", "common", "gc_async_mut", "nogc_async_mut_noalloc"]:
+                val tier_key = "lib." + tier + "." + std_tail
+                cands = cands.push(tier_key)
+                cands = cands.push(tier_key + ".__init__")
+                # Files reached via the src/std -> lib symlink derive their
+                # module name with the std. prefix (src/std/nogc_sync_mut/
+                # simd.spl -> std.nogc_sync_mut.simd) — try that spelling too.
+                val tier_std_key = "std." + tier + "." + std_tail
+                cands = cands.push(tier_std_key)
+                cands = cands.push(tier_std_key + ".__init__")
+        var ci = 0
+        while ci < cands.len():
+            if self.module_surfaces.index_by_name.contains_key(cands[ci]):
+                return cands[ci]
+            ci = ci + 1
+        ""
+
+    me resolve_module_key_relative(name: text, ctx_name: text) -> text:
+        """resolve_module_key, but first normalizes a RELATIVE module path
+        (".types", "..pkg.mod") against `ctx_name` — the canonical registered
+        key of the module the path appears IN.
+
+        resolve_module_key only knows absolute spellings (literal key, the
+        .__init__ facade, the lib.-prefix mirrors, the std.->lib. swap), so a
+        leading dot always misses there: the registry is keyed by path-derived
+        dotted names. Relative paths reach the re-export chase from two places
+        — `export use .types.{X}` written by hand, and `export X from types`,
+        which the parser emits as ".types" (e599a617d6ef).
+
+        Normalization matches resolve_import_symbols' relative branch: drop one
+        trailing segment per leading dot, then splice the tail on.
+        hir_module_package_name drops exactly one segment per call and treats a
+        package facade's ".__init__" as that segment, which is the behaviour a
+        single dot needs — lib.a.easy_fix.__init__ + ".types" resolves to
+        lib.a.easy_fix.types, so a facade needs no special case."""
+        if not name.starts_with("."):
+            return self.resolve_module_key(name)
+        var rel_dots = 0
+        while rel_dots < name.len() and name.substring(rel_dots, rel_dots + 1) == ".":
+            rel_dots = rel_dots + 1
+        val rel_tail = name.substring(rel_dots)
+        if rel_tail == "":
+            return ""
+        var rel_pkg = hir_module_logical_name_from_path(ctx_name)
+        var rel_i = 0
+        while rel_i < rel_dots:
+            rel_pkg = hir_module_package_name(rel_pkg)
+            rel_i = rel_i + 1
+        val rel_abs = if rel_pkg == "": rel_tail else: rel_pkg + "." + rel_tail
+        if self.module_surfaces.index_by_name.contains_key(rel_abs):
+            return rel_abs
+        # The spliced path can still need the canonical-key fallbacks: a
+        # relative hop landing on a package directory resolves via .__init__.
+        self.resolve_module_key(rel_abs)
+
+    me resolve_reexport_module_key(name: text, facade_name: text, facade_mod: ModuleSurface) -> text:
+        """Resolve one facade import without mistaking a file facade for its
+        same-named directory package.
+
+        `io.spl` and `io/__init__.spl` intentionally share the authored import
+        spelling `io`.  In a focused graph containing only the package facade,
+        `use io.*` reaches `io.__init__`; in a full graph the ordinary key wins
+        first and points straight back to `io.spl`.  Re-export chasing then
+        loops on the same physical surface and loses names that the package
+        facade forwards from deeper owners.  Redirect only that proven
+        self-surface collision; ordinary imports of a same-named module keep
+        their existing winner."""
+        var resolved = self.resolve_module_key_relative(name, facade_name)
+        if resolved == "":
+            return ""
+        val resolved_index = hir_module_surface_index(self.module_surfaces, resolved)
+        if resolved_index < 0 or
+           self.module_surfaces.surfaces[resolved_index].canonical_path != facade_mod.canonical_path:
+            return resolved
+        val package_key = self.resolve_module_key(facade_name + ".__init__")
+        if package_key == "" or package_key == resolved:
+            return resolved
+        val package_index = hir_module_surface_index(self.module_surfaces, package_key)
+        if package_index < 0 or
+           self.module_surfaces.surfaces[package_index].canonical_path == facade_mod.canonical_path:
+            return resolved
+        package_key
+
+    me find_reexport_source(facade_mod: ModuleSurface, facade_name: text, wanted: text) -> HirReexportSource:
+        """Resolve one root query using physical-surface scalar caches."""
+        val generation = self.module_surfaces.generation
+        if self.reexport_generation != generation:
+            var root_surface_indices = self.reexport_root_surface_indices
+            var root_wanted = self.reexport_root_wanted
+            var root_found = self.reexport_root_found
+            var root_terminal_indices = self.reexport_root_terminal_indices
+            var root_items = self.reexport_root_items
+            root_surface_indices.clear()
+            root_wanted.clear()
+            root_found.clear()
+            root_terminal_indices.clear()
+            root_items.clear()
+            self.reexport_root_surface_indices = root_surface_indices
+            self.reexport_root_wanted = root_wanted
+            self.reexport_root_found = root_found
+            self.reexport_root_terminal_indices = root_terminal_indices
+            self.reexport_root_items = root_items
+            self.reexport_generation = generation
+            self.reexport_registry_valid = module_surfaces_frozen_alignment(self.module_surfaces)
+
+        self.reexport_walk_complete = true
+        self.reexport_walk_valid = true
+        if not self.reexport_registry_valid:
+            self.reexport_walk_valid = false
+            return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
+        if self.reexport_root_surface_indices.len() != self.reexport_root_wanted.len() or
+           self.reexport_root_surface_indices.len() != self.reexport_root_found.len() or
+           self.reexport_root_surface_indices.len() != self.reexport_root_terminal_indices.len() or
+           self.reexport_root_surface_indices.len() != self.reexport_root_items.len():
+            self.reexport_walk_valid = false
+            return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
+
+        val facade_index = facade_mod.physical_index
+        if facade_index < 0 or facade_index >= self.module_surfaces.surfaces.len():
+            self.reexport_walk_valid = false
+            return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
+        val current_facade = self.module_surfaces.surfaces[facade_index]
+        if current_facade.physical_index != facade_index or
+           facade_mod.generation != self.module_surfaces.generation or
+           facade_mod.generation != current_facade.generation or
+           facade_mod.canonical_path != current_facade.canonical_path or
+           facade_mod.preferred_registry_name != current_facade.preferred_registry_name:
+            self.reexport_walk_valid = false
+            return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
+
+        val root_entry = hir_reexport_parallel_find(
+            self.reexport_root_surface_indices, self.reexport_root_wanted,
+            facade_index, wanted)
+        if root_entry >= 0:
+            self.reexport_chase_memo_hits = self.reexport_chase_memo_hits + 1
+            val terminal_index = self.reexport_root_terminal_indices[root_entry]
+            if terminal_index < -1 or terminal_index >= self.module_surfaces.surfaces.len():
+                self.reexport_walk_valid = false
+                return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
+            var terminal_name = ""
+            if terminal_index >= 0 and
+               terminal_index < self.module_surfaces.surfaces.len():
+                terminal_name = self.module_surfaces.surfaces[terminal_index].preferred_registry_name
+            return HirReexportSource(
+                found: self.reexport_root_found[root_entry],
+                module_index: terminal_index,
+                module_name: terminal_name,
+                item_name: self.reexport_root_items[root_entry])
+
+        var visit_surface_indices = self.reexport_visit_surface_indices
+        var visit_wanted = self.reexport_visit_wanted
+        var visit_depths = self.reexport_visit_depths
+        visit_surface_indices.clear()
+        visit_wanted.clear()
+        visit_depths.clear()
+        self.reexport_visit_surface_indices = visit_surface_indices
+        self.reexport_visit_wanted = visit_wanted
+        self.reexport_visit_depths = visit_depths
+
+        val result = self.find_reexport_source_walk(facade_index, wanted, 0)
+        # Array push retains prior backing stores in the no-GC bootstrap.
+        # Bound the cross-module memo so admission remains O(1) after the hot
+        # working set is populated instead of retaining quadratic growth.
+        val admit_root_cache = self.reexport_root_surface_indices.len() < 512
+        if result.found and admit_root_cache:
+            self.reexport_root_surface_indices = self.reexport_root_surface_indices.push(facade_index)
+            self.reexport_root_wanted = self.reexport_root_wanted.push(wanted)
+            self.reexport_root_found = self.reexport_root_found.push(true)
+            self.reexport_root_terminal_indices = self.reexport_root_terminal_indices.push(result.module_index)
+            self.reexport_root_items = self.reexport_root_items.push(result.item_name)
+        elif self.reexport_walk_complete and self.reexport_walk_valid and
+             admit_root_cache:
+            self.reexport_root_surface_indices = self.reexport_root_surface_indices.push(facade_index)
+            self.reexport_root_wanted = self.reexport_root_wanted.push(wanted)
+            self.reexport_root_found = self.reexport_root_found.push(false)
+            self.reexport_root_terminal_indices = self.reexport_root_terminal_indices.push(-1)
+            self.reexport_root_items = self.reexport_root_items.push("")
+        result

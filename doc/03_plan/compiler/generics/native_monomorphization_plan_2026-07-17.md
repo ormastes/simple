@@ -3,6 +3,8 @@
 Status: Phase A (loud fail-closed) COMPLETE for all reached tiers. Phase B
 (actual monomorphization) NOT attempted — deferred with this plan. Written by
 lane S48, 2026-07-17.
+**See also (2026-08-21):** superseded in part by `doc/05_design/compiler/hardening/critical_completeness_design_2026-08-21.md` (design) and `doc/03_plan/compiler/hardening/critical_hardening_plan_2026-08-21.md` (plan, Phase 3 / Wave 2C) — note this plan's "Phase B not attempted" status is stale: typed tables, real specialization and call-site rewrite landed (`src/compiler/40.mono/monomorphize/table.spl:29`, `monomorphize_integration.spl:433,457`).
+
 
 ## What Phase A now guarantees (no silent miscompiles)
 

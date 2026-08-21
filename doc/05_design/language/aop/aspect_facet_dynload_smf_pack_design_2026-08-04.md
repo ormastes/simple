@@ -3,6 +3,8 @@
 **Subtitle:** Typed structural AOP, relative aspect packages, variant-aware deployment, and low-overhead lazy activation  
 **Status:** Proposed final research and design (design-only; no implementation in-tree yet)  
 **Current implementation check:** As of 2026-08-05, the syntax and runtime for typed facets, aspect-pack catalogs, and facet dyn-loading are not yet present in `src/**` or `test/**` (no `bind facet`, `FacetRef`, `AspectCatalog`, `AspectPack`, or `SMF_FLAG_ASPECT_PACK` symbols found in code).
+**See also (2026-08-21):** aspect seal, lifecycle, and critical activation policy are designed in `doc/05_design/compiler/hardening/critical_completeness_design_2026-08-21.md` §8; sequenced as Phase 6 / Wave 2E in `doc/03_plan/compiler/hardening/critical_hardening_plan_2026-08-21.md`.
+
 **Date:** 2026-08-04  
 **Repository examined:** `ormastes/simple`, `main`  
 **Suggested repository destination:** `doc/05_design/language/aop/aspect_facet_dynload_smf_pack_design_2026-08-04.md`

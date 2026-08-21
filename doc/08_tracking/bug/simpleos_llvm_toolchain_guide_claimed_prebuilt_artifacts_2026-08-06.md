@@ -137,3 +137,52 @@ That row should be refreshed by whoever owns the plan.
 A `--status` style check that compares the guide's asserted artifact paths against
 the filesystem (or moving the artifact table into generated output from
 `src/os/port/deploy_toolchains.spl --status`) would keep this from recurring.
+
+## 2026-08-20 recurrence and prevention repair
+
+The current worktree again differs from the historical table: the cross trees
+and populated sysroot are absent, while
+`build/os/clang_static/bin/clang_static` exists as a 16 KiB all-zero data file.
+It is not an executable. Worse, `deploy_toolchains.spl --status` previously
+classified any existing file at that path as `READY`, so the proposed
+prevention itself was a false-green.
+
+The status owner now reads only candidates at most 256 MiB, requires a complete
+target-matched ELF with a nonzero entry inside an executable `PT_LOAD`, and
+reports a structurally valid artifact only as `PARTIAL` pending an admitted
+target execution receipt. Zero, truncated, wrong-machine, non-executable-entry,
+short-read, missing, and oversized candidates fail closed. The same admission
+applies to the static Rust candidate. The SPipe skill and guide no longer claim
+that current cross/sysroot artifacts exist.
+
+## 2026-08-20 typed reproducible build gate
+
+`GuestToolchainArtifactBuildReceiptV1` now separates artifact construction from
+presence and guest execution. Its admission re-hashes builder, builder source,
+provenance, bounded source-revision material, dependency and environment
+manifests, first output, and independent rebuild output; binds exact target,
+ABI, role, canonical role output path, unique `--target`/`--output` argv
+bindings, output size, and a frozen whole-receipt payload digest; rejects PATH, host
+fallback, and Rust-bootstrap builders; and runs the canonical target ELF/SMF
+loader. `deploy_toolchains.spl` no longer reports sysroot, libc, LLVM-cross,
+compiler-rt, example, or bake-marker presence as `READY`.
+
+The PATH/host-fallback booleans remain declarations in this structural
+candidate. They cannot prove a negative; the future signed execution receipt
+must bind the actual process launch before ledger admission.
+
+The whole-receipt digest freezes a candidate for later signing; it does not
+make its PATH/host-fallback declarations authoritative. No authoritative
+receipt producer, target artifact, or loader-owned consume-once token exists in
+this worktree, so every deployment row remains `BLOCKED`. Resume by producing
+target-isolated artifacts and their receipt material under
+`build/os/toolchain-artifacts/<target>/`, minting loader authority through the
+loader-owned registry, then running the focused receipt spec with an admitted
+self-hosted Simple runtime before any image or execution claim.
+
+After replacing the currently deployed seed with an admitted self-hosted
+binary, the exact focused resume command is:
+
+```sh
+SIMPLE_LIB=src bin/release/x86_64-unknown-linux-gnu/simple test test/01_unit/os/toolchain/guest_toolchain_artifact_build_receipt_spec.spl --mode=interpreter --clean --fail-fast
+```

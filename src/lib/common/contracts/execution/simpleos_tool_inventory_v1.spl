@@ -1,0 +1,246 @@
+# Truthful primary-tool inventory contract for SimpleOS (REQ-011).
+
+use std.common.structural.digest.hash256.{hash256_hex_valid}
+use std.common.contracts.execution.simpleos_target_v1.{
+    simpleos_target_v1_is_userland_triple,
+    SIMPLEOS_TARGET_V1_X86_64_TRIPLE,
+    SIMPLEOS_TARGET_V1_AARCH64_TRIPLE,
+    SIMPLEOS_TARGET_V1_RISCV64GC_TRIPLE
+}
+
+pub const SIMPLEOS_TOOL_INVENTORY_V1: i64 = 1
+pub const SIMPLEOS_TOOL_MAX_CAPABILITIES: i64 = 32
+pub const SIMPLEOS_TOOL_MAX_TARGETS: i64 = 16
+pub const SIMPLEOS_TOOL_MAX_FILESYSTEMS: i64 = 16
+pub const SIMPLEOS_TOOL_MAX_EVIDENCE_RECEIPTS: i64 = 32
+pub const SIMPLEOS_TOOL_MAX_SCALAR_LENGTH: i64 = 256
+pub const SIMPLEOS_TOOL_MAX_LIST_ITEM_LENGTH: i64 = 128
+pub const SIMPLEOS_TOOL_FULL_PROFILE: text = "simpleos-primary-full-v1"
+
+pub enum SimpleOsToolStatus:
+    Supported
+    Partial
+    Unavailable
+    Blocked
+
+pub enum SimpleOsToolInventoryError:
+    InvalidSchemaVersion
+    MissingCanonicalName
+    MissingSourceOwner
+    InvalidArtifactPath
+    InvalidArtifactDigest
+    TooManyCapabilities
+    TooManyTargets
+    TooManyFilesystems
+    TooManyEvidenceReceipts
+    ScalarTooLong
+    InvalidScalar
+    ListItemTooLong
+    MissingCapability
+    MissingTarget
+    InvalidTarget
+    MissingFilesystem
+    MissingVersionContract
+    MissingHelpContract
+    MissingOperationBehavior
+    MissingErrorBehavior
+    MissingEvidenceReceipt
+    DuplicateCapability
+    DuplicateTarget
+    DuplicateFilesystem
+    DuplicateEvidenceReceipt
+    MissingBlocker
+    SupportedMissingBinding
+    FabricatedSuccess
+
+pub struct SimpleOsToolInventoryEntry:
+    schema_version: i64
+    profile: text
+    status: SimpleOsToolStatus
+    canonical_name: text
+    source_owner: text
+    artifact_path: text
+    artifact_digest: text
+    capabilities: [text]
+    target_triples: [text]
+    filesystems: [text]
+    version_contract: text
+    help_contract: text
+    operation_behavior_id: text
+    error_behavior_id: text
+    evidence_receipt_ids: [text]
+    blocker: text
+
+fn _absolute_path(value: text) -> bool:
+    value.len() > 1 and value.starts_with("/") and not value.contains("//") and
+        not value.contains("/./") and not value.contains("/../") and
+        not value.ends_with("/.") and not value.ends_with("/..") and
+        not value.contains("\0") and not value.contains("\n") and
+        not value.contains("\r") and not value.contains("\\")
+
+fn _safe_scalar(value: text) -> bool:
+    not value.contains("\0") and not value.contains("\n") and
+        not value.contains("\r")
+
+fn _nonempty_items(items: [text]) -> bool:
+    for item in items:
+        if item.trim() == "" or not _safe_scalar(item):
+            return false
+    true
+
+fn _items_bounded(items: [text]) -> bool:
+    for item in items:
+        if item.len() > SIMPLEOS_TOOL_MAX_LIST_ITEM_LENGTH:
+            return false
+    true
+
+fn _has_duplicate(items: [text]) -> bool:
+    var i = 0
+    while i < items.len():
+        var j = i + 1
+        while j < items.len():
+            if items[i] == items[j]:
+                return true
+            j = j + 1
+        i = i + 1
+    false
+
+fn _contains(items: [text], expected: text) -> bool:
+    for item in items:
+        if item == expected:
+            return true
+    false
+
+fn _suspicious_behavior_id(value: text) -> bool:
+    val lower = value.to_lower()
+    lower == "ok" or lower == "success" or lower.contains("stub") or
+        lower.contains("fake") or lower.contains("synthetic") or
+        lower.contains("fabricated")
+
+pub fn simpleos_tool_inventory_v1_validate(
+    entry: SimpleOsToolInventoryEntry
+) -> Result<(), SimpleOsToolInventoryError>:
+    if entry.schema_version != SIMPLEOS_TOOL_INVENTORY_V1:
+        return Err(SimpleOsToolInventoryError.InvalidSchemaVersion)
+    if entry.canonical_name.trim() == "":
+        return Err(SimpleOsToolInventoryError.MissingCanonicalName)
+    if entry.source_owner.trim() == "":
+        return Err(SimpleOsToolInventoryError.MissingSourceOwner)
+    if entry.profile.trim() == "" or entry.profile.len() > SIMPLEOS_TOOL_MAX_SCALAR_LENGTH or
+       entry.canonical_name.len() > SIMPLEOS_TOOL_MAX_SCALAR_LENGTH or
+       entry.source_owner.len() > SIMPLEOS_TOOL_MAX_SCALAR_LENGTH or
+       entry.artifact_path.len() > SIMPLEOS_TOOL_MAX_SCALAR_LENGTH or
+       entry.artifact_digest.len() > SIMPLEOS_TOOL_MAX_SCALAR_LENGTH or
+       entry.version_contract.len() > SIMPLEOS_TOOL_MAX_SCALAR_LENGTH or
+       entry.help_contract.len() > SIMPLEOS_TOOL_MAX_SCALAR_LENGTH or
+       entry.operation_behavior_id.len() > SIMPLEOS_TOOL_MAX_SCALAR_LENGTH or
+       entry.error_behavior_id.len() > SIMPLEOS_TOOL_MAX_SCALAR_LENGTH or
+       entry.blocker.len() > SIMPLEOS_TOOL_MAX_SCALAR_LENGTH:
+        return Err(SimpleOsToolInventoryError.ScalarTooLong)
+    if not _safe_scalar(entry.profile) or not _safe_scalar(entry.canonical_name) or
+       not _safe_scalar(entry.source_owner) or not _safe_scalar(entry.artifact_path) or
+       not _safe_scalar(entry.artifact_digest) or not _safe_scalar(entry.version_contract) or
+       not _safe_scalar(entry.help_contract) or not _safe_scalar(entry.operation_behavior_id) or
+       not _safe_scalar(entry.error_behavior_id) or not _safe_scalar(entry.blocker):
+        return Err(SimpleOsToolInventoryError.InvalidScalar)
+
+    val artifact_optional = entry.status == SimpleOsToolStatus.Unavailable or
+        entry.status == SimpleOsToolStatus.Blocked
+    if entry.artifact_path == "":
+        if not artifact_optional or entry.artifact_digest != "":
+            return Err(SimpleOsToolInventoryError.InvalidArtifactPath)
+    else:
+        if not _absolute_path(entry.artifact_path):
+            return Err(SimpleOsToolInventoryError.InvalidArtifactPath)
+        if entry.artifact_digest == "":
+            if entry.status != SimpleOsToolStatus.Blocked:
+                return Err(SimpleOsToolInventoryError.InvalidArtifactDigest)
+        elif not hash256_hex_valid(entry.artifact_digest):
+            return Err(SimpleOsToolInventoryError.InvalidArtifactDigest)
+
+    if entry.capabilities.len() > SIMPLEOS_TOOL_MAX_CAPABILITIES:
+        return Err(SimpleOsToolInventoryError.TooManyCapabilities)
+    if entry.target_triples.len() > SIMPLEOS_TOOL_MAX_TARGETS:
+        return Err(SimpleOsToolInventoryError.TooManyTargets)
+    if entry.filesystems.len() > SIMPLEOS_TOOL_MAX_FILESYSTEMS:
+        return Err(SimpleOsToolInventoryError.TooManyFilesystems)
+    if entry.evidence_receipt_ids.len() > SIMPLEOS_TOOL_MAX_EVIDENCE_RECEIPTS:
+        return Err(SimpleOsToolInventoryError.TooManyEvidenceReceipts)
+    if not _items_bounded(entry.capabilities) or not _items_bounded(entry.target_triples) or
+       not _items_bounded(entry.filesystems) or not _items_bounded(entry.evidence_receipt_ids):
+        return Err(SimpleOsToolInventoryError.ListItemTooLong)
+    if entry.capabilities.len() == 0:
+        return Err(SimpleOsToolInventoryError.MissingCapability)
+    if entry.target_triples.len() == 0:
+        return Err(SimpleOsToolInventoryError.MissingTarget)
+    if entry.filesystems.len() == 0:
+        return Err(SimpleOsToolInventoryError.MissingFilesystem)
+    val evidence_optional = entry.status == SimpleOsToolStatus.Unavailable or
+        entry.status == SimpleOsToolStatus.Blocked
+    if entry.evidence_receipt_ids.len() == 0 and not evidence_optional:
+        return Err(SimpleOsToolInventoryError.MissingEvidenceReceipt)
+    if not _nonempty_items(entry.capabilities):
+        return Err(SimpleOsToolInventoryError.MissingCapability)
+    if not _nonempty_items(entry.target_triples):
+        return Err(SimpleOsToolInventoryError.MissingTarget)
+    for target in entry.target_triples:
+        if not simpleos_target_v1_is_userland_triple(target):
+            return Err(SimpleOsToolInventoryError.InvalidTarget)
+    if not _nonempty_items(entry.filesystems):
+        return Err(SimpleOsToolInventoryError.MissingFilesystem)
+    if not _nonempty_items(entry.evidence_receipt_ids) and not evidence_optional:
+        return Err(SimpleOsToolInventoryError.MissingEvidenceReceipt)
+    if _has_duplicate(entry.capabilities):
+        return Err(SimpleOsToolInventoryError.DuplicateCapability)
+    if _has_duplicate(entry.target_triples):
+        return Err(SimpleOsToolInventoryError.DuplicateTarget)
+    if _has_duplicate(entry.filesystems):
+        return Err(SimpleOsToolInventoryError.DuplicateFilesystem)
+    if _has_duplicate(entry.evidence_receipt_ids):
+        return Err(SimpleOsToolInventoryError.DuplicateEvidenceReceipt)
+
+    if entry.version_contract.trim() == "":
+        return Err(SimpleOsToolInventoryError.MissingVersionContract)
+    if entry.help_contract.trim() == "":
+        return Err(SimpleOsToolInventoryError.MissingHelpContract)
+    if entry.operation_behavior_id.trim() == "":
+        return Err(SimpleOsToolInventoryError.MissingOperationBehavior)
+    if entry.error_behavior_id.trim() == "":
+        return Err(SimpleOsToolInventoryError.MissingErrorBehavior)
+    if entry.status == SimpleOsToolStatus.Supported:
+        if entry.profile != SIMPLEOS_TOOL_FULL_PROFILE or entry.target_triples.len() != 3 or
+           not _contains(entry.target_triples, SIMPLEOS_TARGET_V1_X86_64_TRIPLE) or
+           not _contains(entry.target_triples, SIMPLEOS_TARGET_V1_AARCH64_TRIPLE) or
+           not _contains(entry.target_triples, SIMPLEOS_TARGET_V1_RISCV64GC_TRIPLE) or
+           entry.filesystems.len() != 3 or not _contains(entry.filesystems, "FAT32") or
+           not _contains(entry.filesystems, "DBFS") or not _contains(entry.filesystems, "NVFS"):
+            return Err(SimpleOsToolInventoryError.SupportedMissingBinding)
+    if _suspicious_behavior_id(entry.operation_behavior_id) or
+       _suspicious_behavior_id(entry.error_behavior_id):
+        return Err(SimpleOsToolInventoryError.FabricatedSuccess)
+    if entry.status == SimpleOsToolStatus.Partial or
+       entry.status == SimpleOsToolStatus.Unavailable or
+       entry.status == SimpleOsToolStatus.Blocked:
+        if entry.blocker.trim() == "":
+            return Err(SimpleOsToolInventoryError.MissingBlocker)
+    Ok(())
+
+pub fn simpleos_tool_inventory_v1_can_advertise(
+    entry: SimpleOsToolInventoryEntry
+) -> bool:
+    val result = simpleos_tool_inventory_v1_validate(entry)
+    match result:
+        Ok(_):
+            # Supported/Partial rows require evidence-service admission. A
+            # caller-supplied receipt id is descriptive, not proof. Negative
+            # inventory remains publishable so gaps cannot be hidden.
+            entry.status == SimpleOsToolStatus.Blocked or
+                entry.status == SimpleOsToolStatus.Unavailable
+        Err(_): false
+
+export SimpleOsToolStatus, SimpleOsToolInventoryError, SimpleOsToolInventoryEntry
+export simpleos_tool_inventory_v1_validate, simpleos_tool_inventory_v1_can_advertise
+export SIMPLEOS_TOOL_INVENTORY_V1, SIMPLEOS_TOOL_MAX_CAPABILITIES
+export SIMPLEOS_TOOL_MAX_TARGETS, SIMPLEOS_TOOL_MAX_FILESYSTEMS
+export SIMPLEOS_TOOL_MAX_EVIDENCE_RECEIPTS, SIMPLEOS_TOOL_MAX_SCALAR_LENGTH
+export SIMPLEOS_TOOL_MAX_LIST_ITEM_LENGTH, SIMPLEOS_TOOL_FULL_PROFILE

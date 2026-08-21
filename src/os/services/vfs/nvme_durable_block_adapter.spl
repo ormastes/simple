@@ -1,0 +1,286 @@
+# NVMe durable BlockDevice adapter.
+#
+# This OS-layer owner binds an existing lease-backed NVMe handle to an
+# explicit device identity/generation and the driver's acknowledged flush.
+# Common filesystem traits remain in std.fs_driver.
+
+use std.fs_driver.block_device.{BlockDevice, BlockDeviceDurabilityPortV1}
+use os.services.vfs.vfs_block_adapters.{NvmeBlockAdapter}
+use os.drivers.nvme.nvme_driver.{NvmeDriver, nvme_reset_serialized_with_io}
+use os.drivers.nvme.nvme_storage_model.{NvmeFilesystemLease, NvmeFilesystemConsumer}
+use os.services.vfs.nvme_device_generation_authority_v1.{
+    NvmeDeviceGenerationAuthorityV1, NvmeDeviceGenerationErrorV1,
+    NvmeDeviceGenerationTokenV1
+}
+
+pub enum NvmeDurabilityErrorV1:
+    InvalidBinding
+    IdentityMismatch
+    GenerationMismatch
+    GenerationUnavailable
+    OwnerNotReady
+    ResetNotSerialized
+    NoPendingWrite
+    FuaUnsupported
+    WriteFailed(text)
+    FlushFailed(text)
+    Timeout(text)
+    SequenceExhausted
+
+impl NvmeDurabilityErrorV1:
+    fn to_text() -> text:
+        match self:
+            case NvmeDurabilityErrorV1.InvalidBinding: "nvme-durability: invalid binding"
+            case NvmeDurabilityErrorV1.IdentityMismatch: "nvme-durability: device identity mismatch"
+            case NvmeDurabilityErrorV1.GenerationMismatch: "nvme-durability: device generation mismatch"
+            case NvmeDurabilityErrorV1.GenerationUnavailable: "nvme-durability: authoritative device generation unavailable"
+            case NvmeDurabilityErrorV1.OwnerNotReady: "nvme-durability: owner not ready"
+            case NvmeDurabilityErrorV1.ResetNotSerialized: "nvme-durability: reset and IO are not serialized"
+            case NvmeDurabilityErrorV1.NoPendingWrite: "nvme-durability: flush has no acknowledged preceding write"
+            case NvmeDurabilityErrorV1.FuaUnsupported: "nvme-durability: FUA is unsupported by the owner"
+            case NvmeDurabilityErrorV1.WriteFailed(detail): "nvme-durability: write failed: " + detail
+            case NvmeDurabilityErrorV1.FlushFailed(detail): "nvme-durability: flush failed: " + detail
+            case NvmeDurabilityErrorV1.Timeout(detail): "nvme-durability: completion timeout: " + detail
+            case NvmeDurabilityErrorV1.SequenceExhausted: "nvme-durability: receipt sequence exhausted"
+
+val NVME_DURABILITY_MAX_SEQUENCE: u64 = 18446744073709551615u64
+
+pub struct NvmeDurabilityReceiptV1:
+    device_identity: u64
+    device_generation: u64
+    write_sequence: u64
+    flush_sequence: u64
+    write_acknowledged: bool
+    flush_acknowledged: bool
+    status: text
+
+impl NvmeDurabilityReceiptV1:
+    pub static fn initial(device_identity: u64, device_generation: u64) -> NvmeDurabilityReceiptV1:
+        NvmeDurabilityReceiptV1(
+            device_identity: device_identity,
+            device_generation: device_generation,
+            write_sequence: 0u64,
+            flush_sequence: 0u64,
+            write_acknowledged: false,
+            flush_acknowledged: false,
+            status: "initial"
+        )
+
+fn _nvme_durability_io_error(detail: text, write: bool) -> NvmeDurabilityErrorV1:
+    if detail == NvmeDurabilityErrorV1.OwnerNotReady.to_text():
+        return NvmeDurabilityErrorV1.OwnerNotReady
+    if detail == NvmeDurabilityErrorV1.ResetNotSerialized.to_text():
+        return NvmeDurabilityErrorV1.ResetNotSerialized
+    if detail == NvmeDurabilityErrorV1.GenerationUnavailable.to_text():
+        return NvmeDurabilityErrorV1.GenerationUnavailable
+    if detail == NvmeDurabilityErrorV1.GenerationMismatch.to_text():
+        return NvmeDurabilityErrorV1.GenerationMismatch
+    if detail == NvmeDurabilityErrorV1.IdentityMismatch.to_text():
+        return NvmeDurabilityErrorV1.IdentityMismatch
+    if detail == NvmeDurabilityErrorV1.SequenceExhausted.to_text():
+        return NvmeDurabilityErrorV1.SequenceExhausted
+    if detail.contains("timeout"):
+        return NvmeDurabilityErrorV1.Timeout(detail)
+    if write:
+        NvmeDurabilityErrorV1.WriteFailed(detail)
+    else:
+        NvmeDurabilityErrorV1.FlushFailed(detail)
+
+fn _nvme_durability_generation_error(error: NvmeDeviceGenerationErrorV1) -> NvmeDurabilityErrorV1:
+    match error:
+        case NvmeDeviceGenerationErrorV1.InvalidBinding: NvmeDurabilityErrorV1.InvalidBinding
+        case NvmeDeviceGenerationErrorV1.BindingMismatch: NvmeDurabilityErrorV1.IdentityMismatch
+        case NvmeDeviceGenerationErrorV1.StaleToken: NvmeDurabilityErrorV1.GenerationMismatch
+        case NvmeDeviceGenerationErrorV1.ReplayToken: NvmeDurabilityErrorV1.GenerationMismatch
+        case NvmeDeviceGenerationErrorV1.InvalidToken: NvmeDurabilityErrorV1.GenerationUnavailable
+        case _: NvmeDurabilityErrorV1.GenerationUnavailable
+
+fn _nvme_durability_text_result(result: Result<bool, NvmeDurabilityErrorV1>) -> Result<bool, text>:
+    if result.is_err():
+        return Err(result.unwrap_err().to_text())
+    Ok(result.unwrap())
+
+pub class NvmeDurableBlockAdapter:
+    owner: NvmeBlockAdapter
+    authority: NvmeDeviceGenerationAuthorityV1
+    token: NvmeDeviceGenerationTokenV1
+    device_identity: u64
+    device_generation: u64
+    controller_id: u32
+    namespace_id: u32
+    lease_id: u64
+    pending_write: bool
+    write_sequence: u64
+    flush_sequence: u64
+    last_receipt: NvmeDurabilityReceiptV1
+
+impl NvmeDurableBlockAdapter:
+    pub static fn for_filesystem_lease(
+        nvme: NvmeDriver,
+        lease: NvmeFilesystemLease,
+        consumer: NvmeFilesystemConsumer,
+        authority: NvmeDeviceGenerationAuthorityV1,
+        token: NvmeDeviceGenerationTokenV1,
+        lease_id: u64
+    ) -> Result<NvmeDurableBlockAdapter, NvmeDurabilityErrorV1>:
+        val controller_id = lease.namespace_identity.controller_id
+        val namespace_id = lease.namespace_identity.nsid
+        val owner_result = NvmeBlockAdapter.for_filesystem_lease(nvme, lease, consumer)
+        if owner_result.is_err():
+            return Err(NvmeDurabilityErrorV1.OwnerNotReady)
+        val generation_check = authority.consume(
+            token,
+            nvme.get_device_identity(),
+            controller_id,
+            namespace_id,
+            lease_id,
+            nvme.get_device_generation()
+        )
+        if generation_check.is_err():
+            return Err(_nvme_durability_generation_error(generation_check.unwrap_err()))
+        val owner = owner_result.unwrap()
+        Ok(NvmeDurableBlockAdapter(
+            owner: owner,
+            authority: authority,
+            token: token,
+            device_identity: nvme.get_device_identity(),
+            device_generation: nvme.get_device_generation(),
+            controller_id: controller_id,
+            namespace_id: namespace_id,
+            lease_id: lease_id,
+            pending_write: false,
+            write_sequence: 0u64,
+            flush_sequence: 0u64,
+            last_receipt: NvmeDurabilityReceiptV1(
+                device_identity: nvme.get_device_identity(),
+                device_generation: nvme.get_device_generation(),
+                write_sequence: 0u64,
+                flush_sequence: 0u64,
+                write_acknowledged: false,
+                flush_acknowledged: false,
+                status: "initial"
+            )
+        ))
+
+    pub fn binding_matches(device_identity: u64, device_generation: u64) -> bool:
+        device_identity == self.device_identity and device_generation == self.device_generation
+
+    pub fn validate_binding(device_identity: u64, device_generation: u64) -> Result<bool, NvmeDurabilityErrorV1>:
+        if device_identity != self.device_identity:
+            return Err(NvmeDurabilityErrorV1.IdentityMismatch)
+        if device_generation != self.device_generation:
+            return Err(NvmeDurabilityErrorV1.GenerationMismatch)
+        Ok(true)
+
+    pub fn receipt() -> NvmeDurabilityReceiptV1:
+        self.last_receipt
+
+    pub me fn write_ordered(lba: u64, data: [u8]) -> Result<NvmeDurabilityReceiptV1, NvmeDurabilityErrorV1>:
+        val write_result = self.write_sector(lba, data)
+        if write_result.is_err():
+            return Err(_nvme_durability_io_error(write_result.unwrap_err(), true))
+        val flush_result = self._flush_ordered_typed()
+        if flush_result.is_err():
+            return Err(flush_result.unwrap_err())
+        Ok(self.last_receipt)
+
+    me fn _flush_ordered_typed() -> Result<bool, NvmeDurabilityErrorV1>:
+        if not nvme_reset_serialized_with_io():
+            return Err(NvmeDurabilityErrorV1.ResetNotSerialized)
+        val current_check = self.authority.validate_current(
+            self.token, self.controller_id, self.namespace_id, self.lease_id
+        )
+        if current_check.is_err():
+            return Err(_nvme_durability_generation_error(current_check.unwrap_err()))
+        if not self.pending_write:
+            return Err(NvmeDurabilityErrorV1.NoPendingWrite)
+        if self.flush_sequence == NVME_DURABILITY_MAX_SEQUENCE:
+            return Err(NvmeDurabilityErrorV1.SequenceExhausted)
+        # The write and flush must use the same lease submission queue. The
+        # driver's notify helper currently targets its default queue, so using
+        # it here would not establish an ordering edge for a non-default lease.
+        val flush_result = self.owner.flush_lease_queue()
+        if flush_result.is_err():
+            val error = _nvme_durability_io_error(flush_result.unwrap_err(), false)
+            self.last_receipt = NvmeDurabilityReceiptV1(
+                device_identity: self.device_identity,
+                device_generation: self.device_generation,
+                write_sequence: self.write_sequence,
+                flush_sequence: self.flush_sequence,
+                write_acknowledged: true,
+                flush_acknowledged: false,
+                status: error.to_text()
+            )
+            return Err(error)
+        self.flush_sequence = self.flush_sequence + 1u64
+        self.pending_write = false
+        self.last_receipt = NvmeDurabilityReceiptV1(
+            device_identity: self.device_identity,
+            device_generation: self.device_generation,
+            write_sequence: self.write_sequence,
+            flush_sequence: self.flush_sequence,
+            write_acknowledged: true,
+            flush_acknowledged: true,
+            status: "write-then-same-queue-flush-ack"
+        )
+        Ok(true)
+
+impl BlockDevice for NvmeDurableBlockAdapter:
+    me read_sector(lba: u64) -> Result<[u8], text>:
+        if not nvme_reset_serialized_with_io():
+            return Err(NvmeDurabilityErrorV1.ResetNotSerialized.to_text())
+        val current_check = self.authority.validate_current(
+            self.token, self.controller_id, self.namespace_id, self.lease_id
+        )
+        if current_check.is_err():
+            return Err(_nvme_durability_generation_error(current_check.unwrap_err()).to_text())
+        self.owner.read_sector(lba)
+
+    me write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
+        if not nvme_reset_serialized_with_io():
+            return Err(NvmeDurabilityErrorV1.ResetNotSerialized.to_text())
+        val current_check = self.authority.validate_current(
+            self.token, self.controller_id, self.namespace_id, self.lease_id
+        )
+        if current_check.is_err():
+            return Err(_nvme_durability_generation_error(current_check.unwrap_err()).to_text())
+        if self.write_sequence == NVME_DURABILITY_MAX_SEQUENCE:
+            return Err(NvmeDurabilityErrorV1.SequenceExhausted.to_text())
+        val write_result = self.owner.write_sector(lba, data)
+        if write_result.is_err():
+            val detail = write_result.unwrap_err()
+            self.last_receipt = NvmeDurabilityReceiptV1(
+                device_identity: self.device_identity,
+                device_generation: self.device_generation,
+                write_sequence: self.write_sequence,
+                flush_sequence: self.flush_sequence,
+                write_acknowledged: false,
+                flush_acknowledged: false,
+                status: _nvme_durability_io_error(detail, true).to_text()
+            )
+            return Err(detail)
+        self.write_sequence = self.write_sequence + 1u64
+        self.pending_write = true
+        self.last_receipt = NvmeDurabilityReceiptV1(
+            device_identity: self.device_identity,
+            device_generation: self.device_generation,
+            write_sequence: self.write_sequence,
+            flush_sequence: self.flush_sequence,
+            write_acknowledged: true,
+            flush_acknowledged: false,
+            status: "write-ack-pending-flush"
+        )
+        Ok(true)
+
+    me sector_size() -> u32:
+        self.owner.sector_size()
+
+    me flush() -> Result<bool, text>:
+        _nvme_durability_text_result(self._flush_ordered_typed())
+
+impl BlockDeviceDurabilityPortV1 for NvmeDurableBlockAdapter:
+    me flush_ordered() -> Result<bool, text>:
+        _nvme_durability_text_result(self._flush_ordered_typed())
+
+    me fua_ordered() -> Result<bool, text>:
+        Err(NvmeDurabilityErrorV1.FuaUnsupported.to_text())

@@ -36,7 +36,17 @@ fn try_unwrap_option_or_result(val: &Value) -> Option<Value> {
                     None
                 }
             } else {
-                None
+                // A USER enum (`Color.Green`) is not an Option/Result, so
+                // there is nothing to unwrap: `!` is the identity on the
+                // value and only narrows the static type `Color?` -> `Color`.
+                // Returning None here made the interpreter raise
+                // `force unwrap failed: expected Some or Ok, got Color::Green`
+                // while the JIT accepted it — an engine divergence.
+                // Mirrors the JIT's `lower_try` non-enum-nullable identity
+                // guard (hir/lower/expr/control.rs, `Some(HirType::Struct{..})
+                // | Some(HirType::Enum{..})`).
+                // Bug: doc/08_tracking/bug/jit_optional_class_unwrap_field_access_segv_2026-08-20.md
+                Some(val.clone())
             }
         }
         // Nil is treated as "absent" (like None/Err)

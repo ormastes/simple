@@ -19,7 +19,13 @@ driver stamps its own filesystem name onto the bytes it returns, so
 """
 
 use std.spec.{describe, it, expect, step}
-use os.kernel.fs.vfs_handle_table.{VfsHandleTable, VFS_HANDLE_NO_MOUNT}
+use os.kernel.fs.vfs_handle_table.{
+    VfsHandleEntry,
+    VfsHandleTable,
+    VFS_HANDLE_NO_MOUNT,
+    VFS_HANDLE_TABLE_MAX_OPEN,
+    VFS_HANDLE_GENERATION_MAX,
+}
 
 # ============================================================================
 # Mock drivers — each with its OWN handle namespace starting at 1
@@ -87,8 +93,8 @@ fn make_fixture() -> Fixture:
     val drv_b = fs_b.open("beta-payload")
     val mounts = MountSet(path_a: "/", fs_a: fs_a, path_b: "/win", fs_b: fs_b)
     var table = VfsHandleTable.new()
-    val h_a = table.register(0, "/", drv_a)
-    val h_b = table.register(1, "/win", drv_b)
+    val h_a = table.register(0, "/", drv_a).unwrap()
+    val h_b = table.register(1, "/win", drv_b).unwrap()
     Fixture(mounts: mounts, table: table, h_a: h_a, h_b: h_b, drv_a: drv_a, drv_b: drv_b)
 
 fn route_read(fx: Fixture, vfs_handle: u64) -> text:
@@ -115,8 +121,8 @@ describe "VFS handle to mount association":
         expect(fx.drv_b).to_equal(1 as u64)
 
         step("the VFS handles are still distinct")
-        expect(fx.h_a).to_equal(1 as u64)
-        expect(fx.h_b).to_equal(2 as u64)
+        expect(fx.h_a).to_be_greater_than(0u64)
+        expect(fx.h_b).to_be_greater_than(fx.h_a)
         expect(fx.table.open_count()).to_equal(2)
 
     it "resolves a handle opened on mount B to mount B":
@@ -193,3 +199,79 @@ describe "VFS handle to mount association":
         expect(fx.table.is_open(999 as u64)).to_equal(false)
         expect(fx.table.mount_index_of(999 as u64)).to_equal(VFS_HANDLE_NO_MOUNT)
         expect(route_read(fx, 999 as u64)).to_equal("EBADF")
+
+    it "rejects invalid owner identities before mutating the table":
+        var table = VfsHandleTable.new()
+
+        step("negative mount indices and zero driver handles are never admitted")
+        expect(table.register(-1, "/", 1u64).is_err()).to_be(true)
+        expect(table.register(0, "/", 0u64).is_err()).to_be(true)
+
+        step("ambiguous and traversal-bearing mount paths are never persisted")
+        expect(table.register(0, "relative", 1u64).is_err()).to_be(true)
+        expect(table.register(0, "/safe/../escape", 1u64).is_err()).to_be(true)
+        expect(table.register(0, "/safe//child", 1u64).is_err()).to_be(true)
+        expect(table.register(0, "/safe/", 1u64).is_err()).to_be(true)
+
+        step("all rejected admissions leave capacity and ID state untouched")
+        expect(table.open_count()).to_equal(0)
+        expect(table.entries.len()).to_equal(0)
+
+    it "retires a terminal-generation slot instead of wrapping it":
+        val terminal_handle = (VFS_HANDLE_GENERATION_MAX.to_u64() << 32) | 1u64
+        var table = VfsHandleTable(entries: [VfsHandleEntry(
+            active: true, retired: false, generation: VFS_HANDLE_GENERATION_MAX,
+            mount_index: 0, mount_path: "/", driver_handle: 1u64
+        )], live_count: 1)
+
+        step("release invalidates the handle without incrementing generation")
+        expect(table.release(terminal_handle)).to_be(true)
+        expect(table.is_open(terminal_handle)).to_be(false)
+        expect(table.was_issued(terminal_handle)).to_be(true)
+
+        step("the retired slot is skipped and a distinct slot is admitted")
+        val replacement = table.register(0, "/", 2u64)
+        expect(replacement.is_ok()).to_be(true)
+        expect(table.driver_handle_of(replacement.unwrap())).to_equal(2u64)
+        expect(table.entries[0].retired).to_be(true)
+
+    it "rejects a stale handle after its slot is reused":
+        var table = VfsHandleTable.new()
+        val stale = table.register(0, "/", 11u64).unwrap()
+
+        step("release advances the slot generation")
+        expect(table.release(stale)).to_be(true)
+        expect(table.is_open(stale)).to_be(false)
+
+        step("the next admission reuses the bounded slot with a new handle")
+        val current = table.register(1, "/next", 22u64).unwrap()
+        expect(table.entries.len()).to_equal(1)
+
+        step("the stale generation cannot resolve or release the new owner")
+        expect(table.lookup(stale).found).to_be(false)
+        expect(table.release(stale)).to_be(false)
+        expect(table.was_issued(stale)).to_be(true)
+        expect(table.mount_index_of(current)).to_equal(1)
+        expect(table.driver_handle_of(current)).to_equal(22u64)
+
+    it "bounds live open-file descriptions without evicting an owner":
+        var table = VfsHandleTable.new()
+        var i = 0
+        var all_admitted = true
+        var first_handle = 0u64
+        while i < VFS_HANDLE_TABLE_MAX_OPEN:
+            val admitted = table.register(0, "/", (i + 1) as u64)
+            if admitted.is_err():
+                all_admitted = false
+            else:
+                if i == 0:
+                    first_handle = admitted.unwrap()
+            i = i + 1
+        expect(all_admitted).to_be(true)
+
+        step("one more open fails rather than evicting or aliasing a live owner")
+        val rejected = table.register(0, "/", 5000u64)
+        expect(rejected.is_err()).to_be(true)
+        expect(rejected.unwrap_err()).to_equal("VFS handle table capacity exhausted")
+        expect(table.open_count()).to_equal(VFS_HANDLE_TABLE_MAX_OPEN)
+        expect(table.driver_handle_of(first_handle)).to_equal(1u64)

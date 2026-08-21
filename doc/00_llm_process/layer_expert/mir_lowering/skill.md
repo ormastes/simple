@@ -355,3 +355,25 @@ Bug: `doc/08_tracking/bug/seed_builtin_option_name_heuristic_breaks_user_option_
 Fence: `test/03_system/compiler/user_option_enum_match_lowering_system_spec.spl`
 (fail-closed, unexecuted — no qualified pure-Simple runtime exists).
 Guide: `doc/07_guide/language/user_option_enum_match_lowering.md`.
+---
+
+## 2026-08-21 — explicit `HirTypeKind` arms (hardening Phase 1 / lane C5)
+
+**What landed:** `src/compiler/50.mir/mir_lowering_types.spl` and
+`_MirLoweringExpr/expr_dispatch.spl` now carry an **explicit arm per `HirTypeKind` variant**
+instead of a wildcard tail; `_MirLowering/{function_lowering,module_lowering,bootstrap_globals,
+bootstrap_type_registration}.spl`, `mir_data.spl`, `mir_types.spl`, `mir_lowering_stmts.spl`
+and `_MirLoweringExpr/{method_calls_literals,switch_operators_calls}.spl` updated with it.
+
+**Gates:**
+- `sh scripts/check/check-critical-wildcard-ban.shs` → `PASS — <n> site(s) checked,
+  forbidden=<k> (baseline <k>)` (ratchet; 8 selftest fixtures).
+- `sh scripts/check/check-compiler-transition-coverage.shs` → `PASS — <n> transition row(s)
+  checked, missing=0 silent-fallback=0 critical-wildcard=0`.
+- `sh scripts/check/check-post-mono-invariants.shs` → `PASS — <n> fixture(s) checked, 0 unexpected`.
+
+**Open:** `doc/08_tracking/bug/mir_lowering_missing_hirtypekind_arms_wildcard_fatal_2026-08-05.md`
+(now gated), `ssa_alloca_value_return_admission_spec_conflict_2026-08-21.md`,
+`module_global_fn_pointer_lowered_as_direct_call_2026-08-21.md`.
+
+**Owning feature expert:** `feature_expert/compiler_hardening/skill.md`.

@@ -543,3 +543,34 @@ its stage2/stage3 dirs the same way.
 - Specs: `test/01_unit/compiler/cache/per_lane_cache_scope{,_prevention}_spec.spl`
 - NOT changed: dependency-aware partial rebuild (`interface_digest_of`,
   `simple.sdn` traversal, `SmfManifest` load-verification remain uncalled).
+
+---
+
+## 2026-08-21 — snapshot pinning, PARTIAL fail-closed, threads
+
+**What landed** (`src/compiler_rust/driver/src/cli/commands/misc_commands.rs`):
+- Bootstrap input **snapshot pinning** — stages read a pinned snapshot instead of the live
+  working tree (`bootstrap/.input-snapshot/`), so a parallel session's edit can no longer race
+  a determinism comparison.
+- `PARTIAL` outcomes are now **fail-closed** — a partial stage result is an error, not a pass.
+- Threaded stage execution.
+- Seed fixes shipped alongside: builtin-name shadowing, interpreter unwrap, vulkan externs,
+  owned-process runtime restore.
+
+**Gates:**
+- `sh scripts/check/check-seed-builds-push.shs` → `PASS — <n> file(s) checked, seed bin + test
+  targets compile cleanly at <sha> (seed content <digest> recorded green; ...)`.
+- `sh scripts/check/check-c-runtime-compiles-push.shs` → after the owned-process runtime restore:
+  `FAIL — 1 file(s) failed to compile: src/runtime/test/rt_browser_renderer_namespace_selfcheck.c
+  (107 compiled clean, 2 skipped ...)` (was `FAIL — 5 file(s) failed to compile ... (103 compiled clean)`).
+- `sh scripts/check/check-stage-binaries-runnable.shs` → still ADVISORY/RED: all four tracked
+  stage binaries SEGV on `compile` and `native-build`.
+
+**Bugs filed 2026-08-21:**
+- `doc/08_tracking/bug/bootstrap_determinism_check_races_live_working_tree_2026-08-21.md` (the reason for snapshot pinning)
+- `doc/08_tracking/bug/owned_process_runtime_lost_in_tree_wipe_restore_2026-08-21.md`
+- `doc/08_tracking/bug/module_fn_shadowed_by_builtin_name_2026-08-21.md` — `Results: 4 total, 4 passed, 0 failed`
+- `doc/08_tracking/bug/seed_helper_return_type_mistyped_as_tuple_2026-08-21.md`
+- Still open and blocking self-host parity: `stage3_native_build_and_compile_segv_on_hello_world_2026-08-18.md`
+
+**Depending feature expert:** `feature_expert/compiler_hardening/skill.md` (Phase 7 parity).

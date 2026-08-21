@@ -1,0 +1,42 @@
+use std.spec
+use os.installer.image_bounded_file_reader.{
+    IMAGE_BOUNDED_FILE_READER_UNAVAILABLE_V1,
+    image_read_file_bounded_v1, image_read_text_bounded_v1,
+}
+use std.io_runtime.{file_write_bytes, process_run}
+
+fn _reader_fixture_dir() -> text:
+    val path = "build/test-artifacts/image-bounded-file-reader"
+    process_run("/bin/sh", ["-c", "rm -rf '" + path + "' && mkdir -p '" + path + "'"])
+    path
+
+describe "Installer bounded file reader":
+    it "fails closed before allocating from a regular changeable host file":
+        val dir = _reader_fixture_dir()
+        val path = "{dir}/payload.bin"
+        expect(file_write_bytes(path, [0u8, 1u8, 2u8, 255u8])).to_be(true)
+        val result = image_read_file_bounded_v1(path, 4, "test payload")
+        expect(result.is_err()).to_be(true)
+        if val Err(message) = result:
+            expect(message).to_contain(IMAGE_BOUNDED_FILE_READER_UNAVAILABLE_V1)
+
+    it "rejects a symlink instead of following a changeable source name":
+        val dir = _reader_fixture_dir()
+        val target = "{dir}/target.bin"
+        val link = "{dir}/link.bin"
+        expect(file_write_bytes(target, [7u8, 8u8])).to_be(true)
+        val (_out, _err, code) = process_run("/bin/ln", ["-s", "target.bin", link])
+        expect(code).to_equal(0)
+        val result = image_read_file_bounded_v1(link, 8, "test payload")
+        expect(result.is_err()).to_be(true)
+        if val Err(message) = result:
+            expect(message).to_contain("symlink")
+
+    it "applies the same fail-closed owner boundary to installer text":
+        val dir = _reader_fixture_dir()
+        val path = "{dir}/package.spk"
+        expect(file_write_bytes(path, [112u8, 107u8, 103u8])).to_be(true)
+        val result = image_read_text_bounded_v1(path, 8, "test package")
+        expect(result.is_err()).to_be(true)
+        if val Err(message) = result:
+            expect(message).to_contain(IMAGE_BOUNDED_FILE_READER_UNAVAILABLE_V1)

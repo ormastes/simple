@@ -199,3 +199,22 @@ Add `x64-toolchain-exec-probe` and include it in the SimpleOS real-OS audit
 once it passes under QEMU. Do not add the lane until Blockers 1 and 2 are
 both resolved — a lane that always defers is dead code and contradicts the
 audit requirement that the scenario pass.
+
+## 2026-08-20 structural admission hardening
+
+Target-toolchain candidates now bind the canonical SimpleOS ABI as well as the
+ELF/SMF machine, exact per-role output name, unique target/output argv pairs,
+independently re-hashed build inputs, reproducible output, and a frozen
+whole-receipt digest. The guest execution candidate likewise requires canonical
+role and alias ordering, deterministic version/interpret/compile/load/rerun
+argv, a canonical `SIMPLETOOL.SDN` role/alias contract digest, and a frozen
+whole-receipt digest whose hot path uses transcript hashes rather than copying
+bounded output text again.
+
+These hashes detect mutation but remain caller-provided structural candidates.
+They do not prove that a process ran in the guest, that PATH/host fallback was
+absent, or that `/SYS/SIMPLETOOL.SDN` bytes came from the mounted image. The
+deployment command therefore exits blocked until an authoritative receipt
+producer signs the candidate and the loader registry supplies a live
+consume-once authority token. No runtime or target build was performed in this
+structural-only repair.

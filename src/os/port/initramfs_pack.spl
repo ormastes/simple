@@ -1,18 +1,6 @@
-## Initramfs image packager for SimpleOS QEMU boot.
-##
-## Bundles the Simple compiler binary, the source tree, LLVM cross tools,
-## a sysroot, and a /sbin/init placeholder into a newc cpio archive
-## compressed with zstd. The resulting image is loaded by QEMU via
-## `-initrd build/os/initramfs.img.zst`.
-##
-## Usage:
-##   bin/simple run src/os/port/initramfs_pack.spl -- --help
-##   bin/simple run src/os/port/initramfs_pack.spl -- build
-##   bin/simple run src/os/port/initramfs_pack.spl -- build --output build/os/initramfs.img.zst
-##   bin/simple run src/os/port/initramfs_pack.spl -- build --payload /usr/bin/clang:/usr/bin/clang
-##   bin/simple run src/os/port/initramfs_pack.spl -- validate build/os/initramfs.img.zst
-
+## Fail-closed SimpleOS initramfs packager with explicit target-native role artifacts.
 use std.process
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
 use std.text
 use std.cli.cli_util.{get_cli_args}
 use os.port.font_bundle.{simpleos_font_bundle_entries, load_simpleos_font_bundle_entry}
@@ -23,47 +11,50 @@ use std.nogc_sync_mut.ffi.io.{
     file_write_bytes,
     file_write_text,
     dir_exists,
+    dir_create,
     dir_create_all,
 }
+use std.common.structural.digest.hash256.{hash256_hex_valid}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use os.port.initramfs_validate.{
+    MAX_INITRAMFS_COMPRESSED_BYTES,
+    MAX_INITRAMFS_EXPANDED_BYTES,
+    SIMPLE_COMPILER_ROLE_PATHS,
+    SIMPLE_INTERPRETER_ROLE_PATHS,
+    SIMPLE_LOADER_ROLE_PATHS,
+    simple_toolchain_role_paths,
+    initramfs_init_artifact_admission,
+    validate_zstd_toolchain_archive,
+}
 
-val DEFAULT_SIMPLE_BINARY = "build/bootstrap/stage3/simple_simpleos"
 val DEFAULT_LLVM_PREFIX = "build/os/llvm/cross/bin"
 val DEFAULT_SYSROOT = "build/os/sysroot"
 val DEFAULT_SOURCE_TREE = "src"
 val DEFAULT_OUTPUT = "build/os/initramfs.img.zst"
 val DEFAULT_STAGING = "build/os/initramfs-staging"
 val CLANG_RESOURCE_VER = "19"  # clang resource dir version
-
-val SIMPLE_TOOLCHAIN_ROLE_PATHS: [text] = [
-    "/bin/simple",
-    "/bin/simple.smf",
-    "/usr/bin/simple",
-    "/usr/bin/simple.smf",
-    "/sys/apps/simple",
-    "/sys/apps/simple.smf",
-    "/sys/apps/simple_compiler",
-    "/sys/apps/simple_compiler.smf",
-    "/sys/apps/simple_interpreter",
-    "/sys/apps/simple_interpreter.smf",
-    "/sys/apps/simple_loader",
-    "/sys/apps/simple_loader.smf",
-]
-
+val MAX_PACK_ENTRIES: i64 = 131072
+val MAX_PACK_INVENTORY_BYTES: i64 = 16777216
+val MAX_PACK_MANIFEST_BYTES: i64 = 16777216
+class SimpleToolchainRole:
+    name: text
+    artifact_path: text
+    artifact_digest: text
+    guest_paths: [text]
 val LLVM_TOOLS: [text] = [
     "clang", "lld", "llvm-ar", "llvm-nm",
     "llvm-ranlib", "llvm-objdump", "llvm-objcopy", "llvm-strip",
 ]
-
-## A payload injection entry: a host path (file or directory) to be staged
-## at guest_path inside the initramfs. is_dir=true triggers recursive copy.
 class PayloadEntry:
     host_path: text
     guest_path: text
     is_dir: bool
     data: [u8] = []
-
 class PackConfig:
-    simple_binary: text
+    init_binary: text
+    compiler_binary: text
+    interpreter_binary: text
+    loader_binary: text
     llvm_prefix: text
     sysroot: text
     source_tree: text
@@ -80,20 +71,30 @@ fn usage():
     print "  --help                   Show this help"
     print ""
     print "Build options:"
-    print "  --simple-binary <p>      Simple compiler binary (default: {DEFAULT_SIMPLE_BINARY})"
+    print "  --init-binary <p>       Target-native /sbin/init payload (required)"
+    print "  --compiler-binary <p>   Target-native compiler payload (required)"
+    print "  --interpreter-binary <p> Target-native interpreter payload (required)"
+    print "  --loader-binary <p>     Target-native loader payload (required)"
     print "  --llvm-prefix <p>        LLVM bin dir (default: {DEFAULT_LLVM_PREFIX})"
     print "  --sysroot <p>            Sysroot dir (default: {DEFAULT_SYSROOT})"
     print "  --source-tree <p>        Source tree (default: {DEFAULT_SOURCE_TREE})"
     print "  --output <p>             Output image (default: {DEFAULT_OUTPUT})"
     print "  --staging <p>            Staging dir (default: {DEFAULT_STAGING})"
     print "  --payload HOST:GUEST     Inject host file/dir at GUEST path (repeatable)"
-    print "                           If HOST is a directory, it is copied recursively."
+
+fn _option_value(args: [text], index: i64, option: text) -> text:
+    if index + 1 >= args.len():
+        print "error: missing value for {option}"
+        process.exit(2)
+    args[index + 1]
 
 fn parse_args(args: [text]) -> (text, PackConfig, text):
-    """Return (command, config, validate_arg)."""
     var command = ""
     var validate_arg = ""
-    var simple_binary = DEFAULT_SIMPLE_BINARY
+    var init_binary = ""
+    var compiler_binary = ""
+    var interpreter_binary = ""
+    var loader_binary = ""
     var llvm_prefix = DEFAULT_LLVM_PREFIX
     var sysroot = DEFAULT_SYSROOT
     var source_tree = DEFAULT_SOURCE_TREE
@@ -114,33 +115,48 @@ fn parse_args(args: [text]) -> (text, PackConfig, text):
             if i + 1 < args.len():
                 i = i + 1
                 validate_arg = args[i]
+        else if arg == "--init-binary":
+            init_binary = _option_value(args, i, arg)
+            i = i + 1
+        else if arg == "--compiler-binary":
+            compiler_binary = _option_value(args, i, arg)
+            i = i + 1
+        else if arg == "--interpreter-binary":
+            interpreter_binary = _option_value(args, i, arg)
+            i = i + 1
+        else if arg == "--loader-binary":
+            loader_binary = _option_value(args, i, arg)
+            i = i + 1
         else if arg == "--simple-binary":
-            i = i + 1
-            simple_binary = args[i]
+            print "error: --simple-binary is forbidden; provide distinct compiler, interpreter, and loader payloads"
+            process.exit(2)
         else if arg == "--llvm-prefix":
+            llvm_prefix = _option_value(args, i, arg)
             i = i + 1
-            llvm_prefix = args[i]
         else if arg == "--sysroot":
+            sysroot = _option_value(args, i, arg)
             i = i + 1
-            sysroot = args[i]
         else if arg == "--source-tree":
+            source_tree = _option_value(args, i, arg)
             i = i + 1
-            source_tree = args[i]
         else if arg == "--output":
+            output = _option_value(args, i, arg)
             i = i + 1
-            output = args[i]
         else if arg == "--staging":
+            staging = _option_value(args, i, arg)
             i = i + 1
-            staging = args[i]
         else if arg == "--payload":
+            val spec = _option_value(args, i, arg)
             i = i + 1
-            val spec = args[i]
             val colon_idx = spec.index_of(":")
             if colon_idx < 0:
                 print "error: --payload must be HOST:GUEST, got: {spec}"
                 process.exit(2)
             val host_path = spec.slice(0, colon_idx)
             val guest_path = spec.slice(colon_idx + 1, spec.len())
+            if not _guest_path_safe(guest_path):
+                print "error: --payload guest path must be canonical and absolute: {guest_path}"
+                process.exit(2)
             val is_dir = dir_exists(host_path)
             payloads.push(PayloadEntry(host_path: host_path, guest_path: guest_path, is_dir: is_dir))
         i = i + 1
@@ -151,7 +167,10 @@ fn parse_args(args: [text]) -> (text, PackConfig, text):
         process.exit(2)
 
     val config = PackConfig(
-        simple_binary: simple_binary,
+        init_binary: init_binary,
+        compiler_binary: compiler_binary,
+        interpreter_binary: interpreter_binary,
+        loader_binary: loader_binary,
         llvm_prefix: llvm_prefix,
         sysroot: sysroot,
         source_tree: source_tree,
@@ -171,27 +190,7 @@ fn parent_path(path: text) -> text:
         return "."
     path.slice(0, slash)
 
-fn absolute_path(path: text) -> text:
-    if path.starts_with("/"):
-        return path
-    val pwd = process.run("pwd", [])
-    if pwd.exit_code != 0:
-        return path
-    val cwd = pwd.stdout.trim()
-    if cwd == "":
-        return path
-    "{cwd}/{path}"
-
-fn run_checked(cmd: text, args: [text]):
-    val result = process.run(cmd, args)
-    if result.exit_code != 0:
-        print "error: command failed: {cmd}"
-        print result.stderr
-        process.exit(result.exit_code)
-
 fn stage_file(src: text, dst: text, optional: bool):
-    """Copy a single file into the staging tree. If optional=true and
-    src is missing, skip with a warning."""
     if not file_exists(src):
         if optional:
             print "[pack]   skip (missing): {src}"
@@ -199,7 +198,7 @@ fn stage_file(src: text, dst: text, optional: bool):
         print "error: required file missing: {src}"
         process.exit(1)
     ensure_dir(parent_path(dst))
-    val result = process.run("cp", [src, dst])
+    val result = process.run("cp", ["--", src, dst])
     if result.exit_code != 0:
         print "error: failed to copy {src} -> {dst}"
         print result.stderr
@@ -214,7 +213,7 @@ fn stage_tree(src: text, dst: text, optional: bool):
         print "error: required directory missing: {src}"
         process.exit(1)
     ensure_dir(parent_path(dst))
-    val result = process.run("cp", ["-a", src, dst])
+    val result = process.run("cp", ["-a", "--", src, dst])
     if result.exit_code != 0:
         print "error: failed to copy tree {src} -> {dst}"
         print result.stderr
@@ -252,67 +251,242 @@ fn add_payload_dir(staging: text, host_dir: text, guest_dir: text):
     print "[pack] payload dir: {host_dir} -> /{rel}"
     stage_tree(src: host_dir, dst: dst, optional: false)
 
-fn stage_simple_toolchain_roles(config: PackConfig):
-    """Stage the same target-native Simple payload under every role path the
-    SimpleOS loader, shell, desktop catalog, and SSH surface know how to resolve.
-    The payload must be a SimpleOS-runnable binary/SMF supplied by the caller."""
-    var i = 0
-    while i < SIMPLE_TOOLCHAIN_ROLE_PATHS.len():
-        val guest_path = SIMPLE_TOOLCHAIN_ROLE_PATHS[i]
-        var rel = guest_path
-        if rel.starts_with("/"):
-            rel = rel.slice(1, rel.len())
-        stage_file(src: config.simple_binary, dst: "{config.staging}/{rel}", optional: false)
-        i = i + 1
+fn _canonical_guest_path(path: text) -> text:
+    if path.starts_with("/"):
+        return path
+    "/{path}"
 
-fn write_simple_toolchain_manifest(path: text, simple_binary: text):
-    ensure_dir(parent_path(path))
+fn _guest_path_safe(path: text) -> bool:
+    val canonical = _canonical_guest_path(path)
+    path.starts_with("/") and canonical.len() > 1 and not canonical.contains("//") and
+        not canonical.contains("/./") and not canonical.contains("/../") and
+        not canonical.ends_with("/.") and not canonical.ends_with("/..") and
+        not canonical.contains("\0") and not canonical.contains("\n") and
+        not canonical.contains("\r") and not canonical.contains("\\")
+
+fn _pack_host_path_canonical(path: text) -> bool:
+    path.len() > 0 and not path.starts_with("/") and not path.ends_with("/") and
+        not path.contains("//") and not path.contains("/./") and
+        not path.contains("/../") and not path.ends_with("/.") and
+        not path.ends_with("/..") and not path.contains("\0") and
+        not path.contains("\n") and not path.contains("\r") and
+        not path.contains("\t") and not path.contains("\\")
+
+fn _pack_host_path_shell_meta_free(path: text) -> bool:
+    not path.contains(" ") and not path.contains("\"") and not path.contains("'") and
+        not path.contains("$") and not path.contains("`") and not path.contains(";") and
+        not path.contains("&") and not path.contains("|") and not path.contains("<") and
+        not path.contains(">") and not path.contains("*") and not path.contains("?") and
+        not path.contains("[") and not path.contains("]") and not path.contains("(") and
+        not path.contains(")") and not path.contains("{") and not path.contains("}") and
+        not path.contains("!") and not path.contains("#")
+
+fn initramfs_pack_path_admission(staging: text, output: text) -> Result<(), text>:
+    if not _pack_host_path_canonical(staging) or not _pack_host_path_shell_meta_free(staging):
+        return Err("staging-path-unsafe")
+    if not staging.starts_with("build/os/") or parent_path(staging) != "build/os":
+        return Err("staging-path-outside-owned-root")
+    val staging_name = staging.slice(staging.last_index_of("/") + 1, staging.len())
+    if not staging_name.starts_with("initramfs-") and not staging_name.ends_with(".staging"):
+        return Err("staging-path-not-task-owned")
+    if not _pack_host_path_canonical(output) or not _pack_host_path_shell_meta_free(output):
+        return Err("output-path-unsafe")
+    if not output.starts_with("build/os/") or parent_path(output) != "build/os":
+        return Err("output-path-outside-owned-root")
+    if output == staging or output.starts_with(staging + "/") or staging.starts_with(output + "/"):
+        return Err("staging-output-overlap")
+    Ok(())
+
+fn _require_pack_path_admission(config: PackConfig):
+    match initramfs_pack_path_admission(config.staging, config.output):
+        case Ok(()): ()
+        case Err(message):
+            print "error: initramfs path admission failed: {message}"
+            process.exit(2)
+
+fn _host_image_path_safe(path: text) -> bool:
+    path.len() > 0 and not path.contains("\0") and not path.contains("\n") and
+        not path.contains("\r")
+
+fn _is_toolchain_guest_path(path: text) -> bool:
+    val canonical = _canonical_guest_path(path)
+    for role_path in simple_toolchain_role_paths():
+        if canonical == role_path:
+            return true
+    false
+
+fn _toolchain_role_fatal(message: text):
+    print "error: toolchain role validation failed: {message}"
+    process.exit(1)
+
+fn _simple_payload_basename(path: text) -> text:
+    val slash = path.last_index_of("/")
+    if slash < 0:
+        return path
+    path.slice(slash + 1, path.len())
+
+fn _is_general_simple_payload(path: text) -> bool:
+    val basename = _simple_payload_basename(path)
+    basename == "simple" or basename == "simple_simpleos"
+
+fn _sha256_file(path: text) -> text:
+    if not file_exists(path):
+        _toolchain_role_fatal("cannot hash missing role artifact: {path}")
+    val bytes = file_read_bytes(path)
+    if bytes.len() == 0:
+        _toolchain_role_fatal("cannot hash empty role artifact: {path}")
+    val digest = sha256_u8_hex(bytes)
+    if not hash256_hex_valid(digest):
+        _toolchain_role_fatal("pure-Simple SHA-256 returned an invalid digest for {path}")
+    digest
+
+fn _validated_toolchain_role(name: text, artifact_path: text, guest_paths: [text]) -> SimpleToolchainRole:
+    if artifact_path.trim() == "":
+        _toolchain_role_fatal("missing {name} artifact path")
+    if _is_general_simple_payload(artifact_path):
+        _toolchain_role_fatal("{name} must not use the general Simple payload: {artifact_path}")
+    if artifact_path.contains("\0") or artifact_path.contains("\n") or
+       artifact_path.contains("\r") or artifact_path.contains("\""):
+        _toolchain_role_fatal("{name} artifact path contains manifest-unsafe characters")
+    if not file_exists(artifact_path):
+        _toolchain_role_fatal("missing {name} artifact: {artifact_path}")
+    if file_size(artifact_path) == 0:
+        _toolchain_role_fatal("empty {name} artifact: {artifact_path}")
+    val digest = _sha256_file(artifact_path)
+    SimpleToolchainRole(
+        name: name,
+        artifact_path: artifact_path,
+        artifact_digest: digest,
+        guest_paths: guest_paths,
+    )
+
+fn _validated_toolchain_roles(config: PackConfig) -> [SimpleToolchainRole]:
+    val compiler = _validated_toolchain_role(
+        "compiler", config.compiler_binary, SIMPLE_COMPILER_ROLE_PATHS)
+    val interpreter = _validated_toolchain_role(
+        "interpreter", config.interpreter_binary, SIMPLE_INTERPRETER_ROLE_PATHS)
+    val loader = _validated_toolchain_role(
+        "loader", config.loader_binary, SIMPLE_LOADER_ROLE_PATHS)
+    if compiler.artifact_path == interpreter.artifact_path or
+       compiler.artifact_path == loader.artifact_path or
+       interpreter.artifact_path == loader.artifact_path:
+        _toolchain_role_fatal("compiler, interpreter, and loader paths must be distinct")
+    if compiler.artifact_digest == interpreter.artifact_digest or
+       compiler.artifact_digest == loader.artifact_digest or
+       interpreter.artifact_digest == loader.artifact_digest:
+        _toolchain_role_fatal("compiler, interpreter, and loader digests must be distinct")
+    [compiler, interpreter, loader]
+
+fn _validated_init_artifact(path: text) -> [u8]:
+    if not file_exists(path):
+        _toolchain_role_fatal("missing target-native init artifact: {path}")
+    val data = file_read_bytes(path)
+    match initramfs_init_artifact_admission(path, data):
+        case Ok(()): data
+        case Err(message):
+            _toolchain_role_fatal(message)
+            []
+
+fn stage_simple_toolchain_roles(config: PackConfig, roles: [SimpleToolchainRole]) -> [SimpleToolchainRole]:
+    for role in roles:
+        for guest_path in role.guest_paths:
+            var rel = guest_path
+            if rel.starts_with("/"):
+                rel = rel.slice(1, rel.len())
+            stage_file(src: role.artifact_path, dst: "{config.staging}/{rel}", optional: false)
+        val canonical_rel = role.guest_paths[0].slice(1, role.guest_paths[0].len())
+        val staged_digest = _sha256_file("{config.staging}/{canonical_rel}")
+        if staged_digest != role.artifact_digest:
+            _toolchain_role_fatal("staged {role.name} payload digest changed during copy")
+    roles
+
+fn simple_toolchain_manifest_text(roles: [SimpleToolchainRole]) -> text:
     var body = "simple_toolchain {\n"
-    body = body + "  host_payload: \"{simple_binary}\"\n"
-    body = body + "  guest_roles: [\n"
-    var i = 0
-    while i < SIMPLE_TOOLCHAIN_ROLE_PATHS.len():
-        body = body + "    \"{SIMPLE_TOOLCHAIN_ROLE_PATHS[i]}\"\n"
-        i = i + 1
+    body = body + "  role_bindings: [\n"
+    for role in roles:
+        for guest_path in role.guest_paths:
+            body = body + "    { role: \"{role.name}\", guest_path: \"{guest_path}\", digest: \"{role.artifact_digest}\" }\n"
     body = body + "  ]\n"
     body = body + "}\n"
-    file_write_text(path, body)
+    body
 
-## compress_zstd compresses data in memory by piping it through the host
-## `zstd` binary at level -19. Returns the compressed bytes.
-##
-## If `zstd` is not available on the host the process.run call will fail
-## and this function will print an error and exit. The file-based run_zstd
-## function below is the primary compression path for the build command;
-## this function is exported for callers that already have data in memory.
-fn compress_zstd(data: [u8]) -> [u8]:
-    val result = process.run("zstd", ["-19", "-f", "-c"], stdin: data)
-    if result.exit_code != 0:
-        print "error: zstd compress_zstd failed"
-        print result.stderr
-        process.exit(1)
-    result.stdout_bytes
-
-fn write_stub_init(path: text):
-    """Write a tiny /sbin/init placeholder (shell stub)."""
+fn write_simple_toolchain_manifest(path: text, roles: [SimpleToolchainRole]):
     ensure_dir(parent_path(path))
-    val body = "#!/bin/sh\n# SimpleOS init placeholder\nexec /bin/simple run /src/app/simpleos/init.spl\n"
-    file_write_text(path, body)
-    run_checked("chmod", ["+x", path])
+    file_write_text(path, simple_toolchain_manifest_text(roles))
+
+fn _zstd_chunk_all_same(data: [u8], start: i64, size: i64) -> bool:
+    if size == 0:
+        return false
+    val first = data[start]
+    var i: i64 = 1
+    while i < size:
+        if data[start + i] != first:
+            return false
+        i = i + 1
+    true
+
+fn compress_zstd(data: [u8]) -> [u8]:
+    if data.len() == 0 or data.len() > MAX_INITRAMFS_EXPANDED_BYTES:
+        print "error: initramfs cpio size outside bounded zstd policy"
+        process.exit(1)
+    var out: [u8] = [0x28u8, 0xB5u8, 0x2Fu8, 0xFDu8]
+    if data.len() < 256:
+        out.push(0x20u8)
+        out.push(data.len().to_u8())
+    elif data.len() < 65792:
+        out.push(0x60u8)
+        val encoded_size = data.len() - 256
+        out.push((encoded_size & 255).to_u8())
+        out.push(((encoded_size >> 8) & 255).to_u8())
+    else:
+        out.push(0xA0u8)
+        out.push((data.len() & 255).to_u8())
+        out.push(((data.len() >> 8) & 255).to_u8())
+        out.push(((data.len() >> 16) & 255).to_u8())
+        out.push(((data.len() >> 24) & 255).to_u8())
+    var pos: i64 = 0
+    while pos < data.len():
+        val remaining = data.len() - pos
+        val chunk_size = if remaining < 131072: remaining else: 131072
+        val last = pos + chunk_size == data.len()
+        val rle = _zstd_chunk_all_same(data, pos, chunk_size)
+        val block_type = if rle: 1 else: 0
+        val header = (if last: 1 else: 0) | (block_type << 1) | (chunk_size << 3)
+        out.push((header & 255).to_u8())
+        out.push(((header >> 8) & 255).to_u8())
+        out.push(((header >> 16) & 255).to_u8())
+        if rle:
+            out.push(data[pos])
+        else:
+            var i: i64 = 0
+            while i < chunk_size:
+                out.push(data[pos + i])
+                i = i + 1
+        pos = pos + chunk_size
+    out
 
 fn write_hello_c(path: text):
     ensure_dir(parent_path(path))
     file_write_text(path, "int main(void) { return 0; }\n")
 
 fn populate_staging(config: PackConfig):
-    """Copy all desired payloads into the staging directory."""
+    _require_pack_path_admission(config)
     val s = config.staging
     print "[pack] populating staging dir: {s}"
 
-    # Clean + recreate
     if dir_exists(s):
-        run_checked("rm", ["-rf", s])
-    ensure_dir(s)
+        print "error: refusing preexisting staging directory: {s}"
+        process.exit(1)
+    val init_data = _validated_init_artifact(config.init_binary)
+    val toolchain_roles = _validated_toolchain_roles(config)
+    val init_digest = sha256_u8_hex(init_data)
+    for role in toolchain_roles:
+        if init_digest == role.artifact_digest:
+            _toolchain_role_fatal("init artifact must be distinct from every toolchain role")
+    ensure_dir(parent_path(s))
+    if not dir_create(s, false):
+        print "error: staging directory was not created exclusively: {s}"
+        process.exit(1)
 
     for entry in simpleos_font_bundle_entries():
         val loaded = load_simpleos_font_bundle_entry(entry)
@@ -325,21 +499,15 @@ fn populate_staging(config: PackConfig):
             print "error: failed to stage validated SimpleOS font bundle entry"
             process.exit(1)
 
-    # Simple compiler/interpreter/loader roles. The deploy image intentionally
-    # carries one target-native Simple payload under every canonical app/shell
-    # path so the OS loader does not depend on host-only aliases.
-    stage_simple_toolchain_roles(config)
-    write_simple_toolchain_manifest("{s}/SYS/SIMPLETOOL.SDN", config.simple_binary)
+    stage_simple_toolchain_roles(config, toolchain_roles)
+    write_simple_toolchain_manifest("{s}/SYS/SIMPLETOOL.SDN", toolchain_roles)
 
-    # /usr/bin/<llvm tools>
     for tool in LLVM_TOOLS:
         val src_path = "{config.llvm_prefix}/{tool}"
         stage_file(src: src_path, dst: "{s}/usr/bin/{tool}", optional: true)
 
-    # /usr/include
     stage_tree(src: "{config.sysroot}/include", dst: "{s}/usr/include", optional: true)
 
-    # /usr/lib libraries from sysroot
     stage_file(
         src: "{config.sysroot}/lib/libsimpleos_c.a",
         dst: "{s}/usr/lib/libsimpleos_c.a",
@@ -351,29 +519,32 @@ fn populate_staging(config: PackConfig):
         optional: true,
     )
 
-    # /usr/lib/clang/<ver>/lib/simpleos/libclang_rt.builtins-x86_64.a
     val rt_src = "{config.sysroot}/lib/clang/{CLANG_RESOURCE_VER}/lib/simpleos/libclang_rt.builtins-x86_64.a"
     val rt_dst = "{s}/usr/lib/clang/{CLANG_RESOURCE_VER}/lib/simpleos/libclang_rt.builtins-x86_64.a"
     stage_file(src: rt_src, dst: rt_dst, optional: true)
 
-    # /usr/share/simpleos/simpleos.ld
     stage_file(
         src: "{config.sysroot}/share/simpleos/simpleos.ld",
         dst: "{s}/usr/share/simpleos/simpleos.ld",
         optional: true,
     )
 
-    # /src  (full source tree)
     stage_tree(src: config.source_tree, dst: "{s}/src", optional: false)
 
-    # /usr/share/test/hello.c
     write_hello_c("{s}/usr/share/test/hello.c")
 
-    # /sbin/init
-    write_stub_init("{s}/sbin/init")
+    ensure_dir("{s}/sbin")
+    if not file_write_bytes("{s}/sbin/init", init_data):
+        print "error: failed to stage admitted target-native init artifact"
+        process.exit(1)
 
-    # Inject external payload entries supplied via --payload HOST:GUEST
     for entry in config.payloads:
+        if not _guest_path_safe(entry.guest_path):
+            print "error: payload guest path must be canonical and absolute: {entry.guest_path}"
+            process.exit(1)
+        if _is_toolchain_guest_path(entry.guest_path):
+            print "error: --payload cannot override a canonical Simple toolchain role path: {entry.guest_path}"
+            process.exit(1)
         if entry.is_dir:
             add_payload_dir(staging: s, host_dir: entry.host_path, guest_dir: entry.guest_path)
         elif entry.data.len() > 0:
@@ -388,56 +559,181 @@ fn populate_staging(config: PackConfig):
         else:
             add_payload(staging: s, host_path: entry.host_path, guest_path: entry.guest_path)
 
-fn run_cpio(staging: text, cpio_path: text):
-    """Invoke cpio via sh -c so we can pipe `find`. The shell is used
-    only for the pipeline; no logic lives here."""
+class NewcArchiveWriter:
+    data: [u8]
+    inode: i64
+
+    me append_text(value: text):
+        for byte in value.bytes():
+            self.data.push(byte.to_u8())
+
+    me append_hex8(value: i64):
+        val digits = "0123456789abcdef"
+        var shift: i64 = 28
+        while shift >= 0:
+            val nibble = (value >> shift) & 15
+            self.append_text(digits.slice(nibble, nibble + 1))
+            shift = shift - 4
+
+    me align4():
+        while (self.data.len() & 3) != 0:
+            self.data.push(0u8)
+
+    me entry(path: text, mode: i64, payload: [u8]):
+        self.append_text("070701")
+        self.append_hex8(self.inode)
+        self.inode = self.inode + 1
+        self.append_hex8(mode)
+        self.append_hex8(0)
+        self.append_hex8(0)
+        self.append_hex8(1)
+        self.append_hex8(0)
+        self.append_hex8(payload.len())
+        self.append_hex8(0)
+        self.append_hex8(0)
+        self.append_hex8(0)
+        self.append_hex8(0)
+        self.append_hex8(path.bytes().len() + 1)
+        self.append_hex8(0)
+        self.append_text(path)
+        self.data.push(0u8)
+        self.align4()
+        for byte in payload:
+            self.data.push(byte)
+        self.align4()
+
+class InitramfsInventoryEntry:
+    host_path: text
+    relative_path: text
+    payload_size: i64
+    is_dir: bool
+fn initramfs_pack_newc_entry_size(path: text, payload_size: i64) -> Result<i64, text>:
+    val name_size = path.bytes().len() + 1
+    if payload_size < 0 or name_size < 2 or name_size > 4096:
+        return Err("newc-entry-size-invalid")
+    val data_start = (110 + name_size + 3) & (0 - 4)
+    if data_start > MAX_INITRAMFS_EXPANDED_BYTES or
+       payload_size > MAX_INITRAMFS_EXPANDED_BYTES - data_start:
+        return Err("newc-entry-budget-exceeded")
+    val unpadded = data_start + payload_size
+    val encoded = (unpadded + 3) & (0 - 4)
+    if encoded < unpadded or encoded > MAX_INITRAMFS_EXPANDED_BYTES:
+        return Err("newc-entry-budget-exceeded")
+    Ok(encoded)
+
+fn _bounded_inventory(staging: text) -> [InitramfsInventoryEntry]:
+    val (raw, _err, code) = process_run_bounded(
+        "/usr/bin/find", [staging, "-mindepth", "1", "-print0"], 60000, MAX_PACK_INVENTORY_BYTES)
+    if code != 0 or (raw != "" and not raw.ends_with("\0")):
+        print "error: bounded staging inventory failed or exceeded its byte budget"
+        process.exit(1)
+    var paths = raw.split("\0")
+    if paths.len() > 0 and paths[paths.len() - 1] == "":
+        paths.pop()
+    if paths.len() + 2 > MAX_PACK_ENTRIES:
+        print "error: staging entry count exceeds policy"
+        process.exit(1)
+    paths.sort()
+    var inventory: [InitramfsInventoryEntry] = []
+    var encoded_total = initramfs_pack_newc_entry_size(".", 0).unwrap()
+    val prefix = staging + "/"
+    for host_path in paths:
+        if not host_path.starts_with(prefix):
+            print "error: staging inventory escaped owned root"
+            process.exit(1)
+        val relative = host_path.slice(prefix.len(), host_path.len())
+        if not _guest_path_safe("/" + relative):
+            print "error: staging inventory returned unsafe path"
+            process.exit(1)
+        val is_directory = dir_exists(host_path)
+        if not is_directory and not file_exists(host_path):
+            print "error: staging entry type unsupported"
+            process.exit(1)
+        val size = if is_directory: 0 else: file_size(host_path)
+        val encoded = match initramfs_pack_newc_entry_size(relative, size):
+            case Ok(value): value
+            case Err(message):
+                print "error: {message}"
+                process.exit(1)
+                0
+        if encoded > MAX_INITRAMFS_EXPANDED_BYTES - encoded_total:
+            print "error: cumulative newc size exceeds policy"
+            process.exit(1)
+        encoded_total = encoded_total + encoded
+        inventory.push(InitramfsInventoryEntry(
+            host_path: host_path, relative_path: relative,
+            payload_size: size, is_dir: is_directory))
+    val trailer_size = initramfs_pack_newc_entry_size("TRAILER!!!", 0).unwrap()
+    if trailer_size > MAX_INITRAMFS_EXPANDED_BYTES - encoded_total:
+        print "error: final newc padding exceeds policy"
+        process.exit(1)
+    val unpadded_total = encoded_total + trailer_size
+    val final_size = (unpadded_total + 511) & (0 - 512)
+    if final_size < unpadded_total or final_size > MAX_INITRAMFS_EXPANDED_BYTES:
+        print "error: final newc padding exceeds policy"
+        process.exit(1)
+    inventory
+
+fn run_cpio(staging: text, cpio_path: text, inventory: [InitramfsInventoryEntry]):
+    """Create deterministic newc directly; no shell or interpolated command."""
     ensure_dir(parent_path(cpio_path))
-    val abs_cpio = absolute_path(cpio_path)
-    val cmd = "cd \"{staging}\" && find . -print0 | cpio --null -o -H newc > \"{abs_cpio}\""
-    print "[pack] running cpio: {cmd}"
-    val result = process.run("sh", ["-c", cmd])
-    if result.exit_code != 0:
-        print "error: cpio failed"
-        print result.stderr
+    val (symlinks, _symlink_err, symlink_code) = process_run_bounded(
+        "/usr/bin/find", [staging, "-type", "l", "-print", "-quit"], 60000, 8192)
+    if symlink_code != 0 or symlinks.trim() != "":
+        print "error: staging tree contains or cannot exclude symlinks"
+        process.exit(1)
+    var writer = NewcArchiveWriter(data: [], inode: 1)
+    writer.entry(".", 0x41ED, [])
+    for entry in inventory:
+        if entry.is_dir:
+            writer.entry(entry.relative_path, 0x41ED, [])
+        else:
+            val payload = file_read_bytes(entry.host_path)
+            if payload.len() != entry.payload_size:
+                print "error: staged file changed after bounded inventory"
+                process.exit(1)
+            writer.entry(entry.relative_path, 0x81ED, payload)
+    writer.entry("TRAILER!!!", 0, [])
+    while (writer.data.len() & 511) != 0:
+        writer.data.push(0u8)
+    if writer.data.len() > MAX_INITRAMFS_EXPANDED_BYTES or not file_write_bytes(cpio_path, writer.data):
+        print "error: newc archive write failed"
         process.exit(1)
 
 fn run_zstd(cpio_path: text, zst_path: text):
-    print "[pack] compressing with zstd -19: {zst_path}"
-    val result = process.run("zstd", ["-19", "-f", cpio_path, "-o", zst_path])
-    if result.exit_code != 0:
-        print "error: zstd failed"
-        print result.stderr
+    print "[pack] encoding bounded raw/RLE zstd frame: {zst_path}"
+    if not file_exists(cpio_path):
+        print "error: cpio input missing before zstd encoding"
+        process.exit(1)
+    val encoded = compress_zstd(file_read_bytes(cpio_path))
+    if encoded.len() > MAX_INITRAMFS_COMPRESSED_BYTES or not file_write_bytes(zst_path, encoded):
+        print "error: bounded zstd image write failed"
         process.exit(1)
 
-fn emit_manifest(staging: text, output: text):
+fn emit_manifest(inventory: [InitramfsInventoryEntry], output: text):
     """Emit <output>.sdn listing every staged entry with its size."""
     val manifest = "{output}.sdn"
     ensure_dir(parent_path(manifest))
-    val cmd = "cd \"{staging}\" && find . -type f -printf \"%p %s\\n\""
-    val result = process.run("sh", ["-c", cmd])
-    if result.exit_code != 0:
-        print "warning: manifest find failed; skipping"
-        return
-
-    var text = "initramfs_manifest {\n"
-    text = text + "  image: \"{output}\"\n"
-    text = text + "  entries: [\n"
-    for line in result.stdout.split("\n"):
-        val trimmed = line.trim()
-        if trimmed != "":
-            val parts = trimmed.split(" ")
-            if parts.len() >= 2:
-                val path = parts[0]
-                val size = parts[parts.len() - 1]
-                text = text + "    { path: \"{path}\", size: {size} }\n"
-    text = text + "  ]\n"
-    text = text + "}\n"
-    file_write_text(manifest, text)
+    var parts = ["initramfs_manifest {\n", "  image: \"{output}\"\n", "  entries: [\n"]
+    var bytes = parts[0].bytes().len() + parts[1].bytes().len() + parts[2].bytes().len() + 6
+    for entry in inventory:
+        if not entry.is_dir:
+            val line = "    { path: \"./{entry.relative_path}\", size: {entry.payload_size} }\n"
+            if line.bytes().len() > MAX_PACK_MANIFEST_BYTES - bytes:
+                print "error: initramfs manifest exceeds byte budget"
+                process.exit(1)
+            bytes = bytes + line.bytes().len()
+            parts.push(line)
+    parts.push("  ]\n")
+    parts.push("}\n")
+    file_write_text(manifest, parts.join(""))
     print "[pack] manifest: {manifest}"
 
 fn cmd_build(config: PackConfig):
     print "=== initramfs build ==="
-    print "  simple: {config.simple_binary}"
+    print "  compiler:    {config.compiler_binary}"
+    print "  interpreter: {config.interpreter_binary}"
+    print "  loader:      {config.loader_binary}"
     print "  llvm:   {config.llvm_prefix}"
     print "  sysroot: {config.sysroot}"
     print "  src:    {config.source_tree}"
@@ -448,9 +744,10 @@ fn cmd_build(config: PackConfig):
     populate_staging(config)
 
     val cpio_path = "{config.staging}.cpio"
-    run_cpio(staging: config.staging, cpio_path: cpio_path)
+    val inventory = _bounded_inventory(config.staging)
+    run_cpio(staging: config.staging, cpio_path: cpio_path, inventory: inventory)
     run_zstd(cpio_path: cpio_path, zst_path: config.output)
-    emit_manifest(staging: config.staging, output: config.output)
+    emit_manifest(inventory: inventory, output: config.output)
 
     if file_exists(config.output):
         val size = file_size(config.output)
@@ -461,51 +758,28 @@ fn cmd_build(config: PackConfig):
     print "=== initramfs build complete ==="
 
 fn validate_image(image: text) -> bool:
+    if not _host_image_path_safe(image):
+        print "validate: FAIL — unsafe image path"
+        return false
     if not file_exists(image):
         print "validate: FAIL — image missing: {image}"
         return false
     val size = file_size(image)
-    if size == 0:
-        print "validate: FAIL — image is empty: {image}"
+    if size <= 0 or size > MAX_INITRAMFS_COMPRESSED_BYTES:
+        print "validate: FAIL — compressed image size outside policy"
         return false
-    print "validate: image size {size} bytes"
+    val compressed = file_read_bytes(image)
+    match validate_zstd_toolchain_archive(compressed):
+        case Ok(()):
+            print "validate: PASS — canonical archive and toolchain role digests verified"
+            true
+        case Err(message):
+            print "validate: FAIL — {message}"
+            false
 
-    # Decompress + list entries. We require zstd + cpio on the host.
-    val cmd = "zstd -d -c \"{image}\" | cpio -tv 2>&1"
-    val result = process.run("sh", ["-c", cmd])
-    if result.exit_code != 0:
-        print "validate: FAIL — zstd|cpio listing failed"
-        print result.stderr
-        return false
-
-    val listing = result.stdout
-    var ok = true
-    val required: [text] = [
-        "bin/simple",
-        "bin/simple.smf",
-        "usr/bin/simple",
-        "usr/bin/simple.smf",
-        "sys/apps/simple",
-        "sys/apps/simple.smf",
-        "sys/apps/simple_compiler",
-        "sys/apps/simple_compiler.smf",
-        "sys/apps/simple_interpreter",
-        "sys/apps/simple_interpreter.smf",
-        "sys/apps/simple_loader",
-        "sys/apps/simple_loader.smf",
-        "SYS/SIMPLETOOL.SDN",
-        "usr/bin/clang",
-        "src",
-        "src/compiler/99.loader",
-    ]
-    for entry in required:
-        if not listing.contains(entry):
-            print "validate: FAIL — missing entry: {entry}"
-            ok = false
-
-    if ok:
-        print "validate: PASS"
-    ok
+export PackConfig, PayloadEntry, SimpleToolchainRole, NewcArchiveWriter
+export compress_zstd, simple_toolchain_manifest_text, initramfs_pack_path_admission, initramfs_pack_newc_entry_size
+export cmd_build, validate_image
 
 fn main():
     val raw_args = get_cli_args()

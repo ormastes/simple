@@ -27,6 +27,10 @@ use nogc_async_mut.quic.quic_sffi.{
     rt_quic_is_established,
     rt_quic_is_closed
 }
+use nogc_async_mut.quic.quic_provider.{
+    quic_provider_check,
+    quic_provider_is_usable
+}
 
 # ============================================================================
 # Configuration
@@ -76,12 +80,39 @@ class QuicConnection:
     established: bool
     closed: bool
 
+fn _quic_closed_connection(is_server: bool) -> QuicConnection:
+    """Terminal fail-closed connection: no native handle, never usable."""
+    QuicConnection {
+        handle: 0,
+        is_server: is_server,
+        established: false,
+        closed: true
+    }
+
+pub fn quic_connection_is_usable(conn: QuicConnection) -> bool:
+    """True only for a live native handle under an available provider.
+
+    Every transport entry point below is gated on this. The provider is
+    hard-disabled until the QUIC-TLS blocker is resolved, so no `rt_quic_*`
+    call is reachable, and a zero/negative handle is never passed to the
+    runtime even if the provider later reports Available.
+    """
+    if not quic_provider_is_usable(quic_provider_check()):
+        return false
+    if conn.closed:
+        return false
+    conn.handle > 0
+
 pub fn quic_accept(scid: text, config: QuicConfig) -> QuicConnection:
     """Accept an incoming QUIC connection (server side)."""
+    if not quic_provider_is_usable(quic_provider_check()):
+        return _quic_closed_connection(true)
     val cfg_handle = rt_quic_config_new(config.version)
     rt_quic_config_set_max_idle_timeout(cfg_handle, config.max_idle_timeout)
     rt_quic_config_set_initial_max_streams_bidi(cfg_handle, config.max_streams_bidi)
     val conn_handle = rt_quic_accept(scid, cfg_handle)
+    if conn_handle <= 0:
+        return _quic_closed_connection(true)
     QuicConnection {
         handle: conn_handle,
         is_server: true,
@@ -91,10 +122,14 @@ pub fn quic_accept(scid: text, config: QuicConfig) -> QuicConnection:
 
 pub fn quic_connect(server_name: text, scid: text, config: QuicConfig) -> QuicConnection:
     """Initiate an outgoing QUIC connection (client side)."""
+    if not quic_provider_is_usable(quic_provider_check()):
+        return _quic_closed_connection(false)
     val cfg_handle = rt_quic_config_new(config.version)
     rt_quic_config_set_max_idle_timeout(cfg_handle, config.max_idle_timeout)
     rt_quic_config_set_initial_max_streams_bidi(cfg_handle, config.max_streams_bidi)
     val conn_handle = rt_quic_connect(server_name, scid, cfg_handle)
+    if conn_handle <= 0:
+        return _quic_closed_connection(false)
     QuicConnection {
         handle: conn_handle,
         is_server: false,
@@ -104,6 +139,8 @@ pub fn quic_connect(server_name: text, scid: text, config: QuicConfig) -> QuicCo
 
 pub fn quic_feed_udp(conn: QuicConnection, data: text, len: i64) -> QuicConnection:
     """Feed an incoming UDP datagram into the QUIC state machine."""
+    if not quic_connection_is_usable(conn):
+        return _quic_closed_connection(conn.is_server)
     rt_quic_recv(conn.handle, data, len)
     val is_up = rt_quic_is_established(conn.handle) != 0
     val is_down = rt_quic_is_closed(conn.handle) != 0
@@ -116,6 +153,8 @@ pub fn quic_feed_udp(conn: QuicConnection, data: text, len: i64) -> QuicConnecti
 
 pub fn quic_get_outgoing(conn: QuicConnection) -> QuicOutgoing:
     """Retrieve outgoing UDP data that the stack wants to send."""
+    if not quic_connection_is_usable(conn):
+        return QuicOutgoing { conn: conn, data: "", data_len: 0 }
     val buf_size: i64 = 65535
     val buf = ""
     val n = rt_quic_send(conn.handle, buf, buf_size)
@@ -127,6 +166,8 @@ pub fn quic_get_outgoing(conn: QuicConnection) -> QuicOutgoing:
 
 pub fn quic_stream_recv(conn: QuicConnection, stream_id: i64, buf_size: i64) -> QuicStreamRead:
     """Read up to buf_size bytes from a QUIC stream."""
+    if not quic_connection_is_usable(conn):
+        return QuicStreamRead { data: "", data_len: 0 }
     val buf = ""
     val n = rt_quic_stream_recv(conn.handle, stream_id, buf, buf_size)
     QuicStreamRead {
@@ -136,11 +177,15 @@ pub fn quic_stream_recv(conn: QuicConnection, stream_id: i64, buf_size: i64) -> 
 
 pub fn quic_stream_send(conn: QuicConnection, stream_id: i64, data: text, fin: bool) -> i64:
     """Write data to a QUIC stream. Set fin=true to close the stream."""
+    if not quic_connection_is_usable(conn):
+        return -1
     val fin_flag: i64 = if fin: 1 else: 0
     rt_quic_stream_send(conn.handle, stream_id, data, len(data), fin_flag)
 
 pub fn quic_close(conn: QuicConnection, reason: text) -> QuicConnection:
     """Initiate graceful closure of the QUIC connection."""
+    if not quic_connection_is_usable(conn):
+        return _quic_closed_connection(conn.is_server)
     rt_quic_conn_close(conn.handle, 0, reason)
     QuicConnection {
         handle: conn.handle,
@@ -151,6 +196,8 @@ pub fn quic_close(conn: QuicConnection, reason: text) -> QuicConnection:
 
 pub fn quic_check_timeout(conn: QuicConnection) -> QuicConnection:
     """Fire any expired timers and refresh established/closed flags."""
+    if not quic_connection_is_usable(conn):
+        return _quic_closed_connection(conn.is_server)
     rt_quic_on_timeout(conn.handle)
     val is_up = rt_quic_is_established(conn.handle) != 0
     val is_down = rt_quic_is_closed(conn.handle) != 0
@@ -163,4 +210,6 @@ pub fn quic_check_timeout(conn: QuicConnection) -> QuicConnection:
 
 pub fn quic_timeout_millis(conn: QuicConnection) -> i64:
     """Return milliseconds until the next QUIC timer fires (-1 = no timer)."""
+    if not quic_connection_is_usable(conn):
+        return -1
     rt_quic_timeout_as_millis(conn.handle)

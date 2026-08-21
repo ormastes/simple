@@ -1,0 +1,464 @@
+# Bounded post-authenticated RESP command framing for SimpleOS DBD.
+#
+# One fixed-capacity ring retains decrypted command bytes. The incremental
+# state machine consumes every accepted byte once and queues only complete
+# frame lengths. A complete non-AUTH frame is copied once for the canonical
+# text RESP parser; consumed ring bytes are zeroed in place. No incomplete
+# command is repeatedly concatenated or rescanned.
+
+use os.apps.dbd.dbd_protocol.{
+    DBD_MAX_SESSION_BYTES, DBD_MAX_REQUESTS_PER_SESSION,
+    DBD_MAX_JOURNAL_ARGS
+}
+
+pub enum DbdCommandIngressStatusV1:
+    Accepted
+    Overflow
+    Malformed
+    Closed
+
+enum DbdRespParsePhaseV1:
+    Start
+    ArrayCount
+    ArrayCountLf
+    BulkDollar
+    BulkLength
+    BulkLengthLf
+    BulkData
+    BulkDataCr
+    BulkDataLf
+    Inline
+    InlineCr
+    Failed
+
+pub class DbdAuthenticatedCommandFrameV1:
+    bytes: [u8]
+    auth_command: bool
+
+    pub me fn zeroize_owned_bytes() -> i64:
+        var wiped: i64 = 0
+        var index: u64 = 0
+        while index < self.bytes.len():
+            self.bytes[index] = 0u8
+            wiped = wiped + 1
+            index = index + 1u64
+        wiped
+
+    pub fn retained_nonzero_byte_count() -> i64:
+        var retained: i64 = 0
+        for byte in self.bytes:
+            if byte != 0u8:
+                retained = retained + 1
+        retained
+
+fn _dbd_command_ring_storage() -> [u8]:
+    var storage: [u8] = []
+    var index: i64 = 0
+    while index < DBD_MAX_SESSION_BYTES:
+        storage.push(0u8)
+        index = index + 1
+    storage
+
+fn _dbd_command_ascii_fold(byte: u8) -> u8:
+    if byte >= 97u8 and byte <= 122u8:
+        return byte - 32u8
+    byte
+
+fn _dbd_command_auth_byte(index: i64) -> u8:
+    if index == 0: return 65u8
+    if index == 1: return 85u8
+    if index == 2: return 84u8
+    if index == 3: return 72u8
+    0u8
+
+fn _dbd_command_digit(byte: u8) -> bool:
+    byte >= 48u8 and byte <= 57u8
+
+fn _dbd_command_saturating_add(left: i64, right: i64) -> i64:
+    if left < 0 or right < 0:
+        return 9223372036854775807
+    if right > 9223372036854775807 - left:
+        return 9223372036854775807
+    left + right
+
+pub class DbdAuthenticatedRespIngressV1:
+    storage: [u8]
+    head: i64
+    length: i64
+    scan_offset: i64
+    phase: DbdRespParsePhaseV1
+    current_frame_length: i64
+    number_value: i64
+    number_digits: i64
+    negative_length: bool
+    array_remaining: i64
+    argument_index: i64
+    bulk_length: i64
+    bulk_index: i64
+    command_possible_auth: bool
+    command_token_length: i64
+    command_token_done: bool
+    current_is_auth: bool
+    complete_lengths: [i64]
+    complete_auth_flags: [bool]
+    complete_cursor: i64
+    cumulative_byte_work: i64
+    last_take_was_zeroized: bool
+    last_failure_wipe_count: i64
+    last_failure_was_zeroized: bool
+    last_close_wipe_count: i64
+    last_close_was_zeroized: bool
+    closed: bool
+    malformed: bool
+
+    pub static fn new() -> DbdAuthenticatedRespIngressV1:
+        DbdAuthenticatedRespIngressV1(
+            storage: _dbd_command_ring_storage(),
+            head: 0,
+            length: 0,
+            scan_offset: 0,
+            phase: DbdRespParsePhaseV1.Start,
+            current_frame_length: 0,
+            number_value: 0,
+            number_digits: 0,
+            negative_length: false,
+            array_remaining: 0,
+            argument_index: 0,
+            bulk_length: 0,
+            bulk_index: 0,
+            command_possible_auth: true,
+            command_token_length: 0,
+            command_token_done: false,
+            current_is_auth: false,
+            complete_lengths: [],
+            complete_auth_flags: [],
+            complete_cursor: 0,
+            cumulative_byte_work: 0,
+            last_take_was_zeroized: true,
+            last_failure_wipe_count: 0,
+            last_failure_was_zeroized: true,
+            last_close_wipe_count: 0,
+            last_close_was_zeroized: true,
+            closed: false,
+            malformed: false
+        )
+
+    fn ring_index(logical_offset: i64) -> i64:
+        (self.head + logical_offset) % DBD_MAX_SESSION_BYTES
+
+    me reset_number():
+        self.number_value = 0
+        self.number_digits = 0
+        self.negative_length = false
+
+    me reset_frame_parser():
+        self.phase = DbdRespParsePhaseV1.Start
+        self.current_frame_length = 0
+        self.reset_number()
+        self.array_remaining = 0
+        self.argument_index = 0
+        self.bulk_length = 0
+        self.bulk_index = 0
+        self.command_possible_auth = true
+        self.command_token_length = 0
+        self.command_token_done = false
+        self.current_is_auth = false
+
+    me fail() -> bool:
+        self.last_failure_wipe_count = self.length
+        self.last_failure_was_zeroized = true
+        var index: i64 = 0
+        while index < self.length:
+            val storage_index = self.ring_index(index)
+            self.storage[storage_index] = 0u8
+            if self.storage[storage_index] != 0u8:
+                self.last_failure_was_zeroized = false
+            index = index + 1
+        self.length = 0
+        self.scan_offset = 0
+        self.complete_lengths = []
+        self.complete_auth_flags = []
+        self.complete_cursor = 0
+        self.phase = DbdRespParsePhaseV1.Failed
+        self.malformed = true
+        false
+
+    me accumulate_digit(byte: u8, maximum: i64) -> bool:
+        if not _dbd_command_digit(byte):
+            return false
+        val digit = byte.to_i64() - 48
+        if self.number_digits >= 6 or
+            self.number_value > (maximum - digit) / 10:
+            return false
+        self.number_value = self.number_value * 10 + digit
+        self.number_digits = self.number_digits + 1
+        true
+
+    me observe_command_byte(byte: u8):
+        if self.command_token_done:
+            return
+        if byte == 32u8 or byte == 9u8 or byte == 13u8 or byte == 10u8:
+            self.command_token_done = true
+            self.current_is_auth = self.command_possible_auth and
+                self.command_token_length == 4
+            return
+        if self.command_token_length >= 4 or
+            _dbd_command_ascii_fold(byte) !=
+                _dbd_command_auth_byte(self.command_token_length):
+            self.command_possible_auth = false
+        self.command_token_length = self.command_token_length + 1
+
+    me finish_frame() -> bool:
+        if self.complete_lengths.len().to_i64() - self.complete_cursor >=
+            DBD_MAX_REQUESTS_PER_SESSION:
+            return self.fail()
+        if not self.command_token_done:
+            self.current_is_auth = self.command_possible_auth and
+                self.command_token_length == 4
+        self.complete_lengths.push(self.current_frame_length)
+        self.complete_auth_flags.push(self.current_is_auth)
+        self.reset_frame_parser()
+        true
+
+    me finish_array_argument() -> bool:
+        self.array_remaining = self.array_remaining - 1
+        self.argument_index = self.argument_index + 1
+        if self.array_remaining == 0:
+            return self.finish_frame()
+        self.phase = DbdRespParsePhaseV1.BulkDollar
+        true
+
+    me consume_byte(byte: u8) -> bool:
+        self.current_frame_length = self.current_frame_length + 1
+        if self.phase == DbdRespParsePhaseV1.Start:
+            self.command_possible_auth = true
+            self.command_token_length = 0
+            self.command_token_done = false
+            self.current_is_auth = false
+            if byte == 42u8:
+                self.phase = DbdRespParsePhaseV1.ArrayCount
+                self.reset_number()
+            else:
+                self.phase = DbdRespParsePhaseV1.Inline
+                self.observe_command_byte(byte)
+                if byte == 10u8:
+                    return self.finish_frame()
+                if byte == 13u8:
+                    self.phase = DbdRespParsePhaseV1.InlineCr
+            return true
+
+        if self.phase == DbdRespParsePhaseV1.ArrayCount:
+            if byte == 13u8:
+                if self.number_digits == 0 or
+                    self.number_value > DBD_MAX_JOURNAL_ARGS:
+                    return self.fail()
+                self.array_remaining = self.number_value
+                self.phase = DbdRespParsePhaseV1.ArrayCountLf
+                return true
+            if not self.accumulate_digit(byte, DBD_MAX_JOURNAL_ARGS):
+                return self.fail()
+            return true
+
+        if self.phase == DbdRespParsePhaseV1.ArrayCountLf:
+            if byte != 10u8:
+                return self.fail()
+            if self.array_remaining == 0:
+                self.command_possible_auth = false
+                self.command_token_done = true
+                return self.finish_frame()
+            self.argument_index = 0
+            self.phase = DbdRespParsePhaseV1.BulkDollar
+            return true
+
+        if self.phase == DbdRespParsePhaseV1.BulkDollar:
+            if byte != 36u8:
+                return self.fail()
+            self.reset_number()
+            self.phase = DbdRespParsePhaseV1.BulkLength
+            return true
+
+        if self.phase == DbdRespParsePhaseV1.BulkLength:
+            if byte == 45u8 and self.number_digits == 0 and
+                not self.negative_length:
+                self.negative_length = true
+                return true
+            if byte == 13u8:
+                if self.number_digits == 0:
+                    return self.fail()
+                if self.negative_length and self.number_value != 1:
+                    return self.fail()
+                self.bulk_length = if self.negative_length:
+                    0
+                else:
+                    self.number_value
+                if self.argument_index == 0:
+                    self.command_possible_auth = not self.negative_length and
+                        self.bulk_length == 4
+                    self.command_token_length = 0
+                    self.command_token_done = false
+                self.phase = DbdRespParsePhaseV1.BulkLengthLf
+                return true
+            if not self.accumulate_digit(byte, DBD_MAX_SESSION_BYTES):
+                return self.fail()
+            return true
+
+        if self.phase == DbdRespParsePhaseV1.BulkLengthLf:
+            if byte != 10u8:
+                return self.fail()
+            if self.negative_length:
+                if self.argument_index == 0:
+                    self.command_possible_auth = false
+                    self.command_token_done = true
+                return self.finish_array_argument()
+            self.bulk_index = 0
+            if self.bulk_length == 0:
+                if self.argument_index == 0:
+                    self.command_possible_auth = false
+                    self.command_token_done = true
+                self.phase = DbdRespParsePhaseV1.BulkDataCr
+            else:
+                self.phase = DbdRespParsePhaseV1.BulkData
+            return true
+
+        if self.phase == DbdRespParsePhaseV1.BulkData:
+            if self.argument_index == 0:
+                if self.command_token_length >= 4 or
+                    _dbd_command_ascii_fold(byte) !=
+                        _dbd_command_auth_byte(self.command_token_length):
+                    self.command_possible_auth = false
+                self.command_token_length = self.command_token_length + 1
+            self.bulk_index = self.bulk_index + 1
+            if self.bulk_index == self.bulk_length:
+                if self.argument_index == 0:
+                    self.command_token_done = true
+                    self.current_is_auth = self.command_possible_auth and
+                        self.command_token_length == 4
+                self.phase = DbdRespParsePhaseV1.BulkDataCr
+            return true
+
+        if self.phase == DbdRespParsePhaseV1.BulkDataCr:
+            if byte != 13u8:
+                return self.fail()
+            self.phase = DbdRespParsePhaseV1.BulkDataLf
+            return true
+
+        if self.phase == DbdRespParsePhaseV1.BulkDataLf:
+            if byte != 10u8:
+                return self.fail()
+            return self.finish_array_argument()
+
+        if self.phase == DbdRespParsePhaseV1.Inline:
+            self.observe_command_byte(byte)
+            if byte == 10u8:
+                return self.finish_frame()
+            if byte == 13u8:
+                self.phase = DbdRespParsePhaseV1.InlineCr
+            return true
+
+        if self.phase == DbdRespParsePhaseV1.InlineCr:
+            if byte != 10u8:
+                return self.fail()
+            return self.finish_frame()
+
+        self.fail()
+
+    pub me fn ingest(bytes: [u8]) -> DbdCommandIngressStatusV1:
+        if self.closed:
+            return DbdCommandIngressStatusV1.Closed
+        if self.malformed:
+            return DbdCommandIngressStatusV1.Malformed
+        if bytes.len() == 0:
+            self.fail()
+            return DbdCommandIngressStatusV1.Malformed
+        val incoming_length = bytes.len().to_i64()
+        if incoming_length > DBD_MAX_SESSION_BYTES - self.length:
+            val _ = self.fail()
+            return DbdCommandIngressStatusV1.Overflow
+
+        var input_index: i64 = 0
+        while input_index < incoming_length:
+            self.storage[self.ring_index(self.length + input_index)] =
+                bytes[input_index]
+            input_index = input_index + 1
+        self.length = self.length + incoming_length
+        self.cumulative_byte_work = _dbd_command_saturating_add(
+            self.cumulative_byte_work, incoming_length)
+
+        while self.scan_offset < self.length:
+            val byte = self.storage[self.ring_index(self.scan_offset)]
+            if not self.consume_byte(byte):
+                return DbdCommandIngressStatusV1.Malformed
+            self.scan_offset = self.scan_offset + 1
+            self.cumulative_byte_work = _dbd_command_saturating_add(
+                self.cumulative_byte_work, 1)
+        DbdCommandIngressStatusV1.Accepted
+
+    pub me fn take_next() -> DbdAuthenticatedCommandFrameV1?:
+        if self.closed or self.malformed or
+            self.complete_cursor >= self.complete_lengths.len().to_i64():
+            return nil
+        val frame_length = self.complete_lengths[self.complete_cursor]
+        val is_auth = self.complete_auth_flags[self.complete_cursor]
+        var out: [u8] = []
+        self.last_take_was_zeroized = true
+        var index: i64 = 0
+        while index < frame_length:
+            val ring_index = self.ring_index(index)
+            out.push(self.storage[ring_index])
+            self.storage[ring_index] = 0u8
+            if self.storage[ring_index] != 0u8:
+                self.last_take_was_zeroized = false
+            index = index + 1
+        self.head = self.ring_index(frame_length)
+        self.length = self.length - frame_length
+        self.scan_offset = self.scan_offset - frame_length
+        self.complete_cursor = self.complete_cursor + 1
+        self.cumulative_byte_work = _dbd_command_saturating_add(
+            self.cumulative_byte_work, frame_length)
+        if self.complete_cursor >= self.complete_lengths.len().to_i64():
+            self.complete_lengths = []
+            self.complete_auth_flags = []
+            self.complete_cursor = 0
+        Some(DbdAuthenticatedCommandFrameV1(
+            bytes: out, auth_command: is_auth))
+
+    pub fn remaining_byte_count() -> i64:
+        self.length
+
+    pub fn byte_work() -> i64:
+        self.cumulative_byte_work
+
+    pub fn is_failed() -> bool:
+        self.malformed or self.closed
+
+    pub fn last_take_zeroized_owned_bytes() -> bool:
+        self.last_take_was_zeroized
+
+    pub fn last_failure_wiped_byte_count() -> i64:
+        self.last_failure_wipe_count
+
+    pub fn last_failure_zeroized_owned_bytes() -> bool:
+        self.last_failure_was_zeroized
+
+    pub fn last_close_wiped_byte_count() -> i64:
+        self.last_close_wipe_count
+
+    pub fn last_close_zeroized_owned_bytes() -> bool:
+        self.last_close_was_zeroized
+
+    pub me fn close():
+        self.last_close_wipe_count = self.length
+        self.last_close_was_zeroized = true
+        var index: i64 = 0
+        while index < self.length:
+            val storage_index = self.ring_index(index)
+            self.storage[storage_index] = 0u8
+            if self.storage[storage_index] != 0u8:
+                self.last_close_was_zeroized = false
+            index = index + 1
+        self.length = 0
+        self.scan_offset = 0
+        self.complete_lengths = []
+        self.complete_auth_flags = []
+        self.complete_cursor = 0
+        self.closed = true

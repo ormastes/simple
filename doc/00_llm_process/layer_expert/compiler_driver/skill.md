@@ -133,3 +133,26 @@ now invoked for manifest recording plus a level-gated verify diagnostic. The
 long-standing "zero callers — never computed" status quoted elsewhere (e.g.
 `.claude/rules/commands.md`) is stale as of that commit; dependency-aware
 partial rebuild is still NOT wired.
+
+---
+
+## 2026-08-21 — hardening gates wired around the driver
+
+New fail-closed gates the driver must keep green (all `--selftest` fatal, verdict on the last
+stdout line, 0 items checked ⇒ `ERROR` exit 2):
+`check-critical-wildcard-ban.shs`, `check-compiler-transition-coverage.shs`,
+`check-compiler-schema-fresh.shs`, `check-post-mono-invariants.shs`,
+`check-any-escape-census.shs`, `check-duplicate-pub-fn-names.shs`,
+`check-hardening-mutation.shs` (meta-gate: mutating the hardening code must kill a guard).
+
+New driver-adjacent modules: `src/compiler/00.common/transition/**` (`transition_table`,
+`validator`, `coverage_state`, `check_main`), `00.common/dynamic_identity/**`,
+`99.loader/completeness_seal/**`, and the `src/app/compiler_schema/` CLI
+(`main/registry/extract/coverage.spl`, tests in `test/01_unit/app/compiler_schema/`).
+
+`driver_hir_pipeline_passes.spl` stays **integrator-only** — the wave plan forbids feature agents
+editing it. See `feature_expert/compiler_hardening/skill.md` and
+`doc/03_plan/compiler/hardening/critical_hardening_plan_2026-08-21.md`.
+
+**Open 2026-08-21:** `standalone_hir_lowering_aborts_on_real_compiler_files_2026-08-21.md`,
+`declare_globals_fallback_debug_print_ungated_2026-08-21.md`.

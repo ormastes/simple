@@ -1,0 +1,300 @@
+# ParserModule Surface - compact cross-module declarations for staged HIR lowering.
+#
+# codex-impl: Stage4 module retention is reduced by keeping declaration
+# surfaces.  The surface deliberately omits ordinary executable bodies,
+# parameter default expressions, composite field defaults, and constant values.
+
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.parser_types.*
+
+extern fn rt_hash_text(content: text) -> i64
+
+struct ModuleSurfaceParam:
+    name: text
+    has_type_: bool
+    type_: Type
+    # Native-safe scalar projections.  A parser Type contains an enum payload;
+    # copying it through a nested surface collection can corrupt that payload
+    # on the staged native ABI, while text fields remain stable.
+    type_name: text
+    array_element_name: text
+    has_default: bool
+    is_mutable: bool
+    span: Span
+
+struct ModuleSurfaceCallable:
+    name: text
+    type_params: [ParserTypeParam]
+    params: [ModuleSurfaceParam]
+    has_return_type: bool
+    return_type: Type
+    return_type_name: text
+    return_array_element_name: text
+    visibility: Visibility
+    is_async: bool
+    is_static: bool
+    is_public: bool
+    is_method: bool
+    is_mutable: bool
+    is_const: bool
+    is_kernel: bool
+    is_extern: bool
+    span: Span
+
+struct ModuleSurfaceField:
+    name: text
+    type_: Type
+    type_name: text
+    array_element_name: text
+
+struct ModuleSurfaceComposite:
+    name: text
+    kind: text
+    type_params: [ParserTypeParam]
+    fields: [ModuleSurfaceField]
+    visibility: Visibility
+    is_public: bool
+    span: Span
+
+struct ModuleSurfaceEnum:
+    name: text
+    type_params: [ParserTypeParam]
+    # Variant.Struct carries its Fields, including the one permitted retained
+    # expression form: an enum struct-variant field default.
+    variants: [Variant]
+    visibility: Visibility
+    is_public: bool
+    span: Span
+
+struct ModuleSurfaceTrait:
+    name: text
+    type_params: [ParserTypeParam]
+    super_traits: [Type]
+    where_clause: [TraitBound]
+    methods: [ModuleSurfaceCallable]
+    # These original AST nodes are the sole executable-body exception: impl
+    # lowering must inject a trait's unoverridden default methods.
+    default_methods: [ParserFunction]
+    assoc_types: [AssocTypeDecl]
+    visibility: Visibility
+    is_public: bool
+    span: Span
+
+struct ModuleSurfaceImpl:
+    # Phase 3 consumes only the implemented/trait types and callable headers
+    # when registering imported methods. Generic bounds, associated types, and
+    # the impl span are never read from the surface and remain in the per-file
+    # AST for ordinary lowering.
+    type_: Type
+    has_trait_: bool
+    trait_: Type
+    methods: Dict<text, ModuleSurfaceCallable>
+
+struct ModuleSurfaceConst:
+    name: text
+    has_type_: bool
+    type_: Type
+    is_mutable: bool
+    visibility: Visibility
+    is_public: bool
+    is_volatile: bool
+    has_fixed_address: bool
+    fixed_address: i64
+    span: Span
+
+struct ModuleSurfaceTypeAlias:
+    name: text
+    type_params: [ParserTypeParam]
+    type_: Type
+    visibility: Visibility
+    is_public: bool
+    span: Span
+
+struct ModuleSurfaceExportOrigin:
+    owner_module: text
+    source_name: text
+    resolution_kind: text
+
+struct ModuleSurfaceExportOriginLookup:
+    found: bool
+    owner_module: text
+    source_name: text
+    resolution_kind: text
+
+struct ModuleSurfaceOriginResolution:
+    is_error: bool
+    error: text
+    found: bool
+    owner_module: text
+    source_name: text
+    resolution_kind: text
+
+class ModuleSurfaceExportOriginIndex:
+    origins: Dict<text, ModuleSurfaceExportOrigin>
+    index_by_name: Dict<text, i64>
+    frozen: bool
+    names: [text]
+    owner_modules: [text]
+    source_names: [text]
+    resolution_kinds: [text]
+
+# Registry construction and freeze publication are sequential. A builder must
+# finish its registry before publishing it to lowering or other readers; the
+# monotonic allocator therefore stays deliberately lightweight and does not
+# claim to synchronize concurrent freezes.
+var module_surface_freeze_generation_counter: i64 = 0
+
+pub(package) fn module_surface_allocate_generation() -> Result<i64, text>:
+    if module_surface_freeze_generation_counter == 9223372036854775807:
+        return Err("module surface freeze generation exhausted")
+    module_surface_freeze_generation_counter =
+        module_surface_freeze_generation_counter + 1
+    if module_surface_freeze_generation_counter == 0:
+        return Err("module surface freeze generation wrapped")
+    Ok(module_surface_freeze_generation_counter)
+
+pub(package) fn module_surface_export_origin_index_empty() -> ModuleSurfaceExportOriginIndex:
+    ModuleSurfaceExportOriginIndex(
+        origins: {}, index_by_name: {},
+        names: [], owner_modules: [], source_names: [],
+        resolution_kinds: [], frozen: false)
+
+pub(package) fn module_surface_export_origin_index_put(
+    origin_index: ModuleSurfaceExportOriginIndex,
+    name: text,
+    owner_module: text,
+    source_name: text,
+    resolution_kind: text
+) -> Result<(), text>:
+    # Keep the receiver explicit: native lowering has previously produced an
+    # invalid receiver for chained class-field method calls. Validate all
+    # aligned arrays before changing either representation.
+    if origin_index.frozen:
+        return Err("module surface export origin index is frozen")
+    if origin_index.names.len() != origin_index.owner_modules.len() or
+       origin_index.names.len() != origin_index.source_names.len() or
+       origin_index.names.len() != origin_index.resolution_kinds.len():
+        return Err("module surface export-origin index arrays are misaligned")
+    origin_index.origins[name] = ModuleSurfaceExportOrigin(
+        owner_module: owner_module,
+        source_name: source_name,
+        resolution_kind: resolution_kind)
+    if origin_index.index_by_name.contains_key(name):
+        val index: i64 = origin_index.index_by_name[name]
+        if index < 0 or index >= origin_index.names.len():
+            return Err("module surface export-origin scalar index is invalid")
+        origin_index.owner_modules[index] = owner_module
+        origin_index.source_names[index] = source_name
+        origin_index.resolution_kinds[index] = resolution_kind
+        return Ok(())
+    val index = origin_index.names.len()
+    origin_index.index_by_name[name] = index
+    origin_index.names = origin_index.names.push(name)
+    origin_index.owner_modules = origin_index.owner_modules.push(owner_module)
+    origin_index.source_names = origin_index.source_names.push(source_name)
+    origin_index.resolution_kinds = origin_index.resolution_kinds.push(resolution_kind)
+    Ok(())
+
+pub(package) fn module_surface_export_origin_index_lookup(origin_index: ModuleSurfaceExportOriginIndex, name: text) -> ModuleSurfaceExportOriginLookup:
+    if not origin_index.index_by_name.contains_key(name):
+        return ModuleSurfaceExportOriginLookup(
+            found: false, owner_module: "", source_name: "", resolution_kind: "")
+    val position: i64 = origin_index.index_by_name[name]
+    if position < 0 or position >= origin_index.names.len() or
+       position >= origin_index.owner_modules.len() or
+       position >= origin_index.source_names.len() or
+       position >= origin_index.resolution_kinds.len():
+        return ModuleSurfaceExportOriginLookup(
+            found: false, owner_module: "", source_name: "", resolution_kind: "")
+    return ModuleSurfaceExportOriginLookup(
+        found: true,
+        owner_module: origin_index.owner_modules[position],
+        source_name: origin_index.source_names[position],
+        resolution_kind: origin_index.resolution_kinds[position])
+
+pub(package) fn module_surface_validate_owner_index(
+    previous_index: i64, surface_count: i64
+) -> Result<(), text>:
+    if previous_index >= 0 and previous_index >= surface_count:
+        return Err("invalid module surface owner index: index={previous_index} len={surface_count}")
+    Ok(())
+
+class ModuleSurface:
+    # Stable identity of the physical source surface.  Registry aliases must
+    # never become part of re-export traversal identity.
+    physical_index: i64
+    generation: i64
+    frozen: bool
+    source_index: i64
+    canonical_path: text
+    module_name: text
+    logical_name: text
+    canonical_name: text
+    package_name: text
+    preferred_registry_name: text
+    content_length: i64
+    content_hash: i64
+    imports: [ParserImport]
+    exports: [Export]
+    # Frozen route projections.  These are deliberately parallel scalar
+    # arrays: no Dict<text, aggregate> crosses the native Stage3 boundary.
+    import_target_indices: [i64]
+    import_target_names: [text]
+    export_route_sources: [text]
+    export_route_locals: [text]
+    export_route_target_indices: [i64]
+    export_route_target_names: [text]
+    export_route_is_glob: [bool]
+    # Materialize declaration keys once during surface construction. Glob
+    # expansion reuses these projections instead of allocating Dict.keys()
+    # arrays for every root in the no-GC bootstrap.
+    composite_names: [text]
+    enum_names: [text]
+    trait_names: [text]
+    callable_names: [text]
+    type_alias_names: [text]
+    constant_names: [text]
+    callables: Dict<text, ModuleSurfaceCallable>
+    composites: Dict<text, ModuleSurfaceComposite>
+    enums: Dict<text, ModuleSurfaceEnum>
+    traits: Dict<text, ModuleSurfaceTrait>
+    impls: [ModuleSurfaceImpl]
+    type_aliases: Dict<text, ModuleSurfaceTypeAlias>
+    constants: Dict<text, ModuleSurfaceConst>
+    export_origins: Dict<text, ModuleSurfaceExportOrigin>
+    export_origin_index: ModuleSurfaceExportOriginIndex
+
+    static fn empty(name: text) -> ModuleSurface:
+        ModuleSurface(
+            physical_index: -1, generation: 0, frozen: false,
+            source_index: 0, canonical_path: name, module_name: name,
+            logical_name: name, canonical_name: name, package_name: "",
+            preferred_registry_name: name,
+            content_length: 0, content_hash: 0,
+            imports: [], exports: [],
+            import_target_indices: [], import_target_names: [],
+            export_route_sources: [], export_route_locals: [],
+            export_route_target_indices: [], export_route_target_names: [],
+            export_route_is_glob: [],
+            composite_names: [], enum_names: [], trait_names: [],
+            callable_names: [], type_alias_names: [], constant_names: [],
+            callables: {}, composites: {}, enums: {},
+            traits: {}, impls: [], type_aliases: {}, constants: {},
+            export_origins: {},
+            export_origin_index: module_surface_export_origin_index_empty())
+
+class ModuleSurfacesByName:
+    surfaces: [ModuleSurface]
+    index_by_name: Dict<text, i64>
+    ordered_names: [text]
+    ordered_indices: [i64]
+    generation: i64
+    frozen: bool
+
+struct ModuleSurfaceBuilder:
+    surfaces: [ModuleSurface]
+    index_by_name: Dict<text, i64>
+    index_by_path: Dict<text, i64>
+    ordered_names: [text]
+    ordered_indices: [i64]
+    frozen: bool

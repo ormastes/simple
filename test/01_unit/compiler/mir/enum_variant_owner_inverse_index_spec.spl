@@ -1,0 +1,108 @@
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_definitions.{HirEnum, HirVariant, HirVariantKind, HirExpr, HirExprKind}
+use compiler.hir.hir_types.{SymbolId, SymbolTable}
+use compiler.mir.mir_lowering.{MirLowering}
+
+# Phase-5 MIR allocation runaway: the variant-owner INVERSE INDEX.
+#
+# Dot-qualified enum construction (`CompileResult.CodegenError(msg)`) reaches
+# MIR as a MethodCall, not as an EnumLit. On the Stage-3 self-hosted native
+# lane the nested `receiver.kind` payload must not be re-matched to recover the
+# owner (see doc/08_tracking/bug/simpleos_stage3_native_ast_mode_cache_segfault_2026-08-20.md),
+# so the fallback recovers the owner from the METHOD leaf instead.
+#
+# That fallback was written as a nested loop over `enum_variant_index.keys()`,
+# executed once per uppercase-named method call with an unknown owner and
+# allocating a fresh key array on every one. On the 609-module self-host
+# closure it stalled while lowering
+# `compile_riscv_gen2_zca_migrating_predecode_product` -- a function whose body
+# is a dense run of `CompileResult.CodegenError(..)` calls: one pinned core,
+# a byte-for-byte unchanged log, and RSS climbing GiB per ten seconds.
+#
+# `enum_variant_owners` is the maintained O(1) inverse. These expectations are
+# hand-computed from the declared variant sets, and they pin the ACCEPTANCE
+# RULE the old scan had -- exactly one registered owner -- so the cheap index
+# cannot silently become more (or less) permissive than the scan it replaced.
+
+fn make_variant(name: text, index: i64) -> HirVariant:
+    HirVariant(
+        symbol: SymbolId(id: 9000 + index),
+        name: name,
+        kind: HirVariantKind.Unit,
+        has_discriminant: false,
+        discriminant: HirExpr(kind: HirExprKind.NilLit, type_: nil, span: Span.empty()),
+        span: Span.empty())
+
+fn make_enum(name: text, runtime_name: text, variant_names: [text]) -> HirEnum:
+    var variants: [HirVariant] = []
+    var i = 0
+    while i < variant_names.len():
+        variants = variants.push(make_variant(variant_names[i], i))
+        i = i + 1
+    HirEnum(
+        symbol: SymbolId(id: 8000),
+        name: name,
+        runtime_name: runtime_name,
+        type_params: [],
+        variants: variants,
+        visibility: Visibility.Public,
+        is_public: true,
+        doc_comment: nil,
+        span: Span.empty(),
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {})
+
+describe "the enum variant-owner inverse index":
+    it "names the unique owner of a variant leaf without scanning the keyspace":
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.register_enum_variants(make_enum(
+            "CompileResult", "driver.CompileResult", ["Success", "CodegenError"]))
+
+        # This is the exact recovery the stalling call site performs for
+        # `CompileResult.CodegenError(..)`, now as one dict lookup.
+        expect(lowering.enum_variant_owners.has("CodegenError")).to_be_true()
+        expect(lowering.enum_variant_owners["CodegenError"].len()).to_equal(1)
+        expect(lowering.enum_variant_owners["CodegenError"][0]).to_equal("CompileResult")
+
+    it "refuses recovery when two distinct enums declare the same variant leaf":
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.register_enum_variants(make_enum(
+            "CompileResult", "driver.CompileResult", ["Success", "CodegenError"]))
+        lowering.register_enum_variants(make_enum(
+            "EmitResult", "backend.EmitResult", ["CodegenError", "Skipped"]))
+
+        # Two owners, so the list is not a singleton and the conservative
+        # fallback declines -- exactly what the old `count == 1` scan did.
+        expect(lowering.enum_variant_owners["CodegenError"].len()).to_equal(2)
+        # A leaf that is still unique stays recoverable.
+        expect(lowering.enum_variant_owners["Skipped"].len()).to_equal(1)
+        expect(lowering.enum_variant_owners["Skipped"][0]).to_equal("EmitResult")
+
+    it "withdraws the leaves an evicted bare-name registration no longer owns":
+        var lowering = MirLowering.new(SymbolTable.new())
+        # `enum_variant_index` is keyed by the BARE name and is last-wins, so
+        # the second registration EVICTS the first. Without withdrawal,
+        # "Italic" would keep naming an owner that no longer declares it.
+        lowering.register_enum_variants(make_enum(
+            "Style", "web.layout.Style", ["Bold", "Italic"]))
+        lowering.register_enum_variants(make_enum(
+            "Style", "term.render.Style", ["Plain", "Reverse"]))
+
+        expect(lowering.enum_variant_owners.has("Italic")).to_be_true()
+        expect(lowering.enum_variant_owners["Italic"].len()).to_equal(0)
+        expect(lowering.enum_variant_owners["Reverse"].len()).to_equal(1)
+        expect(lowering.enum_variant_owners["Reverse"][0]).to_equal("Style")
+
+    it "does not double-list an owner that re-registers the identical set":
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.register_enum_variants(make_enum(
+            "CompileResult", "driver.CompileResult", ["Success", "CodegenError"]))
+        lowering.register_enum_variants(make_enum(
+            "CompileResult", "driver.CompileResult", ["Success", "CodegenError"]))
+
+        # A benign identical re-registration must stay a UNIQUE owner; if it
+        # accumulated, the fallback would stop recovering real constructions.
+        expect(lowering.enum_variant_owners["CodegenError"].len()).to_equal(1)
+        expect(lowering.enum_variant_owners["CodegenError"][0]).to_equal("CompileResult")

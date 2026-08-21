@@ -20,6 +20,8 @@ use std.platform.{get_host_os, get_host_arch}
 
 # Import from split-out modules
 use compiler.driver.smf_binary_helpers.{smf_u32_to_bytes, smf_u64_to_bytes, text_to_platform, text_to_arch, hash_name}
+
+extern fn rt_text_to_bytes(s: text) -> [u8]
 use compiler.driver.smf_elf_parser.{extract_code_from_object, extract_elf_relocations, elf_reloc_type_to_smf, ElfRelocEntry, ElfSymEntry}
 use compiler.driver.smf_serialization.{serialize_templates, serialize_metadata, serialize_note_sdn}
 
@@ -45,9 +47,10 @@ struct SmfBuildOptions:
     metadata: MonomorphizationMetadata?
     note_sdn: NoteSdnMetadata?
     target: Target
-    deps: [SmfDependencyEntry]  # Dependency interface hashes for staleness checking
+    deps: [SmfDependencyEntry]  # Dependency content hashes for staleness checking
     driver_manifest_bytes: [u8] # Concatenated DRVS records from @driver/@native_lib
     launch_metadata_bytes: [u8] # SDN launch metadata for startup policy
+    source_hash: i64
 
 impl SmfBuildOptions:
     static fn create(target: Target) -> SmfBuildOptions:
@@ -58,7 +61,8 @@ impl SmfBuildOptions:
             target: target,
             deps: [],
             driver_manifest_bytes: [],
-            launch_metadata_bytes: []
+            launch_metadata_bytes: [],
+            source_hash: 0
         )
 
     fn has_any_sections() -> bool:
@@ -70,51 +74,60 @@ impl SmfBuildOptions:
 
 struct SmfDependencyEntry:
     module_path: text
-    interface_hash: i64
+    content_hash: i64
+
+val SMF_DEPS_MAGIC: i64 = 1397573188
+val SMF_DEPS_VERSION: i64 = 1
 
 fn serialize_smf_dependencies(deps: [SmfDependencyEntry]) -> [u8]:
     """Serialize dependency list to binary format for .note.deps section.
 
-    Format: [u32: count] + per entry: [u32: path_len][path_bytes][i64: interface_hash]
+    Format: [u32: magic][u32: version][u32: count] + per entry:
+    [u32: path_len][path_bytes][i64: content_hash].
     """
     var buf: [u8] = []
+    buf = buf.concat(smf_u32_to_bytes(SMF_DEPS_MAGIC))
+    buf = buf.concat(smf_u32_to_bytes(SMF_DEPS_VERSION))
     buf = buf.concat(smf_u32_to_bytes(deps.len()))
     for dep in deps:
-        val path_bytes = dep.module_path.to_bytes()
+        val path_bytes = rt_text_to_bytes(dep.module_path)
         buf = buf.concat(smf_u32_to_bytes(path_bytes.len()))
         buf = buf.concat(path_bytes)
-        buf = buf.concat(smf_u64_to_bytes(dep.interface_hash))
+        buf = buf.concat(smf_u64_to_bytes(dep.content_hash))
     buf
 
 fn deserialize_smf_dependencies(data: [u8]) -> [SmfDependencyEntry]:
     """Deserialize dependency list from binary .note.deps section."""
-    if data.len() < 4:
+    if data.len() < 12:
         return []
-
-    val count = bytes_to_u32_le(data, 0)
+    if bytes_to_u32_le(data, 0) != SMF_DEPS_MAGIC or bytes_to_u32_le(data, 4) != SMF_DEPS_VERSION:
+        return []
+    val count = bytes_to_u32_le(data, 8)
     var deps: [SmfDependencyEntry] = []
-    var offset = 4
+    var offset = 12
 
     var i = 0
     while i < count:
         if offset + 4 > data.len():
-            break
+            return []
         val path_len = bytes_to_u32_le(data, offset)
         offset = offset + 4
 
         if offset + path_len > data.len():
-            break
+            return []
         val path_bytes = data[offset:offset + path_len]
         val module_path = bytes_to_text(path_bytes)
         offset = offset + path_len
 
         if offset + 8 > data.len():
-            break
-        val interface_hash = bytes_to_i64_le(data, offset)
+            return []
+        val content_hash = bytes_to_i64_le(data, offset)
         offset = offset + 8
 
-        deps.push(SmfDependencyEntry(module_path: module_path, interface_hash: interface_hash))
+        deps.push(SmfDependencyEntry(module_path: module_path, content_hash: content_hash))
         i = i + 1
+    if offset != data.len():
+        return []
     deps
 
 fn bytes_to_u32_le(data: [u8], offset: i64) -> i64:
@@ -137,10 +150,9 @@ fn bytes_to_i64_le(data: [u8], offset: i64) -> i64:
 
 fn bytes_to_text(data: [u8]) -> text:
     """Convert byte array to text (UTF-8)."""
-    var chars: [text] = []
-    for b in data:
-        chars.push(char_from_byte_smf(b))
-    chars.join("")
+    rt_bytes_to_text(data)
+
+extern fn rt_bytes_to_text(data: [u8]) -> text
 
 fn char_from_byte_smf(b: u8) -> text:
     val ascii_table = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
@@ -167,7 +179,8 @@ fn generate_smf_with_templates(
         target: target,
         deps: [],
         driver_manifest_bytes: [],
-        launch_metadata_bytes: []
+        launch_metadata_bytes: [],
+        source_hash: 0
     )
     generate_smf_with_options(object_code, options)
 
@@ -188,7 +201,8 @@ fn generate_smf_with_all_sections(
         target: target,
         deps: [],
         driver_manifest_bytes: [],
-        launch_metadata_bytes: []
+        launch_metadata_bytes: [],
+        source_hash: 0
     )
     generate_smf_with_options(object_code, options)
 
@@ -298,7 +312,7 @@ fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions)
     if has_note_sdn:
         buf = buf.concat(note_sdn_bytes)
 
-    # Write note.deps section (dependency interface hashes)
+    # Write note.deps section (dependency content hashes)
     if has_deps:
         buf = buf.concat(deps_bytes)
 
@@ -351,7 +365,7 @@ fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions)
             name: "note.sdn"
         ))
 
-    # note.deps section (dependency interface hashes for staleness checking)
+    # note.deps section (dependency content hashes for staleness checking)
     if has_deps:
         buf = buf.concat(build_section_entry(
             section_type: 7,  # SectionType::Note
@@ -394,6 +408,7 @@ fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions)
     val platform = text_to_platform(options.target.os)
     val arch = text_to_arch(options.target.arch)
     var header: SmfHeader = SmfHeader.new_v1_1(platform, arch)
+    header.source_hash = options.source_hash as u64
 
     # Set flags
     header.set_executable(true)
@@ -462,8 +477,8 @@ fn build_section_entry(
     # Virtual size (u64)
     buf = buf.concat(smf_u64_to_bytes(size))
 
-    # Alignment (u32)
-    buf = buf.concat(smf_u32_to_bytes(16))
+    # Alignment (u64), matching the canonical 64-byte section entry layout.
+    buf = buf.concat(smf_u64_to_bytes(16))
 
     # Name (16 bytes)
     var name_bytes = smf_name_bytes(name)
@@ -536,7 +551,8 @@ fn build_smf_with_code_for_target(code_bytes: [u8], target: Target) -> [u8]:
         target: target,
         deps: [],
         driver_manifest_bytes: [],
-        launch_metadata_bytes: []
+        launch_metadata_bytes: [],
+        source_hash: 0
     )
     build_smf_with_templates_internal(code_bytes, options)
 
@@ -675,6 +691,7 @@ fn build_smf_with_relocations(object_code: [u8], options: SmfBuildOptions) -> [u
     val platform = text_to_platform(options.target.os)
     val arch = text_to_arch(options.target.arch)
     var header: SmfHeader = SmfHeader.new_v1_1(platform, arch)
+    header.source_hash = options.source_hash as u64
     header.set_executable(true)
     header.section_count = section_count
     header.section_table_offset = section_table_offset

@@ -1,6 +1,7 @@
 # Test database never created: every run silently recorded nothing
 
 - **Status:** FIXED (cold-start hole) + one residual open (see § Residual)
+- **Verification 2026-08-21 (bug-status-consistency audit): PARTIAL, not fully fixed.** the cold-start hole is closed (`factory.spl:185`), but the § Residual directory-run abort ("cannot convert string to int" before persistence) is still open — this is a DATA-PERSISTENCE residual, not cosmetic. `bug_db.sdn` row is `fix-implemented-verification-pending`.
 - **Date:** 2026-08-10
 - **Files:** `src/lib/nogc_sync_mut/database/test_extended/factory.spl`,
   `src/lib/nogc_sync_mut/test_runner/test_db_compat.spl`

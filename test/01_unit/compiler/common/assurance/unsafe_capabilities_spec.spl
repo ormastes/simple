@@ -1,0 +1,103 @@
+# @cover src/compiler/00.common/assurance/unsafe_capabilities.spl 90%
+# @req REQ-MC-ANY-001
+"""
+# Unsafe capability vocabulary
+
+**Category:** Language
+**Status:** In Progress
+**Research:** doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md
+
+## Purpose and Audience
+
+`src/compiler/00.common/assurance/unsafe_capabilities.spl` is the single typed
+table of capabilities an `unsafe` region may carry. Plan §8.1 adds
+`type_erasure` to it; §20.3 row A5 sets the exit gate as a parser/model
+roundtrip.
+
+## Scope and Preconditions
+
+Pure table: zero imports, zero module state. Nothing here parses source.
+
+## Primary Workflow
+
+Every variant renders to a canonical snake_case spelling and parses back to the
+same variant. Unknown names are rejected, never mapped to a fallback.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| capability | A permission that widens what an `unsafe` region may do |
+| `type_erasure` | The capability that licenses `Any` (§8.1) |
+
+## Related Specifications
+
+- doc/08_tracking/bug/unsafe_capabilities_not_carried_into_hir_2026-08-21.md
+
+## Evidence and Provenance
+
+The three pre-existing spellings (`raw_ptr`, `ffi`, `mmio`) are the ones already
+written in `10.frontend/core/_ParserDecls/enum_module_body.spl:941`; they are
+preserved verbatim so existing `@unsafe(capabilities: [...])` text round-trips.
+
+## Recovery and Troubleshooting
+
+An unknown capability name yields `nil` from `parse_unsafe_capability` and is
+listed by `unknown_unsafe_capability_names`, so a typo is reportable rather than
+silently denied.
+
+## Compatibility and Limitations
+
+Nothing validates capability names at parse time yet — see the bug record above.
+"""
+
+use std.spec.*
+use compiler.common.assurance.unsafe_capabilities.{
+    UnsafeCapability, unsafe_capability_name, all_unsafe_capabilities,
+    unsafe_capability_names, is_known_unsafe_capability,
+    parse_unsafe_capability, unsafe_capability_set_contains,
+    unknown_unsafe_capability_names
+}
+
+describe "Unsafe capability vocabulary":
+
+    it "carries type_erasure as a real member of the table":
+        step("look type_erasure up by its canonical spelling")
+        expect(is_known_unsafe_capability("type_erasure")).to_be_true()
+        step("it renders back to the same spelling")
+        expect(unsafe_capability_name(UnsafeCapability.TypeErasure)).to_equal("type_erasure")
+
+    it "round-trips every capability through its canonical spelling":
+        step("render then parse each variant in the table")
+        var round_tripped = 0
+        for cap in all_unsafe_capabilities():
+            val parsed = parse_unsafe_capability(unsafe_capability_name(cap))
+            expect(parsed != nil).to_be_true()
+            expect(unsafe_capability_name(parsed!)).to_equal(unsafe_capability_name(cap))
+            round_tripped = round_tripped + 1
+        step("the walk was not vacuous")
+        expect(round_tripped).to_equal(all_unsafe_capabilities().len())
+
+    # Neighbour — the pre-existing vocabulary must survive. type_erasure was
+    # ADDED to this table, not substituted for a new parallel list.
+    it "keeps the three spellings the parser already documents":
+        step("raw_ptr, ffi and mmio remain known")
+        expect(is_known_unsafe_capability("raw_ptr")).to_be_true()
+        expect(is_known_unsafe_capability("ffi")).to_be_true()
+        expect(is_known_unsafe_capability("mmio")).to_be_true()
+
+    # Neighbour — silent acceptance of an unknown capability is the failure
+    # mode §11.6 forbids; it must be rejected AND reportable.
+    it "rejects an unknown capability instead of falling back":
+        step("parse a name that is in no table")
+        expect(parse_unsafe_capability("teleportation") == nil).to_be_true()
+        step("and it is reported rather than dropped")
+        expect(unknown_unsafe_capability_names(["ffi", "teleportation"]).len()).to_equal(1)
+
+    it "answers grant questions over the parser's raw text list":
+        step("a list naming type_erasure grants it")
+        expect(unsafe_capability_set_contains(["raw_ptr", "type_erasure"], UnsafeCapability.TypeErasure)).to_be_true()
+        step("a list without it does not")
+        expect(unsafe_capability_set_contains(["raw_ptr", "ffi"], UnsafeCapability.TypeErasure)).to_be_false()
+        step("an unknown name grants nothing")
+        expect(unsafe_capability_set_contains(["type_erasure_x"], UnsafeCapability.TypeErasure)).to_be_false()

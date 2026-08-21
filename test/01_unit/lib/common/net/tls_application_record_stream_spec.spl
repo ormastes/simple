@@ -1,0 +1,135 @@
+# @cover src/lib/common/net/tls_application_record_stream_v1.spl 95%
+"""
+# Bounded TLS application-record stream
+
+One mutable fixed ring accepts legal TLS records fragmented down to one byte.
+Complete frames require a generation-bound authenticated commit before logical
+head or receive sequence advances.
+"""
+
+use std.spec
+use std.common.net.tls_application_record_stream_v1.{
+    TLS_MAX_RECORD_WIRE_LENGTH_V1,
+    TLS_MAX_RX_BUFFER_LENGTH_V1,
+    TLS_MAX_SEQUENCE_V1,
+    tls_application_record_stream_new_v1,
+    tls_application_record_sequence_can_advance_v1
+}
+
+fn _synthetic_tls_record(payload_len: i64, fill: u8 = 0u8) -> [u8]:
+    var record: [u8] = [
+        23u8, 3u8, 3u8,
+        (payload_len / 256).to_u8(), (payload_len % 256).to_u8()
+    ]
+    var index: i64 = 0
+    while index < payload_len:
+        record.push(fill)
+        index = index + 1
+    record
+
+describe "TLS mutable fixed-ring ownership":
+    it "accepts a maximum legal record fragmented into one-byte reads":
+        val record = _synthetic_tls_record(16400, 7u8)
+        expect(record.len()).to_be(TLS_MAX_RECORD_WIRE_LENGTH_V1)
+        var stream = tls_application_record_stream_new_v1(9)
+        var index: i64 = 0
+        var final_record_count: i64 = 0
+        var final_token: i64 = 0
+        while index < record.len():
+            val ingested = stream.ingest([record[index]])
+            expect(ingested.is_malformed()).to_be(false)
+            expect(ingested.is_overflow()).to_be(false)
+            final_record_count = ingested.framed_records().len()
+            final_token = ingested.proposal_token()
+            index = index + 1
+
+        expect(final_record_count).to_be(1)
+        expect(stream.has_pending_proposal()).to_be(true)
+        expect(stream.sequence()).to_be(9)
+        expect(stream.commit_authenticated(final_token, 1)).to_be(true)
+        expect(stream.remaining_byte_count()).to_be(0)
+        expect(stream.fragment_count()).to_be(0)
+        expect(stream.sequence()).to_be(10)
+        # N writes + (5N - 10) header probes + N record handoff copies.
+        expect(stream.byte_work()).to_be(7 * record.len() - 10)
+
+        val no_progress = stream.ingest([])
+        expect(no_progress.byte_work()).to_be(0)
+        expect(stream.byte_work()).to_be(7 * record.len() - 10)
+
+    it "frames coalesced records and commits only after authentication":
+        val record_a = _synthetic_tls_record(16, 1u8)
+        val record_b = _synthetic_tls_record(16, 2u8)
+        val record_c = _synthetic_tls_record(16, 3u8)
+        var stream = tls_application_record_stream_new_v1(4)
+        val first = stream.ingest(
+            record_a + record_b + record_c.slice(0, 7))
+        expect(first.framed_records().len()).to_be(2)
+        expect(first.remaining_byte_count()).to_be(7)
+        expect(first.proposed_sequence()).to_be(6)
+        expect(stream.sequence()).to_be(4)
+        expect(stream.remaining_byte_count()).to_be(0)
+        expect(stream.commit_authenticated(
+            first.proposal_token(), first.framed_records().len())).to_be(true)
+        expect(stream.sequence()).to_be(6)
+        expect(stream.remaining_byte_count()).to_be(7)
+
+        val completed = stream.ingest(record_c.slice(7, record_c.len()))
+        expect(completed.framed_records()).to_equal([record_c])
+        expect(stream.commit_authenticated(
+            completed.proposal_token(), 1)).to_be(true)
+        expect(stream.remaining_byte_count()).to_be(0)
+        expect(stream.sequence()).to_be(7)
+
+    it "rejects concurrent ingest and stale authenticated commits":
+        val record = _synthetic_tls_record(16)
+        var stream = tls_application_record_stream_new_v1()
+        val proposal = stream.ingest(record)
+        expect(proposal.requires_commit()).to_be(true)
+        val blocked = stream.ingest([1u8])
+        expect(blocked.is_proposal_pending()).to_be(true)
+        expect(stream.commit_authenticated(
+            proposal.proposal_token(), 2)).to_be(false)
+        expect(stream.is_failed()).to_be(true)
+
+    it "makes authentication rejection terminal for the owner":
+        var stream = tls_application_record_stream_new_v1()
+        val proposal = stream.ingest(_synthetic_tls_record(16))
+        expect(stream.reject_authentication(
+            proposal.proposal_token())).to_be(true)
+        expect(stream.is_failed()).to_be(true)
+        expect(stream.ingest([1u8]).is_malformed()).to_be(true)
+
+describe "TLS application-record fail-closed bounds":
+    it "rejects malformed framing without sequence advancement":
+        var malformed = _synthetic_tls_record(16)
+        malformed[0] = 22u8
+        var stream = tls_application_record_stream_new_v1(3)
+        val rejected = stream.ingest(malformed)
+        expect(rejected.is_malformed()).to_be(true)
+        expect(rejected.framed_records().len()).to_be(0)
+        expect(stream.sequence()).to_be(3)
+        expect(stream.is_failed()).to_be(true)
+
+    it "checks the byte ceiling before adding untrusted input":
+        var oversized: [u8] = []
+        var index: i64 = 0
+        while index <= TLS_MAX_RX_BUFFER_LENGTH_V1:
+            oversized.push(0u8)
+            index = index + 1
+        var stream = tls_application_record_stream_new_v1()
+        val overflow = stream.ingest(oversized)
+        expect(overflow.is_overflow()).to_be(true)
+        expect(overflow.byte_work()).to_be(0)
+        expect(stream.remaining_byte_count()).to_be(0)
+        expect(stream.is_failed()).to_be(true)
+
+    it "rejects receive-sequence exhaustion without wrapping":
+        var stream = tls_application_record_stream_new_v1(TLS_MAX_SEQUENCE_V1)
+        val exhausted = stream.ingest(_synthetic_tls_record(16))
+        expect(exhausted.is_sequence_exhausted()).to_be(true)
+        expect(exhausted.framed_records().len()).to_be(0)
+        expect(exhausted.proposed_sequence()).to_be(TLS_MAX_SEQUENCE_V1)
+        expect(stream.sequence()).to_be(TLS_MAX_SEQUENCE_V1)
+        expect(tls_application_record_sequence_can_advance_v1(0)).to_be(true)
+        expect(tls_application_record_sequence_can_advance_v1(-1)).to_be(false)

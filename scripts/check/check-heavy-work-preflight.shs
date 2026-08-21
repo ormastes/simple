@@ -22,15 +22,72 @@ info() {
     printf 'INFO %s\n' "$1"
 }
 
+# A probe that could not read its input must never be laundered into a
+# plausible number: `x=$(cmd | filter || echo 0)` binds `||` to the PIPELINE, so
+# the filter's success hides the probe's failure and $x is EMPTY, not 0. Empty
+# then becomes 0 in $(( )) -- which is how "swap_used_gib=0" passed
+# "swap_not_overcommitted" on a host whose /proc/meminfo could not be read.
+# Every probe below therefore goes through this: non-numeric => hard FAIL.
+require_num() {
+    # $1 = metric name, $2 = probed value
+    case "${2:-}" in
+        ''|*[!0-9]*)
+            fail "probe_${1}_unreadable"
+            exit_code=1
+            printf 'INFO probe %s returned a non-numeric value (%s); refusing to assume a passing default\n' "$1" "${2:-<empty>}"
+            return 1
+            ;;
+    esac
+    return 0
+}
+
 blocked() {
     printf 'BLOCKED %s\n' "$1"
 }
 
 exit_code=0
 
+# --- --selftest: reproduce the fail-open this file used to carry ------------
+# Pre-fix, an unreadable /proc/meminfo made both swap probes EMPTY, and
+# $(( "" - "" )) is 0, so "swap_not_overcommitted" PASSED having measured
+# nothing. The fixtures below drive require_num with exactly the values those
+# broken probes produced, and assert it now refuses them.
+if [ "${1:-}" = "--selftest" ]; then
+    nfix=0; failed=''
+    fixture() { # name, value, want_rc
+        nfix=$((nfix + 1))
+        exit_code=0
+        got=0
+        require_num "$1" "$2" >/dev/null 2>&1 || got=$?
+        [ "$got" -eq "$3" ] || failed="$failed
+  fixture '$1' value='$2': rc=$got want=$3"
+        if [ "$3" -eq 1 ] && [ "$exit_code" -ne 1 ]; then
+            failed="$failed
+  fixture '$1': rejected the value but did not set exit_code=1"
+        fi
+    }
+    fixture empty_probe_swap_total '' 1
+    fixture empty_probe_swap_free '' 1
+    fixture non_numeric_probe 'N/A' 1
+    fixture partially_numeric_probe '12k' 1
+    fixture healthy_probe '4194304' 0
+    fixture healthy_zero_probe '0' 0
+    if [ -n "$failed" ]; then
+        printf 'selftest: %d fixture(s) run, FAILURES:%s\n' "$nfix" "$failed"
+        echo "ERROR — nothing was checked"
+        exit 2
+    fi
+    echo "selftest: $nfix fixture(s) passed"
+    exit 0
+fi
+
 # --- 1. Disk space ---
-disk_avail_kb=$(df --output=avail / 2>/dev/null | tail -1 | tr -d ' ' || echo 0)
-disk_avail_gib=$((disk_avail_kb / 1048576))
+disk_avail_kb=$(df --output=avail / 2>/dev/null | tail -1 | tr -d ' ')
+if ! require_num disk_avail_kb "$disk_avail_kb"; then
+    disk_avail_gib=-1
+else
+    disk_avail_gib=$((disk_avail_kb / 1048576))
+fi
 info "disk_available_gib=$disk_avail_gib"
 if [ "$disk_avail_gib" -ge "$MIN_DISK_GIB" ]; then
     pass "disk_space_min_${MIN_DISK_GIB}gib"
@@ -40,8 +97,12 @@ else
 fi
 
 # --- 2. Available memory ---
-mem_avail_kb=$(grep MemAvailable /proc/meminfo 2>/dev/null | awk '{print $2}' || echo 0)
-mem_avail_gib=$((mem_avail_kb / 1048576))
+mem_avail_kb=$(grep MemAvailable /proc/meminfo 2>/dev/null | awk '{print $2}')
+if ! require_num mem_avail_kb "$mem_avail_kb"; then
+    mem_avail_gib=-1
+else
+    mem_avail_gib=$((mem_avail_kb / 1048576))
+fi
 info "memory_available_gib=$mem_avail_gib"
 if [ "$mem_avail_gib" -ge "$MIN_MEM_GIB" ]; then
     pass "memory_min_${MIN_MEM_GIB}gib"
@@ -51,10 +112,15 @@ else
 fi
 
 # --- 3. Swap not over-committed ---
-swap_total_kb=$(grep SwapTotal /proc/meminfo 2>/dev/null | awk '{print $2}' || echo 0)
-swap_used_kb=$(grep SwapFree /proc/meminfo 2>/dev/null | awk '{print $2}' || echo 0)
-swap_used_kb=$((swap_total_kb - swap_used_kb))
-swap_used_gib=$((swap_used_kb / 1048576))
+swap_total_kb=$(grep SwapTotal /proc/meminfo 2>/dev/null | awk '{print $2}')
+swap_free_kb=$(grep SwapFree /proc/meminfo 2>/dev/null | awk '{print $2}')
+# THE fail-open this file carried: both probes empty => $(( "" - "" )) is 0 =>
+# swap_used_gib=0 => "swap_not_overcommitted" PASSED without reading any swap.
+if ! require_num swap_total_kb "$swap_total_kb" || ! require_num swap_free_kb "$swap_free_kb"; then
+    swap_used_gib=999
+else
+    swap_used_gib=$(((swap_total_kb - swap_free_kb) / 1048576))
+fi
 info "swap_used_gib=$swap_used_gib"
 if [ "$swap_used_gib" -le 2 ]; then
     pass "swap_not_overcommitted"
@@ -64,10 +130,15 @@ else
 fi
 
 # --- 4. CPU headroom ---
-cpu_count=$(nproc 2>/dev/null || echo 1)
-cpu_half=$((cpu_count / MAX_CPU_FRACTION))
-load_1m=$(cat /proc/loadavg 2>/dev/null | awk '{printf "%d", $1}' || echo 0)
-info "cpu_count=$cpu_count load_1m=$load_1m cpu_half=$cpu_half"
+cpu_count=$(nproc 2>/dev/null)
+load_1m=$(awk '{printf "%d", $1}' /proc/loadavg 2>/dev/null)
+if ! require_num cpu_count "$cpu_count" || ! require_num load_1m "$load_1m"; then
+    cpu_half=-1
+    load_1m=0
+else
+    cpu_half=$((cpu_count / MAX_CPU_FRACTION))
+fi
+info "cpu_count=${cpu_count:-<unreadable>} load_1m=$load_1m cpu_half=$cpu_half"
 if [ "$load_1m" -le "$cpu_half" ]; then
     pass "cpu_load_below_half"
 else

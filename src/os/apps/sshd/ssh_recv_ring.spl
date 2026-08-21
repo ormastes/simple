@@ -1,0 +1,98 @@
+# SSH transport receive ring — fixed-capacity, linear accumulation
+#
+# The SSH buffered encrypted-receive path used to rebuild its whole prefix on
+# every socket fragment (`recv_buf = concat(recv_buf, more)`) and rebuild the
+# remainder again after every consumed frame (`recv_buf = slice(...)`). Both
+# are O(buffered) per fragment, so framing one packet out of N fragments cost
+# O(N^2) byte copies. This owner writes each admitted byte exactly once at
+# `(head + count) % cap` and advances `head` on consumption, so accumulating a
+# frame is linear in the frame's own length regardless of fragmentation.
+#
+# Capacity is fixed and fail-closed: a push that does not fit is rejected in
+# full (no partial write, no reallocation), which also bounds the memory a peer
+# can pin. The maximum admissible SSH AES-GCM frame is
+# 4 + 35000 + 16 = 35020 bytes; the capacity leaves room for one further
+# 8192-byte socket read on top of a maximal pending frame.
+
+# Max admissible frame (35020) + one RECV_BUF_SIZE (8192) socket read.
+val SSH_RECV_RING_CAPACITY: u64 = 45056u64
+
+class SshRecvRing:
+    """Fixed-capacity byte ring for SSH transport receive framing."""
+    buf: [u8]
+    head: u64
+    count: u64
+    cap: u64
+    # Total byte writes performed by push_bytes since construction. Used by
+    # behavioral tests to observe linear (not quadratic) accumulation work.
+    writes: u64
+
+    me len() -> u64:
+        self.count
+
+    me capacity() -> u64:
+        self.cap
+
+    me free_bytes() -> u64:
+        self.cap - self.count
+
+    me byte_at(index: u64) -> u8:
+        """Logical read; out-of-range reads return 0 rather than trapping."""
+        if index >= self.count:
+            return 0u8
+        self.buf[(self.head + index) % self.cap]
+
+    me push_bytes(data: [u8]) -> bool:
+        """Append a fragment. Fails closed (writing nothing) if it cannot fit."""
+        if data.len() == 0u64:
+            return true
+        if data.len() > self.cap - self.count:
+            return false
+        var i: u64 = 0u64
+        while i < data.len():
+            self.buf[(self.head + self.count) % self.cap] = data[i]
+            self.count = self.count + 1u64
+            self.writes = self.writes + 1u64
+            i = i + 1u64
+        true
+
+    me discard(n: u64):
+        """Drop the first n logical bytes without copying the remainder."""
+        var drop = n
+        if drop > self.count:
+            drop = self.count
+        self.head = (self.head + drop) % self.cap
+        self.count = self.count - drop
+
+    me take_front(n: u64) -> [u8]:
+        """Copy out the first n bytes once and consume them. Empty if short."""
+        if n == 0u64 or n > self.count:
+            return []
+        var out: [u8] = []
+        var i: u64 = 0u64
+        while i < n:
+            out.push(self.buf[(self.head + i) % self.cap])
+            i = i + 1u64
+        self.discard(n)
+        out
+
+    me clear():
+        self.head = 0u64
+        self.count = 0u64
+
+fn ssh_recv_ring_new() -> SshRecvRing:
+    """Allocate a zeroed fixed-capacity receive ring."""
+    var storage: [u8] = []
+    var i: u64 = 0u64
+    while i < SSH_RECV_RING_CAPACITY:
+        storage.push(0u8)
+        i = i + 1u64
+    SshRecvRing {
+        buf: storage,
+        head: 0u64,
+        count: 0u64,
+        cap: SSH_RECV_RING_CAPACITY,
+        writes: 0u64
+    }
+
+export SshRecvRing, ssh_recv_ring_new, SSH_RECV_RING_CAPACITY

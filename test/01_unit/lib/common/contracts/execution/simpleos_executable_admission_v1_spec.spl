@@ -1,0 +1,295 @@
+use std.spec.{describe, it, expect}
+use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget}
+use std.common.contracts.execution.simpleos_executable_admission_v1.{
+    ExecutableAdmissionDecisionV1, ExecutableContractErrorV1,
+    ExecutableLoadRangeV1, ExecutableAdmissionV1, ExecutableImageHandleV1,
+    executable_admission_schema_version,
+    executable_image_max_bytes, executable_image_max_read_count,
+    executable_admission_validate, executable_image_handle_validate,
+    executable_image_handle_matches_admission,
+    executable_image_handle_consume_once
+}
+
+fn digest_a() -> text:
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+fn digest_b() -> text:
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+fn target() -> ManifestTarget:
+    ManifestTarget(os: "simpleos", arch: "x86_64", abi: "simpleos")
+
+fn ranges() -> [ExecutableLoadRangeV1]:
+    [
+        ExecutableLoadRangeV1(
+            file_offset: 0u64,
+            file_size: 128u64,
+            virtual_address: 4096u64,
+            memory_size: 256u64,
+            writable: false,
+            executable: true
+        ),
+        ExecutableLoadRangeV1(
+            file_offset: 128u64,
+            file_size: 128u64,
+            virtual_address: 8192u64,
+            memory_size: 256u64,
+            writable: true,
+            executable: false
+        )
+    ]
+
+fn overlapping_ranges() -> [ExecutableLoadRangeV1]:
+    [
+        ExecutableLoadRangeV1(
+            file_offset: 0u64,
+            file_size: 128u64,
+            virtual_address: 4096u64,
+            memory_size: 256u64,
+            writable: false,
+            executable: true
+        ),
+        ExecutableLoadRangeV1(
+            file_offset: 64u64,
+            file_size: 128u64,
+            virtual_address: 8192u64,
+            memory_size: 256u64,
+            writable: true,
+            executable: false
+        )
+    ]
+
+fn wx_ranges() -> [ExecutableLoadRangeV1]:
+    [
+        ExecutableLoadRangeV1(
+            file_offset: 0u64,
+            file_size: 128u64,
+            virtual_address: 4096u64,
+            memory_size: 256u64,
+            writable: true,
+            executable: true
+        )
+    ]
+
+fn admission_record(
+    target_value: ManifestTarget,
+    decision_value: ExecutableAdmissionDecisionV1,
+    rejection_reason_value: text
+) -> ExecutableAdmissionV1:
+    ExecutableAdmissionV1(
+        schema_version: executable_admission_schema_version(),
+        admission_id: "admission-1",
+        decision: decision_value,
+        rejection_reason: rejection_reason_value,
+        image_hash: digest_a(),
+        manifest_hash: digest_b(),
+        kernel_hash: digest_a(),
+        trust_root_hash: digest_b(),
+        trust_epoch: 7u64,
+        target: target_value,
+        firmware_profile: "uefi-secure",
+        compiler_identity: "compiler-1",
+        source_identity: "source-1",
+        config_identity: "config-1",
+        mount_id: 3u64,
+        mount_generation: 8u64,
+        file_id: 4u64,
+        file_generation: 9u64,
+        effective_capabilities: 5u32
+    )
+
+fn valid_admission() -> ExecutableAdmissionV1:
+    admission_record(target(), ExecutableAdmissionDecisionV1.Admitted, "")
+
+fn handle_record(
+    target_value: ManifestTarget,
+    values: [ExecutableLoadRangeV1]
+) -> ExecutableImageHandleV1:
+    ExecutableImageHandleV1(
+        schema_version: executable_admission_schema_version(),
+        open_handle_id: 19u64,
+        mount_id: 3u64,
+        mount_generation: 8u64,
+        file_id: 4u64,
+        file_generation: 9u64,
+        size_bytes: 8192u64,
+        role: "main-image",
+        target: target_value,
+        verified_load_ranges: values,
+        image_hash: digest_a(),
+        admission_id: "admission-1",
+        trust_epoch: 7u64,
+        read_count: 0u64,
+        read_bytes: 0u64,
+        consumed: false
+    )
+
+fn valid_handle() -> ExecutableImageHandleV1:
+    handle_record(target(), ranges())
+
+fn handle_with_ranges(values: [ExecutableLoadRangeV1]) -> ExecutableImageHandleV1:
+    handle_record(target(), values)
+
+fn handle_with_target(target_value: ManifestTarget) -> ExecutableImageHandleV1:
+    handle_record(target_value, ranges())
+
+describe "SimpleOS executable admission and image-handle contracts":
+    it "validates a closed admission binding":
+        val check = executable_admission_validate(valid_admission())
+        expect(check.ok).to_equal(true)
+        expect(check.error).to_equal(ExecutableContractErrorV1.None)
+
+    it "fails closed for wildcard targets and malformed digests":
+        val admission = admission_record(
+            ManifestTarget(os: "any", arch: "x86_64", abi: "simpleos"),
+            ExecutableAdmissionDecisionV1.Admitted,
+            ""
+        )
+        val wildcard_check = executable_admission_validate(admission)
+        expect(wildcard_check.ok).to_equal(false)
+        expect(wildcard_check.error).to_equal(ExecutableContractErrorV1.InvalidTarget)
+
+        val malformed = ExecutableAdmissionV1(
+            schema_version: executable_admission_schema_version(),
+            admission_id: "admission-1",
+            decision: ExecutableAdmissionDecisionV1.Admitted,
+            rejection_reason: "",
+            image_hash: "not-a-digest",
+            manifest_hash: digest_b(),
+            kernel_hash: digest_a(),
+            trust_root_hash: digest_b(),
+            trust_epoch: 7u64,
+            target: target(),
+            firmware_profile: "uefi-secure",
+            compiler_identity: "compiler-1",
+            source_identity: "source-1",
+            config_identity: "config-1",
+            mount_id: 3u64,
+            mount_generation: 8u64,
+            file_id: 4u64,
+            file_generation: 9u64,
+            effective_capabilities: 5u32
+        )
+        val digest_check = executable_admission_validate(malformed)
+        expect(digest_check.ok).to_equal(false)
+        expect(digest_check.error).to_equal(ExecutableContractErrorV1.InvalidDigest)
+
+    it "keeps rejected admissions typed and non-loadable":
+        val rejected = admission_record(
+            target(), ExecutableAdmissionDecisionV1.Rejected, "trust-denied")
+        val admission_check = executable_admission_validate(rejected)
+        expect(admission_check.ok).to_equal(true)
+        val binding_check = executable_image_handle_matches_admission(
+            valid_handle(), rejected)
+        expect(binding_check.ok).to_equal(false)
+        expect(binding_check.error).to_equal(ExecutableContractErrorV1.AdmissionMismatch)
+
+    it "rejects zero admission identities and generations":
+        var zero_mount = valid_admission()
+        zero_mount.mount_id = 0u64
+        val mount_check = executable_admission_validate(zero_mount)
+        expect(mount_check.ok).to_equal(false)
+        expect(mount_check.error).to_equal(ExecutableContractErrorV1.InvalidGeneration)
+
+        var zero_file_generation = valid_admission()
+        zero_file_generation.file_generation = 0u64
+        val file_check = executable_admission_validate(zero_file_generation)
+        expect(file_check.ok).to_equal(false)
+        expect(file_check.error).to_equal(ExecutableContractErrorV1.InvalidGeneration)
+
+    it "validates bounded ranges and binds an open handle to admission":
+        val handle_check = executable_image_handle_validate(valid_handle())
+        expect(handle_check.ok).to_equal(true)
+        val binding_check = executable_image_handle_matches_admission(
+            valid_handle(), valid_admission())
+        expect(binding_check.ok).to_equal(true)
+
+    it "reports an invalid handle target as InvalidTarget":
+        val invalid_target = handle_with_target(
+            ManifestTarget(os: "any", arch: "x86_64", abi: "simpleos"))
+        val check = executable_image_handle_validate(invalid_target)
+        expect(check.ok).to_equal(false)
+        expect(check.error).to_equal(ExecutableContractErrorV1.InvalidTarget)
+
+    it "rejects overlapping ranges and generation drift":
+        val overlap_check = executable_image_handle_validate(
+            handle_with_ranges(overlapping_ranges()))
+        expect(overlap_check.ok).to_equal(false)
+        expect(overlap_check.error).to_equal(ExecutableContractErrorV1.InvalidRangeOverlap)
+
+        val wx_check = executable_image_handle_validate(handle_with_ranges(wx_ranges()))
+        expect(wx_check.ok).to_equal(false)
+        expect(wx_check.error).to_equal(ExecutableContractErrorV1.InvalidRange)
+
+        var handle = valid_handle()
+        handle.mount_generation = 99u64
+        val drift_check = executable_image_handle_matches_admission(
+            handle, valid_admission())
+        expect(drift_check.ok).to_equal(false)
+        expect(drift_check.error).to_equal(ExecutableContractErrorV1.AdmissionMismatch)
+
+    it "rejects empty ranges, zero identities, oversize images, and bad counters":
+        val empty_check = executable_image_handle_validate(handle_with_ranges([]))
+        expect(empty_check.ok).to_equal(false)
+        expect(empty_check.error).to_equal(ExecutableContractErrorV1.InvalidRangeCount)
+
+        var zero_id = valid_handle()
+        zero_id.open_handle_id = 0u64
+        val id_check = executable_image_handle_validate(zero_id)
+        expect(id_check.ok).to_equal(false)
+        expect(id_check.error).to_equal(ExecutableContractErrorV1.InvalidOpaqueIdentity)
+
+        var zero_mount_id = valid_handle()
+        zero_mount_id.mount_id = 0u64
+        val mount_id_check = executable_image_handle_validate(zero_mount_id)
+        expect(mount_id_check.ok).to_equal(false)
+        expect(mount_id_check.error).to_equal(ExecutableContractErrorV1.InvalidOpaqueIdentity)
+
+        var zero_file_id = valid_handle()
+        zero_file_id.file_id = 0u64
+        val file_id_check = executable_image_handle_validate(zero_file_id)
+        expect(file_id_check.ok).to_equal(false)
+        expect(file_id_check.error).to_equal(ExecutableContractErrorV1.InvalidOpaqueIdentity)
+
+        var zero_generation = valid_handle()
+        zero_generation.file_generation = 0u64
+        val generation_check = executable_image_handle_validate(zero_generation)
+        expect(generation_check.ok).to_equal(false)
+        expect(generation_check.error).to_equal(ExecutableContractErrorV1.InvalidGeneration)
+
+        var zero_mount_generation = valid_handle()
+        zero_mount_generation.mount_generation = 0u64
+        val mount_generation_check = executable_image_handle_validate(zero_mount_generation)
+        expect(mount_generation_check.ok).to_equal(false)
+        expect(mount_generation_check.error).to_equal(ExecutableContractErrorV1.InvalidGeneration)
+
+        var oversize = valid_handle()
+        oversize.size_bytes = executable_image_max_bytes() + 1u64
+        val size_check = executable_image_handle_validate(oversize)
+        expect(size_check.ok).to_equal(false)
+        expect(size_check.error).to_equal(ExecutableContractErrorV1.InvalidImageSize)
+
+        var too_many_reads = valid_handle()
+        too_many_reads.read_count = executable_image_max_read_count() + 1u64
+        val read_count_check = executable_image_handle_validate(too_many_reads)
+        expect(read_count_check.ok).to_equal(false)
+        expect(read_count_check.error).to_equal(ExecutableContractErrorV1.InvalidReadCounters)
+
+        var too_many_bytes = valid_handle()
+        too_many_bytes.read_bytes = too_many_bytes.size_bytes + 1u64
+        val read_bytes_check = executable_image_handle_validate(too_many_bytes)
+        expect(read_bytes_check.ok).to_equal(false)
+        expect(read_bytes_check.error).to_equal(ExecutableContractErrorV1.InvalidReadCounters)
+
+    it "consumes a valid handle once without mutating the source value":
+        val original = valid_handle()
+        val first = executable_image_handle_consume_once(original)
+        expect(first.ok).to_equal(true)
+        expect(first.reason).to_equal("ok")
+        expect(first.handle.consumed).to_equal(true)
+        expect(original.consumed).to_equal(false)
+
+        val second = executable_image_handle_consume_once(first.handle)
+        expect(second.ok).to_equal(false)
+        expect(second.reason).to_equal("already-consumed")
+        expect(second.handle.consumed).to_equal(true)

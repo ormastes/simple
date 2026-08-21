@@ -149,9 +149,10 @@ fn lex_init_with_path(source: text, source_path: text):
         if core_source == "":
             eprint("[lexer_fatal] empty source handed to lexer for path '{source_path}' (in-memory source was empty and the file re-read produced no bytes)")
     lex_dead_reported = [false]
-    if lexer_array_len(lex_inline_source_slot) == 0:
-        lex_inline_source_slot = [""]
-    lex_inline_source_slot[0] = core_source
+    # Whole-owner replacement is required across file boundaries. The previous
+    # file's release replaces this slot, and mutating its retained backing on
+    # the next init produced a deterministic native Stage-3 use-after-release.
+    lex_inline_source_slot = [core_source]
     if env_value_nul_free(core_source):
         rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", core_source)
     if env_value_nul_free(source_path):
@@ -682,11 +683,26 @@ fn lex_pop_indent():
 # three (lex_next + lex_token_line + lex_token_col). Under the seed
 # interpreter every cross-module call pays an env-rebuild (~1.4ms), so the
 # parser paid it 3x per token here. Behavior-identical: same lex_next(),
-# same slot reads, just packaged as [kind, line, col].
+# same slot reads, packaged in a typed record.  The former heterogeneous array
+# `[i64, i64, i64, text]` was inferred inconsistently by the Stage-2 native
+# compiler: `snap[0]` decoded as STRING_LIT while the authoritative lexer slot
+# still held FN, and line/text decoded as nil.  A typed carrier preserves both
+# the one-call hot path and exact field representation.
 # See doc/08_tracking/bug/lint_timeout_hwir_zca_rows_2026-08-17.md.
-fn lex_next_snapshot():
+struct LexNextSnapshot:
+    kind: i64
+    line: i64
+    col: i64
+    token_text: text
+
+fn lex_next_snapshot() -> LexNextSnapshot:
     val kind = lex_next()
-    [kind, lex_cur_line_get_slot(), lex_cur_col_get_slot(), lex_cur_text_get_slot()]
+    LexNextSnapshot(
+        kind: kind,
+        line: lex_cur_line_get_slot(),
+        col: lex_cur_col_get_slot(),
+        token_text: lex_cur_text_get_slot()
+    )
 
 fn lex_token_kind() -> i64:
     lex_cur_kind_get_slot()
@@ -857,3 +873,5 @@ fn lex_tokenize_all(source: text) -> i64:
             break
 
     lex_all_kinds.len()
+
+export LexNextSnapshot, lex_next_snapshot

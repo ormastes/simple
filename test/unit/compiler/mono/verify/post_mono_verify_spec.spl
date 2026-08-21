@@ -1,0 +1,256 @@
+"""
+# The post-monomorphization verifier counts every section 9.5 invariant breach
+
+Nothing downstream of the mono pass diagnoses a leftover type parameter, a
+still-emittable generic template, an `Any` introduced as erasure, or an
+`Error` type manufactured by substitution — wrong code is simply generated.
+
+This spec exercises `post_mono_verify` on four modules:
+
+  * a purely monomorphic module, which must report every counter zero;
+  * a module whose non-generic function still carries `TypeParam("T")`;
+  * a module whose function is still flagged `is_generic_template` and is
+    still present in `module.functions`;
+  * a specialization whose substitution produced `HirTypeKind.Error` and one
+    whose mangled name carries the `unknown` mangling token.
+
+It also runs the REAL mono pass (`run_monomorphization`) over a generic
+`box_it<T>` and verifies the resulting module through the same entry point.
+"""
+
+use std.spec
+use compiler.hir.hir.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.mono.monomorphize_integration.{run_monomorphization}
+use compiler.verify.post_mono_verify.*
+
+fn mk_span() -> Span:
+    Span.empty()
+
+fn mk_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: mk_span())
+
+fn mk_expr(kind: HirExprKind) -> HirExpr:
+    HirExpr(kind: kind, has_type_: false, type_: nil, span: mk_span())
+
+fn mk_typed_expr(kind: HirExprKind, ty: HirType) -> HirExpr:
+    HirExpr(kind: kind, has_type_: true, type_: ty, span: mk_span())
+
+fn mk_block(stmts: [HirStmt], value: HirExpr) -> HirBlock:
+    HirBlock(stmts: stmts, has: true, value: value, span: mk_span())
+
+fn mk_fn(id: i64, name: text, type_params: [HirTypeParam], params: [HirParam], ret: HirType, body: HirBlock) -> HirFunction:
+    HirFunction(
+        symbol: SymbolId(id: id),
+        name: name,
+        type_params: type_params,
+        params: params,
+        return_type: ret,
+        body: body,
+        effects: [],
+        visibility: Visibility.Public,
+        is_async: false,
+        is_static: false,
+        is_public: true,
+        is_method: false,
+        is_mutable: false,
+        is_const: false,
+        is_extern: false,
+        func_attr: FunctionAttr.default(),
+        has_export_attr: false,
+        export_attr: nil,
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_suspension: false,
+        has_vhdl_metadata: false,
+        vhdl_metadata: nil,
+        has_doc_comment: false,
+        doc_comment: "",
+        span: mk_span(),
+        is_gpu_kernel: false,
+        gpu_target: "",
+        gpu_backend_order: ""
+    )
+
+fn mk_module(name: text, funcs: [HirFunction]) -> HirModule:
+    var functions: Dict<SymbolId, HirFunction> = {}
+    for f in funcs:
+        val ft: HirFunction = f
+        functions[ft.symbol] = ft
+    HirModule(
+        name: name,
+        path: "synthetic/{name}.spl",
+        imports: [],
+        exports: [],
+        domain_blocks: [],
+        symbols: SymbolTable.new(),
+        functions: functions,
+        gpu_function_targets: {},
+        gpu_function_backend_orders: {},
+        classes: {},
+        structs: {},
+        enums: {},
+        bitfields: {},
+        traits: {},
+        impls: [],
+        constants: {},
+        static_asserts: [],
+        aop_advices: [],
+        di_bindings: [],
+        arch_rules: [],
+        mock_decls: [],
+        types: []
+    )
+
+fn i64_type() -> HirType:
+    mk_type(HirTypeKind.Int(64, true))
+
+fn t_type() -> HirType:
+    mk_type(HirTypeKind.TypeParam("T", []))
+
+fn t_param() -> HirTypeParam:
+    HirTypeParam(symbol: SymbolId(id: 90), name: "T", bounds: [],
+                 has_default: false, default: nil, span: mk_span())
+
+fn param(id: i64, name: text, ty: HirType) -> HirParam:
+    HirParam(symbol: SymbolId(id: id), name: name, type_: ty,
+             has_default: false, default: nil, span: mk_span(), is_mutable: false)
+
+# --- fixtures ---------------------------------------------------------------
+
+fn monomorphic_module() -> HirModule:
+    val body = mk_block(
+        [HirStmt(kind: HirStmtKind.Let(SymbolId(id: 11), i64_type(),
+                                       mk_typed_expr(HirExprKind.IntLit(7, nil), i64_type())),
+                 span: mk_span())],
+        mk_typed_expr(HirExprKind.Var(SymbolId(id: 11)), i64_type())
+    )
+    mk_module("pm_clean", [mk_fn(1, "add_one", [], [param(10, "v", i64_type())], i64_type(), body)])
+
+fn leftover_type_param_module() -> HirModule:
+    # No type_params on the signature, but the body annotation is still `T`.
+    val body = mk_block(
+        [HirStmt(kind: HirStmtKind.Let(SymbolId(id: 21), t_type(),
+                                       mk_expr(HirExprKind.Var(SymbolId(id: 20)))),
+                 span: mk_span())],
+        mk_typed_expr(HirExprKind.Var(SymbolId(id: 21)), i64_type())
+    )
+    mk_module("pm_leftover", [mk_fn(2, "leaky", [], [param(20, "v", i64_type())], i64_type(), body)])
+
+fn emittable_template_module() -> HirModule:
+    var f = mk_fn(3, "box_it", [t_param()], [param(30, "v", t_type())], t_type(),
+                  mk_block([], mk_typed_expr(HirExprKind.Var(SymbolId(id: 30)), t_type())))
+    f.is_generic_template = true
+    mk_module("pm_template", [f])
+
+fn substitution_error_module() -> HirModule:
+    # A specialization (name carries the `$` mangling separator) whose return
+    # type is the `Error` type substitution manufactures on an unknown type.
+    val f = mk_fn(4, "box_it$i64", [], [param(40, "v", i64_type())],
+                  mk_type(HirTypeKind.Error), mk_block([], mk_expr(HirExprKind.NilLit)))
+    mk_module("pm_error", [f])
+
+fn unknown_mangling_module() -> HirModule:
+    val f = mk_fn(5, "box_it$unknown", [], [param(50, "v", i64_type())],
+                  i64_type(), mk_block([], mk_expr(HirExprKind.NilLit)))
+    mk_module("pm_mangle", [f])
+
+fn generic_call_module() -> HirModule:
+    val call = mk_expr(HirExprKind.Call(
+        mk_expr(HirExprKind.Var(SymbolId(id: 3))),
+        [HirCallArg(has_name: false, name: "", value: mk_expr(HirExprKind.IntLit(7, nil)), span: mk_span())],
+        [i64_type()]
+    ))
+    mk_module("pm_call", [mk_fn(6, "caller", [], [], mk_type(HirTypeKind.Unit),
+                                mk_block([HirStmt(kind: HirStmtKind.Expr(call), span: mk_span())],
+                                         mk_expr(HirExprKind.NilLit)))])
+
+fn real_mono_modules() -> Dict<text, HirModule>:
+    val arr = mk_typed_expr(
+        HirExprKind.ArrayLit([mk_typed_expr(HirExprKind.Var(SymbolId(id: 71)), t_type())], t_type()),
+        mk_type(HirTypeKind.Array(t_type(), nil))
+    )
+    val box_it = mk_fn(7, "box_it", [t_param()], [param(71, "v", t_type())],
+                       mk_type(HirTypeKind.Array(t_type(), nil)), mk_block([], arr))
+    val call = mk_expr(HirExprKind.Call(
+        mk_expr(HirExprKind.Var(SymbolId(id: 7))),
+        [HirCallArg(has_name: false, name: "", value: mk_expr(HirExprKind.IntLit(7, nil)), span: mk_span())],
+        [i64_type()]
+    ))
+    val main_fn = mk_fn(8, "main", [], [], mk_type(HirTypeKind.Unit),
+                        mk_block([HirStmt(kind: HirStmtKind.Expr(call), span: mk_span())],
+                                 mk_expr(HirExprKind.NilLit)))
+    val module = mk_module("pm_real", [box_it, main_fn])
+    var modules: Dict<text, HirModule> = {}
+    modules["pm_real"] = module
+    modules
+
+# ---------------------------------------------------------------------------
+
+describe "post-monomorphization invariant verifier (plan section 9.5)":
+    it "reports every counter zero for a monomorphic module":
+        val r = post_mono_verify(monomorphic_module())
+        expect(post_mono_report_total(r)).to_equal(0)
+        assert_true(post_mono_report_is_clean(r))
+        expect(r.violations.len()).to_equal(0)
+
+    it "counts a leftover TypeParam and names the offending type parameter":
+        val r = post_mono_verify(leftover_type_param_module())
+        expect(r.unresolved_type_param).to_equal(1)
+        assert_false(post_mono_report_is_clean(r))
+        val v: MonoViolation = r.violations[0]
+        expect(v.counter).to_equal("unresolved TypeParam")
+        assert_contains(v.detail, "`T`")
+        assert_contains(v.symbol, "leaky")
+        assert_contains(v.chain, "pm_leftover")
+
+    it "counts a template that is still marked emittable":
+        val r = post_mono_verify(emittable_template_module())
+        expect(r.generic_emitted_definition).to_equal(1)
+        # The template body is NOT walked, so its own `T`s are not double-counted.
+        expect(r.unresolved_type_param).to_equal(0)
+        val v: MonoViolation = r.violations[0]
+        expect(v.counter).to_equal("generic emitted definition")
+        assert_contains(v.detail, "box_it")
+
+    it "counts an Error type manufactured by substitution inside a specialization":
+        val r = post_mono_verify(substitution_error_module())
+        expect(r.error_from_substitution).to_equal(1)
+        val v: MonoViolation = r.violations[0]
+        expect(v.counter).to_equal("HirTypeKind.Error created by substitution")
+        assert_contains(v.symbol, "box_it$i64")
+
+    it "counts an unknown mangling token in a specialized symbol":
+        val r = post_mono_verify(unknown_mangling_module())
+        expect(r.unknown_mangling).to_equal(1)
+        assert_contains(r.violations[0].detail, "unknown")
+
+    it "counts a call site that still carries type arguments":
+        val r = post_mono_verify(generic_call_module())
+        expect(r.generic_call).to_equal(1)
+        assert_contains(r.violations[0].counter, "generic call")
+
+    it "renders a non-zero counter as an E-MONO-031 diagnostic":
+        val r = post_mono_verify(leftover_type_param_module())
+        val diags = post_mono_report_diagnostics(r)
+        expect(diags.len()).to_equal(1)
+        assert_contains(diags[0], "E-MONO-031")
+        assert_contains(diags[0], "instantiation chain")
+        assert_contains(diags[0], "no MIR or object file was emitted.")
+
+    it "leaves no unresolved type parameter in the real mono pass output":
+        val (result, _) = run_monomorphization(real_mono_modules())
+        val r = post_mono_verify_modules(result)
+        expect(r.unresolved_type_param).to_equal(0)
+        expect(r.generic_call).to_equal(0)
+        expect(r.unknown_mangling).to_equal(0)
+        expect(r.error_from_substitution).to_equal(0)
+
+    it "reports no emittable generic template now that the pass prunes consumed ones":
+        # Superseded 2026-08-21 by plan section 9.3 step 12: `run_monomorphization`
+        # removes a template once >= 1 specialization of it has been emitted, so
+        # the real-pass module is fully monomorphic. Pinned from the mono side by
+        # test/01_unit/compiler/mono/mono_template_pruning_spec.spl.
+        val (result, _) = run_monomorphization(real_mono_modules())
+        val r = post_mono_verify_modules(result)
+        expect(r.generic_emitted_definition).to_equal(0)

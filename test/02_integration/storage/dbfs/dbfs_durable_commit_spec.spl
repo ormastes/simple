@@ -1,0 +1,281 @@
+"""
+DBFS durable commit and recovery specification.
+
+The backing probe separates volatile controller state from durable media.  A
+power cut discards volatile bytes, so reconstruction never relies on the
+driver's in-memory inode table.
+"""
+
+use std.spipe.*
+use std.db.dbfs_driver.{DbFsDriver}
+use std.fs_driver.block_device.{BlockDevice}
+use std.fs_driver.mem_block_device.{MemBlockDevice}
+use std.fs_driver.types.{Path, OpenFlags}
+use std.fs_driver.error.{FsError}
+use std.fs_driver.instance.{DriverInstance}
+use std.fs_driver.mount_table.{MountTable}
+use std.fs_driver.types.{MountOptions}
+use std.fs_driver.capability.{Capability, FsCapabilitySet}
+use nogc_sync_mut.db.dbfs_driver.device_commit_owner.{
+    DBFS_DEVICE_SERIALIZATION_MISSING,
+    dbfs_device_mutex_provider_blocker,
+    dbfs_device_registration_count
+}
+
+var _crash_next_id: i64 = 1
+var _crash_ids: [i64] = []
+var _crash_sector_sizes: [i64] = []
+var _crash_sector_counts: [i64] = []
+var _crash_volatile: [[u8]] = []
+var _crash_durable: [[u8]] = []
+var _crash_fail_flush: [bool] = []
+var _crash_flush_counts: [i64] = []
+
+fn _copy_bytes(source: [u8]) -> [u8]:
+    var out: [u8] = []
+    for byte in source:
+        out.push(byte)
+    out
+
+fn _zero_bytes(count: i64) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < count:
+        out.push(0u8)
+        i = i + 1
+    out
+
+fn _crash_idx(id: i64) -> i32:
+    var i: i32 = 0
+    while i < _crash_ids.len() as i32:
+        if _crash_ids[i] == id:
+            return i
+        i = i + 1
+    -1
+
+struct DurableCrashDevice:
+    id: i64
+    sector_size_: i64
+    sector_count_: i64
+
+impl DurableCrashDevice:
+    static fn new(sector_count: i64, sector_size: i64) -> DurableCrashDevice:
+        val id = _crash_next_id
+        _crash_next_id = _crash_next_id + 1
+        val bytes = _zero_bytes(sector_count * sector_size)
+        _crash_ids.push(id)
+        _crash_sector_sizes.push(sector_size)
+        _crash_sector_counts.push(sector_count)
+        _crash_volatile.push(_copy_bytes(bytes))
+        _crash_durable.push(_copy_bytes(bytes))
+        _crash_fail_flush.push(false)
+        _crash_flush_counts.push(0)
+        DurableCrashDevice(id: id, sector_size_: sector_size, sector_count_: sector_count)
+
+    fn set_flush_failure(fail: bool):
+        val idx = _crash_idx(self.id)
+        _crash_fail_flush[idx] = fail
+
+    fn flush_count() -> i64:
+        _crash_flush_counts[_crash_idx(self.id)]
+
+    fn power_cut():
+        val idx = _crash_idx(self.id)
+        _crash_volatile[idx] = _copy_bytes(_crash_durable[idx])
+
+    fn persist_checkpoint_sector_without_data(lba: u64):
+        val idx = _crash_idx(self.id)
+        val size = _crash_sector_sizes[idx]
+        val start = lba as i64 * size
+        var durable = _crash_durable[idx]
+        val volatile = _crash_volatile[idx]
+        var i: i64 = 0
+        while i < size:
+            durable[start + i] = volatile[start + i]
+            i = i + 1
+        _crash_durable[idx] = durable
+
+    fn corrupt_durable_sector(lba: u64):
+        val idx = _crash_idx(self.id)
+        val start = lba as i64 * _crash_sector_sizes[idx]
+        var durable = _crash_durable[idx]
+        durable[start] = durable[start] ^ 0x5Au8
+        _crash_durable[idx] = durable
+
+impl BlockDevice for DurableCrashDevice:
+    fn read_sector(lba: u64) -> Result<[u8], text>:
+        val idx = _crash_idx(self.id)
+        if idx < 0 or lba as i64 >= _crash_sector_counts[idx]:
+            return Err("crash device read out of range")
+        val size = _crash_sector_sizes[idx]
+        val start = lba as i64 * size
+        var out: [u8] = []
+        var i: i64 = 0
+        while i < size:
+            out.push(_crash_volatile[idx][start + i])
+            i = i + 1
+        Ok(out)
+
+    me fn write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
+        val idx = _crash_idx(self.id)
+        if idx < 0 or lba as i64 >= _crash_sector_counts[idx] or data.len() as i64 != _crash_sector_sizes[idx]:
+            return Err("crash device write rejected")
+        val size = _crash_sector_sizes[idx]
+        val start = lba as i64 * size
+        var volatile = _crash_volatile[idx]
+        var i: i64 = 0
+        while i < size:
+            volatile[start + i] = data[i]
+            i = i + 1
+        _crash_volatile[idx] = volatile
+        Ok(true)
+
+    fn sector_size() -> u32:
+        self.sector_size_ as u32
+
+    me fn flush() -> Result<bool, text>:
+        val idx = _crash_idx(self.id)
+        if _crash_fail_flush[idx]:
+            return Err("injected flush failure")
+        _crash_durable[idx] = _copy_bytes(_crash_volatile[idx])
+        _crash_flush_counts[idx] = _crash_flush_counts[idx] + 1
+        Ok(true)
+
+fn reopened_text(dev: DurableCrashDevice, path: text, block_count: i64) -> Result<text, FsError>:
+    val reopened = DbFsDriver.open_on_device(dev, 0, block_count)
+    if reopened.is_err():
+        return Err(reopened.unwrap_err())
+    val driver = reopened.unwrap()
+    val stat = driver.stat_path(Path(raw: path))
+    if stat.is_err():
+        return Err(stat.unwrap_err())
+    val handle = driver.open_path(Path(raw: path), OpenFlags.read_only())
+    if handle.is_err():
+        return Err(handle.unwrap_err())
+    driver.read_handle(handle.unwrap(), stat.unwrap().size)
+
+describe "DBFS durable device commit":
+    it "reconstructs exact bytes after an acknowledged fsync and power cut":
+        val dev = DurableCrashDevice.new(32, 512)
+        val driver = DbFsDriver.open_on_device(dev, 0, 32).unwrap()
+        expect(driver.durability_serialization_ready()).to_be(true)
+        expect(driver.durability_serialization_blocker()).to_equal("ready")
+        var mounts = MountTable.new()
+        mounts.mount("/", DriverInstance.DbFs(driver: driver), MountOptions.default()).unwrap()
+        val mounted = mounts.lookup_text("/").unwrap()
+        expect(FsCapabilitySet(bits: mounted.active_caps).has(Capability.DurableSync)).to_be(true)
+        val handle = mounts.open("/state", OpenFlags.create_write()).unwrap()
+        mounts.write(handle, "committed-state").unwrap()
+        mounts.fsync(handle).unwrap()
+        expect(dev.flush_count()).to_equal(1)
+        dev.power_cut()
+        expect(reopened_text(dev, "/state", 32).unwrap()).to_equal("committed-state")
+
+    it "fails closed on flush failure and preserves the prior acknowledged checkpoint":
+        val dev = DurableCrashDevice.new(32, 512)
+        val driver = DbFsDriver.open_on_device(dev, 0, 32).unwrap()
+        val handle = driver.open_path(Path(raw: "/state"), OpenFlags.create_write()).unwrap()
+        driver.write_handle(handle, "old").unwrap()
+        driver.fsync(handle).unwrap()
+        driver.write_handle(handle, "new").unwrap()
+        dev.set_flush_failure(true)
+        expect(driver.fsync(handle).unwrap_err()).to_equal(FsError.IoError(code: 0u32))
+        dev.set_flush_failure(false)
+        dev.power_cut()
+        expect(reopened_text(dev, "/state", 32).unwrap()).to_equal("old")
+
+    it "rejects a higher torn checkpoint whose referenced blob never reached media":
+        val dev = DurableCrashDevice.new(32, 512)
+        val driver = DbFsDriver.open_on_device(dev, 0, 32).unwrap()
+        val handle = driver.open_path(Path(raw: "/state"), OpenFlags.create_write()).unwrap()
+        driver.write_handle(handle, "old").unwrap()
+        driver.fsync(handle).unwrap()
+        driver.write_handle(handle, "new").unwrap()
+        dev.persist_checkpoint_sector_without_data(31u64)
+        dev.power_cut()
+        expect(reopened_text(dev, "/state", 32).unwrap()).to_equal("old")
+
+    it "reports corruption when neither bounded checkpoint slot validates":
+        val dev = DurableCrashDevice.new(32, 512)
+        val driver = DbFsDriver.open_on_device(dev, 0, 32).unwrap()
+        val handle = driver.open_path(Path(raw: "/state"), OpenFlags.create_write()).unwrap()
+        driver.write_handle(handle, "old").unwrap()
+        driver.fsync(handle).unwrap()
+        dev.corrupt_durable_sector(30u64)
+        dev.corrupt_durable_sector(31u64)
+        dev.power_cut()
+        val owners_before = dbfs_device_registration_count()
+        expect(DbFsDriver.open_on_device(dev, 0, 32).unwrap_err()).to_equal(FsError.Corrupt)
+        expect(dbfs_device_registration_count()).to_equal(owners_before)
+
+    it "rejects an unavailable durability backend instead of accepting a no-op":
+        val dev = MemBlockDevice.new(32u64, 512u32)
+        val driver = DbFsDriver.open_on_device(dev, 0, 32).unwrap()
+        val handle = driver.open_path(Path(raw: "/state"), OpenFlags.create_write()).unwrap()
+        driver.write_handle(handle, "volatile").unwrap()
+        expect(driver.fsync(handle).unwrap_err()).to_equal(FsError.IoError(code: 0u32))
+
+    it "bounds the namespace checkpoint and rolls back the rejected entry":
+        val dev = DurableCrashDevice.new(160, 4096)
+        val driver = DbFsDriver.open_on_device(dev, 0, 160).unwrap()
+        var i: i64 = 0
+        while i < 64:
+            driver.open_path(Path(raw: "/f" + i.to_text()), OpenFlags.create_write()).unwrap()
+            i = i + 1
+        expect(driver.open_path(Path(raw: "/overflow"), OpenFlags.create_write()).unwrap_err()).to_equal(FsError.TooLarge)
+        expect(driver.stat_path(Path(raw: "/overflow")).unwrap_err()).to_equal(FsError.NotFound)
+
+    it "serializes interleaved commit transitions without crossing device owners":
+        val left = DurableCrashDevice.new(32, 512)
+        val right = DurableCrashDevice.new(32, 512)
+        val left_driver = DbFsDriver.open_on_device(left, 0, 32).unwrap()
+        val right_driver = DbFsDriver.open_on_device(right, 0, 32).unwrap()
+        val left_handle = left_driver.open_path(
+            Path(raw: "/state"), OpenFlags.create_write()).unwrap()
+        val right_handle = right_driver.open_path(
+            Path(raw: "/state"), OpenFlags.create_write()).unwrap()
+        left_driver.write_handle(left_handle, "left-1").unwrap()
+        right_driver.write_handle(right_handle, "right-1").unwrap()
+        left_driver.write_handle(left_handle, "left-2").unwrap()
+        right_driver.fsync(right_handle).unwrap()
+        left_driver.fsync(left_handle).unwrap()
+        left.power_cut()
+        right.power_cut()
+        expect(reopened_text(left, "/state", 32).unwrap()).to_equal("left-2")
+        expect(reopened_text(right, "/state", 32).unwrap()).to_equal("right-1")
+
+    it "keeps descriptor and namespace visibility coherent across unlink":
+        val dev = DurableCrashDevice.new(32, 512)
+        val driver = DbFsDriver.open_on_device(dev, 0, 32).unwrap()
+        val handle = driver.open_path(
+            Path(raw: "/leased"), OpenFlags.create_write()).unwrap()
+        driver.write_handle(handle, "lease-data").unwrap()
+        driver.unlink_path("/leased").unwrap()
+        expect(driver.stat_path(Path(raw: "/leased")).unwrap_err()).to_equal(
+            FsError.NotFound)
+        expect(driver.read_handle(handle, 10).unwrap()).to_equal("lease-data")
+        driver.close_handle(handle).unwrap()
+        expect(driver.read_handle(handle, 10).unwrap_err()).to_equal(
+            FsError.InvalidArg)
+
+    it "uses one append cursor for passthrough bytes and committed file blobs":
+        val dev = DurableCrashDevice.new(32, 512)
+        val driver = DbFsDriver.open_on_device(dev, 0, 32).unwrap()
+        var prefix: [u8] = []
+        prefix.push(0xA5u8)
+        expect(driver.write_passthrough(prefix).unwrap()).to_equal(1)
+        val handle = driver.open_path(
+            Path(raw: "/state"), OpenFlags.create_write()).unwrap()
+        driver.write_handle(handle, "after-prefix").unwrap()
+        driver.fsync(handle).unwrap()
+        dev.power_cut()
+        expect(reopened_text(dev, "/state", 32).unwrap()).to_equal("after-prefix")
+
+    it "rejects the SimpleOS no-op mutex provider with a stable blocker":
+        expect(dbfs_device_mutex_provider_blocker(
+            "x86_64-baremetal-simpleos")).to_equal(
+                DBFS_DEVICE_SERIALIZATION_MISSING)
+        expect(dbfs_device_mutex_provider_blocker("unknown")).to_equal(
+            DBFS_DEVICE_SERIALIZATION_MISSING)
+        expect(dbfs_device_mutex_provider_blocker("linux")).to_equal("ready")
+        expect(DbFsDriver.device_durability_blocker()).to_equal("ready")

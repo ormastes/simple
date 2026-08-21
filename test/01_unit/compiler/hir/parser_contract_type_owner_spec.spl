@@ -1,20 +1,55 @@
-use std.io.{file_read}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_definitions.{HirContractClause, HirContractClauseKind,
+    HirExpr, HirExprKind}
+use compiler.hir.hir_types.{HirType, HirTypeKind}
+use compiler.hir.hir_verification.{hir_verification_append_clause,
+    hir_verification_decreases_type_valid}
+use std.spec.{describe, expect, it}
 
-val PARSER_TYPES = "src/compiler/10.frontend/parser_types.spl"
-val DECL_LOWERING = "src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl"
+fn verification_span() -> Span:
+    Span.empty()
 
-describe "Parser contract type ownership":
-    it "keeps every verification-contract field on a concrete parser owner":
-        val source = file_read(PARSER_TYPES)
-        expect(source).to_contain("struct ContractClause:")
-        expect(source).to_contain("struct ContractBlock:")
-        expect(source).to_contain("decrease_measure: ContractClause?")
-        expect(source).to_contain("contract: ContractBlock")
-        expect(source).to_contain("fn contract_block_empty() -> ContractBlock:")
+fn verification_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: verification_span())
 
-    it "lowers optional decreases only from the typed ContractBlock boundary":
-        val source = file_read(DECL_LOWERING)
-        expect(source).to_contain(
-            "me lower_verification_contract(contract: ContractBlock")
-        expect(source).to_contain("if val measure = contract.decrease_measure:")
-        expect(source.contains("contract: ANY")).to_equal(false)
+fn verification_clause(kind: HirContractClauseKind) -> HirContractClause:
+    val bool_type = verification_type(HirTypeKind.Bool)
+    HirContractClause(
+        kind: kind,
+        predicate: HirExpr(kind: HirExprKind.BoolLit(true), has_type_: true,
+            type_: bool_type, span: verification_span()),
+        binding_name: "",
+        span: verification_span())
+
+describe "HIR verification contract aggregation":
+    it "retains every clause kind in deterministic source order":
+        var clauses: [HirContractClause] = []
+        clauses = hir_verification_append_clause(clauses,
+            verification_clause(HirContractClauseKind.Requires))
+        clauses = hir_verification_append_clause(clauses,
+            verification_clause(HirContractClauseKind.StatePredicate))
+        clauses = hir_verification_append_clause(clauses,
+            verification_clause(HirContractClauseKind.EnsuresNormal))
+        clauses = hir_verification_append_clause(clauses,
+            verification_clause(HirContractClauseKind.EnsuresError))
+        clauses = hir_verification_append_clause(clauses,
+            verification_clause(HirContractClauseKind.Decreases))
+
+        expect(clauses.len()).to_equal(5)
+        expect(clauses[0].kind == HirContractClauseKind.Requires).to_equal(true)
+        expect(clauses[1].kind == HirContractClauseKind.StatePredicate).to_equal(true)
+        expect(clauses[2].kind == HirContractClauseKind.EnsuresNormal).to_equal(true)
+        expect(clauses[3].kind == HirContractClauseKind.EnsuresError).to_equal(true)
+        expect(clauses[4].kind == HirContractClauseKind.Decreases).to_equal(true)
+
+    it "admits only exact supported unsigned decreases types":
+        expect(hir_verification_decreases_type_valid(
+            verification_type(HirTypeKind.Int(8, false)))).to_equal(true)
+        expect(hir_verification_decreases_type_valid(
+            verification_type(HirTypeKind.Int(128, false)))).to_equal(true)
+        expect(hir_verification_decreases_type_valid(
+            verification_type(HirTypeKind.Int(32, true)))).to_equal(false)
+        expect(hir_verification_decreases_type_valid(
+            verification_type(HirTypeKind.Int(7, false)))).to_equal(false)
+        expect(hir_verification_decreases_type_valid(
+            verification_type(HirTypeKind.Bool))).to_equal(false)

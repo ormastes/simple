@@ -1,0 +1,486 @@
+#!/bin/sh
+# check-critical-wildcard-ban.shs — source ratchet on silent wildcard fallbacks
+# in compiler code (A2, hardening plan 2026-08-21 §11.6).
+#
+# §11.6 "No silent fallback" forbids these shapes in compiler transformations:
+#
+#     case _:  NilLit        case _:  Error        case _:  pass
+#     case _:  0             case _:  scalar_fallback(...)
+#
+# Each one turns "the compiler does not handle this construct" into "the
+# compiler quietly produced nil/zero/nothing". That is the defect class the
+# whole exhaustiveness workstream exists to close: it compiles clean, it tests
+# clean, and it miscompiles. A wildcard is legitimate ONLY over an explicitly
+# open `dyn` region with a typed dispatch or an explicit diagnostic — neither
+# of which matches the shapes above.
+#
+# The tree already carries a large population of these, so a hard zero-bar is
+# not reachable in one step. This is a RATCHET: the population is frozen in
+# scripts/check/critical_wildcard_baseline.txt and any push that ADDS a site
+# fails. Two-directional, exactly like check-test-tree-divergence.shs — a
+# baselined site that is GONE also fails, as a stale baseline, because a
+# baseline that no longer describes the tree is how a ratchet silently stops
+# ratcheting.
+#
+# BASELINE GRANULARITY — why not `path:line`.
+# The first cut of this guard keyed the baseline on `path:line:shape`. Measured
+# on the real tree it was unusable: parallel agent sessions edit src/compiler
+# continuously (the file count moved 1742 -> 1752 during a single verification
+# run), so every unrelated insertion above a baselined site shifts its line
+# number and the guard reports it as simultaneously "new" and "stale". A ratchet
+# that fails on other people's unrelated edits gets routed around, and a guard
+# that is routed around protects nothing.
+# The baseline is therefore keyed on `path<TAB>shape<TAB>count`: how many sites
+# of each shape a file holds. That is invariant under line motion and under
+# reordering within a file, but still strictly increases the moment a new
+# fallback is added — which is the only thing being ratcheted. Failures are
+# still reported as concrete `path:line:shape` sites, resolved from the CURRENT
+# scan, so a human is handed exact locations even though the baseline holds none.
+#
+# Verdict is always the LAST line of stdout:
+#   PASS — <n> site(s) checked, forbidden=<k> (baseline <k>)   exit 0
+#   FAIL — ...                                                 exit 1
+#   ERROR — nothing was checked                                exit 2
+#
+# A run that scanned 0 files is ERROR, never a pass: absence of evidence is not
+# evidence of absence.
+#
+# Usage:
+#   sh scripts/check/check-critical-wildcard-ban.shs [--root DIR]
+#   sh scripts/check/check-critical-wildcard-ban.shs --selftest
+#   sh scripts/check/check-critical-wildcard-ban.shs --generate-baseline
+#
+# --generate-baseline is for DELIBERATE, REVIEWED updates only, exactly like
+# the divergence baseline's flag. Do not "fix" a FAIL with it without reading
+# the diff: a FAIL naming new sites is real new debt, and regenerating hides it.
+
+set -u
+
+ROOT=""
+BASELINE=""
+MODE="scan"
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --root) ROOT="$2"; shift 2 ;;
+        --baseline) BASELINE="$2"; shift 2 ;;
+        --selftest) MODE="selftest"; shift ;;
+        --generate-baseline) MODE="generate"; shift ;;
+        *) echo "unknown argument: $1" >&2; exit 2 ;;
+    esac
+done
+
+[ -n "$ROOT" ] || ROOT="$REPO_ROOT/src/compiler"
+[ -n "$BASELINE" ] || BASELINE="$REPO_ROOT/scripts/check/critical_wildcard_baseline.txt"
+
+# ---------------------------------------------------------------------------
+# The scanner.
+#
+# Emits one `path:line:shape` record per forbidden site, sorted.
+#
+# Finding "a wildcard arm INSIDE a match" cannot be done by grepping `else:` —
+# `else:` belongs to `if` far more often than to `match`. So we track a stack of
+# the indentation of every open `match ...:` block: an arm is a wildcard line
+# indented strictly deeper than the innermost open match. Blocks are popped when
+# a line appears at or left of their indent, which is exactly Simple's
+# offside rule.
+#
+# The arm BODY is either the text after the colon on the same line, or the next
+# non-blank, non-comment line. It is forbidden when it is *only* one of the
+# §11.6 shapes — a wildcard that raises a diagnostic or dispatches dynamically
+# has a body that matches none of them and is correctly ignored.
+# ---------------------------------------------------------------------------
+scan_tree() {
+    scan_root="$1"
+    find "$scan_root" -type f -name '*.spl' \
+        ! -path '*/vendor/*' \
+        | sort \
+        | while IFS= read -r f; do
+            rel=${f#"$REPO_ROOT"/}
+            awk -v path="$rel" '
+                function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+                function indent_of(s,   n) { n = match(s, /[^ ]/); return (n == 0) ? 0 : n - 1 }
+
+                # Is this arm body one of the §11.6 silent-fallback shapes?
+                #
+                # A leading `return`/`yield` is stripped first: `case _: NilLit`
+                # and `case _: return Hir.NilLit()` are the same defect, and
+                # anchoring on the bare token let the wrapped forms through
+                # (found by the A6 mutation harness).
+                #
+                # Each shape accepts an optional qualifier prefix and an
+                # optional call-argument list, so all of `NilLit`,
+                # `NilLit()`, `Hir.NilLit(span)` and `nil_lit(span)` count.
+                #
+                # DELIBERATE LIMIT on `Error`: only the BARE token (and its
+                # zero-argument call form) counts. `Error("unsupported kind: "
+                # + k)` carries a real message and is the "explicit diagnostic"
+                # §11.6 expressly ALLOWS, so widening this one to accept
+                # arguments would flag the correct fix as the defect.
+                function forbidden_shape(b,   q, c) {
+                    b = trim(b)
+                    if (b == "") return ""
+                    sub(/^(return|yield)[ \t]+/, "", b)
+                    b = trim(b)
+                    if (b == "") return ""
+
+                    q = "^([A-Za-z_][A-Za-z0-9_]*\\.)*"   # optional qualifier
+                    c = "([ \t]*\\(.*\\))?$"              # optional call args
+
+                    if (b ~ /^(pass|pass_do_nothing|pass_dn)$/)   return "pass"
+                    if (b ~ /^0([iu](8|16|32|64)|f(32|64))?$/)    return "0"
+                    if (b ~ /^0\.0(f32|f64)?$/)                   return "0"
+                    if (b ~ q "(NilLit|nil_lit|NilExpr|nil_expr)" c) return "NilLit"
+                    if (b ~ q "(nil|None|none)" c)                return "nil"
+                    if (b ~ q "Error([ \t]*\\([ \t]*\\))?$")      return "Error"
+                    if (b ~ /[A-Za-z_][A-Za-z0-9_]*_fallback[ \t]*\(/) return "fallback"
+                    return ""
+                }
+
+                {
+                    line = $0
+                    stripped = line
+                    sub(/[ \t]*#.*$/, "", stripped)
+                    if (trim(stripped) == "") { next }
+                    ind = indent_of(stripped)
+
+                    # Offside: close every match block this line has left.
+                    while (top > 0 && ind <= mind[top]) { top-- }
+
+                    # A pending arm is resolved by the first following line.
+                    if (pending) {
+                        shape = forbidden_shape(stripped)
+                        if (shape != "") { print path ":" pendline ":" shape }
+                        pending = 0
+                    }
+
+                    if (trim(stripped) ~ /^match[ (]/ && stripped ~ /:[ \t]*$/) {
+                        top++; mind[top] = ind
+                        next
+                    }
+
+                    if (top > 0 && ind > mind[top]) {
+                        t = trim(stripped)
+                        if (t ~ /^(case[ \t]+_|_|else)[ \t]*:/) {
+                            body = t
+                            sub(/^(case[ \t]+_|_|else)[ \t]*:/, "", body)
+                            if (trim(body) != "") {
+                                shape = forbidden_shape(body)
+                                if (shape != "") { print path ":" NR ":" shape }
+                            } else {
+                                pending = 1; pendline = NR
+                            }
+                        }
+                    }
+                }
+            ' "$f"
+        done | sort
+}
+
+count_files() {
+    find "$1" -type f -name '*.spl' ! -path '*/vendor/*' | wc -l | tr -d ' '
+}
+
+# Aggregate a `path:line:shape` site list into the line-independent baseline
+# key `path<TAB>shape<TAB>count`. Reads the site list on stdin.
+aggregate_sites() {
+    awk -F: '{ shape = $NF; path = $1; key = path "\t" shape; n[key]++ }
+             END { for (k in n) print k "\t" n[k] }' | sort
+}
+
+# Print the concrete `path:line:shape` sites belonging to a set of offending
+# buckets. $1 = bucket file (`path<TAB>shape<TAB>count`), $2 = site-list file.
+sites_in_buckets() {
+    awk -v bucketfile="$1" '
+        BEGIN {
+            while ((getline line < bucketfile) > 0) {
+                nf = split(line, p, "\t")
+                if (nf >= 2) want[p[1] "\t" p[2]] = 1
+            }
+        }
+        {
+            nf = split($0, f, ":")
+            if (nf < 3) next
+            print_key = f[1] "\t" f[nf]
+            if (want[print_key]) print $0
+        }
+    ' "$2"
+}
+
+# ---------------------------------------------------------------------------
+# Selftest — fatal, runs before every scan.
+# ---------------------------------------------------------------------------
+run_selftest() {
+    tmp=$(mktemp -d) || { echo "selftest: mktemp failed" >&2; return 1; }
+    rc=0
+
+    # Fixture 1: clean tree — a wildcard that raises a real diagnostic, and an
+    # `else:` belonging to an `if` (must NOT be counted as a match arm).
+    mkdir -p "$tmp/clean/src"
+    cat > "$tmp/clean/src/a.spl" <<'CLEAN_EOF'
+fn lower(k: Kind) -> Value:
+    match k:
+        Kind.Int: int_value()
+        case _: self.error("unsupported kind")
+
+fn other(x: i64) -> i64:
+    if x > 0:
+        1
+    else:
+        0
+CLEAN_EOF
+    n=$(scan_tree "$tmp/clean" | wc -l | tr -d ' ')
+    if [ "$n" -ne 0 ]; then
+        echo "selftest FAIL: clean fixture reported $n site(s), expected 0" >&2
+        scan_tree "$tmp/clean" >&2
+        rc=1
+    fi
+
+    # Fixture 2: each §11.6 shape must be caught.
+    mkdir -p "$tmp/dirty/src"
+    cat > "$tmp/dirty/src/b.spl" <<'DIRTY_EOF'
+fn a(k: Kind) -> Value:
+    match k:
+        Kind.Int: int_value()
+        case _: NilLit
+
+fn b(k: Kind) -> Value:
+    match k:
+        Kind.Int: int_value()
+        case _:
+            Error
+
+fn c(k: Kind) -> Value:
+    match k:
+        Kind.Int: int_value()
+        case _: pass
+
+fn d(k: Kind) -> i64:
+    match k:
+        Kind.Int: 7
+        case _: 0
+
+fn e(k: Kind) -> Value:
+    match k:
+        Kind.Int: int_value()
+        case _: scalar_fallback(k)
+DIRTY_EOF
+    got=$(scan_tree "$tmp/dirty" | wc -l | tr -d ' ')
+    if [ "$got" -ne 5 ]; then
+        echo "selftest FAIL: dirty fixture reported $got site(s), expected 5" >&2
+        scan_tree "$tmp/dirty" >&2
+        rc=1
+    fi
+
+    # Fixture 2b: constructor- and return-wrapped forms of the same shapes.
+    # These slipped past the first cut of forbidden_shape(), which anchored on
+    # the bare token — found by the A6 mutation harness, pinned here forever.
+    mkdir -p "$tmp/wrapped/src"
+    cat > "$tmp/wrapped/src/w.spl" <<'WRAPPED_EOF'
+fn a(k: Kind) -> Value:
+    match k:
+        Kind.Int: int_value()
+        case _: return Hir.NilLit()
+
+fn b(k: Kind) -> Value:
+    match k:
+        Kind.Int: int_value()
+        case _: Expr.NilLit(span)
+
+fn c(k: Kind) -> Value:
+    match k:
+        Kind.Int: int_value()
+        case _: nil_lit(span)
+
+fn d(k: Kind) -> Value:
+    match k:
+        Kind.Int: int_value()
+        case _: return nil
+
+fn e(k: Kind) -> i64:
+    match k:
+        Kind.Int: 7
+        case _: return 0
+
+fn f(k: Kind) -> Value:
+    match k:
+        Kind.Int: int_value()
+        case _: return scalar_fallback(k)
+
+fn g(k: Kind) -> Value:
+    match k:
+        Kind.Int: int_value()
+        case _: return Error
+WRAPPED_EOF
+    gotw=$(scan_tree "$tmp/wrapped" | wc -l | tr -d ' ')
+    if [ "$gotw" -ne 7 ]; then
+        echo "selftest FAIL: wrapped fixture reported $gotw site(s), expected 7" >&2
+        scan_tree "$tmp/wrapped" >&2
+        rc=1
+    fi
+
+    # Fixture 2c: an `Error(...)` carrying a real message is an EXPLICIT
+    # DIAGNOSTIC, which §11.6 allows. It must NOT be counted — otherwise the
+    # guard flags the correct fix as the defect.
+    mkdir -p "$tmp/diag/src"
+    cat > "$tmp/diag/src/d.spl" <<'DIAG_EOF'
+fn a(k: Kind) -> Value:
+    match k:
+        Kind.Int: int_value()
+        case _: return Error("unsupported kind: " + k.name())
+
+fn b(k: Kind) -> Value:
+    match k:
+        Kind.Int: int_value()
+        case _: dyn_dispatch(k)
+DIAG_EOF
+    gotd=$(scan_tree "$tmp/diag" | wc -l | tr -d ' ')
+    if [ "$gotd" -ne 0 ]; then
+        echo "selftest FAIL: explicit-diagnostic fixture reported $gotd site(s), expected 0" >&2
+        scan_tree "$tmp/diag" >&2
+        rc=1
+    fi
+
+    # Fixture 3: one NEW site must FAIL, naming file:line.
+    base3="$tmp/base3.txt"
+    scan_tree "$tmp/clean" | aggregate_sites > "$base3"
+    cat >> "$tmp/clean/src/a.spl" <<'NEW_EOF'
+
+fn injected(k: Kind) -> Value:
+    match k:
+        Kind.Int: int_value()
+        case _: NilLit
+NEW_EOF
+    cur3="$tmp/cur3.txt"; agg3="$tmp/agg3.txt"; bad3="$tmp/bad3.txt"
+    scan_tree "$tmp/clean" > "$cur3"
+    aggregate_sites < "$cur3" > "$agg3"
+    comm -13 "$base3" "$agg3" > "$bad3"
+    if [ ! -s "$bad3" ]; then
+        echo "selftest FAIL: injected site was not detected as new" >&2
+        rc=1
+    else
+        newsites=$(sites_in_buckets "$bad3" "$cur3")
+        if ! echo "$newsites" | grep -q 'src/a.spl:[0-9][0-9]*:NilLit'; then
+            echo "selftest FAIL: new site not named as file:line:shape — got: $newsites" >&2
+            rc=1
+        fi
+    fi
+
+    # Fixture 3b: line-number churn ALONE must not fail. Inserting unrelated
+    # lines above a baselined site shifts its line number; a `path:line`
+    # baseline reported that as both new and stale, which is why the baseline
+    # is aggregated. This pins that it no longer does.
+    base3b="$tmp/base3b.txt"
+    scan_tree "$tmp/dirty" | aggregate_sites > "$base3b"
+    sed -i '1i # unrelated comment\n# another one' "$tmp/dirty/src/b.spl"
+    agg3b=$(scan_tree "$tmp/dirty" | aggregate_sites)
+    if [ "$agg3b" != "$(cat "$base3b")" ]; then
+        echo "selftest FAIL: pure line-number churn changed the aggregated baseline" >&2
+        rc=1
+    fi
+
+    # Fixture 4: stale baseline — a baselined site that is gone must FAIL.
+    base4="$tmp/base4.txt"
+    scan_tree "$tmp/dirty" | aggregate_sites > "$base4"
+    rm -f "$tmp/dirty/src/b.spl"
+    mkdir -p "$tmp/dirty/src"
+    echo 'fn nothing() -> i64:' > "$tmp/dirty/src/c.spl"
+    echo '    1' >> "$tmp/dirty/src/c.spl"
+    gone=$(scan_tree "$tmp/dirty" | aggregate_sites | comm -23 "$base4" - 2>/dev/null)
+    if [ -z "$gone" ]; then
+        echo "selftest FAIL: removed baselined sites were not detected as stale" >&2
+        rc=1
+    fi
+
+    # Fixture 5: empty tree must scan 0 files, forcing the caller to ERROR.
+    mkdir -p "$tmp/empty"
+    if [ "$(count_files "$tmp/empty")" -ne 0 ]; then
+        echo "selftest FAIL: empty fixture did not report 0 files" >&2
+        rc=1
+    fi
+
+    rm -rf "$tmp"
+    return $rc
+}
+
+if ! run_selftest; then
+    echo "ERROR — nothing was checked (selftest failed)"
+    exit 2
+fi
+
+if [ "$MODE" = "selftest" ]; then
+    echo "PASS — selftest only, 8 fixture(s) checked, no tree scanned"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Real scan.
+# ---------------------------------------------------------------------------
+if [ ! -d "$ROOT" ]; then
+    echo "ERROR — nothing was checked (root not found: $ROOT)"
+    exit 2
+fi
+
+FILES=$(count_files "$ROOT")
+if [ "$FILES" -eq 0 ]; then
+    echo "ERROR — nothing was checked (no .spl files under $ROOT)"
+    exit 2
+fi
+
+WORK=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+CUR="$WORK/sites.txt"
+AGG="$WORK/agg.txt"
+scan_tree "$ROOT" > "$CUR"
+aggregate_sites < "$CUR" > "$AGG"
+FORBIDDEN=$(wc -l < "$CUR" | tr -d ' ')
+
+# The headline number is the SITE count, summed from the aggregated buckets, so
+# the verdict's `forbidden=` and the baseline it is compared against are always
+# the same quantity.
+bucket_total() {
+    awk -F'\t' '{ s += $3 } END { print (s == "") ? 0 : s }' "$1"
+}
+
+if [ "$MODE" = "generate" ]; then
+    cp "$AGG" "$BASELINE"
+    rm -rf "$WORK"
+    echo "wrote $BASELINE"
+    echo "PASS — $FILES file(s) checked, forbidden=$FORBIDDEN (baseline $FORBIDDEN)"
+    exit 0
+fi
+
+if [ ! -f "$BASELINE" ]; then
+    rm -rf "$WORK"
+    echo "ERROR — nothing was checked (missing baseline: $BASELINE)"
+    exit 2
+fi
+
+BASE_N=$(bucket_total "$BASELINE")
+comm -13 "$BASELINE" "$AGG" > "$WORK/new.txt"
+comm -23 "$BASELINE" "$AGG" > "$WORK/gone.txt"
+
+if [ -s "$WORK/new.txt" ]; then
+    echo "new silent-fallback site(s) — forbidden by hardening plan §11.6:"
+    sites_in_buckets "$WORK/new.txt" "$CUR" | sed 's/^/  /'
+    NN=$(wc -l < "$WORK/new.txt" | tr -d ' ')
+    rm -rf "$WORK"
+    echo "FAIL — $FILES file(s) checked, forbidden=$FORBIDDEN (baseline $BASE_N), $NN newly introduced bucket(s)"
+    exit 1
+fi
+
+if [ -s "$WORK/gone.txt" ]; then
+    echo "stale baseline — these bucket(s) no longer match the tree:"
+    sed 's/^/  /' "$WORK/gone.txt"
+    echo "regenerate with --generate-baseline after reviewing the diff."
+    GN=$(wc -l < "$WORK/gone.txt" | tr -d ' ')
+    rm -rf "$WORK"
+    echo "FAIL — $FILES file(s) checked, forbidden=$FORBIDDEN (baseline $BASE_N), $GN stale baseline entry(ies)"
+    exit 1
+fi
+
+rm -rf "$WORK"
+echo "PASS — $FILES site(s) checked, forbidden=$FORBIDDEN (baseline $BASE_N)"
+exit 0

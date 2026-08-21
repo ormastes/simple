@@ -1,6 +1,7 @@
 # @tag: unit, compiler, hir, native-safe
 
 use std.spec.{describe, it, expect}
+use compiler.common.driver_core_types.{SourceFile}
 use compiler.hir.hir_lowering.module_surface.{
     ModuleSurface,
     ModuleSurfaceBuilder,
@@ -8,11 +9,14 @@ use compiler.hir.hir_lowering.module_surface.{
     module_surface_export_origin_index_empty,
     module_surface_export_origin_index_lookup,
     module_surface_export_origin_index_put,
+    module_surface_index_for_source,
     module_surface_index_by_name,
     module_surfaces_by_name_from_parts
 }
 
 extern fn rt_heap_array_capacity_bytes() -> i64
+extern fn rt_hash_text(content: text) -> i64
+extern fn rt_path_absolute(path: text) -> text
 
 describe "module surface aligned scalar index":
     it "preserves discovery order and deduplicates a same-target alias":
@@ -47,7 +51,7 @@ describe "module surface aligned scalar index":
         val conflicting = module_surfaces_by_name_from_parts(
             [ModuleSurface.empty("owner")], {"owner": 1}, ["owner"], [0])
         expect(conflicting.is_err()).to_equal(true)
-        expect(module_surface_index_by_name(["owner"], [0], "missing")).to_equal(-1)
+        expect(module_surface_index_by_name({"owner": 0}, "missing")).to_equal(-1)
 
     it "uses an explicit index receiver for native-safe origin writes and reads":
         val index = module_surface_export_origin_index_empty()
@@ -62,12 +66,42 @@ describe "module surface aligned scalar index":
         expect(miss.found).to_equal(false)
 
     it "does not allocate array capacity during repeated scalar lookup":
-        val names = ["owner"]
-        val indices = [0]
+        val name_index = {"owner": 0}
         val before = rt_heap_array_capacity_bytes()
         var iteration = 0
         while iteration < 1000:
-            expect(module_surface_index_by_name(names, indices, "owner")).to_equal(0)
+            expect(module_surface_index_by_name(name_index, "owner")).to_equal(0)
             iteration = iteration + 1
         val after = rt_heap_array_capacity_bytes()
         expect(after).to_equal(before)
+
+    it "resolves exact source identity without fallback allocation":
+        val source = SourceFile(
+            path: "identity/owner.spl", content: "fn answer(): 42",
+            module_name: "identity.owner")
+        var surface = ModuleSurface.empty("identity.owner")
+        surface.source_index = 7
+        val absolute_path = rt_path_absolute(source.path)
+        surface.canonical_path = (
+            if absolute_path != "": absolute_path else: source.path).replace("\\", "/")
+        surface.module_name = source.module_name
+        surface.content_length = source.content.len()
+        surface.content_hash = rt_hash_text(source.content)
+        val registry_result = module_surfaces_by_name_from_parts(
+            [surface], {"identity.owner": 0}, ["identity.owner"], [0])
+        expect(registry_result.is_ok()).to_equal(true)
+        if registry_result.is_ok():
+            val registry = registry_result.unwrap()
+            val before = rt_heap_array_capacity_bytes()
+            expect(module_surface_index_for_source(registry, source, 7)).to_equal(0)
+            val wrong_content = SourceFile(
+                path: source.path, content: "fn answer(): 43",
+                module_name: source.module_name)
+            expect(module_surface_index_for_source(registry, wrong_content, 7)).to_equal(-1)
+            expect(module_surface_index_for_source(registry, source, 8)).to_equal(-1)
+            val unknown_alias = SourceFile(
+                path: source.path, content: source.content,
+                module_name: "identity.alias")
+            expect(module_surface_index_for_source(registry, unknown_alias, 7)).to_equal(-1)
+            val after = rt_heap_array_capacity_bytes()
+            expect(after).to_equal(before)

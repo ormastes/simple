@@ -37,6 +37,8 @@
 # `layer_eq_registry.spl` duplicates no checker constants.
 val EFFECT_REGISTRY_BUDGET_UNSET: i64 = 0 - 1
 
+extern fn rt_transient_heap_promote(value: Any) -> bool
+
 var effect_registry_fns: [text] = []
 var effect_registry_budgets: Dict<text, i64> = {}
 var effect_registry_bounded: Dict<text, bool> = {}
@@ -57,11 +59,25 @@ fn effect_registry_reset():
 fn effect_registry_reset_module(path: text):
     val prefix = path + "|"
     var kept: [text] = []
+    var kept_budgets: Dict<text, i64> = {}
+    var kept_bounded: Dict<text, bool> = {}
     for key in effect_registry_fns:
         if key.starts_with(prefix):
             continue
         kept.push(key)
+        if effect_registry_budgets.contains_key(key):
+            kept_budgets[key] = effect_registry_budgets[key]
+        if effect_registry_bounded.contains_key(key):
+            kept_bounded[key] = effect_registry_bounded[key]
     effect_registry_fns = kept
+    effect_registry_budgets = kept_budgets
+    effect_registry_bounded = kept_bounded
+
+fn effect_registry_promote_transient_owner() -> bool:
+    val fns_ok = rt_transient_heap_promote(effect_registry_fns)
+    val budgets_ok = rt_transient_heap_promote(effect_registry_budgets)
+    val bounded_ok = rt_transient_heap_promote(effect_registry_bounded)
+    fns_ok and budgets_ok and bounded_ok
 
 fn effect_claim_key(path: text, fn_name: text) -> text:
     path + "|" + fn_name
@@ -179,6 +195,7 @@ fn effect_pending_bounded_flag() -> bool:
 export EFFECT_REGISTRY_BUDGET_UNSET
 export effect_registry_reset, effect_registry_reset_module, effect_registry_declare
 export effect_registry_claim_keys, effect_claim_key, effect_claim_path, effect_claim_fn
+export effect_registry_promote_transient_owner
 export effect_is_declared, effect_parse_budget
 export effect_registry_budget_of, effect_registry_budget_of_key
 export effect_registry_bounded_of, effect_registry_bounded_of_key

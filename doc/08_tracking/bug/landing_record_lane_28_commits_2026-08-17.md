@@ -306,3 +306,81 @@ Nothing of the other lane's version was overwritten. This duplication is
 exactly what the standing order "when sync and push fix check other agents
 already fix" exists to prevent, and it was caught only because the check was
 run.
+
+# RE-VERIFICATION 2026-08-17 (later pass) — the pushed tip is NOT in origin/main, and CORRECTION 1's forward-fix does not hold today
+
+This is a re-measurement of the claims above against the repository as it
+stands now. Nothing was reverted, restored, or checked out to produce it.
+
+## 1. The pushed sha is no longer reachable from origin/main
+
+```sh
+git rev-parse origin/main                                  # d5ebbefa5f03a53f6241ae218bed22636d2f9ceb
+git cat-file -t 1b2110db1cd                                # commit  (object still exists locally)
+git merge-base --is-ancestor 1b2110db1cd origin/main; echo $?   # 1  -> NOT an ancestor
+git merge-base --is-ancestor b25fd170949 origin/main; echo $?   # 1  -> NOT an ancestor
+```
+
+`1b2110db1cd` was a real push (the record above measured it), but origin has
+since moved to `d5ebbefa5f0` along a history that does **not** contain it.
+This lane's commits are therefore **not proven landed** by sha reachability
+alone; per this record's own standing order, presence must be re-checked by
+CONTENT per file before anyone assumes the work is upstream. That re-check is
+**not** done here and is the open item this section leaves behind.
+
+Local state for context: `git rev-list --left-right --count HEAD...origin/main`
+-> `112  382` (HEAD = `d0d1ccf9c52`, 112 ahead / 382 behind).
+
+## 2. CORRECTION 1's "fixed forward" claim is not the current state
+
+The record above states the mirror was synced so that
+`test/unit/app/doc_coverage/sdoctest_coverage_spec.spl` regained byte-identity
+with `test/01_unit/...`. Measured now:
+
+```sh
+# at origin/main — IDENTICAL, but at the OLD test/unit content
+git rev-parse origin/main:test/01_unit/app/doc_coverage/sdoctest_coverage_spec.spl \
+              origin/main:test/unit/app/doc_coverage/sdoctest_coverage_spec.spl
+# -> 45348fc2bea969df66c3ab895ff9cec10d2e7408
+#    45348fc2bea969df66c3ab895ff9cec10d2e7408
+
+# at local HEAD — DIVERGED
+git rev-parse HEAD:test/01_unit/... HEAD:test/unit/...
+# -> 3cdb86415c3a9f587b732a52e61e9cfd7da857ab   (01_unit, rewritten)
+#    45348fc2bea969df66c3ab895ff9cec10d2e7408   (unit, original)
+
+cmp -s test/01_unit/app/doc_coverage/sdoctest_coverage_spec.spl \
+       test/unit/app/doc_coverage/sdoctest_coverage_spec.spl    # -> DIVERGED on disk
+```
+
+Reading:
+
+- **Upstream is clean.** At `origin/main` the pair is byte-identical, so this
+  lane introduced **no** test-tree divergence that is live at origin. The
+  earlier FAIL verdict has no upstream consequence.
+- **But not for the reason claimed.** The pair is identical at blob
+  `45348fc` — the *old* `test/unit` content. `b25fd170949`, the commit that
+  rewrote the `01_unit` copy, is not in origin/main at all. So upstream is
+  clean because the rewrite never landed there, **not** because the mirror was
+  synced forward to it. The "fixed forward in the same commit" wording is
+  withdrawn as a description of the upstream result.
+- **The divergence is live locally**, in the unpushed 112-commit range and on
+  disk. Anyone landing from this tree will re-introduce the exact offender
+  `unit:app/doc_coverage/sdoctest_coverage_spec.spl` unless they sync the
+  mirror first.
+
+**Deliberately not acted on by this pass:** the two spec files were left
+untouched. This is a shared working copy with ~16 concurrent lanes (files
+observed being modified at 14:02 during this very pass), the files were
+authored by another session, and the repo has a documented history of sync
+commits clobbering landed fixes. Syncing the mirror is the landing lane's call,
+to be made at landing time against the then-current `origin/main` — not a
+drive-by edit from a triage pass.
+
+## Status
+
+**STILL OPEN** — as a *landing* record it is accurate for what it did at the
+time, but two of its conclusions no longer describe reality: the pushed tip is
+not reachable from origin/main, and the CORRECTION-1 forward-fix is not present
+either upstream or locally. Close it only after a per-file content audit of the
+27 replayed commits against `origin/main`.

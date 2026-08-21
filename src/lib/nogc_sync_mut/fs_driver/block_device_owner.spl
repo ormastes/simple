@@ -1,0 +1,63 @@
+# Canonical process-local owner for the fs_driver block-device capability.
+#
+# NVFS arena and superblock code share this owner.  Registering a replacement
+# device is an explicit owner transition; callers never retain raw access to
+# the stored trait object.  Writes are not durable until flush() is
+# acknowledged by the concrete BlockDevice implementation.
+
+use std.fs_driver.block_device.{BlockDevice}
+
+var _fs_block_device_store: [BlockDevice] = []
+var _fs_block_device_ready: bool = false
+
+fn fs_block_device_owner_set(device: BlockDevice):
+    if _fs_block_device_ready:
+        _fs_block_device_store[0] = device
+    else:
+        _fs_block_device_store.push(device)
+        _fs_block_device_ready = true
+
+fn fs_block_device_owner_ready() -> bool:
+    _fs_block_device_ready
+
+fn fs_block_device_owner_sector_size() -> u32:
+    if not _fs_block_device_ready:
+        return 0u32
+    var device = _fs_block_device_store[0]
+    val size = device.sector_size()
+    _fs_block_device_store[0] = device
+    size
+
+fn fs_block_device_owner_read(lba: u64) -> Result<[u8], text>:
+    if not _fs_block_device_ready:
+        return Err("block device owner unavailable")
+    var device = _fs_block_device_store[0]
+    val result = device.read_sector(lba)
+    _fs_block_device_store[0] = device
+    result
+
+fn fs_block_device_owner_write(lba: u64, data: [u8]) -> Result<bool, text>:
+    if not _fs_block_device_ready:
+        return Err("block device owner unavailable")
+    var device = _fs_block_device_store[0]
+    val result = device.write_sector(lba, data)
+    _fs_block_device_store[0] = device
+    result
+
+fn fs_block_device_owner_flush() -> Result<bool, text>:
+    if not _fs_block_device_ready:
+        return Err("block device owner unavailable")
+    var device = _fs_block_device_store[0]
+    val result = device.flush()
+    _fs_block_device_store[0] = device
+    result
+
+fn fs_block_device_owner_flush_acknowledged() -> bool:
+    match fs_block_device_owner_flush():
+        Ok(acknowledged): acknowledged
+        Err(_): false
+
+export fs_block_device_owner_set, fs_block_device_owner_ready
+export fs_block_device_owner_sector_size, fs_block_device_owner_read
+export fs_block_device_owner_write, fs_block_device_owner_flush
+export fs_block_device_owner_flush_acknowledged

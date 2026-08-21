@@ -1,0 +1,358 @@
+# SimpleOS evidence receipt v1.
+#
+# This is an immutable, bounded candidate record.  Producers may construct it,
+# but only the evidence-service owner may validate it against artifacts and
+# commit a capability-ledger transition.  In particular, source presence and a
+# producer-written "pass" marker are intentionally not fields of this record.
+
+use std.common.structural.digest.hash256.{hash256_hex_valid}
+
+enum SimpleOsEvidenceEnvironment:
+    QemuSystem
+    NativeHost
+    PhysicalBoard
+
+enum SimpleOsEvidenceReceiptError:
+    None
+    UnsupportedSchema
+    MissingIdentity
+    TextTooLong
+    InvalidText
+    InvalidDigest
+    MissingTargetIdentity
+    InvalidArgumentCount
+    InvalidArtifactCount
+    InvalidStepCount
+    InvalidPerformanceSampleCount
+    InvalidSequence
+    FailedStep
+    InvalidTimeRange
+    MissingSignature
+    ReviewerConflict
+
+struct SimpleOsEvidenceStepV1:
+    sequence: i64
+    behavior_id: text
+    outcome: text
+    exit_code: i64
+    artifact_hash: text
+
+struct SimpleOsPerformanceSampleV1:
+    sequence: i64
+    metric_value_milli: i64
+    elapsed_us: i64
+    max_rss_bytes: i64
+
+struct SimpleOsEvidenceReceiptV1:
+    schema_version: i64
+    receipt_id: text
+    nonce: text
+    requirement_id: text
+    capability: text
+    target: text
+    target_abi: text
+    environment: SimpleOsEvidenceEnvironment
+    firmware_profile: text
+    board_identity: text
+    accelerator: text
+    filesystem: text
+    protocol_profile: text
+    source_hash: text
+    image_hash: text
+    binary_hash: text
+    config_hash: text
+    exact_argv: [text]
+    artifact_hashes: [text]
+    steps: [SimpleOsEvidenceStepV1]
+    performance_workload: text
+    performance_unit: text
+    performance_warmup_count: i64
+    performance_cpu_identity: text
+    performance_frequency_hz: i64
+    performance_noise_profile: text
+    performance_comparable: bool
+    performance_samples: [SimpleOsPerformanceSampleV1]
+    started_unix_us: i64
+    finished_unix_us: i64
+    owner: text
+    reviewer: text
+    signer_key_id: text
+    signature: text
+
+struct SimpleOsEvidenceReceiptCheck:
+    ok: bool
+    error: SimpleOsEvidenceReceiptError
+
+fn simpleos_evidence_receipt_schema_version() -> i64:
+    1
+
+fn simpleos_evidence_max_arguments() -> i64:
+    128
+
+fn simpleos_evidence_max_artifacts() -> i64:
+    256
+
+fn simpleos_evidence_max_steps() -> i64:
+    1024
+
+fn simpleos_evidence_max_performance_samples() -> i64:
+    1024
+
+fn simpleos_evidence_max_identity_chars() -> i64:
+    256
+
+fn simpleos_evidence_max_argument_chars() -> i64:
+    4096
+
+fn simpleos_evidence_max_signature_chars() -> i64:
+    8192
+
+fn simpleos_evidence_environment_to_text(v: SimpleOsEvidenceEnvironment) -> text:
+    """Stable receipt spelling; this is also the capability-ledger key form."""
+    match v:
+        case SimpleOsEvidenceEnvironment.QemuSystem: "qemu_system"
+        case SimpleOsEvidenceEnvironment.NativeHost: "native_host"
+        case SimpleOsEvidenceEnvironment.PhysicalBoard: "physical_board"
+
+fn simpleos_evidence_receipt_error_to_text(v: SimpleOsEvidenceReceiptError) -> text:
+    """Stable, non-secret diagnostic for a local receipt validation failure."""
+    match v:
+        case SimpleOsEvidenceReceiptError.None: "ok"
+        case SimpleOsEvidenceReceiptError.UnsupportedSchema: "unsupported_schema"
+        case SimpleOsEvidenceReceiptError.MissingIdentity: "missing_identity"
+        case SimpleOsEvidenceReceiptError.TextTooLong: "text_too_long"
+        case SimpleOsEvidenceReceiptError.InvalidText: "invalid_text"
+        case SimpleOsEvidenceReceiptError.InvalidDigest: "invalid_digest"
+        case SimpleOsEvidenceReceiptError.MissingTargetIdentity: "missing_target_identity"
+        case SimpleOsEvidenceReceiptError.InvalidArgumentCount: "invalid_argument_count"
+        case SimpleOsEvidenceReceiptError.InvalidArtifactCount: "invalid_artifact_count"
+        case SimpleOsEvidenceReceiptError.InvalidStepCount: "invalid_step_count"
+        case SimpleOsEvidenceReceiptError.InvalidPerformanceSampleCount: "invalid_performance_sample_count"
+        case SimpleOsEvidenceReceiptError.InvalidSequence: "invalid_sequence"
+        case SimpleOsEvidenceReceiptError.FailedStep: "failed_step"
+        case SimpleOsEvidenceReceiptError.InvalidTimeRange: "invalid_time_range"
+        case SimpleOsEvidenceReceiptError.MissingSignature: "missing_signature"
+        case SimpleOsEvidenceReceiptError.ReviewerConflict: "reviewer_conflict"
+
+fn _simpleos_evidence_ok() -> SimpleOsEvidenceReceiptCheck:
+    SimpleOsEvidenceReceiptCheck(ok: true, error: SimpleOsEvidenceReceiptError.None)
+
+fn _simpleos_evidence_reject(error: SimpleOsEvidenceReceiptError) -> SimpleOsEvidenceReceiptCheck:
+    SimpleOsEvidenceReceiptCheck(ok: false, error: error)
+
+fn _simpleos_evidence_required_text_check(value: text) -> SimpleOsEvidenceReceiptCheck:
+    if value.len() == 0:
+        return _simpleos_evidence_reject(SimpleOsEvidenceReceiptError.MissingIdentity)
+    if value.len() > simpleos_evidence_max_identity_chars():
+        return _simpleos_evidence_reject(SimpleOsEvidenceReceiptError.TextTooLong)
+    var i: i64 = 0
+    while i < value.len():
+        val code = value.char_code_at(i)
+        if code < 32 or code > 126:
+            return _simpleos_evidence_reject(SimpleOsEvidenceReceiptError.InvalidText)
+        i = i + 1
+    _simpleos_evidence_ok()
+
+fn _simpleos_evidence_optional_text_valid(value: text) -> bool:
+    if value.len() > simpleos_evidence_max_identity_chars():
+        return false
+    var i: i64 = 0
+    while i < value.len():
+        val code = value.char_code_at(i)
+        if code < 32 or code > 126:
+            return false
+        i = i + 1
+    true
+
+fn _simpleos_evidence_hashes_valid(values: [text]) -> bool:
+    var i: i64 = 0
+    while i < values.len():
+        if not hash256_hex_valid(values[i]):
+            return false
+        i = i + 1
+    true
+
+fn _simpleos_evidence_hashes_unique(values: [text]) -> bool:
+    var i: i64 = 0
+    while i < values.len():
+        var j: i64 = 0
+        while j < i:
+            if values[i] == values[j]:
+                return false
+            j = j + 1
+        i = i + 1
+    true
+
+fn _simpleos_evidence_arguments_valid(values: [text]) -> bool:
+    var i: i64 = 0
+    while i < values.len():
+        if values[i].len() > simpleos_evidence_max_argument_chars():
+            return false
+        var j: i64 = 0
+        while j < values[i].len():
+            val code = values[i].char_code_at(j)
+            if code < 32 or code > 126:
+                return false
+            j = j + 1
+        i = i + 1
+    true
+
+fn _simpleos_evidence_steps_valid(values: [SimpleOsEvidenceStepV1]) -> SimpleOsEvidenceReceiptCheck:
+    var i: i64 = 0
+    while i < values.len():
+        val step = values[i]
+        if step.sequence != i:
+            return _simpleos_evidence_reject(SimpleOsEvidenceReceiptError.InvalidSequence)
+        val behavior_check = _simpleos_evidence_required_text_check(step.behavior_id)
+        if not behavior_check.ok:
+            return behavior_check
+        val outcome_check = _simpleos_evidence_required_text_check(step.outcome)
+        if not outcome_check.ok:
+            return outcome_check
+        if step.exit_code != 0:
+            return _simpleos_evidence_reject(SimpleOsEvidenceReceiptError.FailedStep)
+        if step.outcome != "ok" and step.outcome != "pass" and
+            step.outcome != "passed" and step.outcome != "validated" and
+            step.outcome != "measured":
+            return _simpleos_evidence_reject(SimpleOsEvidenceReceiptError.FailedStep)
+        if not hash256_hex_valid(step.artifact_hash):
+            return _simpleos_evidence_reject(SimpleOsEvidenceReceiptError.InvalidDigest)
+        i = i + 1
+    _simpleos_evidence_ok()
+
+fn _simpleos_evidence_samples_valid(values: [SimpleOsPerformanceSampleV1]) -> bool:
+    var i: i64 = 0
+    while i < values.len():
+        val sample = values[i]
+        if sample.sequence != i or sample.metric_value_milli < 0:
+            return false
+        if sample.elapsed_us < 0 or sample.max_rss_bytes < 0:
+            return false
+        i = i + 1
+    true
+
+fn simpleos_evidence_receipt_validate(r: SimpleOsEvidenceReceiptV1) -> SimpleOsEvidenceReceiptCheck:
+    """Validate all local, allocation-free receipt invariants.
+
+    This does not verify the signature or referenced artifacts; the evidence
+    service performs those stateful checks before a ledger commit.
+    """
+    if r.schema_version != simpleos_evidence_receipt_schema_version():
+        return _simpleos_evidence_reject(SimpleOsEvidenceReceiptError.UnsupportedSchema)
+    val receipt_id_check = _simpleos_evidence_required_text_check(r.receipt_id)
+    if not receipt_id_check.ok:
+        return receipt_id_check
+    val nonce_check = _simpleos_evidence_required_text_check(r.nonce)
+    if not nonce_check.ok:
+        return nonce_check
+    val requirement_check = _simpleos_evidence_required_text_check(r.requirement_id)
+    if not requirement_check.ok:
+        return requirement_check
+    val capability_check = _simpleos_evidence_required_text_check(r.capability)
+    if not capability_check.ok:
+        return capability_check
+    val target_check = _simpleos_evidence_required_text_check(r.target)
+    if not target_check.ok:
+        return target_check
+    val target_abi_check = _simpleos_evidence_required_text_check(r.target_abi)
+    if not target_abi_check.ok:
+        return target_abi_check
+    if not _simpleos_evidence_optional_text_valid(r.filesystem):
+        return _simpleos_evidence_reject(SimpleOsEvidenceReceiptError.TextTooLong)
+    if not _simpleos_evidence_optional_text_valid(r.protocol_profile):
+        return _simpleos_evidence_reject(SimpleOsEvidenceReceiptError.TextTooLong)
+    if not _simpleos_evidence_optional_text_valid(r.accelerator):
+        return _simpleos_evidence_reject(SimpleOsEvidenceReceiptError.TextTooLong)
+    if not _simpleos_evidence_optional_text_valid(r.firmware_profile):
+        return _simpleos_evidence_reject(SimpleOsEvidenceReceiptError.TextTooLong)
+    if not _simpleos_evidence_optional_text_valid(r.board_identity):
+        return _simpleos_evidence_reject(SimpleOsEvidenceReceiptError.TextTooLong)
+    if r.environment == SimpleOsEvidenceEnvironment.QemuSystem:
+        if r.firmware_profile == "" or r.accelerator == "":
+            return _simpleos_evidence_reject(SimpleOsEvidenceReceiptError.MissingTargetIdentity)
+    if r.environment == SimpleOsEvidenceEnvironment.NativeHost and r.board_identity == "":
+        return _simpleos_evidence_reject(SimpleOsEvidenceReceiptError.MissingTargetIdentity)
+    if r.environment == SimpleOsEvidenceEnvironment.PhysicalBoard and r.board_identity == "":
+        return _simpleos_evidence_reject(SimpleOsEvidenceReceiptError.MissingTargetIdentity)
+    if not hash256_hex_valid(r.source_hash) or not hash256_hex_valid(r.image_hash):
+        return _simpleos_evidence_reject(SimpleOsEvidenceReceiptError.InvalidDigest)
+    if not hash256_hex_valid(r.binary_hash) or not hash256_hex_valid(r.config_hash):
+        return _simpleos_evidence_reject(SimpleOsEvidenceReceiptError.InvalidDigest)
+    if r.exact_argv.len() == 0 or r.exact_argv.len() > simpleos_evidence_max_arguments():
+        return _simpleos_evidence_reject(SimpleOsEvidenceReceiptError.InvalidArgumentCount)
+    if r.exact_argv[0] == "":
+        return _simpleos_evidence_reject(SimpleOsEvidenceReceiptError.InvalidArgumentCount)
+    if not _simpleos_evidence_arguments_valid(r.exact_argv):
+        return _simpleos_evidence_reject(SimpleOsEvidenceReceiptError.TextTooLong)
+    if r.artifact_hashes.len() == 0 or r.artifact_hashes.len() > simpleos_evidence_max_artifacts():
+        return _simpleos_evidence_reject(SimpleOsEvidenceReceiptError.InvalidArtifactCount)
+    if not _simpleos_evidence_hashes_unique(r.artifact_hashes):
+        return _simpleos_evidence_reject(SimpleOsEvidenceReceiptError.InvalidArtifactCount)
+    if not _simpleos_evidence_hashes_valid(r.artifact_hashes):
+        return _simpleos_evidence_reject(SimpleOsEvidenceReceiptError.InvalidDigest)
+    if r.steps.len() == 0 or r.steps.len() > simpleos_evidence_max_steps():
+        return _simpleos_evidence_reject(SimpleOsEvidenceReceiptError.InvalidStepCount)
+    val steps_check = _simpleos_evidence_steps_valid(r.steps)
+    if not steps_check.ok:
+        return steps_check
+    if r.performance_samples.len() > simpleos_evidence_max_performance_samples():
+        return _simpleos_evidence_reject(SimpleOsEvidenceReceiptError.InvalidPerformanceSampleCount)
+    if r.performance_samples.len() > 0 and r.performance_samples.len() < 10:
+        return _simpleos_evidence_reject(SimpleOsEvidenceReceiptError.InvalidPerformanceSampleCount)
+    if not _simpleos_evidence_optional_text_valid(r.performance_workload):
+        return _simpleos_evidence_reject(SimpleOsEvidenceReceiptError.TextTooLong)
+    if not _simpleos_evidence_optional_text_valid(r.performance_unit):
+        return _simpleos_evidence_reject(SimpleOsEvidenceReceiptError.TextTooLong)
+    if not _simpleos_evidence_optional_text_valid(r.performance_cpu_identity):
+        return _simpleos_evidence_reject(SimpleOsEvidenceReceiptError.TextTooLong)
+    if not _simpleos_evidence_optional_text_valid(r.performance_noise_profile):
+        return _simpleos_evidence_reject(SimpleOsEvidenceReceiptError.TextTooLong)
+    if r.performance_samples.len() == 0:
+        if r.performance_workload != "" or r.performance_unit != "" or
+            r.performance_warmup_count != 0 or r.performance_cpu_identity != "" or
+            r.performance_frequency_hz != 0 or r.performance_noise_profile != "" or
+            r.performance_comparable:
+            return _simpleos_evidence_reject(SimpleOsEvidenceReceiptError.InvalidPerformanceSampleCount)
+    if r.performance_samples.len() > 0:
+        val workload_check = _simpleos_evidence_required_text_check(r.performance_workload)
+        if not workload_check.ok:
+            return workload_check
+        val unit_check = _simpleos_evidence_required_text_check(r.performance_unit)
+        if not unit_check.ok:
+            return unit_check
+        val cpu_check = _simpleos_evidence_required_text_check(r.performance_cpu_identity)
+        if not cpu_check.ok:
+            return cpu_check
+        val noise_check = _simpleos_evidence_required_text_check(r.performance_noise_profile)
+        if not noise_check.ok:
+            return noise_check
+        if r.performance_warmup_count <= 0 or r.performance_frequency_hz <= 0:
+            return _simpleos_evidence_reject(SimpleOsEvidenceReceiptError.InvalidPerformanceSampleCount)
+    if not _simpleos_evidence_samples_valid(r.performance_samples):
+        return _simpleos_evidence_reject(SimpleOsEvidenceReceiptError.InvalidSequence)
+    if r.started_unix_us < 0 or r.finished_unix_us < r.started_unix_us:
+        return _simpleos_evidence_reject(SimpleOsEvidenceReceiptError.InvalidTimeRange)
+    val owner_check = _simpleos_evidence_required_text_check(r.owner)
+    if not owner_check.ok:
+        return owner_check
+    val reviewer_check = _simpleos_evidence_required_text_check(r.reviewer)
+    if not reviewer_check.ok:
+        return reviewer_check
+    if r.owner == r.reviewer:
+        return _simpleos_evidence_reject(SimpleOsEvidenceReceiptError.ReviewerConflict)
+    if r.signer_key_id == "" or r.signature == "":
+        return _simpleos_evidence_reject(SimpleOsEvidenceReceiptError.MissingSignature)
+    if r.signer_key_id.len() > simpleos_evidence_max_identity_chars():
+        return _simpleos_evidence_reject(SimpleOsEvidenceReceiptError.TextTooLong)
+    if r.signature.len() > simpleos_evidence_max_signature_chars():
+        return _simpleos_evidence_reject(SimpleOsEvidenceReceiptError.TextTooLong)
+    val signer_check = _simpleos_evidence_required_text_check(r.signer_key_id)
+    if not signer_check.ok:
+        return signer_check
+    var signature_index: i64 = 0
+    while signature_index < r.signature.len():
+        val code = r.signature.char_code_at(signature_index)
+        if code < 32 or code > 126:
+            return _simpleos_evidence_reject(SimpleOsEvidenceReceiptError.InvalidText)
+        signature_index = signature_index + 1
+    _simpleos_evidence_ok()

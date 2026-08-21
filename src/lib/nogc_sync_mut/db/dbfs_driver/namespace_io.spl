@@ -1,0 +1,540 @@
+# DBFS namespace and file-I/O operations.
+#
+# Extension methods mutate only the canonical namespace state declared by
+# dbfs_driver.spl. Public methods acquire the shared namespace/device owner
+# exactly once; `_locked` methods route device work through non-reentrant
+# lock-held operations and never reacquire the owner.
+
+use nogc_sync_mut.db.dbfs_driver.dbfs_driver.{
+    DbFsDriver, DbFsInode, DbFsFd, DbFsKind,
+    _dbfs_inodes, _dbfs_fds,
+    _find_inode_idx_locked, _find_fd_idx_locked, _fd_inode_idx_locked,
+    _alloc_inode_id_locked, _alloc_fd_id_locked, _dbfs_persist_namespace_locked
+}
+use nogc_sync_mut.db.dbfs_driver.device_commit_owner.{
+    dbfs_text_to_bytes, dbfs_bytes_to_text, dbfs_slice_bytes,
+    dbfs_owner_transaction_begin, dbfs_owner_transaction_end
+}
+use std.fs_driver.error.{FsError}
+use std.fs_driver.types.{FileHandle, DirHandle, Path, OpenFlags, DirEntry, StatInfo}
+
+fn _remove_inode_id_locked(inst_id: i64, inode_id: u64):
+    var i: i32 = 0
+    while i < _dbfs_inodes.len() as i32:
+        if _dbfs_inodes[i].inst_id == inst_id and _dbfs_inodes[i].id == inode_id:
+            _dbfs_inodes.remove(i)
+            return
+        i = i + 1
+
+fn _restore_inode_locked(inode: DbFsInode):
+    _remove_inode_id_locked(inode.inst_id, inode.id)
+    _dbfs_inodes.push(inode)
+
+fn _namespace_finish<T>(result: Result<T, FsError>) -> Result<T, FsError>:
+    # An indeterminate release quarantines the shared owner in
+    # device_commit_owner; never publish a value produced under that lease.
+    if dbfs_owner_transaction_end(): return result
+    Err(FsError.IoError(code: 0u32))
+
+impl DbFsDriver:
+    # --- stat ---
+
+    fn _stat_path_locked(path: Path) -> Result<StatInfo, FsError>:
+        """Stat path: look up inode by name in module store."""
+        val raw = path.raw
+        if raw == "/" or raw == "":
+            return Ok(StatInfo(is_dir: true, is_file: false, size: 0))
+        val idx = _find_inode_idx_locked(self.inst_id, raw)
+        if idx < 0:
+            return Err(FsError.NotFound)
+        val inode = _dbfs_inodes[idx]
+        val is_dir: bool = match inode.kind:
+            case Dir:  true
+            case File: false
+        Ok(StatInfo(is_dir: is_dir, is_file: not is_dir, size: inode.size))
+
+    fn _stat_locked(path: text) -> Result<StatInfo, FsError>:
+        """Stat path as text."""
+        self._stat_path_locked(Path(raw: path))
+
+    # --- open ---
+
+    fn _open_path_locked(path: Path, flags: OpenFlags) -> Result<FileHandle, FsError>:
+        """Open a file by path. Creates inode if not present."""
+        val raw = path.raw
+        var inode_id: u64 = 0
+        val idx = _find_inode_idx_locked(self.inst_id, raw)
+        if idx >= 0:
+            inode_id = _dbfs_inodes[idx].id
+        else:
+            inode_id = _alloc_inode_id_locked(self.inst_id)
+            _dbfs_inodes.push(DbFsInode(
+                inst_id:  self.inst_id,
+                id:       inode_id,
+                kind:     DbFsKind.File,
+                name:     raw,
+                content:  "",
+                content_bytes: [],
+                parent:   1,
+                size:     0,
+                unlinked: false,
+            ))
+            val committed = self._commit_inode_bytes_to_device_locked(inode_id, [])
+            if committed.is_err():
+                _remove_inode_id_locked(self.inst_id, inode_id)
+                return Err(committed.unwrap_err())
+        val hid = _alloc_fd_id_locked(self.inst_id)
+        _dbfs_fds.push(DbFsFd(
+            inst_id:    self.inst_id,
+            handle_id:  hid,
+            inode_id:   inode_id,
+            is_dir:     false,
+            closed:     false,
+        ))
+        Ok(FileHandle(id: hid))
+
+    # --- opendir ---
+
+    fn _opendir_path_locked(path: Path) -> Result<DirHandle, FsError>:
+        """Open a directory by path."""
+        val hid = _alloc_fd_id_locked(self.inst_id)
+        _dbfs_fds.push(DbFsFd(
+            inst_id:    self.inst_id,
+            handle_id:  hid,
+            inode_id:   1,
+            is_dir:     true,
+            closed:     false,
+        ))
+        Ok(DirHandle(id: hid))
+
+    # --- readdir ---
+
+    fn _readdir_handle_locked(handle: DirHandle) -> Result<[DirEntry], FsError>:
+        """Return directory entries for handle."""
+        var entries: [DirEntry] = []
+        for inode in _dbfs_inodes:
+            if inode.inst_id == self.inst_id and not inode.unlinked and inode.id != 1:
+                val is_dir_entry: bool = match inode.kind:
+                    case Dir:  true
+                    case File: false
+                entries.push(DirEntry(name: inode.name, is_dir: is_dir_entry, size: 0))
+        Ok(entries)
+
+    # --- read ---
+
+    fn _read_handle_locked(handle: FileHandle, length: i64) -> Result<text, FsError>:
+        """Read up to length bytes from open handle."""
+        val fd_idx = _find_fd_idx_locked(self.inst_id, handle.id as u64)
+        if fd_idx < 0:
+            return Err(FsError.NotFound)
+        if _dbfs_fds[fd_idx].closed:
+            return Err(FsError.InvalidArg)
+        val inode_idx = _fd_inode_idx_locked(self.inst_id, handle.id as u64)
+        if inode_idx < 0:
+            return Ok("")
+        if self.arena_base >= 0:
+            val device = self._read_inode_bytes_from_device_locked(_dbfs_inodes[inode_idx].id, length)
+            match device:
+                Ok(bytes):
+                    return Ok(dbfs_bytes_to_text(bytes, bytes.len() as i64))
+                Err(error):
+                    return Err(error)
+        val content = _dbfs_inodes[inode_idx].content
+        var result: text = ""
+        var i: i64 = 0
+        val cap: i64 = if length < content.len(): length else: content.len()
+        while i < cap:
+            result = result + content[i:i + 1]
+            i = i + 1
+        Ok(result)
+
+    fn _read_bytes_handle_locked(handle: FileHandle, length: i64) -> Result<[u8], FsError>:
+        """Read bytes from open handle without routing binary data through text."""
+        val fd_idx = _find_fd_idx_locked(self.inst_id, handle.id as u64)
+        if fd_idx < 0:
+            return Err(FsError.NotFound)
+        if _dbfs_fds[fd_idx].closed:
+            return Err(FsError.InvalidArg)
+        val inode_idx = _fd_inode_idx_locked(self.inst_id, handle.id as u64)
+        if inode_idx < 0:
+            return Ok([])
+        if self.arena_base >= 0:
+            val device = self._read_inode_bytes_from_device_locked(_dbfs_inodes[inode_idx].id, length)
+            return device
+        val content = _dbfs_inodes[inode_idx].content_bytes
+        val cap: i64 = if length < content.len(): length else: content.len()
+        Ok(dbfs_slice_bytes(content, cap))
+
+    # --- pread ---
+
+    fn _pread_handle_locked(handle: FileHandle, offset: i64, length: i64) -> Result<text, FsError>:
+        """Read length chars starting at offset."""
+        val inode_idx = _fd_inode_idx_locked(self.inst_id, handle.id as u64)
+        if inode_idx < 0:
+            return Err(FsError.NotFound)
+        if self.arena_base >= 0:
+            val device = self._read_inode_bytes_from_device_locked(_dbfs_inodes[inode_idx].id, offset + length)
+            match device:
+                Ok(bytes):
+                    val full = dbfs_bytes_to_text(bytes, bytes.len() as i64)
+                    var device_result: text = ""
+                    var di: i64 = offset
+                    val device_end: i64 = if offset + length < full.len(): offset + length else: full.len()
+                    while di < device_end:
+                        device_result = device_result + full[di:di + 1]
+                        di = di + 1
+                    var device_pad: i64 = device_end - offset
+                    while device_pad < length:
+                        device_result = device_result + "\0"
+                        device_pad = device_pad + 1
+                    return Ok(device_result)
+                Err(error):
+                    return Err(error)
+        val content = _dbfs_inodes[inode_idx].content
+        var result: text = ""
+        var i: i64 = offset
+        val end_pos: i64 = offset + length
+        val content_end: i64 = if end_pos < content.len(): end_pos else: content.len()
+        while i < content_end:
+            result = result + content[i:i + 1]
+            i = i + 1
+        # Pad with null chars if beyond content length
+        var pad: i64 = content_end - offset
+        while pad < length:
+            result = result + "\0"
+            pad = pad + 1
+        Ok(result)
+
+    # --- write ---
+
+    fn _write_handle_locked(handle: FileHandle, content: text) -> Result<(), FsError>:
+        """Write content to open handle."""
+        val fd_idx = _find_fd_idx_locked(self.inst_id, handle.id as u64)
+        if fd_idx < 0:
+            return Err(FsError.NotFound)
+        if _dbfs_fds[fd_idx].closed:
+            return Err(FsError.InvalidArg)
+        val inode_idx = _fd_inode_idx_locked(self.inst_id, handle.id as u64)
+        if inode_idx < 0:
+            return Err(FsError.NotFound)
+        val old = _dbfs_inodes[inode_idx]
+        val new_inode = DbFsInode(
+            inst_id:  old.inst_id,
+            id:       old.id,
+            kind:     old.kind,
+            name:     old.name,
+            content:  content,
+            content_bytes: dbfs_text_to_bytes(content),
+            parent:   old.parent,
+            size:     content.len(),
+            unlinked: old.unlinked,
+        )
+        _dbfs_inodes.remove(inode_idx)
+        _dbfs_inodes.push(new_inode)
+        val committed = self._commit_inode_bytes_to_device_locked(old.id, dbfs_text_to_bytes(content))
+        if committed.is_err():
+            _restore_inode_locked(old)
+            return Err(committed.unwrap_err())
+        Ok(())
+
+    fn _write_bytes_handle_locked(handle: FileHandle, content: [u8]) -> Result<(), FsError>:
+        """Write bytes to open handle without lossy text conversion on readback."""
+        val fd_idx = _find_fd_idx_locked(self.inst_id, handle.id as u64)
+        if fd_idx < 0:
+            return Err(FsError.NotFound)
+        if _dbfs_fds[fd_idx].closed:
+            return Err(FsError.InvalidArg)
+        val inode_idx = _fd_inode_idx_locked(self.inst_id, handle.id as u64)
+        if inode_idx < 0:
+            return Err(FsError.NotFound)
+        val old = _dbfs_inodes[inode_idx]
+        val new_inode = DbFsInode(
+            inst_id:  old.inst_id,
+            id:       old.id,
+            kind:     old.kind,
+            name:     old.name,
+            content:  dbfs_bytes_to_text(content, content.len() as i64),
+            content_bytes: dbfs_slice_bytes(content, content.len() as i64),
+            parent:   old.parent,
+            size:     content.len() as i64,
+            unlinked: old.unlinked,
+        )
+        _dbfs_inodes.remove(inode_idx)
+        _dbfs_inodes.push(new_inode)
+        val committed = self._commit_inode_bytes_to_device_locked(old.id, dbfs_slice_bytes(content, content.len() as i64))
+        if committed.is_err():
+            _restore_inode_locked(old)
+            return Err(committed.unwrap_err())
+        Ok(())
+
+    # --- pwrite ---
+
+    fn _pwrite_handle_locked(handle: FileHandle, patch: text, offset: i64) -> Result<(), FsError>:
+        """Write patch starting at offset (COW semantics)."""
+        if offset < 0:
+            return Err(FsError.InvalidArg)
+        val inode_idx = _fd_inode_idx_locked(self.inst_id, handle.id as u64)
+        if inode_idx < 0:
+            return Err(FsError.NotFound)
+        val old = _dbfs_inodes[inode_idx]
+        val old_content = old.content
+        var new_content: text = ""
+        var i: i64 = 0
+        while i < offset:
+            if i < old_content.len():
+                new_content = new_content + old_content[i:i + 1]
+            else:
+                new_content = new_content + "\0"
+            i = i + 1
+        var j: i64 = 0
+        while j < patch.len():
+            new_content = new_content + patch[j:j + 1]
+            j = j + 1
+        var k: i64 = offset + patch.len()
+        while k < old_content.len():
+            new_content = new_content + old_content[k:k + 1]
+            k = k + 1
+        val new_size: i64 = if new_content.len() > old.size: new_content.len() else: old.size
+        val new_inode = DbFsInode(
+            inst_id:  old.inst_id,
+            id:       old.id,
+            kind:     old.kind,
+            name:     old.name,
+            content:  new_content,
+            content_bytes: dbfs_text_to_bytes(new_content),
+            parent:   old.parent,
+            size:     new_size,
+            unlinked: old.unlinked,
+        )
+        _dbfs_inodes.remove(inode_idx)
+        _dbfs_inodes.push(new_inode)
+        val committed = self._commit_inode_bytes_to_device_locked(old.id, dbfs_text_to_bytes(new_content))
+        if committed.is_err():
+            _restore_inode_locked(old)
+            return Err(committed.unwrap_err())
+        Ok(())
+
+    # --- close ---
+
+    fn _close_handle_locked(handle: FileHandle) -> Result<(), FsError>:
+        """Mark file descriptor closed."""
+        val fd_idx = _find_fd_idx_locked(self.inst_id, handle.id as u64)
+        if fd_idx < 0:
+            return Err(FsError.NotFound)
+        val old_fd = _dbfs_fds[fd_idx]
+        val new_fd = DbFsFd(
+            inst_id:    old_fd.inst_id,
+            handle_id:  old_fd.handle_id,
+            inode_id:   old_fd.inode_id,
+            is_dir:     old_fd.is_dir,
+            closed:     true,
+        )
+        _dbfs_fds.remove(fd_idx)
+        _dbfs_fds.push(new_fd)
+        Ok(())
+
+    # --- unlink ---
+
+    fn _unlink_path_locked(path: text) -> Result<(), FsError>:
+        """Mark inode unlinked. Open handles still readable until closed."""
+        val idx = _find_inode_idx_locked(self.inst_id, path)
+        if idx < 0:
+            return Err(FsError.NotFound)
+        val old = _dbfs_inodes[idx]
+        val new_inode = DbFsInode(
+            inst_id:  old.inst_id,
+            id:       old.id,
+            kind:     old.kind,
+            name:     old.name,
+            content:  old.content,
+            content_bytes: old.content_bytes,
+            parent:   old.parent,
+            size:     old.size,
+            unlinked: true,
+        )
+        _dbfs_inodes.remove(idx)
+        _dbfs_inodes.push(new_inode)
+        val persisted = _dbfs_persist_namespace_locked(self.inst_id, self.arena_base, self.arena_block_count)
+        if persisted.is_err():
+            _restore_inode_locked(old)
+            return Err(persisted.unwrap_err())
+        Ok(())
+
+    # --- rename ---
+
+    fn _rename_path_locked(old_path: text, new_path: text) -> Result<(), FsError>:
+        """Rename: atomically replace new_path with old_path's inode."""
+        if old_path == new_path:
+            return Ok(())
+        val original_src_idx = _find_inode_idx_locked(self.inst_id, old_path)
+        if original_src_idx < 0:
+            return Err(FsError.NotFound)
+        val old = _dbfs_inodes[original_src_idx]
+        var replaced: Option<DbFsInode> = None
+        val target_idx = _find_inode_idx_locked(self.inst_id, new_path)
+        if target_idx >= 0:
+            replaced = Some(_dbfs_inodes[target_idx])
+            _dbfs_inodes.remove(target_idx)
+        val src_idx = _find_inode_idx_locked(self.inst_id, old_path)
+        if src_idx < 0:
+            match replaced:
+                Some(target): _dbfs_inodes.push(target)
+                None: ()
+            return Err(FsError.NotFound)
+        val new_inode = DbFsInode(
+            inst_id:  old.inst_id,
+            id:       old.id,
+            kind:     old.kind,
+            name:     new_path,
+            content:  old.content,
+            content_bytes: old.content_bytes,
+            parent:   old.parent,
+            size:     old.size,
+            unlinked: false,
+        )
+        _dbfs_inodes.remove(src_idx)
+        _dbfs_inodes.push(new_inode)
+        val persisted = _dbfs_persist_namespace_locked(self.inst_id, self.arena_base, self.arena_block_count)
+        if persisted.is_err():
+            _restore_inode_locked(old)
+            match replaced:
+                Some(target): _dbfs_inodes.push(target)
+                None: ()
+            return Err(persisted.unwrap_err())
+        Ok(())
+
+    # --- ftruncate ---
+
+    fn _ftruncate_handle_locked(handle: FileHandle, new_size: i64) -> Result<(), FsError>:
+        """Truncate or extend file to new_size."""
+        if new_size < 0:
+            return Err(FsError.InvalidArg)
+        val inode_idx = _fd_inode_idx_locked(self.inst_id, handle.id as u64)
+        if inode_idx < 0:
+            return Err(FsError.NotFound)
+        val old = _dbfs_inodes[inode_idx]
+        val old_content = old.content
+        var new_content: text = ""
+        var i: i64 = 0
+        while i < new_size:
+            if i < old_content.len():
+                new_content = new_content + old_content[i:i + 1]
+            else:
+                new_content = new_content + "\0"
+            i = i + 1
+        val new_inode = DbFsInode(
+            inst_id:  old.inst_id,
+            id:       old.id,
+            kind:     old.kind,
+            name:     old.name,
+            content:  new_content,
+            content_bytes: dbfs_text_to_bytes(new_content),
+            parent:   old.parent,
+            size:     new_size,
+            unlinked: old.unlinked,
+        )
+        _dbfs_inodes.remove(inode_idx)
+        _dbfs_inodes.push(new_inode)
+        val committed = self._commit_inode_bytes_to_device_locked(old.id, dbfs_text_to_bytes(new_content))
+        if committed.is_err():
+            _restore_inode_locked(old)
+            return Err(committed.unwrap_err())
+        Ok(())
+
+    # --- mkdir ---
+
+    fn _mkdir_path_locked(path: text, mode: u32) -> Result<(), FsError>:
+        """Create a directory at path."""
+        if _find_inode_idx_locked(self.inst_id, path) >= 0:
+            return Err(FsError.AlreadyExists)
+        val iid = _alloc_inode_id_locked(self.inst_id)
+        _dbfs_inodes.push(DbFsInode(
+            inst_id:  self.inst_id,
+            id:       iid,
+            kind:     DbFsKind.Dir,
+            name:     path,
+            content:  "",
+            content_bytes: [],
+            parent:   1,
+            size:     0,
+            unlinked: false,
+        ))
+        val persisted = _dbfs_persist_namespace_locked(self.inst_id, self.arena_base, self.arena_block_count)
+        if persisted.is_err():
+            _remove_inode_id_locked(self.inst_id, iid)
+            return Err(persisted.unwrap_err())
+        Ok(())
+
+    fn _mkdir_locked(path: text, mode: u32) -> Result<(), FsError>:
+        """Alias for mkdir_path (direct driver API)."""
+        self._mkdir_path_locked(path, mode)
+
+    # --- canonical namespace/device transaction boundary ---
+
+    fn stat_path(path: Path) -> Result<StatInfo, FsError>:
+        if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
+        _namespace_finish(self._stat_path_locked(path))
+
+    fn stat(path: text) -> Result<StatInfo, FsError>:
+        if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
+        _namespace_finish(self._stat_locked(path))
+
+    fn open_path(path: Path, flags: OpenFlags) -> Result<FileHandle, FsError>:
+        if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
+        _namespace_finish(self._open_path_locked(path, flags))
+
+    fn opendir_path(path: Path) -> Result<DirHandle, FsError>:
+        if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
+        _namespace_finish(self._opendir_path_locked(path))
+
+    fn readdir_handle(handle: DirHandle) -> Result<[DirEntry], FsError>:
+        if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
+        _namespace_finish(self._readdir_handle_locked(handle))
+
+    fn read_handle(handle: FileHandle, length: i64) -> Result<text, FsError>:
+        if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
+        _namespace_finish(self._read_handle_locked(handle, length))
+
+    fn read_bytes_handle(handle: FileHandle, length: i64) -> Result<[u8], FsError>:
+        if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
+        _namespace_finish(self._read_bytes_handle_locked(handle, length))
+
+    fn pread_handle(handle: FileHandle, offset: i64, length: i64) -> Result<text, FsError>:
+        if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
+        _namespace_finish(self._pread_handle_locked(handle, offset, length))
+
+    fn write_handle(handle: FileHandle, content: text) -> Result<(), FsError>:
+        if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
+        _namespace_finish(self._write_handle_locked(handle, content))
+
+    fn write_bytes_handle(handle: FileHandle, content: [u8]) -> Result<(), FsError>:
+        if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
+        _namespace_finish(self._write_bytes_handle_locked(handle, content))
+
+    fn pwrite_handle(handle: FileHandle, patch: text, offset: i64) -> Result<(), FsError>:
+        if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
+        _namespace_finish(self._pwrite_handle_locked(handle, patch, offset))
+
+    fn close_handle(handle: FileHandle) -> Result<(), FsError>:
+        if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
+        _namespace_finish(self._close_handle_locked(handle))
+
+    fn unlink_path(path: text) -> Result<(), FsError>:
+        if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
+        _namespace_finish(self._unlink_path_locked(path))
+
+    fn rename_path(old_path: text, new_path: text) -> Result<(), FsError>:
+        if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
+        _namespace_finish(self._rename_path_locked(old_path, new_path))
+
+    fn ftruncate_handle(handle: FileHandle, new_size: i64) -> Result<(), FsError>:
+        if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
+        _namespace_finish(self._ftruncate_handle_locked(handle, new_size))
+
+    fn mkdir_path(path: text, mode: u32) -> Result<(), FsError>:
+        if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
+        _namespace_finish(self._mkdir_path_locked(path, mode))
+
+    fn mkdir(path: text, mode: u32) -> Result<(), FsError>:
+        if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
+        _namespace_finish(self._mkdir_locked(path, mode))

@@ -11,9 +11,8 @@ use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types_expr.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.dependency.visibility.{Visibility}
-# `std.alloc.sffi` exists only in the seed library tree.  The self-hosted
-# Stage 3 closure must bind the runtime symbol directly.
-extern fn rt_dict_contains(dict: i64, key: Any) -> bool
+use compiler.common.dynamic_identity.closure.{Closure}
+use compiler.hir.hir_symbol_table_methods.*
 
 # ============================================================================
 # HIR Module Structure
@@ -43,6 +42,25 @@ struct HirModule:
     arch_rules: [HirArchRule]
     mock_decls: [HirMockDecl]
     types: [text]
+    # `extend <Enum>:` sections carried from the frontend (design §2). MUST
+    # stay the LAST field -- partial named constructions are filled
+    # POSITIONALLY by the Rust seed -- and carries a default so existing
+    # `HirModule(...)` sites are untouched.
+    extend_enums: [HirExtendEnum] = []
+
+struct HirExtendEnum:
+    """One `complete:`/`dyn:` section of an `extend <Enum>:` declaration."""
+    target: text
+    closure: Closure
+    constructors: [HirExtendConstructor]
+    span: Span
+
+struct HirExtendConstructor:
+    """`provider.Name(payload, ...)` inside an `extend` section."""
+    provider: text
+    name: text
+    payload_types: [Type]
+    span: Span
 
 struct HirImport:
     """Import declaration."""
@@ -207,13 +225,6 @@ class SymbolTable:
     # routing value; its symbol backing never crosses reset by value.
     root_scope_symbols: Dict<text, i64>
 
-fn _hir_symbol_owner_module(path: text) -> text:
-    if path.starts_with("../"):
-        return _hir_symbol_owner_module(path.substring(3))
-    val relative = if path.starts_with("./"): path.substring(2) else: path
-    val source_relative = if relative.starts_with("src/"): relative.substring(4) else: relative
-    source_relative.replace(".spl", "").replace(".sdn", "").replace("/", ".")
-
 impl SymbolTable:
     static fn new() -> SymbolTable:
         var root_scope_symbols: Dict<text, i64> = {}
@@ -365,6 +376,8 @@ impl SymbolTable:
         scope_syms[name] = raw_id
         scope.symbols = scope_syms
         self.scopes[self.current_scope.id] = scope
+        if self.current_scope.id == 0:
+            self.root_scope_symbols = scope_syms
 
         id
 
@@ -409,234 +422,6 @@ impl SymbolTable:
             return self.qualified_types[key]
         -1
 
-    me register_preserved_symbol(symbol: HirSymbol):
-        """Register a pre-numbered flat/bootstrap symbol without losing the
-        exact-name index used by lowering hot paths."""
-        val raw_id = symbol.id.id
-        self.symbols[raw_id] = symbol
-        if not self.exact_symbols.has(symbol.name):
-            self.exact_symbols[symbol.name] = raw_id
-        if raw_id >= self.next_symbol_id:
-            self.next_symbol_id = raw_id + 1
-
-    fn lookup_exact_type(name: text) -> SymbolId?:
-        """Look up an exact class/struct/enum/trait name in O(1)."""
-        if self.exact_symbols.has(name):
-            val raw_id = self.exact_symbols[name]
-            if val symbol = self.get_symbol_raw(raw_id):
-                match symbol.kind:
-                    case Class | Struct | Enum | Trait:
-                        return Some(symbol.id)
-                    case _: pass
-        nil
-    fn lookup(name: text) -> SymbolId?:
-        """Look up a symbol by name, searching up scope chain."""
-        var scope_id = self.current_scope
-
-        loop:
-            # DO NOT re-add an `if not rt_dict_contains(self.scopes,
-            # scope_id.id): break` guard here. It was added as
-            # "defense-in-depth" by 1ea6599e8fb and it broke the Stage 3
-            # self-host outright: `new()` DOES insert the id-0 root scope
-            # (`table.scopes[0] = Scope(...)` above) and `declare()` writes
-            # symbols into it, but `rt_dict_contains` under-reports
-            # membership on this struct-valued `Dict<i64, Scope>` (the
-            # documented native struct-valued-Dict pitfall,
-            # doc/07_guide/language/dict_native_pitfalls.md). The guard
-            # therefore ended the chain immediately and made lookup() a
-            # constant nil, which silently disabled the ONLY re-entrancy
-            # breakers in the HIR bootstrap-global cycle -- both
-            # try_register_bootstrap_global_symbol and
-            # register_imported_symbol memoize on `self.symbols.lookup(...)`
-            # -- producing unbounded mutual recursion (lower_type ->
-            # lower_named_kind -> try_register_bootstrap_global_symbol ->
-            # register_imported_symbol -> register_imported_type_methods ->
-            # declared_surface_callable_type -> lower_type) that overflowed
-            # the stack and SIGSEGVed Stage 3 with zero diagnostic output.
-            # See doc/08_tracking/bug/
-            # stage3_native_build_segv_generic_codegen_link_path_2026-08-06.md.
-            #
-            # Instead: `self.scopes` is append-only and `next_scope_id` is
-            # its exact cardinality counter -- `push_scope` is the ONLY
-            # writer, always inserting `self.scopes[raw_id]` before
-            # advancing `next_scope_id = raw_id + 1`, and nothing anywhere
-            # in this file ever removes a key from `self.scopes`. So
-            # `scope_id.id in self.scopes` is EXACTLY
-            # `0 <= scope_id.id < self.next_scope_id` -- a plain scalar i64
-            # comparison, not a Dict operation, so it cannot exhibit the
-            # `rt_dict_contains` false-negative bug (that bug is specific to
-            # Dict membership calls on this struct-valued dict; a bare `<`
-            # on two `i64` fields is untouched by it). This also guards
-            # against the ud2 "field access on nil receiver" trap from an
-            # out-of-range `scope_id` reaching the bracket read below (see
-            # doc/08_tracking/bug/
-            # stage3_symboltable_lookup_ud2_field_access_nil_receiver_2026-08-06.md).
-            if scope_id.id < 0 or scope_id.id >= self.next_scope_id:
-                break
-            val scope = self.scopes[scope_id.id]
-            # Dict.get can falsely report nil for a present tagged integer on
-            # the self-hosted native path. The runtime-owner predicate plus a
-            # bracket read keeps the value type-directed and untagged.
-            if rt_dict_contains(scope.symbols, name):
-                val found: i64 = scope.symbols[name]
-                return SymbolId(id: found)
-
-            match scope.parent:
-                case Some(parent):
-                    scope_id = parent
-                case nil:
-                    break
-
-        nil
-
-    fn lookup_or_invalid(name: text) -> SymbolId:
-        """Look up a symbol by name, returning an invalid id when missing."""
-        var scope_id = self.current_scope
-
-        loop:
-            # See lookup()'s matching comment: do NOT re-add an
-            # `rt_dict_contains(self.scopes, scope_id.id)` guard here -- it
-            # under-reports membership on this struct-valued dict and breaks
-            # the Stage 3 self-host via unbounded HIR recursion. Use the same
-            # Dict-free `next_scope_id` range check instead (exact substitute
-            # for membership -- see lookup()'s full comment).
-            if scope_id.id < 0 or scope_id.id >= self.next_scope_id:
-                break
-            val scope = self.scopes[scope_id.id]
-            if rt_dict_contains(scope.symbols, name):
-                val found: i64 = scope.symbols[name]
-                # Fail closed on an id this table cannot own. Every id ever
-                # handed out by `define()` satisfies `0 <= id < next_symbol_id`
-                # (it is `next_symbol_id` at allocation time, which then
-                # advances and never decreases within a module), and
-                # `register_preserved_symbol` raises the counter past any
-                # pre-numbered id it accepts. So an out-of-range id can only be
-                # a name binding that outlived the module it was made in --
-                # exactly the wrong-id shape this lookup used to return as if
-                # it were a real answer. An honest "not found" is the correct
-                # response; silently returning a valid-LOOKING id belonging to
-                # an unrelated declaration is the defect.
-                # doc/08_tracking/bug/stage3_lookup_or_invalid_returns_unrelated_symbol_id_2026-08-18.md
-                if found < 0 or found >= self.next_symbol_id:
-                    return SymbolId(id: -1)
-                return SymbolId(id: found)
-
-            match scope.parent:
-                case Some(parent):
-                    scope_id = parent
-                case nil:
-                    break
-
-        SymbolId(id: -1)
-
-    fn get_symbol(id: SymbolId?) -> HirSymbol?:
-        """Get symbol by ID.
-
-        Renamed from `get` to `get_symbol`: the compiled method resolver
-        mis-dispatched `scope.symbols.get(name)` (a Dict.get with a text key,
-        inside `lookup`) to this same-named SymbolTable method, passing a text
-        where a SymbolId? was expected -> garbage id -> nil-deref
-        ("field access on nil receiver"). Eliminating the `get` name collision
-        lets Dict.get resolve correctly. See driver.spl lower_and_check_impl.
-
-        Bug 2026-07-29 (hir_get_symbol_id_zero_returns_nil): a naked
-        `case SymbolId(raw):` pattern matched directly against the `SymbolId?`
-        (Option-wrapped) parameter ALWAYS falls through to the wildcard arm on
-        this interpreter -- for every id, not just 0 -- because a struct
-        constructor pattern cannot destructure through the implicit Option
-        layer in one step; only `case Some(SymbolId(raw)):` reliably unwraps
-        it (proven by isolated probe: `case PId(raw):` against a `PId?`
-        returned from a helper fell to wildcard for raw=0 AND raw=1, while
-        `case Some(PId(raw)):` matched both correctly). id 0 is a completely
-        ordinary, validly-allocated id (`is_valid()` already treats it as
-        such) -- the fix is this match shape, not the id allocator."""
-        match id:
-            case Some(SymbolId(raw)):
-                val found: HirSymbol? = self.symbols[raw]
-                found
-            case _:
-                nil
-
-    fn get_symbol_raw(raw: i64) -> HirSymbol?:
-        """Raw-i64 form of get_symbol: passing a flat optional OR a struct
-        value as a function argument is miscompiled on the stage4 native lane
-        (bug doc bootstrap_stage4_optional_arg_and_mixed_tail_miscompile_2026-07-23) —
-        callers extract `.id` at the call site and pass the plain i64."""
-        # has()+bracket: Dict.get returns a TAGGED value on the stage4 native
-        # lane; bracket-index takes the untag path (bug doc 2026-07-23 family).
-        if self.symbols.has(raw):
-            return self.symbols[raw]
-        nil
-
-    fn exact_local_value_binding_raw(raw: i64, payload_name: text) -> bool:
-        """Whether `raw` names the exact local value authored by a Var or
-        NamedVar payload. Keep the record inspection inside SymbolTable so a
-        staged-native HirSymbol? payload never crosses the method boundary."""
-        if raw < 0 or payload_name == "" or not self.symbols.has(raw):
-            return false
-        val symbol = self.symbols[raw]
-        if symbol.name != payload_name:
-            return false
-        match symbol.kind:
-            case SymbolKind.Variable | SymbolKind.Parameter:
-                return true
-            case _:
-                return false
-
-    me symbol_display_name(id: SymbolId, fallback: text) -> text:
-        """Return the CURRENT stored `.name` for `id` (reflecting any
-        `rename_symbol` call), or `fallback` if the id isn't found.
-
-        Uniquely named to avoid the same seed method-resolver name+arity
-        collision `get_symbol` was itself renamed to dodge (see its
-        docstring): `LoadedModule.get_symbol(name: text)`
-        (99.loader/module_loader.spl) has the SAME name and arity (1 param)
-        as `SymbolTable.get_symbol(id: SymbolId?)`, and empirically the
-        compiled resolver dispatches a HIR-layer `self.symbols.get_symbol(id)`
-        call to the WRONG (loader) sibling here -- `id` (a SymbolId) gets
-        passed where `name: text` is expected, `self.symbols.has(name)`
-        silently returns false for the garbage-typed key, and every call
-        returns nil regardless of whether the id is actually present (bug
-        bootstrap_stage2_empty_mir_bodies_2026-07-05, Probe B)."""
-        match id:
-            case SymbolId(raw):
-                val found: HirSymbol? = self.symbols[raw]
-                if val sym = found:
-                    return sym.name
-                fallback
-            case _:
-                fallback
-
-    me rename_symbol(id: SymbolId, new_name: text):
-        """Overwrite a symbol's stored `.name` in place, WITHOUT touching its
-        scope lookup key. Used to give a --entry-closure cross-module
-        function import a qualified `module.function` display/emission name
-        (distinct across modules, unlike its possibly-shared bare or
-        alias-local name) while `compute_a`/`compute_b` etc. still resolve
-        via the original scope entry created by `define()` (bug
-        bootstrap_stage2_empty_mir_bodies_2026-07-05, Probe B)."""
-        match id:
-            case SymbolId(raw):
-                val found: HirSymbol? = self.symbols[raw]
-                if val sym = found:
-                    val renamed = HirSymbol(
-                        id: sym.id,
-                        name: new_name,
-                        kind: sym.kind,
-                        type_: sym.type_,
-                        scope: sym.scope,
-                        span: sym.span,
-                        visibility: sym.visibility,
-                        is_public: sym.is_public,
-                        is_mutable: sym.is_mutable,
-                        defining_module: sym.defining_module
-                    )
-                    self.symbols[raw] = renamed
-                    if not self.exact_symbols.has(new_name):
-                        self.exact_symbols[new_name] = raw
-            case _:
-                pass
-
     me push_scope(kind: ScopeKind) -> ScopeId:
         """Push a new scope."""
         val raw_id = self.next_scope_id
@@ -675,232 +460,6 @@ impl SymbolTable:
                 self.current_scope = parent
             case nil:
                 pass
-
-    # ========================================================================
-    # Method Resolution Helpers (for UFCS support)
-    # ========================================================================
-
-    fn lookup_function(name: text) -> SymbolId?:
-        """Look up a free function by name."""
-        val found_id = self.lookup_or_invalid(name)
-        if found_id.is_valid():
-            val sym: HirSymbol? = self.get_symbol(found_id)
-            if val found = sym:
-                match found.kind:
-                    case SymbolKind.Function: return found_id
-                    case _: pass
-        nil
-
-    fn method_symbol_name(type_id: SymbolId, method_name: text) -> text:
-        self.method_symbol_name_raw(type_id.id, method_name)
-
-    fn method_symbol_name_raw(raw_type_id: i64, method_name: text) -> text:
-        if val type_symbol = self.get_symbol_raw(raw_type_id):
-            val owner_module = _hir_symbol_owner_module(type_symbol.defining_module ?? "")
-            val owner = if owner_module != "": "{owner_module}.{type_symbol.name}" else: type_symbol.name
-            return "{owner}::{method_name}"
-        method_name
-
-    fn lookup_method_in_type(type_id: SymbolId, method_name: text) -> SymbolId?:
-        self.lookup_method_in_type_raw(type_id.id, method_name)
-
-    fn lookup_method_in_type_raw(raw_type_id: i64, method_name: text) -> SymbolId?:
-        """Look up a method in a class/struct type.
-
-        Searches for a method named `method_name` defined in the type
-        identified by `type_id`.
-        """
-        # Get the type's scope (class or struct body)
-        if self.get_symbol_raw(raw_type_id) == nil:
-            return nil
-
-        # Look for a Method symbol with matching name in the type's members
-        # This requires traversing impl blocks associated with the type
-        # For now, use a naming convention: Type::method
-        val qualified_name = self.method_symbol_name_raw(raw_type_id, method_name)
-        if self.exact_symbols.has(qualified_name):
-            val raw_id = self.exact_symbols[qualified_name]
-            if val sym = self.get_symbol_raw(raw_id):
-                match sym.kind:
-                    case Method:
-                        return sym.id
-                    case Function:
-                        return sym.id  # Static methods
-                    case _: pass
-
-        nil
-
-    fn lookup_trait_method(trait_id: SymbolId, method_name: text) -> SymbolId?:
-        self.lookup_trait_method_raw(trait_id.id, method_name)
-
-    fn lookup_trait_method_raw(raw_trait_id: i64, method_name: text) -> SymbolId?:
-        """Look up a method in a trait.
-
-        Searches for a method named `method_name` defined in the trait
-        identified by `trait_id`.
-        """
-        if self.get_symbol_raw(raw_trait_id) == nil:
-            return nil
-
-        # Look for trait method using qualified name
-        val qualified_name = self.method_symbol_name_raw(raw_trait_id, method_name)
-        if self.exact_symbols.has(qualified_name):
-            val raw_id = self.exact_symbols[qualified_name]
-            if val sym = self.get_symbol_raw(raw_id):
-                match sym.kind:
-                    case Method:
-                        return sym.id
-                    case _: pass
-
-        nil
-
-    fn lookup_static_method(type_id: SymbolId, method_name: text) -> SymbolId?:
-        self.lookup_static_method_raw(type_id.id, method_name)
-
-    fn lookup_static_method_raw(raw_type_id: i64, method_name: text) -> SymbolId?:
-        """Look up a static method in a class/struct/enum.
-
-        Static methods are defined with `static fn` and don't have a `self` parameter.
-        """
-        if self.get_symbol_raw(raw_type_id) == nil:
-            return nil
-
-        # Static methods are stored as Function symbols with qualified names
-        val qualified_name = self.method_symbol_name_raw(raw_type_id, method_name)
-        if self.exact_symbols.has(qualified_name):
-            val raw_id = self.exact_symbols[qualified_name]
-            if val sym = self.get_symbol_raw(raw_id):
-                match sym.kind:
-                    case Function:
-                        return sym.id  # Static methods
-                    case _: pass
-
-        nil
-
-    fn lookup_unique_static_method(method_name: text) -> SymbolId?:
-        """Recover an unambiguous owner-qualified static method by leaf name.
-
-        Native bootstrap lowering can lose the aggregate HirExpr payload for a
-        type-valued receiver while retaining the scalar method name. Exact
-        symbols encode static impl functions as `owner::method`; accepting a
-        candidate only when every matching key names the same Function keeps
-        this fallback fail-closed when two owners expose the same leaf.
-        """
-        val suffix = "::" + method_name
-        var candidate: SymbolId? = nil
-        for qualified_name in self.exact_symbols.keys():
-            if qualified_name.ends_with(suffix):
-                val raw_id = self.exact_symbols[qualified_name]
-                if val symbol = self.get_symbol_raw(raw_id):
-                    match symbol.kind:
-                        case Function:
-                            if val prior = candidate:
-                                if prior.id != symbol.id.id:
-                                    return nil
-                            else:
-                                candidate = Some(symbol.id)
-                        case _: ()
-        candidate
-
-    fn get_symbol_type(id: SymbolId) -> HirType?:
-        """Get the type of a symbol."""
-        return self.get_symbol_type_raw(id.id)
-
-    fn get_symbol_type_raw(raw: i64) -> HirType?:
-        """Raw-i64 form of get_symbol_type. Passing a struct value (SymbolId)
-        as a function argument is miscompiled on the stage4 native lane (bug
-        bootstrap_stage4_optional_arg_and_mixed_tail_miscompile_2026-07-23) ->
-        garbage id -> get_symbol returns a present-but-nil Option -> `found.type_`
-        SIGILLs "field access on nil receiver" for EVERY struct field access
-        during AOT lowering. Mirror get_symbol_raw: take the plain i64."""
-        val sym = self.get_symbol_raw(raw)
-        if val found = sym:
-            if found != nil:
-                found.type_
-            else:
-                nil
-        else:
-            nil
-
-    fn get_symbol_named_type_raw(raw: i64) -> i64:
-        """Return the raw named-type owner of a value symbol, or -1.
-
-        This keeps both ``HirType?`` and ``SymbolId?`` inside SymbolTable;
-        neither value-type optional is safe across the staged-native method
-        boundary used by nested field lowering.
-        """
-        if val symbol = self.get_symbol_raw(raw):
-            if symbol.type_ != nil:
-                val symbol_type = symbol.type_ ?? HirType(
-                    kind: HirTypeKind.Error, span: symbol.span)
-                match symbol_type.kind:
-                    case HirTypeKind.Named(owner, _): return owner.id
-                    case _: ()
-        -1
-
-    fn is_function(id: SymbolId) -> bool:
-        """Check if symbol is a function."""
-        val sym = self.get_symbol(id)
-        if val found = sym:
-            match found.kind:
-                case Function: true
-                case _: false
-        else:
-            false
-
-    fn is_method(id: SymbolId) -> bool:
-        """Check if symbol is a method."""
-        val sym = self.get_symbol(id)
-        if val found = sym:
-            match found.kind:
-                case Method: true
-                case _: false
-        else:
-            false
-
-    fn get_methods_for_type(type_id: SymbolId) -> [text]:
-        """Get all method names for a type (for error suggestions)."""
-        var methods: [text] = []
-        val type_sym = self.get_symbol(type_id)
-        if not type_sym.?:
-            return methods
-        var type_symbol: HirSymbol = HirSymbol(id: type_id, name: "", kind: SymbolKind.Struct, type_: nil, scope: ScopeId(id: 0), span: Span.empty(), visibility: Visibility.Private, is_public: false, is_mutable: false, defining_module: nil)
-        if val found_type_symbol = type_sym:
-            type_symbol = found_type_symbol
-        else:
-            return methods
-
-        val type_name = type_symbol.name
-        val prefix = "{type_name}::"
-
-        for sym in self.symbols.values():
-            if not sym.?:
-                pass
-            elif not sym.name.?:
-                pass
-            elif sym.name.starts_with(prefix):
-                match sym.kind:
-                    case Method:
-                        # Extract method name from qualified name
-                        val method_name = sym.name[prefix.len():]
-                        methods = methods.push(method_name)
-                    case _: pass
-
-        methods
-
-    fn get_all_functions() -> [text]:
-        """Get all function names (for error suggestions)."""
-        var functions: [text] = []
-
-        for sym in self.symbols.values():
-            match sym.kind:
-                case Function:
-                    # Only include non-qualified names (free functions)
-                    if not sym.name.contains("::"):
-                        functions = functions.push(sym.name)
-                case _: pass
-
-        functions
 
 # ============================================================================
 # HIR Types

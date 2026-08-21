@@ -14,6 +14,7 @@
 > lands.
 
 Status: CLOSED — NOT REPRODUCED 2026-08-17 (P1). Independently re-confirmed by EXECUTION; see the two 2026-08-17 sections below.
+- **Verification 2026-08-21 (bug-status-consistency audit): PARTIAL, not fully fixed.** the surface no longer reproduces, but the underlying engine defect is only MASKED by write-back and remains open as `interp_list_class_element_read_returns_copy_mutation_loss_2026-08-17`; workarounds are still in `host_compositor_entry.spl`. `bug_db.sdn` row is `fix-implemented-verification-pending`.
 
 - Date: 2026-07-06
 - Severity: high (silent state loss — any cache/accumulator held in a Dict misbehaves)

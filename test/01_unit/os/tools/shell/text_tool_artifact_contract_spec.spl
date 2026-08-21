@@ -1,0 +1,126 @@
+use os.tools.shell.grep.grep_artifact_contract.{
+    text_tool_artifact_contract_v1, text_tool_canonical_path_v1,
+    text_tool_artifact_contract_valid_v1, TEXT_TOOL_MAX_FILES_V1,
+    TEXT_TOOL_MAX_FILE_BYTES_V1, TEXT_TOOL_READ_CHUNK_BYTES_V1
+}
+use os.tools.shell.grep.grep_tool.{tool_grep}
+use os.packages.text_tool_package_identity.{
+    text_tool_package_identity_v1, text_tool_package_identity_blocked_v1
+}
+use os.apps.coreutils.grep.{main_grep}
+use os.apps.coreutils.grep_vfs_adapter.{
+    GrepProcessFilesystem, grep_process_vfs
+}
+use os.apps.terminal.terminal.{Terminal}
+use os.services.vfs.vfs.{VfsManager, Filesystem, SeekWhence}
+use os.kernel.types.fs_types.{FileFlags, FsNode, FsNodeKind, DirEntry}
+use std.nogc_sync_mut.binary_io.{string_to_bytes}
+
+class GrepFixtureFilesystem:
+    content: [u8]
+    delivered: bool
+
+impl GrepFixtureFilesystem:
+    static fn new(content: text) -> GrepFixtureFilesystem:
+        GrepFixtureFilesystem(content: string_to_bytes(content), delivered: false)
+
+impl Filesystem for GrepFixtureFilesystem:
+    fn fs_name() -> text: "grep-fixture"
+    me mount(device: text, options: text) -> Result<bool, text>: Ok(true)
+    me unmount() -> Result<bool, text>: Ok(true)
+    me open(path: text, flags: FileFlags) -> Result<u64, text>:
+        self.delivered = false
+        Ok(1u64)
+    me read(handle: u64, size: u64) -> Result<[u8], text>:
+        if self.delivered:
+            return Ok([])
+        self.delivered = true
+        Ok(self.content)
+    me write(handle: u64, data: [u8]) -> Result<u64, text>: Err("read-only")
+    me close(handle: u64) -> Result<bool, text>: Ok(true)
+    me seek(handle: u64, offset: i64, whence: SeekWhence) -> Result<u64, text>: Err("unsupported")
+    fn stat(path: text) -> Result<FsNode, text>:
+        Ok(FsNode(
+            id: 1u64, kind: FsNodeKind.File, size: self.content.len().to_u64(),
+            permissions: 0o444, owner: 0, group: 0,
+            created_ns: 0, modified_ns: 0))
+    fn chmod(path: text, mode: u16) -> Result<bool, text>: Err("read-only")
+    me mkdir(path: text) -> Result<bool, text>: Err("read-only")
+    me rmdir(path: text) -> Result<bool, text>: Err("read-only")
+    fn readdir(path: text) -> Result<[DirEntry], text>: Err("unsupported")
+    me unlink(path: text) -> Result<bool, text>: Err("read-only")
+    me rename(old_path: text, new_path: text) -> Result<bool, text>: Err("read-only")
+    me symlink(target: text, link_path: text) -> Result<bool, text>: Err("read-only")
+
+fn grep_fixture_vfs(content: text) -> VfsManager:
+    var vfs = VfsManager.new()
+    val _mounted = vfs.mount(
+        "/", "grep-fixture", "fixture", false,
+        GrepFixtureFilesystem.new(content))
+    vfs
+
+describe "grep filesystem artifact contract":
+    it "binds grep to its pure-Simple entrypoint and canonical path":
+        val result = text_tool_artifact_contract_v1("grep")
+        expect(result.is_ok()).to_be(true)
+        val contract = result.unwrap()
+        expect(contract.canonical_path).to_equal("/usr/bin/grep")
+        expect(contract.source_owner).to_equal("os.tools.shell.grep.grep_tool")
+        expect(contract.entry_source_owner).to_equal("os.apps.coreutils.grep")
+        expect(contract.entry_symbol).to_equal("main_grep")
+        expect(contract.version_line).to_equal("grep (SimpleOS text tools) 1.0")
+        expect(contract.help_line).to_equal("usage: grep [--] PATTERN FILE...")
+        expect(contract.max_files).to_equal(TEXT_TOOL_MAX_FILES_V1)
+        expect(contract.max_file_bytes).to_equal(TEXT_TOOL_MAX_FILE_BYTES_V1)
+        expect(contract.read_chunk_bytes).to_equal(TEXT_TOOL_READ_CHUNK_BYTES_V1)
+        expect(text_tool_artifact_contract_valid_v1(contract)).to_be(true)
+
+    it "rejects unknown text tool identities":
+        expect(text_tool_artifact_contract_v1("sed").is_err()).to_be(true)
+        expect(text_tool_canonical_path_v1("sed")).to_equal("")
+
+    it "keeps package identity blocked without digest and admission receipt":
+        val result = text_tool_package_identity_v1("grep")
+        expect(result.is_ok()).to_be(true)
+        val identity = result.unwrap()
+        expect(identity.artifact_digest).to_equal("")
+        expect(identity.admission_receipt_id).to_equal("")
+        expect(text_tool_package_identity_blocked_v1(identity)).to_be(true)
+
+describe "pure-Simple grep behavior":
+    it "matches lines through bounded VFS reads":
+        var vfs = grep_fixture_vfs("alpha\nneedle here\nomega\n")
+        var terminal = Terminal.new(80, 24)
+        expect(tool_grep(vfs, "/", ["needle", "sample.txt"], terminal)).to_equal(0)
+        expect(terminal.take_mirrored_output()).to_equal("sample.txt:2:needle here\n")
+
+    it "returns one when no line matches":
+        var vfs = grep_fixture_vfs("alpha\nomega\n")
+        var terminal = Terminal.new(80, 24)
+        expect(tool_grep(vfs, "/", ["needle", "sample.txt"], terminal)).to_equal(1)
+        expect(terminal.take_mirrored_output()).to_equal("")
+
+    it "does not fabricate a line for an empty file and normalizes CRLF output":
+        var empty_vfs = grep_fixture_vfs("")
+        var empty_terminal = Terminal.new(80, 24)
+        expect(tool_grep(empty_vfs, "/", ["", "empty.txt"], empty_terminal)).to_equal(1)
+        expect(empty_terminal.take_mirrored_output()).to_equal("")
+
+        var crlf_vfs = grep_fixture_vfs("alpha\r\nneedle\r\n")
+        var crlf_terminal = Terminal.new(80, 24)
+        expect(tool_grep(crlf_vfs, "/", ["needle", "sample.txt"], crlf_terminal)).to_equal(0)
+        expect(crlf_terminal.take_mirrored_output()).to_equal("sample.txt:2:needle\n")
+
+    it "preserves exact version, help, and argument error behavior":
+        var terminal = Terminal.new(80, 24)
+        expect(tool_grep(nil, "/", ["--version"], terminal)).to_equal(0)
+        expect(terminal.take_mirrored_output()).to_equal("grep (SimpleOS text tools) 1.0\n")
+        expect(main_grep(["--help"])).to_equal(0)
+        expect(main_grep([])).to_equal(2)
+
+    it "mounts a read-only process adapter":
+        val vfs = grep_process_vfs()
+        expect(vfs.mounts.len()).to_equal(1)
+        var fs = GrepProcessFilesystem.new()
+        expect(fs.write(1u64, [1u8]).is_err()).to_be(true)
+        expect(fs.mkdir("/blocked").is_err()).to_be(true)

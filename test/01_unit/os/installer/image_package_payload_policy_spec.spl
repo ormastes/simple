@@ -1,0 +1,177 @@
+use std.spec
+use os.installer.image_package_payload_policy.{
+    image_package_payload_decision_v1,
+    image_native_executable_payload_admitted_v1,
+    image_package_metadata_payload_v1,
+}
+use os.tools.pkg.pkg_format.{PkgArch}
+use os.kernel.arch.arch_context.{Architecture}
+
+fn _put_u16_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    data[offset] = (value & 0xFF).to_u8()
+    data[offset + 1] = ((value >> 8) & 0xFF).to_u8()
+    data
+
+fn _put_u32_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    var i: i64 = 0
+    while i < 4:
+        data[offset + i] = ((value >> (i * 8)) & 0xFF).to_u8()
+        i = i + 1
+    data
+
+fn _put_u64_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    var i: i64 = 0
+    while i < 8:
+        data[offset + i] = ((value >> (i * 8)) & 0xFF).to_u8()
+        i = i + 1
+    data
+
+fn _elf64_x86_64() -> [u8]:
+    var data: [u8] = [0u8; 121]
+    data[0] = 0x7Fu8
+    data[1] = 0x45u8
+    data[2] = 0x4Cu8
+    data[3] = 0x46u8
+    data[4] = 2u8
+    data[5] = 1u8
+    data[6] = 1u8
+    data = _put_u16_le(data, 16, 2)
+    data = _put_u16_le(data, 18, 62)
+    data = _put_u32_le(data, 20, 1)
+    data = _put_u64_le(data, 24, 0x400000)
+    data = _put_u64_le(data, 32, 64)
+    data = _put_u16_le(data, 52, 64)
+    data = _put_u16_le(data, 54, 56)
+    data = _put_u16_le(data, 56, 1)
+    data = _put_u32_le(data, 64, 1)
+    data = _put_u32_le(data, 68, 5)
+    data = _put_u64_le(data, 72, 120)
+    data = _put_u64_le(data, 80, 0x400000)
+    data = _put_u64_le(data, 96, 1)
+    data = _put_u64_le(data, 104, 1)
+    data = _put_u64_le(data, 112, 0x1000)
+    data[120] = 0xC3u8
+    data
+
+fn _smf_x86_64(stub: [u8]) -> [u8]:
+    var data = stub
+    val header_offset = data.len()
+    var i: i64 = 0
+    while i < 128:
+        data.push(0u8)
+        i = i + 1
+    data[header_offset] = 83u8
+    data[header_offset + 1] = 77u8
+    data[header_offset + 2] = 70u8
+    data[header_offset + 4] = 1u8
+    data[header_offset + 5] = 1u8
+    data = _put_u32_le(data, header_offset + 52, stub.len())
+    data = _put_u32_le(data, header_offset + 56, stub.len())
+    data[header_offset + 60] = 1u8
+    data[header_offset + 61] = 1u8
+    data[header_offset + 62] = 1u8
+    data
+
+describe "Installer image package payload policy v1":
+    it "blocks executable placeholders across every executable package root":
+        val paths = [
+            "/bin/shell", "/sbin/bootctl", "/usr/bin/clang",
+            "/usr/sbin/pkg", "/sys/apps/editor",
+        ]
+        for path in paths:
+            val decision = image_package_payload_decision_v1(
+                "simpleos-tools", path, [], Architecture.X86_64)
+            expect(decision.action).to_equal("block-executable-placeholder")
+            expect(decision.write_payload).to_be(false)
+            expect(decision.manifest_deployed).to_be(false)
+            expect(decision.inventory_row).to_contain("path = \"{path}\"")
+            expect(decision.inventory_row).to_contain("reason = \"package-placeholder-rejected\"")
+
+    it "emits the exact essential-toolchain blocked inventory row":
+        val decision = image_package_payload_decision_v1(
+            "simpleos-apps", "/sys/apps/simple_loader", [], Architecture.X86_64)
+        expect(decision.essential).to_be(true)
+        expect(decision.inventory_row).to_equal(
+            "[blocked_package_payload]\npackage = \"simpleos-apps\"\npath = \"/sys/apps/simple_loader\"\nreason = \"package-placeholder-rejected\"\nessential = true\n\n")
+
+    it "admits executable deployment only after native bytes were validated":
+        val denied = image_package_payload_decision_v1(
+            "simpleos-tools", "/usr/bin/clang", [], Architecture.X86_64)
+        val admitted = image_package_payload_decision_v1(
+            "simpleos-tools", "/usr/bin/clang", _elf64_x86_64(), Architecture.X86_64)
+        expect(denied.manifest_deployed).to_be(false)
+        expect(admitted.action).to_equal("stage-validated-native")
+        expect(admitted.write_payload).to_be(true)
+        expect(admitted.manifest_deployed).to_be(true)
+        expect(admitted.inventory_row).to_equal("")
+
+    it "admits only matching target-native ELF bytes":
+        var elf = _elf64_x86_64()
+        expect(image_native_executable_payload_admitted_v1(
+            elf, Architecture.X86_64)).to_be(true)
+        expect(image_native_executable_payload_admitted_v1(
+            elf, Architecture.Arm64)).to_be(false)
+        elf[0] = 0u8
+        expect(image_native_executable_payload_admitted_v1(
+            elf, Architecture.X86_64)).to_be(false)
+
+    it "rejects a header-only ELF and an entry outside file-backed PT_LOAD bytes":
+        var header_only = _elf64_x86_64().slice(0, 64)
+        expect(image_native_executable_payload_admitted_v1(
+            header_only, Architecture.X86_64)).to_be(false)
+        var bss_entry = _elf64_x86_64()
+        bss_entry = _put_u64_le(bss_entry, 96, 0)
+        expect(image_native_executable_payload_admitted_v1(
+            bss_entry, Architecture.X86_64)).to_be(false)
+
+    it "admits canonical SMF only when its embedded ELF is a real executable":
+        val admitted = _smf_x86_64(_elf64_x86_64())
+        val header_only = _smf_x86_64(_elf64_x86_64().slice(0, 64))
+        expect(image_native_executable_payload_admitted_v1(
+            admitted, Architecture.X86_64)).to_be(true)
+        expect(image_native_executable_payload_admitted_v1(
+            admitted, Architecture.Arm64)).to_be(false)
+        expect(image_native_executable_payload_admitted_v1(
+            header_only, Architecture.X86_64)).to_be(false)
+
+    it "keeps metadata payloads deployable without executable claims":
+        val decision = image_package_payload_decision_v1(
+            "simpleos-tools", "/SYS/CLANGMAN.TXT", [], Architecture.X86_64)
+        val payload = image_package_metadata_payload_v1(
+            "simpleos-tools", "/SYS/CLANGMAN.TXT", PkgArch.X86_64)
+        expect(decision.action).to_equal("write-installer-owned-metadata")
+        expect(decision.manifest_deployed).to_be(true)
+        expect(payload).to_contain("status=standalone-required")
+
+    it "builds an honest mixed inventory without deployed executable placeholders":
+        val declared = [
+            "/usr/bin/terminal", "/usr/lib/libwm.a",
+            "/SYS/TOOLSET.SDN", "/sys/apps/simple_compiler",
+        ]
+        var deployed: [text] = []
+        var blocked: [text] = []
+        for path in declared:
+            val decision = image_package_payload_decision_v1(
+                "simpleos-image", path, [], Architecture.X86_64)
+            if decision.manifest_deployed:
+                deployed.push(path)
+            else:
+                blocked.push(path)
+        expect(deployed).to_equal(["/SYS/TOOLSET.SDN"])
+        expect(blocked).to_equal([
+            "/usr/bin/terminal", "/usr/lib/libwm.a", "/sys/apps/simple_compiler"])
+
+    it "blocks every generic non-executable file when package bytes are unavailable":
+        val paths = [
+            "/usr/lib/libwm.a", "/usr/lib64/libnative.so",
+            "/etc/unowned.conf", "/usr/share/data.bin",
+            "/usr/share/simpleos/toolchain/clang/hello.c",
+        ]
+        for path in paths:
+            val decision = image_package_payload_decision_v1(
+                "simpleos-image", path, [], Architecture.X86_64)
+            expect(decision.action).to_equal("block-unavailable-package-bytes")
+            expect(decision.write_payload).to_be(false)
+            expect(decision.manifest_deployed).to_be(false)
+            expect(decision.inventory_row).to_contain(
+                "reason = \"package-bytes-unavailable\"")

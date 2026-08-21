@@ -8,6 +8,75 @@ use compiler.hir.hir_definitions.*
 # Native companion: hir_method_call_receiver_payload_native_main.spl.
 # The companion is compiled with --entry-closure in the targeted native gate
 # because the tagged Dict.get failure is native-only.
+
+fn indexed_receiver_shape_is_exact(hir: HirModule) -> bool:
+    for fn_ in hir.functions.values():
+        if fn_.name == "nested":
+            if fn_.params.len() != 2 or fn_.params[0].name != "args" or fn_.params[1].name != "i" or not fn_.body.has:
+                return false
+            match fn_.body.value.kind:
+                case HirExprKind.MethodCall(receiver, method, args, _):
+                    if method != "starts_with" or args.len() != 1:
+                        return false
+                    match receiver.kind:
+                        case HirExprKind.Index(base, index):
+                            match base.kind:
+                                case HirExprKind.NamedVar(_, base_name):
+                                    if base_name != "args":
+                                        return false
+                                case _:
+                                    return false
+                            match index.kind:
+                                case HirExprKind.NamedVar(_, index_name):
+                                    return index_name == "i"
+                                case _:
+                                    return false
+                        case _:
+                            return false
+                case _:
+                    return false
+    false
+
+fn typed_nested_receiver_shape_is_exact(hir: HirModule) -> bool:
+    for fn_ in hir.functions.values():
+        if fn_.name == "nested_typed":
+            if not fn_.body.has:
+                return false
+            match fn_.body.value.kind:
+                case HirExprKind.MethodCall(receiver, method, args, _):
+                    if method != "to_string" or args.len() != 1 or not receiver.has_type_:
+                        return false
+                    match receiver.type_.kind:
+                        case HirTypeKind.Int(bits, signed):
+                            if bits != 64 or not signed:
+                                return false
+                        case _:
+                            return false
+                    match receiver.kind:
+                        case HirExprKind.Cast(_, target):
+                            match target.kind:
+                                case HirTypeKind.Int(bits, signed):
+                                    if bits != 64 or not signed:
+                                        return false
+                                case _:
+                                    return false
+                        case _:
+                            return false
+                    match args[0].value.kind:
+                        case HirExprKind.MethodCall(arg_receiver, arg_method, arg_args, _):
+                            if arg_method != "starts_with" or arg_args.len() != 1:
+                                return false
+                            match arg_receiver.kind:
+                                case HirExprKind.NamedVar(_, arg_name):
+                                    return arg_name == "arg"
+                                case _:
+                                    return false
+                        case _:
+                            return false
+                case _:
+                    return false
+    false
+
 describe "HIR method-call receiver payloads":
     it "resolves a second parameter used as an indexed method receiver":
         val source =
@@ -19,31 +88,16 @@ describe "HIR method-call receiver payloads":
         val hir = lowering.lower_module(module)
 
         expect(lowering.errors.len()).to_equal(0)
-        for fn_ in hir.functions.values():
-            if fn_.name == "nested":
-                expect(fn_.params.len()).to_equal(2)
-                expect(fn_.params[0].name).to_equal("args")
-                expect(fn_.params[1].name).to_equal("i")
-                expect(fn_.body.has).to_equal(true)
-                match fn_.body.value.kind:
-                    case HirExprKind.MethodCall(receiver, method, args, _):
-                        expect(method).to_equal("starts_with")
-                        expect(args.len()).to_equal(1)
-                        match receiver.kind:
-                            case HirExprKind.Index(base, index):
-                                match base.kind:
-                                    case HirExprKind.NamedVar(_, base_name):
-                                        expect(base_name).to_equal("args")
-                                    case _:
-                                        expect(false).to_equal(true)
-                                match index.kind:
-                                    case HirExprKind.NamedVar(_, index_name):
-                                        expect(index_name).to_equal("i")
-                                    case _:
-                                        expect(false).to_equal(true)
-                            case _:
-                                expect(false).to_equal(true)
-                    case _:
-                        expect(false).to_equal(true)
-                return
-        expect(false).to_equal(true)
+        expect(indexed_receiver_shape_is_exact(hir)).to_equal(true)
+
+    it "preserves a typed receiver while lowering a nested argument payload":
+        val source =
+            "fn nested_typed(arg: text) -> text:\n" +
+            "    i64(7).to_string(arg.starts_with(\"--\"))\n"
+        val logger = Logger(level: 0)
+        val module = parse_full_frontend(source, "hir_method_call_typed_receiver", "hir_method_call_typed_receiver", logger)
+        var lowering = HirLowering.with_filename("hir_method_call_typed_receiver")
+        val hir = lowering.lower_module(module)
+
+        expect(lowering.errors.len()).to_equal(0)
+        expect(typed_nested_receiver_shape_is_exact(hir)).to_equal(true)

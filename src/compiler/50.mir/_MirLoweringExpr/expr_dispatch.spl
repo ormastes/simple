@@ -53,6 +53,8 @@ var mir_lower_parent_expr_col: i64 = -1
 var mir_lower_parent_expr_disc: i64 = -1
 var mir_lower_garbage_expr_count: i64 = 0
 var mir_lower_garbage_debug_state: i64 = -1
+# Cached MIR lower-expr trace gate (-1 unknown, 0 off, 1 on). Default OFF.
+var mir_lower_expr_trace_state: i64 = -1
 var mir_lower_disc_table_dumped: bool = false
 
 pub fn mir_lower_garbage_expr_count_value() -> i64:
@@ -2053,6 +2055,11 @@ impl MirLowering:
                 mir_lower_garbage_debug_state = 1
             else:
                 mir_lower_garbage_debug_state = 0
+        if mir_lower_expr_trace_state < 0:
+            if mir_trace_enabled():
+                mir_lower_expr_trace_state = 1
+            else:
+                mir_lower_expr_trace_state = 0
         if mir_lower_garbage_debug_state == 1 and expr != nil:
             val garbage_disc = rt_enum_discriminant(expr.kind)
             if garbage_disc < 0:
@@ -2098,20 +2105,21 @@ impl MirLowering:
         # temp so the accumulated diagnostics actually get reported.
         if span_result == nil:
             self.error_fatal("MIR lowering produced no local for this expression", nil)
-            eprint("[mir-lower-expr] nil-local-from-impl method={span_method_name}\n")
+            if mir_lower_expr_trace_state == 1:
+                eprint("[mir-lower-expr] nil-local-from-impl method={span_method_name}\n")
             var b_nil_local = self.builder
             span_result = b_nil_local.new_temp(MirType.unit())
             self.builder = b_nil_local
-        if span_method_name != "":
+        if mir_lower_expr_trace_state == 1 and span_method_name != "":
             eprint("[mir-lower-expr] impl-return method={span_method_name} id={span_result.id}\n")
         var b_span_restore = self.builder
-        if span_method_name != "":
+        if mir_lower_expr_trace_state == 1 and span_method_name != "":
             eprint("[mir-lower-expr] span-builder-read method={span_method_name}\n")
         b_span_restore.current_span = saved_span
-        if span_method_name != "":
+        if mir_lower_expr_trace_state == 1 and span_method_name != "":
             eprint("[mir-lower-expr] span-restored-local method={span_method_name}\n")
         self.builder = b_span_restore
-        if span_method_name != "":
+        if mir_lower_expr_trace_state == 1 and span_method_name != "":
             eprint("[mir-lower-expr] span-builder-written method={span_method_name} id={span_result.id}\n")
         span_result
 
@@ -3488,35 +3496,20 @@ impl MirLowering:
                 self.lower_if_chain(arms, else_, expected_if_chain_type)
 
             case MethodCall(receiver, method, args, resolution):
-                eprint("[mir-lower-expr] method-dispatch-before method={method}\n")
-                # Keep the type-valued receiver identity scalar across the
-                # native call boundary.  Stage 2 can corrupt a nested HirExpr
-                # enum payload when lower_method_call receives the aggregate
-                # by value; the source-side name/id are still intact here.
-                var static_receiver_name_hint = ""
-                var static_receiver_symbol_hint: i64 = -1
-                match receiver.kind:
-                    case NamedVar(static_symbol, static_name):
-                        val static_def = self.symbols.get_symbol_raw(static_symbol.id)
-                        if static_def != nil:
-                            match static_def.kind:
-                                case Class | Struct | Enum | Import:
-                                    static_receiver_name_hint = static_def.name
-                                    static_receiver_symbol_hint = static_symbol.id
-                                case _: ()
-                    case Var(static_symbol):
-                        val static_def = self.symbols.get_symbol_raw(static_symbol.id)
-                        if static_def != nil:
-                            match static_def.kind:
-                                case Class | Struct | Enum | Import:
-                                    static_receiver_name_hint = static_def.name
-                                    static_receiver_symbol_hint = static_symbol.id
-                                case _: ()
-                    case _: ()
+                if mir_lower_expr_trace_state == 1:
+                    eprint("[mir-lower-expr] method-dispatch-before method={method}\n")
+                # Do not inspect nested `resolution` or `receiver.kind`
+                # payloads here. This outer MethodCall payload is already a
+                # value extracted from `expr_value.kind`; a second native enum
+                # match at this boundary can loop while allocating. Resolved
+                # calls retain their MethodResolution, while unresolved static
+                # calls use lower_method_call's conservative unique-symbol
+                # recovery until HIR carries explicit scalar owner metadata.
                 val method_result = self.lower_method_call(
                     receiver, method, args, resolution,
-                    static_receiver_name_hint, static_receiver_symbol_hint)
-                eprint("[mir-lower-expr] method-dispatch-after method={method} id={method_result.id}\n")
+                    "", -1)
+                if mir_lower_expr_trace_state == 1:
+                    eprint("[mir-lower-expr] method-dispatch-after method={method} id={method_result.id}\n")
                 method_result
 
             case ArrayLit(elements, _):

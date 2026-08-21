@@ -2,6 +2,7 @@
 
 **Date:** 2026-08-02
 Status: FIXED (P1) — 2026-08-17
+- **Verification 2026-08-21 (bug-status-consistency audit): PARTIAL, not fully fixed.** parser desugar to `__assert(...)` landed (62c075bbe3c, f93a9abb5d0, 7d73d4dd3a6; parser_stmts.spl:732-744), but the interpreter/MIR/backend arms and end-to-end self-hosted behaviour are still unexecuted. `bug_db.sdn` row is `fix-implemented-verification-pending`.
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 OPEN 2 FIXED (`62c075bbe3cf`); OPEN 3 FIXED (`f93a9abb5d0d`);
 **OPEN 1 FIXED 2026-08-17** — it needed more than the parser change first

@@ -1,0 +1,578 @@
+# SimpleOS capability-ledger owner and validator (REQ-001).
+#
+# Evidence runners submit bounded immutable candidates.  This module is the
+# sole mutable owner: it validates the receipt/row binding, orders candidates
+# by their stable row key, and publishes one atomic parent-authoritative
+# transition.  It never infers PASS from source or artifact presence.
+
+use std.common.structural.receipt.simpleos_evidence_receipt_v1.{
+    SimpleOsEvidenceEnvironment,
+    SimpleOsEvidenceReceiptV1,
+    simpleos_evidence_receipt_validate
+}
+use std.common.structural.digest.hash256.{hash256_hex_valid}
+use std.common.contracts.execution.simpleos_performance_v1.{
+    SimpleOsPerformanceDirectionV1,
+    SimpleOsPerformanceEvidenceV1,
+    SimpleOsPerformanceHostV1,
+    SimpleOsPerformanceUnitV1,
+    simpleos_performance_admit,
+    simpleos_performance_canonical_budget,
+    simpleos_performance_receipt_unit,
+    simpleos_performance_workload_from_text
+}
+use std.common.structural.parallel_commit.simpleos_ledger_commit_v1.{
+    SIMPLEOS_LEDGER_SCHEMA_VERSION,
+    SIMPLEOS_LEDGER_MAX_ROWS,
+    SIMPLEOS_LEDGER_MAX_BATCH_ROWS,
+    SIMPLEOS_LEDGER_MAX_KEY_BYTES,
+    SIMPLEOS_LEDGER_MAX_REASON_BYTES,
+    SIMPLEOS_LEDGER_MAX_TODO_BYTES,
+    SIMPLEOS_LEDGER_MAX_PREREQUISITE_BYTES,
+    SIMPLEOS_LEDGER_MAX_RESUME_COMMAND_BYTES,
+    SIMPLEOS_LEDGER_MAX_OWNER_BYTES,
+    SIMPLEOS_LEDGER_MAX_REVIEWER_BYTES,
+    SIMPLEOS_LEDGER_MAX_ARTIFACTS,
+    SIMPLEOS_LEDGER_MAX_ARTIFACT_PATH_BYTES,
+    SIMPLEOS_LEDGER_MAX_CONSUMED_NONCES,
+    SimpleOsCapabilityStatus,
+    SimpleOsCapabilityRowV1,
+    SimpleOsCapabilityLedgerV1,
+    SimpleOsCapabilityLedgerCandidateV1,
+    SimpleOsCapabilityAdmissionContextV1,
+    SimpleOsCapabilityLedgerCheckV1,
+    SimpleOsCapabilityLedgerCommitResultV1,
+    SimpleOsCapabilityLedgerFailure,
+    simpleos_capability_status_to_text,
+    simpleos_capability_ledger_v1,
+    simpleos_capability_row_key,
+    simpleos_capability_rows_same_key,
+    simpleos_capability_ledger_order_candidates,
+    simpleos_capability_ledger_check_v1
+}
+
+val SIMPLEOS_EVIDENCE_ADMISSION_OWNER: text = "simpleos-evidence-service"
+
+fn _bounded_text(value: text, maximum: i64, required: bool) -> bool:
+    if required and value.len() == 0:
+        return false
+    value.len() <= maximum
+
+fn _key_component(value: text, required: bool) -> bool:
+    _bounded_text(value, SIMPLEOS_LEDGER_MAX_KEY_BYTES, required)
+        and not value.contains("|")
+
+fn _hash(value: text) -> bool:
+    hash256_hex_valid(value)
+
+fn _distinct_nonempty(a: text, b: text, maximum: i64) -> bool:
+    _bounded_text(a, maximum, true) and _bounded_text(b, maximum, true) and a != b
+
+fn _artifacts_bounded(artifacts: [text], required: bool) -> bool:
+    if artifacts.len() > SIMPLEOS_LEDGER_MAX_ARTIFACTS:
+        return false
+    if required and artifacts.len() == 0:
+        return false
+    var i: i64 = 0
+    for artifact in artifacts:
+        if not _hash(artifact):
+            return false
+        var prior: i64 = 0
+        while prior < i:
+            if artifacts[prior] == artifact:
+                return false
+            prior = prior + 1
+        i = i + 1
+    true
+
+fn _artifact_paths_bounded(paths: [text], required: bool) -> bool:
+    if paths.len() > SIMPLEOS_LEDGER_MAX_ARTIFACTS:
+        return false
+    if required and paths.len() == 0:
+        return false
+    var i: i64 = 0
+    for path in paths:
+        if not _bounded_text(path, SIMPLEOS_LEDGER_MAX_ARTIFACT_PATH_BYTES, true)
+            or path.contains("\0") or path.contains("\n"):
+            return false
+        var prior: i64 = 0
+        while prior < i:
+            if paths[prior] == path:
+                return false
+            prior = prior + 1
+        i = i + 1
+    true
+
+fn _text_arrays_equal(a: [text], b: [text]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: i64 = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+fn _text_array_contains(values: [text], wanted: text) -> bool:
+    for value in values:
+        if value == wanted:
+            return true
+    false
+
+fn _requires_performance_evidence(row: SimpleOsCapabilityRowV1) -> bool:
+    row.requirement_id == "NFR-002" or row.requirement_id == "NFR-003"
+        or row.capability.contains("perf")
+        or row.capability.contains("performance")
+
+fn _performance_unit_from_text(value: text) -> SimpleOsPerformanceUnitV1?:
+    if value == simpleos_performance_receipt_unit(
+        SimpleOsPerformanceUnitV1.Microseconds):
+        return Some(SimpleOsPerformanceUnitV1.Microseconds)
+    if value == simpleos_performance_receipt_unit(
+        SimpleOsPerformanceUnitV1.BytesPerSecond):
+        return Some(SimpleOsPerformanceUnitV1.BytesPerSecond)
+    nil
+
+fn _performance_host(receipt: SimpleOsEvidenceReceiptV1)
+        -> SimpleOsPerformanceHostV1:
+    match receipt.environment:
+        case SimpleOsEvidenceEnvironment.NativeHost:
+            SimpleOsPerformanceHostV1.Native
+        case SimpleOsEvidenceEnvironment.PhysicalBoard:
+            SimpleOsPerformanceHostV1.Native
+        case SimpleOsEvidenceEnvironment.QemuSystem:
+            if receipt.accelerator.contains("kvm"):
+                SimpleOsPerformanceHostV1.QemuKvm
+            else:
+                SimpleOsPerformanceHostV1.QemuTcg
+
+fn _performance_evidence(
+    receipt: SimpleOsEvidenceReceiptV1,
+    context: SimpleOsCapabilityAdmissionContextV1)
+        -> SimpleOsPerformanceEvidenceV1?:
+    val workload_option = simpleos_performance_workload_from_text(
+        receipt.performance_workload)
+    val workload = match workload_option:
+        case Some(value): value
+        case nil: return nil
+    val unit_option = _performance_unit_from_text(receipt.performance_unit)
+    val unit = match unit_option:
+        case Some(value): value
+        case nil: return nil
+    if receipt.performance_warmup_count <= 0
+        or receipt.performance_frequency_hz <= 0
+        or receipt.performance_cpu_identity == ""
+        or receipt.performance_noise_profile == ""
+        or not receipt.performance_comparable:
+        return nil
+    if context.performance_configured_max_rss_bytes == 0u64
+        or context.performance_baseline_value == 0u64
+        or context.performance_baseline_rss_bytes == 0u64
+        or not _hash(context.performance_fixture_hash)
+        or not _text_array_contains(context.current_artifact_hashes,
+                                    context.performance_fixture_hash)
+        or not _hash(context.performance_baseline_identity_hash)
+        or not _text_array_contains(context.current_artifact_hashes,
+                                    context.performance_baseline_identity_hash):
+        return nil
+    val budget = simpleos_performance_canonical_budget(
+        workload, context.performance_configured_max_rss_bytes)
+    if unit != budget.unit:
+        return nil
+    var samples: [u64] = []
+    var rss_samples: [u64] = []
+    var max_rss_bytes: u64 = 0u64
+    for sample in receipt.performance_samples:
+        if sample.metric_value_milli < 0 or sample.max_rss_bytes <= 0:
+            return nil
+        if sample.metric_value_milli > 9223372036854774807:
+            return nil
+        val raw = match budget.direction:
+            case SimpleOsPerformanceDirectionV1.LowerIsBetter:
+                (sample.metric_value_milli + 999) / 1000
+            case SimpleOsPerformanceDirectionV1.HigherIsBetter:
+                sample.metric_value_milli / 1000
+        if sample.max_rss_bytes.to_u64() > max_rss_bytes:
+            max_rss_bytes = sample.max_rss_bytes.to_u64()
+        samples = samples.push(raw.to_u64())
+        rss_samples = rss_samples.push(sample.max_rss_bytes.to_u64())
+    if samples.len() == 0:
+        return nil
+    Some(SimpleOsPerformanceEvidenceV1(
+        budget: budget,
+        samples: samples,
+        rss_samples: rss_samples,
+        warmup_samples: receipt.performance_warmup_count.to_u64(),
+        cpu_identity: receipt.performance_cpu_identity,
+        frequency_identity: receipt.performance_frequency_hz.to_text(),
+        noise_identity: receipt.performance_noise_profile,
+        fixture_hash: context.performance_fixture_hash,
+        binary_hash: receipt.binary_hash,
+        image_hash: receipt.image_hash,
+        config_hash: receipt.config_hash,
+        accelerator_identity: receipt.accelerator,
+        baseline_identity_hash: context.performance_baseline_identity_hash,
+        artifact_hashes: context.current_artifact_hashes,
+        host: _performance_host(receipt),
+        comparable_baseline: context.performance_external_comparability_verified,
+        baseline_value: context.performance_baseline_value,
+        max_rss_bytes: max_rss_bytes,
+        baseline_rss_bytes: context.performance_baseline_rss_bytes))
+
+fn _row_fields_valid(row: SimpleOsCapabilityRowV1) -> SimpleOsCapabilityLedgerCheckV1:
+    if not _key_component(row.requirement_id, true):
+        return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "requirement-id")
+    if not _key_component(row.capability, true):
+        return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "capability")
+    if not _key_component(row.target, true):
+        return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "target")
+    if not _key_component(row.filesystem, false):
+        return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "filesystem")
+    if not _key_component(row.protocol_profile, false):
+        return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "protocol-profile")
+    if simpleos_capability_row_key(row).len() > SIMPLEOS_LEDGER_MAX_KEY_BYTES:
+        return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "key-bound")
+    if not _bounded_text(row.receipt_id, SIMPLEOS_LEDGER_MAX_KEY_BYTES,
+                         row.status == SimpleOsCapabilityStatus.Pass):
+        return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "receipt-id")
+    if not _bounded_text(row.receipt_nonce, SIMPLEOS_LEDGER_MAX_KEY_BYTES,
+                         row.status == SimpleOsCapabilityStatus.Pass):
+        return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "receipt-nonce")
+    if row.status == SimpleOsCapabilityStatus.Pass and not _hash(row.source_hash):
+        return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "source-hash")
+    if row.status == SimpleOsCapabilityStatus.Pass and not _hash(row.image_hash):
+        return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "image-hash")
+    if row.status == SimpleOsCapabilityStatus.Pass and not _hash(row.binary_hash):
+        return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "binary-hash")
+    if row.status == SimpleOsCapabilityStatus.Pass and not _hash(row.config_hash):
+        return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "config-hash")
+    if not _artifacts_bounded(row.artifacts,
+                              row.status == SimpleOsCapabilityStatus.Pass):
+        return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "artifacts")
+    if not _artifact_paths_bounded(row.artifact_paths,
+                                   row.status == SimpleOsCapabilityStatus.Blocked):
+        return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "artifact-paths")
+    if not _bounded_text(row.blocker_reason, SIMPLEOS_LEDGER_MAX_REASON_BYTES,
+                         row.status == SimpleOsCapabilityStatus.Blocked):
+        return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "blocker-reason")
+    if not _bounded_text(row.todo, SIMPLEOS_LEDGER_MAX_TODO_BYTES,
+                         row.status == SimpleOsCapabilityStatus.Blocked):
+        return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "todo")
+    if not _bounded_text(row.prerequisite, SIMPLEOS_LEDGER_MAX_PREREQUISITE_BYTES,
+                         row.status == SimpleOsCapabilityStatus.Blocked):
+        return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "prerequisite")
+    if not _bounded_text(row.resume_command,
+                         SIMPLEOS_LEDGER_MAX_RESUME_COMMAND_BYTES,
+                         row.status == SimpleOsCapabilityStatus.Blocked):
+        return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "resume-command")
+    if not _distinct_nonempty(row.owner, row.reviewer, SIMPLEOS_LEDGER_MAX_OWNER_BYTES):
+        return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "owner-reviewer")
+    if row.reviewer.len() > SIMPLEOS_LEDGER_MAX_REVIEWER_BYTES:
+        return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "reviewer")
+    if row.status == SimpleOsCapabilityStatus.Pass:
+        if row.blocker_reason.len() != 0 or row.todo.len() != 0
+            or row.prerequisite.len() != 0 or row.resume_command.len() != 0:
+            return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "pass-blocker-data")
+    if row.status == SimpleOsCapabilityStatus.Blocked:
+        if row.receipt_id.len() != 0 or row.source_hash.len() != 0
+            or row.receipt_nonce.len() != 0
+            or row.image_hash.len() != 0 or row.binary_hash.len() != 0
+            or row.config_hash.len() != 0:
+            return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "blocked-receipt-data")
+    SimpleOsCapabilityLedgerCheckV1(ok: true, reason: "")
+
+fn _receipt_row_binding_valid(
+    row: SimpleOsCapabilityRowV1,
+    receipt: SimpleOsEvidenceReceiptV1) -> SimpleOsCapabilityLedgerCheckV1:
+    val receipt_check = simpleos_evidence_receipt_validate(receipt)
+    if not receipt_check.ok:
+        return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "receipt-invalid")
+    if receipt.started_unix_us <= 0 or receipt.finished_unix_us <= 0:
+        return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "receipt-stale")
+    if receipt.requirement_id != row.requirement_id
+        or receipt.capability != row.capability
+        or receipt.target != row.target
+        or receipt.environment != row.environment
+        or receipt.filesystem != row.filesystem
+        or receipt.protocol_profile != row.protocol_profile:
+        return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "receipt-row-key")
+    if receipt.receipt_id != row.receipt_id:
+        return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "receipt-id-binding")
+    if receipt.nonce != row.receipt_nonce:
+        return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "receipt-nonce-binding")
+    if receipt.source_hash != row.source_hash or receipt.image_hash != row.image_hash
+        or receipt.binary_hash != row.binary_hash or receipt.config_hash != row.config_hash:
+        return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "receipt-hash-binding")
+    if not _text_arrays_equal(receipt.artifact_hashes, row.artifacts):
+        return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "artifact-binding")
+    if receipt.owner != row.owner or receipt.reviewer != row.reviewer:
+        return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "reviewer-binding")
+    SimpleOsCapabilityLedgerCheckV1(ok: true, reason: "")
+
+fn _admission_context_valid(
+    row: SimpleOsCapabilityRowV1,
+    receipt: SimpleOsEvidenceReceiptV1,
+    context: SimpleOsCapabilityAdmissionContextV1)
+        -> SimpleOsCapabilityLedgerCheckV1:
+    if not _bounded_text(context.admission_owner, SIMPLEOS_LEDGER_MAX_OWNER_BYTES, true)
+        or context.admission_owner != SIMPLEOS_EVIDENCE_ADMISSION_OWNER:
+        return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "admission-owner")
+    if context.issued_nonce == "" or context.issued_nonce != receipt.nonce:
+        return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "issued-nonce")
+    if not _hash(context.current_source_hash)
+        or not _hash(context.current_image_hash)
+        or not _hash(context.current_binary_hash)
+        or not _hash(context.current_config_hash):
+        return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "current-hashes")
+    if context.current_source_hash != receipt.source_hash
+        or context.current_image_hash != receipt.image_hash
+        or context.current_binary_hash != receipt.binary_hash
+        or context.current_config_hash != receipt.config_hash
+        or context.current_source_hash != row.source_hash
+        or context.current_image_hash != row.image_hash
+        or context.current_binary_hash != row.binary_hash
+        or context.current_config_hash != row.config_hash:
+        return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "current-hash-binding")
+    if not _artifacts_bounded(context.current_artifact_hashes, true)
+        or not _text_arrays_equal(context.current_artifact_hashes,
+                                  receipt.artifact_hashes):
+        return SimpleOsCapabilityLedgerCheckV1(ok: false,
+                                               reason: "current-artifact-binding")
+    if context.freshness_lower_bound_unix_us <= 0
+        or context.now_unix_us < context.freshness_lower_bound_unix_us
+        or receipt.started_unix_us < context.freshness_lower_bound_unix_us
+        or receipt.finished_unix_us > context.now_unix_us:
+        return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "freshness")
+    if context.trusted_signer_key_id == ""
+        or context.trusted_signer_key_id != receipt.signer_key_id:
+        return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "trusted-signer")
+    if not context.signature_verified or not context.source_hash_verified
+        or not context.image_hash_verified or not context.binary_hash_verified
+        or not context.config_hash_verified or not context.artifacts_verified:
+        return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "verification-outcome")
+    if _requires_performance_evidence(row):
+        val evidence_option = _performance_evidence(receipt, context)
+        val evidence = match evidence_option:
+            case Some(value): value
+            case nil:
+                return SimpleOsCapabilityLedgerCheckV1(
+                    ok: false, reason: "performance-admission")
+        val performance_admission = simpleos_performance_admit(evidence)
+        if not performance_admission.ok:
+            return SimpleOsCapabilityLedgerCheckV1(
+                ok: false, reason: "performance-admission")
+    # Fail closed until the evidence service owns a trust-root registry and
+    # verifies the canonical receipt signature itself. Caller-provided boolean
+    # assertions are useful diagnostics but are not an authority boundary.
+    SimpleOsCapabilityLedgerCheckV1(
+        ok: false, reason: "cryptographic-verifier-unavailable")
+
+fn simpleos_capability_candidate_validate(
+    candidate: SimpleOsCapabilityLedgerCandidateV1)
+        -> SimpleOsCapabilityLedgerCheckV1:
+    val row_check = _row_fields_valid(candidate.row)
+    if not row_check.ok:
+        return row_check
+    if candidate.row.status == SimpleOsCapabilityStatus.Pass:
+        if not candidate.receipt_present:
+            return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "pass-without-receipt")
+        return _receipt_row_binding_valid(candidate.row, candidate.receipt)
+    if candidate.receipt_present:
+        return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "blocked-with-receipt")
+    SimpleOsCapabilityLedgerCheckV1(ok: true, reason: "")
+
+fn simpleos_capability_candidate_validate_with_admission(
+    candidate: SimpleOsCapabilityLedgerCandidateV1,
+    admission: SimpleOsCapabilityAdmissionContextV1)
+        -> SimpleOsCapabilityLedgerCheckV1:
+    val candidate_check = simpleos_capability_candidate_validate(candidate)
+    if not candidate_check.ok:
+        return candidate_check
+    if candidate.row.status == SimpleOsCapabilityStatus.Pass:
+        return _admission_context_valid(candidate.row, candidate.receipt, admission)
+    SimpleOsCapabilityLedgerCheckV1(ok: true, reason: "")
+
+fn _rows_ordered(rows: [SimpleOsCapabilityRowV1]) -> [SimpleOsCapabilityRowV1]:
+    var ordered: [SimpleOsCapabilityRowV1] = []
+    for row in rows:
+        var position: i64 = ordered.len()
+        while position > 0:
+            if simpleos_capability_row_key(ordered[position - 1]) <=
+                simpleos_capability_row_key(row):
+                break
+            position = position - 1
+        ordered = ordered.push(row)
+        var i: i64 = ordered.len() - 1
+        while i > position:
+            ordered[i] = ordered[i - 1]
+            i = i - 1
+        ordered[position] = row
+    ordered
+
+fn _ledger_failure(ledger: SimpleOsCapabilityLedgerV1,
+                   failure: SimpleOsCapabilityLedgerFailure,
+                   reason: text) -> SimpleOsCapabilityLedgerCommitResultV1:
+    SimpleOsCapabilityLedgerCommitResultV1(ok: false, ledger: ledger,
+                                           ordered_keys: [], failure: failure,
+                                           reason: reason)
+
+fn _nonce_used(ledger: SimpleOsCapabilityLedgerV1, nonce: text) -> bool:
+    if nonce == "":
+        return false
+    for consumed in ledger.consumed_nonces:
+        if consumed == nonce:
+            return true
+    false
+
+fn _nonces_ordered(nonces: [text]) -> [text]:
+    var ordered: [text] = []
+    for nonce in nonces:
+        var position: i64 = ordered.len()
+        while position > 0 and ordered[position - 1] > nonce:
+            position = position - 1
+        ordered = ordered.push(nonce)
+        var i: i64 = ordered.len() - 1
+        while i > position:
+            ordered[i] = ordered[i - 1]
+            i = i - 1
+        ordered[position] = nonce
+    ordered
+
+fn _simpleos_capability_ledger_commit(
+    ledger: SimpleOsCapabilityLedgerV1,
+    candidates: [SimpleOsCapabilityLedgerCandidateV1],
+    admissions: [SimpleOsCapabilityAdmissionContextV1])
+        -> SimpleOsCapabilityLedgerCommitResultV1:
+    val ledger_check = simpleos_capability_ledger_check_v1(ledger)
+    if not ledger_check.ok:
+        return _ledger_failure(ledger, SimpleOsCapabilityLedgerFailure.InvalidLedger,
+                               "ledger:" + ledger_check.reason)
+    if ledger.rows.len() > SIMPLEOS_LEDGER_MAX_ROWS
+        or candidates.len() > SIMPLEOS_LEDGER_MAX_BATCH_ROWS:
+        return _ledger_failure(ledger, SimpleOsCapabilityLedgerFailure.BatchBound,
+                               "batch-bound")
+    for row in ledger.rows:
+        val row_check = _row_fields_valid(row)
+        if not row_check.ok:
+            return _ledger_failure(ledger, SimpleOsCapabilityLedgerFailure.InvalidLedger,
+                                   "ledger-row:" + row_check.reason)
+        if row.status == SimpleOsCapabilityStatus.Pass
+            and not _nonce_used(ledger, row.receipt_nonce):
+            return _ledger_failure(ledger, SimpleOsCapabilityLedgerFailure.InvalidLedger,
+                                   "ledger-nonce-missing")
+    if admissions.len() != 0 and admissions.len() != candidates.len():
+        return _ledger_failure(ledger, SimpleOsCapabilityLedgerFailure.AdmissionRequired,
+                               "admission-count")
+    var admission_index: i64 = 0
+    while admission_index < candidates.len():
+        val candidate = candidates[admission_index]
+        if candidate.row.status == SimpleOsCapabilityStatus.Pass
+            and admissions.len() != candidates.len():
+            return _ledger_failure(ledger, SimpleOsCapabilityLedgerFailure.AdmissionRequired,
+                                   "admission-required")
+        val candidate_check = if candidate.row.status == SimpleOsCapabilityStatus.Pass:
+            if admissions.len() != candidates.len():
+                SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "admission-required")
+            else:
+                simpleos_capability_candidate_validate_with_admission(
+                    candidate, admissions[admission_index])
+        else:
+            simpleos_capability_candidate_validate(candidate)
+        if not candidate_check.ok:
+            return _ledger_failure(ledger, SimpleOsCapabilityLedgerFailure.InvalidCandidate,
+                                   "candidate:" + candidate_check.reason)
+        admission_index = admission_index + 1
+    val ordered_candidates = simpleos_capability_ledger_order_candidates(candidates)
+    var ordered_keys: [text] = []
+    var i: i64 = 0
+    while i < ordered_candidates.len():
+        val candidate = ordered_candidates[i]
+        val candidate_check = simpleos_capability_candidate_validate(candidate)
+        if not candidate_check.ok:
+            return _ledger_failure(ledger, SimpleOsCapabilityLedgerFailure.InvalidCandidate,
+                                   "candidate:" + candidate_check.reason)
+        val key = simpleos_capability_row_key(candidate.row)
+        ordered_keys = ordered_keys.push(key)
+        if i > 0 and key == ordered_keys[i - 1]:
+            return _ledger_failure(ledger, SimpleOsCapabilityLedgerFailure.DuplicateKey,
+                                   "duplicate-key")
+        if candidate.row.status == SimpleOsCapabilityStatus.Pass
+            and _nonce_used(ledger, candidate.receipt.nonce):
+            return _ledger_failure(ledger, SimpleOsCapabilityLedgerFailure.InvalidCandidate,
+                                   "replayed-nonce")
+        var prior: i64 = 0
+        while prior < i:
+            if candidate.row.status == SimpleOsCapabilityStatus.Pass
+                and ordered_candidates[prior].row.status == SimpleOsCapabilityStatus.Pass
+                and candidate.receipt.nonce == ordered_candidates[prior].receipt.nonce:
+                return _ledger_failure(ledger, SimpleOsCapabilityLedgerFailure.DuplicateKey,
+                                       "duplicate-nonce")
+            prior = prior + 1
+
+        i = i + 1
+    if candidates.len() == 0:
+        return SimpleOsCapabilityLedgerCommitResultV1(
+            ok: true, ledger: ledger, ordered_keys: [],
+            failure: SimpleOsCapabilityLedgerFailure.None, reason: "")
+    if ledger.revision == 9223372036854775807:
+        return _ledger_failure(ledger, SimpleOsCapabilityLedgerFailure.RevisionExhausted,
+                               "revision-exhausted")
+    var next_rows: [SimpleOsCapabilityRowV1] = []
+    for row in ledger.rows:
+        next_rows = next_rows.push(row)
+    var next_consumed_nonces: [text] = []
+    for nonce in ledger.consumed_nonces:
+        next_consumed_nonces = next_consumed_nonces.push(nonce)
+    for candidate in ordered_candidates:
+        var replaced = false
+        var row_index: i64 = 0
+        while row_index < next_rows.len():
+            if simpleos_capability_rows_same_key(next_rows[row_index], candidate.row):
+                next_rows[row_index] = candidate.row
+                replaced = true
+                break
+            row_index = row_index + 1
+        if not replaced:
+            if next_rows.len() >= SIMPLEOS_LEDGER_MAX_ROWS:
+                return _ledger_failure(ledger, SimpleOsCapabilityLedgerFailure.RowBound,
+                                       "row-bound")
+            next_rows = next_rows.push(candidate.row)
+        if candidate.row.status == SimpleOsCapabilityStatus.Pass:
+            if next_consumed_nonces.len() >= SIMPLEOS_LEDGER_MAX_CONSUMED_NONCES:
+                return _ledger_failure(ledger, SimpleOsCapabilityLedgerFailure.NonceBound,
+                                       "nonce-bound")
+            next_consumed_nonces = next_consumed_nonces.push(candidate.receipt.nonce)
+    val next_ledger = SimpleOsCapabilityLedgerV1(
+        schema_version: SIMPLEOS_LEDGER_SCHEMA_VERSION,
+        revision: ledger.revision + 1,
+        rows: _rows_ordered(next_rows),
+        consumed_nonces: _nonces_ordered(next_consumed_nonces))
+    SimpleOsCapabilityLedgerCommitResultV1(ok: true, ledger: next_ledger,
+                                           ordered_keys: ordered_keys,
+                                           failure: SimpleOsCapabilityLedgerFailure.None,
+                                           reason: "")
+
+fn simpleos_capability_ledger_commit(
+    ledger: SimpleOsCapabilityLedgerV1,
+    candidates: [SimpleOsCapabilityLedgerCandidateV1])
+        -> SimpleOsCapabilityLedgerCommitResultV1:
+    _simpleos_capability_ledger_commit(ledger, candidates, [])
+
+fn simpleos_capability_ledger_commit_with_admission(
+    ledger: SimpleOsCapabilityLedgerV1,
+    candidates: [SimpleOsCapabilityLedgerCandidateV1],
+    admissions: [SimpleOsCapabilityAdmissionContextV1])
+        -> SimpleOsCapabilityLedgerCommitResultV1:
+    _simpleos_capability_ledger_commit(ledger, candidates, admissions)
+
+export simpleos_capability_candidate_validate
+export simpleos_capability_candidate_validate_with_admission
+export simpleos_capability_ledger_commit
+export simpleos_capability_ledger_commit_with_admission
+export simpleos_capability_ledger_v1
+export SimpleOsCapabilityStatus, SimpleOsCapabilityRowV1
+export SimpleOsCapabilityLedgerV1, SimpleOsCapabilityLedgerCandidateV1
+export SimpleOsCapabilityAdmissionContextV1, SimpleOsCapabilityLedgerFailure
+export SimpleOsCapabilityLedgerCheckV1, SimpleOsCapabilityLedgerCommitResultV1
+export simpleos_capability_status_to_text, simpleos_capability_row_key
+export SIMPLEOS_EVIDENCE_ADMISSION_OWNER

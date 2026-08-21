@@ -1,0 +1,115 @@
+# @cover src/lib/nogc_async_mut/http_server/parser.spl 40%
+"""
+# Bounded HTTP body accumulation under one-byte fragmentation
+
+The Content-Length body is accumulated as chunks and joined once on
+completion. Appending to the retained `body` on every feed rebuilt the whole
+body each time, which is O(n^2) byte copying under adversarial one-byte
+fragmentation.
+
+These scenarios pin the OBSERVABLE contract that the chunk-accumulation
+refactor must preserve: identical body bytes, identical `consumed`
+accounting, and correct reuse across a keep-alive `reset()`.
+"""
+
+use std.spec.*
+use std.http_server.parser.{HttpRequestParser}
+use std.nogc_sync_mut.io.byte_append.{io_append_chunk}
+
+fn _feed_one_byte_at_a_time(parser: HttpRequestParser, payload: text) -> i64:
+    var total: i64 = 0
+    var i: i64 = 0
+    while i < payload.len():
+        val r = parser.feed(payload.slice(i, i + 1))
+        match r:
+            Ok(n):
+                total = total + n
+            Err(_):
+                return -1
+        i = i + 1
+    total
+
+describe "HTTP body accumulation under fragmentation":
+
+    it "reassembles a Content-Length body fed one byte at a time":
+        val parser = HttpRequestParser.new()
+        val body = "abcdefghijklmnopqrstuvwxyz"
+        val req = "POST /u HTTP/1.1\r\nHost: h\r\nContent-Length: {body.len()}\r\n\r\n{body}"
+        val consumed = _feed_one_byte_at_a_time(parser, req)
+        expect(consumed).to_equal(req.len())
+        expect(parser.to_request("t").body).to_equal(body)
+
+    it "reassembles the same body delivered as one whole feed":
+        val parser = HttpRequestParser.new()
+        val body = "abcdefghijklmnopqrstuvwxyz"
+        val req = "POST /u HTTP/1.1\r\nHost: h\r\nContent-Length: {body.len()}\r\n\r\n{body}"
+        val r = parser.feed(req)
+        match r:
+            Ok(n):
+                expect(n).to_equal(req.len())
+            Err(_):
+                expect(false).to_equal(true)
+        expect(parser.to_request("t").body).to_equal(body)
+
+    it "accumulates a fresh body after a keep-alive reset":
+        val parser = HttpRequestParser.new()
+        val first = "POST /a HTTP/1.1\r\nHost: h\r\nContent-Length: 3\r\n\r\nAAA"
+        val _ = parser.feed(first)
+        expect(parser.to_request("t").body).to_equal("AAA")
+        parser.reset()
+        val second = "POST /b HTTP/1.1\r\nHost: h\r\nContent-Length: 2\r\n\r\nBB"
+        val _2 = _feed_one_byte_at_a_time(parser, second)
+        expect(parser.to_request("t").body).to_equal("BB")
+
+    it "reassembles a body split into two uneven fragments":
+        val parser = HttpRequestParser.new()
+        val req = "POST /u HTTP/1.1\r\nHost: h\r\nContent-Length: 6\r\n\r\n123456"
+        val cut = req.len() - 4
+        val a = parser.feed(req.slice(0, cut))
+        val b = parser.feed(req.slice(cut, req.len()))
+        expect(parser.to_request("t").body).to_equal("123456")
+
+describe "accumulation work grows linearly, not quadratically":
+
+    it "copies O(n) bytes appending n one-byte chunks":
+        # Pre-fix `buf = buf + chunk` copied the whole retained prefix per
+        # chunk: sum(1..n) = n*(n+1)/2. Amortized append copies each byte once.
+        var buf: [u8] = []
+        var copied: i64 = 0
+        var i: i64 = 0
+        val n: i64 = 64
+        while i < n:
+            copied = copied + io_append_chunk(buf, [7u8])
+            i = i + 1
+        expect(buf.len()).to_equal(n)
+        expect(copied).to_equal(n)
+        # Quadratic behavior would be 2080 for n=64.
+        expect(copied < (n * (n + 1)) / 2).to_equal(true)
+
+    it "keeps append work linear as fragment count doubles":
+        var small: [u8] = []
+        var small_work: i64 = 0
+        var a: i64 = 0
+        while a < 32:
+            small_work = small_work + io_append_chunk(small, [1u8])
+            a = a + 1
+        var big: [u8] = []
+        var big_work: i64 = 0
+        var b: i64 = 0
+        while b < 64:
+            big_work = big_work + io_append_chunk(big, [1u8])
+            b = b + 1
+        # Linear: doubling fragments doubles work. Quadratic would quadruple it.
+        expect(big_work).to_equal(small_work * 2)
+
+    it "copies O(n) body bytes when the body is fed one byte at a time":
+        val parser = HttpRequestParser.new()
+        val body = "0123456789012345678901234567890123456789"
+        val req = "POST /u HTTP/1.1\r\nHost: h\r\nContent-Length: {body.len()}\r\n\r\n{body}"
+        val _ = _feed_one_byte_at_a_time(parser, req)
+        expect(parser.to_request("t").body).to_equal(body)
+        # Each body byte is copied once into a chunk, then once by the final
+        # join: 2n. Pre-fix per-feed concat was n*(n+1)/2.
+        val n = body.len()
+        expect(parser.body_copy_work()).to_equal(n * 2)
+        expect(parser.body_copy_work() < (n * (n + 1)) / 2).to_equal(true)

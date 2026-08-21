@@ -1,0 +1,104 @@
+# Cross-Module Same-Name Symbol Collision — REPRODUCING spec
+#
+# Bug: doc/08_tracking/bug/compiler_cross_module_private_symbol_collision_2026-06-16.md
+#
+# Two co-compiled modules that each define a same-named top-level function
+# collapse into one flat registry entry. Whichever module is imported FIRST
+# wins, and every call to that name — including a call made from INSIDE the
+# other defining module — runs the winner's body. Exit code 0, no error.
+#
+# MEASURED 2026-08-17. The defect is **JIT-ONLY** — the two examples below are
+# deliberately split by engine and are EXPECTED to disagree until it is fixed:
+#
+#   SIMPLE_EXECUTION_MODE=interpreter  ->  XMOD_COLLISION PROBE: ALL PASS
+#   SIMPLE_EXECUTION_MODE=jit          ->  FAIL b_private / b_public / b_arity
+#
+# The interpreter's owner-tag machinery (`FLATTEN_MODULE_OWNER_ATTR_PREFIX` /
+# `FUNCTION_MODULE_OWNER` / `select_overload`) resolves in-module calls
+# correctly. The JIT has no equivalent and is first-import-wins.
+#
+# Under the JIT the defect is broader than the filed doc records:
+#
+#   1. NOT limited to private `_`-prefixed helpers — a public `fn who()`
+#      collides identically.
+#   2. NOT limited to the third-module caller. A call made from INSIDE a
+#      defining module also collapses: `b_calls_*` reaches module A's body.
+#   3. NOT limited to identical signatures. With A's `shared_arity()` taking no
+#      parameters and B's taking one, `b_calls_arity()` passes an argument and
+#      still reaches A's zero-parameter body — the argument is silently
+#      DISCARDED and no arity error fires. That is the strongest proof the JIT
+#      keeps only ONE definition rather than choosing badly between two.
+#
+# METHOD WARNING, learned the hard way in this very lane: a plain
+# `bin/simple run` uses the JIT. An earlier pass read that as "the interpreter
+# is broken too" and wrongly retracted a correct source comment. ALWAYS pin
+# `SIMPLE_EXECUTION_MODE` explicitly — the engines disagree here, and "I ran
+# bin/simple run" does not identify which one answered.
+#
+# WHY A SUBPROCESS. A spec body runs on the tree-walk interpreter within one
+# already-loaded module set, so it cannot exercise the import-flattening path
+# that produces the collision. The oracle is the sibling probe
+# `fixtures/probe_xmod_collision.spl` plus its two fixture modules, executed as
+# a subprocess. Each oracle is an ABSOLUTE literal ("A_private", "B_private",
+# ...) — never "the two modules agree", which passes under the defect because
+# both wrappers return the same wrong answer.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/compiler/pipeline/fixtures/probe_xmod_collision.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    # SIMPLE_BIN lets a lane point this at a freshly built candidate; the
+    # default is whatever bin/simple currently resolves to, which is what ships.
+    # NOTE: bin/release/simple is a production-guard wrapper that refuses the
+    # deployed seed and exits 1 — it must not be used here.
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 " +
+        "SIMPLE_EXECUTION_MODE=" + mode + " " + bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "cross-module same-name symbol collision":
+    it "resolves each module's calls against its own definitions on the interpreter":
+        step("Run the two-module collision probe under SIMPLE_EXECUTION_MODE=interpreter")
+        val interp = run_probe_in_mode("interpreter")
+
+        step("The probe must actually have run — a truncated or killed run prints none of these")
+        expect(interp).to_contain("a_private")
+        expect(interp).to_contain("b_private")
+
+        step("A private `_`-prefixed helper must resolve within its own defining module, in both directions")
+        expect(interp).to_contain("PASS a_private")
+        expect(interp).to_contain("PASS b_private")
+
+        step("The same must hold for a PUBLIC free function — the defect is not specific to the `_` prefix")
+        expect(interp).to_contain("PASS a_public")
+        expect(interp).to_contain("PASS b_public")
+
+        step("Differing arity must not collapse either: b_calls_arity() passes one argument and must not reach A's zero-parameter body with the argument silently discarded")
+        expect(interp).to_contain("PASS a_arity")
+        expect(interp).to_contain("PASS b_arity")
+
+        step("Overall verdict")
+        expect(interp).to_contain("XMOD_COLLISION PROBE: ALL PASS")
+
+    it "resolves each module's calls against its own definitions on the cranelift JIT":
+        step("Run the same probe under SIMPLE_EXECUTION_MODE=jit — codegen resolves the same flat registry and is first-import-wins too")
+        val jit = run_probe_in_mode("jit")
+
+        step("The probe must actually have run")
+        expect(jit).to_contain("a_private")
+
+        step("Every wrapper must reach its own module's definition under the JIT as well")
+        expect(jit).to_contain("PASS a_private")
+        expect(jit).to_contain("PASS b_private")
+        expect(jit).to_contain("PASS a_public")
+        expect(jit).to_contain("PASS b_public")
+        expect(jit).to_contain("PASS a_arity")
+        expect(jit).to_contain("PASS b_arity")
+
+        step("Overall verdict")
+        expect(jit).to_contain("XMOD_COLLISION PROBE: ALL PASS")

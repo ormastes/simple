@@ -1,0 +1,86 @@
+# Canonical WM damage/redraw admission contract.
+#
+# This module is pure value logic. WmService owns the committed pending damage;
+# Engine2D receives a copied redraw decision and remains the sole renderer.
+
+pub(package) val WM_DAMAGE_MAX_REGIONS: i32 = 64
+pub(package) val WM_DAMAGE_MAX_COORDINATE: i32 = 1048576
+pub(package) val WM_DAMAGE_MAX_DIMENSION: i32 = 16384
+pub(package) val WM_DAMAGE_MAX_REASON_BYTES: i32 = 64
+
+pub struct WmDamageRectV1:
+    x: i32
+    y: i32
+    width: i32
+    height: i32
+
+pub struct WmDamageRegionV1:
+    generation: u64
+    scene_revision: u64
+    full_redraw: bool
+    reason: text
+    rects: [WmDamageRectV1]
+
+pub struct WmRedrawDecisionV1:
+    accepted: bool
+    generation: u64
+    scene_revision: u64
+    full_redraw: bool
+    reason: text
+    rects: [WmDamageRectV1]
+
+fn _rejected(reason: text, generation: u64, scene_revision: u64) -> WmRedrawDecisionV1:
+    WmRedrawDecisionV1(
+        accepted: false,
+        generation: generation,
+        scene_revision: scene_revision,
+        full_redraw: false,
+        reason: reason,
+        rects: []
+    )
+
+fn _rect_valid(rect: WmDamageRectV1) -> bool:
+    if rect.width <= 0 or rect.height <= 0:
+        return false
+    if rect.width > WM_DAMAGE_MAX_DIMENSION or rect.height > WM_DAMAGE_MAX_DIMENSION:
+        return false
+    if rect.x < -WM_DAMAGE_MAX_COORDINATE or rect.x > WM_DAMAGE_MAX_COORDINATE:
+        return false
+    if rect.y < -WM_DAMAGE_MAX_COORDINATE or rect.y > WM_DAMAGE_MAX_COORDINATE:
+        return false
+    val right = rect.x.to_i64() + rect.width.to_i64()
+    val bottom = rect.y.to_i64() + rect.height.to_i64()
+    if right > WM_DAMAGE_MAX_COORDINATE.to_i64() + WM_DAMAGE_MAX_DIMENSION.to_i64():
+        return false
+    if bottom > WM_DAMAGE_MAX_COORDINATE.to_i64() + WM_DAMAGE_MAX_DIMENSION.to_i64():
+        return false
+    true
+
+pub fn wm_damage_admit_v1(
+    candidate: WmDamageRegionV1,
+    current_generation: u64,
+    current_scene_revision: u64
+) -> WmRedrawDecisionV1:
+    if candidate.generation != current_generation:
+        return _rejected("stale-damage-generation", candidate.generation, candidate.scene_revision)
+    if candidate.scene_revision == 0u64 or candidate.scene_revision != current_scene_revision:
+        return _rejected("stale-damage-revision", candidate.generation, candidate.scene_revision)
+    val reason_bytes = candidate.reason.bytes().len().to_u64()
+    if reason_bytes > WM_DAMAGE_MAX_REASON_BYTES.to_u64():
+        return _rejected("damage-reason-too-large", candidate.generation, candidate.scene_revision)
+    val rect_count = candidate.rects.len().to_u64()
+    if rect_count > WM_DAMAGE_MAX_REGIONS.to_u64():
+        return _rejected("damage-region-overflow", candidate.generation, candidate.scene_revision)
+    for rect in candidate.rects:
+        if not _rect_valid(rect):
+            return _rejected("invalid-damage-geometry", candidate.generation, candidate.scene_revision)
+    WmRedrawDecisionV1(
+        accepted: true,
+        generation: candidate.generation,
+        scene_revision: candidate.scene_revision,
+        full_redraw: candidate.full_redraw,
+        reason: candidate.reason,
+        rects: candidate.rects
+    )
+
+export WmDamageRectV1, WmDamageRegionV1, WmRedrawDecisionV1, wm_damage_admit_v1

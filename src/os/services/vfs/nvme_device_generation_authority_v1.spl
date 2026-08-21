@@ -1,0 +1,302 @@
+# OS-owned NVMe device-generation authority.
+#
+# Tokens are minted only from the successful grant-based NvmeDriver
+# incarnation. Baremetal or caller-supplied scalar identity remains closed.
+# The generation is an in-process stale-binding fence; this module makes no
+# crash-persistence or cross-reboot claim.
+
+use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_with_lock}
+use os.drivers.nvme.nvme_driver.{
+    NvmeDriver, nvme_current_device_identity, nvme_current_device_generation
+}
+use os.drivers.nvme.nvme_storage_model.{NvmeFilesystemLease}
+
+val NVME_DEVICE_GENERATION_MAX_ENTRIES: u32 = 64u32
+val NVME_DEVICE_GENERATION_MAX_VALUE: u64 = 18446744073709551615u64
+
+pub enum NvmeDeviceGenerationErrorV1:
+    InvalidBinding
+    AuthorityUnavailable
+    CapacityExhausted
+    GenerationExhausted
+    StaleToken
+    ReplayToken
+    BindingMismatch
+    InvalidToken
+
+impl NvmeDeviceGenerationErrorV1:
+    pub fn to_text() -> text:
+        match self:
+            case NvmeDeviceGenerationErrorV1.InvalidBinding: "nvme-generation: invalid controller/namespace/lease binding"
+            case NvmeDeviceGenerationErrorV1.AuthorityUnavailable: "nvme-generation: authoritative boot source unavailable"
+            case NvmeDeviceGenerationErrorV1.CapacityExhausted: "nvme-generation: bounded authority capacity exhausted"
+            case NvmeDeviceGenerationErrorV1.GenerationExhausted: "nvme-generation: generation counter exhausted"
+            case NvmeDeviceGenerationErrorV1.StaleToken: "nvme-generation: stale token"
+            case NvmeDeviceGenerationErrorV1.ReplayToken: "nvme-generation: replayed or consumed token"
+            case NvmeDeviceGenerationErrorV1.BindingMismatch: "nvme-generation: token binding mismatch"
+            case NvmeDeviceGenerationErrorV1.InvalidToken: "nvme-generation: invalid opaque token"
+
+pub struct NvmeDeviceGenerationTokenV1:
+    _authority_nonce: u64
+    _token_nonce: u64
+    _device_identity: u64
+    _device_generation: u64
+    _controller_id: u32
+    _namespace_id: u32
+    _lease_id: u64
+    _consumed: bool
+
+impl NvmeDeviceGenerationTokenV1:
+    # Only the authority can construct a valid token. This public probe is an
+    # intentionally invalid value used by negative tests and recovery paths.
+    pub static fn invalid_probe() -> NvmeDeviceGenerationTokenV1:
+        NvmeDeviceGenerationTokenV1(
+            _authority_nonce: 0u64,
+            _token_nonce: 0u64,
+            _device_identity: 0u64,
+            _device_generation: 0u64,
+            _controller_id: 0u32,
+            _namespace_id: 0u32,
+            _lease_id: 0u64,
+            _consumed: false
+        )
+
+    pub fn is_consumed() -> bool:
+        self._consumed
+
+struct NvmeDeviceGenerationStateV1:
+    authority_nonce: u64
+    next_token_nonce: u64
+    entries: [NvmeDeviceGenerationEntryV1]
+    admitted: bool
+    last_code: u32
+    last_token: NvmeDeviceGenerationTokenV1
+
+struct NvmeDeviceGenerationEntryV1:
+    authority_nonce: u64
+    token_nonce: u64
+    device_identity: u64
+    device_generation: u64
+    controller_id: u32
+    namespace_id: u32
+    lease_id: u64
+    consumed: bool
+
+val NVME_GENERATION_OK: u32 = 0u32
+val NVME_GENERATION_INVALID_BINDING: u32 = 1u32
+val NVME_GENERATION_UNAVAILABLE: u32 = 2u32
+val NVME_GENERATION_CAPACITY: u32 = 3u32
+val NVME_GENERATION_EXHAUSTED: u32 = 4u32
+val NVME_GENERATION_STALE: u32 = 5u32
+val NVME_GENERATION_REPLAY: u32 = 6u32
+val NVME_GENERATION_MISMATCH: u32 = 7u32
+val NVME_GENERATION_INVALID_TOKEN: u32 = 8u32
+
+fn _nvme_generation_initial_state() -> NvmeDeviceGenerationStateV1:
+    NvmeDeviceGenerationStateV1(
+        authority_nonce: 0u64,
+        next_token_nonce: 1u64,
+        entries: [],
+        admitted: false,
+        last_code: NVME_GENERATION_UNAVAILABLE,
+        last_token: NvmeDeviceGenerationTokenV1.invalid_probe()
+    )
+
+# One process-lifetime registry. Authority values are capability markers only;
+# they never own independent mutable state and therefore cannot fork proof.
+var g_nvme_generation_state: Mutex = mutex_new(_nvme_generation_initial_state())
+
+fn _nvme_generation_authority_nonce(device_identity: u64, generation: u64) -> u64:
+    val mixed = device_identity ^ (generation * 0x9E3779B97F4A7C15u64)
+    if mixed == 0u64: 1u64 else mixed
+
+fn _nvme_generation_error(code: u32) -> NvmeDeviceGenerationErrorV1:
+    match code:
+        case NVME_GENERATION_INVALID_BINDING: NvmeDeviceGenerationErrorV1.InvalidBinding
+        case NVME_GENERATION_UNAVAILABLE: NvmeDeviceGenerationErrorV1.AuthorityUnavailable
+        case NVME_GENERATION_CAPACITY: NvmeDeviceGenerationErrorV1.CapacityExhausted
+        case NVME_GENERATION_EXHAUSTED: NvmeDeviceGenerationErrorV1.GenerationExhausted
+        case NVME_GENERATION_STALE: NvmeDeviceGenerationErrorV1.StaleToken
+        case NVME_GENERATION_REPLAY: NvmeDeviceGenerationErrorV1.ReplayToken
+        case NVME_GENERATION_MISMATCH: NvmeDeviceGenerationErrorV1.BindingMismatch
+        case _: NvmeDeviceGenerationErrorV1.InvalidToken
+
+fn _nvme_generation_validate_state(
+    state: NvmeDeviceGenerationStateV1,
+    token: NvmeDeviceGenerationTokenV1,
+    device_identity: u64,
+    controller_id: u32,
+    namespace_id: u32,
+    lease_id: u64,
+    expected_generation: u64,
+    allow_consumed: bool
+) -> Result<bool, NvmeDeviceGenerationErrorV1>:
+    if not _nvme_generation_binding_valid(device_identity, controller_id, namespace_id, lease_id) or expected_generation == 0u64:
+        return Err(NvmeDeviceGenerationErrorV1.InvalidBinding)
+    if token._authority_nonce == 0u64 or token._token_nonce == 0u64 or token._device_generation == 0u64:
+        return Err(NvmeDeviceGenerationErrorV1.InvalidToken)
+    for entry in state.entries:
+        if entry.token_nonce != token._token_nonce:
+            continue
+        if entry.authority_nonce != token._authority_nonce or entry.authority_nonce != state.authority_nonce:
+            return Err(NvmeDeviceGenerationErrorV1.InvalidToken)
+        if (entry.consumed or token._consumed) and not allow_consumed:
+            return Err(NvmeDeviceGenerationErrorV1.ReplayToken)
+        if entry.device_identity != device_identity or entry.controller_id != controller_id or entry.namespace_id != namespace_id or entry.lease_id != lease_id:
+            return Err(NvmeDeviceGenerationErrorV1.BindingMismatch)
+        if entry.device_generation != expected_generation or token._device_generation != expected_generation:
+            return Err(NvmeDeviceGenerationErrorV1.StaleToken)
+        return Ok(true)
+    Err(NvmeDeviceGenerationErrorV1.ReplayToken)
+
+fn _nvme_generation_binding_valid(device_identity: u64, controller_id: u32, namespace_id: u32, lease_id: u64) -> bool:
+    device_identity != 0u64 and controller_id != 0u32 and namespace_id != 0u32 and lease_id != 0u64
+
+pub class NvmeDeviceGenerationAuthorityV1:
+    _marker: bool
+
+impl NvmeDeviceGenerationAuthorityV1:
+    pub static fn new() -> NvmeDeviceGenerationAuthorityV1:
+        NvmeDeviceGenerationAuthorityV1(_marker: true)
+
+    pub fn admitted() -> bool:
+        val state = mutex_with_lock(g_nvme_generation_state, \state: state)
+        state.admitted
+
+    pub me fn issue_for_driver(
+        driver: NvmeDriver,
+        lease: NvmeFilesystemLease,
+        lease_id: u64
+    ) -> Result<NvmeDeviceGenerationTokenV1, NvmeDeviceGenerationErrorV1>:
+        val identity = nvme_current_device_identity()
+        val generation = nvme_current_device_generation()
+        val controller_id = lease.namespace_identity.controller_id
+        val namespace_id = lease.namespace_identity.nsid
+        if identity == 0u64 or generation == 0u64 or lease_id == 0u64:
+            return Err(NvmeDeviceGenerationErrorV1.AuthorityUnavailable)
+        if driver.get_device_identity() != identity or driver.get_device_generation() != generation:
+            return Err(NvmeDeviceGenerationErrorV1.AuthorityUnavailable)
+        if driver.get_namespace_id() != namespace_id:
+            return Err(NvmeDeviceGenerationErrorV1.BindingMismatch)
+        if not _nvme_generation_binding_valid(identity, controller_id, namespace_id, lease_id):
+            return Err(NvmeDeviceGenerationErrorV1.InvalidBinding)
+        val updated = mutex_with_lock(g_nvme_generation_state, \state:
+            var next = state
+            val incarnation_changed = (
+                state.authority_nonce != 0u64 and
+                (state.last_token._device_identity != identity or state.last_token._device_generation != generation)
+            )
+            if incarnation_changed:
+                # A successful controller reinitialization invalidates all
+                # tokens from the prior in-process incarnation.
+                next.entries = []
+                next.admitted = false
+            if next.entries.len().to_u64() >= NVME_DEVICE_GENERATION_MAX_ENTRIES.to_u64():
+                next.last_code = NVME_GENERATION_CAPACITY
+            elif state.next_token_nonce == NVME_DEVICE_GENERATION_MAX_VALUE:
+                next.last_code = NVME_GENERATION_EXHAUSTED
+            else:
+                val authority_nonce = if state.authority_nonce == 0u64 or incarnation_changed:
+                    _nvme_generation_authority_nonce(identity, generation)
+                else:
+                    state.authority_nonce
+                val token = NvmeDeviceGenerationTokenV1(
+                    _authority_nonce: authority_nonce,
+                    _token_nonce: state.next_token_nonce,
+                    _device_identity: identity,
+                    _device_generation: generation,
+                    _controller_id: controller_id,
+                    _namespace_id: namespace_id,
+                    _lease_id: lease_id,
+                    _consumed: false
+                )
+                val entry = NvmeDeviceGenerationEntryV1(
+                    authority_nonce: authority_nonce,
+                    token_nonce: state.next_token_nonce,
+                    device_identity: identity,
+                    device_generation: generation,
+                    controller_id: controller_id,
+                    namespace_id: namespace_id,
+                    lease_id: lease_id,
+                    consumed: false
+                )
+                next.authority_nonce = authority_nonce
+                next.next_token_nonce = state.next_token_nonce + 1u64
+                next.entries = next.entries.push(entry)
+                next.admitted = true
+                next.last_code = NVME_GENERATION_OK
+                next.last_token = token
+            next
+        )
+        if updated.last_code != NVME_GENERATION_OK:
+            return Err(_nvme_generation_error(updated.last_code))
+        Ok(updated.last_token)
+
+    pub fn validate(
+        token: NvmeDeviceGenerationTokenV1,
+        device_identity: u64,
+        controller_id: u32,
+        namespace_id: u32,
+        lease_id: u64,
+        expected_generation: u64
+    ) -> Result<bool, NvmeDeviceGenerationErrorV1>:
+        val state = mutex_with_lock(g_nvme_generation_state, \state: state)
+        _nvme_generation_validate_state(state, token, device_identity, controller_id, namespace_id, lease_id, expected_generation, false)
+
+    pub fn validate_current(
+        token: NvmeDeviceGenerationTokenV1,
+        controller_id: u32,
+        namespace_id: u32,
+        lease_id: u64
+    ) -> Result<bool, NvmeDeviceGenerationErrorV1>:
+        val device_identity = nvme_current_device_identity()
+        val expected_generation = nvme_current_device_generation()
+        if device_identity == 0u64 or expected_generation == 0u64:
+            return Err(NvmeDeviceGenerationErrorV1.AuthorityUnavailable)
+        val state = mutex_with_lock(g_nvme_generation_state, \state: state)
+        _nvme_generation_validate_state(
+            state, token, device_identity, controller_id, namespace_id,
+            lease_id, expected_generation, true
+        )
+
+    pub me fn consume(
+        token: NvmeDeviceGenerationTokenV1,
+        device_identity: u64,
+        controller_id: u32,
+        namespace_id: u32,
+        lease_id: u64,
+        expected_generation: u64
+    ) -> Result<bool, NvmeDeviceGenerationErrorV1>:
+        val updated = mutex_with_lock(g_nvme_generation_state, \state:
+            var next = state
+            val checked = _nvme_generation_validate_state(state, token, device_identity, controller_id, namespace_id, lease_id, expected_generation, false)
+            if checked.is_err():
+                val checked_error = checked.unwrap_err()
+                next.last_code = if checked_error == NvmeDeviceGenerationErrorV1.InvalidBinding: NVME_GENERATION_INVALID_BINDING
+                    elif checked_error == NvmeDeviceGenerationErrorV1.StaleToken: NVME_GENERATION_STALE
+                    elif checked_error == NvmeDeviceGenerationErrorV1.ReplayToken: NVME_GENERATION_REPLAY
+                    elif checked_error == NvmeDeviceGenerationErrorV1.BindingMismatch: NVME_GENERATION_MISMATCH
+                    else: NVME_GENERATION_INVALID_TOKEN
+            else:
+                var entries: [NvmeDeviceGenerationEntryV1] = []
+                for entry in state.entries:
+                    if entry.token_nonce == token._token_nonce:
+                        entries.push(NvmeDeviceGenerationEntryV1(
+                            authority_nonce: entry.authority_nonce,
+                            token_nonce: entry.token_nonce,
+                            device_identity: entry.device_identity,
+                            device_generation: entry.device_generation,
+                            controller_id: entry.controller_id,
+                            namespace_id: entry.namespace_id,
+                            lease_id: entry.lease_id,
+                            consumed: true
+                        ))
+                    else:
+                        entries.push(entry)
+                next.entries = entries
+                next.last_code = NVME_GENERATION_OK
+            next
+        )
+        if updated.last_code != NVME_GENERATION_OK:
+            return Err(_nvme_generation_error(updated.last_code))
+        Ok(true)

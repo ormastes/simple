@@ -1,0 +1,85 @@
+# CLASS-DETECTION spec (defect class, not one instance).
+#
+# CLASS: a value materialized by a field's DECLARED DEFAULT at the construction
+# site must be indistinguishable from the same value assigned explicitly after
+# construction — for every field type, and however many fields the struct has.
+#
+# Two members have already shipped as plausible garbage:
+#   * scalar half — `var n: i64 = 0` read back as the runtime nil tag `3`.
+#   * container half — `var arr: [T] = []` / `{}` accepted mutations that then
+#     vanished, and a `{}` dict reported len -1.
+#     doc/08_tracking/bug/jit_field_default_empty_container_mutation_lost_2026-08-17.md
+#
+# Both were found one type at a time, by a human noticing one wrong number.
+# This spec sweeps the whole axis so the next omission fails here instead.
+#
+# WHY A SUBPROCESS. A spec body runs on the tree-walk INTERPRETER, which is
+# correct on this whole family. An in-process example can never go red on it.
+# The oracle is the sibling probe run under BOTH engines, and every assertion
+# below names an absolute expected value the probe did not itself compute — a
+# bare "the two engines agree" check would pass while both are wrong.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/compiler/codegen/probe_declared_default_object_identity_jit.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode + " " +
+        bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "declared field defaults are real values on every engine":
+    it "holds on the interpreter (control arm)":
+        step("Run the probe under SIMPLE_EXECUTION_MODE=interpreter")
+        val interp = run_probe_in_mode("interpreter")
+
+        step("The interpreter was measured correct on all 18 checks 2026-08-17; a red here means the probe is broken, not the engine")
+        expect(interp).to_contain("DECLARED_DEFAULT_OBJECT_IDENTITY PROBE: ALL PASS")
+
+    it "holds for scalar defaults under the cranelift JIT":
+        step("Run the same probe under SIMPLE_EXECUTION_MODE=jit")
+        val jit = run_probe_in_mode("jit")
+
+        step("bool / i64 / f64 / str defaults must read back as themselves, not as the nil tag 3, 0, or a len -1 string")
+        expect(jit).to_contain("PASS default_bool_reads_true")
+        expect(jit).to_contain("PASS default_i64_reads_7")
+        expect(jit).to_contain("PASS default_f64_reads_1_5")
+        expect(jit).to_contain("PASS default_str_len_1")
+
+        step("The same on a class, whose construction takes a different lowering path than a struct")
+        expect(jit).to_contain("PASS class_default_i64")
+
+    it "holds for container defaults under the cranelift JIT":
+        val jit = run_probe_in_mode("jit")
+
+        step("An `[]` default must be a live array: push, element read, second push, and pop-shrink")
+        expect(jit).to_contain("PASS default_array_accepts_push")
+        expect(jit).to_contain("PASS default_array_element_value")
+        expect(jit).to_contain("PASS default_array_second_push")
+        expect(jit).to_contain("PASS default_array_pop_shrinks")
+        expect(jit).to_contain("PASS default_str_array_accepts_push")
+
+        step("A `{}` default must accept an insert, report len 1, and read the value back")
+        expect(jit).to_contain("PASS default_dict_accepts_insert")
+        expect(jit).to_contain("PASS default_dict_value_readback")
+
+        step("The differential control arm — an explicitly assigned empty container — must also pass, or the defect is broader than construction-site defaults")
+        expect(jit).to_contain("PASS control_explicit_empty_then_push")
+
+    it "holds for nested-struct defaults under the cranelift JIT":
+        val jit = run_probe_in_mode("jit")
+
+        step("A `var inner: Inner = Inner()` default must carry Inner's own defaults, not zeros")
+        expect(jit).to_contain("PASS default_nested_struct_field")
+        expect(jit).to_contain("PASS default_nested_struct_write")
+
+    it "reports no failing check at all under the cranelift JIT":
+        val jit = run_probe_in_mode("jit")
+
+        step("The whole-probe verdict — this catches any future field type added to the probe without a matching assertion above")
+        expect(jit).to_contain("DECLARED_DEFAULT_OBJECT_IDENTITY PROBE: ALL PASS")

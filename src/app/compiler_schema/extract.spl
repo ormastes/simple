@@ -1,0 +1,140 @@
+# Compiler schema extractor — src/app/compiler_schema/extract.spl
+#
+# Hardening plan §11.2 (doc/01_research/compiler/hardening/
+# simple_hardening_plan_2026-08-21.md): extract one row per variant from the
+# authoritative enum declarations in the compiler tree.
+#
+# WHY a line-based extractor and not `use compiler...` parser reuse:
+# the compiler's own parser is reachable only through the frontend module
+# graph (parser_factory -> parser_types -> lexer -> ...), which this tool would
+# then depend on for its own build; a schema generator that cannot run when the
+# parser is broken is useless precisely when it is needed (a new variant that
+# does not parse yet). This extractor is therefore deliberately NARROW: it only
+# understands `enum Name:` blocks with variants at exactly 4-space indent, and
+# it refuses to guess. Anything it cannot classify is skipped, never invented.
+
+struct VariantRow:
+    """One extracted enum variant."""
+    module_id: text
+    enum_name: text
+    variant: text
+    payload_schema: text
+
+fn variant_id(row: VariantRow) -> text:
+    """Stable identity: spl:variant@<module>.<Enum>.<Variant>."""
+    "spl:variant@" + row.module_id + "." + row.enum_name + "." + row.variant
+
+fn variant_owner(row: VariantRow) -> text:
+    row.module_id + "." + row.enum_name
+
+fn _strip_comment(line: text) -> text:
+    # Enum declarations carry trailing `# ...` notes. No `#` appears inside a
+    # variant payload in the tracked enums, so a plain cut is sufficient and
+    # keeps the extractor auditable.
+    val idx = line.find("#")
+    if idx < 0:
+        return line
+    line.substring(0, idx)
+
+fn _indent_of(line: text) -> i64:
+    var n = 0
+    var i = 0
+    while i < line.len():
+        if line.char_at(i) == " ":
+            n = n + 1
+            i = i + 1
+        else:
+            return n
+    n
+
+fn _paren_balance(s: text) -> i64:
+    var depth = 0
+    var i = 0
+    while i < s.len():
+        val ch = s.char_at(i)
+        if ch == "(" or ch == "[":
+            depth = depth + 1
+        elif ch == ")" or ch == "]":
+            depth = depth - 1
+        i = i + 1
+    depth
+
+fn _is_upper_start(s: text) -> bool:
+    if s.len() == 0:
+        return false
+    val ch = s.char_at(0)
+    ch >= "A" and ch <= "Z"
+
+fn _variant_name_of(decl: text) -> text:
+    val idx = decl.find("(")
+    if idx < 0:
+        return decl.trim()
+    decl.substring(0, idx).trim()
+
+fn _normalize(decl: text) -> text:
+    # Collapse runs of whitespace so a multi-line payload renders on one line.
+    var out = ""
+    var prev_space = false
+    var i = 0
+    while i < decl.len():
+        val ch = decl.char_at(i)
+        if ch == " " or ch == "\t":
+            if not prev_space:
+                out = out + " "
+            prev_space = true
+        else:
+            out = out + ch
+            prev_space = false
+        i = i + 1
+    out.trim()
+
+fn extract_enum_variants(source: text, enum_name: text, module_id: text) -> [VariantRow]:
+    """Extract every variant of `enum <enum_name>:` from `source`."""
+    var rows: [VariantRow] = []
+    val header = "enum " + enum_name + ":"
+    val lines = source.split("\n")
+    var inside = false
+    var buffer = ""
+    var in_doc = false
+    for raw in lines:
+        if not inside:
+            if raw.trim() == header:
+                inside = true
+            continue
+        val stripped = _strip_comment(raw)
+        val trimmed = stripped.trim()
+        if trimmed == "":
+            continue
+        val indent = _indent_of(stripped)
+        if indent == 0:
+            # Dedent to column 0 ends the enum block.
+            break
+        if in_doc:
+            if trimmed.ends_with("\"\"\""):
+                in_doc = false
+            continue
+        if buffer != "":
+            buffer = buffer + " " + trimmed
+            if _paren_balance(buffer) <= 0:
+                val decl = _normalize(buffer)
+                rows.push(VariantRow(module_id, enum_name, _variant_name_of(decl), decl))
+                buffer = ""
+            continue
+        if trimmed.starts_with("\"\"\""):
+            if not (trimmed.len() > 5 and trimmed.ends_with("\"\"\"")):
+                in_doc = true
+            continue
+        if indent != 4:
+            # Method bodies and nested payload continuations are not variants.
+            continue
+        if not _is_upper_start(trimmed):
+            # `fn`, `val`, attributes: not a variant.
+            continue
+        if _paren_balance(trimmed) > 0:
+            buffer = trimmed
+            continue
+        val decl = _normalize(trimmed)
+        rows.push(VariantRow(module_id, enum_name, _variant_name_of(decl), decl))
+    rows
+
+export VariantRow, variant_id, variant_owner, extract_enum_variants

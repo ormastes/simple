@@ -262,17 +262,68 @@ describe "ShellApp built-in commands":
     context "bootstrap tool commands":
         it "treats uname as a built-in":
             var shell = ShellApp.new()
-            expect(shell._is_builtin_command("uname")).to_equal(true)
+            expect(shell._is_builtin_command("uname")).to_be(true)
 
-        it "treats cmake as a built-in":
+        it "routes cmake through the external launcher":
             var shell = ShellApp.new()
-            expect(shell._is_builtin_command("cmake")).to_equal(true)
+            expect(shell._is_builtin_command("cmake")).to_be(false)
 
-        it "treats ninja as a built-in":
+        it "routes ninja through the external launcher":
             var shell = ShellApp.new()
-            expect(shell._is_builtin_command("ninja")).to_equal(true)
+            expect(shell._is_builtin_command("ninja")).to_be(false)
+
+        it "does not treat checksum artifacts as built-ins":
+            var shell = ShellApp.new()
+            expect(shell._is_builtin_command("sha256sum")).to_be(false)
+            expect(shell._is_builtin_command("md5sum")).to_be(false)
+
+        it "routes grep through its filesystem artifact gate":
+            var shell = ShellApp.new()
+            expect(shell._is_builtin_command("grep")).to_be(false)
 
 describe "ShellApp external command routing":
+    it "blocks a direct checksum alias at its canonical launcher gate":
+        var shell = ShellApp.new()
+        shell.aliases = shell.aliases.push(("digest", "sha256sum"))
+        shell.take_remote_output()
+
+        shell.execute("digest --version")
+        val output = shell.take_remote_output()
+
+        expect(shell.last_exit_code).to_equal(126)
+        expect(output).to_contain("CHECKSUM_TOOL_TARGET_ARTIFACT_TOKEN_UNAVAILABLE")
+        expect(output).to_contain("path=/usr/bin/sha256sum")
+
+    it "blocks a background checksum alias before spawning":
+        var shell = ShellApp.new()
+        shell.aliases = shell.aliases.push(("legacy-digest", "md5sum"))
+        shell.take_remote_output()
+
+        shell.execute("legacy-digest --help &")
+        val output = shell.take_remote_output()
+
+        expect(shell.last_exit_code).to_equal(126)
+        expect(output).to_contain("path=/usr/bin/md5sum")
+        expect(shell.jobs.count()).to_equal(0)
+
+    it "blocks checksum aliases in pipeline stages before any spawn":
+        var shell = ShellApp.new()
+        shell.aliases = shell.aliases.push(("digest", "sha256sum"))
+        shell.take_remote_output()
+
+        shell.execute("echo payload | digest --version")
+        val final_stage_output = shell.take_remote_output()
+
+        expect(shell.last_exit_code).to_equal(126)
+        expect(final_stage_output).to_contain("CHECKSUM_TOOL_TARGET_ARTIFACT_TOKEN_UNAVAILABLE")
+        expect(final_stage_output).to_contain("path=/usr/bin/sha256sum")
+
+        shell.execute("digest --version | echo unreachable")
+        val first_stage_output = shell.take_remote_output()
+
+        expect(shell.last_exit_code).to_equal(126)
+        expect(first_stage_output).to_contain("path=/usr/bin/sha256sum")
+
     it "does not execute registry callbacks for non-builtins":
         var shell = ShellApp.new()
         var registry = ToolRegistry.new()

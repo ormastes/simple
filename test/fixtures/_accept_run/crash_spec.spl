@@ -1,0 +1,48 @@
+# =====================================================================
+# DELIBERATE FIXTURE — NOT A PRODUCT DEFECT.
+# Lane: unstable_test_mode (lane C, test/fixtures/unstable_mode/**).
+# This spec CRASHES ON PURPOSE (kills its own PID by signal) so that the
+# test runner's CRASHED outcome class has something honest to detect.
+# Do not "fix" it. Deleting it removes the only proof unstable mode works.
+#
+# earlyoom disambiguation: earlyoom is SIGTERMing processes named `simple`
+# on this host, which also looks like death-by-signal. So this fixture
+# WRITES A SENTINEL FILE immediately before crashing itself:
+#   sentinel present + died by signal = a REAL CRASH
+#   sentinel absent  + died by signal = TERMINATED / UNVERIFIED (earlyoom)
+# Sentinel path is the LANDED CONTRACT from lane B,
+# `take_crash_sentinel` in test_executor_parsing.spl: `<spec_path>.crashed`.
+# The runner deletes it on read, so a stale sentinel cannot mislabel a
+# later run.
+#
+
+# literal selector `tag: "accept"` (test_runner_files.spl, slow path; the manifest
+# fast path uses entry.skip_tag). Both markers are therefore required:
+# Without the second one the directory run discovers 0 files and reports
+# "No test files found" with exit 4 -- measured.
+# =====================================================================
+use std.spec.*
+use std.fs.*
+use std.nogc_sync_mut.ffi.system.*
+
+# Four crash mechanisms were tried. Three do NOT work — recorded so nobody
+# re-tries them:
+#   - unbounded recursion: the tree-walk interpreter guards it at depth 1000
+#     and reports an ordinary assertion failure ("stack overflow: recursion
+#     depth 1000 exceeded") — exactly the outcome this fixture must NOT give;
+#   - `extern fn abort()`: `semantic: unknown extern function: abort` — the
+#     interpreter only resolves the runtime's `rt_*` exports;
+#   - `extern fn rt_panic(...)`: also `unknown extern function`; the extern
+#     allowlist is narrow, even though the release profile is `panic = abort`;
+#   - `rt_process_kill(rt_getpid())`: only kills processes in the runtime's
+#     SPAWNED_CHILDREN registry, so on our own PID it returns false and the
+#     spec then PASSES — a false green, the worst possible outcome here.
+# What works is SIGKILL on our own PID via the shell.
+extern fn rt_getpid() -> i64
+
+describe "unstable mode crash fixture":
+    it "writes a sentinel and then dies by signal":
+        file_write_text("test/fixtures/_accept_run/crash_spec.spl.crashed", "deliberate crash fixture: about to die by signal")
+        val pid = rt_getpid()
+        shell("kill -9 {pid}")
+        expect(1).to_equal(1)

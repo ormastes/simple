@@ -154,7 +154,22 @@ fn emit_profiler_call<M: Module>(
 mod tests {
     use cranelift_module::Linkage;
 
-    use super::{boxed_text_arg_indices, linkage_is_defined_local, sffi_alias_target};
+    use super::{boxed_text_arg_indices, linkage_is_defined_local, sffi_alias_target, sffi_alias_target_shadowed};
+
+    /// doc/08_tracking/bug/module_fn_shadowed_by_builtin_name_2026-08-21.md:
+    /// a module-level `fn len(xs)` must not be replaced by `rt_len` in the JIT.
+    #[test]
+    fn user_defined_function_wins_over_builtin_alias() {
+        assert_eq!(sffi_alias_target_shadowed("len", false), Some("rt_len"));
+        assert_eq!(sffi_alias_target_shadowed("len", true), None);
+        assert_eq!(sffi_alias_target_shadowed("to_string", true), None);
+        // Process-control names ignore the gate entirely.
+        for name in crate::interpreter::PRELUDE_UNSHADOWABLE {
+            assert_eq!(sffi_alias_target_shadowed(name, true), sffi_alias_target(name));
+        }
+        // Names with no alias are unaffected either way.
+        assert_eq!(sffi_alias_target_shadowed("freeze", false), None);
+    }
 
     #[test]
     fn string_builder_push_boxes_only_its_text_argument() {
@@ -3086,6 +3101,22 @@ pub fn sffi_alias_target(name: &str) -> Option<&'static str> {
     }
 }
 
+/// `sffi_alias_target`, gated on user-function precedence.
+///
+/// A user-defined function of the same name wins over a builtin alias
+/// (`len` -> `rt_len`, ...), matching the interpreter's Priority-2 rule.
+/// Without this, a module-level `fn len(xs)` was silently replaced by the
+/// `rt_len` inline fast path in `compile_call`, which runs BEFORE the
+/// `ctx.func_ids.get(func_name)` user-function branch. Process-control names in
+/// `PRELUDE_UNSHADOWABLE` keep builtin precedence.
+/// See doc/08_tracking/bug/module_fn_shadowed_by_builtin_name_2026-08-21.md
+pub fn sffi_alias_target_shadowed(name: &str, user_defined: bool) -> Option<&'static str> {
+    if user_defined && !crate::interpreter::PRELUDE_UNSHADOWABLE.contains(&name) {
+        return None;
+    }
+    sffi_alias_target(name)
+}
+
 /// Compile Call instruction: dispatches to user-defined, built-in I/O, or runtime SFFI functions
 ///
 /// This handles three types of function calls:
@@ -3109,7 +3140,15 @@ pub fn compile_call<M: Module>(
     // Map Simple builtin names to runtime SFFI function names (for SFFI lookup only)
     // Note: "str", "int", "input" are handled in compile_builtin_io_call, not here
     // The alias table is shared with referenced_call_names via sffi_alias_target().
-    let sffi_name: &str = sffi_alias_target(func_name_for_sffi).unwrap_or(func_name_for_sffi);
+    // A user-defined function of the same name wins over a builtin alias
+    // (`len` -> `rt_len`, ...), matching the interpreter's Priority-2 rule.
+    // Without this, a module-level `fn len(xs)` was silently replaced by the
+    // `rt_len` inline fast path below, which runs BEFORE the
+    // `ctx.func_ids.get(func_name)` user-function branch. Process-control
+    // names in PRELUDE_UNSHADOWABLE keep builtin precedence.
+    // See doc/08_tracking/bug/module_fn_shadowed_by_builtin_name_2026-08-21.md
+    let sffi_name: &str = sffi_alias_target_shadowed(func_name_for_sffi, ctx.func_ids.contains_key(func_name_raw))
+        .unwrap_or(func_name_for_sffi);
     // Use raw name for user-function lookups (func_ids, use_map, import_map)
     // but mapped SFFI name for runtime_funcs and builtin I/O checks
     let func_name: &str = func_name_raw;

@@ -2,6 +2,7 @@
 
 - **Filed:** 2026-08-17
 - **Status:** OPEN
+- **Status:** RESOLVED 2026-08-17 for the error this row names — the widened static-receiver guard is in `method_calls_literals.spl` and `undefined variable Widget` no longer appears in the guard output. The guard is still RED for an unrelated reason (native-build worker timeout); see `native_trailing_default_param_guard_three_stage_red_2026-08-17.md` Cause 2.
 - **Severity:** P1 — blocks pushes for every lane (guard is on the pre-push roster)
 - **Class:** MIR lowering of a static/associated method call on a class name
 - **Prior row (same guard, different diagnosis):**
@@ -109,3 +110,44 @@ verdict line.
   the defect is native-lane-specific, but that was measured before this error
   text was visible and has not been re-checked.
 - Whether any other in-tree code hits the same shape (no census was run).
+
+## Re-measured 2026-08-17 (guard-shape lane)
+
+`bin/simple` = the deployed Rust seed built 2026-08-17 12:58 (59,537,240 B).
+
+Guard harness, verbatim last stdout line:
+
+    sh scripts/check/check-native-trailing-default-param.shs --selftest
+    PASS — 8 selftest case(s) checked, all verdicts as expected            (exit 0)
+
+    sh scripts/check/check-native-trailing-default-param.shs
+    ERROR — nothing was checked: native-build was killed by a signal (exit 255; log saved to /tmp/check-native-trailing-default-param.3996613.log)   (exit 2)
+
+Three things that were previously true are no longer true, all verified in this
+checkout:
+
+1. **The silent exit-1 is gone.** The guard emits an ERROR verdict line and
+   exit 2 when there is no compiler; `SIMPLE_BINARY` is injectable and selftest
+   case 1 (`no-compiler ERROR 2`) covers exactly that. Nothing further is owed
+   on the guard-shape half of `native_trailing_default_param_guard_red_at_origin_tip_2026-08-15.md`.
+2. **The static-receiver lowering fix is in the tree** — the widened guard
+   `static_receiver_name == ""` is present in
+   `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`, and the run
+   above shows no `undefined variable Widget`.
+3. **Cause 3 (the TMPDIR interpolation masking the real error) is fixed** —
+   `src/app/cli/native_build_main.spl:235` now hoists `val spill_root =
+   env_get("TMPDIR") ?? "/tmp"` out of the interpolation, and the failing run
+   above reports its REAL error instead of `function \`TMPDIR\` not found`:
+
+       error: native-build worker timed out after 7200s before producing a binary.
+
+   Also **Cause 1 does not reproduce on this binary**: the 8-line class-method
+   repro prints `inline=10` under `SIMPLE_EXECUTION_MODE=interpreter` (it was the
+   two stale `/mnt/data/cargo-*` lane seeds that failed).
+
+What is left is **Cause 2 only**: the native-build worker does not finish
+compiling a 60-line fixture — 29.4 GB RSS in the earlier measurement, a 7200s
+worker timeout in this one. That is a compiler/native-build defect, not a guard
+defect, and it is untouched by this lane. The guard is honestly RED (ERROR,
+exit 2, fail-closed) and must stay that way until the worker is fixed. Do not
+raise `KILL_SIMPLE_MEM_MB`, do not narrow the guard.

@@ -3,6 +3,7 @@
 - **Date:** 2026-07-25
 - **Lane:** 2D headless showcase (`examples/06_io/ui/graphics_2d_showcase.spl`), interpreted (seed `bin/simple run`, Linux x86_64)
 - Status: **FIXED (interpreter side) 2026-08-20** — see "Actual root cause" below.
+- **Verification 2026-08-21 (bug-status-consistency audit): PARTIAL, not fully fixed.** `try_field_array_mutation_in_place` + guard landed, but the doc's own "Still open" items (font-load lane not re-timed; pure-Simple `src/compiler/95.interp` uninspected) are unaddressed. `bug_db.sdn` row is `fix-implemented-verification-pending`.
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 ## Actual root cause (2026-08-20) — it is NOT a GC root scan

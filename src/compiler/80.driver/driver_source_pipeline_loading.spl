@@ -30,6 +30,11 @@ extern fn rt_file_read_text(path: text) -> text
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_env_get(key: text) -> text
 extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_bytes_to_text(data: [u8]) -> text
+extern fn rt_hash_text(data: text) -> i64
+
+fn driver_source_owner_text_copy(value: text) -> text:
+    rt_bytes_to_text(value.bytes())
 
 impl CompilerDriver:
     # --------------------------------------------------------------------------
@@ -312,8 +317,39 @@ impl CompilerDriver:
             return (self.ctx, false)
 
         # Single assignment avoids chained push issue
-        var loaded_ctx: CompileContext = self.ctx
-        loaded_ctx.sources = all_sources
+        # The streaming compiler owns one canonical context. Commit source
+        # inventory directly instead of reconstructing a whole CompileContext
+        # value and transporting it through the phase-1 tuple boundary.
+        self.ctx.sources = all_sources
+        var owned_paths: [text] = []
+        var owned_authored_paths: [text] = []
+        var owned_contents: [text] = []
+        var owned_content_hashes: [i64] = []
+        var owned_module_names: [text] = []
+        var content_by_physical_path: Dict<text, text> = {}
+        for loaded_source in all_sources:
+            val owned_path = driver_source_owner_text_copy(loaded_source.path)
+            val physical_key = _driver_physical_source_key(owned_path)
+            var owned_content = ""
+            if content_by_physical_path.contains_key(physical_key):
+                owned_content = content_by_physical_path[physical_key]
+            else:
+                owned_content = driver_source_owner_text_copy(loaded_source.content)
+                content_by_physical_path[physical_key] = owned_content
+            owned_paths = owned_paths.push(owned_path)
+            owned_authored_paths = owned_authored_paths.push(
+                driver_source_owner_text_copy(loaded_source.authored_path))
+            owned_contents = owned_contents.push(owned_content)
+            val raw_content_hash = rt_hash_text(owned_content)
+            owned_content_hashes = owned_content_hashes.push(
+                if raw_content_hash == 0: 1 else: raw_content_hash)
+            owned_module_names = owned_module_names.push(
+                driver_source_owner_text_copy(loaded_source.module_name))
+        self.ctx.source_paths_owner = owned_paths
+        self.ctx.source_authored_paths_owner = owned_authored_paths
+        self.ctx.source_contents_owner = owned_contents
+        self.ctx.source_content_hashes_owner = owned_content_hashes
+        self.ctx.source_module_names_owner = owned_module_names
         if source_trace:
             print "[load_sources] total {all_sources.len()}"
 

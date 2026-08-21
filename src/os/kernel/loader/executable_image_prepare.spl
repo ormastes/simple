@@ -1,0 +1,143 @@
+# Shared, non-authorizing executable image preparation.
+#
+# This module turns diagnostic handle metadata into a fully re-read, re-hashed,
+# ELF-checked process image and bounded mapping plan.  The returned value is
+# copyable preparation data, never execution authority; only the loader owner
+# or scheduler owner may allocate/publish an address space from it.
+
+use std.fs_driver.mount_table.{MountTable}
+use std.fs_driver.types.{FileHandle}
+use std.fs_driver.bytes_util.{text_to_bytes_pure}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.contracts.execution.simpleos_executable_admission_v1.{
+    ExecutableImageHandleV1
+}
+use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.loader.elf_loader.{elf_admit_executable}
+use os.kernel.loader.process_image.{build_user_process_image}
+use os.kernel.loader.executable_load_plan_v1.{
+    ExecutableLoadConsumerErrorV1, ExecutableLoadConsumerV1,
+    executable_load_consumer_plan_v1,
+    executable_load_consumer_begin_mapping_v1,
+    executable_load_consumer_page_size_v1,
+    executable_load_consumer_max_pages_v1,
+    executable_load_consumer_user_max_v1,
+    executable_load_consumer_page_start_v1,
+    executable_load_consumer_page_end_v1
+}
+use os.kernel.types.task_types.{
+    UserProcessImage,
+    user_process_image_entry, user_process_image_stack_top,
+    user_process_image_stack_size, user_process_image_initial_sp,
+    user_process_image_segments,
+    user_load_segment_virt_addr, user_load_segment_mem_size,
+    user_load_segment_file_size, user_load_segment_flags
+}
+
+pub struct ExecutablePreparedImageV1:
+    image: UserProcessImage
+    mapping: ExecutableLoadConsumerV1
+
+pub fn executable_prepare_max_source_bytes_v1() -> u64:
+    67108864u64
+
+fn _prepare_read_exact(
+    mut table: MountTable,
+    handle: ExecutableImageHandleV1
+) -> [u8]?:
+    if handle.size_bytes == 0u64 or
+        handle.size_bytes > executable_prepare_max_source_bytes_v1():
+        return nil
+    var bytes: [u8] = []
+    var offset = 0u64
+    while offset < handle.size_bytes:
+        val remaining = handle.size_bytes - offset
+        val chunk_len = if remaining > 16777216u64: 16777216u64 else: remaining
+        val chunk = table.pread(
+            FileHandle(id: handle.open_handle_id), offset as i64, chunk_len as i64)
+        if chunk.is_err():
+            return nil
+        val chunk_bytes = text_to_bytes_pure(chunk.unwrap())
+        if chunk_bytes.len() != chunk_len as i64:
+            return nil
+        for byte in chunk_bytes:
+            bytes.push(byte)
+        offset = offset + chunk_len
+    Some(bytes)
+
+fn _prepare_process_image_matches(
+    image: UserProcessImage,
+    handle: ExecutableImageHandleV1,
+    entry_point: u64
+) -> bool:
+    if user_process_image_entry(image) != entry_point:
+        return false
+    val segments = user_process_image_segments(image)
+    if segments.len() != handle.verified_load_ranges.len():
+        return false
+    var i = 0
+    while i < segments.len():
+        val segment = segments[i]
+        val load_range = handle.verified_load_ranges[i]
+        if user_load_segment_virt_addr(segment) != load_range.virtual_address or
+            user_load_segment_mem_size(segment) != load_range.memory_size or
+            user_load_segment_file_size(segment) != load_range.file_size or
+            ((user_load_segment_flags(segment) & 2u32) != 0u32) != load_range.writable or
+            ((user_load_segment_flags(segment) & 1u32) != 0u32) != load_range.executable:
+            return false
+        i = i + 1
+    true
+
+pub fn executable_prepare_image_v1(
+    mut table: MountTable,
+    handle: ExecutableImageHandleV1,
+    consumer: ExecutableLoadConsumerV1,
+    entry_point: u64,
+    arch: Architecture
+) -> Result<ExecutablePreparedImageV1, ExecutableLoadConsumerErrorV1>:
+    val planned = executable_load_consumer_plan_v1(consumer, handle, entry_point)
+    if planned.failure != ExecutableLoadConsumerErrorV1.None:
+        return Err(planned.failure)
+    val source = _prepare_read_exact(table, handle)
+    if not source.?:
+        return Err(ExecutableLoadConsumerErrorV1.SourceReadFailed)
+    val bytes = source.unwrap()
+    if sha256_u8_hex(bytes) != handle.image_hash:
+        return Err(ExecutableLoadConsumerErrorV1.DigestMismatch)
+    if elf_admit_executable(bytes, arch).is_err():
+        return Err(ExecutableLoadConsumerErrorV1.ElfRejected)
+    val built = build_user_process_image("authority-image", bytes, arch, [], [])
+    if built.is_err():
+        return Err(ExecutableLoadConsumerErrorV1.ProcessImageMismatch)
+    val image = built.unwrap()
+    if not _prepare_process_image_matches(image, handle, entry_point):
+        return Err(ExecutableLoadConsumerErrorV1.ProcessImageMismatch)
+
+    val stack_size = user_process_image_stack_size(image)
+    val stack_top = user_process_image_stack_top(image)
+    val initial_sp = user_process_image_initial_sp(image)
+    if stack_size == 0u64 or stack_top < stack_size or
+        stack_top - 1u64 > executable_load_consumer_user_max_v1(consumer.expected_arch) or
+        initial_sp < stack_top - stack_size or initial_sp > stack_top:
+        return Err(ExecutableLoadConsumerErrorV1.ProcessImageMismatch)
+    val stack_start = executable_load_consumer_page_start_v1(stack_top - stack_size)
+    for load_range in handle.verified_load_ranges:
+        val range_start = executable_load_consumer_page_start_v1(
+            load_range.virtual_address)
+        val range_end = executable_load_consumer_page_end_v1(
+            load_range.virtual_address + load_range.memory_size)
+        if range_start < stack_top and stack_start < range_end:
+            return Err(ExecutableLoadConsumerErrorV1.PageOverlap)
+    val stack_pages = (
+        stack_size + executable_load_consumer_page_size_v1() - 1u64
+    ) / executable_load_consumer_page_size_v1()
+    if stack_pages > executable_load_consumer_max_pages_v1() or
+        planned.planned_pages > executable_load_consumer_max_pages_v1() - stack_pages:
+        return Err(ExecutableLoadConsumerErrorV1.PageLimitExceeded)
+
+    var mapping = executable_load_consumer_begin_mapping_v1(planned)
+    mapping.planned_pages = planned.planned_pages + stack_pages
+    Ok(ExecutablePreparedImageV1(image: image, mapping: mapping))
+
+export ExecutablePreparedImageV1
+export executable_prepare_max_source_bytes_v1, executable_prepare_image_v1

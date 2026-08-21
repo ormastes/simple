@@ -1,0 +1,269 @@
+#!/bin/sh
+# check-any-escape-census.shs — ratcheted census of `Any` origins and escapes.
+#
+# Agent Y2, 2026-08-21. Plan:
+#   doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md
+#   §8.5 (escape analysis), §14.1 REQ-MC-ANY-001, §17.1/§17.2, §20.5 row Y2.
+#
+# WHAT IT MEASURES
+#   Runs `any_escape_check` (src/compiler/35.semantics/any_escape) over typed
+#   HIR for every `.spl` file in scope and counts, per class:
+#     E-MC-ANY-001  an `Any` outside a granted `type_erasure` unsafe region
+#     E-MC-ANY-002  an erased value escaping such a region
+#   Every finding is decided on RESOLVED HIR TYPES, not source text. A grep for
+#   the token `Any` would fire on comments, strings and identifiers; this does
+#   not, and it sees through aliasing and shadowing that a text lint cannot.
+#
+# WHY A RATCHET AND NOT A HARD ZERO
+#   §8.7 names the compiler's own `Any` population as a MIGRATION, and §8.2
+#   makes `deny` a `critical`-only column. A hard bar would be red on day one
+#   and would be routed around. So the current population is frozen in
+#   `scripts/check/any_escape_baseline.txt` and any GROWTH fails, exactly like
+#   `check-no-direct-rt.shs` and `check-unbacked-extern-ratchet.shs`.
+#   A baseline that no longer describes the tree (counts fell) is ALSO a FAIL —
+#   stale, per the same rule the test-tree-divergence guard uses — because a
+#   baseline that has drifted is how a ratchet silently stops ratcheting.
+#
+# VERDICT (always the last line of stdout)
+#   PASS  — <n> module(s) checked, <k> Any site(s), <e> escape(s) (baseline ...)   exit 0
+#   FAIL  — ...                                                                    exit 1
+#   ERROR — nothing was checked (<reason>)                                         exit 2
+#
+#   A run that fed 0 modules to the checker is ERROR, never a pass: absence of
+#   analysis is absence of evidence. A missing `bin/simple` is ERROR too.
+#
+# USAGE
+#   sh scripts/check/check-any-escape-census.shs                 # default scope
+#   sh scripts/check/check-any-escape-census.shs --root DIR      # narrow scope
+#   sh scripts/check/check-any-escape-census.shs --selftest      # fixtures only
+#   sh scripts/check/check-any-escape-census.shs --generate-baseline
+#
+#   `--generate-baseline` is for DELIBERATE, REVIEWED updates only, exactly like
+#   the divergence and unbacked-extern baselines. Do not "fix" a FAIL with it
+#   without reading the diff: a FAIL naming growth is real new debt.
+
+set -u
+
+REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$REPO_ROOT" || { echo "ERROR — nothing was checked (cannot cd to repo root)"; exit 2; }
+
+SIMPLE_BIN="bin/simple"
+DRIVER="src/app/check/any_escape_census.spl"
+BASELINE="scripts/check/any_escape_baseline.txt"
+FIXTURES="test/fixtures/any_escape"
+# Default scope. `src/compiler/**` is the population §8.7 cares about, but the
+# analysis lowers each file to HIR, which costs seconds per file, so the default
+# is the sub-tree the Any-hardening wave owns. Widen with --root.
+ROOT="src/compiler/00.common/assurance"
+
+MODE="scan"
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --root) ROOT="${2:-}"; shift 2 ;;
+        --selftest) MODE="selftest"; shift ;;
+        --generate-baseline) MODE="generate"; shift ;;
+        *) echo "ERROR — nothing was checked (unknown argument: $1)"; exit 2 ;;
+    esac
+done
+
+if [ ! -x "$SIMPLE_BIN" ]; then
+    echo "ERROR — nothing was checked (no executable $SIMPLE_BIN; absence of a compiler is absence of evidence)"
+    exit 2
+fi
+
+TMPDIR_RUN=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -rf "$TMPDIR_RUN"' EXIT
+
+# ---------------------------------------------------------------------------
+# run_census <list-file> <out-file>
+# The driver's exit status is read DIRECTLY into a variable on the line after
+# the invocation, never through a pipe: a pipeline's $? is the last stage's
+# status and has produced false greens in this repo before.
+# ---------------------------------------------------------------------------
+run_census() {
+    _list="$1"
+    _out="$2"
+    "$SIMPLE_BIN" run "$DRIVER" --list "$_list" > "$_out" 2>"$_out.err"
+    _rc=$?
+    return $_rc
+}
+
+count_class() {
+    # count_class <out-file> <class-name>
+    # `grep -c` exits 1 on zero matches, so `|| echo 0` would append a SECOND
+    # line to a count that is already "0". Count lines instead; this always
+    # emits exactly one number.
+    grep "^SITE [^ ]* $2 " "$1" 2>/dev/null | wc -l | tr -d ' \n'
+}
+
+count_code() {
+    # count_code <out-file> <diagnostic-code>
+    grep "^SITE $2 " "$1" 2>/dev/null | wc -l | tr -d ' \n'
+}
+
+# ---------------------------------------------------------------------------
+# SELFTEST — runs before every scan and is fatal.
+#
+# Four fixtures, each a real .spl file lowered by the real checker:
+#   clean                       must produce ZERO findings
+#   any_in_safe_fn              must produce E-MC-ANY-001
+#   any_returned_from_boundary  must produce E-MC-ANY-002 (escape_return)
+#   checked_downcast_ok         must produce ZERO findings — a checked
+#                               conversion's concrete result may leave (§8.6)
+# The last one is the one that matters most: without it a checker that flags
+# EVERYTHING would pass the other three.
+# ---------------------------------------------------------------------------
+selftest() {
+    _fail=0
+    for _f in clean any_in_safe_fn any_returned_from_boundary checked_downcast_ok; do
+        if [ ! -f "$FIXTURES/$_f.spl" ]; then
+            echo "selftest: missing fixture $FIXTURES/$_f.spl"
+            _fail=1
+            continue
+        fi
+        echo "$FIXTURES/$_f.spl" > "$TMPDIR_RUN/st.list"
+        run_census "$TMPDIR_RUN/st.list" "$TMPDIR_RUN/st.out"
+        _rc=$?
+        if [ "$_rc" -ne 0 ]; then
+            echo "selftest: fixture $_f: driver exited $_rc"
+            sed -n '1,5p' "$TMPDIR_RUN/st.out.err"
+            _fail=1
+            continue
+        fi
+        _n001=$(count_class "$TMPDIR_RUN/st.out" outside_unsafe)
+        _n002=$(count_code "$TMPDIR_RUN/st.out" E-MC-ANY-002)
+        case "$_f" in
+            clean)
+                [ "$_n001" -eq 0 ] && [ "$_n002" -eq 0 ] || { echo "selftest: clean must be silent, got 001=$_n001 002=$_n002"; _fail=1; } ;;
+            any_in_safe_fn)
+                [ "$_n001" -ge 1 ] || { echo "selftest: any_in_safe_fn must emit E-MC-ANY-001, got 0"; _fail=1; } ;;
+            any_returned_from_boundary)
+                _nret=$(count_class "$TMPDIR_RUN/st.out" escape_return)
+                [ "$_nret" -ge 1 ] || { echo "selftest: any_returned_from_boundary must emit an escape_return, got 0"; _fail=1; } ;;
+            checked_downcast_ok)
+                [ "$_n001" -eq 0 ] && [ "$_n002" -eq 0 ] || { echo "selftest: checked_downcast_ok must be silent, got 001=$_n001 002=$_n002"; _fail=1; } ;;
+        esac
+    done
+    return $_fail
+}
+
+selftest
+SELFTEST_RC=$?
+if [ "$SELFTEST_RC" -ne 0 ]; then
+    echo "FAIL — selftest failed; no scan was attempted"
+    exit 1
+fi
+
+if [ "$MODE" = "selftest" ]; then
+    echo "PASS — 4 module(s) checked, selftest only (no tree scan requested)"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# SCAN
+# ---------------------------------------------------------------------------
+if [ ! -d "$ROOT" ]; then
+    echo "ERROR — nothing was checked (scope root $ROOT does not exist)"
+    exit 2
+fi
+
+find "$ROOT" -name '*.spl' -type f | grep -v '/vendor/' | sort > "$TMPDIR_RUN/scan.list"
+NFILES=$(wc -l < "$TMPDIR_RUN/scan.list" | tr -d ' ')
+if [ "$NFILES" -eq 0 ]; then
+    echo "ERROR — nothing was checked (no .spl files under $ROOT)"
+    exit 2
+fi
+
+# ONE PROCESS PER FILE, deliberately.
+#
+# The census lowers each file to typed HIR through the deployed compiler, and
+# some real compiler files abort that lowering outright (measured 2026-08-21:
+# `src/compiler/00.common/assurance/unsafe_capabilities.spl` dies with
+# "method `split` not found on type `i64`" during lowering, with no driver code
+# on the stack). A single in-process loop would let one such file kill the whole
+# run and report nothing. Per-file invocation isolates the blast radius.
+#
+# An aborted file is UNANALYZABLE: counted, named, and reported separately. It
+# is never silently skipped and never counted as clean — a file the analysis
+# could not read is absence of evidence, not evidence of absence.
+MODULES=0
+ANY_SITES=0
+ESCAPES=0
+UNANALYZABLE=0
+: > "$TMPDIR_RUN/unanalyzable.txt"
+: > "$TMPDIR_RUN/scan.out"
+
+while IFS= read -r _file; do
+    [ -n "$_file" ] || continue
+    echo "$_file" > "$TMPDIR_RUN/one.list"
+    run_census "$TMPDIR_RUN/one.list" "$TMPDIR_RUN/one.out"
+    _rc=$?
+    _sum=$(grep '^SUMMARY ' "$TMPDIR_RUN/one.out" | tail -1)
+    if [ "$_rc" -ne 0 ] || [ -z "$_sum" ]; then
+        UNANALYZABLE=$((UNANALYZABLE + 1))
+        echo "$_file" >> "$TMPDIR_RUN/unanalyzable.txt"
+        continue
+    fi
+    cat "$TMPDIR_RUN/one.out" >> "$TMPDIR_RUN/scan.out"
+    _m=$(echo "$_sum" | sed 's/.*modules=\([0-9]*\).*/\1/')
+    _a=$(echo "$_sum" | sed 's/.*any_sites=\([0-9]*\).*/\1/')
+    _e=$(echo "$_sum" | sed 's/.*escapes=\([0-9]*\).*/\1/')
+    MODULES=$((MODULES + _m))
+    ANY_SITES=$((ANY_SITES + _a))
+    ESCAPES=$((ESCAPES + _e))
+done < "$TMPDIR_RUN/scan.list"
+
+if [ "$MODULES" -eq 0 ]; then
+    echo "ERROR — nothing was checked (0 modules reached the checker; $NFILES file(s) in scope, $UNANALYZABLE unanalyzable)"
+    exit 2
+fi
+
+if [ "$MODE" = "generate" ]; then
+    {
+        echo "# any-escape census baseline — regenerate ONLY as a reviewed update."
+        echo "# scope: $ROOT"
+        echo "scope=$ROOT"
+        echo "any_sites=$ANY_SITES"
+        echo "escapes=$ESCAPES"
+        echo "unanalyzable=$UNANALYZABLE"
+    } > "$BASELINE"
+    echo "PASS — $MODULES module(s) checked, $ANY_SITES Any site(s), $ESCAPES escape(s), $UNANALYZABLE unanalyzable (baseline REGENERATED at $BASELINE)"
+    exit 0
+fi
+
+if [ ! -f "$BASELINE" ]; then
+    echo "ERROR — nothing was checked (no baseline at $BASELINE; run --generate-baseline as a reviewed step)"
+    exit 2
+fi
+
+BASE_SCOPE=$(grep '^scope=' "$BASELINE" | cut -d= -f2-)
+BASE_ANY=$(grep '^any_sites=' "$BASELINE" | cut -d= -f2)
+BASE_ESC=$(grep '^escapes=' "$BASELINE" | cut -d= -f2)
+BASE_UNA=$(grep '^unanalyzable=' "$BASELINE" | cut -d= -f2)
+
+if [ "$BASE_SCOPE" != "$ROOT" ]; then
+    echo "ERROR — nothing was checked (baseline scope '$BASE_SCOPE' != scanned scope '$ROOT'; the two are not comparable)"
+    exit 2
+fi
+
+# Analyzability is ratcheted too. Without this, a change that made MORE files
+# unanalyzable would drive the site counts DOWN and read as progress, which is
+# the exact false-green this guard exists to prevent.
+if [ "$UNANALYZABLE" -gt "$BASE_UNA" ]; then
+    echo "FAIL — $MODULES module(s) checked, $UNANALYZABLE unanalyzable (baseline $BASE_UNA): FEWER files can be analyzed than before"
+    sed -n '1,10p' "$TMPDIR_RUN/unanalyzable.txt"
+    exit 1
+fi
+
+if [ "$ANY_SITES" -gt "$BASE_ANY" ] || [ "$ESCAPES" -gt "$BASE_ESC" ]; then
+    echo "FAIL — $MODULES module(s) checked, $ANY_SITES Any site(s) (baseline $BASE_ANY), $ESCAPES escape(s) (baseline $BASE_ESC): the population GREW"
+    exit 1
+fi
+
+if [ "$ANY_SITES" -lt "$BASE_ANY" ] || [ "$ESCAPES" -lt "$BASE_ESC" ] || [ "$UNANALYZABLE" -lt "$BASE_UNA" ]; then
+    echo "FAIL — $MODULES module(s) checked, $ANY_SITES Any site(s) (baseline $BASE_ANY), $ESCAPES escape(s) (baseline $BASE_ESC), $UNANALYZABLE unanalyzable (baseline $BASE_UNA): STALE baseline, tighten it with --generate-baseline"
+    exit 1
+fi
+
+echo "PASS — $MODULES module(s) checked, $ANY_SITES Any site(s), $ESCAPES escape(s), $UNANALYZABLE unanalyzable (baseline $BASE_ANY/$BASE_ESC, scope $ROOT)"
+exit 0

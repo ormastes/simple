@@ -1,0 +1,225 @@
+# Declaration parsing: `extend <EnumName>:` completeness extensions.
+#
+# §2 of doc/05_design/compiler/hardening/critical_completeness_design_2026-08-21.md:
+#
+#     extend ExprKind:
+#         complete:
+#             async.Await(Expr)
+#             gpu.KernelLaunch(KernelAst)
+#         dyn:
+#             ide.LiveProbe(ProbePayload)
+#
+# The `complete:` / `dyn:` sections in the ENUM body (parse_enum_decl in
+# enum_module_body.spl) only DECLARE that a region is open; the constructors
+# themselves live here. Each subsection produces one record, so an `extend`
+# with both sections yields two records sharing a target.
+#
+# Why the parsed facts leave through a flat side-channel rather than a flat-AST
+# decl node: this layer speaks decl/expr/type IDs, not AST structs (importing
+# compiler.frontend.parser_types here would invert the frontend's layering).
+# The encoding below is the same "flat list + per-item count" shape
+# parse_enum_decl already uses for variant payload types, and
+# _FlatAstBridge/module_assembly.spl rebuilds ParserExtendEnum from it -- the
+# established pattern for parser facts that have no decl tag
+# (parser_enum_attributes_for, parser_enum_open_regions_for).
+#
+# `extend` is already a hard lexer keyword (TOK_KW_EXTEND, tokens.spl:166) with
+# no parser dispatch before this file, so no soft-keyword lookahead is needed
+# and no existing identifier use can be shadowed.
+
+use compiler.core.parser.{par_kind_get, par_text_get}
+use compiler.core.parser.{parser_advance, parser_expect, parser_error}
+use compiler.core.parser.{parser_skip_newlines, parser_skip_newlines_and_semicolons}
+use compiler.core.parser.{parser_parse_type}
+use compiler.core.tokens.{TOK_KW_DYN, TOK_DOT}
+use compiler.core.types.{named_type_register, named_type_find}
+
+# One entry per parsed `complete:`/`dyn:` SECTION, in source order.
+var EXTEND_TARGETS: [text] = []
+var EXTEND_CLOSURES: [text] = []          # "complete" | "dyn"
+var EXTEND_CTOR_COUNTS: [i64] = []        # constructors in this section
+
+# Flat, in-order concatenation across every section (sliced by the counts above).
+var EXTEND_CTOR_PROVIDERS: [text] = []
+var EXTEND_CTOR_NAMES: [text] = []
+var EXTEND_CTOR_TYPE_COUNTS: [i64] = []   # payload arity per constructor
+var EXTEND_CTOR_TYPE_IDS: [i64] = []      # flat payload type ids
+
+fn parser_extend_targets() -> [text]:
+    """Target enum name of each parsed `extend` section, in source order."""
+    EXTEND_TARGETS
+
+fn parser_extend_closures() -> [text]:
+    """"complete" or "dyn" for each parsed `extend` section."""
+    EXTEND_CLOSURES
+
+fn parser_extend_ctor_counts() -> [i64]:
+    """Constructor count of each parsed `extend` section."""
+    EXTEND_CTOR_COUNTS
+
+fn parser_extend_ctor_providers() -> [text]:
+    """Flat provider names across all `extend` sections."""
+    EXTEND_CTOR_PROVIDERS
+
+fn parser_extend_ctor_names() -> [text]:
+    """Flat constructor names across all `extend` sections."""
+    EXTEND_CTOR_NAMES
+
+fn parser_extend_ctor_type_counts() -> [i64]:
+    """Payload arity of each constructor, flat across all sections."""
+    EXTEND_CTOR_TYPE_COUNTS
+
+fn parser_extend_ctor_type_ids() -> [i64]:
+    """Flat payload type ids, sliceable by parser_extend_ctor_type_counts()."""
+    EXTEND_CTOR_TYPE_IDS
+
+fn parser_reset_extend_enums():
+    """Clear the per-module `extend` registry."""
+    EXTEND_TARGETS = []
+    EXTEND_CLOSURES = []
+    EXTEND_CTOR_COUNTS = []
+    EXTEND_CTOR_PROVIDERS = []
+    EXTEND_CTOR_NAMES = []
+    EXTEND_CTOR_TYPE_COUNTS = []
+    EXTEND_CTOR_TYPE_IDS = []
+
+# Parses one `provider.Name(T, ...)` constructor line. Returns true when a
+# constructor was recorded. The dotted form is REQUIRED: an extension
+# constructor is owned by the extending provider, and that ownership is what
+# the persistent-identity scheme keys on, so an undotted `Name(...)` is a
+# parse error rather than a silently-provider-less constructor.
+fn parse_extend_constructor() -> bool:
+    if par_kind_get() != 6:
+        parser_error("expected `provider.Name(...)` constructor in `extend` section, got " + par_text_get())
+        parser_advance()
+        return false
+    val provider = par_text_get()
+    parser_advance()
+    if par_kind_get() != TOK_DOT:
+        parser_error("expected `.` after extension provider `" + provider + "`")
+        return false
+    parser_advance()
+    if par_kind_get() != 6:
+        parser_error("expected constructor name after `" + provider + ".`")
+        return false
+    val ctor_name = par_text_get()
+    parser_advance()
+
+    var type_ids: [i64] = []
+    if par_kind_get() == 140:
+        parser_advance()
+        while true:
+            if par_kind_get() == 141:
+                break
+            if par_kind_get() == 190:
+                break
+            # `name: T` (named payload field) and bare `T` are both accepted,
+            # matching parse_enum_decl's variant payload loop.
+            if par_kind_get() == 6:
+                val first = par_text_get()
+                parser_advance()
+                if par_kind_get() == 161:
+                    parser_advance()
+                    type_ids.push(parser_parse_type())
+                else:
+                    type_ids.push(parser_type_id_for_name(first))
+            elif par_kind_get() == 144:
+                type_ids.push(parser_parse_type())
+            else:
+                parser_advance()
+            if par_kind_get() == 160:
+                parser_advance()
+        parser_expect(141)
+
+    EXTEND_CTOR_PROVIDERS.push(provider)
+    EXTEND_CTOR_NAMES.push(ctor_name)
+    EXTEND_CTOR_TYPE_COUNTS.push(type_ids.len())
+    for t in type_ids:
+        EXTEND_CTOR_TYPE_IDS.push(t)
+    true
+
+# A bare `T` payload position: the identifier was already consumed to decide
+# between `name: T` and `T`, so the type is resolved from its name here rather
+# than by re-entering parser_parse_type on a token that is gone.
+fn parser_type_id_for_name(name: text) -> i64:
+    val found = named_type_find(name)
+    if found > 0:
+        return found
+    named_type_register(name, [], [])
+
+# Parses one `complete:` / `dyn:` subsection body. `closure` is the recorded
+# axis spelling. Returns the number of constructors parsed.
+fn parse_extend_section(target: text, closure: text) -> i64:
+    parser_expect(161)
+    parser_skip_newlines()
+    var count = 0
+    if par_kind_get() != 181:
+        # An empty section is legal: it re-states that the region is open
+        # without adding constructors.
+        EXTEND_TARGETS.push(target)
+        EXTEND_CLOSURES.push(closure)
+        EXTEND_CTOR_COUNTS.push(0)
+        return 0
+    parser_advance()
+    while true:
+        parser_skip_newlines()
+        if par_kind_get() == 182:
+            parser_advance()
+            break
+        if par_kind_get() == 190:
+            break
+        if parse_extend_constructor():
+            count = count + 1
+        parser_skip_newlines_and_semicolons()
+    EXTEND_TARGETS.push(target)
+    EXTEND_CLOSURES.push(closure)
+    EXTEND_CTOR_COUNTS.push(count)
+    count
+
+# Parses `extend <EnumName>:` with its `complete:` / `dyn:` subsections.
+# Emits NO flat-AST declaration (the facts leave through the registry above),
+# so an `extend` decl is inert for HIR/MIR/codegen in this change -- exactly
+# like the `layer` marker. Returns -1 so the module-body dispatcher adds
+# nothing.
+fn parse_extend_enum_decl() -> i64:
+    parser_advance()  # consume `extend`
+    if par_kind_get() != 6:
+        parser_error("expected enum name after `extend`")
+        return -1
+    val target = par_text_get()
+    parser_advance()
+    parser_expect(161)
+    parser_skip_newlines()
+    if par_kind_get() != 181:
+        parser_error("expected an indented `complete:`/`dyn:` section in `extend " + target + "`")
+        return -1
+    parser_advance()
+    var saw_section = false
+    while true:
+        parser_skip_newlines()
+        if par_kind_get() == 182:
+            parser_advance()
+            break
+        if par_kind_get() == 190:
+            break
+        if par_kind_get() == 6 and par_text_get() == "complete":
+            parser_advance()
+            parse_extend_section(target, "complete")
+            saw_section = true
+            continue
+        if par_kind_get() == TOK_KW_DYN:
+            parser_advance()
+            parse_extend_section(target, "dyn")
+            saw_section = true
+            continue
+        parser_error("expected `complete:` or `dyn:` in `extend " + target + "`, got " + par_text_get())
+        parser_advance()
+        parser_skip_newlines_and_semicolons()
+    if not saw_section:
+        parser_error("`extend " + target + "` declares no `complete:` or `dyn:` section")
+    -1
+
+export parse_extend_enum_decl, parser_reset_extend_enums
+export parser_extend_targets, parser_extend_closures, parser_extend_ctor_counts
+export parser_extend_ctor_providers, parser_extend_ctor_names
+export parser_extend_ctor_type_counts, parser_extend_ctor_type_ids

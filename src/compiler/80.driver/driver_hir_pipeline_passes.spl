@@ -50,7 +50,7 @@ impl CompilerDriver:
         # This standalone method is kept for API compatibility but is a no-op.
         (ctx, not ctx.has_errors())
 
-    me monomorphize_impl() -> bool:
+    me monomorphize_impl(hir_phase_admitted: bool) -> bool:
         """Run monomorphization pass on all HIR modules.
 
         This creates specialized versions of generic functions, structs, and
@@ -58,10 +58,17 @@ impl CompilerDriver:
         rewritten to use the mangled names of specialized definitions.
         """
         log_debug("running monomorphization")
-        if self.ctx.has_errors():
+        # Phase admission is produced only after HIR lowering and every
+        # post-HIR validator succeeds. Do not reconstruct that authority by
+        # rereading CompileContext.error_count_value after a 609-module
+        # aggregate return boundary: the Stage-3 native value ABI can corrupt
+        # that adjacent scalar even though the canonical owner completed with
+        # zero errors.
+        if not hir_phase_admitted:
             return false
         val skip_mono = rt_env_get("SIMPLE_BOOTSTRAP_SKIP_MONO") ?? ""
-        if skip_mono == "1":
+        val bootstrap_mode = rt_env_get("SIMPLE_BOOTSTRAP") ?? ""
+        if skip_mono == "1" or bootstrap_mode == "1":
             print "[bootstrap] skipping monomorphization"
             return true
         val (mono_modules, mono_stats) = run_monomorphization(

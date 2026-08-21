@@ -670,6 +670,17 @@ impl NativeProjectBuilder {
             }
             self.config.backend = backend;
         }
+        #[cfg(not(feature = "llvm"))]
+        if self.config.backend == "llvm" {
+            // Fail once, up front, with an actionable message. Without this the
+            // same "'llvm' feature not enabled" error is reported once per
+            // source file (1,366 identical lines on a bootstrap stage build).
+            return Err(
+                "LLVM backend requested but this binary was built without the 'llvm' cargo feature; \
+                 rebuild it with --features llvm, or pass --backend=cranelift"
+                    .to_string(),
+            );
+        }
         if self
             .config
             .target

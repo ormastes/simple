@@ -30,6 +30,10 @@ var _nvfs_posix_next_inst: i64 = 1
 var _nvfs_posix_next_nvme_block: i64 = 64
 val _NVFS_POSIX_BLOCKS_PER_FILE: i64 = 32
 val _NVFS_POSIX_MAX_OFFSET: i64 = 9223372036854775807
+val _NVFS_POSIX_MAX_INST_ID: i64 = 0x7FFFFFFFFFFFFFFF
+val _NVFS_POSIX_MAX_OPEN_HANDLES: i64 = 65536
+val _NVFS_POSIX_MAX_FILES: i64 = 65536
+val _NVFS_POSIX_MAX_PATH_BYTES: i64 = 4096
 
 struct NvfsPosixDriver:
     name: text
@@ -63,6 +67,8 @@ impl NvfsPosixDriver:
         Ok(Inode(id: 1))
 
     fn stat_path(path: Path) -> Result<StatInfo, FsError>:
+        if not _nvfs_posix_path_valid(path.raw):
+            return Err(FsError.InvalidArg)
         self._ensure_persisted_path(path.raw)?
         self.inner.stat_path(path)
 
@@ -70,8 +76,14 @@ impl NvfsPosixDriver:
         self.stat_path(path)
 
     fn open_path(path: Path, flags: OpenFlags) -> Result<FileHandle, FsError>:
+        if self.inst_id <= 0 or not _nvfs_posix_path_valid(path.raw):
+            return Err(FsError.InvalidArg)
+        if _nvfs_posix_open.len() >= _NVFS_POSIX_MAX_OPEN_HANDLES:
+            return Err(FsError.TooLarge)
         self._ensure_persisted_path(path.raw)?
         val had_persisted_record = _nvfs_posix_file_index(path.raw) >= 0
+        if not had_persisted_record and _nvfs_posix_files.len() >= _NVFS_POSIX_MAX_FILES:
+            return Err(FsError.TooLarge)
         val handle = self.inner.open_path(path, flags)?
         if not had_persisted_record:
             _nvfs_posix_store_file(path.raw, [])
@@ -125,6 +137,8 @@ impl NvfsPosixDriver:
         self.read(handle, offset, buf)
 
     fn mkdir_path(path: text, mode: u32) -> Result<(), FsError>:
+        if not _nvfs_posix_path_valid(path):
+            return Err(FsError.InvalidArg)
         self.inner.mkdir_path(path, mode)
 
     fn mkdir(path: Path, mode: u32) -> Result<(), FsError>:
@@ -166,6 +180,8 @@ impl NvfsPosixDriver:
         self.close_handle(handle)
 
     fn unlink_path(path: text) -> Result<(), FsError>:
+        if not _nvfs_posix_path_valid(path):
+            return Err(FsError.InvalidArg)
         _nvfs_posix_remove_file(path)
         self.inner.unlink_path(path)
 
@@ -173,6 +189,8 @@ impl NvfsPosixDriver:
         self.unlink_path(path.raw)
 
     fn rename_path(old_path: text, new_path: text) -> Result<(), FsError>:
+        if not _nvfs_posix_path_valid(old_path) or not _nvfs_posix_path_valid(new_path):
+            return Err(FsError.InvalidArg)
         val persisted = _nvfs_posix_load_file(old_path)
         val had_persisted_record = _nvfs_posix_file_index(old_path) >= 0
         self.inner.rename_path(old_path, new_path)?
@@ -194,6 +212,12 @@ impl NvfsPosixDriver:
 
     fn ftruncate(handle: FileHandle, new_size: i64) -> Result<(), FsError>:
         self.ftruncate_handle(handle, new_size)
+
+    fn fsync(handle: FileHandle) -> Result<(), FsError>:
+        Err(FsError.Unsupported)
+
+    fn fdatasync(handle: FileHandle) -> Result<(), FsError>:
+        Err(FsError.Unsupported)
 
     fn fstat(handle: FileHandle) -> Result<FileStat, FsError>:
         val bytes = self.inner.read_bytes_handle(handle, 1000000)?
@@ -265,9 +289,20 @@ fn nvfs_posix_write_owned(driver: NvfsPosixDriver, handle: FileHandle, offset: i
     (owned, result)
 
 fn _nvfs_posix_alloc_inst_id() -> i64:
+    if _nvfs_posix_next_inst <= 0 or _nvfs_posix_next_inst == _NVFS_POSIX_MAX_INST_ID:
+        return 0
     val id = _nvfs_posix_next_inst
     _nvfs_posix_next_inst = _nvfs_posix_next_inst + 1
     id
+
+fn _nvfs_posix_path_valid(path: text) -> bool:
+    if path.len() == 0 or path.len() > _NVFS_POSIX_MAX_PATH_BYTES or
+        path.contains("\\") or path.contains("\0") or path.contains("\n") or path.contains("\r"):
+        return false
+    if path == "." or path == ".." or path.contains("//") or path.contains("/./") or path.ends_with("/.") or
+        path.contains("/../") or path.ends_with("/.."):
+        return false
+    true
 
 fn _nvfs_posix_file_index(path: text) -> i32:
     var i: i32 = 0
@@ -366,6 +401,8 @@ fn _nvfs_posix_truncate_bytes(base: [u8], new_size: i64) -> [u8]:
 
 fn _nvfs_posix_mirror_to_nvme(buf: [u8]):
     if not nvfs_arena_has_block_device():
+        return
+    if _nvfs_posix_next_nvme_block > _NVFS_POSIX_MAX_INST_ID - _NVFS_POSIX_BLOCKS_PER_FILE:
         return
     val base = _nvfs_posix_next_nvme_block
     _nvfs_posix_next_nvme_block = _nvfs_posix_next_nvme_block + _NVFS_POSIX_BLOCKS_PER_FILE

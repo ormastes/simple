@@ -1377,6 +1377,14 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_process_execute", &[I64, I64, I64], &[I32]),
     RuntimeFuncSpec::new("rt_process_run_timeout", &[I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_run_bounded", &[I64, I64, I64, I64, I64], &[I64]),
+    // Owned-process receipt ABI, backed by src/runtime/runtime_process_owned.c.
+    // Lost together with that C file in the tree-wipe restore ae55a746719; without
+    // this spec resolve_runtime_func drops whole modules to the interpreter.
+    RuntimeFuncSpec::new(
+        "rt_process_run_owned_bounded_value",
+        &[I64, I64, I64, I64, I64],
+        &[I64],
+    ),
     // rt_process_is_running(pid) -> bool (as i64: 0/1)
     RuntimeFuncSpec::new("rt_process_is_running", &[I64], &[I64]),
     // rt_process_wait(pid, timeout_ms) -> exit_code
@@ -1875,7 +1883,6 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
     RuntimeFuncSpec::new("rt_dir_create", &[I64, I64, I8], &[I8]), // path_ptr, path_len, recursive -> bool
     RuntimeFuncSpec::new("rt_dir_create_all", &[I64, I64], &[I8]), // path_ptr, path_len -> bool
-    RuntimeFuncSpec::new("rt_dir_exists", &[I64, I64], &[I8]),     // path_ptr, path_len -> bool
     RuntimeFuncSpec::new("rt_dir_list", &[I64, I64], &[I64]),      // path -> RuntimeValue (array)
     RuntimeFuncSpec::new("rt_dir_remove", &[I64, I64, I8], &[I8]), // path_ptr, path_len, recursive -> bool
     RuntimeFuncSpec::new("rt_dir_remove_all", &[I64, I64], &[I8]), // path -> bool

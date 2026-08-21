@@ -1,0 +1,57 @@
+# Per-file `Any` census (agent Y1, 2026-08-21).
+# See classify.spl for the stated heuristics and their limits.
+
+use app.any_audit.classify.{classify_occurrences, ANY_CLASSES}
+
+pub struct AnySite:
+    path: text
+    line: i64
+    kind: text
+
+pub struct FileCensus:
+    path: text
+    total: i64
+    sites: [AnySite]
+
+# Count `"""` occurrences on a line so a docstring block can be skipped whole.
+fn _triple_quotes(line: text) -> i64:
+    var count = 0
+    var i = 0
+    val n = line.len()
+    while i + 2 < n:
+        if line.char_at(i) == "\"" and line.char_at(i + 1) == "\"" and line.char_at(i + 2) == "\"":
+            count = count + 1
+            i = i + 3
+        else:
+            i = i + 1
+    count
+
+pub fn scan_source(path: text, source: text) -> FileCensus:
+    var sites: [AnySite] = []
+    var in_doc = false
+    val lines: [text] = source.split("\n")
+    var li = 0
+    while li < lines.len():
+        val raw: text = lines[li]
+        val q = _triple_quotes(raw)
+        if in_doc:
+            if q > 0:
+                in_doc = false
+        elif q == 1:
+            in_doc = true
+        else:
+            for kind in classify_occurrences(raw):
+                sites = sites.push(AnySite(path: path, line: li + 1, kind: kind))
+        li = li + 1
+    FileCensus(path: path, total: sites.len(), sites: sites)
+
+# Per-class totals, ordered exactly as ANY_CLASSES so a caller can zip them.
+pub fn class_totals(sites: [AnySite]) -> [i64]:
+    var out: [i64] = []
+    for cls in ANY_CLASSES:
+        var c = 0
+        for s in sites:
+            if s.kind == cls:
+                c = c + 1
+        out = out.push(c)
+    out

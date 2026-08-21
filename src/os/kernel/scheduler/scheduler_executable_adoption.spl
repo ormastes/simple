@@ -1,0 +1,294 @@
+# Scheduler-owned authenticated executable adoption.
+#
+# Owner/lock order is fixed:
+# The complete transaction runs through the canonical mutable Scheduler `me`
+# receiver used by every task/ready/vmspace mutation.  Nested operations keep
+# one fixed order: scheduler owner, loader registry call, then retained handle
+# I/O.  Registry calls release their private lock before returning.
+# A failure before publication returns ownership locally, destroys the complete
+# address space, and closes or quarantines the exact retained handle.  After
+# publication the scheduler owns the mapping; a source close failure is only a
+# retryable close quarantine and never rolls back the runnable task.
+
+use std.fs_driver.mount_table.{MountTable}
+use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.arch.mod.{get_arch}
+use os.kernel.types.task_types.{
+    TaskId, TaskState, TaskPriority,
+    UserProcessImage, AddressSpace,
+    default_task_schedule, default_task_isolation,
+    user_process_image_stack_top,
+    user_process_image_stack_size, user_process_image_segments,
+    user_process_image_file_bytes, user_process_image_initial_sp,
+    user_process_image_initial_stack_bytes
+}
+use os.kernel.types.capability_types.{CapabilitySet}
+use os.kernel.types.vmspace_types.{ProcessVmSpace}
+use os.kernel.loader.executable_authority_registry.{
+    ExecutableAuthorityRegistryV1, ExecutableAuthorityTokenV1
+}
+use os.kernel.loader.executable_admission_pipeline.{
+    executable_loader_commit, executable_loader_retrieve_once,
+    executable_loader_release_retrieved, executable_loader_revoke
+}
+use os.kernel.loader.executable_image_prepare.{executable_prepare_image_v1}
+use os.kernel.loader.executable_load_plan_v1.{
+    ExecutableLoadConsumerStateV1, ExecutableLoadConsumerErrorV1,
+    ExecutableLoadConsumerV1, ExecutableLoadReceiptV1,
+    executable_load_consumer_receipt_v1
+}
+use os.kernel.memory.user_address_space.{
+    create_user_address_space, destroy_user_address_space
+}
+use os.kernel.scheduler.scheduler_types.{
+    Scheduler, TaskControlBlock, TIME_SLICE_TICKS,
+    SchedulerExecutableAdoptionOwnerStateV1,
+    _address_space_can_map, _map_user_process_image,
+    _initial_user_task_context, scheduler_next_task_id_take
+}
+use os.kernel.scheduler.scheduler_task_mgmt.{_find_empty_slot_in}
+use os.kernel.scheduler.capability_bridge.{cap_init_task_record}
+use os.kernel.ipc.capability.{register_task_vmspace}
+export use os.kernel.scheduler.scheduler_executable_adoption_transition.{
+    SchedulerExecutableAdoptionOwnerEventV1,
+    SchedulerExecutableAdoptionTransitionV1,
+    scheduler_executable_adoption_transition_v1
+}
+
+pub struct SchedulerExecutableAdoptionResultV1:
+    pid: u64
+    receipt: ExecutableLoadReceiptV1
+
+pub struct SchedulerExecutableAdoptionSnapshotV1:
+    state: SchedulerExecutableAdoptionOwnerStateV1
+    pid: u64
+    token_slot: i64
+    token_generation: u64
+    token_nonce: u64
+
+fn _scheduler_adoption_receipt(
+    consumer: ExecutableLoadConsumerV1,
+    state: ExecutableLoadConsumerStateV1,
+    error: ExecutableLoadConsumerErrorV1,
+    authorized: bool
+) -> ExecutableLoadReceiptV1:
+    var completed = consumer
+    completed.state = state
+    completed.failure = error
+    if state == ExecutableLoadConsumerStateV1.Adopted or
+        state == ExecutableLoadConsumerStateV1.AdoptedCloseRetryable:
+        completed.mapped_pages = completed.planned_pages
+    val receipt = executable_load_consumer_receipt_v1(completed)
+    var out = receipt
+    out.execution_authorized = authorized
+    if authorized and state == ExecutableLoadConsumerStateV1.Adopted:
+        out.reason = "scheduler-adopted"
+    elif authorized and state == ExecutableLoadConsumerStateV1.AdoptedCloseRetryable:
+        out.reason = "source-close-retryable-after-scheduler-adoption"
+    out
+
+fn _scheduler_adoption_reject(
+    consumer: ExecutableLoadConsumerV1,
+    error: ExecutableLoadConsumerErrorV1
+) -> SchedulerExecutableAdoptionResultV1:
+    SchedulerExecutableAdoptionResultV1(
+        pid: 0u64,
+        receipt: _scheduler_adoption_receipt(
+            consumer, consumer.state, error, false))
+
+fn _scheduler_adoption_fail_and_close(
+    mut table: MountTable,
+    authorities: ExecutableAuthorityRegistryV1,
+    token: ExecutableAuthorityTokenV1,
+    consumer: ExecutableLoadConsumerV1,
+    error: ExecutableLoadConsumerErrorV1
+) -> SchedulerExecutableAdoptionResultV1:
+    val closed = executable_loader_release_retrieved(table, authorities, token)
+    val state = if closed.is_ok():
+        consumer.state
+    else:
+        ExecutableLoadConsumerStateV1.CloseRetryable
+    val final_error = if closed.is_ok(): error else: ExecutableLoadConsumerErrorV1.CloseFailed
+    val rejected = _scheduler_adoption_reject(consumer, final_error)
+    rejected.with_state(state)
+
+impl SchedulerExecutableAdoptionResultV1:
+    fn with_state(state: ExecutableLoadConsumerStateV1) -> SchedulerExecutableAdoptionResultV1:
+        var out = self
+        out.receipt.state = state
+        out.receipt.close_retryable = state == ExecutableLoadConsumerStateV1.CloseRetryable
+        out
+
+impl Scheduler:
+    me _record_authenticated_executable_adoption_v1(
+        state: SchedulerExecutableAdoptionOwnerStateV1,
+        pid: u64,
+        token: ExecutableAuthorityTokenV1
+    ):
+        self.executable_adoption_state = state
+        self.executable_adoption_pid = pid
+        self.executable_adoption_token_slot = token.slot_index
+        self.executable_adoption_token_generation = token.generation
+        self.executable_adoption_token_nonce = token.nonce
+
+    pub me adopt_authenticated_executable_pid_v1(
+        mut table: MountTable,
+        authorities: ExecutableAuthorityRegistryV1,
+        token: ExecutableAuthorityTokenV1,
+        consumer: ExecutableLoadConsumerV1,
+        entry_point: u64,
+        priority: TaskPriority,
+        caps: CapabilitySet
+    ) -> SchedulerExecutableAdoptionResultV1:
+        # The token/owner coordinates are the only public authority input.
+        # Commit + retrieve is exactly once in the loader registry; no raw
+        # AddressSpace, TCB, or process-image capability crosses this API.
+        # Begin from the scheduler's sticky owner state before consuming the
+        # token.  In particular, a quarantined transaction cannot be reset by
+        # presenting fresh coordinates and can never reach publication or
+        # authorization through this entry point.
+        val prepared_owner = scheduler_executable_adoption_transition_v1(
+            self.executable_adoption_state,
+            SchedulerExecutableAdoptionOwnerEventV1.Prepare)
+        if prepared_owner.state != SchedulerExecutableAdoptionOwnerStateV1.Prepared:
+            return _scheduler_adoption_reject(
+                consumer, ExecutableLoadConsumerErrorV1.AuthorityRejected)
+        val committed = executable_loader_commit(authorities, token)
+        if committed.is_err():
+            self._record_authenticated_executable_adoption_v1(
+                SchedulerExecutableAdoptionOwnerStateV1.Quarantined, 0u64, token)
+            return _scheduler_adoption_reject(
+                consumer, ExecutableLoadConsumerErrorV1.AuthorityRejected)
+        val retrieved = executable_loader_retrieve_once(authorities, token)
+        if retrieved.is_err():
+            _ = executable_loader_revoke(table, authorities, token)
+            self._record_authenticated_executable_adoption_v1(
+                SchedulerExecutableAdoptionOwnerStateV1.Quarantined, 0u64, token)
+            return _scheduler_adoption_reject(
+                consumer, ExecutableLoadConsumerErrorV1.AuthorityRejected)
+        self._record_authenticated_executable_adoption_v1(
+            prepared_owner.state, 0u64, token)
+        val handle = retrieved.unwrap().image_handle
+        if consumer.expected_arch != "x86_64" or get_arch() != Architecture.X86_64:
+            self._record_authenticated_executable_adoption_v1(
+                SchedulerExecutableAdoptionOwnerStateV1.Quarantined, 0u64, token)
+            return _scheduler_adoption_fail_and_close(
+                table, authorities, token, consumer,
+                ExecutableLoadConsumerErrorV1.RollbackUnavailable)
+
+        val prepared = executable_prepare_image_v1(
+            table, handle, consumer, entry_point, Architecture.X86_64)
+        if prepared.is_err():
+            self._record_authenticated_executable_adoption_v1(
+                SchedulerExecutableAdoptionOwnerStateV1.Quarantined, 0u64, token)
+            return _scheduler_adoption_fail_and_close(
+                table, authorities, token, consumer, prepared.unwrap_err())
+        val prepared_image = prepared.unwrap()
+        val image: UserProcessImage = prepared_image.image
+        val mapping = prepared_image.mapping
+        val stack_top = user_process_image_stack_top(image)
+        val stack_size = user_process_image_stack_size(image)
+        val user_sp = user_process_image_initial_sp(image) & 0xFFFFFFFFFFFFFFF0u64
+
+        val space: AddressSpace = create_user_address_space()
+        if not _address_space_can_map(space):
+            self._record_authenticated_executable_adoption_v1(
+                SchedulerExecutableAdoptionOwnerStateV1.Quarantined, 0u64, token)
+            return _scheduler_adoption_fail_and_close(
+                table, authorities, token, consumer,
+                ExecutableLoadConsumerErrorV1.AddressSpaceUnavailable)
+        val mapped = _map_user_process_image(
+            space,
+            user_process_image_segments(image),
+            user_process_image_file_bytes(image),
+            stack_top,
+            stack_size,
+            user_process_image_initial_stack_bytes(image))
+        if mapped < 0:
+            destroy_user_address_space(space)
+            self._record_authenticated_executable_adoption_v1(
+                SchedulerExecutableAdoptionOwnerStateV1.Quarantined, 0u64, token)
+            return _scheduler_adoption_fail_and_close(
+                table, authorities, token, consumer,
+                ExecutableLoadConsumerErrorV1.MapFailed)
+
+        var slot = _find_empty_slot_in(self.tasks)
+        if slot < 0 and self.current.id == 0u64:
+            slot = 0
+        if slot < 0:
+            destroy_user_address_space(space)
+            self._record_authenticated_executable_adoption_v1(
+                SchedulerExecutableAdoptionOwnerStateV1.Quarantined, 0u64, token)
+            return _scheduler_adoption_fail_and_close(
+                table, authorities, token, consumer,
+                ExecutableLoadConsumerErrorV1.ConsumerExhausted)
+
+        val id = TaskId(id: scheduler_next_task_id_take())
+        val user_ctx = _initial_user_task_context(entry_point, user_sp)
+        val tcb = TaskControlBlock(
+            id: id, name: "authenticated-user-{id.id}",
+            state: TaskState.Ready, priority: priority, is_user: true,
+            entry_point: entry_point, context: user_ctx, user_context: Some(user_ctx),
+            address_space: space.phys_root, kernel_stack: 0u64,
+            user_stack: stack_top, capabilities: caps, parent: Some(self.current),
+            schedule: default_task_schedule(priority),
+            isolation: default_task_isolation(space.id),
+            assigned_cpu: 0u32, exit_code: 0,
+            ticks_remaining: TIME_SLICE_TICKS)
+        self.tasks[slot] = tcb
+        register_task_vmspace(
+            id.id.to_u32(),
+            ProcessVmSpace(pml4: space.phys_root, id: space.id, vma_count: 0, areas: []))
+        cap_init_task_record(id, true)
+        self._enqueue_ready_at_slot(id, slot)
+        val published_owner = scheduler_executable_adoption_transition_v1(
+            prepared_owner.state, SchedulerExecutableAdoptionOwnerEventV1.Publish)
+        self._record_authenticated_executable_adoption_v1(
+            published_owner.state, id.id, token)
+        val authorized_owner = scheduler_executable_adoption_transition_v1(
+            published_owner.state, SchedulerExecutableAdoptionOwnerEventV1.Confirm)
+        self._record_authenticated_executable_adoption_v1(
+            authorized_owner.state, id.id, token)
+        val closed = executable_loader_release_retrieved(table, authorities, token)
+        val final_state = if closed.is_ok():
+            ExecutableLoadConsumerStateV1.Adopted
+        else:
+            ExecutableLoadConsumerStateV1.AdoptedCloseRetryable
+        val final_error = if closed.is_err():
+            ExecutableLoadConsumerErrorV1.CloseFailed
+        else:
+            ExecutableLoadConsumerErrorV1.None
+        val result = SchedulerExecutableAdoptionResultV1(
+            pid: id.id,
+            receipt: _scheduler_adoption_receipt(
+                mapping, final_state, final_error,
+                authorized_owner.execution_authorized))
+        # The result is the per-execution proof returned to the caller.  Once
+        # captured, release only this successful scheduler transaction to Idle.
+        # Token replay remains rejected by the loader registry, and every
+        # failure path above remains sticky Quarantined.
+        val completed_owner = scheduler_executable_adoption_transition_v1(
+            authorized_owner.state,
+            SchedulerExecutableAdoptionOwnerEventV1.Complete)
+        self._record_authenticated_executable_adoption_v1(
+            completed_owner.state, id.id, token)
+        result
+
+    pub me authenticated_executable_adoption_snapshot_v1(
+    ) -> SchedulerExecutableAdoptionSnapshotV1:
+        SchedulerExecutableAdoptionSnapshotV1(
+            state: self.executable_adoption_state,
+            pid: self.executable_adoption_pid,
+            token_slot: self.executable_adoption_token_slot,
+            token_generation: self.executable_adoption_token_generation,
+            token_nonce: self.executable_adoption_token_nonce)
+
+    pub me retry_authenticated_executable_source_close_v1(
+        mut table: MountTable,
+        authorities: ExecutableAuthorityRegistryV1,
+        token: ExecutableAuthorityTokenV1
+    ) -> bool:
+        executable_loader_release_retrieved(table, authorities, token).is_ok()
+
+export SchedulerExecutableAdoptionResultV1
+export SchedulerExecutableAdoptionSnapshotV1

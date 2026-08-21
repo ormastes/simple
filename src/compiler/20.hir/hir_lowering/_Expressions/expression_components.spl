@@ -1,0 +1,399 @@
+# HIR lowering - Expression collections, operators, and pattern conversion.
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.frontend.parser_types.*
+use compiler.frontend.parser_types_expr.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_lowering.types.HirLowering
+
+impl HirLowering:
+    me lower_expr_list(exprs: [Expr]) -> [HirExpr]:
+        var result: [HirExpr] = []
+        for e in exprs:
+            result = result.push(self.lower_hir_expr(e))
+        result
+
+    me lower_interpolation_list(interps: [Interpolation]) -> [HirInterpolation]:
+        var result: [HirInterpolation] = []
+        for i in interps:
+            result = result.push(HirInterpolation(
+                expr: self.lower_hir_expr(i.expr),
+                format: i.format,
+                span: i.span
+            ))
+        result
+
+    me lower_dict_entry(entry: (Expr, Expr)) -> (HirExpr, HirExpr):
+        val (key, value) = entry
+        (self.lower_hir_expr(key), self.lower_hir_expr(value))
+
+    me lower_dict_entries(entries: [(Expr, Expr)]) -> [(HirExpr, HirExpr)]:
+        var result: [(HirExpr, HirExpr)] = []
+        for entry in entries:
+            result = result.push(self.lower_dict_entry(entry))
+        result
+
+    me lower_struct_field(field: (text, Expr)) -> (text, HirExpr):
+        val (name, value) = field
+        (name, self.lower_hir_expr(value))
+
+    me lower_struct_fields(fields: [(text, Expr)]) -> [(text, HirExpr)]:
+        var result: [(text, HirExpr)] = []
+        for field in fields:
+            result = result.push(self.lower_struct_field(field))
+        result
+
+    me lower_binop(op: BinOp, span: Span) -> HirBinOp:
+        match op:
+            case BinOp.Add: HirBinOp.Add
+            case BinOp.Sub: HirBinOp.Sub
+            case BinOp.Mul: HirBinOp.Mul
+            case BinOp.Div: HirBinOp.Div
+            case BinOp.Mod: HirBinOp.Mod
+            case BinOp.Pow: HirBinOp.Pow
+            case BinOp.MatMul: HirBinOp.MatMul
+            case BinOp.Eq: HirBinOp.Eq
+            case BinOp.NotEq: HirBinOp.NotEq
+            case BinOp.Lt: HirBinOp.Lt
+            case BinOp.LtEq: HirBinOp.LtEq
+            case BinOp.Gt: HirBinOp.Gt
+            case BinOp.GtEq: HirBinOp.GtEq
+            case BinOp.And: HirBinOp.And
+            case BinOp.Or: HirBinOp.Or
+            case BinOp.BitAnd: HirBinOp.BitAnd
+            case BinOp.BitOr: HirBinOp.BitOr
+            case BinOp.BitXor: HirBinOp.BitXor
+            case BinOp.Shl: HirBinOp.Shl
+            case BinOp.Shr: HirBinOp.Shr
+            case BinOp.BroadcastAdd: HirBinOp.BroadcastAdd
+            case BinOp.BroadcastSub: HirBinOp.BroadcastSub
+            case BinOp.BroadcastMul: HirBinOp.BroadcastMul
+            case BinOp.BroadcastDiv: HirBinOp.BroadcastDiv
+            case BinOp.BroadcastPow: HirBinOp.BroadcastPow
+            case BinOp.PipeForward: HirBinOp.PipeForward
+            case BinOp.Compose: HirBinOp.Compose
+            case BinOp.ComposeBack: HirBinOp.ComposeBack
+            case BinOp.Parallel: HirBinOp.Parallel
+            case BinOp.LayerConnect: HirBinOp.LayerConnect
+            case BinOp.In: HirBinOp.In
+            case BinOp.NotIn: HirBinOp.NotIn
+            case BinOp.Is: HirBinOp.Is
+            case BinOp.IsNot: HirBinOp.IsNot
+            case _:
+                self.error("invalid binary operator", span)
+                # Type-required recovery value; the fatal diagnostic prevents
+                # this HIR from reaching a backend.
+                HirBinOp.Add
+
+    me lower_unaryop(op: UnaryOp) -> HirUnaryOp:
+        val disc = rt_enum_discriminant(op)
+        if disc == rt_enum_discriminant(UnaryOp.Not):
+            return HirUnaryOp.Not
+        if disc == rt_enum_discriminant(UnaryOp.BitNot):
+            return HirUnaryOp.BitNot
+        if disc == rt_enum_discriminant(UnaryOp.Ref):
+            return HirUnaryOp.Ref
+        if disc == rt_enum_discriminant(UnaryOp.RefMut):
+            return HirUnaryOp.RefMut
+        if disc == rt_enum_discriminant(UnaryOp.Deref):
+            return HirUnaryOp.Deref
+        if disc == rt_enum_discriminant(UnaryOp.Transpose):
+            return HirUnaryOp.Transpose
+        HirUnaryOp.Neg
+
+    me lower_pattern(p: Pattern) -> HirPattern:
+        val kind = match p.kind:
+            case PatternKind.Wildcard:
+                HirPatternKind.Wildcard
+
+            case Literal(value):
+                HirPatternKind.Literal(self.lower_hir_expr(value))
+
+            case Binding(name, mutable):
+                val symbol = self.symbols.define(name, SymbolKind.Variable, nil, p.span, false, mutable, nil)
+                # Level-gated (default off): traces every pattern binding that
+                # is actually entered into the current scope. A binding that
+                # the arm body cannot resolve but that never appears here was
+                # dropped by the FRONTEND pattern conversion, not by this pass.
+                if (hir_expr_env_get("SIMPLE_DEBUG_MATCH_PAT") ?? "") == "1":
+                    eprint("[match-pat] define binding: {name}")
+                HirPatternKind.Binding(symbol, mutable)
+
+            case Tuple(elements):
+                var hir_elements: [HirPattern] = []
+                for elem in elements:
+                    hir_elements = hir_elements.push(self.lower_pattern(elem))
+                HirPatternKind.Tuple(hir_elements)
+
+            case Array(elements, rest):
+                var hir_elements: [HirPattern] = []
+                for elem in elements:
+                    hir_elements = hir_elements.push(self.lower_pattern(elem))
+                val rest_symbol: SymbolId? = match rest:
+                    case Some(rest_name): self.symbols.define(rest_name, SymbolKind.Variable, nil, p.span, false, false, nil)
+                    case _: nil
+                HirPatternKind.Array(hir_elements, rest_symbol)
+
+            case Struct(type_, fields):
+                val symbol = self.symbols.lookup_or_invalid(type_)
+                val hir_type = if symbol.is_valid():
+                    HirType(kind: HirTypeKind.Named(symbol, []), span: p.span)
+                else:
+                    HirType(kind: HirTypeKind.Error, span: p.span)
+                var hir_fields: [(text, HirPattern)] = []
+                for (fname, fpat) in fields:
+                    hir_fields = hir_fields.push((fname, self.lower_pattern(fpat)))
+                HirPatternKind.Struct(hir_type, hir_fields)
+
+            case Enum(enum_, variant, payload):
+                # nestedmatch lane: bare positional struct-pattern
+                # reinterpretation. `case Point(x, y):` and a nested payload
+                # sub-pattern like `case Circle(Point(x, y)):` both parse
+                # IDENTICALLY to a bare (unqualified) enum-variant pattern --
+                # convert_flat_pattern (frontend, _FlatAstBridge/
+                # convert_nodes.spl) has no dedicated struct-positional-
+                # pattern grammar and none is invented here (brace `Point{x,
+                # y}` pattern syntax does not parse either -- matchpat lane
+                # finding). When the unqualified `variant` name is a
+                # REGISTERED STRUCT (struct_field_order_by_name is populated
+                # in the up-front declarations pass before any function body
+                # is lowered -- see try_register_local_struct_type's
+                # identical read of this same map in statements.spl),
+                # reinterpret this pattern as a genuine Struct pattern,
+                # reusing the SAME positional-field-order convention already
+                # established for struct CONSTRUCTION call sites (`Point(3,
+                # 4)`) -- not new grammar, just an existing convention
+                # applied symmetrically to pattern position. A bare pattern
+                # whose name matches neither a struct nor any registered enum
+                # variant still falls through unchanged to the plain Enum
+                # path below, which the MIR enum-match lowering already
+                # rejects with a genuine "unknown variant" compile error
+                # (verified empirically: build fails loudly, no binary --
+                # never silently wrong), so this branch is purely additive.
+                if enum_ == "" and rt_dict_contains(self.struct_field_order_by_name, variant) and not rt_dict_contains(self.enum_variant_names, variant):
+                    val field_order = self.struct_field_order_by_name[variant]
+                    var sub_patterns: [Pattern] = []
+                    if val pl_s = payload:
+                        match pl_s:
+                            case Tuple(patterns_s):
+                                sub_patterns = patterns_s
+                            case Struct(_):
+                                ()
+                    val struct_symbol = self.symbols.lookup_or_invalid(variant)
+                    val struct_hir_type = if struct_symbol.is_valid():
+                        HirType(kind: HirTypeKind.Named(struct_symbol, []), span: p.span)
+                    else:
+                        HirType(kind: HirTypeKind.Error, span: p.span)
+                    var struct_hir_fields: [(text, HirPattern)] = []
+                    var sfi = 0
+                    while sfi < sub_patterns.len() and sfi < field_order.len():
+                        struct_hir_fields = struct_hir_fields.push((field_order[sfi], self.lower_pattern(sub_patterns[sfi])))
+                        sfi = sfi + 1
+                    HirPatternKind.Struct(struct_hir_type, struct_hir_fields)
+                else:
+                    # Level-gated (default off): traces the enum-pattern path,
+                    # including whether a payload was seen at all. An arm whose
+                    # payload bindings never reach the Binding case above will
+                    # show no `payload-tuple` line here.
+                    val dbg_on = (hir_expr_env_get("SIMPLE_DEBUG_MATCH_PAT") ?? "") == "1"
+                    if dbg_on:
+                        eprint("[match-pat] enum pattern: {enum_}.{variant}")
+                        if val dbg_pl = payload:
+                            eprint("[match-pat]   payload present")
+                            match dbg_pl:
+                                case Tuple(dbg_pats):
+                                    val dbg_n: i64 = dbg_pats.len()
+                                    eprint("[match-pat]   payload-tuple n={dbg_n}")
+                                case Struct(dbg_flds):
+                                    val dbg_m: i64 = dbg_flds.len()
+                                    eprint("[match-pat]   payload-struct n={dbg_m}")
+                        else:
+                            eprint("[match-pat]   payload absent")
+                    val symbol = self.symbols.lookup_or_invalid(enum_)
+                    val hir_type = if symbol.is_valid():
+                        HirType(kind: HirTypeKind.Named(symbol, []), span: p.span)
+                    else:
+                        HirType(kind: HirTypeKind.Error, span: p.span)
+                    # No `.map(\pl: ...)` lambda here: the seed interpreter does not
+                    # bind `self` inside a lambda body, so `self.lower_pattern` in a
+                    # closure fails native-build with "variable `self` not found".
+                    #
+                    # The payload is destructured with the `if val` idiom, NOT
+                    # with `match payload: case Some(pl): ...`. On this lane a
+                    # `case Some(binding)` arm over an OPTIONAL (`T?`, which is
+                    # a nullable -- not the `Option` enum) does not run its
+                    # body, so the whole payload sub-pattern walk below was
+                    # skipped silently: `lower_pattern` was never called on the
+                    # payload's sub-patterns, so none of their `Binding` names
+                    # were ever entered into scope via `symbols.define`, and
+                    # every arm body that used one failed HIR lowering with
+                    # "unresolved name: <binding>" -- unless a same-named
+                    # parameter or outer local happened to exist and absorb the
+                    # lookup. The sibling `if val pl_s = payload:` read in the
+                    # struct-positional branch above already uses this idiom;
+                    # this makes the two consistent.
+                    #
+                    # The sub-pattern lists are built with explicit
+                    # reassignment (`xs = xs.push(..)`) rather than a bare
+                    # `xs.push(..)` whose result is discarded, so the result
+                    # does not depend on `.push` happening to mutate in place.
+                    # Bare-to-Option assignment landmine (seed interpreter,
+                    # SIMPLE_EXECUTION_MODE=interpret -- the engine
+                    # native-build's own MIR lowering runs under): assigning a
+                    # BARE enum-variant value (`HirPatternPayload.Tuple(...)`)
+                    # directly into a `var x: HirPatternPayload? = nil` slot
+                    # relies on implicit bare->Some coercion, which the seed
+                    # silently drops for an enum payload carrying an array
+                    # field -- `hir_payload.?` reads false/nil immediately
+                    # after the assignment, and that stale "absent" state
+                    # then propagates into every downstream consumer (MIR's
+                    # `enum_pat_binding_syms`/`enum_pat_arity` in
+                    # switch_operators_calls.spl silently return empty/0 for
+                    # a payload that is `.?`-false, so `case Ok(h): h` compiled
+                    # under native-build with `undefined variable: h` even
+                    # though HIR genuinely built the Tuple([Binding(h)])
+                    # payload one statement earlier -- see bug doc
+                    # native_build_filehandle_instance_method_unresolved_2026-08-09.md).
+                    # Fully isolated with a standalone, compiler-free repro:
+                    # `val x: T? = EnumVariant(...)` reads `.?` false;
+                    # `val x: T? = Some(EnumVariant(...))` reads it true.
+                    # Explicit `Some(...)` is the fix -- never leave the
+                    # bare-value coercion to do the wrapping for an
+                    # array-payload enum assigned into an Option slot.
+                    var hir_payload: HirPatternPayload? = nil
+                    if val pl = payload:
+                        match pl:
+                            case Tuple(patterns):
+                                var hir_patterns: [HirPattern] = []
+                                for pat in patterns:
+                                    hir_patterns = hir_patterns.push(self.lower_pattern(pat))
+                                hir_payload = Some(HirPatternPayload.Tuple(hir_patterns))
+                            case Struct(fields):
+                                var hir_fields: [(text, HirPattern)] = []
+                                for (fname, fpat) in fields:
+                                    hir_fields = hir_fields.push((fname, self.lower_pattern(fpat)))
+                                hir_payload = Some(HirPatternPayload.Struct(hir_fields))
+                    HirPatternKind.Enum(hir_type, variant, hir_payload)
+
+            case Or(patterns):
+                var hir_patterns: [HirPattern] = []
+                for pat in patterns:
+                    hir_patterns = hir_patterns.push(self.lower_pattern(pat))
+                HirPatternKind.Or(hir_patterns)
+
+            case Range(start, end, inclusive):
+                # if-val + bare-lift: value-if-nil and optional-in-arg are
+                # miscompiled on the stage4 native lane (bug doc 2026-07-23).
+                val pstart: HirExpr? = match start:
+                    case Some(pstart_src): self.lower_hir_expr(pstart_src)
+                    case _: nil
+                # if-val + bare-lift: value-if-nil and optional-in-arg are
+                # miscompiled on the stage4 native lane (bug doc 2026-07-23).
+                val pend: HirExpr? = match end:
+                    case Some(pend_src): self.lower_hir_expr(pend_src)
+                    case _: nil
+                HirPatternKind.Range(pstart, pend, inclusive)
+
+            case Error:
+                HirPatternKind.Error
+
+            case _:
+                self.error("unsupported pattern kind", p.span)
+                HirPatternKind.Error
+
+        HirPattern(kind: kind, type_: nil, span: p.span)
+
+    # ========================================================================
+    # matchpat lane: match-pattern forms beyond basic enum-match.
+    #
+    # The MIR-level match lowering ("B5b", 50.mir/_MirLoweringExpr/
+    # expr_dispatch.spl::lower_match_case) only natively supports Wildcard |
+    # Binding | Literal(IntLit) | Or(all IntLit) for plain value matches, and
+    # Enum patterns whose payload sub-patterns are themselves plain
+    # Binding/Wildcard. Every other pattern kind hits a `self.error(...)`
+    # there and returns a bare unit temp -- but native-build's lower_to_mir
+    # never checks MirLowering.errors, so the build "succeeds" and the
+    # resulting binary silently returns a garbage value instead of the
+    # correct one or a clean build failure (matchpat lane root-cause; that
+    # MIR file is owned by a different lane this round and is not touched
+    # here). The HIR-only fix below closes this gap without ever touching
+    # the fenced MIR files:
+    #
+    # Enum-pattern arms keep routing through HirExprKind.MatchCase, via
+    # build_match_expr's has_enum branch, which now normalizes the nested
+    # payload sub-pattern kinds first (match_desugaring.spl):
+    #   * Tuple/Struct  -- flattened to a fresh binding + Field/Index prelude
+    #                      statements (flatten_enum_match_arm),
+    #   * Enum/Literal  -- passed through to MIR's emit_enum_payload_deep,
+    #                      which emits the real runtime test + nested binds
+    #                      with fallthrough to the next arm,
+    #   * Or            -- expanded into sibling arms of the same variant
+    #                      (expand_or_payload_arms), which is exactly
+    #                      or-pattern semantics under that fallthrough,
+    #   * Range         -- replaced by a fresh binding whose test moves into
+    #                      the arm body, with the else branch re-dispatching
+    #                      the remaining arms over a scrutinee temp
+    #                      (lower_range_payload_arms).
+    # Nested enum-payload destructure therefore WORKS (pinned by
+    # test/fixtures/compiler/nested_payload_subpattern_matrix.spl); only
+    # Array/Error sub-patterns are still a loud compile error.
+    #
+    # No arm has an Enum pattern, but some arm needs a pattern kind the MIR
+    # fast path can't test (Literal(non-IntLit) e.g. text/bool, Range, Or,
+    # Tuple, Struct): desugar the WHOLE match into an ordinary if/else-if
+    # chain over a single scrutinee temp, entirely bypassing
+    # HirExprKind.MatchCase. The LAST arm in source order always becomes the
+    # unconditional terminal branch (mirroring a compiler that only ever
+    # lowers programs an earlier front-end stage already accepted), so no
+    # synthetic panic/dummy-value fallback is needed for any of the
+    # exhaustive forms this lane covers (wildcard/binding default, bool
+    # true/false, irrefutable tuple/struct destructure). A match that is
+    # genuinely non-exhaustive with no default arm is a pre-existing gap
+    # (this compiler does not check pattern exhaustiveness anywhere yet) and
+    # is unchanged by this fix.
+    # ========================================================================
+
+    me pattern_is_mir_native(kind: HirPatternKind) -> bool:
+        """True iff the MIR B5b fast path already handles this pattern kind
+        correctly on its own (see lower_match_case in the fenced
+        expr_dispatch.spl)."""
+        match kind:
+            case PatternKind.Wildcard:
+                true
+            case Binding(_, _):
+                true
+            case Literal(lit_expr):
+                match lit_expr.kind:
+                    case IntLit(_, _):
+                        true
+                    case _:
+                        false
+            case Or(patterns):
+                var ok = true
+                for p in patterns:
+                    match p.kind:
+                        case Literal(lit2):
+                            match lit2.kind:
+                                case IntLit(_, _):
+                                    ()
+                                case _:
+                                    ok = false
+                        case _:
+                            ok = false
+                ok
+            case Enum(_, _, _):
+                # Enum arms always route through the pre-existing, tested
+                # MatchCase enum-match lowering unchanged (see
+                # build_match_expr's `has_enum` branch below) regardless of
+                # this function's answer, so this is never actually
+                # consulted for them -- true is the conservative "don't
+                # touch it" answer. (Nested payload sub-patterns are
+                # normalized there before MIR ever sees them: Tuple/Struct
+                # flattened, Enum/Literal passed to emit_enum_payload_deep,
+                # Or expanded into sibling arms, Range turned into an
+                # in-body test with arm fallthrough -- see the block comment
+                # above.)
+                true
+            case _:
+                # Tuple, Array, Struct, Range, Error
+                false

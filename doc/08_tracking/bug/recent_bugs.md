@@ -1,8 +1,8 @@
 # Recent Bugs
 
-**Generated:** 2026-08-17
+**Generated:** 2026-08-21
 **Database:** `doc/08_tracking/bug/bug_db.sdn`
-**Open:** 1278 | **Closed:** 1
+**Open:** 1277 | **Closed:** 2
 
 ## Open Bugs
 
@@ -454,7 +454,6 @@
 | interp_testdatabase_class_collision_kills_aggregate_test_runs_2026-07-17 | P1 | open | TestDatabase class-name collision in the interpreter kills every aggregate simple test run | `src/lib/nogc_sync_mut/test_runner/test_db_compat.spl:0` |
 | interp_text_find_byte_offset_vs_slice_char_offset_2026-06-30 | P2 | open | text.find returns a BYTE offset while text.slice/text.len use CHAR offsets, silently corrupting data | `src/compiler_rust/compiler/src/interpreter/expr/collections.rs:0` |
 | interp_to_int_split_result_nil_coalesce_garbage_2026-07-17 | P2 | open | .to_int() on split-derived text and the ?? fallback both return garbage under the Rust seed interpreter | `src/compiler_rust/compiler/src/interpreter/expr/ops.rs:0` |
-| interp_u64_high_bit_option_unwrap_corruption_2026-07-11 | P1 | open | u64 struct field >= 2^63 corrupts if val Option unwrap after a JIT shared-pointer bail | `src/lib/common/ui/window_scene.spl:0` |
 | interp_use_as_alias_not_visible_in_function_body_2026-07-20 | P2 | open | Module-level use <module> as <alias> is not resolvable inside a function body: variable <alias> not found | `src/compiler/90.tools/verify/checker.spl:0` |
 | interp_while_body_scope_leak_2026-07-15 | P2 | open | Interpreter while-body locals leak into the enclosing scope (silent caller-state mutation) | `src/compiler/10.frontend/core/interpreter/eval.spl:0` |
 | int_to_u8_to_char_chained_call_nested_dispatch_2026-08-07 | P2 | open | (i64).to_u8().to_char() chained call fails when it appears in a nested-call dispatch context | `src/os/compositor/host_gui_event_router.spl:0` |
@@ -1292,3 +1291,4 @@
 | ID | Severity | Status | Title | Updated |
 |----|----------|--------|-------|---------|
 | gpu_backend_layer_result_reason_clobber_2026_08_03 | P2 | fixed | GPU backend layer_result clobbers producer unavailability reason | 2026-08-03 |
+| interp_u64_high_bit_option_unwrap_corruption_2026-07-11 | P1 | fixed | u64 struct field >= 2^63 corrupts if val Option unwrap after a JIT shared-pointer bail | 2026-08-17 |

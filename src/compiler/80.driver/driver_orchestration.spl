@@ -98,8 +98,15 @@ impl CompilerDriver:
         log_build_progress("load_sources", "files", -1, -1,
             "starting", 0, 6, 0, 0, "running")
         log_phase("phase1:load_sources:start")
+        val sources_streaming_in_place = driver_streaming_surface_enabled(self.ctx)
         val (loaded_ctx, load_ok) = self.load_sources_impl()
-        self.ctx = loaded_ctx
+        # `load_sources_impl` commits directly for the streaming owner. A
+        # second aggregate assignment at this exact boundary corrupted the
+        # returned context under Stage-3 native value semantics, before the
+        # first phase-2 receipt. Legacy non-streaming users retain the returned
+        # context installation.
+        if not sources_streaming_in_place:
+            self.ctx = loaded_ctx
         if not load_ok:
             log_error("phase 1 FAILED")
             log_build_progress("load_sources", "files", -1, -1,
@@ -114,8 +121,7 @@ impl CompilerDriver:
         log_phase("phase2:parse:start")
         log_debug("phase 2: parsing...")
         compiler_coverage_inventory_reset(self.ctx.config.contains_key("coverage"))
-        val (parsed_ctx, parse_ok) = self.parse_all_impl()
-        self.ctx = parsed_ctx
+        val parse_ok = self.parse_all_committing_impl()
         if not parse_ok:
             log_error("phase 2 FAILED")
             log_build_progress("parse", "files", -1, self.ctx.sources.len(),
@@ -145,8 +151,16 @@ impl CompilerDriver:
 
         log_phase("phase3:hir_typecheck:start")
         log_trace("BEFORE phase 3")
+        val hir_streaming_in_place = self.streaming_surface_owner_ready
         val (analyzed_ctx, analyze_ok) = self.lower_and_check_impl()
-        self.ctx = analyzed_ctx
+        # The streaming path is a canonical `me` owner operation and has
+        # already committed every field directly to self.ctx. Reassigning its
+        # returned whole-context snapshot corrupts adjacent scalar fields under
+        # Stage-3 native value semantics (observed error_count 0 before return,
+        # nonzero at phase 4). Legacy non-streaming paths still return their
+        # newly assembled context and therefore retain the assignment.
+        if not hir_streaming_in_place:
+            self.ctx = analyzed_ctx
         log_trace("AFTER phase 3")
         if not analyze_ok:
             log_error("phase 3 FAILED")
@@ -180,7 +194,7 @@ impl CompilerDriver:
 
         log_phase("phase4:monomorphize:start")
         log_debug("phase 4: monomorphization...")
-        val mono_ok = self.monomorphize_impl()
+        val mono_ok = self.monomorphize_impl(analyze_ok)
         if not mono_ok:
             log_error("phase 4 FAILED")
             log_build_progress("monomorphize", "modules", -1, -1,
@@ -225,8 +239,7 @@ impl CompilerDriver:
         if not load_ok:
             return CompileResult.ParseError(self.ctx.errors)
 
-        val (parsed_ctx, parse_ok) = self.parse_all_impl()
-        self.ctx = parsed_ctx
+        val parse_ok = self.parse_all_committing_impl()
         if not parse_ok:
             return CompileResult.ParseError(self.ctx.errors)
         self.capture_vhdl_metadata()
@@ -239,7 +252,7 @@ impl CompilerDriver:
         if self.ctx.options.low_memory:
             self.ctx.evict_ast()
 
-        if not self.monomorphize_impl():
+        if not self.monomorphize_impl(analyze_ok):
             return CompileResult.TypeError(self.ctx.errors)
         if not self.lower_to_mir():
             # See driver_aot_pipeline.spl's aot_compile() for the full

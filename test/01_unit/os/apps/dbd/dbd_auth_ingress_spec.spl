@@ -1,0 +1,144 @@
+# @cover src/os/apps/dbd/dbd_auth_ingress.spl 95%
+"""
+# DBD mutable-byte AUTH ingress
+
+Exercises the byte-domain RESP AUTH owner used after authenticated TLS ingress.
+Credentials are constructed as mutable fixtures, never as immutable text.  The
+scenarios cover split and coalesced requests, malformed framing, bounded
+one-byte fragmentation, authentication success/failure/lockout, and owner-visible
+zeroization on success, rejection, failure, and close.
+"""
+
+use std.spec
+use os.apps.dbd.dbd_protocol.{
+    DbdCredentialProvider,
+    DBD_MAX_AUTH_ATTEMPTS_PER_SESSION
+}
+use os.apps.dbd.dbd_auth_ingress.{
+    DbdMutableAuthRequestOwnerV1, DbdAuthIngressStatusV1
+}
+
+fn _credential(byte: u8) -> [u8]:
+    var out: [u8] = []
+    var index: i64 = 0
+    while index < 32:
+        out.push(byte)
+        index = index + 1
+    out
+
+fn _auth_request(credential: [u8], trailing: [u8] = []) -> [u8]:
+    var out = "*3\r\n$4\r\nAUTH\r\n$8\r\noperator\r\n$32\r\n".bytes()
+    for byte in credential:
+        out.push(byte)
+    out.push(13u8)
+    out.push(10u8)
+    for byte in trailing:
+        out.push(byte)
+    out
+
+fn _configured_provider(byte: u8) -> DbdCredentialProvider:
+    var provider = DbdCredentialProvider.new()
+    val configured = provider.configure_bytes("operator", _credential(byte))
+    if not configured:
+        fail("credential provider fixture rejected")
+    provider
+
+describe "DBD mutable AUTH framing":
+    it "authenticates a request split across authenticated plaintext frames":
+        val provider = _configured_provider(17u8)
+        val request = _auth_request(_credential(17u8))
+        val owner = DbdMutableAuthRequestOwnerV1.new(101)
+        val first = owner.ingest(provider, request.slice(0, 9))
+        expect(first).to_equal(DbdAuthIngressStatusV1.NeedMore)
+        val second = owner.ingest(provider, request.slice(9, 31))
+        expect(second).to_equal(DbdAuthIngressStatusV1.NeedMore)
+        val third = owner.ingest(
+            provider, request.slice(31, request.len()))
+        expect(third).to_equal(DbdAuthIngressStatusV1.Authenticated)
+        expect(owner.can_dispatch()).to_be(true)
+        expect(owner.identity()).to_equal("operator")
+        expect(owner.last_credential_was_zeroized()).to_be(true)
+        expect(owner.last_wiped_credential_byte_count()).to_equal(32i64)
+        expect(owner.retained_secret_byte_count()).to_equal(0i64)
+
+    it "separates a coalesced post-auth command without treating it as secret":
+        val provider = _configured_provider(19u8)
+        val command = "*1\r\n$4\r\nPING\r\n".bytes()
+        val owner = DbdMutableAuthRequestOwnerV1.new(102)
+        val status = owner.ingest(
+            provider, _auth_request(_credential(19u8), command))
+        expect(status).to_equal(DbdAuthIngressStatusV1.Authenticated)
+        expect(owner.take_authenticated_trailing()).to_equal(command)
+        expect(owner.take_authenticated_trailing().len()).to_equal(0u64)
+        expect(owner.last_credential_was_zeroized()).to_be(true)
+        expect(owner.last_wiped_credential_byte_count()).to_equal(32i64)
+
+    it "rejects malformed AUTH syntax and wipes a collected credential prefix":
+        val provider = _configured_provider(21u8)
+        var malformed = "*3\r\n$4\r\nAUTH\r\n$8\r\noperator\r\n$32\r\n".bytes()
+        var index: i64 = 0
+        while index < 32:
+            malformed.push(21u8)
+            index = index + 1
+        malformed.push(10u8)
+        val owner = DbdMutableAuthRequestOwnerV1.new(103)
+        expect(owner.ingest(provider, malformed)).to_equal(
+            DbdAuthIngressStatusV1.Malformed)
+        expect(owner.can_dispatch()).to_be(false)
+        expect(owner.last_credential_was_zeroized()).to_be(true)
+        expect(owner.last_wiped_credential_byte_count()).to_equal(32i64)
+        expect(owner.retained_secret_byte_count()).to_equal(0i64)
+        expect(owner.ingest(provider, [1u8])).to_equal(
+            DbdAuthIngressStatusV1.Closed)
+
+    it "accepts a legal AUTH request fragmented one plaintext byte at a time":
+        val provider = _configured_provider(23u8)
+        val request = _auth_request(_credential(23u8))
+        val owner = DbdMutableAuthRequestOwnerV1.new(104)
+        var fragment: i64 = 0
+        while fragment < request.len().to_i64() - 1:
+            val status = owner.ingest(
+                provider,
+                request.slice(fragment.to_u64(), (fragment + 1).to_u64())
+            )
+            expect(status).to_equal(DbdAuthIngressStatusV1.NeedMore)
+            fragment = fragment + 1
+        expect(owner.ingest(
+            provider,
+            request.slice(fragment.to_u64(), request.len())
+        )).to_equal(DbdAuthIngressStatusV1.Authenticated)
+        expect(owner.can_dispatch()).to_be(true)
+        expect(owner.last_credential_was_zeroized()).to_be(true)
+
+describe "DBD mutable AUTH identity and lockout":
+    it "wipes each rejected candidate and locks on the bounded fourth attempt":
+        val provider = _configured_provider(29u8)
+        val wrong = _auth_request(_credential(30u8))
+        val owner = DbdMutableAuthRequestOwnerV1.new(105)
+        var attempt: i64 = 0
+        while attempt < DBD_MAX_AUTH_ATTEMPTS_PER_SESSION - 1:
+            expect(owner.ingest(provider, wrong)).to_equal(
+                DbdAuthIngressStatusV1.Rejected)
+            expect(owner.last_credential_was_zeroized()).to_be(true)
+            expect(owner.retained_secret_byte_count()).to_equal(0i64)
+            attempt = attempt + 1
+        expect(owner.ingest(provider, wrong)).to_equal(
+            DbdAuthIngressStatusV1.Locked)
+        expect(owner.is_locked()).to_be(true)
+        expect(owner.can_dispatch()).to_be(false)
+        expect(owner.attempt_count()).to_equal(
+            DBD_MAX_AUTH_ATTEMPTS_PER_SESSION)
+        expect(owner.last_credential_was_zeroized()).to_be(true)
+
+    it "close wipes an incomplete credential held by the owner":
+        val provider = _configured_provider(31u8)
+        val request = _auth_request(_credential(31u8))
+        val owner = DbdMutableAuthRequestOwnerV1.new(106)
+        val partial = request.slice(0, request.len() - 10u64)
+        expect(owner.ingest(provider, partial)).to_equal(
+            DbdAuthIngressStatusV1.NeedMore)
+        owner.close()
+        expect(owner.last_credential_was_zeroized()).to_be(true)
+        expect(owner.retained_secret_byte_count()).to_equal(0i64)
+        expect(owner.ingest(provider, [1u8])).to_equal(
+            DbdAuthIngressStatusV1.Closed)

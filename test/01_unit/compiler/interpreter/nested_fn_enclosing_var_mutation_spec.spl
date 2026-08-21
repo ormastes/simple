@@ -1,0 +1,81 @@
+# Regression: a nested `fn` assigning an ENCLOSING local must update that local.
+#
+# Bug: `node_exec.rs` Node::Function captures the enclosing scope by SNAPSHOT
+# (`captured_env: Arc::new(env.clone())`), and the body then runs in `local_env`,
+# a further copy. Nothing propagated writes back, so the assignment died with the
+# frame and the enclosing variable silently kept its old value — compiles clean,
+# exits 0, wrong answer.
+#
+# Two distinct halves, both required — the fix for one does not give the other,
+# and the first version of this fix passed the write-back half while still
+# failing the accumulate half (returned 7 instead of 12):
+#   1. WRITE-BACK  — a single call's assignment is visible to the caller.
+#   2. FRESH READ  — the SECOND call sees the FIRST call's result, rather than
+#                    re-reading the declaration-time snapshot.
+#
+# See doc/08_tracking/bug/nested_fn_cannot_mutate_enclosing_it_block_var_2026-08-04.md
+# @tag: unit, compiler, interpreter, closure, mutation
+
+use std.spec.{describe, it, expect}
+
+describe "nested fn mutation of an enclosing local":
+
+    it "propagates a single assignment back to the enclosing scope":
+        var total = 0
+        fn bump(n: i64):
+            total = total + n
+        bump(5)
+        expect(total).to_equal(5)
+
+    it "accumulates across repeated calls (second call sees the first result)":
+        # THE ORIGINAL DEFECT: this printed 0. A partial fix printed 7 (the last
+        # call only), because each call re-read the declaration-time snapshot.
+        var total = 0
+        fn bump(n: i64):
+            total = total + n
+        bump(5)
+        bump(7)
+        expect(total).to_equal(12)
+
+    it "supports plain assignment, not only compound assignment":
+        var seen = 0
+        fn record(n: i64):
+            seen = n
+        record(42)
+        expect(seen).to_equal(42)
+
+    it "mutates an enclosing text variable":
+        var log = ""
+        fn append(s: text):
+            log = log + s
+        append("a")
+        append("b")
+        expect(log).to_equal("ab")
+
+    it "mutates an enclosing bool variable":
+        var flag = false
+        fn raise():
+            flag = true
+        raise()
+        expect(flag).to_equal(true)
+
+    it "leaves a callee-only local invisible to the caller":
+        # The write-back must be restricted to names the CALLER already binds.
+        # A callee local escaping into the caller would be the opposite defect.
+        var total = 0
+        fn bump(n: i64):
+            var scratch = n * 100
+            total = total + scratch
+        bump(1)
+        expect(total).to_equal(100)
+
+    it "lets a parameter shadow an enclosing name without clobbering it":
+        # Parameter binding happens AFTER the enclosing-local refresh, so the
+        # parameter must win inside the body and the outer variable must be
+        # untouched by that shadowing.
+        var value = 10
+        fn shadow(value: i64) -> i64:
+            value * 2
+        val doubled = shadow(3)
+        expect(doubled).to_equal(6)
+        expect(value).to_equal(10)

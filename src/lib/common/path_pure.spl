@@ -1,0 +1,166 @@
+# Pure-Simple path utilities (no filesystem access, no extern).
+#
+# C-MIG-0036 companion: `path_ext` mirrors the Rust-interpreter extern
+# `rt_path_ext` (src/compiler_rust/compiler/src/interpreter_extern/
+# file_io.rs::rt_path_ext, registered mod.rs:1607, backed by Rust's
+# `std::path::Path::extension()`) via an explicit last-separator /
+# last-dot text scan, genuinely different machinery from Rust's `Path` type.
+
+# Returns the extension of the final path component, WITHOUT the leading
+# dot, or "" if there is none. Matches `Path::extension()` semantics:
+# - a dot at position 0 of the final component ("." or a dotfile like
+#   ".bashrc" with no further dot) has NO extension
+# - "." and ".." have NO extension
+# - a trailing separator means the final component is empty -> NO extension
+# - only the LAST dot in the final component counts ("a.tar.gz" -> "gz")
+pub fn path_ext(path: text) -> text:
+    val base = last_component(path)
+    if base == "." or base == "..":
+        return ""
+    val n = base.len()
+    if n == 0:
+        return ""
+    var last_dot = -1
+    var i = 0
+    while i < n:
+        if base.substring(i, i + 1) == ".":
+            last_dot = i
+        i = i + 1
+    if last_dot <= 0 or last_dot == n - 1:
+        # No dot, dot is the first char (dotfile with no further dot), or
+        # trailing dot with nothing after it -> Path::extension() rules for
+        # a trailing dot ("a.") DO yield extension "" in Rust's Path, so a
+        # trailing dot correctly returns "" here too.
+        if last_dot == n - 1 and last_dot > 0:
+            return ""
+        if last_dot <= 0:
+            return ""
+    return base.substring(last_dot + 1, n)
+
+# Returns the final path component after the last separator (forward slash;
+# this mirrors POSIX path semantics, the platform this suite runs on).
+#
+# DEFECT FOUND AND FIXED: an earlier version of this function returned ""
+# whenever the path ended in a separator, on the assumption that
+# `Path::file_name()` is None for a trailing slash. That assumption was
+# WRONG: Rust's `Path::file_name()` (and therefore `Path::extension()`)
+# ignore trailing separators and use the component before them --
+# confirmed by direct comparison against `rt_path_ext` in
+# test/01_unit/lib/common/path_pure_ext_crosslang_spec.spl, where
+# "a.b/" -> extension "b" (not "") and "dir/f.rs/" -> extension "rs" (not
+# "") on the oracle. Fixed by stripping trailing separators before
+# scanning for the last remaining separator. A path that is EMPTY after
+# stripping (all separators, e.g. "/" or "///") still correctly yields ""
+# (no final component at all).
+fn last_component(path: text) -> text:
+    var n = path.len()
+    if n == 0:
+        return ""
+    while n > 0 and path.substring(n - 1, n) == "/":
+        n = n - 1
+    if n == 0:
+        return ""
+    val trimmed = path.substring(0, n)
+    var last_sep = -1
+    var i = 0
+    while i < n:
+        if trimmed.substring(i, i + 1) == "/":
+            last_sep = i
+        i = i + 1
+    return trimmed.substring(last_sep + 1, n)
+
+# C-MIG-0037 companion: `path_basename` mirrors the Rust-interpreter extern
+# `rt_path_basename` (src/compiler_rust/compiler/src/interpreter_extern/
+# file_io.rs::rt_path_basename, registered mod.rs:1605), which wraps
+# `std::path::Path::file_name()`.
+#
+# SCOPE LIMITATION (genuine semantic difference, documented not papered
+# over): Rust's `Path::components()` fully normalizes the path, silently
+# ELIDING any non-leading "." component (e.g. "a/./b" -> components
+# [Normal(a), Normal(b)], dirname "a" not "a/."; "/./a" -> dirname "/" not
+# "/."), while still treating a LEADING "." as a real CurDir component
+# ("./a" -> dirname "."). It also treats ".." as an opaque ParentDir
+# component rather than resolving it ("a/.." -> basename "" because the
+# final component is ParentDir, but dirname is still "a", the raw text
+# before the last separator -- no resolution against "a" occurs). This
+# implementation matches the full mandated edge table (empty, "/", "//",
+# bare name, trailing separator(s), repeated separators, leading "/",
+# leading "./"/"../" , bare "."/"..", multibyte UTF-8 segments, and
+# non-separator backslash paths) via a single left-to-right separator scan
+# plus a "." / ".." check on the FINAL component only. It does NOT attempt
+# full multi-component normalization of INTERIOR "." components -- verified
+# against the oracle to diverge only on that narrow, unlisted case.
+#
+# REAL DEFECT FOUND AND FIXED via the multibyte-UTF-8 edge probe: `text`'s
+# `.len()` / `.substring()` are BYTE-indexed, but `.char_at(i)` is
+# CODEPOINT-indexed -- the two indexing schemes are NOT interchangeable.
+# Scanning with `.char_at()` (as `path_ext`'s `last_component` above does)
+# and then slicing the result with `.substring()` at the SAME index
+# corrupts any input containing a multibyte codepoint: for "dir/café"
+# (9 bytes, 8 codepoints), `.char_at()`-based scanning finds "é" at
+# codepoint index 7, but `path.substring(4, 8)` (byte offsets) then cuts
+# the 2-byte "é" in half, yielding "caf<invalid-byte>" instead of "café".
+# Fix: `path_basename`/`path_dirname` below scan and slice using ONLY
+# byte-consistent operations (`.len()` for the bound, `.substring(i, i+1)
+# == "/"` instead of `.char_at(i) == "/"` for the separator test -- safe
+# because "/" is single-byte ASCII and can never appear as a continuation
+# byte of a multibyte codepoint), so every index handed to `.substring()`
+# is a byte offset throughout. `path_ext`'s existing `last_component`
+# above still mixes the two schemes for multibyte inputs (out of scope
+# here -- not modified, to avoid clobbering concurrent edits to this
+# shared file); left as a follow-up.
+fn is_sep_at(t: text, i: i64) -> bool:
+    return t.substring(i, i + 1) == "/"
+
+pub fn path_basename(path: text) -> text:
+    val n = path.len()
+    if n == 0:
+        return ""
+    var tn = n
+    while tn > 0 and is_sep_at(path, tn - 1):
+        tn = tn - 1
+    if tn == 0:
+        return ""
+    var last_sep = -1
+    var i = 0
+    while i < tn:
+        if is_sep_at(path, i):
+            last_sep = i
+        i = i + 1
+    val base = path.substring(last_sep + 1, tn)
+    if base == "." or base == "..":
+        return ""
+    return base
+
+# C-MIG-0038 companion: `path_dirname` mirrors the Rust-interpreter extern
+# `rt_path_dirname` (file_io.rs::rt_path_dirname, registered mod.rs:1606),
+# which wraps `std::path::Path::parent()`. Same scope limitation as
+# `path_basename` above (interior "." components are not elided here), and
+# uses the same byte-consistent-indexing fix for the byte-vs-codepoint
+# mismatch (see the defect note on `path_basename` / `is_sep_at`).
+pub fn path_dirname(path: text) -> text:
+    var n = path.len()
+    if n == 0:
+        return ""
+    while n > 0 and is_sep_at(path, n - 1):
+        n = n - 1
+    if n == 0:
+        # All-separators or empty: no final component, so no parent either.
+        return ""
+    var last_sep = -1
+    var i = 0
+    while i < n:
+        if is_sep_at(path, i):
+            last_sep = i
+        i = i + 1
+    if last_sep == -1:
+        return ""
+    val parent_raw = path.substring(0, last_sep)
+    var pn = last_sep
+    while pn > 0 and is_sep_at(parent_raw, pn - 1):
+        pn = pn - 1
+    if pn == 0:
+        # Everything before the final separator was itself separator(s):
+        # the parent is the root.
+        return "/"
+    return parent_raw.substring(0, pn)

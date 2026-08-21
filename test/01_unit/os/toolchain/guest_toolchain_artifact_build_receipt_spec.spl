@@ -1,0 +1,367 @@
+# REQ-009/010 reproducible target-toolchain artifact build admission.
+
+use std.spec.*
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.contracts.execution.simpleos_target_v1.{
+    simpleos_target_v1_abi_for_triple
+}
+use os.port.guest_toolchain_artifact_build_receipt.{
+    GuestToolchainArtifactRoleV1,
+    GuestToolchainArtifactFormatV1,
+    GuestToolchainArtifactBuildAdmissionErrorV1,
+    GuestToolchainArtifactBuildReceiptV1,
+    guest_toolchain_artifact_build_command_sha256_v1,
+    guest_toolchain_artifact_build_receipt_payload_sha256_v1,
+    guest_toolchain_artifact_canonical_output_path_v1
+}
+use os.port.deploy_toolchains.{deploy_toolchain_artifact_build_admit_v1}
+
+fn _builder_bytes() -> [u8]:
+    [0x53u8, 0x49u8, 0x4du8, 0x50u8, 0x4cu8, 0x45u8]
+
+fn _builder_source_bytes() -> [u8]:
+    [0x62u8, 0x75u8, 0x69u8, 0x6cu8, 0x64u8, 0x2eu8, 0x73u8, 0x70u8, 0x6cu8]
+
+fn _provenance_bytes() -> [u8]:
+    [0x73u8, 0x74u8, 0x61u8, 0x67u8, 0x65u8, 0x34u8]
+
+fn _source_revision_bytes() -> [u8]:
+    [0x11u8, 0x73u8, 0x72u8, 0x63u8]
+
+fn _dependency_manifest_bytes() -> [u8]:
+    [0x22u8, 0x64u8, 0x65u8, 0x70u8]
+
+fn _build_environment_bytes() -> [u8]:
+    [0x33u8, 0x65u8, 0x6eu8, 0x76u8]
+
+fn _elf64_candidate(machine: i64) -> [u8]:
+    var data: [u8] = []
+    while data.len() < 121:
+        data.push(0u8)
+    data[0] = 0x7fu8
+    data[1] = 0x45u8
+    data[2] = 0x4cu8
+    data[3] = 0x46u8
+    data[4] = 2u8
+    data[5] = 1u8
+    data[6] = 1u8
+    data[16] = 2u8
+    data[18] = (machine & 0xff).to_u8()
+    data[19] = ((machine >> 8) & 0xff).to_u8()
+    data[20] = 1u8
+    data[26] = 0x40u8
+    data[32] = 64u8
+    data[52] = 64u8
+    data[54] = 56u8
+    data[56] = 1u8
+    data[64] = 1u8
+    data[68] = 5u8
+    data[72] = 120u8
+    data[82] = 0x40u8
+    data[96] = 1u8
+    data[104] = 1u8
+    data[113] = 0x10u8
+    data[120] = 0xc3u8
+    data
+
+fn _machine_for_target(target: text) -> i64:
+    if target == "x86_64-unknown-simpleos": return 62
+    if target == "aarch64-unknown-simpleos": return 183
+    243
+
+fn _arch_code_for_target(target: text) -> i64:
+    if target == "x86_64-unknown-simpleos": return 1
+    if target == "aarch64-unknown-simpleos": return 3
+    5
+
+fn _smf_candidate(target: text) -> [u8]:
+    var data = _elf64_candidate(_machine_for_target(target))
+    val stub_size = data.len()
+    var i = 0
+    while i < 128:
+        data.push(0u8)
+        i = i + 1
+    val header = stub_size
+    data[header] = 0x53u8
+    data[header + 1] = 0x4du8
+    data[header + 2] = 0x46u8
+    data[header + 4] = 1u8
+    data[header + 5] = 1u8
+    data[header + 44] = 0x40u8
+    data[header + 52] = (stub_size & 0xff).to_u8()
+    data[header + 53] = ((stub_size >> 8) & 0xff).to_u8()
+    data[header + 56] = (stub_size & 0xff).to_u8()
+    data[header + 57] = ((stub_size >> 8) & 0xff).to_u8()
+    data[header + 60] = 1u8
+    data[header + 61] = _arch_code_for_target(target).to_u8()
+    data[header + 62] = 1u8
+    data
+
+fn _receipt(
+    target: text,
+    role: GuestToolchainArtifactRoleV1,
+    format: GuestToolchainArtifactFormatV1,
+    output: [u8]
+) -> GuestToolchainArtifactBuildReceiptV1:
+    val output_path = guest_toolchain_artifact_canonical_output_path_v1(
+        target, role, format)
+    val builder_path = "/opt/simple-stage4/bin/simple"
+    val argv = [builder_path, "--target", target, "--output", output_path]
+    var receipt = GuestToolchainArtifactBuildReceiptV1(
+        schema_version: 1,
+        receipt_id: "toolchain-artifact-build-0001",
+        target_triple: target,
+        target_abi: simpleos_target_v1_abi_for_triple(target),
+        role: role,
+        artifact_format: format,
+        builder_path: builder_path,
+        builder_sha256: sha256_u8_hex(_builder_bytes()),
+        builder_source_path: "src/os/port/llvm/build.spl",
+        builder_source_sha256: sha256_u8_hex(_builder_source_bytes()),
+        builder_provenance_sha256: sha256_u8_hex(_provenance_bytes()),
+        source_revision_sha256: sha256_u8_hex(_source_revision_bytes()),
+        dependency_manifest_sha256: sha256_u8_hex(_dependency_manifest_bytes()),
+        build_environment_sha256: sha256_u8_hex(_build_environment_bytes()),
+        builder_argv: argv,
+        build_command_sha256: guest_toolchain_artifact_build_command_sha256_v1(argv),
+        output_path: output_path,
+        output_sha256: sha256_u8_hex(output),
+        output_size: output.len(),
+        rebuild_output_sha256: sha256_u8_hex(output),
+        rebuild_output_size: output.len(),
+        receipt_payload_sha256: sha256_u8_hex([0x01u8]),
+        used_path_lookup: false,
+        used_host_fallback: false
+    )
+    receipt.receipt_payload_sha256 =
+        guest_toolchain_artifact_build_receipt_payload_sha256_v1(receipt)
+    receipt
+
+fn _admit_materials(
+    receipt: GuestToolchainArtifactBuildReceiptV1,
+    source_revision: [u8],
+    dependency_manifest: [u8],
+    build_environment: [u8],
+    output: [u8],
+    rebuild: [u8]
+) -> Result<(), GuestToolchainArtifactBuildAdmissionErrorV1>:
+    deploy_toolchain_artifact_build_admit_v1(
+        receipt,
+        _builder_bytes(),
+        _builder_source_bytes(),
+        _provenance_bytes(),
+        source_revision,
+        dependency_manifest,
+        build_environment,
+        output,
+        rebuild
+    )
+
+fn _admit(receipt: GuestToolchainArtifactBuildReceiptV1, output: [u8], rebuild: [u8]) -> Result<(), GuestToolchainArtifactBuildAdmissionErrorV1>:
+    _admit_materials(
+        receipt, _source_revision_bytes(), _dependency_manifest_bytes(),
+        _build_environment_bytes(), output, rebuild)
+
+describe "GuestToolchainArtifactBuildReceiptV1":
+    it "admits reproducible target-matched ELF candidates for all required architectures":
+        val targets = [
+            "x86_64-unknown-simpleos",
+            "aarch64-unknown-simpleos",
+            "riscv64gc-unknown-simpleos"
+        ]
+        for target in targets:
+            val output = _elf64_candidate(_machine_for_target(target))
+            val receipt = _receipt(
+                target, GuestToolchainArtifactRoleV1.Clang,
+                GuestToolchainArtifactFormatV1.Elf, output)
+            expect(_admit(receipt, output, output)).to_equal(Ok(()))
+
+    it "admits canonical SMF only for a Simple role and matching target":
+        val target = "x86_64-unknown-simpleos"
+        val output = _smf_candidate(target)
+        val receipt = _receipt(
+            target, GuestToolchainArtifactRoleV1.SimpleCompiler,
+            GuestToolchainArtifactFormatV1.Smf, output)
+        expect(_admit(receipt, output, output)).to_equal(Ok(()))
+
+        var wrong_role = receipt
+        wrong_role.role = GuestToolchainArtifactRoleV1.Clang
+        expect(_admit(wrong_role, output, output).unwrap_err()).to_equal(
+            GuestToolchainArtifactBuildAdmissionErrorV1.InvalidRoleFormat)
+
+    it "rejects all-zero and malformed artifact placeholders":
+        val zero = [0u8, 0u8, 0u8, 0u8]
+        val zero_receipt = _receipt(
+            "x86_64-unknown-simpleos", GuestToolchainArtifactRoleV1.Clang,
+            GuestToolchainArtifactFormatV1.Elf, zero)
+        expect(_admit(zero_receipt, zero, zero).unwrap_err()).to_equal(
+            GuestToolchainArtifactBuildAdmissionErrorV1.OutputDigestMismatch)
+
+        val malformed = [1u8, 2u8, 3u8, 4u8]
+        val malformed_receipt = _receipt(
+            "x86_64-unknown-simpleos", GuestToolchainArtifactRoleV1.Clang,
+            GuestToolchainArtifactFormatV1.Elf, malformed)
+        expect(_admit(malformed_receipt, malformed, malformed).unwrap_err()).to_equal(
+            GuestToolchainArtifactBuildAdmissionErrorV1.InvalidElfStructure)
+
+    it "rejects unknown and wrong-machine target rows":
+        val output = _elf64_candidate(62)
+        var receipt = _receipt(
+            "x86_64-unknown-simpleos", GuestToolchainArtifactRoleV1.Clang,
+            GuestToolchainArtifactFormatV1.Elf, output)
+        receipt.target_triple = "x86_64-unknown-linux-gnu"
+        expect(_admit(receipt, output, output).unwrap_err()).to_equal(
+            GuestToolchainArtifactBuildAdmissionErrorV1.InvalidTarget)
+
+        receipt = _receipt(
+            "aarch64-unknown-simpleos", GuestToolchainArtifactRoleV1.Clang,
+            GuestToolchainArtifactFormatV1.Elf, output)
+        expect(_admit(receipt, output, output).unwrap_err()).to_equal(
+            GuestToolchainArtifactBuildAdmissionErrorV1.InvalidElfStructure)
+
+    it "rejects target ABI substitution independently of ELF machine":
+        val output = _elf64_candidate(62)
+        var receipt = _receipt(
+            "x86_64-unknown-simpleos", GuestToolchainArtifactRoleV1.Clang,
+            GuestToolchainArtifactFormatV1.Elf, output)
+        receipt.target_abi = "gnu"
+        expect(_admit(receipt, output, output).unwrap_err()).to_equal(
+            GuestToolchainArtifactBuildAdmissionErrorV1.InvalidAbi)
+
+    it "requires an explicit non-seed builder and exact target/output argv bindings":
+        val output = _elf64_candidate(62)
+        var receipt = _receipt(
+            "x86_64-unknown-simpleos", GuestToolchainArtifactRoleV1.Clang,
+            GuestToolchainArtifactFormatV1.Elf, output)
+        receipt.builder_path = "simple"
+        expect(_admit(receipt, output, output).unwrap_err()).to_equal(
+            GuestToolchainArtifactBuildAdmissionErrorV1.InvalidBuilderPath)
+
+        receipt = _receipt(
+            "x86_64-unknown-simpleos", GuestToolchainArtifactRoleV1.Clang,
+            GuestToolchainArtifactFormatV1.Elf, output)
+        receipt.builder_path = "src/compiler_rust/target/bootstrap/simple"
+        expect(_admit(receipt, output, output).unwrap_err()).to_equal(
+            GuestToolchainArtifactBuildAdmissionErrorV1.ForbiddenBootstrapBuilder)
+
+        receipt = _receipt(
+            "x86_64-unknown-simpleos", GuestToolchainArtifactRoleV1.Clang,
+            GuestToolchainArtifactFormatV1.Elf, output)
+        receipt.builder_argv = [receipt.builder_path, "--target", receipt.target_triple]
+        receipt.build_command_sha256 = guest_toolchain_artifact_build_command_sha256_v1(receipt.builder_argv)
+        expect(_admit(receipt, output, output).unwrap_err()).to_equal(
+            GuestToolchainArtifactBuildAdmissionErrorV1.InvalidArgv)
+
+    it "rejects PATH lookup and host fallback independently":
+        val output = _elf64_candidate(62)
+        var receipt = _receipt(
+            "x86_64-unknown-simpleos", GuestToolchainArtifactRoleV1.Clang,
+            GuestToolchainArtifactFormatV1.Elf, output)
+        receipt.used_path_lookup = true
+        expect(_admit(receipt, output, output).unwrap_err()).to_equal(
+            GuestToolchainArtifactBuildAdmissionErrorV1.PathLookupForbidden)
+
+        receipt = _receipt(
+            "x86_64-unknown-simpleos", GuestToolchainArtifactRoleV1.Clang,
+            GuestToolchainArtifactFormatV1.Elf, output)
+        receipt.used_host_fallback = true
+        expect(_admit(receipt, output, output).unwrap_err()).to_equal(
+            GuestToolchainArtifactBuildAdmissionErrorV1.HostFallbackForbidden)
+
+    it "re-hashes builder, source, provenance, and canonical argv":
+        val output = _elf64_candidate(62)
+        var receipt = _receipt(
+            "x86_64-unknown-simpleos", GuestToolchainArtifactRoleV1.Clang,
+            GuestToolchainArtifactFormatV1.Elf, output)
+        receipt.builder_sha256 = sha256_u8_hex([0x99u8])
+        expect(_admit(receipt, output, output).unwrap_err()).to_equal(
+            GuestToolchainArtifactBuildAdmissionErrorV1.BuilderDigestMismatch)
+
+        receipt = _receipt(
+            "x86_64-unknown-simpleos", GuestToolchainArtifactRoleV1.Clang,
+            GuestToolchainArtifactFormatV1.Elf, output)
+        receipt.builder_source_sha256 = sha256_u8_hex([0x99u8])
+        expect(_admit(receipt, output, output).unwrap_err()).to_equal(
+            GuestToolchainArtifactBuildAdmissionErrorV1.BuilderSourceDigestMismatch)
+
+        receipt = _receipt(
+            "x86_64-unknown-simpleos", GuestToolchainArtifactRoleV1.Clang,
+            GuestToolchainArtifactFormatV1.Elf, output)
+        receipt.builder_provenance_sha256 = sha256_u8_hex([0x99u8])
+        expect(_admit(receipt, output, output).unwrap_err()).to_equal(
+            GuestToolchainArtifactBuildAdmissionErrorV1.ProvenanceDigestMismatch)
+
+        receipt = _receipt(
+            "x86_64-unknown-simpleos", GuestToolchainArtifactRoleV1.Clang,
+            GuestToolchainArtifactFormatV1.Elf, output)
+        receipt.build_command_sha256 = sha256_u8_hex([0x99u8])
+        expect(_admit(receipt, output, output).unwrap_err()).to_equal(
+            GuestToolchainArtifactBuildAdmissionErrorV1.BuildCommandDigestMismatch)
+
+    it "re-hashes source revision, dependency manifest, and build environment material":
+        val output = _elf64_candidate(62)
+        val receipt = _receipt(
+            "x86_64-unknown-simpleos", GuestToolchainArtifactRoleV1.Clang,
+            GuestToolchainArtifactFormatV1.Elf, output)
+        expect(_admit_materials(
+            receipt, [0x99u8], _dependency_manifest_bytes(),
+            _build_environment_bytes(), output, output).unwrap_err()).to_equal(
+            GuestToolchainArtifactBuildAdmissionErrorV1.SourceRevisionDigestMismatch)
+
+        expect(_admit_materials(
+            receipt, _source_revision_bytes(), [0x99u8],
+            _build_environment_bytes(), output, output).unwrap_err()).to_equal(
+            GuestToolchainArtifactBuildAdmissionErrorV1.DependencyManifestDigestMismatch)
+
+        expect(_admit_materials(
+            receipt, _source_revision_bytes(), _dependency_manifest_bytes(),
+            [0x99u8], output, output).unwrap_err()).to_equal(
+            GuestToolchainArtifactBuildAdmissionErrorV1.BuildEnvironmentDigestMismatch)
+
+        expect(_admit_materials(
+            receipt, [], _dependency_manifest_bytes(),
+            _build_environment_bytes(), output, output).unwrap_err()).to_equal(
+            GuestToolchainArtifactBuildAdmissionErrorV1.InvalidProvenanceMaterial)
+
+    it "requires a target-isolated output path and byte-identical rebuild":
+        val output = _elf64_candidate(62)
+        var receipt = _receipt(
+            "x86_64-unknown-simpleos", GuestToolchainArtifactRoleV1.Clang,
+            GuestToolchainArtifactFormatV1.Elf, output)
+        receipt.output_path = "build/os/clang_static/bin/clang_static"
+        expect(_admit(receipt, output, output).unwrap_err()).to_equal(
+            GuestToolchainArtifactBuildAdmissionErrorV1.InvalidOutputPath)
+
+        receipt = _receipt(
+            "x86_64-unknown-simpleos", GuestToolchainArtifactRoleV1.Clang,
+            GuestToolchainArtifactFormatV1.Elf, output)
+        var different = output
+        different[120] = 0x90u8
+        expect(_admit(receipt, output, different).unwrap_err()).to_equal(
+            GuestToolchainArtifactBuildAdmissionErrorV1.RebuildDigestMismatch)
+
+        receipt = _receipt(
+            "x86_64-unknown-simpleos", GuestToolchainArtifactRoleV1.Clang,
+            GuestToolchainArtifactFormatV1.Elf, output)
+        receipt.output_size = output.len() + 1
+        expect(_admit(receipt, output, output).unwrap_err()).to_equal(
+            GuestToolchainArtifactBuildAdmissionErrorV1.InvalidOutputSize)
+
+    it "rejects duplicate option bindings and frozen receipt mutation":
+        val output = _elf64_candidate(62)
+        var receipt = _receipt(
+            "x86_64-unknown-simpleos", GuestToolchainArtifactRoleV1.Clang,
+            GuestToolchainArtifactFormatV1.Elf, output)
+        receipt.builder_argv = receipt.builder_argv + [
+            "--target", receipt.target_triple, "--output", receipt.output_path]
+        receipt.build_command_sha256 =
+            guest_toolchain_artifact_build_command_sha256_v1(receipt.builder_argv)
+        expect(_admit(receipt, output, output).unwrap_err()).to_equal(
+            GuestToolchainArtifactBuildAdmissionErrorV1.InvalidArgv)
+
+        receipt = _receipt(
+            "x86_64-unknown-simpleos", GuestToolchainArtifactRoleV1.Clang,
+            GuestToolchainArtifactFormatV1.Elf, output)
+        receipt.receipt_id = "toolchain-artifact-build-forged"
+        expect(_admit(receipt, output, output).unwrap_err()).to_equal(
+            GuestToolchainArtifactBuildAdmissionErrorV1.ReceiptPayloadDigestMismatch)

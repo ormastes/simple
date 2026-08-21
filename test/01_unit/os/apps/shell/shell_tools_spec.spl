@@ -1,5 +1,49 @@
-use os.apps.shell.shell_tools.{_toolchain_manifest_paths}
-extern fn rt_file_read_text(path: text) -> text
+use os.apps.shell.shell_tools.{
+    _toolchain_manifest_paths, toolchain_canonical_path,
+    tool_try_staged_toolchain, tool_date, tool_which
+}
+use os.apps.terminal.terminal.{Terminal}
+use os.services.vfs.vfs.{VfsManager, Filesystem, SeekWhence}
+use os.kernel.types.fs_types.{FileFlags, FsNode, FsNodeKind, DirEntry}
+
+class ToolchainFixtureFs:
+    stat_kind: FsNodeKind
+
+impl ToolchainFixtureFs:
+    static fn new(stat_kind: FsNodeKind) -> ToolchainFixtureFs:
+        ToolchainFixtureFs(stat_kind: stat_kind)
+
+impl Filesystem for ToolchainFixtureFs:
+    fn fs_name() -> text: "toolchain-fixture"
+    me mount(device: text, options: text) -> Result<bool, text>: Ok(true)
+    me unmount() -> Result<bool, text>: Ok(true)
+    me open(path: text, flags: FileFlags) -> Result<u64, text>: Ok(1)
+    me read(handle: u64, size: u64) -> Result<[u8], text>: Ok([])
+    me write(handle: u64, data: [u8]) -> Result<u64, text>: Ok(0)
+    me close(handle: u64) -> Result<bool, text>: Ok(true)
+    me seek(handle: u64, offset: i64, whence: SeekWhence) -> Result<u64, text>: Ok(0)
+    fn stat(path: text) -> Result<FsNode, text>:
+        Ok(FsNode(
+            id: 1,
+            kind: self.stat_kind,
+            size: 1,
+            permissions: 0o755,
+            owner: 0,
+            group: 0,
+            created_ns: 0,
+            modified_ns: 0))
+    fn chmod(path: text, mode: u16) -> Result<bool, text>: Ok(true)
+    me mkdir(path: text) -> Result<bool, text>: Ok(true)
+    me rmdir(path: text) -> Result<bool, text>: Ok(true)
+    fn readdir(path: text) -> Result<[DirEntry], text>: Ok([])
+    me unlink(path: text) -> Result<bool, text>: Ok(true)
+    me rename(old_path: text, new_path: text) -> Result<bool, text>: Ok(true)
+    me symlink(target: text, link_path: text) -> Result<bool, text>: Ok(true)
+
+fn toolchain_fixture_vfs(kind: FsNodeKind) -> VfsManager:
+    var vfs = VfsManager.new()
+    val _mounted = vfs.mount("/", "toolchain-fixture", "fixture", false, ToolchainFixtureFs.new(kind))
+    vfs
 
 describe "shell toolchain manifest paths":
     it "maps clang commands to clang metadata instead of llvm metadata":
@@ -13,11 +57,91 @@ describe "shell toolchain manifest paths":
         expect(clang20.manifest_path).to_equal("/SYS/CLANGMAN.TXT")
         expect(clang20.canonical_path).to_equal("/usr/bin/clang-20")
 
+    it "pins build tools to guest filesystem executables":
+        expect(toolchain_canonical_path("cmake")).to_equal("/usr/bin/cmake")
+        expect(toolchain_canonical_path("ninja")).to_equal("/usr/bin/ninja")
+        expect(toolchain_canonical_path("clang")).to_equal("/usr/bin/clang")
+        expect(toolchain_canonical_path("lld")).to_equal("/usr/bin/lld")
+        expect(toolchain_canonical_path("ld.lld")).to_equal("/usr/bin/ld.lld")
+        expect(toolchain_canonical_path("llvm-ar")).to_equal("/usr/bin/llvm-ar")
+        expect(toolchain_canonical_path("llvm-nm")).to_equal("/usr/bin/llvm-nm")
+        expect(toolchain_canonical_path("llvm-ranlib")).to_equal("/usr/bin/llvm-ranlib")
+        expect(toolchain_canonical_path("llvm-objdump")).to_equal("/usr/bin/llvm-objdump")
+        expect(toolchain_canonical_path("llvm-objcopy")).to_equal("/usr/bin/llvm-objcopy")
+        expect(toolchain_canonical_path("llvm-strip")).to_equal("/usr/bin/llvm-strip")
+        expect(toolchain_canonical_path("rustc")).to_equal("/usr/bin/rustc")
+        expect(toolchain_canonical_path("cargo")).to_equal("/usr/bin/cargo")
+        expect(toolchain_canonical_path("cargo-simpleos")).to_equal("/usr/bin/cargo-simpleos")
+        expect(toolchain_canonical_path("not-a-toolchain")).to_equal("")
+
+describe "shell toolchain execution boundary":
+    it "returns control to the launcher for normal invocations":
+        var vfs = toolchain_fixture_vfs(FsNodeKind.File)
+        var terminal = Terminal.new(80, 24)
+
+        val version_result = tool_try_staged_toolchain(
+            vfs, "/", "/host/bin:/tmp", "clang", ["--version"], terminal)
+        expect(version_result).to_be_nil
+        expect(terminal.take_mirrored_output()).to_equal("")
+
+    it "reports metadata as an exact non-authorizing diagnostic":
+        var vfs = toolchain_fixture_vfs(FsNodeKind.File)
+        var terminal = Terminal.new(80, 24)
+
+        val result = tool_try_staged_toolchain(
+            vfs, "/", "/host/bin:/tmp", "clang",
+            ["--print", "simpleos-wrapper-status"], terminal)
+        val output = terminal.take_mirrored_output()
+
+        expect(result ?? -1).to_equal(78)
+        expect(output).to_contain("manifest=/SYS/CLANGMAN.TXT")
+        expect(output).to_contain("payload=/usr/bin/clang")
+        expect(output).to_contain("diagnostic-only=true")
+        expect(output).to_contain("capability-authorized=false")
+        expect(output).to_contain("metadata is not execution evidence")
+
+    it "refuses diagnostic admission through a symlink":
+        var vfs = toolchain_fixture_vfs(FsNodeKind.Symlink)
+        var terminal = Terminal.new(80, 24)
+
+        val result = tool_try_staged_toolchain(
+            vfs, "/", "/usr/bin", "clang",
+            ["--print", "simpleos-wrapper-status"], terminal)
+
+        expect(result).to_be_nil
+        expect(terminal.take_mirrored_output()).to_equal("")
+
 describe "shell date command production boundary":
     it "fails explicitly instead of returning a fake epoch":
-        val source = rt_file_read_text("src/os/apps/shell/_ShellTools/system_tools.spl")
+        var terminal = Terminal.new(80, 24)
 
-        expect(source.index_of("1970-01-01")).to_equal(-1)
-        expect(source.index_of("no RTC available")).to_equal(-1)
-        expect(source).to_contain("date: realtime clock unavailable")
-        expect(source).to_contain("fn tool_date(terminal: Terminal) -> i32:\n    \"\"\"Show current date/time.\"\"\"\n    _write_error(terminal, \"date: realtime clock unavailable\")\n    return 1")
+        expect(tool_date(terminal)).to_equal(1)
+        expect(terminal.take_mirrored_output()).to_contain("date: realtime clock unavailable")
+
+describe "shell which artifact resolution":
+    it "reports all artifact-gated tools before mounted PATH fallback":
+        var vfs = toolchain_fixture_vfs(FsNodeKind.File)
+        var terminal = Terminal.new(80, 24)
+
+        val exit_code = tool_which(
+            vfs, "/", "/custom/bin",
+            ["grep", "sha256sum", "md5sum", "ps", "ordinary"],
+            nil, terminal)
+
+        expect(exit_code).to_equal(0)
+        expect(terminal.take_mirrored_output()).to_equal(
+            "grep: /usr/bin/grep (artifact-gated)\n" +
+            "sha256sum: /usr/bin/sha256sum (artifact-gated)\n" +
+            "md5sum: /usr/bin/md5sum (artifact-gated)\n" +
+            "ps: /usr/bin/ps (artifact-gated)\n" +
+            "/custom/bin/ordinary\n")
+
+    it "treats which arguments literally instead of resolving shell aliases":
+        var vfs = toolchain_fixture_vfs(FsNodeKind.File)
+        var terminal = Terminal.new(80, 24)
+
+        val exit_code = tool_which(
+            vfs, "/", "/custom/bin", ["rg"], nil, terminal)
+
+        expect(exit_code).to_equal(0)
+        expect(terminal.take_mirrored_output()).to_equal("/custom/bin/rg\n")

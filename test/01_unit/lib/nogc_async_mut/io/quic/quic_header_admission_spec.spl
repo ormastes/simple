@@ -1,0 +1,81 @@
+use std.spec
+use std.io.quic.quic_packet.{
+    QuicHeaderResult, QuicPacketHeader, QuicPacketType,
+    parse_quic_header, encode_quic_header, QUIC_VERSION_1
+}
+use std.io.quic.quic_crypto.{crypto_buffer_append}
+use std.io.quic.quic_connection.{QuicConnection, QuicConnectionState}
+
+describe "QUIC header admission":
+    it "rejects a short header without connection-bound header protection context":
+        match parse_quic_header([64 as u8]):
+            case Err(reason):
+                expect(reason).to_equal("short header requires connection-bound DCID and header protection")
+            case _:
+                expect("unexpected outcome").to_equal("rejected")
+
+    it "rejects an unset fixed bit on a versioned long header":
+        val wire: [u8] = [128, 0, 0, 0, 1, 0, 0]
+        match parse_quic_header(wire):
+            case Err(reason):
+                expect(reason).to_equal("QUIC fixed bit not set")
+            case _:
+                expect("unexpected outcome").to_equal("rejected")
+
+    it "rejects connection IDs longer than the RFC limit":
+        val wire: [u8] = [192, 0, 0, 0, 1, 21]
+        match parse_quic_header(wire):
+            case Err(reason):
+                expect(reason).to_equal("connection id exceeds RFC limit")
+            case _:
+                expect("unexpected outcome").to_equal("rejected")
+
+    it "rejects a declared connection ID that is truncated":
+        val wire: [u8] = [192, 0, 0, 0, 1, 2, 7]
+        match parse_quic_header(wire):
+            case Err(reason):
+                expect(reason).to_equal("connection id truncated")
+            case _:
+                expect("unexpected outcome").to_equal("rejected")
+
+    it "admits a structurally complete Initial header":
+        val wire: [u8] = [192, 0, 0, 0, 1, 1, 170, 1, 187, 0, 1, 0]
+        match parse_quic_header(wire):
+            case Ok(header):
+                expect(header.dest_conn_id.len()).to_equal(1)
+                expect(header.src_conn_id.len()).to_equal(1)
+                expect(header.payload_offset).to_equal(12)
+            case _:
+                expect("unexpected outcome").to_equal("accepted")
+
+    it "refuses to fabricate an unprotected Initial send header":
+        val header = QuicPacketHeader(
+            packet_type: QuicPacketType.Initial,
+            version: QUIC_VERSION_1,
+            dest_conn_id: [1 as u8],
+            src_conn_id: [2 as u8],
+            packet_number: 0,
+            payload_offset: 0
+        )
+        expect(encode_quic_header(header).len()).to_equal(0)
+
+    it "rejects peer-selected CRYPTO gaps without zero allocation":
+        val existing: [u8] = [1, 2]
+        val retained = crypto_buffer_append(existing, [3 as u8], 4096)
+        expect(retained.len()).to_equal(2)
+        expect(retained[1]).to_equal(2)
+
+    it "appends contiguous CRYPTO fragments in wire order":
+        val retained = crypto_buffer_append([1 as u8, 2 as u8], [3 as u8, 4 as u8], 2)
+        expect(retained.len()).to_equal(4)
+        expect(retained[2]).to_equal(3)
+        expect(retained[3]).to_equal(4)
+
+    it "cancels a connection exactly once and releases stream ownership":
+        var conn = QuicConnection.create_client([1 as u8], [2 as u8], "127.0.0.1:4433")
+        val first = conn.cancel()
+        val second = conn.cancel()
+        expect(first).to_be(true)
+        expect(second).to_be(false)
+        expect(conn.streams.len()).to_equal(0)
+        expect(conn.state).to_equal(QuicConnectionState.Closed)

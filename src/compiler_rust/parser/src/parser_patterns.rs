@@ -26,7 +26,7 @@ impl<'a> Parser<'a> {
                     self.advance(); // consume field name (discarded)
                     self.advance(); // consume colon
                                     // Now parse the actual binding pattern
-                    patterns.push(self.parse_single_pattern()?);
+                    patterns.push(self.parse_payload_sub_pattern()?);
                     if !self.check(&TokenKind::RParen) {
                         self.expect(&TokenKind::Comma)?;
                     }
@@ -35,13 +35,30 @@ impl<'a> Parser<'a> {
             }
             // Positional pattern (no field name)
             // Use parse_single_pattern to avoid comma being consumed as or-pattern
-            patterns.push(self.parse_single_pattern()?);
+            patterns.push(self.parse_payload_sub_pattern()?);
             if !self.check(&TokenKind::RParen) {
                 self.expect(&TokenKind::Comma)?;
             }
         }
         self.expect(&TokenKind::RParen)?;
         Ok(patterns)
+    }
+
+    /// Parse one enum-payload slot: a single pattern, optionally followed by
+    /// `| alt | alt ...` alternatives (`case Shape.Square(2 | 3):`).
+    /// Commas stay structural — they separate payload slots, never build an Or.
+    /// Same shape as the tuple/array element handling in `parse_single_pattern`.
+    fn parse_payload_sub_pattern(&mut self) -> Result<Pattern, ParseError> {
+        let first = self.parse_single_pattern()?;
+        if !self.check(&TokenKind::Pipe) {
+            return Ok(first);
+        }
+        let mut or_pats = vec![first];
+        while self.check(&TokenKind::Pipe) {
+            self.advance();
+            or_pats.push(self.parse_single_pattern()?);
+        }
+        Ok(Pattern::Or(or_pats))
     }
 
     // === Pattern Parsing ===

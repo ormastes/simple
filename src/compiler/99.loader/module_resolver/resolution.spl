@@ -10,6 +10,7 @@ use compiler.frontend.ast.{Node}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.loader.module_resolver.types.{ModuleResolver, ResolvedModule, DirectoryManifest, ModulePath}
 use compiler.common.error.{CompileError}
+use compiler.loader.module_resolver.fs_probe.{probe_file_exists, probe_dir_exists, clear_fs_probe_cache}
 use std.log.{debug}
 
 # ============================================================================
@@ -103,7 +104,7 @@ impl ModuleResolver:
                             # same-named tier module deterministically. Same
                             # diagnostic, same non-fatal contract.
                             val root_lib_dir = path_join(self.source_root.clone(), "lib")
-                            if rt_dir_exists(root_lib_dir):
+                            if probe_dir_exists(root_lib_dir):
                                 self.maybe_warn_tier_ambiguity(root_lib_dir, inner_segments, from_file)
                             self.resolution_cache[cache_key] = Some(resolved.path)
                             return Ok(resolved)
@@ -113,7 +114,7 @@ impl ModuleResolver:
                     # When allowed_families is non-empty (set by target presets),
                     # only search subdirectories in the allowed list.
                     val lib_dir = path_join(self.source_root.clone(), "lib")
-                    if rt_dir_exists(lib_dir):
+                    if probe_dir_exists(lib_dir):
                         # Tier-less `use std.<path>`: which tier wins used to be
                         # decided by raw readdir order, i.e. by the filesystem.
                         # That is not merely "registration order" -- it is not
@@ -154,7 +155,7 @@ impl ModuleResolver:
                 # This handles cross-project imports declared in simple.sdn
                 if segments[0] != "crate" and segments.len() > 1:
                     val top_dir = path_join(self.source_root.clone(), segments[0])
-                    if rt_dir_exists(top_dir):
+                    if probe_dir_exists(top_dir):
                         match self.resolve_from_base(top_dir, segments[1..], path):
                             Ok(resolved):
                                 self.resolution_cache[cache_key] = Some(resolved.path)
@@ -166,7 +167,7 @@ impl ModuleResolver:
                 # e.g., "use examples.browser.*" → project_root/examples/11_advanced/browser/
                 if segments[0] != "crate" and segments.len() > 1:
                     val proj_dir = path_join(self.project_root.clone(), segments[0])
-                    if rt_dir_exists(proj_dir):
+                    if probe_dir_exists(proj_dir):
                         match self.resolve_from_base(proj_dir, segments[1..], path):
                             Ok(resolved):
                                 self.resolution_cache[cache_key] = Some(resolved.path)
@@ -191,6 +192,7 @@ impl ModuleResolver:
         """Clear all resolution caches. Call between test runs."""
         self.resolution_cache = {}
         self.dir_cache = {}
+        clear_fs_probe_cache()
         self.resolve_count = 0
         self.cache_hit_count = 0
         self.dir_list_call_count = 0
@@ -264,9 +266,9 @@ impl ModuleResolver:
             if entry == "" or entry.starts_with("."):
                 continue
             val full = path_join(dir, entry)
-            if rt_dir_exists(full):
+            if probe_dir_exists(full):
                 val child_rel = if rel == "": "{entry}" else: "{rel}.{entry}"
-                if rt_file_exists(path_join(full, "__init__.spl")):
+                if probe_file_exists(path_join(full, "__init__.spl")):
                     self.record_tier_module(child_rel, tier)
                 self.collect_tier_modules(full, child_rel, tier)
             elif entry.ends_with(".spl"):
@@ -289,7 +291,7 @@ impl ModuleResolver:
         val tier_names = ["common", "nogc_sync_mut", "nogc_async_mut", "gc_async_mut", "nogc_async_mut_noalloc"]
         for tier in tier_names:
             val tier_dir = path_join(lib_dir, tier)
-            if rt_dir_exists(tier_dir):
+            if probe_dir_exists(tier_dir):
                 self.collect_tier_modules(tier_dir, "", tier)
         self.collect_lib_root_modules(lib_dir, tier_names)
         self.tier_map_built = true
@@ -307,8 +309,8 @@ impl ModuleResolver:
             if is_tier:
                 continue
             val full = path_join(lib_dir, entry)
-            if rt_dir_exists(full):
-                if rt_file_exists(path_join(full, "__init__.spl")):
+            if probe_dir_exists(full):
+                if probe_file_exists(path_join(full, "__init__.spl")):
                     self.record_tier_module(entry, "<lib-root>")
                 self.collect_tier_modules(full, entry, "<lib-root>")
             elif entry.ends_with(".spl"):
@@ -567,9 +569,7 @@ impl ModuleResolver:
 
 extern fn rt_path_join(a: text, b: text) -> text
 extern fn rt_path_parent(path: text) -> text
-extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
-extern fn rt_dir_exists(path: text) -> bool
 
 use std.io_runtime.{dir_list}
 
@@ -583,14 +583,14 @@ fn path_parent(path: text) -> text:
 
 fn path_exists(path: text) -> bool:
     """Check if a path exists."""
-    rt_file_exists(path) or rt_dir_exists(path)
+    probe_file_exists(path) or probe_dir_exists(path)
 
 fn is_file(path: text) -> bool:
     """Check if a path is a file (not directory)."""
-    rt_file_exists(path) and not rt_dir_exists(path)
+    probe_file_exists(path) and not probe_dir_exists(path)
 
 fn file_exists(path: text) -> bool:
-    rt_file_exists(path)
+    probe_file_exists(path)
 
 # Optional-returning read. Named apart from the canonical `file_read`
 # (`-> text`) on purpose: the function registry is keyed on NAME ALONE, so a
@@ -657,7 +657,7 @@ fn find_numbered_dir(parent: text, segment: text) -> text?:
     Returns the full path if found, nil otherwise.
     Uses cached directory listings to avoid repeated rt_dir_list calls.
     """
-    if not rt_dir_exists(parent):
+    if not probe_dir_exists(parent):
         return nil
 
     val entries = cached_dir_list_global(parent)
@@ -676,7 +676,7 @@ fn find_numbered_dir(parent: text, segment: text) -> text?:
                     val name = entry.substring(idx + 1)
                     if name == segment:
                         val full_path = path_join(parent, entry)
-                        if rt_dir_exists(full_path):
+                        if probe_dir_exists(full_path):
                             return Some(full_path)
     nil
 

@@ -30,8 +30,34 @@ fn typesubstitution_from_params(type_params: [HirTypeParam], type_args: [HirType
 
 
 fn concrete_to_hir_type(ct: ConcreteType, span: Span) -> HirType:
-    """Best-effort conversion fallback for bootstrap paths."""
-    HirType(kind: HirTypeKind.Error, span: span)
+    """Convert a ConcreteType back into a HirType.
+
+    Only the forms that carry enough information to rebuild a HirType are
+    converted. `Named`/`Specialized`/`Pointer` name a type by TEXT and a
+    HirType names it by `SymbolId`, which this layer cannot resolve, so they
+    stay `Error` rather than fabricating a symbol — a loud Error type is
+    strictly better than a wrong symbol reference. The HIR call-site path in
+    `monomorphize_integration.spl` never goes through here: it substitutes the
+    real `[HirType]` type arguments directly."""
+    match ct:
+        case Int: HirType(kind: HirTypeKind.Int(64, true), span: span)
+        case Float: HirType(kind: HirTypeKind.Float(64), span: span)
+        case Bool: HirType(kind: HirTypeKind.Bool, span: span)
+        case String: HirType(kind: HirTypeKind.Str, span: span)
+        case Nil: HirType(kind: HirTypeKind.Unit, span: span)
+        case Array(elem):
+            HirType(kind: HirTypeKind.Array(concrete_to_hir_type(elem, span), nil), span: span)
+        case Optional(inner):
+            HirType(kind: HirTypeKind.Optional(concrete_to_hir_type(inner, span)), span: span)
+        case Tuple(elems):
+            var parts: [HirType] = []
+            for e in elems:
+                parts = parts.push(concrete_to_hir_type(e, span))
+            HirType(kind: HirTypeKind.Tuple(parts), span: span)
+        case Dict(k, v):
+            HirType(kind: HirTypeKind.Dict(concrete_to_hir_type(k, span), concrete_to_hir_type(v, span)), span: span)
+        case _:
+            HirType(kind: HirTypeKind.Error, span: span)
 
 
 fn typesubstitution_from_concrete(type_params: [HirTypeParam], type_args: [ConcreteType]) -> TypeSubstitution:
@@ -46,19 +72,516 @@ fn typesubstitution_from_concrete(type_params: [HirTypeParam], type_args: [Concr
 
 
 fn substitute_type(ty: HirType, subst: TypeSubstitution) -> HirType:
-    """Substitute type parameters inside a type (minimal identity fallback)."""
-    ty
+    """Substitute type parameters inside a type.
+
+    Replaces every `TypeParam(name)` whose name is bound in `subst`, and
+    recurses through every composite that can contain one. An unbound
+    TypeParam is left as-is (an outer scope may still bind it); any kind that
+    cannot contain a type parameter is returned unchanged."""
+    if ty == nil:
+        return ty
+    match ty.kind:
+        case TypeParam(name, _):
+            if subst.mapping.has(name):
+                subst.mapping[name]
+            else:
+                ty
+        case Tuple(elements):
+            var parts: [HirType] = []
+            for e in elements:
+                parts = parts.push(substitute_type(e, subst))
+            HirType(kind: HirTypeKind.Tuple(parts), span: ty.span)
+        case Array(element, size):
+            HirType(kind: HirTypeKind.Array(substitute_type(element, subst), size), span: ty.span)
+        case Slice(element):
+            HirType(kind: HirTypeKind.Slice(substitute_type(element, subst)), span: ty.span)
+        case Dict(key, value):
+            HirType(kind: HirTypeKind.Dict(substitute_type(key, subst), substitute_type(value, subst)), span: ty.span)
+        case Ref(inner, mutable):
+            HirType(kind: HirTypeKind.Ref(substitute_type(inner, subst), mutable), span: ty.span)
+        case Ptr(inner, mutable):
+            HirType(kind: HirTypeKind.Ptr(substitute_type(inner, subst), mutable), span: ty.span)
+        case Optional(inner):
+            HirType(kind: HirTypeKind.Optional(substitute_type(inner, subst)), span: ty.span)
+        case Isolated(inner):
+            HirType(kind: HirTypeKind.Isolated(substitute_type(inner, subst)), span: ty.span)
+        case Result(ok, err):
+            HirType(kind: HirTypeKind.Result(substitute_type(ok, subst), substitute_type(err, subst)), span: ty.span)
+        case Named(symbol, args):
+            var nargs: [HirType] = []
+            for a in args:
+                nargs = nargs.push(substitute_type(a, subst))
+            HirType(kind: HirTypeKind.Named(symbol, nargs), span: ty.span)
+        case Union(members):
+            var mems: [HirType] = []
+            for m in members:
+                mems = mems.push(substitute_type(m, subst))
+            HirType(kind: HirTypeKind.Union(mems), span: ty.span)
+        case Function(params, ret, effects):
+            var ps: [HirType] = []
+            for p in params:
+                ps = ps.push(substitute_type(p, subst))
+            HirType(kind: HirTypeKind.Function(ps, substitute_type(ret, subst), effects), span: ty.span)
+        case _:
+            ty
+
+
+fn substitute_type_opt(ty: HirType?, subst: TypeSubstitution) -> HirType?:
+    """Substitute inside an optional type annotation."""
+    match ty:
+        Some(t):
+            val tt: HirType = t
+            substitute_type(tt, subst)
+        nil:
+            nil
+
+
+fn substitute_expr_opt(expr: HirExpr?, subst: TypeSubstitution) -> HirExpr?:
+    """Substitute inside an optional sub-expression."""
+    match expr:
+        Some(e):
+            val et: HirExpr = e
+            substitute_expr(et, subst)
+        nil:
+            nil
+
+
+fn substitute_block_opt(block: HirBlock?, subst: TypeSubstitution) -> HirBlock?:
+    """Substitute inside an optional block."""
+    match block:
+        Some(b):
+            val bt: HirBlock = b
+            substitute_block(bt, subst)
+        nil:
+            nil
+
+
+fn substitute_exprs(exprs: [HirExpr], subst: TypeSubstitution) -> [HirExpr]:
+    var out: [HirExpr] = []
+    for e in exprs:
+        val et: HirExpr = e
+        out = out.push(substitute_expr(et, subst))
+    out
+
+
+fn substitute_call_args(args: [HirCallArg], subst: TypeSubstitution) -> [HirCallArg]:
+    var out: [HirCallArg] = []
+    for a in args:
+        val at: HirCallArg = a
+        var na = at
+        na.value = substitute_expr(at.value, subst)
+        out = out.push(na)
+    out
+
+
+fn substitute_named_exprs(fields: [(text, HirExpr)], subst: TypeSubstitution) -> [(text, HirExpr)]:
+    var out: [(text, HirExpr)] = []
+    for f in fields:
+        val (fname, fexpr) = f
+        val fe: HirExpr = fexpr
+        out = out.push((fname, substitute_expr(fe, subst)))
+    out
+
+
+fn substitute_enum_payload(payload: HirEnumPayload?, subst: TypeSubstitution) -> HirEnumPayload?:
+    match payload:
+        Some(p):
+            match p:
+                case Tuple(values):
+                    HirEnumPayload.Tuple(substitute_exprs(values, subst))
+                case Struct(fields):
+                    HirEnumPayload.Struct(substitute_named_exprs(fields, subst))
+        nil:
+            nil
+
+
+fn substitute_patterns(patterns: [HirPattern], subst: TypeSubstitution) -> [HirPattern]:
+    var out: [HirPattern] = []
+    for p in patterns:
+        val pt: HirPattern = p
+        out = out.push(substitute_pattern(pt, subst))
+    out
+
+
+fn substitute_named_patterns(fields: [(text, HirPattern)], subst: TypeSubstitution) -> [(text, HirPattern)]:
+    var out: [(text, HirPattern)] = []
+    for f in fields:
+        val (fname, fpat) = f
+        val fp: HirPattern = fpat
+        out = out.push((fname, substitute_pattern(fp, subst)))
+    out
+
+
+fn substitute_pattern_payload(payload: HirPatternPayload?, subst: TypeSubstitution) -> HirPatternPayload?:
+    match payload:
+        Some(p):
+            match p:
+                case Tuple(patterns):
+                    HirPatternPayload.Tuple(substitute_patterns(patterns, subst))
+                case Struct(fields):
+                    HirPatternPayload.Struct(substitute_named_patterns(fields, subst))
+        nil:
+            nil
+
+
+fn substitute_pattern(pattern: HirPattern, subst: TypeSubstitution) -> HirPattern:
+    """Substitute type parameters inside a pattern and its sub-patterns.
+
+    A pattern carries its own `type_` (gated by `has_type_`) and, for the
+    Struct/Enum forms, a scrutinee type written in the source - all three can
+    name a type parameter."""
+    if pattern == nil:
+        return pattern
+    var out = pattern
+    if pattern.has_type_:
+        out.type_ = substitute_type(pattern.type_, subst)
+    match pattern.kind:
+        case HirPatternKind.Literal(value):
+            val vt: HirExpr = value
+            out.kind = HirPatternKind.Literal(substitute_expr(vt, subst))
+        case HirPatternKind.Tuple(elements):
+            out.kind = HirPatternKind.Tuple(substitute_patterns(elements, subst))
+        case HirPatternKind.Array(elements, rest):
+            out.kind = HirPatternKind.Array(substitute_patterns(elements, subst), rest)
+        case HirPatternKind.Struct(ty, fields):
+            val st: HirType = ty
+            out.kind = HirPatternKind.Struct(substitute_type(st, subst), substitute_named_patterns(fields, subst))
+        case HirPatternKind.Enum(ty, variant, payload):
+            val et: HirType = ty
+            out.kind = HirPatternKind.Enum(substitute_type(et, subst), variant, substitute_pattern_payload(payload, subst))
+        case HirPatternKind.Or(patterns):
+            out.kind = HirPatternKind.Or(substitute_patterns(patterns, subst))
+        case HirPatternKind.Range(start, end, inclusive):
+            val s2: HirExpr = start
+            val e2: HirExpr = end
+            out.kind = HirPatternKind.Range(substitute_expr(s2, subst), substitute_expr(e2, subst), inclusive)
+        case _:
+            pass
+    out
+
+
+fn substitute_stmt(stmt: HirStmt, subst: TypeSubstitution) -> HirStmt:
+    """Substitute type parameters inside a statement."""
+    if stmt == nil:
+        return stmt
+    var out = stmt
+    match stmt.kind:
+        case HirStmtKind.Let(sym, ty, init):
+            val lt: HirType = ty
+            val li: HirExpr = init
+            out.kind = HirStmtKind.Let(sym, substitute_type(lt, subst), substitute_expr(li, subst))
+        case HirStmtKind.Assign(target, op, value):
+            val at: HirExpr = target
+            val av: HirExpr = value
+            out.kind = HirStmtKind.Assign(substitute_expr(at, subst), op, substitute_expr(av, subst))
+        case HirStmtKind.Expr(e):
+            val et: HirExpr = e
+            out.kind = HirStmtKind.Expr(substitute_expr(et, subst))
+        case HirStmtKind.Block(b):
+            val bt: HirBlock = b
+            out.kind = HirStmtKind.Block(substitute_block(bt, subst))
+        case _:
+            pass
+    out
+
+
+fn substitute_block(block: HirBlock, subst: TypeSubstitution) -> HirBlock:
+    """Substitute type parameters throughout a block.
+
+    `block.value` is a DESUGARED plain field gated by `block.has` (NOT an
+    Option), so it is gated on `has` rather than Option-matched - same
+    convention as the scan/rewrite walks in `monomorphize_integration.spl`."""
+    if block == nil:
+        return block
+    var out = block
+    var stmts: [HirStmt] = []
+    for stmt in block.stmts:
+        val st: HirStmt = stmt
+        stmts = stmts.push(substitute_stmt(st, subst))
+    out.stmts = stmts
+    if block.has:
+        val bv: HirExpr = block.value
+        out.value = substitute_expr(bv, subst)
+    out
+
+
+fn substitute_asm(asm_node: HirAsm, subst: TypeSubstitution) -> HirAsm:
+    """Substitute inside inline-assembly operand expressions."""
+    var out = asm_node
+    var cons: [HirAsmConstraint] = []
+    for c in asm_node.constraints:
+        val ct: HirAsmConstraint = c
+        var nc = ct
+        nc.value = substitute_expr(ct.value, subst)
+        nc.output_value = substitute_expr_opt(ct.output_value, subst)
+        cons = cons.push(nc)
+    out.constraints = cons
+    out
 
 
 fn substitute_expr(expr: HirExpr, subst: TypeSubstitution) -> HirExpr:
-    """Substitute type parameters inside an expression (minimal identity fallback)."""
-    expr
+    """Substitute type parameters throughout an expression.
+
+    Substitutes the expression's own recorded type AND recurses into every
+    sub-expression, nested block, pattern, closure parameter and call type
+    argument. Without the recursion a specialized function's SIGNATURE was
+    concrete while its BODY still carried the template's `TypeParam` types -
+    a silent miscompile, since nothing downstream diagnoses a leftover type
+    parameter."""
+    if expr == nil:
+        return expr
+    var out = expr
+    if expr.has_type_:
+        out.type_ = substitute_type(expr.type_, subst)
+    match expr.kind:
+        # Collections
+        case HirExprKind.ArrayLit(elements, elem_ty):
+            out.kind = HirExprKind.ArrayLit(substitute_exprs(elements, subst), substitute_type_opt(elem_ty, subst))
+        case HirExprKind.ArrayRepeat(value, count, elem_ty):
+            val v1: HirExpr = value
+            val c1: HirExpr = count
+            out.kind = HirExprKind.ArrayRepeat(substitute_expr(v1, subst), substitute_expr(c1, subst), substitute_type_opt(elem_ty, subst))
+        case HirExprKind.TupleLit(elements):
+            out.kind = HirExprKind.TupleLit(substitute_exprs(elements, subst))
+        case HirExprKind.DictLit(entries, key_ty, value_ty):
+            var new_entries: [(HirExpr, HirExpr)] = []
+            for entry in entries:
+                val (k, v) = entry
+                val kt: HirExpr = k
+                val vt: HirExpr = v
+                new_entries = new_entries.push((substitute_expr(kt, subst), substitute_expr(vt, subst)))
+            val ktype: HirType = key_ty
+            out.kind = HirExprKind.DictLit(new_entries, substitute_type(ktype, subst), substitute_type_opt(value_ty, subst))
+        case HirExprKind.SetLit(elements, elem_ty):
+            out.kind = HirExprKind.SetLit(substitute_exprs(elements, subst), substitute_type_opt(elem_ty, subst))
+
+        # Access
+        case HirExprKind.Field(base, field, resolved):
+            val b1: HirExpr = base
+            out.kind = HirExprKind.Field(substitute_expr(b1, subst), field, resolved)
+        case HirExprKind.Index(base, index):
+            val b2: HirExpr = base
+            val i2: HirExpr = index
+            out.kind = HirExprKind.Index(substitute_expr(b2, subst), substitute_expr(i2, subst))
+        case HirExprKind.TupleIndex(base, index):
+            val b3: HirExpr = base
+            out.kind = HirExprKind.TupleIndex(substitute_expr(b3, subst), index)
+
+        # Optional operations
+        case HirExprKind.OptionalChain(base, field):
+            val b4: HirExpr = base
+            out.kind = HirExprKind.OptionalChain(substitute_expr(b4, subst), field)
+        case HirExprKind.NullCoalesce(left, right):
+            val l1: HirExpr = left
+            val r1: HirExpr = right
+            out.kind = HirExprKind.NullCoalesce(substitute_expr(l1, subst), substitute_expr(r1, subst))
+        case HirExprKind.ExistsCheck(base):
+            val b5: HirExpr = base
+            out.kind = HirExprKind.ExistsCheck(substitute_expr(b5, subst))
+        case HirExprKind.Unwrap(base):
+            val b6: HirExpr = base
+            out.kind = HirExprKind.Unwrap(substitute_expr(b6, subst))
+
+        # Operators
+        case HirExprKind.Binary(op, left, right):
+            val l2: HirExpr = left
+            val r2: HirExpr = right
+            out.kind = HirExprKind.Binary(op, substitute_expr(l2, subst), substitute_expr(r2, subst))
+        case HirExprKind.Unary(op, operand):
+            val o1: HirExpr = operand
+            out.kind = HirExprKind.Unary(op, substitute_expr(o1, subst))
+
+        # Calls - the type ARGUMENTS are substituted too, so an inner generic
+        # call inside a specialization names concrete types.
+        case HirExprKind.Call(callee, args, type_args):
+            val ce: HirExpr = callee
+            var new_targs: [HirType] = []
+            for ta in type_args:
+                val tat: HirType = ta
+                new_targs = new_targs.push(substitute_type(tat, subst))
+            out.kind = HirExprKind.Call(substitute_expr(ce, subst), substitute_call_args(args, subst), new_targs)
+        case HirExprKind.MethodCall(receiver, method, args, resolution):
+            val rc: HirExpr = receiver
+            out.kind = HirExprKind.MethodCall(substitute_expr(rc, subst), method, substitute_call_args(args, subst), resolution)
+        case HirExprKind.StaticCall(ty, method, args, resolution):
+            val sct: HirType = ty
+            out.kind = HirExprKind.StaticCall(substitute_type(sct, subst), method, substitute_call_args(args, subst), resolution)
+
+        # Control flow
+        case HirExprKind.If(cond, then_, else_):
+            val cd: HirExpr = cond
+            val th: HirBlock = then_
+            out.kind = HirExprKind.If(substitute_expr(cd, subst), substitute_block(th, subst), substitute_block_opt(else_, subst))
+        case HirExprKind.IfChain(arms, else_):
+            var new_arms: [HirIfArm] = []
+            for arm in arms:
+                val at2: HirIfArm = arm
+                var na = at2
+                na.cond = substitute_expr(at2.cond, subst)
+                na.then_ = substitute_block(at2.then_, subst)
+                new_arms = new_arms.push(na)
+            out.kind = HirExprKind.IfChain(new_arms, substitute_block_opt(else_, subst))
+        case HirExprKind.MatchCase(scrutinee, arms):
+            val sc: HirExpr = scrutinee
+            var marms: [HirMatchArm] = []
+            for arm in arms:
+                val mt: HirMatchArm = arm
+                var nm = mt
+                nm.pattern = substitute_pattern(mt.pattern, subst)
+                if mt.has_guard:
+                    nm.guard = substitute_expr(mt.guard, subst)
+                nm.body = substitute_block(mt.body, subst)
+                marms = marms.push(nm)
+            out.kind = HirExprKind.MatchCase(substitute_expr(sc, subst), marms)
+        case HirExprKind.Loop(body, label):
+            val lb: HirBlock = body
+            out.kind = HirExprKind.Loop(substitute_block(lb, subst), label)
+        case HirExprKind.While(cond, body, label):
+            val wc: HirExpr = cond
+            val wb: HirBlock = body
+            out.kind = HirExprKind.While(substitute_expr(wc, subst), substitute_block(wb, subst), label)
+        case HirExprKind.For(var_, iter, body, label):
+            val fi: HirExpr = iter
+            val fb: HirBlock = body
+            out.kind = HirExprKind.For(var_, substitute_expr(fi, subst), substitute_block(fb, subst), label)
+        case HirExprKind.With(items, body):
+            var new_items: [HirWithItem] = []
+            for item in items:
+                val it2: HirWithItem = item
+                var ni = it2
+                ni.context_expr = substitute_expr(it2.context_expr, subst)
+                new_items = new_items.push(ni)
+            val wbb: HirBlock = body
+            out.kind = HirExprKind.With(new_items, substitute_block(wbb, subst))
+
+        # Closures and blocks
+        case HirExprKind.Lambda(params, body, captures):
+            var lparams: [HirParam] = []
+            for p in params:
+                val pt2: HirParam = p
+                lparams = lparams.push(substitute_param(pt2, subst))
+            val lbody: HirExpr = body
+            out.kind = HirExprKind.Lambda(lparams, substitute_expr(lbody, subst), captures)
+        case HirExprKind.Block(block):
+            val bk: HirBlock = block
+            out.kind = HirExprKind.Block(substitute_block(bk, subst))
+        case HirExprKind.HostGpuLane(lane_code, payload_size, marker, body):
+            val mk: HirExpr = marker
+            val gb: HirBlock = body
+            out.kind = HirExprKind.HostGpuLane(lane_code, payload_size, substitute_expr(mk, subst), substitute_block(gb, subst))
+
+        # Control transfer
+        case HirExprKind.Return(value):
+            out.kind = HirExprKind.Return(substitute_expr_opt(value, subst))
+        case HirExprKind.Break(label, value):
+            out.kind = HirExprKind.Break(label, substitute_expr_opt(value, subst))
+        case HirExprKind.Throw(value):
+            val tv: HirExpr = value
+            out.kind = HirExprKind.Throw(substitute_expr(tv, subst))
+        case HirExprKind.Try(inner):
+            val ti: HirExpr = inner
+            out.kind = HirExprKind.Try(substitute_expr(ti, subst))
+
+        # Async
+        case HirExprKind.Await(inner):
+            val ai: HirExpr = inner
+            out.kind = HirExprKind.Await(substitute_expr(ai, subst))
+        case HirExprKind.Yield(value):
+            out.kind = HirExprKind.Yield(substitute_expr_opt(value, subst))
+
+        # Construction
+        case HirExprKind.StructLit(ty, fields):
+            val slt: HirType = ty
+            out.kind = HirExprKind.StructLit(substitute_type(slt, subst), substitute_named_exprs(fields, subst))
+        case HirExprKind.EnumLit(ty, variant, payload):
+            val elt: HirType = ty
+            out.kind = HirExprKind.EnumLit(substitute_type(elt, subst), variant, substitute_enum_payload(payload, subst))
+
+        # Casts
+        case HirExprKind.Cast(inner, target):
+            val ci: HirExpr = inner
+            val ct2: HirType = target
+            out.kind = HirExprKind.Cast(substitute_expr(ci, subst), substitute_type(ct2, subst))
+        case HirExprKind.As(inner, target):
+            val ai2: HirExpr = inner
+            val at3: HirType = target
+            out.kind = HirExprKind.As(substitute_expr(ai2, subst), substitute_type(at3, subst))
+
+        # Special
+        case HirExprKind.Range(start, end, inclusive, step):
+            val rs: HirExpr = start
+            val re: HirExpr = end
+            out.kind = HirExprKind.Range(substitute_expr(rs, subst), substitute_expr(re, subst), inclusive, substitute_expr_opt(step, subst))
+        case HirExprKind.Comprehension(kind, inner, clauses):
+            val ce2: HirExpr = inner
+            var new_clauses: [HirCompClause] = []
+            for clause in clauses:
+                val cl: HirCompClause = clause
+                var nc2 = cl
+                match cl.kind:
+                    case HirCompClauseKind.For(var_, iter):
+                        val cli: HirExpr = iter
+                        nc2.kind = HirCompClauseKind.For(var_, substitute_expr(cli, subst))
+                    case HirCompClauseKind.If(cond):
+                        val clc: HirExpr = cond
+                        nc2.kind = HirCompClauseKind.If(substitute_expr(clc, subst))
+                new_clauses = new_clauses.push(nc2)
+            out.kind = HirExprKind.Comprehension(kind, substitute_expr(ce2, subst), new_clauses)
+
+        # Math/DL and unsafe blocks
+        case HirExprKind.LossBlock(body):
+            val lbb: HirBlock = body
+            out.kind = HirExprKind.LossBlock(substitute_block(lbb, subst))
+        case HirExprKind.NogradBlock(body):
+            val nbb: HirBlock = body
+            out.kind = HirExprKind.NogradBlock(substitute_block(nbb, subst))
+        case HirExprKind.UnsafeBlock(body):
+            val ubb: HirBlock = body
+            out.kind = HirExprKind.UnsafeBlock(substitute_block(ubb, subst))
+
+        # Inline assembly - operand expressions can name a type parameter.
+        case HirExprKind.InlineAsm(asm_node):
+            val an: HirAsm = asm_node
+            out.kind = HirExprKind.InlineAsm(substitute_asm(an, subst))
+        case HirExprKind.InlineAsmMatch(arms):
+            var aarms: [HirAsmMatchArm] = []
+            for arm in arms:
+                val aa: HirAsmMatchArm = arm
+                var na2 = aa
+                if aa.has_asm_body:
+                    na2.asm_body = substitute_asm(aa.asm_body, subst)
+                aarms = aarms.push(na2)
+            out.kind = HirExprKind.InlineAsmMatch(aarms)
+
+        case _:
+            # Literals, Var/NamedVar, Continue and CustomBlock carry no nested
+            # HirExpr that this layer can reach; their own `type_` was already
+            # substituted above.
+            pass
+    out
+
+
+fn substitute_param(param: HirParam, subst: TypeSubstitution) -> HirParam:
+    """Substitute type parameters in a single function parameter."""
+    var out = param
+    out.type_ = substitute_type(param.type_, subst)
+    out
 
 
 fn substitute_function(func: HirFunction, subst: TypeSubstitution, mangled_name: text) -> HirFunction:
-    """Substitute function-level type parameters for a specialized function."""
+    """Substitute function-level type parameters for a specialized function.
+
+    The specialized function carries concrete parameter, return AND BODY
+    types plus an EMPTY `type_params`, which is what the
+    post-monomorphization sweep uses to tell a specialization from a template
+    still awaiting one."""
     var specialized = func
     specialized.name = mangled_name
     specialized.type_params = []
+    var new_params: [HirParam] = []
+    for p in func.params:
+        new_params = new_params.push(substitute_param(p, subst))
+    specialized.params = new_params
     specialized.return_type = substitute_type(func.return_type, subst)
+    specialized.body = substitute_block(func.body, subst)
     specialized

@@ -53,6 +53,8 @@ class H2Connection:
 # Constructor
 # ============================================================================
 
+val H2_CONNECTION_MAX_WINDOW: i64 = 2147483647
+
 pub fn h2_connection_new(settings: H2Settings) -> H2Connection:
     """Create a new server-side H2Connection with given local settings."""
     var streams: [H2Stream] = []
@@ -113,6 +115,14 @@ pub fn h2_connection_accept_stream(conn: H2Connection, stream_id: i64) -> H2Conn
     """Register a new client-initiated stream (HEADERS received).
     Transitions it from Idle to Open and records the highest stream id seen.
     """
+    # A server receives client-initiated odd stream IDs in strictly increasing
+    # order. Refuse admission after GOAWAY or once the bounded registry is full.
+    if conn.goaway_sent or stream_id <= 0 or stream_id % 2 == 0:
+        return conn
+    if stream_id <= conn.last_stream_id:
+        return conn
+    if conn.streams.len() >= conn.max_concurrent_streams:
+        return conn
     val stream = h2_stream_new(stream_id, conn.settings.initial_window_size)
     val open_stream = h2_stream_transition(stream, H2StreamEvent.RecvHeaders)
     val new_last = if stream_id > conn.last_stream_id: stream_id else: conn.last_stream_id
@@ -171,7 +181,11 @@ pub fn h2_connection_update_window(conn: H2Connection, stream_id: i64, increment
     """Apply a WINDOW_UPDATE. If stream_id == 0 update connection window;
     otherwise update the per-stream window.
     """
+    if increment <= 0:
+        return conn
     if stream_id == 0:
+        if conn.connection_window > H2_CONNECTION_MAX_WINDOW - increment:
+            return conn
         return H2Connection(
             streams: conn.streams,
             settings: conn.settings,
@@ -181,6 +195,32 @@ pub fn h2_connection_update_window(conn: H2Connection, stream_id: i64, increment
             goaway_sent: conn.goaway_sent,
             last_stream_id: conn.last_stream_id
         )
+    var found = false
+    var i = 0
+    while i < conn.streams.len():
+        if conn.streams[i].id == stream_id:
+            found = true
+            break
+        i = i + 1
+    if not found:
+        return conn
     val stream = h2_connection_get_stream(conn, stream_id)
+    if stream.recv_window > H2_CONNECTION_MAX_WINDOW - increment:
+        return conn
     val updated_stream = h2_stream_update_recv_window(stream, increment)
     return _conn_upsert_stream(conn, updated_stream)
+
+pub fn h2_connection_cancel(conn: H2Connection) -> H2Connection:
+    """Terminal cancellation drops stream ownership and refuses new streams."""
+    H2Connection(
+        streams: [],
+        settings: conn.settings,
+        next_stream_id: conn.next_stream_id,
+        connection_window: conn.connection_window,
+        max_concurrent_streams: conn.max_concurrent_streams,
+        goaway_sent: true,
+        last_stream_id: conn.last_stream_id
+    )
+
+export H2Settings, H2Connection
+export H2_CONNECTION_MAX_WINDOW

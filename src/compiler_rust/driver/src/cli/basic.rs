@@ -292,6 +292,27 @@ fn report_spec_file_verdict(
     // mid-example must not contribute failures to any accounting.
     let failed = if outcome.is_verified() { failed } else { 0 };
 
+    // INVARIANT, enforced in exactly one place: `failed > 0` implies a non-OK
+    // outcome, which implies a non-zero exit status.
+    //
+    // `SpecOutcome::Ok` means only "the module ran to completion" — it is
+    // decided before the BDD table is tallied — so a run whose examples failed
+    // printed `outcome=OK ... failed=1`, and when the module itself returned a
+    // clean status the process also exited 0. The failure was computed
+    // correctly and then discarded on the way out. Same fail-open family as
+    // SdnTable::update_row's dropped bool. See doc/08_tracking/bug/
+    // test_runner_exits_zero_on_failed_spec_2026-08-21.md
+    let outcome = if failed > 0 && outcome == SpecOutcome::Ok {
+        SpecOutcome::Error
+    } else {
+        outcome
+    };
+    let module_exit_code = if failed > 0 && module_exit_code == 0 {
+        1
+    } else {
+        module_exit_code
+    };
+
     println!(
         "SPEC FILE VERDICT: {} outcome={} declared>={} executed={} passed={} failed={} skipped={} dropped={}",
         path.display(),

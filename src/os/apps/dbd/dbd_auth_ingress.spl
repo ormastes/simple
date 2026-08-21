@@ -1,0 +1,377 @@
+# Mutable-byte RESP AUTH ingress for the SimpleOS database daemon.
+#
+# This owner consumes only plaintext released by DBD's authenticated TLS
+# record owner.  It recognizes exactly one bounded RESP command:
+#
+#   *3\r\n$4\r\nAUTH\r\n$<principal-len>\r\n<principal>\r\n
+#   $<credential-len>\r\n<credential>\r\n
+#
+# Credential bytes never become immutable text.  The parser advances once per
+# byte, keeps only bounded mutable field buffers, and wipes those buffers in
+# place before publishing success, rejection, or failure.  Bytes coalesced
+# after a successful AUTH frame are retained separately for authenticated RESP
+# dispatch; bytes after a failed attempt are discarded and must be retried in
+# a new authenticated TLS application record.
+
+use os.apps.dbd.dbd_protocol.{
+    DbdCredentialProvider, DbdAuthSession,
+    DBD_MAX_PRINCIPAL_BYTES, DBD_MIN_CREDENTIAL_BYTES,
+    DBD_MAX_CREDENTIAL_BYTES
+}
+
+pub val DBD_MAX_AUTH_REQUEST_BYTES: i64 = 256
+pub val DBD_MAX_AUTH_FRAGMENTS: i64 = DBD_MAX_AUTH_REQUEST_BYTES
+pub val DBD_MAX_AUTH_TRAILING_BYTES: i64 = 16384
+
+pub enum DbdAuthIngressStatusV1:
+    NeedMore
+    Authenticated
+    Rejected
+    Locked
+    Malformed
+    Overflow
+    Closed
+
+enum DbdAuthParsePhaseV1:
+    Prefix
+    PrincipalLength
+    PrincipalLengthLf
+    PrincipalData
+    PrincipalDataCr
+    PrincipalDataLf
+    CredentialDollar
+    CredentialLength
+    CredentialLengthLf
+    CredentialData
+    CredentialDataCr
+    CredentialDataLf
+    Complete
+    Failed
+
+fn _dbd_auth_prefix_byte(index: i64) -> i64:
+    # *3\r\n$4\r\nAUTH\r\n$
+    if index == 0: return 42
+    if index == 1: return 51
+    if index == 2: return 13
+    if index == 3: return 10
+    if index == 4: return 36
+    if index == 5: return 52
+    if index == 6: return 13
+    if index == 7: return 10
+    if index == 8: return 65
+    if index == 9: return 85
+    if index == 10: return 84
+    if index == 11: return 72
+    if index == 12: return 13
+    if index == 13: return 10
+    if index == 14: return 36
+    -1
+
+fn _dbd_auth_ascii_digit(byte: u8) -> bool:
+    byte >= 48u8 and byte <= 57u8
+
+pub class DbdMutableAuthRequestOwnerV1:
+    auth_session: DbdAuthSession
+    phase: DbdAuthParsePhaseV1
+    prefix_index: i64
+    length_value: i64
+    length_digits: i64
+    expected_field_bytes: i64
+    field_index: i64
+    request_bytes: i64
+    fragment_count: i64
+    principal: [u8]
+    credential: [u8]
+    trailing: [u8]
+    status: DbdAuthIngressStatusV1
+    closed: bool
+    last_credential_length: i64
+    last_zeroized_byte_count: i64
+    last_zeroization_verified: bool
+
+    pub static fn new(session_id: i64) -> DbdMutableAuthRequestOwnerV1:
+        DbdMutableAuthRequestOwnerV1(
+            auth_session: DbdAuthSession.new(session_id),
+            phase: DbdAuthParsePhaseV1.Prefix,
+            prefix_index: 0,
+            length_value: 0,
+            length_digits: 0,
+            expected_field_bytes: 0,
+            field_index: 0,
+            request_bytes: 0,
+            fragment_count: 0,
+            principal: [],
+            credential: [],
+            trailing: [],
+            status: DbdAuthIngressStatusV1.NeedMore,
+            closed: false,
+            last_credential_length: 0,
+            last_zeroized_byte_count: 0,
+            last_zeroization_verified: false
+        )
+
+    me wipe_auth_material():
+        self.last_credential_length = self.credential.len().to_i64()
+        self.last_zeroized_byte_count = 0
+        var index: u64 = 0
+        while index < self.credential.len():
+            self.credential[index] = 0u8
+            self.last_zeroized_byte_count = self.last_zeroized_byte_count + 1
+            index = index + 1u64
+        index = 0u64
+        while index < self.principal.len():
+            self.principal[index] = 0u8
+            index = index + 1u64
+        var all_zero = self.last_zeroized_byte_count == self.last_credential_length
+        index = 0u64
+        while index < self.credential.len():
+            if self.credential[index] != 0u8:
+                all_zero = false
+            index = index + 1u64
+        self.last_zeroization_verified = all_zero
+
+    me reset_for_retry():
+        self.phase = DbdAuthParsePhaseV1.Prefix
+        self.prefix_index = 0
+        self.length_value = 0
+        self.length_digits = 0
+        self.expected_field_bytes = 0
+        self.field_index = 0
+        self.request_bytes = 0
+        self.fragment_count = 0
+        self.principal = []
+        self.credential = []
+        self.status = DbdAuthIngressStatusV1.NeedMore
+
+    me fail(status: DbdAuthIngressStatusV1) -> DbdAuthIngressStatusV1:
+        self.wipe_auth_material()
+        self.trailing = []
+        self.phase = DbdAuthParsePhaseV1.Failed
+        self.status = status
+        self.closed = true
+        status
+
+    me consume_length_digit(byte: u8, maximum: i64) -> bool:
+        if not _dbd_auth_ascii_digit(byte):
+            return false
+        if self.length_digits >= 3:
+            return false
+        val digit = byte.to_i64() - 48
+        if self.length_value > (maximum - digit) / 10:
+            return false
+        self.length_value = self.length_value * 10 + digit
+        self.length_digits = self.length_digits + 1
+        true
+
+    me finish_authentication(
+        provider: DbdCredentialProvider
+    ) -> DbdAuthIngressStatusV1:
+        val accepted = self.auth_session.authenticate_bytes(
+            provider, self.principal, self.credential)
+        self.wipe_auth_material()
+        if accepted:
+            self.phase = DbdAuthParsePhaseV1.Complete
+            self.status = DbdAuthIngressStatusV1.Authenticated
+            return self.status
+        if self.auth_session.closed:
+            self.phase = DbdAuthParsePhaseV1.Failed
+            self.status = DbdAuthIngressStatusV1.Locked
+            self.closed = true
+            return self.status
+        self.status = DbdAuthIngressStatusV1.Rejected
+        self.reset_for_retry()
+        DbdAuthIngressStatusV1.Rejected
+
+    me consume_auth_byte(
+        byte: u8,
+        provider: DbdCredentialProvider
+    ) -> DbdAuthIngressStatusV1:
+        self.request_bytes = self.request_bytes + 1
+        if self.request_bytes > DBD_MAX_AUTH_REQUEST_BYTES:
+            return self.fail(DbdAuthIngressStatusV1.Overflow)
+
+        if self.phase == DbdAuthParsePhaseV1.Prefix:
+            if byte.to_i64() != _dbd_auth_prefix_byte(self.prefix_index):
+                return self.fail(DbdAuthIngressStatusV1.Malformed)
+            self.prefix_index = self.prefix_index + 1
+            if self.prefix_index == 15:
+                self.phase = DbdAuthParsePhaseV1.PrincipalLength
+            return DbdAuthIngressStatusV1.NeedMore
+
+        if self.phase == DbdAuthParsePhaseV1.PrincipalLength:
+            if byte == 13u8:
+                if self.length_digits == 0 or self.length_value <= 0 or
+                    self.length_value > DBD_MAX_PRINCIPAL_BYTES:
+                    return self.fail(DbdAuthIngressStatusV1.Malformed)
+                self.expected_field_bytes = self.length_value
+                self.length_value = 0
+                self.length_digits = 0
+                self.phase = DbdAuthParsePhaseV1.PrincipalLengthLf
+                return DbdAuthIngressStatusV1.NeedMore
+            if not self.consume_length_digit(byte, DBD_MAX_PRINCIPAL_BYTES):
+                return self.fail(DbdAuthIngressStatusV1.Malformed)
+            return DbdAuthIngressStatusV1.NeedMore
+
+        if self.phase == DbdAuthParsePhaseV1.PrincipalLengthLf:
+            if byte != 10u8:
+                return self.fail(DbdAuthIngressStatusV1.Malformed)
+            self.field_index = 0
+            self.phase = DbdAuthParsePhaseV1.PrincipalData
+            return DbdAuthIngressStatusV1.NeedMore
+
+        if self.phase == DbdAuthParsePhaseV1.PrincipalData:
+            if byte < 33u8 or byte > 126u8:
+                return self.fail(DbdAuthIngressStatusV1.Malformed)
+            self.principal.push(byte)
+            self.field_index = self.field_index + 1
+            if self.field_index == self.expected_field_bytes:
+                self.phase = DbdAuthParsePhaseV1.PrincipalDataCr
+            return DbdAuthIngressStatusV1.NeedMore
+
+        if self.phase == DbdAuthParsePhaseV1.PrincipalDataCr:
+            if byte != 13u8:
+                return self.fail(DbdAuthIngressStatusV1.Malformed)
+            self.phase = DbdAuthParsePhaseV1.PrincipalDataLf
+            return DbdAuthIngressStatusV1.NeedMore
+
+        if self.phase == DbdAuthParsePhaseV1.PrincipalDataLf:
+            if byte != 10u8:
+                return self.fail(DbdAuthIngressStatusV1.Malformed)
+            self.phase = DbdAuthParsePhaseV1.CredentialDollar
+            return DbdAuthIngressStatusV1.NeedMore
+
+        if self.phase == DbdAuthParsePhaseV1.CredentialDollar:
+            if byte != 36u8:
+                return self.fail(DbdAuthIngressStatusV1.Malformed)
+            self.length_value = 0
+            self.length_digits = 0
+            self.phase = DbdAuthParsePhaseV1.CredentialLength
+            return DbdAuthIngressStatusV1.NeedMore
+
+        if self.phase == DbdAuthParsePhaseV1.CredentialLength:
+            if byte == 13u8:
+                if self.length_digits == 0 or
+                    self.length_value < DBD_MIN_CREDENTIAL_BYTES or
+                    self.length_value > DBD_MAX_CREDENTIAL_BYTES:
+                    return self.fail(DbdAuthIngressStatusV1.Malformed)
+                self.expected_field_bytes = self.length_value
+                self.length_value = 0
+                self.length_digits = 0
+                self.phase = DbdAuthParsePhaseV1.CredentialLengthLf
+                return DbdAuthIngressStatusV1.NeedMore
+            if not self.consume_length_digit(byte, DBD_MAX_CREDENTIAL_BYTES):
+                return self.fail(DbdAuthIngressStatusV1.Malformed)
+            return DbdAuthIngressStatusV1.NeedMore
+
+        if self.phase == DbdAuthParsePhaseV1.CredentialLengthLf:
+            if byte != 10u8:
+                return self.fail(DbdAuthIngressStatusV1.Malformed)
+            self.field_index = 0
+            self.phase = DbdAuthParsePhaseV1.CredentialData
+            return DbdAuthIngressStatusV1.NeedMore
+
+        if self.phase == DbdAuthParsePhaseV1.CredentialData:
+            self.credential.push(byte)
+            self.field_index = self.field_index + 1
+            if self.field_index == self.expected_field_bytes:
+                self.phase = DbdAuthParsePhaseV1.CredentialDataCr
+            return DbdAuthIngressStatusV1.NeedMore
+
+        if self.phase == DbdAuthParsePhaseV1.CredentialDataCr:
+            if byte != 13u8:
+                return self.fail(DbdAuthIngressStatusV1.Malformed)
+            self.phase = DbdAuthParsePhaseV1.CredentialDataLf
+            return DbdAuthIngressStatusV1.NeedMore
+
+        if self.phase == DbdAuthParsePhaseV1.CredentialDataLf:
+            if byte != 10u8:
+                return self.fail(DbdAuthIngressStatusV1.Malformed)
+            return self.finish_authentication(provider)
+
+        self.fail(DbdAuthIngressStatusV1.Malformed)
+
+    pub me ingest(
+        provider: DbdCredentialProvider,
+        bytes: [u8]
+    ) -> DbdAuthIngressStatusV1:
+        if self.closed:
+            return DbdAuthIngressStatusV1.Closed
+        if self.status == DbdAuthIngressStatusV1.Authenticated:
+            if self.trailing.len().to_i64() >
+                DBD_MAX_AUTH_TRAILING_BYTES - bytes.len().to_i64():
+                return self.fail(DbdAuthIngressStatusV1.Overflow)
+            for byte in bytes:
+                self.trailing.push(byte)
+            return DbdAuthIngressStatusV1.Authenticated
+        if bytes.len() == 0:
+            return self.fail(DbdAuthIngressStatusV1.Malformed)
+        self.fragment_count = self.fragment_count + 1
+        if self.fragment_count > DBD_MAX_AUTH_FRAGMENTS:
+            return self.fail(DbdAuthIngressStatusV1.Overflow)
+
+        var index: u64 = 0
+        var result = DbdAuthIngressStatusV1.NeedMore
+        while index < bytes.len():
+            result = self.consume_auth_byte(bytes[index], provider)
+            if result == DbdAuthIngressStatusV1.Authenticated:
+                index = index + 1u64
+                while index < bytes.len():
+                    if self.trailing.len().to_i64() >= DBD_MAX_AUTH_TRAILING_BYTES:
+                        return self.fail(DbdAuthIngressStatusV1.Overflow)
+                    self.trailing.push(bytes[index])
+                    index = index + 1u64
+                return result
+            if result != DbdAuthIngressStatusV1.NeedMore:
+                return result
+            index = index + 1u64
+        result
+
+    pub fn last_credential_was_zeroized() -> bool:
+        self.last_credential_length > 0 and
+            self.last_zeroized_byte_count == self.last_credential_length and
+            self.last_zeroization_verified
+
+    pub fn last_wiped_credential_byte_count() -> i64:
+        self.last_zeroized_byte_count
+
+    pub fn retained_secret_byte_count() -> i64:
+        var retained: i64 = 0
+        for byte in self.credential:
+            if byte != 0u8:
+                retained = retained + 1
+        retained
+
+    pub fn can_dispatch() -> bool:
+        self.auth_session.can_dispatch()
+
+    pub fn identity() -> text:
+        self.auth_session.identity
+
+    pub fn attempt_count() -> i64:
+        self.auth_session.attempts
+
+    pub fn is_locked() -> bool:
+        self.auth_session.closed and not self.auth_session.authenticated
+
+    pub me take_authenticated_trailing() -> [u8]:
+        if self.status != DbdAuthIngressStatusV1.Authenticated:
+            return []
+        val out = self.trailing
+        var index: u64 = 0
+        while index < self.trailing.len():
+            self.trailing[index] = 0u8
+            index = index + 1u64
+        self.trailing = []
+        out
+
+    pub me close():
+        self.wipe_auth_material()
+        var index: u64 = 0
+        while index < self.trailing.len():
+            self.trailing[index] = 0u8
+            index = index + 1u64
+        self.trailing = []
+        self.phase = DbdAuthParsePhaseV1.Failed
+        self.status = DbdAuthIngressStatusV1.Closed
+        self.closed = true
+        self.auth_session.close()

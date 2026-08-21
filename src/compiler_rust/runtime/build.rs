@@ -11,6 +11,7 @@ fn main() {
     println!("cargo:rerun-if-changed=src/runtime_export_scan.rs");
     println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=../../runtime/runtime_memory.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_process_owned.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_memory_guard.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_time.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_timestamp.c");
@@ -206,6 +207,19 @@ fn compile_c_runtime_sources() {
         // also declares extern "C" live in runtime_packed_span.c, also never
         // registered here.
         "runtime_packed_span.c",
+        // rt_process_run_owned_bounded_value + rt_process_owned_* (Vulkan
+        // Engine2D native-JIT blocker, doc/08_tracking/bug/
+        // vulkan_engine2d_native_jit_missing_rt_struct_receiver_valid_2026-08-12.md
+        // follow-up): the names are in the runtime_symbols.rs manifest and
+        // declared by JIT codegen, but this list never included the source
+        // file, so the JIT hit "unresolved external symbol
+        // 'rt_process_run_owned_bounded_value'" and dropped whole modules to
+        // the interpreter. Its only cross-file C dependency, rt_free_deep
+        // (runtime_native.c, not compiled here), is swapped for the Rust
+        // rt_string_free via SIMPLE_RUNTIME_PROCESS_OWNED_STRING_FREE below --
+        // exact-equivalent since every value it deep-frees is a string.
+        // Re-added after the tree-wipe restore ae55a746719 dropped it again.
+        "runtime_process_owned.c",
     ];
     if target_os != "windows" && !native_all_provider {
         c_sources.push("hosted_win32.c");
@@ -217,6 +231,9 @@ fn compile_c_runtime_sources() {
     // See the runtime_audio.c comment above: this crate doesn't compile
     // runtime.c, so spl_array_get/spl_as_float are unavailable here.
     build.define("SIMPLE_RUNTIME_AUDIO_STUB_SPLARRAY", None);
+    // See the runtime_process_owned.c comment above: rt_free_deep lives in
+    // runtime_native.c, which this crate does not compile.
+    build.define("SIMPLE_RUNTIME_PROCESS_OWNED_STRING_FREE", None);
     if env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default() != "msvc" {
         build.flag_if_supported("-std=gnu11");
     } else {

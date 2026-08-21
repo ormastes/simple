@@ -1,0 +1,46 @@
+# Reproducing spec for
+# doc/08_tracking/bug/type_alias_declarations_discarded_at_parse_2026-07-29.md
+#
+# `type X = Y` used to be handled in parse_module_body
+# (src/compiler/10.frontend/core/_ParserDecls/enum_module_body.spl) by a bare
+# skip-to-newline loop: no name captured, no arena decl created,
+# module_add_decl never called, and _FlatAstBridge hardcoded
+# `type_aliases: ...` empty. Nothing downstream could see an alias, so a
+# semantic-alias registry could never be built and any type-based rule could
+# be evaded by aliasing the forbidden type.
+#
+# This spec drives the pure-Simple frontend directly via
+# parse_and_build_module, so it exercises the .spl parser (NOT the Rust seed's
+# own parser) even though the spec body itself runs interpreted.
+
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.frontend.parser_types.*
+
+fn alias_names(src: text) -> [text]:
+    val m = parse_and_build_module(src, "type_alias_survives_parse_spec.spl")
+    var names: [text] = []
+    for k in m.type_aliases.keys():
+        names.push(k)
+    names
+
+describe "type alias declarations survive parsing":
+
+    it "records a single module-level alias in module.type_aliases":
+        val src = "type UserId = i64\n"
+        val names = alias_names(src)
+        expect names.len() == 1
+        expect names.contains("UserId")
+
+    it "records the aliased type, not just the name":
+        val m = parse_and_build_module("type UserId = i64\n", "s.spl")
+        expect m.type_aliases.contains_key("UserId")
+        var recorded_name = ""
+        for k in m.type_aliases.keys():
+            recorded_name = m.type_aliases[k].name
+        expect recorded_name == "UserId"
+
+    it "does not desync the parser for declarations that follow":
+        val src = "type UserId = i64\nfn after() -> i64:\n    return 7\n"
+        val m = parse_and_build_module(src, "s.spl")
+        expect m.type_aliases.len() == 1
+        expect m.functions.len() == 1

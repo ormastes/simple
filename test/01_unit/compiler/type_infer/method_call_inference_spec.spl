@@ -1,0 +1,105 @@
+use std.spec.*
+use compiler.types.type_infer.inference.*
+use compiler.types.type_infer.inference_effects.*
+use compiler.types.type_infer.context.*
+use compiler.hir.hir.*
+use compiler.frontend.core.lexer.*
+
+fn method_span() -> Span:
+    lex_span_empty()
+
+fn method_int(value: i64) -> HirExpr:
+    HirExpr(
+        kind: HirExprKind.IntLit(value, nil),
+        has_type_: true,
+        type_: HirType(kind: HirTypeKind.Int(64, true), span: method_span()),
+        span: method_span()
+    )
+
+fn method_arg(value: HirExpr) -> HirCallArg:
+    HirCallArg(has_name: false, name: "", value: value, span: method_span())
+
+fn method_undefined(symbol_id: i64) -> HirExpr:
+    HirExpr(
+        kind: HirExprKind.Var(SymbolId(id: symbol_id)),
+        has_type_: false,
+        type_: HirType(kind: HirTypeKind.Infer(0, 0), span: method_span()),
+        span: method_span()
+    )
+
+fn unresolved_method(receiver: HirExpr, name: text, args: [HirCallArg]) -> HirExpr:
+    HirExpr(
+        kind: HirExprKind.MethodCall(receiver, name, args, MethodResolution.Unresolved),
+        has_type_: false,
+        type_: HirType(kind: HirTypeKind.Infer(0, 0), span: method_span()),
+        span: method_span()
+    )
+
+fn effect_is_io(effect: Effect) -> bool:
+    match effect.kind:
+        case IO: true
+        case _: false
+
+fn type_is_infer(ty: HirType) -> bool:
+    match ty.kind:
+        case Infer(_, _): true
+        case _: false
+
+fn error_is_undefined(error: TypeInferError) -> bool:
+    match error:
+        case Undefined(_, _): true
+        case _: false
+
+describe "HIR method-call inference aggregate transport":
+    it "infers every argument in a nested method-call payload":
+        var ctx = HmInferContext.new()
+        val inner = unresolved_method(method_int(1), "inner", [method_arg(method_int(2))])
+        val outer = unresolved_method(
+            method_int(3),
+            "outer",
+            [method_arg(inner), method_arg(method_int(4))]
+        )
+
+        val inferred = ctx.synthesize_expr(outer)
+        expect(inferred.is_ok()).to_be(true)
+        expect(type_is_infer(inferred.unwrap())).to_be(true)
+
+    it "visits an argument nested inside another method call":
+        var ctx = HmInferContext.new()
+        val inner = unresolved_method(
+            method_int(1),
+            "inner",
+            [method_arg(method_undefined(901))]
+        )
+        val outer = unresolved_method(method_int(2), "outer", [method_arg(inner)])
+
+        val inferred = ctx.synthesize_expr(outer)
+        expect(inferred.is_ok()).to_be(false)
+        val error = inferred.err.unwrap()
+        expect(error_is_undefined(error)).to_be(true)
+        expect(error.message()).to_contain("901")
+
+    it "visits a later argument after a valid nested argument":
+        var ctx = HmInferContext.new()
+        val inner = unresolved_method(method_int(1), "inner", [method_arg(method_int(2))])
+        val outer = unresolved_method(
+            method_int(3),
+            "outer",
+            [method_arg(inner), method_arg(method_undefined(902))]
+        )
+
+        val inferred = ctx.synthesize_expr(outer)
+        expect(inferred.is_ok()).to_be(false)
+        val error = inferred.err.unwrap()
+        expect(error_is_undefined(error)).to_be(true)
+        expect(error.message()).to_contain("902")
+
+    it "keeps an unresolved method fail-closed for effects":
+        var ctx = HmInferContext.new()
+        val pure_call = unresolved_method(method_int(1), "pure", [method_arg(method_int(2))])
+        val effects = ctx.infer_expr_effects(pure_call)
+        var has_io = false
+        for effect in effects:
+            if effect_is_io(effect):
+                has_io = true
+        expect(has_io).to_be(true)

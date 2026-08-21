@@ -2,6 +2,7 @@
 
 - **Filed:** 2026-08-09
 - Status: **FIXED 2026-08-17** (was OPEN P2)
+- **Verification 2026-08-21 (bug-status-consistency audit): PARTIAL, not fully fixed.** 47 manifest entries and both tests present in `runtime_symbols.rs`, but end-to-end JIT socket EXECUTION is unproven — the deployed seed predates the change. `bug_db.sdn` row is `fix-implemented-verification-pending`.
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).
   (Rust-seed-only fix, see "Root cause" below)
 

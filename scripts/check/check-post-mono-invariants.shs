@@ -1,0 +1,150 @@
+#!/bin/sh
+# check-post-mono-invariants.shs — run the post-monomorphization invariant
+# verifier (src/compiler/40.mono/verify/post_mono_verify.spl, hardening plan
+# section 9.5) over a fixture corpus and compare each fixture's REAL counters
+# against the expectation declared in its own `# @expect:` header.
+#
+# Verdict is always the LAST line of stdout:
+#   PASS  — <n> fixture(s) checked, 0 unexpected            exit 0
+#   FAIL  — <n> fixture(s) checked, <k> unexpected: <names> exit 1
+#   ERROR — nothing was checked (<reason>)                  exit 2
+# A run that checked 0 fixtures is ERROR, never a pass.
+#
+#   --selftest   run the fatal selftest only
+#   --corpus D   override the corpus dir (default test/fixtures/mono/post_mono)
+
+set -u
+
+REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+CORPUS="$REPO_ROOT/test/fixtures/mono/post_mono"
+SIMPLE="$REPO_ROOT/bin/simple"
+SELFTEST_ONLY=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) SELFTEST_ONLY=1 ;;
+        --corpus) shift; CORPUS="$1" ;;
+        *) printf 'ERROR — nothing was checked (unknown argument: %s)\n' "$1"; exit 2 ;;
+    esac
+    shift
+done
+
+# Expected counter string for a fixture, from its `# @expect:` header.
+fixture_expectation() {
+    sed -n 's/^# @expect:[[:space:]]*//p' "$1" | head -1
+}
+
+# Actual counter string: the POST_MONO_COUNTERS line the fixture printed.
+# The exit status is read directly, never through a pipe.
+fixture_actual() {
+    _out=$("$SIMPLE" run "$1" 2>/dev/null)
+    _rc=$?
+    if [ "$_rc" -ne 0 ]; then
+        printf 'RUNFAILED(rc=%s)' "$_rc"
+        return 0
+    fi
+    _line=$(printf '%s\n' "$_out" | sed -n 's/^POST_MONO_COUNTERS=//p' | tail -1)
+    if [ -z "$_line" ]; then
+        printf 'NOOUTPUT'
+        return 0
+    fi
+    printf '%s' "$_line"
+}
+
+scan_corpus() {
+    _dir="$1"
+    CHECKED=0
+    OFFENDERS=""
+    for f in "$_dir"/*.spl; do
+        [ -e "$f" ] || continue
+        _exp=$(fixture_expectation "$f")
+        [ -n "$_exp" ] || continue   # support modules carry no expectation
+        _act=$(fixture_actual "$f")
+        CHECKED=$((CHECKED + 1))
+        if [ "$_act" = "$_exp" ]; then
+            printf '  ok   %-34s %s\n' "$(basename "$f")" "$_act"
+        else
+            printf '  BAD  %-34s expected [%s] got [%s]\n' "$(basename "$f")" "$_exp" "$_act"
+            OFFENDERS="$OFFENDERS $(basename "$f")"
+        fi
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Selftest — fatal, runs before every scan.
+# Fixtures print the contract lines directly, so the selftest exercises THIS
+# script's comparison and non-vacuity logic without depending on the verifier.
+# ---------------------------------------------------------------------------
+selftest() {
+    _tmp=$(mktemp -d) || { printf 'ERROR — nothing was checked (mktemp failed)\n'; exit 2; }
+    _ok=1
+
+    mkdir -p "$_tmp/good" "$_tmp/bad" "$_tmp/silent" "$_tmp/empty"
+
+    printf '# @expect: clean\nfn main():\n    print "POST_MONO_COUNTERS=clean"\n    print "POST_MONO_TOTAL=0"\n' > "$_tmp/good/f_clean.spl"
+    printf '# @expect: unresolved_type_param=1\nfn main():\n    print "POST_MONO_COUNTERS=unresolved_type_param=1"\n    print "POST_MONO_TOTAL=1"\n' > "$_tmp/good/f_counter.spl"
+
+    printf '# @expect: clean\nfn main():\n    print "POST_MONO_COUNTERS=unresolved_type_param=3"\n    print "POST_MONO_TOTAL=3"\n' > "$_tmp/bad/f_mismatch.spl"
+
+    printf '# @expect: clean\nfn main():\n    print "nothing to see here"\n' > "$_tmp/silent/f_silent.spl"
+
+    scan_corpus "$_tmp/good" >/dev/null
+    if [ "$CHECKED" -ne 2 ] || [ -n "$OFFENDERS" ]; then
+        printf 'selftest FAIL: matching corpus should pass (checked=%s offenders=%s)\n' "$CHECKED" "$OFFENDERS"
+        _ok=0
+    fi
+
+    scan_corpus "$_tmp/bad" >/dev/null
+    if [ "$CHECKED" -ne 1 ] || [ -z "$OFFENDERS" ]; then
+        printf 'selftest FAIL: mismatched expectation must be an offender\n'
+        _ok=0
+    fi
+
+    scan_corpus "$_tmp/silent" >/dev/null
+    if [ "$CHECKED" -ne 1 ] || [ -z "$OFFENDERS" ]; then
+        printf 'selftest FAIL: a fixture that prints no POST_MONO_COUNTERS must be an offender\n'
+        _ok=0
+    fi
+
+    scan_corpus "$_tmp/empty" >/dev/null
+    if [ "$CHECKED" -ne 0 ]; then
+        printf 'selftest FAIL: empty corpus must check 0 fixtures so the caller ERRORs\n'
+        _ok=0
+    fi
+
+    rm -rf "$_tmp"
+    if [ "$_ok" -ne 1 ]; then
+        printf 'FAIL — selftest failed\n'
+        exit 1
+    fi
+    printf 'selftest: 4 scenario(s) passed\n'
+}
+
+selftest
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+    printf 'PASS — selftest only, 4 scenario(s) checked, 0 unexpected\n'
+    exit 0
+fi
+
+if [ ! -x "$SIMPLE" ]; then
+    printf 'ERROR — nothing was checked (no runnable binary at %s)\n' "$SIMPLE"
+    exit 2
+fi
+if [ ! -d "$CORPUS" ]; then
+    printf 'ERROR — nothing was checked (corpus dir missing: %s)\n' "$CORPUS"
+    exit 2
+fi
+
+scan_corpus "$CORPUS"
+
+if [ "$CHECKED" -eq 0 ]; then
+    printf 'ERROR — nothing was checked (no fixture in %s declares a # @expect: header)\n' "$CORPUS"
+    exit 2
+fi
+if [ -n "$OFFENDERS" ]; then
+    _n=$(printf '%s' "$OFFENDERS" | wc -w | tr -d ' ')
+    printf 'FAIL — %s fixture(s) checked, %s unexpected:%s\n' "$CHECKED" "$_n" "$OFFENDERS"
+    exit 1
+fi
+printf 'PASS — %s fixture(s) checked, 0 unexpected\n' "$CHECKED"
+exit 0

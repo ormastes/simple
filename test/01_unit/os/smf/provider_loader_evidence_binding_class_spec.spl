@@ -1,0 +1,107 @@
+# Class-detection spec for the "evidence not bound to the object it describes"
+# defect class.
+#
+# Property under test, stated generally:
+#   ANY admission entry point that derives evidence (a digest) from a
+#   path-based read and then INDEPENDENTLY re-opens that same path must
+#   re-verify the bytes after the open and fail admission closed on mismatch.
+#
+# This is asserted across EVERY admission entry point in provider_loader.spl,
+# not just the dynamic one, so a future admission path that repeats the same
+# read-then-reopen shape is caught the day it is added.
+
+extern fn rt_file_read_text(path: text) -> text
+
+val LOADER_SOURCE_PATH: text = "src/os/smf/provider_loader.spl"
+
+fn loader_source() -> text:
+    rt_file_read_text(LOADER_SOURCE_PATH) ?? ""
+
+# All top-level function bodies, keyed positionally with fn_names().
+fn fn_names(src: text) -> [text]:
+    var out: [text] = []
+    val parts = src.split("\nfn ")
+    var i = 1
+    while i < parts.len():
+        val head = parts[i].split("(")[0]
+        out.push(head)
+        i = i + 1
+    out
+
+fn fn_bodies(src: text) -> [text]:
+    var out: [text] = []
+    val parts = src.split("\nfn ")
+    var i = 1
+    while i < parts.len():
+        out.push(parts[i])
+        i = i + 1
+    out
+
+fn is_admission_entry(name: text) -> bool:
+    name.starts_with("provider_admit_")
+
+fn reads_a_path(body: text) -> bool:
+    body.contains("rt_file_read_bytes(") or body.contains("rt_file_read_text(")
+
+fn reopens_a_path(body: text) -> bool:
+    body.contains("dynlib_open(")
+
+fn segment_after(body: text, marker: text) -> text:
+    val parts = body.split(marker)
+    if parts.len() < 2:
+        return ""
+    parts[1]
+
+fn rebinds_after_open(body: text) -> bool:
+    val after = segment_after(body, "dynlib_open(")
+    if after.len() == 0:
+        return false
+    val re_read = after.contains("rt_file_read_bytes(") or after.contains("rt_file_read_text(")
+    val re_hash = after.contains("provider_artifact_digest_v1(")
+    val fails_closed = after.contains("PROVIDER_ADMISSION_DIGEST_UNSTABLE")
+    val releases = after.contains("dynlib_close(")
+    re_read and re_hash and fails_closed and releases
+
+describe "admission evidence must be bound to the object it describes":
+    it "finds admission entry points to check":
+        val src = loader_source()
+        expect(src.len() > 0).to_be(true)
+        val names = fn_names(src)
+        var admitters = 0
+        var i = 0
+        while i < names.len():
+            if is_admission_entry(names[i]):
+                admitters = admitters + 1
+            i = i + 1
+        expect(admitters > 0).to_be(true)
+
+    it "every admission entry point that reads a path and re-opens it re-verifies after open":
+        val src = loader_source()
+        val names = fn_names(src)
+        val bodies = fn_bodies(src)
+        var offenders: [text] = []
+        var checked = 0
+        var i = 0
+        while i < names.len() and i < bodies.len():
+            if is_admission_entry(names[i]):
+                val body = bodies[i]
+                if reads_a_path(body) and reopens_a_path(body):
+                    checked = checked + 1
+                    if not rebinds_after_open(body):
+                        offenders.push(names[i])
+            i = i + 1
+        expect(checked > 0).to_be(true)
+        expect(offenders.len()).to_be(0)
+
+    it "the fail-closed status is a distinct, exported admission status":
+        val src = loader_source()
+        expect(src.contains("val PROVIDER_ADMISSION_DIGEST_UNSTABLE")).to_be(true)
+        expect(src.contains("export PROVIDER_ADMISSION_DIGEST_UNSTABLE") or
+            src.contains("PROVIDER_ADMISSION_DIGEST_UNSTABLE,")).to_be(true)
+
+    it "the fail-closed status is not aliased onto OK":
+        val src = loader_source()
+        val decl = src.split("val PROVIDER_ADMISSION_DIGEST_UNSTABLE: i32 = ")
+        expect(decl.len() > 1).to_be(true)
+        val value = decl[1].split("\n")[0]
+        expect(value == "0").to_be(false)

@@ -3,7 +3,7 @@
 # Walks HIR modules to find cross-module symbol accesses and check visibility.
 
 use compiler.hir.hir_types.{HirModule, SymbolId, SymbolTable}
-use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirStmt, HirStmtKind, HirBlock, HirFunction, HirMatchArm, HirCallArg}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirStmt, HirStmtKind, HirBlock, HirFunction, HirMatchArm, HirCallArg, HirIfArm}
 use visibility_checker.{VisibilityChecker, VisibilityWarning}
 use compiler.common.diagnostics.span.{Span}
 
@@ -19,8 +19,7 @@ fn check_module_visibility(
 
     # Check all functions
     val funcs = hir_module.functions
-    for func_id in funcs.keys():
-        val func: HirFunction = funcs[func_id]
+    for func in funcs.values():
         check_function_visibility(func, symbols, checker)
 
     checker.get_warnings()
@@ -52,8 +51,9 @@ fn check_args_visibility(
 ):
     """Check visibility in call arguments."""
     for arg in args:
-        val arg_val: HirExpr = arg.value
-        check_expr_visibility(arg_val, symbols, checker)
+        # Walk the owned argument payload directly. Materializing another
+        # HirExpr here copies nested call trees on value-semantics runtimes.
+        check_expr_visibility(arg.value, symbols, checker)
 
 fn check_stmt_visibility(
     stmt: HirStmt,
@@ -122,9 +122,8 @@ fn check_expr_visibility(
 
         case IfChain(arms, else_block):
             for arm in arms:
-                val typed_arm: HirIfArm = arm
-                check_expr_visibility(typed_arm.cond, symbols, checker)
-                check_block_visibility(typed_arm.then_, symbols, checker)
+                check_expr_visibility(arm.cond, symbols, checker)
+                check_block_visibility(arm.then_, symbols, checker)
             match else_block:
                 case Some(block):
                     check_block_visibility(block, symbols, checker)
@@ -187,6 +186,15 @@ fn check_symbol_visibility(
         case nil:
             return  # Local symbol, no visibility check needed
 
+    # The HIR owner can be recorded as a source path while the driver supplies
+    # a dotted module key. Resolve both to the same logical owner before
+    # asking the checker; otherwise a module can warn on access to its own
+    # private symbol merely because the two spellings differ.
+    val owner_key = visibility_owner_key(defining_module)
+    val requester_key = visibility_owner_key(checker.current_module)
+    if owner_key == requester_key:
+        return
+
     # Check visibility and record warning if needed
     val warning = checker.check_symbol_access(symbol, defining_module, access_span)
     match warning:
@@ -194,5 +202,17 @@ fn check_symbol_visibility(
             checker.record_warning(value)
         case nil:
             pass
+
+fn visibility_owner_key(module_name: text) -> text:
+    var owner = module_name
+    while owner.starts_with("../"):
+        owner = owner.substring(3)
+    if owner.starts_with("./"):
+        owner = owner.substring(2)
+    if owner.starts_with("src/"):
+        owner = owner.substring(4)
+    owner.replace(".spl", "").replace(".sdn", "").replace("/", ".")
+
+export check_module_visibility, visibility_owner_key
 
 # Export public API

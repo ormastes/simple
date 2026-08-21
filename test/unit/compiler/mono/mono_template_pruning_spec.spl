@@ -1,0 +1,177 @@
+"""
+# Consumed generic templates stop being emittable (plan section 9.3 step 12)
+
+`run_monomorphization` substituted and rewrote correctly but left the generic
+TEMPLATE sitting in `module.functions`, so the section 9.5 post-mono verifier
+reported `generic_emitted_definition=1` on its own real-pass fixture
+(`test/fixtures/mono/post_mono/real_mono_pass_output.spl`).
+
+Step 12 of the fixed-point algorithm says: remove or mark non-emittable every
+generic template that has been consumed. This spec pins the three halves of
+that rule on one hand-built module holding
+
+    fn box_it<T>(v: T) -> [T]     # generic, called as box_it<i64>(7)  -> REMOVED
+    fn never_used<T>(v: T) -> T   # generic, never called             -> KEPT
+    fn plain(v: i64) -> i64       # not generic                       -> KEPT
+    fn main(): box_it<i64>(7)
+
+1. the consumed template is gone;
+2. its specialization `box_it$i64` is present;
+3. the non-generic neighbour `plain` is untouched — the removal is fail-closed
+   and can never drop a concrete definition.
+
+The zero-instantiation template `never_used` is deliberately KEPT: it is
+unreachable, and dropping it in the mono pass would paper over the fact that
+MIR lowering (`50.mir/_MirLowering/module_lowering.spl:981`, `lower_module`)
+iterates `module.functions.values()` with no template check and so does NOT
+skip it. That remaining gap is tracked in
+`doc/08_tracking/bug/hir_generic_templates_unconsumed_by_mono_pass_2026-08-21.md`.
+
+The module is built by hand, not parsed: the Phase A refusal gates in HIR
+lowering still reject a generic `fn` from source, so a generic HirFunction
+cannot reach Phase 4 through the front end today.
+"""
+
+use std.spec
+use compiler.hir.hir.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.mono.monomorphize_integration.{run_monomorphization}
+
+fn mk_span() -> Span:
+    Span.empty()
+
+fn mk_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: mk_span())
+
+fn mk_expr(kind: HirExprKind) -> HirExpr:
+    HirExpr(kind: kind, has_type_: false, type_: nil, span: mk_span())
+
+fn mk_block(stmts: [HirStmt]) -> HirBlock:
+    HirBlock(stmts: stmts, has: false, value: mk_expr(HirExprKind.NilLit), span: mk_span())
+
+fn mk_fn(id: i64, name: text, type_params: [HirTypeParam], params: [HirParam], ret: HirType, body: HirBlock) -> HirFunction:
+    HirFunction(
+        symbol: SymbolId(id: id),
+        name: name,
+        type_params: type_params,
+        params: params,
+        return_type: ret,
+        body: body,
+        effects: [],
+        visibility: Visibility.Public,
+        is_async: false,
+        is_static: false,
+        is_public: true,
+        is_method: false,
+        is_mutable: false,
+        is_const: false,
+        is_extern: false,
+        func_attr: FunctionAttr.default(),
+        has_export_attr: false,
+        export_attr: nil,
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_suspension: false,
+        has_vhdl_metadata: false,
+        vhdl_metadata: nil,
+        has_doc_comment: false,
+        doc_comment: "",
+        span: mk_span(),
+        is_gpu_kernel: false,
+        gpu_target: "",
+        gpu_backend_order: ""
+    )
+
+fn mk_tparam(id: i64) -> HirTypeParam:
+    HirTypeParam(symbol: SymbolId(id: id), name: "T", bounds: [], has_default: false, default: nil, span: mk_span())
+
+fn mk_param(id: i64, name: text, ty: HirType) -> HirParam:
+    HirParam(symbol: SymbolId(id: id), name: name, type_: ty, has_default: false, default: nil, span: mk_span(), is_mutable: false)
+
+fn make_modules() -> Dict<text, HirModule>:
+    val t_type = mk_type(HirTypeKind.TypeParam("T", []))
+    val i64_type = mk_type(HirTypeKind.Int(64, true))
+
+    val box_it = mk_fn(
+        10, "box_it", [mk_tparam(90)], [mk_param(11, "v", t_type)],
+        mk_type(HirTypeKind.Array(t_type, nil)),
+        mk_block([HirStmt(kind: HirStmtKind.Expr(mk_expr(HirExprKind.Var(SymbolId(id: 11)))), span: mk_span())])
+    )
+    val never_used = mk_fn(
+        20, "never_used", [mk_tparam(91)], [mk_param(21, "v", t_type)], t_type,
+        mk_block([HirStmt(kind: HirStmtKind.Expr(mk_expr(HirExprKind.Var(SymbolId(id: 21)))), span: mk_span())])
+    )
+    val plain = mk_fn(
+        30, "plain", [], [mk_param(31, "v", i64_type)], i64_type,
+        mk_block([HirStmt(kind: HirStmtKind.Expr(mk_expr(HirExprKind.Var(SymbolId(id: 31)))), span: mk_span())])
+    )
+    val call = mk_expr(HirExprKind.Call(
+        mk_expr(HirExprKind.Var(SymbolId(id: 10))),
+        [HirCallArg(has_name: false, name: "", value: mk_expr(HirExprKind.IntLit(7, nil)), span: mk_span())],
+        [i64_type]
+    ))
+    val main_fn = mk_fn(
+        40, "main", [], [], mk_type(HirTypeKind.Unit),
+        mk_block([HirStmt(kind: HirStmtKind.Expr(call), span: mk_span())])
+    )
+
+    var functions: Dict<SymbolId, HirFunction> = {}
+    functions[box_it.symbol] = box_it
+    functions[never_used.symbol] = never_used
+    functions[plain.symbol] = plain
+    functions[main_fn.symbol] = main_fn
+    val module = HirModule(
+        name: "mono_prune_test",
+        path: "synthetic/mono_prune_test.spl",
+        imports: [],
+        exports: [],
+        domain_blocks: [],
+        symbols: SymbolTable.new(),
+        functions: functions,
+        gpu_function_targets: {},
+        gpu_function_backend_orders: {},
+        classes: {},
+        structs: {},
+        enums: {},
+        bitfields: {},
+        traits: {},
+        impls: [],
+        constants: {},
+        static_asserts: [],
+        aop_advices: [],
+        di_bindings: [],
+        arch_rules: [],
+        mock_decls: [],
+        types: []
+    )
+    var modules: Dict<text, HirModule> = {}
+    modules["mono_prune_test"] = module
+    modules
+
+fn count_named(module: HirModule, name: text) -> i64:
+    var n = 0
+    for key in module.functions.keys():
+        val f: HirFunction = module.functions[key]
+        if f.name == name:
+            n = n + 1
+    n
+
+describe "generic template pruning after monomorphization (plan 9.3 step 12)":
+    it "removes the template that has a specialization":
+        val (result, _) = run_monomorphization(make_modules())
+        expect(count_named(result["mono_prune_test"], "box_it")).to_equal(0)
+
+    it "still emits the specialization":
+        val (result, stats) = run_monomorphization(make_modules())
+        expect(stats.specializations_created).to_equal(1)
+        expect(count_named(result["mono_prune_test"], "box_it$i64")).to_equal(1)
+
+    it "never drops a non-generic neighbour":
+        val (result, _) = run_monomorphization(make_modules())
+        val out = result["mono_prune_test"]
+        expect(count_named(out, "plain")).to_equal(1)
+        expect(count_named(out, "main")).to_equal(1)
+
+    it "keeps a generic template that has zero instantiations":
+        val (result, _) = run_monomorphization(make_modules())
+        expect(count_named(result["mono_prune_test"], "never_used")).to_equal(1)

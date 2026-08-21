@@ -680,6 +680,99 @@ char*    spl_sprintf(const char* fmt, ...);
 
 /* ===== Process ===== */
 
+/* Owned-process capsule ABI. Lost from this header by the tree-wipe restore
+ * ae55a746719 together with src/runtime/runtime_process_owned.c; restored
+ * verbatim from f11bd8f0d6b. */
+/* Versioned receipt for the runtime-owned bounded process capsule.  Slot and
+ * generation are the capability; PID and start identity are witnesses. */
+#define RT_OWNED_PROCESS_RECEIPT_VERSION 1
+typedef struct RtOwnedProcessReceipt {
+    uint64_t version;
+    uint64_t slot;
+    uint64_t generation;
+    int64_t pid;
+    int64_t process_group_id;
+    uint64_t start_identity;
+    uint64_t stdout_bytes_seen;
+    uint64_t stderr_bytes_seen;
+    uint64_t stdout_bytes_kept;
+    uint64_t stderr_bytes_kept;
+    int64_t exit_code;
+    int32_t timed_out;
+    int32_t term_sent;
+    int32_t kill_sent;
+    int32_t identity_revalidated;
+    int32_t reaped;
+    int32_t stdout_truncated;
+    int32_t stderr_truncated;
+    int32_t runtime_error;
+} RtOwnedProcessReceipt;
+
+#define RT_OWNED_PROCESS_CANCEL_RECEIPT_VERSION 1
+typedef struct RtOwnedProcessCancelReceipt {
+    uint64_t version;
+    uint64_t slot;
+    uint64_t generation;
+    int64_t pid;
+    uint64_t start_identity;
+    int32_t accepted;
+    int32_t term_sent;
+    int32_t runtime_error;
+} RtOwnedProcessCancelReceipt;
+
+/* Async identity-owned process lease.  The random token is authority; the
+ * diagnostic PID fields returned after start/termination are not. */
+#define RT_OWNED_PROCESS_ASYNC_VERSION 2
+typedef struct RtOwnedProcessTokenV2 {
+    uint64_t high;
+    uint64_t low;
+} RtOwnedProcessTokenV2;
+
+typedef struct RtOwnedProcessStartReceiptV2 {
+    uint64_t version;
+    int32_t accepted;
+    int32_t runtime_error;
+} RtOwnedProcessStartReceiptV2;
+
+typedef struct RtOwnedProcessPollReceiptV2 {
+    uint64_t version;
+    int32_t live;
+    int32_t terminal;
+    int32_t cancel_requested;
+    int32_t timed_out;
+    int32_t term_sent;
+    int32_t kill_sent;
+    int32_t reaped;
+    int32_t stdout_truncated;
+    int32_t stderr_truncated;
+    uint64_t stdout_bytes_seen;
+    uint64_t stderr_bytes_seen;
+    uint64_t stdout_bytes_kept;
+    uint64_t stderr_bytes_kept;
+    int32_t runtime_error;
+} RtOwnedProcessPollReceiptV2;
+
+typedef struct RtOwnedProcessResultV2 {
+    uint64_t version;
+    int64_t pid;
+    int64_t process_group_id;
+    uint64_t start_identity;
+    int64_t exit_code;
+    int32_t timed_out;
+    int32_t cancel_requested;
+    int32_t term_sent;
+    int32_t kill_sent;
+    int32_t identity_revalidated;
+    int32_t reaped;
+    int32_t stdout_truncated;
+    int32_t stderr_truncated;
+    uint64_t stdout_bytes_seen;
+    uint64_t stderr_bytes_seen;
+    uint64_t stdout_bytes_kept;
+    uint64_t stderr_bytes_kept;
+    int32_t runtime_error;
+} RtOwnedProcessResultV2;
+
 int64_t  spl_shell(const char* cmd);
 char*    spl_shell_output(const char* cmd);  /* capture stdout */
 /* -> RuntimeValue (I64), per runtime_sffi.rs:1419. NOT a bare SplArray*. */
@@ -691,6 +784,13 @@ int64_t   rt_process_spawn_guarded_value(int64_t cmd, SplArray* args);
 int64_t   rt_process_run_timeout(const char* cmd, uint64_t cmd_len, SplArray* args, int64_t timeout_ms);
 SplArray* rt_process_run_bounded(const char* cmd, uint64_t cmd_len, SplArray* args,
                                  int64_t timeout_ms, int64_t max_output_bytes);
+bool      rt_process_run_owned_bounded(const char* cmd, const char* const* argv,
+                                       int64_t timeout_ms, uint64_t max_output_bytes,
+                                       char* out, uint64_t out_cap, char* err,
+                                       uint64_t err_cap, RtOwnedProcessReceipt* receipt);
+int64_t*  rt_process_run_owned_bounded_value(const char* cmd, uint64_t cmd_len,
+                                             SplArray* args, int64_t timeout_ms,
+                                             int64_t max_output_bytes);
 #ifdef _WIN32
 char* rt_windows_build_command_line(const char* cmd, const char** args, int64_t arg_count);
 #endif
@@ -702,6 +802,28 @@ int64_t  rt_process_spawn_guarded(const char* cmd, const char** args, int64_t ar
 int64_t  rt_process_wait(int64_t pid, int64_t timeout_ms);
 bool     rt_process_is_running(int64_t pid);
 bool     rt_process_kill(int64_t pid);
+bool     rt_process_owned_cancel(uint64_t slot, uint64_t generation,
+                                 int64_t pid, uint64_t start_identity,
+                                 RtOwnedProcessCancelReceipt* receipt);
+bool     rt_process_owned_cancel_value(uint64_t slot, uint64_t generation,
+                                       int64_t pid, uint64_t start_identity);
+/* Legacy raw identity helper retained only as a fail-closed ABI tombstone. */
+bool     rt_process_owned_terminate(int64_t pid, uint64_t identity);
+bool     rt_process_owned_start_v2(const char* cmd, const char* const* argv,
+                                   int64_t timeout_ms, int64_t term_grace_ms,
+                                   uint64_t max_output_bytes,
+                                   RtOwnedProcessTokenV2* token,
+                                   RtOwnedProcessStartReceiptV2* receipt);
+bool     rt_process_owned_poll_v2(RtOwnedProcessTokenV2 token, int64_t wait_ms,
+                                  char* out, uint64_t out_cap, char* err,
+                                  uint64_t err_cap,
+                                  RtOwnedProcessPollReceiptV2* receipt);
+bool     rt_process_owned_cancel_v2(RtOwnedProcessTokenV2 token,
+                                    RtOwnedProcessCancelReceipt* receipt);
+bool     rt_process_owned_result_v2(RtOwnedProcessTokenV2 token,
+                                    RtOwnedProcessResultV2* result);
+bool     rt_process_owned_collect_v2(RtOwnedProcessTokenV2 token,
+                                     RtOwnedProcessResultV2* result);
 
 /* ===== Process Piped (editor LSP transport) ===== */
 

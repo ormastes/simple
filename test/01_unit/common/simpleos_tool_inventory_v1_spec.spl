@@ -1,0 +1,170 @@
+# REQ-011 truthful primary-tool inventory contract.
+
+use std.spec.*
+use common.contracts.execution.simpleos_tool_inventory_v1.{
+    SimpleOsToolStatus, SimpleOsToolInventoryError, SimpleOsToolInventoryEntry,
+    simpleos_tool_inventory_v1_validate, simpleos_tool_inventory_v1_can_advertise
+}
+use common.contracts.execution.simpleos_primary_tool_manifest_v1.{
+    simpleos_primary_tool_manifest_v1, simpleos_primary_tool_manifest_v1_is_closed
+}
+use common.contracts.execution.simpleos_target_v1.{
+    SIMPLEOS_TARGET_V1_X86_64_TRIPLE,
+    SIMPLEOS_TARGET_V1_AARCH64_TRIPLE,
+    SIMPLEOS_TARGET_V1_RISCV64GC_TRIPLE
+}
+
+fn valid_entry() -> SimpleOsToolInventoryEntry:
+    SimpleOsToolInventoryEntry(
+        schema_version: 1,
+        profile: "simpleos-primary-full-v1",
+        status: SimpleOsToolStatus.Supported,
+        canonical_name: "simple_compiler",
+        source_owner: "src/app/simpleos_tool",
+        artifact_path: "/sys/apps/simple_compiler",
+        artifact_digest: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        capabilities: ["compile"],
+        target_triples: [
+            SIMPLEOS_TARGET_V1_X86_64_TRIPLE,
+            SIMPLEOS_TARGET_V1_AARCH64_TRIPLE,
+            SIMPLEOS_TARGET_V1_RISCV64GC_TRIPLE
+        ],
+        filesystems: ["FAT32", "DBFS", "NVFS"],
+        version_contract: "--version emits tool-version-v1",
+        help_contract: "--help emits help-v1",
+        operation_behavior_id: "compile-real-source-v1",
+        error_behavior_id: "compile-invalid-input-v1",
+        evidence_receipt_ids: ["receipt-req011-001"],
+        blocker: ""
+    )
+
+describe "SimpleOS truthful primary-tool inventory v1 focused":
+    it "validates a fully bound Supported entry but requires the evidence owner":
+        expect(simpleos_tool_inventory_v1_validate(valid_entry())).to_equal(Ok(()))
+        expect(simpleos_tool_inventory_v1_can_advertise(valid_entry())).to_be(false)
+
+    it "rejects uppercase or malformed artifact digests":
+        var entry = valid_entry()
+        entry.artifact_digest = "0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef"
+        expect(simpleos_tool_inventory_v1_validate(entry)).to_equal(Err(SimpleOsToolInventoryError.InvalidArtifactDigest))
+
+    it "rejects non-canonical artifact paths and control characters":
+        var entry = valid_entry()
+        entry.artifact_path = "/sys/apps/../bin/simple"
+        expect(simpleos_tool_inventory_v1_validate(entry)).to_equal(Err(SimpleOsToolInventoryError.InvalidArtifactPath))
+        entry = valid_entry()
+        entry.help_contract = "help-v1\nforged-row"
+        expect(simpleos_tool_inventory_v1_validate(entry)).to_equal(Err(SimpleOsToolInventoryError.InvalidScalar))
+
+    it "rejects Supported without target, filesystem, operation, error, and evidence bindings":
+        var entry = valid_entry()
+        entry.target_triples = []
+        expect(simpleos_tool_inventory_v1_validate(entry)).to_equal(Err(SimpleOsToolInventoryError.MissingTarget))
+
+    it "rejects duplicate capabilities, targets, filesystems, and receipts":
+        var entry = valid_entry()
+        entry.capabilities = ["compile", "compile"]
+        expect(simpleos_tool_inventory_v1_validate(entry)).to_equal(Err(SimpleOsToolInventoryError.DuplicateCapability))
+        entry.capabilities = ["compile"]
+        entry.target_triples = [SIMPLEOS_TARGET_V1_X86_64_TRIPLE, SIMPLEOS_TARGET_V1_X86_64_TRIPLE, SIMPLEOS_TARGET_V1_RISCV64GC_TRIPLE]
+        expect(simpleos_tool_inventory_v1_validate(entry)).to_equal(Err(SimpleOsToolInventoryError.DuplicateTarget))
+        entry.target_triples = [SIMPLEOS_TARGET_V1_X86_64_TRIPLE, SIMPLEOS_TARGET_V1_AARCH64_TRIPLE, SIMPLEOS_TARGET_V1_RISCV64GC_TRIPLE]
+        entry.filesystems = ["FAT32", "FAT32", "NVFS"]
+        expect(simpleos_tool_inventory_v1_validate(entry)).to_equal(Err(SimpleOsToolInventoryError.DuplicateFilesystem))
+        entry.filesystems = ["FAT32", "DBFS", "NVFS"]
+        entry.evidence_receipt_ids = ["receipt-req011-001", "receipt-req011-001"]
+        expect(simpleos_tool_inventory_v1_validate(entry)).to_equal(Err(SimpleOsToolInventoryError.DuplicateEvidenceReceipt))
+
+    it "requires a blocker for non-supported states and rejects fabricated success IDs":
+        var entry = valid_entry()
+        entry.status = SimpleOsToolStatus.Blocked
+        expect(simpleos_tool_inventory_v1_validate(entry)).to_equal(Err(SimpleOsToolInventoryError.MissingBlocker))
+        entry.blocker = "ring3 userland unavailable"
+        entry.operation_behavior_id = "success"
+        expect(simpleos_tool_inventory_v1_validate(entry)).to_equal(Err(SimpleOsToolInventoryError.FabricatedSuccess))
+
+    it "allows blocked inventory without fabricated artifact or evidence identity":
+        var entry = valid_entry()
+        entry.status = SimpleOsToolStatus.Blocked
+        entry.artifact_path = ""
+        entry.artifact_digest = ""
+        entry.evidence_receipt_ids = []
+        entry.blocker = "ring3 userland unavailable"
+        expect(simpleos_tool_inventory_v1_can_advertise(entry)).to_be(true)
+
+    it "allows a blocked canonical artifact path without fabricating its digest":
+        var entry = valid_entry()
+        entry.status = SimpleOsToolStatus.Blocked
+        entry.artifact_digest = ""
+        entry.evidence_receipt_ids = []
+        entry.blocker = "target artifact has not been admitted"
+        expect(simpleos_tool_inventory_v1_validate(entry)).to_equal(Ok(()))
+        expect(simpleos_tool_inventory_v1_can_advertise(entry)).to_be(true)
+
+    it "keeps partial claims behind evidence admission while publishing unavailable gaps":
+        var entry = valid_entry()
+        entry.status = SimpleOsToolStatus.Partial
+        entry.blocker = "only one target has execution evidence"
+        expect(simpleos_tool_inventory_v1_validate(entry)).to_equal(Ok(()))
+        expect(simpleos_tool_inventory_v1_can_advertise(entry)).to_be(false)
+        entry.status = SimpleOsToolStatus.Unavailable
+        entry.artifact_path = ""
+        entry.artifact_digest = ""
+        entry.evidence_receipt_ids = []
+        expect(simpleos_tool_inventory_v1_can_advertise(entry)).to_be(true)
+
+    it "rejects a target outside the canonical SimpleOS target contract":
+        var entry = valid_entry()
+        entry.status = SimpleOsToolStatus.Blocked
+        entry.blocker = "target port unavailable"
+        entry.target_triples = ["mips64-unknown-simpleos"]
+        val result = simpleos_tool_inventory_v1_validate(entry)
+        expect(result).to_equal(Err(SimpleOsToolInventoryError.InvalidTarget))
+
+    it "keeps the primary profile closed while exposing exact implemented owners as blocked":
+        val rows = simpleos_primary_tool_manifest_v1()
+        expect(rows.len()).to_equal(8)
+        val names = [
+            "admin", "archive", "network", "sha256sum", "md5sum",
+            "grep", "ps", "package"
+        ]
+        val categories = ["administration", "archive-compression", "networking", "checksums", "checksums", "text-processing", "process-monitoring", "package-management"]
+        var i = 0
+        while i < rows.len():
+            expect(rows[i].canonical_name).to_equal(names[i])
+            expect(rows[i].capabilities[0]).to_equal(categories[i])
+            expect(simpleos_tool_inventory_v1_can_advertise(rows[i])).to_be(true)
+            expect(rows[i].target_triples.len()).to_equal(3)
+            expect(rows[i].filesystems).to_equal(["FAT32", "DBFS", "NVFS"])
+            if rows[i].canonical_name == "sha256sum" or rows[i].canonical_name == "md5sum":
+                expect(rows[i].status).to_equal(SimpleOsToolStatus.Blocked)
+                expect(rows[i].source_owner).to_equal("os.tools.shell.checksum.checksum_tool")
+                expect(rows[i].artifact_path).to_equal("/usr/bin/{rows[i].canonical_name}")
+                expect(rows[i].artifact_digest).to_equal("")
+                expect(rows[i].capabilities).to_equal(["checksums", rows[i].canonical_name])
+                expect(rows[i].blocker).to_equal("simpleos-primary-checksum-target-execution-evidence-unavailable")
+            elif rows[i].canonical_name == "grep":
+                expect(rows[i].status).to_equal(SimpleOsToolStatus.Blocked)
+                expect(rows[i].source_owner).to_equal("os.tools.shell.grep.grep_tool")
+                expect(rows[i].artifact_path).to_equal("/usr/bin/grep")
+                expect(rows[i].artifact_digest).to_equal("")
+                expect(rows[i].capabilities).to_equal(["text-processing", "grep"])
+                expect(rows[i].blocker).to_equal("simpleos-primary-text-target-execution-evidence-unavailable")
+            elif rows[i].canonical_name == "ps":
+                expect(rows[i].status).to_equal(SimpleOsToolStatus.Blocked)
+                expect(rows[i].source_owner).to_equal("os.tools.proc.ps_tool")
+                expect(rows[i].artifact_path).to_equal("/usr/bin/ps")
+                expect(rows[i].artifact_digest).to_equal("")
+                expect(rows[i].capabilities).to_equal(["process-monitoring", "ps"])
+                expect(rows[i].blocker).to_equal("simpleos-primary-process-target-artifact-loader-unavailable")
+            else:
+                expect(rows[i].status).to_equal(SimpleOsToolStatus.Unavailable)
+                expect(rows[i].blocker).to_equal("No evidence-service admission or artifact contract")
+            i = i + 1
+        expect(simpleos_primary_tool_manifest_v1_is_closed("admin")).to_be(true)
+        expect(simpleos_primary_tool_manifest_v1_is_closed("sha256sum")).to_be(true)
+        expect(simpleos_primary_tool_manifest_v1_is_closed("md5sum")).to_be(true)
+        expect(simpleos_primary_tool_manifest_v1_is_closed("grep")).to_be(true)
+        expect(simpleos_primary_tool_manifest_v1_is_closed("ps")).to_be(true)
+        expect(simpleos_primary_tool_manifest_v1_is_closed("checksum")).to_be(false)
+        expect(simpleos_primary_tool_manifest_v1_is_closed("unknown-tool")).to_be(false)

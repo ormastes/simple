@@ -1,0 +1,303 @@
+# SDN extension-manifest loader — hardening plan 2026-08-21 §13.2 and §16.4.
+#
+# Reads the two manifest shapes:
+#   `extension:` — one constructor contributed to an owner enum, with the
+#                  operation table every complete constructor must provide.
+#   `module:`    — one independently built unit, its linkage/closure/activation
+#                  axes (§5.2, §5.3), what it extends and what it provides.
+#
+# This is the SEMANTIC layer. It does not touch the aspect-pack `.smf` loader.
+
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.parser.{parse}
+
+# §13.2 optional `transition:` block: the constructor is normalized away at a
+# named pipeline stage, which is the only thing that lets a downstream required
+# operation be NotApplicable.
+pub class TransitionDecl:
+    stage: text
+    state: text
+    target: text
+
+pub class ExtensionManifest:
+    owner_enum: text
+    constructor: text
+    closure: text
+    payload_schema_hash: text
+    module_abi_hash: text
+    required_core_abi_hash: text
+    provider_module: text
+    local_ordinal: i64
+    schema_abi_version: i64
+    provided_ops: [text]
+    provided_handlers: [text]
+    transition: TransitionDecl?
+
+    fn handler_for(self, op: text) -> text?:
+        var i: i64 = 0
+        while i < self.provided_ops.len():
+            if self.provided_ops[i] == op:
+                return Some(self.provided_handlers[i])
+            i = i + 1
+        None
+
+    fn provides_op(self, op: text) -> bool:
+        match self.handler_for(op):
+            case Some(_): true
+            case None: false
+
+# §16.4 `extends:` entry.
+pub class ExtendsDecl:
+    owner_enum: text
+    constructor: text
+    schema_abi: i64
+
+pub class ModuleManifest:
+    id: text
+    linkage: text
+    closure: text
+    activation: text
+    extends_list: [ExtendsDecl]
+    provides: [text]
+
+    fn provides_interface(self, name: text) -> bool:
+        for p in self.provides:
+            if p == name:
+                return true
+        false
+
+pub class ManifestDoc:
+    path: text
+    extensions: [ExtensionManifest]
+    modules: [ModuleManifest]
+
+# Closed error enum — no wildcard arms anywhere in this module.
+pub enum ManifestError:
+    ParseFailed(text, text)
+    MissingField(text, text)
+    WrongShape(text, text)
+    EmptyManifest(text)
+
+pub fn manifest_error_text(e: ManifestError) -> text:
+    match e:
+        case ParseFailed(path, detail):
+            "E-MANIFEST-001: " + path + ": SDN parse failed: " + detail
+        case MissingField(path, field):
+            "E-MANIFEST-002: " + path + ": required field missing: " + field
+        case WrongShape(path, detail):
+            "E-MANIFEST-003: " + path + ": " + detail
+        case EmptyManifest(path):
+            "E-MANIFEST-004: " + path + ": manifest declares neither `extension:` nor `module:`"
+
+fn _text_at(v: SdnValue, key: text) -> text?:
+    match v.get(key):
+        case Some(item):
+            item.as_str()
+        case None:
+            None
+
+fn _required_text(
+    v: SdnValue,
+    key: text,
+    path: text,
+    prefix: text,
+    mut errors: [ManifestError]
+) -> text:
+    match _text_at(v, key):
+        case Some(s):
+            s
+        case None:
+            errors.push(ManifestError.MissingField(path, prefix + key))
+            ""
+
+fn _required_int(
+    v: SdnValue,
+    key: text,
+    path: text,
+    prefix: text,
+    mut errors: [ManifestError]
+) -> i64:
+    match v.get(key):
+        case None:
+            errors.push(ManifestError.MissingField(path, prefix + key))
+            0
+        case Some(item):
+            match item.as_i64():
+                case Some(n):
+                    n
+                case None:
+                    errors.push(ManifestError.WrongShape(path, "`" + prefix + key + "` must be an integer"))
+                    0
+
+fn _parse_transition(v: SdnValue, path: text, mut errors: [ManifestError]) -> TransitionDecl?:
+    val block = v.get("transition")
+    match block:
+        case None:
+            return None
+        case Some(t):
+            val dict = t.as_dict()
+            match dict:
+                case None:
+                    errors.push(ManifestError.WrongShape(path, "`transition:` must be a mapping of stage -> declaration"))
+                    return None
+                case Some(d):
+                    val stages = d.keys()
+                    if stages.len() != 1:
+                        errors.push(ManifestError.WrongShape(path, "`transition:` must name exactly one stage"))
+                        return None
+                    val stage = stages[0]
+                    val body = d[stage]
+                    val state = _required_text(body, "state", path, "transition." + stage + ".", errors)
+                    var target = ""
+                    match _text_at(body, "target"):
+                        case Some(tv):
+                            target = tv
+                        case None:
+                            errors.push(ManifestError.MissingField(path, "transition." + stage + ".target"))
+                    return Some(TransitionDecl(stage: stage, state: state, target: target))
+
+fn _sorted_keys(keys: [text]) -> [text]:
+    var out: [text] = []
+    for k in keys:
+        var inserted = false
+        var next: [text] = []
+        for existing in out:
+            if not inserted and k < existing:
+                next = next + [k]
+                inserted = true
+            next = next + [existing]
+        if not inserted:
+            next = next + [k]
+        out = next
+    out
+
+fn _parse_extension(v: SdnValue, path: text, mut errors: [ManifestError]) -> ExtensionManifest:
+    val owner = _required_text(v, "owner_enum", path, "extension.", errors)
+    val ctor = _required_text(v, "constructor", path, "extension.", errors)
+    val closure = _required_text(v, "closure", path, "extension.", errors)
+    val payload = _required_text(v, "payload_schema_hash", path, "extension.", errors)
+    val abi = _required_text(v, "module_abi_hash", path, "extension.", errors)
+    val core_abi = _required_text(v, "required_core_abi_hash", path, "extension.", errors)
+    val provider = _required_text(v, "provider_module", path, "extension.", errors)
+    val local_ordinal = _required_int(v, "local_ordinal", path, "extension.", errors)
+    val schema_abi = _required_int(v, "schema_abi_version", path, "extension.", errors)
+
+    var ops: [text] = []
+    var handlers: [text] = []
+    match v.get("provides"):
+        case None:
+            errors.push(ManifestError.MissingField(path, "extension.provides"))
+        case Some(pv):
+            match pv.as_dict():
+                case None:
+                    errors.push(ManifestError.WrongShape(path, "`provides:` must be a mapping of operation -> handler"))
+                case Some(pd):
+                    for op in _sorted_keys(pd.keys()):
+                        match pd[op].as_str():
+                            case Some(h):
+                                ops = ops + [op]
+                                handlers = handlers + [h]
+                            case None:
+                                errors.push(ManifestError.WrongShape(path, "`provides." + op + "` must be a handler name"))
+
+    val transition = _parse_transition(v, path, errors)
+    ExtensionManifest(
+        owner_enum: owner,
+        constructor: ctor,
+        closure: closure,
+        payload_schema_hash: payload,
+        module_abi_hash: abi,
+        required_core_abi_hash: core_abi,
+        provider_module: provider,
+        local_ordinal: local_ordinal,
+        schema_abi_version: schema_abi,
+        provided_ops: ops,
+        provided_handlers: handlers,
+        transition: transition
+    )
+
+fn _parse_extends(v: SdnValue, path: text, mut errors: [ManifestError]) -> [ExtendsDecl]:
+    var out: [ExtendsDecl] = []
+    match v.get("extends"):
+        case None:
+            return out
+        case Some(ev):
+            match ev.as_array():
+                case None:
+                    errors.push(ManifestError.WrongShape(path, "`extends:` must be a sequence"))
+                case Some(items):
+                    for item in items:
+                        val owner = _required_text(item, "enum", path, "module.extends.", errors)
+                        val ctor = _required_text(item, "constructor", path, "module.extends.", errors)
+                        var abi: i64 = 0
+                        match item.get("schema_abi"):
+                            case Some(av):
+                                match av.as_i64():
+                                    case Some(n):
+                                        abi = n
+                                    case None:
+                                        errors.push(ManifestError.WrongShape(path, "`extends.schema_abi` must be an integer"))
+                            case None:
+                                errors.push(ManifestError.MissingField(path, "module.extends.schema_abi"))
+                        out = out + [ExtendsDecl(owner_enum: owner, constructor: ctor, schema_abi: abi)]
+    out
+
+fn _parse_module(v: SdnValue, path: text, mut errors: [ManifestError]) -> ModuleManifest:
+    val id = _required_text(v, "id", path, "module.", errors)
+    val linkage = _required_text(v, "linkage", path, "module.", errors)
+    val closure = _required_text(v, "closure", path, "module.", errors)
+    val activation = _required_text(v, "activation", path, "module.", errors)
+    val extends_decls = _parse_extends(v, path, errors)
+
+    var provides: [text] = []
+    match v.get("provides"):
+        case None:
+            errors.push(ManifestError.MissingField(path, "module.provides"))
+        case Some(pv):
+            match pv.as_array():
+                case None:
+                    errors.push(ManifestError.WrongShape(path, "module `provides:` must be a sequence of interface names"))
+                case Some(items):
+                    for item in items:
+                        match item.as_str():
+                            case Some(s):
+                                provides = provides + [s]
+                            case None:
+                                errors.push(ManifestError.WrongShape(path, "module `provides:` entries must be interface names"))
+
+    ModuleManifest(
+        id: id,
+        linkage: linkage,
+        closure: closure,
+        activation: activation,
+        extends_list: extends_decls,
+        provides: provides
+    )
+
+# Parse one manifest source. A single file may carry `extension:`, `module:`, or
+# both; a file carrying neither is an error, never a silently empty document.
+pub fn parse_manifest_text(source: text, path: text) -> Result<ManifestDoc, [ManifestError]>:
+    var errors: [ManifestError] = []
+    val parsed = parse(source)
+    match parsed:
+        case Err(msg):
+            errors.push(ManifestError.ParseFailed(path, msg))
+            return Err(errors)
+        case Ok(root):
+            var extensions: [ExtensionManifest] = []
+            var modules: [ModuleManifest] = []
+            match root.get("extension"):
+                case Some(ev):
+                    extensions = extensions + [_parse_extension(ev, path, errors)]
+                case None:
+                    extensions = extensions
+            match root.get("module"):
+                case Some(mv):
+                    modules = modules + [_parse_module(mv, path, errors)]
+                case None:
+                    modules = modules
+            if extensions.len() == 0 and modules.len() == 0:
+                errors.push(ManifestError.EmptyManifest(path))
+            if errors.len() > 0:
+                return Err(errors)
+            return Ok(ManifestDoc(path: path, extensions: extensions, modules: modules))

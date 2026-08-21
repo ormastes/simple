@@ -1,0 +1,274 @@
+use std.spec.{describe, it, expect, fail}
+use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget}
+use std.common.contracts.execution.simpleos_executable_admission_v1.{
+    ExecutableImageHandleV1, ExecutableLoadRangeV1
+}
+use os.kernel.loader.executable_load_consumer.{
+    ExecutableLoadConsumerStateV1, ExecutableLoadConsumerErrorV1,
+    ExecutableLoadConsumerV1,
+    executable_load_consumer_new_v1, executable_load_consumer_validate_plan_v1,
+    executable_load_consumer_plan_v1, executable_load_consumer_begin_mapping_v1,
+    executable_load_consumer_map_page_v1, executable_load_consumer_begin_release_v1,
+    executable_load_consumer_unmap_page_v1, executable_load_consumer_close_v1,
+    executable_load_consumer_receipt_v1,
+    executable_load_consumer_max_segment_pages_v1
+}
+
+fn load_digest() -> text:
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+fn load_target(arch: text, abi: text) -> ManifestTarget:
+    ManifestTarget(os: "simpleos", arch: arch, abi: abi)
+
+fn exec_range() -> ExecutableLoadRangeV1:
+    ExecutableLoadRangeV1(
+        file_offset: 0u64, file_size: 4096u64,
+        virtual_address: 0x400000u64, memory_size: 4096u64,
+        writable: false, executable: true)
+
+fn data_range() -> ExecutableLoadRangeV1:
+    ExecutableLoadRangeV1(
+        file_offset: 4096u64, file_size: 2048u64,
+        virtual_address: 0x500000u64, memory_size: 8192u64,
+        writable: true, executable: false)
+
+fn load_handle(
+    arch: text,
+    abi: text,
+    ranges: [ExecutableLoadRangeV1]
+) -> ExecutableImageHandleV1:
+    ExecutableImageHandleV1(
+        schema_version: 1,
+        open_handle_id: 11u64,
+        mount_id: 2u64,
+        mount_generation: 3u64,
+        file_id: 11u64,
+        file_generation: 4u64,
+        size_bytes: 16777216u64,
+        role: "main-image",
+        target: load_target(arch, abi),
+        verified_load_ranges: ranges,
+        image_hash: load_digest(),
+        admission_id: "admission-load-1",
+        trust_epoch: 5u64,
+        read_count: 0u64,
+        read_bytes: 0u64,
+        consumed: false)
+
+fn forged_lifecycle(
+    state: ExecutableLoadConsumerStateV1,
+    planned_pages: u64,
+    mapped_pages: u64,
+    pages_to_unmap: u64,
+    close_attempt: u64
+) -> ExecutableLoadConsumerV1:
+    ExecutableLoadConsumerV1(
+        schema_version: 1,
+        state: state,
+        expected_os: "simpleos",
+        expected_arch: "x86_64",
+        expected_abi: "simpleos",
+        segment_count: 1,
+        planned_pages: planned_pages,
+        mapped_pages: mapped_pages,
+        pages_to_unmap: pages_to_unmap,
+        close_attempt: close_attempt,
+        entry_point: 0x400100u64,
+        failure: ExecutableLoadConsumerErrorV1.None)
+
+describe "bounded executable load planning":
+    it "accepts an exact x86_64 SimpleOS plan and counts mapped pages":
+        val consumer = executable_load_consumer_new_v1(
+            "simpleos", "x86_64", "simpleos")
+        val checked = executable_load_consumer_validate_plan_v1(
+            consumer, load_handle("x86_64", "simpleos", [exec_range(), data_range()]),
+            0x400100u64)
+        if not checked.ok:
+            fail("valid load plan rejected")
+        expect(checked.segment_count).to_equal(2)
+        expect(checked.page_count).to_equal(3u64)
+
+    it "rejects unsupported architecture ABI mismatch and non-executable entry":
+        val unsupported = executable_load_consumer_validate_plan_v1(
+            executable_load_consumer_new_v1("simpleos", "mips64", "simpleos"),
+            load_handle("mips64", "simpleos", [exec_range()]), 0x400100u64)
+        expect(unsupported.error).to_equal(
+            ExecutableLoadConsumerErrorV1.UnsupportedArchitecture)
+
+        val wrong_abi = executable_load_consumer_validate_plan_v1(
+            executable_load_consumer_new_v1("simpleos", "x86_64", "linux-gnu"),
+            load_handle("x86_64", "linux-gnu", [exec_range()]), 0x400100u64)
+        expect(wrong_abi.error).to_equal(ExecutableLoadConsumerErrorV1.UnsupportedAbi)
+
+        val wrong_entry = executable_load_consumer_validate_plan_v1(
+            executable_load_consumer_new_v1("simpleos", "x86_64", "simpleos"),
+            load_handle("x86_64", "simpleos", [exec_range()]), 0x500000u64)
+        expect(wrong_entry.error).to_equal(
+            ExecutableLoadConsumerErrorV1.InvalidEntryPoint)
+
+    it "rejects W-X page alias overflow and per-segment page excess":
+        val consumer = executable_load_consumer_new_v1(
+            "simpleos", "x86_64", "simpleos")
+        val wx = ExecutableLoadRangeV1(
+            file_offset: 0u64, file_size: 1u64,
+            virtual_address: 0x400000u64, memory_size: 4096u64,
+            writable: true, executable: true)
+        expect(executable_load_consumer_validate_plan_v1(
+            consumer, load_handle("x86_64", "simpleos", [wx]), 0x400000u64
+        ).error).to_equal(ExecutableLoadConsumerErrorV1.WriteExecuteDenied)
+
+        val alias_a = ExecutableLoadRangeV1(
+            file_offset: 0u64, file_size: 2048u64,
+            virtual_address: 0x400000u64, memory_size: 2048u64,
+            writable: false, executable: true)
+        val alias_b = ExecutableLoadRangeV1(
+            file_offset: 2048u64, file_size: 2048u64,
+            virtual_address: 0x400800u64, memory_size: 2048u64,
+            writable: false, executable: false)
+        expect(executable_load_consumer_validate_plan_v1(
+            consumer,
+            load_handle("x86_64", "simpleos", [alias_a, alias_b]), 0x400000u64
+        ).error).to_equal(ExecutableLoadConsumerErrorV1.PageOverlap)
+
+        val overflow = ExecutableLoadRangeV1(
+            file_offset: 3995u64, file_size: 1u64,
+            virtual_address: 18446744073709551515u64, memory_size: 200u64,
+            writable: false, executable: true)
+        expect(executable_load_consumer_validate_plan_v1(
+            consumer, load_handle("x86_64", "simpleos", [overflow]),
+            18446744073709551515u64
+        ).error).to_equal(ExecutableLoadConsumerErrorV1.AddressOverflow)
+
+        val too_many_pages = ExecutableLoadRangeV1(
+            file_offset: 0u64, file_size: 1u64,
+            virtual_address: 0x400000u64,
+            memory_size: (executable_load_consumer_max_segment_pages_v1() + 1u64) * 4096u64,
+            writable: false, executable: true)
+        expect(executable_load_consumer_validate_plan_v1(
+            consumer, load_handle("x86_64", "simpleos", [too_many_pages]),
+            0x400000u64
+        ).error).to_equal(ExecutableLoadConsumerErrorV1.PageLimitExceeded)
+
+describe "pure executable load lifecycle":
+    it "rejects a forged ready value with pre-existing lifecycle counters":
+        var forged_ready = forged_lifecycle(
+            ExecutableLoadConsumerStateV1.Ready, 1u64, 0u64, 0u64, 0u64)
+        forged_ready.segment_count = 0
+        forged_ready.entry_point = 0u64
+        val checked = executable_load_consumer_validate_plan_v1(
+            forged_ready,
+            load_handle("x86_64", "simpleos", [exec_range()]),
+            0x400100u64)
+        expect(checked.error).to_equal(
+            ExecutableLoadConsumerErrorV1.InvalidConsumer)
+
+    it "quarantines forged unmap counters without subtracting or wrapping":
+        val zero_mapped = forged_lifecycle(
+            ExecutableLoadConsumerStateV1.Unmapping, 1u64, 0u64, 1u64, 0u64)
+        val zero_rejected = executable_load_consumer_unmap_page_v1(
+            zero_mapped, true)
+        expect(zero_rejected.state).to_equal(
+            ExecutableLoadConsumerStateV1.Quarantined)
+        expect(zero_rejected.failure).to_equal(
+            ExecutableLoadConsumerErrorV1.InvalidTransition)
+        expect(zero_rejected.mapped_pages).to_equal(0u64)
+        expect(zero_rejected.pages_to_unmap).to_equal(1u64)
+
+        val impossible_pending = forged_lifecycle(
+            ExecutableLoadConsumerStateV1.Unmapping, 2u64, 1u64, 2u64, 0u64)
+        val pending_rejected = executable_load_consumer_unmap_page_v1(
+            impossible_pending, true)
+        expect(pending_rejected.state).to_equal(
+            ExecutableLoadConsumerStateV1.Quarantined)
+        expect(pending_rejected.mapped_pages).to_equal(1u64)
+        expect(pending_rejected.pages_to_unmap).to_equal(2u64)
+
+    it "quarantines impossible map release and close lifecycle counters":
+        val forged_mapping = forged_lifecycle(
+            ExecutableLoadConsumerStateV1.Mapping, 1u64, 2u64, 0u64, 0u64)
+        val map_rejected = executable_load_consumer_map_page_v1(
+            forged_mapping, true)
+        expect(map_rejected.state).to_equal(
+            ExecutableLoadConsumerStateV1.Quarantined)
+        expect(map_rejected.mapped_pages).to_equal(2u64)
+
+        val forged_mapped = forged_lifecycle(
+            ExecutableLoadConsumerStateV1.MappedBlocked, 2u64, 1u64, 0u64, 0u64)
+        val release_rejected = executable_load_consumer_begin_release_v1(
+            forged_mapped)
+        expect(release_rejected.state).to_equal(
+            ExecutableLoadConsumerStateV1.Quarantined)
+        expect(release_rejected.pages_to_unmap).to_equal(0u64)
+
+        val forged_close = forged_lifecycle(
+            ExecutableLoadConsumerStateV1.ClosePending, 1u64, 1u64, 0u64, 0u64)
+        val close_rejected = executable_load_consumer_close_v1(
+            forged_close, true)
+        expect(close_rejected.state).to_equal(
+            ExecutableLoadConsumerStateV1.Quarantined)
+        expect(close_rejected.close_attempt).to_equal(0u64)
+
+        val close_overflow = forged_lifecycle(
+            ExecutableLoadConsumerStateV1.ClosePending,
+            1u64, 0u64, 0u64, 18446744073709551615u64)
+        val overflow_rejected = executable_load_consumer_close_v1(
+            close_overflow, false)
+        expect(overflow_rejected.state).to_equal(
+            ExecutableLoadConsumerStateV1.Quarantined)
+        expect(overflow_rejected.failure).to_equal(
+            ExecutableLoadConsumerErrorV1.CloseFailed)
+        expect(overflow_rejected.close_attempt).to_equal(
+            18446744073709551615u64)
+
+    it "rolls back a partial map and retries close exactly once per attempt":
+        val ready = executable_load_consumer_new_v1("simpleos", "x86_64", "simpleos")
+        val planned = executable_load_consumer_plan_v1(
+            ready, load_handle("x86_64", "simpleos", [exec_range(), data_range()]),
+            0x400100u64)
+        var state = executable_load_consumer_begin_mapping_v1(planned)
+        state = executable_load_consumer_map_page_v1(state, true)
+        state = executable_load_consumer_map_page_v1(state, false)
+        expect(state.state).to_equal(ExecutableLoadConsumerStateV1.Unmapping)
+        expect(state.pages_to_unmap).to_equal(1u64)
+        state = executable_load_consumer_unmap_page_v1(state, true)
+        expect(state.state).to_equal(ExecutableLoadConsumerStateV1.ClosePending)
+        state = executable_load_consumer_close_v1(state, false)
+        expect(state.state).to_equal(ExecutableLoadConsumerStateV1.CloseRetryable)
+        state = executable_load_consumer_begin_release_v1(state)
+        state = executable_load_consumer_close_v1(state, true)
+        expect(state.state).to_equal(ExecutableLoadConsumerStateV1.Released)
+        expect(state.close_attempt).to_equal(2u64)
+        val receipt = executable_load_consumer_receipt_v1(state)
+        if receipt.execution_authorized:
+            fail("pure rollback receipt authorized execution")
+
+    it "releases every mapped page before close and quarantines unmap failure":
+        val ready = executable_load_consumer_new_v1("simpleos", "x86_64", "simpleos")
+        val planned = executable_load_consumer_plan_v1(
+            ready, load_handle("x86_64", "simpleos", [exec_range()]), 0x400100u64)
+        var loaded = executable_load_consumer_begin_mapping_v1(planned)
+        loaded = executable_load_consumer_map_page_v1(loaded, true)
+        expect(loaded.state).to_equal(ExecutableLoadConsumerStateV1.MappedBlocked)
+        val blocked_receipt = executable_load_consumer_receipt_v1(loaded)
+        expect(blocked_receipt.execution_authorized).to_be(false)
+        expect(blocked_receipt.reason).to_equal(
+            "legacy-loader-mapped-lease-not-scheduler-adoptable")
+        var releasing = executable_load_consumer_begin_release_v1(loaded)
+        releasing = executable_load_consumer_unmap_page_v1(releasing, true)
+        releasing = executable_load_consumer_close_v1(releasing, true)
+        expect(releasing.state).to_equal(ExecutableLoadConsumerStateV1.Released)
+        expect(releasing.mapped_pages).to_equal(0u64)
+
+        var failed = executable_load_consumer_begin_release_v1(loaded)
+        failed = executable_load_consumer_unmap_page_v1(failed, false)
+        expect(failed.state).to_equal(ExecutableLoadConsumerStateV1.Quarantined)
+        expect(failed.failure).to_equal(ExecutableLoadConsumerErrorV1.RollbackFailed)
+
+    it "never turns a forged adopted lifecycle value into authority":
+        val forged = forged_lifecycle(
+            ExecutableLoadConsumerStateV1.Adopted,
+            1u64, 1u64, 0u64, 1u64)
+        val receipt = executable_load_consumer_receipt_v1(forged)
+        expect(receipt.execution_authorized).to_be(false)
+        expect(receipt.reason).to_equal(
+            "adopted-state-requires-scheduler-authority")

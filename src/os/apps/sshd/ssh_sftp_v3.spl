@@ -1,0 +1,214 @@
+# Bounded SFTP protocol core for the SSH subsystem owner.
+# This lane advertises protocol v3 negotiation only; filesystem operations are
+# deliberately read-only and return OP_UNSUPPORTED until the VFS capability is
+# injected by the filesystem owner.
+
+use os.apps.sshd.ssh_packet.{ssh_get_u32, ssh_put_u32, ssh_put_text, ssh_get_text}
+
+val SSH_FXP_INIT: u8 = 1
+val SSH_FXP_VERSION: u8 = 2
+val SSH_FXP_OPEN: u8 = 3
+val SSH_FXP_CLOSE: u8 = 4
+val SSH_FXP_READ: u8 = 5
+val SSH_FXP_REALPATH: u8 = 16
+val SSH_FXP_STAT: u8 = 17
+val SSH_FXP_STATUS: u8 = 101
+val SSH_FXP_NAME: u8 = 104
+val SSH_FX_OK: u32 = 0
+val SSH_FX_OP_UNSUPPORTED: u32 = 8
+val SFTP_V3: u32 = 3
+val SFTP_MAX_PACKET: u32 = 35000
+val SFTP_MAX_PATH: u32 = 4096
+val SFTP_MAX_READ: u32 = 32768
+val SFTP_ACCUMULATOR_CAP: u64 = (SFTP_MAX_PACKET.to_u64() + 4u64) * 2u64
+val SFTP_COUNTER_MAX: u64 = 0xFFFFFFFFFFFFFFFFu64
+
+pub struct SftpAccumulatorWorkV3:
+    admitted_ingress_bytes: u64
+    copied_bytes: u64
+    header_scan_bytes: u64
+    complete_frames: u64
+    peak_retained_bytes: u64
+    saturated: bool
+
+class SftpSessionV3:
+    initialized: bool
+    client_version: u32
+    next_handle: u32
+    rx_ring: [u8]
+    rx_head: u64
+    rx_count: u64
+    admitted_ingress_bytes: u64
+    copied_bytes: u64
+    header_scan_bytes: u64
+    complete_frames: u64
+    peak_retained_bytes: u64
+    work_counter_saturated: bool
+
+    pub static fn new() -> SftpSessionV3:
+        SftpSessionV3(
+            initialized: false,
+            client_version: 0,
+            next_handle: 1,
+            rx_ring: [],
+            rx_head: 0,
+            rx_count: 0,
+            admitted_ingress_bytes: 0,
+            copied_bytes: 0,
+            header_scan_bytes: 0,
+            complete_frames: 0,
+            peak_retained_bytes: 0,
+            work_counter_saturated: false
+        )
+
+fn _record_work(current: u64, added: u64) -> (u64, bool):
+    if added > SFTP_COUNTER_MAX - current:
+        return (SFTP_COUNTER_MAX, true)
+    (current + added, false)
+
+fn _u32(value: u32) -> [u8]:
+    var out: [u8] = []
+    out.push(((value >> 24) & 255u32).to_u8())
+    out.push(((value >> 16) & 255u32).to_u8())
+    out.push(((value >> 8) & 255u32).to_u8())
+    out.push((value & 255u32).to_u8())
+    out
+
+fn _status(request_id: u32, code: u32, message: text) -> [u8]:
+    var body: [u8] = [SSH_FXP_STATUS]
+    body = ssh_put_u32(body, request_id)
+    body = ssh_put_u32(body, code)
+    body = ssh_put_text(body, message)
+    body = ssh_put_text(body, "")
+    var framed = _u32(body.len().to_u32())
+    for byte in body:
+        framed.push(byte)
+    framed
+
+fn _path_safe(path: text) -> bool:
+    if path.len() > SFTP_MAX_PATH.to_u64() or path == "":
+        return false
+    # No traversal or NUL bytes. Symlink resolution remains VFS-owner policy.
+    if path.contains("..") or path.contains("\u0000"):
+        return false
+    true
+
+impl SftpSessionV3:
+    fn _ring_byte(offset: u64) -> u8:
+        self.rx_ring[(self.rx_head + offset) % SFTP_ACCUMULATOR_CAP]
+
+    fn _ring_u32(offset: u64) -> u32:
+        (self._ring_byte(offset).to_u32() << 24) |
+        (self._ring_byte(offset + 1u64).to_u32() << 16) |
+        (self._ring_byte(offset + 2u64).to_u32() << 8) |
+        self._ring_byte(offset + 3u64).to_u32()
+
+    me _add_ingress_work(incoming: u64):
+        val ingress = _record_work(self.admitted_ingress_bytes, incoming)
+        self.admitted_ingress_bytes = ingress.0
+        val copied = _record_work(self.copied_bytes, incoming)
+        self.copied_bytes = copied.0
+        if ingress.1 or copied.1:
+            self.work_counter_saturated = true
+
+    me _add_copy_work(copied_bytes: u64):
+        val copied = _record_work(self.copied_bytes, copied_bytes)
+        self.copied_bytes = copied.0
+        if copied.1:
+            self.work_counter_saturated = true
+
+    me _add_header_scan_work():
+        val scanned = _record_work(self.header_scan_bytes, 4u64)
+        self.header_scan_bytes = scanned.0
+        if scanned.1:
+            self.work_counter_saturated = true
+
+    me _clear_retained():
+        self.rx_head = 0
+        self.rx_count = 0
+
+    me _append(packet: [u8]) -> bool:
+        val incoming = packet.len().to_u64()
+        if self.rx_count > SFTP_ACCUMULATOR_CAP or incoming > SFTP_ACCUMULATOR_CAP - self.rx_count:
+            self._clear_retained()
+            return false
+        for byte in packet:
+            val target = (self.rx_head + self.rx_count) % SFTP_ACCUMULATOR_CAP
+            if target < self.rx_ring.len():
+                self.rx_ring[target] = byte
+            else:
+                self.rx_ring.push(byte)
+            self.rx_count = self.rx_count + 1u64
+        self._add_ingress_work(incoming)
+        if self.rx_count > self.peak_retained_bytes:
+            self.peak_retained_bytes = self.rx_count
+        true
+
+    pub fn accumulator_work() -> SftpAccumulatorWorkV3:
+        SftpAccumulatorWorkV3(
+            admitted_ingress_bytes: self.admitted_ingress_bytes,
+            copied_bytes: self.copied_bytes,
+            header_scan_bytes: self.header_scan_bytes,
+            complete_frames: self.complete_frames,
+            peak_retained_bytes: self.peak_retained_bytes,
+            saturated: self.work_counter_saturated
+        )
+
+    pub me handle_packet(packet: [u8]) -> [u8]:
+        # One authoritative ring owner retains coalesced bytes by advancing a
+        # head offset. Retained remainders are never copied between calls.
+        if not self._append(packet):
+            return _status(0, SSH_FX_OP_UNSUPPORTED, "sftp accumulator full")
+        if self.rx_count < 4u64:
+            return []
+        self._add_header_scan_work()
+        val declared = self._ring_u32(0u64)
+        if declared > SFTP_MAX_PACKET or declared < 1u32:
+            self._clear_retained()
+            return _status(0, SSH_FX_OP_UNSUPPORTED, "invalid sftp packet length")
+        val frame_len = declared.to_u64() + 4u64
+        if self.rx_count < frame_len:
+            return []
+        var frame: [u8] = []
+        var fi: u64 = 0
+        while fi < frame_len:
+            frame.push(self._ring_byte(fi))
+            fi = fi + 1u64
+        self._add_copy_work(frame_len)
+        self.rx_head = (self.rx_head + frame_len) % SFTP_ACCUMULATOR_CAP
+        self.rx_count = self.rx_count - frame_len
+        if self.rx_count == 0u64:
+            self.rx_head = 0
+        val completed = _record_work(self.complete_frames, 1u64)
+        self.complete_frames = completed.0
+        if completed.1:
+            self.work_counter_saturated = true
+        val kind = frame[4]
+        if kind == SSH_FXP_INIT:
+            if frame.len() < 9u64:
+                return _status(0, SSH_FX_OP_UNSUPPORTED, "invalid sftp init")
+            self.client_version = ssh_get_u32(frame, 5)
+            self.initialized = true
+            var version: [u8] = [SSH_FXP_VERSION]
+            val version_bytes = _u32(SFTP_V3)
+            for byte in version_bytes:
+                version.push(byte)
+            var framed_version = _u32(version.len().to_u32())
+            for byte in version:
+                framed_version.push(byte)
+            return framed_version
+        if not self.initialized or frame.len() < 9u64:
+            return _status(0, SSH_FX_OP_UNSUPPORTED, "sftp not initialized")
+        val request_id = ssh_get_u32(frame, 5)
+        if kind == SSH_FXP_REALPATH or kind == SSH_FXP_STAT:
+            val parsed = ssh_get_text(frame, 9)
+            match parsed:
+                Ok(value):
+                    if not _path_safe(value.value):
+                        return _status(request_id, SSH_FX_OP_UNSUPPORTED, "unsafe path")
+                Err(_):
+                    return _status(request_id, SSH_FX_OP_UNSUPPORTED, "invalid path")
+        # OPEN/READ/CLOSE require a VFS capability and never fall back to host I/O.
+        _status(request_id, SSH_FX_OP_UNSUPPORTED, "sftp operation unavailable")
+
+export SftpSessionV3, SftpAccumulatorWorkV3

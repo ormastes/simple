@@ -1,0 +1,70 @@
+use std.spec
+use compiler.frontend.aspect_registry.{
+    aspect_registry_reset, aspect_registry_reset_module,
+    aspect_registry_declare, aspect_registry_claim_keys,
+    aspect_registry_promote_transient_owner
+}
+use compiler.frontend.effect_registry.{
+    effect_registry_reset, effect_registry_reset_module,
+    effect_registry_declare, effect_registry_claim_keys,
+    effect_registry_promote_transient_owner
+}
+use compiler.frontend.layer_eq_registry.{
+    layer_eq_registry_reset, layer_eq_registry_reset_module,
+    layer_eq_registry_declare, layer_eq_registry_claim_keys,
+    layer_eq_registry_promote_transient_owner
+}
+
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_transient_array_scope_end() -> bool
+
+fn record_registry_claims(path: text):
+    aspect_registry_reset_module(path)
+    aspect_registry_declare(path, "trace", "before", "submit", "static",
+        true, true, true)
+    effect_registry_reset_module(path)
+    effect_registry_declare(path, "copy", "8", true)
+    layer_eq_registry_reset_module(path)
+    layer_eq_registry_declare(path, "View", "Target", "field")
+
+fn promote_registry_owners() -> bool:
+    val aspect_ok = aspect_registry_promote_transient_owner()
+    val effect_ok = effect_registry_promote_transient_owner()
+    val layer_ok = layer_eq_registry_promote_transient_owner()
+    aspect_ok and effect_ok and layer_ok
+
+describe "frontend registry transient ownership":
+    it "retains prior module claims across a reclaimed parse scope":
+        aspect_registry_reset()
+        effect_registry_reset()
+        layer_eq_registry_reset()
+
+        expect(rt_transient_array_scope_begin()).to_be(true)
+        record_registry_claims("first.module")
+        expect(rt_transient_array_scope_pause()).to_be(true)
+        expect(promote_registry_owners()).to_be(true)
+        expect(rt_transient_array_scope_end()).to_be(true)
+
+        expect(rt_transient_array_scope_begin()).to_be(true)
+        record_registry_claims("second.module")
+        expect(rt_transient_array_scope_pause()).to_be(true)
+        expect(promote_registry_owners()).to_be(true)
+        expect(rt_transient_array_scope_end()).to_be(true)
+
+        expect(aspect_registry_claim_keys().len()).to_equal(2)
+        expect(effect_registry_claim_keys().len()).to_equal(2)
+        expect(layer_eq_registry_claim_keys().len()).to_equal(2)
+
+    it "removes only the reparsed module from every registry":
+        expect(rt_transient_array_scope_begin()).to_be(true)
+        aspect_registry_reset_module("first.module")
+        effect_registry_reset_module("first.module")
+        layer_eq_registry_reset_module("first.module")
+        expect(rt_transient_array_scope_pause()).to_be(true)
+        expect(promote_registry_owners()).to_be(true)
+        expect(rt_transient_array_scope_end()).to_be(true)
+
+        expect(aspect_registry_claim_keys().len()).to_equal(1)
+        expect(effect_registry_claim_keys().len()).to_equal(1)
+        expect(layer_eq_registry_claim_keys().len()).to_equal(1)

@@ -10,9 +10,8 @@ records. Asserts:
   * malformed RESP frames (wrong/huge length prefix, unterminated, truncated
     bulk) fail closed — parse yields nil or an empty command, never a
     fabricated partial command;
-  * a corrupt or truncated journal record is counted but produces an engine
-    error and does NOT mutate durable state — the well-formed records around
-    it still reconstruct exactly (durability under corruption);
+  * any corrupt or truncated journal record rejects the complete replay
+    before mutation, preventing partially reconstructed durable state;
   * oversized keys/values round-trip through the real engine without
     truncation.
 
@@ -21,7 +20,16 @@ Complements the round-trip coverage in dbd_protocol_spec.spl.
 
 use std.spec
 use os.apps.dbd.dbd_protocol.{
-    DbdEngine, dbd_encode_journal_line, dbd_decode_journal_line
+    DbdEngine, DbdSessionBudget, DbdPersistenceBudget,
+    DbdCredentialProvider, DbdAuthSession,
+    dbd_encode_journal_line, dbd_decode_journal_line,
+    dbd_production_startup_ready, dbd_production_startup_blocker,
+    dbd_dbfs_persistence_ready, dbd_dbfs_persistence_blocker,
+    dbd_redact_diagnostic, DBD_MAX_SESSION_BYTES,
+    DBD_MAX_REQUESTS_PER_SESSION, DBD_MAX_RESPONSE_BYTES_PER_SESSION,
+    DBD_MAX_JOURNAL_BYTES, DBD_MAX_JOURNAL_RECORDS,
+    DBD_MAX_CREDENTIAL_BYTES, DBD_MAX_AUTH_ATTEMPTS_PER_SESSION,
+    DBD_CAPABILITY_STATE
 }
 use std.nogc_sync_mut.redis.server.{parse_next_request, RequestResult}
 
@@ -36,6 +44,22 @@ fn _big(n: i64) -> text:
     var i = 0
     while i < n:
         out = out + "x"
+        i = i + 1
+    out
+
+fn _big_bytes(n: i64) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < n:
+        out.push(120u8)
+        i = i + 1
+    out
+
+fn _credential(byte: u8) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < 32:
+        out.push(byte)
         i = i + 1
     out
 
@@ -78,23 +102,18 @@ describe "dbd RESP framing: an empty command is rejected by the engine":
         expect(eng.dispatch(["GET", "k"])).to_equal("$-1\r\n")
 
 describe "dbd journal replay: corrupt records do not corrupt the store":
-    it "garbage and truncated records are skipped while valid ones reconstruct":
-        # Interleave a truncated SET, an unknown command, and a truncated
-        # trailing SET among well-formed records.
-        val journal = "SET alpha 1\nSET\nSET beta 2\nGARBAGE junk\nSET alpha 9\nDEL beta\nSET c"
+    it "rejects the complete journal before applying any partial state":
+        val journal = "SET alpha 1\nSET beta 2\nGARBAGE junk\nSET alpha 9\n"
         var eng = DbdEngine.new()
         val replayed = eng.replay_journal(journal)
-        # every non-empty decoded line is attempted (counted)...
-        expect(replayed).to_equal(7i64)
-        # ...but only the well-formed mutations changed durable state:
-        expect(eng.dispatch(["GET", "alpha"])).to_equal("$1\r\n9\r\n")   # overwritten
-        expect(eng.dispatch(["GET", "beta"])).to_equal("$-1\r\n")        # deleted
-        expect(eng.dispatch(["GET", "c"])).to_equal("$-1\r\n")           # truncated -> never set
+        expect(replayed).to_equal(0i64 - 1i64)
+        expect(eng.dispatch(["GET", "alpha"])).to_equal("$-1\r\n")
+        expect(eng.dispatch(["GET", "beta"])).to_equal("$-1\r\n")
 
     it "a journal of only-corrupt records leaves the store empty":
-        val journal = "SET\nDEL\nBOGUS x y\nSET onlykey"
+        val journal = "SET\nDEL\nBOGUS x y\nSET onlykey\n"
         var eng = DbdEngine.new()
-        eng.replay_journal(journal)
+        expect(eng.replay_journal(journal)).to_equal(0i64 - 1i64)
         expect(eng.dispatch(["GET", "onlykey"])).to_equal("$-1\r\n")
 
     it "post-corruption writes still succeed (engine not wedged)":
@@ -102,6 +121,11 @@ describe "dbd journal replay: corrupt records do not corrupt the store":
         eng.replay_journal("GARBAGE\nSET\n")
         expect(eng.dispatch(["SET", "fresh", "ok"])).to_equal("+OK\r\n")
         expect(eng.dispatch(["GET", "fresh"])).to_equal("$2\r\nok\r\n")
+
+    it "rejects a torn final record without a newline":
+        var eng = DbdEngine.new()
+        expect(eng.replay_journal("SET persisted yes")).to_equal(0i64 - 1i64)
+        expect(eng.dispatch(["GET", "persisted"])).to_equal("$-1\r\n")
 
 describe "dbd journal encoding: ambiguous / oversized args":
     it "an arg containing a space is rejected (returns empty line)":
@@ -118,9 +142,142 @@ describe "dbd journal encoding: ambiguous / oversized args":
         assert_true(reply.starts_with("$5000\r\n"))
         assert_true(reply.ends_with(bigv + "\r\n"))
 
-    it "an oversized value survives a journal encode/decode round-trip":
+    it "an oversized value is rejected before journal persistence":
         val bigv = _big(4096)
         val line = dbd_encode_journal_line(["SET", "big", bigv])
-        val args = dbd_decode_journal_line(line)
-        expect(args.len()).to_equal(3u64)
-        expect(args[2]).to_equal(bigv)
+        expect(line).to_equal("")
+
+    it "invalid mutating arity is rejected before journal persistence":
+        expect(dbd_encode_journal_line(["SET", "key"])).to_equal("")
+        expect(dbd_encode_journal_line(["DEL", "key", "extra"])).to_equal("")
+
+    it "empty and control-bearing journal fields fail closed":
+        expect(dbd_encode_journal_line(["SET", "", "value"])).to_equal("")
+        expect(dbd_encode_journal_line(["SET", "key", "value\rforged"])).to_equal("")
+        expect(dbd_encode_journal_line(["SET", "key", "value\0forged"])).to_equal("")
+
+describe "dbd production startup admission":
+    it "fails closed while the authenticated transport owners are absent":
+        expect(dbd_production_startup_ready()).to_be(false)
+        expect(dbd_production_startup_blocker()).to_equal(
+            "boot-mutable-credential-owner-unavailable")
+        assert_true(DBD_CAPABILITY_STATE.contains(
+            "auth=BlockedBootCredentialOwner"))
+        assert_true(DBD_CAPABILITY_STATE.contains(
+            "auth_framing=DbdMutableAuthRequestOwnerV1"))
+        assert_true(DBD_CAPABILITY_STATE.contains("tls=Blocked"))
+        assert_true(DBD_CAPABILITY_STATE.contains(
+            "tls_handshake_authority=BlockedCertificatePrivateKeyEntropyOwner"))
+        assert_true(DBD_CAPABILITY_STATE.contains("live_dbfs_durability=Blocked"))
+        expect(dbd_dbfs_persistence_ready()).to_be(false)
+        expect(dbd_dbfs_persistence_blocker()).to_equal("dbfs-engine-owner-unavailable")
+
+    it "redacts a whole credential-bearing diagnostic":
+        expect(dbd_redact_diagnostic("AUTH operator super-secret")).to_equal(
+            "[dbd] sensitive diagnostic redacted"
+        )
+        expect(dbd_redact_diagnostic("[dbd] backend=vfs-log")).to_equal(
+            "[dbd] backend=vfs-log"
+        )
+        expect(dbd_redact_diagnostic("authentication-owner-unavailable")).to_equal(
+            "authentication-owner-unavailable"
+        )
+
+describe "dbd session budget: cumulative backpressure":
+    it "admits exactly the byte quota and rejects overflow without wraparound":
+        var budget = DbdSessionBudget.new()
+        expect(budget.admit_receive(DBD_MAX_SESSION_BYTES)).to_be(true)
+        expect(budget.admit_receive(1)).to_be(false)
+        var oversized = DbdSessionBudget.new()
+        expect(oversized.admit_receive(DBD_MAX_SESSION_BYTES + 1)).to_be(false)
+
+    it "admits exactly the request quota":
+        var budget = DbdSessionBudget.new()
+        var admitted: i64 = 0
+        while admitted < DBD_MAX_REQUESTS_PER_SESSION:
+            expect(budget.admit_request()).to_be(true)
+            admitted = admitted + 1
+        expect(budget.admit_request()).to_be(false)
+
+    it "bounds cumulative response bytes and rejects negative sizes":
+        var budget = DbdSessionBudget.new()
+        expect(budget.admit_response(DBD_MAX_RESPONSE_BYTES_PER_SESSION)).to_be(true)
+        expect(budget.admit_response(1)).to_be(false)
+        var negative = DbdSessionBudget.new()
+        expect(negative.admit_response(0i64 - 1i64)).to_be(false)
+        expect(negative.admit_response(DBD_MAX_RESPONSE_BYTES_PER_SESSION + 1)).to_be(false)
+
+    it "a closed session rejects every subsequent admission":
+        var budget = DbdSessionBudget.new()
+        budget.close()
+        expect(budget.admit_receive(1)).to_be(false)
+        expect(budget.admit_request()).to_be(false)
+        expect(budget.admit_response(1)).to_be(false)
+
+describe "dbd persistence owner state: successive verified mutations":
+    it "retains byte and record accounting across successive commits":
+        var state = DbdPersistenceBudget.new()
+        expect(state.commit_verified(8)).to_be(true)
+        expect(state.commit_verified(12)).to_be(true)
+        expect(state.record_count).to_equal(2i64)
+        expect(state.journal_bytes).to_equal(20i64)
+
+    it "rejects both record-cap and byte-cap exhaustion":
+        var record_full = DbdPersistenceBudget.restored(
+            DBD_MAX_JOURNAL_RECORDS, 0)
+        expect(record_full.commit_verified(1)).to_be(false)
+        var byte_full = DbdPersistenceBudget.restored(0, DBD_MAX_JOURNAL_BYTES)
+        expect(byte_full.commit_verified(1)).to_be(false)
+
+    it "an unhealthy owner cannot resume mutation admission":
+        var state = DbdPersistenceBudget.new()
+        state.mark_unhealthy()
+        expect(state.commit_verified(1)).to_be(false)
+
+describe "dbd configured credential provider and per-session identity":
+    it "admits the configured principal and credential without retaining raw bytes":
+        var provider = DbdCredentialProvider.new()
+        val configured = provider.configure_bytes("operator", _credential(17u8))
+        expect(configured).to_be(true)
+        expect(provider.configured).to_be(true)
+        expect(provider.principal).to_equal("operator")
+        var session = DbdAuthSession.new(1)
+        val accepted = session.authenticate(provider, "operator", _credential(17u8))
+        expect(accepted).to_be(true)
+        expect(session.can_dispatch()).to_be(true)
+        expect(session.identity).to_equal("operator")
+        expect(session.identity_generation).to_equal(1i64)
+
+    it "rejects wrong principal, wrong credential, and unconfigured providers":
+        var provider = DbdCredentialProvider.new()
+        provider.configure_bytes("operator", _credential(23u8))
+        var wrong_principal = DbdAuthSession.new(2)
+        expect(wrong_principal.authenticate(
+            provider, "other", _credential(23u8))).to_be(false)
+        var wrong_credential = DbdAuthSession.new(3)
+        expect(wrong_credential.authenticate(
+            provider, "operator", _credential(24u8))).to_be(false)
+        var unconfigured = DbdAuthSession.new(4)
+        expect(unconfigured.authenticate(
+            DbdCredentialProvider.new(), "operator", _credential(23u8)
+        )).to_be(false)
+
+    it "closes a session after the bounded failed-attempt budget":
+        var provider = DbdCredentialProvider.new()
+        provider.configure_bytes("operator", _credential(29u8))
+        var session = DbdAuthSession.new(5)
+        var attempt: i64 = 0
+        while attempt < DBD_MAX_AUTH_ATTEMPTS_PER_SESSION:
+            expect(session.authenticate(
+                provider, "operator", _credential(30u8))).to_be(false)
+            attempt = attempt + 1
+        expect(session.closed).to_be(true)
+        expect(session.authenticate(
+            provider, "operator", _credential(29u8))).to_be(false)
+
+    it "rejects oversized credentials before hashing unbounded input":
+        var provider = DbdCredentialProvider.new()
+        expect(provider.configure_bytes("operator", [1u8])).to_be(false)
+        expect(provider.configure_bytes(
+            "operator", _big_bytes(DBD_MAX_CREDENTIAL_BYTES + 1))).to_be(false)
+        expect(provider.configured).to_be(false)

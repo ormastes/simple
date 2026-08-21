@@ -46,6 +46,13 @@ edits go there, not in this tracker.
 | `[UPFRONT] S6` | Capability-gated atomic-pointer-record publish | P0 | `from_simple_db.md §S6` |
 | `[UPFRONT] S7` | NVMe Flush / FUA pass-through tied to durability classes | P0 | `from_simple_db.md §S7` |
 
+Durability status (2026-08-20): the fs-driver capability vocabulary retains
+`Capability.DurableSync`, but no current adapter advertises it. The canonical
+`BlockDevice.flush()` default remains fail-closed, and the new
+`BlockDeviceDurabilityPortV1` is an owner seam only; it has no implementation
+until an NVMe/block adapter can acknowledge an actual Flush or FUA ordering
+boundary. WAL/group-commit counters must not promote this capability.
+
 The seven `[UPFRONT]` items above are **not** open entries. They are already
 locked into the fs-API contract. Do not re-file them here. Updates to their
 wording/semantics belong in `from_simple_db.md` (and mirror into

@@ -1,6 +1,6 @@
 # quic_udp_initial_spec
 
-> var out: [u8] = []
+> Safety classification: UDP byte-carrier evidence for an unprotected header shape only. It is not a valid QUIC Initial, handshake, or H3 readiness proof.
 
 <!-- sdn-diagram:id=quic_udp_initial_spec.arch -->
 <details class="sdn-source">
@@ -43,7 +43,7 @@ var out: [u8] = []
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/nogc_async_mut/quic/quic_udp_initial_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-20 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 var out: [u8] = []
@@ -70,7 +70,7 @@ fn recv_bytes(res: Result<[i64], text>) -> [u8]:
 
 ## Scenarios
 
-### QUIC Initial packet wire format
+### Unprotected QUIC Initial header shape
 
 #### encodes first byte as 0xC0 (long-header + fixed + Initial + PN_len=0)
 
@@ -83,7 +83,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val dcid: [u8] = [0x01, 0x02, 0x03, 0x04]
 val scid: [u8] = [0x0a, 0x0b]
-val pkt = build_initial(dcid, scid, 0)
+val pkt = build_unprotected_initial_shape(dcid, scid, 0)
 expect(byte_at(pkt, 0)).to_equal(192)     # 0xC0
 ```
 
@@ -100,7 +100,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val dcid: [u8] = [0x01, 0x02]
 val scid: [u8] = [0x03]
-val pkt = build_initial(dcid, scid, 0)
+val pkt = build_unprotected_initial_shape(dcid, scid, 0)
 expect(byte_at(pkt, 1)).to_equal(0)
 expect(byte_at(pkt, 2)).to_equal(0)
 expect(byte_at(pkt, 3)).to_equal(0)
@@ -120,7 +120,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val dcid: [u8] = [0xaa, 0xbb, 0xcc, 0xdd]
 val scid: [u8] = [0x11]
-val pkt = build_initial(dcid, scid, 0)
+val pkt = build_unprotected_initial_shape(dcid, scid, 0)
 expect(byte_at(pkt, 5)).to_equal(4)       # dcid_len
 expect(byte_at(pkt, 6)).to_equal(170)     # 0xaa
 expect(byte_at(pkt, 7)).to_equal(187)     # 0xbb
@@ -141,7 +141,7 @@ Reproduction: this block contains the complete executable scenario source.
 # layout: 1+4+1+2+1+2+1+1+1 = 14 bytes total
 val dcid: [u8] = [0x01, 0x02]
 val scid: [u8] = [0xfe, 0xfd]
-val pkt = build_initial(dcid, scid, 0)
+val pkt = build_unprotected_initial_shape(dcid, scid, 0)
 expect(byte_at(pkt, 8)).to_equal(2)       # scid_len
 expect(byte_at(pkt, 9)).to_equal(254)     # 0xfe
 expect(byte_at(pkt, 10)).to_equal(253)    # 0xfd
@@ -161,7 +161,7 @@ Reproduction: this block contains the complete executable scenario source.
 # layout: 1+4+1+1+1+1+1+1+1 = 12 bytes
 val dcid: [u8] = [0x01]
 val scid: [u8] = [0x02]
-val pkt = build_initial(dcid, scid, 7)
+val pkt = build_unprotected_initial_shape(dcid, scid, 7)
 expect(byte_at(pkt, 9)).to_equal(0)       # token_len
 expect(byte_at(pkt, 10)).to_equal(1)      # length varint = 1
 expect(byte_at(pkt, 11)).to_equal(7)      # pkt_num
@@ -180,14 +180,14 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val dcid: [u8] = [0x01, 0x02, 0x03]      # 3 bytes
 val scid: [u8] = [0x04, 0x05]             # 2 bytes
-val pkt = build_initial(dcid, scid, 0)
+val pkt = build_unprotected_initial_shape(dcid, scid, 0)
 # 1(first)+4(ver)+1(dcidlen)+3(dcid)+1(scidlen)+2(scid)+1(token)+1(length)+1(pn)=15
 expect(pkt.len()).to_equal(15)
 ```
 
 </details>
 
-### QUIC Initial packet round-trip over loopback UDP
+### UDP carrier fidelity for unprotected header shapes
 
 #### sends an Initial packet and receives exact bytes back
 
@@ -220,7 +220,7 @@ expect(cli_err).to_equal(0)
 
 val dcid: [u8] = [0x08, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07]
 val scid: [u8] = [0x04, 0xaa, 0xbb, 0xcc]
-val pkt = build_initial(dcid, scid, 0)
+val pkt = build_unprotected_initial_shape(dcid, scid, 0)
 val n: i64 = pkt.len()
 
 val (sent, send_err) = native_udp_send_to(cli, pkt, n, "127.0.0.1:19211")
@@ -271,7 +271,7 @@ expect(cli_err).to_equal(0)
 
 val dcid: [u8] = [0xde, 0xad]
 val scid: [u8] = [0xbe, 0xef]
-val pkt = build_initial(dcid, scid, 42)
+val pkt = build_unprotected_initial_shape(dcid, scid, 42)
 val n: i64 = pkt.len()
 val (sent, send_err) = native_udp_send_to(cli, pkt, n, "127.0.0.1:19213")
 expect(send_err).to_equal(0)
@@ -320,7 +320,7 @@ expect(cli_err).to_equal(0)
 
 val dcid: [u8] = [0x10, 0x20, 0x30]
 val scid: [u8] = [0x40, 0x50]
-val pkt = build_initial(dcid, scid, 0)
+val pkt = build_unprotected_initial_shape(dcid, scid, 0)
 val n: i64 = pkt.len()
 val (sent, send_err) = native_udp_send_to(cli, pkt, n, "127.0.0.1:19215")
 expect(send_err).to_equal(0)

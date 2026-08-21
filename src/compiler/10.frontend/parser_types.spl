@@ -11,6 +11,7 @@ use compiler.frontend.lexer_types.{Token}
 use compiler.frontend.parser_types_expr.*
 use compiler.frontend.parser_types_utils.*
 use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.dynamic_identity.closure.{Closure}
 
 extern fn rt_env_get(key: text) -> text
 
@@ -69,6 +70,12 @@ struct ParserModule:
     # not on the ParserModule itself. If a future FR needs bare-module attribute
     # support, add `attributes: [Attribute]` here and update all
     # `ParserModule(...)` constructor sites across the self-hosted codebase.
+    #
+    # `extend <Enum>:` sections declared in this module, in source order. MUST
+    # stay the LAST field (partial named constructions are filled POSITIONALLY
+    # by the Rust seed), and carries a default so the existing
+    # `ParserModule(...)` sites keep compiling unchanged.
+    extend_enums: [ParserExtendEnum] = []
 
 struct DomainBlock:
     """Raw top-level domain block captured at module scope."""
@@ -367,6 +374,46 @@ struct ParserEnum:
     # # DESUGARED: doc_comment: text
     has_doc_comment: bool
     doc_comment: text
+    span: Span
+    # Raw decorator spellings recorded by the parser, in source order:
+    # "closed", "evolving(repr:u16,unknown:Unknown)". MUST stay the LAST field
+    # (partial named constructions are filled POSITIONALLY by the Rust seed).
+    # See doc/08_tracking/bug/enum_decorators_dropped_before_hir_2026-08-21.md.
+    attributes: [text]
+    # §2 of doc/05_design/compiler/hardening/critical_completeness_design_2026-08-21.md:
+    # a trailing `complete:` / `dyn:` section in the enum body declares that
+    # the constructor universe stays OPEN in that region (an enum with neither
+    # section is closed). New fields MUST stay after `attributes` for the same
+    # positional-construction reason recorded above.
+    complete_open: bool = false
+    dyn_open: bool = false
+
+# §2 of doc/05_design/compiler/hardening/critical_completeness_design_2026-08-21.md:
+#
+#     extend ExprKind:
+#         complete:
+#             async.Await(Expr)
+#         dyn:
+#             ide.LiveProbe(ProbePayload)
+#
+# One ParserExtendEnum is produced per `complete:` / `dyn:` SUBSECTION, so a
+# single `extend` decl with both sections yields two records sharing a target.
+# `Closure` is the shared axis enum from
+# src/compiler/00.common/dynamic_identity/closure.spl -- deliberately imported
+# rather than redeclared, so the frontend and the seal loader agree on one
+# spelling of the state.
+struct ParserExtendEnum:
+    """A `complete:`/`dyn:` extension section of an `extend <Enum>:` decl."""
+    target: text
+    closure: Closure
+    constructors: [ExtendConstructor]
+    span: Span
+
+struct ExtendConstructor:
+    """`provider.Name(payload, ...)` inside an `extend` section."""
+    provider: text
+    name: text
+    payload_types: [Type]
     span: Span
 
 struct Variant:

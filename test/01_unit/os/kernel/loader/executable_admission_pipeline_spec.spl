@@ -1,0 +1,313 @@
+use std.spec.{describe, it, expect, fail}
+use std.fs_driver.mount_table.{MountTable, MountId, ExecuteOpenBinding}
+use std.fs_driver.types.{MountOptions, OpenFlags, ExecuteTrust, FileHandle}
+use std.fs_driver.instance.{DriverInstance}
+use std.fs_driver.ramfs.{RamFsDriver}
+use std.common.contracts.execution.simpleos_executable_v1.{
+    ManifestTarget, SimpleArtifactManifest
+}
+use std.common.contracts.execution.simpleos_executable_admission_v1.{
+    ExecutableAdmissionDecisionV1, ExecutableLoadRangeV1,
+    ExecutableAdmissionV1
+}
+use os.kernel.loader.artifact_manifest.{
+    manifest_for_kind, manifest_kind_elf,
+    manifest_with_entrypoint, manifest_with_signature
+}
+use os.kernel.loader.executable_admission_pipeline.{
+    ExecutableLoaderAdmissionErrorV1,
+    ExecutableLoaderVerificationInputsV1,
+    executable_loader_admit_open_binding,
+    executable_loader_authority_owner_initialize,
+    executable_loader_commit, executable_loader_retrieve_once
+}
+use os.kernel.loader.executable_authority_registry.{
+    ExecutableAuthorityErrorV1,
+    ExecutableAuthorityRegistryV1, ExecutableAuthorityTokenV1,
+    executable_authority_registry_max_slots,
+    executable_authority_owner_valid, executable_authority_capacity,
+    executable_authority_slot_count, executable_authority_active_count,
+    executable_authority_snapshot
+}
+
+fn digest_a() -> text:
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+fn digest_b() -> text:
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+fn target_x86() -> ManifestTarget:
+    ManifestTarget(os: "simpleos", arch: "x86_64", abi: "simpleos")
+
+fn target_wrong() -> ManifestTarget:
+    ManifestTarget(os: "simpleos", arch: "aarch64", abi: "simpleos")
+
+fn valid_range() -> ExecutableLoadRangeV1:
+    ExecutableLoadRangeV1(
+        file_offset: 0u64,
+        file_size: 4u64,
+        virtual_address: 4096u64,
+        memory_size: 4u64,
+        writable: false,
+        executable: true
+    )
+
+fn wx_range() -> ExecutableLoadRangeV1:
+    ExecutableLoadRangeV1(
+        file_offset: 0u64,
+        file_size: 4u64,
+        virtual_address: 4096u64,
+        memory_size: 4u64,
+        writable: true,
+        executable: true
+    )
+
+fn valid_manifest() -> SimpleArtifactManifest:
+    val skeleton = manifest_for_kind(manifest_kind_elf())
+    val entered = manifest_with_entrypoint(skeleton, "main")
+    manifest_with_signature(entered, "signature-1", [digest_b()])
+
+fn admission_for_binding(binding: ExecuteOpenBinding) -> ExecutableAdmissionV1:
+    ExecutableAdmissionV1(
+        schema_version: 1,
+        admission_id: "admission-1",
+        decision: ExecutableAdmissionDecisionV1.Admitted,
+        rejection_reason: "",
+        image_hash: digest_a(),
+        manifest_hash: digest_b(),
+        kernel_hash: digest_a(),
+        trust_root_hash: digest_b(),
+        trust_epoch: 7u64,
+        target: target_x86(),
+        firmware_profile: "uefi-secure",
+        compiler_identity: "compiler-1",
+        source_identity: "source-1",
+        config_identity: "config-1",
+        mount_id: binding.mount_id.id as u64,
+        mount_generation: binding.mount_generation,
+        file_id: binding.file_handle.id,
+        file_generation: binding.content_generation,
+        effective_capabilities: 69u32
+    )
+
+fn valid_inputs() -> ExecutableLoaderVerificationInputsV1:
+    ExecutableLoaderVerificationInputsV1(
+        manifest: valid_manifest(),
+        manifest_hash: digest_b(),
+        image_hash: digest_a(),
+        trust_root_hash: digest_b(),
+        target: target_x86(),
+        format: "elf",
+        role: "main-image",
+        verified_load_ranges: [valid_range()],
+        manifest_verified: true,
+        signature_verified: true,
+        trust_root_verified: true,
+        target_verified: true,
+        format_verified: true,
+        ranges_verified: true,
+        image_digest_verified: true
+    )
+
+fn table_with_program() -> MountTable:
+    var table = MountTable.new()
+    match table.mount(
+        "/",
+        DriverInstance.RamFs(driver: RamFsDriver.new()),
+        MountOptions.default()
+    ):
+        case Ok(_):
+            match table.open("/program", OpenFlags.create_write()):
+                case Ok(handle):
+                    match table.write(handle, "ELF!"):
+                        case Ok(_): ()
+                        case Err(_): fail("fixture write failed")
+                    match table.close(handle):
+                        case Ok(_): ()
+                        case Err(_): fail("fixture close failed")
+                case Err(_): fail("fixture open failed")
+        case Err(_): fail("fixture mount failed")
+    table
+
+fn open_program(table: mut MountTable) -> ExecuteOpenBinding:
+    match table.open_for_execute("/program", ExecuteTrust.Trusted):
+        case Ok(binding): binding
+        case Err(_):
+            fail("fixture execute-open failed")
+            ExecuteOpenBinding(
+                mount_id: MountId.null(),
+                backend_name: "",
+                file_handle: FileHandle(id: 0u64),
+                mount_generation: 0u64,
+                namespace_generation: 0u64,
+                content_generation: 0u64,
+                size: 0
+            )
+
+fn unmount_root(table: mut MountTable):
+    match table.unmount("/"):
+        case Ok(_): ()
+        case Err(_): fail("fixture unmount failed")
+
+fn bump_binding_namespace(table: mut MountTable, binding: ExecuteOpenBinding):
+    match table.bump_namespace_generation(binding.mount_id):
+        case Ok(_): ()
+        case Err(_): fail("fixture namespace generation bump failed")
+
+fn authority_owner(slot_limit: i64, nonce_seed: u64) -> ExecutableAuthorityRegistryV1:
+    val result = executable_loader_authority_owner_initialize(slot_limit, nonce_seed)
+    if result.is_err():
+        fail("serialized authority owner unavailable")
+    result.unwrap()
+
+describe "authenticated filesystem executable admission pipeline":
+    it "fails closed after structural checks when cryptographic verification is unavailable":
+        var table = table_with_program()
+        val binding = open_program(table)
+        val result = executable_loader_admit_open_binding(
+            table, binding, valid_inputs(), admission_for_binding(binding))
+        match result:
+            case Err(error):
+                expect(error).to_equal(
+                    ExecutableLoaderAdmissionErrorV1.CryptographicVerifierUnavailable)
+            case Ok(_): fail("caller-provided verification booleans minted authority")
+        unmount_root(table)
+
+    it "rejects diagnostic signature, trust, target, and format failures earlier":
+        var signature_table = table_with_program()
+        var signature_inputs = valid_inputs()
+        signature_inputs.signature_verified = false
+        val signature_binding = open_program(signature_table)
+        match executable_loader_admit_open_binding(
+            signature_table, signature_binding, signature_inputs,
+            admission_for_binding(signature_binding)
+        ):
+            case Err(error):
+                expect(error).to_equal(ExecutableLoaderAdmissionErrorV1.SignatureInvalid)
+            case Ok(_): fail("signature failure admitted")
+        unmount_root(signature_table)
+
+        var trust_table = table_with_program()
+        var trust_inputs = valid_inputs()
+        trust_inputs.trust_root_verified = false
+        val trust_binding = open_program(trust_table)
+        match executable_loader_admit_open_binding(
+            trust_table, trust_binding, trust_inputs,
+            admission_for_binding(trust_binding)
+        ):
+            case Err(error):
+                expect(error).to_equal(ExecutableLoaderAdmissionErrorV1.TrustRootInvalid)
+            case Ok(_): fail("trust failure admitted")
+        unmount_root(trust_table)
+
+        var target_table = table_with_program()
+        var target_inputs = valid_inputs()
+        target_inputs.target = target_wrong()
+        val target_binding = open_program(target_table)
+        match executable_loader_admit_open_binding(
+            target_table, target_binding, target_inputs,
+            admission_for_binding(target_binding)
+        ):
+            case Err(error):
+                expect(error).to_equal(ExecutableLoaderAdmissionErrorV1.TargetInvalid)
+            case Ok(_): fail("wrong target admitted")
+        unmount_root(target_table)
+
+        var format_table = table_with_program()
+        var format_inputs = valid_inputs()
+        format_inputs.format_verified = false
+        val format_binding = open_program(format_table)
+        match executable_loader_admit_open_binding(
+            format_table, format_binding, format_inputs,
+            admission_for_binding(format_binding)
+        ):
+            case Err(error):
+                expect(error).to_equal(ExecutableLoaderAdmissionErrorV1.FormatInvalid)
+            case Ok(_): fail("format failure admitted")
+        unmount_root(format_table)
+
+    it "rejects W^X ranges, stale bindings, and identity substitution":
+        var range_table = table_with_program()
+        var range_inputs = valid_inputs()
+        range_inputs.verified_load_ranges = [wx_range()]
+        val range_binding = open_program(range_table)
+        match executable_loader_admit_open_binding(
+            range_table, range_binding, range_inputs,
+            admission_for_binding(range_binding)
+        ):
+            case Err(error):
+                expect(error).to_equal(ExecutableLoaderAdmissionErrorV1.RangeInvalid)
+            case Ok(_): fail("W^X range admitted")
+        unmount_root(range_table)
+
+        var stale_table = table_with_program()
+        val stale_binding = open_program(stale_table)
+        bump_binding_namespace(stale_table, stale_binding)
+        match executable_loader_admit_open_binding(
+            stale_table, stale_binding, valid_inputs(),
+            admission_for_binding(stale_binding)
+        ):
+            case Err(error):
+                expect(error).to_equal(ExecutableLoaderAdmissionErrorV1.StaleBinding)
+            case Ok(_): fail("stale binding admitted")
+        unmount_root(stale_table)
+
+        var identity_table = table_with_program()
+        val identity_binding = open_program(identity_table)
+        var wrong_admission = admission_for_binding(identity_binding)
+        wrong_admission.file_id = wrong_admission.file_id + 1u64
+        match executable_loader_admit_open_binding(
+            identity_table, identity_binding, valid_inputs(), wrong_admission
+        ):
+            case Err(error):
+                expect(error).to_equal(ExecutableLoaderAdmissionErrorV1.AdmissionMismatch)
+            case Ok(_): fail("substituted file identity admitted")
+        unmount_root(identity_table)
+
+    it "rejects invalid owner bounds before allocating serialized state":
+        match executable_loader_authority_owner_initialize(0, 0u64):
+            case Err(error): expect(error).to_equal(ExecutableAuthorityErrorV1.InvalidRegistry)
+            case Ok(_): fail("invalid owner configuration initialized")
+        match executable_loader_authority_owner_initialize(
+            executable_authority_registry_max_slots() + 1, 1u64
+        ):
+            case Err(error): expect(error).to_equal(ExecutableAuthorityErrorV1.InvalidRegistry)
+            case Ok(_): fail("oversized owner initialized")
+
+    it "reopens one exact owner configuration and rejects conflicts":
+        val owner = authority_owner(1, 0xA17u64)
+        val owner_copy = owner
+        match executable_loader_authority_owner_initialize(1, 0xA17u64):
+            case Ok(reopened):
+                if not executable_authority_owner_valid(reopened):
+                    fail("idempotently reopened owner is invalid")
+            case Err(_): fail("exact owner configuration did not reopen")
+        match executable_loader_authority_owner_initialize(2, 0xA17u64):
+            case Err(error):
+                expect(error).to_equal(ExecutableAuthorityErrorV1.InvalidRegistry)
+            case Ok(_): fail("conflicting singleton capacity replaced the owner")
+        if not executable_authority_owner_valid(owner_copy):
+            fail("copied owner lost the loader singleton")
+        expect(executable_authority_capacity(owner_copy)).to_equal(1)
+        expect(executable_authority_slot_count(owner)).to_equal(0)
+        expect(executable_authority_active_count(owner_copy)).to_equal(0)
+
+    it "rejects forged tokens without mutating the empty registry":
+        val owner = authority_owner(1, 0xA17u64)
+        val owner_copy = owner
+        val forged = ExecutableAuthorityTokenV1(
+            slot_index: 0,
+            generation: 1u64,
+            nonce: 1u64
+        )
+        match executable_loader_commit(owner, forged):
+            case Err(error): expect(error).to_equal(ExecutableAuthorityErrorV1.InvalidToken)
+            case Ok(_): fail("forged token committed")
+        match executable_loader_retrieve_once(owner_copy, forged):
+            case Err(error): expect(error).to_equal(ExecutableAuthorityErrorV1.InvalidToken)
+            case Ok(_): fail("forged token retrieved an image")
+        match executable_authority_snapshot(owner, forged):
+            case Err(error): expect(error).to_equal(ExecutableAuthorityErrorV1.InvalidToken)
+            case Ok(_): fail("forged token observed slot state")
+        expect(executable_authority_slot_count(owner_copy)).to_equal(0)
+        expect(executable_authority_active_count(owner)).to_equal(0)

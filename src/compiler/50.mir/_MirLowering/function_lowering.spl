@@ -31,10 +31,15 @@ use compiler.mir.synthetic_driver_codegen.{apply_synthetic_driver_codegen}
 use compiler.frontend.core.types.{custom_primitive_underlying_type_tag_by_symbol}
 use compiler.semantics.gpu_checker.{parse_gpu_kernel_target}
 use compiler.common.attributes.{FunctionAttr}
+use compiler.common.assurance.policy_names.{normalize_profile_name}
+use compiler.common.assurance.policy_schema.{AssuranceStrictness}
 use compiler.common.gpu_target_metadata.{normalize_gpu_backend_order_metadata, normalize_gpu_target_metadata_name}
 use compiler.mir.mir_types.{MirConstant}
 
 extern fn rt_enum_discriminant(value: Any) -> i64
+
+# Cached [mir-optional-inner] trace gate (-1 unknown, 0 off, 1 on). Default OFF.
+var mir_optional_inner_trace_state: i64 = -1
 
 # Import struct definitions from types module
 use compiler.mir.mir_lowering_types.{MirLowering, MirError}
@@ -45,6 +50,20 @@ use compiler.mir._MirLoweringExpr.switch_operators_calls.*
 use compiler.mir._MirLoweringExpr.method_calls_literals.*
 use compiler.mir.mir_lowering_stmts.*
 use compiler.mir.mir_lowering_ml.*
+
+
+fn mir_type_any_requires_hard_error(strictness_name: text) -> bool:
+    """True when `HirTypeKind.Any` must be a FATAL MIR-lowering diagnostic.
+
+    Mirrors `match_coverage_requires_hard_error` (35.semantics) so the two
+    profile-gated MIR decisions cannot drift: Critical is hard, every other
+    assurance strictness is warn-only.
+    """
+    val canonical = normalize_profile_name(strictness_name)
+    val strictness = AssuranceStrictness.from_name(canonical)
+    match strictness:
+        AssuranceStrictness.Critical: true
+        _: false
 
 impl MirLowering:
     fn mir_folded_const_type(expr: HirExpr, value: MirConstValue) -> MirType?:
@@ -757,7 +776,13 @@ impl MirLowering:
                                 inner_symbol_id = self.symbol_id_value(inner_symbol)
                             case _:
                                 pass
-                    eprint("[mir-optional-inner] actual={inner_actual_disc} named={inner_named_disc} infer={inner_infer_disc} error={inner_error_disc} str={inner_str_disc} any={inner_any_disc} symbol={inner_symbol_id}\n")
+                    if mir_optional_inner_trace_state < 0:
+                        if mir_trace_enabled():
+                            mir_optional_inner_trace_state = 1
+                        else:
+                            mir_optional_inner_trace_state = 0
+                    if mir_optional_inner_trace_state == 1:
+                        eprint("[mir-optional-inner] actual={inner_actual_disc} named={inner_named_disc} infer={inner_infer_disc} error={inner_error_disc} str={inner_str_disc} any={inner_any_disc} symbol={inner_symbol_id}\n")
                     return MirType(kind: MirTypeKind.Tuple([
                         MirType(kind: MirTypeKind.Bool),
                         self.lower_type(inner)
@@ -851,9 +876,84 @@ impl MirLowering:
                 # (mir_hir_type_is_isolated, mir_lowering_stmts.spl), never a
                 # runtime representation, so no distinct MirType is needed.
                 self.lower_type(inner)
+            case HirTypeKind.Slice(element):
+                # Real lowering: MirTypeKind.Slice exists (mir_types.spl:159).
+                MirType(kind: MirTypeKind.Slice(self.lower_type(element)))
+            case HirTypeKind.Function(params, ret, _):
+                # Real lowering: a function type is a code pointer at MIR level.
+                var mir_params: [MirType] = []
+                for p in params:
+                    mir_params = mir_params.push(self.lower_type(p))
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                    params: mir_params,
+                    return_type: self.lower_type(ret),
+                    is_variadic: false)))
+            case HirTypeKind.DynTrait(_):
+                # Normalized to MirTypeKind.Tuple([Ptr(U8), Ptr(U8)]) — a trait
+                # object is a fat pointer (data pointer, vtable pointer); MIR
+                # has no distinct dyn-trait type.
+                MirType(kind: MirTypeKind.Tuple([
+                    MirType(kind: MirTypeKind.Ptr(MirType(kind: MirTypeKind.U8), false)),
+                    MirType(kind: MirTypeKind.Ptr(MirType(kind: MirTypeKind.U8), false))
+                ]))
+            case HirTypeKind.Any:
+                # Profile-dependent (hardening plan §8 / §9.5: "Any introduced
+                # as generic erasure count = 0"). Erasing `Any` to a tagged
+                # i64 slot IS that silent erasure, so it is never merely
+                # silent here:
+                #   critical / mission-critical -> E-MIR-TYPE-Any is FATAL,
+                #     exactly like TypeParam/Projection.
+                #   any other profile -> the same named diagnostic is recorded
+                #     as a non-fatal warning and the type is Normalized to
+                #     MirTypeKind.I64 (the runtime tagged any slot, same as the
+                #     fail-soft `Error` arm above), so today's non-critical
+                #     builds still complete while the census can measure it.
+                # The profile reaches MIR lowering the same way the match
+                # exhaustiveness hard-error decision does
+                # (_MirLoweringExpr/switch_operators_calls.spl:2770): the
+                # process-global SIMPLE_SAFETY_PROFILE, read through
+                # mir_lower_env_get. No AnyEscapeProfile handle is threaded
+                # into MirLowering.
+                val any_profile_name = mir_lower_env_get("SIMPLE_SAFETY_PROFILE") ?? ""
+                if mir_type_any_requires_hard_error(any_profile_name):
+                    self.error_fatal("E-MIR-TYPE-Any: `Any` reached MIR lowering and would erase to a tagged i64 slot; replace with a monomorphized generic, a closed sum type, or a typed interface", Some(type_.span))
+                else:
+                    self.error("E-MIR-TYPE-Any: `Any` erased to a tagged i64 slot at MIR lowering (warning under profile '{any_profile_name}'; fatal under critical)", Some(type_.span))
+                MirType.i64()
+            case HirTypeKind.Tensor(_, _, _):
+                # Normalized to MirTypeKind.Opaque("tensor") — tensors are
+                # runtime-managed handles; dims/device are checked in HIR and
+                # have no MIR representation.
+                MirType(kind: MirTypeKind.Opaque("tensor"))
+            case HirTypeKind.Layer(_, _):
+                # Normalized to MirTypeKind.Opaque("layer") — same reasoning as
+                # Tensor: a layer is a runtime handle, shapes live in HIR only.
+                MirType(kind: MirTypeKind.Opaque("layer"))
+            case HirTypeKind.TypeParam(name, _):
+                # Unsupported: a generic parameter must be substituted by
+                # monomorphization before MIR lowering; reaching here is a bug
+                # upstream, not something MIR can represent.
+                self.error_fatal("E-MIR-TYPE-TypeParam: unsubstituted generic type parameter '{name}' reached MIR lowering", Some(type_.span))
+                MirType.i64()
+            case HirTypeKind.Projection(_, assoc_name):
+                # Unsupported: associated-type projections must be resolved by
+                # trait selection before MIR lowering.
+                self.error_fatal("E-MIR-TYPE-Projection: unresolved associated type projection '.{assoc_name}' reached MIR lowering", Some(type_.span))
+                MirType.i64()
             case _:
-                self.error_fatal("unsupported MIR type kind [wildcard-arm] disc={rt_enum_discriminant(type_.kind)}: {type_.kind}", nil)
-                MirType(kind: MirTypeKind.I64)
+                # Seed requires a trailing arm; every HirTypeKind variant is
+                # handled explicitly above, so this is unreachable by construction.
+                self.unreachable_hir_type_kind(type_)
+
+    me unreachable_hir_type_kind(type_: HirType) -> MirType:
+        """Raise for a HirTypeKind that has no explicit lower_type arm.
+
+        Unreachable by construction: lower_type covers all 26 declared
+        HirTypeKind variants. Exists only because the seed compiler demands a
+        trailing match arm.
+        """
+        self.error_fatal("E-MIR-TYPE-Unknown: unreachable HirTypeKind disc={rt_enum_discriminant(type_.kind)}: {type_.kind}", Some(type_.span))
+        MirType.i64()
 
     me lower_block(block: HirBlock) -> LocalId?:
         self.lower_block_expected(block, nil)

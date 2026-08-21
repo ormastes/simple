@@ -48,13 +48,34 @@
 use std.io.{shell_output_trimmed, file_write, file_delete}
 use std.notebook.lsp_bridge.{LspBridge}
 
-fn _piped_process_extern_available() -> bool:
-    val probe_path = "/tmp/simple_lsp_test_bridge_capability_probe.spl"
+fn _simple_bin() -> text:
+    cwd() + "/bin/simple"
+
+fn _shell_quote(value: text) -> text:
+    "'" + value.replace("'", "'\\''") + "'"
+
+fn _piped_process_probe_path() -> text:
+    "/tmp/simple_lsp_test_bridge_capability_probe.spl"
+
+fn _piped_process_probe_command(simple_bin: text) -> text:
+    _shell_quote(simple_bin) + " run " + _shell_quote(_piped_process_probe_path()) + " 2>/dev/null"
+
+fn _piped_process_extern_available(probe_command: text) -> bool:
+    val probe_path = _piped_process_probe_path()
     val probe_src = "use std.nogc_sync_mut.io.{process_spawn_piped}\n\nfn main():\n    val pid = process_spawn_piped(\"true\", [])\n    if pid > 0:\n        print \"PIPED_OK\"\n    else:\n        print \"PIPED_FAIL\"\n"
     file_write(probe_path, probe_src)
-    val output = shell_output_trimmed("/home/ormastes/dev/pub/simple/bin/simple run {probe_path} 2>/dev/null", "")
+    val output = shell_output_trimmed(probe_command, "")
     file_delete(probe_path)
-    output.contains("PIPED_OK")
+    val ok_count = output.split("PIPED_OK").len() - 1
+    val fail_count = output.split("PIPED_FAIL").len() - 1
+    val has_one_token = ok_count + fail_count == 1
+    expect(has_one_token).to_equal(true)
+    # A malformed/empty probe must fail the spec without masquerading as the
+    # known missing-capability skip. Returning true keeps execution on the
+    # real bridge path after the assertion records the malformed probe.
+    if not has_one_token:
+        return true
+    ok_count == 1
 
 describe "LspBridge — session-long Simple LSP subprocess":
     slow_it "completes a known-defined symbol via the real LSP + query_visibility.spl completions path":
@@ -64,7 +85,11 @@ describe "LspBridge — session-long Simple LSP subprocess":
         `my_completable_function` is a guaranteed hit at that prefix
         position (verified manually: same fixture, same 1-indexed
         line/col, non-empty completions list)."""
-        if not _piped_process_extern_available():
+        val simple_bin = _simple_bin()
+        val probe_command = _piped_process_probe_command(simple_bin)
+        val expected_probe_command = _shell_quote(simple_bin) + " run " + _shell_quote(_piped_process_probe_path()) + " 2>/dev/null"
+        expect(probe_command).to_equal(expected_probe_command)
+        if not _piped_process_extern_available(probe_command):
             print "SKIP: rt_process_spawn_piped is not registered in this interpreter build's extern dispatch table (pre-existing gap, not caused by this change — see doc/08_tracking/bug/interpreter_sffi_missing_piped_process_externs_2026-07-29.md)"
             return
 
@@ -82,7 +107,11 @@ describe "LspBridge — session-long Simple LSP subprocess":
         (`extract_symbol_at` short-circuits to the whole-line declaration
         name regardless of column) returns the real declaration text and a
         visibility marker."""
-        if not _piped_process_extern_available():
+        val simple_bin = _simple_bin()
+        val probe_command = _piped_process_probe_command(simple_bin)
+        val expected_probe_command = _shell_quote(simple_bin) + " run " + _shell_quote(_piped_process_probe_path()) + " 2>/dev/null"
+        expect(probe_command).to_equal(expected_probe_command)
+        if not _piped_process_extern_available(probe_command):
             print "SKIP: rt_process_spawn_piped is not registered in this interpreter build's extern dispatch table (pre-existing gap, not caused by this change — see doc/08_tracking/bug/interpreter_sffi_missing_piped_process_externs_2026-07-29.md)"
             return
 

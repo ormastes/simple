@@ -80,3 +80,28 @@ describe "NVFS superblock disk I/O":
         expect(sb.uuid_hi).to_equal(0x1111u64)
         expect(sb.uuid_lo).to_equal(0x2222u64)
         expect(sb.mount_generation).to_equal(1u64)
+
+    it "rejects a corrupt replica and reconstructs from the intact peer":
+        var dev = _make_device()
+        nvfs_superblock_set_device(dev)
+        expect(nvfs_superblock_format_disk(0x3333u64, 0x4444u64)).to_be(true)
+        var replica_a = nvfs_raw_read_sector(0u64)
+        replica_a[8] = replica_a[8] ^ 0x5Au8
+        expect(nvfs_raw_write_sector(0u64, replica_a)).to_be(true)
+        val recovered = nvfs_superblock_read_from_disk()
+        expect(recovered.valid).to_be(true)
+        expect(recovered.replica_id).to_equal(1u8)
+        expect(recovered.uuid_hi).to_equal(0x3333u64)
+
+    it "fails closed when both replicas are corrupt":
+        var dev = _make_device()
+        nvfs_superblock_set_device(dev)
+        expect(nvfs_superblock_format_disk(0x5555u64, 0x6666u64)).to_be(true)
+        var replica_a = nvfs_raw_read_sector(0u64)
+        var replica_b = nvfs_raw_read_sector(1u64)
+        replica_a[16] = replica_a[16] ^ 0x33u8
+        replica_b[16] = replica_b[16] ^ 0x77u8
+        expect(nvfs_raw_write_sector(0u64, replica_a)).to_be(true)
+        expect(nvfs_raw_write_sector(1u64, replica_b)).to_be(true)
+        expect(nvfs_superblock_probe_disk()).to_be(false)
+        expect(nvfs_superblock_read_from_disk().valid).to_be(false)

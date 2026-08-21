@@ -1,0 +1,184 @@
+# Physical and logical source identity for module surfaces.
+
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.parser_types.*
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfacesByName}
+
+extern fn rt_hash_text(content: text) -> i64
+extern fn rt_path_absolute(path: text) -> text
+
+pub(package) fn module_surface_canonical_module_name(name: text) -> text:
+    var dotted = name
+    if dotted.ends_with(".spl"):
+        dotted = dotted[0:dotted.len() - 4]
+    dotted = dotted.replace("/", ".")
+    if dotted.starts_with("src."):
+        dotted = dotted.substring(4)
+    var result: [text] = []
+    for segment in dotted.split("."):
+        var digits_only = segment != ""
+        var i = 0
+        while i < segment.len():
+            val code = segment.char_code_at(i)
+            if code < 48 or code > 57:
+                digits_only = false
+            i = i + 1
+        if not digits_only:
+            result = result.push(segment)
+    val canonical = result.join(".")
+    if canonical == "std":
+        return "lib"
+    if canonical.starts_with("std."):
+        return "lib." + canonical.substring(4)
+    canonical
+
+pub(package) fn module_surface_logical_name_from_path(path: text) -> text:
+    # Match the prior hir_module_logical_name_from_path contract: derive the
+    # logical name from the physical path, strip only repository roots and
+    # source extensions, then sanitize. Do not apply tier, std, or lib folds.
+    var portable_path = path.replace("\\", "/")
+    while portable_path.starts_with("../"):
+        portable_path = portable_path.substring(3)
+    if portable_path.starts_with("./"):
+        portable_path = portable_path.substring(2)
+    val path_parts = portable_path.split("/")
+    var start = 0
+    var found_src = false
+    var part_index = 0
+    while part_index < path_parts.len():
+        if path_parts[part_index] == "src" and not found_src:
+            start = part_index + 1
+            found_src = true
+        elif path_parts[part_index] == "examples" and not found_src and start == 0:
+            start = part_index
+        part_index = part_index + 1
+    var relative_path = ""
+    var relative_index = start
+    while relative_index < path_parts.len():
+        if relative_index > start:
+            relative_path = relative_path + "/"
+        relative_path = relative_path + path_parts[relative_index]
+        relative_index = relative_index + 1
+    if relative_path == "":
+        relative_path = portable_path
+    relative_path = relative_path.replace(".spl", "")
+    relative_path = relative_path.replace(".sdn", "")
+    var sanitized = ""
+    var char_index = 0
+    while char_index < relative_path.len():
+        val code = relative_path.char_code_at(char_index)
+        val allowed = (code >= 97 and code <= 122) or
+            (code >= 65 and code <= 90) or
+            (code >= 48 and code <= 57) or
+            code == 95 or code == 46 or code == 47
+        if allowed:
+            sanitized = sanitized + relative_path.char_at(char_index)
+        else:
+            sanitized = sanitized + "_"
+        char_index = char_index + 1
+    sanitized.replace("/", ".")
+
+pub(package) fn module_surface_package_name(surface: ModuleSurface) -> text:
+    module_surface_package_name_from_name(
+        module_surface_canonical_module_name(surface.module_name))
+
+pub(package) fn module_surface_package_name_from_name(name: text) -> text:
+    if name.ends_with(".__init__"):
+        return name[0:name.len() - 9]
+    val segments = name.split(".")
+    if segments.len() <= 1:
+        return ""
+    segments[0:segments.len() - 1].join(".")
+
+pub(package) fn module_surface_source_identity_matches(
+    surface: ModuleSurface,
+    source_index: i64,
+    canonical_path: text,
+    module_name: text,
+    content_length: i64,
+    content_hash: i64
+) -> bool:
+    # SourceFile is a value-semantic driver aggregate. Keep it outside repeated
+    # registry probes and transport only its immutable identity projections.
+    # The ModuleSurface registry is the canonical owner of retained state.
+    surface.source_index == source_index and
+        surface.canonical_path == canonical_path and
+        surface.module_name == module_name and
+        surface.content_length == content_length and
+        surface.content_hash == content_hash
+
+pub fn module_surface_index_for_source(registry: ModuleSurfacesByName, source: SourceFile, source_index: i64) -> i64:
+    """Resolve one physical source without copying every surface aggregate."""
+    # Snapshot source identity once. Besides avoiding repeated hashing/path
+    # normalization on the fallback scan, scalar transport prevents a nested
+    # SourceFile aggregate copy at every candidate boundary.
+    val source_module_name = source.module_name
+    val source_canonical_path = module_surface_canonical_path(source.path)
+    val source_content_length = source.content.len()
+    val source_content_hash = rt_hash_text(source.content)
+    var alias_position = 0
+    while alias_position < registry.ordered_names.len() and alias_position < registry.ordered_indices.len():
+        if registry.ordered_names[alias_position] == source_module_name:
+            val candidate_index = registry.ordered_indices[alias_position]
+            if candidate_index >= 0 and candidate_index < registry.surfaces.len():
+                if module_surface_source_identity_matches(
+                    registry.surfaces[candidate_index], source_index,
+                    source_canonical_path, source_module_name,
+                    source_content_length, source_content_hash):
+                    return candidate_index
+            break
+        alias_position = alias_position + 1
+
+    # Every admitted source/module spelling is committed to ordered_names by
+    # ModuleSurfaceBuilder.add_indexed_name. A missing alias is therefore an
+    # exact miss, not permission for an O(surface-count) compatibility scan.
+    -1
+
+pub fn module_surface_canonical_path(path: text) -> text:
+    val physical = rt_path_absolute(path)
+    val normalized = (if physical != "": physical else: path).replace("\\", "/")
+    val absolute = normalized.starts_with("/")
+    var parts: [text] = []
+    for part in normalized.split("/"):
+        if part == "" or part == ".":
+            continue
+        if part == ".." and parts.len() > 0 and parts[parts.len() - 1] != "..":
+            parts = parts[0:parts.len() - 1]
+        elif part == ".." and not absolute:
+            parts = parts.push(part)
+        elif part != "..":
+            parts = parts.push(part)
+    val joined = parts.join("/")
+    if absolute:
+        return "/" + joined
+    joined
+
+pub(package) fn module_surface_declaration_matches(surface: ModuleSurface, module: ParserModule) -> bool:
+    if surface.imports.len() != module.imports.len(): return false
+    if surface.exports.len() != module.exports.len(): return false
+    # Native Dict.len() returns -1. Compare key-array lengths so aliases of one
+    # physical source are not rejected by corrupt dictionary cardinalities.
+    if surface.callables.keys().len() != module.functions.keys().len(): return false
+    if surface.composites.keys().len() != module.classes.keys().len() + module.actors.keys().len() + module.structs.keys().len(): return false
+    if surface.enums.keys().len() != module.enums.keys().len(): return false
+    if surface.traits.keys().len() != module.traits.keys().len(): return false
+    if surface.impls.len() != module.impls.len(): return false
+    if surface.type_aliases.keys().len() != module.type_aliases.keys().len(): return false
+    if surface.constants.keys().len() != module.constants.keys().len(): return false
+    for name in module.functions.keys():
+        if not surface.callables.contains_key(name): return false
+    for name in module.classes.keys():
+        if not surface.composites.contains_key(name): return false
+    for name in module.actors.keys():
+        if not surface.composites.contains_key(name): return false
+    for name in module.structs.keys():
+        if not surface.composites.contains_key(name): return false
+    for name in module.enums.keys():
+        if not surface.enums.contains_key(name): return false
+    for name in module.traits.keys():
+        if not surface.traits.contains_key(name): return false
+    for name in module.type_aliases.keys():
+        if not surface.type_aliases.contains_key(name): return false
+    for name in module.constants.keys():
+        if not surface.constants.contains_key(name): return false
+    true

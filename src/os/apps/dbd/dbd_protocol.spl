@@ -15,11 +15,352 @@
 # verifiable with `simple run <spec>` without a network or a mounted disk.
 
 use std.nogc_sync_mut.redis.server.{RedisServer, parse_next_request}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+
+pub val DBD_MAX_JOURNAL_BYTES: i64 = 1024 * 1024
+pub val DBD_MAX_JOURNAL_RECORDS: i64 = 4096
+pub val DBD_MAX_JOURNAL_ARGS: i64 = 16
+pub val DBD_MAX_JOURNAL_LINE_BYTES: i64 = 512
+pub val DBD_MAX_SESSION_BYTES: i64 = 65536
+pub val DBD_MAX_REQUESTS_PER_SESSION: i64 = 64
+pub val DBD_MAX_RESPONSE_BYTES_PER_SESSION: i64 = 65536
+pub val DBD_MAX_PRINCIPAL_BYTES: i64 = 64
+pub val DBD_MIN_CREDENTIAL_BYTES: i64 = 32
+pub val DBD_MAX_CREDENTIAL_BYTES: i64 = 128
+pub val DBD_MAX_AUTH_ATTEMPTS_PER_SESSION: i64 = 4
+pub val DBD_BOOT_CREDENTIAL_OWNER_BLOCKER: text =
+    "boot-mutable-credential-owner-unavailable"
+
+val DBD_UNKNOWN_PRINCIPAL_DIGEST: text = sha256_text("dbd-unknown-principal")
+val DBD_UNKNOWN_CREDENTIAL_DIGEST: text = sha256_text("dbd-unknown-credential")
+
+# Owner-admission facts, not user configuration. The mutable TLS-to-AUTH wire
+# owner exists, but no boot mutable-credential provisioner, certificate/key
+# owner, typed entropy-failure path, or durable DBFS commit owner is wired to
+# dbd. Keeping these private prevents a socket caller from manufacturing a
+# boolean "verified" claim.
+val DBD_AUTH_FRAMING_OWNER_VERIFIED: bool = true
+val DBD_AUTHENTICATION_OWNER_VERIFIED: bool = false
+val DBD_TLS_OWNER_VERIFIED: bool = false
+val DBD_DBFS_OWNER_VERIFIED: bool = false
+
+# Advertised capabilities are intentionally conservative: features without a
+# verified implementation must remain visibly blocked.
+pub val DBD_CAPABILITY_STATE: text = "protocol=RESP;profile=basic;limits=bounded;close_owner=RetryableQuarantineV1;auth=BlockedBootCredentialOwner;auth_provider=ConfiguredTokenV1;auth_framing=DbdMutableAuthRequestOwnerV1;command_framing=DbdAuthenticatedRespIngressV1;tls=Blocked;tls_record_owner=AuthenticatedV1;tls_handshake_authority=BlockedCertificatePrivateKeyEntropyOwner;transactions=Blocked;dbfs_adapter=DiagnosticReadOnly;live_dbfs_durability=Blocked"
+
+pub fn dbd_production_startup_ready() -> bool:
+    """True only after real auth, TLS, and DBFS owners verify admission."""
+    DBD_AUTH_FRAMING_OWNER_VERIFIED and DBD_AUTHENTICATION_OWNER_VERIFIED and
+        DBD_TLS_OWNER_VERIFIED and DBD_DBFS_OWNER_VERIFIED
+
+pub fn dbd_production_startup_blocker() -> text:
+    """Return a non-secret, stable production startup blocker."""
+    if not DBD_AUTHENTICATION_OWNER_VERIFIED:
+        return DBD_BOOT_CREDENTIAL_OWNER_BLOCKER
+    if not DBD_TLS_OWNER_VERIFIED:
+        return "tls-owner-unavailable"
+    if not DBD_DBFS_OWNER_VERIFIED:
+        return "dbfs-engine-owner-unavailable"
+    ""
+
+pub fn dbd_dbfs_persistence_ready() -> bool:
+    """True only when dbd can reach a mounted, durable DBFS engine owner."""
+    DBD_DBFS_OWNER_VERIFIED
+
+pub fn dbd_dbfs_persistence_blocker() -> text:
+    if DBD_DBFS_OWNER_VERIFIED:
+        return ""
+    "dbfs-engine-owner-unavailable"
+
+fn _dbd_ascii_fold(code: i64) -> i64:
+    if code >= 97 and code <= 122:
+        return code - 32
+    code
+
+fn _dbd_ascii_match_at(message: text, start: i64, marker: text) -> bool:
+    if start < 0 or start + marker.len() > message.len():
+        return false
+    var i: i64 = 0
+    while i < marker.len():
+        if _dbd_ascii_fold(message.char_code_at(start + i)) != marker.char_code_at(i):
+            return false
+        i = i + 1
+    true
+
+fn _dbd_diagnostic_contains_credential(message: text) -> bool:
+    var i: i64 = 0
+    while i < message.len():
+        if _dbd_ascii_match_at(message, i, "AUTH ") or
+            _dbd_ascii_match_at(message, i, "PASSWORD=") or
+            _dbd_ascii_match_at(message, i, "CREDENTIAL=") or
+            _dbd_ascii_match_at(message, i, "SECRET=") or
+            _dbd_ascii_match_at(message, i, "TOKEN="):
+            return true
+        i = i + 1
+    false
+
+pub fn dbd_redact_diagnostic(message: text) -> text:
+    """Replace a credential-shaped diagnostic without copying its payload."""
+    if _dbd_diagnostic_contains_credential(message):
+        return "[dbd] sensitive diagnostic redacted"
+    message
+
+pub class DbdSessionBudget:
+    """Cumulative, per-connection admission budget for the transport owner."""
+    received_bytes: i64
+    request_count: i64
+    response_bytes: i64
+    closed: bool
+
+    pub static fn new() -> DbdSessionBudget:
+        DbdSessionBudget(received_bytes: 0, request_count: 0,
+                         response_bytes: 0, closed: false)
+
+    pub me admit_receive(byte_count: i64) -> bool:
+        if self.closed or byte_count <= 0 or byte_count > DBD_MAX_SESSION_BYTES:
+            return false
+        if self.received_bytes > DBD_MAX_SESSION_BYTES - byte_count:
+            return false
+        self.received_bytes = self.received_bytes + byte_count
+        true
+
+    pub me admit_request() -> bool:
+        if self.closed or self.request_count >= DBD_MAX_REQUESTS_PER_SESSION:
+            return false
+        self.request_count = self.request_count + 1
+        true
+
+    pub me admit_response(byte_count: i64) -> bool:
+        if self.closed or byte_count < 0 or byte_count > DBD_MAX_RESPONSE_BYTES_PER_SESSION:
+            return false
+        if self.response_bytes > DBD_MAX_RESPONSE_BYTES_PER_SESSION - byte_count:
+            return false
+        self.response_bytes = self.response_bytes + byte_count
+        true
+
+    pub me close():
+        self.closed = true
+
+pub class DbdPersistenceBudget:
+    """Durability admission state retained by the canonical daemon owner."""
+    healthy: bool
+    record_count: i64
+    journal_bytes: i64
+
+    pub static fn new() -> DbdPersistenceBudget:
+        DbdPersistenceBudget(healthy: true, record_count: 0, journal_bytes: 0)
+
+    pub static fn restored(record_count: i64, journal_bytes: i64) -> DbdPersistenceBudget:
+        val valid = record_count >= 0 and record_count <= DBD_MAX_JOURNAL_RECORDS and
+            journal_bytes >= 0 and journal_bytes <= DBD_MAX_JOURNAL_BYTES
+        DbdPersistenceBudget(healthy: valid, record_count: record_count,
+                             journal_bytes: journal_bytes)
+
+    pub fn can_append(line_bytes: i64) -> bool:
+        if not self.healthy or line_bytes <= 0 or
+            self.record_count >= DBD_MAX_JOURNAL_RECORDS:
+            return false
+        line_bytes <= DBD_MAX_JOURNAL_BYTES - self.journal_bytes
+
+    pub me commit_verified(line_bytes: i64) -> bool:
+        if not self.can_append(line_bytes):
+            return false
+        self.record_count = self.record_count + 1
+        self.journal_bytes = self.journal_bytes + line_bytes
+        true
+
+    pub me mark_unhealthy():
+        self.healthy = false
+
+fn _dbd_principal_valid(principal: text) -> bool:
+    if principal.len() <= 0 or principal.len() > DBD_MAX_PRINCIPAL_BYTES:
+        return false
+    var i: i64 = 0
+    while i < principal.len():
+        val code = principal.char_code_at(i)
+        if code < 33 or code > 126:
+            return false
+        i = i + 1
+    true
+
+fn _dbd_principal_bytes_valid(principal: [u8]) -> bool:
+    if principal.len().to_i64() <= 0 or
+        principal.len().to_i64() > DBD_MAX_PRINCIPAL_BYTES:
+        return false
+    for byte in principal:
+        if byte < 33u8 or byte > 126u8:
+            return false
+    true
+
+fn _dbd_digest_equal(left: text, right: text) -> bool:
+    # Both inputs are SHA-256 hex digests.  Iterate the full fixed width and
+    # combine every mismatch before deciding; never early-return on content.
+    var different: i64 = 0
+    var i: i64 = 0
+    while i < 64:
+        different = different |
+            (left.char_code_at(i) ^ right.char_code_at(i))
+        i = i + 1
+    different == 0
+
+pub class DbdCredentialProvider:
+    """Configured verifier material; never retains the credential bytes."""
+    configured: bool
+    principal: text
+    principal_digest: text
+    credential_digest: text
+
+    pub static fn new() -> DbdCredentialProvider:
+        DbdCredentialProvider(configured: false, principal: "",
+            principal_digest: DBD_UNKNOWN_PRINCIPAL_DIGEST,
+            credential_digest: DBD_UNKNOWN_CREDENTIAL_DIGEST)
+
+    pub me configure_bytes(principal: text, credential: [u8]) -> bool:
+        # A failed replacement revokes the previous verifier rather than
+        # silently continuing with stale credentials.
+        self.configured = false
+        self.principal = ""
+        self.principal_digest = DBD_UNKNOWN_PRINCIPAL_DIGEST
+        self.credential_digest = DBD_UNKNOWN_CREDENTIAL_DIGEST
+        if not _dbd_principal_valid(principal) or
+            credential.len().to_i64() < DBD_MIN_CREDENTIAL_BYTES or
+            credential.len().to_i64() > DBD_MAX_CREDENTIAL_BYTES:
+            return false
+        self.principal = principal
+        self.principal_digest = sha256_text(principal)
+        self.credential_digest = sha256_u8_hex(credential)
+        self.configured = true
+        true
+
+    pub me revoke():
+        self.configured = false
+        self.principal = ""
+        self.principal_digest = DBD_UNKNOWN_PRINCIPAL_DIGEST
+        self.credential_digest = DBD_UNKNOWN_CREDENTIAL_DIGEST
+
+pub class DbdAuthSession:
+    """One connection's bounded authentication attempts and admitted identity."""
+    session_id: i64
+    attempts: i64
+    authenticated: bool
+    identity: text
+    identity_generation: i64
+    closed: bool
+
+    pub static fn new(session_id: i64) -> DbdAuthSession:
+        DbdAuthSession(session_id: session_id, attempts: 0,
+            authenticated: false, identity: "", identity_generation: 0,
+            closed: session_id <= 0)
+
+    me begin_attempt() -> bool:
+        if self.closed or self.authenticated or
+            self.attempts >= DBD_MAX_AUTH_ATTEMPTS_PER_SESSION:
+            return false
+        self.attempts = self.attempts + 1
+        true
+
+    me reject_attempt() -> bool:
+        if self.attempts >= DBD_MAX_AUTH_ATTEMPTS_PER_SESSION:
+            self.closed = true
+        false
+
+    me commit_digest_authentication(
+        provider: DbdCredentialProvider,
+        principal_valid: bool,
+        supplied_principal_digest: text,
+        supplied_credential_digest: text
+    ) -> bool:
+        val principal_matches = _dbd_digest_equal(
+            provider.principal_digest, supplied_principal_digest)
+        val credential_matches = _dbd_digest_equal(
+            provider.credential_digest, supplied_credential_digest)
+        if provider.configured and principal_valid and
+            principal_matches and credential_matches:
+            self.authenticated = true
+            self.identity = provider.principal
+            self.identity_generation = self.identity_generation + 1
+            return true
+        self.reject_attempt()
+
+    pub me authenticate(
+        provider: DbdCredentialProvider,
+        principal: text,
+        candidate: [u8]
+    ) -> bool:
+        if not self.begin_attempt():
+            return false
+        if candidate.len().to_i64() < DBD_MIN_CREDENTIAL_BYTES or
+            candidate.len().to_i64() > DBD_MAX_CREDENTIAL_BYTES:
+            return self.reject_attempt()
+        val principal_valid = _dbd_principal_valid(principal)
+        val supplied_principal_digest = if principal_valid:
+            sha256_text(principal)
+        else:
+            DBD_UNKNOWN_PRINCIPAL_DIGEST
+        val supplied_credential_digest = sha256_u8_hex(candidate)
+        self.commit_digest_authentication(
+            provider, principal_valid, supplied_principal_digest,
+            supplied_credential_digest)
+
+    pub me authenticate_bytes(
+        provider: DbdCredentialProvider,
+        principal: [u8],
+        candidate: [u8]
+    ) -> bool:
+        """Authenticate mutable wire fields without creating secret text."""
+        if not self.begin_attempt():
+            return false
+        if candidate.len().to_i64() < DBD_MIN_CREDENTIAL_BYTES or
+            candidate.len().to_i64() > DBD_MAX_CREDENTIAL_BYTES:
+            return self.reject_attempt()
+        val principal_valid = _dbd_principal_bytes_valid(principal)
+        val supplied_principal_digest = if principal_valid:
+            sha256_u8_hex(principal)
+        else:
+            DBD_UNKNOWN_PRINCIPAL_DIGEST
+        val supplied_credential_digest = sha256_u8_hex(candidate)
+        self.commit_digest_authentication(
+            provider, principal_valid, supplied_principal_digest,
+            supplied_credential_digest)
+
+    pub fn can_dispatch() -> bool:
+        self.authenticated and not self.closed and self.identity != "" and
+            self.identity_generation > 0
+
+    pub me close():
+        self.authenticated = false
+        self.identity = ""
+        self.closed = true
 
 pub fn dbd_command_is_mutating(cmd: text) -> bool:
     """A command mutates durable state (must be journaled) iff it is SET/DEL."""
     val u = cmd.upper()
     u == "SET" or u == "DEL"
+
+fn _dbd_journal_scalar_safe(value: text) -> bool:
+    if value.len() == 0 or value.len() > DBD_MAX_JOURNAL_LINE_BYTES:
+        return false
+    var i: i64 = 0
+    while i < value.len():
+        val code = value.char_code_at(i)
+        if code < 33 or code > 126:
+            return false
+        i = i + 1
+    true
+
+pub fn dbd_journal_args_valid(args: [text]) -> bool:
+    if args.len() == 0 or args.len().to_i64() > DBD_MAX_JOURNAL_ARGS:
+        return false
+    for arg in args:
+        if not _dbd_journal_scalar_safe(arg):
+            return false
+    val cmd = args[0].upper()
+    if cmd == "SET":
+        args.len() == 3
+    elif cmd == "DEL":
+        args.len() == 2
+    else:
+        false
 
 pub fn dbd_encode_journal_line(args: [text]) -> text:
     """Encode one mutating command as a single journal line: SPACE-joined args.
@@ -27,26 +368,30 @@ pub fn dbd_encode_journal_line(args: [text]) -> text:
     Returns "" (caller rejects) if any arg contains a space or newline, so the
     line-oriented journal round-trips unambiguously through split(" ")/split("\\n").
     """
+    if not dbd_journal_args_valid(args):
+        return ""
     var out = ""
     var i: u64 = 0
     while i < args.len():
-        if args[i].find("\n") >= 0 or args[i].find(" ") >= 0:
-            return ""
         if i > 0:
             out = out + " "
         out = out + args[i]
+        if out.len() > DBD_MAX_JOURNAL_LINE_BYTES:
+            return ""
         i = i + 1
     out
 
 pub fn dbd_decode_journal_line(line: text) -> [text]:
     """Decode one journal line back into command args (whitespace split)."""
     var args: [text] = []
+    if line.len() == 0 or line.len() > DBD_MAX_JOURNAL_LINE_BYTES:
+        return args
     for tok in line.split(" "):
         if tok.len() > 0:
             args.push(tok)
     args
 
-class DbdEngine:
+pub class DbdEngine:
     """The real RESP store (RedisServer) plus journal replay.
 
     dispatch() delegates verbatim to RedisServer.dispatch(); replay_journal()
@@ -56,20 +401,38 @@ class DbdEngine:
     """
     engine: RedisServer
 
-    static fn new() -> DbdEngine:
+    pub static fn new() -> DbdEngine:
         DbdEngine(engine: RedisServer.create())
 
-    me dispatch(args: [text]) -> text:
+    pub me dispatch(args: [text]) -> text:
         self.engine.dispatch(args)
 
-    me replay_journal(log_text: text) -> i64:
+    pub me replay_journal(log_text: text) -> i64:
         """Replay a durable journal (newline-separated encoded commands) through
         the real engine. Returns the number of commands replayed."""
-        var replayed: i64 = 0
+        if log_text.len() > DBD_MAX_JOURNAL_BYTES:
+            return -1
+        if log_text.len() > 0 and not log_text.ends_with("\n"):
+            return -1
+        # Validate the complete bounded journal before applying any mutation.
+        # A corrupt later record must not leave a partially reconstructed DB.
+        var commands: [[text]] = []
         for line in log_text.split("\n"):
             if line.len() > 0:
+                if commands.len() >= DBD_MAX_JOURNAL_RECORDS:
+                    return -1
                 val args = dbd_decode_journal_line(line)
-                if args.len() > 0:
-                    self.engine.dispatch(args)
-                    replayed = replayed + 1
-        replayed
+                if not dbd_journal_args_valid(args):
+                    return -1
+                commands.push(args)
+        for args in commands:
+            self.engine.dispatch(args)
+        commands.len().to_i64()
+
+pub fn dbd_parse_next_authenticated_command(
+    buffer: text
+) -> ([text], text, bool):
+    """Expose the canonical RESP parser only after transport authentication."""
+    match parse_next_request(buffer):
+        case Some(request): (request.args, request.rest, true)
+        case nil: ([], buffer, false)

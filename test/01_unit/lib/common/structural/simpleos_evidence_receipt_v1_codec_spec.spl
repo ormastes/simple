@@ -1,0 +1,149 @@
+use std.spec.{describe, it, assert_true, assert_false, assert_equal}
+use std.common.structural.receipt.simpleos_evidence_receipt_v1.{
+    SimpleOsEvidenceEnvironment,
+    SimpleOsEvidenceStepV1,
+    SimpleOsPerformanceSampleV1,
+    SimpleOsEvidenceReceiptV1
+}
+use std.common.structural.receipt.simpleos_evidence_receipt_v1_codec.{
+    encode_simpleos_evidence_receipt_v1,
+    encode_simpleos_evidence_receipt_v1_signing_bytes,
+    decode_simpleos_evidence_receipt_v1
+}
+
+fn _codec_hash(digit: text) -> text:
+    var out = ""
+    var i: i64 = 0
+    while i < 64:
+        out = out + digit
+        i = i + 1
+    out
+
+fn _codec_samples() -> [SimpleOsPerformanceSampleV1]:
+    var out: [SimpleOsPerformanceSampleV1] = []
+    var i: i64 = 0
+    while i < 10:
+        out.push(SimpleOsPerformanceSampleV1(
+            sequence: i,
+            metric_value_milli: 125000 + i,
+            elapsed_us: 1000 + i,
+            max_rss_bytes: 1048576 + i))
+        i = i + 1
+    out
+
+fn _codec_receipt() -> SimpleOsEvidenceReceiptV1:
+    SimpleOsEvidenceReceiptV1(
+        schema_version: 1,
+        receipt_id: "receipt-codec-1",
+        nonce: "nonce-codec-1",
+        requirement_id: "NFR-PERF-001",
+        capability: "warm_server_startup",
+        target: "x86_64-unknown-simpleos",
+        target_abi: "simpleos-v1",
+        environment: SimpleOsEvidenceEnvironment.NativeHost,
+        firmware_profile: "uefi",
+        board_identity: "test-board",
+        accelerator: "native",
+        filesystem: "fat32",
+        protocol_profile: "http/2",
+        source_hash: _codec_hash("1"),
+        image_hash: _codec_hash("2"),
+        binary_hash: _codec_hash("3"),
+        config_hash: _codec_hash("4"),
+        exact_argv: ["/sys/apps/measure", "--warm"],
+        artifact_hashes: [_codec_hash("5")],
+        steps: [SimpleOsEvidenceStepV1(
+            sequence: 0,
+            behavior_id: "NFR-PERF-001-native",
+            outcome: "measured",
+            exit_code: 0,
+            artifact_hash: _codec_hash("6"))],
+        performance_workload: "warm_server_startup",
+        performance_unit: "microseconds_milli",
+        performance_warmup_count: 3,
+        performance_cpu_identity: "test-cpu-1",
+        performance_frequency_hz: 3000000000,
+        performance_noise_profile: "isolated-core",
+        performance_comparable: true,
+        performance_samples: _codec_samples(),
+        started_unix_us: 1000000,
+        finished_unix_us: 2000000,
+        owner: "measurement-owner",
+        reviewer: "independent-reviewer",
+        signer_key_id: "test-key-1",
+        signature: "test-signature")
+
+describe "SimpleOS evidence receipt v1 codec":
+    it "round trips every identity performance and signed outcome field":
+        val encoded = encode_simpleos_evidence_receipt_v1(_codec_receipt())
+        assert_true(encoded.ok)
+        val decoded = decode_simpleos_evidence_receipt_v1(encoded.bytes)
+        assert_true(decoded.ok)
+        assert_equal(decoded.value.receipt_id, "receipt-codec-1")
+        assert_equal(decoded.value.environment, SimpleOsEvidenceEnvironment.NativeHost)
+        assert_equal(decoded.value.steps[0].exit_code, 0)
+        assert_equal(decoded.value.performance_workload, "warm_server_startup")
+        assert_equal(decoded.value.performance_unit, "microseconds_milli")
+        assert_equal(decoded.value.performance_warmup_count, 3)
+        assert_equal(decoded.value.performance_cpu_identity, "test-cpu-1")
+        assert_equal(decoded.value.performance_frequency_hz, 3000000000)
+        assert_equal(decoded.value.performance_noise_profile, "isolated-core")
+        assert_true(decoded.value.performance_comparable)
+        assert_equal(decoded.value.performance_samples.len(), 10)
+        assert_equal(decoded.value.performance_samples[9].metric_value_milli, 125009)
+        assert_equal(decoded.value.performance_samples[9].elapsed_us, 1009)
+        assert_equal(decoded.value.performance_samples[9].max_rss_bytes, 1048585)
+
+    it "rejects an invalid envelope truncation and trailing bytes":
+        val encoded = encode_simpleos_evidence_receipt_v1(_codec_receipt())
+        var bad_magic = encoded.bytes
+        bad_magic[0] = 0u8
+        assert_false(decode_simpleos_evidence_receipt_v1(bad_magic).ok)
+        var truncated: [u8] = []
+        var i: i64 = 0
+        while i + 1 < encoded.bytes.len():
+            truncated.push(encoded.bytes[i])
+            i = i + 1
+        assert_false(decode_simpleos_evidence_receipt_v1(truncated).ok)
+        var trailing = encoded.bytes
+        trailing.push(0u8)
+        assert_false(decode_simpleos_evidence_receipt_v1(trailing).ok)
+
+    it "defines signing bytes that omit only the self-referential signature field":
+        val receipt = _codec_receipt()
+        val full = encode_simpleos_evidence_receipt_v1(receipt)
+        val signing = encode_simpleos_evidence_receipt_v1_signing_bytes(receipt)
+        assert_true(full.ok)
+        assert_true(signing.ok)
+        assert_equal(full.bytes.len() - signing.bytes.len(), 4 + receipt.signature.len())
+        var unsigned = receipt
+        unsigned.signature = ""
+        assert_false(encode_simpleos_evidence_receipt_v1(unsigned).ok)
+        assert_true(encode_simpleos_evidence_receipt_v1_signing_bytes(unsigned).ok)
+
+    it "rejects non printable text before wire admission":
+        var receipt = _codec_receipt()
+        receipt.owner = "owner\nforged"
+        assert_false(encode_simpleos_evidence_receipt_v1(receipt).ok)
+
+    it "rejects failed evidence steps before wire admission":
+        var receipt = _codec_receipt()
+        receipt.steps[0].exit_code = 9
+        assert_false(encode_simpleos_evidence_receipt_v1(receipt).ok)
+        receipt = _codec_receipt()
+        receipt.steps[0].outcome = "failed"
+        assert_false(encode_simpleos_evidence_receipt_v1(receipt).ok)
+
+    it "rejects an unknown comparable boolean discriminant":
+        val encoded = encode_simpleos_evidence_receipt_v1(_codec_receipt())
+        var corrupted = encoded.bytes
+        # The comparable flag immediately precedes the sample count. Locate it
+        # from the fixed 10-sample tail without duplicating all variable offsets.
+        val tail_after_flag = 4 + 10 * 32 + 16 +
+            (4 + "measurement-owner".len()) +
+            (4 + "independent-reviewer".len()) +
+            (4 + "test-key-1".len()) +
+            (4 + "test-signature".len())
+        val flag_offset = corrupted.len() - tail_after_flag - 1
+        corrupted[flag_offset] = 2u8
+        assert_false(decode_simpleos_evidence_receipt_v1(corrupted).ok)

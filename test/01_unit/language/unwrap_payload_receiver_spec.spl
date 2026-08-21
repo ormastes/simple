@@ -1,0 +1,39 @@
+# Spec — Result<T,E>.unwrap() payload type survives into an UNANNOTATED local,
+# so method resolution on that local resolves against T.
+#
+# TODO row 558 (doc/08_tracking/todo/todo_db.sdn):
+#   "Preserve Result<T,E>.unwrap() payload types for unannotated local receiver
+#    method resolution and deduplicate raw/mangled aliases in ambiguity
+#    diagnostics."
+#
+# Measured 2026-08-18 (bin/simple = Rust seed, 59581296 bytes, 2026-08-18
+# 00:21:41): jit -> PROBE_VERDICT: PASS, interpreter -> PROBE_VERDICT: PASS.
+# The payload-type half of the row is ALREADY FIXED; this spec fences it.
+#
+# WHY A SUBPROCESS: a spec body runs on a single engine (the tree-walk
+# interpreter), so it cannot compare engines. The oracle is the sibling probe
+# `probe_unwrap_payload_receiver.spl`, run under BOTH engines. Every check in it
+# compares against an ABSOLUTE literal, never "the two engines agree".
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/language/probe_unwrap_payload_receiver.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode + " " +
+        bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "unwrap() payload type for an unannotated local receiver":
+    it "resolves T's method on the jit lane (annotated, unannotated, nested, Err)":
+        val out = run_probe_in_mode("jit")
+        expect(out).to_contain("PROBE_VERDICT: PASS")
+
+    it "resolves T's method on the interpreter lane as well":
+        val out = run_probe_in_mode("interpreter")
+        expect(out).to_contain("PROBE_VERDICT: PASS")

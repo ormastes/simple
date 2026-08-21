@@ -1,0 +1,96 @@
+# Enum-contract MATCH-SITE checks (S2/S3, hardening plan §10.1/§10.2).
+#
+# The covered-variant set is NOT recomputed here. It comes from
+# compiler.hir.match_coverage.ResolvedMatchCoverage, which is id-keyed
+# (variant ids, never names) precisely so two unrelated enums sharing a
+# variant name cannot cross-satisfy each other's coverage. This module only
+# adds the contract-aware severity decision on top of that record.
+
+use compiler.hir.match_coverage.{ResolvedMatchCoverage}
+use compiler.common.assurance.policy_schema.{AssuranceStrictness}
+use compiler.semantics.enum_contract.contract_model.{
+    EnumContractKind, EnumContract, EnumContractDiag, enum_contract_diag, join_names
+}
+
+fn check_closed_match(
+    contract: EnumContract,
+    coverage: ResolvedMatchCoverage,
+    profile: AssuranceStrictness,
+) -> [EnumContractDiag]:
+    """E-CLOSED-001 -- a wildcard arm over a `@closed` enum that leaves static
+    variants unnamed.
+
+    `@closed` is an author-written opt-in, so it is honoured at EVERY profile:
+    it is passed to `is_exhaustive_for` as `annotated_exhaustive`, exactly the
+    way `@exhaustive` is. Under that call a `case _:` arm covers nothing, so
+    the witness set is `StaticRequired(E) - StaticCovered(match)` and the
+    diagnostic can name the uncovered variants instead of just saying
+    'not exhaustive'.
+
+    A `@closed` match with NO wildcard and full coverage is clean; a `@closed`
+    match with no wildcard and missing arms is left to the existing
+    exhaustiveness error, which already reports it -- this rule exists for the
+    case that error deliberately does not fire on."""
+    var diags: [EnumContractDiag] = []
+    if coverage.is_exhaustive_for(profile, true):
+        return diags
+    val missing = coverage.static_missing_variant_names()
+    if missing.len() == 0:
+        return diags
+    if not coverage.has_wildcard:
+        return diags
+    diags.push(enum_contract_diag(
+        "E-CLOSED-001", coverage.enum_name, join_names(missing),
+        "match over @closed enum '" + coverage.enum_name
+            + "' uses a wildcard arm that silently absorbs uncovered variant(s): "
+            + join_names(missing)))
+
+fn check_evolving_match(
+    contract: EnumContract,
+    coverage: ResolvedMatchCoverage,
+) -> [EnumContractDiag]:
+    """E-EVOLVING-003 -- critical code matching an `@evolving` enum must NAME
+    the Unknown arm.
+
+    §10.2: 'critical logic must explicitly decide whether Unknown is
+    permitted'. A wildcard that swallows Unknown is the one shape that makes
+    that decision invisible, so it is the shape this rule rejects. Naming
+    Unknown explicitly is always accepted, with or without a wildcard over the
+    remaining known variants -- the decision was made."""
+    var diags: [EnumContractDiag] = []
+    val unknown_name = contract.unknown_variant_name()
+    if unknown_name == "":
+        return diags
+    var unknown_named = false
+    for name in coverage.names_for_ids(coverage.covered_variant_ids):
+        if name == unknown_name:
+            unknown_named = true
+    if unknown_named:
+        return diags
+    diags.push(enum_contract_diag(
+        "E-EVOLVING-003", coverage.enum_name, unknown_name,
+        "match over @evolving enum '" + coverage.enum_name
+            + "' does not name the unknown variant '" + unknown_name
+            + "' explicitly; a wildcard arm must not silently swallow it"))
+
+fn check_match_for_contract(
+    contract: EnumContract,
+    coverage: ResolvedMatchCoverage,
+    profile: AssuranceStrictness,
+) -> [EnumContractDiag]:
+    """Dispatch one match site on its scrutinee enum's contract.
+
+    The `@evolving` rule is critical-profile-only by design: preserving an
+    unknown wire value is correct at every profile, but FORCING every match to
+    spell it out is a critical-code obligation, not a global behaviour change
+    (there are existing wire matches in-tree that legitimately do not)."""
+    match contract.kind:
+        case EnumContractKind.Closed:
+            check_closed_match(contract, coverage, profile)
+        case EnumContractKind.Evolving(bits, unknown):
+            if profile.at_least(AssuranceStrictness.Critical):
+                check_evolving_match(contract, coverage)
+            else:
+                []
+
+export check_closed_match, check_evolving_match, check_match_for_contract

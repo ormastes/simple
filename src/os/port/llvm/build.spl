@@ -18,6 +18,7 @@ use std.fs
 use std.process
 use std.text
 use std.cli.cli_util.{get_cli_args}
+use os.port.simpleos_multiplatform_build.{simpleos_platform_userland_target}
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_env_set(key: text, value: text) -> bool
@@ -30,12 +31,22 @@ fn env_set(key: text, value: text) -> bool:
 
 ## Legacy standalone-build target list. Canonical `-unknown-simpleos` spelling,
 ## kept in the same vocabulary as CROSS_SUPPORTED_TARGETS below.
-val SUPPORTED_TARGETS = [
-    "x86_64-unknown-simpleos",
-    "aarch64-unknown-simpleos",
-    "riscv64gc-unknown-simpleos",
-    "riscv32imac-unknown-simpleos",
-]
+fn _catalog_userland_targets(names: [text]) -> [text]:
+    """Resolve LLVM targets from the shared platform catalog."""
+    var targets: [text] = []
+    for name in names:
+        val triple = simpleos_platform_userland_target(name)
+        if triple != "" and not targets.contains(triple):
+            targets.push(triple)
+    targets
+
+fn _llvm_supported_targets() -> [text]:
+    _catalog_userland_targets([
+    "x86_64-simpleos",
+    "aarch64-simpleos",
+    "riscv64gc-simpleos",
+    "riscv32imac-simpleos",
+    ])
 
 ## compiler-rt in this port is only ever configured freestanding/baremetal
 ## (`COMPILER_RT_BAREMETAL_BUILD=ON`, `-ffreestanding -nostdlib`) and is staged
@@ -90,7 +101,7 @@ class BuildConfig:
             panic("Unknown architecture for target: {self.target}")
 
 fn parse_args(args: List<text>) -> BuildConfig:
-    var target = "x86_64-unknown-simpleos"
+    var target = simpleos_platform_userland_target("x86_64-simpleos")
     var source_dir = "llvm-project"
     var build_dir = "build-llvm"
     var install_prefix = DEFAULT_INSTALL_PREFIX
@@ -128,7 +139,7 @@ fn parse_args(args: List<text>) -> BuildConfig:
     if build_all:
         # Ensure source is cloned/updated once before building all targets
         val first_config = BuildConfig(
-            target: SUPPORTED_TARGETS[0],
+            target: _llvm_supported_targets()[0],
             source_dir: source_dir,
             build_dir: build_dir,
             install_prefix: install_prefix,
@@ -138,7 +149,7 @@ fn parse_args(args: List<text>) -> BuildConfig:
         clone_or_update_source(first_config)
 
         # Build for all targets sequentially
-        for t in SUPPORTED_TARGETS:
+        for t in _llvm_supported_targets():
             val config = BuildConfig(
                 target: t,
                 source_dir: source_dir,
@@ -296,13 +307,14 @@ val CROSS_STAGES: [text] = ["host-tools", "cross", "compiler-rt"]
 ## above and with patches/simpleos_toolchain_cpp/README.md. User input in the
 ## `<arch>-simpleos` selector form is normalized into this vocabulary by
 ## canonical_simpleos_triple() before it is matched here.
-val CROSS_SUPPORTED_TARGETS: [text] = [
-    "x86_64-unknown-simpleos",
-    "aarch64-unknown-simpleos",
-    "armv7-unknown-simpleos",
-    "riscv64gc-unknown-simpleos",
-    "riscv32imac-unknown-simpleos",
-]
+fn _cross_supported_targets() -> [text]:
+    _catalog_userland_targets([
+    "x86_64-simpleos",
+    "aarch64-simpleos",
+    "armv7-simpleos",
+    "riscv64gc-simpleos",
+    "riscv32imac-simpleos",
+    ])
 
 ## Clang resource dir version tag — matches the `lib/clang/<version>/`
 ## layout produced by upstream LLVM install. Bump together with LLVM.
@@ -319,7 +331,7 @@ fn cross_target_supported(triple: text) -> bool:
     # documented form (`x86_64-simpleos`) passes the shape gate and is then
     # rejected by an allowlist written only in the canonical vocabulary.
     val canonical = canonical_simpleos_triple(triple)
-    for supported in CROSS_SUPPORTED_TARGETS:
+    for supported in _cross_supported_targets():
         if canonical == supported:
             return true
     false
@@ -336,7 +348,7 @@ impl CrossBuildConfig:
             llvm_src: "{env_get("HOME")}/llvm-project",
             build_dir: "build/os/llvm",
             sysroot_dir: "build/os/sysroot",
-            target_triple: "x86_64-unknown-simpleos"
+            target_triple: simpleos_platform_userland_target("x86_64-simpleos")
         )
 
 fn cross_llvm_arch_for(triple: text) -> text:
@@ -372,7 +384,7 @@ fn cross_selected_targets() -> [text]:
             if trimmed != "":
                 selected.push(canonical_simpleos_triple(trimmed))
         return selected
-    CROSS_SUPPORTED_TARGETS
+    _cross_supported_targets()
 
 fn cross_build_print_plan():
     """Print the multi-target cross-build plan without executing anything."""
@@ -399,7 +411,7 @@ fn cross_build_status() -> text:
     else:
         status = status + "  sysroot:     NOT READY\n"
 
-    for triple in CROSS_SUPPORTED_TARGETS:
+    for triple in _cross_supported_targets():
         val cross_dir = "build/os/llvm/cross-{triple}/bin"
         if fs.dir_exists(cross_dir):
             status = status + "  cross[{triple}]:  BUILT\n"

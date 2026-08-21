@@ -377,3 +377,17 @@ upgrade replaces it in place, it does not get kept alongside it.
 - Class-param reference semantics (s19): kept; enforcement layers on via REQ-MC-002.
 - Mutable-by-default collections (Decision #3): kept; iterator-liveness restriction only.
 - Base (non-MC) profiles keep current ergonomics; this profile is opt-in per package.
+
+## Reserved / proposed requirement IDs (proposed 2026-08-21)
+
+Named-suffix ids reserved by `doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md`
+§14, designed in `doc/05_design/compiler/hardening/critical_completeness_design_2026-08-21.md` and
+sequenced in `doc/03_plan/compiler/hardening/critical_hardening_plan_2026-08-21.md`. All six are
+**proposed, not landed**; none consumes the reserved numeric range 015–022.
+
+- `REQ-MC-ANY-001` — unsafe-only `Any`: illegal in safe critical code, legal only inside `unsafe(capabilities: [type_erasure])`, no escape, no direct operators, checked conversion only. (proposed 2026-08-21)
+- `REQ-MC-MONO-001` — monomorphic canonical IR: no unresolved type parameter or generic call reaches canonical MIR, no erasure to `Any`, all reachable instantiations in the mono graph and seal. (proposed 2026-08-21)
+- `REQ-MC-COMPLETE-001` — static and complete closure: all static variants exhaustively handled, all selected complete variants implement required interfaces, no reachable open `dyn`, no wildcard closes a compiler-IR match. (proposed 2026-08-21)
+- `REQ-MC-PIPE-001` — total stage transitions: every producer variant has an explicit `CoverageState`; a missing mapping is a build error; silent fallback replacement is prohibited. (proposed 2026-08-21)
+- `REQ-MC-ASPECT-001` — sealed aspect world: all semantics-changing aspects selected before weave, post-weave program rechecked, weave plan part of artifact identity, no late semantic activation. (proposed 2026-08-21)
+- `REQ-MC-BOOT-001` — bootstrap and engine parity: seed and self-hosted compiler share one generated feature/coverage manifest; accepted/rejected critical fixture sets match; interpreter/JIT/native semantic differentials are zero on the critical corpus. (proposed 2026-08-21)

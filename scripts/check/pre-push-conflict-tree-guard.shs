@@ -202,6 +202,7 @@ spipe_docgen_live_guard="$repo_root/scripts/check/check-spipe-docgen-regeneratio
 sspec_evidence_regen_guard="$repo_root/scripts/check/check-sspec-evidence-regeneration.shs"
 ui_showcase_layering_guard="$repo_root/scripts/check/check-ui-showcase-layering.shs"
 bootstrap_handoff_selftest_guard="$repo_root/scripts/check/check-bootstrap-platform-handoff-readiness.shs"
+stage2_sanity_diagnostic_guard="$repo_root/scripts/bootstrap/check-stage2-sanity-diagnostic.shs"
 gpu_backend_layer_evidence_guard="$repo_root/scripts/check/check-gpu-backend-layer-evidence.shs"
 cpu_backend_artifacts_guard="$repo_root/scripts/check/check-cpu-backend-artifacts.shs"
 mlkem_simd_c_lane_guard="$repo_root/scripts/check/build-mlkem-simd-c-lane.shs"
@@ -246,6 +247,27 @@ native_trailing_default_param_guard="$repo_root/scripts/check/check-native-trail
 # tree, not a diff).
 no_direct_rt_guard="$repo_root/scripts/check/check-no-direct-rt.shs"
 
+# 2026-08-21 batch-6 (guard-wiring hardening campaign, cont.): twelve guards
+# found unwired by check-guard-wiring.shs. Every one was RUN standalone on this
+# tree before wiring and measured GREEN in <= 4s (most <= 1s) — a pre-push
+# budget of roughly 10s total. Guards that are honestly RED on main today were
+# deliberately NOT wired: wiring a red guard blocks every push and creates
+# pressure to weaken it. Those stay unwired and named in the tracking record.
+# Eight of these are the "loudness"/fail-open family (an error that reaches no
+# fd is the same defect class as the tree wipes: protection that isn't there).
+phantom_module_imports_guard="$repo_root/scripts/check/check-no-phantom-module-imports.shs"
+silent_default_baseline_guard="$repo_root/scripts/check/check-silent-default-baseline.shs"
+core_bare_sanity_guard="$repo_root/scripts/check/check-core-bare-sanity.shs"
+coverage_not_noop_guard="$repo_root/scripts/check/check-coverage-not-silent-noop.shs"
+build_outcome_reason_guard="$repo_root/scripts/check/check-build-outcome-reason-attribution.shs"
+llvm_toolchain_consistency_guard="$repo_root/scripts/check/check-llvm-toolchain-consistency.shs"
+eprint_stderr_fd_guard="$repo_root/scripts/check/check-eprint-reaches-stderr-fd.shs"
+log_error_visible_guard="$repo_root/scripts/check/check-log-error-visible-by-default.shs"
+noalloc_log_error_guard="$repo_root/scripts/check/check-noalloc-log-error-reaches-stderr.shs"
+security_audit_stderr_guard="$repo_root/scripts/check/check-security-audit-critical-reaches-stderr.shs"
+browser_logger_level_guard="$repo_root/scripts/check/check-browser-logger-honours-level.shs"
+ghdl_gate_rc_guard="$repo_root/scripts/check/check-ghdl-gate-rc-swallow.shs"
+
 for g in "$tree_guard" "$markers_guard" "$size_guard" "$seed_build_guard" "$runtime_api_guard" "$jit_guard" \
          "$try_op_guard" "$list_shift_guard" \
          "$cuda_ntt_guard" "$vulkan_ntt_guard" \
@@ -273,7 +295,14 @@ for g in "$tree_guard" "$markers_guard" "$size_guard" "$seed_build_guard" "$runt
          "$gui_web_2d_completion_criteria_guard" "$gui_web_2d_parallel_review_guard" \
          "$class_identity_seed_matrix_guard" "$engine_claiming_specs_guard" \
          "$engine_differential_guard" "$lint_cached_guard" \
-         "$native_trailing_default_param_guard" "$no_direct_rt_guard"; do
+         "$native_trailing_default_param_guard" "$no_direct_rt_guard" \
+         "$phantom_module_imports_guard" "$silent_default_baseline_guard" \
+         "$core_bare_sanity_guard" "$coverage_not_noop_guard" \
+         "$build_outcome_reason_guard" "$llvm_toolchain_consistency_guard" \
+         "$eprint_stderr_fd_guard" "$log_error_visible_guard" \
+         "$noalloc_log_error_guard" "$security_audit_stderr_guard" \
+         "$browser_logger_level_guard" "$ghdl_gate_rc_guard" \
+         "$stage2_sanity_diagnostic_guard"; do
     [ -f "$g" ] || {
         echo "pre-push: guard script missing at $g — refusing to push blind" >&2
         exit 1
@@ -690,6 +719,24 @@ run_guard "$sspec_evidence_regen_guard" "sspec evidence regeneration determinism
 run_guard "$ui_showcase_layering_guard" "ui_showcase import-layering guard (full scan, not range-bound)"
 run_guard "$bootstrap_handoff_selftest_guard" "bootstrap platform handoff readiness gate self-test (full scan, not range-bound)" --self-test
 
+# check-stage2-sanity-diagnostic.shs: fences the SILENCE, not the verdict. The
+# Stage-2 bootstrap sanity gate once exited 2 with no stdout/stderr line of any
+# class, so the canonical stage diagnosis reported UNDIAGNOSABLE and refused
+# admission with nothing to act on. The trigger (a stale expected version
+# string) was fixed 2026-08-20; the defect CLASS -- ~30 bare `return 1` sites in
+# the verifier and bare `exit 1`/`exit 2` in its caller -- survived that fix, so
+# any OTHER field failing would have reproduced the identical mute exit. Each
+# negative fixture asserts BOTH the non-zero exit AND an actionable diagnostic
+# naming the offending field; a non-zero exit alone is explicitly not accepted,
+# since every fixture already exited non-zero while the bug was live. --selftest
+# runs first and is fatal, a 0-fixture run is ERROR not a pass, and the verdict
+# line is last on stdout. Proven to discriminate by replaying it against the
+# pre-fix library: FAIL naming all six as `silent-failure`, while the positive
+# fixture still passes. Full scan, not range-bound: whether a gate can explain
+# itself is a property of the scripts on disk, not of the pushed range.
+# See doc/08_tracking/bug/simpleos_stage2_bootstrap_sanity_exit2_without_diagnostic_2026-08-20.md
+run_guard "$stage2_sanity_diagnostic_guard" "stage2 bootstrap sanity diagnostic gate self-test (full scan, not range-bound)" --selftest
+
 # check-gpu-backend-layer-evidence.shs / check-cpu-backend-artifacts.shs:
 # artifact-first backend evidence gates (GPU: cuda/vulkan/metal/hip/opencl;
 # CPU: LLVM/Cranelift/WASM). Both are sub-second and deterministic in their
@@ -864,5 +911,19 @@ run_guard "$native_trailing_default_param_guard" "native-build trailing-default-
 # call sites at the recorded baseline (2026-08-18) — PASS is baseline-or-lower,
 # not zero. See scripts/check/no_direct_rt_baseline.txt.
 run_guard "$no_direct_rt_guard" "direct rt_* call-site ratchet (full scan, not range-bound)"
+
+# 2026-08-21 batch-6 run calls (see declarations above for verification detail).
+run_guard "$phantom_module_imports_guard" "phantom module imports (ratchet, full scan)"
+run_guard "$silent_default_baseline_guard" "silent-default fail-open ratchet"
+run_guard "$core_bare_sanity_guard" "git core.bare sanity on non-bare layout"
+run_guard "$coverage_not_noop_guard" "coverage flush is wired and fail-closed"
+run_guard "$build_outcome_reason_guard" "non-OK build units carry printed reasons"
+run_guard "$llvm_toolchain_consistency_guard" "LLVM toolchain version consistency"
+run_guard "$eprint_stderr_fd_guard" "eprint reaches fd 2 in both execution lanes"
+run_guard "$log_error_visible_guard" "log.error visible by default in both lanes"
+run_guard "$noalloc_log_error_guard" "noalloc log.error reaches stderr in both lanes"
+run_guard "$security_audit_stderr_guard" "security-audit critical reaches stderr in both lanes"
+run_guard "$browser_logger_level_guard" "browser logger honours level in both lanes"
+run_guard "$ghdl_gate_rc_guard" "no new exit-status-discarding gates"
 
 exit $status

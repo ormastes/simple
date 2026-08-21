@@ -106,15 +106,40 @@ impl HmInferContext:
 
                 effects
 
-            case MethodCall(receiver, method, args, _):
+            case MethodCall(receiver, _, args, resolution):
+                # Snapshot the resolution to scalars before recursion and keep
+                # only the args array's tagged owner handle live. Never retain
+                # a copied HirCallArg/HirExpr element across recursive descent.
+                val argument_count = args.len()
+                val resolved_method_id = match resolution:
+                    case InstanceMethod(_, method_id): method_id.id
+                    case TraitMethod(_, method_id): method_id.id
+                    case FreeFunction(func_id): func_id.id
+                    case StaticMethod(_, method_id): method_id.id
+                    case Unresolved: -1
                 var effects = self.infer_expr_effects(receiver)
-                for arg in args:
-                    val typed_arg: HirCallArg = arg
-                    effects = self.merge_effects(effects, self.infer_expr_effects(typed_arg.value))
+                var argument_index = 0
+                while argument_index < argument_count:
+                    val argument_effects = self.infer_expr_effects(
+                        args[argument_index].value)
+                    effects = self.merge_effects(effects, argument_effects)
+                    argument_index = argument_index + 1
 
-                # Method calls may have effects depending on the method
-                # For now, conservatively assume IO effect
-                effects.push(Effect(kind: EffectKind.IO, span: expr.span))
+                # Prefer the resolved callable's declared row when inference
+                # has it. Unknown/unregistered methods remain fail-closed IO;
+                # this preserves conservative analysis without fabricating IO
+                # for a method whose signature explicitly proves purity.
+                var has_declared_effect_row = false
+                if resolved_method_id >= 0:
+                    if val method_ty = self._lookup_symbol_type(resolved_method_id):
+                        match self.resolve(method_ty).kind:
+                            case Function(_, _, declared_effects):
+                                effects = self.merge_effects(effects, declared_effects)
+                                has_declared_effect_row = true
+                            case _: pass
+                if not has_declared_effect_row:
+                    effects = effects.push(Effect(kind: EffectKind.IO, span: expr.span))
+                effects
 
             # Closures - effects of the body.
             # `Closure` is not a HirExprKind variant — it is
@@ -184,7 +209,7 @@ impl HmInferContext:
                 # Assignment is a mutation effect
                 var effects = self.infer_expr_effects(target)
                 effects = self.merge_effects(effects, self.infer_expr_effects(value))
-                effects.push(Effect(kind: EffectKind.Mutates, span: stmt.span))
+                effects = effects.push(Effect(kind: EffectKind.Mutates, span: stmt.span))
 
             case Block(block):
                 self.infer_block_effects(block)

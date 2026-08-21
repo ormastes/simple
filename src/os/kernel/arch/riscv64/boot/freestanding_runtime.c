@@ -4061,6 +4061,16 @@ spl_i64 rt_boot_tcp_read_bytes(spl_i64 max_len) {
     return out;
 }
 
+spl_i64 rt_boot_tcp_read_bytes_for_fd(spl_i64 fd, spl_i64 max_len) {
+    /* The boot network backend owns one accepted client, fd 200. Reject an
+       unrelated descriptor before consulting its receive ring; callers must
+       never fall through to the process-global stream. */
+    if (fd != 200 || !g_boot_tcp_client_open) {
+        return rt_array_new(0);
+    }
+    return rt_boot_tcp_read_bytes(max_len);
+}
+
 __attribute__((weak)) spl_i64 rt_io_tcp_bind(spl_i64 addr) {
     return rt_boot_tcp_bind(addr);
 }

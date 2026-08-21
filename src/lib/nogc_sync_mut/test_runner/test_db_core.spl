@@ -13,6 +13,20 @@ use std.test_runner.test_db_parser.{parse_stable_db, parse_volatile_db, ParsedSt
 use std.test_runner.test_db_serializer.{serialize_stable_db, serialize_volatile_db}
 use std.test_runner.test_stats.{compute_statistics, compute_percentiles, detect_outliers_iqr, sort_f64, percentile_at, abs_f64, detect_flaky_test}
 
+# Excess timing-run entries tolerated before one full prune pass runs.
+# Bounds the amortized cost of cap_timing_runs to O(1) per update.
+val PRUNE_BATCH: i64 = 512
+
+# Copy of the last `max_count` elements of `runs`.
+fn trim_to_last(runs: List<f64>, max_count: i64) -> List<f64>:
+    val start = if runs.len() > max_count: runs.len() - max_count else: 0
+    var out: List<f64> = []
+    var i = start
+    while i < runs.len():
+        out.push(runs[i])
+        i = i + 1
+    out
+
 # =========================================================================
 # RunnerTestDbCore
 # =========================================================================
@@ -33,6 +47,10 @@ struct RunnerTestDbCore:
     _suite_index: Dict<text, i64>      # "{file_id}:{name_str}" -> suite_id
     _counter_index: Dict<i64, i64>     # test_id -> index in counters
     _timing_index: Dict<i64, i64>      # test_id -> index in timing
+    _test_index: Dict<text, i64>       # "{suite_id}:{name_str}" -> index in tests
+    _runs_count: Dict<i64, i64>        # test_id -> number of entries in timing_runs
+    _runs_by_test: Dict<i64, List<f64>>  # test_id -> newest durations (<= cap)
+    _runs_overflow: i64                # entries above cap awaiting a prune pass
 
 impl RunnerTestDbCore:
     static fn empty() -> RunnerTestDbCore:
@@ -50,7 +68,11 @@ impl RunnerTestDbCore:
             _file_index: {},
             _suite_index: {},
             _counter_index: {},
-            _timing_index: {}
+            _timing_index: {},
+            _test_index: {},
+            _runs_count: {},
+            _runs_by_test: {},
+            _runs_overflow: 0
         )
 
     # -----------------------------------------------------------------
@@ -75,6 +97,27 @@ impl RunnerTestDbCore:
         while ti < self.timing.len():
             self._timing_index[self.timing[ti].test_id] = ti
             ti = ti + 1
+        self._test_index = {}
+        var xi = 0
+        while xi < self.tests.len():
+            val tkey = "{self.tests[xi].suite_id}:{self.tests[xi].name_str}"
+            self._test_index[tkey] = xi
+            xi = xi + 1
+        # Timing-run indexes: one O(runs) pass here replaces a full walk per update.
+        self._runs_count = {}
+        self._runs_by_test = {}
+        self._runs_overflow = 0
+        val cap = TimingConfig.defaults().max_runs_per_test
+        for tr in self.timing_runs:
+            val prev = if self._runs_count.has(tr.test_id): self._runs_count[tr.test_id] else: 0
+            self._runs_count[tr.test_id] = prev + 1
+            var lst = if self._runs_by_test.has(tr.test_id): self._runs_by_test[tr.test_id] else: []
+            lst.push(tr.duration_ms)
+            self._runs_by_test[tr.test_id] = trim_to_last(lst, cap)
+        for tid in self._runs_count.keys():
+            val over = self._runs_count[tid] - cap
+            if over > 0:
+                self._runs_overflow = self._runs_overflow + over
 
     # -----------------------------------------------------------------
     # Load from disk
@@ -123,6 +166,9 @@ impl RunnerTestDbCore:
         match write_db_file_locked(DB_PATH, stable_content):
             case Ok(_): pass
             case Err(reason): return Err(reason)
+
+        # Enforce the per-test run cap once, before the file is written.
+        self.prune_timing_runs(TimingConfig.defaults().max_runs_per_test)
 
         # Save volatile data
         val volatile_content = serialize_volatile_db(
@@ -199,11 +245,12 @@ impl RunnerTestDbCore:
     # -----------------------------------------------------------------
 
     fn find_test_index(name_str: i64, suite_id: i64) -> i64:
-        var i = 0
-        while i < self.tests.len():
-            if self.tests[i].name_str == name_str and self.tests[i].suite_id == suite_id:
-                return i
-            i = i + 1
+        # O(1) index lookup — a linear scan here was O(tests) per update,
+        # i.e. quadratic over a whole run (see
+        # doc/08_tracking/bug/test_runner_spins_at_100pct_after_summary_2026-08-18.md)
+        val key = "{suite_id}:{name_str}"
+        if self._test_index.has(key):
+            return self._test_index[key]
         -1
 
     # -----------------------------------------------------------------
@@ -230,6 +277,7 @@ impl RunnerTestDbCore:
 
         if is_new:
             # Create new test record
+            self._test_index["{suite_id}:{name_str}"] = self.tests.len()
             self.tests.push(TestRecord(
                 suite_id: suite_id,
                 name_str: name_str,
@@ -329,11 +377,16 @@ impl RunnerTestDbCore:
             duration_ms: duration_ms,
             outlier: false
         ))
+        val prev_count = if self._runs_count.has(name_str): self._runs_count[name_str] else: 0
+        self._runs_count[name_str] = prev_count + 1
+        var cached = if self._runs_by_test.has(name_str): self._runs_by_test[name_str] else: []
+        cached.push(duration_ms)
+        self._runs_by_test[name_str] = trim_to_last(cached, config.max_runs_per_test)
 
-        # C3: Cap timing runs to max per test
+        # C3: Cap timing runs to max per test (amortized — see prune_timing_runs)
         self.cap_timing_runs(name_str, config.max_runs_per_test)
 
-        # Collect runs for this test
+        # Collect runs for this test — O(cap) from the index, not O(all runs)
         val runs = self.collect_timing_runs(name_str)
 
         # H4: Remove outliers using IQR method
@@ -404,30 +457,40 @@ impl RunnerTestDbCore:
             ))
             self._timing_index[name_str] = idx
 
+    # Amortized cap: counts come from the index, and the O(all runs) rebuild
+    # happens once per PRUNE_BATCH excess entries instead of once per update.
     me cap_timing_runs(test_id: i64, max_count: i64):
-        # Count runs for this test
-        var count = 0
-        for tr in self.timing_runs:
-            if tr.test_id == test_id:
-                count = count + 1
-
-        # If over cap, rebuild list keeping only the newest max_count runs
+        val count = if self._runs_count.has(test_id): self._runs_count[test_id] else: 0
         if count > max_count:
-            var to_skip = count - max_count
-            var new_runs: List<TimingRun> = []
-            for tr in self.timing_runs:
-                if tr.test_id == test_id and to_skip > 0:
-                    to_skip = to_skip - 1
-                    continue
-                new_runs.push(tr)
-            self.timing_runs = new_runs
+            self._runs_overflow = self._runs_overflow + 1
+        if self._runs_overflow >= PRUNE_BATCH:
+            self.prune_timing_runs(max_count)
+
+    # Drop the oldest over-cap runs for every test in a single pass.
+    me prune_timing_runs(max_count: i64):
+        var skip: Dict<i64, i64> = {}
+        for tid in self._runs_count.keys():
+            val over = self._runs_count[tid] - max_count
+            if over > 0:
+                skip[tid] = over
+        self._runs_overflow = 0
+        if skip.len() == 0:
+            return
+        var new_runs: List<TimingRun> = []
+        for tr in self.timing_runs:
+            if skip.has(tr.test_id) and skip[tr.test_id] > 0:
+                skip[tr.test_id] = skip[tr.test_id] - 1
+                continue
+            new_runs.push(tr)
+        self.timing_runs = new_runs
+        for tid2 in self._runs_count.keys():
+            if self._runs_count[tid2] > max_count:
+                self._runs_count[tid2] = max_count
 
     fn collect_timing_runs(test_id: i64) -> List<f64>:
-        var runs: List<f64> = []
-        for tr in self.timing_runs:
-            if tr.test_id == test_id:
-                runs.push(tr.duration_ms)
-        runs
+        if self._runs_by_test.has(test_id):
+            return trim_to_last(self._runs_by_test[test_id], PRUNE_BATCH)
+        []
 
     # -----------------------------------------------------------------
     # Run tracking

@@ -2,6 +2,7 @@
 
 - **Date:** 2026-08-15
 - **Status:** FIXED (2026-08-17) for both titled defects — `typeof` of an
+- **Verification 2026-08-21 (bug-status-consistency audit): PARTIAL, not fully fixed.** typeof/for are fixed, but the doc's own residual (switch/try/void/delete still unparsed — 0 hits in `parser.spl`) is open. `bug_db.sdn` row is `fix-implemented-verification-pending`.
   undeclared identifier and the C-style `for` / `__simple_i` desugar now
   execute correctly, verified by direct execution (evidence below).
   A RESIDUAL, separately-scoped gap remains in the same subset parser

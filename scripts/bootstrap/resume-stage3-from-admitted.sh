@@ -1,11 +1,20 @@
 #!/bin/sh
 set -eu
 
+# Exit 2 means "ERROR — nothing was checked" and MUST always state the reason.
+# A silent exit 2 here made a real Stage-2 refusal UNDIAGNOSABLE — see
+# doc/08_tracking/bug/simpleos_stage2_bootstrap_sanity_exit2_without_diagnostic_2026-08-20.md
+bootstrap_stage3_error() {
+  printf 'ERROR — nothing was checked (%s)\n' "$1" >&2
+  exit 2
+}
+
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
 source_output=${1:?usage: resume-stage3-from-admitted.sh OUTPUT_DIR}
-case "$source_output" in /*|*../*|../*|*/..|..) exit 2 ;; esac
+case "$source_output" in /*|*../*|../*|*/..|..) bootstrap_stage3_error "OUTPUT_DIR must be a repo-relative path without .. components: $source_output" ;; esac
 output="$root/$source_output"
-[ "$(CDPATH= cd -- "$output" && pwd -P)" = "$output" ] || exit 1
+[ "$(CDPATH= cd -- "$output" && pwd -P)" = "$output" ] ||
+  bootstrap_stage3_error "OUTPUT_DIR is not a canonical existing directory: $output"
 
 BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
 export BOOTSTRAP_STAGE3_FACADE_PATH
@@ -61,12 +70,16 @@ for required in "$stage2" "$admitted" "$stage2_admission" "$seed" "$stamp" "$nat
   "$git_before" \
   "$runtime_origin_before" "$runtime_origin_after" "$runtime_admitted" \
   "$tool_before"; do
-  [ -f "$required" ] && [ ! -L "$required" ] || exit 1
-  [ "$(bootstrap_stage3_canonical_file "$required")" = "$required" ] || exit 1
+  { [ -f "$required" ] && [ ! -L "$required" ]; } ||
+    bootstrap_stage3_error "required Stage-2 input missing or is a symlink: $required"
+  [ "$(bootstrap_stage3_canonical_file "$required")" = "$required" ] ||
+    bootstrap_stage3_error "required Stage-2 input is not a canonical path: $required"
 done
 for required_dir in "$runtime" "$stage2_cache"; do
-  [ -d "$required_dir" ] && [ ! -L "$required_dir" ] || exit 1
-  [ "$(bootstrap_stage3_canonical_path "$required_dir")" = "$required_dir" ] || exit 1
+  { [ -d "$required_dir" ] && [ ! -L "$required_dir" ]; } ||
+    bootstrap_stage3_error "required Stage-2 directory missing or is a symlink: $required_dir"
+  [ "$(bootstrap_stage3_canonical_path "$required_dir")" = "$required_dir" ] ||
+    bootstrap_stage3_error "required Stage-2 directory is not a canonical path: $required_dir"
 done
 
 stage2_sha=$(bootstrap_stage3_hash_file "$stage2")
@@ -311,7 +324,7 @@ bootstrap_stage_sanity() (
   fi
   after=$(bootstrap_stage3_hash_file "$candidate_sanity")
   sanity_status=fail
-  if [ "$version_status" -eq 0 ] && [ "$version" = "simple-bootstrap 1.0.0-beta" ] && \
+  if [ "$version_status" -eq 0 ] && [ "$version" = "simple-bootstrap 1.0.0-RC" ] && \
     [ "$unsupported_status" -eq 1 ] && case "$unsupported" in *"unknown command 'run'"*) true;; *) false;; esac && \
     [ "$frontend_status" -eq 0 ] && [ "$before" = "$after" ]; then sanity_status=pass; fi
   { echo schema=simple-bootstrap-sanity-evidence-v1; echo status="$sanity_status"; \

@@ -1,5 +1,4 @@
 # HIR item lowering - function, class, struct, enum, and field lowering.
-use compiler.hir.hir_lowering.items.*
 # HIR Lowering - Item Lowering
 #
 # This module handles lowering of top-level items (functions, classes, structs, enums, traits, impls) from AST to HIR.
@@ -7,10 +6,11 @@ use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
-use compiler.frontend.parser_types.{ParserFunction, ImportItem, Param, ContractBlock, ContractClause}
+use compiler.frontend.parser_types.{ParserFunction, ImportItem}
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.expressions.*
 use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
 use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind, PlatformParseResult, PlatformDiagnosticLevel, PlatformLayoutDiagnostic}
@@ -63,6 +63,26 @@ fn bootstrap_erased_len_generic_is_safe(name: text) -> bool:
     name == "lexer_array_len" or name == "rt_array_len_safe" or
         name == "decl_nodes_array_len"
 
+# Single source of truth for "this generic FUNCTION is an unmonomorphized
+# TEMPLATE" (#158 Phase B). Currently the Phase A loud gate below is its only
+# caller; it exists as a named predicate because the sibling struct/class
+# tiers RECORD template-ness on the HIR node
+# (`HirStruct/HirClass.is_generic_template`, see lower_struct), and the
+# function tier now does too: `HirFunction.is_generic_template`
+# (hir_definitions.spl) is set from this predicate at both lowering sites
+# below, so all four tiers agree. Tracked in
+# doc/08_tracking/bug/hir_generic_templates_unconsumed_by_mono_pass_2026-08-21.md.
+# Keeping the gate condition behind this predicate means the marking, when it
+# is added, cannot drift from the refusal: a declaration that is refused is
+# exactly a declaration that is a template, and the three erasure-safe
+# bootstrap helpers above are neither.
+fn hir_generic_fn_is_template(name: text, type_param_count: i64) -> bool:
+    if type_param_count == 0:
+        return false
+    if (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and bootstrap_erased_len_generic_is_safe(name):
+        return false
+    true
+
 # Reads the parser-recorded span for a declaration index. Falls back to an
 # empty span only when the id is invalid, so a missing location stays visibly
 # empty rather than pointing at a wrong line.
@@ -75,62 +95,6 @@ fn declaration_span_for(decl_idx: i64) -> Span:
     Span(start: s, end: e, line: span_line(span_id), col: span_col(span_id), file: "", length: e - s)
 
 impl HirLowering:
-    me lower_verification_contract_clause(
-        parser_clause: ContractClause,
-        kind: HirContractClauseKind,
-        binding_name: text,
-        binding_type: HirType,
-        require_bool: bool
-    ) -> HirContractClause:
-        self.symbols.push_scope(ScopeKind.Block)
-        if binding_name != "":
-            self.symbols.define(binding_name, SymbolKind.Variable, Some(binding_type), parser_clause.span, Visibility.Private, false, nil)
-        val predicate = self.lower_hir_expr(parser_clause.expr)
-        self.symbols.pop_scope()
-        if require_bool:
-            var predicate_is_bool = false
-            if predicate.has_type_:
-                match predicate.type_.kind:
-                    case HirTypeKind.Bool: predicate_is_bool = true
-                    case _: pass
-            if not predicate_is_bool:
-                self.error("FV2-E-CONTRACT-TYPE: contract predicate must have exact bool type", parser_clause.span)
-        HirContractClause(kind: kind, predicate: predicate, binding_name: binding_name, span: parser_clause.span)
-
-    me lower_verification_contract(contract: ContractBlock, return_type: HirType) -> HirContractBlock?:
-        var has_decreases = false
-        if val _measure = contract.decrease_measure:
-            has_decreases = true
-        val has_contract = contract.preconditions.len() > 0 or contract.invariants.len() > 0 or
-            contract.postconditions.len() > 0 or contract.error_postconditions.len() > 0 or
-            contract.proof_uses != "" or has_decreases
-        if not has_contract:
-            return nil
-        var normal_type = return_type
-        var error_type = HirType(kind: HirTypeKind.Unit, span: return_type.span)
-        var result_outcome = false
-        match return_type.kind:
-            case HirTypeKind.Result(ok_type, err_type):
-                normal_type = ok_type
-                error_type = err_type
-                result_outcome = true
-            case _: pass
-        if contract.error_postconditions.len() > 0 and not result_outcome:
-            self.error("FV2-E-CONTRACT-ERROR-OUTCOME: out_err requires Result return semantics", return_type.span)
-        var clauses: [HirContractClause] = []
-        for clause in contract.preconditions:
-            clauses.push(self.lower_verification_contract_clause(clause, HirContractClauseKind.Requires, "", return_type, true))
-        for clause in contract.invariants:
-            clauses.push(self.lower_verification_contract_clause(clause, HirContractClauseKind.StatePredicate, "", return_type, true))
-        for clause in contract.postconditions:
-            clauses.push(self.lower_verification_contract_clause(clause, HirContractClauseKind.EnsuresNormal, contract.postcondition_binding, normal_type, true))
-        for clause in contract.error_postconditions:
-            clauses.push(self.lower_verification_contract_clause(clause, HirContractClauseKind.EnsuresError, contract.error_binding, error_type, true))
-        if val measure = contract.decrease_measure:
-            clauses.push(self.lower_verification_contract_clause(measure, HirContractClauseKind.Decreases, "", return_type, false))
-        val outcome = if result_outcome: HirContractOutcome.Result else: HirContractOutcome.Plain
-        Some(HirContractBlock(clauses: clauses, proof_uses: contract.proof_uses, outcome: outcome))
-
     me lower_bootstrap_flat_function(decl_idx: i64) -> HirFunction:
         # Was Span.empty(), which made every bootstrap-path function report
         # line 0 downstream (DWARF decl_line, MIR instruction spans,
@@ -191,7 +155,11 @@ impl HirLowering:
             is_gpu_kernel: func_attr.is_gpu_kernel,
             gpu_target: func_attr.gpu_target,
             gpu_backend_order: func_attr.gpu_backends,
-            verification_contract: nil
+            verification_contract: nil,
+            # Flat bootstrap functions carry no type params (type_params: []
+            # above), so this tier is never a template. Named explicitly so
+            # the construction stays fully named.
+            is_generic_template: false
         )
 
     me lower_function(fn_: ParserFunction) -> HirFunction:
@@ -322,10 +290,7 @@ impl HirLowering:
         # of proceeding into codegen with an unmonomorphized generic. Real
         # monomorphization is tracked separately (#158 Phase B) -- this is a
         # deliberate hard stop, not a workaround.
-        if (fn_.type_params.len() > 0 and not (
-            (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and
-            bootstrap_erased_len_generic_is_safe(fn_.name)
-        )):
+        if hir_generic_fn_is_template(fn_.name, fn_.type_params.len()):
             self.error("generic functions are not supported on the native build path yet: fn '{fn_.name}' declares type parameter(s); monomorphization is not implemented (#158 Phase B)", fn_.span)
 
         # Lower parameters
@@ -557,7 +522,8 @@ impl HirLowering:
             is_gpu_kernel: fa.is_gpu_kernel,
             gpu_target: fa.gpu_target,
             gpu_backend_order: fa.gpu_backends,
-            verification_contract: verification_contract
+            verification_contract: verification_contract,
+            is_generic_template: hir_generic_fn_is_template(fn_.name, type_params.len())
         )
 
         # Validate async functions
@@ -565,125 +531,6 @@ impl HirLowering:
             self.validate_async_fn(hir_func)
 
         hir_func
-
-    me lower_param(p: Param) -> HirParam:
-        val type_ = self.lower_type(p.type_)
-        val symbol = self.symbols.define(p.name, SymbolKind.Parameter, Some(type_), p.span, Visibility.Private, false, nil)
-        val default_ = if p.has_default:
-            self.lower_hir_expr(p.default)
-        else:
-            HirExpr(
-                kind: HirExprKind.NilLit,
-                has_type_: true,
-                type_: HirType(kind: HirTypeKind.Unit, span: p.span),
-                span: p.span
-            )
-
-        HirParam(
-            symbol: symbol,
-            name: p.name,
-            type_: type_,
-            has_default: p.has_default,
-            default: default_,
-            span: p.span,
-            is_mutable: p.is_mutable
-        )
-
-    me lower_class(class_: ParserClass) -> HirClass:
-        # DIRECT field access, NOT `match class_: case Class(...)` — struct
-        # destructure yields garbage positional fields on stage4 (same hazard as
-        # lower_struct; bug doc iteration 17/20 #86).
-        val class_name: text = class_.name
-        val class_type_params: [ParserTypeParam] = class_.type_params
-        val class_fields: [ParserField] = class_.fields
-        val class_methods: Dict<text, ParserFunction> = class_.methods
-        val class_visibility: Visibility = class_.visibility
-        val class_is_public: bool = class_.is_public
-        val class_attributes: [Attribute] = class_.attributes
-        val class_doc_comment: text = class_.doc_comment
-        val class_span: Span = class_.span
-
-        val symbol = self.symbols.lookup_or_invalid(class_name)
-        self.symbols.push_scope(ScopeKind.Class)
-
-        var type_params: [HirTypeParam] = []
-        for tp in class_type_params:
-            type_params = type_params.push(self.lower_type_param(tp))
-
-        # Phase A gate (#158): a generic class (`class Box<T>: v: T`) is NOT
-        # monomorphized on the native build path. Unlike a bare generic struct
-        # (which degraded to a silent garbage read), the class aggregate path
-        # bails during codegen and surfaces only as a cryptic downstream
-        # `ld.lld: cannot open ...p_class.o: No such file` link error with no
-        # mention of the generic class or #158. Fail loud and precise here,
-        # mirroring lower_struct (see above) and lower_function (see :198), until
-        # real monomorphization lands (#158 Phase B). MDSOC+ makes classes the
-        # default aggregate, so this tier matters.
-        if class_type_params.len() > 0:
-            self.error("generic classes are not supported on the native build path yet: class '{class_name}' declares type parameter(s); monomorphization is not implemented (#158 Phase B)", class_span)
-
-        var fields: [HirField] = []
-        for f in class_fields:
-            val cf: ParserField = f
-            fields = fields.push(self.lower_field(cf))
-
-        var methods: Dict<text, SymbolId> = {}
-        val previous_self_type = self.current_method_self_type
-        val previous_self_symbol_id = self.current_method_self_symbol_id
-        self.current_method_self_type = Some(HirType(kind: HirTypeKind.Named(symbol, []), span: class_span))
-        self.current_method_self_symbol_id = symbol.id
-        for name in class_methods.keys():
-            val fn_: ParserFunction = class_methods[name]
-            val hir_fn = self.lower_function(fn_)
-            methods[name] = hir_fn.symbol
-            # Merge class-embedded method bodies into module.functions the
-            # same way impl methods do (trait_impl_lowering.spl:204, via
-            # `lowered_impl_functions`), so any HIR-level checker walking
-            # `module.functions` can reach them. Without this, only
-            # `hir_fn.symbol` survived into `HirClass.methods` and the
-            # HirFunction (and its body) was unreachable for a class defined
-            # with `class X:` + `me foo(): ...` (safety_checker.spl lane G2,
-            # 2026-07-29).
-            self.lowered_impl_functions[hir_fn.symbol] = hir_fn
-        self.current_method_self_type = previous_self_type
-        self.current_method_self_symbol_id = previous_self_symbol_id
-
-        self.symbols.pop_scope()
-
-        # Compute effective visibility using filename matching
-        val effective_visibility = self.compute_visibility(class_name, class_visibility)
-
-        # Parse layout attributes (@repr, @packed, @align)
-        val layout: LayoutAttr = parse_layout_attrs(class_attributes)
-        val has_layout = layout.layout_kind != TypeLayoutKind.Simple or layout.has_explicit_align or layout.is_packed
-
-        # Parse export attributes (@export("C"))
-        val parsed_export_attr: ExportAttr? = parse_export_attrs(class_attributes)
-        val platform: PlatformParseResult = parse_platform_attrs(class_attributes)
-        val platform_fields = platform_attr_fields_for(platform)
-
-        HirClass(
-            symbol: symbol,
-            name: class_name,
-            type_params: type_params,
-            fields: fields,
-            methods: methods,
-            visibility: effective_visibility,
-            is_public: class_is_public,
-            doc_comment: class_doc_comment,
-            span: class_span,
-            has_layout_attr: has_layout,
-            layout_attr: layout,
-            export_attr: parsed_export_attr,
-            has_platform_attr: platform_fields.has_platform,
-            platform_has_error: platform_fields.has_error,
-            platform_has_warning: platform_fields.has_warning,
-            platform_diagnostic_message: platform_fields.message,
-            platform_diagnostic_line: platform_fields.line,
-            is_generic_template: false,
-            specialization_of: nil,
-            type_bindings: {}
-        )
 
     me lower_struct(struct_: ParserStruct) -> HirStruct:
         # DIRECT field access, NOT `match struct_: case Struct(...)`: the struct
@@ -757,7 +604,10 @@ impl HirLowering:
             platform_has_warning: platform_fields.has_warning,
             platform_diagnostic_message: platform_fields.message,
             platform_diagnostic_line: platform_fields.line,
-            is_generic_template: false,
+            # #158 Phase B (HIR half): recorded truthfully instead of the
+            # hardcoded `false` this used to carry. See lower_class in
+            # class_declaration_lowering.spl for the full rationale.
+            is_generic_template: struct_type_params.len() > 0,
             specialization_of: nil,
             type_bindings: {}
         )
@@ -825,6 +675,14 @@ impl HirLowering:
                 var hir_variants: [HirVariant] = []
                 for v in variants:
                     hir_variants = hir_variants.push(self.lower_variant(v))
+                var hir_attrs: [HirAttribute] = []
+                for raw_attr in enum_.attributes:
+                    hir_attrs = hir_attrs.push(hir_attribute_from_raw(raw_attr))
+                # Every field is named explicitly, in declaration order: the
+                # Rust seed fills PARTIAL named constructions positionally, so
+                # the previously-omitted has_doc_comment / has_specialization_of
+                # slots silently absorbed the new trailing `attributes` field
+                # and produced a nil HirEnum.
                 HirEnum(
                     symbol: symbol,
                     name: name,
@@ -833,11 +691,14 @@ impl HirLowering:
                     variants: hir_variants,
                     visibility: self.compute_visibility(name, visibility),
                     is_public: is_public,
+                    has_doc_comment: doc_comment != "",
                     doc_comment: doc_comment,
                     span: span,
                     is_generic_template: false,
-                    specialization_of: nil,
-                    type_bindings: {}
+                    has_specialization_of: false,
+                    specialization_of: "",
+                    type_bindings: {},
+                    attributes: hir_attrs
                 )
 
     me lower_variant(v: Variant) -> HirVariant:

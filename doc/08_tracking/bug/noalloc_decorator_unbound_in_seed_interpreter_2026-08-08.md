@@ -2,6 +2,7 @@
 
 - **ID:** noalloc_decorator_unbound_in_seed_interpreter_2026-08-08
 - **Status:** FIXED IN SOURCE, NOT YET DEPLOYED
+- **Verification 2026-08-21 (bug-status-consistency audit): PARTIAL, not fully fixed.** `"noalloc"` skip-list entry present at `interpreter_eval.rs:729`, but the fix is source-only: NOT YET DEPLOYED, awaiting a seed redeploy. `bug_db.sdn` row is `fix-implemented-verification-pending`.
 - **Severity:** high (any stdlib module carrying `@noalloc` is unloadable by the spec harness)
 - **Date:** 2026-08-08
 - **Supersedes:** `noalloc_annotations_do_not_survive_import_false_alarm_2026-08-08.md`

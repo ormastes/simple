@@ -102,7 +102,10 @@ fi
 #    the real elapsed interval, with `starttime` checked so a RECYCLED pid can
 #    never inherit a stranger's prior sample.
 #
-# Emits: "<cpu_pct|unknown> <rss_kb> <nproc> <top_pid> <top_rss_kb> <top_comm>".
+# Emits: "<cpu_pct|unknown> <tree_rss_kb> <nproc> <top_pid> <top_rss_kb> <top_comm> <root_rss_kb>".
+# root_rss_kb and tree_rss_kb come from the same /proc snapshot, so a leaf
+# process cannot report two different RSS values merely because it changed
+# residency between independent reads.
 # cpu_pct is `unknown` when no prior tick baseline exists. Callers MUST treat
 # `unknown` as "no evidence", never as 0 and never as idle.
 cpu_state_file="${progress_log}.treestate"
@@ -192,6 +195,7 @@ process_tree_metrics() {
         if (!included[pid] || excluded[pid]) continue
         nproc++
         total_rss += rsspg[pid]
+        if (pid == root) root_rss = rsspg[pid] * pagekb
         if (rsspg[pid] > top_rss) { top_rss = rsspg[pid]; top_pid = pid; top_comm = comm[pid] }
         printf "%s %s %s\n", pid, start[pid], ticks[pid] > state
         if (pid in prev_ticks && prev_start[pid] == start[pid]) {
@@ -313,13 +317,12 @@ while :; do
     exit 3
   fi
 
-  metrics=$(ps -o etime= -o rss= -p "$watch_pid" 2>/dev/null | awk 'NF {print $1 " " $2; exit}')
+  metrics=$(ps -o etime= -p "$watch_pid" 2>/dev/null | awk 'NF {print $1; exit}')
   set -- $metrics
   process_elapsed=${1:-unknown}
   # rss_kb is the ROOT process only, and for a wrapper shell that is ~3MB of
   # sleeping shell. Kept for continuity, but it is NOT the build's footprint --
   # tree_rss_kb is. Do not read rss_kb as "how big is the build".
-  rss_kb=${2:-unknown}
   tree_metrics=$(process_tree_metrics "$watch_pid" "$$")
   set -- $tree_metrics
   tree_cpu_pct=${1:-unknown}

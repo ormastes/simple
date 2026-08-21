@@ -1,0 +1,200 @@
+"""
+# Enum Payload Metadata Boundary Spec (lane S1)
+
+Hardening plan `doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md`
+§15 Phase 4 "preserve enum payload metadata end to end", §20.7 row S1.
+
+Tracks the payload enum
+
+    enum E:
+        A(i64, text)
+        B(name: text, n: i64)
+        C
+
+across the parser boundary, and asserts the four properties the plan names:
+
+1. **arity**    -- a 2-field payload stays 2 fields, never collapses to 1 or 0;
+2. **types**    -- each payload field's declared type survives POSITIONALLY,
+                   in source order;
+3. **names**    -- a NAMED payload field (`name: text`) keeps its field name;
+4. **discriminant** -- an explicit `A = 1` reaches later stages as the GIVEN
+                   value, not the variant's positional index.
+
+Property 3 was the measured gap when this lane opened: the parser consumed the
+payload field-name token and discarded it (`enum_module_body.spl`, the
+`par_kind_get() == 6: parser_advance()` arm), `decl_enum_def` had no slot for
+payload field names, and `_FlatAstBridge/module_assembly.spl` hardcoded
+`VariantKind.Tuple(...)` for EVERY variant -- so a named payload was
+indistinguishable from a positional one by the time anything downstream could
+ask. `HirVariantKind.Struct([HirField])` and `VariantKind.Struct([ParserField])`
+both already existed and were simply never constructed from source text.
+
+HARNESS NOTE (matches enum_payload_capture_spec.spl / type_alias_capture_spec.spl
+in this same area): the `parse_full_frontend` call is inlined in each `it` block
+on purpose -- routing it through a shared module-level helper fn has previously
+been shown to lose recorded parser/lowering state when read back afterward.
+
+Dict landmine (.claude/rules/code-style.md): `enums` values are STRUCTS, so
+presence/lookup goes through `contains_key(...)` + index read, never `.get()`.
+"""
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.core.parser.{parser_has_errors}
+use compiler.frontend.parser_types_expr.{TypeKind, parser_type_kind_named_name}
+use compiler.frontend.parser_types.{Variant, VariantKind}
+
+val FIXTURE = "enum E:\n" +
+    "    A(i64, text)\n" +
+    "    B(name: text, n: i64)\n" +
+    "    C\n" +
+    "\n" +
+    "fn identity(n: i64) -> i64:\n" +
+    "    n\n"
+
+fn find_variant_index(variants: [Variant], name: text) -> i64:
+    var i = 0
+    while i < variants.len():
+        if variants[i].name == name:
+            return i
+        i = i + 1
+    -1
+
+fn payload_type_names(v: Variant) -> [text]:
+    """Declared payload field TYPES of `v`, in source order.
+
+    Reads both payload shapes: a positional `Tuple` payload and a named
+    `Struct` payload carry the same type sequence, and every assertion about
+    arity/types below must hold for either spelling."""
+    match v.kind:
+        case VariantKind.Tuple(types):
+            var out: [text] = []
+            for t in types:
+                out.push(parser_type_kind_named_name(t.kind))
+            out
+        case VariantKind.Struct(fields):
+            var out: [text] = []
+            for f in fields:
+                out.push(parser_type_kind_named_name(f.type_.kind))
+            out
+        case _:
+            []
+
+fn payload_field_names(v: Variant) -> [text]:
+    """Declared payload field NAMES of `v`, in source order.
+
+    A positional (`Tuple`) payload has no field names by construction and
+    yields `[]`; only a `Struct` payload can answer this."""
+    match v.kind:
+        case VariantKind.Struct(fields):
+            var out: [text] = []
+            for f in fields:
+                out.push(f.name)
+            out
+        case _:
+            []
+
+describe "enum payload metadata survives the parser boundary":
+
+    it "preserves payload ARITY for a positional multi-field variant A(i64, text)":
+        val parsed = parse_full_frontend(FIXTURE, "testdata/s1_arity_a.spl", "s1_arity_a", Logger(level: 0))
+        assert_false(parser_has_errors())
+        assert_true(parsed.enums.contains_key("E"))
+        val e = parsed.enums["E"]
+        val ai = find_variant_index(e.variants, "A")
+        assert_true(ai >= 0)
+        assert_equal(payload_type_names(e.variants[ai]).len(), 2)
+
+    it "preserves positional payload TYPES in source order for A(i64, text)":
+        val parsed = parse_full_frontend(FIXTURE, "testdata/s1_types_a.spl", "s1_types_a", Logger(level: 0))
+        assert_false(parser_has_errors())
+        val e = parsed.enums["E"]
+        val ai = find_variant_index(e.variants, "A")
+        assert_true(ai >= 0)
+        val tys = payload_type_names(e.variants[ai])
+        assert_equal(tys.len(), 2)
+        assert_equal(tys[0], "i64")
+        assert_equal(tys[1], "text")
+
+    it "preserves payload ARITY and TYPES for a NAMED-payload variant B(name: text, n: i64)":
+        val parsed = parse_full_frontend(FIXTURE, "testdata/s1_types_b.spl", "s1_types_b", Logger(level: 0))
+        assert_false(parser_has_errors())
+        val e = parsed.enums["E"]
+        val bi = find_variant_index(e.variants, "B")
+        assert_true(bi >= 0)
+        val tys = payload_type_names(e.variants[bi])
+        assert_equal(tys.len(), 2)
+        assert_equal(tys[0], "text")
+        assert_equal(tys[1], "i64")
+
+    it "preserves payload field NAMES for B(name: text, n: i64)":
+        # The lane's headline property. Before the S1 fix this returned [] --
+        # every variant was lowered to VariantKind.Tuple, which has no names.
+        val parsed = parse_full_frontend(FIXTURE, "testdata/s1_names_b.spl", "s1_names_b", Logger(level: 0))
+        assert_false(parser_has_errors())
+        val e = parsed.enums["E"]
+        val bi = find_variant_index(e.variants, "B")
+        assert_true(bi >= 0)
+        val names = payload_field_names(e.variants[bi])
+        assert_equal(names.len(), 2)
+        assert_equal(names[0], "name")
+        assert_equal(names[1], "n")
+
+    it "keeps a positional payload NAMELESS -- A(i64, text) must not invent field names":
+        # The dual of the assertion above: recording names must not silently
+        # reclassify a positional payload as a named one.
+        val parsed = parse_full_frontend(FIXTURE, "testdata/s1_names_a.spl", "s1_names_a", Logger(level: 0))
+        assert_false(parser_has_errors())
+        val e = parsed.enums["E"]
+        val ai = find_variant_index(e.variants, "A")
+        assert_true(ai >= 0)
+        assert_equal(payload_field_names(e.variants[ai]).len(), 0)
+
+    it "leaves a payload-less variant C with zero payload fields":
+        val parsed = parse_full_frontend(FIXTURE, "testdata/s1_unit_c.spl", "s1_unit_c", Logger(level: 0))
+        assert_false(parser_has_errors())
+        val e = parsed.enums["E"]
+        val ci = find_variant_index(e.variants, "C")
+        assert_true(ci >= 0)
+        assert_equal(payload_type_names(e.variants[ci]).len(), 0)
+        assert_equal(payload_field_names(e.variants[ci]).len(), 0)
+
+    it "records an explicit discriminant A = 1 as PRESENT on the variant":
+        val src = "enum D:\n" +
+            "    A = 1\n" +
+            "    B\n" +
+            "\n" +
+            "fn identity(n: i64) -> i64:\n" +
+            "    n\n"
+        val parsed = parse_full_frontend(src, "testdata/s1_disc.spl", "s1_disc", Logger(level: 0))
+        assert_false(parser_has_errors())
+        assert_true(parsed.enums.contains_key("D"))
+        val e = parsed.enums["D"]
+        val ai = find_variant_index(e.variants, "A")
+        assert_true(ai >= 0)
+        # `has_discriminant` is what MIR's lower_const_expr gate reads before
+        # it will honour the GIVEN value instead of the positional index
+        # (50.mir/_MirLowering/module_lowering.spl, `if variant.has_discriminant`).
+        assert_true(e.variants[ai].has_discriminant)
+        val bi = find_variant_index(e.variants, "B")
+        assert_true(bi >= 0)
+        assert_false(e.variants[bi].has_discriminant)
+
+    it "records an explicit discriminant on a variant that ALSO has a payload":
+        # Payload capture and discriminant capture share the same parse loop
+        # iteration; neither may consume the other's tokens.
+        val src = "enum D:\n" +
+            "    A(n: i64) = 7\n" +
+            "    B\n" +
+            "\n" +
+            "fn identity(n: i64) -> i64:\n" +
+            "    n\n"
+        val parsed = parse_full_frontend(src, "testdata/s1_disc_pay.spl", "s1_disc_pay", Logger(level: 0))
+        assert_false(parser_has_errors())
+        val e = parsed.enums["D"]
+        val ai = find_variant_index(e.variants, "A")
+        assert_true(ai >= 0)
+        assert_true(e.variants[ai].has_discriminant)
+        assert_equal(payload_type_names(e.variants[ai]).len(), 1)
+        assert_equal(payload_field_names(e.variants[ai])[0], "n")

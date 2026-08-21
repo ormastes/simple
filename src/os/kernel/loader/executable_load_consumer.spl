@@ -1,0 +1,346 @@
+# Bounded privileged executable load owner and public compatibility facade.
+#
+# The commit bridge consumes loader authority exactly once, validates and
+# re-hashes retained bytes, and maps only into a reclaimable x86_64 address
+# space. Receipts never contain the address-space capability and always report
+# execution_authorized=false. Canonical execution consumes the original opaque
+# registry token through Scheduler.adopt_authenticated_executable_pid_v1; a
+# compatibility mapping receipt is deliberately not transferable.
+use std.fs_driver.mount_table.{MountTable}
+use std.common.contracts.execution.simpleos_executable_admission_v1.{
+    ExecutableImageHandleV1
+}
+use os.kernel.loader.executable_authority_registry.{
+    ExecutableAuthorityRegistryV1, ExecutableAuthorityTokenV1
+}
+use os.kernel.loader.executable_admission_pipeline.{
+    executable_loader_commit, executable_loader_retrieve_once,
+    executable_loader_release_retrieved, executable_loader_revoke
+}
+export use os.kernel.loader.executable_load_plan_v1.{
+    ExecutableLoadConsumerStateV1, ExecutableLoadConsumerErrorV1,
+    ExecutableLoadConsumerV1, ExecutableLoadReceiptV1,
+    ExecutableLoadPlanCheckV1,
+    executable_load_consumer_schema_version_v1,
+    executable_load_consumer_page_size_v1,
+    executable_load_consumer_max_pages_v1,
+    executable_load_consumer_max_segment_pages_v1,
+    executable_load_consumer_new_v1,
+    executable_load_consumer_validate_plan_v1,
+    executable_load_consumer_plan_v1,
+    executable_load_consumer_begin_mapping_v1,
+    executable_load_consumer_map_page_v1,
+    executable_load_consumer_begin_release_v1,
+    executable_load_consumer_unmap_page_v1,
+    executable_load_consumer_close_v1,
+    executable_load_consumer_receipt_v1
+}
+use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.arch.mod.{get_arch}
+use os.kernel.loader.executable_image_prepare.{
+    executable_prepare_max_source_bytes_v1, executable_prepare_image_v1
+}
+use os.kernel.scheduler.scheduler_types.{_map_user_process_image}
+use os.kernel.memory.user_address_space.{
+    create_user_address_space, destroy_user_address_space
+}
+use os.kernel.types.task_types.{
+    AddressSpace,
+    user_process_image_stack_top,
+    user_process_image_stack_size, user_process_image_segments,
+    user_process_image_file_bytes, user_process_image_initial_stack_bytes
+}
+use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
+
+struct ExecutableLoadOwnedSlotV1:
+    state: ExecutableLoadConsumerStateV1
+    generation: u64
+    nonce: u64
+    address_space: AddressSpace?
+    authorities: ExecutableAuthorityRegistryV1
+    authority_token: ExecutableAuthorityTokenV1
+    consumer: ExecutableLoadConsumerV1
+
+struct ExecutableLoadOwnedLeaseV1:
+    slot_index: i64
+    generation: u64
+    nonce: u64
+    address_space: AddressSpace?
+    authorities: ExecutableAuthorityRegistryV1
+    authority_token: ExecutableAuthorityTokenV1
+    consumer: ExecutableLoadConsumerV1
+
+val _executable_load_owner_mutex: i64 = mutex_raw_create()
+var _executable_load_owned_slots: [ExecutableLoadOwnedSlotV1] = []
+
+pub fn executable_load_consumer_max_source_bytes_v1() -> u64:
+    executable_prepare_max_source_bytes_v1()
+
+pub fn executable_load_consumer_max_live_slots_v1() -> i64:
+    4
+
+fn _load_owner_lock() -> bool:
+    _executable_load_owner_mutex > 0 and mutex_raw_lock(_executable_load_owner_mutex)
+
+fn _load_owner_unlock() -> bool:
+    mutex_raw_unlock(_executable_load_owner_mutex)
+
+fn _load_receipt_with_coordinates(
+    consumer: ExecutableLoadConsumerV1,
+    slot_index: i64,
+    generation: u64,
+    nonce: u64
+) -> ExecutableLoadReceiptV1:
+    var receipt = executable_load_consumer_receipt_v1(consumer)
+    receipt.load_slot_index = slot_index
+    receipt.load_generation = generation
+    receipt.load_nonce = nonce
+    receipt
+
+fn _load_reserve_slot(
+    authorities: ExecutableAuthorityRegistryV1,
+    token: ExecutableAuthorityTokenV1,
+    consumer: ExecutableLoadConsumerV1
+) -> ExecutableLoadReceiptV1:
+    if not _load_owner_lock():
+        var failed = consumer
+        failed.state = ExecutableLoadConsumerStateV1.Quarantined
+        failed.failure = ExecutableLoadConsumerErrorV1.SerializationIndeterminate
+        return executable_load_consumer_receipt_v1(failed)
+    var reusable = -1
+    var i = 0
+    while i < _executable_load_owned_slots.len():
+        if _executable_load_owned_slots[i].state == ExecutableLoadConsumerStateV1.Released and
+            _executable_load_owned_slots[i].generation < 18446744073709551615u64 and
+            reusable < 0:
+            reusable = i
+        i = i + 1
+    if reusable < 0 and
+        _executable_load_owned_slots.len() >= executable_load_consumer_max_live_slots_v1():
+        _ = _load_owner_unlock()
+        var exhausted = consumer
+        exhausted.failure = ExecutableLoadConsumerErrorV1.ConsumerExhausted
+        return executable_load_consumer_receipt_v1(exhausted)
+    val slot_index = if reusable >= 0: reusable else: _executable_load_owned_slots.len()
+    val generation = if reusable >= 0:
+        _executable_load_owned_slots[reusable].generation + 1u64
+    else:
+        1u64
+    var nonce = token.nonce ^ generation ^ ((slot_index + 1) as u64)
+    if nonce == 0u64:
+        nonce = generation ^ 0xA5A5A5A5A5A5A5A5u64
+    val slot = ExecutableLoadOwnedSlotV1(
+        state: ExecutableLoadConsumerStateV1.Validated,
+        generation: generation,
+        nonce: nonce,
+        address_space: nil,
+        authorities: authorities,
+        authority_token: token,
+        consumer: consumer
+    )
+    if reusable >= 0:
+        _executable_load_owned_slots[reusable] = slot
+    else:
+        _executable_load_owned_slots.push(slot)
+
+    # Slot publication is already committed. An unlock error is therefore an
+    # indeterminate quarantine, never evidence that reservation did not occur.
+    if not _load_owner_unlock():
+        var quarantined = consumer
+        quarantined.state = ExecutableLoadConsumerStateV1.Quarantined
+        quarantined.failure = ExecutableLoadConsumerErrorV1.SerializationIndeterminate
+        return _load_receipt_with_coordinates(
+            quarantined, slot_index, generation, nonce)
+    _load_receipt_with_coordinates(consumer, slot_index, generation, nonce)
+
+fn _load_slot_index(receipt: ExecutableLoadReceiptV1) -> i64:
+    if receipt.load_slot_index < 0 or
+        receipt.load_slot_index >= _executable_load_owned_slots.len():
+        return -1
+    val slot = _executable_load_owned_slots[receipt.load_slot_index]
+    if slot.generation != receipt.load_generation or slot.nonce != receipt.load_nonce:
+        return -1
+    receipt.load_slot_index
+
+fn _load_slot_finish(
+    receipt: ExecutableLoadReceiptV1,
+    consumer: ExecutableLoadConsumerV1,
+    address_space: AddressSpace?
+) -> bool:
+    if not _load_owner_lock():
+        return false
+    val index = _load_slot_index(receipt)
+    if index < 0:
+        _ = _load_owner_unlock()
+        return false
+    var slot = _executable_load_owned_slots[index]
+    slot.state = consumer.state
+    slot.consumer = consumer
+    slot.address_space = address_space
+    _executable_load_owned_slots[index] = slot
+
+    # Ownership transfer has committed. Even if unlock reports failure, the
+    # caller must not destroy the resource now owned by the quarantined slot.
+    _ = _load_owner_unlock()
+    true
+
+fn _load_slot_lease(receipt: ExecutableLoadReceiptV1) -> ExecutableLoadOwnedLeaseV1?:
+    if not _load_owner_lock():
+        return nil
+    val index = _load_slot_index(receipt)
+    if index < 0:
+        _ = _load_owner_unlock()
+        return nil
+    var slot = _executable_load_owned_slots[index]
+    if slot.state != ExecutableLoadConsumerStateV1.MappedBlocked and
+        slot.state != ExecutableLoadConsumerStateV1.CloseRetryable:
+        _ = _load_owner_unlock()
+        return nil
+    val lease = ExecutableLoadOwnedLeaseV1(
+        slot_index: index,
+        generation: slot.generation,
+        nonce: slot.nonce,
+        address_space: slot.address_space,
+        authorities: slot.authorities,
+        authority_token: slot.authority_token,
+        consumer: slot.consumer
+    )
+    slot.state = if slot.address_space.?:
+        ExecutableLoadConsumerStateV1.Unmapping
+    else:
+        ExecutableLoadConsumerStateV1.ClosePending
+    _executable_load_owned_slots[index] = slot
+    if not _load_owner_unlock():
+        # The state transition is committed, but the resource is not released
+        # to the caller. It remains unreachable and cannot be double-destroyed.
+        return nil
+    Some(lease)
+
+fn _load_close_failed_commit(
+    mut table: MountTable,
+    receipt: ExecutableLoadReceiptV1,
+    authorities: ExecutableAuthorityRegistryV1,
+    token: ExecutableAuthorityTokenV1,
+    consumer: ExecutableLoadConsumerV1
+) -> ExecutableLoadReceiptV1:
+    var next = executable_load_consumer_begin_release_v1(consumer)
+    val closed = executable_loader_release_retrieved(table, authorities, token)
+    next = executable_load_consumer_close_v1(next, closed.is_ok())
+    _ = _load_slot_finish(receipt, next, nil)
+    _load_receipt_with_coordinates(
+        next, receipt.load_slot_index, receipt.load_generation, receipt.load_nonce)
+
+pub fn executable_load_consumer_commit_v1(
+    mut table: MountTable,
+    authorities: ExecutableAuthorityRegistryV1,
+    token: ExecutableAuthorityTokenV1,
+    consumer: ExecutableLoadConsumerV1,
+    entry_point: u64
+) -> ExecutableLoadReceiptV1:
+    # This is the only public bridge from authority to the load consumer. The
+    # admission path cannot mint `token`, and no mapping result is authorized.
+    val committed = executable_loader_commit(authorities, token)
+    if committed.is_err():
+        var rejected = consumer
+        rejected.failure = ExecutableLoadConsumerErrorV1.AuthorityRejected
+        return executable_load_consumer_receipt_v1(rejected)
+    val retrieved = executable_loader_retrieve_once(authorities, token)
+    match retrieved:
+        case Err(_):
+            var rejected = consumer
+            rejected.failure = ExecutableLoadConsumerErrorV1.AuthorityRejected
+            _ = executable_loader_revoke(table, authorities, token)
+            executable_load_consumer_receipt_v1(rejected)
+        case Ok(value):
+            val planned = executable_load_consumer_plan_v1(
+                consumer, value.image_handle, entry_point)
+            if planned.state != ExecutableLoadConsumerStateV1.Validated:
+                _ = executable_loader_release_retrieved(table, authorities, token)
+                return executable_load_consumer_receipt_v1(planned)
+            val reserved = _load_reserve_slot(authorities, token, planned)
+            if reserved.error != ExecutableLoadConsumerErrorV1.None:
+                _ = executable_loader_release_retrieved(table, authorities, token)
+                return reserved
+            if reserved.load_slot_index < 0:
+                _ = executable_loader_release_retrieved(table, authorities, token)
+                return reserved
+            if planned.expected_arch != "x86_64" or
+                get_arch() != Architecture.X86_64:
+                var blocked = planned
+                blocked.failure = ExecutableLoadConsumerErrorV1.RollbackUnavailable
+                return _load_close_failed_commit(
+                    table, reserved, authorities, token, blocked)
+            val prepared = executable_prepare_image_v1(
+                table, value.image_handle, consumer, entry_point, Architecture.X86_64)
+            if prepared.is_err():
+                var failed = planned
+                failed.failure = prepared.unwrap_err()
+                return _load_close_failed_commit(table, reserved, authorities, token, failed)
+            val prepared_image = prepared.unwrap()
+            val image = prepared_image.image
+            var mapping = prepared_image.mapping
+            val stack_size = user_process_image_stack_size(image)
+            val stack_top = user_process_image_stack_top(image)
+            val space = create_user_address_space()
+            if space.phys_root == 0u64 or space.phys_root == 1u64:
+                var failed = planned
+                failed.failure = ExecutableLoadConsumerErrorV1.AddressSpaceUnavailable
+                return _load_close_failed_commit(table, reserved, authorities, token, failed)
+            val mapped = _map_user_process_image(
+                space,
+                user_process_image_segments(image),
+                user_process_image_file_bytes(image),
+                stack_top,
+                stack_size,
+                user_process_image_initial_stack_bytes(image)
+            )
+            if mapped < 0:
+                destroy_user_address_space(space)
+                var failed = planned
+                failed.failure = ExecutableLoadConsumerErrorV1.MapFailed
+                return _load_close_failed_commit(table, reserved, authorities, token, failed)
+            mapping.mapped_pages = mapping.planned_pages
+            mapping.state = ExecutableLoadConsumerStateV1.MappedBlocked
+            if not _load_slot_finish(reserved, mapping, Some(space)):
+                destroy_user_address_space(space)
+                var failed = planned
+                failed.failure = ExecutableLoadConsumerErrorV1.InvalidConsumer
+                return _load_close_failed_commit(table, reserved, authorities, token, failed)
+            _load_receipt_with_coordinates(
+                mapping, reserved.load_slot_index,
+                reserved.load_generation, reserved.load_nonce)
+
+pub fn executable_load_consumer_release_v1(
+    mut table: MountTable,
+    receipt: ExecutableLoadReceiptV1
+) -> ExecutableLoadReceiptV1:
+    val lease = _load_slot_lease(receipt)
+    if not lease.?:
+        var failed = executable_load_consumer_new_v1("", "", "")
+        failed.failure = ExecutableLoadConsumerErrorV1.InvalidTransition
+        return executable_load_consumer_receipt_v1(failed)
+    val owned = lease.unwrap()
+    if owned.address_space.?:
+        destroy_user_address_space(owned.address_space.unwrap())
+    var next = owned.consumer
+    next.state = ExecutableLoadConsumerStateV1.ClosePending
+    next.mapped_pages = 0u64
+    next.pages_to_unmap = 0u64
+    val closed = executable_loader_release_retrieved(
+        table, owned.authorities, owned.authority_token)
+    next = executable_load_consumer_close_v1(next, closed.is_ok())
+    val updated_receipt = _load_receipt_with_coordinates(
+        next, owned.slot_index, owned.generation, owned.nonce)
+    _ = _load_slot_finish(updated_receipt, next, nil)
+    updated_receipt
+
+pub fn executable_load_consumer_retry_close_v1(
+    mut table: MountTable,
+    receipt: ExecutableLoadReceiptV1
+) -> ExecutableLoadReceiptV1:
+    executable_load_consumer_release_v1(table, receipt)
+
+export executable_load_consumer_max_source_bytes_v1
+export executable_load_consumer_max_live_slots_v1
+export executable_load_consumer_commit_v1, executable_load_consumer_release_v1
+export executable_load_consumer_retry_close_v1

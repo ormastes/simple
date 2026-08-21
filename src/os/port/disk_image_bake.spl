@@ -19,16 +19,53 @@
 use std.io_runtime as io
 use os.port.initramfs_pack.{PackConfig, PayloadEntry as InitramfsPayloadEntry,
     cmd_build, validate_image}
+use os.port.initramfs_validate.{
+    initramfs_init_artifact_admission,
+    SIMPLE_COMPILER_ROLE_PATHS,
+    SIMPLE_INTERPRETER_ROLE_PATHS,
+    SIMPLE_LOADER_ROLE_PATHS,
+}
+use os.kernel.loader.smf.{smf_admit_explicit_simpleos_executable}
 use os.port.disk_image.{DiskImageConfig, PayloadEntry, build}
 use os.port.font_bundle.{simpleos_font_bundle_entries, load_simpleos_font_bundle_entry}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.structural.digest.hash256.{hash256_hex_valid}
 
 extern fn rt_file_read_bytes(path: text) -> [u8]
 extern fn rt_env_get(key: text) -> text?
+extern fn rt_text_to_bytes(value: text) -> [u8]
 
-class SimpleRolePayloadSpec:
-    name83: text
-    guest_path: text
-    label: text
+class SimpleRolePayload:
+    role: text
+    host_path: text
+    digest: text
+    data: [u8]
+    guest_paths: [text]
+
+class SimpleRoleInput:
+    role: text
+    host_path: text
+    exists: bool
+    data: [u8]
+
+enum SimpleRoleAdmissionError:
+    MissingRole
+    UnknownRole
+    MissingArtifact
+    EmptyArtifact
+    GeneralPayload
+    DuplicateRole
+    DuplicatePath
+    DuplicateDigest
+    InvalidDigest
+    InvalidExecutableFormat
+    InvalidArtifactPath
+    InvalidGuestPath
+
+class RequiredArtifact:
+    host_path: text
+    digest: text
+    data: [u8]
 
 fn _load_payload(path: text, name83: text) -> Result<PayloadEntry, text>:
     """Read a file and wrap as a FAT32 8.3 directory entry (flat root placement)."""
@@ -43,7 +80,184 @@ fn _load_payload_at(path: text, name83: text, guest_path: text) -> Result<Payloa
         return Err("bake: payload empty or unreadable: " + path)
     Ok(PayloadEntry(path: name83, data: data, guest_path: guest_path))
 
-fn _build_initramfs(out_initramfs: text, hello_rs_path: text, hello_c_path: text) -> Result<(), text>:
+fn _artifact_digest(data: [u8], label: text) -> Result<text, text>:
+    val digest = sha256_u8_hex(data)
+    if not hash256_hex_valid(digest):
+        return Err("bake: pure-Simple SHA-256 returned invalid digest for " + label)
+    Ok(digest)
+
+fn simpleos_role_payload_digest(data: [u8]) -> text:
+    sha256_u8_hex(data)
+
+fn _read_required_artifact(path: text, label: text) -> Result<RequiredArtifact, text>:
+    if path.trim() == "":
+        return Err("bake: missing explicit " + label + " path")
+    if not io.file_exists(path):
+        return Err("bake: " + label + " missing: " + path)
+    val data: [u8] = rt_file_read_bytes(path) ?? []
+    if data.len() == 0:
+        return Err("bake: " + label + " empty or unreadable: " + path)
+    val digest = match _artifact_digest(data, label):
+        case Ok(value): value
+        case Err(message): return Err(message)
+    Ok(RequiredArtifact(host_path: path, digest: digest, data: data))
+
+fn _payload_basename(path: text) -> text:
+    val slash = path.last_index_of("/")
+    if slash < 0:
+        return path
+    path.slice(slash + 1, path.len())
+
+fn _is_general_simple_payload(path: text) -> bool:
+    val basename = _payload_basename(path)
+    basename == "simple" or basename == "simple_simpleos"
+
+fn _role_guest_paths(role: text) -> [text]:
+    if role == "compiler":
+        return SIMPLE_COMPILER_ROLE_PATHS
+    if role == "interpreter":
+        return SIMPLE_INTERPRETER_ROLE_PATHS
+    if role == "loader":
+        return SIMPLE_LOADER_ROLE_PATHS
+    []
+
+fn simpleos_admit_role_artifact_path(path: text) -> Result<(), SimpleRoleAdmissionError>:
+    if path.trim() == "" or path != path.trim():
+        return Err(SimpleRoleAdmissionError.InvalidArtifactPath)
+    for byte in path.bytes():
+        val code = byte.to_i64()
+        if code < 32 or code == 127 or code == 34 or code == 92:
+            return Err(SimpleRoleAdmissionError.InvalidArtifactPath)
+    val parts = path.split("/")
+    val first = if path.starts_with("/"): 1 else: 0
+    if first == parts.len():
+        return Err(SimpleRoleAdmissionError.InvalidArtifactPath)
+    var i = first
+    while i < parts.len():
+        if parts[i] == "" or parts[i] == "." or parts[i] == "..":
+            return Err(SimpleRoleAdmissionError.InvalidArtifactPath)
+        i = i + 1
+    Ok(())
+
+fn simpleos_admit_role_payloads(inputs: [SimpleRoleInput]) -> Result<[SimpleRolePayload], SimpleRoleAdmissionError>:
+    if inputs.len() != 3:
+        return Err(SimpleRoleAdmissionError.MissingRole)
+    var roles: [SimpleRolePayload] = []
+    for input in inputs:
+        val guest_paths = _role_guest_paths(input.role)
+        if guest_paths.len() == 0:
+            return Err(SimpleRoleAdmissionError.UnknownRole)
+        if input.role.trim() == "":
+            return Err(SimpleRoleAdmissionError.MissingArtifact)
+        match simpleos_admit_role_artifact_path(input.host_path):
+            case Ok(()): ()
+            case Err(error): return Err(error)
+        if not input.exists:
+            return Err(SimpleRoleAdmissionError.MissingArtifact)
+        if input.data.len() == 0:
+            return Err(SimpleRoleAdmissionError.EmptyArtifact)
+        if _is_general_simple_payload(input.host_path):
+            return Err(SimpleRoleAdmissionError.GeneralPayload)
+        match smf_admit_explicit_simpleos_executable(input.data):
+            case Ok(()): ()
+            case Err(_): return Err(SimpleRoleAdmissionError.InvalidExecutableFormat)
+        val digest = simpleos_role_payload_digest(input.data)
+        if not hash256_hex_valid(digest):
+            return Err(SimpleRoleAdmissionError.InvalidDigest)
+        for existing in roles:
+            if existing.role == input.role:
+                return Err(SimpleRoleAdmissionError.DuplicateRole)
+            if existing.host_path == input.host_path:
+                return Err(SimpleRoleAdmissionError.DuplicatePath)
+            if existing.digest == digest:
+                return Err(SimpleRoleAdmissionError.DuplicateDigest)
+        roles.push(SimpleRolePayload(
+            role: input.role,
+            host_path: input.host_path,
+            digest: digest,
+            data: input.data,
+            guest_paths: guest_paths,
+        ))
+    Ok(roles)
+
+fn _role_admission_error_text(error: SimpleRoleAdmissionError) -> text:
+    match error:
+        case SimpleRoleAdmissionError.MissingRole: "missing role"
+        case SimpleRoleAdmissionError.UnknownRole: "unknown role"
+        case SimpleRoleAdmissionError.MissingArtifact: "missing artifact"
+        case SimpleRoleAdmissionError.EmptyArtifact: "empty artifact"
+        case SimpleRoleAdmissionError.GeneralPayload: "general payload rejected"
+        case SimpleRoleAdmissionError.DuplicateRole: "duplicate role"
+        case SimpleRoleAdmissionError.DuplicatePath: "duplicate path"
+        case SimpleRoleAdmissionError.DuplicateDigest: "duplicate digest"
+        case SimpleRoleAdmissionError.InvalidDigest: "invalid digest"
+        case SimpleRoleAdmissionError.InvalidExecutableFormat: "invalid executable format"
+        case SimpleRoleAdmissionError.InvalidArtifactPath: "invalid artifact path"
+        case SimpleRoleAdmissionError.InvalidGuestPath: "invalid guest path"
+
+fn _role_input_from_path(role: text, path: text) -> SimpleRoleInput:
+    if path.trim() == "" or not io.file_exists(path):
+        return SimpleRoleInput(role: role, host_path: path, exists: false, data: [])
+    SimpleRoleInput(
+        role: role,
+        host_path: path,
+        exists: true,
+        data: rt_file_read_bytes(path) ?? [],
+    )
+
+fn _admit_roles() -> Result<[SimpleRolePayload], text>:
+    val compiler_path = rt_env_get("SIMPLEOS_COMPILER_BINARY") ?? ""
+    val interpreter_path = rt_env_get("SIMPLEOS_INTERPRETER_BINARY") ?? ""
+    val loader_path = rt_env_get("SIMPLEOS_LOADER_BINARY") ?? ""
+    val admitted = simpleos_admit_role_payloads([
+        _role_input_from_path("compiler", compiler_path),
+        _role_input_from_path("interpreter", interpreter_path),
+        _role_input_from_path("loader", loader_path),
+    ])
+    match admitted:
+        case Ok(roles): Ok(roles)
+        case Err(error): Err("bake: " + _role_admission_error_text(error))
+
+fn simpleos_render_toolchain_manifest(roles: [SimpleRolePayload]) -> Result<text, SimpleRoleAdmissionError>:
+    var inputs: [SimpleRoleInput] = []
+    for role in roles:
+        inputs.push(SimpleRoleInput(
+            role: role.role,
+            host_path: role.host_path,
+            exists: true,
+            data: role.data,
+        ))
+    val admitted = match simpleos_admit_role_payloads(inputs):
+        case Ok(value): value
+        case Err(error): return Err(error)
+
+    var body = "simple_toolchain {\n  role_bindings: [\n"
+    var i = 0
+    while i < admitted.len():
+        val role = admitted[i]
+        val supplied = roles[i]
+        if supplied.digest != role.digest:
+            return Err(SimpleRoleAdmissionError.InvalidDigest)
+        if supplied.guest_paths != role.guest_paths:
+            return Err(SimpleRoleAdmissionError.InvalidGuestPath)
+        for guest_path in role.guest_paths:
+            body = body + "    { role: \"{role.role}\", guest_path: \"{guest_path}\", artifact: \"{role.host_path}\", digest: \"{role.digest}\" }\n"
+        i = i + 1
+    body = body + "  ]\n}\n"
+    Ok(body)
+
+fn _simple_toolchain_manifest_payload(roles: [SimpleRolePayload]) -> Result<[u8], SimpleRoleAdmissionError>:
+    match simpleos_render_toolchain_manifest(roles):
+        case Ok(manifest): Ok(rt_text_to_bytes(manifest))
+        case Err(error): Err(error)
+
+fn _build_initramfs(
+    out_initramfs: text,
+    hello_rs_path: text,
+    hello_c_path: text,
+    roles: [SimpleRolePayload],
+    init_binary: text,
+) -> Result<(), text>:
     """Build a real initramfs image and inject the bake payloads into it."""
     var payloads: List<InitramfsPayloadEntry> = [
         InitramfsPayloadEntry(
@@ -59,7 +273,10 @@ fn _build_initramfs(out_initramfs: text, hello_rs_path: text, hello_c_path: text
             is_dir: false,
         ))
     val config = PackConfig(
-        simple_binary: "build/bootstrap/stage3/simple_simpleos",
+        init_binary: init_binary,
+        compiler_binary: roles[0].host_path,
+        interpreter_binary: roles[1].host_path,
+        loader_binary: roles[2].host_path,
         llvm_prefix: "build/os/llvm/cross/bin",
         sysroot: "build/os/sysroot",
         source_tree: "src",
@@ -72,47 +289,36 @@ fn _build_initramfs(out_initramfs: text, hello_rs_path: text, hello_c_path: text
         return Err("bake: initramfs validation failed: " + out_initramfs)
     Ok(())
 
-fn _simpleos_compiler_payload_path() -> text:
-    val override = rt_env_get("SIMPLEOS_SIMPLE_BINARY") ?? ""
-    if override != "":
-        return override
-    val candidates: [text] = [
-        "build/bootstrap/stage3/simple_simpleos",
-        "bin/release/x86_64-unknown-simpleos/simple",
-        "bin/release/x86_64-simpleos/simple",
-    ]
-    for candidate in candidates:
-        if io.file_exists(candidate):
-            return candidate
-    ""
-
-fn _simple_payload_required() -> bool:
-    io.file_exists("build/os/.bake_include_toolchain") or io.file_exists("build/os/.bake_include_simple_compiler")
-
-fn _simple_role_payload_specs() -> [SimpleRolePayloadSpec]:
-    [
-        SimpleRolePayloadSpec(name83: "SIMPLSTCSMF", guest_path: "", label: "/SIMPLSTC.SMF"),
-        SimpleRolePayloadSpec(name83: "SIMPLE     ", guest_path: "/sys/apps/simple", label: "/sys/apps/simple"),
-        SimpleRolePayloadSpec(name83: "SIMPLE  SMF", guest_path: "/sys/apps/simple.smf", label: "/sys/apps/simple.smf"),
-        SimpleRolePayloadSpec(name83: "USIMPLE    ", guest_path: "/usr/bin/simple", label: "/usr/bin/simple"),
-        SimpleRolePayloadSpec(name83: "USIMPLE SMF", guest_path: "/usr/bin/simple.smf", label: "/usr/bin/simple.smf"),
-        SimpleRolePayloadSpec(name83: "BSIMPLE    ", guest_path: "/bin/simple", label: "/bin/simple"),
-        SimpleRolePayloadSpec(name83: "BSIMPLE SMF", guest_path: "/bin/simple.smf", label: "/bin/simple.smf"),
-        SimpleRolePayloadSpec(name83: "SCOMPSMFSMF", guest_path: "/sys/apps/simple_compiler.smf", label: "/sys/apps/simple_compiler.smf"),
-        SimpleRolePayloadSpec(name83: "SCOMPILER  ", guest_path: "/sys/apps/simple_compiler", label: "/sys/apps/simple_compiler"),
-        SimpleRolePayloadSpec(name83: "SINTSMF SMF", guest_path: "/sys/apps/simple_interpreter.smf", label: "/sys/apps/simple_interpreter.smf"),
-        SimpleRolePayloadSpec(name83: "SINTERP    ", guest_path: "/sys/apps/simple_interpreter", label: "/sys/apps/simple_interpreter"),
-        SimpleRolePayloadSpec(name83: "SLOADSMFSMF", guest_path: "/sys/apps/simple_loader.smf", label: "/sys/apps/simple_loader.smf"),
-        SimpleRolePayloadSpec(name83: "SLOADER    ", guest_path: "/sys/apps/simple_loader", label: "/sys/apps/simple_loader"),
-    ]
-
 fn bake(out_disk: text, out_initramfs: text) -> Result<(), text>:
     """Produce FAT32 disk image + validated initramfs image from pre-built ELF artifacts."""
     val hello_rs_path      = "/tmp/hello_rs_simpleos/target/target/release/hello_rs"
     val hello_c_path       = "/tmp/hello_c.o"
     val clang_static_path  = "build/os/clang_static/bin/clang_static"
     val rustc_static_path  = "build/os/rust_static/bin/rustc_static"
-    val simple_path        = _simpleos_compiler_payload_path()
+    val roles = match _admit_roles():
+        case Ok(value): value
+        case Err(message): return Err(message)
+    val init_path = rt_env_get("SIMPLEOS_INIT_BINARY") ?? ""
+    val init_artifact = match _read_required_artifact(init_path, "target-native init payload"):
+        case Ok(value): value
+        case Err(message): return Err(message)
+    match initramfs_init_artifact_admission(init_artifact.host_path, init_artifact.data):
+        case Ok(()): ()
+        case Err(message): return Err("bake: " + message)
+    for role in roles:
+        if init_artifact.host_path == role.host_path or init_artifact.digest == role.digest:
+            return Err("bake: init payload must be distinct from every toolchain role")
+    val browser_path = rt_env_get("SIMPLEOS_BROWSER_PAYLOAD") ?? ""
+    val version_path = rt_env_get("SIMPLEOS_VERSION_METADATA") ?? ""
+    val browser = match _read_required_artifact(browser_path, "browser payload"):
+        case Ok(value): value
+        case Err(message): return Err(message)
+    val version = match _read_required_artifact(version_path, "version metadata"):
+        case Ok(value): value
+        case Err(message): return Err(message)
+    if init_artifact.host_path == browser.host_path or init_artifact.host_path == version.host_path or
+       init_artifact.digest == browser.digest or init_artifact.digest == version.digest:
+        return Err("bake: init payload must be distinct from browser/version artifacts")
 
     # --- Step 1: load hello_rs ---
     val rs_entry = match _load_payload(hello_rs_path, "HELLORS    "):
@@ -122,81 +328,73 @@ fn bake(out_disk: text, out_initramfs: text) -> Result<(), text>:
         case Err(msg):
             return Err(msg)
 
-    # --- Step 2: load hello_c.o (informational only — wave-4a embeds first payload) ---
+    # --- Step 2: load hello_c.o (optional auxiliary test input) ---
     if io.file_exists(hello_c_path):
         print "bake: loaded hello_c.o (" + io.file_size(hello_c_path).to_text() + " bytes)"
     else:
-        print "bake: warning — hello_c.o not found (skipped, wave-4a single-payload limit)"
+        print "bake: hello_c.o not found (optional auxiliary input)"
 
     # --- Step 3: ensure output dir + build real FAT32 image ---
     io.dir_create_all("build/os")
     var payloads: [PayloadEntry] = [rs_entry]
 
-    # --- Step 3-fixtures: VERSION.TXT + BROWSMF.SMF (mount-probe satisfaction) ---
-    # The kernel's _vfs_boot_init_pure_nvme_fat32 requires both files to mount.
-    # Wave-4a flat-bake puts files at root; Team S's mount-probe fallback (commit
-    # bbdd694a05) reads /BROWSMF.SMF after /SYS/APPS/BROWSMF.SMF fails.
-    val version_bytes: [u8] = [83u8, 105u8, 109u8, 112u8, 108u8, 101u8, 79u8, 83u8, 32u8, 80u8, 49u8, 10u8]
-    payloads.push(PayloadEntry(path: "VERSION TXT", data: version_bytes, guest_path: ""))
-    print "bake: added VERSION.TXT stub (12 bytes)"
-    # BROWSMF stand-in: reuse the hello_rs ELF — kernel only checks ELF magic.
-    val brow_entry = PayloadEntry(path: "BROWSMFSMF ", data: rs_entry.data, guest_path: "")
-    payloads.push(brow_entry)
-    print "bake: added BROWSMF.SMF stand-in (mirrors hello_rs ELF)"
+    # --- Step 3-fixtures: require genuine browser/version evidence ---
+    val hello_digest = match _artifact_digest(rs_entry.data, "hello_rs"):
+        case Ok(value): value
+        case Err(message): return Err(message)
+    if init_artifact.digest == hello_digest:
+        return Err("bake: init payload must not reuse the hello ELF")
+    if browser.host_path == version.host_path or browser.digest == version.digest:
+        return Err("bake: browser payload and version metadata must be distinct artifacts")
+    if browser.digest == hello_digest or version.digest == hello_digest:
+        return Err("bake: browser/version artifacts must not reuse the hello ELF")
+    for role in roles:
+        if browser.host_path == role.host_path or version.host_path == role.host_path or
+           browser.digest == role.digest or version.digest == role.digest:
+            return Err("bake: browser/version artifacts must be distinct from toolchain roles")
+    payloads.push(PayloadEntry(path: "VERSION TXT", data: version.data, guest_path: ""))
+    payloads.push(PayloadEntry(path: "BROWSMFSMF ", data: browser.data, guest_path: ""))
+    print "bake: added explicit VERSION.TXT metadata (" + version.data.len().to_text() + " bytes)"
+    print "bake: added explicit BROWSMF.SMF browser payload (" + browser.data.len().to_text() + " bytes)"
 
-    # --- Step 3a/3b: optionally bake clang_static + rustc_static ---
-    # Strict once enabled: the marker means the image must contain the real
-    # guest compiler payloads, not a silently skipped placeholder.
-    # To enable: `touch build/os/.bake_include_toolchain` before running bake.
-    # 100+ MB binaries through interpreter take 5+ min (BUG-INTERPRETER-PERF).
+    # --- Step 3a/3b: require clang_static + rustc_static ---
+    # Full bake has no optional fallback: missing artifacts fail closed.
     var nested_payloads: [PayloadEntry] = []
-    if io.file_exists("build/os/.bake_include_toolchain"):
-        if not io.file_exists(clang_static_path):
-            return Err("bake: toolchain marker set but clang_static missing: " + clang_static_path)
-        match _load_payload(clang_static_path, "CLANGSTCSMF"):
-            case Ok(e):
-                print "bake: loaded clang_static (" + io.file_size(clang_static_path).to_text() + " bytes)"
-                payloads.push(e)
-            case Err(e):
-                return Err(e)
+    val clang_static = match _read_required_artifact(clang_static_path, "clang_static payload"):
+        case Ok(value): value
+        case Err(message): return Err(message)
+    val rustc_static = match _read_required_artifact(rustc_static_path, "rustc_static payload"):
+        case Ok(value): value
+        case Err(message): return Err(message)
+    payloads.push(PayloadEntry(path: "CLANGSTCSMF", data: clang_static.data, guest_path: ""))
+    print "bake: loaded clang_static (" + clang_static.data.len().to_text() + " bytes)"
         # clang_as_general_fs_exec (task 1): also place clang_static at the
         # general nested path /usr/bin/clang as a REAL FAT32 file (real /usr
         # and /usr/bin subdirectories), reachable via Fat32Core.resolve_path --
         # not just the /sys/apps/clang SMF stub or the flat-root CLANGSTC.SMF
         # slot above. Additive: does not change the flat-root placement.
-        match _load_payload_at(clang_static_path, "clang_static (nested)", "/usr/bin/clang"):
-            case Ok(e):
-                print "bake: loaded clang_static -> /usr/bin/clang (nested, " + io.file_size(clang_static_path).to_text() + " bytes)"
-                nested_payloads.push(e)
-            case Err(e):
-                return Err(e)
-        if not io.file_exists(rustc_static_path):
-            return Err("bake: toolchain marker set but rustc_static missing: " + rustc_static_path)
-        match _load_payload(rustc_static_path, "RUSTCSTCSMF"):
-            case Ok(e):
-                print "bake: loaded rustc_static (" + io.file_size(rustc_static_path).to_text() + " bytes)"
-                payloads.push(e)
-            case Err(e):
-                return Err(e)
-    else:
-        print "bake: toolchain skipped (touch build/os/.bake_include_toolchain to embed)"
+    nested_payloads.push(PayloadEntry(path: "clang_static (nested)", data: clang_static.data, guest_path: "/usr/bin/clang"))
+    print "bake: loaded clang_static -> /usr/bin/clang (nested, " + clang_static.data.len().to_text() + " bytes)"
+    payloads.push(PayloadEntry(path: "RUSTCSTCSMF", data: rustc_static.data, guest_path: ""))
+    print "bake: loaded rustc_static (" + rustc_static.data.len().to_text() + " bytes)"
 
-    if _simple_payload_required():
-        if simple_path == "":
-            return Err("bake: SimpleOS compiler payload requested but missing; set SIMPLEOS_SIMPLE_BINARY or build build/bootstrap/stage3/simple_simpleos")
-        val simple_size = io.file_size(simple_path)
-        for spec in _simple_role_payload_specs():
-            match _load_payload_at(simple_path, spec.name83, spec.guest_path):
-                case Ok(e):
-                    print "bake: loaded Simple payload -> " + spec.label + " (" + simple_size.to_text() + " bytes)"
-                    if spec.guest_path == "":
-                        payloads.push(e)
-                    else:
-                        nested_payloads.push(e)
-                case Err(e):
-                    return Err(e)
-    else:
-        print "bake: Simple compiler payload skipped (set SIMPLEOS_SIMPLE_BINARY and touch build/os/.bake_include_simple_compiler to embed)"
+    for role in roles:
+        for guest_path in role.guest_paths:
+            nested_payloads.push(PayloadEntry(
+                path: role.role + " role",
+                data: role.data,
+                guest_path: guest_path,
+            ))
+            print "bake: loaded " + role.role + " payload -> " + guest_path + " (" + role.data.len().to_text() + " bytes)"
+    val manifest_payload = match _simple_toolchain_manifest_payload(roles):
+        case Ok(data): data
+        case Err(error): return Err("bake: " + _role_admission_error_text(error))
+    nested_payloads.push(PayloadEntry(
+        path: "SIMPLETOOL SDN",
+        data: manifest_payload,
+        guest_path: "/SYS/SIMPLETOOL.SDN",
+    ))
+    print "bake: loaded /SYS/SIMPLETOOL.SDN role/digest manifest"
 
     for entry in simpleos_font_bundle_entries():
         val loaded = load_simpleos_font_bundle_entry(entry)
@@ -228,7 +426,7 @@ fn bake(out_disk: text, out_initramfs: text) -> Result<(), text>:
     print "bake: disk image written: " + out_disk + " (" + img_size.to_text() + " bytes)"
 
     # --- Step 4: build real initramfs image with injected payloads ---
-    match _build_initramfs(out_initramfs, hello_rs_path, hello_c_path):
+    match _build_initramfs(out_initramfs, hello_rs_path, hello_c_path, roles, init_artifact.host_path):
         case Ok(()):
             print "bake: initramfs image written: " + out_initramfs
         case Err(e):
@@ -245,3 +443,8 @@ fn main():
             print "bake done: " + disk + "  " + initramfs
         case Err(e):
             print "bake FAILED: " + e
+
+export SimpleRolePayload, SimpleRoleInput, SimpleRoleAdmissionError
+export simpleos_role_payload_digest, simpleos_admit_role_payloads
+export simpleos_admit_role_artifact_path
+export simpleos_render_toolchain_manifest

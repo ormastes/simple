@@ -1,0 +1,212 @@
+# HIR lowering - Block and assembly lowering.
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.frontend.parser_types.*
+use compiler.frontend.parser_types_expr.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_lowering.types.HirLowering
+
+impl HirLowering:
+    me strip_discarded_string_interps(s: Stmt) -> Stmt:
+        """Docstring guard: a bare string-literal expression STATEMENT whose
+        value is DISCARDED (non-tail position in a value block, any position
+        in a unit block) is documentation, not code. The flat bridge never
+        strips docstrings from bodies (Function.doc_comment stays empty) and
+        flat_bridge_build_string_interps brace-scans EVERY string literal, so
+        a doc example like `substitute_vars("Hello ${name}!", ...)` lowered
+        `{name}` as a REAL interpolation of an undefined variable and
+        loud-failed the whole module ("unresolved name: name" in
+        std.env.variables — parity case dynload_tagged_text). Strip the
+        interpolations so the discarded literal stays inert. Tail-position
+        strings are NEVER passed here — `fn f() -> text: "hi {who}"` keeps
+        interpolating."""
+        val sk: StmtKind = s.kind
+        match sk:
+            case StmtKind.Expr(e):
+                val e_t: Expr = e
+                match e_t.kind:
+                    case ExprKind.StringLit(sval, sinterps):
+                        if sinterps.?:
+                            return Stmt(
+                                kind: StmtKind.Expr(Expr(kind: ExprKind.StringLit(sval, nil), span: e_t.span)),
+                                span: s.span
+                            )
+                    case _: ()
+            case _: ()
+        s
+
+    me lower_hir_block(b: Block) -> HirBlock:
+        # NOTE: a former SIMPLE_BOOTSTRAP branch here returned
+        # `HirBlock(stmts:, value:, span:)` — omitting the `has` field, which then
+        # read `nil` (an unwritten bool), so MIR lower_block dropped every tail
+        # value under bootstrap (implicit-return string/int literals vanished →
+        # `ret ptr null` / empty stage2 binary, bug #79). It also used the
+        # seed-unsafe re-index + Option patterns the loop below was written to
+        # avoid. Deleted: bootstrap now uses this hardened path, which sets `has`.
+        self.symbols.push_scope(ScopeKind.Block)
+
+        # Extract the block's trailing value (last statement, if an expression)
+        # from the FRESH `lower_hir_stmt` return value during the loop, NOT by
+        # re-indexing the `stmts` array afterward. The seed erases `[HirStmt]`
+        # elements to ANY, and matching `last.kind` on an ANY array element
+        # mis-extracts the `Expr(expr)` enum payload -> a GARBAGE HirExpr pointer
+        # (observed 0x1800000007), silently dropping the `-c` "print(...)" body
+        # (iteration 10). A direct function return is not ANY-erased, so matching
+        # `lowered.kind` in-loop resolves the payload correctly. Also avoids the
+        # intermediate `Option<HirExpr>` + `if val v = ...` Some-unwrap the seed
+        # miscompiles.
+        var stmts: [HirStmt] = []
+        var block_has_value = false
+        var block_value_expr: HirExpr = HirExpr(kind: HirExprKind.NilLit, type_: nil, span: b.span)
+        val expr_stmt_disc = rt_enum_discriminant(HirStmtKind.Expr(block_value_expr))
+        val return_expr_disc = rt_enum_discriminant(HirExprKind.Return(nil))
+        val stmt_count = b.stmts.len()
+        var stmt_idx = 0
+        while stmt_idx < stmt_count:
+            # A single source statement may desugar into several HIR statements
+            # (tuple destructuring, see lower_hir_stmt_multi) -- splice them all
+            # in, applying the tail-value extraction only to the very last one.
+            # Non-tail bare string statements are docstrings — strip their
+            # interpolations (see strip_discarded_string_interps).
+            val src_stmt = if stmt_idx < stmt_count - 1:
+                self.strip_discarded_string_interps(b.stmts[stmt_idx])
+            else:
+                b.stmts[stmt_idx]
+            val lowered_list = self.lower_hir_stmt_multi(src_stmt)
+            val lowered_count = lowered_list.len()
+            var li = 0
+            while li < lowered_count:
+                val lowered = lowered_list[li]
+                if stmt_idx == stmt_count - 1 and li == lowered_count - 1:
+                    # Guard the exact Expr discriminator before the qualified
+                    # payload match. Bare or unguarded enum matching can accept
+                    # another statement variant and extract its header as a
+                    # garbage HirExpr stored in block.value.
+                    if rt_enum_discriminant(lowered.kind) == expr_stmt_disc:
+                        match lowered.kind:
+                            case HirStmtKind.Expr(expr):
+                                if rt_enum_discriminant(expr.kind) == return_expr_disc:
+                                    stmts = stmts.push(lowered)
+                                else:
+                                    block_has_value = true
+                                    block_value_expr = expr
+                            case _:
+                                stmts = stmts.push(lowered)
+                    else:
+                        stmts = stmts.push(lowered)
+                else:
+                    stmts = stmts.push(lowered)
+                li = li + 1
+            stmt_idx = stmt_idx + 1
+
+        self.symbols.pop_scope()
+
+        # HirBlock desugars Option<value> into has + value. The `has` flag MUST
+        # be set: MIR lower_block gates the tail value on `block.has`, so without
+        # it the extracted last expression-statement is silently dropped (every
+        # function body lowered to an empty MIR block in the AOT/native path).
+        if block_has_value:
+            HirBlock(stmts: stmts, has: true, value: block_value_expr, span: b.span)
+        else:
+            HirBlock(stmts: stmts, has: false, value: HirExpr(kind: HirExprKind.NilLit, type_: nil, span: b.span), span: b.span)
+
+    # Lower a block that is NOT in value position (a Unit-returning function body,
+    # e.g. `fn main(): print(...)`). Every statement — INCLUDING a trailing
+    # expression-statement — stays in `stmts`; NO trailing value is extracted and
+    # `has=false`.
+    #
+    # Why a separate path: the value-extracting `lower_hir_block` above destructures
+    # `case Expr(expr)` on the FRESH `lower_hir_stmt` return value to lift the last
+    # expr into `block.value`. On the seed-compiled stage4 the seed erases the
+    # `HirStmtKind` payload to ANY and mis-extracts that `Expr(expr)` payload,
+    # storing a GARBAGE HirExpr as `block.value` (iteration 14: eval_expr on it
+    # silently no-ops with the has-gate, or SIGSEGVs with a typed rebind — a SEED
+    # codegen bug, not fixable by a use-site typed local). For a Unit-returning
+    # body the trailing value is never needed, so we sidestep the fragile
+    # extraction entirely: the trailing `print(...)` stays a statement and is
+    # evaluated by the interpreter's `exec_stmt` statement loop (which destructures
+    # `case Expr(expr)` on a PROPERLY-lowered HirStmt — that path works). The
+    # value-extracting path is preserved for expression-position blocks and
+    # non-Unit returns, where a value is genuinely required (that path keeps the
+    # known ANY-extraction limitation, documented in the bug tracker).
+    me lower_hir_block_unit(b: Block) -> HirBlock:
+        if (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            self.symbols.push_scope(ScopeKind.Block)
+            var boot_stmts: [HirStmt] = []
+            var boot_idx = 0
+            while boot_idx < b.stmts.len():
+                val boot_lowered_list = self.lower_hir_stmt_multi(b.stmts[boot_idx])
+                var boot_li = 0
+                while boot_li < boot_lowered_list.len():
+                    boot_stmts = boot_stmts.push(boot_lowered_list[boot_li])
+                    boot_li = boot_li + 1
+                boot_idx = boot_idx + 1
+            self.symbols.pop_scope()
+            return HirBlock(stmts: boot_stmts, has: false, value: HirExpr(kind: HirExprKind.NilLit, type_: nil, span: b.span), span: b.span)
+
+        self.symbols.push_scope(ScopeKind.Block)
+        var stmts: [HirStmt] = []
+        val stmt_count = b.stmts.len()
+        var stmt_idx = 0
+        while stmt_idx < stmt_count:
+            # Unit block: EVERY statement's value is discarded, so a bare
+            # string statement at ANY position is a docstring — strip its
+            # interpolations (see strip_discarded_string_interps).
+            val lowered_list: [HirStmt] = self.lower_hir_stmt_multi(self.strip_discarded_string_interps(b.stmts[stmt_idx]))
+            var li = 0
+            while li < lowered_list.len():
+                stmts = stmts.push(lowered_list[li])
+                li = li + 1
+            stmt_idx = stmt_idx + 1
+        self.symbols.pop_scope()
+
+        HirBlock(stmts: stmts, has: false, value: HirExpr(kind: HirExprKind.NilLit, type_: nil, span: b.span), span: b.span)
+
+    me lower_asm(asm_node: AsmExpr) -> HirAsm:
+        # Lower all constraint value expressions
+        var hir_constraints: [HirAsmConstraint] = []
+        for constraint in asm_node.constraints:
+            val hir_value = self.lower_hir_expr(constraint.value)
+            val hir_output = match constraint.output_value:
+                case Some(output): Some(self.lower_hir_expr(output))
+                case None: nil
+            val hir_constraint = HirAsmConstraint(
+                name: constraint.name,
+                kind: constraint.kind,
+                location: constraint.location,
+                value: hir_value,
+                output_value: hir_output,
+                span: constraint.span
+            )
+            hir_constraints = hir_constraints.push(hir_constraint)
+
+        HirAsm(
+            asm_template: asm_node.asm_template,
+            is_volatile: asm_node.is_volatile,
+            constraints: hir_constraints,
+            clobbers: asm_node.clobbers,
+            clobber_abis: asm_node.clobber_abis,
+            options: asm_node.options,
+            span: asm_node.span
+        )
+
+    me lower_asm_match_arms(arms: [AsmMatchArm]) -> [HirAsmMatchArm]:
+        var result: [HirAsmMatchArm] = []
+        for arm in arms:
+            var has_body = arm.has_asm_body
+            var hir_body = if has_body:
+                self.lower_asm(arm.asm_body)
+            else:
+                nil
+            val hir_arm = HirAsmMatchArm(
+                has_spec: arm.has_spec,
+                spec: arm.spec,
+                is_wildcard: arm.is_wildcard,
+                has_asm_body: has_body,
+                asm_body: hir_body,
+                is_compile_error: arm.is_compile_error,
+                error_message: arm.error_message,
+                span: arm.span
+            )
+            result = result.push(hir_arm)
+        result

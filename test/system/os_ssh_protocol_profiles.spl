@@ -1,0 +1,749 @@
+# SSH protocol profiles A-G for the canonical baremetal suite.
+
+use os.crypto.ed25519.{ed25519_self_test, ed25519_keypair_from_seed}
+use os.crypto.random.{random_bytes}
+use os.apps.sshd.ssh_packet.{ssh_packet_build, ssh_packet_read, ssh_put_u32, ssh_get_u32, ssh_put_text, ssh_get_text, ssh_put_string, ssh_get_string, ssh_put_bool, ssh_put_byte}
+use os.apps.sshd.ssh_auth.{SshUserDb, SshAuthRequest, ssh_parse_auth_request, ssh_build_auth_success, ssh_build_auth_failure, ssh_build_auth_banner, ssh_build_userauth_pk_ok, SSH_MSG_USERAUTH_REQUEST}
+use os.apps.sshd.ssh_channel.{ChannelTable, ChannelType, ChannelState, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET, ssh_parse_channel_open, ssh_parse_channel_data, ssh_parse_channel_request, ssh_parse_window_adjust, ssh_parse_channel_eof, ssh_parse_channel_close, ssh_build_channel_open_confirmation, ssh_build_channel_open_failure, ssh_build_channel_data, ssh_build_channel_window_adjust, ssh_build_channel_eof, ssh_build_channel_close, ssh_build_channel_success, ssh_build_channel_failure}
+use os.apps.sshd.ssh_transport.{SshKexInit, ssh_build_version_string, ssh_parse_version_string, ssh_build_kexinit, ssh_parse_kexinit, ssh_negotiate_algorithms, ssh_build_service_accept, ssh_parse_service_request, ssh_build_disconnect}
+use os.apps.sshd.sshd.{SshDaemon}
+use test.system.os_ssh_support.{os_ssh_assert, os_ssh_configured_users}
+
+extern fn serial_println(msg: text)
+
+# ============================================================================
+# A. Crypto Tests (10)
+# ============================================================================
+
+pub fn os_ssh_test_crypto():
+    serial_println("--- A. Crypto ---")
+
+    # A1: Ed25519 self-test (RFC 8032 vectors)
+    val self_test = ed25519_self_test()
+    os_ssh_assert(self_test.is_ok(), "A1: Ed25519 self-test passes")
+    if self_test.is_err():
+        serial_println("[INFO] Ed25519: {self_test.unwrap_err()}")
+
+    # A2: Ed25519 keypair sizes
+    val seed = random_bytes(32)
+    val keypair = ed25519_keypair_from_seed(seed)
+    os_ssh_assert(keypair.0.len() == 32, "A2: Ed25519 private key is 32 bytes (seed)")
+
+    # A3: Ed25519 public key size
+    os_ssh_assert(keypair.1.len() == 32, "A3: Ed25519 public key is 32 bytes")
+
+    # A4: Different seeds produce different public keys
+    val seed2 = random_bytes(32)
+    val keypair2 = ed25519_keypair_from_seed(seed2)
+    var pk_differ = false
+    var j: u64 = 0
+    while j < 32:
+        if keypair.1[j] != keypair2.1[j]:
+            pk_differ = true
+        j = j + 1
+    os_ssh_assert(pk_differ, "A4: Different seeds produce different public keys")
+
+    # A5: Same seed produces same keypair (deterministic)
+    val keypair_dup = ed25519_keypair_from_seed(seed)
+    var pk_same = true
+    j = 0
+    while j < 32:
+        if keypair.1[j] != keypair_dup.1[j]:
+            pk_same = false
+        j = j + 1
+    os_ssh_assert(pk_same, "A5: Same seed produces same public key (deterministic)")
+
+    # A6: Random bytes length correct
+    val rnd16 = random_bytes(16)
+    os_ssh_assert(rnd16.len() == 16, "A6: random_bytes(16) returns 16 bytes")
+
+    # A7: Random bytes length 1
+    val rnd1 = random_bytes(1)
+    os_ssh_assert(rnd1.len() == 1, "A7: random_bytes(1) returns 1 byte")
+
+    # A8: Random bytes length 64
+    val rnd64 = random_bytes(64)
+    os_ssh_assert(rnd64.len() == 64, "A8: random_bytes(64) returns 64 bytes")
+
+    # A9: Random bytes not all zero (statistical)
+    var any_nonzero = false
+    j = 0
+    while j < 64:
+        if rnd64[j] != 0:
+            any_nonzero = true
+        j = j + 1
+    os_ssh_assert(any_nonzero, "A9: random_bytes(64) not all zeros")
+
+    # A10: Two random calls produce different output
+    val rnd64b = random_bytes(64)
+    var rnd_differ = false
+    j = 0
+    while j < 64:
+        if rnd64[j] != rnd64b[j]:
+            rnd_differ = true
+        j = j + 1
+    os_ssh_assert(rnd_differ, "A10: Two random_bytes(64) calls differ")
+
+# ============================================================================
+# B. SSH Packet Codec Tests (12)
+# ============================================================================
+
+pub fn os_ssh_test_packet_codec():
+    serial_println("--- B. Packet Codec ---")
+
+    # B1: Encode 5-byte payload
+    var payload5: [u8] = [0x14, 0x01, 0x02, 0x03, 0x04]
+    val enc5 = ssh_packet_build(payload5, 0)
+    os_ssh_assert(enc5.len() > 5, "B1: 5-byte payload encodes to larger packet")
+
+    # B2: Decode round-trip — length
+    val dec5 = ssh_packet_read(enc5, 0)
+    if dec5.is_ok():
+        val pkt5 = dec5.unwrap().0
+        os_ssh_assert(pkt5.payload.len() == 5, "B2: Decoded payload length == 5")
+    else:
+        os_ssh_assert(false, "B2: Decoded payload length == 5 (decode error)")
+
+    # B3: Decode round-trip — first byte
+    if dec5.is_ok():
+        val pkt5b = dec5.unwrap().0
+        os_ssh_assert(pkt5b.payload[0] == 0x14, "B3: Decoded first byte == 0x14")
+    else:
+        os_ssh_assert(false, "B3: Decoded first byte == 0x14 (decode error)")
+
+    # B4: Decode round-trip — last byte
+    if dec5.is_ok():
+        val pkt5c = dec5.unwrap().0
+        os_ssh_assert(pkt5c.payload[4] == 0x04, "B4: Decoded last byte == 0x04")
+    else:
+        os_ssh_assert(false, "B4: Decoded last byte == 0x04 (decode error)")
+
+    # B5: Empty payload round-trip
+    var empty: [u8] = []
+    val enc_empty = ssh_packet_build(empty, 1)
+    val dec_empty = ssh_packet_read(enc_empty, 0)
+    os_ssh_assert(dec_empty.is_ok(), "B5: Empty payload packet round-trips")
+
+    # B6: Single-byte payload
+    var single: [u8] = [0xFF]
+    val enc_single = ssh_packet_build(single, 2)
+    val dec_single = ssh_packet_read(enc_single, 0)
+    if dec_single.is_ok():
+        os_ssh_assert(dec_single.unwrap().0.payload[0] == 0xFF, "B6: Single byte 0xFF round-trips")
+    else:
+        os_ssh_assert(false, "B6: Single byte 0xFF round-trips (decode error)")
+
+    # B7: ssh_put_u32 / ssh_get_u32 round-trip
+    var buf32: [u8] = []
+    ssh_put_u32(buf32, 0x12345678)
+    val got32 = ssh_get_u32(buf32, 0)
+    os_ssh_assert(got32 == 0x12345678, "B7: put_u32/get_u32 round-trip (0x12345678)")
+
+    # B8: ssh_put_u32 zero
+    var buf32z: [u8] = []
+    ssh_put_u32(buf32z, 0)
+    val got32z = ssh_get_u32(buf32z, 0)
+    os_ssh_assert(got32z == 0, "B8: put_u32/get_u32 round-trip (0)")
+
+    # B9: ssh_put_text / ssh_get_text round-trip
+    var buft: [u8] = []
+    ssh_put_text(buft, "hello")
+    val got_text = ssh_get_text(buft, 0)
+    if got_text.is_ok():
+        os_ssh_assert(got_text.unwrap().0 == "hello", "B9: put_text/get_text round-trip")
+    else:
+        os_ssh_assert(false, "B9: put_text/get_text round-trip (error)")
+
+    # B10: ssh_put_text empty string
+    var buft_e: [u8] = []
+    ssh_put_text(buft_e, "")
+    val got_text_e = ssh_get_text(buft_e, 0)
+    if got_text_e.is_ok():
+        os_ssh_assert(got_text_e.unwrap().0 == "", "B10: put_text/get_text empty string")
+    else:
+        os_ssh_assert(false, "B10: put_text/get_text empty string (error)")
+
+    # B11: ssh_put_string / ssh_get_string round-trip
+    var bufs: [u8] = []
+    var data_bytes: [u8] = [0xDE, 0xAD, 0xBE, 0xEF]
+    ssh_put_string(bufs, data_bytes)
+    val got_str = ssh_get_string(bufs, 0)
+    if got_str.is_ok():
+        val sdata = got_str.unwrap().0
+        os_ssh_assert(sdata.len() == 4, "B11: put_string/get_string length == 4")
+    else:
+        os_ssh_assert(false, "B11: put_string/get_string length == 4 (error)")
+
+    # B12: Large payload (256 bytes)
+    var large: [u8] = []
+    var k: u64 = 0
+    while k < 256:
+        large.push((k & 0xFF).to_u8())
+        k = k + 1
+    val enc_large = ssh_packet_build(large, 3)
+    val dec_large = ssh_packet_read(enc_large, 0)
+    os_ssh_assert(dec_large.is_ok(), "B12: 256-byte payload round-trips")
+
+# ============================================================================
+# C. SSH Auth Tests (20)
+# ============================================================================
+
+pub fn os_ssh_test_auth():
+    serial_println("--- C. Auth ---")
+
+    # C1: Fresh user DB is empty
+    var db = SshUserDb.new()
+    os_ssh_assert(not db.authenticate_password("root", "anything"), "C1: Fresh DB rejects all")
+
+    # C2: Add identity; password stays disabled until zeroization is proven.
+    db.add_user_identity("root")
+    os_ssh_assert(not db.authenticate_password("root", "simpleos"), "C2: password auth disabled")
+
+    # C3: Wrong password rejected
+    os_ssh_assert(not db.authenticate_password("root", "wrongpass"), "C3: root/wrongpass rejected")
+
+    # C4: Unknown user rejected
+    os_ssh_assert(not db.authenticate_password("nobody", "anything"), "C4: Unknown user rejected")
+
+    # C5: Second identity also has no implicit password.
+    db.add_user_identity("user")
+    os_ssh_assert(not db.authenticate_password("user", "password"), "C5: no implicit password")
+
+    # C6: First user still works after adding second
+    os_ssh_assert(not db.authenticate_password("root", "simpleos"), "C6: root password remains disabled")
+
+    # C7: Pubkey rejected when no keys configured
+    var fake_key: [u8] = [0x00, 0x01, 0x02, 0x03]
+    os_ssh_assert(not db.authenticate_key("root", fake_key), "C7: Pubkey rejected (no keys)")
+
+    # C8: Empty password rejected
+    os_ssh_assert(not db.authenticate_password("root", ""), "C8: Empty password rejected")
+
+    # C9: Empty username rejected
+    os_ssh_assert(not db.authenticate_password("", "simpleos"), "C9: Empty username rejected")
+
+    # C10: Configured identities still have no implicit password
+    var default_db = os_ssh_configured_users()
+    os_ssh_assert(not default_db.authenticate_password("root", "simpleos"), "C10: Configured root has no implicit password")
+
+    # C11: Second configured identity also remains password-disabled
+    os_ssh_assert(not default_db.authenticate_password("user", "password"), "C11: Configured user has no implicit password")
+
+    # C12: USERAUTH_REQUEST parsing
+    var auth_payload: [u8] = []
+    auth_payload.push(SSH_MSG_USERAUTH_REQUEST)
+    ssh_put_text(auth_payload, "testuser")
+    ssh_put_text(auth_payload, "ssh-connection")
+    ssh_put_text(auth_payload, "password")
+    auth_payload.push(0)
+    ssh_put_text(auth_payload, "secret123")
+    val parsed = ssh_parse_auth_request(auth_payload)
+    os_ssh_assert(parsed.is_err(), "C12: Password request rejected before secret materialization")
+
+    # C13: Publickey auth request parsing
+    var pk_payload: [u8] = []
+    pk_payload.push(SSH_MSG_USERAUTH_REQUEST)
+    ssh_put_text(pk_payload, "alice")
+    ssh_put_text(pk_payload, "ssh-connection")
+    ssh_put_text(pk_payload, "publickey")
+    pk_payload.push(0)  # has_signature = false
+    ssh_put_text(pk_payload, "ssh-ed25519")
+    var pk_blob: [u8] = []
+    ssh_put_text(pk_blob, "ssh-ed25519")
+    ssh_put_string(pk_blob, [0u8; 32])
+    ssh_put_string(pk_payload, pk_blob)
+    val pk_parsed = ssh_parse_auth_request(pk_payload)
+    if pk_parsed.is_ok():
+        var pk_req = pk_parsed.unwrap()
+        os_ssh_assert(pk_req.method == "publickey" and pk_req.key_algo == "ssh-ed25519", "C13: Publickey auth request parsed")
+    else:
+        os_ssh_assert(false, "C13: Publickey auth request parsed (error)")
+
+    # C14: Publickey auth request has_signature=true
+    var pk2_payload: [u8] = []
+    pk2_payload.push(SSH_MSG_USERAUTH_REQUEST)
+    ssh_put_text(pk2_payload, "bob")
+    ssh_put_text(pk2_payload, "ssh-connection")
+    ssh_put_text(pk2_payload, "publickey")
+    pk2_payload.push(1)  # has_signature = true
+    ssh_put_text(pk2_payload, "ssh-ed25519")
+    var pk2_blob: [u8] = []
+    ssh_put_text(pk2_blob, "ssh-ed25519")
+    ssh_put_string(pk2_blob, [1u8; 32])
+    ssh_put_string(pk2_payload, pk2_blob)
+    var pk2_sig: [u8] = []
+    ssh_put_text(pk2_sig, "ssh-ed25519")
+    ssh_put_string(pk2_sig, [2u8; 64])
+    ssh_put_string(pk2_payload, pk2_sig)
+    val pk2_parsed = ssh_parse_auth_request(pk2_payload)
+    if pk2_parsed.is_ok():
+        var pk2_req = pk2_parsed.unwrap()
+        os_ssh_assert(pk2_req.has_signature, "C14: has_signature=true parsed")
+    else:
+        os_ssh_assert(false, "C14: has_signature=true parsed (error)")
+
+    # C15: "none" method parsing
+    var none_payload: [u8] = []
+    none_payload.push(SSH_MSG_USERAUTH_REQUEST)
+    ssh_put_text(none_payload, "guest")
+    ssh_put_text(none_payload, "ssh-connection")
+    ssh_put_text(none_payload, "none")
+    val none_parsed = ssh_parse_auth_request(none_payload)
+    if none_parsed.is_ok():
+        var none_req = none_parsed.unwrap()
+        os_ssh_assert(none_req.method == "none" and none_req.username == "guest", "C15: none method parsed")
+    else:
+        os_ssh_assert(false, "C15: none method parsed (error)")
+
+    # C16: Too-short auth request
+    var short_auth: [u8] = [SSH_MSG_USERAUTH_REQUEST]
+    val short_parsed = ssh_parse_auth_request(short_auth)
+    os_ssh_assert(short_parsed.is_err(), "C16: Too-short auth request is error")
+
+    # C17: Wrong message type
+    var wrong_type_auth: [u8] = [99, 0x00, 0x00]
+    val wt_parsed = ssh_parse_auth_request(wrong_type_auth)
+    os_ssh_assert(wt_parsed.is_err(), "C17: Wrong message type is error")
+
+    # C18: Key blob round-trip in pubkey request
+    if pk_parsed.is_ok():
+        var pk_req2 = pk_parsed.unwrap()
+        os_ssh_assert(pk_req2.key_blob.len() == 51, "C18: Canonical Ed25519 key blob length == 51")
+    else:
+        os_ssh_assert(false, "C18: Key blob length (error)")
+
+    # C19: Add authorized key and authenticate
+    var authorized_blob: [u8] = []
+    authorized_blob = ssh_put_text(authorized_blob, "ssh-ed25519")
+    var authorized_raw: [u8] = []
+    var key_i: i64 = 0
+    while key_i < 32:
+        authorized_raw.push(key_i.to_u8())
+        key_i = key_i + 1
+    authorized_blob = ssh_put_string(authorized_blob, authorized_raw)
+    db.add_user_key("root", authorized_blob)
+    var auth_key_ok: bool = db.authenticate_key("root", authorized_blob)
+    os_ssh_assert(auth_key_ok, "C19: Authorized key accepted")
+
+    # C20: Wrong key rejected after adding authorized key
+    var auth_key_bad: bool = db.authenticate_key("root", [0xFF, 0xFF, 0xFF, 0xFF])
+    os_ssh_assert(not auth_key_bad, "C20: Wrong key rejected")
+
+# ============================================================================
+# D. SSH Channel Table Tests (22)
+# ============================================================================
+
+pub fn os_ssh_test_channel_table():
+    serial_println("--- D. Channel Table ---")
+
+    # D1: New table is empty
+    var ct = ChannelTable.new()
+    val not_found = ct.find(0)
+    os_ssh_assert(not_found == nil, "D1: Empty table find(0) returns nil")
+
+    # D2: Open first channel
+    val id0 = ct.open(ChannelType.Session, 100, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)
+    os_ssh_assert(id0 == 0, "D2: First channel ID == 0")
+
+    # D3: Open second channel
+    val id1 = ct.open(ChannelType.Session, 101, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)
+    os_ssh_assert(id1 == 1, "D3: Second channel ID == 1")
+
+    # D4: Find first channel
+    val ch0 = ct.find(id0)
+    os_ssh_assert(ch0 != nil, "D4: Channel 0 found")
+
+    # D5: Find second channel
+    val ch1 = ct.find(id1)
+    os_ssh_assert(ch1 != nil, "D5: Channel 1 found")
+
+    # D6: Channel remote_id correct
+    if ch0 != nil:
+        os_ssh_assert(ch0.remote_id == 100, "D6: Channel 0 remote_id == 100")
+    else:
+        os_ssh_assert(false, "D6: Channel 0 remote_id == 100 (not found)")
+
+    # D7: Close channel
+    ct.close(id0)
+    val ch0_after = ct.find(id0)
+    if ch0_after != nil:
+        os_ssh_assert(ch0_after.state == ChannelState.Closed, "D7: Channel 0 state == Closed")
+    else:
+        os_ssh_assert(false, "D7: Closed channel remains observable")
+
+    # D8: Close non-existent channel doesn't crash
+    os_ssh_assert(not ct.close(999), "D8: Close non-existent channel reports rejection")
+
+    # D9: Open third channel after close
+    val id2 = ct.open(ChannelType.Session, 102, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)
+    os_ssh_assert(id2 >= 0, "D9: Third channel opened (id={id2})")
+
+    # D10: Window adjust
+    val before_adjust = ct.find(id1).unwrap().local_window
+    os_ssh_assert(ct.adjust_window(id1, 4096), "D10: Window adjust accepted")
+    os_ssh_assert(ct.find(id1).unwrap().local_window == before_adjust + 4096u32, "D10: Window adjust is observable")
+
+    # D11: Consume remote window
+    val consumed = ct.consume_remote_window(id1, 1024)
+    os_ssh_assert(consumed, "D11: Consume 1024 bytes from remote window")
+
+    # D12: Parse channel open message round-trip
+    var ch_open_msg: [u8] = [90]  # SSH_MSG_CHANNEL_OPEN
+    ssh_put_text(ch_open_msg, "session")
+    ssh_put_u32(ch_open_msg, 42)      # sender channel
+    ssh_put_u32(ch_open_msg, 65536)   # window
+    ssh_put_u32(ch_open_msg, 32768)   # max packet
+    val co_parsed = ssh_parse_channel_open(ch_open_msg)
+    os_ssh_assert(co_parsed.is_ok(), "D12: CHANNEL_OPEN parsed")
+
+    # D13: Parse channel open — channel type
+    if co_parsed.is_ok():
+        var co_tup = co_parsed.unwrap()
+        os_ssh_assert(co_tup.0 == "session", "D13: CHANNEL_OPEN type == session")
+    else:
+        os_ssh_assert(false, "D13: CHANNEL_OPEN type (error)")
+
+    # D14: Parse channel open — sender channel
+    if co_parsed.is_ok():
+        var co_tup2 = co_parsed.unwrap()
+        os_ssh_assert(co_tup2.1 == 42, "D14: CHANNEL_OPEN sender == 42")
+    else:
+        os_ssh_assert(false, "D14: CHANNEL_OPEN sender (error)")
+
+    # D15: Parse channel data round-trip
+    var ch_data_buf: [u8] = [94]  # SSH_MSG_CHANNEL_DATA
+    ssh_put_u32(ch_data_buf, 7)
+    var ch_data_bytes: [u8] = [0x48, 0x69]
+    ssh_put_string(ch_data_buf, ch_data_bytes)
+    val cd_parsed = ssh_parse_channel_data(ch_data_buf)
+    if cd_parsed.is_ok():
+        var cd_tup = cd_parsed.unwrap()
+        os_ssh_assert(cd_tup.0 == 7 and cd_tup.1.len() == 2, "D15: CHANNEL_DATA parsed")
+    else:
+        os_ssh_assert(false, "D15: CHANNEL_DATA parsed (error)")
+
+    # D16: Parse channel request
+    var ch_req_buf: [u8] = [98]  # SSH_MSG_CHANNEL_REQUEST
+    ssh_put_u32(ch_req_buf, 3)
+    ssh_put_text(ch_req_buf, "shell")
+    ch_req_buf.push(1)  # want_reply = true
+    val cr_parsed = ssh_parse_channel_request(ch_req_buf)
+    if cr_parsed.is_ok():
+        var cr_tup = cr_parsed.unwrap()
+        os_ssh_assert(cr_tup.0 == 3 and cr_tup.1 == "shell" and cr_tup.2, "D16: CHANNEL_REQUEST parsed")
+    else:
+        os_ssh_assert(false, "D16: CHANNEL_REQUEST parsed (error)")
+
+    # D17: Parse window adjust
+    var wa_buf: [u8] = [93]  # SSH_MSG_CHANNEL_WINDOW_ADJUST
+    ssh_put_u32(wa_buf, 5)
+    ssh_put_u32(wa_buf, 16384)
+    val wa_parsed = ssh_parse_window_adjust(wa_buf)
+    if wa_parsed.is_ok():
+        var wa_tup = wa_parsed.unwrap()
+        os_ssh_assert(wa_tup.0 == 5 and wa_tup.1 == 16384, "D17: WINDOW_ADJUST parsed")
+    else:
+        os_ssh_assert(false, "D17: WINDOW_ADJUST parsed (error)")
+
+    # D18: Parse channel EOF
+    var eof_buf: [u8] = [96]  # SSH_MSG_CHANNEL_EOF
+    ssh_put_u32(eof_buf, 9)
+    val eof_parsed = ssh_parse_channel_eof(eof_buf)
+    if eof_parsed.is_ok():
+        os_ssh_assert(eof_parsed.unwrap() == 9, "D18: CHANNEL_EOF recipient == 9")
+    else:
+        os_ssh_assert(false, "D18: CHANNEL_EOF parsed (error)")
+
+    # D19: Parse channel close
+    var close_buf: [u8] = [97]  # SSH_MSG_CHANNEL_CLOSE
+    ssh_put_u32(close_buf, 11)
+    val close_parsed = ssh_parse_channel_close(close_buf)
+    if close_parsed.is_ok():
+        os_ssh_assert(close_parsed.unwrap() == 11, "D19: CHANNEL_CLOSE recipient == 11")
+    else:
+        os_ssh_assert(false, "D19: CHANNEL_CLOSE parsed (error)")
+
+    # D20: Parse channel open too short
+    var co_short: [u8] = [90]
+    val co_short_parsed = ssh_parse_channel_open(co_short)
+    os_ssh_assert(co_short_parsed.is_err(), "D20: CHANNEL_OPEN too short is error")
+
+    # D21: Parse channel data wrong type
+    var cd_wrong: [u8] = [99, 0, 0, 0, 1, 0, 0, 0, 0]
+    val cd_wrong_parsed = ssh_parse_channel_data(cd_wrong)
+    os_ssh_assert(cd_wrong_parsed.is_err(), "D21: CHANNEL_DATA wrong type is error")
+
+    # D22: Window adjust after consume tracks correctly
+    var ct2 = ChannelTable.new()
+    var d22_id: u32 = ct2.open(ChannelType.Session, 200, 4096, DEFAULT_MAX_PACKET)
+    var d22_consumed: bool = ct2.consume_remote_window(d22_id, 2048)
+    os_ssh_assert(d22_consumed, "D22: Consume 2048 from 4096 window succeeds")
+
+# ============================================================================
+# E. SSH Transport Tests (20)
+# ============================================================================
+
+pub fn os_ssh_test_transport():
+    serial_println("--- E. Transport ---")
+
+    # E1: Version string starts with SSH-2.0
+    val ver = ssh_build_version_string()
+    os_ssh_assert(ver.len() > 0, "E1: Version string not empty")
+
+    # E2: Parse valid version string
+    var ver_data: [u8] = []
+    var ver_str = "SSH-2.0-SimpleOS\r\n"
+    var vi: u64 = 0
+    while vi < ver_str.len():
+        ver_data.push(ver_str[vi].to_u8())
+        vi = vi + 1
+    val parsed_ver = ssh_parse_version_string(ver_data)
+    os_ssh_assert(parsed_ver.is_ok(), "E2: Valid version string parsed")
+
+    # E3: KEXINIT message builds
+    val kexinit = ssh_build_kexinit()
+    os_ssh_assert(kexinit.len() > 16, "E3: KEXINIT message > 16 bytes")
+
+    # E4: KEXINIT first byte is SSH_MSG_KEXINIT (20)
+    os_ssh_assert(kexinit[0] == 20, "E4: KEXINIT type byte == 20")
+
+    # E5: Service accept builds
+    val svc_accept = ssh_build_service_accept("ssh-userauth")
+    os_ssh_assert(svc_accept.len() > 0, "E5: SERVICE_ACCEPT message built")
+    os_ssh_assert(svc_accept[0] == 6, "E5b: SERVICE_ACCEPT type == 6")
+
+    # E6: Disconnect builds
+    val disc = ssh_build_disconnect(11, "test disconnect")
+    os_ssh_assert(disc.len() > 0, "E6: DISCONNECT message built")
+    os_ssh_assert(disc[0] == 1, "E6b: DISCONNECT type == 1")
+
+    # E7: Service request parsing
+    var svc_data: [u8] = [5]  # SSH_MSG_SERVICE_REQUEST
+    ssh_put_text(svc_data, "ssh-userauth")
+    val svc_parsed = ssh_parse_service_request(svc_data)
+    if svc_parsed.is_ok():
+        os_ssh_assert(svc_parsed.unwrap() == "ssh-userauth", "E7: SERVICE_REQUEST parsed as ssh-userauth")
+    else:
+        os_ssh_assert(false, "E7: SERVICE_REQUEST parsed (error)")
+
+    # E8: KEXINIT parse round-trip
+    val kex_parsed = ssh_parse_kexinit(kexinit)
+    os_ssh_assert(kex_parsed.is_ok(), "E8: KEXINIT parses back correctly")
+
+    # E9: Reject SSH-1.x version string
+    var ver_v1: [u8] = []
+    var ver_v1_str = "SSH-1.99-Old\r\n"
+    var vi9: u64 = 0
+    while vi9 < ver_v1_str.len():
+        ver_v1.push(ver_v1_str[vi9].to_u8())
+        vi9 = vi9 + 1
+    val parsed_v1 = ssh_parse_version_string(ver_v1)
+    os_ssh_assert(parsed_v1.is_err(), "E9: SSH-1.99 version rejected")
+
+    # E10: Reject version without CRLF
+    var ver_no_crlf: [u8] = []
+    var ver_no_crlf_str = "SSH-2.0-Test"
+    var vi10: u64 = 0
+    while vi10 < ver_no_crlf_str.len():
+        ver_no_crlf.push(ver_no_crlf_str[vi10].to_u8())
+        vi10 = vi10 + 1
+    val parsed_no_crlf = ssh_parse_version_string(ver_no_crlf)
+    os_ssh_assert(parsed_no_crlf.is_err(), "E10: Version without CRLF rejected")
+
+    # E11: Too-short version string
+    var ver_short: [u8] = [0x53, 0x0D, 0x0A]  # "S\r\n"
+    val parsed_short = ssh_parse_version_string(ver_short)
+    os_ssh_assert(parsed_short.is_err(), "E11: Too-short version rejected")
+
+    # E12: KEXINIT too-short parse error
+    var kex_short: [u8] = [20, 0x00]
+    val kex_short_parsed = ssh_parse_kexinit(kex_short)
+    os_ssh_assert(kex_short_parsed.is_err(), "E12: KEXINIT too short is error")
+
+    # E13: KEXINIT wrong type
+    var kex_wrong: [u8] = [99]
+    var kw_i: u64 = 0
+    while kw_i < 200:
+        kex_wrong.push(0)
+        kw_i = kw_i + 1
+    val kex_wrong_parsed = ssh_parse_kexinit(kex_wrong)
+    os_ssh_assert(kex_wrong_parsed.is_err(), "E13: KEXINIT wrong type is error")
+
+    # E14: Algorithm negotiation succeeds with matching algos
+    if kex_parsed.is_ok():
+        var server_kex = kex_parsed.unwrap()
+        # Build a client KEXINIT with matching algorithms
+        var client_kex = SshKexInit(
+            cookie: [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            kex_algorithms: "curve25519-sha256",
+            server_host_key_algorithms: "ssh-ed25519",
+            encryption_client_to_server: "aes256-gcm@openssh.com",
+            encryption_server_to_client: "aes256-gcm@openssh.com",
+            mac_client_to_server: "none",
+            mac_server_to_client: "none",
+            compression_client_to_server: "none",
+            compression_server_to_client: "none",
+            first_kex_packet_follows: false
+        )
+        var neg = ssh_negotiate_algorithms(client_kex, server_kex)
+        os_ssh_assert(neg.is_ok(), "E14: Algorithm negotiation succeeds")
+    else:
+        os_ssh_assert(false, "E14: Algorithm negotiation (kex parse error)")
+
+    # E15: Negotiation result kex algorithm
+    if kex_parsed.is_ok():
+        var server_kex2 = kex_parsed.unwrap()
+        var client_kex2 = SshKexInit(
+            cookie: [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            kex_algorithms: "curve25519-sha256",
+            server_host_key_algorithms: "ssh-ed25519",
+            encryption_client_to_server: "aes256-gcm@openssh.com",
+            encryption_server_to_client: "aes256-gcm@openssh.com",
+            mac_client_to_server: "none",
+            mac_server_to_client: "none",
+            compression_client_to_server: "none",
+            compression_server_to_client: "none",
+            first_kex_packet_follows: false
+        )
+        var neg2 = ssh_negotiate_algorithms(client_kex2, server_kex2)
+        if neg2.is_ok():
+            var algos = neg2.unwrap()
+            os_ssh_assert(algos.kex == "curve25519-sha256", "E15: Negotiated kex == curve25519-sha256")
+        else:
+            os_ssh_assert(false, "E15: Negotiated kex (error)")
+    else:
+        os_ssh_assert(false, "E15: Negotiated kex (kex parse error)")
+
+    # E16: Negotiation fails with no matching kex
+    var client_nomatch = SshKexInit(
+        cookie: [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+        kex_algorithms: "diffie-hellman-group14-sha256",
+        server_host_key_algorithms: "ssh-ed25519",
+        encryption_client_to_server: "aes256-gcm@openssh.com",
+        encryption_server_to_client: "aes256-gcm@openssh.com",
+        mac_client_to_server: "none",
+        mac_server_to_client: "none",
+        compression_client_to_server: "none",
+        compression_server_to_client: "none",
+        first_kex_packet_follows: false
+    )
+    if kex_parsed.is_ok():
+        var server_kex3 = kex_parsed.unwrap()
+        var neg3 = ssh_negotiate_algorithms(client_nomatch, server_kex3)
+        os_ssh_assert(neg3.is_err(), "E16: No matching kex algorithm is error")
+    else:
+        os_ssh_assert(false, "E16: No matching kex (kex parse error)")
+
+    # E17: Service request wrong type
+    var svc_wrong: [u8] = [99, 0, 0, 0, 3, 0x61, 0x62, 0x63]
+    val svc_wrong_parsed = ssh_parse_service_request(svc_wrong)
+    os_ssh_assert(svc_wrong_parsed.is_err(), "E17: SERVICE_REQUEST wrong type is error")
+
+    # E18: Service request too short
+    var svc_short: [u8] = [5]
+    val svc_short_parsed = ssh_parse_service_request(svc_short)
+    os_ssh_assert(svc_short_parsed.is_err(), "E18: SERVICE_REQUEST too short is error")
+
+    # E19: Disconnect message contains reason code
+    val disc2 = ssh_build_disconnect(14, "no more auth methods")
+    var disc2_reason: u32 = ssh_get_u32(disc2, 1)
+    os_ssh_assert(disc2_reason == 14, "E19: DISCONNECT reason code == 14")
+
+    # E20: KEXINIT parsed kex_algorithms matches
+    if kex_parsed.is_ok():
+        var kp = kex_parsed.unwrap()
+        os_ssh_assert(kp.kex_algorithms == "curve25519-sha256", "E20: Parsed KEXINIT kex_algorithms == curve25519-sha256")
+    else:
+        os_ssh_assert(false, "E20: Parsed kex_algorithms (error)")
+
+# ============================================================================
+# F. SSH Daemon Tests (6)
+# ============================================================================
+
+pub fn os_ssh_test_daemon():
+    serial_println("--- F. Daemon ---")
+
+    # F1: Construction with port 22
+    val d22 = SshDaemon.new(22)
+    os_ssh_assert(d22.port == 22, "F1: Daemon port == 22")
+
+    # F2: Not running initially
+    os_ssh_assert(not d22.is_running(), "F2: Not running before start()")
+
+    # F3: Zero sessions initially
+    os_ssh_assert(d22.session_count() == 0, "F3: 0 sessions initially")
+
+    # F4: Construction with custom port
+    val d2222 = SshDaemon.new(2222)
+    os_ssh_assert(d2222.port == 2222, "F4: Daemon port == 2222")
+
+    # F5: Add user to daemon
+    var d_users = SshDaemon.new(22)
+    d_users.add_user_identity("admin")
+    os_ssh_assert(d_users.user_db.find_user("admin") != nil, "F5: add_user_identity persists identity")
+
+    # F6: Two daemons are independent
+    os_ssh_assert(d22.port == 22 and d2222.port == 2222, "F6: Two daemons independent ports")
+
+# ============================================================================
+# G. SSH Message Builder Tests (13)
+# ============================================================================
+
+pub fn os_ssh_test_message_builders():
+    serial_println("--- G. Message Builders ---")
+
+    # G1: AUTH_SUCCESS is single byte (52)
+    val success = ssh_build_auth_success()
+    os_ssh_assert(success.len() == 1 and success[0] == 52, "G1: AUTH_SUCCESS == [52]")
+
+    # G2: AUTH_FAILURE starts with 51
+    val failure = ssh_build_auth_failure(["password"], false)
+    os_ssh_assert(failure[0] == 51, "G2: AUTH_FAILURE type == 51")
+
+    # G3: AUTH_BANNER starts with 53
+    val banner = ssh_build_auth_banner("Welcome to SimpleOS SSH")
+    os_ssh_assert(banner[0] == 53, "G3: AUTH_BANNER type == 53")
+
+    # G4: Channel open confirmation
+    val conf = ssh_build_channel_open_confirmation(0, 0, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)
+    os_ssh_assert(conf[0] == 91, "G4: CHANNEL_OPEN_CONFIRMATION type == 91")
+
+    # G5: Channel open failure
+    val fail_msg = ssh_build_channel_open_failure(7, 3, "unknown channel type")
+    os_ssh_assert(fail_msg[0] == 92, "G5: CHANNEL_OPEN_FAILURE type == 92")
+
+    # G6: Channel data
+    var g6_payload: [u8] = [0x41, 0x42, 0x43]
+    val ch_data_msg = ssh_build_channel_data(5, g6_payload)
+    os_ssh_assert(ch_data_msg[0] == 94, "G6: CHANNEL_DATA type == 94")
+
+    # G7: Channel window adjust
+    val wa_msg = ssh_build_channel_window_adjust(3, 8192)
+    os_ssh_assert(wa_msg[0] == 93, "G7: CHANNEL_WINDOW_ADJUST type == 93")
+
+    # G8: Channel EOF
+    val eof_msg = ssh_build_channel_eof(2)
+    os_ssh_assert(eof_msg[0] == 96, "G8: CHANNEL_EOF type == 96")
+
+    # G9: Channel close
+    val close_msg = ssh_build_channel_close(4)
+    os_ssh_assert(close_msg[0] == 97, "G9: CHANNEL_CLOSE type == 97")
+
+    # G10: Channel success
+    val succ_msg = ssh_build_channel_success(1)
+    os_ssh_assert(succ_msg[0] == 99, "G10: CHANNEL_SUCCESS type == 99")
+
+    # G11: Channel failure
+    val cfail_msg = ssh_build_channel_failure(1)
+    os_ssh_assert(cfail_msg[0] == 100, "G11: CHANNEL_FAILURE type == 100")
+
+    # G12: Auth USERAUTH_PK_OK
+    var g12_blob: [u8] = [0x01, 0x02, 0x03, 0x04]
+    val pk_ok_msg = ssh_build_userauth_pk_ok("ssh-ed25519", g12_blob)
+    os_ssh_assert(pk_ok_msg[0] == 60, "G12: USERAUTH_PK_OK type == 60")
+
+    # G13: Auth failure with partial_success=true
+    val fail_partial = ssh_build_auth_failure(["password", "publickey"], true)
+    os_ssh_assert(fail_partial[0] == 51, "G13: AUTH_FAILURE partial_success type == 51")
+
+export os_ssh_test_crypto, os_ssh_test_packet_codec, os_ssh_test_auth, os_ssh_test_channel_table, os_ssh_test_transport, os_ssh_test_daemon, os_ssh_test_message_builders

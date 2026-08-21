@@ -236,11 +236,18 @@ impl FsDriver for FsFat32Driver:
             return Err(FsError.Corrupt)
         Ok(())
 
-    fn fsync(handle: FileHandle) -> Result<(), FsError>:
+    me fn fsync(handle: FileHandle) -> Result<(), FsError>:
+        if not self.mounted or not self.inner.durable_flush_supported:
+            return Err(FsError.Unsupported)
+        if self.inner.get_open_file(handle).is_err():
+            return Err(FsError.StaleHandle)
+        val result = self.inner.sync_durable(handle)
+        if result.is_err():
+            return Err(FsError.IoError(0))
         Ok(())
 
-    fn fdatasync(handle: FileHandle) -> Result<(), FsError>:
-        Ok(())
+    me fn fdatasync(handle: FileHandle) -> Result<(), FsError>:
+        self.fsync(handle)
 
     fn readdir(handle: DirHandle) -> Result<[DirEntry], FsError>:
         if not self.mounted:
@@ -296,11 +303,14 @@ impl FsDriver for FsFat32Driver:
 
     fn capabilities() -> FsCapabilitySet:
         var caps = FsCapabilitySet.empty()
+            .with(Capability.Execute)
             .with(Capability.CaseFold)
             .with(Capability.LargeFiles)
             .with(Capability.UnicodeNames)
         if self.direct_io.is_some():
             caps = caps.with(Capability.DirectIo)
+        if self.inner.durable_flush_supported:
+            caps = caps.with(Capability.DurableSync)
         caps
 
     fn probe(cap: Capability) -> Option<Extension>:

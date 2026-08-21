@@ -1,0 +1,114 @@
+# @cover src/compiler/00.common/transition/validator.spl 60%
+"""
+# HirTypeKind -> MirTypeKind is a totally declared boundary
+
+**Category:** Compiler / completeness proofs
+**Plan:** doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md sections 11.3-11.4
+**Bug:** doc/08_tracking/bug/mir_lowering_missing_hirtypekind_arms_wildcard_fatal_2026-08-05.md
+
+## Purpose
+
+`spec/compiler_schema/transitions/hir_type_to_mir_type.sdn` is the first real
+transition table. It records what `MirLowering.lower_type` ACTUALLY does today,
+not what it should do: three of the 27 `HirTypeKind` variants (`TypeParam`, `Projection`, `Infer`)
+have no representable MIR form and are declared `unsupported`.
+
+That honesty is the point. A table that marked those three `implemented` would
+be green and worthless; omitting them would make them Missing and fail the
+build, which is the correct outcome for an undeclared hole but the wrong one
+for a KNOWN, attributed hole. `unsupported` is the third answer: covered,
+attributed, and not counted as handled.
+
+The table has already moved once: it was authored on 2026-08-21 with nine
+unsupported variants, all hitting one shared fatal `case _:` wildcard arm, and
+lane C5 then implemented or normalized six of them. That is the intended
+lifecycle — the row flips, and the literal counts below flip with it.
+
+## Scope
+
+Totality of the table against its own producer universe, the universe's size
+against the declared `enum HirTypeKind`, and the handled/unhandled split. The
+counts are deliberately literal so that adding a variant to `HirTypeKind`
+without adding a row turns this spec red rather than drifting silently.
+
+This spec does NOT assert that the remaining three ought to stay unsupported —
+when the lowering grows an arm, the row flips and the counts below move with it.
+"""
+
+use std.spec
+use std.io_runtime.{file_read, file_exists}
+use compiler.common.transition.transition_table.{parse_transition_table, variant_name_of}
+use compiler.common.transition.validator.{
+    validate_transition_table, coverage_report_is_clean, coverage_report_handled
+}
+use compiler.common.transition.coverage_state.{coverage_state_tag}
+
+val TABLE_PATH = "spec/compiler_schema/transitions/hir_type_to_mir_type.sdn"
+
+fn load_table_text() -> text:
+    if not file_exists(TABLE_PATH):
+        fail("transition table not found at {TABLE_PATH}; run from the repo root")
+        return ""
+    return file_read(TABLE_PATH)
+
+fn count_with_tag(tag: text) -> i64:
+    val table = parse_transition_table(load_table_text())
+    var n = 0
+    for row in table.rows:
+        if coverage_state_tag(row.state) == tag:
+            n = n + 1
+    return n
+
+describe "hir_type_to_mir_type transition table":
+    it "loads without a single parse error":
+        step("Read the checked-in table")
+        val table = parse_transition_table(load_table_text())
+        expect(table.errors.len()).to_equal(0)
+        expect(table.name).to_equal("hir_type_to_mir_type")
+        expect(table.producer).to_equal("HirTypeKind")
+        expect(table.consumer).to_equal("MirTypeKind")
+
+    it "declares all 27 HirTypeKind variants — Missing is empty":
+        step("HirTypeKind (src/compiler/20.hir/hir_types.spl:431) has 27 variants")
+        val report = validate_transition_table(parse_transition_table(load_table_text()))
+        expect(report.universe_size).to_equal(27)
+        expect(report.declared).to_equal(27)
+        step("The build invariant: Missing = ProducerUniverse - declared = {}")
+        expect(report.missing.len()).to_equal(0)
+        expect(report.unknown.len()).to_equal(0)
+        expect(report.duplicated.len()).to_equal(0)
+        expect(coverage_report_is_clean(report)).to_equal(true)
+
+    it "names the exact variants lower_type still cannot represent":
+        step("The fatal `case _:` wildcard is gone (agent C5, 2026-08-21); TypeParam, Projection and Infer keep named E-MIR-TYPE-<Variant> diagnostics instead")
+        val table = parse_transition_table(load_table_text())
+        var unsupported: [text] = []
+        for row in table.rows:
+            if coverage_state_tag(row.state) == "unsupported":
+                unsupported.push(variant_name_of(row.from_id))
+        expect(unsupported.len()).to_equal(3)
+        expect(unsupported.contains("TypeParam")).to_equal(true)
+        expect(unsupported.contains("Projection")).to_equal(true)
+        expect(unsupported.contains("Infer")).to_equal(true)
+        step("Variants with a real arm must NOT be in that set")
+        expect(unsupported.contains("Int")).to_equal(false)
+        expect(unsupported.contains("Named")).to_equal(false)
+        expect(unsupported.contains("Isolated")).to_equal(false)
+        expect(unsupported.contains("Slice")).to_equal(false)
+
+    it "gives every unsupported row a reason, so the hole is auditable":
+        step("A hole with no stated behaviour is indistinguishable from an oversight")
+        val table = parse_transition_table(load_table_text())
+        var attributed = 0
+        for row in table.rows:
+            if coverage_state_tag(row.state) == "unsupported":
+                if row.reason != "":
+                    attributed = attributed + 1
+        expect(attributed).to_equal(3)
+
+    it "counts 24 handled variants — declared is not the same as handled":
+        step("19 implemented arms plus 5 normalizations (DynTrait, Isolated, Any, Tensor, Layer)")
+        expect(coverage_report_handled(parse_transition_table(load_table_text()))).to_equal(24)
+        expect(count_with_tag("implemented")).to_equal(19)
+        expect(count_with_tag("normalized")).to_equal(5)
+        expect(count_with_tag("unsupported")).to_equal(3)

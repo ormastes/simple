@@ -90,6 +90,14 @@ struct MirLowering:
     # plain (non-`mut`, non-`me`) `struct` param keeps Bug #167's value-copy.
     # See bug s19_class_free_fn_mutation_dropped_native_2026-07-17.
     class_type_names: Dict<text, bool>
+    # Struct NAME -> ordered field TYPE OWNERSHIP KEYS (module-qualified
+    # `composite_layout_key`s, parallel to `struct_field_type_name`; "" when
+    # the field's type is not a Named struct/class). A nested field spelled
+    # `Child` can be a value struct in one module and a class in another;
+    # the raw name alone cannot tell them apart, so nested value-copy and
+    # struct-spread decide class ownership from this qualified key and keep
+    # the raw name only for SymbolTable/struct_field_order lookups.
+    struct_field_type_ownership_key: Dict<text, [text]>
     # Struct NAME -> ordered field TYPE names (parallels struct_field_order;
     # "" when the field's type is not itself a Named struct/class). Bug #166:
     # a chained field access `r.origin.y` lowers the inner Field's `base`
@@ -245,6 +253,21 @@ struct MirLowering:
     enum_variant_index: Dict<text, [text]>
     # Enum NAME -> runtime discriminants, parallel to enum_variant_index.
     enum_variant_discriminants: Dict<text, [i64]>
+    # Variant LEAF name -> every bare enum owner currently registered under
+    # `enum_variant_index` that declares that leaf. Maintained incrementally by
+    # `reindex_enum_variant_owners` at each enum registration (including the
+    # divergent bare-name eviction path, so an evicted owner is withdrawn).
+    #
+    # Exists purely as the O(1) inverse of a full-keyspace scan. Dot-qualified
+    # enum construction (`CompileResult.CodegenError(..)`) arrives as a
+    # MethodCall whose receiver payload must NOT be re-matched on the Stage-3
+    # native lane (see the bug record). The conservative recovery therefore
+    # searches by variant leaf instead -- but doing that as a nested loop over
+    # `enum_variant_index.keys()` runs per METHOD CALL and allocates a fresh key
+    # array each time, which is the phase-5 MIR allocation runaway. A unique
+    # owner is exactly a single-element list here, matching the old scan's
+    # `count == 1` acceptance.
+    enum_variant_owners: Dict<text, [text]>
     # Bare enum NAME -> a description of a DIVERGENT same-bare-name registration
     # that overwrote an earlier one. enum_variant_index above is keyed by the
     # BARE enum name and is LAST-WINS, so an enum declared in another module

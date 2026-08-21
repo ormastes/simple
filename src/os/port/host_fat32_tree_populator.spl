@@ -6,6 +6,7 @@
 use os.port.cached_raw_image_block_device.{CachedRawImageBlockDevice}
 use os.services.block_device.{BlockDevice}
 use std.fs_driver.fat32_core.{Fat32Core}
+use std.nogc_sync_mut.io.file_ops.{file_fsync}
 
 extern fn rt_dir_list(path: text) -> [text]
 extern fn rt_file_read_bytes(path: text) -> [u8]
@@ -85,14 +86,12 @@ fn _flush_driver_image(driver: Fat32Core, image_path: text, image_len_bytes: i64
 
     if not rt_file_write_bytes(image_path, image_bytes):
         return Err("host_fat32_tree_populator: failed to flush image: " + image_path)
+    if not file_fsync(image_path):
+        return Err("host_fat32_tree_populator: backing fsync failed: " + image_path)
     Ok(())
 
 class CachedRawImageBlockDeviceAdapter:
     backing: CachedRawImageBlockDevice
-
-impl CachedRawImageBlockDeviceAdapter:
-    me fn flush() -> Result<(), text>:
-        self.backing.flush()
 
 impl BlockDevice for CachedRawImageBlockDeviceAdapter:
     fn read_sector(lba: u64) -> Result<[u8], text>:
@@ -148,6 +147,12 @@ impl BlockDevice for CachedRawImageBlockDeviceAdapter:
 
     me fn sector_size() -> u32:
         self.backing.sector_size_bytes.to_u32()
+
+    me fn flush() -> Result<bool, text>:
+        val acknowledged = self.backing.flush()?
+        if not acknowledged:
+            return Err("host_fat32_tree_populator: backing flush was not acknowledged")
+        Ok(true)
 
 class HostFat32TreePopulator:
     driver: Fat32Core

@@ -1,0 +1,156 @@
+# Enum-contract checker entry point (S2/S3, hardening plan §10.1/§10.2).
+#
+# `enum_contract_check` is the function the driver wires in. It is the ONLY
+# file in this package that touches HIR; every rule below it works on plain
+# data (contract_model / declaration_check / match_check) so the rules stay
+# testable without a symbol table.
+#
+# SCOPE, stated rather than implied: this entry point performs the
+# DECLARATION checks (E-CLOSED-002, E-EVOLVING-001/002), which are decidable
+# from `module.enums` alone. The MATCH-SITE checks (E-CLOSED-001,
+# E-EVOLVING-003) need a `ResolvedMatchCoverage`, which is built where a match
+# arm has already been resolved to a numeric discriminant against a
+# definitively-known enum -- that is
+# src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl, not here.
+# Rebuilding that resolution over raw HIR patterns would be a second,
+# divergent copy of it, which is precisely what ResolvedMatchCoverage's header
+# warns against. `enum_contract_check_matches` is therefore exposed for that
+# call site to hand its already-built coverage records to.
+
+use std.fs.{read_file}
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind}
+use compiler.hir.hir_definitions.{HirEnum, HirVariant, HirVariantKind, HirExprKind}
+use compiler.hir.match_coverage.{ResolvedMatchCoverage}
+use compiler.common.assurance.policy_schema.{AssuranceStrictness}
+use compiler.semantics.enum_contract.contract_model.{
+    EnumContractKind, EnumContract, EnumContractTable, EnumContractDiag
+}
+use compiler.semantics.enum_contract.attribute_source.{enum_contract_table_from_source}
+use compiler.semantics.enum_contract.declaration_check.{
+    EnumVariantShape, check_enum_declaration
+}
+use compiler.semantics.enum_contract.match_check.{check_match_for_contract}
+
+fn hir_type_name(t: HirType) -> text:
+    """Source-level spelling of the few type shapes a wire payload may use.
+
+    Only integer widths need to be exact -- the E-EVOLVING-001 rule compares
+    the Unknown payload against `uN`. Everything else renders to a name that
+    can never equal a `uN` spelling, so an unexpected payload type is reported
+    as a mismatch rather than silently accepted."""
+    match t.kind:
+        case HirTypeKind.Int(bits, signed):
+            if signed:
+                "i" + bits.to_text()
+            else:
+                "u" + bits.to_text()
+        case HirTypeKind.Bool: "bool"
+        case HirTypeKind.Char: "char"
+        case HirTypeKind.Str: "text"
+        case HirTypeKind.Float(bits): "f" + bits.to_text()
+        case HirTypeKind.Unit: "()"
+        case _: "<non-scalar>"
+
+fn variant_shape(v: HirVariant) -> EnumVariantShape:
+    """Flatten one `HirVariant` into the contract checker's plain shape."""
+    var names: [text] = []
+    var types: [text] = []
+    match v.kind:
+        case HirVariantKind.Unit:
+            pass_do_nothing
+        case HirVariantKind.Tuple(tys):
+            for t in tys:
+                names = names.push("")
+                types = types.push(hir_type_name(t))
+        case HirVariantKind.Struct(fields):
+            for f in fields:
+                names = names.push(f.name)
+                types = types.push(hir_type_name(f.type_))
+    var disc = 0
+    var has_disc = false
+    if v.has_discriminant:
+        match v.discriminant.kind:
+            case HirExprKind.IntLit(value, suffix):
+                disc = value
+                has_disc = true
+            case _:
+                has_disc = false
+    EnumVariantShape(
+        name: v.name,
+        payload_names: names,
+        payload_types: types,
+        has_discriminant: has_disc,
+        discriminant: disc,
+    )
+
+fn enum_variant_shapes(e: HirEnum) -> [EnumVariantShape]:
+    var out: [EnumVariantShape] = []
+    for v in e.variants:
+        out = out.push(variant_shape(v))
+    out
+
+fn enum_contract_check_with_table(
+    module: HirModule,
+    table: EnumContractTable,
+    profile: AssuranceStrictness,
+) -> [EnumContractDiag]:
+    """Declaration checks for every contracted enum in `module`.
+
+    Split out from `enum_contract_check` so a caller that already has the
+    contract table -- notably a future fixed parser that carries the decorator
+    into HIR -- does not have to go back through the source text."""
+    var diags: [EnumContractDiag] = []
+    val fallback = EnumContract(enum_name: "", kind: EnumContractKind.Closed)
+    for e in module.enums.values():
+        if table.has(e.name):
+            val contract = table.lookup_or(e.name, fallback)
+            for d in check_enum_declaration(contract, enum_variant_shapes(e)):
+                diags = diags.push(d)
+    diags
+
+fn enum_contract_check(module: HirModule, profile: AssuranceStrictness) -> [EnumContractDiag]:
+    """S2/S3 entry point: validate every `@closed` / `@evolving` enum declared
+    in `module` against its contract.
+
+    The contract table is recovered from the module's source text because the
+    decorator does not survive lowering today -- see attribute_source.spl and
+    doc/08_tracking/bug/enum_decorators_dropped_before_hir_2026-08-21.md. When
+    that is fixed this function keeps its signature and only its first line
+    changes."""
+    val table = enum_contract_table_from_source(read_module_source(module))
+    enum_contract_check_with_table(module, table, profile)
+
+fn read_module_source(module: HirModule) -> text:
+    """Module source text, or "" when it cannot be read.
+
+    "" yields an EMPTY contract table, i.e. no enum is treated as contracted.
+    That is the safe direction for a checker that can only ADD diagnostics:
+    an unreadable source can never fabricate a violation. It cannot hide one
+    either once the decorator reaches HIR, at which point this function goes
+    away entirely."""
+    if module.path == "":
+        return ""
+    read_file(module.path)
+
+fn enum_contract_check_matches(
+    coverages: [ResolvedMatchCoverage],
+    table: EnumContractTable,
+    profile: AssuranceStrictness,
+) -> [EnumContractDiag]:
+    """E-CLOSED-001 / E-EVOLVING-003 over already-resolved coverage records.
+
+    Wiring point: src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl
+    already resolves each arm to a numeric discriminant against a
+    definitively-known enum, which is exactly the input ResolvedMatchCoverage
+    needs; hand the records it builds to this function."""
+    var diags: [EnumContractDiag] = []
+    val fallback = EnumContract(enum_name: "", kind: EnumContractKind.Closed)
+    for cov in coverages:
+        if table.has(cov.enum_name):
+            val contract = table.lookup_or(cov.enum_name, fallback)
+            for d in check_match_for_contract(contract, cov, profile):
+                diags = diags.push(d)
+    diags
+
+export enum_contract_check, enum_contract_check_with_table, enum_contract_check_matches
+export hir_type_name, variant_shape, enum_variant_shapes

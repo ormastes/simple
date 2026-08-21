@@ -1,0 +1,669 @@
+# WmService protocol/transport extension.
+#
+# This module contains IPC lifecycle, bounded wire parsing, and outbound event
+# encoding. Mutable WM authority remains the WmService instance declared in
+# wm_service_core; this extension adds methods without introducing state.
+
+use os.services.wm.wm_service_core.{WmService, SYS_IPC_RECV, SYS_IPC_DESTROY_PORT, SYS_IPC_PORT_OWNER, SYS_IPC_CREATE_PORT, SYS_IPC_CONNECT, WM_PORT_NAME, STATUS_OK, STATUS_ERR, STATUS_INVALID, WM_MAX_IPC_PAYLOAD_BYTES, WM_MAX_APP_ID_BYTES}
+use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW, COMP_CREATE_WEB_WINDOW, COMP_DESTROY_WINDOW, COMP_UPDATE_TREE, COMP_FOCUS, COMP_RESIZE, COMP_MOVE, COMP_SET_TITLE, COMP_MINIMIZE, COMP_MAXIMIZE, COMP_RESTORE, COMP_INPUT_EVENT, COMP_CLOSE_REQUEST, COMP_FOCUS_CHANGED, COMP_TEST_API_REQ}
+use os.userlib.syscall_raw.{syscall}
+use common.window_protocol.geometry.{WindowId}
+use common.window_protocol.window_protocol.{WmCreateRequest, WmInputEvent, WmCloseRequest, WmResizeRequest, WmMoveRequest, WM_STATUS_NO_SPACE, WM_EVENT_CLOSE, WM_INPUT_TEXT_MAX_BYTES}
+use os.services.launcher.launcher.{launcher_get_process_app_id_for_pid}
+use os.services.wm.wm_world.{WmAction, wm_action_none, Geometry, WindowState, WIN_STATE_NORMAL, WIN_STATE_MINIMIZED, WIN_STATE_MAXIMIZED}
+use os.services.wm.wm_codec.{wm_send_create_reply, wm_send_create_response, wm_send_status_reply, wm_send_error_reply, _read_u8, _read_u32, _read_u64, _read_i32, _read_text, _push_u32, _push_i32, _push_u64, _ipc_send}
+
+impl WmService:
+    me init() -> bool:
+        """Create named IPC port "compositor" and prepare for requests.
+
+        The port is registered with the name "compositor" so remote apps
+        can discover it via SYS_IPC_CONNECT("compositor").
+
+        Returns true on success, false if port creation fails.
+        """
+        if self.initialized:
+            return true
+        # Pass the name pointer and length so the kernel registers a named port.
+        # SYS_IPC_CREATE_PORT(name_ptr, name_len, 0, 0, 0) -> port_id
+        extern fn unsafe_addr_of(ref: any) -> u64
+        val name_ptr = unsafe_addr_of(WM_PORT_NAME)
+        val name_len = WM_PORT_NAME.len().to_u64()
+        val port = syscall(SYS_IPC_CREATE_PORT, name_ptr, name_len, 0, 0, 0)
+        if port <= 0:
+            log_raw_println("[wm-service] Failed to create IPC port (error {port})")
+            return false
+        self.port_id = port.to_u64()
+        self.initialized = true
+        log_raw_println("[wm-service] Listening on IPC port {self.port_id} as '{WM_PORT_NAME}'")
+        true
+
+    me run_loop():
+        """Main service loop (blocking). Prefer poll_once() in shell integration.
+
+        WARNING: This blocking loop cannot return WmActions to the caller.
+        It is retained for standalone WM service usage only. In the shell
+        integration pattern, use poll_once() which returns WmAction?.
+        """
+        if not self.initialized:
+            log_raw_println("[wm-service] Cannot run: not initialized")
+            return
+        self.running = true
+        log_raw_println("[wm-service] Service loop started (blocking mode)")
+        while self.running:
+            # Receive IPC message -- blocks until message arrives
+            val msg_raw = syscall(SYS_IPC_RECV, self.port_id, 0, 0, 0, 0)
+            if msg_raw <= 0:
+                log_raw_println("[wm-service] IPC recv error: {msg_raw}")
+                continue
+            if not self.record_request():
+                self.running = false
+                return
+            # In blocking mode, parse and discard (no compositor to apply to)
+            val _action = self.parse_message(msg_raw.to_u64())
+
+    me poll_once() -> WmAction?:
+        """Non-blocking poll: parse one IPC message and return it as a WmAction.
+
+        Used when the WM service is integrated into the shell's main loop.
+        The caller (DesktopShell) applies the returned action to its own
+        compositor, ensuring a single source of truth for compositor state.
+
+        Returns nil if no message is pending or the service is not initialized.
+
+        SYS_IPC_RECV args: (port_id, timeout_ms, flags, 0, 0)
+        timeout_ms = 0 means non-blocking (return immediately if no message).
+        flags bit 0 = 1 means non-blocking poll.
+        """
+        if not self.initialized:
+            return nil
+        # Non-blocking recv: timeout = 0, flags = 1 (poll mode)
+        val msg_raw = syscall(SYS_IPC_RECV, self.port_id, 0, 1, 0, 0)
+        if msg_raw <= 0:
+            return nil
+        if not self.record_request():
+            return nil
+        return self.parse_message(msg_raw.to_u64())
+
+    me stop():
+        """Signal the service loop to exit."""
+        self.running = false
+        log_raw_println("[wm-service] Stopped after {self.request_count} requests")
+
+    # -- Message Parsing ------------------------------------------------------
+
+    me parse_message(msg_addr: u64) -> WmAction:
+        """Parse an IPC message header and return the corresponding WmAction.
+
+        IPC message layout: src_port(8) | dst_port(8) | method(4) | flags(4) | payload_len(4) | cap_count(4)
+        Payload starts at msg_addr + 32.
+        """
+        val src_port = _read_u64(msg_addr)
+        val method = _read_u32(msg_addr + 16)
+        val payload_len = _read_u32(msg_addr + 24)
+        val payload_addr = msg_addr + 32
+
+        if payload_len > WM_MAX_IPC_PAYLOAD_BYTES:
+            log_raw_println("[wm-service] rejected oversized IPC payload={payload_len}")
+            self.last_rejection_reason = "payload-too-large"
+            self.send_error_reply(src_port, STATUS_INVALID, "payload exceeds WM bound")
+            return wm_action_none()
+
+        # src_port is a reply transport address.  Resolve its owner through the
+        # kernel instead of treating the port number or payload as a PID.
+        val sender_pid_raw = syscall(SYS_IPC_PORT_OWNER, src_port, 0, 0, 0, 0)
+        val sender_pid = if sender_pid_raw > 0: sender_pid_raw.to_u64() else: 0u64
+
+        match method:
+            COMP_CREATE_WINDOW:
+                return self.parse_create_window_authenticated(src_port, sender_pid, payload_addr, payload_len)
+            COMP_CREATE_WEB_WINDOW:
+                return self.parse_create_web_window_authenticated(src_port, sender_pid, payload_addr, payload_len)
+            COMP_DESTROY_WINDOW:
+                return self.parse_destroy_window(src_port, payload_addr, payload_len)
+            COMP_UPDATE_TREE:
+                return self.parse_update_tree(src_port, payload_addr, payload_len)
+            COMP_FOCUS:
+                return self.parse_focus(src_port, payload_addr, payload_len)
+            COMP_RESIZE:
+                return self.parse_resize(src_port, payload_addr, payload_len)
+            COMP_MOVE:
+                return self.parse_move(src_port, payload_addr, payload_len)
+            COMP_SET_TITLE:
+                return self.parse_set_title(src_port, payload_addr, payload_len)
+            COMP_MINIMIZE:
+                return self.parse_minimize(src_port, payload_addr, payload_len)
+            COMP_MAXIMIZE:
+                return self.parse_maximize(src_port, payload_addr, payload_len)
+            COMP_RESTORE:
+                return self.parse_restore(src_port, payload_addr, payload_len)
+            COMP_TEST_API_REQ:
+                return self.parse_test_api_req(src_port, payload_addr, payload_len)
+            _:
+                log_raw_println("[wm-service] Unknown method {method} from port {src_port}")
+                self.send_error_reply(src_port, STATUS_INVALID, "unknown compositor method")
+                return wm_action_none()
+
+    me parse_test_api_req(src_port: u64, payload_addr: u64, payload_len: u32) -> WmAction:
+        """Answer the shared /api/test/* introspection surface with live WM
+        state instead of a blanket STATUS_INVALID. The window world is
+        reachable right here — self.owner_count tracks owned windows and
+        self.world.win_ids holds the active ECS window entities — so callers
+        get a real reply: status(i32=OK) | window_count(i32) | active_windows(i32).
+
+        The IPC reply is emitted only when the service holds a live port
+        (self.initialized); off-line callers (unit specs) still observe the
+        same introspection via the returned WmAction, so no syscall runs.
+        Protocol contract is fixed — see COMP_TEST_API_REQ in
+        src/os/userlib/ipc_protocol.spl."""
+        if payload_len != 0u32:
+            self.last_rejection_reason = "unexpected-test-api-payload"
+            return wm_action_none()
+        val window_count = self.window_count()
+        val active_windows = self.world.win_ids.len()
+        log_raw_println("[wm-service] COMP_TEST_API_REQ from port {src_port}: window_count={window_count} active_windows={active_windows} (payload_len={payload_len})")
+        if self.initialized:
+            var buf: [u8] = []
+            _push_i32(buf, STATUS_OK)
+            _push_i32(buf, window_count)
+            _push_i32(buf, active_windows)
+            _ipc_send(src_port, self.port_id, buf)
+        return WmAction(kind: "test_api", window_id: 0, title: "", x: window_count, y: active_windows, width: window_count, height: active_windows, content: "", process_id: 0, app_id: "", owner_port: 0, src_port: src_port)
+
+    # -- Request Parsers (return WmAction) ------------------------------------
+
+    me parse_create_window(src_port: u64, payload_addr: u64, payload_len: u32) -> WmAction:
+        # Compatibility for direct parser callers whose source identity predates
+        # separate reply ports. Production dispatch always uses the kernel query.
+        self.parse_create_window_authenticated(src_port, src_port, payload_addr, payload_len)
+
+    me parse_create_window_authenticated(src_port: u64, sender_pid: u64, payload_addr: u64, payload_len: u32) -> WmAction:
+        """Parse COMP_CREATE_WINDOW into a WmAction.
+
+        Payload: title_len(u32) | title(bytes) | x(i32) | y(i32) | w(i32) | h(i32)
+                 | process_id(u64)? | app_id_len(u32)? | app_id(bytes)?
+        """
+        if self.owner_count >= self.max_windows or self.world.win_ids.len() >= self.max_windows:
+            log_raw_println("[wm-service] Max windows reached, rejecting create")
+            self.send_create_response(src_port, WindowId(value: 0), WM_STATUS_NO_SPACE)
+            return wm_action_none()
+
+        if payload_len < 4u32:
+            return wm_action_none()
+
+        # Parse title
+        val title_len = _read_u32(payload_addr)
+        if title_len > WM_MAX_IPC_PAYLOAD_BYTES - 20u32:
+            self.last_rejection_reason = "title-too-large"
+            return wm_action_none()
+        if payload_len.to_u64() < 20u64 + title_len.to_u64():
+            self.last_rejection_reason = "truncated-create-payload"
+            return wm_action_none()
+        val title = _read_text(payload_addr + 4, title_len)
+        if not self.safe_display_text(title, WM_MAX_IPC_PAYLOAD_BYTES.to_i64()):
+            self.last_rejection_reason = "invalid-title"
+            return wm_action_none()
+        val fields_offset = 4 + title_len.to_u64()
+
+        # Parse position and size
+        val x = _read_i32(payload_addr + fields_offset)
+        val y = _read_i32(payload_addr + fields_offset + 4)
+        val w = _read_i32(payload_addr + fields_offset + 8)
+        val h = _read_i32(payload_addr + fields_offset + 12)
+        if not self.geometry_valid(x, y, w, h):
+            self.last_rejection_reason = "invalid-geometry"
+            return wm_action_none()
+        # SECURITY: process_id is ownership identity and MUST come from the
+        # kernel-verified owner task of src_port, never from the port number or
+        # client-supplied payload —
+        # a payload process_id is trivially spoofable and would let one
+        # process impersonate another's window ownership (e.g. escaping
+        # process-exit window cleanup, or hijacking focus/terminate actions
+        # keyed by pid in shell.spl). app_id remains payload-sourced since it
+        # is only a display label, not a security boundary.
+        if sender_pid == 0:
+            return wm_action_none()
+        val process_id = sender_pid
+        var app_id = ""
+        val identity_offset = fields_offset + 16
+        if payload_len.to_u64() != identity_offset:
+            if payload_len.to_u64() < identity_offset + 12:
+                self.last_rejection_reason = "truncated-create-identity"
+                return wm_action_none()
+            val app_id_len = _read_u32(payload_addr + identity_offset + 8)
+            if app_id_len.to_u64() > WM_MAX_APP_ID_BYTES.to_u64() or payload_len.to_u64() != identity_offset + 12 + app_id_len.to_u64():
+                self.last_rejection_reason = "invalid-create-identity"
+                return wm_action_none()
+            if app_id_len > 0:
+                app_id = _read_text(payload_addr + identity_offset + 12, app_id_len)
+                if not self.safe_display_text(app_id, WM_MAX_APP_ID_BYTES):
+                    self.last_rejection_reason = "invalid-app-id"
+                    return wm_action_none()
+        if app_id == "":
+            val launcher_app_id = launcher_get_process_app_id_for_pid(process_id)
+            if launcher_app_id != "":
+                app_id = launcher_app_id
+            else:
+                app_id = title
+
+        log_raw_println("[wm-service] Parsed create_window from port {src_port}: '{title}' ({w}x{h}) pid={process_id} app_id='{app_id}'")
+        WmAction(kind: "create_window", window_id: 0, title: title, x: x, y: y, width: w, height: h, content: "", process_id: process_id, app_id: app_id, owner_port: src_port, src_port: src_port)
+
+    me parse_create_web_window(src_port: u64, payload_addr: u64, payload_len: u32) -> WmAction:
+        self.parse_create_web_window_authenticated(src_port, src_port, payload_addr, payload_len)
+
+    me parse_create_web_window_authenticated(src_port: u64, sender_pid: u64, payload_addr: u64, payload_len: u32) -> WmAction:
+        """Parse COMP_CREATE_WEB_WINDOW into a WmAction.
+
+        Payload: url_len(u32) | url(bytes) | x(i32) | y(i32) | w(i32) | h(i32)
+
+        The URL is stashed in WmAction.content so the apply side can route
+        the window to the Simple Web Engine rect renderer; title defaults
+        to the URL, app_id falls back to the launcher's record for src_port.
+        """
+        if self.owner_count >= self.max_windows or self.world.win_ids.len() >= self.max_windows:
+            log_raw_println("[wm-service] Max windows reached, rejecting create_web")
+            self.send_create_response(src_port, WindowId(value: 0), WM_STATUS_NO_SPACE)
+            return wm_action_none()
+
+        if payload_len < 4u32:
+            return wm_action_none()
+
+        val url_len = _read_u32(payload_addr)
+        if url_len > WM_MAX_IPC_PAYLOAD_BYTES - 20u32:
+            self.last_rejection_reason = "url-too-large"
+            return wm_action_none()
+        if payload_len.to_u64() != 20u64 + url_len.to_u64():
+            self.last_rejection_reason = "truncated-create-web-payload"
+            return wm_action_none()
+        val url = _read_text(payload_addr + 4, url_len)
+        if not self.safe_display_text(url, WM_MAX_IPC_PAYLOAD_BYTES.to_i64()):
+            self.last_rejection_reason = "invalid-url"
+            return wm_action_none()
+        val fields_offset = 4 + url_len.to_u64()
+        val x = _read_i32(payload_addr + fields_offset)
+        val y = _read_i32(payload_addr + fields_offset + 4)
+        val w = _read_i32(payload_addr + fields_offset + 8)
+        val h = _read_i32(payload_addr + fields_offset + 12)
+        if not self.geometry_valid(x, y, w, h):
+            self.last_rejection_reason = "invalid-geometry"
+            return wm_action_none()
+
+        if sender_pid == 0:
+            return wm_action_none()
+        val process_id = sender_pid
+        var app_id = launcher_get_process_app_id_for_pid(process_id)
+        if app_id == "":
+            app_id = url
+
+        log_raw_println("[wm-service] Parsed create_web_window from port {src_port}: '{url}' ({w}x{h}) pid={process_id}")
+        WmAction(kind: "create_web_window", window_id: 0, title: url, x: x, y: y, width: w, height: h, content: url, process_id: process_id, app_id: app_id, owner_port: src_port, src_port: src_port)
+
+    me parse_destroy_window(src_port: u64, payload_addr: u64, payload_len: u32) -> WmAction:
+        """Parse COMP_DESTROY_WINDOW into a WmAction.
+
+        Payload: window_id(u64)
+        """
+        if payload_len != 8u32:
+            self.last_rejection_reason = "truncated-destroy-payload"
+            return wm_action_none()
+        val window_id = _read_u64(payload_addr)
+
+        # Verify ownership
+        val owner = self.find_owner(window_id)
+        if owner == 0 or owner != src_port:
+            log_raw_println("[wm-service] Destroy denied: port {src_port} does not own window {window_id}")
+            self.send_status_reply(src_port, STATUS_ERR)
+            return wm_action_none()
+
+        if self.next_scene_revision() == 0u64:
+            return wm_action_none()
+        if not self.admit_window_damage(window_id, 0u64, "window-destroy"):
+            return wm_action_none()
+        WmAction(kind: "destroy_window", window_id: window_id, title: "", x: 0, y: 0, width: 0, height: 0, content: "", process_id: 0, app_id: "", owner_port: 0, src_port: src_port)
+
+    me parse_update_tree(src_port: u64, payload_addr: u64, payload_len: u32) -> WmAction:
+        """Parse COMP_UPDATE_TREE into a WmAction.
+
+        Payload: window_id(u64) | content_len(u32) | content_text(bytes)
+        """
+        if payload_len < 12u32:
+            self.last_rejection_reason = "truncated-update-payload"
+            return wm_action_none()
+        val window_id = _read_u64(payload_addr)
+        val owner = self.find_owner(window_id)
+        if owner == 0 or owner != src_port:
+            self.send_status_reply(src_port, STATUS_ERR)
+            return wm_action_none()
+        # Read content text from payload
+        val content_len = _read_u32(payload_addr + 8)
+        var content: text = ""
+        if content_len > WM_MAX_IPC_PAYLOAD_BYTES - 12u32:
+            self.last_rejection_reason = "content-too-large"
+            return wm_action_none()
+        if payload_len != 12u32 + content_len:
+            self.last_rejection_reason = "truncated-update-content"
+            return wm_action_none()
+        if content_len > 0u32:
+            content = _read_text(payload_addr + 12, content_len)
+
+        if self.next_scene_revision() == 0u64:
+            return wm_action_none()
+        if not self.admit_window_damage(window_id, 0u64, "content-update"):
+            return wm_action_none()
+
+        WmAction(kind: "update_tree", window_id: window_id, title: "", x: 0, y: 0, width: 0, height: 0, content: content, process_id: 0, app_id: "", owner_port: 0, src_port: src_port)
+
+    me parse_focus(src_port: u64, payload_addr: u64, payload_len: u32) -> WmAction:
+        """Parse COMP_FOCUS into a WmAction.
+
+        Payload: window_id(u64)
+
+        Ownership is verified the same way as destroy/resize/move/minimize:
+        only the owning port may request focus for its own window.
+        """
+        if payload_len != 8u32:
+            self.last_rejection_reason = "truncated-focus-payload"
+            return wm_action_none()
+        val window_id = _read_u64(payload_addr)
+
+        val owner = self.find_owner(window_id)
+        if owner == 0 or owner != src_port:
+            log_raw_println("[wm-service] Focus denied: port {src_port} does not own window {window_id}")
+            self.send_status_reply(src_port, STATUS_ERR)
+            return wm_action_none()
+
+        if self.next_scene_revision() == 0u64:
+            return wm_action_none()
+        if not self.raise_focus_stack(window_id):
+            return wm_action_none()
+        WmAction(kind: "focus", window_id: window_id, title: "", x: 0, y: 0, width: 0, height: 0, content: "", process_id: 0, app_id: "", owner_port: 0, src_port: src_port)
+
+    me parse_resize(src_port: u64, payload_addr: u64, payload_len: u32) -> WmAction:
+        """Parse COMP_RESIZE into a WmAction.
+
+        Payload: window_id(u64) | width(i32) | height(i32)
+        """
+        if payload_len != 16u32:
+            self.last_rejection_reason = "truncated-resize-payload"
+            return wm_action_none()
+        val window_id = _read_u64(payload_addr)
+        val width = _read_i32(payload_addr + 8)
+        val height = _read_i32(payload_addr + 12)
+
+        if not self.geometry_valid(0, 0, width, height):
+            self.last_rejection_reason = "invalid-geometry"
+            return wm_action_none()
+
+        val owner = self.find_owner(window_id)
+        if owner == 0 or owner != src_port:
+            self.send_status_reply(src_port, STATUS_ERR)
+            return wm_action_none()
+
+        if self.next_scene_revision() == 0u64:
+            return wm_action_none()
+        if not self.admit_full_damage("resize"):
+            return wm_action_none()
+
+        # Wire the resize into the ECS window world so world.geometries
+        # reflects live dimensions (previously only spawn_window ever wrote
+        # this component, leaving it stuck at 0x0 after any resize).
+        val e = self.world.find_entity_for_window(window_id)
+        if not e.is_null():
+            var gx: i32 = 0
+            var gy: i32 = 0
+            val geo_slot = self.world.geometries.get_slot(e)
+            if geo_slot >= 0:
+                gx = self.world.geometries.dense[geo_slot].x
+                gy = self.world.geometries.dense[geo_slot].y
+            # two-hop mutation workaround: bug selfhost_two_hop_field_method_mutation_lost_2026-07-27
+            val ecs_tick = self.world.base.now()
+            var geometries_s = self.world.geometries
+            geometries_s.insert(e, Geometry(x: gx, y: gy, w: width, h: height), ecs_tick)
+            self.world.geometries = geometries_s
+
+        WmAction(kind: "resize", window_id: window_id, title: "", x: 0, y: 0, width: width, height: height, content: "", process_id: 0, app_id: "", owner_port: 0, src_port: src_port)
+
+    me parse_move(src_port: u64, payload_addr: u64, payload_len: u32) -> WmAction:
+        """Parse COMP_MOVE into a WmAction.
+
+        Payload: window_id(u64) | x(i32) | y(i32)
+        """
+        if payload_len != 16u32:
+            self.last_rejection_reason = "truncated-move-payload"
+            return wm_action_none()
+        val window_id = _read_u64(payload_addr)
+        val x = _read_i32(payload_addr + 8)
+        val y = _read_i32(payload_addr + 12)
+
+        if not self.geometry_valid(x, y, WM_MIN_WINDOW_DIMENSION, WM_MIN_WINDOW_DIMENSION):
+            self.last_rejection_reason = "invalid-geometry"
+            return wm_action_none()
+
+        val owner = self.find_owner(window_id)
+        if owner == 0 or owner != src_port:
+            self.send_status_reply(src_port, STATUS_ERR)
+            return wm_action_none()
+
+        if self.next_scene_revision() == 0u64:
+            return wm_action_none()
+        if not self.admit_full_damage("move"):
+            return wm_action_none()
+
+        val e = self.world.find_entity_for_window(window_id)
+        if not e.is_null():
+            val geo_slot = self.world.geometries.get_slot(e)
+            if geo_slot >= 0:
+                val current_w = self.world.geometries.dense[geo_slot].w
+                val current_h = self.world.geometries.dense[geo_slot].h
+                val ecs_tick = self.world.base.now()
+                var geometries_s = self.world.geometries
+                geometries_s.insert(e, Geometry(x: x, y: y, w: current_w, h: current_h), ecs_tick)
+                self.world.geometries = geometries_s
+        WmAction(kind: "move", window_id: window_id, title: "", x: x, y: y, width: 0, height: 0, content: "", process_id: 0, app_id: "", owner_port: 0, src_port: src_port)
+
+    me parse_set_title(src_port: u64, payload_addr: u64, payload_len: u32) -> WmAction:
+        """Parse COMP_SET_TITLE into a WmAction.
+
+        Payload: window_id(u64) | title_len(u32) | title(bytes)
+        """
+        if payload_len < 12u32:
+            self.last_rejection_reason = "truncated-title-payload"
+            return wm_action_none()
+        val window_id = _read_u64(payload_addr)
+        val title_len = _read_u32(payload_addr + 8)
+        if title_len > WM_MAX_IPC_PAYLOAD_BYTES - 12u32 or payload_len.to_u64() != 12u64 + title_len.to_u64():
+            self.last_rejection_reason = "title-too-large"
+            return wm_action_none()
+        val title = _read_text(payload_addr + 12, title_len)
+        if not self.safe_display_text(title, WM_MAX_IPC_PAYLOAD_BYTES.to_i64()):
+            self.last_rejection_reason = "invalid-title"
+            return wm_action_none()
+
+        val owner = self.find_owner(window_id)
+        if owner == 0 or owner != src_port:
+            self.send_status_reply(src_port, STATUS_ERR)
+            return wm_action_none()
+
+        if self.next_scene_revision() == 0u64:
+            return wm_action_none()
+        if not self.admit_window_damage(window_id, 0u64, "title-change"):
+            return wm_action_none()
+
+        # Touch the title component to record change detection tick
+        val e = self.world.find_entity_for_window(window_id)
+        if not e.is_null():
+            self.world.titles.touch(e, self.world.base.now())
+
+        WmAction(kind: "set_title", window_id: window_id, title: title, x: 0, y: 0, width: 0, height: 0, content: "", process_id: 0, app_id: "", owner_port: 0, src_port: src_port)
+
+    me parse_minimize(src_port: u64, payload_addr: u64, payload_len: u32) -> WmAction:
+        """Parse COMP_MINIMIZE into a WmAction.
+
+        Payload: window_id(u64)
+        """
+        if payload_len != 8u32:
+            self.last_rejection_reason = "truncated-minimize-payload"
+            return wm_action_none()
+        val window_id = _read_u64(payload_addr)
+        val owner = self.find_owner(window_id)
+        if owner == 0 or owner != src_port:
+            self.send_status_reply(src_port, STATUS_ERR)
+            return wm_action_none()
+
+        if self.next_scene_revision() == 0u64:
+            return wm_action_none()
+        if not self.admit_window_damage(window_id, 0u64, "minimize"):
+            return wm_action_none()
+
+        val e = self.world.find_entity_for_window(window_id)
+        if not e.is_null():
+            # two-hop mutation workaround: bug selfhost_two_hop_field_method_mutation_lost_2026-07-27
+            val ecs_tick = self.world.base.now()
+            var states_s = self.world.states
+            states_s.insert(e, WindowState(value: WIN_STATE_MINIMIZED), ecs_tick)
+            self.world.states = states_s
+
+        WmAction(kind: "minimize", window_id: window_id, title: "", x: 0, y: 0, width: 0, height: 0, content: "", process_id: 0, app_id: "", owner_port: 0, src_port: src_port)
+
+    me parse_maximize(src_port: u64, payload_addr: u64, payload_len: u32) -> WmAction:
+        """Parse COMP_MAXIMIZE into a WmAction.
+
+        Payload: window_id(u64)
+        """
+        if payload_len != 8u32:
+            self.last_rejection_reason = "truncated-maximize-payload"
+            return wm_action_none()
+        val window_id = _read_u64(payload_addr)
+        val owner = self.find_owner(window_id)
+        if owner == 0 or owner != src_port:
+            self.send_status_reply(src_port, STATUS_ERR)
+            return wm_action_none()
+
+        if self.next_scene_revision() == 0u64:
+            return wm_action_none()
+        if not self.admit_window_damage(window_id, 0u64, "maximize"):
+            return wm_action_none()
+
+        val e = self.world.find_entity_for_window(window_id)
+        if not e.is_null():
+            # two-hop mutation workaround: bug selfhost_two_hop_field_method_mutation_lost_2026-07-27
+            val ecs_tick = self.world.base.now()
+            var states_s = self.world.states
+            states_s.insert(e, WindowState(value: WIN_STATE_MAXIMIZED), ecs_tick)
+            self.world.states = states_s
+
+        WmAction(kind: "maximize", window_id: window_id, title: "", x: 0, y: 0, width: 0, height: 0, content: "", process_id: 0, app_id: "", owner_port: 0, src_port: src_port)
+
+    me parse_restore(src_port: u64, payload_addr: u64, payload_len: u32) -> WmAction:
+        """Parse COMP_RESTORE into a WmAction.
+
+        Payload: window_id(u64)
+        """
+        if payload_len != 8u32:
+            self.last_rejection_reason = "truncated-restore-payload"
+            return wm_action_none()
+        val window_id = _read_u64(payload_addr)
+        val owner = self.find_owner(window_id)
+        if owner == 0 or owner != src_port:
+            self.send_status_reply(src_port, STATUS_ERR)
+            return wm_action_none()
+
+        if self.next_scene_revision() == 0u64:
+            return wm_action_none()
+        if not self.admit_window_damage(window_id, 0u64, "restore"):
+            return wm_action_none()
+
+        val e = self.world.find_entity_for_window(window_id)
+        if not e.is_null():
+            # two-hop mutation workaround: bug selfhost_two_hop_field_method_mutation_lost_2026-07-27
+            val ecs_tick = self.world.base.now()
+            var states_s = self.world.states
+            states_s.insert(e, WindowState(value: WIN_STATE_NORMAL), ecs_tick)
+            self.world.states = states_s
+
+        WmAction(kind: "restore", window_id: window_id, title: "", x: 0, y: 0, width: 0, height: 0, content: "", process_id: 0, app_id: "", owner_port: 0, src_port: src_port)
+
+    # -- Outbound Event Delivery ---------------------------------------------
+
+    me send_input_to_owner(window_id: u64, event: WmInputEvent):
+        """Send an input event to the app that owns this window via IPC.
+
+        Called by the compositor when a remote window receives input.
+        Encodes the WmInputEvent as:
+          method(u32=COMP_INPUT_EVENT) | window_id(u64) | event_type(u32) |
+          key_code(u32) | mouse_x(i32) | mouse_y(i32) | modifiers(u32) |
+          text_len(u32) | committed_utf8(text_len)
+        """
+        val owner = self.find_owner(window_id)
+        if owner == 0:
+            return
+        self.send_input_to_port(owner, event)
+
+    me send_close_request(window_id: u64):
+        """Send a close request to the app that owns this window.
+
+        Called when the user clicks the close button or presses Alt+F4
+        on a remote window. The app should clean up and respond with
+        COMP_DESTROY_WINDOW.
+        """
+        val owner = self.find_owner(window_id)
+        if owner == 0:
+            return
+
+        var buf: [u8] = []
+        _push_u32(buf, COMP_CLOSE_REQUEST)
+        _push_u64(buf, window_id)
+        _ipc_send(owner, self.port_id, buf)
+        log_raw_println("[wm-service] Sent close request for window {window_id} to port {owner}")
+
+    me send_focus_changed(window_id: u64, focused: bool):
+        """Notify the app that a window gained or lost focus.
+
+        Sent when the compositor changes focus between windows, so apps
+        can update their visual state (e.g., cursor blink, selection highlight).
+        """
+        val owner = self.find_owner(window_id)
+        if owner == 0:
+            return
+
+        var buf: [u8] = []
+        _push_u32(buf, COMP_FOCUS_CHANGED)
+        _push_u64(buf, window_id)
+        val focused_byte: u8 = if focused: 1 else: 0
+        buf.push(focused_byte)
+        _ipc_send(owner, self.port_id, buf)
+
+    me send_input_to_port(dst_port: u64, event: WmInputEvent):
+        """Send an input event to a specific IPC port.
+
+        Called by the shell to deliver input events to remote app windows.
+        The shell owns the compositor and drains pending_remote_events itself.
+        """
+        val text_bytes = event.committed_text.bytes()
+        if text_bytes.len() > WM_INPUT_TEXT_MAX_BYTES.to_i64():
+            log_raw_println("[wm-service] rejected oversized committed text event")
+            return
+        var buf: [u8] = []
+        # Method header
+        _push_u32(buf, COMP_INPUT_EVENT)
+        # Event payload
+        _push_u64(buf, event.window_id.value)
+        _push_u32(buf, event.event_type.to_u32())
+        _push_u32(buf, event.key_code.code)
+        _push_i32(buf, event.point.x.to_i32())
+        _push_i32(buf, event.point.y.to_i32())
+        var modifier_bits: u32 = 0
+        if event.modifiers.shift:
+            modifier_bits = modifier_bits | 1u32
+        if event.modifiers.ctrl:
+            modifier_bits = modifier_bits | 2u32
+        if event.modifiers.alt:
+            modifier_bits = modifier_bits | 4u32
+        if event.modifiers.meta:
+            modifier_bits = modifier_bits | 8u32
+        _push_u32(buf, modifier_bits)
+        _push_u32(buf, text_bytes.len().to_u32())
+        for byte in text_bytes:
+            buf.push(byte.to_u8())
+        _ipc_send(dst_port, self.port_id, buf)

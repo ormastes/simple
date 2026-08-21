@@ -1,0 +1,208 @@
+# Backend-neutral dispatch for MountTable.
+#
+# Keeping the exhaustive DriverInstance match arms here makes mount_table.spl
+# own namespace, binding, and policy state while this module owns backend
+# operation selection. Every operation is routed to the recorded instance;
+# unsupported operations fail closed.
+
+use std.fs_driver.types.{Path, StatInfo, FileStat, FileHandle, DirHandle, DirEntry, OpenFlags}
+use std.fs_driver.instance.{DriverInstance}
+use std.fs_driver.error.{FsError}
+use std.fs_driver.capability.{FsCapabilitySet}
+use std.fs_driver.bytes_util.{alloc_zeroed_bytes, text_to_bytes_pure}
+
+fn _bytes_to_text_prefix(buf: [u8], count: i64) -> text:
+    var out = ""
+    var i: i64 = 0
+    while i < count and i < buf.len() as i64:
+        out = out + buf[i as i32].chr()
+        i = i + 1
+    out
+
+fn _driver_name(driver: DriverInstance) -> text:
+    match driver:
+        case DriverInstance.Fat32(d):     d.name
+        case DriverInstance.Nvfs(d):      d.name
+        case DriverInstance.NvfsPosix(d): d.name
+        case DriverInstance.RamFs(d):     d.name
+        case DriverInstance.DbFs(d):      d.name
+
+fn _driver_capabilities(driver: DriverInstance) -> FsCapabilitySet:
+    match driver:
+        case DriverInstance.Fat32(d):     d.capabilities()
+        case DriverInstance.Nvfs(d):      d.capabilities()
+        case DriverInstance.NvfsPosix(d): d.capabilities()
+        case DriverInstance.RamFs(d):     d.capabilities()
+        case DriverInstance.DbFs(d):      d.capabilities()
+
+fn _driver_stat_path(driver: DriverInstance, path: Path) -> Result<StatInfo, FsError>:
+    match driver:
+        case DriverInstance.Fat32(d):     d.stat_path(path)
+        case DriverInstance.Nvfs(d):      d.stat_path(path)
+        case DriverInstance.NvfsPosix(d): d.stat_path(path)
+        case DriverInstance.RamFs(d):     d.stat_path(path)
+        case DriverInstance.DbFs(d):      d.stat_path(path)
+
+fn _driver_fstat(driver: DriverInstance, handle: FileHandle) -> Result<FileStat, FsError>:
+    match driver:
+        case DriverInstance.Fat32(d):     d.fstat(handle)
+        case DriverInstance.Nvfs(d):      d.fstat(handle)
+        case DriverInstance.NvfsPosix(d): d.fstat(handle)
+        case DriverInstance.RamFs(d):     d.fstat(handle)
+        case DriverInstance.DbFs(d):      d.fstat(handle)
+
+fn _driver_open_path(driver: DriverInstance, path: Path, flags: OpenFlags) -> Result<FileHandle, FsError>:
+    match driver:
+        case DriverInstance.Fat32(d):     d.open_path(path, flags)
+        case DriverInstance.Nvfs(d):      d.open_path(path, flags)
+        case DriverInstance.NvfsPosix(d): d.open_path(path, flags)
+        case DriverInstance.RamFs(d):     d.open_path(path, flags)
+        case DriverInstance.DbFs(d):      d.open_path(path, flags)
+
+fn _driver_opendir_path(driver: DriverInstance, path: Path) -> Result<DirHandle, FsError>:
+    match driver:
+        case DriverInstance.Fat32(d):     d.opendir_path(path)
+        case DriverInstance.Nvfs(d):      d.opendir_path(path)
+        case DriverInstance.NvfsPosix(d): d.opendir_path(path)
+        case DriverInstance.RamFs(d):     d.opendir_path(path)
+        case DriverInstance.DbFs(d):      d.opendir_path(path)
+
+fn _driver_readdir_handle(driver: DriverInstance, handle: DirHandle) -> Result<[DirEntry], FsError>:
+    match driver:
+        case DriverInstance.Fat32(d):     d.readdir_handle(handle)
+        case DriverInstance.Nvfs(d):      d.readdir_handle(handle)
+        case DriverInstance.NvfsPosix(d): d.readdir_handle(handle)
+        case DriverInstance.RamFs(d):     d.readdir_handle(handle)
+        case DriverInstance.DbFs(d):      d.readdir_handle(handle)
+
+fn _driver_read_handle(driver: DriverInstance, handle: FileHandle, length: i64) -> Result<text, FsError>:
+    match driver:
+        case DriverInstance.Fat32(d):     d.read_handle(handle, length)
+        case DriverInstance.Nvfs(d):      d.read_handle(handle, length)
+        case DriverInstance.NvfsPosix(d): d.read_handle(handle, length)
+        case DriverInstance.RamFs(d):     d.read_handle(handle, length)
+        case DriverInstance.DbFs(d):      d.read_handle(handle, length)
+
+fn _driver_mkdir_path(driver: DriverInstance, path: text, mode: u32) -> Result<(), FsError>:
+    match driver:
+        case DriverInstance.Fat32(d):     d.mkdir_path(path, mode)
+        case DriverInstance.Nvfs(d):      d.mkdir_path(path, mode)
+        case DriverInstance.NvfsPosix(d): d.mkdir_path(path, mode)
+        case DriverInstance.RamFs(d):     d.mkdir_path(path, mode)
+        case DriverInstance.DbFs(d):      d.mkdir_path(path, mode)
+
+fn _driver_write_text_handle(driver: DriverInstance, handle: FileHandle, content: text) -> Result<(), FsError>:
+    match driver:
+        case DriverInstance.Nvfs(d):
+            val bytes = text_to_bytes_pure(content)
+            match d.write(handle, 0, bytes):
+                case Err(e): Err(e)
+                case Ok(_): Ok(())
+        case DriverInstance.NvfsPosix(d):
+            val bytes = text_to_bytes_pure(content)
+            match d.write(handle, 0, bytes):
+                case Err(e): Err(e)
+                case Ok(_): Ok(())
+        case DriverInstance.DbFs(d): d.write_handle(handle, content)
+        case _:                      Err(FsError.Unsupported)
+
+fn _driver_pwrite_text_handle(driver: DriverInstance, handle: FileHandle, patch: text, offset: i64) -> Result<(), FsError>:
+    match driver:
+        case DriverInstance.Nvfs(d):
+            val bytes = text_to_bytes_pure(patch)
+            match d.pwrite(handle, offset, bytes):
+                case Err(e): Err(e)
+                case Ok(_): Ok(())
+        case DriverInstance.NvfsPosix(d):
+            val bytes = text_to_bytes_pure(patch)
+            match d.pwrite(handle, offset, bytes):
+                case Err(e): Err(e)
+                case Ok(_): Ok(())
+        case DriverInstance.DbFs(d): d.pwrite_handle(handle, patch, offset)
+        case _:                      Err(FsError.Unsupported)
+
+fn _driver_pread_text_handle(driver: DriverInstance, handle: FileHandle, offset: i64, length: i64) -> Result<text, FsError>:
+    match driver:
+        case DriverInstance.Nvfs(d):
+            val buf = alloc_zeroed_bytes(length)
+            match d.pread(handle, offset, buf):
+                case Err(e): Err(e)
+                case Ok(n): Ok(_bytes_to_text_prefix(buf, n))
+        case DriverInstance.NvfsPosix(d):
+            val buf = alloc_zeroed_bytes(length)
+            match d.pread(handle, offset, buf):
+                case Err(e): Err(e)
+                case Ok(n): Ok(_bytes_to_text_prefix(buf, n))
+        case DriverInstance.DbFs(d): d.pread_handle(handle, offset, length)
+        case _:                      Err(FsError.Unsupported)
+
+fn _driver_close_handle(driver: DriverInstance, handle: FileHandle) -> Result<(), FsError>:
+    match driver:
+        case DriverInstance.Fat32(d):      d.close(handle)
+        case DriverInstance.Nvfs(d):       d.close_handle(handle)
+        case DriverInstance.NvfsPosix(d):  d.close_handle(handle)
+        case DriverInstance.DbFs(d):       d.close_handle(handle)
+        case DriverInstance.RamFs(d):      d.close(handle)
+        case _:                            Err(FsError.Unsupported)
+
+fn _driver_fsync(driver: DriverInstance, handle: FileHandle) -> Result<(), FsError>:
+    match driver:
+        case DriverInstance.Fat32(d):      d.fsync(handle)
+        case DriverInstance.Nvfs(d):       d.fsync(handle)
+        case DriverInstance.NvfsPosix(d):  d.fsync(handle)
+        case DriverInstance.RamFs(d):      d.fsync(handle)
+        case DriverInstance.DbFs(d):       d.fsync(handle)
+
+fn _driver_fdatasync(driver: DriverInstance, handle: FileHandle) -> Result<(), FsError>:
+    match driver:
+        case DriverInstance.Fat32(d):      d.fdatasync(handle)
+        case DriverInstance.Nvfs(d):       d.fdatasync(handle)
+        case DriverInstance.NvfsPosix(d):  d.fdatasync(handle)
+        case DriverInstance.RamFs(d):      d.fdatasync(handle)
+        case DriverInstance.DbFs(d):       d.fdatasync(handle)
+
+fn _file_stat_is_directory(stat: FileStat) -> bool:
+    (stat.mode & 0o170000) == 0o040000
+
+fn _driver_unlink_path_text(driver: DriverInstance, path: text) -> Result<(), FsError>:
+    match driver:
+        case DriverInstance.Nvfs(d):      d.unlink_path(path)
+        case DriverInstance.NvfsPosix(d): d.unlink_path(path)
+        case DriverInstance.DbFs(d):      d.unlink_path(path)
+        case _:                           Err(FsError.Unsupported)
+
+fn _driver_rename_path_text(driver: DriverInstance, old_path: text, new_path: text) -> Result<(), FsError>:
+    match driver:
+        case DriverInstance.Nvfs(d):      d.rename_path(old_path, new_path)
+        case DriverInstance.NvfsPosix(d): d.rename_path(old_path, new_path)
+        case DriverInstance.DbFs(d):      d.rename_path(old_path, new_path)
+        case _:                           Err(FsError.Unsupported)
+
+fn _driver_ftruncate_handle(driver: DriverInstance, handle: FileHandle, new_size: i64) -> Result<(), FsError>:
+    match driver:
+        case DriverInstance.Nvfs(d):      d.ftruncate_handle(handle, new_size)
+        case DriverInstance.NvfsPosix(d): d.ftruncate_handle(handle, new_size)
+        case DriverInstance.DbFs(d):      d.ftruncate_handle(handle, new_size)
+        case _:                           Err(FsError.Unsupported)
+
+fn _driver_mmap_shared_writable_handle(driver: DriverInstance, handle: FileHandle, offset: i64, length: i64) -> Result<(), FsError>:
+    val _ = driver
+    val _ = handle
+    val _ = offset
+    val _ = length
+    Err(FsError.Unsupported)
+
+fn _driver_link_path_text(driver: DriverInstance, target: text, link_path: text) -> Result<(), FsError>:
+    val _ = target
+    val _ = link_path
+    match driver:
+        case _: Err(FsError.Unsupported)
+
+export _driver_name, _driver_capabilities, _driver_stat_path, _driver_fstat
+export _driver_open_path, _driver_opendir_path, _driver_readdir_handle
+export _driver_read_handle, _driver_mkdir_path, _driver_write_text_handle
+export _driver_pwrite_text_handle, _driver_pread_text_handle, _driver_close_handle
+export _driver_fsync, _driver_fdatasync, _file_stat_is_directory
+export _driver_unlink_path_text, _driver_rename_path_text
+export _driver_ftruncate_handle, _driver_mmap_shared_writable_handle
+export _driver_link_path_text

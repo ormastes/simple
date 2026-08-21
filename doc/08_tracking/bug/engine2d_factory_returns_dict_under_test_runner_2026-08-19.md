@@ -19,6 +19,7 @@
       strict_interp_spec 10/10, mir_interpreter_hot_path_spec 11/11
   - Deployed to `bin/release/x86_64-unknown-linux-gnu/simple` (simple-main) via
     `.new` + `mv`.
+- Status: OPEN (P1)
 - **Found:** 2026-08-19
 - Related: `module_named_like_its_class_shadows_it_inside_it_blocks_2026-08-04`
   (same root fact 1: importing one symbol registers the WHOLE module under its

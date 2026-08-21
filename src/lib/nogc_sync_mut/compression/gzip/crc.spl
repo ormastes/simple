@@ -14,7 +14,7 @@
 # =============================================================================
 
 # CRC32 lookup table (256 entries, reflected polynomial 0xEDB88320, RFC 1952)
-fn crc32_table():
+fn crc32_table() -> [i64]:
     var table: [i64] = []
     var i = 0
     loop:
@@ -38,18 +38,11 @@ fn crc32_table():
 # dominant per-checksum cost (PERF bug recorded in C-MIG-0001, fixed 2026-08-18).
 val _CRC32_TABLE = crc32_table()
 
-# Per-call local copy of the cached table: arrays sourced from a module val
-# index ~15x slower in the JIT even when hoisted (bug:
-# jit_module_val_array_indexing_15x_slow_2026-08-18). Copying 256 entries
-# costs microseconds and restores local-array indexing speed in hot loops.
-fn _table_copy() -> [i64]:
-    val src = _CRC32_TABLE
-    var t: [i64] = []
-    var i = 0
-    while i < 256:
-        t.push(src[i])
-        i = i + 1
-    t
+# Direct module-val reads are safe and fast again: the fn-call-initializer
+# type-inference fix (module_pass.rs, bug
+# jit_module_val_array_indexing_15x_slow_2026-08-18) is in the deployed seed;
+# the former _table_copy() per-call mitigation was removed 2026-08-20 after
+# the CRC-32 KAT passed under SIMPLE_JIT_STRICT=1 with direct reads.
 
 # Calculate CRC32 checksum
 fn crc32_calculate(data: [u8]) -> i64:
@@ -58,7 +51,7 @@ fn crc32_calculate(data: [u8]) -> i64:
 
     var crc = 0xffffffff
     var i = 0
-    val table = _table_copy()
+    val table = _CRC32_TABLE
 
     loop:
         if i >= data.len():
@@ -79,7 +72,7 @@ fn crc32_update(crc, data: [u8]) -> i64:
 
     var current = crc
     var i = 0
-    val table = _table_copy()
+    val table = _CRC32_TABLE
 
     loop:
         if i >= data.len():
@@ -136,7 +129,7 @@ fn crc32_text(s: text) -> i64:
     # slower than the C oracle on a 2KB body (perf spec
     # test/05_perf/lib/crc32_text_c_vs_simple_perf_spec.spl).
     val raw = s.bytes()
-    val table = _table_copy()
+    val table = _CRC32_TABLE
     var crc = 0xffffffff
     var i = 0
     val n = raw.len()

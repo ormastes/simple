@@ -328,12 +328,37 @@ fn load_user_executable(data: [u8], arch: Architecture) -> Result<ElfImage, text
         return Err("unsupported architecture for ELF loading")
     val expected = expected_opt.unwrap()
     val class_ = _validate_ident(data)?
-    _validate_common_header(data, arch, expected, class_)? 
+    _validate_common_header(data, arch, expected, class_)?
     match class_:
         case ElfClass.Elf32:
             _parse_elf32(data)
         case ElfClass.Elf64:
             _parse_elf64(data)
+
+pub fn elf_admit_executable(data: [u8], arch: Architecture) -> Result<(), text>:
+    """Validate a complete target executable without exposing loader internals."""
+    val image = load_user_executable(data, arch)?
+    if image.entry == 0u64:
+        return Err("ELF executable entry is zero")
+    var entry_is_executable = false
+    for segment in image.segments:
+        if segment.file_size == 0u64 or segment.mem_size == 0u64:
+            continue
+        if segment.virt_addr > 18446744073709551615u64 - segment.mem_size:
+            return Err("ELF PT_LOAD virtual range overflows")
+        # The initial instruction must be backed by admitted artifact bytes,
+        # not merely by the zero-filled p_memsz tail.  Otherwise a structurally
+        # valid header can point execution into BSS and still receive a false
+        # positive from this artifact gate.
+        if segment.virt_addr > 18446744073709551615u64 - segment.file_size:
+            return Err("ELF PT_LOAD file-backed virtual range overflows")
+        val segment_end = segment.virt_addr + segment.file_size
+        if (segment.flags & 1u32) != 0u32 and
+           image.entry >= segment.virt_addr and image.entry < segment_end:
+            entry_is_executable = true
+    if not entry_is_executable:
+        return Err("ELF entry is not inside an executable PT_LOAD segment")
+    Ok(())
 
 fn load_riscv_executable(data: [u8], arch: Architecture) -> Result<ElfImage, text>:
     load_user_executable(data, arch)
@@ -383,3 +408,5 @@ fn load_user_executable_unchecked(data: [u8], arch: Architecture) -> ElfImage:
             _parse_elf32(data).unwrap()
         case _:
             _load_user_executable_arm64_unchecked(data)
+
+export elf_admit_executable

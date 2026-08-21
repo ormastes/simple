@@ -108,6 +108,8 @@ struct NvfsOpenHandle:
 
 var _open_handles: [NvfsOpenHandle] = []
 var _next_handle_id: u64 = 1
+val NVFS_DRIVER_MAX_OPEN_HANDLES: i64 = 65536
+val NVFS_DRIVER_MAX_HANDLE_ID: u64 = 0xFFFFFFFFFFFFFFFFu64
 
 fn _find_handle(id: u64) -> i64:
     """Return index of handle with id in _open_handles, or -1."""
@@ -118,13 +120,16 @@ fn _find_handle(id: u64) -> i64:
         i = i + 1
     -1
 
-fn _alloc_handle(arena_id: i64, read_only: bool) -> FileHandle:
+fn _alloc_handle(arena_id: i64, read_only: bool) -> Result<FileHandle, FsError>:
     """Allocate a new handle entry and return the opaque FileHandle."""
+    if _open_handles.len() >= NVFS_DRIVER_MAX_OPEN_HANDLES or
+        _next_handle_id == NVFS_DRIVER_MAX_HANDLE_ID:
+        return Err(FsError.TooLarge)
     val id = _next_handle_id
     _next_handle_id = _next_handle_id + 1
     val h = NvfsOpenHandle(handle_id: id, arena_id: arena_id, read_only: read_only)
     _open_handles.push(h)
-    FileHandle(id: id)
+    Ok(FileHandle(id: id))
 
 fn _remove_handle(idx: i64):
     """Remove the handle at idx from the table (swap-remove for O(1))."""
@@ -220,8 +225,7 @@ impl FsDriver for NvfsDriver:
         if (writable and self.read_only):
             return Err(FsError.ReadOnly)
         val arena_id = arena_create_impl(0, 4096)
-        val handle = _alloc_handle(arena_id, not writable)
-        Ok(handle)
+        _alloc_handle(arena_id, not writable)
 
     fn close(handle: FileHandle) -> Result<(), FsError>:
         """Release an open FileHandle."""
@@ -331,18 +335,14 @@ impl FsDriver for NvfsDriver:
         Err(FsError.Unsupported)
 
     fn fsync(handle: FileHandle) -> Result<(), FsError>:
-        """fsync — N1 in-memory: no-op (all writes already durable in-process)."""
+        """Fail closed: this service driver has no acknowledged device barrier."""
         val idx = _find_handle(handle.id)
         if idx < 0:
             return Err(FsError.InvalidArg)
-        Ok(())
+        Err(FsError.Unsupported)
 
     fn fdatasync(handle: FileHandle) -> Result<(), FsError>:
-        """fdatasync — N1 in-memory: no-op."""
-        val idx = _find_handle(handle.id)
-        if idx < 0:
-            return Err(FsError.InvalidArg)
-        Ok(())
+        self.fsync(handle)
 
     # --- Namespace ---
 

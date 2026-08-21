@@ -1,0 +1,674 @@
+"""
+# Worker Thread
+
+Each worker owns its own EventLoop + IoDriver and handles
+thousands of connections via non-blocking I/O. Workers are
+spawned by the master HttpServer.
+
+## Architecture
+
+```
+Worker Thread
+  ├── EventLoop (epoll/kqueue)
+  ├── IoDriver (submit/poll completions)
+  ├── TcpListener (SO_REUSEPORT, own bind)
+  ├── connections: Dict<fd, Connection>
+  ├── AsyncRouter
+  ├── MiddlewarePipeline
+  └── HandlerRegistry
+```
+
+## Main Loop
+
+```
+while not shutdown:
+  1. Check control channel for shutdown/reload
+  2. driver.flush()
+  3. completions = driver.poll(max_events, timeout_ms)
+  4. For each completion: advance connection state machine
+  5. Reap expired keepalive connections
+```
+"""
+
+use std.io.driver.{IoDriver}
+use std.io.net_backend.{NetBackendCapabilities, net_backend_summary}
+use std.nogc_async_mut.io.tcp_backend.{
+    tcp_backend_bind,
+    tcp_backend_bind_with_reuseport,
+    tcp_backend_close,
+    tcp_backend_local_addr,
+    tcp_backend_set_nodelay,
+    tcp_backend_set_nonblocking
+}
+use std.concurrent.channel.{Channel}
+use std.thread_sffi.{spl_thread_sleep}
+
+use std.http_server.types.{
+    ConnectionState, ConnectionAction, HttpRequestData, HttpResponseData,
+    ServerConfig, LocationConfig, PhaseResult, default_response_data
+}
+use std.http_server.connection.{Connection}
+use std.http_server.router.{AsyncRouter}
+use std.http_server.middleware.{MiddlewarePipeline}
+use std.http_server.response.{
+    serialize_response, build_error, build_not_found, build_internal_error,
+    build_phase_response
+}
+use std.http_server.handler.{HandlerRegistry}
+use std.http_server.error.{HttpServerError}
+use std.common.net.http_core.{path_is_safe}
+use std.http_server.security_context.{dispatch_with_task_remote_security_context}
+use std.async_host.task_identity.{allocate_scheduler_task_id, current_unified_task_key, enter_scheduler_task_id, exit_scheduler_task_id}
+use std.nogc_async_mut.io.tls.{TlsConfig}
+use std.nogc_async_mut.io.tls_handshake.{perform_server_handshake}
+use std.tls.certificate.{TlsCertificateChain, TlsPrivateKey}
+use std.nogc_async_mut.io.file_ops.{file_read_text, file_exists, file_size}
+use std.http_server.range.{
+    find_header, parse_range_header,
+    build_range_response, build_multipart_range_response,
+    generate_boundary
+}
+use std.nogc_async_mut.io.time_ops.{current_time_ms}
+use std.http_server.protocol_handler.{ProtocolKind, protocol_from_alpn}
+use std.http_server.h2_connection.{H2Connection}
+use std.http.h2.h2_preface.{h2_validate_preface, H2_CONNECTION_PREFACE_LEN}
+use std.http_server.compression.{compress_response}
+use std.http_server.worker_wire.{
+    TlsSessionState,
+    is_dynamic_handler,
+    worker_static_file_route,
+    worker_static_file_fallback_response,
+    worker_sendfile_open_path_for_pending
+}
+use std.common.net.tls_application_record_stream_v1.{
+    TlsApplicationRecordStreamV1,
+    tls_application_record_stream_new_v1
+}
+fn _http_time_now_ms() -> i64:
+    current_time_ms()
+
+# Completion type constants
+pub(package) val OP_RECV = 1
+pub(package) val OP_SEND = 2
+pub(package) val OP_SENDFILE = 3
+pub(package) val OP_OPEN_SENDFILE = 4
+pub(package) val OP_CLOSE_SENDFILE = 5
+
+# ============================================================================
+# Worker
+# ============================================================================
+
+pub struct WorkerResourceSnapshot:
+    """Read-only ownership counters exposed for lifecycle verification."""
+    pub active_count: i64
+    pub active_connections: i64
+    pub h2_connections: i64
+    pub pending_operations: i64
+    pub pending_sendfiles: i64
+    pub open_sendfiles: i64
+    pub tls_sessions: i64
+    pub tls_buffers: i64
+
+pub class Worker:
+    """Event-driven worker thread for the async HTTP server.
+
+    Each worker binds its own listener (SO_REUSEPORT), owns an IoDriver,
+    and manages a pool of non-blocking connections. The kernel distributes
+    incoming connections across workers.
+    """
+    worker_id: i64
+    driver: IoDriver
+    net_capabilities: NetBackendCapabilities
+    net_backend_summary: text
+    listener_fd: i64
+    connections: Dict<i64, Connection>
+    h2_connections: Dict<i64, H2Connection>
+    op_to_fd: Dict<i64, i64>
+    op_type: Dict<i64, i64>
+    sendfile_pending: Dict<i64, (text, i64, i64)>
+    sendfile_open_files: Dict<i64, i64>
+    router: AsyncRouter
+    pipeline: MiddlewarePipeline
+    handler_registry: HandlerRegistry
+    config: ServerConfig
+    control: Channel
+    status: Channel?
+    active_count: i64
+    shutdown_requested: bool
+    draining: bool
+    accept_op_id: i64
+    static_file_sendfile_count: i64
+    static_file_fallback_count: i64
+    tls_config: TlsConfig?
+    tls_sessions: Dict<i64, TlsSessionState>
+    tls_rx_streams: Dict<i64, TlsApplicationRecordStreamV1>
+
+    pub static fn create(worker_id: i64, config: ServerConfig,
+                     router: AsyncRouter, pipeline: MiddlewarePipeline,
+                     handler_registry: HandlerRegistry,
+                     control: Channel,
+                     status: Channel? = nil) -> Result<Worker, HttpServerError>:
+        """Create a new worker and bind its listener.
+
+        Args:
+            worker_id: Worker index (0-based)
+            config: Server configuration
+            router: Router (read-only after init)
+            pipeline: Middleware pipeline (read-only after init)
+            handler_registry: Content handler dispatch registry
+            control: Channel for shutdown signals from master
+            status: Optional worker-to-master status channel
+
+        Returns:
+            Initialized Worker or BindFailed error
+        """
+        val driver = IoDriver.new()
+        val caps = driver.net_capabilities()
+        val backend_summary = net_backend_summary(caps)
+
+        val listen_fd = tcp_backend_bind_with_reuseport(config.listen_addr)
+        if listen_fd < 0:
+            return Err(HttpServerError.BindFailed(
+                "Worker {worker_id}: failed to bind {config.listen_addr}"
+            ))
+
+        tcp_backend_set_nonblocking(listen_fd, true)
+
+        # Build TLS config when TLS is enabled (no separate bind — reuse TCP listener fd)
+        var tls_cfg: TlsConfig? = nil
+        if config.tls_enabled:
+            val chain_result = TlsCertificateChain.from_pem_file(config.tls_cert_path)
+            var chain: TlsCertificateChain
+            match chain_result:
+                Ok(c):
+                    chain = c
+                Err(msg):
+                    tcp_backend_close(listen_fd)
+                    driver.close()
+                    return Err(HttpServerError.TlsError("Worker {worker_id}: certificate load failed: {msg}"))
+            val key_result = TlsPrivateKey.from_pem_file(config.tls_key_path)
+            var key: TlsPrivateKey
+            match key_result:
+                Ok(k):
+                    key = k
+                Err(msg):
+                    tcp_backend_close(listen_fd)
+                    driver.close()
+                    return Err(HttpServerError.TlsError("Worker {worker_id}: private key load failed: {msg}"))
+            tls_cfg = TlsConfig.server(chain, key)
+
+        Ok(Worker(
+            worker_id: worker_id,
+            driver: driver,
+            net_capabilities: caps,
+            net_backend_summary: backend_summary,
+            listener_fd: listen_fd,
+            connections: {},
+            h2_connections: {},
+            op_to_fd: {},
+            op_type: {},
+            sendfile_pending: {},
+            sendfile_open_files: {},
+            router: router,
+            pipeline: pipeline,
+            handler_registry: handler_registry,
+            config: config,
+            control: control,
+            status: status,
+            active_count: 0,
+            shutdown_requested: false,
+            draining: false,
+            accept_op_id: 0,
+            static_file_sendfile_count: 0,
+            static_file_fallback_count: 0,
+            tls_config: tls_cfg,
+            tls_sessions: {},
+            tls_rx_streams: {}
+        ))
+
+    pub(package) me run():
+        """Main worker loop. Runs until shutdown is requested.
+
+        This method is called in a dedicated OS thread. It submits
+        an initial accept, then loops polling for completions.
+        """
+        self.accept_op_id = self.driver.submit_accept(self.listener_fd)
+        self.driver.flush()
+        if self.accept_op_id < 0:
+            if val status = self.status:
+                status.send("failed")
+            self.shutdown_requested = true
+        else:
+            if val status = self.status:
+                status.send("ready")
+
+        while not self.shutdown_requested:
+            val msg = self.control.try_recv()
+            if msg.?:
+                val cmd = msg as text
+                if cmd == "shutdown":
+                    self.shutdown_requested = true
+                    break
+                elif cmd == "drain":
+                    self.draining = true
+
+            self.driver.flush()
+            val completion_count = self.driver.poll_count(64, 10)
+            val now = _http_time_now_ms()
+
+            var completion_index = 0
+            while completion_index < completion_count:
+                val op_id = self.driver.poll_id(completion_index)
+                val result = self.driver.poll_result(completion_index)
+                if op_id == self.accept_op_id:
+                    if self.draining:
+                        if result >= 0:
+                            tcp_backend_close(result)
+                    else:
+                        self.handle_accept(result, now)
+                else:
+                    self.handle_completion(op_id, result, completion_index, now)
+                completion_index = completion_index + 1
+
+            self.reap_expired(now)
+
+            if self.draining and self.active_count == 0:
+                if val status = self.status:
+                    status.send("drained")
+                self.shutdown_requested = true
+
+        self.close_all_connections()
+        tcp_backend_close(self.listener_fd)
+        self.driver.close()
+
+    pub me abort_start():
+        self.shutdown_requested = true
+        self.close_all_connections()
+        tcp_backend_close(self.listener_fd)
+        self.driver.close()
+
+    # ========================================================================
+    # Accept
+    # ========================================================================
+
+    pub(package) me handle_accept(client_fd: i64, now: i64):
+        """Handle a new connection accept completion.
+
+        When TLS is enabled, performs TLS handshake and dispatches
+        by ALPN protocol. Plain TCP otherwise.
+        """
+        self.accept_op_id = self.driver.submit_accept(self.listener_fd)
+
+        if client_fd < 0:
+            return
+
+        if self.active_count >= self.config.max_connections:
+            tcp_backend_close(client_fd)
+            return
+
+        tcp_backend_set_nonblocking(client_fd, true)
+        tcp_backend_set_nodelay(client_fd, true)
+
+        # TLS path: handshake then ALPN dispatch
+        if self.tls_config.?:
+            self.handle_tls_accept(client_fd, now)
+            return
+
+        val peer = tcp_backend_local_addr(client_fd) ?? "unknown"
+        val conn = Connection.new(client_fd, peer, now)
+
+        self.connections[client_fd] = conn
+        self.active_count = self.active_count + 1
+
+        val recv_op = self.driver.submit_recv(client_fd, 8192)
+        self.op_to_fd[recv_op] = client_fd
+        self.op_type[recv_op] = OP_RECV
+
+    pub(package) me handle_tls_accept(client_fd: i64, now: i64):
+        """Perform TLS handshake on an accepted fd and dispatch by ALPN.
+
+        Uses perform_server_handshake from the TLS module to complete the
+        handshake synchronously. On success, stores session keys for
+        record-layer encrypt/decrypt, then dispatches via dispatch_by_alpn
+        for HTTP/1.1 or HTTP/2. On failure, closes the fd.
+
+        The protocol comes from `state.alpn`, negotiated during the
+        handshake (RFC 7301) and echoed back to the client in ServerHello.
+        It is "" when the client offered no ALPN extension, which routes
+        the connection to HTTP/1.1.
+        """
+        var cfg = self.tls_config
+        val hs_result = perform_server_handshake(
+            self.driver,
+            client_fd,
+            cfg
+        )
+        match hs_result:
+            Ok(state):
+                val keys = match state.session_keys:
+                    Some(session_keys):
+                        session_keys
+                    nil:
+                        tcp_backend_close(client_fd)
+                        return
+                # Store TLS session keys for this connection so recv/send
+                # paths can decrypt/encrypt TLS application data records.
+                # Use seq values from the handshake state: both Finished messages
+                # consume seq 0, so application data begins at client_seq=1, server_seq=1.
+                self.tls_sessions[client_fd] = TlsSessionState(
+                    keys: keys,
+                    cipher_suite: state.cipher_suite,
+                    client_seq: state.client_seq,
+                    server_seq: state.server_seq
+                )
+                self.tls_rx_streams[client_fd] = tls_application_record_stream_new_v1(state.client_seq)
+                self.dispatch_by_alpn(state.alpn, client_fd, now)
+            Err(e):
+                tcp_backend_close(client_fd)
+
+    # ========================================================================
+    # I/O Completions
+    # ========================================================================
+
+    pub(package) me process_request(fd: i64, now: i64):
+        """Process a complete HTTP request through the pipeline.
+
+        Runs middleware phases, routes to handler, generates response.
+        """
+        # NOTE: contains_key + index read, not .get() — Dict<K, class> .get()
+        # returns a corrupt payload under native codegen.
+        if not self.connections.contains_key(fd):
+            return
+
+        var c = self.connections[fd]
+        val request = c.request
+        if not request.?:
+            self.send_error(fd, 500, "No request data", now)
+            return
+
+        # Run pre-content middleware phases
+        val phase_result = self.pipeline.run_all_phases(request, self.config)
+        match phase_result:
+            PhaseResult.Respond(status, reason, headers, body):
+                val resp = build_phase_response(status, reason, headers, body)
+                self.send_response(fd, resp, now)
+                return
+            PhaseResult.Error(status, msg):
+                self.send_error(fd, status, msg, now)
+                return
+            PhaseResult.Continue:
+                val phase_allowed = true
+            PhaseResult.Skip:
+                val phase_allowed = true
+
+        # Route request
+        val route_result = self.router.route(request)
+        match route_result:
+            Ok((location, params)):
+                # AC-4 (assessment P0-D): dynamic handler types dispatch through
+                # the handler registry under a server-established security
+                # context; only static locations use the inline fast path.
+                var resp = if is_dynamic_handler(location.handler_type):
+                    self.execute_handler_with_remote_security_context(location, request)
+                else:
+                    self.inline_static_handler(location, request)
+                resp = compress_response(request, resp)
+                self.send_response(fd, resp, now)
+
+            Err(e):
+                match e:
+                    HttpServerError.ParseError(msg):
+                        # AC-3: unsafe path rejected by the router guard.
+                        self.send_error(fd, 400, msg, now)
+                    _:
+                        self.send_response(fd, build_not_found(), now)
+
+        # Run log phase
+        self.pipeline.run_log_phase(request, self.config)
+
+    pub(package) me inline_static_handler(location: LocationConfig, request: HttpRequestData) -> HttpResponseData:
+        val root = location.root
+        val path = request.path
+        # AC-3 defence in depth: never build a filesystem path from an unsafe
+        # request path, even if a caller bypassed the router guard.
+        if not path_is_safe(path):
+            var bad = default_response_data(400, "Bad Request", "unsafe path")
+            bad.headers = [("Content-Type", "text/plain"), ("Server", "SimpleServer")]
+            return bad
+        val full_path = root + path
+        if not file_exists(full_path):
+            return build_not_found()
+
+        val size = file_size(full_path)
+        var ctype = "application/octet-stream"
+        if path.ends_with(".html") or path.ends_with(".htm"):
+            ctype = "text/html; charset=utf-8"
+        elif path.ends_with(".txt"):
+            ctype = "text/plain; charset=utf-8"
+        elif path.ends_with(".css"):
+            ctype = "text/css"
+        elif path.ends_with(".js"):
+            ctype = "application/javascript"
+        elif path.ends_with(".json"):
+            ctype = "application/json"
+        elif path.ends_with(".png"):
+            ctype = "image/png"
+        elif path.ends_with(".jpg") or path.ends_with(".jpeg"):
+            ctype = "image/jpeg"
+
+        # ETag based on file size (weak but consistent)
+        val etag = "\"{size}\""
+
+        # Check for Range header
+        val range_hdr = find_header(request.headers, "Range")
+        if range_hdr.?:
+            # If-Range: only honor Range when ETag matches
+            var honor_range = true
+            val if_range_val = find_header(request.headers, "If-Range")
+            if if_range_val.?:
+                val ir = "" + if_range_val
+                if ir != etag:
+                    honor_range = false
+
+            if honor_range:
+                val parsed = parse_range_header(range_hdr, size)
+                match parsed:
+                    Ok(ranges):
+                        if ranges.len() == 1:
+                            return build_range_response(ranges, size, ctype, full_path, etag)
+                        else:
+                            val boundary = generate_boundary()
+                            return build_multipart_range_response(ranges, size, ctype, boundary, full_path, etag)
+                    Err(e):
+                        # 416 Range Not Satisfiable
+                        return HttpResponseData(
+                            status: 416,
+                            reason: "Range Not Satisfiable",
+                            headers: [
+                                ("Content-Range", "bytes */{size}"),
+                                ("Accept-Ranges", "bytes"),
+                                ("Server", "SimpleServer")
+                            ],
+                            body: "",
+                            body_bytes: [],
+                            body_file: "",
+                            body_offset: 0,
+                            body_length: 0,
+                            chunked: false
+                        )
+
+        # Full 200 response with Accept-Ranges and ETag
+        val content = file_read_text(full_path)
+        var resp = default_response_data(200, "OK", content)
+        resp.headers = [
+            ("Content-Type", ctype),
+            ("Content-Length", "{size}"),
+            ("Accept-Ranges", "bytes"),
+            ("ETag", etag),
+            ("Server", "SimpleServer")
+        ]
+        resp
+
+    pub(package) me execute_handler(location: LocationConfig,
+                       request: HttpRequestData) -> HttpResponseData:
+        """Execute the content handler for a matched location.
+
+        Delegates to handler_registry which maps handler_type to
+        the appropriate ContentHandler.
+        """
+        self.handler_registry.dispatch(location.handler_type, request, location)
+
+    pub(package) me security_task_id() -> text:
+        current_unified_task_key("scheduler-task-missing")
+
+    pub(package) me execute_handler_with_remote_security_context(location: LocationConfig,
+                                                    request: HttpRequestData) -> HttpResponseData:
+        """Execute handler under a server-side SecurityContext.
+
+        Client-provided UI permission snapshots are not used as authority. This
+        transport boundary only propagates safe headers and establishes an
+        anonymous context unless an upstream auth layer has validated identity.
+        """
+        val task_id = allocate_scheduler_task_id()
+        val previous_task_id = enter_scheduler_task_id(task_id)
+        val response = dispatch_with_task_remote_security_context(self.handler_registry, self.security_task_id(), location, request)
+        exit_scheduler_task_id(previous_task_id)
+        return response
+
+    # ========================================================================
+    # Response Sending
+    # ========================================================================
+
+    pub(package) me send_response(fd: i64, resp: HttpResponseData, now: i64):
+        """Send a response on a connection.
+
+        When a TLS session exists for this fd, the response bytes are chunked
+        into bounded 16KiB fragments, encrypted by the Worker transport
+        owner, and sent as a single contiguous byte buffer.
+        sendfile is transparently fallen back to portable-read for TLS
+        connections since kernel sendfile cannot encrypt in-flight.
+        """
+        # NOTE: contains_key presence test, not .get() — Dict<K, class> .get()
+        # returns a corrupt payload under native codegen.
+        if not self.connections.contains_key(fd):
+            return
+
+        var response = resp
+
+        # TLS connections must use portable-read for file bodies (sendfile bypasses encryption)
+        # NOTE: contains_key presence test, not .get() — Dict<K, class> .get()
+        # returns a corrupt payload under native codegen.
+        if self.tls_sessions.contains_key(fd):
+            if (worker_static_file_route(self.net_capabilities, resp) == "sendfile" or
+                worker_static_file_route(self.net_capabilities, resp) == "portable-read"):
+                response = worker_static_file_fallback_response(resp)
+                self.static_file_fallback_count = self.static_file_fallback_count + 1
+        else:
+            if worker_static_file_route(self.net_capabilities, resp) == "portable-read":
+                response = worker_static_file_fallback_response(resp)
+                self.static_file_fallback_count = self.static_file_fallback_count + 1
+            elif worker_static_file_route(self.net_capabilities, resp) == "sendfile":
+                self.static_file_sendfile_count = self.static_file_sendfile_count + 1
+
+        var c = self.connections[fd]
+        val keepalive_s = self.config.keepalive_timeout_ms / 1000
+
+        # TLS encryption path: encrypt response bytes into TLS records
+        if self.tls_sessions.contains_key(fd):
+            # The byte serializer preserves compressed/binary bodies. Convert
+            # only at the TLS wire boundary, where text is explicitly a
+            # byte-preserving carrier.
+            c.set_response_bytes(response, keepalive_s)
+            self.connections[fd] = c
+            self.submit_tls_send_bytes(fd, c.get_response_bytes_buf())
+            return
+
+        if worker_static_file_route(self.net_capabilities, response) == "sendfile":
+            # Send headers first (text path), then chain sendfile on completion
+            c.set_response(response, keepalive_s)
+            self.connections[fd] = c
+            val bytes = c.get_response_bytes()
+            self.sendfile_pending[fd] = (response.body_file, response.body_offset, response.body_length)
+            val op = self.driver.submit_send(fd, bytes)
+            self.op_to_fd[op] = fd
+            self.op_type[op] = OP_SEND
+        elif response.body_bytes.len() > 0:
+            # Compressed or binary body — use bytes path to avoid text corruption
+            c.set_response_bytes(response, keepalive_s)
+            self.connections[fd] = c
+            val buf = c.get_response_bytes_buf()
+            val op = self.driver.submit_send_bytes(fd, buf)
+            self.op_to_fd[op] = fd
+            self.op_type[op] = OP_SEND
+        else:
+            c.set_response(response, keepalive_s)
+            self.connections[fd] = c
+            val bytes = c.get_response_bytes()
+            val op = self.driver.submit_send(fd, bytes)
+            self.op_to_fd[op] = fd
+            self.op_type[op] = OP_SEND
+
+    pub(package) me send_error(fd: i64, status: i64, msg: text, now: i64):
+        """Send an error response and close."""
+        val resp = build_error(status, msg)
+        self.send_response(fd, resp, now)
+
+    # ========================================================================
+    # Connection Lifecycle
+    # ========================================================================
+
+    pub(package) me dispatch_by_alpn(alpn: text, fd: i64, now: i64):
+        """Dispatch a new TLS connection based on the negotiated ALPN protocol.
+
+        Called after TLS accept when the handshake result carries a negotiated
+        ALPN string. Logs the chosen protocol and routes accordingly.
+
+        Routing:
+          - Http1 (or empty ALPN) → standard handle_accept() H1 path
+          - Http2                 → handle_h2_accept(): H2 framing + SETTINGS
+          - Http3                 → reject (H3 arrives on UDP, not TCP)
+
+        Args:
+            alpn: Negotiated ALPN string from TLS handshake. May be "".
+            fd:   Accepted client socket fd.
+            now:  Current epoch-ms timestamp from _http_time_now_ms().
+        """
+        val kind = protocol_from_alpn(alpn)
+        match kind:
+            ProtocolKind.Http2:
+                # H2 connection via ALPN — create H2Connection and start recv.
+                self.handle_h2_accept(fd, now)
+            ProtocolKind.Http3:
+                # H3 over TCP is a client error — reject immediately.
+                tcp_backend_close(fd)
+            ProtocolKind.Http1:
+                self.handle_accept(fd, now)
+
+    pub(package) me reap_expired(now: i64):
+        """Close connections that have exceeded their timeout."""
+        var to_close: [i64] = []
+
+        for fd in self.connections.keys():
+            val conn = self.connections[fd]
+            if conn.is_keepalive_expired(now, self.config.keepalive_timeout_ms):
+                to_close.push(fd)
+            elif conn.is_read_timeout(now, self.config.read_timeout_ms):
+                to_close.push(fd)
+
+        for fd in to_close:
+            self.close_connection(fd)
+
+        # Reap idle H2 connections
+        var h2_to_close: [i64] = []
+        for fd in self.h2_connections.keys():
+            val h2conn = self.h2_connections[fd]
+            if h2conn.is_idle_timeout(now, self.config.idle_timeout_ms):
+                h2_to_close.push(fd)
+
+        for fd in h2_to_close:
+            self.close_h2_connection(fd)
+
+# Strict cross-file surface. The facade re-exports only Worker and its
+# read-only snapshot; completion tags stay package-visible to the extension.
+export Worker, WorkerResourceSnapshot
+export OP_RECV, OP_SEND, OP_SENDFILE, OP_OPEN_SENDFILE, OP_CLOSE_SENDFILE

@@ -1,0 +1,60 @@
+# NvmeDriver concrete I/O queue construction.
+use os.drivers.nvme.nvme_driver.*
+use os.drivers.nvme._NvmeDriver.driver_class.*
+use os.drivers.nvme.nvme_queue.{NvmeQueuePair}
+use os.drivers.nvme.nvme_queue_resources.{NvmeQueueResources, nvme_queue_pair_from_resources, nvme_cq_doorbell_addr, nvme_sq_doorbell_addr, nvme_dstrd_to_doorbell_stride_bytes}
+use os.drivers.nvme.nvme_admin_command.{nvme_admin_create_io_completion_queue, nvme_admin_create_io_submission_queue}
+
+impl NvmeDriver:
+    me create_io_queue_pair(qid: u16, depth: u16) -> Result<NvmeQueuePair, text>:
+        """Create a concrete I/O completion/submission queue pair."""
+        if qid == 0u16:
+            return Result.Err("NVMe: I/O queue id zero")
+        if depth == 0u16:
+            return Result.Err("NVMe: I/O queue depth zero")
+        val cq_size = depth.to_u64() * 16u64
+        val cq_result = self.alloc_dma(cq_size)
+        if cq_result.is_err():
+            return Result.Err("NVMe: failed to allocate data I/O CQ")
+        val cq = cq_result.unwrap()
+        self.zero_memory(cq.virt, cq_size)
+        val cq_cmd_result = nvme_admin_create_io_completion_queue(qid, depth, cq.phys)
+        if cq_cmd_result.is_err():
+            return Result.Err("NVMe: create data I/O CQ " + cq_cmd_result.unwrap_err())
+        val cq_cmd = cq_cmd_result.unwrap()
+        self.admin_queue.submit_command(
+            cq_cmd.opcode, cq_cmd.nsid, cq_cmd.prp1, cq_cmd.prp2,
+            cq_cmd.cdw10, cq_cmd.cdw11, cq_cmd.cdw12
+        )
+        if not self.admin_queue.wait_completion(CMD_TIMEOUT):
+            return Result.Err("NVMe: create data I/O CQ timeout")
+
+        val sq_size = depth.to_u64() * 64u64
+        val sq_result = self.alloc_dma(sq_size)
+        if sq_result.is_err():
+            return Result.Err("NVMe: failed to allocate data I/O SQ")
+        val sq = sq_result.unwrap()
+        self.zero_memory(sq.virt, sq_size)
+        val queue_result = nvme_queue_pair_from_resources(NvmeQueueResources(
+            qid: qid,
+            depth: depth,
+            sq_phys: sq.phys,
+            sq_virt: sq.virt,
+            cq_phys: cq.phys,
+            cq_virt: cq.virt,
+            bar0_virt: self.bar0_virt,
+            doorbell_stride_bytes: nvme_dstrd_to_doorbell_stride_bytes(self.db_stride)
+        ))
+        if queue_result.is_err():
+            return Result.Err("NVMe: invalid data I/O queue resources: " + queue_result.unwrap_err())
+        val sq_cmd_result = nvme_admin_create_io_submission_queue(qid, depth, qid, sq.phys)
+        if sq_cmd_result.is_err():
+            return Result.Err("NVMe: create data I/O SQ " + sq_cmd_result.unwrap_err())
+        val sq_cmd = sq_cmd_result.unwrap()
+        self.admin_queue.submit_command(
+            sq_cmd.opcode, sq_cmd.nsid, sq_cmd.prp1, sq_cmd.prp2,
+            sq_cmd.cdw10, sq_cmd.cdw11, sq_cmd.cdw12
+        )
+        if not self.admin_queue.wait_completion(CMD_TIMEOUT):
+            return Result.Err("NVMe: create data I/O SQ timeout")
+        Ok(queue_result.unwrap())

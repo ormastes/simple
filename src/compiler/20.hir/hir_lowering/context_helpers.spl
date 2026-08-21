@@ -1,0 +1,156 @@
+# HIR Lowering - Context Lifecycle and Diagnostics
+#
+# Context initialization remains in types.spl; this sibling extension owns
+# transient reset, configuration accessors, and diagnostic projections.
+
+use compiler.hir.hir_types.*
+use compiler.hir.hir_lowering.types.*
+use compiler.common.config.{TypeInferenceConfig, TypeDefault}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.visibility.{effective_visibility}
+use compiler.common.dependency.visibility.{Visibility}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+
+impl HirLowering:
+    # Re-entrancy stack accessors for `imported_type_methods_in_progress`.
+    #
+    # These keep the guard's push/peek/pop behind the HirLowering extension
+    # boundary. Reading that field directly from `_Items/module_lowering.spl`
+    # made native-build's semantic pass abort the whole worker with
+    # "class `HirLowering` has no field named
+    # `imported_type_methods_in_progress`", even though the field is declared
+    # here and the seed interpreter resolved it fine — the same bare-name
+    # class-surface divergence recorded at 10.frontend/ast.spl:65 and
+    # _Items/module_lowering.spl:2029. Every other cross-module field on this
+    # class predates that surface, so only a newly added one trips it.
+    # Divergence filed: doc/08_tracking/bug/native_build_class_surface_misses_newly_added_field_2026-08-17.md
+    # Do NOT inline these back into module_lowering.spl.
+    me imported_type_methods_in_progress_has(key: text) -> bool:
+        for in_progress in self.imported_type_methods_in_progress:
+            if in_progress == key:
+                return true
+        false
+
+    me imported_type_methods_in_progress_push(key: text):
+        self.imported_type_methods_in_progress = self.imported_type_methods_in_progress.push(key)
+
+    me imported_type_methods_in_progress_pop(key: text):
+        var unwound: [text] = []
+        for in_progress in self.imported_type_methods_in_progress:
+            if in_progress != key:
+                unwound = unwound.push(in_progress)
+        self.imported_type_methods_in_progress = unwound
+
+    me begin_module(filename: text):
+        """Reset transient module state without replacing retained owners."""
+        # Diagnostics are stable no-GC owners. Clear them in place.
+        self.errors.clear()
+        self.diagnostic_messages.clear()
+        self.diagnostic_recovered.clear()
+        self.symbols.reset_module()
+        self.current_function = nil
+        self.loop_depth = 0
+        self.module_filename = filename
+        self.module_resolver = nil
+        self.loaded_modules.clear()
+        self.current_method_self_type = nil
+        self.current_method_self_symbol_id = -1
+        self.lowered_impl_functions.clear()
+        # Trait defaults are consumed only by impls in the module currently
+        # being lowered. Retaining full HirTrait values here kept every prior
+        # module graph alive across the streaming phase.
+        self.lowered_traits.clear()
+        # module_surfaces, type_inference_config, re-export root caches,
+        # generation, and counters are retained reference-bound state.
+        self.imported_traits.clear()
+        self.imported_enums.clear()
+        self.imported_enum_owners.clear()
+        self.materialized_payload_origins.clear()
+        self.materialized_payload_bindings.clear()
+        # Must already be empty here (the guard pops what it pushes, and the
+        # cycle cannot span a module boundary), so this is belt-and-braces: a
+        # stale entry would silently SKIP a needed method registration rather
+        # than recurse, which is the quieter and more dangerous failure.
+        self.imported_type_methods_in_progress = []
+        self.struct_field_types_by_name.clear()
+        self.local_struct_types.clear()
+        self.struct_field_order_by_name.clear()
+        self.local_tuple_types.clear()
+        self.enum_variant_names.clear()
+        self.registering_import_symbols = false
+        self.fn_tuple_returns.clear()
+        self.glob_expand_memo.clear()
+        self.reexport_visit_surface_indices.clear()
+        self.reexport_visit_wanted.clear()
+        self.reexport_visit_depths.clear()
+        self.reexport_walk_complete = true
+        self.reexport_walk_valid = true
+
+    static fn with_resolver(resolver: ModuleResolverPort, filename: text) -> HirLowering:
+        var lowering: HirLowering = hirlowering_new()
+        lowering.module_filename = filename
+        lowering.module_resolver = resolver
+        lowering
+
+    me set_type_inference_config(config: TypeInferenceConfig):
+        self.type_inference_config = Some(config)
+
+    me get_empty_array_default() -> HirType:
+        val default_type = if self.type_inference_config.?:
+            self.type_inference_config.unwrap().empty_array_default
+        else:
+            TypeDefault.I32
+
+        # Convert TypeDefault to HirType
+        val span = Span.empty()
+        match default_type:
+            case TypeDefault.Void: HirType(kind: HirTypeKind.Unit, span: span)
+            case TypeDefault.Bool: HirType(kind: HirTypeKind.Bool, span: span)
+            case TypeDefault.I8: HirType(kind: HirTypeKind.Int(8, true), span: span)
+            case TypeDefault.I16: HirType(kind: HirTypeKind.Int(16, true), span: span)
+            case TypeDefault.I32: HirType(kind: HirTypeKind.Int(32, true), span: span)
+            case TypeDefault.I64: HirType(kind: HirTypeKind.Int(64, true), span: span)
+            case TypeDefault.U8: HirType(kind: HirTypeKind.Int(8, false), span: span)
+            case TypeDefault.U16: HirType(kind: HirTypeKind.Int(16, false), span: span)
+            case TypeDefault.U32: HirType(kind: HirTypeKind.Int(32, false), span: span)
+            case TypeDefault.U64: HirType(kind: HirTypeKind.Int(64, false), span: span)
+            case TypeDefault.F32: HirType(kind: HirTypeKind.Float(32), span: span)
+            case TypeDefault.F64: HirType(kind: HirTypeKind.Float(64), span: span)
+            case TypeDefault.String: HirType(kind: HirTypeKind.Str, span: span)
+            case TypeDefault.Nil: HirType(kind: HirTypeKind.Unit, span: span)
+            case TypeDefault.Any: HirType(kind: HirTypeKind.Any, span: span)
+            case _: HirType(kind: HirTypeKind.Int(32, true), span: span)  # Default to i32
+
+    me is_strict_empty_collections() -> bool:
+        if self.type_inference_config.?:
+            self.type_inference_config.unwrap().strict_empty_collections
+        else:
+            false
+
+    # Keep the aggregate LoweringError array inside its HIR owner. Stage4 can
+    # Any-erase an array-of-struct field when it is read through a class field
+    # in another module under full-closure allocation pressure. Expose only
+    # scalar/text projections across that boundary.
+    me lowering_error_count() -> i64:
+        val focused_future_errors = self.module_filename == "src/lib/nogc_async_mut/async/future.spl"
+        if focused_future_errors:
+            eprint("[hir-errors] receiver valid")
+        val count: i64 = self.diagnostic_messages.len()
+        if focused_future_errors:
+            eprint("[hir-errors] array valid count={count}")
+        count
+
+    me lowering_error_is_recovered_at(index: i64) -> bool:
+        self.diagnostic_recovered[index]
+
+    me lowering_error_message_at(index: i64, module_name: text) -> text:
+        self.diagnostic_messages[index]
+
+    me compute_visibility(type_name: text, declared_visibility: Visibility) -> Visibility:
+        if (hir_type_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            return Visibility.Public
+        if declared_visibility != Visibility.Private:
+            return declared_visibility
+        if effective_visibility(type_name, self.module_filename, false):
+            return Visibility.Public
+        Visibility.Private

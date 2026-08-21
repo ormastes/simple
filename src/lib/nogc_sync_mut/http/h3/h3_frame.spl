@@ -33,6 +33,14 @@ val H3_SETTINGS_QPACK_MAX_TABLE_CAPACITY: i64 = 0x01
 val H3_SETTINGS_MAX_FIELD_SECTION_SIZE: i64   = 0x06
 val H3_SETTINGS_QPACK_BLOCKED_STREAMS: i64    = 0x07
 
+# Resource profile used by the public frame parser. HTTP/3 permits very large
+# varints, but a protocol implementation must not let an unauthenticated peer
+# select an unbounded allocation. Callers needing a smaller bound use
+# h3_frame_parse_bounded directly.
+val H3_MAX_VARINT: i64 = 4611686018427387903
+val H3_DEFAULT_MAX_FRAME_PAYLOAD: i64 = 1048576
+val H3_MAX_SETTINGS: i64 = 64
+
 # ============================================================================
 # Result types
 # ============================================================================
@@ -66,6 +74,15 @@ class H3Setting:
     """One HTTP/3 SETTINGS parameter (identifier, value) — both varints on wire."""
     identifier: i64
     value: i64
+
+class H3SettingsOk:
+    """Strict SETTINGS decode result."""
+    settings: [H3Setting]
+
+enum H3SettingsResult:
+    """Strict SETTINGS result; malformed input never becomes a partial list."""
+    Ok(H3SettingsOk)
+    Err(msg: text)
 
 # ============================================================================
 # Tagged union: H3Frame
@@ -139,6 +156,8 @@ fn _h3_append_bytes(bytes_out: [u8], src: [u8]):
 pub fn h3_varint_encode(u: i64) -> [u8]:
     """Encode an i64 as an RFC 9000 variable-length integer."""
     var out: [u8] = []
+    if u < 0 or u > H3_MAX_VARINT:
+        return out
     if u <= 63:
         # 1-byte form: 0b00xxxxxx
         out.push(u & 0xff)
@@ -225,6 +244,10 @@ pub fn h3_varint_decode(bytes: [u8], offset: i64) -> H3VarintResult:
 pub fn h3_frame_emit(frame_type: i64, payload: [u8]) -> [u8]:
     """Encode an HTTP/3 frame: varint(type) || varint(len) || payload."""
     var out: [u8] = []
+    if frame_type < 0 or frame_type > H3_MAX_VARINT:
+        return out
+    if payload.len() > H3_DEFAULT_MAX_FRAME_PAYLOAD:
+        return out
     val type_bytes = h3_varint_encode(frame_type)
     val len_bytes = h3_varint_encode(payload.len())
     _h3_append_bytes(out, type_bytes)
@@ -236,7 +259,7 @@ pub fn h3_frame_emit(frame_type: i64, payload: [u8]) -> [u8]:
 # Frame parse — RFC 9114 §7.2
 # ============================================================================
 
-pub fn h3_frame_parse(bytes: [u8], offset: i64) -> H3FrameResult:
+pub fn h3_frame_parse_bounded(bytes: [u8], offset: i64, max_payload: i64) -> H3FrameResult:
     """Parse one HTTP/3 frame from bytes starting at offset.
 
     Returns Ok(frame_type, payload, new_offset) where new_offset points
@@ -244,6 +267,8 @@ pub fn h3_frame_parse(bytes: [u8], offset: i64) -> H3FrameResult:
     """
     if offset < 0:
         return H3FrameResult.Err("negative offset")
+    if max_payload < 0 or max_payload > H3_MAX_VARINT:
+        return H3FrameResult.Err("invalid payload bound")
     # Decode frame type varint
     val type_r = h3_varint_decode(bytes, offset)
     match type_r:
@@ -258,9 +283,13 @@ pub fn h3_frame_parse(bytes: [u8], offset: i64) -> H3FrameResult:
                     return H3FrameResult.Err(msg)
                 case Ok(lr):
                     val payload_start = after_type + lr.consumed
-                    val payload_end = payload_start + lr.value
-                    if payload_end > bytes.len():
+                    if lr.value > max_payload:
+                        return H3FrameResult.Err("frame payload exceeds configured bound")
+                    if payload_start > bytes.len():
+                        return H3FrameResult.Err("frame payload offset past end")
+                    if lr.value > bytes.len() - payload_start:
                         return H3FrameResult.Err("frame payload truncated")
+                    val payload_end = payload_start + lr.value
                     var payload: [u8] = []
                     var j = payload_start
                     loop:
@@ -275,6 +304,10 @@ pub fn h3_frame_parse(bytes: [u8], offset: i64) -> H3FrameResult:
                     ))
     return H3FrameResult.Err("unreachable")
 
+pub fn h3_frame_parse(bytes: [u8], offset: i64) -> H3FrameResult:
+    """Parse one frame using the default one-MiB unauthenticated payload cap."""
+    h3_frame_parse_bounded(bytes, offset, H3_DEFAULT_MAX_FRAME_PAYLOAD)
+
 # ============================================================================
 # SETTINGS payload encode/decode — RFC 9114 §7.2.4
 #
@@ -284,12 +317,25 @@ pub fn h3_frame_parse(bytes: [u8], offset: i64) -> H3FrameResult:
 pub fn h3_settings_encode(settings: [H3Setting]) -> [u8]:
     """Encode a SETTINGS payload: sequence of varint(id) || varint(value) pairs."""
     var out: [u8] = []
+    if settings.len() > H3_MAX_SETTINGS:
+        return out
     var i = 0
     val n = settings.len()
     loop:
         if i >= n:
             break
         val s = settings[i]
+        if s.identifier < 0 or s.identifier > H3_MAX_VARINT:
+            return []
+        if s.value < 0 or s.value > H3_MAX_VARINT:
+            return []
+        if _h3_setting_id_forbidden(s.identifier):
+            return []
+        var j = 0
+        while j < i:
+            if settings[j].identifier == s.identifier:
+                return []
+            j = j + 1
         val id_bytes = h3_varint_encode(s.identifier)
         val val_bytes = h3_varint_encode(s.value)
         _h3_append_bytes(out, id_bytes)
@@ -300,29 +346,45 @@ pub fn h3_settings_encode(settings: [H3Setting]) -> [u8]:
 pub fn h3_settings_decode(payload: [u8]) -> [H3Setting]:
     """Decode a SETTINGS payload into a list of H3Setting pairs.
 
-    Ignores unknown identifiers (per RFC 9114 §7.2.4). Returns empty list
-    on any parse error (truncated varint).
+    Compatibility facade over atomic strict admission. Unknown identifiers are
+    retained per RFC 9114; malformed or duplicate input returns no settings.
     """
+    match h3_settings_decode_strict(payload):
+        case Ok(result): result.settings
+        case Err(_): []
+
+fn _h3_setting_id_forbidden(identifier: i64) -> bool:
+    # RFC 9114 section 7.2.8.1 reserves the HTTP/2 SETTINGS identifiers.
+    identifier == 0x02 or identifier == 0x03 or identifier == 0x04 or identifier == 0x05
+
+pub fn h3_settings_decode_strict(payload: [u8]) -> H3SettingsResult:
+    """Decode SETTINGS atomically with duplicate, count, and reserved-id guards."""
     var out: [H3Setting] = []
     var offset = 0
-    val n = payload.len()
-    loop:
-        if offset >= n:
-            break
+    while offset < payload.len():
+        if out.len() >= H3_MAX_SETTINGS:
+            return H3SettingsResult.Err("too many settings")
         val id_r = h3_varint_decode(payload, offset)
         match id_r:
-            case Err(_):
-                break
+            case Err(msg):
+                return H3SettingsResult.Err("setting identifier: {msg}")
             case Ok(ir):
+                if _h3_setting_id_forbidden(ir.value):
+                    return H3SettingsResult.Err("forbidden HTTP/2 setting identifier")
                 val after_id = offset + ir.consumed
                 val val_r = h3_varint_decode(payload, after_id)
                 match val_r:
-                    case Err(_):
-                        break
+                    case Err(msg):
+                        return H3SettingsResult.Err("setting value: {msg}")
                     case Ok(vr):
+                        var i = 0
+                        while i < out.len():
+                            if out[i].identifier == ir.value:
+                                return H3SettingsResult.Err("duplicate setting identifier")
+                            i = i + 1
                         out.push(H3Setting(identifier: ir.value, value: vr.value))
                         offset = after_id + vr.consumed
-    return out
+    H3SettingsResult.Ok(H3SettingsOk(settings: out))
 
 # ============================================================================
 # High-level H3Frame serializer
@@ -337,6 +399,8 @@ pub fn h3_write_frame(frame: H3Frame) -> [u8]:
             return h3_frame_emit(H3_FRAME_HEADERS, h.encoded_fields)
         case CancelPush(c):
             val payload = h3_varint_encode(c.push_id)
+            if payload.len() == 0:
+                return []
             return h3_frame_emit(H3_FRAME_CANCEL_PUSH, payload)
         case Settings(s):
             val payload = h3_settings_encode(s.settings)
@@ -344,14 +408,20 @@ pub fn h3_write_frame(frame: H3Frame) -> [u8]:
         case PushPromise(pp):
             var payload: [u8] = []
             val id_bytes = h3_varint_encode(pp.push_id)
+            if id_bytes.len() == 0:
+                return []
             _h3_append_bytes(payload, id_bytes)
             _h3_append_bytes(payload, pp.encoded_fields)
             return h3_frame_emit(H3_FRAME_PUSH_PROMISE, payload)
         case Goaway(g):
             val payload = h3_varint_encode(g.id)
+            if payload.len() == 0:
+                return []
             return h3_frame_emit(H3_FRAME_GOAWAY, payload)
         case MaxPushId(m):
             val payload = h3_varint_encode(m.push_id)
+            if payload.len() == 0:
+                return []
             return h3_frame_emit(H3_FRAME_MAX_PUSH_ID, payload)
     var empty: [u8] = []
     return empty

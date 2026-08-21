@@ -473,6 +473,19 @@ impl<'a> Parser<'a> {
         // (mock Name implements Trait:). Otherwise treat as expression (mock.field, etc.)
         let is_mock_decl = matches!(&self.current.kind, TokenKind::Mock)
             && matches!(self.peek_next().kind, TokenKind::Identifier { .. });
+        // `mut` / `shared` / `ghost` are declaration prefixes ONLY when the
+        // `let` they prefix actually follows: `parse_mut_let`, `parse_shared_let`
+        // and `parse_ghost_let` all `expect(&TokenKind::Let)` as their second
+        // token, so the declaration form is always exactly this two-token prefix.
+        // Routing here unconditionally meant a statement like `ghost.set(k, v)`
+        // or `shared = x` (using a variable named `ghost`/`shared`, which
+        // expression position already accepts) died with the misleading
+        // `expected Let, found Dot`. Same disambiguation pattern as `lazy`,
+        // `common`, `mock` and `literal`.
+        let is_prefixed_let_decl = matches!(
+            &self.current.kind,
+            TokenKind::Mut | TokenKind::Shared | TokenKind::Ghost
+        ) && self.peek_is(&TokenKind::Let);
         let is_inject_graph_decl = matches!(&self.current.kind, TokenKind::Identifier { name, .. } if name == "inject")
             && matches!(self.peek_next().kind, TokenKind::Identifier { .. });
         let is_capability_policy_decl = matches!(&self.current.kind, TokenKind::Identifier { name, .. } if name == "capability")
@@ -528,14 +541,14 @@ impl<'a> Parser<'a> {
                 self.advance();
                 self.parse_pub_item_with_doc(doc_comment)
             }
-            TokenKind::Mut => self.parse_mut_let(), // Legacy: mut let
+            TokenKind::Mut if is_prefixed_let_decl => self.parse_mut_let(), // Legacy: mut let
             TokenKind::Let => self.parse_let(),     // Legacy: let
             TokenKind::Val => self.parse_val(),     // New: val (immutable)
             TokenKind::Var => self.parse_var(),     // New: var (mutable)
             TokenKind::Const => self.parse_const(),
             TokenKind::Static => self.parse_static(),
-            TokenKind::Shared => self.parse_shared_let(),
-            TokenKind::Ghost => self.parse_ghost_let(),
+            TokenKind::Shared if is_prefixed_let_decl => self.parse_shared_let(),
+            TokenKind::Ghost if is_prefixed_let_decl => self.parse_ghost_let(),
             TokenKind::Alias => {
                 // Check if this is a class alias (alias NewName = OldName) or identifier usage
                 // Class alias names must be PascalCase (start with uppercase)

@@ -1,0 +1,143 @@
+# Any-escape census driver (agent Y2, 2026-08-21).
+#
+# Runs `any_escape_check` (35.semantics/any_escape) over a list of `.spl`
+# files and prints a machine-readable census.
+# Driven by `scripts/check/check-any-escape-census.shs`, which supplies the
+# file list and turns the census into a ratcheted verdict.
+#
+# Usage:
+#   bin/simple run src/app/check/any_escape_census.spl --list <file-of-paths>
+#   bin/simple run src/app/check/any_escape_census.spl <path.spl> ...
+#
+# Output contract (stdout, one record per line):
+#   SITE <code> <class> <module> <function> <line>
+#   MODULE <module> <path>
+#   PARSE-FAIL <path>
+#   SUMMARY modules=<n> any_sites=<k> escapes=<e>
+#
+# `any_sites` counts E-MC-ANY-001 findings; `escapes` counts E-MC-ANY-002.
+
+use compiler.frontend.{parse_full_frontend}
+use compiler.common.config.{Logger}
+use compiler.hir.hir_lowering.*
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfacesByName}
+use compiler.hir.hir_types.{HirModule}
+use compiler.semantics.any_escape.types.{AnyEscapeProfile, any_escape_kind_name}
+use compiler.semantics.any_escape.checker.{any_escape_check}
+use std.nogc_sync_mut.cli.{get_cli_args}
+
+# ---------------------------------------------------------------------------
+# `type_erasure` grant discovery
+# ---------------------------------------------------------------------------
+# The grant is scraped from SOURCE here, not from HIR, and that is a stated
+# limitation rather than a shortcut: `HirExprKind.UnsafeBlock` carries no
+# capability set and the parser's `@unsafe(...)` metadata never reaches HIR
+# (doc/08_tracking/bug/unsafe_capabilities_not_carried_into_hir_2026-08-21.md).
+# Only the GRANT is textual; every finding is still decided on resolved HIR
+# types. Once the capability is threaded into HIR this function is deleted and
+# the profile is built from the node.
+
+# Name extraction avoids `substring` deliberately: on the deployed seed
+# `text.substring(a, b)` returned an i64 for some real compiler lines, and the
+# next `.split` then failed with "method `split` not found on type `i64`".
+# Splitting is enough and does not hit that path.
+fn _decl_fn_name(decl_line: text) -> text:
+    val head: [text] = decl_line.split("(")
+    if head.len() == 0:
+        return ""
+    val words: [text] = head[0].trim().split(" ")
+    if words.len() == 0:
+        return ""
+    words[words.len() - 1].trim()
+
+fn granted_type_erasure_functions(source: text) -> [text]:
+    var out: [text] = []
+    var armed = false
+    val lines: [text] = source.split("\n")
+    var li = 0
+    while li < lines.len():
+        val trimmed: text = lines[li].trim()
+        if trimmed.contains("type_erasure") and trimmed.contains("capabilities"):
+            armed = true
+        elif armed and trimmed.starts_with("pub fn "):
+            val n2 = _decl_fn_name(trimmed)
+            if n2 != "":
+                out = out.push(n2)
+            armed = false
+        elif armed and trimmed.starts_with("fn "):
+            val n1 = _decl_fn_name(trimmed)
+            if n1 != "":
+                out = out.push(n1)
+            armed = false
+        li = li + 1
+    out
+
+fn module_name_of(path: text) -> text:
+    val parts: [text] = path.split("/")
+    val base: text = parts[parts.len() - 1]
+    val stem: [text] = base.split(".")
+    if stem.len() == 0:
+        return base
+    stem[0]
+
+# ---------------------------------------------------------------------------
+# One file
+# ---------------------------------------------------------------------------
+
+# Module-level accumulators. A returned aggregate was tried first and the
+# seed mis-typed the receiver at the call site ("unknown property 'kind' on
+# Tuple"); filed as
+# doc/08_tracking/bug/seed_helper_return_type_mistyped_as_tuple_2026-08-21.md.
+var CENSUS_MODULES: i64 = 0
+var CENSUS_ANY_SITES: i64 = 0
+var CENSUS_ESCAPES: i64 = 0
+
+fn census_one(path: text) -> i64:
+    val content = rt_file_read_text(path) ?? ""
+    if content == "":
+        print "PARSE-FAIL {path}"
+        return 0
+
+    val mod_name = module_name_of(path)
+    val log = Logger(level: 0)
+    val pm = parse_full_frontend(content, path, mod_name, log)
+    val surfaces = ModuleSurfacesByName.empty()
+    var lowering = hirlowering_for_module("", surfaces)
+    val hm: HirModule = lowering.lower_module(pm)
+
+    val profile = AnyEscapeProfile.census(granted_type_erasure_functions(content))
+    val diags = any_escape_check(hm, profile)
+
+    print "MODULE {mod_name} {path}"
+    CENSUS_MODULES = CENSUS_MODULES + 1
+    for d in diags:
+        val cls = any_escape_kind_name(d.kind)
+        print "SITE {d.code} {cls} {d.module_name} {d.function_name} {d.span.line}"
+        if d.code == "E-MC-ANY-001":
+            CENSUS_ANY_SITES = CENSUS_ANY_SITES + 1
+        else:
+            CENSUS_ESCAPES = CENSUS_ESCAPES + 1
+    0
+
+# ---------------------------------------------------------------------------
+# Entry
+# ---------------------------------------------------------------------------
+
+fn main() -> i64:
+    val args = get_cli_args()
+    var i = 0
+    while i < args.len():
+        val a = args[i]
+        if a == "--list":
+            if i + 1 < args.len():
+                val listing = rt_file_read_text(args[i + 1]) ?? ""
+                for line in listing.split("\n"):
+                    val entry = line.trim()
+                    if entry != "":
+                        val _ = census_one(entry)
+                i = i + 1
+        elif a.ends_with(".spl"):
+            val _ = census_one(a)
+        i = i + 1
+    print "SUMMARY modules={CENSUS_MODULES} any_sites={CENSUS_ANY_SITES} escapes={CENSUS_ESCAPES}"
+    0

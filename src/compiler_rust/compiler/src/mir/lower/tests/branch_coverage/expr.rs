@@ -55,7 +55,13 @@ fn inline_lambda_array_literal_keeps_function_value_unboxed() {
 #[test]
 fn string_interp_int_boxing() {
     let mir = compile_to_mir("fn test() -> i64:\n    val x: i64 = 42\n    val s = \"{x}\"\n    return 42\n").unwrap();
-    assert!(has_inst(&mir, |i| matches!(i, MirInst::BoxInt { .. })));
+    // i64 bypasses BoxInt deliberately: BoxInt packs `(value << 3) | TAG_INT`,
+    // truncating to 61 bits (stress_f02_i64_boxing_truncation_2026-07-17).
+    // The canonical i64 path is rt_raw_i64_to_string.
+    assert!(has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_raw_i64_to_string"))
+    }));
+    assert!(!has_inst(&mir, |i| matches!(i, MirInst::BoxInt { .. })));
 }
 
 #[test]
@@ -96,7 +102,13 @@ fn string_interp_string_no_boxing() {
 #[test]
 fn print_int_boxing() {
     let mir = compile_to_mir("fn test() -> i64:\n    val x: i64 = 42\n    print \"{x}\"\n    return 42\n").unwrap();
-    assert!(has_inst(&mir, |i| matches!(i, MirInst::BoxInt { .. })));
+    // i64 bypasses BoxInt deliberately: BoxInt packs `(value << 3) | TAG_INT`,
+    // truncating to 61 bits (stress_f02_i64_boxing_truncation_2026-07-17).
+    // The canonical i64 path is rt_raw_i64_to_string.
+    assert!(has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_raw_i64_to_string"))
+    }));
+    assert!(!has_inst(&mir, |i| matches!(i, MirInst::BoxInt { .. })));
 }
 
 #[test]
@@ -125,9 +137,11 @@ fn fstring_multiple_parts() {
         compile_to_mir("fn test():\n    val a: i64 = 1\n    val b: i64 = 2\n    val s = \"{a} + {b}\"\n").unwrap();
     let count = count_inst(
         &mir,
-        |i| matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_value_to_string")),
+        // i64 interpolation lowers through rt_raw_i64_to_string, not the
+        // truncating BoxInt + rt_value_to_string pair.
+        |i| matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_raw_i64_to_string")),
     );
-    assert!(count >= 2, "expected >= 2 rt_value_to_string calls, got {}", count);
+    assert!(count >= 2, "expected >= 2 rt_raw_i64_to_string calls, got {}", count);
 }
 
 // =============================================================================

@@ -1,0 +1,69 @@
+# @Feature G9: DType enum-variant equality survives a variant/type name collision
+# @Description: REPRODUCING spec for
+# doc/08_tracking/bug/interpreter_cross_module_enum_discriminant_3_compares_false_2026-08-04.md
+#
+# Filed symptom: under the tree-walk interpreter,
+# `array_bool([...]).dtype == DType.Bool` was FALSE, while the same comparison
+# for F32/F64/I64 was true. The doc attributed this to "discriminant 3 is the
+# nil sentinel". That root cause is WRONG and this spec deliberately pins the
+# real one, because the wrong story would have sent the next reader hunting in
+# the tagging code.
+#
+# What actually happens: `DType.Bool` reached as FIELD ACCESS (no parens) fell
+# through the interpreter's bare-name fallbacks in
+# src/compiler_rust/compiler/src/interpreter/expr/calls.rs, which look the
+# variant name up in the GLOBAL class table. `Bool` is also a real std struct,
+# in scope via `use std.ndarray.*`, so `DType.Bool` evaluated to
+# `<constructor:Bool>` -- the struct's constructor, not the variant. Comparing
+# a genuine `DType::Bool` field against a constructor is false, silently.
+#
+# Measured evidence for the diagnosis (interpreter, pre-fix):
+#   print(arr.dtype)   -> DType::Bool
+#   print(DType.Bool)  -> <constructor:Bool>      <-- the defect
+#   arr.dtype == DType.Bool          -> false
+#   match arr.dtype: case DType.Bool -> MATCHED   <-- patterns were always right
+# Discriminant is NOT the axis: a same-shaped enum in another module whose
+# 4th variant is named `D` compares correctly at discriminant 3.
+#
+# NOTE ON ENGINE: the defect is interpreter-only (the JIT got it right), so the
+# assertions below are meaningful in a spec body, which runs interpreted. That
+# is the engine that was wrong; no subprocess is required to make this red.
+
+use std.ndarray.*
+
+describe "DType variant equality (name-collision reproducer)":
+
+    it "the Bool variant -- the filed failing case -- compares equal":
+        val arr = array_bool([Bool.new(true)])
+        expect(arr.dtype == DType.Bool).to_equal(true)
+
+    it "the three variants that always worked still work":
+        expect(array_f32([Float32.new(1.0)]).dtype == DType.F32).to_equal(true)
+        expect(array([Float64.new(1.0)]).dtype == DType.F64).to_equal(true)
+        expect(array_i64([Int64.new(1)]).dtype == DType.I64).to_equal(true)
+
+    it "the colliding variant literal is an ENUM VALUE, not a constructor":
+        # This is the assertion that names the true root cause. Before the fix
+        # `DType.Bool` was the std `Bool` struct's constructor, so it compared
+        # equal to nothing that came out of a field.
+        val arr = array_bool([Bool.new(true)])
+        expect(DType.Bool == arr.dtype).to_equal(true)
+        expect(DType.Bool == DType.F32).to_equal(false)
+
+    it "equality agrees with pattern matching for the colliding variant":
+        # Patterns were correct throughout, so a disagreement between these two
+        # is the signature of this defect.
+        val arr = array_bool([Bool.new(true)])
+        var matched = false
+        match arr.dtype:
+            case DType.Bool:
+                matched = true
+            case _:
+                matched = false
+        expect(matched).to_equal(true)
+        expect(arr.dtype == DType.Bool).to_equal(matched)
+
+    it "inequality against a non-matching variant is still correct":
+        val arr = array_bool([Bool.new(true)])
+        expect(arr.dtype != DType.F32).to_equal(true)
+        expect(arr.dtype != DType.Bool).to_equal(false)

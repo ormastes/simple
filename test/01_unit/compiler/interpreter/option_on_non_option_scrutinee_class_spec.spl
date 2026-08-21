@@ -1,0 +1,69 @@
+# Option-shaped operations on a NON-Option scrutinee — defect CLASS spec.
+#
+# Row: doc/08_tracking/bug/option_pattern_accepted_on_non_option_scrutinee_2026-07-27.md
+#
+# THE CLASS: the compiler accepts `Some(_)` patterns and Option-only methods
+# (`unwrap_or`, `unwrap`, `is_some`, ...) against receivers/scrutinees that are
+# NOT Options, then hands back a silently wrong value instead of erroring. One
+# raw `i64` = 6 yields a different wrong answer per consumer, and the two engines
+# disagree with each other — so no "both engines agree" oracle can settle it.
+# Every assertion below is an ABSOLUTE expectation, never an engine comparison.
+#
+# WHY A SUBPROCESS. A spec body executes on the tree-walk interpreter. The JIT
+# is the default engine for a bare `simple foo.spl` and is the half that leaks a
+# tag box into text (`<value:0x6>`), so an in-process example can never go red on
+# it. Each probe under probe_option_on_non_option/ is run as a subprocess under
+# BOTH engines.
+#
+# CORRECT BEHAVIOUR (what makes this spec go green) is a COMPILE-TIME REJECTION
+# of each bad probe. Any successful run that prints a value is a failure of the
+# missing type check, regardless of which value it printed.
+#
+# @cover src/compiler/10.frontend/core/interpreter/_EvalOps/call_method_eval.spl
+# @cover src/compiler/10.frontend/core/interpreter/eval_calls.spl
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_DIR: text = "test/01_unit/compiler/interpreter/probe_option_on_non_option/"
+
+fn run_probe(mode: text, name: text) -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_TIMEOUT_SECONDS=300 " +
+        "SIMPLE_EXECUTION_MODE=" + mode + " " + bin + " run " + PROBE_DIR + name +
+        " 2>&1"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+# NOTE: a helper returning `bool` from a process_run result yields a FUTURE here,
+# and `expect(<future>).to_equal(true)` fails for the wrong reason. Assert on the
+# probe's TEXT directly instead — `to_not_contain` is the real oracle: a correctly
+# rejected probe never prints a value line at all.
+
+describe "Option-shaped operations on a non-Option scrutinee":
+
+    it "rejects unwrap_or on a bare i64 receiver on both engines":
+        # MEASURED 2026-08-17 (live defect): jit -> "uo=<value:0x6>",
+        # interpreter -> "uo=6". Neither is an error.
+        expect(run_probe("jit", "unwrap_or_on_i64.spl")).to_not_contain("uo=")
+        expect(run_probe("interpreter", "unwrap_or_on_i64.spl")).to_not_contain("uo=")
+
+    it "rejects a Some(_) match arm against a bare i64 scrutinee on both engines":
+        # MEASURED: jit -> "some=<value:0x6>", interpreter -> "some=6".
+        expect(run_probe("jit", "match_some_on_i64.spl")).to_not_contain("some=")
+        expect(run_probe("interpreter", "match_some_on_i64.spl")).to_not_contain("some=")
+
+    it "rejects an if-val Some() binding against a bare i64 on both engines":
+        # MEASURED: jit -> "bound=<value:0x6>", interpreter -> "bound=6".
+        expect(run_probe("jit", "if_val_some_on_i64.spl")).to_not_contain("bound=")
+        expect(run_probe("interpreter", "if_val_some_on_i64.spl")).to_not_contain("bound=")
+
+    it "still accepts a GENUINE Option and returns the payload on both engines":
+        # Guard against a fix that outlaws Option operations wholesale. This is
+        # also a live independent defect: on the JIT `val o: i64? = 42` leaves the
+        # scalar unboxed, so unwrap_or re-reads it under TAG_FLOAT and prints a
+        # denormal instead of 42 (see the row doc's section 25).
+        expect(run_probe("interpreter", "control_real_option.spl")).to_contain("ok=42")
+        expect(run_probe("jit", "control_real_option.spl")).to_contain("ok=42")

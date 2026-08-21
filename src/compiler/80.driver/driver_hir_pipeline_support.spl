@@ -1,0 +1,182 @@
+# Scalar support boundaries for the CompilerDriver HIR pipeline.
+
+use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.driver_mem_snapshot.{mem_snapshot_record}
+use compiler.hir.hir.*
+use compiler.hir.hir_lowering.items.{
+    bootstrap_hir_module_count,
+    bootstrap_hir_modules_rollback_last,
+    bootstrap_hir_module_names_outer_len,
+    bootstrap_hir_module_symbols_outer_len,
+    bootstrap_hir_module_functions_outer_len,
+    bootstrap_hir_module_constants_outer_len,
+    bootstrap_hir_module_enums_outer_len,
+    bootstrap_hir_module_structs_outer_len,
+    bootstrap_hir_module_classes_outer_len
+}
+use compiler.hir.hir_lowering.types.{LoweringError, LoweringErrorKind}
+use compiler.frontend.aspect_registry.{aspect_registry_reset}
+use compiler.frontend.effect_registry.{effect_registry_reset}
+use compiler.frontend.layer_eq_registry.{layer_eq_registry_reset}
+use compiler.driver.driver_source_pipeline_impl.{driver_end_transient_parse_scope, driver_promote_frontend_registry_owners}
+use compiler.semantics.value_struct_layout.{validate_value_struct_layouts}
+use compiler.semantics.layer_eq_validation.{validate_layer_eq_types}
+use compiler.semantics.effect_validation.{validate_effect_contracts}
+use compiler.semantics.aspect_validation.{validate_aspect_contracts}
+use compiler.semantics.aspect_weave.{weave_forward_advice}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+
+extern fn rt_path_absolute(path: text) -> text
+extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_exit(code: i64)
+
+pub fn driver_rollback_flat_hir_row_or_abort(expected_count: i64):
+    val actual_count = bootstrap_hir_module_count()
+    if actual_count == expected_count:
+        return
+    if actual_count == expected_count + 1:
+        if bootstrap_hir_modules_rollback_last(expected_count):
+            return
+    rt_exit(1)
+
+fn reset_frontend_registries_after_scope():
+    aspect_registry_reset()
+    effect_registry_reset()
+    layer_eq_registry_reset()
+
+pub fn driver_finish_failed_parse_scope(source_path: text) -> text:
+    if not rt_transient_array_scope_pause():
+        val _ended = driver_end_transient_parse_scope()
+        reset_frontend_registries_after_scope()
+        return "parse error in {source_path} (see [parser_error] output above); transient parser scope pause failed"
+    if not driver_promote_frontend_registry_owners():
+        val _ended = driver_end_transient_parse_scope()
+        reset_frontend_registries_after_scope()
+        rt_exit(1)
+        return "parse error in {source_path} (see [parser_error] output above); frontend registry promotion failed"
+    if not driver_end_transient_parse_scope():
+        reset_frontend_registries_after_scope()
+        return "parse error in {source_path} (see [parser_error] output above); transient parser scope end failed"
+    "parse error in {source_path} (see [parser_error] output above)"
+
+fn driver_normalized_source_path(source_path: text) -> text:
+    val physical_path = rt_path_absolute(source_path)
+    (if physical_path != "": physical_path else: source_path).replace("\\", "/")
+
+pub fn driver_stage3_surface_identity_matches(
+    surface_source_index: i64,
+    surface_canonical_path: text,
+    surface_module_name: text,
+    surface_content_length: i64,
+    surface_content_hash: i64,
+    source_index: i64,
+    source_path: text,
+    source_module_name: text,
+    source_content_length: i64,
+    source_content_hash: i64
+) -> bool:
+    val normalized_source_path = driver_normalized_source_path(source_path)
+    surface_source_index == source_index and
+        surface_canonical_path == normalized_source_path and
+        surface_module_name == source_module_name and
+        surface_content_length == source_content_length and
+        surface_content_hash == source_content_hash
+
+pub fn driver_stage3_surface_content_matches(
+    surface_canonical_path: text,
+    surface_content_length: i64,
+    surface_content_hash: i64,
+    source_path: text,
+    source_content_length: i64,
+    source_content_hash: i64
+) -> bool:
+    val normalized_source_path = driver_normalized_source_path(source_path)
+    surface_canonical_path == normalized_source_path and
+        surface_content_length == source_content_length and
+        surface_content_hash == source_content_hash
+
+pub fn driver_stage3_surface_identity_mismatch(
+    surface_source_index: i64,
+    surface_canonical_path: text,
+    surface_module_name: text,
+    surface_content_length: i64,
+    surface_content_hash: i64,
+    source_index: i64,
+    source_path: text,
+    source_module_name: text,
+    source_content_length: i64,
+    source_content_hash: i64
+) -> text:
+    val normalized_source_path = driver_normalized_source_path(source_path)
+    "surface/source identity mismatch: " +
+        "index={surface_source_index}/{source_index} " +
+        "path='{surface_canonical_path}'/'{normalized_source_path}' " +
+        "module='{surface_module_name}'/'{source_module_name}' " +
+        "length={surface_content_length}/{source_content_length} " +
+        "hash={surface_content_hash}/{source_content_hash}"
+
+pub fn driver_hir_mem_snapshot(
+    boundary: text,
+    source_index: i64,
+    source_path: text,
+    retained_modules: i64,
+    validation_keys: i64,
+    validation_values: i64,
+    shared_traits: i64
+) -> bool:
+    mem_snapshot_record(
+        boundary, source_index, source_path, retained_modules,
+        validation_keys, validation_values, shared_traits,
+        bootstrap_hir_module_names_outer_len(),
+        bootstrap_hir_module_symbols_outer_len(),
+        bootstrap_hir_module_functions_outer_len(),
+        bootstrap_hir_module_constants_outer_len(),
+        bootstrap_hir_module_enums_outer_len(),
+        bootstrap_hir_module_structs_outer_len(),
+        bootstrap_hir_module_classes_outer_len())
+
+fn format_hir_lowering_error(name: text, err: LoweringError) -> text:
+    if err.span.file != "":
+        "HIR lowering error in {name} ({err.span.file}:{err.span.line}:{err.span.col}): {err.message}"
+    else:
+        "HIR lowering error in {name}: {err.message}"
+
+pub fn driver_shown_fatal_count(total: i64, unbounded: bool) -> i64:
+    if unbounded:
+        return total
+    if total > 10:
+        return 10
+    total
+
+pub fn driver_collect_hir_errors(ctx: CompileContext, name: text, errors: [LoweringError]):
+    for err in errors:
+        if err.kind == LoweringErrorKind.Recovered:
+            ctx.add_warning(format_hir_lowering_error(name, err))
+        else:
+            val formatted = format_hir_lowering_error(name, err)
+            eprint("[hir-fatal] {formatted}")
+            ctx.add_error(formatted)
+
+# Concrete because the native build path has no generic monomorphization.
+pub fn driver_dict_entry_count(entries: Dict<SymbolId, HirFunction>) -> i64:
+    val keys: [SymbolId] = entries.keys()
+    keys.len()
+
+pub fn driver_validate_value_struct_layouts(
+    module_keys: [text],
+    module_values: [HirModule],
+    hir_modules: Dict<text, HirModule>
+) -> [text]:
+    var errors: [text] = []
+    for error in validate_value_struct_layouts(module_keys, module_values):
+        errors = errors.push(error)
+    for layer_eq_error in validate_layer_eq_types(hir_modules):
+        errors = errors.push(layer_eq_error)
+    for effect_error in validate_effect_contracts(hir_modules):
+        errors = errors.push(effect_error)
+    val aspect_errors = validate_aspect_contracts(hir_modules)
+    for aspect_error in aspect_errors:
+        errors = errors.push(aspect_error)
+    if aspect_errors.len() == 0:
+        val _woven = weave_forward_advice(hir_modules)
+    errors

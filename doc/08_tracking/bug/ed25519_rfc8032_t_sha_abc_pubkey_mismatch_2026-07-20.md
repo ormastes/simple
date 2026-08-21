@@ -65,3 +65,20 @@ vector.
 ## Affected specs
 
 - `test/unit/lib/crypto/ed25519_rfc8032_spec.spl` (2 of 15 examples)
+
+## 2026-08-20 canonical common-verifier repair (static only)
+
+The independent pure-Simple owner used by release/evidence verification now
+fully reduces field elements before encoding and uses a constant-work
+four-bit scalar multiplication loop.  The cohesive implementation is split
+between `src/lib/common/crypto/ed25519_field.spl` and the public
+`src/lib/common/crypto/ed25519.spl` facade.  A focused common-owner spec adds
+the exact RFC 8032 SHA(abc) public-key and signature vector:
+
+- `test/01_unit/lib/common/crypto/ed25519_strict_verify_spec.spl`
+
+This is not runtime closure of the original `src/os/crypto/**` row.  That
+separate implementation was outside this repair's exclusive scope, and no
+valid deployed self-hosted Simple runtime was available for executable KAT
+proof.  Keep this P1 OPEN until the focused KAT passes on the canonical
+self-hosted runtime; evidence admission must remain fail-closed meanwhile.

@@ -1,0 +1,586 @@
+# HTTP worker connection and transport method extensions.
+#
+# This module extends the single mutable Worker owner. It declares no state;
+# all socket, TLS, queue, and sendfile ownership remains in Worker.
+
+use std.nogc_async_mut.io.tcp_backend.{
+    tcp_backend_close,
+    tcp_backend_local_addr,
+    tcp_backend_set_nodelay,
+    tcp_backend_set_nonblocking
+}
+
+use std.http_server.types.{
+    ConnectionAction, default_response_data
+}
+use std.http_server.response.{build_not_found}
+use std.http_server.h2_connection.{H2Connection}
+use std.http.h2.h2_preface.{h2_validate_preface, H2_CONNECTION_PREFACE_LEN}
+use std.http_server.worker_wire.{
+    TlsSessionState,
+    is_dynamic_handler,
+    worker_static_file_route,
+    worker_static_file_fallback_response,
+    worker_sendfile_open_path_for_pending,
+    tls_bytes_to_wire,
+    tls_wire_to_bytes,
+    tls_decrypt_record,
+    tls_encrypt_record
+}
+use std.common.net.tls_application_record_stream_v1.{
+    TLS_MAX_FRAGMENT_LENGTH_V1,
+    tls_application_record_sequence_can_advance_v1,
+    tls_application_record_stream_new_v1
+}
+
+use std.http_server.worker_owner.{
+    Worker, WorkerResourceSnapshot, OP_RECV, OP_SEND, OP_SENDFILE, OP_OPEN_SENDFILE,
+    OP_CLOSE_SENDFILE
+}
+
+impl Worker:
+    pub(package) me handle_completion(op_id: i64, result: i64, completion_index: i64, now: i64):
+        """Handle a non-accept I/O completion."""
+        val fd = self.op_to_fd.get(op_id)
+        if not fd.?:
+            return
+
+        val typ = self.op_type.get(op_id) ?? 0
+
+        # Clean up tracking maps
+        self.op_to_fd.remove(op_id)
+        self.op_type.remove(op_id)
+
+        # NOTE: contains_key presence test, not .get() — Dict<K, class> .get()
+        # returns a corrupt payload under native codegen.
+        val is_h2 = self.h2_connections.contains_key(fd)
+
+        if result < 0:
+            if typ == OP_OPEN_SENDFILE:
+                self.sendfile_pending.remove(fd)
+            if typ == OP_SENDFILE:
+                val open_file = self.sendfile_open_files.get(fd)
+                if open_file.?:
+                    self.driver.submit_close(open_file)
+                    self.sendfile_open_files.remove(fd)
+            if is_h2:
+                self.close_h2_connection(fd)
+            else:
+                self.close_connection(fd)
+            return
+
+        if typ == OP_RECV:
+            if result == 0:
+                if is_h2:
+                    self.close_h2_connection(fd)
+                else:
+                    self.close_connection(fd)
+            else:
+                val data = self.driver.poll_data(completion_index)
+                val raw_bytes = self.driver.poll_recv_bytes(completion_index)
+                self.handle_recv(fd, data, raw_bytes, now)
+
+        elif typ == OP_SEND:
+            # Check if there's a pending sendfile for this fd
+            val file_path = worker_sendfile_open_path_for_pending(self.sendfile_pending, fd)
+            if file_path.len() > 0:
+                val open_op = self.driver.submit_open(file_path, 0, 0)
+                self.op_to_fd[open_op] = fd
+                self.op_type[open_op] = OP_OPEN_SENDFILE
+            else:
+                self.handle_send_complete(fd, now)
+
+        elif typ == OP_OPEN_SENDFILE:
+            # NOTE: contains_key + index read, not .get() — Dict<K, aggregate>
+            # .get() returns a corrupt payload under native codegen.
+            if not self.sendfile_pending.contains_key(fd):
+                self.driver.submit_close(result)
+                if is_h2:
+                    self.close_h2_connection(fd)
+                else:
+                    self.close_connection(fd)
+                return
+            val pending = self.sendfile_pending[fd]
+            val offset = pending.1
+            val length = pending.2
+            self.sendfile_pending.remove(fd)
+            self.sendfile_open_files[fd] = result
+            val sf_op = self.driver.submit_sendfile(fd, result, offset, length)
+            self.op_to_fd[sf_op] = fd
+            self.op_type[sf_op] = OP_SENDFILE
+
+        elif typ == OP_SENDFILE:
+            val open_file = self.sendfile_open_files.get(fd)
+            if open_file.?:
+                self.sendfile_open_files.remove(fd)
+                val close_op = self.driver.submit_close(open_file)
+                self.op_to_fd[close_op] = fd
+                self.op_type[close_op] = OP_CLOSE_SENDFILE
+            else:
+                self.handle_send_complete(fd, now)
+
+        elif typ == OP_CLOSE_SENDFILE:
+            self.handle_send_complete(fd, now)
+
+    pub(package) me handle_recv(fd: i64, data: text, raw_bytes: [u8], now: i64):
+        """Handle data received on a connection.
+
+        When a TLS session exists for this fd, raw bytes are accumulated in the
+        shared TlsApplicationRecordStreamV1, complete TLS records are decrypted with tls_decrypt_record,
+        and the plaintext is fed to the connection parser. Partial records are
+        held in the accumulator until the next recv completes them.
+        """
+        # H2 connections are routed separately — feed raw bytes to avoid UTF-8 corruption
+        # NOTE: contains_key presence test, not .get() — Dict<K, class> .get()
+        # returns a corrupt payload under native codegen.
+        if self.h2_connections.contains_key(fd) and not self.tls_sessions.contains_key(fd):
+            self.handle_h2_recv(fd, raw_bytes, now)
+            return
+
+        # h2c (cleartext HTTP/2) preface detection. A short "PRI" prefix is
+        # not sufficient: partial/malformed input must stay on the HTTP/1.1
+        # parser and fail closed instead of changing protocol mid-request.
+        val h2c_ok = raw_bytes.len() >= H2_CONNECTION_PREFACE_LEN and h2_validate_preface(raw_bytes)
+        if h2c_ok:
+            self.connections.remove(fd)
+            val peer = tcp_backend_local_addr(fd) ?? "unknown"
+            var h2conn = H2Connection.new(fd, peer, now)
+            # Send server SETTINGS (empty = use defaults)
+            var server_settings: [u8] = [0, 0, 0, 4, 0, 0, 0, 0, 0]
+            val ss_op = self.driver.submit_send_bytes(fd, server_settings)
+            self.op_to_fd[ss_op] = fd
+            self.op_type[ss_op] = OP_SEND
+            h2conn.settings_sent = true
+            # Process initial bytes (preface + client SETTINGS)
+            h2conn.h2_on_data_received(raw_bytes, now)
+            h2conn.consume_frames()
+            # Flush pending writes (SETTINGS ACK from consume_frames)
+            val out = h2conn.take_pending_writes()
+            if out.len() > 0:
+                val out_op = self.driver.submit_send_bytes(fd, out)
+                self.op_to_fd[out_op] = fd
+                self.op_type[out_op] = OP_SEND
+            self.h2_connections[fd] = h2conn
+            val recv_op = self.driver.submit_recv(fd, 8192)
+            self.op_to_fd[recv_op] = fd
+            self.op_type[recv_op] = OP_RECV
+            return
+
+        # TLS application data decryption path. Complete records are consumed
+        # immediately so one recv may carry split and multiple records while
+        # the retained per-connection buffer stays bounded.
+        # NOTE: contains_key + index read, not .get() — Dict<K, class> .get()
+        # returns a corrupt payload under native codegen.
+        if self.tls_sessions.contains_key(fd):
+            var session = self.tls_sessions[fd]
+            val stream_was_owned = self.tls_rx_streams.contains_key(fd)
+            var stream = if stream_was_owned:
+                self.tls_rx_streams[fd]
+            else:
+                tls_application_record_stream_new_v1(session.client_seq)
+            # Dict indexing has value semantics. Remove the published value
+            # before the first mutating call so the local is the sole fixed-
+            # ring owner and copy-on-write cannot clone 32 KiB per fragment.
+            if stream_was_owned:
+                self.tls_rx_streams.remove(fd)
+            if stream.sequence() != session.client_seq:
+                self.close_wire_connection(fd)
+                return
+            var ingest = stream.ingest(raw_bytes)
+            if (ingest.is_malformed() or ingest.is_overflow() or
+                ingest.is_sequence_exhausted() or ingest.is_proposal_pending()):
+                self.close_wire_connection(fd)
+                return
+            var plaintext_all = ""
+            var malformed = false
+            var record_index = 0
+            val framed_records = ingest.framed_records()
+            while record_index < framed_records.len() and not malformed:
+                val rec = framed_records[record_index]
+                if not tls_application_record_sequence_can_advance_v1(session.client_seq):
+                    malformed = true
+                else:
+                    val pt = tls_decrypt_record(rec, session)
+                    match pt:
+                        nil:
+                            malformed = true
+                        Some(plaintext):
+                            plaintext_all = plaintext_all + plaintext
+                            # Advance only after authenticated decrypt.
+                            session.client_seq = session.client_seq + 1
+                record_index = record_index + 1
+
+            if malformed:
+                if ingest.requires_commit():
+                    stream.reject_authentication(ingest.proposal_token())
+                self.close_wire_connection(fd)
+                return
+
+            if session.client_seq != ingest.proposed_sequence():
+                if ingest.requires_commit():
+                    stream.reject_authentication(ingest.proposal_token())
+                self.close_wire_connection(fd)
+                return
+            if ingest.requires_commit():
+                val committed = stream.commit_authenticated(
+                    ingest.proposal_token(), framed_records.len())
+                if not committed:
+                    stream.reject_authentication(ingest.proposal_token())
+                    self.close_wire_connection(fd)
+                    return
+            if stream.sequence() != session.client_seq:
+                self.close_wire_connection(fd)
+                return
+            # Commit the sole owner back only after framing and authentication
+            # state have committed successfully.
+            self.tls_rx_streams[fd] = stream
+            self.tls_sessions[fd] = session
+            if plaintext_all.len() == 0:
+                # No complete records yet — keep reading
+                val op = self.driver.submit_recv(fd, 8192)
+                self.op_to_fd[op] = fd
+                self.op_type[op] = OP_RECV
+                return
+            if self.h2_connections.contains_key(fd):
+                self.handle_h2_recv(fd, tls_wire_to_bytes(plaintext_all), now)
+                return
+            # Feed decrypted plaintext into the connection parser
+            # NOTE: contains_key + index read, not .get() — Dict<K, class> .get()
+            # returns a corrupt payload under native codegen.
+            if not self.connections.contains_key(fd):
+                return
+            var c_tls = self.connections[fd]
+            val action_tls = c_tls.on_data_received(plaintext_all, now)
+            self.connections[fd] = c_tls
+            match action_tls:
+                ConnectionAction.ContinueReading:
+                    val op = self.driver.submit_recv(fd, 8192)
+                    self.op_to_fd[op] = fd
+                    self.op_type[op] = OP_RECV
+                ConnectionAction.RequestReady:
+                    self.process_request(fd, now)
+                ConnectionAction.Close:
+                    self.close_connection(fd)
+                ConnectionAction.Error(status, msg):
+                    self.send_error(fd, status, msg, now)
+                ConnectionAction.WriteResponse(body):
+                    self.send_response(fd, default_response_data(200, "OK", body), now)
+                ConnectionAction.SendFile(path, offset, length):
+                    var resp_tls = default_response_data(200, "OK", "")
+                    resp_tls.body_file = path
+                    resp_tls.body_offset = offset
+                    resp_tls.body_length = length
+                    self.send_response(fd, resp_tls, now)
+            return
+
+        # NOTE: contains_key + index read, not .get() — Dict<K, class> .get()
+        # returns a corrupt payload under native codegen.
+        if not self.connections.contains_key(fd):
+            return
+
+        var c = self.connections[fd]
+        val action = c.on_data_received(data, now)
+        self.connections[fd] = c
+
+        match action:
+            ConnectionAction.ContinueReading:
+                val op = self.driver.submit_recv(fd, 8192)
+                self.op_to_fd[op] = fd
+                self.op_type[op] = OP_RECV
+
+            ConnectionAction.RequestReady:
+                self.process_request(fd, now)
+
+            ConnectionAction.Close:
+                self.close_connection(fd)
+
+            ConnectionAction.Error(status, msg):
+                self.send_error(fd, status, msg, now)
+
+            ConnectionAction.WriteResponse(body):
+                self.send_response(fd, default_response_data(200, "OK", body), now)
+
+            ConnectionAction.SendFile(path, offset, length):
+                var resp = default_response_data(200, "OK", "")
+                resp.body_file = path
+                resp.body_offset = offset
+                resp.body_length = length
+                self.send_response(fd, resp, now)
+
+    pub(package) me handle_send_complete(fd: i64, now: i64):
+        """Handle write completion on a connection."""
+        # NOTE: contains_key + index read, not .get() — Dict<K, class> .get()
+        # returns a corrupt payload under native codegen.
+        if not self.connections.contains_key(fd):
+            return
+
+        var c = self.connections[fd]
+        val action = c.on_write_complete(now)
+        self.connections[fd] = c
+
+        match action:
+            ConnectionAction.ContinueReading:
+                val op = self.driver.submit_recv(fd, 8192)
+                self.op_to_fd[op] = fd
+                self.op_type[op] = OP_RECV
+
+            ConnectionAction.Close:
+                self.close_connection(fd)
+
+            ConnectionAction.ContinueReading:
+                return
+
+            ConnectionAction.RequestReady:
+                self.process_request(fd, now)
+
+            ConnectionAction.WriteResponse(body):
+                self.send_response(fd, default_response_data(200, "OK", body), now)
+
+            ConnectionAction.SendFile(path, offset, length):
+                var resp = default_response_data(200, "OK", "")
+                resp.body_file = path
+                resp.body_offset = offset
+                resp.body_length = length
+                self.send_response(fd, resp, now)
+
+            ConnectionAction.Error(status, msg):
+                self.send_error(fd, status, msg, now)
+
+    pub(package) me submit_tls_send_bytes(fd: i64, bytes: [u8]) -> bool:
+        """Encrypt and submit bounded TLS records, committing seq per success."""
+        if not self.tls_sessions.contains_key(fd):
+            return false
+        var session = self.tls_sessions[fd]
+        val plaintext = tls_bytes_to_wire(bytes)
+        var encrypted: [u8] = []
+        var offset = 0
+        while offset < plaintext.len():
+            if not tls_application_record_sequence_can_advance_v1(session.server_seq):
+                self.close_wire_connection(fd)
+                return false
+            val remaining = plaintext.len() - offset
+            val chunk_len = if remaining > TLS_MAX_FRAGMENT_LENGTH_V1: TLS_MAX_FRAGMENT_LENGTH_V1 else: remaining
+            val chunk = plaintext.slice(offset, offset + chunk_len)
+            val record = tls_encrypt_record(chunk, session)
+            if record.len() == 0:
+                self.close_wire_connection(fd)
+                return false
+            for b in record:
+                encrypted.push(b)
+            session.server_seq = session.server_seq + 1
+            offset = offset + chunk_len
+        self.tls_sessions[fd] = session
+        val op = self.driver.submit_send_bytes(fd, encrypted)
+        self.op_to_fd[op] = fd
+        self.op_type[op] = OP_SEND
+        true
+
+    # ========================================================================
+    # Request Processing
+    # ========================================================================
+
+    pub(package) me release_fd_operations(fd: i64):
+        """Cancel socket work and release all per-connection state.
+
+        The socket and the sendfile handle have different ownership domains:
+        cancelling the socket does not close an already-open file handle.
+        Queue the file close before dropping the tracking row so terminal
+        shutdown can drain those close operations before the driver itself is
+        destroyed.
+        """
+        self.driver.cancel_fd(fd)
+        val op_ids = self.op_to_fd.keys()
+        for oid in op_ids:
+            if self.op_to_fd[oid] == fd:
+                self.op_to_fd.remove(oid)
+                self.op_type.remove(oid)
+        if self.sendfile_open_files.contains_key(fd):
+            val open_file = self.sendfile_open_files[fd]
+            self.driver.submit_close(open_file)
+        self.sendfile_pending.remove(fd)
+        self.sendfile_open_files.remove(fd)
+        self.tls_sessions.remove(fd)
+        self.tls_rx_streams.remove(fd)
+
+    pub(package) me close_wire_connection(fd: i64):
+        """Close the active protocol owner without leaking TLS/H2 state."""
+        if self.h2_connections.contains_key(fd):
+            self.close_h2_connection(fd)
+        else:
+            self.close_connection(fd)
+
+    pub(package) me close_connection(fd: i64):
+        """Close a connection and remove from tracking (including TLS state)."""
+        if not self.connections.contains_key(fd):
+            return
+        self.release_fd_operations(fd)
+        tcp_backend_close(fd)
+        self.connections.remove(fd)
+        if self.active_count > 0:
+            self.active_count = self.active_count - 1
+
+    pub(package) me drain_file_close_operations(close_ops: [i64]):
+        """Run bounded completion passes for file handles closed at shutdown."""
+        if close_ops.len() == 0:
+            return
+        self.driver.flush()
+        var closed = 0
+        var pass = 0
+        while closed < close_ops.len() and pass < 2:
+            val count = self.driver.poll_count(close_ops.len() + 64, 0)
+            var i = 0
+            while i < count:
+                val op_id = self.driver.poll_id(i)
+                var j = 0
+                while j < close_ops.len():
+                    if close_ops[j] == op_id:
+                        closed = closed + 1
+                        break
+                    j = j + 1
+                i = i + 1
+            pass = pass + 1
+
+    pub(package) me close_all_connections():
+        """Close all active connections during shutdown."""
+        # Snapshot and close open sendfile handles before connection teardown;
+        # close_connection then only owns the socket and cancellation maps.
+        val open_file_clients = self.sendfile_open_files.keys()
+        var file_close_ops: [i64] = []
+        for client_fd in open_file_clients:
+            val open_file = self.sendfile_open_files[client_fd]
+            file_close_ops.push(self.driver.submit_close(open_file))
+        self.sendfile_open_files = {}
+
+        val fds = self.connections.keys()
+        for fd in fds:
+            self.close_connection(fd)
+        # Close H2 connections
+        val h2_fds = self.h2_connections.keys()
+        for fd in h2_fds:
+            self.close_h2_connection(fd)
+        self.drain_file_close_operations(file_close_ops)
+        self.connections = {}
+        self.h2_connections = {}
+        self.op_to_fd = {}
+        self.op_type = {}
+        self.sendfile_pending = {}
+        self.sendfile_open_files = {}
+        self.tls_sessions = {}
+        self.tls_rx_streams = {}
+        self.active_count = 0
+
+    # ========================================================================
+    # HTTP/2 Connection Handling
+    # ========================================================================
+
+    pub(package) me handle_h2_accept(fd: i64, now: i64):
+        """Accept a new HTTP/2 connection after ALPN negotiation.
+
+        Called from dispatch_by_alpn after TLS handshake. The fd is
+        already accepted — this sets up H2 framing, sends server
+        SETTINGS, and starts reading.
+        """
+        if self.active_count >= self.config.max_connections:
+            tcp_backend_close(fd)
+            return
+
+        tcp_backend_set_nonblocking(fd, true)
+        tcp_backend_set_nodelay(fd, true)
+
+        val peer = tcp_backend_local_addr(fd) ?? "unknown"
+        var h2conn = H2Connection.new(fd, peer, now)
+
+        # Publish ownership before sending so encryption failure can reclaim
+        # the H2 transport through the same close path.
+        val initial_bytes = h2conn.take_pending_writes()
+        self.h2_connections[fd] = h2conn
+        self.active_count = self.active_count + 1
+        if initial_bytes.len() > 0:
+            if self.tls_sessions.contains_key(fd):
+                if not self.submit_tls_send_bytes(fd, initial_bytes):
+                    return
+            else:
+                val send_op = self.driver.submit_send_bytes(fd, initial_bytes)
+                self.op_to_fd[send_op] = fd
+                self.op_type[send_op] = OP_SEND
+
+        # Start reading client preface + frames
+        val recv_op = self.driver.submit_recv(fd, 8192)
+        self.op_to_fd[recv_op] = fd
+        self.op_type[recv_op] = OP_RECV
+
+    pub(package) me handle_h2_recv(fd: i64, data: [u8], now: i64):
+        """Feed received raw bytes to an H2 connection and flush outbound frames."""
+        # NOTE: contains_key + index read, not .get() — Dict<K, class> .get()
+        # returns a corrupt payload under native codegen.
+        if not self.h2_connections.contains_key(fd):
+            return
+
+        # Dict indexing has value semantics. Remove the published connection
+        # before mutating its receive buffer so this local is the sole owner;
+        # otherwise fragmented input can COW-copy the bounded 1 MiB buffer on
+        # every receive and turn linear frame assembly quadratic.
+        var conn = self.h2_connections[fd]
+        self.h2_connections.remove(fd)
+        conn.h2_on_data_received(data, now)
+        val keep_going = conn.consume_frames()
+
+        # Process fully decoded H2 requests through the pipeline
+        val decoded = conn.take_decoded_requests()
+        for pair in decoded:
+            val stream_id = pair.0
+            val request = pair.1
+            var resp = build_not_found()
+            val route_result = self.router.route(request)
+            match route_result:
+                Ok((location, params)):
+                    resp = self.inline_static_handler(location, request)
+                Err(e):
+                    resp = build_not_found()
+            if resp.body_file.len() > 0:
+                resp = worker_static_file_fallback_response(resp)
+            conn.queue_h2_response(stream_id, resp)
+
+        # Drain any pending outbound frames (SETTINGS ACK, PING echo, responses)
+        val out_bytes = conn.take_pending_writes()
+        self.h2_connections[fd] = conn
+
+        if out_bytes.len() > 0:
+            if self.tls_sessions.contains_key(fd):
+                if not self.submit_tls_send_bytes(fd, out_bytes):
+                    return
+            else:
+                val send_op = self.driver.submit_send_bytes(fd, out_bytes)
+                self.op_to_fd[send_op] = fd
+                self.op_type[send_op] = OP_SEND
+
+        if keep_going and not conn.is_goaway_sent():
+            # Continue reading
+            val recv_op = self.driver.submit_recv(fd, 8192)
+            self.op_to_fd[recv_op] = fd
+            self.op_type[recv_op] = OP_RECV
+        else:
+            self.close_h2_connection(fd)
+
+    pub(package) me close_h2_connection(fd: i64):
+        """Close an H2 connection and clean up tracking state."""
+        if not self.h2_connections.contains_key(fd):
+            return
+        self.release_fd_operations(fd)
+        tcp_backend_close(fd)
+        self.h2_connections.remove(fd)
+        if self.active_count > 0:
+            self.active_count = self.active_count - 1
+
+    pub fn resource_snapshot() -> WorkerResourceSnapshot:
+        """Return bounded read-only ownership counts after cancellation/close."""
+        WorkerResourceSnapshot(
+            active_count: self.active_count,
+            active_connections: self.connections.len() + self.h2_connections.len(),
+            h2_connections: self.h2_connections.len(),
+            pending_operations: self.op_to_fd.len(),
+            pending_sendfiles: self.sendfile_pending.len(),
+            open_sendfiles: self.sendfile_open_files.len(),
+            tls_sessions: self.tls_sessions.len(),
+            tls_buffers: self.tls_rx_streams.len()
+        )

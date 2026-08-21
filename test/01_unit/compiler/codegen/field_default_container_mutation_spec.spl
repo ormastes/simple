@@ -1,0 +1,57 @@
+# REPRODUCING spec for
+# doc/08_tracking/bug/jit_field_default_empty_container_mutation_lost_2026-08-17.md
+#
+# Under the JIT (the DEFAULT engine) a mutation to a struct/class container
+# field that still holds its declared EMPTY default (`[]` / `{}`) is silently
+# discarded: the program compiles, exits 0, and hands back an empty collection.
+# A `{}`-default dict reports len -1.
+#
+# WHY A SUBPROCESS. A spec body runs on the tree-walk INTERPRETER, which is
+# CORRECT here. An in-process example can therefore never go red on this defect.
+# The oracle is the sibling run-path probe executed under both engines, checked
+# against absolute literals it did not itself compute.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/compiler/codegen/probe_field_default_container_jit.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode + " " +
+        bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "container field holding its declared empty default":
+    it "keeps mutations on the interpreter (control arm)":
+        step("Run the probe under SIMPLE_EXECUTION_MODE=interpreter")
+        val interp = run_probe_in_mode("interpreter")
+
+        step("The interpreter was measured correct on 2026-08-17; a red here means the probe is broken, not the engine")
+        expect(interp).to_contain("FIELD_DEFAULT_CONTAINER PROBE: ALL PASS")
+
+        step("The probe must actually have executed its checks, not exited early")
+        expect(interp).to_contain("PASS class_default_array_method_push")
+
+    it "keeps mutations under the cranelift JIT":
+        step("Run the same probe under SIMPLE_EXECUTION_MODE=jit — the engine the bug lives in")
+        val jit = run_probe_in_mode("jit")
+
+        step("A struct field declared `var arr: [str] = []` must retain a push")
+        expect(jit).to_contain("PASS struct_default_array_push")
+
+        step("Explicit read-modify-writeback through a local must also land — proving no writeback rule can paper over this")
+        expect(jit).to_contain("PASS struct_default_array_explicit_writeback")
+
+        step("The canonical accumulator idiom — a class method appending to its own `[]`-defaulted field")
+        expect(jit).to_contain("PASS class_default_array_method_push")
+        expect(jit).to_contain("PASS class_default_array_direct_push")
+
+        step("A `{}`-defaulted dict must accept an insert and report len 1, not the -1 sentinel")
+        expect(jit).to_contain("PASS class_default_dict_insert")
+
+        step("No check may have failed")
+        expect(jit).to_contain("FIELD_DEFAULT_CONTAINER PROBE: ALL PASS")

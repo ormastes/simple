@@ -230,3 +230,80 @@ EXIT=0
 **Verdict: STILL-OPEN.** Counts identical to the previous pass (3/3 fail, 4/4
 control pass); the seed rebuild carried no change to the module flatten /
 free-function registration path.
+
+## Root cause located in the Rust seed (2026-08-21)
+
+Re-verified RED today: `test/01_unit/app/build/private_helper_name_collision_spec.spl`
+reports `3 total, 0 passed, 3 failed`, all `expected false to equal true`,
+on `bin/release/x86_64-unknown-linux-gnu/simple`.
+
+The interpreter keeps **one flat map keyed by the bare function name**, with no
+module qualification and no visibility filter. All paths under
+`src/compiler_rust/compiler/src/`:
+
+- Registration: `interpreter_eval.rs:538` — `functions.insert(f.name.clone(), Arc::clone(&func));`
+  plus `:539-545` pushing into the thread-local `FUNCTION_OVERLOADS: HashMap<String, Vec<Arc<FunctionDef>>>`.
+  Imports are flattened into `items` beforehand by
+  `pipeline::module_loader::strip_flattened_import_nodes`, so every co-compiled
+  module's top-level fns land in that one map.
+  Also `interpreter_module/module_evaluator/evaluation_helpers.rs:185` (local) and
+  `:195` (global) — `register_definitions()`, whose only filter is
+  `if f.name != "main"` (`:193`); and `interpreter_module/module_merger.rs:31`,
+  which merges module items into the same flat map *and* into `exports`
+  unconditionally.
+- Lookup: `interpreter_call/mod.rs:573` (`functions.get(name)`) and the overload
+  path at `:550-570` resolved by `select_overload` (`:177`) purely on
+  arity/argument types.
+- `FUNCTION_MODULE_OWNER` (populated at `interpreter_eval.rs:534-537`) exists but
+  is only a *tie-break*: it prefers the same-module candidate when several share
+  a name. It is not a barrier — if module B calls a name only module A defines,
+  the single entry is found and called.
+- **No `_`-prefix privacy rule exists anywhere in the seed.**
+  `grep -rn 'starts_with("_")' src/compiler_rust --include=*.rs` yields only
+  `vendor/toml_parser/src/decoder/scalar.rs:370` (numeric-literal underscores).
+  The `visibility` / `is_public` fields on definitions are consulted only by
+  `semantic_diff.rs` (API-diff reporting) and `smf_builder.rs:91` — never at
+  registration or call time.
+
+This is the same defect class as
+`doc/08_tracking/bug/crypto_types_text_to_bytes_collides_with_base_encoding_2026-08-21.md`;
+that one collides two *public* same-named functions with different signatures,
+this one collides two *module-private* ones with identical signatures, where the
+owner tie-break does not save the caller because the spec's own module is the
+`<entry>` owner and the collision is resolved before the preference applies.
+
+### Proposed seed change (NOT applied — no seed build performed)
+
+At the registration sites above, key module-private functions by
+`format!("{}::{}", owner_module, f.name)` instead of by `f.name`, and have the
+bare-name lookup at `interpreter_call/mod.rs:573` (and the `FUNCTION_OVERLOADS`
+path at `:550-570`) try the caller's own `owner::name` first, falling back to the
+bare name only for names that are `pub`. Concretely, `f.name.starts_with('_')`
+and not exported ⇒ register under the qualified key only. The `--selftest`-style
+proof is already in the tree: this spec plus the reduced fixtures in the section
+above go 0/3 -> 3/3 and `build_targets_spec.spl` goes 38/45 -> 45/45 (that last
+number is already recorded above from the rename workaround).
+
+Until the seed carries this, the spec stays RED as a legitimate reproducer per
+`.claude/rules/testing.md` — it must not be weakened, renamed, or skipped, since
+renaming the helper is exactly the workaround that hides the defect.
+
+## Third instance (2026-08-21): a global function shadows a MATCH BINDING
+
+`test/01_unit/lib/common/web/browser_session_controls_spec.spl` was RED with
+`11 total, 9 passed, 2 failed`, both failures
+`semantic: undefined field 'id': cannot access field on value of type 'function'`.
+
+The binding was `if val Some(pending) = request:` followed by `pending.id`.
+`pending` is also `pub fn pending(name: text)` in
+`src/lib/nogc_sync_mut/spec.spl:242` (plus the `spec/__init__.spl` re-exports),
+which every spec pulls in via `use std.spec`. The bare-name function map
+described above wins over the pattern binding, so `pending` evaluated to the
+SPEC-RUNNER FUNCTION and the field access failed.
+
+This is strictly worse than the module-private case: a *local binding introduced
+in the same expression* loses to a global. Any spec that names a match binding
+after a std.spec export (`pending`, `fail`, ...) is affected. Worked around in
+that spec by renaming the binding to `pending_request`; the rename is a
+workaround, not a fix — the resolution order (local binding > parameter > global
+function) is what needs correcting, at the same seed sites listed above.

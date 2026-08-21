@@ -1,0 +1,99 @@
+# Pure-Simple frontend promotes `{expr}` string literals to EXPR_INTERPOLATED_STRING.
+#
+# Row: doc/08_tracking/bug/selfhosted_stage4_interpreter_string_interpolation_broken_2026-07-30.md
+#
+# Why the pre-existing test/01_unit/compiler/interpreter/string_interpolation_spec.spl
+# cannot settle that row: its examples are plain `expect("bare={a}")...` literals, so
+# they are lexed and interpolated by WHICHEVER binary runs the spec — currently the Rust
+# seed, whose interpolation has always worked. It never touches the pure-Simple frontend
+# and is therefore vacuous for this defect.
+#
+# This spec drives the pure-Simple frontend sources directly (they are read live from
+# disk, no build), so it exercises exactly the code path a self-hosted `run` would take:
+#   core_frontend_parse_reset -> expand_string_interpolations
+#     (src/compiler/10.frontend/core/string_interpolation_expand.spl:155)
+#   -> expr_promote_interpolated_string -> EXPR_INTERPOLATED_STRING
+#   -> eval.spl:421 dispatches to eval_interpolated_string
+# If promotion does not happen, the interpreter's eval_string_lit
+# (src/compiler/10.frontend/core/interpreter/eval.spl:469) returns the raw token text
+# and `x={x}` prints literally — the reported symptom.
+#
+# NOTE: fixture sources are built by CONCATENATING brace characters, never by embedding
+# `{`/`}` literally — an embedded brace would be resolved by THIS spec's own lexer.
+#
+# @cover src/compiler/10.frontend/core/string_interpolation_expand.spl
+# @cover src/compiler/10.frontend/core/frontend.spl
+
+use std.spec.{describe, it, expect}
+use compiler.core.ast.{ast_reset}
+use compiler.core.ast_expr.{
+    EXPR_INTERPOLATED_STRING, EXPR_STRING_LIT,
+    expr_count, expr_tag, expr_s_val
+}
+use compiler.frontend.core.frontend.{core_frontend_parse_reset}
+use std.string_core.{char_from_code}
+
+fn lb() -> text:
+    char_from_code(123)
+
+fn rb() -> text:
+    char_from_code(125)
+
+fn count_tag(tag: i64) -> i64:
+    var n = 0
+    var idx = 0
+    while idx < expr_count():
+        if expr_tag[idx] == tag:
+            n = n + 1
+        idx = idx + 1
+    n
+
+fn parse_src(src: text) -> bool:
+    ast_reset()
+    core_frontend_parse_reset(src, "interp_probe.spl")
+
+describe "pure-Simple frontend string interpolation promotion":
+
+    it "promotes a bare {var} literal to an interpolated-string node":
+        # fn main():
+        #     val x = 5
+        #     print("x={x}")
+        val src = (
+            "fn main():\n" +
+            "    val x = 5\n" +
+            "    print(\"x=" + lb() + "x" + rb() + "\")\n"
+        )
+        expect(parse_src(src)).to_equal(true)
+        # RED shape: 0 interpolated nodes, the literal stays EXPR_STRING_LIT and
+        # the interpreter prints it verbatim.
+        expect(count_tag(EXPR_INTERPOLATED_STRING)).to_equal(1)
+
+    it "promotes an expression region and a multi-region literal":
+        val src = (
+            "fn main():\n" +
+            "    val a = 2\n" +
+            "    val b = 3\n" +
+            "    print(\"sum=" + lb() + "a + b" + rb() + "\")\n" +
+            "    print(\"" + lb() + "a" + rb() + " and " + lb() + "b" + rb() + "\")\n"
+        )
+        expect(parse_src(src)).to_equal(true)
+        expect(count_tag(EXPR_INTERPOLATED_STRING)).to_equal(2)
+
+    it "leaves a brace-free literal as a plain string literal":
+        val src = (
+            "fn main():\n" +
+            "    print(\"hello from self hosted\")\n"
+        )
+        expect(parse_src(src)).to_equal(true)
+        expect(count_tag(EXPR_INTERPOLATED_STRING)).to_equal(0)
+        expect(count_tag(EXPR_STRING_LIT) > 0).to_equal(true)
+
+    it "leaves a CSS-shaped brace literal unpromoted":
+        # `{ color: red; }` is not an expression region — must NOT be promoted,
+        # otherwise the fix would break every CSS/JSON string in the tree.
+        val src = (
+            "fn main():\n" +
+            "    print(\"p " + lb() + " color: red; " + rb() + "\")\n"
+        )
+        expect(parse_src(src)).to_equal(true)
+        expect(count_tag(EXPR_INTERPOLATED_STRING)).to_equal(0)

@@ -1,13 +1,20 @@
 # PS Tool — Process Listing
 # MDSOC: feature dimension, apps layer
 
-use os.userlib.process.{ProcessEntry, list_tasks}
+use os.userlib.process.{list_tasks}
+use os.tools.shell.process.process_artifact_contract.{
+    PROCESS_TOOL_MAX_ARGS_V1,
+    PROCESS_TOOL_MAX_TASKS_V1
+}
 
-fn run_ps(args: [text]) -> i32:
+pub fn run_ps(args: [text]) -> i32:
     """Entry point for ps command.
 
     Flags: -a (all), -l (long format), -p PID (specific)
     """
+    if args.len() > PROCESS_TOOL_MAX_ARGS_V1:
+        print "ps: too many arguments"
+        return 2
     if args.len() > 0 and (args[0] == "-h" or args[0] == "--help"):
         print "usage: ps [-a] [-l] [-p PID]"
         print ""
@@ -17,7 +24,6 @@ fn run_ps(args: [text]) -> i32:
         print "  -p PID   Filter by PID"
         return 0
 
-    var show_all = false
     var long_format = false
     var filter_pid: u64? = nil
     var i = 0
@@ -25,25 +31,38 @@ fn run_ps(args: [text]) -> i32:
     while i < args.len():
         val arg = args[i]
         if arg == "-a":
-            show_all = true
+            i = i + 1
+            continue
         else if arg == "-l":
             long_format = true
         else if arg == "-p":
             i = i + 1
             if i >= args.len():
                 print "error: -p requires a PID argument"
-                return 1
+                return 2
             val pid_result = _parse_pid(args[i])
             if val Ok(pid) = pid_result:
                 filter_pid = Some(pid)
             else:
                 print "error: invalid PID '{args[i]}'"
-                return 1
+                return 2
+        else if arg == "--version":
+            print "ps (SimpleOS core tools) 1.0"
+            return 0
+        else if arg == "--help":
+            print "usage: ps [-a] [-l] [-p PID]"
+            return 0
+        else:
+            print "ps: unknown option {arg}"
+            return 2
         i = i + 1
 
     val tasks_result = list_tasks()
     match tasks_result:
         Ok(tasks):
+            if tasks.len() > PROCESS_TOOL_MAX_TASKS_V1:
+                print "error: process snapshot exceeds configured task bound"
+                return 1
             if long_format:
                 print "{_pad_right("PID", 6)}{_pad_right("PPID", 6)}{_pad_right("STATE", 10)}{_pad_right("PRIORITY", 10)}{_pad_right("MEM(pg)", 10)}{_pad_right("CPU(tick)", 10)}NAME"
             else:
@@ -59,7 +78,7 @@ fn run_ps(args: [text]) -> i32:
                 val prio_str = _format_priority(entry.priority)
 
                 if long_format:
-                    print "{_pad_left("{entry.pid}", 6)}{_pad_left("{entry.ppid}", 6)}{_pad_right(state_str, 10)}{_pad_right(prio_str, 10)}{_pad_left("{entry.mem_pages}", 10)}{_pad_left("{entry.cpu_ticks}", 10)}{entry.name}"
+                    print "{_pad_left("{entry.pid}", 6)}{_pad_left("{entry.parent_pid}", 6)}{_pad_right(state_str, 10)}{_pad_right(prio_str, 10)}{_pad_left("{entry.memory_pages}", 10)}{_pad_left("{entry.cpu_ticks}", 10)}{entry.name}"
                 else:
                     print "{_pad_left("{entry.pid}", 6)}{_pad_right(state_str, 10)}{_pad_right(prio_str, 10)}{entry.name}"
                 count = count + 1
@@ -67,9 +86,6 @@ fn run_ps(args: [text]) -> i32:
             print "\nTotal: {count} processes"
             0
         Err(e):
-            if _is_unavailable(e):
-                print "[SKIP] ps: {e}"
-                return 0
             print "error: failed to list tasks: {e}"
             return 1
 
@@ -108,6 +124,3 @@ fn _parse_pid(s: text) -> Result<u64, text>:
         Ok(pid)
     else:
         Err("invalid PID: {s}")
-
-fn _is_unavailable(err: text) -> bool:
-    err.contains("code -38") or err.contains("code -19")

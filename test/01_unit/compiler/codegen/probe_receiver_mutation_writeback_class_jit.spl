@@ -1,0 +1,108 @@
+# Run-path probe for the CLASS of defect "a callee's write to a
+# by-reference-intended receiver or parameter is discarded at return".
+#
+# Oracle for `receiver_mutation_writeback_class_spec.spl`.
+#
+# The reproducing probe (`probe_struct_receiver_mutation_persist_jit.spl`) pins
+# ONE shape: a `struct` receiver at depths 0..2. This file sweeps the axes that
+# shape does not cover, so the next omission fails here rather than shipping as
+# a plausible number:
+#
+#   * receiver kind      — struct vs class
+#   * mutation site      — `self` vs an explicit `mut` parameter
+#   * call shape         — direct, delegated through another method, in a loop
+#   * depth              — 3 field hops, beyond the reproducer's 2
+#   * spelling           — method call vs direct field assignment on the SAME
+#                          place, which is the axis that made this silent: the
+#                          assignment spelling is correct and the method
+#                          spelling is not
+#
+# DELIBERATELY EXCLUDED: Array/Dict/ByteArray receivers. A single unsupported
+# container operation silently demotes the whole program to the interpreter
+# (.claude/rules/testing.md), which would make the JIT arm measure the wrong
+# engine and report a FALSE GREEN. Containers need their own probe file.
+#
+# Every oracle is an ABSOLUTE literal, never "the two engines agree".
+
+struct SCounter:
+    var n: i64
+
+impl SCounter:
+    fn bump():
+        self.n = self.n + 1
+
+class CCounter:
+    var n: i64
+
+impl CCounter:
+    fn bump():
+        self.n = self.n + 1
+
+    fn bump_twice():
+        self.bump()
+        self.bump()
+
+struct L3:
+    var c: SCounter
+struct L2:
+    var l3: L3
+struct L1:
+    var l2: L2
+
+var failures: i64 = 0
+
+fn check(name: text, got: i64, want: i64):
+    if got == want:
+        print("PASS " + name + " = " + got.to_text())
+    else:
+        failures = failures + 1
+        print("FAIL " + name + " expected " + want.to_text() + " got " + got.to_text())
+
+fn bump_param(mut c: SCounter):
+    c.n = c.n + 1
+
+fn main():
+    # --- axis: receiver kind -------------------------------------------------
+    var s = SCounter(n: 0)
+    s.bump()
+    check("struct_receiver", s.n, 1)
+
+    var c = CCounter(n: 0)
+    c.bump()
+    check("class_receiver", c.n, 1)
+
+    # --- axis: mutation site — an explicit `mut` parameter, not `self` -------
+    var p = SCounter(n: 0)
+    bump_param(p)
+    check("mut_parameter", p.n, 1)
+
+    # --- axis: call shape — delegated through a second method ---------------
+    var d = CCounter(n: 0)
+    d.bump_twice()
+    check("delegated_call", d.n, 2)
+
+    # --- axis: call shape — repeated in a loop ------------------------------
+    var lp = SCounter(n: 0)
+    var i = 0
+    while i < 3:
+        lp.bump()
+        i = i + 1
+    check("loop_three_calls", lp.n, 3)
+
+    # --- axis: depth 3 ------------------------------------------------------
+    var deep = L1(l2: L2(l3: L3(c: SCounter(n: 0))))
+    deep.l2.l3.c.bump()
+    check("depth3_method", deep.l2.l3.c.n, 1)
+
+    # --- axis: spelling — the SAME place written by assignment --------------
+    # This is the control that makes the defect legible: if the method arm above
+    # is wrong while this is right, the place model is fine and the write-back
+    # is what is missing.
+    var deep2 = L1(l2: L2(l3: L3(c: SCounter(n: 0))))
+    deep2.l2.l3.c.n = deep2.l2.l3.c.n + 1
+    check("depth3_assignment", deep2.l2.l3.c.n, 1)
+
+    if failures == 0:
+        print("RECEIVER_WRITEBACK CLASS PROBE: ALL PASS")
+    else:
+        print("RECEIVER_WRITEBACK CLASS PROBE: " + failures.to_text() + " FAILURES")

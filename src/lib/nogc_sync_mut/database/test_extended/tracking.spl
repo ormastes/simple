@@ -4,7 +4,7 @@
 
 use std.database.core.{SdnRow}
 use std.database.stats.{stats_from_values, is_significant_change, update_baseline}
-use std.database.test_extended.database.{TestDatabaseExtended}
+use std.database.test_extended.database.{TestDatabaseExtended, trim_to_last_f64, TIMING_RUNS_PER_TEST_CAP}
 use std.database.test_extended.stubs.{rt_timestamp_now}
 
 # Extension methods for TestDatabaseExtended
@@ -24,14 +24,37 @@ impl TestDatabaseExtended:
             test_name
         )
 
-        # 2. Update counter
+        # 2. Record the verdict on the test row itself.
+        #    Without this every `tests` row keeps the `unknown` status written
+        #    by get_or_create_test, so test_count_by_status() reports
+        #    total=N / passed=0 / failed=0 — a vacuous green.
+        self.update_test_status(test_id, status)
+
+        # 3. Update counter
         self.update_counter(test_id, status)
 
-        # 3. Update timing
+        # 4. Update timing
         self.update_timing(test_id, duration_ms)
 
-        # 4. Add timing run
+        # 5. Add timing run
         self.add_timing_run(test_id, duration_ms, run_id)
+
+    # Write the latest verdict onto the `tests` row
+    me update_test_status(test_id: i64, status: text):
+        var tests_table = match self.db.get_table_mut("tests"):
+            case Some(table): table
+            case nil: return
+        val status_id = self.interner.intern(status)
+        for row in tests_table.rows:
+            val row_test_id = row.get_i64("test_id") ?? -1
+            if row_test_id != -1 and row_test_id == test_id:
+                var updated = row
+                updated.set("status_str", "{status_id}")
+                match tests_table.update_row_checked("{test_id}", updated):
+                    case Ok(_): ()
+                    case Err(reason): print "[db] complete/update lost: {reason}"
+                break
+        self.db.set_table("tests", tests_table)
 
     # Update counter for test
     me update_counter(test_id: i64, status: text):
@@ -90,12 +113,15 @@ impl TestDatabaseExtended:
                     val timed = (counter_row.get_i64("timed_out") ?? 0) + 1
                     counter_row.set("timed_out", "{timed}")
 
-            counters_table.update_row("{test_id}", counter_row)
+            match counters_table.update_row_checked("{test_id}", counter_row):
+                case Ok(_): ()
+                case Err(reason): print "[db] complete/update lost: {reason}"
 
         self.db.set_table("counters", counters_table)
 
     # Update timing statistics for test
     me update_timing(test_id: i64, duration_ms: f64):
+        self.ensure_indexes()
         # Collect recent timing runs
         val recent_runs = self.collect_timing_runs(test_id, 100)  # Last 100 runs
 
@@ -162,7 +188,9 @@ impl TestDatabaseExtended:
                     pass
 
         if found:
-            timing_table.update_row("{test_id}", timing_row)
+            match timing_table.update_row_checked("{test_id}", timing_row):
+                case Ok(_): ()
+                case Err(reason): print "[db] complete/update lost: {reason}"
         else:
             timing_table.add_row(timing_row)
 
@@ -192,32 +220,19 @@ impl TestDatabaseExtended:
         timing_runs_table.add_row(row)
         self.db.set_table("timing_runs", timing_runs_table)
 
-    # Collect timing runs for a test (most recent N)
+        self.ensure_indexes()
+        var lst = if self._runs_by_test.has(test_id): self._runs_by_test[test_id] else: []
+        lst.push(duration_ms)
+        self._runs_by_test[test_id] = trim_to_last_f64(lst, TIMING_RUNS_PER_TEST_CAP)
+
+    # Collect timing runs for a test (most recent N) — O(cap) from the index.
+    # This used to walk EVERY row of the never-capped `timing_runs` table on
+    # every update. NOTE: duplicate impl of database.spl's method; both copies
+    # must carry the fix because dispatch between them is ambiguous.
     fn collect_timing_runs(test_id: i64, max_count: i64) -> [f64]:
-        val timing_runs_table_opt = self.db.get_table("timing_runs")
-        if not timing_runs_table_opt.?:
+        if not self._runs_by_test.has(test_id):
             return []
-        val timing_runs_table = match timing_runs_table_opt:
-            case Some(table):
-                table
-            case None:
-                return []
-        var timings: [f64] = []
-
-        for row in timing_runs_table.rows:
-            # BUG-044: Use ?? instead of ? to avoid "try: early return"
-            val row_test_id = row.get_i64("test_id") ?? -1
-            if row_test_id != -1 and row_test_id == test_id:
-                val duration_str = row.get("duration_ms") ?? ""
-                if duration_str != "":
-                    val duration = duration_str.to_float()
-                    timings.push(duration)
-
-        # Return most recent max_count
-        if timings.len() > max_count:
-            timings[timings.len() - max_count:]
-        else:
-            timings
+        trim_to_last_f64(self._runs_by_test[test_id], max_count)
 
     # Check if test is flaky
     fn is_flaky_test(test_id: i64) -> bool:

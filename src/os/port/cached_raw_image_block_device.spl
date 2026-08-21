@@ -1,4 +1,6 @@
 use os.services.block_device.{BlockDevice}
+use std.io_runtime.{ file_exists }
+use std.nogc_sync_mut.io.file_ops.{file_fsync}
 
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_bytes(path: text) -> [u8]
@@ -43,13 +45,14 @@ impl CachedRawImageBlockDevice:
             case None: return Err("cached_raw_image_block_device: failed to read image bytes: " + image_path)
         CachedRawImageBlockDevice.from_bytes(image_path, image_bytes, sector_size)
 
-    me fn flush() -> Result<(), text>:
+    me fn _flush_image() -> Result<(), text>:
         if self.image_path == "":
             return Err("cached_raw_image_block_device: flush requires a backing image path")
-        if not self.dirty:
-            return Ok(())
-        if not rt_file_write_bytes(self.image_path, self.image_bytes):
-            return Err("cached_raw_image_block_device: flush failed: " + self.image_path)
+        if self.dirty:
+            if not rt_file_write_bytes(self.image_path, self.image_bytes):
+                return Err("cached_raw_image_block_device: flush failed: " + self.image_path)
+        if not file_fsync(self.image_path):
+            return Err("cached_raw_image_block_device: backing fsync failed: " + self.image_path)
         self.dirty = false
         Ok(())
 
@@ -93,3 +96,7 @@ impl BlockDevice for CachedRawImageBlockDevice:
 
     fn sector_size() -> u32:
         self.sector_size_bytes.to_u32()
+
+    me fn flush() -> Result<bool, text>:
+        self._flush_image()?
+        Ok(true)

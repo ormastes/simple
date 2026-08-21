@@ -1,0 +1,82 @@
+# @cover src/os/apps/dbd/dbd_dbfs_adapter.spl 90%
+"""
+# dbd DBFS adapter — mounted driver evidence without false durability
+
+Proves that the daemon can identify and bounded-read a real DbFsDriver while
+rejecting every commit before mutation because DBFS has no fsync owner yet.
+"""
+
+use std.spec
+use os.apps.dbd.dbd_dbfs_adapter.{
+    DbdDbfsAdapter, DbdDbfsAdapterState, dbd_dbfs_adapter_from_driver,
+    DBD_DBFS_MAX_RECOVERY_BYTES
+}
+use std.db.dbfs_driver.dbfs_driver.{DbFsDriver}
+use std.fs_driver.instance.{DriverInstance}
+use std.fs_driver.ramfs.{RamFsDriver}
+use std.fs_driver.types.{Path, OpenFlags}
+
+fn _mounted_adapter(): DbdDbfsAdapter:
+    val driver = DbFsDriver.new_hosted()
+    dbd_dbfs_adapter_from_driver(DriverInstance.DbFs(driver))
+
+describe "dbd DBFS adapter durable admission":
+    it "recognizes a real DBFS driver but keeps readiness blocked on fsync":
+        val adapter = _mounted_adapter()
+        expect(adapter.state).to_equal(DbdDbfsAdapterState.MountedSyncUnsupported)
+        expect(adapter.ready()).to_be(false)
+        expect(adapter.blocker()).to_equal("dbfs-fsync-unsupported")
+        assert_true(adapter.driver_instance_id > 0)
+
+    it "rejects commit before creating or mutating the journal":
+        val driver = DbFsDriver.new_hosted()
+        var adapter = dbd_dbfs_adapter_from_driver(DriverInstance.DbFs(driver))
+        val committed = adapter.commit_and_sync("/DBD.LOG", [1u8, 2u8, 3u8])
+        expect(committed.is_err()).to_be(true)
+        expect(committed.unwrap_err()).to_equal("dbfs-fsync-unsupported")
+        expect(driver.stat_path(Path(raw: "/DBD.LOG")).is_err()).to_be(true)
+
+    it "rejects a mounted driver that is not DBFS":
+        val adapter = dbd_dbfs_adapter_from_driver(
+            DriverInstance.RamFs(RamFsDriver.new()))
+        expect(adapter.state).to_equal(DbdDbfsAdapterState.Detached)
+        expect(adapter.ready()).to_be(false)
+        expect(adapter.blocker()).to_equal("mounted-root-is-not-dbfs")
+
+describe "dbd DBFS adapter bounded recovery read":
+    it "reads exact existing journal bytes through the typed driver":
+        val driver = DbFsDriver.new_hosted()
+        val opened = driver.open_path(
+            Path(raw: "/DBD.LOG"), OpenFlags.read_write().with_create())
+        expect(opened.is_ok()).to_be(true)
+        val handle = opened.unwrap()
+        expect(driver.write_bytes_handle(handle, [7u8, 8u8, 9u8]).is_ok()).to_be(true)
+        expect(driver.close_handle(handle).is_ok()).to_be(true)
+        var adapter = dbd_dbfs_adapter_from_driver(DriverInstance.DbFs(driver))
+        val read = adapter.read_existing_bounded("/DBD.LOG", 64)
+        expect(read.is_ok()).to_be(true)
+        expect(read.unwrap()).to_equal([7u8, 8u8, 9u8])
+        expect(adapter.open_handles).to_equal(0i64)
+
+    it "rejects missing files and invalid or oversized read bounds":
+        var adapter = _mounted_adapter()
+        expect(adapter.read_existing_bounded("/DBD.LOG", 64).is_err()).to_be(true)
+        expect(adapter.read_existing_bounded("/other", 64).is_err()).to_be(true)
+        expect(adapter.read_existing_bounded(
+            "/DBD.LOG", DBD_DBFS_MAX_RECOVERY_BYTES + 1
+        ).is_err()).to_be(true)
+
+describe "dbd DBFS adapter quarantine and restart":
+    it "restart releases the driver but preserves quarantine evidence":
+        var adapter = _mounted_adapter()
+        expect(adapter.quarantine("dbfs-recovery-corrupt-journal")).to_be(true)
+        expect(adapter.state).to_equal(DbdDbfsAdapterState.Quarantined)
+        expect(adapter.read_existing_bounded("/DBD.LOG", 64).is_err()).to_be(true)
+        expect(adapter.commit_and_sync("/DBD.LOG", [1u8]).is_err()).to_be(true)
+        val previous_generation = adapter.generation
+        expect(adapter.reset_for_restart()).to_be(true)
+        expect(adapter.state).to_equal(DbdDbfsAdapterState.Quarantined)
+        expect(adapter.blocker()).to_equal("dbfs-recovery-corrupt-journal")
+        expect(adapter.driver.is_none()).to_be(true)
+        expect(adapter.generation).to_equal(previous_generation + 1)
+        expect(adapter.ready()).to_be(false)

@@ -6,7 +6,7 @@
 #   - derive_initial_secrets: client_in / server_in from connection ID
 #   - derive_quic_keys: key / iv / hp from a traffic secret
 #   - QUIC AEAD encrypt/decrypt (AES-128-GCM) for packet payload
-#   - Header protection mask (AES-ECB sample) — stub pending pure AES-ECB
+#   - Header protection mask (pure-Simple AES-ECB sample)
 #   - QUIC CRYPTO frame buffer for TLS handshake message reassembly
 #   - TLS 1.3 key schedule advancement (early → handshake → application)
 #
@@ -55,6 +55,7 @@ val QUIC_HP_KEY_LEN: i64 = 16
 
 # AES-128-GCM tag length
 val QUIC_AEAD_TAG_LEN: i64 = 16
+val QUIC_MAX_CRYPTO_BUFFER: i64 = 1048576
 
 # ============================================================================
 # TLS 1.3 handshake encryption levels — RFC 9001 §4
@@ -492,20 +493,18 @@ fn quic_aead_decrypt(keys: QuicPacketKeys, pn: i64, header: [u8], ciphertext: [u
 # For AES-128, sample = ciphertext[pn_offset+4 .. pn_offset+4+16]
 # mask = AES-ECB(hp_key, sample)  (first 5 bytes used)
 #
-# Pure AES-ECB is not yet available in std.common.crypto — this
-# provides the interface and a documented stub.
+# Header protection uses the in-tree pure-Simple AES block primitive.
 # ============================================================================
 
 fn quic_header_protect_mask(hp_key: [i64], sample: [u8]) -> [u8]:
     """Compute header protection mask from ciphertext sample.
 
     Uses AES-ECB(hp_key, sample) → first 5 bytes as mask.
-    TODO: [quic-crypto][P2] wire pure-Simple AES-ECB once available in std.common.crypto
 
     Parameters:
         hp_key: 16-byte header protection key
         sample: 16-byte ciphertext sample
-    Returns: 5-byte mask (stubbed as zeros until AES-ECB is available)
+    Returns: 5-byte mask
     """
     # RFC 9001 §5.4.3: mask = AES-ECB(hp_key, sample)[0..4] via pure-Simple AES.
     var key_u8: [u8] = []
@@ -566,8 +565,9 @@ fn quic_apply_header_protection(header: [u8], mask: [u8], pn_offset: i64, pn_len
 fn crypto_buffer_append(buf: [u8], data: [u8], offset: i64) -> [u8]:
     """Append CRYPTO frame data to the reassembly buffer.
 
-    Simple contiguous-only reassembly: if offset matches buffer length,
-    append. Otherwise, extend buffer with zeros to fill gap.
+    Simple contiguous-only reassembly: offset must match buffer length.
+    Gaps and overlaps are rejected by leaving the buffer unchanged. This keeps
+    work linear and prevents an unauthenticated offset from allocating zeros.
 
     Parameters:
         buf: existing buffer
@@ -575,37 +575,17 @@ fn crypto_buffer_append(buf: [u8], data: [u8], offset: i64) -> [u8]:
         offset: stream offset of this data
     Returns: updated buffer
     """
-    if offset < 0:
+    if offset < 0 or offset != buf.len():
         return buf
-
-    var out: [u8] = []
-    # Copy existing buffer
-    var i = 0
-    loop:
-        if i >= buf.len():
-            break
-        out.push(buf[i])
-        i = i + 1
-
-    # Fill gap if offset is beyond current length
-    loop:
-        if out.len() >= offset:
-            break
-        out.push(0)
+    if data.len() > QUIC_MAX_CRYPTO_BUFFER - buf.len():
+        return buf
 
     # Append new data
     var di = 0
-    loop:
-        if di >= data.len():
-            break
-        if offset + di < out.len():
-            # Overwrite (retransmission)
-            out[offset + di] = data[di]
-        else:
-            out.push(data[di])
+    while di < data.len():
+        buf.push(data[di])
         di = di + 1
-
-    return out
+    return buf
 
 # ============================================================================
 # TLS 1.3 Handshake Message Parsing — minimal for QUIC dispatch
@@ -796,7 +776,7 @@ fn _bytes_to_hex_u8(data: [u8]) -> text:
         i = i + 1
     return out
 
-export QUIC_INITIAL_SALT_V1, SHA256_HASH_LEN, AES_128_KEY_LEN, QUIC_IV_LEN, QUIC_HP_KEY_LEN, QUIC_AEAD_TAG_LEN
+export QUIC_INITIAL_SALT_V1, SHA256_HASH_LEN, AES_128_KEY_LEN, QUIC_IV_LEN, QUIC_HP_KEY_LEN, QUIC_AEAD_TAG_LEN, QUIC_MAX_CRYPTO_BUFFER
 export QuicPacketKeys, QuicCryptoState
 export quic_hkdf_expand_label, derive_initial_secret, derive_initial_secrets, derive_quic_keys
 export derive_secret, derive_early_secret, derive_handshake_secrets, derive_application_secrets

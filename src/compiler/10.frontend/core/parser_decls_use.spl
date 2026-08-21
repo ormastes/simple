@@ -719,12 +719,51 @@ fn skip_impl_where_clause():
 
     parser_error("where clause in impl header is too long")
 
+# A type argument is treated as an impl-head type PARAMETER when it follows the
+# type-parameter naming convention (uppercase initial: `T`, `U`, `Item`).
+# Concrete builtins (`i64`, `f64`, `text`, `bool`, ...) start lowercase, so
+# `impl Box<i64>:` stays a concrete impl with zero type params.
+fn impl_type_arg_is_param(name: text) -> bool:
+    if name.len() == 0:
+        return false
+    val c = char_code(name[0:1])
+    c >= 65 and c <= 90
+
+# Parses an impl target type (`Name`, `a.b.Name`, `Name<T, U>`) and returns the
+# type-parameter names carried INSIDE it. `impl Box<T>:` declares `T` at the
+# impl head without using the `impl<T>` form; `parser_parse_type` merely
+# consumes those names, which left `Impl.type_params` permanently empty and made
+# the HIR generic-impl gate dead code (bug
+# hir_generic_templates_unconsumed_by_mono_pass_2026-08-21.md). Any target shape
+# other than an identifier path falls back to the general type parser.
+fn parse_impl_target_type(has_explicit_params: bool) -> [text]:
+    var params: [text] = []
+    if par_kind_get() != TOK_IDENT:
+        parser_parse_type()
+        return params
+    parser_advance()
+    while par_kind_get() == TOK_DOT:
+        parser_advance()
+        if par_kind_get() != TOK_IDENT:
+            return params
+        parser_advance()
+    val k = par_kind_get()
+    if k != TOK_LT and k != TOK_LT_GENERIC and k != TOK_LBRACKET:
+        return params
+    val args = parse_type_params()
+    if has_explicit_params:
+        return params
+    for a in args:
+        if impl_type_arg_is_param(a):
+            params.push(a)
+    params
+
 fn parse_impl_decl() -> i64:
     # impl StructName:  |  impl TraitName for StructName:
     parser_advance()
     val type_params = parse_type_params()
     var target_name = par_text_get()
-    parser_parse_type()
+    var head_params = parse_impl_target_type(type_params.len() > 0)
     var trait_name = ""
     if par_kind_get() == TOK_KW_FOR:
         # `impl Trait for Type:` — methods attach to the concrete type;
@@ -735,7 +774,9 @@ fn parse_impl_decl() -> i64:
         trait_name = target_name
         parser_advance()
         target_name = par_text_get()
-        parser_parse_type()
+        val self_params = parse_impl_target_type(type_params.len() > 0)
+        for p in self_params:
+            head_params.push(p)
     skip_impl_where_clause()
     parser_expect(TOK_COLON)
     parser_skip_newlines()
@@ -773,7 +814,15 @@ fn parse_impl_decl() -> i64:
             parser_advance()
 
     val impl_idx = decl_impl_block(target_name, method_ids, 0)
-    decl_set_type_params(impl_idx, type_params)
+    var all_params = type_params
+    for hp in head_params:
+        var seen = false
+        for existing in all_params:
+            if existing == hp:
+                seen = true
+        if not seen:
+            all_params.push(hp)
+    decl_set_type_params(impl_idx, all_params)
     if trait_name != "":
         decl_set_impl_trait(impl_idx, trait_name)
     impl_idx

@@ -1,0 +1,35 @@
+## Fail-closed installer boundary for changeable hosted artifact files.
+
+use os.installer.image_package_payload_policy.{IMAGE_MAX_NATIVE_PAYLOAD_BYTES_V1}
+use std.io.{file_is_regular_no_follow}
+
+val IMAGE_MAX_PACKAGE_ARCHIVE_BYTES_V1: i64 = 16777216
+val IMAGE_MAX_BUILD_STAMP_BYTES_V1: i64 = 65536
+val IMAGE_BOUNDED_FILE_READER_UNAVAILABLE_V1 = "bounded-nofollow-fd-reader-unavailable"
+
+fn image_read_file_bounded_v1(
+    path: text, max_bytes: i64, artifact_role: text,
+) -> Result<[u8], text>:
+    if artifact_role == "" or artifact_role.contains("\0") or artifact_role.contains("\n"):
+        return Err("installer bounded reader received an invalid artifact role")
+    if max_bytes <= 0 or max_bytes > IMAGE_MAX_NATIVE_PAYLOAD_BYTES_V1:
+        return Err("{artifact_role} has an invalid read bound")
+    if not file_is_regular_no_follow(path):
+        return Err("{artifact_role} is missing, not regular, or is a symlink")
+
+    # Hosted FileHandle/rt_io_file_open follows the path and offers no
+    # O_NOFOLLOW/openat2 identity binding. The older descriptor surface has no
+    # bounded byte read tied to its fd. A size/path check followed by either
+    # API would therefore reopen the attacker-controlled name. Refuse instead
+    # of allocating or returning bytes from an unbound object.
+    Err("{artifact_role}: {IMAGE_BOUNDED_FILE_READER_UNAVAILABLE_V1}")
+
+fn image_read_text_bounded_v1(
+    path: text, max_bytes: i64, artifact_role: text,
+) -> Result<text, text>:
+    image_read_file_bounded_v1(path, max_bytes, artifact_role)?
+    Err("{artifact_role}: {IMAGE_BOUNDED_FILE_READER_UNAVAILABLE_V1}")
+
+export IMAGE_MAX_PACKAGE_ARCHIVE_BYTES_V1, IMAGE_MAX_BUILD_STAMP_BYTES_V1
+export IMAGE_BOUNDED_FILE_READER_UNAVAILABLE_V1
+export image_read_file_bounded_v1, image_read_text_bounded_v1

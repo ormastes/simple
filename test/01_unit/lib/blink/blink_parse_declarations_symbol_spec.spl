@@ -1,0 +1,111 @@
+# @cover src/lib/blink/css_parser/parser.spl 20%
+# @tag: unit, blink, css, imports
+"""
+# `blink_parse_declarations` exists and is what the cascade binds to
+
+## Overview
+
+Two different modules define a function named `parse_declarations`:
+
+- `src/lib/blink/css_parser/parser.spl` — returns `[CssDeclaration]`.
+- `src/lib/gc_async_mut/gpu/browser_engine/style_block_parse.spl` — returns
+  `[CssDecl]`, a DIFFERENT type with different fields.
+
+The interpreter resolves a function by NAME across co-compiled modules rather
+than by import scope, so `blink.style.cascade` calling the bare name could bind
+to the browser-engine one and fail later with `class CssDecl has no field named
+important` — a wrong-module bind, not a missing function. The agreed fix was to
+give blink's version a unique prefixed name, `blink_parse_declarations`.
+
+`cascade.spl` was updated to import and call `blink_parse_declarations`, but the
+definition was never added: the name existed at exactly one site in the whole
+tree, the `use` line itself. A dangling import is the same class of silent
+defect — the name resolves to nothing rather than to the wrong thing.
+
+## Examples
+
+The reproducing example calls `blink_parse_declarations` directly and checks it
+returns blink `CssDeclaration` values carrying `important`. The class-detection
+example checks the invariant that actually failed: that every name a blink
+module imports from another blink module is really defined there.
+"""
+
+use std.spec
+use std.fs.{read_to_string}
+use std.blink.css_parser.parser.{CssDeclaration, blink_parse_declarations, parse_declarations}
+
+describe "blink_parse_declarations":
+
+    it "parses an inline style attribute into blink CssDeclaration values":
+        val decls = blink_parse_declarations("color: red; margin: 0")
+        expect(decls.len()).to_equal(2)
+        expect(decls[0].property).to_equal("color")
+        expect(decls[0].value).to_equal("red")
+
+    it "returns the blink declaration type, which carries `important`":
+        # This is the field whose absence was the observed symptom when the
+        # bare name bound to the browser-engine module's CssDecl instead.
+        val decls = blink_parse_declarations("color: red !important")
+        expect(decls.len()).to_equal(1)
+        expect(decls[0].important).to_equal(true)
+
+    it "agrees with the legacy unprefixed alias":
+        val a = blink_parse_declarations("color: red; margin: 0")
+        val b = parse_declarations("color: red; margin: 0")
+        expect(a.len()).to_equal(b.len())
+        expect(a[0].property).to_equal(b[0].property)
+
+describe "no blink module imports a name that is not defined":
+
+    # Class detection: a `use std.blink.<mod>.{a, b}` naming a symbol that the
+    # target module never defines is accepted silently at import time and only
+    # explodes — or worse, binds to a same-named symbol elsewhere — at the call
+    # site. This walks blink's own cross-module imports and requires each name
+    # to have a real definition in the module it is imported from.
+
+    fn _module_path(dotted: text) -> text:
+        "src/lib/" + dotted.replace(".", "/") + ".spl"
+
+    fn _defines(src: text, name: text) -> bool:
+        (src.contains("fn " + name + "(") or
+            src.contains("class " + name) or
+            src.contains("struct " + name) or
+            src.contains("enum " + name) or
+            src.contains("type " + name) or
+            src.contains("trait " + name) or
+            src.contains("val " + name) or
+            src.contains(name + ","))
+
+    it "resolves every name in blink/style/cascade.spl's blink imports":
+        val src_opt = read_to_string("src/lib/blink/style/cascade.spl")
+        expect(src_opt == nil).to_equal(false)
+        val src = src_opt!
+        var missing: [text] = []
+        var checked = 0
+        val lines = src.split("\n")
+        var i = 0
+        while i < lines.len():
+            val line = lines[i].trim()
+            if line.starts_with("use std.blink.") and line.contains(".") and line.contains(","):
+                val open = line.index_of("." + "{")
+                if open > 0:
+                    val dotted = line.substring(8, open)
+                    val close = line.index_of("" + "}")
+                    if close > open:
+                        val names = line.substring(open + 2, close).split(",")
+                        val target_opt = read_to_string(_module_path(dotted))
+                        if target_opt != nil:
+                            val target = target_opt!
+                            var j = 0
+                            while j < names.len():
+                                val nm = names[j].trim()
+                                if nm.len() > 0:
+                                    checked = checked + 1
+                                    if not _defines(target, nm):
+                                        missing = missing + [dotted + "." + nm]
+                                j = j + 1
+            i = i + 1
+        # Non-vacuity: cascade.spl imports many names from blink modules. If
+        # this parse found nothing, the example proves nothing and must fail.
+        expect(checked > 0).to_equal(true)
+        expect(missing).to_equal([])

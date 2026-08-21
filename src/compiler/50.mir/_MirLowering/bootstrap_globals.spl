@@ -2,6 +2,7 @@
 use compiler.mir._MirLowering.module_lowering.*
 use compiler.mir._MirLowering.function_lowering.*
 use compiler.mir._MirLowering.asm_and_targets.*
+use compiler.mir._MirLowering.bootstrap_type_registration.{bootstrap_type_registry_reset, bootstrap_register_flat_type_defs, bootstrap_register_flat_class_defs, bootstrap_register_hir_type_defs}
 # MIR Lowering - HIR to MIR Transformation
 #
 # This module handles lowering from HIR (High-level IR) to MIR (Mid-level IR).
@@ -22,7 +23,7 @@ use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, mir_operand_const_int}
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
-use compiler.hir.hir_lowering.items.{bootstrap_hir_module_count, bootstrap_hir_entry_index, bootstrap_hir_module_name_at, bootstrap_hir_module_symbols_at, bootstrap_hir_module_functions_at, bootstrap_hir_module_constants_at, bootstrap_hir_module_enums_at, bootstrap_hir_module_structs_at, bootstrap_hir_module_classes_at}
+use compiler.hir.hir_lowering.items.{bootstrap_hir_module_count, bootstrap_hir_entry_index, bootstrap_hir_module_name_at, bootstrap_hir_module_symbol_count, bootstrap_hir_module_symbol_at, bootstrap_hir_module_function_count, bootstrap_hir_module_function_at, bootstrap_hir_module_constant_count, bootstrap_hir_module_constant_at}
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 extern fn rt_exit(code: i64)
@@ -96,7 +97,6 @@ var _bootstrap_mir_static_type_tags: [i64] = []
 var _bootstrap_mir_static_init_kinds: [i64] = []
 var _bootstrap_mir_static_init_payloads: [text] = []
 var _bootstrap_function_value_names: [text] = []
-var _bootstrap_enum_runtime_id_names: Dict<text, text> = {}
 
 fn bootstrap_function_value_names_reset():
     _bootstrap_function_value_names = []
@@ -274,7 +274,7 @@ fn bootstrap_mir_modules_add(module: MirModule):
 var _bootstrap_entry_hir_module: HirModule? = nil
 
 fn bootstrap_set_entry_hir_module(m: HirModule):
-    _bootstrap_enum_runtime_id_names = {}
+    bootstrap_type_registry_reset()
     _bootstrap_entry_hir_module = Some(m)
 
 fn bootstrap_clear_entry_hir_module():
@@ -282,9 +282,11 @@ fn bootstrap_clear_entry_hir_module():
 
 fn bootstrap_flat_symbol_table(module_index: i64) -> SymbolTable:
     var table = SymbolTable.new()
-    val flat_symbols = bootstrap_hir_module_symbols_at(module_index)
-    for symbol in flat_symbols:
+    var symbol_index = 0
+    while symbol_index < bootstrap_hir_module_symbol_count(module_index):
+        val symbol = bootstrap_hir_module_symbol_at(module_index, symbol_index)
         table.symbols[symbol.id.id] = symbol
+        symbol_index = symbol_index + 1
     table
 
 fn bootstrap_flat_function_symbol_name(symbols: SymbolTable, func: HirFunction) -> text:
@@ -302,8 +304,9 @@ fn bootstrap_register_flat_function_values():
     while module_index < bootstrap_hir_module_count():
         val module_name = bootstrap_mir_logical_module_name(bootstrap_hir_module_name_at(module_index))
         val symbols = bootstrap_flat_symbol_table(module_index)
-        val functions = bootstrap_hir_module_functions_at(module_index)
-        for func in functions:
+        var function_index = 0
+        while function_index < bootstrap_hir_module_function_count(module_index):
+            val func = bootstrap_hir_module_function_at(module_index, function_index)
             val function_name = bootstrap_flat_function_symbol_name(symbols, func)
             _bootstrap_function_value_names.push(function_name)
             if not func.is_method:
@@ -311,14 +314,18 @@ fn bootstrap_register_flat_function_values():
                 # Cross-module declared HIR return types (name-keyed; see
                 # bootstrap_fn_ret_hir_type_register in mir_data.spl).
                 bootstrap_fn_ret_hir_type_register(func.name, func.return_type)
+            function_index = function_index + 1
         module_index = module_index + 1
 
 fn bootstrap_lower_flat_hir_module_to_mir(module_index: i64, target_context: MirTargetContext, is_entry: bool) -> (MirModule, i64):
     val module_name = bootstrap_hir_module_name_at(module_index)
     val logical_module_name = bootstrap_mir_logical_module_name(module_name)
     val symbols = bootstrap_flat_symbol_table(module_index)
-    val functions = bootstrap_hir_module_functions_at(module_index)
-    val constants = bootstrap_hir_module_constants_at(module_index)
+    var constants: [HirConst] = []
+    var constant_index = 0
+    while constant_index < bootstrap_hir_module_constant_count(module_index):
+        constants = constants.push(bootstrap_hir_module_constant_at(module_index, constant_index))
+        constant_index = constant_index + 1
     var lowering = MirLowering.new_for_target(symbols, target_context)
     lowering.current_function_names = _bootstrap_function_value_names
     # Register this module's own enum/struct type defs so `E.V` reclassifies to
@@ -326,11 +333,11 @@ fn bootstrap_lower_flat_hir_module_to_mir(module_index: i64, target_context: Mir
     # reclassifies to an inline aggregate construct (not a call to an undefined
     # `@S` ctor). The reduced flat store now carries these; the globals/extra
     # lowering paths use bootstrap_register_hir_type_defs for the same purpose.
-    lowering = bootstrap_register_flat_type_defs(lowering, bootstrap_hir_module_enums_at(module_index), bootstrap_hir_module_structs_at(module_index))
+    lowering = bootstrap_register_flat_type_defs(lowering, module_index)
     # Register class field layout so class construction lowers inline instead of
     # calling an undefined `@C` ctor. (Class method resolution is a follow-up that
     # also needs the method bodies lowered into the flat function stream.)
-    lowering = bootstrap_register_flat_class_defs(lowering, bootstrap_hir_module_classes_at(module_index))
+    lowering = bootstrap_register_flat_class_defs(lowering, module_index)
     for const_ in constants:
         lowering.lower_const(const_)
         lowering.lower_static(const_)
@@ -359,13 +366,30 @@ fn bootstrap_lower_flat_hir_module_to_mir(module_index: i64, target_context: Mir
     # field 0 and yields `inner.a`'s value -- a silent wrong answer with no
     # diagnostic and exit 0. Seeding the map here makes the result independent
     # of function order, exactly as the non-flat path already is.
-    for prescan_fn in functions:
+    val function_count = bootstrap_hir_module_function_count(module_index)
+    # Level-gated (default OFF), retained per the log-retention policy.
+    val flat_prescan_trace = mir_trace_enabled()
+    if flat_prescan_trace:
+        eprint("[mir-flat-prescan-module] start index={module_index} module={module_name} functions={function_count}")
+    var flat_prescan_index = 0
+    while flat_prescan_index < function_count:
+        val prescan_fn = bootstrap_hir_module_function_at(module_index, flat_prescan_index)
+        if flat_prescan_trace:
+            eprint("[mir-flat-prescan-function] start module={module_name} index={flat_prescan_index} name={prescan_fn.name}")
         if not prescan_fn.is_extern:
             lowering.prescan_block_for_struct_types(prescan_fn.body)
+        if flat_prescan_trace:
+            eprint("[mir-flat-prescan-function] done module={module_name} index={flat_prescan_index} name={prescan_fn.name}")
+        flat_prescan_index = flat_prescan_index + 1
+    if flat_prescan_trace:
+        eprint("[mir-flat-prescan-module] done index={module_index} module={module_name}")
 
     var instruction_total = 0
-    for hir_fn in functions:
+    var function_index = 0
+    while function_index < function_count:
+        val hir_fn = bootstrap_hir_module_function_at(module_index, function_index)
         if hir_fn.is_extern:
+            function_index = function_index + 1
             continue
         val function_name = bootstrap_flat_function_symbol_name(symbols, hir_fn)
         # is_static methods already carry a qualified `Type.method` function_name
@@ -382,6 +406,7 @@ fn bootstrap_lower_flat_hir_module_to_mir(module_index: i64, target_context: Mir
         var builder = lowering.builder
         lowered_module = builder.module
         lowered_module.name = module_name
+        function_index = function_index + 1
         var lowered_functions = lowered_module.functions
         lowered_functions[mir_fn.symbol] = mir_fn
         lowered_module.functions = lowered_functions
@@ -403,7 +428,7 @@ fn bootstrap_lower_flat_hir_modules_to_mir_for_target(entry_module_name: text, t
         eprint("error: bootstrap flat HIR entry module was not captured: {entry_module_name}\n")
         rt_exit(1)
 
-    val entry_function_count = bootstrap_hir_module_functions_at(entry_index).len()
+    val entry_function_count = bootstrap_hir_module_function_count(entry_index)
     eprint("[bootstrap-flat-entry] index={entry_index} modules={bootstrap_hir_module_count()} functions={entry_function_count}\n")
 
     val (entry_module, entry_instruction_total) = bootstrap_lower_flat_hir_module_to_mir(entry_index, target_context, true)
@@ -498,187 +523,6 @@ fn bootstrap_mir_name_for_index(index: i64) -> text:
     if index == 6:
         return "rt_native_build"
     ""
-
-fn bootstrap_register_flat_type_defs(lowering: MirLowering, enums: [HirEnum], structs: [HirStruct]) -> MirLowering:
-    """Flat --entry-closure counterpart of bootstrap_register_hir_type_defs: the
-    flat path lowers from the reduced per-module store and has no HirModule, so
-    the enum/struct defs are passed as lists (captured in bootstrap_hir_modules_add).
-    Same registrations as the struct/enum blocks of that function so `E.V` and
-    `S(..)` reclassify correctly. Classes are still unhandled here (a separate,
-    documented gap — the MCP tree converts class -> struct at the source level)."""
-    var lw = lowering
-    lw.enum_runtime_id_names = _bootstrap_enum_runtime_id_names
-    var si = 0
-    while si < structs.len():
-        val struct_def = structs[si]
-        var field_names: [text] = []
-        var fi = 0
-        while fi < struct_def.fields.len():
-            field_names.push(struct_def.fields[fi].name)
-            fi = fi + 1
-        var fm = lw.field_map
-        fm[lw.symbol_id_value(struct_def.symbol)] = field_names
-        lw.field_map = fm
-        var sfo = lw.struct_field_order
-        sfo[struct_def.name] = field_names
-        lw.struct_field_order = sfo
-        lw.lower_struct_type(struct_def)
-        si = si + 1
-
-    var ei = 0
-    while ei < enums.len():
-        val enum_def = enums[ei]
-        lw.register_enum_variants(enum_def)
-        lw.register_enum_runtime_id(enum_def)
-        ei = ei + 1
-
-    if lw.errors.len() > 0:
-        val first_error = lw.errors[0]
-        eprint("error: bootstrap flat MIR type registration failed: {first_error.message}\n")
-        rt_exit(1)
-
-    if not lw.enum_runtime_id_index.has("Result"):
-        lw.enum_runtime_id_index["Result"] = 0
-    if not lw.enum_variant_index.has("Result"):
-        lw.enum_variant_index["Result"] = ["Ok", "Err"]
-        lw.enum_variant_discriminants["Result"] = [0, 1]
-    if not lw.enum_runtime_id_index.has("Option"):
-        lw.enum_runtime_id_index["Option"] = 1
-    if not lw.enum_variant_index.has("Option"):
-        lw.enum_variant_index["Option"] = ["Some", "None"]
-        lw.enum_variant_discriminants["Option"] = [0, 1]
-    # Step (c): mirror the built-in seeds into the runtime_name-keyed maps too,
-    # so a qualified-first read on the bootstrap path resolves Option/Result
-    # instead of silently degrading to the bare fallback on every lookup.
-    lw.register_builtin_enum_dual("Result", ["Ok", "Err"], [0, 1], 0)
-    lw.register_builtin_enum_dual("Option", ["Some", "None"], [0, 1], 1)
-    _bootstrap_enum_runtime_id_names = lw.enum_runtime_id_names
-    lw
-
-fn bootstrap_register_flat_class_defs(lowering: MirLowering, classes: [HirClass]) -> MirLowering:
-    """Flat --entry-closure class FIELD registration, mirroring the class block of
-    the normal lower_module (module_lowering.spl ~728-758): register class field
-    layout so `C(..)` reclassifies to an inline aggregate instead of a call to an
-    undefined `@C` ctor. The impl-method / `static::C::m` registry (so class
-    methods resolve) also requires lowering the method BODIES into the flat
-    function stream — a separate follow-up; without emitted bodies, registering
-    the method symbols would only turn a loud const-0 placeholder into an
-    undefined-symbol link error. `lowering` is value-typed here, so every dict
-    write copies back."""
-    var lw = lowering
-
-    # Class field layout: same name-keyed maps as structs, plus class_type_names.
-    var ci = 0
-    while ci < classes.len():
-        val class_def = classes[ci]
-        var field_names: [text] = []
-        var field_has_default: [bool] = []
-        var field_default_expr: [HirExpr] = []
-        var fi = 0
-        while fi < class_def.fields.len():
-            field_names.push(class_def.fields[fi].name)
-            field_has_default.push(class_def.fields[fi].has_default)
-            field_default_expr.push(class_def.fields[fi].default)
-            fi = fi + 1
-        var fm = lw.field_map
-        fm[lw.symbol_id_value(class_def.symbol)] = field_names
-        lw.field_map = fm
-        var shd = lw.struct_field_has_default
-        shd[class_def.name] = field_has_default
-        lw.struct_field_has_default = shd
-        var sde = lw.struct_field_default_expr
-        sde[class_def.name] = field_default_expr
-        lw.struct_field_default_expr = sde
-        var sfo = lw.struct_field_order
-        sfo[class_def.name] = field_names
-        lw.struct_field_order = sfo
-        var ctn = lw.class_type_names
-        ctn[class_def.name] = true
-        lw.class_type_names = ctn
-        ci = ci + 1
-
-    lw
-
-fn bootstrap_register_hir_type_defs(lowering: MirLowering, hir_module: HirModule) -> MirLowering:
-    """Populate a fresh MirLowering's struct/enum/class type metadata from one
-    HIR module's own type definitions, mirroring the struct/enum/class block
-    of the normal (non-bootstrap) `lower_module()`
-    (`_MirLowering/module_lowering.spl` lines ~315-391) that neither bootstrap
-    flat-lowering entry point (`bootstrap_lower_hir_globals_to_mir_module`,
-    `bootstrap_lower_extra_hir_module_to_mir`) ever reaches -- both build a
-    fresh `MirLowering` and call `lower_function` directly per function,
-    skipping `lower_module` entirely. Without this, `self.struct_field_order`
-    stays empty, so `lower_call` never reclassifies `Point(x:.., y:..)` as a
-    struct construction and it falls through to a generic function call that
-    links as `undefined symbol: Point` (bug
-    bootstrap_stage2_empty_mir_bodies_2026-07-05, Probe A, MIR-layer half of
-    the HIR-layer fix in `declare_module_symbols`/`lower_module`). A module
-    with no structs/enums/classes of its own (the common case) makes every
-    loop below a no-op, so this is additive only."""
-    var lw = lowering
-    lw.enum_runtime_id_names = _bootstrap_enum_runtime_id_names
-    val struct_values = hir_module.structs.values()
-    var si = 0
-    while si < struct_values.len():
-        val struct_def = struct_values[si]
-        var field_names: [text] = []
-        var fi = 0
-        while fi < struct_def.fields.len():
-            field_names.push(struct_def.fields[fi].name)
-            fi = fi + 1
-        var fm = lw.field_map
-        fm[lw.symbol_id_value(struct_def.symbol)] = field_names
-        lw.field_map = fm
-        var sfo = lw.struct_field_order
-        sfo[struct_def.name] = field_names
-        lw.struct_field_order = sfo
-        lw.lower_struct_type(struct_def)
-        si = si + 1
-
-    val enum_values = hir_module.enums.values()
-    var ei = 0
-    while ei < enum_values.len():
-        val enum_def = enum_values[ei]
-        lw.register_enum_variants(enum_def)
-        lw.register_enum_runtime_id(enum_def)
-        ei = ei + 1
-
-    if lw.errors.len() > 0:
-        val first_error = lw.errors[0]
-        eprint("error: bootstrap MIR type registration failed: {first_error.message}\n")
-        rt_exit(1)
-
-    if not lw.enum_runtime_id_index.has("Result"):
-        lw.enum_runtime_id_index["Result"] = 0
-    if not lw.enum_variant_index.has("Result"):
-        lw.enum_variant_index["Result"] = ["Ok", "Err"]
-        lw.enum_variant_discriminants["Result"] = [0, 1]
-    if not lw.enum_runtime_id_index.has("Option"):
-        lw.enum_runtime_id_index["Option"] = 1
-    if not lw.enum_variant_index.has("Option"):
-        lw.enum_variant_index["Option"] = ["Some", "None"]
-        lw.enum_variant_discriminants["Option"] = [0, 1]
-    # Step (c): same qualified mirror as the flat path above.
-    lw.register_builtin_enum_dual("Result", ["Ok", "Err"], [0, 1], 0)
-    lw.register_builtin_enum_dual("Option", ["Some", "None"], [0, 1], 1)
-    _bootstrap_enum_runtime_id_names = lw.enum_runtime_id_names
-
-    val class_values = hir_module.classes.values()
-    var ci = 0
-    while ci < class_values.len():
-        val class_def = class_values[ci]
-        var field_names: [text] = []
-        var fi2 = 0
-        while fi2 < class_def.fields.len():
-            field_names.push(class_def.fields[fi2].name)
-            fi2 = fi2 + 1
-        var fm2 = lw.field_map
-        fm2[lw.symbol_id_value(class_def.symbol)] = field_names
-        lw.field_map = fm2
-        lw.lower_class_type(class_def)
-        ci = ci + 1
-
-    lw
 
 fn bootstrap_lower_hir_globals_to_mir_module() -> MirModule:
     val target_context = mir_target_context_from("", "unknown", "unknown", "llvm", -1)
@@ -872,18 +716,8 @@ fn bootstrap_lower_extra_hir_module_to_mir_for_target(hir_module: HirModule, tar
         if hir_fn.is_extern:
             fki = fki + 1
             continue
-        # Key/emit under `module.function`, not the bare function name: two
-        # different closure helper modules can legally define a same-named
-        # function (`compute`), and the bare-name dedup below used to treat
-        # the second module's `compute` as an already-added duplicate and
-        # silently drop it, losing its body entirely. The call site
-        # (lower_call's NamedVar branch, switch_operators_calls.spl) resolves
-        # a cross-module call through the SAME qualified name via
-        # qualify_imported_function_symbol (module_lowering.spl), so the
-        # `define @<name>` emitted here (bootstrap_mir_function_name_at is
-        # what bootstrap_emit_real_llvm_object actually emits as the LLVM
-        # symbol) matches what callers reference (bug
-        # bootstrap_stage2_empty_mir_bodies_2026-07-05, Probe B).
+        # Qualified accumulator identity prevents same-named functions in
+        # different closure modules from suppressing one another.
         val qualified_fn_name = bootstrap_hir_accumulator_name(hir_module, hir_fn)
         var already_added = false
         var dup_i = 0
@@ -894,8 +728,6 @@ fn bootstrap_lower_extra_hir_module_to_mir_for_target(hir_module: HirModule, tar
         if fn_name != "" and not already_added:
             lowering.symbols = hir_module.symbols
             val mir_fn = lowering.lower_function(hir_fn)
-            # Function-body lowering can also record fatal errors. Reject it
-            # before its partial MIR reaches the shared closure accumulator.
             if bootstrap_reject_fatal_mir_errors(lowering):
                 return -1
             bootstrap_mir_functions_add(qualified_fn_name, mir_fn, module_index)

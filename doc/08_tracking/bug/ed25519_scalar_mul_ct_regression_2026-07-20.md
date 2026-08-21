@@ -130,3 +130,26 @@ body, which also still carries per-byte `serial_println("[ed25519-scalar] byte8"
 debug tracing. Use :966 / :976 as the reference points.
 NOT PROVEN: that the constant-time property actually regresses at runtime — that
 needs execution/timing, which this triage did not perform.
+
+## 2026-08-20 canonical common-verifier repair (static only)
+
+At source level, the pure-Simple owner used by release/evidence verification
+now has fixed-work secret-scalar paths.  Its public `ed25519.spl` facade uses a
+fixed 64-window schedule, four doublings and one addition per window, a full
+16-entry table scan, and XOR-mask point selection.  A follow-up review found
+additional secret-dependent branches in scalar reduction and multiplication;
+`ed25519_scalar.spl` now performs every conditional subtraction and multiply
+accumulation through mask selection over fixed loops.  Dormant branch-indexed
+cached selectors were removed.  Field arithmetic lives in the cohesive
+`ed25519_field.spl` module.  The same repair adds strict canonical point
+decoding, square-root revalidation, negative-zero rejection, `S < L`,
+prime-subgroup membership, and small-order rejection.
+
+The original row names `src/os/crypto/ed25519_ops.spl`; that separate owner was
+outside this bounded repair and remains OPEN.  The common-owner fix is also
+STATIC-ONLY: no valid deployed self-hosted Simple runtime was available.  The
+fixed-work statement above describes source control flow only; it is not an
+executable constant-time or compiler-codegen proof.  Neither the RFC signing
+KAT nor timing/codegen evidence has run yet.  Do not enable evidence signature
+admission until the focused common-owner spec passes under the self-hosted
+runtime and the native code path is reviewed.

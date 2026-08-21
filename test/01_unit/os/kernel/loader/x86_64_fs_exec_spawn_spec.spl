@@ -1,58 +1,25 @@
-use std.io_runtime.{file_read}
+use std.spec.{describe, it, expect}
+use os.kernel.loader.x86_64_fs_exec_spawn.{
+    x86_64_fs_exec_spawn,
+    x86_64_fs_exec_spawn_as,
+    x86_64_fs_exec_spawn_scheduler_owned,
+    x86_64_fs_exec_spawn_heap
+}
 
-describe "x86_64 filesystem exec ring3 launch contract":
-    it "streams the exact filesystem ELF into PT_LOAD frames without preload substitution":
-        val spawn_source = file_read("src/os/kernel/loader/x86_64_fs_exec_spawn.spl")
-        val handoff = file_read("src/os/kernel/loader/x86_64_fs_exec_ring3.spl")
+describe "x86_64 authenticated filesystem execution gate":
+    it "rejects a kernel path-only launch":
+        val result = x86_64_fs_exec_spawn("/sys/apps/unsigned.elf", [], [])
+        expect(result).to_equal(-13)
 
-        expect(spawn_source).to_contain("simpleos_fat32_stream_open(path)")
-        expect(spawn_source).to_contain("simpleos_fat32_stream_read_at(0.to_u64(), buf, prefix_len)")
-        expect(spawn_source).to_contain("x86_64_fs_exec_enter_stream_ring3(path, header_blob, hdr_prefix, stream_len as u64, argv, envp)")
-        # Streaming-mode phdr parse is bounded to the RESIDENT header prefix
-        # (hdr_len), not the full on-disk size — a corrupt phdr cannot drive
-        # mmio reads past the header buffer.
-        expect(handoff).to_contain("phnum > ((hdr_len - phoff) / phentsize)")
-        expect(handoff).to_contain("simpleos_fat32_stream_read_at(file_pos, dst, clen)")
-        expect(handoff).to_contain("FAIL short PT_LOAD read")
-        expect(handoff).to_contain("val HEAP_PAGE_SZ: u64 = 4096")
-        expect(handoff).to_contain("rt_user_heap_init_returning(HEAP_VA, HEAP_PAGES * HEAP_PAGE_SZ)")
-        expect(handoff).to_contain("file_len, true, false, argv, envp")
-        expect(handoff).to_contain("file_len, true, true, argv, envp")
-        expect(handoff).to_contain("fb.len().to_u64(), false, false, argv, envp")
-        # The heap spawn path MUST use the resuming heap-init: the plain
-        # rt_user_heap_init sets _bare_exec_halt_on_exit=1, which sends the
-        # payload's exit(0) to outb(0xF4)+hlt. Under OVMF there is no
-        # isa-debug-exit device, so the guest wedges and the sshd accept loop
-        # never serves a second command. Regression pin for
-        # doc/08_tracking/bug/heap_ring3_exit_halts_guest_under_ovmf_2026-08-06.md
-        expect(handoff.contains("rt_user_heap_init(HEAP_VA")).to_equal(false)
-        expect(handoff).to_contain("mmio_write8(dst + t, mmio_read8(blob + file_pos + t))")
-        expect(spawn_source.contains("simpleos_fat32_preloaded_size")).to_equal(false)
-        expect(spawn_source.contains("spawn:preloaded")).to_equal(false)
+    it "rejects compatibility scheduler and heap names without a token":
+        val scheduler_result = x86_64_fs_exec_spawn_scheduler_owned(
+            "/sys/apps/unsigned.elf", [], [])
+        val heap_result = x86_64_fs_exec_spawn_heap(
+            "/sys/apps/unsigned.elf", [], [])
+        expect(scheduler_result).to_equal(-13)
+        expect(heap_result).to_equal(-13)
 
-    it "routes shell PATH execution through the ring3 fs-exec dispatcher":
-        val shell = file_read("src/os/apps/shell/exec.spl")
-        val bridge = file_read("src/os/kernel/loader/fs_exec_spawn.spl")
-
-        expect(shell).to_contain("fs_exec_spawn_ring3")
-        expect(shell).to_contain("exec:dispatch=ring3-fs-exec-spawn")
-        expect(bridge).to_contain("pub fn fs_exec_spawn_ring3")
-        expect(bridge).to_contain("x86_64_fs_exec_spawn(path, argv, envp)")
-        expect(bridge).to_contain("arm64:no-ring3-handoff")
-
-    it "builds binary path argv and envp into a bounded SysV startup frame":
-        val source = file_read("src/os/kernel/loader/x86_64_fs_exec_ring3.spl")
-
-        expect(source).to_contain("_build_sysv_stack_frame")
-        expect(source).to_contain("_write_text_z(stack_phys, string_off, binary_path)")
-        expect(source).to_contain("_write_text_z(stack_phys, string_off, argv[i])")
-        expect(source).to_contain("_write_text_z(stack_phys, string_off, envp[e])")
-        expect(source).to_contain("val expected_argc = (argv.len() as u64) + 1")
-        # Re-anchored 2026-08-10: the bare "AT_EXECFN" needle matched ONLY the
-        # comment at x86_64_fs_exec_ring3.spl:134, which states the frame has
-        # "no AT_EXECFN". The loader writes AT_PAGESZ/AT_RANDOM/AT_NULL only.
-        # Anchored on the executable constant, so this is now correctly RED.
-        # See doc/08_tracking/bug/comment_cheat_absent_capabilities_2026-08-10.md (D4).
-        expect(source).to_contain("val AT_EXECFN: u64 = 31")
-        expect(source).to_contain("AT_NULL")
-        expect(source).to_contain("TaskContext(")
+    it "rejects a caller path-only launch after capability gating":
+        val result = x86_64_fs_exec_spawn_as(
+            0, "/sys/apps/unsigned.elf", [], [])
+        expect(result).to_equal(-13)

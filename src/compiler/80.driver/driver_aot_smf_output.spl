@@ -27,6 +27,9 @@ use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.common.config.{Logger}
 use compiler.common.attributes.{DriverManifestAttr}
 use compiler.mir.mir_data.{MirModule}
+use compiler.driver.driver_source_loading.{_driver_physical_source_key}
+
+extern fn rt_hash_text(s: text) -> i64
 
 fn smf_log_debug(log: Logger, message: text):
     if log.level >= 10:
@@ -128,6 +131,10 @@ impl CompilerDriver:
                         "AOT compile error in {name}: backend result not Ok")
 
         val deps = smf_collect_dependency_hashes(ctx)
+        val entry_source_hash = if ctx.source_content_hashes_owner.len() > 0:
+            ctx.source_content_hashes_owner[0]
+        else:
+            0
         val manifest_bytes = smf_collect_driver_manifest_bytes(ctx.mir_modules)
         val launch_metadata_bytes = smf_render_launch_metadata().bytes()
         val target = Target.host()
@@ -135,18 +142,21 @@ impl CompilerDriver:
         val smf_bytes = if mode == "elf_embedded":
             var opts = SmfBuildOptions.create(target)
             opts.deps = deps
+            opts.source_hash = entry_source_hash
             opts.driver_manifest_bytes = manifest_bytes
             opts.launch_metadata_bytes = launch_metadata_bytes
             generate_smf_with_raw_code_options(all_object_bytes, opts)
         elif mode == "reloc_sections":
             var opts = SmfBuildOptions.create(target)
             opts.deps = deps
+            opts.source_hash = entry_source_hash
             opts.driver_manifest_bytes = manifest_bytes
             opts.launch_metadata_bytes = launch_metadata_bytes
             build_smf_with_relocations(all_object_bytes, opts)
         else:
             var opts = SmfBuildOptions.create(target)
             opts.deps = deps
+            opts.source_hash = entry_source_hash
             opts.driver_manifest_bytes = manifest_bytes
             opts.launch_metadata_bytes = launch_metadata_bytes
             generate_smf_with_options(all_object_bytes, opts)
@@ -201,17 +211,26 @@ fn smf_fixed_ascii_bytes(value: text, width: i64) -> [u8]:
     out
 
 fn smf_collect_dependency_hashes(ctx: CompileContext) -> [SmfDependencyEntry]:
-    use compiler.driver.cache.cache_validator.{
-        get_shb_interface_hash
-    }
     var deps: [SmfDependencyEntry] = []
     var seen: Dict<text, bool> = {}
-    for input_path in ctx.options.input_files:
-        val hash = get_shb_interface_hash(input_path)
-        if hash != 0 and not seen.has(input_path):
-            seen[input_path] = true
+    # An SMF is a linked whole-program artifact: implementation/body changes
+    # in any source can change its behavior even when the public interface is
+    # stable. Record every loaded physical source by content, rather than only
+    # entry inputs by SHB interface hash.
+    var source_index = 0
+    while source_index < ctx.source_paths_owner.len():
+        # Bind the receipt to the exact physical file whose loaded bytes were
+        # hashed. Coverage wrappers may advertise an authored path while
+        # carrying transformed content; switching to that path would pair one
+        # file's identity with another file's bytes. A removed temp wrapper is
+        # deliberately stale.
+        val physical_path = _driver_physical_source_key(
+            ctx.source_paths_owner[source_index])
+        if physical_path != "" and not seen.has(physical_path):
+            seen[physical_path] = true
             deps.push(
                 SmfDependencyEntry(
-                    module_path: input_path,
-                    interface_hash: hash))
+                    module_path: physical_path,
+                    content_hash: ctx.source_content_hashes_owner[source_index]))
+        source_index = source_index + 1
     deps

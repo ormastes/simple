@@ -1,0 +1,200 @@
+## Target payload admission, copying, and immutable installer payload renderers.
+
+use os.tools.pkg.pkg_format.{PkgArch, pkg_arch_to_text}
+use os.kernel.arch.arch_context.{Architecture}
+use os.installer.image_package_payload_policy.{
+    IMAGE_MAX_NATIVE_PAYLOAD_BYTES_V1, image_native_executable_payload_admitted_v1,
+}
+use os.installer.image_bounded_file_reader.{
+    IMAGE_MAX_BUILD_STAMP_BYTES_V1, image_read_file_bounded_v1,
+    image_read_text_bounded_v1,
+}
+use std.common.crypto.sha256.{sha256_u8_hex}
+
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+extern fn rt_env_get(key: text) -> text?
+extern fn rt_file_exists(path: text) -> bool
+
+val IMAGE_SIMPLE_TOOLCHAIN_ROLE_PATHS: [text] = [
+    "/bin/simple", "/bin/simple.smf", "/usr/bin/simple", "/usr/bin/simple.smf",
+    "/sys/apps/simple", "/sys/apps/simple.smf",
+    "/sys/apps/simple_compiler", "/sys/apps/simple_compiler.smf",
+    "/sys/apps/simple_interpreter", "/sys/apps/simple_interpreter.smf",
+    "/sys/apps/simple_loader", "/sys/apps/simple_loader.smf",
+]
+val IMAGE_CLANG_GUEST_BIN_PATHS: [text] = ["/usr/bin/clang", "/sys/apps/clang"]
+val IMAGE_RUSTC_GUEST_BIN_PATHS: [text] = ["/usr/bin/rustc", "/sys/apps/rust"]
+val _CLANG_CANDIDATES = ["build/os/clang_static/bin/clang_static", "build/os/clang_static/bin/clang"]
+val _RUSTC_CANDIDATES = ["build/os/rust_static/bin/rustc_static", "build/os/rustc_static/bin/rustc_static"]
+
+fn image_target_architecture(arch: PkgArch) -> Architecture:
+    match arch:
+        PkgArch.X86_64: Architecture.X86_64
+        PkgArch.Arm64: Architecture.Arm64
+        PkgArch.Riscv64: Architecture.Riscv64
+        PkgArch.Riscv32: Architecture.Riscv32
+        PkgArch.Any: Architecture.X86_64
+
+fn image_effective_simple_binary(configured: text) -> text:
+    if configured != "": return configured
+    val env_path = rt_env_get("SIMPLEOS_SIMPLE_BINARY") ?? ""
+    if env_path != "": return env_path
+    val candidates = [
+        "build/bootstrap/stage3/simple_simpleos",
+        "bin/release/x86_64-unknown-simpleos/simple",
+        "bin/release/x86_64-simpleos/simple",
+    ]
+    for candidate in candidates:
+        if rt_file_exists(candidate) and rt_file_exists("{candidate}.build_stamp"):
+            return candidate
+    ""
+
+fn _image_stamp_field_v1(stamp: text, key: text) -> Result<text, text>:
+    val prefix = "{key}="
+    var found = ""
+    var count: i64 = 0
+    for line in stamp.split("\n"):
+        if line.starts_with(prefix):
+            count = count + 1
+            found = line.slice(prefix.len(), line.len())
+    if count != 1 or found == "" or found.contains("\r") or found.contains("\0"):
+        return Err("SimpleOS Simple payload build stamp has invalid {key}")
+    Ok(found)
+
+fn _image_lower_sha256_v1(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    var nonzero = false
+    for ch in value:
+        if not ((ch >= '0' and ch <= '9') or (ch >= 'a' and ch <= 'f')):
+            return false
+        if ch != '0':
+            nonzero = true
+    nonzero
+
+fn image_load_validated_simple_binary(path: text, arch: PkgArch) -> Result<[u8], text>:
+    if not rt_file_exists(path): return Err("SimpleOS Simple payload is missing: {path}")
+    val stamp_path = "{path}.build_stamp"
+    if not rt_file_exists(stamp_path): return Err("SimpleOS Simple payload lacks target provenance: {stamp_path}")
+    val target = match arch:
+        PkgArch.X86_64: "x86_64-unknown-simpleos"
+        PkgArch.Arm64: "aarch64-unknown-simpleos"
+        PkgArch.Riscv64: "riscv64gc-unknown-simpleos"
+        PkgArch.Riscv32: "riscv32-unknown-simpleos"
+        PkgArch.Any: "x86_64-unknown-simpleos"
+    val stamp = image_read_text_bounded_v1(
+        stamp_path, IMAGE_MAX_BUILD_STAMP_BYTES_V1,
+        "SimpleOS Simple payload build stamp")?
+    if _image_stamp_field_v1(stamp, "target")? != target:
+        return Err("SimpleOS Simple payload target mismatch: expected {target}")
+    if _image_stamp_field_v1(stamp, "entry")? != "src/app/simpleos_tool/main.spl" or
+       _image_stamp_field_v1(stamp, "entry_closure")? != "true":
+        return Err("SimpleOS Simple payload is not the focused compiler/interpreter/loader entry closure")
+    val compiler = _image_stamp_field_v1(stamp, "compiler")?
+    if compiler.contains("compiler_rust") or compiler.contains("simple_seed") or
+       compiler.contains("/target/bootstrap/"):
+        return Err("SimpleOS Simple payload was built by the bootstrap seed, not the self-hosted compiler: {stamp_path}")
+    val backend = _image_stamp_field_v1(stamp, "backend")?
+    if backend != "llvm" and backend != "cranelift":
+        return Err("SimpleOS Simple payload build stamp has no valid backend (want llvm or cranelift): {stamp_path}")
+    val payload = image_read_file_bounded_v1(
+        path, IMAGE_MAX_NATIVE_PAYLOAD_BYTES_V1, "SimpleOS Simple payload")?
+    val expected_digest = _image_stamp_field_v1(stamp, "artifact_sha256")?
+    if not _image_lower_sha256_v1(expected_digest):
+        return Err("SimpleOS Simple payload build stamp artifact_sha256 is invalid")
+    if sha256_u8_hex(payload) != expected_digest:
+        return Err("SimpleOS Simple payload SHA-256 does not match its build receipt")
+    if not image_native_executable_payload_admitted_v1(
+        payload, image_target_architecture(arch)):
+        return Err("SimpleOS Simple payload executable structure or architecture is invalid")
+    Ok(payload)
+
+fn image_validate_simple_binary(path: text, arch: PkgArch) -> Result<bool, text>:
+    image_load_validated_simple_binary(path, arch)?
+    Ok(true)
+
+fn image_effective_clang_binary() -> text:
+    val env_path = rt_env_get("SIMPLEOS_CLANG_BINARY") ?? ""
+    if env_path != "": return env_path
+    for candidate in _CLANG_CANDIDATES:
+        if rt_file_exists(candidate): return candidate
+    ""
+
+fn image_effective_rustc_binary() -> text:
+    val env_path = rt_env_get("SIMPLEOS_RUSTC_BINARY") ?? ""
+    if env_path != "": return env_path
+    for candidate in _RUSTC_CANDIDATES:
+        if rt_file_exists(candidate): return candidate
+    ""
+
+fn image_effective_sysroot_dir() -> text:
+    val env_path = rt_env_get("SIMPLEOS_SYSROOT") ?? ""
+    if env_path != "": env_path else: "build/os/sysroot"
+
+fn image_copy_tree(src: text, dst: text) -> bool:
+    val (_out, _err, code) = rt_process_run_timeout("/bin/cp", ["-a", "--", "{src}/.", "{dst}/"], 180000)
+    code == 0
+
+fn image_simple_toolchain_manifest(simple_binary: text) -> text:
+    var out = "[simple_toolchain]\nstatus = \"embedded\"\nhost_payload = \"{simple_binary}\"\n"
+    out = out + "build_stamp = \"{simple_binary}.build_stamp\"\nruntime_source = \"simpleos-filesystem\"\n"
+    for path in IMAGE_SIMPLE_TOOLCHAIN_ROLE_PATHS: out = out + "role = \"{path}\"\n"
+    out
+
+fn image_clang_fixture_payload() -> text:
+    "[clang_toolchain]\nstatus = \"fixture: clang_static not built\"\nexpected_binary = \"build/os/clang_static/bin/clang_static\"\nexpected_sysroot = \"build/os/sysroot\"\nnote = \"build clang_static + sysroot, then re-run to embed the real toolchain\"\n"
+
+fn image_clang_embedded_payload(binary: text, sysroot: text, embedded: bool) -> text:
+    var out = "[clang_toolchain]\nstatus = \"embedded\"\nhost_payload = \"{binary}\"\n"
+    out = out + "target_triple = \"x86_64-unknown-simpleos\"\nsysroot_source = \"{sysroot}\"\n"
+    out = out + "sysroot_embedded = {embedded}\nlib_dir = \"/usr/lib\"\nsysroot_dir = \"/usr/share/simpleos\"\n"
+    for path in IMAGE_CLANG_GUEST_BIN_PATHS: out = out + "role = \"{path}\"\n"
+    out
+
+fn image_rust_fixture_payload() -> text:
+    "[rust_toolchain]\nstatus = \"fixture: rustc_static not built\"\nexpected_binary = \"build/os/rust_static/bin/rustc_static\"\nnote = \"build rustc_static, then re-run to embed the real toolchain\"\n"
+
+fn image_rust_embedded_payload(binary: text) -> text:
+    var out = "[rust_toolchain]\nstatus = \"embedded\"\nhost_payload = \"{binary}\"\ntarget_triple = \"x86_64-unknown-simpleos\"\n"
+    for path in IMAGE_RUSTC_GUEST_BIN_PATHS: out = out + "role = \"{path}\"\n"
+    out
+
+fn image_fstab_payload() -> text:
+    "# SimpleOS filesystem table\n/dev/root / auto defaults 0 1\n/dev/efi /boot/efi fat32 defaults 0 2\n"
+
+fn image_normalized_rootfs_backend(value: text) -> text:
+    if value == "dbfs": return "dbfs"
+    if value == "nvfs": return "nvfs"
+    "fat32"
+
+fn image_rootfs_backend_payload(value: text) -> text:
+    val backend = image_normalized_rootfs_backend(value)
+    "[rootfs]\nbackend = \"{backend}\"\ncarrier = \"fat32\"\nboot_mode = \"fat32-carrier\"\n"
+
+fn image_rootfs_boot_marker(value: text) -> text:
+    val backend = image_normalized_rootfs_backend(value)
+    "rootfs_backend={backend}\nrootfs_carrier=fat32\nrootfs_boot_mode=fat32-carrier\n"
+
+fn image_rc_conf_payload(screen_type: text, screen_res: text, screen_simd: text) -> text:
+    var out = "hostname=\"simpleos\"\nsshd_enable=\"NO\"\nsimpleos_desktop=\"YES\"\n"
+    if screen_type != "": out = out + "screen_type=\"{screen_type}\"\n"
+    if screen_res != "": out = out + "screen_res=\"{screen_res}\"\n"
+    if screen_simd != "": out = out + "screen_simd=\"{screen_simd}\"\n"
+    out
+
+fn image_default_bootloader_config(arch: PkgArch) -> text:
+    "# Limine bootloader config\nTIMEOUT=5\n\n:SimpleOS\n  PROTOCOL=limine\n  KERNEL_PATH=boot:///kernel.elf\n  CMDLINE=console=serial root=/dev/sda2 arch={pkg_arch_to_text(arch)}\n"
+
+fn image_installer_bootloader_config(arch: PkgArch) -> text:
+    "TIMEOUT=5\n\n:SimpleOS Installer\n  PROTOCOL=limine\n  KERNEL_PATH=boot:///kernel.elf\n  CMDLINE=console=serial installer=1 root=/dev/sda2 arch={pkg_arch_to_text(arch)}\n\n:SimpleOS (Live)\n  PROTOCOL=limine\n  KERNEL_PATH=boot:///kernel.elf\n  CMDLINE=console=serial live=1 arch={pkg_arch_to_text(arch)}\n"
+
+export IMAGE_SIMPLE_TOOLCHAIN_ROLE_PATHS, IMAGE_CLANG_GUEST_BIN_PATHS, IMAGE_RUSTC_GUEST_BIN_PATHS
+export image_target_architecture, image_effective_simple_binary
+export image_load_validated_simple_binary, image_validate_simple_binary
+export image_effective_clang_binary, image_effective_rustc_binary, image_effective_sysroot_dir
+export image_copy_tree, image_simple_toolchain_manifest
+export image_clang_fixture_payload, image_clang_embedded_payload
+export image_rust_fixture_payload, image_rust_embedded_payload
+export image_fstab_payload, image_normalized_rootfs_backend, image_rootfs_backend_payload
+export image_rootfs_boot_marker, image_rc_conf_payload
+export image_default_bootloader_config, image_installer_bootloader_config

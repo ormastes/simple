@@ -189,6 +189,7 @@ pub(crate) use interpreter_types::get_type_name;
 // Core module evaluation logic
 #[path = "../interpreter_eval.rs"]
 mod interpreter_eval;
+pub use interpreter_eval::PRELUDE_UNSHADOWABLE;
 
 #[path = "../interpreter_method/mod.rs"]
 mod interpreter_method;

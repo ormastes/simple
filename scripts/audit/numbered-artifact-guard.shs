@@ -10,7 +10,7 @@ BASE_REF=""
 
 usage() {
     cat <<'EOF'
-Usage: sh scripts/audit/numbered-artifact-guard.shs [--working|--staged|--all|--changed-from <ref>|--self-test]
+Usage: sh scripts/audit/numbered-artifact-guard.shs [--working|--staged|--all|--changed-from <ref>|--self-test|--selftest]
 
 Blocks newly added or renamed files that look like LLM-created numbered copies:
 foo_1.spl, foo-2.spl, foo_part1.md, foo.v2.md, foo_ver1.md, foo_version1.md.
@@ -23,7 +23,7 @@ if [ "$#" -gt 0 ]; then
 fi
 
 case "$MODE" in
-        --working|--staged|--all|--self-test) ;;
+        --working|--staged|--all|--self-test|--selftest) ;;
     --changed-from)
         [ "$#" -ge 1 ] || { usage >&2; exit 2; }
         BASE_REF="$1"
@@ -42,6 +42,13 @@ is_in_scope() {
     case "$1" in
         src/*|test/*|doc/*|.claude/*|.codex/*|.agents/*|scripts/*) ;;
         *) return 1 ;;
+    esac
+    # Nested agent worktree copies (.claude/worktrees/, .claude/worktrees.*_backup/)
+    # are checkouts of this repo, not artifacts of it: their own guard run owns them.
+    case "$1" in
+        .claude/worktrees/*|.claude/worktrees.*/*)
+            return 1
+            ;;
     esac
     case "$1" in
         src/compiler_rust/vendor/*|src/runtime/vendor/*|src/compiler_rust/target*|build/*|target/*|tools/tauri-shell/src-tauri/gen/*|src/app/vscode_extension/node_modules/*|src/app/vscode_extension/.vscode-test/*|doc/09_report/misc/*)
@@ -125,14 +132,36 @@ self_test() {
         src/compiler/10.frontend/parser.spl \
         test/fixtures/svllm/valid_pack/data-000.bin \
         test/fixtures/svllm/cross_chunk_pack/data-001.bin \
-        test/09_baselines/famous_site_corpus/glyph_atlas/arial16_lcd_v1.bin
+        test/09_baselines/famous_site_corpus/glyph_atlas/arial16_lcd_v1.bin \
+        .claude/worktrees/agent-abc/src/app/foo_1.spl \
+        .claude/worktrees.pre_migrate_backup/agent-abc/doc/05_design/foo_v2.md
     do
         if classify_path "$path" >/dev/null; then
             echo "self-test negative failed: $path" >&2
             exit 1
         fi
     done
-    echo "STATUS: PASS numbered-artifact-guard self-test"
+
+    # The streaming awk classifier must agree with classify_path on the same paths.
+    for path in \
+        src/app/foo_1.spl \
+        doc/05_design/foo_part1.md
+    do
+        if [ -z "$(printf '%s\n' "$path" | classify_paths_stream)" ]; then
+            echo "self-test stream positive failed: $path" >&2
+            exit 1
+        fi
+    done
+    for path in \
+        src/app/foo_parser.spl \
+        .claude/worktrees/agent-abc/src/app/foo_1.spl \
+        .claude/worktrees.pre_migrate_backup/agent-abc/doc/05_design/foo_v2.md
+    do
+        if [ -n "$(printf '%s\n' "$path" | classify_paths_stream)" ]; then
+            echo "self-test stream negative failed: $path" >&2
+            exit 1
+        fi
+    done
 }
 
 list_paths() {
@@ -174,6 +203,9 @@ classify_paths_stream() {
     awk '
         function in_scope(path) {
             if (path !~ /^(src|test|doc|\.claude|\.codex|\.agents|scripts)\//) {
+                return 0
+            }
+            if (path ~ /^\.claude\/worktrees(\.[^\/]*)?\//) {
                 return 0
             }
             if (path ~ /^(src\/compiler_rust\/vendor|src\/runtime\/vendor|src\/compiler_rust\/target|build|target|tools\/tauri-shell\/src-tauri\/gen|src\/app\/vscode_extension\/node_modules|src\/app\/vscode_extension\/\.vscode-test|doc\/09_report\/misc)(\/|$)/) {
@@ -237,19 +269,32 @@ classify_paths_stream() {
     '
 }
 
-if [ "$MODE" = "--self-test" ]; then
-    self_test
+# The self-test runs first on every invocation and is fatal.
+self_test
+echo "numbered-artifact-guard self-test: PASS"
+
+if [ "$MODE" = "--self-test" ] || [ "$MODE" = "--selftest" ]; then
+    echo "PASS — self-test only, classifier fixtures verified"
     exit 0
 fi
 
 tmp="${TMPDIR:-/tmp}/numbered-artifact-guard.$$"
-trap 'rm -f "$tmp"' EXIT
+paths="${TMPDIR:-/tmp}/numbered-artifact-guard.paths.$$"
+trap 'rm -f "$tmp" "$paths"' EXIT
 : > "$tmp"
 
-list_paths | classify_paths_stream > "$tmp"
+if ! list_paths > "$paths" 2>/dev/null; then
+    echo "ERROR — nothing was checked: could not enumerate paths for $MODE"
+    exit 2
+fi
+
+CHECKED="$(grep -c . "$paths" || true)"
+[ -n "$CHECKED" ] || CHECKED=0
+
+classify_paths_stream < "$paths" > "$tmp"
 
 if [ ! -s "$tmp" ]; then
-    echo "Numbered artifact guard: OK"
+    echo "PASS — $CHECKED path(s) classified in $MODE, 0 numbered artifacts"
     exit 0
 fi
 
@@ -260,4 +305,6 @@ done < "$tmp"
 echo
 echo "Rename the artifact to a meaningful domain/module name, or update the"
 echo "existing file instead of creating a numbered copy."
+FOUND="$(grep -c . "$tmp" || true)"
+echo "FAIL — $CHECKED path(s) classified in $MODE, $FOUND numbered artifact(s)"
 exit 1

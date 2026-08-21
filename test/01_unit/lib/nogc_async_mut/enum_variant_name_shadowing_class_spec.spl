@@ -1,0 +1,116 @@
+# @Feature G9: CLASS DETECTION -- an enum variant is never shadowed by a same-named global
+# @Description: Similar-problem detection spec for the defect CLASS behind
+# doc/08_tracking/bug/interpreter_cross_module_enum_discriminant_3_compares_false_2026-08-04.md
+#
+# The class is: "`EnumName.Variant` reached as FIELD ACCESS resolves `Variant`
+# by its BARE name against the global function/class tables before consulting
+# the receiver enum". Whenever a variant name happens to collide with any other
+# global of that name, the expression silently evaluates to the unrelated global
+# -- no error, no warning, just a value that compares equal to nothing.
+#
+# The filed instance was exactly one variant of exactly one enum
+# (`DType.Bool` vs the std `Bool` struct), and the doc mis-generalised it as a
+# "discriminant 3" defect. Re-testing DType would therefore not detect the class
+# at all. This spec instead constructs the collision deliberately, at several
+# variant POSITIONS and against several KINDS of colliding global, and asserts
+# the invariant directly: a variant literal must be an enum value of the
+# receiver enum, and must equal the same variant obtained by any other route.
+#
+# It also pins the two routes that DISAGREED under the defect -- `==` was wrong
+# while `match` was right -- so a future regression that fixes only one of them
+# is still caught.
+#
+# The same guard already exists for the CALL form (`EnumName.Variant(args)`) in
+# interpreter_method/mod.rs (`receiver_is_enum`, bug
+# hir_stmt_expr_payload_extraction_nil_2026-07-17.md). This spec covers the
+# payload-less FIELD-ACCESS form, which is the half that was missing.
+
+# --- Globals whose names deliberately collide with variant names below. ---
+struct Alpha:
+    n: i64
+
+struct Omega:
+    n: i64
+
+struct Middle:
+    n: i64
+
+fn Solo() -> i64:
+    -1
+
+# Every variant name here also names a global above, EXCEPT `Plain`, which is
+# the control: it can never be shadowed, so if it fails the cause is something
+# other than this defect.
+enum Shadowed:
+    Alpha
+    Plain
+    Middle
+    Solo
+    Omega
+
+struct Holder:
+    tag: Shadowed
+
+fn wrap(t: Shadowed) -> Holder:
+    Holder(tag: t)
+
+describe "enum variants are not shadowed by same-named globals":
+
+    it "control: a non-colliding variant round-trips through a struct field":
+        expect(wrap(Shadowed.Plain).tag == Shadowed.Plain).to_equal(true)
+
+    it "FIRST variant position colliding with a struct":
+        expect(wrap(Shadowed.Alpha).tag == Shadowed.Alpha).to_equal(true)
+
+    it "MIDDLE variant position colliding with a struct":
+        expect(wrap(Shadowed.Middle).tag == Shadowed.Middle).to_equal(true)
+
+    it "LAST variant position colliding with a struct":
+        # Position matters to this spec because the filed instance happened to
+        # be the last variant, which is what made it look like a discriminant
+        # defect. If only this one failed, position -- not collision -- would be
+        # the axis.
+        expect(wrap(Shadowed.Omega).tag == Shadowed.Omega).to_equal(true)
+
+    it "a variant colliding with a FUNCTION, not a struct":
+        # The bare-name fallback tries `functions` BEFORE `classes`, so a
+        # function collision is a distinct path to the same wrong answer.
+        expect(wrap(Shadowed.Solo).tag == Shadowed.Solo).to_equal(true)
+
+    it "a colliding variant literal is not equal to a different variant":
+        # Guards the degenerate 'fix' where every comparison returns true.
+        expect(Shadowed.Alpha == Shadowed.Omega).to_equal(false)
+        expect(wrap(Shadowed.Alpha).tag == Shadowed.Omega).to_equal(false)
+        expect(wrap(Shadowed.Omega).tag == Shadowed.Alpha).to_equal(false)
+
+    it "the colliding global itself is still reachable and unchanged":
+        # The fix must not steal the plain name: `Alpha` alone is still the
+        # struct, only `Shadowed.Alpha` is the variant.
+        expect(Alpha(n: 5).n).to_equal(5)
+        expect(Solo()).to_equal(-1)
+
+    it "== agrees with match for every colliding variant":
+        # These two routes disagreed under the defect: patterns resolved the
+        # variant correctly while `==` silently compared against a constructor.
+        # Any future regression that repairs only one route is caught here.
+        var agreed = true
+        val cases = [Shadowed.Alpha, Shadowed.Plain, Shadowed.Middle, Shadowed.Solo, Shadowed.Omega]
+        var i = 0
+        while i < cases.len():
+            val held = wrap(cases[i]).tag
+            var by_match = false
+            match held:
+                case Shadowed.Alpha:
+                    by_match = (cases[i] == Shadowed.Alpha)
+                case Shadowed.Plain:
+                    by_match = (cases[i] == Shadowed.Plain)
+                case Shadowed.Middle:
+                    by_match = (cases[i] == Shadowed.Middle)
+                case Shadowed.Solo:
+                    by_match = (cases[i] == Shadowed.Solo)
+                case Shadowed.Omega:
+                    by_match = (cases[i] == Shadowed.Omega)
+            if not by_match:
+                agreed = false
+            i = i + 1
+        expect(agreed).to_equal(true)

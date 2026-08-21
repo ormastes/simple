@@ -6,40 +6,12 @@
 use os.apps.sshd.ssh_session.{SshSession, SshSessionState}
 use os.apps.sshd.ssh_hex.{format_hex, format_hex_width}
 use os.apps.sshd.ssh_transport.{SSH_DISCONNECT_PROTOCOL_ERROR, ssh_build_service_accept, ssh_build_disconnect}
-use os.apps.sshd.ssh_auth.{SshUserDb, MAX_AUTH_ATTEMPTS, ssh_build_auth_success}
+use os.apps.sshd.ssh_auth.{SshUserDb, MAX_AUTH_ATTEMPTS, ssh_parse_auth_request, ssh_check_public_key_auth, ssh_build_auth_success, ssh_build_userauth_pk_ok}
 use os.apps.sshd.ssh_packet.{ssh_ascii_text_to_bytes}
-use os.apps.sshd.ssh_session_helpers.{_u8_at, _bytes_to_hex, _read_text_field_fast, _payload_field_is_ssh_connection, _payload_field_is_none, _payload_field_is_password, _password_only_auth_failure_payload, _is_ssh_userauth_service_request}
+use os.apps.sshd.ssh_session_helpers.{_u8_at, _bytes_to_hex, _read_text_field_fast, _payload_field_is_ssh_connection, _payload_field_is_none, _payload_field_is_password, _payload_field_is_publickey, _publickey_only_auth_failure_payload, _is_ssh_userauth_service_request}
 use os.kernel.log.klog_api.{log_info}
 
 extern fn serial_println(msg: text)
-
-fn _payload_field_is_root(payload: [u8], field_offset: u64) -> bool:
-    if field_offset + 8 > payload.len():
-        return false
-    _u8_at(payload, field_offset) == 0 and
-        _u8_at(payload, field_offset + 1) == 0 and
-        _u8_at(payload, field_offset + 2) == 0 and
-        _u8_at(payload, field_offset + 3) == 4 and
-        _u8_at(payload, field_offset + 4) == 0x72 and
-        _u8_at(payload, field_offset + 5) == 0x6F and
-        _u8_at(payload, field_offset + 6) == 0x6F and
-        _u8_at(payload, field_offset + 7) == 0x74
-
-fn _payload_field_is_simpleos(payload: [u8], field_offset: u64) -> bool:
-    """Constant-time match of the length-prefixed secret root password.
-    The length guard uses only the non-secret payload length; all 12 field
-    bytes are always visited (diff accumulation, no short-circuit) so the
-    match time does not reveal how many password bytes were correct
-    (plan A3 timing-side-channel hardening)."""
-    if field_offset + 12 > payload.len():
-        return false
-    val expected: [u8] = [0, 0, 0, 8, 0x73, 0x69, 0x6D, 0x70, 0x6C, 0x65, 0x6F, 0x73]
-    var diff: u8 = 0
-    var i: u64 = 0
-    while i < 12:
-        diff = diff | (_u8_at(payload, field_offset + i) ^ expected[i])
-        i = i + 1
-    diff == 0
 
 fn _ct_bytes_equal(a: [u8], b: [u8]) -> bool:
     """Constant-time byte comparison. Length mismatch returns false early
@@ -53,20 +25,6 @@ fn _ct_bytes_equal(a: [u8], b: [u8]) -> bool:
         diff = diff | (a[i] ^ b[i])
         i = i + 1
     diff == 0
-
-fn _payload_is_live_root_none_auth(payload: [u8]) -> bool:
-    payload.len() >= 35 and
-        _u8_at(payload, 0) == 50 and
-        _payload_field_is_root(payload, 1) and
-        _payload_field_is_ssh_connection(payload, 9) and
-        _payload_field_is_none(payload, 27)
-
-fn _payload_is_live_root_password_auth(payload: [u8]) -> bool:
-    payload.len() >= 52 and
-        _u8_at(payload, 0) == 50 and
-        _payload_field_is_root(payload, 1) and
-        _payload_field_is_ssh_connection(payload, 9) and
-        _payload_field_is_password(payload, 27)
 
 impl SshSession:
 
@@ -119,29 +77,6 @@ impl SshSession:
                 self.state = SshSessionState.Closed
                 return false
 
-            if _payload_is_live_root_none_auth(payload):
-                serial_println("[sshd-session] auth none fail branch")
-                val fail = _password_only_auth_failure_payload()
-                self.send_packet(fail)
-                continue
-
-            if _payload_is_live_root_password_auth(payload):
-                # method field starts at 27 and has length 8; the password
-                # change-request boolean is byte 39, followed by the password string.
-                if _payload_field_is_simpleos(payload, 40):
-                    self.authenticated_user = "root"
-                    val success = ssh_build_auth_success()
-                    self.send_packet(success)
-                    serial_println("[sshd-session] auth ok user=root method=password")
-                    log_info("[app.sshd] " + "[sshd-session] auth ok")
-                    self.state = SshSessionState.Interactive
-                    return true
-                attempts = attempts + 1
-                val fail = _password_only_auth_failure_payload()
-                serial_println("[sshd-session] auth password fail branch")
-                self.send_packet(fail)
-                continue
-
             val auth_msg_type = _u8_at(payload, 0)
             if auth_msg_type == 7 or auth_msg_type == 2 or auth_msg_type == 4:
                 serial_println("[sshd-session] auth skip type=0x{format_hex_width(auth_msg_type.to_u64(), 2)}")
@@ -184,47 +119,41 @@ impl SshSession:
 
             if _payload_field_is_none(payload, service.next_offset):
                 serial_println("[sshd-session] auth none fail branch")
-                val fail = _password_only_auth_failure_payload()
+                val fail = _publickey_only_auth_failure_payload()
                 self.send_packet(fail)
 
             elif _payload_field_is_password(payload, service.next_offset):
-                # Bounds-check before arithmetic: ensure at least 13 bytes
-                # remain (4 bool-flag prefix + 8 reserved + 1 byte step-in)
-                # before advancing the offset.
-                if service.next_offset + 13 > payload.len():
-                    attempts = attempts + 1
-                    val disc = ssh_build_disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "bad auth service")
-                    self.send_packet(disc)
-                    self.state = SshSessionState.Closed
-                    return false
-                var off = service.next_offset + 4 + 8 + 1
-                val r_password = _read_text_field_fast(payload, off)
-                val password = match r_password:
-                    Ok(parsed_password):
-                        parsed_password.value
-                    Err(_):
+                # Password auth is disabled: do not copy the secret field into
+                # an immutable text value while zeroization is unavailable.
+                attempts = attempts + 1
+                val fail = _publickey_only_auth_failure_payload()
+                serial_println("[sshd-session] auth password disabled")
+                self.send_packet(fail)
+
+            elif _payload_field_is_publickey(payload, service.next_offset):
+                val parsed = ssh_parse_auth_request(payload)
+                match parsed:
+                    case Err(_):
                         attempts = attempts + 1
-                        val disc = ssh_build_disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "bad auth service")
-                        self.send_packet(disc)
-                        self.state = SshSessionState.Closed
-                        return false
-                if self.user_db.authenticate_password(user.value, password):
-                    self.authenticated_user = user.value
-                    val success = ssh_build_auth_success()
-                    self.send_packet(success)
-                    serial_println("[sshd-session] auth ok user={user.value} method=password")
-                    log_info("[app.sshd] " + "[sshd-session] auth ok")
-                    self.state = SshSessionState.Interactive
-                    return true
-                else:
-                    attempts = attempts + 1
-                    val fail = _password_only_auth_failure_payload()
-                    serial_println("[sshd-session] auth password fail branch")
-                    self.send_packet(fail)
+                        self.send_packet(_publickey_only_auth_failure_payload())
+                    case Ok(request):
+                        val check = ssh_check_public_key_auth(
+                            request, self.session_id, self.user_db)
+                        if check.probe_accepted:
+                            self.send_packet(ssh_build_userauth_pk_ok(
+                                check.algorithm, check.key_blob))
+                        elif check.valid:
+                            self.authenticated_user = request.username
+                            self.send_packet(ssh_build_auth_success())
+                            self.state = SshSessionState.Interactive
+                            return true
+                        else:
+                            attempts = attempts + 1
+                            self.send_packet(_publickey_only_auth_failure_payload())
 
             else:
                 attempts = attempts + 1
-                val fail = _password_only_auth_failure_payload()
+                val fail = _publickey_only_auth_failure_payload()
                 serial_println("[sshd-session] auth unsupported fail branch")
                 self.send_packet(fail)
 
@@ -234,4 +163,4 @@ impl SshSession:
 
 # Exported for constant-time-compare unit coverage (plan A3). These are pure
 # comparison helpers with no session/socket state.
-export _ct_bytes_equal, _payload_field_is_simpleos
+export _ct_bytes_equal

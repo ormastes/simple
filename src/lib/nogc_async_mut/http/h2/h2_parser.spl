@@ -4,28 +4,43 @@
 #
 # Scope (W15-F):
 #   - All 10 frame types from §6.1-§6.10
-#   - Returns nil on malformed length / size errors / unknown frame types
-#     (state machine is W16+; parser is purely stateless on bytes-in -> frame-out)
+#   - Typed bounded entry point distinguishes incomplete, rejected, and
+#     ignorable extension frames; compatibility entry returns nil otherwise
 #   - PADDED flag handling deferred — when set, parser returns nil (avoids
 #     silently truncating padding-prefixed payloads).
 #
 # Out of scope (W16+):
 #   - HPACK decode — header_block stays opaque
 #   - Connection state machine, stream lifecycle, flow control accounting
-#   - SETTINGS_MAX_FRAME_SIZE enforcement (parser will accept any length that
-#     fits in the 24-bit header field; larger framing-layer policy is connection
-#     state machine territory)
+#   - Dynamic peer max-frame policy above the caller-provided parser bound
 
 use std.http.h2.h2_frame.{
     H2Frame, H2DataFrame, H2HeadersFrame, H2PriorityFrame, H2RstStreamFrame,
     H2SettingsFrame, H2Setting, H2PushPromiseFrame, H2PingFrame,
     H2GoawayFrame, H2WindowUpdateFrame, H2ContinuationFrame,
-    H2_FRAME_HEADER_LEN,
+    H2_FRAME_HEADER_LEN, H2_DEFAULT_MAX_FRAME_SIZE,
     H2_FRAME_DATA, H2_FRAME_HEADERS, H2_FRAME_PRIORITY, H2_FRAME_RST_STREAM,
     H2_FRAME_SETTINGS, H2_FRAME_PUSH_PROMISE, H2_FRAME_PING, H2_FRAME_GOAWAY,
     H2_FRAME_WINDOW_UPDATE, H2_FRAME_CONTINUATION,
-    H2_FLAG_PADDED, H2_FLAG_PRIORITY
+    H2_FLAG_PADDED, H2_FLAG_PRIORITY,
+    H2_SETTINGS_ENABLE_PUSH, H2_SETTINGS_INITIAL_WINDOW_SIZE,
+    H2_SETTINGS_MAX_FRAME_SIZE
 }
+
+val H2_MAX_WINDOW_SIZE: i64 = 2147483647
+val H2_MAX_SETTINGS_PER_FRAME: i64 = 64
+
+class H2BoundedFrameOk:
+    """One admitted frame and its exact wire-byte consumption."""
+    frame: H2Frame
+    consumed: i64
+
+enum H2BoundedParseResult:
+    """Typed incremental parse outcome; malformed and incomplete are distinct."""
+    Complete(H2BoundedFrameOk)
+    Incomplete(required_bytes: i64)
+    Ignored(consumed: i64)
+    Rejected(reason: text)
 
 # ============================================================================
 # Big-endian decode helpers
@@ -73,10 +88,12 @@ class H2FrameHeader:
 
 # Parse 9-byte header at `offset`. Returns nil if `data` doesn't have 9 bytes
 # starting at `offset`.
-fn h2_parse_frame_header(data: [u8], offset: i64) -> H2FrameHeader?:
+pub fn h2_parse_frame_header(data: [u8], offset: i64) -> H2FrameHeader?:
     if offset < 0:
         return nil
-    if data.len() < offset + H2_FRAME_HEADER_LEN:
+    if offset > data.len():
+        return nil
+    if data.len() - offset < H2_FRAME_HEADER_LEN:
         return nil
     val length = _read_u24_be(data, offset)
     val frame_type = data[offset + 3]
@@ -174,6 +191,14 @@ fn _parse_settings(header: H2FrameHeader, payload: [u8]) -> H2Frame?:
             break
         val ident = _read_u16_be(payload, i)
         val value = _read_u32_be(payload, i + 2)
+        if settings.len() >= H2_MAX_SETTINGS_PER_FRAME:
+            return nil
+        if ident == H2_SETTINGS_ENABLE_PUSH and value != 0 and value != 1:
+            return nil
+        if ident == H2_SETTINGS_INITIAL_WINDOW_SIZE and value > H2_MAX_WINDOW_SIZE:
+            return nil
+        if ident == H2_SETTINGS_MAX_FRAME_SIZE and (value < 16384 or value > 16777215):
+            return nil
         settings.push(H2Setting(identifier: ident, value: value))
         i = i + 6
     return Some(H2Frame.Settings(H2SettingsFrame(
@@ -230,6 +255,8 @@ fn _parse_window_update(header: H2FrameHeader, payload: [u8]) -> H2Frame?:
         return nil
     val raw_inc = _read_u32_be(payload, 0)
     val inc = raw_inc & 0x7fffffff
+    if inc == 0:
+        return nil
     return Some(H2Frame.WindowUpdate(H2WindowUpdateFrame(
         stream_id: header.stream_id,
         increment: inc
@@ -248,42 +275,72 @@ fn _parse_continuation(header: H2FrameHeader, payload: [u8]) -> H2Frame?:
 # Public parser entry points
 # ============================================================================
 
-# Parse a single frame from `data` starting at `offset`. Returns nil on:
-#   - truncated buffer (less than 9 + length bytes available)
-#   - per-type validation failure (size, reserved-stream-id, etc.)
-#   - unknown frame type (RFC 9113 §4.1: implementations MUST ignore frames of
-#     unknown type; here we surface nil so the caller can decide. State-
-#     machine layer (W16+) will translate to "ignore + advance".)
-fn h2_parse_frame(data: [u8], offset: i64) -> H2Frame?:
+# Parse a single frame from `data` starting at `offset`, preserving the
+# distinction between incomplete input, malformed input, and ignorable
+# extension frames.
+pub fn h2_parse_frame_bounded(data: [u8], offset: i64, max_frame_size: i64) -> H2BoundedParseResult:
+    """Parse one frame with a caller-owned resource limit.
+
+    Unknown extension frames are returned as Ignored with their exact consumed
+    length, as RFC 9113 requires. Incomplete input reports the additional byte
+    count and never aliases malformed input.
+    """
     if offset < 0:
-        return nil
+        return H2BoundedParseResult.Rejected("negative offset")
+    if max_frame_size < 16384 or max_frame_size > 16777215:
+        return H2BoundedParseResult.Rejected("invalid max frame size")
+    if offset > data.len():
+        val gap = offset - data.len()
+        if gap > H2_MAX_WINDOW_SIZE:
+            return H2BoundedParseResult.Rejected("offset exceeds bounded parser domain")
+        return H2BoundedParseResult.Incomplete(gap + H2_FRAME_HEADER_LEN)
+    if data.len() - offset < H2_FRAME_HEADER_LEN:
+        return H2BoundedParseResult.Incomplete(H2_FRAME_HEADER_LEN - (data.len() - offset))
     val maybe_header = h2_parse_frame_header(data, offset)
     if maybe_header == nil:
-        return nil
+        return H2BoundedParseResult.Rejected("invalid frame header")
     val header = maybe_header ?? H2FrameHeader(length: 0, frame_type: 0, flags: 0, stream_id: 0)
+    if header.length > max_frame_size:
+        return H2BoundedParseResult.Rejected("frame payload exceeds configured bound")
     val payload_offset = offset + H2_FRAME_HEADER_LEN
-    if data.len() < payload_offset + header.length:
-        return nil   # Truncated payload.
+    if header.length > data.len() - payload_offset:
+        return H2BoundedParseResult.Incomplete(header.length - (data.len() - payload_offset))
+    val consumed = H2_FRAME_HEADER_LEN + header.length
+    if header.frame_type > H2_FRAME_CONTINUATION:
+        return H2BoundedParseResult.Ignored(consumed)
     val payload = _slice_bytes(data, payload_offset, header.length)
     val ft = header.frame_type
+    var parsed: H2Frame? = nil
     if ft == 0:
-        return _parse_data(header, payload)
+        parsed = _parse_data(header, payload)
     elif ft == 1:
-        return _parse_headers(header, payload)
+        parsed = _parse_headers(header, payload)
     elif ft == 2:
-        return _parse_priority(header, payload)
+        parsed = _parse_priority(header, payload)
     elif ft == 3:
-        return _parse_rst_stream(header, payload)
+        parsed = _parse_rst_stream(header, payload)
     elif ft == 4:
-        return _parse_settings(header, payload)
+        parsed = _parse_settings(header, payload)
     elif ft == 5:
-        return _parse_push_promise(header, payload)
+        parsed = _parse_push_promise(header, payload)
     elif ft == 6:
-        return _parse_ping(header, payload)
+        parsed = _parse_ping(header, payload)
     elif ft == 7:
-        return _parse_goaway(header, payload)
+        parsed = _parse_goaway(header, payload)
     elif ft == 8:
-        return _parse_window_update(header, payload)
+        parsed = _parse_window_update(header, payload)
     elif ft == 9:
-        return _parse_continuation(header, payload)
-    return nil
+        parsed = _parse_continuation(header, payload)
+    if parsed == nil:
+        return H2BoundedParseResult.Rejected("frame payload violates RFC 9113")
+    val admitted = parsed ?? H2Frame.Data(H2DataFrame(stream_id: 1, flags: 0, data: []))
+    H2BoundedParseResult.Complete(H2BoundedFrameOk(frame: admitted, consumed: consumed))
+
+pub fn h2_parse_frame(data: [u8], offset: i64) -> H2Frame?:
+    """Compatibility parser using the RFC default incoming frame-size cap."""
+    match h2_parse_frame_bounded(data, offset, H2_DEFAULT_MAX_FRAME_SIZE):
+        case Complete(ok): Some(ok.frame)
+        case _: nil
+
+export H2FrameHeader, H2BoundedFrameOk, H2BoundedParseResult
+export H2_MAX_WINDOW_SIZE, H2_MAX_SETTINGS_PER_FRAME

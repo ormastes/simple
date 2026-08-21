@@ -1,0 +1,262 @@
+# @req REQ-C-MIG-DUAL-RUN-SHADOW
+#
+# Goal 6 of the binary_runtime_hardening plan: "a framework that runs BOTH
+# the C and Simple implementations at runtime to check robustness" — Wave 4's
+# shadow mode. This spec exercises src/lib/common/spec/dual_run.spl's
+# dual_check_f64/dual_check_text helper across 13 already-migrated,
+# already-verified symbol-pairs from
+# doc/08_tracking/c_migration/c_migration_inventory.sdn (C-MIG-0031, 0032,
+# 0026, 0028, 0019 x6 [from_components/add_days/diff_days/get_year/
+# get_month/get_day], 0020 [rt_hash_text only — the sibling rt_str_hash is
+# not registered in the interpreter's extern dispatch table, deferred],
+# 0021, 0022). Pairs deliberately chosen OUTSIDE the contested/in-flux areas
+# under concurrent edit: path_pure.spl, text_ascii.spl, text_builder.spl,
+# math/special.spl, math/cbrt.spl, numeric_round.spl (beyond the two
+# pre-existing floor/ceil tests below), base_encoding/** (beyond
+# utilities.spl's UTF-8 validator, which is NOT in that concurrent-edit
+# list), gzip/**, string_core.spl are all avoided. See
+# doc/07_guide/infra/c_migration/dual_run_shadow.md for the full wired +
+# deferred pair list and "how to add a pair".
+#
+# HONEST LIMITATION: this dual-runs both sides only inside test specs. It is
+# NOT a production shadow that dual-runs on live traffic — see
+# doc/07_guide/infra/c_migration/dual_run_shadow.md.
+
+use std.spec.{describe, it, assert_true, assert_equal}
+use std.common.spec.dual_run.{dual_check_f64, dual_check_text}
+use std.common.numeric_round.{floor_f64, ceil_f64}
+use std.common.convert.{i64_to_text}
+use std.common.encoding.byte_char.{byte_char}
+use std.common.time_utils.{timestamp_from_components, timestamp_add_days,
+    timestamp_diff_days, timestamp_get_year, timestamp_get_month, timestamp_get_day}
+use std.hash.{rt_hash_text as simple_hash_text}
+use std.common.text.{parse_i64}
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear, base_encoding_text_to_bytes as text_to_bytes}
+
+# C/Rust oracles (test-only; never production-linked from Simple product code here).
+extern fn rt_math_floor(x: f64) -> f64
+extern fn rt_math_ceil(x: f64) -> f64
+extern fn rt_raw_i64_to_string(n: i64) -> text
+extern fn rt_byte_char(v: i64) -> text
+extern fn rt_timestamp_from_components(year: i32, month: i32, day: i32, hour: i32, minute: i32, second: i32, microsecond: i32) -> i64
+extern fn rt_timestamp_add_days(micros: i64, days: i64) -> i64
+extern fn rt_timestamp_diff_days(micros1: i64, micros2: i64) -> i64
+extern fn rt_timestamp_get_year(micros: i64) -> i32
+extern fn rt_timestamp_get_month(micros: i64) -> i32
+extern fn rt_timestamp_get_day(micros: i64) -> i32
+extern fn rt_hash_text(s: text) -> i64
+extern fn rt_string_to_int(s: text) -> i64
+extern fn rt_text_validate_utf8(s: text) -> bool
+
+fn simple_is_valid_utf8(s: text) -> bool:
+    match validated_utf8_bytes_to_text_linear(text_to_bytes(s)):
+        Ok(_decoded):
+            true
+        Err(_error):
+            false
+
+fn bool_text(b: bool) -> text:
+    if b: "true" else: "false"
+
+describe "dual_run shadow harness — C oracle vs Simple, 4 migrated pairs":
+    it "floor_f64 vs rt_math_floor agrees on representative + edge inputs":
+        # bit_exact: false here (plain `==`) -- matches the convention of
+        # the existing floor_f64 crosslang spec's assert_equal. Sign-of-zero
+        # on -0.0 differs between bin/simple test's tree-walk interpreter
+        # and bin/simple run's JIT for this pair (a real, already-known
+        # run-vs-test engine divergence class per .claude/rules/testing.md,
+        # not a floor_f64 defect); bit_exact:true would flag it, which is
+        # exactly what the sanity checks below demonstrate on purpose.
+        val xs = [3.0, 3.7, -3.1, 0.0, -0.0, 1.0e20, 0.0 - 1.0e20]
+        var i = 0
+        var checked = 0
+        while i < xs.len():
+            val x = xs[i]
+            val v = dual_check_f64("floor_f64", floor_f64(x), rt_math_floor(x), false)
+            assert_true(v.agree)
+            checked = checked + 1
+            i = i + 1
+        # NaN case: both-NaN must count as agreement, not divergence.
+        val big = 1.0e308
+        val pos_inf = big * 10.0
+        val nan_x = pos_inf - pos_inf
+        val nan_v = dual_check_f64("floor_f64_nan", floor_f64(nan_x), rt_math_floor(nan_x), false)
+        assert_true(nan_v.agree)
+        assert_equal(checked, 7)
+
+    it "ceil_f64 vs rt_math_ceil agrees on representative + edge inputs":
+        val xs = [3.0, 3.2, -3.1, 0.0, -0.5, 1.0e20, 0.0 - 1.0e20]
+        var i = 0
+        var checked = 0
+        while i < xs.len():
+            val x = xs[i]
+            val v = dual_check_f64("ceil_f64", ceil_f64(x), rt_math_ceil(x), false)
+            assert_true(v.agree)
+            checked = checked + 1
+            i = i + 1
+        assert_equal(checked, 7)
+
+    it "i64_to_text vs rt_raw_i64_to_string agrees on boundary + typical values":
+        val ns = [0, 1, -1, 42, -42, 9223372036854775807, -9223372036854775808]
+        var i = 0
+        var checked = 0
+        while i < ns.len():
+            val n = ns[i]
+            val v = dual_check_text("i64_to_text", i64_to_text(n), rt_raw_i64_to_string(n))
+            assert_true(v.agree)
+            checked = checked + 1
+            i = i + 1
+        assert_equal(checked, 7)
+
+    it "byte_char vs rt_byte_char agrees across the full 0..255 byte range":
+        var b = 0
+        var checked = 0
+        var divergent = 0
+        while b < 256:
+            val v = dual_check_text("byte_char", byte_char(b), rt_byte_char(b))
+            if not v.agree:
+                divergent = divergent + 1
+            checked = checked + 1
+            b = b + 1
+        assert_equal(divergent, 0)
+        assert_equal(checked, 256)
+
+    it "dual_check_f64 detects a deliberately divergent pair (sanity: the helper is not vacuous)":
+        val v = dual_check_f64("deliberately_wrong", 1.0, 2.0, false)
+        assert_true(not v.agree)
+
+    it "dual_check_text detects a deliberately divergent pair (sanity: the helper is not vacuous)":
+        val v = dual_check_text("deliberately_wrong_text", "a", "b")
+        assert_true(not v.agree)
+
+    it "dual_check_f64 bit_exact:true distinguishes -0.0 from 0.0, unlike plain ==":
+        val loose = dual_check_f64("zero_loose", 0.0, -0.0, false)
+        assert_true(loose.agree)
+        val strict = dual_check_f64("zero_strict", 0.0, -0.0, true)
+        assert_true(not strict.agree)
+
+    it "dual_check_f64 treats both-NaN as agreement (NaN-safe), not a divergence":
+        val big = 1.0e308
+        val pos_inf = big * 10.0
+        val nan_a = pos_inf - pos_inf
+        val nan_b = pos_inf - pos_inf
+        val v = dual_check_f64("nan_pair", nan_a, nan_b, false)
+        assert_true(v.agree)
+
+    it "timestamp_from_components vs rt_timestamp_from_components agrees on epoch/leap/century/pre-epoch vectors":
+        # year, month, day, hour, minute, second, microsecond
+        val vectors = [
+            (1970, 1, 1, 0, 0, 0, 0),
+            (2000, 2, 29, 0, 0, 0, 0),        # 400-year leap day
+            (1900, 2, 28, 23, 59, 59, 999999), # century non-leap boundary
+            (2038, 1, 19, 3, 14, 8, 0),        # 32-bit rollover
+            (1969, 12, 31, 23, 59, 59, 0),     # pre-epoch
+            (2024, 12, 31, 23, 59, 59, 500000),
+        ]
+        var i = 0
+        var checked = 0
+        while i < vectors.len():
+            val (y, mo, d, h, mi, se, us) = vectors[i]
+            val simple = timestamp_from_components(y, mo, d, h, mi, se, us)
+            val oracle = rt_timestamp_from_components(y as i32, mo as i32, d as i32, h as i32, mi as i32, se as i32, us as i32)
+            val v = dual_check_text("timestamp_from_components", "{simple}", "{oracle}")
+            assert_true(v.agree)
+            checked = checked + 1
+            i = i + 1
+        assert_equal(checked, 6)
+
+    it "timestamp_add_days vs rt_timestamp_add_days agrees on positive/negative/zero offsets":
+        val base = timestamp_from_components(2024, 6, 15, 12, 0, 0, 0)
+        val offsets = [0, 1, -1, 30, -365, 146097]  # 146097 days = 400 years
+        var i = 0
+        var checked = 0
+        while i < offsets.len():
+            val simple = timestamp_add_days(base, offsets[i])
+            val oracle = rt_timestamp_add_days(base, offsets[i])
+            val v = dual_check_text("timestamp_add_days", "{simple}", "{oracle}")
+            assert_true(v.agree)
+            checked = checked + 1
+            i = i + 1
+        assert_equal(checked, 6)
+
+    it "timestamp_diff_days vs rt_timestamp_diff_days agrees, incl. negative diffs":
+        val a = timestamp_from_components(2024, 6, 15, 0, 0, 0, 0)
+        val b = timestamp_from_components(2024, 1, 1, 0, 0, 0, 0)
+        val c = timestamp_from_components(1969, 12, 1, 0, 0, 0, 0)
+        val pairs = [(a, b), (b, a), (a, a), (a, c), (c, a)]
+        var i = 0
+        var checked = 0
+        while i < pairs.len():
+            val (m1, m2) = pairs[i]
+            val simple = timestamp_diff_days(m1, m2)
+            val oracle = rt_timestamp_diff_days(m1, m2)
+            val v = dual_check_text("timestamp_diff_days", "{simple}", "{oracle}")
+            assert_true(v.agree)
+            checked = checked + 1
+            i = i + 1
+        assert_equal(checked, 5)
+
+    it "timestamp_get_year/month/day vs rt_timestamp_get_year/month/day agree on boundary timestamps":
+        val micros_list = [
+            timestamp_from_components(1970, 1, 1, 0, 0, 0, 0),
+            timestamp_from_components(2000, 2, 29, 0, 0, 0, 0),
+            timestamp_from_components(1900, 2, 28, 0, 0, 0, 0),
+            timestamp_from_components(2038, 1, 19, 3, 14, 8, 0),
+            timestamp_from_components(1969, 12, 31, 23, 59, 59, 0),
+        ]
+        var i = 0
+        var checked = 0
+        while i < micros_list.len():
+            val m = micros_list[i]
+            val y_v = dual_check_text("timestamp_get_year", "{timestamp_get_year(m)}", "{rt_timestamp_get_year(m)}")
+            val mo_v = dual_check_text("timestamp_get_month", "{timestamp_get_month(m)}", "{rt_timestamp_get_month(m)}")
+            val d_v = dual_check_text("timestamp_get_day", "{timestamp_get_day(m)}", "{rt_timestamp_get_day(m)}")
+            assert_true(y_v.agree)
+            assert_true(mo_v.agree)
+            assert_true(d_v.agree)
+            checked = checked + 1
+            i = i + 1
+        assert_equal(checked, 5)
+
+    it "rt_hash_text (Simple FNV-1a bridge) vs C oracle rt_hash_text agrees incl. UTF-8":
+        val vectors = ["", "a", "abc", "hello world", "héllo", "日本語", "emoji 🎉 test", "Ω≈ç√∫"]
+        var i = 0
+        var checked = 0
+        while i < vectors.len():
+            val simple = simple_hash_text(vectors[i])
+            val oracle = rt_hash_text(vectors[i])
+            val v = dual_check_text("rt_hash_text", "{simple}", "{oracle}")
+            assert_true(v.agree)
+            checked = checked + 1
+            i = i + 1
+        assert_equal(checked, 8)
+
+    it "parse_i64 vs rt_string_to_int agrees on well-formed decimal integers (sentinel divergence documented, not asserted)":
+        # NOTE: on malformed/empty input the two sides use DIFFERENT sentinels
+        # (parse_i64 -1 vs rt_string_to_int 0 per C-MIG-0021's caller_note) —
+        # this pair intentionally restricts to well-formed input, matching
+        # test/01_unit/lib/nogc_sync_mut/parse_i64_crosslang_spec.spl's convention.
+        val vectors = ["0", "1", "-1", "42", "-42", "9223372036854775807", "-9223372036854775808"]
+        var i = 0
+        var checked = 0
+        while i < vectors.len():
+            val simple = parse_i64(vectors[i])
+            val oracle = rt_string_to_int(vectors[i])
+            val v = dual_check_text("parse_i64", "{simple}", "{oracle}")
+            assert_true(v.agree)
+            checked = checked + 1
+            i = i + 1
+        assert_equal(checked, 7)
+
+    it "validated_utf8_bytes_to_text_linear vs rt_text_validate_utf8 agrees on valid/invalid UTF-8, incl. multibyte":
+        val vectors = ["", "a", "hello world", "héllo", "日本語ABCabc", "emoji 🎉 TEST", "Ω≈ç√∫ mixedCase", "Café", "naïve", "東京", "👍👎🎉"]
+        var i = 0
+        var checked = 0
+        while i < vectors.len():
+            val simple = bool_text(simple_is_valid_utf8(vectors[i]))
+            val oracle = bool_text(rt_text_validate_utf8(vectors[i]))
+            val v = dual_check_text("utf8_validate", simple, oracle)
+            assert_true(v.agree)
+            checked = checked + 1
+            i = i + 1
+        assert_equal(checked, 11)

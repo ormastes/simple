@@ -1,0 +1,278 @@
+"""
+# HIR monomorphization substitutes the specialization BODY, not just its signature
+
+`substitute_expr` used to substitute only an expression's OWN recorded type and
+never recursed into sub-expressions, and `substitute_function` never touched
+`func.body` at all. A specialization therefore had a CONCRETE signature and a
+body still full of the template's `TypeParam("T")` types — a silent miscompile:
+nothing downstream of Phase 4 diagnoses a leftover type parameter, so wrong
+code would be generated with no error.
+
+This spec builds
+
+    fn box_it<T>(v: T) -> [T]:
+        val tmp: T = v
+        [tmp, v]            # nested: array literal, elem type T, elements typed T
+
+and calls `box_it<i64>(7)`, then walks the WHOLE specialized body — every
+statement, every nested expression, the `let` annotation and the array
+literal's element type — asserting that NO `TypeParam` survives anywhere.
+
+Before the fix the body walk found the template types (`let` annotation `T`,
+array elem type `T`, and the `T`-typed element expressions) and the count of
+surviving type params was non-zero. After it, it is zero while the signature
+assertions still hold.
+"""
+
+use std.spec
+use compiler.hir.hir.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.mono.monomorphize_integration.{run_monomorphization}
+
+fn mk_span() -> Span:
+    Span.empty()
+
+fn mk_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: mk_span())
+
+fn mk_expr(kind: HirExprKind) -> HirExpr:
+    HirExpr(kind: kind, has_type_: false, type_: nil, span: mk_span())
+
+fn mk_typed_expr(kind: HirExprKind, ty: HirType) -> HirExpr:
+    HirExpr(kind: kind, has_type_: true, type_: ty, span: mk_span())
+
+fn mk_block(stmts: [HirStmt], value: HirExpr) -> HirBlock:
+    HirBlock(stmts: stmts, has: true, value: value, span: mk_span())
+
+fn mk_fn(id: i64, name: text, type_params: [HirTypeParam], params: [HirParam], ret: HirType, body: HirBlock) -> HirFunction:
+    HirFunction(
+        symbol: SymbolId(id: id),
+        name: name,
+        type_params: type_params,
+        params: params,
+        return_type: ret,
+        body: body,
+        effects: [],
+        visibility: Visibility.Public,
+        is_async: false,
+        is_static: false,
+        is_public: true,
+        is_method: false,
+        is_mutable: false,
+        is_const: false,
+        is_extern: false,
+        func_attr: FunctionAttr.default(),
+        has_export_attr: false,
+        export_attr: nil,
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_suspension: false,
+        has_vhdl_metadata: false,
+        vhdl_metadata: nil,
+        has_doc_comment: false,
+        doc_comment: "",
+        span: mk_span(),
+        is_gpu_kernel: false,
+        gpu_target: "",
+        gpu_backend_order: ""
+    )
+
+# ---------------------------------------------------------------------------
+# Counting walk: how many TypeParam types survive anywhere in a body?
+# ---------------------------------------------------------------------------
+
+fn count_tp_type(ty: HirType) -> i64:
+    if ty == nil:
+        return 0
+    match ty.kind:
+        case TypeParam(_, _): 1
+        case Array(element, _): count_tp_type(element)
+        case Optional(inner): count_tp_type(inner)
+        case Tuple(elements):
+            var n = 0
+            for e in elements:
+                n = n + count_tp_type(e)
+            n
+        case Dict(k, v): count_tp_type(k) + count_tp_type(v)
+        case _: 0
+
+fn count_tp_expr(expr: HirExpr) -> i64:
+    if expr == nil:
+        return 0
+    var n = 0
+    if expr.has_type_:
+        n = n + count_tp_type(expr.type_)
+    match expr.kind:
+        case HirExprKind.ArrayLit(elements, elem_ty):
+            match elem_ty:
+                Some(t):
+                    val tt: HirType = t
+                    n = n + count_tp_type(tt)
+                nil:
+                    pass
+            for e in elements:
+                val et: HirExpr = e
+                n = n + count_tp_expr(et)
+        case HirExprKind.Call(callee, args, type_args):
+            val ct: HirExpr = callee
+            n = n + count_tp_expr(ct)
+            for ta in type_args:
+                val tat: HirType = ta
+                n = n + count_tp_type(tat)
+            for a in args:
+                val at: HirCallArg = a
+                n = n + count_tp_expr(at.value)
+        case HirExprKind.Block(b):
+            val bt: HirBlock = b
+            n = n + count_tp_block(bt)
+        case _:
+            pass
+    n
+
+fn count_tp_stmt(stmt: HirStmt) -> i64:
+    if stmt == nil:
+        return 0
+    match stmt.kind:
+        case HirStmtKind.Let(_, ty, init):
+            val lt: HirType = ty
+            val li: HirExpr = init
+            count_tp_type(lt) + count_tp_expr(li)
+        case HirStmtKind.Expr(e):
+            val et: HirExpr = e
+            count_tp_expr(et)
+        case HirStmtKind.Block(b):
+            val bt: HirBlock = b
+            count_tp_block(bt)
+        case _:
+            0
+
+fn count_tp_block(block: HirBlock) -> i64:
+    if block == nil:
+        return 0
+    var n = 0
+    for stmt in block.stmts:
+        val st: HirStmt = stmt
+        n = n + count_tp_stmt(st)
+    if block.has:
+        val bv: HirExpr = block.value
+        n = n + count_tp_expr(bv)
+    n
+
+# ---------------------------------------------------------------------------
+
+fn make_modules() -> Dict<text, HirModule>:
+    val t_param = HirTypeParam(
+        symbol: SymbolId(id: 90),
+        name: "T",
+        bounds: [],
+        has_default: false,
+        default: nil,
+        span: mk_span()
+    )
+    val t_type = mk_type(HirTypeKind.TypeParam("T", []))
+    val v_param = HirParam(
+        symbol: SymbolId(id: 91),
+        name: "v",
+        type_: t_type,
+        has_default: false,
+        default: nil,
+        span: mk_span(),
+        is_mutable: false
+    )
+    # val tmp: T = v
+    val v_ref = mk_typed_expr(HirExprKind.Var(SymbolId(id: 91)), t_type)
+    val let_stmt = HirStmt(kind: HirStmtKind.Let(SymbolId(id: 92), t_type, v_ref), span: mk_span())
+    # [tmp, v] : [T]
+    val tmp_ref = mk_typed_expr(HirExprKind.Var(SymbolId(id: 92)), t_type)
+    val arr = mk_typed_expr(
+        HirExprKind.ArrayLit([tmp_ref, v_ref], t_type),
+        mk_type(HirTypeKind.Array(t_type, nil))
+    )
+    val box_it = mk_fn(
+        1, "box_it", [t_param], [v_param],
+        mk_type(HirTypeKind.Array(t_type, nil)),
+        mk_block([let_stmt], arr)
+    )
+
+    val call = mk_expr(HirExprKind.Call(
+        mk_expr(HirExprKind.Var(SymbolId(id: 1))),
+        [HirCallArg(has_name: false, name: "", value: mk_expr(HirExprKind.IntLit(7, nil)), span: mk_span())],
+        [mk_type(HirTypeKind.Int(64, true))]
+    ))
+    val main_fn = mk_fn(
+        2, "main", [], [], mk_type(HirTypeKind.Unit),
+        mk_block([HirStmt(kind: HirStmtKind.Expr(call), span: mk_span())], mk_expr(HirExprKind.NilLit))
+    )
+
+    var functions: Dict<SymbolId, HirFunction> = {}
+    functions[box_it.symbol] = box_it
+    functions[main_fn.symbol] = main_fn
+    val module = HirModule(
+        name: "mono_body_subst_test",
+        path: "synthetic/mono_body_subst_test.spl",
+        imports: [],
+        exports: [],
+        domain_blocks: [],
+        symbols: SymbolTable.new(),
+        functions: functions,
+        gpu_function_targets: {},
+        gpu_function_backend_orders: {},
+        classes: {},
+        structs: {},
+        enums: {},
+        bitfields: {},
+        traits: {},
+        impls: [],
+        constants: {},
+        static_asserts: [],
+        aop_advices: [],
+        di_bindings: [],
+        arch_rules: [],
+        mock_decls: [],
+        types: []
+    )
+    var modules: Dict<text, HirModule> = {}
+    modules["mono_body_subst_test"] = module
+    modules
+
+fn specialized_of(result: Dict<text, HirModule>) -> HirFunction:
+    val out = result["mono_body_subst_test"]
+    var found: HirFunction = nil
+    for key in out.functions.keys():
+        val f: HirFunction = out.functions[key]
+        if f.name == "box_it$i64":
+            found = f
+    found
+
+describe "HIR monomorphization body substitution (#158 Phase B hole)":
+    it "leaves no type parameter anywhere in the specialized body":
+        val (result, _) = run_monomorphization(make_modules())
+        val spec = specialized_of(result)
+        expect(spec != nil).to_equal(true)
+        expect(count_tp_block(spec.body)).to_equal(0)
+
+    it "still leaves no type parameter in the specialized signature":
+        val (result, _) = run_monomorphization(make_modules())
+        val spec = specialized_of(result)
+        expect(spec != nil).to_equal(true)
+        expect(spec.type_params.len()).to_equal(0)
+        var sig_tp = count_tp_type(spec.return_type)
+        for p in spec.params:
+            val pt: HirParam = p
+            sig_tp = sig_tp + count_tp_type(pt.type_)
+        expect(sig_tp).to_equal(0)
+
+    it "removes the consumed template rather than mutating it in place":
+        # Superseded 2026-08-21 by plan section 9.3 step 12. The point this
+        # example guarded - that specialization never mutates the template in
+        # place - is now expressed as the template being ABSENT from the emitted
+        # module (count_tp_block is never reached because no `box_it` remains),
+        # while `box_it$i64` keeps its fully substituted body (examples above).
+        val (result, _) = run_monomorphization(make_modules())
+        val out = result["mono_body_subst_test"]
+        var templates = 0
+        for key in out.functions.keys():
+            val f: HirFunction = out.functions[key]
+            if f.name == "box_it":
+                templates = templates + 1
+        expect(templates).to_equal(0)

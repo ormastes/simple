@@ -22,7 +22,7 @@ Tests that `loss{}` and `nograd{}` blocks parse, evaluate, and render the same s
 | Difficulty | 2/5 |
 | Status | Implemented |
 | Source | `test/feature/usage/loss_nograd_blocks_spec.spl` |
-| Updated | 2026-08-18 |
+| Updated | 2026-08-21 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

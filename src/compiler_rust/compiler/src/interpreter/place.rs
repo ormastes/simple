@@ -106,6 +106,14 @@ pub(crate) fn resolve_place(
                 None => Ok(None),
             }
         }
+        // `m!.n = 44`: `!` on an optional class/struct is the identity on the
+        // value (it only narrows `T?` to `T`), so the unwrapped object is the
+        // SAME place as the wrapped one and must be writable through. Without
+        // this arm the interpreter rejected the shape with
+        // `field assignment target is not a place` while the JIT accepted it —
+        // an engine divergence.
+        // Bug: doc/08_tracking/bug/jit_optional_class_unwrap_field_access_segv_2026-08-20.md
+        Expr::ForceUnwrap(inner) => resolve_place(inner, env, functions, classes, enums, impl_methods),
         _ => Ok(None),
     }
 }

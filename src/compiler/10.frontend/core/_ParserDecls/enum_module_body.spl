@@ -38,6 +38,7 @@ use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_wa
 use compiler.core.parser.{parser_skip_newlines, parser_skip_newlines_and_semicolons}
 use compiler.core.parser.{parser_parse_type, parser_parse_type_with_union}
 use compiler.core.tokens.{TOK_KW_AS, TOK_KW_CE, TOK_PIPE, TOK_ASSIGN, tok_kind_name}
+use compiler.core.tokens.{TOK_KW_DYN}
 use compiler.core.tokens.{TOK_IDENT, TOK_COMMA, TOK_MINUS}
 
 # Import from sibling split modules
@@ -295,6 +296,12 @@ fn parse_enum_decl() -> i64:
     var variant_payload_types_flat: [i64] = []
     var variant_payload_counts: [i64] = []
     var parse_enum_method_ids: [i64] = []
+    # §2 of doc/05_design/compiler/hardening/critical_completeness_design_2026-08-21.md:
+    # trailing `complete:` / `dyn:` sections declare the OPEN regions of the
+    # constructor universe. An enum with neither section is closed, which is
+    # why both start false and are only ever set, never cleared.
+    var saw_complete_section = false
+    var saw_dyn_section = false
 
     while true:
         parser_skip_newlines()
@@ -303,6 +310,28 @@ fn parse_enum_decl() -> i64:
             break
         if par_kind_get() == 190:
             break
+
+        # Trailing `complete:` / `dyn:` region sections (design §2). `complete`
+        # is a SOFT keyword -- it is an ordinary identifier everywhere else in
+        # this tree -- so it is recognized only as an IDENT whose text is
+        # exactly "complete" and which is immediately followed by `:`. `dyn` is
+        # already a hard keyword (TOK_KW_DYN, `dyn Trait` types), so it is
+        # matched on its token kind. Both sections are EMPTY in an enum body:
+        # they declare that the region is open; the constructors themselves
+        # arrive through `extend <Enum>:` (parse_extend_enum_decl). An indented
+        # block is still consumed rather than left to derail the variant loop.
+        if par_kind_get() == 6 and par_text_get() == "complete" and parser_enum_section_colon_follows():
+            parser_advance()
+            parser_expect(161)
+            parse_enum_open_section_body()
+            saw_complete_section = true
+            continue
+        if par_kind_get() == TOK_KW_DYN and parser_enum_section_colon_follows():
+            parser_advance()
+            parser_expect(161)
+            parse_enum_open_section_body()
+            saw_dyn_section = true
+            continue
 
         # Skip docstrings in enum body
         if par_kind_get() == 3:
@@ -397,6 +426,8 @@ fn parse_enum_decl() -> i64:
             continue
         parser_skip_newlines_and_semicolons()
 
+    if saw_complete_section or saw_dyn_section:
+        parser_record_enum_open_regions(enum_name, saw_complete_section, saw_dyn_section)
     val enum_d = decl_enum_def(enum_name, variant_names, variant_discriminants, variant_payload_types_flat, variant_payload_counts, 0)
     if parse_enum_method_ids.len() > 0:
         val enum_impl = decl_impl_block(enum_name, parse_enum_method_ids, 0)
@@ -551,7 +582,116 @@ fn parser_record_unsafe_annotation(decl_name: text):
     if PENDING_UNSAFE == 1:
         UNSAFE_ANNOTATIONS.push(decl_name + "|" + PENDING_UNSAFE_REASON + "|" + PENDING_UNSAFE_CAPS.join(","))
 
+fn parser_attr_token_text() -> text:
+    """Text of the current token for decorator-argument capture.
+
+    Punctuation is spelled from its kind because par_text_get() is not
+    guaranteed to carry a text for structural tokens."""
+    val k = par_kind_get()
+    if k == 160:
+        return ","
+    if k == 145:
+        return "]"
+    if k == 144:
+        return "["
+    if k == 140:
+        return "("
+    if k == 141:
+        return ")"
+    if k == 161:
+        return ":"
+    if k == 162:
+        return "::"
+    val t = par_text_get()
+    if t == "":
+        return ""
+    t
+
+# Pending decorators for the NEXT declaration, in source order. Each entry is
+# the raw spelling without the leading `@`: "closed" or
+# "evolving(repr:u16,unknown:Unknown)". They STACK (each decorator is its own
+# module-body loop iteration) and are cleared per-declaration by
+# parser_reset_pending_vhdl_decorators, exactly like PENDING_UNSAFE_*.
+var PENDING_DECL_ATTRS: [text] = []
+# One entry per decorated enum: "enum_name|attr1|attr2". Reset per module.
+# Read by module_assembly.spl so the annotation reaches ParserEnum -> HirEnum
+# (doc/08_tracking/bug/enum_decorators_dropped_before_hir_2026-08-21.md).
+var ENUM_ATTRIBUTES: [text] = []
+
+fn parser_record_enum_attributes(enum_name: text):
+    if PENDING_DECL_ATTRS.len() > 0:
+        ENUM_ATTRIBUTES.push(enum_name + "|" + PENDING_DECL_ATTRS.join("|"))
+
+fn parser_enum_attributes_for(enum_name: text) -> [text]:
+    """Raw decorator spellings recorded for `enum_name` in this module."""
+    var out: [text] = []
+    val prefix = enum_name + "|"
+    for entry in ENUM_ATTRIBUTES:
+        if entry.starts_with(prefix):
+            val rest = entry.substring(prefix.len(), entry.len())
+            for part in rest.split("|"):
+                if part != "":
+                    out = out.push(part)
+    out
+
+# One entry per enum that declared an open region: "enum_name|complete|dyn"
+# where each flag is "1"/"0". Reset per module together with ENUM_ATTRIBUTES.
+# Read by module_assembly.spl so the flags reach ParserEnum -> HirEnum.
+var ENUM_OPEN_REGIONS: [text] = []
+
+fn parser_record_enum_open_regions(enum_name: text, complete_open: bool, dyn_open: bool):
+    val c = if complete_open: "1" else: "0"
+    val d = if dyn_open: "1" else: "0"
+    ENUM_OPEN_REGIONS.push(enum_name + "|" + c + "|" + d)
+
+fn parser_enum_open_regions_for(enum_name: text) -> (bool, bool):
+    """(complete_open, dyn_open) recorded for `enum_name` in this module."""
+    var complete_open = false
+    var dyn_open = false
+    val prefix = enum_name + "|"
+    for entry in ENUM_OPEN_REGIONS:
+        if entry.starts_with(prefix):
+            val parts = entry.split("|")
+            if parts.len() >= 3:
+                if parts[1] == "1":
+                    complete_open = true
+                if parts[2] == "1":
+                    dyn_open = true
+    (complete_open, dyn_open)
+
+# True when the token AFTER the current one is `:`. Uses raw-source lookahead
+# (the same technique as current_ident_is_layer_decl / _on_advice_decl) because
+# the parser has no general two-token peek: skip inline whitespace after the
+# current token and require the next source char to be ':'.
+fn parser_enum_section_colon_follows() -> bool:
+    val pos = lex_skip_inline_ws_after_token()
+    if pos < 0:
+        return false
+    lex_source_char_at(pos) == ":"
+
+# Consumes an OPTIONAL indented block after a `complete:` / `dyn:` header
+# inside an enum body. The design puts constructors in `extend`, not here, so
+# the well-formed shape is an empty section; anything indented is consumed
+# whole (depth-tracked) so it cannot leak into the variant loop and be
+# misreported as "expected enum variant name".
+fn parse_enum_open_section_body():
+    parser_skip_newlines()
+    if par_kind_get() != 181:
+        return
+    parser_advance()
+    var depth = 1
+    while depth > 0:
+        val k = par_kind_get()
+        if k == 190:
+            return
+        if k == 181:
+            depth = depth + 1
+        elif k == 182:
+            depth = depth - 1
+        parser_advance()
+
 fn parser_reset_pending_vhdl_decorators():
+    PENDING_DECL_ATTRS = []
     PENDING_HARDWARE = 0
     PENDING_CLOCKED_ARGS = []
     PENDING_VHDL_GENERIC_ARGS = []
@@ -568,6 +708,7 @@ fn parser_reset_pending_vhdl_decorators():
 fn parse_module_body():
     parser_reset_pending_vhdl_decorators()
     UNSAFE_ANNOTATIONS = []
+    ENUM_ATTRIBUTES = []
     var i: i64 = 0 - 1
     # Forward-progress invariant (defense in depth).
     #
@@ -666,6 +807,7 @@ fn parse_module_body():
             parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 24:
             val d = parse_enum_decl()
+            parser_record_enum_attributes(decl_get_name(d))
             module_add_decl(d)
             parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 31:
@@ -843,6 +985,12 @@ fn parse_module_body():
             var layer_tag_names: [text] = []
             # C4 `@copy_budget(N)` payload, raw decimal text ("" = absent).
             var effect_budget_arg = ""
+            # Raw argument spelling, rebuilt from the token texts this loop
+            # walks (no whitespace: "repr:u16,unknown:Unknown"). Generic
+            # decorators such as @evolving take the one-token-per-iteration
+            # fallback arms below, so appending at the top of the body sees
+            # every argument token.
+            var attr_raw_args = ""
             if par_kind_get() == 140:
                 parser_advance()
                 while true:
@@ -850,6 +998,7 @@ fn parse_module_body():
                     val dec_end2: bool = par_kind_get() == 190
                     if dec_end1 or dec_end2:
                         break
+                    attr_raw_args = attr_raw_args + parser_attr_token_text()
                     if decorator_name == "layer" or decorator_name == "layer_eq" or decorator_name == "advice":
                         # All take bare ident args: `@layer(NAME)` (M1
                         # module tag), `@layer_eq(TargetType)` (C1 view-type
@@ -969,6 +1118,11 @@ fn parse_module_body():
                         parser_advance()
                 parser_expect(141)
             parser_skip_newlines_and_semicolons()
+            if decorator_name != "":
+                if attr_raw_args == "":
+                    PENDING_DECL_ATTRS.push(decorator_name)
+                else:
+                    PENDING_DECL_ATTRS.push(decorator_name + "(" + attr_raw_args + ")")
             if decorator_name == "hardware":
                 PENDING_HARDWARE = 1
             elif decorator_name == "sffi":
@@ -1567,6 +1721,7 @@ fn parse_module_body():
 
 # ===== Exports =====
 
-export parse_enum_decl, parse_module_body
+export parse_enum_decl, parse_module_body, parser_enum_attributes_for
+export parser_enum_open_regions_for
 
 # ===== Bitfield Declaration =====

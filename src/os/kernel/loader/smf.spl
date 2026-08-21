@@ -121,6 +121,45 @@ fn smf_parse_header(bytes: [u8]) -> SmfHeader?:
         abi: abi
     ))
 
+fn _smf_explicit_arch_matches_elf(bytes: [u8], arch: i64, stub_size: i64) -> bool:
+    if stub_size < 64 or stub_size > bytes.len():
+        return false
+    if not _smf_has_elf_magic(bytes) or _smf_byte_at(bytes, 5).to_i64() != 1 or
+       _smf_byte_at(bytes, 6).to_i64() != 1:
+        return false
+    val class = _smf_byte_at(bytes, 4).to_i64()
+    val machine = _smf_byte_at(bytes, 18).to_i64() |
+        (_smf_byte_at(bytes, 19).to_i64() << 8)
+    (arch == 1 and machine == 62 and class == 2) or
+        (arch == 2 and machine == 3 and class == 1) or
+        (arch == 3 and machine == 183 and class == 2) or
+        (arch == 4 and machine == 40 and class == 1) or
+        (arch == 5 and machine == 243 and class == 2) or
+        (arch == 6 and machine == 243 and class == 1)
+
+fn smf_admit_explicit_simpleos_executable(bytes: [u8]) -> Result<(), text>:
+    """Admit one canonical v1.1 SimpleOS executable envelope without exposing header internals."""
+    val parsed = smf_parse_header(bytes)
+    if parsed == nil:
+        return Err(SMF_ERR_MALFORMED)
+    val header = parsed.unwrap()
+    if header.header_offset != bytes.len() - SMF_HEADER_TRAILER_SIZE or
+       _smf_byte_at(bytes, header.header_offset + 4).to_i64() != 1 or
+       _smf_byte_at(bytes, header.header_offset + 5).to_i64() != 1:
+        return Err(SMF_ERR_MALFORMED)
+    if header.role != 1:
+        return Err(SMF_ERR_WRONG_ROLE)
+    if header.arch < 1 or header.arch > 6:
+        return Err(SMF_ERR_WRONG_ARCH)
+    if header.abi != 1:
+        return Err(SMF_ERR_ABI_MISMATCH)
+    if header.stub_size < 64 or header.stub_size > header.header_offset or
+       header.smf_data_offset != header.stub_size:
+        return Err(SMF_ERR_MALFORMED)
+    if not _smf_explicit_arch_matches_elf(bytes, header.arch, header.stub_size):
+        return Err(SMF_ERR_MISSING_ELF)
+    Ok(())
+
 fn _smf_has_elf_magic(bytes: [u8]) -> bool:
     if bytes.len() < 4:
         return false
@@ -310,3 +349,5 @@ fn smf_load(bytes: [u8], space: ProcessVmSpace) -> i64:
     if stub.is_err():
         return -38  # -ENOSYS — native SMF mapping deferred
     elf64_load(stub.unwrap(), space)
+
+export smf_admit_explicit_simpleos_executable, smf_extract_executable_stub_for_arch

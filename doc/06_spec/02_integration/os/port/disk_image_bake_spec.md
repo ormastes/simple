@@ -1,185 +1,36 @@
 # Disk Image Bake Specification
 
-> _Static bake contracts plus disabled heavyweight examples._
+The executable spec covers the pure admission/rendering boundary used by the
+Phase-2 bake. It does not construct a disk image or initramfs without admitted
+target-native artifacts.
 
-<!-- sdn-diagram:id=disk_image_bake_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
+## Executable behavioral scenarios
 
-```sdn id=disk_image_bake_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
+`test/02_integration/os/port/disk_image_bake_spec.spl` exercises:
 
-disk_image_bake_spec -> std
-```
+- pure-Simple SHA-256 output for role payload bytes;
+- admission of exactly three explicit, non-empty compiler/interpreter/loader
+  artifacts using valid EOF-trailer SMF envelopes;
+- typed rejection of missing and empty artifacts;
+- rejection of the general `simple`/`simple_simpleos` fallback payload;
+- typed rejection of malformed executable bytes before image construction;
+- typed rejection of empty, control, quote, backslash, and noncanonical
+  artifact paths both at admission and at manifest rendering;
+- full public-render revalidation of caller-constructed role, SMF bytes,
+  digest, and canonical guest-path bindings;
+- pairwise path and digest uniqueness; and
+- rendering of canonical guest role paths with artifact paths and digests.
 
-</details>
+The test imports only the exported pure APIs from
+`src/os/port/disk_image_bake.spl`; it does not inspect source or documentation.
 
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
+## Manual blocked row
 
-```ascii generated-from=disk_image_bake_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
-
-<details>
-<summary>Full Scenario Manual</summary>
-
-# Disk Image Bake Specification
-
-## Scenarios
-
-### SimpleOS I5 disk-image bake harness
-_Static bake contracts plus disabled heavyweight examples._
-
-#### requires clang_static when the toolchain bake marker is enabled
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val src = file_read("src/os/port/disk_image_bake.spl")
-expect(src).to_contain("if io.file_exists(\"build/os/.bake_include_toolchain\"):")
-expect(src).to_contain("toolchain marker set but clang_static missing")
-expect(src).to_contain("return Err(\"bake: toolchain marker set but clang_static missing: \" + clang_static_path)")
-```
-
-</details>
-
-#### requires rustc_static when the toolchain bake marker is enabled
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val src = file_read("src/os/port/disk_image_bake.spl")
-expect(src).to_contain("toolchain marker set but rustc_static missing")
-expect(src).to_contain("return Err(\"bake: toolchain marker set but rustc_static missing: \" + rustc_static_path)")
-```
-
-</details>
-
-#### skips heavyweight bake examples in interpreter spec
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-return "skip: heavyweight bake examples are disabled in interpreter spec"
-```
-
-</details>
-
-#### bake() returns Ok and produces both artifact files
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-return "skip: heavyweight bake examples are disabled in interpreter spec"
-```
-
-</details>
-
-#### disk image is at least 32 MiB
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-return "skip: heavyweight bake examples are disabled in interpreter spec"
-```
-
-</details>
-
-#### initramfs artifact exists with non-zero size
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-return "skip: heavyweight bake examples are disabled in interpreter spec"
-```
-
-</details>
-
-#### initramfs artifact validates as a real archive
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-return "skip: heavyweight bake examples are disabled in interpreter spec"
-```
-
-</details>
-
-#### writes multi-payload disk image
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-return "skip: heavyweight bake examples are disabled in interpreter spec"
-```
-
-</details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Hardware & OS |
-| Status | Active |
-| Source | `test/02_integration/os/port/disk_image_bake_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- SimpleOS I5 disk-image bake harness
-
-## Scenario Summary
-
-| Metric | Count |
-|--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
-| Slow scenarios | 0 |
-| Skipped scenarios | 0 |
-| Pending scenarios | 0 |
-
-
-</details>
+**BLOCKED — target-native image construction.** The full bake remains blocked
+for x86_64 (`x86_64-unknown-simpleos`), AArch64
+(`aarch64-unknown-simpleos`), and RV64GC (`riscv64gc-unknown-simpleos`) until
+each row has admitted LLVM/Clang/LLD/sysroot, init, compiler, interpreter, and
+loader artifacts plus explicit browser/version evidence. The manual row must
+then verify that the same admitted role paths and digests reach FAT32,
+`/SYS/SIMPLETOOL.SDN`, and initramfs, followed by a guest filesystem
+compile/link/load/run receipt. The blocked work has no executable placeholder.

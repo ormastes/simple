@@ -192,6 +192,9 @@ fn join_point_forward_target(body: HirBlock) -> text:
         return JOIN_POINT_NOT_FORWARDER
     if body.stmts.len() != 1 or body.has:
         return JOIN_POINT_NOT_FORWARDER
+    # The exact-length guard is the bounds proof for this sole indexed read.
+    # Keep it adjacent so future accepted shapes cannot accidentally make the
+    # access reachable with an empty statement payload.
     val only: HirStmt = body.stmts[0]
     match only.kind:
         case HirStmtKind.Expr(e):
@@ -224,13 +227,12 @@ fn join_point_is_forwarder(func: HirFunction) -> bool:
 fn forward_join_points(modules: Dict<text, HirModule>) -> [JoinPoint]:
     var out: [JoinPoint] = []
     var next_id: i64 = 1
-    for module_key in modules.keys():
-        val module: HirModule = modules[module_key]
+    for module in modules.values():
         for func in module.functions.values():
             val target = join_point_forward_target(func.body)
             if target == JOIN_POINT_NOT_FORWARDER:
                 continue
-            out.push(JoinPoint(
+            out = out.push(JoinPoint(
                 kind: "forward",
                 source_symbol: func.name,
                 target_symbol: target,
@@ -246,9 +248,10 @@ fn forward_join_points(modules: Dict<text, HirModule>) -> [JoinPoint]:
 fn join_points_matching(points: [JoinPoint], kind: text, selector: text) -> [JoinPoint]:
     var out: [JoinPoint] = []
     for p in points:
-        val jp: JoinPoint = p
-        if jp.kind == kind and jp.source_symbol == selector:
-            out.push(jp)
+        # Inspect and publish the iteration payload directly; an intermediate
+        # JoinPoint value is an unnecessary aggregate copy.
+        if p.kind == kind and p.source_symbol == selector:
+            out = out.push(p)
     out
 
 export JoinPoint, JOIN_POINT_NOT_FORWARDER, JOIN_POINT_TARGET_UNKNOWN

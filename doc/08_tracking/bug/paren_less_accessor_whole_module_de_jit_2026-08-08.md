@@ -2,6 +2,7 @@
 
 - **Filed:** 2026-08-08
 - **Status:** FIXED in the `run`/JIT lane 2026-08-08 (Rust seed driver). Fence
+- **Verification 2026-08-21 (bug-status-consistency audit): PARTIAL, not fully fixed.** fixed in the `run`/JIT lane only (`exec_core.rs:1071/1353` + `check-no-jit-module-drop.shs`); the `compile` lane is fenced, not fixed. `bug_db.sdn` row is `fix-implemented-verification-pending`.
   remains for the `compile` lane. See "Upstream fix (landed)" below.
 - **Severity:** High — silent ~100-1000x slowdown, correct output, no diagnostic
 - **Fence:** `scripts/check/check-no-jit-module-drop.shs`

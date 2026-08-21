@@ -1,0 +1,76 @@
+use os.tools.shell.checksum.checksum_artifact_contract.{
+    checksum_tool_artifact_contract_v1,
+    checksum_tool_canonical_path_v1,
+    checksum_tool_artifact_contract_valid_v1,
+    CHECKSUM_TOOL_MAX_FILES_V1,
+    CHECKSUM_TOOL_MAX_FILE_BYTES_V1,
+    CHECKSUM_TOOL_READ_CHUNK_BYTES_V1
+}
+use os.packages.checksum_tool_package_identity.{
+    checksum_tool_package_identity_v1,
+    checksum_tool_package_identity_blocked_v1
+}
+use os.apps.coreutils.checksum.{main_sha256sum, main_md5sum}
+use os.apps.coreutils.checksum_vfs_adapter.{
+    ChecksumProcessFilesystem, checksum_process_vfs
+}
+
+describe "checksum filesystem artifact contract":
+    it "binds sha256sum to its pure-Simple entrypoint and canonical path":
+        val result = checksum_tool_artifact_contract_v1("sha256sum")
+        expect(result.is_ok()).to_be(true)
+        val contract = result.unwrap()
+        expect(contract.canonical_path).to_equal("/usr/bin/sha256sum")
+        expect(contract.source_owner).to_equal("os.tools.shell.checksum.checksum_tool")
+        expect(contract.entry_source_owner).to_equal("os.apps.coreutils.checksum")
+        expect(contract.entry_symbol).to_equal("main_sha256sum")
+        expect(contract.version_line).to_equal("sha256sum (SimpleOS core tools) 1.0")
+        expect(contract.help_line).to_equal("usage: sha256sum [--] FILE...")
+        expect(checksum_tool_artifact_contract_valid_v1(contract)).to_be(true)
+
+    it "binds md5sum to the same bounded hashing owner":
+        val result = checksum_tool_artifact_contract_v1("md5sum")
+        expect(result.is_ok()).to_be(true)
+        val contract = result.unwrap()
+        expect(contract.canonical_path).to_equal("/usr/bin/md5sum")
+        expect(contract.entry_symbol).to_equal("main_md5sum")
+        expect(contract.max_files).to_equal(CHECKSUM_TOOL_MAX_FILES_V1)
+        expect(contract.max_file_bytes).to_equal(CHECKSUM_TOOL_MAX_FILE_BYTES_V1)
+        expect(contract.read_chunk_bytes).to_equal(CHECKSUM_TOOL_READ_CHUNK_BYTES_V1)
+        expect(contract.requires_target_artifact).to_be(true)
+        expect(contract.requires_loader_authority_token).to_be(true)
+
+    it "does not map unknown names onto an artifact":
+        expect(checksum_tool_artifact_contract_v1("sha512sum").is_err()).to_be(true)
+        expect(checksum_tool_canonical_path_v1("sha512sum")).to_equal("")
+
+    it "keeps package identity blocked without digest and admission receipt":
+        val result = checksum_tool_package_identity_v1("sha256sum")
+        expect(result.is_ok()).to_be(true)
+        val identity = result.unwrap()
+        expect(identity.artifact.canonical_path).to_equal("/usr/bin/sha256sum")
+        expect(identity.artifact_digest).to_equal("")
+        expect(identity.admission_receipt_id).to_equal("")
+        expect(checksum_tool_package_identity_blocked_v1(identity)).to_be(true)
+
+describe "checksum filesystem process entrypoints":
+    it "mounts one read-only process VFS adapter":
+        val vfs = checksum_process_vfs()
+        expect(vfs.mounts.len()).to_equal(1)
+
+    it "rejects writes at the process adapter boundary":
+        var fs = ChecksumProcessFilesystem.new()
+        expect(fs.write(1u64, [1u8]).is_err()).to_be(true)
+        expect(fs.mkdir("/blocked").is_err()).to_be(true)
+
+    it "delegates sha256sum version, help, and errors to the canonical tool":
+        expect(main_sha256sum(["--version"])).to_equal(0)
+        expect(main_sha256sum(["--help"])).to_equal(0)
+        expect(main_sha256sum([])).to_equal(1)
+        expect(main_sha256sum(["--unknown"])).to_equal(2)
+
+    it "delegates md5sum version, help, and errors to the canonical tool":
+        expect(main_md5sum(["--version"])).to_equal(0)
+        expect(main_md5sum(["--help"])).to_equal(0)
+        expect(main_md5sum([])).to_equal(1)
+        expect(main_md5sum(["--unknown"])).to_equal(2)

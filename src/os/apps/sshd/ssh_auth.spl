@@ -1,8 +1,8 @@
 #![allow(unnamed_duplicate_typed_args)]
 # SSH Authentication — RFC 4252
 #
-# Supports password and public key authentication.
-# Uses plaintext password comparison (SHA-256 may FAULT on baremetal).
+# Supports public-key authentication. Password requests fail closed until the
+# verifier and compiler-resistant secret-zeroization blocker is resolved.
 #
 # Authentication flow:
 #   1. Client sends SSH_MSG_SERVICE_REQUEST for "ssh-userauth"
@@ -11,6 +11,7 @@
 #   4. Server responds SUCCESS or FAILURE
 
 use os.apps.sshd.ssh_packet.{ssh_put_u32, ssh_put_text, ssh_put_string, ssh_put_bool, ssh_put_byte, ssh_get_u32, ssh_get_string, ssh_get_text, ssh_ascii_text_to_bytes, SshTextResult, SshStringResult}
+use os.crypto.ed25519.{ed25519_verify}
 
 # ============================================================================
 # Constants
@@ -26,6 +27,9 @@ val SSH_MSG_USERAUTH_INFO_RESPONSE: u8 = 61
 
 # Maximum authentication attempts before disconnect
 val MAX_AUTH_ATTEMPTS: u32 = 6
+val MAX_USERS: u32 = 64
+val MAX_AUTHORIZED_KEYS_PER_USER: i64 = 128
+val MAX_AUTH_REQUEST_BYTES: i64 = 32768
 
 # ============================================================================
 # Types
@@ -42,11 +46,35 @@ struct SshAuthRequest:
     has_signature: bool  # For publickey: true means verify, false means probe
     signature: [u8]     # For publickey: client's signature over session data
 
+struct SshPasswordVerifier:
+    """Versioned verifier record; plaintext passwords are never retained."""
+    version: text
+    salt: [u8]
+    derived_key: [u8]
+    iterations: i64
+
+struct SshPublicKeyAuthCheck:
+    valid: bool
+    probe_accepted: bool
+    algorithm: text
+    key_blob: [u8]
+
 struct SshUser:
     """A user entry in the authentication database."""
     username: text
-    password: text          # Plaintext password (SHA-256 FAULTs on baremetal)
+    password_verifier: SshPasswordVerifier?
     authorized_keys: [[u8]] # List of public key blobs
+
+fn _ssh_username_safe(username: text) -> bool:
+    if username.len() == 0 or username.len() > 64:
+        return false
+    var i: i64 = 0
+    while i < username.len():
+        val code = username.char_code_at(i)
+        if code < 33 or code > 126:
+            return false
+        i = i + 1
+    true
 
 class SshUserDb:
     """Simple user database for SSH authentication."""
@@ -58,20 +86,45 @@ impl SshUserDb:
         """Create an empty user database."""
         SshUserDb(users: [])
 
-    me add_user(username: text, password_val: text):
-        """Add a user with a password (plaintext storage for baremetal)."""
+    me add_user_identity(username: text):
+        """Add a bounded identity; authentication material is attached separately."""
+        if not _ssh_username_safe(username) or self.users.len().to_u32() >= MAX_USERS:
+            return
+        for existing in self.users:
+            if existing.username == username:
+                return
         self.users.push(SshUser(
             username: username,
-            password: password_val,
+            password_verifier: nil,
             authorized_keys: []
         ))
 
     me add_user_key(username: text, key_blob: [u8]):
         """Add an authorized public key for an existing user."""
+        if _ssh_public_key_material(key_blob).len() != 32:
+            return
         var i: u64 = 0
         while i < self.users.len():
             if self.users[i].username == username:
-                self.users[i].authorized_keys.push(key_blob)
+                if self.users[i].authorized_keys.len() >= MAX_AUTHORIZED_KEYS_PER_USER:
+                    return
+                for existing in self.users[i].authorized_keys:
+                    if _blobs_equal(existing, key_blob):
+                        return
+                var user = self.users[i]
+                user.authorized_keys.push(key_blob)
+                self.users[i] = user
+                return
+            i = i + 1
+
+    me add_password_verifier(username: text, verifier: SshPasswordVerifier):
+        """Attach an operator-provisioned verifier record, never plaintext."""
+        var i: u64 = 0
+        while i < self.users.len():
+            if self.users[i].username == username:
+                var user = self.users[i]
+                user.password_verifier = verifier
+                self.users[i] = user
                 return
             i = i + 1
 
@@ -84,19 +137,20 @@ impl SshUserDb:
             i = i + 1
         nil
 
-    fn authenticate_password(username: text, password_val: text) -> bool:
-        """Check password against stored plaintext.
-        Password compare is constant-time (_blobs_equal) to avoid a timing
-        side-channel on the secret; username compare stays plain (not secret)."""
-        var i: u64 = 0
-        while i < self.users.len():
-            val user = self.users[i]
-            if user.username == username:
-                var stored_bytes: [u8] = ssh_ascii_text_to_bytes(user.password)
-                var given_bytes: [u8] = ssh_ascii_text_to_bytes(password_val)
-                if _blobs_equal(stored_bytes, given_bytes):
+    fn has_authorized_key() -> bool:
+        for user in self.users:
+            for key_blob in user.authorized_keys:
+                if _ssh_public_key_material(key_blob).len() == 32:
                     return true
-            i = i + 1
+        false
+
+    fn authenticate_password(username: text, password_val: text) -> bool:
+        """Password authentication is fail-closed until verifier zeroization is proven.
+
+        Do not reintroduce plaintext comparison: the repository has no
+        compiler-resistant wipe primitive for password/KDF temporaries.
+        Public-key authentication remains available through authenticate_key.
+        """
         false
 
     fn authenticate_key(username: text, key_blob: [u8]) -> bool:
@@ -118,18 +172,13 @@ impl SshUserDb:
 
         false
 
-fn sshd_create_default_users() -> SshUserDb:
-    """Create default user database for SSH daemon.
-
-    Standalone function to avoid method resolution ambiguity
-    between SshDaemon.add_user and SshUserDb.add_user in Cranelift codegen.
-    """
-    var db = SshUserDb.new()
-    db.add_user("root", "simpleos")
-    db.add_user("user", "password")
-    db
 
 # ============================================================================
+# Deprecated compatibility constructor; production-safe empty DB. Historical
+# callers must migrate to an operator-supplied SshdCredentialProvider.
+fn sshd_create_default_users() -> SshUserDb:
+    SshUserDb.new()
+
 # Message Parsing
 # ============================================================================
 
@@ -143,7 +192,7 @@ fn ssh_parse_auth_request(data: [u8]) -> Result<SshAuthRequest, text>:
       string    method name ("password", "publickey", "none")
       ... method-specific fields ...
     """
-    if data.len() < 2:
+    if data.len() < 2 or data.len() > MAX_AUTH_REQUEST_BYTES:
         return Err("USERAUTH_REQUEST too short")
     if data[0] != SSH_MSG_USERAUTH_REQUEST:
         return Err("not a USERAUTH_REQUEST")
@@ -158,6 +207,8 @@ fn ssh_parse_auth_request(data: [u8]) -> Result<SshAuthRequest, text>:
             off = user_pair.next_offset
         Err(_):
             return Err("USERAUTH: bad username")
+    if not _ssh_username_safe(username):
+        return Err("USERAUTH: invalid username")
 
     # Service name
     var service: text = ""
@@ -167,6 +218,8 @@ fn ssh_parse_auth_request(data: [u8]) -> Result<SshAuthRequest, text>:
             off = svc_pair.next_offset
         Err(_):
             return Err("USERAUTH: bad service")
+    if service != "ssh-connection":
+        return Err("USERAUTH: unsupported service")
 
     # Method name
     var method: text = ""
@@ -184,62 +237,54 @@ fn ssh_parse_auth_request(data: [u8]) -> Result<SshAuthRequest, text>:
     var signature: [u8] = []
 
     if method == "password":
-        # bool    FALSE (no password change)
-        # string  plaintext password
-        if off < data.len():
-            off = off + 1   # skip bool byte
-        match ssh_get_text(data, off):
-            Ok(pw_pair):
-                password_val = pw_pair.value
-                off = pw_pair.next_offset
-            Err(_):
-                pass_do_nothing("password auth request has no password field")
+        # Fail before decoding the secret into immutable text. Password auth
+        # remains unavailable until compiler-resistant temporary zeroization
+        # exists and is covered by evidence.
+        return Err("USERAUTH: password authentication disabled")
 
     elif method == "publickey":
         # bool    has_signature
         # string  public key algorithm name
         # string  public key blob
         # [string signature]  — only present when has_signature is true
-        if off < data.len():
-            has_signature = data[off] != 0
-            off = off + 1
+        if off >= data.len() or data[off] > 1:
+            return Err("USERAUTH: bad publickey signature flag")
+        has_signature = data[off] == 1
+        off = off + 1
         match ssh_get_text(data, off):
             Ok(algo_pair):
                 key_algo = algo_pair.value
                 off = algo_pair.next_offset
             Err(_):
-                pass_do_nothing("publickey auth request has no algorithm field")
+                return Err("USERAUTH: missing publickey algorithm")
+        if key_algo != "ssh-ed25519":
+            return Err("USERAUTH: unsupported publickey algorithm")
         match ssh_get_string(data, off):
             Ok(blob_pair):
                 key_blob = blob_pair.data
                 off = blob_pair.next_offset
             Err(_):
-                pass_do_nothing("publickey auth request has no key blob")
+                return Err("USERAUTH: missing publickey blob")
+        if _ssh_public_key_material(key_blob).len() != 32:
+            return Err("USERAUTH: malformed publickey blob")
         # Read signature if has_signature is true
-        if has_signature and off < data.len():
+        if has_signature:
+            if off >= data.len():
+                return Err("USERAUTH: missing publickey signature")
             match ssh_get_string(data, off):
                 Ok(sig_pair):
                     signature = sig_pair.data
                     off = sig_pair.next_offset
                 Err(_):
-                    pass_do_nothing("publickey auth request has no signature")
+                    return Err("USERAUTH: missing publickey signature")
+            if _ssh_public_key_signature(signature, key_algo).len() != 64:
+                return Err("USERAUTH: malformed publickey signature")
 
-    elif method == "keyboard-interactive":
-        # string language tag
-        # string submethods
-        match ssh_get_text(data, off):
-            Ok(lang_pair):
-                off = lang_pair.next_offset
-            Err(_):
-                pass_do_nothing("keyboard-interactive auth request has no language tag")
-        match ssh_get_text(data, off):
-            Ok(submethods_pair):
-                off = submethods_pair.next_offset
-            Err(_):
-                pass_do_nothing("keyboard-interactive auth request has no submethods")
+    elif method != "none":
+        return Err("USERAUTH: unsupported authentication method")
 
-    # method == "none" has no additional fields
-
+    if off != data.len():
+        return Err("USERAUTH: trailing method data")
     Ok(SshAuthRequest(
         username: username,
         service: service,
@@ -250,6 +295,84 @@ fn ssh_parse_auth_request(data: [u8]) -> Result<SshAuthRequest, text>:
         has_signature: has_signature,
         signature: signature
     ))
+
+fn _ssh_public_key_material(key_blob: [u8]) -> [u8]:
+    if key_blob.len() > 256:
+        return []
+    val key_type = ssh_get_text(key_blob, 0)
+    match key_type:
+        case Err(_): return []
+        case Ok(type_pair):
+            if type_pair.value != "ssh-ed25519":
+                return []
+            val key = ssh_get_string(key_blob, type_pair.next_offset)
+            match key:
+                case Err(_): return []
+                case Ok(key_pair):
+                    if key_pair.next_offset != key_blob.len() or key_pair.data.len() != 32:
+                        return []
+                    key_pair.data
+
+fn _ssh_public_key_signature(signature: [u8], algorithm: text) -> [u8]:
+    if signature.len() > 256:
+        return []
+    val signature_type = ssh_get_text(signature, 0)
+    match signature_type:
+        case Err(_): return []
+        case Ok(type_pair):
+            if type_pair.value != algorithm:
+                return []
+            val raw = ssh_get_string(signature, type_pair.next_offset)
+            match raw:
+                case Err(_): return []
+                case Ok(raw_pair):
+                    if raw_pair.next_offset != signature.len() or raw_pair.data.len() != 64:
+                        return []
+                    raw_pair.data
+
+fn _ssh_public_key_signed_data(session_id: [u8], request: SshAuthRequest) -> [u8]:
+    var data: [u8] = []
+    data = ssh_put_string(data, session_id)
+    data = ssh_put_byte(data, SSH_MSG_USERAUTH_REQUEST)
+    data = ssh_put_text(data, request.username)
+    data = ssh_put_text(data, request.service)
+    data = ssh_put_text(data, request.method)
+    data = ssh_put_bool(data, true)
+    data = ssh_put_text(data, request.key_algo)
+    ssh_put_string(data, request.key_blob)
+
+fn ssh_check_public_key_auth(
+    request: SshAuthRequest,
+    session_id: [u8],
+    user_db: SshUserDb
+) -> SshPublicKeyAuthCheck:
+    val rejected = SshPublicKeyAuthCheck(
+        valid: false, probe_accepted: false,
+        algorithm: request.key_algo, key_blob: request.key_blob)
+    if request.method != "publickey" or request.service != "ssh-connection" or
+        not _ssh_username_safe(request.username) or
+        request.key_algo != "ssh-ed25519" or session_id.len() < 32 or
+        session_id.len() > 64:
+        return rejected
+    val public_key = _ssh_public_key_material(request.key_blob)
+    if public_key.len() != 32 or not user_db.authenticate_key(
+        request.username, request.key_blob):
+        return rejected
+    if not request.has_signature:
+        if request.signature.len() != 0:
+            return rejected
+        return SshPublicKeyAuthCheck(
+            valid: false, probe_accepted: true,
+            algorithm: request.key_algo, key_blob: request.key_blob)
+    val signature = _ssh_public_key_signature(request.signature, request.key_algo)
+    if signature.len() != 64:
+        return rejected
+    val signed_data = _ssh_public_key_signed_data(session_id, request)
+    SshPublicKeyAuthCheck(
+        valid: ed25519_verify(public_key, signed_data, signature),
+        probe_accepted: false,
+        algorithm: request.key_algo,
+        key_blob: request.key_blob)
 
 # ============================================================================
 # Message Builders
@@ -351,11 +474,6 @@ fn ssh_parse_userauth_info_response(data: [u8]) -> Result<text, text>:
         Err(_):
             Err("USERAUTH_INFO_RESPONSE bad response")
 
-# NOTE: Public key authentication is currently DISABLED in ssh_session.spl.
-# To enable it, implement Ed25519 signature verification for userauth here.
-# The Ed25519 verify primitive is available at os.crypto.ed25519.ed25519_verify.
-# The signed data format is defined in RFC 4252 section 7.
-
 # ============================================================================
 # Internal Helpers
 # ============================================================================
@@ -373,4 +491,7 @@ fn _blobs_equal(a: [u8], b: [u8]) -> bool:
 
     diff == 0
 
-export SSH_MSG_USERAUTH_REQUEST, SSH_MSG_USERAUTH_FAILURE, SSH_MSG_USERAUTH_PK_OK, SSH_MSG_USERAUTH_SUCCESS, MAX_AUTH_ATTEMPTS
+export SshPasswordVerifier, SshPublicKeyAuthCheck
+export SSH_MSG_USERAUTH_REQUEST, SSH_MSG_USERAUTH_FAILURE, SSH_MSG_USERAUTH_PK_OK, SSH_MSG_USERAUTH_SUCCESS
+export MAX_AUTH_ATTEMPTS, MAX_AUTHORIZED_KEYS_PER_USER, sshd_create_default_users
+export ssh_check_public_key_auth

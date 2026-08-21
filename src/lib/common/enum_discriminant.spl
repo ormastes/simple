@@ -1,0 +1,79 @@
+# Checked enum-discriminant decoding (hardening plan 2026-08-21 §10.1).
+#
+# §10.1 requires that for a `@closed` enum "every discriminant is validated on
+# decode" and "unknown discriminants fail decode". A checker can prove the
+# DECLARATION is well formed, but the decode itself happens at runtime on data
+# the compiler never saw, so it needs a runtime primitive.
+#
+# This is that primitive, and it is deliberately CODEGEN-FREE: it is a plain
+# table lookup over the enum's declared discriminants, not a compiler
+# intrinsic and not reflection. A truly generic
+# `closed_from_discriminant<E>(raw)` cannot exist without runtime reflection
+# over E's variants -- Simple has no such facility today -- so the table is
+# passed in. The generic obligation ("every declared discriminant decodes back
+# to itself; anything else fails") is what this type enforces, and it is
+# enforced identically for every enum that uses it.
+#
+# There was no existing enum-discriminant API in src/lib/common to extend:
+# `/usr/bin/grep -rn discriminant src/lib/common/` before this file returned
+# only JavaScript-engine `switch` statement fields.
+
+struct InvalidDiscriminant:
+    """A raw value that names no declared variant."""
+    enum_name: text
+    raw: i64
+
+impl InvalidDiscriminant:
+    fn message() -> text:
+        "invalid discriminant " + self.raw.to_text() + " for closed enum '" + self.enum_name + "'"
+
+struct ClosedDiscriminantTable:
+    """The declared discriminants of one `@closed` enum, as parallel arrays.
+
+    `values[i]` is the discriminant of the variant named `names[i]`. Parallel
+    arrays rather than a Dict so the decode path allocates nothing and so the
+    declaration order -- which is the order the checker reports in -- is
+    preserved."""
+    enum_name: text
+    names: [text]
+    values: [i64]
+
+impl ClosedDiscriminantTable:
+    fn decode(raw: i64) -> Result<text, InvalidDiscriminant>:
+        """Variant name for `raw`, or `InvalidDiscriminant`.
+
+        Fail-closed: an undeclared value is an error, never a silent fallback
+        to variant zero. The name is returned rather than a value of the enum
+        because the table has no way to construct one; the caller's generated
+        `from_discriminant` maps the name back, and the property that matters
+        -- roundtrip for every declared value, failure for every other -- is
+        decided entirely here."""
+        var i = 0
+        while i < self.values.len():
+            if self.values[i] == raw:
+                return Ok(self.names[i])
+            i = i + 1
+        Err(InvalidDiscriminant(enum_name: self.enum_name, raw: raw))
+
+    fn encode(name: text) -> Result<i64, InvalidDiscriminant>:
+        """Discriminant for a declared variant name; the inverse of `decode`.
+
+        Present so the roundtrip property is checkable in both directions from
+        the table alone; `InvalidDiscriminant.raw` is -1 for an unknown NAME,
+        since no raw value was involved."""
+        var i = 0
+        while i < self.names.len():
+            if self.names[i] == name:
+                return Ok(self.values[i])
+            i = i + 1
+        Err(InvalidDiscriminant(enum_name: self.enum_name, raw: -1))
+
+    fn is_valid(raw: i64) -> bool:
+        var i = 0
+        while i < self.values.len():
+            if self.values[i] == raw:
+                return true
+            i = i + 1
+        false
+
+export InvalidDiscriminant, ClosedDiscriminantTable

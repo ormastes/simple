@@ -10,7 +10,7 @@ use compiler.core.parser.{parser_has_errors, parser_get_errors, parser_init_with
 use compiler.frontend.core.string_interpolation_expand.{expand_string_interpolations}
 use compiler.frontend.desugar.placeholder_lambda.{transform_placeholder_call_args_after_interpolation}
 use compiler.semantics.layer_dag_checker.{LayerDagRegistry, check_layer_dag}
-use compiler.core.parser_decls.{parse_module_body}
+use compiler.core.parser_decls.{parse_module_body, parser_enum_attributes_for}
 use compiler.core.ast.*
 use compiler.core.ast.{decl_get_body, decl_get_field_bits, decl_get_field_defaults, decl_get_field_types, decl_get_fields}
 use compiler.core.ast.{decl_get_imports, decl_get_is_comptime, decl_get_is_lazy, decl_get_name, decl_get_param_names}
@@ -451,7 +451,8 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                 is_public: decl_get_visibility_text(idx) == "public",
                 has_doc_comment: false,
                 doc_comment: "",
-                span: span
+                span: span,
+                attributes: parser_enum_attributes_for(e_name)
             )
         elif tag_text == "9":
             val target_name = decl_get_name(idx)
@@ -831,6 +832,26 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                 is_public: decl_get_visibility_text(idx) == "public",
                 span: span
             )
+        else:
+            # Lane C2 (flat-bridge transition census). Until this arm existed
+            # the decl dispatch chain above simply RAN OFF THE END for any tag
+            # with no arm: the declaration was dropped from the module with no
+            # diagnostic at all -- the same silent-loss class as the
+            # convert_flat_expr / convert_flat_stmt NilLit catch-alls (see
+            # flat_bridge_report_unhandled_node in convert_nodes.spl and
+            # doc/08_tracking/bug/spawn_call_expr_silently_becomes_nillit_2026-07-29.md),
+            # but strictly worse, because a dropped decl leaves no node behind
+            # at all. Three tags reach here from REAL source today --
+            # DECL_CE (11, decl_ce_block), DECL_LAZY_VAL (12,
+            # decl_lazy_val_binding) and DECL_CLI (13, decl_cli_def), all
+            # allocated by _Ast/decl_nodes.spl. Route the fallback through the
+            # parser's real error channel so parser_has_errors() goes true,
+            # then keep going (error recovery, not a hard stop) so the rest of
+            # the module still converts.
+            parser_error("flat AST bridge: unhandled decl node kind (tag=" +
+                tag_text + ") silently dropped from the module -- add an arm to " +
+                "module_assembly.spl's flat_ast_to_module decl loop (see " +
+                "doc/08_tracking/bug/spawn_call_expr_silently_becomes_nillit_2026-07-29.md)")
         di = di + 1
         if flat_bootstrap_enabled() and flat_bridge_trace_enabled():
             eprint("[flat-bridge] decl:done {di}")

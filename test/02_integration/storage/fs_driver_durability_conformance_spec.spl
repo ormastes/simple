@@ -1,0 +1,116 @@
+"""
+Shared filesystem durability conformance.
+
+Every adapter may advertise DurableSync only when a real durable owner exists.
+The current FAT32, DBFS, NVFS, and NVFS-POSIX paths fail closed with Unsupported because
+their present flush path has no block-device barrier. No adapter may report a
+successful no-op for a volatile/non-durable implementation.
+"""
+
+use std.spipe.*
+use std.fs_driver.instance.{DriverInstance}
+use std.fs_driver.mount_table.{MountTable}
+use std.fs_driver.types.{MountOptions, OpenFlags}
+use std.fs_driver.capability.{Capability, FsCapabilitySet}
+use std.fs_driver.error.{FsError}
+use std.fs_driver.ramfs.{RamFsDriver}
+use std.fs_driver.fat32_stub.{FsFat32Driver}
+use std.fs_driver.nvfs_driver.{NvfsDriver}
+use std.fs_driver.nvfs_posix_driver.{NvfsPosixDriver}
+use std.db.dbfs_driver.{DbFsDriver}
+use std.fs_driver.block_device.{BlockDevice, BlockDeviceDurabilityPortV1}
+
+struct UnsupportedDurabilityProbe:
+    marker: i64
+
+impl BlockDevice for UnsupportedDurabilityProbe:
+    fn read_sector(lba: u64) -> Result<[u8], text>:
+        val _ = lba
+        Err("probe: read unavailable")
+
+    fn write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
+        val _ = lba
+        val _ = data
+        Err("probe: write unavailable")
+
+    fn sector_size() -> u32:
+        512
+
+impl BlockDeviceDurabilityPortV1 for UnsupportedDurabilityProbe:
+    fn flush_ordered() -> Result<bool, text>:
+        Err("durability owner unavailable: no acknowledged device flush")
+
+    fn fua_ordered() -> Result<bool, text>:
+        Err("durability owner unavailable: no acknowledged FUA boundary")
+
+fn has_durable(mt: MountTable) -> bool:
+    val entry = mt.lookup_text("/")
+    match entry:
+        case Some(value):
+            val caps = FsCapabilitySet(bits: value.active_caps)
+            caps.has(Capability.DurableSync)
+        case nil:         false
+
+describe "FsDriver durability conformance":
+    it "default block-device durability methods fail closed exactly":
+        val probe = UnsupportedDurabilityProbe(marker: 0)
+        expect(probe.flush().unwrap_err()).to_equal("block device does not support durable flush")
+        expect(probe.flush_ordered().unwrap_err()).to_equal("durability owner unavailable: no acknowledged device flush")
+        expect(probe.fua_ordered().unwrap_err()).to_equal("durability owner unavailable: no acknowledged FUA boundary")
+
+    it "RamFS fails closed because it has no durable backend":
+        var mt = MountTable.new()
+        mt.mount("/", DriverInstance.RamFs(driver: RamFsDriver.new()), MountOptions.default())
+        expect(has_durable(mt)).to_be(false)
+        val handle = mt.open("/volatile", OpenFlags.create_write()).unwrap()
+        expect(mt.fsync(handle).unwrap_err()).to_equal(FsError.Unsupported)
+        expect(mt.fdatasync(handle).unwrap_err()).to_equal(FsError.Unsupported)
+
+    it "FAT32 fails closed until a durable sync implementation is provided":
+        var mt = MountTable.new()
+        mt.mount("/", DriverInstance.Fat32(driver: FsFat32Driver.new_ram_backed()), MountOptions.default())
+        expect(has_durable(mt)).to_be(false)
+        val handle = mt.open("/fat-volatile", OpenFlags.create_write()).unwrap()
+        expect(mt.fsync(handle).unwrap_err()).to_equal(FsError.Unsupported)
+        expect(mt.fdatasync(handle).unwrap_err()).to_equal(FsError.Unsupported)
+
+    it "DBFS refuses durability until WAL commit reaches a device barrier":
+        var mt = MountTable.new()
+        mt.mount("/", DriverInstance.DbFs(driver: DbFsDriver.new_hosted()), MountOptions.default())
+        expect(has_durable(mt)).to_be(false)
+        val handle = mt.open("/durable", OpenFlags.create_write()).unwrap()
+        expect(mt.fsync(handle).unwrap_err()).to_equal(FsError.Unsupported)
+        expect(mt.fdatasync(handle).unwrap_err()).to_equal(FsError.Unsupported)
+
+    it "NVFS refuses durability until its backend exposes Flush or FUA":
+        var mt = MountTable.new()
+        mt.mount("/", DriverInstance.Nvfs(driver: NvfsDriver.new("nvfs")), MountOptions.default())
+        expect(has_durable(mt)).to_be(false)
+        val handle = mt.open("/nvfs-durable", OpenFlags.create_write()).unwrap()
+        expect(mt.fsync(handle).unwrap_err()).to_equal(FsError.Unsupported)
+        expect(mt.fdatasync(handle).unwrap_err()).to_equal(FsError.Unsupported)
+
+    it "NVFS-POSIX refuses durability until its backend exposes Flush or FUA":
+        var mt = MountTable.new()
+        mt.mount("/", DriverInstance.NvfsPosix(driver: NvfsPosixDriver.new("nvfs-posix")), MountOptions.default())
+        expect(has_durable(mt)).to_be(false)
+        val handle = mt.open("/nvfs-posix-durable", OpenFlags.create_write()).unwrap()
+        expect(mt.fsync(handle).unwrap_err()).to_equal(FsError.Unsupported)
+        expect(mt.fdatasync(handle).unwrap_err()).to_equal(FsError.Unsupported)
+
+    it "capability-gated sync rejects a mount whose request excludes durability":
+        var mt = MountTable.new()
+        var opts = MountOptions.default()
+        opts.want_caps = (1 << 23)
+        mt.mount("/", DriverInstance.DbFs(driver: DbFsDriver.new_hosted()), opts)
+        expect(has_durable(mt)).to_be(false)
+        val handle = mt.open("/not-durable", OpenFlags.create_write()).unwrap()
+        expect(mt.fsync(handle).unwrap_err()).to_equal(FsError.Unsupported)
+
+    it "rejects sync through a released global handle before capability dispatch":
+        var mt = MountTable.new()
+        mt.mount("/", DriverInstance.RamFs(driver: RamFsDriver.new()), MountOptions.default())
+        val handle = mt.open("/stale", OpenFlags.create_write()).unwrap()
+        mt.close(handle).unwrap()
+        expect(mt.fsync(handle).unwrap_err()).to_equal(FsError.StaleHandle)
+        expect(mt.fdatasync(handle).unwrap_err()).to_equal(FsError.StaleHandle)

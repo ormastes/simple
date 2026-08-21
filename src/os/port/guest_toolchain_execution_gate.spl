@@ -1,18 +1,582 @@
-# DEPRECATED (desktop SimpleOS): this gate demands the static-relinked
-# `clang_static`/`rustc_static` guest binaries — a stand-in for a real loader.
-# The proper path is the general FS-exec loader launching an ordinary on-disk
-# `x86_64-unknown-simpleos` ELF from /usr/bin/clang (or a SIMPLEOS_TOOLCHAIN_DIR
-# env path). Kept only as a legacy fallback until the FS-exec lane (FR-SOS-020+,
-# doc/02_requirements/os/simpleos/simpleos_os_subsystem_feature_requests.md) is
-# complete. Do NOT build new desktop work on the static path. See
-# doc/07_guide/os/simpleos_llvm_toolchain.md § "Desktop SimpleOS launch policy".
-pub fn guest_toolchain_execution_gate_detail(clang_static_ready: bool, rustc_static_ready: bool, bake_enabled: bool) -> text:
-    """Return READY or a concrete blocker list for real in-guest compiler execution.
+# Target-native SimpleOS toolchain execution evidence gate (REQ-009/010).
+#
+# Host staging, file presence, serial markers, PATH lookup, and host process
+# execution are deliberately insufficient. This module validates a bounded
+# candidate for the cryptographic evidence-service owner; it never promotes a
+# candidate directly to a capability-ledger PASS.
 
-    DEPRECATED on desktop SimpleOS (static-relink workaround; kept as legacy
-    fallback until the FS-exec loader can launch /usr/bin/clang). See the banner
-    above and the toolchain guide's launch-policy section.
-    """
+use std.common.crypto.sha256.{sha256_text}
+use std.common.structural.digest.hash256.{hash256_hex_valid, hash256_is_zero}
+use std.common.contracts.execution.simpleos_target_v1.{
+    simpleos_target_v1_abi_for_triple,
+    SIMPLEOS_TARGET_V1_X86_64_TRIPLE,
+    SIMPLEOS_TARGET_V1_AARCH64_TRIPLE,
+    SIMPLEOS_TARGET_V1_RISCV64GC_TRIPLE
+}
+
+pub const GUEST_TOOLCHAIN_EXECUTION_RECEIPT_V1: i64 = 1
+pub const GUEST_TOOLCHAIN_EXECUTION_REQUIRED_ROLE_COUNT: i64 = 12
+pub const GUEST_TOOLCHAIN_EXECUTION_REQUIRED_ALIAS_COUNT: i64 = 6
+pub const GUEST_TOOLCHAIN_EXECUTION_MAX_ARGV: i64 = 32
+pub const GUEST_TOOLCHAIN_EXECUTION_MAX_SCALAR_BYTES: i64 = 512
+pub const GUEST_TOOLCHAIN_EXECUTION_MAX_OUTPUT_BYTES: i64 = 65536
+
+pub enum GuestToolchainRole:
+    SimpleCompiler
+    SimpleInterpreter
+    SimpleLoader
+    Llvm
+    Clang
+    Clangxx
+    Lld
+    SimpleVersionWorkflow
+    SimpleInterpretWorkflow
+    SimpleCompileWorkflow
+    SimpleLoadWorkflow
+    SimpleRerunAfterSourceDeleteWorkflow
+
+pub enum GuestToolchainFilesystem:
+    Fat32
+    Dbfs
+    Nvfs
+
+pub enum GuestToolchainExecutionReceiptError:
+    InvalidSchema
+    InvalidTarget
+    InvalidAbi
+    InvalidReceiptIdentity
+    InvalidChainDigest
+    MissingRole
+    DuplicateRole
+    WrongRoleOrder
+    WrongRoleTarget
+    WrongRoleFilesystem
+    WrongRoleArtifactPath
+    InvalidArtifactDigest
+    InvalidSourcePath
+    InvalidSourceDigest
+    InvalidWorkingDirectory
+    InvalidArgv
+    PathLookupForbidden
+    HostFallbackForbidden
+    GuestExecutionRequired
+    OutputTooLarge
+    OutputMismatch
+    OutputDigestMismatch
+    ExitMismatch
+    InvalidResultArtifact
+    InvalidSourceDeletionClaim
+    WorkflowSourceMismatch
+    WorkflowArtifactMismatch
+    WorkflowOutputMismatch
+    MissingAlias
+    DuplicateAlias
+    WrongAliasOrder
+    WrongAliasPath
+    WrongAliasRole
+    AliasDigestMismatch
+    InvalidManifestPath
+    InvalidManifestDigest
+    ManifestRoleDigestMismatch
+    ManifestContractDigestMismatch
+    ReceiptPayloadDigestMismatch
+
+pub struct GuestToolchainRoleExecutionV1:
+    role: GuestToolchainRole
+    target_triple: text
+    target_abi: text
+    filesystem_source: GuestToolchainFilesystem
+    tool_artifact_path: text
+    tool_artifact_sha256: text
+    source_path: text
+    source_sha256: text
+    result_artifact_path: text
+    result_artifact_sha256: text
+    working_directory: text
+    argv: [text]
+    expected_stdout: text
+    observed_stdout: text
+    expected_stderr: text
+    observed_stderr: text
+    expected_exit_code: i64
+    observed_exit_code: i64
+    observed_output_sha256: text
+    executed_in_guest: bool
+    used_path_lookup: bool
+    used_host_process: bool
+    source_deleted_before_execution: bool
+
+pub struct GuestToolchainAliasBindingV1:
+    guest_path: text
+    intended_role: GuestToolchainRole
+    artifact_sha256: text
+
+pub struct GuestToolchainExecutionReceiptV1:
+    schema_version: i64
+    receipt_id: text
+    nonce: text
+    target_triple: text
+    target_abi: text
+    filesystem_source: GuestToolchainFilesystem
+    image_sha256: text
+    sysroot_sha256: text
+    boot_receipt_sha256: text
+    mount_receipt_sha256: text
+    loader_receipt_sha256: text
+    roles: [GuestToolchainRoleExecutionV1]
+    aliases: [GuestToolchainAliasBindingV1]
+    manifest_path: text
+    manifest_sha256: text
+    manifest_compiler_sha256: text
+    manifest_interpreter_sha256: text
+    manifest_loader_sha256: text
+    # Frozen candidate payload for a future evidence-service signature. This
+    # detects mutation but does not mint authority or a loader token.
+    receipt_payload_sha256: text
+
+fn _safe_scalar(value: text) -> bool:
+    value.len() > 0 and value.len() <= GUEST_TOOLCHAIN_EXECUTION_MAX_SCALAR_BYTES and
+        not value.contains("\0") and not value.contains("\n") and
+        not value.contains("\r")
+
+fn _absolute_guest_path(path: text) -> bool:
+    _safe_scalar(path) and path.starts_with("/") and not path.contains("//") and
+        not path.contains("/./") and not path.contains("/../") and
+        not path.ends_with("/.") and not path.ends_with("/..") and
+        not path.contains("\\")
+
+fn _required_target(target: text) -> bool:
+    target == SIMPLEOS_TARGET_V1_X86_64_TRIPLE or
+        target == SIMPLEOS_TARGET_V1_AARCH64_TRIPLE or
+        target == SIMPLEOS_TARGET_V1_RISCV64GC_TRIPLE
+
+fn _nonzero_hash(value: text) -> bool:
+    hash256_hex_valid(value) and not hash256_is_zero(value)
+
+fn _role_index(role: GuestToolchainRole) -> i64:
+    match role:
+        GuestToolchainRole.SimpleCompiler: 0
+        GuestToolchainRole.SimpleInterpreter: 1
+        GuestToolchainRole.SimpleLoader: 2
+        GuestToolchainRole.Llvm: 3
+        GuestToolchainRole.Clang: 4
+        GuestToolchainRole.Clangxx: 5
+        GuestToolchainRole.Lld: 6
+        GuestToolchainRole.SimpleVersionWorkflow: 7
+        GuestToolchainRole.SimpleInterpretWorkflow: 8
+        GuestToolchainRole.SimpleCompileWorkflow: 9
+        GuestToolchainRole.SimpleLoadWorkflow: 10
+        GuestToolchainRole.SimpleRerunAfterSourceDeleteWorkflow: 11
+
+pub fn guest_toolchain_role_canonical_path(role: GuestToolchainRole) -> text:
+    match role:
+        GuestToolchainRole.SimpleCompiler: "/sys/apps/simple_compiler.smf"
+        GuestToolchainRole.SimpleInterpreter: "/sys/apps/simple_interpreter.smf"
+        GuestToolchainRole.SimpleLoader: "/sys/apps/simple_loader.smf"
+        GuestToolchainRole.Llvm: "/usr/bin/llvm-ar"
+        GuestToolchainRole.Clang: "/usr/bin/clang"
+        GuestToolchainRole.Clangxx: "/usr/bin/clang++"
+        GuestToolchainRole.Lld: "/usr/bin/ld.lld"
+        GuestToolchainRole.SimpleVersionWorkflow: "/usr/bin/simple"
+        GuestToolchainRole.SimpleInterpretWorkflow: "/sys/apps/simple_interpreter.smf"
+        GuestToolchainRole.SimpleCompileWorkflow: "/sys/apps/simple_compiler.smf"
+        GuestToolchainRole.SimpleLoadWorkflow: "/sys/apps/simple_loader.smf"
+        GuestToolchainRole.SimpleRerunAfterSourceDeleteWorkflow: "/sys/apps/simple_loader.smf"
+
+fn _alias_index(path: text) -> i64:
+    if path == "/usr/bin/simple": return 0
+    if path == "/usr/bin/simple.smf": return 1
+    if path == "/bin/simple": return 2
+    if path == "/bin/simple.smf": return 3
+    if path == "/sys/apps/simple": return 4
+    if path == "/sys/apps/simple.smf": return 5
+    0 - 1
+
+fn _argv_valid(argv: [text], executable: text, source_path: text) -> bool:
+    if argv.len() != 2:
+        return false
+    if argv[0] != executable:
+        return false
+    for arg in argv:
+        if not _safe_scalar(arg):
+            return false
+    argv[1] == source_path
+
+fn _workflow_argv_valid(role: GuestToolchainRoleExecutionV1) -> bool:
+    if role.argv.len() == 0 or role.argv.len() > GUEST_TOOLCHAIN_EXECUTION_MAX_ARGV or
+       role.argv[0] != role.tool_artifact_path:
+        return false
+    for arg in role.argv:
+        if not _safe_scalar(arg):
+            return false
+    if role.role == GuestToolchainRole.SimpleVersionWorkflow:
+        return role.argv.len() == 2 and role.argv[1] == "--version"
+    if role.role == GuestToolchainRole.SimpleInterpretWorkflow:
+        return role.argv.len() == 2 and role.argv[1] == role.source_path
+    if role.role == GuestToolchainRole.SimpleCompileWorkflow:
+        return role.argv.len() == 4 and
+            role.argv[1] == role.source_path and role.argv[2] == "--output" and
+            role.argv[3] == role.result_artifact_path
+    if role.role == GuestToolchainRole.SimpleLoadWorkflow or
+       role.role == GuestToolchainRole.SimpleRerunAfterSourceDeleteWorkflow:
+        return role.argv.len() == 2 and
+            role.argv[1] == role.result_artifact_path
+    _argv_valid(role.argv, role.tool_artifact_path, role.source_path)
+
+pub fn guest_toolchain_role_output_sha256(
+    role: GuestToolchainRoleExecutionV1
+) -> text:
+    # Length prefixes make the transcript unambiguous even when output contains
+    # separators. The role index prevents cross-role output substitution.
+    sha256_text(
+        "toolchain-output-v1|role={_role_index(role.role)}|" +
+        "stdout={role.observed_stdout.len()}:{role.observed_stdout}|" +
+        "stderr={role.observed_stderr.len()}:{role.observed_stderr}|" +
+        "exit={role.observed_exit_code}")
+
+fn _validate_role(
+    role: GuestToolchainRoleExecutionV1,
+    receipt: GuestToolchainExecutionReceiptV1
+) -> Result<(), GuestToolchainExecutionReceiptError>:
+    if role.target_triple != receipt.target_triple:
+        return Err(GuestToolchainExecutionReceiptError.WrongRoleTarget)
+    if role.target_abi != receipt.target_abi:
+        return Err(GuestToolchainExecutionReceiptError.InvalidAbi)
+    if role.filesystem_source != receipt.filesystem_source:
+        return Err(GuestToolchainExecutionReceiptError.WrongRoleFilesystem)
+    if role.tool_artifact_path != guest_toolchain_role_canonical_path(role.role):
+        return Err(GuestToolchainExecutionReceiptError.WrongRoleArtifactPath)
+    if not _nonzero_hash(role.tool_artifact_sha256):
+        return Err(GuestToolchainExecutionReceiptError.InvalidArtifactDigest)
+    if not _absolute_guest_path(role.source_path):
+        return Err(GuestToolchainExecutionReceiptError.InvalidSourcePath)
+    if not _nonzero_hash(role.source_sha256):
+        return Err(GuestToolchainExecutionReceiptError.InvalidSourceDigest)
+    if not _absolute_guest_path(role.result_artifact_path) or
+       not _nonzero_hash(role.result_artifact_sha256):
+        return Err(GuestToolchainExecutionReceiptError.InvalidResultArtifact)
+    if not _absolute_guest_path(role.working_directory):
+        return Err(GuestToolchainExecutionReceiptError.InvalidWorkingDirectory)
+    if not _workflow_argv_valid(role):
+        return Err(GuestToolchainExecutionReceiptError.InvalidArgv)
+    if role.used_path_lookup:
+        return Err(GuestToolchainExecutionReceiptError.PathLookupForbidden)
+    if role.used_host_process:
+        return Err(GuestToolchainExecutionReceiptError.HostFallbackForbidden)
+    if not role.executed_in_guest:
+        return Err(GuestToolchainExecutionReceiptError.GuestExecutionRequired)
+    if role.expected_stdout.len() > GUEST_TOOLCHAIN_EXECUTION_MAX_OUTPUT_BYTES or
+       role.observed_stdout.len() > GUEST_TOOLCHAIN_EXECUTION_MAX_OUTPUT_BYTES or
+       role.expected_stderr.len() > GUEST_TOOLCHAIN_EXECUTION_MAX_OUTPUT_BYTES or
+       role.observed_stderr.len() > GUEST_TOOLCHAIN_EXECUTION_MAX_OUTPUT_BYTES:
+        return Err(GuestToolchainExecutionReceiptError.OutputTooLarge)
+    if role.expected_stdout != role.observed_stdout or
+       role.expected_stderr != role.observed_stderr:
+        return Err(GuestToolchainExecutionReceiptError.OutputMismatch)
+    if not _nonzero_hash(role.observed_output_sha256) or
+       role.observed_output_sha256 != guest_toolchain_role_output_sha256(role):
+        return Err(GuestToolchainExecutionReceiptError.OutputDigestMismatch)
+    if role.expected_exit_code != 0 or role.observed_exit_code != role.expected_exit_code:
+        return Err(GuestToolchainExecutionReceiptError.ExitMismatch)
+    val rerun = role.role == GuestToolchainRole.SimpleRerunAfterSourceDeleteWorkflow
+    if role.source_deleted_before_execution != rerun:
+        return Err(GuestToolchainExecutionReceiptError.InvalidSourceDeletionClaim)
+    Ok(())
+
+fn _role_digest(roles: [GuestToolchainRoleExecutionV1], expected: GuestToolchainRole) -> text:
+    for role in roles:
+        if role.role == expected:
+            return role.tool_artifact_sha256
+    ""
+
+fn _filesystem_name(filesystem: GuestToolchainFilesystem) -> text:
+    match filesystem:
+        GuestToolchainFilesystem.Fat32: "fat32"
+        GuestToolchainFilesystem.Dbfs: "dbfs"
+        GuestToolchainFilesystem.Nvfs: "nvfs"
+
+fn _bool_name(value: bool) -> text:
+    if value: "1" else: "0"
+
+pub fn guest_toolchain_manifest_contract_sha256_v1(
+    receipt: GuestToolchainExecutionReceiptV1
+) -> text:
+    # Canonical role/alias manifest. The authoritative producer must still
+    # re-hash the actual /SYS/SIMPLETOOL.SDN bytes and bind this contract.
+    var canonical = "simpletool-manifest-contract-v1|" +
+        "target={receipt.target_triple.len()}:{receipt.target_triple}|" +
+        "abi={receipt.target_abi.len()}:{receipt.target_abi}|"
+    val required_roles = [
+        GuestToolchainRole.SimpleCompiler,
+        GuestToolchainRole.SimpleInterpreter,
+        GuestToolchainRole.SimpleLoader
+    ]
+    for role in required_roles:
+        val digest = _role_digest(receipt.roles, role)
+        canonical = canonical +
+            "role={_role_index(role)}|digest={digest.len()}:{digest}|"
+    var alias_index = 0
+    while alias_index < GUEST_TOOLCHAIN_EXECUTION_REQUIRED_ALIAS_COUNT:
+        var alias_path = ""
+        var alias_digest = ""
+        for binding in receipt.aliases:
+            if _alias_index(binding.guest_path) == alias_index:
+                alias_path = binding.guest_path
+                alias_digest = binding.artifact_sha256
+        canonical = canonical +
+            "alias={alias_index}|path={alias_path.len()}:{alias_path}|" +
+            "digest={alias_digest.len()}:{alias_digest}|"
+        alias_index = alias_index + 1
+    sha256_text(canonical)
+
+pub fn guest_toolchain_execution_receipt_payload_sha256_v1(
+    receipt: GuestToolchainExecutionReceiptV1
+) -> text:
+    # Output bytes are represented by the already-validated role transcript
+    # digest and lengths, avoiding a quadratic multi-megabyte concatenation.
+    var canonical = "guest-toolchain-execution-receipt-v1|" +
+        "schema={receipt.schema_version}|receipt={receipt.receipt_id.len()}:{receipt.receipt_id}|" +
+        "nonce={receipt.nonce.len()}:{receipt.nonce}|" +
+        "target={receipt.target_triple.len()}:{receipt.target_triple}|" +
+        "abi={receipt.target_abi.len()}:{receipt.target_abi}|" +
+        "filesystem={_filesystem_name(receipt.filesystem_source)}|" +
+        "image={receipt.image_sha256}|sysroot={receipt.sysroot_sha256}|" +
+        "boot={receipt.boot_receipt_sha256}|mount={receipt.mount_receipt_sha256}|" +
+        "loader={receipt.loader_receipt_sha256}|roles={receipt.roles.len()}|"
+    for role in receipt.roles:
+        canonical = canonical + "role={_role_index(role.role)}|" +
+            "target={role.target_triple.len()}:{role.target_triple}|" +
+            "abi={role.target_abi.len()}:{role.target_abi}|" +
+            "filesystem={_filesystem_name(role.filesystem_source)}|" +
+            "tool={role.tool_artifact_path.len()}:{role.tool_artifact_path}|" +
+            "tool-digest={role.tool_artifact_sha256}|" +
+            "source={role.source_path.len()}:{role.source_path}|" +
+            "source-digest={role.source_sha256}|" +
+            "result={role.result_artifact_path.len()}:{role.result_artifact_path}|" +
+            "result-digest={role.result_artifact_sha256}|" +
+            "cwd={role.working_directory.len()}:{role.working_directory}|" +
+            "argc={role.argv.len()}|"
+        for arg in role.argv:
+            canonical = canonical + "arg={arg.len()}:{arg}|"
+        canonical = canonical +
+            "stdout-len={role.observed_stdout.len()}|stderr-len={role.observed_stderr.len()}|" +
+            "exit={role.observed_exit_code}|output={role.observed_output_sha256}|" +
+            "guest={_bool_name(role.executed_in_guest)}|" +
+            "path={_bool_name(role.used_path_lookup)}|" +
+            "host={_bool_name(role.used_host_process)}|" +
+            "deleted={_bool_name(role.source_deleted_before_execution)}|"
+    canonical = canonical + "aliases={receipt.aliases.len()}|"
+    for binding in receipt.aliases:
+        canonical = canonical +
+            "alias={binding.guest_path.len()}:{binding.guest_path}|" +
+            "role={_role_index(binding.intended_role)}|" +
+            "digest={binding.artifact_sha256}|"
+    canonical = canonical +
+        "manifest={receipt.manifest_path.len()}:{receipt.manifest_path}|" +
+        "manifest-digest={receipt.manifest_sha256}|" +
+        "compiler={receipt.manifest_compiler_sha256}|" +
+        "interpreter={receipt.manifest_interpreter_sha256}|" +
+        "loader-role={receipt.manifest_loader_sha256}|"
+    sha256_text(canonical)
+
+fn _validate_workflow_role_bindings(
+    receipt: GuestToolchainExecutionReceiptV1
+) -> Result<(), GuestToolchainExecutionReceiptError>:
+    val compiler_digest = _role_digest(receipt.roles, GuestToolchainRole.SimpleCompiler)
+    val interpreter_digest = _role_digest(receipt.roles, GuestToolchainRole.SimpleInterpreter)
+    val loader_digest = _role_digest(receipt.roles, GuestToolchainRole.SimpleLoader)
+    for role in receipt.roles:
+        if (role.role == GuestToolchainRole.SimpleVersionWorkflow or
+            role.role == GuestToolchainRole.SimpleCompileWorkflow) and
+           role.tool_artifact_sha256 != compiler_digest:
+            return Err(GuestToolchainExecutionReceiptError.AliasDigestMismatch)
+        if role.role == GuestToolchainRole.SimpleInterpretWorkflow and
+           role.tool_artifact_sha256 != interpreter_digest:
+            return Err(GuestToolchainExecutionReceiptError.AliasDigestMismatch)
+        if (role.role == GuestToolchainRole.SimpleLoadWorkflow or
+            role.role == GuestToolchainRole.SimpleRerunAfterSourceDeleteWorkflow) and
+           role.tool_artifact_sha256 != loader_digest:
+            return Err(GuestToolchainExecutionReceiptError.AliasDigestMismatch)
+    Ok(())
+
+fn _validate_workflow_chain(
+    receipt: GuestToolchainExecutionReceiptV1
+) -> Result<(), GuestToolchainExecutionReceiptError>:
+    var interpret_source_path = ""
+    var interpret_source_digest = ""
+    var interpret_stdout = ""
+    var interpret_stderr = ""
+    var compile_source_path = ""
+    var compile_source_digest = ""
+    var compiled_path = ""
+    var compiled_digest = ""
+    var loaded_path = ""
+    var loaded_digest = ""
+    var loaded_stdout = ""
+    var loaded_stderr = ""
+    var rerun_source_path = ""
+    var rerun_source_digest = ""
+    var rerun_path = ""
+    var rerun_digest = ""
+    var rerun_stdout = ""
+    var rerun_stderr = ""
+    for role in receipt.roles:
+        if role.role == GuestToolchainRole.SimpleInterpretWorkflow:
+            interpret_source_path = role.source_path
+            interpret_source_digest = role.source_sha256
+            interpret_stdout = role.observed_stdout
+            interpret_stderr = role.observed_stderr
+        if role.role == GuestToolchainRole.SimpleCompileWorkflow:
+            compile_source_path = role.source_path
+            compile_source_digest = role.source_sha256
+            compiled_path = role.result_artifact_path
+            compiled_digest = role.result_artifact_sha256
+        if role.role == GuestToolchainRole.SimpleLoadWorkflow:
+            loaded_path = role.result_artifact_path
+            loaded_digest = role.result_artifact_sha256
+            loaded_stdout = role.observed_stdout
+            loaded_stderr = role.observed_stderr
+        if role.role == GuestToolchainRole.SimpleRerunAfterSourceDeleteWorkflow:
+            rerun_source_path = role.source_path
+            rerun_source_digest = role.source_sha256
+            rerun_path = role.result_artifact_path
+            rerun_digest = role.result_artifact_sha256
+            rerun_stdout = role.observed_stdout
+            rerun_stderr = role.observed_stderr
+    if interpret_source_path != compile_source_path or
+       interpret_source_digest != compile_source_digest or
+       rerun_source_path != compile_source_path or
+       rerun_source_digest != compile_source_digest:
+        return Err(GuestToolchainExecutionReceiptError.WorkflowSourceMismatch)
+    if loaded_path != compiled_path or loaded_digest != compiled_digest or
+       rerun_path != compiled_path or rerun_digest != compiled_digest:
+        return Err(GuestToolchainExecutionReceiptError.WorkflowArtifactMismatch)
+    if loaded_stdout != interpret_stdout or loaded_stderr != interpret_stderr or
+       rerun_stdout != interpret_stdout or rerun_stderr != interpret_stderr:
+        return Err(GuestToolchainExecutionReceiptError.WorkflowOutputMismatch)
+    Ok(())
+
+fn _validate_aliases(
+    receipt: GuestToolchainExecutionReceiptV1
+) -> Result<(), GuestToolchainExecutionReceiptError>:
+    if receipt.aliases.len() != GUEST_TOOLCHAIN_EXECUTION_REQUIRED_ALIAS_COUNT:
+        return Err(GuestToolchainExecutionReceiptError.MissingAlias)
+    val compiler_digest = _role_digest(receipt.roles, GuestToolchainRole.SimpleCompiler)
+    var seen = [false, false, false, false, false, false]
+    var binding_position = 0
+    for binding in receipt.aliases:
+        val index = _alias_index(binding.guest_path)
+        if index < 0:
+            return Err(GuestToolchainExecutionReceiptError.WrongAliasPath)
+        if seen[index]:
+            return Err(GuestToolchainExecutionReceiptError.DuplicateAlias)
+        if index != binding_position:
+            return Err(GuestToolchainExecutionReceiptError.WrongAliasOrder)
+        seen[index] = true
+        if binding.intended_role != GuestToolchainRole.SimpleCompiler:
+            return Err(GuestToolchainExecutionReceiptError.WrongAliasRole)
+        if not _nonzero_hash(binding.artifact_sha256) or
+           binding.artifact_sha256 != compiler_digest:
+            return Err(GuestToolchainExecutionReceiptError.AliasDigestMismatch)
+        binding_position = binding_position + 1
+    for present in seen:
+        if not present:
+            return Err(GuestToolchainExecutionReceiptError.MissingAlias)
+    Ok(())
+
+fn _validate_manifest(
+    receipt: GuestToolchainExecutionReceiptV1
+) -> Result<(), GuestToolchainExecutionReceiptError>:
+    if receipt.manifest_path != "/SYS/SIMPLETOOL.SDN":
+        return Err(GuestToolchainExecutionReceiptError.InvalidManifestPath)
+    if not _nonzero_hash(receipt.manifest_sha256):
+        return Err(GuestToolchainExecutionReceiptError.InvalidManifestDigest)
+    if receipt.manifest_compiler_sha256 !=
+           _role_digest(receipt.roles, GuestToolchainRole.SimpleCompiler) or
+       receipt.manifest_interpreter_sha256 !=
+           _role_digest(receipt.roles, GuestToolchainRole.SimpleInterpreter) or
+       receipt.manifest_loader_sha256 !=
+           _role_digest(receipt.roles, GuestToolchainRole.SimpleLoader):
+        return Err(GuestToolchainExecutionReceiptError.ManifestRoleDigestMismatch)
+    if receipt.manifest_sha256 != guest_toolchain_manifest_contract_sha256_v1(receipt):
+        return Err(GuestToolchainExecutionReceiptError.ManifestContractDigestMismatch)
+    Ok(())
+
+pub fn guest_toolchain_execution_receipt_v1_validate(
+    receipt: GuestToolchainExecutionReceiptV1
+) -> Result<(), GuestToolchainExecutionReceiptError>:
+    if receipt.schema_version != GUEST_TOOLCHAIN_EXECUTION_RECEIPT_V1:
+        return Err(GuestToolchainExecutionReceiptError.InvalidSchema)
+    if not _required_target(receipt.target_triple):
+        return Err(GuestToolchainExecutionReceiptError.InvalidTarget)
+    if receipt.target_abi != simpleos_target_v1_abi_for_triple(receipt.target_triple):
+        return Err(GuestToolchainExecutionReceiptError.InvalidAbi)
+    if not _safe_scalar(receipt.receipt_id) or not _safe_scalar(receipt.nonce):
+        return Err(GuestToolchainExecutionReceiptError.InvalidReceiptIdentity)
+    if not _nonzero_hash(receipt.image_sha256) or
+       not _nonzero_hash(receipt.sysroot_sha256) or
+       not _nonzero_hash(receipt.boot_receipt_sha256) or
+       not _nonzero_hash(receipt.mount_receipt_sha256) or
+       not _nonzero_hash(receipt.loader_receipt_sha256):
+        return Err(GuestToolchainExecutionReceiptError.InvalidChainDigest)
+    if receipt.roles.len() != GUEST_TOOLCHAIN_EXECUTION_REQUIRED_ROLE_COUNT:
+        return Err(GuestToolchainExecutionReceiptError.MissingRole)
+
+    var seen = [false, false, false, false, false, false, false, false, false, false, false, false]
+    var role_position = 0
+    for role in receipt.roles:
+        val index = _role_index(role.role)
+        if seen[index]:
+            return Err(GuestToolchainExecutionReceiptError.DuplicateRole)
+        if index != role_position:
+            return Err(GuestToolchainExecutionReceiptError.WrongRoleOrder)
+        seen[index] = true
+        val role_result = _validate_role(role, receipt)
+        if role_result.is_err():
+            return role_result
+        role_position = role_position + 1
+    for present in seen:
+        if not present:
+            return Err(GuestToolchainExecutionReceiptError.MissingRole)
+    val workflow_result = _validate_workflow_role_bindings(receipt)
+    if workflow_result.is_err():
+        return workflow_result
+    val workflow_chain_result = _validate_workflow_chain(receipt)
+    if workflow_chain_result.is_err():
+        return workflow_chain_result
+    val aliases_result = _validate_aliases(receipt)
+    if aliases_result.is_err():
+        return aliases_result
+    val manifest_result = _validate_manifest(receipt)
+    if manifest_result.is_err():
+        return manifest_result
+    if not _nonzero_hash(receipt.receipt_payload_sha256) or
+       receipt.receipt_payload_sha256 !=
+           guest_toolchain_execution_receipt_payload_sha256_v1(receipt):
+        return Err(GuestToolchainExecutionReceiptError.ReceiptPayloadDigestMismatch)
+    Ok(())
+
+pub fn guest_toolchain_execution_candidate_ready_for_evidence_admission(
+    receipt: GuestToolchainExecutionReceiptV1
+) -> bool:
+    # Structural completeness is intentionally not capability advertisement.
+    # The evidence-service owner still has to verify freshness, nonce, artifact
+    # bytes, signature/trust root, and then commit the ledger row.
+    guest_toolchain_execution_receipt_v1_validate(receipt).is_ok()
+
+pub fn guest_toolchain_execution_receipt_gate_detail(
+    receipt: GuestToolchainExecutionReceiptV1
+) -> text:
+    if guest_toolchain_execution_receipt_v1_validate(receipt).is_err():
+        return "BLOCKED: invalid target-native guest execution receipt"
+    "BLOCKED: receipt structurally complete; authoritative producer signature and loader-owned consume-once token required"
+
+pub fn guest_toolchain_execution_gate_detail(
+    clang_static_ready: bool,
+    rustc_static_ready: bool,
+    bake_enabled: bool
+) -> text:
+    """Legacy compatibility status; staging booleans can never produce READY."""
     var blockers: List<text> = []
     if not clang_static_ready:
         blockers = blockers + ["missing build/os/clang_static/bin/clang_static"]
@@ -20,6 +584,24 @@ pub fn guest_toolchain_execution_gate_detail(clang_static_ready: bool, rustc_sta
         blockers = blockers + ["missing build/os/rust_static/bin/rustc_static"]
     if not bake_enabled:
         blockers = blockers + ["build/os/.bake_include_toolchain not enabled"]
-    if blockers.len() == 0:
-        return "READY"
+    blockers = blockers + [
+        "authoritative target-native receipt producer and loader-owned consume-once token required"]
     "blocked: " + blockers.join("; ")
+
+export GuestToolchainRole, GuestToolchainFilesystem
+export GuestToolchainExecutionReceiptError
+export GuestToolchainRoleExecutionV1, GuestToolchainAliasBindingV1
+export GuestToolchainExecutionReceiptV1
+export guest_toolchain_role_canonical_path, guest_toolchain_role_output_sha256
+export guest_toolchain_manifest_contract_sha256_v1
+export guest_toolchain_execution_receipt_payload_sha256_v1
+export guest_toolchain_execution_receipt_v1_validate
+export guest_toolchain_execution_candidate_ready_for_evidence_admission
+export guest_toolchain_execution_receipt_gate_detail
+export guest_toolchain_execution_gate_detail
+export GUEST_TOOLCHAIN_EXECUTION_RECEIPT_V1
+export GUEST_TOOLCHAIN_EXECUTION_REQUIRED_ROLE_COUNT
+export GUEST_TOOLCHAIN_EXECUTION_REQUIRED_ALIAS_COUNT
+export GUEST_TOOLCHAIN_EXECUTION_MAX_ARGV
+export GUEST_TOOLCHAIN_EXECUTION_MAX_SCALAR_BYTES
+export GUEST_TOOLCHAIN_EXECUTION_MAX_OUTPUT_BYTES

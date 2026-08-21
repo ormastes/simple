@@ -1821,6 +1821,54 @@ impl Lowerer {
             Pattern::Array(elements) => {
                 self.bind_sequence(slot, elements, true, binding_type_map, ctx, out);
             }
+            // `case Shape.Boxed(Inner.A(n) | Inner.B(n)):` — an OR sub-pattern
+            // whose alternatives bind the same names from DIFFERENT structural
+            // positions. This arm used to fall into `_ => {}`, so the arm was
+            // selected (the condition side handles `Or` in
+            // `subpattern_condition`) and then `n` was read off the zeroed
+            // stack — the same "tested here, bound nowhere" shape as the
+            // tuple/array gap documented above.
+            //
+            // Which alternative matched is only known at runtime, so the
+            // binders cannot be emitted unconditionally: each alternative's
+            // bindings are guarded by that alternative's own condition, tried
+            // in source order. An irrefutable alternative (condition `None`)
+            // binds in the trailing `else` and ends the chain — nothing after
+            // it is reachable.
+            Pattern::Or(alternatives) => {
+                let mut arms: Vec<(Option<HirExpr>, Vec<HirStmt>)> = Vec::new();
+                for alt in alternatives {
+                    let cond = self.subpattern_condition(slot, alt, ctx);
+                    let mut alt_out: Vec<HirStmt> = Vec::new();
+                    self.bind_subpattern(slot, alt, binding_type_map, ctx, &mut alt_out);
+                    let irrefutable = cond.is_none();
+                    arms.push((cond, alt_out));
+                    if irrefutable {
+                        break;
+                    }
+                }
+                // Nothing to bind at all: emit no control flow.
+                if arms.iter().all(|(_, stmts)| stmts.is_empty()) {
+                    return;
+                }
+                // Fold from the back so earlier alternatives take priority.
+                let mut chain: Option<Vec<HirStmt>> = None;
+                for (cond, alt_out) in arms.into_iter().rev() {
+                    chain = Some(match cond {
+                        // Irrefutable alternative: bind unguarded.
+                        None => alt_out,
+                        Some(condition) => vec![HirStmt::If {
+                            condition,
+                            then_block: alt_out,
+                            else_block: chain,
+                            span: None,
+                        }],
+                    });
+                }
+                if let Some(stmts) = chain {
+                    out.extend(stmts);
+                }
+            }
             // Wildcard / Rest / literals / ranges bind nothing.
             _ => {}
         }

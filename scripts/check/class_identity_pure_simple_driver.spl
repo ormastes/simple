@@ -137,7 +137,9 @@ extern fn rt_env_get(name: text) -> text
 fn main():
     print "[driver] engine = pure-Simple frontend tree-walk interpreter"
     print "[driver] entry  = core_jit_interpret(src, path, 999999)"
-    val dir = "test/fixtures/repro/compiler/class_identity/cases/"
+    # Directory override so the re-entrancy check can drive the same
+    # two-evals-in-one-process path over its own fixtures.
+    val dir = rt_env_get("CLASS_IDENTITY_DIR") ?? "test/fixtures/repro/compiler/class_identity/cases/"
     val names = [
         "a_class_trait_field.spl",
         "b_class_optional_field.spl",
@@ -169,6 +171,21 @@ fn main():
     # correct. The loop is retained for manual whole-corpus runs.
     # Re-entrancy is filed as a real interpreter defect, not fixed here.
     val only = rt_env_get("CLASS_IDENTITY_CASE") ?? ""
+    # ORDERED MULTI-CASE MODE (re-entrancy check, 2026-08-21).
+    # CLASS_IDENTITY_CASES=<name>,<name>,... evaluates exactly those cases, in
+    # the given order, in ONE process. That is the configuration the
+    # re-entrancy defect corrupted, so it is what
+    # scripts/check/check-interp-reentrancy.shs compares against the
+    # one-case-per-process answers.
+    val ordered = rt_env_get("CLASS_IDENTITY_CASES") ?? ""
+    if ordered != "":
+        for name in ordered.split(","):
+            val opath = dir + name
+            val osrc = rt_file_read_text(opath)
+            val orc = core_jit_interpret(osrc, opath, 999999)
+            print "[case] {name} rc={orc}"
+        print "[driver] done"
+        return
     var i = 0
     while i < names.len():
         if only == "" or only == names[i]:

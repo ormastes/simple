@@ -17,6 +17,18 @@ cannot resolve a valid current self-hosted compiler, record the compiler blocker
 and stop; do not point `SIMPLE_BOOTSTRAP_DRIVER` at `simple_seed` to turn a
 blocked system-test row into apparent evidence.
 
+For x86_64/AArch64/RV64GC release evidence, a passing legacy fs-exec spec is
+necessary but insufficient. Admit each immutable SOSIX bundle through
+`scripts/check/check-simpleos-three-arch-qemu-bundle.shs`. The adapter requires
+real OVMF/AAVMF/OpenSBI bytes, target ELF/ABI identity, a source-bound retained
+pure-Simple Stage-4 compiler, image and mounted-program hashes, exact QEMU argv,
+and ordered retained serial evidence. Direct `-kernel`, loader-device, opaque
+`-bios default`, symlinked compiler, stale receipt, or marker-only output cannot
+be promoted. See the architecture-evidence tracker for exact resume commands.
+The adapter currently returns BLOCKED/nonzero after structural diagnostics
+because the signed campaign authority and descriptor-bound no-follow hashing
+owner are not implemented; file contents alone never authorize PASS.
+
 ## RV64 Ordered Boot-Gate Lane
 
 The canonical completion contract for Sv39, PID1, network, production SSH, and

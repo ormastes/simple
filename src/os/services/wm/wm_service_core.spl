@@ -1,0 +1,734 @@
+# Window Manager Service — IPC server for multi-process window management
+#
+# Runs inside the compositor process. Creates a named IPC port "compositor"
+# and handles window creation, destruction, focus, resize, move, and
+# input event delivery for remote app processes.
+#
+# The WM service serializes/deserializes window protocol messages and
+# returns WmAction structs that the shell applies to its compositor.
+#
+# Wire protocol:
+#   Request:  method (u32) | flags (u32) | payload (bytes)
+#   Response: status (i32) | payload (bytes)
+#
+# Payload encoding per method:
+#   COMP_CREATE_WINDOW:  title_len(u32) | title(bytes) | x(i32) | y(i32) | w(i32) | h(i32)
+#                        | process_id(u64)? | app_id_len(u32)? | app_id(bytes)?
+#   COMP_DESTROY_WINDOW: window_id(u64)
+#   COMP_UPDATE_TREE:    window_id(u64) | tree_data(bytes)
+#   COMP_FOCUS:          window_id(u64)
+#   COMP_RESIZE:         window_id(u64) | width(i32) | height(i32)
+#   COMP_MOVE:           window_id(u64) | x(i32) | y(i32)
+#   COMP_SET_TITLE:      window_id(u64) | title_len(u32) | title(bytes)
+#   COMP_MINIMIZE:       window_id(u64)
+#   COMP_MAXIMIZE:       window_id(u64)
+#   COMP_RESTORE:        window_id(u64)
+#
+# Response for COMP_CREATE_WINDOW:
+#   status(i32) | window_id(u64)
+
+use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW, COMP_CREATE_WEB_WINDOW, COMP_DESTROY_WINDOW, COMP_UPDATE_TREE, COMP_FOCUS, COMP_RESIZE, COMP_MOVE, COMP_SET_TITLE, COMP_MINIMIZE, COMP_MAXIMIZE, COMP_RESTORE, COMP_INPUT_EVENT, COMP_CLOSE_REQUEST, COMP_FOCUS_CHANGED, COMP_TEST_API_REQ}
+use os.userlib.syscall_raw.{syscall}
+use common.window_protocol.geometry.{WindowId}
+use common.window_protocol.window_protocol.{WmCreateRequest, WmInputEvent, WmCloseRequest, WmResizeRequest, WmStatus, WM_STATUS_NO_SPACE, WM_EVENT_CLOSE, WM_INPUT_TEXT_MAX_BYTES}
+use os.services.launcher.launcher.{launcher_get_process_app_id_for_pid}
+use std.ecs.entity.{Entity, EntityAllocator}
+use std.ecs.component_store.{ComponentStore}
+use std.ecs.change_detection.{ChangeTracker}
+use std.ecs.system.{Scheduler}
+use std.ecs.world.{WorldBase}
+
+use os.services.wm.wm_world.{WmAction, wm_action_none, WindowOwner, WinId, OwnerPort, OwnerProcess, WinAppId, Title, Geometry, WindowState, WmWorld, WM_MAX_WINDOWS, WIN_STATE_NORMAL, WIN_STATE_MINIMIZED, WIN_STATE_MAXIMIZED}
+use os.services.wm.wm_codec.{wm_send_create_reply, wm_send_create_response, wm_send_status_reply, wm_send_error_reply, wm_notify_app_launched, _read_u8, _read_u32, _read_u64, _read_i32, _read_text, _push_u32, _push_i32, _push_u64, _ipc_send}
+use os.services.wm.wm_damage.{WmDamageRectV1}
+
+# Syscall numbers — canonical values from src/os/kernel/ipc/syscall.spl
+# dispatcher cases 20..23. Keep in sync with test/01_unit/os/kernel/ipc/
+# syscall_number_consistency_spec.spl.
+pub(package) val SYS_IPC_RECV: u64 = 21
+pub(package) val SYS_IPC_DESTROY_PORT: u64 = 18
+pub(package) val SYS_IPC_PORT_OWNER: u64 = 19
+pub(package) val SYS_IPC_CREATE_PORT: u64 = 22
+pub(package) val SYS_IPC_CONNECT: u64 = 23
+
+# Named port identifier for compositor discovery
+pub(package) val WM_PORT_NAME: text = "compositor"
+
+# Response status codes
+pub(package) val STATUS_OK: i32 = 0
+pub(package) val STATUS_ERR: i32 = -1
+pub(package) val STATUS_INVALID: i32 = -3
+
+# Bounded ingress and geometry contracts.  These are deliberately owned by
+# WmService: adapters may translate platform input, but they may not widen the
+# service's memory or coordinate budget.
+pub(package) val WM_MAX_IPC_PAYLOAD_BYTES: u32 = 65536u32
+val WM_MAX_ACTION_QUEUE_DEPTH: i32 = 64
+val WM_MAX_INPUT_QUEUE_DEPTH: i32 = 256
+val WM_MIN_WINDOW_DIMENSION: i32 = 1
+val WM_MAX_WINDOW_DIMENSION: i32 = 16384
+val WM_MAX_WINDOW_COORDINATE: i32 = 1048576
+pub(package) val WM_MAX_APP_ID_BYTES: i64 = 1024
+
+# ============================================================================
+# Window Manager Service
+# ============================================================================
+
+pub class WmService:
+    """IPC server for multi-process window management. Parses IPC into WmAction structs.
+    Tracks window ownership; replies are sent via wm_codec helpers.
+    """
+    port_id: u64
+    world: WmWorld
+    owners: [WindowOwner]
+    owner_window_ids: [u64; 256]
+    owner_ports_fixed: [u64; 256]
+    owner_process_ids: [u64; 256]
+    owner_app_ids: [text; 256]
+    shadow_window_id: u64
+    shadow_owner_port: u64
+    shadow_process_id: u64
+    shadow_app_id: text
+    shadow_active: bool
+    owner_count: i32
+    max_windows: i32
+    initialized: bool
+    running: bool
+    request_count: u64
+    lifecycle_generation: u64
+    scene_revision: u64
+    focused_window_id: u64
+    focus_stack_window_ids: [u64; 256]
+    focus_stack_count: i32
+    damage_generation: u64
+    damage_scene_revision: u64
+    damage_regions: [WmDamageRectV1]
+    damage_full_redraw: bool
+    damage_reason: text
+    action_queue_depth: i32
+    input_queue_depth: i32
+    max_action_queue_depth: i32
+    max_input_queue_depth: i32
+    last_input_sequence: u64
+    last_presented_generation: u64
+    last_presented_scene_revision: u64
+    last_presented_frame_id: u64
+    last_readback_hash: u64
+    last_readback_source: text
+    last_rejection_reason: text
+
+impl WmService:
+    static fn new() -> WmService:
+        """Create a new WM service (stateless w.r.t. compositor)."""
+        WmService(
+            port_id: 0,
+            world: WmWorld.new(),
+            owners: [],
+            owner_window_ids: [0; 256],
+            owner_ports_fixed: [0; 256],
+            owner_process_ids: [0; 256],
+            owner_app_ids: [""; 256],
+            shadow_window_id: 0,
+            shadow_owner_port: 0,
+            shadow_process_id: 0,
+            shadow_app_id: "",
+            shadow_active: false,
+            owner_count: 0,
+            max_windows: WM_MAX_WINDOWS,
+            initialized: false,
+            running: false,
+            request_count: 0,
+            lifecycle_generation: 0,
+            scene_revision: 0,
+            focused_window_id: 0,
+            focus_stack_window_ids: [0; 256],
+            focus_stack_count: 0,
+            damage_generation: 0,
+            damage_scene_revision: 0,
+            damage_regions: [],
+            damage_full_redraw: false,
+            damage_reason: "",
+            action_queue_depth: 0,
+            input_queue_depth: 0,
+            max_action_queue_depth: WM_MAX_ACTION_QUEUE_DEPTH,
+            max_input_queue_depth: WM_MAX_INPUT_QUEUE_DEPTH,
+            last_input_sequence: 0,
+            last_presented_generation: 0,
+            last_presented_scene_revision: 0,
+            last_presented_frame_id: 0,
+            last_readback_hash: 0,
+            last_readback_source: "",
+            last_rejection_reason: ""
+        )
+
+    me scene_revision_available(self) -> bool:
+        if self.scene_revision == 18446744073709551615u64:
+            self.last_rejection_reason = "scene-revision-exhausted"
+            return false
+        true
+
+    me next_scene_revision(self) -> u64:
+        if not self.scene_revision_available():
+            return 0
+        self.scene_revision = self.scene_revision + 1u64
+        self.scene_revision
+
+    fn scene_revision_value(self) -> u64:
+        self.scene_revision
+
+    fn generation_value(self) -> u64:
+        self.lifecycle_generation
+
+    fn focused_window(self) -> u64:
+        self.focused_window_id
+
+    fn focus_stack_value(self) -> [u64]:
+        var result: [u64] = []
+        var i: i32 = 0
+        while i < self.focus_stack_count:
+            result = result.push(self.focus_stack_window_ids[i])
+            i = i + 1
+        result
+
+    me raise_focus_stack(window_id: u64) -> bool:
+        val owner_index = self.find_owner_index(window_id)
+        val record_index = self.find_owner_record_index(window_id)
+        if window_id == 0u64 or (owner_index < 0 and record_index < 0):
+            return self.reject("unowned-focus-window")
+        var found: i32 = -1
+        var i: i32 = 0
+        while i < self.focus_stack_count:
+            if self.focus_stack_window_ids[i] == window_id:
+                found = i
+                break
+            i = i + 1
+        if found < 0:
+            if self.focus_stack_count >= WM_MAX_WINDOWS:
+                return self.reject("focus-stack-capacity")
+        if window_id != self.focused_window_id:
+            if not self.admit_window_damage(self.focused_window_id, window_id, "focus-raise"):
+                return false
+        if found < 0:
+            self.focus_stack_window_ids[self.focus_stack_count] = window_id
+            self.focus_stack_count = self.focus_stack_count + 1
+        else:
+            val last = self.focus_stack_count - 1
+            while found < last:
+                self.focus_stack_window_ids[found] = self.focus_stack_window_ids[found + 1]
+                found = found + 1
+            self.focus_stack_window_ids[last] = window_id
+        self.focused_window_id = window_id
+        true
+
+    me remove_from_focus_stack(window_id: u64):
+        var found: i32 = -1
+        var i: i32 = 0
+        while i < self.focus_stack_count:
+            if self.focus_stack_window_ids[i] == window_id:
+                found = i
+                break
+            i = i + 1
+        if found < 0:
+            return
+        val last = self.focus_stack_count - 1
+        while found < last:
+            self.focus_stack_window_ids[found] = self.focus_stack_window_ids[found + 1]
+            found = found + 1
+        self.focus_stack_window_ids[last] = 0u64
+        self.focus_stack_count = self.focus_stack_count - 1
+
+    fn geometry_valid(x: i32, y: i32, width: i32, height: i32) -> bool:
+        if width < WM_MIN_WINDOW_DIMENSION or width > WM_MAX_WINDOW_DIMENSION:
+            return false
+        if height < WM_MIN_WINDOW_DIMENSION or height > WM_MAX_WINDOW_DIMENSION:
+            return false
+        if x < -WM_MAX_WINDOW_COORDINATE or x > WM_MAX_WINDOW_COORDINATE:
+            return false
+        if y < -WM_MAX_WINDOW_COORDINATE or y > WM_MAX_WINDOW_COORDINATE:
+            return false
+        true
+
+    me reject(reason: text) -> bool:
+        self.last_rejection_reason = reason
+        false
+
+    fn safe_display_text(value: text, max_bytes: i64) -> bool:
+        if value.bytes().len() > max_bytes:
+            return false
+        var i: i64 = 0
+        while i < value.len():
+            val code = value.char_code_at(i)
+            if code < 32 or code == 127:
+                return false
+            i = i + 1
+        true
+
+    me record_request() -> bool:
+        if self.request_count == 18446744073709551615u64:
+            return self.reject("request-count-exhausted")
+        self.request_count = self.request_count + 1u64
+        true
+
+    fn ingress_generation_valid(generation: u64) -> bool:
+        generation == self.lifecycle_generation
+
+    fn ingress_revision_valid(revision: u64) -> bool:
+        revision == self.scene_revision
+
+    fn readback_source_valid(source: text) -> bool:
+        # Only authoritative committed pixels may satisfy the WM receipt.  A
+        # CPU mirror, synthetic hash, or unspecified source is not evidence of
+        # the DrawIrComposition -> Engine2D -> presentation path.
+        source == "framebuffer" or source == "device_readback"
+
+    fn action_kind_supported(kind: text) -> bool:
+        # Keep this set identical to the shared shell/compositor WmAction
+        # dispatch.  Introspection and sentinel actions are not renderable
+        # mutations and must never enter the action queue.
+        kind == "create_window" or kind == "create_web_window" or
+            kind == "destroy_window" or kind == "focus" or
+            kind == "resize" or kind == "move" or kind == "set_title" or
+            kind == "minimize" or kind == "maximize" or kind == "restore" or
+            kind == "update_tree"
+
+    # Adapter-facing bounded ingress reservations.  The reservation is a
+    # counter, not a second action/input store; WmService remains the owner and
+    # the parent must release it after deterministic commit.
+    me accept_action_ingress(generation: u64, revision: u64, action: WmAction) -> bool:
+        if not self.ingress_generation_valid(generation):
+            return self.reject("stale-lifecycle-generation")
+        if not self.ingress_revision_valid(revision):
+            return self.reject("stale-scene-revision")
+        if action.kind == "none":
+            return self.reject("empty-action")
+        if not self.action_kind_supported(action.kind):
+            return self.reject("unknown-action-kind")
+        val is_create = action.kind == "create_window" or action.kind == "create_web_window"
+        if not is_create:
+            if action.window_id == 0u64:
+                return self.reject("invalid-action-window")
+            if self.find_owner(action.window_id) == 0u64:
+                return self.reject("unowned-action-window")
+        # Check each operand before subtracting from the bound, so the
+        # remaining-capacity arithmetic cannot underflow even for hostile text
+        # values or a future wider string length representation.
+        val max_text_bytes = WM_MAX_IPC_PAYLOAD_BYTES.to_u64()
+        val title_bytes = action.title.bytes().len().to_u64()
+        if title_bytes > max_text_bytes:
+            return self.reject("action-text-too-large")
+        val remaining_text_bytes = max_text_bytes - title_bytes
+        val content_bytes = action.content.bytes().len().to_u64()
+        if content_bytes > remaining_text_bytes:
+            return self.reject("action-text-too-large")
+        if self.action_queue_depth >= self.max_action_queue_depth:
+            return self.reject("action-queue-overflow")
+        if (action.kind == "create_window" or action.kind == "create_web_window" or
+            action.kind == "resize"):
+            if not self.geometry_valid(action.x, action.y, action.width, action.height):
+                return self.reject("invalid-geometry")
+        if action.kind == "move":
+            if not self.geometry_valid(action.x, action.y, WM_MIN_WINDOW_DIMENSION, WM_MIN_WINDOW_DIMENSION):
+                return self.reject("invalid-geometry")
+        self.action_queue_depth = self.action_queue_depth + 1
+        true
+
+    me complete_action_ingress() -> bool:
+        if self.action_queue_depth <= 0:
+            return self.reject("action-queue-underflow")
+        self.action_queue_depth = self.action_queue_depth - 1
+        true
+
+    me accept_input_ingress(generation: u64, sequence: u64, event: WmInputEvent) -> bool:
+        if not self.ingress_generation_valid(generation):
+            return self.reject("stale-lifecycle-generation")
+        if event.window_id.value == 0u64:
+            return self.reject("invalid-input-window")
+        if self.find_owner(event.window_id.value) == 0u64:
+            return self.reject("unowned-input-window")
+        if sequence == 0u64 or sequence <= self.last_input_sequence:
+            return self.reject("stale-input-sequence")
+        if event.committed_text.bytes().len().to_u64() > WM_INPUT_TEXT_MAX_BYTES.to_u64():
+            return self.reject("input-text-too-large")
+        if self.input_queue_depth >= self.max_input_queue_depth:
+            return self.reject("input-queue-overflow")
+        self.last_input_sequence = sequence
+        self.input_queue_depth = self.input_queue_depth + 1
+        true
+
+    me complete_input_ingress() -> bool:
+        if self.input_queue_depth <= 0:
+            return self.reject("input-queue-underflow")
+        self.input_queue_depth = self.input_queue_depth - 1
+        true
+
+    # Parent-owned presentation commit.  A frame is accepted only when its
+    # generation/revision are current and both frame and readback identities
+    # are non-zero and strictly newer than the previous committed receipt.
+    me commit_presentation(generation: u64, revision: u64, frame_id: u64, readback_hash: u64, readback_source: text) -> bool:
+        if not self.ingress_generation_valid(generation):
+            return self.reject("stale-lifecycle-generation")
+        if revision == 0u64 or not self.ingress_revision_valid(revision):
+            return self.reject("stale-scene-revision")
+        if frame_id == 0u64 or readback_hash == 0u64:
+            return self.reject("fabricated-frame-or-readback")
+        if not self.readback_source_valid(readback_source):
+            return self.reject("invalid-readback-source")
+        if generation < self.last_presented_generation:
+            return self.reject("stale-present-generation")
+        if generation == self.last_presented_generation and revision < self.last_presented_scene_revision:
+            return self.reject("stale-present-revision")
+        if generation == self.last_presented_generation and frame_id <= self.last_presented_frame_id:
+            return self.reject("stale-frame-id")
+        self.last_presented_generation = generation
+        self.last_presented_scene_revision = revision
+        self.last_presented_frame_id = frame_id
+        self.last_readback_hash = readback_hash
+        self.last_readback_source = readback_source
+        self.clear_damage()
+        true
+
+    fn presentation_matches(self, generation: u64, revision: u64, frame_id: u64, readback_hash: u64, readback_source: text) -> bool:
+        generation == self.last_presented_generation and
+        revision == self.last_presented_scene_revision and
+        frame_id == self.last_presented_frame_id and
+        readback_hash == self.last_readback_hash and
+        readback_source == self.last_readback_source and
+        frame_id != 0u64 and readback_hash != 0u64
+
+    me restart() -> u64:
+        self.running = false
+        if self.initialized and self.port_id != 0u64:
+            val destroyed = syscall(SYS_IPC_DESTROY_PORT, self.port_id, 0, 0, 0, 0)
+            if destroyed < 0:
+                self.last_rejection_reason = "ipc-port-destroy-failed"
+                return 0
+        self.initialized = false
+        self.port_id = 0
+        if self.lifecycle_generation == 18446744073709551615u64:
+            self.last_rejection_reason = "lifecycle-generation-exhausted"
+            return 0
+        self.lifecycle_generation = self.lifecycle_generation + 1u64
+        self.scene_revision = 0
+        self.focused_window_id = 0
+        self.focus_stack_window_ids = [0; 256]
+        self.focus_stack_count = 0
+        self.clear_damage()
+        self.action_queue_depth = 0
+        self.input_queue_depth = 0
+        self.last_input_sequence = 0
+        self.last_presented_generation = 0
+        self.last_presented_scene_revision = 0
+        self.last_presented_frame_id = 0
+        self.last_readback_hash = 0
+        self.last_readback_source = ""
+        self.last_rejection_reason = ""
+        self.request_count = 0
+        self.world = WmWorld.new()
+        self.owners = []
+        self.owner_window_ids = [0; 256]
+        self.owner_ports_fixed = [0; 256]
+        self.owner_process_ids = [0; 256]
+        self.owner_app_ids = [""; 256]
+        self.shadow_window_id = 0
+        self.shadow_owner_port = 0
+        self.shadow_process_id = 0
+        self.shadow_app_id = ""
+        self.shadow_active = false
+        self.owner_count = 0
+        self.lifecycle_generation
+
+    fn window_count(self) -> i32:
+        """Return the total number of tracked windows."""
+        self.owner_count
+
+    fn find_owner_index(self, window_id: u64) -> i32:
+        var i: i32 = 0
+        while i < self.owner_count:
+            if self.owner_window_ids[i] == window_id:
+                return i
+            i = i + 1
+        -1
+
+    fn find_owner_record_index(self, window_id: u64) -> i32:
+        var i: i32 = 0
+        while i < self.owners.len():
+            if self.owners[i].window_id == window_id:
+                return i
+            i = i + 1
+        -1
+
+    me upsert_owner(window_id: u64, owner_port: u64, process_id: u64, app_id: text):
+        if window_id == 0u64:
+            self.last_rejection_reason = "invalid-window-id"
+            return
+        if owner_port == 0u64 and process_id == 0u64:
+            self.last_rejection_reason = "invalid-owner-identity"
+            return
+        if not self.safe_display_text(app_id, WM_MAX_APP_ID_BYTES):
+            self.last_rejection_reason = "invalid-app-id"
+            return
+        val existing_idx = self.find_owner_index(window_id)
+        if existing_idx >= 0 and self.owner_ports_fixed[existing_idx] != 0u64 and owner_port != 0u64 and self.owner_ports_fixed[existing_idx] != owner_port:
+            self.last_rejection_reason = "owner-port-conflict"
+            return
+        if self.owner_count >= self.max_windows and existing_idx < 0:
+            self.last_rejection_reason = "window-owner-capacity"
+            return
+        if self.owner_count >= WM_MAX_WINDOWS and existing_idx < 0:
+            self.last_rejection_reason = "window-owner-capacity"
+            return
+        if self.focus_stack_count >= WM_MAX_WINDOWS and existing_idx < 0:
+            self.last_rejection_reason = "focus-stack-capacity"
+            return
+        if self.next_scene_revision() == 0u64:
+            return
+        if existing_idx < 0:
+            if not self.admit_window_damage(window_id, 0u64, "window-create"):
+                return
+
+        if self.world.find_entity_for_window(window_id).is_null():
+            self.world.spawn_window(window_id, owner_port, process_id, app_id)
+        self.shadow_window_id = window_id
+        self.shadow_owner_port = owner_port
+        self.shadow_process_id = process_id
+        self.shadow_app_id = app_id
+        self.shadow_active = true
+        val idx = existing_idx
+        if idx >= 0:
+            self.owner_window_ids[idx] = window_id
+            self.owner_ports_fixed[idx] = owner_port
+            self.owner_process_ids[idx] = process_id
+            self.owner_app_ids[idx] = app_id
+        elif self.owner_count < WM_MAX_WINDOWS:
+            self.owner_window_ids[self.owner_count] = window_id
+            self.owner_ports_fixed[self.owner_count] = owner_port
+            self.owner_process_ids[self.owner_count] = process_id
+            self.owner_app_ids[self.owner_count] = app_id
+            self.owner_count = self.owner_count + 1
+        val record_idx = self.find_owner_record_index(window_id)
+        val owner = WindowOwner(window_id: window_id, owner_port: owner_port, process_id: process_id, app_id: app_id)
+        if record_idx >= 0:
+            self.owners[record_idx] = owner
+        else:
+            self.owners = self.owners.push(owner)
+        if self.focused_window_id == 0u64:
+            self.focused_window_id = window_id
+        if existing_idx < 0:
+            self.focus_stack_window_ids[self.focus_stack_count] = window_id
+            self.focus_stack_count = self.focus_stack_count + 1
+
+    # -- Lifecycle -----------------------------------------------------------
+
+    # -- Ownership Tracking --------------------------------------------------
+
+    fn find_owner(window_id: u64) -> u64:
+        """Look up the owner port for a window. Returns 0 if not found."""
+        if self.shadow_active and self.shadow_window_id == window_id:
+            return self.shadow_owner_port
+        val idx = self.find_owner_index(window_id)
+        if idx >= 0:
+            return self.owner_ports_fixed[idx]
+        val record_idx = self.find_owner_record_index(window_id)
+        if record_idx < 0:
+            return 0
+        self.owners[record_idx].owner_port
+
+    me remove_owner(window_id: u64):
+        """Remove ownership tracking for a window."""
+        if self.next_scene_revision() == 0u64:
+            return
+        if not self.admit_window_damage(window_id, 0u64, "owner-death-exposure"):
+            return
+        if self.shadow_active and self.shadow_window_id == window_id:
+            self.shadow_window_id = 0
+            self.shadow_owner_port = 0
+            self.shadow_process_id = 0
+            self.shadow_app_id = ""
+            self.shadow_active = false
+        val idx = self.find_owner_index(window_id)
+        if idx >= 0:
+            val last = self.owner_count - 1
+            if idx != last:
+                self.owner_window_ids[idx] = self.owner_window_ids[last]
+                self.owner_ports_fixed[idx] = self.owner_ports_fixed[last]
+                self.owner_process_ids[idx] = self.owner_process_ids[last]
+                self.owner_app_ids[idx] = self.owner_app_ids[last]
+            self.owner_window_ids[last] = 0
+            self.owner_ports_fixed[last] = 0
+            self.owner_process_ids[last] = 0
+            self.owner_app_ids[last] = ""
+            self.owner_count = self.owner_count - 1
+        var kept: [WindowOwner] = []
+        for owner in self.owners:
+            if owner.window_id != window_id:
+                kept = kept.push(owner)
+        self.owners = kept
+        self.remove_from_focus_stack(window_id)
+        if self.focused_window_id == window_id:
+            self.focused_window_id = self.focus_fallback_window()
+        self.world.despawn_window(window_id)
+
+    fn focus_fallback_window(self) -> u64:
+        # The stack is bottom-to-top, so the last surviving entry is the
+        # deterministic most-recent focus target.  Numeric window IDs are
+        # allocation identities, not z-order.
+        if self.focus_stack_count <= 0:
+            return 0u64
+        self.focus_stack_window_ids[self.focus_stack_count - 1]
+
+    me remove_all_windows_for_port(port: u64) -> [u64]:
+        """Remove all ownership entries for a disconnected port.
+
+        Returns the list of window IDs that were owned by the port.
+        The caller (shell) is responsible for removing any presentation
+        projection. The service itself destroys its owned ECS windows here.
+        """
+        var to_destroy: [u64] = []
+        var i: i32 = 0
+        while i < self.owner_count:
+            if self.owner_ports_fixed[i] == port:
+                to_destroy = to_destroy.push(self.owner_window_ids[i])
+            i = i + 1
+        for window_id in to_destroy:
+            self.remove_owner(window_id)
+        for window_id in to_destroy:
+            log_raw_println("[wm-service] Cleaned up ownership of window {window_id} for disconnected port {port}")
+        to_destroy
+
+    fn window_owner_process_id(window_id: u64) -> u64:
+        if self.shadow_active and self.shadow_window_id == window_id:
+            return self.shadow_process_id
+        val idx = self.find_owner_index(window_id)
+        if idx >= 0:
+            return self.owner_process_ids[idx]
+        val record_idx = self.find_owner_record_index(window_id)
+        if record_idx < 0:
+            return 0
+        self.owners[record_idx].process_id
+
+    fn window_owner_app_id(window_id: u64) -> text:
+        if self.shadow_active and self.shadow_window_id == window_id:
+            return self.shadow_app_id
+        val idx = self.find_owner_index(window_id)
+        if idx >= 0:
+            return self.owner_app_ids[idx]
+        val record_idx = self.find_owner_record_index(window_id)
+        if record_idx < 0:
+            return ""
+        self.owners[record_idx].app_id
+
+    fn window_ids_for_owner_port(port: u64) -> [u64]:
+        var ids: [u64] = []
+        var i: i32 = 0
+        while i < self.owner_count:
+            if self.owner_ports_fixed[i] == port:
+                ids = ids.push(self.owner_window_ids[i])
+            i = i + 1
+        if ids.len() > 0:
+            return ids
+        if self.shadow_active and self.shadow_owner_port == port:
+            return [self.shadow_window_id]
+        for owner in self.owners:
+            if owner.owner_port == port:
+                ids = ids.push(owner.window_id)
+        ids
+
+    fn window_ids_for_process(process_id: u64) -> [u64]:
+        var ids: [u64] = []
+        var i: i32 = 0
+        while i < self.owner_count:
+            if self.owner_process_ids[i] == process_id:
+                ids = ids.push(self.owner_window_ids[i])
+            i = i + 1
+        if ids.len() > 0:
+            return ids
+        if self.shadow_active and self.shadow_process_id == process_id:
+            return [self.shadow_window_id]
+        for owner in self.owners:
+            if owner.process_id == process_id:
+                ids = ids.push(owner.window_id)
+        ids
+
+    fn window_ids_for_app(app_id: text) -> [u64]:
+        var ids: [u64] = []
+        var i: i32 = 0
+        while i < self.owner_count:
+            if self.owner_app_ids[i] == app_id:
+                ids = ids.push(self.owner_window_ids[i])
+            i = i + 1
+        if ids.len() > 0:
+            return ids
+        if self.shadow_active and self.shadow_app_id == app_id:
+            return [self.shadow_window_id]
+        for owner in self.owners:
+            if owner.app_id == app_id:
+                ids = ids.push(owner.window_id)
+        ids
+
+    fn window_count_for_owner_port(port: u64) -> i32:
+        self.window_ids_for_owner_port(port).len() as i32
+
+    fn window_count_for_process(process_id: u64) -> i32:
+        self.window_ids_for_process(process_id).len() as i32
+
+    fn window_count_for_app(app_id: text) -> i32:
+        self.window_ids_for_app(app_id).len() as i32
+
+    # -- Shell Integration (called by DesktopShell after applying actions) ----
+
+    me register_window_owner(window_id: WindowId, owner_port: u64):
+        """Register ownership of a window after the shell creates it.
+
+        Called by the shell after it calls compositor.create_remote_window()
+        and obtains the window_id.
+        """
+        self.upsert_owner(window_id.value, owner_port, owner_port, "")
+
+    me register_window_owner_with_identity(window_id: WindowId, owner_port: u64, process_id: u64, app_id: text):
+        """Register ownership plus launch identity metadata."""
+        self.upsert_owner(window_id.value, owner_port, process_id, app_id)
+
+    me set_window_owner_identity(window_id: WindowId, process_id: u64, app_id: text):
+        """Update the identity metadata for an already-owned window."""
+        val idx = self.find_owner_index(window_id.value)
+        if idx < 0:
+            self.upsert_owner(window_id.value, 0, process_id, app_id)
+            return
+        self.upsert_owner(window_id.value, self.owner_ports_fixed[idx], process_id, app_id)
+
+
+    # -- Reply Helpers -------------------------------------------------------
+
+    fn send_create_reply(dst_port: u64, window_id: WindowId):
+        wm_send_create_reply(self.port_id, dst_port, window_id)
+
+    fn send_create_response(dst_port: u64, window_id: WindowId, status: WmStatus):
+        wm_send_create_response(self.port_id, dst_port, window_id, status)
+
+    fn send_status_reply(dst_port: u64, status: i32):
+        wm_send_status_reply(self.port_id, dst_port, status)
+
+    fn send_error_reply(dst_port: u64, status: i32, msg: text):
+        wm_send_error_reply(self.port_id, dst_port, status, msg)
+
+    # -- Queries -------------------------------------------------------------
+
+    fn stats() -> text:
+        """Return service statistics as text."""
+        "WmService: port={self.port_id}, windows={self.world.win_ids.len()}, requests={self.request_count}, running={self.running}"
+
+    fn is_initialized() -> bool:
+        self.initialized
+
+    me notify_app_launched(app_name: text, pid: u64):
+        """Create a managed window entry for a newly launched app.
+
+        Called by the launcher after posix_spawn succeeds.  Creates a
+        placeholder window ownership record so the WM is aware of the
+        app before the app's own IPC connect arrives.
+        """
+        log_raw_println("[wm-service] App launched: {app_name} (PID {pid})")
+        # The actual window surface will be created when the app sends
+        # COMP_CREATE_WINDOW via IPC.  Record the PID so we can match
+        # the connect request to this launch notification later.
+        wm_notify_app_launched(app_name, pid)

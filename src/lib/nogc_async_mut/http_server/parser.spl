@@ -64,6 +64,13 @@ class HttpRequestParser:
     version: text
     headers: [(text, text)]
     body: text
+    # Body is accumulated as chunks and joined once on completion; appending
+    # to `body` per feed rebuilt the whole retained body each time (O(n^2)).
+    body_chunks: [text]
+    body_len: i64
+    # Test-observability hook: cumulative bytes copied while accumulating the
+    # body. Linear in body size here; the pre-fix concat made it quadratic.
+    body_copy_bytes: i64
     content_length: i64
     is_chunked_encoding: bool
     error_message: text
@@ -87,6 +94,9 @@ class HttpRequestParser:
             version: "",
             headers: [],
             body: "",
+            body_chunks: [],
+            body_len: 0,
+            body_copy_bytes: 0,
             content_length: 0,
             is_chunked_encoding: false,
             error_message: "",
@@ -156,7 +166,8 @@ class HttpRequestParser:
                             val line = self.buffer.slice(0, line_end)
                             self.buffer = self.buffer.slice(line_end + 2, self.buffer.len())
                             consumed = consumed + line_end + 2
-                            self.parse_header_line(line)
+                            if not self.parse_header_line(line):
+                                return Err(self.fail("400 Malformed header line"))
                     else:
                         # AC-2: bound buffer growth on a partial header line.
                         if self.buffer.len() > self.max_header_line + 2:
@@ -194,14 +205,20 @@ class HttpRequestParser:
                                 return Err(self.fail_body_too_large("413 Chunked body too large: {self.buffer.len()} bytes"))
                             return Ok(consumed)
                     else:
-                        val remaining = self.content_length - self.body.len()
+                        val remaining = self.content_length - self.body_len
                         if self.buffer.len() >= remaining:
-                            self.body = self.body + self.buffer.slice(0, remaining)
+                            self.body_chunks.push(self.buffer.slice(0, remaining))
+                            self.body_len = self.body_len + remaining
+                            self.body_copy_bytes = self.body_copy_bytes + remaining
                             self.buffer = self.buffer.slice(remaining, self.buffer.len())
                             consumed = consumed + remaining
+                            self.body = self.body_chunks.join("")
+                            self.body_copy_bytes = self.body_copy_bytes + self.body_len
                             self.state = ParseState.Complete
                         else:
-                            self.body = self.body + self.buffer
+                            self.body_chunks.push(self.buffer)
+                            self.body_len = self.body_len + self.buffer.len()
+                            self.body_copy_bytes = self.body_copy_bytes + self.buffer.len()
                             consumed = consumed + self.buffer.len()
                             self.buffer = ""
                             return Ok(consumed)
@@ -213,6 +230,15 @@ class HttpRequestParser:
                     return Err(HttpServerError.ParseError(self.error_message))
 
         Ok(consumed)
+
+    fn body_copy_work() -> i64:
+        """Cumulative bytes copied while accumulating the body.
+
+        Test-observability hook, not public API. Linear in body size for the
+        chunk accumulator; the pre-fix per-feed concat made it quadratic in
+        fragment count.
+        """
+        self.body_copy_bytes
 
     fn is_complete() -> bool:
         """Check if a complete request has been parsed."""
@@ -257,6 +283,9 @@ class HttpRequestParser:
         self.version = ""
         self.headers = []
         self.body = ""
+        self.body_chunks = []
+        self.body_len = 0
+        self.body_copy_bytes = 0
         self.content_length = 0
         self.is_chunked_encoding = false
         self.error_message = ""
@@ -289,13 +318,21 @@ class HttpRequestParser:
 
         true
 
-    me parse_header_line(line: text):
-        """Parse a single 'Name: Value' header line."""
+    me parse_header_line(line: text) -> bool:
+        """Parse a single 'Name: Value' header line.
+
+        A header without a non-empty field name is a framing error. Silently
+        dropping it would let malformed input change the request semantics.
+        """
         val colon = line.index_of(":")
-        if colon > 0:
-            val name = line.slice(0, colon).trim()
-            val value = line.slice(colon + 1, line.len()).trim()
-            self.headers.push((name, value))
+        if colon <= 0:
+            return false
+        val name = line.slice(0, colon).trim()
+        if name.len() == 0:
+            return false
+        val value = line.slice(colon + 1, line.len()).trim()
+        self.headers.push((name, value))
+        true
 
     me finalize_headers() -> bool:
         """Apply the shared header/body policy after all headers are parsed.

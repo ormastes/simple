@@ -131,32 +131,6 @@ fn _tool_env_value(env_pairs: [(text, text)], key: text, default_value: text) ->
             return pair.1
     default_value
 
-fn _tool_file_first_line(vfs: VfsManager?, path: text) -> text?:
-    if vfs == nil:
-        return nil
-    val result = vfs.read_text(path)
-    if result.is_err():
-        return nil
-    val content = result.unwrap()
-    # index_of returns a plain i64 with -1 for not-found, not an Option;
-    # `== nil` never fired and `.unwrap()` yielded nil on a real hit.
-    val newline = content.index_of("\n")
-    if newline < 0:
-        return Some(content.trim())
-    Some(content.slice(0, newline).trim())
-
-fn _tool_manifest_value(vfs: VfsManager?, path: text, key: text) -> text?:
-    if vfs == nil:
-        return nil
-    val result = vfs.read_text(path)
-    if result.is_err():
-        return nil
-    for raw_line in _split_lines(result.unwrap()):
-        val line = raw_line.trim()
-        if line.starts_with("{key}="):
-            return Some(line.slice(key.len() + 1, line.len()).trim())
-    nil
-
 fn _tool_path_candidates(command: text, cwd: text, path_env: text) -> [text]:
     if command == "":
         return []
@@ -172,14 +146,6 @@ fn _tool_path_candidates(command: text, cwd: text, path_env: text) -> [text]:
         else:
             candidates = candidates.push(_normalize("{dir}/{command}"))
     candidates
-
-fn _tool_path_exists(vfs: VfsManager?, cwd: text, path_env: text, command: text) -> bool:
-    if vfs == nil:
-        return false
-    for candidate in _tool_path_candidates(command, cwd, path_env):
-        if vfs.stat(candidate).is_ok():
-            return true
-    false
 
 struct ToolchainManifestPaths:
     version_path: text
@@ -225,179 +191,38 @@ fn _toolchain_command_supported(command: text) -> bool:
     val paths = _toolchain_manifest_paths(command)
     paths.version_path != ""
 
-fn _toolchain_help_lines(command: text) -> [text]:
-    if command == "cmake":
-        return [
-            "cmake: SimpleOS native wrapper for the packaged configure lane",
-            "supported: --version, --help, -E capabilities",
-            "supported subset: cmake -S <src> -B <build> -G Ninja",
-        ]
-    if command == "clang" or command == "clang-20" or command == "lld" or
-       command == "ld.lld" or command == "llvm-ar" or command == "llvm-nm" or
-       command == "llvm-ranlib" or command == "llvm-objdump" or
-       command == "llvm-objcopy" or command == "llvm-strip":
-        return [
-            "{command}: SimpleOS guest-exec wrapper for staged LLVM payloads",
-            "supported: --version, --help, --print-target-triple",
-            "lane executes the staged LLVM payloads for x86_64-simpleos",
-        ]
-    if command == "rustc":
-        return [
-            "rustc: SimpleOS report-and-gate wrapper for staged Rust payloads",
-            "supported: --version, --help, --print target-list, --print sysroot",
-            "compile/build operations fail explicitly with lane/status metadata",
-        ]
-    if command == "cargo":
-        return [
-            "cargo: SimpleOS report-and-gate wrapper for staged Rust payloads",
-            "supported: --version, --help, --print target-list",
-            "cargo build/check/test/run are intentionally gated on this lane",
-        ]
-    if command == "cargo-simpleos":
-        return [
-            "cargo-simpleos: SimpleOS report-and-gate bootstrap wrapper",
-            "supported: --version, --help, --print target-list",
-            "real guest cargo cutover is pending rustlib/std bring-up",
-        ]
-    if command == "ninja":
-        return [
-            "ninja: SimpleOS native wrapper for packaged Ninja execution",
-            "supported: --version, --help",
-            "guest execution uses the staged ninja payload",
-        ]
-    []
+fn toolchain_canonical_path(command: text) -> text:
+    """Return the fixed guest filesystem path for a known toolchain command."""
+    _toolchain_manifest_paths(command).canonical_path
 
-fn tool_try_staged_toolchain(vfs: VfsManager?, cwd: text, path_env: text,
+fn tool_try_staged_toolchain(vfs: VfsManager?, _cwd: text, _path_env: text,
                              command: text, args: [text], terminal: Terminal) -> i32?:
-    """Execute a filesystem-backed native-wrapper surface for guest toolchain commands.
+    """Report diagnostic-only package metadata without claiming tool success.
 
-    The FAT image currently stages host-built LLVM/Rust/Ninja binaries under
-    `/usr/bin`, and packages the promoted native build-tool entrypoints at the
-    same stable paths. The wrappers are truthful about what works in-guest while
-    the full native execution lanes are still landing.
+    Normal toolchain invocations must return `nil` so the shell launches the
+    canonical guest executable. Manifest/version text is not execution evidence
+    and must never produce a successful command status.
     """
     if not _toolchain_command_supported(command):
         return nil
-    if not _tool_path_exists(vfs, cwd, path_env, command):
-        return nil
-
     val paths = _toolchain_manifest_paths(command)
-    val version_path = paths.version_path
-    val manifest_path = paths.manifest_path
-    val canonical_path = paths.canonical_path
-    val version = _tool_file_first_line(vfs, version_path) ?? "{command} staged payload"
-    val primary = if args.len() > 0: args[0] else: "--version"
-
-    if primary == "--version":
-        _write_line(terminal, version)
-        return 0
-
-    if command == "cmake":
-        if primary == "-E" and args.len() > 1 and args[1] == "capabilities":
-            val lane = _tool_manifest_value(vfs, manifest_path, "lane") ?? "unknown"
-            val mode = _tool_manifest_value(vfs, manifest_path, "mode") ?? "unknown"
-            val status = _tool_manifest_value(vfs, manifest_path, "status") ?? "unknown"
-            _write_line(terminal, "serverMode=false")
-            _write_line(terminal, "generators=Ninja")
-            _write_line(terminal, "tool=/usr/bin/cmake")
-            _write_line(terminal, "lane={lane}")
-            _write_line(terminal, "mode={mode}")
-            _write_line(terminal, "status={status}")
-            return 0
-
-    if command == "clang" or command == "clang-20":
-        if primary == "--print-target-triple":
-            _write_line(terminal, "x86_64-simpleos")
-            return 0
-        if primary == "--print" and args.len() > 1 and args[1] == "simpleos-wrapper-status":
-            val lane = _tool_manifest_value(vfs, manifest_path, "lane") ?? "unknown"
-            val mode = _tool_manifest_value(vfs, manifest_path, "mode") ?? "unknown"
-            val status = _tool_manifest_value(vfs, manifest_path, "status") ?? "unknown"
-            _write_line(terminal, "lane={lane}")
-            _write_line(terminal, "mode={mode}")
-            _write_line(terminal, "status={status}")
-            return 0
+    if vfs == nil:
         return nil
-    if command == "rustc":
-        if primary == "--print" and args.len() > 1 and args[1] == "target-list":
-            _write_line(terminal, "x86_64-unknown-simpleos")
-            return 0
-        if primary == "--print" and args.len() > 1 and args[1] == "sysroot":
-            _write_line(terminal, "/usr")
-            return 0
-        if primary == "--print" and args.len() > 1 and args[1] == "target-libdir":
-            _write_line(terminal, "/usr/lib/rustlib/x86_64-unknown-simpleos/lib")
-            return 0
-        if primary == "--print" and args.len() > 1 and args[1] == "simpleos-rustlib":
-            _write_line(terminal, "/usr/lib/rustlib/x86_64-unknown-simpleos/lib")
-            return 0
-        if primary == "--print" and args.len() > 1 and args[1] == "simpleos-target-json":
-            _write_line(terminal, "/usr/lib/rustlib/x86_64-unknown-simpleos/target.json")
-            return 0
-        if primary == "--print" and args.len() > 1 and args[1] == "simpleos-wrapper-status":
-            val lane = _tool_manifest_value(vfs, manifest_path, "lane") ?? "unknown"
-            val mode = _tool_manifest_value(vfs, manifest_path, "mode") ?? "unknown"
-            val status = _tool_manifest_value(vfs, manifest_path, "status") ?? "unknown"
-            _write_line(terminal, "lane={lane}")
-            _write_line(terminal, "mode={mode}")
-            _write_line(terminal, "status={status}")
-            return 0
-    if command == "cargo" or command == "cargo-simpleos":
-        if primary == "--print" and args.len() > 1 and args[1] == "target-list":
-            _write_line(terminal, "x86_64-unknown-simpleos")
-            return 0
-        if primary == "--print" and args.len() > 1 and args[1] == "sysroot":
-            _write_line(terminal, "/usr")
-            return 0
-        if primary == "--print" and args.len() > 1 and args[1] == "simpleos-rustlib":
-            _write_line(terminal, "/usr/lib/rustlib/x86_64-unknown-simpleos/lib")
-            return 0
-        if primary == "--print" and args.len() > 1 and args[1] == "simpleos-target-json":
-            _write_line(terminal, "/usr/lib/rustlib/x86_64-unknown-simpleos/target.json")
-            return 0
-        if primary == "--print" and args.len() > 1 and args[1] == "simpleos-wrapper-status":
-            val lane = _tool_manifest_value(vfs, manifest_path, "lane") ?? "unknown"
-            val mode = _tool_manifest_value(vfs, manifest_path, "mode") ?? "unknown"
-            val status = _tool_manifest_value(vfs, manifest_path, "status") ?? "unknown"
-            _write_line(terminal, "lane={lane}")
-            _write_line(terminal, "mode={mode}")
-            _write_line(terminal, "status={status}")
-            return 0
+    val payload_stat = vfs.stat(paths.canonical_path)
+    if payload_stat.is_err():
+        return nil
+    val payload_kind = payload_stat.unwrap().kind
+    if payload_kind != FsNodeKind.File:
+        return nil
+    if args.len() != 2 or args[0] != "--print" or args[1] != "simpleos-wrapper-status":
+        return nil
 
-    if primary == "--help" or primary == "-h":
-        for line in _toolchain_help_lines(command):
-            _write_line(terminal, line)
-        val manifest = _tool_file_first_line(vfs, manifest_path)
-        val lane = _tool_manifest_value(vfs, manifest_path, "lane")
-        val status = _tool_manifest_value(vfs, manifest_path, "status")
-        if manifest != nil and manifest.unwrap() != "":
-            _write_line(terminal, "manifest: {manifest.unwrap()}")
-        if lane != nil:
-            _write_line(terminal, "lane: {lane.unwrap()}")
-        if status != nil:
-            _write_line(terminal, "status: {status.unwrap()}")
-        _write_line(terminal, "payload: {canonical_path}")
-        return 0
-
-    val lane = _tool_manifest_value(vfs, manifest_path, "lane") ?? "unknown"
-    val mode = _tool_manifest_value(vfs, manifest_path, "mode") ?? "unknown"
-    val status = _tool_manifest_value(vfs, manifest_path, "status") ?? "unknown"
-    _write_error(terminal,
-        "{command}: unsupported operation on lane={lane} mode={mode} status={status}")
-    _write_error(terminal,
-        "{command}: no host fallback is available from this guest wrapper")
-    _write_error(terminal,
-        "{command}: supported guest wrapper options are --version and --help")
-    if command == "cmake":
-        _write_error(terminal,
-            "{command}: supported discovery option available: -E capabilities")
-    if command == "clang" or command == "clang-20" or command == "rustc" or
-       command == "cargo" or command == "cargo-simpleos":
-        _write_error(terminal,
-            "{command}: additional discovery option available: --print target metadata")
-        _write_error(terminal,
-            "{command}: wrapper status available via --print simpleos-wrapper-status")
-    1
+    _write_line(terminal, "manifest={paths.manifest_path}")
+    _write_line(terminal, "payload={paths.canonical_path}")
+    _write_line(terminal, "diagnostic-only=true")
+    _write_line(terminal, "capability-authorized=false")
+    _write_error(terminal, "{command}: metadata is not execution evidence")
+    78
 
 # =========================================================================
 # touch — Create empty files or update timestamps

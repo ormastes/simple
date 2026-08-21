@@ -1,0 +1,302 @@
+use std.spec
+use os.port.initramfs_validate.{
+    initramfs_init_artifact_admission,
+    validate_cpio_toolchain_archive,
+    validate_zstd_toolchain_archive,
+}
+use os.port.initramfs_pack.{
+    SimpleToolchainRole,
+    NewcArchiveWriter,
+    compress_zstd,
+    simple_toolchain_manifest_text,
+    initramfs_pack_path_admission,
+    initramfs_pack_newc_entry_size,
+}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use os.kernel.loader.cpio_newc.{cpio_parse_bounded}
+
+val COMPILER_PATHS: [text] = [
+    "/bin/simple", "/bin/simple.smf", "/usr/bin/simple", "/usr/bin/simple.smf",
+    "/sys/apps/simple", "/sys/apps/simple.smf", "/sys/apps/simple_compiler",
+    "/sys/apps/simple_compiler.smf",
+]
+val INTERPRETER_PATHS: [text] = [
+    "/sys/apps/simple_interpreter", "/sys/apps/simple_interpreter.smf",
+]
+val LOADER_PATHS: [text] = [
+    "/sys/apps/simple_loader", "/sys/apps/simple_loader.smf",
+]
+
+fn _append_bytes(dst: [u8], src: [u8]) -> [u8]:
+    var out = dst
+    for byte in src:
+        out.push(byte)
+    out
+
+fn _append_text(dst: [u8], value: text) -> [u8]:
+    var out = dst
+    for byte in value.bytes():
+        out.push(byte.to_u8())
+    out
+
+fn _text_bytes(value: text) -> [u8]:
+    _append_text([], value)
+
+fn _elf_fixture(marker: u8) -> [u8]:
+    var data: [u8] = [0u8; 64]
+    data[0] = 0x7Fu8
+    data[1] = 0x45u8
+    data[2] = 0x4Cu8
+    data[3] = 0x46u8
+    data[4] = 2u8
+    data[5] = 1u8
+    data[6] = 1u8
+    data[18] = 62u8
+    data[63] = marker
+    data
+
+fn _smf_fixture(marker: u8) -> [u8]:
+    var data = _append_bytes(_elf_fixture(marker), [0u8; 128])
+    data[64] = 0x53u8
+    data[65] = 0x4Du8
+    data[66] = 0x46u8
+    data[68] = 1u8
+    data[69] = 1u8
+    data[116] = 64u8
+    data[120] = 64u8
+    data[124] = 1u8
+    data[125] = 1u8
+    data[126] = 1u8
+    data
+
+fn _script_fixture() -> [u8]:
+    var data: [u8] = [0u8; 64]
+    data[0] = 0x23u8
+    data[1] = 0x21u8
+    data[2] = 0x2Fu8
+    data[3] = 0x62u8
+    data
+
+fn _manifest_binding(role: text, path: text, digest: text) -> text:
+    "    { role: \"{role}\", guest_path: \"{path}\", digest: \"{digest}\" }\n"
+
+fn _render_fixture_manifest(compiler_digest: text, interpreter_digest: text, loader_digest: text) -> text:
+    simple_toolchain_manifest_text([
+        SimpleToolchainRole(name: "compiler", artifact_path: "fixture/compiler", artifact_digest: compiler_digest, guest_paths: COMPILER_PATHS),
+        SimpleToolchainRole(name: "interpreter", artifact_path: "fixture/interpreter", artifact_digest: interpreter_digest, guest_paths: INTERPRETER_PATHS),
+        SimpleToolchainRole(name: "loader", artifact_path: "fixture/loader", artifact_digest: loader_digest, guest_paths: LOADER_PATHS),
+    ])
+
+fn _manifest(compiler: [u8], interpreter: [u8], loader: [u8], corrupt_digest: bool, attack: text) -> text:
+    var compiler_digest = sha256_u8_hex(compiler)
+    if corrupt_digest:
+        compiler_digest = "0000000000000000000000000000000000000000000000000000000000000000"
+    val interpreter_digest = sha256_u8_hex(interpreter)
+    val loader_digest = sha256_u8_hex(loader)
+    if not corrupt_digest and attack == "":
+        return _render_fixture_manifest(compiler_digest, interpreter_digest, loader_digest)
+    var body = "simple_toolchain {\n  role_bindings: [\n"
+    var compiler_index = 0
+    for path in COMPILER_PATHS:
+        val role = if attack == "wrong-role" and compiler_index == 0: "loader" else: "compiler"
+        val bound_path = if attack == "duplicate-binding" and compiler_index == 1: COMPILER_PATHS[0] else: path
+        if attack == "artifact-scalar" and compiler_index == 0:
+            body = body + "    { role: \"compiler\", guest_path: \"{bound_path}\", artifact: \"forged\", digest: \"{compiler_digest}\" }\n"
+        else:
+            body = body + _manifest_binding(role, bound_path, compiler_digest)
+        compiler_index = compiler_index + 1
+    for path in INTERPRETER_PATHS:
+        body = body + _manifest_binding("interpreter", path, interpreter_digest)
+    for path in LOADER_PATHS:
+        body = body + _manifest_binding("loader", path, loader_digest)
+    body + "  ]\n}\n"
+
+fn _archive(attack: text, corrupt_digest: bool, duplicate_roles: bool) -> [u8]:
+    val compiler = _elf_fixture(2u8)
+    val interpreter: [u8] = if duplicate_roles: compiler else: [5u8, 6u8, 7u8]
+    val loader: [u8] = [8u8, 9u8, 10u8]
+    var writer = NewcArchiveWriter(data: [], inode: 1)
+    val init_data: [u8] = if attack == "placeholder-init": _script_fixture() else: if attack == "init-role-reuse": compiler else: _elf_fixture(1u8)
+    writer.entry("sbin/init", 0x81ED, init_data)
+    writer.entry("SYS/SIMPLETOOL.SDN", 0x81A4, _text_bytes(_manifest(compiler, interpreter, loader, corrupt_digest, attack)))
+    writer.entry("usr/bin/clang", 0x81ED, [0x7Fu8, 0x45u8, 0x4Cu8, 0x46u8])
+    writer.entry("src", 0x41ED, [])
+    writer.entry("src/compiler/99.loader", 0x41ED, [])
+    for path in COMPILER_PATHS:
+        writer.entry(path.slice(1, path.len()), 0x81ED, compiler)
+    for path in INTERPRETER_PATHS:
+        writer.entry(path.slice(1, path.len()), 0x81ED, interpreter)
+    for path in LOADER_PATHS:
+        writer.entry(path.slice(1, path.len()), 0x81ED, loader)
+    if attack == "duplicate":
+        writer.entry("src", 0x41ED, [])
+    elif attack == "traversal":
+        writer.entry("../escape", 0x81A4, [1u8])
+    elif attack == "symlink":
+        writer.entry("usr/bin/simple-link", 0xA1FF, [47u8, 98u8, 105u8, 110u8])
+    writer.entry("TRAILER!!!", 0, [])
+    writer.data
+
+fn _zstd_raw_frame(payload: [u8]) -> [u8]:
+    var out: [u8] = [0x28u8, 0xB5u8, 0x2Fu8, 0xFDu8]
+    if payload.len() < 256:
+        out.push(0x20u8)
+        out.push(payload.len().to_u8())
+    elif payload.len() < 65792:
+        val encoded = payload.len() - 256
+        out.push(0x60u8)
+        out.push((encoded & 255).to_u8())
+        out.push(((encoded >> 8) & 255).to_u8())
+    else:
+        out.push(0xA0u8)
+        out.push((payload.len() & 255).to_u8())
+        out.push(((payload.len() >> 8) & 255).to_u8())
+        out.push(((payload.len() >> 16) & 255).to_u8())
+        out.push(((payload.len() >> 24) & 255).to_u8())
+    val block_header = 1 | (payload.len() << 3)
+    out.push((block_header & 255).to_u8())
+    out.push(((block_header >> 8) & 255).to_u8())
+    out.push(((block_header >> 16) & 255).to_u8())
+    _append_bytes(out, payload)
+
+describe "SimpleOS initramfs archive role validation":
+    it "admits explicit target-native ELF and SMF init artifacts":
+        expect(initramfs_init_artifact_admission(
+            "build/os/simpleos-init", _elf_fixture(1u8)).is_ok()).to_equal(true)
+        expect(initramfs_init_artifact_admission(
+            "build/os/simpleos-init.smf", _smf_fixture(1u8)).is_ok()).to_equal(true)
+
+    it "rejects absent, empty, source, script, and placeholder init inputs":
+        expect(initramfs_init_artifact_admission("", [0x7Fu8, 0x45u8, 0x4Cu8, 0x46u8]).is_ok()).to_equal(false)
+        expect(initramfs_init_artifact_admission("build/os/simpleos-init", []).is_ok()).to_equal(false)
+        expect(initramfs_init_artifact_admission(
+            "src/app/simpleos/init.spl", _smf_fixture(1u8)).is_ok()).to_equal(false)
+        expect(initramfs_init_artifact_admission(
+            "build/os/init.shs", _script_fixture()).is_ok()).to_equal(false)
+        expect(initramfs_init_artifact_admission(
+            "build/os/placeholder", _script_fixture()).is_ok()).to_equal(false)
+
+    it "rejects SMF init envelopes with ambiguous role, arch, ABI, or stub metadata":
+        var wrong_role = _smf_fixture(1u8)
+        wrong_role[124] = 2u8
+        expect(initramfs_init_artifact_admission("build/os/init.smf", wrong_role).is_ok()).to_equal(false)
+        var wrong_arch = _smf_fixture(1u8)
+        wrong_arch[125] = 3u8
+        expect(initramfs_init_artifact_admission("build/os/init.smf", wrong_arch).is_ok()).to_equal(false)
+        var wrong_abi = _smf_fixture(1u8)
+        wrong_abi[126] = 0u8
+        expect(initramfs_init_artifact_admission("build/os/init.smf", wrong_abi).is_ok()).to_equal(false)
+        var missing_stub = _smf_fixture(1u8)
+        missing_stub[116] = 0u8
+        expect(initramfs_init_artifact_admission("build/os/init.smf", missing_stub).is_ok()).to_equal(false)
+
+    it "admits only non-overlapping task-owned build paths before mutation":
+        expect(initramfs_pack_path_admission(
+            "build/os/initramfs-staging", "build/os/initramfs.img.zst").is_ok()).to_equal(true)
+        expect(initramfs_pack_path_admission(
+            "build/os/custom-image.staging", "build/os/custom-image.zst").is_ok()).to_equal(true)
+
+    it "preflights newc payload sizes before reading archive inputs":
+        expect(initramfs_pack_newc_entry_size("sbin/init", 64).is_ok()).to_equal(true)
+        expect(initramfs_pack_newc_entry_size("sbin/init", -1).is_ok()).to_equal(false)
+        expect(initramfs_pack_newc_entry_size("sbin/init", 536870912).is_ok()).to_equal(false)
+
+    it "rejects broad, absolute, dot, traversal, and overlapping staging paths":
+        val unsafe_staging = [
+            "/", ".", "..", "build", "build/os", "build/os/../escape.staging",
+            "build/os/./image.staging", "build/os/image.staging/../escape",
+            "tmp/image.staging", "build/os/nested/image.staging", "build/os/image",
+            "build/os/image.staging/",
+        ]
+        for staging in unsafe_staging:
+            expect(initramfs_pack_path_admission(staging, "build/os/image.zst").is_ok()).to_equal(false)
+        expect(initramfs_pack_path_admission(
+            "build/os/image.staging", "build/os/image.staging/output.zst").is_ok()).to_equal(false)
+        expect(initramfs_pack_path_admission(
+            "build/os/image.staging", "build/os/nested/output.zst").is_ok()).to_equal(false)
+
+    it "rejects controls and shell metacharacters without executing them":
+        val injected = [
+            "build/os/image;touch-owned.staging", "build/os/image$(id).staging",
+            "build/os/image`id`.staging", "build/os/image|tee.staging",
+            "build/os/image&job.staging", "build/os/image\nnext.staging",
+            "build/os/image\targ.staging", "build/os/image space.staging",
+        ]
+        for staging in injected:
+            expect(initramfs_pack_path_admission(staging, "build/os/image.zst").is_ok()).to_equal(false)
+        for output in injected:
+            expect(initramfs_pack_path_admission("build/os/image.staging", output).is_ok()).to_equal(false)
+
+    it "renders only security-relevant role, path, and digest bindings":
+        val rendered = _render_fixture_manifest(
+            sha256_u8_hex([1u8]), sha256_u8_hex([2u8]), sha256_u8_hex([3u8]))
+        expect(rendered.contains("artifact:")).to_equal(false)
+        expect(rendered.split("\n").len()).to_equal(COMPILER_PATHS.len() + INTERPRETER_PATHS.len() + LOADER_PATHS.len() + 5)
+
+    it "accepts one canonical archive whose manifest hashes every distinct role payload":
+        val archive = _archive("", false, false)
+        expect(validate_cpio_toolchain_archive(archive).is_ok()).to_equal(true)
+        expect(validate_zstd_toolchain_archive(compress_zstd(archive)).is_ok()).to_equal(true)
+
+    it "fails closed on truncated and non-hex newc headers":
+        expect(cpio_parse_bounded(
+            [0x30u8, 0x37u8, 0x30u8], 16, 256, 4096).unwrap_err()).to_equal("cpio-header-truncated")
+        var invalid_hex = _archive("", false, false)
+        invalid_hex[6] = 0x67u8
+        expect(cpio_parse_bounded(
+            invalid_hex, 131072, 4096, 536870912).unwrap_err()).to_equal("cpio-header-hex-invalid")
+        var prefix_attack = NewcArchiveWriter(data: [], inode: 1)
+        prefix_attack.entry("ok", 0x81A4, [1u8])
+        prefix_attack.entry("TRAILER!!!", 0, [])
+        prefix_attack.data[120] = 0u8
+        expect(cpio_parse_bounded(
+            prefix_attack.data, 16, 256, 4096).unwrap_err()).to_equal("cpio-magic-invalid")
+
+    it "fails closed before indexing oversized newc names and payloads":
+        var oversized_name = _archive("", false, false)
+        var i: i64 = 94
+        while i < 102:
+            oversized_name[i] = 0x66u8
+            i = i + 1
+        expect(cpio_parse_bounded(
+            oversized_name, 131072, 4096, 536870912).unwrap_err()).to_equal("cpio-name-size-invalid")
+        var oversized_payload = _archive("", false, false)
+        i = 54
+        while i < 62:
+            oversized_payload[i] = 0x66u8
+            i = i + 1
+        expect(cpio_parse_bounded(
+            oversized_payload, 131072, 4096, 536870912).unwrap_err()).to_equal("cpio-payload-truncated")
+
+    it "rejects trailing data after the one bounded zstd frame":
+        var compressed = _zstd_raw_frame(_archive("", false, false))
+        compressed.push(1u8)
+        expect(validate_zstd_toolchain_archive(compressed).unwrap_err()).to_equal("zstd-chained-or-trailing-frame-rejected")
+
+    it "rejects duplicate canonical paths":
+        expect(validate_cpio_toolchain_archive(_archive("duplicate", false, false)).unwrap_err()).to_equal("archive-path-duplicate")
+
+    it "rejects traversal and symlink entries before extraction":
+        expect(validate_cpio_toolchain_archive(_archive("traversal", false, false)).unwrap_err()).to_equal("archive-path-traversal")
+        expect(validate_cpio_toolchain_archive(_archive("symlink", false, false)).unwrap_err()).to_equal("archive-entry-type-unsafe")
+
+    it "rejects manifest digests that do not match archived bytes":
+        expect(validate_cpio_toolchain_archive(_archive("", true, false)).unwrap_err()).to_equal("toolchain-role-payload-digest-mismatch")
+
+    it "rejects a source or placeholder payload archived at /sbin/init":
+        expect(validate_cpio_toolchain_archive(
+            _archive("placeholder-init", false, false)).unwrap_err()).to_equal("init-artifact-native-format-invalid")
+
+    it "rejects reusing a toolchain role as the init artifact":
+        expect(validate_cpio_toolchain_archive(
+            _archive("init-role-reuse", false, false)).unwrap_err()).to_equal("toolchain-role-digests-not-distinct")
+
+    it "rejects wrong role binding and duplicate binding declarations":
+        expect(validate_cpio_toolchain_archive(_archive("wrong-role", false, false)).unwrap_err()).to_equal("toolchain-manifest-role-binding-invalid")
+        expect(validate_cpio_toolchain_archive(_archive("duplicate-binding", false, false)).unwrap_err()).to_equal("toolchain-manifest-path-duplicate")
+
+    it "rejects removed host artifact metadata instead of ignoring it":
+        expect(validate_cpio_toolchain_archive(_archive("artifact-scalar", false, false)).is_ok()).to_equal(false)
+
+    it "rejects role reuse even when each manifest digest matches":
+        expect(validate_cpio_toolchain_archive(_archive("", false, true)).unwrap_err()).to_equal("toolchain-role-digests-not-distinct")

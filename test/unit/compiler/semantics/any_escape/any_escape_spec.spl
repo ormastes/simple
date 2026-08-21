@@ -1,0 +1,139 @@
+# @cover src/compiler/35.semantics/any_escape/checker.spl 70%
+# @req REQ-MC-ANY-001
+"""
+# Critical-profile `Any` escape analysis
+
+**Category:** Language
+**Status:** In Progress
+**Research:** doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md
+
+## Purpose and Audience
+
+`AnyEscapeChecker` enforces plan §8.1: in the `critical` profile the erased top
+type `Any` is legal only inside an `unsafe` region carrying the `type_erasure`
+capability, and an erased value may not leave that region except as the result
+of a checked conversion. This spec pins both diagnostics against real typed HIR.
+
+## Scope and Preconditions
+
+Each scenario parses a fixture under `test/fixtures/any_escape/`, lowers it to
+HIR, and runs `any_escape_check`. Nothing is decided from source text: the
+checker reads `HirTypeKind.Any` off resolved `HirType` values.
+
+## Primary Workflow
+
+`E-MC-ANY-001` fires where an `Any` originates outside a granted region.
+`E-MC-ANY-002` fires where an erased value escapes one. Neither fires on code
+that has no `Any`, nor on the sanctioned §8.6 checked-conversion boundary.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| `type_erasure` | The unsafe capability that licenses `Any` (§8.1) |
+| origin | A site where an `Any` value comes into existence |
+| escape | An erased value leaving its region: store, return, capture, await, call, operator |
+
+## Related Specifications
+
+- doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md §8.5, §17.1, §17.2
+
+## Evidence and Provenance
+
+Fixtures are executable inputs, not prose. The negative cases (`clean`,
+`checked_downcast_ok`) are load-bearing: without them a checker that flagged
+everything would pass the positive cases.
+
+## Recovery and Troubleshooting
+
+A finding names the function and the diagnostic class. Replace the `Any` with a
+monomorphized generic, a closed sum type, a typed interface, or move it inside
+an `unsafe` region annotated `@unsafe(capabilities: [type_erasure])`.
+
+## Compatibility and Limitations
+
+The `type_erasure` GRANT is supplied through `AnyEscapeProfile` because HIR does
+not yet carry unsafe capabilities — see
+doc/08_tracking/bug/unsafe_capabilities_not_carried_into_hir_2026-08-21.md.
+"""
+
+use std.spec.*
+use compiler.frontend.{parse_full_frontend}
+use compiler.common.config.{Logger}
+use compiler.hir.hir_lowering.*
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfacesByName}
+use compiler.hir.hir_types.{HirModule}
+use compiler.semantics.any_escape.types.{AnyEscapeProfile, any_escape_kind_name}
+use compiler.semantics.any_escape.checker.{any_escape_check}
+
+# ============================================================================
+# Step Helpers
+# ============================================================================
+
+fn check_fixture(name: text, granted: [text]) -> [text]:
+    """Lower `test/fixtures/any_escape/<name>.spl` and return one text code per
+    finding, in `<code>/<class>` form."""
+    val path = "test/fixtures/any_escape/" + name + ".spl"
+    val content = rt_file_read_text(path) ?? ""
+    val log = Logger(level: 0)
+    val pm = parse_full_frontend(content, path, name, log)
+    val surfaces = ModuleSurfacesByName.empty()
+    var lowering = hirlowering_for_module("", surfaces)
+    val hm: HirModule = lowering.lower_module(pm)
+    val diags = any_escape_check(hm, AnyEscapeProfile.census(granted))
+    var out: [text] = []
+    for d in diags:
+        out = out.push(d.code + "/" + any_escape_kind_name(d.kind))
+    out
+
+fn count_of(found: [text], want: text) -> i64:
+    var n = 0
+    for f in found:
+        if f == want:
+            n = n + 1
+    n
+
+# ============================================================================
+# Primary Scenarios
+# ============================================================================
+
+describe "Critical Any escape analysis":
+
+    it "reports E-MC-ANY-001 for an Any bound in a safe function":
+        step("lower a fixture whose safe function declares `val raw: Any`")
+        val found = check_fixture("any_in_safe_fn", [])
+        step("the origin is reported as E-MC-ANY-001 / outside_unsafe")
+        expect(count_of(found, "E-MC-ANY-001/outside_unsafe")).to_be_greater_than(0)
+
+    it "reports E-MC-ANY-002 when an erased value is returned from a granted region":
+        step("lower a fixture whose type_erasure region returns its raw Any")
+        val found = check_fixture("any_returned_from_boundary", ["leak_raw"])
+        step("the escape is reported as E-MC-ANY-002 / escape_return")
+        expect(count_of(found, "E-MC-ANY-002/escape_return")).to_be_greater_than(0)
+        step("and it is an escape, not an origin: the region grants type_erasure")
+        expect(count_of(found, "E-MC-ANY-001/outside_unsafe")).to_equal(0)
+
+    # Neighbour 1 — the defect class is "flags too much" as much as
+    # "flags too little". A checker that reported every construct would pass
+    # both scenarios above and fail here.
+    it "is silent on code that contains no Any at all":
+        step("lower a fixture with only concrete types")
+        val found = check_fixture("clean", [])
+        step("nothing is reported")
+        expect(found.len()).to_equal(0)
+
+    # Neighbour 2 — §8.6: `checked_downcast` may CONSUME an erased value inside
+    # the boundary, and its concrete result may leave.
+    it "is silent when a checked conversion's concrete result leaves the region":
+        step("lower a fixture whose region converts before the value leaves")
+        val found = check_fixture("checked_downcast_ok", ["checked_downcast", "decode"])
+        step("neither the origin nor the call is reported")
+        expect(found.len()).to_equal(0)
+
+    # Neighbour 3 — the grant is what distinguishes 001 from 002. Removing it
+    # must turn the same fixture's finding back into an origin report.
+    it "reports the origin again when the region is not granted type_erasure":
+        step("lower the boundary fixture with an EMPTY grant list")
+        val found = check_fixture("checked_downcast_ok", [])
+        step("the Any inside the ungranted unsafe block is an E-MC-ANY-001 origin")
+        expect(count_of(found, "E-MC-ANY-001/outside_unsafe")).to_be_greater_than(0)

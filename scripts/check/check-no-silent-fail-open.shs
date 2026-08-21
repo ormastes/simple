@@ -197,6 +197,52 @@ let s = self.lookup_symbol(name).unwrap_or(0);
 RSEOF
     run_fixture "NEW finding on top of a baseline still fails" 1 "$TMP/f7" "other.rs"
 
+    # Fixture 9 (must PASS) -- a COMMENT describing the defect is not the
+    # defect. Uses the real offending text so the exemption is proved to be
+    # comment-scoped, not pattern-weakening.
+    mkfixture f9
+    cat > "$TMP/f9/src/compiler/doc.spl" <<'SPEOF'
+# val idx = s.index_of("(").unwrap_or(0) <- DEFECT, 0 is a valid index
+fn ok() -> i64:
+    1
+SPEOF
+    cat > "$TMP/f9/scripts/check/c.shs" <<'SHEOF'
+# 1. Every `ghdl` invocation was written `out="$(ghdl ...)" || true`, which
+echo hi
+SHEOF
+    run_fixture "a comment DESCRIBING the defect is not an instance of it" 0 "$TMP/f9" ""
+
+    # Fixture 10 (must FAIL) -- and the exemption must be comment-scoped: the
+    # same text as real code still fails. Without this, fixture 9 would only
+    # prove the gate can be silenced by adding a `#`.
+    mkfixture f10
+    cat > "$TMP/f10/src/compiler/real.spl" <<'SPEOF'
+fn idx(s: text) -> i64:
+    s.index_of("(") ?? 0
+SPEOF
+    run_fixture "the same shape as real code (not a comment) still fails" 1 "$TMP/f10" "real.spl"
+
+    # Fixture 11 (must PASS) -- inline `[ "$(cmd || true)" = LITERAL ]` is
+    # fail-CLOSED: empty never equals the literal, so the guard blocks.
+    mkfixture f11
+    cat > "$TMP/f11/scripts/check/trust.shs" <<'SHEOF'
+[ "$(field attestation "$r" 2>/dev/null || true)" = signed-v1 ] || { echo BLOCKED >&2; exit 2; }
+SHEOF
+    cat > "$TMP/f11/src/compiler_rust/compiler/src/ok.rs" <<'RSEOF'
+let capacity = opts.capacity.unwrap_or(16);
+RSEOF
+    run_fixture "inline [ \"\$(cmd || true)\" = LITERAL ] is fail-closed" 0 "$TMP/f11" ""
+
+    # Fixture 12 (must FAIL) -- the exemption is narrow. An ASSIGNMENT (use
+    # site unknown from here) and a `|| echo <N>` laundering a failure into a
+    # plausible NUMBER both still fail, even written as a test.
+    mkfixture f12
+    cat > "$TMP/f12/scripts/check/loose.shs" <<'SHEOF'
+mode=$(field artifact_mode "$h" 2>/dev/null || true)
+[ "$(grep -c '^ok' "$LOG" || echo 0)" = 0 ] && echo PASS
+SHEOF
+    run_fixture "assignment and || echo N are NOT exempted by the inline-test rule" 1 "$TMP/f12" "loose.shs"
+
     if [ -n "$FAILED" ]; then
         printf 'selftest: %d fixture(s) run, FAILURES:%b\n' "$NFIX" "$FAILED"
         echo "ERROR — nothing was checked"
@@ -226,7 +272,13 @@ SH_FILES=$(find scripts -name '*.shs' 2>/dev/null)
 emit_sites() {
     # $1 = newline-separated file list, $2 = operator regex, $3 = tag
     [ -n "$1" ] || return 0
-    printf '%s\n' "$1" | xargs grep -nE "$2" 2>/dev/null | sed "s/^/$3\t/"
+    # `/dev/null` forces grep to print the FILENAME even when xargs hands it a
+    # single file. Without it a one-file batch emits `LINE:code` with no path,
+    # the awk splitter takes the line NUMBER as the path, and every baseline
+    # key for that file is written as a bare integer -- a baseline that cannot
+    # identify what it baselines. Same fail-open class this file gates against,
+    # in the gate itself: it is what made the selftest red on main.
+    printf '%s\n' "$1" | xargs grep -nE "$2" /dev/null 2>/dev/null | sed "s/^/$3\t/"
 }
 
 {
@@ -234,7 +286,7 @@ emit_sites() {
     emit_sites "$SPL_FILES"  "$SIMPLE_OPS" simple
     # Shell: only a substitution feeding a variable, per the header.
     [ -n "$SH_FILES" ] && printf '%s\n' "$SH_FILES" | \
-        xargs grep -nE '=[^=]*\$\(.*\|\|[[:space:]]*(true|echo[[:space:]]+[0-9]+|:)' 2>/dev/null | sed 's/^/shell\t/'
+        xargs grep -nE '=[^=]*\$\(.*\|\|[[:space:]]*(true|echo[[:space:]]+[0-9]+|:)' /dev/null 2>/dev/null | sed 's/^/shell\t/'
 } > "$SITES" 2>/dev/null
 
 CHECKED=$(wc -l < "$SITES" | tr -d ' ')
@@ -254,6 +306,26 @@ awk -F'\t' '
     p2 = index(r2, ":");             code = substr(r2, p2 + 1)
     gsub(/^[ \t]+|[ \t]+$/, "", code)
     gsub(/[ \t]+/, " ", code)
+
+    # FALSE-POSITIVE 1: a COMMENT cannot fail open. Every line here is prose --
+    # including the header of this file, the worked examples inside the
+    # silent_default lint rule, and a bug record quoting the shape it
+    # documents. Flagging documentation of the class as an instance of the
+    # class trains reviewers to ignore the gate, which is how a gate dies.
+    if (code ~ /^(#|\/\/|\*|\/\*)/) next
+
+    # FALSE-POSITIVE 2: `[ "$(cmd || true)" = LITERAL ]` is fail-CLOSED, not
+    # fail-open. `|| true` there exists only to stop `set -e` aborting before
+    # the comparison runs; a failed cmd yields the EMPTY string, which never
+    # equals the expected literal, so the test takes its blocking branch. This
+    # is the dominant idiom in the signed-receipt / trusted-key gates, where
+    # the substitution is compared inline and the mismatch branch exits 2.
+    # Only `=`/`!=` against an inline test qualify -- an assignment to a
+    # variable is NOT exempt, since the use site cannot be seen from here, and
+    # `|| echo <N>` is NOT exempt, since that launders failure into a plausible
+    # NUMBER (the shape the header names as the true positive).
+    if (tag == "shell" && code ~ /\[[^]]*[$]\([^)]*\|\|[ \t]*(true|:)[^)]*\)[^]]*(=|!=)/) next
+
     if (tag != "shell" && code !~ RES) next
     printf "%s\t%s\t%s\n", tag, path, code
 }' RES="$RESOLUTION" "$SITES" | sort -u > "$FIND"

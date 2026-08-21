@@ -1,0 +1,100 @@
+# WmService damage projection extension.
+#
+# WmService remains the sole mutable owner. This module only validates and
+# projects bounded damage candidates into the owner's existing fields.
+
+use os.services.wm.wm_service_core.{WmService}
+use os.services.wm.wm_damage.{WmDamageRectV1, WmDamageRegionV1, WmRedrawDecisionV1, WM_DAMAGE_MAX_REGIONS, wm_damage_admit_v1}
+
+impl WmService:
+    fn window_damage_rect(self, window_id: u64) -> WmDamageRectV1?:
+        if window_id == 0u64:
+            return nil
+        val e = self.world.find_entity_for_window(window_id)
+        if e.is_null():
+            return nil
+        val slot = self.world.geometries.get_slot(e)
+        if slot < 0:
+            return nil
+        val geo = self.world.geometries.dense[slot]
+        if geo.w <= 0 or geo.h <= 0:
+            return nil
+        Some(WmDamageRectV1(x: geo.x, y: geo.y, width: geo.w, height: geo.h))
+
+    me admit_damage(candidate: WmDamageRegionV1) -> bool:
+        val max_regions = WM_DAMAGE_MAX_REGIONS.to_u64()
+        val candidate_count = candidate.rects.len().to_u64()
+        if candidate_count > max_regions:
+            return self.reject("damage-region-overflow")
+        val existing_count = self.damage_regions.len().to_u64()
+        if existing_count > max_regions:
+            return self.reject("damage-region-overflow")
+        val remaining_capacity = max_regions - existing_count
+        if candidate_count > remaining_capacity:
+            return self.reject("damage-region-overflow")
+        var rects: [WmDamageRectV1] = []
+        for rect in self.damage_regions:
+            rects = rects.push(rect)
+        for rect in candidate.rects:
+            rects = rects.push(rect)
+        val merged = WmDamageRegionV1(
+            generation: candidate.generation,
+            scene_revision: candidate.scene_revision,
+            full_redraw: self.damage_full_redraw or candidate.full_redraw,
+            reason: candidate.reason,
+            rects: rects
+        )
+        val decision = wm_damage_admit_v1(merged, self.lifecycle_generation, self.scene_revision)
+        if not decision.accepted:
+            return self.reject(decision.reason)
+        self.damage_generation = decision.generation
+        self.damage_scene_revision = decision.scene_revision
+        self.damage_regions = decision.rects
+        self.damage_full_redraw = decision.full_redraw
+        self.damage_reason = decision.reason
+        true
+
+    me admit_window_damage(first_window_id: u64, second_window_id: u64, reason: text) -> bool:
+        var rects: [WmDamageRectV1] = []
+        if val Some(first_rect) = self.window_damage_rect(first_window_id):
+            rects = rects.push(first_rect)
+        if second_window_id != first_window_id:
+            if val Some(second_rect) = self.window_damage_rect(second_window_id):
+                rects = rects.push(second_rect)
+        val candidate = WmDamageRegionV1(
+            generation: self.lifecycle_generation,
+            scene_revision: self.scene_revision,
+            full_redraw: rects.len() == 0,
+            reason: reason,
+            rects: rects
+        )
+        self.admit_damage(candidate)
+
+    me admit_full_damage(reason: text) -> bool:
+        val candidate = WmDamageRegionV1(
+            generation: self.lifecycle_generation,
+            scene_revision: self.scene_revision,
+            full_redraw: true,
+            reason: reason,
+            rects: []
+        )
+        self.admit_damage(candidate)
+
+    fn redraw_decision(self) -> WmRedrawDecisionV1:
+        WmRedrawDecisionV1(
+            accepted: self.damage_scene_revision != 0u64 and
+                self.damage_generation == self.lifecycle_generation and
+                self.damage_scene_revision == self.scene_revision,
+            generation: self.damage_generation,
+            scene_revision: self.damage_scene_revision,
+            full_redraw: self.damage_full_redraw,
+            reason: self.damage_reason,
+            rects: self.damage_regions
+        )
+
+    me clear_damage():
+        self.damage_generation = 0
+        self.damage_scene_revision = 0
+        self.damage_regions = []
+        self.damage_full_redraw = false
+        self.damage_reason = ""

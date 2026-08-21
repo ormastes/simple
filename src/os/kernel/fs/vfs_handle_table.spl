@@ -10,7 +10,7 @@ that starts at 1 (see `win_vfs_driver.WinVfsDriver.next_handle` and
 `1` for the first file each of them opens — the handle value alone cannot
 identify which filesystem owns it.
 
-`VfsManager` (src/os/services/vfs/vfs.spl) currently papers over that by
+`VfsManager` (src/os/services/vfs/vfs.spl) previously papered over that by
 routing every handle-based operation to `self.mounts[0]`:
 
     me read(handle: u64, size: u64) -> Result<[u8], text>:
@@ -32,8 +32,10 @@ The table owns no I/O and no policy — it is only the association.
 """
 
 class VfsHandleEntry:
-    """One open file description: VFS handle to (mount, driver handle)."""
-    vfs_handle: u64
+    """One bounded slot, guarded by a generation encoded in the handle."""
+    active: bool
+    retired: bool
+    generation: u32
     mount_index: i32
     mount_path: text
     driver_handle: u64
@@ -52,52 +54,143 @@ class VfsHandleLookup:
 
 # Canonical "no such mount" index returned for an unknown or closed handle.
 val VFS_HANDLE_NO_MOUNT: i32 = -1
+val VFS_HANDLE_TABLE_MAX_OPEN: i32 = 4096
+val VFS_HANDLE_GENERATION_MAX: u32 = 0xFFFFFFFFu32
+val VFS_HANDLE_MOUNT_PATH_MAX_BYTES: i32 = 4096
+
+fn _vfs_handle_encode(slot_index: i32, generation: u32) -> u64:
+    (generation.to_u64() << 32) | (slot_index + 1).to_u64()
+
+fn _vfs_handle_slot_number(handle: u64) -> u32:
+    (handle & 0xFFFFFFFFu64).to_u32()
+
+fn _vfs_handle_generation(handle: u64) -> u32:
+    ((handle >> 32) & 0xFFFFFFFFu64).to_u32()
+
+fn _vfs_handle_miss() -> VfsHandleLookup:
+    VfsHandleLookup(
+        found: false,
+        mount_index: VFS_HANDLE_NO_MOUNT,
+        mount_path: "",
+        driver_handle: 0u64
+    )
+
+fn _vfs_handle_mount_path_canonical(path: text) -> bool:
+    """Reject non-absolute or traversal-bearing mount identities.
+
+    The mount table is the primary canonicalization owner.  The handle table
+    still validates its persisted routing identity so a future caller cannot
+    bypass that boundary and retain an ambiguous path in a live handle.
+    """
+    if path.len() == 0 or path.len() > VFS_HANDLE_MOUNT_PATH_MAX_BYTES:
+        return false
+    if not path.starts_with("/") or path.contains("\\") or path.contains("\0"):
+        return false
+    if path.contains("\n") or path.contains("\r"):
+        return false
+    if path == "/":
+        return true
+    if path.ends_with("/") or path.contains("//"):
+        return false
+    if path.contains("/./") or path.ends_with("/."):
+        return false
+    if path.contains("/../") or path.ends_with("/.."):
+        return false
+    true
 
 class VfsHandleTable:
     """Open-file-description table shared by one mount namespace.
 
-    `next_handle` starts at 1 so 0 stays reserved as the invalid handle.
-    VFS handles are never reused within the life of a table, so a stale
-    handle resolves to `found: false` instead of aliasing a new file.
+    The low 32 bits of a handle encode slot+1 and the high 32 bits encode its
+    generation. Lookup and release are O(1). Admission may scan the bounded
+    4096-slot table for a reusable slot. Releasing bumps the generation; a
+    slot at maximum generation is retired instead of wrapping.
     """
     entries: [VfsHandleEntry]
-    next_handle: u64
+    live_count: i32
 
 impl VfsHandleTable:
     static fn new() -> VfsHandleTable:
-        VfsHandleTable(entries: [], next_handle: 1 as u64)
+        VfsHandleTable(entries: [], live_count: 0)
 
-    me register(mount_index: i32, mount_path: text, driver_handle: u64) -> u64:
+    me register(mount_index: i32, mount_path: text, driver_handle: u64) -> Result<u64, text>:
         """Associate a driver-issued handle with the mount that issued it.
 
-        Returns the globally unique VFS handle to hand back to the caller.
+        Admission is bounded and fail-closed. Slots may be reused only after
+        their generation advances, so a retired handle cannot alias a later
+        open. A terminal-generation slot is permanently retired.
         """
-        val h = self.next_handle
-        self.next_handle = self.next_handle + (1 as u64)
-        self.entries = self.entries + [VfsHandleEntry(
-            vfs_handle: h,
+        if mount_index < 0:
+            return Err("invalid VFS mount index")
+        if not _vfs_handle_mount_path_canonical(mount_path):
+            return Err("non-canonical VFS mount path")
+        if driver_handle == 0u64:
+            return Err("invalid zero driver handle")
+        var slot_index = -1
+        var i = 0
+        while i < self.entries.len():
+            if not self.entries[i].active and not self.entries[i].retired:
+                slot_index = i
+                break
+            i = i + 1
+        if slot_index >= 0:
+            val generation = self.entries[slot_index].generation
+            self.entries[slot_index] = VfsHandleEntry(
+                active: true,
+                retired: false,
+                generation: generation,
+                mount_index: mount_index,
+                mount_path: mount_path,
+                driver_handle: driver_handle
+            )
+            self.live_count = self.live_count + 1
+            return Ok(_vfs_handle_encode(slot_index, generation))
+        if self.entries.len() >= VFS_HANDLE_TABLE_MAX_OPEN:
+            return Err("VFS handle table capacity exhausted")
+        val new_slot = self.entries.len()
+        self.entries.push(VfsHandleEntry(
+            active: true,
+            retired: false,
+            generation: 1u32,
             mount_index: mount_index,
             mount_path: mount_path,
             driver_handle: driver_handle
-        )]
-        h
+        ))
+        self.live_count = self.live_count + 1
+        Ok(_vfs_handle_encode(new_slot, 1u32))
 
     fn lookup(vfs_handle: u64) -> VfsHandleLookup:
-        """Resolve a VFS handle to its owning mount and driver handle."""
-        for e in self.entries:
-            if e.vfs_handle == vfs_handle:
-                return VfsHandleLookup(
-                    found: true,
-                    mount_index: e.mount_index,
-                    mount_path: e.mount_path,
-                    driver_handle: e.driver_handle
-                )
+        """Resolve an encoded handle with one bounded slot access."""
+        val slot_number = _vfs_handle_slot_number(vfs_handle)
+        val generation = _vfs_handle_generation(vfs_handle)
+        if slot_number == 0u32 or generation == 0u32:
+            return _vfs_handle_miss()
+        val slot_index = (slot_number - 1u32).to_i32()
+        if slot_index < 0 or slot_index >= self.entries.len():
+            return _vfs_handle_miss()
+        val e = self.entries[slot_index]
+        if not e.active or e.generation != generation:
+            return _vfs_handle_miss()
         VfsHandleLookup(
-            found: false,
-            mount_index: VFS_HANDLE_NO_MOUNT,
-            mount_path: "",
-            driver_handle: 0 as u64
+            found: true,
+            mount_index: e.mount_index,
+            mount_path: e.mount_path,
+            driver_handle: e.driver_handle
         )
+
+    fn was_issued(vfs_handle: u64) -> bool:
+        """O(1) terminal-close receipt check for an old generation."""
+        val slot_number = _vfs_handle_slot_number(vfs_handle)
+        val generation = _vfs_handle_generation(vfs_handle)
+        if slot_number == 0u32 or generation == 0u32:
+            return false
+        val slot_index = (slot_number - 1u32).to_i32()
+        if slot_index < 0 or slot_index >= self.entries.len():
+            return false
+        val e = self.entries[slot_index]
+        if generation < e.generation:
+            return true
+        generation == e.generation and (e.active or e.retired)
 
     fn is_open(vfs_handle: u64) -> bool:
         """True while the handle is registered (i.e. not yet released)."""
@@ -117,33 +210,47 @@ impl VfsHandleTable:
 
     fn open_count() -> i32:
         """Number of currently registered open file descriptions."""
-        self.entries.len()
+        self.live_count
 
     me release(vfs_handle: u64) -> bool:
-        """Drop one handle. False when it was not registered (double close)."""
-        var kept: [VfsHandleEntry] = []
-        var removed = false
-        for e in self.entries:
-            if e.vfs_handle == vfs_handle:
-                removed = true
-            else:
-                kept = kept + [e]
-        self.entries = kept
-        removed
+        """Drop one handle in O(1). False for stale/unknown generations."""
+        val slot_number = _vfs_handle_slot_number(vfs_handle)
+        val generation = _vfs_handle_generation(vfs_handle)
+        if slot_number == 0u32 or generation == 0u32:
+            return false
+        val slot_index = (slot_number - 1u32).to_i32()
+        if slot_index < 0 or slot_index >= self.entries.len():
+            return false
+        val e = self.entries[slot_index]
+        if not e.active or e.generation != generation:
+            return false
+        if e.generation == VFS_HANDLE_GENERATION_MAX:
+            self.entries[slot_index] = VfsHandleEntry(
+                active: false, retired: true, generation: e.generation,
+                mount_index: VFS_HANDLE_NO_MOUNT, mount_path: "", driver_handle: 0u64
+            )
+        else:
+            self.entries[slot_index] = VfsHandleEntry(
+                active: false, retired: false, generation: e.generation + 1u32,
+                mount_index: VFS_HANDLE_NO_MOUNT, mount_path: "", driver_handle: 0u64
+            )
+        self.live_count = self.live_count - 1
+        true
 
     me release_mount(mount_index: i32) -> i32:
         """Drop every handle owned by a mount. Returns how many were dropped.
 
         Called by `unmount()` so no handle survives its filesystem.
         """
-        var kept: [VfsHandleEntry] = []
         var dropped = 0
-        for e in self.entries:
-            if e.mount_index == mount_index:
+        var i = 0
+        while i < self.entries.len():
+            val e = self.entries[i]
+            if e.active and e.mount_index == mount_index:
+                val handle = _vfs_handle_encode(i, e.generation)
+                self.release(handle)
                 dropped = dropped + 1
-            else:
-                kept = kept + [e]
-        self.entries = kept
+            i = i + 1
         dropped
 
     me reindex_after_unmount(removed_index: i32):
@@ -153,15 +260,16 @@ impl VfsHandleTable:
         every mount above `i`. Without this the surviving handles would point
         at the wrong filesystem — the same class of bug as mounts[0] routing.
         """
-        var updated: [VfsHandleEntry] = []
-        for e in self.entries:
-            if e.mount_index > removed_index:
-                updated = updated + [VfsHandleEntry(
-                    vfs_handle: e.vfs_handle,
+        var i = 0
+        while i < self.entries.len():
+            val e = self.entries[i]
+            if e.active and e.mount_index > removed_index:
+                self.entries[i] = VfsHandleEntry(
+                    active: true,
+                    retired: false,
+                    generation: e.generation,
                     mount_index: e.mount_index - 1,
                     mount_path: e.mount_path,
                     driver_handle: e.driver_handle
-                )]
-            else:
-                updated = updated + [e]
-        self.entries = updated
+                )
+            i = i + 1

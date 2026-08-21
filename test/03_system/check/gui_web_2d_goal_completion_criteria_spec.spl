@@ -121,6 +121,20 @@ Windows D3D12 requires:
 - GPU debugger status `pass`
 - non-empty GPU debugger artifact path
 
+## Cross-Platform Freshness Assertions
+
+Until 2026-08-21 this lane (and the five wrapper witnesses filed under it) was
+backed ONLY by `to_contain` greps over the plan document and over this spec
+file itself — a self-referential documentation check that could never fail
+while the prose was intact, and could never say what was missing. It is now
+bound to the real receipt produced by
+`scripts/check/check-gui-web-2d-platform-freshness.shs`, which cross-checks the
+native, mobile, retained-4K, retained-8K, HTML/CSS, and production lane
+evidence files for one shared source revision and metadata set. Absent receipt
+reports `BLOCKED[cross-platform-freshness] ... reason=receipt-absent`; a
+present-but-failing receipt reports the producer's own reason plus the missing
+lanes. Neither is ever a silent pass.
+
 ## Remaining Placeholders
 
 The parallel-agent review lane is now evidence-backed by a small source audit
@@ -611,6 +625,45 @@ fn verify_cross_platform_freshness_criteria() -> text:
     expect(spec).to_contain("tauri_mobile_renderer_parity_status")
     expect(spec).to_contain("tauri_mobile_renderer_parity_ios_status")
     expect(spec).to_contain("tauri_mobile_renderer_parity_android_status")
+
+    # The prose assertions above only prove the plan/spec still DOCUMENT the
+    # freshness gate. They are not the gate. The gate is the real freshness
+    # receipt produced by check-gui-web-2d-platform-freshness.shs, which
+    # cross-checks the Linux/macOS/Windows/iOS/Android lane evidence files for
+    # one shared source revision, runtime build, browser/WebView/Electron
+    # revision, graphics SDK/driver, and runbook version. Absent receipt =>
+    # BLOCKED, never a silent pass.
+    val root = unique_build_root("cross-platform-freshness")
+    val command = "rm -rf " + root + " && " +
+        "BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md " +
+        "sh scripts/check/check-gui-web-2d-platform-freshness.shs >/dev/null 2>&1 || true"
+    val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+    expect(code).to_equal(0)
+
+    val evidence = file_read(root + "/out/evidence.env")
+    if evidence.trim() == "":
+        return "BLOCKED[cross-platform-freshness] evidence=" + root +
+            "/out/evidence.env reason=receipt-absent " +
+            "resume=sh scripts/check/check-gui-web-2d-platform-freshness.shs"
+
+    val freshness_status = value_of(evidence, "gui_web_2d_platform_freshness_status")
+    if freshness_status != "pass":
+        return "BLOCKED[cross-platform-freshness] reason=" +
+            value_of(evidence, "gui_web_2d_platform_freshness_reason") +
+            " missing_lanes=" +
+            value_of(evidence, "gui_web_2d_platform_freshness_missing_evidence_lanes") +
+            " missing_metadata=" +
+            value_of(evidence, "gui_web_2d_platform_freshness_missing_metadata") +
+            " mismatched_source_lanes=" +
+            value_of(evidence, "gui_web_2d_platform_freshness_mismatched_source_revision_lanes") +
+            " resume=sh scripts/check/check-gui-web-2d-platform-freshness.shs"
+
+    expect(value_of(evidence, "gui_web_2d_platform_freshness_missing_evidence_lanes")).to_equal("")
+    expect(value_of(evidence, "gui_web_2d_platform_freshness_missing_source_revision_lanes")).to_equal("")
+    expect(value_of(evidence, "gui_web_2d_platform_freshness_mismatched_source_revision_lanes")).to_equal("")
+    expect(value_of(evidence, "gui_web_2d_platform_freshness_missing_metadata")).to_equal("")
+    expect(value_of(evidence, "gui_web_2d_platform_freshness_mismatched_metadata_lanes")).to_equal("")
+    expect(value_of(evidence, "gui_web_2d_platform_freshness_source_revision").len()).to_be_greater_than(0)
     "pass"
 
 fn value_of(lines: text, key: text) -> text:

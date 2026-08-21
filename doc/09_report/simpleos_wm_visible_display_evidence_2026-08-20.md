@@ -1,0 +1,24 @@
+# SimpleOS WM Visible Display Evidence
+
+- date: 2026-08-20
+- status: fail
+- reason: simple-bin-missing
+- Simple binary: 
+- Simple binary resolved: 
+- no Rust seed fallback: pass (selected-simple-binary-not-under-src-compiler-rust; source=missing-self-hosted; status=missing)
+- display backend:  (not-selected)
+- real display surface: not-run (not-selected)
+- kernel: build/os/simpleos_wm_simple_web_check_32.elf
+- serial markers: not-run (not-run)
+- UEFI boot ladder: not-run (not-run; observation=not-run; grub=not-run; kernel=not-run)
+- shared-renderer serial evidence: generated Aetheric theme installed, web-demo renderer, backend selected, direct-mmio present, html renderable, render-ready
+- marker state: theme:false probe:false web:false backend:false present:false mdi:false windows:false top:false taskbar:false html:false render:false
+- QMP capture: not-run (not-run; method=not-run)
+- PPM validation: not-run (not-run)
+- PPM: build/simpleos_wm_visible_display_evidence/qmp-visible-display.ppm 0x0, nonblack=0, unique_colors=0
+- taskbar/item pixels: colored=0, runs=0, sampled_regions=0
+- readable text glyph matches: 0 / 0
+- cleanup: pass (pass; qemu=not-started, qmp_socket=absent)
+- serial log: build/simpleos_wm_visible_display_evidence/serial.log
+- QEMU stderr: build/simpleos_wm_visible_display_evidence/qemu.stderr.log
+- command: ``

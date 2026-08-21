@@ -1,0 +1,213 @@
+"""
+Portable FAT32, NVFS, and NVFS-POSIX recovery/durability conformance.
+
+The device fixture owns sector state and flush admission. Scenarios exercise
+driver APIs and on-device bytes with behavioral oracles only.
+"""
+
+use std.spipe.*
+use std.fs_driver.block_device.{BlockDevice}
+use std.fs_driver.fat32_core.{Fat32Core}
+use std.fs_driver.types.{FileHandle, Path, OpenFlags}
+use std.fs_driver.error.{FsError}
+use std.fs_driver.nvfs_arena.{
+    nvfs_arena_set_block_device, arena_create_nvme_impl, arena_append_impl,
+    arena_fsync_impl, arena_durable_len_impl, arena_durable_sequence_impl,
+    arena_recover_nvme_impl, arena_readv_impl
+}
+use std.fs_driver.nvfs_posix_driver.{NvfsPosixDriver}
+
+struct RecoveryBank:
+    sectors: [[u8]]
+    flush_allowed: bool
+    flush_count: i64
+
+var _recovery_banks: [RecoveryBank] = []
+
+fn _zeros(count: i64) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < count:
+        out.push(0u8)
+        i = i + 1
+    out
+
+fn _new_bank(flush_allowed: bool) -> i32:
+    var sectors: [[u8]] = []
+    var i: i32 = 0
+    while i < 128:
+        sectors.push(_zeros(512))
+        i = i + 1
+    _recovery_banks.push(RecoveryBank(sectors: sectors, flush_allowed: flush_allowed, flush_count: 0))
+    _recovery_banks.len() - 1
+
+fn _bank_sector(bank_id: i32, lba: i32) -> [u8]:
+    _recovery_banks[bank_id].sectors[lba]
+
+fn _bank_write(bank_id: i32, lba: i32, data: [u8]):
+    var bank = _recovery_banks[bank_id]
+    var sector = _zeros(512)
+    var i: i32 = 0
+    while i < data.len() and i < 512:
+        sector[i] = data[i]
+        i = i + 1
+    bank.sectors[lba] = sector
+    _recovery_banks[bank_id] = bank
+
+fn _bank_corrupt(bank_id: i32, lba: i32, offset: i32):
+    var bank = _recovery_banks[bank_id]
+    var sector = bank.sectors[lba]
+    sector[offset] = sector[offset] ^ 0x5Au8
+    bank.sectors[lba] = sector
+    _recovery_banks[bank_id] = bank
+
+fn _bank_flush(bank_id: i32) -> bool:
+    var bank = _recovery_banks[bank_id]
+    if not bank.flush_allowed:
+        return false
+    bank.flush_count = bank.flush_count + 1
+    _recovery_banks[bank_id] = bank
+    true
+
+fn _bank_flush_count(bank_id: i32) -> i64:
+    _recovery_banks[bank_id].flush_count
+
+class RecoveryDevice:
+    bank_id: i32
+
+impl RecoveryDevice:
+    static fn new(flush_allowed: bool) -> RecoveryDevice:
+        RecoveryDevice(bank_id: _new_bank(flush_allowed))
+
+impl BlockDevice for RecoveryDevice:
+    fn read_sector(lba: u64) -> Result<[u8], text>:
+        if lba >= 128u64:
+            return Err("recovery device read out of range")
+        Ok(_bank_sector(self.bank_id, lba as i32))
+
+    fn write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
+        if lba >= 128u64:
+            return Err("recovery device write out of range")
+        _bank_write(self.bank_id, lba as i32, data)
+        Ok(true)
+
+    fn sector_size() -> u32:
+        512u32
+
+    fn flush() -> Result<bool, text>:
+        Ok(_bank_flush(self.bank_id))
+
+fn _put_u16(buf: [u8], off: i32, value: u16) -> [u8]:
+    var out = buf
+    out[off] = (value & 0xFFu16) as u8
+    out[off + 1] = ((value >> 8) & 0xFFu16) as u8
+    out
+
+fn _put_u32(buf: [u8], off: i32, value: u32) -> [u8]:
+    var out = buf
+    out[off] = (value & 0xFFu32) as u8
+    out[off + 1] = ((value >> 8) & 0xFFu32) as u8
+    out[off + 2] = ((value >> 16) & 0xFFu32) as u8
+    out[off + 3] = ((value >> 24) & 0xFFu32) as u8
+    out
+
+fn _seed_fat32(bank_id: i32):
+    var boot = _zeros(512)
+    boot = _put_u16(boot, 11, 512u16)
+    boot[13] = 1u8
+    boot = _put_u16(boot, 14, 1u16)
+    boot[16] = 1u8
+    boot = _put_u32(boot, 32, 128u32)
+    boot = _put_u32(boot, 36, 1u32)
+    boot = _put_u32(boot, 44, 2u32)
+    boot[510] = 0x55u8
+    boot[511] = 0xAAu8
+    _bank_write(bank_id, 0, boot)
+    var fat = _zeros(512)
+    fat = _put_u32(fat, 0, 0x0FFFFFF8u32)
+    fat = _put_u32(fat, 4, 0x0FFFFFFFu32)
+    fat = _put_u32(fat, 8, 0x0FFFFFFFu32)
+    _bank_write(bank_id, 1, fat)
+
+describe "portable filesystem recovery and durability matrix":
+    it "FAT32 publishes sync only through an acknowledged device flush":
+        val device = RecoveryDevice.new(true)
+        _seed_fat32(device.bank_id)
+        var core = Fat32Core.new(device)
+        core.mount().unwrap()
+        expect(core.durable_flush_supported).to_be(true)
+        val handle = core.alloc_file_handle(2u32, 0, false).unwrap()
+        core.sync_durable(handle).unwrap()
+        expect(_bank_flush_count(device.bank_id)).to_equal(2)
+
+    it "FAT32 rejects stale recycled handles and unavailable durability":
+        val durable_device = RecoveryDevice.new(true)
+        _seed_fat32(durable_device.bank_id)
+        var core = Fat32Core.new(durable_device)
+        core.mount().unwrap()
+        val first = core.alloc_file_handle(2u32, 0, false).unwrap()
+        core.close(first).unwrap()
+        val second = core.alloc_file_handle(2u32, 0, false).unwrap()
+        expect(second.id).to_be_greater_than(first.id)
+        expect(core.get_open_file(first).unwrap_err()).to_equal("invalid file handle")
+
+        val volatile_device = RecoveryDevice.new(false)
+        _seed_fat32(volatile_device.bank_id)
+        var volatile_core = Fat32Core.new(volatile_device)
+        volatile_core.mount().unwrap()
+        expect(volatile_core.durable_flush_supported).to_be(false)
+
+    it "NVFS reconstructs only the newest checksum-valid committed length":
+        val device = RecoveryDevice.new(true)
+        nvfs_arena_set_block_device(device)
+        val base = 8
+        val arena = arena_create_nvme_impl(0, 4096, base, 16)
+        expect(arena).to_be_greater_than(0)
+        expect(arena_append_impl(arena, [0x41u8], 0)).to_equal(1)
+        expect(arena_fsync_impl(arena)).to_be(true)
+        expect(arena_append_impl(arena, [0x42u8], 0)).to_equal(1)
+        expect(arena_fsync_impl(arena)).to_be(true)
+        expect(arena_durable_sequence_impl(base)).to_equal(2u64)
+        expect(arena_durable_len_impl(base)).to_equal(2)
+
+        # Slot 1 (offset 32) is the second commit. A crash-torn newest slot
+        # must fall back to the intact first commit.
+        _bank_corrupt(device.bank_id, base, 32)
+        expect(arena_durable_sequence_impl(base)).to_equal(1u64)
+        expect(arena_durable_len_impl(base)).to_equal(1)
+        val recovered = arena_recover_nvme_impl(0, 4096, base, 16)
+        expect(recovered).to_be_greater_than(0)
+        val bytes = arena_readv_impl(recovered, 0, 8)
+        expect(bytes.len()).to_equal(1)
+        expect(bytes[0]).to_equal(0x41u8)
+
+    it "NVFS rejects fully corrupt and capacity-incompatible recovery":
+        val device = RecoveryDevice.new(true)
+        nvfs_arena_set_block_device(device)
+        val base = 40
+        val arena = arena_create_nvme_impl(0, 4096, base, 16)
+        expect(arena_append_impl(arena, [0x11u8, 0x22u8], 0)).to_equal(2)
+        expect(arena_fsync_impl(arena)).to_be(true)
+        expect(arena_recover_nvme_impl(0, 4096, base, 1)).to_equal(-1)
+        _bank_corrupt(device.bank_id, base, 0)
+        expect(arena_durable_len_impl(base)).to_equal(-1)
+
+    it "NVFS refuses a commit when the device owner rejects flush":
+        val device = RecoveryDevice.new(false)
+        nvfs_arena_set_block_device(device)
+        val base = 64
+        val arena = arena_create_nvme_impl(0, 4096, base, 8)
+        expect(arena_append_impl(arena, [0x7Fu8], 0)).to_equal(1)
+        expect(arena_fsync_impl(arena)).to_be(false)
+        expect(arena_durable_len_impl(base)).to_equal(-1)
+
+    it "NVFS-POSIX preserves portable names and fails closed on sync":
+        var driver = NvfsPosixDriver.new("nvfs-posix")
+        val handle = driver.open_path(Path(raw: "portable/name"), OpenFlags.create_write()).unwrap()
+        expect(driver.write(handle, 0, [0x61u8, 0x62u8])).to_equal(2)
+        expect(driver.fsync(handle).unwrap_err()).to_equal(FsError.Unsupported)
+        driver.close_handle(handle).unwrap()
+        val reopened = driver.open_path(Path(raw: "portable/name"), OpenFlags.read_only()).unwrap()
+        var read_buf = _zeros(2)
+        expect(driver.read(reopened, 0, read_buf)).to_equal(2)
+        expect(driver.open_path(Path(raw: "portable/../escape"), OpenFlags.read_only()).unwrap_err()).to_equal(FsError.InvalidArg)

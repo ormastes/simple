@@ -1,0 +1,73 @@
+# Run-path probe: mutations to a struct/class container field that still holds
+# its DECLARED EMPTY DEFAULT (`[]` / `{}`).
+#
+# Bug: doc/08_tracking/bug/jit_field_default_empty_container_mutation_lost_2026-08-17.md
+#
+# Run under BOTH engines and compare against ABSOLUTE literals (never
+# "the engines agree" — that passes when both are wrong the same way).
+#
+# Measured 2026-08-17 on the deployed seed: interpreter ALL PASS; jit reported
+# method_push_len=0 (expect 2) and dict_default_len=-1 (expect 1), rc=0.
+
+struct SDoc:
+    var n: i64 = 3
+    var arr: [str] = []
+
+class CDoc:
+    var lines: [str] = []
+    var tags: {str: i64} = {}
+
+    fn add(mut self, s: str):
+        self.lines.push(s)
+
+var failures: i64 = 0
+
+fn check(name: text, got: i64, want: i64):
+    if got == want:
+        print("PASS " + name)
+    else:
+        print("FAIL " + name + " got=" + got.to_string() + " want=" + want.to_string())
+        failures = failures + 1
+
+fn main() -> i64:
+    var s = SDoc()
+    check("struct_scalar_sibling_unaffected", s.n, 3)
+    check("struct_default_array_reads_empty", s.arr.len(), 0)
+    s.arr.push("z")
+    check("struct_default_array_push", s.arr.len(), 1)
+
+    var s2 = SDoc()
+    var fresh: [str] = []
+    s2.arr = fresh
+    s2.arr.push("z")
+    check("struct_reassigned_empty_then_push", s2.arr.len(), 1)
+
+    var s3 = SDoc()
+    s3.arr = ["a"]
+    s3.arr.push("z")
+    check("struct_reassigned_nonempty_then_push", s3.arr.len(), 2)
+
+    var s4 = SDoc()
+    var tmp = s4.arr
+    tmp.push("z")
+    s4.arr = tmp
+    check("struct_default_array_explicit_writeback", s4.arr.len(), 1)
+
+    var d = CDoc()
+    d.add("a")
+    d.add("b")
+    check("class_default_array_method_push", d.lines.len(), 2)
+
+    var d2 = CDoc()
+    d2.lines.push("a")
+    check("class_default_array_direct_push", d2.lines.len(), 1)
+
+    var e = CDoc()
+    e.tags["k"] = 1
+    check("class_default_dict_insert", e.tags.len(), 1)
+
+    if failures == 0:
+        print("FIELD_DEFAULT_CONTAINER PROBE: ALL PASS")
+    else:
+        print("FIELD_DEFAULT_CONTAINER PROBE: " + failures.to_string() + " FAILURES")
+    return 0

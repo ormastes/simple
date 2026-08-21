@@ -1,0 +1,183 @@
+# FAT32 ownership-preserving write helpers.
+use std.fs_driver.fat32_core.{
+    Fat32Core, OpenFile, FAT32_EOC, _fat32_handle_index,
+    _fat32_saved_open_files
+}
+use std.fs_driver.types.{FileHandle}
+
+fn fat32_close(mut core: Fat32Core, handle: FileHandle) -> Result<(), text>:
+    val idx = _fat32_handle_index(core.open_files, handle)
+    if idx < 0 or idx >= core.open_files.len():
+        return Err("invalid file handle")
+    var of = core.open_files[idx]
+    if not of.is_open:
+        return Err("file handle not open")
+    var flush_i = 0
+    while flush_i < core._dirty_clusters.len():
+        val cluster = core._dirty_clusters[flush_i]
+        val cached = core._cluster_cache_lookup(cluster)
+        if cached.len() > 0:
+            val rc = core.write_cluster_raw(cluster, cached)
+            if rc.is_err():
+                return match rc:
+                    Ok(_): Err("failed to flush dirty cluster")
+                    Err(err): Err(err)
+        flush_i = flush_i + 1
+    core._dirty_clusters = []
+    of.is_open = false
+    core.open_files = _fat32_saved_open_files(core.open_files, idx, of)
+    Ok(())
+
+fn fat32_write(mut core: Fat32Core, handle: FileHandle, buf: [u8], len: i64) -> Result<i64, text>:
+    if not core.mounted:
+        return Err("filesystem not mounted")
+    val idx = _fat32_handle_index(core.open_files, handle)
+    if idx < 0 or idx >= core.open_files.len():
+        return Err("invalid file handle")
+    var of = core.open_files[idx]
+    if not of.is_open:
+        return Err("file handle not open")
+    val cluster_bytes = (core.bytes_per_sector * core.sectors_per_cluster).to_i64()
+    var cluster_limit: i32 = 0
+    var cluster_limit_sector: u32 = 0
+    while cluster_limit_sector < core.sectors_per_cluster:
+        if core.bytes_per_sector == 512u32:
+            cluster_limit = cluster_limit + 512
+        else:
+            cluster_limit = cluster_limit + core.bytes_per_sector.to_i32()
+        cluster_limit_sector = cluster_limit_sector + 1
+    var start = of.start_cluster
+    if start < 2:
+        val alloc_rc = core.alloc_cluster()
+        if alloc_rc.is_err():
+            return match alloc_rc:
+                Ok(_): Err("failed to allocate FAT32 cluster")
+                Err(err): Err(err)
+        start = match alloc_rc:
+            Ok(value): value
+            Err(err): return Err(err)
+        of.start_cluster = start
+        of.current_cluster = start
+    val chain_rc = core.follow_chain(start)
+    if chain_rc.is_err():
+        return match chain_rc:
+            Ok(_): Err("failed to follow FAT chain")
+            Err(err): Err(err)
+    var chain = match chain_rc:
+        Ok(value): value
+        Err(err): return Err(err)
+    var bytes_written: i64 = 0
+    var pos = of.position
+    val original_pos = of.position
+    while bytes_written < len:
+        val cluster_index = (pos / cluster_bytes).to_i32()
+        val offset_in_cluster = (pos % cluster_bytes).to_i32()
+        while cluster_index >= chain.len():
+            val new_rc = core.alloc_cluster()
+            if new_rc.is_err():
+                of.position = pos
+                if of.size < pos:
+                    of.size = pos
+                core.open_files = _fat32_saved_open_files(core.open_files, idx, of)
+                return match new_rc:
+                    Ok(_): Err("failed to allocate FAT32 cluster")
+                    Err(err): Err(err)
+            val new_cluster = match new_rc:
+                Ok(value): value
+                Err(err): return Err(err)
+            val last = chain[chain.len() - 1]
+            val link_rc = core.write_fat_entry(last, new_cluster)
+            if link_rc.is_err():
+                of.position = pos
+                core.open_files = _fat32_saved_open_files(core.open_files, idx, of)
+                return match link_rc:
+                    Ok(_): Err("failed to link FAT32 cluster")
+                    Err(err): Err(err)
+            chain.push(new_cluster)
+        if offset_in_cluster == 0 and (len - bytes_written) >= cluster_bytes and buf.len().to_i64() >= bytes_written + cluster_bytes:
+            val wrc = core.write_cluster_from(chain[cluster_index], buf, bytes_written)
+            if wrc.is_err():
+                of.position = pos
+                core.open_files = _fat32_saved_open_files(core.open_files, idx, of)
+                return match wrc:
+                    Ok(_): Err("failed to write cluster")
+                    Err(err): Err(err)
+            bytes_written = bytes_written + cluster_bytes
+            pos = pos + cluster_bytes
+            continue
+        val cdata_rc = core.read_cluster(chain[cluster_index])
+        if cdata_rc.is_err():
+            of.position = pos
+            core.open_files = _fat32_saved_open_files(core.open_files, idx, of)
+            return match cdata_rc:
+                Ok(_): Err("failed to read cluster data")
+                Err(err): Err(err)
+        var cdata = match cdata_rc:
+            Ok(value): value
+            Err(err): return Err(err)
+        var bi = offset_in_cluster
+        while bi < cluster_limit and bytes_written < len:
+            if bytes_written.to_i32() < buf.len():
+                cdata[bi] = buf[bytes_written.to_i32()]
+            else:
+                cdata[bi] = 0
+            bytes_written = bytes_written + 1
+            pos = pos + 1
+            bi = bi + 1
+        val wrc = core.write_cluster(chain[cluster_index], cdata)
+        if wrc.is_err():
+            of.position = pos
+            core.open_files = _fat32_saved_open_files(core.open_files, idx, of)
+            return match wrc:
+                Ok(_): Err("failed to write cluster")
+                Err(err): Err(err)
+    of.position = pos
+    if pos > of.size:
+        of.size = pos
+    core._chain_start = start
+    core._chain_values = chain
+    core._chain_valid = true
+    core.open_files = _fat32_saved_open_files(core.open_files, idx, of)
+    Ok(bytes_written)
+
+fn fat32_write_4k_overwrite(mut core: Fat32Core, handle: FileHandle, buf: [u8]) -> Result<i64, text>:
+    if not core.mounted:
+        return Err("filesystem not mounted")
+    if buf.len() < 4096:
+        return Err("buffer too small")
+    val idx = _fat32_handle_index(core.open_files, handle)
+    if idx < 0 or idx >= core.open_files.len():
+        return Err("invalid file handle")
+    var of = core.open_files[idx]
+    if not of.is_open:
+        return Err("file handle not open")
+    if (of.position % 4096) != 0:
+        return Err("unaligned 4k overwrite")
+    if of.start_cluster < 2:
+        return Err("file has no cluster")
+    val cluster_bytes = (core.bytes_per_sector * core.sectors_per_cluster).to_i64()
+    if cluster_bytes != 4096:
+        return Err("cluster is not 4k")
+    val cluster_index = (of.position / 4096).to_i32()
+    val chain_rc = core.follow_chain(of.start_cluster)
+    if chain_rc.is_err():
+        return match chain_rc:
+            Ok(_): Err("failed to follow FAT chain")
+            Err(err): Err(err)
+    val chain = match chain_rc:
+        Ok(value): value
+        Err(err): return Err(err)
+    if cluster_index < 0 or cluster_index >= chain.len():
+        return Err("overwrite beyond allocated file")
+    val wrc = core.write_cluster_from(chain[cluster_index], buf, 0)
+    if wrc.is_err():
+        return match wrc:
+            Ok(_): Err("failed to write cluster")
+            Err(err): Err(err)
+    of.position = of.position + 4096
+    if of.position > of.size:
+        of.size = of.position
+    core.open_files = _fat32_saved_open_files(core.open_files, idx, of)
+    Ok(4096)
+
+export fat32_close, fat32_write, fat32_write_4k_overwrite

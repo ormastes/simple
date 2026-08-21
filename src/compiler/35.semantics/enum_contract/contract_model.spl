@@ -1,0 +1,105 @@
+# Enum contract model (S2/S3, hardening plan 2026-08-21 §10.1/§10.2).
+#
+# Plan: doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md
+#
+# Two contracts live here and they are deliberately NOT the same shape:
+#
+#   @closed                       -- an internal sum type. Every variant is
+#                                    known at compile time, so a `case _:`
+#                                    arm is a hole, not a convenience: it
+#                                    silently absorbs variants added later.
+#   @evolving(repr: uN, unknown: V) -- a WIRE enum. Unknown discriminants are
+#                                    expected and must be preserved, so the
+#                                    named Unknown variant is mandatory and
+#                                    must be able to round-trip a raw uN.
+#
+# Everything in this file is plain data keyed by NAME rather than by HIR
+# symbol id, because a contract is authored in source text (a decorator) and
+# must be comparable before any symbol table exists. The id-keyed comparison
+# that actually decides match coverage stays in
+# compiler.hir.match_coverage.ResolvedMatchCoverage, which this module
+# consumes and never re-implements.
+
+"""Which contract an enum declares."""
+enum EnumContractKind:
+    Closed
+    Evolving(repr_bits: i64, unknown_variant: text)
+
+struct EnumContract:
+    """One enum's declared contract, keyed by the enum's source name."""
+    enum_name: text
+    kind: EnumContractKind
+
+impl EnumContract:
+    fn is_closed() -> bool:
+        match self.kind:
+            case EnumContractKind.Closed: true
+            case EnumContractKind.Evolving(bits, unknown): false
+
+    fn unknown_variant_name() -> text:
+        """Name of the Unknown variant for an @evolving enum, "" otherwise."""
+        match self.kind:
+            case EnumContractKind.Closed: ""
+            case EnumContractKind.Evolving(bits, unknown): unknown
+
+    fn repr_bits() -> i64:
+        """Wire repr width for an @evolving enum, 0 otherwise."""
+        match self.kind:
+            case EnumContractKind.Closed: 0
+            case EnumContractKind.Evolving(bits, unknown): bits
+
+struct EnumContractTable:
+    """Contracts declared in one module, in declaration order."""
+    contracts: [EnumContract]
+
+impl EnumContractTable:
+    fn lookup_or(enum_name: text, fallback: EnumContract) -> EnumContract:
+        """Contract for `enum_name`, or `fallback` when there is none.
+
+        Not an `EnumContract?` return on purpose -- see
+        doc/08_tracking/bug/nil_optional_enum_return_truthy_2026-08-21.md:
+        a nil optional returned across a module boundary here tested truthy at
+        the call site. Callers guard with `has()` first, which is a plain bool
+        and cannot be misread."""
+        for c in self.contracts:
+            if c.enum_name == enum_name:
+                return c
+        fallback
+
+    fn has(enum_name: text) -> bool:
+        for c in self.contracts:
+            if c.enum_name == enum_name:
+                return true
+        false
+
+    fn len() -> i64:
+        self.contracts.len()
+
+struct EnumContractDiag:
+    """One enum-contract violation.
+
+    `code` is the stable diagnostic id (E-CLOSED-001, E-EVOLVING-001/002/003);
+    `enum_name` always names the offending enum so the message is actionable
+    without a span, and `detail` carries the witness set (uncovered variant
+    names, the offending discriminant, the missing variant name)."""
+    code: text
+    enum_name: text
+    detail: text
+    message: text
+
+fn enum_contract_diag(code: text, enum_name: text, detail: text, message: text) -> EnumContractDiag:
+    EnumContractDiag(code: code, enum_name: enum_name, detail: detail, message: message)
+
+fn join_names(names: [text]) -> text:
+    var out = ""
+    var first = true
+    for n in names:
+        if first:
+            out = n
+            first = false
+        else:
+            out = out + ", " + n
+    out
+
+export EnumContractKind, EnumContract, EnumContractTable, EnumContractDiag
+export enum_contract_diag, join_names

@@ -112,7 +112,7 @@ fn pb_bytes_to_text(bytes: [i64], offset: i64, length: i64) -> text:
 # VARINT ENCODING
 # ============================================================================
 
-fn pb_encode_varint(value: i64) -> [i64]:
+fn pb_wire_encode_varint(value: i64) -> [i64]:
     """Encode a value as a protobuf base-128 varint.
 
     The i64 is interpreted as its u64 bit pattern. Negative values are
@@ -222,35 +222,35 @@ fn pb_encode_field(field_num: i64, wire_type: i64, payload: [i64]) -> [i64]:
     if wire_type != pb_wire_varint() and wire_type != pb_wire_i64() and wire_type != pb_wire_len() and wire_type != pb_wire_i32():
         return []
     val tag = pb_make_tag(field_num, wire_type)
-    val tag_bytes = pb_encode_varint(tag)
+    val tag_bytes = pb_wire_encode_varint(tag)
     pb_bytes_concat(tag_bytes, payload)
 
 fn pb_encode_uint32(field_num: i64, value: i64) -> [i64]:
     """Encode a uint32 field (wire type 0, no sign extension)."""
     # Mask to 32 bits to treat as unsigned
     val masked = value & 4294967295
-    pb_encode_field(field_num, pb_wire_varint(), pb_encode_varint(masked))
+    pb_encode_field(field_num, pb_wire_varint(), pb_wire_encode_varint(masked))
 
 fn pb_encode_uint64(field_num: i64, value: i64) -> [i64]:
     """Encode a uint64 field (wire type 0, full 64-bit)."""
-    pb_encode_field(field_num, pb_wire_varint(), pb_encode_varint(value))
+    pb_encode_field(field_num, pb_wire_varint(), pb_wire_encode_varint(value))
 
 fn pb_encode_int32(field_num: i64, value: i64) -> [i64]:
     """Encode an int32 field (wire type 0).
     Negative values are sign-extended to 64 bits → 10 bytes."""
-    pb_encode_field(field_num, pb_wire_varint(), pb_encode_varint(value))
+    pb_encode_field(field_num, pb_wire_varint(), pb_wire_encode_varint(value))
 
 fn pb_encode_int64(field_num: i64, value: i64) -> [i64]:
     """Encode an int64 field (wire type 0)."""
-    pb_encode_field(field_num, pb_wire_varint(), pb_encode_varint(value))
+    pb_encode_field(field_num, pb_wire_varint(), pb_wire_encode_varint(value))
 
 fn pb_encode_sint32(field_num: i64, value: i64) -> [i64]:
     """Encode a sint32 field (wire type 0, zigzag encoded)."""
-    pb_encode_field(field_num, pb_wire_varint(), pb_encode_varint(pb_encode_zigzag32(value)))
+    pb_encode_field(field_num, pb_wire_varint(), pb_wire_encode_varint(pb_encode_zigzag32(value)))
 
 fn pb_encode_sint64(field_num: i64, value: i64) -> [i64]:
     """Encode a sint64 field (wire type 0, zigzag encoded)."""
-    pb_encode_field(field_num, pb_wire_varint(), pb_encode_varint(pb_encode_zigzag64(value)))
+    pb_encode_field(field_num, pb_wire_varint(), pb_wire_encode_varint(pb_encode_zigzag64(value)))
 
 fn pb_encode_bool(field_num: i64, value: bool) -> [i64]:
     """Encode a bool field (wire type 0)."""
@@ -270,7 +270,7 @@ fn pb_encode_string(field_num: i64, s: text) -> [i64]:
             return []
         i = i + 1
     val payload = pb_text_to_bytes(s)
-    val len_bytes = pb_encode_varint(payload.len())
+    val len_bytes = pb_wire_encode_varint(payload.len())
     pb_encode_field(field_num, pb_wire_len(), pb_bytes_concat(len_bytes, payload))
 
 fn pb_encode_bytes_field(field_num: i64, data: [i64]) -> [i64]:
@@ -278,10 +278,10 @@ fn pb_encode_bytes_field(field_num: i64, data: [i64]) -> [i64]:
     for byte_val in data:
         if byte_val < 0 or byte_val > 255:
             return []
-    val len_bytes = pb_encode_varint(data.len())
+    val len_bytes = pb_wire_encode_varint(data.len())
     pb_encode_field(field_num, pb_wire_len(), pb_bytes_concat(len_bytes, data))
 
-fn pb_encode_fixed32(field_num: i64, value: i64) -> [i64]:
+fn pb_wire_encode_fixed32_field(field_num: i64, value: i64) -> [i64]:
     """Encode a fixed32/sfixed32 field (wire type 5, little-endian 4 bytes)."""
     val b0 = value & 255
     val b1 = (value >> 8) & 255
@@ -289,7 +289,7 @@ fn pb_encode_fixed32(field_num: i64, value: i64) -> [i64]:
     val b3 = (value >> 24) & 255
     pb_encode_field(field_num, pb_wire_i32(), [b0, b1, b2, b3])
 
-fn pb_encode_fixed64(field_num: i64, value: i64) -> [i64]:
+fn pb_wire_encode_fixed64_field(field_num: i64, value: i64) -> [i64]:
     """Encode a fixed64/sfixed64 field (wire type 1, little-endian 8 bytes).
     The i64 value is stored as its raw little-endian bit pattern."""
     val b0 = value & 255
@@ -388,7 +388,7 @@ fn pb_read_field(bytes: [i64], offset: i64) -> (i64, i64, [i64], i64):
         if after_varint == after_tag:
             return (0, 0, [], offset)
         # Reconstruct varint bytes as payload
-        val payload = pb_encode_varint(varint_val)
+        val payload = pb_wire_encode_varint(varint_val)
         return (field_num, wire_type, payload, after_varint)
 
     # Wire type 1: 64-bit little-endian

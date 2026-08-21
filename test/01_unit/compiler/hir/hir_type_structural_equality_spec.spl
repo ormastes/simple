@@ -1,0 +1,93 @@
+# @cover src/compiler/20.hir/hir_lowering/type_equality.spl 90%
+# @tag: unit, compiler, hir, types, equality
+
+use std.spec
+use compiler.hir.hir_types.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
+
+fn ty(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.default())
+
+fn ty_at(kind: HirTypeKind, line: i64) -> HirType:
+    HirType(kind: kind, span: Span.at(line, line, 1))
+
+fn i32_() -> HirType:
+    ty(HirTypeKind.Int(bits: 32, signed: true))
+
+fn u8_() -> HirType:
+    ty(HirTypeKind.Int(bits: 8, signed: false))
+
+describe "HIR structural type equality":
+    it "treats equal-but-distinct structures built at different spans as equal":
+        # Same shape, different HirType values, different spans.
+        val a = ty(HirTypeKind.Optional(ty(HirTypeKind.Tuple([i32_(), u8_()]))))
+        val b = ty_at(HirTypeKind.Optional(ty_at(HirTypeKind.Tuple([i32_(), u8_()]), 7)), 9)
+        expect(hir_types_equal(a, b)).to_equal(true)
+
+    it "compares generic named types by symbol and by type arguments":
+        val vec_i32_a = ty(HirTypeKind.Named(SymbolId.new(11), [i32_()]))
+        val vec_i32_b = ty(HirTypeKind.Named(SymbolId.new(11), [i32_()]))
+        val vec_u8 = ty(HirTypeKind.Named(SymbolId.new(11), [u8_()]))
+        val other_ctor = ty(HirTypeKind.Named(SymbolId.new(12), [i32_()]))
+        expect(hir_types_equal(vec_i32_a, vec_i32_b)).to_equal(true)
+        expect(hir_types_equal(vec_i32_a, vec_u8)).to_equal(false)
+        expect(hir_types_equal(vec_i32_a, other_ctor)).to_equal(false)
+
+    it "compares pointer and reference mutability and pointee":
+        val pa = ty(HirTypeKind.Ptr(i32_(), true))
+        val pb = ty(HirTypeKind.Ptr(i32_(), true))
+        val pc = ty(HirTypeKind.Ptr(i32_(), false))
+        val ra = ty(HirTypeKind.Ref(i32_(), true))
+        expect(hir_types_equal(pa, pb)).to_equal(true)
+        expect(hir_types_equal(pa, pc)).to_equal(false)
+        expect(hir_types_equal(pa, ra)).to_equal(false)
+
+    it "treats the declared array length as part of the type":
+        val a3 = ty(HirTypeKind.Array(i32_(), Some(3)))
+        val a3b = ty(HirTypeKind.Array(i32_(), Some(3)))
+        val a4 = ty(HirTypeKind.Array(i32_(), Some(4)))
+        expect(hir_types_equal(a3, a3b)).to_equal(true)
+        expect(hir_types_equal(a3, a4)).to_equal(false)
+
+    it "compares function types by parameters and return type":
+        val f1 = ty(HirTypeKind.Function([i32_(), u8_()], i32_(), []))
+        val f2 = ty(HirTypeKind.Function([i32_(), u8_()], i32_(), []))
+        val f3 = ty(HirTypeKind.Function([i32_()], i32_(), []))
+        val f4 = ty(HirTypeKind.Function([i32_(), u8_()], u8_(), []))
+        expect(hir_types_equal(f1, f2)).to_equal(true)
+        expect(hir_types_equal(f1, f3)).to_equal(false)
+        expect(hir_types_equal(f1, f4)).to_equal(false)
+
+    it "rejects genuinely unequal primitives and constructors":
+        expect(hir_types_equal(i32_(), u8_())).to_equal(false)
+        expect(hir_types_equal(i32_(), ty(HirTypeKind.Str))).to_equal(false)
+        expect(hir_types_equal(i32_(), ty(HirTypeKind.Bool))).to_equal(false)
+        expect(hir_types_equal(ty(HirTypeKind.Str), ty(HirTypeKind.Bool))).to_equal(false)
+        expect(hir_types_equal(ty(HirTypeKind.Unit), ty(HirTypeKind.Unit))).to_equal(true)
+
+    it "terminates on a self-referential named type and compares it structurally":
+        # `class Node: next: Node?` -- the recursive occurrence is a Named
+        # symbol reference, never expanded, so equality is a finite descent.
+        val node = SymbolId.new(42)
+        val node_ref_a = ty(HirTypeKind.Named(node, []))
+        val next_a = ty(HirTypeKind.Optional(ty(HirTypeKind.Named(node, [node_ref_a]))))
+        val node_ref_b = ty(HirTypeKind.Named(node, []))
+        val next_b = ty(HirTypeKind.Optional(ty(HirTypeKind.Named(node, [node_ref_b]))))
+        expect(hir_types_equal(next_a, next_b)).to_equal(true)
+
+        val other = ty(HirTypeKind.Optional(ty(HirTypeKind.Named(node, [i32_()]))))
+        expect(hir_types_equal(next_a, other)).to_equal(false)
+
+    it "compares union and dyn-trait types structurally":
+        val u1 = ty(HirTypeKind.Union([i32_(), u8_()]))
+        val u2 = ty(HirTypeKind.Union([i32_(), u8_()]))
+        val u3 = ty(HirTypeKind.Union([i32_()]))
+        expect(hir_types_equal(u1, u2)).to_equal(true)
+        expect(hir_types_equal(u1, u3)).to_equal(false)
+
+        val d1 = ty(HirTypeKind.DynTrait(SymbolId.new(5)))
+        val d2 = ty(HirTypeKind.DynTrait(SymbolId.new(5)))
+        val d3 = ty(HirTypeKind.DynTrait(SymbolId.new(6)))
+        expect(hir_types_equal(d1, d2)).to_equal(true)
+        expect(hir_types_equal(d1, d3)).to_equal(false)

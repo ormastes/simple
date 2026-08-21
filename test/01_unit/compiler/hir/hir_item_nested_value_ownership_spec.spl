@@ -1,0 +1,73 @@
+use std.testing.*
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module, ParserEnum}
+use compiler.hir.hir_definitions.{HirExprKind}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+
+fn surfaces_for(module: Module, source: text, name: text) -> ModuleSurfacesByName:
+    var modules: Dict<text, Module> = {}
+    modules[name] = module
+    module_surfaces_from_modules(
+        modules, [SourceFile(path: name, content: source, module_name: name)]).unwrap()
+
+describe "HIR item lowering nested value ownership":
+    it "preserves independently owned enum and constant records":
+        val source = "enum First:\n    One\nenum Second:\n    Two\nval left = 11\nval right = 22"
+        val module = parse_full_frontend(source, "owned.items", "owned.items", Logger(level: 0))
+        val surfaces = surfaces_for(module, source, "owned.items")
+        var lowering = hirlowering_for_module("owned.items", surfaces)
+
+        val hir = lowering.lower_module(module)
+
+        expect(lowering.errors.len()).to_equal(0)
+        expect(hir.enums.keys().len()).to_equal(2)
+        expect(hir.constants.keys().len()).to_equal(2)
+        var enum_names: [text] = []
+        for enum_key in hir.enums.keys():
+            enum_names = enum_names.push(hir.enums[enum_key].name)
+        expect(enum_names).to_contain("First")
+        expect(enum_names).to_contain("Second")
+        var left_symbol = -1
+        var right_symbol = -1
+        var left_value = -1
+        var right_value = -1
+        for const_key in hir.constants.keys():
+            val constant = hir.constants[const_key]
+            match constant.name:
+                case "left":
+                    left_symbol = constant.symbol.id
+                    match constant.value.kind:
+                        case HirExprKind.IntLit(value, _): left_value = value
+                        case _: left_value = -2
+                case "right":
+                    right_symbol = constant.symbol.id
+                    match constant.value.kind:
+                        case HirExprKind.IntLit(value, _): right_value = value
+                        case _: right_value = -2
+                case _: pass
+        expect(left_symbol).to_be_greater_than(-1)
+        expect(right_symbol).to_be_greater_than(-1)
+        expect(left_symbol == right_symbol).to_equal(false)
+        expect(left_value).to_equal(11)
+        expect(right_value).to_equal(22)
+
+    it "rejects an imported enum value without its declaration owner":
+        val source = "fn noop():\n    pass"
+        val module = parse_full_frontend(source, "owner.guard", "owner.guard", Logger(level: 0))
+        val surfaces = surfaces_for(module, source, "owner.guard")
+        var lowering = hirlowering_for_module("owner.guard", surfaces)
+        lowering.imported_enums["Detached"] = ParserEnum(
+            name: "Detached", type_params: [], variants: [],
+            visibility: Visibility.Private, is_public: false,
+            has_doc_comment: false, doc_comment: "", span: Span.empty())
+
+        val lowered = lowering.lower_module_enum_definitions(module)
+
+        expect(lowered.keys().len()).to_equal(0)
+        expect(lowering.errors.len()).to_equal(1)

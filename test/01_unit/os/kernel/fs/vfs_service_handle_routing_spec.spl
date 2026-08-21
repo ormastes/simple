@@ -23,6 +23,7 @@ is *not* mount A's value.
 
 use std.spec.{describe, it, expect, step, assert_true}
 use os.services.vfs.vfs.{VfsManager, Filesystem, SeekWhence}
+use os.kernel.fs.vfs_handle_table.{VfsHandleEntry, VfsHandleTable, VFS_HANDLE_TABLE_MAX_OPEN}
 use os.kernel.types.fs_types.{FileFlags, FsNode, FsNodeKind, DirEntry}
 use std.nogc_sync_mut.binary_io.{bytes_to_string, string_to_bytes}
 
@@ -128,7 +129,7 @@ describe("VfsManager routes handle ops to the mount that opened them", fn():
 
         step("open a file on the SECOND mount")
         val opened = vfs.open("/beta/report.txt", rw_flags())
-        expect(opened.is_ok()).to_equal(true)
+        expect(opened.is_ok()).to_be(true)
         val fd = opened.unwrap()
 
         step("the descriptor carries a VFS handle bound to mount B")
@@ -140,13 +141,39 @@ describe("VfsManager routes handle ops to the mount that opened them", fn():
         expect(vfs.handle_driver_handle(fd.node)).to_equal(1 as u64)
     )
 
+    it("rolls back a driver open when global handle admission is exhausted", fn():
+        var vfs = two_mount_vfs()
+        var saturated: [VfsHandleEntry] = []
+        var i = 0
+        while i < VFS_HANDLE_TABLE_MAX_OPEN:
+            saturated.push(VfsHandleEntry(
+                active: true, retired: false, generation: 1u32,
+                mount_index: 0, mount_path: "/alpha", driver_handle: (i + 1).to_u64()
+            ))
+            i = i + 1
+        vfs.handles = VfsHandleTable(
+            entries: saturated, live_count: VFS_HANDLE_TABLE_MAX_OPEN)
+
+        step("fill every bounded global handle slot")
+        val opened = vfs.open("/beta/report.txt", rw_flags())
+
+        step("the open fails and reports the backend close rollback failure honestly")
+        expect(opened.is_err()).to_be(true)
+        expect(opened.unwrap_err()).to_contain("VFS handle table capacity exhausted")
+        expect(opened.unwrap_err()).to_contain("driver close rollback failed: close-routed-to-beta")
+
+        step("no additional global handle or userspace fd is issued")
+        expect(vfs.open_handle_count()).to_equal(VFS_HANDLE_TABLE_MAX_OPEN)
+        expect(vfs.next_fd).to_equal(3)
+    )
+
     it("reads from mount B, not from mount A", fn():
         var vfs = two_mount_vfs()
         val fd = vfs.open("/beta/report.txt", rw_flags()).unwrap()
 
         step("read returns beta's stamped payload")
         val got = vfs.read(fd.node, 32 as u64)
-        expect(got.is_ok()).to_equal(true)
+        expect(got.is_ok()).to_be(true)
         expect(bytes_to_string(got.unwrap())).to_equal("beta-payload")
 
         step("negative: it is NOT alpha's payload (the mounts[0] answer)")
@@ -164,7 +191,7 @@ describe("VfsManager routes handle ops to the mount that opened them", fn():
 
         step("write returns beta's base code 2000 plus the byte count")
         val wrote = vfs.write(fd.node, string_to_bytes("abcde"))
-        expect(wrote.is_ok()).to_equal(true)
+        expect(wrote.is_ok()).to_be(true)
         expect(wrote.unwrap()).to_equal(2005 as u64)
 
         step("negative: alpha would have answered 1005")
@@ -178,7 +205,7 @@ describe("VfsManager routes handle ops to the mount that opened them", fn():
 
         step("seek returns beta's base position 200 plus the offset")
         val pos = vfs.seek(fd.node, 7, SeekWhence.Set)
-        expect(pos.is_ok()).to_equal(true)
+        expect(pos.is_ok()).to_be(true)
         expect(pos.unwrap()).to_equal(207 as u64)
 
         step("negative: alpha would have answered 107")
@@ -193,7 +220,7 @@ describe("VfsManager routes handle ops to the mount that opened them", fn():
 
         step("close is delivered to beta's driver")
         val closed = vfs.close(fd.node)
-        expect(closed.is_err()).to_equal(true)
+        expect(closed.is_err()).to_be(true)
         expect(closed.unwrap_err()).to_equal("close-routed-to-beta")
 
         step("the VFS handle is retired even though the driver reported an error")
@@ -201,12 +228,12 @@ describe("VfsManager routes handle ops to the mount that opened them", fn():
 
         step("a replay is terminal success and cannot be re-routed to mount A")
         val again = vfs.close(fd.node)
-        expect(again.is_ok()).to_equal(true)
-        expect(again.unwrap()).to_equal(true)
+        expect(again.is_ok()).to_be(true)
+        expect(again.unwrap()).to_be(true)
 
         step("a never-opened handle still fails rather than forging a receipt")
         val unknown = vfs.close(999 as u64)
-        expect(unknown.is_err()).to_equal(true)
+        expect(unknown.is_err()).to_be(true)
         expect(unknown.unwrap_err()).to_contain("unknown VFS handle")
     )
 
@@ -232,12 +259,12 @@ describe("VfsManager routes handle ops to the mount that opened them", fn():
         val fd = vfs.open("/beta/report.txt", rw_flags()).unwrap()
 
         step("unmounting beta drops its open descriptions")
-        expect(vfs.unmount("/beta").is_ok()).to_equal(true)
+        expect(vfs.unmount("/beta").is_ok()).to_be(true)
         expect(vfs.open_handle_count()).to_equal(0)
 
         step("the stale handle errors instead of falling through to alpha")
         val stale = vfs.read(fd.node, 32 as u64)
-        expect(stale.is_err()).to_equal(true)
+        expect(stale.is_err()).to_be(true)
         expect(stale.unwrap_err()).to_contain("unknown VFS handle")
     )
 )

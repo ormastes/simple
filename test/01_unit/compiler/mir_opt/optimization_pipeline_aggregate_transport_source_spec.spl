@@ -4,6 +4,10 @@
 # payload, entered the backend pipeline as NoOpt, and dereferenced the native
 # empty-array immediate. Keep the hot driver path on scalar level transport.
 #
+# The driver-side halves of this invariant moved out of driver.spl when the
+# driver was split: the level call site now lives in driver_pipeline_execution
+# and the AOT lane in driver_aot_pipeline. The invariant itself is unchanged.
+#
 # @cover src/compiler/60.mir_opt/mir_opt/mod.spl
 
 use std.io.{file_read}
@@ -12,7 +16,9 @@ describe "OptimizationPipeline aggregate transport":
     it "uses a scalar level and direct OptLevel literals in the driver":
         val pipeline = file_read(
             "src/compiler/80.driver/driver_pipeline_passes.spl")
-        val driver = file_read("src/compiler/80.driver/driver.spl")
+        val execution = file_read(
+            "src/compiler/80.driver/driver_pipeline_execution.spl")
+        val aot = file_read("src/compiler/80.driver/driver_aot_pipeline.spl")
         val optimizer = file_read("src/compiler/60.mir_opt/mir_opt/mod.spl")
         val consumer_start = optimizer.index_of(
             "fn optimize_module_for_backend(module: MirModule, level: OptLevel, backend_name: text) -> MirModule:"
@@ -29,15 +35,16 @@ describe "OptimizationPipeline aggregate transport":
         expect(pipeline.contains(
             "use compiler.mir_opt.mir_opt_integration.{OptimizationConfig"
         )).to_equal(false)
-        expect(pipeline).to_contain(
+        expect(execution).to_contain(
             "self.optimize_mir_level(self.ctx.options.opt_level ?? 0)"
         )
-        expect(driver).to_contain(
+        expect(aot).to_contain(
             "val mir_opt_level = self.ctx.options.opt_level ?? 0"
         )
-        expect(driver).to_contain("self.optimize_mir_level(mir_opt_level)")
-        expect(driver.contains("mir_opt_level = 2")).to_equal(false)
-        expect(driver.contains("get_optimization_config")).to_equal(false)
+        expect(aot).to_contain("self.optimize_mir_level(mir_opt_level)")
+        expect(aot.contains("mir_opt_level = 2")).to_equal(false)
+        expect(aot.contains("get_optimization_config")).to_equal(false)
+        expect(execution.contains("get_optimization_config")).to_equal(false)
         expect(consumer.contains(
             "optimizationpipeline_for_backend(level, backend_name).passes"
         )).to_equal(false)

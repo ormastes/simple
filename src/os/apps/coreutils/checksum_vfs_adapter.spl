@@ -1,0 +1,80 @@
+# Process-side VFS adapter for filesystem-launched checksum utilities.
+#
+# It retains VfsManager.read_bytes_bounded as the one hashing read owner while
+# routing driver reads through bounded user/kernel file-descriptor syscalls.
+
+use os.services.vfs.vfs.{VfsManager, Filesystem, SeekWhence}
+use os.kernel.types.fs_types.{FileFlags, FsNode, DirEntry}
+use os.userlib.fs.{
+    file_open_direct, file_read_direct, file_close_direct,
+    stat as user_vfs_stat
+}
+
+class ChecksumProcessFilesystem:
+    name: text
+
+impl ChecksumProcessFilesystem:
+    static fn new() -> ChecksumProcessFilesystem:
+        ChecksumProcessFilesystem(name: "checksum-process-vfs")
+
+impl Filesystem for ChecksumProcessFilesystem:
+    fn fs_name() -> text: self.name
+    me mount(device: text, options: text) -> Result<bool, text>: Ok(true)
+    me unmount() -> Result<bool, text>: Ok(true)
+
+    me open(path: text, flags: FileFlags) -> Result<u64, text>:
+        if flags.write or flags.append or flags.create or flags.truncate or flags.directory:
+            return Err("checksum process filesystem is read-only")
+        val opened = file_open_direct(path, 0u32)
+        match opened:
+            case Err(reason): Err(reason)
+            case Ok(fd): Ok(fd.to_u64())
+
+    me read(handle: u64, size: u64) -> Result<[u8], text>:
+        file_read_direct(handle.to_i32(), size)
+
+    me write(handle: u64, data: [u8]) -> Result<u64, text>:
+        Err("checksum process filesystem is read-only")
+
+    me close(handle: u64) -> Result<bool, text>:
+        if file_close_direct(handle.to_i32()):
+            return Ok(true)
+        Err("checksum process filesystem close failed")
+
+    me seek(handle: u64, offset: i64, whence: SeekWhence) -> Result<u64, text>:
+        Err("checksum process filesystem seek unsupported")
+
+    fn stat(path: text) -> Result<FsNode, text>:
+        user_vfs_stat(path)
+
+    fn chmod(path: text, mode: u16) -> Result<bool, text>:
+        Err("checksum process filesystem is read-only")
+
+    me mkdir(path: text) -> Result<bool, text>:
+        Err("checksum process filesystem is read-only")
+
+    me rmdir(path: text) -> Result<bool, text>:
+        Err("checksum process filesystem is read-only")
+
+    fn readdir(path: text) -> Result<[DirEntry], text>:
+        Err("checksum process filesystem directory reads unsupported")
+
+    me unlink(path: text) -> Result<bool, text>:
+        Err("checksum process filesystem is read-only")
+
+    me rename(old_path: text, new_path: text) -> Result<bool, text>:
+        Err("checksum process filesystem is read-only")
+
+    me symlink(target: text, link_path: text) -> Result<bool, text>:
+        Err("checksum process filesystem is read-only")
+
+fn checksum_process_vfs() -> VfsManager:
+    var vfs = VfsManager.new()
+    val mounted = vfs.mount(
+        "/", "checksum-process-vfs", "kernel-vfs-service", true,
+        ChecksumProcessFilesystem.new())
+    if mounted.is_err():
+        return VfsManager.new()
+    vfs
+
+export ChecksumProcessFilesystem, checksum_process_vfs

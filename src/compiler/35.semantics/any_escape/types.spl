@@ -1,0 +1,139 @@
+# AnyEscapeChecker — diagnostic and profile model (agent Y2, 2026-08-21).
+#
+# Plan: doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md
+#       §8.5 (escape analysis), §14.1 REQ-MC-ANY-001, §17.1/§17.2 (diagnostic
+#       text), §20.5 row Y2.
+
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.assurance.unsafe_capabilities.{
+    UnsafeCapability, unsafe_capability_name
+}
+
+"""Why an `Any` diagnostic fired.
+
+One variant per row of the §8.5 "Critical errors" list. `OutsideUnsafe` is
+`E-MC-ANY-001`; every other variant is `E-MC-ANY-002`.
+"""
+enum AnyEscapeKind:
+    OutsideUnsafe        # Any created/typed outside a type_erasure region
+    EscapeStore          # stored into a field, global, or container
+    EscapeReturn         # returned or yielded out of the region
+    EscapeCapture        # captured by a closure/coroutine
+    EscapeAcrossAwait    # live across an await/yield suspension point
+    EscapeCallArg        # passed to a function that is not the checked boundary
+    EscapeOperator       # arithmetic/comparison operator applied to Any
+
+fn any_escape_kind_name(kind: AnyEscapeKind) -> text:
+    """Stable machine-readable class name, used by the census baseline."""
+    match kind:
+        case OutsideUnsafe: "outside_unsafe"
+        case EscapeStore: "escape_store"
+        case EscapeReturn: "escape_return"
+        case EscapeCapture: "escape_capture"
+        case EscapeAcrossAwait: "escape_across_await"
+        case EscapeCallArg: "escape_call_arg"
+        case EscapeOperator: "escape_operator"
+
+fn any_escape_kind_code(kind: AnyEscapeKind) -> text:
+    """Diagnostic code for `kind` (§17.1, §17.2)."""
+    match kind:
+        case OutsideUnsafe: "E-MC-ANY-001"
+        case _: "E-MC-ANY-002"
+
+"""Severity a diagnostic carries.
+
+`critical` produces `Error`; every other profile produces `Warning` so the
+census can run over the whole compiler today without failing the build
+(§8.2 profile matrix — only the `critical` column is `deny`).
+"""
+enum AnyEscapeSeverity:
+    Error
+    Warning
+
+fn any_escape_severity_name(sev: AnyEscapeSeverity) -> text:
+    match sev:
+        case Error: "error"
+        case Warning: "warning"
+
+struct AnyEscapeDiag:
+    """One `Any` finding.
+
+    `origin_note` is empty for `E-MC-ANY-001` and carries the §17.2
+    "`raw: Any` originated at ..." line for escapes whose origin is known.
+    """
+    code: text
+    kind: AnyEscapeKind
+    severity: AnyEscapeSeverity
+    module_name: text
+    function_name: text
+    message: text
+    origin_note: text
+    span: Span
+
+"""Where the `type_erasure` capability is granted, and how hard to enforce.
+
+WHY A GRANT LIST AND NOT A LOOKUP ON THE HIR NODE: `HirExprKind.UnsafeBlock`
+(20.hir/hir_definitions.spl:569) carries only a `HirBlock` — no reason and no
+capability set — and the parser's `@unsafe(reason:, capabilities:)` metadata is
+accumulated into a module-level `[text]` (`UNSAFE_ANNOTATIONS`,
+10.frontend/core/_ParserDecls/enum_module_body.spl:552) that no HIR node
+references. Until that is threaded through, the grant has to be supplied to
+this checker from outside. Filed as
+doc/08_tracking/bug/unsafe_capabilities_not_carried_into_hir_2026-08-21.md.
+"""
+struct AnyEscapeProfile:
+    # `critical` -> Error severity; any other profile -> Warning.
+    is_critical: bool
+    # Names of functions whose body is granted `type_erasure`, i.e. those
+    # annotated `@unsafe(reason: ..., capabilities: [type_erasure])`.
+    type_erasure_functions: [text]
+    # When true, EVERY lexical `unsafe:` block counts as a `type_erasure`
+    # region. Never true for `critical`: that would grant the capability to
+    # unsafe blocks that only asked for `raw_ptr`, which is precisely the
+    # over-grant §8.1 forbids. Provided for lanes that want the escape half
+    # of the analysis without the capability half.
+    unsafe_grants_type_erasure: bool
+
+impl AnyEscapeProfile:
+    static fn critical(type_erasure_functions: [text]) -> AnyEscapeProfile:
+        """Hard-enforcing profile: capability required, findings are errors."""
+        AnyEscapeProfile(
+            is_critical: true,
+            type_erasure_functions: type_erasure_functions,
+            unsafe_grants_type_erasure: false
+        )
+
+    static fn census(type_erasure_functions: [text]) -> AnyEscapeProfile:
+        """Non-critical profile: same findings, warning severity.
+
+        This is what `scripts/check/check-any-escape-census.shs` runs, so the
+        inventory can be measured before the rule is switched on.
+        """
+        AnyEscapeProfile(
+            is_critical: false,
+            type_erasure_functions: type_erasure_functions,
+            unsafe_grants_type_erasure: false
+        )
+
+    fn severity() -> AnyEscapeSeverity:
+        if self.is_critical:
+            AnyEscapeSeverity.Error
+        else:
+            AnyEscapeSeverity.Warning
+
+    fn grants_type_erasure(function_name: text) -> bool:
+        """True when `function_name`'s unsafe blocks carry `type_erasure`."""
+        if self.unsafe_grants_type_erasure:
+            return true
+        for granted in self.type_erasure_functions:
+            if granted == function_name:
+                return true
+        false
+
+fn type_erasure_capability_name() -> text:
+    """The one capability this checker gates on (§8.1)."""
+    unsafe_capability_name(UnsafeCapability.TypeErasure)
+
+export AnyEscapeKind, AnyEscapeSeverity, AnyEscapeDiag, AnyEscapeProfile
+export any_escape_kind_name, any_escape_kind_code, any_escape_severity_name
+export type_erasure_capability_name

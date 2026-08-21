@@ -1,0 +1,38 @@
+# @cover src/compiler/20.hir/hir_lowering/_Items/trait_impl_lowering.spl
+# @cover src/compiler/10.frontend/core/parser_decls_use.spl
+# tag: unit
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+
+describe "generic impl head type params reach the HIR Phase A gate":
+    it "fires the impl-tier Phase A gate now that head params are threaded":
+        val src = "struct Stack<T>:\n    items: [T]\n\nimpl Stack<T>:\n    me push_it(v: T):\n        ()\n"
+        val parsed = parse_full_frontend(src, "testdata/gi.spl", "gi", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/gi.spl")
+        val hir = hl.lower_module(parsed)
+        var saw_impl_gate = false
+        for err in hl.errors:
+            if err.message.contains("impl for a type with type parameter(s)"):
+                saw_impl_gate = true
+        expect(saw_impl_gate).to_equal(true)
+
+    it "the struct-tier gate already fired for the same file before this change":
+        # Load-bearing for the bootstrap risk analysis: every repo file that
+        # carries a generic `impl Head<T>:` also declares the generic
+        # struct/class/enum it is an impl FOR, and that struct-tier gate is
+        # unconditional and pre-existing. So threading impl head type params
+        # adds a SECOND error to files that were already erroring -- it makes
+        # no previously-clean module dirty.
+        val src = "struct Bare<T>:\n    items: [T]\n"
+        val parsed = parse_full_frontend(src, "testdata/bare.spl", "bare", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/bare.spl")
+        val hir = hl.lower_module(parsed)
+        var saw_struct_gate = false
+        for err in hl.errors:
+            if err.message.contains("generic structs are not supported"):
+                saw_struct_gate = true
+        expect(saw_struct_gate).to_equal(true)

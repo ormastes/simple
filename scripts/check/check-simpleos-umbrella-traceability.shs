@@ -1,0 +1,163 @@
+#!/usr/bin/env sh
+# Umbrella REQ/NFR traceability gate for the SimpleOS complete-OS-hardening
+# feature.
+#
+# Why this exists: the mandatory release gate
+# (scripts/check/check-simpleos-mission-critical-release.shs) never consulted
+# the umbrella traceability helper, so the REQ/NFR bindings in
+# test/helpers/simpleos_complete_os_hardening_steps.spl could rot - or a
+# requirement could carry no acceptance owner at all - while the release gate
+# still reported PASS. That is a fail-open. This lane makes the binding table a
+# checked object:
+#
+#   1. every REQ/NFR declared by an umbrella spec `# @req` header is bound,
+#   2. every bound acceptance owner file exists,
+#   3. every bound requirement's expected receipt is reported - absent
+#      receipts are BLOCKED, never a silent pass.
+#
+# Verdict line is the LAST line of stdout: PASS / FAIL / ERROR, always with a
+# non-vacuous count. --selftest runs first on every invocation and is fatal.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+HELPER="test/helpers/simpleos_complete_os_hardening_steps.spl"
+SPEC_DIR="test/03_system/os/simpleos/feature"
+RECEIPT_DIR="build/test-artifacts/simpleos_complete_os_hardening"
+
+# Print "REQ-xxx<TAB>owner" for each binding in the helper file.
+bindings_of() {
+    awk '
+        match($0, /return _binding\(requirement, "[^"]*", "[^"]*"\)/) {
+            line = substr($0, RSTART, RLENGTH)
+            split(line, q, "\"")
+            owner = q[4]
+            print req "\t" owner
+        }
+        match($0, /if requirement == "[^"]*":/) {
+            split($0, r, "\"")
+            req = r[2]
+        }
+    ' "$1"
+}
+
+# Print each REQ/NFR id declared in umbrella spec `# @req` headers.
+declared_reqs() {
+    dir="$1"
+    [ -d "$dir" ] || return 0
+    for spec in "$dir"/simpleos_complete_os_hardening_*_spec.spl; do
+        [ -f "$spec" ] || continue
+        sed -n 's/^# @req //p' "$spec"
+    done | tr ' ' '\n' | grep -E '^(REQ|NFR)-[0-9]+$' || true
+}
+
+self_test() {
+    dir="${TMPDIR:-/tmp}/simpleos-umbrella-traceability-selftest.$$"
+    rm -rf "$dir"
+    mkdir -p "$dir/spec"
+
+    cat >"$dir/helper.spl" <<'EOF'
+fn _evidence_binding(requirement: text) -> SimpleOsHardeningEvidenceBinding:
+    if requirement == "REQ-001":
+        return _binding(requirement, "check_a", "test/01_unit/a_spec.spl")
+    if requirement == "NFR-002":
+        return _binding(requirement, "check_b", "test/01_unit/b_spec.spl")
+    return _binding("", "", "")
+EOF
+    got="$(bindings_of "$dir/helper.spl" | tr '\t' '=' | tr '\n' ' ')"
+    case "$got" in
+        "REQ-001=test/01_unit/a_spec.spl NFR-002=test/01_unit/b_spec.spl ") ;;
+        *)
+            echo "self-test failed: binding extraction got [$got]" >&2
+            rm -rf "$dir"
+            exit 1
+            ;;
+    esac
+
+    cat >"$dir/spec/simpleos_complete_os_hardening_x_spec.spl" <<'EOF'
+# @req REQ-001 NFR-002
+EOF
+    got="$(declared_reqs "$dir/spec" | tr '\n' ' ')"
+    case "$got" in
+        "REQ-001 NFR-002 ") ;;
+        *)
+            echo "self-test failed: @req extraction got [$got]" >&2
+            rm -rf "$dir"
+            exit 1
+            ;;
+    esac
+
+    # An unbound declared requirement must be detectable.
+    printf '# @req REQ-999\n' >"$dir/spec/simpleos_complete_os_hardening_y_spec.spl"
+    if declared_reqs "$dir/spec" | grep -Fqx REQ-999; then
+        :
+    else
+        echo "self-test failed: unbound requirement not detected" >&2
+        rm -rf "$dir"
+        exit 1
+    fi
+
+    rm -rf "$dir"
+}
+
+self_test
+echo "simpleos-umbrella-traceability self-test: PASS"
+
+if [ "${1:-}" = "--selftest" ] || [ "${1:-}" = "--self-test" ]; then
+    echo "PASS — self-test only, extraction fixtures verified"
+    exit 0
+fi
+
+if [ ! -f "$HELPER" ]; then
+    echo "ERROR — nothing was checked: traceability helper missing at $HELPER"
+    exit 2
+fi
+
+tmp="${TMPDIR:-/tmp}/simpleos-umbrella-traceability.$$"
+trap 'rm -f "$tmp" "$tmp.reqs"' EXIT
+bindings_of "$HELPER" >"$tmp"
+declared_reqs "$SPEC_DIR" | sort -u >"$tmp.reqs"
+
+checked=0
+missing_binding=""
+missing_owner=""
+blocked=""
+
+while IFS= read -r req; do
+    [ -n "$req" ] || continue
+    if ! grep -q "^$req	" "$tmp"; then
+        missing_binding="$missing_binding $req"
+    fi
+done <"$tmp.reqs"
+
+while IFS="$(printf '\t')" read -r req owner; do
+    [ -n "$req" ] || continue
+    checked=$((checked + 1))
+    if [ -z "$owner" ] || [ ! -f "$owner" ]; then
+        missing_owner="$missing_owner $req=${owner:-none}"
+        continue
+    fi
+    if [ ! -d "$RECEIPT_DIR/$req" ]; then
+        blocked="$blocked $req"
+    fi
+done <"$tmp"
+
+if [ "$checked" -eq 0 ]; then
+    echo "ERROR — nothing was checked: no REQ/NFR bindings found in $HELPER"
+    exit 2
+fi
+
+if [ -n "$missing_binding" ] || [ -n "$missing_owner" ]; then
+    echo "FAIL — $checked binding(s) checked; unbound:${missing_binding:- none}; missing acceptance owner:${missing_owner:- none}"
+    exit 1
+fi
+
+if [ -n "$blocked" ]; then
+    echo "blocked requirements have no admitted receipt under $RECEIPT_DIR:$blocked"
+    echo "FAIL — $checked binding(s) checked, $(printf '%s' "$blocked" | wc -w | tr -d ' ') BLOCKED (receipt-absent), 0 unbound, 0 missing owners"
+    exit 1
+fi
+
+echo "PASS — $checked binding(s) checked, 0 unbound, 0 missing owners, 0 blocked"
+exit 0

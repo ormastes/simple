@@ -26,8 +26,10 @@ world with clang for SimpleOS", start here.
 > | 2 `cross` | `build/os/llvm/cross-<triple>/` | **NOT BUILT** — x86_64 dir holds only `CMakeCache.txt`/`CMakeFiles`/`CPack*.cmake`: no `bin/`, no `build.ninja`. aarch64 dir does not exist at all |
 > | 3 `compiler-rt` | `build/os/sysroot/lib/clang/<ver>/lib/<triple>/*.a` | not staged |
 >
-> `build/os/clang_static/` and `build/os/.bake_include_toolchain` are **ABSENT**.
-> The sysroot (`build/os/sysroot/`) **is** present and usable — see the table below.
+> Current 2026-08-20 worktree inspection: no cross-tree or populated sysroot is
+> present. `build/os/clang_static/bin/clang_static` exists only as a 16 KiB
+> all-zero data placeholder and is not executable evidence. Do not reuse older
+> size/path claims below as current admission.
 >
 > Build it with:
 >
@@ -61,8 +63,8 @@ The port builds from a **fork**, not upstream LLVM:
 | **Cross clang/lld** (host-run, targets SimpleOS) | `build/os/llvm/cross-x86_64-unknown-simpleos/bin/` | **NOT BUILT — directory holds only CMakeCache/CMakeFiles.** Once stage `cross` runs it holds `clang-20`, `ld.lld`, `lld`, `llvm-nm` (expect ~131 MB clang, ~954 MB tree). This is the compiler the rest of this guide assumes. |
 | aarch64 cross variant | `build/os/llvm/cross-aarch64-unknown-simpleos/` | **ABSENT** (not even configured). Same layout as x86_64 once built via `SIMPLE_TARGET=aarch64-unknown-simpleos`. |
 | Host LLVM tblgen tools | `build/os/llvm/host-tools/bin/` | **PRESENT** (`llvm-tblgen`, `clang-tblgen`, `llvm-min-tblgen`, `llvm-lit`). Bootstrap only — not clang. |
-| **Sysroot** | `build/os/sysroot/` | **PRESENT.** `lib/{crt0.o,libsimpleos_c.a,libc++.a,libm.a,simple_entry.o}`, `share/simpleos/{simpleos.ld,target-triple.txt}`, `include/`. |
-| Guest-native static clang | `build/os/clang_static/` | **ABSENT.** Deprecated for desktop SimpleOS — see launch-policy section. |
+| **Sysroot** | `build/os/sysroot/` | **NOT PRESENT in the current worktree.** Rebuild and bind the exact target contents before use. |
+| Guest-native static clang | `build/os/clang_static/` | **INVALID PLACEHOLDER.** The current 16 KiB all-zero `bin/clang_static` is not an ELF/SMF executable. Deprecated for desktop SimpleOS — see launch-policy section. |
 | Disk-bake toolchain marker | `build/os/.bake_include_toolchain` | **ABSENT.** |
 | Build driver (shell, stages) | `src/os/port/llvm/build.shs` | `LLVM_SRC=/home/ormastes/llvm-project sh src/os/port/llvm/build.shs` → stages `host-tools`, `cross`, `compiler-rt`. |
 | Build driver (Simple) | `src/os/port/llvm/build.spl` | Clones/builds LLVM; `--target x86_64-unknown-simpleos`. |
@@ -287,3 +289,36 @@ is correct static-ELF linking, orthogonal to this deprecation.
 `clang_static.shs` and the static `guest_toolchain_execution_gate` requirement
 remain only as a legacy fallback until the FS-exec lane proves an ordinary
 on-disk toolchain ELF runs in ring-3, then are removed from the desktop lane.
+
+## Artifact build admission (v1)
+
+Path existence, a non-empty directory, `.bake_include_toolchain`, and a
+structurally parseable ELF/SMF are not build provenance. They remain `PARTIAL`
+or `BLOCKED` in `deploy_toolchains.spl`.
+
+Every target artifact must first pass
+`GuestToolchainArtifactBuildReceiptV1` in
+`src/os/port/guest_toolchain_artifact_build_receipt.spl`. The receipt freezes:
+
+- the exact x86_64, AArch64, or RV64GC SimpleOS target triple and tool role;
+- an explicit builder path (never host `PATH` or the Rust bootstrap seed), the
+  builder bytes hash, builder-source hash, provenance hash, full source
+  revision, dependency manifest, and build-environment digest;
+- exact argv with separate target and target-isolated output-path bindings;
+- first-build and independent-rebuild sizes and SHA-256 digests; and
+- canonical target-matched executable structure: complete ELF, or a canonical
+  executable SMF whose embedded ELF also passes the target loader.
+
+The admission function re-hashes every supplied builder, builder source,
+provenance, bounded source-revision bundle, dependency manifest,
+build-environment manifest, and output byte array. Outputs live under
+`build/os/toolchain-artifacts/<target>/`; legacy
+`build/os/clang_static/bin/clang_static` cannot be admitted by path alone.
+Byte-identical build admission is still not guest execution or ledger PASS:
+signature/trust, freshness, image continuity, filesystem launch, and live
+compile/link/run receipts remain required.
+
+`used_path_lookup` and `used_host_fallback` are candidate declarations, not
+proof of their own absence. They fail structural admission when asserted, but
+only a signed execution receipt binding the actual launch can authorize the
+corresponding negative claim.

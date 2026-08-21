@@ -1,0 +1,322 @@
+# Independent E1049 transfer/share traversal extension.
+
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_types.*
+use compiler.common.parallel_policy.policy_schema.{ResolvedParallelPolicyV1}
+use compiler.semantics.boundary_transfer.{
+    HirExecutionBoundary,
+    HirRegionOrigin,
+    classify_hir_boundary_transfer
+}
+use compiler.semantics.safety_checker.{SafetyChecker, SafetyError}
+
+# ============================================================================
+# E1049: transfer-share (lane G8, 2026-07-29)
+# ============================================================================
+#
+# Phase-1 scoping (see
+# doc/01_research/language/simple_vs_rust_safety_property_audit_2026-07-28.md
+# G8 "Transfer/Share structural capabilities" and
+# doc/03_plan/agent_tasks/mission_critical_robustness_parallel_agents_2026-07-27.md
+# "G8 Transfer/Share capabilities (needs contract lock)", deferred to Batch 3)
+# found NO distinguishable "spawn site" or "actor message send" node at HIR
+# level:
+#   - The parser DOES have a dedicated `ExprKind.Spawn(Expr)` AST node
+#     (`10.frontend/parser_types_expr.spl:227`, built by
+#     `parse_spawn_expr` at `10.frontend/parser_extensions.spl:179-194`) but
+#     it has ZERO callers anywhere in the frontend -- fully dead code. The one
+#     HIR lowering dispatch that would ever see it,
+#     `20.hir/hir_lowering/expressions.spl`'s `lower_hir_expr` match, has no
+#     `case ExprKind.Spawn` arm and falls through to
+#     `case _: self.error("unsupported expression kind", e.span)` (:837-839)
+#     -- so if that AST node were ever produced, HIR lowering would hard-error.
+#   - The only LIVE `spawn` is an ordinary builtin-named function call
+#     (`spawn(Worker(...))`), lowered as a plain `HirExprKind.Call` with a
+#     `NamedVar` callee, matched by callee-NAME STRING in three independent,
+#     uncoordinated places today: `30.types/type_system/checker.spl:122`,
+#     `30.types/type_system/builtin_registry.spl:123`, and
+#     `50.mir/mir_effects.spl:315`. This rule reuses that same precedent
+#     (string match on the callee name) rather than inventing a new one.
+#   - Actors have NO representation in the type system at all: `module.actors`
+#     (`20.hir/hir_lowering/module_surface.spl:240-242,357`,
+#     `_Items/module_lowering.spl:546-547`) exists only for module-surface /
+#     import wiring. There is no `HirTypeKind.Actor` (or any equivalent)
+#     anywhere under `30.types`, so an actor-typed receiver cannot be told
+#     apart from an ordinary class receiver at a `MethodCall` -- "gate an
+#     actor message send" is therefore NOT decision-free and is out of scope
+#     for this rule.
+#   - `HirExpr.type_` is set to `nil` at HIR-lowering time
+#     (`20.hir/hir_lowering/expressions.spl` `lower_hir_expr`'s final
+#     `HirExpr(kind: kind, type_: nil, span: e.span)`) and is NEVER written
+#     anywhere else in the compiler (`grep -rn '\.type_ =' 20.hir/ 30.types/`
+#     is empty) -- there is no per-expression inferred type available to a
+#     HIR-level pass. What IS available without any new inference wiring is
+#     the DECLARED type on a parameter (`HirParam.type_: HirType`, mandatory,
+#     straight from the source annotation) -- the same syntactic source
+#     `safetychecker_build_param_tracks` already reads for E1047's
+#     `is_class_type` gate. `iso T` is real end-to-end as of 2026-07-29
+#     (`HirTypeKind.Isolated(inner: HirType)`, `20.hir/hir_types.spl:677`) and
+#     shows up on that same declared-type field, so "declared `iso` or not"
+#     is likewise decision-free.
+#
+# Net decision-free slice: a bare parameter reference (module-local `class`
+# type -- share/reference/GC-aliasable semantics, via the same
+# `class_symbol_ids` gate E1047 uses) passed DIRECTLY as an argument to a
+# call whose callee is literally named `spawn`, when that parameter's
+# declared type is not wrapped in `iso`. Deliberately NOT covered (each is a
+# real language-design decision, not merely more code):
+#   - actor message sends (`worker.tell(x)`) -- unenforceable, no Actor type
+#   - a Send-derived-from-fields capability walk (the audit's original G8 ask)
+#   - freshly-constructed spawn arguments (`spawn(Worker(x))`) -- trivially
+#     unaliased by construction, and typing them needs the same missing
+#     inferred-type plumbing above
+#   - let-bound locals (only params are tracked; extending to lets needs a
+#     scoped symbol-id -> declared-type table this lane did not build, to
+#     keep this block free of new shared mutable state)
+#
+# SEPARATE finding surfaced while writing the spec for this rule (see
+# `test/01_unit/compiler/semantics/transfer_share_semantic_spec.spl`'s own
+# header and
+# `doc/08_tracking/bug/spawn_call_expr_silently_becomes_nillit_2026-07-29.md`):
+# on the currently-active Rust bootstrap seed binary, an actual `spawn(...)`
+# CALL EXPRESSION (not just the `fn spawn(...)` declaration, which is a
+# separate hard parse error since `spawn` lexes as `KwSpawn`, never
+# `TOK_IDENT`) silently lowers to `HirExprKind.NilLit` -- discarding the
+# callee and every argument -- with ZERO diagnostic anywhere. That is a
+# `10.frontend/_FlatAstBridge/convert_nodes.spl` (bootstrap-seed-only
+# frontend path) bug, upstream of and out-of-scope for this file; this
+# rule's own correctness is proven against hand-built HIR instead (same
+# technique `iso_move_pipeline_spec.spl` uses for an analogous parser-layer
+# gap) so it is not blocked on that separate fix. Net effect: even once this
+# rule is wired into the driver's real compile path, it cannot see a single
+# real `spawn(...)` call site on the seed until that bridge bug is fixed --
+# worth re-verifying against the self-hosted (non-seed) compiler, which was
+# not available to build in this session.
+#
+# Implemented as its OWN top-level walk (own recursion, own function
+# coverage), NOT woven into `safetychecker_check_expr` / `check_module` /
+# `check_stmt` above -- so this block stays a clean append and merges
+# textually against any other lane editing the primary dispatch in this
+# file. Reuses `self.context.class_symbol_ids` (read-only here), which is
+# populated by `safetychecker_check_module` -- callers should invoke
+# `safetychecker_check_transfer_module` on the SAME `SafetyChecker` instance
+# right after `safetychecker_check_module` for the same module (see
+# `80.driver/driver.spl`'s `run_safety_warn_pass`).
+struct SafetyTransferBinding:
+    symbol_id: i64
+    name: text
+    is_class_type: bool
+    declared_type: HirType
+
+fn safety_transfer_type_is_class(type_: HirType, class_symbol_ids: [i64]) -> bool:
+    match type_.kind:
+        case Named(tsym, _):
+            class_symbol_ids.contains(tsym.id)
+        case Isolated(inner):
+            safety_transfer_type_is_class(inner, class_symbol_ids)
+        case _: false
+
+
+fn safety_transfer_bindings_for_params(self: SafetyChecker, params: [HirParam]) -> [SafetyTransferBinding]:
+    """Build the E1049-trackable binding list for one function's params:
+    every non-receiver param, tagged with whether its DECLARED type is a
+    module-local `class` (E1047's class_symbol_ids gate) and whether it is
+    `iso`-wrapped (HirTypeKind.Isolated)."""
+    var out: [SafetyTransferBinding] = []
+    for p in params:
+        if p.name == "self" or p.name == "me":
+            continue
+        val is_class = safety_transfer_type_is_class(p.type_,
+            self.context.class_symbol_ids)
+        out = out.push(SafetyTransferBinding(symbol_id: p.symbol.id,
+            name: p.name, is_class_type: is_class,
+            declared_type: p.type_))
+    out
+
+
+fn safety_transfer_lookup(bindings: [SafetyTransferBinding], symbol_id: i64) -> SafetyTransferBinding?:
+    for b in bindings:
+        if b.symbol_id == symbol_id:
+            return b
+    nil
+
+
+# Recursive expression walk covering the statement/expression shapes needed
+# to find `spawn(...)` call sites under common control flow (if/while/loop/
+# for/block/lambda bodies, plain binary/unary/call/method-call/array/tuple/
+# struct-lit nesting). `bindings` is threaded by VALUE (arrays are value
+# types in this language -- see feedback_arrays_value_types) so a nested
+# block naturally gets its own scoped copy without any explicit push/pop
+# bookkeeping and without ever mutating the caller's list.
+fn safety_transfer_walk_expr(self: SafetyChecker, expr: HirExpr,
+                             bindings: [SafetyTransferBinding],
+                             policy: ResolvedParallelPolicyV1,
+                             out: [SafetyError]) -> [SafetyError]:
+    match expr.kind:
+        case Call(callee, args, _):
+            var out2 = out
+            match callee.kind:
+                case NamedVar(_, callee_name):
+                    # `spawn_actor` is the intended desugared spelling;
+                    # `spawn` retains the hand-built HIR regression path while
+                    # the seed bridge still drops ExprKind.Spawn.
+                    if callee_name == "spawn" or callee_name == "spawn_actor":
+                        for arg in args:
+                            match arg.value.kind:
+                                case NamedVar(asymbol, aname):
+                                    match safety_transfer_lookup(bindings, asymbol.id):
+                                        case Some(b):
+                                            val decision = classify_hir_boundary_transfer(
+                                                b.declared_type, b.is_class_type,
+                                                HirExecutionBoundary.Thread,
+                                                HirRegionOrigin.ParentExisting,
+                                                false,
+                                                policy)
+                                            if decision.code.len() > 0:
+                                                val msg = "{decision.code}: '{aname}' passed to spawn(): {decision.message}"
+                                                out2 = out2.push(SafetyError.Other(msg, arg.value.span))
+                                        case nil:
+                                            pass
+                                case _:
+                                    pass
+                case _:
+                    pass
+            out2 = safety_transfer_walk_expr(self, callee, bindings, policy, out2)
+            for arg in args:
+                out2 = safety_transfer_walk_expr(self, arg.value, bindings, policy, out2)
+            out2
+
+        case MethodCall(receiver, _, args, _):
+            var out3 = safety_transfer_walk_expr(self, receiver, bindings, policy, out)
+            for arg in args:
+                out3 = safety_transfer_walk_expr(self, arg.value, bindings, policy, out3)
+            out3
+
+        case Binary(_, left, right):
+            safety_transfer_walk_expr(self, right, bindings, policy,
+                safety_transfer_walk_expr(self, left, bindings, policy, out))
+
+        case Unary(_, operand):
+            safety_transfer_walk_expr(self, operand, bindings, policy, out)
+
+        case If(cond, then_, else_):
+            var out4 = safety_transfer_walk_expr(self, cond, bindings, policy, out)
+            out4 = safety_transfer_walk_block(self, then_, bindings, policy, out4)
+            match else_:
+                case Some(eb):
+                    out4 = safety_transfer_walk_block(self, eb, bindings, policy, out4)
+                case nil:
+                    pass
+            out4
+
+        case IfChain(arms, else_):
+            var out4 = out
+            for arm in arms:
+                val typed_arm: HirIfArm = arm
+                out4 = safety_transfer_walk_expr(self, typed_arm.cond, bindings, policy, out4)
+                out4 = safety_transfer_walk_block(self, typed_arm.then_, bindings, policy, out4)
+            match else_:
+                case Some(eb):
+                    out4 = safety_transfer_walk_block(self, eb, bindings, policy, out4)
+                case nil:
+                    pass
+            out4
+
+        case Loop(body, _):
+            safety_transfer_walk_block(self, body, bindings, policy, out)
+
+        case While(cond, body, _):
+            safety_transfer_walk_block(self, body, bindings, policy,
+                safety_transfer_walk_expr(self, cond, bindings, policy, out))
+
+        case For(_, iter, body, _):
+            safety_transfer_walk_block(self, body, bindings, policy,
+                safety_transfer_walk_expr(self, iter, bindings, policy, out))
+
+        case Block(block):
+            safety_transfer_walk_block(self, block, bindings, policy, out)
+
+        case Lambda(_, body, _):
+            safety_transfer_walk_expr(self, body, bindings, policy, out)
+
+        case Return(value):
+            match value:
+                case Some(v):
+                    safety_transfer_walk_expr(self, v, bindings, policy, out)
+                case nil:
+                    out
+
+        case ArrayLit(elements, _):
+            var out5 = out
+            for e in elements:
+                out5 = safety_transfer_walk_expr(self, e, bindings, policy, out5)
+            out5
+
+        case TupleLit(elements):
+            var out6 = out
+            for e in elements:
+                out6 = safety_transfer_walk_expr(self, e, bindings, policy, out6)
+            out6
+
+        case StructLit(_, fields):
+            var out7 = out
+            for sfield in fields:
+                val sval = sfield[1]
+                out7 = safety_transfer_walk_expr(self, sval, bindings, policy, out7)
+            out7
+
+        case _:
+            out
+
+
+fn safety_transfer_walk_block(self: SafetyChecker, block: HirBlock,
+                              bindings: [SafetyTransferBinding],
+                              policy: ResolvedParallelPolicyV1,
+                              out: [SafetyError]) -> [SafetyError]:
+    var out_acc = out
+    for stmt in block.stmts:
+        match stmt.kind:
+            case Expr(expr):
+                out_acc = safety_transfer_walk_expr(self, expr, bindings, policy, out_acc)
+            case Assign(target, _, value):
+                out_acc = safety_transfer_walk_expr(self, target, bindings, policy, out_acc)
+                out_acc = safety_transfer_walk_expr(self, value, bindings, policy, out_acc)
+            case Block(inner):
+                out_acc = safety_transfer_walk_block(self, inner, bindings, policy, out_acc)
+            case Let(_, _, linit):
+                out_acc = safety_transfer_walk_expr(self, linit, bindings, policy, out_acc)
+            case _:
+                pass
+    if block.has:
+        out_acc = safety_transfer_walk_expr(self, block.value, bindings, policy, out_acc)
+    out_acc
+
+
+fn safetychecker_check_transfer_module_with_policy_impl(
+    self: SafetyChecker,
+    module: HirModule,
+    policy: ResolvedParallelPolicyV1
+) -> [SafetyError]:
+    """E1049 top-level entry (lane G8). Independent traversal -- see the
+    block comment above. Covers `module.functions` (plain functions AND
+    impl methods, which are merged into `module.functions` by
+    `module_lowering.spl`'s `lowered_impl_functions` -- same set
+    `safetychecker_check_module`'s first loop walks); class-embedded method
+    bodies are skipped, the same pre-existing gap `safetychecker_check_module`
+    documents (they are never merged into `module.functions`)."""
+    var out: [SafetyError] = []
+    for _for_item in module.functions:
+        val func = _for_item[1]
+        val bindings = safety_transfer_bindings_for_params(self, func.params)
+        out = safety_transfer_walk_block(self, func.body, bindings, policy, out)
+    out
+
+fn safetychecker_check_transfer_module_impl(self: SafetyChecker,
+                                            module: HirModule) -> [SafetyError]:
+    safetychecker_check_transfer_module_with_policy_impl(
+        self, module, ResolvedParallelPolicyV1.balanced())
+
+
+# ============================================================================
+# Exports
+# ============================================================================

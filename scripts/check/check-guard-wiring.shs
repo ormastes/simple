@@ -341,8 +341,36 @@ if [ -d "$HOOKDIR" ]; then
     # *.local is a pre-existing site-local hook that setup.shs deliberately
     # preserved and chains; it is untracked by design, so it cannot be a symlink
     # into the tree and is not a staleness hazard.
+    #
+    # 2026-08-21 precision fix: the scan used to flag EVERY non-symlink regular
+    # file in .git/hooks/, which caught two pattern DATA files (pw_patterns.txt,
+    # secrets.patterns) that have no tracked counterpart anywhere in the repo and
+    # that git never executes. Reporting them as "copied hooks" is a false
+    # positive that permanently pins the copied-hook count above zero and trains
+    # the reader to ignore the line -- the same "protection that isn't there"
+    # failure this script exists to prevent, inverted. This is NOT a weakening:
+    # git only ever runs a hook whose file is EXECUTABLE, and a file named after
+    # a real git hook is still flagged even when it is not executable, which is
+    # precisely the fourth-tree-wipe shape (hook present, non-executable,
+    # silently doing nothing). A non-executable file whose name is not a git
+    # hook name is neither run by git nor a stale copy of a tracked script.
+    : > "$WD/copyhooks"
     find "$HOOKDIR" -maxdepth 1 -type f ! -name '*.sample' ! -name '*.local' \
-        -print > "$WD/copyhooks" 2>/dev/null || :
+        -print 2>/dev/null | while IFS= read -r _h; do
+        _b=${_h##*/}
+        if [ -x "$_h" ]; then
+            echo "$_h"
+        else
+            case "$_b" in
+                applypatch-msg|pre-applypatch|post-applypatch|pre-commit|\
+                pre-merge-commit|prepare-commit-msg|commit-msg|post-commit|\
+                pre-rebase|post-checkout|post-merge|pre-push|pre-receive|\
+                update|post-receive|post-update|push-to-checkout|\
+                pre-auto-gc|post-rewrite|sendemail-validate|fsmonitor-watchman)
+                    echo "$_h" ;;
+            esac
+        fi
+    done >> "$WD/copyhooks"
     find "$HOOKDIR" -maxdepth 1 ! -name '*.sample' ! -name '*.local' ! -name hooks \
         -print > "$WD/allhooks" 2>/dev/null || :
     n_hooks=$(wc -l < "$WD/allhooks" | tr -d ' ')

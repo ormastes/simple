@@ -1,1 +1,45 @@
+use compiler.mir.mir_data.*
+use compiler.mir_opt.mir_opt.dce.{create_dce_pass}
+use compiler.mir_opt.mir_opt.mod.{optimizationpipeline_passes_for_level, OptLevel}
 
+fn _dce_lid(id: i64) -> LocalId:
+    LocalId(id: id)
+
+fn _dce_copy(id: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Copy(_dce_lid(id)))
+
+fn _dce_inst(kind: MirInstKind) -> MirInst:
+    MirInst(kind: kind, span: nil)
+
+describe "MIR Dead Code Elimination":
+    it "identifies itself as a transform pass with no dependencies":
+        var dce = create_dce_pass()
+
+        expect(dce.name()).to_equal("dead_code_elimination")
+        expect(dce.is_analysis_pass()).to_equal(false)
+        expect(dce.dependencies().len()).to_equal(0)
+
+    it "treats stores and calls as side-effecting but plain copies as pure":
+        var dce = create_dce_pass()
+
+        expect(dce.instruction_has_side_effects(
+            _dce_inst(MirInstKind.Store(_dce_copy(1), _dce_copy(2))))).to_equal(true)
+        expect(dce.instruction_has_side_effects(
+            _dce_inst(MirInstKind.CheckedBinOp(_dce_lid(3), MirBinOp.Add, _dce_copy(1), _dce_copy(2))))).to_equal(true)
+        expect(dce.instruction_has_side_effects(
+            _dce_inst(MirInstKind.Copy(_dce_lid(3), _dce_lid(1))))).to_equal(false)
+
+    it "keeps impure intrinsics but not pure math intrinsics":
+        var dce = create_dce_pass()
+
+        expect(dce.is_pure_intrinsic("sqrt")).to_equal(true)
+        expect(dce.is_pure_intrinsic("abs")).to_equal(true)
+        expect(dce.is_pure_intrinsic("print")).to_equal(false)
+        expect(dce.instruction_has_side_effects(
+            _dce_inst(MirInstKind.Intrinsic(Some(_dce_lid(4)), "sqrt", [_dce_copy(1)])))).to_equal(false)
+        expect(dce.instruction_has_side_effects(
+            _dce_inst(MirInstKind.Intrinsic(Some(_dce_lid(4)), "print", [_dce_copy(1)])))).to_equal(true)
+
+    it "runs in every optimized pipeline level":
+        expect(optimizationpipeline_passes_for_level(OptLevel.Speed).index_of("dead_code_elimination") >= 0).to_equal(true)
+        expect(optimizationpipeline_passes_for_level(OptLevel.Aggressive).index_of("dead_code_elimination") >= 0).to_equal(true)

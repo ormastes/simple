@@ -1,0 +1,67 @@
+"""
+# Impl-Head Type Parameters
+
+`impl Box<T>:` declares `T` at the impl head without the `impl<T>` form. The
+frontend used to hand the whole target type to `parser_parse_type`, which
+merely CONSUMED `<T>`, so the resulting `Impl` AST node always carried
+`type_params.len() == 0`. That made the HIR generic-impl gate in `lower_impl`
+dead code for this shape and left the impl-method tier of
+`is_generic_template` marking unreachable from source. See
+doc/08_tracking/bug/hir_generic_templates_unconsumed_by_mono_pass_2026-08-21.md.
+"""
+
+use std.spec.*
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.common.config.{Logger}
+
+fn impl_type_param_count(source: text, name: text) -> i64:
+    val module = parse_full_frontend(source, name, name, Logger(level: 0))
+    if module.impls.len() == 0:
+        return 0 - 1
+    module.impls[0].type_params.len()
+
+describe "impl-head type parameters reach the AST":
+    it "populates type_params for impl Box<T>:":
+        step("Parse a generic inherent impl")
+        val n = impl_type_param_count(
+            "struct Box<T>:\n    value: T\n\nimpl Box<T>:\n    fn get(self) -> T:\n        return self.value",
+            "impl_head_tp_inherent"
+        )
+        step("Confirm T reached Impl.type_params")
+        expect(n).to_equal(1)
+
+    it "populates type_params for a generic trait impl":
+        step("Parse impl Show for Box<T>:")
+        val n = impl_type_param_count(
+            "struct Box<T>:\n    value: T\n\ntrait Show:\n    fn show(self) -> i64\n\nimpl Show for Box<T>:\n    fn show(self) -> i64:\n        return 1",
+            "impl_head_tp_trait"
+        )
+        step("Confirm the self-type's T reached Impl.type_params")
+        expect(n).to_equal(1)
+
+    it "populates both params for a multi-param impl":
+        step("Parse impl Pair<K, V>:")
+        val n = impl_type_param_count(
+            "struct Pair<K, V>:\n    k: K\n    v: V\n\nimpl Pair<K, V>:\n    fn key(self) -> K:\n        return self.k",
+            "impl_head_tp_multi"
+        )
+        step("Confirm both K and V reached Impl.type_params")
+        expect(n).to_equal(2)
+
+    it "reports zero type params for a concrete impl":
+        step("Parse a non-generic impl")
+        val n = impl_type_param_count(
+            "struct Point:\n    x: i64\n\nimpl Point:\n    fn x_of(self) -> i64:\n        return self.x",
+            "impl_head_tp_concrete"
+        )
+        step("Confirm a concrete impl still reports no type params")
+        expect(n).to_equal(0)
+
+    it "reports zero type params for a concretely-instantiated impl":
+        step("Parse impl Box<i64>:")
+        val n = impl_type_param_count(
+            "struct Box<T>:\n    value: T\n\nimpl Box<i64>:\n    fn get(self) -> i64:\n        return self.value",
+            "impl_head_tp_instantiated"
+        )
+        step("Confirm a builtin type argument is not mistaken for a type param")
+        expect(n).to_equal(0)

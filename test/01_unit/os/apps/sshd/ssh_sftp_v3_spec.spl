@@ -1,0 +1,91 @@
+# @cover src/os/apps/sshd/ssh_sftp_v3.spl 80%
+use std.spipe.*
+use os.apps.sshd.ssh_sftp_v3.{SftpSessionV3}
+use os.apps.sshd.ssh_session.{ssh_channel_request_is_sftp}
+
+fn _sftp_subsystem_request(name: [u8]) -> [u8]:
+    var payload: [u8] = [98, 0, 0, 0, 0, 0, 0, 0, 9]
+    val subsystem: [u8] = [0x73, 0x75, 0x62, 0x73, 0x79, 0x73, 0x74, 0x65, 0x6D]
+    for byte in subsystem:
+        payload.push(byte)
+    payload.push(1)
+    payload.push(0)
+    payload.push(0)
+    payload.push(0)
+    payload.push(name.len().to_u8())
+    for byte in name:
+        payload.push(byte)
+    payload
+
+describe "bounded SFTP v3 protocol core":
+    it "negotiates version 3":
+        var session = SftpSessionV3.new()
+        val response = session.handle_packet([0, 0, 0, 5, 1, 0, 0, 0, 3])
+        expect(response[4]).to_equal(2)
+        expect(response[8]).to_equal(3)
+
+    it "rejects requests before initialization":
+        var session = SftpSessionV3.new()
+        val response = session.handle_packet([0, 0, 0, 5, 17, 0, 0, 0, 1])
+        expect(response[4]).to_equal(101)
+
+    it "rejects traversal without filesystem access":
+        var session = SftpSessionV3.new()
+        session.handle_packet([0, 0, 0, 5, 1, 0, 0, 0, 3])
+        # STAT id=7, string length 8, ../etc/passwd
+        val response = session.handle_packet([0, 0, 0, 11, 17, 0, 0, 0, 7, 0, 0, 0, 2, 46, 46])
+        expect(response[4]).to_equal(101)
+        expect(response[8]).to_equal(7)
+
+    it "bounds malformed and oversized packets":
+        var session = SftpSessionV3.new()
+        val partial = session.handle_packet([])
+        expect(partial.len()).to_equal(0)
+        val response = session.handle_packet([0, 0, 0, 0])
+        expect(response[4]).to_equal(101)
+
+    it "retains a split length header":
+        var session = SftpSessionV3.new()
+        val first = session.handle_packet([0, 0])
+        expect(first.len()).to_equal(0)
+        val second = session.handle_packet([0, 5, 1, 0, 0, 0, 3])
+        expect(second[4]).to_equal(2)
+
+    it "accepts a complete frame fragmented one byte at a time":
+        var session = SftpSessionV3.new()
+        var response: [u8] = []
+        val frame: [u8] = [0, 0, 0, 5, 1, 0, 0, 0, 3]
+        for byte in frame:
+            response = session.handle_packet([byte])
+        expect(response[4]).to_equal(2)
+        expect(response[8]).to_equal(3)
+        val work = session.accumulator_work()
+        expect(work.admitted_ingress_bytes).to_equal(9)
+        expect(work.copied_bytes).to_equal(18)
+        expect(work.header_scan_bytes).to_equal(24)
+        expect(work.complete_frames).to_equal(1)
+        expect(work.peak_retained_bytes).to_equal(9)
+        expect(work.saturated).to_be(false)
+
+    it "retains a coalesced second frame":
+        var session = SftpSessionV3.new()
+        val frames: [u8] = [0, 0, 0, 5, 1, 0, 0, 0, 3, 0, 0, 0, 5, 1, 0, 0, 0, 3]
+        val first = session.handle_packet(frames)
+        expect(first[4]).to_equal(2)
+        val second = session.handle_packet([])
+        expect(second[4]).to_equal(2)
+        val work = session.accumulator_work()
+        expect(work.admitted_ingress_bytes).to_equal(18)
+        expect(work.copied_bytes).to_equal(36)
+        expect(work.header_scan_bytes).to_equal(8)
+        expect(work.complete_frames).to_equal(2)
+
+describe "live SSH SFTP subsystem routing":
+    it "recognizes only the exact SFTP subsystem request":
+        expect(ssh_channel_request_is_sftp(_sftp_subsystem_request([0x73, 0x66, 0x74, 0x70]))).to_be(true)
+        expect(ssh_channel_request_is_sftp(_sftp_subsystem_request([0x73, 0x63, 0x70]))).to_be(false)
+
+    it "rejects trailing bytes after the subsystem name":
+        var request = _sftp_subsystem_request([0x73, 0x66, 0x74, 0x70])
+        request.push(0)
+        expect(ssh_channel_request_is_sftp(request)).to_be(false)

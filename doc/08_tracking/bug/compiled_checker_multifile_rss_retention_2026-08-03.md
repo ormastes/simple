@@ -1,8 +1,9 @@
 # Compiled checker per-file transient ownership
 
 - **Id:** `compiled_checker_multifile_rss_retention_2026-08-03`
-- **Status:** fixed for non-string transient parser objects and, as of
-  2026-08-17, for ordinary transient strings tracked by
+- Status: **FIXED** — verified 2026-08-21 (bug-status-consistency audit): the per-file transient scope is live at `src/app/check/main.spl:192/198` with fail-closed begin/teardown at `:226/:261`, and the regression spec `test/01_unit/app/check/check_multifile_transient_scope_spec.spl` exists. `bug_db.sdn` has said `fixed` since the landing; only this doc was stale.
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
+  process-persistent strings remain tracked separately as
   `compiled_checker_transient_string_retention_2026-08-03`
 - **Severity:** P1
 - **Owner:** `src/app/check/main.spl::check_one`

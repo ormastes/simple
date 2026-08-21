@@ -1,0 +1,73 @@
+"""
+# Regression: the real flat-AST mappings still map
+
+Lane C2 (flat-AST bridge transition census). The census work above added loud
+diagnostics to previously-silent fallbacks; this spec guards the other side of
+the ledger -- the tags whose transition table row says `Implemented` or
+`Normalized(...)` must still produce their named target node, and must NOT
+start reporting an `unhandled` diagnostic.
+
+`spawn` / `await` / `yield` are the three tags the originating bug record
+(`doc/08_tracking/bug/spawn_call_expr_silently_becomes_nillit_2026-07-29.md`)
+fixed on 2026-08-17; they are the highest-risk rows in
+`spec/compiler_schema/transitions/flat_expr_to_ast_expr.sdn` because they were
+silent once already.
+"""
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.core.parser.{parser_get_errors}
+use compiler.frontend.parser_types_expr.*
+
+fn first_stmt_expr_label(src: text, name: text) -> text:
+    val parsed = parse_full_frontend(src, "testdata/" + name + ".spl", name, Logger(level: 0))
+    val boot = parsed.functions["boot"]
+    var label = "missing"
+    if boot.?:
+        val fn_ = boot!
+        if fn_.body.stmts.len() > 0:
+            match fn_.body.stmts[0].kind:
+                case StmtKind.Expr(e):
+                    match e.kind:
+                        case ExprKind.Call(callee, args): label = "Call"
+                        case ExprKind.Await(inner): label = "Await"
+                        case ExprKind.Yield(inner): label = "Yield"
+                        case ExprKind.NilLit: label = "NilLit"
+                        case _: label = "other"
+                case _: label = "other-stmt"
+    label
+
+fn any_bridge_diag(src: text, name: text) -> bool:
+    val parsed = parse_full_frontend(src, "testdata/" + name + ".spl", name, Logger(level: 0))
+    val errs = parser_get_errors()
+    var found = false
+    var i = 0
+    while i < errs.len():
+        if errs[i].contains("flat AST bridge: unhandled"):
+            found = true
+        i = i + 1
+    found
+
+describe "implemented/normalized flat-AST transitions still map":
+    it "maps `spawn(w)` onto ExprKind.Call -- Normalized(Call) row":
+        assert_equal(first_stmt_expr_label("fn boot(w: i64):\n    spawn(w)\n", "fixture_reg_spawn"), "Call")
+
+    it "does not collapse `await f()` -- Implemented row (post-bridge desugar rewrites it)":
+        # MEASURED, not assumed: the bridge arm emits `ExprKind.Await`, but
+        # `parse_full_frontend` runs the async desugar afterwards, and for a
+        # non-`async` enclosing fn `desugar_async.spl:233` rewrites the Await
+        # into a plain Call. So the observable label here is "Call", not
+        # "Await". The property this row actually guards is the one the bug
+        # record is about: the await operand must not vanish into NilLit.
+        val src = "fn f() -> i64:\n    1\n\nfn boot() -> i64:\n    await f()\n"
+        val label = first_stmt_expr_label(src, "fixture_reg_await")
+        assert_false(label == "NilLit")
+        assert_false(label == "missing")
+
+    it "maps `yield 1` onto ExprKind.Yield -- Implemented row":
+        assert_equal(first_stmt_expr_label("fn boot():\n    yield 1\n", "fixture_reg_yield"), "Yield")
+
+    it "raises no `unhandled` bridge diagnostic for spawn/await/yield source":
+        val src = "fn f() -> i64:\n    1\n\nfn boot() -> i64:\n    await f()\n"
+        assert_false(any_bridge_diag(src, "fixture_reg_no_diag"))

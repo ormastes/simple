@@ -1,0 +1,88 @@
+# Similar-problem detection spec (defect CLASS): a callee's write to a
+# by-reference-intended receiver or parameter is silently discarded at return.
+#
+# Bug: doc/08_tracking/bug/jit_method_receiver_mutation_never_written_back_2026-08-17.md
+# Related (interpreter half now fixed):
+#   doc/08_tracking/bug/selfhost_two_hop_field_method_mutation_lost_2026-07-27.md
+#
+# The reproducing spec pins ONE shape: a `struct` receiver at depths 0..2 on the
+# JIT. That framing is WRONG about what the real axis is, and this spec exists
+# because generalising found it. Measured 2026-08-17 on the deployed seed, the
+# two engines lose writes in DIFFERENT places:
+#
+#   shape                             interpreter   JIT
+#   struct receiver, `self.n = ...`   ok            LOST (0)
+#   class receiver, `self.n = ...`    ok            ok
+#   explicit `mut` struct parameter   LOST (0)      ok
+#   delegated call through a method   ok            ok
+#   struct receiver bumped in a loop  ok            LOST (0)
+#   depth-3 struct method call        ok            LOST (0)
+#   depth-3 direct field ASSIGNMENT   ok            ok
+#
+# So the axis is VALUE-TYPE (struct) receivers and parameters, not hop depth —
+# and neither engine is a safe control for the other. `class` is reference-typed
+# and correct everywhere; the direct-assignment spelling of the identical place
+# is correct everywhere. That pairing is what makes this silent: the place model
+# resolves fine, only the write-back is missing.
+#
+# WHY A SUBPROCESS. `bin/simple test` runs spec bodies on the tree-walk
+# interpreter, so an in-process example can only ever see one of the two
+# engines. The oracle is the sibling run-path probe
+# `probe_receiver_mutation_writeback_class_jit.spl`, executed under both.
+#
+# Both arms below assert the CORRECT answer. This spec is expected to be RED
+# until the write-back gaps are closed; per .claude/rules/testing.md a correct
+# spec that fails is a legitimate artifact and must not be softened.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/compiler/codegen/probe_receiver_mutation_writeback_class_jit.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode +
+        " " + bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "receiver and parameter mutations are written back on every engine":
+    it "writes back every mutation shape on the tree-walk interpreter":
+        step("Run the class probe under SIMPLE_EXECUTION_MODE=interpreter")
+        val interp = run_probe_in_mode("interpreter")
+
+        step("Non-vacuity: the probe must have executed its first case, not been demoted or exited early")
+        expect(interp).to_contain("PASS struct_receiver")
+
+        step("An explicit `mut` struct parameter must observe the callee's write — the interpreter's known gap")
+        expect(interp).to_contain("PASS mut_parameter")
+
+        step("A class receiver must be equivalent to a struct receiver here")
+        expect(interp).to_contain("PASS class_receiver")
+
+        step("No shape in the sweep may fail")
+        expect(interp).to_contain("RECEIVER_WRITEBACK CLASS PROBE: ALL PASS")
+
+    it "writes back every mutation shape on the default JIT engine":
+        step("Run the same class probe under SIMPLE_EXECUTION_MODE=jit")
+        val jit = run_probe_in_mode("jit")
+
+        step("Non-vacuity: a case the JIT already gets right must be present, proving the probe ran on this arm too")
+        expect(jit).to_contain("PASS class_receiver")
+
+        step("A struct receiver must persist `self.n = self.n + 1` — the JIT's core gap")
+        expect(jit).to_contain("PASS struct_receiver")
+
+        step("Repeating the call in a loop must accumulate, not reset")
+        expect(jit).to_contain("PASS loop_three_calls")
+
+        step("Three field hops to a struct receiver must behave like zero hops")
+        expect(jit).to_contain("PASS depth3_method")
+
+        step("The direct-assignment spelling of the same place is the control: it must also stay correct")
+        expect(jit).to_contain("PASS depth3_assignment")
+
+        step("No shape in the sweep may fail")
+        expect(jit).to_contain("RECEIVER_WRITEBACK CLASS PROBE: ALL PASS")

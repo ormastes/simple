@@ -23,7 +23,6 @@ extern fn rt_tls13_x25519_public_key(scalar: [u8]) -> [u8]
 extern fn rt_tls13_x25519_shared_secret(scalar: [u8], point: [u8]) -> [u8]
 extern fn rt_ssh_aes128_gcm_encrypt_packet(key: [u8], iv: [u8], seq: i64, payload: [u8]) -> [u8]
 extern fn rt_ssh_aes128_gcm_decrypt_packet(key: [u8], iv: [u8], seq: i64, packet: [u8]) -> [u8]
-extern fn rt_ssh_userauth_password_only_failure_payload() -> [u8]
 extern fn serial_println(msg: text)
 
 fn log_raw_println(msg: text):
@@ -47,13 +46,6 @@ struct _SshFieldRange:
     start: u64
     end: u64
     next_offset: u64
-
-struct _AuthRequestFast:
-    username: text
-    service: text
-    service_ok: i64
-    method_code: i64
-    password: text
 
 fn _u8_at(data: [u8], idx: u64) -> u8:
     rt_bytes_u8_at(data, idx.to_i64()).to_u8()
@@ -96,8 +88,8 @@ fn _copy_prefix_stable(data: [u8], limit: u64) -> [u8]:
         i = i + 1
     out
 
-fn _password_only_auth_failure_payload() -> [u8]:
-    val payload = _copy_bytes_stable([0x33, 0x00, 0x00, 0x00, 0x08, 0x70, 0x61, 0x73, 0x73, 0x77, 0x6f, 0x72, 0x64, 0x00])
+fn _publickey_only_auth_failure_payload() -> [u8]:
+    val payload = _copy_bytes_stable([0x33, 0x00, 0x00, 0x00, 0x09, 0x70, 0x75, 0x62, 0x6c, 0x69, 0x63, 0x6b, 0x65, 0x79, 0x00])
     serial_println("[sshd-session] auth fail payload len={payload.len()} hex={_bytes_to_hex(payload)}")
     payload
 
@@ -573,55 +565,20 @@ fn _payload_field_is_password(payload: [u8], field_offset: u64) -> bool:
         _u8_at(payload, field_offset + 10) == 0x72 and
         _u8_at(payload, field_offset + 11) == 0x64
 
-fn _parse_auth_request_fast(payload: [u8]) -> Result<_AuthRequestFast, text>:
-    if payload.len() < 2 or _u8_at(payload, 0) != 50:
-        return Err("not auth request")
-    val r_user = _read_text_field_fast(payload, 1)
-    val user = match r_user:
-        Ok(parsed):
-            parsed
-        Err(_):
-            return Err("bad user")
-    val r_service = _read_text_field_fast(payload, user.next_offset)
-    val service = match r_service:
-        Ok(parsed):
-            parsed
-        Err(_):
-            return Err("bad service")
-    val r_method = _read_text_field_fast(payload, service.next_offset)
-    val method = match r_method:
-        Ok(parsed):
-            parsed
-        Err(_):
-            return Err("bad method")
-
-    val service_ok = if _payload_field_is_ssh_connection(payload, user.next_offset): 1 else: 0
-    var method_code: i64 = 0
-    var password: text = ""
-    if _payload_field_is_none(payload, service.next_offset):
-        method_code = 1
-    elif _payload_field_is_password(payload, service.next_offset):
-        method_code = 2
-        var off = method.next_offset
-        if off >= payload.len():
-            return Err("missing password bool")
-        off = off + 1
-        val r_password = _read_text_field_fast(payload, off)
-        password = match r_password:
-            Ok(parsed):
-                parsed.value
-            Err(_):
-                return Err("bad password")
-    else:
-        return Err("unsupported auth method")
-
-    Ok(_AuthRequestFast(
-        username: user.value,
-        service: service.value,
-        service_ok: service_ok,
-        method_code: method_code,
-        password: password
-    ))
+fn _payload_field_is_publickey(payload: [u8], field_offset: u64) -> bool:
+    if field_offset + 13 > payload.len():
+        return false
+    if _read_u32_stable(payload, field_offset) != 9:
+        return false
+    _u8_at(payload, field_offset + 4) == 0x70 and
+        _u8_at(payload, field_offset + 5) == 0x75 and
+        _u8_at(payload, field_offset + 6) == 0x62 and
+        _u8_at(payload, field_offset + 7) == 0x6c and
+        _u8_at(payload, field_offset + 8) == 0x69 and
+        _u8_at(payload, field_offset + 9) == 0x63 and
+        _u8_at(payload, field_offset + 10) == 0x6b and
+        _u8_at(payload, field_offset + 11) == 0x65 and
+        _u8_at(payload, field_offset + 12) == 0x79
 
 fn _bytes_to_hex(data: [u8]) -> text:
     var out = ""
@@ -718,32 +675,8 @@ fn _build_live_host_key_blob_for_algo(algo: text, host_keys: HostKeySet, host_ce
     []
 
 # ============================================================================
-# Public Key Auth Helpers (RFC 4252 §7)
+# SSH signature envelope helpers
 # ============================================================================
-
-fn _build_publickey_signed_data(session_id: [u8], username: text, algo: text, key_blob: [u8]) -> [u8]:
-    """Build the signed_data blob for publickey auth per RFC 4252 §7.
-
-    Format:
-      string  session_id
-      byte    SSH_MSG_USERAUTH_REQUEST (50)
-      string  username
-      string  "ssh-connection"
-      string  "publickey"
-      bool    true
-      string  algorithm name
-      string  public_key_blob
-    """
-    var data: [u8] = []
-    data = ssh_put_string(data, session_id)
-    data = ssh_put_byte(data, 50)
-    data = ssh_put_text(data, username)
-    data = ssh_put_text(data, "ssh-connection")
-    data = ssh_put_text(data, "publickey")
-    data = ssh_put_bool(data, true)
-    data = ssh_put_text(data, algo)
-    data = ssh_put_string(data, key_blob)
-    data
 
 fn _unwrap_ssh_signature(sig_envelope: [u8]) -> [u8]:
     """Unwrap the SSH signature envelope to extract the raw signature bytes.

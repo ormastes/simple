@@ -1,0 +1,71 @@
+use std.spec.*
+use common.enum_discriminant.{InvalidDiscriminant, ClosedDiscriminantTable}
+
+fn status_table() -> ClosedDiscriminantTable:
+    # Mirrors a `@closed enum Status: Ok = 0 / Warn = 7 / Fail = 255`.
+    ClosedDiscriminantTable(enum_name: "Status",
+                            names: ["Ok", "Warn", "Fail"],
+                            values: [0, 7, 255])
+
+describe "closed enum discriminant roundtrip (S2 §10.1)":
+    describe "roundtrip property":
+        it "decodes every declared discriminant back to its own variant":
+            # PROPERTY: for every declared value v, encode(decode(v)) == v.
+            val t = status_table()
+            var i = 0
+            while i < t.values.len():
+                val raw = t.values[i]
+                val decoded = t.decode(raw)
+                assert_true(decoded.is_ok())
+                val name = decoded.unwrap()
+                expect(name).to_equal(t.names[i])
+                val reencoded = t.encode(name)
+                assert_true(reencoded.is_ok())
+                expect(reencoded.unwrap()).to_equal(raw)
+                i = i + 1
+
+        it "decodes every declared variant name back to its own discriminant":
+            val t = status_table()
+            var i = 0
+            while i < t.names.len():
+                val enc = t.encode(t.names[i])
+                assert_true(enc.is_ok())
+                expect(enc.unwrap()).to_equal(t.values[i])
+                expect(t.decode(enc.unwrap()).unwrap()).to_equal(t.names[i])
+                i = i + 1
+
+    describe "out-of-range decode fails closed":
+        it "fails on a value between two declared discriminants":
+            val res = status_table().decode(3)
+            assert_true(res.is_err())
+            expect(res.unwrap_err().raw).to_equal(3)
+            expect(res.unwrap_err().enum_name).to_equal("Status")
+
+        it "fails on a value above every declared discriminant":
+            assert_true(status_table().decode(256).is_err())
+
+        it "fails on a negative value rather than wrapping to variant zero":
+            # NEIGHBOUR: the classic silent-fallback bug is decoding an
+            # invalid raw to the first variant. It must be an error.
+            val res = status_table().decode(-1)
+            assert_true(res.is_err())
+            expect(res.unwrap_err().raw).to_equal(-1)
+
+        it "fails on an undeclared variant name":
+            val res = status_table().encode("Nope")
+            assert_true(res.is_err())
+
+        it "reports the offending value in the error message":
+            expect(status_table().decode(42).unwrap_err().message()).to_contain("42")
+
+    describe "is_valid":
+        it "accepts a declared discriminant":
+            assert_true(status_table().is_valid(7))
+
+        it "rejects an undeclared discriminant":
+            assert_false(status_table().is_valid(8))
+
+        it "rejects every value on an empty table":
+            val empty = ClosedDiscriminantTable(enum_name: "Empty", names: [], values: [])
+            assert_false(empty.is_valid(0))
+            assert_true(empty.decode(0).is_err())

@@ -295,20 +295,6 @@ impl MethodResolver:
     # Function Resolution
     # ========================================================================
 
-    me resolve_verification_contract(contract: HirContractBlock?) -> HirContractBlock?:
-        if val present_value = contract:
-            val present: HirContractBlock = present_value
-            var clauses: [HirContractClause] = []
-            for clause in present.clauses:
-                clauses.push(HirContractClause(
-                    kind: clause.kind,
-                    predicate: self.resolve_expr(clause.predicate),
-                    binding_name: clause.binding_name,
-                    span: clause.span
-                ))
-            return Some(HirContractBlock(clauses: clauses, proof_uses: present.proof_uses, outcome: present.outcome))
-        nil
-
     me resolve_function(func: HirFunction) -> HirFunction:
         """Resolve method calls in a function body."""
         self.current_fn_sym = Some(func.symbol)
@@ -394,21 +380,101 @@ impl MethodResolver:
         val kind = match expr.kind:
             # Method calls - the main target
             case MethodCall(receiver, method, call_args, resolution):
+                # Do not keep payload-enum fields live across recursive work.
+                # Snapshot only scalar discriminants/IDs; staged native value
+                # transport can otherwise alias/corrupt an adjacent payload.
+                var resolution_tag = 0
+                var resolution_owner_id = -1
+                var resolution_method_id = -1
+                match resolution:
+                    case InstanceMethod(type_id, method_id):
+                        resolution_tag = 1
+                        resolution_owner_id = type_id.id
+                        resolution_method_id = method_id.id
+                    case TraitMethod(trait_id, method_id):
+                        resolution_tag = 2
+                        resolution_owner_id = trait_id.id
+                        resolution_method_id = method_id.id
+                    case FreeFunction(func_id):
+                        resolution_tag = 3
+                        resolution_method_id = func_id.id
+                    case StaticMethod(type_id, method_id):
+                        resolution_tag = 4
+                        resolution_owner_id = type_id.id
+                        resolution_method_id = method_id.id
+                    case Unresolved: ()
+
+                # Static ownership is syntactic. Snapshot the receiver symbol
+                # before resolving nested receiver/argument expressions so no
+                # Var/NamedVar payload aggregate survives that recursion.
+                var receiver_symbol_id = -1
+                match receiver.kind:
+                    case Var(symbol): receiver_symbol_id = symbol.id
+                    case NamedVar(symbol, _): receiver_symbol_id = symbol.id
+                    case _: ()
+
                 val resolved_receiver = self.resolve_expr(receiver)
                 val resolved_args = self.resolve_call_args(call_args)
 
                 # Check if this is actually a static method call (Type.method())
-                val is_static = self.is_static_method_call(resolved_receiver)
+                var is_static = false
+                if receiver_symbol_id >= 0:
+                    if val receiver_symbol = self.symbols.get_symbol_raw(receiver_symbol_id):
+                        match receiver_symbol.kind:
+                            case Class | Struct | Enum | Import: is_static = true
+                            case _: ()
 
-                # Only resolve if not already resolved
-                val new_resolution = if resolution.is_resolved():
-                    resolution
-                elif is_static:
-                    self.resolve_static_method(resolved_receiver, method, resolved_args)
-                else:
-                    self.resolve_method(resolved_receiver, method, resolved_args)
+                # Keep MethodResolution transport explicit.  It is a payload
+                # enum whose owner/method fields are value-type SymbolIds; the
+                # staged native lane has corrupted those fields when the enum
+                # crosses both a generic enum method (`is_resolved`) and an
+                # if-expression result boundary.  Snapshot every payload as
+                # raw scalars and rebuild it at this HIR ownership boundary.
+                val new_resolution = match resolution_tag:
+                    case 0:
+                        val discovered = if is_static:
+                            self.resolve_static_method(resolved_receiver, method, resolved_args)
+                        else:
+                            self.resolve_method(resolved_receiver, method, resolved_args)
+                        match discovered:
+                            case InstanceMethod(type_id, method_id):
+                                MethodResolution.InstanceMethod(SymbolId(id: type_id.id), SymbolId(id: method_id.id))
+                            case TraitMethod(trait_id, method_id):
+                                MethodResolution.TraitMethod(SymbolId(id: trait_id.id), SymbolId(id: method_id.id))
+                            case FreeFunction(func_id):
+                                MethodResolution.FreeFunction(SymbolId(id: func_id.id))
+                            case StaticMethod(type_id, method_id):
+                                MethodResolution.StaticMethod(SymbolId(id: type_id.id), SymbolId(id: method_id.id))
+                            case Unresolved:
+                                MethodResolution.Unresolved
+                    case 1:
+                        MethodResolution.InstanceMethod(
+                            SymbolId(id: resolution_owner_id),
+                            SymbolId(id: resolution_method_id)
+                        )
+                    case 2:
+                        MethodResolution.TraitMethod(
+                            SymbolId(id: resolution_owner_id),
+                            SymbolId(id: resolution_method_id)
+                        )
+                    case 3:
+                        MethodResolution.FreeFunction(SymbolId(id: resolution_method_id))
+                    case 4:
+                        MethodResolution.StaticMethod(
+                            SymbolId(id: resolution_owner_id),
+                            SymbolId(id: resolution_method_id)
+                        )
+                    case _:
+                        MethodResolution.Unresolved
 
-                resolved_type = self.resolve_call_result_type(new_resolution, expr.type_)
+                val resolved_method_raw_id: i64? = match new_resolution:
+                    case InstanceMethod(_, method_id): method_id.id
+                    case TraitMethod(_, method_id): method_id.id
+                    case FreeFunction(func_id): func_id.id
+                    case StaticMethod(_, method_id): method_id.id
+                    case Unresolved: nil
+
+                resolved_type = self.resolve_call_result_type_raw(resolved_method_raw_id, expr.type_)
                 HirExprKind.MethodCall(resolved_receiver, method, resolved_args, new_resolution)
 
             # Regular function calls - resolve arguments, then fill omitted
@@ -680,161 +746,6 @@ impl MethodResolver:
             case Error: expr.kind
 
         HirExpr(kind: kind, has_type_: expr.has_type_, type_: resolved_type, span: expr.span)
-
-    me attach_inferred_type(expr: HirExpr) -> HirExpr:
-        if expr.type_ != nil:
-            return expr
-        if val inferred = self.infer_expr_type(expr):
-            return HirExpr(kind: expr.kind, has_type_: true, type_: inferred, span: expr.span)
-        expr
-
-    me infer_symbol_value_type(raw_symbol_id: i64, span: Span) -> HirType?:
-        # Keep the resolver's native boundary scalar. Passing a value-type
-        # SymbolId into a helper is miscompiled on the staged native lane; the
-        # SymbolTable owner exposes get_symbol_raw for the same reason.
-        if val symbol = self.symbols.get_symbol_raw(raw_symbol_id):
-            if symbol.type_ != nil:
-                val symbol_type = symbol.type_ ?? HirType(kind: HirTypeKind.Error, span: span)
-                return symbol_type
-            match symbol.kind:
-                case Class | Struct | Enum:
-                    return HirType(kind: HirTypeKind.Named(SymbolId(id: raw_symbol_id), []), span: span)
-                case _: ()
-        nil
-
-    me infer_expr_type(expr: HirExpr) -> HirType?:
-        if expr.type_ != nil:
-            val known_type = expr.type_ ?? HirType(kind: HirTypeKind.Error, span: expr.span)
-            match known_type.kind:
-                case Error | Infer(_, _): ()
-                case _: return known_type
-        match expr.kind:
-            case Var(symbol): self.infer_symbol_value_type(symbol.id, expr.span)
-            case NamedVar(symbol, _): self.infer_symbol_value_type(symbol.id, expr.span)
-            case Call(callee, _, _):
-                val callee_type = self.infer_expr_type(callee)
-                if val found_type = callee_type:
-                    match found_type.kind:
-                        case Function(_, return_type, _): return return_type
-                        case Named(_, _): return found_type
-                        case _: ()
-                nil
-            case StructLit(type_, _): type_
-            case Index(base, _):
-                if val base_type = self.infer_expr_type(base):
-                    match base_type.kind:
-                        case Array(element, _) | Slice(element): return element
-                        case Dict(_, value): return value
-                        case _: ()
-                nil
-            case _: nil
-
-    me resolve_call_result_type(resolution: MethodResolution, fallback: HirType?) -> HirType?:
-        """Use the resolved callee's return type when available."""
-        # if-val: get_symbol_id() now returns a FLAT optional (bare-lift,
-        # bug doc 2026-07-23) — `case Some` only matches the boxed repr.
-        if val symbol_id = resolution.get_symbol_id():
-                val sym = self.symbols.get_symbol(symbol_id)
-                match sym:
-                    case Some(found_sym):
-                        if found_sym == nil:
-                            pass
-                        else:
-                            match found_sym.type_:
-                                case Some(sym_type):
-                                    if sym_type == nil:
-                                        pass
-                                    else:
-                                        match sym_type.kind:
-                                            case Function(_, ret, _):
-                                                return Some(ret)
-                                            case _:
-                                                pass
-                                case nil:
-                                    pass
-                    case nil:
-                        pass
-                return fallback
-        return fallback
-
-    me resolve_call_args(args: [HirCallArg]) -> [HirCallArg]:
-        """Resolve method calls in call arguments."""
-        var resolved: [HirCallArg] = []
-        var arg_idx = 0
-        while arg_idx < args.len():
-            val arg: HirCallArg = args[arg_idx]
-            resolved = resolved.push(HirCallArg(
-                has_name: arg.has_name,
-                name: arg.name,
-                value: self.resolve_expr(arg.value),
-                span: arg.span
-            ))
-            arg_idx = arg_idx + 1
-        resolved
-
-    me fill_call_defaults(callee: HirExpr, args: [HirCallArg], call_span: Span) -> [HirCallArg]:
-        """Fill omitted trailing arguments of a direct function call with the
-        callee's declared default values (G50 / M12 item 3b).
-
-        Only direct free-function calls `Var(sym)` whose signature lives in the
-        current module's function registry are handled; cross-module callees are
-        absent from `module_functions` so the call is returned unchanged (safe
-        no-op, never a spurious arity error). Named-argument calls are left
-        untouched because trailing positional fill would misalign them.
-
-        Limitation / deferred runtime-verification target: the lookup keys on the
-        callee `Var` SymbolId matching the definition's `module.functions` key.
-        SymbolId is by-name (`structure SymbolId where name`), so this holds for
-        same-module direct calls; a runtime end-to-end check (omitted-arg call
-        returns the default, not 0) is deferred to M12 delegation removal, since
-        the seed interpreter cannot run the HIR lowering+resolve pipeline."""
-        match callee.kind:
-            case Var(sym):
-                if not self.module_functions.contains_key(sym):
-                    return args
-                # Trailing positional fill is unsound across named args.
-                for a in args:
-                    if a.has_name:
-                        return args
-                val func = self.module_functions[sym]
-                val params = func.params
-                if args.len() >= params.len():
-                    return args
-                var filled: [HirCallArg] = args
-                var i = args.len()
-                while i < params.len():
-                    val p = params[i]
-                    if p.has_default:
-                        filled = filled.push(HirCallArg(
-                            has_name: false,
-                            name: "",
-                            value: self.resolve_expr(p.default),
-                            span: call_span
-                        ))
-                    else:
-                        # Arity-error half intentionally omitted (M12 3b). The lean
-                        # bridge currently hardcodes `has_default: false`
-                        # (_FlatAstBridge/convert_nodes.spl:571/682), so emitting a "too few
-                        # arguments" error here would FALSE-FIRE on every valid
-                        # omitted-default call. A missing param with no default also
-                        # cannot be filled positionally, so stop and leave the call
-                        # as-is (pre-existing behavior). Re-enable the arity error
-                        # only after the bridge captures has_default faithfully.
-                        return filled
-                    i = i + 1
-                return filled
-            case _("indirect/computed callees have no static signature to fill"):
-                return args
-
-    me resolve_comp_clause(clause: HirCompClause) -> HirCompClause:
-        """Resolve method calls in comprehension clause."""
-        val kind = match clause.kind:
-            case For(var_, iter):
-                HirCompClauseKind.For(var_, self.resolve_expr(iter))
-            case If(cond):
-                HirCompClauseKind.If(self.resolve_expr(cond))
-
-        HirCompClause(kind: kind, span: clause.span)
 
     # ========================================================================
     # Method Resolution Logic (UFCS)

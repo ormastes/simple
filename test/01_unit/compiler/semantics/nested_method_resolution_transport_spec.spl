@@ -1,0 +1,48 @@
+"""Nested method resolution preserves payload-enum owner metadata."""
+
+use std.spec.*
+
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.mir.mir_instructions.{MirInstKind, MirModule, MirOperandKind}
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_types.{MirConstValue}
+use compiler.semantics.resolve.{resolve_methods}
+
+fn nested_resolution_call_names(mir: MirModule) -> [text]:
+    var names: [text] = []
+    for function in mir.functions.values():
+        for block in function.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case MirInstKind.Call(_, callee, _):
+                        match callee.kind:
+                            case MirOperandKind.Const(value, _):
+                                match value:
+                                    case MirConstValue.Str(name): names = names.push(name)
+                                    case _: ()
+                            case _: ()
+                    case _: ()
+    names
+
+describe "nested method resolution transport":
+    it "keeps static owner and instance method IDs across recursive receiver resolution":
+        val source = "struct Factory:\n    value: i64\n" +
+            "impl Factory:\n" +
+            "    static fn make() -> Factory: Factory(value: 41)\n" +
+            "    fn finish(self) -> i64: self.value + 1\n" +
+            "fn nested() -> i64: Factory.make().finish()\n"
+        val parsed = parse_full_frontend(source, "nested_transport.spl", "nested_transport", Logger(level: 0))
+        var lowering = HirLowering.with_filename("nested_transport.spl")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+
+        val (resolved_hir, errors) = resolve_methods(hir)
+        expect(errors.len()).to_equal(0)
+
+        var mir_lowering = MirLowering.new(resolved_hir.symbols)
+        val calls = nested_resolution_call_names(mir_lowering.lower_module(resolved_hir))
+        expect(calls).to_contain("nested_transport.Factory.make")
+        expect(calls).to_contain("nested_transport.Factory.finish")

@@ -420,3 +420,24 @@ boundary values — grep for the wrong pattern and cover each repeat);
 observed). Canonical wording: `.claude/agents/test.md` § "Every fix ships a
 reproduction spec AND similar-case specs"; SPipe process hook:
 `.claude/skills/spipe.md` § "Reproduce-first for bug-fix specs".
+
+---
+
+## 2026-08-21 — daemon bypass
+
+**What landed:** `src/app/test_runner_new/test_runner_client.spl` gained a **daemon bypass** —
+the light test daemon serialized concurrent `bin/simple test` invocations, so parallel agent
+sessions queued behind each other. The client now bypasses the daemon rather than blocking.
+
+**Bugs filed 2026-08-21 (this layer):**
+- `doc/08_tracking/bug/light_test_daemon_serializes_concurrent_test_invocations_2026-08-21.md` (driver of the bypass)
+- `doc/08_tracking/bug/test_runner_exits_zero_on_failed_spec_2026-08-21.md` — exit-code fail-open
+- `doc/08_tracking/bug/test_runner_unanchored_skip_substring_2026-08-21.md`
+- `doc/08_tracking/bug/test_mode_filter_specs_are_vacuous_self_tests_2026-08-21.md`
+- `doc/08_tracking/bug/test_db_update_row_keys_nonexistent_id_column_2026-08-21.md`
+- `doc/08_tracking/bug/twelve_verification_assurance_specs_broken_not_flaky_2026-08-21.md`
+- `doc/08_tracking/bug/red_spec_triage_2026-08-21.md`, `phase2_sweep_triage_remaining_2026-08-21.md`,
+  `test_tree_divergence_backlog_triage_2026-08-21.md`
+
+**Verify:** `bin/simple test test/01_unit/app/compiler_schema/` — read the `Results: N total,
+N passed, 0 failed` line, and confirm the process exit code separately (see the exit-zero bug above).

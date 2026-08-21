@@ -1,0 +1,143 @@
+# Similar-problem DETECTION probe (defect CLASS, not one instance).
+#
+# Class: MIR method lowering special-cases a builtin collection/string method by
+# NAME and rewrites the argument (or receiver) transport — tag-boxing an int,
+# boxing a float, swapping in an `rt_*` symbol — without first checking that the
+# receiver is actually the builtin type that special case belongs to. A
+# user-defined method of the same name on an ordinary struct then receives a
+# rewritten argument it never asked for, and reads garbage. It compiles clean and
+# exits 0.
+#
+# The instance that motivated this: `push`/`append` (`is_array_append_method`,
+# name-only) multiplied the first i64 argument by 8. Its sibling `index_of` in
+# the same file was correctly gated on `receiver_is_array`; nothing enforced that
+# the gate exists, so the next name added to a name-only list reintroduces the
+# bug. This probe defines a user method for EVERY name the lowering/codegen
+# tables special-case, and round-trips each argument type through it.
+#
+# Every oracle is an ABSOLUTE literal. Run with `bin/simple run <this file>`.
+
+struct Collider:
+    tag: i64
+
+impl Collider:
+    me push(v: i64) -> i64:
+        v
+    me append(v: i64) -> i64:
+        v
+    me insert(v: i64) -> i64:
+        v
+    me index_of(v: i64) -> i64:
+        v
+    me contains(v: i64) -> i64:
+        v
+    me at(v: i64) -> i64:
+        v
+    me char_at(v: i64) -> i64:
+        v
+    me byte_at(v: i64) -> i64:
+        v
+    me char_code_at(v: i64) -> i64:
+        v
+    me write_span(v: i64) -> i64:
+        v
+    me extend(v: i64) -> i64:
+        v
+    me concat(v: i64) -> i64:
+        v
+    me repeat(v: i64) -> i64:
+        v
+    me join(v: i64) -> i64:
+        v
+    me split(v: i64) -> i64:
+        v
+    me replace(v: i64) -> i64:
+        v
+    me remove(v: i64) -> i64:
+        v
+    me get(v: i64) -> i64:
+        v
+    me set(v: i64) -> i64:
+        v
+    me merge(v: i64) -> i64:
+        v
+    # Float and bool travel through different boxing paths (BoxFloat, raw).
+    me push_f(v: f64) -> f64:
+        v
+    me append_f(v: f64) -> f64:
+        v
+
+var failures: i64 = 0
+var known_open: i64 = 0
+
+# A DIFFERENT defect in the same family, found by this probe on 2026-08-17 and
+# filed separately: `c.char_code_at(42)` on a struct receiver returns 0, i.e. the
+# call is stolen outright by `rt_string_char_code_at` rather than merely having
+# its argument rewritten. That is codegen's qualified-name SUFFIX resolution
+# (`codegen/instr/calls.rs`), not MIR argument transport, so it is reported on
+# its own verdict line instead of being silently dropped.
+# See doc/08_tracking/bug/codegen_user_method_stolen_by_builtin_name_suffix_2026-08-17.md
+fn check_known_open(name: text, got: i64, want: i64):
+    if got == want:
+        print("PASS(known-open now fixed) " + name)
+    else:
+        print("KNOWN-OPEN " + name + " -- expected " + want.to_text() + " got " + got.to_text())
+        known_open = known_open + 1
+
+fn check(name: text, got: i64, want: i64):
+    if got == want:
+        print("PASS " + name)
+    else:
+        print("FAIL " + name + " -- expected " + want.to_text() + " got " + got.to_text())
+        failures = failures + 1
+
+fn check_f(name: text, got: f64, want: f64):
+    if got == want:
+        print("PASS " + name)
+    else:
+        print("FAIL " + name + " -- expected " + want.to_text() + " got " + got.to_text())
+        failures = failures + 1
+
+fn main():
+    val c: Collider = Collider(tag: 0)
+
+    # 42 is chosen deliberately: 42 * 8 == 336, and 42 & 7 == 2 (TAG_FLOAT), so
+    # both the shift and the tag-reinterpretation failure modes are visible.
+    check("push", c.push(42), 42)
+    check("append", c.append(42), 42)
+    check("insert", c.insert(42), 42)
+    check("index_of", c.index_of(42), 42)
+    check("contains", c.contains(42), 42)
+    check("at", c.at(42), 42)
+    check("char_at", c.char_at(42), 42)
+    check("byte_at", c.byte_at(42), 42)
+    check_known_open("char_code_at", c.char_code_at(42), 42)
+    check("write_span", c.write_span(42), 42)
+    check("extend", c.extend(42), 42)
+    check("concat", c.concat(42), 42)
+    check("repeat", c.repeat(42), 42)
+    check("join", c.join(42), 42)
+    check("split", c.split(42), 42)
+    check("replace", c.replace(42), 42)
+    check("remove", c.remove(42), 42)
+    check("get", c.get(42), 42)
+    check("set", c.set(42), 42)
+    check("merge", c.merge(42), 42)
+    check_f("push_f64", c.push_f(2.5), 2.5)
+    check_f("append_f64", c.append_f(2.5), 2.5)
+
+    # Control arm: the real builtins must keep working after any gate is added.
+    var arr: [i64] = []
+    arr.push(42)
+    check("builtin_array_push_roundtrip", arr[0], 42)
+    var farr: [f64] = []
+    farr.push(2.5)
+    check_f("builtin_array_push_f64_roundtrip", farr[0], 2.5)
+    check("builtin_array_index_of", arr.index_of(42), 0)
+    check("builtin_text_index_of", "hello world".index_of("world"), 6)
+
+    print("BUILTIN_NAME_COLLISION KNOWN-OPEN COUNT: " + known_open.to_text())
+    if failures == 0:
+        print("BUILTIN_NAME_COLLISION PROBE: ALL PASS")
+    else:
+        print("BUILTIN_NAME_COLLISION PROBE: " + failures.to_text() + " FAILURES")

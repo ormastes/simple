@@ -1,0 +1,124 @@
+use std.spec
+use std.common.contracts.execution.simpleos_capability_v1.{
+    ProtocolCapabilityManifestV1, ProtocolCapabilityError,
+    ProtocolCapabilityRequiredExtension,
+    MAX_CAPABILITY_TEXT_BYTES, MAX_CAPABILITY_LIST_ITEMS,
+    MAX_CAPABILITY_CONNECTIONS, MAX_CAPABILITY_TIMEOUT_MS,
+    protocol_capability_manifest_v1_new,
+    protocol_capability_manifest_v1_validate,
+    protocol_capability_manifest_v1_with_probe,
+    protocol_capability_manifest_v1_advertised,
+    protocol_capability_manifest_v1_can_advertise
+}
+
+fn capability_ok(result: Result<(), ProtocolCapabilityError>) -> bool:
+    match result:
+        Ok(_): true
+        Err(_): false
+
+fn valid_manifest() -> ProtocolCapabilityManifestV1:
+    var manifest = protocol_capability_manifest_v1_new("http-prod", "http/1.1", "tcp+tls")
+    manifest.tls_versions = ["1.3"]
+    manifest.alpn = ["http/1.1"]
+    manifest.auth_methods = ["certificate"]
+    manifest.algorithms = ["tls_aes_128_gcm_sha256"]
+    manifest.operations = ["GET", "HEAD"]
+    manifest = protocol_capability_manifest_v1_with_probe(
+        manifest, "probe-http-1", "evidence-http-1", true, true
+    )
+    manifest
+
+describe "SimpleOS ProtocolCapabilityManifestV1":
+    it "fails closed before a live probe and evidence identity":
+        val manifest = protocol_capability_manifest_v1_new("http", "http/1.1", "tcp")
+        expect(protocol_capability_manifest_v1_can_advertise(manifest)).to_equal(false)
+        expect(capability_ok(protocol_capability_manifest_v1_validate(manifest))).to_equal(false)
+
+    it "validates mandatory fields but rejects caller-authorized advertisement":
+        val manifest = valid_manifest()
+        expect(capability_ok(protocol_capability_manifest_v1_validate(manifest))).to_equal(true)
+        expect(protocol_capability_manifest_v1_can_advertise(manifest)).to_equal(false)
+        val advertised = protocol_capability_manifest_v1_advertised(manifest)
+        val outcome = match advertised:
+            Err(ProtocolCapabilityError.UnverifiedEvidenceAuthority): "owner-required"
+            _: "unexpected"
+        expect(outcome).to_equal("owner-required")
+
+    it "rejects missing evidence, unsafe downgrade, and malformed bounds":
+        var manifest = valid_manifest()
+        manifest.probe.evidence_ok = false
+        expect(capability_ok(protocol_capability_manifest_v1_validate(manifest))).to_equal(false)
+        manifest = valid_manifest()
+        manifest.downgrade_policy = "fallback-plaintext"
+        expect(capability_ok(protocol_capability_manifest_v1_validate(manifest))).to_equal(false)
+        manifest = valid_manifest()
+        manifest.framing.max_frame_bytes = 0
+        expect(capability_ok(protocol_capability_manifest_v1_validate(manifest))).to_equal(false)
+
+    it "rejects manifest injection and unbounded backpressure claims":
+        var manifest = valid_manifest()
+        manifest.profile = "http-prod\nforged-capability"
+        expect(capability_ok(protocol_capability_manifest_v1_validate(manifest))).to_equal(false)
+        manifest = valid_manifest()
+        manifest.backpressure = "unbounded"
+        expect(capability_ok(protocol_capability_manifest_v1_validate(manifest))).to_equal(false)
+        manifest = valid_manifest()
+        manifest.framing.max_header_bytes = manifest.framing.max_frame_bytes + 1
+        expect(capability_ok(protocol_capability_manifest_v1_validate(manifest))).to_equal(false)
+
+    it "rejects a copied manifest even when all caller probe fields say success":
+        var manifest = valid_manifest()
+        val copied = manifest
+        manifest.probe.live_probe_id = "caller-forged-probe"
+        manifest.probe.evidence_id = "caller-forged-evidence"
+        manifest.probe.probe_ok = true
+        manifest.probe.evidence_ok = true
+        expect(protocol_capability_manifest_v1_can_advertise(manifest)).to_equal(false)
+        expect(protocol_capability_manifest_v1_can_advertise(copied)).to_equal(false)
+
+    it "rejects direct mutation of the wire-compatible advertised field":
+        var manifest = valid_manifest()
+        manifest.advertised = true
+        val checked = protocol_capability_manifest_v1_validate(manifest)
+        val outcome = match checked:
+            Err(ProtocolCapabilityError.UnverifiedEvidenceAuthority): "forgery-rejected"
+            _: "unexpected"
+        expect(outcome).to_equal("forgery-rejected")
+
+    it "rejects duplicate and overlong list entries":
+        var manifest = valid_manifest()
+        manifest.alpn = ["http/1.1", "http/1.1"]
+        expect(capability_ok(protocol_capability_manifest_v1_validate(manifest))).to_equal(false)
+        manifest = valid_manifest()
+        var long_name = ""
+        var i = 0
+        while i <= MAX_CAPABILITY_TEXT_BYTES:
+            long_name = long_name + "x"
+            i = i + 1
+        manifest.profile = long_name
+        expect(capability_ok(protocol_capability_manifest_v1_validate(manifest))).to_equal(false)
+
+    it "rejects unsupported mandatory extensions with a typed gate":
+        var manifest = valid_manifest()
+        manifest.required_extensions = [ProtocolCapabilityRequiredExtension(name: "webtransport", mandatory: true)]
+        val checked = protocol_capability_manifest_v1_validate(manifest)
+        val error_name = match checked:
+            ProtocolCapabilityError.UnsupportedMandatoryExtension: "unsupported-mandatory"
+            _: "unexpected"
+        expect(error_name).to_equal("unsupported-mandatory")
+
+    it "bounds connection and timeout values and list counts":
+        var manifest = valid_manifest()
+        manifest.limits.max_connections = MAX_CAPABILITY_CONNECTIONS + 1
+        expect(capability_ok(protocol_capability_manifest_v1_validate(manifest))).to_equal(false)
+        manifest = valid_manifest()
+        manifest.timeouts.read_ms = MAX_CAPABILITY_TIMEOUT_MS + 1
+        expect(capability_ok(protocol_capability_manifest_v1_validate(manifest))).to_equal(false)
+        manifest = valid_manifest()
+        var too_many_alpn: [text] = []
+        var i = 0
+        while i <= MAX_CAPABILITY_LIST_ITEMS:
+            too_many_alpn.push("alpn-{i}")
+            i = i + 1
+        manifest.alpn = too_many_alpn
+        expect(capability_ok(protocol_capability_manifest_v1_validate(manifest))).to_equal(false)

@@ -1,0 +1,439 @@
+## Fail-closed validation for a zstd-compressed SimpleOS newc initramfs.
+##
+## This module owns every untrusted-byte boundary: zstd frame preflight,
+## canonical newc parsing, and /SYS/SIMPLETOOL.SDN role/digest admission.
+
+use std.common.structural.digest.hash256.{hash256_hex_valid}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
+use std.common.compress.zstd.{zstd_decompress_frame}
+use os.kernel.loader.cpio_newc.{CpioEntry, cpio_parse_bounded}
+use os.kernel.loader.smf.{smf_admit_explicit_simpleos_executable}
+
+val MAX_INITRAMFS_COMPRESSED_BYTES: i64 = 537000000
+val MAX_INITRAMFS_EXPANDED_BYTES: i64 = 536870912
+val MAX_INITRAMFS_ENTRIES: i64 = 131072
+val MAX_INITRAMFS_PATH_BYTES: i64 = 4096
+val MAX_TOOLCHAIN_MANIFEST_BYTES: i64 = 131072
+val MAX_INIT_ARTIFACT_BYTES: i64 = 268435456
+
+val SIMPLE_COMPILER_ROLE_PATHS: [text] = [
+    "/bin/simple", "/bin/simple.smf", "/usr/bin/simple", "/usr/bin/simple.smf",
+    "/sys/apps/simple", "/sys/apps/simple.smf", "/sys/apps/simple_compiler",
+    "/sys/apps/simple_compiler.smf",
+]
+val SIMPLE_INTERPRETER_ROLE_PATHS: [text] = [
+    "/sys/apps/simple_interpreter", "/sys/apps/simple_interpreter.smf",
+]
+val SIMPLE_LOADER_ROLE_PATHS: [text] = [
+    "/sys/apps/simple_loader", "/sys/apps/simple_loader.smf",
+]
+
+class SimpleToolchainManifestBinding:
+    role: text
+    guest_path: text
+    digest: text
+
+fn _native_elf_prefix(data: [u8], size: i64) -> bool:
+    if size < 64 or size > data.len():
+        return false
+    val machine = data[18].to_i64() | (data[19].to_i64() << 8)
+    val machine_ok = machine == 3 or machine == 40 or machine == 62 or
+        machine == 183 or machine == 243
+    data[0].to_i64() == 0x7F and data[1].to_i64() == 0x45 and
+        data[2].to_i64() == 0x4C and data[3].to_i64() == 0x46 and
+        (data[4].to_i64() == 1 or data[4].to_i64() == 2) and
+        data[5].to_i64() == 1 and data[6].to_i64() == 1 and machine_ok
+
+fn _canonical_executable_smf(data: [u8]) -> bool:
+    smf_admit_explicit_simpleos_executable(data).is_ok()
+
+fn initramfs_init_artifact_admission(path: text, data: [u8]) -> Result<(), text>:
+    if path.trim() == "" or path.contains("\0") or path.contains("\n") or
+       path.contains("\r") or path.contains("\t"):
+        return Err("init-artifact-path-invalid")
+    val slash = path.last_index_of("/")
+    val basename = if slash < 0: path else: path.slice(slash + 1, path.len())
+    val lower = basename.lower()
+    if lower == "" or lower == "." or lower == ".." or lower == "stub" or
+       lower == "placeholder" or lower.contains("placeholder") or
+       lower.ends_with(".spl") or lower.ends_with(".sh") or
+       lower.ends_with(".shs") or lower.ends_with(".txt") or
+       lower.ends_with(".py") or lower.ends_with(".c") or
+       lower.ends_with(".rs") or lower.ends_with(".js"):
+        return Err("init-artifact-source-or-placeholder-path")
+    if data.len() < 64 or data.len() > MAX_INIT_ARTIFACT_BYTES:
+        return Err("init-artifact-size-invalid")
+    val elf = _native_elf_prefix(data, data.len())
+    val smf = _canonical_executable_smf(data)
+    if not elf and not smf:
+        return Err("init-artifact-native-format-invalid")
+    Ok(())
+
+fn simple_toolchain_role_paths() -> [text]:
+    var paths: [text] = []
+    for path in SIMPLE_COMPILER_ROLE_PATHS:
+        paths.push(path)
+    for path in SIMPLE_INTERPRETER_ROLE_PATHS:
+        paths.push(path)
+    for path in SIMPLE_LOADER_ROLE_PATHS:
+        paths.push(path)
+    paths
+
+fn _newc_hex8(raw: [u8], offset: i64) -> i64:
+    if offset < 0 or offset + 8 > raw.len():
+        return -1
+    var value: i64 = 0
+    var i = 0
+    while i < 8:
+        val code = raw[offset + i].to_i64()
+        var nibble = -1
+        if code >= 48 and code <= 57:
+            nibble = code - 48
+        elif code >= 65 and code <= 70:
+            nibble = code - 55
+        elif code >= 97 and code <= 102:
+            nibble = code - 87
+        if nibble < 0:
+            return -1
+        value = (value << 4) | nibble
+        i = i + 1
+    value
+
+fn _newc_align4(value: i64) -> i64:
+    (value + 3) & (0 - 4)
+
+fn _canonical_archive_path(raw_path: text) -> Result<text, text>:
+    var path = raw_path
+    if path.starts_with("./"):
+        path = path.slice(2, path.len())
+    if path == ".":
+        return Ok(path)
+    if path == "" or path.starts_with("/") or path.ends_with("/") or
+       path.contains("//") or path.contains("\\") or path.contains("\0"):
+        return Err("archive-path-not-canonical")
+    if path == ".." or path.starts_with("../") or path.ends_with("/..") or
+       path.contains("/../") or path.starts_with("./") or path.ends_with("/.") or
+       path.contains("/./"):
+        return Err("archive-path-traversal")
+    Ok(path)
+
+fn _newc_entry_path(raw: [u8], start: i64, namesize: i64) -> Result<text, text>:
+    if namesize < 2 or namesize > MAX_INITRAMFS_PATH_BYTES:
+        return Err("archive-name-size-invalid")
+    if start < 0 or start + namesize > raw.len():
+        return Err("archive-name-truncated")
+    if raw[start + namesize - 1].to_i64() != 0:
+        return Err("archive-name-not-terminated")
+    var chars: [text] = []
+    var i = 0
+    while i < namesize - 1:
+        val code = raw[start + i].to_i64()
+        if code < 32 or code > 126:
+            return Err("archive-name-not-portable-ascii")
+        chars.push(code.to_char())
+        i = i + 1
+    _canonical_archive_path(chars.join(""))
+
+fn _newc_padding_zero(raw: [u8], start: i64, stop: i64) -> bool:
+    var i = start
+    while i < stop:
+        if raw[i].to_i64() != 0:
+            return false
+        i = i + 1
+    true
+
+fn _validated_newc_entries(raw: [u8]) -> Result<[CpioEntry], text>:
+    if raw.len() == 0 or raw.len() > MAX_INITRAMFS_EXPANDED_BYTES:
+        return Err("archive-expanded-size-invalid")
+    var pos: i64 = 0
+    var count: i64 = 0
+    var trailer_seen = false
+    var seen: Dict<text, bool> = {}
+    while not trailer_seen:
+        if pos + 110 > raw.len():
+            return Err("archive-header-truncated")
+        if not (raw[pos].to_i64() == 48 and raw[pos + 1].to_i64() == 55 and
+                raw[pos + 2].to_i64() == 48 and raw[pos + 3].to_i64() == 55 and
+                raw[pos + 4].to_i64() == 48 and raw[pos + 5].to_i64() == 49):
+            return Err("archive-magic-invalid")
+        val field_offsets: [i64] = [6, 14, 22, 30, 38, 46, 54, 62, 70, 78, 86, 94, 102]
+        for field_offset in field_offsets:
+            if _newc_hex8(raw, pos + field_offset) < 0:
+                return Err("archive-header-hex-invalid")
+        val mode = _newc_hex8(raw, pos + 14)
+        val nlink = _newc_hex8(raw, pos + 38)
+        val filesize = _newc_hex8(raw, pos + 54)
+        val namesize = _newc_hex8(raw, pos + 94)
+        val name_start = pos + 110
+        val path = match _newc_entry_path(raw, name_start, namesize):
+            case Ok(value): value
+            case Err(message): return Err(message)
+        val data_start = _newc_align4(name_start + namesize)
+        if data_start < name_start or data_start + filesize > raw.len():
+            return Err("archive-payload-truncated")
+        if not _newc_padding_zero(raw, name_start + namesize, data_start):
+            return Err("archive-name-padding-invalid")
+        val next = _newc_align4(data_start + filesize)
+        if next < data_start or next > raw.len():
+            return Err("archive-padding-truncated")
+        if not _newc_padding_zero(raw, data_start + filesize, next):
+            return Err("archive-data-padding-invalid")
+        if path == "TRAILER!!!":
+            if filesize != 0:
+                return Err("archive-trailer-payload-invalid")
+            trailer_seen = true
+            pos = next
+        else:
+            count = count + 1
+            if count > MAX_INITRAMFS_ENTRIES:
+                return Err("archive-entry-limit-exceeded")
+            if seen.has(path):
+                return Err("archive-path-duplicate")
+            seen[path] = true
+            val kind = mode & 0xF000
+            if kind != 0x8000 and kind != 0x4000:
+                return Err("archive-entry-type-unsafe")
+            if kind == 0x8000 and nlink != 1:
+                return Err("archive-regular-hardlink-ambiguous")
+            if kind == 0x4000 and filesize != 0:
+                return Err("archive-directory-payload-ambiguous")
+            pos = next
+    var tail = pos
+    while tail < raw.len():
+        if raw[tail].to_i64() != 0:
+            return Err("archive-trailing-data-invalid")
+        tail = tail + 1
+    val entries = match cpio_parse_bounded(
+        raw, MAX_INITRAMFS_ENTRIES, MAX_INITRAMFS_PATH_BYTES,
+        MAX_INITRAMFS_EXPANDED_BYTES):
+        case Ok(value): value
+        case Err(message): return Err(message)
+    if entries.len() != count: return Err("archive-parser-count-mismatch")
+    Ok(entries)
+
+fn _archive_entry(entries: [CpioEntry], wanted: text) -> CpioEntry?:
+    for entry in entries:
+        val canonical = match _canonical_archive_path(entry.path):
+            case Ok(value): value
+            case Err(_): return nil
+        if canonical == wanted:
+            return entry
+    nil
+
+fn _parse_toolchain_binding(line: text) -> Result<SimpleToolchainManifestBinding, text>:
+    val prefix = "    { role: \""
+    val role_sep = "\", guest_path: \""
+    val digest_sep = "\", digest: \""
+    val suffix = "\" }"
+    if not line.starts_with(prefix) or not line.ends_with(suffix):
+        return Err("toolchain-manifest-binding-shape-invalid")
+    var rest = line.slice(prefix.len(), line.len())
+    val role_end = rest.index_of(role_sep)
+    if role_end < 1:
+        return Err("toolchain-manifest-role-invalid")
+    val role = rest.slice(0, role_end)
+    rest = rest.slice(role_end + role_sep.len(), rest.len())
+    val path_end = rest.index_of(digest_sep)
+    if path_end < 1:
+        return Err("toolchain-manifest-path-invalid")
+    val guest_path = rest.slice(0, path_end)
+    rest = rest.slice(path_end + digest_sep.len(), rest.len())
+    val digest = rest.slice(0, rest.len() - suffix.len())
+    if not hash256_hex_valid(digest):
+        return Err("toolchain-manifest-digest-invalid")
+    Ok(SimpleToolchainManifestBinding(role: role, guest_path: guest_path, digest: digest))
+
+fn _expected_toolchain_role(path: text) -> text:
+    for expected in SIMPLE_COMPILER_ROLE_PATHS:
+        if path == expected:
+            return "compiler"
+    for expected in SIMPLE_INTERPRETER_ROLE_PATHS:
+        if path == expected:
+            return "interpreter"
+    for expected in SIMPLE_LOADER_ROLE_PATHS:
+        if path == expected:
+            return "loader"
+    ""
+
+fn _validate_toolchain_manifest(entries: [CpioEntry], init_digest: text) -> Result<(), text>:
+    val manifest_entry = _archive_entry(entries, "SYS/SIMPLETOOL.SDN") ??
+        return Err("toolchain-manifest-missing")
+    if (manifest_entry.mode.to_i64() & 0xF000) != 0x8000 or
+       manifest_entry.data.len() == 0 or
+       manifest_entry.data.len() > MAX_TOOLCHAIN_MANIFEST_BYTES:
+        return Err("toolchain-manifest-file-invalid")
+    val manifest = match validated_utf8_bytes_to_text_linear(manifest_entry.data):
+        case Ok(value): value
+        case Err(_): return Err("toolchain-manifest-utf8-invalid")
+    if manifest.contains("\0") or manifest.contains("\r") or not manifest.ends_with("\n"):
+        return Err("toolchain-manifest-text-invalid")
+    val lines = manifest.split("\n")
+    val expected_count = simple_toolchain_role_paths().len()
+    if lines.len() != expected_count + 5 or lines[0] != "simple_toolchain {" or
+       lines[1] != "  role_bindings: [" or
+       lines[lines.len() - 3] != "  ]" or lines[lines.len() - 2] != "}" or
+       lines[lines.len() - 1] != "":
+        return Err("toolchain-manifest-envelope-invalid")
+    var seen: Dict<text, bool> = {}
+    var role_digests: Dict<text, text> = {}
+    var i: i64 = 2
+    while i < lines.len() - 3:
+        val binding = match _parse_toolchain_binding(lines[i]):
+            case Ok(value): value
+            case Err(message): return Err(message)
+        val expected_role = _expected_toolchain_role(binding.guest_path)
+        if expected_role == "" or binding.role != expected_role:
+            return Err("toolchain-manifest-role-binding-invalid")
+        if seen.has(binding.guest_path):
+            return Err("toolchain-manifest-path-duplicate")
+        seen[binding.guest_path] = true
+        val archive_path = binding.guest_path.slice(1, binding.guest_path.len())
+        val payload = _archive_entry(entries, archive_path) ??
+            return Err("toolchain-role-payload-missing")
+        if (payload.mode.to_i64() & 0xF000) != 0x8000 or payload.data.len() == 0:
+            return Err("toolchain-role-payload-invalid")
+        if sha256_u8_hex(payload.data) != binding.digest:
+            return Err("toolchain-role-payload-digest-mismatch")
+        if role_digests.has(binding.role):
+            if (role_digests[binding.role] ?? "") != binding.digest:
+                return Err("toolchain-role-alias-digest-mismatch")
+        else:
+            role_digests[binding.role] = binding.digest
+        i = i + 1
+    for required in simple_toolchain_role_paths():
+        if not seen.has(required):
+            return Err("toolchain-manifest-binding-missing")
+    val compiler_digest = role_digests["compiler"] ?? ""
+    val interpreter_digest = role_digests["interpreter"] ?? ""
+    val loader_digest = role_digests["loader"] ?? ""
+    if not hash256_hex_valid(compiler_digest) or not hash256_hex_valid(interpreter_digest) or
+       not hash256_hex_valid(loader_digest) or compiler_digest == interpreter_digest or
+       compiler_digest == loader_digest or interpreter_digest == loader_digest or
+       init_digest == compiler_digest or init_digest == interpreter_digest or
+       init_digest == loader_digest:
+        return Err("toolchain-role-digests-not-distinct")
+    Ok(())
+
+fn validate_cpio_toolchain_archive(raw: [u8]) -> Result<(), text>:
+    val entries = _validated_newc_entries(raw)?
+    val init_entry = _archive_entry(entries, "sbin/init") ??
+        return Err("required-entry-missing:sbin/init")
+    if (init_entry.mode.to_i64() & 0xF000) != 0x8000:
+        return Err("required-file-invalid:sbin/init")
+    initramfs_init_artifact_admission("sbin/init", init_entry.data)?
+    val clang = _archive_entry(entries, "usr/bin/clang") ??
+        return Err("required-entry-missing:usr/bin/clang")
+    if (clang.mode.to_i64() & 0xF000) != 0x8000 or clang.data.len() == 0:
+        return Err("required-file-invalid:usr/bin/clang")
+    val source_dir = _archive_entry(entries, "src") ??
+        return Err("required-entry-missing:src")
+    if (source_dir.mode.to_i64() & 0xF000) != 0x4000:
+        return Err("required-directory-invalid:src")
+    val loader_dir = _archive_entry(entries, "src/compiler/99.loader") ??
+        return Err("required-entry-missing:src/compiler/99.loader")
+    if (loader_dir.mode.to_i64() & 0xF000) != 0x4000:
+        return Err("required-directory-invalid:src/compiler/99.loader")
+    _validate_toolchain_manifest(entries, sha256_u8_hex(init_entry.data))
+
+fn _zstd_bounded_le(input: [u8], start: i64, width: i64) -> Result<i64, text>:
+    if width < 1 or width > 8 or start < 0 or start + width > input.len():
+        return Err("zstd-frame-field-truncated")
+    var value: i64 = 0
+    var i: i64 = 0
+    while i < width:
+        val byte = input[start + i].to_i64()
+        if i >= 7 and byte != 0:
+            return Err("zstd-frame-size-overflow")
+        value = value | (byte << (i * 8))
+        i = i + 1
+    value
+
+fn _zstd_single_frame_size(input: [u8]) -> Result<i64, text>:
+    if input.len() < 9 or not (input[0].to_i64() == 0x28 and
+       input[1].to_i64() == 0xB5 and input[2].to_i64() == 0x2F and
+       input[3].to_i64() == 0xFD):
+        return Err("zstd-frame-magic-invalid")
+    val descriptor = input[4].to_i64()
+    if (descriptor & 0x08) != 0:
+        return Err("zstd-frame-reserved-bit-set")
+    val single_segment = (descriptor & 0x20) != 0
+    val checksum = (descriptor & 0x04) != 0
+    val dictionary_flag = descriptor & 0x03
+    val content_flag = (descriptor >> 6) & 0x03
+    var pos: i64 = 5
+    if not single_segment:
+        if pos >= input.len():
+            return Err("zstd-window-descriptor-truncated")
+        pos = pos + 1
+    val dictionary_width = if dictionary_flag == 0: 0 else: if dictionary_flag == 1: 1 else: if dictionary_flag == 2: 2 else: 4
+    if pos + dictionary_width > input.len():
+        return Err("zstd-dictionary-id-truncated")
+    pos = pos + dictionary_width
+    var content_width: i64 = 0
+    if content_flag == 0:
+        if single_segment:
+            content_width = 1
+    elif content_flag == 1:
+        content_width = 2
+    elif content_flag == 2:
+        content_width = 4
+    else:
+        content_width = 8
+    if content_width == 0:
+        return Err("zstd-content-size-required")
+    var declared_size = _zstd_bounded_le(input, pos, content_width)?
+    if content_width == 2:
+        declared_size = declared_size + 256
+    if declared_size <= 0 or declared_size > MAX_INITRAMFS_EXPANDED_BYTES:
+        return Err("zstd-content-size-outside-policy")
+    pos = pos + content_width
+    var last_block = false
+    var decoded_size: i64 = 0
+    while not last_block:
+        if pos + 3 > input.len():
+            return Err("zstd-block-header-truncated")
+        val header = input[pos].to_i64() | (input[pos + 1].to_i64() << 8) |
+            (input[pos + 2].to_i64() << 16)
+        pos = pos + 3
+        last_block = (header & 1) == 1
+        val block_type = (header >> 1) & 3
+        val block_size = (header >> 3) & 0x1FFFFF
+        if block_type == 3:
+            return Err("zstd-block-type-reserved")
+        if block_type == 2:
+            return Err("zstd-compressed-block-rejected-unbounded")
+        if block_size > 131072 or ((block_type == 1 or block_type == 2) and block_size == 0):
+            return Err("zstd-block-size-invalid")
+        if decoded_size + block_size > declared_size:
+            return Err("zstd-block-output-exceeds-declared-size")
+        decoded_size = decoded_size + block_size
+        val encoded_size = if block_type == 1: 1 else: block_size
+        if pos + encoded_size > input.len():
+            return Err("zstd-block-payload-truncated")
+        pos = pos + encoded_size
+    if decoded_size != declared_size:
+        return Err("zstd-block-output-size-mismatch")
+    if checksum:
+        if pos + 4 > input.len():
+            return Err("zstd-checksum-truncated")
+        pos = pos + 4
+    if pos != input.len():
+        return Err("zstd-chained-or-trailing-frame-rejected")
+    Ok(declared_size)
+
+fn validate_zstd_toolchain_archive(compressed: [u8]) -> Result<(), text>:
+    if compressed.len() == 0 or compressed.len() > MAX_INITRAMFS_COMPRESSED_BYTES:
+        return Err("compressed-image-size-invalid")
+    val declared_size = _zstd_single_frame_size(compressed)?
+    val expanded = match zstd_decompress_frame(compressed):
+        case Ok(value): value
+        case Err(_): return Err("zstd-pure-simple-decompression-failed")
+    if expanded.len() != declared_size or expanded.len() > MAX_INITRAMFS_EXPANDED_BYTES:
+        return Err("zstd-expanded-size-mismatch")
+    validate_cpio_toolchain_archive(expanded)
+
+export MAX_INITRAMFS_COMPRESSED_BYTES, MAX_INITRAMFS_EXPANDED_BYTES
+export SIMPLE_COMPILER_ROLE_PATHS, SIMPLE_INTERPRETER_ROLE_PATHS, SIMPLE_LOADER_ROLE_PATHS
+export simple_toolchain_role_paths, initramfs_init_artifact_admission
+export validate_cpio_toolchain_archive, validate_zstd_toolchain_archive

@@ -63,6 +63,32 @@ fn mir_lower_trace_enabled() -> bool:
     diag == "1"
 use compiler.core.types.{TYPE_BOOL, TYPE_I64, TYPE_F64}
 use compiler.mir.synthetic_driver_codegen.{apply_synthetic_driver_codegen}
+
+pub fn mir_dynamic_module_init_name(module_name_raw: text, bootstrap_module_index: i64 = -1) -> text:
+    var module_name = ""
+    var has_identity_char = false
+    var index = 0
+    val count = module_name_raw.len()
+    while index < count:
+        val ch = module_name_raw.char_code_at(index)
+        if (ch >= 97 and ch <= 122) or (ch >= 65 and ch <= 90) or
+           (ch >= 48 and ch <= 57) or ch == 95:
+            module_name = module_name + module_name_raw.char_at(index)
+            has_identity_char = true
+        else:
+            module_name = module_name + "_"
+        index = index + 1
+    var unique_name = module_name
+    if not has_identity_char:
+        var fallback_name = bootstrap_module_index
+        if fallback_name < 0:
+            fallback_name = hm_hash_text(module_name_raw)
+            if fallback_name < 0:
+                fallback_name = 0 - (fallback_name + 1)
+        unique_name = "mod_" + fallback_name.to_text()
+    elif bootstrap_module_index >= 0:
+        unique_name = unique_name + "_" + bootstrap_module_index.to_text()
+    "__module_init_" + unique_name + "_dynamic"
 use compiler.frontend.core.types.{custom_primitive_underlying_type_tag_by_symbol}
 use compiler.core.interpreter.hashmap.{hm_hash_text}
 
@@ -224,6 +250,7 @@ impl MirLowering:
             struct_field_has_default: {},
             struct_field_default_expr: {},
             class_type_names: {},
+            struct_field_type_ownership_key: {},
             struct_field_type_name: {},
             struct_field_repr_name: {},
             struct_field_hir_type: {},
@@ -248,6 +275,7 @@ impl MirLowering:
             nil_locals: {},
             enum_variant_index: {},
             enum_variant_discriminants: {},
+            enum_variant_owners: {},
             enum_bare_name_collisions: {},
             enum_variant_index_q: {},
             enum_variant_discriminants_q: {},
@@ -441,12 +469,55 @@ impl MirLowering:
         var runtime_to_bare = self.enum_runtime_to_bare
         runtime_to_bare[enum_def.runtime_name] = enum_def.name
         self.enum_runtime_to_bare = runtime_to_bare
+        # Captured BEFORE the bare-key write below, which is last-wins: these
+        # are the variant leaves this owner currently contributes to
+        # `enum_variant_owners` and must be withdrawn before the new set is
+        # added, or an evicted leaf would keep naming this owner forever.
+        val prior_variant_names: [text] = if self.enum_variant_index.has(enum_def.name):
+            self.enum_variant_index[enum_def.name]
+        else:
+            []
         var variant_index = self.enum_variant_index
         variant_index[enum_def.name] = names
         self.enum_variant_index = variant_index
+        self.reindex_enum_variant_owners(enum_def.name, prior_variant_names, names)
         var variant_discriminants = self.enum_variant_discriminants
         variant_discriminants[enum_def.name] = discriminants
         self.enum_variant_discriminants = variant_discriminants
+
+    # O(1) inverse of `enum_variant_index`, maintained at every bare-key write.
+    # `prior_names` is the variant set this owner previously had registered
+    # under the same bare key (empty on a first registration); those entries are
+    # withdrawn before the new ones are added, so the divergent last-wins
+    # eviction path in `register_enum` cannot leave a stale owner behind.
+    #
+    # Kept exactly equivalent to the full-keyspace scan it replaces: the scan
+    # accepted an owner only when the variant leaf occurred under exactly ONE
+    # key of `enum_variant_index`, which is precisely a single-element list
+    # here. The scan itself ran once per method call and allocated a fresh
+    # `.keys()` array each time -- the phase-5 MIR allocation runaway.
+    me reindex_enum_variant_owners(owner_name: text, prior_names: [text], names: [text]):
+        var owners = self.enum_variant_owners
+        for prior_variant in prior_names:
+            if owners.has(prior_variant):
+                var kept_owners: [text] = []
+                for existing_owner in owners[prior_variant]:
+                    if existing_owner != owner_name:
+                        kept_owners.push(existing_owner)
+                owners[prior_variant] = kept_owners
+        for variant_name in names:
+            var current_owners: [text] = if owners.has(variant_name):
+                owners[variant_name]
+            else:
+                []
+            var owner_already_listed = false
+            for existing_owner in current_owners:
+                if existing_owner == owner_name:
+                    owner_already_listed = true
+            if not owner_already_listed:
+                current_owners.push(owner_name)
+            owners[variant_name] = current_owners
+        self.enum_variant_owners = owners
 
     fn hir_bitfield_fields(bitfield_def: HirBitfield) -> [HirBitfieldField]:
         match bitfield_def:
@@ -628,6 +699,7 @@ impl MirLowering:
         """Register name-keyed struct/class field metadata."""
         var field_names: [text] = []
         var field_type_names: [text] = []
+        var field_type_ownership_keys: [text] = []
         var field_repr_names: [text] = []
         var field_hir_types: [HirType] = []
         var field_array_element_type_names: [text] = []
@@ -637,6 +709,7 @@ impl MirLowering:
             val field = fields[fi]
             field_names.push(field.name)
             var field_type_name = ""
+            var field_type_ownership_key = ""
             var field_repr_name = ""
             var field_array_element_type_name = ""
             var field_elem_type = HirType(kind: HirTypeKind.Error, span: field.span)
@@ -650,6 +723,7 @@ impl MirLowering:
                         val field_type_symbol = symbols.get_symbol_raw(field_type_sym.id)
                         if field_type_symbol.?:
                             field_type_name = field_type_symbol.name
+                            field_type_ownership_key = self.composite_layout_key(field_type_symbol)
                     case Array(field_element_type, _):
                         field_array_element_type_name = "__runtime_array__"
                         # Bug (native_class_array_field_mutation_segfault /
@@ -684,6 +758,7 @@ impl MirLowering:
                             case _: ()
                     case _: ()
             field_type_names.push(field_type_name)
+            field_type_ownership_keys.push(field_type_ownership_key)
             field_repr_names.push(field_repr_name)
             field_hir_types.push(field_hir_type)
             field_array_element_type_names.push(field_array_element_type_name)
@@ -729,6 +804,8 @@ impl MirLowering:
             self.struct_field_order[name] = field_names
         if overwrite or not self.struct_field_type_name.has(name):
             self.struct_field_type_name[name] = field_type_names
+        if overwrite or not self.struct_field_type_ownership_key.has(name):
+            self.struct_field_type_ownership_key[name] = field_type_ownership_keys
         if overwrite or not self.struct_field_repr_name.has(name):
             self.struct_field_repr_name[name] = field_repr_names
         if overwrite or not self.struct_field_hir_type.has(name):
@@ -1103,6 +1180,7 @@ impl MirLowering:
         # to an undefined callee. Skip if user code shadows the name.
         if not self.enum_variant_index.has("Result"):
             self.enum_variant_index["Result"] = ["Ok", "Err"]
+            self.reindex_enum_variant_owners("Result", [], ["Ok", "Err"])
             self.enum_variant_discriminants["Result"] = [0, 1]
         if not self.enum_runtime_id_index.has("Result"):
             self.enum_runtime_id_index["Result"] = 0
@@ -1115,6 +1193,7 @@ impl MirLowering:
         # user code shadows the name.
         if not self.enum_variant_index.has("Option"):
             self.enum_variant_index["Option"] = ["Some", "None"]
+            self.reindex_enum_variant_owners("Option", [], ["Some", "None"])
             self.enum_variant_discriminants["Option"] = [0, 1]
         if not self.enum_runtime_id_index.has("Option"):
             self.enum_runtime_id_index["Option"] = 1
@@ -1223,6 +1302,13 @@ impl MirLowering:
             # real struct once both satisfy struct_field_order.
             self.struct_field_order[class_def.name] = field_names
             self.class_type_names[class_def.name] = true
+            # Also record the module-qualified ownership key, so a nested
+            # field whose declared type resolves to THIS class is recognised
+            # as a class even when another module declares a value struct of
+            # the same bare name.
+            val class_owner_symbol = module.symbols.get_symbol_raw(sym_id.id)
+            if class_owner_symbol != nil:
+                self.class_type_names[self.composite_layout_key(class_owner_symbol)] = true
             ci = ci + 1
 
         val bitfield_values = module.bitfields.values()
@@ -1287,11 +1373,21 @@ impl MirLowering:
         # (`outer`) had not yet been visited by the real lowering loop below.
         val prescan_fn_values = module.functions.values()
         var psi = 0
+        # Level-gated (default OFF), retained per the log-retention policy.
+        val prescan_trace = mir_lower_trace_enabled()
+        if prescan_trace:
+            eprint("[mir-prescan-module] start module={module.name} functions={prescan_fn_values.len()}")
         while psi < prescan_fn_values.len():
             val prescan_fn: HirFunction = prescan_fn_values[psi]
+            if prescan_trace:
+                eprint("[mir-prescan-function] start module={module.name} index={psi} name={prescan_fn.name}")
             if not prescan_fn.is_extern:
                 self.prescan_block_for_struct_types(prescan_fn.body)
+            if prescan_trace:
+                eprint("[mir-prescan-function] done module={module.name} index={psi} name={prescan_fn.name}")
             psi = psi + 1
+        if prescan_trace:
+            eprint("[mir-prescan-module] done module={module.name}")
 
         # Lower functions (skip extern declarations - they have no body)
         val fn_values = module.functions.values()
@@ -1440,35 +1536,10 @@ impl MirLowering:
         if dynamic.len() == 0:
             return
 
-        var module_name = ""
-        var has_identity_char = false
-        var _mn_i = 0
-        val _mn_n = module_name_raw.len()
-        while _mn_i < _mn_n:
-            val ch = module_name_raw.char_code_at(_mn_i)
-            if (ch >= 97 and ch <= 122) or (ch >= 65 and ch <= 90) or (ch >= 48 and ch <= 57) or ch == 95:
-                module_name = module_name + module_name_raw.char_at(_mn_i)
-                has_identity_char = true
-            else:
-                module_name = module_name + "_"
-            _mn_i = _mn_i + 1
-        var module_name_uniq = module_name
-        if not has_identity_char:
-            var fallback_name = bootstrap_module_index
-            if fallback_name < 0:
-                fallback_name = hm_hash_text(module_name_raw)
-                if fallback_name < 0:
-                    fallback_name = 0 - (fallback_name + 1)
-            module_name_uniq = "mod_" + fallback_name.to_text()
-        elif bootstrap_module_index >= 0:
-            module_name_uniq = module_name_uniq + "_" + bootstrap_module_index.to_text()
         # This symbol is external because the aggregate linker discovers and
         # calls it, but it must be unique in every per-module worker object.
-        # Explicit concatenation is required here: the bootstrap compiler can
-        # lose this interpolation and emit the legacy bare symbol in all
-        # objects, producing duplicate definitions at final link.
-        val init_name = "__module_init_" + module_name_uniq + "_dynamic"
-        assert init_name != "__module_init_dynamic", "dynamic module initializer must have a stable module identity"
+        val init_name = mir_dynamic_module_init_name(
+            module_name_raw, bootstrap_module_index)
         var symbols = self.symbols
         val init_symbol = symbols.define(init_name, SymbolKind.Function, nil, Span.empty(), Visibility.Private, false, nil)
         self.symbols = symbols

@@ -1,0 +1,255 @@
+# @cover src/os/apps/dbd/dbd_tls.spl 90%
+"""
+# DBD TLS record ownership
+
+Exercises the shared bounded TLS record framing through DBD's real AEAD owner.
+It proves that split/coalesced ciphertext is authenticated before plaintext is
+released and that failed authentication never advances the receive sequence.
+"""
+
+use std.spec
+use os.apps.dbd.dbd_tls.{
+    DbdTlsSessionV1, DbdTlsSessionStatusV1, DbdTlsIngressStatusV1
+}
+use std.common.net.tls_application_record_stream_v1.{
+    TLS_APPLICATION_DATA_TYPE_V1,
+    TLS_VERSION_MAJOR_V1, TLS_VERSION_MINOR_V1, TLS_AEAD_TAG_LENGTH_V1,
+    TLS_MAX_RX_BUFFER_LENGTH_V1, TLS_MAX_SEQUENCE_V1
+}
+use os.tls13.handshake13.{CIPHER_AES_128_GCM_SHA256}
+use os.tls13.record13.{
+    RecordKey, RecordResult,
+    record13_decrypt_for_suite, record13_encrypt_for_suite
+}
+use os.tls13.server_types.{Tls13ServerContext}
+use os.apps.dbd.dbd_protocol.{DbdCredentialProvider}
+use os.apps.dbd.dbd_auth_ingress.{
+    DbdMutableAuthRequestOwnerV1, DbdAuthIngressStatusV1
+}
+
+fn _bytes(value: u8, count: i64) -> [u8]:
+    var out: [u8] = []
+    var index: i64 = 0
+    while index < count:
+        out.push(value)
+        index = index + 1
+    out
+
+fn _context(client_sequence: u64 = 0u64) -> Tls13ServerContext:
+    Tls13ServerContext(
+        cipher_suite: CIPHER_AES_128_GCM_SHA256,
+        named_group: 29u16,
+        server_random: _bytes(1u8, 32),
+        server_keyshare_pub: _bytes(2u8, 32),
+        client_app_key: _bytes(3u8, 16),
+        client_app_iv: _bytes(4u8, 12),
+        server_app_key: _bytes(5u8, 16),
+        server_app_iv: _bytes(6u8, 12),
+        client_seq: client_sequence,
+        server_seq: 0u64
+    )
+
+fn _client_record_with_type(
+    sequence: u64,
+    content_type: u8,
+    plaintext: [u8]
+) -> [u8]:
+    record13_encrypt_for_suite(
+        CIPHER_AES_128_GCM_SHA256,
+        RecordKey(key: _bytes(3u8, 16), iv: _bytes(4u8, 12)),
+        sequence,
+        content_type,
+        plaintext
+    )
+
+fn _client_record(sequence: u64, plaintext: [u8]) -> [u8]:
+    _client_record_with_type(
+        sequence, TLS_APPLICATION_DATA_TYPE_V1.to_u8(), plaintext)
+
+fn _auth_request(credential: [u8]) -> [u8]:
+    var out = "*3\r\n$4\r\nAUTH\r\n$8\r\noperator\r\n$32\r\n".bytes()
+    for byte in credential:
+        out.push(byte)
+    out.push(13u8)
+    out.push(10u8)
+    out
+
+describe "DBD TLS authenticated record framing":
+    it "mutates one session owner across one-byte ingress with bounded work":
+        var session = DbdTlsSessionV1.from_context(_context()).unwrap()
+        val record = _client_record(0u64, [77u8, 78u8])
+        var index: i64 = 0
+        var prior_work: i64 = 0
+        while index < record.len().to_i64() - 1:
+            val ingress = session.ingest(
+                record.slice(index.to_u64(), (index + 1).to_u64()))
+            expect(ingress.status).to_equal(DbdTlsIngressStatusV1.NeedMore)
+            expect(session.stream.sequence()).to_equal(0i64)
+            expect(session.stream.byte_work()).to_be_greater_than(prior_work)
+            prior_work = session.stream.byte_work()
+            index = index + 1
+        val final_ingress = session.ingest(
+            record.slice(index.to_u64(), record.len()))
+        expect(final_ingress.status).to_equal(
+            DbdTlsIngressStatusV1.Authenticated)
+        expect(final_ingress.plaintext_frames).to_equal([[77u8, 78u8]])
+        expect(session.stream.sequence()).to_equal(1i64)
+        expect(session.stream.has_pending_proposal()).to_be(false)
+        expect(session.stream.byte_work()).to_be_greater_than(prior_work)
+
+    it "retains split ciphertext and releases plaintext only after authentication":
+        var session = DbdTlsSessionV1.from_context(_context()).unwrap()
+        val record = _client_record(0u64, [65u8, 66u8, 67u8])
+        val split_at = 7
+        val first = session.ingest(record.slice(0, split_at))
+        expect(first.status).to_equal(DbdTlsIngressStatusV1.NeedMore)
+        expect(first.plaintext_frames.len()).to_equal(0u64)
+        expect(session.stream.sequence()).to_equal(0i64)
+        expect(first.remainder_length).to_equal(split_at)
+
+        val second = session.ingest(record.slice(split_at, record.len()))
+        expect(second.status).to_equal(DbdTlsIngressStatusV1.Authenticated)
+        expect(second.plaintext_frames).to_equal([[65u8, 66u8, 67u8]])
+        expect(second.remainder_length).to_equal(0i64)
+        expect(session.stream.sequence()).to_equal(1i64)
+
+    it "authenticates coalesced records and commits each sequence in order":
+        var session = DbdTlsSessionV1.from_context(_context()).unwrap()
+        val records = _client_record(0u64, [1u8]) +
+            _client_record(1u64, [2u8, 3u8])
+        val ingested = session.ingest(records)
+        expect(ingested.status).to_equal(DbdTlsIngressStatusV1.Authenticated)
+        expect(ingested.authenticated_record_count).to_equal(2i64)
+        expect(ingested.plaintext_frames).to_equal([[1u8], [2u8, 3u8]])
+        expect(session.stream.sequence()).to_equal(2i64)
+
+describe "DBD TLS fail-closed record admission":
+    it "rejects a forged tag without advancing the receive sequence":
+        var session = DbdTlsSessionV1.from_context(_context()).unwrap()
+        var forged = _client_record(0u64, [9u8, 8u8, 7u8])
+        val last = forged.len() - 1u64
+        forged[last] = forged[last] ^ 1u8
+        val ingested = session.ingest(forged)
+        expect(ingested.status).to_equal(
+            DbdTlsIngressStatusV1.AuthenticationFailed)
+        expect(ingested.plaintext_frames.len()).to_equal(0u64)
+        expect(session.stream.sequence()).to_equal(0i64)
+        expect(session.status).to_equal(DbdTlsSessionStatusV1.Failed)
+        expect(session.client_key.key.len()).to_equal(0u64)
+        expect(session.server_key.key.len()).to_equal(0u64)
+
+    it "maps malformed framing, byte-capacity overflow, and sequence exhaustion":
+        var malformed_session = DbdTlsSessionV1.from_context(_context()).unwrap()
+        val malformed = malformed_session.ingest(
+            [22u8, TLS_VERSION_MAJOR_V1.to_u8(),
+                TLS_VERSION_MINOR_V1.to_u8(), 0u8,
+                TLS_AEAD_TAG_LENGTH_V1.to_u8()])
+        expect(malformed.status).to_equal(DbdTlsIngressStatusV1.Malformed)
+
+        var fragment_session = DbdTlsSessionV1.from_context(_context()).unwrap()
+        val overflow = fragment_session.ingest(
+            _bytes(0u8, TLS_MAX_RX_BUFFER_LENGTH_V1 + 1))
+        expect(overflow.status).to_equal(DbdTlsIngressStatusV1.Overflow)
+
+        var sequence_session = DbdTlsSessionV1.from_context(
+            _context(TLS_MAX_SEQUENCE_V1.to_u64())).unwrap()
+        val record_at_limit = _bytes(0u8, TLS_AEAD_TAG_LENGTH_V1)
+        val exhausted = sequence_session.ingest(
+            [TLS_APPLICATION_DATA_TYPE_V1.to_u8(),
+                TLS_VERSION_MAJOR_V1.to_u8(), TLS_VERSION_MINOR_V1.to_u8(),
+                0u8, TLS_AEAD_TAG_LENGTH_V1.to_u8()] + record_at_limit
+        )
+        expect(exhausted.status).to_equal(
+            DbdTlsIngressStatusV1.SequenceExhausted)
+
+    it "rejects unsupported cipher and malformed traffic-key shapes":
+        var unsupported = _context()
+        unsupported.cipher_suite = 0x1302u16
+        expect(DbdTlsSessionV1.from_context(unsupported).is_err()).to_be(true)
+        var malformed_keys = _context()
+        malformed_keys.client_app_key = [1u8]
+        expect(DbdTlsSessionV1.from_context(malformed_keys).is_err()).to_be(true)
+        val invalid_sequence = _context(
+            TLS_MAX_SEQUENCE_V1.to_u64() + 1u64)
+        expect(DbdTlsSessionV1.from_context(
+            invalid_sequence).is_err()).to_be(true)
+
+    it "rejects authenticated records carrying a non-application inner type":
+        var session = DbdTlsSessionV1.from_context(_context()).unwrap()
+        val handshake_inner = _client_record_with_type(
+            0u64, 22u8, [1u8, 2u8])
+        val ingested = session.ingest(handshake_inner)
+        expect(ingested.status).to_equal(
+            DbdTlsIngressStatusV1.UnexpectedContentType)
+        expect(ingested.plaintext_frames.len()).to_equal(0u64)
+
+    it "does not reopen an explicitly closed session":
+        var session = DbdTlsSessionV1.from_context(_context()).unwrap()
+        session.close()
+        val ingested = session.ingest(_client_record(0u64, [1u8]))
+        expect(ingested.status).to_equal(
+            DbdTlsIngressStatusV1.SessionClosed)
+        expect(ingested.plaintext_frames.len()).to_equal(0u64)
+
+describe "DBD TLS encrypted response ownership":
+    it "delivers authenticated TLS plaintext to the mutable AUTH owner":
+        var provider = DbdCredentialProvider.new()
+        expect(provider.configure_bytes(
+            "operator", _bytes(41u8, 32))).to_be(true)
+        var tls = DbdTlsSessionV1.from_context(_context()).unwrap()
+        val request = _auth_request(_bytes(41u8, 32))
+        var ingress = tls.ingest(_client_record(0u64, request))
+        expect(ingress.status).to_equal(
+            DbdTlsIngressStatusV1.Authenticated)
+        expect(ingress.plaintext_frames.len()).to_equal(1u64)
+        val auth_owner = DbdMutableAuthRequestOwnerV1.new(71)
+        expect(auth_owner.ingest(
+            provider, ingress.plaintext_frames[0]
+        )).to_equal(DbdAuthIngressStatusV1.Authenticated)
+        expect(auth_owner.can_dispatch()).to_be(true)
+        expect(auth_owner.last_credential_was_zeroized()).to_be(true)
+        expect(ingress.zeroize_plaintext_frame(0u64)).to_equal(
+            request.len().to_i64())
+        expect(ingress.retained_plaintext_nonzero_byte_count()).to_equal(0i64)
+
+    it "seals a fixed authentication reply as decryptable application data":
+        var session = DbdTlsSessionV1.from_context(_context()).unwrap()
+        val record = session.seal_application("+OK\r\n".bytes())
+        val opened = record13_decrypt_for_suite(
+            CIPHER_AES_128_GCM_SHA256,
+            RecordKey(key: _bytes(5u8, 16), iv: _bytes(6u8, 12)),
+            0u64,
+            record
+        )
+        match opened:
+            case RecordResult.Err(_):
+                fail("sealed authentication reply did not authenticate")
+            case RecordResult.Ok(content_type, plaintext):
+                expect(content_type).to_equal(
+                    TLS_APPLICATION_DATA_TYPE_V1.to_u8())
+                expect(plaintext).to_equal("+OK\r\n".bytes())
+
+    it "commits the send sequence only when a record is emitted":
+        var session = DbdTlsSessionV1.from_context(_context()).unwrap()
+        val record = session.seal_application([43u8, 79u8, 75u8])
+        expect(record.len() > 0).to_be(true)
+        expect(session.server_sequence).to_equal(1i64)
+        val rejected = session.seal_application([])
+        expect(rejected.len()).to_equal(0u64)
+        expect(session.server_sequence).to_equal(1i64)
+
+    it "releases traffic-key references when the session closes":
+        var session = DbdTlsSessionV1.from_context(_context()).unwrap()
+        session.close()
+        expect(session.status).to_equal(DbdTlsSessionStatusV1.Closed)
+        expect(session.client_key.key.len()).to_equal(0u64)
+        expect(session.server_key.key.len()).to_equal(0u64)
+
+    it "fails closed instead of wrapping an exhausted send sequence":
+        var context = _context()
+        context.server_seq = TLS_MAX_SEQUENCE_V1.to_u64()
+        var session = DbdTlsSessionV1.from_context(context).unwrap()
+        expect(session.seal_application([1u8]).len()).to_equal(0u64)
+        expect(session.server_sequence).to_equal(TLS_MAX_SEQUENCE_V1)
+        expect(session.status).to_equal(DbdTlsSessionStatusV1.Failed)
+        expect(session.server_key.key.len()).to_equal(0u64)

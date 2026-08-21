@@ -1,0 +1,90 @@
+# Cross-Module Collision DETECTION — similar-problem detection spec (defect CLASS)
+#
+# Companion to `cross_module_symbol_collision_spec.spl`, which pins the WRONG
+# ANSWER. This one pins the DIAGNOSTIC, because the two failure modes have
+# opposite visibility and the repo keeps rediscovering the invisible one.
+#
+# THE CLASS. Any name defined by two co-compiled modules collapses to one flat
+# registry entry; one definition silently wins. The shapes differ only in how
+# detectable they are, and detectability is currently INVERTED — the more
+# dangerous the shape, the quieter the compiler:
+#
+#   shape                     other tooling can find it?   warns by default?
+#   ------------------------  ---------------------------  -----------------
+#   differing signatures      yes (type/arity errors)      YES
+#   identical signatures      NO — nothing else can        NO  <-- inverted
+#
+# Measured 2026-08-17 on the probe fixtures: with no env vars set, the compiler
+# named only `shared_arity` (the differing-signature pair). `_shared_helper` and
+# `shared_public` — same-signature collisions that produced silently wrong
+# answers in the very same run — drew no warning at all. Their diagnostic sits
+# behind `SIMPLE_DIAG_SAME_SIGNATURE_COLLISION`, default-off
+# (`pipeline/module_loader.rs:1509`), and the code comment above that arm
+# (`module_loader.rs:1592-1607`) argues at length that this is exactly the shape
+# no other tool can detect — and then leaves it off.
+#
+# That is the vacuity engine behind an entire spec class: a spec can import its
+# real subject, be green, and be testing another module's same-named function.
+#
+# This spec generalises rather than re-testing one name: EVERY collision shape
+# must be named on stderr under DEFAULT settings, so the next shape added to the
+# registry fails here instead of shipping silently. It deliberately asserts on
+# the collision-family tag `[compiler_cross_module_private_symbol_collision]`
+# rather than on prose, so rewording a warning does not silently void it.
+#
+# WHY A SUBPROCESS: the diagnostic is emitted by the import-flattening pass at
+# load time, on stderr. A spec body runs inside an already-loaded module set and
+# can never observe it.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/compiler/pipeline/fixtures/probe_xmod_collision.spl"
+
+fn simple_bin() -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    return bin
+
+# Captures STDERR (2>&1) — the diagnostic never appears on stdout.
+fn probe_stderr_with(env_prefix: text) -> text:
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 " + env_prefix + " " +
+        simple_bin() + " run " + PROBE_PATH + " 2>&1"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "cross-module collision detection covers every collision shape":
+    it "names every colliding symbol under default settings":
+        step("Run the collision probe with NO diagnostic env vars — this is what a developer, a CI lane and a bootstrap actually see")
+        val out = probe_stderr_with("")
+
+        step("The run must have happened at all — otherwise every absence below is vacuous")
+        expect(out).to_contain("XMOD_COLLISION PROBE")
+
+        step("Differing-signature collision: already detected today, and must stay detected")
+        expect(out).to_contain("shared_arity")
+
+        step("Identical-signature PRIVATE collision — the shape no other tool can detect, and the one that silently returned A_private for B's call in this same run")
+        expect(out).to_contain("_shared_helper")
+
+        step("Identical-signature PUBLIC collision — same shape, and proof the defect is not specific to the `_` prefix")
+        expect(out).to_contain("shared_public")
+
+        step("Each warning must carry the stable collision-family tag, so a reworded message cannot silently void this spec")
+        expect(out).to_contain("[compiler_cross_module_private_symbol_collision]")
+
+    # BUDGET NOTE: every shell-out example is a full compiler launch against the
+    # test daemon's budget, and an earlier 3-launch version of this spec timed out
+    # at 900s with `reason=daemon-no-response` (an UNVERIFIED result, not a red).
+    # This spec is therefore capped at ONE launch per example, two total.
+    it "reports a same-signature collision through the detector itself":
+        step("Run once with the same-signature diagnostic explicitly enabled")
+        val opted_in = probe_stderr_with("SIMPLE_DIAG_SAME_SIGNATURE_COLLISION=1")
+
+        step("This arm is the CONTROL: it proves the detector works and that any red in the previous example is about the DEFAULT being off, not about a broken probe or fixture")
+        expect(opted_in).to_contain("_shared_helper")
+        expect(opted_in).to_contain("shared_public")
+
+        step("The stable collision-family tag must be present here too")
+        expect(opted_in).to_contain("[compiler_cross_module_private_symbol_collision]")

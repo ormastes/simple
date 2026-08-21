@@ -1,0 +1,255 @@
+# @codex-impl
+# @req REQ-017 REQ-019 NFR-005 NFR-007 NFR-009
+#
+# Focused unit coverage for the first canonical WM hardening slice.  These
+# tests exercise WmService-owned lifecycle state only; renderer/input adapters
+# remain outside this slice.
+
+use std.spec
+use os.services.wm.wm_service.{WmService}
+use os.services.wm.wm_action.{WmAction}
+use os.services.wm.wm_damage.{WmDamageRectV1, WmDamageRegionV1, wm_damage_admit_v1}
+use common.window_protocol.geometry.{WindowId, Point}
+use common.window_protocol.window_protocol.{WmInputEvent}
+
+fn action(kind: text, window_id: u64, x: i32, y: i32, width: i32, height: i32) -> WmAction:
+    WmAction(
+        kind: kind,
+        window_id: window_id,
+        title: "",
+        x: x,
+        y: y,
+        width: width,
+        height: height,
+        content: "",
+        process_id: 1,
+        app_id: "wm-hardening-test",
+        owner_port: 7,
+        src_port: 7
+    )
+
+fn input(window_id: u64) -> WmInputEvent:
+    WmInputEvent.mouse_move(WindowId(value: window_id), Point.xy(4, 5))
+
+describe "WmService canonical lifecycle hardening":
+    it "starts with a zero revision and bounded ingress queues":
+        val wm = WmService.new()
+        expect(wm.generation_value()).to_equal(0u64)
+        expect(wm.scene_revision_value()).to_equal(0u64)
+        expect(wm.focus_stack_value()).to_equal([])
+        expect(wm.redraw_decision().accepted).to_be(false)
+        expect(wm.max_action_queue_depth).to_equal(64)
+        expect(wm.max_input_queue_depth).to_equal(256)
+
+    it "rejects stale generation and stale scene revision before queueing":
+        val wm = WmService.new()
+        val a = action("focus", 7, 0, 0, 0, 0)
+        expect(wm.accept_action_ingress(1u64, 0u64, a)).to_be(false)
+        expect(wm.last_rejection_reason).to_equal("stale-lifecycle-generation")
+        expect(wm.accept_action_ingress(0u64, 1u64, a)).to_be(false)
+        expect(wm.last_rejection_reason).to_equal("stale-scene-revision")
+        expect(wm.action_queue_depth).to_equal(0)
+
+    it "rejects invalid geometry and action queue overflow":
+        val wm = WmService.new()
+        val invalid = action("create_window", 0, 0, 0, 0, 900)
+        expect(wm.accept_action_ingress(0u64, 0u64, invalid)).to_be(false)
+        expect(wm.last_rejection_reason).to_equal("invalid-geometry")
+        wm.max_action_queue_depth = 1
+        val valid = action("create_window", 0, 0, 0, 640, 480)
+        expect(wm.accept_action_ingress(0u64, 0u64, valid)).to_be(true)
+        expect(wm.accept_action_ingress(0u64, 0u64, valid)).to_be(false)
+        expect(wm.last_rejection_reason).to_equal("action-queue-overflow")
+        expect(wm.complete_action_ingress()).to_be(true)
+        expect(wm.complete_action_ingress()).to_be(false)
+
+    it "rejects stale input, zero window input, and input queue overflow":
+        val wm = WmService.new()
+        val zero_input = input(0u64)
+        expect(wm.accept_input_ingress(0u64, 1u64, zero_input)).to_be(false)
+        expect(wm.last_rejection_reason).to_equal("invalid-input-window")
+        val unowned_input = input(8u64)
+        expect(wm.accept_input_ingress(0u64, 1u64, unowned_input)).to_be(false)
+        expect(wm.last_rejection_reason).to_equal("unowned-input-window")
+        wm.register_window_owner(WindowId(value: 7u64), 7u64)
+        val event = input(7u64)
+        expect(wm.accept_input_ingress(0u64, 1u64, event)).to_be(true)
+        expect(wm.accept_input_ingress(0u64, 1u64, event)).to_be(false)
+        expect(wm.last_rejection_reason).to_equal("stale-input-sequence")
+        wm.complete_input_ingress()
+        wm.max_input_queue_depth = 1
+        expect(wm.accept_input_ingress(0u64, 2u64, event)).to_be(true)
+        expect(wm.accept_input_ingress(0u64, 3u64, event)).to_be(false)
+        expect(wm.last_rejection_reason).to_equal("input-queue-overflow")
+
+    it "rejects unknown and non-owned actions and bounds combined action text":
+        val wm = WmService.new()
+        val unknown = action("test_api", 0, 0, 0, 0, 0)
+        expect(wm.accept_action_ingress(0u64, 0u64, unknown)).to_be(false)
+        expect(wm.last_rejection_reason).to_equal("unknown-action-kind")
+        val zero_target = action("focus", 0, 0, 0, 0, 0)
+        expect(wm.accept_action_ingress(0u64, 0u64, zero_target)).to_be(false)
+        expect(wm.last_rejection_reason).to_equal("invalid-action-window")
+        val unowned_target = action("focus", 7u64, 0, 0, 0, 0)
+        expect(wm.accept_action_ingress(0u64, 0u64, unowned_target)).to_be(false)
+        expect(wm.last_rejection_reason).to_equal("unowned-action-window")
+        wm.register_window_owner(WindowId(value: 7u64), 7u64)
+        var oversized_text = action("update_tree", 7u64, 0, 0, 0, 0)
+        oversized_text.title = "t".repeat(40000)
+        oversized_text.content = "c".repeat(30000)
+        expect(wm.accept_action_ingress(0u64, wm.scene_revision_value(), oversized_text)).to_be(false)
+        expect(wm.last_rejection_reason).to_equal("action-text-too-large")
+
+    it "bounds committed input text before queue reservation":
+        val wm = WmService.new()
+        wm.register_window_owner(WindowId(value: 9u64), 9u64)
+        val oversized = WmInputEvent.text_input(WindowId(value: 9u64), "x".repeat(4097))
+        expect(wm.accept_input_ingress(0u64, 1u64, oversized)).to_be(false)
+        expect(wm.last_rejection_reason).to_equal("input-text-too-large")
+        expect(wm.input_queue_depth).to_equal(0)
+
+    it "rejects stale, invalid, and over-capacity redraw candidates":
+        val stale = WmDamageRegionV1(
+            generation: 1u64,
+            scene_revision: 1u64,
+            full_redraw: false,
+            reason: "input",
+            rects: [WmDamageRectV1(x: 0, y: 0, width: 8, height: 8)]
+        )
+        val stale_result = wm_damage_admit_v1(stale, 0u64, 1u64)
+        expect(stale_result.accepted).to_be(false)
+        expect(stale_result.reason).to_equal("stale-damage-generation")
+        val stale_revision = WmDamageRegionV1(
+            generation: 0u64,
+            scene_revision: 2u64,
+            full_redraw: true,
+            reason: "focus",
+            rects: []
+        )
+        val stale_revision_result = wm_damage_admit_v1(stale_revision, 0u64, 1u64)
+        expect(stale_revision_result.accepted).to_be(false)
+        expect(stale_revision_result.reason).to_equal("stale-damage-revision")
+        val invalid = WmDamageRegionV1(
+            generation: 0u64,
+            scene_revision: 1u64,
+            full_redraw: false,
+            reason: "resize",
+            rects: [WmDamageRectV1(x: 0, y: 0, width: 0, height: 8)]
+        )
+        val invalid_result = wm_damage_admit_v1(invalid, 0u64, 1u64)
+        expect(invalid_result.accepted).to_be(false)
+        expect(invalid_result.reason).to_equal("invalid-damage-geometry")
+        val oversized_reason = WmDamageRegionV1(
+            generation: 0u64,
+            scene_revision: 1u64,
+            full_redraw: true,
+            reason: "r".repeat(65),
+            rects: []
+        )
+        val oversized_reason_result = wm_damage_admit_v1(oversized_reason, 0u64, 1u64)
+        expect(oversized_reason_result.accepted).to_be(false)
+        expect(oversized_reason_result.reason).to_equal("damage-reason-too-large")
+        var many_rects: [WmDamageRectV1] = []
+        var i: i32 = 0
+        while i < 65:
+            many_rects = many_rects.push(WmDamageRectV1(x: i, y: 0, width: 1, height: 1))
+            i = i + 1
+        val overflow = WmDamageRegionV1(
+            generation: 0u64,
+            scene_revision: 1u64,
+            full_redraw: false,
+            reason: "input",
+            rects: many_rects
+        )
+        val overflow_result = wm_damage_admit_v1(overflow, 0u64, 1u64)
+        expect(overflow_result.accepted).to_be(false)
+        expect(overflow_result.reason).to_equal("damage-region-overflow")
+
+    it "fails closed when scene revision reaches its maximum":
+        val wm = WmService.new()
+        wm.scene_revision = 18446744073709551615u64
+        wm.register_window_owner(WindowId(value: 11u64), 11u64)
+        expect(wm.owner_count).to_equal(0)
+        expect(wm.world.live_window_count()).to_equal(0)
+        expect(wm.last_rejection_reason).to_equal("scene-revision-exhausted")
+
+    it "rejects owner conflicts, unsafe app ids, and widened fixed capacity":
+        val wm = WmService.new()
+        wm.register_window_owner_with_identity(WindowId(value: 12u64), 40u64, 50u64, "app.safe")
+        wm.register_window_owner_with_identity(WindowId(value: 12u64), 41u64, 51u64, "app.hijack")
+        expect(wm.find_owner(12u64)).to_equal(40u64)
+        expect(wm.last_rejection_reason).to_equal("owner-port-conflict")
+        wm.register_window_owner_with_identity(WindowId(value: 13u64), 42u64, 52u64, "bad\napp")
+        expect(wm.find_owner(13u64)).to_equal(0u64)
+        expect(wm.last_rejection_reason).to_equal("invalid-app-id")
+        wm.max_windows = 300
+        wm.owner_count = 256
+        wm.register_window_owner(WindowId(value: 14u64), 43u64)
+        expect(wm.last_rejection_reason).to_equal("window-owner-capacity")
+
+    it "fails closed before request count wrap and restart recovers the counter":
+        val wm = WmService.new()
+        wm.request_count = 18446744073709551615u64
+        expect(wm.record_request()).to_be(false)
+        expect(wm.last_rejection_reason).to_equal("request-count-exhausted")
+        expect(wm.restart()).to_equal(1u64)
+        expect(wm.request_count).to_equal(0u64)
+        expect(wm.record_request()).to_be(true)
+        expect(wm.request_count).to_equal(1u64)
+
+    it "cleans owner-dead ECS windows and focuses the next stack-top window":
+        val wm = WmService.new()
+        wm.register_window_owner(WindowId(value: 30u64), 30u64)
+        wm.register_window_owner(WindowId(value: 10u64), 10u64)
+        wm.register_window_owner(WindowId(value: 20u64), 20u64)
+        expect(wm.focus_stack_value()).to_equal([30u64, 10u64, 20u64])
+        expect(wm.raise_focus_stack(30u64)).to_be(true)
+        expect(wm.focus_stack_value()).to_equal([10u64, 20u64, 30u64])
+        expect(wm.focused_window()).to_equal(30u64)
+        expect(wm.world.live_window_count()).to_equal(3)
+        val removed = wm.remove_all_windows_for_port(30u64)
+        expect(removed.len()).to_equal(1)
+        expect(removed[0]).to_equal(30u64)
+        expect(wm.world.live_window_count()).to_equal(2)
+        expect(wm.window_count()).to_equal(2)
+        expect(wm.focused_window()).to_equal(20u64)
+        expect(wm.focus_stack_value()).to_equal([10u64, 20u64])
+        expect(wm.redraw_decision().accepted).to_be(true)
+        expect(wm.redraw_decision().full_redraw).to_be(true)
+
+    it "fences old ingress after restart and clears presentation state":
+        val wm = WmService.new()
+        wm.register_window_owner(WindowId(value: 3u64), 3u64)
+        val old_generation = wm.generation_value()
+        val revision = wm.scene_revision_value()
+        val a = action("focus", 3, 0, 0, 0, 0)
+        expect(wm.accept_action_ingress(old_generation, revision, a)).to_be(true)
+        val next_generation = wm.restart()
+        expect(next_generation).to_equal(1u64)
+        expect(wm.window_count()).to_equal(0)
+        expect(wm.focus_stack_value()).to_equal([])
+        expect(wm.redraw_decision().accepted).to_be(false)
+        expect(wm.last_presented_frame_id).to_equal(0u64)
+        expect(wm.last_readback_source).to_equal("")
+        expect(wm.accept_action_ingress(old_generation, revision, a)).to_be(false)
+        expect(wm.last_rejection_reason).to_equal("stale-lifecycle-generation")
+        wm.register_window_owner(WindowId(value: 3u64), 3u64)
+        expect(wm.accept_action_ingress(next_generation, wm.scene_revision_value(), a)).to_be(true)
+
+    it "accepts only current nonzero frame/readback receipts and correlates them immutably":
+        val wm = WmService.new()
+        wm.register_window_owner(WindowId(value: 8u64), 8u64)
+        val generation = wm.generation_value()
+        val revision = wm.scene_revision_value()
+        expect(wm.commit_presentation(generation, revision, 0u64, 44u64, "framebuffer")).to_be(false)
+        expect(wm.last_rejection_reason).to_equal("fabricated-frame-or-readback")
+        expect(wm.commit_presentation(generation, revision, 1u64, 44u64, "cpu_mirror")).to_be(false)
+        expect(wm.last_rejection_reason).to_equal("invalid-readback-source")
+        expect(wm.commit_presentation(generation, revision, 1u64, 44u64, "framebuffer")).to_be(true)
+        expect(wm.redraw_decision().accepted).to_be(false)
+        expect(wm.presentation_matches(generation, revision, 1u64, 44u64, "framebuffer")).to_be(true)
+        expect(wm.presentation_matches(generation, revision, 1u64, 44u64, "device_readback")).to_be(false)
+        expect(wm.commit_presentation(generation, revision, 1u64, 45u64, "framebuffer")).to_be(false)
+        expect(wm.last_rejection_reason).to_equal("stale-frame-id")
+        expect(wm.commit_presentation(generation, revision - 1u64, 2u64, 46u64, "framebuffer")).to_be(false)
+        expect(wm.last_rejection_reason).to_equal("stale-scene-revision")

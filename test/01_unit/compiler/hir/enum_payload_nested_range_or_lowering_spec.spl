@@ -1,0 +1,110 @@
+# @cover src/compiler/20.hir/hir_lowering/_Expressions/match_desugaring.spl
+# @cover src/compiler/20.hir/hir_lowering/_Expressions/expression_components.spl
+#
+# HIR nested-pattern lowering inside an enum payload.
+#
+# Before this change, `build_match_expr`'s enum branch normalized only
+# Tuple/Struct (flattened) and Enum/Literal (passed to MIR's
+# emit_enum_payload_deep) payload sub-patterns; a nested `Range` (`case
+# V(1..5):`) or `Or` (`case V(2 | 3):`) sub-pattern fell into
+# flatten_enum_match_arm's explicit `self.error(... unsupported construct)`
+# arm, so the construct never compiled.
+#
+# Now:
+#   * Or    -> expand_or_payload_arms rewrites `case V(a | b):` into two
+#              sibling arms of the same variant. The enum dispatch already
+#              supports several arms per variant with fallthrough between
+#              them (emit_enum_payload_deep), which IS or-pattern semantics,
+#              so no MIR change is needed.
+#   * Range -> lower_range_payload_arms replaces the range slot with a fresh
+#              Binding (which the flat bind path handles) and moves the test
+#              into the arm body, whose else branch re-dispatches the
+#              REMAINING arms over a single scrutinee temp -- the arm-to-arm
+#              fallthrough a payload test needs.
+#
+# HARNESS NOTE. The parse -> HirLowering in-process harness used by the
+# sibling match specs (match_arm_underscore_subpattern_spec.spl) is red on
+# the Rust seed for unrelated reasons (`method lookup not found on type
+# SymbolTable`; all 5 of its examples fail on an unmodified tree), and the
+# seed's own parser rejects `case V(2 | 3):` outright, so neither lane can
+# execute these shapes today. This spec therefore pins the lowering CONTRACT
+# in the pure-Simple source, exactly like statement_payload_types_source_spec
+# .spl next to it. Every assertion below is false before the change and true
+# after. The end-to-end value check for a compiled lane lives in
+# test/fixtures/compiler/enum_payload_range_or_matrix.spl.
+#
+# tag: unit
+
+use std.spec
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn desugaring_source() -> text:
+    rt_file_read_text("src/compiler/20.hir/hir_lowering/_Expressions/match_desugaring.spl") ?? ""
+
+describe "enum payload nested Or lowering":
+    it "expands an Or payload sub-pattern into sibling arms of the same variant":
+        val src = desugaring_source()
+        expect(src).to_contain("me expand_or_payload_arms(arms: [HirMatchArm]) -> [HirMatchArm]:")
+        expect(src).to_contain("me arms_have_or_payload(arms: [HirMatchArm]) -> bool:")
+        expect(src).to_contain("self.enum_arm_with_payload(arm, np, arm.body)")
+
+    it "runs the Or expansion before flattening, in bounded rounds":
+        val src = desugaring_source()
+        val start = src.index_of("    me build_match_expr(")
+        expect(start).to_be_greater_than(-1)
+        val body = src.substring(start, src.len())
+        expect(body).to_contain("while or_rounds < 8 and self.arms_have_or_payload(expanded):")
+        expect(body).to_contain("expanded = self.expand_or_payload_arms(expanded)")
+        val or_at = body.index_of("expanded = self.expand_or_payload_arms(expanded)")
+        val flatten_at = body.index_of("flat_arms = flat_arms.push(self.flatten_enum_match_arm(a, span))")
+        expect(flatten_at).to_be_greater_than(or_at)
+
+describe "enum payload nested Range lowering":
+    it "rewrites a Range payload sub-pattern into a fresh binding plus an in-body test":
+        val src = desugaring_source()
+        expect(src).to_contain("me lower_range_payload_arms(scrut_var: HirExpr, arms: [HirMatchArm], start: i64, span: Span) -> [HirMatchArm]:")
+        expect(src).to_contain("self.symbols.define(\"__mp_payload_range\"")
+        expect(src).to_contain("val rc = self.pattern_test_condition(fresh_var, pats[pi], span)")
+
+    it "gives the failed range test arm-to-arm fallthrough over the remaining arms":
+        val src = desugaring_source()
+        val start = src.index_of("    me lower_range_payload_arms(")
+        expect(start).to_be_greater_than(-1)
+        val body = src.substring(start, src.len())
+        expect(body).to_contain("val rest = self.lower_range_payload_arms(scrut_var, arms, found + 1, span)")
+        expect(body).to_contain("HirExprKind.MatchCase(scrut_var, rest)")
+        expect(body).to_contain("HirExprKind.If(cond, then_block, else_opt)")
+
+    it "evaluates the scrutinee exactly once into a temp when a range arm is present":
+        val src = desugaring_source()
+        val start = src.index_of("    me build_match_expr(")
+        expect(start).to_be_greater_than(-1)
+        val body = src.substring(start, src.len())
+        expect(body).to_contain("val range_scrut = self.symbols.define(\"__mp_scrutinee\"")
+        expect(body).to_contain("self.lower_range_payload_arms(range_var, flat_arms, 0, span)")
+        expect(body).to_contain("if not has_range_payload:")
+        expect(body).to_contain("return HirExprKind.MatchCase(hir_scrutinee, flat_arms)")
+
+describe "neighbors of the same defect class stay handled":
+    it "keeps Range out of the flatten pass's fresh-binding rewrite":
+        val src = desugaring_source()
+        val start = src.index_of("    me flatten_enum_match_arm(")
+        expect(start).to_be_greater_than(-1)
+        val body = src.substring(start, src.len())
+        expect(body).to_contain("# lower_range_payload_arms.")
+        expect(body).to_contain("case Range(_, _, _):")
+
+    it "still loud-fails, never silently always-matches, on a genuinely unsupported sub-pattern":
+        val src = desugaring_source()
+        expect(src).to_contain("nested match pattern kind not supported inside an enum payload here")
+        expect(src).to_contain("nested Or is expanded into sibling arms and nested Range into an in-body test with arm fallthrough")
+
+    it "keeps the HIR expression catch-all safety net intact":
+        val core = rt_file_read_text("src/compiler/20.hir/hir_lowering/_Expressions/expression_core.spl") ?? ""
+        expect(core).to_contain("self.error(\"unsupported expression kind\", e.span)")
+
+    it "no longer documents nested enum-payload destructure as unsupported":
+        val comp = rt_file_read_text("src/compiler/20.hir/hir_lowering/_Expressions/expression_components.spl") ?? ""
+        expect(comp.contains("nested enum-payload destructure remains an unsupported")).to_equal(false)
+        expect(comp).to_contain("Nested enum-payload destructure therefore WORKS")

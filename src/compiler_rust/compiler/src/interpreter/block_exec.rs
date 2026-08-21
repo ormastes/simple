@@ -61,13 +61,18 @@ pub(crate) fn capture_node_scope_shadows(nodes: &[Node], env: &mut Env) -> Vec<(
                             .map(|owner| (owner, name.clone()))
                     });
                     if let (Some((owner, source_name)), Some(value)) = (target, prior_value.as_ref()) {
-                        crate::interpreter::MODULE_GLOBALS_BY_OWNER.with(|cell| {
-                            if let Some(globals) = cell.borrow_mut().get_mut(&owner) {
-                                if globals.contains_key(&source_name) {
+                        let present = crate::interpreter::MODULE_GLOBALS_BY_OWNER.with(|cell| {
+                            cell.borrow()
+                                .get(&owner)
+                                .is_some_and(|globals| globals.contains_key(&source_name))
+                        });
+                        if present {
+                            crate::interpreter::MODULE_GLOBALS_BY_OWNER.with(|cell| {
+                                if let Some(globals) = cell.borrow_mut().get_mut(&owner) {
                                     globals.insert(source_name, value.clone());
                                 }
-                            }
-                        });
+                            });
+                        }
                     }
                 }
                 shadows.push((name.clone(), prior_value));

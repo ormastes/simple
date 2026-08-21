@@ -1,0 +1,149 @@
+## Frozen v1 policy for package-declared installer image payloads.
+
+use os.tools.pkg.pkg_format.{PkgArch}
+use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.loader.elf_loader.{elf_admit_executable}
+use os.kernel.loader.smf.{
+    smf_admit_explicit_simpleos_executable,
+    smf_extract_executable_stub_for_arch,
+}
+
+class ImagePackagePayloadDecisionV1:
+    action: text
+    write_payload: bool
+    manifest_deployed: bool
+    essential: bool
+    inventory_row: text
+
+val IMAGE_MAX_NATIVE_PAYLOAD_BYTES_V1: i64 = 268435456
+
+val _ESSENTIAL_EXECUTABLE_PATHS_V1: [text] = [
+    "/bin/simple", "/bin/simple.smf", "/usr/bin/simple", "/usr/bin/simple.smf",
+    "/sys/apps/simple", "/sys/apps/simple.smf",
+    "/sys/apps/simple_compiler", "/sys/apps/simple_compiler.smf",
+    "/sys/apps/simple_interpreter", "/sys/apps/simple_interpreter.smf",
+    "/sys/apps/simple_loader", "/sys/apps/simple_loader.smf",
+]
+
+fn _payload_scalar_safe_v1(value: text) -> bool:
+    value != "" and not value.contains("\0") and not value.contains("\n") and
+        not value.contains("\r") and not value.contains("\t") and
+        not value.contains("\"") and not value.contains("\\")
+
+fn _package_executable_path_v1(path: text) -> bool:
+    path.starts_with("/bin/") or path.starts_with("/sbin/") or
+        path.starts_with("/usr/bin/") or path.starts_with("/usr/sbin/") or
+        path.starts_with("/usr/local/bin/") or path.starts_with("/usr/local/sbin/") or
+        path.starts_with("/usr/libexec/") or path.starts_with("/sys/apps/") or
+        path == "/boot/kernel.elf" or path == "/boot/limine/limine.sys" or
+        path.ends_with(".smf")
+
+fn _essential_executable_path_v1(path: text) -> bool:
+    for required in _ESSENTIAL_EXECUTABLE_PATHS_V1:
+        if path == required:
+            return true
+    false
+
+fn _installer_owned_metadata_path_v1(path: text) -> bool:
+    val paths = [
+        "/SYS/LLVMMAN.TXT", "/SYS/CLANGMAN.TXT", "/SYS/RUSTMAN.TXT",
+        "/SYS/TOOLSET.SDN", "/SYS/LLVMVER.TXT", "/SYS/CLANGVER.TXT",
+        "/SYS/RUSTVER.TXT",
+    ]
+    for owned_path in paths:
+        if path == owned_path:
+            return true
+    false
+
+fn _blocked_inventory_row_v1(package_name: text, path: text, reason: text, essential: bool) -> text:
+    val required = if essential: "true" else: "false"
+    "[blocked_package_payload]\npackage = \"{package_name}\"\npath = \"{path}\"\nreason = \"{reason}\"\nessential = {required}\n\n"
+
+fn image_package_payload_decision_v1(
+    package_name: text, path: text, candidate: [u8],
+    architecture: Architecture,
+) -> ImagePackagePayloadDecisionV1:
+    if not _payload_scalar_safe_v1(package_name) or
+       not _payload_scalar_safe_v1(path) or not path.starts_with("/") or
+       path.contains("//") or path.contains("/../") or path.ends_with("/..") or
+       path.contains("/./") or path.ends_with("/."):
+        return ImagePackagePayloadDecisionV1(
+            action: "reject-invalid-metadata", write_payload: false,
+            manifest_deployed: false, essential: true,
+            inventory_row: _blocked_inventory_row_v1(
+                "invalid-package", "/invalid-path", "invalid-package-metadata", true))
+    val executable = _package_executable_path_v1(path)
+    val essential = _essential_executable_path_v1(path)
+    val admitted = image_native_executable_payload_admitted_v1(candidate, architecture)
+    if executable and not admitted:
+        return ImagePackagePayloadDecisionV1(
+            action: "block-executable-placeholder", write_payload: false,
+            manifest_deployed: false, essential: essential,
+            inventory_row: _blocked_inventory_row_v1(
+                package_name, path, "package-placeholder-rejected", essential))
+    if executable:
+        return ImagePackagePayloadDecisionV1(
+            action: "stage-validated-native", write_payload: true,
+            manifest_deployed: true, essential: essential, inventory_row: "")
+    if _installer_owned_metadata_path_v1(path):
+        return ImagePackagePayloadDecisionV1(
+            action: "write-installer-owned-metadata", write_payload: true,
+            manifest_deployed: true, essential: false, inventory_row: "")
+    ImagePackagePayloadDecisionV1(
+        action: "block-unavailable-package-bytes", write_payload: false,
+        manifest_deployed: false, essential: false,
+        inventory_row: _blocked_inventory_row_v1(
+            package_name, path, "package-bytes-unavailable", false))
+
+fn image_native_executable_payload_admitted_v1(
+    data: [u8], architecture: Architecture,
+) -> bool:
+    if data.len() == 0 or data.len() > IMAGE_MAX_NATIVE_PAYLOAD_BYTES_V1:
+        return false
+    if elf_admit_executable(data, architecture).is_ok():
+        return true
+    if smf_admit_explicit_simpleos_executable(data).is_err():
+        return false
+    val stub = smf_extract_executable_stub_for_arch(data, architecture)
+    if stub.is_err():
+        return false
+    elf_admit_executable(stub.unwrap(), architecture).is_ok()
+
+fn _toolchain_lane_v1(arch: PkgArch) -> text:
+    match arch:
+        PkgArch.X86_64: "x86_64-uefi-hardware"
+        PkgArch.Arm64: "arm64-virtio-fat32-smf"
+        PkgArch.Riscv64: "riscv64-hosted"
+        PkgArch.Riscv32: "riscv32-virtio-fat32-smf"
+        PkgArch.Any: "x86_64-uefi-hardware"
+
+fn _toolchain_manifest_v1(
+    arch: PkgArch, payload: text, title: text, app_path: text,
+    cap_a: text, proof_a: text, cap_b: text, proof_b: text,
+    cap_c: text, proof_c: text,
+) -> text:
+    var out = "payload={payload}\ntitle={title}\nentry_app={app_path}\n"
+    out = out + "lane={_toolchain_lane_v1(arch)}\nmode=native-filesystem-app\nstatus=standalone-required\n"
+    out = out + "capability_primary={cap_a}\nproof_primary={proof_a}\n"
+    out = out + "capability_secondary={cap_b}\nproof_secondary={proof_b}\n"
+    out + "capability_pipeline={cap_c}\nproof_pipeline={proof_c}\n"
+
+fn image_package_metadata_payload_v1(
+    package_name: text, path: text, arch: PkgArch,
+) -> text:
+    if path == "/SYS/LLVMMAN.TXT":
+        return _toolchain_manifest_v1(arch, "llvm", "LLVM", "/sys/apps/llvm", "local-ir-inspection", "/usr/share/simpleos/toolchain/llvm/hello.ll", "object-assembly-inspection", "/usr/share/simpleos/toolchain/llvm/hello.s", "compile-pipeline-step", "/usr/share/simpleos/toolchain/llvm/pipeline.step")
+    if path == "/SYS/CLANGMAN.TXT":
+        return _toolchain_manifest_v1(arch, "clang", "Clang", "/sys/apps/clang", "local-c-source-inspection", "/usr/share/simpleos/toolchain/clang/hello.c", "driver-flag-inspection", "/usr/share/simpleos/toolchain/clang/flags.rsp", "compile-pipeline-step", "/usr/share/simpleos/toolchain/clang/pipeline.step")
+    if path == "/SYS/RUSTMAN.TXT":
+        return _toolchain_manifest_v1(arch, "rust", "Rust", "/sys/apps/rust", "local-source-inspection", "/usr/share/simpleos/toolchain/rust/hello.rs", "package-layout-inspection", "/usr/share/simpleos/toolchain/rust/Cargo.toml", "build-pipeline-step", "/usr/share/simpleos/toolchain/rust/pipeline.step")
+    if path == "/SYS/TOOLSET.SDN":
+        return "[toolchain]\nlane = \"{_toolchain_lane_v1(arch)}\"\nllvm = \"/sys/apps/llvm status=standalone-required\"\nclang = \"/sys/apps/clang status=standalone-required\"\nrust = \"/sys/apps/rust status=standalone-required\"\ndeveloper_export_llvm = \"/usr/bin/clang optional\"\ndeveloper_export_rust = \"/usr/bin/rustc optional\"\n"
+    if path == "/SYS/LLVMVER.TXT": return "SimpleOS LLVM standalone app v1\n"
+    if path == "/SYS/CLANGVER.TXT": return "clang version 20.0.0\n"
+    if path == "/SYS/RUSTVER.TXT": return "SimpleOS Rust standalone app v1\n"
+    ""
+
+export ImagePackagePayloadDecisionV1, image_package_payload_decision_v1
+export image_native_executable_payload_admitted_v1, image_package_metadata_payload_v1
+export IMAGE_MAX_NATIVE_PAYLOAD_BYTES_V1

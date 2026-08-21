@@ -37,6 +37,19 @@ if [ "${1:-}" = "--self-test" ]; then
         }
     }
 
+    # The umbrella traceability lane is genuinely RED on this tree, so the
+    # self-test drives fakes for it rather than the real gate: one that passes
+    # (so the ready fixture can still reach PASS) and one that fails (so the
+    # lane is proven to block a pass-looking release).
+    fake_trace_pass="$SELF_TEST_DIR/fake-trace-pass.shs"
+    printf '#!/usr/bin/env sh\necho "PASS — 34 binding(s) checked, 0 unbound, 0 missing owners, 0 blocked"\n' >"$fake_trace_pass"
+    chmod +x "$fake_trace_pass"
+    fake_trace_fail="$SELF_TEST_DIR/fake-trace-fail.shs"
+    printf '#!/usr/bin/env sh\necho "FAIL — 34 binding(s) checked, 34 BLOCKED (receipt-absent), 0 unbound, 0 missing owners"\nexit 1\n' >"$fake_trace_fail"
+    chmod +x "$fake_trace_fail"
+    TRACE_GATE="$fake_trace_pass"
+    export TRACE_GATE
+
     fake_ready_matrix="$SELF_TEST_DIR/fake-ready-matrix.shs"
     cat >"$fake_ready_matrix" <<'EOF'
 #!/usr/bin/env sh
@@ -65,6 +78,18 @@ EOF
         >"$SELF_TEST_DIR/ready.out" 2>"$SELF_TEST_DIR/ready.err"
     grep -Fq "STATUS: PASS simpleos-mission-critical-release" "$SELF_TEST_DIR/ready.out" || {
         echo "FAIL: release self-test fake ready matrix did not pass" >&2
+        exit 1
+    }
+
+    # A pass-looking matrix must NOT release while REQ/NFR traceability is red.
+    if TRACE_GATE="$fake_trace_fail" ALLOW_CUSTOM_MATRIX=1 MATRIX="$fake_ready_matrix" \
+        BUILD_DIR="$SELF_TEST_DIR/trace-red" REPORT_PATH="$SELF_TEST_DIR/trace-red.md" sh "$0" \
+        >"$SELF_TEST_DIR/trace-red.out" 2>"$SELF_TEST_DIR/trace-red.err"; then
+        echo "FAIL: release self-test accepted pass-looking matrix with red umbrella traceability" >&2
+        exit 1
+    fi
+    grep -Fq "umbrella_traceability_lane=fail" "$SELF_TEST_DIR/trace-red.err" || {
+        echo "FAIL: release self-test missing umbrella traceability diagnostic" >&2
         exit 1
     }
 
@@ -253,16 +278,37 @@ if [ "${KV260_BOOT_LANE:-auto}" != off ]; then
     fi
 fi
 
+# ---- Umbrella REQ/NFR traceability lane ----------------------------------
+# Without this the release gate never consulted the umbrella REQ/NFR bindings,
+# so it could report PASS while every selected requirement was unbacked.
+TRACE_LANE_OUT="$BUILD_DIR/umbrella_traceability.out"
+trace_gate="${TRACE_GATE:-scripts/check/check-simpleos-umbrella-traceability.shs}"
+set +e
+sh "$trace_gate" >"$TRACE_LANE_OUT" 2>&1
+trace_rc=$?
+set -e
+trace_verdict="$(tail -n 1 "$TRACE_LANE_OUT")"
+if [ "$trace_rc" -eq 0 ]; then
+    trace_lane=pass
+else
+    trace_lane=fail
+    echo "$trace_verdict" >&2
+fi
+
 case "$matrix_rc:$matrix_status:$status:$blockers:$prereq_status:$prereq_missing:$prereq_next_action" in
     0:pass:pass:none:ready:none:none)
+        if [ "$trace_lane" != pass ]; then
+            echo "STATUS: FAIL simpleos-mission-critical-release umbrella_traceability_lane=$trace_lane trace_gate=$trace_gate trace_lane_log=$TRACE_LANE_OUT trace_verdict=$trace_verdict" >&2
+            exit 1
+        fi
         if [ "$kv260_lane" = fail ]; then
             echo "STATUS: FAIL simpleos-mission-critical-release kv260_boot_lane=fail kv260_gate=$kv260_gate kv260_lane_log=$KV260_LANE_OUT matrix_status=pass release_status=pass" >&2
             exit 1
         fi
-        echo "STATUS: PASS simpleos-mission-critical-release matrix_status=pass release_status=pass release_blockers=none prereq_status=ready prereq_missing=${prereq_missing:-missing} prereq_next_action=${prereq_next_action:-missing} kv260_boot_lane=$kv260_lane"
+        echo "STATUS: PASS simpleos-mission-critical-release matrix_status=pass release_status=pass release_blockers=none prereq_status=ready prereq_missing=${prereq_missing:-missing} prereq_next_action=${prereq_next_action:-missing} kv260_boot_lane=$kv260_lane umbrella_traceability_lane=$trace_lane"
         exit 0
         ;;
 esac
 
-echo "STATUS: FAIL simpleos-mission-critical-release matrix_status=${matrix_status:-missing} matrix_exit=$matrix_exit release_status=${status:-missing} release_blockers=${blockers:-missing} status=${status:-missing} blockers=${blockers:-missing} prereq_status=${prereq_status:-missing} prereq_missing=${prereq_missing:-missing} prereq_next_action=${prereq_next_action:-missing} prereq_gate=$prereq_gate kv260_boot_lane=$kv260_lane kv260_gate=$kv260_gate" >&2
+echo "STATUS: FAIL simpleos-mission-critical-release matrix_status=${matrix_status:-missing} matrix_exit=$matrix_exit release_status=${status:-missing} release_blockers=${blockers:-missing} status=${status:-missing} blockers=${blockers:-missing} prereq_status=${prereq_status:-missing} prereq_missing=${prereq_missing:-missing} prereq_next_action=${prereq_next_action:-missing} prereq_gate=$prereq_gate kv260_boot_lane=$kv260_lane kv260_gate=$kv260_gate umbrella_traceability_lane=$trace_lane trace_gate=$trace_gate" >&2
 exit 1

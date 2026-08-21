@@ -1,0 +1,89 @@
+# @cover src/os/apps/dbd/dbd_close_owner.spl 95%
+"""
+# DBD retryable close ownership
+
+Injects close return codes at the ownership commit seam. A failed close keeps
+the exact descriptor owned; retries are bounded; quarantine survives restart.
+"""
+
+use std.spec
+use os.apps.dbd.dbd_close_owner.{
+    DbdCloseOwnerV1, DbdCloseStateV1, DbdCloseDispositionV1,
+    DBD_MAX_CLOSE_ATTEMPTS_V1
+}
+
+describe "DBD listener close failure ownership":
+    it "retains the only descriptor until a retry verifies close":
+        var owner = DbdCloseOwnerV1.new("listener")
+        expect(owner.acquire(41)).to_be(true)
+        val failed = owner.commit_close_result(-5)
+        expect(failed).to_equal(DbdCloseDispositionV1.Retryable)
+        expect(owner.fd).to_equal(41i64)
+        expect(owner.state).to_equal(DbdCloseStateV1.CloseRetryable)
+        expect(owner.close_attempts).to_equal(1i64)
+        expect(owner.owns_fd()).to_be(true)
+        expect(owner.can_attempt_close()).to_be(true)
+
+        val retried = owner.commit_close_result(0)
+        expect(retried).to_equal(DbdCloseDispositionV1.Closed)
+        expect(owner.fd).to_equal(-1i64)
+        expect(owner.state).to_equal(DbdCloseStateV1.Closed)
+        expect(owner.owns_fd()).to_be(false)
+
+    it "does not accept a replacement while close remains retryable":
+        var owner = DbdCloseOwnerV1.new("listener")
+        expect(owner.acquire(42)).to_be(true)
+        expect(owner.commit_close_result(-1)).to_equal(
+            DbdCloseDispositionV1.Retryable)
+        expect(owner.acquire(43)).to_be(false)
+        expect(owner.fd).to_equal(42i64)
+
+describe "DBD client close quarantine":
+    it "bounds retries and preserves the client fd in terminal quarantine":
+        var owner = DbdCloseOwnerV1.new("client")
+        expect(owner.acquire(71)).to_be(true)
+        var attempt: i64 = 0
+        while attempt < DBD_MAX_CLOSE_ATTEMPTS_V1:
+            val disposition = owner.commit_close_result(-9)
+            if attempt + 1 < DBD_MAX_CLOSE_ATTEMPTS_V1:
+                expect(disposition).to_equal(DbdCloseDispositionV1.Retryable)
+            else:
+                expect(disposition).to_equal(DbdCloseDispositionV1.Quarantined)
+            attempt = attempt + 1
+        expect(owner.state).to_equal(DbdCloseStateV1.Quarantined)
+        expect(owner.fd).to_equal(71i64)
+        expect(owner.owns_fd()).to_be(true)
+        expect(owner.can_attempt_close()).to_be(false)
+        expect(owner.commit_close_result(0)).to_equal(
+            DbdCloseDispositionV1.Quarantined)
+        expect(owner.close_attempts).to_equal(DBD_MAX_CLOSE_ATTEMPTS_V1)
+        expect(owner.fd).to_equal(71i64)
+
+    it "carries quarantined ownership across restart without state reset":
+        var owner = DbdCloseOwnerV1.new("client")
+        expect(owner.acquire(72)).to_be(true)
+        var attempt: i64 = 0
+        while attempt < DBD_MAX_CLOSE_ATTEMPTS_V1:
+            val _ = owner.commit_close_result(-1)
+            attempt = attempt + 1
+        val previous_generation = owner.generation
+        expect(owner.carry_restart()).to_be(true)
+        expect(owner.generation).to_equal(previous_generation + 1)
+        expect(owner.state).to_equal(DbdCloseStateV1.Quarantined)
+        expect(owner.fd).to_equal(72i64)
+        expect(owner.last_error).to_equal(
+            "client-close-quarantined-across-restart")
+
+describe "DBD closed resource restart":
+    it "reopens acquisition only after verified close and restart":
+        var owner = DbdCloseOwnerV1.new("listener")
+        expect(owner.acquire(81)).to_be(true)
+        expect(owner.commit_close_result(0)).to_equal(
+            DbdCloseDispositionV1.Closed)
+        val previous_generation = owner.generation
+        expect(owner.carry_restart()).to_be(true)
+        expect(owner.generation).to_equal(previous_generation + 1)
+        expect(owner.state).to_equal(DbdCloseStateV1.Available)
+        expect(owner.close_attempts).to_equal(0i64)
+        expect(owner.acquire(82)).to_be(true)
+        expect(owner.fd).to_equal(82i64)

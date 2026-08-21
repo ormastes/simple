@@ -27,6 +27,10 @@ use std.http_server.{
     default_location_config, default_response_data
 }
 use std.http_server.error.{HttpServerError}
+use std.common.contracts.execution.simpleos_server_v1.{
+    ServerLifecycleState, ServerLifecycleReceipt, ServerLifecycleV1,
+    server_lifecycle_default_quota, server_lifecycle_v1_new
+}
 use os.kernel.net.http_route.{http_classify_request, HttpRouteKind}
 use std.common.web.html_escape.{html_escape_core}
 
@@ -54,12 +58,14 @@ fn _request_line(request: HttpRequestData) -> text:
     already-parsed request data."""
     request.method + " " + request.path + " " + request.version + "\r\n\r\n"
 
-pub struct WebService:
+pub class WebService:
     """A minimal SimpleOS web service over the real std.http_server stack."""
     config: ServerConfig
     registry: HandlerRegistry
     location: LocationConfig
     port: i64
+    lifecycle: ServerLifecycleV1
+    server: HttpServer?
 
 pub fn web_service_new(port: i64) -> WebService:
     """Construct the service: a ServerConfig bound to `port`, a HandlerRegistry
@@ -67,11 +73,21 @@ pub fn web_service_new(port: i64) -> WebService:
     a socket or spawn workers — call start() for that."""
     var config = default_server_config()
     config.listen_addr = "0.0.0.0:" + port.to_text()
+    config.worker_count = 1
     val loc = _web_demo_location()
     config.locations = [loc]
     var registry = create_default_registry(".")
     registry.register(WEB_DEMO_HANDLER_TYPE, web_demo_handler)
-    WebService(config: config, registry: registry, location: loc, port: port)
+    var quota = server_lifecycle_default_quota()
+    quota.max_workers = 1
+    WebService(
+        config: config,
+        registry: registry,
+        location: loc,
+        port: port,
+        lifecycle: server_lifecycle_v1_new("web:{port}", quota),
+        server: nil
+    )
 
 fn _handler_type_for(service: WebService, path: text) -> text:
     """Look up which registered handler_type serves `path` by scanning the
@@ -80,6 +96,30 @@ fn _handler_type_for(service: WebService, path: text) -> text:
     if service.location.pattern == path:
         return service.location.handler_type
     ""
+
+fn _web_service_complete_active_workers(service: WebService) -> Result<(), HttpServerError>:
+    """Reclaim the lifecycle workers that are still active.
+
+    The snapshot makes rollback retryable: workers completed by an earlier
+    attempt are absent on the next attempt instead of being completed twice.
+    """
+    val active_worker_ids = service.lifecycle.active_worker_ids
+    for worker_id in active_worker_ids:
+        val completed = service.lifecycle.complete_worker(
+            worker_id, service.lifecycle.generation)
+        if completed.is_err():
+            return Err(HttpServerError.Internal("web service worker resource reclamation failed"))
+    Ok(())
+
+fn _web_service_cancel_and_retain(
+    service: WebService, server: HttpServer
+) -> Result<(), HttpServerError>:
+    """Cancel the transport owner and retain it for close/restart retry."""
+    val cancelled = server.cancel(server.generation())
+    service.server = Some(server)
+    if cancelled.is_err():
+        return Err(HttpServerError.Internal("web service rollback cancellation failed"))
+    Ok(())
 
 pub fn web_service_dispatch(service: WebService, request: HttpRequestData) -> HttpResponseData:
     """Resolve a request to a handler and run it in-process (no socket).
@@ -109,6 +149,168 @@ pub fn web_service_start(service: WebService) -> Result<(), HttpServerError>:
     """Production entry: build the real HttpServer over the service config,
     install the demo handler registry, and start serving (binds the port and
     spawns the worker/supervisor stack)."""
+    if service.lifecycle.state != ServerLifecycleState.Created:
+        return Err(HttpServerError.Internal("web service lifecycle is not Created"))
+    if service.config.worker_count <= 0:
+        return Err(HttpServerError.ConfigError("SimpleOS web service requires worker_count >= 1"))
+    val validation = service.lifecycle.validate(service.lifecycle.generation)
+    if validation.is_err():
+        return Err(HttpServerError.Internal("web service lifecycle validation failed"))
+
     var server = HttpServer.new(service.config)
     server.set_handler_registry(service.registry)
-    server.start()
+    val started = server.start()
+    match started:
+        Err(error):
+            # Retain the cleaned terminal owner so restart can close it before
+            # creating the next generation.
+            service.server = Some(server)
+            val failed = service.lifecycle.fail("http-start-failed", service.lifecycle.generation)
+            if failed.is_err():
+                return Err(HttpServerError.Internal("web service start-failure transition failed"))
+            Err(error)
+        Ok(_):
+            val bound = service.lifecycle.bind(server.bind_identity(), service.lifecycle.generation)
+            if bound.is_err():
+                val cancelled = _web_service_cancel_and_retain(service, server)
+                if cancelled.is_err():
+                    return cancelled
+                val failed = service.lifecycle.fail("http-bind-transition-failed", service.lifecycle.generation)
+                if failed.is_err():
+                    return Err(HttpServerError.Internal("web service bind-failure transition failed"))
+                return Err(HttpServerError.Internal("web service lifecycle bind transition failed"))
+            val probe = server.live_probe()
+            match probe:
+                Err(error):
+                    val cancelled = _web_service_cancel_and_retain(service, server)
+                    if cancelled.is_err():
+                        return cancelled
+                    val failed = service.lifecycle.fail("http-live-probe-failed", service.lifecycle.generation)
+                    if failed.is_err():
+                        return Err(HttpServerError.Internal("web service probe-failure transition failed"))
+                    Err(error)
+                Ok(probe_identity):
+                    val ready = service.lifecycle.mark_ready(
+                        probe_identity,
+                        server.evidence_identity(),
+                        service.lifecycle.generation
+                    )
+                    if ready.is_err():
+                        val cancelled = _web_service_cancel_and_retain(service, server)
+                        if cancelled.is_err():
+                            return cancelled
+                        val failed = service.lifecycle.fail("http-readiness-transition-failed", service.lifecycle.generation)
+                        if failed.is_err():
+                            return Err(HttpServerError.Internal("web service readiness-failure transition failed"))
+                        return Err(HttpServerError.Internal("web service lifecycle readiness transition failed"))
+                    var worker_id = 0
+                    while worker_id < server.worker_count():
+                        val admitted = service.lifecycle.admit_worker(service.lifecycle.generation)
+                        if admitted.is_err():
+                            # Transfer the cancelled owner before lifecycle
+                            # reclamation so a partial rollback can be retried.
+                            val cancelled = _web_service_cancel_and_retain(service, server)
+                            if cancelled.is_err():
+                                return cancelled
+                            val reclaimed = _web_service_complete_active_workers(service)
+                            if reclaimed.is_err():
+                                return reclaimed
+                            val failed = service.lifecycle.fail("http-worker-admission-failed", service.lifecycle.generation)
+                            if failed.is_err():
+                                return Err(HttpServerError.Internal("web service worker-admission failure transition failed"))
+                            return Err(HttpServerError.Internal("web service worker admission failed"))
+                        worker_id = worker_id + 1
+                    service.server = Some(server)
+                    Ok(())
+
+pub fn web_service_begin_drain(service: WebService) -> Result<(), HttpServerError>:
+    match service.server:
+        Some(server):
+            val server_drain = server.begin_drain(server.generation())
+            match server_drain:
+                Err(error): Err(error)
+                Ok(_):
+                    val lifecycle_drain = service.lifecycle.begin_drain(service.lifecycle.generation)
+                    if lifecycle_drain.is_err():
+                        val cancelled = _web_service_cancel_and_retain(service, server)
+                        if cancelled.is_err():
+                            return cancelled
+                        val reclaimed = _web_service_complete_active_workers(service)
+                        if reclaimed.is_err():
+                            return reclaimed
+                        val failed = service.lifecycle.fail("http-drain-transition-failed", service.lifecycle.generation)
+                        if failed.is_err():
+                            return Err(HttpServerError.Internal("web service drain-failure transition failed"))
+                        return Err(HttpServerError.Internal("web service lifecycle drain transition failed"))
+                    Ok(())
+        nil: Err(HttpServerError.Internal("web service is not started"))
+
+pub fn web_service_stop(service: WebService) -> Result<(), HttpServerError>:
+    match service.server:
+        Some(server):
+            if service.lifecycle.state == ServerLifecycleState.Ready:
+                val drained = web_service_begin_drain(service)
+                if drained.is_err():
+                    return drained
+            server.stop()
+            val reclaimed = _web_service_complete_active_workers(service)
+            if reclaimed.is_err():
+                return reclaimed
+            val server_closed = server.close(server.generation())
+            if server_closed.is_err():
+                return Err(HttpServerError.Internal("web service server close failed"))
+            val closed = service.lifecycle.close(service.lifecycle.generation)
+            if closed.is_err():
+                return Err(HttpServerError.Internal("web service lifecycle close transition failed"))
+            Ok(())
+        nil: Err(HttpServerError.Internal("web service is not started"))
+
+pub fn web_service_cancel(service: WebService) -> Result<(), HttpServerError>:
+    match service.server:
+        Some(server):
+            val cancelled = server.cancel(server.generation())
+            if cancelled.is_err():
+                return Err(HttpServerError.Internal("web service server cancellation failed"))
+            val reclaimed = _web_service_complete_active_workers(service)
+            if reclaimed.is_err():
+                return reclaimed
+            val lifecycle_cancelled = service.lifecycle.cancel(service.lifecycle.generation)
+            if lifecycle_cancelled.is_err():
+                return Err(HttpServerError.Internal("web service lifecycle cancellation failed"))
+            Ok(())
+        nil:
+            val lifecycle_cancelled = service.lifecycle.cancel(service.lifecycle.generation)
+            if lifecycle_cancelled.is_err():
+                return Err(HttpServerError.Internal("web service lifecycle cancellation failed"))
+            Ok(())
+
+pub fn web_service_restart(service: WebService) -> Result<(), HttpServerError>:
+    if service.lifecycle.generation >= 9223372036854775807:
+        return Err(HttpServerError.Internal("web service generation exhausted"))
+    match service.server:
+        Some(server):
+            if service.lifecycle.state == ServerLifecycleState.Failed or
+                service.lifecycle.state == ServerLifecycleState.Cancelled:
+                if server.is_running():
+                    val cancelled = server.cancel(server.generation())
+                    if cancelled.is_err():
+                        return Err(HttpServerError.Internal("web service failed-server cancellation failed"))
+                if not server.is_closed():
+                    val closed = server.close(server.generation())
+                    if closed.is_err():
+                        return Err(HttpServerError.Internal("web service failed-server close failed"))
+            elif service.lifecycle.state != ServerLifecycleState.Closed:
+                val stopped = web_service_stop(service)
+                if stopped.is_err():
+                    return stopped
+        nil: ()
+    val next_generation = service.lifecycle.generation + 1
+    var quota = server_lifecycle_default_quota()
+    quota.max_workers = service.config.worker_count
+    service.lifecycle = server_lifecycle_v1_new("web:{service.port}", quota)
+    service.lifecycle.generation = next_generation
+    service.server = nil
+    web_service_start(service)
+
+pub fn web_service_receipt(service: WebService) -> ServerLifecycleReceipt:
+    service.lifecycle.receipt()

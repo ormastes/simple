@@ -61,6 +61,21 @@ fn _shell_cmd(command: text) -> (text, i64):
     (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", "export NO_COLOR=1 TERM=dumb; " + command])
     (stdout, code)
 
+fn lsp_extract_query_json_payload(output: text) -> text:
+    """Return the last complete JSON object/array emitted by a query child.
+
+    Bootstrap binaries may write diagnostics to stdout before the query
+    payload. Those diagnostics must never be embedded in an LSP result.
+    """
+    var payload = ""
+    for line in output.split("\n"):
+        val trimmed = line.trim()
+        val is_object = trimmed.starts_with("{") and trimmed.ends_with("}")
+        val is_array = trimmed.starts_with("[") and trimmed.ends_with("]")
+        if is_object or is_array:
+            payload = trimmed
+    payload
+
 fn _extract_uri(body: text) -> text:
     val td_search = Q() + "textDocument" + Q() + ":"
     val td_idx = body.index_of(td_search)
@@ -395,9 +410,10 @@ fn lsp_handle_hover(id: text, body: text) -> text:
     var out = ""
     var exit_code: i64 = 0
     (out, exit_code) = _shell_cmd(cmd)
-    if exit_code != 0 or out.trim() == "":
+    val payload = lsp_extract_query_json_payload(out)
+    if exit_code != 0 or payload == "":
         return make_json_result(id=id, result="null")
-    make_json_result(id=id, result=out.trim())
+    make_json_result(id=id, result=payload)
 
 # --- Completion (fast path) ---
 
@@ -412,9 +428,10 @@ fn lsp_handle_completion(id: text, body: text) -> text:
     var out = ""
     var exit_code: i64 = 0
     (out, exit_code) = _shell_cmd(cmd)
-    if exit_code != 0 or out.trim() == "":
+    val payload = lsp_extract_query_json_payload(out)
+    if exit_code != 0 or payload == "":
         return make_json_result(id=id, result=SB_L() + SB_R())
-    make_json_result(id=id, result=out.trim())
+    make_json_result(id=id, result=payload)
 
 # --- Document Symbol (fast path) ---
 

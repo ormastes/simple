@@ -1,0 +1,142 @@
+# Canonical UNSAFE-CAPABILITY vocabulary (agent A5, 2026-08-21).
+#
+# Plan: doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md
+#       §8.1 (`type_erasure`), §14.1 REQ-MC-ANY-001, §20.3 row A5.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS FILE IS THE TABLE AND NOT A PARALLEL LIST
+# ---------------------------------------------------------------------------
+# Before this file the "capability vocabulary" existed only as a COMMENT and a
+# bag of bare `text`:
+#
+#   10.frontend/core/_ParserDecls/enum_module_body.spl:941
+#       # @unsafe(reason: "...", capabilities: [raw_ptr, ffi, mmio])
+#   ...:960   PENDING_UNSAFE_CAPS.push(par_text_get())     # any identifier
+#   ...:552   UNSAFE_ANNOTATIONS.push(name + "|" + reason + "|" + caps.join(","))
+#
+# The parser accepts ANY identifier there, validates nothing, and the value
+# never reaches HIR. The three names in that comment (`raw_ptr`, `ffi`, `mmio`)
+# plus the two operations `35.semantics/safety_checker.spl` actually names
+# (`InlineAsmOutsideUnsafe`, `RawPointerOutsideUnsafe`, `UnsafeFfiOutsideUnsafe`)
+# are the whole of the pre-existing vocabulary. This file promotes exactly that
+# set to a typed enum and ADDS `type_erasure` to it. It does not start a second
+# list: the parser comment's spellings are preserved verbatim as the canonical
+# names so the existing `@unsafe(capabilities: [...])` text round-trips.
+#
+# Zero `use` lines and zero module-level state, for the same layering reason
+# `policy_names.spl` documents: 00.common is below the parser, the driver and
+# 35.semantics, all of which need this table.
+
+"""One unsafe capability that an `unsafe` region may carry.
+
+Each variant corresponds to one class of representation hazard that safe
+Simple forbids. A capability is a PERMISSION, not an effect: carrying it
+widens what the enclosing region may do, and every capability-gated
+operation names exactly one variant here.
+"""
+enum UnsafeCapability:
+    # Raw pointer construction, arithmetic and dereference.
+    # Enforced (declared) as SafetyError.RawPointerOutsideUnsafe.
+    RawPtr
+    # Foreign-function / SFFI calls across a non-Simple ABI.
+    # Enforced (declared) as SafetyError.UnsafeFfiOutsideUnsafe.
+    Ffi
+    # Memory-mapped I/O and volatile device register access.
+    Mmio
+    # Inline assembly. The one rule safety_checker.spl actually constructs.
+    InlineAsm
+    # NEW (§8.1): type erasure. Permits `Any` to exist inside the region.
+    # An `Any` value may not leave a region carrying this capability except
+    # as the result of a checked conversion to a non-`Any` type.
+    TypeErasure
+
+# ---------------------------------------------------------------------------
+# Canonical spellings
+# ---------------------------------------------------------------------------
+# The source spelling accepted inside `@unsafe(capabilities: [...])` and the
+# `unsafe(capabilities: [...])` block header. snake_case, matching the three
+# names already written in the parser's comment.
+
+fn unsafe_capability_name(cap: UnsafeCapability) -> text:
+    """Canonical source spelling of `cap`."""
+    match cap:
+        case RawPtr: "raw_ptr"
+        case Ffi: "ffi"
+        case Mmio: "mmio"
+        case InlineAsm: "inline_asm"
+        case TypeErasure: "type_erasure"
+
+fn all_unsafe_capabilities() -> [UnsafeCapability]:
+    """Every capability in the vocabulary, in declaration order.
+
+    Total by construction: a new variant that is not added here makes
+    `unsafe_capability_names()` disagree with `parse_unsafe_capability`,
+    which the A5 roundtrip spec pins.
+    """
+    [
+        UnsafeCapability.RawPtr,
+        UnsafeCapability.Ffi,
+        UnsafeCapability.Mmio,
+        UnsafeCapability.InlineAsm,
+        UnsafeCapability.TypeErasure
+    ]
+
+fn unsafe_capability_names() -> [text]:
+    """Canonical spellings of every capability, in declaration order."""
+    var out: [text] = []
+    for cap in all_unsafe_capabilities():
+        out = out.push(unsafe_capability_name(cap))
+    out
+
+fn is_known_unsafe_capability(name: text) -> bool:
+    """True when `name` is a canonical capability spelling."""
+    for known in unsafe_capability_names():
+        if known == name:
+            return true
+    false
+
+fn parse_unsafe_capability(name: text) -> UnsafeCapability?:
+    """Parse a source spelling back to its variant; nil when unknown.
+
+    Unknown names are REJECTED rather than mapped to a fallback: a silently
+    ignored capability is exactly the failure mode §11.6 forbids.
+    """
+    for cap in all_unsafe_capabilities():
+        if unsafe_capability_name(cap) == name:
+            return cap
+    nil
+
+fn unsafe_capability_set_contains(caps: [text], cap: UnsafeCapability) -> bool:
+    """True when the raw capability-name list `caps` grants `cap`.
+
+    `caps` is the shape the parser already produces
+    (`PENDING_UNSAFE_CAPS`, a `[text]`), so callers holding that list do not
+    have to convert it first. Unknown names in `caps` never grant anything.
+    """
+    val want = unsafe_capability_name(cap)
+    for raw in caps:
+        if raw == want:
+            return true
+    false
+
+fn unknown_unsafe_capability_names(caps: [text]) -> [text]:
+    """The entries of `caps` that name no capability in this table.
+
+    Reported rather than dropped, so a typo'd capability is a diagnostic and
+    not a silent denial.
+    """
+    var out: [text] = []
+    for raw in caps:
+        if not is_known_unsafe_capability(raw):
+            out = out.push(raw)
+    out
+
+fn valid_unsafe_capability_names_help() -> text:
+    """Help text listing every accepted capability spelling."""
+    "valid unsafe capabilities: " + unsafe_capability_names().join(", ")
+
+export UnsafeCapability
+export unsafe_capability_name, all_unsafe_capabilities, unsafe_capability_names
+export is_known_unsafe_capability, parse_unsafe_capability
+export unsafe_capability_set_contains, unknown_unsafe_capability_names
+export valid_unsafe_capability_names_help

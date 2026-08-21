@@ -5,6 +5,8 @@
 - Kernel/device drivers own NIC, block, GPU and interrupt mechanisms.
 - Syscall owners validate and copy user pointers before kernel access.
 - VFS/loader owns filesystem provenance and executable mapping.
+- VFS admits `fsync`/`fdatasync` only when the mounted backend advertises
+  `DurableSync`; an in-memory WAL flush counter is not a device barrier.
 - Server/DB owners retain protocol, authentication, transaction and durability
   semantics; platform code supplies bounded I/O rather than protocol bypasses.
 - Evidence controllers own process/QEMU/ADB lifetime and encoded receipts, not
@@ -26,3 +28,6 @@ parent owner for validation and deterministic commit.
 
 Canonical feature knowledge is in
 `doc/00_llm_process/feature_expert/simpleos_server_execution_matrix/skill.md`.
+The full cross-subsystem hardening contract and current fail-closed boundary are
+also recorded in
+`doc/00_llm_process/feature_expert/simpleos_complete_os_hardening/skill.md`.

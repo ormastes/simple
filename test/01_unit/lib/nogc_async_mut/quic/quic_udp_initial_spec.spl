@@ -1,8 +1,8 @@
-# QUIC Initial Packet UDP Round-Trip Spec
+# Unprotected QUIC Initial-Header Shape UDP Carrier Spec
 #
-# Proves that a QUIC long-header Initial packet (RFC 9000 §17.2.2) can be
-# constructed, sent over a real loopback UDP socket (native_udp_*), received,
-# and parsed back with exact wire-byte fidelity.
+# Exercises UDP byte-carrier fidelity for an unprotected long-header shape.
+# This is NOT a valid QUIC Initial packet: no CRYPTO payload, AEAD tag, or
+# header protection is present, and it is not H3/QUIC readiness evidence.
 #
 # Scope: packet framing + UDP carrier only.
 # Crypto handshake (TLS 1.3 key schedule / AEAD) is NOT exercised here —
@@ -40,7 +40,7 @@ fn _varint1(v: i64) -> [u8]:
     """Encode a QUIC varint that fits in 1 byte (value 0..63)."""
     return [v & 0x3f]
 
-fn build_initial(dcid: [u8], scid: [u8], pkt_num: i64) -> [u8]:
+fn build_unprotected_initial_shape(dcid: [u8], scid: [u8], pkt_num: i64) -> [u8]:
     """Build a minimal QUIC v1 Initial packet header.
 
     Wire layout (RFC 9000 §17.2.2):
@@ -101,17 +101,17 @@ fn byte_at(data: [u8], idx: i64) -> i64:
 # Specs
 # ============================================================================
 
-describe "QUIC Initial packet wire format":
+describe "Unprotected QUIC Initial header shape":
     it "encodes first byte as 0xC0 (long-header + fixed + Initial + PN_len=0)":
         val dcid: [u8] = [0x01, 0x02, 0x03, 0x04]
         val scid: [u8] = [0x0a, 0x0b]
-        val pkt = build_initial(dcid, scid, 0)
+        val pkt = build_unprotected_initial_shape(dcid, scid, 0)
         expect(byte_at(pkt, 0)).to_equal(192)     # 0xC0
 
     it "encodes QUIC v1 in bytes 1-4 (big-endian 0x00000001)":
         val dcid: [u8] = [0x01, 0x02]
         val scid: [u8] = [0x03]
-        val pkt = build_initial(dcid, scid, 0)
+        val pkt = build_unprotected_initial_shape(dcid, scid, 0)
         expect(byte_at(pkt, 1)).to_equal(0)
         expect(byte_at(pkt, 2)).to_equal(0)
         expect(byte_at(pkt, 3)).to_equal(0)
@@ -120,7 +120,7 @@ describe "QUIC Initial packet wire format":
     it "encodes DCID length and DCID bytes correctly":
         val dcid: [u8] = [0xaa, 0xbb, 0xcc, 0xdd]
         val scid: [u8] = [0x11]
-        val pkt = build_initial(dcid, scid, 0)
+        val pkt = build_unprotected_initial_shape(dcid, scid, 0)
         expect(byte_at(pkt, 5)).to_equal(4)       # dcid_len
         expect(byte_at(pkt, 6)).to_equal(170)     # 0xaa
         expect(byte_at(pkt, 7)).to_equal(187)     # 0xbb
@@ -130,7 +130,7 @@ describe "QUIC Initial packet wire format":
         # layout: 1+4+1+2+1+2+1+1+1 = 14 bytes total
         val dcid: [u8] = [0x01, 0x02]
         val scid: [u8] = [0xfe, 0xfd]
-        val pkt = build_initial(dcid, scid, 0)
+        val pkt = build_unprotected_initial_shape(dcid, scid, 0)
         expect(byte_at(pkt, 8)).to_equal(2)       # scid_len
         expect(byte_at(pkt, 9)).to_equal(254)     # 0xfe
         expect(byte_at(pkt, 10)).to_equal(253)    # 0xfd
@@ -139,7 +139,7 @@ describe "QUIC Initial packet wire format":
         # layout: 1+4+1+1+1+1+1+1+1 = 12 bytes
         val dcid: [u8] = [0x01]
         val scid: [u8] = [0x02]
-        val pkt = build_initial(dcid, scid, 7)
+        val pkt = build_unprotected_initial_shape(dcid, scid, 7)
         expect(byte_at(pkt, 9)).to_equal(0)       # token_len
         expect(byte_at(pkt, 10)).to_equal(1)      # length varint = 1
         expect(byte_at(pkt, 11)).to_equal(7)      # pkt_num
@@ -147,11 +147,11 @@ describe "QUIC Initial packet wire format":
     it "total packet length = 1+4+1+dcid.len+1+scid.len+1+1+1":
         val dcid: [u8] = [0x01, 0x02, 0x03]      # 3 bytes
         val scid: [u8] = [0x04, 0x05]             # 2 bytes
-        val pkt = build_initial(dcid, scid, 0)
+        val pkt = build_unprotected_initial_shape(dcid, scid, 0)
         # 1(first)+4(ver)+1(dcidlen)+3(dcid)+1(scidlen)+2(scid)+1(token)+1(length)+1(pn)=15
         expect(pkt.len()).to_equal(15)
 
-describe "QUIC Initial packet round-trip over loopback UDP":
+describe "UDP carrier fidelity for unprotected header shapes":
     it "sends an Initial packet and receives exact bytes back":
         val (srv, srv_err) = native_udp_bind("127.0.0.1:19211")
         expect(srv_err).to_equal(0)
@@ -162,7 +162,7 @@ describe "QUIC Initial packet round-trip over loopback UDP":
 
         val dcid: [u8] = [0x08, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07]
         val scid: [u8] = [0x04, 0xaa, 0xbb, 0xcc]
-        val pkt = build_initial(dcid, scid, 0)
+        val pkt = build_unprotected_initial_shape(dcid, scid, 0)
         val n: i64 = pkt.len()
 
         val (sent, send_err) = native_udp_send_to(cli, pkt, n, "127.0.0.1:19211")
@@ -193,7 +193,7 @@ describe "QUIC Initial packet round-trip over loopback UDP":
 
         val dcid: [u8] = [0xde, 0xad]
         val scid: [u8] = [0xbe, 0xef]
-        val pkt = build_initial(dcid, scid, 42)
+        val pkt = build_unprotected_initial_shape(dcid, scid, 42)
         val n: i64 = pkt.len()
         val (sent, send_err) = native_udp_send_to(cli, pkt, n, "127.0.0.1:19213")
         expect(send_err).to_equal(0)
@@ -218,7 +218,7 @@ describe "QUIC Initial packet round-trip over loopback UDP":
 
         val dcid: [u8] = [0x10, 0x20, 0x30]
         val scid: [u8] = [0x40, 0x50]
-        val pkt = build_initial(dcid, scid, 0)
+        val pkt = build_unprotected_initial_shape(dcid, scid, 0)
         val n: i64 = pkt.len()
         val (sent, send_err) = native_udp_send_to(cli, pkt, n, "127.0.0.1:19215")
         expect(send_err).to_equal(0)

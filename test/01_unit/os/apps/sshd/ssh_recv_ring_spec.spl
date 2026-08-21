@@ -1,0 +1,147 @@
+# SSH transport receive ring — linear accumulation + fragmentation reproduce spec
+#
+# Bug: doc/08_tracking/bug/simpleos_ssh_live_encrypted_packet_bound_disconnected_2026-08-20.md
+#
+# Before the fix, the buffered encrypted-receive path in ssh_session.spl did
+#   recv_buf = rt_bytes_concat(recv_buf, more)      # per socket fragment
+#   recv_buf = _slice_range(recv_buf, n, len)       # per consumed frame
+# Both rebuild the entire buffer, so framing one packet out of N fragments cost
+# O(N^2) byte copies, and SSH transport was the remaining quadratic stage in
+# front of the now-linear SFTP layer. The ring writes each byte once.
+
+use os.apps.sshd.ssh_recv_ring.{
+    SshRecvRing, ssh_recv_ring_new, SSH_RECV_RING_CAPACITY
+}
+
+fn _fragmented_writes(total: u64, fragment: u64) -> u64:
+    """Push `total` bytes in `fragment`-sized pieces; report total byte writes."""
+    var ring = ssh_recv_ring_new()
+    var sent: u64 = 0u64
+    while sent < total:
+        var piece: [u8] = []
+        var i: u64 = 0u64
+        while i < fragment and sent + i < total:
+            piece.push(((sent + i) % 251u64).to_u8())
+            i = i + 1u64
+        expect(ring.push_bytes(piece)).to_be(true)
+        sent = sent + i
+    ring.writes
+
+describe "SSH receive ring accumulates linearly":
+
+    it "does one byte write per byte when fed one byte at a time":
+        expect(_fragmented_writes(4096u64, 1u64)).to_be(4096u64)
+
+    it "does the same total work at 8x the fragment size":
+        expect(_fragmented_writes(4096u64, 8u64)).to_be(4096u64)
+
+    it "quadruples work for 4x the bytes, not 16x":
+        val small = _fragmented_writes(1024u64, 1u64)
+        val large = _fragmented_writes(4096u64, 1u64)
+        expect(large).to_be(small * 4u64)
+
+    it "never exceeds one write per admitted byte":
+        expect(_fragmented_writes(8192u64, 1u64) <= 8192u64).to_be(true)
+
+describe "SSH receive ring frames fragmented input":
+
+    it "reassembles a frame delivered one byte at a time":
+        var ring = ssh_recv_ring_new()
+        var i: u64 = 0u64
+        while i < 32u64:
+            expect(ring.push_bytes([i.to_u8()])).to_be(true)
+            i = i + 1u64
+        val frame = ring.take_front(32u64)
+        expect(frame.len()).to_be(32u64)
+        expect(frame[0]).to_be(0u8)
+        expect(frame[31]).to_be(31u8)
+        expect(ring.len()).to_be(0u64)
+
+    it "reads a big-endian length that arrives split across fragments":
+        var ring = ssh_recv_ring_new()
+        expect(ring.push_bytes([0u8, 0u8])).to_be(true)
+        expect(ring.push_bytes([1u8, 0u8])).to_be(true)
+        val b0 = ring.byte_at(0u64).to_u32()
+        val b1 = ring.byte_at(1u64).to_u32()
+        val b2 = ring.byte_at(2u64).to_u32()
+        val b3 = ring.byte_at(3u64).to_u32()
+        val length = (b0 * 16777216u32) + (b1 * 65536u32) + (b2 * 256u32) + b3
+        expect(length).to_be(256u32)
+
+    it "keeps trailing bytes of a coalesced two-frame read":
+        var ring = ssh_recv_ring_new()
+        expect(ring.push_bytes([1u8, 2u8, 3u8, 4u8, 5u8, 6u8])).to_be(true)
+        val first = ring.take_front(4u64)
+        expect(first.len()).to_be(4u64)
+        expect(ring.len()).to_be(2u64)
+        expect(ring.byte_at(0u64)).to_be(5u8)
+        expect(ring.byte_at(1u64)).to_be(6u8)
+
+    it "wraps around the physical end without corrupting bytes":
+        var ring = ssh_recv_ring_new()
+        var filler: [u8] = []
+        var i: u64 = 0u64
+        while i < SSH_RECV_RING_CAPACITY - 4u64:
+            filler.push(7u8)
+            i = i + 1u64
+        expect(ring.push_bytes(filler)).to_be(true)
+        ring.discard(SSH_RECV_RING_CAPACITY - 4u64)
+        expect(ring.len()).to_be(0u64)
+        expect(ring.push_bytes([9u8, 10u8, 11u8, 12u8, 13u8, 14u8])).to_be(true)
+        val out = ring.take_front(6u64)
+        expect(out[0]).to_be(9u8)
+        expect(out[5]).to_be(14u8)
+
+describe "SSH receive ring fails closed at its bound":
+
+    it "rejects a fragment that does not fit, writing nothing":
+        var ring = ssh_recv_ring_new()
+        var over: [u8] = []
+        var i: u64 = 0u64
+        while i < SSH_RECV_RING_CAPACITY + 1u64:
+            over.push(1u8)
+            i = i + 1u64
+        expect(ring.push_bytes(over)).to_be(false)
+        expect(ring.len()).to_be(0u64)
+        expect(ring.writes).to_be(0u64)
+
+    it "accepts exactly its capacity and then refuses one more byte":
+        var ring = ssh_recv_ring_new()
+        var full: [u8] = []
+        var i: u64 = 0u64
+        while i < SSH_RECV_RING_CAPACITY:
+            full.push(2u8)
+            i = i + 1u64
+        expect(ring.push_bytes(full)).to_be(true)
+        expect(ring.len()).to_be(SSH_RECV_RING_CAPACITY)
+        expect(ring.push_bytes([3u8])).to_be(false)
+        expect(ring.len()).to_be(SSH_RECV_RING_CAPACITY)
+
+    it "refuses to take more bytes than it holds":
+        var ring = ssh_recv_ring_new()
+        expect(ring.push_bytes([1u8, 2u8])).to_be(true)
+        expect(ring.take_front(3u64).len()).to_be(0u64)
+        expect(ring.len()).to_be(2u64)
+
+    it "holds a maximum SSH AES-GCM frame plus one socket read":
+        expect(SSH_RECV_RING_CAPACITY >= 35020u64 + 8192u64).to_be(true)
+
+# --- ssh_session.spl's ring-backed length reader (forces that module to load)
+
+use os.apps.sshd.ssh_session.{ssh_recv_ring_u32_be, ssh_encrypted_packet_frame_allowed}
+
+describe "SSH session reads its packet length from the ring":
+
+    it "decodes a big-endian length spanning two fragments":
+        var ring = ssh_recv_ring_new()
+        expect(ring.push_bytes([0u8, 0u8])).to_be(true)
+        expect(ring.push_bytes([0u8, 32u8])).to_be(true)
+        expect(ssh_recv_ring_u32_be(ring, 0u64)).to_be(32u32)
+
+    it "returns zero rather than reading past the buffered bytes":
+        var ring = ssh_recv_ring_new()
+        expect(ring.push_bytes([0u8, 0u8, 0u8])).to_be(true)
+        expect(ssh_recv_ring_u32_be(ring, 0u64)).to_be(0u32)
+
+    it "still rejects a short encrypted frame":
+        expect(ssh_encrypted_packet_frame_allowed([0u8, 0u8, 0u8, 1u8])).to_be(false)

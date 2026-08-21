@@ -1,0 +1,53 @@
+# Focused contract coverage for the fail-closed NVMe durability owner.
+# Hardware completion is intentionally not fabricated here: NvmeDriver.new()
+# is an uninitialized fake owner, so construction must reject promotion.
+
+use std.spec.*
+use os.services.vfs.nvme_durable_block_adapter.{
+    NvmeDurabilityErrorV1, NvmeDurabilityReceiptV1,
+    NvmeDurableBlockAdapter
+}
+use os.drivers.nvme.nvme_driver.{NvmeDriver}
+use os.drivers.nvme.nvme_storage_model.{
+    NvmeFilesystemLease, NvmeNamespaceIdentity, NvmeNamespaceMode,
+    NvmeQueueAssignment, NvmeQueueRole, NvmeFilesystemConsumer
+}
+use os.services.vfs.nvme_device_generation_authority_v1.{
+    NvmeDeviceGenerationAuthorityV1, NvmeDeviceGenerationTokenV1
+}
+
+describe "NVMe durability binding":
+    it "preserves the binding in an initial receipt":
+        val receipt = NvmeDurabilityReceiptV1.initial(7u64, 9u64)
+        expect(receipt.device_identity).to_equal(7u64)
+        expect(receipt.device_generation).to_equal(9u64)
+        expect(receipt.write_sequence).to_equal(0u64)
+        expect(receipt.flush_acknowledged).to_be(false)
+
+describe "NVMe durability owner fail-closed behavior":
+    it "does not promote an uninitialized fake owner":
+        val lease = NvmeFilesystemLease(
+            namespace_identity: NvmeNamespaceIdentity(
+                lba_count: 1024u64, eui64: 1u64, nguid_lo: 0u64, nguid_hi: 0u64,
+                uuid_lo: 0u64, uuid_hi: 0u64, controller_id: 2u32, nsid: 1u32,
+                lba_size: 512u32
+            ),
+            base_lba: 0u64, lba_count: 1024u64,
+            mode: NvmeNamespaceMode.UserAssigned,
+            queue: NvmeQueueAssignment(
+                owner_task: 1u64, rights: 0u32, controller_id: 2u32, nsid: 1u32,
+                queue_id: 2u16, max_depth: 8u16,
+                role: NvmeQueueRole.Data
+            ),
+            provider: "fake-owner", grant_kind: "test", shared_block_interface: true,
+            iommu_or_broker: true
+        )
+        val result = NvmeDurableBlockAdapter.for_filesystem_lease(
+            NvmeDriver.new(), lease,
+            NvmeFilesystemConsumer.Fat32,
+            NvmeDeviceGenerationAuthorityV1.new(),
+            NvmeDeviceGenerationTokenV1.invalid_probe(),
+            1u64
+        )
+        expect(result.is_err()).to_be(true)
+        expect(result.unwrap_err()).to_equal(NvmeDurabilityErrorV1.OwnerNotReady)

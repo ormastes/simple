@@ -1,6 +1,7 @@
 # BUG: JIT SEGV — `!` unwrap of an optional CLASS, then a field access
 
-Status: FIXED 2026-08-20 (fix in tree, NOT yet deployed to the shared seed)
+Status: FIXED 2026-08-21 (class/struct + user-enum pointees; fix in tree, NOT yet
+deployed to the shared seed)
 Severity: P1 — crashed the process and blocked all pushes
 
 ## Symptom
@@ -142,3 +143,78 @@ Build-environment note for whoever redeploys: `cargo build` currently fails in
 this worktree with `did not expect repo at .../.git to be bare` — `.git/config`
 carries `bare = true`, set by another session. Building from a symlink-mirrored
 root outside the repo works around it without mutating shared state.
+
+
+## Follow-up 2026-08-21 — neighbour sweep, and one shape still broken
+
+`20416a1bda7` covered the class/struct pointee only. The neighbouring defect
+class was swept by RUNNING each shape on the JIT (never by reading), against a
+freshly built seed (`/home/ormastes/.jitfix-target-enum/release/simple`,
+59,709,824 bytes, 2026-08-21 01:43):
+
+| shape | JIT before this follow-up | JIT after |
+|---|---|---|
+| `m!.field` (class) | OK (fixed by 20416a1bda7) | OK |
+| `m!.method()` | OK | OK |
+| `m!.inner.v` (nested) | OK | OK |
+| `m!.maybe!.n` (optional-of-optional) | OK | OK |
+| `m!.x` (struct receiver) | OK | OK |
+| `m!.n = 44` (unwrap as assignment target) | OK (`mutate 44`) | OK |
+| **`val u = m!` on a user ENUM, then `match u`** | **WRONG ANSWER — `enum other` for a value that is `Color.Green`** | **OK — `enum green`** |
+
+The enum shape was the one that remained. It is the same root cause: `Color?`
+is `HirType::Pointer { inner: Enum }`, the outer
+`result_like_payload_type(...).is_none()` test has already established it is not
+a Result/Option, so the hashed-`"Err"` discriminant test below is false for
+every variant. It did not SEGV — it silently produced a word matching no `case`,
+which is worse to detect than a crash.
+
+Fix: `src/compiler_rust/compiler/src/hir/lower/expr/control.rs` — the guard's
+pointee match becomes `Some(HirType::Struct { .. }) | Some(HirType::Enum { .. })`.
+Same identity semantics and same concrete-`pointee` reporting as the struct arm.
+
+### Reproduce + gate (extended)
+
+- `test/fixtures/repro/compiler/optional_class_unwrap/optional_class_unwrap_field.spl`
+  gained four both-engine checks: `unwrap-method-call`, `unwrap-nested-field`,
+  `unwrap-optional-of-optional`, `unwrap-struct-field`.
+- New fixture
+  `test/fixtures/repro/compiler/optional_class_unwrap/optional_enum_unwrap_match.spl`,
+  asserted on the JIT and only REPORTED on the interpreter (see below).
+- `scripts/check/check-optional-class-unwrap-field.shs` runs both fixtures on
+  both engines: `PASS — 4 engine(s) executed` (was 2).
+
+Validated in BOTH directions against real binaries:
+
+| binary | verdict |
+|---|---|
+| deployed seed `bin/release/x86_64-unknown-linux-gnu/simple` (59,860,872 B, 2026-08-20 06:26) | `FAIL — 4 engine(s) executed, offender(s): jit:enum-unwrap-match` (exit 1) |
+| new build (59,709,824 B, 2026-08-21 01:43) | `PASS — 4 engine(s) executed, 0 crashes, unwrap-then-field holds` (exit 0) |
+
+No regression elsewhere on the new binary:
+- `check-class-identity-seed-matrix.shs` — `PASS — complete SEED matrix over 11
+  case(s)`, `seedJIT=11/11 seedINTERP=11/11`.
+- `check-try-operator-error-propagation.shs` — `PASS — 3 engine(s) checked:
+  default,interpret,jit` (the Result `?` path is untouched).
+
+### Still open, NOT fixed here (different engine, different owner)
+
+Both are seed-INTERPRETER defects, reproduced on the new binary; the JIT is
+correct on both. Neither is caused or worsened by this change, and neither is in
+the JIT/codegen lowering this record covers:
+
+1. `val m: Color? = Color.Green; m!` — interpreter raises
+   `error: semantic: force unwrap failed: expected Some or Ok, got Color::Green`
+   (rc=1). The interpreter's force-unwrap has no nullable-pointee arm at all,
+   the mirror of the bug fixed here in lowering.
+2. `val m: Cell? = c; m!.n = 44` — interpreter raises
+   `error: semantic: invalid assignment: field assignment target is not a place`
+   (rc=1); the JIT correctly writes through and prints `mutate 44`.
+
+### Deployment
+
+Still NOT redeployed to the shared `bin/release/**` seed: a full bootstrap was
+running concurrently on this box. The gate is therefore RED on the shared seed
+(`jit:enum-unwrap-match`) until a redeploy. Build note: `/mnt/data` was 100%
+full and the linker died with `collect2: ld terminated with signal 7 [Bus
+error]`; building with `CARGO_TARGET_DIR` on the root filesystem works.

@@ -12,6 +12,7 @@
 # Part of the type_infer/inference split. See inference.spl for module overview.
 #
 # Split into modules:
+#   inference_expr_calls.spl — function and method call inference
 #   inference_expr_ops.spl — infer_binary_op, infer_unary_op, narrowing helpers
 
 use compiler.hir.hir.*
@@ -22,6 +23,7 @@ use type_infer_types.*
 use compiler.semantics.narrowing.*
 
 # Import from split operators module
+use compiler.types.type_infer.inference_expr_calls.*
 use compiler.types.type_infer.inference_expr_ops.*
 
 impl HmInferContext:
@@ -190,13 +192,13 @@ impl HmInferContext:
                     if not arm_terminates:
                         var arm_path: [NarrowingFact] = []
                         for fact in false_facts:
-                            arm_path.push(fact)
+                            arm_path = arm_path.push(fact)
                         for fact in arm_facts:
-                            arm_path.push(fact)
-                        surviving_paths.push(arm_path)
+                            arm_path = arm_path.push(fact)
+                        surviving_paths = surviving_paths.push(arm_path)
                     val negated_arm_facts = negate_facts(arm_facts)
                     for fact in negated_arm_facts:
-                        false_facts.push(fact)
+                        false_facts = false_facts.push(fact)
                     arm_idx = arm_idx + 1
                 if else_.?:
                     val else_block = else_.unwrap()
@@ -210,9 +212,9 @@ impl HmInferContext:
                         case Err(e): return Err(e)
                     self.subsume(else_ty, expected)?
                     if not else_terminates:
-                        surviving_paths.push(false_facts)
+                        surviving_paths = surviving_paths.push(false_facts)
                 else:
-                    surviving_paths.push(false_facts)
+                    surviving_paths = surviving_paths.push(false_facts)
                     val unit_ty = HirType(kind: HirTypeKind.Unit, span: span)
                     self.subsume(unit_ty, expected)?
                 if surviving_paths.len() == 1:
@@ -483,81 +485,11 @@ impl HmInferContext:
 
             # Function calls (with bidirectional type checking for all arguments)
             case Call(callee, args, type_args):
-                match self.synthesize_expr(callee):
-                    case Ok(callee_ty):
-                        # Resolve callee type to get expected parameter types
-                        val resolved_callee = self.resolve(callee_ty)
-
-                        # Extract callee effects for tracking (Phase 3: Effect Integration)
-                        val callee_effects = match resolved_callee.kind:
-                            case Function(_, _, effects): effects
-                            case _: []
-
-                        # Accumulate callee effects into current function context
-                        for eff in callee_effects:
-                            self.accumulate_effect(eff)
-
-                        # Try to extract parameter types for bidirectional checking
-                        val expected_params = match resolved_callee.kind:
-                            case Function(params, _, _): Some(params)
-                            case _: nil
-
-                        # Infer/check argument types with bidirectional mode
-                        var arg_types: [HirType] = []
-                        var i = 0
-                        for arg in args:
-                            # Use Check mode if we know the expected param type
-                            val arg_result = if expected_params.? and i < expected_params.unwrap().len():
-                                val expected_param = expected_params.unwrap()[i]
-                                # Use Check mode for ALL arguments to propagate types
-                                self.infer_expr(arg.value, InferMode.Check(expected_param))
-                            else:
-                                # No expected type, just synthesize
-                                self.synthesize_expr(arg.value)
-
-                            match arg_result:
-                                case Ok(ty): arg_types = arg_types.push(ty)
-                                case Err(e): return Err(e)
-
-                            i = i + 1
-
-                        val ret_ty = self.fresh_var(span)
-                        val expected_fn_ty = HirType(
-                            kind: HirTypeKind.Function(arg_types, ret_ty, []),
-                            span: span
-                        )
-
-                        match self.unify(callee_ty, expected_fn_ty):
-                            case Err(e): Err(e)
-                            case _:
-                                # Generate trait obligations if callee is a function with bounds
-                                # Extract function symbol from callee expression
-                                match callee.kind:
-                                    case Var(func_symbol):
-                                        self.generate_obligations_for_function_call(func_symbol, type_args, span)
-                                    case _: pass  # Not a direct function call
-
-                                Ok(self.resolve(ret_ty))
-                    case Err(e): Err(e)
+                self.infer_function_call(callee, args, type_args, span)
 
             # Method calls
-            case MethodCall(receiver, method, args, _):
-                match self.synthesize_expr(receiver):
-                    case Ok(receiver_ty):
-                        # Infer argument types
-                        for arg in args:
-                            match self.synthesize_expr(arg.value):
-                                case Err(e): return Err(e)
-                                case _: pass
-
-                        # Generate trait obligation for method call
-                        # This will be enhanced in Phase C (Method Resolution)
-                        self.generate_obligation_for_method_call(receiver_ty, method, span)
-
-                        # Method resolution requires more type information
-                        # For now, return fresh var
-                        Ok(self.fresh_var(span))
-                    case Err(e): Err(e)
+            case MethodCall(receiver, method, args, resolution):
+                self.infer_method_call(receiver, method, args, resolution, span)
 
             # Field access
             case Field(base, _, _):
@@ -719,13 +651,13 @@ impl HmInferContext:
                     if not arm_terminates:
                         var arm_path: [NarrowingFact] = []
                         for fact in false_facts:
-                            arm_path.push(fact)
+                            arm_path = arm_path.push(fact)
                         for fact in arm_facts:
-                            arm_path.push(fact)
-                        surviving_paths.push(arm_path)
+                            arm_path = arm_path.push(fact)
+                        surviving_paths = surviving_paths.push(arm_path)
                     val negated_arm_facts = negate_facts(arm_facts)
                     for fact in negated_arm_facts:
-                        false_facts.push(fact)
+                        false_facts = false_facts.push(fact)
                     arm_idx = arm_idx + 1
                 if else_.?:
                     val else_block = else_.unwrap()
@@ -743,12 +675,12 @@ impl HmInferContext:
                         result_ty = else_ty
                         has_result = true
                     if not else_terminates:
-                        surviving_paths.push(false_facts)
+                        surviving_paths = surviving_paths.push(false_facts)
                     if surviving_paths.len() == 1:
                         self._add_immutable_facts(surviving_paths[0])
                     Ok(self.resolve(result_ty))
                 else:
-                    surviving_paths.push(false_facts)
+                    surviving_paths = surviving_paths.push(false_facts)
                     if surviving_paths.len() == 1:
                         self._add_immutable_facts(surviving_paths[0])
                     Ok(HirType(kind: HirTypeKind.Unit, span: span))

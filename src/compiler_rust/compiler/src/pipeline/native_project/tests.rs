@@ -1348,7 +1348,14 @@ fn test_object_cache_key_includes_compiler_fingerprint() {
 fn test_incremental_cache_dir_default() {
     let builder = NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/simple"));
     let cache_dir = builder.cache_dir().to_string_lossy().replace('\\', "/");
-    assert!(cache_dir.ends_with("/project/.simple/native_cache"));
+    // Entries are partitioned by a per-lane scope subdirectory (see
+    // doc/05_design/compiler/incremental_build/per_lane_private_caches.md).
+    let parent = builder.cache_dir().parent().unwrap().to_string_lossy().replace('\\', "/");
+    assert!(parent.ends_with("/project/.simple/native_cache"), "unexpected cache dir {cache_dir}");
+    assert!(
+        builder.cache_dir().file_name().unwrap().to_string_lossy().starts_with("scope-"),
+        "unexpected cache dir {cache_dir}"
+    );
 }
 
 #[test]
@@ -1454,7 +1461,8 @@ fn test_incremental_cache_dir_custom() {
     let builder =
         NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/simple")).config(config);
 
-    assert_eq!(builder.cache_dir(), PathBuf::from("/tmp/my_cache"));
+    assert_eq!(builder.cache_dir().parent().unwrap(), PathBuf::from("/tmp/my_cache"));
+    assert!(builder.cache_dir().file_name().unwrap().to_string_lossy().starts_with("scope-"));
 }
 
 #[test]

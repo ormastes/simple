@@ -242,6 +242,62 @@ Writers hold the inode write lock (RwLock, exclusive) for the full duration of s
 
 **fsync points:** Only one: step 4 (`DURABLE_GROUP_COMMIT` flush covering all N row-mutation records + COMMIT record). No additional fsync at publish. The WAL is the durability anchor.
 
+### Landed compact-driver durable commit owner (2026-08-20)
+
+The VFS-facing compact DBFS driver now has one device commit owner at
+`src/lib/nogc_sync_mut/db/dbfs_driver/device_commit_owner.spl`. This is a
+bounded compatibility path for the current compact namespace representation;
+it does not replace the page/WAL architecture above.
+
+The owner stores the sole DBFS `BlockDevice` binding and its mutable append,
+blob, pending-generation, and acknowledged-generation state. Namespace I/O in
+`namespace_io.spl` builds candidates and the driver commits them through this
+owner; copied `DriverInstance` values do not become competing durability
+authorities. The compact driver does not register its region in
+`RawNvmeArena`; raw passthrough append uses the same locked cursor, preventing a
+second registry from allocating overlapping data. Data blobs begin on fresh sectors so an unacknowledged update does
+not rewrite a sector referenced by the last acknowledged generation.
+
+Two final sectors hold alternating `DBFSNS2` checkpoints. Each checkpoint has a
+monotonic generation, an Adler-32 over the bounded namespace body, at most 64
+entries, and per-file offset/length/checksum bindings. Until the backing
+`BlockDevice.flush()` returns `Ok(true)`, repeated mutations reuse only the
+non-durable slot. A failed flush leaves the prior slot authoritative. Recovery
+validates both checkpoint bodies and every referenced blob, chooses the highest
+valid generation, falls back on a torn newer generation, and returns
+`FsError.Corrupt` when nonblank media has no valid slot. No in-memory inode data
+is a recovery oracle.
+
+`Capability.DurableSync` is advertised only by device-backed DBFS after the
+serialization provider gate admits the host. `fsync` and
+`fdatasync` validate the live handle and complete only through the stored
+device's flush result; hosted DBFS is unsupported and a default/no-op-less
+device fails closed. Logical `SharedWal.flush_wal()` counters are deliberately
+not treated as device durability evidence.
+
+The compact namespace's inode/fd/instance state and the commit owner's
+process-global device, cursor, binding, generation, and slot state share one
+raw-mutex transaction facade on audited hosted targets. Every namespace entry
+point acquires that owner exactly once and invokes only lock-held device
+operations, so an inode candidate, its blob binding, and its checkpoint either
+commit or roll back within one non-reentrant serialization interval.
+Registration/recovery and registration cleanup use the same interval.
+Standalone device inspection, passthrough, and flush operations acquire that
+same mutex once. Every public result is released
+only after `mutex_raw_unlock` succeeds. Missing lock creation/lock support makes
+device registration return `FsError.Unsupported`; an unlock failure converts
+the transition to an I/O failure. Provider admission does not infer exclusion
+from handle creation: Linux/macOS/Windows/FreeBSD/illumos/Solaris resolve to the
+hosted pthread/critical-section implementation, while SimpleOS and unknown
+platforms return
+`missing-simpleos-atomic-compare-exchange-or-scheduler-exclusion` and reject
+registration before the no-op shim is called. The opaque scalar handle remains at the sole
+owner and is never copied into `DbFsDriver` values. Package-internal
+`*_locked` operations are valid only inside the namespace transaction and may
+never call a public owner entry (which would re-enter the mutex). This closes
+the prior split-authority race for the compact driver's canonical inode, fd,
+blob, checkpoint, and registration state.
+
 ---
 
 ## D5. Recovery Model

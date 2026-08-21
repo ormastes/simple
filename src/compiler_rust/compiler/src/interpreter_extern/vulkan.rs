@@ -73,6 +73,17 @@ pub const VULKAN_FNS: &[(&str, Ret, &str)] = &[
     ("rt_vulkan_acquire_next_image", Ret::I, "i"),
     ("rt_vulkan_alloc_buffer", Ret::I, "ii"),
     ("rt_vulkan_begin_compute", Ret::I, ""),
+    ("rt_vulkan_compile_spirv_array", Ret::I, "v"),
+    ("rt_vulkan_copy_from_buffer_array", Ret::I, "viii"),
+    ("rt_vulkan_copy_from_buffer_regions", Ret::I, "viv"),
+    ("rt_vulkan_copy_from_buffer_strided", Ret::I, "viiiii"),
+    ("rt_vulkan_copy_to_buffer_array", Ret::I, "ivii"),
+    ("rt_vulkan_init_external_window_present", Ret::I, "iiiiii"),
+    ("rt_vulkan_init_headless_present", Ret::I, "iii"),
+    ("rt_vulkan_init_window_present", Ret::I, "iii"),
+    ("rt_vulkan_present_buffer", Ret::I, "iiiii"),
+    ("rt_vulkan_present_buffer_regions", Ret::I, "iiiiiv"),
+    ("rt_vulkan_push_constants_array", Ret::I, "iivi"),
     ("rt_vulkan_begin_graphics", Ret::I, ""),
     ("rt_vulkan_begin_render_pass_gfx", Ret::I, "iiidddd"),
     ("rt_vulkan_bind_buffer", Ret::I, "iii"),
@@ -442,11 +453,12 @@ mod tests {
         );
     }
 
-    /// Both cross-validation methods agreed on 95; hold that number so a silent
-    /// drop is a failure rather than a smaller sweep.
+    /// Cross-validated against the runtime crate's exports (107 as of the
+    /// 2026-08-21 sweep that registered the 11 missing array/present entry
+    /// points); hold that number so a silent drop is a failure.
     #[test]
-    fn family_size_is_ninety_five() {
-        assert_eq!(VULKAN_FNS.len(), 95);
+    fn family_size_is_one_hundred_seven() {
+        assert_eq!(VULKAN_FNS.len(), 107);
     }
 
     /// Names outside the family are rejected, never silently succeed.
@@ -463,7 +475,7 @@ mod tests {
         assert!(format!("{err:?}").contains("expected 0 argument"));
     }
 
-    /// The seven RuntimeValue-touching entry points must be refused with an
+    /// The RuntimeValue-touching entry points must be refused with an
     /// explanation rather than bad-transmuted across the ABI boundary.
     #[test]
     fn runtime_value_entry_points_are_refused_cleanly() {
@@ -474,8 +486,8 @@ mod tests {
             .collect();
         assert_eq!(
             refused.len(),
-            7,
-            "expected 7 RuntimeValue entry points, got {refused:?}"
+            14,
+            "expected 14 RuntimeValue entry points, got {refused:?}"
         );
 
         for name in refused {

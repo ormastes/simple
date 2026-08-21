@@ -3,6 +3,10 @@
 
 use std.nogc_sync_mut.websocket.types.{WEBSOCKET_GUID, BASE64_CHARS}
 use std.common.string_core.{char_from_code}
+# SHA-1 comes from the canonical RFC 3174 implementation in std.crypto.sha1.
+# This module used to carry a second, byte-identical-in-intent SHA-1; it was
+# deleted (duplicate implementation of the same algorithm).
+use std.crypto.sha1.{sha1_bytes}
 
 # ==============================================================================
 # Base64 Encoding
@@ -46,7 +50,7 @@ fn base64_encode_single(b1: i64) -> text:
 
     "{c1}{c2}=="
 
-fn text_to_bytes(input: text) -> List<i64>:
+fn ws_handshake_text_to_bytes(input: text) -> List<i64>:
     val result = []
     val len = input.length()
     var i = 0
@@ -70,7 +74,7 @@ fn bytes_to_text(bytes: List<i64>) -> text:
     result
 
 fn base64_encode(input: text) -> text:
-    val bytes = text_to_bytes(input)
+    val bytes = ws_handshake_text_to_bytes(input)
     val len = bytes.length()
     var parts: [text] = []
     var i = 0
@@ -237,55 +241,6 @@ fn sha1_process_block(block: List<i64>, h0: i64, h1: i64, h2: i64, h3: i64, h4: 
 
     [new_h0, new_h1, new_h2, new_h3, new_h4]
 
-fn sha1(input: text) -> List<i64>:
-    val bytes = text_to_bytes(input)
-    val padded = sha1_pad(bytes)
-
-    # Initialize hash values
-    var h0 = 0x67452301
-    var h1 = 0xEFCDAB89
-    var h2 = 0x98BADCFE
-    var h3 = 0x10325476
-    var h4 = 0xC3D2E1F0
-
-    # Process blocks
-    val num_blocks = padded.length() / 64
-    var block_idx = 0
-
-    while block_idx < num_blocks:
-        val block = []
-        val offset = block_idx * 64
-        var i = 0
-
-        while i < 64:
-            block.push(padded[offset + i])
-            i = i + 1
-
-        val hash_values = sha1_process_block(block: block, h0: h0, h1: h1, h2: h2, h3: h3, h4: h4)
-        h0 = hash_values[0]
-        h1 = hash_values[1]
-        h2 = hash_values[2]
-        h3 = hash_values[3]
-        h4 = hash_values[4]
-
-        block_idx = block_idx + 1
-
-    # Convert hash values to bytes
-    val result = []
-    val words = [h0, h1, h2, h3, h4]
-    var i = 0
-
-    while i < 5:
-        val word = words[i]
-        val bytes = word_to_bytes(word)
-        var j = 0
-        while j < 4:
-            result.push(bytes[j])
-            j = j + 1
-        i = i + 1
-
-    result
-
 # ==============================================================================
 # WebSocket Handshake Functions
 # ==============================================================================
@@ -306,7 +261,7 @@ fn generate_websocket_key() -> text:
 
 fn compute_websocket_accept(key: text) -> text:
     val concatenated = key + WEBSOCKET_GUID
-    val hash = sha1(concatenated)
+    val hash = sha1_bytes(ws_handshake_text_to_bytes(concatenated))
     val hash_text = bytes_to_text(hash)
     base64_encode(hash_text)
 

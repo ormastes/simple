@@ -1,0 +1,466 @@
+# @cover src/os/services/evidence/capability_ledger.spl 85%
+# @req REQ-001
+
+use std.spec.*
+use std.common.structural.receipt.simpleos_evidence_receipt_v1.{
+    SimpleOsEvidenceEnvironment,
+    SimpleOsEvidenceStepV1,
+    SimpleOsPerformanceSampleV1,
+    SimpleOsEvidenceReceiptV1
+}
+use os.services.evidence.capability_ledger.{
+    SimpleOsCapabilityStatus,
+    SimpleOsCapabilityRowV1,
+    SimpleOsCapabilityLedgerCandidateV1,
+    SimpleOsCapabilityAdmissionContextV1,
+    SimpleOsCapabilityLedgerFailure,
+    simpleos_capability_ledger_v1,
+    simpleos_capability_ledger_commit,
+    simpleos_capability_ledger_commit_with_admission,
+    simpleos_capability_candidate_validate,
+    simpleos_capability_row_key
+}
+
+val HASH_A: text = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+val HASH_B: text = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+val HASH_C: text = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+val HASH_D: text = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+
+fn valid_receipt(requirement_id: text, capability: text,
+                 target: text, receipt_id: text) -> SimpleOsEvidenceReceiptV1:
+    SimpleOsEvidenceReceiptV1(
+        schema_version: 1,
+        receipt_id: receipt_id,
+        nonce: "nonce-" + receipt_id,
+        requirement_id: requirement_id,
+        capability: capability,
+        target: target,
+        target_abi: "x86_64-simpleos-v1",
+        environment: SimpleOsEvidenceEnvironment.QemuSystem,
+        firmware_profile: "ovmf-grub-efi",
+        board_identity: "",
+        accelerator: "tcg",
+        filesystem: "fat32",
+        protocol_profile: "",
+        source_hash: HASH_A,
+        image_hash: HASH_B,
+        binary_hash: HASH_C,
+        config_hash: HASH_D,
+        exact_argv: ["/usr/bin/simple", "--version"],
+        artifact_hashes: [HASH_A, HASH_B, HASH_C, HASH_D],
+        steps: [SimpleOsEvidenceStepV1(
+            sequence: 0,
+            behavior_id: "version",
+            outcome: "ok",
+            exit_code: 0,
+            artifact_hash: HASH_A)],
+        performance_workload: "",
+        performance_unit: "",
+        performance_warmup_count: 0,
+        performance_cpu_identity: "",
+        performance_frequency_hz: 0,
+        performance_noise_profile: "",
+        performance_comparable: false,
+        performance_samples: [],
+        started_unix_us: 100,
+        finished_unix_us: 200,
+        owner: "runner",
+        reviewer: "reviewer",
+        signer_key_id: "key-1",
+        signature: "signed-receipt")
+
+fn pass_candidate(requirement_id: text, capability: text,
+                  target: text, receipt_id: text)
+        -> SimpleOsCapabilityLedgerCandidateV1:
+    val receipt = valid_receipt(requirement_id, capability, target, receipt_id)
+    SimpleOsCapabilityLedgerCandidateV1(
+        row: SimpleOsCapabilityRowV1(
+            requirement_id: requirement_id,
+            capability: capability,
+            target: target,
+            environment: SimpleOsEvidenceEnvironment.QemuSystem,
+            filesystem: "fat32",
+            protocol_profile: "",
+            status: SimpleOsCapabilityStatus.Pass,
+            receipt_id: receipt_id,
+            receipt_nonce: "nonce-" + receipt_id,
+            source_hash: HASH_A,
+            image_hash: HASH_B,
+            binary_hash: HASH_C,
+            config_hash: HASH_D,
+            artifacts: [HASH_A, HASH_B, HASH_C, HASH_D],
+            artifact_paths: [],
+            blocker_reason: "",
+            todo: "",
+            prerequisite: "",
+            resume_command: "",
+            owner: "runner",
+            reviewer: "reviewer"),
+        receipt_present: true,
+        receipt: receipt)
+
+fn blocked_candidate(requirement_id: text, capability: text, target: text)
+        -> SimpleOsCapabilityLedgerCandidateV1:
+    SimpleOsCapabilityLedgerCandidateV1(
+        row: SimpleOsCapabilityRowV1(
+            requirement_id: requirement_id,
+            capability: capability,
+            target: target,
+            environment: SimpleOsEvidenceEnvironment.PhysicalBoard,
+            filesystem: "dbfs",
+            protocol_profile: "",
+            status: SimpleOsCapabilityStatus.Blocked,
+            receipt_id: "",
+            receipt_nonce: "",
+            source_hash: "",
+            image_hash: "",
+            binary_hash: "",
+            config_hash: "",
+            artifacts: [HASH_A],
+            artifact_paths: ["build/evidence/blocked/receipt.sdn"],
+            blocker_reason: "board unavailable",
+            todo: "run board campaign",
+            prerequisite: "board and capture device",
+            resume_command: "scripts/check/run-board-campaign.shs",
+            owner: "runner",
+            reviewer: "reviewer"),
+        receipt_present: false,
+        receipt: valid_receipt(requirement_id, capability, target, "unused"))
+
+fn admission_for(receipt: SimpleOsEvidenceReceiptV1)
+        -> SimpleOsCapabilityAdmissionContextV1:
+    SimpleOsCapabilityAdmissionContextV1(
+        admission_owner: "simpleos-evidence-service",
+        issued_nonce: receipt.nonce,
+        current_source_hash: receipt.source_hash,
+        current_image_hash: receipt.image_hash,
+        current_binary_hash: receipt.binary_hash,
+        current_config_hash: receipt.config_hash,
+        current_artifact_hashes: receipt.artifact_hashes,
+        freshness_lower_bound_unix_us: 50,
+        now_unix_us: 1000,
+        trusted_signer_key_id: receipt.signer_key_id,
+        signature_verified: true,
+        source_hash_verified: true,
+        image_hash_verified: true,
+        binary_hash_verified: true,
+        config_hash_verified: true,
+        artifacts_verified: true,
+        performance_configured_max_rss_bytes: 1000000u64,
+        performance_baseline_value: 1u64,
+        performance_baseline_rss_bytes: 1000u64,
+        performance_fixture_hash: HASH_A,
+        performance_baseline_identity_hash: HASH_A,
+        performance_external_comparability_verified: false)
+
+fn ten_samples() -> [SimpleOsPerformanceSampleV1]:
+    var samples: [SimpleOsPerformanceSampleV1] = []
+    var i: i64 = 0
+    while i < 10:
+        samples = samples.push(SimpleOsPerformanceSampleV1(
+            sequence: i,
+            metric_value_milli: 1000,
+            elapsed_us: 100,
+            max_rss_bytes: 1000))
+        i = i + 1
+    samples
+
+fn performance_candidate(receipt_id: text, workload: text, unit: text,
+                         environment: SimpleOsEvidenceEnvironment,
+                         accelerator: text, metric_milli: i64,
+                         rss_bytes: i64)
+        -> SimpleOsCapabilityLedgerCandidateV1:
+    var candidate = pass_candidate("NFR-002", "performance", "x86_64", receipt_id)
+    var receipt = candidate.receipt
+    receipt.environment = environment
+    receipt.accelerator = accelerator
+    receipt.board_identity = if environment == SimpleOsEvidenceEnvironment.NativeHost:
+        "host-identity"
+    else:
+        receipt.board_identity
+    receipt.performance_workload = workload
+    receipt.performance_unit = unit
+    receipt.performance_warmup_count = 2
+    receipt.performance_cpu_identity = "stable-cpu"
+    receipt.performance_frequency_hz = 1000000
+    receipt.performance_noise_profile = "controlled"
+    receipt.performance_comparable = false
+    var samples: [SimpleOsPerformanceSampleV1] = []
+    var i: i64 = 0
+    while i < 10:
+        samples = samples.push(SimpleOsPerformanceSampleV1(
+            sequence: i,
+            metric_value_milli: metric_milli,
+            elapsed_us: 100,
+            max_rss_bytes: rss_bytes))
+        i = i + 1
+    receipt.performance_samples = samples
+    candidate.receipt = receipt
+    var row = candidate.row
+    row.environment = environment
+    candidate.row = row
+    candidate
+
+fn native_performance_candidate(receipt_id: text, metric_milli: i64,
+                                rss_bytes: i64)
+        -> SimpleOsCapabilityLedgerCandidateV1:
+    var candidate = performance_candidate(
+        receipt_id, "http_db_loopback", "microseconds_milli",
+        SimpleOsEvidenceEnvironment.NativeHost, "native", metric_milli, rss_bytes)
+    var receipt = candidate.receipt
+    receipt.performance_comparable = true
+    candidate.receipt = receipt
+    candidate
+
+describe "SimpleOS capability ledger owner":
+    it "accepts a complete blocked row without inferring Pass":
+        val result = simpleos_capability_ledger_commit(
+            simpleos_capability_ledger_v1(),
+            [blocked_candidate("REQ-001", "ledger", "rv64")])
+        expect(result.ok).to_equal(true)
+        expect(result.ledger.rows.len()).to_equal(1)
+        expect(result.ledger.rows[0].status).to_equal(SimpleOsCapabilityStatus.Blocked)
+
+    it "does not promote a receipt-bound Pass row without an owned cryptographic verifier":
+        val candidate = pass_candidate("REQ-001", "ledger", "x86_64", "r-1")
+        expect(simpleos_capability_candidate_validate(candidate).ok).to_equal(true)
+        val result = simpleos_capability_ledger_commit_with_admission(
+            simpleos_capability_ledger_v1(), [candidate], [admission_for(candidate.receipt)])
+        expect(result.ok).to_equal(false)
+        expect(result.reason).to_contain("cryptographic-verifier-unavailable")
+
+    it "rejects a self-consistent receipt without service admission context":
+        val candidate = pass_candidate("REQ-001", "ledger", "x86_64", "r-no-context")
+        val result = simpleos_capability_ledger_commit(
+            simpleos_capability_ledger_v1(), [candidate])
+        expect(result.ok).to_equal(false)
+        expect(result.failure).to_equal(SimpleOsCapabilityLedgerFailure.AdmissionRequired)
+
+    it "rejects an admission context without explicit signature verification":
+        val candidate = pass_candidate("REQ-001", "ledger", "x86_64", "r-unverified")
+        var admission = admission_for(candidate.receipt)
+        admission.signature_verified = false
+        val result = simpleos_capability_ledger_commit_with_admission(
+            simpleos_capability_ledger_v1(), [candidate], [admission])
+        expect(result.ok).to_equal(false)
+        expect(result.reason).to_contain("verification-outcome")
+
+    it "rejects a substituted hash and leaves the parent ledger unchanged":
+        var candidate = pass_candidate("REQ-001", "ledger", "x86_64", "r-2")
+        var candidate_row = candidate.row
+        candidate_row.image_hash = HASH_A
+        candidate.row = candidate_row
+        val result = simpleos_capability_ledger_commit_with_admission(
+            simpleos_capability_ledger_v1(), [candidate], [admission_for(candidate.receipt)])
+        expect(result.ok).to_equal(false)
+        expect(result.ledger.rows.len()).to_equal(0)
+        expect(result.reason).to_contain("current-hash-binding")
+
+    it "sorts candidates by the complete row key before committing":
+        val first = blocked_candidate("REQ-002", "wm", "x86_64")
+        val second = blocked_candidate("REQ-001", "ledger", "x86_64")
+        val result = simpleos_capability_ledger_commit(
+            simpleos_capability_ledger_v1(), [first, second])
+        expect(result.ok).to_equal(true)
+        expect(result.ordered_keys[0]).to_equal(simpleos_capability_row_key(second.row))
+        expect(result.ordered_keys[1]).to_equal(simpleos_capability_row_key(first.row))
+
+    it "rejects duplicate keys atomically":
+        val first = blocked_candidate("REQ-001", "ledger", "rv64")
+        val second = blocked_candidate("REQ-001", "ledger", "rv64")
+        val result = simpleos_capability_ledger_commit(
+            simpleos_capability_ledger_v1(), [first, second])
+        expect(result.ok).to_equal(false)
+        expect(result.reason).to_equal("duplicate-key")
+        expect(result.ledger.rows.len()).to_equal(0)
+
+    it "rejects duplicate artifact hashes or blocker paths":
+        var candidate = pass_candidate("REQ-001", "ledger", "x86_64", "r-dup-artifact")
+        var duplicate_row = candidate.row
+        duplicate_row.artifacts = [HASH_A, HASH_A]
+        duplicate_row.artifact_paths = ["build/a", "build/a"]
+        candidate.row = duplicate_row
+        val result = simpleos_capability_ledger_commit_with_admission(
+            simpleos_capability_ledger_v1(), [candidate], [admission_for(candidate.receipt)])
+        expect(result.ok).to_equal(false)
+        expect(result.reason).to_contain("artifacts")
+
+    it "requires a bounded artifact path on blocker rows":
+        var candidate = blocked_candidate("REQ-003", "board", "rv64")
+        var missing_path_row = candidate.row
+        missing_path_row.artifact_paths = []
+        candidate.row = missing_path_row
+        val result = simpleos_capability_ledger_commit(
+            simpleos_capability_ledger_v1(), [candidate])
+        expect(result.ok).to_equal(false)
+        expect(result.reason).to_contain("artifact-paths")
+
+    it "does not consume a nonce when cryptographic verification is unavailable":
+        val first = pass_candidate("REQ-001", "ledger", "x86_64", "r-retained")
+        val first_result = simpleos_capability_ledger_commit_with_admission(
+            simpleos_capability_ledger_v1(), [first], [admission_for(first.receipt)])
+        expect(first_result.ok).to_equal(false)
+        expect(first_result.reason).to_contain("cryptographic-verifier-unavailable")
+        expect(first_result.ledger.consumed_nonces.len()).to_equal(0)
+
+    it "rejects replayed receipt nonces even for a different row key":
+        val first = pass_candidate("REQ-001", "ledger", "x86_64", "r-3")
+        var second = pass_candidate("REQ-002", "ledger", "x86_64", "r-4")
+        var second_receipt = second.receipt
+        second_receipt.nonce = first.receipt.nonce
+        second.receipt = second_receipt
+        var second_row = second.row
+        second_row.receipt_nonce = first.receipt.nonce
+        second.row = second_row
+        val result = simpleos_capability_ledger_commit_with_admission(
+            simpleos_capability_ledger_v1(), [first, second],
+            [admission_for(first.receipt), admission_for(second.receipt)])
+        expect(result.ok).to_equal(false)
+        expect(result.reason).to_equal("duplicate-nonce")
+        expect(result.ledger.rows.len()).to_equal(0)
+
+    it "rejects a performance promotion without ten samples":
+        val candidate = pass_candidate("NFR-002", "performance", "x86_64", "r-perf")
+        val result = simpleos_capability_ledger_commit_with_admission(
+            simpleos_capability_ledger_v1(), [candidate], [admission_for(candidate.receipt)])
+        expect(result.ok).to_equal(false)
+        expect(result.reason).to_contain("performance-admission")
+
+    it "does not treat QEMU TCG samples as native performance evidence":
+        var candidate = pass_candidate("NFR-002", "performance", "x86_64", "r-perf-tcg")
+        var performance_receipt = candidate.receipt
+        performance_receipt.performance_workload = "http_db_loopback"
+        performance_receipt.performance_unit = "microseconds_milli"
+        performance_receipt.performance_warmup_count = 2
+        performance_receipt.performance_cpu_identity = "tcg-cpu"
+        performance_receipt.performance_frequency_hz = 1000000
+        performance_receipt.performance_noise_profile = "controlled"
+        performance_receipt.performance_comparable = true
+        performance_receipt.performance_samples = ten_samples()
+        candidate.receipt = performance_receipt
+        var admission = admission_for(candidate.receipt)
+        admission.performance_external_comparability_verified = true
+        val result = simpleos_capability_ledger_commit_with_admission(
+            simpleos_capability_ledger_v1(), [candidate], [admission])
+        expect(result.ok).to_equal(false)
+        expect(result.reason).to_contain("performance-admission")
+
+    it "rejects QEMU KVM-like samples as non-native":
+        val candidate = performance_candidate(
+            "r-perf-kvm", "http_db_loopback", "microseconds_milli",
+            SimpleOsEvidenceEnvironment.QemuSystem, "qemu-kvm", 1000, 1000)
+        var admission = admission_for(candidate.receipt)
+        admission.performance_external_comparability_verified = true
+        val result = simpleos_capability_ledger_commit_with_admission(
+            simpleos_capability_ledger_v1(), [candidate], [admission])
+        expect(result.ok).to_equal(false)
+        expect(result.reason).to_contain("performance-admission")
+
+    it "rejects a workload outside the closed performance vocabulary":
+        val candidate = performance_candidate(
+            "r-perf-workload", "unknown_workload", "microseconds_milli",
+            SimpleOsEvidenceEnvironment.NativeHost, "native", 1000, 1000)
+        var admission = admission_for(candidate.receipt)
+        admission.performance_external_comparability_verified = true
+        val result = simpleos_capability_ledger_commit_with_admission(
+            simpleos_capability_ledger_v1(), [candidate], [admission])
+        expect(result.ok).to_equal(false)
+        expect(result.reason).to_contain("performance-admission")
+
+    it "rejects a unit that is not canonical for the workload":
+        val candidate = performance_candidate(
+            "r-perf-unit", "http_db_loopback", "bytes_per_second_milli",
+            SimpleOsEvidenceEnvironment.NativeHost, "native", 1000, 1000)
+        var admission = admission_for(candidate.receipt)
+        admission.performance_external_comparability_verified = true
+        val result = simpleos_capability_ledger_commit_with_admission(
+            simpleos_capability_ledger_v1(), [candidate], [admission])
+        expect(result.ok).to_equal(false)
+        expect(result.reason).to_contain("performance-admission")
+
+    it "rejects runner evidence not marked comparable even when the service context is":
+        val candidate = performance_candidate(
+            "r-perf-not-comparable", "http_db_loopback", "microseconds_milli",
+            SimpleOsEvidenceEnvironment.NativeHost, "native", 1000, 1000)
+        var admission = admission_for(candidate.receipt)
+        admission.performance_external_comparability_verified = true
+        val result = simpleos_capability_ledger_commit_with_admission(
+            simpleos_capability_ledger_v1(), [candidate], [admission])
+        expect(result.ok).to_equal(false)
+        expect(result.reason).to_contain("performance-admission")
+
+    it "cannot weaken the canonical metric budget through admission context":
+        val candidate = native_performance_candidate("r-perf-budget", 6000000, 1000)
+        var admission = admission_for(candidate.receipt)
+        admission.performance_external_comparability_verified = true
+        admission.performance_configured_max_rss_bytes = 999999999u64
+        admission.performance_baseline_value = 1u64
+        val result = simpleos_capability_ledger_commit_with_admission(
+            simpleos_capability_ledger_v1(), [candidate], [admission])
+        expect(result.ok).to_equal(false)
+        expect(result.reason).to_contain("performance-admission")
+
+    it "rejects noisy native performance samples":
+        var candidate = native_performance_candidate("r-perf-noisy", 1000, 1000)
+        var receipt = candidate.receipt
+        var noisy = ten_samples()
+        var i: i64 = 0
+        while i < noisy.len():
+            var sample = noisy[i]
+            sample.metric_value_milli = if i % 2 == 0: 1000 else: 3000
+            noisy[i] = sample
+            i = i + 1
+        receipt.performance_samples = noisy
+        candidate.receipt = receipt
+        var admission = admission_for(candidate.receipt)
+        admission.performance_external_comparability_verified = true
+        val result = simpleos_capability_ledger_commit_with_admission(
+            simpleos_capability_ledger_v1(), [candidate], [admission])
+        expect(result.ok).to_equal(false)
+        expect(result.reason).to_contain("performance-admission")
+
+    it "rejects native samples over the canonical budget":
+        val candidate = native_performance_candidate("r-perf-over", 6000000, 1000)
+        var admission = admission_for(candidate.receipt)
+        admission.performance_external_comparability_verified = true
+        val result = simpleos_capability_ledger_commit_with_admission(
+            simpleos_capability_ledger_v1(), [candidate], [admission])
+        expect(result.ok).to_equal(false)
+        expect(result.reason).to_contain("performance-admission")
+
+    it "rejects native metric regression against the admitted baseline":
+        val candidate = native_performance_candidate("r-perf-regression", 1100, 1000)
+        var admission = admission_for(candidate.receipt)
+        admission.performance_external_comparability_verified = true
+        val result = simpleos_capability_ledger_commit_with_admission(
+            simpleos_capability_ledger_v1(), [candidate], [admission])
+        expect(result.ok).to_equal(false)
+        expect(result.reason).to_contain("performance-admission")
+
+    it "rejects native samples over the RSS regression ceiling":
+        val candidate = native_performance_candidate("r-perf-rss", 1000, 1101)
+        var admission = admission_for(candidate.receipt)
+        admission.performance_external_comparability_verified = true
+        val result = simpleos_capability_ledger_commit_with_admission(
+            simpleos_capability_ledger_v1(), [candidate], [admission])
+        expect(result.ok).to_equal(false)
+        expect(result.reason).to_contain("performance-admission")
+
+    it "rejects a service fixture hash absent from verified receipt artifacts":
+        val candidate = native_performance_candidate("r-perf-fixture", 1000, 1000)
+        var admission = admission_for(candidate.receipt)
+        admission.performance_external_comparability_verified = true
+        admission.performance_fixture_hash = HASH_B
+        val result = simpleos_capability_ledger_commit_with_admission(
+            simpleos_capability_ledger_v1(), [candidate], [admission])
+        expect(result.ok).to_equal(false)
+        expect(result.reason).to_contain("performance-admission")
+
+    it "validates stable native performance but still requires the cryptographic verifier":
+        val candidate = native_performance_candidate("r-perf-native", 1000, 1000)
+        var admission = admission_for(candidate.receipt)
+        admission.performance_external_comparability_verified = true
+        val result = simpleos_capability_ledger_commit_with_admission(
+            simpleos_capability_ledger_v1(), [candidate], [admission])
+        expect(result.ok).to_equal(false)
+        expect(result.reason).to_contain("cryptographic-verifier-unavailable")

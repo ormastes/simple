@@ -92,7 +92,8 @@ mod tests {
     fn test_options_default() {
         let options = NativeBinaryOptions::default();
         assert!(options.pie);
-        assert!(!options.strip);
+        // Release builds strip by default; --no-strip opts out (options.rs:100).
+        assert!(options.strip);
         assert!(!options.shared);
         #[cfg(target_os = "macos")]
         assert!(options.libraries.contains(&"System".to_string()));
@@ -478,7 +479,12 @@ mod tests {
         std::env::remove_var("CC");
 
         let linux = Target::new(TargetArch::X86_64, TargetOS::Linux);
-        assert_eq!(detect_c_compiler(&linux), "cc");
+        // Unix detection prefers an installed clang, else gcc (cc_detect.rs:65-66).
+        let linux_cc = detect_c_compiler(&linux);
+        assert!(
+            linux_cc == "clang" || linux_cc == "gcc",
+            "unexpected Linux C compiler: {linux_cc}"
+        );
 
         let windows = Target::new(TargetArch::X86_64, TargetOS::Windows);
         let win_cc = detect_c_compiler(&windows);
@@ -505,7 +511,7 @@ mod tests {
     #[test]
     fn test_compile_c_args_gnu() {
         let args = compile_c_args("cc", Path::new("out.o"), Path::new("in.c"));
-        assert_eq!(args, vec!["-c", "-o", "out.o", "in.c"]);
+        assert_eq!(args, vec!["-O3", "-c", "-o", "out.o", "in.c"]);
     }
 
     #[test]

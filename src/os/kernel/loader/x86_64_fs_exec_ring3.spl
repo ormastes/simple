@@ -1,14 +1,9 @@
 # x86_64 filesystem-exec ring-3 control-transfer handoff.
 #
-# The GENERAL spawn (x86_64_fs_exec_spawn_as -> fs_exec_prepare_spawn_from_bytes
-# -> build_user_process_image_unchecked) builds a UserProcessImage but never maps
-# its segments into a live address space and never transfers control to ring 3 —
-# only the one-shot smoke kernel did that, for a hardcoded blob. This module is
-# the missing handoff: it maps a general-built UserProcessImage into a fresh user
-# address space and iretq's to CPL3, reusing the ring-3 primitives that are
-# actually present and proven in this checkout (create_user_address_space +
-# vmm_clone_kernel_low_identity + vmm_map_page_in + vmm_copy_bytes_to_phys +
-# arch_x86_64_enter_user_task — the same set ring3_smoke_entry.spl uses).
+# This module retains a private low-level mechanism for an eventual
+# scheduler-owned handoff. It exports no raw header/blob/image entrypoint.
+# Production execution is admitted only through the loader registry token and
+# Scheduler.adopt_authenticated_executable_pid_v1; raw memory is never authority.
 #
 # Freestanding discipline (native-build does NOT run module-level `val`
 # initializers — see ring3_smoke_entry.spl and the module-val note below):
@@ -32,12 +27,7 @@ use os.kernel.memory.vmm_address_space.{
     vmm_clone_kernel_low_private, vmm_zero_phys_range
 }
 use os.kernel.types.memory_types.{VmFlags, VirtAddr, PhysAddr}
-use os.kernel.types.task_types.{
-    TaskContext, AddressSpace, UserProcessImage,
-    user_process_image_entry, user_process_image_segment_count,
-    user_process_image_file_bytes, user_process_image_initial_sp,
-    user_process_image_stack_top, user_process_image_initial_stack_bytes
-}
+use os.kernel.types.task_types.{TaskContext, AddressSpace}
 use os.kernel.arch.x86_64.context.{arch_x86_64_enter_user_task}
 use os.kernel.boot.mmio.{mmio_read8, mmio_read16, mmio_read32, mmio_read64, mmio_write8}
 
@@ -464,34 +454,3 @@ fn _x86_64_fs_exec_enter_ring3(binary_path: text, blob: u64, hdr_len: u64, file_
     val exit_rc = rt_x86_ring3_exit_rc()
     serial_println("[spawn] ring3 program exited rc={exit_rc} (kernel resumed)")
     exit_rc
-
-pub fn x86_64_fs_exec_enter_stream_ring3(binary_path: text, header_blob: u64, hdr_len: u64, file_len: u64, argv: [text], envp: [text]) -> i64:
-    """Stream an opened filesystem ELF into a fresh user address space.
-
-    `header_blob` must hold at least `hdr_len` RESIDENT bytes covering the ELF
-    header + full phdr table; PT_LOAD segment bytes are streamed straight from
-    the opened file (caller must have called simpleos_fat32_stream_open) into
-    freshly allocated pmm frames — the whole file is never buffered, so
-    `file_len` is not capped by the 4 MiB path-read buffer.
-    """
-    serial_println("[spawn] stream path={binary_path} hdr_len={hdr_len} file_len={file_len}")
-    _x86_64_fs_exec_enter_ring3(binary_path, header_blob, hdr_len, file_len, true, false, argv, envp)
-
-pub fn x86_64_fs_exec_enter_stream_heap_ring3(binary_path: text, header_blob: u64, hdr_len: u64, file_len: u64, argv: [text], envp: [text]) -> i64:
-    """Stream + a 64 MiB anonymous user heap for real libc programs (clang,
-    lld). OPT-IN because the heap costs 64 MiB of pmm frames per spawn; the
-    payload's exit(0) resumes this kernel frame either way (the heap is
-    registered via rt_user_heap_init_returning, not rt_user_heap_init)."""
-    serial_println("[spawn] stream+heap path={binary_path} hdr_len={hdr_len} file_len={file_len}")
-    _x86_64_fs_exec_enter_ring3(binary_path, header_blob, hdr_len, file_len, true, true, argv, envp)
-
-pub fn x86_64_fs_exec_enter_image_ring3(image: UserProcessImage, blob: u64, argv: [text], envp: [text]) -> i64:
-    """Map a general-built UserProcessImage into a fresh user AS and enter ring 3."""
-    val fb = user_process_image_file_bytes(image)
-    val img_entry = user_process_image_entry(image)
-    val seg_count = user_process_image_segment_count(image)
-    val builder_sp = user_process_image_initial_sp(image)
-    val builder_top = user_process_image_stack_top(image)
-    val stk_bytes = user_process_image_initial_stack_bytes(image)
-    serial_println("[spawn] image path={image.binary_path} entry=0x{img_entry} segments={seg_count} builder_top=0x{builder_top} builder_sp=0x{builder_sp} stk_bytes={stk_bytes.len()} file_len={fb.len()}")
-    _x86_64_fs_exec_enter_ring3(image.binary_path, blob, fb.len().to_u64(), fb.len().to_u64(), false, false, argv, envp)

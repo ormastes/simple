@@ -1,0 +1,403 @@
+# HIR Lowering - Expression Lowering
+#
+# This module handles lowering of expressions from AST to HIR.
+
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.frontend.parser_types.*
+use compiler.frontend.parser_types_expr.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.context_helpers.*
+use std.nogc_sync_mut.io.process_ops.{eprint}
+use compiler.core.lexer_chars.{is_digit}
+use std.string_core.{char_code}
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_enum_discriminant(value: Any) -> i64
+extern fn rt_dict_contains(dict: i64, key: Any) -> bool
+
+fn hir_expr_env_get(key: text) -> text:
+    rt_env_get(key)
+
+fn hir_expr_kind_disc(k: ExprKind) -> i64:
+    rt_enum_discriminant(k)
+
+fn is_tuple_positional_field(name: text) -> bool:
+    """True iff `name` is composed entirely of ASCII digits -- the parser's
+    encoding for `.0`, `.1`, ... positional tuple-field access (see the
+    `member_kind == 1` numeric-tuple-field branch in parser_expr.spl). A
+    real struct/named-tuple field name is always an identifier and can
+    never be spelled as a pure-digit string, so this test is unambiguous."""
+    if name.len() == 0:
+        return false
+    var i = 0
+    while i < name.len():
+        if not is_digit(name[i:i + 1]):
+            return false
+        i = i + 1
+    true
+
+fn parse_tuple_field_index(name: text) -> i64:
+    """Parse a digit-only field name (see `is_tuple_positional_field`) into
+    the positional index it denotes."""
+    var idx: i64 = 0
+    var i = 0
+    while i < name.len():
+        idx = idx * 10 + (char_code(name[i:i + 1]) - 48)
+        i = i + 1
+    idx
+
+fn is_interp_builtin_fn(name: text) -> bool:
+    """Free-function builtins dispatched by NAME in the HIR interpreter
+    (70.backend/backend/interpreter_calls.spl lookup_builtin_tag)."""
+    (name == "print" or name == "println" or name == "to_string" or
+     name == "type_of" or name == "clone" or name == "file_exists" or
+     name == "file_read" or name == "file_write" or name == "file_delete" or
+     name == "env_get" or name == "env_set" or name == "int" or
+     name == "float" or name == "bool" or name == "panic" or
+     name == "str" or name == "text")
+
+fn primitive_cast_type_kind(name: text) -> HirTypeKind?:
+    """`i32(x)`-style primitive casts: a fixed-width numeric type name used
+    as a call target is a CAST, not a function call. These names are not in
+    the value symbol table, so lowering them as ordinary callees yields
+    HirExprKind.Error and native codegen then emits an indirect call on an
+    undefined local (llc: "use of undefined value '%l0'"). Restricted to
+    fixed-width numeric names -- `int`/`bool` remain calls (they are
+    value-parsing builtins, not pure numeric casts).
+
+    `float` IS included: the Rust seed treats it as an exact alias of `f64`
+    (`hir/lower/expr/calls.rs` lower_utility_builtin: `"f64" | "float" =>
+    Some(TypeId::F64)`), applied on the same one-positional-argument gate this
+    function is used behind. Omitting it here was a self-hosted/seed
+    divergence, not a deliberate carve-out: `float(i_part)` in
+    `src/std/common/format.spl:103,113` reached symbol lookup, missed, and
+    hard-errored `unresolved name: float` -- a builtin TYPE name arriving in
+    the VALUE namespace. bug doc:
+    doc/08_tracking/bug/float_cast_missing_from_selfhosted_primitive_casts_2026-08-01.md"""
+    match name:
+        case "float": HirTypeKind.Float(64)
+        case "i8": HirTypeKind.Int(8, true)
+        case "i16": HirTypeKind.Int(16, true)
+        case "i32": HirTypeKind.Int(32, true)
+        case "i64": HirTypeKind.Int(64, true)
+        case "u8": HirTypeKind.Int(8, false)
+        case "u16": HirTypeKind.Int(16, false)
+        case "u32": HirTypeKind.Int(32, false)
+        case "u64": HirTypeKind.Int(64, false)
+        case "f32": HirTypeKind.Float(32)
+        case "f64": HirTypeKind.Float(64)
+        case _: nil
+
+fn is_bootstrap_builtin_fn(name: text) -> bool:
+    name == "get_args" or
+    name == "sys_get_args" or
+    name == "rt_get_args" or
+    name == "eprint" or
+    name == "bootstrap_version" or
+    name == "native_build_help" or
+    name == "compile_result_exit" or
+    name == "bootstrap_output_from_args" or
+    name == "run_native_build_bootstrap" or
+    name == "rt_native_build" or
+    name == "get_cli_args" or
+    name == "main"
+
+fn hir_bootstrap_i64_type(span: Span) -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: span)
+
+fn hir_bootstrap_text_type(span: Span) -> HirType:
+    HirType(kind: HirTypeKind.Str, span: span)
+
+fn hir_bootstrap_text_array_type(span: Span) -> HirType:
+    HirType(kind: HirTypeKind.Array(hir_bootstrap_text_type(span), nil), span: span)
+
+fn hir_bootstrap_unit_type(span: Span) -> HirType:
+    HirType(kind: HirTypeKind.Unit, span: span)
+
+fn bootstrap_builtin_return_type(name: text, span: Span) -> HirType:
+    if name == "get_args" or name == "get_cli_args" or name == "sys_get_args" or name == "rt_get_args":
+        return hir_bootstrap_text_array_type(span)
+    if name == "bootstrap_version" or name == "bootstrap_output_from_args":
+        return hir_bootstrap_text_type(span)
+    if name == "eprint":
+        return hir_bootstrap_unit_type(span)
+    hir_bootstrap_i64_type(span)
+
+fn bootstrap_builtin_signature(name: text, span: Span) -> HirType:
+    HirType(kind: HirTypeKind.Function([], bootstrap_builtin_return_type(name, span), []), span: span)
+
+fn _hir_expr_symbol_or_invalid(kind: HirExprKind) -> SymbolId:
+    match kind:
+        case HirExprKind.Var(symbol): symbol
+        case HirExprKind.NamedVar(symbol, _): symbol
+        case _: SymbolId(id: -1)
+
+fn _hir_named_type_symbol(type_: HirType) -> SymbolId?:
+    match type_.kind:
+        case HirTypeKind.Named(symbol, _): symbol
+        case _: nil
+
+fn _hir_missing_field_type() -> HirType:
+    HirType(kind: HirTypeKind.Error, span: Span.empty())
+
+# Expression Lowering
+# ============================================================================
+
+impl HirLowering:
+    me field_module_callable(module_name: text, field_name: text) -> SymbolId?:
+        # NOTE: deliberately does NOT filter candidates by `candidate.kind ==
+        # SymbolKind.Function`. A same-process cross-module symbol-kind
+        # comparison (a value of an enum declared in hir_types.spl, built via
+        # one import spelling, pattern-matched against a case constructed via
+        # a different import spelling of the same symlinked module path --
+        # `src/compiler/hir` -> `src/compiler/20.hir`) was found to NEVER
+        # match here at runtime: `rt_enum_discriminant` returns -1 for every
+        # SymbolKind value reached this way, and a `match candidate.kind:
+        # case SymbolKind.Function:` against a genuinely Function-kind
+        # candidate silently fell to the wildcard arm every time (verified
+        # with an exhaustive per-variant probe: none of the 15 named
+        # SymbolKind cases ever matched). That made this whole function a
+        # dead no-op for every cross-module candidate -- the reason
+        # `provider.answer()` (module-qualified call reached via `import
+        # provider`, not `use provider.*`) silently lowered to a call on a
+        # namespace with no runtime receiver instead of the real function.
+        # (name, defining_module) is already a strong enough pair to
+        # identify the intended symbol without the kind filter: an ordinary
+        # local variable/parameter never has `defining_module` set (nil), so
+        # this loop only ever matches symbols that came from a real cross-
+        # module import registration in the first place.
+        val candidate_keys = self.symbols.symbols.keys()
+        var index = candidate_keys.len()
+        while index > 0:
+            index = index - 1
+            val candidate = self.symbols.symbols[candidate_keys[index]]
+            if val candidate_module = candidate.defining_module:
+                if candidate_module == module_name:
+                    if candidate.name == field_name or candidate.name.ends_with("." + field_name):
+                        return candidate.id
+        nil
+
+    me field_tuple_element_type(base_kind: HirExprKind, index: i64) -> HirType?:
+        val base_symbol = _hir_expr_symbol_or_invalid(base_kind)
+        if base_symbol.is_valid():
+            if rt_dict_contains(self.local_tuple_types, base_symbol.id):
+                val element_types = self.local_tuple_types[base_symbol.id]
+                if index >= 0 and index < element_types.len():
+                    return element_types[index]
+        nil
+
+    me field_type_for_owner(owner_symbol_id: SymbolId, field_name: text) -> HirType?:
+        val found = self.field_type_for_owner_raw(owner_symbol_id.id, field_name)
+        match found.kind:
+            case HirTypeKind.Error: nil
+            case _: found
+
+    me field_type_for_owner_raw(raw_owner_symbol_id: i64, field_name: text) -> HirType:
+        if val owner_symbol = self.symbols.get_symbol_raw(raw_owner_symbol_id):
+            if val owner_module = owner_symbol.defining_module:
+                val canonical_name = owner_module + "." + owner_symbol.name
+                if rt_dict_contains(self.struct_field_types_by_name, canonical_name):
+                    val canonical_fields = self.struct_field_types_by_name[canonical_name]
+                    if rt_dict_contains(canonical_fields, field_name):
+                        return canonical_fields[field_name]
+            if rt_dict_contains(self.struct_field_types_by_name, owner_symbol.name):
+                val owner_fields = self.struct_field_types_by_name[owner_symbol.name]
+                if rt_dict_contains(owner_fields, field_name):
+                    return owner_fields[field_name]
+        _hir_missing_field_type()
+
+    me field_type_for_base(base_symbol: SymbolId, field_name: text) -> HirType?:
+        val found = self.field_type_for_base_raw(base_symbol.id, field_name)
+        match found.kind:
+            case HirTypeKind.Error: nil
+            case _: found
+
+    me field_type_for_base_raw(raw_base_symbol_id: i64, field_name: text) -> HirType:
+        if rt_dict_contains(self.local_struct_types, raw_base_symbol_id):
+            val struct_name = self.local_struct_types[raw_base_symbol_id]
+            if rt_dict_contains(self.struct_field_types_by_name, struct_name):
+                val struct_fields = self.struct_field_types_by_name[struct_name]
+                if rt_dict_contains(struct_fields, field_name):
+                    return struct_fields[field_name]
+
+        val raw_owner_symbol_id = self.symbols.get_symbol_named_type_raw(raw_base_symbol_id)
+        if raw_owner_symbol_id >= 0:
+            return self.field_type_for_owner_raw(raw_owner_symbol_id, field_name)
+
+        if self.current_method_self_symbol_id >= 0:
+            if val base_definition = self.symbols.get_symbol_raw(raw_base_symbol_id):
+                if base_definition.name == "self" or base_definition.name == "me":
+                    return self.field_type_for_owner_raw(self.current_method_self_symbol_id, field_name)
+        _hir_missing_field_type()
+
+    me combine_pattern_conditions(conditions: [HirExpr], count: i64, op: HirBinOp, span: Span) -> HirExpr:
+        if count == 1:
+            return conditions[0]
+        val left = self.combine_pattern_conditions(conditions, count - 1, op, span)
+        HirExpr(kind: HirExprKind.Binary(op, left, conditions[count - 1]), type_: nil, span: span)
+
+    me lower_host_gpu_lane_payload(marker: Expr) -> i64:
+        match marker.kind:
+            case ExprKind.MethodCall(_receiver, method, args):
+                if method != "later":
+                    return 0
+                for arg in args:
+                    if arg.has_name and arg.name == "max_packet":
+                        match arg.value.kind:
+                            case ExprKind.IntLit(value):
+                                if value > 0:
+                                    return value
+                                return 0
+                            case _:
+                                pass
+                if args.len() == 1:
+                    match args[0].value.kind:
+                        case ExprKind.IntLit(value):
+                            if value > 0:
+                                return value
+                            return 0
+                        case _:
+                            pass
+                0
+            case _:
+                0
+
+    me lower_host_gpu_lane_body(body_expr: Expr) -> HirBlock:
+        match body_expr.kind:
+            case ExprKind.Block(block):
+                self.lower_hir_block(block)
+            case _:
+                HirBlock(stmts: [], value: Some(self.lower_hir_expr(body_expr)), span: body_expr.span)
+
+    me try_lower_host_gpu_lane_expr(e: Expr) -> HirExpr?:
+        match e.kind:
+            case ExprKind.Call(callee, args):
+                # Typed rebinds of extracted pattern payloads: reading `.kind`
+                # directly off the extracted ANY-ish payload misreads on stage4
+                # (most-fields-wins), making `name == "host"` pass on garbage
+                # and misrouting print(1+1) into HostGpuLane → mono scan SEGV
+                # (bug doc iteration 17/18).
+                val callee_t: Expr = callee
+                val args_t: [CallArg] = args
+                var lane_code: i64 = 0
+                val callee_kind_t: ExprKind = callee_t.kind
+                match callee_kind_t:
+                    case ExprKind.Ident(name):
+                        val name_t: text = name
+                        if name_t == "host":
+                            lane_code = 1
+                        elif name_t == "gpu":
+                            lane_code = 2
+                    case _:
+                        pass
+                if lane_code == 0:
+                    return nil
+                if args_t.len() != 2:
+                    return nil
+                val arg1_t: Expr = args_t[1].value
+                val arg1_kind_t: ExprKind = arg1_t.kind
+                match arg1_kind_t:
+                    case ExprKind.Lambda(_params, lambda_body):
+                        val lambda_body_t: Expr = lambda_body
+                        val arg0_t: Expr = args_t[0].value
+                        val marker = self.lower_hir_expr(arg0_t)
+                        val payload_size = self.lower_host_gpu_lane_payload(arg0_t)
+                        val body = self.lower_host_gpu_lane_body(lambda_body_t)
+                        Some(HirExpr(
+                            kind: HirExprKind.HostGpuLane(lane_code, payload_size, marker, body),
+                            type_: nil,
+                            span: e.span
+                        ))
+                    case _:
+                        nil
+            case _:
+                nil
+
+    me lower_unresolved_ident(name: text, span: Span) -> HirExprKind:
+        """Unresolved identifier: known interpreter builtins (print, ...) are
+        not in the symbol table on the single-file/-c unstub path — define
+        them on first use and emit NamedVar so the HIR interpreter can
+        dispatch by name (process_module registers every table symbol as a
+        global Function value). Everything else stays an error."""
+        # Receiver aliasing (`me` <-> `self`). The class-body parser
+        # (parser_decls_use.spl parse_class_body_method) synthesizes the
+        # receiver parameter as "self" for a `me`-prefixed method that declares
+        # no explicit receiver (`me build_ui():`), so a body that writes
+        # `me.field` / `me.method()` looked up a name that was never defined and
+        # died here with "unresolved name: me" — 543 times in the stage-4
+        # full-CLI build, all in `class X:` bodies (src/app/office/*). Both
+        # spellings denote the same receiver, so try the counterpart before
+        # failing. Only visible under SIMPLE_BOOTSTRAP_STAGE4=1: the non-stage4
+        # bootstrap lane builds MIR from the flat-AST accumulator and never
+        # surfaces these HIR errors, which is why isolated probes of the same
+        # class shape all reported success. See
+        # doc/08_tracking/bug/stage4_me_receiver_unresolved_in_class_methods_2026-07-27.md
+        # NOTE (2026-07-29, lane ME1): this block was landed in 8af2dc555960
+        # and accidentally deleted the next day by 55db1d3d92016 ("fix(compiler):
+        # harden source-matched native worker"), an unrelated refactor whose diff
+        # hunk swallowed it. Re-landed here after lane CLSM re-discovered the
+        # regression (2 me-methods reading `me.field` -> 4 unresolved-name
+        # errors). This only aliases `me`/`self` when one resolves as a live
+        # symbol (lookup_or_invalid + is_valid()) -- a bare `me` outside any
+        # method body still has no `self` symbol to alias to, so it still
+        # errors below, same as before this fix.
+        if name == "me" or name == "self":
+            val recv_alias = if name == "me": "self" else: "me"
+            val recv_sym = self.symbols.lookup_or_invalid(recv_alias)
+            if recv_sym.is_valid():
+                return HirExprKind.NamedVar(recv_sym, recv_alias)
+        val is_bootstrap_builtin = (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and is_bootstrap_builtin_fn(name)
+        # Bare Result variants: `Ok(v)` / `Err(e)` are not in the symbol table
+        # (Result is a built-in, not a module enum). Emit NamedVar so MIR
+        # lowering's lower_call can intercept by name and construct via
+        # rt_enum_new (Ok=0, Err=1); previously these decayed to Error and
+        # crashed the LLVM backend with a nil callee local.
+        val is_result_variant = name == "Ok" or name == "Err"
+        # Bare Option variants: `Some(v)` / `None` are built-ins (not module
+        # enums), so like Ok/Err they are absent from the symbol table. Emit
+        # NamedVar so MIR lowering intercepts by name and constructs via
+        # rt_enum_new (registered in enum_variant_index as Option -> Some=0,
+        # None=1); without this they decayed to "unresolved name: Some".
+        val is_option_variant = name == "Some" or name == "None"
+        # These are the direct invocation-index intrinsics lowered below.
+        # Do not accept arbitrary gpu_* typos as synthetic functions.
+        val is_gpu_builtin = name == "gpu_global_id" or name == "gpu_local_id" or
+            name == "gpu_block_id" or name == "gpu_block_dim" or name == "gpu_grid_dim"
+        # Bare `Result`/`Option` RECEIVER names, e.g. `Result.Ok(x)` /
+        # `Option.Some(x)`: these builtin generic enums' TYPE annotations
+        # are special-cased in hir_lowering/types.spl's `lower_named_kind`
+        # (HirTypeKind.Result / HirTypeKind.Optional) without ever calling
+        # `self.symbols.define`. A module that only ever writes
+        # `Result<T,E>`/`Option<T>` as a type annotation -- and never
+        # imports the stdlib struct/enum declaration itself (mirrors the
+        # Rust seed bug: freestanding/entry-closure kernel modules without
+        # the std prelude) -- therefore has no "Result"/"Option" symbol, so
+        # `self.symbols.lookup` above misses and the qualified receiver used
+        # to hard-error "unresolved name: Result" here, even though MIR's
+        # enum_variant_index ALWAYS registers Result/Option's variants
+        # module-wide (module_lowering.spl) and happily routes
+        # `.Ok(...)`/`.Some(...)` through lower_enum_construct_named once
+        # the receiver resolves to a NamedVar carrying the name. Emit one so
+        # it reaches that routing instead of failing to compile.
+        val is_result_or_option_type_name = name == "Result" or name == "Option"
+        if is_interp_builtin_fn(name) or is_bootstrap_builtin or is_result_variant or is_option_variant or is_result_or_option_type_name or is_gpu_builtin:
+            val symbol_type = if is_bootstrap_builtin:
+                bootstrap_builtin_signature(name, span)
+            else:
+                nil
+            val bsym = self.symbols.define(name, SymbolKind.Function, symbol_type, span, false, false, nil)
+            HirExprKind.NamedVar(bsym, name)
+        else:
+            if self.try_register_bootstrap_global_symbol(name, span):
+                val global_sym = self.symbols.lookup_or_invalid(name)
+                if global_sym.is_valid():
+                    return HirExprKind.NamedVar(global_sym, name)
+            # Preserve scalar source provenance before Span crosses the
+            # aggregate diagnostic boundary. The driver intentionally carries
+            # only rendered text under native closure pressure.
+            self.error(
+                "unresolved name: {name} at {span.file}:{span.line}:{span.col}",
+                span)
+            HirExprKind.Error

@@ -2,6 +2,7 @@
 
 - **Date:** 2026-08-01
 - **Status:** **FIXED in the Rust seed** by `3487c07ce41` (verified RED -> GREEN
+- **Verification 2026-08-21 (bug-status-consistency audit): PARTIAL, not fully fixed.** the seed half is real (3487c07ce41; `start_unreachable_block` at `lowering_core.rs:1515`, 3 call sites), but the mirrored pure-Simple `src/compiler/50.mir/` site is still OPEN. `bug_db.sdn` row is `fix-implemented-verification-pending`.
   on real native ELF binaries). The mirrored **pure-Simple** site in
   `src/compiler/50.mir/` is still **OPEN**. See "Fix landed" below.
 - **Severity:** critical (silently changes control flow and return values)

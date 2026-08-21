@@ -1,0 +1,151 @@
+# Enum-contract DECLARATION checks (S3, hardening plan §10.2).
+#
+# These validate the enum's own shape against its contract, independent of any
+# match site. Kept on a plain-data variant shape rather than `HirEnum` so the
+# rules are testable without building a symbol table; the HIR adapter lives in
+# `check.spl` and is the only place that touches HIR.
+
+use compiler.semantics.enum_contract.contract_model.{
+    EnumContractKind, EnumContract, EnumContractDiag, enum_contract_diag
+}
+
+struct EnumVariantShape:
+    """One declared variant, flattened for contract checking.
+
+    `payload_types` is the variant's payload in declaration order, rendered as
+    source-level type names (`["u16"]` for `Unknown(raw: u16)`, `[]` for a unit
+    variant). `payload_names` is the parallel field-name array, empty entries
+    for positional payloads."""
+    name: text
+    payload_names: [text]
+    payload_types: [text]
+    has_discriminant: bool
+    discriminant: i64
+
+fn max_unsigned_for_bits(bits: i64) -> i64:
+    """Largest value representable in `bits` unsigned bits, as i64.
+
+    64 is deliberately clamped to i64::MAX: the checker's job is to catch a
+    discriminant that cannot round-trip, and a u64 discriminant above
+    i64::MAX cannot be written as a Simple integer literal in the first
+    place, so there is nothing for this rule to reject there."""
+    if bits <= 0:
+        return 0
+    if bits >= 64:
+        return 9223372036854775807
+    var limit = 1
+    var i = 0
+    while i < bits:
+        limit = limit * 2
+        i = i + 1
+    limit - 1
+
+fn check_evolving_declaration(contract: EnumContract, variants: [EnumVariantShape]) -> [EnumContractDiag]:
+    """E-EVOLVING-001/002 for one `@evolving(repr: uN, unknown: V)` enum.
+
+    001 -- the named Unknown variant is absent, or is not a single `raw: uN`
+           payload matching the declared repr, or the repr itself is not one
+           of u8/u16/u32/u64. Without that shape an unknown discriminant has
+           nowhere to go and decode silently loses it, which is exactly the
+           masquerading §10.2 forbids.
+    002 -- a KNOWN variant's explicit discriminant is not representable in the
+           declared repr, so a decoded unknown could never be distinguished
+           from it on the wire."""
+    var diags: [EnumContractDiag] = []
+    val bits = contract.repr_bits()
+    val unknown_name = contract.unknown_variant_name()
+    if unknown_name == "":
+        diags = diags.push(enum_contract_diag(
+            "E-EVOLVING-001", contract.enum_name, "unknown: <missing>",
+            "@evolving enum '" + contract.enum_name + "' declares no unknown: variant"))
+        return diags
+    if bits == 0:
+        diags = diags.push(enum_contract_diag(
+            "E-EVOLVING-001", contract.enum_name, "repr: <not u8/u16/u32/u64>",
+            "@evolving enum '" + contract.enum_name + "' has no valid unsigned repr"))
+        return diags
+    val repr_name = "u" + bits.to_text()
+    var found = false
+    for v in variants:
+        if v.name == unknown_name:
+            found = true
+            if v.payload_types.len() != 1:
+                diags = diags.push(enum_contract_diag(
+                    "E-EVOLVING-001", contract.enum_name,
+                    unknown_name + " payload arity " + v.payload_types.len().to_text(),
+                    "unknown variant '" + unknown_name + "' of @evolving enum '"
+                        + contract.enum_name + "' must carry exactly one raw: "
+                        + repr_name + " payload"))
+            else:
+                if v.payload_names[0] != "" and v.payload_names[0] != "raw":
+                    # §10.2 spells the payload `raw: uN`. A differently-named
+                    # field still round-trips, but every decoder in the tree
+                    # would have to know the local spelling, so the contract
+                    # fixes it. A positional payload (empty name) is accepted.
+                    diags = diags.push(enum_contract_diag(
+                        "E-EVOLVING-001", contract.enum_name,
+                        unknown_name + "(" + v.payload_names[0] + ": " + v.payload_types[0] + ")",
+                        "unknown variant '" + unknown_name + "' of @evolving enum '"
+                            + contract.enum_name + "' names its payload field '"
+                            + v.payload_names[0] + "'; it must be named 'raw'"))
+                if v.payload_types[0] != repr_name:
+                    diags = diags.push(enum_contract_diag(
+                        "E-EVOLVING-001", contract.enum_name,
+                        unknown_name + "(" + v.payload_types[0] + ")",
+                        "unknown variant '" + unknown_name + "' of @evolving enum '"
+                            + contract.enum_name + "' carries " + v.payload_types[0]
+                            + " but the declared repr is " + repr_name))
+    if not found:
+        diags = diags.push(enum_contract_diag(
+            "E-EVOLVING-001", contract.enum_name, unknown_name,
+            "@evolving enum '" + contract.enum_name + "' names unknown variant '"
+                + unknown_name + "' which is not declared"))
+    val limit = max_unsigned_for_bits(bits)
+    for v in variants:
+        if v.name != unknown_name and v.has_discriminant:
+            if v.discriminant < 0 or v.discriminant > limit:
+                diags = diags.push(enum_contract_diag(
+                    "E-EVOLVING-002", contract.enum_name,
+                    v.name + " = " + v.discriminant.to_text(),
+                    "variant '" + v.name + "' of @evolving enum '" + contract.enum_name
+                        + "' has discriminant " + v.discriminant.to_text()
+                        + " which is not representable in " + repr_name))
+    diags
+
+fn check_closed_declaration(contract: EnumContract, variants: [EnumVariantShape]) -> [EnumContractDiag]:
+    """E-CLOSED-002 -- duplicate explicit discriminants on a `@closed` enum.
+
+    §10.1 requires that every discriminant be validated on decode and that
+    unknown discriminants fail decode. Both are impossible when two variants
+    share one discriminant: decode cannot pick a variant, so the roundtrip
+    property the S2 spec asserts (every discriminant decodes back to itself)
+    is unprovable rather than merely violated."""
+    var diags: [EnumContractDiag] = []
+    var seen_values: [i64] = []
+    var seen_names: [text] = []
+    for v in variants:
+        if v.has_discriminant:
+            var i = 0
+            while i < seen_values.len():
+                if seen_values[i] == v.discriminant:
+                    diags = diags.push(enum_contract_diag(
+                        "E-CLOSED-002", contract.enum_name,
+                        seen_names[i] + " / " + v.name + " = " + v.discriminant.to_text(),
+                        "@closed enum '" + contract.enum_name + "' gives variants '"
+                            + seen_names[i] + "' and '" + v.name
+                            + "' the same discriminant " + v.discriminant.to_text()))
+                i = i + 1
+            seen_values = seen_values.push(v.discriminant)
+            seen_names = seen_names.push(v.name)
+    diags
+
+fn check_enum_declaration(contract: EnumContract, variants: [EnumVariantShape]) -> [EnumContractDiag]:
+    """Dispatch one enum's declaration check on its contract kind."""
+    match contract.kind:
+        case EnumContractKind.Closed:
+            check_closed_declaration(contract, variants)
+        case EnumContractKind.Evolving(bits, unknown):
+            check_evolving_declaration(contract, variants)
+
+export EnumVariantShape, check_enum_declaration, check_closed_declaration
+export check_evolving_declaration, max_unsigned_for_bits

@@ -11,19 +11,13 @@ impl TestDatabaseExtended:
     me get_or_create_file(path: text) -> i64:
         val path_id = self.interner.intern(path)
 
-        # Check if file exists
-        match self.db.get_table("files"):
-            case Some(files_table):
-                for row in files_table.rows:
-                    # BUG-044: Use ?? instead of ? to avoid "try: early return"
-                    val row_path_str = row.get_i32("path_str") ?? -1
-                    if row_path_str != -1:
-                        if row_path_str == path_id:
-                            val file_id = row.get_i64("file_id") ?? -1
-                            if file_id != -1:
-                                return file_id
-            case nil:
-                pass
+        # Check if file exists — O(1) index lookup, was a full table scan.
+        # NOTE: this file is a DUPLICATE impl of methods that also live in
+        # database.spl's class body; which copy wins dispatch is ambiguous, so
+        # both must carry the fix. See the bug record.
+        self.ensure_indexes()
+        if self._file_index.has(path_id):
+            return self._file_index[path_id]
 
         # Create new file
         val file_id = self.next_file_id
@@ -39,6 +33,7 @@ impl TestDatabaseExtended:
                 self.db.set_table("files", files_table_mut)
             case nil:
                 pass
+        self._file_index[path_id] = file_id
 
         file_id
 
@@ -47,20 +42,11 @@ impl TestDatabaseExtended:
         val file_id = self.get_or_create_file(file_path)
         val name_id = self.interner.intern(suite_name)
 
-        # Check if suite exists
-        match self.db.get_table("suites"):
-            case Some(suites_table):
-                for row in suites_table.rows:
-                    # BUG-044: Use ?? instead of ? to avoid "try: early return"
-                    val row_file_id = row.get_i64("file_id") ?? -1
-                    val row_name_str = row.get_i32("name_str") ?? -1
-                    if row_file_id != -1 and row_name_str != -1:
-                        if row_file_id == file_id and row_name_str == name_id:
-                            val suite_id = row.get_i64("suite_id") ?? -1
-                            if suite_id != -1:
-                                return suite_id
-            case nil:
-                pass
+        # Check if suite exists — O(1) index lookup, was a full table scan
+        self.ensure_indexes()
+        val suite_key = "{file_id}:{name_id}"
+        if self._suite_index.has(suite_key):
+            return self._suite_index[suite_key]
 
         # Create new suite
         val suite_id = self.next_suite_id
@@ -77,6 +63,7 @@ impl TestDatabaseExtended:
                 self.db.set_table("suites", suites_table_mut)
             case nil:
                 pass
+        self._suite_index[suite_key] = suite_id
 
         suite_id
 
@@ -84,20 +71,11 @@ impl TestDatabaseExtended:
     me get_or_create_test(suite_id: i64, test_name: text) -> i64:
         val name_id = self.interner.intern(test_name)
 
-        # Check if test exists
-        match self.db.get_table("tests"):
-            case Some(tests_table):
-                for row in tests_table.rows:
-                    # BUG-044: Use ?? instead of ? to avoid "try: early return"
-                    val row_suite_id = row.get_i64("suite_id") ?? -1
-                    val row_name_str = row.get_i32("name_str") ?? -1
-                    if row_suite_id != -1 and row_name_str != -1:
-                        if row_suite_id == suite_id and row_name_str == name_id:
-                            val test_id = row.get_i64("test_id") ?? -1
-                            if test_id != -1:
-                                return test_id
-            case nil:
-                pass
+        # Check if test exists — O(1) index lookup, was a full table scan
+        self.ensure_indexes()
+        val test_key = "{suite_id}:{name_id}"
+        if self._test_index.has(test_key):
+            return self._test_index[test_key]
 
         # Create new test
         val test_id = self.next_test_id
@@ -119,5 +97,6 @@ impl TestDatabaseExtended:
                 self.db.set_table("tests", tests_table_mut)
             case nil:
                 pass
+        self._test_index[test_key] = test_id
 
         test_id

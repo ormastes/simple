@@ -1,0 +1,108 @@
+# A7 perf baseline: §18.1/18.2 dispatch cost.
+# Static closed-enum match dispatch vs dict-keyed dynamic dispatch vs
+# interface (trait-object) call dispatch, 8 variants.
+# Prints one machine-readable line per bench: BENCH <name> <ns_per_op>
+
+extern fn rt_time_now_nanos() -> i64
+
+val ITERS: i64 = 1000000
+
+enum Op:
+    Add(a: i64)
+    Sub(a: i64)
+    Mul(a: i64)
+    Div(a: i64)
+    And(a: i64)
+    Or(a: i64)
+    Xor(a: i64)
+    Shl(a: i64)
+
+fn eval_static(o: Op, acc: i64) -> i64:
+    match o:
+        case Op.Add(a): acc + a
+        case Op.Sub(a): acc - a
+        case Op.Mul(a): acc + a * 2
+        case Op.Div(a): acc + a / 2
+        case Op.And(a): acc + (a & 7)
+        case Op.Or(a): acc + (a | 1)
+        case Op.Xor(a): acc + (a ^ 3)
+        case Op.Shl(a): acc + (a << 1)
+
+fn make_op(k: i64, a: i64) -> Op:
+    if k == 0: Op.Add(a)
+    elif k == 1: Op.Sub(a)
+    elif k == 2: Op.Mul(a)
+    elif k == 3: Op.Div(a)
+    elif k == 4: Op.And(a)
+    elif k == 5: Op.Or(a)
+    elif k == 6: Op.Xor(a)
+    else: Op.Shl(a)
+
+fn op_add(acc: i64, a: i64) -> i64: acc + a
+fn op_sub(acc: i64, a: i64) -> i64: acc - a
+fn op_mul(acc: i64, a: i64) -> i64: acc + a * 2
+fn op_div(acc: i64, a: i64) -> i64: acc + a / 2
+fn op_and(acc: i64, a: i64) -> i64: acc + (a & 7)
+fn op_or(acc: i64, a: i64) -> i64: acc + (a | 1)
+fn op_xor(acc: i64, a: i64) -> i64: acc + (a ^ 3)
+fn op_shl(acc: i64, a: i64) -> i64: acc + (a << 1)
+
+fn report(name: text, total_ns: i64, iters: i64):
+    print "BENCH {name} {total_ns / iters}"
+
+fn bench_static():
+    var acc: i64 = 0
+    val t0 = rt_time_now_nanos()
+    var i: i64 = 0
+    while i < ITERS:
+        acc = eval_static(make_op(i & 7, i), acc)
+        i = i + 1
+    val t1 = rt_time_now_nanos()
+    report("dispatch_static_enum_match", t1 - t0, ITERS)
+    if acc == 12345678987654321: print "# unreachable"
+
+fn bench_dict():
+    # dict-keyed dynamic dispatch: name lookup then fn-value call
+    var table: {text: fn(i64, i64) -> i64} = {}
+    table["add"] = op_add
+    table["sub"] = op_sub
+    table["mul"] = op_mul
+    table["div"] = op_div
+    table["and"] = op_and
+    table["or"] = op_or
+    table["xor"] = op_xor
+    table["shl"] = op_shl
+    var keys: [text] = ["add", "sub", "mul", "div", "and", "or", "xor", "shl"]
+    var acc: i64 = 0
+    val t0 = rt_time_now_nanos()
+    var i: i64 = 0
+    while i < ITERS:
+        val k = keys[i & 7]
+        val f = table.get(k)
+        if f != nil:
+            acc = f(acc, i)
+        i = i + 1
+    val t1 = rt_time_now_nanos()
+    report("dispatch_dict_dynamic", t1 - t0, ITERS)
+    if acc == 12345678987654321: print "# unreachable"
+
+fn bench_indirect():
+    # interface-call proxy: indirect call through an fn-value array (no hashing)
+    var slots: [fn(i64, i64) -> i64] = [op_add, op_sub, op_mul, op_div, op_and, op_or, op_xor, op_shl]
+    var acc: i64 = 0
+    val t0 = rt_time_now_nanos()
+    var i: i64 = 0
+    while i < ITERS:
+        val f = slots[i & 7]
+        acc = f(acc, i)
+        i = i + 1
+    val t1 = rt_time_now_nanos()
+    report("dispatch_interface_indirect", t1 - t0, ITERS)
+    if acc == 12345678987654321: print "# unreachable"
+
+fn main():
+    bench_static()
+    bench_indirect()
+    bench_dict()
+
+main()

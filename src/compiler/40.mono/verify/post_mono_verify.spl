@@ -1,0 +1,643 @@
+# Post-monomorphization invariant verifier (hardening plan agent M7).
+#
+# Implements the section 9.5 invariant set of
+# doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md.
+# Every counter must be zero before canonical MIR lowering; a non-zero counter
+# carries the offending symbol and the instantiation chain so the driver can
+# emit the section 17.5 `E-MONO-031` diagnostic.
+#
+# WIRING (the integrator, not this agent, makes the edit):
+#   src/compiler/80.driver/driver_hir_pipeline_passes.spl,
+#   `CompilerDriver.monomorphize_impl`, immediately after
+#       val (mono_modules, mono_stats) = run_monomorphization(...)
+#       self.ctx.hir_modules = mono_modules
+#   call `post_mono_verify(module)` for every module in `mono_modules` (or
+#   `post_mono_verify_modules(mono_modules)`) and fail the critical build when
+#   `post_mono_report_is_clean(report)` is false.
+#
+# This module is READ-ONLY with respect to the mono pass: it never mutates HIR.
+
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.common.diagnostics.span.{Span}
+
+# ============================================================================
+# Report model
+# ============================================================================
+
+struct MonoViolation:
+    """One offending site behind a non-zero section 9.5 counter."""
+    counter: text
+    symbol: text
+    detail: text
+    chain: text
+
+struct PostMonoReport:
+    """Section 9.5 post-monomorphization invariant counters.
+
+    Critical compilation fails unless every counter is zero."""
+    unresolved_type_param: i64
+    generic_call: i64
+    generic_ctor: i64
+    generic_method: i64
+    generic_emitted_definition: i64
+    any_erasure: i64
+    error_from_substitution: i64
+    unknown_mangling: i64
+    unresolved_projection: i64
+    # Fail-closed guard: a HIR variant this walker does not name explicitly.
+    unreachable_variant: i64
+    violations: [MonoViolation]
+
+fn post_mono_report_empty() -> PostMonoReport:
+    PostMonoReport(
+        unresolved_type_param: 0,
+        generic_call: 0,
+        generic_ctor: 0,
+        generic_method: 0,
+        generic_emitted_definition: 0,
+        any_erasure: 0,
+        error_from_substitution: 0,
+        unknown_mangling: 0,
+        unresolved_projection: 0,
+        unreachable_variant: 0,
+        violations: []
+    )
+
+fn post_mono_report_total(r: PostMonoReport) -> i64:
+    """Sum of every section 9.5 counter. Zero means the module is monomorphic."""
+    (r.unresolved_type_param + r.generic_call + r.generic_ctor
+     + r.generic_method + r.generic_emitted_definition + r.any_erasure
+     + r.error_from_substitution + r.unknown_mangling
+     + r.unresolved_projection + r.unreachable_variant)
+
+fn post_mono_report_is_clean(r: PostMonoReport) -> bool:
+    post_mono_report_total(r) == 0
+
+fn post_mono_report_diagnostics(r: PostMonoReport) -> [text]:
+    """Render each violation as a section 17.5 `E-MONO-031` diagnostic."""
+    var out: [text] = []
+    for v in r.violations:
+        val vt: MonoViolation = v
+        out = out.push(
+            "E-MONO-031:\n{vt.counter}: {vt.detail}\n\ndefinition:\n  {vt.symbol}\n\ninstantiation chain:\n  {vt.chain}\n\nno MIR or object file was emitted."
+        )
+    out
+
+fn unreachable_variant(enum_name: text, where_: text) -> text:
+    """A HIR variant reached the verifier that this walker does not name.
+
+    The walker below is written WITHOUT a semantic wildcard arm on purpose: a
+    new `HirTypeKind`/`HirExprKind`/`HirStmtKind` variant must be noticed. The
+    seed's match checker still demands a trailing `case _`, so that arm routes
+    here and is recorded as the fail-closed `unreachable_variant` counter
+    rather than being silently ignored."""
+    print "[post-mono-verify] unhandled {enum_name} variant at {where_}"
+    "{enum_name}@{where_}"
+
+# ============================================================================
+# Verifier
+# ============================================================================
+
+class PostMonoVerifier:
+    """Exhaustive post-mono walker over one HirModule."""
+    r: PostMonoReport
+    symbol: text
+    chain: text
+    in_specialization: bool
+
+    static fn create() -> PostMonoVerifier:
+        PostMonoVerifier(
+            r: post_mono_report_empty(),
+            symbol: "",
+            chain: "",
+            in_specialization: false
+        )
+
+    me record(counter: text, detail: text):
+        var v = self.r.violations
+        v = v.push(MonoViolation(
+            counter: counter, symbol: self.symbol,
+            detail: detail, chain: self.chain))
+        self.r.violations = v
+
+    me hit_type_param(name: text):
+        self.r.unresolved_type_param = self.r.unresolved_type_param + 1
+        self.record("unresolved TypeParam", "type parameter `{name}` reached the post-monomorphization verifier")
+
+    me hit_projection(assoc: text):
+        self.r.unresolved_projection = self.r.unresolved_projection + 1
+        self.record("unresolved associated projection", "projection `.{assoc}` was never resolved")
+
+    me hit_any(where_: text):
+        # `Any` is only an erasure defect when it appears INSIDE a
+        # specialization (a name carrying the `$` mangling separator): that is
+        # the only place monomorphization itself can have introduced it.
+        if self.in_specialization:
+            self.r.any_erasure = self.r.any_erasure + 1
+            self.record("Any introduced as generic erasure", "`Any` at {where_} in a specialized definition")
+
+    me hit_error_type(where_: text):
+        if self.in_specialization:
+            self.r.error_from_substitution = self.r.error_from_substitution + 1
+            self.record("HirTypeKind.Error created by substitution", "`Error` type at {where_} in a specialized definition")
+
+    me hit_unreachable(enum_name: text, where_: text):
+        self.r.unreachable_variant = self.r.unreachable_variant + 1
+        self.record("unhandled HIR variant", unreachable_variant(enum_name, where_))
+
+    # ------------------------------------------------------------------
+    # Types — every HirTypeKind variant is named. Covered (27):
+    # Int Float Bool Char Str Unit Tuple Array Slice Dict Ref Ptr Optional
+    # Result Named TypeParam Union DynTrait Function Projection Isolated
+    # Infer Error Never Any Tensor Layer
+    # ------------------------------------------------------------------
+    me walk_type(ty: HirType):
+        if ty == nil:
+            return
+        match ty.kind:
+            case Int(_, _): pass_do_nothing("monomorphic primitive")
+            case Float(_): pass_do_nothing("monomorphic primitive")
+            case Bool: pass_do_nothing("monomorphic primitive")
+            case Char: pass_do_nothing("monomorphic primitive")
+            case Str: pass_do_nothing("monomorphic primitive")
+            case Unit: pass_do_nothing("monomorphic primitive")
+            case Never: pass_do_nothing("monomorphic primitive")
+            case Tuple(elements): self.walk_types(elements)
+            case Array(element, _): self.walk_type(element)
+            case Slice(element): self.walk_type(element)
+            case Dict(key, value):
+                self.walk_type(key)
+                self.walk_type(value)
+            case Ref(inner, _): self.walk_type(inner)
+            case Ptr(inner, _): self.walk_type(inner)
+            case Optional(inner): self.walk_type(inner)
+            case Result(ok, err):
+                self.walk_type(ok)
+                self.walk_type(err)
+            case Named(_, args): self.walk_types(args)
+            case TypeParam(name, bounds):
+                self.hit_type_param(name)
+                self.walk_types(bounds)
+            case Union(members): self.walk_types(members)
+            case DynTrait(_): pass_do_nothing("dyn trait is not a generic residue")
+            case Function(params, ret, _):
+                self.walk_types(params)
+                self.walk_type(ret)
+            case Projection(base, assoc_name):
+                self.hit_projection(assoc_name)
+                self.walk_type(base)
+            case Isolated(inner): self.walk_type(inner)
+            case Infer(_, _): pass_do_nothing("inference variable is a typecheck concern")
+            case Error: self.hit_error_type("type position")
+            case Any: self.hit_any("type position")
+            case Tensor(element, _, _): self.walk_type(element)
+            case Layer(_, _): pass_do_nothing("layer dims carry no HirType")
+            case _: self.hit_unreachable("HirTypeKind", "walk_type")
+
+    me walk_types(tys: [HirType]):
+        if tys == nil:
+            return
+        for t in tys:
+            val tt: HirType = t
+            self.walk_type(tt)
+
+    me type_param_count_of(ty: HirType) -> i64:
+        """Type params found in `ty`, measured as the delta this walk adds."""
+        val before = self.r.unresolved_type_param
+        self.walk_type(ty)
+        self.r.unresolved_type_param - before
+
+    # ------------------------------------------------------------------
+    # Expressions — every HirExprKind variant is named. Covered (55):
+    # IntLit FloatLit StringLit BoolLit CharLit UnitLit NilLit ArrayLit
+    # ArrayRepeat TupleLit DictLit SetLit Var NamedVar Field Index TupleIndex
+    # OptionalChain NullCoalesce ExistsCheck Unwrap Binary Unary Call
+    # MethodCall StaticCall If IfChain MatchCase Loop While For With Lambda
+    # Block HostGpuLane Return Break Continue Throw Try Await Yield StructLit
+    # EnumLit Cast As Range Comprehension CustomBlock LossBlock NogradBlock
+    # UnsafeBlock InlineAsm InlineAsmMatch Error
+    # ------------------------------------------------------------------
+    me walk_expr(expr: HirExpr):
+        if expr == nil:
+            return
+        if expr.has_type_:
+            self.walk_type(expr.type_)
+        match expr.kind:
+            case IntLit(_, _): pass_do_nothing("literal")
+            case FloatLit(_, _): pass_do_nothing("literal")
+            case StringLit(_, interpolations): self.walk_interpolations(interpolations)
+            case BoolLit(_): pass_do_nothing("literal")
+            case CharLit(_): pass_do_nothing("literal")
+            case UnitLit: pass_do_nothing("literal")
+            case NilLit: pass_do_nothing("literal")
+            case ArrayLit(elements, type_):
+                self.walk_opt_type(type_)
+                self.walk_exprs(elements)
+            case ArrayRepeat(value, count, elem_type):
+                self.walk_opt_type(elem_type)
+                self.walk_expr(value)
+                self.walk_expr(count)
+            case TupleLit(elements): self.walk_exprs(elements)
+            case DictLit(entries, key_type, value_type):
+                self.walk_type(key_type)
+                self.walk_opt_type(value_type)
+                self.walk_pairs(entries)
+            case SetLit(elements, elem_type):
+                self.walk_opt_type(elem_type)
+                self.walk_exprs(elements)
+            case Var(_): pass_do_nothing("symbol reference")
+            case NamedVar(_, _): pass_do_nothing("symbol reference")
+            case Field(base, _, _): self.walk_expr(base)
+            case Index(base, index):
+                self.walk_expr(base)
+                self.walk_expr(index)
+            case TupleIndex(base, _): self.walk_expr(base)
+            case OptionalChain(base, _): self.walk_expr(base)
+            case NullCoalesce(left, right):
+                self.walk_expr(left)
+                self.walk_expr(right)
+            case ExistsCheck(base): self.walk_expr(base)
+            case Unwrap(base): self.walk_expr(base)
+            case Binary(_, left, right):
+                self.walk_expr(left)
+                self.walk_expr(right)
+            case Unary(_, operand): self.walk_expr(operand)
+            case Call(callee, args, type_args):
+                # `rewrite_expr` empties `type_args` when a call site is
+                # repointed at its specialization, so ANY surviving type
+                # argument is an unrewritten generic call.
+                if type_args != nil:
+                    if type_args.len() > 0:
+                        self.r.generic_call = self.r.generic_call + 1
+                        self.record("generic call", "call site still carries {type_args.len()} type argument(s)")
+                self.walk_types(type_args)
+                self.walk_expr(callee)
+                self.walk_call_args(args)
+            case MethodCall(receiver, method, args, _):
+                val rt: HirExpr = receiver
+                if rt != nil:
+                    if rt.has_type_:
+                        if self.type_param_count_of(rt.type_) > 0:
+                            self.r.generic_method = self.r.generic_method + 1
+                            self.record("generic method", "method `{method}` dispatched on a receiver still typed by a type parameter")
+                self.walk_expr(receiver)
+                self.walk_call_args(args)
+            case StaticCall(type_, method, args, _):
+                if self.type_param_count_of(type_) > 0:
+                    self.r.generic_method = self.r.generic_method + 1
+                    self.record("generic method", "static call `{method}` on a type still carrying a type parameter")
+                self.walk_call_args(args)
+            case If(cond, then_, else_):
+                self.walk_expr(cond)
+                self.walk_block(then_)
+                self.walk_opt_block(else_)
+            case IfChain(arms, else_):
+                for a in arms:
+                    val at: HirIfArm = a
+                    self.walk_expr(at.cond)
+                    self.walk_block(at.then_)
+                self.walk_opt_block(else_)
+            case MatchCase(scrutinee, arms):
+                self.walk_expr(scrutinee)
+                for a in arms:
+                    val mt: HirMatchArm = a
+                    self.walk_pattern(mt.pattern)
+                    if mt.has_guard:
+                        self.walk_expr(mt.guard)
+                    self.walk_block(mt.body)
+            case Loop(body, _): self.walk_block(body)
+            case While(cond, body, _):
+                self.walk_expr(cond)
+                self.walk_block(body)
+            case For(_, iter, body, _):
+                self.walk_expr(iter)
+                self.walk_block(body)
+            case With(items, body):
+                for i in items:
+                    val it: HirWithItem = i
+                    self.walk_expr(it.context_expr)
+                self.walk_block(body)
+            case Lambda(params, body, _):
+                self.walk_params(params)
+                self.walk_expr(body)
+            case Block(block): self.walk_block(block)
+            case HostGpuLane(_, _, marker, body):
+                self.walk_expr(marker)
+                self.walk_block(body)
+            case Return(value): self.walk_opt_expr(value)
+            case Break(_, value): self.walk_opt_expr(value)
+            case Continue(_): pass_do_nothing("control transfer")
+            case Throw(value): self.walk_expr(value)
+            case Try(e): self.walk_expr(e)
+            case Await(e): self.walk_expr(e)
+            case Yield(value): self.walk_opt_expr(value)
+            case StructLit(type_, fields):
+                if self.type_param_count_of(type_) > 0:
+                    self.r.generic_ctor = self.r.generic_ctor + 1
+                    self.record("generic constructor", "struct literal constructs a type still carrying a type parameter")
+                self.walk_named_exprs(fields)
+            case EnumLit(type_, variant, payload):
+                if self.type_param_count_of(type_) > 0:
+                    self.r.generic_ctor = self.r.generic_ctor + 1
+                    self.record("generic constructor", "enum literal `{variant}` constructs a type still carrying a type parameter")
+                self.walk_enum_payload(payload)
+            case Cast(e, target):
+                self.walk_expr(e)
+                self.walk_type(target)
+            case As(e, target):
+                self.walk_expr(e)
+                self.walk_type(target)
+            case Range(start, end, _, step):
+                self.walk_expr(start)
+                self.walk_expr(end)
+                self.walk_opt_expr(step)
+            case Comprehension(_, e, clauses):
+                self.walk_expr(e)
+                for c in clauses:
+                    val ct: HirCompClause = c
+                    self.walk_comp_clause(ct)
+            case CustomBlock(_, _): pass_do_nothing("custom block payload is opaque text")
+            case LossBlock(body): self.walk_block(body)
+            case NogradBlock(body): self.walk_block(body)
+            case UnsafeBlock(body): self.walk_block(body)
+            case InlineAsm(_): pass_do_nothing("inline asm carries no HirType")
+            case InlineAsmMatch(_): pass_do_nothing("inline asm carries no HirType")
+            case Error: pass_do_nothing("expression error recovery is a frontend concern")
+            case _: self.hit_unreachable("HirExprKind", "walk_expr")
+
+    me walk_comp_clause(clause: HirCompClause):
+        if clause == nil:
+            return
+        match clause.kind:
+            case For(_, iter): self.walk_expr(iter)
+            case If(cond): self.walk_expr(cond)
+            case _: self.hit_unreachable("HirCompClauseKind", "walk_comp_clause")
+
+    # ------------------------------------------------------------------
+    # Patterns — every HirPatternKind variant is named. Covered (10):
+    # Wildcard Literal Binding Tuple Array Struct Enum Or Range Error
+    # ------------------------------------------------------------------
+    me walk_pattern(pattern: HirPattern):
+        if pattern == nil:
+            return
+        if pattern.has_type_:
+            self.walk_type(pattern.type_)
+        match pattern.kind:
+            case Wildcard: pass_do_nothing("wildcard binds nothing")
+            case Literal(value): self.walk_expr(value)
+            case Binding(_, _): pass_do_nothing("binding has no nested type")
+            case Tuple(elements): self.walk_patterns(elements)
+            case Array(elements, _): self.walk_patterns(elements)
+            case Struct(type_, fields):
+                self.walk_type(type_)
+                self.walk_named_patterns(fields)
+            case Enum(type_, _, payload):
+                self.walk_type(type_)
+                self.walk_pattern_payload(payload)
+            case Or(patterns): self.walk_patterns(patterns)
+            case Range(start, end, _):
+                self.walk_expr(start)
+                self.walk_expr(end)
+            case Error: pass_do_nothing("pattern error recovery is a frontend concern")
+            case _: self.hit_unreachable("HirPatternKind", "walk_pattern")
+
+    # ------------------------------------------------------------------
+    # Statements — every HirStmtKind variant is named. Covered (5):
+    # Expr Let Assign Block AsmAssert
+    # ------------------------------------------------------------------
+    me walk_stmt(stmt: HirStmt):
+        if stmt == nil:
+            return
+        match stmt.kind:
+            case Expr(expr): self.walk_expr(expr)
+            case Let(_, type_, init):
+                self.walk_type(type_)
+                self.walk_expr(init)
+            case Assign(target, _, value):
+                self.walk_expr(target)
+                self.walk_expr(value)
+            case Block(block): self.walk_block(block)
+            case AsmAssert(_): pass_do_nothing("asm target guard carries no HirType")
+            case _: self.hit_unreachable("HirStmtKind", "walk_stmt")
+
+    me walk_block(block: HirBlock):
+        if block == nil:
+            return
+        for s in block.stmts:
+            val st: HirStmt = s
+            self.walk_stmt(st)
+        if block.has:
+            self.walk_expr(block.value)
+
+    # ------------------------------------------------------------------
+    # Small helpers
+    # ------------------------------------------------------------------
+    me walk_opt_type(ty: HirType?):
+        match ty:
+            Some(t):
+                val tt: HirType = t
+                self.walk_type(tt)
+            nil:
+                pass_do_nothing("absent type")
+
+    me walk_opt_expr(expr: HirExpr?):
+        match expr:
+            Some(e):
+                val et: HirExpr = e
+                self.walk_expr(et)
+            nil:
+                pass_do_nothing("absent expression")
+
+    me walk_opt_block(block: HirBlock?):
+        match block:
+            Some(b):
+                val bt: HirBlock = b
+                self.walk_block(bt)
+            nil:
+                pass_do_nothing("absent block")
+
+    me walk_exprs(exprs: [HirExpr]):
+        if exprs == nil:
+            return
+        for e in exprs:
+            val et: HirExpr = e
+            self.walk_expr(et)
+
+    me walk_patterns(patterns: [HirPattern]):
+        if patterns == nil:
+            return
+        for p in patterns:
+            val pt: HirPattern = p
+            self.walk_pattern(pt)
+
+    me walk_named_patterns(fields: [(text, HirPattern)]):
+        if fields == nil:
+            return
+        for f in fields:
+            val (_, p) = f
+            val pt: HirPattern = p
+            self.walk_pattern(pt)
+
+    me walk_pattern_payload(payload: HirPatternPayload?):
+        match payload:
+            Some(p):
+                match p:
+                    case Tuple(patterns): self.walk_patterns(patterns)
+                    case Struct(fields): self.walk_named_patterns(fields)
+                    case _: self.hit_unreachable("HirPatternPayload", "walk_pattern_payload")
+            nil:
+                pass_do_nothing("absent payload")
+
+    me walk_enum_payload(payload: HirEnumPayload?):
+        match payload:
+            Some(p):
+                match p:
+                    case Tuple(values): self.walk_exprs(values)
+                    case Struct(fields): self.walk_named_exprs(fields)
+                    case _: self.hit_unreachable("HirEnumPayload", "walk_enum_payload")
+            nil:
+                pass_do_nothing("absent payload")
+
+    me walk_pairs(entries: [(HirExpr, HirExpr)]):
+        if entries == nil:
+            return
+        for e in entries:
+            val (k, v) = e
+            val kt: HirExpr = k
+            val vt: HirExpr = v
+            self.walk_expr(kt)
+            self.walk_expr(vt)
+
+    me walk_named_exprs(fields: [(text, HirExpr)]):
+        if fields == nil:
+            return
+        for f in fields:
+            val (_, e) = f
+            val et: HirExpr = e
+            self.walk_expr(et)
+
+    me walk_call_args(args: [HirCallArg]):
+        if args == nil:
+            return
+        for a in args:
+            val at: HirCallArg = a
+            self.walk_expr(at.value)
+
+    me walk_interpolations(interps: [HirInterpolation]?):
+        match interps:
+            Some(items):
+                for i in items:
+                    val it: HirInterpolation = i
+                    self.walk_expr(it.expr)
+            nil:
+                pass_do_nothing("plain string")
+
+    me walk_params(params: [HirParam]):
+        if params == nil:
+            return
+        for p in params:
+            val pt: HirParam = p
+            self.walk_type(pt.type_)
+            if pt.has_default:
+                self.walk_expr(pt.default)
+
+    # ------------------------------------------------------------------
+    # Definitions
+    # ------------------------------------------------------------------
+    me check_mangling(name: text):
+        """`mangle_type` (40.mono/monomorphize/engine.spl) emits `unknown` for
+        an unmangleable type and `param_<T>` for an unsubstituted type
+        parameter. Either token in a specialized name is an unknown mangling."""
+        if name.contains("unknown"):
+            self.r.unknown_mangling = self.r.unknown_mangling + 1
+            self.record("unknown type mangling", "specialized symbol `{name}` contains the `unknown` mangling token")
+        else:
+            if name.contains("param_"):
+                self.r.unknown_mangling = self.r.unknown_mangling + 1
+                self.record("unknown type mangling", "specialized symbol `{name}` mangles an unsubstituted type parameter")
+
+    me is_template(type_params: [HirTypeParam], flagged: bool) -> bool:
+        if flagged:
+            return true
+        if type_params == nil:
+            return false
+        type_params.len() > 0
+
+    me enter(module_name: text, def_name: text):
+        self.symbol = "{module_name}.{def_name}"
+        self.in_specialization = def_name.contains("$")
+        if self.in_specialization:
+            self.chain = "{module_name}.{def_name} (template {def_name.split("$")[0]})"
+        else:
+            self.chain = "{module_name}.{def_name}"
+
+    me flag_template(kind: text, def_name: text):
+        self.r.generic_emitted_definition = self.r.generic_emitted_definition + 1
+        self.record("generic emitted definition", "{kind} `{def_name}` is still a generic template and is still emittable")
+
+    me verify_module(module: HirModule) -> PostMonoReport:
+        if module == nil:
+            return self.r
+        val mname: text = module.name
+        for key in module.functions.keys():
+            val f: HirFunction = module.functions[key]
+            self.enter(mname, f.name)
+            if self.is_template(f.type_params, f.is_generic_template):
+                self.flag_template("function", f.name)
+                continue
+            if self.in_specialization:
+                self.check_mangling(f.name)
+            self.walk_params(f.params)
+            self.walk_type(f.return_type)
+            self.walk_block(f.body)
+        for key in module.structs.keys():
+            val s: HirStruct = module.structs[key]
+            self.enter(mname, s.name)
+            if self.is_template(s.type_params, s.is_generic_template):
+                self.flag_template("struct", s.name)
+                continue
+            if self.in_specialization:
+                self.check_mangling(s.name)
+            for fld in s.fields:
+                val ft: HirField = fld
+                self.walk_type(ft.type_)
+        for key in module.classes.keys():
+            val c: HirClass = module.classes[key]
+            self.enter(mname, c.name)
+            if self.is_template(c.type_params, c.is_generic_template):
+                self.flag_template("class", c.name)
+                continue
+            if self.in_specialization:
+                self.check_mangling(c.name)
+            for fld in c.fields:
+                val ft2: HirField = fld
+                self.walk_type(ft2.type_)
+        for key in module.enums.keys():
+            val e: HirEnum = module.enums[key]
+            self.enter(mname, e.name)
+            if self.is_template(e.type_params, e.is_generic_template):
+                self.flag_template("enum", e.name)
+                continue
+            if self.in_specialization:
+                self.check_mangling(e.name)
+        self.r
+
+# ============================================================================
+# Entry points
+# ============================================================================
+
+fn post_mono_verify(module: HirModule) -> PostMonoReport:
+    """Verify the section 9.5 invariants over one post-mono HIR module."""
+    var v = PostMonoVerifier.create()
+    v.verify_module(module)
+
+fn post_mono_verify_modules(modules: Dict<text, HirModule>) -> PostMonoReport:
+    """Verify every post-mono module, accumulating into one report."""
+    var v = PostMonoVerifier.create()
+    if modules == nil:
+        return v.r
+    for key in modules.keys():
+        val m: HirModule = modules[key]
+        v.verify_module(m)
+    v.r

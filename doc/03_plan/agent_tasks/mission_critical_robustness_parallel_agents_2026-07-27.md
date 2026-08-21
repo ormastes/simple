@@ -3,6 +3,8 @@
 **Date:** 2026-07-27 (verified against source 2026-07-28)
 **Research base:** `doc/01_research/language/simple_vs_rust_mission_critical_2026-07-27.md`
 (§13 verification appendix has file:line ground truth for every premise below).
+**See also (2026-08-21):** the completeness/Any/mono/aspect hardening lanes extend this plan's wave model — `doc/03_plan/compiler/hardening/critical_hardening_plan_2026-08-21.md` (waves 0–5) and `doc/05_design/compiler/hardening/critical_completeness_design_2026-08-21.md`.
+
 
 **Principle:** shared contracts first (serial Wave 0), then agents work individually on
 disjoint file ownership. No agent edits a shared dispatcher, root export, or aggregate

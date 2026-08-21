@@ -535,9 +535,14 @@ SPL_CORE_C_WEAK bool rt_atomic_int_compare_exchange(int64_t handle, int64_t curr
         &value->value, &current, new_value, memory_order_seq_cst, memory_order_seq_cst);
 }
 
-SPL_CORE_C_WEAK void rt_thread_sleep(int64_t millis) {
-    rt_sleep_ms(millis);
-}
+/* rt_thread_sleep is NOT defined here.  runtime_thread.c is the canonical
+ * OS-thread provider (see native_project/tools.rs: "runtime_thread.c owns both
+ * rt_thread_* and rt_pool_*") and is compiled into every archive that also
+ * carries this file, including the Stage4 core archive built with
+ * -DSIMPLE_CORE_C_STANDALONE=1.  The weak fallback that used to live here was
+ * therefore never selected and only made the symbol appear twice in the core
+ * archive, tripping the Stage4 SQLite C-provider "must own <symbol> exactly
+ * once" contract. */
 
 static volatile sig_atomic_t rt_core_signal_flags[32];
 static volatile sig_atomic_t rt_core_atexit_flag;

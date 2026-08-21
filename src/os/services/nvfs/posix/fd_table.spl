@@ -16,6 +16,9 @@
 
 use std.fs_driver.error.{FsError}
 
+val NVFS_POSIX_MAX_FD_SLOTS: i64 = 65536
+val NVFS_POSIX_MAX_REFCOUNT: u32 = 0xFFFFFFFFu32
+
 struct FdEntry:
     """Per-fd state tracked by the POSIX shim.
 
@@ -49,7 +52,7 @@ impl FdTable:
         )
         FdTable(entries: [sentinel], free_slots: [])
 
-    fn open(arena_id: i64, mode: u32) -> u32:
+    fn open(arena_id: i64, mode: u32) -> Result<u32, FsError>:
         """Allocate a fresh fd slot for arena_id with the given mode flags.
 
         Reuses a free slot if available; otherwise appends. Returns the fd id.
@@ -71,10 +74,12 @@ impl FdTable:
                 i = i + 1
             self.free_slots = new_free
             self.entries[idx as i64] = entry
-            return idx
+            return Ok(idx)
+        if self.entries.len() >= NVFS_POSIX_MAX_FD_SLOTS:
+            return Err(FsError.TooLarge)
         val idx = self.entries.len() as u32
         self.entries.push(entry)
-        idx
+        Ok(idx)
 
     fn lookup(fd: u32) -> Option<FdEntry>:
         """Return the entry for fd, or None if out-of-range/uninitialized."""
@@ -102,6 +107,8 @@ impl FdTable:
         val e = self.entries[idx]
         if e.refcount == 0:
             return Err(FsError.InvalidArg)
+        if e.refcount == NVFS_POSIX_MAX_REFCOUNT:
+            return Err(FsError.TooLarge)
         val updated = FdEntry(
             arena_id: e.arena_id,
             refcount: e.refcount + 1,

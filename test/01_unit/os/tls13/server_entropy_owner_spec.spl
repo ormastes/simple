@@ -1,0 +1,115 @@
+# TLS 1.3 server handshake entropy owner — reproduce spec
+#
+# Bug: doc/08_tracking/bug/simpleos_dbd_dbfs_tls_auth_gap_2026-08-20.md
+#
+# The record states: "A canonical typed entropy owner does exist at
+# os.crypto.entropy.crypto_entropy_bytes, but tls13_accept bypasses it and
+# calls legacy random_bytes directly, whose API cannot return typed entropy
+# failure."  A failing or zeroed draw was therefore indistinguishable from a
+# good one and would have been used as the server's ECDH private scalar and
+# ServerHello random.  tls13_accept now draws both through the canonical owner
+# and admits each draw before any key derivation.
+
+use os.tls13.server.{
+    tls13_accept, tls13_server_entropy_admits,
+    Tls13ServerConfig, Tls13AcceptResult
+}
+use os.crypto.entropy.{
+    crypto_entropy_bytes, crypto_entropy_validate_candidate_for_test,
+    CRYPTO_ENTROPY_MAX_REQUEST
+}
+
+fn _zeros(n: u64) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < n:
+        out.push(0u8)
+        i = i + 1u64
+    out
+
+fn _test_config() -> Tls13ServerConfig:
+    Tls13ServerConfig {
+        cert_chain: [[1u8, 2u8, 3u8]],
+        server_pkcs8: [4u8, 5u8, 6u8],
+        server_sig_scheme: 0x0807u16,
+        alpn_protocols: []
+    }
+
+describe "server handshake entropy admission":
+
+    it "rejects an all-zero 32-byte draw":
+        expect(tls13_server_entropy_admits(_zeros(32u64))).to_be("server_entropy_all_zero")
+
+    it "rejects an empty draw":
+        expect(tls13_server_entropy_admits([])).to_be("server_entropy_wrong_length")
+
+    it "rejects a short draw":
+        expect(tls13_server_entropy_admits(_zeros(31u64))).to_be("server_entropy_wrong_length")
+
+    it "rejects an over-long draw":
+        expect(tls13_server_entropy_admits(_zeros(33u64))).to_be("server_entropy_wrong_length")
+
+    it "admits a 32-byte draw with a nonzero byte":
+        var material = _zeros(32u64)
+        material[31] = 1u8
+        expect(tls13_server_entropy_admits(material)).to_be("")
+
+describe "the canonical entropy owner reports failure typed":
+
+    # A live `crypto_entropy_bytes(32)` draw is deliberately NOT exercised here:
+    # its platform extern `rt_entropy_fill` (src/lib/nogc_sync_mut/crypto/
+    # entropy_platform.spl:7) has no runtime backing, so the call traps with
+    # "semantic: unknown extern function: rt_entropy_fill" rather than
+    # returning a typed Err. That is the concrete remaining entropy blocker
+    # recorded in the DBD bug record; it is not something this spec can assert
+    # around, and it is not masked by the tests below, which cover every path
+    # that returns before the extern is reached.
+
+    it "rejects a zero-length request instead of returning empty bytes":
+        expect(crypto_entropy_bytes(0u64).is_err()).to_be(true)
+
+    it "rejects a request over the owner limit":
+        expect(crypto_entropy_bytes(CRYPTO_ENTROPY_MAX_REQUEST + 1u64).is_err()).to_be(true)
+
+    it "rejects a provider draw of the wrong length":
+        val checked = crypto_entropy_validate_candidate_for_test(32u64, true, _zeros(16u64))
+        expect(checked.is_err()).to_be(true)
+
+    it "rejects any draw when the platform is not ready":
+        val checked = crypto_entropy_validate_candidate_for_test(32u64, false, _zeros(32u64))
+        expect(checked.is_err()).to_be(true)
+
+describe "tls13_accept still fails closed before drawing entropy":
+
+    it "rejects a negative socket":
+        match tls13_accept(-1, _test_config()):
+            case Tls13AcceptResult.Failed(reason):
+                expect(reason).to_be("invalid_socket_fd")
+            case Tls13AcceptResult.Accepted(_ctx):
+                expect(false).to_be(true)
+
+    it "rejects a config with no certificate chain":
+        val cfg = Tls13ServerConfig {
+            cert_chain: [],
+            server_pkcs8: [4u8],
+            server_sig_scheme: 0x0807u16,
+            alpn_protocols: []
+        }
+        match tls13_accept(3, cfg):
+            case Tls13AcceptResult.Failed(reason):
+                expect(reason).to_be("missing_certificate_chain")
+            case Tls13AcceptResult.Accepted(_ctx):
+                expect(false).to_be(true)
+
+    it "rejects a config with no private key":
+        val cfg = Tls13ServerConfig {
+            cert_chain: [[1u8]],
+            server_pkcs8: [],
+            server_sig_scheme: 0x0807u16,
+            alpn_protocols: []
+        }
+        match tls13_accept(3, cfg):
+            case Tls13AcceptResult.Failed(reason):
+                expect(reason).to_be("missing_server_private_key")
+            case Tls13AcceptResult.Accepted(_ctx):
+                expect(false).to_be(true)

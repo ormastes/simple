@@ -2403,9 +2403,20 @@ impl Lowerer {
                 // the scalar case above): the word is a real object reference,
                 // not a tagged scalar, and the concrete type is what lets the
                 // following `.field` resolve against the right layout.
+                // Same defect class again for a nullable USER ENUM (`Color?`).
+                // It is `HirType::Pointer { inner: Enum }`, and the outer
+                // `result_like_payload_type(...).is_none()` above has already
+                // established it is NOT a Result/Option, so the hashed-"Err"
+                // discriminant test below is false for every one of its
+                // variants: under the JIT `m!` yielded a word that matched no
+                // `case`, and the seed interpreter raised
+                // `force unwrap failed: expected Some or Ok, got Color::Green`.
+                // Bug: doc/08_tracking/bug/jit_optional_class_unwrap_field_access_segv_2026-08-20.md
+                // Identity on the value, narrowing only the static type, exactly
+                // as for the struct/class pointee.
                 if matches!(
                     self.module.types.get(pointee),
-                    Some(HirType::Struct { .. })
+                    Some(HirType::Struct { .. }) | Some(HirType::Enum { .. })
                 ) {
                     return Ok(HirExpr {
                         kind: inner_hir.kind,

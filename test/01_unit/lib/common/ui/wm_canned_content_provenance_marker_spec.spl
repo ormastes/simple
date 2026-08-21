@@ -1,0 +1,123 @@
+# @cover src/lib/common/ui/window_scene_draw_ir.spl 5%
+# @tag: unit, ui, wm, provenance
+"""
+# Canned WM app content must carry its `[canned]` provenance marker
+
+## Overview
+
+`shared_wm_scene_render_app_content`
+(`src/lib/common/ui/window_scene_draw_ir.spl`) paints live app content when
+`state_text` is non-empty, and otherwise falls back to a per-title table of
+hard-coded demo text. The module's own contract comment states that "every
+canned block is tagged with an explicit `[canned]` marker line so a captured
+frame is visibly" not-live.
+
+That marker is the ONLY thing distinguishing a demo frame from a real one in a
+captured screenshot. A canned branch that omits it produces a frame that looks
+like genuine live app output — a silent wrong result, not a crash. The
+`Calculator` branch omitted it (four content lines, no marker), so a captured
+calculator window was indistinguishable from a live one.
+
+## Examples
+
+The reproducing example pins the `Calculator` branch specifically. The
+class-detection example generalizes: it walks EVERY canned title branch in the
+function and requires each to emit the marker, so a newly added demo app that
+forgets the marker fails here rather than shipping an unlabelled fake frame.
+"""
+
+use std.spec
+use std.fs.{read_to_string}
+
+val _SOURCE_PATH = "src/lib/common/ui/window_scene_draw_ir.spl"
+val _MARKER = "[canned demo — no live content]"
+
+# The canned-content function body, as text: from its `fn` line to the start of
+# the next top-level declaration. Returning "" makes every assertion below fail
+# loudly rather than vacuously pass if the function is ever renamed.
+fn _canned_fn_body() -> text:
+    val src_opt = read_to_string(_SOURCE_PATH)
+    if src_opt == nil:
+        return ""
+    val src = src_opt!
+    val start_marker = "fn shared_wm_scene_render_app_content("
+    val start = src.index_of(start_marker)
+    if start < 0:
+        return ""
+    val rest = src.substring(start, src.len())
+    val end_marker = "\nfn _shared_wm_scene_window_content_rect("
+    val end = rest.index_of(end_marker)
+    if end < 0:
+        return rest
+    rest.substring(0, end)
+
+# The slice of the canned table that handles one title, i.e. from that title's
+# `if title == "<name>"` guard up to the `return` that closes the branch.
+fn _branch_for(body: text, title: text) -> text:
+    val guard = "if title == \"" + title + "\""
+    val start = body.index_of(guard)
+    if start < 0:
+        return ""
+    val rest = body.substring(start, body.len())
+    val end = rest.index_of("\n        return")
+    if end < 0:
+        return rest
+    rest.substring(0, end)
+
+# Every title that the canned table branches on. Discovered from the source
+# itself so a new demo app is covered automatically instead of needing this
+# list edited — that is what makes the detection example generalize.
+fn _canned_titles(body: text) -> [text]:
+    var titles: [text] = []
+    val guard = "if title == \""
+    var cursor = 0
+    while cursor < body.len():
+        val rest = body.substring(cursor, body.len())
+        val hit = rest.index_of(guard)
+        if hit < 0:
+            break
+        val after = rest.substring(hit + guard.len(), rest.len())
+        val close = after.index_of("\"")
+        if close < 0:
+            break
+        titles = titles + [after.substring(0, close)]
+        cursor = cursor + hit + guard.len() + close
+    titles
+
+describe "canned WM app content provenance marker":
+
+    it "labels the Calculator canned block as canned (reproducing case)":
+        val body = _canned_fn_body()
+        expect(body.len() > 0).to_equal(true)
+        val branch = _branch_for(body, "Calculator")
+        expect(branch.len() > 0).to_equal(true)
+        expect(branch.contains(_MARKER)).to_equal(true)
+
+    it "labels EVERY canned title branch, not just the ones checked by hand":
+        val body = _canned_fn_body()
+        expect(body.len() > 0).to_equal(true)
+        val titles = _canned_titles(body)
+        # A guard against this example silently covering nothing: the table has
+        # several demo apps, so an empty or near-empty discovery is a bug in
+        # this spec, not a pass.
+        expect(titles.len() >= 5).to_equal(true)
+        var unmarked: [text] = []
+        var i = 0
+        while i < titles.len():
+            val branch = _branch_for(body, titles[i])
+            if not branch.contains(_MARKER):
+                unmarked = unmarked + [titles[i]]
+            i = i + 1
+        expect(unmarked).to_equal([])
+
+    it "still lets live state_text bypass the canned table entirely":
+        # The marker requirement must not have been satisfied by making the
+        # marker unconditional — live content must remain unlabelled.
+        val body = _canned_fn_body()
+        expect(body.len() > 0).to_equal(true)
+        expect(body.contains("if state_text != \"\":")).to_equal(true)
+        val live_start = body.index_of("if state_text != \"\":")
+        val live_rest = body.substring(live_start, body.len())
+        val live_end = live_rest.index_of("if title ==")
+        val live_branch = if live_end > 0: live_rest.substring(0, live_end) else: live_rest
+        expect(live_branch.contains(_MARKER)).to_equal(false)

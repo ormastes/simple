@@ -1,0 +1,138 @@
+"""
+# HIR marks unmonomorphized generic declarations as templates (#158 Phase B, HIR half)
+
+Every HIR lowering site hardcoded `is_generic_template: false` (or left the
+field at its struct default), so the flag was a constant lie: a generic
+`fn`/`struct`/`class`/impl-method reached MIR indistinguishable from a
+concrete one. That made every DOWNSTREAM template check dead code that could
+never fire -- `50.mir/hwir/mir_to_hwir.spl`'s `HWIR-E-GENERIC` reject, the
+VHDL backend's equivalent, and the `.smf` generic-template partitioning in
+`80.driver/smf_serialization.spl` all branch on `is_generic_template` and all
+saw `false` unconditionally.
+
+This spec pins the HIR half of #158 Phase B for the two tiers HIR can express
+today: **generic struct** and **generic class**. Both read `false` before this
+change and `true` after.
+
+The other two tiers named in
+`doc/03_plan/compiler/generics/native_monomorphization_plan_2026-07-17.md` --
+generic free fn, and a method declared in an impl body for a generic type --
+are now covered too (last two `it` blocks). They used to be impossible to
+express: `HirFunction` in `20.hir/hir_definitions.spl` had **no**
+`is_generic_template` field (only `HirStruct`, `HirClass`, `HirEnum` and
+`HirTrait` did), and constructing one with that name failed semantic analysis
+with `class HirFunction has no field named is_generic_template`. The field now
+exists (declared LAST, because the seed fills partial named constructions
+positionally) and both function-tier lowering sites set it.
+
+Deliberately ALSO asserts that the Phase A loud gate still fires. Marking a
+template is not the same as monomorphizing it: until `rewrite_module` in
+`40.mono/monomorphize_integration.spl` stops being the identity function,
+letting a generic through would be a silent miscompile. See
+`doc/08_tracking/bug/hir_generic_templates_unconsumed_by_mono_pass_2026-08-21.md`
+for exactly what remains.
+
+## Harness landmine
+The parse -> HIR pipeline is inlined in each `it` block on purpose, mirroring
+`test/01_unit/compiler/borrow/iso_parse_pipeline_spec.spl`: running the
+identical code inside a module-level helper fn loses recorded lowering state
+when read back afterward.
+"""
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+# Function bodies are lowered through statements.* (lower_hir_stmt_multi);
+# without this import the fn-tier examples fail with a missing-method
+# semantic error rather than a wrong flag.
+use compiler.hir.hir_lowering.statements.*
+
+describe "HIR generic template marking (#158 Phase B, HIR half)":
+    it "marks a generic struct as a template and still reports the Phase A gate":
+        val src = "struct Box<T>:\n" +
+            "    v: T\n"
+        val parsed = parse_full_frontend(src, "testdata/fixture_generic_struct.spl", "fixture_generic_struct", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("testdata/fixture_generic_struct.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        var marked = 0
+        var total = 0
+        for key in hir.structs.keys():
+            val s = hir.structs[key]
+            if s.name == "Box":
+                total = total + 1
+                if s.is_generic_template:
+                    marked = marked + 1
+        expect(total).to_be_greater_than(0)
+        expect(marked).to_equal(total)
+        # Phase A must still be loud: marking is not monomorphizing.
+        var gated = 0
+        for msg in hir_lowering.diagnostic_messages:
+            if msg.contains("generic structs are not supported"):
+                gated = gated + 1
+        expect(gated).to_be_greater_than(0)
+
+    it "marks a generic class as a template and still reports the Phase A gate":
+        val src = "class Holder<T>:\n" +
+            "    v: T\n"
+        val parsed = parse_full_frontend(src, "testdata/fixture_generic_class.spl", "fixture_generic_class", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("testdata/fixture_generic_class.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        var marked = 0
+        var total = 0
+        for key in hir.classes.keys():
+            val c = hir.classes[key]
+            if c.name == "Holder":
+                total = total + 1
+                if c.is_generic_template:
+                    marked = marked + 1
+        expect(total).to_be_greater_than(0)
+        expect(marked).to_equal(total)
+        var gated = 0
+        for msg in hir_lowering.diagnostic_messages:
+            if msg.contains("generic classes are not supported"):
+                gated = gated + 1
+        expect(gated).to_be_greater_than(0)
+
+    it "marks a generic free fn as a template (HirFunction tier)":
+        val src = "fn ident<T>(v: T) -> T:\n" +
+            "    v\n"
+        val parsed = parse_full_frontend(src, "testdata/fixture_generic_fn.spl", "fixture_generic_fn", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("testdata/fixture_generic_fn.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        var marked = 0
+        var total = 0
+        for key in hir.functions.keys():
+            val f = hir.functions[key]
+            if f.name == "ident":
+                total = total + 1
+                if f.is_generic_template:
+                    marked = marked + 1
+        expect(total).to_be_greater_than(0)
+        expect(marked).to_equal(total)
+
+    it "does NOT mark a concrete free fn as a template":
+        val src = "fn twice(v: i64) -> i64:\n" +
+            "    v + v\n"
+        val parsed = parse_full_frontend(src, "testdata/fixture_concrete_fn.spl", "fixture_concrete_fn", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("testdata/fixture_concrete_fn.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        var marked = 0
+        var total = 0
+        for key in hir.functions.keys():
+            val f = hir.functions[key]
+            if f.name == "twice":
+                total = total + 1
+                if f.is_generic_template:
+                    marked = marked + 1
+        expect(total).to_be_greater_than(0)
+        expect(marked).to_equal(0)
+
+    # Impl-method tier: `HirLowering.lower_impl` DOES mark every method when
+    # the impl carries type parameters, but that path cannot be reached from
+    # source today -- `parse_full_frontend` on `impl Box<T>:` yields an Impl
+    # whose `type_params.len() == 0` (measured 2026-08-21), so the marking is
+    # correct but unreachable. That frontend gap is recorded in
+    # doc/08_tracking/bug/hir_generic_templates_unconsumed_by_mono_pass_2026-08-21.md
+    # (10.frontend is owned elsewhere); when it is fixed, add the example here.

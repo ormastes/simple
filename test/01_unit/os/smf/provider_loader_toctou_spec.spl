@@ -1,0 +1,67 @@
+# Reproducer for: provider_admit_dynamic_v1 hashes the declared path, then
+# independently re-opens that same path with dynlib_open.  The recorded
+# admission digest is therefore not bound to the image that was actually
+# loaded and made process-callable.
+#
+# The race itself cannot be driven from an interpreted spec body (there is no
+# hook between the read and the open, and no fd-bound hashing primitive), so
+# this spec asserts the structural property that makes the window survivable:
+# after the path is re-opened, the loader MUST re-read and re-compare the
+# artifact bytes and fail closed on any difference.
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_atomic_write(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+
+val LOADER_SOURCE_PATH: text = "src/os/smf/provider_loader.spl"
+
+fn loader_source() -> text:
+    rt_file_read_text(LOADER_SOURCE_PATH) ?? ""
+
+fn fn_body(src: text, name: text) -> text:
+    val parts = src.split("\nfn " + name)
+    if parts.len() < 2:
+        return ""
+    val tail = parts[1].split("\nfn ")
+    tail[0]
+
+fn segment_after(body: text, marker: text) -> text:
+    val parts = body.split(marker)
+    if parts.len() < 2:
+        return ""
+    parts[1]
+
+describe "provider_admit_dynamic_v1 path digest is not bound to the loaded image":
+    it "reads the loader source used by this repository":
+        val src = loader_source()
+        expect(src.len() > 0).to_be(true)
+        expect(src.contains("fn provider_admit_dynamic_v1")).to_be(true)
+
+    it "documents the defect: the digest is computed before the path is re-opened":
+        val body = fn_body(loader_source(), "provider_admit_dynamic_v1")
+        expect(body.len() > 0).to_be(true)
+        val before_open = body.split("dynlib_open(")[0]
+        expect(before_open.contains("provider_artifact_digest_v1(")).to_be(true)
+
+    it "requires a verify-after-open re-read of the artifact bytes":
+        val body = fn_body(loader_source(), "provider_admit_dynamic_v1")
+        val after_open = segment_after(body, "dynlib_open(")
+        expect(after_open.len() > 0).to_be(true)
+        expect(after_open.contains("provider_artifact_digest_v1(")).to_be(true)
+
+    it "fails admission closed when the post-open re-read disagrees":
+        val body = fn_body(loader_source(), "provider_admit_dynamic_v1")
+        val after_open = segment_after(body, "dynlib_open(")
+        expect(after_open.contains("PROVIDER_ADMISSION_DIGEST_UNSTABLE")).to_be(true)
+        expect(after_open.contains("dynlib_close(")).to_be(true)
+
+    it "swapping the artifact bytes changes the digest the loader would record":
+        val path = "build/providers/toctou_probe_fixture.so"
+        val wrote_a = rt_file_atomic_write(path, "PROVIDER-IMAGE-A")
+        expect(wrote_a).to_be(true)
+        val a = rt_file_read_text(path) ?? ""
+        val wrote_b = rt_file_atomic_write(path, "PROVIDER-IMAGE-B-DIFFERENT")
+        expect(wrote_b).to_be(true)
+        val b = rt_file_read_text(path) ?? ""
+        expect(a == b).to_be(false)
+        rt_file_delete(path)

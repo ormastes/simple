@@ -1,0 +1,149 @@
+#!/bin/sh
+# Guards the defect in
+# doc/08_tracking/bug/simpleos_stage2_bootstrap_sanity_exit2_without_diagnostic_2026-08-20.md :
+# the Stage-2 bootstrap sanity gate failed with a non-zero exit and NO
+# diagnostic, so the canonical stage diagnosis reported UNDIAGNOSABLE.
+#
+# A non-zero exit is not the property under test — every fixture below already
+# exited non-zero when the bug was live. What is under test is that the failure
+# NAMES what failed. Each negative fixture therefore asserts BOTH the non-zero
+# exit AND that a 'stage2-sanity-error:' line was emitted mentioning the
+# offending field.
+#
+# Exit status convention:
+#   PASS — <n> fixture(s) checked, ... exit 0
+#   FAIL — ...                        exit 1
+#   ERROR — nothing was checked (...) exit 2
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+
+gate_error() {
+  printf 'ERROR — nothing was checked (%s)\n' "$1" >&2
+  exit 2
+}
+
+[ "${1:---selftest}" = --selftest ] ||
+  gate_error "usage: check-stage2-sanity-diagnostic.shs [--selftest]"
+
+sanity_lib="$root/scripts/check/lib/bootstrap-stage3/sanity.shs"
+[ -f "$sanity_lib" ] || gate_error "sanity library not found: $sanity_lib"
+
+facade="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+[ -f "$facade" ] || gate_error "provenance facade not found: $facade"
+BOOTSTRAP_STAGE3_FACADE_PATH="$facade"
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$facade"
+
+work=$(mktemp -d) || gate_error "could not create a temporary work directory"
+trap 'rm -rf "$work"' EXIT INT TERM
+
+mkdir -p "$work/repo" "$work/env-home" "$work/env-tmp"
+
+candidate="$work/simple"
+cat >"$candidate" <<'CANDIDATE_EOF'
+#!/bin/sh
+case "$1" in
+  --version) printf 'simple-bootstrap 1.0.0-RC\n' ;;
+  run) printf "error: unknown command 'run'\n" >&2; exit 1 ;;
+  *) exit 1 ;;
+esac
+CANDIDATE_EOF
+chmod +x "$candidate"
+
+candidate_frontend_smoke() { printf 'frontend-ok\n'; }
+
+frontend_log="$work/frontend.log"
+candidate_frontend_smoke "$candidate" >"$frontend_log"
+unsupported_status=0
+unsupported=$("$candidate" run fixture 2>&1) || unsupported_status=$?
+[ "$unsupported_status" = 1 ] ||
+  gate_error "fixture candidate did not reject 'run' with status 1"
+candidate_sha=$(bootstrap_stage3_hash_file "$candidate") ||
+  gate_error "fixture candidate could not be hashed"
+
+good="$work/sanity.env"
+{
+  echo "schema=simple-bootstrap-sanity-evidence-v1"
+  echo "status=pass"
+  echo "candidate_sha256_before=$candidate_sha"
+  echo "version_status=0"
+  echo "version_output=simple-bootstrap 1.0.0-RC"
+  echo "unsupported_status=1"
+  echo "unsupported_output_sha256=$(printf '%s' "$unsupported" | bootstrap_stage3_hash_stream)"
+  echo "frontend_smoke_status=0"
+  echo "frontend_smoke_output_sha256=$(bootstrap_stage3_hash_file "$frontend_log")"
+  echo "candidate_sha256_after=$candidate_sha"
+} >"$good"
+
+checked=0
+failures=""
+
+run_verify() {
+  verify_status=0
+  verify_err="$work/verify.err.$$"
+  bootstrap_stage3_verify_sanity_evidence "$1" "$candidate" "$work/repo" \
+    cranelift "$work/env-home" "$work/env-tmp" "/usr/bin:/bin" \
+    >/dev/null 2>"$verify_err" || verify_status=$?
+  verify_output=$(cat "$verify_err")
+  rm -f "$verify_err"
+}
+
+# Positive fixture: intact evidence must verify and stay silent.
+checked=$((checked + 1))
+run_verify "$good"
+if [ "$verify_status" != 0 ]; then
+  failures="$failures intact-evidence-rejected(status=$verify_status,msg=$verify_output)"
+fi
+
+# Negative fixtures: each must produce BOTH a non-zero exit AND a diagnostic
+# naming the offending field. The `expect` string is the substring that makes
+# the message actionable.
+expect_diagnosed() {
+  fixture_name=$1
+  fixture_file=$2
+  fixture_expect=$3
+  checked=$((checked + 1))
+  run_verify "$fixture_file"
+  if [ "$verify_status" = 0 ]; then
+    failures="$failures $fixture_name:accepted-bad-evidence"
+    return 0
+  fi
+  case "$verify_output" in
+    *stage2-sanity-error:*) ;;
+    *) failures="$failures $fixture_name:silent-failure"; return 0 ;;
+  esac
+  case "$verify_output" in
+    *"$fixture_expect"*) ;;
+    *) failures="$failures $fixture_name:unactionable-message" ;;
+  esac
+}
+
+# This is the exact shape of the filed bug: a stale expected version string.
+sed 's/^version_output=.*/version_output=simple-bootstrap 1.0.0-beta/' \
+  "$good" >"$work/stale-version.env"
+expect_diagnosed stale-version "$work/stale-version.env" "version_output"
+
+sed 's/^status=pass$/status=fail/' "$good" >"$work/status.env"
+expect_diagnosed status-not-pass "$work/status.env" "status"
+
+grep -v '^candidate_sha256_after=' "$good" >"$work/missing-field.env"
+expect_diagnosed missing-field "$work/missing-field.env" "candidate_sha256_after"
+
+sed 's/^candidate_sha256_before=.*/candidate_sha256_before=0000000000000000000000000000000000000000000000000000000000000000/' \
+  "$good" >"$work/candidate-sha.env"
+expect_diagnosed candidate-sha "$work/candidate-sha.env" "candidate_sha256_before"
+
+sed 's/^frontend_smoke_output_sha256=.*/frontend_smoke_output_sha256=not-a-sha/' \
+  "$good" >"$work/frontend-sha.env"
+expect_diagnosed frontend-sha "$work/frontend-sha.env" "frontend_smoke_output_sha256"
+
+expect_diagnosed absent-evidence "$work/does-not-exist.env" "missing or is a symlink"
+
+[ "$checked" -gt 0 ] || gate_error "no fixture was executed"
+
+if [ -n "$failures" ]; then
+  printf 'FAIL — %s fixture(s) checked,%s\n' "$checked" "$failures"
+  exit 1
+fi
+printf 'PASS — %s fixture(s) checked, every sanity failure emitted an actionable diagnostic\n' "$checked"

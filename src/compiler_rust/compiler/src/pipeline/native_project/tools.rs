@@ -1035,7 +1035,12 @@ const STAGE4_C_SQLITE_DEFINITIONS: &[&str] = &[
 const STAGE4_C_TIME_UNDEFINED: &[&str] = &["clock_gettime"];
 
 const STAGE4_C_SQLITE_UNDEFINED: &[&str] = &[
+    // NUL-terminating copies (commit 8d04ee87582) allocate with malloc/free and
+    // need the string length; sqlite reads past the end without them.
+    "free",
+    "malloc",
     "rt_string_data",
+    "rt_string_len",
     "rt_string_new",
     "sqlite3_bind_double",
     "sqlite3_bind_int64",
@@ -1350,8 +1355,11 @@ fn validate_stage4_system_library_ownership(
         .iter()
         .map(|symbol| canonical_archive_symbol(symbol))
         .filter(|symbol| {
-            !(matches!(spec.undefined, Stage4CliCUndefinedPolicy::Sqlite)
-                && matches!(*symbol, "rt_string_data" | "rt_string_new"))
+            // libc always links; the rt_* names are the Simple runtime's, so
+            // neither is expected to be defined by the system library.
+            !matches!(*symbol, "free" | "malloc")
+                && !(matches!(spec.undefined, Stage4CliCUndefinedPolicy::Sqlite)
+                    && matches!(*symbol, "rt_string_data" | "rt_string_len" | "rt_string_new"))
         })
         .collect();
     let missing: Vec<&str> = system_undefined

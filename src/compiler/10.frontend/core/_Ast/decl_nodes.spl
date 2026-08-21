@@ -151,7 +151,8 @@ fn ast_decl_imports_key(idx: i64) -> text:
 # The flag is cached in a slot: rt_env_get_i64 is itself an environ scan and
 # these gates sit on the per-decl-field hot path. Refreshed per file via
 # ast_decl_mode_slots_refresh() (same pattern as stmt_mode_slots_refresh).
-var ast_decl_mode_slot: [i64] = []
+var ast_decl_mode_ready: bool = false
+var ast_decl_mode_cached: i64 = 1
 
 fn ast_decl_arena_default() -> i64:
     # Bootstrap lanes keep the legacy default (env store on unless the lane
@@ -166,13 +167,12 @@ fn ast_decl_arena_default() -> i64:
     1
 
 fn ast_decl_mode_slots_refresh():
-    if ast_decl_mode_slot == nil or ast_decl_mode_slot.len() == 0:
-        ast_decl_mode_slot = [1]
-    ast_decl_mode_slot[0] = rt_env_get_i64("SIMPLE_NATIVE_ARENA_DECLS", ast_decl_arena_default())
+    ast_decl_mode_cached = rt_env_get_i64("SIMPLE_NATIVE_ARENA_DECLS", ast_decl_arena_default())
+    ast_decl_mode_ready = true
 
 fn ast_decl_prefer_arena() -> bool:
-    if ast_decl_mode_slot != nil and ast_decl_mode_slot.len() > 0:
-        return ast_decl_mode_slot[0] == 1
+    if ast_decl_mode_ready:
+        return ast_decl_mode_cached == 1
     # Interpreter module variables may not persist between calls — fall back
     # to a direct env read (same compatibility note as stmt_env_mirror_enabled).
     rt_env_get_i64("SIMPLE_NATIVE_ARENA_DECLS", ast_decl_arena_default()) == 1
@@ -1288,6 +1288,23 @@ fn arm_get_rationale(idx: i64) -> text:
 var elif_cond: [i64] = []
 var elif_body: [[i64]] = []
 var elif_else: [[i64]] = []
+
+# Clear the elif arena FROM ITS OWNING MODULE.
+#
+# ast_reset() used to clear these three arrays with a cross-module
+# `elif_cond.clear()` from _Ast/module_state.spl. That clear did not reach the
+# arena `elif_new` below appends to, so a second parse in the same process
+# appended after the first file's entries while the if-statement nodes were
+# numbered from 0 again: the interpreter then read the PREVIOUS file's
+# condition expression id out of elif_cond[0] and indexed the freshly reset
+# expr arena with it ("array index out of bounds: index is 19 but length is
+# 10"), or silently took the wrong branch when the stale id happened to be in
+# range. Same ownership rule as ast_module_decl_slots_clear() above.
+# doc/08_tracking/bug/pure_simple_interpreter_core_jit_interpret_not_reentrant_2026-08-20.md
+fn elif_arena_clear():
+    elif_cond = []
+    elif_body = []
+    elif_else = []
 
 fn elif_new(cond: i64, body: [i64], else_body: [i64]) -> i64:
     val idx = elif_cond.len()

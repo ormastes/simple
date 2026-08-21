@@ -1,0 +1,94 @@
+# Bounded byte snapshots for SimpleOS evidence admission.
+#
+# The verifier hashes the exact bytes supplied by an owning capture boundary;
+# caller-provided digest strings and verification booleans are never authority.
+# Large inputs remain bounded so one candidate cannot monopolize the service.
+
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.structural.parallel_commit.simpleos_ledger_commit_v1.{
+    SIMPLEOS_LEDGER_MAX_ARTIFACTS,
+    SimpleOsCapabilityLedgerCandidateV1,
+    SimpleOsCapabilityLedgerCheckV1
+}
+
+val SIMPLEOS_EVIDENCE_MAX_SNAPSHOT_ITEM_BYTES: i64 = 268435456
+val SIMPLEOS_EVIDENCE_MAX_SNAPSHOT_TOTAL_BYTES: i64 = 536870912
+
+struct SimpleOsEvidenceArtifactSnapshotV1:
+    source_manifest_bytes: [u8]
+    image_bytes: [u8]
+    binary_bytes: [u8]
+    config_bytes: [u8]
+    artifact_bytes: [[u8]]
+    # -1 means the receipt has no performance workload. Otherwise this is the
+    # exact ordered artifact whose digest names the performance fixture.
+    performance_fixture_artifact_index: i64
+
+fn _snapshot_failure(reason: text) -> SimpleOsCapabilityLedgerCheckV1:
+    SimpleOsCapabilityLedgerCheckV1(ok: false, reason: reason)
+
+fn _snapshot_add_size(total: i64, bytes: [u8]) -> i64:
+    if bytes.len() == 0 or bytes.len() > SIMPLEOS_EVIDENCE_MAX_SNAPSHOT_ITEM_BYTES:
+        return -1
+    if total > SIMPLEOS_EVIDENCE_MAX_SNAPSHOT_TOTAL_BYTES - bytes.len():
+        return -1
+    total + bytes.len()
+
+fn simpleos_evidence_artifact_snapshot_check(
+    candidate: SimpleOsCapabilityLedgerCandidateV1,
+    snapshot: SimpleOsEvidenceArtifactSnapshotV1
+) -> SimpleOsCapabilityLedgerCheckV1:
+    """Rehash all signed payload classes from bounded immutable byte values."""
+    val receipt = candidate.receipt
+    if snapshot.artifact_bytes.len() != receipt.artifact_hashes.len()
+        or snapshot.artifact_bytes.len() > SIMPLEOS_LEDGER_MAX_ARTIFACTS:
+        return _snapshot_failure("artifact-snapshot-count")
+
+    var total: i64 = 0
+    total = _snapshot_add_size(total, snapshot.source_manifest_bytes)
+    if total < 0:
+        return _snapshot_failure("source-snapshot-bound")
+    if sha256_u8_hex(snapshot.source_manifest_bytes) != receipt.source_hash:
+        return _snapshot_failure("source-rehash")
+
+    total = _snapshot_add_size(total, snapshot.image_bytes)
+    if total < 0:
+        return _snapshot_failure("image-snapshot-bound")
+    if sha256_u8_hex(snapshot.image_bytes) != receipt.image_hash:
+        return _snapshot_failure("image-rehash")
+
+    total = _snapshot_add_size(total, snapshot.binary_bytes)
+    if total < 0:
+        return _snapshot_failure("binary-snapshot-bound")
+    if sha256_u8_hex(snapshot.binary_bytes) != receipt.binary_hash:
+        return _snapshot_failure("binary-rehash")
+
+    total = _snapshot_add_size(total, snapshot.config_bytes)
+    if total < 0:
+        return _snapshot_failure("config-snapshot-bound")
+    if sha256_u8_hex(snapshot.config_bytes) != receipt.config_hash:
+        return _snapshot_failure("config-rehash")
+
+    var i: i64 = 0
+    while i < snapshot.artifact_bytes.len():
+        total = _snapshot_add_size(total, snapshot.artifact_bytes[i])
+        if total < 0:
+            return _snapshot_failure("artifact-snapshot-bound")
+        if sha256_u8_hex(snapshot.artifact_bytes[i]) != receipt.artifact_hashes[i]:
+            return _snapshot_failure("artifact-rehash")
+        i = i + 1
+
+    if receipt.performance_workload == "":
+        if snapshot.performance_fixture_artifact_index != -1:
+            return _snapshot_failure("unexpected-performance-fixture")
+    else:
+        if snapshot.performance_fixture_artifact_index < 0
+            or snapshot.performance_fixture_artifact_index >=
+                snapshot.artifact_bytes.len():
+            return _snapshot_failure("performance-fixture-binding")
+    SimpleOsCapabilityLedgerCheckV1(ok: true, reason: "")
+
+export SimpleOsEvidenceArtifactSnapshotV1
+export simpleos_evidence_artifact_snapshot_check
+export SIMPLEOS_EVIDENCE_MAX_SNAPSHOT_ITEM_BYTES
+export SIMPLEOS_EVIDENCE_MAX_SNAPSHOT_TOTAL_BYTES

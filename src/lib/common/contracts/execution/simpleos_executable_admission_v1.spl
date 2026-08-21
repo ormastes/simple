@@ -1,0 +1,288 @@
+# SimpleOS executable admission and image-handle contracts.
+#
+# This module is deliberately dependency-free from the OS/filesystem layers.
+# Numeric identities are opaque values supplied by those owners; a path is
+# never an authorization input. Validation is local and bounded so a loader or
+# filesystem owner can fail closed before doing any stateful work.
+
+use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget}
+use std.common.structural.digest.hash256.{hash256_hex_valid}
+
+pub enum ExecutableAdmissionDecisionV1:
+    Admitted
+    Rejected
+
+pub enum ExecutableContractErrorV1:
+    None
+    UnsupportedSchema
+    MissingIdentity
+    TextTooLong
+    InvalidDigest
+    InvalidTarget
+    InvalidOpaqueIdentity
+    InvalidGeneration
+    InvalidDecision
+    InvalidImageSize
+    InvalidRangeCount
+    InvalidRange
+    InvalidRangeOverlap
+    InvalidReadCounters
+    AdmissionMismatch
+    AlreadyConsumed
+
+pub struct ExecutableContractCheckV1:
+    ok: bool
+    error: ExecutableContractErrorV1
+
+pub struct ExecutableLoadRangeV1:
+    file_offset: u64
+    file_size: u64
+    virtual_address: u64
+    memory_size: u64
+    writable: bool
+    executable: bool
+
+pub struct ExecutableAdmissionV1:
+    schema_version: i64
+    admission_id: text
+    decision: ExecutableAdmissionDecisionV1
+    rejection_reason: text
+    image_hash: text
+    manifest_hash: text
+    kernel_hash: text
+    trust_root_hash: text
+    trust_epoch: u64
+    target: ManifestTarget
+    firmware_profile: text
+    compiler_identity: text
+    source_identity: text
+    config_identity: text
+    mount_id: u64
+    mount_generation: u64
+    file_id: u64
+    file_generation: u64
+    effective_capabilities: u32
+
+pub struct ExecutableImageHandleV1:
+    schema_version: i64
+    open_handle_id: u64
+    mount_id: u64
+    mount_generation: u64
+    file_id: u64
+    file_generation: u64
+    size_bytes: u64
+    role: text
+    target: ManifestTarget
+    verified_load_ranges: [ExecutableLoadRangeV1]
+    image_hash: text
+    admission_id: text
+    trust_epoch: u64
+    read_count: u64
+    read_bytes: u64
+    consumed: bool
+
+pub struct ExecutableImageHandleConsumeResultV1:
+    ok: bool
+    handle: ExecutableImageHandleV1
+    reason: text
+
+pub fn executable_admission_schema_version() -> i64:
+    1
+
+pub fn executable_admission_max_identity_chars() -> i64:
+    256
+
+pub fn executable_image_max_load_ranges() -> i64:
+    64
+
+pub fn executable_image_max_bytes() -> u64:
+    281474976710656u64
+
+pub fn executable_image_max_read_count() -> u64:
+    4294967296u64
+
+fn _executable_ok() -> ExecutableContractCheckV1:
+    ExecutableContractCheckV1(
+        ok: true,
+        error: ExecutableContractErrorV1.None
+    )
+
+fn _executable_reject(error: ExecutableContractErrorV1) -> ExecutableContractCheckV1:
+    ExecutableContractCheckV1(ok: false, error: error)
+
+fn _executable_identity_valid(value: text) -> bool:
+    val trimmed = value.trim()
+    trimmed != "" and trimmed.len() <= executable_admission_max_identity_chars()
+
+fn _executable_target_valid(target: ManifestTarget) -> bool:
+    _executable_identity_valid(target.os) and
+        _executable_identity_valid(target.arch) and
+        _executable_identity_valid(target.abi) and
+        target.os != "any" and target.arch != "any" and target.abi != "any"
+
+fn _executable_target_equal(a: ManifestTarget, b: ManifestTarget) -> bool:
+    a.os == b.os and a.arch == b.arch and a.abi == b.abi
+
+fn _executable_range_valid(
+    load_range: ExecutableLoadRangeV1,
+    image_size: u64
+) -> bool:
+    if load_range.file_size == 0 or
+        load_range.memory_size < load_range.file_size or
+        load_range.file_size > executable_image_max_bytes() or
+        load_range.memory_size > executable_image_max_bytes() or
+        (load_range.writable and load_range.executable):
+        return false
+    if load_range.file_offset > image_size:
+        return false
+    if load_range.file_size > image_size - load_range.file_offset:
+        return false
+    if load_range.file_offset > 18446744073709551615u64 - load_range.file_size:
+        return false
+    if load_range.virtual_address >
+        18446744073709551615u64 - load_range.memory_size:
+        return false
+    true
+
+fn _executable_ranges_overlap_file(
+    a: ExecutableLoadRangeV1,
+    b: ExecutableLoadRangeV1
+) -> bool:
+    val a_end = a.file_offset + a.file_size
+    val b_end = b.file_offset + b.file_size
+    a.file_offset < b_end and b.file_offset < a_end
+
+fn _executable_ranges_overlap_memory(
+    a: ExecutableLoadRangeV1,
+    b: ExecutableLoadRangeV1
+) -> bool:
+    val a_end = a.virtual_address + a.memory_size
+    val b_end = b.virtual_address + b.memory_size
+    a.virtual_address < b_end and b.virtual_address < a_end
+
+fn _executable_ranges_valid(
+    ranges: [ExecutableLoadRangeV1],
+    image_size: u64
+) -> ExecutableContractCheckV1:
+    if ranges.len() == 0 or ranges.len() > executable_image_max_load_ranges():
+        return _executable_reject(ExecutableContractErrorV1.InvalidRangeCount)
+    var i: i64 = 0
+    while i < ranges.len():
+        if not _executable_range_valid(ranges[i], image_size):
+            return _executable_reject(ExecutableContractErrorV1.InvalidRange)
+        var j: i64 = 0
+        while j < i:
+            if _executable_ranges_overlap_file(ranges[i], ranges[j]) or
+                _executable_ranges_overlap_memory(ranges[i], ranges[j]):
+                return _executable_reject(ExecutableContractErrorV1.InvalidRangeOverlap)
+            j = j + 1
+        i = i + 1
+    _executable_ok()
+
+pub fn executable_admission_validate(
+    admission: ExecutableAdmissionV1
+) -> ExecutableContractCheckV1:
+    if admission.schema_version != executable_admission_schema_version():
+        return _executable_reject(ExecutableContractErrorV1.UnsupportedSchema)
+    if not _executable_identity_valid(admission.admission_id):
+        return _executable_reject(ExecutableContractErrorV1.MissingIdentity)
+    if not hash256_hex_valid(admission.image_hash) or
+        not hash256_hex_valid(admission.manifest_hash) or
+        not hash256_hex_valid(admission.kernel_hash) or
+        not hash256_hex_valid(admission.trust_root_hash):
+        return _executable_reject(ExecutableContractErrorV1.InvalidDigest)
+    if admission.trust_epoch == 0u64 or admission.mount_id == 0u64 or
+        admission.mount_generation == 0u64 or admission.file_id == 0u64 or
+        admission.file_generation == 0u64:
+        return _executable_reject(ExecutableContractErrorV1.InvalidGeneration)
+    if not _executable_target_valid(admission.target):
+        return _executable_reject(ExecutableContractErrorV1.InvalidTarget)
+    if not _executable_identity_valid(admission.firmware_profile) or
+        not _executable_identity_valid(admission.compiler_identity) or
+        not _executable_identity_valid(admission.source_identity) or
+        not _executable_identity_valid(admission.config_identity):
+        return _executable_reject(ExecutableContractErrorV1.MissingIdentity)
+    match admission.decision:
+        case ExecutableAdmissionDecisionV1.Admitted:
+            if admission.rejection_reason != "":
+                return _executable_reject(ExecutableContractErrorV1.InvalidDecision)
+        case ExecutableAdmissionDecisionV1.Rejected:
+            if not _executable_identity_valid(admission.rejection_reason):
+                return _executable_reject(ExecutableContractErrorV1.InvalidDecision)
+    _executable_ok()
+
+pub fn executable_image_handle_validate(
+    handle: ExecutableImageHandleV1
+) -> ExecutableContractCheckV1:
+    if handle.consumed:
+        return _executable_reject(ExecutableContractErrorV1.AlreadyConsumed)
+    if handle.schema_version != executable_admission_schema_version():
+        return _executable_reject(ExecutableContractErrorV1.UnsupportedSchema)
+    if handle.open_handle_id == 0u64 or handle.mount_id == 0u64 or
+        handle.file_id == 0u64:
+        return _executable_reject(ExecutableContractErrorV1.InvalidOpaqueIdentity)
+    if handle.mount_generation == 0u64 or handle.file_generation == 0u64 or
+        handle.trust_epoch == 0u64:
+        return _executable_reject(ExecutableContractErrorV1.InvalidGeneration)
+    if handle.size_bytes == 0u64 or
+        handle.size_bytes > executable_image_max_bytes():
+        return _executable_reject(ExecutableContractErrorV1.InvalidImageSize)
+    if not _executable_identity_valid(handle.role) or
+        not _executable_identity_valid(handle.admission_id):
+        return _executable_reject(ExecutableContractErrorV1.MissingIdentity)
+    if not _executable_target_valid(handle.target):
+        return _executable_reject(ExecutableContractErrorV1.InvalidTarget)
+    if not hash256_hex_valid(handle.image_hash):
+        return _executable_reject(ExecutableContractErrorV1.InvalidDigest)
+    if handle.read_count > executable_image_max_read_count() or
+        handle.read_bytes > handle.size_bytes:
+        return _executable_reject(ExecutableContractErrorV1.InvalidReadCounters)
+    _executable_ranges_valid(handle.verified_load_ranges, handle.size_bytes)
+
+pub fn executable_image_handle_matches_admission(
+    handle: ExecutableImageHandleV1,
+    admission: ExecutableAdmissionV1
+) -> ExecutableContractCheckV1:
+    val handle_check = executable_image_handle_validate(handle)
+    if not handle_check.ok:
+        return handle_check
+    val admission_check = executable_admission_validate(admission)
+    if not admission_check.ok:
+        return admission_check
+    if admission.decision != ExecutableAdmissionDecisionV1.Admitted:
+        return _executable_reject(ExecutableContractErrorV1.AdmissionMismatch)
+    if handle.image_hash != admission.image_hash or
+        handle.admission_id != admission.admission_id or
+        handle.trust_epoch != admission.trust_epoch or
+        handle.mount_id != admission.mount_id or
+        handle.mount_generation != admission.mount_generation or
+        handle.file_id != admission.file_id or
+        handle.file_generation != admission.file_generation or
+        not _executable_target_equal(handle.target, admission.target):
+        return _executable_reject(ExecutableContractErrorV1.AdmissionMismatch)
+    _executable_ok()
+
+pub fn executable_image_handle_consume_once(
+    handle: ExecutableImageHandleV1
+) -> ExecutableImageHandleConsumeResultV1:
+    # ExecutableImageHandleV1 has value semantics. Mutating a returned copy
+    # cannot revoke the original or another prior copy, so this value-level API
+    # must not claim consume-once authority. A loader-owned generational token
+    # registry must perform the eventual atomic consume.
+    ExecutableImageHandleConsumeResultV1(
+        ok: false,
+        handle: handle,
+        reason: "loader-owner-required"
+    )
+
+export ExecutableAdmissionDecisionV1, ExecutableContractErrorV1
+export ExecutableContractCheckV1, ExecutableLoadRangeV1
+export ExecutableAdmissionV1, ExecutableImageHandleV1
+export ExecutableImageHandleConsumeResultV1
+export executable_admission_schema_version
+export executable_admission_max_identity_chars
+export executable_image_max_load_ranges, executable_image_max_bytes
+export executable_image_max_read_count
+export executable_admission_validate, executable_image_handle_validate
+export executable_image_handle_matches_admission
+export executable_image_handle_consume_once

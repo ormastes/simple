@@ -1,0 +1,92 @@
+# QUIC transport provider/handle gate — reproduce spec
+#
+# Bug: doc/08_tracking/bug/quic_h3_transport_tls_blocker_2026-08-20.md
+#
+# The record's prerequisite 3 says transport operations must never be called
+# with a zero handle, and quic_provider.spl documents that "native quiche
+# calls go through quic_connection.spl only when the provider reports
+# Available". Before the fix that gate had zero call sites: every
+# `pub fn` in quic_connection.spl dispatched to `rt_quic_*` unconditionally,
+# and `quic_accept`/`quic_connect` never inspected the returned handle, so a
+# failed (0/negative) handle was handed straight back to the runtime.
+#
+# These tests exercise the REAL module (no inlined copy).
+
+use nogc_async_mut.quic.quic_connection.{
+    QuicConfig, QuicConnection,
+    quic_config_default, quic_accept, quic_connect,
+    quic_feed_udp, quic_get_outgoing, quic_stream_recv, quic_stream_send,
+    quic_close, quic_check_timeout, quic_timeout_millis,
+    quic_connection_is_usable
+}
+use nogc_async_mut.quic.quic_provider.{
+    quic_provider_check, quic_provider_is_usable
+}
+
+fn _zero_handle_connection() -> QuicConnection:
+    QuicConnection { handle: 0, is_server: true, established: false, closed: false }
+
+describe "QUIC transport is gated on the provider":
+
+    it "reports the provider as unusable while the TLS blocker is open":
+        expect(quic_provider_is_usable(quic_provider_check())).to_be(false)
+
+    it "never treats a zero-handle connection as usable":
+        expect(quic_connection_is_usable(_zero_handle_connection())).to_be(false)
+
+    it "never treats a negative-handle connection as usable":
+        val conn = QuicConnection { handle: -1, is_server: false, established: false, closed: false }
+        expect(quic_connection_is_usable(conn)).to_be(false)
+
+    it "never treats a closed connection as usable":
+        val conn = QuicConnection { handle: 7, is_server: false, established: false, closed: true }
+        expect(quic_connection_is_usable(conn)).to_be(false)
+
+describe "QUIC constructors fail closed":
+
+    it "quic_accept returns a terminal connection with no handle":
+        val conn = quic_accept("0011223344556677", quic_config_default())
+        expect(conn.handle).to_be(0)
+        expect(conn.closed).to_be(true)
+        expect(conn.established).to_be(false)
+        expect(conn.is_server).to_be(true)
+
+    it "quic_connect returns a terminal connection with no handle":
+        val conn = quic_connect("example.com", "0011223344556677", quic_config_default())
+        expect(conn.handle).to_be(0)
+        expect(conn.closed).to_be(true)
+        expect(conn.is_server).to_be(false)
+
+describe "QUIC operations refuse an unusable connection":
+
+    it "quic_feed_udp does not establish a connection":
+        val out = quic_feed_udp(_zero_handle_connection(), "datagram", 8)
+        expect(out.established).to_be(false)
+        expect(out.closed).to_be(true)
+        expect(out.handle).to_be(0)
+
+    it "quic_get_outgoing emits no bytes":
+        val out = quic_get_outgoing(_zero_handle_connection())
+        expect(out.data_len).to_be(0)
+        expect(out.data).to_be("")
+
+    it "quic_stream_recv reads no bytes":
+        val read = quic_stream_recv(_zero_handle_connection(), 0, 1200)
+        expect(read.data_len).to_be(0)
+        expect(read.data).to_be("")
+
+    it "quic_stream_send reports failure instead of writing":
+        expect(quic_stream_send(_zero_handle_connection(), 0, "payload", true)).to_be(-1)
+
+    it "quic_close stays terminal without a native call":
+        val closed = quic_close(_zero_handle_connection(), "bye")
+        expect(closed.closed).to_be(true)
+        expect(closed.handle).to_be(0)
+
+    it "quic_check_timeout cannot promote an unusable connection":
+        val ticked = quic_check_timeout(_zero_handle_connection())
+        expect(ticked.established).to_be(false)
+        expect(ticked.closed).to_be(true)
+
+    it "quic_timeout_millis reports no timer":
+        expect(quic_timeout_millis(_zero_handle_connection())).to_be(-1)

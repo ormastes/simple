@@ -1,0 +1,217 @@
+#!/bin/sh
+# check-duplicate-pub-fn-names.shs — ratchet on colliding public free-function names.
+#
+# Defect class: doc/08_tracking/bug/crypto_types_text_to_bytes_collides_with_base_encoding_2026-08-21.md
+# Two `pub fn text_to_bytes` with DIFFERENT signatures ((text)->[i64] vs (text)->[u8])
+# are co-compiled; the tree-walk interpreter resolves free functions by BARE NAME, so an
+# explicit `use std.crypto.types.{text_to_bytes}` can silently bind to the other module's
+# definition. The failure mode is not a crash — it is a wrong value (wrong SHA-256 digest).
+#
+# A name is COLLIDING when it is defined `pub fn` in >= 2 distinct modules (files) AND
+# those definitions do not all share one normalized signature. Same-signature duplicates
+# are counted only under --strict (they are still ambiguous, but they cannot silently
+# change a value's type).
+#
+# Verdict is the LAST line of stdout:
+#   PASS — <n> pub fn(s) checked, <k> colliding name(s) (baseline <k>)   exit 0
+#   FAIL — ...                                                          exit 1
+#   ERROR — nothing was checked (<reason>)                              exit 2
+#
+# --selftest runs first, unconditionally, and is fatal.
+# --generate-baseline rewrites the baseline. For REVIEWED updates only — do not use it
+# to make a FAIL go away without reading the diff.
+
+set -u
+
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+BASELINE="${DUP_PUB_FN_BASELINE:-$ROOT/scripts/check/duplicate_pub_fn_baseline.txt}"
+SCAN_ROOT="$ROOT"
+SCAN_DIRS="src/lib src/compiler src/app"
+STRICT=0
+GENERATE=0
+SELFTEST_ONLY=0
+LIST_TOP=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --strict) STRICT=1 ;;
+        --generate-baseline) GENERATE=1 ;;
+        --selftest) SELFTEST_ONLY=1 ;;
+        --top) LIST_TOP=1 ;;
+        --root) shift; SCAN_ROOT="$1" ;;
+        --dirs) shift; SCAN_DIRS="$1" ;;
+        --baseline) shift; BASELINE="$1" ;;
+        *) echo "unknown argument: $1" >&2; exit 2 ;;
+    esac
+    shift
+done
+
+# ---------------------------------------------------------------- extraction --
+# Emits, per collision: "<name>\t<def-count>\t<sig-count>\t<sigs joined by ' | '>"
+# and on stderr-free stdout a leading "CHECKED <n>" line with the total pub fn count.
+extract() {
+    _root="$1"; _dirs="$2"; _strict="$3"
+    _files=""
+    for d in $_dirs; do
+        [ -d "$_root/$d" ] && _files="$_files $_root/$d"
+    done
+    [ -n "$_files" ] || return 0
+    # shellcheck disable=SC2086
+    find $_files -name '*.spl' -type f -not -path '*/vendor/*' -print0 2>/dev/null \
+      | xargs -0 -r awk -v strict="$_strict" '
+        # top-level `pub fn NAME(params) -> ret:`  (column 0 only => free function,
+        # never a method inside a class/impl body, which is always indented).
+        /^(pub[ \t]+)?fn[ \t]+[A-Za-z_]/ {
+            line = $0
+            sub(/^(pub[ \t]+)?fn[ \t]+/, "", line)
+            name = line
+            sub(/[<(].*$/, "", name)
+            gsub(/[ \t]/, "", name)
+            if (name == "") next
+
+            sig = line
+            sub(/^[^(]*/, "", sig)      # drop name + generics, keep from "("
+            sub(/:[ \t]*$/, "", sig)    # drop trailing colon
+            gsub(/[ \t]+/, "", sig)     # canonicalize whitespace
+            sub(/#.*$/, "", sig)
+            # Drop PARAMETER NAMES: only the types matter for dispatch, and
+            # `(text: text)` vs `(input: text)` is not a collision, it is a
+            # rename. Without this the census is ~30% noise.
+            gsub(/[A-Za-z_][A-Za-z_0-9]*:/, "", sig)
+            if (sig == "") sig = "()"
+
+            # Emit one raw record per definition. Aggregation happens ONCE, below,
+            # over the whole tree -- never per awk invocation: xargs splits a
+            # 14k-file tree across several awk processes, so per-process END blocks
+            # would both miss cross-batch collisions and print duplicate rows.
+            printf "%s\t%s\t%s\n", name, FILENAME, sig
+        }' \
+      | awk -F'\t' -v strict="$_strict" '
+        {
+            name = $1; file = $2; sig = $3
+            total++
+            key = name SUBSEP file
+            if (!(key in seenfile)) { seenfile[key] = 1; defs[name]++ }
+            sigkey = name SUBSEP sig
+            if (!(sigkey in seensig)) {
+                seensig[sigkey] = 1
+                sigs[name] = (name in sigs) ? sigs[name] " | " sig : sig
+                nsig[name]++
+            }
+        }
+        END {
+            print "CHECKED " total+0
+            for (n in defs) {
+                if (defs[n] < 2) continue
+                if (!strict && nsig[n] < 2) continue
+                printf "%s\t%d\t%d\t%s\n", n, defs[n], nsig[n], sigs[n]
+            }
+        }' | sort
+}
+
+current_report() {
+    extract "$SCAN_ROOT" "$SCAN_DIRS" "$STRICT"
+}
+
+# ------------------------------------------------------------------ selftest --
+selftest() {
+    _t="$(mktemp -d)"
+    _fail=0
+
+    _mk() { mkdir -p "$_t/$1/src/lib"; }
+
+    # fixture 1: clean — two pub fns, distinct names
+    _mk clean
+    printf 'pub fn alpha(a: text) -> [u8]:\n    a\n' > "$_t/clean/src/lib/a.spl"
+    printf 'pub fn beta(a: text) -> [i64]:\n    a\n' > "$_t/clean/src/lib/b.spl"
+    _out="$(extract "$_t/clean" "src/lib" 0 | grep -v '^CHECKED' | wc -l | tr -d ' ')"
+    [ "$_out" = "0" ] || { echo "selftest FAIL: clean fixture reported $_out collision(s)"; _fail=1; }
+    _n="$(extract "$_t/clean" "src/lib" 0 | sed -n 's/^CHECKED //p')"
+    [ "$_n" = "2" ] || { echo "selftest FAIL: clean fixture checked $_n pub fn(s), expected 2"; _fail=1; }
+
+    # fixture 2: one collision — the real incident's shape
+    _mk one
+    printf 'pub fn text_to_bytes(s: text) -> [i64]:\n    s\n' > "$_t/one/src/lib/a.spl"
+    printf 'pub fn text_to_bytes(s: text) -> [u8]:\n    s\n' > "$_t/one/src/lib/b.spl"
+    _out="$(extract "$_t/one" "src/lib" 0 | grep -c '^text_to_bytes	')"
+    [ "$_out" = "1" ] || { echo "selftest FAIL: incident fixture reported $_out, expected 1"; _fail=1; }
+
+    # fixture 3: same-signature duplicates are NOT counted without --strict ...
+    _mk same
+    printf 'pub fn dup(s: text) -> text:\n    s\n' > "$_t/same/src/lib/a.spl"
+    printf 'pub fn dup(s: text) -> text:\n    s\n' > "$_t/same/src/lib/b.spl"
+    _out="$(extract "$_t/same" "src/lib" 0 | grep -v '^CHECKED' | wc -l | tr -d ' ')"
+    [ "$_out" = "0" ] || { echo "selftest FAIL: same-signature counted without --strict"; _fail=1; }
+    # ... and ARE counted with --strict
+    _out="$(extract "$_t/same" "src/lib" 1 | grep -c '^dup	')"
+    [ "$_out" = "1" ] || { echo "selftest FAIL: --strict did not count same-signature duplicate"; _fail=1; }
+
+    # fixture 4: indented (method) definitions must never be scanned
+    _mk method
+    printf 'class C:\n    pub fn text_to_bytes(s: text) -> [u8]:\n        s\n' > "$_t/method/src/lib/a.spl"
+    printf 'pub fn text_to_bytes(s: text) -> [i64]:\n    s\n' > "$_t/method/src/lib/b.spl"
+    _out="$(extract "$_t/method" "src/lib" 0 | grep -v '^CHECKED' | wc -l | tr -d ' ')"
+    [ "$_out" = "0" ] || { echo "selftest FAIL: indented method counted as a free function"; _fail=1; }
+
+    # fixture 5: empty tree must check 0 so the caller is forced to ERROR
+    _mk empty
+    _n="$(extract "$_t/empty" "src/lib" 0 | sed -n 's/^CHECKED //p')"
+    [ "${_n:-0}" = "0" ] || { echo "selftest FAIL: empty tree checked $_n"; _fail=1; }
+
+    rm -rf "$_t"
+    [ "$_fail" = "0" ] || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
+}
+
+selftest
+if [ "$SELFTEST_ONLY" = "1" ]; then
+    echo "PASS — selftest only, 5 fixture(s) verified, 0 pub fn(s) scanned in the tree"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------- scan --
+REPORT="$(current_report)"
+CHECKED="$(printf '%s\n' "$REPORT" | sed -n 's/^CHECKED //p' | head -1)"
+CHECKED="${CHECKED:-0}"
+COLL="$(printf '%s\n' "$REPORT" | grep -v '^CHECKED' | grep -v '^$')"
+K="$(printf '%s' "$COLL" | grep -c . )"
+
+if [ "$CHECKED" -eq 0 ]; then
+    echo "ERROR — nothing was checked (0 pub fn definitions found under $SCAN_DIRS)"
+    exit 2
+fi
+
+if [ "$LIST_TOP" = "1" ]; then
+    printf '%s\n' "$COLL" | awk -F'\t' '
+        /crypto|hash|sha|md5|hmac|encode|decode|bytes|parse|digest|to_text|base64|hex/ {print "RISK\t" $0; next}
+        {print "other\t" $0}' | sort -r | head -40
+fi
+
+if [ "$GENERATE" = "1" ]; then
+    printf '%s\n' "$COLL" | cut -f1 > "$BASELINE"
+    echo "PASS — $CHECKED pub fn(s) checked, $K colliding name(s) (baseline $K) [baseline regenerated at $BASELINE]"
+    exit 0
+fi
+
+if [ ! -f "$BASELINE" ]; then
+    echo "ERROR — nothing was checked (baseline $BASELINE missing; run --generate-baseline)"
+    exit 2
+fi
+
+_tmp="$(mktemp -d)"
+printf '%s\n' "$COLL" | cut -f1 | sort -u > "$_tmp/now"
+sort -u "$BASELINE" | grep -v '^$' > "$_tmp/base"
+NEW="$(comm -23 "$_tmp/now" "$_tmp/base" | tr '\n' ' ' | sed 's/ $//')"
+STALE="$(comm -13 "$_tmp/now" "$_tmp/base" | tr '\n' ' ' | sed 's/ $//')"
+BK="$(grep -c . "$_tmp/base")"
+rm -rf "$_tmp"
+
+if [ -n "$NEW" ] || [ -n "$STALE" ]; then
+    _msg="FAIL — $CHECKED pub fn(s) checked, $K colliding name(s) (baseline $BK)"
+    [ -n "$NEW" ] && _msg="$_msg; NEW: $NEW"
+    [ -n "$STALE" ] && _msg="$_msg; STALE (no longer colliding, baseline out of date): $STALE"
+    echo "$_msg"
+    exit 1
+fi
+
+echo "PASS — $CHECKED pub fn(s) checked, $K colliding name(s) (baseline $BK)"
+exit 0

@@ -1,0 +1,129 @@
+# Bootstrap-only HIR type registration for direct function lowering.
+
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_lowering.items.{
+    bootstrap_hir_module_enum_count, bootstrap_hir_module_enum_at,
+    bootstrap_hir_module_struct_count, bootstrap_hir_module_struct_at,
+    bootstrap_hir_module_class_count, bootstrap_hir_module_class_at
+}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+
+extern fn rt_exit(code: i64)
+
+var _bootstrap_type_runtime_names: Dict<text, text> = {}
+
+fn bootstrap_type_registry_reset():
+    _bootstrap_type_runtime_names = {}
+
+fn bootstrap_type_registration_finish(lowering: MirLowering, label: text) -> MirLowering:
+    var lw = lowering
+    if lw.errors.len() > 0:
+        val first_error = lw.errors[0]
+        eprint("error: {label}: {first_error.message}\n")
+        rt_exit(1)
+    if not lw.enum_runtime_id_index.has("Result"):
+        lw.enum_runtime_id_index["Result"] = 0
+    if not lw.enum_variant_index.has("Result"):
+        lw.enum_variant_index["Result"] = ["Ok", "Err"]
+        lw.reindex_enum_variant_owners("Result", [], ["Ok", "Err"])
+        lw.enum_variant_discriminants["Result"] = [0, 1]
+    if not lw.enum_runtime_id_index.has("Option"):
+        lw.enum_runtime_id_index["Option"] = 1
+    if not lw.enum_variant_index.has("Option"):
+        lw.enum_variant_index["Option"] = ["Some", "None"]
+        lw.reindex_enum_variant_owners("Option", [], ["Some", "None"])
+        lw.enum_variant_discriminants["Option"] = [0, 1]
+    lw.register_builtin_enum_dual("Result", ["Ok", "Err"], [0, 1], 0)
+    lw.register_builtin_enum_dual("Option", ["Some", "None"], [0, 1], 1)
+    _bootstrap_type_runtime_names = lw.enum_runtime_id_names
+    lw
+
+fn bootstrap_register_flat_type_defs(lowering: MirLowering, module_index: i64) -> MirLowering:
+    var lw = lowering
+    lw.enum_runtime_id_names = _bootstrap_type_runtime_names
+    var struct_index = 0
+    while struct_index < bootstrap_hir_module_struct_count(module_index):
+        val struct_def = bootstrap_hir_module_struct_at(module_index, struct_index)
+        var field_names: [text] = []
+        var field_index = 0
+        while field_index < struct_def.fields.len():
+            field_names = field_names.push(struct_def.fields[field_index].name)
+            field_index = field_index + 1
+        var field_map = lw.field_map
+        field_map[lw.symbol_id_value(struct_def.symbol)] = field_names
+        lw.field_map = field_map
+        var field_order = lw.struct_field_order
+        field_order[struct_def.name] = field_names
+        lw.struct_field_order = field_order
+        lw.lower_struct_type(struct_def)
+        struct_index = struct_index + 1
+    var enum_index = 0
+    while enum_index < bootstrap_hir_module_enum_count(module_index):
+        val enum_def = bootstrap_hir_module_enum_at(module_index, enum_index)
+        lw.register_enum_variants(enum_def)
+        lw.register_enum_runtime_id(enum_def)
+        enum_index = enum_index + 1
+    bootstrap_type_registration_finish(lw, "bootstrap flat MIR type registration failed")
+
+fn bootstrap_register_flat_class_defs(lowering: MirLowering, module_index: i64) -> MirLowering:
+    var lw = lowering
+    var class_index = 0
+    while class_index < bootstrap_hir_module_class_count(module_index):
+        val class_def = bootstrap_hir_module_class_at(module_index, class_index)
+        var field_names: [text] = []
+        var field_has_default: [bool] = []
+        var field_default_expr: [HirExpr] = []
+        var field_index = 0
+        while field_index < class_def.fields.len():
+            val field = class_def.fields[field_index]
+            field_names = field_names.push(field.name)
+            field_has_default = field_has_default.push(field.has_default)
+            field_default_expr = field_default_expr.push(field.default)
+            field_index = field_index + 1
+        var field_map = lw.field_map
+        field_map[lw.symbol_id_value(class_def.symbol)] = field_names
+        lw.field_map = field_map
+        var default_map = lw.struct_field_has_default
+        default_map[class_def.name] = field_has_default
+        lw.struct_field_has_default = default_map
+        var default_expr_map = lw.struct_field_default_expr
+        default_expr_map[class_def.name] = field_default_expr
+        lw.struct_field_default_expr = default_expr_map
+        var field_order = lw.struct_field_order
+        field_order[class_def.name] = field_names
+        lw.struct_field_order = field_order
+        var class_names = lw.class_type_names
+        class_names[class_def.name] = true
+        lw.class_type_names = class_names
+        class_index = class_index + 1
+    lw
+
+fn bootstrap_register_hir_type_defs(lowering: MirLowering, hir_module: HirModule) -> MirLowering:
+    var lw = lowering
+    lw.enum_runtime_id_names = _bootstrap_type_runtime_names
+    for struct_def in hir_module.structs.values():
+        var field_names: [text] = []
+        for field in struct_def.fields:
+            field_names = field_names.push(field.name)
+        var field_map = lw.field_map
+        field_map[lw.symbol_id_value(struct_def.symbol)] = field_names
+        lw.field_map = field_map
+        var field_order = lw.struct_field_order
+        field_order[struct_def.name] = field_names
+        lw.struct_field_order = field_order
+        lw.lower_struct_type(struct_def)
+    for enum_def in hir_module.enums.values():
+        lw.register_enum_variants(enum_def)
+        lw.register_enum_runtime_id(enum_def)
+    lw = bootstrap_type_registration_finish(lw, "bootstrap MIR type registration failed")
+    for class_def in hir_module.classes.values():
+        var field_names: [text] = []
+        for field in class_def.fields:
+            field_names = field_names.push(field.name)
+        var field_map = lw.field_map
+        field_map[lw.symbol_id_value(class_def.symbol)] = field_names
+        lw.field_map = field_map
+        lw.lower_class_type(class_def)
+    lw

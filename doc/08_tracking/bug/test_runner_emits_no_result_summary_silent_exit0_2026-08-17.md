@@ -2,6 +2,7 @@
 
 - **Date:** 2026-08-17
 - **Status:** FIXED (seed fix pending redeploy; shell guard live; pure-Simple
+- **Verification 2026-08-21 (bug-status-consistency audit): PARTIAL, not fully fixed.** the pure-Simple classifier, `check-test-verdict-not-silent.shs` and all four specs exist, but the seed fix is pending redeploy. `bug_db.sdn` row is `fix-implemented-verification-pending`.
   classifier fix RE-VERIFIED 2026-08-18 by independent lane — guard `--selftest`
   PASS (4 fixtures), regression spec `Results: 9 total, 9 passed, 0 failed`
   exit 0, sabotage (unverified early-return removed) reproduced

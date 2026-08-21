@@ -1,0 +1,296 @@
+# codex-system-test
+# @tag:system
+# @req REQ-017 REQ-018 NFR-005
+# @evidence-display: links
+
+"""# SimpleOS WM behavior and visual evidence
+
+This specification separates two evidence classes that must never substitute
+for one another:
+
+- `host-fixture` exercises the production WM owner, compositor, input router,
+  Draw IR/Engine2D scene projection, and framebuffer-shaped pixel buffer;
+- `live-guest` invokes the canonical QEMU wrapper and accepts only correlated
+  guest input, scene, presentation, readback, and QMP artifacts.
+
+A passing host fixture cannot promote a missing live guest.  Missing QEMU,
+firmware, admitted pure-Simple artifacts, readback, or input correlation ends
+with the exact `BLOCKED[REQ-017-LIVE-GUEST]` result.
+
+**Screenshots:** `build/test-simpleos-wm-hardening-behavior/{baseline,fullscreen,restored,browser-event}.ppm`
+"""
+
+use std.io_runtime.{file_exists, file_hash_sha256, file_read, file_read_bytes, process_run}
+use std.spec.*
+use common.io.window_event.{WINDOW_EVENT_TEXT, window_event_none}
+use common.ui.builder.{build_tree, column, text_field, with_height}
+use common.ui.pixel_surface_content_frame.{pixel_surface_content_frame}
+use common.window_protocol.geometry.{Point, Size, WindowId}
+use common.window_protocol.window_protocol.{WmInputEvent}
+use nogc_sync_mut.ui.session.{UISession}
+use os.compositor.host_compositor_entry.{HostCompositor}
+use os.compositor.host_gui_event_router.{HostGuiEventRouter}
+use os.services.wm.wm_damage.{WmDamageRectV1, WmDamageRegionV1, wm_damage_admit_v1}
+use os.services.wm.wm_service.{WmService}
+use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW}
+
+val COLOR_A: u32 = 0xFFFF3B30u32
+val COLOR_B: u32 = 0xFF0A84FFu32
+val LIVE_WRAPPER = "scripts/check/check-simpleos-wm-fullscreen-evidence.shs"
+val LIVE_DIR = "build/test-simpleos-wm-hardening-behavior"
+val LIVE_REPORT = LIVE_DIR + "/report.md"
+val LIVE_EVIDENCE = LIVE_DIR + "/evidence.env"
+
+fn solid_pixels(width: i32, height: i32, color: u32) -> [u32]:
+    var pixels: [u32] = []
+    var i = 0
+    while i < width * height:
+        pixels = pixels.push(color)
+        i = i + 1
+    pixels
+
+fn pixel_at(pixels: [u32], stride: i32, x: i32, y: i32) -> u32:
+    val index = y * stride + x
+    if index < 0 or index >= pixels.len():
+        return 0u32
+    pixels[index]
+
+fn add_colored_window(
+    compositor: HostCompositor,
+    request_id: i64,
+    title: text,
+    x: i32,
+    y: i32,
+    color: u32
+) -> i64:
+    compositor.apply_bridge_request(
+        request_id, 10, COMP_CREATE_WINDOW.to_i64(), 0, title,
+        x, y, 300, 300, "", 99, "simpleos.wm.behavior"
+    )
+    val window_id = compositor.windows[compositor.windows.len() - 1].id
+    val content_width = 292
+    val content_height = 264
+    expect(compositor.require_external_web_frame(window_id)).to_be(true)
+    val frame = pixel_surface_content_frame(
+        "{window_id}", "", 0, 0, content_width, content_height,
+        solid_pixels(content_width, content_height, color), request_id, request_id
+    )
+    expect(compositor.set_external_web_frame(window_id, frame)).to_be(true)
+    window_id
+
+fn ui_session() -> UISession:
+    UISession.new(build_tree(column("root", [
+        with_height(text_field("entry", "", "Entry"), 24)
+    ])))
+
+fn live_value(record: text, key: text) -> text:
+    val prefix = key + "="
+    var found = ""
+    var count = 0
+    for line in record.split("\n"):
+        if line.starts_with(prefix):
+            found = line.substring(prefix.len(), line.len())
+            count = count + 1
+    if count != 1:
+        return ""
+    found
+
+fn live_i64(record: text, key: text) -> i64:
+    live_value(record, key).to_i64() ?? 0
+
+fn block_live_guest(reason: text):
+    fail("BLOCKED[REQ-017-LIVE-GUEST]: " + reason +
+        "; resume: run " + LIVE_WRAPPER +
+        " with admitted pure-Simple image/runtime, QEMU+OVMF, QMP, and framebuffer input/readback")
+
+fn live_artifacts_present() -> bool:
+    if not file_exists(LIVE_EVIDENCE) or not file_exists(LIVE_REPORT):
+        return false
+    for name in ["baseline", "fullscreen", "restored", "browser-event"]:
+        if not file_exists(LIVE_DIR + "/" + name + ".ppm"):
+            return false
+    true
+
+describe "REQ-017 host-fixture WM behavior":
+    # @capture(protocol)
+    it "should keep focus order and choose the next stack-top window after close":
+        step("Register three real WmService-owned windows")
+        val wm = WmService.new()
+        wm.register_window_owner(WindowId(value: 30u64), 30u64)
+        wm.register_window_owner(WindowId(value: 10u64), 10u64)
+        wm.register_window_owner(WindowId(value: 20u64), 20u64)
+        expect(wm.focus_stack_value()).to_equal([30u64, 10u64, 20u64])
+        expect(wm.focused_window()).to_equal(20u64)
+
+        step("Raise the oldest window and then close it")
+        expect(wm.raise_focus_stack(30u64)).to_be(true)
+        expect(wm.focus_stack_value()).to_equal([10u64, 20u64, 30u64])
+        wm.remove_owner(30u64)
+
+        step("Verify deterministic close fallback follows stack order, not numeric ID")
+        expect(wm.focused_window()).to_equal(20u64)
+        expect(wm.focus_stack_value()).to_equal([10u64, 20u64])
+        expect(wm.window_count()).to_equal(2)
+
+    # @capture(protocol)
+    it "should bound damage geometry count generation and scene revision":
+        step("Admit one current bounded damage rectangle")
+        val current = WmDamageRegionV1(
+            generation: 7u64,
+            scene_revision: 9u64,
+            full_redraw: false,
+            reason: "input",
+            rects: [WmDamageRectV1(x: 12, y: 14, width: 80, height: 60)]
+        )
+        val accepted = wm_damage_admit_v1(current, 7u64, 9u64)
+        expect(accepted.accepted).to_be(true)
+        expect(accepted.rects.len()).to_equal(1)
+        expect(accepted.rects[0].width).to_equal(80)
+
+        step("Reject stale and invalid damage before it reaches presentation")
+        expect(wm_damage_admit_v1(current, 8u64, 9u64).reason).to_equal(
+            "stale-damage-generation")
+        val invalid = WmDamageRegionV1(
+            generation: 7u64,
+            scene_revision: 9u64,
+            full_redraw: false,
+            reason: "input",
+            rects: [WmDamageRectV1(x: 0, y: 0, width: 0, height: 60)]
+        )
+        expect(wm_damage_admit_v1(invalid, 7u64, 9u64).reason).to_equal(
+            "invalid-damage-geometry")
+
+    # @capture(protocol)
+    it "should route committed input only through the focused production window":
+        step("Create two compositor windows and one canonical client UI session")
+        var compositor = HostCompositor.new_headless(Size.wh(640, 600))
+        val window_a = add_colored_window(compositor, 1, "Window A", 20, 20, COLOR_A)
+        val window_b = add_colored_window(compositor, 2, "Window B", 160, 160, COLOR_B)
+        var router_a = HostGuiEventRouter.new(window_a)
+        var router_b = HostGuiEventRouter.new(window_b)
+        var session = ui_session()
+
+        step("Send committed text through both routes while B is focused")
+        var event = window_event_none()
+        event.kind = WINDOW_EVENT_TEXT
+        expect(router_b.route(event, compositor, session, "focused")).to_be(true)
+        expect(router_a.route(event, compositor, session, "wrong-target")).to_be(false)
+
+        step("Focus A through the compositor and prove routing changes owner")
+        compositor.handle_mouse_move(30, 60)
+        compositor.handle_left_button(true)
+        compositor.handle_left_button(false)
+        expect(router_a.route(event, compositor, session, "refocused")).to_be(true)
+        expect(router_b.route(event, compositor, session, "stale-target")).to_be(false)
+
+    # @capture(gui)
+    # @capture(protocol)
+    it "should compose z-order into pixels and preserve it across damage-only redraw":
+        step("Create two overlapping windows with distinct runtime pixels")
+        var compositor = HostCompositor.new_headless(Size.wh(640, 600))
+        val window_a = add_colored_window(compositor, 1, "Window A", 20, 20, COLOR_A)
+        add_colored_window(compositor, 2, "Window B", 160, 160, COLOR_B)
+        compositor.render_frame()
+        val overlap_x = 220
+        val overlap_y = 230
+        expect(pixel_at(
+            compositor.pure_simple_pixel_buffer(), compositor.width, overlap_x, overlap_y
+        )).to_equal(COLOR_B)
+
+        step("Damage only the lower window without changing z-order")
+        val replacement = pixel_surface_content_frame(
+            "{window_a}", "", 0, 0, 292, 264,
+            solid_pixels(292, 264, COLOR_A), 3, 3
+        )
+        expect(compositor.set_external_web_frame(window_a, replacement)).to_be(true)
+        compositor.render_frame()
+        expect(pixel_at(
+            compositor.pure_simple_pixel_buffer(), compositor.width, overlap_x, overlap_y
+        )).to_equal(COLOR_B)
+
+        step("Focus A and prove the composited overlap pixel follows it")
+        compositor.handle_mouse_move(30, 60)
+        compositor.handle_left_button(true)
+        compositor.handle_left_button(false)
+        compositor.render_frame()
+        expect(pixel_at(
+            compositor.pure_simple_pixel_buffer(), compositor.width, overlap_x, overlap_y
+        )).to_equal(COLOR_A)
+
+    # @capture(protocol)
+    it "should fence stale input and presentation receipts after recovery":
+        step("Commit one generation-correlated input and framebuffer presentation")
+        val wm = WmService.new()
+        wm.register_window_owner(WindowId(value: 8u64), 8u64)
+        val generation = wm.generation_value()
+        val revision = wm.scene_revision_value()
+        val input = WmInputEvent.mouse_move(WindowId(value: 8u64), Point.xy(4, 5))
+        expect(wm.accept_input_ingress(generation, 1u64, input)).to_be(true)
+        expect(wm.commit_presentation(
+            generation, revision, 1u64, 44u64, "framebuffer"
+        )).to_be(true)
+        expect(wm.presentation_matches(
+            generation, revision, 1u64, 44u64, "framebuffer"
+        )).to_be(true)
+
+        step("Restart the owner and reject all old-generation work")
+        expect(wm.restart()).to_equal(1u64)
+        expect(wm.accept_input_ingress(generation, 2u64, input)).to_be(false)
+        expect(wm.last_rejection_reason).to_equal("stale-lifecycle-generation")
+        expect(wm.presentation_matches(
+            generation, revision, 1u64, 44u64, "framebuffer"
+        )).to_be(false)
+        expect(wm.last_presented_frame_id).to_equal(0u64)
+
+describe "REQ-017 live-guest visual capture binding":
+    # @capture(exec)
+    # @capture(log)
+    # @capture(gui)
+    # @capture(artifact)
+    it "should bind guest input scene presentation and QMP pixels in one fresh bundle":
+        step("Run the canonical SimpleOS WM QEMU evidence owner")
+        val (stdout, stderr, code) = process_run(
+            "/usr/bin/env",
+            [
+                "BUILD_DIR=" + LIVE_DIR,
+                "REPORT_PATH=" + LIVE_REPORT,
+                "/bin/sh",
+                LIVE_WRAPPER
+            ]
+        )
+        if code != 0:
+            block_live_guest(
+                "wrapper exit=" + code.to_string() +
+                " stderr_bytes=" + stderr.bytes().len().to_string())
+        else if not live_artifacts_present():
+            block_live_guest("wrapper returned zero without the complete evidence bundle")
+        else:
+            step("Load the wrapper-admitted evidence and reject missing capture identities")
+            val evidence = file_read(LIVE_EVIDENCE)
+            expect(stdout).to_contain("simpleos_wm_fullscreen_status=pass")
+            expect(evidence).to_contain("simpleos_wm_fullscreen_status=pass")
+            expect(file_read(LIVE_REPORT)).to_contain("- status: pass")
+
+            step("Bind the same input sequence to scene mutation and presentation generation")
+            val pointer_sequence = live_i64(evidence, "simpleos_wm_fullscreen_pointer_input_seq")
+            val presented_generation = live_i64(
+                evidence, "simpleos_wm_fullscreen_browser_content_presented_generation")
+            expect(pointer_sequence).to_be_greater_than(0)
+            expect(presented_generation).to_be_greater_than(0)
+            expect(live_i64(
+                evidence, "simpleos_wm_fullscreen_browser_content_delta_generation"
+            )).to_equal(presented_generation)
+            expect(live_value(
+                evidence, "simpleos_wm_fullscreen_browser_content_applied_marker"
+            )).to_contain("input_seq=" + pointer_sequence.to_string())
+
+            step("Verify retained QMP frames by byte count and content hash")
+            for name in ["baseline", "fullscreen", "restored", "browser-event"]:
+                val path = LIVE_DIR + "/" + name + ".ppm"
+                expect(file_read_bytes(path).len()).to_be_greater_than(0)
+                expect(file_hash_sha256(path).len()).to_equal(64)
+            expect(file_hash_sha256(LIVE_DIR + "/fullscreen.ppm").index_of(
+                file_hash_sha256(LIVE_DIR + "/baseline.ppm")
+            )).to_equal(-1)
+            expect(file_hash_sha256(LIVE_DIR + "/restored.ppm")).to_equal(
+                file_hash_sha256(LIVE_DIR + "/baseline.ppm"))

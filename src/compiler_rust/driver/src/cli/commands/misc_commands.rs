@@ -1,6 +1,6 @@
 //! Miscellaneous command handlers (diagram, lock, run, etc.)
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use crate::cli::diagram_gen::{generate_diagrams_from_events, parse_diagram_args, print_diagram_help};
 use crate::cli::lock;
 
@@ -351,6 +351,7 @@ fn handle_bootstrap(args: &[&str]) -> i32 {
         println!("OPTIONS:");
         println!("  --backend=<name>   Backend: llvm, cranelift, c, auto (default: auto)");
         println!("  --output=<dir>     Output directory (default: bootstrap)");
+        println!("  --no-deploy        Verify only; do not deploy the verified stage");
         println!("  --seed=<path>      Seed compiler binary (default: bin/simple or bin/release/<platform>/simple)");
         println!();
         println!("The seed compiler must be a self-hosted Simple binary capable of");
@@ -362,7 +363,14 @@ fn handle_bootstrap(args: &[&str]) -> i32 {
     let mut backend = "auto".to_string();
     let mut output_dir = "bootstrap".to_string();
     let mut seed_compiler: Option<String> = None;
+    // Deploying the verified stage over a shared path while another lane is
+    // using it is unsafe; --no-deploy (or SIMPLE_BOOTSTRAP_NO_DEPLOY=1) makes
+    // the run verification-only.
+    let mut no_deploy = std::env::var("SIMPLE_BOOTSTRAP_NO_DEPLOY").map(|v| v != "0").unwrap_or(false);
     for arg in args {
+        if *arg == "--no-deploy" {
+            no_deploy = true;
+        }
         if let Some(b) = arg.strip_prefix("--backend=") {
             backend = b.to_string();
         } else if let Some(d) = arg.strip_prefix("--output=") {
@@ -397,6 +405,45 @@ fn handle_bootstrap(args: &[&str]) -> i32 {
         return 1;
     };
 
+    // Pin the input closure BEFORE stage 1, and run all three stages from it.
+    // Without this the three stages re-read the live working copy across ~45
+    // minutes and can compile different source, making every verdict
+    // uninterpretable — see
+    // doc/08_tracking/bug/bootstrap_determinism_check_races_live_working_tree_2026-08-21.md
+    let repo_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let compiler = std::fs::canonicalize(&compiler)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or(compiler);
+    let abs_output_dir = repo_root.join(&output_dir);
+    let snapshot_dir = match std::env::var("SIMPLE_BOOTSTRAP_SNAPSHOT_DIR") {
+        Ok(d) => PathBuf::from(d),
+        Err(_) => abs_output_dir.join(".input-snapshot"),
+    };
+    let mut workdir = repo_root.clone();
+    let mut snapshot_note = "NOT PINNED (live working copy)".to_string();
+    match create_bootstrap_snapshot(&repo_root, &snapshot_dir) {
+        Ok(()) => {
+            workdir = snapshot_dir.clone();
+            snapshot_note = format!("pinned snapshot {}", snapshot_dir.display());
+        }
+        Err(e) => {
+            eprintln!(
+                "Warning: could not pin input snapshot at {} ({e}); stages will read the LIVE working copy",
+                snapshot_dir.display()
+            );
+        }
+    }
+    // The inputs actually fed to the three stages. Re-fingerprinted after stage 3
+    // as the safety net: if they moved, the run proves nothing.
+    let inputs_before = bootstrap_closure_fingerprint(&workdir.join("src"));
+    let inputs_digest = bootstrap_closure_digest(&inputs_before);
+    println!(
+        "Inputs: {} ({} source files, tree={})",
+        snapshot_note,
+        inputs_before.len(),
+        inputs_digest
+    );
+
     // Stage 1: Compile compiler source with seed compiler.
     // NOTE: every stage compiles to the SAME basename ("simple", in a per-stage
     // subdir) on purpose. native-build embeds the output basename into the
@@ -406,8 +453,8 @@ fn handle_bootstrap(args: &[&str]) -> i32 {
     // non-determinism from the output filename.
     println!();
     println!("=== Stage 1: Compile with seed compiler ===");
-    let stage1_path = bootstrap_stage_output_path(&output_dir, "stage1/simple");
-    let stage1 = compile_stage(&compiler, &stage1_path, &backend);
+    let stage1_path = bootstrap_stage_output_path(&abs_output_dir.to_string_lossy(), "stage1/simple");
+    let stage1 = compile_stage(&compiler, &stage1_path, &backend, &workdir);
     if !stage1.success {
         eprintln!("Stage 1 FAILED");
         return 1;
@@ -420,8 +467,8 @@ fn handle_bootstrap(args: &[&str]) -> i32 {
     // deterministic output.
     println!();
     println!("=== Stage 2: Compile with seed compiler (determinism check) ===");
-    let stage2_path = bootstrap_stage_output_path(&output_dir, "stage2/simple");
-    let stage2 = compile_stage(&compiler, &stage2_path, &backend);
+    let stage2_path = bootstrap_stage_output_path(&abs_output_dir.to_string_lossy(), "stage2/simple");
+    let stage2 = compile_stage(&compiler, &stage2_path, &backend, &workdir);
     if !stage2.success {
         eprintln!("Stage 2 FAILED");
         return 1;
@@ -431,41 +478,278 @@ fn handle_bootstrap(args: &[&str]) -> i32 {
     // Stage 3: Third compilation
     println!();
     println!("=== Stage 3: Compile with seed compiler (triple check) ===");
-    let stage3_path = bootstrap_stage_output_path(&output_dir, "stage3/simple");
-    let stage3 = compile_stage(&compiler, &stage3_path, &backend);
+    let stage3_path = bootstrap_stage_output_path(&abs_output_dir.to_string_lossy(), "stage3/simple");
+    let stage3 = compile_stage(&compiler, &stage3_path, &backend, &workdir);
     if !stage3.success {
         eprintln!("Stage 3 FAILED");
         return 1;
     }
     println!("Stage 3: OK ({} bytes, hash={})", stage3.size, stage3.hash);
 
-    // Verify
+    // Safety net: the three stages prove nothing unless they read the SAME
+    // inputs. Re-fingerprint what they actually read; if it moved, the only
+    // honest verdict is ERROR (exit 2), never VERIFIED/PARTIAL/MISMATCH.
     println!();
-    if stage1.hash == stage2.hash && stage2.hash == stage3.hash {
-        println!("Bootstrap VERIFIED: All 3 stages produce identical output");
-        println!("  Hash: {}", stage1.hash);
-        if let Err(e) = deploy_verified_bootstrap_stage(&stage3_path, &output_dir) {
-            eprintln!("Bootstrap deploy FAILED: {}", e);
-            return 1;
-        }
-        0
-    } else if stage2.hash == stage3.hash {
-        println!("Bootstrap PARTIAL: Stage 2 and Stage 3 match (Stage 1 differs)");
-        println!("  Stage 1: {}", stage1.hash);
-        println!("  Stage 2: {}", stage2.hash);
-        println!("  Stage 3: {}", stage3.hash);
-        if let Err(e) = deploy_verified_bootstrap_stage(&stage3_path, &output_dir) {
-            eprintln!("Bootstrap deploy FAILED: {}", e);
-            return 1;
-        }
-        0
-    } else {
-        println!("Bootstrap MISMATCH: outputs differ between stages");
-        println!("  Stage 1: {} ({} bytes)", stage1.hash, stage1.size);
-        println!("  Stage 2: {} ({} bytes)", stage2.hash, stage2.size);
-        println!("  Stage 3: {} ({} bytes)", stage3.hash, stage3.size);
-        1
+    let inputs_after = bootstrap_closure_fingerprint(&workdir.join("src"));
+    if inputs_before.is_empty() {
+        println!("ERROR — nothing was checked (no source files found under {}/src)", workdir.display());
+        return 2;
     }
+    if bootstrap_closure_digest(&inputs_after) != inputs_digest {
+        let before: std::collections::BTreeMap<&String, &String> =
+            inputs_before.iter().map(|(p, h)| (p, h)).collect();
+        let after: std::collections::BTreeMap<&String, &String> =
+            inputs_after.iter().map(|(p, h)| (p, h)).collect();
+        let mut changed: Vec<String> = Vec::new();
+        for (p, h) in &after {
+            match before.get(p) {
+                Some(bh) if bh == h => {}
+                Some(_) => changed.push((*p).clone()),
+                None => changed.push(format!("{} (added)", p)),
+            }
+        }
+        for p in before.keys() {
+            if !after.contains_key(*p) {
+                changed.push(format!("{} (removed)", p));
+            }
+        }
+        println!(
+            "ERROR — inputs changed during the run: {} of {} source file(s) differ: {}",
+            changed.len(),
+            inputs_before.len(),
+            changed.join(", ")
+        );
+        return 2;
+    }
+
+    // Verify
+    println!("Inputs stable: {} source file(s), tree={}", inputs_before.len(), inputs_digest);
+    println!();
+    match classify_bootstrap_verdict(&stage1.hash, &stage2.hash, &stage3.hash) {
+        BootstrapVerdict::Verified => {
+            println!("Bootstrap VERIFIED: All 3 stages produce identical output");
+            println!("  Hash: {}", stage1.hash);
+            if no_deploy {
+                println!("Deploy skipped (--no-deploy)");
+            } else if let Err(e) = deploy_verified_bootstrap_stage(&stage3_path, &output_dir) {
+                eprintln!("Bootstrap deploy FAILED: {}", e);
+                return 1;
+            }
+            0
+        }
+        BootstrapVerdict::Partial => {
+            // Deployment requires VERIFIED. The former PARTIAL -> deploy branch
+            // was a fail-open; its removal precondition (one VERIFIED run on a
+            // pinned snapshot) was met 2026-08-21, so a PARTIAL now can only
+            // mean genuine codegen nondeterminism and is never deployed.
+            println!(
+                "Bootstrap PARTIAL \u{2014} not deployed: stage1 differs (stage1={}, stage2={}, stage3={})",
+                stage1.hash, stage2.hash, stage3.hash
+            );
+            1
+        }
+        BootstrapVerdict::Mismatch => {
+            println!("Bootstrap MISMATCH: outputs differ between stages");
+            println!("  Stage 1: {} ({} bytes)", stage1.hash, stage1.size);
+            println!("  Stage 2: {} ({} bytes)", stage2.hash, stage2.size);
+            println!("  Stage 3: {} ({} bytes)", stage3.hash, stage3.size);
+            1
+        }
+    }
+}
+
+/// Verdict for a three-stage bootstrap, decided purely from the stage hashes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootstrapVerdict {
+    /// All three stages produced identical output.
+    Verified,
+    /// Stage 2 == stage 3 but stage 1 differs (fixpoint reached late).
+    Partial,
+    /// Anything else.
+    Mismatch,
+}
+
+/// Classify a bootstrap run from its three stage hashes.
+pub fn classify_bootstrap_verdict(s1: &str, s2: &str, s3: &str) -> BootstrapVerdict {
+    if s1 == s2 && s2 == s3 {
+        BootstrapVerdict::Verified
+    } else if s2 == s3 {
+        BootstrapVerdict::Partial
+    } else {
+        BootstrapVerdict::Mismatch
+    }
+}
+
+#[cfg(test)]
+mod bootstrap_verdict_tests {
+    use super::{classify_bootstrap_verdict, BootstrapVerdict};
+
+    #[test]
+    fn all_equal_is_verified() {
+        assert_eq!(classify_bootstrap_verdict("a", "a", "a"), BootstrapVerdict::Verified);
+    }
+
+    #[test]
+    fn stage1_differs_is_partial() {
+        assert_eq!(classify_bootstrap_verdict("a", "b", "b"), BootstrapVerdict::Partial);
+    }
+
+    #[test]
+    fn stage3_differs_is_mismatch() {
+        assert_eq!(classify_bootstrap_verdict("a", "a", "b"), BootstrapVerdict::Mismatch);
+        assert_eq!(classify_bootstrap_verdict("a", "b", "c"), BootstrapVerdict::Mismatch);
+        assert_eq!(classify_bootstrap_verdict("a", "b", "a"), BootstrapVerdict::Mismatch);
+    }
+}
+
+/// Source extensions that make up the compiled input closure. Only these are
+/// COPIED into the pinned snapshot; every other entry is symlinked back to the
+/// live tree (build outputs, `.a`/`.o`, C runtime sources are inputs to the
+/// LINK, not to codegen, and copying 16 GB of `src/` is not viable).
+const BOOTSTRAP_PINNED_EXTS: [&str; 2] = ["spl", "sdn"];
+/// Directories never traversed when building the snapshot; symlinked whole.
+const BOOTSTRAP_SNAPSHOT_SKIP_DIRS: [&str; 5] = ["target", "build", "node_modules", ".git", "vendor"];
+
+/// Walk `root` (a `src/` directory), returning (relative path, sha256) for every
+/// file in the pinned input closure, sorted by path.
+fn bootstrap_closure_fingerprint(root: &Path) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            let ft = match entry.file_type() {
+                Ok(ft) => ft,
+                Err(_) => continue,
+            };
+            if ft.is_symlink() {
+                continue;
+            }
+            if ft.is_dir() {
+                if !BOOTSTRAP_SNAPSHOT_SKIP_DIRS.contains(&name.as_str()) {
+                    stack.push(path);
+                }
+            } else if path
+                .extension()
+                .map(|e| BOOTSTRAP_PINNED_EXTS.contains(&e.to_string_lossy().as_ref()))
+                .unwrap_or(false)
+            {
+                if let Ok(h) = sha256_file(&path.to_string_lossy()) {
+                    let rel = path
+                        .strip_prefix(root)
+                        .unwrap_or(&path)
+                        .to_string_lossy()
+                        .to_string();
+                    out.push((rel, h));
+                }
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Single digest over a closure fingerprint — the snapshot's "tree id".
+fn bootstrap_closure_digest(files: &[(String, String)]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    for (path, hash) in files {
+        hasher.update(path.as_bytes());
+        hasher.update(b" ");
+        hasher.update(hash.as_bytes());
+        hasher.update(b"\n");
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+/// Materialise an immutable snapshot of the input closure at `dest`.
+///
+/// The working tree is routinely DIRTY (hundreds of uncommitted files across
+/// concurrent sessions), so `git worktree add --detach` — the pattern
+/// `check-seed-builds-push.shs` uses for the Rust seed — would compile HEAD, i.e.
+/// *different* source than the operator asked for. We therefore snapshot the live
+/// working-copy CONTENT: source files are copied, everything else is symlinked.
+fn create_bootstrap_snapshot(repo_root: &Path, dest: &Path) -> std::io::Result<()> {
+    if dest.exists() {
+        std::fs::remove_dir_all(dest)?;
+    }
+    std::fs::create_dir_all(dest)?;
+
+    // Everything at the repo root except `src` is symlinked wholesale: relative
+    // paths (bin/, config/, scripts/) keep resolving, and none of it is codegen input.
+    for entry in std::fs::read_dir(repo_root)?.flatten() {
+        let name = entry.file_name();
+        if name == std::ffi::OsStr::new("src") {
+            continue;
+        }
+        let _ = symlink_path(&entry.path(), &dest.join(&name));
+    }
+
+    copy_pinned_tree(&repo_root.join("src"), &dest.join("src"))
+}
+
+#[cfg(unix)]
+fn symlink_path(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(src, dst)
+}
+
+#[cfg(not(unix))]
+fn symlink_path(src: &Path, dst: &Path) -> std::io::Result<()> {
+    if src.is_dir() {
+        std::os::windows::fs::symlink_dir(src, dst)
+    } else {
+        std::os::windows::fs::symlink_file(src, dst)
+    }
+}
+
+/// Copy the pinned source extensions; symlink every other file and skipped dir.
+fn copy_pinned_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)?.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let target = dst.join(&name);
+        let ft = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        if ft.is_symlink() {
+            // Preserve RELATIVE link targets verbatim so they keep resolving
+            // INSIDE the snapshot. Pointing them back at the live tree is an
+            // escape: `src/std -> lib` is a stdlib root candidate, so a
+            // live-pointing `src/std` hands every stage the live `src/lib`
+            // regardless of the copy — the exact race this snapshot exists to
+            // close. Absolute targets are reproduced as-is.
+            match std::fs::read_link(&path) {
+                Ok(link_target) if link_target.is_relative() => {
+                    let _ = symlink_path(&link_target, &target);
+                }
+                _ => {
+                    let _ = symlink_path(&path, &target);
+                }
+            }
+        } else if ft.is_dir() {
+            if BOOTSTRAP_SNAPSHOT_SKIP_DIRS.contains(&name.to_string_lossy().as_ref()) {
+                let _ = symlink_path(&path, &target);
+            } else {
+                copy_pinned_tree(&path, &target)?;
+            }
+        } else if path
+            .extension()
+            .map(|e| BOOTSTRAP_PINNED_EXTS.contains(&e.to_string_lossy().as_ref()))
+            .unwrap_or(false)
+        {
+            std::fs::copy(&path, &target)?;
+        } else {
+            let _ = symlink_path(&path, &target);
+        }
+    }
+    Ok(())
 }
 
 fn bootstrap_stage_output_path(output_dir: &str, name: &str) -> String {
@@ -486,7 +770,40 @@ struct StageResult {
     hash: String,
 }
 
-fn compile_stage(compiler: &str, output: &str, backend: &str) -> StageResult {
+/// Native-build worker count for a bootstrap stage.
+///
+/// `SIMPLE_BOOTSTRAP_THREADS=<n>` overrides (n=1 restores the old serial
+/// behaviour); otherwise half the host CPUs, capped at 8. The cap is a MEMORY
+/// bound, not a determinism one: each LLVM worker owns a full
+/// `inkwell::Context` + optimizer and peaks GB-scale, which is why
+/// `resolve_num_threads` (`compiler/src/pipeline/native_project/mod.rs`,
+/// `LLVM_DEFAULT_MAX_THREADS`) clamps LLVM parallelism at all.
+///
+/// Output is thread-count independent: modules compile to separate objects and
+/// link in a fixed order. Verified 2026-08-21 on a 7-module pinned input with
+/// per-run private cache scopes (so every run really compiled: "7 compiled, 0
+/// cached") — --threads 1 x2 and --threads 8 x2 all produced sha256
+/// 41c5b4d4df287797ffb7bdd821808a1c...
+fn bootstrap_threads() -> usize {
+    if let Ok(n) = std::env::var("SIMPLE_BOOTSTRAP_THREADS") {
+        if let Ok(n) = n.parse::<usize>() {
+            if n > 0 {
+                return n;
+            }
+        }
+    }
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    (cores / 2).clamp(1, 8)
+}
+
+/// Compile one bootstrap stage.
+///
+/// `workdir` is the directory the compiler is run FROM. All three stages must be
+/// given the SAME pinned snapshot directory, otherwise they read the live working
+/// copy and can compile different source — see
+/// `doc/08_tracking/bug/bootstrap_determinism_check_races_live_working_tree_2026-08-21.md`.
+/// `compiler` and `output` must therefore be absolute paths.
+fn compile_stage(compiler: &str, output: &str, backend: &str, workdir: &Path) -> StageResult {
     use std::process::Command;
 
     // Rust driver uses native-build with --entry-closure for cross-module resolution:
@@ -504,6 +821,7 @@ fn compile_stage(compiler: &str, output: &str, backend: &str) -> StageResult {
     let is_rust_driver = is_rust_driver_binary(compiler) || binary_reports_rust_seed(compiler);
 
     let mut cmd = Command::new(compiler);
+    cmd.current_dir(workdir);
     cmd.env_remove("_SIMPLE_STACK_SET");
     if is_rust_driver {
         // Force the seed's in-process native_project pipeline. Without this the
@@ -519,7 +837,7 @@ fn compile_stage(compiler: &str, output: &str, backend: &str) -> StageResult {
             .arg("--entry-closure")
             .arg("--strip")
             .arg("--threads")
-            .arg("1")
+            .arg(bootstrap_threads().to_string())
             .arg("--timeout")
             .arg("180")
             .arg("-o")
@@ -530,8 +848,8 @@ fn compile_stage(compiler: &str, output: &str, backend: &str) -> StageResult {
             cmd.env("SIMPLE_RUNTIME_PATH", rtp);
         }
         println!(
-            "  Running: {} native-build --source src/app --entry-closure --strip --threads 1 --timeout 180 --entry src/app/cli/bootstrap_main.spl -o {}",
-            compiler, output
+            "  Running: {} native-build --source src/app --entry-closure --strip --threads {} --timeout 180 --entry src/app/cli/bootstrap_main.spl -o {}",
+            compiler, bootstrap_threads(), output
         );
     } else {
         cmd.arg("native-build")
@@ -542,7 +860,7 @@ fn compile_stage(compiler: &str, output: &str, backend: &str) -> StageResult {
             .arg("--entry-closure")
             .arg("--strip")
             .arg("--threads")
-            .arg("1")
+            .arg(bootstrap_threads().to_string())
             .arg("--timeout")
             .arg("180")
             .arg("-o")
@@ -551,14 +869,26 @@ fn compile_stage(compiler: &str, output: &str, backend: &str) -> StageResult {
         // backend (`llvm-lib`); `auto`/`llvm` must be normalized to it or the
         // receiver's dispatch (src/app/cli/_CliMain) rejects the invocation with
         // "native-build requires --backend=llvm-lib in the pure Simple command path".
+        // `auto` must never resolve to a backend the seed cannot actually run:
+        // a seed linked against a libsimple_native_all.a built without the
+        // 'llvm' cargo feature fails every file with "'llvm' feature not
+        // enabled". Probe the seed once and fall back to cranelift.
         let sh_backend = match backend {
-            "llvm" | "llvm-lib" | "llvmlib" | "auto" => "llvm-lib",
+            "llvm" | "llvm-lib" | "llvmlib" => "llvm-lib",
+            "auto" => {
+                if seed_supports_llvm(compiler) {
+                    "llvm-lib"
+                } else {
+                    println!("  Backend auto: seed cannot use llvm (built without the 'llvm' feature) — using cranelift");
+                    "cranelift"
+                }
+            }
             other => other,
         };
         cmd.arg(format!("--backend={}", sh_backend));
         println!(
-            "  Running: {} native-build --source src/app --entry-closure --strip --threads 1 --timeout 180 --entry src/app/cli/bootstrap_main.spl -o {} --backend={}",
-            compiler, output, sh_backend
+            "  Running: {} native-build --source src/app --entry-closure --strip --threads {} --timeout 180 --entry src/app/cli/bootstrap_main.spl -o {} --backend={}",
+            compiler, bootstrap_threads(), output, sh_backend
         );
     }
 
@@ -753,6 +1083,54 @@ fn binary_reports_rust_seed(compiler: &str) -> bool {
             text.contains("bootstrap seed")
         })
         .unwrap_or(false)
+}
+
+/// Probe whether a self-hosted seed can actually codegen through llvm.
+///
+/// The pure-Simple `native-build` lane routes `llvm-lib` into the linked
+/// `rt_native_build` pipeline; when that static library was built without the
+/// 'llvm' cargo feature every file fails. One tiny compile answers it. Cached:
+/// the bootstrap runs three stages with the same seed.
+fn seed_supports_llvm(compiler: &str) -> bool {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<bool> = OnceLock::new();
+    *CACHE.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("simple-llvm-probe-{}", std::process::id()));
+        if std::fs::create_dir_all(&dir).is_err() {
+            return true;
+        }
+        let src = dir.join("probe.spl");
+        if std::fs::write(&src, "fn main():\n    print \"probe\"\n").is_err() {
+            return true;
+        }
+        let out = std::process::Command::new(compiler)
+            .arg("native-build")
+            .arg("--source")
+            .arg(&dir)
+            .arg("--entry")
+            .arg(&src)
+            .arg("--entry-closure")
+            .arg("--backend=llvm-lib")
+            .arg("-o")
+            .arg(dir.join("probe"))
+            .stdin(std::process::Stdio::null())
+            .output();
+        let supported = match out {
+            Ok(out) => {
+                let text = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                !text.contains("'llvm' feature not enabled")
+                    && !text.contains("without the 'llvm' cargo feature")
+            }
+            // Could not run the probe: don't silently downgrade the backend.
+            Err(_) => true,
+        };
+        let _ = std::fs::remove_dir_all(&dir);
+        supported
+    })
 }
 
 fn is_rust_driver_binary(compiler: &str) -> bool {

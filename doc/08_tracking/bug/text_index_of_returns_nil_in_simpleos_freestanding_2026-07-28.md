@@ -171,6 +171,8 @@ depends on this today.
 ## UPDATE 2026-08-09 — step (3) went live and FIXED; the retraction is superseded
 
 **Status: FIXED** for the erased-receiver route. The 2026-07-28 retraction above
+
+- **Verification 2026-08-21 (bug-status-consistency audit): PARTIAL, not fully fixed.** The erased-receiver fix is real (`rt_index_of` at `examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c:10462`; cranelift allowlist `("index_of", 1)` at `src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs:204`; commit `2c782cbfb76`; guard spec `test/01_unit/os/kernel/boot/baremetal_rt_index_of_not_fabricated_spec.spl` exists). Still open: (1) the NON-erased-receiver route in `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl` is untouched; (2) `llvm_native_link.spl` refuses only *baselined* fabrications, so an unbaselined `rt_*` fabrication still passes fail-open. Two cited artefacts do not check out: the evidence ELF `build/simpleos_wm_fullscreen_evidence/simpleos_wm_production_desktop.elf` is absent, and the helper-form citation points at `..._foundation.spl:431` where the helper actually lives in `..._renderer_style.spl` (69 sites today, not 75). `bug_db.sdn` row is `fix-implemented-verification-pending`.
 ("implementing `rt_index_of` would be dead code") was correct *on that day* and
 is now **superseded by a change that landed after it**, not wrong in hindsight.
 

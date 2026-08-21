@@ -29,11 +29,10 @@ use os.apps.shell.shell_job.{JobTable, JobState, Job}
 use os.apps.shell.shell_pipe.{parse_pipeline, has_pipeline, execute_pipeline}
 use os.apps.shell.shell_redirect.{parse_redirects, apply_redirects, restore_redirects, ParsedCommand, SavedFd}
 use os.apps.shell.shell_async.{spawn_command_async, spawn_command_bg}
-use os.apps.shell.shell_tools.{tool_touch, tool_head, tool_tail, tool_wc, tool_sort, tool_uniq, tool_which, tool_date, tool_true, tool_false, tool_tee, tool_ln, tool_chmod, tool_stat, tool_uname, tool_cmake, tool_ninja, tool_try_staged_toolchain}
+use os.apps.shell.shell_tools.{tool_touch, tool_head, tool_tail, tool_wc, tool_sort, tool_uniq, tool_which, tool_date, tool_true, tool_false, tool_tee, tool_ln, tool_chmod, tool_stat, tool_uname, tool_try_staged_toolchain, toolchain_canonical_path}
 use os.tools.shell.cat.cat_tool.{tool_cat}
 use os.tools.shell.ls.ls_tool.{tool_ls}
 use os.tools.shell.echo.echo_tool.{tool_echo}
-use os.tools.shell.grep.grep_tool.{tool_grep}
 use os.tools.shell.find.find_tool.{tool_find}
 use os.tools.shell.cut.cut_tool.{tool_cut}
 use os.tools.shell.tr.tr_tool.{tool_tr}
@@ -55,7 +54,10 @@ use os.tools.shell.file.file_tool.{tool_file}
 use os.tools.shell.strings.strings_tool.{tool_strings}
 use os.tools.shell.hexdump.hexdump_tool.{tool_hexdump}
 use os.tools.shell.base64.base64_tool.{tool_base64}
-use os.tools.shell.checksum.checksum_tool.{tool_md5sum, tool_sha256sum}
+use os.tools.shell.checksum.checksum_artifact_contract.{checksum_tool_canonical_path_v1}
+use os.services.launcher.launcher_checksum_tool_gate.{launcher_dispatch_checksum_tool_v1}
+use os.tools.shell.grep.grep_artifact_contract.{text_tool_canonical_path_v1}
+use os.services.launcher.launcher_text_tool_gate.{launcher_dispatch_text_tool_v1}
 use os.tools.shell.shell_helpers.{split_lines}
 use os.apps.git.git_app.{git_run_cmd}
 use os.apps.jj.jj_app.{jj_run_cmd}
@@ -64,6 +66,8 @@ use os.posix.process_compat.{posix_waitpid}
 use os.apps.shell.shell_expand.{shell_expand, shell_apply_alias}
 use os.apps.shell.shell_script.{ScriptEngine, Stmt, StmtKind}
 use os.apps.shell.shell_builtins.{builtin_printf, builtin_alias_list}
+use os.services.launcher.launcher_process_tool_gate.{launcher_dispatch_process_tool_v1}
+use os.tools.shell.process.process_artifact_contract.{process_tool_canonical_path_v1}
 use os.apps.shell.shell_starship.{StarshipPrompt, ShellContext}
 use os.tools.shell.awk.awk_tool.{tool_awk}
 use os.tools.shell.tac.tac_tool.{tool_tac}
@@ -232,6 +236,37 @@ impl ShellApp:
         if has_pipeline(cmd):
             val stages = parse_pipeline(cmd)
             if stages.len() > 1:
+                # Artifact-gated tools must not bypass launcher admission by
+                # appearing in a pipeline or through a shell alias.
+                for stage in stages:
+                    val stage_argv = self.parse_command(stage)
+                    if stage_argv.len() > 0:
+                        val artifact_command = shell_apply_alias(stage_argv[0], self.aliases)
+                        val artifact_args = stage_argv.slice(1, stage_argv.len())
+                        val text_path = text_tool_canonical_path_v1(artifact_command)
+                        val checksum_path = checksum_tool_canonical_path_v1(artifact_command)
+                        val process_path = process_tool_canonical_path_v1(artifact_command)
+                        if text_path != "":
+                            val blocked = launcher_dispatch_text_tool_v1(
+                                artifact_command, artifact_args)
+                            self.last_exit_code = blocked.exit_code
+                            self._write_error(
+                                "{artifact_command}: BLOCKED {blocked.code} path={blocked.canonical_path}")
+                            return
+                        if checksum_path != "":
+                            val blocked_checksum = launcher_dispatch_checksum_tool_v1(
+                                artifact_command, artifact_args)
+                            self.last_exit_code = blocked_checksum.exit_code
+                            self._write_error(
+                                "{artifact_command}: BLOCKED {blocked_checksum.code} path={blocked_checksum.canonical_path}")
+                            return
+                        if process_path != "":
+                            val blocked_process = launcher_dispatch_process_tool_v1(
+                                artifact_command, artifact_args)
+                            self.last_exit_code = blocked_process.exit_code
+                            self._write_error(
+                                "{artifact_command}: BLOCKED {blocked_process.code} path={blocked_process.canonical_path}")
+                            return
                 val exit_code = execute_pipeline(stages)
                 self.last_exit_code = exit_code as i32
                 return
@@ -269,8 +304,36 @@ impl ShellApp:
                 restore_redirects(saved_fds)
             return
 
-        # Built-ins stay in-process; everything else routes through launcher.
-        if self._is_builtin_command(command):
+        val artifact_command = shell_apply_alias(command, self.aliases)
+        val text_tool_path = text_tool_canonical_path_v1(artifact_command)
+        val checksum_path = checksum_tool_canonical_path_v1(artifact_command)
+        val process_path = process_tool_canonical_path_v1(artifact_command)
+        if text_tool_path != "":
+            val result = launcher_dispatch_text_tool_v1(artifact_command, args)
+            self.last_exit_code = result.exit_code
+            if not result.ok:
+                self._write_error("{artifact_command}: BLOCKED {result.code} path={result.canonical_path}")
+        elif checksum_path != "":
+            val result = launcher_dispatch_checksum_tool_v1(artifact_command, args)
+            self.last_exit_code = result.exit_code
+            if not result.ok:
+                self._write_error("{artifact_command}: BLOCKED {result.code} path={result.canonical_path}")
+        elif process_path != "":
+            val result = launcher_dispatch_process_tool_v1(artifact_command, args)
+            self.last_exit_code = result.exit_code
+            if not result.ok:
+                self._write_error("{artifact_command}: BLOCKED {result.code} path={result.canonical_path}")
+        # Toolchains are pinned to packaged guest paths. This prevents PATH or
+        # /sys/apps aliases from replacing the executable admitted by the image.
+        elif toolchain_canonical_path(command) != "":
+            val toolchain_path = toolchain_canonical_path(command)
+            val diagnostic = tool_try_staged_toolchain(
+                self.vfs, self.cwd, self._get_env("PATH"), command, args, self.terminal)
+            if diagnostic != nil:
+                self.last_exit_code = diagnostic.unwrap()
+            else:
+                self._try_external(toolchain_path, args)
+        elif self._is_builtin_command(command):
             self._dispatch_builtin(command, args)
         else:
             self._try_external(command, args)
@@ -296,9 +359,7 @@ impl ShellApp:
             "rm":       self.cmd_rm(args)
             "cp":       self.cmd_cp(args)
             "mv":       self.cmd_mv(args)
-            "grep":     self.last_exit_code = tool_grep(self.vfs, self.cwd, args, self.terminal)
             "find":     self.last_exit_code = tool_find(self.vfs, self.cwd, args, self.terminal)
-            "ps":       self.cmd_ps()
             "kill":     self.cmd_kill(args)
             "run":      self.cmd_run(args)
             "mount":    self.cmd_mount(args)
@@ -326,8 +387,6 @@ impl ShellApp:
             "which":    self.last_exit_code = tool_which(self.vfs, self.cwd, self._get_env("PATH"), args, self.tool_registry, self.terminal)
             "date":     self.last_exit_code = tool_date(self.terminal)
             "uname":    self.last_exit_code = tool_uname(args, self.terminal)
-            "cmake":    self.last_exit_code = tool_cmake(self.vfs, self.cwd, self.env, args, self.terminal)
-            "ninja":    self.last_exit_code = tool_ninja(self.vfs, self.cwd, self.env, args, self.terminal)
             "true":     self.last_exit_code = tool_true()
             "false":    self.last_exit_code = tool_false()
             "tee":      self.last_exit_code = tool_tee(self.vfs, self.cwd, args, self.terminal)
@@ -355,8 +414,6 @@ impl ShellApp:
             "strings":  self.last_exit_code = tool_strings(self.vfs, self.cwd, args, self.terminal)
             "hexdump":  self.last_exit_code = tool_hexdump(self.vfs, self.cwd, args, self.terminal)
             "base64":   self.last_exit_code = tool_base64(self.vfs, self.cwd, args, self.terminal)
-            "md5sum":   self.last_exit_code = tool_md5sum(self.vfs, self.cwd, args, self.terminal)
-            "sha256sum": self.last_exit_code = tool_sha256sum(self.vfs, self.cwd, args, self.terminal)
             "git":      self.cmd_git(args)
             "jj":       self.cmd_jj(args)
             "source":   self.cmd_source(args)
@@ -405,9 +462,7 @@ impl ShellApp:
             "rm": true
             "cp": true
             "mv": true
-            "grep": true
             "find": true
-            "ps": true
             "kill": true
             "run": true
             "mount": true
@@ -435,8 +490,6 @@ impl ShellApp:
             "which": true
             "date": true
             "uname": true
-            "cmake": true
-            "ninja": true
             "true": true
             "false": true
             "tee": true
@@ -464,8 +517,6 @@ impl ShellApp:
             "strings": true
             "hexdump": true
             "base64": true
-            "md5sum": true
-            "sha256sum": true
             "git": true
             "jj": true
             "source": true
@@ -502,14 +553,50 @@ impl ShellApp:
 
     me _execute_background(command: text, args: [text]):
         """Execute a command in the background. Adds to job table."""
+        val artifact_command = shell_apply_alias(command, self.aliases)
+        val text_tool_path = text_tool_canonical_path_v1(artifact_command)
+        if text_tool_path != "":
+            val text_tool_result = launcher_dispatch_text_tool_v1(artifact_command, args)
+            self.last_exit_code = text_tool_result.exit_code
+            if not text_tool_result.ok:
+                self._write_error(
+                    "{artifact_command}: BLOCKED {text_tool_result.code} path={text_tool_result.canonical_path}")
+            return
+
+        val checksum_path = checksum_tool_canonical_path_v1(artifact_command)
+        if checksum_path != "":
+            val checksum_result = launcher_dispatch_checksum_tool_v1(artifact_command, args)
+            self.last_exit_code = checksum_result.exit_code
+            if not checksum_result.ok:
+                self._write_error(
+                    "{artifact_command}: BLOCKED {checksum_result.code} path={checksum_result.canonical_path}")
+            return
+
+        val process_path = process_tool_canonical_path_v1(artifact_command)
+        if process_path != "":
+            val process_result = launcher_dispatch_process_tool_v1(artifact_command, args)
+            self.last_exit_code = process_result.exit_code
+            if not process_result.ok:
+                self._write_error(
+                    "{artifact_command}: BLOCKED {process_result.code} path={process_result.canonical_path}")
+            return
+
         # Built-ins cannot be backgrounded because they mutate shell state.
         if self._is_builtin_command(command):
             self._write_error("sosh: cannot background built-in: {command}")
             self.last_exit_code = 1
             return
 
-        # Spawn in background
-        val result = spawn_command_bg(command, args, self.cwd, self._get_env("PATH"))
+        val diagnostic = tool_try_staged_toolchain(
+            self.vfs, self.cwd, self._get_env("PATH"), command, args, self.terminal)
+        if diagnostic != nil:
+            self.last_exit_code = diagnostic.unwrap()
+            return
+
+        # Known toolchains bypass PATH and launch their image-owned executable.
+        val canonical_path = toolchain_canonical_path(command)
+        val launch_path = if canonical_path != "": canonical_path else: command
+        val result = spawn_command_bg(launch_path, args, self.cwd, self._get_env("PATH"))
         match result:
             Ok(pid):
                 val job_id = self.jobs.add(pid, "{command}", 0)

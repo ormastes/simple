@@ -1,0 +1,299 @@
+# Completeness sealer — hardening plan 2026-08-21 §13.1.
+#
+# Runs the §13.1 admission steps in order over a selected manifest set and
+# either freezes the semantic universe (dense tags + seal hash) or returns the
+# closed set of reasons it cannot be frozen. There is no wildcard arm and no
+# silent fallback (§11.6): every rejection names a constructor and a cause.
+#
+# Step order (§13.1):
+#   stable identity check
+#     -> ABI/schema check
+#     -> required-interface check (§11.4 MissingCapabilities = Required - Provided)
+#     -> closure/activation admission for critical (§5.3)
+#     -> dense local tag assignment
+#     -> completeness seal hash over the canonical manifest set
+#
+# Identity, the axis tables and the dense tag freeze all come from A4's
+# `compiler.common.dynamic_identity`; nothing here re-implements them.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.dynamic_identity.closure.{Closure, Activation, critical_admits}
+use compiler.common.dynamic_identity.persistent_id.{PersistentExtensionId}
+use compiler.common.dynamic_identity.identity_error.{IdentityError}
+use compiler.common.dynamic_identity.dense_tag_map.{
+    TagCapacity,
+    ClaimedVariant,
+    DenseTagMap,
+    claim_of,
+    freeze_universe
+}
+use compiler.loader.completeness_seal.axis_parse.{
+    closure_from_text,
+    activation_from_text,
+    first_use_obligation_met
+}
+use compiler.loader.completeness_seal.manifest.{
+    ExtensionManifest,
+    ModuleManifest,
+    ManifestError,
+    manifest_error_text
+}
+use compiler.loader.completeness_seal.required_interfaces.{
+    required_operations,
+    missing_operations,
+    missing_module_interfaces,
+    operation_interface_name
+}
+
+# Closed error enum. Each variant renders the diagnostic shape §17 specifies.
+pub enum SealError:
+    UnknownOwnerEnum(text, text)
+    AbiMismatch(text, text, text, text)
+    MissingInterface(text, text, text, text)
+    OpenDynInCritical(text, text)
+    ActivationRejected(text, text, text)
+    BadAxisValue(text, text, text)
+    IdentityRejected(IdentityError)
+    ManifestRejected(ManifestError)
+
+pub fn seal_error_code(e: SealError) -> text:
+    match e:
+        case UnknownOwnerEnum(_, _): "E-COMPLETE-022"
+        case AbiMismatch(_, _, _, _): "E-COMPLETE-023"
+        case MissingInterface(_, _, _, _): "E-COMPLETE-021"
+        case OpenDynInCritical(_, _): "E-MC-DYN-001"
+        case ActivationRejected(_, _, _): "E-MC-DYN-002"
+        case BadAxisValue(_, _, _): "E-COMPLETE-024"
+        case IdentityRejected(inner): inner.code()
+        case ManifestRejected(_): "E-MANIFEST"
+
+pub fn seal_error_text(e: SealError) -> text:
+    match e:
+        case UnknownOwnerEnum(owner, provider):
+            "E-COMPLETE-022:\nowner enum is not a known extensible enum\n\nenum:\n  " + owner + "\n\nprovider:\n  " + provider
+        case AbiMismatch(provider, field, expected, found):
+            "E-COMPLETE-023:\nABI/schema check failed for " + provider + "\n\nfield:\n  " + field + "\nexpected:\n  " + expected + "\nfound:\n  " + found
+        # §17.4 E-COMPLETE-021.
+        case MissingInterface(constructor, missing, provider, payload_schema):
+            "E-COMPLETE-021:\ncomplete extension " + constructor + " cannot be sealed\n\nrequired interface missing:\n  " + missing + "\n\nprovider:\n  " + provider + "\npayload schema:\n  " + payload_schema
+        # §17.6 E-MC-DYN-001.
+        case OpenDynInCritical(owner, provider):
+            "E-MC-DYN-001:\nopen dynamic semantic extension is reachable in a critical build\n\nenum:\n  " + owner + "\n\nprovider:\n  " + provider + "\n\nselect and seal the provider as `complete`, normalize it before the critical\nbarrier, or exclude it from this configuration."
+        case ActivationRejected(provider, activation, reason):
+            "E-MC-DYN-002:\nactivation policy is not admissible in a critical build\n\nprovider:\n  " + provider + "\nactivation:\n  " + activation + "\nreason:\n  " + reason
+        case BadAxisValue(provider, axis, value):
+            "E-COMPLETE-024:\nunknown value on the `" + axis + ":` axis\n\nprovider:\n  " + provider + "\nvalue:\n  " + value
+        case IdentityRejected(inner):
+            inner.describe()
+        case ManifestRejected(inner):
+            manifest_error_text(inner)
+
+pub class SealConfig:
+    critical: bool
+    core_abi_hash: text
+    extensions: [ExtensionManifest]
+    modules: [ModuleManifest]
+    verified_sealed_modules: [text]
+    capacity: TagCapacity
+
+# The default tag budget for a seal that does not pin one (§7.5).
+pub fn default_capacity() -> TagCapacity:
+    TagCapacity(static_capacity: 4096, dense_capacity: 65536)
+
+pub class CompletenessSeal:
+    tags: DenseTagMap
+    module_ids: [text]
+    canonical_lines: [text]
+    seal_hash: text
+
+    fn tag_of(self, ext: ExtensionManifest) -> i64?:
+        match self.tags.to_dense(identity_of(ext)):
+            case Ok(t): Some(t)
+            case Err(_): None
+
+pub fn identity_of(ext: ExtensionManifest) -> PersistentExtensionId:
+    PersistentExtensionId(
+        owner_enum: ext.owner_enum,
+        provider_module: ext.provider_module,
+        constructor_name: ext.constructor,
+        local_ordinal: ext.local_ordinal,
+        schema_abi_version: ext.schema_abi_version
+    )
+
+fn _sorted(items: [text]) -> [text]:
+    var out: [text] = []
+    for k in items:
+        var inserted = false
+        var next: [text] = []
+        for existing in out:
+            if not inserted and k < existing:
+                next = next + [k]
+                inserted = true
+            next = next + [existing]
+        if not inserted:
+            next = next + [k]
+        out = next
+    out
+
+fn _contains(items: [text], needle: text) -> bool:
+    for item in items:
+        if item == needle:
+            return true
+    false
+
+# Step 1 — stable identity check (§7.2). Uniqueness, ordinal reuse and
+# claimed-vs-computed hash are A4's `freeze_universe` contract; what belongs
+# here is the check A4 cannot make: that the owner enum is one this compiler
+# actually knows how to extend.
+fn _check_identity(config: SealConfig, mut errors: [SealError]):
+    for ext in config.extensions:
+        if required_operations(ext.owner_enum).len() == 0:
+            errors.push(SealError.UnknownOwnerEnum(ext.owner_enum, ext.provider_module))
+
+# Step 2 — ABI/schema check.
+fn _check_abi(config: SealConfig, mut errors: [SealError]):
+    for ext in config.extensions:
+        if ext.required_core_abi_hash != config.core_abi_hash:
+            errors.push(SealError.AbiMismatch(
+                ext.provider_module,
+                "required_core_abi_hash",
+                config.core_abi_hash,
+                ext.required_core_abi_hash
+            ))
+        if ext.module_abi_hash == "":
+            errors.push(SealError.AbiMismatch(ext.provider_module, "module_abi_hash", "<non-empty>", ""))
+        if ext.payload_schema_hash == "":
+            errors.push(SealError.AbiMismatch(ext.provider_module, "payload_schema_hash", "<non-empty>", ""))
+    for m in config.modules:
+        for decl in m.extends_list:
+            if decl.schema_abi <= 0:
+                errors.push(SealError.AbiMismatch(m.id, "extends.schema_abi", "<positive>", decl.schema_abi.to_text()))
+
+# Step 3 — required-interface check (§11.4 negative space, §17.4 shape).
+fn _check_required_interfaces(config: SealConfig, mut errors: [SealError]):
+    for ext in config.extensions:
+        for op in missing_operations(ext):
+            errors.push(SealError.MissingInterface(
+                ext.constructor,
+                operation_interface_name(op),
+                ext.provider_module,
+                ext.payload_schema_hash
+            ))
+    for m in config.modules:
+        for decl in m.extends_list:
+            for iface in missing_module_interfaces(decl.owner_enum, m.provides):
+                errors.push(SealError.MissingInterface(decl.constructor, iface, m.id, m.id))
+
+fn _admit(provider: text, owner: text, closure: Closure, activation: Activation,
+        activation_text: text, verified: bool, mut errors: [SealError]):
+    match critical_admits(closure, activation):
+        case Err(reason):
+            match closure:
+                Closure.Dyn:
+                    errors.push(SealError.OpenDynInCritical(owner, provider))
+                Closure.Static:
+                    errors.push(SealError.ActivationRejected(provider, activation_text, reason))
+                Closure.Complete:
+                    errors.push(SealError.ActivationRejected(provider, activation_text, reason))
+        case Ok(_):
+            if not first_use_obligation_met(activation, verified):
+                errors.push(SealError.ActivationRejected(
+                    provider,
+                    activation_text,
+                    "first_use requires the module code/hash to be already verified and sealed"
+                ))
+
+# Step 4 — closure/activation admission for critical builds (§5.3).
+fn _check_admission(config: SealConfig, mut errors: [SealError]):
+    for ext in config.extensions:
+        match closure_from_text(ext.closure):
+            case None:
+                errors.push(SealError.BadAxisValue(ext.provider_module, "closure", ext.closure))
+            case Some(c):
+                if config.critical:
+                    # An extension carries no activation of its own; it inherits
+                    # the startup-safe row so only its closure is judged here.
+                    _admit(ext.provider_module, ext.owner_enum, c, Activation.Startup,
+                        "startup", true, errors)
+    for m in config.modules:
+        var owner = "<unknown>"
+        if m.extends_list.len() > 0:
+            owner = m.extends_list[0].owner_enum
+        match closure_from_text(m.closure):
+            case None:
+                errors.push(SealError.BadAxisValue(m.id, "closure", m.closure))
+            case Some(c):
+                match activation_from_text(m.activation):
+                    case None:
+                        errors.push(SealError.BadAxisValue(m.id, "activation", m.activation))
+                    case Some(a):
+                        if config.critical:
+                            _admit(m.id, owner, c, a, m.activation,
+                                _contains(config.verified_sealed_modules, m.id), errors)
+
+# Step 6 — the seal hash over the canonical manifest set. Order-independent by
+# construction: the lines are sorted before hashing, so the same selected set
+# discovered in any order hashes identically.
+fn _canonical_lines(config: SealConfig) -> [text]:
+    var lines: [text] = []
+    for ext in config.extensions:
+        var ops = ""
+        var i: i64 = 0
+        while i < ext.provided_ops.len():
+            ops = ops + ext.provided_ops[i] + "=" + ext.provided_handlers[i] + ";"
+            i = i + 1
+        lines = lines + ["extension|" + identity_of(ext).canonical_text()
+            + "|" + ext.closure
+            + "|" + ext.payload_schema_hash + "|" + ext.module_abi_hash
+            + "|" + ext.required_core_abi_hash + "|" + ops]
+    for m in config.modules:
+        var extends_text = ""
+        for decl in m.extends_list:
+            extends_text = extends_text + decl.owner_enum + "." + decl.constructor + "@" + decl.schema_abi.to_text() + ";"
+        lines = lines + ["module|" + m.id + "|" + m.linkage + "|" + m.closure + "|" + m.activation
+            + "|" + extends_text + "|" + _sorted(m.provides).join(",")]
+    _sorted(lines)
+
+pub fn seal(config: SealConfig) -> Result<CompletenessSeal, [SealError]>:
+    var errors: [SealError] = []
+    _check_identity(config, errors)
+    if errors.len() > 0:
+        return Err(errors)
+    _check_abi(config, errors)
+    if errors.len() > 0:
+        return Err(errors)
+    _check_required_interfaces(config, errors)
+    if errors.len() > 0:
+        return Err(errors)
+    _check_admission(config, errors)
+    if errors.len() > 0:
+        return Err(errors)
+
+    # Step 5 — dense local tag assignment. A4 sorts by persistent tuple, so the
+    # tags do not depend on the order the manifests were discovered in.
+    var completes: [ClaimedVariant] = []
+    for ext in config.extensions:
+        completes = completes + [claim_of(identity_of(ext))]
+    var frozen: DenseTagMap? = None
+    match freeze_universe([], completes, config.capacity):
+        case Err(ie):
+            errors.push(SealError.IdentityRejected(ie))
+            return Err(errors)
+        case Ok(map):
+            frozen = Some(map)
+
+    var module_ids: [text] = []
+    for m in config.modules:
+        module_ids = module_ids + [m.id]
+    val lines = _canonical_lines(config)
+    match frozen:
+        case Some(map):
+            return Ok(CompletenessSeal(
+                tags: map,
+                module_ids: _sorted(module_ids),
+                canonical_lines: lines,
+                seal_hash: "COMPLETESEALV1-" + sha256_text(map.seal_hash + "\n" + lines.join("\n"))
+            ))
+        case None:
+            errors.push(SealError.BadAxisValue("<seal>", "dense_tags", "freeze produced no map"))
+            return Err(errors)

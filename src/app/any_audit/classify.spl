@@ -1,0 +1,188 @@
+# Source-level `Any` occurrence classifier (agent Y1, 2026-08-21).
+#
+# Plan: doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md
+#       §8.7 (compiler-internal Any migration), §15 Phase 0 census, §20.5 row Y1.
+#
+# WHAT THIS IS, AND WHAT IT IS NOT
+#   This is an INDEPENDENT, SOURCE-LEVEL inventory built to cross-check the
+#   HIR-based census in `scripts/check/check-any-escape-census.shs` (agent
+#   A5/Y2). It is deliberately a different KIND of measurement: line-anchored
+#   text heuristics over `.spl` source, with no parser, no HIR, and no type
+#   resolution. Two independent measurements that disagree localise a defect;
+#   two runs of the same mechanism cannot.
+#
+#   Because it is textual it CANNOT see through aliasing, shadowing, or a type
+#   alias that resolves to `Any`. It therefore UNDER-counts in those cases and
+#   is not a substitute for the HIR census. What it CAN do — and the HIR census
+#   provably cannot on a file that fails to lower — is report a number for
+#   every file that exists, so an unanalyzable file is visible as itself rather
+#   than silently contributing zero.
+#
+# STATED HEURISTICS (all line-anchored; no multi-line type parsing)
+#   1. Double-quoted string spans are blanked before classification, and an
+#      unquoted `#` starts a comment that is dropped to end of line.
+#   2. A `"""` docstring block is skipped entirely (open/close counted per
+#      line), because docstrings contain English prose using the word "Any".
+#   3. An occurrence must be word-isolated: the character before is not
+#      alphanumeric, `_`, or `.` (`.` excludes the enum variant `Platform.Any`
+#      and `ArgPatterns.Any`, which are values, not the `Any` TYPE), and the
+#      character after is not alphanumeric or `_`.
+#   4. Prose filter: `Any` followed by whitespace and then a lowercase letter
+#      is English ("Any other key is a no-op"), not a type, and is dropped.
+#   5. A line whose entire trimmed content is `Any` is an enum variant
+#      declaration, not a type annotation, and is dropped.
+#
+# CLASSES (§8.7 asks for these; the last is the residue we refuse to guess at)
+#   cast    `x as Any`
+#   generic `Dict<text, Any>`, `[Any]`, `(i64, Any)` — inside an unclosed
+#           `<`/`[` bracket at the occurrence
+#   match   `case Any`, `x is Any`
+#   ret     immediately after `->`
+#   local   `val x: Any` / `var x: Any`
+#   param   after `name:` while inside an unclosed `(`
+#   field   after `name:` at statement level (struct/class field)
+#   Anything else is not counted. Silence is deliberate: an unclassifiable
+#   occurrence inflating a total is how a census becomes noise.
+
+pub val ANY_CLASSES: [text] = ["param", "ret", "field", "local", "generic", "cast", "match"]
+
+fn _is_alnum_us(ch: text) -> bool:
+    if ch == "_":
+        return true
+    if ch >= "0" and ch <= "9":
+        return true
+    if ch >= "a" and ch <= "z":
+        return true
+    ch >= "A" and ch <= "Z"
+
+fn _is_lower(ch: text) -> bool:
+    ch >= "a" and ch <= "z"
+
+fn _is_space(ch: text) -> bool:
+    ch == " " or ch == "\t"
+
+# Blank out double-quoted spans, then drop an unquoted `#` comment.
+# Blanking (rather than deleting) preserves column positions, which every
+# later heuristic depends on.
+pub fn strip_code(line: text) -> text:
+    var out: text = ""
+    var i = 0
+    val n = line.len()
+    while i < n:
+        val ch: text = line.char_at(i)
+        if ch == "\"":
+            out = out + " "
+            i = i + 1
+            var closed = false
+            while i < n and not closed:
+                val c2: text = line.char_at(i)
+                if c2 == "\\":
+                    out = out + "  "
+                    i = i + 2
+                elif c2 == "\"":
+                    out = out + " "
+                    i = i + 1
+                    closed = true
+                else:
+                    out = out + " "
+                    i = i + 1
+        elif ch == "#":
+            i = n
+        else:
+            out = out + ch
+            i = i + 1
+    out
+
+# Last non-space character of `s`, or "" when `s` is blank.
+fn _last_meaningful(s: text) -> text:
+    var i = s.len() - 1
+    while i >= 0:
+        val ch: text = s.char_at(i)
+        if not _is_space(ch):
+            return ch
+        i = i - 1
+    ""
+
+# Does the prefix end with the bare keyword `kw` (whitespace-separated)?
+fn _ends_with_keyword(prefix: text, kw: text) -> bool:
+    val t: text = prefix.trim()
+    if t == kw:
+        return true
+    t.ends_with(" " + kw)
+
+pub fn classify_occurrences(raw_line: text) -> [text]:
+    val code: text = strip_code(raw_line)
+    val st: text = code.trim()
+    if st == "Any":
+        return []
+    var found: [text] = []
+    var i = 0
+    val n = code.len()
+    # Running bracket/paren depths, maintained left-to-right so each
+    # occurrence is classified against the nesting it actually sits in.
+    var angle = 0
+    var square = 0
+    var paren = 0
+    while i < n:
+        val ch: text = code.char_at(i)
+        if ch == "<":
+            angle = angle + 1
+        elif ch == ">":
+            if angle > 0:
+                angle = angle - 1
+        elif ch == "[":
+            square = square + 1
+        elif ch == "]":
+            if square > 0:
+                square = square - 1
+        elif ch == "(":
+            paren = paren + 1
+        elif ch == ")":
+            if paren > 0:
+                paren = paren - 1
+        val is_start = ch == "A" and i + 2 < n and code.char_at(i + 1) == "n" and code.char_at(i + 2) == "y"
+        if is_start:
+            var ok = true
+            if i > 0:
+                val pc: text = code.char_at(i - 1)
+                if _is_alnum_us(pc) or pc == ".":
+                    ok = false
+            if i + 3 < n:
+                val nc: text = code.char_at(i + 3)
+                if _is_alnum_us(nc):
+                    ok = false
+            if ok:
+                # Prose filter (heuristic 4).
+                var j = i + 3
+                while j < n and _is_space(code.char_at(j)):
+                    j = j + 1
+                if j > i + 3 and j < n and _is_lower(code.char_at(j)):
+                    ok = false
+            if ok:
+                var prefix: text = ""
+                var k = 0
+                while k < i:
+                    prefix = prefix + code.char_at(k)
+                    k = k + 1
+                val pm: text = _last_meaningful(prefix)
+                var cls: text = ""
+                if _ends_with_keyword(prefix, "as"):
+                    cls = "cast"
+                elif angle > 0 or square > 0:
+                    cls = "generic"
+                elif _ends_with_keyword(prefix, "is") or st.starts_with("match ") or st.starts_with("case "):
+                    cls = "match"
+                elif prefix.trim().ends_with("->"):
+                    cls = "ret"
+                elif pm == ":":
+                    if st.starts_with("val ") or st.starts_with("var ") or st.starts_with("let "):
+                        cls = "local"
+                    elif paren > 0:
+                        cls = "param"
+                    else:
+                        cls = "field"
+                if cls != "":
+                    found = found.push(cls)
+                i = i + 2
+        i = i + 1
+    found

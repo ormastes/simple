@@ -1,0 +1,694 @@
+# AnyEscapeChecker — typed-HIR `Any` origin/escape analysis (agent Y2, 2026-08-21).
+#
+# Plan: doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md
+#       §8.5, §14.1 REQ-MC-ANY-001, §17.1/§17.2.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS IS A TYPED-HIR PASS AND NOT A SOURCE LINT
+# ---------------------------------------------------------------------------
+# §8.5 ends with "The checker must be type-resolved and dataflow-aware; a
+# source-text lint is insufficient." Every decision below reads
+# `HirType.kind == HirTypeKind.Any` or a tracked `SymbolId`, never source
+# text, so it sees through aliasing, shadowing, type aliases and formatting,
+# and it does not fire on the token `Any` appearing in a comment or a string.
+#
+# ENTRY POINT: `any_escape_check(module, profile) -> [AnyEscapeDiag]`.
+# It is pure with respect to the module: nothing is mutated, nothing is
+# printed, and no global state is touched, so the driver may call it from any
+# phase after HIR type resolution. See the module report for the wiring point.
+
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_types.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.semantics.any_escape.types.{
+    AnyEscapeKind, AnyEscapeDiag, AnyEscapeProfile,
+    any_escape_kind_code, type_erasure_capability_name
+}
+
+# ============================================================================
+# Walk state
+# ============================================================================
+
+class AnyEscapeState:
+    """Mutable state for one module walk.
+
+    `any_symbols` is the dataflow half: symbol ids currently known to hold an
+    `Any` value. It is populated from `let` bindings and parameters whose
+    resolved type is `Any`, and consulted whenever a bare `Var` reaches an
+    escaping position -- an aliased `Any` must be caught even where the
+    expression node itself carries no resolved type.
+    """
+    diags: [AnyEscapeDiag]
+    # Symbol table of the module under analysis, so a `Var` callee can be
+    # resolved to a NAME. Without it, a direct `checked_downcast(raw)` call
+    # (whose callee lowers to `Var`, not `NamedVar`) is indistinguishable from
+    # an ordinary function and the sanctioned §8.6 boundary reads as an escape.
+    symbols: SymbolTable
+    module_name: text
+    function_name: text
+    # Lexical `unsafe:` nesting depth of the node being visited.
+    unsafe_depth: i64
+    # True when the CURRENT function's unsafe blocks carry `type_erasure`.
+    te_granted: bool
+    any_symbols: [i64]
+    # Number of live `Any` bindings in the enclosing statement sequence; a
+    # suspension point reached while this is non-zero is an across-await
+    # escape even when the awaited expression is not itself `Any`.
+    live_any: i64
+    # Recursion guard, same reasoning as safetychecker_max_expr_depth.
+    depth: i64
+
+fn any_escape_max_depth() -> i64:
+    512
+
+fn any_escape_state_new(symbols: SymbolTable, module_name: text) -> AnyEscapeState:
+    AnyEscapeState(
+        diags: [],
+        symbols: symbols,
+        module_name: module_name,
+        function_name: "",
+        unsafe_depth: 0,
+        te_granted: false,
+        any_symbols: [],
+        live_any: 0,
+        depth: 0
+    )
+
+# ============================================================================
+# Type predicates -- the whole "type-resolved" claim rests here
+# ============================================================================
+
+fn any_type_is_any(t: HirType) -> bool:
+    """True when `t` IS the erased top type, through transparent wrappers.
+
+    `Optional<Any>`, `&Any` and `iso Any` are all still an erased value with a
+    wrapper around it, so they are `Any` for the purposes of §8.1. A container
+    OF `Any` is a different question -- see `any_type_mentions_any`.
+    """
+    match t.kind:
+        case Any: true
+        case Optional(inner): any_type_is_any(inner)
+        case Ref(inner, mutable): any_type_is_any(inner)
+        case Isolated(inner): any_type_is_any(inner)
+        case _: false
+
+fn any_type_mentions_any(t: HirType) -> bool:
+    """True when `t` is `Any` or a container/aggregate holding `Any`.
+
+    This is the predicate for the "field/global/container element" row of the
+    §8.2 matrix: `[Any]`, `Dict<text, Any>` and `(i64, Any)` all keep an
+    erased value alive past the boundary just as a bare `Any` would.
+    """
+    if any_type_is_any(t):
+        return true
+    match t.kind:
+        case Array(element, size): any_type_mentions_any(element)
+        case Slice(element): any_type_mentions_any(element)
+        case Dict(key, value): any_type_mentions_any(key) or any_type_mentions_any(value)
+        case Tuple(elements):
+            for e in elements:
+                if any_type_mentions_any(e):
+                    return true
+            false
+        case Result(ok, err): any_type_mentions_any(ok) or any_type_mentions_any(err)
+        case Union(members):
+            for m in members:
+                if any_type_mentions_any(m):
+                    return true
+            false
+        case _: false
+
+fn any_state_tracks(self: AnyEscapeState, symbol_id: i64) -> bool:
+    for s in self.any_symbols:
+        if s == symbol_id:
+            return true
+    false
+
+fn any_expr_is_any(self: AnyEscapeState, e: HirExpr) -> bool:
+    """True when `e` evaluates to an erased value.
+
+    Two independent sources, deliberately OR-ed: the node's own resolved type
+    (`has_type_` is the authoritative presence bit, per HirExpr's own doc
+    comment -- reading `type_` while it is false would read a placeholder),
+    and the tracked-symbol set for a bare variable reference whose node type
+    was never filled in.
+    """
+    if e.has_type_ and any_type_is_any(e.type_):
+        return true
+    match e.kind:
+        case Var(symbol): symbol != nil and any_state_tracks(self, symbol.id)
+        case NamedVar(symbol, name): symbol != nil and any_state_tracks(self, symbol.id)
+        case _: false
+
+# ============================================================================
+# Region model
+# ============================================================================
+
+fn any_in_type_erasure_region(self: AnyEscapeState) -> bool:
+    """True when the node being visited sits inside a granted region.
+
+    BOTH halves are required: a lexical `unsafe:` block AND the
+    `type_erasure` capability on it. An `unsafe:` block that only asked for
+    `raw_ptr` does not license erasure (§8.1).
+    """
+    self.unsafe_depth > 0 and self.te_granted
+
+# ============================================================================
+# Diagnostic emission
+# ============================================================================
+
+fn any_emit(self: AnyEscapeState, profile: AnyEscapeProfile, kind: AnyEscapeKind,
+            message: text, origin_note: text, span: Span):
+    val diag = AnyEscapeDiag(
+        code: any_escape_kind_code(kind),
+        kind: kind,
+        severity: profile.severity(),
+        module_name: self.module_name,
+        function_name: self.function_name,
+        message: message,
+        origin_note: origin_note,
+        span: span
+    )
+    self.diags = self.diags.push(diag)
+
+fn any_emit_001(self: AnyEscapeState, profile: AnyEscapeProfile, what: text, span: Span):
+    """E-MC-ANY-001 -- §17.1."""
+    val cap = type_erasure_capability_name()
+    val msg = "`Any` is unavailable in safe critical code: {what}; replace with a monomorphized generic, a closed sum type, a typed interface, or an `unsafe(capabilities: [{cap}])` boundary with checked conversion"
+    any_emit(self, profile, AnyEscapeKind.OutsideUnsafe, msg, "", span)
+
+fn any_emit_002(self: AnyEscapeState, profile: AnyEscapeProfile, kind: AnyEscapeKind,
+                what: text, span: Span):
+    """E-MC-ANY-002 -- §17.2."""
+    val cap = type_erasure_capability_name()
+    val msg = "erased value escapes its {cap} boundary: {what}; convert it to a concrete or closed-sum type before leaving the unsafe block"
+    val note = "the value's type resolves to `Any` in {self.function_name}"
+    any_emit(self, profile, kind, msg, note, span)
+
+# ============================================================================
+# Checked-boundary API (§8.6)
+# ============================================================================
+
+fn any_is_checked_boundary_callee(name: text) -> bool:
+    """Callees that CONSUME an `Any` legitimately (§8.6).
+
+    Passing an erased value to one of these is the sanctioned exit from the
+    boundary, not an escape: their concrete `Result<T, ...>` may leave. Kept
+    to the three names §8.6 actually specifies plus the `checked_` family
+    prefix, so a new checked converter is covered without editing this list.
+    """
+    if name == "checked_downcast" or name == "checked_match":
+        return true
+    if name.starts_with("checked_decode") or name.starts_with("checked_downcast"):
+        return true
+    if name == "type_test" or name == "is_type":
+        return true
+    false
+
+# ============================================================================
+# Expression walk
+# ============================================================================
+
+fn any_check_expr(self: AnyEscapeState, profile: AnyEscapeProfile, e: HirExpr):
+    if self.depth > any_escape_max_depth():
+        return
+    self.depth = self.depth + 1
+
+    # An expression whose RESOLVED type is Any, occurring outside a granted
+    # region, is an origin (§8.5 "Any created outside type_erasure unsafe
+    # capability"). Only value-producing kinds are reported, so a block or a
+    # control-transfer node typed Any by inference does not double-report.
+    if not any_in_type_erasure_region(self):
+        if any_origin_kind(e) and any_expr_is_any(self, e):
+            any_emit_001(self, profile, "this expression's type resolves to `Any`", e.span)
+
+    match e.kind:
+        case UnsafeBlock(body):
+            self.unsafe_depth = self.unsafe_depth + 1
+            any_check_block(self, profile, body)
+            self.unsafe_depth = self.unsafe_depth - 1
+
+        case Return(value):
+            if value != nil:
+                val v = value!
+                if any_expr_is_any(self, v):
+                    any_emit_002(self, profile, AnyEscapeKind.EscapeReturn,
+                                 "`return` carries an erased value out of the region", v.span)
+                any_check_expr(self, profile, v)
+
+        case Yield(value):
+            if value != nil:
+                val v = value!
+                if any_expr_is_any(self, v):
+                    any_emit_002(self, profile, AnyEscapeKind.EscapeReturn,
+                                 "`yield` carries an erased value out of the region", v.span)
+                any_check_expr(self, profile, v)
+
+        case Break(label, value):
+            if value != nil:
+                val v = value!
+                if any_expr_is_any(self, v):
+                    any_emit_002(self, profile, AnyEscapeKind.EscapeReturn,
+                                 "`break` carries an erased value out of the region", v.span)
+                any_check_expr(self, profile, v)
+
+        case Await(inner):
+            # Any live erased binding is held across the suspension point.
+            if self.live_any > 0 or any_expr_is_any(self, inner):
+                any_emit_002(self, profile, AnyEscapeKind.EscapeAcrossAwait,
+                             "an erased value is live across this `await` suspension point", e.span)
+            any_check_expr(self, profile, inner)
+
+        case Lambda(params, body, captures):
+            for c in captures:
+                if c != nil and any_state_tracks(self, c.id):
+                    any_emit_002(self, profile, AnyEscapeKind.EscapeCapture,
+                                 "a closure captures an erased value", e.span)
+            for p in params:
+                if any_type_is_any(p.type_):
+                    any_emit_001(self, profile, "closure parameter `{p.name}` is typed `Any`", p.span)
+            any_check_expr(self, profile, body)
+
+        case Binary(op, left, right):
+            if any_expr_is_any(self, left) or any_expr_is_any(self, right):
+                any_emit_002(self, profile, AnyEscapeKind.EscapeOperator,
+                             "a binary operator is applied directly to an erased value", e.span)
+            any_check_expr(self, profile, left)
+            any_check_expr(self, profile, right)
+
+        case Unary(op, operand):
+            if any_expr_is_any(self, operand):
+                any_emit_002(self, profile, AnyEscapeKind.EscapeOperator,
+                             "a unary operator is applied directly to an erased value", e.span)
+            any_check_expr(self, profile, operand)
+
+        case Call(callee, args, type_args):
+            val callee_name = any_callee_name(self, callee)
+            any_check_call_args(self, profile, callee_name, args)
+            any_check_expr(self, profile, callee)
+
+        case MethodCall(receiver, method, args, resolution):
+            any_check_call_args(self, profile, method, args)
+            if any_expr_is_any(self, receiver) and not any_is_checked_boundary_callee(method):
+                any_emit_002(self, profile, AnyEscapeKind.EscapeCallArg,
+                             "method `{method}` is invoked on an erased receiver", e.span)
+            any_check_expr(self, profile, receiver)
+
+        case StaticCall(type_, method, args, resolution):
+            any_check_call_args(self, profile, method, args)
+
+        case ArrayLit(elements, type_):
+            any_check_container_elements(self, profile, elements, "array")
+
+        case SetLit(elements, elem_type):
+            any_check_container_elements(self, profile, elements, "set")
+
+        case TupleLit(elements):
+            any_check_container_elements(self, profile, elements, "tuple")
+
+        case DictLit(entries, key_type, value_type):
+            for (k, v) in entries:
+                if any_expr_is_any(self, k) or any_expr_is_any(self, v):
+                    any_emit_002(self, profile, AnyEscapeKind.EscapeStore,
+                                 "an erased value is stored into a dict literal", e.span)
+                any_check_expr(self, profile, k)
+                any_check_expr(self, profile, v)
+
+        case StructLit(type_, fields):
+            for (fname, fval) in fields:
+                if any_expr_is_any(self, fval):
+                    any_emit_002(self, profile, AnyEscapeKind.EscapeStore,
+                                 "an erased value is stored into field `{fname}`", e.span)
+                any_check_expr(self, profile, fval)
+
+        case Cast(inner, target):
+            # A cast TO a concrete type is the sanctioned exit; a cast to Any
+            # is an origin and was already reported above.
+            any_check_expr(self, profile, inner)
+
+        case As(inner, target):
+            any_check_expr(self, profile, inner)
+
+        case Block(block):
+            any_check_block(self, profile, block)
+
+        case If(cond, then_, else_):
+            any_check_expr(self, profile, cond)
+            any_check_block(self, profile, then_)
+            if else_ != nil:
+                any_check_block(self, profile, else_!)
+
+        case IfChain(arms, else_):
+            for arm in arms:
+                any_check_expr(self, profile, arm.cond)
+                any_check_block(self, profile, arm.then_)
+            if else_ != nil:
+                any_check_block(self, profile, else_!)
+
+        case MatchCase(scrutinee, arms):
+            any_check_expr(self, profile, scrutinee)
+            for arm in arms:
+                any_check_block(self, profile, arm.body)
+
+        case Loop(body, label):
+            any_check_block(self, profile, body)
+
+        case While(cond, body, label):
+            any_check_expr(self, profile, cond)
+            any_check_block(self, profile, body)
+
+        case For(var_, iter, body, label):
+            any_check_expr(self, profile, iter)
+            any_check_block(self, profile, body)
+
+        case With(items, body):
+            for item in items:
+                any_check_expr(self, profile, item.context_expr)
+            any_check_block(self, profile, body)
+
+        case Field(base, field, resolved):
+            any_check_expr(self, profile, base)
+
+        case Index(base, index):
+            any_check_expr(self, profile, base)
+            any_check_expr(self, profile, index)
+
+        case TupleIndex(base, index):
+            any_check_expr(self, profile, base)
+
+        case Unwrap(base):
+            any_check_expr(self, profile, base)
+
+        case Try(inner):
+            any_check_expr(self, profile, inner)
+
+        case Throw(value):
+            any_check_expr(self, profile, value)
+
+        case NullCoalesce(left, right):
+            any_check_expr(self, profile, left)
+            any_check_expr(self, profile, right)
+
+        case OptionalChain(base, field):
+            any_check_expr(self, profile, base)
+
+        case ExistsCheck(base):
+            any_check_expr(self, profile, base)
+
+        case LossBlock(body):
+            any_check_block(self, profile, body)
+
+        case NogradBlock(body):
+            any_check_block(self, profile, body)
+
+        case HostGpuLane(lane_code, payload_size, marker, body):
+            any_check_expr(self, profile, marker)
+            any_check_block(self, profile, body)
+
+        case ArrayRepeat(value, count, elem_type):
+            if any_expr_is_any(self, value):
+                any_emit_002(self, profile, AnyEscapeKind.EscapeStore,
+                             "an erased value is stored into a repeated-array literal", e.span)
+            any_check_expr(self, profile, value)
+            any_check_expr(self, profile, count)
+
+        case StringLit(value, interpolations):
+            if interpolations != nil:
+                for interp in interpolations!:
+                    if any_expr_is_any(self, interp.expr):
+                        any_emit_002(self, profile, AnyEscapeKind.EscapeOperator,
+                                     "an erased value is text-converted by string interpolation", e.span)
+                    any_check_expr(self, profile, interp.expr)
+
+        case EnumLit(type_, variant, payload):
+            if payload != nil:
+                any_check_enum_payload(self, profile, payload!, variant, e.span)
+
+        case Range(start, end, inclusive, step):
+            any_check_expr(self, profile, start)
+            any_check_expr(self, profile, end)
+            if step != nil:
+                any_check_expr(self, profile, step!)
+
+        case Comprehension(kind, expr, clauses):
+            any_check_expr(self, profile, expr)
+            for cl in clauses:
+                match cl.kind:
+                    case For(var_, iter): any_check_expr(self, profile, iter)
+                    case If(cond): any_check_expr(self, profile, cond)
+
+        # Leaves: no sub-expression, and no `Any` can be introduced by the
+        # node itself. Listed one by one rather than swallowed by a wildcard
+        # so a NEW HirExprKind variant is a compile error here, not a silent
+        # hole in the analysis (plan §11.6).
+        case IntLit(value, suffix): pass_dn
+        case FloatLit(value, suffix): pass_dn
+        case BoolLit(value): pass_dn
+        case CharLit(value): pass_dn
+        case UnitLit: pass_dn
+        case NilLit: pass_dn
+        case Var(symbol): pass_dn
+        case NamedVar(symbol, name): pass_dn
+        case Continue(label): pass_dn
+        # A custom block's payload is opaque BlockValue, not HIR.
+        case CustomBlock(kind, value): pass_dn
+        # Inline asm is safety_checker.spl's rule, not this pass's.
+        case InlineAsm(asm_node): pass_dn
+        case InlineAsmMatch(arms): pass_dn
+        # Recovery node: the parse already failed and was reported.
+        case Error: pass_dn
+
+    self.depth = self.depth - 1
+
+fn any_check_enum_payload(self: AnyEscapeState, profile: AnyEscapeProfile,
+                          payload: HirEnumPayload, variant: text, span: Span):
+    """An enum payload is storage: an erased value put there survives the
+    region exactly as a struct field would."""
+    match payload:
+        case Tuple(values):
+            for v in values:
+                if any_expr_is_any(self, v):
+                    any_emit_002(self, profile, AnyEscapeKind.EscapeStore,
+                                 "an erased value is stored into enum variant `{variant}`", span)
+                any_check_expr(self, profile, v)
+        case Struct(fields):
+            for (fname, fval) in fields:
+                if any_expr_is_any(self, fval):
+                    any_emit_002(self, profile, AnyEscapeKind.EscapeStore,
+                                 "an erased value is stored into enum variant `{variant}` field `{fname}`", span)
+                any_check_expr(self, profile, fval)
+
+fn any_origin_kind(e: HirExpr) -> bool:
+    """True for node kinds that PRODUCE a value, so an `Any` type on them is
+    an origin rather than an inherited annotation.
+
+    Control-flow and block nodes are excluded: HIR gives a block the type of
+    its value expression, so reporting both would double-count one origin.
+    """
+    match e.kind:
+        case Block(block): false
+        case If(cond, then_, else_): false
+        case IfChain(arms, else_): false
+        case MatchCase(scrutinee, arms): false
+        case Loop(body, label): false
+        case While(cond, body, label): false
+        case For(var_, iter, body, label): false
+        case With(items, body): false
+        case UnsafeBlock(body): false
+        case Return(value): false
+        case Break(label, value): false
+        case Continue(label): false
+        case Yield(value): false
+        case Error: false
+        case _: true
+
+fn any_callee_name(self: AnyEscapeState, callee: HirExpr) -> text:
+    match callee.kind:
+        case NamedVar(symbol, name): name
+        case Field(base, field, resolved): field
+        case Var(symbol):
+            if symbol == nil:
+                return ""
+            val sym = self.symbols.get_symbol(symbol)
+            if sym == nil:
+                return ""
+            sym!.name
+        case _: ""
+
+fn any_check_call_args(self: AnyEscapeState, profile: AnyEscapeProfile,
+                       callee_name: text, args: [HirCallArg]):
+    val is_boundary = any_is_checked_boundary_callee(callee_name)
+    for a in args:
+        if any_expr_is_any(self, a.value) and not is_boundary:
+            any_emit_002(self, profile, AnyEscapeKind.EscapeCallArg,
+                         "an erased value is passed to `{callee_name}`, which is not a checked-conversion boundary",
+                         a.value.span)
+        any_check_expr(self, profile, a.value)
+
+fn any_check_container_elements(self: AnyEscapeState, profile: AnyEscapeProfile,
+                                elements: [HirExpr], what: text):
+    for el in elements:
+        if any_expr_is_any(self, el):
+            any_emit_002(self, profile, AnyEscapeKind.EscapeStore,
+                         "an erased value is stored into a {what} literal", el.span)
+        any_check_expr(self, profile, el)
+
+# ============================================================================
+# Statement / block walk
+# ============================================================================
+
+fn any_check_block(self: AnyEscapeState, profile: AnyEscapeProfile, b: HirBlock):
+    # Bindings introduced by THIS block stop being live when it ends, so the
+    # across-await counter is restored on exit -- the same save/restore shape
+    # safety_checker.spl uses for `in_unsafe`.
+    val saved_live = self.live_any
+    for st in b.stmts:
+        any_check_stmt(self, profile, st)
+    if b.has:
+        # A block's value expression leaves the block.
+        if any_expr_is_any(self, b.value) and self.unsafe_depth > 0:
+            any_emit_002(self, profile, AnyEscapeKind.EscapeReturn,
+                         "the block's value expression is an erased value", b.value.span)
+        any_check_expr(self, profile, b.value)
+    self.live_any = saved_live
+
+fn any_check_stmt(self: AnyEscapeState, profile: AnyEscapeProfile, st: HirStmt):
+    match st.kind:
+        case Let(symbol, type_, init):
+            if any_type_is_any(type_):
+                if not any_in_type_erasure_region(self):
+                    any_emit_001(self, profile, "this binding is declared `Any`", st.span)
+                if symbol != nil:
+                    self.any_symbols = self.any_symbols.push(symbol.id)
+                self.live_any = self.live_any + 1
+            elif any_type_mentions_any(type_):
+                any_emit_002(self, profile, AnyEscapeKind.EscapeStore,
+                             "an erased value is stored in a container-typed binding", st.span)
+            any_check_expr(self, profile, init)
+
+        case Assign(target, op, value):
+            if any_expr_is_any(self, value) and any_target_is_storage(target):
+                any_emit_002(self, profile, AnyEscapeKind.EscapeStore,
+                             "an erased value is stored into a field, global or container element",
+                             st.span)
+            any_check_expr(self, profile, target)
+            any_check_expr(self, profile, value)
+
+        case Expr(e):
+            any_check_expr(self, profile, e)
+
+        case Block(block):
+            any_check_block(self, profile, block)
+
+        # Compile-time target guard; carries no expression and no type.
+        # Named explicitly so a new HirStmtKind variant fails to compile here.
+        case AsmAssert(spec):
+            pass_dn
+
+fn any_target_is_storage(target: HirExpr) -> bool:
+    """True when the assignment target outlives the current region.
+
+    A plain local rebinding stays inside the block; a field, an index, or an
+    optional-chained field writes through to storage that does not.
+    """
+    match target.kind:
+        case Field(base, field, resolved): true
+        case Index(base, index): true
+        case TupleIndex(base, index): true
+        case OptionalChain(base, field): true
+        case _: false
+
+# ============================================================================
+# Item walk
+# ============================================================================
+
+fn any_check_function(self: AnyEscapeState, profile: AnyEscapeProfile, f: HirFunction):
+    self.function_name = f.name
+    self.te_granted = profile.grants_type_erasure(f.name)
+    self.any_symbols = []
+    self.live_any = 0
+    self.unsafe_depth = 0
+    self.depth = 0
+
+    # A public signature that mentions Any is an origin AND a guaranteed
+    # escape: the value crosses the function boundary by definition.
+    for p in f.params:
+        if any_type_is_any(p.type_):
+            # A function that itself carries `type_erasure` IS the
+            # representation boundary (§8.6 `checked_downcast(value: Any)`),
+            # so an `Any` parameter on it is the contract, not a violation.
+            if not self.te_granted:
+                any_emit_001(self, profile, "parameter `{p.name}` is typed `Any`", p.span)
+            if p.symbol != nil:
+                self.any_symbols = self.any_symbols.push(p.symbol.id)
+        elif any_type_mentions_any(p.type_):
+            any_emit_002(self, profile, AnyEscapeKind.EscapeStore,
+                         "parameter `{p.name}` carries erased values in a container type", p.span)
+
+    if any_type_is_any(f.return_type):
+        any_emit_002(self, profile, AnyEscapeKind.EscapeReturn,
+                     "function `{f.name}` returns `Any`", f.span)
+    elif any_type_mentions_any(f.return_type):
+        any_emit_002(self, profile, AnyEscapeKind.EscapeReturn,
+                     "function `{f.name}` returns a container of `Any`", f.span)
+
+    any_check_block(self, profile, f.body)
+
+fn any_check_fields(self: AnyEscapeState, profile: AnyEscapeProfile,
+                    owner: text, fields: [HirField]):
+    self.function_name = owner
+    self.te_granted = false
+    self.unsafe_depth = 0
+    for fl in fields:
+        if any_type_is_any(fl.type_):
+            any_emit_002(self, profile, AnyEscapeKind.EscapeStore,
+                         "field `{owner}.{fl.name}` is typed `Any`", fl.span)
+        elif any_type_mentions_any(fl.type_):
+            any_emit_002(self, profile, AnyEscapeKind.EscapeStore,
+                         "field `{owner}.{fl.name}` is a container of `Any`", fl.span)
+
+# ============================================================================
+# Entry point
+# ============================================================================
+
+pub fn any_escape_check(module: HirModule, profile: AnyEscapeProfile) -> [AnyEscapeDiag]:
+    """Run the `Any` origin/escape analysis over one typed HIR module.
+
+    Pure: `module` is not mutated and nothing is printed. Severity comes from
+    `profile` -- `critical` yields errors, every other profile yields the same
+    findings as warnings so the census can measure them today (§8.2).
+    """
+    var state = any_escape_state_new(module.symbols, module.name)
+
+    for key in module.functions.keys():
+        val f = module.functions[key]
+        if f != nil:
+            any_check_function(state, profile, f)
+
+    for key in module.structs.keys():
+        val s = module.structs[key]
+        if s != nil:
+            any_check_fields(state, profile, s.name, s.fields)
+
+    for key in module.classes.keys():
+        val c = module.classes[key]
+        if c != nil:
+            any_check_fields(state, profile, c.name, c.fields)
+
+    for key in module.constants.keys():
+        val cn = module.constants[key]
+        if cn != nil:
+            state.function_name = cn.name
+            state.te_granted = false
+            state.unsafe_depth = 0
+            if any_type_is_any(cn.type_):
+                any_emit_002(state, profile, AnyEscapeKind.EscapeStore,
+                             "global `{cn.name}` is typed `Any`", cn.span)
+            elif any_type_mentions_any(cn.type_):
+                any_emit_002(state, profile, AnyEscapeKind.EscapeStore,
+                             "global `{cn.name}` is a container of `Any`", cn.span)
+
+    state.diags
+
+export AnyEscapeState, any_escape_check
+export any_type_is_any, any_type_mentions_any, any_is_checked_boundary_callee

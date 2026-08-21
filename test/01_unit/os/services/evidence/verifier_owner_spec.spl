@@ -1,0 +1,268 @@
+# @cover src/os/services/evidence/verifier_owner.spl 85%
+# @req REQ-001
+
+use std.spec.*
+use std.common.structural.receipt.simpleos_evidence_receipt_v1.{
+    SimpleOsEvidenceEnvironment,
+    SimpleOsEvidenceStepV1,
+    SimpleOsEvidenceReceiptV1
+}
+use std.common.structural.parallel_commit.simpleos_ledger_commit_v1.{
+    SimpleOsCapabilityStatus,
+    SimpleOsCapabilityRowV1,
+    SimpleOsCapabilityLedgerCandidateV1,
+    simpleos_capability_row_key
+}
+use os.services.evidence.verifier_owner.{
+    SimpleOsTrustedEvidenceSignerV1,
+    SimpleOsEvidenceChallengeV1,
+    SimpleOsVerifiedEvidenceHandleV1,
+    simpleos_evidence_trust_roots_check,
+    simpleos_evidence_verifier_start,
+    simpleos_evidence_verifier_ready,
+    simpleos_evidence_pass_admission_available,
+    simpleos_evidence_issue_challenge,
+    simpleos_evidence_verify_candidate,
+    simpleos_evidence_consume_verified,
+    simpleos_evidence_row_admitted,
+    simpleos_evidence_ledger_snapshot,
+    SIMPLEOS_EVIDENCE_MAX_CHALLENGE_TTL_US
+}
+
+val EVIDENCE_OWNER_HASH_A: text =
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+val EVIDENCE_OWNER_HASH_B: text =
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+val EVIDENCE_OWNER_HASH_C: text =
+    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+val EVIDENCE_OWNER_HASH_D: text =
+    "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+
+fn evidence_owner_roots() -> [SimpleOsTrustedEvidenceSignerV1]:
+    [SimpleOsTrustedEvidenceSignerV1(
+        key_id: "root-1", public_key: [7u8; 32])]
+
+fn evidence_owner_receipt(nonce: text) -> SimpleOsEvidenceReceiptV1:
+    SimpleOsEvidenceReceiptV1(
+        schema_version: 1,
+        receipt_id: "receipt-1",
+        nonce: nonce,
+        requirement_id: "REQ-001",
+        capability: "protocol-http1",
+        target: "x86_64",
+        target_abi: "x86_64-simpleos-v1",
+        environment: SimpleOsEvidenceEnvironment.QemuSystem,
+        firmware_profile: "ovmf-grub-efi",
+        board_identity: "",
+        accelerator: "tcg",
+        filesystem: "fat32",
+        protocol_profile: "http1",
+        source_hash: EVIDENCE_OWNER_HASH_A,
+        image_hash: EVIDENCE_OWNER_HASH_B,
+        binary_hash: EVIDENCE_OWNER_HASH_C,
+        config_hash: EVIDENCE_OWNER_HASH_D,
+        exact_argv: ["/usr/bin/simple", "--version"],
+        artifact_hashes: [EVIDENCE_OWNER_HASH_A],
+        steps: [SimpleOsEvidenceStepV1(
+            sequence: 0,
+            behavior_id: "version",
+            outcome: "ok",
+            exit_code: 0,
+            artifact_hash: EVIDENCE_OWNER_HASH_A)],
+        performance_workload: "",
+        performance_unit: "",
+        performance_warmup_count: 0,
+        performance_cpu_identity: "",
+        performance_frequency_hz: 0,
+        performance_noise_profile: "",
+        performance_comparable: false,
+        performance_samples: [],
+        started_unix_us: 110,
+        finished_unix_us: 120,
+        owner: "runner",
+        reviewer: "reviewer",
+        signer_key_id: "root-1",
+        signature: "0000000000000000000000000000000000000000000000000000000000000000" +
+            "0000000000000000000000000000000000000000000000000000000000000000")
+
+fn evidence_owner_candidate(nonce: text)
+        -> SimpleOsCapabilityLedgerCandidateV1:
+    val receipt = evidence_owner_receipt(nonce)
+    SimpleOsCapabilityLedgerCandidateV1(
+        row: SimpleOsCapabilityRowV1(
+            requirement_id: receipt.requirement_id,
+            capability: receipt.capability,
+            target: receipt.target,
+            environment: receipt.environment,
+            filesystem: receipt.filesystem,
+            protocol_profile: receipt.protocol_profile,
+            status: SimpleOsCapabilityStatus.Pass,
+            receipt_id: receipt.receipt_id,
+            receipt_nonce: receipt.nonce,
+            source_hash: receipt.source_hash,
+            image_hash: receipt.image_hash,
+            binary_hash: receipt.binary_hash,
+            config_hash: receipt.config_hash,
+            artifacts: receipt.artifact_hashes,
+            artifact_paths: [],
+            blocker_reason: "",
+            todo: "",
+            prerequisite: "",
+            resume_command: "",
+            owner: receipt.owner,
+            reviewer: receipt.reviewer),
+        receipt_present: true,
+        receipt: receipt)
+
+describe "SimpleOS mutex-serialized evidence owner":
+    it "validates roots and linearizes first initialization":
+        val empty = simpleos_evidence_trust_roots_check([])
+        expect(empty.ok).to_be(false)
+        val duplicate = simpleos_evidence_trust_roots_check([
+            SimpleOsTrustedEvidenceSignerV1(
+                key_id: "same", public_key: [0u8; 32]),
+            SimpleOsTrustedEvidenceSignerV1(
+                key_id: "same", public_key: [1u8; 32])
+        ])
+        expect(duplicate.ok).to_be(false)
+        var too_many: [SimpleOsTrustedEvidenceSignerV1] = []
+        var root_index: i64 = 0
+        while root_index < 17:
+            too_many = too_many.push(SimpleOsTrustedEvidenceSignerV1(
+                key_id: "root-" + root_index.to_text(),
+                public_key: [7u8; 32]))
+            root_index = root_index + 1
+        expect(simpleos_evidence_trust_roots_check(too_many).ok).to_be(false)
+        val first = simpleos_evidence_verifier_start(evidence_owner_roots())
+        val repeated = simpleos_evidence_verifier_start(evidence_owner_roots())
+        expect(first.ok).to_be(true)
+        expect(repeated.ok).to_be(true)
+        expect(simpleos_evidence_verifier_ready()).to_be(true)
+        expect(simpleos_evidence_pass_admission_available()).to_be(false)
+
+    it "rejects the losing conflicting initializer without replacing roots":
+        expect(simpleos_evidence_verifier_start(
+            evidence_owner_roots()).ok).to_be(true)
+        var conflicting = evidence_owner_roots()
+        var changed = conflicting[0]
+        changed.key_id = "other-root"
+        conflicting[0] = changed
+        val rejected = simpleos_evidence_verifier_start(conflicting)
+        expect(rejected.ok).to_be(false)
+        expect(rejected.reason).to_equal("trust-root-already-initialized")
+        expect(simpleos_evidence_verifier_start(
+            evidence_owner_roots()).ok).to_be(true)
+        expect(simpleos_evidence_verifier_ready()).to_be(true)
+
+    it "linearizes competing nonce issuance to one accepted generation":
+        # This is the deterministic owner model for either mutex acquisition
+        # order: whichever contender enters first succeeds, the other observes
+        # the committed nonce and loses without a second generation.
+        expect(simpleos_evidence_verifier_start(
+            evidence_owner_roots()).ok).to_be(true)
+        val first = simpleos_evidence_issue_challenge(
+            "nonce-concurrent", 100, 10)
+        val losing_call = simpleos_evidence_issue_challenge(
+            "nonce-concurrent", 100, 10)
+        expect(first.ok).to_be(true)
+        expect(first.challenge.session_id).to_be_greater_than(0u64)
+        expect(first.challenge.generation).to_be_greater_than(0u64)
+        expect(losing_call.ok).to_be(false)
+        expect(losing_call.reason).to_equal("nonce-replay")
+        val invalid_time = simpleos_evidence_issue_challenge(
+            "nonce-time", 100, SIMPLEOS_EVIDENCE_MAX_CHALLENGE_TTL_US + 1)
+        expect(invalid_time.ok).to_be(false)
+        expect(invalid_time.reason).to_equal("challenge-time")
+
+    it "retains nonce history after expiry while reusing its bounded slot":
+        expect(simpleos_evidence_verifier_start(
+            evidence_owner_roots()).ok).to_be(true)
+        val first = simpleos_evidence_issue_challenge(
+            "nonce-expired", 1000, 10)
+        expect(first.ok).to_be(true)
+        val replacement = simpleos_evidence_issue_challenge(
+            "nonce-replacement", 1011, 10)
+        expect(replacement.ok).to_be(true)
+        expect(replacement.challenge.session_id).to_equal(
+            first.challenge.session_id)
+        expect(replacement.challenge.generation).to_be_greater_than(
+            first.challenge.generation)
+        val replay = simpleos_evidence_issue_challenge(
+            "nonce-expired", 1022, 10)
+        expect(replay.ok).to_be(false)
+        expect(replay.reason).to_equal("nonce-replay")
+
+    it "rejects copied generations and keeps crypto PASS disabled":
+        expect(simpleos_evidence_verifier_start(
+            evidence_owner_roots()).ok).to_be(true)
+        val issued = simpleos_evidence_issue_challenge(
+            "nonce-copy", 2000, 100)
+        expect(issued.ok).to_be(true)
+        var copied = issued.challenge
+        copied.generation = 2u64
+        if copied.generation == issued.challenge.generation:
+            copied.generation = copied.generation + 1u64
+        val candidate = evidence_owner_candidate("nonce-copy")
+        var fresh_receipt = candidate.receipt
+        fresh_receipt.started_unix_us = 2010
+        fresh_receipt.finished_unix_us = 2020
+        var fresh_candidate = candidate
+        fresh_candidate.receipt = fresh_receipt
+        val forged = simpleos_evidence_verify_candidate(
+            fresh_candidate, copied, "protocol-inventory", 2030)
+        expect(forged.ok).to_be(false)
+        expect(forged.reason).to_equal("challenge-unknown")
+        val real = simpleos_evidence_verify_candidate(
+            fresh_candidate, issued.challenge, "protocol-inventory", 2030)
+        expect(real.ok).to_be(false)
+        expect(real.reason).to_equal("artifact-rehash-required")
+        expect(real.handle.handle_id).to_equal("")
+
+    it "caller-constructed handles cannot consume or advertise authority":
+        expect(simpleos_evidence_verifier_start(
+            evidence_owner_roots()).ok).to_be(true)
+        val candidate = evidence_owner_candidate("nonce-handle")
+        val forged = SimpleOsVerifiedEvidenceHandleV1(
+            handle_id: "evh-1",
+            receipt_id: candidate.receipt.receipt_id,
+            receipt_nonce: candidate.receipt.nonce,
+            row_key: simpleos_capability_row_key(candidate.row),
+            consumer: "protocol-inventory",
+            generation: 1u64,
+            expires_unix_us: 200)
+        val before = simpleos_evidence_ledger_snapshot()
+        val first = simpleos_evidence_consume_verified(
+            forged, candidate, "protocol-inventory", 140)
+        val second = simpleos_evidence_consume_verified(
+            forged, candidate, "protocol-inventory", 140)
+        expect(first.ok).to_be(false)
+        expect(second.ok).to_be(false)
+        expect(first.reason).to_equal("verified-handle-unknown")
+        expect(second.reason).to_equal(first.reason)
+        val after = simpleos_evidence_ledger_snapshot()
+        expect(before.ok).to_be(true)
+        expect(after.ok).to_be(true)
+        expect(after.ledger.revision).to_equal(before.ledger.revision)
+        expect(after.ledger.rows.len()).to_equal(before.ledger.rows.len())
+        expect(after.ledger.consumed_nonces).to_equal(
+            before.ledger.consumed_nonces)
+        expect(simpleos_evidence_row_admitted(
+            simpleos_capability_row_key(candidate.row), 140)).to_be(false)
+
+    it "enforces the live challenge bound and deterministically reuses expiry":
+        expect(simpleos_evidence_verifier_start(
+            evidence_owner_roots()).ok).to_be(true)
+        var i: i64 = 0
+        while i < 128:
+            val issued = simpleos_evidence_issue_challenge(
+                "nonce-bound-" + i.to_text(), 10000, 10)
+            expect(issued.ok).to_be(true)
+            i = i + 1
+        val bounded = simpleos_evidence_issue_challenge(
+            "nonce-bound-overflow", 10000, 10)
+        expect(bounded.ok).to_be(false)
+        expect(bounded.reason).to_equal("challenge-bound")
+        val reused = simpleos_evidence_issue_challenge(
+            "nonce-bound-reused", 10011, 10)
+        expect(reused.ok).to_be(true)
+        expect(reused.challenge.session_id).to_equal(1u64)

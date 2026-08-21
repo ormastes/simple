@@ -1,0 +1,300 @@
+# Parser declarations retained in module surfaces.
+
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.parser_types.*
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfaceCallable, ModuleSurfaceComposite, ModuleSurfaceConst, ModuleSurfaceEnum, ModuleSurfaceField, ModuleSurfaceImpl, ModuleSurfaceParam, ModuleSurfaceTrait, ModuleSurfaceTypeAlias, module_surface_export_origin_index_empty, module_surface_export_origin_index_put}
+use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_module_name, module_surface_canonical_path, module_surface_logical_name_from_path, module_surface_package_name_from_name}
+
+extern fn rt_hash_text(content: text) -> i64
+
+fn module_surface_callable_from_function(function_: ParserFunction) -> ModuleSurfaceCallable:
+    var params: [ModuleSurfaceParam] = []
+    for param in function_.params:
+        params = params.push(ModuleSurfaceParam(
+            name: param.name,
+            has_type_: param.has_type_,
+            type_: param.type_,
+            type_name: parser_type_kind_named_name(param.type_.kind),
+            array_element_name: parser_type_kind_array_element_name(param.type_.kind),
+            has_default: false,
+            is_mutable: param.is_mutable,
+            span: param.span
+        ))
+    ModuleSurfaceCallable(
+        name: function_.name,
+        type_params: function_.type_params,
+        params: params,
+        has_return_type: function_.has_return_type,
+        return_type: function_.return_type,
+        return_type_name: parser_type_kind_named_name(function_.return_type.kind),
+        return_array_element_name: parser_type_kind_array_element_name(function_.return_type.kind),
+        visibility: function_.visibility,
+        is_async: function_.is_async,
+        is_static: function_.is_static,
+        is_public: function_.is_public,
+        is_method: function_.is_method,
+        is_mutable: function_.is_mutable,
+        is_const: function_.is_const,
+        is_kernel: function_.is_kernel,
+        is_extern: function_.is_extern,
+        span: function_.span
+    )
+
+fn module_surface_callable_from_header(
+    header: ParserFunctionHeader
+) -> ModuleSurfaceCallable:
+    var params: [ModuleSurfaceParam] = []
+    for param in header.params:
+        params = params.push(ModuleSurfaceParam(
+            name: param.name,
+            has_type_: param.has_type_,
+            type_: param.type_,
+            type_name: parser_type_kind_named_name(param.type_.kind),
+            array_element_name: parser_type_kind_array_element_name(param.type_.kind),
+            has_default: false,
+            is_mutable: param.is_mutable,
+            span: param.span
+        ))
+    ModuleSurfaceCallable(
+        name: header.name,
+        type_params: header.type_params,
+        params: params,
+        has_return_type: header.has_return_type,
+        return_type: header.return_type,
+        return_type_name: parser_type_kind_named_name(header.return_type.kind),
+        return_array_element_name: parser_type_kind_array_element_name(header.return_type.kind),
+        visibility: header.visibility,
+        is_async: header.is_async,
+        is_static: header.is_static,
+        is_public: header.is_public,
+        is_method: header.is_method,
+        is_mutable: header.is_mutable,
+        is_const: header.is_const,
+        is_kernel: header.is_kernel,
+        is_extern: header.is_extern,
+        span: header.span
+    )
+
+fn module_surface_trait_from_trait(trait_: ParserTrait) -> ModuleSurfaceTrait:
+    var methods: [ModuleSurfaceCallable] = []
+    var default_methods: [ParserFunction] = []
+    for method in trait_.methods:
+        methods = methods.push(module_surface_callable_from_function(method))
+        if not method.body.stmts.is_empty():
+            default_methods = default_methods.push(method)
+    ModuleSurfaceTrait(
+        name: trait_.name,
+        type_params: trait_.type_params,
+        super_traits: trait_.super_traits,
+        where_clause: trait_.where_clause,
+        methods: methods,
+        default_methods: default_methods,
+        assoc_types: trait_.assoc_types,
+        visibility: trait_.visibility,
+        is_public: trait_.is_public,
+        span: trait_.span
+    )
+
+fn module_surface_impl_from_impl(impl_: Impl) -> ModuleSurfaceImpl:
+    var methods: Dict<text, ModuleSurfaceCallable> = {}
+    for name in impl_.methods.keys():
+        methods[name] = module_surface_callable_from_function(impl_.methods[name])
+    ModuleSurfaceImpl(
+        type_: impl_.type_,
+        has_trait_: impl_.has_trait_,
+        trait_: impl_.trait_,
+        methods: methods
+    )
+
+fn module_surface_export_origin_hints(
+    source: SourceFile, origins: ModuleSurfaceExportOriginIndex
+) -> Result<bool, text>:
+    # Most modules are not generated facades. Avoid splitting their complete
+    # source into per-line text objects: the no-GC bootstrap runtime retains
+    # those strings for the process lifetime even though this scanner cannot
+    # produce a hint without the exact generator marker.
+    if not source.content.contains("# Re-exported from "):
+        return Ok(true)
+    var owner_file = ""
+    var facade_name = module_surface_canonical_module_name(source.module_name)
+    if facade_name.ends_with(".__init__"):
+        facade_name = facade_name[0:facade_name.len() - 9]
+    for raw_line in source.content.split("\n"):
+        val line = raw_line.trim()
+        if line.starts_with("# Re-exported from ") and line.contains(".spl"):
+            val owner_parts = line.substring(19).split(".spl")
+            owner_file = owner_parts[0]
+            continue
+        if owner_file != "" and line.starts_with("export "):
+            val owner_module = facade_name + "." + owner_file.replace("/", ".")
+            for raw_item in line.substring(7).split(","):
+                val item = raw_item.trim()
+                if item != "" and not item.ends_with(".*"):
+                    var source_name = item
+                    var local_name = item
+                    if item.contains(":"):
+                        val parts = item.split(":")
+                        source_name = parts[0].trim()
+                        if parts.len() > 1:
+                            local_name = parts[1].trim()
+                    val put_result = module_surface_export_origin_index_put(
+                        origins, local_name, owner_module, source_name,
+                        "generated-comment")
+                    if put_result.is_err():
+                        return Err(put_result.unwrap_err())
+            owner_file = ""
+        elif line != "" and not line.starts_with("#"):
+            owner_file = ""
+    Ok(true)
+
+pub class ModuleSurfaceParserOwner:
+    value: ParserModule
+
+    static fn new(value: ParserModule) -> ModuleSurfaceParserOwner:
+        ModuleSurfaceParserOwner(value: value)
+
+pub fn module_surface_from_owner(
+    owner: ModuleSurfaceParserOwner, source: SourceFile, source_index: i64
+) -> Result<ModuleSurface, text>:
+    var callables: Dict<text, ModuleSurfaceCallable> = {}
+    for name in owner.value.functions.keys():
+        if owner.value.function_headers.contains_key(name):
+            callables[name] = module_surface_callable_from_header(
+                owner.value.function_headers[name])
+        else:
+            # Compatibility for parser producers that have not populated the
+            # compact header index.
+            callables[name] = module_surface_callable_from_function(
+                owner.value.functions[name])
+
+    var composites: Dict<text, ModuleSurfaceComposite> = {}
+    for name in owner.value.classes.keys():
+        val class_ = owner.value.classes[name]
+        var fields: [ModuleSurfaceField] = []
+        for field in class_.fields:
+            fields = fields.push(ModuleSurfaceField(
+                name: field.name,
+                type_: field.type_,
+                type_name: parser_type_kind_named_name(field.type_.kind),
+                array_element_name: parser_type_kind_array_element_name(field.type_.kind)))
+        composites[name] = ModuleSurfaceComposite(name: class_.name, kind: "class", type_params: class_.type_params, fields: fields, visibility: class_.visibility, is_public: class_.is_public, span: class_.span)
+    for name in owner.value.actors.keys():
+        val actor = owner.value.actors[name]
+        var fields: [ModuleSurfaceField] = []
+        for field in actor.fields:
+            fields = fields.push(ModuleSurfaceField(
+                name: field.name,
+                type_: field.type_,
+                type_name: parser_type_kind_named_name(field.type_.kind),
+                array_element_name: parser_type_kind_array_element_name(field.type_.kind)))
+        composites[name] = ModuleSurfaceComposite(name: actor.name, kind: "actor", type_params: actor.type_params, fields: fields, visibility: actor.visibility, is_public: actor.is_public, span: actor.span)
+    for name in owner.value.structs.keys():
+        val struct_ = owner.value.structs[name]
+        var fields: [ModuleSurfaceField] = []
+        for field in struct_.fields:
+            fields = fields.push(ModuleSurfaceField(
+                name: field.name,
+                type_: field.type_,
+                type_name: parser_type_kind_named_name(field.type_.kind),
+                array_element_name: parser_type_kind_array_element_name(field.type_.kind)))
+        composites[name] = ModuleSurfaceComposite(name: struct_.name, kind: "struct", type_params: struct_.type_params, fields: fields, visibility: struct_.visibility, is_public: struct_.is_public, span: struct_.span)
+
+    var enums: Dict<text, ModuleSurfaceEnum> = {}
+    for name in owner.value.enums.keys():
+        val enum_ = owner.value.enums[name]
+        enums[name] = ModuleSurfaceEnum(name: enum_.name, type_params: enum_.type_params, variants: enum_.variants, visibility: enum_.visibility, is_public: enum_.is_public, span: enum_.span)
+
+    var traits: Dict<text, ModuleSurfaceTrait> = {}
+    for name in owner.value.traits.keys():
+        traits[name] = module_surface_trait_from_trait(owner.value.traits[name])
+
+    var impls: [ModuleSurfaceImpl] = []
+    for impl_ in owner.value.impls:
+        impls = impls.push(module_surface_impl_from_impl(impl_))
+
+    var type_aliases: Dict<text, ModuleSurfaceTypeAlias> = {}
+    for name in owner.value.type_aliases.keys():
+        val alias = owner.value.type_aliases[name]
+        type_aliases[name] = ModuleSurfaceTypeAlias(
+            name: alias.name,
+            type_params: alias.type_params,
+            type_: alias.type_,
+            visibility: alias.visibility,
+            is_public: alias.is_public,
+            span: alias.span
+        )
+
+    var constants: Dict<text, ModuleSurfaceConst> = {}
+    for name in owner.value.constants.keys():
+        val constant = owner.value.constants[name]
+        constants[name] = ModuleSurfaceConst(
+            name: constant.name,
+            has_type_: constant.has_type_,
+            type_: constant.type_,
+            is_mutable: constant.is_mutable,
+            visibility: constant.visibility,
+            is_public: constant.is_public,
+            is_volatile: constant.is_volatile,
+            has_fixed_address: constant.has_fixed_address,
+            fixed_address: constant.fixed_address,
+            span: constant.span
+        )
+
+    # Keep the class payload caller-owned. Native generic Result payload
+    # lowering is not an ownership boundary for reference-valued classes.
+    val origin_hints = module_surface_export_origin_index_empty()
+    val origin_hints_result = module_surface_export_origin_hints(
+        source, origin_hints)
+    if origin_hints_result.is_err():
+        return Err(origin_hints_result.unwrap_err())
+    val composite_names = composites.keys()
+    val enum_names = enums.keys()
+    val trait_names = traits.keys()
+    val callable_names = callables.keys()
+    val type_alias_names = type_aliases.keys()
+    val constant_names = constants.keys()
+    Ok(ModuleSurface(
+        physical_index: source_index,
+        generation: 0,
+        frozen: false,
+        source_index: source_index,
+        canonical_path: module_surface_canonical_path(source.path),
+        module_name: source.module_name,
+        logical_name: module_surface_logical_name_from_path(source.path),
+        canonical_name: module_surface_logical_name_from_path(source.path),
+        package_name: module_surface_package_name_from_name(
+            module_surface_logical_name_from_path(source.path)),
+        preferred_registry_name: "",
+        content_length: source.content.len(),
+        content_hash: rt_hash_text(source.content),
+        imports: owner.value.imports,
+        exports: owner.value.exports,
+        import_target_indices: [],
+        import_target_names: [],
+        export_route_sources: [],
+        export_route_locals: [],
+        export_route_target_indices: [],
+        export_route_target_names: [],
+        export_route_is_glob: [],
+        composite_names: composite_names,
+        enum_names: enum_names,
+        trait_names: trait_names,
+        callable_names: callable_names,
+        type_alias_names: type_alias_names,
+        constant_names: constant_names,
+        callables: callables,
+        composites: composites,
+        enums: enums,
+        traits: traits,
+        impls: impls,
+        type_aliases: type_aliases,
+        constants: constants,
+        export_origins: origin_hints.origins,
+        export_origin_index: origin_hints
+    ))
+
+pub(package) fn module_surface_from_module(
+    module: ParserModule, source: SourceFile, source_index: i64
+) -> Result<ModuleSurface, text>:
+    val owner = ModuleSurfaceParserOwner.new(module)
+    module_surface_from_owner(owner, source, source_index)

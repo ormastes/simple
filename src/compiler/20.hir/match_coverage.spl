@@ -21,6 +21,25 @@
 # (all_variant_ids[i] names all_variant_names[i]) so a missing id can be
 # reported back to the user by name without the comparison itself ever
 # touching a name -- `missing_variant_ids` below only compares the id arrays.
+#
+# ---------------------------------------------------------------------------
+# STATIC vs WILDCARD-ABSORBED COVERAGE (A2, hardening plan 2026-08-21 6.4/6.5)
+# ---------------------------------------------------------------------------
+# There are two genuinely different questions a caller can ask, and conflating
+# them is exactly the hole 6.4 closes:
+#
+#   "does this match compile?"        -> is_exhaustive(), wildcard absorbs.
+#   "is every static variant NAMED?"  -> static_missing_variant_ids(), which
+#                                        ignores the wildcard entirely.
+#
+# `missing_variant_ids()` answers the FIRST question and therefore returns []
+# under a wildcard -- that is its contract and it is unchanged. The witness
+# set of 6.5 (`StaticRequired(E) - StaticCovered(match)`) is the SECOND, so it
+# must not be computed from it. `static_missing_variant_ids()` below is the
+# wildcard-independent primitive; `missing_variant_ids()` now delegates to it
+# rather than duplicating the O(n*m) scan, so the two can never drift.
+
+use compiler.common.assurance.policy_schema.{AssuranceStrictness}
 
 struct ResolvedMatchCoverage:
     """One match's coverage against its scrutinee's closed enum, id-keyed."""
@@ -40,12 +59,35 @@ impl ResolvedMatchCoverage:
             return true
         self.missing_variant_ids().len() == 0
 
-    fn missing_variant_ids() -> [i64]:
-        """Declared variant ids with no covering arm. ID comparison only --
+    fn is_exhaustive_for(profile: AssuranceStrictness, annotated_exhaustive: bool) -> bool:
+        """Profile-aware coverage (hardening plan 2026-08-21 6.4).
+
+        Under `critical`, or on any match carrying `@exhaustive`, a wildcard
+        does NOT satisfy coverage: the witness set
+        `StaticRequired(E) - StaticCovered(match)` must be empty, which means
+        every static variant is named explicitly. `@exhaustive` is honoured at
+        EVERY profile, not just critical -- it is an opt-in the author wrote
+        deliberately, so a moderate build must not silently ignore it.
+
+        For every other profile on an unannotated match this is exactly
+        `is_exhaustive()`, byte for byte -- existing callers are unaffected.
+
+        `annotated_exhaustive` is a parameter rather than a struct field on
+        purpose: the annotation is a property of the MATCH SITE, not of the
+        enum's resolved coverage, and threading it as an argument keeps every
+        existing `ResolvedMatchCoverage(...)` construction site compiling
+        unchanged."""
+        if annotated_exhaustive or profile.at_least(AssuranceStrictness.Critical):
+            return self.static_missing_variant_ids().len() == 0
+        self.is_exhaustive()
+
+    fn static_missing_variant_ids() -> [i64]:
+        """`StaticRequired(E) - StaticCovered(match)` -- the 6.5 witness set.
+
+        Wildcard-INDEPENDENT by design: a `case _:` arm covers no static
+        variant, it merely absorbs the ones nobody named. ID comparison only --
         never name comparison, so two unrelated enums sharing a variant name
         cannot cross-satisfy each other's coverage."""
-        if self.has_wildcard:
-            return []
         var missing: [i64] = []
         for vid in self.all_variant_ids:
             var seen = false
@@ -56,11 +98,28 @@ impl ResolvedMatchCoverage:
                 missing = missing.push(vid)
         missing
 
+    fn static_missing_variant_names() -> [text]:
+        """Names of static_missing_variant_ids(), via the parallel name array."""
+        self.names_for_ids(self.static_missing_variant_ids())
+
+    fn missing_variant_ids() -> [i64]:
+        """Declared variant ids with no covering arm, as ordinary (non-critical)
+        exhaustiveness sees them: a wildcard absorbs every uncovered variant, so
+        this is [] whenever one is present. Unchanged contract -- for the
+        wildcard-independent set use `static_missing_variant_ids()`."""
+        if self.has_wildcard:
+            return []
+        self.static_missing_variant_ids()
+
     fn missing_variant_names() -> [text]:
         """Names of missing_variant_ids(), resolved via the parallel name array."""
-        val missing_ids = self.missing_variant_ids()
+        self.names_for_ids(self.missing_variant_ids())
+
+    fn names_for_ids(ids: [i64]) -> [text]:
+        """Resolve variant ids to names through the parallel name array. Shared
+        by both missing-set projections so their rendering cannot drift."""
         var names: [text] = []
-        for mid in missing_ids:
+        for mid in ids:
             var i = 0
             while i < self.all_variant_ids.len():
                 if self.all_variant_ids[i] == mid:

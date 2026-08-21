@@ -1,0 +1,98 @@
+# Retryable socket-close ownership for DBD.
+#
+# The syscall caller owns invocation. This value owns the descriptor and
+# commits the injected syscall result, allowing socket-free behavioral tests
+# to exercise the exact production state transitions.
+
+pub val DBD_MAX_CLOSE_ATTEMPTS_V1: i64 = 3
+val DBD_MAX_CLOSE_GENERATION_V1: i64 = 9223372036854775807
+
+pub enum DbdCloseStateV1:
+    Available
+    Open
+    CloseRetryable
+    Quarantined
+    Closed
+
+pub enum DbdCloseDispositionV1:
+    NoResource
+    Retryable
+    Quarantined
+    Closed
+
+pub class DbdCloseOwnerV1:
+    role: text
+    fd: i64
+    state: DbdCloseStateV1
+    close_attempts: i64
+    generation: i64
+    last_error: text
+
+    pub static fn new(role: text) -> DbdCloseOwnerV1:
+        DbdCloseOwnerV1(
+            role: role,
+            fd: -1,
+            state: DbdCloseStateV1.Available,
+            close_attempts: 0,
+            generation: 1,
+            last_error: ""
+        )
+
+    pub fn owns_fd() -> bool:
+        self.fd >= 0 and (
+            self.state == DbdCloseStateV1.Open or
+            self.state == DbdCloseStateV1.CloseRetryable or
+            self.state == DbdCloseStateV1.Quarantined)
+
+    pub fn is_open() -> bool:
+        self.fd >= 0 and self.state == DbdCloseStateV1.Open
+
+    pub fn can_attempt_close() -> bool:
+        self.fd >= 0 and (
+            self.state == DbdCloseStateV1.Open or
+            self.state == DbdCloseStateV1.CloseRetryable)
+
+    pub me acquire(fd: i64) -> bool:
+        if fd < 0 or self.owns_fd() or
+            self.state == DbdCloseStateV1.Quarantined:
+            return false
+        self.fd = fd
+        self.state = DbdCloseStateV1.Open
+        self.close_attempts = 0
+        self.last_error = ""
+        true
+
+    pub me commit_close_result(close_rc: i64) -> DbdCloseDispositionV1:
+        """Commit one injected close result without losing the owned fd."""
+        if not self.can_attempt_close():
+            if self.state == DbdCloseStateV1.Quarantined:
+                return DbdCloseDispositionV1.Quarantined
+            return DbdCloseDispositionV1.NoResource
+        self.close_attempts = self.close_attempts + 1
+        if close_rc >= 0:
+            self.fd = -1
+            self.state = DbdCloseStateV1.Closed
+            self.last_error = ""
+            return DbdCloseDispositionV1.Closed
+        self.last_error = self.role + "-close-failed"
+        if self.close_attempts >= DBD_MAX_CLOSE_ATTEMPTS_V1:
+            self.state = DbdCloseStateV1.Quarantined
+            return DbdCloseDispositionV1.Quarantined
+        self.state = DbdCloseStateV1.CloseRetryable
+        DbdCloseDispositionV1.Retryable
+
+    pub me carry_restart() -> bool:
+        """Advance generation without discarding a possibly live descriptor."""
+        if self.generation >= DBD_MAX_CLOSE_GENERATION_V1:
+            return false
+        self.generation = self.generation + 1
+        if self.state == DbdCloseStateV1.Quarantined:
+            self.last_error = self.role + "-close-quarantined-across-restart"
+        elif self.fd >= 0:
+            self.state = DbdCloseStateV1.CloseRetryable
+            self.last_error = self.role + "-close-retryable-across-restart"
+        else:
+            self.state = DbdCloseStateV1.Available
+            self.close_attempts = 0
+            self.last_error = ""
+        true

@@ -28,6 +28,7 @@ val QUIC_LH_TYPE_INITIAL: i64   = 0x00
 val QUIC_LH_TYPE_ZERO_RTT: i64  = 0x01
 val QUIC_LH_TYPE_HANDSHAKE: i64 = 0x02
 val QUIC_LH_TYPE_RETRY: i64     = 0x03
+val QUIC_MAX_CONN_ID_LEN: i64 = 20
 
 # ============================================================================
 # Packet type enum — RFC 9000 §17
@@ -78,6 +79,14 @@ class QuicPacketHeader:
 enum QuicHeaderResult:
     """Result of parsing a QUIC packet header."""
     Ok(QuicPacketHeader)
+    Err(msg: text)
+
+class QuicConnIdOk:
+    bytes: [u8]
+    new_offset: i64
+
+enum QuicConnIdResult:
+    Ok(QuicConnIdOk)
     Err(msg: text)
 
 # ============================================================================
@@ -140,8 +149,8 @@ pub fn quic_varint_decode(data: [u8], offset: i64) -> QuicVarintResult:
 
 pub fn quic_varint_encode(value: i64) -> [u8]:
     """Encode a QUIC variable-length integer."""
-    if value < 0:
-        return [0]
+    if value < 0 or value > 4611686018427387903:
+        return []
 
     if value <= 63:
         # 1-byte: 6-bit
@@ -179,26 +188,26 @@ pub fn quic_varint_encode(value: i64) -> [u8]:
 # Internal helpers
 # ============================================================================
 
-fn _read_conn_id(data: [u8], offset: i64) -> ([u8], i64):
+fn _read_conn_id(data: [u8], offset: i64) -> QuicConnIdResult:
     """Read a connection ID: 1-byte length prefix + that many bytes.
 
     Returns (conn_id_bytes, new_offset).
     """
     if offset < 0:
-        return ([], 0)
+        return QuicConnIdResult.Err("connection id: negative offset")
     if offset >= data.len():
-        return ([], offset)
+        return QuicConnIdResult.Err("connection id: missing length")
     val id_len = data[offset]
+    if id_len > QUIC_MAX_CONN_ID_LEN:
+        return QuicConnIdResult.Err("connection id exceeds RFC limit")
+    if id_len > data.len() - offset - 1:
+        return QuicConnIdResult.Err("connection id truncated")
     var cid: [u8] = []
     var i = 0
-    loop:
-        if i >= id_len:
-            break
-        if offset + 1 + i >= data.len():
-            break
+    while i < id_len:
         cid.push(data[offset + 1 + i])
         i = i + 1
-    return (cid, offset + 1 + id_len)
+    QuicConnIdResult.Ok(QuicConnIdOk(bytes: cid, new_offset: offset + 1 + id_len))
 
 fn _quic_pkt_append_bytes(out: [u8], src: [u8]):
     """Append all bytes of src onto out."""
@@ -235,14 +244,7 @@ pub fn parse_quic_header(data: [u8]) -> QuicHeaderResult:
         # Then packet number (1-4 bytes based on PN Len bits)
         # We cannot know the DCID length without connection state, so we
         # return a minimal header. Caller must supply DCID length.
-        return QuicHeaderResult.Ok(QuicPacketHeader(
-            packet_type: QuicPacketType.OneRTT,
-            version: 0,
-            dest_conn_id: [],
-            src_conn_id: [],
-            packet_number: 0,
-            payload_offset: 1
-        ))
+        return QuicHeaderResult.Err("short header requires connection-bound DCID and header protection")
 
     # Long header — RFC 9000 §17.2
     # Bytes: first(1) | version(4) | DCID len(1) | DCID | SCID len(1) | SCID | ...
@@ -253,22 +255,41 @@ pub fn parse_quic_header(data: [u8]) -> QuicHeaderResult:
 
     # Version Negotiation: version field is 0 — RFC 9000 §17.2.1
     if version == 0:
-        val (dcid, after_dcid) = _read_conn_id(data, 5)
-        val (scid, after_scid) = _read_conn_id(data, after_dcid)
-        return QuicHeaderResult.Ok(QuicPacketHeader(
-            packet_type: QuicPacketType.VersionNeg,
-            version: 0,
-            dest_conn_id: dcid,
-            src_conn_id: scid,
-            packet_number: 0,
-            payload_offset: after_scid
-        ))
+        match _read_conn_id(data, 5):
+            case Err(msg): return QuicHeaderResult.Err(msg)
+            case Ok(d):
+                match _read_conn_id(data, d.new_offset):
+                    case Err(msg): return QuicHeaderResult.Err(msg)
+                    case Ok(s):
+                        if data.len() - s.new_offset < 4 or (data.len() - s.new_offset) % 4 != 0:
+                            return QuicHeaderResult.Err("version negotiation list malformed")
+                        return QuicHeaderResult.Ok(QuicPacketHeader(
+                            packet_type: QuicPacketType.VersionNeg,
+                            version: 0,
+                            dest_conn_id: d.bytes,
+                            src_conn_id: s.bytes,
+                            packet_number: 0,
+                            payload_offset: s.new_offset
+                        ))
+
+    if (first & QUIC_FIXED_BIT) == 0:
+        return QuicHeaderResult.Err("QUIC fixed bit not set")
 
     # Determine long-header type from bits 5-4
     val lh_type = (first >> 4) & 0x03
 
-    val (dcid, after_dcid) = _read_conn_id(data, 5)
-    val (scid, after_scid) = _read_conn_id(data, after_dcid)
+    var dcid: [u8] = []
+    var scid: [u8] = []
+    var after_scid: i64 = 0
+    match _read_conn_id(data, 5):
+        case Err(msg): return QuicHeaderResult.Err(msg)
+        case Ok(d):
+            dcid = d.bytes
+            match _read_conn_id(data, d.new_offset):
+                case Err(msg): return QuicHeaderResult.Err(msg)
+                case Ok(s):
+                    scid = s.bytes
+                    after_scid = s.new_offset
 
     var pkt_type = QuicPacketType.Initial
     var payload_off = after_scid
@@ -279,7 +300,10 @@ pub fn parse_quic_header(data: [u8]) -> QuicHeaderResult:
         val tok_r = quic_varint_decode(data, after_scid)
         match tok_r:
             case Ok(tr):
-                payload_off = after_scid + tr.consumed + tr.value
+                val token_start = after_scid + tr.consumed
+                if tr.value > data.len() - token_start:
+                    return QuicHeaderResult.Err("initial token truncated")
+                payload_off = token_start + tr.value
             case Err(msg):
                 return QuicHeaderResult.Err("initial token length: {msg}")
 
@@ -294,6 +318,8 @@ pub fn parse_quic_header(data: [u8]) -> QuicHeaderResult:
     if lh_type == QUIC_LH_TYPE_RETRY:
         pkt_type = QuicPacketType.Retry
         # Retry has no packet number; rest is retry token + integrity tag
+        if data.len() - after_scid < 16:
+            return QuicHeaderResult.Err("retry integrity tag truncated")
         return QuicHeaderResult.Ok(QuicPacketHeader(
             packet_type: QuicPacketType.Retry,
             version: version,
@@ -310,13 +336,16 @@ pub fn parse_quic_header(data: [u8]) -> QuicHeaderResult:
             val pn_offset = payload_off + lr.consumed
             # Packet number is 1-4 bytes; length encoded in low 2 bits of first byte
             val pn_len = (first & 0x03) + 1
+            if lr.value < pn_len:
+                return QuicHeaderResult.Err("packet length smaller than packet number")
+            if lr.value > data.len() - pn_offset:
+                return QuicHeaderResult.Err("packet payload truncated")
             var pn: i64 = 0
             var pi = 0
             loop:
                 if pi >= pn_len:
                     break
-                if pn_offset + pi < data.len():
-                    pn = (pn << 8) | data[pn_offset + pi]
+                pn = (pn << 8) | data[pn_offset + pi]
                 pi = pi + 1
 
             return QuicHeaderResult.Ok(QuicPacketHeader(
@@ -337,81 +366,34 @@ pub fn parse_quic_header(data: [u8]) -> QuicHeaderResult:
 # ============================================================================
 
 pub fn encode_quic_header(header: QuicPacketHeader) -> [u8]:
-    """Encode a QUIC packet header to bytes.
+    """Encode the unprotected Version Negotiation header.
 
-    Builds the wire header for the given packet type. Payload is NOT
-    included — caller appends payload after the returned header bytes.
-    Crypto protection is NOT applied.
+    Protected packet kinds return empty until a connection-bound packet owner
+    supplies the missing packet length/number and header-protection context.
     """
     var out: [u8] = []
 
+    if header.dest_conn_id.len() > QUIC_MAX_CONN_ID_LEN or header.src_conn_id.len() > QUIC_MAX_CONN_ID_LEN:
+        return out
     match header.packet_type:
-        case OneRTT:
-            # Short header: Fixed bit set, long-header bit clear
-            val first = QUIC_FIXED_BIT
-            out.push(first)
-            _quic_pkt_append_bytes(out, header.dest_conn_id)
-            return out
-
         case VersionNeg:
-            # Version Negotiation: long bit set, version = 0
             out.push(QUIC_LONG_HEADER_BIT | QUIC_FIXED_BIT)
-            # Version = 0 (4 bytes)
             out.push(0)
             out.push(0)
             out.push(0)
             out.push(0)
-            # DCID
             out.push(header.dest_conn_id.len())
             _quic_pkt_append_bytes(out, header.dest_conn_id)
-            # SCID
             out.push(header.src_conn_id.len())
             _quic_pkt_append_bytes(out, header.src_conn_id)
             return out
-
         case _:
-            pass
-
-    # Long header: Initial, Handshake, ZeroRTT, Retry
-    var lh_type = QUIC_LH_TYPE_INITIAL
-    match header.packet_type:
-        case Initial:
-            lh_type = QUIC_LH_TYPE_INITIAL
-        case ZeroRTT:
-            lh_type = QUIC_LH_TYPE_ZERO_RTT
-        case Handshake:
-            lh_type = QUIC_LH_TYPE_HANDSHAKE
-        case Retry:
-            lh_type = QUIC_LH_TYPE_RETRY
-        case _:
-            pass
-
-    val first = QUIC_LONG_HEADER_BIT | QUIC_FIXED_BIT | (lh_type << 4)
-    out.push(first)
-
-    # Version (4 bytes big-endian)
-    out.push((header.version >> 24) & 0xff)
-    out.push((header.version >> 16) & 0xff)
-    out.push((header.version >> 8) & 0xff)
-    out.push(header.version & 0xff)
-
-    # DCID
-    out.push(header.dest_conn_id.len())
-    _quic_pkt_append_bytes(out, header.dest_conn_id)
-
-    # SCID
-    out.push(header.src_conn_id.len())
-    _quic_pkt_append_bytes(out, header.src_conn_id)
-
-    # Initial packets: token length = 0 (no token in this skeleton)
-    match header.packet_type:
-        case Initial:
-            out.push(0)
-        case _:
-            pass
-
-    return out
+            # Protected packet headers require packet-length, packet-number,
+            # key-phase, and header-protection context not carried by this
+            # structural value. Do not fabricate a sendable header.
+            return out
 
 export QUIC_VERSION_1, QUIC_LONG_HEADER_BIT, QUIC_FIXED_BIT
 export QUIC_LH_TYPE_INITIAL, QUIC_LH_TYPE_ZERO_RTT, QUIC_LH_TYPE_HANDSHAKE, QUIC_LH_TYPE_RETRY
+export QUIC_MAX_CONN_ID_LEN
 export QuicPacketType, QuicVarintOk, QuicVarintResult, QuicPacketHeader, QuicHeaderResult

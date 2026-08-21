@@ -1,0 +1,471 @@
+# Deterministic, bounded performance admission for SimpleOS (NFR-002/003).
+#
+# The caller selects only an absolute RSS ceiling. Workload unit, direction,
+# percentile, and numeric limit are canonical here, so evidence cannot weaken
+# the selected requirements. Regression values are derived from the samples;
+# there is no caller-supplied current value.
+
+use std.common.structural.digest.hash256.{hash256_hex_valid}
+
+pub enum SimpleOsPerformanceWorkloadV1:
+    WarmServerStartup
+    HttpDbLoopback
+    SshEstablish
+    WindowManagerFirstFrame
+    InputToPresent
+    WindowManagerSteadyFrame
+    FsMetadata
+    FsSequentialThroughput
+    SimpleCompileRun
+    CCompileLinkRun
+
+pub enum SimpleOsPerformanceUnitV1:
+    Microseconds
+    BytesPerSecond
+
+pub enum SimpleOsPerformanceDirectionV1:
+    LowerIsBetter
+    HigherIsBetter
+
+pub enum SimpleOsPerformanceHostV1:
+    Native
+    QemuKvm
+    QemuTcg
+
+pub enum SimpleOsPerformanceErrorV1:
+    None
+    InvalidBudget
+    InvalidSample
+    TooFewSamples
+    TooManySamples
+    MissingMetadata
+    InvalidHash
+    NonComparable
+    NonNativeCannotPass
+    NoisySamples
+    Overflow
+    AbsoluteBudgetExceeded
+    Regression
+
+pub struct SimpleOsPerformanceBudgetV1:
+    workload: SimpleOsPerformanceWorkloadV1
+    unit: SimpleOsPerformanceUnitV1
+    direction: SimpleOsPerformanceDirectionV1
+    admission_percentile: u64
+    limit: u64
+    max_rss_bytes: u64
+
+pub struct SimpleOsPerformanceEvidenceV1:
+    budget: SimpleOsPerformanceBudgetV1
+    samples: [u64]
+    rss_samples: [u64]
+    warmup_samples: u64
+    cpu_identity: text
+    frequency_identity: text
+    noise_identity: text
+    fixture_hash: text
+    binary_hash: text
+    image_hash: text
+    config_hash: text
+    accelerator_identity: text
+    baseline_identity_hash: text
+    artifact_hashes: [text]
+    host: SimpleOsPerformanceHostV1
+    comparable_baseline: bool
+    baseline_value: u64
+    max_rss_bytes: u64
+    baseline_rss_bytes: u64
+
+pub struct SimpleOsPerformanceStatsV1:
+    p50: u64
+    p95: u64
+    p99: u64
+    max: u64
+    max_rss_bytes: u64
+    cv_basis_points: u64
+
+pub struct SimpleOsPerformanceAdmissionV1:
+    ok: bool
+    error: SimpleOsPerformanceErrorV1
+    admitted_value: u64
+    stats: SimpleOsPerformanceStatsV1
+
+pub const SIMPLEOS_PERFORMANCE_MIN_SAMPLES: i64 = 10
+pub const SIMPLEOS_PERFORMANCE_MAX_SAMPLES: i64 = 1024
+pub const SIMPLEOS_PERFORMANCE_MAX_WARMUP_SAMPLES: u64 = 100000u64
+pub const SIMPLEOS_PERFORMANCE_MAX_METADATA_BYTES: i64 = 128
+pub const SIMPLEOS_PERFORMANCE_MAX_ARTIFACT_HASHES: i64 = 64
+pub const SIMPLEOS_PERFORMANCE_MAX_CV_BASIS_POINTS: u64 = 500u64
+
+pub fn simpleos_performance_workload_to_text(
+    workload: SimpleOsPerformanceWorkloadV1
+) -> text:
+    match workload:
+        case SimpleOsPerformanceWorkloadV1.WarmServerStartup: "warm_server_startup"
+        case SimpleOsPerformanceWorkloadV1.HttpDbLoopback: "http_db_loopback"
+        case SimpleOsPerformanceWorkloadV1.SshEstablish: "ssh_establish"
+        case SimpleOsPerformanceWorkloadV1.WindowManagerFirstFrame: "wm_first_frame"
+        case SimpleOsPerformanceWorkloadV1.InputToPresent: "wm_input_to_present"
+        case SimpleOsPerformanceWorkloadV1.WindowManagerSteadyFrame: "wm_steady_frame"
+        case SimpleOsPerformanceWorkloadV1.FsMetadata: "fs_metadata"
+        case SimpleOsPerformanceWorkloadV1.FsSequentialThroughput: "fs_sequential_throughput"
+        case SimpleOsPerformanceWorkloadV1.SimpleCompileRun: "simple_compile_run"
+        case SimpleOsPerformanceWorkloadV1.CCompileLinkRun: "c_cpp_compile_link_run"
+
+pub fn simpleos_performance_workload_from_text(
+    value: text
+) -> SimpleOsPerformanceWorkloadV1?:
+    if value == "warm_server_startup": return Some(SimpleOsPerformanceWorkloadV1.WarmServerStartup)
+    if value == "http_db_loopback": return Some(SimpleOsPerformanceWorkloadV1.HttpDbLoopback)
+    if value == "ssh_establish": return Some(SimpleOsPerformanceWorkloadV1.SshEstablish)
+    if value == "wm_first_frame": return Some(SimpleOsPerformanceWorkloadV1.WindowManagerFirstFrame)
+    if value == "wm_input_to_present": return Some(SimpleOsPerformanceWorkloadV1.InputToPresent)
+    if value == "wm_steady_frame": return Some(SimpleOsPerformanceWorkloadV1.WindowManagerSteadyFrame)
+    if value == "fs_metadata": return Some(SimpleOsPerformanceWorkloadV1.FsMetadata)
+    if value == "fs_sequential_throughput": return Some(SimpleOsPerformanceWorkloadV1.FsSequentialThroughput)
+    if value == "simple_compile_run": return Some(SimpleOsPerformanceWorkloadV1.SimpleCompileRun)
+    if value == "c_cpp_compile_link_run": return Some(SimpleOsPerformanceWorkloadV1.CCompileLinkRun)
+    nil
+
+pub fn simpleos_performance_receipt_unit(
+    unit: SimpleOsPerformanceUnitV1
+) -> text:
+    match unit:
+        case SimpleOsPerformanceUnitV1.Microseconds: "microseconds_milli"
+        case SimpleOsPerformanceUnitV1.BytesPerSecond: "bytes_per_second_milli"
+
+fn _empty_stats() -> SimpleOsPerformanceStatsV1:
+    SimpleOsPerformanceStatsV1(
+        p50: 0u64, p95: 0u64, p99: 0u64, max: 0u64,
+        max_rss_bytes: 0u64,
+        cv_basis_points: 0u64)
+
+fn _reject(error: SimpleOsPerformanceErrorV1) -> SimpleOsPerformanceAdmissionV1:
+    SimpleOsPerformanceAdmissionV1(
+        ok: false, error: error, admitted_value: 0u64, stats: _empty_stats())
+
+fn _safe_metadata(value: text) -> bool:
+    value.len() > 0 and value.len() <= SIMPLEOS_PERFORMANCE_MAX_METADATA_BYTES and
+        not value.contains("\0") and not value.contains("\n") and
+        not value.contains("\r")
+
+fn _artifact_hashes_valid(values: [text]) -> bool:
+    if values.len() == 0 or
+       values.len() > SIMPLEOS_PERFORMANCE_MAX_ARTIFACT_HASHES:
+        return false
+    var i: i64 = 0
+    while i < values.len():
+        if not hash256_hex_valid(values[i]):
+            return false
+        var prior: i64 = 0
+        while prior < i:
+            if values[prior] == values[i]:
+                return false
+            prior = prior + 1
+        i = i + 1
+    true
+
+fn _artifact_hash_present(values: [text], wanted: text) -> bool:
+    for value in values:
+        if value == wanted:
+            return true
+    false
+
+fn _checked_add(a: u64, b: u64) -> Result<u64, SimpleOsPerformanceErrorV1>:
+    if a > 18446744073709551615u64 - b:
+        return Err(SimpleOsPerformanceErrorV1.Overflow)
+    Ok(a + b)
+
+fn _checked_mul(a: u64, b: u64) -> Result<u64, SimpleOsPerformanceErrorV1>:
+    if a != 0u64 and b > 18446744073709551615u64 / a:
+        return Err(SimpleOsPerformanceErrorV1.Overflow)
+    Ok(a * b)
+
+fn _sqrt_floor(value: u64) -> u64:
+    var lo: u64 = 0u64
+    var hi: u64 = 4294967295u64
+    while lo < hi:
+        val mid = lo + (hi - lo + 1u64) / 2u64
+        if mid <= value / mid:
+            lo = mid
+        else:
+            hi = mid - 1u64
+    lo
+
+fn _sqrt_ceil(value: u64) -> u64:
+    val floor = _sqrt_floor(value)
+    if floor * floor == value:
+        return floor
+    floor + 1u64
+
+fn _ceil_div(numerator: u64, denominator: u64) -> u64:
+    val quotient = numerator / denominator
+    if numerator % denominator == 0u64:
+        return quotient
+    quotient + 1u64
+
+# Return floor(value^2 / 400), saturating only when the mathematical result is
+# greater than u64::MAX. Saturation is exact for the only consumer: comparing a
+# u64 variance numerator with the five-percent threshold.
+fn _square_div_400_saturating(value: u64) -> u64:
+    val quotient = value / 400u64
+    val remainder = value % 400u64
+    val quotient_square = _checked_mul(quotient, quotient)
+    val first = match quotient_square:
+        case Err(_): return 18446744073709551615u64
+        case Ok(square):
+            match _checked_mul(square, 400u64):
+                case Err(_): return 18446744073709551615u64
+                case Ok(term): term
+    val twice_quotient = match _checked_mul(quotient, 2u64):
+        case Err(_): return 18446744073709551615u64
+        case Ok(value): value
+    val second = match _checked_mul(twice_quotient, remainder):
+        case Err(_): return 18446744073709551615u64
+        case Ok(term): term
+    val remainder_square = remainder * remainder
+    val third = remainder_square / 400u64
+    val first_second = match _checked_add(first, second):
+        case Err(_): return 18446744073709551615u64
+        case Ok(value): value
+    match _checked_add(first_second, third):
+        case Err(_): 18446744073709551615u64
+        case Ok(result): result
+
+fn _sorted_copy(values: [u64]) -> [u64]:
+    var result = values.map(\value: value)
+    var i: i64 = 1
+    while i < result.len():
+        val item = result[i]
+        var j = i
+        while j > 0 and result[j - 1] > item:
+            result[j] = result[j - 1]
+            j = j - 1
+        result[j] = item
+        i = i + 1
+    result
+
+# Nearest-rank percentile: ceil(percentile * count / 100) - 1.
+fn _percentile(sorted: [u64], percentile: u64) -> u64:
+    val count = sorted.len().to_u64()
+    val rank = (percentile * count + 99u64) / 100u64
+    sorted[(rank - 1u64).to_i64()]
+
+pub fn simpleos_performance_canonical_budget(
+    workload: SimpleOsPerformanceWorkloadV1,
+    configured_max_rss_bytes: u64
+) -> SimpleOsPerformanceBudgetV1:
+    match workload:
+        case SimpleOsPerformanceWorkloadV1.WarmServerStartup:
+            SimpleOsPerformanceBudgetV1(workload: workload, unit: SimpleOsPerformanceUnitV1.Microseconds, direction: SimpleOsPerformanceDirectionV1.LowerIsBetter, admission_percentile: 95u64, limit: 125000u64, max_rss_bytes: configured_max_rss_bytes)
+        case SimpleOsPerformanceWorkloadV1.HttpDbLoopback:
+            SimpleOsPerformanceBudgetV1(workload: workload, unit: SimpleOsPerformanceUnitV1.Microseconds, direction: SimpleOsPerformanceDirectionV1.LowerIsBetter, admission_percentile: 95u64, limit: 5000u64, max_rss_bytes: configured_max_rss_bytes)
+        case SimpleOsPerformanceWorkloadV1.SshEstablish:
+            SimpleOsPerformanceBudgetV1(workload: workload, unit: SimpleOsPerformanceUnitV1.Microseconds, direction: SimpleOsPerformanceDirectionV1.LowerIsBetter, admission_percentile: 95u64, limit: 125000u64, max_rss_bytes: configured_max_rss_bytes)
+        case SimpleOsPerformanceWorkloadV1.WindowManagerFirstFrame:
+            SimpleOsPerformanceBudgetV1(workload: workload, unit: SimpleOsPerformanceUnitV1.Microseconds, direction: SimpleOsPerformanceDirectionV1.LowerIsBetter, admission_percentile: 95u64, limit: 250000u64, max_rss_bytes: configured_max_rss_bytes)
+        case SimpleOsPerformanceWorkloadV1.InputToPresent:
+            SimpleOsPerformanceBudgetV1(workload: workload, unit: SimpleOsPerformanceUnitV1.Microseconds, direction: SimpleOsPerformanceDirectionV1.LowerIsBetter, admission_percentile: 95u64, limit: 25000u64, max_rss_bytes: configured_max_rss_bytes)
+        case SimpleOsPerformanceWorkloadV1.WindowManagerSteadyFrame:
+            SimpleOsPerformanceBudgetV1(workload: workload, unit: SimpleOsPerformanceUnitV1.Microseconds, direction: SimpleOsPerformanceDirectionV1.LowerIsBetter, admission_percentile: 99u64, limit: 16700u64, max_rss_bytes: configured_max_rss_bytes)
+        case SimpleOsPerformanceWorkloadV1.FsMetadata:
+            SimpleOsPerformanceBudgetV1(workload: workload, unit: SimpleOsPerformanceUnitV1.Microseconds, direction: SimpleOsPerformanceDirectionV1.LowerIsBetter, admission_percentile: 95u64, limit: 2500u64, max_rss_bytes: configured_max_rss_bytes)
+        case SimpleOsPerformanceWorkloadV1.FsSequentialThroughput:
+            # Throughput has no percentile in NFR-002; the controlled campaign
+            # admits its median and still reports p95/p99/max for diagnosis.
+            SimpleOsPerformanceBudgetV1(workload: workload, unit: SimpleOsPerformanceUnitV1.BytesPerSecond, direction: SimpleOsPerformanceDirectionV1.HigherIsBetter, admission_percentile: 50u64, limit: 104857600u64, max_rss_bytes: configured_max_rss_bytes)
+        case SimpleOsPerformanceWorkloadV1.SimpleCompileRun:
+            SimpleOsPerformanceBudgetV1(workload: workload, unit: SimpleOsPerformanceUnitV1.Microseconds, direction: SimpleOsPerformanceDirectionV1.LowerIsBetter, admission_percentile: 95u64, limit: 2500000u64, max_rss_bytes: configured_max_rss_bytes)
+        case SimpleOsPerformanceWorkloadV1.CCompileLinkRun:
+            SimpleOsPerformanceBudgetV1(workload: workload, unit: SimpleOsPerformanceUnitV1.Microseconds, direction: SimpleOsPerformanceDirectionV1.LowerIsBetter, admission_percentile: 95u64, limit: 2500000u64, max_rss_bytes: configured_max_rss_bytes)
+
+fn _budget_is_canonical(budget: SimpleOsPerformanceBudgetV1) -> bool:
+    if budget.max_rss_bytes == 0u64:
+        return false
+    val canonical = simpleos_performance_canonical_budget(
+        budget.workload, budget.max_rss_bytes)
+    budget.unit == canonical.unit and budget.direction == canonical.direction and
+        budget.admission_percentile == canonical.admission_percentile and
+        budget.limit == canonical.limit
+
+fn _selected_value(stats: SimpleOsPerformanceStatsV1, percentile: u64) -> u64:
+    if percentile == 50u64:
+        return stats.p50
+    if percentile == 95u64:
+        return stats.p95
+    if percentile == 99u64:
+        return stats.p99
+    0u64
+
+fn _metric_exceeds_limit(
+    direction: SimpleOsPerformanceDirectionV1,
+    value: u64,
+    limit: u64
+) -> bool:
+    match direction:
+        case SimpleOsPerformanceDirectionV1.LowerIsBetter: value > limit
+        case SimpleOsPerformanceDirectionV1.HigherIsBetter: value < limit
+
+fn _regressed_more_than_five_percent(
+    direction: SimpleOsPerformanceDirectionV1,
+    current: u64,
+    baseline: u64
+) -> Result<bool, SimpleOsPerformanceErrorV1>:
+    val current_scaled = _checked_mul(current, 100u64)?
+    match direction:
+        case SimpleOsPerformanceDirectionV1.LowerIsBetter:
+            val threshold = _checked_mul(baseline, 105u64)?
+            Ok(current_scaled > threshold)
+        case SimpleOsPerformanceDirectionV1.HigherIsBetter:
+            val threshold = _checked_mul(baseline, 95u64)?
+            Ok(current_scaled < threshold)
+
+pub fn simpleos_performance_admit(
+    evidence: SimpleOsPerformanceEvidenceV1
+) -> SimpleOsPerformanceAdmissionV1:
+    if evidence.samples.len() < SIMPLEOS_PERFORMANCE_MIN_SAMPLES:
+        return _reject(SimpleOsPerformanceErrorV1.TooFewSamples)
+    if evidence.samples.len() > SIMPLEOS_PERFORMANCE_MAX_SAMPLES:
+        return _reject(SimpleOsPerformanceErrorV1.TooManySamples)
+    if evidence.rss_samples.len() != evidence.samples.len():
+        return _reject(SimpleOsPerformanceErrorV1.InvalidSample)
+    if evidence.warmup_samples == 0u64 or
+       evidence.warmup_samples > SIMPLEOS_PERFORMANCE_MAX_WARMUP_SAMPLES:
+        return _reject(SimpleOsPerformanceErrorV1.InvalidBudget)
+    if not _budget_is_canonical(evidence.budget):
+        return _reject(SimpleOsPerformanceErrorV1.InvalidBudget)
+    if not _safe_metadata(evidence.cpu_identity) or
+       not _safe_metadata(evidence.frequency_identity) or
+       not _safe_metadata(evidence.noise_identity):
+        return _reject(SimpleOsPerformanceErrorV1.MissingMetadata)
+    if not hash256_hex_valid(evidence.fixture_hash) or
+       not hash256_hex_valid(evidence.binary_hash) or
+       not hash256_hex_valid(evidence.image_hash) or
+       not hash256_hex_valid(evidence.config_hash) or
+       not hash256_hex_valid(evidence.baseline_identity_hash) or
+       not _safe_metadata(evidence.accelerator_identity):
+        return _reject(SimpleOsPerformanceErrorV1.InvalidHash)
+    if not _artifact_hashes_valid(evidence.artifact_hashes) or
+       not _artifact_hash_present(evidence.artifact_hashes, evidence.fixture_hash) or
+       not _artifact_hash_present(evidence.artifact_hashes, evidence.binary_hash) or
+       not _artifact_hash_present(evidence.artifact_hashes, evidence.image_hash) or
+       not _artifact_hash_present(evidence.artifact_hashes, evidence.config_hash) or
+       not _artifact_hash_present(evidence.artifact_hashes,
+                                  evidence.baseline_identity_hash):
+        return _reject(SimpleOsPerformanceErrorV1.NonComparable)
+    if evidence.host != SimpleOsPerformanceHostV1.Native:
+        return _reject(SimpleOsPerformanceErrorV1.NonNativeCannotPass)
+    if not evidence.comparable_baseline or evidence.baseline_value == 0u64 or
+       evidence.baseline_rss_bytes == 0u64 or evidence.max_rss_bytes == 0u64:
+        return _reject(SimpleOsPerformanceErrorV1.NonComparable)
+
+    val sorted = _sorted_copy(evidence.samples)
+    var total: u64 = 0u64
+    var max_rss_bytes: u64 = 0u64
+    var sample_index: i64 = 0
+    for sample in sorted:
+        if sample == 0u64:
+            return _reject(SimpleOsPerformanceErrorV1.InvalidSample)
+        val next_total = _checked_add(total, sample)
+        match next_total:
+            case Err(_): return _reject(SimpleOsPerformanceErrorV1.Overflow)
+            case Ok(value): total = value
+    while sample_index < evidence.rss_samples.len():
+        val rss = evidence.rss_samples[sample_index]
+        if rss == 0u64:
+            return _reject(SimpleOsPerformanceErrorV1.InvalidSample)
+        if rss > max_rss_bytes:
+            max_rss_bytes = rss
+        sample_index = sample_index + 1
+    if max_rss_bytes != evidence.max_rss_bytes:
+        return _reject(SimpleOsPerformanceErrorV1.NonComparable)
+
+    val count = sorted.len().to_u64()
+    # Exact population-CV numerator, centered on the minimum sample to avoid
+    # squaring the much larger absolute metric values:
+    #   count * sum((x-min)^2) - sum(x-min)^2
+    var delta_total: u64 = 0u64
+    var delta_squares: u64 = 0u64
+    val minimum = sorted[0]
+    for sample in sorted:
+        val delta = sample - minimum
+        val delta_total_result = _checked_add(delta_total, delta)
+        match delta_total_result:
+            case Err(_): return _reject(SimpleOsPerformanceErrorV1.Overflow)
+            case Ok(value): delta_total = value
+        val square_result = _checked_mul(delta, delta)
+        val square = match square_result:
+            case Err(_): return _reject(SimpleOsPerformanceErrorV1.Overflow)
+            case Ok(value): value
+        val sum_result = _checked_add(delta_squares, square)
+        match sum_result:
+            case Err(_): return _reject(SimpleOsPerformanceErrorV1.Overflow)
+            case Ok(value): delta_squares = value
+    val scaled_delta_squares = match _checked_mul(count, delta_squares):
+        case Err(_): return _reject(SimpleOsPerformanceErrorV1.Overflow)
+        case Ok(value): value
+    val delta_total_square = match _checked_mul(delta_total, delta_total):
+        case Err(_): return _reject(SimpleOsPerformanceErrorV1.Overflow)
+        case Ok(value): value
+    if scaled_delta_squares < delta_total_square:
+        return _reject(SimpleOsPerformanceErrorV1.Overflow)
+    val variance_numerator = scaled_delta_squares - delta_total_square
+    # CV^2 is variance_numerator / total^2. Comparing to 1/400 is exact;
+    # floor(total^2/400) preserves the inclusive 5% boundary.
+    if variance_numerator > _square_div_400_saturating(total):
+        return _reject(SimpleOsPerformanceErrorV1.NoisySamples)
+    val cv_scaled_result = _checked_mul(_sqrt_ceil(variance_numerator), 10000u64)
+    val cv_scaled = match cv_scaled_result:
+        case Err(_): return _reject(SimpleOsPerformanceErrorV1.Overflow)
+        case Ok(value): value
+    # This is a conservative integer upper bound for reporting. Admission is
+    # decided by the exact squared inequality above, not by rounded display.
+    val cv_basis_points = _ceil_div(cv_scaled, total)
+
+    val stats = SimpleOsPerformanceStatsV1(
+        p50: _percentile(sorted, 50u64),
+        p95: _percentile(sorted, 95u64),
+        p99: _percentile(sorted, 99u64),
+        max: sorted[sorted.len() - 1],
+        max_rss_bytes: max_rss_bytes,
+        cv_basis_points: cv_basis_points)
+    val admitted_value = _selected_value(stats, evidence.budget.admission_percentile)
+    if admitted_value == 0u64 or _metric_exceeds_limit(
+        evidence.budget.direction, admitted_value, evidence.budget.limit):
+        return _reject(SimpleOsPerformanceErrorV1.AbsoluteBudgetExceeded)
+    if evidence.max_rss_bytes > evidence.budget.max_rss_bytes:
+        return _reject(SimpleOsPerformanceErrorV1.AbsoluteBudgetExceeded)
+
+    val metric_regression = _regressed_more_than_five_percent(
+        evidence.budget.direction, admitted_value, evidence.baseline_value)
+    match metric_regression:
+        case Err(_): return _reject(SimpleOsPerformanceErrorV1.Overflow)
+        case Ok(true): return _reject(SimpleOsPerformanceErrorV1.Regression)
+        case Ok(false): pass
+    val rss_regression = _regressed_more_than_five_percent(
+        SimpleOsPerformanceDirectionV1.LowerIsBetter,
+        evidence.max_rss_bytes,
+        evidence.baseline_rss_bytes)
+    match rss_regression:
+        case Err(_): return _reject(SimpleOsPerformanceErrorV1.Overflow)
+        case Ok(true): return _reject(SimpleOsPerformanceErrorV1.Regression)
+        case Ok(false): pass
+
+    SimpleOsPerformanceAdmissionV1(
+        ok: true, error: SimpleOsPerformanceErrorV1.None,
+        admitted_value: admitted_value, stats: stats)
+
+export SimpleOsPerformanceWorkloadV1, SimpleOsPerformanceUnitV1
+export SimpleOsPerformanceDirectionV1, SimpleOsPerformanceHostV1
+export SimpleOsPerformanceErrorV1, SimpleOsPerformanceBudgetV1
+export SimpleOsPerformanceEvidenceV1, SimpleOsPerformanceStatsV1
+export SimpleOsPerformanceAdmissionV1
+export SIMPLEOS_PERFORMANCE_MIN_SAMPLES, SIMPLEOS_PERFORMANCE_MAX_SAMPLES
+export SIMPLEOS_PERFORMANCE_MAX_WARMUP_SAMPLES
+export SIMPLEOS_PERFORMANCE_MAX_METADATA_BYTES
+export SIMPLEOS_PERFORMANCE_MAX_ARTIFACT_HASHES
+export SIMPLEOS_PERFORMANCE_MAX_CV_BASIS_POINTS
+export simpleos_performance_canonical_budget, simpleos_performance_admit
+export simpleos_performance_workload_to_text
+export simpleos_performance_workload_from_text
+export simpleos_performance_receipt_unit

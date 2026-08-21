@@ -1,0 +1,67 @@
+# Reproduce spec for:
+#   doc/08_tracking/bug/test_db_update_row_keys_nonexistent_id_column_2026-08-21.md
+#
+# Test runs were recorded as `running` and never transitioned to `completed`,
+# and every `tests` row stayed `unknown`, so test_result.md reported
+# Total 770 / Passed 0 / Failed 0 — a vacuous green.
+#
+# Two independent defects, one spec each below:
+#   1. SdnTable.update_row() matched rows on a hardcoded "id" column that no
+#      table except `strings` has, so every in-place update was dropped.
+#   2. update_test_result() never wrote the verdict onto the `tests` row.
+
+use std.database.core.{SdnTable, SdnRow}
+use std.database.test_extended.{create_test_database_extended}
+
+describe "Test run finalization":
+
+    it "updates a row keyed by the table's own primary key column":
+        val table = SdnTable(
+            name: "test_runs",
+            columns: ["run_id", "status"],
+            rows: [],
+            index: {}
+        )
+        val row = SdnRow.empty()
+        row.set("run_id", "run_1")
+        row.set("status", "running")
+        table.add_row(row)
+
+        val updated = SdnRow.empty()
+        updated.set("run_id", "run_1")
+        updated.set("status", "completed")
+        # Pre-fix: false — update_row looked for a column named "id".
+        assert_true(table.update_row("run_1", updated))
+        expect(table.rows[0].get("status") ?? "").to_equal("completed")
+
+    it "transitions a started run to completed":
+        var db = create_test_database_extended("build/test/test_run_finalization.sdn")
+        val run_id = db.start_run()
+
+        val running = db.list_runs("running")
+        expect(running.len()).to_equal(1)
+
+        db.complete_run(run_id: run_id, test_count: 1, passed: 1, failed: 0, timed_out: 0)
+
+        # Pre-fix: still 1 running, 0 completed — the run never finalized.
+        expect(db.list_runs("running").len()).to_equal(0)
+        val completed = db.list_runs("completed")
+        expect(completed.len()).to_equal(1)
+        expect(completed[0].passed).to_equal(1)
+
+    it "records a verdict on the test row instead of leaving it unknown":
+        var db = create_test_database_extended("build/test/test_run_verdict.sdn")
+        val run_id = db.start_run()
+        db.update_test_result(
+            file_path: "test/example_spec.spl",
+            suite_name: "spec",
+            test_name: "test/example_spec.spl",
+            status: "passed",
+            duration_ms: 1.0,
+            run_id: run_id
+        )
+        db.complete_run(run_id: run_id, test_count: 1, passed: 1, failed: 0, timed_out: 0)
+
+        # Pre-fix: (1, 0, 0, 0) — one known test, zero verdicts.
+        expect(db.tests_by_status("passed").len()).to_equal(1)
+        expect(db.tests_by_status("unknown").len()).to_equal(0)

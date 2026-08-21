@@ -1,0 +1,331 @@
+# Bounded TLS application-record framing shared by stream protocol owners.
+#
+# One mutable owner holds a fixed-capacity ring. Ingest appends in place and
+# returns only copied complete records plus a generation-bound proposal token.
+# Logical head/sequence advance only after the caller authenticates every frame
+# and calls commit_authenticated. A second ingest cannot cross a pending proposal.
+
+pub val TLS_RECORD_HEADER_LENGTH_V1: i64 = 5
+pub val TLS_APPLICATION_DATA_TYPE_V1: i64 = 23
+pub val TLS_VERSION_MAJOR_V1: i64 = 3
+pub val TLS_VERSION_MINOR_V1: i64 = 3
+pub val TLS_AEAD_TAG_LENGTH_V1: i64 = 16
+pub val TLS_MAX_FRAGMENT_LENGTH_V1: i64 = 16384
+pub val TLS_MAX_RECORD_PAYLOAD_LENGTH_V1: i64 = TLS_MAX_FRAGMENT_LENGTH_V1 + TLS_AEAD_TAG_LENGTH_V1
+pub val TLS_MAX_RECORD_WIRE_LENGTH_V1: i64 = TLS_RECORD_HEADER_LENGTH_V1 + TLS_MAX_RECORD_PAYLOAD_LENGTH_V1
+pub val TLS_MAX_RX_BUFFER_LENGTH_V1: i64 = TLS_MAX_RECORD_WIRE_LENGTH_V1 * 2
+# Diagnostic ceiling only; byte capacity, not ingress-call count, bounds input.
+pub val TLS_MAX_RX_FRAGMENTS_V1: i64 = TLS_MAX_RX_BUFFER_LENGTH_V1
+pub val TLS_MAX_SEQUENCE_V1: i64 = 9223372036854775807
+
+pub struct TlsRecordIngestV1:
+    records: [[u8]]
+    remaining_length: i64
+    next_client_sequence: i64
+    ingest_byte_work: i64
+    token: i64
+    commit_required: bool
+    malformed: bool
+    overflow: bool
+    sequence_exhausted: bool
+    proposal_pending: bool
+
+impl TlsRecordIngestV1:
+    pub fn framed_records() -> [[u8]]:
+        self.records
+
+    pub fn remaining_byte_count() -> i64:
+        self.remaining_length
+
+    pub fn proposed_sequence() -> i64:
+        self.next_client_sequence
+
+    pub fn byte_work() -> i64:
+        self.ingest_byte_work
+
+    pub fn proposal_token() -> i64:
+        self.token
+
+    pub fn requires_commit() -> bool:
+        self.commit_required
+
+    pub fn is_malformed() -> bool:
+        self.malformed
+
+    pub fn is_overflow() -> bool:
+        self.overflow
+
+    pub fn is_sequence_exhausted() -> bool:
+        self.sequence_exhausted
+
+    pub fn is_proposal_pending() -> bool:
+        self.proposal_pending
+
+fn _ingest_result_v1(
+    remaining_length: i64,
+    sequence: i64
+) -> TlsRecordIngestV1:
+    TlsRecordIngestV1(
+        records: [],
+        remaining_length: remaining_length,
+        next_client_sequence: sequence,
+        ingest_byte_work: 0,
+        token: 0,
+        commit_required: false,
+        malformed: false,
+        overflow: false,
+        sequence_exhausted: false,
+        proposal_pending: false
+    )
+
+fn _fixed_ring_storage_v1() -> [u8]:
+    var storage: [u8] = []
+    var index: i64 = 0
+    while index < TLS_MAX_RX_BUFFER_LENGTH_V1:
+        storage.push(0u8)
+        index = index + 1
+    storage
+
+fn _saturating_add_v1(left: i64, right: i64) -> i64:
+    if left < 0 or right < 0:
+        return TLS_MAX_SEQUENCE_V1
+    if right > TLS_MAX_SEQUENCE_V1 - left:
+        return TLS_MAX_SEQUENCE_V1
+    left + right
+
+fn _record_total_length_v1(header: [u8], available: i64) -> i64:
+    if available < TLS_RECORD_HEADER_LENGTH_V1:
+        return 0
+    if header.len() != TLS_RECORD_HEADER_LENGTH_V1:
+        return -1
+    if header[0].to_i64() != TLS_APPLICATION_DATA_TYPE_V1:
+        return -1
+    if (header[1].to_i64() != TLS_VERSION_MAJOR_V1 or
+        header[2].to_i64() != TLS_VERSION_MINOR_V1):
+        return -1
+    val payload_len = (header[3].to_i64() * 256) + header[4].to_i64()
+    if payload_len < TLS_AEAD_TAG_LENGTH_V1 or payload_len > TLS_MAX_RECORD_PAYLOAD_LENGTH_V1:
+        return -1
+    val total = TLS_RECORD_HEADER_LENGTH_V1 + payload_len
+    if available < total:
+        return 0
+    total
+
+pub class TlsApplicationRecordStreamV1:
+    storage: [u8]
+    retained_head: i64
+    retained_length: i64
+    retained_fragment_count: i64
+    client_sequence: i64
+    cumulative_byte_work: i64
+    generation: i64
+    pending: bool
+    pending_token: i64
+    pending_consumed: i64
+    pending_total_length: i64
+    pending_next_sequence: i64
+    pending_fragment_count: i64
+    pending_record_count: i64
+    failed: bool
+
+    fn ring_index(logical_offset: i64) -> i64:
+        (self.retained_head + logical_offset) % TLS_MAX_RX_BUFFER_LENGTH_V1
+
+    fn copy_prefix(logical_offset: i64, count: i64) -> [u8]:
+        var out: [u8] = []
+        var copied: i64 = 0
+        while copied < count:
+            out.push(self.storage[self.ring_index(logical_offset + copied)])
+            copied = copied + 1
+        out
+
+    fn valid() -> bool:
+        (self.storage.len() == TLS_MAX_RX_BUFFER_LENGTH_V1 and
+         self.retained_head >= 0 and
+         self.retained_head < TLS_MAX_RX_BUFFER_LENGTH_V1 and
+         self.retained_length >= 0 and
+         self.retained_length <= TLS_MAX_RX_BUFFER_LENGTH_V1 and
+         self.retained_fragment_count >= 0 and
+         self.cumulative_byte_work >= 0 and
+         self.generation >= 0)
+
+    me clear_pending_fields():
+        self.pending = false
+        self.pending_token = 0
+        self.pending_consumed = 0
+        self.pending_total_length = 0
+        self.pending_next_sequence = self.client_sequence
+        self.pending_fragment_count = self.retained_fragment_count
+        self.pending_record_count = 0
+
+    pub fn sequence() -> i64:
+        self.client_sequence
+
+    pub fn remaining_byte_count() -> i64:
+        self.retained_length
+
+    pub fn fragment_count() -> i64:
+        self.retained_fragment_count
+
+    pub fn byte_work() -> i64:
+        self.cumulative_byte_work
+
+    pub fn has_pending_proposal() -> bool:
+        self.pending
+
+    pub fn is_failed() -> bool:
+        self.failed
+
+    pub me fn ingest(incoming: [u8]) -> TlsRecordIngestV1:
+        var result = _ingest_result_v1(
+            self.retained_length, self.client_sequence)
+        if self.failed or not self.valid():
+            self.failed = true
+            result.malformed = true
+            return result
+        if self.pending:
+            result.proposal_pending = true
+            return result
+        if incoming.len() == 0:
+            return result
+        if incoming.len() > TLS_MAX_RX_BUFFER_LENGTH_V1 - self.retained_length:
+            self.failed = true
+            result.overflow = true
+            return result
+
+        val write_offset = self.retained_length
+        var incoming_index: i64 = 0
+        while incoming_index < incoming.len():
+            self.storage[self.ring_index(write_offset + incoming_index)] =
+                incoming[incoming_index]
+            incoming_index = incoming_index + 1
+
+        val total_length = self.retained_length + incoming.len()
+        var consumed: i64 = 0
+        var byte_work = incoming.len()
+        while consumed < total_length:
+            val available = total_length - consumed
+            val header_count = if available < TLS_RECORD_HEADER_LENGTH_V1:
+                available
+            else:
+                TLS_RECORD_HEADER_LENGTH_V1
+            val header = self.copy_prefix(consumed, header_count)
+            byte_work = _saturating_add_v1(byte_work, header.len())
+            val record_total = _record_total_length_v1(header, available)
+            if record_total < 0:
+                self.cumulative_byte_work = _saturating_add_v1(
+                    self.cumulative_byte_work, byte_work)
+                self.failed = true
+                result.records = []
+                result.ingest_byte_work = byte_work
+                result.malformed = true
+                return result
+            if record_total == 0:
+                break
+            if not tls_application_record_sequence_can_advance_v1(
+                result.next_client_sequence):
+                self.cumulative_byte_work = _saturating_add_v1(
+                    self.cumulative_byte_work, byte_work)
+                self.failed = true
+                result.records = []
+                result.ingest_byte_work = byte_work
+                result.sequence_exhausted = true
+                return result
+            val record = self.copy_prefix(consumed, record_total)
+            byte_work = _saturating_add_v1(byte_work, record.len())
+            if record.len() != record_total:
+                self.cumulative_byte_work = _saturating_add_v1(
+                    self.cumulative_byte_work, byte_work)
+                self.failed = true
+                result.records = []
+                result.ingest_byte_work = byte_work
+                result.malformed = true
+                return result
+            result.records.push(record)
+            result.next_client_sequence = result.next_client_sequence + 1
+            consumed = consumed + record_total
+
+        val remaining_length = total_length - consumed
+        val fragment_count = if remaining_length == 0:
+            0
+        elif consumed > 0:
+            1
+        else:
+            _saturating_add_v1(self.retained_fragment_count, 1)
+        self.cumulative_byte_work = _saturating_add_v1(
+            self.cumulative_byte_work, byte_work)
+        result.remaining_length = remaining_length
+        result.ingest_byte_work = byte_work
+
+        if result.records.len() == 0:
+            self.retained_length = total_length
+            self.retained_fragment_count = fragment_count
+            return result
+        if self.generation >= TLS_MAX_SEQUENCE_V1:
+            self.failed = true
+            result.records = []
+            result.overflow = true
+            return result
+
+        self.generation = self.generation + 1
+        self.pending = true
+        self.pending_token = self.generation
+        self.pending_consumed = consumed
+        self.pending_total_length = total_length
+        self.pending_next_sequence = result.next_client_sequence
+        self.pending_fragment_count = fragment_count
+        self.pending_record_count = result.records.len()
+        result.token = self.pending_token
+        result.commit_required = true
+        result
+
+    pub me fn commit_authenticated(token: i64, record_count: i64) -> bool:
+        if (self.failed or not self.pending or token <= 0 or
+            token != self.pending_token or
+            record_count != self.pending_record_count):
+            self.failed = true
+            self.clear_pending_fields()
+            return false
+        self.retained_head = self.ring_index(self.pending_consumed)
+        self.retained_length = self.pending_total_length - self.pending_consumed
+        self.retained_fragment_count = self.pending_fragment_count
+        self.client_sequence = self.pending_next_sequence
+        self.clear_pending_fields()
+        true
+
+    pub me fn reject_authentication(token: i64) -> bool:
+        val matched = self.pending and token > 0 and token == self.pending_token
+        self.failed = true
+        self.clear_pending_fields()
+        matched
+
+pub fn tls_application_record_stream_new_v1(initial_client_sequence: i64 = 0) -> TlsApplicationRecordStreamV1:
+    TlsApplicationRecordStreamV1(
+        storage: _fixed_ring_storage_v1(),
+        retained_head: 0,
+        retained_length: 0,
+        retained_fragment_count: 0,
+        client_sequence: initial_client_sequence,
+        cumulative_byte_work: 0,
+        generation: 0,
+        pending: false,
+        pending_token: 0,
+        pending_consumed: 0,
+        pending_total_length: 0,
+        pending_next_sequence: initial_client_sequence,
+        pending_fragment_count: 0,
+        pending_record_count: 0,
+        failed: false
+    )
+
+pub fn tls_application_record_sequence_can_advance_v1(sequence: i64) -> bool:
+    sequence >= 0 and sequence < TLS_MAX_SEQUENCE_V1
+
+export TlsApplicationRecordStreamV1, TlsRecordIngestV1
+export TLS_RECORD_HEADER_LENGTH_V1, TLS_APPLICATION_DATA_TYPE_V1
+export TLS_VERSION_MAJOR_V1, TLS_VERSION_MINOR_V1, TLS_AEAD_TAG_LENGTH_V1
+export TLS_MAX_FRAGMENT_LENGTH_V1, TLS_MAX_RECORD_PAYLOAD_LENGTH_V1
+export TLS_MAX_RECORD_WIRE_LENGTH_V1, TLS_MAX_RX_BUFFER_LENGTH_V1
+export TLS_MAX_RX_FRAGMENTS_V1, TLS_MAX_SEQUENCE_V1
+export tls_application_record_stream_new_v1
+export tls_application_record_sequence_can_advance_v1

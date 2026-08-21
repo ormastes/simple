@@ -77,7 +77,6 @@ fn ast_reset_seq_get() -> i64:
 # is evicted and lookups report -1 ("outside the window"), same as today.
 const AST_ARENA_SLOT_POISON: i64 = -777
 
-var ast_gen_harden_slot: [i64] = []
 var ast_harden_retired_gens: [i64] = []
 var ast_harden_retired_decl_tag: [[i64]] = []
 var ast_harden_retired_module_decl_slots: [[i64]] = []
@@ -136,10 +135,10 @@ fn _ast_harden_evict_oldest():
     ast_harden_retired_decl_tag = new_decl
     ast_harden_retired_module_decl_slots = new_mods
 
-fn _ast_harden_retire_snapshot(retiring_gen: i64):
+fn _ast_harden_retire_snapshot(retiring_gen: i64, harden_enabled: bool):
     # Called unconditionally from ast_reset(); no-ops when the gate is off so
     # off-path behavior (and cost) is identical to before this feature.
-    if not ast_gen_harden_enabled():
+    if not harden_enabled:
         return
     _ast_harden_arrays_ensure()
     val decl_len = decl_tag.len()
@@ -456,9 +455,12 @@ fn ast_reset():
     # read then reports one "stale generation" line (see _AstExpr/nodes.spl,
     # ast_gen_check_index) instead of cascading OOB/missing-tag diagnostics.
     ast_generation_bump()
-    # Refresh the harden gate once per reset cycle (see the "Arena Harden"
-    # section above) before it is consulted below.
-    ast_gen_harden_refresh()
+    # Read the harden gate once per reset cycle and carry the scalar decision
+    # directly to retirement. The former array-backed cache crashed in the
+    # self-hosted native compiler before the first source parse and performed
+    # the same environment read, so it had neither a safety nor a performance
+    # advantage.
+    val ast_harden_enabled = rt_env_get_i64("SIMPLE_AST_GEN_HARDEN", 0) == 1
     # DIAGNOSTIC (2026-07-12, flat_bridge_type_index_across_ast_reset): trace
     # every reset with the pre-reset arena sizes so an interleaved reset that
     # clobbers a still-in-flight conversion can be pinpointed. Guarded by an
@@ -567,7 +569,7 @@ fn ast_reset():
     # Arena Harden: retire a poisoned, size-only snapshot of the generation
     # that is about to be cleared BEFORE the live pools are wiped below (see
     # "Arena Harden" section above). No-ops when the gate is off.
-    _ast_harden_retire_snapshot(ast_generation() - 1)
+    _ast_harden_retire_snapshot(ast_generation() - 1, ast_harden_enabled)
     decl_tag.clear()
     decl_span.clear()
     decl_name.clear()
@@ -610,9 +612,9 @@ fn ast_reset():
     arm_body_flat.clear()
     arm_binding.clear()
     arm_rationale.clear()
-    elif_cond.clear()
-    elif_body.clear()
-    elif_else.clear()
+    # Owner-module clear: a cross-module `.clear()` on these does not reach the
+    # arena elif_new() appends to (see elif_arena_clear in _Ast/decl_nodes.spl).
+    elif_arena_clear()
     module_decls.clear()
     # Drop the per-index decl env mirror BEFORE the slot array goes: it is read
     # env-first (module_decl_at / ast_decl_text_get), so anything left here
@@ -672,7 +674,7 @@ fn stmt_get(idx: i64) -> CoreStmt:
         expr_idx: stmt_expr[idx],
         name: stmt_name[idx],
         type_tag: stmt_type_tag[idx],
-        body: stmt_body[idx],
+        body: stmt_get_body(idx),
         target: -1,
         value: -1,
         condition: -1,
@@ -740,7 +742,7 @@ fn stmt_contains_yield(sid: i64) -> bool:
     # Same stale-arena-id hazard as expr_contains_yield above.
     if sid < 0 or sid >= stmt_expr.len(): return false
     if expr_contains_yield(stmt_expr[sid]): return true
-    for child_sid in stmt_body[sid]:
+    for child_sid in stmt_get_body(sid):
         if stmt_contains_yield(child_sid): return true
     false
 

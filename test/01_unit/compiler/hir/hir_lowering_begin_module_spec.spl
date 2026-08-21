@@ -5,11 +5,30 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.frontend.parser_types.{ParserEnum, ParserTrait}
 use compiler.hir.hir_definitions.{HirTrait}
 use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_types.{HirType, ScopeKind, SymbolId}
 use compiler.hir.hir_lowering.module_surface.{ModuleSurface, ModuleSurfacesByName}
 
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_transient_array_scope_end() -> bool
+
 describe "HirLowering.begin_module":
-    it "resets module-local state while preserving surfaces and configuration":
+    it "retains the complete diagnostic stream after transient retirement":
+        val surfaces = ModuleSurfacesByName.from_parts(
+            [ModuleSurface.empty("diagnostic")], {"diagnostic": 0},
+            ["diagnostic"], [0]).unwrap()
+        expect(rt_transient_array_scope_begin()).to_equal(true)
+        var lowering = hirlowering_for_module("diagnostic.spl", surfaces)
+        lowering.error("owned failure", Span.empty())
+        expect(rt_transient_array_scope_pause()).to_equal(true)
+        expect(lowering.promote_diagnostics_transient_owner()).to_equal(true)
+        expect(rt_transient_array_scope_end()).to_equal(true)
+        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.diagnostic_messages[0]).to_contain("owned failure")
+        expect(lowering.diagnostic_recovered[0]).to_equal(false)
+
+    it "resets module-local traits while preserving surfaces and configuration":
         val surfaces_result = ModuleSurfacesByName.from_parts(
             [ModuleSurface.empty("first")], {"first": 0}, ["first"], [0])
         val surfaces = surfaces_result.unwrap()
@@ -45,6 +64,7 @@ describe "HirLowering.begin_module":
         expect(lowering.module_filename).to_equal("second.spl")
         expect(lowering.symbols.next_symbol_id).to_equal(0)
         expect(lowering.loop_depth).to_equal(0)
+        expect(lowering.lowered_traits.keys().len()).to_equal(0)
         expect(lowering.module_surfaces.index_by_name.contains_key("first")).to_equal(true)
         expect(lowering.type_inference_config.unwrap().strict_empty_collections).to_equal(true)
 
@@ -106,4 +126,4 @@ describe "HirLowering.begin_module":
         expect(lowering.diagnostic_messages.len()).to_equal(0)
         expect(lowering.diagnostic_recovered.len()).to_equal(0)
         expect(lowering.module_surfaces.index_by_name.contains_key("first")).to_equal(true)
-        expect(lowering.lowered_traits.contains_key("Retained")).to_equal(true)
+        expect(lowering.lowered_traits.contains_key("Retained")).to_equal(false)

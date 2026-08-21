@@ -5,14 +5,15 @@
 # authentication, and then provides an interactive shell.
 #
 # Usage:
-#   var daemon = SshDaemon.new(22)
+#   var provider = SshdCredentialProvider.new(user_db, host_private_key, host_public_key)
+#   var daemon = SshDaemon.new_with_provider(22, provider)
 #   daemon.start()
 
 use os.crypto.ed25519.{ed25519_keypair_from_seed}
 use os.apps.sshd.ssh_session.{SshSession, SshSessionState}
 use os.apps.sshd.ssh_kex.{ssh_build_kexinit_for_host_keys_and_certs}
 use os.apps.sshd.ssh_kex_primitives.{HostKeySet, HostCertificateSet, host_key_set_has_any_algorithm}
-use os.apps.sshd.ssh_auth.{SshUserDb, sshd_create_default_users}
+use os.apps.sshd.ssh_auth.{SshUserDb}
 use os.kernel.net.rt_net_socket_facade.{rt_net_close}
 # NOTE: call the x86_64 spawn DIRECTLY (single non-@cfg pub fn) rather than the
 # cross-arch fs_exec_spawn_ring3 wrapper — the @cfg multi-variant dispatch of
@@ -321,18 +322,19 @@ pub fn sshd_start_verdict_for_test(
         running: false,
         port: SSHD_PORT,
         host_private_key: ed25519_seed,
-        host_public_key: [],
+        host_public_key: ed25519_seed,
         advertise_ed25519_host_key: advertise_ed25519,
         host_rsa_pkcs8: rsa_pkcs8,
         host_rsa_public_blob: nil,
         host_ecdsa_p256_pkcs8: ecdsa_p256_pkcs8,
         host_ed25519_cert: ed25519_cert,
         host_rsa_sha2_256_cert: nil,
-        host_rsa_sha2_512_cert: nil
+        host_rsa_sha2_512_cert: nil,
+        credential_provider_configured: true
     )
     match daemon.start():
         Ok(_): "started"
-        Err(e): e
+        Err(e): sshd_start_error_text(e)
 
 pub fn sshd_daemon_host_key_policy_satisfiable_for_test(
     advertise_ed25519: bool,
@@ -356,14 +358,15 @@ pub fn sshd_daemon_host_key_policy_satisfiable_for_test(
         running: false,
         port: SSHD_PORT,
         host_private_key: ed25519_seed,
-        host_public_key: [],
+        host_public_key: ed25519_seed,
         advertise_ed25519_host_key: advertise_ed25519,
         host_rsa_pkcs8: rsa_pkcs8,
         host_rsa_public_blob: nil,
         host_ecdsa_p256_pkcs8: ecdsa_p256_pkcs8,
         host_ed25519_cert: ed25519_cert,
         host_rsa_sha2_256_cert: nil,
-        host_rsa_sha2_512_cert: nil
+        host_rsa_sha2_512_cert: nil,
+        credential_provider_configured: true
     )
     daemon.host_key_policy_satisfiable()
 
@@ -385,14 +388,15 @@ pub fn sshd_build_production_session_kexinit_for_test(
         running: false,
         port: SSHD_PORT,
         host_private_key: ed25519_seed,
-        host_public_key: [],
+        host_public_key: ed25519_seed,
         advertise_ed25519_host_key: advertise_ed25519,
         host_rsa_pkcs8: rsa_pkcs8,
         host_rsa_public_blob: rsa_public_blob,
         host_ecdsa_p256_pkcs8: ecdsa_p256_pkcs8,
         host_ed25519_cert: ed25519_cert,
         host_rsa_sha2_256_cert: rsa_sha2_256_cert,
-        host_rsa_sha2_512_cert: rsa_sha2_512_cert
+        host_rsa_sha2_512_cert: rsa_sha2_512_cert,
+        credential_provider_configured: true
     )
 
     val host_keys = daemon.build_host_keys_for_session()
@@ -402,6 +406,32 @@ pub fn sshd_build_production_session_kexinit_for_test(
 # ============================================================================
 # SSH Daemon
 # ============================================================================
+
+enum SshdStartError:
+    MissingCredentialProvider
+    MissingHostKeyIdentity
+    HostKeyPolicy(text)
+    BindFailed(text)
+
+fn sshd_start_error_text(error: SshdStartError) -> text:
+    match error:
+        SshdStartError.MissingCredentialProvider: "sshd: credential provider required"
+        SshdStartError.MissingHostKeyIdentity: "sshd: host key identity required"
+        SshdStartError.HostKeyPolicy(message): message
+        SshdStartError.BindFailed(message): message
+
+class SshdCredentialProvider:
+    """Bounded, operator-supplied authentication and host-key material."""
+    user_db: SshUserDb
+    host_private_key: [u8]
+    host_public_key: [u8]
+
+    static fn new(user_db: SshUserDb, host_private_key: [u8], host_public_key: [u8]) -> SshdCredentialProvider:
+        SshdCredentialProvider(user_db: user_db, host_private_key: host_private_key, host_public_key: host_public_key)
+
+    fn is_valid() -> bool:
+        self.user_db.users.len() > 0 and self.user_db.has_authorized_key() and
+            self.host_private_key.len() == 32 and self.host_public_key.len() == 32
 
 class SshDaemon:
     """SimpleOS SSH server.
@@ -423,6 +453,7 @@ class SshDaemon:
     host_ed25519_cert: [u8]?
     host_rsa_sha2_256_cert: [u8]?
     host_rsa_sha2_512_cert: [u8]?
+    credential_provider_configured: bool
 
 impl SshDaemon:
 
@@ -433,18 +464,12 @@ impl SshDaemon:
         after the Ed25519 self-test passes. This ensures no unvalidated
         crypto code runs during construction.
 
-        Creates default users:
-          root / simpleos
-          user / password
+        Starts unconfigured. Production startup refuses until an operator
+        supplies SshdCredentialProvider via new_with_provider().
         """
-        # Set up user database with default accounts
-        # NOTE: Call module-level function to avoid method resolution
-        # ambiguity between SshDaemon.add_user and SshUserDb.add_user
-        var db = sshd_create_default_users()
-
         SshDaemon(
             listen_fd: -1,
-            user_db: db,
+            user_db: SshUserDb.new(),
             sessions: [],
             running: false,
             port: port,
@@ -456,12 +481,21 @@ impl SshDaemon:
             host_ecdsa_p256_pkcs8: nil,
             host_ed25519_cert: nil,
             host_rsa_sha2_256_cert: nil,
-            host_rsa_sha2_512_cert: nil
+            host_rsa_sha2_512_cert: nil,
+            credential_provider_configured: false
         )
 
-    me add_user(username: text, password: text):
-        """Add a user to the authentication database."""
-        self.user_db.add_user(username, password)
+    static fn new_with_provider(port: u16, provider: SshdCredentialProvider) -> SshDaemon:
+        var daemon = SshDaemon.new(port)
+        daemon.user_db = provider.user_db
+        daemon.host_private_key = provider.host_private_key
+        daemon.host_public_key = provider.host_public_key
+        daemon.credential_provider_configured = provider.is_valid()
+        daemon
+
+    me add_user_identity(username: text):
+        """Add an identity; attach an authorized key before service admission."""
+        self.user_db.add_user_identity(username)
 
     me add_user_key(username: text, key_blob: [u8]):
         """Add an authorized public key for a user."""
@@ -496,7 +530,7 @@ impl SshDaemon:
         """Control whether live sessions advertise the generated Ed25519 host key."""
         self.advertise_ed25519_host_key = enabled
 
-    me start() -> Result<bool, text>:
+    me start() -> Result<bool, SshdStartError>:
         """Start listening for SSH connections.
 
         Runs Ed25519 self-test first (RFC 8032 test vectors). Refuses to
@@ -507,15 +541,19 @@ impl SshDaemon:
         Creates a TCP socket, binds to the configured port, and enters
         the accept loop. This method does not return until stop() is called.
         """
+        if not self.credential_provider_configured:
+            return Err(SshdStartError.MissingCredentialProvider)
+        if self.host_private_key.len() != 32 or self.host_public_key.len() != 32:
+            return Err(SshdStartError.MissingHostKeyIdentity)
         # Fail closed: refuse to serve when the configuration leaves no host key
         # algorithm enabled. Serving here would fall back to a default algorithm
         # the operator switched off.
         if not self.host_key_policy_satisfiable():
             serial_println("[sshd] refusing to start: no host key algorithm enabled")
-            return Err("sshd: no host key algorithm enabled")
+            return Err(SshdStartError.HostKeyPolicy("sshd: no host key algorithm enabled"))
         match self.bind_and_ready():
             Ok(_): pass
-            Err(err): return Err(err)
+            Err(err): return Err(SshdStartError.BindFailed(err))
         serial_println("[sshd] accept loop start")
         self.accept_loop()
         Ok(true)
@@ -531,32 +569,12 @@ impl SshDaemon:
         sshd-only boot path is unchanged.
         """
         serial_println("[sshd] start: begin")
-        # Use a fixed RFC 8032 Ed25519 host key in the live lane.
-        # The current C-side public-key derivation shim can produce a public
-        # key that does not match the seed on baremetal Cranelift, which
-        # breaks SSH host-key signatures. Pinning a known-good seed/public
-        # pair keeps the live recovery path deterministic while the lower-level
-        # runtime bug remains under investigation.
-        var seed: [u8] = [
-            0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60,
-            0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec, 0x2c, 0xc4,
-            0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19,
-            0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae, 0x7f, 0x60
-        ]
-        val expected_public_key: [u8] = [
-            0xd7, 0x5a, 0x98, 0x01, 0x82, 0xb1, 0x0a, 0xb7,
-            0xd5, 0x4b, 0xfe, 0xd3, 0xc9, 0x64, 0x07, 0x3a,
-            0x0e, 0xe1, 0x72, 0xf3, 0xda, 0xa6, 0x23, 0x25,
-            0xaf, 0x02, 0x1a, 0x68, 0xf7, 0x07, 0x51, 0x1a
-        ]
         if self.advertise_ed25519_host_key and self.host_rsa_pkcs8 == nil:
             serial_println("[sshd] Running Ed25519 live helper self-test")
             serial_println("[sshd] Ed25519 live helper self-test: PASS")
         else:
             serial_println("[sshd] Ed25519 host key disabled for live lane")
-        serial_println("[sshd] Seed bytes={seed.len()}")
-        self.host_private_key = seed
-        self.host_public_key = expected_public_key
+        serial_println("[sshd] configured host identity ready")
         serial_println("[sshd] Host keys ready")
 
         # The RV64 live lane uses the boot-local TCP runtime directly.
@@ -752,3 +770,5 @@ impl SshDaemon:
     fn session_count() -> u32:
         """Return the number of active sessions."""
         self.sessions.len().to_u32()
+
+export SshdStartError, SshdCredentialProvider, sshd_start_error_text

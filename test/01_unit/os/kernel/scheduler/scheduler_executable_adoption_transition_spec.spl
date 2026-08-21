@@ -1,0 +1,89 @@
+use std.spec.{describe, it, expect}
+use os.kernel.scheduler.scheduler_executable_adoption_state.{
+    SchedulerExecutableAdoptionOwnerStateV1
+}
+use os.kernel.scheduler.scheduler_executable_adoption_transition.{
+    SchedulerExecutableAdoptionOwnerEventV1,
+    scheduler_executable_adoption_transition_v1
+}
+
+describe "scheduler executable adoption owner transition":
+    it "authorizes only after prepared publication is confirmed":
+        val prepared = scheduler_executable_adoption_transition_v1(
+            SchedulerExecutableAdoptionOwnerStateV1.Idle,
+            SchedulerExecutableAdoptionOwnerEventV1.Prepare)
+        expect(prepared.state).to_equal(
+            SchedulerExecutableAdoptionOwnerStateV1.Prepared)
+        expect(prepared.execution_authorized).to_be(false)
+
+        val published = scheduler_executable_adoption_transition_v1(
+            prepared.state,
+            SchedulerExecutableAdoptionOwnerEventV1.Publish)
+        expect(published.state).to_equal(
+            SchedulerExecutableAdoptionOwnerStateV1.Published)
+        expect(published.execution_authorized).to_be(false)
+
+        val confirmed = scheduler_executable_adoption_transition_v1(
+            published.state,
+            SchedulerExecutableAdoptionOwnerEventV1.Confirm)
+        expect(confirmed.state).to_equal(
+            SchedulerExecutableAdoptionOwnerStateV1.Authorized)
+        expect(confirmed.execution_authorized).to_be(true)
+
+        val completed = scheduler_executable_adoption_transition_v1(
+            confirmed.state,
+            SchedulerExecutableAdoptionOwnerEventV1.Complete)
+        expect(completed.state).to_equal(
+            SchedulerExecutableAdoptionOwnerStateV1.Idle)
+        expect(completed.execution_authorized).to_be(false)
+
+        val next_prepared = scheduler_executable_adoption_transition_v1(
+            completed.state,
+            SchedulerExecutableAdoptionOwnerEventV1.Prepare)
+        expect(next_prepared.state).to_equal(
+            SchedulerExecutableAdoptionOwnerStateV1.Prepared)
+        expect(next_prepared.execution_authorized).to_be(false)
+
+    it "quarantines an indeterminate commit without authorization":
+        val indeterminate = scheduler_executable_adoption_transition_v1(
+            SchedulerExecutableAdoptionOwnerStateV1.Published,
+            SchedulerExecutableAdoptionOwnerEventV1.CommitIndeterminate)
+        expect(indeterminate.state).to_equal(
+            SchedulerExecutableAdoptionOwnerStateV1.Quarantined)
+        expect(indeterminate.execution_authorized).to_be(false)
+
+        val replay = scheduler_executable_adoption_transition_v1(
+            indeterminate.state,
+            SchedulerExecutableAdoptionOwnerEventV1.Confirm)
+        expect(replay.state).to_equal(
+            SchedulerExecutableAdoptionOwnerStateV1.Quarantined)
+        expect(replay.execution_authorized).to_be(false)
+
+        val fresh_token_attempt = scheduler_executable_adoption_transition_v1(
+            indeterminate.state,
+            SchedulerExecutableAdoptionOwnerEventV1.Prepare)
+        expect(fresh_token_attempt.state).to_equal(
+            SchedulerExecutableAdoptionOwnerStateV1.Quarantined)
+        expect(fresh_token_attempt.execution_authorized).to_be(false)
+
+        val quarantine_reset_attempt = scheduler_executable_adoption_transition_v1(
+            indeterminate.state,
+            SchedulerExecutableAdoptionOwnerEventV1.Complete)
+        expect(quarantine_reset_attempt.state).to_equal(
+            SchedulerExecutableAdoptionOwnerStateV1.Quarantined)
+        expect(quarantine_reset_attempt.execution_authorized).to_be(false)
+
+    it "rejects invalid transition order fail closed":
+        val skipped_prepare = scheduler_executable_adoption_transition_v1(
+            SchedulerExecutableAdoptionOwnerStateV1.Idle,
+            SchedulerExecutableAdoptionOwnerEventV1.Confirm)
+        expect(skipped_prepare.state).to_equal(
+            SchedulerExecutableAdoptionOwnerStateV1.Quarantined)
+        expect(skipped_prepare.execution_authorized).to_be(false)
+
+        val premature_complete = scheduler_executable_adoption_transition_v1(
+            SchedulerExecutableAdoptionOwnerStateV1.Prepared,
+            SchedulerExecutableAdoptionOwnerEventV1.Complete)
+        expect(premature_complete.state).to_equal(
+            SchedulerExecutableAdoptionOwnerStateV1.Quarantined)
+        expect(premature_complete.execution_authorized).to_be(false)

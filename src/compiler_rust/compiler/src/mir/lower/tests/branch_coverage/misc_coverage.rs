@@ -8,7 +8,7 @@ use super::helpers::*;
 use crate::hir::{self, BinOp};
 use crate::mir::lower::{ContractMode, MirLowerer};
 use crate::mir::function::MirFunction;
-use crate::mir::{self, MirInst, Terminator};
+use crate::mir::{self, CallTarget, MirInst, Terminator};
 
 // =============================================================================
 // Additional branch coverage: Constants
@@ -443,7 +443,13 @@ fn coverage_end_scope() {
 #[test]
 fn coverage_box_int_in_interp() {
     let mir = compile_to_mir("fn test() -> i64:\n    val x: i64 = 42\n    val s = \"{x}\"\n    return 42\n").unwrap();
-    assert!(has_inst(&mir, |i| matches!(i, MirInst::BoxInt { .. })));
+    // i64 bypasses BoxInt deliberately: BoxInt packs `(value << 3) | TAG_INT`,
+    // truncating to 61 bits (stress_f02_i64_boxing_truncation_2026-07-17).
+    // The canonical i64 path is rt_raw_i64_to_string.
+    assert!(has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_raw_i64_to_string"))
+    }));
+    assert!(!has_inst(&mir, |i| matches!(i, MirInst::BoxInt { .. })));
 }
 
 #[test]

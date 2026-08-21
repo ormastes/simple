@@ -1,0 +1,77 @@
+# @cover src/os/apps/sshd/ssh_channel.spl 80%
+# @cover src/os/apps/sshd/ssh_session_channel.spl 60%
+# Behavioral channel-open bounds: duplicate/replay and capacity failures.
+use std.spipe.*
+use os.apps.sshd.ssh_channel.{ChannelTable, ChannelType, SSH_INVALID_CHANNEL_ID, SSH_MAX_CHANNELS_PER_SESSION, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET, SSH_MSG_CHANNEL_OPEN_FAILURE, SSH_MSG_CHANNEL_OPEN_CONFIRMATION, ssh_build_channel_open_failure}
+
+describe "SSH channel-open allocation is fail-closed":
+    it "rejects a duplicate remote channel without overwriting state":
+        var table = ChannelTable.new()
+        val first = table.open(ChannelType.Session, 7, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)
+        val replay = table.open(ChannelType.Session, 7, 1, 1)
+        expect(first).to_equal(0)
+        expect(replay).to_equal(SSH_INVALID_CHANNEL_ID)
+        expect(table.channels.len()).to_equal(1)
+
+    it "rejects a seeded replay and keeps the original channel":
+        var table = ChannelTable.new()
+        expect(table.seed_open(0, ChannelType.Session, 9, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)).to_be(true)
+        expect(table.seed_open(0, ChannelType.Session, 9, 1, 1)).to_be(false)
+        expect(table.channels.len()).to_equal(1)
+        expect(table.channels[0].remote_id).to_equal(9)
+
+    it "rejects opens after the bounded table is full":
+        var table = ChannelTable.new()
+        var i = 0
+        while i < SSH_MAX_CHANNELS_PER_SESSION:
+            expect(table.open(ChannelType.Session, i.to_u32(), DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET) != SSH_INVALID_CHANNEL_ID).to_be(true)
+            i = i + 1
+        val rejected = table.open(ChannelType.Session, 999, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)
+        expect(rejected).to_equal(SSH_INVALID_CHANNEL_ID)
+        expect(table.channels.len()).to_equal(SSH_MAX_CHANNELS_PER_SESSION)
+
+    it "reclaims capacity after close and remove_closed":
+        var table = ChannelTable.new()
+        var i = 0
+        while i < SSH_MAX_CHANNELS_PER_SESSION:
+            expect(table.open(ChannelType.Session, i.to_u32(), DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET) != SSH_INVALID_CHANNEL_ID).to_be(true)
+            i = i + 1
+        expect(table.close(0)).to_be(true)
+        table.remove_closed()
+        expect(table.channels.len()).to_equal(SSH_MAX_CHANNELS_PER_SESSION - 1)
+        expect(table.open(ChannelType.Session, 99, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET) != SSH_INVALID_CHANNEL_ID).to_be(true)
+        expect(table.channels.len()).to_equal(SSH_MAX_CHANNELS_PER_SESSION)
+
+    it "emits duplicate OPEN_FAILURE without OPEN_CONFIRMATION":
+        var table = ChannelTable.new()
+        val first = table.session_channel_open_response(41, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)
+        val replay = table.session_channel_open_response(41, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)
+        expect(first[0]).to_equal(SSH_MSG_CHANNEL_OPEN_CONFIRMATION)
+        expect(replay[0]).to_equal(SSH_MSG_CHANNEL_OPEN_FAILURE)
+        expect(replay).to_equal(ssh_build_channel_open_failure(41, 4, "channel already open"))
+
+    it "classifies a duplicate local ID as already open":
+        var table = ChannelTable.new()
+        val first = table.session_channel_open_response(51, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)
+        val replay = table.session_channel_open_response(52, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)
+        expect(first[0]).to_equal(SSH_MSG_CHANNEL_OPEN_CONFIRMATION)
+        expect(replay).to_equal(ssh_build_channel_open_failure(52, 4, "channel already open"))
+
+    it "emits full-table OPEN_FAILURE without OPEN_CONFIRMATION":
+        var table = ChannelTable.new()
+        var i = 0
+        while i < SSH_MAX_CHANNELS_PER_SESSION:
+            # Reserve local IDs 1..MAX so local zero remains free and the
+            # rejection is caused specifically by the table bound.
+            expect(table.seed_open((i + 1).to_u32(), ChannelType.Session, i.to_u32(), DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)).to_be(true)
+            i = i + 1
+        val rejected = table.session_channel_open_response(999, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)
+        expect(rejected[0]).to_equal(SSH_MSG_CHANNEL_OPEN_FAILURE)
+        expect(rejected).to_equal(ssh_build_channel_open_failure(999, 4, "channel capacity exhausted"))
+
+    it "rejects remote window-adjust overflow without mutation":
+        var table = ChannelTable.new()
+        val local_id = table.open(ChannelType.Session, 70, 100, 100)
+        val before = table.channels[local_id as u64].remote_window
+        expect(table.adjust_remote_window(local_id, 4294967295u32)).to_be(false)
+        expect(table.channels[local_id as u64].remote_window).to_equal(before)

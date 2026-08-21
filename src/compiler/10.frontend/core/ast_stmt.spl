@@ -47,10 +47,15 @@ var stmt_expr: [i64] = []
 var stmt_name: [text] = []
 var stmt_type_tag: [i64] = []
 var stmt_body: [[i64]] = []
+var stmt_body_offsets: [i64] = []
+var stmt_body_counts: [i64] = []
+var stmt_body_flat: [i64] = []
+var stmt_if_single_else: [i64] = []
 var stmt_empty_i64: [i64] = []
 var stmt_if_val_marker: [bool] = []
 var stmt_count_slot: [i64] = [0]
-var stmt_env_mirror_slot: [bool] = []
+var stmt_mode_ready: bool = false
+var stmt_env_mirror_cached: bool = false
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_env_set(key: text, value: text) -> bool
@@ -116,8 +121,8 @@ fn stmt_i64_list_split(raw: text) -> [i64]:
     result
 
 fn stmt_env_mirror_enabled() -> bool:
-    if stmt_env_mirror_slot != nil and stmt_env_mirror_slot.len() > 0:
-        return stmt_env_mirror_slot[0]
+    if stmt_mode_ready:
+        return stmt_env_mirror_cached
     # Interpreter module variables may not persist between calls. Preserve its
     # compatibility mirror while compiled Stage4 uses the cached fast path.
     (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (rt_env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? "") != "1"
@@ -128,10 +133,9 @@ fn stmt_env_read(idx: i64, field: text) -> text:
     rt_env_get(stmt_key(idx, field)) ?? ""
 
 fn stmt_mode_slots_refresh():
-    if stmt_env_mirror_slot == nil or stmt_env_mirror_slot.len() == 0:
-        stmt_env_mirror_slot = [false]
     val native_arena = (rt_env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? "") == "1"
-    stmt_env_mirror_slot[0] = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and not native_arena
+    stmt_env_mirror_cached = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and not native_arena
+    stmt_mode_ready = true
 
 fn stmt_count_slot_ensure():
     if stmt_count_slot == nil or stmt_count_slot.len() == 0:
@@ -167,7 +171,7 @@ fn stmt_key(idx: i64, field: text) -> text:
 # Built per call, not a module-level `val`: module globals are nil in native
 # builds, which would make the clear silently inert.
 fn stmt_mirror_fields() -> [text]:
-    ["TAG", "SPAN", "EXPR", "NAME", "TYPE", "BODY", "IF_VAL"]
+    ["TAG", "SPAN", "EXPR", "NAME", "TYPE", "BODY", "IF_VAL", "IF_ELSE_SINGLE"]
 
 fn stmt_env_mirror_clear():
     """Unset every per-index stmt env-mirror entry minted since the last reset.
@@ -212,6 +216,15 @@ fn stmt_list_set(idx: i64, field: text, values: [i64]):
     if stmt_env_mirror_enabled():
         rt_env_set(stmt_key(idx, field), stmt_i64_list_join(values))
 
+fn stmt_body_store(idx: i64, values: [i64]):
+    val offset = stmt_body_flat.len()
+    var i = 0
+    while i < values.len():
+        stmt_body_flat.push(values[i])
+        i = i + 1
+    stmt_body_offsets[idx] = offset
+    stmt_body_counts[idx] = values.len()
+
 fn stmt_count() -> i64:
     val env_count = stmt_count_env()
     if env_count > 0:
@@ -236,6 +249,14 @@ fn stmt_reset():
         stmt_type_tag = []
     if stmt_body == nil:
         stmt_body = []
+    if stmt_body_offsets == nil:
+        stmt_body_offsets = []
+    if stmt_body_counts == nil:
+        stmt_body_counts = []
+    if stmt_body_flat == nil:
+        stmt_body_flat = []
+    if stmt_if_single_else == nil:
+        stmt_if_single_else = []
     if stmt_empty_i64 == nil:
         stmt_empty_i64 = []
     if stmt_if_val_marker == nil:
@@ -250,6 +271,10 @@ fn stmt_reset():
     stmt_name.clear()
     stmt_type_tag.clear()
     stmt_body.clear()
+    stmt_body_offsets.clear()
+    stmt_body_counts.clear()
+    stmt_body_flat.clear()
+    stmt_if_single_else.clear()
     stmt_if_val_marker.clear()
     stmt_gpu_grid_exprs.clear()
     stmt_gpu_block_exprs.clear()
@@ -264,6 +289,9 @@ fn stmt_alloc(tag: i64, span_id: i64) -> i64:
     stmt_name.push("")
     stmt_type_tag.push(0)
     stmt_body.push(stmt_empty_i64)
+    stmt_body_offsets.push(stmt_body_flat.len())
+    stmt_body_counts.push(0)
+    stmt_if_single_else.push(-1)
     stmt_if_val_marker.push(false)
     stmt_i64_set(idx, "TAG", tag)
     stmt_i64_set(idx, "SPAN", span_id)
@@ -271,6 +299,7 @@ fn stmt_alloc(tag: i64, span_id: i64) -> i64:
     stmt_text_set(idx, "NAME", "")
     stmt_i64_set(idx, "TYPE", 0)
     stmt_list_set(idx, "BODY", [])
+    stmt_i64_set(idx, "IF_ELSE_SINGLE", -1)
     val trace_stmt_tags = rt_env_get("SIMPLE_TRACE_STMT_TAGS") ?? ""
     if trace_stmt_tags != "" and (idx < 8 or tag <= 0):
         print "[stmt_alloc] idx={idx} tag={tag} span={span_id}"
@@ -333,7 +362,7 @@ fn stmt_assign_stmt(target_expr: i64, value_expr: i64, span_id: i64) -> i64:
     stmt_i64_set(idx, "EXPR", target_expr)
     var body: [i64] = []
     body.push(value_expr)
-    stmt_body[idx] = body
+    stmt_body_store(idx, body)
     stmt_list_set(idx, "BODY", body)
     idx
 
@@ -344,13 +373,18 @@ fn stmt_return_stmt(value_expr: i64, span_id: i64) -> i64:
     idx
 
 fn stmt_if_stmt(cond_expr: i64, then_stmts: [i64], elif_idx: i64, span_id: i64) -> i64:
+    stmt_if_stmt_with_single_else(cond_expr, then_stmts, elif_idx, -1, span_id)
+
+fn stmt_if_stmt_with_single_else(cond_expr: i64, then_stmts: [i64], elif_idx: i64, single_else_stmt: i64, span_id: i64) -> i64:
     val idx = stmt_alloc(STMT_IF, span_id)
     stmt_expr[idx] = cond_expr
     stmt_i64_set(idx, "EXPR", cond_expr)
-    stmt_body[idx] = then_stmts
+    stmt_body_store(idx, then_stmts)
     stmt_list_set(idx, "BODY", then_stmts)
     stmt_type_tag[idx] = elif_idx
     stmt_i64_set(idx, "TYPE", elif_idx)
+    stmt_if_single_else[idx] = single_else_stmt
+    stmt_i64_set(idx, "IF_ELSE_SINGLE", single_else_stmt)
     idx
 
 fn stmt_for_stmt(iter_name: text, iterable: i64, body_stmts: [i64], span_id: i64) -> i64:
@@ -359,7 +393,7 @@ fn stmt_for_stmt(iter_name: text, iterable: i64, body_stmts: [i64], span_id: i64
     stmt_text_set(idx, "NAME", iter_name)
     stmt_expr[idx] = iterable
     stmt_i64_set(idx, "EXPR", iterable)
-    stmt_body[idx] = body_stmts
+    stmt_body_store(idx, body_stmts)
     stmt_list_set(idx, "BODY", body_stmts)
     idx
 
@@ -369,13 +403,13 @@ fn stmt_static_for_stmt(iter_name: text, iterable: i64, body_stmts: [i64], span_
     stmt_text_set(idx, "NAME", iter_name)
     stmt_expr[idx] = iterable
     stmt_i64_set(idx, "EXPR", iterable)
-    stmt_body[idx] = body_stmts
+    stmt_body_store(idx, body_stmts)
     stmt_list_set(idx, "BODY", body_stmts)
     idx
 
 fn stmt_comptime_block(body_stmts: [i64], span_id: i64) -> i64:
     val idx = stmt_alloc(STMT_COMPTIME, span_id)
-    stmt_body[idx] = body_stmts
+    stmt_body_store(idx, body_stmts)
     stmt_list_set(idx, "BODY", body_stmts)
     idx
 
@@ -383,7 +417,7 @@ fn stmt_receive_stmt(arm_indices: [i64], timeout_expr: i64, timeout_body_idx: i6
     # receive: block — arm_indices = match arm pool indices,
     # timeout_expr = after timeout expr (or -1), timeout_body_idx = after body stmt index (or -1)
     val idx = stmt_alloc(STMT_RECEIVE, span_id)
-    stmt_body[idx] = arm_indices
+    stmt_body_store(idx, arm_indices)
     stmt_list_set(idx, "BODY", arm_indices)
     stmt_expr[idx] = timeout_expr
     stmt_i64_set(idx, "EXPR", timeout_expr)
@@ -404,7 +438,7 @@ fn stmt_while_stmt(cond_expr: i64, body_stmts: [i64], span_id: i64) -> i64:
     val idx = stmt_alloc(STMT_WHILE, span_id)
     stmt_expr[idx] = cond_expr
     stmt_i64_set(idx, "EXPR", cond_expr)
-    stmt_body[idx] = body_stmts
+    stmt_body_store(idx, body_stmts)
     stmt_list_set(idx, "BODY", body_stmts)
     idx
 
@@ -412,13 +446,13 @@ fn stmt_match_stmt(scrutinee: i64, arm_indices: [i64], span_id: i64) -> i64:
     val idx = stmt_alloc(9, span_id)
     stmt_expr[idx] = scrutinee
     stmt_i64_set(idx, "EXPR", scrutinee)
-    stmt_body[idx] = arm_indices
+    stmt_body_store(idx, arm_indices)
     stmt_list_set(idx, "BODY", arm_indices)
     idx
 
 fn stmt_block_stmt(body_stmts: [i64], span_id: i64) -> i64:
     val idx = stmt_alloc(STMT_BLOCK, span_id)
-    stmt_body[idx] = body_stmts
+    stmt_body_store(idx, body_stmts)
     stmt_list_set(idx, "BODY", body_stmts)
     idx
 
@@ -448,7 +482,7 @@ fn stmt_compound_assign_stmt(op: i64, target_expr: i64, value_expr: i64, span_id
     stmt_i64_set(idx, "TYPE", op)
     var body: [i64] = []
     body.push(value_expr)
-    stmt_body[idx] = body
+    stmt_body_store(idx, body)
     stmt_list_set(idx, "BODY", body)
     idx
 
@@ -472,7 +506,7 @@ fn stmt_defer_block_stmt(body_stmts: [i64], span_id: i64) -> i64:
     val idx = stmt_alloc(STMT_DEFER, span_id)
     stmt_expr[idx] = -1
     stmt_i64_set(idx, "EXPR", -1)
-    stmt_body[idx] = body_stmts
+    stmt_body_store(idx, body_stmts)
     stmt_list_set(idx, "BODY", body_stmts)
     idx
 
@@ -480,7 +514,7 @@ fn stmt_errdefer_block_stmt(body_stmts: [i64], span_id: i64) -> i64:
     val idx = stmt_alloc(STMT_ERRDEFER, span_id)
     stmt_expr[idx] = -1
     stmt_i64_set(idx, "EXPR", -1)
-    stmt_body[idx] = body_stmts
+    stmt_body_store(idx, body_stmts)
     stmt_list_set(idx, "BODY", body_stmts)
     idx
 
@@ -491,7 +525,7 @@ fn stmt_labeled_loop(label: text, inner_stmt: i64, span_id: i64) -> i64:
     stmt_text_set(idx, "NAME", label)
     var body: [i64] = []
     body.push(inner_stmt)
-    stmt_body[idx] = body
+    stmt_body_store(idx, body)
     stmt_list_set(idx, "BODY", body)
     idx
 
@@ -511,7 +545,7 @@ var stmt_gpu_block_exprs: [[i64]] = []  # block dimension expression indices
 fn stmt_gpu_launch(grid_exprs: [i64], block_exprs: [i64], body_stmts: [i64], span_id: i64) -> i64:
     """Create gpu_launch statement with grid/block dimensions and body."""
     val idx = stmt_alloc(STMT_GPU_LAUNCH, span_id)
-    stmt_body[idx] = body_stmts
+    stmt_body_store(idx, body_stmts)
     stmt_list_set(idx, "BODY", body_stmts)
     # Grow GPU storage arrays to match
     while stmt_gpu_grid_exprs.len() <= idx:
@@ -525,7 +559,7 @@ fn stmt_contract_clause(tag: i64, binding: text, clause_stmts: [i64], span_id: i
     val idx = stmt_alloc(tag, span_id)
     stmt_name[idx] = binding
     stmt_text_set(idx, "NAME", binding)
-    stmt_body[idx] = clause_stmts
+    stmt_body_store(idx, clause_stmts)
     stmt_list_set(idx, "BODY", clause_stmts)
     idx
 
@@ -647,14 +681,32 @@ fn stmt_get_type(idx: i64) -> i64:
         return -1
     stmt_type_tag[idx]
 
+fn stmt_get_if_single_else(idx: i64) -> i64:
+    val direct = stmt_env_read(idx, "IF_ELSE_SINGLE")
+    if direct != "":
+        return stmt_parse_i64(direct)
+    if idx < 0 or idx >= stmt_if_single_else.len():
+        return -1
+    stmt_if_single_else[idx]
+
 fn stmt_get_body(idx: i64) -> [i64]:
     val direct = stmt_env_read(idx, "BODY")
     if direct != "":
         return stmt_i64_list_split(direct)
-    if not stmt_idx_is_live(idx, stmt_body.len()):
-        stmt_oob_trace("stmt_get_body", idx, stmt_body.len())
+    if not stmt_idx_is_live(idx, stmt_body_offsets.len()):
+        stmt_oob_trace("stmt_get_body", idx, stmt_body_offsets.len())
         return []
-    stmt_body[idx]
+    val offset = stmt_body_offsets[idx]
+    val count = stmt_body_counts[idx]
+    if offset < 0 or count < 0 or offset > stmt_body_flat.len() or count > stmt_body_flat.len() - offset:
+        stmt_oob_trace("stmt_get_body_flat", offset + count, stmt_body_flat.len())
+        return []
+    var body: [i64] = []
+    var i = 0
+    while i < count:
+        body.push(stmt_body_flat[offset + i])
+        i = i + 1
+    body
 
 export STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_ASSIGN, STMT_RETURN
 export STMT_IF, STMT_FOR, STMT_WHILE, STMT_MATCH, STMT_BLOCK

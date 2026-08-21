@@ -1,0 +1,77 @@
+# Marker Registry attrs Enforcement — CLASS DETECTION Spec
+#
+# Class of defect: a registry declares per-entry required metadata
+# (`attrs_schema`) and the validator silently ignores it, so every entry in the
+# table is unenforced at once. Pinning only the one entry that happened to be
+# noticed ([vfs] mounted) would leave the other entries — and any entry added
+# later — equally unchecked.
+#
+# This spec asserts the PROPERTY over the whole registry rather than over one
+# marker: for EVERY registered spec that declares at least one attribute key,
+# the bare marker with no attributes must be REJECTED, and the same marker
+# carrying all declared keys must be ACCEPTED. A regression that drops
+# attrs_schema enforcement, or a newly added registry entry whose attributes go
+# unchecked, fails here even if the reproducing spec is deleted.
+#
+# Bug: doc/08_tracking/bug/markers_module_unparseable_and_spec_drift_2026-07-28.md
+#
+# @platform: hosted
+# @tag: os,log,markers,unit,class-detection
+
+use os.kernel.log.markers.{validate, registry, marker_string}
+
+describe "every registry entry with declared attrs is actually enforced":
+
+    it "rejects the bare form of every marker that declares attribute keys":
+        val specs = registry()
+        var checked: u64 = 0
+        var unenforced: text = ""
+        var i: u64 = 0
+        while i < specs.len():
+            val spec = specs[i]
+            if spec.attrs_schema.len() > 0:
+                checked = checked + 1
+                val bare = marker_string(spec.ns, spec.event)
+                if validate(bare).is_ok():
+                    unenforced = unenforced + " " + bare
+            i = i + 1
+        # Non-vacuity: the registry must actually contain attribute-bearing
+        # entries, otherwise this example proves nothing.
+        expect(checked > 0).to_equal(true)
+        expect(unenforced).to_equal("")
+
+    it "accepts every marker that carries all of its declared attribute keys":
+        val specs = registry()
+        var checked: u64 = 0
+        var wrongly_rejected: text = ""
+        var i: u64 = 0
+        while i < specs.len():
+            val spec = specs[i]
+            if spec.attrs_schema.len() > 0:
+                checked = checked + 1
+                var raw = marker_string(spec.ns, spec.event)
+                var k: u64 = 0
+                while k < spec.attrs_schema.len():
+                    raw = raw + " " + spec.attrs_schema[k] + "=x"
+                    k = k + 1
+                if not validate(raw).is_ok():
+                    wrongly_rejected = wrongly_rejected + " " + raw
+            i = i + 1
+        expect(checked > 0).to_equal(true)
+        expect(wrongly_rejected).to_equal("")
+
+    it "accepts every marker that declares no attribute keys in bare form":
+        val specs = registry()
+        var checked: u64 = 0
+        var wrongly_rejected: text = ""
+        var i: u64 = 0
+        while i < specs.len():
+            val spec = specs[i]
+            if spec.attrs_schema.len() == 0:
+                checked = checked + 1
+                val bare = marker_string(spec.ns, spec.event)
+                if not validate(bare).is_ok():
+                    wrongly_rejected = wrongly_rejected + " " + bare
+            i = i + 1
+        expect(checked > 0).to_equal(true)
+        expect(wrongly_rejected).to_equal("")

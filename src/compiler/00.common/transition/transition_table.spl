@@ -1,0 +1,248 @@
+"""
+Loader for the SDN transition tables under `spec/compiler_schema/transitions/`.
+
+Format (hardening plan section 11.3), one file per stage boundary:
+
+    table: hir_type_to_mir_type
+    producer: HirTypeKind
+    consumer: MirTypeKind
+    source: src/compiler/50.mir/_MirLowering/function_lowering.spl
+
+    universe:
+      - Int
+      - Float
+
+    transition:
+      from: HirTypeKind.Int
+      to: MirTypeKind.I64
+      state: implemented
+      reason: "..."
+      test: some_spec
+
+The `universe:` block is the authoritative producer universe for the
+boundary; `transition:` blocks are the declarations checked against it.
+
+A dedicated line reader is used rather than `std.common.sdn`: the format has
+repeated top-level `transition:` keys, which a map-shaped document model
+collapses. Parse failures are collected into `errors` rather than thrown, so
+the checker can report every problem in a file in one pass.
+"""
+
+use compiler.common.transition.coverage_state.{
+    CoverageState, coverage_state_from_fields
+}
+
+"""One declared producer -> consumer edge."""
+struct TransitionRow:
+    from_id: text
+    to_id: text
+    state: CoverageState
+    reason: text
+    test: text
+    # True when the declared state differs by compiler profile (a variant that
+    # is normalized on the default profile but fatal under `critical`, per plan
+    # sections 8 and 9.5). The row records the DEFAULT-profile state; this flag
+    # marks it as not the whole story so a profile-aware reader can find it.
+    profile_dependent: bool
+
+"""
+The parsed contents of one transition table file.
+
+`universe_declared` records whether the file carried an explicit `universe:`
+block. When it did not, `universe` is derived from the declared rows by the
+validator — a census-style table whose rows ARE the enumeration. Such a table
+still proves internal consistency, but only an explicit universe can catch a
+variant nobody wrote a row for, so the two cases must stay distinguishable.
+"""
+struct TransitionTable:
+    name: text
+    producer: text
+    consumer: text
+    source: text
+    universe: [text]
+    universe_declared: bool
+    rows: [TransitionRow]
+    errors: [text]
+
+"""Strip one layer of surrounding double quotes from an SDN scalar."""
+fn unquote_scalar(raw: text) -> text:
+    val v = raw.trim()
+    if v.len() >= 2 and v.starts_with("\"") and v.ends_with("\""):
+        return v.substring(1, v.len() - 1)
+    return v
+
+"""Split `key: value` at the FIRST colon; returns ("", "") when there is none."""
+fn split_key_value(line: text) -> (text, text):
+    val idx = line.index_of(":")
+    if idx < 0:
+        return ("", "")
+    val key = line.substring(0, idx).trim()
+    val value = line.substring(idx + 1, line.len()).trim()
+    return (key, value)
+
+"""
+The bare variant name of a stable id: `HirTypeKind.Int` -> `Int`.
+
+Ids without a dot are returned unchanged, so a table may list its universe in
+either form.
+"""
+fn variant_name_of(stable_id: text) -> text:
+    val id = stable_id.trim()
+    var name = id
+    var i = 0
+    val parts = id.split(".")
+    for part in parts:
+        i = i + 1
+        name = part
+    return name.trim()
+
+fn flush_pending(
+    table: TransitionTable,
+    have_row: bool,
+    from_id: text,
+    to_id: text,
+    state_tag: text,
+    reason: text,
+    issue: text,
+    test_name: text,
+    profile_dependent: bool,
+    line_no: i64
+) -> TransitionTable:
+    if not have_row:
+        return table
+    if from_id == "":
+        table.errors.push("line {line_no}: transition block has no 'from:'")
+        return table
+    if state_tag == "":
+        table.errors.push("line {line_no}: transition '{from_id}' has no 'state:'")
+        return table
+    val built = coverage_state_from_fields(state_tag, to_id, reason, issue)
+    match built:
+        case Ok(state):
+            table.rows.push(TransitionRow(
+                from_id: from_id,
+                to_id: to_id,
+                state: state,
+                reason: reason,
+                test: test_name,
+                profile_dependent: profile_dependent
+            ))
+        case Err(msg):
+            table.errors.push("line {line_no}: transition '{from_id}': {msg}")
+    return table
+
+"""
+Parse one transition table file.
+
+Never fails: a malformed file yields a table whose `errors` is non-empty,
+which the validator treats as a hard failure.
+"""
+fn parse_transition_table(source_text: text) -> TransitionTable:
+    var table = TransitionTable(
+        name: "",
+        producer: "",
+        consumer: "",
+        source: "",
+        universe: [],
+        universe_declared: false,
+        rows: [],
+        errors: []
+    )
+
+    var section = "none"
+    var have_row = false
+    var from_id = ""
+    var to_id = ""
+    var state_tag = ""
+    var reason = ""
+    var issue = ""
+    var test_name = ""
+    var profile_dependent = false
+    var row_line = 0
+    var line_no = 0
+
+    for raw_line in source_text.split("\n"):
+        line_no = line_no + 1
+        var line = raw_line.trim()
+        if line == "":
+            continue
+        if line.starts_with("#"):
+            continue
+
+        # Two equivalent shapes are accepted. Flat: repeated top-level
+        # `transition:` blocks. Nested: a `transitions:` container whose items
+        # are `- transition:` blocks (the shape lane C2's frontend censuses
+        # use). Unwrap the list bullet so the field handling below is shared.
+        if line.starts_with("- ") and line.substring(2, line.len()).trim() == "transition:":
+            line = "transition:"
+        if line == "transitions:":
+            table = flush_pending(table, have_row, from_id, to_id, state_tag, reason, issue, test_name, profile_dependent, row_line)
+            have_row = false
+            section = "transition_container"
+            continue
+
+        if line == "transition:":
+            table = flush_pending(table, have_row, from_id, to_id, state_tag, reason, issue, test_name, profile_dependent, row_line)
+            section = "transition"
+            have_row = true
+            from_id = ""
+            to_id = ""
+            state_tag = ""
+            reason = ""
+            issue = ""
+            test_name = ""
+            profile_dependent = false
+            row_line = line_no
+            continue
+
+        if line == "universe:":
+            table = flush_pending(table, have_row, from_id, to_id, state_tag, reason, issue, test_name, profile_dependent, row_line)
+            have_row = false
+            section = "universe"
+            table.universe_declared = true
+            continue
+
+        if line.starts_with("- "):
+            if section != "universe":
+                table.errors.push("line {line_no}: list item outside a 'universe:' block")
+                continue
+            val entry = unquote_scalar(line.substring(2, line.len()))
+            if entry == "":
+                table.errors.push("line {line_no}: empty universe entry")
+            else:
+                if table.universe.contains(entry):
+                    table.errors.push("line {line_no}: duplicate universe entry '{entry}'")
+                else:
+                    table.universe.push(entry)
+            continue
+
+        val pair = split_key_value(line)
+        val key = pair.0
+        val value = unquote_scalar(pair.1)
+        if key == "":
+            table.errors.push("line {line_no}: not a 'key: value' line: {line}")
+            continue
+
+        if section == "transition":
+            match key:
+                case "from": from_id = value
+                case "to": to_id = value
+                case "state": state_tag = value
+                case "reason": reason = value
+                case "issue": issue = value
+                case "test": test_name = value
+                case "profile_dependent": profile_dependent = value.to_lower() == "true"
+                case _:
+                    table.errors.push("line {line_no}: unknown transition field '{key}'")
+            continue
+
+        match key:
+            case "table": table.name = value
+            case "producer": table.producer = value
+            case "consumer": table.consumer = value
+            case "source": table.source = value
+            case _:
+                table.errors.push("line {line_no}: unknown top-level field '{key}'")
+
+    table = flush_pending(table, have_row, from_id, to_id, state_tag, reason, issue, test_name, profile_dependent, row_line)
+    return table

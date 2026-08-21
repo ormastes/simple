@@ -1,0 +1,83 @@
+# @Feature G9: CLASS DETECTION -- no async-runtime bookkeeping map grows unboundedly
+# @Description: Similar-problem detection spec for the defect CLASS behind
+# doc/08_tracking/bug/async_runtime_detached_completed_results_unbounded_2026-08-13.md
+#
+# The class is: "an internal bookkeeping container that is INSERTED into on every
+# unit of work, but whose only eviction sits on a path the caller may never
+# take". `completed` was the instance that was filed; `Runtime` has FOUR such
+# containers (`ready_queue`, `in_queue`, `tasks`, `completed`, plus `awaited`
+# introduced by the fix), and the reproducing spec only pins one of them.
+#
+# So rather than re-asserting the filed symptom, this spec asserts the INVARIANT
+# the class violates: after all work has drained, EVERY internal container is
+# back to its starting size, and that size does not depend on how much work went
+# through. It is checked at two different workloads (2 and 20) so a container
+# that grows by a CONSTANT amount and one that grows PER TASK are both caught --
+# a single-workload check passes vacuously against a constant leak.
+#
+# It also covers both drive paths (detached spawn+run, and block_on) because the
+# original defect was invisible on the block_on path: block_on removed its own
+# entry, so a block_on-only test was green while the detached path leaked.
+
+use std.async.runtime.{Runtime}
+use std.async.future.{Future}
+
+# Returns the total number of retained entries across every internal
+# bookkeeping container after `n` detached tasks have been driven to completion.
+fn detached_residue(n: i64) -> i64:
+    val rt = Runtime.new()
+    var i = 0
+    while i < n:
+        rt.spawn(Future.from_value(i))
+        i = i + 1
+    rt.run()
+    rt.ready_queue.len() + rt.in_queue.len() + rt.tasks.len() + rt.completed.len() + rt.awaited.len()
+
+# Same, driven entirely through block_on.
+fn awaited_residue(n: i64) -> i64:
+    val rt = Runtime.new()
+    var i = 0
+    while i < n:
+        rt.block_on(Future.from_value(i))
+        i = i + 1
+    rt.ready_queue.len() + rt.in_queue.len() + rt.tasks.len() + rt.completed.len() + rt.awaited.len()
+
+describe "async runtime bookkeeping does not grow with workload":
+
+    it "a freshly constructed Runtime retains nothing":
+        expect(detached_residue(0)).to_equal(0)
+
+    it "detached workload: residue is zero and INDEPENDENT of workload size":
+        val small = detached_residue(2)
+        val large = detached_residue(20)
+        # Independence catches a per-task leak even if some constant residue
+        # were considered acceptable.
+        expect(large).to_equal(small)
+        # Zero catches a constant leak that independence alone would miss.
+        expect(large).to_equal(0)
+
+    it "awaited workload: residue is zero and INDEPENDENT of workload size":
+        val small = awaited_residue(2)
+        val large = awaited_residue(20)
+        expect(large).to_equal(small)
+        expect(large).to_equal(0)
+
+    it "the two drive paths agree -- neither is privileged":
+        # The filed defect existed precisely because these two disagreed:
+        # block_on was bounded while spawn+run was not, so any test that
+        # exercised only one path reported green.
+        expect(detached_residue(20)).to_equal(awaited_residue(20))
+
+    it "a runtime reused across many rounds stays flat":
+        val rt = Runtime.new()
+        var round = 0
+        while round < 10:
+            rt.spawn(Future.from_value(round))
+            rt.run()
+            rt.block_on(Future.from_value(round))
+            round = round + 1
+        expect(rt.completed.len()).to_equal(0)
+        expect(rt.tasks.len()).to_equal(0)
+        expect(rt.awaited.len()).to_equal(0)
+        expect(rt.in_queue.len()).to_equal(0)
+        expect(rt.ready_queue.len()).to_equal(0)

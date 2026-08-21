@@ -1,0 +1,87 @@
+# AES block-cipher FIPS 197 Appendix C known-answer tests (class detection).
+#
+# Class this detects: a corrupted or mis-sourced KAT vector in any AES spec.
+# The CTR-mode spec (aes_ctr_nist_spec.spl) carried NIST SP 800-38A *OFB*
+# (F.4.5) bytes in its AES-256 *CTR* (F.5.5) expected array for blocks 2-4,
+# which made a CORRECT implementation look broken for weeks. See
+# doc/08_tracking/bug/aes256_ctr_keystream_wrong_after_first_block_2026-07-20.md
+#
+# These vectors are mode-free: they pin the raw block cipher and the key
+# schedule against FIPS 197 Appendix C.1 (AES-128) and C.3 (AES-256), which
+# are the shortest vectors that cannot be confused with any mode's output.
+# If a mode spec fails while these pass, the mode spec's data is suspect,
+# not the cipher.
+
+use std.spec.*
+use std.common.crypto.aes_gcm.{
+    aes128_key_expansion,
+    aes256_key_expansion,
+    aes128_encrypt_block,
+    aes256_encrypt_block
+}
+
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+
+fn _to_u8(vals: list) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    val n = vals.len()
+    while i < n:
+        out.push((vals[i] & 0xFF).to_u8())
+        i = i + 1
+    out
+
+fn _to_i64(arr: [u8], n: i64) -> list:
+    var out: [i64] = []
+    var i = 0
+    while i < n:
+        out.push(rt_bytes_u8_at(arr, i))
+        i = i + 1
+    out
+
+# FIPS 197 C.1/C.3 shared plaintext: 00112233445566778899aabbccddeeff
+fn _fips_plaintext() -> list:
+    [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+     0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]
+
+# FIPS 197 C.1 key: 000102030405060708090a0b0c0d0e0f
+fn _fips_key128() -> list:
+    [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+     0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f]
+
+# FIPS 197 C.1 ciphertext: 69c4e0d86a7b0430d8cdb78070b4c55a
+fn _fips_ct128() -> list:
+    [0x69, 0xc4, 0xe0, 0xd8, 0x6a, 0x7b, 0x04, 0x30,
+     0xd8, 0xcd, 0xb7, 0x80, 0x70, 0xb4, 0xc5, 0x5a]
+
+# FIPS 197 C.3 key: 000102...1e1f
+fn _fips_key256() -> list:
+    [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+     0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+     0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+     0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f]
+
+# FIPS 197 C.3 ciphertext: 8ea2b7ca516745bfeafc49904b496089
+fn _fips_ct256() -> list:
+    [0x8e, 0xa2, 0xb7, 0xca, 0x51, 0x67, 0x45, 0xbf,
+     0xea, 0xfc, 0x49, 0x90, 0x4b, 0x49, 0x60, 0x89]
+
+describe "AES block cipher FIPS 197 Appendix C known-answer tests":
+
+    it "C.1 AES-128 encrypts the FIPS 197 block correctly":
+        val schedule = aes128_key_expansion(_to_u8(_fips_key128()))
+        val ct = aes128_encrypt_block(_to_u8(_fips_plaintext()), schedule)
+        expect(_to_i64(ct, 16)).to_equal(_fips_ct128())
+
+    it "C.3 AES-256 encrypts the FIPS 197 block correctly":
+        val schedule = aes256_key_expansion(_to_u8(_fips_key256()))
+        val ct = aes256_encrypt_block(_to_u8(_fips_plaintext()), schedule)
+        expect(_to_i64(ct, 16)).to_equal(_fips_ct256())
+
+    it "AES-128 key expansion produces 176 bytes":
+        val schedule = aes128_key_expansion(_to_u8(_fips_key128()))
+        expect(schedule.len()).to_equal(176)
+
+    it "AES-256 key expansion produces 240 bytes":
+        val schedule = aes256_key_expansion(_to_u8(_fips_key256()))
+        expect(schedule.len()).to_equal(240)

@@ -1,0 +1,227 @@
+"""
+# HTTP worker wire and shutdown ownership coverage.
+
+The worker owns socket operations, TLS state, and any open sendfile handles.
+These cases pin the fail-closed wire boundaries and observe the public cleanup
+counters while runtime/socket admission remains unavailable in the static lane.
+"""
+
+use std.spec
+use std.http.h2.h2_preface.{
+    h2_connection_preface_bytes,
+    h2_validate_preface
+}
+use std.http_server.parser.{HttpRequestParser}
+use std.http_server.{HttpServer, default_server_config}
+use std.http_server.worker.{Worker}
+use std.common.net.tls_application_record_stream_v1.{
+    TlsApplicationRecordStreamV1,
+    tls_application_record_stream_new_v1,
+    tls_application_record_sequence_can_advance_v1
+}
+use std.http_server.router.{AsyncRouter}
+use std.http_server.server.{build_default_pipeline}
+use std.http_server.handler.{create_default_registry}
+use std.concurrent.channel.{channel_new}
+
+fn synthetic_tls_record(payload_len: i64) -> [u8]:
+    var record: [u8] = [23, 3, 3, (payload_len / 256).to_u8(), (payload_len % 256).to_u8()]
+    var i = 0
+    while i < payload_len:
+        record.push(0)
+        i = i + 1
+    record
+
+describe "HTTP worker malformed wire handling":
+    it "rejects a header line without a field name instead of dropping it":
+        val parser = HttpRequestParser.new()
+        val result = parser.feed("GET / HTTP/1.1\r\nBroken\r\n")
+        match result:
+            Ok(_): fail("malformed header was accepted")
+            Err(_): expect(parser.error_message.starts_with("400")).to_be(true)
+
+    it "rejects an over-limit partial header before more buffering":
+        val parser = HttpRequestParser.with_limits(8192, 8, 16, 1024)
+        val first = parser.feed("GET / HTTP/1.1\r\n")
+        match first:
+            Ok(_): expect(parser.is_complete()).to_be(false)
+            Err(_): fail("valid request line was rejected")
+        val result = parser.feed("X-Test: 12345678901234567890")
+        match result:
+            Ok(_): fail("over-limit header was accepted")
+            Err(_): expect(parser.error_message.starts_with("431")).to_be(true)
+
+describe "HTTP/2 preface admission":
+    it "requires the complete canonical preface":
+        val preface = h2_connection_preface_bytes()
+        expect(h2_validate_preface(preface)).to_be(true)
+        val short = preface.slice(0, 3)
+        expect(h2_validate_preface(short)).to_be(false)
+        var malformed = preface
+        malformed[2] = 88
+        expect(h2_validate_preface(malformed)).to_be(false)
+
+describe "TLS application-record accumulation":
+    it "retains split records and consumes multiple complete records":
+        val record_a = synthetic_tls_record(16)
+        val record_b = synthetic_tls_record(16)
+        val first = record_a.slice(0, 7)
+        val tail = record_a.slice(7, record_a.len())
+        var split_stream = tls_application_record_stream_new_v1(1)
+        var first_ingest = split_stream.ingest(first)
+        val first_records = first_ingest.framed_records()
+        expect(first_ingest.is_malformed()).to_be(false)
+        expect(first_records.len()).to_be(0)
+        expect(first_ingest.remaining_byte_count()).to_be(7)
+        expect(split_stream.fragment_count()).to_be(1)
+        expect(first_ingest.requires_commit()).to_be(false)
+
+        var second_ingest = split_stream.ingest(tail)
+        val second_records = second_ingest.framed_records()
+        expect(second_ingest.is_malformed()).to_be(false)
+        expect(second_records.len()).to_be(1)
+        expect(second_ingest.remaining_byte_count()).to_be(0)
+        expect(second_ingest.proposed_sequence()).to_be(2)
+        expect(second_ingest.requires_commit()).to_be(true)
+        expect(split_stream.commit_authenticated(
+            second_ingest.proposal_token(), second_records.len()
+        )).to_be(true)
+        expect(split_stream.remaining_byte_count()).to_be(0)
+        expect(split_stream.sequence()).to_be(2)
+
+        val coalesced = record_a + record_b
+        var multiple_stream = tls_application_record_stream_new_v1(1)
+        var multiple_ingest = multiple_stream.ingest(coalesced)
+        val multiple_records = multiple_ingest.framed_records()
+        expect(multiple_records.len()).to_be(2)
+        expect(multiple_ingest.remaining_byte_count()).to_be(0)
+        expect(multiple_ingest.proposed_sequence()).to_be(3)
+        expect(multiple_stream.commit_authenticated(
+            multiple_ingest.proposal_token(), multiple_records.len()
+        )).to_be(true)
+        expect(multiple_stream.sequence()).to_be(3)
+
+    it "rejects malformed framing and bounded-buffer overflow":
+        var malformed = synthetic_tls_record(16)
+        malformed[0] = 22
+        var malformed_stream = tls_application_record_stream_new_v1(1)
+        var malformed_result = malformed_stream.ingest(malformed)
+        expect(malformed_result.is_malformed()).to_be(true)
+
+        val oversized_header: [u8] = [23, 3, 3, 64, 17]
+        var oversized_stream = tls_application_record_stream_new_v1(1)
+        var oversized_result = oversized_stream.ingest(oversized_header)
+        expect(oversized_result.is_malformed()).to_be(true)
+
+        val full_record = synthetic_tls_record(16384)
+        val next_header: [u8] = [23, 3, 3]
+        var accepted_stream = tls_application_record_stream_new_v1(1)
+        var accepted_result = accepted_stream.ingest(full_record + next_header)
+        val accepted_records = accepted_result.framed_records()
+        expect(accepted_result.is_malformed()).to_be(false)
+        expect(accepted_result.is_overflow()).to_be(false)
+        expect(accepted_records.len()).to_be(1)
+        expect(accepted_result.remaining_byte_count()).to_be(3)
+        expect(accepted_stream.commit_authenticated(
+            accepted_result.proposal_token(), accepted_records.len()
+        )).to_be(true)
+        expect(accepted_stream.remaining_byte_count()).to_be(3)
+
+        var beyond_ceiling: [u8] = []
+        var i = 0
+        while i <= full_record.len():
+            beyond_ceiling.push(0)
+            i = i + 1
+        var overflow_stream = tls_application_record_stream_new_v1(1)
+        var overflow_result = overflow_stream.ingest(full_record + beyond_ceiling)
+        expect(overflow_result.is_overflow()).to_be(true)
+
+    it "rejects a second ingest while authentication is pending":
+        val record = synthetic_tls_record(16)
+        var stream = tls_application_record_stream_new_v1(0)
+        var proposal = stream.ingest(record)
+        expect(proposal.requires_commit()).to_be(true)
+        var blocked = stream.ingest([1])
+        expect(blocked.is_proposal_pending()).to_be(true)
+        stream.reject_authentication(proposal.proposal_token())
+
+    it "preserves mapped ownership through maximum one-byte fragmentation":
+        val record = synthetic_tls_record(16400)
+        var streams: Dict<i64, TlsApplicationRecordStreamV1> = {}
+        streams[7] = tls_application_record_stream_new_v1(0)
+        var framed_count = 0
+        var malformed = false
+        var overflow = false
+        var commit_failed = false
+        var index = 0
+        while index < record.len():
+            val fragment: [u8] = [record[index]]
+            # Mirror Worker ownership: take the sole value out of the Dict,
+            # mutate it, then publish it back after a successful transaction.
+            var stream = streams[7]
+            streams.remove(7)
+            var ingest = stream.ingest(fragment)
+            if ingest.is_malformed():
+                malformed = true
+            if ingest.is_overflow():
+                overflow = true
+            val framed_records = ingest.framed_records()
+            framed_count = framed_count + framed_records.len()
+            if ingest.requires_commit():
+                if not stream.commit_authenticated(
+                    ingest.proposal_token(), framed_records.len()):
+                    commit_failed = true
+            streams[7] = stream
+            index = index + 1
+        expect(malformed).to_be(false)
+        expect(overflow).to_be(false)
+        expect(commit_failed).to_be(false)
+        expect(framed_count).to_be(1)
+        expect(streams[7].remaining_byte_count()).to_be(0)
+        expect(streams[7].fragment_count()).to_be(0)
+        expect(streams[7].sequence()).to_be(1)
+        expect(streams[7].has_pending_proposal()).to_be(false)
+        expect(streams[7].is_failed()).to_be(false)
+        expect(streams[7].byte_work()).to_be(record.len() * 7 - 10)
+
+    it "rejects exhausted and invalid record sequences":
+        expect(tls_application_record_sequence_can_advance_v1(0)).to_be(true)
+        expect(tls_application_record_sequence_can_advance_v1(9223372036854775806)).to_be(true)
+        expect(tls_application_record_sequence_can_advance_v1(9223372036854775807)).to_be(false)
+        expect(tls_application_record_sequence_can_advance_v1(-1)).to_be(false)
+
+describe "HTTP worker shutdown ownership contract":
+    it "cancels an unstarted owner without retaining reservations":
+        var config = default_server_config()
+        config.worker_count = 1
+        val server = HttpServer.new(config)
+        val result = server.cancel(0)
+        match result:
+            Ok(_):
+                expect(server.active_worker_reservations()).to_be(0)
+                expect(server.queue_bytes_reserved()).to_be(0)
+                expect(server.result_reservations()).to_be(0)
+            Err(_): fail("unstarted owner cancellation failed")
+
+    it "reports zero retained resources after owner abort cleanup":
+        var config = default_server_config()
+        config.listen_addr = "127.0.0.1:0"
+        config.worker_count = 1
+        val worker_result = Worker.create(
+            0, config, AsyncRouter.new(config.locations),
+            build_default_pipeline(), create_default_registry(""),
+            channel_new()
+        )
+        match worker_result:
+            Ok(worker):
+                worker.abort_start()
+                val snapshot = worker.resource_snapshot()
+                expect(snapshot.active_count).to_be(0)
+                expect(snapshot.active_connections).to_be(0)
+                expect(snapshot.h2_connections).to_be(0)
+                expect(snapshot.pending_operations).to_be(0)
+                expect(snapshot.pending_sendfiles).to_be(0)
+                expect(snapshot.open_sendfiles).to_be(0)
+                expect(snapshot.tls_sessions).to_be(0)
+                expect(snapshot.tls_buffers).to_be(0)
+            Err(_): fail("worker owner construction failed")

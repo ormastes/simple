@@ -1,0 +1,307 @@
+# Frozen registry indexes and import/export route projections.
+
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfacesByName, module_surface_allocate_generation}
+use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_module_name, module_surface_logical_name_from_path, module_surface_package_name_from_name}
+
+pub(package) fn module_surfaces_validate_index_alignment(
+    surfaces: [ModuleSurface],
+    index_by_name: Dict<text, i64>,
+    ordered_names: [text],
+    ordered_indices: [i64]
+) -> Result<(), text>:
+    if ordered_names.len() != ordered_indices.len():
+        return Err("module surface name/index arrays have different lengths")
+
+    # The compatibility dictionary is checked once at construction/finalize,
+    # never from the hot lookup helpers.  keys() and values() are aligned by
+    # dict_collect, so this validates both membership and scalar identity.
+    val dict_names = index_by_name.keys()
+    val dict_indices = index_by_name.values()
+    if dict_names.len() != dict_indices.len() or
+       dict_names.len() != ordered_names.len():
+        return Err("module surface name/index representation is inconsistent")
+
+    var i = 0
+    while i < ordered_names.len():
+        if ordered_indices[i] < 0 or ordered_indices[i] >= surfaces.len():
+            return Err("module surface index out of range for {ordered_names[i]}")
+        var prior = 0
+        while prior < i:
+            if ordered_names[prior] == ordered_names[i]:
+                return Err("duplicate ordered module surface name: {ordered_names[i]}")
+            prior = prior + 1
+        var dict_position = 0
+        var found = false
+        while dict_position < dict_names.len():
+            if dict_names[dict_position] == ordered_names[i]:
+                if dict_indices[dict_position] != ordered_indices[i]:
+                    return Err("module surface name maps to conflicting indices: {ordered_names[i]}")
+                found = true
+            dict_position = dict_position + 1
+        if not found:
+            return Err("module surface ordered name missing from compatibility index: {ordered_names[i]}")
+        i = i + 1
+    Ok(())
+
+
+pub(package) fn module_surface_registry_index(registry: ModuleSurfacesByName, name: text) -> i64:
+    if not registry.index_by_name.contains_key(name):
+        return -1
+    val index = registry.index_by_name[name]
+    if index < 0 or index >= registry.surfaces.len():
+        return -1
+    index
+
+pub(package) fn module_surface_resolve_absolute_key(
+    registry: ModuleSurfacesByName,
+    name: text
+) -> text:
+    if module_surface_registry_index(registry, name) >= 0:
+        return name
+    var candidates: [text] = []
+    candidates = candidates.push(name + ".__init__")
+    candidates = candidates.push("lib." + name)
+    candidates = candidates.push("lib." + name + ".__init__")
+    if name.starts_with("std."):
+        val std_tail = name.substring(4)
+        val lib_tail = "lib." + std_tail
+        candidates = candidates.push(lib_tail)
+        candidates = candidates.push(lib_tail + ".__init__")
+        for tier in ["nogc_async_mut", "nogc_sync_mut", "nogc_async_immut", "common", "gc_async_mut", "nogc_async_mut_noalloc"]:
+            val tier_key = "lib." + tier + "." + std_tail
+            candidates = candidates.push(tier_key)
+            candidates = candidates.push(tier_key + ".__init__")
+            val tier_std_key = "std." + tier + "." + std_tail
+            candidates = candidates.push(tier_std_key)
+            candidates = candidates.push(tier_std_key + ".__init__")
+    var candidate_index = 0
+    while candidate_index < candidates.len():
+        if module_surface_registry_index(registry, candidates[candidate_index]) >= 0:
+            return candidates[candidate_index]
+        candidate_index = candidate_index + 1
+    ""
+
+pub(package) fn module_surface_resolve_relative_key(
+    registry: ModuleSurfacesByName,
+    facade: ModuleSurface,
+    name: text
+) -> text:
+    if not name.starts_with("."):
+        return module_surface_resolve_absolute_key(registry, name)
+    var dots = 0
+    while dots < name.len() and name.substring(dots, dots + 1) == ".":
+        dots = dots + 1
+    val tail = name.substring(dots)
+    if tail == "":
+        return ""
+    var package_name = facade.canonical_name
+    var package_index = 0
+    while package_index < dots:
+        package_name = module_surface_package_name_from_name(package_name)
+        package_index = package_index + 1
+    val absolute_name = if package_name == "": tail else package_name + "." + tail
+    if module_surface_registry_index(registry, absolute_name) >= 0:
+        return absolute_name
+    module_surface_resolve_absolute_key(registry, absolute_name)
+
+pub(package) fn module_surface_resolve_import_key(
+    registry: ModuleSurfacesByName,
+    facade: ModuleSurface,
+    name: text
+) -> text:
+    var resolved = module_surface_resolve_relative_key(registry, facade, name)
+    if resolved == "":
+        return ""
+    val resolved_index = module_surface_registry_index(registry, resolved)
+    if resolved_index < 0 or
+       registry.surfaces[resolved_index].canonical_path != facade.canonical_path:
+        return resolved
+    if facade.canonical_name.ends_with(".__init__"):
+        return resolved
+    val package_key = module_surface_resolve_absolute_key(
+        registry, facade.canonical_name + ".__init__")
+    if package_key == "" or package_key == resolved:
+        return resolved
+    val package_index = module_surface_registry_index(registry, package_key)
+    if package_index < 0 or
+       registry.surfaces[package_index].canonical_path == facade.canonical_path:
+        return resolved
+    package_key
+
+pub(package) fn module_surface_preferred_registry_name(
+    registry: ModuleSurfacesByName,
+    surface: ModuleSurface
+) -> Result<text, text>:
+    var selected = ""
+    var found = false
+    var alias_index = 0
+    while alias_index < registry.ordered_names.len() and
+          alias_index < registry.ordered_indices.len():
+        if registry.ordered_indices[alias_index] == surface.physical_index:
+            val alias_name = registry.ordered_names[alias_index]
+            found = true
+            if selected == "" or alias_name < selected:
+                selected = alias_name
+            # Keep scanning so the result is independent of alias insertion
+            # order and malformed data is still rejected by validation.
+        alias_index = alias_index + 1
+    if not found or selected == "":
+        return Err("physical module surface has no ordered registry alias: {surface.physical_index}")
+    if module_surface_registry_index(registry, selected) != surface.physical_index:
+        return Err("preferred registry alias is not mapped to its physical surface: {selected}")
+    Ok(selected)
+
+pub(package) fn module_surface_route_arrays_aligned(surface: ModuleSurface) -> bool:
+    if surface.import_target_indices.len() != surface.imports.len() or
+       surface.import_target_names.len() != surface.imports.len():
+        return false
+    if surface.export_route_sources.len() != surface.export_route_locals.len() or
+       surface.export_route_sources.len() != surface.export_route_target_indices.len() or
+       surface.export_route_sources.len() != surface.export_route_target_names.len() or
+       surface.export_route_sources.len() != surface.export_route_is_glob.len():
+        return false
+    if surface.export_origin_index.names.len() != surface.export_origin_index.owner_modules.len() or
+       surface.export_origin_index.names.len() != surface.export_origin_index.source_names.len() or
+       surface.export_origin_index.names.len() != surface.export_origin_index.resolution_kinds.len():
+        return false
+    val origin_map = surface.export_origin_index.origins
+    var origin_index = 0
+    while origin_index < surface.export_origin_index.names.len():
+        if not origin_map.contains_key(
+            surface.export_origin_index.names[origin_index]):
+            return false
+        origin_index = origin_index + 1
+    true
+
+pub(package) fn module_surfaces_frozen_alignment(registry: ModuleSurfacesByName) -> bool:
+    if not registry.frozen or registry.generation == 0:
+        return false
+    if registry.ordered_names.len() != registry.ordered_indices.len():
+        return false
+    var alias_index = 0
+    while alias_index < registry.ordered_indices.len():
+        if registry.ordered_indices[alias_index] < 0 or
+           registry.ordered_indices[alias_index] >= registry.surfaces.len():
+            return false
+        alias_index = alias_index + 1
+    var surface_index = 0
+    while surface_index < registry.surfaces.len():
+        val surface = registry.surfaces[surface_index]
+        if not surface.frozen or not surface.export_origin_index.frozen or
+           surface.physical_index != surface_index or
+           surface.generation != registry.generation or
+           surface.preferred_registry_name == "" or
+           module_surface_registry_index(registry, surface.preferred_registry_name) != surface_index or
+           not module_surface_route_arrays_aligned(surface):
+            return false
+        surface_index = surface_index + 1
+    true
+
+pub(package) fn module_surfaces_freeze(registry: ModuleSurfacesByName) -> Result<ModuleSurfacesByName, text>:
+    if registry.frozen:
+        return Err("module surface registry is already frozen")
+    var existing_surface_index = 0
+    while existing_surface_index < registry.surfaces.len():
+        val existing_surface = registry.surfaces[existing_surface_index]
+        if existing_surface.frozen or existing_surface.export_origin_index.frozen:
+            return Err("module surface is already frozen: {existing_surface_index}")
+        existing_surface_index = existing_surface_index + 1
+    val validation = module_surfaces_validate_index_alignment(
+        registry.surfaces, registry.index_by_name,
+        registry.ordered_names, registry.ordered_indices)
+    if validation.is_err():
+        return Err(validation.unwrap_err())
+    var surface_index = 0
+    while surface_index < registry.surfaces.len():
+        var surface = registry.surfaces[surface_index]
+        surface.physical_index = surface_index
+        surface.logical_name = module_surface_logical_name_from_path(surface.canonical_path)
+        surface.canonical_name = surface.logical_name
+        surface.package_name = module_surface_package_name_from_name(surface.logical_name)
+        val preferred_result = module_surface_preferred_registry_name(registry, surface)
+        if preferred_result.is_err():
+            return Err(preferred_result.unwrap_err())
+        surface.preferred_registry_name = preferred_result.unwrap()
+
+        var import_target_indices: [i64] = []
+        var import_target_names: [text] = []
+        for import_decl in surface.imports:
+            val target_name = module_surface_resolve_import_key(
+                registry, surface, import_decl.module)
+            var target_index = -1
+            if target_name != "":
+                target_index = module_surface_registry_index(registry, target_name)
+            import_target_indices = import_target_indices.push(target_index)
+            import_target_names = import_target_names.push(target_name)
+
+        var export_route_sources: [text] = []
+        var export_route_locals: [text] = []
+        var export_route_target_indices: [i64] = []
+        var export_route_target_names: [text] = []
+        var export_route_is_glob: [bool] = []
+        for export_decl in surface.exports:
+            for export_item in export_decl.items:
+                if export_item.ends_with(".*"):
+                    val export_base = export_item[0:export_item.len() - 2]
+                    var target_name = ""
+                    if export_base.starts_with("."):
+                        target_name = module_surface_resolve_relative_key(
+                            registry, surface, export_base)
+                    else:
+                        target_name = module_surface_resolve_absolute_key(
+                            registry, surface.package_name + "." + export_base)
+                        if target_name == "":
+                            target_name = module_surface_resolve_absolute_key(
+                                registry, export_base)
+                    export_route_sources = export_route_sources.push(export_base)
+                    export_route_locals = export_route_locals.push("")
+                    export_route_target_names = export_route_target_names.push(target_name)
+                    var export_target_index = -1
+                    if target_name != "":
+                        export_target_index = module_surface_registry_index(registry, target_name)
+                    export_route_target_indices = export_route_target_indices.push(export_target_index)
+                    export_route_is_glob = export_route_is_glob.push(true)
+                else:
+                    var source_name = export_item
+                    var local_name = export_item
+                    if export_item.contains(":"):
+                        val parts = export_item.split(":")
+                        source_name = parts[0]
+                        if parts.len() > 1:
+                            local_name = parts[1]
+                    export_route_sources = export_route_sources.push(source_name)
+                    export_route_locals = export_route_locals.push(local_name)
+                    export_route_target_indices = export_route_target_indices.push(-1)
+                    export_route_target_names = export_route_target_names.push("")
+                    export_route_is_glob = export_route_is_glob.push(false)
+
+        surface.import_target_indices = import_target_indices
+        surface.import_target_names = import_target_names
+        surface.export_route_sources = export_route_sources
+        surface.export_route_locals = export_route_locals
+        surface.export_route_target_indices = export_route_target_indices
+        surface.export_route_target_names = export_route_target_names
+        surface.export_route_is_glob = export_route_is_glob
+        registry.surfaces[surface_index] = surface
+        surface_index = surface_index + 1
+
+    surface_index = 0
+    while surface_index < registry.surfaces.len():
+        if not module_surface_route_arrays_aligned(registry.surfaces[surface_index]):
+            return Err("frozen module surface route arrays are misaligned: {surface_index}")
+        surface_index = surface_index + 1
+    val generation_result = module_surface_allocate_generation()
+    if generation_result.is_err():
+        return Err(generation_result.unwrap_err())
+    val generation = generation_result.unwrap()
+    surface_index = 0
+    while surface_index < registry.surfaces.len():
+        var surface = registry.surfaces[surface_index]
+        surface.generation = generation
+        surface.frozen = true
+        surface.export_origin_index.frozen = true
+        registry.surfaces[surface_index] = surface
+        surface_index = surface_index + 1
+    registry.generation = generation
+    registry.frozen = true
+    Ok(registry)
