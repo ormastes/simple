@@ -388,25 +388,13 @@ fn sync_flat_global(name: &str, value: &Value) {
     if !present {
         return;
     }
-    let owner = crate::interpreter::CURRENT_EXEC_MODULE.with(|cell| cell.borrow().clone());
-    let Some(owner) = owner else {
-        crate::interpreter::MODULE_GLOBALS.with(|cell| {
-            cell.borrow_mut().insert(name.to_string(), value.clone());
-        });
-        return;
-    };
     crate::interpreter::MODULE_GLOBALS.with(|cell| {
-        cell.borrow_mut_recorded().insert(name.to_string(), value.clone());
+        cell.borrow_mut().insert(name.to_string(), value.clone());
     });
-    crate::interpreter::MODULE_GLOBALS_BY_OWNER.with(|cell| {
-        let mut by_owner = cell.borrow_mut_recorded();
-        if let Some(globals) = by_owner.get_mut(&owner) {
-            if globals.contains_key(name) {
-                globals.insert(name.to_string(), value.clone());
-            }
-        }
-    });
-    crate::interpreter::record_global_write(owner, name.to_string(), value.clone());
+    let owner = crate::interpreter::CURRENT_EXEC_MODULE.with(|cell| cell.borrow().clone());
+    if let Some(owner) = owner {
+        crate::interpreter::set_owned_global(&owner, name, value.clone(), false);
+    }
 }
 
 fn handle_method_call_with_self_update_inner(

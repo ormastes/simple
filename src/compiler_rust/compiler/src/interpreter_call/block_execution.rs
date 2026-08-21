@@ -36,20 +36,15 @@ fn module_global_target(name: &str, env: &Env) -> Option<ModuleGlobalTarget> {
     if env.is_local(name) {
         return None;
     }
-    if MODULE_GLOBALS_BY_OWNER.with(|cell| {
-        cell.borrow()
-            .get(&owner)
-            .is_some_and(|globals| globals.contains_key(name))
-    }) {
+    if crate::interpreter::owned_global_present(&owner, name) {
         return Some(ModuleGlobalTarget::Owned {
             owner,
             name: name.to_owned(),
         });
     }
-    MODULE_GLOBAL_BINDINGS_BY_OWNER.with(|cell| {
-        cell.borrow()
-            .get(&owner)
-            .and_then(|bindings| bindings.get(name))
+    crate::interpreter::owner_bindings(&owner).and_then(|bindings| {
+        bindings
+            .get(name)
             .cloned()
             .map(|(owner, name)| ModuleGlobalTarget::Owned { owner, name })
     })
@@ -62,9 +57,7 @@ fn seed_module_global(target: &ModuleGlobalTarget, local_name: &str, env: &mut E
     if env.get(local_name).is_some() {
         return;
     }
-    if let Some(value) =
-        MODULE_GLOBALS_BY_OWNER.with(|cell| cell.borrow().get(owner).and_then(|globals| globals.get(name)).cloned())
-    {
+    if let Some(value) = crate::interpreter::owned_global(owner, name) {
         env.insert(local_name.to_owned(), value);
     }
 }
@@ -72,15 +65,24 @@ fn seed_module_global(target: &ModuleGlobalTarget, local_name: &str, env: &mut E
 fn sync_module_global(target: ModuleGlobalTarget, local_name: &str, env: &mut Env) {
     match target {
         ModuleGlobalTarget::Owned { owner, name } => {
+            // Mirror the assignment into the live store immediately: callee
+            // envs built on paths that do not publish the caller first
+            // (builtin-invoked lambdas, `refresh_live_bound_globals` users)
+            // read the store, and a one-element-stale arena array there was
+            // `array index out of bounds: index is 742 but length is 742`
+            // in stage-1. Release this frame's own snapshot around the write so
+            // the store maps are uniquely owned and the insert is in place
+            // (O(1)); with the snapshot held, `Arc::make_mut` would copy the
+            // owner's whole global map per assignment
+            // (tests/interpreter_call_env_o_args.rs).
             if let Some(value) = env.get(local_name).cloned() {
-                let present = MODULE_GLOBALS_BY_OWNER
-                    .with(|cell| cell.borrow().get(&owner).is_some_and(|globals| globals.contains_key(&name)));
-                if present {
-                    MODULE_GLOBALS_BY_OWNER.with(|cell| {
-                        if let Some(globals) = cell.borrow_mut().get_mut(&owner) {
-                            globals.insert(name, value);
-                        }
-                    });
+                let scoped = env.scope().is_some();
+                if scoped {
+                    env.release_scope();
+                }
+                crate::interpreter::set_owned_global(&owner, &name, value, false);
+                if scoped {
+                    env.refresh_scope(crate::interpreter::owned_globals_snapshot());
                 }
             }
         }
@@ -686,10 +688,6 @@ pub(super) fn exec_block_closure_into(
                         let mut shadowed: Vec<(String, Option<Value>)> = Vec::with_capacity(bindings.len());
                         for (name, value) in bindings {
                             let prev = local_env.insert(name.clone(), value);
-                            // Mark the arm binding LOCAL so reads don't prefer
-                            // MODULE_GLOBALS (e.g. `case Ok(engine):` resolving
-                            // `engine` to an imported module's namespace dict).
-                            local_env.enter_block_local(name.clone());
                             shadowed.push((name, prev));
                         }
                         let arm_result = exec_block_closure_mut(
@@ -701,7 +699,6 @@ pub(super) fn exec_block_closure_into(
                             impl_methods,
                         );
                         for (name, prev) in shadowed.into_iter().rev() {
-                            local_env.exit_block_local(&name);
                             match prev {
                                 Some(v) => {
                                     local_env.insert(name, v);
@@ -1525,10 +1522,6 @@ fn exec_block_closure_mut_inner(
                         let mut shadowed: Vec<(String, Option<Value>)> = Vec::with_capacity(bindings.len());
                         for (name, value) in bindings {
                             let prev = local_env.insert(name.clone(), value);
-                            // Mark the arm binding LOCAL so reads don't prefer
-                            // MODULE_GLOBALS (e.g. `case Ok(engine):` resolving
-                            // `engine` to an imported module's namespace dict).
-                            local_env.enter_block_local(name.clone());
                             shadowed.push((name, prev));
                         }
                         let arm_result = exec_block_closure_mut(
@@ -1540,7 +1533,6 @@ fn exec_block_closure_mut_inner(
                             impl_methods,
                         );
                         for (name, prev) in shadowed.into_iter().rev() {
-                            local_env.exit_block_local(&name);
                             match prev {
                                 Some(v) => {
                                     local_env.insert(name, v);

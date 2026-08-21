@@ -59,7 +59,7 @@ use std::collections::HashMap;
 // Import parent interpreter types and functions
 use super::{
     await_value, captured_env_with_live_globals, evaluate_expr, exec_block, exec_block_fn, execute_function_body,
-    publish_live_bound_globals, sync_owned_captured_globals, Control, Enums, ImplMethods, BDD_CONTEXT_DEFS,
+    publish_and_repoint, sync_owned_captured_globals, Control, Enums, ImplMethods, BDD_CONTEXT_DEFS,
     BDD_INDENT, BDD_LAZY_VALUES, CONST_NAMES, CONTEXT_OBJECT, CONTEXT_VAR_NAME, IMMUTABLE_VARS,
 };
 
@@ -3177,7 +3177,7 @@ fn exec_method_body(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
-    publish_live_bound_globals(env);
+    publish_and_repoint(env);
     let mut local_env = captured_env_with_live_globals(method, &Env::new());
     for (k, v) in fields {
         local_env.mark_local(k.clone());
@@ -3190,6 +3190,7 @@ fn exec_method_body(
             args.get(index).cloned().unwrap_or(Value::Nil),
         );
     }
+    env.release_scope();
     let result = execute_function_body(
         method,
         bound,
@@ -3200,6 +3201,7 @@ fn exec_method_body(
         impl_methods,
         false,
     );
+    local_env.release_scope();
     sync_owned_captured_globals(method, &local_env, env);
     result
 }
@@ -3322,24 +3324,7 @@ pub(super) fn exec_for(
         })
         .collect();
 
-    // The loop variable is a genuine local for the duration of the loop.
-    // Without this, an identifier read of the loop var inside the body loses
-    // to a same-named entry in flat MODULE_GLOBALS (e.g. a module-namespace
-    // dict bound under its basename by any `use pkg.manifest.*` elsewhere in
-    // the program) via the "prefer live module global on non-local reads"
-    // rule in interpreter/expr/literals.rs — the struct/class element decays
-    // to the module dict. See
-    // doc/08_tracking/bug/for_loop_var_shadowed_by_module_alias_2026-08-18.md
-    // and struct_receiver_decays_to_empty_dict_under_test_runner_2026-08-19.md.
-    for (name, _) in &saved {
-        env.enter_block_local(name.clone());
-    }
-
     let result = exec_for_inner(for_stmt, env, functions, classes, enums, impl_methods);
-
-    for (name, _) in &saved {
-        env.exit_block_local(name);
-    }
 
     // Restore unconditionally — including on the error path and on every early
     // `return` a fast path takes. `break`/`continue`/`return` inside the body all

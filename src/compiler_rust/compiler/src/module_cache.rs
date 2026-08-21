@@ -130,7 +130,7 @@ pub fn clear_module_cache() {
     MODULE_FUNCTIONS_CACHE.with(|cache| cache.borrow_mut().clear());
     MODULE_ENUMS_CACHE.with(|cache| cache.borrow_mut().clear());
     MODULE_GLOBALS.with(|cache| cache.borrow_mut().clear());
-    MODULE_GLOBALS_BY_OWNER.with(|cache| cache.borrow_mut().clear());
+    MODULE_GLOBALS_BY_OWNER.with(|cache| *cache.borrow_mut() = Arc::new(HashMap::new()));
     MODULE_GLOBALS_INITIAL_BY_OWNER.with(|cache| cache.borrow_mut().clear());
     MODULE_ENV_BY_OWNER.with(|cache| cache.borrow_mut().clear());
     MODULE_GLOBAL_BINDINGS_BY_OWNER.with(|cache| cache.borrow_mut().clear());
@@ -181,8 +181,7 @@ pub fn clear_module_cache_selective() {
             .borrow_mut()
             .retain(|owner, _| is_stdlib(Path::new(owner.as_ref())));
     });
-    let initial_globals = MODULE_GLOBALS_INITIAL_BY_OWNER.with(|cache| cache.borrow().clone());
-    MODULE_GLOBALS_BY_OWNER.with(|cache| *cache.borrow_mut() = initial_globals);
+    crate::interpreter::reset_owned_globals_from_initial();
     MODULE_ENV_BY_OWNER.with(|cache| {
         cache
             .borrow_mut()

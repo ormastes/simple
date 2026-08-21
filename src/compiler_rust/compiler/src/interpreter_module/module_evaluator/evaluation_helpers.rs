@@ -52,12 +52,7 @@ fn record_owned_global(module_path: Option<&Path>, name: &str, value: &Value) {
     let Some(owner) = module_owner(module_path) else {
         return;
     };
-    MODULE_GLOBALS_BY_OWNER.with(|cell| {
-        cell.borrow_mut()
-            .entry(Arc::clone(&owner))
-            .or_default()
-            .insert(name.to_owned(), value.clone());
-    });
+    crate::interpreter::set_owned_global(&owner, name, value.clone(), true);
     MODULE_GLOBALS_INITIAL_BY_OWNER.with(|cell| {
         cell.borrow_mut()
             .entry(owner)
@@ -67,13 +62,9 @@ fn record_owned_global(module_path: Option<&Path>, name: &str, value: &Value) {
 }
 
 fn imported_binding(source_owner: &Arc<str>, source_name: &str) -> (Arc<str>, String) {
-    MODULE_GLOBAL_BINDINGS_BY_OWNER.with(|cell| {
-        cell.borrow()
-            .get(source_owner)
-            .and_then(|bindings| bindings.get(source_name))
-            .cloned()
-            .unwrap_or_else(|| (Arc::clone(source_owner), source_name.to_owned()))
-    })
+    crate::interpreter::owner_bindings(source_owner)
+        .and_then(|bindings| bindings.get(source_name).cloned())
+        .unwrap_or_else(|| (Arc::clone(source_owner), source_name.to_owned()))
 }
 
 fn record_import_binding(
@@ -86,24 +77,10 @@ fn record_import_binding(
         return;
     };
     let binding = imported_binding(source_owner, source_name);
-    // Skip the write (and the env-cache generation bump it implies) when the
-    // identical binding is already recorded — the common case for the lazy
-    // re-imports the lint/parse hot path performs per declaration.
-    let already = MODULE_GLOBAL_BINDINGS_BY_OWNER.with(|cell| {
-        cell.borrow()
-            .get(&importer)
-            .and_then(|bindings| bindings.get(local_name))
-            .is_some_and(|existing| *existing == binding)
-    });
-    if already {
-        return;
-    }
-    MODULE_GLOBAL_BINDINGS_BY_OWNER.with(|cell| {
-        cell.borrow_mut()
-            .entry(importer)
-            .or_default()
-            .insert(local_name.to_owned(), binding);
-    });
+    // `ModuleBindings::insert` is a no-op for an identical binding — the
+    // common case for the lazy re-imports the lint/parse hot path performs
+    // per declaration — so the shared table is not copied for it.
+    crate::interpreter::record_owner_binding(importer, local_name.to_owned(), binding);
 }
 
 fn has_driver_manifest_attr(attrs: &[Attribute]) -> bool {
@@ -815,7 +792,7 @@ pub(super) fn create_filtered_env(env: &Env) -> Env {
 /// for caching (avoids creating duplicate Arc wrappers).
 pub(super) fn export_functions(
     local_functions: &HashMap<String, Arc<simple_parser::ast::FunctionDef>>,
-    filtered_env: &Arc<HashMap<String, Value>>,
+    frozen_env: &Arc<HashMap<String, Value>>,
     exports: &mut HashMap<String, Value>,
     env: &mut Env,
 ) -> HashMap<String, Arc<simple_parser::ast::FunctionDef>> {
@@ -841,14 +818,12 @@ pub(super) fn export_functions(
     // Only export functions marked as 'pub' - others need explicit export statements
     trace!(
         functions = local_functions.len(),
-        env_size = filtered_env.len(),
+        env_size = frozen_env.len(),
         "Second pass: exporting public functions"
     );
-    // Share the already-frozen map as the CoW base instead of copying it: the
-    // old `Arc::new(filtered_env.clone())` materialized a second full copy of
-    // the module's entire visible-name map and retained it forever via every
-    // exported function's `captured_env`.
-    let shared_env = Arc::new(Env::with_base(Arc::clone(filtered_env)));
+    // Shared-base CowEnv: the frozen map exists exactly once; every exported
+    // function's captured_env is an O(1) Arc-base view of it.
+    let shared_env = Arc::new(Env::with_base(Arc::clone(frozen_env)));
     let mut exported_count = 0;
     for (name, shared_def) in &shared_defs {
         let func_with_env = Value::Function {

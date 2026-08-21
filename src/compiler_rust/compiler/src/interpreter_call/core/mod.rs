@@ -38,7 +38,7 @@ pub(crate) use class_instantiation::instantiate_class;
 pub(crate) use function_exec::{
     captured_env_with_live_globals, exec_function, exec_function_with_bound_args, exec_function_with_captured_env,
     exec_function_with_values, exec_function_with_values_and_self, exec_function_with_values_and_writeback,
-    execute_function_body, publish_live_bound_globals, refresh_live_bound_globals, sync_live_bound_globals,
+    execute_function_body, publish_and_repoint, publish_live_bound_globals, refresh_live_bound_globals, sync_live_bound_globals,
     sync_owned_captured_globals,
 };
 pub(crate) use lambda::exec_lambda;

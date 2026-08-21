@@ -55,24 +55,13 @@ pub(crate) fn capture_node_scope_shadows(nodes: &[Node], env: &mut Env) -> Vec<(
             if seen.insert(name.clone()) {
                 let prior_value = env.get(&name).cloned();
                 if !env.is_local(&name) {
-                    let target = env.global_binding(&name).cloned().or_else(|| {
+                    let target = env.global_binding(&name).or_else(|| {
                         crate::interpreter::CURRENT_EXEC_MODULE
                             .with(|cell| cell.borrow().clone())
                             .map(|owner| (owner, name.clone()))
                     });
                     if let (Some((owner, source_name)), Some(value)) = (target, prior_value.as_ref()) {
-                        let present = crate::interpreter::MODULE_GLOBALS_BY_OWNER.with(|cell| {
-                            cell.borrow()
-                                .get(&owner)
-                                .is_some_and(|globals| globals.contains_key(&source_name))
-                        });
-                        if present {
-                            crate::interpreter::MODULE_GLOBALS_BY_OWNER.with(|cell| {
-                                if let Some(globals) = cell.borrow_mut().get_mut(&owner) {
-                                    globals.insert(source_name, value.clone());
-                                }
-                            });
-                        }
+                        crate::interpreter::set_owned_global(&owner, &source_name, value.clone(), false);
                     }
                 }
                 shadows.push((name.clone(), prior_value));
@@ -96,18 +85,12 @@ pub(crate) fn restore_block_scope_shadows(shadows: Vec<(String, Option<Value>)>,
         let owner_global = if env.is_local(&name) {
             None
         } else {
-            let target = env.global_binding(&name).cloned().or_else(|| {
+            let target = env.global_binding(&name).or_else(|| {
                 crate::interpreter::CURRENT_EXEC_MODULE
                     .with(|cell| cell.borrow().clone())
                     .map(|owner| (owner, name.clone()))
             });
-            target.and_then(|(owner, source_name)| {
-                crate::interpreter::MODULE_GLOBALS_BY_OWNER.with(|cell| {
-                    cell.borrow()
-                        .get(&owner)
-                        .and_then(|globals| globals.get(&source_name).cloned())
-                })
-            })
+            target.and_then(|(owner, source_name)| crate::interpreter::owned_global(&owner, &source_name))
         };
         match (owner_global, prior_value) {
             (Some(value), _) => env.refresh_globals([(name, value)]),
@@ -190,6 +173,7 @@ pub(crate) fn assert_dirty_names_invariant(block_env: &Env) {
 }
 
 pub(crate) fn copy_back_block_writes(block_env: &Env, env: &mut Env) {
+    env.refresh_scope(crate::interpreter::owned_globals_snapshot());
     // Off-path cost: one bool load (see `strict_mem_enabled()`); the check
     // itself is skipped entirely rather than called-and-short-circuited.
     if strict_mem_enabled() {

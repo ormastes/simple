@@ -20,140 +20,99 @@ use crate::aop_config::AopConfig;
 use crate::concurrent_providers::registry::ConcurrentProviderRegistry;
 use crate::di::DiConfig;
 use crate::interpreter_unit::*;
-use crate::value::Value;
+use crate::value::{ModuleBindings, OwnedGlobals, Value};
 
 // ---------------------------------------------------------------------------
-// Module-globals generation tracking (interpreter env cache invalidation)
-// ---------------------------------------------------------------------------
-//
-// `captured_env_with_live_globals` (interpreter_call/core/function_exec.rs)
-// caches the per-owner call environment; that cache is only valid while the
-// module-global stores are unchanged. Rather than trusting every one of the
-// ~40 mutation sites to remember to invalidate, the five stores below are
-// wrapped in `GenTrackedCell`, whose `borrow_mut()` bumps a thread-local
-// generation counter unconditionally. A bump on a borrow_mut that turns out
-// not to mutate costs only a cache miss (performance), never staleness
-// (correctness).
-
-thread_local! {
-    static MODULE_GLOBALS_GENERATION: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
-
-/// Current module-globals generation for this thread.
-pub(crate) fn module_globals_generation() -> u64 {
-    MODULE_GLOBALS_GENERATION.with(|c| c.get())
-}
-
-fn bump_module_globals_generation() {
-    MODULE_GLOBALS_GENERATION.with(|c| c.set(c.get().wrapping_add(1)));
-    // SIMPLE_INTERP_ENV_CACHE_STATS=2: sampled backtraces to locate the
-    // dominant generation-bump (env-cache miss) source. Level-gated, off by
-    // default.
-    static BUMP_TRACE: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
-        std::env::var("SIMPLE_INTERP_ENV_CACHE_STATS").is_ok_and(|v| v == "2")
-    });
-    if *BUMP_TRACE {
-        thread_local! {
-            static BUMPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-        }
-        BUMPS.with(|b| {
-            let n = b.get() + 1;
-            b.set(n);
-            if n % 5000 == 0 {
-                eprintln!("[env-cache] bump #{n} at:\n{}", std::backtrace::Backtrace::force_capture());
-            }
-        });
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Recorded global writes (dirty-name patching of cached env templates)
+// Live module-global stores
 // ---------------------------------------------------------------------------
 //
-// A full generation bump invalidates EVERY cached call-env template, forcing a
-// rebuild that clones the owner module env and re-resolves thousands of
-// imported bindings. Interpreted parsing writes module globals constantly
-// (measured `hits=82708 misses=17292` on a 7 KB file), so the bumps, not the
-// hits, were the wall. Write sites that KNOW which (owner, name) they touched
-// therefore use `borrow_mut_recorded()` (no bump) and push the write here; the
-// template cache replays the log tail into the template it already holds,
-// which is O(writes-since) instead of O(module globals). Any other
-// `borrow_mut()` still bumps and still invalidates everything, so an
-// unrecorded mutation can never be observed stale.
-thread_local! {
-    static GLOBAL_WRITE_LOG: RefCell<Vec<(Arc<str>, String, Value)>> = const { RefCell::new(Vec::new()) };
-    static GLOBAL_WRITE_LOG_BASE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+// A call frame never COPIES module globals: `captured_env_with_live_globals`
+// (interpreter_call/core/function_exec.rs) attaches a `GlobalScope` holding
+// `Arc` handles to the stores below, and the env resolves globals through
+// that parent pointer. Writes go through `set_owned_global`, which
+// `Arc::make_mut`s only the owner map it touches (a frame holding an older
+// snapshot keeps reading its own, exactly the copy-in/copy-out semantics the
+// per-call materialized env had). No template, no generation counter, no
+// invalidation. doc/08_tracking/bug/seed_interpreter_env_rebuild_per_call_o_globals_2026-08-21.md
+
+/// O(1) snapshot of every owner's live globals, for a frame's `GlobalScope`.
+pub(crate) fn owned_globals_snapshot() -> OwnedGlobals {
+    MODULE_GLOBALS_BY_OWNER.with(|cell| Arc::clone(&cell.borrow()))
 }
 
-const GLOBAL_WRITE_LOG_CAP: usize = 1 << 16;
-
-/// Sequence number of the next write to be recorded.
-pub(crate) fn global_write_seq() -> usize {
-    GLOBAL_WRITE_LOG_BASE.with(|b| b.get()) + GLOBAL_WRITE_LOG.with(|c| c.borrow().len())
+pub(crate) fn owned_global(owner: &str, name: &str) -> Option<Value> {
+    MODULE_GLOBALS_BY_OWNER.with(|cell| {
+        cell.borrow()
+            .get(owner)
+            .and_then(|globals| globals.get(name))
+            .cloned()
+    })
 }
 
-/// Oldest sequence number still replayable; a template stamped before this
-/// must be rebuilt.
-pub(crate) fn global_write_log_base() -> usize {
-    GLOBAL_WRITE_LOG_BASE.with(|b| b.get())
+pub(crate) fn owned_global_present(owner: &str, name: &str) -> bool {
+    MODULE_GLOBALS_BY_OWNER.with(|cell| {
+        cell.borrow()
+            .get(owner)
+            .is_some_and(|globals| globals.contains_key(name))
+    })
 }
 
-pub(crate) fn record_global_write(owner: Arc<str>, name: String, value: Value) {
-    GLOBAL_WRITE_LOG.with(|c| {
-        let mut log = c.borrow_mut();
-        log.push((owner, name, value));
-        if log.len() >= GLOBAL_WRITE_LOG_CAP {
-            // Truncating loses replayability, so fall back to the blunt
-            // instrument: drop the log and invalidate every template.
-            let dropped = log.len();
-            log.clear();
-            GLOBAL_WRITE_LOG_BASE.with(|b| b.set(b.get() + dropped));
-            bump_module_globals_generation();
+pub(crate) fn owner_has_globals(owner: &str) -> bool {
+    MODULE_GLOBALS_BY_OWNER.with(|cell| cell.borrow().contains_key(owner))
+}
+
+/// Write `name` into `owner`'s live store. With `create == false` the write
+/// only lands when the name is already a global of that owner. Returns
+/// whether it landed.
+pub(crate) fn set_owned_global(owner: &Arc<str>, name: &str, value: Value, create: bool) -> bool {
+    MODULE_GLOBALS_BY_OWNER.with(|cell| {
+        let mut all = cell.borrow_mut();
+        if !create && !all.get(owner).is_some_and(|globals| globals.contains_key(name)) {
+            return false;
         }
+        let all = Arc::make_mut(&mut *all);
+        let globals = all.entry(Arc::clone(owner)).or_default();
+        Arc::make_mut(globals).insert(name.to_owned(), value);
+        true
+    })
+}
+
+/// First use of an owner's functions: seed its live store from the initial
+/// (module-load) values when no live map exists yet.
+pub(crate) fn seed_owner_globals(owner: &Arc<str>) {
+    if owner_has_globals(owner) {
+        return;
+    }
+    let initial = MODULE_GLOBALS_INITIAL_BY_OWNER.with(|cell| cell.borrow().get(owner).cloned().unwrap_or_default());
+    MODULE_GLOBALS_BY_OWNER.with(|cell| {
+        let mut all = cell.borrow_mut();
+        Arc::make_mut(&mut *all)
+            .entry(Arc::clone(owner))
+            .or_insert_with(|| Arc::new(initial));
     });
 }
 
-/// Replay the writes recorded at or after `from` (must be >= `global_write_log_base()`).
-pub(crate) fn for_each_global_write_since(from: usize, mut f: impl FnMut(&Arc<str>, &str, &Value)) {
-    let base = GLOBAL_WRITE_LOG_BASE.with(|b| b.get());
-    let start = from.saturating_sub(base);
-    GLOBAL_WRITE_LOG.with(|c| {
-        let log = c.borrow();
-        for (owner, name, value) in log.iter().skip(start) {
-            f(owner, name.as_str(), value);
-        }
+/// Reset every live store to its module-load value (module cache reuse).
+pub(crate) fn reset_owned_globals_from_initial() {
+    let initial = MODULE_GLOBALS_INITIAL_BY_OWNER.with(|cell| {
+        cell.borrow()
+            .iter()
+            .map(|(owner, globals)| (Arc::clone(owner), Arc::new(globals.clone())))
+            .collect::<HashMap<_, _>>()
     });
+    MODULE_GLOBALS_BY_OWNER.with(|cell| *cell.borrow_mut() = Arc::new(initial));
 }
 
-/// RefCell wrapper that bumps the module-globals generation on every
-/// `borrow_mut()`, so any possible mutation invalidates dependent caches.
-pub(crate) struct GenTrackedCell<T> {
-    inner: RefCell<T>,
+pub(crate) fn owner_bindings(owner: &str) -> Option<Arc<ModuleBindings>> {
+    MODULE_GLOBAL_BINDINGS_BY_OWNER.with(|cell| cell.borrow().get(owner).cloned())
 }
 
-impl<T> GenTrackedCell<T> {
-    pub(crate) fn new(value: T) -> Self {
-        GenTrackedCell {
-            inner: RefCell::new(value),
-        }
-    }
-
-    pub(crate) fn borrow(&self) -> std::cell::Ref<'_, T> {
-        self.inner.borrow()
-    }
-
-    pub(crate) fn borrow_mut(&self) -> std::cell::RefMut<'_, T> {
-        bump_module_globals_generation();
-        self.inner.borrow_mut()
-    }
-
-    /// `borrow_mut` for sites that record every (owner, name) they write via
-    /// `record_global_write`, so no generation bump (and no cache-wide
-    /// invalidation) is needed. Using this WITHOUT recording is a correctness
-    /// bug, not a performance one.
-    pub(crate) fn borrow_mut_recorded(&self) -> std::cell::RefMut<'_, T> {
-        self.inner.borrow_mut()
-    }
+pub(crate) fn record_owner_binding(importer: Arc<str>, local_name: String, binding: (Arc<str>, String)) {
+    MODULE_GLOBAL_BINDINGS_BY_OWNER.with(|cell| {
+        let mut by_owner = cell.borrow_mut();
+        let bindings = by_owner.entry(importer).or_default();
+        Arc::make_mut(bindings).insert(local_name, binding);
+    });
 }
 
 /// Debug census of the module-global stores, printed by the mem-trace report
@@ -166,9 +125,7 @@ pub(crate) fn report_globals_census() {
         (m.len(), m.values().map(|g| g.len()).sum::<usize>())
     });
     let envs = MODULE_ENV_BY_OWNER.with(|c| c.borrow().len());
-    let bindings = MODULE_GLOBAL_BINDINGS_BY_OWNER.with(|c| {
-        c.borrow().values().map(|b| b.len()).sum::<usize>()
-    });
+    let bindings = MODULE_GLOBAL_BINDINGS_BY_OWNER.with(|c| c.borrow().values().map(|b| b.len()).sum::<usize>());
     eprintln!(
         "[mem] globals census: flat={flat} owners={owners} owned_entries={owned_entries} module_envs={envs} import_bindings={bindings}"
     );
@@ -434,16 +391,16 @@ thread_local! {
     /// Module-level mutable variables accessible from functions.
     /// When a module declares `let mut x = ...` at top level, x is added here.
     /// Functions can read and write these variables.
-    pub(crate) static MODULE_GLOBALS: GenTrackedCell<HashMap<String, Value>> = GenTrackedCell::new(HashMap::new());
+    pub(crate) static MODULE_GLOBALS: RefCell<HashMap<String, Value>> = RefCell::new(HashMap::new());
     /// Live globals keyed by their defining module.
-    pub(crate) static MODULE_GLOBALS_BY_OWNER: GenTrackedCell<HashMap<Arc<str>, HashMap<String, Value>>> = GenTrackedCell::new(HashMap::new());
+    pub(crate) static MODULE_GLOBALS_BY_OWNER: RefCell<OwnedGlobals> = RefCell::new(Arc::new(HashMap::new()));
     /// Initial owner-qualified globals retained with the module cache.
-    pub(crate) static MODULE_GLOBALS_INITIAL_BY_OWNER: GenTrackedCell<HashMap<Arc<str>, HashMap<String, Value>>> = GenTrackedCell::new(HashMap::new());
+    pub(crate) static MODULE_GLOBALS_INITIAL_BY_OWNER: RefCell<HashMap<Arc<str>, HashMap<String, Value>>> = RefCell::new(HashMap::new());
     /// Immutable filtered module environments keyed by owner.
-    pub(crate) static MODULE_ENV_BY_OWNER: GenTrackedCell<HashMap<Arc<str>, Arc<HashMap<String, Value>>>> = GenTrackedCell::new(HashMap::new());
+    pub(crate) static MODULE_ENV_BY_OWNER: RefCell<HashMap<Arc<str>, Arc<HashMap<String, Value>>>> = RefCell::new(HashMap::new());
     /// Imported global bindings keyed by importer, then local name.
     /// Values retain the defining owner and defining name for collision-free refresh.
-    pub(crate) static MODULE_GLOBAL_BINDINGS_BY_OWNER: GenTrackedCell<HashMap<Arc<str>, HashMap<String, (Arc<str>, String)>>> = GenTrackedCell::new(HashMap::new());
+    pub(crate) static MODULE_GLOBAL_BINDINGS_BY_OWNER: RefCell<HashMap<Arc<str>, Arc<ModuleBindings>>> = RefCell::new(HashMap::new());
     /// BDD Test Registry - shared across all modules that import spec.registry
     /// This ensures that describe/context/it blocks register to the same location
     /// regardless of how the registry module is imported.
@@ -929,7 +886,7 @@ pub fn clear_interpreter_state() {
     // (`state`, `bridge`, ...) leak into the next test that reuses the same
     // module names on the same thread (bug: reentrant test order-dependence).
     MODULE_GLOBALS.with(|cell| cell.borrow_mut().clear());
-    MODULE_GLOBALS_BY_OWNER.with(|cell| cell.borrow_mut().clear());
+    MODULE_GLOBALS_BY_OWNER.with(|cell| *cell.borrow_mut() = Arc::new(HashMap::new()));
     MODULE_GLOBALS_INITIAL_BY_OWNER.with(|cell| cell.borrow_mut().clear());
     MODULE_ENV_BY_OWNER.with(|cell| cell.borrow_mut().clear());
     MODULE_GLOBAL_BINDINGS_BY_OWNER.with(|cell| cell.borrow_mut().clear());

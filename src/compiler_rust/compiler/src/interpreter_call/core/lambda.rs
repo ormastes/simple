@@ -25,7 +25,7 @@ pub(crate) fn exec_lambda(
 ) -> Result<Value, CompileError> {
     use super::super::block_execution::exec_block_closure_into;
     use super::function_exec::{
-        mark_nodes_locals, publish_live_bound_globals, refresh_live_bound_globals, sync_live_bound_globals,
+        mark_nodes_locals, publish_and_repoint, refresh_live_bound_globals, sync_live_bound_globals,
     };
 
     // Diagram tracing for lambda execution
@@ -33,7 +33,7 @@ pub(crate) fn exec_lambda(
         diagram_sffi::trace_call("<lambda>");
     }
 
-    publish_live_bound_globals(call_env);
+    publish_and_repoint(call_env);
     let mut local_env = captured_env.clone();
     refresh_live_bound_globals(&mut local_env);
     let mut positional_idx = 0usize;
@@ -69,6 +69,7 @@ pub(crate) fn exec_lambda(
         }
     }
 
+    call_env.release_scope();
     let result = if let Expr::DoBlock(nodes) = body {
         mark_nodes_locals(nodes, &mut local_env);
         // Run the block against local_env in place (same statement semantics as the
@@ -84,6 +85,7 @@ pub(crate) fn exec_lambda(
     } else {
         evaluate_expr(body, &mut local_env, functions, classes, enums, impl_methods)
     };
+    local_env.release_scope();
     sync_live_bound_globals(&local_env, call_env);
 
     // Write back mutated container arguments to the caller's bindings, mirroring the

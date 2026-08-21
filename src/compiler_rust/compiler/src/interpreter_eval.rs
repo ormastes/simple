@@ -46,12 +46,7 @@ fn record_flattened_global(owner: Option<&Arc<str>>, name: String, value: Value)
         cell.borrow_mut().insert(name.clone(), value.clone());
     });
     if let Some(owner) = owner {
-        MODULE_GLOBALS_BY_OWNER.with(|cell| {
-            cell.borrow_mut()
-                .entry(Arc::clone(owner))
-                .or_default()
-                .insert(name.clone(), value.clone());
-        });
+        crate::interpreter::set_owned_global(owner, &name, value.clone(), true);
         MODULE_GLOBALS_INITIAL_BY_OWNER.with(|cell| {
             cell.borrow_mut()
                 .entry(Arc::clone(owner))
@@ -79,31 +74,21 @@ fn record_flattened_import_binding(marker: &str) {
                 }
             }
         });
-        MODULE_GLOBAL_BINDINGS_BY_OWNER.with(|bindings| {
-            if let Some(source_bindings) = bindings.borrow().get(&source_owner) {
-                for (name, binding) in source_bindings {
-                    entries.insert(name.clone(), binding.clone());
-                }
+        if let Some(source_bindings) = crate::interpreter::owner_bindings(&source_owner) {
+            for (name, binding) in source_bindings.iter() {
+                entries.insert(name.clone(), binding.clone());
             }
-        });
+        }
     } else {
-        let binding = MODULE_GLOBAL_BINDINGS_BY_OWNER.with(|bindings| {
-            bindings
-                .borrow()
-                .get(&source_owner)
-                .and_then(|source_bindings| source_bindings.get::<str>(source_name))
-                .cloned()
-                .unwrap_or_else(|| (Arc::clone(&source_owner), source_name.to_owned()))
-        });
+        let binding = crate::interpreter::owner_bindings(&source_owner)
+            .and_then(|source_bindings| source_bindings.get(source_name).cloned())
+            .unwrap_or_else(|| (Arc::clone(&source_owner), source_name.to_owned()));
         entries.insert(local_name.to_owned(), binding);
     }
-    MODULE_GLOBAL_BINDINGS_BY_OWNER.with(|bindings| {
-        bindings
-            .borrow_mut()
-            .entry(Arc::from(importer))
-            .or_default()
-            .extend(entries);
-    });
+    let importer: Arc<str> = Arc::from(importer);
+    for (local_name, binding) in entries {
+        crate::interpreter::record_owner_binding(Arc::clone(&importer), local_name, binding);
+    }
 }
 
 fn has_driver_manifest_attr(attrs: &[Attribute]) -> bool {
@@ -427,8 +412,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
     SI_BASE_UNITS.with(|cell| cell.borrow_mut().clear());
     // Clear module-level globals from previous runs
     MODULE_GLOBALS.with(|cell| cell.borrow_mut().clear());
-    let initial_globals = MODULE_GLOBALS_INITIAL_BY_OWNER.with(|cell| cell.borrow().clone());
-    MODULE_GLOBALS_BY_OWNER.with(|cell| *cell.borrow_mut() = initial_globals);
+    crate::interpreter::reset_owned_globals_from_initial();
     // Bitfields are module declarations; clear stale definitions before registration.
     super::BITFIELDS.with(|cell| cell.borrow_mut().clear());
     // Clear the struct/class overload registry from previous runs.
@@ -1745,18 +1729,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                                 &use_stmt.target,
                                 ImportTarget::Glob | ImportTarget::Group(_)
                             );
-                        // A Group import that explicitly names an item equal to the
-                        // module's own name (`use pkg.Mod.{Mod}`) must bind the member,
-                        // not the enclosing module dict -- don't clobber it.
-                        let group_binds_name = match &use_stmt.target {
-                            ImportTarget::Group(items) => items.iter().any(|item| match item {
-                                ImportTarget::Single(name) => name == &binding_name,
-                                ImportTarget::Aliased { alias, .. } => alias == &binding_name,
-                                _ => false,
-                            }),
-                            _ => false,
-                        };
-                        if !is_path_derived_main && !group_binds_name {
+                        if !is_path_derived_main {
                             env.insert(binding_name.clone(), value.clone());
                             // Sync module binding to MODULE_GLOBALS so functions can access it
                             MODULE_GLOBALS.with(|cell| {

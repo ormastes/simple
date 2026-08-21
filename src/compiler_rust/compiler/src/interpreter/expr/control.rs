@@ -37,11 +37,12 @@ pub(super) fn eval_control_expr(
                     crate::interpreter::MODULE_GLOBAL_BINDINGS_BY_OWNER.with(|c| c
                         .borrow()
                         .iter()
-                        .map(|(o, m)| (o.to_string(), m.keys().cloned().collect::<Vec<_>>()))
+                        .map(|(o, m)| (o.to_string(), m.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>()))
                         .collect::<Vec<_>>()),
                     capture_all,
                     env.global_bindings()
-                        .map(|(k, (o, s))| (k.clone(), o.to_string(), s.clone()))
+                        .into_iter()
+                        .map(|(k, (o, s))| (k, o.to_string(), s))
                         .collect::<Vec<_>>(),
                     collect_free_vars(body),
                 );
@@ -50,7 +51,11 @@ pub(super) fn eval_control_expr(
             // For regular closures, we share the environment reference
             // In the interpreter, both behave the same since we clone env anyway
             let captured_env = if *capture_all {
-                Arc::new(env.clone())
+                let mut captured = env.clone();
+                // A capture must not pin the store version at capture time;
+                // exec_lambda re-points the scope before running the body.
+                captured.release_scope();
+                Arc::new(captured)
             } else {
                 // Selective capture: only copy variables referenced in the lambda
                 // body. Must preserve global-binding metadata — a plain
@@ -185,14 +190,8 @@ pub(super) fn eval_control_expr(
                         }
                     }
                     let mut arm_env = env.clone();
-                    let binding_names: std::collections::HashSet<String> =
-                        arm_bindings.keys().cloned().collect();
                     for (name, value) in arm_bindings {
-                        arm_env.insert(name.clone(), value);
-                        // Mark the arm binding LOCAL so reads don't prefer
-                        // MODULE_GLOBALS (match-expression form of the
-                        // `case Ok(engine):` module-dict bug).
-                        arm_env.enter_block_local(name);
+                        arm_env.insert(name, value);
                     }
                     let mut result = Value::Nil;
                     let stmt_count = arm.body.statements.len();
@@ -272,18 +271,8 @@ pub(super) fn eval_control_expr(
                             }
                         }
                     }
-                    // Write back pre-existing variables from arm_env to env.
-                    // Arm PATTERN BINDINGS are arm-local and must never be
-                    // written back: `Some(value): value` leaked `value` (a
-                    // BeDomNode) past its arm whenever the enclosing frame's
-                    // base env happened to contain a same-named key, shadowing
-                    // a later `val value` — "method `len` not found on type
-                    // `BeDomNode`" in browser_session_runtime (5th match-arm
-                    // leak site, 2026-08-19).
+                    // Write back pre-existing variables from arm_env to env
                     for (key, value) in &arm_env {
-                        if binding_names.contains(key) {
-                            continue;
-                        }
                         if env.contains_key(key) {
                             env.insert(key.clone(), value.clone());
                         }

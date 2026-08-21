@@ -6,9 +6,8 @@ use super::macros::*;
 use crate::error::CompileError;
 use crate::interpreter::{
     exec_block_fn, Control, CONST_NAMES, IMMUTABLE_VARS, IN_IMMUTABLE_FN_METHOD, GENERATOR_YIELDS, CURRENT_EXEC_MODULE,
-    FUNCTION_MODULE_OWNER, MODULE_ENV_BY_OWNER, MODULE_GLOBALS, MODULE_GLOBAL_BINDINGS_BY_OWNER,
-    MODULE_GLOBALS_BY_OWNER, MODULE_GLOBALS_INITIAL_BY_OWNER, module_globals_generation, for_each_global_write_since,
-    global_write_log_base, global_write_seq, record_global_write, visit_pattern_binding_names,
+    FUNCTION_MODULE_OWNER, MODULE_ENV_BY_OWNER, MODULE_GLOBALS, owned_global, owned_globals_snapshot,
+    owner_bindings, owner_has_globals, seed_owner_globals, set_owned_global, visit_pattern_binding_names,
 };
 use crate::interpreter_unit::{is_unit_type, validate_unit_type};
 use crate::value::*;
@@ -141,123 +140,28 @@ fn function_module_owner(func: &FunctionDef) -> Option<Arc<str>> {
         })
 }
 
-// Per-owner cache of the fully-built call environment TEMPLATE (base map +
-// global bindings), valid while the module-globals generation is unchanged.
-// `GenTrackedCell` (interpreter_state.rs) bumps the generation on every
-// `borrow_mut()` of any module-global store, so a hit can never observe a
-// stale global value or binding structure. Cloning a template is
-// O(bindings-map) — the shared `base` is an Arc — versus the previous
-// per-call rebuild that cloned the owner's whole module env and re-resolved
-// every imported binding (~1.38ms vs ~µs on real parser hops; see
-// doc/08_tracking/bug/lint_timeout_hwir_zca_rows_2026-08-17.md).
-//
-// Kill switch: SIMPLE_INTERP_ENV_CACHE=0 disables the cache entirely.
-// A cached template carries, besides the env itself, the generation and the
-// global-write sequence it reflects, plus a reverse index
-// (defining owner, defining name) -> local names, so a recorded write can be
-// patched into the template in O(1) instead of rescanning every binding.
-struct EnvTemplate {
-    generation: u64,
-    seq: usize,
-    env: Env,
-    by_source: HashMap<(Arc<str>, String), Vec<String>>,
-    // ABA guard. The key's second half is `Arc::as_ptr` of the captured env's
-    // base -- a raw address, which the allocator may hand out again once that
-    // base dies, so a key match alone can hit a template built for a
-    // completely different env. Holding a `Weak` of the base keeps the
-    // ALLOCATION (not its contents) alive for as long as the entry lives, so
-    // the address cannot be recycled underneath us, and a base that has been
-    // dropped fails `upgrade()` and is treated as a miss. `None` is the empty
-    // env (key 0), which has no base and therefore no identity to confuse.
-    base_guard: Option<Weak<HashMap<String, Value>>>,
-}
+// Per-call environment setup is O(args), not O(globals): the callee frame gets
+// a `GlobalScope` — four `Arc` handles to the owner's static module env, its
+// import table and the live per-owner global stores — and resolves every
+// global through that parent pointer. Nothing is materialized, so there is no
+// template to cache and no generation to invalidate. The previous design
+// (cached per-owner env template + write-log patching, 2026-08-21) still
+// cloned a growing overlay per call and rescanned every binding per changed
+// global; measured at 2.1 GB RSS and >150 s on `lint driver_types.spl`.
+// doc/08_tracking/bug/seed_interpreter_env_rebuild_per_call_o_globals_2026-08-21.md
 
-// Bounded insert: the map is dropped wholesale once it reaches the cap. A
-// wholesale clear is O(1) amortised and needs no recency bookkeeping on the
-// hot path; a HashMap has no ordering to make "evict the oldest half" mean
-// anything, so half-clearing would evict arbitrarily at the same cost.
-fn insert_env_template(cache: &mut HashMap<(Arc<str>, usize), EnvTemplate>, key: (Arc<str>, usize), template: EnvTemplate) {
-    if cache.len() >= *OWNED_ENV_TEMPLATE_CACHE_CAP {
-        cache.clear();
-    }
-    cache.insert(key, template);
-}
-
-// Does `template` describe the env we were actually handed?
-fn env_template_base_matches(template: &EnvTemplate, captured_base: Option<&Arc<HashMap<String, Value>>>) -> bool {
-    match (&template.base_guard, captured_base) {
-        (None, None) => true,
-        (Some(weak), Some(base)) => weak.upgrade().is_some_and(|alive| Arc::ptr_eq(&alive, base)),
-        _ => false,
-    }
-}
-
-thread_local! {
-    static OWNED_ENV_TEMPLATE_CACHE: std::cell::RefCell<HashMap<(Arc<str>, usize), EnvTemplate>> =
-        std::cell::RefCell::new(HashMap::new());
-}
-
-// The cache key's second component is `Env::template_key()`, i.e. the ADDRESS
-// of the captured env's immutable base (`Arc::as_ptr`). A fresh base is
-// allocated for every closure/call frame that owns one, so the key space is
-// unbounded even though the number of MODULES is small: interpreting a large
-// file mints a new key per distinct base and each entry retains a full `Env`
-// clone plus its `by_source` reverse index. Measured 2026-08-21 on
-// `lint src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl`:
-// RSS climbed past 7.5 GB and the run did not finish inside 900 s, against
-// 220 s / 863 MB for a seed without this growth. The cache is a hot-path
-// optimisation, not a correctness requirement, so it is bounded here: a module
-// in steady state uses far fewer than CAP distinct bases, and blowing past CAP
-// means the base identities are churning, which is exactly the case where the
-// entries would never be hit again anyway. Dropping the whole map (rather than
-// evicting one victim) keeps this O(1) and needs no recency bookkeeping on the
-// hot path.
-// `SIMPLE_INTERP_ENV_CACHE_CAP` overrides the bound; 0 means UNBOUNDED and
-// reproduces the pre-fix behaviour exactly, which is what the perf gate uses to
-// prove the fix is load-bearing rather than measuring two runs of the same code.
-const OWNED_ENV_TEMPLATE_CACHE_CAP_DEFAULT: usize = 4096;
-
-static OWNED_ENV_TEMPLATE_CACHE_CAP: LazyLock<usize> = LazyLock::new(|| {
-    std::env::var("SIMPLE_INTERP_ENV_CACHE_CAP")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .map_or(OWNED_ENV_TEMPLATE_CACHE_CAP_DEFAULT, |v| {
-            if v == 0 {
-                usize::MAX
-            } else {
-                v
-            }
-        })
-});
-
-static INTERP_ENV_CACHE_ENABLED: LazyLock<bool> =
-    LazyLock::new(|| std::env::var("SIMPLE_INTERP_ENV_CACHE").map_or(true, |v| v != "0"));
-
-// Diagnostics: SIMPLE_INTERP_ENV_CACHE_STATS=1 prints hit/miss/skip counts to
-// stderr every 100k lookups (level-gated, default off).
-static INTERP_ENV_CACHE_STATS: LazyLock<bool> =
-    LazyLock::new(|| std::env::var("SIMPLE_INTERP_ENV_CACHE_STATS").is_ok_and(|v| v == "1"));
-
-thread_local! {
-    static ENV_CACHE_COUNTS: std::cell::Cell<(u64, u64, u64)> = const { std::cell::Cell::new((0, 0, 0)) };
-}
-
-fn env_cache_count(kind: usize) {
-    if !*INTERP_ENV_CACHE_STATS {
-        return;
-    }
-    ENV_CACHE_COUNTS.with(|c| {
-        let (mut h, mut m, mut s) = c.get();
-        match kind {
-            0 => h += 1,
-            1 => m += 1,
-            _ => s += 1,
-        }
-        c.set((h, m, s));
-        if (h + m + s) % 100_000 == 0 {
-            eprintln!("[env-cache] hits={h} misses={m} skips={s}");
-        }
-    });
+/// The module scope for functions owned by `owner`, over the CURRENT live
+/// stores. Seeds the owner's live store from its module-load values on first
+/// use, as the materializing path did.
+pub(crate) fn owner_scope(owner: &Arc<str>) -> GlobalScope {
+    seed_owner_globals(owner);
+    let module_env = MODULE_ENV_BY_OWNER.with(|cell| cell.borrow().get(owner).cloned());
+    GlobalScope::new(
+        Arc::clone(owner),
+        module_env,
+        owner_bindings(owner),
+        owned_globals_snapshot(),
+    )
 }
 
 pub(crate) fn captured_env_with_live_globals(func: &FunctionDef, captured_env: &Env) -> Env {
@@ -278,146 +182,24 @@ pub(crate) fn captured_env_with_live_globals(func: &FunctionDef, captured_env: &
         initial_env.extend(live_globals);
         return initial_env;
     };
-
-    // Cache key: the owner module plus the identity of the captured env's
-    // immutable base. Until 2026-08-21 only an EMPTY captured env was cached,
-    // so every intra-module call (module fn -> module fn, whose captured env
-    // is the module env snapshot) rebuilt the full env -- thousands of
-    // imported globals -- per call: ~5.5 ms/call in a driver module vs
-    // 0.08 ms in a light one, which made interpreted phase 1/2 of a stage
-    // build look like a hang.
-    let template_key = captured_env.template_key();
-    let captured_base = captured_env.template_base();
-    let cache_ok = *INTERP_ENV_CACHE_ENABLED && template_key.is_some();
-    let cache_key = (Arc::clone(&owner), template_key.unwrap_or(usize::MAX));
-    if cache_ok {
-        let generation = module_globals_generation();
-        let seq = global_write_seq();
-        let log_base = global_write_log_base();
-        let cached = OWNED_ENV_TEMPLATE_CACHE.with(|cell| {
-            let mut cache = cell.borrow_mut();
-            if cache
-                .get(&cache_key)
-                .is_some_and(|t| !env_template_base_matches(t, captured_base.as_ref()))
-            {
-                // Recycled address: drop the stale entry rather than serving it.
-                cache.remove(&cache_key);
-            }
-            let template = cache.get_mut(&cache_key)?;
-            if template.generation != generation || template.seq < log_base {
-                return None;
-            }
-            if template.seq < seq {
-                // Replay only the names written since this template was last
-                // refreshed. Values land in the env overlay marked "refreshed
-                // global", exactly as `refresh_bound_global` does, so
-                // `publish_live_bound_globals` will not write them back.
-                let mut patches: Vec<(String, Value)> = Vec::new();
-                let by_source = &template.by_source;
-                for_each_global_write_since(template.seq, |owner, name, value| {
-                    if let Some(locals) = by_source.get(&(Arc::clone(owner), name.to_string())) {
-                        for local in locals {
-                            patches.push((local.clone(), value.clone()));
-                        }
-                    }
-                });
-                template.env.refresh_globals(patches);
-                template.seq = seq;
-            }
-            Some(template.env.clone())
-        });
-        if let Some(env) = cached {
-            env_cache_count(0);
-            return env;
-        }
-        env_cache_count(1);
-    } else {
-        env_cache_count(2);
-    }
-
-    // Seed the owner's live-globals map on first use WITHOUT taking a write
-    // borrow on the already-seeded path — a `borrow_mut()` on the tracked
-    // cell bumps the generation and would defeat the cache above.
-    let owner_globals = MODULE_GLOBALS_BY_OWNER
-        .with(|cell| cell.borrow().get(&owner).cloned())
-        .unwrap_or_else(|| {
-            let initial_owner_globals =
-                MODULE_GLOBALS_INITIAL_BY_OWNER.with(|cell| cell.borrow().get(&owner).cloned().unwrap_or_default());
-            MODULE_GLOBALS_BY_OWNER.with(|cell| {
-                cell.borrow_mut()
-                    .entry(Arc::clone(&owner))
-                    .or_insert(initial_owner_globals)
-                    .clone()
-            })
-        });
-    let mut base = if captured_env.is_empty() {
-        MODULE_ENV_BY_OWNER
-            .with(|cell| cell.borrow().get(&owner).cloned())
-            .map(|env| (*env).clone())
-            .unwrap_or_default()
-    } else {
-        captured_env.to_map()
-    };
-    let imported_globals = MODULE_GLOBAL_BINDINGS_BY_OWNER.with(|bindings_cell| {
-        let bindings = bindings_cell.borrow();
-        let Some(owner_bindings) = bindings.get(&owner) else {
-            return Vec::new();
-        };
-        MODULE_GLOBALS_BY_OWNER.with(|globals_cell| {
-            let globals = globals_cell.borrow();
-            owner_bindings
-                .iter()
-                .filter_map(|(local_name, (defining_owner, defining_name))| {
-                    globals
-                        .get(defining_owner)
-                        .and_then(|owner_globals| owner_globals.get(defining_name))
-                        .map(|value| {
-                            (
-                                local_name.clone(),
-                                Arc::clone(defining_owner),
-                                defining_name.clone(),
-                                value.clone(),
-                            )
-                        })
-                })
-                .collect::<Vec<_>>()
-        })
-    });
-    base.extend(
-        imported_globals
-            .iter()
-            .map(|(local_name, _, _, value)| (local_name.clone(), value.clone())),
-    );
-    base.extend(owner_globals.clone());
-    let mut env = Env::with_base(Arc::new(base));
-    for (local_name, defining_owner, defining_name, _) in imported_globals {
-        env.bind_global(local_name, defining_owner, defining_name);
-    }
-    for (name, _) in owner_globals {
-        env.bind_global(name.clone(), Arc::clone(&owner), name);
-    }
-    if cache_ok {
-        // Read the generation AFTER building: the first-use seeding above may
-        // have bumped it, and the template must be stamped with the state it
-        // actually reflects.
-        let generation = module_globals_generation();
-        let mut by_source: HashMap<(Arc<str>, String), Vec<String>> = HashMap::new();
-        for (local_name, (owner, source_name)) in env.global_bindings() {
-            by_source
-                .entry((Arc::clone(owner), source_name.clone()))
-                .or_default()
-                .push(local_name.clone());
-        }
-        let template = EnvTemplate {
-            generation,
-            seq: global_write_seq(),
-            env: env.clone(),
-            by_source,
-            base_guard: captured_base.as_ref().map(Arc::downgrade),
-        };
-        OWNED_ENV_TEMPLATE_CACHE.with(|cell| insert_env_template(&mut cell.borrow_mut(), cache_key, template));
-    }
+    // The captured env's own entries (a closure's captured locals) stay in the
+    // overlay and shadow the scope, exactly as they shadowed the materialized
+    // base before; the owner's live globals and imports sit above any base
+    // the captured env carried, and the static module env below it.
+    let mut env = captured_env.clone();
+    env.clear_dirty();
+    env.set_scope(owner_scope(&owner));
     env
+}
+
+/// Call-entry publish for a frame about to call out: drop the frame's store
+/// snapshot FIRST so the publish writes into uniquely-owned maps (no
+/// `Arc::make_mut` copy of the owner's whole global map), then re-point so
+/// default-argument evaluation in this frame still sees live globals.
+pub(crate) fn publish_and_repoint(env: &mut Env) {
+    env.release_scope();
+    publish_live_bound_globals(env);
+    env.refresh_scope(owned_globals_snapshot());
 }
 
 pub(crate) fn publish_live_bound_globals(env: &Env) {
@@ -426,48 +208,34 @@ pub(crate) fn publish_live_bound_globals(env: &Env) {
         .filter(|(name, _)| !env.is_local(name) && !env.is_refreshed_global(name))
         .filter_map(|(name, value)| {
             env.global_binding(name)
-                .map(|(owner, source_name)| (Arc::clone(owner), source_name.clone(), value.clone()))
+                .map(|(owner, source_name)| (owner, source_name, value.clone()))
         })
         .collect::<Vec<_>>();
     if changed.is_empty() {
         return;
     }
-    let mut recorded: Vec<(Arc<str>, String, Value)> = Vec::new();
-    MODULE_GLOBALS_BY_OWNER.with(|cell| {
-        let mut globals_by_owner = cell.borrow_mut_recorded();
-        for (owner, name, value) in &changed {
-            if let Some(globals) = globals_by_owner.get_mut(owner) {
-                if globals.contains_key(name) {
-                    globals.insert(name.clone(), value.clone());
-                    recorded.push((Arc::clone(owner), name.clone(), value.clone()));
-                }
-            }
-        }
-    });
+    for (owner, name, value) in &changed {
+        set_owned_global(owner, name, value.clone(), false);
+    }
     MODULE_GLOBALS.with(|cell| {
-        let mut globals = cell.borrow_mut_recorded();
+        let mut globals = cell.borrow_mut();
         for (_, name, value) in changed {
             globals.insert(name, value);
         }
     });
-    for (owner, name, value) in recorded {
-        record_global_write(owner, name, value);
-    }
 }
 
+/// Make a frame see the current live globals: O(1) scope re-point, plus a
+/// refresh of any stale global copy sitting in the frame's own overlay.
 pub(crate) fn refresh_live_bound_globals(env: &mut Env) {
-    let targets = env
-        .global_bindings()
-        .map(|(_, (owner, name))| (Arc::clone(owner), name.clone()))
+    env.refresh_scope(owned_globals_snapshot());
+    let stale = env
+        .overlay_entries()
+        .filter(|(name, _)| !env.is_local(name))
+        .filter_map(|(name, _)| env.global_binding(name))
         .collect::<HashSet<_>>();
-    for (owner, name) in targets {
-        let value = MODULE_GLOBALS_BY_OWNER.with(|cell| {
-            cell.borrow()
-                .get(&owner)
-                .and_then(|globals| globals.get(&name))
-                .cloned()
-        });
-        if let Some(value) = value {
+    for (owner, name) in stale {
+        if let Some(value) = owned_global(&owner, &name) {
             env.refresh_bound_global(&owner, &name, value);
         }
     }
@@ -475,6 +243,7 @@ pub(crate) fn refresh_live_bound_globals(env: &mut Env) {
 
 pub(crate) fn sync_live_bound_globals(local_env: &Env, outer_env: &mut Env) {
     publish_live_bound_globals(local_env);
+    outer_env.refresh_scope(owned_globals_snapshot());
     let mut packets = local_env
         .forwarded_globals()
         .map(|((owner, name), value)| ((Arc::clone(owner), name.clone()), value.clone()))
@@ -486,23 +255,13 @@ pub(crate) fn sync_live_bound_globals(local_env: &Env, outer_env: &mut Env) {
         let Some((owner, source_name)) = local_env.global_binding(local_name) else {
             continue;
         };
-        if let Some(value) = MODULE_GLOBALS_BY_OWNER.with(|cell| {
-            cell.borrow()
-                .get(owner)
-                .and_then(|globals| globals.get(source_name))
-                .cloned()
-        }) {
-            packets.insert((Arc::clone(owner), source_name.clone()), value);
+        if let Some(value) = owned_global(&owner, &source_name) {
+            packets.insert((owner, source_name), value);
         }
     }
     let caller_owner = CURRENT_EXEC_MODULE.with(|cell| cell.borrow().clone());
     for ((owner, name), _) in packets {
-        let Some(value) = MODULE_GLOBALS_BY_OWNER.with(|cell| {
-            cell.borrow()
-                .get(&owner)
-                .and_then(|globals| globals.get(&name))
-                .cloned()
-        }) else {
+        let Some(value) = owned_global(&owner, &name) else {
             continue;
         };
         let refreshed = outer_env.refresh_bound_global(&owner, &name, value.clone());
@@ -512,62 +271,43 @@ pub(crate) fn sync_live_bound_globals(local_env: &Env, outer_env: &mut Env) {
     }
 }
 
+/// The caller released its store snapshot for the callee's lifetime. It is
+/// re-pointed here AFTER the store writes below — never before: a snapshot
+/// taken first would share the owner map with the store, and the write's
+/// `Arc::make_mut` would then copy every global of that owner
+/// (tests/interpreter_call_env_o_args.rs caught exactly that ordering).
 pub(crate) fn sync_owned_captured_globals(func: &FunctionDef, local_env: &Env, outer_env: &mut Env) {
     let caller_owner = CURRENT_EXEC_MODULE.with(|cell| cell.borrow().clone());
     let Some(owner) = function_module_owner(func).or_else(|| caller_owner.clone()) else {
+        outer_env.refresh_scope(owned_globals_snapshot());
         return;
     };
-    // Read-only pass first: taking a write borrow on the tracked cell bumps
-    // the env-cache generation, so it is deferred until `changed` is known
-    // non-empty below.
-    let (changed, live_for_caller) = MODULE_GLOBALS_BY_OWNER.with(|cell| {
-        let globals_by_owner = cell.borrow();
-        if !globals_by_owner.contains_key(&owner) {
-            return (Vec::new(), Vec::new());
+    if !owner_has_globals(&owner) {
+        outer_env.refresh_scope(owned_globals_snapshot());
+        return;
+    }
+    let mut changed = Vec::new();
+    let mut live_for_caller = Vec::new();
+    for (local_name, value) in local_env.overlay_entries() {
+        if func.params.iter().any(|param| param.name == *local_name) || local_env.is_local(local_name) {
+            continue;
         }
-        let mut changed = Vec::new();
-        let mut live_for_caller = Vec::new();
-        for (local_name, value) in local_env.overlay_entries() {
-            if func.params.iter().any(|param| param.name == *local_name) || local_env.is_local(local_name) {
-                continue;
-            }
-            let (target_owner, target_name) = local_env
-                .global_binding(local_name)
-                .cloned()
-                .unwrap_or_else(|| (Arc::clone(&owner), local_name.clone()));
-            let Some(current) = globals_by_owner
-                .get(&target_owner)
-                .and_then(|globals| globals.get(&target_name))
-                .cloned()
-            else {
-                continue;
-            };
-            if local_env.is_refreshed_global(local_name) {
-                live_for_caller.push((target_owner, target_name, current));
-            } else {
-                let entry = (target_owner, target_name, value.clone());
-                changed.push(entry.clone());
-                live_for_caller.push(entry);
-            }
+        let (target_owner, target_name) = local_env
+            .global_binding(local_name)
+            .unwrap_or_else(|| (Arc::clone(&owner), local_name.clone()));
+        let Some(current) = owned_global(&target_owner, &target_name) else {
+            continue;
+        };
+        if local_env.is_refreshed_global(local_name) {
+            live_for_caller.push((target_owner, target_name, current));
+        } else {
+            let entry = (target_owner, target_name, value.clone());
+            changed.push(entry.clone());
+            live_for_caller.push(entry);
         }
-        (changed, live_for_caller)
-    });
-    // Recorded, not generation-bumping: this write-back runs on essentially
-    // every interpreted call that touched a global, and a bump here dropped
-    // every cached call-env template (measured 160k full rebuilds in one
-    // `lint` of driver_types.spl -- the dominant remaining cost after the
-    // template cache landed).
-    let mut recorded: Vec<(Arc<str>, String, Value)> = Vec::new();
-    if !changed.is_empty() {
-        MODULE_GLOBALS_BY_OWNER.with(|cell| {
-            let mut globals_by_owner = cell.borrow_mut_recorded();
-            for (target_owner, target_name, value) in &changed {
-                if let Some(globals) = globals_by_owner.get_mut(target_owner) {
-                    globals.insert(target_name.clone(), value.clone());
-                    recorded.push((Arc::clone(target_owner), target_name.clone(), value.clone()));
-                }
-            }
-        });
+    }
+    for (target_owner, target_name, value) in &changed {
+        set_owned_global(target_owner, target_name, value.clone(), false);
     }
     // Mirror mutated owned globals into the shared flat MODULE_GLOBALS. Deferred
     // lazy imports keep each module's globals in MODULE_GLOBALS_BY_OWNER, but a
@@ -583,15 +323,16 @@ pub(crate) fn sync_owned_captured_globals(func: &FunctionDef, local_env: &Env, o
     // globals stay isolated.
     if !changed.is_empty() {
         MODULE_GLOBALS.with(|cell| {
-            let mut globals = cell.borrow_mut_recorded();
+            let mut globals = cell.borrow_mut();
             for (_, name, value) in &changed {
                 globals.insert(name.clone(), value.clone());
             }
         });
     }
-    for (owner, name, value) in recorded {
-        record_global_write(owner, name, value);
-    }
+    // Store writes are done: now the caller may hold a snapshot again. It
+    // reads every live global through the re-pointed scope; only stale copies
+    // in its overlay still need the explicit refresh below.
+    outer_env.refresh_scope(owned_globals_snapshot());
     let Some(caller_owner) = caller_owner else {
         return;
     };
@@ -604,13 +345,7 @@ pub(crate) fn sync_owned_captured_globals(func: &FunctionDef, local_env: &Env, o
     }
     let mut refreshed = Vec::new();
     for ((entry_owner, name), fallback) in forwarded {
-        let value = MODULE_GLOBALS_BY_OWNER.with(|cell| {
-            cell.borrow()
-                .get(&entry_owner)
-                .and_then(|globals| globals.get(&name))
-                .cloned()
-                .unwrap_or(fallback)
-        });
+        let value = owned_global(&entry_owner, &name).unwrap_or(fallback);
         if entry_owner == caller_owner {
             if !outer_env.is_local(&name) {
                 refreshed.push((name, value));
@@ -622,6 +357,11 @@ pub(crate) fn sync_owned_captured_globals(func: &FunctionDef, local_env: &Env, o
             outer_env.forward_globals(entry_owner, [(name, value)]);
         }
     }
+    let through_scope = outer_env.scope().is_some();
+    let refreshed = refreshed
+        .into_iter()
+        .filter(|(name, _)| !through_scope || outer_env.has_overlay_entry(name))
+        .collect::<Vec<_>>();
     outer_env.refresh_globals(refreshed);
 }
 
@@ -976,33 +716,13 @@ pub(crate) fn execute_function_body(
     }
 
     // Now extract result, potentially returning error
-    let (return_origin, result) = match exec_result {
-        Ok((Control::Return(v), _)) => {
-            let origin = if matches!(&v, Value::Nil) && matches!(func.return_type.as_ref(), Some(Type::Optional(_))) {
-                SffiReturnOrigin::ExplicitOptionalNone
-            } else {
-                SffiReturnOrigin::ExplicitReturn
-            };
-            (origin, Some(v))
-        }
-        Ok((_, Some(v))) => {
-            let origin = if matches!(&v, Value::Nil) && matches!(func.return_type.as_ref(), Some(Type::Optional(_))) {
-                SffiReturnOrigin::ExplicitOptionalNone
-            } else {
-                SffiReturnOrigin::TailValue
-            };
-            (origin, Some(v))
-        }
-        Ok((_, None)) if is_language_unit_return_type(func.return_type.as_ref()) => {
-            (SffiReturnOrigin::UnitFallthrough, None)
-        }
-        Ok((_, None)) => (SffiReturnOrigin::MissingReturn, None),
-        // `?` produces an explicit early Result return; it is not a foreign
-        // raw value and must follow the declared function return contract.
-        Err(CompileError::TryError(val)) => (SffiReturnOrigin::ExplicitReturn, Some(*val)),
+    let result = match exec_result {
+        Ok((Control::Return(v), _)) => v,
+        Ok((_, Some(v))) => v,
+        Ok((_, None)) => Value::Nil,
+        Err(CompileError::TryError(val)) => *val,
         Err(e) => return Err(e),
     };
-    let result = validate_sffi_return_contract(&func.name, func.return_type.as_ref(), return_origin, result)?;
 
     // Auto-wrap return value in Some() when the declared return type is T? (Optional)
     // and the actual return value is not already an Option enum.
@@ -1050,6 +770,13 @@ pub(crate) fn execute_function_body(
     } else {
         result
     };
+
+    // Validate return type
+    validate_unit!(
+        &result,
+        func.return_type.as_ref(),
+        format!("return type mismatch in '{}'", func.name)
+    );
 
     // Wrap in Promise if async and requested
     let result = if wrap_async && is_async_function(func) {
@@ -1162,7 +889,7 @@ pub(crate) fn exec_function_with_values_and_self(
     self_ctx: Option<(&str, &Arc<HashMap<String, Value>>)>,
 ) -> Result<Value, CompileError> {
     with_effect_check!(func, {
-        publish_live_bound_globals(outer_env);
+        publish_and_repoint(outer_env);
         let mut local_env = captured_env_with_live_globals(func, &Env::new());
 
         // Set up self context if provided
@@ -1200,7 +927,8 @@ pub(crate) fn exec_function_with_values_and_self(
             self_mode,
         )?;
 
-        let result = execute_function_body(
+        outer_env.release_scope();
+    let result = execute_function_body(
             func,
             bound,
             &mut local_env,
@@ -1210,6 +938,9 @@ pub(crate) fn exec_function_with_values_and_self(
             impl_methods,
             false,
         );
+        // The callee is done executing: drop its snapshot so the sync below
+        // writes the store in place instead of copying the owner map.
+        local_env.release_scope();
         sync_owned_captured_globals(func, &local_env, outer_env);
         result
     })
@@ -1227,7 +958,7 @@ pub(crate) fn exec_function_with_captured_env(
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
     with_effect_check!(func, {
-        publish_live_bound_globals(outer_env);
+        publish_and_repoint(outer_env);
         let mut local_env = captured_env_with_live_globals(func, captured_env);
 
         let self_mode = SelfMode::IncludeSelf;
@@ -1242,7 +973,8 @@ pub(crate) fn exec_function_with_captured_env(
             self_mode,
         )?;
 
-        let result = execute_function_body(
+        outer_env.release_scope();
+    let result = execute_function_body(
             func,
             bound_args,
             &mut local_env,
@@ -1252,6 +984,9 @@ pub(crate) fn exec_function_with_captured_env(
             impl_methods,
             false,
         );
+        // The callee is done executing: drop its snapshot so the sync below
+        // writes the store in place instead of copying the owner map.
+        local_env.release_scope();
         sync_owned_captured_globals(func, &local_env, outer_env);
         if result.is_ok() {
             write_back_mutable_arguments(func, args, outer_env, &local_env, classes, self_mode);
@@ -1312,28 +1047,35 @@ fn is_value_type_struct(v: &Value, classes: &HashMap<String, Arc<ClassDef>>) -> 
 /// container-valued fields — the ones the compiled lanes back with a real heap
 /// handle — are carried back, which is exactly what makes the three engines
 /// agree.
-fn merge_shared_collection_fields(caller_val: &mut Value, callee_val: &Value) {
-    let (
-        Value::Object {
-            fields: caller_fields, ..
-        },
-        Value::Object {
-            fields: callee_fields, ..
-        },
-    ) = (&mut *caller_val, callee_val)
+/// Returns true when any field of `caller_val` was replaced. Containers are
+/// compared by HANDLE identity (`Arc::ptr_eq`), never by content: a deep
+/// `PartialEq` here walked every token of a parser object's array on every
+/// method call (the top frame in 4/5 samples of `lint driver_types.spl`
+/// once per-call env setup was O(args)). A handle that changed carries the
+/// callee's new container; writing back a value-equal one is observably a
+/// no-op, so identity is the right — and O(1) — test.
+fn merge_shared_collection_fields(caller_val: &mut Value, callee_val: &Value) -> bool {
+    let (Value::Object { fields: caller_fields, .. }, Value::Object { fields: callee_fields, .. }) =
+        (&mut *caller_val, callee_val)
     else {
-        return;
+        return false;
     };
+    if Arc::ptr_eq(caller_fields, callee_fields) {
+        return false;
+    }
     let mut updates: Vec<(String, Value)> = Vec::new();
     for (name, new_field) in callee_fields.iter() {
         let Some(old_field) = caller_fields.get(name) else {
             continue;
         };
-        if std::mem::discriminant(old_field) != std::mem::discriminant(new_field) {
-            continue;
-        }
-        match new_field {
-            Value::Array(_) | Value::Dict(_) | Value::ByteArray(_) if old_field != new_field => {
+        match (old_field, new_field) {
+            (Value::Array(old), Value::Array(new)) if !Arc::ptr_eq(old, new) => {
+                updates.push((name.clone(), new_field.clone()));
+            }
+            (Value::Dict(old), Value::Dict(new)) if !Arc::ptr_eq(old, new) => {
+                updates.push((name.clone(), new_field.clone()));
+            }
+            (Value::ByteArray(old), Value::ByteArray(new)) if !Arc::ptr_eq(old, new) => {
                 updates.push((name.clone(), new_field.clone()));
             }
             // A struct-typed field is itself value-copied, but the containers
@@ -1341,10 +1083,9 @@ fn merge_shared_collection_fields(caller_val: &mut Value, callee_val: &Value) {
             // stopping at depth one. `self.inner.values[k] = v` through a
             // by-value receiver must reach the caller for the same reason
             // `self.values[k] = v` does.
-            Value::Object { .. } => {
+            (Value::Object { .. }, Value::Object { .. }) => {
                 let mut merged = old_field.clone();
-                merge_shared_collection_fields(&mut merged, new_field);
-                if merged != *old_field {
+                if merge_shared_collection_fields(&mut merged, new_field) {
                     updates.push((name.clone(), merged));
                 }
             }
@@ -1352,12 +1093,13 @@ fn merge_shared_collection_fields(caller_val: &mut Value, callee_val: &Value) {
         }
     }
     if updates.is_empty() {
-        return;
+        return false;
     }
     let slots = Arc::make_mut(caller_fields);
     for (name, value) in updates {
         slots.insert(name, value);
     }
+    true
 }
 
 // Bug #19 fix: write back mutable-container parameters to caller's bindings.
@@ -1504,9 +1246,7 @@ fn write_back_mutable_arguments(
                         // container-valued fields are shared handles. See
                         // merge_shared_collection_fields.
                         if let Some(mut caller_val) = outer_env.get(&caller_name).cloned() {
-                            let before = caller_val.clone();
-                            merge_shared_collection_fields(&mut caller_val, callee_val);
-                            if caller_val != before {
+                            if merge_shared_collection_fields(&mut caller_val, callee_val) {
                                 outer_env.insert(caller_name, caller_val);
                             }
                         }
@@ -1579,7 +1319,7 @@ fn exec_function_inner(
         crate::runtime_profile::record_full_call(&func.name, self_ctx.map(|(c, _)| c), vec![], call_type);
     }
 
-    publish_live_bound_globals(outer_env);
+    publish_and_repoint(outer_env);
     let mut local_env = captured_env_with_live_globals(func, &Env::new());
 
     if let Some((class_name, fields)) = self_ctx {
@@ -1618,6 +1358,7 @@ fn exec_function_inner(
     // Record function return for layout call graph tracking
     crate::layout_recorder::record_function_return();
 
+    outer_env.release_scope();
     let result = execute_function_body(
         func,
         bound,
@@ -1628,6 +1369,9 @@ fn exec_function_inner(
         impl_methods,
         true,
     );
+    // The callee is done executing: drop its snapshot so the sync below
+    // writes the store in place instead of copying the owner map.
+    local_env.release_scope();
     sync_owned_captured_globals(func, &local_env, outer_env);
 
     if result.is_ok() {
@@ -1667,7 +1411,7 @@ fn exec_function_with_values_and_writeback_inner(
         crate::runtime_profile::record_full_call(&func.name, None, vec![], crate::runtime_profile::CallType::Direct);
     }
 
-    publish_live_bound_globals(outer_env);
+    publish_and_repoint(outer_env);
     let mut local_env = captured_env_with_live_globals(func, &Env::new());
     let self_mode = SelfMode::IncludeSelf;
     let bound = bind_args_with_values(
@@ -1683,6 +1427,7 @@ fn exec_function_with_values_and_writeback_inner(
 
     crate::layout_recorder::record_function_return();
 
+    outer_env.release_scope();
     let result = execute_function_body(
         func,
         bound,
@@ -1693,6 +1438,9 @@ fn exec_function_with_values_and_writeback_inner(
         impl_methods,
         true,
     );
+    // The callee is done executing: drop its snapshot so the sync below
+    // writes the store in place instead of copying the owner map.
+    local_env.release_scope();
     sync_owned_captured_globals(func, &local_env, outer_env);
 
     if result.is_ok() {
@@ -1756,11 +1504,12 @@ fn exec_function_with_bound_args_inner(
         crate::runtime_profile::record_full_call(&func.name, None, vec![], crate::runtime_profile::CallType::Direct);
     }
 
-    publish_live_bound_globals(outer_env);
+    publish_and_repoint(outer_env);
     let mut local_env = captured_env_with_live_globals(func, &Env::new());
     // Record function return for layout call graph tracking
     crate::layout_recorder::record_function_return();
 
+    outer_env.release_scope();
     let result = execute_function_body(
         func,
         bound_args,
@@ -1771,6 +1520,9 @@ fn exec_function_with_bound_args_inner(
         impl_methods,
         true,
     );
+    // The callee is done executing: drop its snapshot so the sync below
+    // writes the store in place instead of copying the owner map.
+    local_env.release_scope();
     sync_owned_captured_globals(func, &local_env, outer_env);
 
     // Runtime profiler return hook
@@ -1891,16 +1643,9 @@ mod tests {
             simple_runtime::value::heap::set_current_owner(owner.as_ref());
         }
         MODULE_GLOBALS.with(|cell| cell.borrow_mut().clear());
-        MODULE_GLOBALS_BY_OWNER.with(|cell| {
-            cell.borrow_mut().insert(
-                Arc::clone(&owner),
-                HashMap::from([
-                    ("stale".to_string(), Value::Bool(false)),
-                    ("caller_write".to_string(), Value::Bool(true)),
-                    ("items".to_string(), Value::array(vec![Value::Int(1)])),
-                ]),
-            );
-        });
+        set_owned_global(&owner, "stale", Value::Bool(false), true);
+        set_owned_global(&owner, "caller_write", Value::Bool(true), true);
+        set_owned_global(&owner, "items", Value::array(vec![Value::Int(1)]), true);
 
         let mut frame = Env::new();
         frame.refresh_globals([
@@ -1908,12 +1653,7 @@ mod tests {
             ("caller_write".to_string(), Value::Bool(true)),
             ("items".to_string(), Value::array(vec![Value::Int(1)])),
         ]);
-        MODULE_GLOBALS_BY_OWNER.with(|cell| {
-            cell.borrow_mut()
-                .get_mut(&owner)
-                .expect("owner globals")
-                .insert("stale".to_string(), Value::Bool(true));
-        });
+        assert!(set_owned_global(&owner, "stale", Value::Bool(true), false));
         frame.insert("caller_write".to_string(), Value::Bool(false));
         let Value::Array(items) = frame.get_mut("items").expect("items") else {
             panic!("items must be an array");
@@ -1926,24 +1666,18 @@ mod tests {
         assert_eq!(outer.get("stale"), Some(&Value::Bool(true)));
         assert!(outer.is_refreshed_global("stale"));
 
-        MODULE_GLOBALS_BY_OWNER.with(|cell| {
-            let globals = cell.borrow();
-            let globals = globals.get(&owner).expect("owner globals");
-            assert_eq!(globals.get("stale"), Some(&Value::Bool(true)));
-            assert_eq!(globals.get("caller_write"), Some(&Value::Bool(false)));
-            let Value::Array(items) = globals.get("items").expect("items") else {
-                panic!("items must be an array");
-            };
-            assert_eq!(items.as_slice(), &[Value::Int(1), Value::Int(2)]);
-        });
+        assert_eq!(owned_global(&owner, "stale"), Some(Value::Bool(true)));
+        assert_eq!(owned_global(&owner, "caller_write"), Some(Value::Bool(false)));
+        let Some(Value::Array(items)) = owned_global(&owner, "items") else {
+            panic!("items must be an array");
+        };
+        assert_eq!(items.as_slice(), &[Value::Int(1), Value::Int(2)]);
 
         let foreign_owner: Arc<str> = Arc::from("test/foreign_frame.spl");
         FUNCTION_MODULE_OWNER.with(|cell| {
             cell.borrow_mut().insert(function_key, Arc::clone(&foreign_owner));
         });
-        MODULE_GLOBALS_BY_OWNER.with(|cell| {
-            cell.borrow_mut().insert(Arc::clone(&foreign_owner), HashMap::new());
-        });
+        seed_owner_globals(&foreign_owner);
         let mut foreign_frame = Env::new();
         foreign_frame.forward_globals(Arc::clone(&owner), [("stale".to_string(), Value::Bool(false))]);
         let mut owner_frame = Env::new();
@@ -1951,71 +1685,13 @@ mod tests {
         assert_eq!(owner_frame.get("stale"), Some(&Value::Bool(true)));
 
         FUNCTION_MODULE_OWNER.with(|cell| cell.borrow_mut().remove(&function_key));
-        MODULE_GLOBALS_BY_OWNER.with(|cell| {
+        crate::interpreter::MODULE_GLOBALS_BY_OWNER.with(|cell| {
             let mut globals = cell.borrow_mut();
+            let globals = Arc::make_mut(&mut *globals);
             globals.remove(&owner);
             globals.remove(&foreign_owner);
         });
         MODULE_GLOBALS.with(|cell| cell.borrow_mut().clear());
         CURRENT_EXEC_MODULE.with(|cell| *cell.borrow_mut() = None);
-    }
-}
-
-#[cfg(test)]
-mod env_template_cache_tests {
-    use super::*;
-
-    fn template_for(base: Option<&Arc<HashMap<String, Value>>>) -> EnvTemplate {
-        EnvTemplate {
-            generation: 0,
-            seq: 0,
-            env: Env::new(),
-            by_source: HashMap::new(),
-            base_guard: base.map(Arc::downgrade),
-        }
-    }
-
-    // Mechanism pin for the bound: pushing far more DISTINCT keys than the cap
-    // must never let the map exceed it. Asserts structure, not wall time.
-    #[test]
-    fn owned_env_template_cache_stays_within_cap() {
-        let cap = *OWNED_ENV_TEMPLATE_CACHE_CAP;
-        assert!(cap < usize::MAX, "test requires a bounded cap (SIMPLE_INTERP_ENV_CACHE_CAP unset)");
-        let owner: Arc<str> = Arc::from("owner");
-        let mut cache: HashMap<(Arc<str>, usize), EnvTemplate> = HashMap::new();
-        let mut bases = Vec::new();
-        for i in 0..(cap * 2 + 7) {
-            let base = Arc::new(HashMap::new());
-            let key = (Arc::clone(&owner), Arc::as_ptr(&base) as *const u8 as usize + i);
-            insert_env_template(&mut cache, key, template_for(Some(&base)));
-            bases.push(base);
-            assert!(cache.len() <= cap, "cache grew to {} over cap {}", cache.len(), cap);
-        }
-        assert!(!cache.is_empty(), "cache must still be usable after eviction");
-    }
-
-    // ABA pin: an entry whose base has been dropped must not be served, even
-    // when a fresh allocation reuses the same address (which is exactly what
-    // the raw-pointer key cannot distinguish on its own).
-    #[test]
-    fn dropped_base_is_not_a_hit_even_at_the_same_address() {
-        let old = Arc::new(HashMap::new());
-        let template = template_for(Some(&old));
-        assert!(env_template_base_matches(&template, Some(&old)));
-        drop(old);
-        let replacement: Arc<HashMap<String, Value>> = Arc::new(HashMap::new());
-        assert!(
-            !env_template_base_matches(&template, Some(&replacement)),
-            "a different base must never match, address reuse or not"
-        );
-        assert!(!env_template_base_matches(&template, None));
-    }
-
-    #[test]
-    fn empty_env_template_matches_only_the_empty_env() {
-        let template = template_for(None);
-        assert!(env_template_base_matches(&template, None));
-        let base: Arc<HashMap<String, Value>> = Arc::new(HashMap::new());
-        assert!(!env_template_base_matches(&template, Some(&base)));
     }
 }

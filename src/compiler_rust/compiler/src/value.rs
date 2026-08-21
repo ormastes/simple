@@ -292,8 +292,201 @@ pub fn strict_mem_enable() {
     STRICT_MEM_FORCED.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Copy-on-write environment: reads check overlay first, then immutable base.
-/// Clone is O(overlay_size) via Arc base + overlay clone, not O(base_size).
+/// Live per-owner module-global stores: owner -> (name -> value). The outer
+/// and inner maps are both `Arc`-shared so a call frame can SNAPSHOT the whole
+/// store in O(1) (`GlobalScope`), while a write copies only the map it
+/// touches (`Arc::make_mut`) — never the thousands of bindings a module env
+/// used to materialize per call.
+/// doc/08_tracking/bug/seed_interpreter_env_rebuild_per_call_o_globals_2026-08-21.md
+pub type OwnedGlobals = Arc<HashMap<Arc<str>, Arc<HashMap<String, Value>>>>;
+
+thread_local! {
+    /// Shared empty store for released scopes (`CowEnv::release_scope`).
+    static EMPTY_GLOBALS: OwnedGlobals = Arc::new(HashMap::new());
+}
+
+/// Per-module import table: local alias -> (defining owner, defining name),
+/// plus the reverse index (owner -> name -> aliases) so every alias of a
+/// written global is found in O(1) instead of scanning the whole table.
+#[derive(Debug, Default, Clone)]
+pub struct ModuleBindings {
+    forward: HashMap<String, (Arc<str>, String)>,
+    reverse: HashMap<Arc<str>, HashMap<String, Vec<String>>>,
+}
+
+impl ModuleBindings {
+    pub fn insert(&mut self, local_name: String, binding: (Arc<str>, String)) {
+        if let Some(old) = self.forward.get(&local_name) {
+            if *old == binding {
+                return;
+            }
+            if let Some(aliases) = self.reverse.get_mut(&old.0).and_then(|by_name| by_name.get_mut(&old.1)) {
+                aliases.retain(|alias| alias != &local_name);
+            }
+        }
+        self.reverse
+            .entry(Arc::clone(&binding.0))
+            .or_default()
+            .entry(binding.1.clone())
+            .or_default()
+            .push(local_name.clone());
+        self.forward.insert(local_name, binding);
+    }
+
+    pub fn get(&self, local_name: &str) -> Option<&(Arc<str>, String)> {
+        self.forward.get(local_name)
+    }
+
+    /// Local aliases bound to (`owner`, `name`).
+    pub fn aliases_of(&self, owner: &str, name: &str) -> &[String] {
+        self.reverse
+            .get(owner)
+            .and_then(|by_name| by_name.get(name))
+            .map(|aliases| aliases.as_slice())
+            .unwrap_or(&[])
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &(Arc<str>, String))> {
+        self.forward.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.forward.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.forward.is_empty()
+    }
+}
+
+/// The module-level scope a call frame resolves globals through, by parent
+/// pointer rather than by copy. Lookup order for a name not in the frame's
+/// overlay: the owner's live globals, then its imports (resolved through the
+/// defining owner's live globals), then the static module env (functions,
+/// classes, constants). All four handles are `Arc`s: attaching a scope to a
+/// frame is four refcount increments, independent of how many globals exist.
+#[derive(Debug, Clone)]
+pub struct GlobalScope {
+    owner: Arc<str>,
+    module_env: Option<Arc<HashMap<String, Value>>>,
+    bindings: Option<Arc<ModuleBindings>>,
+    globals: OwnedGlobals,
+}
+
+impl GlobalScope {
+    pub fn new(
+        owner: Arc<str>,
+        module_env: Option<Arc<HashMap<String, Value>>>,
+        bindings: Option<Arc<ModuleBindings>>,
+        globals: OwnedGlobals,
+    ) -> Self {
+        GlobalScope {
+            owner,
+            module_env,
+            bindings,
+            globals,
+        }
+    }
+
+    pub fn owner(&self) -> &Arc<str> {
+        &self.owner
+    }
+
+    fn owner_globals(&self) -> Option<&Arc<HashMap<String, Value>>> {
+        self.globals.get(&self.owner)
+    }
+
+    /// True while `release_scope` has pointed this scope at the shared empty
+    /// store (the frame is not executing, or is about to write the store).
+    fn is_released(&self) -> bool {
+        EMPTY_GLOBALS.with(|empty| Arc::ptr_eq(&self.globals, empty))
+    }
+
+    /// Is `name` one of the owner's own module globals? Answered from the
+    /// snapshot while one is held; from the live store while released. The
+    /// released case is what `publish_and_repoint` and the callee-side sync
+    /// run in, and answering "no" there silently dropped every publish of a
+    /// frame's writes to its own module globals (stage-1 then read a
+    /// one-append-stale arena: `index is 742 but length is 742`).
+    fn owner_has(&self, name: &str) -> bool {
+        if self.is_released() {
+            return crate::interpreter::owned_global_present(&self.owner, name);
+        }
+        self.owner_globals().is_some_and(|globals| globals.contains_key(name))
+    }
+
+    /// Live value: owner globals first, then imported globals.
+    fn get_live(&self, name: &str) -> Option<&Value> {
+        if let Some(value) = self.owner_globals().and_then(|globals| globals.get(name)) {
+            return Some(value);
+        }
+        let (owner, source) = self.bindings.as_ref()?.get(name)?;
+        self.globals.get(owner)?.get(source.as_str())
+    }
+
+    fn get_static(&self, name: &str) -> Option<&Value> {
+        self.module_env.as_ref()?.get(name)
+    }
+
+    fn contains_live(&self, name: &str) -> bool {
+        self.get_live(name).is_some()
+    }
+
+    fn contains_static(&self, name: &str) -> bool {
+        self.module_env.as_ref().is_some_and(|env| env.contains_key(name))
+    }
+
+    /// (defining owner, defining name) of a global visible as `name`.
+    fn binding(&self, name: &str) -> Option<(Arc<str>, String)> {
+        if self.owner_has(name) {
+            return Some((Arc::clone(&self.owner), name.to_owned()));
+        }
+        self.bindings.as_ref()?.get(name).cloned()
+    }
+
+    /// Every local name through which (`owner`, `source`) is visible.
+    fn aliases_of(&self, owner: &Arc<str>, source: &str, out: &mut Vec<String>) {
+        if *owner == self.owner && self.owner_has(source) {
+            out.push(source.to_owned());
+        }
+        if let Some(bindings) = &self.bindings {
+            out.extend(bindings.aliases_of(owner, source).iter().cloned());
+        }
+    }
+
+    fn for_each_binding<'a>(&'a self, mut f: impl FnMut(&'a String, (Arc<str>, String))) {
+        if let Some(globals) = self.owner_globals() {
+            for name in globals.keys() {
+                f(name, (Arc::clone(&self.owner), name.clone()));
+            }
+        }
+        if let Some(bindings) = &self.bindings {
+            for (local_name, binding) in bindings.iter() {
+                f(local_name, binding.clone());
+            }
+        }
+    }
+
+    /// Live-layer entries in precedence order (owner globals, then imports).
+    fn for_each_live<'a>(&'a self, mut f: impl FnMut(&'a String, &'a Value)) {
+        if let Some(globals) = self.owner_globals() {
+            for (name, value) in globals.iter() {
+                f(name, value);
+            }
+        }
+        if let Some(bindings) = &self.bindings {
+            for (local_name, (owner, source)) in bindings.iter() {
+                if let Some(value) = self.globals.get(owner).and_then(|globals| globals.get(source.as_str())) {
+                    f(local_name, value);
+                }
+            }
+        }
+    }
+}
+
+/// Copy-on-write environment: reads check the frame's overlay first, then the
+/// module scope (live globals by parent pointer), then the immutable base.
+/// Clone is O(overlay_size): base and scope are `Arc`s.
 ///
 /// This replaces the old `type Env = HashMap<String, Value>` with a struct
 /// that avoids deep-cloning the entire captured environment on every
@@ -302,9 +495,11 @@ pub fn strict_mem_enable() {
 pub struct CowEnv {
     /// Shared immutable base environment (cheap to clone via Arc)
     base: Option<Arc<HashMap<String, Value>>>,
+    /// Module scope resolved by parent pointer: never copied into the frame.
+    scope: Option<GlobalScope>,
     /// Local modifications/additions (typically small — function args, locals)
     overlay: HashMap<String, Value>,
-    /// Keys removed from base (tombstones)
+    /// Keys removed from base/scope (tombstones)
     tombstones: HashSet<String>,
     /// Names declared by the current lexical function frame.
     local_bindings: HashSet<String>,
@@ -314,10 +509,9 @@ pub struct CowEnv {
     refreshed_globals: HashSet<String>,
     /// Owner-qualified updates crossing frames from another module.
     forwarded_globals: HashMap<(Arc<str>, String), Value>,
-    /// Local global name to defining module/name, including imported aliases.
-    // Arc-shared: a module function's env template carries thousands of
-    // imported-global bindings and is cloned on EVERY call; copy-on-write via
-    // Arc::make_mut keeps the per-call clone O(1) (2026-08-21 stall record).
+    /// Explicit local-name -> defining module/name bindings (selective lambda
+    /// capture, tests). The module scope answers the same question lazily for
+    /// every other name, so this stays small.
     global_bindings: Arc<HashMap<String, (Arc<str>, String)>>,
     /// Names written through this frame since the last `clear_dirty()`.
     /// Distinguishes actual frame writes from values merely present in a
@@ -335,6 +529,7 @@ impl CowEnv {
     pub fn new() -> Self {
         CowEnv {
             base: None,
+            scope: None,
             overlay: HashMap::new(),
             tombstones: HashSet::new(),
             local_bindings: HashSet::new(),
@@ -347,7 +542,8 @@ impl CowEnv {
         }
     }
 
-    /// Look up a key: overlay first, then base (skipping tombstones).
+    /// Look up a key: overlay, then (skipping tombstones) the live module
+    /// scope, the base, and finally the static module env.
     pub fn get(&self, key: &str) -> Option<&Value> {
         if let Some(v) = self.overlay.get(key) {
             return Some(v);
@@ -355,10 +551,17 @@ impl CowEnv {
         if self.tombstones.contains(key) {
             return None;
         }
-        if let Some(ref base) = self.base {
-            return base.get(key);
+        if let Some(scope) = &self.scope {
+            if let Some(v) = scope.get_live(key) {
+                return Some(v);
+            }
         }
-        None
+        if let Some(ref base) = self.base {
+            if let Some(v) = base.get(key) {
+                return Some(v);
+            }
+        }
+        self.scope.as_ref().and_then(|scope| scope.get_static(key))
     }
 
     /// Insert a key-value pair. Returns the previous value if any.
@@ -414,13 +617,42 @@ impl CowEnv {
         self.local_bindings.contains(name) || self.block_local_bindings.contains_key(name)
     }
 
-    /// Get a mutable reference to a value, promoting it from the shared base
-    /// into the local overlay on first mutable access (so the base stays
-    /// immutable/shared). Enables in-place mutation of arrays/dicts held in a
-    /// local or `self`, avoiding an O(n) copy-on-write clone per element write.
-    /// Copy-on-write semantics are preserved: the promoted value Arc-clones the
-    /// container handle, so a genuinely aliased container still deep-copies on
-    /// the first `Arc::make_mut` and only then mutates in place.
+    /// Attach (or replace) the module scope this frame resolves globals through.
+    pub fn set_scope(&mut self, scope: GlobalScope) {
+        self.scope = Some(scope);
+    }
+
+    pub fn scope(&self) -> Option<&GlobalScope> {
+        self.scope.as_ref()
+    }
+
+    /// Re-point the scope at the current live stores. O(1): the frame keeps
+    /// no copy of any global, so "refreshing" is swapping one `Arc`.
+    pub fn refresh_scope(&mut self, globals: OwnedGlobals) {
+        if let Some(scope) = &mut self.scope {
+            scope.globals = globals;
+        }
+    }
+
+    /// Drop this frame's store snapshot while it is not executing (its callee
+    /// is). A held snapshot pins the store version at frame entry, and every
+    /// pinned version forces the next COW mutation of a global container to
+    /// deep-copy — O(recursion depth x container) memory under the parser.
+    /// The frame re-acquires a snapshot through `refresh_scope` at sync.
+    pub fn release_scope(&mut self) {
+        if let Some(scope) = &mut self.scope {
+            scope.globals = EMPTY_GLOBALS.with(Arc::clone);
+        }
+    }
+
+    /// Get a mutable reference to a value, promoting it from the shared
+    /// base/scope into the local overlay on first mutable access (so the
+    /// shared layers stay immutable). Enables in-place mutation of
+    /// arrays/dicts held in a local or `self`, avoiding an O(n) copy-on-write
+    /// clone per element write. Copy-on-write semantics are preserved: the
+    /// promoted value Arc-clones the container handle, so a genuinely aliased
+    /// container still deep-copies on the first `Arc::make_mut` and only then
+    /// mutates in place.
     pub fn get_mut(&mut self, key: &str) -> Option<&mut Value> {
         if self.overlay.contains_key(key) {
             self.refreshed_globals.remove(key);
@@ -430,10 +662,7 @@ impl CowEnv {
         if self.tombstones.contains(key) {
             return None;
         }
-        let promoted = match &self.base {
-            Some(base) => base.get(key).cloned(),
-            None => None,
-        };
+        let promoted = self.get(key).cloned();
         if let Some(v) = promoted {
             self.overlay.insert(key.to_string(), v);
             self.refreshed_globals.remove(key);
@@ -443,28 +672,31 @@ impl CowEnv {
         None
     }
 
+    fn shared_contains(&self, key: &str) -> bool {
+        self.scope
+            .as_ref()
+            .is_some_and(|scope| scope.contains_live(key) || scope.contains_static(key))
+            || self.base.as_ref().is_some_and(|base| base.contains_key(key))
+    }
+
     /// Remove a key. Returns the removed value if any.
     pub fn remove(&mut self, key: &str) -> Option<Value> {
         self.refreshed_globals.remove(key);
         if let Some(v) = self.overlay.remove(key) {
-            // If the key also exists in base, add a tombstone so we don't see it
-            if let Some(ref base) = self.base {
-                if base.contains_key(key) {
-                    self.tombstones.insert(key.to_string());
-                }
+            // If the key also exists in a shared layer, add a tombstone so we don't see it
+            if self.shared_contains(key) {
+                self.tombstones.insert(key.to_string());
             }
             return Some(v);
         }
         if self.tombstones.contains(key) {
             return None;
         }
-        if let Some(ref base) = self.base {
-            if let Some(v) = base.get(key) {
-                self.tombstones.insert(key.to_string());
-                return Some(v.clone());
-            }
+        let shared = self.get(key).cloned();
+        if shared.is_some() {
+            self.tombstones.insert(key.to_string());
         }
-        None
+        shared
     }
 
     /// Check if a key exists in the environment.
@@ -475,60 +707,44 @@ impl CowEnv {
         if self.tombstones.contains(key) {
             return false;
         }
-        if let Some(ref base) = self.base {
-            return base.contains_key(key);
-        }
-        false
+        self.shared_contains(key)
     }
 
-    /// Approximate number of entries.
+    /// All visible (key, value) pairs, first-wins in lookup precedence:
+    /// overlay, live scope, base, static module env; tombstones hide the
+    /// shared layers.
+    fn visible_entries<'a>(&'a self) -> Vec<(&'a String, &'a Value)> {
+        let mut out: Vec<(&'a String, &'a Value)> = Vec::with_capacity(self.overlay.len());
+        let mut seen: HashSet<&'a str> = HashSet::with_capacity(self.overlay.len());
+        for (k, v) in &self.overlay {
+            seen.insert(k.as_str());
+            out.push((k, v));
+        }
+        let tombstones = &self.tombstones;
+        let mut push_shared = |k: &'a String, v: &'a Value| {
+            if !tombstones.contains(k.as_str()) && seen.insert(k.as_str()) {
+                out.push((k, v));
+            }
+        };
+        if let Some(scope) = &self.scope {
+            scope.for_each_live(&mut push_shared);
+        }
+        if let Some(base) = &self.base {
+            for (k, v) in base.iter() {
+                push_shared(k, v);
+            }
+        }
+        if let Some(env) = self.scope.as_ref().and_then(|scope| scope.module_env.as_ref()) {
+            for (k, v) in env.iter() {
+                push_shared(k, v);
+            }
+        }
+        out
+    }
+
+    /// Number of visible entries.
     pub fn len(&self) -> usize {
-        let base_count = match &self.base {
-            Some(b) => b.len(),
-            None => 0,
-        };
-        // base keys minus tombstones, plus overlay keys (some may shadow base)
-        let base_visible = if base_count > self.tombstones.len() {
-            base_count - self.tombstones.len()
-        } else {
-            0
-        };
-        // Count overlay keys that are NOT shadowing base keys
-        let overlay_new = self
-            .overlay
-            .keys()
-            .filter(|k| match &self.base {
-                Some(b) => !b.contains_key(k.as_str()),
-                None => true,
-            })
-            .count();
-        base_visible
-            + overlay_new
-            + self
-                .overlay
-                .keys()
-                .filter(|k| match &self.base {
-                    Some(b) => b.contains_key(k.as_str()),
-                    None => false,
-                })
-                .count()
-    }
-
-    /// Identity of this env for the owned-env template cache: `Some(0)` for a
-    /// fully empty env, `Some(ptr)` of the shared immutable base when the env
-    /// is exactly that base (no overlay, no tombstones), `None` otherwise.
-    /// Two envs with the same key see the same bindings, so a per-call env
-    /// template built from one is valid for the other (globals are guarded
-    /// separately by the module-globals generation).
-    /// doc/08_tracking/bug/bootstrap_main_native_build_stalls_after_source_closure_2026-08-21.md
-    pub fn template_key(&self) -> Option<usize> {
-        if !self.overlay.is_empty() || !self.tombstones.is_empty() {
-            return None;
-        }
-        match &self.base {
-            None => Some(0),
-            Some(b) => Some(Arc::as_ptr(b) as *const u8 as usize),
-        }
+        self.visible_entries().len()
     }
 
     /// The `Arc` whose address `template_key` reports, when this env has one.
@@ -549,16 +765,7 @@ impl CowEnv {
 
     /// Check if the environment is empty.
     pub fn is_empty(&self) -> bool {
-        if !self.overlay.is_empty() {
-            return false;
-        }
-        match &self.base {
-            Some(b) => {
-                // All base keys must be tombstoned
-                b.len() <= self.tombstones.len() && b.keys().all(|k| self.tombstones.contains(k))
-            }
-            None => true,
-        }
+        self.visible_entries().is_empty()
     }
 
     /// Iterate over all keys (merged, deduplicated).
@@ -572,13 +779,14 @@ impl CowEnv {
     }
 
     /// Iterate over all (key, value) pairs (merged).
-    pub fn iter(&self) -> CowEnvIter<'_> {
-        CowEnvIter {
-            overlay_iter: self.overlay.iter(),
-            base_iter: self.base.as_ref().map(|b| b.iter()),
-            overlay: &self.overlay,
-            tombstones: &self.tombstones,
-        }
+    pub fn iter(&self) -> std::vec::IntoIter<(&String, &Value)> {
+        self.visible_entries().into_iter()
+    }
+
+    /// True when this frame holds its own copy of `name` (written, bound, or
+    /// refreshed here), as opposed to reading it through a shared layer.
+    pub fn has_overlay_entry(&self, name: &str) -> bool {
+        self.overlay.contains_key(name)
     }
 
     /// Iterate over values written in this environment frame.
@@ -630,12 +838,35 @@ impl CowEnv {
         }
     }
 
-    pub fn global_binding(&self, local_name: &str) -> Option<&(Arc<str>, String)> {
-        self.global_bindings.get(local_name)
+    /// (defining owner, defining name) behind `local_name`: an explicit
+    /// binding first, otherwise the module scope — unless the name is a local
+    /// of this frame, which shadows any global.
+    pub fn global_binding(&self, local_name: &str) -> Option<(Arc<str>, String)> {
+        if let Some(binding) = self.global_bindings.get(local_name) {
+            return Some(binding.clone());
+        }
+        if self.is_local(local_name) {
+            return None;
+        }
+        self.scope.as_ref()?.binding(local_name)
     }
 
-    pub fn global_bindings(&self) -> impl Iterator<Item = (&String, &(Arc<str>, String))> {
-        self.global_bindings.iter()
+    /// Every (local name, (owner, source)) pair this frame treats as a global
+    /// alias. Materialized — O(globals) — so only for diagnostics.
+    pub fn global_bindings(&self) -> Vec<(String, (Arc<str>, String))> {
+        let mut out: Vec<(String, (Arc<str>, String))> = self
+            .global_bindings
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        if let Some(scope) = &self.scope {
+            scope.for_each_binding(|name, binding| {
+                if !self.is_local(name) && !self.global_bindings.contains_key(name) {
+                    out.push((name.clone(), binding));
+                }
+            });
+        }
+        out
     }
 
     /// Names written through this frame since the last `clear_dirty()`.
@@ -678,13 +909,16 @@ impl CowEnv {
         self.dirty_names.insert(name.to_string());
     }
 
-    /// Project a subset of names into a fresh env, preserving global-binding
-    /// and refreshed-global metadata. Selective lambda capture MUST use this
-    /// instead of a plain name->value map: `from_map` demotes an imported
-    /// global alias to a local-looking value, losing its defining owner —
-    /// the exact metadata-loss path behind the stage-4 stale-arena reads.
+    /// Project a subset of names into a fresh env, preserving global-binding,
+    /// local-binding and refreshed-global metadata, and the module scope.
+    /// Selective lambda capture MUST use this instead of a plain name->value
+    /// map: `from_map` demotes an imported global alias to a local-looking
+    /// value, losing its defining owner — the exact metadata-loss path behind
+    /// the stage-4 stale-arena reads.
     pub fn project_preserving_bindings(&self, names: &HashSet<String>) -> CowEnv {
         let mut env = CowEnv::new();
+        env.scope = self.scope.clone();
+        env.release_scope();
         for (k, v) in self.iter() {
             if names.contains(k.as_str()) {
                 env.overlay.insert(k.clone(), v.clone());
@@ -696,6 +930,16 @@ impl CowEnv {
                     .insert(local_name.clone(), (Arc::clone(owner), source_name.clone()));
             }
         }
+        for name in &self.local_bindings {
+            if names.contains(name.as_str()) {
+                env.local_bindings.insert(name.clone());
+            }
+        }
+        for name in self.block_local_bindings.keys() {
+            if names.contains(name.as_str()) {
+                env.local_bindings.insert(name.clone());
+            }
+        }
         for name in &self.refreshed_globals {
             if names.contains(name.as_str()) && env.overlay.contains_key(name.as_str()) {
                 env.refreshed_globals.insert(name.clone());
@@ -704,15 +948,26 @@ impl CowEnv {
         env
     }
 
+    /// Make the live value of (`owner`, `source_name`) visible through every
+    /// local alias of it. A stale copy sitting in this frame's overlay is
+    /// overwritten (marked refreshed, not dirty); an alias not in the overlay
+    /// already reads the value through the scope and needs nothing. Returns
+    /// true when the global is visible in this frame at all.
     pub fn refresh_bound_global(&mut self, owner: &Arc<str>, source_name: &str, value: Value) -> bool {
-        let local_names = self
+        let mut local_names = self
             .global_bindings
             .iter()
             .filter(|(_, (bound_owner, bound_name))| bound_owner == owner && bound_name == source_name)
             .map(|(local_name, _)| local_name.clone())
-            .filter(|local_name| !self.is_local(local_name))
             .collect::<Vec<_>>();
+        if let Some(scope) = &self.scope {
+            scope.aliases_of(owner, source_name, &mut local_names);
+        }
+        local_names.retain(|local_name| !self.is_local(local_name));
         let refreshed = !local_names.is_empty();
+        if self.scope.is_some() {
+            local_names.retain(|local_name| self.overlay.contains_key(local_name.as_str()));
+        }
         self.refresh_globals(local_names.into_iter().map(|local_name| (local_name, value.clone())));
         refreshed
     }
@@ -721,6 +976,7 @@ impl CowEnv {
     pub fn from_map(map: HashMap<String, Value>) -> Self {
         CowEnv {
             base: None,
+            scope: None,
             overlay: map,
             tombstones: HashSet::new(),
             local_bindings: HashSet::new(),
@@ -737,6 +993,7 @@ impl CowEnv {
     pub fn with_base(base: Arc<HashMap<String, Value>>) -> Self {
         CowEnv {
             base: Some(base),
+            scope: None,
             overlay: HashMap::new(),
             tombstones: HashSet::new(),
             local_bindings: HashSet::new(),
@@ -751,19 +1008,10 @@ impl CowEnv {
 
     /// Materialize into a flat HashMap (for cases that need it).
     pub fn to_map(&self) -> HashMap<String, Value> {
-        let mut result = match &self.base {
-            Some(b) => {
-                let mut m = (**b).clone();
-                for t in &self.tombstones {
-                    m.remove(t);
-                }
-                m
-            }
-            None => HashMap::new(),
-        };
-        // Overlay overwrites base entries
-        result.extend(self.overlay.iter().map(|(k, v)| (k.clone(), v.clone())));
-        result
+        self.visible_entries()
+            .into_iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
     }
 
     /// Freeze current state into a shareable Arc<HashMap> for capture.
@@ -774,32 +1022,27 @@ impl CowEnv {
     /// Clear all entries.
     pub fn clear(&mut self) {
         self.overlay.clear();
-        self.local_bindings.clear();
-        self.block_local_bindings.clear();
+        self.tombstones.clear();
+        self.base = None;
+        self.scope = None;
         self.refreshed_globals.clear();
         self.forwarded_globals.clear();
-        if !self.global_bindings.is_empty() {
-            self.global_bindings = Arc::new(HashMap::new());
-        }
+        self.local_bindings.clear();
+        self.block_local_bindings.clear();
+        self.global_bindings = Arc::new(HashMap::new());
         self.dirty_names.clear();
         self.uninit_names.clear();
-        if let Some(ref base) = self.base {
-            // Tombstone all base keys
-            self.tombstones = base.keys().cloned().collect();
-        }
     }
 
     /// Provide entry-like API by delegating to the overlay.
-    /// If the key exists in base but not overlay, copy it to overlay first.
+    /// If the key exists in a shared layer but not overlay, copy it to overlay first.
     pub fn entry(&mut self, key: String) -> std::collections::hash_map::Entry<'_, String, Value> {
         self.refreshed_globals.remove(&key);
         self.dirty_names.insert(key.clone());
-        // If key is in base but not in overlay, promote it
+        // If key is in a shared layer but not in overlay, promote it
         if !self.overlay.contains_key(&key) && !self.tombstones.contains(&key) {
-            if let Some(ref base) = self.base {
-                if let Some(v) = base.get(&key) {
-                    self.overlay.insert(key.clone(), v.clone());
-                }
+            if let Some(v) = self.get(&key).cloned() {
+                self.overlay.insert(key.clone(), v);
             }
         }
         self.tombstones.remove(&key);
@@ -817,6 +1060,7 @@ impl Clone for CowEnv {
     fn clone(&self) -> Self {
         CowEnv {
             base: self.base.clone(),             // Arc::clone — O(1)
+            scope: self.scope.clone(),           // four Arc::clones — O(1)
             overlay: self.overlay.clone(),       // small
             tombstones: self.tombstones.clone(), // small
             local_bindings: self.local_bindings.clone(),
@@ -848,47 +1092,10 @@ impl IntoIterator for CowEnv {
 
 impl<'a> IntoIterator for &'a CowEnv {
     type Item = (&'a String, &'a Value);
-    type IntoIter = CowEnvIter<'a>;
+    type IntoIter = std::vec::IntoIter<(&'a String, &'a Value)>;
 
     fn into_iter(self) -> Self::IntoIter {
-        CowEnvIter {
-            overlay_iter: self.overlay.iter(),
-            base_iter: self.base.as_ref().map(|b| b.iter()),
-            overlay: &self.overlay,
-            tombstones: &self.tombstones,
-        }
-    }
-}
-
-/// Iterator for &CowEnv — yields overlay entries then non-shadowed base entries.
-pub struct CowEnvIter<'a> {
-    overlay_iter: std::collections::hash_map::Iter<'a, String, Value>,
-    base_iter: Option<std::collections::hash_map::Iter<'a, String, Value>>,
-    overlay: &'a HashMap<String, Value>,
-    tombstones: &'a HashSet<String>,
-}
-
-impl<'a> Iterator for CowEnvIter<'a> {
-    type Item = (&'a String, &'a Value);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if let Some(item) = self.overlay_iter.next() {
-            return Some(item);
-        }
-        if let Some(ref mut base_it) = self.base_iter {
-            loop {
-                match base_it.next() {
-                    Some((k, v)) => {
-                        if !self.overlay.contains_key(k) && !self.tombstones.contains(k.as_str()) {
-                            return Some((k, v));
-                        }
-                        // Skip shadowed/tombstoned keys
-                    }
-                    None => return None,
-                }
-            }
-        }
-        None
+        self.iter()
     }
 }
 

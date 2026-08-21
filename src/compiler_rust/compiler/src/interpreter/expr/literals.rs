@@ -278,9 +278,7 @@ pub(super) fn eval_literal_expr(
             if let Some(val) = env.get(name) {
                 if !env.is_local(name) && env.is_refreshed_global(name) {
                     if let Some((owner, source_name)) = env.global_binding(name) {
-                        let live = crate::interpreter::MODULE_GLOBALS_BY_OWNER
-                            .with(|globals_cell| globals_cell.borrow().get(owner)?.get(source_name).cloned());
-                        if let Some(live) = live {
+                        if let Some(live) = crate::interpreter::owned_global(&owner, &source_name) {
                             return Ok(Some(live));
                         }
                     }

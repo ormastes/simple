@@ -4,7 +4,7 @@
 
 use crate::error::CompileError;
 use crate::interpreter::{
-    bind_args, captured_env_with_live_globals, execute_function_body, publish_live_bound_globals,
+    bind_args, captured_env_with_live_globals, execute_function_body, publish_and_repoint,
     sync_owned_captured_globals, Enums, ImplMethods,
 };
 use crate::value::{Env, OptionVariant, ResultVariant, SpecialEnumType, Value};
@@ -198,7 +198,7 @@ pub fn exec_function_with_self_return(
     class_name: &str,
     fields: Arc<HashMap<String, Value>>,
 ) -> Result<(Value, Value), CompileError> {
-    publish_live_bound_globals(outer_env);
+    publish_and_repoint(outer_env);
     let mut local_env = captured_env_with_live_globals(func, &Env::new());
 
     // Move fields directly — callers that own the Arc pass refcount 1 (zero-copy mutations)
@@ -222,6 +222,7 @@ pub fn exec_function_with_self_return(
         impl_methods,
         self_mode,
     )?;
+    outer_env.release_scope();
     let result = execute_function_body(
         func,
         bound,
@@ -232,6 +233,7 @@ pub fn exec_function_with_self_return(
         impl_methods,
         true,
     );
+    local_env.release_scope();
     sync_owned_captured_globals(func, &local_env, outer_env);
     let result = result?;
 

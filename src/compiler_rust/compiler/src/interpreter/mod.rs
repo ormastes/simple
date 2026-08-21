@@ -70,8 +70,8 @@ pub(crate) use interpreter_state::{
     UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY, USER_MACROS, FUNCTION_OVERLOADS,
     CLASS_OVERLOADS, FUNCTION_MODULE_OWNER, CURRENT_EXEC_MODULE, FLATTEN_GLOBAL_OWNER_MARKER_PREFIX,
     FLATTEN_IMPORT_BINDING_MARKER_PREFIX, FLATTEN_MODULE_OWNER_ATTR_PREFIX, tag_function_module_owner,
-    module_globals_generation, report_globals_census, for_each_global_write_since, global_write_log_base,
-    global_write_seq, record_global_write,
+    report_globals_census, owned_globals_snapshot, owned_global, owned_global_present, owner_has_globals,
+    set_owned_global, seed_owner_globals, reset_owned_globals_from_initial, owner_bindings, record_owner_binding,
 };
 
 // Core types and utilities
@@ -95,10 +95,6 @@ pub(crate) use coverage_helpers::{
     current_coverage_file, extract_node_location, record_node_coverage, record_decision_coverage_sffi,
     record_condition_coverage, decision_id_from_span, is_coverage_enabled,
 };
-
-// Optional AST dispatch profiling. The implementation is level-gated and
-// called from `interpreter/expr.rs`; keep the tracked owner in the module tree.
-pub(crate) mod dispatch_profile;
 
 // Place (lvalue) model: identifier root + arbitrary field/index projections.
 // Backs both deep field assignment and mutating-method receivers.
@@ -161,7 +157,7 @@ mod interpreter_call;
 pub(crate) use interpreter_call::IN_NEW_METHOD;
 pub(crate) use interpreter_call::exec_block_value;
 pub(crate) use interpreter_call::{
-    captured_env_with_live_globals, execute_function_body, publish_live_bound_globals, sync_owned_captured_globals,
+    captured_env_with_live_globals, execute_function_body, publish_and_repoint, publish_live_bound_globals, sync_owned_captured_globals,
 };
 pub use interpreter_call::{clear_bdd_state, clear_class_instantiation_state, get_ignored_tests, get_test_results};
 use interpreter_call::{

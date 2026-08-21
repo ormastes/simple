@@ -42,6 +42,16 @@ thread_local! {
     // still preserving "a passing matcher must not clear a real prior failure".
     pub(crate) static BDD_EXPECT_PROVISIONAL: RefCell<bool> = const { RefCell::new(false) };
 
+    // Monotonic id of the `expect` currently being evaluated, and the id of the
+    // expect that raised the standing provisional. `interpreter_method/mod.rs`
+    // compares them so a chained matcher retracts ONLY its own expect's
+    // provisional, never a genuine bare-`expect` failure raised earlier in the
+    // same example (doc/08_tracking/bug/bare_expect_statement_vacuous_2026-08-18.md).
+    // Declared here because the readers landed without these definitions,
+    // leaving the seed crate unbuildable at 47ee75c7cf5.
+    pub(crate) static BDD_EXPECT_SEQ: RefCell<usize> = const { RefCell::new(0) };
+    pub(crate) static BDD_PROVISIONAL_SEQ: RefCell<usize> = const { RefCell::new(0) };
+
     // Message belonging to a PROVISIONAL failure only. Kept in its own slot so a
     // provisional `expect(<falsy>)` can never overwrite a REAL matcher failure
     // already recorded in BDD_FAILURE_MSG. Promoted to the reported message at
@@ -931,6 +941,7 @@ pub(super) fn eval_bdd_builtin(
             Ok(Some(Value::Nil))
         }
         "expect" => {
+            BDD_EXPECT_SEQ.with(|cell| *cell.borrow_mut() += 1);
             // Two call forms reach this handler:
             //   (1) `expect(value).to_equal(other)` — caller chains `.to_equal(...)`
             //       through interpreter_method/mod.rs, which sets BDD_EXPECT_FAILED
@@ -1012,6 +1023,7 @@ pub(super) fn eval_bdd_builtin(
                             let value = evaluate_expr(arg_expr, env, functions, classes, enums, impl_methods)?;
                             if !value.truthy() {
                                 BDD_EXPECT_PROVISIONAL.with(|cell| *cell.borrow_mut() = true);
+                                BDD_PROVISIONAL_SEQ.with(|cell| *cell.borrow_mut() = BDD_EXPECT_SEQ.with(|seq| *seq.borrow()));
                                 BDD_PROVISIONAL_MSG.with(|cell| {
                                     *cell.borrow_mut() = Some(format!(
                                         "expected {} {} {} to hold",
@@ -1040,6 +1052,7 @@ pub(super) fn eval_bdd_builtin(
                     // (mirrors the ordered-comparison and call-expr paths).
                     if !matched {
                         BDD_EXPECT_PROVISIONAL.with(|cell| *cell.borrow_mut() = true);
+                                BDD_PROVISIONAL_SEQ.with(|cell| *cell.borrow_mut() = BDD_EXPECT_SEQ.with(|seq| *seq.borrow()));
                         BDD_PROVISIONAL_MSG.with(|cell| {
                             *cell.borrow_mut() = Some(format!(
                                 "expected {} to {} {}",
@@ -1111,6 +1124,7 @@ pub(super) fn eval_bdd_builtin(
                 // may be exactly what the matcher expects). If no matcher follows,
                 // it stands as a hollow-expect failure at example end.
                 BDD_EXPECT_PROVISIONAL.with(|cell| *cell.borrow_mut() = true);
+                                BDD_PROVISIONAL_SEQ.with(|cell| *cell.borrow_mut() = BDD_EXPECT_SEQ.with(|seq| *seq.borrow()));
                 BDD_PROVISIONAL_MSG.with(|cell| {
                     *cell.borrow_mut() = Some(format!(
                         "expected subject to be truthy, got {}",
