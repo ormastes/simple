@@ -1,7 +1,8 @@
 # Interpreter gaps behind the lib/native failing-spec cluster (2026-08-21)
 
-**Status:** OPEN (Rust seed changes required; seed rebuild is blocked — a sweep
-is running against the deployed `bin/simple`, so no diff was applied.)
+**Status:** PARTIALLY RESOLVED 2026-08-21 — items 1, 3, 4 and 6 are FIXED in
+`src/compiler_rust`; items 2 and 5 remain OPEN. Per-item status and evidence
+are in the "Resolution 2026-08-21" section at the bottom of this record.
 
 Found while fixing the 33-spec `lib`/`native` failure cluster. Nine of those
 specs were repaired entirely in Simple product code (see the commit touching
@@ -106,3 +107,97 @@ Rust seed. Item 4 (`dict` has no `for_each`) was independently re-confirmed:
 surface to add it to (details in
 `map_for_each_missing_on_dict_2026-08-21.md`). Still OPEN, still blocked on a
 seed rebuild + deploy.
+
+
+## Resolution 2026-08-21
+
+A seed rebuild was possible in an isolated tree, so four of the six items are
+now fixed. Status per item:
+
+| # | item | status |
+|---|---|---|
+| 1 | runtime-allocated arrays not index-assignable | **FIXED** |
+| 2 | nested lvalues unsupported | OPEN |
+| 3 | `use std.spec.*` omits `expect_not` / `get_test_count` | **FIXED** (already fixed in source; the deployed seed predated it) |
+| 4 | `dict` has no `for_each` | **FIXED** |
+| 5 | `use pkg.Mod.{Mod}` binds the module dict | OPEN (partially improved) |
+| 6 | unbacked `rt_cpu_is_*` / `rt_cpuid` externs | **FIXED** |
+
+### Item 1 — FIXED
+
+`src/compiler_rust/compiler/src/interpreter/node_exec.rs`. The index-assignment
+path recognised only `Value::Array`/`Dict`/`Tuple`. A buffer from
+`rt_byte_array_new` / `rt_bytes_alloc` is a `Value::ByteArray` (packed), so it
+fell to the catch-all — which then reported `cannot index assign to field 'xs'
+of type array`, naming the very type it had just refused. Added `ByteArray`
+and `FixedSizeArray` arms at all three assignment sites (the in-place
+`ClassInstance` path and the two by-value object paths). Frozen variants are
+deliberately still rejected; a fixed-size array errors on an out-of-range
+index rather than growing, since its length is declared.
+
+Regression spec:
+`test/01_unit/compiler/interpreter/runtime_buffer_index_assign_spec.spl`
+(mirrored to `test/unit/`). Deployed seed `5 total, 1 passed, 4 failed` ->
+rebuilt seed `5 total, 5 passed, 0 failed`.
+
+**The product-code workaround can now be reverted** — the stdlib modules that
+replaced `rt_bytes_alloc`/`rt_byte_array_new` with pure-Simple push-built
+arrays no longer need to. That revert was NOT done here: it should ride with
+the seed redeploy, not precede it.
+
+### Item 3 — FIXED (was already fixed in source)
+
+`test/01_unit/lib/nogc_sync_mut/spec_bool_expect_spec.spl` is
+`3 total, 3 passed, 0 failed` on the rebuilt seed. The glob-export defect was
+already repaired in `src/compiler_rust`; only the DEPLOYED binary predated it.
+No new change was needed. (The separate observation about
+`SPIPE_INLINE_HELPERS` in `driver/src/cli/test_runner/execution.rs:969`
+lacking an `expect_not` shim was not re-checked and is not covered by this
+result.)
+
+### Item 4 — FIXED
+
+Implemented dict `for_each`/`each`. Full detail, including two further defects
+found underneath it, in
+`doc/08_tracking/bug/map_for_each_missing_on_dict_2026-08-21.md`.
+`test/01_unit/lib/nogc_sync_mut/map_traversal_spec.spl` is now
+`4 total, 4 passed, 0 failed` (was 3/4).
+
+### Item 6 — FIXED
+
+`rt_cpu_is_x86_64` / `rt_cpu_is_aarch64` / `rt_cpu_is_riscv64` / `rt_cpuid`
+were defined only in `src/runtime/runtime_native.c`, which interpreter mode
+never links. Added interpreter implementations in
+`compiler/src/interpreter_extern/simd.rs` and registered them in
+`compiler/src/interpreter_extern/mod.rs`.
+
+The record's objection to the rejected pure-Simple workaround is respected:
+the arch predicates use `cfg!(target_arch = ...)`, mirroring the C's
+COMPILE-TIME `#if defined(__x86_64__)`, **not** a runtime host probe — so
+cross-compilation still answers for the target. `rt_cpuid` uses
+`std::arch::x86_64::__cpuid_count` on x86_64 and returns all zeros elsewhere,
+matching the C `#else` branch exactly.
+
+`test/01_unit/compiler/native/simd_capabilities_spec.spl`:
+`14 total, 2 passed, 12 failed` -> **`14 total, 14 passed, 0 failed`**.
+
+### Item 2 — still OPEN
+
+`self.buffers[idx].data[dst_i] = ...` still fails with
+`invalid assignment: complex field access not supported`
+(`interpreter/node_exec.rs:1703`, verified on the rebuilt seed). The
+assignment path handles at most one level of field-then-index; a nested
+`field[i].field[j]` lvalue has no arm at all. This is a missing feature in the
+lvalue resolver rather than a wrong-type dispatch like item 1, so it was not
+folded into that fix. The hoist-to-locals workaround in
+`src/lib/nogc_sync_mut/engine/render/software_backend3d.spl` stands.
+
+### Item 5 — still OPEN (partially improved)
+
+`test/01_unit/compiler/module_resolver/group_import_self_named_module_spec.spl`
+goes from `0/2`-class failure on the deployed seed to
+`2 total, 1 passed, 1 failed` on the rebuilt one — so the fix the record
+mentions (`group_import_self_named_module_binds_module_dict_2026-08-17.md`) IS
+in the source and the deployed binary simply predated it, but it is
+**incomplete**: one example still fails. The remaining half was not
+root-caused here.

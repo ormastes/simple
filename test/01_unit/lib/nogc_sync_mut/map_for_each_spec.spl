@@ -1,0 +1,114 @@
+"""
+# Map/dict for_each Traversal Specification
+
+`Map<K, V>` lowers to the builtin `dict`. Until 2026-08-21 the seed's dict
+method table had no traversal method at all, so `map.for_each(\k, v: ...)`
+failed with `method 'for_each' not found on type 'dict'` while the array form
+worked. Regression cover for
+doc/08_tracking/bug/map_for_each_missing_on_dict_2026-08-21.md and item 4 of
+doc/08_tracking/bug/interpreter_raw_array_and_glob_import_gaps_2026-08-21.md.
+
+Two properties are asserted together, because either alone would let the
+method exist and still be useless:
+  * the traversal RUNS (every entry visited exactly once), and
+  * a side effect on a variable of the ENCLOSING scope survives the call —
+    accumulating into an outer `var` is the whole point of `for_each`, and a
+    body evaluated against a detached copy of the closure environment would
+    make every such call a silent no-op.
+"""
+
+use std.spipe.*
+
+describe "map for_each traversal":
+
+    it "visits every entry exactly once":
+        var m: {i64: i64} = {}
+        m[1] = 10
+        m[2] = 20
+        m[3] = 30
+        var visits = 0
+        m.for_each(\k, v:
+            visits = visits + 1
+        )
+        expect(visits).to_equal(3)
+
+    it "accumulates into a variable of the enclosing scope":
+        var m: {i64: i64} = {}
+        m[1] = 10
+        m[2] = 20
+        m[3] = 30
+        var total = 0
+        m.for_each(\k, v:
+            total = total + v
+        )
+        expect(total).to_equal(60)
+
+    it "passes both the key and the value to a two-parameter lambda":
+        # The key arrives in the SAME representation `keys()` and `entries()`
+        # use -- for a scalar `i64` key that is its text form, not an `i64`
+        # (`m.keys()` likewise yields "1", so `k + 1` concatenates). That is a
+        # pre-existing property of the dict surface, asserted here as-is so
+        # for_each cannot silently drift away from its sibling accessors.
+        var m: {i64: i64} = {}
+        m[1] = 10
+        m[2] = 20
+        var keys_seen = ""
+        var value_sum = 0
+        m.for_each(\k, v:
+            keys_seen = keys_seen + "{k};"
+            value_sum = value_sum + v
+        )
+        expect(keys_seen).to_equal("1;2;")
+        expect(value_sum).to_equal(30)
+
+    it "supports `each` as an alias for `for_each`":
+        var m: {i64: i64} = {}
+        m[1] = 4
+        m[2] = 8
+        var total = 0
+        m.each(\k, v:
+            total = total + v
+        )
+        expect(total).to_equal(12)
+
+    it "visits entries in the same order as keys()":
+        # for_each must agree with the dict's canonical iteration order, or a
+        # traversal written with for_each and one written with a for loop
+        # disagree about ordering.
+        var m: {i64: i64} = {}
+        m[3] = 30
+        m[1] = 10
+        m[2] = 20
+        var seen: [i64] = []
+        m.for_each(\k, v:
+            seen = seen.push(k)
+        )
+        expect(seen).to_equal(m.keys())
+
+    it "does not leak its loop variables into the caller's scope":
+        var m: {i64: i64} = {}
+        m[1] = 10
+        val k = 999
+        var total = 0
+        m.for_each(\k, v:
+            total = total + v
+        )
+        expect(k).to_equal(999)
+
+    it "leaves the receiver unchanged":
+        var m: {i64: i64} = {}
+        m[1] = 10
+        m[2] = 20
+        var total = 0
+        m.for_each(\k, v:
+            total = total + v
+        )
+        expect(m.len()).to_equal(2)
+
+    it "is a no-op on an empty map":
+        var m: {i64: i64} = {}
+        var visits = 0
+        m.for_each(\k, v:
+            visits = visits + 1
+        )
+        expect(visits).to_equal(0)

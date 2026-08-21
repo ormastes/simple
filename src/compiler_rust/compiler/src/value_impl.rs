@@ -371,9 +371,17 @@ impl Value {
             Value::Borrow(b) => b.inner().truthy(),
             Value::BorrowMut(b) => b.inner().truthy(),
             Value::Union { inner, .. } => inner.truthy(),
+            // A nullable `T?` has two runtime representations (see
+            // `Value::is_nil_like`): a `nil` literal stays `Value::Nil`, while a
+            // function declared `-> T?` returning nil yields `Option::None`, a
+            // `Value::Enum`. `== nil` and `.?` both bridge that split; `if x:`
+            // must too, or an absent optional that crossed a function return
+            // tests TRUTHY. Only `Option::None` is falsy here — every other
+            // enum value, `Option::Some(_)` included, stays truthy, so this is
+            // a presence test exactly like `.?`.
+            Value::Enum { .. } => !self.is_nil_like(),
             Value::Object { .. }
             | Value::ClassInstance(_)
-            | Value::Enum { .. }
             | Value::Lambda { .. }
             | Value::BlockClosure { .. }
             | Value::Function { .. }

@@ -1,0 +1,99 @@
+"""
+# Optional-Returning Function Nil Truthiness Specification
+
+A function declared `-> T?` that yields nil must test FALSY under `if x:`,
+exactly as a directly-bound nil does. Regression cover for
+doc/08_tracking/bug/nil_optional_enum_return_truthy_2026-08-21.md, where nil
+crossing an optional-typed function RETURN was coerced to an `Option::None`
+enum value that landed in the interpreter's always-truthy arm — so `if x:`
+took the then-branch for an absent value, silently and with no diagnostic.
+
+The defect was interpreter-only (`SIMPLE_EXECUTION_MODE=interpreter`); the JIT
+was already correct, which is why four earlier reduced fixtures all passed.
+`bin/simple test` runs the tree-walk interpreter, so these examples exercise
+the engine that was wrong.
+"""
+
+use std.spipe.*
+
+fn absent_int() -> i64?:
+    nil
+
+fn present_int() -> i64?:
+    7
+
+fn absent_via_return() -> i64?:
+    return nil
+
+enum Kind:
+    Closed
+    Evolving(bits: i64)
+
+fn absent_enum() -> Kind?:
+    nil
+
+fn present_enum_payload() -> Kind?:
+    Kind.Evolving(bits: 3)
+
+describe "optional-returning function nil truthiness":
+
+    it "treats a nil returned from a T? function as falsy":
+        val k = absent_int()
+        var taken = "else"
+        if k:
+            taken = "then"
+        expect(taken).to_equal("else")
+
+    it "treats an explicit `return nil` from a T? function as falsy":
+        val k = absent_via_return()
+        var taken = "else"
+        if k:
+            taken = "then"
+        expect(taken).to_equal("else")
+
+    it "treats a nil-returning call tested inline as falsy":
+        var taken = "else"
+        if absent_int():
+            taken = "then"
+        expect(taken).to_equal("else")
+
+    it "treats a present value returned from a T? function as truthy":
+        val k = present_int()
+        var taken = "else"
+        if k:
+            taken = "then"
+        expect(taken).to_equal("then")
+
+    it "keeps `== nil` agreeing with the truthiness test":
+        assert_true(absent_int() == nil)
+        assert_false(present_int() == nil)
+
+    it "keeps `.?` agreeing with the truthiness test":
+        assert_false(absent_int().?)
+        assert_true(present_int().?)
+
+    it "treats a nil optional-of-enum as falsy":
+        # The originally reported shape: an enum-typed optional whose nil-ness
+        # decided whether a decorator contract was attached. Truthy here
+        # attached a @closed contract to an enum that never declared one.
+        val kind = absent_enum()
+        var taken = "else"
+        if kind:
+            taken = "then"
+        expect(taken).to_equal("else")
+
+    it "treats a present payload-carrying enum variant as truthy":
+        val kind = present_enum_payload()
+        var taken = "else"
+        if kind:
+            taken = "then"
+        expect(taken).to_equal("then")
+
+    it "keeps a directly-bound nil falsy":
+        # This case was always correct (`Value::Nil` is falsy); it is asserted
+        # so a fix that regressed the direct binding cannot pass unnoticed.
+        val k: i64? = nil
+        var taken = "else"
+        if k:
+            taken = "then"
+        expect(taken).to_equal("else")

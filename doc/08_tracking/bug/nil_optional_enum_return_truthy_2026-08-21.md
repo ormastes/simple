@@ -1,7 +1,7 @@
 # A nil optional-of-enum returned across a module boundary tests truthy
 
 - **Date:** 2026-08-21
-- **Status:** ROOT-CAUSED 2026-08-21 (minimal fixture below; fix is seed-side, `src/compiler_rust`, not applied here)
+- **Status:** RESOLVED 2026-08-21 (fix applied seed-side in `src/compiler_rust`; evidence at the bottom of this record)
 - **Found by:** S2/S3 enum-contract work (hardening plan §10.1/§10.2)
 - **Binary:** `bin/simple` (Rust seed; prints the seed warning banner)
 
@@ -147,3 +147,66 @@ Once that lands, `contract_of_decorator_line` and
 `src/compiler/35.semantics/enum_contract/attribute_source.spl` can go back to
 returning optionals; until then the `DecoratorScan`/`has()`+`lookup_or()`
 workaround stays.
+
+
+## RESOLVED 2026-08-21 — fix applied
+
+**Fix:** `src/compiler_rust/compiler/src/value_impl.rs`, `Value::truthy()`.
+`Value::Enum { .. }` was moved OUT of the always-truthy arm (which it shared
+with `Object`/`ClassInstance`/`Lambda`/`Function`) into its own arm:
+
+```rust
+Value::Enum { .. } => !self.is_nil_like(),
+```
+
+`Value::is_nil_like()` (`compiler/src/value.rs:1468`) already existed as the
+single source of truth for the nil/`Option::None` representation split, and is
+what `==`/`!=` against the `nil` literal already used. Routing truthiness
+through it is what makes `if x:` agree with `== nil` and `.?` by construction
+rather than by a second, parallel rule that can drift.
+
+Only `Option::None` becomes falsy. `Option::Some(_)` and every other enum
+value stay truthy, so `if x:` on an optional is a PRESENCE test, exactly like
+`.?` — this is the narrower of the two fixes the analysis above proposed, and
+it leaves the `== nil` / `.?` paths untouched.
+
+**Regression spec:** `test/01_unit/compiler/interpreter/optional_return_nil_truthiness_spec.spl`
+(mirrored to `test/unit/compiler/interpreter/`). 9 examples covering the
+discriminating table above: tail `nil`, explicit `return nil`, inline
+`if f():`, a present value, `== nil` agreement, `.?` agreement, the
+optional-of-enum shape from the original symptom, a present payload-carrying
+variant, and the directly-bound nil that was always correct.
+
+**Evidence (same spec, two binaries):**
+
+| binary | result |
+|---|---|
+| deployed seed `bin/simple` (pre-fix) | `Results: 9 total, 5 passed, 4 failed` |
+| rebuilt seed (post-fix) | `Results: 9 total, 9 passed, 0 failed` |
+
+The 4 pre-fix failures are exactly the nil-crossing-a-return cases; the 5 that
+passed are the direct-binding, `== nil` and `.?` cases, which were never wrong.
+
+**No regressions.** A/B against the deployed seed over the option/enum
+neighbourhood — `std/complete/option_{1,2,3}_complete_spec` (15/15 each),
+`language/dict_get_option_match_spec` (2/2),
+`compiler/interpreter/option_result_method_dispatch_spec` (7/7),
+`compiler/interpreter/optional_unwrap_bang_spec` (5/5) — every result is
+identical on both binaries. `language/option_i64_flat_lane_class_spec` fails
+2 of 3 on BOTH binaries (pre-existing, unrelated).
+
+**Follow-up, deliberately not changed here:** `Option::Some(0)` is truthy
+under this rule (presence), while a directly-bound `val k: i64? = 0` is falsy
+(payload truthiness). That inconsistency predates this fix, is a property of
+the two representations rather than of the truthiness rule, and changing it
+would be a semantic decision beyond this defect. It is called out so the
+asymmetry is recorded rather than discovered later.
+
+**Unblock now available:** `contract_of_decorator_line` and
+`EnumContractTable.lookup` in
+`src/compiler/35.semantics/enum_contract/attribute_source.spl` can go back to
+returning optionals once a seed carrying this fix is deployed. The
+`DecoratorScan` / `has()`+`lookup_or()` workaround is no longer required by
+this defect, but was NOT reverted here — that revert should ride with the
+redeploy, so the workaround is not removed while the deployed binary still
+has the bug.

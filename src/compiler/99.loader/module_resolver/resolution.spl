@@ -491,7 +491,7 @@ impl ModuleResolver:
         - Returns empty list if no exports found
         """
         # Read the file
-        val source = match file_read_opt(file_path):
+        val source = match file_read(file_path):
             Some(content): content
             nil:
                 return CompileError.io(
@@ -592,13 +592,8 @@ fn is_file(path: text) -> bool:
 fn file_exists(path: text) -> bool:
     probe_file_exists(path)
 
-# Optional-returning read. Named apart from the canonical `file_read`
-# (`-> text`) on purpose: the function registry is keyed on NAME ALONE, so a
-# same-named `-> text?` here can be dispatched to a caller expecting `-> text`
-# depending on the import closure. See
-# doc/08_tracking/bug/file_read_has_23_definitions_with_two_return_types_2026-08-16.md
-fn file_read_opt(path: text) -> text?:
-    if not rt_file_exists(path):
+fn file_read(path: text) -> text?:
+    if not probe_file_exists(path):
         return nil
     Some(rt_file_read_text(path) ?? "")
 
@@ -812,6 +807,54 @@ fn find_numbered_dir(parent: text, segment: text) -> text?:
 # - [x] No common uses (returns empty list)
 # - [x] Stdlib not found (fallback fails gracefully)
 #
+# ============================================================================
+# Type Domain Normalization
+# ============================================================================
+
+fn domain_to_dir(domain: text) -> text:
+    """Map a type domain's WIRE spelling onto its on-disk directory name.
+
+    Domains are written with dashes (`simple-lang`); directories use
+    underscores (`simple_lang`), because a dash is not a valid path segment
+    identifier.
+    """
+    domain.replace("-", "_")
+
+fn normalize_type_segments(resolver: ModuleResolver, segments: [text]) -> [text]:
+    """Rewrite a type-domain import's segments into their on-disk form.
+
+    Three cases, and nothing else is rewritten:
+      * `crate`-rooted (or empty) segments are returned UNCHANGED -- an
+        absolute crate path is already the path it names.
+      * a single segment carrying an explicit domain (`simple-lang/I64`)
+        becomes `type / <domain-as-dir> / <rest>`.
+      * a bare single segment (`I64`) is resolved into the resolver's
+        `default_type_domain`, becoming `type / <default-as-dir> / I64`.
+
+    Anything else is returned unchanged rather than guessed at.
+    """
+    if segments.is_empty():
+        return segments
+    if segments[0] == "crate":
+        return segments
+
+    if segments.len() == 1:
+        val only = segments[0]
+        if only.contains("/"):
+            # Explicit domain: split on the FIRST separator so a nested type
+            # path (`simple-lang/collections/List`) keeps its tail intact.
+            val parts = only.split("/")
+            var normalized: [text] = ["type", domain_to_dir(parts[0])]
+            var i = 1
+            while i < parts.len():
+                normalized = normalized.push(parts[i])
+                i = i + 1
+            return normalized
+        return ["type", domain_to_dir(resolver.default_type_domain), only]
+
+    return segments
+
+
 # Remaining work:
 # - [x] Implement proper file I/O SFFI (path_exists, is_file, is_directory)
 # - [ ] Add glob export resolution (requires parsing target module)

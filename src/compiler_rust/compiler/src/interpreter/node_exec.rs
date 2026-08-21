@@ -1466,6 +1466,59 @@ pub(crate) fn exec_assignment(
                                         }
                                         Ok(())
                                     }
+                                    // A buffer handed back by a runtime allocator
+                                    // (`rt_byte_array_new`, `rt_bytes_alloc`) is a
+                                    // `Value::ByteArray`, not a `Value::Array`, so
+                                    // without this arm `self.buf[i] = v` fell to the
+                                    // catch-all and failed with "cannot index assign
+                                    // to field `buf` of type array" — a message that
+                                    // names the type it just refused. Every
+                                    // preallocate-then-fill module was pushed onto a
+                                    // dead path by that. See
+                                    // doc/08_tracking/bug/interpreter_raw_array_and_glob_import_gaps_2026-08-21.md item 1.
+                                    // Frozen variants are deliberately NOT accepted:
+                                    // rejecting a write to a frozen buffer is correct.
+                                    Value::ByteArray(arc) => {
+                                        let idx = pre_idx.ok_or_else(|| {
+                                            CompileError::semantic("array index must be an integer".to_string())
+                                        })?;
+                                        let byte = value.as_int()? as u8;
+                                        let bytes = Arc::make_mut(arc);
+                                        if idx < bytes.len() {
+                                            bytes[idx] = byte;
+                                        } else {
+                                            while bytes.len() < idx {
+                                                bytes.push(0);
+                                            }
+                                            bytes.push(byte);
+                                        }
+                                        Ok(())
+                                    }
+                                    // A fixed-size array has a declared length that an
+                                    // index assignment must not change, so an
+                                    // out-of-range index is an error rather than a grow.
+                                    Value::FixedSizeArray { data, .. } => {
+                                        let idx = pre_idx.ok_or_else(|| {
+                                            CompileError::semantic("array index must be an integer".to_string())
+                                        })?;
+                                        if idx < data.len() {
+                                            data[idx] = value.clone();
+                                            Ok(())
+                                        } else {
+                                            let ctx = ErrorContext::new()
+                                                .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                                                .with_help(format!("array has {} element(s)", data.len()))
+                                                .with_note(format!("index {} is out of bounds", idx));
+                                            Err(CompileError::semantic_with_context(
+                                                format!(
+                                                    "index out of bounds: array index {} out of bounds (len={})",
+                                                    idx,
+                                                    data.len()
+                                                ),
+                                                ctx,
+                                            ))
+                                        }
+                                    }
                                     Value::Dict(dict) => {
                                         let stored = Value::wrap_dict_entry(&index_val, value.clone());
                                         Arc::make_mut(dict).insert(pre_key.clone(), stored);
@@ -1540,6 +1593,45 @@ pub(crate) fn exec_assignment(
                                             arr.push(value);
                                         }
                                         Value::Array(arc)
+                                    }
+                                    // Same runtime-allocator buffer case as the
+                                    // ClassInstance path above (`rt_byte_array_new` /
+                                    // `rt_bytes_alloc` hand back a `Value::ByteArray`,
+                                    // not a `Value::Array`). Frozen variants stay
+                                    // rejected on purpose.
+                                    Value::ByteArray(mut arc) => {
+                                        let idx = index_val.as_int()? as usize;
+                                        let byte = value.as_int()? as u8;
+                                        let bytes = Arc::make_mut(&mut arc);
+                                        if idx < bytes.len() {
+                                            bytes[idx] = byte;
+                                        } else {
+                                            while bytes.len() < idx {
+                                                bytes.push(0);
+                                            }
+                                            bytes.push(byte);
+                                        }
+                                        Value::ByteArray(arc)
+                                    }
+                                    Value::FixedSizeArray { mut data, size } => {
+                                        let idx = index_val.as_int()? as usize;
+                                        if idx < data.len() {
+                                            data[idx] = value;
+                                            Value::FixedSizeArray { data, size }
+                                        } else {
+                                            let ctx = ErrorContext::new()
+                                                .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                                                .with_help(format!("array has {} element(s)", data.len()))
+                                                .with_note(format!("index {} is out of bounds", idx));
+                                            return Err(CompileError::semantic_with_context(
+                                                format!(
+                                                    "index out of bounds: array index {} out of bounds (len={})",
+                                                    idx,
+                                                    data.len()
+                                                ),
+                                                ctx,
+                                            ));
+                                        }
                                     }
                                     Value::Dict(mut dict) => {
                                         let key = index_val.to_key_string();
@@ -1649,6 +1741,45 @@ pub(crate) fn exec_assignment(
                                             arr.push(value);
                                         }
                                         Value::Array(arc)
+                                    }
+                                    // Same runtime-allocator buffer case as the
+                                    // ClassInstance path above (`rt_byte_array_new` /
+                                    // `rt_bytes_alloc` hand back a `Value::ByteArray`,
+                                    // not a `Value::Array`). Frozen variants stay
+                                    // rejected on purpose.
+                                    Value::ByteArray(mut arc) => {
+                                        let idx = index_val.as_int()? as usize;
+                                        let byte = value.as_int()? as u8;
+                                        let bytes = Arc::make_mut(&mut arc);
+                                        if idx < bytes.len() {
+                                            bytes[idx] = byte;
+                                        } else {
+                                            while bytes.len() < idx {
+                                                bytes.push(0);
+                                            }
+                                            bytes.push(byte);
+                                        }
+                                        Value::ByteArray(arc)
+                                    }
+                                    Value::FixedSizeArray { mut data, size } => {
+                                        let idx = index_val.as_int()? as usize;
+                                        if idx < data.len() {
+                                            data[idx] = value;
+                                            Value::FixedSizeArray { data, size }
+                                        } else {
+                                            let ctx = ErrorContext::new()
+                                                .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                                                .with_help(format!("array has {} element(s)", data.len()))
+                                                .with_note(format!("index {} is out of bounds", idx));
+                                            return Err(CompileError::semantic_with_context(
+                                                format!(
+                                                    "index out of bounds: array index {} out of bounds (len={})",
+                                                    idx,
+                                                    data.len()
+                                                ),
+                                                ctx,
+                                            ));
+                                        }
                                     }
                                     Value::Dict(mut dict) => {
                                         let key = index_val.to_key_string();

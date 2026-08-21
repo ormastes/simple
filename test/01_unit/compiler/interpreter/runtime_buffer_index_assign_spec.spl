@@ -1,0 +1,74 @@
+"""
+# Runtime-Allocated Buffer Index Assignment Specification
+
+A buffer handed back by a runtime allocator (`rt_byte_array_new`,
+`rt_bytes_alloc`) is a packed byte array, not the generic array
+representation. Until 2026-08-21 the interpreter's index-assignment path
+recognised only the generic form, so `self.buf[i] = v` on such a buffer failed
+with `invalid assignment: cannot index assign to field 'buf' of type array` —
+a message that names the very type it refused. Every module that preallocates
+a buffer and fills it slot-by-slot was pushed onto a dead path by that.
+
+Regression cover for item 1 of
+doc/08_tracking/bug/interpreter_raw_array_and_glob_import_gaps_2026-08-21.md.
+"""
+
+use std.spipe.*
+
+extern fn rt_byte_array_new(n: i64) -> [u8]
+extern fn rt_array_set_len_known(arr: [u8], n: i64)
+
+class ByteBox:
+    xs: [u8]
+
+    static fn sized(n: i64) -> ByteBox:
+        var xs = rt_byte_array_new(n)
+        rt_array_set_len_known(xs, n)
+        ByteBox(xs: xs)
+
+    fn set(i: i64, v: u8):
+        self.xs[i] = v
+
+    fn get(i: i64) -> u8:
+        self.xs[i]
+
+describe "runtime-allocated buffer index assignment":
+
+    it "writes through a field holding a runtime-allocated buffer":
+        val b = ByteBox.sized(4)
+        b.set(0, 7u8)
+        expect(b.get(0)).to_equal(7u8)
+
+    it "writes every slot of the buffer independently":
+        # The original defect made such a buffer effectively write-once, so
+        # filling it slot-by-slot -- the exact pattern the stdlib modules
+        # needed -- silently could not work.
+        val b = ByteBox.sized(4)
+        b.set(0, 1u8)
+        b.set(1, 2u8)
+        b.set(2, 3u8)
+        b.set(3, 4u8)
+        expect(b.get(0)).to_equal(1u8)
+        expect(b.get(1)).to_equal(2u8)
+        expect(b.get(2)).to_equal(3u8)
+        expect(b.get(3)).to_equal(4u8)
+
+    it "overwrites a slot that was already written":
+        val b = ByteBox.sized(2)
+        b.set(0, 9u8)
+        b.set(0, 11u8)
+        expect(b.get(0)).to_equal(11u8)
+
+    it "leaves the other slots untouched by a single write":
+        val b = ByteBox.sized(3)
+        b.set(1, 5u8)
+        expect(b.get(0)).to_equal(0u8)
+        expect(b.get(1)).to_equal(5u8)
+        expect(b.get(2)).to_equal(0u8)
+
+    it "still supports index assignment into a Simple-built array":
+        # The generic array path always worked; asserted so a fix for the
+        # packed representation cannot regress the one that was already right.
+        var xs: [i64] = [0, 0, 0]
+        xs[1] = 42
+        expect(xs[1]).to_equal(42)

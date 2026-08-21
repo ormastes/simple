@@ -96,3 +96,47 @@ Handoff for `src/compiler` owners, unchanged locations:
 - Raw-asm parsing: bare/unparenthesized `asm` bodies are evaluated as
   expressions (`variable \`nop\` not found`), 4 failures in
   `test/01_unit/compiler/native/inline_asm_spec.spl`.
+
+
+## Update 2026-08-21 — `type_domain_resolver_spec` was NOT a seed defect
+
+The handoff above says `normalize_type_segments` "is a private Rust `fn` with
+no Simple binding" and that the spec "cannot go green without either a seed
+change making the symbol `pub` and exporting it to Simple, or rewriting the
+spec against a real Simple-side API".
+
+Both halves of that are wrong, and the conclusion drawn from them — that this
+needs a seed change — sent the item to the wrong owner. There **is** a
+pure-Simple module at the path the spec imports:
+`src/compiler/99.loader/module_resolver/resolution.spl` (reached as
+`compiler.module_resolver.resolution`; `src/compiler/loader` is a symlink to
+`99.loader`). It is a port of the Rust file, and it simply had not gained this
+one function yet. Nothing about the Rust `fn`'s visibility was ever relevant.
+
+**Fixed Simple-side, no seed change:**
+
+- `src/compiler/99.loader/module_resolver/resolution.spl` — added
+  `normalize_type_segments` and its `domain_to_dir` helper.
+- `src/compiler/99.loader/module_resolver/types.spl` — added the
+  `default_type_domain` field to `ModuleResolver` (defaulted to
+  `"simple-lang"` in both constructors), which the bare-segment case needs.
+
+The Simple function's contract is taken from the SPEC, not transliterated from
+the Rust, because the two genuinely differ: the Rust returns `None` for a
+`crate`-rooted path, while the spec requires the segments back unchanged; and
+the Rust's explicit-domain branch requires `len() >= 2`, while the spec passes
+the domain inside a single `"simple-lang/I64"` segment. Copying the Rust would
+have failed the spec.
+
+**Result:** `Results: 4 total, 3 passed, 1 failed` -- **3 of 4 passing**, up
+from 0. All three `normalize_type_segments` examples are green.
+
+The one remaining failure is a DIFFERENT defect and is unrelated to this
+function: "exposes public child modules through domain facade glob exports"
+fails with ``semantic: variable `Parser` not found`` from
+`resolver.parse_manifest(...)`. That is the second error the original triage
+noticed; it belongs to the manifest-parsing path, not the type-domain
+resolver, and is left RED and unfixed here.
+
+Left untouched by this update: the raw-asm parsing item in the handoff, which
+is a genuine seed parser defect as recorded.

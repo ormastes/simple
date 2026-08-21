@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use super::super::{
     eval_arg, eval_arg_usize, eval_array_all, eval_array_any, eval_array_filter, eval_array_find, eval_array_map,
-    eval_array_reduce, eval_dict_filter, eval_dict_map_values, evaluate_expr, exec_function, instantiate_class, Enums,
+    eval_array_reduce, eval_dict_filter, eval_dict_for_each, eval_dict_map_values, evaluate_expr, exec_function, instantiate_class, Enums,
     ImplMethods,
 };
 use crate::error::{codes, CompileError, ErrorContext};
@@ -1289,6 +1289,23 @@ pub fn handle_dict_methods(
             return Ok(Some(eval_dict_map_values(
                 map,
                 func,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?));
+        }
+        // `Map<K, V>` lowers to the builtin dict, so `map.for_each(\k, v: ...)`
+        // has to land here; before this arm existed it failed with
+        // "method `for_each` not found on type `dict`" while the array form
+        // worked. `each` is accepted as the alias, matching the array arm in
+        // codegen/llvm/functions.rs.
+        "for_each" | "each" => {
+            let func = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            return Ok(Some(eval_dict_for_each(
+                map,
+                func,
+                env,
                 functions,
                 classes,
                 enums,

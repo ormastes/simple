@@ -2259,3 +2259,75 @@ mod engine2d_span_tests {
         );
     }
 }
+
+// --- CPU identity / CPUID -------------------------------------------------
+//
+// `src/compiler/30.types/simd_capabilities.spl` declares these four as
+// `extern fn`, and the ONLY definitions in the tree were in
+// `src/runtime/runtime_native.c`. Interpreter mode never links that C, so
+// `detect_capabilities()` died with `unknown extern function:
+// rt_cpu_is_x86_64` and took 12 of the 14 examples in
+// `test/01_unit/compiler/native/simd_capabilities_spec.spl` with it.
+// See doc/08_tracking/bug/interpreter_raw_array_and_glob_import_gaps_2026-08-21.md item 6.
+//
+// The arch predicates deliberately mirror the C's COMPILE-TIME `#if
+// defined(__x86_64__)` with `cfg!(target_arch = ...)`, not a runtime host
+// probe. That distinction is the reason the record rejected a pure-Simple
+// `host_arch()` workaround: under cross-compilation the target arch and the
+// running host disagree, and this predicate must answer for the target.
+
+/// `rt_cpu_is_x86_64() -> i32` — 1 when built for x86_64, else 0.
+pub fn rt_cpu_is_x86_64(args: &[Value]) -> Result<Value, CompileError> {
+    expect_no_args("rt_cpu_is_x86_64", args)?;
+    Ok(Value::Int(if cfg!(target_arch = "x86_64") { 1 } else { 0 }))
+}
+
+/// `rt_cpu_is_aarch64() -> i32` — 1 when built for aarch64, else 0.
+pub fn rt_cpu_is_aarch64(args: &[Value]) -> Result<Value, CompileError> {
+    expect_no_args("rt_cpu_is_aarch64", args)?;
+    Ok(Value::Int(if cfg!(target_arch = "aarch64") { 1 } else { 0 }))
+}
+
+/// `rt_cpu_is_riscv64() -> i32` — 1 when built for 64-bit RISC-V, else 0.
+pub fn rt_cpu_is_riscv64(args: &[Value]) -> Result<Value, CompileError> {
+    expect_no_args("rt_cpu_is_riscv64", args)?;
+    Ok(Value::Int(if cfg!(target_arch = "riscv64") { 1 } else { 0 }))
+}
+
+/// `rt_cpuid(leaf: i32, subleaf: i32) -> (i32, i32, i32, i32)` — raw CPUID
+/// registers (eax, ebx, ecx, edx).
+///
+/// Off x86_64 this returns all zeros, exactly like the C implementation's
+/// `#else` branch, so a caller on another arch reads "no features" rather
+/// than failing — the arch predicates above are what gate the call.
+pub fn rt_cpuid(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::semantic(format!(
+            "rt_cpuid expects 2 arguments (leaf, subleaf), got {}",
+            args.len()
+        )));
+    }
+    let leaf = args[0].as_int()? as u32;
+    let subleaf = args[1].as_int()? as u32;
+
+    #[cfg(target_arch = "x86_64")]
+    let (a, b, c, d) = {
+        // SAFETY: `__cpuid_count` is always available on x86_64, and CPUID
+        // with an out-of-range leaf is defined to return the highest
+        // supported leaf's data rather than fault.
+        let r = unsafe { std::arch::x86_64::__cpuid_count(leaf, subleaf) };
+        (r.eax as i32, r.ebx as i32, r.ecx as i32, r.edx as i32)
+    };
+    #[cfg(not(target_arch = "x86_64"))]
+    let (a, b, c, d) = {
+        let _ = (leaf, subleaf);
+        (0i32, 0i32, 0i32, 0i32)
+    };
+
+    Ok(Value::Tuple(vec![
+        Value::Int(a as i64),
+        Value::Int(b as i64),
+        Value::Int(c as i64),
+        Value::Int(d as i64),
+    ]))
+}
