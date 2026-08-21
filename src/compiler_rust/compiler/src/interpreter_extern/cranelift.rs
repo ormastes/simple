@@ -44,14 +44,6 @@ unsafe fn runtime_string_parts_to_value(data: *const u8, len: i64, symbol: &str)
     }
 }
 
-/// Helper to get i64 from Value
-fn value_to_i64(val: &Value) -> i64 {
-    match val {
-        Value::Int(i) => *i,
-        _ => 0,
-    }
-}
-
 #[inline]
 fn expect_i64(args: &[Value], index: usize, symbol: &str) -> Result<i64, CompileError> {
     match args.get(index) {
@@ -70,24 +62,6 @@ fn validate_raw_span(ptr: i64, len: i64, symbol: &str) -> Result<(), CompileErro
         )));
     }
     Ok(())
-}
-
-/// Helper to get f64 from Value
-fn value_to_f64(val: &Value) -> f64 {
-    match val {
-        Value::Float(f) => *f,
-        Value::Int(i) => *i as f64,
-        _ => 0.0,
-    }
-}
-
-/// Helper to get bool from Value
-fn value_to_bool(val: &Value) -> bool {
-    match val {
-        Value::Bool(b) => *b,
-        Value::Int(i) => *i != 0,
-        _ => false,
-    }
 }
 
 #[inline]
@@ -552,11 +526,8 @@ impl_binop_wrapper!(rt_cranelift_ushr, rt_cranelift_ushr);
 /// Bitwise NOT
 /// Args: ctx (i64), a (i64)
 pub fn rt_cranelift_bnot(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 2 {
-        return Ok(Value::Int(0));
-    }
-    let ctx = value_to_i64(&args[0]);
-    let a = value_to_i64(&args[1]);
+    let ctx = expect_i64(args, 0, "rt_cranelift_bnot")?;
+    let a = expect_i64(args, 1, "rt_cranelift_bnot")?;
     let handle = unsafe { cranelift_sffi::rt_cranelift_bnot(ctx, a) };
     Ok(Value::Int(handle))
 }
@@ -568,13 +539,10 @@ pub fn rt_cranelift_bnot(args: &[Value]) -> Result<Value, CompileError> {
 /// Integer comparison
 /// Args: ctx (i64), cond (i64), a (i64), b (i64)
 pub fn rt_cranelift_icmp(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 4 {
-        return Ok(Value::Int(0));
-    }
-    let ctx = value_to_i64(&args[0]);
-    let cond = value_to_i64(&args[1]);
-    let a = value_to_i64(&args[2]);
-    let b = value_to_i64(&args[3]);
+    let ctx = expect_i64(args, 0, "rt_cranelift_icmp")?;
+    let cond = expect_i64(args, 1, "rt_cranelift_icmp")?;
+    let a = expect_i64(args, 2, "rt_cranelift_icmp")?;
+    let b = expect_i64(args, 3, "rt_cranelift_icmp")?;
     let handle = unsafe { cranelift_sffi::rt_cranelift_icmp(ctx, cond, a, b) };
     Ok(Value::Int(handle))
 }
@@ -582,13 +550,10 @@ pub fn rt_cranelift_icmp(args: &[Value]) -> Result<Value, CompileError> {
 /// Float comparison
 /// Args: ctx (i64), cond (i64), a (i64), b (i64)
 pub fn rt_cranelift_fcmp(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 4 {
-        return Ok(Value::Int(0));
-    }
-    let ctx = value_to_i64(&args[0]);
-    let cond = value_to_i64(&args[1]);
-    let a = value_to_i64(&args[2]);
-    let b = value_to_i64(&args[3]);
+    let ctx = expect_i64(args, 0, "rt_cranelift_fcmp")?;
+    let cond = expect_i64(args, 1, "rt_cranelift_fcmp")?;
+    let a = expect_i64(args, 2, "rt_cranelift_fcmp")?;
+    let b = expect_i64(args, 3, "rt_cranelift_fcmp")?;
     let handle = unsafe { cranelift_sffi::rt_cranelift_fcmp(ctx, cond, a, b) };
     Ok(Value::Int(handle))
 }
@@ -600,13 +565,10 @@ pub fn rt_cranelift_fcmp(args: &[Value]) -> Result<Value, CompileError> {
 /// Load from memory
 /// Args: ctx (i64), type_ (i64), addr (i64), offset (i64)
 pub fn rt_cranelift_load(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 4 {
-        return Ok(Value::Int(0));
-    }
-    let ctx = value_to_i64(&args[0]);
-    let type_ = value_to_i64(&args[1]);
-    let addr = value_to_i64(&args[2]);
-    let offset = value_to_i64(&args[3]);
+    let ctx = expect_i64(args, 0, "rt_cranelift_load")?;
+    let type_ = expect_i64(args, 1, "rt_cranelift_load")?;
+    let addr = expect_i64(args, 2, "rt_cranelift_load")?;
+    let offset = expect_i64(args, 3, "rt_cranelift_load")?;
     let handle = unsafe { cranelift_sffi::rt_cranelift_load(ctx, type_, addr, offset) };
     Ok(Value::Int(handle))
 }
@@ -614,13 +576,10 @@ pub fn rt_cranelift_load(args: &[Value]) -> Result<Value, CompileError> {
 /// Store to memory
 /// Args: ctx (i64), value (i64), addr (i64), offset (i64)
 pub fn rt_cranelift_store(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 4 {
-        return Ok(Value::Nil);
-    }
-    let ctx = value_to_i64(&args[0]);
-    let val = value_to_i64(&args[1]);
-    let addr = value_to_i64(&args[2]);
-    let offset = value_to_i64(&args[3]);
+    let ctx = expect_i64(args, 0, "rt_cranelift_store")?;
+    let val = expect_i64(args, 1, "rt_cranelift_store")?;
+    let addr = expect_i64(args, 2, "rt_cranelift_store")?;
+    let offset = expect_i64(args, 3, "rt_cranelift_store")?;
     unsafe { cranelift_sffi::rt_cranelift_store(ctx, val, addr, offset) };
     Ok(Value::Nil)
 }
@@ -628,12 +587,9 @@ pub fn rt_cranelift_store(args: &[Value]) -> Result<Value, CompileError> {
 /// Allocate stack slot
 /// Args: ctx (i64), size (i64), align (i64)
 pub fn rt_cranelift_stack_slot(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 3 {
-        return Ok(Value::Int(0));
-    }
-    let ctx = value_to_i64(&args[0]);
-    let size = value_to_i64(&args[1]);
-    let align = value_to_i64(&args[2]);
+    let ctx = expect_i64(args, 0, "rt_cranelift_stack_slot")?;
+    let size = expect_i64(args, 1, "rt_cranelift_stack_slot")?;
+    let align = expect_i64(args, 2, "rt_cranelift_stack_slot")?;
     let handle = unsafe { cranelift_sffi::rt_cranelift_stack_slot(ctx, size, align) };
     Ok(Value::Int(handle))
 }
@@ -641,12 +597,9 @@ pub fn rt_cranelift_stack_slot(args: &[Value]) -> Result<Value, CompileError> {
 /// Get stack slot address
 /// Args: ctx (i64), slot (i64), offset (i64)
 pub fn rt_cranelift_stack_addr(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 3 {
-        return Ok(Value::Int(0));
-    }
-    let ctx = value_to_i64(&args[0]);
-    let slot = value_to_i64(&args[1]);
-    let offset = value_to_i64(&args[2]);
+    let ctx = expect_i64(args, 0, "rt_cranelift_stack_addr")?;
+    let slot = expect_i64(args, 1, "rt_cranelift_stack_addr")?;
+    let offset = expect_i64(args, 2, "rt_cranelift_stack_addr")?;
     let handle = unsafe { cranelift_sffi::rt_cranelift_stack_addr(ctx, slot, offset) };
     Ok(Value::Int(handle))
 }
@@ -658,11 +611,8 @@ pub fn rt_cranelift_stack_addr(args: &[Value]) -> Result<Value, CompileError> {
 /// Unconditional jump
 /// Args: ctx (i64), block (i64)
 pub fn rt_cranelift_jump(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 2 {
-        return Ok(Value::Nil);
-    }
-    let ctx = value_to_i64(&args[0]);
-    let block = value_to_i64(&args[1]);
+    let ctx = expect_i64(args, 0, "rt_cranelift_jump")?;
+    let block = expect_i64(args, 1, "rt_cranelift_jump")?;
     unsafe { cranelift_sffi::rt_cranelift_jump(ctx, block) };
     Ok(Value::Nil)
 }
@@ -670,13 +620,10 @@ pub fn rt_cranelift_jump(args: &[Value]) -> Result<Value, CompileError> {
 /// Conditional branch
 /// Args: ctx (i64), cond (i64), then_block (i64), else_block (i64)
 pub fn rt_cranelift_brif(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 4 {
-        return Ok(Value::Nil);
-    }
-    let ctx = value_to_i64(&args[0]);
-    let cond = value_to_i64(&args[1]);
-    let then_block = value_to_i64(&args[2]);
-    let else_block = value_to_i64(&args[3]);
+    let ctx = expect_i64(args, 0, "rt_cranelift_brif")?;
+    let cond = expect_i64(args, 1, "rt_cranelift_brif")?;
+    let then_block = expect_i64(args, 2, "rt_cranelift_brif")?;
+    let else_block = expect_i64(args, 3, "rt_cranelift_brif")?;
     unsafe { cranelift_sffi::rt_cranelift_brif(ctx, cond, then_block, else_block) };
     Ok(Value::Nil)
 }
@@ -684,11 +631,8 @@ pub fn rt_cranelift_brif(args: &[Value]) -> Result<Value, CompileError> {
 /// Return with value
 /// Args: ctx (i64), value (i64)
 pub fn rt_cranelift_return(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 2 {
-        return Ok(Value::Nil);
-    }
-    let ctx = value_to_i64(&args[0]);
-    let val = value_to_i64(&args[1]);
+    let ctx = expect_i64(args, 0, "rt_cranelift_return")?;
+    let val = expect_i64(args, 1, "rt_cranelift_return")?;
     unsafe { cranelift_sffi::rt_cranelift_return(ctx, val) };
     Ok(Value::Nil)
 }
@@ -696,10 +640,7 @@ pub fn rt_cranelift_return(args: &[Value]) -> Result<Value, CompileError> {
 /// Return void
 /// Args: ctx (i64)
 pub fn rt_cranelift_return_void(args: &[Value]) -> Result<Value, CompileError> {
-    if args.is_empty() {
-        return Ok(Value::Nil);
-    }
-    let ctx = value_to_i64(&args[0]);
+    let ctx = expect_i64(args, 0, "rt_cranelift_return_void")?;
     unsafe { cranelift_sffi::rt_cranelift_return_void(ctx) };
     Ok(Value::Nil)
 }
@@ -707,11 +648,8 @@ pub fn rt_cranelift_return_void(args: &[Value]) -> Result<Value, CompileError> {
 /// Trap (unreachable)
 /// Args: ctx (i64), code (i64)
 pub fn rt_cranelift_trap(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 2 {
-        return Ok(Value::Nil);
-    }
-    let ctx = value_to_i64(&args[0]);
-    let code = value_to_i64(&args[1]);
+    let ctx = expect_i64(args, 0, "rt_cranelift_trap")?;
+    let code = expect_i64(args, 1, "rt_cranelift_trap")?;
     unsafe { cranelift_sffi::rt_cranelift_trap(ctx, code) };
     Ok(Value::Nil)
 }
@@ -721,31 +659,25 @@ pub fn rt_cranelift_trap(args: &[Value]) -> Result<Value, CompileError> {
 // ============================================================================
 
 pub fn rt_cranelift_call_args_clear(args: &[Value]) -> Result<Value, CompileError> {
-    if let Some(ctx) = args.first() {
-        cranelift_sffi::rt_cranelift_call_args_clear(value_to_i64(ctx));
-    }
+    let ctx = expect_i64(args, 0, "rt_cranelift_call_args_clear")?;
+    cranelift_sffi::rt_cranelift_call_args_clear(ctx);
     Ok(Value::Nil)
 }
 
 pub fn rt_cranelift_call_arg(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 2 {
-        return Ok(Value::Bool(false));
-    }
-    Ok(Value::Bool(cranelift_sffi::rt_cranelift_call_arg(
-        value_to_i64(&args[0]),
-        value_to_i64(&args[1]),
-    )))
+    let ctx = expect_i64(args, 0, "rt_cranelift_call_arg")?;
+    let value = expect_i64(args, 1, "rt_cranelift_call_arg")?;
+    Ok(Value::Bool(cranelift_sffi::rt_cranelift_call_arg(ctx, value)))
 }
 
 /// Call a function
 /// Args: ctx (i64), func (i64), args_ptr (i64), args_len (i64)
 pub fn rt_cranelift_call(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 4 {
-        return Ok(Value::Int(0));
-    }
-    let ctx = value_to_i64(&args[0]);
-    let func = value_to_i64(&args[1]);
-    let handles = unsafe { interpreter_cranelift_arg_handles(value_to_i64(&args[2]), value_to_i64(&args[3]))? };
+    let ctx = expect_i64(args, 0, "rt_cranelift_call")?;
+    let func = expect_i64(args, 1, "rt_cranelift_call")?;
+    let raw_args = expect_i64(args, 2, "rt_cranelift_call")?;
+    let raw_len = expect_i64(args, 3, "rt_cranelift_call")?;
+    let handles = unsafe { interpreter_cranelift_arg_handles(raw_args, raw_len)? };
     let (args_ptr, args_len) = if handles.is_empty() {
         (0, 0)
     } else {
@@ -758,13 +690,12 @@ pub fn rt_cranelift_call(args: &[Value]) -> Result<Value, CompileError> {
 /// Call indirect (through function pointer)
 /// Args: ctx (i64), sig (i64), callee (i64), args_ptr (i64), args_len (i64)
 pub fn rt_cranelift_call_indirect(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 5 {
-        return Ok(Value::Int(0));
-    }
-    let ctx = value_to_i64(&args[0]);
-    let sig = value_to_i64(&args[1]);
-    let callee = value_to_i64(&args[2]);
-    let handles = unsafe { interpreter_cranelift_arg_handles(value_to_i64(&args[3]), value_to_i64(&args[4]))? };
+    let ctx = expect_i64(args, 0, "rt_cranelift_call_indirect")?;
+    let sig = expect_i64(args, 1, "rt_cranelift_call_indirect")?;
+    let callee = expect_i64(args, 2, "rt_cranelift_call_indirect")?;
+    let raw_args = expect_i64(args, 3, "rt_cranelift_call_indirect")?;
+    let raw_len = expect_i64(args, 4, "rt_cranelift_call_indirect")?;
+    let handles = unsafe { interpreter_cranelift_arg_handles(raw_args, raw_len)? };
     let (args_ptr, args_len) = if handles.is_empty() {
         (0, 0)
     } else {
@@ -781,12 +712,10 @@ pub fn rt_cranelift_call_indirect(args: &[Value]) -> Result<Value, CompileError>
 macro_rules! impl_conv_wrapper {
     ($wrapper_name:ident, $sffi_name:ident) => {
         pub fn $wrapper_name(args: &[Value]) -> Result<Value, CompileError> {
-            if args.len() < 3 {
-                return Ok(Value::Int(0));
-            }
-            let ctx = value_to_i64(&args[0]);
-            let to_type = value_to_i64(&args[1]);
-            let value = value_to_i64(&args[2]);
+            let symbol = stringify!($wrapper_name);
+            let ctx = expect_i64(args, 0, symbol)?;
+            let to_type = expect_i64(args, 1, symbol)?;
+            let value = expect_i64(args, 2, symbol)?;
             let handle = unsafe { cranelift_sffi::$sffi_name(ctx, to_type, value) };
             Ok(Value::Int(handle))
         }
@@ -811,12 +740,10 @@ impl_conv_wrapper!(rt_cranelift_bitcast, rt_cranelift_bitcast);
 /// Get JIT function pointer
 /// Args: module (i64), name_ptr (i64), name_len (i64)
 pub fn rt_cranelift_get_function_ptr(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 3 {
-        return Ok(Value::Int(0));
-    }
-    let module = value_to_i64(&args[0]);
-    let name_ptr = value_to_i64(&args[1]);
-    let name_len = value_to_i64(&args[2]);
+    let module = expect_i64(args, 0, "rt_cranelift_get_function_ptr")?;
+    let name_ptr = expect_i64(args, 1, "rt_cranelift_get_function_ptr")?;
+    let name_len = expect_i64(args, 2, "rt_cranelift_get_function_ptr")?;
+    validate_raw_span(name_ptr, name_len, "rt_cranelift_get_function_ptr")?;
     let ptr = unsafe { cranelift_sffi::rt_cranelift_get_function_ptr(module, name_ptr, name_len) };
     Ok(Value::Int(ptr))
 }
@@ -824,12 +751,15 @@ pub fn rt_cranelift_get_function_ptr(args: &[Value]) -> Result<Value, CompileErr
 /// Call JIT function pointer
 /// Args: func_ptr (i64), args_ptr (i64), args_len (i64)
 pub fn rt_cranelift_call_function_ptr(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 3 {
-        return Ok(Value::Int(0));
+    let func_ptr = expect_i64(args, 0, "rt_cranelift_call_function_ptr")?;
+    if func_ptr == 0 {
+        return Err(CompileError::runtime(
+            "rt_cranelift_call_function_ptr: null function pointer".to_string(),
+        ));
     }
-    let func_ptr = value_to_i64(&args[0]);
-    let args_ptr = value_to_i64(&args[1]);
-    let args_len = value_to_i64(&args[2]);
+    let args_ptr = expect_i64(args, 1, "rt_cranelift_call_function_ptr")?;
+    let args_len = expect_i64(args, 2, "rt_cranelift_call_function_ptr")?;
+    validate_raw_span(args_ptr, args_len, "rt_cranelift_call_function_ptr")?;
     let result = unsafe { cranelift_sffi::rt_cranelift_call_function_ptr(func_ptr, args_ptr, args_len) };
     Ok(Value::Int(result))
 }
@@ -944,6 +874,18 @@ mod tests {
         assert!(super::rt_cranelift_fconst(&[Value::Int(1), Value::Int(2), Value::Bool(false),]).is_err());
         assert!(super::rt_cranelift_bconst(&[Value::Int(1), Value::text("false")]).is_err());
         assert!(super::rt_cranelift_iadd(&[Value::Int(1), Value::Int(2), Value::Nil]).is_err());
+    }
+
+    #[test]
+    fn memory_control_call_and_conversion_sffi_fail_closed() {
+        assert!(super::rt_cranelift_icmp(&[Value::Int(1), Value::Int(2), Value::Int(3)]).is_err());
+        assert!(super::rt_cranelift_load(&[Value::Int(1), Value::Int(2), Value::Nil, Value::Int(0),]).is_err());
+        assert!(super::rt_cranelift_jump(&[]).is_err());
+        assert!(super::rt_cranelift_call_arg(&[Value::Int(1), Value::Bool(false)]).is_err());
+        assert!(super::rt_cranelift_call(&[Value::Int(1), Value::Int(2), Value::Int(0), Value::Int(1),]).is_err());
+        assert!(super::rt_cranelift_sextend(&[Value::Int(1), Value::Int(2), Value::Nil]).is_err());
+        assert!(super::rt_cranelift_get_function_ptr(&[Value::Int(1), Value::Int(0), Value::Int(4),]).is_err());
+        assert!(super::rt_cranelift_call_function_ptr(&[Value::Int(0), Value::Int(0), Value::Int(0),]).is_err());
     }
 
     #[test]

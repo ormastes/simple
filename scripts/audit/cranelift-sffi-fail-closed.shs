@@ -1,0 +1,32 @@
+#!/bin/sh
+set -eu
+
+# Cranelift interpreter SFFI must reject malformed arguments before entering
+# unsafe code generation. This source-only gate has no runtime-path cost.
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+source_file="$root/src/compiler_rust/compiler/src/interpreter_extern/cranelift.rs"
+failed=0
+
+if grep -n -E 'fn value_to_(i64|f64|bool)|return Ok\(Value::(Int\(0\)|Float\(0\.0\)|Bool\(false\)|Nil)' "$source_file"; then
+    echo "Cranelift SFFI contains a fabricated scalar/unit fallback" >&2
+    failed=1
+fi
+
+for helper in expect_i64 expect_f64 expect_bool validate_raw_span; do
+    if ! grep -q "fn $helper" "$source_file"; then
+        echo "Cranelift SFFI is missing checked helper: $helper" >&2
+        failed=1
+    fi
+done
+
+if ! grep -q 'null function pointer' "$source_file"; then
+    echo "Cranelift JIT invocation must reject null function pointers" >&2
+    failed=1
+fi
+
+if [ "$failed" -ne 0 ]; then
+    exit 1
+fi
+
+echo "Cranelift SFFI fail-closed audit: PASS"

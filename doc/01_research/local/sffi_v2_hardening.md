@@ -263,6 +263,15 @@ helpers are inline, numeric widening remains explicit for valid float inputs,
 and every valid wrapper still makes exactly one backend call. A focused test
 covers block, constant, boolean, float, and generated binary rejection.
 
+The remaining Cranelift comparison, memory, stack, control-flow, direct and
+indirect call, conversion, function lookup, and raw function-pointer handlers
+now use the checked decoders too. Null JIT function pointers, malformed raw
+argument vectors, missing operands, and wrong scalar types fail before unsafe
+invocation. The permissive numeric converters and all scalar/unit fabricated
+fallbacks have been removed from this module. A focused sabotage test passes,
+and `cranelift-sffi-fail-closed.shs` permanently gates these source invariants
+without adding runtime work.
+
 All 15 remaining legacy sign/verify declarations in the canonical signature
 module are now explicitly `unsafe(ffi)` and document their sentinel contract:
 verification collapses malformed bridge input into `0`, while signing may
