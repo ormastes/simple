@@ -1110,6 +1110,7 @@ fn codegen_closure_create_and_indirect_call() {
         captures: vec![],
         lambda_params: vec![],
         body_block: None,
+        return_type: crate::hir::TypeId::ANY,
     });
     block.instructions.push(MirInst::ConstInt { dest: arg, value: 42 });
     block.instructions.push(MirInst::IndirectCall {

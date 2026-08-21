@@ -65,3 +65,22 @@ pub use parallel::{
     compile_modules_parallel, compile_modules_parallel_with_config, BatchCodegen, CodegenStats, CompiledModule,
     CompiledModuleCache, ParallelCodegen, ParallelCodegenConfig,
 };
+
+/// Whether the JIT closure ABI can carry a value of this type across a
+/// closure call boundary.
+///
+/// The boundary is a raw Cranelift signature with no boxing, so a type is only
+/// carryable when its machine representation is a full register the rest of
+/// codegen already treats uniformly: a 64-bit integer/pointer or an f64.
+/// `TypeId::BOOL` lowers to `i8` and a lambda returning one crashed (measured:
+/// SIGSEGV on `print(f(32))` for `\\x: x > 1`), because the parent's value
+/// handling assumes register width. `TypeId::ANY` is excluded on purpose: an
+/// untyped boundary has no correct encoding, which is the defect this whole
+/// change exists to remove.
+pub fn jit_closure_abi_supports(ty: crate::hir::TypeId) -> bool {
+    use cranelift_codegen::ir::types;
+    if ty == crate::hir::TypeId::ANY || ty == crate::hir::TypeId::VOID {
+        return false;
+    }
+    matches!(types_util::type_id_to_cranelift(ty), types::I64 | types::F64)
+}

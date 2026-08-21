@@ -1,5 +1,6 @@
 pub mod arena;
 mod async_sm;
+pub mod closure_call_types;
 mod blocks;
 mod effects;
 mod function;

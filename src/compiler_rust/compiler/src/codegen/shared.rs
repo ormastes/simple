@@ -323,6 +323,7 @@ mod tests {
                     },
                 ],
                 body_block: Some(body_block),
+                return_type: crate::hir::TypeId::ANY,
             });
 
         let mut module = MirModule::new();
@@ -397,6 +398,7 @@ mod tests {
                 captures: vec![VReg(21), VReg(23)],
                 lambda_params: vec![],
                 body_block: Some(body_block),
+                return_type: crate::hir::TypeId::ANY,
             },
         ]);
 
@@ -454,17 +456,32 @@ pub fn get_body_kind(
     BodyKind,
     Vec<LambdaParamBinding>,
     Vec<crate::mir::VReg>,
+    crate::hir::TypeId,
 )> {
+    let any = crate::hir::TypeId::ANY;
     match inst {
-        MirInst::ActorSpawn { body_block, .. } => Some((*body_block, BodyKind::Actor, Vec::new(), Vec::new())),
-        MirInst::GeneratorCreate { body_block, .. } => Some((*body_block, BodyKind::Generator, Vec::new(), Vec::new())),
-        MirInst::FutureCreate { body_block, .. } => Some((*body_block, BodyKind::Future, Vec::new(), Vec::new())),
+        MirInst::ActorSpawn { body_block, .. } => {
+            Some((*body_block, BodyKind::Actor, Vec::new(), Vec::new(), any))
+        }
+        MirInst::GeneratorCreate { body_block, .. } => {
+            Some((*body_block, BodyKind::Generator, Vec::new(), Vec::new(), any))
+        }
+        MirInst::FutureCreate { body_block, .. } => {
+            Some((*body_block, BodyKind::Future, Vec::new(), Vec::new(), any))
+        }
         MirInst::ClosureCreate {
             body_block: Some(bb),
             lambda_params,
             captures,
+            return_type,
             ..
-        } => Some((*bb, BodyKind::Lambda, lambda_params.clone(), captures.clone())),
+        } => Some((
+            *bb,
+            BodyKind::Lambda,
+            lambda_params.clone(),
+            captures.clone(),
+            *return_type,
+        )),
         _ => None,
     }
 }
@@ -481,7 +498,8 @@ pub fn expand_with_outlined(mir: &MirModule) -> Vec<MirFunction> {
         let live_ins_map = func.compute_live_ins();
         for block in &func.blocks {
             for (inst_index, inst) in block.instructions.iter().enumerate() {
-                if let Some((body_block, kind, lambda_params, capture_regs)) = get_body_kind(inst) {
+                if let Some((body_block, kind, lambda_params, capture_regs, lambda_return_type)) = get_body_kind(inst)
+                {
                     let name = format!("{}_outlined_{}", func.name, body_block.0);
                     if seen.contains(&name) {
                         continue;
@@ -503,6 +521,7 @@ pub fn expand_with_outlined(mir: &MirModule) -> Vec<MirFunction> {
                         &capture_local_indices,
                         &live_ins_map,
                         &mut functions,
+                        lambda_return_type,
                     );
                     functions.push(outlined);
                 }
@@ -522,6 +541,7 @@ fn create_outlined_function(
     capture_local_indices: &[usize],
     live_ins_map: &std::collections::HashMap<crate::mir::BlockId, std::collections::HashSet<crate::mir::VReg>>,
     functions: &mut [MirFunction],
+    lambda_return_type: crate::hir::TypeId,
 ) -> MirFunction {
     let original_param_count = func.params.len();
     let mut outlined = func.clone();
@@ -529,7 +549,16 @@ fn create_outlined_function(
     outlined.visibility = Visibility::Private;
     outlined.entry_block = body_block;
     outlined.return_type = match kind {
-        BodyKind::Generator | BodyKind::Future | BodyKind::Lambda => crate::hir::TypeId::I64,
+        BodyKind::Generator | BodyKind::Future => crate::hir::TypeId::I64,
+        // A lambda's outlined function must DECLARE the type it actually
+        // returns. Hardcoding I64 made every f64-bodied lambda's Cranelift
+        // signature disagree with the value its `Return` terminator produces,
+        // and disagree again with the `IndirectCall` signature built from
+        // `return_type` at the call site — the two halves of the same lie that
+        // forced the previous closure-ABI attempt to be reverted. `ANY` (no
+        // inferred type) keeps the old I64 behaviour.
+        BodyKind::Lambda if crate::codegen::jit_closure_abi_supports(lambda_return_type) => lambda_return_type,
+        BodyKind::Lambda => crate::hir::TypeId::I64,
         BodyKind::Actor => crate::hir::TypeId::VOID,
     };
     outlined.outlined_bodies.clear();

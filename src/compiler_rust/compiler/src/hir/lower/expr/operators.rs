@@ -15,6 +15,24 @@ impl Lowerer {
     ///
     /// Handles arithmetic, comparison, logical, and other binary operations.
     /// For SIMD vectors, comparison operations return SIMD bool vectors.
+    fn is_float_scalar(ty: TypeId) -> bool {
+        matches!(ty, TypeId::F32 | TypeId::F64)
+    }
+
+    fn is_int_scalar(ty: TypeId) -> bool {
+        matches!(
+            ty,
+            TypeId::I8
+                | TypeId::I16
+                | TypeId::I32
+                | TypeId::I64
+                | TypeId::U8
+                | TypeId::U16
+                | TypeId::U32
+                | TypeId::U64
+        )
+    }
+
     pub(super) fn lower_binary(
         &mut self,
         op: &ast::BinOp,
@@ -84,6 +102,24 @@ impl Lowerer {
             {
                 TypeId::ANY
             }
+            // NUMERIC PROMOTION. Falling through to `left_hir.ty` typed
+            // `x * 1.5` as I64 whenever `x` was an integer — including every
+            // untyped lambda parameter, which `lower_lambda` defaults to I64.
+            // Codegen's binary arm already coerces a mixed int/float pair to
+            // FLOAT (see the float-vs-nil note in
+            // `mir/lower/lowering_expr_ops.rs`), so the HIR type was a plain
+            // lie about the machine value: the expression computes an f64 and
+            // claimed i64. That lie is what made the JIT closure ABI
+            // unimplementable — no value encoding at an indirect-call boundary
+            // can be correct when the declared result type disagrees with the
+            // register class actually produced. See
+            // `doc/08_tracking/bug/seed_jit_coverage_self_hosted_compiler_2026-08-21.md`.
+            //
+            // Scoped deliberately: only when BOTH sides are numeric scalars and
+            // exactly one is a float, so string concat (`"s" + n`), ANY operands
+            // (handled above) and non-scalar operands are untouched.
+            _ if Self::is_float_scalar(right_hir.ty) && Self::is_int_scalar(left_hir.ty) => right_hir.ty,
+            _ if Self::is_float_scalar(left_hir.ty) && Self::is_int_scalar(right_hir.ty) => left_hir.ty,
             _ => left_hir.ty,
         };
 

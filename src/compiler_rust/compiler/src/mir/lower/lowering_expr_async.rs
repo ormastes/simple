@@ -85,6 +85,7 @@ impl<'a> MirLowerer<'a> {
                 captures: capture_regs,
                 lambda_params,
                 body_block: Some(body_block),
+                return_type: body.ty,
             });
             dest
         })

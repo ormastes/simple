@@ -1912,6 +1912,11 @@ impl<'a> MirLowerer<'a> {
             );
         }
 
+        // Stamp lambda signatures onto otherwise-untyped indirect calls
+        // (see `mir::closure_call_types` for why this cannot be done at the
+        // call site alone).
+        crate::mir::closure_call_types::propagate_closure_call_types(&mut module);
+
         Ok(module)
     }
 

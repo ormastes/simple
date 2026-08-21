@@ -312,6 +312,7 @@ shared_test!(shared_closure_missing_func, |f: &mut MirFunction| {
         captures: vec![],
         lambda_params: vec![],
         body_block: None,
+        return_type: crate::hir::TypeId::ANY,
     });
     dest
 });
@@ -341,6 +342,7 @@ shared_module_test!(shared_indirect_call_void_return,
             closure_size: 8, capture_offsets: vec![], capture_types: vec![], captures: vec![],
             lambda_params: vec![],
             body_block: None,
+            return_type: crate::hir::TypeId::ANY,
         });
         block.instructions.push(MirInst::ConstInt { dest: arg, value: 42 });
         block.instructions.push(MirInst::IndirectCall {
@@ -362,6 +364,7 @@ shared_module_test!(shared_indirect_call_void_return,
             closure_size: 8, capture_offsets: vec![], capture_types: vec![], captures: vec![],
             lambda_params: vec![],
             body_block: None,
+            return_type: crate::hir::TypeId::ANY,
         },
         MirInst::ConstInt { dest: VReg(1), value: 42 },
         MirInst::IndirectCall {

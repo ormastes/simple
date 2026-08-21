@@ -436,6 +436,14 @@ pub enum MirInst {
         lambda_params: Vec<LambdaParamBinding>,
         /// Body block for lambda extraction (used by expand_with_outlined)
         body_block: Option<super::BlockId>,
+        /// Result type of the lambda body, as inferred by HIR.
+        ///
+        /// Carried here so `mir::closure_call_types` can push the lambda's real
+        /// signature into the `IndirectCall` sites that consume this closure.
+        /// The callee expression at such a site is usually a plain local whose
+        /// static type is ANY, so the call boundary would otherwise be untyped
+        /// and no value encoding could be chosen. `TypeId::ANY` when unknown.
+        return_type: TypeId,
     },
 
     /// Indirect call through a closure or function pointer (zero-cost: load + indirect call)

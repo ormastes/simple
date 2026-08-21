@@ -68,9 +68,16 @@ impl<'a> MirLowerer<'a> {
         }
     }
 
-    fn function_signature_for_callee(&self, callee: &HirExpr, arg_count: usize) -> (Vec<TypeId>, TypeId) {
+    /// `args` supplies the FALLBACK parameter types when the callee has no
+    /// static function type. Recording what the caller actually passes (rather
+    /// than a row of `ANY`) is what lets `mir::closure_call_types` check that a
+    /// lambda's compiled parameter types agree with its call site before
+    /// stamping them onto the boundary — a lambda compiled with `x: i64` that
+    /// is handed a `text` handle must NOT be given a typed boundary.
+    fn function_signature_for_callee(&self, callee: &HirExpr, args: &[HirExpr]) -> (Vec<TypeId>, TypeId) {
+        let arg_types = || args.iter().map(|arg| arg.ty).collect::<Vec<_>>();
         let Some(registry) = self.type_registry else {
-            return (vec![TypeId::ANY; arg_count], TypeId::ANY);
+            return (arg_types(), TypeId::ANY);
         };
         if let Some(HirType::Function { params, ret }) = registry.get(callee.ty) {
             return (params.clone(), *ret);
@@ -82,7 +89,7 @@ impl<'a> MirLowerer<'a> {
                 }
             }
         }
-        (vec![TypeId::ANY; arg_count], TypeId::ANY)
+        (arg_types(), TypeId::ANY)
     }
 
     fn call_returns_array_of(&self, callee: &HirExpr, element_type: TypeId) -> bool {
@@ -335,7 +342,7 @@ impl<'a> MirLowerer<'a> {
             if self.function_value_globals.contains(name) {
                 self.box_args_for_any_params(callee, args, &mut arg_regs)?;
                 let callee_reg = self.lower_global_expr(name.clone(), callee.ty)?;
-                let (param_types, return_type) = self.function_signature_for_callee(callee, arg_regs.len());
+                let (param_types, return_type) = self.function_signature_for_callee(callee, args);
                 return self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
@@ -686,7 +693,7 @@ impl<'a> MirLowerer<'a> {
             // Indirect call through closure/function pointer
             let callee_reg = self.lower_expr(callee)?;
 
-            let (param_types, return_type) = self.function_signature_for_callee(callee, arg_regs.len());
+            let (param_types, return_type) = self.function_signature_for_callee(callee, args);
 
             self.with_func(|func, current_block| {
                 let dest = func.new_vreg();

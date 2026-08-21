@@ -830,6 +830,7 @@ pub fn compile_instruction<M: Module>(
             captures,
             body_block: _,
             lambda_params: _,
+            return_type: _,
         } => {
             compile_closure_create(
                 ctx,

@@ -201,6 +201,7 @@ pub fn dispatch_instruction<E: CodegenEmitter>(emitter: &mut E, inst: &MirInst) 
             captures,
             lambda_params: _,
             body_block: _,
+            return_type: _,
         } => emitter.emit_closure_create(*dest, func_name, *closure_size as usize, capture_offsets, captures),
 
         // =====================================================================
