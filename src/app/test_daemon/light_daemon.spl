@@ -115,6 +115,14 @@ fn handle_request(binary: text, name: text):
     if not name.ends_with(".req"):
         return
     val req_path = if name.contains("/"): name else: "{LIGHT_REQ_DIR}/{name}"
+    # Another poller already consumed this request. Returning WITHOUT writing a
+    # response is load-bearing: the old code fell through to the "missing test
+    # path" branch below and CLOBBERED the winner's real response with a stub,
+    # so the client that owned the request read a body carrying no verdict line
+    # at all. See doc/08_tracking/bug/
+    # test_runner_concurrent_runs_lose_output_2026-08-21.md.
+    if not file_exists(req_path):
+        return
     val request = light_request_parse(read_file_text(req_path))
     val test_path = request.0
     if test_path == "":
@@ -152,9 +160,47 @@ fn handle_request(binary: text, name: text):
     atomic_write_text(response_path(name), "{out_code}\n{body}")
     file_delete(req_path)
 
+fn lock_owner_pid() -> text:
+    """Pid recorded in the lane lock ("" when there is no lock)."""
+    if not file_exists(LIGHT_LOCK):
+        return ""
+    ((read_file_text(LIGHT_LOCK)).split("\n")[0]).trim()
+
+fn pid_is_live(pid: text) -> bool:
+    """True when /proc/<pid> exists. Linux-only, like the rest of this lane."""
+    if pid == "":
+        return false
+    file_exists("/proc/{pid}")
+
+fn claim_lane() -> bool:
+    """Take exclusive ownership of the lane, or report that someone else has it.
+
+    `ensure_daemon()` in test_runner_client.spl is check-then-spawn with NO
+    mutual exclusion, so N clients that all find the lock absent all spawn a
+    daemon. Measured 2026-08-21: a 6-client burst left 4+ light daemons alive,
+    every one of them polling the SAME request directory, racing to serve and
+    to answer the same `.req` files. That is the concurrency defect behind
+    doc/08_tracking/bug/test_runner_concurrent_runs_lose_output_2026-08-21.md.
+
+    Fixing the client alone cannot close it (the check and the spawn can never
+    be one atomic step from out there), so the exclusion is enforced HERE, by
+    the only processes that can see each other: a daemon that does not own the
+    lock exits instead of serving. Claim = atomic tmp+rename, then verify. Two
+    racing renames are serialised by the kernel, so after the settle both
+    losers read the same winner pid and stand down."""
+    val me = "{getpid()}"
+    val incumbent = lock_owner_pid()
+    if incumbent != "" and incumbent != me and pid_is_live(incumbent):
+        return false
+    if not atomic_write_text(LIGHT_LOCK, me):
+        return false
+    thread_sleep(200)
+    lock_owner_pid() == me
+
 fn main() -> i64:
     ensure_dirs()
-    file_write(LIGHT_LOCK, "{getpid()}")
+    if not claim_lane():
+        return 0
     val binary = simple_binary()
     # Publish the served binary BEFORE accepting any request, so a client that
     # observes the lock also observes an accurate binary record.
@@ -165,6 +211,10 @@ fn main() -> i64:
             file_delete(LIGHT_STOP)
             file_delete(LIGHT_LOCK)
             file_delete(LIGHT_BINARY)
+            return 0
+        # Stand down the moment another daemon owns the lane, so a duplicate
+        # spawned by a racing client cannot double-serve requests.
+        if lock_owner_pid() != "{getpid()}":
             return 0
         val entries = dir_list(LIGHT_REQ_DIR)
         if entries.len() == 0:

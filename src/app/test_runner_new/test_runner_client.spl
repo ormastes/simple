@@ -5,6 +5,7 @@ use app.io.process_ops.{process_run, process_run_bounded, process_run_timeout}
 use app.io.mod.{env_get}
 use app.test_runner_new.timeout_budget.{client_default_timeout_secs}
 use app.test_runner_new.daemon_backlog.{daemon_backlog_bypass, count_pending_requests}
+use app.test_runner_new.no_examples_gate.{no_examples_is_silent_green, no_examples_exit_code}
 use std.test_runner.test_runner_args.{parse_test_args}
 use std.test_runner.test_config.{load_test_config}
 use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES}
@@ -290,7 +291,26 @@ fn ensure_daemon() -> bool:
     file_write("/tmp/simple-test-daemon-light.log", "light daemon shell exited but did not create lock\n")
     false
 
-fn print_response(content: text) -> i64:
+# Fail-closed verdict for a run that produced NO evidence it executed anything.
+#
+# Every real spec execution ends with a `SPEC FILE VERDICT:` line (emitted by
+# test_runner_single.spl, and synthesised by the daemon and by run_one_direct
+# for a killed worker), so an empty or verdict-less body means zero examples
+# ran. Returning the child's 0 for that is a SILENT FALSE GREEN: rc=0 with no
+# output at all, which every sweep reads as "passed". Measured 2026-08-21: 42
+# of 122 spec logs in a 2-way sharded run came back exactly that way.
+#
+# A runner that was given >= 1 spec and executed nothing must never exit 0.
+# See doc/08_tracking/bug/test_runner_concurrent_runs_lose_output_2026-08-21.md.
+fn fail_closed_on_no_examples(path: text, body: text, code: i64) -> i64:
+    if not no_examples_is_silent_green(body, code):
+        return code
+    print "ERROR — 0 examples executed: {path} produced no SPEC FILE VERDICT line and exited 0"
+    print "ERROR: a runner that executed nothing must not report success; treating this as a failure."
+    print timeout_verdict_line(path, "no-examples-executed", 0)
+    no_examples_exit_code(body, code)
+
+fn print_response(path: text, content: text) -> i64:
     val newline = content.find("\n")
     if newline < 0:
         print content
@@ -299,7 +319,7 @@ fn print_response(content: text) -> i64:
     val body = content[newline + 1:]
     if body != "":
         print body
-    code
+    fail_closed_on_no_examples(path, body, code)
 
 fn has_spl_doctest_flag(args: [text]) -> bool:
     for a in args:
@@ -406,7 +426,7 @@ fn run_one_direct(binary: text, path: text, timeout_secs: i64) -> i64:
         print "error: test-runner: {exit_code_reason(code)} (outer bound {outer_timeout_ms}ms)"
         print timeout_verdict_line(path, "outer-bound-timeout", outer_timeout_ms)
         return if code == 0: 1 else: code
-    code
+    fail_closed_on_no_examples(path, out + err, code)
 
 # Run one spec file through the light daemon. `seq` disambiguates request ids
 # within a single multi-path invocation: time_now_unix_micros() can repeat
@@ -428,7 +448,7 @@ fn run_one_via_daemon(path: text, timeout_ms: i64, seq: i64) -> i64:
         if file_exists(resp_path):
             val content = read_file_text(resp_path)
             file_delete(resp_path)
-            return print_response(content)
+            return print_response(path, content)
         thread_sleep(100)
     # No response inside the budget + grace. Emit a verdict so the spec reads
     # BROKEN, not UNRUN, and name the lock + the one-line remedy: the most

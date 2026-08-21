@@ -1,0 +1,80 @@
+"""0 examples executed must never exit 0 — the test-runner's fail-closed rule.
+
+Audience: anyone editing `src/app/test_runner_new/no_examples_gate.spl`,
+`test_runner_client.spl`'s `fail_closed_on_no_examples`, or
+`src/app/test_daemon/light_daemon.spl`.
+
+Why this spec exists (REPRODUCER). Measured 2026-08-21: two concurrent
+`simple test <spec>` processes in the SAME worktree could make one of them
+return rc=0 with ZERO test output — no examples, no failure, not even a
+`SPEC FILE VERDICT:` line. 42 of 122 spec logs in a 2-way sharded run came
+back that way; a serial re-run of the same specs was clean. Because the
+client returned the child's exit code verbatim, every sweep that reads exit
+codes scored those 42 as PASSED. That is a silent false green, and it is the
+worst failure a test runner can have.
+
+The output-losing mechanism was in the shared light-daemon lane (duplicate
+daemons racing to answer the same request; closed by `claim_lane` in
+light_daemon.spl). This spec pins the OTHER half — the rule that makes any
+such loss loud instead of green, whichever lane loses the output next time.
+
+Assertions here are ALGORITHMIC (exit code as a function of output + child
+code), never wall-clock, so they are stable on a contended host.
+
+# @req REQ-TESTRUNNER-NO-EXAMPLES-FAIL-CLOSED
+"""
+
+use std.spec.*
+
+use app.test_runner_new.no_examples_gate.{
+    NO_EXAMPLES_VERDICT_MARKER,
+    output_has_verdict,
+    no_examples_exit_code,
+    no_examples_is_silent_green
+}
+
+val REAL_VERDICT: text = "SPEC FILE VERDICT: test/x_spec.spl outcome=OK declared>=1 executed=1 passed=1 failed=0 dropped=0"
+
+describe "test-runner 0-examples fail-closed rule", :
+    describe "recognising that something actually ran", :
+        it "sees a verdict line in a real run's output", :
+            expect(output_has_verdict(REAL_VERDICT)).to_be_true()
+
+        it "sees no verdict line in empty output", :
+            expect(output_has_verdict("")).to_be_false()
+
+        it "does not accept unrelated chatter as evidence of a run", :
+            # Warnings alone are exactly what a lost-output run leaves behind.
+            expect(output_has_verdict("[gc-warning] higher layer module\n")).to_be_false()
+
+        it "names the marker every lane agrees on", :
+            expect(NO_EXAMPLES_VERDICT_MARKER).to_equal("SPEC FILE VERDICT:")
+
+    describe "the exit code as a function of output and child code", :
+        it "rewrites a silent green to a failure", :
+            # THE REGRESSION: rc=0 with zero output used to be returned as 0.
+            expect(no_examples_exit_code("", 0)).to_equal(1)
+
+        it "rewrites a warnings-only green to a failure", :
+            expect(no_examples_exit_code("[gc-warning] x\n", 0)).to_equal(1)
+
+        it "keeps a genuine pass green", :
+            expect(no_examples_exit_code(REAL_VERDICT, 0)).to_equal(0)
+
+        it "passes a real failure through untouched", :
+            expect(no_examples_exit_code(REAL_VERDICT, 3)).to_equal(3)
+
+        it "never masks a non-zero code even with no verdict line", :
+            # A crash that printed nothing must stay its own exit code, not
+            # become a generic 1 — the diagnosis is in that number.
+            expect(no_examples_exit_code("", 139)).to_equal(139)
+
+    describe "classifying the silent green itself", :
+        it "flags rc=0 with no verdict line", :
+            expect(no_examples_is_silent_green("", 0)).to_be_true()
+
+        it "does not flag a real pass", :
+            expect(no_examples_is_silent_green(REAL_VERDICT, 0)).to_be_false()
+
+        it "does not flag an already-loud failure", :
+            expect(no_examples_is_silent_green("", 1)).to_be_false()
