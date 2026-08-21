@@ -2,8 +2,9 @@
 
 ## Status
 
-Open. The third bounded bootstrap verification cycle failed in Stage-3 HIR;
-the session cap prohibits another fix/retry cycle.
+Claimed by the `codex/must-check-slang` lane for a fresh bounded repair
+session. The prior session's third bootstrap cycle failed in Stage-3 HIR and
+was stopped at its cap; this session starts with no verification retries used.
 
 ## Evidence
 
@@ -39,3 +40,17 @@ it; use a scalar-safe span at this staged registration boundary. Add a source
 contract forbidding `.imports[` and `.items[` in this file plus behavioral
 coverage for explicit `ProcessResult`-shaped return types, aliases, module-only
 imports, and globs. Verification must occur in a fresh bounded session.
+
+## Implemented repair
+
+`ModuleSurface` now freezes the authored module spelling alongside each
+resolved target and flattened item route. Primary import registration resolves
+the current physical surface once and consumes only those scalar arrays;
+private facade/glob expansion does the same. Misalignment, out-of-range target
+indices, or an indexed target without a canonical name fail closed. Import
+diagnostics also use scalar counts instead of reopening parser aggregates.
+
+The exact `ProcessResult` shape is covered by explicit and aliased structs used
+only in return annotations. A source contract rejects `.imports[...]` and
+`.items[...]` reads in the staged primary resolver. Fresh bootstrap evidence is
+pending.
