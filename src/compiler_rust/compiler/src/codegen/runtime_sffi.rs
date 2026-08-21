@@ -325,6 +325,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_call_ptr_3", &[I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_ptr_write_u8", &[I64, I64, I64], &[]),
     RuntimeFuncSpec::new("rt_ptr_write_i32", &[I64, I64, I32], &[]),
+    RuntimeFuncSpec::new("rt_ptr_write_i16", &[I64, I64, I32], &[]),
     RuntimeFuncSpec::new("rt_ptr_write_i64", &[I64, I64, I64], &[]),
     RuntimeFuncSpec::new("rt_ptr_read_i32", &[I64, I64], &[I32]),
     RuntimeFuncSpec::new("rt_ptr_read_i64", &[I64, I64], &[I64]),
@@ -2470,6 +2471,7 @@ mod tests {
     fn raw_pointer_write_abis_are_registered_exactly() {
         let expected = [
             ("rt_ptr_write_u8", &[I64, I64, I64][..]),
+            ("rt_ptr_write_i16", &[I64, I64, I32][..]),
             ("rt_ptr_write_i32", &[I64, I64, I32][..]),
             ("rt_ptr_write_i64", &[I64, I64, I64][..]),
         ];

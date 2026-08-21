@@ -665,6 +665,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_call_ptr_1",
     "rt_call_ptr_2",
     "rt_call_ptr_3",
+    "rt_ptr_write_i16",
     "rt_ptr_write_i32",
     "rt_ptr_write_i64",
     "rt_provider_query_v1_call",

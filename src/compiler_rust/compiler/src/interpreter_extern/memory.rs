@@ -924,6 +924,28 @@ pub fn rt_ptr_write_i32(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Nil)
 }
 
+/// Write one i16 at addr+offset. The caller owns the allocation and bounds.
+pub fn rt_ptr_write_i16(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 3 {
+        return Err(CompileError::runtime(
+            "rt_ptr_write_i16 requires 3 arguments (addr, offset, value)",
+        ));
+    }
+    let addr = args[0].as_int()?;
+    let offset = args[1].as_int()?;
+    if addr <= 0 || offset < 0 {
+        return Err(CompileError::runtime(
+            "rt_ptr_write_i16 requires a nonnull address and nonnegative offset",
+        ));
+    }
+    let value = args[2].as_int()? as i16;
+    unsafe {
+        let ptr = (addr as usize as *mut u8).offset(offset as isize) as *mut i16;
+        ptr.write_unaligned(value);
+    }
+    Ok(Value::Nil)
+}
+
 /// Volatile MMIO/RAM read/write primitives (u8/u16/u32), single address arg
 /// (no offset) — mirrors `rt_mmio_*` in
 /// `src/runtime/startup/baremetal/runtime_minimal.c`, which is compiled only
@@ -1625,7 +1647,12 @@ mod tests {
 
     #[test]
     fn raw_pointer_writes_reject_invalid_descriptors_and_write_exact_widths() {
-        for write in [rt_ptr_write_u8, rt_ptr_write_i32, rt_ptr_write_i64] {
+        for write in [
+            rt_ptr_write_u8,
+            rt_ptr_write_i16,
+            rt_ptr_write_i32,
+            rt_ptr_write_i64,
+        ] {
             assert!(write(&[Value::Int(0), Value::Int(0), Value::Int(1)]).is_err());
             assert!(write(&[Value::Int(1), Value::Int(-1), Value::Int(1)]).is_err());
         }
@@ -1633,6 +1660,12 @@ mod tests {
         let mut bytes = [0u8; 16];
         let address = bytes.as_mut_ptr() as usize as i64;
         rt_ptr_write_u8(&[Value::Int(address), Value::Int(0), Value::Int(0xab)]).unwrap();
+        rt_ptr_write_i16(&[
+            Value::Int(address),
+            Value::Int(2),
+            Value::Int(0x1234),
+        ])
+        .unwrap();
         rt_ptr_write_i32(&[
             Value::Int(address),
             Value::Int(4),
@@ -1646,6 +1679,7 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(bytes[0], 0xab);
+        assert_eq!(i16::from_ne_bytes(bytes[2..4].try_into().unwrap()), 0x1234);
         assert_eq!(i32::from_ne_bytes(bytes[4..8].try_into().unwrap()), 0x1234_5678);
         assert_eq!(
             i64::from_ne_bytes(bytes[8..16].try_into().unwrap()),

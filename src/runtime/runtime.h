@@ -230,6 +230,7 @@ uint64_t rt_read_cr3_raw(void);
 void     rt_write_cr3_raw(uint64_t value);
 int64_t  rt_volatile_read_u8(int64_t addr);
 int64_t  rt_ptr_read_u8(int64_t addr, int64_t offset);
+void     rt_ptr_write_i16(int64_t addr, int64_t offset, int32_t value);
 int64_t  rt_ptr_write_bytes_raw(int64_t addr, int64_t offset, const void* src, int64_t len);
 int64_t  rt_call_ptr_0(int64_t addr);
 int64_t  rt_call_ptr_1(int64_t addr, int64_t a1);

@@ -153,3 +153,12 @@ explicit `unsafe(ffi, raw_ptr)` metadata. Inventory improves to 92
 contract. As with writes, the tag records the caller-owned allocation/bounds
 obligation; it does not manufacture proof while lexical enforcement remains
 incomplete.
+
+The remaining-width inventory exposed `rt_ptr_write_i16` as a live HDA audio
+declaration with no owned interpreter or C provider. It is now implemented in
+all three lanes as an exact `(i64, i64, i32) -> void` ABI, uses unaligned-safe
+two-byte stores, rejects invalid descriptors, and is called through a narrow
+`unsafe(ffi, raw_ptr)` scope after the HDA buffer-size check. The compiler-owned
+runtime-symbol and ABI registries now include it. Coverage advances to 1,094
+of 1,792 runtime symbols, while the missing-contract count remains 698 because
+the previously absent symbol became a newly enumerated covered contract.

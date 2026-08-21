@@ -10396,6 +10396,12 @@ void rt_ptr_write_i32(int64_t addr, int64_t offset, int32_t value) {
     *ptr = value;
 }
 
+void rt_ptr_write_i16(int64_t addr, int64_t offset, int32_t value) {
+    if (addr <= 0 || offset < 0) abort();
+    int16_t narrowed = (int16_t)value;
+    memcpy((char*)(uintptr_t)addr + offset, &narrowed, sizeof(narrowed));
+}
+
 void rt_ptr_write_i64(int64_t addr, int64_t offset, int64_t value) {
     if (addr <= 0 || offset < 0) abort();
     int64_t* ptr = (int64_t*)((char*)(uintptr_t)addr + offset);
