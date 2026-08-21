@@ -208,6 +208,13 @@ physical-memory staging do not authorize BIOS, MSR, or storage writes. Boot the
 existing UEFI image under DCI observation unless a reviewed CPU-state-specific
 RAM trampoline exists; perform persistent writes only through an identity-gated
 target-side storage driver with flush and exact readback evidence.
+Intel documents that Apollo Lake OpenRC warm reset can strand cores in an
+undefined state and requires manual reset; reject it rather than treating DCI
+reset as generic. A Power-Good reset is unqualified without exact-board proof.
+Before any proposed RAM load, run
+`scripts/check/inspect-up-squared-apl-dci-elf.shs --inspect`; non-contiguous
+`PT_LOAD` ranges and `p_memsz - p_filesz` zero-fill must be honored. Prefer a
+UEFI-resident mailbox loader over debugger-authored CR/GDT/page-table state.
 
 When a user asks to close an implementation phase with external verification
 still unavailable, record an **implementation handoff** in the plan and Todo

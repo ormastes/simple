@@ -87,6 +87,15 @@ same-thread/typed-payload exclusions and the Stage-4 blocker.
   DCI can stage RAM but is not a block-storage writer; persistent I/O remains a
   target-side driver/provisioner operation. Primary guide:
   `doc/07_guide/platform/simpleos/up_squared_apl_intel_dci_debug.md`.
+- **Apollo Lake reset exception:** Intel's 2020 debugger notes say OpenRC warm
+  reset can leave Apollo Lake cores unreleasable, with manual reset required.
+  Never use it as the UP2 software-reset fallback. A Power-Good reset remains
+  unqualified until proven on the exact FAB.
+- **Direct-load boundary:** the current ELF has three non-contiguous `PT_LOAD`
+  mappings and a 138-byte writable file payload expanding to `0x0180d000` in
+  memory. Contiguous ELF copy plus RIP assignment is invalid. Inspect the exact
+  artifact with `scripts/check/inspect-up-squared-apl-dci-elf.shs`; prefer a
+  UEFI-resident mailbox loader that performs ELF and Multiboot transitions.
 - **Canonical tooling:** build the exact-kernel image receipt with
   `scripts/os/build-simpleos-up-squared-usb-image.shs`; admit/write only through
   `scripts/os/write-simpleos-up-squared-usb.shs`; accept hardware only through

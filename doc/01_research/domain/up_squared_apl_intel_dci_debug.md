@@ -18,6 +18,14 @@ and detailed target guides are controlled. Public release notes document
 physical-memory viewing, root-CPU warm reset, and power-good reset controls,
 but do not publish a complete Apollo Lake arbitrary-ELF boot recipe.
 
+An Apollo Lake exception is decisive: Intel System Debugger 2020 release notes
+state that **OpenRC warm reset on Apollo Lake can leave the target in an
+undefined state with cores that cannot be released**. Intel lists no software
+workaround and requires manual target reset to recover. A generic “DCI software
+reset” must therefore not be the default UP2 recovery operation. A toolkit
+Power-Good reset may be evaluated separately, but only retained physical
+evidence on the exact board can qualify it.
+
 ## Hardware and firmware gates
 
 A genuine SuperSpeed debug cable is required. A normal USB A-to-A cable, USB
@@ -49,6 +57,21 @@ reset, memory inspection, and breakpoints while firmware loads the existing
 UEFI USB image. A direct DCI RAM boot needs a small reviewed trampoline designed
 for the exact debugger entry state. It remains blocked until the proprietary
 toolchain and physical cable are present.
+
+The current SimpleOS ELF has three `PT_LOAD` ranges. File bytes occupy
+`0x08000000..0x0800608a`, while the final writable segment has a memory size of
+`0x0180d000`; its BSS/heap/stack tail must be zeroed through approximately
+`0x09813000`. The entry is `0x08000038`. This makes “write the 37,280-byte ELF
+and set RIP” specifically incorrect: ELF file offsets differ from physical
+addresses and roughly 24 MiB of zero-fill state is part of the image contract.
+
+Intel Slim Bootloader provides public precedent for the safer architecture: its
+OS loader parses ELF and Multiboot/Multiboot2 images, loads segments, constructs
+boot information, and jumps through a defined boot-state transition. For UP2,
+the existing UEFI/GRUB plus reviewed Multiboot2 shim already performs that role.
+A future DCI mailbox should stage bytes into a buffer and let a resident,
+target-side loader validate and perform the transition; the debugger should not
+invent CPU state ad hoc.
 
 ## Storage read/write
 
@@ -88,13 +111,14 @@ disconnecting a halted target can lose context and crash it.
 - [Intel System Bring-Up Toolkit release notes](https://www.intel.com/content/www/us/en/developer/articles/release-notes/intel-system-bring-up-toolkit-release-notes.html)
 - [Intel System Bring-Up Toolkit requirements](https://www.intel.com/content/www/us/en/developer/articles/system-requirements/intel-system-bring-up-toolkit-system-requirements.html)
 - [Intel System Debugger 2019 Linux release notes](https://www.intel.com/content/dam/develop/external/us/en/documents/system-debug-2019-linux-release-notes-797773.pdf)
+- [Intel System Debugger 2020 Linux release notes](https://www.intel.com/content/dam/develop/external/us/en/documents/public-2020initialrelease-lin-797773.pdf)
 - [Intel E3900 UP2 UEFI firmware project](https://www.intel.com/content/www/us/en/developer/articles/tool/uefi-firmware-project-for-intel-atom-processor-e3900-series-processor-platforms.html)
 - [Intel Software Developer Manuals](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html)
 - [UP Squared user manual download](https://downloads.up-community.org/download/up-squared-user-manual/)
 - [UP Squared specifications](https://up-board.org/upsquared/specifications/)
 - [Linux xHCI debug capability](https://cdn.kernel.org/doc/html/latest/driver-api/usb/usb3-debug-port.html)
 - [Linux xHCI DbC source](https://github.com/torvalds/linux/blob/master/drivers/usb/early/xhci-dbc.h)
+- [Intel Slim Bootloader ELF/Multiboot loader](https://github.com/slimbootloader/slimbootloader/blob/master/PayloadPkg/OsLoader/OsLoader.c)
 - [Microsoft USB 3 debug-cable setup](https://github.com/MicrosoftDocs/windows-driver-docs/blob/staging/windows-driver-docs-pr/debugger/setting-up-a-usb-3-0-debug-cable-connection.md)
 - [UP community DCI discussion](https://forum.up-community.org/discussion/3701/dci-debug-for-upsquared) (community evidence)
 - [UP community firmware compatibility discussion](https://forum.up-community.org/discussion/4806/opensource-uefi-bios-by-intel-appears-to-be-unusable-now) (community evidence)
-

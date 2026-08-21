@@ -19,6 +19,18 @@ UEFI/debugger state would violate that contract. A DCI loader must load every
 handoff, and establish the documented control-register, segment, stack, and
 entry state before resuming exactly one bootstrap processor.
 
+The artifact's three loadable ranges are:
+
+| File offset | Physical address | File size | Memory size | Flags |
+|---:|---:|---:|---:|:---|
+| `0x1000` | `0x08000000` | `0x4b6f` | `0x4b6f` | R-X |
+| `0x6000` | `0x08005000` | `0x01fe` | `0x01fe` | R-- |
+| `0x7000` | `0x08006000` | `0x008a` | `0x0180d000` | RW- |
+
+Consequently, a direct loader must zero the last segment beyond its 138 file
+bytes up to its memory size. Loading the ELF file contiguously is not loading
+the program image.
+
 ## Connected-host inventory
 
 The connected Smart KM Link `0ea0:2211` is a USB 2.0 composite mass-storage and
@@ -58,3 +70,6 @@ SimpleOS boot are currently **blocked**, not failed and not passed.
 5. A retained connection receipt proving the target, rather than a USB bridge.
 6. A reviewed DCI bootstrap contract or standard UEFI media for actual boot.
 
+Intel's published 2020 release notes add a reset blocker: Apollo Lake OpenRC
+warm reset may strand cores in an undefined state, with manual reset as the only
+listed recovery. No UP2 automation should select OpenRC warm reset.

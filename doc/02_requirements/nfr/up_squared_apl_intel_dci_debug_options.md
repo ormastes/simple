@@ -10,6 +10,7 @@ option; stricter alternatives may be selected independently.
 - Fail closed unless exact board/FAB, firmware, cable, debugger, and target
   connection receipt are present.
 - Never flash BIOS, write MSRs, or mutate persistent storage by default.
+- Reject Apollo Lake OpenRC warm reset; recovery defaults to a physical reset.
 - Admit only hash-bound payloads and allowlisted RAM ranges from a current map.
 - Storage writes require stable identity, explicit confirmation, bounded write,
   flush, and exact-length readback hash.
@@ -37,4 +38,3 @@ matching, full SPI backup, external recovery programmer, and tested restore.
 - Pros: prevents offline or partial evidence being mislabeled as hardware PASS.
 - Cons: requires retaining several receipts.
 - Effort: small.
-

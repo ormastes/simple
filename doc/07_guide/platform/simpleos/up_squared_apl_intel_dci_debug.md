@@ -29,9 +29,13 @@ Never infer readiness from a connector or unknown USB VID/PID.
    flash firmware as part of this guide.
 5. Connect through Target Connection Agent and retain a receipt identifying
    target, connection type, tool version, cable, firmware, and timestamp.
-6. Prove halt/resume on a disposable, secret-free target; then prove reset and
-   a read of a known non-sensitive physical-memory location. Never unplug DCI
-   while the target is halted.
+6. Prove halt/resume on a disposable, secret-free target, then read a known
+   non-sensitive physical-memory location. Never unplug DCI while halted.
+
+Do **not** use OpenRC warm reset on Apollo Lake. Intel documents that it can
+leave cores unreleasable in an undefined state and gives manual reset as the
+recovery. Treat physical reset as the baseline. A toolkit Power-Good reset is a
+separate experiment and is accepted only after exact-board evidence.
 
 ## Boot SimpleOS
 
@@ -41,11 +45,17 @@ reset, halt, breakpoints, and memory inspection. Accept boot only when CN16 UART
 shows the current loader/shim/entry/console/VFS/shell markers and a freshly
 injected `ls /` returns `/bin`, `/etc`, and `/README.txt`.
 
-Do not copy `simpleos.elf` to `0x08000000` and set RIP. The current entry is a
-32-bit bootstrap contract; arbitrary debugger/UEFI state is incompatible. A
-future direct-load lane must supply a reviewed, hash-bound trampoline that
-loads all ELF segments, zeroes BSS, reserves valid DRAM, parks other cores, and
-constructs exact CPU/register/stack/handoff state.
+Do not copy `simpleos.elf` to `0x08000000` and set RIP. Its three `PT_LOAD`
+segments use different file offsets/physical addresses, and the writable
+segment expands from 138 file bytes to `0x0180d000` memory bytes. The current
+entry is a 32-bit bootstrap contract; arbitrary debugger/UEFI state is
+incompatible.
+
+The preferred direct-memory design is a resident UEFI loader: it allocates and
+publishes a staging mailbox, DCI writes the hash-bound image, and target code
+parses ELF, zeros BSS, exits firmware, parks cores, and constructs exact
+Multiboot state. Raw debugger-controlled register/CR/GDT/page-table setup is a
+last-resort design, not an operational command in this guide.
 
 ## Read and write storage
 
@@ -67,4 +77,3 @@ pre-boot reset/halt/memory load before target software initializes xHCI.
 
 Research and source links are in
 `doc/01_research/domain/up_squared_apl_intel_dci_debug.md`.
-
