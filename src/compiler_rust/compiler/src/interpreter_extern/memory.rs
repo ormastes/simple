@@ -707,30 +707,40 @@ pub fn rt_ptr_write_i64(args: &[Value]) -> Result<Value, CompileError> {
 ///
 /// Callable from Simple as: `rt_ptr_read_i64(addr: i64, offset: i64) -> i64`
 pub fn rt_ptr_read_i64(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 2 {
+    if args.len() != 2 {
         return Err(CompileError::runtime(
             "rt_ptr_read_i64 requires 2 arguments (addr, offset)",
         ));
     }
-    let addr = args[0].as_int()? as usize;
+    let addr = args[0].as_int()?;
     let offset = args[1].as_int()?;
+    if addr <= 0 || offset < 0 {
+        return Err(CompileError::runtime(
+            "rt_ptr_read_i64 requires a nonnull address and nonnegative offset",
+        ));
+    }
     unsafe {
-        let ptr = (addr as *const u8).offset(offset as isize) as *const i64;
-        Ok(Value::Int(ptr.read()))
+        let ptr = (addr as usize as *const u8).offset(offset as isize) as *const i64;
+        Ok(Value::Int(ptr.read_unaligned()))
     }
 }
 
 /// Read one unsigned byte from addr+offset without over-reading.
 pub fn rt_ptr_read_u8(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 2 {
+    if args.len() != 2 {
         return Err(CompileError::runtime(
             "rt_ptr_read_u8 requires 2 arguments (addr, offset)",
         ));
     }
-    let addr = args[0].as_int()? as usize;
+    let addr = args[0].as_int()?;
     let offset = args[1].as_int()?;
+    if addr <= 0 || offset < 0 {
+        return Err(CompileError::runtime(
+            "rt_ptr_read_u8 requires a nonnull address and nonnegative offset",
+        ));
+    }
     unsafe {
-        let ptr = (addr as *const u8).offset(offset as isize);
+        let ptr = (addr as usize as *const u8).offset(offset as isize);
         Ok(Value::Int(ptr.read() as i64))
     }
 }
@@ -872,16 +882,21 @@ mod ptr_read_u8_tests {
 ///
 /// Callable from Simple as: `rt_ptr_read_i32(addr: i64, offset: i64) -> i32`
 pub fn rt_ptr_read_i32(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 2 {
+    if args.len() != 2 {
         return Err(CompileError::runtime(
             "rt_ptr_read_i32 requires 2 arguments (addr, offset)",
         ));
     }
-    let addr = args[0].as_int()? as usize;
+    let addr = args[0].as_int()?;
     let offset = args[1].as_int()?;
+    if addr <= 0 || offset < 0 {
+        return Err(CompileError::runtime(
+            "rt_ptr_read_i32 requires a nonnull address and nonnegative offset",
+        ));
+    }
     unsafe {
-        let ptr = (addr as *const u8).offset(offset as isize) as *const i32;
-        Ok(Value::Int(ptr.read() as i64))
+        let ptr = (addr as usize as *const u8).offset(offset as isize) as *const i32;
+        Ok(Value::Int(ptr.read_unaligned() as i64))
     }
 }
 
@@ -1634,6 +1649,41 @@ mod tests {
         assert_eq!(i32::from_ne_bytes(bytes[4..8].try_into().unwrap()), 0x1234_5678);
         assert_eq!(
             i64::from_ne_bytes(bytes[8..16].try_into().unwrap()),
+            0x0102_0304_0506_0708
+        );
+    }
+
+    #[test]
+    fn raw_pointer_reads_reject_invalid_descriptors_and_read_unaligned_widths() {
+        for read in [rt_ptr_read_u8, rt_ptr_read_i32, rt_ptr_read_i64] {
+            assert!(read(&[Value::Int(0), Value::Int(0)]).is_err());
+            assert!(read(&[Value::Int(1), Value::Int(-1)]).is_err());
+        }
+
+        let bytes: [u8; 13] = [
+            0xff, 0x78, 0x56, 0x34, 0x12, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02,
+            0x01,
+        ];
+        let address = bytes.as_ptr() as usize as i64;
+        assert_eq!(
+            rt_ptr_read_u8(&[Value::Int(address), Value::Int(0)])
+                .unwrap()
+                .as_int()
+                .unwrap(),
+            0xff
+        );
+        assert_eq!(
+            rt_ptr_read_i32(&[Value::Int(address), Value::Int(1)])
+                .unwrap()
+                .as_int()
+                .unwrap(),
+            0x1234_5678
+        );
+        assert_eq!(
+            rt_ptr_read_i64(&[Value::Int(address), Value::Int(5)])
+                .unwrap()
+                .as_int()
+                .unwrap(),
             0x0102_0304_0506_0708
         );
     }

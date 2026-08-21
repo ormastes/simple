@@ -129,3 +129,18 @@ from 40 to 70 `unsafe_contract_declared` rows and reduces declarations missing
 both tag and contract from 13,599 to 13,569. Call-site lexical enforcement is
 still incomplete in the bootstrap compiler, so the tags are honest review
 metadata, not evidence that every pointer operation is memory-safe.
+
+## Raw pointer-read provider audit
+
+The corresponding `rt_ptr_read_u8/i32/i64` interpreter and C providers had the
+same fail-open descriptor and alignment hazards: extra arguments were accepted,
+null or negative descriptors reached dereference, and wide reads used aligned
+typed loads even though the ABI permits byte offsets. The hardened providers
+require exactly two arguments, reject nonpositive addresses and negative
+offsets, and use unaligned-safe i32/i64 loads. Native i32 and i64 contracts are
+now compiler-registered; runtime contract coverage therefore advances to 1,093
+covered and 698 missing. Constant-size C `memcpy` is used for alignment safety
+and remains compiler-lowerable to a direct load; no allocation, lookup, hash,
+lock, or generic marshalling is introduced on the call path. An `-O2` object
+inspection confirms the i32/i64 functions compile to two descriptor tests and
+one direct `mov` load, with no call to `memcpy` on the accepted path.

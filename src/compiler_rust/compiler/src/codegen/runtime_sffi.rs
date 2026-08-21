@@ -326,6 +326,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_ptr_write_u8", &[I64, I64, I64], &[]),
     RuntimeFuncSpec::new("rt_ptr_write_i32", &[I64, I64, I32], &[]),
     RuntimeFuncSpec::new("rt_ptr_write_i64", &[I64, I64, I64], &[]),
+    RuntimeFuncSpec::new("rt_ptr_read_i32", &[I64, I64], &[I32]),
+    RuntimeFuncSpec::new("rt_ptr_read_i64", &[I64, I64], &[I64]),
     // =========================================================================
     // AOP runtime operations
     // =========================================================================
@@ -2478,6 +2480,23 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} must be registered for native codegen"));
             assert_eq!(spec.params, params);
             assert!(spec.returns.is_empty());
+        }
+    }
+
+    #[test]
+    fn raw_pointer_read_abis_are_registered_exactly() {
+        let expected = [
+            ("rt_ptr_read_u8", &[I64][..]),
+            ("rt_ptr_read_i32", &[I32][..]),
+            ("rt_ptr_read_i64", &[I64][..]),
+        ];
+        for (name, returns) in expected {
+            let spec = RUNTIME_FUNCS
+                .iter()
+                .find(|spec| spec.name == name)
+                .unwrap_or_else(|| panic!("{name} must be registered for native codegen"));
+            assert_eq!(spec.params, &[I64, I64]);
+            assert_eq!(spec.returns, returns);
         }
     }
 
