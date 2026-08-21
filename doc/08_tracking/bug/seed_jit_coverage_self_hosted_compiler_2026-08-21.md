@@ -198,3 +198,124 @@ higher). Twelve were cleared here because the worker's closure reached them.
 Reproduce the census with a `^struct X:` scan over `src/compiler`. Each one is a
 latent whole-program de-JIT for whichever entry point first pulls both halves
 into one closure.
+
+---
+
+## Update 2026-08-21 (later) — the untyped indirect call is fixed; the unboxed closure ABI is now admitted for the self-contained case
+
+The previous section closed with "the real fix is seed-side: make the JIT closure
+ABI tag-box lambda arguments and results". That framing was one step too far. The
+first attempt was reverted not because boxing was missing but because
+**`MirInst::IndirectCall` carried `return_type = ANY` / `param_types = [ANY]` for
+every untyped lambda**, and no value encoding at an untyped boundary can be right
+for both an i64 and an f64. That is now fixed, and with real types on the boundary
+the *self-contained* case needs no boxing at all.
+
+### Typing changes
+
+- `hir/lower/expr/operators.rs` — **numeric promotion.** `lower_binary` typed the
+  result as `left_hir.ty`, so `x * 1.5` with an integer `x` was typed I64 while
+  codegen's binary arm coerces a mixed int/float pair to FLOAT. The HIR type was a
+  plain lie about the machine value. Now: both sides numeric scalars and exactly
+  one a float ⇒ the float type. Deliberately scoped so string concat (`"s" + n`)
+  and ANY operands are untouched.
+- `mir/inst_enum.rs` — `ClosureCreate` gains `return_type`, populated in
+  `mir/lower/lowering_expr_async.rs` from the lambda BODY's HIR type.
+- `mir/closure_call_types.rs` (new) — an intraprocedural MIR pass, run at the end
+  of `lower_module`. It follows a closure from its `ClosureCreate` through the
+  `Store`/`Load` pair a `val` binding lowers to, and stamps the lambda's real
+  signature onto the `IndirectCall` sites that consume it. Poisons a local that
+  holds two conflicting closures; poisons a call site whose caller argument types
+  disagree with the types the outlined body was compiled with.
+- `mir/lower/lowering_expr_call.rs` — the signature fallback records the CALLER's
+  argument types instead of a row of `ANY`, which is what makes that
+  disagreement check possible.
+- `codegen/shared.rs` — a lambda's outlined function had `return_type` hardcoded
+  to I64. It now declares the lambda's real return type, so the outlined body's
+  Cranelift signature and the `IndirectCall` signature agree by construction.
+
+### Why the parameter-side lie matters, and how it is contained
+
+HIR defaults an UNDECLARED lambda parameter to I64. `\x: "v" + x` called with a
+text therefore compiles a body that does i64 arithmetic on a string handle — under
+the JIT it printed `v4483685820545` instead of `va`. That is a real pre-existing
+miscompile, not an ABI question: the poisoning rule above detects exactly this
+(caller arg type ≠ compiled param type) and leaves the boundary `ANY`, which the
+admission guard then refuses. Fixing the parameter inference itself is a separate,
+larger job and is NOT done here.
+
+### The ABI, and what is admitted
+
+`codegen/jit.rs::first_unsupported_lambda` replaces the blanket
+"any `ClosureCreate` anywhere ⇒ refuse the whole module" bail. Two conventions
+exist and only one is admitted:
+
+1. **JIT-internal** — the closure is called back by an `IndirectCall` in the same
+   function. Both halves are emitted by this backend and now agree by
+   construction, so **no tag-boxing is needed**; the values never leave JIT code.
+2. **Runtime-facing** — the closure is passed as an argument (`Array.map`),
+   stored into a heap object, captured by another closure, or returned. Whoever
+   calls it goes through the runtime's `RuntimeClosure` layout and its
+   all-`RuntimeValue` convention, which is not what `compile_closure_create`
+   builds. **Still refused, and this is the remaining blocker.**
+
+Also refused: any boundary type that is not carryable unboxed
+(`codegen::jit_closure_abi_supports` — I64/F64-width only). `TypeId::BOOL` lowers
+to `i8` and **SIGSEGV'd** the process on `print(f(32))` for `\x: x > 1`; that is
+why the predicate exists rather than a blanket allow.
+
+The guard also had to learn that a lambda's parameter reuses the PARENT's local
+slots — HIR truncates the lambda's locals after lowering the body, so in
+`val f = \x: ...` both `x` and `f` are local index 0 — which made the body's read
+of its own parameter look identical to a load of the closure.
+`outlined_body_block_ids` excludes the not-yet-outlined body blocks from both the
+pass and the guard.
+
+### Measured (differential, JIT vs interpreter, 8 lambda fixtures)
+
+| fixture | lane taken | result |
+|---|---|---|
+| `\x: x*10`, `\a,b: a+b` | **JIT** | identical |
+| capturing a mutable local | **JIT** | identical |
+| lambda called inside `fn`, result returned | **JIT** | identical |
+| `\x: x*1.5` called with `4.0` | fallback (poisoned ANY) | identical |
+| `\x: "v"+x` called with `"a"` | fallback (poisoned ANY) | identical |
+| `\x: x>1` (BOOL result) | fallback (unsupported type) | identical |
+| `xs.map(\x: x*3)` | fallback (runtime-facing) | identical |
+| nested lambda capturing a lambda | fallback (runtime-facing) | identical |
+
+No wrong answers in any lane. The `test/fixtures/engine_differential` corpus is
+unchanged: 10/12 SAME, and the 2 DIFFs (`i64_boundary_values`,
+`utf8_slice_boundary`) are the two pre-existing, already-filed ones.
+`cargo test -p simple-compiler --release --lib`: same 52 failures as baseline,
+none closure- or float-related.
+
+### The worker probe could not be run — a DIFFERENT, PRE-EXISTING blocker
+
+`SIMPLE_JIT_COVERAGE=1 native-build --source src/app --entry-closure --entry
+src/app/cli/bootstrap_main.spl` fails before reaching a single `[build] parse`
+line, with
+
+```
+error: semantic: nil is forbidden by the non-optional return contract of 'env_get'
+```
+
+**This is not caused by anything above.** Attributed by building a seed from HEAD
+content for exactly the files this change touches (leaving every other
+worktree-local modification in place) and running the identical command: it fails
+identically, `env_get=11 parse=0`, rc=1. So there is no `dt=` table to report and
+no evidence yet about whether the worker stays on the JIT — the worker never gets
+that far on a locally-built seed in this tree. That blocker must be cleared before
+the closure-ABI question can even be asked of the worker.
+
+### Remaining, in order
+
+1. The `env_get` non-optional-return blocker above — until it is fixed the worker
+   lane is unmeasurable from a locally-built seed.
+2. The runtime-facing convention: `rt_closure_new`/`rt_closure_set_capture`
+   allocation plus tag-boxed arguments, results and captures on both sides, so a
+   lambda handed to `Array.map` can be JIT-compiled. This is what actually
+   unblocks `native_build_worker`, whose bail was on `SdnBackendImpl.is_allowed`.
+3. Undeclared lambda parameter types (defaulted to I64) — currently detected and
+   routed to the interpreter rather than inferred.
+4. `TypeId::BOOL` (and other sub-register types) across a closure boundary.

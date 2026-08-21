@@ -108,11 +108,10 @@ impl JitCompiler {
         // parameters and results. Until then, fail the JIT compile so the
         // driver's interpreter fallback runs and produces correct answers,
         // matching the `first_unresolved_import` guard below.
-        if let Some(name) = Self::first_lambda_function_impl(mir) {
+        if let Some((name, why)) = Self::first_unsupported_lambda(mir) {
             return Err(BackendError::ModuleError(format!(
-                "function '{name}' creates a lambda/closure; the JIT closure ABI does not \
-                 tag-box lambda arguments or results and is incompatible with the runtime's \
-                 RuntimeClosure layout, so JIT would return wrong values or crash; \
+                "function '{name}' creates a lambda/closure the JIT closure ABI cannot \
+                 compile ({why}); JIT would return wrong values or crash; \
                  deferring to interpreter"
             )));
         }
@@ -216,14 +215,144 @@ impl JitCompiler {
     /// have their own instructions. See `compile_module` for why its presence
     /// disqualifies a module from JIT execution.
     fn first_lambda_function_impl(mir: &MirModule) -> Option<String> {
+        Self::first_unsupported_lambda(mir).map(|(name, _)| name)
+    }
+
+    /// Return the first function whose lambda usage the closure ABI cannot
+    /// compile, with the reason.
+    ///
+    /// # The two closure conventions
+    ///
+    /// A `ClosureCreate` result can be consumed in two incompatible ways:
+    ///
+    /// 1. **JIT-internal.** The closure is called back by an `IndirectCall` in
+    ///    the same function. Both halves of that boundary are emitted by this
+    ///    backend, so they only have to AGREE: `compile_indirect_call` builds
+    ///    its signature from `param_types`/`return_type`, and the outlined
+    ///    lambda declares the same types (`create_outlined_function` now takes
+    ///    the lambda's real return type rather than hardcoding I64). Since
+    ///    `mir::closure_call_types` fills those in from the `ClosureCreate`
+    ///    itself, they agree by construction, and no tag-boxing is needed at
+    ///    all — the values never leave JIT-compiled code.
+    ///
+    /// 2. **Runtime-facing.** The closure value is handed to something else —
+    ///    passed as an argument (e.g. to `rt_array_map`), stored into a heap
+    ///    object, or returned. Whoever calls it then goes through the runtime's
+    ///    `RuntimeClosure` layout and its all-`RuntimeValue` convention, which
+    ///    is NOT what `compile_closure_create` builds (a bare `rt_alloc` block
+    ///    with a raw code address at offset 0) and NOT how the outlined body
+    ///    reads its arguments. That mismatch returns wrong values or crashes.
+    ///
+    /// Only case 1 is admitted. Case 2 needs `rt_closure_new` allocation plus
+    /// tag-boxed arguments/results/captures on both sides; it is recorded as
+    /// the remaining blocker in
+    /// `doc/08_tracking/bug/seed_jit_coverage_self_hosted_compiler_2026-08-21.md`.
+    ///
+    /// An `IndirectCall` still carrying `TypeId::ANY` is also refused: no value
+    /// encoding at an untyped boundary can be right for both an i64 and an f64,
+    /// which is the exact defect that reverted the previous attempt.
+    fn first_unsupported_lambda(mir: &MirModule) -> Option<(String, String)> {
+        use crate::hir::TypeId;
+        use crate::mir::MirInst;
+
         for func in &mir.functions {
-            for block in &func.blocks {
-                if block
-                    .instructions
-                    .iter()
-                    .any(|inst| matches!(inst, crate::mir::MirInst::ClosureCreate { .. }))
-                {
-                    return Some(func.name.clone());
+            // Registers holding a closure built in THIS function.
+            let closure_regs = crate::mir::closure_call_types::closure_value_regs(func);
+            if closure_regs.is_empty() {
+                continue;
+            }
+
+            // A closure register may only be consumed as an `IndirectCall`
+            // callee (case 1) or stored/loaded through a local — the shape a
+            // `val f = \x: ...` binding lowers to, which
+            // `mir::closure_call_types` already tracks. Every other use is
+            // runtime-facing (case 2).
+            let body_blocks = crate::mir::closure_call_types::outlined_body_block_ids(func);
+            let mut local_closure_addrs = std::collections::HashSet::new();
+            for block in func.blocks.iter().filter(|b| !body_blocks.contains(&b.id)) {
+                for inst in &block.instructions {
+                    match inst {
+                        MirInst::LocalAddr { dest, .. } => {
+                            // Not itself a closure use; recorded so a Store of a
+                            // closure INTO a local is distinguishable from a
+                            // store into a heap object field.
+                            local_closure_addrs.insert(*dest);
+                        }
+                        MirInst::Store { addr, value, .. } => {
+                            if closure_regs.contains(value) && !local_closure_addrs.contains(addr) {
+                                return Some((
+                                    func.name.clone(),
+                                    "the closure is stored into a heap object, so it would be \
+                                     called through the runtime's RuntimeClosure convention"
+                                        .to_string(),
+                                ));
+                            }
+                        }
+                        MirInst::IndirectCall {
+                            callee,
+                            args,
+                            param_types,
+                            return_type,
+                            ..
+                        } => {
+                            if args.iter().any(|arg| closure_regs.contains(arg)) {
+                                return Some((
+                                    func.name.clone(),
+                                    "the closure is passed as a call argument (runtime-facing \
+                                     RuntimeClosure convention)"
+                                        .to_string(),
+                                ));
+                            }
+                            if closure_regs.contains(callee)
+                                && !(crate::codegen::jit_closure_abi_supports(*return_type)
+                                    && param_types
+                                        .iter()
+                                        .all(|ty| crate::codegen::jit_closure_abi_supports(*ty)))
+                            {
+                                return Some((
+                                    func.name.clone(),
+                                    format!(
+                                        "the call boundary types {param_types:?} -> {return_type:?} \
+                                         are not carryable by the unboxed closure ABI (ANY means no \
+                                         encoding is correct for both an integer and a float; a \
+                                         sub-register type such as BOOL is not handled uniformly by \
+                                         the surrounding codegen)"
+                                    ),
+                                ));
+                            }
+                        }
+                        // A scope `Drop` of the closure local neither calls the
+                        // closure nor hands it to anything that could.
+                        MirInst::Drop { .. } => {}
+                        other => {
+                            // Any other instruction that READS a closure
+                            // register hands the value somewhere this backend
+                            // does not control.
+                            if other
+                                .uses()
+                                .iter()
+                                .any(|reg| closure_regs.contains(reg))
+                            {
+                                return Some((
+                                    func.name.clone(),
+                                    format!(
+                                        "the closure value escapes into `{other:?}`, which would \
+                                         call it through the runtime's RuntimeClosure convention"
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                }
+                if let crate::mir::Terminator::Return(Some(reg)) = &block.terminator {
+                    if closure_regs.contains(reg) {
+                        return Some((
+                            func.name.clone(),
+                            "the closure is returned from the function, so its caller would use \
+                             the runtime's RuntimeClosure convention"
+                                .to_string(),
+                        ));
+                    }
                 }
             }
         }
