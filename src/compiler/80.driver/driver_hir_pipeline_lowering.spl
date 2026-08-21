@@ -91,8 +91,17 @@ impl CompilerDriver:
 
     me lower_and_check_streaming_surfaces_impl() -> (CompileContext, bool):
         if not self.streaming_surface_owner_ready:
-            self.ctx.add_error("Streaming module surfaces missing after phase 2")
-            return (self.ctx, false)
+            # Native value semantics can lose the adjacent readiness boolean
+            # across the phase-2 method boundary while retaining the frozen
+            # surface owner in CompileContext. Recover only from that stable
+            # owner; never fall through to the intentionally empty module map.
+            match self.ctx.module_surfaces:
+                case Some(retained_surfaces):
+                    self.streaming_module_surfaces_owner = retained_surfaces
+                    self.streaming_surface_owner_ready = true
+                case None:
+                    self.ctx.add_error("Streaming module surfaces missing after phase 2")
+                    return (self.ctx, false)
         val surfaces = self.streaming_module_surfaces_owner
         var lowering: HirLowering = hirlowering_for_module("", surfaces)
         var lowered_by_surface: Dict<i64, HirModule> = {}
@@ -310,8 +319,12 @@ impl CompilerDriver:
 
     me lower_and_check_impl() -> (CompileContext, bool):
         dtrace("[DRV] lac-canary=entry")
-        if self.streaming_surface_owner_ready:
+        if driver_streaming_surface_enabled(self.ctx):
             return self.lower_and_check_streaming_surfaces_impl()
+        if self.ctx.sources.len() > 0 and self.ctx.modules.keys().len() == 0:
+            self.ctx.add_error(
+                "HIR lowering invariant: non-streaming path selected with an empty parser-module cache")
+            return (self.ctx, false)
         val log = self.ctx.logger
 
         # Build module_name -> source_path map so each module gets the right
@@ -470,7 +483,7 @@ impl CompilerDriver:
                 else:
                     val entry_module_for_hir = self.ctx.modules[name]
                     lowering.lower_parser_module_unstub(entry_module_for_hir, is_bootstrap_entry)
-            elif unstub_hir and (self.ctx.modules[name] != nil):
+            elif unstub_hir and self.ctx.modules.contains_key(name):
                 # Reuse phase 2's parsed closure module. Re-parsing every source
                 # makes entry-closure HIR lowering superlinear and bypasses the
                 # object cache before code generation starts.
