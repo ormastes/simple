@@ -110,3 +110,11 @@ removes optional-value construction from these per-element paths. The source
 inventory improved from 33 to 40 fully tagged/contracted declarations, but 517
 remain contract-documented without an unsafe tag and 13,599 remain missing
 both; therefore repository-wide SFFI is still neither safe nor verified.
+
+The follow-up exact-signature census found 41 owned declarations for the three
+pointer-write symbols and 11 ABI mismatches: false i64 returns and widened i32
+payloads. All 41 now match the compiler/runtime void ABI. The new
+`sffi-exact-pointer-write-abi.shs` gate is called by the runtime contract audit,
+so reintroducing either mismatch fails before build or execution. This is a
+source/ABI guarantee only; declarations still lacking lexical unsafe metadata
+and call-site bounds proofs remain in the unsafe-tag migration queue.

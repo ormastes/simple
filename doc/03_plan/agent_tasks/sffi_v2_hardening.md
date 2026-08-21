@@ -46,12 +46,13 @@ passing placeholder.
 ## Current continuation sequence
 
 1. Harden the three raw pointer-write providers and register exact void ABIs.
-2. Migrate owned Simple declarations/callers from fabricated return contracts
-   and widened i32 arguments to the canonical ABI with narrow `unsafe(ffi,
-   raw_ptr)` scopes.
-3. Rebuild the contract inventory and migrate the next highest-risk uncovered
+2. Enforce exact pointer-write declarations with a source audit; migrate all
+   false return types and widened i32 payloads.
+3. Add contract-bearing unsafe metadata and narrow `unsafe(ffi, raw_ptr)` call
+   scopes, prioritizing wrappers that already establish allocation bounds.
+4. Rebuild the contract inventory and migrate the next highest-risk uncovered
    runtime family.
-4. Gate each slice with focused behavior, ABI, source, lint, and hot-path shape
+5. Gate each slice with focused behavior, ABI, source, lint, and hot-path shape
    checks; do not repeat an already-green check in the same session.
-5. Treat signing as separate artifact-admission evidence. Never label a
+6. Treat signing as separate artifact-admission evidence. Never label a
    provider semantically verified merely because its artifact is signed.
