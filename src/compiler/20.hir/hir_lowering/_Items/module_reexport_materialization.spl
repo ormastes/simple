@@ -231,7 +231,15 @@ impl HirLowering:
         if self.materialized_payload_bindings.contains_key(local_name):
             val existing = self.materialized_payload_bindings[local_name]
             if existing != wanted:
-                self.error("enum payload dependency `{local_name}` conflicts: `{existing}` vs `{wanted}`", import_span)
+                # NOT an error. Two distinct declarations may legitimately
+                # share one short name (aop::AdviceForm vs
+                # weaving.advice_form::AdviceForm), and this table is keyed on
+                # the short name, so the second claimant always loses the
+                # unqualified slot. Report false and let the caller re-register
+                # under the module-qualified local name; hard-failing here
+                # poisoned whichever module happened to reach both owners.
+                if (hir_module_env_get("SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE") ?? "") == "1":
+                    eprint("[hir-payload-shortname-taken] name={local_name} existing={existing} wanted={wanted}")
                 return false
             return true
         val existing_id = self.symbols.lookup_or_invalid(local_name)
@@ -276,7 +284,12 @@ impl HirLowering:
                     self.error("enum payload dependency `{local_name}` resolved to non-type binding `{symbol.name}` (kind `{existing_kind}`) in `{existing_owner}`; expected the type `{wanted}`", import_span)
                     return false
                 if existing != wanted:
-                    self.error("enum payload dependency `{local_name}` conflicts: `{existing}` vs `{wanted}`", import_span)
+                    # Same reasoning as the binding-table branch above: a
+                    # different TYPE already owns this short name. That is a
+                    # name collision, not a defect -- fall back to the
+                    # qualified registration in the caller.
+                    if (hir_module_env_get("SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE") ?? "") == "1":
+                        eprint("[hir-payload-shortname-taken] name={local_name} existing={existing} wanted={wanted}")
                     return false
         self.materialized_payload_bindings[local_name] = wanted
         true
@@ -297,7 +310,7 @@ impl HirLowering:
             # See doc/08_tracking/bug/hir_enum_payload_blockvalue_unresolved_2026-08-21.md
             eprint("[hir-payload-origin-unresolved] owner={imported_mod.module_name} owner_key={imported_mod_name} payload={dependency}: no declaration, re-export hop, or explicit import of this name in the owner; a later `unresolved type: {dependency}` will be reported against an importing module instead")
             return
-        if not self.claim_materialized_payload_binding(dependency, origin, import_span): return
+        val claimed_short_name = self.claim_materialized_payload_binding(dependency, origin, import_span)
         val identity = hir_payload_terminal_identity(origin.module_name, origin.item_name, origin.item_kind)
         val expanded = self.materialized_payload_origins.contains_key(identity)
         val source_index = self.surface_index_for_name(origin.module_key)
@@ -305,7 +318,13 @@ impl HirLowering:
         val terminal = self.module_surfaces.surfaces[source_index]
         # Binding and expansion are deliberately distinct: aliases in a cycle
         # still need their local symbol even when the physical origin was seen.
-        self.register_imported_symbol(terminal, origin.module_key, origin.item_name, dependency, import_span, true)
+        # When the unqualified name is already owned by a DIFFERENT terminal
+        # type, register this one under `{owner}::{name}` instead of dropping
+        # it. `register_imported_symbol` binds the qualified type for us, so
+        # the payload stays resolvable from the owner's own signatures.
+        val payload_local_name = if claimed_short_name: dependency
+            else: "{origin.module_name}::{origin.item_name}"
+        self.register_imported_symbol(terminal, origin.module_key, origin.item_name, payload_local_name, import_span, true)
         if expanded: return
         if origin.item_kind != "type_alias":
             self.materialized_payload_origins[identity] = true

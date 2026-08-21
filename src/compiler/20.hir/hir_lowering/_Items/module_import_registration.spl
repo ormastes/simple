@@ -120,6 +120,34 @@ impl HirLowering:
                     item_kind: "enum",
                     module_key: imported_mod_name)
                 if not self.claim_materialized_payload_binding(local_name, root_origin, import_span):
+                    # Two DISTINCT enums legitimately share one short name.
+                    # `compiler.frontend.core.aop::AdviceForm::enum` and
+                    # `compiler.mdsoc.weaving.advice_form::AdviceForm::enum`
+                    # are separate declarations that a module reaching both
+                    # (src/compiler/80.driver/driver.spl, transitively) must be
+                    # able to import. `materialized_payload_bindings` is keyed
+                    # on the LOCAL short name, so the second claimant could
+                    # only ever lose -- and losing meant a hard
+                    # `enum payload dependency `AdviceForm` conflicts` error
+                    # plus a bare `return` that left the second enum with no
+                    # symbol at all. A short-name collision is not a defect; it
+                    # only means the unqualified name is taken. Retry under the
+                    # module-qualified local name, exactly as
+                    # `materialize_imported_callable_declared_dependency` does
+                    # for signature dependencies -- that path binds
+                    # `{module}::{name}` and then `bind_qualified_type`, so the
+                    # loser stays reachable through the qualified lookup every
+                    # cross-module type resolution already consults.
+                    # Terminates after one retry: the qualified key cannot
+                    # collide with the short key, and the guard below refuses
+                    # to recurse when they are already equal.
+                    val qualified_local = "{imported_mod.module_name}::{imported_name}"
+                    if local_name == qualified_local: return
+                    if (hir_module_env_get("SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE") ?? "") == "1":
+                        eprint("[hir-payload-shortname-collision] local={local_name} requalified={qualified_local} owner={imported_mod.module_name}")
+                    self.register_imported_symbol(
+                        imported_mod, imported_mod_name, imported_name,
+                        qualified_local, import_span, materialize_enum)
                     return
             val already_bound = self.symbols.lookup(local_name).?
             val imported_type = self.symbols.define(local_name, SymbolKind.Enum, nil, import_span, Visibility.Public, false, Some(imported_mod.module_name))
