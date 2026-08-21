@@ -449,7 +449,9 @@ fn parallel_map<T, R>(items: List<T>, func: fn(T) -> R, num_threads: i64) -> Lis
     # Collect results
     val results = []
     for ch in result_channels:
-        val chunk_results = ch.recv()
+        # `recv()` is `Any?` (nil when the channel closed empty); an empty
+        # chunk contributes nothing, so fold nil to [].
+        val chunk_results = ch.recv() ?? []
         results.extend(chunk_results)
 
     # Clean up handles
@@ -511,8 +513,10 @@ fn parallel_reduce<T, R>(items: List<T>, reducer: fn(R, T) -> R, initial: R, num
     # Combine partial results
     val result = initial
     for ch in result_channels:
-        val partial = ch.recv()
-        result = reducer(result, partial)
+        # `recv()` is `Any?`; a closed-empty channel contributes no partial,
+        # so skip it rather than feeding nil to the reducer.
+        if val partial = ch.recv():
+            result = reducer(result, partial)
 
     # Clean up handles
     for handle in handles:
