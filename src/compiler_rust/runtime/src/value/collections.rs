@@ -73,6 +73,12 @@ fn normalize_index(index: i64, len: i64) -> i64 {
     }
 }
 
+/// Number of times [`fnv1a_hash`] actually walked bytes. Test-only instrumentation
+/// used to pin the lazy-hash mechanism (see `lazy_string_hash_tests`).
+#[cfg(test)]
+pub(crate) static FNV1A_HASH_CALLS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 /// FNV-1a hash for strings (64-bit)
 /// This is a simple, fast hash suitable for hash tables.
 #[inline]
@@ -80,11 +86,50 @@ fn fnv1a_hash(bytes: &[u8]) -> u64 {
     const FNV_OFFSET: u64 = 0xcbf29ce484222325;
     const FNV_PRIME: u64 = 0x100000001b3;
 
+    #[cfg(test)]
+    FNV1A_HASH_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
     let mut hash = FNV_OFFSET;
     for &byte in bytes {
         hash ^= byte as u64;
         hash = hash.wrapping_mul(FNV_PRIME);
     }
+    hash
+}
+
+/// Sentinel stored in [`RuntimeString::hash`] meaning "not computed yet".
+///
+/// String construction (literal, `rt_string_new`, concat, file read) does NOT
+/// hash its bytes: hashing was pure overhead on every construction while the
+/// field has exactly ONE reader, `rt_value_hash` in `value/sffi/equality.rs`,
+/// which is only reached when a string is used as a dict/set key. Concatenation
+/// in particular was alloc + copy + rehash-the-whole-result, making
+/// `s = s + x` in a loop quadratic in HASHING as well as in copying.
+///
+/// `0` is used as the sentinel because it is also the hash of the empty string
+/// under this scheme (an empty string has nothing to walk), so the empty case
+/// needs no special handling. A non-empty string whose real FNV-1a value is `0`
+/// (probability 2^-64) is simply re-hashed on each lookup — slower, never wrong.
+pub(crate) const STRING_HASH_UNCOMPUTED: u64 = 0;
+
+/// Read the cached hash of a runtime string, computing and memoising it on the
+/// first call. This is the only place that turns string bytes into a hash for
+/// key lookups.
+///
+/// # Safety
+/// `ptr` must point to a live, fully initialised [`RuntimeString`].
+pub(crate) unsafe fn runtime_string_hash(ptr: *mut RuntimeString) -> u64 {
+    let cached = (*ptr).hash;
+    if cached != STRING_HASH_UNCOMPUTED {
+        return cached;
+    }
+    let len = (*ptr).len;
+    if len == 0 {
+        return STRING_HASH_UNCOMPUTED;
+    }
+    let data = (ptr as *const u8).add(std::mem::size_of::<RuntimeString>());
+    let hash = fnv1a_hash(std::slice::from_raw_parts(data, len as usize));
+    (*ptr).hash = hash;
     hash
 }
 
@@ -351,10 +396,9 @@ fn rt_string_new_uncached_untracked(bytes: *const u8, len: u64) -> RuntimeValue 
         if len > 0 {
             let data_ptr = ptr.add(1) as *mut u8;
             std::ptr::copy_nonoverlapping(bytes, data_ptr, len as usize);
-            (*ptr).hash = fnv1a_hash(std::slice::from_raw_parts(bytes, len as usize));
-        } else {
-            (*ptr).hash = 0;
         }
+        // Hash lazily: see STRING_HASH_UNCOMPUTED.
+        (*ptr).hash = STRING_HASH_UNCOMPUTED;
 
         RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader)
     }
@@ -2341,7 +2385,10 @@ pub(crate) fn rt_string_new_with_len_hash(bytes: *const u8, len: u64) -> Runtime
             let data_ptr = ptr.add(1) as *mut u8;
             std::ptr::copy_nonoverlapping(bytes, data_ptr, len as usize);
         }
-        (*ptr).hash = len;
+        // Previously stored `len` here, which is not the FNV-1a value every other
+        // construction path stored: two equal strings could hash differently
+        // depending on where they came from. Deferring makes every path agree.
+        (*ptr).hash = STRING_HASH_UNCOMPUTED;
 
         track_transient_heap(RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader))
     }
@@ -2432,12 +2479,10 @@ pub extern "C" fn rt_string_concat(a: RuntimeValue, b: RuntimeValue) -> RuntimeV
             std::ptr::copy_nonoverlapping(data_b, data_ptr.add(len_a as usize), len_b as usize);
         }
 
-        // Compute hash for concatenated string
-        (*ptr).hash = if total_len > 0 {
-            fnv1a_hash(std::slice::from_raw_parts(data_ptr, total_len as usize))
-        } else {
-            0
-        };
+        // No hash here: concat is one alloc + two copies. Hashing the whole
+        // result per append is what made s = s + x quadratic in hash work on
+        // top of the copy cost. Computed on demand by runtime_string_hash.
+        (*ptr).hash = STRING_HASH_UNCOMPUTED;
 
         RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader)
     }
@@ -6261,5 +6306,85 @@ mod array_free_deep_contract_tests {
         let after_first = rt_heap_registry_count();
         assert_eq!(rt_array_free_deep(a), 0, "double deep-free refused");
         assert_eq!(rt_heap_registry_count(), after_first, "refusal does not decrement");
+    }
+}
+
+#[cfg(test)]
+mod lazy_string_hash_tests {
+    use super::{
+        rt_string_concat, rt_string_len, rt_string_new, RuntimeString, FNV1A_HASH_CALLS,
+        STRING_HASH_UNCOMPUTED,
+    };
+    use crate::value::{HeapObjectType, RuntimeValue};
+    use std::sync::atomic::Ordering;
+
+    fn s(text: &str) -> RuntimeValue {
+        rt_string_new(text.as_ptr(), text.len() as u64)
+    }
+
+    fn hash_of(v: RuntimeValue) -> u64 {
+        crate::value::sffi::equality::value_hash(v)
+    }
+
+    fn raw_hash_field(v: RuntimeValue) -> u64 {
+        let p = crate::value::heap::get_typed_ptr::<RuntimeString>(v, HeapObjectType::String)
+            .expect("string");
+        unsafe { (*p).hash }
+    }
+
+    /// The mechanism: 20k accumulating appends must walk bytes for a hash ZERO
+    /// times. Before the lazy change every concat re-hashed the whole result.
+    #[test]
+    fn appending_20k_times_computes_no_hashes() {
+        let piece = s("abcdefghij");
+        let mut acc = s("");
+        let before = FNV1A_HASH_CALLS.load(Ordering::Relaxed);
+        for _ in 0..20_000 {
+            acc = rt_string_concat(acc, piece);
+        }
+        let after = FNV1A_HASH_CALLS.load(Ordering::Relaxed);
+        assert_eq!(
+            after - before,
+            0,
+            "concat must not hash; {} hash walks over 20k appends",
+            after - before
+        );
+        assert_eq!(rt_string_len(acc), 200_000);
+        assert_eq!(raw_hash_field(acc), STRING_HASH_UNCOMPUTED);
+    }
+
+    /// ... and the deferred hash is still produced, exactly once, on first use.
+    #[test]
+    fn hash_is_computed_once_on_first_use() {
+        let v = rt_string_concat(s("hello, "), s("world"));
+        let before = FNV1A_HASH_CALLS.load(Ordering::Relaxed);
+        let h1 = hash_of(v);
+        let mid = FNV1A_HASH_CALLS.load(Ordering::Relaxed);
+        let h2 = hash_of(v);
+        let after = FNV1A_HASH_CALLS.load(Ordering::Relaxed);
+        assert_eq!(mid - before, 1, "first use must hash exactly once");
+        assert_eq!(after - mid, 0, "second use must be memoised");
+        assert_eq!(h1, h2);
+        assert_ne!(h1, STRING_HASH_UNCOMPUTED);
+    }
+
+    /// Equal strings hash equally regardless of how they were built -- the
+    /// property a dict key depends on.
+    #[test]
+    fn equal_strings_hash_equally_across_construction_paths() {
+        let literal = s("hello, world");
+        let built = rt_string_concat(s("hello, "), s("world"));
+        let three = rt_string_concat(rt_string_concat(s("hello"), s(", ")), s("world"));
+        assert_eq!(hash_of(literal), hash_of(built));
+        assert_eq!(hash_of(literal), hash_of(three));
+    }
+
+    /// The empty string keeps hash 0 and needs no byte walk.
+    #[test]
+    fn empty_string_needs_no_hash_walk() {
+        let e = s("");
+        let before = FNV1A_HASH_CALLS.load(Ordering::Relaxed);
+        assert_eq!(hash_of(e), 0);
+        assert_eq!(FNV1A_HASH_CALLS.load(Ordering::Relaxed) - before, 0);
     }
 }

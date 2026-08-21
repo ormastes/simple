@@ -139,7 +139,7 @@ fn value_hash_inner(v: RuntimeValue, depth: u32) -> u64 {
     match v.heap_type() {
         Some(HeapObjectType::String) => {
             if let Some(sp) = get_typed_ptr::<RuntimeString>(v, HeapObjectType::String) {
-                return unsafe { (*sp).hash };
+                return unsafe { super::super::collections::runtime_string_hash(sp as *mut RuntimeString) };
             }
             fnv1a_bits(v.to_raw())
         }
