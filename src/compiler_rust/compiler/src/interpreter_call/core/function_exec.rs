@@ -715,13 +715,38 @@ pub(crate) fn execute_function_body(
         return Ok(Value::Generator(gen));
     }
 
-    // Now extract result, potentially returning error
-    let result = match exec_result {
-        Ok((Control::Return(v), _)) => v,
-        Ok((_, Some(v))) => v,
-        Ok((_, None)) => Value::Nil,
-        Err(CompileError::TryError(val)) => *val,
+    // Now extract result, potentially returning error.
+    // The ORIGIN of the value is tracked alongside it: a body that produced no
+    // value at all must not first be laundered into `Value::Nil` (and then, for
+    // an optional return type, into `Option::None`). Only a UNIT contract may
+    // fall through without a value; every other contract fails closed with
+    // E-SFFI-016. Bug:
+    // doc/08_tracking/bug/sffi_non_optional_fallthrough_fabricates_nil_2026-08-21.md
+    let return_contract = sffi_return_contract(func.return_type.as_ref());
+    let (return_origin, extracted) = match exec_result {
+        Ok((Control::Return(v), _)) => (
+            if matches!(v, Value::Nil) {
+                SffiReturnOrigin::ExplicitOptionalNone
+            } else {
+                SffiReturnOrigin::ExplicitReturn
+            },
+            Some(v),
+        ),
+        Ok((_, Some(v))) => (SffiReturnOrigin::TailValue, Some(v)),
+        Ok((_, None)) => (
+            if matches!(return_contract, SffiReturnContract::Unit) {
+                SffiReturnOrigin::UnitFallthrough
+            } else {
+                SffiReturnOrigin::MissingReturn
+            },
+            None,
+        ),
+        Err(CompileError::TryError(val)) => (SffiReturnOrigin::ForeignRawResult, Some(*val)),
         Err(e) => return Err(e),
+    };
+    let result = match extracted {
+        Some(value) => value,
+        None => validate_sffi_return_contract(&func.name, func.return_type.as_ref(), return_origin, None)?,
     };
 
     // Auto-wrap return value in Some() when the declared return type is T? (Optional)
@@ -771,12 +796,13 @@ pub(crate) fn execute_function_body(
         result
     };
 
-    // Validate return type
-    validate_unit!(
-        &result,
+    // Validate the full return contract (total, not unit-only).
+    let result = validate_sffi_return_contract(
+        &func.name,
         func.return_type.as_ref(),
-        format!("return type mismatch in '{}'", func.name)
-    );
+        return_origin,
+        Some(result),
+    )?;
 
     // Wrap in Promise if async and requested
     let result = if wrap_async && is_async_function(func) {
