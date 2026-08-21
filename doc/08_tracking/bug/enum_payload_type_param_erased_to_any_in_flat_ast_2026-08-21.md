@@ -1,7 +1,7 @@
 # Enum type params dropped and payload `T` erased to `Any` by the flat AST
 
 **Date:** 2026-08-21
-**Status:** OPEN
+**Status:** RESOLVED (2026-08-21)
 **Severity:** Medium (blocks generic-enum template metadata in SMF; no runtime effect today)
 **Found while:** delivering the "populate" follow-on of
 `smf_enum_def_serializes_variant_names_only_2026-08-21.md`
@@ -66,3 +66,52 @@ struct fields do). When `HirEnum.type_params` is populated and
 
 Those files are under active edit by other lanes (see `git status`), which is why this
 is filed rather than fixed here.
+
+## RESOLUTION (2026-08-21)
+
+Both halves came from ONE missing link, not two: the flat AST already preserved
+the payload type NAME (`parser_parse_type` registers an unknown ident via
+`named_type_register`, so `T` travels as `TYPE_NAMED_BASE + id` and
+`convert_flat_type` rebuilds `Named("T", [])` -- `core/parser.spl:906`). The
+erasure to `Any` happened one layer later, in `lower_type`'s seed-parity
+"bare single uppercase letter -> Any" rule, which fires only when the generic
+binder never registered `T`. It never registered it because
+`ParserEnum.type_params` was empty. Carrying the params therefore fixes the
+payload erasure as a consequence -- no per-payload name channel was needed.
+
+Two edits, both mirroring what generic structs already do:
+
+1. `src/compiler/10.frontend/core/_ParserDecls/enum_module_body.spl` --
+   `parse_enum_decl` now calls `decl_set_type_params(enum_d, type_params)`
+   after `decl_enum_def(...)`, exactly as `parse_struct_decl` does
+   (`_ParserDecls/fn_struct_decls.spl:1098`). No signature change to
+   `decl_enum_def`: the shared per-decl `TYPE_PARAMS` slot
+   (`decl_type_params`, `decl_nodes.spl:273`) already existed and was simply
+   never written for enums.
+2. `src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl` -- the enum
+   arm (`tag_text == "8"`) builds `[ParserTypeParam]` from
+   `decl_get_type_params(idx)` instead of the hardcoded `[]`, the same shape
+   as the struct/class arm above it.
+
+`lower_enum_with_symbol` already ran `lower_type_param` (which
+`symbols.define(..., SymbolKind.TypeParam, ...)`) before `lower_variant`, and
+`enum_def_from_hir` already derived template-ness from
+`e.type_params.len() > 0`, so neither HIR nor the mono bridge needed changing.
+
+### Evidence
+
+`test/01_unit/compiler/linker/smf_enum_def_source_round_trip_spec.spl`
+(mirrored at `test/unit/...`): the 2 `KNOWN RED` examples are now real
+expectations and the file is **11/11 green**. Its `template_round_trip`
+helper no longer force-sets `is_generic_template`/`generic_params` -- the
+source enum partitions as generic on its own, which is the fix's direct proof.
+
+Regression sweep, each run individually, all green:
+`smf_enum_def_round_trip` 15/15, `smf_enums` 22/22,
+`enum_lowering_end_to_end` 6/6, `enum_extension_grammar` 10/10,
+`enum_payload_capture` 7/7, `enum_contract_hir_wiring` 10/10,
+`mono/generic_template` 20/20, `mono_source_inference_fixed_point` 5/5.
+
+Schema registry: no compiler enum shape changed;
+`sh scripts/check/check-compiler-schema-fresh.shs` ->
+`PASS - 365 variant(s) across 12 enum(s), registry fresh`.

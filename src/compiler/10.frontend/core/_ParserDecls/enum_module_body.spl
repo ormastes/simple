@@ -14,6 +14,7 @@ use compiler.core.ast.{DECL_CE, decl_ce_block}
 use compiler.core.ast.{decl_fn, decl_extern_fn, decl_struct_def}
 use compiler.core.ast.{decl_val_binding, decl_lazy_val_binding, decl_var_binding, decl_type_alias}
 use compiler.core.ast.{decl_use_import, decl_export_names, decl_enum_def, decl_enum_payload_unnamed_marker, decl_set_lazy}
+use compiler.core.ast.{decl_set_type_params}
 use compiler.core.ast.{decl_set_hardware, decl_set_clocked_args, decl_set_vhdl_generic_args, decl_set_flatten_struct_output}
 use compiler.core.ast.{decl_impl_block}
 use compiler.core.ast.{decl_set_comptime}
@@ -454,6 +455,17 @@ fn parse_enum_decl() -> i64:
     if saw_complete_section or saw_dyn_section:
         parser_record_enum_open_regions(enum_name, saw_complete_section, saw_dyn_section)
     val enum_d = decl_enum_def(enum_name, variant_names, variant_discriminants, variant_payload_types_flat, variant_payload_counts, variant_payload_field_names_flat, 0)
+    # `enum Opt<T>:` -- thread the `<T, ...>` names parsed above onto the flat
+    # decl's shared TYPE_PARAMS slot, exactly as parse_struct_decl does for
+    # `struct Box<T>` (fn_struct_decls.spl:1098). Without this the list was
+    # dropped here, so ParserEnum.type_params was always `[]`, HIR never
+    # registered `T` as a SymbolKind.TypeParam, and every payload `T` fell
+    # through lower_type's seed-parity "bare single uppercase letter -> Any"
+    # rule -- erasing the payload type AND making a generic enum partition as
+    # non-generic, so it could never be monomorphized.
+    # doc/08_tracking/bug/enum_payload_type_param_erased_to_any_in_flat_ast_2026-08-21.md
+    if type_params.len() > 0:
+        decl_set_type_params(enum_d, type_params)
     if parse_enum_method_ids.len() > 0:
         val enum_impl = decl_impl_block(enum_name, parse_enum_method_ids, 0)
         module_add_decl(enum_impl)

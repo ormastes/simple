@@ -72,20 +72,11 @@ fn template_round_trip(src: text) -> EnumDef:
     """Full path: bridge -> partition -> serialize_templates -> deserialize_templates."""
     deferred_clear_error()
     val hm = lower(src)
-    var module = ast_module_enums_from_hir(hm)
-    # Until the flat AST carries enum type params (see KNOWN RED below), the
-    # source enum partitions as non-generic; force template-ness so the
-    # serialize_templates -> deserialize_templates leg is exercised.
-    var forced: [Node] = []
-    for item in module.items:
-        match item:
-            case Node.Enum(d):
-                var g = d
-                g.is_generic_template = true
-                g.generic_params = ["T"]
-                forced = forced.push(Node.Enum(g))
-            case _: forced = forced.push(item)
-    module = AstModule(name: module.name, items: forced)
+    val module = ast_module_enums_from_hir(hm)
+    # The source enum now partitions as generic on its own: the flat AST
+    # carries `<T>` through to HirEnum.type_params, so no template-ness needs
+    # to be forced here (it was, until the bug record below was fixed).
+    # doc/08_tracking/bug/enum_payload_type_param_erased_to_any_in_flat_ast_2026-08-21.md
     val parts = partition_generic_constructs(module)
     # partition_generic_constructs returns an array literal, not a tuple.
     val templates: GenericTemplates = parts[0]
@@ -130,19 +121,21 @@ describe "SMF enum population from source (hir_bridge)":
         expect(e.complete_open).to_equal(true)
         expect(e.dyn_open).to_equal(false)
 
-    it "marks a parameterised enum as a template with its params (KNOWN RED: flat AST drops enum type params)":
+    it "marks a parameterised enum as a template with its params":
         # doc/08_tracking/bug/enum_payload_type_param_erased_to_any_in_flat_ast_2026-08-21.md
-        # enum_module_body.spl:268 parses `<T>` but decl_enum_def (decl_nodes.spl:655)
-        # has no type_params slot, so HirEnum.type_params is always empty.
+        # (RESOLVED) parse_enum_decl now threads `<T>` onto the flat decl's
+        # shared TYPE_PARAMS slot and module_assembly rebuilds
+        # ParserEnum.type_params from it, so HirEnum.type_params carries `T`.
         val e = only_enum_def(GENERIC_SRC)
         expect(e.variant_payload_counts).to_equal([1, 0])
         expect(e.generic_params).to_equal(["T"])
         expect(e.is_generic_template).to_equal(true)
 
-    it "names the payload type param T (KNOWN RED: flat AST erases enum payload type params to Any)":
+    it "names the payload type param T":
         # doc/08_tracking/bug/enum_payload_type_param_erased_to_any_in_flat_ast_2026-08-21.md
-        # enum_module_body.spl:437 pushes a type TAG per payload slot; `T` has
-        # no tag, so lower_type sees a bare single letter and erases it to Any.
+        # (RESOLVED) with `T` bound as a SymbolKind.TypeParam by lower_type_param,
+        # lower_type resolves the payload annotation to Named(sym_T) instead of
+        # falling through to the seed-parity single-uppercase-letter -> Any rule.
         val e = only_enum_def(GENERIC_SRC)
         expect(e.variant_payload_type_names).to_equal(["T"])
 
