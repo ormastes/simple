@@ -10,6 +10,7 @@ mod instructions;
 mod lower;
 pub mod parallel;
 mod state_machine_utils;
+pub mod string_accum;
 
 // Note: instructions module now contains submodules:
 // - inst_types: Supporting types (ParallelBackend, ContractKind, etc.)
@@ -35,6 +36,9 @@ pub use lower::*;
 pub use parallel::{
     lower_modules_parallel, lower_modules_parallel_with_config, BatchMirLowerer, MirLowerStats, ParallelMirConfig,
     ParallelMirLowerer,
+};
+pub use string_accum::{
+    apply_string_accumulation, apply_string_accumulation_to_module, StringAccumStats,
 };
 pub use simple_parser::Visibility;
 

@@ -176,3 +176,92 @@ interpreter dispatch cost.
 
 Because `run` defaults to JIT, this change does **not** move the `simple run`
 concat benchmark — that number only improves when the JIT lane is fixed.
+
+---
+
+## JIT lane: FIXED (2026-08-21)
+
+Two changes, in the order they were made.
+
+### 1. Runtime — lazy string hashing
+
+`RuntimeString.hash` was computed eagerly at every construction site, so
+`rt_string_concat` re-hashed the ENTIRE result on every append: the accumulation
+was quadratic in HASH work on top of the quadratic copy. The field has exactly
+one reader in the tree (`value_hash()` in `value/sffi/equality.rs`, reached only
+when a string is a dict/set key), so every other string paid for nothing. All
+construction paths now store `STRING_HASH_UNCOMPUTED` (`0`, which doubles as the
+empty string's hash) and `runtime_string_hash()` computes and memoises on first
+key use.
+
+This also fixed a latent hash-consistency bug: `rt_string_new_with_len_hash`
+(used by file reads) stored `len` in the hash field instead of the FNV-1a value
+every other path stored, so a string read from a file and an equal literal
+hashed differently.
+
+Pinned by deterministic counts (a `cfg(test)` counter inside `fnv1a_hash`), in
+`value::collections::lazy_string_hash_tests`: 20k appends perform **0** hash
+walks; first key use performs exactly 1; a second use performs 0; equal strings
+built three different ways hash equally.
+
+### 2. MIR — emit the string builder for the accumulation pattern
+
+New pass `src/compiler_rust/compiler/src/mir/string_accum.rs`, run at the end of
+`MirLowerer::lower_module` (the single choke point every backend goes through,
+so JIT and native cannot diverge). It finds a natural loop containing exactly
+one `s = s + <expr>` on a local, and rewrites it to `rt_string_builder_new` +
+seed push in the preheader, one `rt_string_builder_push` per iteration, and
+`rt_string_builder_finish` + store-back on every exit edge (edges are split, so
+an exit target shared with non-loop paths is safe). The builder already existed
+from bug `rt_string_concat_quadratic_2026-06-12` and was already declared to
+codegen; nothing had ever emitted it.
+
+The match rules are conservative and documented at the top of that file: left
+operand only (a prepend is not this pattern), exactly one read and one write of
+the local in the loop, no other consumer of the local's address, no
+closure/interp/asm/indirect call in the loop, no in-loop return, and a single
+preheader. `SIMPLE_NO_STRING_BUILDER=1` disables the pass.
+
+Two bugs found by running it end to end, both of which produced silently WRONG
+strings rather than crashes, and both now pinned by tests:
+
+* `LocalAddr.local_index` is not an index into `func.locals` — it is a position
+  in the combined `[implicit][params][locals]` space whose implicit COUNT is
+  itself inferred from the max index used. Taking an index above every existing
+  one grew that count and shifted the meaning of every other index: the
+  accumulator was then read as the `i32` parameter's slot and its pointer was
+  `ireduce`d to 32 bits (`<invalid-heap:0x72021711>`).
+* Inserting the push at the removed `Load`'s index put it before its own operand
+  (`ConstString`) was defined; the JIT read a stale `vreg_values` entry from the
+  previous iteration and every result came out exactly one push short.
+
+### Measured, `bin/simple run` (JIT), `s = s + "abcdefghij"`
+
+| appends | pre | post |
+|---|---|---|
+| 10,000 | 4.4 s | 0.10 s |
+| 20,000 | 30.1 s | 0.07 s |
+| 40,000 | 99.1 s | 0.18 s |
+| 80,000 | OOM-killed at 24 GB RSS after 259 s | 0.16 s |
+
+Post is flat because it is now dominated by process start and JIT compilation;
+the quadratic term is gone. Python's 0.13 s for 40k is no longer the benchmark
+to beat.
+
+### Verification
+
+* `cargo test -p simple-compiler --release --lib`: 3738 passed / 52 failed —
+  the same 52 as the recorded baseline, no new failures.
+* `cargo test -p simple-runtime --release --lib`: 1180 passed / 10 failed — the
+  same 10 fail at the parent commit, verified by building and running the
+  baseline in a separate worktree.
+* Engine-differential corpus (`test/fixtures/engine_differential/`), JIT vs
+  interpreter with the same binary: 9 match / 2 differ, byte-identical to the
+  pre-change binary's result (`i64_boundary_values`, `utf8_slice_boundary` are
+  pre-existing and unrelated).
+* New fixture `test/fixtures/engine_differential/string_accumulation_loop.spl`
+  covers zero iterations, a non-empty seed, an empty seed, a 2000-append run, a
+  mid-loop read (must NOT be rewritten), a prepend (must NOT be rewritten), and
+  non-ASCII content. JIT and interpreter agree on every line.
+
+Status: JIT lane **FIXED**.

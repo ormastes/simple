@@ -1897,6 +1897,21 @@ impl<'a> MirLowerer<'a> {
             }
         }
 
+        // String-accumulation pass: rewrite `s = s + x` loops onto the runtime
+        // string builder. Placed at the single choke point every MIR consumer
+        // goes through (JIT, native, hybrid) rather than in one pipeline, so a
+        // backend cannot silently miss it. See `mir::string_accum` and bug
+        // `seed_interpreter_raw_throughput_2026-08-21.md`.
+        let accum_stats = crate::mir::apply_string_accumulation_to_module(&mut module.functions);
+        if accum_stats.loops_rewritten > 0 {
+            tracing::debug!(
+                "String accumulation: {} loop(s) rewritten, {} push(es), {} finish(es)",
+                accum_stats.loops_rewritten,
+                accum_stats.pushes_emitted,
+                accum_stats.finishes_emitted,
+            );
+        }
+
         Ok(module)
     }
 
