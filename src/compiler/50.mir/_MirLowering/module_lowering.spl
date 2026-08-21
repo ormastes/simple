@@ -1608,8 +1608,41 @@ impl MirLowering:
     me lower_runtime_module_initializers(module: HirModule, consts: [HirConst], bootstrap_module_index: i64 = -1):
         self.lower_runtime_module_initializers_named(module.name, consts, bootstrap_module_index)
 
+    me hir_const_is_function_slot(const_: HirConst) -> bool:
+        """True for a module-level `var` whose initializer NAMES a top-level
+        function -- a function-pointer slot (`var cleanup: fn() =
+        default_cleanup`).
+
+        Such a binding is not a compile-time constant and `const_.type_.kind`
+        arrives as `Any` (the `fn()` annotation does not survive HIR
+        lowering), so `runtime_module_initializer_supported`'s type-driven
+        fallback rejects it and it used to get NO static slot at all: the
+        assignment in another function was dropped and every call through the
+        slot was bound DIRECTLY at lowering time. Bug
+        module_global_fn_pointer_lowered_as_direct_call_2026-08-21.
+        """
+        if not const_.is_mutable:
+            return false
+        match const_.value.kind:
+            case NamedVar(_, name): self.is_known_top_level_function(name)
+            case _: false
+
     me lower_runtime_module_initializers_named(module_name_raw: text, consts: [HirConst], bootstrap_module_index: i64 = -1):
-        val dynamic = runtime_module_initializers_in_declaration_order(consts)
+        var dynamic = runtime_module_initializers_in_declaration_order(consts)
+        # Function-pointer slots need the same runtime-initialized global
+        # storage, but cannot be recognised by the free type-driven predicate
+        # above (it has no view of the module's function names). Appended
+        # rather than merged in declaration order: a function-pointer
+        # initializer names a function, never another global, so it has no
+        # ordering dependency on the entries already collected.
+        for slot_const in consts:
+            if self.hir_const_is_function_slot(slot_const):
+                var slot_already = false
+                for existing in dynamic:
+                    if existing.symbol.id == slot_const.symbol.id:
+                        slot_already = true
+                if not slot_already:
+                    dynamic = dynamic.push(slot_const)
         if dynamic.len() == 0:
             return
 

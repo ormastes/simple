@@ -4418,6 +4418,23 @@ impl MirLowering:
         if is_direct and self.local_map.has(mir_expr_symbol_id_value(direct_symbol)):
             is_direct = false
 
+        # A module-global function-pointer SLOT is not a call target bound at
+        # lowering time: `var cleanup: fn() = default_cleanup` followed by
+        # `cleanup = replacement_cleanup` in another function must be observed
+        # by `cleanup()`. The local-variable demotion above covers only
+        # per-function SSA locals, so a global slot stayed `is_direct` and
+        # reached `emit_resolved_direct_call`, freezing the callee at its
+        # initializer. Demote when the callee names a module global that has
+        # backing static storage AND is not itself a top-level function -- a
+        # plain `foo()` call is a known function name and keeps its direct
+        # call unchanged. Bug
+        # module_global_fn_pointer_lowered_as_direct_call_2026-08-21.
+        if is_direct and not self.is_known_top_level_function(direct_name):
+            val slot_symbol_id = mir_expr_symbol_id_value(direct_symbol)
+            if slot_symbol_id >= 0 and self.global_symbol_ids.contains(slot_symbol_id):
+                if self.find_global_static(slot_symbol_id).?:
+                    is_direct = false
+
         if is_direct:
             # Inline a val-bound lambda `f(args)` by beta-reduction (lambda-lift).
             val inl = self.try_inline_lambda_call(direct_symbol, args)

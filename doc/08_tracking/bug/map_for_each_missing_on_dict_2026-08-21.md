@@ -54,3 +54,15 @@ Add a `dict`/`Map` arm for `each`/`for_each` alongside the existing array arm,
 passing `(key, value)` to the closure, and dispatch it in the interpreter's
 dict method table. Iteration order should match the existing dict key
 iteration order so the new method agrees with `for k in map:`.
+
+## Re-confirmed seed-only 2026-08-21
+
+Checked for a pure-Simple place to close this instead: there is none.
+`/usr/bin/grep -rn '"merge"|"map_values"|"for_each"' src/compiler/95.interp`
+returns **zero** hits — the pure-Simple interpreter layer has no dict method
+table at all, and the `method 'for_each' not found on type 'dict'` text is not
+produced anywhere under `src/compiler/**`. `Map` in `src/lib` is not a class
+with methods either (`src/lib/nogc_sync_mut/src/map.spl` lowers to the builtin
+`dict`), so a stdlib-side `for_each` has nothing to attach to. The fix stays
+where the record says: the seed's dict method table plus the codegen arm, then
+a redeploy. Unchanged; still OPEN.

@@ -96,3 +96,13 @@ Replacing only the three arch gates with a pure-Simple `host_arch()` test was
 tried and deliberately reverted: it does not fix the spec (`rt_cpuid` fails
 next) and it silently swaps compile-time arch for run-time host arch, which is
 wrong under cross-compilation.
+
+## Triage note 2026-08-21 (interpreter/evaluation bug sweep)
+
+Re-read against the pure-Simple tree looking for anything closable without a
+seed change. All six items stand as recorded — every one of them is in the
+Rust seed. Item 4 (`dict` has no `for_each`) was independently re-confirmed:
+`src/compiler/95.interp` has no dict method table, so there is no pure-Simple
+surface to add it to (details in
+`map_for_each_missing_on_dict_2026-08-21.md`). Still OPEN, still blocked on a
+seed rebuild + deploy.

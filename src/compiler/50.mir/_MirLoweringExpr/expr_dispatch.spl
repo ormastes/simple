@@ -3338,6 +3338,22 @@ impl MirLowering:
             # A local of the same name shadows it (handled above).
             if named_var_name == "None" and self.enum_variant_index.contains("Option") and not (pre_sym_id >= 0 and pre_named_local.id >= 0):
                 return self.lower_enum_construct_named("Option", "None", [])
+            # A top-level function named as a VALUE (`var slot: fn() =
+            # default_cleanup`, or the RHS of `slot = replacement_cleanup`).
+            # Same `Const(Str(name), FuncPtr(..))` shape
+            # `named_function_operand` produces for a function passed as a
+            # call argument; without this the identifier fell through to
+            # "undefined variable" and the whole binding was silently dropped
+            # (bug module_global_fn_pointer_lowered_as_direct_call_2026-08-21).
+            if self.is_known_top_level_function(named_var_name):
+                val fn_value_type = MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                    params: [], return_type: MirType.i64(), is_variadic: false
+                )))
+                var b_fn_value = self.builder
+                val fn_value_local = b_fn_value.new_temp(fn_value_type)
+                b_fn_value.emit_const(fn_value_local, MirConstValue.Str(named_var_name), fn_value_type)
+                self.builder = b_fn_value
+                return fn_value_local
             self.error("undefined variable " + named_var_name, Some(expr_value.span))
             var b_missing_named_var = self.builder
             val missing_named_var = b_missing_named_var.emit_const_int(0)

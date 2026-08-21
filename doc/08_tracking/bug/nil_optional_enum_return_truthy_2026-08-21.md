@@ -1,7 +1,7 @@
 # A nil optional-of-enum returned across a module boundary tests truthy
 
 - **Date:** 2026-08-21
-- **Status:** OPEN (worked around at the one call site; root cause not located)
+- **Status:** ROOT-CAUSED 2026-08-21 (minimal fixture below; fix is seed-side, `src/compiler_rust`, not applied here)
 - **Found by:** S2/S3 enum-contract work (hardening plan §10.1/§10.2)
 - **Binary:** `bin/simple` (Rust seed; prints the seed warning banner)
 
@@ -69,3 +69,81 @@ until this is root-caused.
 Reduce to a minimal fixture and fix the optional's nil representation (or the
 truthiness test) in the seed, then re-check whether the `?` returns can come
 back here.
+
+
+## ROOT CAUSE LOCATED 2026-08-21 — reduced to 6 lines, and it is NOT about enums
+
+The four non-reproducing fixtures above all missed because they were run on
+the JIT path. The defect is **interpreter-mode only**, and it needs neither an
+enum, nor a payload variant, nor a module boundary, nor any helper:
+
+```simple
+fn f() -> i64?:
+    nil
+
+fn main():
+    val k = f()
+    if k:
+        print("BUG: truthy")     # <-- taken
+    else:
+        print("ok")
+```
+
+```
+SIMPLE_EXECUTION_MODE=interpreter bin/simple run main.spl
+BUG: truthy
+```
+
+`bin/simple run main.spl` (JIT, no env var) prints `ok`. That difference is
+why every earlier fixture "passed".
+
+### Discriminating table (all interpreter mode, all on the deployed seed)
+
+| fixture | result |
+|---|---|
+| `val k: i64? = nil` bound DIRECTLY, `if k:` | **ok** (falsy, correct) |
+| `k = f()` where `f() -> i64?` ends in `nil`, `if k:` | **BUG** |
+| same, but `return nil` instead of the tail `nil` | **BUG** |
+| `if f():` with no intermediate binding | **BUG** |
+| `if k == nil:` | ok (correct) |
+| `if k.?:` | ok (correct) |
+| `-> K?` with an enum, payload variant, cross-module | BUG (same defect, not a separate one) |
+
+So the trigger is precisely **nil crossing a function RETURN whose declared
+type is optional**. A directly-bound nil is fine.
+
+### Why
+
+Printing the value shows what the return coercion produced:
+
+```
+print "value={k}"    ->    value=Option::None
+```
+
+The returned nil is coerced into an `Option::None` **enum value**, not
+`Value::Nil`. In `src/compiler_rust/compiler/src/value_impl.rs`:
+
+- `Value::Nil => false` (`:365`) — correct, and why the direct binding works.
+- `Value::Enum { .. }` sits in the always-truthy arm (`:376-380`, alongside
+  `Object`/`ClassInstance`/`Lambda`/`Function`) — so `Option::None` is truthy.
+
+`== nil` and `.?` each have their own special-cased handling of the wrapped
+form, which is why only the bare `if x:` truthiness test is wrong. This also
+explains the original symptom exactly: the enum-contract checker's `if kind:`
+took the then-branch for every non-decorator line.
+
+### Fix needed (seed, `src/compiler_rust` — NOT applied here, out of this
+session's scope)
+
+Make `Value::Enum` falsy when it is `Option::None` (equivalently, stop the
+optional-return coercion from wrapping a nil, but the truthiness fix is the
+narrower of the two and cannot break the `== nil`/`.?` paths that already
+work). Add the 6-line fixture above as a spec in the same change; it is
+currently RED under `SIMPLE_EXECUTION_MODE=interpreter` and GREEN on the JIT,
+so it discriminates both engines.
+
+Once that lands, `contract_of_decorator_line` and
+`EnumContractTable.lookup` in
+`src/compiler/35.semantics/enum_contract/attribute_source.spl` can go back to
+returning optionals; until then the `DecoratorScan`/`has()`+`lookup_or()`
+workaround stays.
