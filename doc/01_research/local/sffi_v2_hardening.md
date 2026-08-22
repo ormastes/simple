@@ -1396,3 +1396,10 @@ of lifting a zero handle. The status spec passes 6/6, both source checks pass,
 and lint has zero errors. Existing caller count/shape/device validation remains;
 each selected wrapper adds only constant handle checks around one raw operation
 call, with no allocation, lookup, hashing, I/O, retry, or synchronization.
+
+Dynamic Torch binary arithmetic and to-float conversion now return typed
+results. All production callers propagate provider reasons instead of lifting
+zero; conversions release their input handle before matching success or error,
+preserving ownership on both paths. Status tests pass 7/7, both source checks
+pass, and lint has zero errors. Each wrapper has one raw call and constant input
+and output checks only, with no allocation, lookup, hash, I/O, retry, or sync.

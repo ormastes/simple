@@ -1,6 +1,6 @@
 use std.ndarray.*
 use std.common.torch.dyn_sffi_ops.{dyn_torch_available, dyn_torch_tensor_add_scalar_result, dyn_torch_tensor_arange, dyn_torch_tensor_argmax, dyn_torch_tensor_argmin, dyn_torch_tensor_clone_result, dyn_torch_tensor_contiguous_result, dyn_torch_tensor_det, dyn_torch_tensor_div_scalar_result, dyn_torch_tensor_eye, dyn_torch_tensor_free, dyn_torch_tensor_inverse_result, dyn_torch_tensor_leaky_relu, dyn_torch_tensor_linalg_solve_result, dyn_torch_tensor_linspace, dyn_torch_tensor_log_softmax, dyn_torch_tensor_matmul_result, dyn_torch_tensor_max, dyn_torch_tensor_max_dim, dyn_torch_tensor_mean, dyn_torch_tensor_mean_dim, dyn_torch_tensor_min, dyn_torch_tensor_min_dim, dyn_torch_tensor_mul_scalar_result, dyn_torch_tensor_norm, dyn_torch_tensor_pow_result, dyn_torch_tensor_slice_result, dyn_torch_tensor_softmax, dyn_torch_tensor_squeeze_dim_result, dyn_torch_tensor_std, dyn_torch_tensor_sub_scalar_result, dyn_torch_tensor_sum, dyn_torch_tensor_sum_dim, dyn_torch_tensor_unsqueeze_result, dyn_torch_tensor_var}
-use std.common.torch.dyn_sffi_tensor_ops.{dyn_torch_tensor_atan2_result, dyn_torch_tensor_binary_op, dyn_torch_tensor_cat_2_result, dyn_torch_tensor_cat_3_result, dyn_torch_tensor_cat_4_result, dyn_torch_tensor_copy_values_result, dyn_torch_tensor_from_values_1d_result, dyn_torch_tensor_from_values_2d_result, dyn_torch_tensor_permute_2d_result, dyn_torch_tensor_permute_3d_result, dyn_torch_tensor_permute_4d_result, dyn_torch_tensor_reshape_1d_result, dyn_torch_tensor_reshape_2d_result, dyn_torch_tensor_reshape_3d_result, dyn_torch_tensor_reshape_4d_result, dyn_torch_tensor_stack_2_result, dyn_torch_tensor_stack_3_result, dyn_torch_tensor_stack_4_result, dyn_torch_tensor_to_float}
+use std.common.torch.dyn_sffi_tensor_ops.{dyn_torch_tensor_atan2_result, dyn_torch_tensor_binary_op_result, dyn_torch_tensor_cat_2_result, dyn_torch_tensor_cat_3_result, dyn_torch_tensor_cat_4_result, dyn_torch_tensor_copy_values_result, dyn_torch_tensor_from_values_1d_result, dyn_torch_tensor_from_values_2d_result, dyn_torch_tensor_permute_2d_result, dyn_torch_tensor_permute_3d_result, dyn_torch_tensor_permute_4d_result, dyn_torch_tensor_reshape_1d_result, dyn_torch_tensor_reshape_2d_result, dyn_torch_tensor_reshape_3d_result, dyn_torch_tensor_reshape_4d_result, dyn_torch_tensor_stack_2_result, dyn_torch_tensor_stack_3_result, dyn_torch_tensor_stack_4_result, dyn_torch_tensor_to_float_result}
 use std.linalg.linalg_core.{BackendError, torch_positive_slice_length, float64_values_to_f64, float64_matrix_to_f64}
 use std.linalg.torch_ndarray_helpers.{torch_arange_count, torch_fill_handle_f64, torch_create_handle_f64, torch_unary_handle_f64}
 
@@ -56,10 +56,11 @@ class TorchNDArray:
     static fn from_raw_f64_handle(handle: i64, shape: Shape, symbol: text) -> Result<TorchNDArray, BackendError>:
         if handle <= 0:
             return Err(BackendError.MissingRuntimeSymbol(symbol))
-        val float_handle = dyn_torch_tensor_to_float(handle)
+        val float_result = dyn_torch_tensor_to_float_result(handle)
         dyn_torch_tensor_free(handle)
-        if float_handle <= 0:
-            return Err(BackendError.MissingRuntimeSymbol("rt_torch_torchtensor_to_float"))
+        val float_handle = match float_result:
+            case Ok(value): value
+            case Err(reason): return Err(BackendError.BackendExecutionFailed("pytorch float conversion failed: " + reason))
         Ok(TorchNDArray(
             handle: float_handle,
             shape: shape,
@@ -642,14 +643,20 @@ class TorchNDArray:
             val index_handle = dyn_torch_tensor_argmin(self.handle, normalized, false)
             if index_handle <= 0:
                 return Err(BackendError.MissingRuntimeSymbol("rt_torch_torchtensor_argmin"))
-            handle = dyn_torch_tensor_to_float(index_handle)
+            val float_result = dyn_torch_tensor_to_float_result(index_handle)
             dyn_torch_tensor_free(index_handle)
+            handle = match float_result:
+                case Ok(value): value
+                case Err(reason): return Err(BackendError.BackendExecutionFailed("pytorch argmin float conversion failed: " + reason))
         elif op == "argmax":
             val index_handle = dyn_torch_tensor_argmax(self.handle, normalized, false)
             if index_handle <= 0:
                 return Err(BackendError.MissingRuntimeSymbol("rt_torch_torchtensor_argmax"))
-            handle = dyn_torch_tensor_to_float(index_handle)
+            val float_result = dyn_torch_tensor_to_float_result(index_handle)
             dyn_torch_tensor_free(index_handle)
+            handle = match float_result:
+                case Ok(value): value
+                case Err(reason): return Err(BackendError.BackendExecutionFailed("pytorch argmax float conversion failed: " + reason))
         else:
             return Err(BackendError.BackendExecutionFailed("unsupported pytorch tensor owner axis reduction op"))
         if handle <= 0:
@@ -714,9 +721,9 @@ class TorchNDArray:
             ))
         else:
             return Err(BackendError.BackendExecutionFailed("unsupported pytorch tensor owner arithmetic op"))
-        val handle = dyn_torch_tensor_binary_op(self.handle, other.handle, op_id)
-        if handle <= 0:
-            return Err(BackendError.MissingRuntimeSymbol("rt_dyn_torch_tensor_binary_op"))
+        val handle = match dyn_torch_tensor_binary_op_result(self.handle, other.handle, op_id):
+            case Ok(value): value
+            case Err(reason): return Err(BackendError.BackendExecutionFailed("pytorch binary operation failed: " + reason))
         Ok(TorchNDArray(
             handle: handle,
             shape: self.shape,

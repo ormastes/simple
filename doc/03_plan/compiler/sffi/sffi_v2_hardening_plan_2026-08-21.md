@@ -1100,3 +1100,8 @@ Cat/stack for two through four tensors now preserve typed provider errors
 through `TorchNDArray`. Status tests pass 6/6, focused checks and lint pass, and
 each wrapper retains one raw call. Next migrate binary operation and to-float,
 then fixed-dimension constructors and scalar reductions.
+
+Binary arithmetic and to-float now preserve typed errors through all production
+callers. Status tests pass 7/7, focused checks and lint pass, and conversion
+ownership is released before result propagation. Continue with fixed-dimension
+constructors and dimension reductions, then scalar status/value results.
