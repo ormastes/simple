@@ -11,13 +11,13 @@ crash-capturing process after the compiler identity below has been admitted.
 - Source revision: `76193ab4953a3157e7d6d211f2bc10159107f026`
   (`docs(mcdc): record performance hardening evidence`).
 - Candidate executable:
-  `/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple`
+  `/mnt/data/worktrees/simple-main/release/x86_64-unknown-linux-gnu/simple`
 - SHA-256:
-  `969fec3898b606ddffbfb629e1e427d086fb46448dfbea6a7caad287f260aedd`
-- ELF build ID: `904d6cef2a352e61b0278b3cfcc9d93b36a847b0`.
-- Size: 60,415,648 bytes; inode 225216445; mtime
-  `2026-08-22 01:01:53.486471860 +0000`.
-- Host/target: Linux x86-64, pure-Simple release executable with debug info.
+  `04a38e21d6fbd86149d46d3ee2d761349f8ad29b02c5037a8eb589b6a1b9e4e0`
+- ELF build ID: `545d912cac46001892de0d9959e6b0b92497f2b9`.
+- Size: 42,477,824 bytes; inode 2259895; mtime
+  `2026-08-11 22:10:09.323921115 +0000`.
+- Host/target: Linux x86-64, pure-Simple release executable, not stripped.
 - Kernel evidence, first attempt at 2026-08-22 05:54:00 UTC:
   PID 2967971, SIGSEGV read at address `0x11`, instruction pointer
   `libc.so.6` ELF offset `0x18b95d`.
@@ -31,12 +31,18 @@ crash-capturing process after the compiler identity below has been admitted.
 
 ## Reproducer scope
 
-The two failing focused operations were the check/test of
-`test/01_unit/compiler/driver/native_mcdc_transport_spec.spl` introduced with
-the native `<artifact>.mcdp` companion transport.  Preserve their exact CLI
-arguments from the calling session when available.  A fresh-session capture
-should run each operation at most once, with core capture enabled, and must
-record the resolved executable identity before execution.
+The two failing focused operations were run from
+`/mnt/data/worktrees/simple-mcdc-hal`, with
+`SIMPLE_LIB=/mnt/data/worktrees/simple-mcdc-hal/src`:
+
+```text
+timeout 180 /mnt/data/worktrees/simple-main/release/x86_64-unknown-linux-gnu/simple test test/01_unit/compiler/driver/native_mcdc_transport_spec.spl --mode=interpreter
+timeout 180 /mnt/data/worktrees/simple-main/release/x86_64-unknown-linux-gnu/simple check test/01_unit/compiler/driver/native_mcdc_transport_spec.spl
+```
+
+Each exited 139.  A fresh-session capture should run each operation at most
+once, with core capture enabled, and must record the resolved executable
+identity before execution.
 
 Do not replace this with a Rust-seed run: seed behavior is diagnostic only and
 cannot admit the pure-Simple compiler or this feature.
