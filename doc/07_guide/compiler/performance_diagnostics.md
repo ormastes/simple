@@ -49,6 +49,8 @@ structural receipt with indexed identity, CFG-target, canonical access-coverage,
 declared operand/local checks plus exact function ABI-local type checks, but not yet proof
 of opcode type correctness, SSA dominance, ownership, or
 semantic equivalence; those omissions remain explicit blockers for `--verify-each`.
+CFG terminator edges are checked in place against the indexed block set; verification does
+not allocate a target collection per basic block, including high-fanout switches.
 
 ## Diagnostic policy
 
