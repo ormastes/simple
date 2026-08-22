@@ -14,10 +14,12 @@ use compiler.mir_opt.mir_opt.perf_facts.{
     PerfFactKind, PerfFactPreservation,
     perf_facts_build, perf_facts_successors, perf_facts_predecessors,
     perf_facts_dominates, perf_facts_definitions, perf_facts_uses,
+    perf_facts_is_live_in, perf_facts_is_live_out,
     perf_fact_preservation_all, perf_fact_preservation_cfg_only,
     perf_fact_preservation_integrity_errors, perf_facts_invalidated
 }
 use compiler.mir_opt.mir_opt.loop_detect.{LoopDetector}
+use compiler.mir_opt.mir_opt.dce.{create_dce_pass}
 
 fn _pf_block(id: i64, term: MirTerminator) -> MirBlock:
     MirBlock(BlockId(id: id), Some("b{id}"), [], term)
@@ -165,6 +167,48 @@ describe "shared MIR PerfFacts":
         expect(perf_facts_uses(facts, local1).len()).to_equal(1)
         expect(perf_facts_uses(facts, local1)[0].is_terminator).to_equal(true)
 
+    it "propagates block liveness through a branch without rescanning MIR":
+        step("Reuse shared block liveness")
+        val local0 = LocalId(id: 0)
+        val local1 = LocalId(id: 1)
+        val func = _pf_function_with_locals_blocks([
+            MirLocal(local0, Some("value"), MirType.i64(), LocalKind.Temp, false),
+            MirLocal(local1, Some("copy"), MirType.i64(), LocalKind.Temp, false)
+        ], [
+            _pf_block_with(0, [
+                MirInst(MirInstKind.Const(local0, MirConstValue.Int(4), MirType.i64()), nil)
+            ], MirTerminator.If(mir_operand_const_bool(true), BlockId(id: 1), BlockId(id: 2))),
+            _pf_block_with(1, [
+                MirInst(MirInstKind.Copy(local1, local0), nil)
+            ], MirTerminator.Goto(BlockId(id: 3))),
+            _pf_block(2, MirTerminator.Goto(BlockId(id: 3))),
+            _pf_block(3, MirTerminator.Ret(nil))
+        ])
+        val facts = perf_facts_build(func)
+        expect(facts.liveness_complete).to_equal(true)
+        expect(facts.liveness_budget_exhausted).to_equal(false)
+        expect(perf_facts_is_live_out(facts, BlockId(id: 0), local0)).to_equal(true)
+        expect(perf_facts_is_live_in(facts, BlockId(id: 1), local0)).to_equal(true)
+        expect(perf_facts_is_live_in(facts, BlockId(id: 2), local0)).to_equal(false)
+        expect(perf_facts_is_live_in(facts, BlockId(id: 0), local0)).to_equal(false)
+
+    it "marks use before definition live at block entry":
+        step("Preserve use-before-definition semantics")
+        val local0 = LocalId(id: 0)
+        val local1 = LocalId(id: 1)
+        val func = _pf_function_with_locals_blocks([
+            MirLocal(local0, Some("input"), MirType.i64(), LocalKind.Var, false),
+            MirLocal(local1, Some("copy"), MirType.i64(), LocalKind.Temp, false)
+        ], [
+            _pf_block_with(0, [
+                MirInst(MirInstKind.Copy(local1, local0), nil),
+                MirInst(MirInstKind.Const(local0, MirConstValue.Int(9), MirType.i64()), nil)
+            ], MirTerminator.Ret(nil))
+        ])
+        val facts = perf_facts_build(func)
+        expect(facts.liveness_complete).to_equal(true)
+        expect(perf_facts_is_live_in(facts, BlockId(id: 0), local0)).to_equal(true)
+
     it "fails def-use completeness closed for an unmodeled instruction":
         step("Reject incomplete def-use coverage")
         val func = _pf_function_with_locals_blocks([
@@ -177,12 +221,57 @@ describe "shared MIR PerfFacts":
         val facts = perf_facts_build(func)
         expect(facts.def_use_complete).to_equal(false)
         expect(facts.uncovered_instruction_count).to_equal(1)
+        expect(facts.liveness_complete).to_equal(false)
+        expect(perf_facts_is_live_in(facts, BlockId(id: 0), LocalId(id: 0))).to_equal(false)
+
+    it "fails liveness closed for a dangling CFG edge":
+        step("Reject incomplete CFG liveness")
+        val facts = perf_facts_build(_pf_function_with_blocks([
+            _pf_block(0, MirTerminator.Goto(BlockId(id: 99)))
+        ]))
+        expect(facts.cfg_complete).to_equal(false)
+        expect(facts.invalid_block_reference_count).to_equal(1)
+        expect(facts.liveness_complete).to_equal(false)
+
+    it "lets dormant DCE use shared liveness in one backward sweep":
+        step("Remove a dead definition with shared facts")
+        val dead = LocalId(id: 0)
+        val returned = LocalId(id: 1)
+        val func = _pf_function_with_locals_blocks([
+            MirLocal(dead, Some("dead"), MirType.i64(), LocalKind.Temp, false),
+            MirLocal(returned, Some("returned"), MirType.i64(), LocalKind.Temp, false)
+        ], [
+            _pf_block_with(0, [
+                MirInst(MirInstKind.Const(dead, MirConstValue.Int(1), MirType.i64()), nil),
+                MirInst(MirInstKind.Const(returned, MirConstValue.Int(2), MirType.i64()), nil)
+            ], MirTerminator.Ret(Some(mir_operand_copy(returned))))
+        ])
+        var dce = create_dce_pass()
+        val optimized = dce.run_on_function(func)
+        expect(optimized.blocks[0].instructions.len()).to_equal(1)
+        expect(dce.removed_instructions).to_equal(1)
+
+    it "keeps dormant DCE unchanged when shared liveness is incomplete":
+        step("Fail DCE closed on uncovered MIR")
+        val local0 = LocalId(id: 0)
+        val func = _pf_function_with_locals_blocks([
+            MirLocal(local0, Some("region"), MirType.i64(), LocalKind.Temp, false)
+        ], [
+            _pf_block_with(0, [
+                MirInst(MirInstKind.FreezeRegion(local0), nil)
+            ], MirTerminator.Ret(nil))
+        ])
+        var dce = create_dce_pass()
+        val optimized = dce.run_on_function(func)
+        expect(optimized.blocks[0].instructions.len()).to_equal(1)
+        expect(dce.removed_instructions).to_equal(0)
 
     it "makes fact invalidation explicit and internally consistent":
         step("Invalidate stale performance facts")
         val cfg_only = perf_fact_preservation_cfg_only()
         expect(perf_fact_preservation_integrity_errors(cfg_only).len()).to_equal(0)
-        expect(perf_facts_invalidated(cfg_only)).to_equal([PerfFactKind.DefUse])
+        expect(perf_facts_invalidated(cfg_only)).to_equal([
+            PerfFactKind.DefUse, PerfFactKind.Liveness])
         expect(perf_facts_invalidated(perf_fact_preservation_all()).len()).to_equal(0)
-        val invalid = PerfFactPreservation(false, true, false)
-        expect(perf_fact_preservation_integrity_errors(invalid).len()).to_equal(1)
+        val invalid = PerfFactPreservation(false, true, false, true)
+        expect(perf_fact_preservation_integrity_errors(invalid).len()).to_equal(2)
