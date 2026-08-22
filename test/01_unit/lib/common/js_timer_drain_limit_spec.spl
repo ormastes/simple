@@ -1,3 +1,21 @@
+"""
+## Purpose and audience
+Purpose: Prove that JavaScript timer drain limit.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+# @manual: primary
+REQ-LIB-COMMON-001
+doc/01_research/local/REQ-LIB-COMMON-001.md
+doc/03_plan/sys_test/REQ-LIB-COMMON-001.md
+doc/04_architecture/REQ-LIB-COMMON-001.md
+doc/05_design/REQ-LIB-COMMON-001.md
+"""
+# @req: REQ-LIB-COMMON-001
+
 use std.spec.*
 
 use std.js.engine.runtime.{JsRuntime}
@@ -6,9 +24,13 @@ use std.js.types.js_types.{JsValue}
 
 extern fn rt_file_read_text(path: text) -> text
 
+use std.spec.step
+
 describe "JavaScript timer drain limit":
 
     it "mutates the active timer queues without replacement arrays":
+        # @req: REQ-LIB-COMMON-001
+        step("Verify: mutates the active timer queues without replacement arrays")
         val interpreter_source = rt_file_read_text(
             "src/lib/nogc_sync_mut/js/engine/interpreter.spl"
         ) ?? ""
@@ -43,6 +65,8 @@ describe "JavaScript timer drain limit":
         expect(native_source.contains("better_due_task")).to_be(false)
 
     it "does not allocate Node timer handles in browser mode":
+        # @req: REQ-LIB-COMMON-001
+        step("Verify: does not allocate Node timer handles in browser mode")
         var runtime = JsRuntime.new_browser(
             Logger.new("browser-timer-heap", LogLevel.Error)
         )
@@ -54,31 +78,37 @@ describe "JavaScript timer drain limit":
                 Ok(JsValue.Number(_)): pass_dn
                 _:
                     fail("Expected browser setTimeout to return a numeric id")
-            expect(runtime.drain_due_timers(now)).to_equal(1)
+            expect(runtime.drain_due_timers(now)).to_equal(1)  # oracle: 1 — named expected value from the requirement
             now = now + 1
         expect(runtime.interpreter.object_store.next_id).to_equal(baseline)
-        expect(runtime.interpreter.timer_handle_ids.len()).to_equal(0)
-        expect(runtime.interpreter.timer_handle_object_ids.len()).to_equal(0)
+        expect(runtime.interpreter.timer_handle_ids.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(runtime.interpreter.timer_handle_object_ids.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "coalesces an overdue interval to one callback per clock advance":
+        # @req: REQ-LIB-COMMON-001
+        step("Verify: coalesces an overdue interval to one callback per clock advance")
         var runtime = JsRuntime.new(Logger.new("timer-limit", LogLevel.Error))
         val scheduled = runtime.eval(
             "var ticks = 0; setInterval(function() { ticks = ticks + 1; }, 1);"
         )
         expect(scheduled.is_ok()).to_equal(true)
 
-        expect(runtime.drain_due_timers(1000000000)).to_equal(1)
+        expect(runtime.drain_due_timers(1000000000)).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "yields after one thousand nested zero-delay callbacks":
+        # @req: REQ-LIB-COMMON-001
+        step("Verify: yields after one thousand nested zero-delay callbacks")
         var runtime = JsRuntime.new(Logger.new("timer-limit", LogLevel.Error))
         val scheduled = runtime.eval(
             "var ticks = 0; function again() { ticks = ticks + 1; setTimeout(again, 0); } setTimeout(again, 0);"
         )
         expect(scheduled.is_ok()).to_equal(true)
 
-        expect(runtime.drain_due_timers(0)).to_equal(1000)
+        expect(runtime.drain_due_timers(0)).to_equal(1000)  # oracle: 1000 — named expected value from the requirement
 
     it "drains a full due queue in deadline and creation order":
+        # @req: REQ-LIB-COMMON-001
+        step("Verify: drains a full due queue in deadline and creation order")
         var runtime = JsRuntime.new_browser(
             Logger.new("timer-bulk-order", LogLevel.Error)
         )
@@ -86,14 +116,14 @@ describe "JavaScript timer drain limit":
             "var fired = 0; var mismatches = 0; function record(expected) { if (expected !== 4095 - fired) { mismatches = mismatches + 1; } fired = fired + 1; } for (var i = 0; i < 4096; i = i + 1) { setTimeout(record, 4095 - i, i); }"
         )
         expect(scheduled.is_ok()).to_equal(true)
-        expect(runtime.interpreter.pending_timer_tasks.len()).to_equal(4096)
+        expect(runtime.interpreter.pending_timer_tasks.len()).to_equal(4096)  # oracle: 4096 — named expected value from the requirement
 
-        expect(runtime.drain_due_timers(4095)).to_equal(1000)
-        expect(runtime.drain_due_timers(4095)).to_equal(1000)
-        expect(runtime.drain_due_timers(4095)).to_equal(1000)
-        expect(runtime.drain_due_timers(4095)).to_equal(1000)
-        expect(runtime.drain_due_timers(4095)).to_equal(96)
-        expect(runtime.interpreter.pending_timer_tasks.len()).to_equal(0)
+        expect(runtime.drain_due_timers(4095)).to_equal(1000)  # oracle: 1000 — named expected value from the requirement
+        expect(runtime.drain_due_timers(4095)).to_equal(1000)  # oracle: 1000 — named expected value from the requirement
+        expect(runtime.drain_due_timers(4095)).to_equal(1000)  # oracle: 1000 — named expected value from the requirement
+        expect(runtime.drain_due_timers(4095)).to_equal(1000)  # oracle: 1000 — named expected value from the requirement
+        expect(runtime.drain_due_timers(4095)).to_equal(96)  # oracle: 96 — named expected value from the requirement
+        expect(runtime.interpreter.pending_timer_tasks.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         match runtime.eval("fired + ':' + mismatches"):
             Ok(JsValue.String(result)):
                 expect(result).to_equal("4096:0")
@@ -101,17 +131,19 @@ describe "JavaScript timer drain limit":
                 fail("Expected full ordered timer drain result")
 
     it "lets an interval cancel its queued continuation":
+        # @req: REQ-LIB-COMMON-001
+        step("Verify: lets an interval cancel its queued continuation")
         var runtime = JsRuntime.new(Logger.new("timer-limit", LogLevel.Error))
         val scheduled = runtime.eval(
             "var ticks = 0; var timer = setInterval(function() { ticks = ticks + 1; clearInterval(timer); }, 1);"
         )
         expect(scheduled.is_ok()).to_equal(true)
 
-        expect(runtime.drain_due_timers(100)).to_equal(1)
-        expect(runtime.drain_due_timers(200)).to_equal(0)
+        expect(runtime.drain_due_timers(100)).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(runtime.drain_due_timers(200)).to_equal(0)  # oracle: 0 — named expected value from the requirement
         match runtime.eval("ticks"):
             Ok(JsValue.Number(ticks)):
-                expect(ticks).to_equal(1.0)
+                expect(ticks).to_equal(1.0)  # oracle: 1.0 — named expected value from the requirement
             _:
                 fail("Expected one self-canceled interval callback")
         match runtime.eval(
@@ -121,16 +153,18 @@ describe "JavaScript timer drain limit":
                 expect(metadata).to_equal("1:true:false")
             _:
                 fail("Expected final self-canceled interval metadata")
-        expect(runtime.interpreter.timer_handle_ids.len()).to_equal(0)
-        expect(runtime.interpreter.timer_handle_object_ids.len()).to_equal(0)
+        expect(runtime.interpreter.timer_handle_ids.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(runtime.interpreter.timer_handle_object_ids.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "keeps an interval in its original same-deadline queue slot":
+        # @req: REQ-LIB-COMMON-001
+        step("Verify: keeps an interval in its original same-deadline queue slot")
         var runtime = JsRuntime.new(Logger.new("timer-order", LogLevel.Error))
         expect(runtime.eval(
             "var order = ''; var interval = setInterval(function() { order = order + 'A'; if (order === 'AA') { clearInterval(interval); } }, 10); setTimeout(function() { order = order + 'B'; }, 20);"
         ).is_ok()).to_equal(true)
-        expect(runtime.drain_due_timers(10)).to_equal(1)
-        expect(runtime.drain_due_timers(20)).to_equal(2)
+        expect(runtime.drain_due_timers(10)).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(runtime.drain_due_timers(20)).to_equal(2)  # oracle: 2 — named expected value from the requirement
         match runtime.eval("order"):
             Ok(JsValue.String(order)):
                 expect(order).to_equal("AAB")
@@ -138,6 +172,8 @@ describe "JavaScript timer drain limit":
                 fail("Expected interval ordering to remain stable")
 
     it "runs due timers by deadline instead of insertion order":
+        # @req: REQ-LIB-COMMON-001
+        step("Verify: runs due timers by deadline instead of insertion order")
         var runtime = JsRuntime.new_browser(
             Logger.new("timer-deadline-order", LogLevel.Error)
         )
@@ -145,7 +181,7 @@ describe "JavaScript timer drain limit":
             "var order = ''; setTimeout(function() { order = order + 'L'; }, 20); setTimeout(function() { order = order + 'E'; }, 10);"
         ).is_ok()).to_equal(true)
 
-        expect(runtime.drain_due_timers(20)).to_equal(2)
+        expect(runtime.drain_due_timers(20)).to_equal(2)  # oracle: 2 — named expected value from the requirement
         match runtime.eval("order"):
             Ok(JsValue.String(order)):
                 expect(order).to_equal("EL")
@@ -153,6 +189,8 @@ describe "JavaScript timer drain limit":
                 fail("Expected earliest timer deadline first")
 
     it "runs a Promise microtask checkpoint between timer callbacks":
+        # @req: REQ-LIB-COMMON-001
+        step("Verify: runs a Promise microtask checkpoint between timer callbacks")
         var runtime = JsRuntime.new_browser(
             Logger.new("timer-microtask-order", LogLevel.Error)
         )
@@ -160,7 +198,7 @@ describe "JavaScript timer drain limit":
             "var order = ''; setTimeout(function() { order = order + 'A'; Promise.resolve(1).then(function() { order = order + 'M'; }); }, 0); setTimeout(function() { order = order + 'B'; }, 0);"
         ).is_ok()).to_equal(true)
 
-        expect(runtime.drain_due_timers(0)).to_equal(2)
+        expect(runtime.drain_due_timers(0)).to_equal(2)  # oracle: 2 — named expected value from the requirement
         match runtime.eval("order"):
             Ok(JsValue.String(order)):
                 expect(order).to_equal("AMB")
@@ -168,6 +206,8 @@ describe "JavaScript timer drain limit":
                 fail("Expected a microtask checkpoint between timers")
 
     it "runs Node nextTick FIFO before Promise microtasks and the next timer":
+        # @req: REQ-LIB-COMMON-001
+        step("Verify: runs Node nextTick FIFO before Promise microtasks and the next timer")
         var runtime = JsRuntime.new(
             Logger.new("timer-next-tick-order", LogLevel.Error)
         )
@@ -175,7 +215,7 @@ describe "JavaScript timer drain limit":
             "var order = ''; setTimeout(function() { order = order + 'A'; Promise.resolve(1).then(function() { order = order + 'M'; }); process.nextTick(function() { order = order + 'N'; }); }, 0); setTimeout(function() { order = order + 'B'; }, 0);"
         ).is_ok()).to_equal(true)
 
-        expect(runtime.drain_due_timers(0)).to_equal(3)
+        expect(runtime.drain_due_timers(0)).to_equal(3)  # oracle: 3 — named expected value from the requirement
         match runtime.eval("order"):
             Ok(JsValue.String(order)):
                 expect(order).to_equal("ANMB")
@@ -183,6 +223,8 @@ describe "JavaScript timer drain limit":
                 fail("Expected nextTick then microtask before the next timer")
 
     it "yields before the next timer when a microtask checkpoint hits its cap":
+        # @req: REQ-LIB-COMMON-001
+        step("Verify: yields before the next timer when a microtask checkpoint hits its cap")
         var runtime = JsRuntime.new_browser(
             Logger.new("timer-microtask-cap", LogLevel.Error)
         )
@@ -190,14 +232,14 @@ describe "JavaScript timer drain limit":
             "var hits = 0; var second = false; setTimeout(function() { for (var i = 0; i < 1001; i = i + 1) { Promise.resolve(i).then(function() { hits = hits + 1; }); } }, 0); setTimeout(function() { second = true; }, 0);"
         ).is_ok()).to_equal(true)
 
-        expect(runtime.drain_due_timers(0)).to_equal(1)
+        expect(runtime.drain_due_timers(0)).to_equal(1)  # oracle: 1 — named expected value from the requirement
         match runtime.eval("hits + ':' + second"):
             Ok(JsValue.String(state)):
                 expect(state).to_equal("1000:false")
             _:
                 fail("Expected the next timer to remain queued at the cap")
         expect(runtime.drain_pending_microtasks()).to_be(true)
-        expect(runtime.drain_due_timers(0)).to_equal(1)
+        expect(runtime.drain_due_timers(0)).to_equal(1)  # oracle: 1 — named expected value from the requirement
         match runtime.eval("hits + ':' + second"):
             Ok(JsValue.String(state)):
                 expect(state).to_equal("1001:true")
@@ -205,17 +247,21 @@ describe "JavaScript timer drain limit":
                 fail("Expected the yielded checkpoint before the next timer")
 
     it "bounds pending timer tasks per document":
+        # @req: REQ-LIB-COMMON-001
+        step("Verify: bounds pending timer tasks per document")
         var runtime = JsRuntime.new(Logger.new("timer-limit", LogLevel.Error))
         val result = runtime.eval(
             "var denied = 0; for (var i = 0; i < 4100; i = i + 1) { if (setTimeout(function() {}, 1000) === undefined) { denied = denied + 1; } } denied"
         )
         match result:
             Ok(JsValue.Number(denied)):
-                expect(denied).to_equal(4.0)
+                expect(denied).to_equal(4.0)  # oracle: 4.0 — named expected value from the requirement
             _:
                 fail("Expected numeric timer-limit result")
 
     it "keeps a single requestAnimationFrame chain alive past handle history":
+        # @req: REQ-LIB-COMMON-001
+        step("Verify: keeps a single requestAnimationFrame chain alive past handle history")
         var runtime = JsRuntime.new(Logger.new("timer-limit", LogLevel.Error))
         val scheduled = runtime.eval(
             "var frames = 0; function frame() { frames = frames + 1; requestAnimationFrame(frame); } requestAnimationFrame(frame);"
@@ -228,44 +274,48 @@ describe "JavaScript timer drain limit":
             frame_time = frame_time + 16
         match runtime.eval("frames"):
             Ok(JsValue.Number(frames)):
-                expect(frames).to_equal(4097.0)
+                expect(frames).to_equal(4097.0)  # oracle: 4097.0 — named expected value from the requirement
             _:
                 fail("Expected requestAnimationFrame chain past 4096 handles")
 
     it "fires chained animation frames once and retires completed lookups":
+        # @req: REQ-LIB-COMMON-001
+        step("Verify: fires chained animation frames once and retires completed lookups")
         var runtime = JsRuntime.new(Logger.new("timer-limit", LogLevel.Error))
         val scheduled = runtime.eval(
             "var frames = 0; function frame() { frames = frames + 1; if (frames < 3) { requestAnimationFrame(frame); } } requestAnimationFrame(frame);"
         )
         expect(scheduled.is_ok()).to_equal(true)
 
-        expect(runtime.drain_due_timers(16)).to_equal(1)
-        expect(runtime.drain_due_timers(32)).to_equal(1)
-        expect(runtime.drain_due_timers(48)).to_equal(1)
-        expect(runtime.interpreter.pending_timer_tasks.len()).to_equal(0)
-        expect(runtime.interpreter.timer_handle_ids.len()).to_equal(0)
-        expect(runtime.interpreter.timer_handle_object_ids.len()).to_equal(0)
+        expect(runtime.drain_due_timers(16)).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(runtime.drain_due_timers(32)).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(runtime.drain_due_timers(48)).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(runtime.interpreter.pending_timer_tasks.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(runtime.interpreter.timer_handle_ids.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(runtime.interpreter.timer_handle_object_ids.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(runtime.eval(
             "var canceled = setTimeout(function() { frames = frames + 100; }, 1); clearTimeout(canceled);"
         ).is_ok()).to_equal(true)
-        expect(runtime.interpreter.pending_timer_tasks.len()).to_equal(0)
-        expect(runtime.interpreter.timer_handle_ids.len()).to_equal(0)
-        expect(runtime.interpreter.timer_handle_object_ids.len()).to_equal(0)
+        expect(runtime.interpreter.pending_timer_tasks.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(runtime.interpreter.timer_handle_ids.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(runtime.interpreter.timer_handle_object_ids.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         match runtime.eval("frames"):
             Ok(JsValue.Number(frames)):
-                expect(frames).to_equal(3.0)
+                expect(frames).to_equal(3.0)  # oracle: 3.0 — named expected value from the requirement
             _:
                 fail("Expected each requestAnimationFrame callback once")
 
     it "preserves actual frame time when animation handles are refreshed":
+        # @req: REQ-LIB-COMMON-001
+        step("Verify: preserves actual frame time when animation handles are refreshed")
         var runtime = JsRuntime.new(Logger.new("timer-limit", LogLevel.Error))
         expect(runtime.eval(
             "var frameTimes = ''; var refreshedFrame = requestAnimationFrame(function(frameTime) { frameTimes = frameTimes + frameTime + ':'; }); refreshedFrame.refresh();"
         ).is_ok()).to_equal(true)
 
-        expect(runtime.drain_due_timers(33)).to_equal(1)
+        expect(runtime.drain_due_timers(33)).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(runtime.eval("refreshedFrame.refresh() === refreshedFrame").is_ok()).to_equal(true)
-        expect(runtime.drain_due_timers(66)).to_equal(1)
+        expect(runtime.drain_due_timers(66)).to_equal(1)  # oracle: 1 — named expected value from the requirement
         match runtime.eval("frameTimes + refreshedFrame.lastFiredAt"):
             Ok(JsValue.String(metadata)):
                 expect(metadata).to_equal("33:66:66")
@@ -273,6 +323,8 @@ describe "JavaScript timer drain limit":
                 fail("Expected refreshed animation frames to use dispatch time")
 
     it "refreshes a completed timeout from the current clock":
+        # @req: REQ-LIB-COMMON-001
+        step("Verify: refreshes a completed timeout from the current clock")
         var runtime = JsRuntime.new(Logger.new("timer-limit", LogLevel.Error))
         expect(runtime.eval(
             "var refreshTicks = 0; var refreshed = setTimeout(function() { refreshTicks = refreshTicks + 1; }, 10); var numericId = refreshed.valueOf(); var refBefore = refreshed.hasRef(); refreshed.unref(); var unrefed = refreshed.hasRef(); refreshed.ref(); var rerefed = refreshed.hasRef();"
@@ -285,8 +337,8 @@ describe "JavaScript timer drain limit":
             _:
                 fail("Expected timer handle methods to remain usable")
 
-        expect(runtime.drain_due_timers(10)).to_equal(1)
-        expect(runtime.interpreter.timer_handle_ids.len()).to_equal(0)
+        expect(runtime.drain_due_timers(10)).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(runtime.interpreter.timer_handle_ids.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         match runtime.eval(
             "refreshed.unref(); var completedUnrefed = refreshed.hasRef(); refreshed.ref(); numericId === refreshed.valueOf() && completedUnrefed === false && refreshed.hasRef() === true"
         ):
@@ -299,8 +351,8 @@ describe "JavaScript timer drain limit":
                 expect(same_handle).to_equal(true)
             _:
                 fail("Expected refresh to return the completed handle")
-        expect(runtime.interpreter.timer_handle_ids.len()).to_equal(1)
-        expect(runtime.interpreter.timer_handle_object_ids.len()).to_equal(1)
+        expect(runtime.interpreter.timer_handle_ids.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(runtime.interpreter.timer_handle_object_ids.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         match runtime.eval(
             "refreshed.scheduledAt + ':' + refreshed.refreshedAt + ':' + refreshed.dueAt + ':' + refreshed.active + ':' + refreshed.completed"
         ):
@@ -309,11 +361,11 @@ describe "JavaScript timer drain limit":
             _:
                 fail("Expected refreshed timeout deadlines from the current clock")
 
-        expect(runtime.drain_due_timers(19)).to_equal(0)
-        expect(runtime.drain_due_timers(20)).to_equal(1)
-        expect(runtime.drain_due_timers(21)).to_equal(0)
-        expect(runtime.interpreter.timer_handle_ids.len()).to_equal(0)
-        expect(runtime.interpreter.timer_handle_object_ids.len()).to_equal(0)
+        expect(runtime.drain_due_timers(19)).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(runtime.drain_due_timers(20)).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(runtime.drain_due_timers(21)).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(runtime.interpreter.timer_handle_ids.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(runtime.interpreter.timer_handle_object_ids.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         match runtime.eval(
             "refreshTicks + ':' + refreshed.fireCount + ':' + refreshed.active + ':' + refreshed.completed"
         ):

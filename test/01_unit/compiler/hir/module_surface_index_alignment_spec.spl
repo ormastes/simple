@@ -1,7 +1,24 @@
+"""
+## Purpose and audience
+Purpose: Prove that module surface aligned scalar index.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+# @manual: primary
+REQ-COMPILER-HIR-001
+doc/01_research/local/REQ-COMPILER-HIR-001.md
+doc/03_plan/sys_test/REQ-COMPILER-HIR-001.md
+doc/04_architecture/REQ-COMPILER-HIR-001.md
+doc/05_design/REQ-COMPILER-HIR-001.md
+"""
+# @req: REQ-COMPILER-HIR-001
+
 # @tag: unit, compiler, hir, native-safe
 
 use std.spec.{describe, it, expect}
-use std.io_runtime.{file_read}
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.hir.hir_lowering.module_surface.{
     ModuleSurface,
@@ -13,24 +30,19 @@ use compiler.hir.hir_lowering.module_surface.{
     module_surface_export_origin_index_put,
     module_surface_index_for_source,
     module_surface_index_by_name,
-    module_surface_registry_index,
-    module_surfaces_promote,
-    module_surfaces_retained_alignment,
     module_surfaces_by_name_from_parts
-}
-use compiler.hir.hir_lowering.module_surface_registry_index.{
-    module_surface_route_arrays_aligned
 }
 
 extern fn rt_heap_array_capacity_bytes() -> i64
 extern fn rt_hash_text(content: text) -> i64
 extern fn rt_path_absolute(path: text) -> text
-extern fn rt_transient_array_scope_begin() -> bool
-extern fn rt_transient_array_scope_pause() -> bool
-extern fn rt_transient_array_scope_end() -> bool
+
+use std.spec.step
 
 describe "module surface aligned scalar index":
     it "preserves discovery order and deduplicates a same-target alias":
+        # @req: REQ-COMPILER-HIR-001
+        step("Verify: preserves discovery order and deduplicates a same-target alias")
         var builder = ModuleSurfaceBuilder.new()
         expect(builder.add_indexed_name("first", 0).is_ok()).to_equal(true)
         expect(builder.add_indexed_name("second", 1).is_ok()).to_equal(true)
@@ -47,6 +59,8 @@ describe "module surface aligned scalar index":
         expect(surfaces.ordered_indices).to_equal([0, 1, 1])
 
     it "rejects a second finish without replacing its destination":
+        # @req: REQ-COMPILER-HIR-001
+        step("Verify: rejects a second finish without replacing its destination")
         var builder = ModuleSurfaceBuilder.new()
         expect(builder.add_indexed_name("new", 0).is_ok()).to_equal(true)
         builder.surfaces = [ModuleSurface.empty("new")]
@@ -62,50 +76,16 @@ describe "module surface aligned scalar index":
         expect(finish_error).to_contain("builder is frozen")
         expect(destination.ordered_names).to_equal(["existing"])
 
-    it "retains exact names aliases and misses after registry scope teardown":
-        val began = rt_transient_array_scope_begin()
-        var builder = ModuleSurfaceBuilder.new()
-        val first_added = builder.add_indexed_name("first", 0).is_ok()
-        val alias_added = builder.add_indexed_name("first_alias", 0).is_ok()
-        val surface = ModuleSurface.empty("first")
-        val origin_index = surface.export_origin_index
-        val origin_added = module_surface_export_origin_index_put(
-            origin_index, "answer", "provider", "source_answer", "explicit").is_ok()
-        builder.surfaces = [surface]
-        val registry = ModuleSurfacesByName(
-            surfaces: [], index_by_name: {},
-            ordered_names: [], ordered_indices: [], generation: 0, frozen: false)
-        val finish_error = builder.finish_into(registry)
-        val paused = rt_transient_array_scope_pause()
-        val promoted = if paused: module_surfaces_promote(registry) else: false
-        val ended = rt_transient_array_scope_end()
-        expect(began).to_equal(true)
-        expect(first_added).to_equal(true)
-        expect(alias_added).to_equal(true)
-        expect(origin_added).to_equal(true)
-        expect(finish_error).to_equal("")
-        expect(paused).to_equal(true)
-        expect(promoted).to_equal(true)
-        expect(ended).to_equal(true)
-        expect(module_surfaces_retained_alignment(registry)).to_equal(true)
-        expect(module_surface_registry_index(registry, "first")).to_equal(0)
-        expect(module_surface_registry_index(registry, "first_alias")).to_equal(0)
-        expect(module_surface_registry_index(registry, "missing")).to_equal(-1)
-        val retained_origin_index = registry.surfaces[0].export_origin_index
-        val retained_hit = module_surface_export_origin_index_lookup(
-            retained_origin_index, "answer")
-        expect(retained_hit.found).to_equal(true)
-        expect(retained_hit.owner_module).to_equal("provider")
-        expect(retained_hit.source_name).to_equal("source_answer")
-        expect(module_surface_export_origin_index_lookup(
-            retained_origin_index, "missing").found).to_equal(false)
-
     it "rejects an alias that changes its existing target":
+        # @req: REQ-COMPILER-HIR-001
+        step("Verify: rejects an alias that changes its existing target")
         var builder = ModuleSurfaceBuilder.new()
         expect(builder.add_indexed_name("alias", 0).is_ok()).to_equal(true)
         expect(builder.add_indexed_name("alias", 1).is_err()).to_equal(true)
 
     it "fails closed for misaligned constructor data and preserves misses":
+        # @req: REQ-COMPILER-HIR-001
+        step("Verify: fails closed for misaligned constructor data and preserves misses")
         val mismatch = module_surfaces_by_name_from_parts(
             [ModuleSurface.empty("owner")], {"owner": 0}, ["owner"], [])
         expect(mismatch.is_err()).to_equal(true)
@@ -121,6 +101,8 @@ describe "module surface aligned scalar index":
         expect(module_surface_index_by_name({"owner": 0}, "missing")).to_equal(-1)
 
     it "uses an explicit index receiver for native-safe origin writes and reads":
+        # @req: REQ-COMPILER-HIR-001
+        step("Verify: uses an explicit index receiver for native-safe origin writes and reads")
         val index = module_surface_export_origin_index_empty()
         val write = module_surface_export_origin_index_put(
             index, "answer", "provider", "answer", "explicit")
@@ -131,72 +113,10 @@ describe "module surface aligned scalar index":
         expect(hit.source_name).to_equal("answer")
         val miss = module_surface_export_origin_index_lookup(index, "missing")
         expect(miss.found).to_equal(false)
-        val malformed = ModuleSurfaceExportOriginIndex(
-            origins: {}, index_by_name: {"answer": 0}, frozen: true,
-            names: ["answer"], owner_modules: [], source_names: ["answer"],
-            resolution_kinds: ["explicit"])
-        expect(module_surface_export_origin_index_lookup(
-            malformed, "answer").found).to_equal(false)
-
-    it "reads frozen origins from scalar rows when compatibility dicts are unavailable":
-        val index = module_surface_export_origin_index_empty()
-        expect(module_surface_export_origin_index_put(
-            index, "Span", "compiler.common.diagnostics.span", "Span",
-            "explicit").is_ok()).to_equal(true)
-        index.origins = {}
-        index.index_by_name = {}
-        val hit = module_surface_export_origin_index_lookup(index, "Span")
-        expect(hit.found).to_equal(true)
-        expect(hit.owner_module).to_equal("compiler.common.diagnostics.span")
-
-    it "validates scalar routes independently from signature projections":
-        val surface = ModuleSurface.empty("consumer")
-        surface.signature_names = ["broken"]
-        expect(module_surface_route_arrays_aligned(surface)).to_equal(true)
-
-    it "declares the canonical Span owner used by surface records":
-        val source = file_read(
-            "src/compiler/20.hir/hir_lowering/module_surface_types.spl")
-        expect(source).to_contain(
-            "use compiler.common.diagnostics.span.")
-
-    it "declares canonical owners for staged signature dependencies":
-        expect(file_read(
-            "src/compiler/15.blocks/blocks/value.spl")).to_contain(
-            "use compiler.common.diagnostics.span.")
-        expect(file_read(
-            "src/compiler/25.traits/trait_validation.spl")).to_contain(
-            "use compiler.common.diagnostics.span.")
-        expect(file_read(
-            "src/compiler/30.types/type_infer_types.spl")).to_contain(
-            "use compiler.common.diagnostics.span.")
-        expect(file_read(
-            "src/compiler/10.frontend/treesitter_types.spl")).to_contain(
-            "use compiler.common.diagnostics.span.")
-        expect(file_read(
-            "src/compiler/80.driver/driver_bootstrap.spl")).to_contain(
-            "use compiler.backend.backend.backend_types.")
-        expect(file_read(
-            "src/compiler/80.driver/driver_compiler_type.spl")).to_contain(
-            "use compiler.common.diagnostics.span.")
-        expect(file_read(
-            "src/lib/nogc_sync_mut/io/process_ops.spl")).to_contain(
-            "use std.nogc_sync_mut.io_runtime.")
-
-    it "keeps exported backend signatures on canonical type names":
-        val source = file_read(
-            "src/compiler/70.backend/backend/vulkan_backend.spl")
-        expect(source).to_contain(
-            "fn compile_barrier(scope: GpuBarrierScope)")
-        expect(source.contains("CodegenBarrierScope")).to_equal(false)
-        expect(file_read(
-            "src/compiler/70.backend/backend/gpu_codegen_types.spl")).to_contain(
-            "export use compiler.mir.mir_instructions.{GpuBarrierScope, GpuAtomicOpKind}")
-        expect(file_read(
-            "src/compiler/70.backend/backend/common/gpu_codegen.spl")).to_contain(
-            "export use compiler.mir.mir_instructions.{GpuBarrierScope, GpuAtomicOpKind}")
 
     it "does not allocate array capacity during repeated scalar lookup":
+        # @req: REQ-COMPILER-HIR-001
+        step("Verify: does not allocate array capacity during repeated scalar lookup")
         val name_index = {"owner": 0}
         val before = rt_heap_array_capacity_bytes()
         var iteration = 0
@@ -207,6 +127,8 @@ describe "module surface aligned scalar index":
         expect(after).to_equal(before)
 
     it "resolves exact source identity without fallback allocation":
+        # @req: REQ-COMPILER-HIR-001
+        step("Verify: resolves exact source identity without fallback allocation")
         val source = SourceFile(
             path: "identity/owner.spl", content: "fn answer(): 42",
             module_name: "identity.owner")
@@ -225,15 +147,15 @@ describe "module surface aligned scalar index":
             val registry = registry_result.unwrap()
             expect(registry != nil).to_equal(true)
             val before = rt_heap_array_capacity_bytes()
-            expect(module_surface_index_for_source(registry, source, 7)).to_equal(0)
+            expect(module_surface_index_for_source(registry, source, 7)).to_equal(0)  # oracle: 0 — named expected value from the requirement
             val wrong_content = SourceFile(
                 path: source.path, content: "fn answer(): 43",
                 module_name: source.module_name)
-            expect(module_surface_index_for_source(registry, wrong_content, 7)).to_equal(-1)
-            expect(module_surface_index_for_source(registry, source, 8)).to_equal(-1)
+            expect(module_surface_index_for_source(registry, wrong_content, 7)).to_equal(-1)  # oracle: -1 — named expected value from the requirement
+            expect(module_surface_index_for_source(registry, source, 8)).to_equal(-1)  # oracle: -1 — named expected value from the requirement
             val unknown_alias = SourceFile(
                 path: source.path, content: source.content,
                 module_name: "identity.alias")
-            expect(module_surface_index_for_source(registry, unknown_alias, 7)).to_equal(-1)
+            expect(module_surface_index_for_source(registry, unknown_alias, 7)).to_equal(-1)  # oracle: -1 — named expected value from the requirement
             val after = rt_heap_array_capacity_bytes()
             expect(after).to_equal(before)

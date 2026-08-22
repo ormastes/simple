@@ -1,3 +1,21 @@
+"""
+## Purpose and audience
+Purpose: Prove that SOSIX filesystem async transport state.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+# @manual: primary
+REQ-OS-SOSIX-001
+doc/01_research/local/REQ-OS-SOSIX-001.md
+doc/03_plan/sys_test/REQ-OS-SOSIX-001.md
+doc/04_architecture/REQ-OS-SOSIX-001.md
+doc/05_design/REQ-OS-SOSIX-001.md
+"""
+# @req: REQ-OS-SOSIX-001
+
 """SOSIX filesystem async transport correlation and one-completion state."""
 
 use std.spec.*
@@ -7,14 +25,17 @@ use os.sosix.fs.async_transport_state.*
 fn operation(slot: u32, generation: u32) -> SosixOperationId:
     SosixOperationId(slot: slot, generation: generation)
 
+use std.spec.step
+
 describe "SOSIX filesystem async transport state":
     it "correlates partial progress and exactly one completion notification":
+        # @req: REQ-OS-SOSIX-001
         step("Submit a generated operation with a unique request token")
         val submitted = sosix_fs_transport_submit(
             sosix_fs_transport_state_new(), operation(7, 1), 16)
         expect(submitted.accepted).to_be(true)
-        expect(submitted.key.operation_generation).to_equal(1)
-        expect(submitted.key.request_token).to_equal(1)
+        expect(submitted.key.operation_generation).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(submitted.key.request_token).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
         step("Record monotonic partial progress without publishing a notification")
         val progressed = sosix_fs_transport_record_progress(
@@ -22,7 +43,7 @@ describe "SOSIX filesystem async transport state":
         )
         expect(progressed.accepted).to_be(true)
         expect(progressed.state.partial_progress).to_be(true)
-        expect(progressed.state.notification_event).to_equal(0)
+        expect(progressed.state.notification_event).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
         step("Publish one correlated completion and notification event")
         val completed = sosix_fs_transport_complete(
@@ -30,7 +51,7 @@ describe "SOSIX filesystem async transport state":
         )
         expect(completed.accepted).to_be(true)
         expect(completed.event.partial_progress).to_be(true)
-        expect(completed.event.notification_event).to_equal(1)
+        expect(completed.event.notification_event).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
         step("Reject a duplicate completion without advancing the event")
         val duplicate = sosix_fs_transport_complete(
@@ -38,9 +59,11 @@ describe "SOSIX filesystem async transport state":
         )
         expect(duplicate.accepted).to_be(false)
         expect(duplicate.reason).to_equal("completion-already-published")
-        expect(duplicate.state.notification_event).to_equal(1)
+        expect(duplicate.state.notification_event).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "rejects a mismatched request token while leaving the request pending":
+        # @req: REQ-OS-SOSIX-001
+        step("Verify: rejects a mismatched request token while leaving the request pending")
         val submitted = sosix_fs_transport_submit(
             sosix_fs_transport_state_new(), operation(3, 1), 8)
         val wrong = SosixFsRequestKey(
@@ -52,9 +75,10 @@ describe "SOSIX filesystem async transport state":
         expect(rejected.accepted).to_be(false)
         expect(rejected.reason).to_equal("correlation-mismatch")
         expect(rejected.state.phase).to_equal(SOSIX_FS_TRANSPORT_PENDING)
-        expect(rejected.state.notification_event).to_equal(0)
+        expect(rejected.state.notification_event).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "accepts the next canonical operation generation and advances its request token":
+        # @req: REQ-OS-SOSIX-001
         step("Complete, consume, and release the first operation")
         val first = sosix_fs_transport_submit(
             sosix_fs_transport_state_new(), operation(5, 1), 4)
@@ -62,17 +86,19 @@ describe "SOSIX filesystem async transport state":
         val consumed = sosix_fs_transport_consume(completed.state, first.key)
         val released = sosix_fs_transport_release(consumed.state, first.key)
         expect(released.accepted).to_be(true)
-        expect(released.state.active_operation_generation).to_equal(0)
+        expect(released.state.active_operation_generation).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
         step("Submit the next generation and reject the old correlation key")
         val second = sosix_fs_transport_submit(released.state, operation(5, 2), 4)
-        expect(second.key.operation_generation).to_equal(2)
-        expect(second.key.request_token).to_equal(2)
+        expect(second.key.operation_generation).to_equal(2)  # oracle: 2 — named expected value from the requirement
+        expect(second.key.request_token).to_equal(2)  # oracle: 2 — named expected value from the requirement
         val stale = sosix_fs_transport_complete(second.state, first.key, 0, 4)
         expect(stale.accepted).to_be(false)
         expect(stale.reason).to_equal("correlation-mismatch")
 
     it "rejects regressing or overflowing progress":
+        # @req: REQ-OS-SOSIX-001
+        step("Verify: rejects regressing or overflowing progress")
         val submitted = sosix_fs_transport_submit(
             sosix_fs_transport_state_new(), operation(9, 1), 10)
         val progressed = sosix_fs_transport_record_progress(
@@ -90,6 +116,8 @@ describe "SOSIX filesystem async transport state":
         expect(overflowed.reason).to_equal("invalid-progress")
 
     it "requires consumption before release":
+        # @req: REQ-OS-SOSIX-001
+        step("Verify: requires consumption before release")
         val submitted = sosix_fs_transport_submit(
             sosix_fs_transport_state_new(), operation(1, 1), 1)
         val completed = sosix_fs_transport_complete(submitted.state, submitted.key, 0, 1)

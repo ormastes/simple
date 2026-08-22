@@ -1,3 +1,21 @@
+"""
+## Purpose and audience
+Purpose: Prove that UP2 target-side GDB RSP framing.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+# @manual: primary
+REQ-OS-KERNEL-001
+doc/01_research/local/REQ-OS-KERNEL-001.md
+doc/03_plan/sys_test/REQ-OS-KERNEL-001.md
+doc/04_architecture/REQ-OS-KERNEL-001.md
+doc/05_design/REQ-OS-KERNEL-001.md
+"""
+# @req: REQ-OS-KERNEL-001
+
 use std.spec.{describe, it, expect}
 use os.kernel.arch.x86_64.up_squared.gdb_rsp_monitor.{
     UP2_RSP_STAGING_START, UP2_RSP_STAGING_SIZE, UP2_RSP_MAX_TRANSFER,
@@ -5,8 +23,12 @@ use os.kernel.arch.x86_64.up_squared.gdb_rsp_monitor.{
     up2_rsp_decode_frame
 }
 
+use std.spec.step
+
 describe "UP2 target-side GDB RSP framing":
     it "round trips a checksummed query packet":
+        # @req: REQ-OS-KERNEL-001
+        step("Verify: round trips a checksummed query packet")
         val frame = up2_rsp_frame("qSupported:multiprocess+")
         expect(frame.starts_with("$qSupported:multiprocess+#")).to_equal(true)
         val decoded = up2_rsp_decode_frame(frame)
@@ -14,16 +36,22 @@ describe "UP2 target-side GDB RSP framing":
         expect(decoded.unwrap()).to_equal("qSupported:multiprocess+")
 
     it "rejects malformed, oversized, and mismatched checksums":
+        # @req: REQ-OS-KERNEL-001
+        step("Verify: rejects malformed, oversized, and mismatched checksums")
         expect(up2_rsp_decode_frame("qSupported#00").unwrap_err()).to_equal("rsp-frame")
         expect(up2_rsp_decode_frame("$qSupported#zz").unwrap_err()).to_equal("rsp-checksum-format")
         expect(up2_rsp_decode_frame("$qSupported#00").unwrap_err()).to_equal("rsp-checksum")
         expect(up2_rsp_decode_frame("$" + ("a" * 4094) + "#00").unwrap_err()).to_equal("rsp-frame")
 
     it "uses the byte-sum modulo 256 checksum":
+        # @req: REQ-OS-KERNEL-001
+        step("Verify: uses the byte-sum modulo 256 checksum")
         expect(up2_rsp_checksum("m0,1")).to_equal(0xfau8)
 
 describe "UP2 target-side GDB RSP query planning":
     it "advertises only packet size and reports one attached thread":
+        # @req: REQ-OS-KERNEL-001
+        step("Verify: advertises only packet size and reports one attached thread")
         expect(up2_rsp_plan("qSupported:xmlRegisters=i386").response).to_equal("PacketSize=1000")
         expect(up2_rsp_plan("qAttached").response).to_equal("1")
         expect(up2_rsp_plan("qC").response).to_equal("QC1")
@@ -33,6 +61,8 @@ describe "UP2 target-side GDB RSP query planning":
         expect(up2_rsp_plan("?").response).to_equal("S00")
 
     it "fails closed for register, breakpoint, continue, and step packets":
+        # @req: REQ-OS-KERNEL-001
+        step("Verify: fails closed for register, breakpoint, continue, and step packets")
         expect(up2_rsp_plan("g").response).to_equal("")
         expect(up2_rsp_plan("p0").response).to_equal("")
         expect(up2_rsp_plan("Z0,a000000,1").response).to_equal("")
@@ -40,35 +70,45 @@ describe "UP2 target-side GDB RSP query planning":
         expect(up2_rsp_plan("s").response).to_equal("")
 
     it "plans detach without treating it as target reset":
+        # @req: REQ-OS-KERNEL-001
+        step("Verify: plans detach without treating it as target reset")
         val plan = up2_rsp_plan("D")
         expect(plan.operation).to_equal(Up2RspOperation.Detach)
         expect(plan.response).to_equal("OK")
 
 describe "UP2 target-side GDB RSP bounded memory planning":
     it "admits reads at both staging boundaries":
+        # @req: REQ-OS-KERNEL-001
+        step("Verify: admits reads at both staging boundaries")
         val first = up2_rsp_plan("m0a000000,1")
         expect(first.operation).to_equal(Up2RspOperation.ReadMemory)
         expect(first.address).to_equal(UP2_RSP_STAGING_START)
-        expect(first.length).to_equal(1)
+        expect(first.length).to_equal(1)  # oracle: 1 — named expected value from the requirement
         val last = up2_rsp_plan("m0affffff,1")
         expect(last.operation).to_equal(Up2RspOperation.ReadMemory)
         expect(last.address).to_equal(UP2_RSP_STAGING_START + UP2_RSP_STAGING_SIZE - 1u64)
 
     it "admits an exact write and decodes its bytes":
+        # @req: REQ-OS-KERNEL-001
+        step("Verify: admits an exact write and decodes its bytes")
         val plan = up2_rsp_plan("M0a000010,4:00a55aff")
         expect(plan.operation).to_equal(Up2RspOperation.WriteMemory)
-        expect(plan.length).to_equal(4)
+        expect(plan.length).to_equal(4)  # oracle: 4 — named expected value from the requirement
         expect(plan.data).to_equal([0x00u8, 0xa5u8, 0x5au8, 0xffu8])
 
     it "rejects zero, oversized, overflowed, and out-of-range reads":
+        # @req: REQ-OS-KERNEL-001
+        step("Verify: rejects zero, oversized, overflowed, and out-of-range reads")
         expect(up2_rsp_plan("m0a000000,0").response).to_equal("E02")
         expect(up2_rsp_plan("m0a000000,401").response).to_equal("E02")
-        expect(UP2_RSP_MAX_TRANSFER).to_equal(1024)
+        expect(UP2_RSP_MAX_TRANSFER).to_equal(1024)  # oracle: 1024 — named expected value from the requirement
         expect(up2_rsp_plan("m09ffffff,1").response).to_equal("E02")
         expect(up2_rsp_plan("m0b000000,1").response).to_equal("E02")
         expect(up2_rsp_plan("mffffffffffffffff,2").response).to_equal("E02")
 
     it "rejects malformed and length-mismatched writes":
+        # @req: REQ-OS-KERNEL-001
+        step("Verify: rejects malformed and length-mismatched writes")
         expect(up2_rsp_plan("M0a000000,2:00").response).to_equal("E01")
         expect(up2_rsp_plan("M0a000000,1:zz").response).to_equal("E01")
         expect(up2_rsp_plan("M0a000000:00").response).to_equal("E01")

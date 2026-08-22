@@ -1,0 +1,140 @@
+"""
+## Purpose and audience
+Purpose: Prove that TensorPackManifest.empty.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+# @manual: primary
+REQ-LIB-GC-ASYNC-MUT-001
+doc/01_research/local/REQ-LIB-GC-ASYNC-MUT-001.md
+doc/03_plan/sys_test/REQ-LIB-GC-ASYNC-MUT-001.md
+doc/04_architecture/REQ-LIB-GC-ASYNC-MUT-001.md
+doc/05_design/REQ-LIB-GC-ASYNC-MUT-001.md
+"""
+# @req: REQ-LIB-GC-ASYNC-MUT-001
+
+# svllm manifest — parser + A2 serializer surface
+# A2 adds serialize_manifest(). Parser round-trip deferred to A3.
+
+use std.gc_async_mut.svllm.model_executor.model_loader.manifest.{TensorPackManifest, ModelManifestError, parse_manifest, build_tensor_pack, serialize_manifest}
+use std.gc_async_mut.svllm.model_executor.model_loader.tensor_pack.{TensorPack, TensorInfo, ChunkInfo}
+use std.gc_async_mut.svllm.model_executor.model_loader.weight_utils.{Dtype}
+
+use std.spec.step
+
+describe "TensorPackManifest.empty":
+    it "is_empty on fresh value":
+        # @req: REQ-LIB-GC-ASYNC-MUT-001
+        step("Verify: is_empty on fresh value")
+        val m = TensorPackManifest.empty()
+        expect(m.is_empty()).to_equal(true)
+
+    it "has schema_version 0":
+        # @req: REQ-LIB-GC-ASYNC-MUT-001
+        step("Verify: has schema_version 0")
+        val m = TensorPackManifest.empty()
+        expect(m.schema_version).to_equal(0)  # oracle: 0 — named expected value from the requirement
+
+describe "parse_manifest":
+    it "rejects empty input":
+        # @req: REQ-LIB-GC-ASYNC-MUT-001
+        step("Verify: rejects empty input")
+        val r = parse_manifest("")
+        expect(r.is_err()).to_equal(true)
+
+    it "returns Ok on a well-formed canonical v0 manifest":
+        # @req: REQ-LIB-GC-ASYNC-MUT-001
+        step("Verify: returns Ok on a well-formed canonical v0 manifest")
+        val sdn = "{\"schema_version\":0,\"model_id\":\"demo\",\"revision\":\"v0\",\"preferred_chunk_bytes\":2097152,\"digest_algo\":\"sha256\",\"chunks\":[],\"tensors\":[]}"
+        val r = parse_manifest(sdn)
+        expect(r.is_ok()).to_equal(true)
+
+    it "keeps parsed model metadata and counts":
+        # @req: REQ-LIB-GC-ASYNC-MUT-001
+        step("Verify: keeps parsed model metadata and counts")
+        val sdn = "{\"schema_version\":0,\"model_id\":\"demo\",\"revision\":\"v0\",\"preferred_chunk_bytes\":2097152,\"digest_algo\":\"sha256\",\"chunks\":[],\"tensors\":[]}"
+        val r = parse_manifest(sdn)
+        match r:
+            Ok(m) =>
+                expect(m.model_id).to_equal("demo")
+                expect(m.revision).to_equal("v0")
+                expect(m.preferred_chunk_bytes).to_equal(2097152)  # oracle: 2097152 — named expected value from the requirement
+                expect(m.chunk_count).to_equal(0)  # oracle: 0 — named expected value from the requirement
+                expect(m.tensor_count).to_equal(0)  # oracle: 0 — named expected value from the requirement
+            Err(_) =>
+                fail("canonical manifest should parse")
+
+describe "build_tensor_pack":
+    it "materialises a pack from a parsed manifest":
+        # @req: REQ-LIB-GC-ASYNC-MUT-001
+        step("Verify: materialises a pack from a parsed manifest")
+        val sdn = "{\"schema_version\":0,\"model_id\":\"demo\",\"revision\":\"v0\",\"preferred_chunk_bytes\":2097152,\"digest_algo\":\"sha256\",\"chunks\":[],\"tensors\":[]}"
+        val m = parse_manifest(sdn).unwrap()
+        val r = build_tensor_pack("/tmp/pack", m)
+        expect(r.is_ok()).to_equal(true)
+
+    it "copies parsed manifest fields into the pack":
+        # @req: REQ-LIB-GC-ASYNC-MUT-001
+        step("Verify: copies parsed manifest fields into the pack")
+        val sdn = "{\"schema_version\":0,\"model_id\":\"demo\",\"revision\":\"v0\",\"preferred_chunk_bytes\":2097152,\"digest_algo\":\"sha256\",\"chunks\":[],\"tensors\":[]}"
+        val m = parse_manifest(sdn).unwrap()
+        val r = build_tensor_pack("/tmp/pack", m)
+        match r:
+            Ok(pack) =>
+                expect(pack.pack_root).to_equal("/tmp/pack")
+                expect(pack.model_id).to_equal("demo")
+                expect(pack.revision).to_equal("v0")
+                expect(pack.preferred_chunk_bytes).to_equal(2097152)  # oracle: 2097152 — named expected value from the requirement
+                expect(pack.chunk_count()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+                expect(pack.tensor_count()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+            Err(_) =>
+                fail("canonical manifest should materialise")
+
+# ----- A2 serializer specs (failing until Phase 5) -----
+
+fn _demo_pack() -> TensorPack:
+    var p = TensorPack.empty("/tmp/pack")
+    p.model_id = "demo"
+    p.revision = "v0"
+    p.chunks.push(ChunkInfo(
+        id: 0,
+        relative_path: "data-000.bin",
+        byte_len: 4096,
+        digest_hex: "0011aabb00000000000000000000000000000000000000000000000000000000"
+    ))
+    p.tensors.push(TensorInfo(
+        name: "w", shape: [2, 2], dtype: Dtype.F32,
+        chunk_id: 0, offset_in_chunk: 0, byte_len: 16
+    ))
+    p
+
+describe "serialize_manifest (A2)":
+    it "produces non-empty bytes":
+        # @req: REQ-LIB-GC-ASYNC-MUT-001
+        step("Verify: produces non-empty bytes")
+        val pack = _demo_pack()
+        val out = serialize_manifest(pack)
+        expect(out.len()).to_be_greater_than(10)
+
+    it "includes the schema_version field":
+        # @req: REQ-LIB-GC-ASYNC-MUT-001
+        step("Verify: includes the schema_version field")
+        val out = serialize_manifest(_demo_pack())
+        expect(out).to_contain("schema_version")
+
+    it "includes the tensor name 'w' and dtype F32":
+        # @req: REQ-LIB-GC-ASYNC-MUT-001
+        step("Verify: includes the tensor name 'w' and dtype F32")
+        val out = serialize_manifest(_demo_pack())
+        expect(out).to_contain("w")
+        expect(out).to_contain("F32")
+
+    it "includes digest_hex and relative_path":
+        # @req: REQ-LIB-GC-ASYNC-MUT-001
+        step("Verify: includes digest_hex and relative_path")
+        val out = serialize_manifest(_demo_pack())
+        expect(out).to_contain("0011aabb")
+        expect(out).to_contain("data-000.bin")

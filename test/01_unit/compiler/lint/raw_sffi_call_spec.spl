@@ -1,3 +1,21 @@
+"""
+## Purpose and audience
+Purpose: Prove that SFFI009: raw calls require minimal ffi-unsafe scope.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+# @manual: primary
+REQ-COMPILER-LINT-001
+doc/01_research/local/REQ-COMPILER-LINT-001.md
+doc/03_plan/sys_test/REQ-COMPILER-LINT-001.md
+doc/04_architecture/REQ-COMPILER-LINT-001.md
+doc/05_design/REQ-COMPILER-LINT-001.md
+"""
+# @req: REQ-COMPILER-LINT-001
+
 use std.spec.*
 use compiler.semantics.lint.raw_sffi_call.{
     check_raw_sffi_calls, check_raw_sffi_declarations
@@ -6,63 +24,83 @@ use compiler.tools.lint._LintMain.config_and_model.{
     profile_default_levels, map_lint_code_to_config_name, LintProfile
 }
 
+use std.spec.step
+
 describe "SFFI009: raw calls require minimal ffi-unsafe scope":
     """Verifies that raw foreign calls are isolated in the smallest helper
     carrying the canonical ffi capability, while ordinary safe wrappers remain
     free to validate and lift the result."""
 
     it "reports a raw extern call in an ordinary function":
+        # @req: REQ-COMPILER-LINT-001
+        step("Verify: reports a raw extern call in an ordinary function")
         """An unannotated caller must be rejected at the source boundary."""
         val source = "extern fn rt_widget_open() -> i64\n\nfn open_widget() -> i64:\n    rt_widget_open()\n"
         val findings = check_raw_sffi_calls(source, "src/app/demo.spl")
-        expect(findings.len()).to_equal(1)
+        expect(findings.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(findings[0].code).to_equal("SFFI009")
-        expect(findings[0].line_num).to_equal(4)
+        expect(findings[0].line_num).to_equal(4)  # oracle: 4 — named expected value from the requirement
 
     it "accepts a minimal explicitly ffi-unsafe helper":
+        # @req: REQ-COMPILER-LINT-001
+        step("Verify: accepts a minimal explicitly ffi-unsafe helper")
         """The canonical ffi capability discharges the raw-call lint locally."""
         val source = "extern fn rt_widget_open() -> i64\n\n@unsafe(reason: \"raw widget ABI\", capabilities: [ffi])\nfn _open_raw() -> i64:\n    rt_widget_open()\n"
         val findings = check_raw_sffi_calls(source, "src/app/demo.spl")
-        expect(findings.len()).to_equal(0)
+        expect(findings.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "accepts only calls nested in a lexical ffi-unsafe block":
+        # @req: REQ-COMPILER-LINT-001
+        step("Verify: accepts only calls nested in a lexical ffi-unsafe block")
         """An inline block avoids an extra hot-path helper call while keeping
         the validation and lift code outside foreign authority."""
         val source = "extern fn rt_widget_open() -> i64\n\nfn open_widget() -> i64:\n    val raw = unsafe(capabilities: [ffi]):\n        rt_widget_open()\n    if raw <= 0:\n        return -1\n    raw\n"
         expect(check_raw_sffi_calls(source, "src/app/demo.spl").len()).to_equal(0)
 
     it "does not let lexical ffi authority escape its indentation scope":
+        # @req: REQ-COMPILER-LINT-001
+        step("Verify: does not let lexical ffi authority escape its indentation scope")
         """A sibling raw call after the block remains a violation."""
         val source = "extern fn rt_widget_open() -> i64\n\nfn open_widget() -> i64:\n    unsafe(capabilities: [ffi]):\n        rt_widget_open()\n    rt_widget_open()\n"
         val findings = check_raw_sffi_calls(source, "src/app/demo.spl")
-        expect(findings.len()).to_equal(1)
-        expect(findings[0].line_num).to_equal(6)
+        expect(findings.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(findings[0].line_num).to_equal(6)  # oracle: 6 — named expected value from the requirement
 
     it "does not accept an unrelated unsafe capability":
+        # @req: REQ-COMPILER-LINT-001
+        step("Verify: does not accept an unrelated unsafe capability")
         """Raw-pointer authority does not imply permission to invoke foreign code."""
         val source = "extern fn rt_widget_open() -> i64\n\n@unsafe(reason: \"memory only\", capabilities: [raw_ptr])\nfn _open_raw() -> i64:\n    rt_widget_open()\n"
         val findings = check_raw_sffi_calls(source, "src/app/demo.spl")
-        expect(findings.len()).to_equal(1)
+        expect(findings.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "does not confuse a longer identifier with the extern name":
+        # @req: REQ-COMPILER-LINT-001
+        step("Verify: does not confuse a longer identifier with the extern name")
         """Identifier matching must avoid false positives on ordinary functions."""
         val source = "extern fn rt_open() -> i64\n\nfn safe() -> i64:\n    my_rt_open()\n"
         val findings = check_raw_sffi_calls(source, "src/app/demo.spl")
-        expect(findings.len()).to_equal(0)
+        expect(findings.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "reports an imported raw SFFI call outside authority":
+        # @req: REQ-COMPILER-LINT-001
+        step("Verify: reports an imported raw SFFI call outside authority")
         """Imported raw symbols must not bypass the declaration-local census."""
         val source = "use std.thread_sffi.{{spl_thread_sleep}}\n\nfn pause():\n    spl_thread_sleep(1)\n"
         val findings = check_raw_sffi_calls(source, "src/app/demo.spl")
-        expect(findings.len()).to_equal(1)
-        expect(findings[0].line_num).to_equal(4)
+        expect(findings.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(findings[0].line_num).to_equal(4)  # oracle: 4 — named expected value from the requirement
 
     it "accepts an imported raw SFFI call in a lexical block":
+        # @req: REQ-COMPILER-LINT-001
+        step("Verify: accepts an imported raw SFFI call in a lexical block")
         """The imported raw symbol retains its FFI effect at the call site."""
         val source = "use std.thread_sffi.{{\n    spl_thread_sleep, spl_thread_join\n}}\n\nfn pause():\n    unsafe(capabilities: [ffi]):\n        spl_thread_sleep(1)\n"
         expect(check_raw_sffi_calls(source, "src/app/demo.spl").len()).to_equal(0)
 
     it "maps to deny in robust and critical profiles":
+        # @req: REQ-COMPILER-LINT-001
+        step("Verify: maps to deny in robust and critical profiles")
         """Assurance profiles make missing ffi scope a release-blocking error."""
         expect(map_lint_code_to_config_name("SFFI009")).to_equal("raw_sffi_call")
         val robust = profile_default_levels(LintProfile.Robust)
@@ -71,20 +109,26 @@ describe "SFFI009: raw calls require minimal ffi-unsafe scope":
         expect(critical["raw_sffi_call"]).to_equal("deny")
 
     it "reports an extern declaration that lacks ffi authority":
+        # @req: REQ-COMPILER-LINT-001
+        step("Verify: reports an extern declaration that lacks ffi authority")
         """Declarations are ABI assertions even when the function is never called."""
         val findings = check_raw_sffi_declarations(
             "extern fn rt_widget_open() -> i64\n", "src/app/demo.spl")
-        expect(findings.len()).to_equal(1)
+        expect(findings.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(findings[0].code).to_equal("SFFI010")
 
     it "accepts an explicitly ffi-unsafe extern declaration":
+        # @req: REQ-COMPILER-LINT-001
+        step("Verify: accepts an explicitly ffi-unsafe extern declaration")
         """The declaration carries authority independently of its safe wrapper."""
         val source = "@unsafe(reason: \"foreign ABI\", capabilities: [ffi])\nextern fn rt_widget_open() -> i64\n"
         expect(check_raw_sffi_declarations(source, "src/app/demo.spl").len()).to_equal(0)
 
     it "checks attribute-style foreign declarations":
+        # @req: REQ-COMPILER-LINT-001
+        step("Verify: checks attribute-style foreign declarations")
         """Legacy @extern syntax cannot bypass the same declaration policy."""
         val source = "@extern(\"runtime\", \"rt_widget_open\")\nfn rt_widget_open() -> i64:\n    0\n"
         val findings = check_raw_sffi_declarations(source, "src/app/demo.spl")
-        expect(findings.len()).to_equal(1)
+        expect(findings.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(findings[0].code).to_equal("SFFI010")
