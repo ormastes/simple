@@ -1,10 +1,26 @@
 #define _POSIX_C_SOURCE 200809L
 #include "../hal_provider_sealed_facade_v1.h"
 
+#include <pthread.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+
+typedef struct {
+    uint64_t handle;
+    int64_t invocation;
+    pthread_barrier_t *barrier;
+    int32_t status;
+} RaceInvoke;
+
+static void *race_invoke(void *opaque) {
+    RaceInvoke *call = (RaceInvoke *)opaque;
+    (void)pthread_barrier_wait(call->barrier);
+    call->status = rt_hal_sealed_invoke_clock_v2(
+        call->handle, 101, call->invocation, 9, call->invocation, 41, 42);
+    return NULL;
+}
 
 static int fake_session(int argc, char **argv) {
     char line[512];
@@ -53,6 +69,9 @@ int main(int argc, char **argv) {
     long long elapsed_ns;
     int iteration, lane;
     long long v2_elapsed_ns;
+    pthread_barrier_t race_barrier;
+    pthread_t race_thread[2];
+    RaceInvoke race_call[2];
     if (argc > 1 && strcmp(argv[1], "--session") == 0)
         return fake_session(argc, argv);
     executable_size = readlink("/proc/self/exe", executable,
@@ -133,12 +152,26 @@ int main(int argc, char **argv) {
                 HAL_SEALED_FACADE_STATUS_INVALID_V1 ||
         rt_hal_sealed_hot_spawn_count_v1(handle) != 0 ||
         rt_hal_sealed_hot_allocation_count_v1(handle) != 0) return 22;
+    if (pthread_barrier_init(&race_barrier, NULL, 2) != 0) return 23;
+    race_call[0] = (RaceInvoke){handle, 3000, &race_barrier, -99};
+    race_call[1] = (RaceInvoke){handle, 3001, &race_barrier, -99};
+    if (pthread_create(&race_thread[0], NULL, race_invoke, &race_call[0]) != 0 ||
+        pthread_create(&race_thread[1], NULL, race_invoke, &race_call[1]) != 0)
+        return 24;
+    if (pthread_join(race_thread[0], NULL) != 0 ||
+        pthread_join(race_thread[1], NULL) != 0) return 25;
+    (void)pthread_barrier_destroy(&race_barrier);
+    if (!((race_call[0].status == HAL_SEALED_FACADE_STATUS_OK_V1 &&
+           race_call[1].status == HAL_SEALED_FACADE_STATUS_STATE_V1) ||
+          (race_call[1].status == HAL_SEALED_FACADE_STATUS_OK_V1 &&
+           race_call[0].status == HAL_SEALED_FACADE_STATUS_STATE_V1))) return 26;
     stale = handle;
     if (rt_hal_sealed_maintenance_shutdown_v1(handle) != 0 ||
         rt_hal_sealed_invoke_v1(stale, 101, 1001, 9, 0, 32, 64, 8) !=
             HAL_SEALED_FACADE_STATUS_INVALID_V1) return 15;
     printf("hal sealed facade selfcheck: PASS v1_invocations=1000 "
            "v2_invocations=1000 hot_spawn=0 hot_alloc=0 "
+           "race_winners=1 race_state_rejections=1 "
            "v1_mean_ns=%lld v2_mean_ns=%lld\n",
            elapsed_ns / 1000, v2_elapsed_ns / 1000);
     return 0;

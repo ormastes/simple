@@ -39,6 +39,11 @@ typedef struct {
     uint64_t trace_hi, trace_lo, trace_cursor, trace_length, trace_capacity;
 } HalBytesRequestV2;
 
+typedef struct {
+    unsigned char data[HAL_FRAME_CAP_V1];
+    size_t start, end;
+} HalInputV1;
+
 static int write_all(const unsigned char *p, size_t n) {
     size_t at = 0;
     while (at < n) {
@@ -50,15 +55,32 @@ static int write_all(const unsigned char *p, size_t n) {
     return 1;
 }
 
-static int read_line(unsigned char p[HAL_FRAME_CAP_V1], size_t *n_out) {
-    size_t n = 0;
-    while (n + 1 < HAL_FRAME_CAP_V1) {
-        ssize_t k = read(STDIN_FILENO, p + n, 1);
-        if (k < 0 && errno == EINTR) continue;
-        if (k != 1) return k == 0 ? -1 : 0;
-        if (p[n++] == '\n') { p[n] = 0; *n_out = n; return 1; }
+static int read_line(HalInputV1 *input,
+                     unsigned char p[HAL_FRAME_CAP_V1], size_t *n_out) {
+    for (;;) {
+        unsigned char *newline = memchr(input->data + input->start, '\n',
+                                         input->end - input->start);
+        if (newline) {
+            size_t n = (size_t)(newline - (input->data + input->start)) + 1;
+            memcpy(p, input->data + input->start, n);
+            input->start += n;
+            if (input->start == input->end) input->start = input->end = 0;
+            p[n] = 0; *n_out = n; return 1;
+        }
+        if (input->start != 0) {
+            memmove(input->data, input->data + input->start,
+                    input->end - input->start);
+            input->end -= input->start; input->start = 0;
+        }
+        if (input->end + 1 >= HAL_FRAME_CAP_V1) return 0;
+        {
+            ssize_t k = read(STDIN_FILENO, input->data + input->end,
+                             HAL_FRAME_CAP_V1 - input->end - 1);
+            if (k < 0 && errno == EINTR) continue;
+            if (k <= 0) return k == 0 ? -1 : 0;
+            input->end += (size_t)k;
+        }
     }
-    return 0;
 }
 
 static int prefix(const unsigned char *p, size_t n, const char *s, size_t z) {
@@ -339,21 +361,22 @@ static int reset_ok(const uint64_t reset[3]) {
 
 int main(int argc, char **argv) {
     unsigned char line[HAL_FRAME_CAP_V1];
+    HalInputV1 input = {{0}, 0, 0};
     size_t n = 0;
     uint64_t reset[3], generation = 0, next_sequence = 1;
     if (argc == 1) {
-        return read_line(line, &n) == 1 && dispatch_request(line, n, 0) ? 0 : 64;
+        return read_line(&input, line, &n) == 1 && dispatch_request(line, n, 0) ? 0 : 64;
     }
     if (argc != 2 || strcmp(argv[1], "session") != 0 ||
         !write_all((const unsigned char *)"HALWORKER1\n", 11)) return 64;
     for (;;) {
-        int read_status = read_line(line, &n);
+        int read_status = read_line(&input, line, &n);
         if (read_status == -1) return 0;
         if (read_status != 1 || !parse_reset(line, n, reset) ||
             (generation != 0 && reset[0] != generation) ||
             reset[1] != next_sequence || !reset_ok(reset)) return 65;
         generation = reset[0];
-        if (read_line(line, &n) != 1 ||
+        if (read_line(&input, line, &n) != 1 ||
             !dispatch_request(line, n, reset[2])) return 66;
         next_sequence++;
         if (next_sequence == 0) return 67;

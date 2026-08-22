@@ -21,6 +21,8 @@ struct RequestV2 { f: [u64; 11] }
 #[derive(Copy, Clone)]
 struct BytesRequestV2 { f: [i64; 19] }
 
+struct Input { data: [u8; CAP], start: usize, end: usize }
+
 fn write_all(p: &[u8]) -> bool {
     let mut at = 0;
     while at < p.len() {
@@ -30,16 +32,26 @@ fn write_all(p: &[u8]) -> bool {
     true
 }
 
-fn read_line(p: &mut [u8; CAP]) -> i32 {
-    let mut n = 0;
-    while n + 1 < CAP {
-        let k = unsafe { read(0, p[n..].as_mut_ptr().cast(), 1) };
+fn read_line(input: &mut Input, p: &mut [u8; CAP]) -> i32 {
+    loop {
+        if let Some(offset) = input.data[input.start..input.end]
+            .iter().position(|v| *v == b'\n') {
+            let n = offset + 1;
+            p[..n].copy_from_slice(&input.data[input.start..input.start + n]);
+            input.start += n;
+            if input.start == input.end { input.start = 0; input.end = 0; }
+            return n as i32;
+        }
+        if input.start != 0 {
+            input.data.copy_within(input.start..input.end, 0);
+            input.end -= input.start; input.start = 0;
+        }
+        if input.end + 1 >= CAP { return 0; }
+        let k = unsafe { read(0, input.data[input.end..].as_mut_ptr().cast(), CAP - input.end - 1) };
         if k == 0 { return -1; }
-        if k != 1 { return 0; }
-        n += 1;
-        if p[n - 1] == b'\n' { return n as i32; }
+        if k < 0 { return 0; }
+        input.end += k as usize;
     }
-    0
 }
 
 fn number(p: &[u8], at: &mut usize, terminal: bool) -> Option<u64> {
@@ -230,20 +242,21 @@ fn main() {
     let direct = env::args_os().nth(1).is_none();
     if !session && !direct { std::process::exit(64); }
     let mut line = [0u8; CAP];
+    let mut input = Input { data: [0u8; CAP], start: 0, end: 0 };
     if direct {
-        let n = read_line(&mut line);
+        let n = read_line(&mut input, &mut line);
         if n <= 0 || !dispatch(&line[..n as usize], 0) { std::process::exit(64); }
         return;
     }
     if !write_all(b"HALWORKER1\n") { std::process::exit(64); }
     let mut generation = 0; let mut sequence = 1;
     loop {
-        let n = read_line(&mut line);
+        let n = read_line(&mut input, &mut line);
         if n == -1 { return; }
         let Some(rs) = (if n > 0 { reset(&line[..n as usize]) } else { None }) else { std::process::exit(65) };
         if (generation != 0 && rs[0] != generation) || rs[1] != sequence || !reset_ok(rs) { std::process::exit(65); }
         generation = rs[0];
-        let n = read_line(&mut line);
+        let n = read_line(&mut input, &mut line);
         if n <= 0 || !dispatch(&line[..n as usize], rs[2]) { std::process::exit(66); }
         sequence = sequence.checked_add(1).unwrap_or_else(|| std::process::exit(67));
     }

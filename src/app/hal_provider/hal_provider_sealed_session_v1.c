@@ -42,9 +42,14 @@ static int read_line_deadline(int fd, unsigned char *p, size_t cap,
         if (ready < 0 && errno == EINTR) continue;
         if (ready <= 0) return 0;
         {
-            ssize_t k = read(fd, p + n, 1);
-            if (k == 1) {
-                if (p[n++] == '\n') { p[n] = 0; *n_out = n; return 1; }
+            ssize_t k = read(fd, p + n, cap - n - 1);
+            if (k > 0) {
+                unsigned char *newline = memchr(p + n, '\n', (size_t)k);
+                n += (size_t)k;
+                if (newline) {
+                    if ((size_t)(newline - p) + 1 != n) return 0;
+                    p[n] = 0; *n_out = n; return 1;
+                }
             } else if (k < 0 && errno == EINTR) continue;
             else return 0;
         }

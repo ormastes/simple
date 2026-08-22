@@ -39,3 +39,21 @@ stack-contiguous, and dispatch adds two prefix checks.  Complexity is O(frame)
 with a hard 512-byte frame and 32-byte payload cap; no payload-sized dynamic
 state exists.  The optimizer was not run because the only deployed Pure Simple
 compiler is inadmissible.
+
+## Fixed-storage transport follow-up
+
+The worker input path previously issued one `read(2)` syscall per frame byte.
+The C and Rust workers now use a fixed 512-byte sliding reader: kernel reads
+accept bounded chunks, completed frames are copied once into the existing
+stack parse buffer, and over-capacity frames still fail closed. No heap state
+or ABI field was added, and batched reset/request input remains valid.
+
+On the same focused host, sealed ClockRead means improved from
+511,560/622,808 ns for V1/V2 to 119,501/122,587 ns. V2 overhead fell from 21.7%
+to 2.6%; peak RSS remained 1,536 KiB and hot allocation/spawn counts remained
+zero. The exact C/Rust receipt matrix passed with unchanged 1,024/1,792 KiB
+worker RSS. Its whole check, including compilation, moved from 2.21 s to 2.01
+s. The earlier standalone 20,000-cycle rows remain above because that exact
+harness was not committed and could not be replayed honestly. A two-thread
+facade race proved one invocation owner wins while its competitor receives the
+state rejection.
