@@ -113,6 +113,17 @@
 - Add mirrored clean-view, policy, parse/count order, and active-source contracts.
 - Verification intentionally not run under the user's no-verify instruction.
 
+## Completed FlatAstBridge trace-dispatch tranche
+
+- Scoped the existing compiler-trace snapshot across fresh and restored flat
+  AST module assembly.
+- Migrated both split bridge modules to the cycle-free read-only accessor.
+- Preserved dynamic `SIMPLE_BOOTSTRAP` behavior and both early/normal returns.
+- Added mirrored structural contracts against direct trace env reads.
+- Static operation model: up to 14 trace env/text lookups per bridge transaction
+  become one; no new cache storage beyond the existing two-i64 scope state.
+- Verification intentionally not run under the user's no-verify instruction.
+
 ## Completed frontend trace hot-path tranche
 
 - Added one cycle-free parse-scope snapshot of `SIMPLE_COMPILER_TRACE`.
