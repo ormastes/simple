@@ -331,3 +331,10 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Remove signed arithmetic, decomposition, and synthetic-local rewrite helpers.
 - Replace legacy transformation fixtures with fail-closed/source contracts in both test layouts.
 - Follow-up: rehabilitate individual rewrite families only with per-operation range/type/overflow proofs and differential tests.
+## Completed compiler tranche: remove unsafe dormant GVN
+
+- Preserve the `Skeleton` class, factory, dependencies, statistics, and identity wrapper.
+- Remove direct block-order value-numbering and cross-block rewrite entrypoints.
+- Delete text-signature tables and unscoped field-load reuse.
+- Pin absence of the block-order implementation with a source contract.
+- Follow-up: rehabilitate only on dominators, structural keys, and MemorySSA-lite versions.
