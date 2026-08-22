@@ -574,5 +574,6 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Assemble valid non-overlapping edits from source chunks with one join.
 - Retain incremental behavior for negative, reversed, or out-of-range spans.
 - Pin multi-edit output, equal-start insertion order, and invalid-span skipping.
-- Follow-up: replace per-file dictionary array copyback with owned indexed buckets
-  and consolidate the three duplicated applicator implementations.
+- Replace per-file dictionary array copyback with owned indexed buckets while
+  preserving dictionary key iteration and per-file replacement order.
+- Follow-up: consolidate the three duplicated applicator implementations.
