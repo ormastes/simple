@@ -543,3 +543,14 @@ blank lines and final-newline shape. Persistence remains one `file_atomic_write`
 after complete assembly, with `0` unchanged, `1` written and `-1` failed. The
 rewrite deliberately retains existing indentation normalization for matched bare
 imports and does not broaden import recognition.
+
+## MCP diagnostic wrapper assembly contract
+
+`query_rich_common.query_mcp_diagnostics_wrapper_json` is the single serializer
+for query-check MCP envelopes. It caches decimal diagnostic count once, emits
+fixed prefix/suffix fragments, inserts each already-serialized diagnostic
+verbatim with exactly one comma between neighbors, and joins exactly once. Empty
+input yields `diagnostics:[]`; input order, nested diagnostic JSON, summary text,
+numeric count and `isError:false` remain byte-identical. Callers use the shared
+emitter and must not construct `diags_array` or structured-content payload copies.
+Complexity is `O(S + D)` work, `O(D)` fragment references and one `O(S)` output.
