@@ -1249,21 +1249,24 @@ const char* rt_sdl2_last_error(void) {
     return SDL_GetError();
 }
 
-void rt_sdl2_set_cursor_visible(int64_t visible) {
-    SDL2_REQUIRE_VOID();
-    SDL_ShowCursor(visible ? SDL_ENABLE : SDL_DISABLE);
+bool rt_sdl2_set_cursor_visible(int64_t visible) {
+    SDL2_REQUIRE(false);
+    if (!sdl2_on_owner_thread()) return false;
+    return SDL_ShowCursor(visible ? SDL_ENABLE : SDL_DISABLE) >= 0;
 }
 
-void rt_sdl2_set_cursor_grab(int64_t handle, int64_t grab) {
+bool rt_sdl2_set_cursor_grab(int64_t handle, int64_t grab) {
     SDL_Window* win = sdl2_window_get(handle);
-    if (!win) return;
+    if (!win) return false;
     SDL_SetWindowGrab(win, grab ? SDL_TRUE : SDL_FALSE);
+    return true;
 }
 
-void rt_sdl2_warp_mouse(int64_t handle, int64_t x, int64_t y) {
+bool rt_sdl2_warp_mouse(int64_t handle, int64_t x, int64_t y) {
     SDL_Window* win = sdl2_window_get(handle);
-    if (!win || x < INT_MIN || x > INT_MAX || y < INT_MIN || y > INT_MAX) return;
+    if (!win || x < INT_MIN || x > INT_MAX || y < INT_MIN || y > INT_MAX) return false;
     SDL_WarpMouseInWindow(win, (int)x, (int)y);
+    return true;
 }
 
 /* ===== Clipboard ===== */
@@ -1487,6 +1490,8 @@ int64_t rt_sdl_event_window_data2(void) {
 
 #ifdef SIMPLE_SDL2_HANDLE_SELFTEST
 int main(void) {
+    if (rt_sdl2_set_cursor_visible(1) || rt_sdl2_set_cursor_grab(1, 1) ||
+        rt_sdl2_warp_mouse(1, 0, 0)) return 13;
     if (rt_sdl2_quit() || rt_sdl2_destroy_window(1)) return 12;
     if (rt_sdl2_get_window_width(1) != -1 ||
         rt_sdl2_get_window_height(1) != -1 ||

@@ -112,3 +112,7 @@ passing placeholder.
     quit and destroy return status, five safe wrappers use lexical FFI scopes,
     and Web UI consumes them without changing presentation cost. Continue with
     cursor, flag, and remaining property families before signed admission.
+20. SDL2 cursor visibility/grab/warp now return checked status across C, Rust,
+    and Simple with three lexical wrappers and unchanged SDL call counts.
+    Continue with window flags/state and remaining property contracts before
+    signed admission and sanitizer receipts.

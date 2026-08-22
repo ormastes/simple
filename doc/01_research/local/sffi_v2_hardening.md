@@ -569,3 +569,19 @@ Optimized C compilation, Rust family tests, three Simple checks, and lifecycle
 ABI/performance auditing pass. Inventory improves to 194 contracted and 282
 uncontracted unsafe declarations. SDL’s void shutdown/destroy primitives and
 the unsigned loaded artifact still prevent a fully verified classification.
+
+SDL2 cursor visibility, grab, and warp previously returned void, so stale
+handles, wrong-owner calls, out-of-range coordinates, and `SDL_ShowCursor`
+failure were reported as success. All three now return boolean status across
+C, Rust dispatch, and Simple. Their public wrappers propagate status from
+minimal lexical `unsafe(ffi)` scopes. The native sabotage fixture verifies
+wrong-owner/stale-handle refusal for all three operations.
+
+Cursor changes are not frame rendering operations. Each path retains one
+existing handle validation and at most its original single SDL mutation call;
+visibility uses the existing `SDL_ShowCursor` return rather than an additional
+query. No allocation, lock, hash, map, or retry was added. Optimized C, Rust
+family, Simple, and cursor ABI/performance audits pass. Inventory improves to
+197 contracted and 279 uncontracted unsafe declarations. SDL’s void grab/warp
+primitives prove accepted inputs rather than post-call OS state, and signed
+provider evidence remains absent, so the family is not fully verified.

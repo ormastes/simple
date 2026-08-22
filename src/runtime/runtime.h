@@ -1337,9 +1337,9 @@ int64_t  rt_sdl2_window_flags(int64_t handle);
 const char* rt_sdl2_last_error(void);
 
 /* Cursor */
-void     rt_sdl2_set_cursor_visible(int64_t visible);
-void     rt_sdl2_set_cursor_grab(int64_t handle, int64_t grab);
-void     rt_sdl2_warp_mouse(int64_t handle, int64_t x, int64_t y);
+bool     rt_sdl2_set_cursor_visible(int64_t visible);
+bool     rt_sdl2_set_cursor_grab(int64_t handle, int64_t grab);
+bool     rt_sdl2_warp_mouse(int64_t handle, int64_t x, int64_t y);
 
 /* Clipboard */
 const char* rt_sdl2_clipboard_get(void);
