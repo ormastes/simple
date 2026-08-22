@@ -82,7 +82,7 @@ describe "closed @rt(hal) compiler bindings":
         expect(process.compare_supported).to_be(true)
         expect(socket.compare_supported).to_be(true)
 
-    it "keeps capability receiver APIs metadata-only until struct ABI proof":
+    it "fails closed when a safe device tag has no execution ABI":
         val irq = rt_hal_static_binding_v1(
             "io.interrupt.acknowledge.safe.v1")
         val mmio = rt_hal_static_binding_v1("io.mmio.read.safe.v1")
@@ -94,7 +94,44 @@ describe "closed @rt(hal) compiler bindings":
         expect(irq.environment_capability_id).to_equal(0)
         expect(irq.direct_rewrite_supported).to_be(false)
         expect(irq.compare_supported).to_be(false)
-        expect(irq.diagnostic).to_contain("validation metadata only")
+        expect(rt_hal_binding_requires_device_execution_route_v1(irq))
+            .to_be(true)
+        expect(rt_hal_binding_requires_device_execution_route_v1(mmio))
+            .to_be(true)
+        expect(rt_hal_binding_requires_device_execution_route_v1(dma))
+            .to_be(true)
+        expect(irq.diagnostic).to_contain(
+            "must not compile as executed HAL")
+
+    it "binds all eight device execution tags to the frozen caller ABI":
+        val signature =
+            "fn(u64,i64,i64,i64,i64,i64,i64,i64,i64,i64,i64,i64,*u8,i64,*mut u8,i64,i64,i64,i64,i64,i64)->i32"
+        val operations = [
+            "io.interrupt.mask.exec.v1",
+            "io.interrupt.acknowledge.exec.v1",
+            "io.mmio.read.exec.v1", "io.mmio.write.exec.v1",
+            "io.dma.map.exec.v1", "io.dma.submit.exec.v1",
+            "io.dma.poll.exec.v1", "io.dma.unmap.exec.v1"]
+        var index = 0
+        while index < operations.len():
+            val binding = rt_hal_static_binding_v1(operations[index])
+            expect(binding.known).to_be(true)
+            expect(binding.environment_opcode_code).to_equal(16 + index)
+            expect(binding.direct_rewrite_supported).to_be(true)
+            expect(binding.compare_supported).to_be(true)
+            expect(rt_hal_binding_signature_key_diagnostic_v1(
+                binding, signature)).to_equal("")
+            expect(binding.raw_symbol.ends_with("_exec_v1_raw")).to_be(true)
+            expect(binding.direct_symbol.ends_with("_exec_direct_v1"))
+                .to_be(true)
+            expect(binding.compare_symbol.ends_with("_exec_compare_v1"))
+                .to_be(true)
+            index = index + 1
+
+        val mmio = rt_hal_static_binding_v1("io.mmio.read.exec.v1")
+        expect(rt_hal_binding_signature_key_diagnostic_v1(mmio,
+            signature.replace("*mut u8", "*u8")))
+            .to_contain("E-RT-HAL-BIND-002")
 
     it "rejects unknown operation identities without lookup fallback":
         val binding = rt_hal_static_binding_v1("io.unknown.v1")

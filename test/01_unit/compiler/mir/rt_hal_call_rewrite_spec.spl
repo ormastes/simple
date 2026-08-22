@@ -27,6 +27,33 @@ fn clock_wrapper_call() -> MirFunction:
             MirOperandKind.Copy(LocalId(id: 0))))))
     MirFunction(name: "time_now_nanos", blocks: [block], locals: [])
 
+fn device_exec_wrapper_call(mutable_result: bool = true) -> MirFunction:
+    val byte = MirType(kind: MirTypeKind.U8)
+    val params = [MirType(kind: MirTypeKind.U64), MirType.i64(), MirType.i64(), MirType.i64(),
+        MirType.i64(), MirType.i64(), MirType.i64(), MirType.i64(),
+        MirType.i64(), MirType.i64(), MirType.i64(), MirType.i64(),
+        MirType(kind: MirTypeKind.Ptr(byte, false)), MirType.i64(),
+        MirType(kind: MirTypeKind.Ptr(byte, mutable_result)), MirType.i64(),
+        MirType.i64(), MirType.i64(), MirType.i64(), MirType.i64(),
+        MirType.i64()]
+    val signature = MirSignature(
+        params: params, return_type: MirType(kind: MirTypeKind.I32),
+        is_variadic: false)
+    val callee = MirOperand(kind: MirOperandKind.Const(
+        MirConstValue.Str("_hal_mmio_read_exec_v1_raw"),
+        MirType(kind: MirTypeKind.FuncPtr(signature))))
+    var args: [MirOperand] = []
+    var index = 0
+    while index < params.len():
+        args.push(MirOperand(kind: MirOperandKind.Copy(LocalId(id: index))))
+        index = index + 1
+    val instruction = MirInst(kind: MirInstKind.Call(
+        Some(LocalId(id: 30)), callee, args), span: nil)
+    val block = MirBlock(id: BlockId(id: 0), label: nil,
+        instructions: [instruction], terminator: MirTerminator.Ret(
+            Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 30))))))
+    MirFunction(name: "mmio_read_exec", blocks: [block], locals: [])
+
 val CLOCK_MANIFEST = "rt-hal-v1|operation=io.clock.monotonic_nanos.v1|providers=2"
 
 describe "resolved @rt(hal) MIR call rewrite":
@@ -57,3 +84,41 @@ describe "resolved @rt(hal) MIR call rewrite":
             RtHalCallModeV1.NormalDirect)
         expect(compared.rewritten_calls).to_equal(0)
         expect(compared.diagnostic).to_equal("")
+
+    it "rejects a device planning leaf in every execution mode":
+        val manifest =
+            "rt-hal-v1|operation=io.mmio.read.safe.v1|providers=1"
+        val direct = rt_hal_rewrite_function_calls_v1(
+            clock_wrapper_call(), manifest, RtHalCallModeV1.NormalDirect)
+        val compared = rt_hal_rewrite_function_calls_v1(
+            clock_wrapper_call(), manifest, RtHalCallModeV1.SealedCompare)
+        expect(direct.rewritten_calls).to_equal(0)
+        expect(compared.rewritten_calls).to_equal(0)
+        expect(direct.diagnostic).to_contain(
+            "must not compile as executed HAL")
+        expect(compared.diagnostic).to_contain(
+            "must not compile as executed HAL")
+
+    it "routes the exact device execution ABI transactionally":
+        val manifest =
+            "rt-hal-v1|operation=io.mmio.read.exec.v1|providers=1"
+        val direct = rt_hal_rewrite_function_calls_v1(
+            device_exec_wrapper_call(), manifest, RtHalCallModeV1.NormalDirect)
+        val compared = rt_hal_rewrite_function_calls_v1(
+            device_exec_wrapper_call(), manifest, RtHalCallModeV1.SealedCompare)
+        expect(direct.rewritten_calls).to_equal(1)
+        expect(direct.selected_symbol).to_equal(
+            "rt_hal_mmio_read_exec_direct_v1")
+        expect(call_name(direct.function)).to_equal(
+            "rt_hal_mmio_read_exec_direct_v1")
+        expect(compared.rewritten_calls).to_equal(1)
+        expect(call_name(compared.function)).to_equal(
+            "rt_hal_mmio_read_exec_compare_v1")
+
+        val invalid = device_exec_wrapper_call(false)
+        val rejected = rt_hal_rewrite_function_calls_v1(
+            invalid, manifest, RtHalCallModeV1.NormalDirect)
+        expect(rejected.rewritten_calls).to_equal(0)
+        expect(rejected.diagnostic).to_contain("E-RT-HAL-BIND-002")
+        expect(call_name(rejected.function)).to_equal(
+            "_hal_mmio_read_exec_v1_raw")
