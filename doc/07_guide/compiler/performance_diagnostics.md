@@ -47,8 +47,14 @@ invalidation.
 ## Current safety containment
 
 - Unknown escape state remains escaping after finalization.
-- The active vectorizer requires an exact integer unit step found in the actual loop
-  header/direct body region.
+- Auto-vectorization is analysis-only; candidate recognition requires an exact integer
+  unit step found in the actual loop header/direct body region.
+- Canonical `collection_opt` dispatch is disabled. Retained patterns do not yet prove
+  ownership/COW equivalence, alias and memory versions, call effects,
+  trapping/allocation behavior, or destruction order.
+- Collection hoisting remains inert until it can target a true preheader with complete
+  dominance, effects, alias, zero-trip, and speculatability proofs.
+- Loop trip counts remain unknown until SCEV-lite proves the complete recurrence.
 - Dormant identity and proof-incomplete transforms are absent from effective pipelines.
 - General fusion, stack promotion, general LICM, BCE, GVN, string-builder rewriting, and
   TCO remain unavailable until their proof contracts pass.
