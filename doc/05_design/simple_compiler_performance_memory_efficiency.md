@@ -431,3 +431,12 @@ checks completeness before allocating live-in/live-out. If completeness becomes
 false after USE/DEF collection, the request returns empty USE, DEF, live-in, and
 live-out arrays with `liveness_complete = false`. Consumers must gate on that bit;
 incomplete matrices are never retained as shape-compatible placeholder data.
+
+## CLI policy projection identity contract
+
+`lint_run_result_apply_cli_policy` computes effective severity once. When it
+equals the diagnostic's current level, the immutable `LintRunResult` is returned
+directly; no result or diagnostic payload is reconstructed. When severity changes,
+one new diagnostic/result is created. Callers must not mutate either path, and
+rendered output, counts, ordering, fix identity, evidence, and uncertainty remain
+identical.
