@@ -344,9 +344,11 @@ Consumers explicitly select whether liveness is required. The no-liveness
 builder produces CFG, reverse-postorder, dominance and def-use while leaving
 DEF/USE matrices, live-in/live-out matrices, visits and exhaustion state empty.
 The ambiguous full builder retains compatibility but must not be used by active
-analyses that do not query liveness. A future `PerfFactRequest` validates
-dependencies among CFG, dominance, def-use and liveness and constructs only the
-requested capabilities.
+analyses that do not query liveness. `PerfFactRequest` validates dependencies
+among CFG, dominance, def-use and liveness and constructs only the dependency-
+closed capabilities. Raw missing dependencies remain reportable even though the
+runtime builder closes them safely. Unrequested families have empty storage and
+`complete = false`; queries therefore fail closed.
 
 ## Diagnostic rendering allocation contract
 
