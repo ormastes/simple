@@ -688,6 +688,23 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Add mirrored behavioral contracts for cycles, methods, and duplicates.
 - Verification intentionally not run under the user's no-verify instruction.
 
+## Completed structural-union symbol/narrowing tranche
+
+- Add module-lifetime forward/reverse structural-union SymbolId maps to
+  `SymbolTable`, reset, and codec transport.
+- Recompute the preferred lane ID from canonical identity so caller hints
+  cannot perturb assignments; bound collision probing and fall back to a
+  unique ordinary ID without aliasing.
+- Route enum and variant synthesis plus HIR narrowing through the same owner.
+- Resolve bare named pattern types to their registered SymbolId and canonical
+  member key.
+- Build one key-to-variant dictionary per rewritten match.
+- Correct nested-union member keys to shared ordered equality semantics.
+- Deferred: generic/qualified type-pattern grammar and deep structured-key
+  interning/streaming; pre-sorted preregistration for encounter-independent
+  assignment under genuine FNV collisions.
+- Verification intentionally not run under the user's no-verify instruction.
+
 ## Completed query outline-index tranche
 
 - Build return-type and parameter-name facts together from the already-split
