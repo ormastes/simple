@@ -122,6 +122,32 @@ function-side index, and first-binding-wins on a duplicate bind.
 
 Perf gate row: `scripts/check/check-perf-regression-tests.shs`.
 
+## Measured result
+
+`src/compiler/mir_opt/mir_opt/cse.spl`, `[hir-prof-excl]` (ms):
+
+| term | before (run12) | after |
+|---|---|---|
+| **callable_deps** | **14,693** | **401** (~37x) |
+| declared_dep | — | 1,123 |
+| field_dep | — | 828 |
+| imports | 951 | 301 |
+| glob | 144 | 61 |
+| enums | 560 | 594 |
+| functions | 7 | 9 |
+
+`callable_deps` is no longer the dominant term for that module — it now sits
+behind `declared_dep` and `field_dep`. The terms this fix does not touch
+(`enums`, `functions`) are unchanged, which is the control: the drop is
+attributable to the lookup, not to a quieter box.
+
+**Caveat, stated rather than papered over:** the "before" column is run12's
+number, taken on a different entry closure (`src/app` vs `src/compiler`) and a
+differently-loaded machine, so 37x is an envelope, not a controlled A/B. The
+controlled evidence is the mechanism spec — identical miss-probe count against a
+100-binding and a 4000-binding table, ratio required under 3x — which fails
+pre-fix and passes post-fix, isolating table size as the only variable.
+
 ## Related
 
 Same defect family (a per-operation full copy/scan invisible at fixture scale):
