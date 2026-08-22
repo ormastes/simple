@@ -125,13 +125,12 @@ impl HirLowering:
         # (a pure function of the frozen registry) it is NOT phase-invariant
         # and must never be shared across importers.
         #
-        # A key is recorded only AFTER the body returns, never before. Marking
-        # on entry would have been a cheap re-entrancy breaker, but it would
-        # also mark tuples whose body bailed out early against an in-progress
-        # guard (`imported_type_methods_in_progress`) without finishing --
-        # those must stay retryable, exactly as they are today. Cycles keep
-        # being broken by the existing guards; this memo only removes repeats
-        # of a registration that already ran to completion.
+        # Completed and in-flight state stay distinct. The completed memo is
+        # still written only AFTER the body returns, so an incomplete tuple is
+        # retryable. The list-based in-flight stack breaks composite FIELD
+        # cycles while the outer invocation remains responsible for finishing
+        # the same exact tuple. The method-only guard cannot cover this outer
+        # register -> field dependency -> register cycle.
         if self.registered_import_memo_owner != self.module_filename:
             val fresh_registered_import_memo: {text: bool} = {}
             self.registered_import_memo = fresh_registered_import_memo
@@ -142,9 +141,15 @@ impl HirLowering:
             self.registered_import_skip_count = self.registered_import_skip_count + 1
             hir_phase_profile_count_imported_symbol_skip()
             return
+        if self.registered_import_in_progress_has(registered_key):
+            self.registered_import_skip_count = self.registered_import_skip_count + 1
+            hir_phase_profile_count_imported_symbol_skip()
+            return
+        self.registered_import_in_progress_push(registered_key)
         self.register_imported_symbol_inner(
             imported_index, imported_mod_name, imported_name, local_name,
             import_span, materialize_enum)
+        self.registered_import_in_progress_pop(registered_key)
         self.registered_import_memo[registered_key] = true
 
     me ensure_surface_name_index(imported_mod: ModuleSurface) -> text:
