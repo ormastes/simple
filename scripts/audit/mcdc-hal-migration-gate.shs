@@ -1,0 +1,86 @@
+#!/bin/sh
+# Mandatory bounded changed-path entry point for the REQ-019 compiler policy.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+MODE="${1:---working}"
+REF="${2:-}"
+CONFIG="config/check/mcdc_hal_migration.sdn"
+SCANNED_ROOTS=$(grep '^root=' "$CONFIG")
+
+usage() {
+    echo 'Usage: sh scripts/audit/mcdc-hal-migration-gate.shs [--working|--staged|--changed-from REF|--self-test]'
+}
+
+case "$MODE" in
+    --working|--staged|--self-test) ;;
+    --changed-from) [ -n "$REF" ] || { usage >&2; exit 2; } ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+esac
+
+path_is_scanned() {
+    candidate=$1
+    case "$candidate" in
+        */vendor/*|src/runtime/miniaudio.h|src/runtime/stb_image.h|src/runtime/stb_truetype.h) return 1 ;;
+    esac
+    while IFS= read -r configured; do
+        root=${configured#root=}
+        case "$candidate" in
+            "$root"|"$root"/*) return 0 ;;
+        esac
+    done <<EOF
+$SCANNED_ROOTS
+EOF
+    return 1
+}
+
+if [ "$MODE" = "--self-test" ]; then
+    path_is_scanned src/runtime/runtime_process.c || exit 1
+    path_is_scanned src/lib/common/structural/hal_provider/provider.spl || exit 1
+    if path_is_scanned src/runtime/vendor/foreign.c; then exit 1; fi
+    if path_is_scanned src/runtime/stb_image.h; then exit 1; fi
+    if path_is_scanned src/runtime/test/runtime_process_owned_selfcheck.c; then exit 1; fi
+    echo 'STATUS: PASS mcdc-hal-migration-gate self-test'
+    exit 0
+fi
+
+tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/mcdc-hal-migration-gate.XXXXXX")
+trap 'rm -rf "$tmp_dir"' EXIT HUP INT TERM
+all_paths="$tmp_dir/all-paths"
+changed_paths="$tmp_dir/changed-paths"
+
+case "$MODE" in
+    --working)
+        { git diff --name-only HEAD; git ls-files --others --exclude-standard; } >"$all_paths"
+        ;;
+    --staged)
+        git diff --cached --name-only --diff-filter=ACMR >"$all_paths"
+        ;;
+    --changed-from)
+        base=$(git merge-base HEAD "$REF")
+        { git diff --name-only --diff-filter=ACMR "$base"...HEAD; git diff --name-only HEAD; git ls-files --others --exclude-standard; } >"$all_paths"
+        ;;
+esac
+
+: >"$changed_paths"
+sort -u "$all_paths" | while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    if path_is_scanned "$path"; then printf '%s\n' "$path"; fi
+done >"$changed_paths"
+
+if [ ! -s "$changed_paths" ]; then
+    echo 'STATUS: PASS mcdc-hal-migration-gate (no changed runtime/HAL source)'
+    exit 0
+fi
+
+runtime=${SIMPLE_RUNTIME:-bin/simple}
+if [ ! -x "$runtime" ]; then
+    echo "STATUS: FAIL mcdc-hal-migration-gate missing Pure Simple runtime: $runtime" >&2
+    exit 2
+fi
+
+exec "$runtime" run scripts/audit/mcdc_hal_migration_check.spl -- \
+    --repo . --config "$CONFIG" --changed-file "$changed_paths"

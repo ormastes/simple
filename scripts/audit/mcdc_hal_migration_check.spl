@@ -2,12 +2,10 @@
 # Usage: bin/simple run scripts/audit/mcdc_hal_migration_check.spl -- [options]
 
 use compiler.tools.verify.mcdc_hal_migration.*
-
-extern fn rt_cli_get_args() -> [text]
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-extern fn rt_time_now_unix_micros() -> i64
-extern fn rt_exit(code: i64)
+use std.nogc_sync_mut.io.file_ops.{file_read_text}
+use std.nogc_sync_mut.io.process_ops.{process_run}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
+use std.nogc_sync_mut.sffi.cli.{cli_get_args, cli_exit}
 
 val DEFAULT_CONFIG = "config/check/mcdc_hal_migration.sdn"
 val MAX_CONFIG_BYTES = 65536
@@ -44,7 +42,7 @@ fn _rel(root: text, path: text) -> text:
     path
 
 fn _args() -> [text]:
-    val all = rt_cli_get_args()
+    val all = cli_get_args()
     var out: [text] = []
     var found = false
     for arg in all:
@@ -83,32 +81,32 @@ fn _positive(raw: text, fallback: i64) -> i64:
     val value = raw.to_i64()
     if value <= 0:
         print "ERROR MHM000 bounded numeric config must be a positive integer: " + raw
-        rt_exit(2)
+        cli_exit(2)
     value
 
 fn _load_config(args: [text]) -> MigrationConfigV1:
     val repo = _arg_value(args, "--repo", ".")
     val config_path = _arg_value(args, "--config", DEFAULT_CONFIG)
     val config_abs = _join(repo, config_path)
-    val source = rt_file_read_text(config_abs) ?? ""
+    val source = file_read_text(config_abs)
     if source.len() == 0 or source.len() > MAX_CONFIG_BYTES:
         print "ERROR MHM000 config missing, empty, or exceeds 65536 bytes: " + config_path
-        rt_exit(2)
+        cli_exit(2)
     val schema = _config_value(source, "schema", "")
     if schema != MCDC_HAL_MIGRATION_SCHEMA_V1:
         print "ERROR MHM000 unsupported config schema: " + schema
-        rt_exit(2)
+        cli_exit(2)
     val roots = _config_roots(source)
     if roots.len() == 0:
         print "ERROR MHM000 config has no bounded scan roots"
-        rt_exit(2)
+        cli_exit(2)
     val max_files = _positive(_config_value(source, "max_files", ""), 4096)
     val max_file_bytes = _positive(_config_value(source, "max_file_bytes", ""), 1048576)
     val max_total_bytes = _positive(_config_value(source, "max_total_bytes", ""), 16777216)
     val max_findings = _positive(_config_value(source, "max_findings", ""), 8192)
     if max_files > 65536 or max_file_bytes > 4194304 or max_total_bytes > 268435456 or max_findings > 65536:
         print "ERROR MHM000 reviewed hard cap exceeded (files=65536, file_bytes=4194304, total_bytes=268435456, findings=65536)"
-        rt_exit(2)
+        cli_exit(2)
     MigrationConfigV1(
         repo: repo, config_path: config_path,
         baseline_path: _arg_value(args, "--baseline", _config_value(source, "baseline", "")),
@@ -203,7 +201,7 @@ fn _list_files(config: MigrationConfigV1) -> ([text], [text]):
     # root. Source contents are then read exactly once in _scan.
     for arg in ["-type", "f", "(", "-name", "*.spl", "-o", "-name", "*.c", "-o", "-name", "*.h", ")", "-print"]:
         find_args = find_args.push(arg)
-    val result = rt_process_run("/usr/bin/find", find_args)
+    val result = process_run("/usr/bin/find", find_args)
     if result.2 != 0:
         errors = errors.push("single-pass file inventory failed")
     elif result.0.len() > MAX_COMMAND_BYTES:
@@ -219,6 +217,8 @@ fn _list_files(config: MigrationConfigV1) -> ([text], [text]):
                 if files.len() > config.max_files:
                     errors = errors.push("file inventory exceeded max_files=" + config.max_files.to_string())
                     return (files, errors)
+    # Preserve stable human diagnostics. The source scan itself is linear;
+    # this one bounded startup ordering step is outside per-line analysis.
     files.sort()
     (files, errors)
 
@@ -228,7 +228,7 @@ fn _scan(config: MigrationConfigV1) -> ([MigrationFindingV1], [text], i64, i64):
     var errors = inventory_errors
     var source_bytes = 0
     for path in files:
-        val source = rt_file_read_text(path) ?? ""
+        val source = file_read_text(path)
         source_bytes = source_bytes + source.len()
         if source_bytes > config.max_total_bytes:
             errors = errors.push("source inventory exceeded max_total_bytes=" + config.max_total_bytes.to_string())
@@ -245,7 +245,7 @@ fn _scan(config: MigrationConfigV1) -> ([MigrationFindingV1], [text], i64, i64):
     (findings, errors, files.len(), source_bytes)
 
 fn _parse_baseline(config: MigrationConfigV1) -> ([MigrationBaselineV1], [text]):
-    val source = rt_file_read_text(_join(config.repo, config.baseline_path)) ?? ""
+    val source = file_read_text(_join(config.repo, config.baseline_path))
     var entries: [MigrationBaselineV1] = []
     var errors: [text] = []
     if source.len() == 0 or _config_value(source, "schema", "") != MCDC_HAL_MIGRATION_SCHEMA_V1:
@@ -266,31 +266,33 @@ fn _parse_baseline(config: MigrationConfigV1) -> ([MigrationBaselineV1], [text])
 
 fn _changed_paths(config: MigrationConfigV1) -> ([text], [text]):
     if config.changed_file != "":
-        val source = rt_file_read_text(config.changed_file) ?? ""
+        val source = file_read_text(config.changed_file)
         if source.len() > MAX_COMMAND_BYTES: return ([], ["changed-file exceeded 4194304 bytes"])
         var paths: [text] = []
+        var seen: Dict<text, bool> = {}
         for raw in source.split("\n"):
-            if raw.trim() != "": paths = paths.push(raw.trim())
+            val path = raw.trim()
+            if path != "" and not seen.contains_key(path):
+                seen[path] = true
+                paths = paths.push(path)
         return (paths, [])
     val command = "git -C " + _shell_quote(config.repo) + " diff --name-only --diff-filter=ACMR " + _shell_quote(config.base_ref) + "...HEAD; " +
         "git -C " + _shell_quote(config.repo) + " diff --name-only --diff-filter=ACMR; " +
         "git -C " + _shell_quote(config.repo) + " ls-files --others --exclude-standard"
-    val result = rt_process_run("/bin/sh", ["-ec", command])
+    val result = process_run("/bin/sh", ["-ec", command])
     if result.2 != 0: return ([], ["unable to compute changed paths against " + config.base_ref])
     if result.0.len() > MAX_COMMAND_BYTES: return ([], ["changed-path inventory exceeded 4194304 bytes"])
     var paths: [text] = []
+    var seen: Dict<text, bool> = {}
     for raw in result.0.split("\n"):
         val path = raw.trim()
-        if path != "" and not _migration_path_present(paths, path): paths = paths.push(path)
+        if path != "" and not seen.contains_key(path):
+            seen[path] = true
+            paths = paths.push(path)
     (paths, [])
 
-fn _migration_path_present(paths: [text], path: text) -> bool:
-    for value in paths:
-        if value == path: return true
-    false
-
 fn _check_shims(config: MigrationConfigV1, promoted: bool) -> [text]:
-    val source = rt_file_read_text(_join(config.repo, config.shim_path)) ?? ""
+    val source = file_read_text(_join(config.repo, config.shim_path))
     var errors: [text] = []
     if source.len() == 0 or _config_value(source, "schema", "") != MCDC_HAL_MIGRATION_SCHEMA_V1:
         return ["compatibility-shim inventory missing or has unsupported schema"]
@@ -308,7 +310,7 @@ fn _check_shims(config: MigrationConfigV1, promoted: bool) -> [text]:
         else:
             if fields[4] != config.enforcement_epoch:
                 errors = errors.push("compatibility-shim deadline must equal enforcement_epoch: " + fields[0] + ":" + fields[1])
-            val body = rt_file_read_text(_join(config.repo, fields[0])) ?? ""
+            val body = file_read_text(_join(config.repo, fields[0]))
             if body == "" or not body.contains(fields[1]):
                 errors = errors.push("stale compatibility-shim inventory: " + fields[0] + ":" + fields[1])
     if promoted and count > 0:
@@ -318,14 +320,14 @@ fn _check_shims(config: MigrationConfigV1, promoted: bool) -> [text]:
 val config = _load_config(_args())
 if config.epoch == "" or config.enforcement_epoch == "":
     print "ERROR MHM000 current_epoch and enforcement_epoch are mandatory"
-    rt_exit(2)
+    cli_exit(2)
 if config.epoch != config.development_epoch and config.epoch != config.enforcement_epoch:
     print "ERROR MHM000 epoch must equal configured current_epoch or enforcement_epoch"
-    rt_exit(2)
+    cli_exit(2)
 val promoted = config.epoch == config.enforcement_epoch
-val scan_started_us = rt_time_now_unix_micros()
+val scan_started_us = time_now_unix_micros()
 val (findings, scan_errors, scanned_files, scanned_bytes) = _scan(config)
-val scan_elapsed_us = rt_time_now_unix_micros() - scan_started_us
+val scan_elapsed_us = time_now_unix_micros() - scan_started_us
 val (baseline, baseline_errors) = _parse_baseline(config)
 val (changed, changed_errors) = _changed_paths(config)
 val shim_errors = _check_shims(config, promoted)
@@ -336,7 +338,7 @@ for item in changed_errors: setup_errors = setup_errors.push(item)
 for item in shim_errors: setup_errors = setup_errors.push(item)
 if setup_errors.len() > 0:
     for item in setup_errors: print "ERROR MHM000 " + item
-    rt_exit(2)
+    cli_exit(2)
 
 val result = evaluate_mcdc_hal_migration_v1(findings, baseline, changed, promoted, config.max_findings)
 for diagnostic in result.diagnostics:
@@ -349,5 +351,5 @@ print "mcdc-hal migration perf: scan_us=" + scan_elapsed_us.to_string() +
     " files=" + scanned_files.to_string() + " source_bytes=" + scanned_bytes.to_string() +
     " files_per_second=" + files_per_second.to_string() + " file_reads=" + scanned_files.to_string() +
     " inventory_processes=1"
-if result.error_count > 0: rt_exit(1)
-rt_exit(0)
+if result.error_count > 0: cli_exit(1)
+cli_exit(0)

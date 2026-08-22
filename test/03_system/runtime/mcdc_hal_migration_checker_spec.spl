@@ -1,19 +1,20 @@
 # @req REQ-019 NFR-005 NFR-009
 
 use std.spec
+use std.nogc_sync_mut.io.file_ops.{file_read_text}
+use std.nogc_sync_mut.io.process_ops.{process_run}
 
 extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
 fn run_checker(root: text, epoch: text, changed_file: text) -> (text, text, i64):
-    rt_process_run("bin/simple", ["run", "scripts/audit/mcdc_hal_migration_check.spl", "--",
+    process_run("bin/simple", ["run", "scripts/audit/mcdc_hal_migration_check.spl", "--",
         "--repo", root, "--config", "migration.sdn", "--epoch", epoch,
         "--changed-file", changed_file])
 
 describe "REQ-019 repository migration checker":
     it "ratchets exact legacy warnings to changed-code and release errors":
         val root = "/tmp/simple_mcdc_hal_migration_checker_spec"
-        val cleanup = rt_process_run("/bin/sh", ["-c", "rm -rf " + root + " && mkdir -p " + root + "/src"])
+        val cleanup = process_run("/bin/sh", ["-c", "rm -rf " + root + " && mkdir -p " + root + "/src"])
         expect(cleanup.2).to_equal(0)
         expect(rt_file_write_text(root + "/src/legacy.spl", "extern fn rt_old() -> i64\n")).to_be(true)
         expect(rt_file_write_text(root + "/baseline.sdn",
@@ -48,3 +49,22 @@ describe "REQ-019 repository migration checker":
         expect(promoted.2).to_equal(1)
         expect(promoted.0).to_contain("ERROR MHM019")
         expect(promoted.0).to_contain("ERROR MHM020")
+
+    it "makes the bounded policy mandatory for production I/O without vendored roots":
+        val gate = process_run("sh", ["scripts/audit/mcdc-hal-migration-gate.shs", "--self-test"])
+        expect(gate.2).to_equal(0)
+        expect(gate.0).to_contain("STATUS: PASS")
+
+        val config = file_read_text("config/check/mcdc_hal_migration.sdn")
+        expect(config).to_contain("root=src/runtime/runtime_hosted_fs.c")
+        expect(config).to_contain("root=src/runtime/runtime_process.c")
+        expect(config).to_contain("root=src/runtime/runtime_socket_nonblock.c")
+        expect(config.contains("root=src/runtime/vendor")).to_be(false)
+        expect(config.contains("root=src/runtime/stb_image.h")).to_be(false)
+
+        val checker = file_read_text("scripts/audit/mcdc_hal_migration_check.spl")
+        expect(checker).to_contain("use std.nogc_sync_mut.io.process_ops.{process_run}")
+        expect(checker.contains("extern fn rt_process_run")).to_be(false)
+
+        val repo_gate = file_read_text("scripts/check/check-repo-hygiene.shs")
+        expect(repo_gate).to_contain("mcdc-hal-migration-gate.shs --changed-from")
