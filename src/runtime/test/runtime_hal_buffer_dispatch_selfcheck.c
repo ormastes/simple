@@ -37,30 +37,46 @@ static long rss_kib(void) {
 
 int main(void) {
     uint8_t input[32], output[32];
-    uint64_t start, elapsed;
+    uint64_t start, direct_elapsed, compare_elapsed;
     long rss_before, rss_after;
     int i;
     memset(input, 0x5a, sizeof(input));
     memset(output, 0xa5, sizeof(output));
+    if (rt_hal_buffer_dispatch_direct_v3(1001, 1, 0, 0, 0, 0,
+            input, 32, output, 32, 1, 2, 1, 1, 1) != 0) return 1;
+    if (memcmp(input, output, sizeof(input)) != 0) return 2;
+    memset(output, 0xa5, sizeof(output));
+    if (rt_hal_buffer_dispatch_direct_v3(1001, 1, 9, 2, 7, 0,
+            input, 32, output, 32, 1, 2, 1, 1, 1) != 3) return 3;
+    if (output[0] != 0xa5) return 4;
     if (rt_hal_buffer_dispatch_compare_v3(1001, 1, 0, 0, 0, 0,
-            input, 32, output, 32, 1, 2, 1, 1, 1) != 1) return 1;
-    if (output[0] != 0xa5) return 2;
-    if (rt_hal_buffer_dispatch_bind_owner_v3(fake_owner, 2, 1) != 0) return 3;
-    if (rt_hal_buffer_dispatch_mode_v3() != 2 ||
-        rt_hal_buffer_dispatch_provider_v3() != 1) return 4;
+            input, 32, output, 32, 1, 2, 1, 1, 1) != 1) return 5;
+    if (output[0] != 0xa5) return 6;
     rss_before = rss_kib();
+    start = nanos();
+    for (i = 0; i < 1000000; ++i)
+        if (rt_hal_buffer_dispatch_direct_v3(1001, 1, 0, 0, 0, 0,
+                input, 32, output, 32, 1, 2, i + 1, i + 1, 1000000) != 0)
+            return 7;
+    direct_elapsed = nanos() - start;
+    if (rt_hal_buffer_dispatch_bind_owner_v3(fake_owner, 2, 1) != 0) return 8;
+    if (rt_hal_buffer_dispatch_mode_v3() != 2 ||
+        rt_hal_buffer_dispatch_provider_v3() != 1) return 9;
     start = nanos();
     for (i = 0; i < 1000000; ++i)
         if (rt_hal_buffer_dispatch_compare_v3(1001, 1, 0, 0, 0, 0,
                 input, 32, output, 32, 1, 2, i + 1, i + 1, 1000000) != 0)
-            return 5;
-    elapsed = nanos() - start;
+            return 10;
+    compare_elapsed = nanos() - start;
     rss_after = rss_kib();
-    if (memcmp(input, output, sizeof(input)) != 0) return 6;
-    if (rt_hal_buffer_dispatch_hot_allocation_count_v3() != 0) return 7;
-    if (rss_after > rss_before + 1024) return 8;
-    if (rt_hal_buffer_dispatch_unbind_owner_v3() != 0) return 9;
-    printf("runtime_hal_buffer_v3 calls=1000000 ns_per_call=%llu rss_before_kib=%ld rss_after_kib=%ld hot_allocations=0\n",
-           (unsigned long long)(elapsed / 1000000), rss_before, rss_after);
+    if (memcmp(input, output, sizeof(input)) != 0) return 11;
+    if (rt_hal_buffer_dispatch_hot_allocation_count_v3() != 0) return 12;
+    if (rss_after > rss_before + 1024) return 13;
+    if (direct_elapsed >= compare_elapsed) return 14;
+    if (rt_hal_buffer_dispatch_unbind_owner_v3() != 0) return 15;
+    printf("runtime_hal_buffer_v3 calls=1000000 direct_ns_per_call=%llu compare_ns_per_call=%llu rss_before_kib=%ld rss_after_kib=%ld hot_allocations=0\n",
+           (unsigned long long)(direct_elapsed / 1000000),
+           (unsigned long long)(compare_elapsed / 1000000),
+           rss_before, rss_after);
     return 0;
 }
