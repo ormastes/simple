@@ -435,3 +435,15 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Pin `write <= read` algorithm shape and absence of the second buffer with source contracts.
 - Reduce peak diagnostic reference/capacity retention without relying on mutable aliases.
 - Follow-up: migrate remaining safe split-based lint wrappers to the canonical line view; preserve intentionally transformed/masked views.
+
+## Completed compiler tranche: quarantine dead-code elimination
+
+- Make every DCE transform entrypoint identity while status is `Skeleton`.
+- Remove dense liveness construction, block/local scans, keep bitmaps and MIR
+  rebuilding from the callable Skeleton path.
+- Preserve mandatory probe classification as analysis-only compatibility and
+  fail side-effect/purity decisions closed.
+- Replace positive deletion fixtures/manual claims with quarantine contracts.
+- Follow-up: separate `perf_facts_build_without_liveness` for production
+  consumers that do not need dense liveness; rehabilitate DCE only with sparse
+  liveness and exhaustive opcode semantics.
