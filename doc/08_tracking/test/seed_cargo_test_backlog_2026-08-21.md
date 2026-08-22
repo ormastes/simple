@@ -1,0 +1,121 @@
+# Rust seed `cargo test` backlog — triage 2026-08-21
+
+Baseline commit: `9ac9d120b83` (`origin/main` at the start of the pass; origin
+advanced repeatedly during it — see "Rebase note" below).
+
+Host: this box HAS two working NVIDIA GPUs (Vulkan 1.4 + CUDA 13) and clang/LLD
+23 via `. scripts/setup/llvm-toolchain-env.shs`. "No GPU" is therefore never a
+valid ENV excuse here, and nothing below was classified ENV-dependent.
+
+## Before / after, per crate
+
+| crate | command | before | after |
+|---|---|---|---|
+| `simple-compiler` | `cargo test -p simple-compiler --release --lib -j8` | 49 failed / 3803 passed | **19 failed / 3833 passed** |
+| `simple-driver` | `cargo test -p simple-driver --lib -j8` | 4 failed / 484 passed | **0 failed / 488 passed** |
+| `simple-runtime` | `cargo test -p simple-runtime --lib -j8` | 10 failed / 1195 passed | **0 failed / 1205 passed** (one intermittent, see below) |
+
+The 19 remaining `simple-compiler` failures are exactly: the **3** cluster-32
+tests left red on purpose pending a language decision (see below), and **16**
+pre-existing `pipeline::native_project` failures (see below). No test outside
+those two groups is red, and no test was skipped or `#[ignore]`d to get there.
+
+## Cluster table
+
+| # | cluster | tests | class | root cause | action |
+|---|---|---|---|---|---|
+| 1 | mem-attribution gate latched OFF | `interpreter_extern::gpu::device_mem_counter_tests::{alloc_bumps_live_and_peak_bytes,peak_survives_free_seeded_leak}`, `value::heap::attr_tests::owner_attribution_orders_by_live_bytes_and_frees_settle` | REAL old bug | `ATTR_ENABLED: OnceLock<bool>` seeded from `SIMPLE_MEM_ATTR` latched OFF as soon as *any* allocation read the gate, so `mem_attr_enable()` became a silent no-op — test-order dependent and unfixable from the caller | SOURCE: tri-state `AtomicU8` gate; programmatic enable is authoritative, off path is still one relaxed load |
+| 2 | packed `Value::ByteArray` on the extern boundary | `interpreter_extern::io_file::tests::seek_and_read_after_seek_report_real_positions_and_bytes`, `interpreter_extern::signatures::tests::ed25519_sign_{matches_pkcs8_v1_fixture_signature,preserves_u8_literals_in_message_arrays}` | STALE after `69bd3215708` ("perf: optimize compiler loader and packed byte paths") | byte-producing externs now return packed `Value::ByteArray`, not `Value::Array(Vec<Value::Int>)`; the *bytes* were already correct in every case | TEST: assert the byte SEQUENCE via `Value::try_array_bytes` (the accessor the boundary itself uses) instead of matching one container variant. Strengthens rather than weakens |
+| 3 | `rt_dict_get` invalid receiver | `value::collections::tests::{test_dict_invalid_value,test_low_heap_tagged_values_do_not_crash_collection_runtime}` | REAL old bug | the not-a-Dict fallback returned `rt_array_new(0)` — an empty ARRAY — while every other miss path in the same function, and `rt_dict_remove`, return NIL. A caller's `if v == nil` absence guard was fail-open on a non-dict receiver | SOURCE: fallback is `RuntimeValue::NIL` |
+| 4 | `rt_string_char_at` over-run | `value::collections::tests::test_string_char_at_out_of_bounds` | STALE after `7d39f8ae3b6` ("fix(runtime): rt_string_char_at over-run returns empty text, not nil") | forward over-run deliberately returns EMPTY TEXT so `if ch == "": break` terminates on the compiled path too | TEST: assert empty text forward, nil for negative underflow (both halves kept) |
+| 5 | `rt_string_ends_with` unicode fixture | `interpreter_extern::tests::rt_string_ends_with_is_registered_and_correct_sdoctest_2026_08_07` | REAL bug in the FIXTURE | the row `("héllo…", "o…", false)` is unsatisfiable: "héllo…" does end with "o…" (h é l l o …), and both the C runtime's memcmp tail test (`runtime_native.c:3666`) and the interpreter handler say so | TEST: corrected to `true`, plus a genuine negative (`"é…"` → false) so the no-false-hit intent is still covered |
+| 6 | float union discrimination | `value::tests::test_value_matches_type_float` | STALE after the `Value::Float32` variant landed | `matches_type` exists for union-arm discrimination, so `"f32"` matches `Value::Float32` and `"f64"` matches `Value::Float`; `"float"`/`"Float"` still matches either | TEST: assert the discrimination in both directions (4 new assertions, none removed) |
+| 7 | array vs tuple marshalling | `runtime_bridge::tests::test_value_to_runtime_array` | STALE | `value_to_runtime` deliberately splits arrays (runtime array) from tuples (runtime tuple) so a tuple is byte-identical to a natively constructed one; the test read an array back with `rt_tuple_len`/`rt_tuple_get`, which report -1 | TEST: read with `rt_array_len`/`rt_array_get` |
+| 8 | 32-bit target needs LLVM | `pipeline::tests::test_pipeline_32bit_target_requires_llvm` | REAL old bug (diagnostic) | without the `llvm` cargo feature, `BackendKind::select_for_target` has no 32-bit/WASM arm and falls through to Cranelift, which has no ISA for them and reports the opaque "Support for this target has not been implemented yet" | SOURCE: fail closed in `compile_module_to_memory_for_target_with_context` with a message naming the `llvm` feature. Nothing that used to compile stops compiling — this is exactly the set Cranelift already rejected |
+| 8b | (guard blast radius, caught in verification) | `web_compiler::tests::*` (5) | REGRESSION introduced by cluster 8's first draft | the first version of the 32-bit guard also covered WASM, pre-empting the more specific WASM message at `pipeline/codegen.rs:2826` that `web_compiler.rs:176` matches on to fall back gracefully | SOURCE: guard restricted to 32-bit **non**-WASM, and worded exactly as the string `web_compiler.rs:176` already expected and which nothing in the tree ever emitted |
+| 9 | ELF `.text` extraction | `pipeline::tests::test_elf_extraction_from_codegen` | REAL old bug | `extract_elf_text_section` matched the section name exactly, missing Cranelift's `.text.subsection` (and `-ffunction-sections`-style `.text.<sym>`), so the relocation-aware path returned None and `extract_code_from_object` fell through — worst case to the `mov eax, 0; ret` stub | SOURCE: accept `.text` and `.text.*` (exact still wins), same for `.rela.text*` |
+| 10 | isolated-thread arg marshalling | `executor::tests::test_isolated_thread_spawn_with_args_and_join{,_direct_function_record}` | REAL old bug | `rt_thread_spawn_isolated_with_args` hardcoded `native_worker_arg(_, true)`, ignoring the callable's `raw_worker_args`, so ints were re-encoded raw and shifted again (10+32 → 5); the `DirectFunction` arm transmuted to a 2-arg fn, dropping the closure slot (→ 36) | SOURCE: pass the callable's real `raw_worker_args`; transmute to `fn(u64, RuntimeValue, RuntimeValue)`. Same two defects fixed in the sibling `rt_thread_spawn_limited_with_args` (defect-class neighbour) |
+| 11 | manifest trailer | `loader::package::format::tests::test_manifest_section_rejects_partial_runtime_variants_trailer` | REAL old bug | `ManifestSection::from_bytes` never checked it consumed all bytes, so a trailing garbage byte was silently ignored | SOURCE: `if offset != bytes.len() { return None }` |
+| 12 | native lib manager | `loader::settlement::native::tests::test_native_lib_manager` | STALE | `NativeLibManager::new()` preloads the `__process__` pseudo-library, so it is never empty | TEST: assert `__process__` present and index off `base` |
+| 13 | packed-vs-generic array equality | `value::sffi::equality::tests::test_array_equality_handles_packed_generic_and_cycles` | REAL old bug | `generic_int_eq` required `expected >= 0`, so a negative element (`-1`) in a u64-packed array never matched the generic array's inline int, although `rt_array_get` reinterprets the word as i64 | SOURCE: drop the sign restriction |
+| 14 | vulkan inert-stub probe | `vulkan_graphics_runtime_core::vulkan_feature_disabled_tests::no_entry_point_fails_with_an_empty_error_channel` | STALE after `fe8fee8d6f0` | `rt_vulkan_is_available` became an honest dlopen probe of the system loader; on this host it truthfully returns 1, which the probe table read as "inert stub lied" | TEST: removed from the inert-stub table with a cited comment; table still 13 entries, so its `>= 10` non-vacuity assert is intact |
+| 15 | driver `check` gc-boundary fixtures | `cli::check::tests::test_check_warns_for_gc_boundary_crossing` | REAL old bug (broken fixture) | the fixture imported `std.gc_async_mut.task`, which does not exist, so `validate_imports` raised a hard unresolved-import Error and `check_file` returned Error, not Warning. The sibling strict test passed only vacuously, for the same wrong reason | TEST: point both fixtures at a real module (`std.gc_async_mut.gc`); assertions untouched, strict test now non-vacuous |
+| 16 | spipe matcher preprocessing | `cli::test_runner::execution::tests::{test_preprocess_spipe_rewrites_infix_expect_matchers,test_preprocess_spipe_inlines_expect_for_expect_only_helper}` | REAL old bug | `rewrite_method_expect_line` parenthesized *every* `to_equal`/`to_be` subject, so `expect value to_equal 1` became `expect (value) == 1`. The wrap exists only for the compound-subject case | SOURCE: `equality_subject()` parenthesizes only compound (whitespace-containing) subjects |
+| 17 | safe-mode child args | `cli::test_runner::execution::tests::test_build_safe_mode_child_args_runs_spec_directly` | REAL old bug (broken fixture) | the fixture named `test/example_spec.spl`, which does not exist relative to the driver crate dir, so `preprocess_matchers_only` failed the read and the code silently fell back to the original path | TEST: write a real spec into a `tempdir()` and assert against the `.spipe_matchers_` sibling |
+| 18 | native_project cache scope | `pipeline::native_project::tests::{test_compile_failure_does_not_link_cached_objects,test_incremental_cache_rejects_corrupt_mangled_object}` | STALE after `3e45ef20790` (per-lane private caches) | the tests hardcoded `<cache>/objects`; the layout is `<cache>/<scope>/objects` | TEST: `scoped_cache_objects_dir()` helper citing the sha |
+| 19 | focus C-runtime ABI test | `pipeline::native_project::tests::test_core_c_runtime_native_focus_contract` | STALE after `41eef4686b7` (ptr/len ABI) + REAL | `rt_dir_walk`/`rt_dir_remove_all` were called with the old C-string ABI; `rt_terminal_is_tty_handle` has never existed anywhere in the tree | TEST: ptr/len + tagged-array decode corrected in `test/01_unit/runtime/runtime_native_focus_test.c`. The tty probe is NOT fixed — see below |
+
+| 20 | text-method MIR dispatch | `mir::lower::tests::branch_coverage::calls::bootstrap_stem_and_chained_text_aliases_use_canonical_runtime_calls` | STALE after `cfe0506e336` | that commit added `builtin_method_receiver_name`, so `starts_with`/`rfind`/`replace`/`split` on a text receiver lower to `MethodCallStatic{"str.<m>"}`, not a canonical `rt_string_*` MIR `Call`. The new contract is pinned by 3 live sibling tests | TEST: those 4 rows moved into a `str.<m>` dispatch loop; trim/lower/upper/slice/char_code_at stay on the `Call` loop |
+| 21 | `to_text()` on 64-bit ints | `mir::lower::tests::branch_coverage::calls::primitive_to_text_method_call_is_builtin_qualified` | STALE after `610ce80229e` | i64/u64 `.to_text()` deliberately bypasses the lossy `BoxInt` (`(v<<3)\|TAG_INT`) and calls `rt_raw_i64_to_string` | TEST: assert `rt_raw_i64_to_string/1` present and `BoxInt` absent; the i32 sibling still pins the old path |
+| 22 | DI resolve diagnostic | `mir::lower::tests::branch_coverage::calls::di_resolve_arg_no_config_error` | STALE after `cfe0506e336` | the no-`di_config` branch now tries `resolve_convention_binding` first and reports "No binding found for this type" | TEST: expect the current substring; `is_err()` assertion untouched |
+| 23 | optional unwrap: flat-nullable vs boxed enum | `mir::lower::tests::branch_coverage::expr::optional_field_unwrap_lowers_to_enum_payload_not_named_method`, `codegen::codegen_instr_tests::calls::codegen_bare_unwrap_or_calls_rt_unwrap_or_self_not_rt_enum_payload` | STALE after `1b915112b68` + `20416a1bda7`, and `f1f8dba2e69` | a `T?` FIELD is a flat-nullable (`Pointer{inner}`) holding its payload directly, so `rt_enum_payload` returned tagged-nil there and segfaulted on field access — the contract was deliberately inverted to stay on the erased bare `unwrap`. Separately, `unwrap_or` moved off `rt_unwrap_or_self` (the `??` helper, which ignores the default for non-Option enums) onto the 2-arg `rt_unwrap_or_value` | TEST: assert the new contract positively AND the old wrong behaviour negatively. The genuine boxed-enum path is still pinned by `direct_result_unwrap_lowers_to_enum_payload_not_method_dispatch`, so both halves stay covered |
+
+| 24 | VHDL backend: boxed-result unbox | `pipeline::codegen::tests::{compile_file_to_vhdl_lowers_unsigned_fixed_width_operations,vhdl_lowers_labeled_hardware_call_field_access_to_output_signal}` | REAL old bug (two layers) | the backend has always dispatched a MIR call target named `concat`, but the type checker never had `concat` in its builtin env, so it died at `Undefined("concat")`; behind that, MIR emits `UnboxInt` on the boxed call result and the backend had only a `BoxInt` arm | SOURCE: `concat` registered as a 2-arg generic builtin in `type/src/checker_builtins.rs`; `UnboxInt` made a transparent alias alongside `BoxInt` (also propagates `reg_tuple_fields`) |
+| 25 | VHDL backend: short-circuit diamond | `pipeline::codegen::tests::vhdl_lowers_multi_output_hardware_call_to_named_port_map` | REAL old bug | `a and b` lowers to a short-circuit CFG diamond whose arms `Jump` to a shared merge block, and the backend understood only if/else arms that `Return`; latently, `vhdl_int_literal` had no `BOOL` arm so MIR's `ConstInt 0` for `false` could not be materialised | SOURCE: `vhdl_diamond_merge_block` + `lower_vhdl_diamond_mux` (mux every local both arms define into one combinational signal, then resume at the merge block); `BOOL` → `'0'`/`'1'` |
+| 26 | scoped visibility after `@cfg` | `pipeline::cfg_strip::tests::cfg_globals_cover_visibility_docs_and_column_zero_triple_close` | REAL old bug | `parse_pub_item_with_attrs` never consumed the scoped-visibility modifier, so `@cfg(...) pub(peer) val X` hit `LParen` where an item keyword was expected; it also hardcoded `Visibility::Public` and rejected `val`/`var`/`const` | SOURCE: call `parse_visibility_modifier_after_pub()`, thread the real visibility, fall through to the shared `parse_pub_item_with_visibility` table |
+| 27 | class methods invisible to compilability | `compilability::tests::test_self_field_and_method_helpers_compilable` | REAL old bug | `analyze_module` walked only top-level `Node::Function`, so class methods were absent from the map and the lookup unwrapped `None` | SOURCE: also analyse `Node::Class(c).methods` via `entry().or_insert`, so a top-level function of the same name still wins |
+
+| 28 | struct field-type inference collapsing to `ANY` | `hir::lower::tests::expression_tests::{test_lower_field_access_uses_unique_duplicate_struct_variant,test_lower_ambiguous_global_field_chain_as_field_access,test_lower_ambiguous_loop_element_field_access_with_global_array_type}` | REAL old bug | `global_struct_key_for_name` had no plain-name fallback, so with no cross-module owner map every name-keyed global-struct lookup returned None and field chains collapsed to `ANY` | SOURCE: `type_resolver.rs` falls back to the bare name when `global_struct_defs` holds it; qualified owners still win |
+| 29 | call-result local index | `hir::lower::tests::expression_tests::test_lower_local_function_value_call_uses_function_return_type` | STALE (`cfe0506e336`) | locals are `[holder, thunk, value]`; the test indexed `locals[1]` (the fn-typed `thunk`) while asserting "call result local" | TEST: look the local up by name `value`; the assertion itself is unchanged |
+| 30 | empty-array element refinement | `hir::lower::tests::expression_tests::test_empty_array_append_refines_indexed_element_type` | REAL old bug | the `untyped_empty_array_locals` refinement hardcoded `size: None`, dropping the literal's `Some(0)` and disagreeing with its sibling path in `lower_method_call` | SOURCE: carry the receiver's existing size through the refinement |
+| 31 | transitive `use` type loading | `hir::lower::import_loader::tests::imported_trait_optional_struct_return_preserves_field_type`, and (as a bonus) `pipeline::native_project::tests::test_cross_module_optional_struct_match_keeps_payload_type` | REAL old bug + STALE assertion | only the ENTRY module's `use` statements got type pre-registration/loading, so `trait ... -> MouseEvent?` in an IMPORTED module failed `Unknown type` and degraded to `ANY` | SOURCE: pre-register and load transitive type names for an imported module's own `use` statements (cycle-guarded). The test's `body.contains("left_just_pressed")` could only ever match the FAILURE shape (`FieldAccess` stores an index, not a name), so it became a structural `FieldAccess`/index/`BOOL` assertion |
+| 32 | built-in string type shadowed | `hir::lower::tests::expression_tests::{text_rfind_uses_string_method_lowering,uppercase_string_is_empty_uses_string_method_lowering,impl_text_self_chars_index_remains_a_string_receiver}` | REAL old bug, but the FIX is an undecided language question | `register_named`/`update_named` let a `struct text:` / `struct String:` declaration rebind the built-in `name_to_id` entry away from `TypeId::STRING`, so the `is_string` gate went false and EVERY built-in string method fell out of static dispatch | **NOT FIXED — left red on purpose.** A working "built-ins are reserved" patch was written and reverted: it is a silent language-visible semantic change, and the documented precedent (`.claude/rules/language.md:26`, `generator`) runs the OPPOSITE way — user declarations shadow built-ins, landed as the fix on 2026-08-17. Built-in TYPE names appear on no reserved list and no E-code for redeclaring one exists. The error-on-collision alternative is also blocked, because the fixtures declare a real `struct text: data: i64` and then demand built-in dispatch, so an error would reject them too. Filed as `doc/08_tracking/bug/builtin_type_name_shadowing_is_an_undecided_language_question_2026-08-22.md` |
+| 33 | import alias emitted an undefined symbol | `hir::lower::import_loader::tests::aliased_import_call_lowers_to_original_global_symbol` | REAL old bug | `named_callable_value_type`/`globals` resolved the alias for the TYPE but still emitted `Global("<alias>")` — a symbol nothing defines after flattening | SOURCE: emit the `resolve_function_alias` target in both branches |
+
+## Explicitly NOT fixed, and why
+
+**16 of the 19 `pipeline::native_project::tests` failures remain.** A control run
+of the same filter at `4b88aebf00b~1` (= `d200f577aaa`, 2026-08-19) failed **24**
+tests — a strict superset — so **none of them is a regression from the 08-20/21
+commits**; those commits in fact fixed 5. They are pre-existing, dating to at
+least the 08-11 tree restore (`ae55a746719`) and the 08-14 runtime-lane change
+(`fc35bbc28c2`). Three groups:
+
+1. **Runtime-lane selection (3 tests).** `config.rs:399` early-returns a freshly
+   built `core_c_runtime/libsimple_runtime.a` whenever `src/runtime` exists, so a
+   dummy `runtime_path` archive can never win. The tests assert the *pre-*
+   `fc35bbc28c2` contract. Which side is canonical is a product decision, not a
+   test-hygiene one, so nothing was edited.
+2. **Core-C archive missing ABI symbols (8 tests).**
+   `CORE_REQUIRED_RUNTIME_SYMBOLS` lists `rt_is_jit_runtime`, `rt_struct_alloc`,
+   `rt_struct_receiver_valid`, `rt_transient_array_scope_*`,
+   `rt_transient_heap_promote`, `rt_native_cmp`, which neither the core-C archive
+   file list (`tools.rs:341`) nor `src/runtime/simple_core/` provides;
+   `rt_heap_*` moved to `runtime_memtrack.c`. Fixing this means adding real
+   runtime definitions / deciding archive membership. Note this overlaps the
+   already-filed advisory guard
+   `scripts/check/check-no-unresolved-runtime-symbols.shs` (83 codegen-emitted
+   names undefined in the C runtime archive).
+3. **Seed HIR/cache bugs (6 tests).** Duplicate-struct resolution consults only
+   `global_struct_defs` and not `duplicate_global_struct_defs`
+   (`type_resolver.rs:177`); cross-module optional-struct payload typing; and a
+   real retry bug — after a failed batch, retry reports `cached=0` instead of
+   preserving completed objects.
+
+**A related fragility, deliberately left alone:** `codegen/instr/methods.rs` and
+`codegen/llvm/functions.rs` key their text-method tables on `"String"`/`"string"`
+only, while MIR now emits the `str.` qualifier. Dispatch still resolves through a
+suffix fallback, so nothing is red, but the qualifier/table mismatch looks
+accidental. Three tests pin the current shape, so changing it belongs in its own
+change.
+
+**Classification caveat, stated rather than glossed:** clusters 24-33 are called
+"old bug" on the strength of the source being byte-identical at pre-2026-08-20
+commits, **not** on a green bisect. `ae55a746719` and earlier do not build
+(`simple-runtime` E0432/E0599, the known 2026-08-11 breakage), so these tests
+could not be run at any older revision to confirm they ever passed.
+
+**One intermittent runtime test:**
+`tests::pool_state_tests::pool_handles_reject_stale_forged_and_cross_kind_values`
+failed once in three consecutive full-suite runs of the fixed tree and passed the
+other two. It is not deterministic and is not caused by any change here; it needs
+its own investigation.
+
+## Rebase note
+
+`origin/main` advanced at least four times during this pass
+(`9ac9d120b83` → `42ee7131004` → `d60aa3dd802` → `c0a2c5fc04f` …). The `-S`
+pickaxe is unreliable in this repo's history because of the recorded tree wipes
+and restores (`6f86ff32a7d`/`ae55a746719`, `cfe0506e336`), so several "contract
+commit" citations above name the earliest commit in the *surviving* history that
+carries the contract rather than its original author commit.
