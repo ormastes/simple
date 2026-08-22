@@ -1566,3 +1566,31 @@ index one allocation/category at a time, beginning with
 or aggregate iteration with a retained scalar/SoA owner rather than changing
 later HIR code. No ARM64 SimpleOS artifact or QEMU 2D, web, GUI, or
 window-manager evidence is claimed.
+
+## Export-origin declaration-category cycles (2026-08-22)
+
+Cycle 1 added fixed probes after each owner-index dictionary allocation and
+around the first declaration category. All four dictionaries allocated. The
+first two surfaces processed callable keys; the third surface,
+`compiler.common.driver_core_types`, copied and computed its package, then
+exited 139 while entering `owner_surface.callables.keys()`. That module is a
+pure re-export facade with no declarations, so the failing dictionary was
+empty.
+
+Cycle 2 replaced `.keys()` for all six declaration dictionaries with the
+surface's retained aligned name arrays (`callable_names`, `composite_names`,
+`enum_names`, `trait_names`, `type_alias_names`, and `constant_names`). Phase 2
+passed both admission gates and Phase 3 ran beyond the earlier immediate probe
+boundary, but still exited 139 before `phase2:parse:done`; no trusted artifacts
+were produced.
+
+Cycle 3 replaced those array `for` loops with scalar index loops to test staged
+iterator construction. Phase 2 again passed both gates, but Phase 3 still
+exited 139 at the unresolved export-origin boundary. The unproven scalar-loop
+variant was removed; the evidence-backed retained-name-array correction remains.
+
+The three-cycle cap is exhausted. A fresh session must add durable progress
+receipts per surface and declaration category while retaining the name-array
+path, then isolate the first failing category/owner mutation. No Stage-3
+candidate, sanity receipt, provenance manifest, ARM64 SimpleOS artifact, or
+QEMU rendering evidence is claimed.
