@@ -1,7 +1,7 @@
 # JIT: a bare method on an `Any`/trait-object receiver bails the whole stage1 compiler
 
 - **Filed:** 2026-08-22
-- **Status:** PARTIALLY FIXED (seed, Rust) — 3 of 6 blocking bodies now JIT; see "Remaining"
+- **Status:** FIXED — all 6 blocking bodies now JIT (`[CODEGEN-AMBIGUOUS-METHOD]` sites 18 → 0). Stage1 still de-JITs, but on a DIFFERENT single cause; see "Next gate".
 - **Severity:** High (perf) — stage1 `compile` still runs 100% on the tree-walker
 - **Component:** Rust seed JIT — `src/compiler_rust/compiler/src/codegen/{instr/closures_structs.rs,instr/mod.rs,closure_boxed_entry.rs,common_backend.rs}`, `hir/lower/module_lowering/module_pass.rs`, `parser/src/types_def/mod.rs`
 - **Parent record:** `jit_fn_ref_port_bails_whole_stage1_2026-08-22.md` (landed 7a137dbffdb)
@@ -81,17 +81,50 @@ runtime type identity.
   (both runs still de-JIT; measured 228 s pre-fix vs 188 s post-fix on a
   loaded box — that spread is load, not this change).
 
-## Remaining (stage1 is still NOT JIT)
+## Resolved: the duck-typed half
 
-The three `objtaker_*` bodies. Their candidates `SmfReaderImpl`
-(`smf_reader.spl:278`) and `SmfReaderMemory`
-(`_SmfReaderMemory/header_parser.spl:68`) are declared as bare `struct X:` and
-are only DUCK-typed against the `SmfReader` trait — they declare no trait, so
-they carry no vtable and there is no runtime identity to switch on. Two honest
-options, neither taken here: declare the trait on the two structs (a
-one-token pure-Simple change that reflects existing intent, not a JIT dodge),
-or infer a vtable for a struct that structurally satisfies a trait used as a
-parameter type (a language-semantics change; out of scope).
+`objtaker_take_object/_with_types/_concrete` take `smf_reader: SmfReader`, but
+the concrete type flowing in, `SmfReaderImpl`, declared its methods in a bare
+`impl SmfReaderImpl:` block — so it had no trait impl, no vtable, and no runtime
+identity, and the call fell back to ambiguous bare-name binding. Changed to
+`impl SmfReader for SmfReaderImpl:` (plus importing the trait). That is
+declaring intent that already existed — the struct's own comment says "implements
+SmfReader trait" and it implements all 5 methods — not a rewrite of any call
+site. MIR lowering then finds the trait and emits a proper `MethodCallVirtual`
+slot dispatch, which is the pre-existing correct path.
+
+**`SmfReaderMemory` was deliberately NOT declared.** It implements only 2 of the
+trait's 5 methods (`lookup_symbol`, `read_code`; missing `path`,
+`read_template_section`, `read_note_sdn`). Declaring the trait on it would be
+false, and would emit a vtable with three ZERO slots — `compile_method_call_virtual`
+loads the slot and calls it, so any dispatch through those would be a NULL jump.
+It is safe to leave undeclared because it is never passed as an `SmfReader`:
+its only users (`99.loader/loader/module_loader_lib_support.spl`,
+`70.backend/linker/smf_getter.spl`) hold it by concrete type. If it ever needs
+to flow through the trait, the three missing methods must be IMPLEMENTED first,
+not merely declared.
+
+## Next gate (stage1 still de-JITs, for a different reason)
+
+With the ambiguity gone the module reaches the NEXT guard and stops there:
+
+    [jit-fallback] unresolved external symbol 'rt_process_read_stdout_checked':
+    whole module dropped to the interpreter (expect ~100-1000x slowdown)
+
+That is `first_unresolved_import` (`jit.rs`), a separate defect class: one
+runtime symbol the JIT cannot resolve. It is now the single named blocker
+between stage1 and a JIT-compiled run, and it is far more tractable than the
+dispatch problem was.
+
+## Where stage1's wall actually goes (redirects the next profiling lane)
+
+`SIMPLE_INTERP_SAMPLE=1` on the stage1 `compile` run: **3561 total samples,
+3460 idle — only ~101 samples (2.8%) have a Simple frame at all.** The
+tree-walking interpreter is therefore NOT where stage1's wall time goes; ~97%
+is seed-native work (module loading, HIR/MIR lowering, codegen). This matters
+for planning: it means getting stage1 to JIT will NOT by itself deliver the
+~30x that the per-statement interpreter cost suggests, and the next profiling
+lane should target the seed's native phases rather than the interpreter loop.
 
 ## Why per-function deopt (the more general fix) was NOT taken
 
