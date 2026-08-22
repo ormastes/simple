@@ -235,6 +235,28 @@ static size_t mcdc_reserve_shard_slot_v1(_Atomic size_t *next) {
     return current;
 }
 
+static int32_t mcdc_writer_enter_v1(void) {
+    const uint32_t state = atomic_load_explicit(&g_mcdc.state,
+                                                memory_order_acquire);
+    if (state == MCDC_COLLECTOR_UNINITIALIZED)
+        return SIMPLE_MCDC_V1_NOT_INITIALIZED;
+    if (state != MCDC_COLLECTOR_ACTIVE) return SIMPLE_MCDC_V1_NOT_SEALED;
+    uint64_t active = atomic_load_explicit(&g_mcdc.active_writers,
+                                           memory_order_relaxed);
+    while (active != UINT64_MAX &&
+           !atomic_compare_exchange_weak_explicit(
+               &g_mcdc.active_writers, &active, active + 1,
+               memory_order_acquire, memory_order_relaxed)) {}
+    if (active == UINT64_MAX) return SIMPLE_MCDC_V1_BUSY;
+    if (atomic_load_explicit(&g_mcdc.state, memory_order_acquire) !=
+        MCDC_COLLECTOR_ACTIVE) {
+        atomic_fetch_sub_explicit(&g_mcdc.active_writers, 1,
+                                  memory_order_release);
+        return SIMPLE_MCDC_V1_NOT_SEALED;
+    }
+    return SIMPLE_MCDC_V1_OK;
+}
+
 static int32_t mcdc_record_vector_concurrent_v1(
         uint64_t session_id, uint64_t decision_id, uint32_t condition_count,
         uint64_t source_digest, uint64_t evaluated_mask, uint64_t true_mask,
@@ -245,19 +267,8 @@ static int32_t mcdc_record_vector_concurrent_v1(
     const uint64_t admitted = (UINT64_C(1) << condition_count) - UINT64_C(1);
     if ((evaluated_mask & ~admitted) || (true_mask & ~evaluated_mask))
         return SIMPLE_MCDC_V1_INVALID;
-    const uint32_t state = atomic_load_explicit(&g_mcdc.state,
-                                                memory_order_acquire);
-    if (state == MCDC_COLLECTOR_UNINITIALIZED) {
-        return SIMPLE_MCDC_V1_NOT_INITIALIZED;
-    }
-    if (state != MCDC_COLLECTOR_ACTIVE) return SIMPLE_MCDC_V1_NOT_SEALED;
-    atomic_fetch_add_explicit(&g_mcdc.active_writers, 1, memory_order_acquire);
-    if (atomic_load_explicit(&g_mcdc.state, memory_order_acquire) !=
-        MCDC_COLLECTOR_ACTIVE) {
-        atomic_fetch_sub_explicit(&g_mcdc.active_writers, 1,
-                                  memory_order_release);
-        return SIMPLE_MCDC_V1_NOT_SEALED;
-    }
+    const int32_t admission = mcdc_writer_enter_v1();
+    if (admission != SIMPLE_MCDC_V1_OK) return admission;
     if (atomic_load_explicit(&g_mcdc.session_id, memory_order_relaxed) !=
         session_id) {
         atomic_fetch_sub_explicit(&g_mcdc.active_writers, 1,
