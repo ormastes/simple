@@ -23,6 +23,19 @@ Every active transform must have a positive sentinel, negative legality fixture,
 idempotence check, IR verification, and semantic differential evidence. Missing facts,
 timeouts, or unavailable backends fail closed.
 
+The registry now gives each admitted transform a stable positive and negative witness ID.
+The first contracts are `pattern.supported_aes_call`,
+`predicate.mask_cmp_masked_add`, `fs.two_stores_same_base`, and
+`fs.two_calls_same_callee`, paired with explicit non-candidate witnesses. An `Active`
+descriptor without a complete witness contract is a compiler-integrity error.
+
+`optimizationpipeline_report_json` emits deterministic planning evidence under schema
+`simple.opt-pipeline-report/v1`. Each requested ordinal records pass status,
+expectation, backend outcome and reason. Planning is not execution: its run outcome is
+`not-run` and execution counters are `null`. Consumers must not infer that a pass ran or
+changed MIR from selection alone. Populated `PassRunRecord` counters will be admitted
+only after dispatch owns verified change receipts.
+
 ## Diagnostic policy
 
 `COLL*` findings belong to the `collection_performance` lint family. Moderate and strict
@@ -56,6 +69,8 @@ invalidation.
   dominance, effects, alias, zero-trip, and speculatability proofs.
 - Loop trip counts remain unknown until SCEV-lite proves the complete recurrence.
 - Dormant identity and proof-incomplete transforms are absent from effective pipelines.
+- Inline facades and target narrowing are classified `Skeleton`; read-ahead hoisting is
+  `AnalysisOnly`. Their presence in a requested pipeline is never transformation proof.
 - General fusion, stack promotion, general LICM, BCE, GVN, string-builder rewriting, and
   TCO remain unavailable until their proof contracts pass.
 
