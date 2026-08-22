@@ -1,6 +1,7 @@
 # @tag: unit, compiler, hir, native-safe
 
 use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.hir.hir_lowering.module_surface.{
     ModuleSurface,
@@ -12,6 +13,9 @@ use compiler.hir.hir_lowering.module_surface.{
     module_surface_index_for_source,
     module_surface_index_by_name,
     module_surfaces_by_name_from_parts
+}
+use compiler.hir.hir_lowering.module_surface_registry_index.{
+    module_surface_route_arrays_aligned
 }
 
 extern fn rt_heap_array_capacity_bytes() -> i64
@@ -64,6 +68,28 @@ describe "module surface aligned scalar index":
         expect(hit.source_name).to_equal("answer")
         val miss = module_surface_export_origin_index_lookup(index, "missing")
         expect(miss.found).to_equal(false)
+
+    it "reads frozen origins from scalar rows when compatibility dicts are unavailable":
+        val index = module_surface_export_origin_index_empty()
+        expect(module_surface_export_origin_index_put(
+            index, "Span", "compiler.common.diagnostics.span", "Span",
+            "explicit").is_ok()).to_equal(true)
+        index.origins = {}
+        index.index_by_name = {}
+        val hit = module_surface_export_origin_index_lookup(index, "Span")
+        expect(hit.found).to_equal(true)
+        expect(hit.owner_module).to_equal("compiler.common.diagnostics.span")
+
+    it "validates scalar routes independently from signature projections":
+        val surface = ModuleSurface.empty("consumer")
+        surface.signature_names = ["broken"]
+        expect(module_surface_route_arrays_aligned(surface)).to_equal(true)
+
+    it "declares the canonical Span owner used by surface records":
+        val source = file_read(
+            "src/compiler/20.hir/hir_lowering/module_surface_types.spl")
+        expect(source).to_contain(
+            "use compiler.common.diagnostics.span.{Span}")
 
     it "does not allocate array capacity during repeated scalar lookup":
         val name_index = {"owner": 0}
