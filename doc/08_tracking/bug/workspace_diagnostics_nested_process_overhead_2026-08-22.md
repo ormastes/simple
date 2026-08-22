@@ -29,8 +29,9 @@ rejected in static parallel review:
 ## Required fix
 
 1. Add a nonprinting structured per-file compiler/lint result API.
-2. Put collection, severity, tier activation, parser/AST reset, and failure cleanup
-   behind request-owned state or one owner-provided snapshot/restore boundary.
+2. Collection, severity, and tier activation now have a lint-owned nested-safe
+   snapshot/restore boundary. Move parser/AST reset and failure cleanup behind
+   request-owned state before workspace integration.
 3. Keep execution serial until parser/lexer/AST globals are request-owned.
 4. Add byte-for-byte standalone/session parity and sibling-contamination fixtures.
 5. Measure the same 50- and 200-file fixtures before/after: explicit/descendant
