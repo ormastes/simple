@@ -1,0 +1,141 @@
+# codex-impl
+# Pure-Simple rt(hal) provider worker, protocol ABI v1.
+#
+# The semantic transform uses scalar state only. The current hosted stdin/text
+# runtime owns bounded line materialization; the launcher still enforces the
+# 512-byte wire ceiling. A future raw-buffer stdin facade can replace only the
+# two transport calls without changing the provider transform or wire identity.
+
+use std.nogc_async_mut.host_io.stdio.{read_line, write_line}
+
+val FRAME_CAP: i64 = 512
+val PROVIDER_PURE: i64 = 0
+
+struct PureHalRequestV1:
+    contract: i64
+    operation: i64
+    invocation: i64
+    fixture: i64
+    input_offset: i64
+    input_length: i64
+    input_capacity: i64
+    trace_capacity: i64
+
+fn _parse_u64(value: text) -> (bool, i64):
+    if value == "" or value.len() > 19:
+        return (false, 0)
+    var result: i64 = 0
+    var index = 0
+    while index < value.len():
+        val code = value.char_code_at(index)
+        if code < 48 or code > 57:
+            return (false, 0)
+        val digit = code - 48
+        if result > (9223372036854775807 - digit) / 10:
+            return (false, 0)
+        result = result * 10 + digit
+        index = index + 1
+    (true, result)
+
+fn _request(line: text) -> (bool, PureHalRequestV1):
+    val invalid = PureHalRequestV1(contract: 0, operation: 0, invocation: 0,
+        fixture: 0, input_offset: 0, input_length: 0, input_capacity: 0,
+        trace_capacity: 0)
+    if line.len() >= FRAME_CAP or not line.starts_with("HALREQ1|"):
+        return (false, invalid)
+    val fields = line.split("|")
+    if fields.len() != 9:
+        return (false, invalid)
+    val f0 = _parse_u64(fields[1])
+    val f1 = _parse_u64(fields[2])
+    val f2 = _parse_u64(fields[3])
+    val f3 = _parse_u64(fields[4])
+    val f4 = _parse_u64(fields[5])
+    val f5 = _parse_u64(fields[6])
+    val f6 = _parse_u64(fields[7])
+    val f7 = _parse_u64(fields[8])
+    if (not f0.0 or not f1.0 or not f2.0 or not f3.0 or not f4.0
+            or not f5.0 or not f6.0 or not f7.0):
+        return (false, invalid)
+    val request = PureHalRequestV1(contract: f0.1, operation: f1.1,
+        invocation: f2.1, fixture: f3.1, input_offset: f4.1,
+        input_length: f5.1, input_capacity: f6.1, trace_capacity: f7.1)
+    val valid = request.contract == 1 and request.operation > 0
+        and request.invocation > 0 and request.fixture > 0
+        and request.input_offset >= 0 and request.input_length >= 0
+        and request.input_capacity >= 0 and request.trace_capacity > 0
+        and request.input_length <= request.input_capacity
+        and request.input_offset <= request.input_capacity - request.input_length
+        and request.input_capacity <= 1048576 and request.trace_capacity <= 65536
+    (valid, request)
+
+fn _mix(hash: i64, value: i64) -> i64:
+    # A small positive modulus keeps every intermediate inside i64 while
+    # preserving exact cross-language behavior without overflow assumptions.
+    var result = hash
+    var remaining = value
+    var index = 0
+    while index < 8:
+        result = (result * 257 + (remaining & 255)) % 2147483647
+        remaining = remaining >> 8
+        index = index + 1
+    result
+
+fn _digest(request: PureHalRequestV1, seed: i64) -> i64:
+    var result = seed % 2147483647
+    result = _mix(result, request.contract)
+    result = _mix(result, request.operation)
+    result = _mix(result, request.invocation)
+    result = _mix(result, request.fixture)
+    result = _mix(result, request.input_offset)
+    result = _mix(result, request.input_length)
+    result = _mix(result, request.input_capacity)
+    _mix(result, request.trace_capacity)
+
+fn _result(request: PureHalRequestV1) -> text:
+    val digest = _digest(request, 1469598103934665603)
+    val trace = _digest(request, 7809847782465536322)
+    val digest_lo = digest ^ 7640891576956012809
+    val trace_lo = trace ^ -4942790177534073029
+    "HALRES1|{PROVIDER_PURE}|{request.invocation}|0|0|{digest}|{digest_lo}|{trace}|{trace_lo}|{request.input_length}|{request.input_capacity}|1|{request.trace_capacity}|0|-1|0|64"
+
+fn _parse_reset(line: text) -> (bool, i64, i64, i64):
+    if line.len() >= FRAME_CAP or not line.starts_with("HALRESET1|"):
+        return (false, 0, 0, 0)
+    val fields = line.split("|")
+    if fields.len() != 4:
+        return (false, 0, 0, 0)
+    val generation = _parse_u64(fields[1])
+    val sequence = _parse_u64(fields[2])
+    val invocation = _parse_u64(fields[3])
+    (generation.0 and sequence.0 and invocation.0 and generation.1 > 0
+        and sequence.1 > 0 and invocation.1 > 0,
+     generation.1, sequence.1, invocation.1)
+
+fn main():
+    val args = get_cli_args()
+    if args.len() == 0:
+        val parsed = _request(read_line())
+        if not parsed.0:
+            return
+        write_line(_result(parsed.1))
+        return
+    if args.len() != 1 or args[0] != "session":
+        return
+    write_line("HALWORKER1")
+    var generation = 0
+    var next_sequence = 1
+    while true:
+        val reset = _parse_reset(read_line())
+        if (not reset.0 or (generation != 0 and generation != reset.1)
+                or reset.2 != next_sequence):
+            return
+        generation = reset.1
+        write_line("HALRESETOK1|{reset.1}|{reset.2}|{reset.3}")
+        val parsed = _request(read_line())
+        if not parsed.0 or parsed.1.invocation != reset.3:
+            return
+        write_line(_result(parsed.1))
+        next_sequence = next_sequence + 1
+
+main()

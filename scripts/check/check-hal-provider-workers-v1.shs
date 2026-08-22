@@ -1,0 +1,63 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+work=$(mktemp -d "${TMPDIR:-/tmp}/hal-provider-workers-v1.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+"$repo_root/scripts/build/build-hal-providers-v1.shs" "$work/bin" native-only >/dev/null
+"${CC:-cc}" -std=c11 -O2 -Wall -Wextra -Werror -pedantic \
+    -fsyntax-only "$repo_root/src/app/hal_provider/hal_provider_launcher_v1.c"
+
+request='HALREQ1|1|101|7|9|0|32|64|8'
+printf '%s\n' "$request" > "$work/request"
+session_input='HALRESET1|41|1|7
+HALREQ1|1|101|7|9|0|32|64|8
+HALRESET1|41|2|8
+HALREQ1|1|101|8|9|0|32|64|8'
+
+c_result=$(printf '%s\n' "$request" | "$work/bin/hal-provider-c-v1")
+rust_result=$(printf '%s\n' "$request" | "$work/bin/hal-provider-rust-v1")
+c_normal=$(printf '%s\n' "$c_result" | sed 's/^HALRES1|1|/HALRES1|X|/')
+rust_normal=$(printf '%s\n' "$rust_result" | sed 's/^HALRES1|2|/HALRES1|X|/')
+[ "$c_normal" = "$rust_normal" ] || { echo 'FAIL: C/Rust normalized receipts differ' >&2; exit 1; }
+
+for provider in c rust; do
+    output=$(printf '%b\n' "$session_input" | "$work/bin/hal-provider-$provider-v1" session)
+    [ "$(printf '%s\n' "$output" | wc -l)" -eq 5 ] || { echo "FAIL: $provider session emitted an unbounded row count" >&2; exit 1; }
+    [ "$(printf '%s\n' "$output" | sed -n '1p')" = HALWORKER1 ] || { echo "FAIL: $provider handshake" >&2; exit 1; }
+    [ "$(printf '%s\n' "$output" | sed -n '2p')" = 'HALRESETOK1|41|1|7' ] || { echo "FAIL: $provider reset identity" >&2; exit 1; }
+    [ "$(printf '%s\n' "$output" | sed -n '4p')" = 'HALRESETOK1|41|2|8' ] || { echo "FAIL: $provider sequence identity" >&2; exit 1; }
+    if printf 'HALREQ1|1|101|7|9|0|65|64|8\n' | "$work/bin/hal-provider-$provider-v1" >/dev/null 2>&1; then
+        echo "FAIL: $provider admitted input beyond capacity" >&2; exit 1
+    fi
+    if printf 'HALRESET1|1|2|7\n' | "$work/bin/hal-provider-$provider-v1" session >/dev/null 2>&1; then
+        echo "FAIL: $provider admitted a noninitial session sequence" >&2; exit 1
+    fi
+done
+
+if rg -n '\b(malloc|calloc|realloc|free|strdup|asprintf)\s*\(' \
+        "$repo_root/src/app/hal_provider/hal_provider_worker_v1.c" >/dev/null; then
+    echo 'FAIL: C provider contains a direct heap operation' >&2; exit 1
+fi
+if rg -n '\b(Vec|String|Box|format!|vec!|to_string)\b' \
+        "$repo_root/src/app/hal_provider/hal_provider_worker_v1.rs" >/dev/null; then
+    echo 'FAIL: Rust provider contains a heap-owning hot-path construct' >&2; exit 1
+fi
+rg -F 'session_worker_argv[session_worker_argc++] = (char *)"session"' \
+    "$repo_root/src/app/hal_provider/hal_provider_launcher_v1.c" >/dev/null || {
+    echo 'FAIL: sealed launcher does not select provider session mode' >&2; exit 1
+}
+
+if [ -x /usr/bin/time ]; then
+    for provider in c rust; do
+        /usr/bin/time -f '%M' -o "$work/$provider.rss" \
+            "$work/bin/hal-provider-$provider-v1" < "$work/request" >/dev/null
+        rss=$(sed -n '1p' "$work/$provider.rss")
+        case "$rss" in (*[!0-9]*|'') echo "FAIL: invalid $provider RSS" >&2; exit 1;; esac
+        [ "$rss" -le 16384 ] || { echo "FAIL: $provider RSS ${rss}KiB exceeds 16384KiB" >&2; exit 1; }
+    done
+else
+    echo 'FAIL: /usr/bin/time is required for RSS evidence' >&2; exit 1
+fi
+
+echo "PASS: real C/Rust HAL providers agree; ipc_cap=512 session_rows=5 direct_heap_calls=0 c_rss_kib=$(cat "$work/c.rss") rust_rss_kib=$(cat "$work/rust.rss")"

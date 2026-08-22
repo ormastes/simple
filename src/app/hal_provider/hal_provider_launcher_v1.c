@@ -391,6 +391,8 @@ static int session_main(int argc, char **argv) {
     char isolation[192];
     int to_child[2] = {-1, -1}, from_child[2] = {-1, -1};
     int64_t deadline_ms = 0, response_cap = 0;
+    char *session_worker_argv[HAL_LAUNCHER_ARG_CAP];
+    int session_worker_argc = 0;
     pid_t child;
     size_t parent_size = 0, worker_size = 0;
     int status = 0;
@@ -400,11 +402,20 @@ static int session_main(int argc, char **argv) {
         !parse_positive(argv[3], HAL_LAUNCHER_RESPONSE_CAP, &response_cap) ||
         pipe2(to_child, O_CLOEXEC) != 0 || pipe2(from_child, O_CLOEXEC) != 0)
         return 74;
+    while (4 + session_worker_argc < argc) {
+        session_worker_argv[session_worker_argc] =
+            argv[4 + session_worker_argc];
+        session_worker_argc++;
+    }
+    if (session_worker_argc + 1 >= HAL_LAUNCHER_ARG_CAP) return 74;
+    session_worker_argv[session_worker_argc++] = (char *)"session";
+    session_worker_argv[session_worker_argc] = NULL;
     child = fork();
     if (child < 0) return 75;
     if (child == 0) {
         if (setpgid(0, 0) != 0) _exit(119);
-        worker_exec(to_child[0], from_child[1], &argv[4], argc - 4,
+        worker_exec(to_child[0], from_child[1], session_worker_argv,
+                    session_worker_argc,
                     deadline_ms);
     }
     if (setpgid(child, child) != 0 && errno != EACCES) {
