@@ -510,3 +510,11 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Remove the single-use linear `list_has` helper.
 - Follow-up: inventory remaining canonical lint dedupe arrays and distinguish
   count-only membership from ordering-sensitive result storage.
+
+## Completed tooling tranche: skip inactive diagnostic policy work
+
+- Guard serialized diagnostic code extraction with an explicit override count.
+- Maintain the dictionary/count pair only at lint-config load and clear boundaries.
+- Preserve suppression, severity rewriting, collection, and direct-print behavior.
+- Avoid native dictionary length as a hot-path correctness predicate.
+- Follow-up: replace serialized JSON policy projection with typed diagnostics.
