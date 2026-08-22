@@ -363,6 +363,7 @@ int32_t rt_mcdc_report_mcdp_v1(
 int32_t rt_mcdc_report_mcdp_v2(
     SimpleMcdcVectorV1 *events, uint64_t event_count,
     const uint8_t *manifest_bytes, uint64_t manifest_byte_count,
+    const uint8_t binary_identity_sha256[64],
     const SimpleMcdcExclusionV1 *exclusions, uint64_t exclusion_count,
     const SimpleMcdcSourceLocationV2 *locations, uint64_t location_count,
     uint64_t current_epoch, uint32_t mode, uint64_t process_id,

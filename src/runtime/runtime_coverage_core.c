@@ -1863,6 +1863,7 @@ static void mcdc_report_summary_digest_v2(
 int32_t rt_mcdc_report_mcdp_v2(
         SimpleMcdcVectorV1 *events, uint64_t event_count,
         const uint8_t *manifest_bytes, uint64_t manifest_byte_count,
+        const uint8_t binary_identity_sha256[64],
         const SimpleMcdcExclusionV1 *exclusions, uint64_t exclusion_count,
         const SimpleMcdcSourceLocationV2 *locations, uint64_t location_count,
         uint64_t current_epoch, uint32_t mode, uint64_t process_id,
@@ -1872,7 +1873,9 @@ int32_t rt_mcdc_report_mcdp_v2(
         SimpleMcdcWitnessV1 *witnesses, uint64_t witness_capacity,
         SimpleMcdcDecisionReportV2 *rows, uint64_t decision_capacity,
         uint64_t proof_budget, SimpleMcdcReportV2 *report) {
-    if (!report || !process_id || !process_sequence ||
+    if (!report || !binary_identity_sha256 ||
+        !mcdc_manifest_identity_valid_v1(binary_identity_sha256) ||
+        !process_id || !process_sequence ||
         (location_count && !locations) || (decision_capacity && !rows) ||
         event_count > SIZE_MAX / sizeof(*events) ||
         manifest_byte_count > SIZE_MAX ||
@@ -1900,6 +1903,8 @@ int32_t rt_mcdc_report_mcdp_v2(
         mcdc_ranges_overlap(locations, location_bytes, programs, program_bytes) ||
         mcdc_ranges_overlap(locations, location_bytes, tokens, token_bytes) ||
         mcdc_ranges_overlap(locations, location_bytes, witnesses, witness_bytes) ||
+        mcdc_ranges_overlap(binary_identity_sha256, 64u, rows, decision_bytes) ||
+        mcdc_ranges_overlap(binary_identity_sha256, 64u, report, sizeof(*report)) ||
         mcdc_ranges_overlap(rows, decision_bytes, report, sizeof(*report)) ||
         mcdc_ranges_overlap(rows, decision_bytes, events, event_bytes) ||
         mcdc_ranges_overlap(rows, decision_bytes, manifest_bytes, manifest_bytes_size) ||
@@ -1927,15 +1932,12 @@ int32_t rt_mcdc_report_mcdp_v2(
     /* V1 has already authenticated and decoded this exact manifest into the
      * supplied program workspace.  Rehashing it here would add a redundant
      * O(manifest bytes) pass to every V2 report. */
-    SimpleMcdcManifestInfoV1 info = {0};
-    info.program_count = v1.decisions;
-    memcpy(info.identity_sha256, manifest_bytes + 24u, 64u);
-    if (location_count != info.program_count ||
-        decision_capacity < info.program_count)
+    const uint64_t program_count = v1.decisions;
+    if (location_count != program_count || decision_capacity < program_count)
         return SIMPLE_MCDC_V1_OUTPUT_TOO_SMALL;
 
     size_t witness_index = 0, exclusion_index = 0;
-    for (size_t i = 0; i < (size_t)info.program_count; ++i) {
+    for (size_t i = 0; i < (size_t)program_count; ++i) {
         const SimpleMcdcDecisionExprV1 *program = &programs[i];
         const SimpleMcdcSourceLocationV2 *location = &locations[i];
         if (location->decision_id != program->decision_id ||
@@ -1974,7 +1976,7 @@ int32_t rt_mcdc_report_mcdp_v2(
         row->column = location->column;
         row->condition_count = program->condition_count;
         row->mode = mode;
-        memcpy(row->binary_identity_sha256, info.identity_sha256, 64u);
+        memcpy(row->binary_identity_sha256, binary_identity_sha256, 64u);
         mcdc_decision_row_digest_v2(row, row->row_provenance_sha256);
         ++report->gross_decisions;
         if (!row->eligible_mask) ++report->excluded_decisions;
@@ -1994,13 +1996,13 @@ int32_t rt_mcdc_report_mcdp_v2(
     report->uncovered_conditions = v1.uncovered_eligible_conditions;
     report->witnessed_pairs = v1.witness_count;
     report->process_count = 1;
-    report->decision_row_count = info.program_count;
+    report->decision_row_count = program_count;
     report->process_id = process_id;
     report->process_sequence = process_sequence;
     report->mode = mode;
     report->gate_passed = v1.gate_passed;
-    memcpy(report->binary_identity_sha256, info.identity_sha256, 64u);
-    mcdc_report_summary_digest_v2(report, rows, info.program_count,
+    memcpy(report->binary_identity_sha256, binary_identity_sha256, 64u);
+    mcdc_report_summary_digest_v2(report, rows, program_count,
                                   witnesses, v1.witness_count,
                                   report->provenance_sha256);
     return status;

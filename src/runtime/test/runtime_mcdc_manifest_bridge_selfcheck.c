@@ -160,6 +160,8 @@ int main(void) {
     const SimpleMcdcSourceLocationV2 locations[] = {
         {9, 99, UINT64_C(0x55aa), 12, 7}
     };
+    uint8_t binary_identity[64];
+    memset(binary_identity, 'b', sizeof(binary_identity));
     SimpleMcdcDecisionReportV2 process_rows[2];
     SimpleMcdcReportV2 report_v2;
     SimpleMcdcVectorV1 process_a_events[] = {
@@ -168,7 +170,7 @@ int main(void) {
         {9, 2, 0, 99, 1, 1, 1, 2, 1, {0}}
     };
     assert(rt_mcdc_report_mcdp_v2(
-               process_a_events, 3, wire, wire_size, NULL, 0,
+               process_a_events, 3, wire, wire_size, binary_identity, NULL, 0,
                locations, 1, 10, SIMPLE_MCDC_REPORT_NORMAL_V1, 101, 1,
                programs, 1, tokens, 3, witnesses, 2, process_rows, 1,
                100, &report_v2) == SIMPLE_MCDC_V1_OK);
@@ -182,14 +184,14 @@ int main(void) {
            process_rows[0].line == 12 && process_rows[0].column == 7 &&
            process_rows[0].covered_mask == 3 &&
            memcmp(process_rows[0].binary_identity_sha256,
-                  info.identity_sha256, 64) == 0);
+                  binary_identity, 64) == 0);
     SimpleMcdcVectorV1 process_b_events[] = {
         {9, 2, 0, 99, 3, 2, 2, 3, 1, {0}},
         {9, 2, 0, 99, 3, 0, 1, 1, 0, {0}},
         {9, 2, 0, 99, 1, 1, 1, 2, 1, {0}}
     };
     assert(rt_mcdc_report_mcdp_v2(
-               process_b_events, 3, wire, wire_size, NULL, 0,
+               process_b_events, 3, wire, wire_size, binary_identity, NULL, 0,
                locations, 1, 10, SIMPLE_MCDC_REPORT_NORMAL_V1, 102, 1,
                programs, 1, tokens, 3, witnesses, 2, &process_rows[1], 1,
                100, &report_v2) == SIMPLE_MCDC_V1_OK);
@@ -434,7 +436,7 @@ int main(void) {
     assert(clock_gettime(CLOCK_MONOTONIC, &start) == 0);
     for (uint64_t i = 0; i < v2_iterations; ++i)
         assert(rt_mcdc_report_mcdp_v2(
-                   process_a_events, 3, wire, wire_size, NULL, 0,
+                   process_a_events, 3, wire, wire_size, binary_identity, NULL, 0,
                    locations, 1, 10, SIMPLE_MCDC_REPORT_NORMAL_V1, 101, 1,
                    programs, 1, tokens, 3, witnesses, 2, process_rows, 1,
                    100, &report_v2) == SIMPLE_MCDC_V1_OK);

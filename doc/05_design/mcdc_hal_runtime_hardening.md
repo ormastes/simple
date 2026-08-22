@@ -23,7 +23,9 @@ All safe-boundary wire values use fixed-width scalars and checked `(offset,lengt
 
 Observations deduplicate by decision ID, evaluated mask, masked value mask, and outcome. For each condition, search deterministic pairs in sorted order. Accept unique-cause first. For masking fallback, evaluate the frozen postfix Boolean DAG for all allowed values of changed or unevaluated non-target atoms within the proof budget. If every completion preserves each observation outcome and the target flips the decision, emit a masking witness; otherwise leave uncovered. Proof exhaustion is not an exclusion.
 
-The complete report uses the additive `SimpleMcdcReportV2` ABI. Compiler-owned
+The complete report uses the additive `SimpleMcdcReportV2` ABI. The caller
+supplies the independently measured executable SHA-256; the manifest digest
+remains a separate identity bound by V1 provenance. Compiler-owned
 source locations are supplied as fixed `(file_digest,line,column)` rows in exact
 manifest order. Report creation fills fixed decision rows and binds every row
 to mode, binary identity, process identity/sequence, masks, and a SHA-256

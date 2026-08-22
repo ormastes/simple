@@ -34,7 +34,9 @@ new complete reports use the additive V2 surface:
 - decision report: `SimpleMcdcDecisionReportV2` (208 bytes);
 - complete report: `SimpleMcdcReportV2` (256 bytes).
 
-`rt_mcdc_report_mcdp_v2` emits gross/eligible/excluded/covered/uncovered totals
+`rt_mcdc_report_mcdp_v2` requires the independently measured lowercase SHA-256
+of the executable binary (the manifest identity is not mislabeled as binary
+identity) and emits gross/eligible/excluded/covered/uncovered totals
 for both decisions and conditions, the exact witnessed-pair count, report mode,
 binary identity, explicit source spans, and process provenance. All output and
 workspace storage is caller-owned. It performs no heap allocation.
