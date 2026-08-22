@@ -1,0 +1,133 @@
+"""
+## Purpose and audience
+Purpose: Pin that an EXPLICIT named import of a type wins over a glob import
+that re-exports the same entity, instead of being reported as an
+`ambiguous explicit callable dependency`.
+Audience: compiler engineers maintaining HIR import/re-export materialization.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+NOTE: these two scenarios pin the CONTRACT but do not yet reproduce the open
+defect in doc/08_tracking/bug/ambiguous_explicit_callable_dependency_backend_env_2026-08-22.md
+— both resolve at the first step of materialize_imported_callable_dependency, so
+the explicit-dependency sweep that carries the bug is never entered here.
+# @manual: primary
+REQ-COMPILER-HIR-001
+doc/01_research/local/REQ-COMPILER-HIR-001.md
+doc/03_plan/sys_test/REQ-COMPILER-HIR-001.md
+doc/04_architecture/REQ-COMPILER-HIR-001.md
+doc/05_design/REQ-COMPILER-HIR-001.md
+"""
+# @req: REQ-COMPILER-HIR-001
+
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+
+fn ambig_logger() -> Logger:
+    Logger(level: 0)
+
+fn ambig_module(source: text, name: text, log: Logger) -> Module:
+    parse_full_frontend(source, name, name, log)
+
+fn expect_explicit_named_import_beats_glob_route():
+    val log = ambig_logger()
+    # Shape copied from src/compiler/70.backend/backend/env.spl: an explicit
+    # `use ...backend_api.{Backend}` alongside glob imports whose expansion
+    # reaches the SAME entity by a different route (here through the
+    # `type Backend = CompilerBackend` alias).
+    val core_source = "pub struct CompilerBackend:\n    tag: i64"
+    val api_source = "use graph.be.core.*\ntype Backend = CompilerBackend\nexport Backend"
+    val types_source = "use graph.be.api.*\nexport Backend"
+    val env_source = "use graph.be.api.\{Backend\}\nuse graph.be.types.*\npub fn make_backend(b: Backend) -> i64:\n    b.tag"
+    val consumer_source = "use graph.be.env.\{make_backend\}\nfn main() -> i64:\n    0"
+
+    var modules: Dict<text, Module> = {}
+    modules["graph.be.core"] = ambig_module(core_source, "graph.be.core", log)
+    modules["graph.be.api"] = ambig_module(api_source, "graph.be.api", log)
+    modules["graph.be.types"] = ambig_module(types_source, "graph.be.types", log)
+    modules["graph.be.env"] = ambig_module(env_source, "graph.be.env", log)
+    modules["graph.be.consumer"] = ambig_module(consumer_source, "graph.be.consumer", log)
+
+    val sources = [
+        SourceFile(path: "graph/be/core.spl", content: core_source, module_name: "graph.be.core"),
+        SourceFile(path: "graph/be/api.spl", content: api_source, module_name: "graph.be.api"),
+        SourceFile(path: "graph/be/types.spl", content: types_source, module_name: "graph.be.types"),
+        SourceFile(path: "graph/be/env.spl", content: env_source, module_name: "graph.be.env"),
+        SourceFile(path: "graph/be/consumer.spl", content: consumer_source, module_name: "graph.be.consumer")
+    ]
+
+    val surfaces_result = module_surfaces_from_modules(modules, sources)
+    expect(surfaces_result.is_ok()).to_be_truthy()
+    val surfaces = surfaces_result.unwrap()
+
+    var lowering = hirlowering_for_module("graph.be.consumer", surfaces)
+    val hir = lowering.lower_module(modules["graph.be.consumer"])
+
+    var ambiguous_count = 0
+    var error_index = 0
+    while error_index < lowering.errors.len():
+        if lowering.errors[error_index].message.contains("ambiguous explicit callable dependency"):
+            ambiguous_count = ambiguous_count + 1
+        error_index = error_index + 1
+    # oracle: 0 — an explicit named import is never ambiguous with a glob route
+    expect(ambiguous_count).to_equal(0)
+    expect(lowering.errors.len()).to_equal(0)  # oracle: 0
+    expect(hir.symbols.lookup("make_backend").?).to_be_truthy()
+
+
+fn expect_explicit_named_import_beats_competing_glob_declaration():
+    val log = ambig_logger()
+    # Same shape, but the globbed module DECLARES its own `Backend` rather than
+    # re-exporting the explicit one, so the two routes reach different
+    # terminals. The explicit named import must still win: a glob import only
+    # fills names the module did not import explicitly.
+    val core_source = "pub struct CompilerBackend:\n    tag: i64"
+    val api_source = "use graph.gb.core.*\ntype Backend = CompilerBackend\nexport Backend"
+    val other_source = "pub struct Backend:\n    other: i64"
+    val env_source = "use graph.gb.api.\{Backend\}\nuse graph.gb.other.*\npub fn make_backend(b: Backend) -> i64:\n    b.tag"
+    val consumer_source = "use graph.gb.env.\{make_backend\}\nfn main() -> i64:\n    0"
+
+    var modules: Dict<text, Module> = {}
+    modules["graph.gb.core"] = ambig_module(core_source, "graph.gb.core", log)
+    modules["graph.gb.api"] = ambig_module(api_source, "graph.gb.api", log)
+    modules["graph.gb.other"] = ambig_module(other_source, "graph.gb.other", log)
+    modules["graph.gb.env"] = ambig_module(env_source, "graph.gb.env", log)
+    modules["graph.gb.consumer"] = ambig_module(consumer_source, "graph.gb.consumer", log)
+
+    val sources = [
+        SourceFile(path: "graph/gb/core.spl", content: core_source, module_name: "graph.gb.core"),
+        SourceFile(path: "graph/gb/api.spl", content: api_source, module_name: "graph.gb.api"),
+        SourceFile(path: "graph/gb/other.spl", content: other_source, module_name: "graph.gb.other"),
+        SourceFile(path: "graph/gb/env.spl", content: env_source, module_name: "graph.gb.env"),
+        SourceFile(path: "graph/gb/consumer.spl", content: consumer_source, module_name: "graph.gb.consumer")
+    ]
+
+    val surfaces_result = module_surfaces_from_modules(modules, sources)
+    expect(surfaces_result.is_ok()).to_be_truthy()
+    val surfaces = surfaces_result.unwrap()
+
+    var lowering = hirlowering_for_module("graph.gb.consumer", surfaces)
+    val hir = lowering.lower_module(modules["graph.gb.consumer"])
+
+    var ambiguous_count = 0
+    var error_index = 0
+    while error_index < lowering.errors.len():
+        if lowering.errors[error_index].message.contains("ambiguous explicit callable dependency"):
+            ambiguous_count = ambiguous_count + 1
+        error_index = error_index + 1
+    # oracle: 0 — the explicit import decides; the glob never competes with it
+    expect(ambiguous_count).to_equal(0)
+    expect(hir.symbols.lookup("make_backend").?).to_be_truthy()
+
+describe("explicit named import beats glob re-export route"):
+    it("does not report an ambiguous explicit callable dependency"):
+        expect_explicit_named_import_beats_glob_route()
+    it("does not report ambiguity when a globbed module declares the same name"):
+        expect_explicit_named_import_beats_competing_glob_declaration()
