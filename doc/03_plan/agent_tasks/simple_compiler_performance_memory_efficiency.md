@@ -280,3 +280,10 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Preserve valid-empty-file versus read-error behavior.
 - Keep fix application on a fresh validated disk read before mutation.
 - Follow-up: cache directory-to-manifest and critical-mode policy resolution.
+## Completed tooling tranche: critical policy session snapshot
+
+- Resolve `critical.dynamic_acquire` lazily on first linted file.
+- Retain only the effective scalar mode in the command-owned `Linter`.
+- Reuse disabled/allow state without rereading or reparsing configuration.
+- Pin one-load session ownership with a source contract.
+- Follow-up: add bounded directory-to-manifest discovery caching.
