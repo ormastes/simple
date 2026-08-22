@@ -95,6 +95,54 @@ describe "shared MIR PerfFacts":
         expect(detector.loops[0].exit_edges[0].to.id).to_equal(2)
         expect(detector.loops[0].trip_count).to_be_nil()
 
+    it "keeps an inner natural loop from absorbing its outer cycle":
+        step("Build dominance-scoped nested natural loops")
+        val func = _pf_function_with_blocks([
+            _pf_block(0, MirTerminator.Goto(BlockId(id: 1))),
+            _pf_block(1, MirTerminator.If(mir_operand_const_bool(true), BlockId(id: 2), BlockId(id: 5))),
+            _pf_block(2, MirTerminator.If(mir_operand_const_bool(true), BlockId(id: 3), BlockId(id: 4))),
+            _pf_block(3, MirTerminator.Goto(BlockId(id: 2))),
+            _pf_block(4, MirTerminator.Goto(BlockId(id: 1))),
+            _pf_block(5, MirTerminator.Ret(nil))
+        ])
+        var detector = LoopDetector.new()
+        detector.detect_loops(func)
+        expect(detector.loops.len()).to_equal(2)
+
+        var inner_body: [i64] = []
+        var inner_exits: [i64] = []
+        var outer_body: [i64] = []
+        var outer_exits: [i64] = []
+        for loop_info in detector.loops:
+            if loop_info.header.id == 2:
+                for block in loop_info.body: inner_body.push(block.id)
+                for edge in loop_info.exit_edges: inner_exits.push(edge.to.id)
+            elif loop_info.header.id == 1:
+                for block in loop_info.body: outer_body.push(block.id)
+                for edge in loop_info.exit_edges: outer_exits.push(edge.to.id)
+
+        expect(inner_body).to_equal([3])
+        expect(inner_exits).to_equal([4])
+        expect(outer_body).to_equal([2, 3, 4])
+        expect(outer_exits).to_equal([5])
+
+    it "unions multiple dominance-proven latches once":
+        step("Build one natural loop from multiple backedges")
+        val func = _pf_function_with_blocks([
+            _pf_block(0, MirTerminator.Goto(BlockId(id: 1))),
+            _pf_block(1, MirTerminator.If(mir_operand_const_bool(true), BlockId(id: 2), BlockId(id: 3))),
+            _pf_block(2, MirTerminator.Goto(BlockId(id: 1))),
+            _pf_block(3, MirTerminator.Goto(BlockId(id: 1)))
+        ])
+        var detector = LoopDetector.new()
+        detector.detect_loops(func)
+        expect(detector.loops.len()).to_equal(1)
+        expect(detector.loops[0].header.id).to_equal(1)
+        expect(detector.loops[0].backedges.len()).to_equal(2)
+        var body: [i64] = []
+        for block in detector.loops[0].body: body.push(block.id)
+        expect(body).to_equal([2, 3])
+
     it "builds linear definition and use sites including terminators":
         step("Reuse one function-local def-use index")
         val local0 = LocalId(id: 0)
