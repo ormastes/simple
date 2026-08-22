@@ -14,6 +14,9 @@ closed with a split-push diagnostic. The structural tree row checks only the
 committed tip and its count-only parent reference; the exhaustive 24-fixture
 detector campaign belongs to bootstrap. Production evidence must resolve under
 the repository root and fit the 64 MiB aggregate hashing budget.
+Quick rule commands and floors are loaded from the same committed revision, not
+the working tree; the fixture replaces the latter with a hostile sleep command
+and requires committed policy to pass promptly.
 
 ## Run the bootstrap must-check
 
@@ -51,9 +54,10 @@ linked-worktree installation remains the visible `windows-hook-installation`
 TODO and is not inferred from PowerShell source parity.
 
 Focused evidence: `sh test/01_unit/scripts/must_check_tiering_test.shs` produced
-`selftest=2s ref-path=1s installed-hook=0s` on 2026-08-22 after adding bounded
+`selftest=3s ref-path=0s installed-hook=1s` on 2026-08-22 after adding bounded
 ref/evidence handling and moving exhaustive tree fixtures to bootstrap. The
-complete command took 7.14s with 71,168 KiB peak RSS.
+complete command took 7.61s with 71,936 KiB peak RSS, including the hostile
+working-tree rules regression.
 
 The executable scenario invokes the push self-test, bootstrap self-test, and
 the real bootstrap-produced-ledger to committed-ref push transition fixture.
