@@ -1,0 +1,114 @@
+# First-time `register_imported_symbol_inner` cost, pinned by mechanism.
+#
+# doc/08_tracking/bug/hir_phase_per_module_cost_2026-08-21.md: run9 measured
+# ~40 ms per FIRST-TIME registration (driver.spl: 2,951 registrations, 243 s of
+# imports). Bisecting one composite registration with the RIS profile slots on
+# a synthetic 3-package fixture found two mechanisms:
+#
+#   MATCHRET  `val kind = match composite.kind:` with `return` inside two arms
+#             left the frame in a mode where EVERY later statement cost ~10 ms
+#             (a scalar `val` measured 0.05 ms before that line and 12 ms after
+#             it). Hoisting the early-exit out of the match expression took a
+#             composite registration from ~120 ms to ~15 ms.
+#   IMPLIDX   `register_imported_type_methods_inner` swept every impl of the
+#             declaring module per imported type. The impl positions are now
+#             indexed once per frozen surface; `impl_index_build_count` and
+#             `impl_rows_visited` are the observable counters.
+#
+# Fixture: 3 packages x N composites (3 fields each, one naming a sibling
+# type), N free functions, N impls with 2 methods. Every public name of each
+# package is registered into ONE importer, single-module, so the numbers are
+# first-time registrations only (the RISDONE memo skips repeats).
+
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering._Items.module_import_registration.*
+use compiler.hir.hir_lowering.context_helpers.*
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_lowering._Items.module_reexport_materialization.*
+use compiler.hir.hir_lowering._Items.module_lowering.*
+use compiler.hir.hir_lowering.module_surface.*
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.expressions.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_lowering._Items.module_import_resolution.*
+use compiler.hir.hir_lowering._Items.module_callable_types.*
+use std.nogc_sync_mut.io.process_ops.{eprint}
+use std.spec.{describe, it, expect, assert_true}
+
+use std.nogc_sync_mut.src.time.{now_ms}
+
+val FIXTURE_PACKAGES: i64 = 3
+val FIXTURE_ITEMS_PER_PACKAGE: i64 = 40
+# Post-fix the fixture averages ~11 ms per first-time registration on the
+# seed interpreter (composites ~15 ms, callables ~5 ms); pre-fix it averaged
+# 62-68 ms. 3x the post-fix budget keeps a loaded box green and the pre-fix
+# cost red.
+val PER_REGISTRATION_BUDGET_US: i64 = 33000
+
+fn gen_module(k: i64, n: i64) -> text:
+    var parts: [text] = []
+    var i = 0
+    while i < n:
+        # Dependency fan-in stays shallow (group leader every 4 items) so the
+        # field-dependency descent is bounded and the cost is per symbol.
+        val prev = i - (i % 4)
+        parts = parts.push("pub struct T{k}_{i}:\n    a: T{k}_{prev}\n    b: i64\n    c: [T{k}_{prev}]\n\n")
+        parts = parts.push("pub fn f{k}_{i}(x: T{k}_{i}, y: text, z: T{k}_{prev}) -> T{k}_{prev}:\n    z\n\n")
+        parts = parts.push("impl T{k}_{i}:\n    fn m{i}(v: T{k}_{prev}) -> i64:\n        1\n    fn n{i}(v: text) -> T{k}_{i}:\n        self\n\n")
+        i = i + 1
+    parts.join("")
+
+describe("HIR first-time import registration cost", fn():
+    it("registers every export of a 3-package fixture within the per-symbol budget and indexes impls once per surface", fn():
+        val n = FIXTURE_ITEMS_PER_PACKAGE
+        var modules: {text: ParserModule} = {}
+        var sources: [SourceFile] = []
+        var k = 0
+        while k < FIXTURE_PACKAGES:
+            val body = gen_module(k: k, n: n)
+            val path = "pkg/m{k}.spl"
+            val name = "pkg.m{k}"
+            modules[name] = parse_and_build_module(body, path)
+            sources = sources.push(SourceFile(path: path, content: body, module_name: name))
+            k = k + 1
+        val registry = module_surfaces_from_modules(modules, sources).unwrap()
+        var lowering = hirlowering_for_module("app/main.spl", registry)
+        lowering.begin_module("app/main.spl")
+        val span = Span.empty()
+        var total_regs = 0
+        val t_all = now_ms()
+        k = 0
+        while k < FIXTURE_PACKAGES:
+            val idx = registry.index_by_name["pkg.m{k}"]
+            val surf = registry.surfaces[idx]
+            var i = 0
+            while i < surf.composite_names.len():
+                lowering.register_imported_symbol(idx, "pkg.m{k}", surf.composite_names[i], surf.composite_names[i], span, true)
+                total_regs = total_regs + 1
+                i = i + 1
+            i = 0
+            while i < surf.callable_names.len():
+                lowering.register_imported_symbol(idx, "pkg.m{k}", surf.callable_names[i], surf.callable_names[i], span, true)
+                total_regs = total_regs + 1
+                i = i + 1
+            k = k + 1
+        val wall_ms = now_ms() - t_all
+        val per_us = wall_ms * 1000 / total_regs
+        eprint("[hir-reg-cost] regs={total_regs} wall={wall_ms} ms per={per_us} us symbols={lowering.symbols.next_symbol_id} impl_index_builds={lowering.impl_index_build_count} impl_rows_visited={lowering.impl_rows_visited} skips={lowering.registered_import_skip_count}")
+        expect(lowering.errors.len()).to_equal(0)
+        expect(total_regs).to_equal(FIXTURE_PACKAGES * n * 2)
+        # Every export registered: N structs + N functions + 2N methods per package.
+        expect(lowering.symbols.next_symbol_id).to_equal(FIXTURE_PACKAGES * n * 4)
+        # IMPLIDX: one sweep per surface, and only the matching impl row is
+        # read per composite (N impls x N composites would be the old sweep).
+        expect(lowering.impl_index_build_count).to_equal(FIXTURE_PACKAGES)
+        expect(lowering.impl_rows_visited).to_equal(FIXTURE_PACKAGES * n)
+        # MATCHRET: the per-statement penalty is not a counter; pin the budget.
+        assert_true(per_us <= PER_REGISTRATION_BUDGET_US)
+    )
+)

@@ -931,6 +931,36 @@ impl HirLowering:
         hir_phase_profile_add(HIR_PROF_RIS_METHODS, started)
         self.imported_type_methods_in_progress_pop(reentry_key)
 
+    me imported_impl_positions(imported_mod: ModuleSurface, imported_name: text) -> [i64]:
+        """IMPLIDX: positions in `imported_mod.impls` whose implemented type is
+        `imported_name`, in declaration order. Built once per frozen surface
+        (`generation physical_index`) by a single sweep; every later query is
+        a Dict probe. Keyed on the frozen registry only, so the answer is the
+        same for every importer and is never cleared per module."""
+        val surface_key = "{self.module_surfaces.generation} {imported_mod.physical_index}"
+        if not self.impl_index_built.contains_key(surface_key):
+            self.impl_index_build_count = self.impl_index_build_count + 1
+            var position = 0
+            while position < imported_mod.impls.len():
+                val implemented = parser_type_kind_named_name(imported_mod.impls[position].type_.kind)
+                val rows_key = surface_key + " " + implemented
+                if self.impl_index_positions.contains_key(rows_key):
+                    # One-time build over a few rows per type: the temporary
+                    # copy here is bounded by impls-per-type, not by the table.
+                    var rows: [i64] = self.impl_index_positions[rows_key]
+                    rows = rows.push(position)
+                    self.impl_index_positions[rows_key] = rows
+                else:
+                    val first_rows: [i64] = [position]
+                    self.impl_index_positions[rows_key] = first_rows
+                position = position + 1
+            self.impl_index_built[surface_key] = true
+        val wanted_key = surface_key + " " + imported_name
+        if self.impl_index_positions.contains_key(wanted_key):
+            return self.impl_index_positions[wanted_key]
+        val none: [i64] = []
+        none
+
     me register_imported_type_methods_inner(imported_mod: ModuleSurface, imported_mod_name: text, imported_name: text, local_owner: SymbolId, import_span: Span, materialize_enum: bool):
         var local_owner_module: text = imported_mod_name
         var local_owner_defining_module: text? = nil
@@ -939,9 +969,15 @@ impl HirLowering:
                 local_owner_module = module_name
                 local_owner_defining_module = Some(module_name)
         val owner_module = hir_module_logical_name_from_path(local_owner_module)
-        for impl_ in imported_mod.impls:
-            if parser_type_kind_named_name(impl_.type_.kind) != imported_name:
-                continue
+        # IMPLIDX: visit only the impls that implement `imported_name`, in
+        # declaration order, instead of sweeping (and copying) every impl row
+        # of the declaring module per registration.
+        val impl_positions = self.imported_impl_positions(imported_mod, imported_name)
+        var impl_cursor = 0
+        while impl_cursor < impl_positions.len():
+            val impl_ = imported_mod.impls[impl_positions[impl_cursor]]
+            impl_cursor = impl_cursor + 1
+            self.impl_rows_visited = self.impl_rows_visited + 1
             for method_name in impl_.methods.keys():
                 val method = impl_.methods[method_name]
                 val symbol_name = "{owner_module}.{imported_name}::{method_name}"

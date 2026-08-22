@@ -9,7 +9,7 @@ use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types.{ParserFunction, ImportItem, Param}
 use compiler.frontend.parser_types_expr.*
-use compiler.hir.hir_lowering.hir_phase_profile.{hir_phase_profile_count_imported_symbol, hir_phase_profile_count_imported_symbol_skip, hir_phase_profile_now, hir_phase_profile_add, HIR_PROF_RIS_FIELD_DEP, HIR_PROF_RIS_SIGTYPE, HIR_PROF_RIS_DEFINE}
+use compiler.hir.hir_lowering.hir_phase_profile.{hir_phase_profile_count_imported_symbol, hir_phase_profile_count_imported_symbol_skip, hir_phase_profile_now, hir_phase_profile_add, HIR_PROF_RIS_FIELD_DEP, HIR_PROF_RIS_SIGTYPE, HIR_PROF_RIS_DEFINE, HIR_PROF_RIS_SCAN, HIR_PROF_RIS_FIELDS, HIR_PROF_RIS_PROJECT}
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
@@ -147,6 +147,7 @@ impl HirLowering:
     me register_imported_symbol_inner(imported_index: i64, imported_mod_name: text, imported_name: text, local_name: text, import_span: Span, materialize_enum: bool):
         val imported_mod = self.module_surfaces.surfaces[imported_index]
         hir_phase_profile_count_imported_symbol()
+        val scan_started = hir_phase_profile_now()
         val composite_position = module_surface_name_position(
             imported_mod.composite_names, imported_name)
         val enum_position = module_surface_name_position(
@@ -159,6 +160,7 @@ impl HirLowering:
             imported_mod.callable_names, imported_name)
         val constant_position = module_surface_name_position(
             imported_mod.constant_names, imported_name)
+        hir_phase_profile_add(HIR_PROF_RIS_SCAN, scan_started)
         if composite_position >= 0:
             val composite = imported_mod.composite_values[composite_position]
             val existing_id = self.symbols.lookup_or_invalid(local_name)
@@ -177,15 +179,21 @@ impl HirLowering:
                     imported_name, qualified_local, import_span,
                     materialize_enum)
                 return
-            val kind = match composite.kind:
-                case "class": SymbolKind.Class
-                case "struct": SymbolKind.Struct
-                case "actor":
-                    self.error("imported actor `{imported_name}` has no HIR SymbolKind surface mapping", import_span)
-                    return
-                case other:
-                    self.error("unknown imported composite kind `{other}` for `{imported_name}`", import_span)
-                    return
+            # MATCHRET (2026-08-22): this was `val kind = match composite.kind:`
+            # with `return` inside two arms. On the seed interpreter a
+            # match-EXPRESSION whose arm returns leaves the frame in a mode
+            # where EVERY later statement costs ~10 ms (a scalar `val` went
+            # 0.05 ms -> 12 ms measured by bisecting this function with the
+            # RIS profile slots), which was ~100 of the ~120 ms a first-time
+            # composite registration cost. Same diagnostics, same order;
+            # only the early-exit is hoisted out of the expression.
+            if composite.kind == "actor":
+                self.error("imported actor `{imported_name}` has no HIR SymbolKind surface mapping", import_span)
+                return
+            if composite.kind != "class" and composite.kind != "struct":
+                self.error("unknown imported composite kind `{composite.kind}` for `{imported_name}`", import_span)
+                return
+            val kind = if composite.kind == "class": SymbolKind.Class else: SymbolKind.Struct
             val composite_define_started = hir_phase_profile_now()
             val imported_type = self.symbols.define(local_name, kind, nil, import_span, Visibility.Public, false, Some(imported_mod.module_name))
             hir_phase_profile_add(HIR_PROF_RIS_DEFINE, composite_define_started)
@@ -199,6 +207,7 @@ impl HirLowering:
             # defining module inside a container (`[Cell]`, `Cell?`, ...).
             # Materialize those identities before lowering the field type so
             # resolution is independent of the consumer's import item order.
+            val fields_started = hir_phase_profile_now()
             for field in composite.fields:
                 if field.type_name != "":
                     self.materialize_imported_field_dependency(
@@ -213,6 +222,8 @@ impl HirLowering:
                         self.materialize_imported_field_dependency(
                             imported_mod.physical_index, imported_mod_name, dependency,
                             import_span, materialize_enum)
+            hir_phase_profile_add(HIR_PROF_RIS_FIELDS, fields_started)
+            val project_started = hir_phase_profile_now()
             var imported_field_types: Dict<text, HirType> = {}
             for field in composite.fields:
                 imported_field_types[field.name] = self.imported_surface_type_projected(
@@ -221,6 +232,7 @@ impl HirLowering:
             self.struct_field_types_by_name[canonical_composite_name] = imported_field_types
             if not self.struct_field_types_by_name.has(imported_name):
                 self.struct_field_types_by_name[imported_name] = imported_field_types
+            hir_phase_profile_add(HIR_PROF_RIS_PROJECT, project_started)
             self.register_imported_type_methods(imported_mod, imported_mod_name, imported_name, imported_type, import_span, materialize_enum)
         elif enum_position >= 0:
             if materialize_enum:

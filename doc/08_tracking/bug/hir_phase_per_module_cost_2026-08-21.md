@@ -416,3 +416,95 @@ round trip.
   is deployed. The evidence here is therefore the counter-based spec plus the
   mechanism argument; the wall-clock re-measure is owed after the next seed
   deploy.
+
+## Sixth session (2026-08-22): what one first-time registration does for 40 ms
+
+Run9 (`compiler.driver.driver`, memo `d954bcf0d5d`): HIR 254,987 ms, imports
+243,413 ms, `reg_imported=2951` -> ~40 ms per FIRST-TIME
+`register_imported_symbol_inner`. This session measured one registration in
+isolation instead of the closure: a synthetic 3-package fixture (N structs with
+3 fields, N free functions, N impls with 2 methods per package; dependency
+fan-in capped at a group leader every 4 items so the field descent is bounded),
+every export registered into ONE importer, single module, `--threads=2`, on the
+deployed seed (`bin/release/x86_64-unknown-linux-gnu/simple`, the Rust seed).
+
+### Breakdown before (N=100, 600 registrations, RIS slots + 3 new ones)
+
+| slot | ms / calls | per call |
+|---|---|---|
+| wall per registration (avg, composites+callables) | 37,326 / 600 | **62 ms** (composites ~120 ms, callables ~5 ms) |
+| `fields` (composite field-dependency loop, new slot) | 7,966 / 300 | 27 ms — of which `field_dep` (the actual calls) 715 / 900 = 0.8 ms |
+| `project` (3 field projections + 2 dict stores, new slot) | 7,336 / 300 | 24 ms |
+| `define` | 4,957 / 600 | 8 ms (2 ms when called from a spec) |
+| `methods` | 2,262 / 300 | 7.5 ms |
+| `scan` (six `module_surface_name_position` sweeps, new slot) | 260 / 609 | 0.4 ms |
+
+`scan`, `callable_deps`, `declared_dep`, `explicit_dep`, `sigtype` are all
+sub-millisecond: the candidate list in the lane brief (linear name scans,
+surface re-resolution, COW clones of importer dicts, type-dep re-descent) is
+NOT where the 40 ms is. Surface copies by value measured 0 ms / 100.
+
+### The mechanism: a statement-cost cliff after a match-expression that returns
+
+Bisecting inside `register_imported_symbol_inner` with one scalar `val` timed
+into a spare slot: 0.03 ms at function entry, 0.05 ms after
+`val composite = ...` and after the `same_owner` block, **12 ms** after
+
+```
+val kind = match composite.kind:
+    case "class": SymbolKind.Class
+    case "struct": SymbolKind.Struct
+    case "actor": ...; return
+    case other:   ...; return
+```
+
+An empty 3-iteration `for` / `while` after that line cost 8-10 ms; the same
+loop before it cost nothing. So every statement after a match-EXPRESSION whose
+arms contain `return` pays ~10 ms in this frame on the seed interpreter, and
+the composite branch runs ~10 such statements. That is the ~100 ms of the
+~120 ms composite registration, and the ~40 ms/registration average run9 saw.
+(Seed-interpreter defect; filed separately below. The compiler-side fix is
+shape-only.)
+
+### Fixes (MATCHRET, IMPLIDX)
+
+- **MATCHRET** (`module_import_registration.spl`): hoist the two early-exit
+  diagnostics above the expression; `kind` becomes a plain `if` expression.
+  Same diagnostics, same order, same HIR.
+- **IMPLIDX** (`module_reexport_materialization.spl`, `types.spl`):
+  `register_imported_type_methods_inner` swept every impl of the declaring
+  module per imported type. `imported_impl_positions` indexes impl positions
+  once per frozen surface (`{generation} {physical_index}` key, phase-invariant
+  like `explicit_dep_target_memo`); counters `impl_index_build_count` /
+  `impl_rows_visited`. Small on its own (~0.1 ms per impl row) but O(impls) per
+  symbol -> O(impls^2) per module in the real closure.
+- Three level-gated RIS slots kept: `scan`, `fields`, `project`.
+
+### After (same fixture, same box)
+
+| | before | after |
+|---|---|---|
+| per registration, N=100 avg | 62,210 us | **10,788 us** |
+| `fields` | 27 ms | 1.5 ms |
+| `project` | 24 ms | 0.3 ms |
+| `define` | 8 ms | 2.8 ms |
+| spec fixture N=40 x 3 pkgs (240 regs) | 85,429 us/reg (FAILS budget) | 14,420 us/reg |
+
+Spec: `test/01_unit/compiler/hir/hir_import_registration_per_symbol_cost_spec.spl`
+(mirrored in `test/unit/`): pins `impl_index_build_count == packages`,
+`impl_rows_visited == composites`, and `<= 33,000 us` per registration (3x the
+post-fix budget); verified red with the match-expression reinstated. Perf-gate
+rows added to `scripts/check/check-perf-regression-tests.shs`.
+
+### Remainder
+
+- Composite registration is still ~15 ms: `methods` ~10 ms (2 methods x
+  (`callable_deps` 0.9 + `sigtype` 0.4 + `define` ~2.8)) and `define` ~2-3 ms
+  per call. `define` copies the Scope row (`val scope = self.scopes[id]`,
+  including its `symbols` Dict) on the type-symbol first-write check; left
+  alone because `lookup` documents `rt_dict_contains` under-reporting on that
+  struct-valued dict.
+- Seed interpreter: match-expression with returning arms makes every later
+  statement in the frame ~10 ms. Other `val x = match ...: ... return` sites
+  across the compiler will pay the same; a census is owed. The closure-level
+  wall time is still owed after the next seed deploy (same caveat as session 5).
