@@ -91,6 +91,36 @@ pub struct ImageSimpleboxArtifactReceiptV1:
     backend: text
     compiler: text
 
+pub struct ImageSimpleboxValidationMetricsV1:
+    validation_calls: i64
+    hash_bytes: i64
+    executable_admission_calls: i64
+
+struct ImageSimpleboxValidatedDecisionV1:
+    artifact: ImageSimpleboxArtifactV1
+    write_payload: bool
+    manifest_deployed: bool
+
+class _ImageSimpleboxValidationObserverV1:
+    validation_calls: i64
+    hash_bytes: i64
+    executable_admission_calls: i64
+impl _ImageSimpleboxValidationObserverV1:
+    static fn new() -> _ImageSimpleboxValidationObserverV1:
+        _ImageSimpleboxValidationObserverV1(
+            validation_calls: 0, hash_bytes: 0,
+            executable_admission_calls: 0)
+    fn snapshot() -> ImageSimpleboxValidationMetricsV1:
+        ImageSimpleboxValidationMetricsV1(
+            validation_calls: self.validation_calls,
+            hash_bytes: self.hash_bytes,
+            executable_admission_calls: self.executable_admission_calls)
+
+fn _empty_simplebox_validated_decision_v1() -> ImageSimpleboxValidatedDecisionV1:
+    ImageSimpleboxValidatedDecisionV1(
+        artifact: _empty_simplebox_artifact_v1(),
+        write_payload: false, manifest_deployed: false)
+
 fn _empty_simplebox_artifact_v1() -> ImageSimpleboxArtifactV1:
     ImageSimpleboxArtifactV1(
         bytes: [],
@@ -115,7 +145,9 @@ fn _valid_simplebox_sha256_v1(value: text) -> bool:
 
 fn _validate_simplebox_artifact_v1(
     artifact: ImageSimpleboxArtifactV1, arch: PkgArch,
-) -> Result<bool, text>:
+    observer: _ImageSimpleboxValidationObserverV1,
+) -> Result<ImageSimpleboxValidatedDecisionV1, text>:
+    observer.validation_calls = observer.validation_calls + 1
     if artifact.bytes.len() == 0:
         return Err("SimpleOS simplebox artifact bytes are required")
     if artifact.bytes.len() > IMAGE_MAX_NATIVE_PAYLOAD_BYTES_V1:
@@ -125,6 +157,7 @@ fn _validate_simplebox_artifact_v1(
         return Err("SimpleOS simplebox artifact receipt schema is invalid")
     if not _valid_simplebox_sha256_v1(receipt.artifact_sha256):
         return Err("SimpleOS simplebox artifact SHA-256 is invalid")
+    observer.hash_bytes = observer.hash_bytes + artifact.bytes.len()
     if sha256_u8_hex(artifact.bytes) != receipt.artifact_sha256:
         return Err("SimpleOS simplebox artifact SHA-256 does not match its bytes")
     if receipt.target != _simplebox_target_triple_v1(arch):
@@ -142,10 +175,20 @@ fn _validate_simplebox_artifact_v1(
        receipt.compiler.contains("simple_seed") or
        receipt.compiler.contains("target/bootstrap"):
         return Err("SimpleOS simplebox artifact was built by a bootstrap seed")
-    if not image_native_executable_payload_admitted_v1(
-        artifact.bytes, image_target_architecture(arch)):
+    # This is the sole executable parser/admission call for the artifact.  The
+    # returned value-semantic decision is passed to staging; staging must not
+    # hash or parse the payload again.
+    observer.executable_admission_calls =
+        observer.executable_admission_calls + 1
+    val payload_decision = image_package_payload_decision_v1(
+        "simpleos-tools", SIMPLEBOX_CANONICAL_PATH_V1, artifact.bytes,
+        image_target_architecture(arch))
+    if not payload_decision.write_payload or not payload_decision.manifest_deployed:
         return Err("SimpleOS simplebox artifact executable structure or architecture is invalid")
-    Ok(true)
+    Ok(ImageSimpleboxValidatedDecisionV1(
+        artifact: artifact,
+        write_payload: payload_decision.write_payload,
+        manifest_deployed: payload_decision.manifest_deployed))
 
 fn _simplebox_target_triple_v1(arch: PkgArch) -> text:
     match arch:
@@ -168,7 +211,7 @@ fn _simplebox_receipt_field_v1(receipt: text, key: text) -> Result<text, text>:
     Ok(found)
 
 fn _load_simplebox_artifact_v1(
-    artifact_path: text, receipt_path: text, arch: PkgArch,
+    artifact_path: text, receipt_path: text,
 ) -> Result<ImageSimpleboxArtifactV1, text>:
     if artifact_path == "" or receipt_path == "":
         return Err("SimpleOS simplebox artifact and receipt paths are both required")
@@ -193,7 +236,6 @@ fn _load_simplebox_artifact_v1(
                 text_receipt, "entry_closure")? == "true",
             backend: _simplebox_receipt_field_v1(text_receipt, "backend")?,
             compiler: _simplebox_receipt_field_v1(text_receipt, "compiler")?))
-    _validate_simplebox_artifact_v1(artifact, arch)?
     Ok(artifact)
 struct PartitionLayout:
     efi_start_sector: u64
@@ -258,7 +300,7 @@ impl ImageBuilder:
         val layout = _compute_layout(config.image_size_mb)
         ImageBuilder(config: config, layout: layout)
 
-    fn build() -> Result<text, text>:
+    fn build(observer: _ImageSimpleboxValidationObserverV1) -> Result<text, text>:
         if self.config.image_size_mb < MIN_IMAGE_SIZE_MB_V1:
             return Err("SimpleOS image size must be at least {MIN_IMAGE_SIZE_MB_V1} MB")
         val arch_name = pkg_arch_to_text(self.config.arch)
@@ -268,9 +310,11 @@ impl ImageBuilder:
             val simple_check = image_validate_simple_binary(simple_binary, self.config.arch)
             if val Err(e) = simple_check:
                 return Err(e)
+        var simplebox_decision = _empty_simplebox_validated_decision_v1()
         if self.config.simplebox_artifact.bytes.len() > 0 or
            self.config.simplebox_artifact.receipt.schema_version != 0:
-            _validate_simplebox_artifact_v1(self.config.simplebox_artifact, self.config.arch)?
+            simplebox_decision = _validate_simplebox_artifact_v1(
+                self.config.simplebox_artifact, self.config.arch, observer)?
         var kernel_bytes: [u8] = []
         if self.config.kernel_path != "" and rt_file_exists(self.config.kernel_path):
             kernel_bytes = image_read_file_bounded_v1(self.config.kernel_path, IMAGE_MAX_NATIVE_PAYLOAD_BYTES_V1, "SimpleOS kernel payload")?
@@ -296,7 +340,8 @@ impl ImageBuilder:
         var deploy_manifest = _manifest_header(self.config, self.layout)
         deploy_manifest = deploy_manifest + self._populate_efi_partition(efi_root, kernel_bytes)
         val root_manifest = self._populate_root_partition(
-            rootfs_root, kernel_bytes, font_guest_paths, font_blobs)?
+            rootfs_root, kernel_bytes, font_guest_paths, font_blobs,
+            simplebox_decision)?
         deploy_manifest = deploy_manifest + root_manifest
 
         if self.config.include_installer:
@@ -341,6 +386,7 @@ impl ImageBuilder:
     fn _populate_root_partition(
         rootfs_root: text, kernel_bytes: [u8],
         font_guest_paths: [text], font_blobs: [[u8]],
+        simplebox_decision: ImageSimpleboxValidatedDecisionV1,
     ) -> Result<text, text>:
         if font_guest_paths.len() != font_blobs.len():
             return Err("SimpleOS font asset staging input mismatch")
@@ -369,7 +415,8 @@ impl ImageBuilder:
         manifest = manifest + self._native_payload_manifest(
             "{rootfs_root}/boot/kernel.elf", "/boot/kernel.elf",
             "simpleos-kernel", "runtime-kernel", kernel_bytes)
-        manifest = manifest + self._stage_simplebox_payload(rootfs_root)?
+        manifest = manifest + self._stage_simplebox_payload(
+            rootfs_root, simplebox_decision)?
         manifest = manifest + _manifest_file("/SYS/ROOTFS.CFG", "rootfs-boot-marker", "simpleos-core")
 
         val packages = list_all_packages(self.config.arch)
@@ -390,17 +437,16 @@ impl ImageBuilder:
             font_index = font_index + 1
         Ok(manifest)
 
-    fn _stage_simplebox_payload(rootfs_root: text) -> Result<text, text>:
-        val artifact = self.config.simplebox_artifact
+    fn _stage_simplebox_payload(
+        rootfs_root: text,
+        validated: ImageSimpleboxValidatedDecisionV1,
+    ) -> Result<text, text>:
+        val artifact = validated.artifact
         if artifact.bytes.len() == 0:
             return Ok(image_package_payload_decision_v1(
                 "simpleos-core", SIMPLEBOX_CANONICAL_PATH_V1, [],
                 image_target_architecture(self.config.arch)).inventory_row)
-        _validate_simplebox_artifact_v1(artifact, self.config.arch)?
-        val decision = image_package_payload_decision_v1(
-            "simpleos-tools", SIMPLEBOX_CANONICAL_PATH_V1, artifact.bytes,
-            image_target_architecture(self.config.arch))
-        if not decision.write_payload or not decision.manifest_deployed:
+        if not validated.write_payload or not validated.manifest_deployed:
             return Err("SimpleOS simplebox payload policy rejected")
         if not rt_file_write_bytes(rootfs_root + SIMPLEBOX_CANONICAL_PATH_V1, artifact.bytes):
             return Err("SimpleOS simplebox artifact staging failed")
@@ -617,6 +663,9 @@ impl ImageBuilder:
         _write_artifact_descriptor(self.config, self.layout, manifest_path)
         Result.Ok(true)
 
+fn _build_image_v1(config: ImageConfig) -> Result<text, text>:
+    ImageBuilder.new(config).build(_ImageSimpleboxValidationObserverV1.new())
+
 fn build_usb_installer_image(
     arch: PkgArch,
     kernel_path: text,
@@ -636,7 +685,7 @@ fn build_usb_installer_image(
         include_installer: true
     )
     _image_builder_rootfs_backend = "fat32"
-    ImageBuilder.new(config).build()
+    _build_image_v1(config)
 
 fn build_usb_installer_image_with_rootfs(
     arch: PkgArch,
@@ -658,7 +707,7 @@ fn build_usb_installer_image_with_rootfs(
         include_installer: true
     )
     _image_builder_rootfs_backend = image_normalized_rootfs_backend(rootfs_backend)
-    ImageBuilder.new(config).build()
+    _build_image_v1(config)
 
 fn build_install_image(
     arch: PkgArch,
@@ -679,7 +728,7 @@ fn build_install_image(
         include_installer: false
     )
     _image_builder_rootfs_backend = "fat32"
-    ImageBuilder.new(config).build()
+    _build_image_v1(config)
 
 fn build_install_image_with_simple_binary(
     arch: PkgArch,
@@ -701,7 +750,7 @@ fn build_install_image_with_simple_binary(
         include_installer: false
     )
     _image_builder_rootfs_backend = "fat32"
-    ImageBuilder.new(config).build()
+    _build_image_v1(config)
 
 pub fn build_install_image_with_simplebox_artifact(
     arch: PkgArch,
@@ -723,7 +772,32 @@ pub fn build_install_image_with_simplebox_artifact(
         include_installer: false
     )
     _image_builder_rootfs_backend = "fat32"
-    ImageBuilder.new(config).build()
+    _build_image_v1(config)
+
+pub fn build_install_image_with_simplebox_artifact_observed_v1(
+    arch: PkgArch,
+    kernel_path: text,
+    package_dir: text,
+    output_path: text,
+    size_mb: u64,
+    artifact: ImageSimpleboxArtifactV1,
+) -> Result<(text, ImageSimpleboxValidationMetricsV1), text>:
+    """Build through the production core and return local validation work."""
+    val config = ImageConfig(
+        arch: arch,
+        output_path: output_path,
+        image_size_mb: if size_mb > 0: size_mb else: DEFAULT_IMAGE_SIZE_MB,
+        kernel_path: kernel_path,
+        bootloader_config: "",
+        package_dir: package_dir,
+        simple_binary: "",
+        simplebox_artifact: artifact,
+        include_installer: false
+    )
+    _image_builder_rootfs_backend = "fat32"
+    val observer = _ImageSimpleboxValidationObserverV1.new()
+    val built = ImageBuilder.new(config).build(observer)?
+    Ok((built, observer.snapshot()))
 
 fn build_install_image_with_rootfs(
     arch: PkgArch,
@@ -745,7 +819,7 @@ fn build_install_image_with_rootfs(
         include_installer: false
     )
     _image_builder_rootfs_backend = image_normalized_rootfs_backend(rootfs_backend)
-    ImageBuilder.new(config).build()
+    _build_image_v1(config)
 
 fn _print_image_usage():
     print "Usage: image-builder create [--arch=ARCH] [--output=PATH] [--size=MB] [--kernel=PATH] [--packages=DIR] [--simple-binary=PATH] [--simplebox-artifact=PATH --simplebox-receipt=PATH] [--rootfs=fat32|dbfs|nvfs] [--screen-type=T] [--screen-res=WxH] [--screen-simd=S] [--installer]"
@@ -818,7 +892,7 @@ fn run_image_builder(args: [text]) -> i32:
     var simplebox_artifact = _empty_simplebox_artifact_v1()
     if simplebox_artifact_path != "" or simplebox_receipt_path != "":
         val loaded = _load_simplebox_artifact_v1(
-            simplebox_artifact_path, simplebox_receipt_path, arch)
+            simplebox_artifact_path, simplebox_receipt_path)
         if val Err(e) = loaded:
             print "Error: {e}"
             return 1
@@ -837,7 +911,7 @@ fn run_image_builder(args: [text]) -> i32:
             include_installer: true
         )
         _image_builder_rootfs_backend = image_normalized_rootfs_backend(rootfs_backend)
-        ImageBuilder.new(config).build()
+        _build_image_v1(config)
     else:
         val config = ImageConfig(
             arch: arch,
@@ -851,7 +925,7 @@ fn run_image_builder(args: [text]) -> i32:
             include_installer: false
         )
         _image_builder_rootfs_backend = image_normalized_rootfs_backend(rootfs_backend)
-        ImageBuilder.new(config).build()
+        _build_image_v1(config)
 
     if val Ok(path) = result:
         print "Artifact created: {path}"
