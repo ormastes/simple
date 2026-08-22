@@ -12,6 +12,14 @@ fn _seed_dbfs(driver: DbFsDriver, path: text) -> FileHandle:
     driver.write_bytes_handle(handle, [0u8, 255u8, 17u8, 0u8, 128u8]).unwrap()
     handle
 
+fn _bounded_fixture_bytes() -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < 65536:
+        out.push((i % 251) as u8)
+        i = i + 1
+    out
+
 describe "positioned binary backend parity":
     it "DBFS preserves binary bytes and clips reads at EOF":
         val driver = DbFsDriver.new_hosted()
@@ -30,6 +38,30 @@ describe "positioned binary backend parity":
             handle, 0x7FFFFFFFFFFFFFFF, 1).unwrap_err()).to_equal(
                 FsError.InvalidArg)
 
+    it "DBFS bounded chunks accept 64 KiB and reject larger requests":
+        val driver = DbFsDriver.new_hosted()
+        val handle = driver.open_path(
+            Path(raw: "/dbfs-bounded.bin"), OpenFlags.create_write()).unwrap()
+        val seed = _bounded_fixture_bytes()
+        driver.write_bytes_handle(handle, seed).unwrap()
+        val got = driver.pread_bounded_bytes_handle(handle, 0, 65536).unwrap()
+        expect(got.len()).to_equal(65536)
+        expect(got[0]).to_equal(0u8)
+        expect(got[65535]).to_equal((65535 % 251) as u8)
+        got[0] = 99u8
+        expect(driver.pread_bounded_bytes_handle(handle, 0, 1).unwrap()).to_equal([0u8])
+        expect(driver.pread_bounded_bytes_handle(handle, 65536, 1).unwrap()).to_equal([])
+        expect(driver.pread_bounded_bytes_handle(handle, 0, 0).unwrap()).to_equal([])
+        expect(driver.pread_bounded_bytes_handle(
+            handle, -1, 1).unwrap_err()).to_equal(FsError.InvalidArg)
+        expect(driver.pread_bounded_bytes_handle(
+            handle, 0, -1).unwrap_err()).to_equal(FsError.InvalidArg)
+        expect(driver.pread_bounded_bytes_handle(
+            handle, 0, 65537).unwrap_err()).to_equal(FsError.InvalidArg)
+        expect(driver.pread_bounded_bytes_handle(
+            handle, 0x7FFFFFFFFFFFFFFF, 1).unwrap_err()).to_equal(
+                FsError.InvalidArg)
+
     it "native NVFS exposes the same binary and EOF contract":
         val driver = NvfsDriver.new("binary-native")
         val handle = driver.open(Path(raw: "/native.bin"), OpenFlags.create_write()).unwrap()
@@ -45,6 +77,24 @@ describe "positioned binary backend parity":
         expect(driver.pread_bytes_handle(
             handle, 0x7FFFFFFFFFFFFFFF, 1).unwrap_err()).to_equal(
                 FsError.InvalidArg)
+        val native_owned = driver.pread_bounded_bytes_handle(handle, 1, 3).unwrap()
+        expect(native_owned).to_equal([255u8, 17u8, 0u8])
+        native_owned[0] = 1u8
+        expect(driver.pread_bounded_bytes_handle(handle, 1, 1).unwrap()).to_equal([255u8])
+        expect(driver.pread_bounded_bytes_handle(
+            handle, 0, 65537).unwrap_err()).to_equal(FsError.InvalidArg)
+        expect(driver.pread_bounded_bytes_handle(handle, 5, 1).unwrap()).to_equal([])
+        expect(driver.pread_bounded_bytes_handle(handle, 0, 0).unwrap()).to_equal([])
+        expect(driver.pread_bounded_bytes_handle(
+            handle, -1, 1).unwrap_err()).to_equal(FsError.InvalidArg)
+        expect(driver.pread_bounded_bytes_handle(
+            handle, 0, -1).unwrap_err()).to_equal(FsError.InvalidArg)
+        expect(driver.pread_bounded_bytes_handle(
+            handle, 0x7FFFFFFFFFFFFFFF, 1).unwrap_err()).to_equal(
+                FsError.InvalidArg)
+        val native_max = _bounded_fixture_bytes()
+        driver.pwrite(handle, 0, native_max).unwrap()
+        expect(driver.pread_bounded_bytes_handle(handle, 0, 65536).unwrap().len()).to_equal(65536)
 
     it "POSIX NVFS exposes the same binary and EOF contract":
         val driver = NvfsPosixDriver.new("binary-posix")
@@ -61,3 +111,21 @@ describe "positioned binary backend parity":
         expect(driver.pread_bytes_handle(
             handle, 0x7FFFFFFFFFFFFFFF, 1).unwrap_err()).to_equal(
                 FsError.InvalidArg)
+        val posix_owned = driver.pread_bounded_bytes_handle(handle, 1, 3).unwrap()
+        expect(posix_owned).to_equal([255u8, 17u8, 0u8])
+        posix_owned[0] = 1u8
+        expect(driver.pread_bounded_bytes_handle(handle, 1, 1).unwrap()).to_equal([255u8])
+        expect(driver.pread_bounded_bytes_handle(
+            handle, 0, 65537).unwrap_err()).to_equal(FsError.InvalidArg)
+        expect(driver.pread_bounded_bytes_handle(handle, 5, 1).unwrap()).to_equal([])
+        expect(driver.pread_bounded_bytes_handle(handle, 0, 0).unwrap()).to_equal([])
+        expect(driver.pread_bounded_bytes_handle(
+            handle, -1, 1).unwrap_err()).to_equal(FsError.InvalidArg)
+        expect(driver.pread_bounded_bytes_handle(
+            handle, 0, -1).unwrap_err()).to_equal(FsError.InvalidArg)
+        expect(driver.pread_bounded_bytes_handle(
+            handle, 0x7FFFFFFFFFFFFFFF, 1).unwrap_err()).to_equal(
+                FsError.InvalidArg)
+        val posix_max = _bounded_fixture_bytes()
+        driver.pwrite(handle, 0, posix_max).unwrap()
+        expect(driver.pread_bounded_bytes_handle(handle, 0, 65536).unwrap().len()).to_equal(65536)

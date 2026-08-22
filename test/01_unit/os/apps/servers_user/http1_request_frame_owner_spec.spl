@@ -1,0 +1,109 @@
+use std.spec.{describe, it, expect}
+use std.fs_driver.bytes_util.{text_to_bytes_pure}
+use std.nogc_sync_mut.http_server.server.{SecureServerPolicy}
+use os.apps.servers_user.http1_request_frame_owner.{
+    frame_http1_fragments_owned_for_test,
+    http1_no_progress_terminal_index_for_test
+}
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn _one_byte_fragments(wire: text) -> [[u8]]:
+    val bytes = text_to_bytes_pure(wire)
+    var fragments: [[u8]] = []
+    for byte in bytes:
+        fragments.push([byte])
+    fragments
+
+fn _frame(wire: text):
+    frame_http1_fragments_owned_for_test(
+        _one_byte_fragments(wire), SecureServerPolicy.production())
+
+describe "SimpleOS filesystem HTTP/1 incremental framing owner":
+    it "accepts request headers and bodies fragmented at every byte boundary":
+        val wire = "POST /health HTTP/1.1\r\nHost: simpleos\r\nContent-Length: 5\r\n\r\nhello"
+        val result = _frame(wire)
+        expect(result.complete).to_equal(true)
+        expect(result.request).to_equal(wire)
+        expect(result.scanned_bytes).to_equal(text_to_bytes_pure(wire).len() as i64)
+
+    it "accepts the exact ten MiB body policy boundary without a header rescan":
+        val header = text_to_bytes_pure(
+            "POST /health HTTP/1.1\r\nHost: simpleos\r\nContent-Length: 10485760\r\n\r\n")
+        val body: [u8] = [97u8; 10485760]
+        val result = frame_http1_fragments_owned_for_test(
+            [header, body], SecureServerPolicy.production())
+        expect(result.complete).to_equal(true)
+        expect(result.scanned_bytes).to_equal(header.len() as i64 + 10485760)
+        expect(result.request.len()).to_equal(header.len() as i64 + 10485760)
+        expect(result.request).to_start_with("POST /health HTTP/1.1\r\n")
+        expect(result.request).to_end_with("a")
+
+    it "rejects ambiguous lengths transfer coding and trailing body bytes":
+        expect(_frame("POST / HTTP/1.1\r\nContent-Length: 1\r\nContent-Length: 1\r\n\r\nx").error).to_contain("Duplicate Content-Length")
+        expect(_frame("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nContent-Length: 1\r\n\r\nx").complete).to_equal(false)
+        expect(_frame("POST / HTTP/1.1\r\nContent-Length: nope\r\n\r\n").error).to_contain("Invalid Content-Length")
+        expect(_frame("POST / HTTP/1.1\r\nContent-Length: 1\r\n\r\nxy").error).to_contain("Bytes follow")
+
+    it "rejects line boundary and field-name smuggling shapes":
+        expect(_frame("\r\nHost: x\r\n\r\n").error).to_contain("Empty request line")
+        expect(_frame("GET / HTTP/1.1\nHost: x\r\n\r\n").error).to_contain("Bare LF")
+        expect(_frame("GET / HTTP/1.1\rX: y\r\n\r\n").error).to_contain("Embedded CR")
+        expect(_frame("GET / HTTP/1.1\r\nBad Name: x\r\n\r\n").error).to_contain("Invalid header field name")
+        expect(_frame("GET / HTTP/1.1\r\nHost : x\r\n\r\n").error).to_contain("Invalid header field name")
+        val control = frame_http1_fragments_owned_for_test([
+            text_to_bytes_pure("GET / HTTP/1.1\r\nX-Test: a"),
+            [1u8],
+            text_to_bytes_pure("b\r\n\r\n")
+        ], SecureServerPolicy.production())
+        expect(control.error).to_contain("Control byte")
+
+    it "enforces fragmented line count body and version boundaries":
+        expect(_frame("POST / HTTP/1.1\r\nContent-Length: 10485761\r\n\r\n").error).to_contain("413")
+        expect(_frame("POST / HTTP/1.1\r\nContent-Length: 2\r\n\r\nx").error).to_contain("Incomplete")
+        expect(_frame("GET / HTTP/2\r\n\r\n").error).to_contain("Unsupported HTTP version")
+        expect(_frame("GET / HTTP/1.1\r\n folded: value\r\n\r\n").error).to_contain("folded")
+
+        var too_many: [[u8]] = [text_to_bytes_pure("GET / HTTP/1.1\r\n")]
+        var header_index = 0
+        while header_index < 101:
+            too_many.push(text_to_bytes_pure("X-{header_index}: value\r\n"))
+            header_index = header_index + 1
+        too_many.push(text_to_bytes_pure("\r\n"))
+        val count_result = frame_http1_fragments_owned_for_test(
+            too_many, SecureServerPolicy.production())
+        expect(count_result.error).to_contain("Too many headers")
+
+        val oversized_request_line: [u8] = [65u8; 8193]
+        val line_result = frame_http1_fragments_owned_for_test(
+            [oversized_request_line], SecureServerPolicy.production())
+        expect(line_result.error).to_contain("line exceeds policy")
+
+        val oversized_header_line: [u8] = [65u8; 8193]
+        val header_result = frame_http1_fragments_owned_for_test([
+            text_to_bytes_pure("GET / HTTP/1.1\r\n"), oversized_header_line
+        ], SecureServerPolicy.production())
+        expect(header_result.error).to_contain("line exceeds policy")
+
+    it "counts only consecutive no-progress receives and resets after progress":
+        expect(http1_no_progress_terminal_index_for_test(
+            [false, false, true, false, false, false], 3)).to_equal(5)
+        expect(http1_no_progress_terminal_index_for_test(
+            [false, false, true, false, false], 3)).to_equal(-1)
+        expect(http1_no_progress_terminal_index_for_test(
+            [true, true, true], 3)).to_equal(-1)
+
+    it "keeps resume state private and the handler connection-close lifecycle intact":
+        val owner_source = rt_file_read_text(
+            "src/os/apps/servers_user/http1_request_frame_owner.spl") ?? ""
+        val handler_source = rt_file_read_text(
+            "src/os/apps/servers_user/main.spl") ?? ""
+        expect(owner_source.contains("class Http1RequestFrameOwner:")).to_equal(true)
+        expect(owner_source.contains("pub class Http1RequestFrameOwner")).to_equal(false)
+        expect(owner_source.contains("export Http1RequestFrameOwner")).to_equal(false)
+        expect(owner_source.contains("resume_offset")).to_equal(false)
+        expect(owner_source.contains("retained.slice(0")).to_equal(false)
+        expect(owner_source).to_contain("self.retained.extend(fragment)")
+        expect(owner_source).to_contain("maximum_retained: i64")
+        expect(handler_source).to_contain("recv_http1_request_owned(client, policy)")
+        expect(handler_source).to_contain("close_fd(client.fd)")

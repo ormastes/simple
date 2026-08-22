@@ -225,6 +225,131 @@ impl HirLowering:
             case HirTypeKind.Error: nil
             case _: found
 
+    me composite_name_for_base_raw(raw_base_symbol_id: i64) -> text:
+        if rt_dict_contains(self.local_struct_types, raw_base_symbol_id):
+            return self.local_struct_types[raw_base_symbol_id]
+        val raw_owner_symbol_id = self.symbols.get_symbol_named_type_raw(raw_base_symbol_id)
+        if raw_owner_symbol_id >= 0:
+            return self.composite_name_for_owner_raw(raw_owner_symbol_id)
+        if self.current_method_self_symbol_id >= 0:
+            if val base_definition = self.symbols.get_symbol_raw(raw_base_symbol_id):
+                if base_definition.name == "self" or base_definition.name == "me":
+                    if val self_owner = self.symbols.get_symbol_raw(self.current_method_self_symbol_id):
+                        return self_owner.name
+        ""
+
+    me composite_name_for_owner_raw(raw_owner_symbol_id: i64) -> text:
+        if rt_dict_contains(self.composite_name_by_owner_symbol, raw_owner_symbol_id):
+            return self.composite_name_by_owner_symbol[raw_owner_symbol_id]
+        var result = ""
+        if val owner_symbol = self.symbols.get_symbol_raw(raw_owner_symbol_id):
+            if val owner_module = owner_symbol.defining_module:
+                val canonical_name = owner_module + "." + owner_symbol.name
+                if rt_dict_contains(self.struct_field_access_by_name, canonical_name):
+                    result = canonical_name
+            if result == "" and rt_dict_contains(self.struct_field_access_by_name, owner_symbol.name):
+                result = owner_symbol.name
+        self.composite_name_by_owner_symbol[raw_owner_symbol_id] = result
+        result
+
+    me named_owner_raw_from_type(type_: HirType) -> i64:
+        match type_.kind:
+            case HirTypeKind.Named(owner, _): owner.id
+            case HirTypeKind.Ref(inner, _): self.named_owner_raw_from_type(inner)
+            case HirTypeKind.Ptr(inner, _): self.named_owner_raw_from_type(inner)
+            case HirTypeKind.Optional(inner): self.named_owner_raw_from_type(inner)
+            case HirTypeKind.Array(inner, _): self.named_owner_raw_from_type(inner)
+            case HirTypeKind.Slice(inner): self.named_owner_raw_from_type(inner)
+            case _: -1
+
+    me named_owner_raw_for_expr(expr: HirExpr) -> i64:
+        if expr.has_type_:
+            val typed_owner = self.named_owner_raw_from_type(expr.type_)
+            if typed_owner >= 0:
+                return typed_owner
+        val direct_symbol = _hir_expr_symbol_or_invalid(expr.kind)
+        if direct_symbol.is_valid():
+            return self.symbols.get_symbol_named_type_raw(direct_symbol.id)
+        match expr.kind:
+            case HirExprKind.Call(callee, _, _):
+                val callee_symbol = _hir_expr_symbol_or_invalid(callee.kind)
+                if callee_symbol.is_valid():
+                    if val definition = self.symbols.get_symbol_raw(callee_symbol.id):
+                        if definition.type_ != nil:
+                            val callable_type = definition.type_ ?? _hir_missing_field_type()
+                            match callable_type.kind:
+                                case HirTypeKind.Function(_, return_type, _):
+                                    val return_owner = self.named_owner_raw_from_type(return_type)
+                                    if return_owner >= 0:
+                                        return return_owner
+                                case _: ()
+            case _: ()
+        -1
+
+    me composite_name_for_expr(expr: HirExpr) -> text:
+        val owner = self.named_owner_raw_for_expr(expr)
+        if owner < 0:
+            return ""
+        self.composite_name_for_owner_raw(owner)
+
+    me field_access_for_base_raw(raw_base_symbol_id: i64, field_name: text) -> i64:
+        """Return 1 allowed, 0 denied, -1 when no retained member metadata exists."""
+        val composite_name = self.composite_name_for_base_raw(raw_base_symbol_id)
+        if composite_name == "" or not rt_dict_contains(self.struct_field_access_by_name, composite_name):
+            return -1
+        val fields = self.struct_field_access_by_name[composite_name]
+        if not rt_dict_contains(fields, field_name):
+            return -1
+        if fields[field_name]:
+            return 1
+        0
+
+    me field_access_for_expr(expr: HirExpr, field_name: text) -> i64:
+        val direct_symbol = _hir_expr_symbol_or_invalid(expr.kind)
+        if direct_symbol.is_valid() and rt_dict_contains(self.local_struct_types, direct_symbol.id):
+            val local_composite = self.local_struct_types[direct_symbol.id]
+            if not rt_dict_contains(self.struct_field_access_by_name, local_composite):
+                return 0
+            val local_fields = self.struct_field_access_by_name[local_composite]
+            if not rt_dict_contains(local_fields, field_name):
+                return -1
+            if local_fields[field_name]:
+                return 1
+            return 0
+        val owner = self.named_owner_raw_for_expr(expr)
+        if owner < 0:
+            return -1
+        val composite_name = self.composite_name_for_owner_raw(owner)
+        # A nominal owner without retained member metadata is a malformed
+        # compiler boundary, not permission to bypass visibility.
+        if composite_name == "" or not rt_dict_contains(self.struct_field_access_by_name, composite_name):
+            return 0
+        val fields = self.struct_field_access_by_name[composite_name]
+        if not rt_dict_contains(fields, field_name):
+            return -1
+        if fields[field_name]:
+            return 1
+        0
+
+    me constructor_access_for_name(name: text) -> i64:
+        """Return 1 allowed, 0 denied, -1 for a non-composite/unknown callee."""
+        if not rt_dict_contains(self.struct_constructor_access_by_name, name):
+            return -1
+        if self.struct_constructor_access_by_name[name]:
+            return 1
+        0
+
+    me qualified_constructor_access(qualifier: text, name: text) -> i64:
+        val qualifier_symbol = self.symbols.lookup_or_invalid(qualifier)
+        if qualifier_symbol.is_valid():
+            if val definition = self.symbols.get_symbol_raw(qualifier_symbol.id):
+                if val owner_module = definition.defining_module:
+                    val canonical_name = owner_module + "." + name
+                    val canonical_access = self.constructor_access_for_name(canonical_name)
+                    if canonical_access >= 0:
+                        return canonical_access
+        self.constructor_access_for_name(name)
+
     me field_type_for_base_raw(raw_base_symbol_id: i64, field_name: text) -> HirType:
         if rt_dict_contains(self.local_struct_types, raw_base_symbol_id):
             val struct_name = self.local_struct_types[raw_base_symbol_id]

@@ -18,6 +18,8 @@ use nogc_sync_mut.db.dbfs_driver.device_commit_owner.{
 use std.fs_driver.error.{FsError}
 use std.fs_driver.types.{FileHandle, DirHandle, Path, OpenFlags, DirEntry, StatInfo}
 
+val DBFS_MAX_BOUNDED_PREAD_BYTES: i64 = 65536
+
 fn _remove_inode_id_locked(inst_id: i64, inode_id: u64):
     var i: i32 = 0
     while i < _dbfs_inodes.len() as i32:
@@ -209,10 +211,9 @@ impl DbFsDriver:
             return Ok([])
         val available = inode.size - offset
         val count = if length < available: length else: available
-        val prefix = if self.arena_base >= 0:
-            self._read_inode_bytes_from_device_locked(inode.id, offset + count)?
-        else:
-            inode.content_bytes
+        if self.arena_base >= 0:
+            return self._pread_inode_bytes_from_device_locked(inode.id, offset, count)
+        val prefix = inode.content_bytes
         var out: [u8] = []
         var i: i64 = 0
         while i < count and offset + i < prefix.len() as i64:
@@ -559,6 +560,21 @@ impl DbFsDriver:
     fn pread_bytes_handle(
         handle: FileHandle, offset: i64, length: i64
     ) -> Result<[u8], FsError>:
+        if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
+        _namespace_finish(self._pread_bytes_handle_locked(handle, offset, length))
+
+    fn pread_bounded_bytes_handle(
+        handle: FileHandle, offset: i64, length: i64
+    ) -> Result<[u8], FsError>:
+        """Return an owned positioned chunk of at most 64 KiB.
+
+        Arrays are value/CoW in the current shared driver surface, so this API
+        intentionally returns ownership instead of claiming caller-visible
+        mutation.  The device-backed path reads at the requested file offset
+        and never allocates or reads the skipped prefix.
+        """
+        if length < 0 or length > DBFS_MAX_BOUNDED_PREAD_BYTES:
+            return Err(FsError.InvalidArg)
         if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
         _namespace_finish(self._pread_bytes_handle_locked(handle, offset, length))
 

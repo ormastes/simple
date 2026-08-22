@@ -1,6 +1,6 @@
 # Export-origin indexes and facade resolution.
 
-use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfaceBuilder, ModuleSurfaceExportOriginIndex, ModuleSurfaceOriginResolution, module_surface_export_origin_index_lookup, module_surface_export_origin_index_put, module_surface_validate_owner_index}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfaceBuilder, ModuleSurfaceExportOriginIndex, ModuleSurfaceOriginResolution, module_surface_declaration_authority_index_put, module_surface_declaration_authority_lookup_building, module_surface_export_origin_index_lookup, module_surface_export_origin_index_put, module_surface_validate_owner_index}
 use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_module_name, module_surface_package_name}
 
 extern fn rt_env_get(key: text) -> text
@@ -387,6 +387,36 @@ impl ModuleSurfaceBuilder:
                 "exit passes_run={origin_pass} changed={origin_changed}")
         if origin_changed:
             return Err("facade export origin resolution did not converge after {max_origin_passes} passes")
+        # Bind every facade spelling to the terminal declaration's authority
+        # once, after the export graph converges. Consumers then perform one
+        # indexed lookup and never rescan declaration category arrays or walk
+        # a re-export chain on the import hot path.
+        var authority_surface_index = 0
+        while authority_surface_index < self.surfaces.len():
+            var authority_surface = self.surfaces[authority_surface_index]
+            var authority_name_index = 0
+            while authority_name_index < authority_surface.export_origin_index.names.len():
+                val local_name = authority_surface.export_origin_index.names[authority_name_index]
+                val origin = module_surface_export_origin_index_lookup(
+                    authority_surface.export_origin_index, local_name)
+                if origin.found:
+                    val terminal_index = module_surface_index_by_name(
+                        name_index, origin.owner_module)
+                    if terminal_index >= 0 and terminal_index < self.surfaces.len():
+                        val terminal_surface = self.surfaces[terminal_index]
+                        val authority = module_surface_declaration_authority_lookup_building(
+                            terminal_surface.declaration_authority_index,
+                            origin.source_name)
+                        if authority.found:
+                            val put_result = module_surface_declaration_authority_index_put(
+                                authority_surface.declaration_authority_index,
+                                local_name, authority.declaring_module,
+                                authority.source_name, authority.visibility)
+                            if put_result.is_err():
+                                return Err(put_result.unwrap_err())
+                authority_name_index = authority_name_index + 1
+            self.surfaces[authority_surface_index] = authority_surface
+            authority_surface_index = authority_surface_index + 1
         Ok(())
 
 pub(package) fn module_surface_declares_item(surface: ModuleSurface, name: text) -> bool:

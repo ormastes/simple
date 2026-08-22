@@ -1,0 +1,134 @@
+"""Frozen declaration authority metadata across outline, parser, and facades."""
+
+use std.spec
+use compiler.treesitter.*
+use compiler.common.config.{Logger}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.module_surface.{module_surface_declaration_authority_lookup, module_surfaces_from_modules}
+
+fn authority_logger() -> Logger:
+    Logger(level: 0)
+
+describe "module surface declaration authority":
+    it "does not strip authority-looking text from executable strings":
+        val source_text = "fn message() -> text:\n    \"friend attacker internal_export secret\""
+        val parsed = parse_full_frontend(
+            source_text, "authority.literal", "authority.literal", authority_logger())
+        expect(parsed.functions.contains_key("message")).to_be(true)
+        expect(parsed.friends.len()).to_equal(0)
+        expect(parsed.internal_exports.len()).to_equal(0)
+
+    it "carries friend and internal-export metadata from outline through parser surface":
+        val source_text = "friend trusted\ninternal_export sealed_value\npub(friend) val sealed_value: i64 = 7"
+        var tree = TreeSitter.new(source_text)
+        val outline = tree.parse_outline()
+        expect(outline.friends).to_contain("trusted")
+        expect(outline.internal_exports).to_contain("sealed_value")
+
+        val parsed = parse_full_frontend(
+            source_text,
+            "authority.owner", "authority.owner", authority_logger())
+        var modules: Dict<text, Module> = {}
+        modules["authority.owner"] = parsed
+        val result = module_surfaces_from_modules(modules, [SourceFile(
+            path: "authority/owner.spl", content: source_text,
+            module_name: "authority.owner")])
+        expect(result.is_ok()).to_be(true)
+        if result.is_ok():
+            val registry = result.unwrap()
+            val surface = registry.surfaces[registry.index_by_name["authority.owner"]]
+            expect(surface.friends).to_contain("trusted")
+            expect(surface.internal_exports).to_contain("sealed_value")
+            val authority = module_surface_declaration_authority_lookup(
+                surface.declaration_authority_index, "sealed_value")
+            expect(authority.found).to_be(true)
+            expect(authority.declaring_module).to_equal("authority.owner")
+            expect(authority.source_name).to_equal("sealed_value")
+            expect(authority.visibility).to_equal(Visibility.Internal)
+
+    it "resolves an aliased re-export to terminal declaration authority":
+        val owner_source = "pub(package) fn guarded() -> i64:\n    1"
+        val facade_source = "use authority.owner.\{guarded\}\nexport guarded: exposed"
+        var modules: Dict<text, Module> = {}
+        modules["authority.owner"] = parse_full_frontend(
+            owner_source, "authority.owner", "authority.owner", authority_logger())
+        modules["authority.facade"] = parse_full_frontend(
+            facade_source, "authority.facade", "authority.facade", authority_logger())
+        val result = module_surfaces_from_modules(modules, [
+            SourceFile(path: "authority/owner.spl", content: owner_source, module_name: "authority.owner"),
+            SourceFile(path: "authority/facade.spl", content: facade_source, module_name: "authority.facade")
+        ])
+        expect(result.is_ok()).to_be(true)
+        if result.is_ok():
+            val registry = result.unwrap()
+            val facade = registry.surfaces[registry.index_by_name["authority.facade"]]
+            val authority = module_surface_declaration_authority_lookup(
+                facade.declaration_authority_index, "exposed")
+            expect(authority.found).to_be(true)
+            expect(authority.declaring_module).to_equal("authority.owner")
+            expect(authority.source_name).to_equal("guarded")
+            expect(authority.visibility).to_equal(Visibility.Package)
+
+    it "resolves a multi-hop alias chain to terminal declaration authority":
+        val owner_source = "pub(up) fn guarded() -> i64:\n    1"
+        val middle_source = "use chain.owner.\{guarded\}\nexport guarded: middle_name"
+        val facade_source = "use chain.middle.\{middle_name\}\nexport middle_name: public_name"
+        var modules: Dict<text, Module> = {}
+        modules["chain.owner"] = parse_full_frontend(
+            owner_source, "chain.owner", "chain.owner", authority_logger())
+        modules["chain.middle"] = parse_full_frontend(
+            middle_source, "chain.middle", "chain.middle", authority_logger())
+        modules["chain.facade"] = parse_full_frontend(
+            facade_source, "chain.facade", "chain.facade", authority_logger())
+        val result = module_surfaces_from_modules(modules, [
+            SourceFile(path: "chain/facade.spl", content: facade_source, module_name: "chain.facade"),
+            SourceFile(path: "chain/middle.spl", content: middle_source, module_name: "chain.middle"),
+            SourceFile(path: "chain/owner.spl", content: owner_source, module_name: "chain.owner")
+        ])
+        expect(result.is_ok()).to_be(true)
+        if result.is_ok():
+            val registry = result.unwrap()
+            val facade = registry.surfaces[registry.index_by_name["chain.facade"]]
+            val authority = module_surface_declaration_authority_lookup(
+                facade.declaration_authority_index, "public_name")
+            expect(authority.found).to_be(true)
+            expect(authority.declaring_module).to_equal("chain.owner")
+            expect(authority.source_name).to_equal("guarded")
+            expect(authority.visibility).to_equal(Visibility.Up)
+
+    it "retains member visibility and declaring owner without enforcing access yet":
+        val source_text = "pub class Vault:\n    pub(up) parent_only: i64"
+        var modules: Dict<text, Module> = {}
+        modules["authority.vault"] = parse_full_frontend(
+            source_text, "authority.vault", "authority.vault", authority_logger())
+        val result = module_surfaces_from_modules(modules, [SourceFile(
+            path: "authority/vault.spl", content: source_text,
+            module_name: "authority.vault")])
+        expect(result.is_ok()).to_be(true)
+        if result.is_ok():
+            val registry = result.unwrap()
+            val surface = registry.surfaces[registry.index_by_name["authority.vault"]]
+            val composite = surface.composites["Vault"]
+            expect(composite.fields.len()).to_equal(1)
+            expect(composite.fields[0].visibility).to_equal(Visibility.Up)
+            expect(composite.fields[0].declaring_module).to_equal("authority.vault")
+
+    it "fails closed for absent authority metadata":
+        val source_text = "pub fn visible() -> i64:\n    1"
+        var modules: Dict<text, Module> = {}
+        modules["authority.single"] = parse_full_frontend(
+            source_text, "authority.single", "authority.single", authority_logger())
+        val result = module_surfaces_from_modules(modules, [SourceFile(
+            path: "authority/single.spl", content: source_text,
+            module_name: "authority.single")])
+        expect(result.is_ok()).to_be(true)
+        if result.is_ok():
+            val registry = result.unwrap()
+            val surface = registry.surfaces[registry.index_by_name["authority.single"]]
+            val missing = module_surface_declaration_authority_lookup(
+                surface.declaration_authority_index, "not_declared")
+            expect(missing.found).to_be(false)
+            expect(missing.visibility).to_equal(Visibility.Private)

@@ -60,3 +60,29 @@ implementations annotate their local binding `mut`.  Existing value/CoW
 semantics do not establish that those writes reach the caller.  The stable
 snapshot API must therefore return owned bounded chunks until a language test
 and shared trait signature prove a mutable caller-visible ABI.
+
+## 2026-08-22 bounded read-at seam
+
+DBFS, NVFS, and NVFS-POSIX now expose the additive
+`pread_bounded_bytes_handle` contract.  It accepts 0–65,536 bytes, rejects
+negative, oversize, and overflowing ranges, preserves exact short-EOF binary
+results, and returns an owned array.  The existing unrestricted byte-return
+APIs remain compatible.
+
+For device-backed DBFS, the namespace owner now translates the requested file
+offset through the inode's blob binding before entering the device owner.  The
+device loop therefore reads only sectors intersecting the result:
+O(ceil((intra_sector + result_bytes) / sector_size)) device reads and
+O(result_bytes + sector_size) live owned memory, excluding geometric spare
+capacity while the result array grows.  A structural integration oracle
+places an 8-KiB binary file on a counting device, reads 16 bytes at offset
+4 KiB, and requires fewer than three sector reads; the former prefix route
+would require at least nine.  It also checks exact EOF, NUL-capable binary
+values, overflow, 64-KiB/oversize boundaries, independent ownership, and
+unchanged canaries.
+
+Caller-visible mutable read-into remains deliberately unimplemented: current
+shared `[u8]` value/CoW semantics do not prove that a callee's `mut` binding
+updates caller storage.  No mutable reuse or zero-allocation claim is made.
+The remaining stable-snapshot work is the MountTable-owned generation/lease
+registry and serialized mutation invalidation described above.

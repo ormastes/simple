@@ -40,8 +40,17 @@ a complete keep-alive lifecycle is owned.
 
 ## Status
 
-Open. A three-cycle implementation attempt was reverted after independent
-review found the choice between forgeable public resume scalars and O(H²)
-canonical prefix rescanning had not converged on an opaque O(H) owner. The
-self-hosted runtime was unavailable, so runtime/performance evidence was not
-produced.
+Implemented in the filesystem server lane with a module-private
+`Http1RequestFrameOwner`. The exported socket operation owns construction,
+incremental scanning, and terminal delivery; no resume scalar or constructor
+crosses the module boundary. Each framing/header byte is appended and examined
+once, body tails are bounds-checked and bulk-appended once per receive, each
+completed header line is materialized once, and the full request is
+materialized once at delivery. Peak retained framing state is bounded by the
+configured request-line, header, and exact 10 MiB body policy.
+
+Static correctness and performance-structure coverage is in
+`test/01_unit/os/apps/servers_user/http1_request_frame_owner_spec.spl`.
+Runtime timing/RSS and x86-64/ARM64/RV64 execution evidence remain pending
+because this worktree has no admitted self-hosted `bin/simple`; the Rust seed
+was not used as a substitute.

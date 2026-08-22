@@ -26,6 +26,27 @@ use std.fs_driver.mem_block_device.{MemBlockDevice}
 use std.fs_driver.types.{FileHandle, OpenFlags, Path}
 
 var _dbfs_namespace_write_count: i64 = 0
+var _dbfs_counting_read_count: i64 = 0
+
+class CountingReadBlockDevice:
+    inner: MemBlockDevice
+
+impl CountingReadBlockDevice:
+    static fn new(sector_count: u64) -> CountingReadBlockDevice:
+        _dbfs_counting_read_count = 0
+        CountingReadBlockDevice(inner: MemBlockDevice.new(sector_count, 512u32))
+
+impl BlockDevice for CountingReadBlockDevice:
+    fn read_sector(lba: u64) -> Result<[u8], text>:
+        _dbfs_counting_read_count = _dbfs_counting_read_count + 1
+        self.inner.read_sector(lba)
+
+    fn write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
+        var inner = self.inner
+        inner.write_sector(lba, data)
+
+    fn sector_size() -> u32:
+        512u32
 
 class NamespaceCommitFailBlockDevice:
     inner: MemBlockDevice
@@ -77,6 +98,39 @@ describe "DBFS binary positioned I/O":
         step("Keep each result independently owned")
         got[0] = 0x11u8
         expect(driver.pread_bytes_handle(handle, 2, 1).unwrap()).to_equal([0x80u8])
+
+    # @req: REQ-SQ-021
+    it "device-backed bounded reads do not read the skipped prefix":
+        step("Verify: a far-offset read touches only sectors containing its result")
+        val dev = CountingReadBlockDevice.new(4096u64)
+        val driver = DbFsDriver.open_on_device(dev, 64i64, 2048i64).unwrap()
+        val handle = driver.open_path(
+            Path(raw: "/dbfs-read-at.bin"), OpenFlags.read_write().with_create()).unwrap()
+        var seed: [u8] = []
+        var i: i64 = 0
+        while i < 8192:
+            seed.push((i % 251) as u8)
+            i = i + 1
+        driver.write_bytes_handle(handle, seed).unwrap()
+
+        step("Reset device evidence after setup and read sixteen bytes at 4 KiB")
+        _dbfs_counting_read_count = 0
+        val got = driver.pread_bounded_bytes_handle(handle, 4096, 16).unwrap()
+        expect(got.len()).to_equal(16)
+        expect(got[0]).to_equal((4096 % 251) as u8)
+        expect(got[15]).to_equal((4111 % 251) as u8)
+        # An unaligned blob can span two sectors. Prefix materialization would
+        # touch at least nine sectors for this fixture.
+        expect(_dbfs_counting_read_count).to_be_less_than(3)
+
+        step("EOF is short and owned results cannot overwrite caller canaries")
+        val caller_canary: [u8] = [0xa5u8, 0x5au8]
+        val eof = driver.pread_bounded_bytes_handle(handle, 8188, 16).unwrap()
+        expect(eof.len()).to_equal(4)
+        expect(eof).to_equal([
+            (8188 % 251) as u8, (8189 % 251) as u8,
+            (8190 % 251) as u8, (8191 % 251) as u8])
+        expect(caller_canary).to_equal([0xa5u8, 0x5au8])
 
     # @req: REQ-SQ-021
     it "preserves binary prefix and suffix around an overwrite":

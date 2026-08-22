@@ -1,0 +1,81 @@
+# @tag: unit, os, wm, provenance, performance
+# @cover src/lib/common/ui/window_scene.spl 5%
+# @cover src/os/compositor/engine2d_wm_frame_executor.spl 1%
+
+use std.spec.*
+use std.fs.{file_read}
+use common.ui.window_scene.{
+    WM_CONTENT_ORIGIN_GUI,
+    WM_CONTENT_ORIGIN_SIMPLE_WEB,
+    WmContentFrame,
+    wm_content_frame_web_provenance_valid
+}
+
+val LOWER_SHA = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+fn content_frame(origin_kind: text, material_sha: text, theme_sha: text) -> WmContentFrame:
+    WmContentFrame(
+        window_id: "browser",
+        scene_revision: 1,
+        content_revision: 1,
+        origin_kind: origin_kind,
+        width: 1,
+        height: 1,
+        pixels: [0xFF102030u32],
+        checksum: 1u64,
+        parent_window_id: "",
+        offset_x: 0,
+        offset_y: 0,
+        engine2d_status: "engine2d_rendered",
+        engine2d_backend: "software",
+        material_fallback_kind: "solid-material",
+        material_fallback_reason: "cpu-raster-backdrop-sampling-unavailable",
+        material_fallback_sha256: material_sha,
+        theme_id: "aetheric_dark",
+        theme_source_manifest_sha256: theme_sha
+    )
+
+fn occurrence_count(haystack: text, needle: text) -> i64:
+    var count: i64 = 0
+    var offset: i64 = 0
+    while offset < haystack.len():
+        val found = find_from(haystack, needle, offset)
+        if found < 0:
+            return count
+        count = count + 1
+        offset = found + needle.len()
+    count
+
+describe "WM content provenance hot path":
+    it "preserves strict lowercase SHA-256 admission at every byte boundary":
+        expect(wm_content_frame_web_provenance_valid(
+            content_frame(WM_CONTENT_ORIGIN_SIMPLE_WEB, LOWER_SHA, LOWER_SHA))).to_be(true)
+        expect(wm_content_frame_web_provenance_valid(
+            content_frame(WM_CONTENT_ORIGIN_SIMPLE_WEB, "g" + LOWER_SHA.substring(1, 64), LOWER_SHA))).to_be(false)
+        expect(wm_content_frame_web_provenance_valid(
+            content_frame(WM_CONTENT_ORIGIN_SIMPLE_WEB, LOWER_SHA.substring(0, 63) + "A", LOWER_SHA))).to_be(false)
+        expect(wm_content_frame_web_provenance_valid(
+            content_frame(WM_CONTENT_ORIGIN_SIMPLE_WEB, LOWER_SHA, LOWER_SHA.substring(0, 63)))).to_be(false)
+
+    it "does not apply web provenance rules to a GUI-owned frame":
+        expect(wm_content_frame_web_provenance_valid(
+            content_frame(WM_CONTENT_ORIGIN_GUI, "", ""))).to_be(true)
+
+    it "uses byte validation without per-character text allocation":
+        val source = file_read("src/lib/common/ui/window_scene.spl")
+        expect(source).to_contain("val bytes = value.bytes()")
+        expect(source).to_not_contain("allowed.contains(value[i].to_text())")
+
+    it "dispatches top-level frame provenance exactly once per render branch":
+        val source = file_read(
+            "src/os/compositor/engine2d_wm_frame_executor.spl")
+        val branch_start = source.find(
+            "if val frame = shared_wm_content_frame_for_window")
+        val branch_end = source.find(
+            "if not resolved:")
+        expect(branch_start >= 0).to_be(true)
+        expect(branch_end > branch_start).to_be(true)
+        val branch = source.substring(branch_start, branch_end)
+        expect(occurrence_count(
+            branch, "wm_content_frame_web_provenance_valid(frame)"
+        )).to_equal(1)

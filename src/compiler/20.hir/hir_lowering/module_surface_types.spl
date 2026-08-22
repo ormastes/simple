@@ -53,6 +53,8 @@ struct ModuleSurfaceField:
     type_: Type
     type_name: text
     array_element_name: text
+    visibility: Visibility
+    declaring_module: text
 
 struct ModuleSurfaceComposite:
     name: text
@@ -153,6 +155,98 @@ struct ModuleSurfaceOriginResolution:
     owner_module: text
     source_name: text
     resolution_kind: text
+
+struct ModuleSurfaceDeclarationAuthorityLookup:
+    found: bool
+    declaring_module: text
+    source_name: text
+    visibility: Visibility
+
+class ModuleSurfaceDeclarationAuthorityIndex:
+    index_by_name: Dict<text, i64>
+    names: [text]
+    declaring_modules: [text]
+    source_names: [text]
+    visibilities: [Visibility]
+    frozen: bool
+
+pub(package) fn module_surface_declaration_authority_index_empty() -> ModuleSurfaceDeclarationAuthorityIndex:
+    ModuleSurfaceDeclarationAuthorityIndex(
+        index_by_name: {}, names: [], declaring_modules: [],
+        source_names: [], visibilities: [], frozen: false)
+
+pub(package) fn module_surface_declaration_authority_index_put(
+    index: ModuleSurfaceDeclarationAuthorityIndex,
+    name: text,
+    declaring_module: text,
+    source_name: text,
+    visibility: Visibility
+) -> Result<(), text>:
+    if index.frozen:
+        return Err("module surface declaration authority index is frozen")
+    if index.names.len() != index.declaring_modules.len() or
+       index.names.len() != index.source_names.len() or
+       index.names.len() != index.visibilities.len():
+        return Err("module surface declaration authority arrays are misaligned")
+    if index.index_by_name.contains_key(name):
+        val position = index.index_by_name[name]
+        if position < 0 or position >= index.names.len() or index.names[position] != name:
+            return Err("module surface declaration authority scalar index is invalid")
+        index.declaring_modules[position] = declaring_module
+        index.source_names[position] = source_name
+        index.visibilities[position] = visibility
+        return Ok(())
+    val position = index.names.len()
+    index.index_by_name[name] = position
+    index.names = index.names.push(name)
+    index.declaring_modules = index.declaring_modules.push(declaring_module)
+    index.source_names = index.source_names.push(source_name)
+    index.visibilities = index.visibilities.push(visibility)
+    Ok(())
+
+pub fn module_surface_declaration_authority_lookup(
+    index: ModuleSurfaceDeclarationAuthorityIndex, name: text
+) -> ModuleSurfaceDeclarationAuthorityLookup:
+    if not index.frozen or not index.index_by_name.contains_key(name):
+        return ModuleSurfaceDeclarationAuthorityLookup(
+            found: false, declaring_module: "", source_name: "",
+            visibility: Visibility.Private)
+    val position = index.index_by_name[name]
+    if position < 0 or position >= index.names.len() or
+       position >= index.declaring_modules.len() or
+       position >= index.source_names.len() or
+       position >= index.visibilities.len() or index.names[position] != name:
+        return ModuleSurfaceDeclarationAuthorityLookup(
+            found: false, declaring_module: "", source_name: "",
+            visibility: Visibility.Private)
+    ModuleSurfaceDeclarationAuthorityLookup(
+        found: true,
+        declaring_module: index.declaring_modules[position],
+        source_name: index.source_names[position],
+        visibility: index.visibilities[position])
+
+pub(package) fn module_surface_declaration_authority_lookup_building(
+    index: ModuleSurfaceDeclarationAuthorityIndex, name: text
+) -> ModuleSurfaceDeclarationAuthorityLookup:
+    # Construction-only twin of the public frozen lookup. Export resolution
+    # must bind facade aliases before the registry can be frozen.
+    if not index.index_by_name.contains_key(name):
+        return ModuleSurfaceDeclarationAuthorityLookup(
+            found: false, declaring_module: "", source_name: "",
+            visibility: Visibility.Private)
+    val position = index.index_by_name[name]
+    if position < 0 or position >= index.names.len() or
+       position >= index.declaring_modules.len() or
+       position >= index.source_names.len() or
+       position >= index.visibilities.len() or index.names[position] != name:
+        return ModuleSurfaceDeclarationAuthorityLookup(
+            found: false, declaring_module: "", source_name: "",
+            visibility: Visibility.Private)
+    ModuleSurfaceDeclarationAuthorityLookup(
+        found: true,
+        declaring_module: index.declaring_modules[position],
+        source_name: index.source_names[position],
+        visibility: index.visibilities[position])
 
 class ModuleSurfaceExportOriginIndex:
     origins: Dict<text, ModuleSurfaceExportOrigin>
@@ -283,6 +377,8 @@ class ModuleSurface:
     content_hash: i64
     imports: [ParserImport]
     exports: [Export]
+    friends: [text]
+    internal_exports: [text]
     # Frozen route projections.  These are deliberately parallel scalar
     # arrays: no Dict<text, aggregate> crosses the native Stage3 boundary.
     import_target_indices: [i64]
@@ -323,6 +419,7 @@ class ModuleSurface:
     constants: Dict<text, ModuleSurfaceConst>
     export_origins: Dict<text, ModuleSurfaceExportOrigin>
     export_origin_index: ModuleSurfaceExportOriginIndex
+    declaration_authority_index: ModuleSurfaceDeclarationAuthorityIndex
 
     static fn empty(name: text) -> ModuleSurface:
         ModuleSurface(
@@ -331,7 +428,7 @@ class ModuleSurface:
             logical_name: name, canonical_name: name, package_name: "",
             preferred_registry_name: name,
             content_length: 0, content_hash: 0,
-            imports: [], exports: [],
+            imports: [], exports: [], friends: [], internal_exports: [],
             import_target_indices: [], import_target_names: [],
             import_item_offsets: [0], import_item_names: [],
             import_item_aliases: [], import_item_has_alias: [],
@@ -346,7 +443,8 @@ class ModuleSurface:
             callables: {}, composites: {}, enums: {},
             traits: {}, impls: [], type_aliases: {}, constants: {},
             export_origins: {},
-            export_origin_index: module_surface_export_origin_index_empty())
+            export_origin_index: module_surface_export_origin_index_empty(),
+            declaration_authority_index: module_surface_declaration_authority_index_empty())
 
 pub(package) fn module_surface_name_position(names: [text], name: text) -> i64:
     var position = 0

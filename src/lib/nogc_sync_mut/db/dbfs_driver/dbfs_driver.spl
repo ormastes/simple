@@ -510,6 +510,39 @@ impl DbFsDriver:
             return Err(FsError.IoError(code: 0))
         Ok(out)
 
+    fn _pread_inode_bytes_from_device_locked(
+        inode_id: u64, file_offset: i64, length: i64
+    ) -> Result<[u8], FsError>:
+        """Read one bounded file range without materializing its prefix."""
+        if self.arena_base < 0:
+            return Err(FsError.Unsupported)
+        if file_offset < 0 or length < 0 or file_offset > 0x7FFFFFFFFFFFFFFF - length:
+            return Err(FsError.InvalidArg)
+        val binding = dbfs_device_blob_binding_locked(self.inst_id, inode_id)
+        if not binding.exists or binding.offset < 0 or binding.length < 0:
+            return Err(FsError.Unsupported)
+        if length == 0:
+            return Ok([])
+        # The namespace owner already clipped `length` to its inode size.  A
+        # shorter durable binding is metadata divergence, not ordinary EOF.
+        if file_offset > binding.length or length > binding.length - file_offset:
+            return Err(FsError.Corrupt)
+        val count = length
+        if binding.offset > 0x7FFFFFFFFFFFFFFF - file_offset:
+            return Err(FsError.InvalidArg)
+        val bytes = dbfs_device_read_bytes_locked(
+            self.inst_id, self.arena_base, self.arena_block_count,
+            binding.offset + file_offset, count
+        )
+        if bytes.is_err():
+            return bytes
+        val out = match bytes:
+            Ok(value): value
+            Err(err): return Err(err)
+        if out.len() as i64 != count:
+            return Err(FsError.IoError(code: 0u32))
+        Ok(out)
+
     # --- capability / extension ---
 
     fn probe(cap: Capability) -> Option<Extension>:

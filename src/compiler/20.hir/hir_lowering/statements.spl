@@ -24,15 +24,12 @@ impl HirLowering:
     # Nested-field-access support (native --entry path bug -- see
     # struct_field_types_by_name / local_struct_types doc comments in
     # types.spl). `val/var x = StructName(...)` is the only local-declared-
-    # type shape this lane can recover without a full inference pass: the
-    # callee name is a compile-time-static struct name IF it is already
-    # registered in struct_field_types_by_name (structs are lowered in a
-    # up-front pass before function bodies, so this dict is fully populated
-    # by the time any function body -- and thus any Let -- is lowered).
-    # Deliberately narrow: only a bare `Ident(...)` call callee: qualified
-    # constructors, method calls, etc. are left untracked (Field-expr
-    # lowering then falls back to its pre-existing untyped i64 default,
-    # same as today -- this is additive, never a regression).
+    # type shapes this lane can recover without a full inference pass are a
+    # direct aggregate constructor and a bare function whose retained
+    # signature has a nominal return. Structs and imported signatures are
+    # registered before bodies, so both decisions are constant-time here.
+    # Qualified constructors and dynamically dispatched calls remain outside
+    # this narrow ownership projection.
     me try_register_local_struct_type(sym: SymbolId, init_expr: Expr):
         match init_expr.kind:
             case ExprKind.Call(callee, call_args):
@@ -69,6 +66,25 @@ impl HirLowering:
                                         case _: ()
                                     arg_i = arg_i + 1
                                 self.struct_field_types_by_name[callee_name] = known_fields
+                        else:
+                            # Preserve a nominal function result for a later
+                            # field access (`val v = make(); v.private`). The
+                            # local symbol itself is untyped on this path, so
+                            # dropping this owner would bypass member policy.
+                            val callee_symbol = self.symbols.lookup_or_invalid(callee_name)
+                            if callee_symbol.is_valid():
+                                if val callable = self.symbols.get_symbol_raw(callee_symbol.id):
+                                    if callable.type_ != nil:
+                                        val callable_type = callable.type_ ?? HirType(
+                                            kind: HirTypeKind.Error, span: init_expr.span)
+                                        match callable_type.kind:
+                                            case HirTypeKind.Function(_, return_type, _):
+                                                val return_owner = self.named_owner_raw_from_type(return_type)
+                                                if return_owner >= 0:
+                                                    val composite_name = self.composite_name_for_owner_raw(return_owner)
+                                                    if composite_name != "":
+                                                        self.local_struct_types[sym.id] = composite_name
+                                            case _: ()
                     case _: ()
             case _: ()
 

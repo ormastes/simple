@@ -1,0 +1,273 @@
+# Incremental HTTP/1 request framing for the filesystem-launched server.
+#
+# Http1RequestFrameOwner is deliberately module-private.  The socket-facing
+# API owns it for the whole connection, so no caller can forge scan offsets,
+# line counters, or a cached Content-Length resume tuple.
+
+use os.userlib.net.{Socket, socket_recv}
+use std.nogc_sync_mut.http_server.server.{SecureServerPolicy, secure_server_policy_error}
+use std.nogc_sync_mut.http_server.parser.{parse_request_line, headers_decision}
+use std.nogc_sync_mut.binary_io.{bytes_to_string}
+
+pub class Http1OwnedFrameResult:
+    complete: bool
+    request: text
+    error: text
+    scanned_bytes: i64
+
+fn _http_field_token_byte(byte: u8) -> bool:
+    (byte >= 48u8 and byte <= 57u8) or
+        (byte >= 65u8 and byte <= 90u8) or
+        (byte >= 97u8 and byte <= 122u8) or
+        byte == 33u8 or byte == 35u8 or byte == 36u8 or byte == 37u8 or
+        byte == 38u8 or byte == 39u8 or byte == 42u8 or byte == 43u8 or
+        byte == 45u8 or byte == 46u8 or byte == 94u8 or byte == 95u8 or
+        byte == 96u8 or byte == 124u8 or byte == 126u8
+
+class Http1RequestFrameOwner:
+    policy: SecureServerPolicy
+    retained: [u8]
+    line_start: i64
+    request_line_seen: bool
+    header_count: i32
+    headers: [(text, text)]
+    pending_cr: bool
+    headers_complete: bool
+    expected_total: i64
+    terminal_error: text
+    scanned_bytes: i64
+    maximum_retained: i64
+
+    static fn create(policy: SecureServerPolicy) -> Http1RequestFrameOwner:
+        Http1RequestFrameOwner(
+            policy: policy,
+            retained: [],
+            line_start: 0,
+            request_line_seen: false,
+            header_count: 0,
+            headers: [],
+            pending_cr: false,
+            headers_complete: false,
+            expected_total: -1,
+            terminal_error: "",
+            scanned_bytes: 0,
+            maximum_retained: policy.max_request_line as i64 + 2 +
+                policy.max_header_count as i64 *
+                    (policy.max_header_line as i64 + 2) + 2 +
+                policy.max_body as i64
+        )
+
+    fn terminal() -> bool:
+        self.terminal_error != "" or
+            (self.expected_total >= 0 and self.retained.len() as i64 >= self.expected_total)
+
+    fn complete() -> bool:
+        self.terminal_error == "" and self.expected_total >= 0 and
+            self.retained.len() as i64 == self.expected_total
+
+    me _fail(message: text):
+        if self.terminal_error == "":
+            self.terminal_error = message
+
+    me _finish_line(line_end: i64):
+        val line_bytes = self.retained.slice(self.line_start as u64, line_end as u64)
+        val line = bytes_to_string(line_bytes)
+        if not self.request_line_seen:
+            if line == "":
+                self._fail("400 Empty request line")
+                return
+            val parsed = parse_request_line(line)
+            if parsed.0 == "" or parsed.1 == "" or parsed.2 == "":
+                self._fail("400 Malformed request line")
+                return
+            if parsed.2 != "HTTP/1.1" and parsed.2 != "HTTP/1.0":
+                self._fail("400 Unsupported HTTP version")
+                return
+            self.request_line_seen = true
+            return
+
+        if line == "":
+            val decision = headers_decision(self.headers, self.policy.max_body)
+            if decision.0 != "":
+                self._fail(decision.0)
+                return
+            self.headers_complete = true
+            self.expected_total = self.retained.len() as i64 + decision.1 as i64
+            if self.expected_total > self.maximum_retained:
+                self._fail("413 Request exceeds retained-byte policy")
+            return
+
+        self.header_count = self.header_count + 1
+        if self.header_count > self.policy.max_header_count:
+            self._fail("431 Too many headers")
+            return
+        if line.starts_with(" ") or line.starts_with("\t"):
+            self._fail("400 Obsolete folded header is not supported")
+            return
+        val colon = line.index_of(":")
+        if colon <= 0:
+            self._fail("400 Malformed header line")
+            return
+        var name_index: i64 = 0
+        while name_index < colon:
+            if not _http_field_token_byte(line_bytes[name_index as u64]):
+                self._fail("400 Invalid header field name")
+                return
+            name_index = name_index + 1
+        val name = line.slice(0, colon)
+        val value = line.slice(colon + 1, line.len()).trim()
+        self.headers.push((name, value))
+
+    me append(fragment: [u8]):
+        if self.terminal():
+            self._fail("400 Data supplied after terminal request frame")
+            return
+        var index: u64 = 0
+        while index < fragment.len():
+            if self.headers_complete:
+                val remaining = fragment.len() - index
+                val allowed = self.expected_total - self.retained.len() as i64
+                if remaining as i64 > allowed:
+                    self._fail("400 Bytes follow declared request body")
+                    return
+                if index == 0u64:
+                    self.retained.extend(fragment)
+                else:
+                    self.retained.extend(fragment.slice(index, fragment.len()))
+                self.scanned_bytes = self.scanned_bytes + remaining as i64
+                return
+            if self.retained.len() as i64 >= self.maximum_retained:
+                self._fail("413 Request exceeds retained-byte policy")
+                return
+            val byte = fragment[index]
+            self.retained.push(byte)
+            self.scanned_bytes = self.scanned_bytes + 1
+
+            if self.pending_cr:
+                if byte != 10u8:
+                    self._fail("400 Embedded CR in HTTP header section")
+                    return
+                self.pending_cr = false
+                val line_end = self.retained.len() as i64 - 2
+                self._finish_line(line_end)
+                self.line_start = self.retained.len() as i64
+                if self.terminal_error != "":
+                    return
+            elif byte == 13u8:
+                self.pending_cr = true
+            elif byte == 10u8:
+                self._fail("400 Bare LF in HTTP header section")
+                return
+            elif (byte < 32u8 and byte != 9u8) or byte == 127u8:
+                self._fail("400 Control byte in HTTP header section")
+                return
+            else:
+                val line_bytes = self.retained.len() as i64 - self.line_start
+                val line_limit = if self.request_line_seen:
+                    self.policy.max_header_line as i64
+                else:
+                    self.policy.max_request_line as i64
+                if line_bytes > line_limit:
+                    self._fail("431 HTTP line exceeds policy")
+                    return
+            index = index + 1
+
+    fn result() -> Http1OwnedFrameResult:
+        if self.complete():
+            return Http1OwnedFrameResult(
+                complete: true,
+                request: bytes_to_string(self.retained),
+                error: "",
+                scanned_bytes: self.scanned_bytes
+            )
+        val message = if self.terminal_error == "":
+            "400 Incomplete HTTP request"
+        else:
+            self.terminal_error
+        Http1OwnedFrameResult(
+            complete: false,
+            request: "",
+            error: message,
+            scanned_bytes: self.scanned_bytes
+        )
+
+class Http1ReceiveProgressOwner:
+    limit: i32
+    consecutive_no_progress: i32
+
+    static fn create(limit: i32) -> Http1ReceiveProgressOwner:
+        Http1ReceiveProgressOwner(
+            limit: limit,
+            consecutive_no_progress: 0
+        )
+
+    me observe(made_progress: bool) -> bool:
+        if made_progress:
+            self.consecutive_no_progress = 0
+            return false
+        self.consecutive_no_progress = self.consecutive_no_progress + 1
+        self.consecutive_no_progress >= self.limit
+
+fn _invalid_policy_result(message: text) -> Http1OwnedFrameResult:
+    Http1OwnedFrameResult(
+        complete: false,
+        request: "",
+        error: "400 Invalid HTTP framing policy: {message}",
+        scanned_bytes: 0
+    )
+
+# Production entry point.  No resumable state crosses this boundary.
+fn recv_http1_request_owned(
+    socket: Socket, policy: SecureServerPolicy
+) -> Http1OwnedFrameResult:
+    val policy_error = secure_server_policy_error(policy)
+    if policy_error != "":
+        return _invalid_policy_result(policy_error)
+    var owner = Http1RequestFrameOwner.create(policy)
+    var progress = Http1ReceiveProgressOwner.create(policy.max_read_iters)
+    while not owner.terminal():
+        match socket_recv(socket, 8192u64):
+            Ok(fragment):
+                if fragment.len() == 0u64:
+                    if progress.observe(false):
+                        owner._fail("408 Consecutive no-progress receive limit exceeded")
+                else:
+                    val _ = progress.observe(true)
+                    owner.append(fragment)
+            Err(_):
+                if progress.observe(false):
+                    owner._fail("408 Consecutive no-progress receive limit exceeded")
+    owner.result()
+
+# Pure batch seam for correctness tests.  It owns the scanner from creation to
+# terminal result and deliberately exposes no constructor or resume material.
+fn frame_http1_fragments_owned_for_test(
+    fragments: [[u8]], policy: SecureServerPolicy
+) -> Http1OwnedFrameResult:
+    val policy_error = secure_server_policy_error(policy)
+    if policy_error != "":
+        return _invalid_policy_result(policy_error)
+    var owner = Http1RequestFrameOwner.create(policy)
+    for fragment in fragments:
+        if owner.terminal():
+            owner._fail("400 Data supplied after terminal request frame")
+            break
+        owner.append(fragment)
+    owner.result()
+
+fn http1_no_progress_terminal_index_for_test(
+    made_progress_events: [bool], limit: i32
+) -> i64:
+    if limit <= 0:
+        return 0
+    var owner = Http1ReceiveProgressOwner.create(limit)
+    var index: i64 = 0
+    for made_progress in made_progress_events:
+        if owner.observe(made_progress):
+            return index
+        index = index + 1
+    -1
+
+export Http1OwnedFrameResult
+export recv_http1_request_owned, frame_http1_fragments_owned_for_test
+export http1_no_progress_terminal_index_for_test

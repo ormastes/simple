@@ -19,7 +19,9 @@ use compiler.hir.hir_lowering.expressions.*
 use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
 use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind, PlatformParseResult, PlatformDiagnosticLevel, PlatformLayoutDiagnostic}
 use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.dependency.member_visibility.{aggregate_constructor_visibility_allows, member_access_scope_for_modules, member_visibility_allows}
 use compiler.common.module_path_naming.{module_logical_name_from_path}
+use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_package_name_from_name}
 use compiler.core.{decl_get_body, decl_get_name, decl_get_param_names, decl_get_param_types, decl_get_ret_type}
 use compiler.core.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_RETURN, stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_type}
 
@@ -261,13 +263,54 @@ impl HirLowering:
             hir_phase_profile_add(HIR_PROF_RIS_FIELDS, fields_started)
             val project_started = hir_phase_profile_now()
             var imported_field_types: Dict<text, HirType> = {}
+            var imported_field_access: Dict<text, bool> = {}
+            var imported_field_visibilities: [Visibility] = []
+            val requester_package = module_surface_package_name_from_name(
+                module_logical_name_from_path(self.module_filename))
+            var member_owner = imported_mod
+            var member_owner_consistent = true
+            if composite.fields.len() > 0:
+                val declaring_index = self.surface_index_for_name(
+                    composite.fields[0].declaring_module)
+                if declaring_index >= 0 and declaring_index < self.module_surfaces.surfaces.len():
+                    member_owner = self.module_surfaces.surfaces[declaring_index]
+            # Validate the whole retained field set before publishing any
+            # decision. A corrupt mixed-owner surface must deny every field,
+            # independent of field order.
+            for retained_field in composite.fields:
+                if retained_field.declaring_module != member_owner.module_name:
+                    member_owner_consistent = false
+            var composite_internal_exported = false
+            for internal_name in member_owner.internal_exports:
+                if internal_name == imported_name or internal_name == composite.name:
+                    composite_internal_exported = true
+            val member_scope = member_access_scope_for_modules(
+                self.module_filename, requester_package,
+                member_owner.canonical_path, member_owner.package_name,
+                member_owner.friends, composite_internal_exported)
             for field in composite.fields:
                 imported_field_types[field.name] = self.imported_surface_type_projected(
                     field.type_, field.type_name, field.array_element_name, imported_mod.module_name, [])
+                imported_field_access[field.name] = (member_owner_consistent and
+                    member_visibility_allows(field.visibility, member_scope))
+                imported_field_visibilities = imported_field_visibilities.push(field.visibility)
             val canonical_composite_name = imported_mod.module_name + "." + imported_name
             self.struct_field_types_by_name[canonical_composite_name] = imported_field_types
+            self.struct_field_access_by_name[canonical_composite_name] = imported_field_access
+            self.struct_constructor_access_by_name[canonical_composite_name] =
+                (member_owner_consistent and aggregate_constructor_visibility_allows(
+                    imported_field_visibilities, member_scope))
+            # The consumer may bind an explicit alias. Retain access under the
+            # spelling that can actually appear as an aggregate callee/base.
+            self.struct_field_access_by_name[local_name] = imported_field_access
+            self.struct_constructor_access_by_name[local_name] =
+                self.struct_constructor_access_by_name[canonical_composite_name]
             if not self.struct_field_types_by_name.has(imported_name):
                 self.struct_field_types_by_name[imported_name] = imported_field_types
+                self.struct_field_access_by_name[imported_name] = imported_field_access
+                self.struct_constructor_access_by_name[imported_name] =
+                    (member_owner_consistent and aggregate_constructor_visibility_allows(
+                        imported_field_visibilities, member_scope))
             hir_phase_profile_add(HIR_PROF_RIS_PROJECT, project_started)
             self.register_imported_type_methods(imported_mod, imported_mod_name, imported_name, imported_type, import_span, materialize_enum)
         elif enum_position >= 0:

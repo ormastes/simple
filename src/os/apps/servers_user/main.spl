@@ -5,7 +5,7 @@
 # transaction semantics, bounded responses, commit identity, and durability
 # are all delegated to their canonical Pure-Simple owners.
 
-use os.userlib.net.{IpAddr, SockAddr, Socket, socket, bind, listen, accept, socket_send, socket_recv}
+use os.userlib.net.{IpAddr, SockAddr, Socket, socket, bind, listen, accept, socket_send}
 use os.userlib.fs.{read_file_bytes_direct, read_file_bytes_direct_owned}
 use os.userlib.syscall_raw.{syscall}
 use os.kernel.net.http_route.{http_classify_request, HttpRouteKind}
@@ -13,7 +13,6 @@ use std.nogc_sync_mut.http_server.types.{HttpResponse, HttpStatus}
 use std.nogc_sync_mut.http_server.response.{serialize_response, with_default_security_headers}
 use std.nogc_sync_mut.http_server.mime.{mime_from_path}
 use std.nogc_sync_mut.http_server.server.{SecureServerPolicy, plaintext_development_capability}
-use std.nogc_sync_mut.http_server.parser.{parse_request_line, headers_decision}
 use os.apps.dbd.dbd.{DbdServer}
 use std.fs_driver.bytes_util.{text_to_bytes_pure}
 use std.nogc_sync_mut.binary_io.{bytes_to_string}
@@ -21,6 +20,7 @@ use std.common.crypto.secure_memory.{SecureZeroReport, secure_zero_u8_slots}
 use os.apps.servers_user.database_persistence_adapter.{
     simpleos_database_dbfs_vfs_caps
 }
+use os.apps.servers_user.http1_request_frame_owner.{recv_http1_request_owned}
 
 val HTTP_PORT: u16 = 8080u16
 val DB_PORT: u16 = 5433u16
@@ -60,31 +60,6 @@ fn bind_listener(port: u16) -> Result<Socket, text>:
     val _bound = bind(listener, SockAddr(ip: ip, port: port))?
     val _listening = listen(listener, 8)?
     Ok(listener)
-
-fn bounded_http_request(request: text, policy: SecureServerPolicy) -> bool:
-    val sections = request.split("\r\n\r\n")
-    if sections.len() != 2:
-        return false
-    val lines = sections[0].split("\r\n")
-    if lines.len() < 1 or lines.len() - 1 > policy.max_header_count as i64:
-        return false
-    if lines[0].len() > policy.max_request_line:
-        return false
-    val request_parts = parse_request_line(lines[0])
-    if request_parts.0 == "" or request_parts.1 == "" or request_parts.2 == "":
-        return false
-    var headers: [(text, text)] = []
-    var index: i64 = 1
-    while index < lines.len():
-        if lines[index].len() > policy.max_header_line:
-            return false
-        val separator = lines[index].find(":")
-        if separator <= 0:
-            return false
-        headers.push((lines[index].slice(0, separator), lines[index].slice(separator + 1, lines[index].len()).trim()))
-        index = index + 1
-    val body_decision = headers_decision(headers, policy.max_body)
-    body_decision.0 == "" and sections[1].len() == body_decision.1 as i64
 
 fn http_response(request: text) -> text:
     val route = http_classify_request(request)
@@ -129,21 +104,18 @@ fn handle_http(listener: Socket, policy: SecureServerPolicy) -> bool:
     match accept(listener):
         Err(_): false
         Ok(client):
-            match socket_recv(client, 8192):
-                Err(_): debug_line("[simpleos-servers-user] http recv=fail")
-                Ok(bytes):
-                    val request = bytes_to_string(bytes)
-                    if bounded_http_request(request, policy):
-                        val response = text_to_bytes_pure(http_response(request))
-                        if response.len() <= MAX_WIRE_RESPONSE:
-                            val _sent = send_all(client, response)
-                    else:
-                        val rejected = HttpResponse(
-                            status: HttpStatus.BadRequest,
-                            headers: [], body: "ERR incomplete request\n"
-                        )
-                        val wire = serialize_response(with_default_security_headers(rejected, false))
-                        val _ = send_all(client, text_to_bytes_pure(wire))
+            val frame = recv_http1_request_owned(client, policy)
+            if frame.complete:
+                val response = text_to_bytes_pure(http_response(frame.request))
+                if response.len() <= MAX_WIRE_RESPONSE:
+                    val _sent = send_all(client, response)
+            else:
+                val rejected = HttpResponse(
+                    status: HttpStatus.BadRequest,
+                    headers: [], body: "ERR incomplete request\n"
+                )
+                val wire = serialize_response(with_default_security_headers(rejected, false))
+                val _ = send_all(client, text_to_bytes_pure(wire))
             close_fd(client.fd)
             true
 

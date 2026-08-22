@@ -1,0 +1,179 @@
+use std.spec
+use compiler.common.config.Logger
+use compiler.common.driver_core_types.SourceFile
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.frontend.parser_types.Module
+use compiler.hir.hir_lowering.types.hirlowering_for_module
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
+
+fn lower_consumer_errors(
+    provider_name: text,
+    provider_path: text,
+    provider_source: text,
+    consumer_name: text,
+    consumer_path: text,
+    consumer_source: text
+) -> [text]:
+    val log = Logger(level: 0)
+    val provider = parse_full_frontend(
+        provider_source, provider_name, provider_path, log)
+    val consumer = parse_full_frontend(
+        consumer_source, consumer_name, consumer_path, log)
+    var modules: Dict<text, Module> = {}
+    modules[provider_name] = provider
+    val surfaces_result = module_surfaces_from_modules(modules, [
+        SourceFile(path: provider_path, content: provider_source, module_name: provider_name)
+    ])
+    if surfaces_result.is_err():
+        return ["surface error: " + surfaces_result.unwrap_err()]
+    val surfaces: ModuleSurfacesByName = surfaces_result.unwrap()
+    var lowering = hirlowering_for_module(consumer_path, surfaces)
+    lowering.lower_module(consumer)
+    lowering.diagnostic_messages
+
+fn messages_contain(messages: [text], wanted: text) -> bool:
+    for message in messages:
+        if message.contains(wanted):
+            return true
+    false
+
+fn lower_reexport_consumer_errors() -> [text]:
+    val log = Logger(level: 0)
+    val leaf_source = "pub struct Vault:\n    secret: i64"
+    val facade_source = "export use vault.leaf.\{Vault\}"
+    val consumer_source = "use vault.facade.\{Vault\}\nfn steal(v: Vault) -> i64:\n    v.secret"
+    var modules: Dict<text, Module> = {}
+    modules["vault.leaf"] = parse_full_frontend(
+        leaf_source, "vault.leaf", "src/vault/leaf.spl", log)
+    modules["vault.facade"] = parse_full_frontend(
+        facade_source, "vault.facade", "src/vault/facade.spl", log)
+    val surfaces_result = module_surfaces_from_modules(modules, [
+        SourceFile(path: "src/vault/leaf.spl", content: leaf_source, module_name: "vault.leaf"),
+        SourceFile(path: "src/vault/facade.spl", content: facade_source, module_name: "vault.facade")
+    ])
+    if surfaces_result.is_err():
+        return ["surface error: " + surfaces_result.unwrap_err()]
+    var lowering = hirlowering_for_module(
+        "src/client/consumer.spl", surfaces_result.unwrap())
+    val consumer = parse_full_frontend(
+        consumer_source, "client.consumer", "src/client/consumer.spl", log)
+    lowering.lower_module(consumer)
+    lowering.diagnostic_messages
+
+describe "HIR member and aggregate constructor visibility enforcement":
+    it "compile-rejects a private imported field read":
+        val errors = lower_consumer_errors(
+            "vault.provider", "src/vault/provider.spl",
+            "pub struct Vault:\n    secret: i64",
+            "client.consumer", "src/client/consumer.spl",
+            "use vault.provider.\{Vault\}\nfn steal(v: Vault) -> i64:\n    v.secret")
+        expect(messages_contain(errors, "field `secret` is not visible")).to_be(true)
+
+    it "compile-rejects aggregate construction when private state exists":
+        val errors = lower_consumer_errors(
+            "vault.provider", "src/vault/provider.spl",
+            "pub struct Vault:\n    secret: i64",
+            "client.consumer", "src/client/consumer.spl",
+            "use vault.provider.\{Vault\}\nfn forge() -> Vault:\n    Vault(secret: 7)")
+        expect(messages_contain(errors, "aggregate constructor `Vault` is not visible")).to_be(true)
+
+    it "compile-rejects private aggregate construction through an import alias":
+        val errors = lower_consumer_errors(
+            "vault.provider", "src/vault/provider.spl",
+            "pub struct Vault:\n    secret: i64",
+            "client.consumer", "src/client/consumer.spl",
+            "use vault.provider.\{Vault as AliasVault\}\nfn forge() -> AliasVault:\n    AliasVault(secret: 7)")
+        expect(messages_contain(errors, "aggregate constructor `AliasVault` is not visible")).to_be(true)
+
+    it "compile-allows public fields and aggregate construction":
+        val errors = lower_consumer_errors(
+            "records.provider", "src/records/provider.spl",
+            "pub struct Record:\n    pub value: i64",
+            "client.consumer", "src/client/consumer.spl",
+            "use records.provider.\{Record\}\nfn build() -> i64:\n    val r = Record(value: 7)\n    r.value")
+        expect(messages_contain(errors, "is not visible")).to_be(false)
+
+    it "compile-allows package fields only for a same-package consumer":
+        val errors = lower_consumer_errors(
+            "pkg.provider", "src/pkg/provider.spl",
+            "pub struct PackageRecord:\n    pub(package) value: i64",
+            "pkg.consumer", "src/pkg/consumer.spl",
+            "use pkg.provider.\{PackageRecord\}\nfn build() -> i64:\n    val r = PackageRecord(value: 9)\n    r.value")
+        expect(messages_contain(errors, "is not visible")).to_be(false)
+
+    it "compile-allows an internally exported field to a declared friend":
+        val errors = lower_consumer_errors(
+            "server.provider", "src/server/provider.spl",
+            "friend client\ninternal_export FriendRecord\npub struct FriendRecord:\n    pub(friend) value: i64",
+            "client.consumer", "src/client/consumer.spl",
+            "use server.provider.\{FriendRecord\}\nfn read(v: FriendRecord) -> i64:\n    v.value")
+        expect(messages_contain(errors, "is not visible")).to_be(false)
+
+    it "compile-rejects an internal field when the type is not internally exported":
+        val errors = lower_consumer_errors(
+            "server.provider", "src/server/provider.spl",
+            "friend client\npub struct FriendRecord:\n    pub(friend) value: i64",
+            "client.consumer", "src/client/consumer.spl",
+            "use server.provider.\{FriendRecord\}\nfn read(v: FriendRecord) -> i64:\n    v.value")
+        expect(messages_contain(errors, "field `value` is not visible")).to_be(true)
+
+    it "compile-allows up fields from the immediate parent facade":
+        val errors = lower_consumer_errors(
+            "pkg.child", "src/pkg/child.spl",
+            "pub struct ParentRecord:\n    pub(up) value: i64",
+            "pkg.__init__", "src/pkg/__init__.spl",
+            "use pkg.child.\{ParentRecord\}\nfn read(v: ParentRecord) -> i64:\n    v.value")
+        expect(messages_contain(errors, "is not visible")).to_be(false)
+
+    it "compile-rejects up fields from a non-parent sibling":
+        val errors = lower_consumer_errors(
+            "pkg.child", "src/pkg/child.spl",
+            "pub struct ParentRecord:\n    pub(up) value: i64",
+            "pkg.sibling", "src/pkg/sibling.spl",
+            "use pkg.child.\{ParentRecord\}\nfn read(v: ParentRecord) -> i64:\n    v.value")
+        expect(messages_contain(errors, "field `value` is not visible")).to_be(true)
+
+    it "compile-allows peer fields at the same logical path in another compiler layer":
+        val errors = lower_consumer_errors(
+            "compiler.10.frontend.shared.node", "src/compiler/10.frontend/shared/node.spl",
+            "pub struct PeerRecord:\n    pub(peer) value: i64",
+            "compiler.20.hir.shared.node", "src/compiler/20.hir/shared/node.spl",
+            "use compiler.10.frontend.shared.node.\{PeerRecord\}\nfn read(v: PeerRecord) -> i64:\n    v.value")
+        expect(messages_contain(errors, "is not visible")).to_be(false)
+
+    it "compile-rejects peer fields at a different logical path":
+        val errors = lower_consumer_errors(
+            "compiler.10.frontend.shared.node", "src/compiler/10.frontend/shared/node.spl",
+            "pub struct PeerRecord:\n    pub(peer) value: i64",
+            "compiler.20.hir.other.node", "src/compiler/20.hir/other/node.spl",
+            "use compiler.10.frontend.shared.node.\{PeerRecord\}\nfn read(v: PeerRecord) -> i64:\n    v.value")
+        expect(messages_contain(errors, "field `value` is not visible")).to_be(true)
+
+    it "compile-rejects a private field on a nominal function-call result":
+        val errors = lower_consumer_errors(
+            "vault.provider", "src/vault/provider.spl",
+            "pub struct Vault:\n    secret: i64\npub fn make_vault() -> Vault:\n    Vault(secret: 1)",
+            "client.consumer", "src/client/consumer.spl",
+            "use vault.provider.\{Vault, make_vault\}\nfn steal() -> i64:\n    make_vault().secret")
+        expect(messages_contain(errors, "field `secret` is not visible")).to_be(true)
+
+    it "compile-rejects a private field after storing a nominal call result":
+        val errors = lower_consumer_errors(
+            "vault.provider", "src/vault/provider.spl",
+            "pub struct Vault:\n    secret: i64\npub fn make_vault() -> Vault:\n    Vault(secret: 1)",
+            "client.consumer", "src/client/consumer.spl",
+            "use vault.provider.\{Vault, make_vault\}\nfn steal() -> i64:\n    val v = make_vault()\n    v.secret")
+        expect(messages_contain(errors, "field `secret` is not visible")).to_be(true)
+
+    it "compile-rejects a qualified private aggregate constructor":
+        val errors = lower_consumer_errors(
+            "vault.provider", "src/vault/provider.spl",
+            "pub struct Vault:\n    secret: i64",
+            "client.consumer", "src/client/consumer.spl",
+            "use vault.provider.\{Vault\}\nfn forge():\n    vault.provider.Vault(secret: 1)")
+        expect(messages_contain(errors, "aggregate constructor `Vault` is not visible")).to_be(true)
+
+    it "compile-rejects private members using the terminal re-export owner":
+        val errors = lower_reexport_consumer_errors()
+        expect(messages_contain(errors, "field `secret` is not visible")).to_be(true)
