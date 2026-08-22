@@ -710,6 +710,19 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
   measurement and exact mismatch semantics.
 - Verification intentionally not run under the user's no-verify instruction.
 
+## Completed CLOS001 scope-index tranche
+
+- Use a prefix-maximum indentation index for exact prior-boundary lookup.
+- Share incrementally advanced declaration counts across sibling closures with
+  the same textual boundary and indentation.
+- Preserve duplicate warning multiplicity, body/order/span, boundary quirks,
+  and assignment syntax.
+- Remove stale extra emitter arguments from query-check lint calls.
+- Add production-path duplicate/sibling ordering and source-shape contracts.
+- Deferred: replace overlapping nested-body scans with an offline assignment
+  interval join while preserving legacy double reporting.
+- Verification intentionally not run under the user's no-verify instruction.
+
 ## Completed diagnostic runtime tranche: fixed-pattern automaton
 
 - Intern 116 fixed classifier literals into 1,160 sparse Aho-Corasick states.
