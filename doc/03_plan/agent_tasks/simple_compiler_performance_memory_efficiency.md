@@ -113,6 +113,16 @@
 - Add mirrored clean-view, policy, parse/count order, and active-source contracts.
 - Verification intentionally not run under the user's no-verify instruction.
 
+## Completed VHDL trace-loop tranche
+
+- Hoisted driver and catalog trace decisions after initial validation.
+- Removed environment/text dispatch from metadata, rebase, and candidate loops.
+- Preserved focused `core32_` stderr receipts and all generated data behavior.
+- Replaced the empty catalog `keys().len()` materialization with `Dict.len()`.
+- Added mirrored contracts for placement, guards, messages, and direct length.
+- Static model: `N + 2F + M + 3` trace lookups become two per compile.
+- Verification intentionally not run under the user's no-verify instruction.
+
 ## Completed LLVM adapter policy-hoisting tranche
 
 - Snapshot compiler trace and bare-metal target mode once per direct compile.
