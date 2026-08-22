@@ -1942,6 +1942,23 @@ once, create a fresh compile context per file, preserve discovery ordinals and
 standalone isolation, and move parser-owned globals into request/session state
 before bounded workers are enabled.
 
+The existing lint-owned structured collector was independently unsafe for nested
+use: it replaced the caller's collection buffer and forced collection mode off,
+while lint policy loading cleared severity overrides and private tier state. It
+now snapshots and restores collection mode, outer diagnostics, severity map/count,
+and `_LINT_TIER_ACTIVE`, returning inner records separately. On normal return,
+value/COW snapshots avoid explicit element-wise copies of the caller payload. Its
+scalar preserves legacy per-rule counting, whose suppression behavior is not
+uniform; emitted count is authoritatively `records.len()`. This advances the
+lint-state prerequisite, but failure cleanup and the parser trace/global-arena
+blocker remain, so workspace process removal stays disabled.
+The collector's full lint pipeline also now splits source lines once and passes
+that canonical array to file-attribute policy parsing. The former call order made
+`LintConfig.apply_file_attributes(source)` allocate a second source-sized line
+array before the lint pipeline allocated its own. Work remains linear, but one
+full split and its allocation volume/churn are removed. Peak RSS improvement
+requires measurement because the two arrays were not proven simultaneously live.
+
 ### Variable-reassignment analysis map audit
 
 The active SSA/JIT admission analysis represented counts, alias parents, borrowed
