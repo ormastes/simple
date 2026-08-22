@@ -11,6 +11,7 @@ use compiler.mir.mir_instructions.{MirFunction, MirBlock}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.attributes.{DriverManifestAttr, DriverManifestAttrKind, vhdl_hardware_metadata_default}
 use compiler.mir_opt.mir_opt.perf_facts.{perf_facts_build, perf_facts_successors, perf_facts_predecessors, perf_facts_dominates}
+use compiler.mir_opt.mir_opt.loop_detect.{LoopDetector}
 
 fn _pf_block(id: i64, term: MirTerminator) -> MirBlock:
     MirBlock(BlockId(id: id), Some("b{id}"), [], term)
@@ -63,3 +64,18 @@ describe "shared MIR PerfFacts":
         expect(facts.reverse_postorder[0].id).to_equal(0)
         expect(perf_facts_dominates(facts, BlockId(id: 0), BlockId(id: 2))).to_equal(true)
         expect(perf_facts_dominates(facts, BlockId(id: 1), BlockId(id: 2))).to_equal(false)
+
+    it "records complete loop exit edges and leaves unproved trip counts unknown":
+        step("Reject incomplete induction facts")
+        val func = _pf_function_with_blocks([
+            _pf_block(0, MirTerminator.If(mir_operand_const_bool(true), BlockId(id: 1), BlockId(id: 2))),
+            _pf_block(1, MirTerminator.Goto(BlockId(id: 0))),
+            _pf_block(2, MirTerminator.Ret(nil))
+        ])
+        var detector = LoopDetector.new()
+        detector.detect_loops(func)
+        expect(detector.loops.len()).to_equal(1)
+        expect(detector.loops[0].exit_edges.len()).to_equal(1)
+        expect(detector.loops[0].exit_edges[0].from.id).to_equal(0)
+        expect(detector.loops[0].exit_edges[0].to.id).to_equal(2)
+        expect(detector.loops[0].trip_count).to_be_nil()
