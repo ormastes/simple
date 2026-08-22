@@ -108,3 +108,7 @@ passing placeholder.
     optional wrappers without extra native calls. Continue through lifecycle,
     cursor, flag, and remaining property contracts, then signed admission and
     sanitizer evidence.
+19. SDL2 init/create/quit/destroy/present now have exact lifecycle contracts;
+    quit and destroy return status, five safe wrappers use lexical FFI scopes,
+    and Web UI consumes them without changing presentation cost. Continue with
+    cursor, flag, and remaining property families before signed admission.

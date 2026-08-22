@@ -553,9 +553,9 @@ int64_t rt_sdl2_init(void) {
     return 1;
 }
 
-void rt_sdl2_quit(void) {
-    SDL2_REQUIRE_VOID();
-    if (!sdl2_on_owner_thread()) return;
+bool rt_sdl2_quit(void) {
+    SDL2_REQUIRE(false);
+    if (!sdl2_on_owner_thread()) return false;
     for (uint64_t index = 0; index < SDL2_MAX_WINDOWS; index++) {
         SDL_Window *window = g_sdl2_windows[index].window;
         if (window) {
@@ -574,6 +574,7 @@ void rt_sdl2_quit(void) {
     g_quit_requested = 0;
     g_last_event_valid = 0;
     atomic_store_explicit(&g_sdl2_owner_thread, 0, memory_order_release);
+    return true;
 }
 
 /* ================================================================
@@ -715,10 +716,11 @@ int64_t rt_sdl2_create_window(const char* title, int64_t width, int64_t height) 
     return handle;
 }
 
-void rt_sdl2_destroy_window(int64_t handle) {
+bool rt_sdl2_destroy_window(int64_t handle) {
     SDL_Window* win = sdl2_window_remove(handle);
-    if (!win) return;
+    if (!win) return false;
     SDL_DestroyWindow(win);
+    return true;
 }
 
 int64_t rt_sdl2_get_window_width(int64_t handle) {
@@ -1485,6 +1487,7 @@ int64_t rt_sdl_event_window_data2(void) {
 
 #ifdef SIMPLE_SDL2_HANDLE_SELFTEST
 int main(void) {
+    if (rt_sdl2_quit() || rt_sdl2_destroy_window(1)) return 12;
     if (rt_sdl2_get_window_width(1) != -1 ||
         rt_sdl2_get_window_height(1) != -1 ||
         rt_sdl2_get_window_position_x(1) != INT64_MIN ||

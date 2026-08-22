@@ -552,3 +552,20 @@ Optimized C compilation, both Simple facade checks, and the read-contract hot-
 path audit pass. Inventory improves to 189 contracted and 287 uncontracted
 unsafe declarations. Successful OS reads still rely on SDL semantics and the
 provider remains unsigned, so this is fail-closed but not fully verified.
+
+SDL2 lifecycle declarations for init, quit, window creation/destruction, and
+presentation previously had generic contracts; quit and destroy returned void,
+and five public wrappers carried whole-function unsafe authority. Quit and
+destroy now return boolean status across C, Rust dispatch, and Simple. The
+canonical wrappers use lexical scopes and propagate status; Web UI uses those
+ownership/presentation wrappers and logs destruction failure. Init/create keep
+their established zero failure sentinel with exact contracts. Invalid-owner
+quit and stale-handle destroy are covered by the generation sabotage fixture.
+
+Lifecycle changes are cold. The frame hot path remains exactly one
+`rt_sdl2_present_rgba` call with its existing O(1) handle validation and pixel
+conversion; no extra call, allocation, lock, hash, lookup, or retry was added.
+Optimized C compilation, Rust family tests, three Simple checks, and lifecycle
+ABI/performance auditing pass. Inventory improves to 194 contracted and 282
+uncontracted unsafe declarations. SDL’s void shutdown/destroy primitives and
+the unsigned loaded artifact still prevent a fully verified classification.
