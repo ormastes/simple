@@ -9,10 +9,15 @@ val MCDC_ANALYSIS_V1_BYTES: i64 = 48
 val MCDC_DECISION_EXPR_V1_BYTES: i64 = 32
 val MCDC_EXPR_TOKEN_V1_BYTES: i64 = 8
 val MCDC_MANIFEST_INFO_V1_BYTES: i64 = 96
+val MCDC_EXCLUSION_V1_BYTES: i64 = 184
+val MCDC_REPORT_V1_BYTES: i64 = 152
 val MCDC_STATUS_OK: i32 = 0
 val MCDC_STATUS_INVALID: i32 = 2
 val MCDC_STATUS_BUSY: i32 = 7
 val MCDC_STATUS_DRAINING: i32 = 9
+val MCDC_STATUS_GATE_FAILED: i32 = 10
+val MCDC_STATUS_EMPTY_DENOMINATOR: i32 = 11
+val MCDC_STATUS_EXCLUSION_INVALID: i32 = 12
 
 extern fn rt_mcdc_collector_init_v1(storage: i64, storage_bytes: u64,
                                     session_id: u64) -> i32
@@ -64,6 +69,14 @@ extern fn rt_mcdc_analyze_masking_mcdp_v1(
     proof_budget: u64, analysis: i64, manifest_info: i64
 ) -> i32
 extern fn rt_mcdc_sort_vectors_v1(events: i64, event_count: u64) -> i32
+extern fn rt_mcdc_report_mcdp_v1(
+    events: i64, event_count: u64, manifest: i64, manifest_bytes: u64,
+    exclusions: i64, exclusion_count: u64, current_epoch: u64, mode: u32,
+    programs: i64, program_capacity: u64,
+    tokens: i64, token_capacity: u64,
+    witnesses: i64, witness_capacity: u64,
+    proof_budget: u64, report: i64
+) -> i32
 extern fn rt_mcdc_collector_reset_v1()
 extern fn rt_mcdc_collector_reset_checked_v1() -> i32
 
@@ -145,6 +158,43 @@ fn mcdc_runtime_analyze_manifest(
 fn mcdc_runtime_sort_vectors(events: i64, event_count: u64) -> i32:
     rt_mcdc_sort_vectors_v1(events, event_count)
 
+fn mcdc_runtime_report_manifest(
+    events: [u8], manifest: [u8], exclusions: [u8], current_epoch: u64,
+    mode: u32, programs: [u8], tokens: [u8], witnesses: [u8],
+    proof_budget: u64, report: [u8]
+) -> i32:
+    """Build one deterministic allocation-free report in caller workspaces.
+
+    File loading and bounded workspace allocation must finish before this call.
+    Every byte region has an exact V1 row size; malformed/truncated input fails
+    closed rather than being rounded down into a smaller denominator.
+    """
+    if events.len() % MCDC_VECTOR_V1_BYTES != 0:
+        return MCDC_STATUS_INVALID
+    if exclusions.len() % MCDC_EXCLUSION_V1_BYTES != 0:
+        return MCDC_STATUS_INVALID
+    if programs.len() % MCDC_DECISION_EXPR_V1_BYTES != 0:
+        return MCDC_STATUS_INVALID
+    if tokens.len() % MCDC_EXPR_TOKEN_V1_BYTES != 0:
+        return MCDC_STATUS_INVALID
+    if witnesses.len() % MCDC_WITNESS_V1_BYTES != 0:
+        return MCDC_STATUS_INVALID
+    if report.len() != MCDC_REPORT_V1_BYTES or manifest.len() == 0:
+        return MCDC_STATUS_INVALID
+    rt_mcdc_report_mcdp_v1(
+        rt_array_data_ptr(events), (events.len() / MCDC_VECTOR_V1_BYTES) as u64,
+        rt_array_data_ptr(manifest), manifest.len() as u64,
+        rt_array_data_ptr(exclusions),
+        (exclusions.len() / MCDC_EXCLUSION_V1_BYTES) as u64,
+        current_epoch, mode,
+        rt_array_data_ptr(programs),
+        (programs.len() / MCDC_DECISION_EXPR_V1_BYTES) as u64,
+        rt_array_data_ptr(tokens),
+        (tokens.len() / MCDC_EXPR_TOKEN_V1_BYTES) as u64,
+        rt_array_data_ptr(witnesses),
+        (witnesses.len() / MCDC_WITNESS_V1_BYTES) as u64,
+        proof_budget, rt_array_data_ptr(report))
+
 fn mcdc_runtime_reset():
     rt_mcdc_collector_reset_v1()
 
@@ -155,13 +205,17 @@ export MCDC_VECTOR_V1_BYTES, MCDC_SNAPSHOT_V1_BYTES
 export MCDC_WITNESS_V1_BYTES, MCDC_ANALYSIS_V1_BYTES
 export MCDC_DECISION_EXPR_V1_BYTES, MCDC_EXPR_TOKEN_V1_BYTES
 export MCDC_MANIFEST_INFO_V1_BYTES
+export MCDC_EXCLUSION_V1_BYTES, MCDC_REPORT_V1_BYTES
 export MCDC_STATUS_OK, MCDC_STATUS_INVALID, MCDC_STATUS_BUSY, MCDC_STATUS_DRAINING
+export MCDC_STATUS_GATE_FAILED, MCDC_STATUS_EMPTY_DENOMINATOR
+export MCDC_STATUS_EXCLUSION_INVALID
 export mcdc_runtime_init, mcdc_runtime_record, mcdc_runtime_seal
 export mcdc_runtime_snapshot, mcdc_runtime_reset
 export mcdc_runtime_reset_checked
 export mcdc_runtime_analyze_unique
 export mcdc_runtime_analyze_manifest
 export mcdc_runtime_sort_vectors
+export mcdc_runtime_report_manifest
 export mcdc_compiled_owner_configure, mcdc_compiled_owner_release
 export mcdc_compiled_record, mcdc_compiled_last_status
 export mcdc_dynamic_bind_compiled, mcdc_dynamic_unbind_compiled

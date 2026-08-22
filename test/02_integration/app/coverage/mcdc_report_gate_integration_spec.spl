@@ -1,0 +1,35 @@
+use std.spec.*
+use std.common.structural.mcdc.contracts.{
+    McdcReportModeV1, mcdc_coverage_summary_v1, mcdc_normal_gate_v1
+}
+use compiler.tools.verify.mcdc_scenario_exclusion.{
+    scan_mcdc_scenario_exclusions_v1, mcdc_audited_normal_gate_v1_passes
+}
+
+val EVIDENCE = "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+
+fn _exact_gate():
+    val summary = mcdc_coverage_summary_v1(3, 1, 2)
+    mcdc_normal_gate_v1(
+        McdcReportModeV1.Normal, true, summary, 1, 1, 0)
+
+describe "MC/DC report normal-mode gate":
+    it "joins exact eligible coverage with a fresh governed directive":
+        val source = "# @mcdc-exclude: scenario=irq-edge | capability=irq.inject | reason=host cannot produce the physical IRQ edge | evidence={EVIDENCE} | owner=safety-team | reviewed=100 | expires=200"
+        val audit = scan_mcdc_scenario_exclusions_v1(source, 150)
+        expect(audit.directive_count).to_equal(1)
+        expect(audit.accepted_count).to_equal(1)
+        expect(mcdc_audited_normal_gate_v1_passes(_exact_gate(), audit)).to_equal(true)
+
+    it "fails a nominal 100 percent result when a directive is stale":
+        val source = "# @mcdc-exclude: scenario=irq-edge | capability=irq.inject | reason=host cannot produce the physical IRQ edge | evidence={EVIDENCE} | owner=safety-team | reviewed=100 | expires=120"
+        val audit = scan_mcdc_scenario_exclusions_v1(source, 150)
+        expect(audit.stale_count).to_equal(1)
+        expect(mcdc_audited_normal_gate_v1_passes(_exact_gate(), audit)).to_equal(false)
+
+    it "never admits an empty eligible denominator":
+        val summary = mcdc_coverage_summary_v1(2, 2, 0)
+        val gate = mcdc_normal_gate_v1(
+            McdcReportModeV1.Normal, true, summary, 2, 2, 0)
+        val audit = scan_mcdc_scenario_exclusions_v1("", 150)
+        expect(mcdc_audited_normal_gate_v1_passes(gate, audit)).to_equal(false)

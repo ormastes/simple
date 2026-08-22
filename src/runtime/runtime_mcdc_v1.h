@@ -18,7 +18,10 @@ enum {
     SIMPLE_MCDC_V1_NOT_SEALED = 6,
     SIMPLE_MCDC_V1_BUSY = 7,
     SIMPLE_MCDC_V1_BUDGET_EXHAUSTED = 8,
-    SIMPLE_MCDC_V1_DRAINING = 9
+    SIMPLE_MCDC_V1_DRAINING = 9,
+    SIMPLE_MCDC_V1_GATE_FAILED = 10,
+    SIMPLE_MCDC_V1_EMPTY_DENOMINATOR = 11,
+    SIMPLE_MCDC_V1_EXCLUSION_INVALID = 12
 };
 
 typedef struct {
@@ -94,6 +97,49 @@ typedef struct {
     uint8_t identity_sha256[64];
 } SimpleMcdcManifestInfoV1;
 
+enum {
+    SIMPLE_MCDC_REPORT_NORMAL_V1 = 0,
+    SIMPLE_MCDC_REPORT_ALPHA_V1 = 1,
+    SIMPLE_MCDC_REPORT_BETA_V1 = 2,
+    SIMPLE_MCDC_EXCLUSION_CAPABILITY_UNAVAILABLE_V1 = 1,
+    SIMPLE_MCDC_EXCLUSION_REASON_BYTES_V1 = 96
+};
+
+/* Governed exclusion bound to the complete native decision identity.  Text is
+ * length-delimited so critical-mode validation never scans outside the row. */
+typedef struct {
+    uint64_t decision_id;
+    uint64_t source_digest;
+    uint64_t condition_mask;
+    uint64_t capability_id;
+    uint64_t evidence_digest_hi;
+    uint64_t evidence_digest_lo;
+    uint64_t owner_id;
+    uint64_t reviewed_epoch;
+    uint64_t expires_epoch;
+    uint32_t condition_count;
+    uint32_t kind;
+    uint32_t reason_length;
+    uint32_t reserved0;
+    uint8_t reason[SIMPLE_MCDC_EXCLUSION_REASON_BYTES_V1];
+} SimpleMcdcExclusionV1;
+
+typedef struct {
+    uint64_t decisions;
+    uint64_t gross_conditions;
+    uint64_t excluded_conditions;
+    uint64_t eligible_conditions;
+    uint64_t covered_eligible_conditions;
+    uint64_t uncovered_eligible_conditions;
+    uint64_t validated_exclusions;
+    uint64_t event_count;
+    uint64_t witness_count;
+    uint64_t proof_checks;
+    uint32_t mode;
+    uint32_t gate_passed;
+    uint8_t provenance_sha256[64];
+} SimpleMcdcReportV1;
+
 /* Recompute the lowercase SHA-256 identity over canonical MCDP V1 bytes:
  * bytes [0,24) followed by bytes [88,byte_count). The embedded identity field
  * is deliberately excluded. This helper is allocation free. */
@@ -120,6 +166,8 @@ SIMPLE_MCDC_STATIC_ASSERT(sizeof(SimpleMcdcAnalysisV1) == 48, "SimpleMcdcAnalysi
 SIMPLE_MCDC_STATIC_ASSERT(sizeof(SimpleMcdcExprTokenV1) == 8, "SimpleMcdcExprTokenV1 ABI");
 SIMPLE_MCDC_STATIC_ASSERT(sizeof(SimpleMcdcDecisionExprV1) == 32, "SimpleMcdcDecisionExprV1 ABI");
 SIMPLE_MCDC_STATIC_ASSERT(sizeof(SimpleMcdcManifestInfoV1) == 96, "SimpleMcdcManifestInfoV1 ABI");
+SIMPLE_MCDC_STATIC_ASSERT(sizeof(SimpleMcdcExclusionV1) == 184, "SimpleMcdcExclusionV1 ABI");
+SIMPLE_MCDC_STATIC_ASSERT(sizeof(SimpleMcdcReportV1) == 152, "SimpleMcdcReportV1 ABI");
 #undef SIMPLE_MCDC_STATIC_ASSERT
 
 int32_t rt_mcdc_collector_init_v1(void *storage, uint64_t storage_bytes,
@@ -219,6 +267,19 @@ int32_t rt_mcdc_analyze_masking_mcdp_v1(
     SimpleMcdcWitnessV1 *witnesses, uint64_t witness_capacity,
     uint64_t proof_budget, SimpleMcdcAnalysisV1 *analysis,
     SimpleMcdcManifestInfoV1 *info);
+/* Authoritative bounded report/gate owner. Events are sorted in place, then
+ * joined to the manifest, masking witnesses, and fresh governed exclusions.
+ * All workspace is caller-owned; this function performs no allocation or I/O.
+ * Normal mode returns GATE_FAILED unless eligible coverage is exactly 100%. */
+int32_t rt_mcdc_report_mcdp_v1(
+    SimpleMcdcVectorV1 *events, uint64_t event_count,
+    const uint8_t *manifest_bytes, uint64_t manifest_byte_count,
+    const SimpleMcdcExclusionV1 *exclusions, uint64_t exclusion_count,
+    uint64_t current_epoch, uint32_t mode,
+    SimpleMcdcDecisionExprV1 *program_workspace, uint64_t program_capacity,
+    SimpleMcdcExprTokenV1 *token_workspace, uint64_t token_capacity,
+    SimpleMcdcWitnessV1 *witness_workspace, uint64_t witness_capacity,
+    uint64_t proof_budget, SimpleMcdcReportV1 *report);
 int32_t rt_mcdc_sort_vectors_v1(SimpleMcdcVectorV1 *events,
                                 uint64_t event_count);
 void rt_mcdc_collector_reset_v1(void);

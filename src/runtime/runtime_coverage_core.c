@@ -1484,6 +1484,263 @@ int32_t rt_mcdc_analyze_masking_mcdp_v1(
         proof_budget, analysis);
 }
 
+static uint64_t mcdc_popcount_v1(uint64_t value) {
+    uint64_t count = 0;
+    while (value) { value &= value - UINT64_C(1); ++count; }
+    return count;
+}
+
+static bool mcdc_reason_equals_ascii_v1(const SimpleMcdcExclusionV1 *row,
+                                        const char *literal) {
+    const size_t length = strlen(literal);
+    if (row->reason_length != length) return false;
+    for (size_t i = 0; i < length; ++i) {
+        uint8_t c = row->reason[i];
+        if (c >= 'A' && c <= 'Z') c = (uint8_t)(c + ('a' - 'A'));
+        if (c != (uint8_t)literal[i]) return false;
+    }
+    return true;
+}
+
+static bool mcdc_exclusion_reason_valid_v1(const SimpleMcdcExclusionV1 *row) {
+    if (row->reason_length < 12u ||
+        row->reason_length > SIMPLE_MCDC_EXCLUSION_REASON_BYTES_V1) return false;
+    bool visible = false, separator = false;
+    for (uint32_t i = 0; i < row->reason_length; ++i) {
+        const uint8_t c = row->reason[i];
+        if (c < 0x20u || c > 0x7eu) return false;
+        visible |= (c != ' ' && c != '\t');
+        separator |= (c == ' ' || c == '-' || c == '_' || c == ':');
+    }
+    for (uint32_t i = row->reason_length;
+         i < SIMPLE_MCDC_EXCLUSION_REASON_BYTES_V1; ++i)
+        if (row->reason[i] != 0) return false;
+    return visible && separator &&
+        !mcdc_reason_equals_ascii_v1(row, "not available") &&
+        !mcdc_reason_equals_ascii_v1(row, "cannot reproduce") &&
+        !mcdc_reason_equals_ascii_v1(row, "unknown reason") &&
+        !mcdc_reason_equals_ascii_v1(row, "skip this test");
+}
+
+static int mcdc_exclusion_order_v1(const SimpleMcdcExclusionV1 *a,
+                                   const SimpleMcdcExclusionV1 *b) {
+    if (a->source_digest != b->source_digest)
+        return a->source_digest < b->source_digest ? -1 : 1;
+    if (a->decision_id != b->decision_id)
+        return a->decision_id < b->decision_id ? -1 : 1;
+    return 0;
+}
+
+static void mcdc_sha256_scalar_le_v1(McdcSha256V1 *ctx, uint64_t value,
+                                     size_t width) {
+    uint8_t wire[8];
+    for (size_t i = 0; i < width; ++i) wire[i] = (uint8_t)(value >> (i * 8u));
+    mcdc_sha256_update_v1(ctx, wire, width);
+}
+
+static void mcdc_sha256_finish_hex_v1(McdcSha256V1 *ctx, uint8_t hex[64]) {
+    const uint64_t bits = ctx->byte_count * UINT64_C(8);
+    const uint8_t one = 0x80u, zeroes[64] = {0};
+    mcdc_sha256_update_v1(ctx, &one, 1u);
+    const size_t padding = ctx->used <= 56u ? 56u - ctx->used : 120u - ctx->used;
+    mcdc_sha256_update_v1(ctx, zeroes, padding);
+    uint8_t length[8];
+    for (size_t i = 0; i < 8u; ++i) length[7u - i] = (uint8_t)(bits >> (i * 8u));
+    mcdc_sha256_update_v1(ctx, length, sizeof(length));
+    static const uint8_t digits[] = "0123456789abcdef";
+    for (size_t i = 0; i < 8u; ++i) for (size_t j = 0; j < 4u; ++j) {
+        const uint8_t value = (uint8_t)(ctx->state[i] >> (24u - j * 8u));
+        hex[(i * 4u + j) * 2u] = digits[value >> 4];
+        hex[(i * 4u + j) * 2u + 1u] = digits[value & 15u];
+    }
+}
+
+int32_t rt_mcdc_report_mcdp_v1(
+        SimpleMcdcVectorV1 *events, uint64_t event_count,
+        const uint8_t *manifest_bytes, uint64_t manifest_byte_count,
+        const SimpleMcdcExclusionV1 *exclusions, uint64_t exclusion_count,
+        uint64_t current_epoch, uint32_t mode,
+        SimpleMcdcDecisionExprV1 *programs, uint64_t program_capacity,
+        SimpleMcdcExprTokenV1 *tokens, uint64_t token_capacity,
+        SimpleMcdcWitnessV1 *witnesses, uint64_t witness_capacity,
+        uint64_t proof_budget, SimpleMcdcReportV1 *report) {
+    if (!report || !manifest_bytes || (event_count && !events) ||
+        (exclusion_count && !exclusions) || mode > SIMPLE_MCDC_REPORT_BETA_V1 ||
+        event_count > SIZE_MAX || exclusion_count > SIZE_MAX ||
+        manifest_byte_count > SIZE_MAX ||
+        program_capacity > SIZE_MAX / sizeof(*programs) ||
+        token_capacity > SIZE_MAX / sizeof(*tokens) ||
+        witness_capacity > SIZE_MAX / sizeof(*witnesses) ||
+        event_count > SIZE_MAX / sizeof(*events) ||
+        exclusion_count > SIZE_MAX / sizeof(*exclusions) ||
+        ((uintptr_t)report % _Alignof(SimpleMcdcReportV1)) ||
+        (exclusions && (uintptr_t)exclusions % _Alignof(SimpleMcdcExclusionV1)))
+        return SIMPLE_MCDC_V1_INVALID;
+    const size_t report_event_bytes = (size_t)event_count * sizeof(*events);
+    const size_t report_exclusion_bytes =
+        (size_t)exclusion_count * sizeof(*exclusions);
+    if (mcdc_ranges_overlap(report, sizeof(*report), events, report_event_bytes) ||
+        mcdc_ranges_overlap(report, sizeof(*report), manifest_bytes,
+                            (size_t)manifest_byte_count) ||
+        mcdc_ranges_overlap(report, sizeof(*report), exclusions,
+                            report_exclusion_bytes) ||
+        mcdc_ranges_overlap(report, sizeof(*report), programs,
+                            (size_t)program_capacity * sizeof(*programs)) ||
+        mcdc_ranges_overlap(report, sizeof(*report), tokens,
+                            (size_t)token_capacity * sizeof(*tokens)) ||
+        mcdc_ranges_overlap(report, sizeof(*report), witnesses,
+                            (size_t)witness_capacity * sizeof(*witnesses)) ||
+        mcdc_ranges_overlap(exclusions, report_exclusion_bytes, events,
+                            report_event_bytes) ||
+        mcdc_ranges_overlap(exclusions, report_exclusion_bytes, programs,
+                            (size_t)program_capacity * sizeof(*programs)) ||
+        mcdc_ranges_overlap(exclusions, report_exclusion_bytes, tokens,
+                            (size_t)token_capacity * sizeof(*tokens)) ||
+        mcdc_ranges_overlap(exclusions, report_exclusion_bytes, witnesses,
+                            (size_t)witness_capacity * sizeof(*witnesses)))
+        return SIMPLE_MCDC_V1_INVALID;
+    *report = (SimpleMcdcReportV1){0};
+    report->mode = mode;
+    if (rt_mcdc_sort_vectors_v1(events, event_count) != SIMPLE_MCDC_V1_OK)
+        return SIMPLE_MCDC_V1_INVALID;
+
+    SimpleMcdcAnalysisV1 analysis;
+    SimpleMcdcManifestInfoV1 info;
+    int32_t status = rt_mcdc_analyze_masking_mcdp_v1(
+        events, event_count, manifest_bytes, manifest_byte_count,
+        programs, program_capacity, tokens, token_capacity,
+        witnesses, witness_capacity, proof_budget, &analysis, &info);
+    if (status != SIMPLE_MCDC_V1_OK) return status;
+    /* A complete report must retain every witness; truncated evidence can
+     * never be promoted into a coverage percentage. */
+    if (analysis.witness_count > witness_capacity)
+        return SIMPLE_MCDC_V1_OUTPUT_TOO_SMALL;
+
+    uint64_t excluded_total = 0;
+    size_t exclusion_index = 0;
+    for (size_t p = 0; p < (size_t)info.program_count; ++p) {
+        const SimpleMcdcDecisionExprV1 *program = &programs[p];
+        if (exclusion_index < (size_t)exclusion_count &&
+            exclusions[exclusion_index].source_digest < program->source_digest)
+            return SIMPLE_MCDC_V1_EXCLUSION_INVALID;
+        if (exclusion_index < (size_t)exclusion_count &&
+            exclusions[exclusion_index].source_digest == program->source_digest &&
+            exclusions[exclusion_index].decision_id < program->decision_id)
+            return SIMPLE_MCDC_V1_EXCLUSION_INVALID;
+        if (exclusion_index == (size_t)exclusion_count ||
+            exclusions[exclusion_index].source_digest != program->source_digest ||
+            exclusions[exclusion_index].decision_id != program->decision_id) continue;
+        const SimpleMcdcExclusionV1 *row = &exclusions[exclusion_index];
+        const uint64_t complete = (UINT64_C(1) << program->condition_count) - 1u;
+        if (!row->decision_id || !row->source_digest || !row->condition_mask ||
+            (row->condition_mask & ~complete) || !row->capability_id ||
+            (!row->evidence_digest_hi && !row->evidence_digest_lo) ||
+            !row->owner_id ||
+            row->condition_count != program->condition_count || row->reserved0 ||
+            row->kind != SIMPLE_MCDC_EXCLUSION_CAPABILITY_UNAVAILABLE_V1 ||
+            row->reviewed_epoch > current_epoch || current_epoch > row->expires_epoch ||
+            !mcdc_exclusion_reason_valid_v1(row))
+            return SIMPLE_MCDC_V1_EXCLUSION_INVALID;
+        if (exclusion_index &&
+            mcdc_exclusion_order_v1(&exclusions[exclusion_index - 1], row) >= 0)
+            return SIMPLE_MCDC_V1_EXCLUSION_INVALID;
+        const uint64_t add = mcdc_popcount_v1(row->condition_mask);
+        if (excluded_total > UINT64_MAX - add)
+            return SIMPLE_MCDC_V1_OVERFLOW;
+        excluded_total += add;
+        ++exclusion_index;
+    }
+    if (exclusion_index != (size_t)exclusion_count ||
+        excluded_total > analysis.gross_conditions)
+        return SIMPLE_MCDC_V1_EXCLUSION_INVALID;
+
+    uint64_t covered_eligible = 0;
+    size_t witness_exclusion = 0;
+    for (size_t w = 0; w < (size_t)analysis.witness_count; ++w) {
+        const SimpleMcdcWitnessV1 *witness = &witnesses[w];
+        uint64_t excluded_mask = 0;
+        while (witness_exclusion < (size_t)exclusion_count &&
+               (exclusions[witness_exclusion].source_digest < witness->source_digest ||
+                (exclusions[witness_exclusion].source_digest == witness->source_digest &&
+                 exclusions[witness_exclusion].decision_id < witness->decision_id)))
+            ++witness_exclusion;
+        if (witness_exclusion < (size_t)exclusion_count &&
+            exclusions[witness_exclusion].decision_id == witness->decision_id &&
+            exclusions[witness_exclusion].source_digest == witness->source_digest)
+            excluded_mask = exclusions[witness_exclusion].condition_mask;
+        if (!(excluded_mask & (UINT64_C(1) << witness->condition_index)))
+            ++covered_eligible;
+    }
+    const uint64_t eligible = analysis.gross_conditions - excluded_total;
+    if (covered_eligible > eligible) return SIMPLE_MCDC_V1_INVALID;
+
+    report->decisions = analysis.decisions;
+    report->gross_conditions = analysis.gross_conditions;
+    report->excluded_conditions = excluded_total;
+    report->eligible_conditions = eligible;
+    report->covered_eligible_conditions = covered_eligible;
+    report->uncovered_eligible_conditions = eligible - covered_eligible;
+    report->validated_exclusions = exclusion_count;
+    report->event_count = event_count;
+    report->witness_count = analysis.witness_count;
+    report->proof_checks = analysis.pair_checks;
+    report->gate_passed = covered_eligible == eligible ? 1u : 0u;
+    if (!eligible) {
+        report->gate_passed = 0;
+        return SIMPLE_MCDC_V1_EMPTY_DENOMINATOR;
+    }
+
+    McdcSha256V1 digest = {{0x6a09e667u,0xbb67ae85u,0x3c6ef372u,0xa54ff53au,
+                            0x510e527fu,0x9b05688cu,0x1f83d9abu,0x5be0cd19u},0,{0},0};
+    static const uint8_t domain[] = "simple-mcdc-report-v1";
+    mcdc_sha256_update_v1(&digest, domain, sizeof(domain) - 1u);
+    mcdc_sha256_update_v1(&digest, info.identity_sha256, 64u);
+    mcdc_sha256_scalar_le_v1(&digest, mode, 4u);
+    mcdc_sha256_scalar_le_v1(&digest, current_epoch, 8u);
+    for (size_t i = 0; i < (size_t)event_count; ++i) {
+        const SimpleMcdcVectorV1 *v = &events[i];
+        mcdc_sha256_scalar_le_v1(&digest, v->decision_id, 8u);
+        mcdc_sha256_scalar_le_v1(&digest, v->condition_count, 4u);
+        mcdc_sha256_scalar_le_v1(&digest, v->source_digest, 8u);
+        mcdc_sha256_scalar_le_v1(&digest, v->evaluated_mask, 8u);
+        mcdc_sha256_scalar_le_v1(&digest, v->true_mask, 8u);
+        mcdc_sha256_scalar_le_v1(&digest, v->owner_id, 8u);
+        mcdc_sha256_scalar_le_v1(&digest, v->owner_sequence, 8u);
+        mcdc_sha256_scalar_le_v1(&digest, v->outcome, 1u);
+    }
+    for (size_t i = 0; i < (size_t)exclusion_count; ++i) {
+        const SimpleMcdcExclusionV1 *x = &exclusions[i];
+        mcdc_sha256_scalar_le_v1(&digest, x->decision_id, 8u);
+        mcdc_sha256_scalar_le_v1(&digest, x->source_digest, 8u);
+        mcdc_sha256_scalar_le_v1(&digest, x->condition_mask, 8u);
+        mcdc_sha256_scalar_le_v1(&digest, x->capability_id, 8u);
+        mcdc_sha256_scalar_le_v1(&digest, x->evidence_digest_hi, 8u);
+        mcdc_sha256_scalar_le_v1(&digest, x->evidence_digest_lo, 8u);
+        mcdc_sha256_scalar_le_v1(&digest, x->owner_id, 8u);
+        mcdc_sha256_scalar_le_v1(&digest, x->reviewed_epoch, 8u);
+        mcdc_sha256_scalar_le_v1(&digest, x->expires_epoch, 8u);
+        mcdc_sha256_scalar_le_v1(&digest, x->condition_count, 4u);
+        mcdc_sha256_scalar_le_v1(&digest, x->kind, 4u);
+        mcdc_sha256_scalar_le_v1(&digest, x->reason_length, 4u);
+        mcdc_sha256_update_v1(&digest, x->reason, x->reason_length);
+    }
+    for (size_t i = 0; i < (size_t)analysis.witness_count; ++i) {
+        const SimpleMcdcWitnessV1 *w = &witnesses[i];
+        mcdc_sha256_scalar_le_v1(&digest, w->decision_id, 8u);
+        mcdc_sha256_scalar_le_v1(&digest, w->source_digest, 8u);
+        mcdc_sha256_scalar_le_v1(&digest, w->condition_index, 4u);
+        mcdc_sha256_scalar_le_v1(&digest, w->policy, 4u);
+        mcdc_sha256_scalar_le_v1(&digest, w->owner_a, 8u);
+        mcdc_sha256_scalar_le_v1(&digest, w->sequence_a, 8u);
+        mcdc_sha256_scalar_le_v1(&digest, w->owner_b, 8u);
+        mcdc_sha256_scalar_le_v1(&digest, w->sequence_b, 8u);
+    }
+    mcdc_sha256_finish_hex_v1(&digest, report->provenance_sha256);
+    if (mode == SIMPLE_MCDC_REPORT_NORMAL_V1 && !report->gate_passed)
+        return SIMPLE_MCDC_V1_GATE_FAILED;
+    return SIMPLE_MCDC_V1_OK;
+}
+
 static bool coverage_add_size(size_t a, size_t b, size_t *result) {
     if (a > SIZE_MAX - b) return false;
     *result = a + b;

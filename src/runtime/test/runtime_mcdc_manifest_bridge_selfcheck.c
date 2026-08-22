@@ -128,6 +128,78 @@ int main(void) {
                witnesses, 2, 20, &analysis, &info) == SIMPLE_MCDC_V1_OK);
     assert(analysis.covered_conditions == 1 && witnesses[0].policy == 1);
 
+    /* The report owner is the production join: manifest + sorted process
+     * provenance + masking witnesses + governed exclusions + exact gate. */
+    SimpleMcdcVectorV1 full_events[] = {
+        {9, 2, 0, 99, 3, 2, 2, 3, 1, {0}},
+        {9, 2, 0, 99, 3, 0, 1, 1, 0, {0}},
+        {9, 2, 0, 99, 1, 1, 1, 2, 1, {0}}
+    };
+    SimpleMcdcReportV1 report;
+    assert(rt_mcdc_report_mcdp_v1(
+               full_events, 3, wire, wire_size, NULL, 0, 10,
+               SIMPLE_MCDC_REPORT_NORMAL_V1, programs, 1, tokens, 3,
+               witnesses, 2, 100, &report) == SIMPLE_MCDC_V1_OK);
+    assert(report.decisions == 1 && report.gross_conditions == 2 &&
+           report.eligible_conditions == 2 &&
+           report.covered_eligible_conditions == 2 && report.gate_passed == 1 &&
+           report.event_count == 3 && report.witness_count == 2);
+    uint8_t provenance[64];
+    memcpy(provenance, report.provenance_sha256, sizeof(provenance));
+    SimpleMcdcVectorV1 permuted[] = {
+        full_events[2], full_events[0], full_events[1]
+    };
+    assert(rt_mcdc_report_mcdp_v1(
+               permuted, 3, wire, wire_size, NULL, 0, 10,
+               SIMPLE_MCDC_REPORT_NORMAL_V1, programs, 1, tokens, 3,
+               witnesses, 2, 100, &report) == SIMPLE_MCDC_V1_OK);
+    assert(memcmp(provenance, report.provenance_sha256, 64) == 0);
+
+    SimpleMcdcVectorV1 incomplete[] = {
+        {9, 2, 0, 99, 3, 0, 1, 1, 0, {0}},
+        {9, 2, 0, 99, 1, 1, 1, 2, 1, {0}}
+    };
+    assert(rt_mcdc_report_mcdp_v1(
+               incomplete, 2, wire, wire_size, NULL, 0, 10,
+               SIMPLE_MCDC_REPORT_NORMAL_V1, programs, 1, tokens, 3,
+               witnesses, 2, 100, &report) == SIMPLE_MCDC_V1_GATE_FAILED);
+    assert(report.eligible_conditions == 2 &&
+           report.covered_eligible_conditions == 1 && report.gate_passed == 0);
+    assert(rt_mcdc_report_mcdp_v1(
+               incomplete, 2, wire, wire_size, NULL, 0, 10,
+               SIMPLE_MCDC_REPORT_ALPHA_V1, programs, 1, tokens, 3,
+               witnesses, 2, 100, &report) == SIMPLE_MCDC_V1_OK);
+    assert(report.gate_passed == 0);
+
+    SimpleMcdcExclusionV1 exclusion = {
+        .decision_id = 9, .source_digest = 99, .condition_mask = 2,
+        .capability_id = 77, .evidence_digest_hi = 123,
+        .evidence_digest_lo = 456, .owner_id = 88,
+        .reviewed_epoch = 5, .expires_epoch = 20,
+        .condition_count = 2,
+        .kind = SIMPLE_MCDC_EXCLUSION_CAPABILITY_UNAVAILABLE_V1,
+        .reason_length = 34,
+        .reason = "device IRQ cannot be produced here"
+    };
+    assert(rt_mcdc_report_mcdp_v1(
+               incomplete, 2, wire, wire_size, &exclusion, 1, 10,
+               SIMPLE_MCDC_REPORT_NORMAL_V1, programs, 1, tokens, 3,
+               witnesses, 2, 100, &report) == SIMPLE_MCDC_V1_OK);
+    assert(report.excluded_conditions == 1 && report.eligible_conditions == 1 &&
+           report.covered_eligible_conditions == 1 &&
+           report.validated_exclusions == 1 && report.gate_passed == 1);
+    exclusion.expires_epoch = 9;
+    assert(rt_mcdc_report_mcdp_v1(
+               incomplete, 2, wire, wire_size, &exclusion, 1, 10,
+               SIMPLE_MCDC_REPORT_NORMAL_V1, programs, 1, tokens, 3,
+               witnesses, 2, 100, &report) == SIMPLE_MCDC_V1_EXCLUSION_INVALID);
+    exclusion.expires_epoch = 20;
+    exclusion.condition_mask = 3;
+    assert(rt_mcdc_report_mcdp_v1(
+               incomplete, 2, wire, wire_size, &exclusion, 1, 10,
+               SIMPLE_MCDC_REPORT_NORMAL_V1, programs, 1, tokens, 3,
+               witnesses, 2, 100, &report) == SIMPLE_MCDC_V1_EMPTY_DENOMINATOR);
+
     /* Every canonical region is cryptographically bound. Structural validity
      * alone must not admit a manifest altered after compiler publication. */
     uint8_t tampered[160];
@@ -203,6 +275,38 @@ int main(void) {
 #endif
     );
     assert(ns_per_manifest < UINT64_C(100000));
+
+    const uint64_t report_iterations = UINT64_C(100000);
+#ifdef MCDC_SELFCHECK_WRAP_ALLOC
+    tracked_allocations = 0;
+    track_allocations = 1;
+#endif
+    assert(clock_gettime(CLOCK_MONOTONIC, &start) == 0);
+    for (uint64_t i = 0; i < report_iterations; ++i)
+        assert(rt_mcdc_report_mcdp_v1(
+                   full_events, 3, wire, wire_size, NULL, 0, 10,
+                   SIMPLE_MCDC_REPORT_NORMAL_V1, programs, 1, tokens, 3,
+                   witnesses, 2, 100, &report) == SIMPLE_MCDC_V1_OK);
+    assert(clock_gettime(CLOCK_MONOTONIC, &finish) == 0);
+#ifdef MCDC_SELFCHECK_WRAP_ALLOC
+    track_allocations = 0;
+    assert(tracked_allocations == 0);
+#endif
+    const uint64_t report_elapsed_ns = (uint64_t)(
+        (int64_t)(finish.tv_sec - start.tv_sec) * INT64_C(1000000000) +
+        (int64_t)(finish.tv_nsec - start.tv_nsec));
+    const uint64_t ns_per_report = report_elapsed_ns / report_iterations;
+    printf("mcdc_report_perf iterations=%llu ns_per_report=%llu allocations=%llu workspace_bytes=%llu\n",
+           (unsigned long long)report_iterations,
+           (unsigned long long)ns_per_report,
+#ifdef MCDC_SELFCHECK_WRAP_ALLOC
+           (unsigned long long)tracked_allocations,
+#else
+           0ull,
+#endif
+           (unsigned long long)(sizeof(full_events) + sizeof(programs) +
+                                sizeof(tokens) + sizeof(witnesses) + sizeof(report)));
+    assert(ns_per_report < UINT64_C(100000));
 #endif
     return 0;
 }

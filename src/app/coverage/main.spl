@@ -18,6 +18,23 @@ Commands:
 use std.cli.cli_util (get_cli_args)
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use std.log.{error}
+use app.io.mod.{file_exists, file_read, file_read_bytes}
+use std.common.string_core.{bytes_to_text}
+use std.nogc_sync_mut.io.coverage_mcdc.{
+    MCDC_VECTOR_V1_BYTES, MCDC_EXCLUSION_V1_BYTES, MCDC_REPORT_V1_BYTES,
+    MCDC_DECISION_EXPR_V1_BYTES, MCDC_EXPR_TOKEN_V1_BYTES,
+    MCDC_WITNESS_V1_BYTES, MCDC_STATUS_OK, MCDC_STATUS_GATE_FAILED,
+    MCDC_STATUS_EMPTY_DENOMINATOR,
+    mcdc_runtime_report_manifest
+}
+use std.common.structural.mcdc.contracts.{
+    McdcReportModeV1, mcdc_coverage_summary_v1, mcdc_normal_gate_v1
+}
+use compiler.tools.verify.mcdc_scenario_exclusion.{
+    MCDC_EXCLUSION_PREFIX,
+    parse_mcdc_scenario_exclusion_v1, mcdc_scenario_exclusion_report_v1,
+    scan_mcdc_scenario_exclusions_v1, mcdc_audited_normal_gate_v1_passes
+}
 
 # SFFI declarations for Rust coverage functions
 extern fn coverage_scan(source_dir: text, output_file: text) -> i64
@@ -65,6 +82,20 @@ fn print_usage():
     print "  summary   Print coverage summary"
     print "            --coverage <file>       Extended coverage JSON"
     print ""
+    print "  mcdc      Build the authoritative masking MC/DC report and gate"
+    print "            --manifest <file>       Compiler MCDP V1 manifest (required)"
+    print "            --events <file>         Sealed V1 vector rows (required)"
+    print "            --exclusions <file>     Governed V1 exclusion rows (optional)"
+    print "            --exclusion-source <f>  Source containing governed directives; repeatable"
+    print "            --mode <mode>           normal|alpha|beta (default: normal)"
+    print "            --current-epoch <n>     Exclusion freshness epoch"
+    print "            --max-events <n>        Event bound (default: 65536)"
+    print "            --max-manifest-bytes <n> Manifest bound (default: 65536)"
+    print "            --max-programs <n>      Decision bound (default: 4096)"
+    print "            --max-tokens <n>        Boolean token bound (default: 65536)"
+    print "            --max-witnesses <n>     Evidence bound (default: 65536)"
+    print "            --proof-budget <n>      Masking proof bound (default: 1000000)"
+    print ""
     print "Shared log options:"
     for line in log_options_help():
         print "  {line}"
@@ -100,6 +131,15 @@ fn get_arg(args: [text], flag: text, default_val: text) -> text:
             return args[i + 1]
         i = i + 1
     default_val
+
+fn get_all_args(args: [text], flag: text) -> [text]:
+    var result: [text] = []
+    var i = 0
+    while i < args.len() - 1:
+        if args[i] == flag:
+            result.push(args[i + 1])
+        i = i + 1
+    result
 
 
 fn cmd_scan(args: [text]) -> i64:
@@ -202,6 +242,147 @@ fn cmd_summary(args: [text]) -> i64:
 
     coverage_summary(coverage)
 
+fn _bounded_number(args: [text], flag: text, default_value: i64,
+                   hard_max: i64) -> i64:
+    val raw = get_arg(args, flag, default_value.to_string())
+    val parsed = raw.to_i64() ?? -1
+    if parsed < 0 or parsed > hard_max:
+        return -1
+    parsed
+
+fn _zero_workspace(byte_count: i64) -> [u8]:
+    [for _ in 0..byte_count: 0u8]
+
+fn _report_u64(bytes: [u8], offset: i64) -> u64:
+    var result: u64 = 0u64
+    var i = 0
+    while i < 8:
+        result = result | ((bytes[offset + i] as u64) << ((i * 8) as u64))
+        i = i + 1
+    result
+
+fn _report_digest(bytes: [u8]) -> text:
+    var digest: [u8] = []
+    var i = 88
+    while i < 152:
+        digest.push(bytes[i])
+        i = i + 1
+    bytes_to_text(digest)
+
+fn cmd_mcdc(args: [text]) -> i64:
+    val manifest_path = get_arg(args, "--manifest", "")
+    val events_path = get_arg(args, "--events", "")
+    val exclusions_path = get_arg(args, "--exclusions", "")
+    val exclusion_sources = get_all_args(args, "--exclusion-source")
+    if manifest_path == "" or events_path == "":
+        print "Error: mcdc requires --manifest and --events"
+        return 1
+    if not file_exists(manifest_path) or not file_exists(events_path):
+        print "Error: MC/DC manifest or events file does not exist"
+        return 1
+    if exclusions_path != "" and not file_exists(exclusions_path):
+        print "Error: MC/DC exclusions file does not exist"
+        return 1
+    for source_path in exclusion_sources:
+        if not file_exists(source_path):
+            print "Error: MC/DC exclusion source does not exist: {source_path}"
+            return 1
+
+    val max_events = _bounded_number(args, "--max-events", 65536, 1048576)
+    val max_manifest_bytes = _bounded_number(
+        args, "--max-manifest-bytes", 65536, 67108864)
+    val max_programs = _bounded_number(args, "--max-programs", 4096, 1048576)
+    val max_tokens = _bounded_number(args, "--max-tokens", 65536, 8388608)
+    val max_witnesses = _bounded_number(args, "--max-witnesses", 65536, 1048576)
+    val proof_budget = _bounded_number(args, "--proof-budget", 1000000, 1000000000)
+    val current_epoch = _bounded_number(args, "--current-epoch", 0, 9223372036854775807)
+    if max_events < 0 or max_manifest_bytes <= 0 or max_programs <= 0 or max_tokens <= 0 or
+            max_witnesses <= 0 or proof_budget <= 0 or current_epoch < 0:
+        print "Error: MC/DC capacity/epoch argument is invalid or above its hard bound"
+        return 1
+    val mode_name = get_arg(args, "--mode", "normal")
+    val mode = if mode_name == "normal": 0 elif mode_name == "alpha": 1 elif mode_name == "beta": 2 else: -1
+    if mode < 0:
+        print "Error: --mode must be normal, alpha, or beta"
+        return 1
+
+    var manifest = file_read_bytes(manifest_path)
+    var events = file_read_bytes(events_path)
+    var exclusions: [u8] = []
+    if exclusions_path != "":
+        exclusions = file_read_bytes(exclusions_path)
+    var exclusion_source = ""
+    for source_path in exclusion_sources:
+        val source_text = file_read(source_path) ?? ""
+        if source_text == "":
+            print "Error: MC/DC exclusion source is empty or unreadable: {source_path}"
+            return 1
+        exclusion_source = exclusion_source + source_text + "\n"
+    val exclusion_audit = scan_mcdc_scenario_exclusions_v1(
+        exclusion_source, current_epoch)
+    for line in exclusion_source.split("\n"):
+        if line.trim().starts_with(MCDC_EXCLUSION_PREFIX):
+            val parsed = parse_mcdc_scenario_exclusion_v1(line, current_epoch)
+            print mcdc_scenario_exclusion_report_v1(parsed)
+    if manifest.len() == 0 or manifest.len() > max_manifest_bytes:
+        print "Error: MC/DC manifest is empty or exceeds --max-manifest-bytes"
+        return 1
+    if events.len() % MCDC_VECTOR_V1_BYTES != 0 or
+            events.len() / MCDC_VECTOR_V1_BYTES > max_events:
+        print "Error: MC/DC events are malformed or exceed --max-events"
+        return 1
+    if exclusions.len() % MCDC_EXCLUSION_V1_BYTES != 0 or
+            exclusions.len() / MCDC_EXCLUSION_V1_BYTES > max_programs:
+        print "Error: MC/DC exclusions are malformed or exceed --max-programs"
+        return 1
+
+    # All allocation ends before the report boundary. The runtime analyzer only
+    # mutates these fixed caller-owned regions and performs no I/O or allocation.
+    var programs = _zero_workspace(max_programs * MCDC_DECISION_EXPR_V1_BYTES)
+    var tokens = _zero_workspace(max_tokens * MCDC_EXPR_TOKEN_V1_BYTES)
+    var witnesses = _zero_workspace(max_witnesses * MCDC_WITNESS_V1_BYTES)
+    var report = _zero_workspace(MCDC_REPORT_V1_BYTES)
+    val status = mcdc_runtime_report_manifest(
+        events, manifest, exclusions, current_epoch as u64, mode as u32,
+        programs, tokens, witnesses, proof_budget as u64, report)
+
+    if status != MCDC_STATUS_OK and status != MCDC_STATUS_GATE_FAILED:
+        if status == MCDC_STATUS_EMPTY_DENOMINATOR:
+            print "MC/DC gate=ERROR reason=eligible denominator is empty"
+            return 1
+        print "MC/DC gate=ERROR status={status}"
+        return 1
+
+    val eligible = _report_u64(report, 24)
+    val covered = _report_u64(report, 32)
+    val uncovered = _report_u64(report, 40)
+    val excluded = _report_u64(report, 16)
+    val gross = _report_u64(report, 8)
+    val decisions = _report_u64(report, 0)
+    val events_count = _report_u64(report, 56)
+    val witnesses_count = _report_u64(report, 64)
+    val checks = _report_u64(report, 72)
+    print "MC/DC mode={mode_name} decisions={decisions} eligible={eligible} covered={covered} uncovered={uncovered} excluded={excluded}"
+    print "MC/DC evidence events={events_count} witnesses={witnesses_count} proof_checks={checks} provenance_sha256={_report_digest(report)}"
+    var audited_pass = true
+    if mode_name == "normal":
+        val summary = mcdc_coverage_summary_v1(
+            gross as i64, excluded as i64, covered as i64)
+        val gate = mcdc_normal_gate_v1(
+            McdcReportModeV1.Normal, true, summary,
+            excluded as i64, excluded as i64, 0)
+        audited_pass = mcdc_audited_normal_gate_v1_passes(gate, exclusion_audit)
+    if status == MCDC_STATUS_OK and audited_pass:
+        print "MC/DC gate=PASS"
+        return 0
+    if status == MCDC_STATUS_GATE_FAILED:
+        print "MC/DC gate=FAIL reason=eligible coverage is not exactly 100%"
+        return 1
+    if status == MCDC_STATUS_OK:
+        print "MC/DC gate=FAIL reason=governed exclusion directive audit failed"
+        return 1
+    1
+
 
 fn main() -> i64:
     val raw_args = get_cli_args()
@@ -239,6 +420,8 @@ fn main() -> i64:
             return cmd_check(args)
         case "summary":
             return cmd_summary(args)
+        case "mcdc":
+            return cmd_mcdc(args)
         case "--help" | "-h" | "help":
             print_usage()
             return 0
