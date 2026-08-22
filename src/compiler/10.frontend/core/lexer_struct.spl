@@ -26,15 +26,12 @@ var core_token_text_intern: {i64: text} = {}
 fn core_token_text_intern_reset():
     core_token_text_intern = {}
 
-fn core_token_text_matches(chars: [text], start: i64, end: i64, value: text) -> bool:
-    if value.len() != end - start:
-        return false
-    var i = start
-    while i < end:
-        if chars[i] != value[i - start:i - start + 1]:
-            return false
-        i = i + 1
-    true
+# NOTE: intentionally NOT a free function taking `chars: [text]`. Under the seed
+# interpreter every array argument is scanned element-by-element at bind time
+# (value-type copy check), so passing the whole `source_chars` array here cost
+# O(file) per TOKEN -- quadratic per file, ~9e9 element visits on a 224 KB
+# source. As a method it reads `self.source_chars` in place: O(span).
+# doc/08_tracking/bug/lexer_source_chars_arg_scan_per_token_2026-08-22.md
 
 # Digit-value helpers for string escape decoding (\NNN octal, \xNN hex,
 # \u{...} unicode). Return -1 for non-digits so callers can stop consuming.
@@ -337,6 +334,16 @@ impl CoreLexer:
             return false
         self.line_starts_binary_op(p)
 
+    fn chars_match(start: i64, end: i64, value: text) -> bool:
+        if value.len() != end - start:
+            return false
+        var i = start
+        while i < end:
+            if self.source_chars[i] != value[i - start:i - start + 1]:
+                return false
+            i = i + 1
+        true
+
     # Token-text extraction over a [start,end) char range: O(span) via indexed
     # collection + one join, replacing `source[start:end]` which was O(N) per call.
     fn char_slice(start: i64, end: i64) -> text:
@@ -365,7 +372,7 @@ impl CoreLexer:
             # See doc/07_guide/language/dict_native_pitfalls.md
             if core_token_text_intern.contains_key(key):
                 val cached = core_token_text_intern[key]
-                if core_token_text_matches(self.source_chars, s, e, cached):
+                if self.chars_match(s, e, cached):
                     return cached
 
             self.slice_parts.clear()
@@ -1044,7 +1051,7 @@ impl CoreLexer:
         while true:
             if i + wlen > to_pos:
                 break
-            if core_token_text_matches(self.source_chars, i, i + wlen, word):
+            if self.chars_match(i, i + wlen, word):
                 var before_ok: bool = true
                 if i > from_pos:
                     before_ok = not is_ident_char(self.source_chars[i - 1])
@@ -1062,7 +1069,7 @@ impl CoreLexer:
         val wlen: i64 = word.len()
         if to_pos - from_pos < wlen:
             return false
-        if not core_token_text_matches(self.source_chars, to_pos - wlen, to_pos, word):
+        if not self.chars_match(to_pos - wlen, to_pos, word):
             return false
         if to_pos - wlen <= from_pos:
             return true

@@ -1,0 +1,36 @@
+use std.spec
+use compiler.frontend.core.lexer_struct.{make_core_lexer}
+
+extern fn rt_file_read_text(path: text) -> text
+
+# Mechanism pin for
+# doc/08_tracking/bug/lexer_source_chars_arg_scan_per_token_2026-08-22.md
+#
+# Under the seed interpreter every ARRAY ARGUMENT is scanned element by
+# element at bind time (value-type copy check). The lexer's per-token text
+# compare used to take the whole `source_chars` array (one entry per source
+# character) as an argument from three per-token sites, so every token cost
+# O(file): a 224 KB generated module paid ~9e9 element visits and took 20
+# minutes to parse. The compare is now a method that reads `self.source_chars`
+# in place. A timing ratio cannot pin this at unit-spec sizes (the linear
+# interpreter floor dominates below thousands of declarations), so the shape
+# itself is pinned.
+describe "lexer token-text compare does not pass source_chars by argument":
+
+    it "has no free function taking the char array and uses the in-place method":
+        val source = rt_file_read_text("src/compiler/10.frontend/core/lexer_struct.spl") ?? ""
+        expect(source.len() > 0).to_be_true()
+        expect(source).to_contain("fn chars_match(start: i64, end: i64, value: text) -> bool:")
+        expect(source).to_contain("self.chars_match(s, e, cached)")
+        expect(source).to_contain("self.chars_match(i, i + wlen, word)")
+        expect(source.contains("core_token_text_matches(self.source_chars")).to_be_false()
+        expect(source.contains("fn core_token_text_matches(chars: [text]")).to_be_false()
+
+    it "compares token spans correctly in place":
+        # Fidelity: the in-place compare must accept exact spans and reject
+        # length and content mismatches, on the real lexer type.
+        val lx = make_core_lexer("fn main")
+        expect(lx.chars_match(0, 2, "fn")).to_be_true()
+        expect(lx.chars_match(3, 7, "main")).to_be_true()
+        expect(lx.chars_match(3, 7, "mail")).to_be_false()
+        expect(lx.chars_match(3, 6, "main")).to_be_false()
