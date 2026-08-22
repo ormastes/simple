@@ -93,6 +93,19 @@ fn producer_module_with_owner_call(call_name: text) -> MirModule:
     ])
     MirModule(..module, functions: functions)
 
+fn producer_module_with_unmodeled_use() -> MirModule:
+    val module = producer_module(true, 3, false)
+    val symbol = SymbolId.new(41)
+    val function = module.functions[symbol]
+    val block = function.blocks[0]
+    var instructions = block.instructions
+    instructions.push(MirInst(kind: MirInstKind.FreezeRegion(LocalId(id: 0)), span: nil))
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[symbol] = MirFunction(..function, blocks: [
+        MirBlock(..block, instructions: instructions)
+    ])
+    MirModule(..module, functions: functions)
+
 fn count_intrinsic(module: MirModule, name: text) -> i64:
     var count = 0
     for function in module.functions.values():
@@ -175,6 +188,14 @@ describe "automatic compiler-owned typed storage producer":
         assert_false(result.ok)
         assert_equal(result.reason, "stale-typed-storage-declaration")
         assert_equal(result.sites.len(), 0)
+
+    it "rejects incomplete shared def-use coverage before rewriting":
+        val result = produce_mir_typed_storage_views_v1(
+            producer_module_with_unmodeled_use(),
+            [producer_declaration(StorageLayoutKind.SoA)])
+        assert_false(result.ok)
+        assert_equal(result.reason, "storage-view-def-use-incomplete")
+        assert_equal(count_intrinsic(result.module, MIR_STORAGE_PROJECT_FIELD_V1), 0)
 
     it "derives address escape gating and permits the exact owner finalizer":
         val escaped = produce_mir_typed_storage_views_v1(
