@@ -6812,6 +6812,18 @@ fn test_freestanding_spl_main_is_entry_fallback() {
     assert_eq!(entry, Some("spl_main".to_string()));
 }
 
+/// Resolve the on-disk objects directory for a `--cache-dir`.
+///
+/// Contract commit 3e45ef20790 ("feat(cache): per-lane private build cache
+/// scope in both engines", 2026-08-17) moved every cache entry under a
+/// per-lane scope segment, so the layout is `<cache_dir>/<scope>/objects`
+/// rather than `<cache_dir>/objects`. Tests must resolve the segment the same
+/// way `NativeProjectBuilder::cache_dir()` does instead of hardcoding the
+/// pre-3e45ef20790 path.
+fn scoped_cache_objects_dir(cache_dir: &Path) -> PathBuf {
+    cache_dir.join(super::cache_scope_segment()).join("objects")
+}
+
 /// A failed module must abort before cached objects can be linked into a
 /// successful-looking output.
 #[cfg(target_os = "linux")]
@@ -6845,7 +6857,7 @@ fn test_compile_failure_does_not_link_cached_objects() {
         .source_dir(source_dir.clone())
         .build()
         .unwrap();
-    assert!(cache_dir.join("objects").is_dir());
+    assert!(scoped_cache_objects_dir(&cache_dir).is_dir());
 
     std::fs::remove_file(&archive).unwrap();
     std::fs::write(&failing, "fn failing_probe() -> i64:\n    return )\n").unwrap();
@@ -6892,7 +6904,7 @@ fn test_compile_failure_preserves_completed_objects_for_retry() {
                 .build()
                 .unwrap_err();
 
-            let completed = fs::read_dir(cache_dir.join("objects"))
+            let completed = fs::read_dir(scoped_cache_objects_dir(&cache_dir))
                 .unwrap()
                 .filter_map(Result::ok)
                 .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "o"))
@@ -6941,7 +6953,7 @@ fn test_incremental_cache_rejects_corrupt_mangled_object() {
 
     let cold = build();
     assert_eq!(cold.cached, 0);
-    let mut objects: Vec<_> = fs::read_dir(cache_dir.join("objects"))
+    let mut objects: Vec<_> = fs::read_dir(scoped_cache_objects_dir(&cache_dir))
         .unwrap()
         .filter_map(Result::ok)
         .map(|entry| entry.path())

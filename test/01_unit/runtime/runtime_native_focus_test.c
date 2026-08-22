@@ -64,10 +64,20 @@ static int64_t text_bytes(const uint8_t* value, size_t len) {
     return rt_string_new(value, len);
 }
 
-static int walk_contains(SplArray* paths, const char* expected) {
-    for (int64_t i = 0; i < spl_array_len(paths); i++) {
-        const char* actual = spl_as_str(spl_array_get(paths, i));
-        if (actual && strcmp(actual, expected) == 0) return 1;
+/* rt_dir_walk returns a TAGGED RuntimeValue array of text since 41eef4686b7
+ * ("fix(runtime): (ptr,len) ABI for rt_dir_create / rt_dir_create_all /
+ * rt_dir_remove_all / rt_dir_walk"), not the legacy `SplArray*` of SplValue.
+ * Decode elements through the rt_ text accessors, not spl_as_str. */
+static int walk_contains(int64_t paths, const char* expected) {
+    SplArray* array = (SplArray*)(uintptr_t)paths;
+    size_t expected_len = strlen(expected);
+    for (int64_t i = 0; i < rt_array_len(array); i++) {
+        int64_t actual = rt_array_get_text(array, i);
+        const uint8_t* data = rt_string_data(actual);
+        if (data && (size_t)rt_string_len(actual) == expected_len
+            && memcmp(data, expected, expected_len) == 0) {
+            return 1;
+        }
     }
     return 0;
 }
@@ -201,15 +211,15 @@ int main(void) {
     assert(walk_file != NULL && fclose(walk_file) == 0);
     assert(symlink(walk_regular, walk_file_link) == 0);
     assert(symlink(walk_root, walk_cycle) == 0);
-    SplArray* walked = rt_dir_walk(walk_root);
-    assert(spl_array_len(walked) == 4);
+    int64_t walked = rt_dir_walk((const uint8_t*)walk_root, (uint64_t)strlen(walk_root));
+    assert(rt_array_len((SplArray*)(uintptr_t)walked) == 4);
     assert(walk_contains(walked, walk_regular));
     assert(walk_contains(walked, walk_child));
     assert(walk_contains(walked, walk_file_link));
     assert(walk_contains(walked, walk_cycle));
     assert(!walk_contains(walked, walk_nested));
     assert(!walk_contains(walked, walk_suffix_dir));
-    assert(rt_dir_remove_all(walk_root));
+    assert(rt_dir_remove_all((const uint8_t*)walk_root, (uint64_t)strlen(walk_root)));
     assert(access(walk_root, F_OK) != 0);
 
     char atomic_root[] = "/tmp/simple-atomic-write-XXXXXX";
