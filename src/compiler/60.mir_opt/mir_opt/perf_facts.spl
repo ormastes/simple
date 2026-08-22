@@ -4,6 +4,39 @@
 use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirFunction}
 
+enum PerfFactKind:
+    Cfg
+    Dominators
+    DefUse
+
+struct PerfFactPreservation:
+    cfg: bool
+    dominators: bool
+    def_use: bool
+
+struct MirDefUseSite:
+    block: BlockId
+    instruction_index: i64
+    local: LocalId
+    is_terminator: bool
+
+struct MirInstructionAccess:
+    defs: [LocalId]
+    uses: [LocalId]
+    covered: bool
+
+impl MirInstructionAccess:
+    me define(local: LocalId):
+        self.defs.push(local)
+
+    me use_operand(operand: MirOperand):
+        match operand.kind:
+            case Copy(local) | Move(local): self.uses.push(local)
+            case Const(_, _): pass_dn
+
+    me use_local(local: LocalId):
+        self.uses.push(local)
+
 struct PerfFacts:
     """Revision-local CFG facts shared by loop and optimization analyses.
 
@@ -17,6 +50,100 @@ struct PerfFacts:
     reverse_postorder: [BlockId]
     rpo_index: Dict<i64, i64>
     immediate_dominator: Dict<i64, i64>
+    local_index: Dict<i64, i64>
+    definition_buckets: [[MirDefUseSite]]
+    use_buckets: [[MirDefUseSite]]
+    def_use_complete: bool
+    uncovered_instruction_count: i64
+    invalid_local_reference_count: i64
+
+fn perf_fact_preservation_all() -> PerfFactPreservation:
+    PerfFactPreservation(true, true, true)
+
+fn perf_fact_preservation_none() -> PerfFactPreservation:
+    PerfFactPreservation(false, false, false)
+
+fn perf_fact_preservation_cfg_only() -> PerfFactPreservation:
+    PerfFactPreservation(true, true, false)
+
+fn perf_fact_preservation_integrity_errors(preservation: PerfFactPreservation) -> [text]:
+    var errors: [text] = []
+    if preservation.dominators and not preservation.cfg:
+        errors.push("dominator preservation requires CFG preservation")
+    errors
+
+fn perf_facts_invalidated(preservation: PerfFactPreservation) -> [PerfFactKind]:
+    var invalidated: [PerfFactKind] = []
+    if not preservation.cfg: invalidated.push(PerfFactKind.Cfg)
+    if not preservation.dominators: invalidated.push(PerfFactKind.Dominators)
+    if not preservation.def_use: invalidated.push(PerfFactKind.DefUse)
+    invalidated
+
+fn perf_instruction_access(inst: MirInst) -> MirInstructionAccess:
+    var access = MirInstructionAccess([], [], true)
+    match inst.kind:
+        case Const(dest, _, _) | Alloc(dest, _) | LoadGlobal(dest, _):
+            access.define(dest)
+        case Copy(dest, source) | Move(dest, source):
+            access.define(dest)
+            access.use_local(source)
+        case BinOp(dest, _, left, right) | CheckedBinOp(dest, _, left, right):
+            access.define(dest)
+            access.use_operand(left)
+            access.use_operand(right)
+        case UnaryOp(dest, _, operand) | Cast(dest, operand, _) | Bitcast(dest, operand, _):
+            access.define(dest)
+            access.use_operand(operand)
+        case Load(dest, pointer):
+            access.define(dest)
+            access.use_operand(pointer)
+        case Store(pointer, value):
+            access.use_operand(pointer)
+            access.use_operand(value)
+        case GetElementPtr(dest, base, indices):
+            access.define(dest)
+            access.use_operand(base)
+            for index in indices: access.use_operand(index)
+        case StoreGlobal(_, value):
+            access.use_operand(value)
+        case Aggregate(dest, _, operands):
+            access.define(dest)
+            for operand in operands: access.use_operand(operand)
+        case GetField(dest, base, _):
+            access.define(dest)
+            access.use_operand(base)
+        case SetField(base, _, value):
+            access.use_operand(base)
+            access.use_operand(value)
+        case Call(dest, function, args):
+            if dest.?: access.define(dest.unwrap())
+            access.use_operand(function)
+            for arg in args: access.use_operand(arg)
+        case CallIndirect(dest, pointer, args, _):
+            if dest.?: access.define(dest.unwrap())
+            access.use_operand(pointer)
+            for arg in args: access.use_operand(arg)
+        case Intrinsic(dest, _, args):
+            if dest.?: access.define(dest.unwrap())
+            for arg in args: access.use_operand(arg)
+        case DebugValue(local, _): access.use_local(local)
+        case Nop: pass_dn
+        case _: return MirInstructionAccess([], [], false)
+    access
+
+fn perf_terminator_access(terminator: MirTerminator) -> MirInstructionAccess:
+    var access = MirInstructionAccess([], [], true)
+    match terminator:
+        case Ret(value):
+            if value.?: access.use_operand(value.unwrap())
+        case If(condition, _, _): access.use_operand(condition)
+        case Switch(value, _, _): access.use_operand(value)
+        case CallTerminator(dest, function, args, _, _):
+            if dest.?: access.define(dest.unwrap())
+            access.use_operand(function)
+            for arg in args: access.use_operand(arg)
+        case Goto(_) | Unreachable | Abort(_): pass_dn
+    access
 
 fn perf_facts_reverse_postorder(entry: BlockId, successors: Dict<i64, [BlockId]>) -> [BlockId]:
     # Iterative DFS with explicit frames avoids recursion depth and array-slice
@@ -116,7 +243,24 @@ fn perf_facts_build(func: MirFunction) -> PerfFacts:
     var successors: Dict<i64, [BlockId]> = {}
     var predecessors: Dict<i64, [i64]> = {}
     var block_index: Dict<i64, i64> = {}
+    var local_index: Dict<i64, i64> = {}
+    var definition_buckets: [[MirDefUseSite]] = []
+    var use_buckets: [[MirDefUseSite]] = []
+    var def_use_complete = true
+    var uncovered_instruction_count = 0
+    var invalid_local_reference_count = 0
     var index = 0
+
+    var local_position = 0
+    for local in func.locals:
+        if local_index.has(local.id.id):
+            def_use_complete = false
+            invalid_local_reference_count = invalid_local_reference_count + 1
+        else:
+            local_index[local.id.id] = local_position
+            definition_buckets.push([])
+            use_buckets.push([])
+            local_position = local_position + 1
 
     for block in func.blocks:
         block_index[block.id.id] = index
@@ -127,6 +271,38 @@ fn perf_facts_build(func: MirFunction) -> PerfFacts:
             var incoming = predecessors[successor.id] ?? []
             incoming.push(block.id.id)
             predecessors[successor.id] = incoming
+        var instruction_index = 0
+        for instruction in block.instructions:
+            val access = perf_instruction_access(instruction)
+            if not access.covered:
+                def_use_complete = false
+                uncovered_instruction_count = uncovered_instruction_count + 1
+            for local in access.defs:
+                if local_index.has(local.id):
+                    definition_buckets[local_index[local.id]].push(MirDefUseSite(block.id, instruction_index, local, false))
+                else:
+                    def_use_complete = false
+                    invalid_local_reference_count = invalid_local_reference_count + 1
+            for local in access.uses:
+                if local_index.has(local.id):
+                    use_buckets[local_index[local.id]].push(MirDefUseSite(block.id, instruction_index, local, false))
+                else:
+                    def_use_complete = false
+                    invalid_local_reference_count = invalid_local_reference_count + 1
+            instruction_index = instruction_index + 1
+        val terminator_access = perf_terminator_access(block.terminator)
+        for local in terminator_access.defs:
+            if local_index.has(local.id):
+                definition_buckets[local_index[local.id]].push(MirDefUseSite(block.id, -1, local, true))
+            else:
+                def_use_complete = false
+                invalid_local_reference_count = invalid_local_reference_count + 1
+        for local in terminator_access.uses:
+            if local_index.has(local.id):
+                use_buckets[local_index[local.id]].push(MirDefUseSite(block.id, -1, local, true))
+            else:
+                def_use_complete = false
+                invalid_local_reference_count = invalid_local_reference_count + 1
 
     val rpo = perf_facts_reverse_postorder(func.entry_block, successors)
     var rpo_index: Dict<i64, i64> = {}
@@ -143,7 +319,13 @@ fn perf_facts_build(func: MirFunction) -> PerfFacts:
         block_count: func.blocks.len(),
         reverse_postorder: rpo,
         rpo_index: rpo_index,
-        immediate_dominator: idom
+        immediate_dominator: idom,
+        local_index: local_index,
+        definition_buckets: definition_buckets,
+        use_buckets: use_buckets,
+        def_use_complete: def_use_complete,
+        uncovered_instruction_count: uncovered_instruction_count,
+        invalid_local_reference_count: invalid_local_reference_count
     )
 
 fn perf_facts_successors(facts: PerfFacts, block: BlockId) -> [BlockId]:
@@ -164,7 +346,17 @@ fn perf_facts_dominates(facts: PerfFacts, dominator: BlockId, block: BlockId) ->
             return false
         current = parent
 
-export PerfFacts
+fn perf_facts_definitions(facts: PerfFacts, local: LocalId) -> [MirDefUseSite]:
+    if not facts.local_index.has(local.id): return []
+    facts.definition_buckets[facts.local_index[local.id]]
+
+fn perf_facts_uses(facts: PerfFacts, local: LocalId) -> [MirDefUseSite]:
+    if not facts.local_index.has(local.id): return []
+    facts.use_buckets[facts.local_index[local.id]]
+
+export PerfFactKind, PerfFactPreservation, MirDefUseSite, MirInstructionAccess, PerfFacts
+export perf_fact_preservation_all, perf_fact_preservation_none, perf_fact_preservation_cfg_only
+export perf_fact_preservation_integrity_errors, perf_facts_invalidated
 export perf_facts_build, perf_facts_terminator_successors
 export perf_facts_successors, perf_facts_predecessors
-export perf_facts_dominates
+export perf_facts_dominates, perf_facts_definitions, perf_facts_uses
