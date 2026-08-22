@@ -1859,3 +1859,17 @@ an owned latch bucket plus an indexed membership dictionary. Each backedge is
 admitted once in expected constant time and appended directly. Total aggregation
 is expected `O(E)`; header order and per-header latch order remain first CFG
 traversal order, and repeated edges from one source/header still coalesce.
+
+### Bounded fast path for applying source fixes
+
+The active `FixToolApplicator` selection-sorted every file's replacements in
+`O(R²)`, then rebuilt the complete source after each edit, copying roughly
+`O(R * S)` bytes for small edits. The common compatibility-safe path now detects
+distinct start offsets, uses comparator sorting (average `O(R log R)`), validates
+overlap exactly as before, and assembles untouched chunks plus replacement text
+with one final join (`O(S + output)` copied bytes). Equal-start edits retain the
+legacy selection sort because its historical insertion order is observable.
+Negative, reversed, or originally out-of-range spans retain incremental legacy
+application because dynamic length checks are also observable. Missing-source and
+overlap errors are unchanged. Grouping replacements by file still uses dictionary
+array copyback and remains a separate COW optimization target.
