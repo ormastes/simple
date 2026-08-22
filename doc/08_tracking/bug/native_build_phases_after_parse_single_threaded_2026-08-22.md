@@ -221,14 +221,47 @@ HIR in under an hour on this host (see "What remains").
 
 ## What remains
 
-- **Streaming surfaces path not wired.** `lower_and_check_streaming_surfaces_impl`
-  (`SIMPLE_STAGE3_STREAMING_SURFACES=1`, the bootstrap entry-closure mode)
-  still lowers in process; the cache/shard wiring is in the non-streaming loop
-  only. The same lookup/store belongs around `lower_streaming_surface_source`,
-  with the decoded module promoted the way the lowered one is
-  (`rt_transient_heap_promote`). Until then a bootstrap stage build gains
-  nothing from this lane — that is the next step, and the one that moves the
-  26-hour number.
+- **Streaming surfaces path: WIRED (2026-08-22, second landing).**
+  `lower_and_check_streaming_surfaces_impl` now does the same cache lookup/store
+  and shard-ownership skip around `lower_streaming_surface_source`, visiting
+  sources in dependency-level order via the shared `hir_shard_visit_order`.
+  Key soundness: the streaming name is about PARSE — surfaces are produced
+  per file in phase 2 and frozen in full (`surface_freeze`,
+  `driver_source_pipeline_parsing.spl`) before the HIR loop starts, so the
+  whole-closure digest is exactly what any module's lowering can see.
+  A cache hit replays the stored warning-level diagnostics (entry format
+  `spl-hircache-v2`: `W\n<count>\n<escaped lines>` ahead of the codec blob)
+  under the same `SIMPLE_BOOTSTRAP` gate as in-process lowering (remainder #3).
+  Which path does the live entry-closure build take? `fp9/run9.sh` runs the
+  Rust seed `native-build --source src/app --entry-closure --threads 8` with
+  NO `SIMPLE_BOOTSTRAP` / `SIMPLE_STAGE3_STREAMING_SURFACES` — so
+  `driver_streaming_surface_enabled` is false and it takes the NON-streaming
+  loop (already wired). The streaming loop is selected only by
+  `scripts/bootstrap/bootstrap-from-scratch.sh` stage3/stage4 and
+  `resume-stage3-from-admitted.sh` (`SIMPLE_BOOTSTRAP=1` + entry closure +
+  `SIMPLE_STAGE3_STREAMING_SURFACES=1`).
+  Found while probing: the streaming path could never run under the
+  interpreter at all — `rt_transient_heap_promote` was implemented in
+  `interpreter_extern/memory.rs` but never inserted into `EXTERN_DISPATCH`
+  (`semantic: unknown extern function: rt_transient_heap_promote`); registered
+  now, covered by `dispatch_registers_transient_array_scope_hooks`. The
+  streaming fixture case in `native_build_hir_sharding_spec.spl` therefore
+  needs a seed built at or after this landing.
+  Two more streaming-only defects found by the fixture probe and fixed here:
+  (a) the streaming parse never published `SIMPLE_FRONTEND_CACHE_SCOPE`, so
+  `hir_cache_enabled()` was false on that path (no compiler identity, no
+  cache) — `parse_all_streaming_surfaces_in_place_impl` now publishes it;
+  (b) parse-shard children on the streaming path did not exit after parse
+  (the `rt_exit(0)` lives in the non-streaming loop) and each lowered the
+  whole closure in process — they now exit after the surface freeze, and
+  `native_build_main` no longer launches parse shards at all on the streaming
+  path (that parse uses no front-end parse cache, so there is nothing to
+  warm); HIR shards still launch.
+  Fixture (3 modules, `--threads 2`, fixed seed, load ~30): streaming sharded
+  build 204 s (2 shards report, lowered 3+0, final build `hits=3 misses=0`),
+  plain `--threads 1` build 116 s, artifacts byte-identical. On 3 modules the
+  sharded run is slower (two extra interpreter starts); the win is on the real
+  closure where lowering dominates.
 - **Cross-process object cache path is broken independently of this lane:**
   a second `native-build` into the SAME `--cache-dir` (warm object cache)
   dies in step 5 with `method \`replace\` not found on type \`function\`

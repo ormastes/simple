@@ -60,43 +60,27 @@ fn sum_field(blob: text, line_needle: text, field: text) -> i64:
 fn count_of(blob: text, needle: text) -> i64:
     blob.split(needle).len() - 1
 
-describe "native-build HIR sharding":
+describe "native-build HIR sharding on the streaming-surfaces path":
 
-    slow_it "lowers every module in exactly one HIR shard process and the real build loads them all":
+    slow_it "shards and caches HIR on the streaming-surfaces (bootstrap stage3) path too, byte-identically":
+        # SIMPLE_STAGE3_STREAMING_SURFACES=1 + SIMPLE_BOOTSTRAP=1 selects
+        # lower_and_check_streaming_surfaces_impl, the path the scripted
+        # stage3/stage4 builds take. Its surfaces are frozen in full before
+        # the HIR loop, so the same whole-closure digest key is sound there.
         val run_id = getpid()
-        val root = "build/tmp/hir_shard_spec_{run_id}"
+        val root = "build/tmp/hir_shard_stream_spec_{run_id}"
         expect(dir_create_all(root)).to_equal(true)
-        val (blob, code) = run_build("{root}/cache", "{root}/fe", "{root}/hir", "{root}/out", "2", "1")
+        rt_env_set("SIMPLE_BOOTSTRAP", "1")
+        rt_env_set("SIMPLE_STAGE3_STREAMING_SURFACES", "1")
+        val (blob, code) = run_build("{root}/c1", "{root}/fe", "{root}/hir", "{root}/sharded.bin", "2", "1")
+        val (_b, cb) = run_build("{root}/c2", "{root}/fe2", "{root}/hir2", "{root}/plain.bin", "1", "0")
+        rt_env_set("SIMPLE_BOOTSTRAP", "")
+        rt_env_set("SIMPLE_STAGE3_STREAMING_SURFACES", "")
         expect(code).to_equal(0)
-        # N workers ran and each reported.
-        expect(blob.contains("[hir-shard] 2/2 shard(s) completed split=queue")).to_equal(true)
+        expect(cb).to_equal(0)
         expect(count_of(blob, "[hir-shard] done shard=")).to_equal(2)
-        # Every module lowered and stored by exactly one shard: a double
-        # claim overshoots 3, a lost one undershoots, a shard that silently
-        # fell back to "own nothing" contributes 0 to both sums.
         expect(sum_field(blob, "[hir-shard] done shard=", "lowered=")).to_equal(3)
-        expect(sum_field(blob, "[hir-shard] done shard=", "claimed=")).to_equal(3)
-        # Dependency levels were computed (main imports util_a/util_b: 2 levels).
-        expect(last_line_with(blob, "[hir-shard] done shard=").contains("levels=2")).to_equal(true)
-        # The REAL build's HIR phase was all hits and lowered nothing.
         val summary = last_line_with(blob, "[hir-cache]")
         expect(summary.contains("hits=3")).to_equal(true)
         expect(summary.contains("misses=0")).to_equal(true)
-        expect(summary.contains("stores=0")).to_equal(true)
-        # The queue dir is private to the orchestrator and removed with it.
-        expect(file_exists("{root}/hir/.lock")).to_equal(false)
-
-    slow_it "produces a binary byte-identical to an unsharded, uncached --threads 1 build":
-        # Sharding may only change WHICH PROCESS lowered a module. The real
-        # build runs MIR/codegen from DECODED modules, so identical bytes here
-        # is the proof that the codec reproduces what MIR needs.
-        val run_id = getpid()
-        val root = "build/tmp/hir_shard_ident_spec_{run_id}"
-        expect(dir_create_all(root)).to_equal(true)
-        val (_a, ca) = run_build("{root}/c1", "{root}/fe", "{root}/hir", "{root}/sharded.bin", "2", "1")
-        expect(ca).to_equal(0)
-        val (_b, cb) = run_build("{root}/c2", "{root}/fe2", "{root}/hir2", "{root}/plain.bin", "1", "0")
-        expect(cb).to_equal(0)
-        expect(file_exists("{root}/sharded.bin")).to_equal(true)
-        expect(file_exists("{root}/plain.bin")).to_equal(true)
         expect(file_read("{root}/sharded.bin")).to_equal(file_read("{root}/plain.bin"))

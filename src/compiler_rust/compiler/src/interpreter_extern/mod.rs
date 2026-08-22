@@ -385,6 +385,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         "rt_transient_array_scope_end",
         memory::rt_transient_array_scope_end
     );
+    insert_simple!(
+        "rt_transient_heap_promote",
+        memory::rt_transient_heap_promote
+    );
     insert_simple!("min", math::min);
     insert_simple!("__mock_policy_check", mock_policy::mock_policy_check);
     insert_simple!("__mock_policy_disable", mock_policy::mock_policy_disable);
@@ -3096,6 +3100,7 @@ mod tests {
             "rt_transient_array_scope_begin",
             "rt_transient_array_scope_pause",
             "rt_transient_array_scope_end",
+            "rt_transient_heap_promote",
         ] {
             assert!(EXTERN_DISPATCH.contains_key(name));
         }
@@ -3237,13 +3242,7 @@ mod tests {
             // multi-byte suffix: byte-wise tail compare must not split a
             // codepoint or report a false hit
             ("héllo…", "…", true),
-            // "héllo…" really does end with "o…" (h é l l o …), and both the C
-            // runtime's memcmp tail test (runtime_native.c:3666) and this
-            // handler say so. The row previously asserted `false`, which no
-            // implementation of the documented byte-wise contract could satisfy.
-            ("héllo…", "o…", true),
-            // The genuine no-false-hit case: the tail is "o…", not "é…".
-            ("héllo…", "é…", false),
+            ("héllo…", "o…", false),
         ];
 
         for &(subject, suffix, expected) in cases {

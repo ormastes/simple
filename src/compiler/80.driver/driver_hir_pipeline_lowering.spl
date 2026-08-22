@@ -44,7 +44,7 @@ use compiler.driver.driver_safety_severity.{SafetyPassSeverity, safety_pass_seve
 use compiler.driver.driver_typecheck_severity.{TypecheckPassSeverity, typecheck_pass_severity}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.hir.hir_codec.{hir_codec_roundtrip_selfcheck, hir_codec_roundtrip_line}
-use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_closure_digest, hir_cache_key, hir_cache_has, hir_cache_load, hir_cache_store, hir_cache_summary, hir_shard_active, hir_shard_owns, hir_shard_levels, hir_shard_level_count, hir_shard_summary}
+use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_closure_digest, hir_cache_key, hir_cache_has, hir_cache_load, hir_cache_store, hir_cache_summary, hir_cache_last_warnings, hir_shard_active, hir_shard_owns, hir_shard_levels, hir_shard_level_count, hir_shard_visit_order, hir_shard_summary}
 use compiler.hir.hir_lowering.items.{bootstrap_hir_modules_add_from_module, hir_module_logical_name_from_path}
 extern fn rt_env_get(key: text) -> text
 extern fn rt_hash_text(content: text) -> i64
@@ -119,11 +119,30 @@ impl CompilerDriver:
         var source_index = 0
         var progress_hir_done = 0
         bootstrap_hir_modules_reset()
+        # HIR cache + shards on the streaming path. The surfaces are FROZEN
+        # in full before this loop (surface_freeze completes in phase 2), so
+        # one digest over every surface is exactly what each module's
+        # lowering can see, and the key stays sound.
+        val hir_closure_digest: text = if hir_cache_enabled():
+            hir_cache_closure_digest(surfaces)
+        else:
+            ""
+        val hir_shard_mode: bool = hir_shard_active() and hir_closure_digest != ""
+        var hir_level_count: i64 = 0
+        var hir_shard_lowered: i64 = 0
+        var hir_levels: [i64] = []
+        if hir_shard_mode:
+            hir_levels = hir_shard_levels(surfaces)
+            hir_level_count = hir_shard_level_count(hir_levels)
+        val hir_visit_order: [i64] = hir_shard_visit_order(self.ctx.source_module_names_owner, surfaces, hir_levels)
+        var hir_loop_pos: i64 = 0
+        val hir_bootstrap_mode_gate = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
         log_build_progress("hir", "modules", 0, surfaces.surfaces.len(),
             "pending", 2, 6, 0, 0, "running")
 
         val source_count = self.ctx.source_paths_owner.len()
-        while source_index < source_count:
+        while hir_loop_pos < hir_visit_order.len():
+            source_index = hir_visit_order[hir_loop_pos]
             val source = SourceFile(
                 path: self.ctx.source_paths_owner[source_index],
                 authored_path: self.ctx.source_authored_paths_owner[source_index],
@@ -143,13 +162,13 @@ impl CompilerDriver:
                 if not phase_hir_modules.contains_key(source.module_name):
                     streaming_hir_module_count = streaming_hir_module_count + 1
                 phase_hir_modules[source.module_name] = alias_hir
-                source_index = source_index + 1
+                hir_loop_pos = hir_loop_pos + 1
                 continue
             if poisoned_by_surface.contains_key(surface_index):
                 # One physical file is lowered at most once. Compatibility
                 # aliases cannot retry a poisoned surface under another module
                 # spelling or replace its original diagnostic.
-                source_index = source_index + 1
+                hir_loop_pos = hir_loop_pos + 1
                 continue
             # Keep the retained surface in its canonical owner. ModuleSurface
             # is a large value aggregate; copying it into a local and then
@@ -189,6 +208,18 @@ impl CompilerDriver:
                         source_content_length, source_content_hash))
                 return (self.ctx, false)
 
+            val hir_stream_key: text = if hir_closure_digest != "":
+                hir_cache_key(source.path, hir_closure_digest, is_requested_bootstrap_entry)
+            else:
+                ""
+            if hir_shard_mode:
+                if hir_stream_key == "" or hir_cache_has(hir_stream_key) or not hir_shard_owns(source.path):
+                    hir_loop_pos = hir_loop_pos + 1
+                    continue
+            val hir_stream_cached: HirModule? = if hir_stream_key != "":
+                hir_cache_load(hir_stream_key)
+            else:
+                nil
             lowering.begin_module(source.path)
             log_phase("phase3:hir:file:start {source.path} module={source.module_name}")
             # In-flight receipt, same reasoning as the parse loop: HIR lowering
@@ -198,60 +229,81 @@ impl CompilerDriver:
             log_build_progress("hir", "modules", progress_hir_done,
                 surfaces.surfaces.len(), source.module_name,
                 2, 6, 0, 0, "running")
-            val lower_result = self.lower_streaming_surface_source(lowering, source, is_requested_bootstrap_entry)
-            if lower_result.is_err():
-                # No HIR aggregate exists for this unit (parse/ownership
-                # failure), so it is poisoned by definition -- but the other
-                # units are still checkable.
-                val streaming_error = lower_result.unwrap_err()
-                eprint("[hir-owner-fatal] {streaming_error}")
-                self.ctx.add_error("Streaming HIR lowering error: {streaming_error}")
-                poisoned_by_surface[surface_index] = true
-                val poison_ctx: CompileContext = self.ctx
-                poison_ctx.mark_module_poisoned(source.module_name)
-                if poison_ctx.poison_budget_exhausted():
-                    return (self.ctx, false)
-                source_index = source_index + 1
-                continue
-            val hir_module = lower_result.unwrap()
-            # Keep the aggregate diagnostic array inside its canonical
-            # HirLowering owner. Transporting `lowering.errors` or comparing a
-            # before/after CompileContext scalar both mis-lower under the
-            # Stage-3 native closure. Read only bounded scalar/text projections
-            # and make the poison decision from this module's fatal count.
-            val module_error_count: i64 = lowering.lowering_error_count()
-            val bootstrap_mode = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
-            var module_error_index: i64 = 0
-            var module_fatal_error_count: i64 = 0
-            while module_error_index < module_error_count:
-                val module_error_message = lowering.lowering_error_message_at(
-                    module_error_index, source.module_name)
-                val module_error_recovered = lowering.lowering_error_is_recovered_at(
-                    module_error_index)
-                if module_error_recovered:
-                    # The staged compiler's aggregate warning mutation can
-                    # corrupt the adjacent error-count scalar. Warnings remain
-                    # advisory and are retained outside bootstrap mode.
-                    if not bootstrap_mode:
-                        self.ctx.add_warning(module_error_message)
+            var hir_module: HirModule = nil
+            if hir_stream_cached != nil:
+                hir_module = hir_stream_cached.unwrap()
+                val hir_registry_name = if is_requested_bootstrap_entry:
+                    hir_module_logical_name_from_path(source.path)
                 else:
-                    if module_fatal_error_count < 10:
-                        eprint("[hir-fatal] source_idx={source_index} path={source.path} error_idx={module_error_index} text={module_error_message}")
-                    module_fatal_error_count = module_fatal_error_count + 1
-                    self.ctx.add_error(module_error_message)
-                module_error_index = module_error_index + 1
-            if module_fatal_error_count > 0:
-                eprint("[hir-fatal-count] source_idx={source_index} path={source.path} count={module_fatal_error_count} shown={driver_shown_fatal_count(module_fatal_error_count, false)}")
-                # Drop the partially-lowered aggregate (never store it) and
-                # keep checking the remaining modules. See the non-streaming
-                # loop below for the full rationale.
-                poisoned_by_surface[surface_index] = true
-                val poison_ctx: CompileContext = self.ctx
-                poison_ctx.mark_module_poisoned(source.module_name)
-                if poison_ctx.poison_budget_exhausted():
-                    return (self.ctx, false)
-                source_index = source_index + 1
-                continue
+                    source.module_name
+                bootstrap_hir_modules_add_from_module(hir_module, hir_registry_name, is_requested_bootstrap_entry)
+                if not hir_bootstrap_mode_gate:
+                    for hir_cached_warning in hir_cache_last_warnings():
+                        self.ctx.add_warning(hir_cached_warning)
+            else:
+                val lower_result = self.lower_streaming_surface_source(lowering, source, is_requested_bootstrap_entry)
+                if lower_result.is_err():
+                    # No HIR aggregate exists for this unit (parse/ownership
+                    # failure), so it is poisoned by definition -- but the other
+                    # units are still checkable.
+                    val streaming_error = lower_result.unwrap_err()
+                    eprint("[hir-owner-fatal] {streaming_error}")
+                    self.ctx.add_error("Streaming HIR lowering error: {streaming_error}")
+                    poisoned_by_surface[surface_index] = true
+                    val poison_ctx: CompileContext = self.ctx
+                    poison_ctx.mark_module_poisoned(source.module_name)
+                    if poison_ctx.poison_budget_exhausted():
+                        return (self.ctx, false)
+                    hir_loop_pos = hir_loop_pos + 1
+                    continue
+                hir_module = lower_result.unwrap()
+                # Keep the aggregate diagnostic array inside its canonical
+                # HirLowering owner. Transporting `lowering.errors` or comparing a
+                # before/after CompileContext scalar both mis-lower under the
+                # Stage-3 native closure. Read only bounded scalar/text projections
+                # and make the poison decision from this module's fatal count.
+                val module_error_count: i64 = lowering.lowering_error_count()
+                val bootstrap_mode = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+                var module_error_index: i64 = 0
+                var module_fatal_error_count: i64 = 0
+                var hir_module_warnings: [text] = []
+                while module_error_index < module_error_count:
+                    val module_error_message = lowering.lowering_error_message_at(
+                        module_error_index, source.module_name)
+                    val module_error_recovered = lowering.lowering_error_is_recovered_at(
+                        module_error_index)
+                    if module_error_recovered:
+                        hir_module_warnings.push(module_error_message)
+                        # The staged compiler's aggregate warning mutation can
+                        # corrupt the adjacent error-count scalar. Warnings remain
+                        # advisory and are retained outside bootstrap mode.
+                        if not bootstrap_mode:
+                            self.ctx.add_warning(module_error_message)
+                    else:
+                        if module_fatal_error_count < 10:
+                            eprint("[hir-fatal] source_idx={source_index} path={source.path} error_idx={module_error_index} text={module_error_message}")
+                        module_fatal_error_count = module_fatal_error_count + 1
+                        self.ctx.add_error(module_error_message)
+                    module_error_index = module_error_index + 1
+                if module_fatal_error_count > 0:
+                    eprint("[hir-fatal-count] source_idx={source_index} path={source.path} count={module_fatal_error_count} shown={driver_shown_fatal_count(module_fatal_error_count, false)}")
+                    # Drop the partially-lowered aggregate (never store it) and
+                    # keep checking the remaining modules. See the non-streaming
+                    # loop below for the full rationale.
+                    poisoned_by_surface[surface_index] = true
+                    val poison_ctx: CompileContext = self.ctx
+                    poison_ctx.mark_module_poisoned(source.module_name)
+                    if poison_ctx.poison_budget_exhausted():
+                        return (self.ctx, false)
+                    hir_loop_pos = hir_loop_pos + 1
+                    continue
+                if (rt_env_get("SIMPLE_HIR_CODEC_ROUNDTRIP") ?? "") == "1":
+                    val hir_round_trip = hir_codec_roundtrip_selfcheck(hir_module)
+                    print hir_codec_roundtrip_line(hir_round_trip, source.path)
+                    hir_module = hir_round_trip.module
+                if hir_stream_key != "":
+                    if hir_cache_store(hir_stream_key, hir_module, hir_module_warnings):
+                        hir_shard_lowered = hir_shard_lowered + 1
             lowered_by_surface[surface_index] = hir_module
             progress_hir_done = progress_hir_done + 1
             if not phase_hir_modules.contains_key(source.module_name):
@@ -273,8 +325,14 @@ impl CompilerDriver:
             log_build_progress("hir", "modules", progress_hir_done,
                 surfaces.surfaces.len(), source.module_name,
                 2, 6, 0, 0, "running")
-            source_index = source_index + 1
+            hir_loop_pos = hir_loop_pos + 1
 
+        if hir_cache_enabled():
+            print hir_cache_summary()
+        if hir_shard_mode:
+            print hir_shard_summary(hir_level_count, hir_shard_lowered)
+            rt_stdout_flush()
+            rt_exit(0)
         # Collect-all summary (streaming surfaces path). Same provenance marker
         # as the non-streaming loop -- see the comment there.
         val poisoned_count = self.ctx.poisoned_module_count_value
@@ -433,31 +491,16 @@ impl CompilerDriver:
         # The sequential build keeps source order; the set of entries produced
         # is the same either way, so the real build's output cannot change.
         val hir_shard_mode: bool = hir_shard_active() and hir_closure_digest != ""
-        var hir_visit_order: [i64] = []
         var hir_level_count: i64 = 0
         var hir_shard_lowered: i64 = 0
+        var hir_levels: [i64] = []
         if hir_shard_mode:
-            val hir_levels = hir_shard_levels(retained_module_surfaces)
+            hir_levels = hir_shard_levels(retained_module_surfaces)
             hir_level_count = hir_shard_level_count(hir_levels)
-            var hir_level_index: i64 = 0
-            while hir_level_index <= hir_level_count:
-                var hir_order_idx: i64 = 0
-                while hir_order_idx < self.ctx.sources.len():
-                    val hir_order_name = self.ctx.sources[hir_order_idx].module_name
-                    var hir_source_level: i64 = hir_level_count
-                    if retained_module_surfaces.index_by_name.contains_key(hir_order_name):
-                        val hir_surface_idx = retained_module_surfaces.index_by_name[hir_order_name]
-                        if hir_surface_idx >= 0 and hir_surface_idx < hir_levels.len():
-                            hir_source_level = hir_levels[hir_surface_idx]
-                    if hir_source_level == hir_level_index:
-                        hir_visit_order.push(hir_order_idx)
-                    hir_order_idx = hir_order_idx + 1
-                hir_level_index = hir_level_index + 1
-        else:
-            var hir_order_idx: i64 = 0
-            while hir_order_idx < self.ctx.sources.len():
-                hir_visit_order.push(hir_order_idx)
-                hir_order_idx = hir_order_idx + 1
+        var hir_order_names: [text] = []
+        for hir_order_src in self.ctx.sources:
+            hir_order_names.push(hir_order_src.module_name)
+        val hir_visit_order: [i64] = hir_shard_visit_order(hir_order_names, retained_module_surfaces, hir_levels)
         var hir_loop_pos: i64 = 0
         if mem_snapshot_begin() < 0:
             self.ctx.add_error("SIMPLE_MEM_SNAPSHOT_FILE could not be established safely")
@@ -532,6 +575,12 @@ impl CompilerDriver:
                 else:
                     name
                 bootstrap_hir_modules_add_from_module(hir_cached.unwrap(), hir_registry_name, is_bootstrap_entry)
+                # Replay the stored warning-level diagnostics under the same
+                # gate the in-process path applies (warnings are advisory and
+                # dropped in bootstrap mode there too).
+                if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+                    for hir_cached_warning in hir_cache_last_warnings():
+                        self.ctx.add_warning(hir_cached_warning)
             var hir_module: HirModule = if hir_cache_hit:
                 dtrace("[DRV] branch=hir_cache_hit")
                 hir_cached.unwrap()
@@ -619,12 +668,14 @@ impl CompilerDriver:
                 eprint("[bootstrap-hir-module-errors] source_idx={source_idx} path={src.path} count={module_error_count}")
             var module_error_idx = 0
             var module_fatal_error_count = 0
+            var hir_module_warnings: [text] = []
             while module_error_idx < module_error_count:
                 val module_error_message: text = lowering.lowering_error_message_at(module_error_idx, name)
                 val module_error_recovered: bool = lowering.lowering_error_is_recovered_at(module_error_idx)
                 if bootstrap_diag and source_idx < 20 and module_error_idx < 20:
                     eprint("[bootstrap-hir-module-error] source_idx={source_idx} error_idx={module_error_idx} len={module_error_message.len()} recovered={module_error_recovered} text={module_error_message}")
                 if module_error_recovered:
+                    hir_module_warnings.push(module_error_message)
                     # Avoid warning aggregate mutation on the old staged ABI;
                     # bounded debug output above keeps diagnostics visible.
                     if not bootstrap_mode:
@@ -685,7 +736,7 @@ impl CompilerDriver:
                 hir_module = hir_round_trip.module
 
             if hir_cache_key_value != "" and not hir_cache_hit:
-                if hir_cache_store(hir_cache_key_value, hir_module):
+                if hir_cache_store(hir_cache_key_value, hir_module, hir_module_warnings):
                     hir_shard_lowered = hir_shard_lowered + 1
             val hir_function_count: i64 = driver_dict_entry_count(hir_module.functions)
             if focused_future_driver_diag:

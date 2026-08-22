@@ -332,6 +332,9 @@ impl CompilerDriver:
         self.streaming_module_surfaces_owner = nil
         self.streaming_surface_owner_ready = false
         self.streaming_entry_source_index_owner = bootstrap_entry_source_index(self.ctx)
+        # Same compiler-identity scope the non-streaming parse publishes: the
+        # HIR cache keys off it, and without it the streaming path had no cache.
+        _driver_publish_frontend_cache_scope()
         self.ctx.modules = {}
         self.ctx.module_surfaces = nil
         # Phase 1 owns independent scalar text arrays; phase 2 never re-reads a
@@ -472,6 +475,13 @@ impl CompilerDriver:
         self.streaming_surface_owner_ready = true
         self.ctx.module_surfaces = Some(retained_surfaces)
         self.ctx.modules = {}
+        if driver_parse_shard_active():
+            # The streaming parse has no front-end parse cache to warm, and a
+            # shard child must never carry on into HIR/MIR/codegen (it did:
+            # each child lowered the whole closure in process, N times over).
+            print "[parse-shard] done shard={rt_env_get(\"SIMPLE_PARSE_SHARD\") ?? \"\"} parses={flat_parse_module_body_calls()} claimed={driver_parse_shard_claimed()}"
+            rt_stdout_flush()
+            rt_exit(0)
         # Read the authoritative scalar field directly.  Avoid both a receiver
         # method call and a phase-local boolean: the current native backend has
         # independently mis-lowered each form in this large mutable method.

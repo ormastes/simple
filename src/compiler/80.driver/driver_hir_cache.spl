@@ -31,6 +31,7 @@
 
 use compiler.hir.hir_types.{HirModule}
 use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode, hir_codec_header}
+use compiler.frontend.core.flat_pool_codec.{flat_pool_escape, flat_pool_unescape}
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_scope}
 use std.common.crypto.sha256.{sha256_text}
@@ -47,12 +48,15 @@ extern fn rt_getpid() -> i64
 extern fn rt_file_move(src: text, dst: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
 
-val HIR_CACHE_ENTRY_VERSION: text = "spl-hircache-v1"
+val HIR_CACHE_ENTRY_VERSION: text = "spl-hircache-v2"
 
 # Diagnostic counters, same shape as the front-end cache's.
 var _hir_cache_hits: i64 = 0
 var _hir_cache_misses: i64 = 0
 var _hir_cache_stores: i64 = 0
+# Recovered (warning-level) lowering diagnostics of the last loaded entry, so
+# a hit replays exactly what the in-process lowering would have reported.
+var _hir_cache_last_warnings: [text] = []
 
 fn hir_cache_enabled() -> bool:
     if (rt_env_get("SIMPLE_HIR_CACHE") ?? "") == "0":
@@ -124,24 +128,57 @@ fn hir_cache_load(key: text) -> HirModule?:
     if raw == "" or nl < 0 or raw.substring(0, nl) != hir_cache_header():
         _hir_cache_misses = _hir_cache_misses + 1
         return nil
-    val decoded = hir_module_decode(raw.substring(nl + 1, raw.len()))
+    # Entry body: "W" <count> <escaped warning lines...> then the codec blob.
+    var pos = nl + 1
+    var warnings: [text] = []
+    val w_nl = raw.index_of("\n", pos)
+    if w_nl < 0 or raw.substring(pos, w_nl) != "W":
+        _hir_cache_misses = _hir_cache_misses + 1
+        return nil
+    pos = w_nl + 1
+    val c_nl = raw.index_of("\n", pos)
+    if c_nl < 0:
+        _hir_cache_misses = _hir_cache_misses + 1
+        return nil
+    val warning_count = raw.substring(pos, c_nl).to_i64() ?? -1
+    if warning_count < 0:
+        _hir_cache_misses = _hir_cache_misses + 1
+        return nil
+    pos = c_nl + 1
+    var wi = 0
+    while wi < warning_count:
+        val l_nl = raw.index_of("\n", pos)
+        if l_nl < 0:
+            _hir_cache_misses = _hir_cache_misses + 1
+            return nil
+        warnings.push(flat_pool_unescape(raw.substring(pos, l_nl)))
+        pos = l_nl + 1
+        wi = wi + 1
+    val decoded = hir_module_decode(raw.substring(pos, raw.len()))
     if decoded == nil:
         _hir_cache_misses = _hir_cache_misses + 1
         return nil
+    _hir_cache_last_warnings = warnings
     _hir_cache_hits = _hir_cache_hits + 1
     decoded
 
-fn hir_cache_store(key: text, module: HirModule) -> bool:
+fn hir_cache_last_warnings() -> [text]:
+    _hir_cache_last_warnings
+
+fn hir_cache_store(key: text, module: HirModule, warnings: [text]) -> bool:
     if key == "" or not hir_cache_enabled():
         return false
     val blob = hir_module_encode(module)
     if blob == "":
         return false
+    var warning_parts: [text] = ["W\n{warnings.len()}\n"]
+    for w in warnings:
+        warning_parts.push(flat_pool_escape(w) + "\n")
     val dir = hir_cache_dir()
     val _made = rt_dir_create_all(dir)
     val final_path = hir_cache_path(key)
     val tmp = final_path + ".{rt_getpid()}.tmp"
-    if not rt_file_write_text(tmp, hir_cache_header() + "\n" + blob):
+    if not rt_file_write_text(tmp, hir_cache_header() + "\n" + warning_parts.join("") + blob):
         return false
     if rt_file_move(tmp, final_path):
         _hir_cache_stores = _hir_cache_stores + 1
@@ -286,6 +323,32 @@ fn hir_shard_levels(surfaces: ModuleSurfacesByName) -> [i64]:
         current = current + 1
     level
 
+# Source indices in (level, source index) order; a source with no surface
+# alias goes after every levelled one. Identity order when levels is empty.
+fn hir_shard_visit_order(names: [text], surfaces: ModuleSurfacesByName, levels: [i64]) -> [i64]:
+    var order: [i64] = []
+    if levels.len() == 0:
+        var idx = 0
+        while idx < names.len():
+            order.push(idx)
+            idx = idx + 1
+        return order
+    val level_count = hir_shard_level_count(levels)
+    var level = 0
+    while level <= level_count:
+        var idx = 0
+        while idx < names.len():
+            var source_level = level_count
+            if surfaces.index_by_name.contains_key(names[idx]):
+                val surface_idx = surfaces.index_by_name[names[idx]]
+                if surface_idx >= 0 and surface_idx < levels.len():
+                    source_level = levels[surface_idx]
+            if source_level == level:
+                order.push(idx)
+            idx = idx + 1
+        level = level + 1
+    order
+
 fn hir_shard_level_count(levels: [i64]) -> i64:
     var top = -1
     for l in levels:
@@ -298,7 +361,7 @@ fn hir_shard_summary(levels: i64, lowered: i64) -> text:
 
 export HIR_CACHE_ENTRY_VERSION
 export hir_cache_enabled, hir_cache_dir, hir_cache_closure_digest, hir_cache_key
-export hir_cache_has, hir_cache_load, hir_cache_store
+export hir_cache_has, hir_cache_load, hir_cache_store, hir_cache_last_warnings
 export hir_cache_hits, hir_cache_misses, hir_cache_stores, hir_cache_summary
 export hir_shard_spec, hir_shard_active, hir_shard_claimed, hir_shard_owns
-export hir_shard_levels, hir_shard_level_count, hir_shard_summary
+export hir_shard_levels, hir_shard_level_count, hir_shard_visit_order, hir_shard_summary
