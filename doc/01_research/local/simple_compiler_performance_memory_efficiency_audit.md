@@ -2052,3 +2052,19 @@ ownership. `check` renders in memory and exact-compares without writing;
 `generate` skips byte-identical output and otherwise performs one atomic write.
 Ordered classifier rules remain a separate priority-manifest contract, so table
 freshness must not be presented as proof of predicate-priority freshness.
+
+### Ordered classifier manifest audit
+
+The classifier has exactly 80 first-match predicates across 15 sections. Its
+Boolean grammar includes single hits, conjunction, disjunction, two
+`(A or B) and C` rules, one explicit negative guard, and one caller-selected
+dynamic phrase at zero-based priority 49. Order is observable: generic
+`dimension mismatch` intentionally shadows later specialized dimension rules.
+
+A build-only postfix predicate manifest now owns this order without creating a
+runtime rule registry. Validation requires contiguous priorities, valid pattern
+IDs, a well-formed one-value postfix stack, valid E-codes, and exactly one
+standalone dynamic phrase at priority 49. The renderer reconstructs the explicit
+early-return cascade and fallback mapping with precedence-aware parentheses.
+The runtime classifier therefore keeps its scalar hit record and straight-line
+dispatch; manifest arrays and token lists exist only during generation.
