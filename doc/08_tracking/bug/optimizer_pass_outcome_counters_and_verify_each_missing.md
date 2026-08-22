@@ -30,6 +30,9 @@ against serialized change and fail on disagreement. It is not yet the pipeline-w
 Each structural failure carries a stable `MIRV001`-`MIRV019` code parallel to its
 human message. `MIRV999` explicitly marks an unclassified future failure instead of
 silently inventing a semantic category.
+`MirModuleStructuralVerificationReceipt` deterministically aggregates child receipts and
+adds `MIRVM001` for a function-map key/symbol mismatch. It is groundwork for module-pass
+dispatch, not evidence that module-pass outcome counters are implemented.
 
 Consequently `simple.opt-pipeline-report/v1` deliberately records
 `run_outcome: not-run` and null execution counters. Selection must not be interpreted as
