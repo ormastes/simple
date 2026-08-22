@@ -317,3 +317,10 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Replace handwritten selection sort with the standard deterministic sort.
 - Preserve identity format, completeness decisions, and overlap semantics.
 - Follow-up: design a region-grouped interval sweep for overlap proof before changing the remaining pair analysis.
+## Completed compiler tranche: remove incomplete string-builder rewrite
+
+- Preserve the `Skeleton` class, factory, statistics, and identity entrypoint.
+- Remove private concat candidate/rewrite machinery and unused loop-detector/local-ID state.
+- Pin absence of push-only lowering with a source contract.
+- Require typed builder construction, initialization, final joins, dominated use replacement, and semantic differential tests before rehabilitation.
+- Follow-up: prefer CollectionPlan producer-consumer lowering once ownership/effect/cardinality facts are complete.
