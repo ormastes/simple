@@ -13,7 +13,7 @@ static uint64_t now_ns(void) {
 }
 
 int main(void) {
-    enum { iterations = 10000000 };
+    enum { iterations = 50000000 };
     uint8_t bytes[33] = {0};
     simple_hal_captured_device_payload_v1 value = {0};
     simple_hal_payload_cursor_v1 cursor = {77u, 0u, 1u, 0u, 0u, 1u};

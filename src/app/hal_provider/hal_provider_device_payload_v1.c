@@ -39,7 +39,13 @@ int simple_hal_captured_device_payload_well_formed_v1(
         value->read_once_token > 62u || value->sealed != 1u ||
         !region_well_formed(&value->region) ||
         !digest_present(value->interaction_digest_hi,
-                        value->interaction_digest_lo)) {
+                        value->interaction_digest_lo) ||
+        (((value->observation_status == 1u ||
+           value->observation_status == 2u) &&
+          value->observation_status_code != 0) ||
+         ((value->observation_status != 1u &&
+           value->observation_status != 2u) &&
+          value->observation_status_code <= 0))) {
         return 0;
     }
     /* RandomFill is opcode 11 and has no physical-device grant. All device

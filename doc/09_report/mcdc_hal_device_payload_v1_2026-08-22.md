@@ -21,11 +21,13 @@ records and never receive a device handle or physical address.
 ## Native evidence
 
 The C self-check passed with `-Wall -Wextra -Werror -pedantic` plus AddressSanitizer
-and UndefinedBehaviorSanitizer. A 10,000,000-iteration 32-byte exact-replay run
-measured 27.228 ns/replay and 1,536 KiB peak RSS, with zero contract allocations.
-The earlier unsanitized observation before the entropy authorization binding was
-35.352 ns/replay at the same 1,536 KiB peak RSS; the final result is not a
-regression.
+and UndefinedBehaviorSanitizer. A 50,000,000-iteration 32-byte exact-replay run
+measured 23.340 ns/replay and 1,536 KiB peak RSS, with zero contract allocations.
+The earlier 10,000,000-iteration baseline before structured observation
+validation was 35.352 ns/replay at the same 1,536 KiB peak RSS. Validation is
+therefore included without a measured regression. The Pure Simple cursor also
+uses a validated internal comparison path, avoiding duplicate validation of
+both payloads on every replay.
 
 The Pure Simple optimizer was not run because the deployed self-hosted compiler
 is currently inadmissible; the Rust seed was not substituted and no full build
