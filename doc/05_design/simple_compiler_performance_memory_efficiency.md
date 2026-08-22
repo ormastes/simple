@@ -190,3 +190,11 @@ array or the canonical lines. Standalone wrappers construct equivalent private f
 remain behavior-compatible. Duplicate-typed call-site discovery reuses canonical lines
 for every signature, avoiding per-candidate arrays; its repeated traversal remains an
 explicit candidate for a name-indexed call-site table. No view survives registry return.
+
+### Compiler-owned split elimination
+
+All compiler-owned EasyFix registry members that require line iteration accept canonical
+lines or contexts. Path-gated compatibility wrappers must perform their gate before
+splitting, so direct calls on excluded files remain allocation-free. File-scope allow
+analysis has a lines variant and must not reconstruct the source view. Whole-source input
+remains only for algorithms that inspect cross-line text without a migrated fact owner.
