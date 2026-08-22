@@ -345,3 +345,10 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Remove global loop-proof seeding, textual check keys, and direct instruction deletion.
 - Replace simulated-elimination fixtures in both test layouts with fail-closed contracts.
 - Follow-up: rehabilitate only with dominance-scoped SSA/range/mutation facts and differential safety tests.
+## Completed compiler tranche: close general loop-transform bypasses
+
+- Preserve LICM/unroller/combined classes, counters, thresholds, factories, dependencies, and identity compatibility methods.
+- Remove preheader synthesis, predecessor redirection, instruction movement/duplication, and direct combined chaining.
+- Remove per-instance loop detectors from disabled transforms.
+- Replace simulated transformation fixtures in both test layouts with quarantine contracts.
+- Follow-up: rehabilitate only on canonical LoopForest, SSA, MemorySSA-lite, effect and profitability facts.
