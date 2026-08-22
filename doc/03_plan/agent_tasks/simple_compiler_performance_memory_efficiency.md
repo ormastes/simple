@@ -113,6 +113,17 @@
 - Add mirrored clean-view, policy, parse/count order, and active-source contracts.
 - Verification intentionally not run under the user's no-verify instruction.
 
+## Completed VHDL metadata-index tranche
+
+- Built collision-framed exact and eligible-alias row-index maps once.
+- Hoisted target-module alias normalization outside its function loop.
+- Preserved direct+alias, duplicate exact/alias, invalid-row, generic-entry, and
+  unmatched-row behavior.
+- Added a real duplicate-exact ambiguity specimen plus mirrored source contracts.
+- Static model: `Theta(F*N)` matching and alias substring churn become expected
+  `O(F+N)` work with `O(N)` index keys/row ordinals.
+- Verification intentionally not run under the user's no-verify instruction.
+
 ## Completed VHDL target-index tranche
 
 - Indexed exact raw qualified/bare names for all and hardware-only functions.
