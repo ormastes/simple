@@ -1126,3 +1126,9 @@ errors for ranks 1-4 and remove the second availability probe from their owner
 dispatcher. Readiness passes 11/11 with the same one-query/one-call hot path.
 Next migrate eye/arange/linspace, softmax/leaky-relu, and scalar status/value
 results; signed evidence admission remains a separate unfinished phase.
+
+Eye, arange, and linspace now preserve typed errors through `TorchNDArray` and
+remove duplicate availability probes. Readiness passes 12/12 while each path
+keeps one direct raw constructor call. Next migrate softmax/log-softmax/leaky-
+relu, then scalar status/value results; cryptographic provider admission and
+C++ exception barriers remain pending.

@@ -1427,3 +1427,10 @@ its duplicate availability probe. Readiness passes 11/11; each selected path
 keeps one availability query and one raw call plus constant dimension/handle
 checks, with no added allocation, lookup, hashing, I/O, retry, or sync. These
 providers remain unsafe-tagged rather than signed or evidence-verified.
+
+Dynamic Torch eye, arange, and linspace now return typed errors and no longer
+fabricate handle zero. `TorchNDArray` removes its duplicate availability probes
+and propagates the provider reason before conversion. Readiness passes 12/12;
+each constructor retains one availability query, input checks, one direct raw
+call, and one handle check, with no added allocation, lookup, hash, I/O, retry,
+or synchronization. The raw provider remains unsafe-tagged and unverified.
