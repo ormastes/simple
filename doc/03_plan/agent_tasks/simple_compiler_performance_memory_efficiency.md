@@ -248,3 +248,19 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Pin the absence of dormant recognizer markers and helper names with a source contract.
 - Preserve natural-loop discovery and complete `(from,to)` exit-edge facts.
 - Follow-up: implement bounded SCEV-lite as a shared immutable analysis with explicit invalidation.
+## Completed compiler tranche: remove unsafe dormant TCO
+
+- Preserve the `Skeleton` descriptor, factory, statistics, and identity compatibility entrypoints.
+- Delete the unreachable sequential parameter-assignment rewrite and private candidate helpers.
+- Pin absence of the unsafe rewrite surface with a source contract.
+- Require parallel temporaries and full arity/type/ownership/effect/unwind/debug proofs before rehabilitation.
+- Follow-up: implement the active transform only after shared call-edge and ownership facts exist.
+
+## Planned tooling tranche: CLI-scoped lint session
+
+- Construct the lint descriptor registry once per repository command.
+- Cache manifest discovery and parsed policy per unique project configuration.
+- Load critical-mode policy once per command.
+- Read each source once and share it with optional SIMD analysis.
+- Keep `run_lint_file` as a one-file compatibility wrapper.
+- Pin diagnostic ordering/policy equivalence and measure batch wall time plus maximum RSS.
