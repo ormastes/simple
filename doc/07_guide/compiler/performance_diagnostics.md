@@ -271,3 +271,8 @@ EasyFix policy uses the semantic code extracted from either `L|E:code:location` 
 `direct_code:location` IDs. Direct warning IDs such as W0406 remain W0406; their line is
 never interpreted as a code. Known annotation membership uses allocation-free exact
 dispatch rather than rebuilding whitelist arrays for each source line.
+
+EasyFix diagnostics participate in the same configurable policy as native lint records.
+Existing named rules such as export boundaries, SPipe quality, resource leaks, stubs, and
+annotations map directly to their configured names; W0406 uses `visibility_boundary`.
+Default deny and authored allow settings therefore apply consistently after ID decoding.

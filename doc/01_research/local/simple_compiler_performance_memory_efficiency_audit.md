@@ -1547,3 +1547,14 @@ suppression and severity policy targeted the wrong key. `lint_rule_code_from_eas
 now recognizes `L:`/`E:` namespaced IDs, preserves direct codes before the first colon,
 and returns malformed IDs unchanged. It performs one necessary code slice and no parts
 array, restoring correct W0404/W0406 policy ownership.
+
+## 2026-08-22 implementation addendum: EasyFix policy reachability
+
+Correct ID decoding exposed that many EasyFix codes already declared in
+`all_lint_names()` and `build_default_levels()` still lacked a mapping to those names.
+Rules including export boundaries, SPipe quality, resource leaks, annotation validity,
+and stub detection therefore ignored authored suppression and configured/default deny
+levels. Exact allocation-free mapping now covers every existing configurable EasyFix
+name, while W0406 maps to `visibility_boundary` alongside W0401–W0404. Default-deny
+`export_outside_init` now promotes to deny, and an explicit allow suppresses it through
+the same one-pass `LintPolicyDecision` used by other diagnostics.
