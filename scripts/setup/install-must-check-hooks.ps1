@@ -5,7 +5,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
-$Source = Join-Path $Root "scripts/hooks/pre-push"
+$Source = Join-Path $Root "scripts/hooks/pre-push-worktree-launcher"
+$Dispatcher = Join-Path $Root "scripts/hooks/pre-push"
 $HooksPath = (& git -C $Root rev-parse --git-path hooks 2>$null)
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($HooksPath)) {
     Write-Error "install-must-check-hooks: not a Git worktree"
@@ -28,8 +29,9 @@ function Test-LegacyCanonicalHook {
     if (-not (Test-Path -LiteralPath $Destination)) { return $false }
     $legacy = Join-Path $Root "scripts/check/pre-push-conflict-tree-guard.shs"
     try {
-        return (Get-FileHash -Algorithm SHA256 -LiteralPath $legacy).Hash -eq
-               (Get-FileHash -Algorithm SHA256 -LiteralPath $Destination).Hash
+        $destinationHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $Destination).Hash
+        return ((Get-FileHash -Algorithm SHA256 -LiteralPath $legacy).Hash -eq $destinationHash) -or
+               ((Get-FileHash -Algorithm SHA256 -LiteralPath $Dispatcher).Hash -eq $destinationHash)
     } catch {
         return $false
     }

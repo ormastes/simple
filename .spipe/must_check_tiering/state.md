@@ -360,3 +360,16 @@ implementation-blocked-by-bootstrap-authority
   RSS. This is no material improvement over the diagnostic baseline (+240864
   ms at module 5, 776960 KiB RSS). The three-cycle cap is exhausted; Stage 4,
   deployment, lightweight pre-push, and GitHub push remain refused.
+- hook-fix: Reproduced the shared-worktree installer defect with two linked
+  worktrees: installation from the first made the second fail because the
+  common pre-push hook resolved into the first checkout. Both installers now
+  use a stable worktree-resolving launcher; legacy dispatchers are replaced
+  rather than preserved recursively. The focused contract passed with
+  `selftest=4s ref-path=0s installed-hook=1s` after rebase. The real shared
+  hook was then installed and both installer freshness and production wiring
+  checks passed.
+- doc-refactor: Updated the operator manual, tooling guide, feature expert,
+  bootstrap layer expert, SPipe/Codex workflow skills, and the bug record.
+  `.agents/skills`, `.claude/agents/spipe`, `.claude/commands`, and
+  `.gemini/commands` are N/A for this narrow installation mechanism because
+  none names or implements must-check hook installation.
