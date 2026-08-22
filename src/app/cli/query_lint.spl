@@ -5,7 +5,7 @@
 
 use app.cli.query_helpers.{_count_indent}
 use app.cli.query_rich_common.{_diag_emit_or_collect, _find_in_line, _find_in_line_from, _extract_decl_name, query_file_read_rich, query_file_exists, _DIAG_COLLECT_MODE, _DIAG_COLLECTED, _DIAG_SEVERITY_OVERRIDE}
-use app.cli.query_lint_checks.{_check_match_exhaustiveness_text, _check_closure_capture_text, _check_ignored_return_text, _check_multiline_bool_text, _check_safety_text, _check_visibility_text, _check_print_to_log_text}
+use app.cli.query_lint_checks.{_check_match_exhaustiveness_text, _check_closure_capture_text, _check_ignored_return_text_indexed, _check_multiline_bool_text, _check_safety_text, _check_visibility_text, _check_print_to_log_text, QueryIndentSuccessorIndex, _query_indent_successor_index}
 use app.cli.query_lint_scan.{lint_scan_line}
 # Strictness-tier severity routing: resolve the LintConfig (sdn profile= + @lint_profile)
 # and translate per-code Allow/Deny into the diagnostic severity override map, so the
@@ -215,17 +215,22 @@ fn _emit_source_lint_diagnostics(file: text, source: text, format: text) -> i64:
     _load_lint_config_for(file, source)
     val lines = source.split("\n")
     val source_locations = _query_ast_lint_location_index(lines)
+    val indent_successors = _query_indent_successor_index(lines)
     var count = 0
-    count = count + _emit_basic_line_lints(lines, file, format)
+    count = count + _emit_basic_line_lints(
+        lines, indent_successors, file, format)
     count = count + _emit_text_heuristic_lints(
-        lines, source_locations, file, format)
+        lines, source_locations, indent_successors, file, format)
     count = count + _emit_primitive_api_text(lines, file, format)
     count = count + _run_ast_lint_passes(
         source, source_locations, file, format)
     _clear_lint_config_overrides()
     count
 
-fn _emit_basic_line_lints(lines: [text], file: text, format: text) -> i64:
+fn _emit_basic_line_lints(
+    lines: [text], indent_successors: QueryIndentSuccessorIndex,
+    file: text, format: text
+) -> i64:
     var count = 0
     var lint_i = 0
     while lint_i < lines.len():
@@ -253,8 +258,10 @@ fn _emit_basic_line_lints(lines: [text], file: text, format: text) -> i64:
                 count = count + 1
 
         if _is_return_statement(trimmed):
-            val next_unreachable = _find_next_statement_in_block(lines, lint_i)
-            if next_unreachable > 0:
+            val successor = indent_successors.next_same_or_shallower[lint_i]
+            if (successor >= 0 and
+                _count_indent(lines[successor]) == scan.indent):
+                val next_unreachable = successor + 1
                 if format == "json":
                     _diag_emit_or_collect("{\"severity\":2,\"code\":\"UNREACH001\",\"message\":\"unreachable code after return\",\"line\":{next_unreachable},\"col\":1,\"end_line\":{next_unreachable},\"end_col\":1,\"tags\":[1],\"source\":\"simple-lint\"}")
                 else:
@@ -266,6 +273,7 @@ fn _emit_basic_line_lints(lines: [text], file: text, format: text) -> i64:
 
 fn _emit_text_heuristic_lints(
     lines: [text], source_locations: QueryAstLintLocationIndex,
+    indent_successors: QueryIndentSuccessorIndex,
     file: text, format: text
 ) -> i64:
     var count = 0
@@ -273,7 +281,8 @@ fn _emit_text_heuristic_lints(
     count = count + _check_gc_boundary_imports_text(source_locations, file, format)
     count = count + _check_match_exhaustiveness_text(lines, file, format)
     count = count + _check_closure_capture_text(lines, file, format)
-    count = count + _check_ignored_return_text(lines, file, format)
+    count = count + _check_ignored_return_text_indexed(
+        lines, file, format, indent_successors)
     count = count + _check_print_to_log_text(lines, file, format)
     count = count + _check_multiline_bool_text(lines, file, format)
     count = count + _check_safety_text(lines, file, format)
@@ -362,32 +371,6 @@ fn _truncate_import_suffix(value: text, marker: text) -> text:
 fn _is_return_statement(trimmed: text) -> bool:
     """Check if a trimmed line is a return statement."""
     (trimmed == "return" or trimmed.starts_with("return "))
-
-fn _find_next_statement_in_block(lines: [text], return_idx: i64) -> i64:
-    """Find the next non-empty statement at the same indentation level after a return.
-    Returns the 1-based line number, or 0 if no unreachable code found.
-    """
-    if return_idx >= lines.len() - 1:
-        return 0
-    val return_line = lines[return_idx]
-    val return_indent = _count_indent(return_line)
-
-    var ni = return_idx + 1
-    while ni < lines.len():
-        val next_line = lines[ni]
-        val next_trimmed = next_line.trim()
-        if next_trimmed == "":
-            ni = ni + 1
-            continue
-        val next_indent = _count_indent(next_line)
-        # If indentation decreased, we left the block
-        if next_indent < return_indent:
-            return 0
-        # If at same indent, it's unreachable code in the same block
-        if next_indent == return_indent:
-            return ni + 1
-        ni = ni + 1
-    0
 
 fn _check_deprecated_double_underscore(trimmed: text, line_num: i64, file: text, format: text) -> i64:
     """Check for Type__method() deprecated call pattern in a line."""
