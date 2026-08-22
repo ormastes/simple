@@ -76,3 +76,10 @@ The TCP/TLS HTTP owner rejects unknown ALPN and H3 without H1 downgrade. SFTP
 now routes bounded filesystem operations through the canonical capability-gated
 VFS; fresh live OpenSSH/QEMU evidence remains blocked on an admitted runtime. Never
 promote `check-simpleos-servers-qemu.shs` while it uses the Rust seed/password.
+# SSH filesystem-exec fail-closed boundary (2026-08-22)
+
+The production SSH daemon has real filesystem launchers only on x86_64 and
+RISC-V 64. Its x86_32, ARM64, ARM32, and RISC-V 32 target branches must return
+the shared unavailable-launcher status `126`, never `0`. Keep `127` distinct
+for a real command/PATH miss on an implemented launcher. Source contract coverage is
+not target-native or QEMU execution evidence.

@@ -1,5 +1,14 @@
 # SimpleOS Kernel Exec / Loader Layer Expert
 
+## SSH unsupported-target status boundary (2026-08-22)
+
+`src/os/apps/sshd/ssh_exec_status_contract.spl` owns the fail-closed status for
+an admitted SSH filesystem-exec request when the target has no launcher. The
+x86_32, ARM64, ARM32, and RISC-V 32 branches return `126` (launcher unavailable),
+never success. Do not reuse `127`: that remains command/PATH not found on the
+implemented x86_64 and RISC-V 64 paths. This distinction prevents unsupported
+target stubs from fabricating successful guest execution.
+
 ## Role
 
 Own layer-specific process knowledge for the SimpleOS **execution substrate**:
