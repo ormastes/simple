@@ -281,3 +281,13 @@ leaders for distinct fields prove overlap for analyzer-produced half-open
 ranges. Malformed externally supplied ranges retain an exact region-local
 predicate fallback. Identity canonicalization remains a separate lexical fact,
 and incomplete evidence continues to fail closed before interval allocation.
+
+### Lint manifest resolution ownership
+
+Direct-library `Linter.new()` retains cwd-relative discovery for compatibility.
+Target-scoped CLI construction explicitly disables that work; the command then
+owns manifest selection, bounded parsed-policy storage, CLI overlay, and file
+attribute resolution. Existing source-directory/manifest-directory cache
+semantics and the ten-level lookup bound remain unchanged. These snapshots live for one command only;
+daemon reuse requires canonical-path freshness tokens and invalidation rather
+than promoting the cache to process-global state.
