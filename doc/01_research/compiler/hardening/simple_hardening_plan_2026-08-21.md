@@ -2066,6 +2066,8 @@ Proofs complement executable checks; they do not replace missing runtime/backend
 
 ## 20. Parallel-agent implementation plan
 
+> Execution status for this plan (living, per-commit rows, Phase 1 stage1 state): see §27.
+
 ### 20.1 Coordination rule
 
 Use the repository’s existing principle:
@@ -2490,3 +2492,42 @@ static + sealed complete
 `Any` is treated as an unsafe representation escape, generics become concrete through typed monomorphization, finite dynamic domains become closed sum types, compiler transitions become total generated relations, and aspects become part of the post-weave verified artifact identity.
 
 That combination provides maximum practical completeness without imposing dynamic lookup, extra node fields, or erased representations on the common static compiler path.
+
+## 27. Execution status (living — update on every change)
+
+**Rule:** every landed lane commit touching this plan's scope appends a dated row to the table below *in the same commit*. A landing without a row here is incomplete.
+
+| date | phase/lane | commit | what changed | plan section affected | evidence |
+|---|---|---|---|---|---|
+| 2026-08-21 | hardening lanes | `c089809a253` | compiler completeness lanes, bootstrap pinning, seed fixes, test sweep repairs | §20 | commit |
+| 2026-08-21 | test-runner | `7a6f6459a81` | daemon backlog bypass; single-worker daemon serialized concurrent `simple test` | §20 (tooling) | `light_test_daemon_serializes_concurrent_test_invocations_2026-08-21.md` |
+| 2026-08-21 | jit | `20416a1bda7` | optional class unwrap emitted enum payload read, segfaulting on field access | §20 (JIT completeness) | commit |
+| 2026-08-21 | pure-simple | `73cd50caf97` | ForceUnwrap in tree-walk eval; matrix cases isolated per process | §20 | `pure_mir_force_unwrap_class_receiver_unresolved_2026-08-22.md` |
+| 2026-08-21 | mir | `7d5e33c9007` | closure conversion for capturing lambdas on the native path | §20 (MIR) | `native_capturing_lambda_closure_conversion_2026-08-22.md` |
+| 2026-08-21 | hir | `144f608f81a` | package-sibling fallback for imported callable signature dependencies | §20 (HIR) | `hir_sibling_impl_signature_package_dependency_2026-08-22.md` |
+| 2026-08-21 | seed perf | `d30727e74e3` | interpreter hot path: lazy coverage file per decision, shadow capture order, CowEnv frame maps on ahash | Phase 1 | `seed_interpreter_stall_profile_2026-08-21.md` |
+| 2026-08-21 | hir perf | `88146e0e7e5` | NAMEIDX per-surface name index, SCOPEROW in-place scope probe, EXCL exclusive profile slots, PROFOFF fast path | Phase 1 / §20 (HIR) | `hir_phase_per_module_cost_2026-08-21.md` |
+| 2026-08-21 | native-build | `a6233953eca` | HIR shard children re-parsed the closure — front-end cache scope split by entrypoint script | Phase 1 | `hir_shard_children_reparse_closure_2026-08-22.md` |
+| 2026-08-21 | bootstrap | `2fec447281f` | stabilize phase2 runtime and stage3 cache path | Phase 1 | commit |
+| 2026-08-22 | native-build | `6cedd51faec` | log every parse-shard exit; reclaim a dead shard's orphaned queue claims | Phase 1 | `parse_shard_orphaned_claims_after_shard_death_2026-08-22.md` |
+| 2026-08-22 | seed perf | `5ff4999c8e9` | scalar-element array args skip per-call value-type scan — interpreted lexing was quadratic in source | Phase 1 | `seed_interpreter_raw_throughput_2026-08-21.md` |
+| 2026-08-22 | hir (many) | `66ccf79f57f`..`5d539f31e7e` | import-route freezing, signature owners, composite projections, span binding (≈25 `fix(hir)`/`fix(frontend)`/`fix(parser)` commits) | §20 (HIR/frontend) | `stage3_selfhost_imported_type_resolution_cascade_2026-08-21.md` |
+| 2026-08-22 | sffi | `bae6d82891e`..`505a32265db` | Torch error preservation + typed failure sweep (≈14 `fix(sffi)` commits) | §20 (SFFI) | `sffi_non_optional_fallthrough_fabricates_nil_2026-08-21.md` |
+| 2026-08-22 | checks | `09e879ff838`, `775fb38377a`, `cb2aef31d8e` | must-check ledger ownership, must-pass evidence bound to measured stage2 | §20 (gates) | `check_push_must_pass_requires_unobtainable_bootstrap_fingerprint_2026-08-22.md` |
+| 2026-08-22 | audit | `f2761551931` | extern census made linear | §20 (tooling) | commit |
+| 2026-08-22 | docs | (this commit) | added §27 and §20 pointer | §20, §27 | — |
+
+### Phase 1 (stage1 bootstrap) state
+
+**Current run:** run11b, worktree `stage1-clean13`, seed `e5f12c93`, tree sha `a6233953eca`.
+
+**Blockers found and fixed:**
+- HIR shard children re-parsed the whole closure; front-end cache scope now split by entrypoint script — `a6233953eca`.
+- Dead parse shards left orphaned queue claims, stalling the build; claims are reclaimed and every shard exit logged — `6cedd51faec`.
+- Seed interpreter perf: `d30727e74e3` (hot path), `88146e0e7e5` (HIR name index / scope probe), `5ff4999c8e9` (quadratic lexing via per-call array value-type scan).
+- `kill_simple_monitor.shs` kills the run unless `SIMPLE_TIMEOUT_SECONDS=0` is set — required for any multi-hour stage1 run.
+
+**Open items:**
+- Stage1 runs *fully on the tree-walking interpreter*: the JIT bails at `compiler_services.spl:168`, so no compiled code is executed during stage1. Fix lane in progress (`seed_jit_coverage_self_hosted_compiler_2026-08-21.md`).
+- `check-push-must-pass` hook circularity: it requires a bootstrap fingerprint that can only be produced by the bootstrap it gates — record filed: `check_push_must_pass_requires_unobtainable_bootstrap_fingerprint_2026-08-22.md`.
+- Remaining Phase 1 records (2026-08-21/22): `bootstrap_main_native_build_stalls_after_source_closure`, `native_build_phases_after_parse_single_threaded`, `native_build_frontend_not_incremental`, `native_build_object_cache_never_persists_entries`, `phase3_hir_import_materialization_time_rss`, `stage1_lexer_hir_fatals_eprint_and_generic_len_helper`, `stage1_untyped_return_reintroduced_by_clobber_llvm_backend`, `stage2_split_impl_modules_missing_from_entry_closure`, `stage3_streaming_hir_owner_crash_after_origin_fix`, `c_runtime_missing_83_codegen_runtime_symbols`, `seed_match_expression_return_arm_statement_cost_cliff`, `seed_filtered_module_dict_rebuilt_per_importer`, `seed_empty_captured_env_allocated_per_import_binding`.
