@@ -48,7 +48,7 @@ Reproduce spec: `test/01_unit/lib/common/text_advanced_return_types_spec.spl`
 Pre-fix the build failed at HIR lowering; post-fix the spec is 6/6 green and the
 `text_advanced` diagnostics are gone from the build log (verified: 0 occurrences).
 
-### Blocker 2 — OPEN
+### Blocker 2 — PARTLY FIXED, still OPEN
 
 ```
 error: semantic: undefined field 'kind': cannot access field on value of type 'nil'
@@ -111,12 +111,45 @@ figure is stale and should be reconciled with the tool table.
 **Not performed.** Deploying requires a freshly built artifact; blocker 2
 prevented one. The existing deployed servers were left untouched.
 
+## 3b. Update — blocker 2 localized, two traps fixed, one open
+
+The span-less error was localized using the seed's **existing**
+`SIMPLE_DEBUG_FIELD_ACCESS=1` instrumentation (no rebuild needed), which prints
+the receiver expression and a Simple-level call stack:
+
+```
+[field-access-error] field=kind recv_type=nil recv=nil expr=Identifier("t")
+  stack=... -> run_any_escape_pass -> any_check_function -> any_check_block
+     -> any_check_stmt -> any_type_is_any
+```
+
+Two traps of the same class were fixed and landed (`f1cf8081849`):
+
+- `35.semantics/any_escape/checker.spl`, `any_check_stmt` `case Let`: the
+  declared type is absent for an inferred `val x = e`, and `any_type_is_any`
+  opens with `match t.kind`. Now unwrapped with `if val`.
+- `20.hir/.../module_callable_types.spl`, `declared_callable_type`: `Param.type_`
+  passed to `lower_type` with no `has_type_` guard (its sibling guards). Latent,
+  not the blocker.
+
+Evidence: any_escape suite 14/14; new
+`test/01_unit/compiler/hir/untyped_param_declared_callable_type_spec.spl` 5/5.
+
+**Still open:** with the nil receiver gone, the build now fails with
+`undefined field: unknown property or method 'kind' on Option` — the same shape
+on a *wrapped* optional, at a different site. That arm of the interpreter
+(`calls.rs:1032`) has no debug branch, so it cannot be localized the same way
+until one is added. Details and candidate sites are in the bug record.
+
+Also corrected: the original "fires after post-store" reading was wrong —
+`[bootstrap-error-count]` is capped at `source_idx < 3`.
+
 ## 4. Verdict
 
-- Build: **FAIL** — one root cause fixed and landed, one open.
+- Build: **FAIL** — three root causes found, two fixed and landed, one open.
 - Handshake: **PASS** against the deployed artifact and source mode.
 - Deploy: **not done**, blocked on the build.
 
 The milestone is not met: the sanity build does not yet produce a binary. The
-handshake half is proven and the harness is ready to re-run the moment blocker 2
-is cleared.
+handshake half is proven and the harness is ready to re-run the moment the last
+trap is cleared. Iterate on the LSP entry (~7.5 min), not the MCP entry (~33 min).
