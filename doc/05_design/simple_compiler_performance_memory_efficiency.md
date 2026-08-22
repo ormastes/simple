@@ -48,6 +48,12 @@ Proposed COW MIR operations expose ensure/clone/mutate sites. Uniqueness transfe
 
 Tier 0 runs known high-confidence typed rules and suppresses fixed-small or unknown cases. Tier 1 adds MIR legality and remarks. Tier 2 uses bounded SCC summaries/affine solving and reports incomplete. Tier 3 correlates optional profiles.
 
+Lint revision reuse is capability-bound, not a raw `[DeclId]` API. A
+`LintParsedRevision` carries path, source digest, AST arena generation, and declarations.
+The parsed lint entry checks all three identity dimensions before reading arena indices;
+stale identity is a deny diagnostic, never a fallback parse or silent empty result.
+Standalone lint owns exactly one parse and then calls the same parsed-results owner.
+
 Fix applicability:
 
 - Reserve and duplicate-lookup fixes require exact collection contract/mutation facts.
