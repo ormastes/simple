@@ -70,6 +70,13 @@ them. Finer preservation can be admitted only with a focused witness. Loop fores
 range/induction, region alias, effects, and MemorySSA-lite remain future slices of the
 same revision-local owner.
 
+Natural-loop membership is built from dominance-proven latch edges by a reverse
+predecessor walk bounded at the header. Multiple latches are unioned once and bodies are
+emitted in stable MIR order. This avoids the former per-header forward/backward CFG
+traversals and, critically, prevents an inner loop from absorbing outer-loop blocks merely
+because both belong to the same strongly connected region. Canonical nesting, preheaders,
+dedicated exits, and SCEV-lite are still pending shared facts.
+
 The vectorizer projects loop-local chains from shared complete `PerfFacts`; it rejects
 the candidate when opcode or local coverage is incomplete. Its compatibility operand and
 array-access collectors append into owned buffers, and dependency summaries use linear
