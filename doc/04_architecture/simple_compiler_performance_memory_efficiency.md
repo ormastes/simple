@@ -223,6 +223,15 @@ applies trace suppression, and token/declaration probes consume that read-only
 decision. Clock and formatting work remains below the enabled branch. This is a
 parse-lifetime cache, not a process-lifetime configuration singleton.
 
+### MIR trace-policy ownership
+
+`compiler.mir.mir_data` owns the dependency-leaf MIR trace scope consumed by
+split lowering modules. Outermost module lowering captures the general
+compiler/phase/bootstrap diagnostic decision and the distinct MIRB decision;
+nested lowering inherits it. A monotonic generation refreshes local caches
+between same-process module lowerings. Both current exits restore prior depth.
+The four-word state relies on MIR lowering's existing serial ownership.
+
 ## References
 
 - `doc/01_research/local/simple_compiler_performance_memory_efficiency_audit.md`
