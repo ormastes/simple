@@ -129,6 +129,7 @@
 # Usage:
 #   check-tree-size-push.shs                       # default range main@origin..@-
 #   check-tree-size-push.shs '<base>..<tip>'       # explicit range
+#   check-tree-size-push.shs --push-tip '<base>..<tip>' # bounded hook mode
 #   check-tree-size-push.shs --expect-files 109531 '<base>..<tip>'
 #   check-tree-size-push.shs --rev-list-args A --not --remotes=origin
 #   check-tree-size-push.shs --selftest            # fixtures only, no scan
@@ -267,6 +268,20 @@ path_count() {
     [ "$pc_st" -ne 0 ] && return "$pc_st"
     pc_n=$(wc -l <"$pc_out")
     printf '%s' "$pc_n" | tr -d ' '
+    return 0
+}
+
+# Count only blobs for a relative-band reference. Parent/base references do not
+# need duplicate, src-shape, or path-floor analysis: those invariants are
+# applied to the candidate tree. Avoiding inspect_commit here removes one full
+# recursive listing plus sort from every candidate evaluation.
+file_count() {
+    fc_out="$TMPROOT/fc.out"
+    git -C "$1" ls-tree -r --name-only "$2" >"$fc_out" 2>/dev/null
+    fc_st=$?
+    [ "$fc_st" -ne 0 ] && return "$fc_st"
+    fc_n=$(wc -l <"$fc_out")
+    printf '%s' "$fc_n" | tr -d ' '
     return 0
 }
 
@@ -440,8 +455,10 @@ reference_for_rev() {
         return 0
     fi
 
-    inspect_commit "$rf_repo" "$rf_parent" || return 2
-    REF_FILES=$IC_FILES
+    REF_FILES=$(file_count "$rf_repo" "$rf_parent") || {
+        IC_ERR="git ls-tree failed reading first parent $rf_parent"
+        return 2
+    }
     REF_SOURCE="first parent $rf_parent"
     return 0
 }
@@ -855,6 +872,16 @@ if [ -n "$real_gitdir" ] && [ -e "$real_gitdir" ]; then
     real_user_before=$(git config --get user.email 2>&1)/$(git config --get user.name 2>&1)
 fi
 
+# Push-hook mode is intentionally bounded: exhaustive fixtures belong to the
+# bootstrap/unit lane, while the hook evaluates only the committed tip. The
+# same evaluate_rev_banded implementation and absolute structural invariants
+# are used in both modes.
+push_tip=0
+if [ "${1:-}" = "--push-tip" ]; then
+    push_tip=1
+    shift
+fi
+
 # The selftest runs in a SUBSHELL with every GIT_* location variable unset. Two
 # reasons, both load-bearing:
 #   * `-C <dir>` does not override an inherited GIT_DIR, so a caller that
@@ -862,7 +889,7 @@ fi
 #     redirect fixture reads AND writes at the real repo.
 #   * selftest() temporarily overwrites the CFG_* thresholds; a subshell makes
 #     it impossible for a fixture threshold to survive into the real scan.
-if ! ( unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+if [ "$push_tip" -eq 0 ] && ! ( unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
              GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE \
              GIT_CONFIG GIT_CONFIG_COUNT
        selftest ); then
@@ -1013,9 +1040,8 @@ base_source=""
 if [ "$expect_files" -ge 0 ]; then
     base_files=$expect_files
     base_source="stated via --expect-files"
-elif [ -n "$base_rev" ]; then
-    if inspect_commit "$toplevel" "$base_rev"; then
-        base_files=$IC_FILES
+elif [ -n "$base_rev" ] && [ "$push_tip" -eq 0 ]; then
+    if base_files=$(file_count "$toplevel" "$base_rev"); then
         base_source="measured at base $base_rev"
     else
         die 2 "cannot measure the base commit '$base_rev': $IC_ERR"
@@ -1023,7 +1049,11 @@ elif [ -n "$base_rev" ]; then
 fi
 
 # --- 6. enumerate the range, checking git's exit status ---------------------
-if [ "$rawmode" -eq 1 ]; then
+if [ "$push_tip" -eq 1 ]; then
+    [ "$rawmode" -eq 0 ] || die 2 "--push-tip does not accept --rev-list-args"
+    revs=$right
+    rl=0
+elif [ "$rawmode" -eq 1 ]; then
     revs=$(git rev-list "$@" 2>/dev/null)
     rl=$?
     range="rev-list-args: $*"
@@ -1106,6 +1136,10 @@ if [ "$expect_files" -ge 0 ]; then
 elif [ "$base_files" -ge 0 ]; then
     echo "$SELF: PASS — $checked commit(s) checked in $range, each banded against its own first parent, range base $base_files file(s) ($base_source), 0 structural faults (repo $toplevel)"
 else
-    echo "$SELF: PASS — $checked commit(s) checked in $range, each banded against its own first parent, no range base available, 0 structural faults (repo $toplevel)"
+    if [ "$push_tip" -eq 1 ]; then
+        echo "$SELF: PASS — committed tip checked in $range against its first parent, absolute structure and load-bearing paths intact (repo $toplevel)"
+    else
+        echo "$SELF: PASS — $checked commit(s) checked in $range, each banded against its own first parent, no range base available, 0 structural faults (repo $toplevel)"
+    fi
 fi
 exit 0
