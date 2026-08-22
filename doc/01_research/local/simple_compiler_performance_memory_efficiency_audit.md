@@ -1879,3 +1879,14 @@ per-file discovery order. The ordering/assembly implementation now lives with
 delegates to it, and lint `--fix` calls the same exported primitives. This removes
 the two remaining selection-sort/repeated-splice copies and prevents behavioral
 or performance drift among the three active entrypoints.
+
+### Diagnostic JSON escaping allocation audit
+
+The lint and compiler-diagnostic query paths each serialized every message with
+five chained whole-text replacements. For a message of length `M`, this remained
+`O(M)` but performed about five scans and could allocate/copy five complete
+intermediates per diagnostic. Both paths now delegate to one Pure Simple helper.
+It returns an unchanged value directly when no JSON escape is present; otherwise
+it performs one character scan, records unchanged spans and exact escape literals,
+then joins once. The accepted escape set remains exactly backslash, quote, LF, CR
+and TAB; other text, including Unicode, is unchanged.
