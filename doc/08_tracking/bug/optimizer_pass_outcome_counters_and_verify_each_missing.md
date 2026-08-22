@@ -2,8 +2,9 @@
 
 ## Status
 
-Open, narrowed. A function-pass boundary now produces a structural before/after receipt,
-but this still blocks treating planning evidence as proof of full MIR correctness.
+Open, narrowed. Checked module dispatch now enforces structural before/after receipts and
+routes active function-scoped passes through their exact recorded boundary, but broader
+semantic verification and exact module-pass counters remain incomplete.
 
 ## Evidence
 
@@ -31,8 +32,15 @@ Each structural failure carries a stable `MIRV001`-`MIRV019` code parallel to it
 human message. `MIRV999` explicitly marks an unclassified future failure instead of
 silently inventing a semantic category.
 `MirModuleStructuralVerificationReceipt` deterministically aggregates child receipts and
-adds `MIRVM001` for a function-map key/symbol mismatch. It is groundwork for module-pass
-dispatch, not evidence that module-pass outcome counters are implemented.
+adds `MIRVM001` for a function-map key/symbol mismatch. `run_pass_on_module_checked`
+rejects malformed input and output. Active function and filesystem-driver passes execute
+through `run_named_pass_with_record`; active module passes currently receive structural
+module receipts but still lack exact module-level candidate and rejection telemetry.
+
+`SIMPLE_MIR_VERIFY_EACH=1` selects that checked boundary in canonical module dispatch.
+The legacy module-return API fails closed by retaining the last input module and tracing
+the rejection. The option is cached after one environment read: disabled verification
+does not build receipts, sort symbols, scan MIR, or allocate verifier diagnostics.
 
 Consequently `simple.opt-pipeline-report/v1` deliberately records
 `run_outcome: not-run` and null execution counters. Selection must not be interpreted as
@@ -44,8 +52,8 @@ execution.
    rehabilitated passes without discarding native statistics.
 2. Extend actual adapter results with stable rejected-reason codes and injected timing.
 3. Extend the structural receipt beyond deployed operand/local and ABI-local type validity
-   into opcode type rules, SSA dominance, ownership, and loop boundaries, then require it after every changed function/module
-   pass in test and `--verify-each` modes.
+   into opcode type rules, SSA dominance, ownership, and loop boundaries. Keep those
+   scans opt-in through the cached verify-each gate.
 4. Reject transformed records without candidates, impossible instruction counts,
    missing verifier receipts, or missing active witness contracts.
 5. Add positive, negative, malformed-MIR, and deterministic report fixtures.
