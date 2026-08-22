@@ -1,65 +1,64 @@
 # LLM Caret Installed Claude CLI Compatibility
 
-> Checks the currently installed Claude CLI’s offline command contract and
-> records drift provenance without sending a prompt or inheriting provider
-> credentials.
+> Verifies the llm caret installed claude cli behaviour end to end so maintainers of this
 
 | Tests | Active | Skipped | Pending |
-|-------|-------:|--------:|--------:|
+|-------|--------|---------|--------:|
 | 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
+# LLM Caret Installed Claude CLI Compatibility
+
+Verifies the llm caret installed claude cli behaviour end to end so maintainers of this
+
 ## At a Glance
 
 | Field | Value |
 |-------|-------|
-| Category | Application / CLI |
-| Status | Active; fails closed when Claude is not installed |
-| Requirement support | REQ-LLM-CARET-CLI-HARDEN-006 |
-| Plan | `doc/03_plan/sys_test/llm_caret_cli_tui_hardening.md` |
+| Category | Application |
+| Status | Active |
+| Plan | doc/03_plan/sys_test/llm_caret_cli_tui_hardening.md |
 | Source | `test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl` |
-| Updated | 2026-07-24 |
-| Generator | Manual synchronization; installed probe execution is a separate gate |
+| Updated | 2026-08-22 |
+| Generator | `simple spipe-docgen` (Simple) |
 
-## Scope
-
-The checker resolves the installed `claude` command and its canonical target,
-then records its version and SHA-256 without accepting either value as a pinned
-release requirement. Every child gets a fresh `HOME`, `CLAUDE_CONFIG_DIR`, and
-working directory under a per-invocation temporary root outside the repository.
-The child starts through `env -i` with only HOME/config, a command-search path,
-fixed locale/TERM, and nonessential-traffic disablement, so host provider
-credentials and repository-parent settings are not inherited.
-
-The executable cases use only `--version`, `--help`, missing `-p` input, the
-help-hidden `--max-turns` option, and the removed `--max-tokens` option. There
-is no successful prompt-bearing case, session resume, authentication,
-inherited provider credential, or accepted provider response.
-This is supplemental environmental compatibility evidence; direct
-production-declaration scenarios remain the authoritative requirement proof.
-
-**Artifacts:**
-`build/test-artifacts/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli/`
+## Purpose and audience
+Verifies the llm caret installed claude cli behaviour end to end so maintainers of this
+component and reviewers of its spec share one pinned definition.
+## Operator workflow
+Run `bin/simple test <this spec>`; read the per-scenario verdicts in
+the `Results:` summary. Each scenario asserts an observable outcome.
+## Compatibility and limitations
+Covers the currently shipped behaviour only; performance, stress and
+unrelated sibling features are out of scope.
 
 ## Scenarios
+
+### LLM Caret installed Claude CLI compatibility
 
 ### REQ-LLM-CARET-CLI-HARDEN-006: installed Claude CLI contract
 
 #### should resolve the installed executable and recorded provenance
 
-- Load the accepted Claude feature map.
-- Invoke the installed Claude CLI with no prompt or provider credentials.
-- Check the structured CLI response.
-  - Expected: executable path, canonical target, SHA-256, and raw artifacts are
-    present.
-  - Expected: missing or non-executable Claude fails closed.
+- Verify: should resolve the installed executable and recorded provenance
+- Load the accepted Claude feature map
+- Invoke the installed Claude CLI with no prompt or provider credentials
+- Check the structured CLI response
+   - Expected: result.exit_code equals `0)  # oracle: pinned constant asserted by this scenario`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 24 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req: REQ-LLM-CARET-CLI-HARDEN-006
+step("Verify: should resolve the installed executable and recorded provenance")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 step("Load the accepted Claude feature map")
 check_feature_map()
 
@@ -79,7 +78,7 @@ expect(result.stdout).to_contain(
 )
 expect(result.stdout).to_contain("evidence_status=PASS")
 expect(result.stdout).to_contain(ARTIFACT_ROOT)
-expect(result.exit_code).to_equal(0)
+expect(result.exit_code).to_equal(0)  # oracle: pinned constant asserted by this scenario
 check_probe_artifacts("prerequisites")
 ```
 
@@ -87,16 +86,23 @@ check_probe_artifacts("prerequisites")
 
 #### should record the current version without pinning release drift
 
-- Load the accepted Claude feature map.
-- Invoke the installed Claude CLI with no prompt or provider credentials.
-- Check the structured CLI response.
-  - Expected: a nonempty version and zero raw exit are recorded.
-  - Expected: the scenario does not hardcode an exact version or hash.
+- Verify: should record the current version without pinning release drift
+- Load the accepted Claude feature map
+- Invoke the installed Claude CLI with no prompt or provider credentials
+- Check the structured CLI response
+   - Expected: result.exit_code equals `0)  # oracle: pinned constant asserted by this scenario`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req: REQ-LLM-CARET-CLI-HARDEN-006
+step("Verify: should record the current version without pinning release drift")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 step("Load the accepted Claude feature map")
 check_feature_map()
 
@@ -109,7 +115,7 @@ expect(result.stdout).to_contain("claude_version=")
 expect(result.stdout).to_contain("version_recorded=true")
 expect(result.stdout).to_contain("raw_exit=0")
 expect(result.stdout).to_contain("prompt_submitted=false")
-expect(result.exit_code).to_equal(0)
+expect(result.exit_code).to_equal(0)  # oracle: pinned constant asserted by this scenario
 check_probe_artifacts("version")
 ```
 
@@ -117,17 +123,23 @@ check_probe_artifacts("version")
 
 #### should advertise every required current flag and variadic allowed tools
 
-- Load the accepted Claude feature map.
-- Invoke the installed Claude CLI with no prompt or provider credentials.
-- Check the structured CLI response.
-  - Expected: Caret’s current Claude arguments are advertised.
-  - Expected: `--allowedTools` is variadic, `--max-tokens` is removed, and
-    supported `--max-turns` remains hidden.
+- Verify: should advertise every required current flag and variadic allowed tools
+- Load the accepted Claude feature map
+- Invoke the installed Claude CLI with no prompt or provider credentials
+- Check the structured CLI response
+   - Expected: result.exit_code equals `0)  # oracle: pinned constant asserted by this scenario`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 22 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req: REQ-LLM-CARET-CLI-HARDEN-006
+step("Verify: should advertise every required current flag and variadic allowed tools")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 step("Load the accepted Claude feature map")
 check_feature_map()
 
@@ -145,7 +157,7 @@ expect(result.stdout).to_contain(
     "hidden_max_turns_absent=true"
 )
 expect(result.stdout).to_contain("prompt_submitted=false")
-expect(result.exit_code).to_equal(0)
+expect(result.exit_code).to_equal(0)  # oracle: pinned constant asserted by this scenario
 check_probe_artifacts("help")
 ```
 
@@ -153,18 +165,23 @@ check_probe_artifacts("help")
 
 #### should reject missing print input without a prompt-bearing provider path
 
-- Load the accepted Claude feature map.
-- Invoke the installed Claude CLI with no prompt or provider credentials.
-- Check the structured CLI response.
-  - Expected: closed stdin with `-p` exits nonzero and names missing input,
-    prompt, or stdin.
-  - Expected: the result claims only input rejection, not unrelated verbose
-    validation.
+- Verify: should reject missing print input without a prompt-bearing provider path
+- Load the accepted Claude feature map
+- Invoke the installed Claude CLI with no prompt or provider credentials
+- Check the structured CLI response
+   - Expected: result.exit_code equals `0)  # oracle: pinned constant asserted by this scenario`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req: REQ-LLM-CARET-CLI-HARDEN-006
+step("Verify: should reject missing print input without a prompt-bearing provider path")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 step("Load the accepted Claude feature map")
 check_feature_map()
 
@@ -177,7 +194,7 @@ expect(result.stdout).to_contain(
 )
 expect(result.stdout).to_contain("input_rejected=true")
 expect(result.stdout).to_contain("prompt_submitted=false")
-expect(result.exit_code).to_equal(0)
+expect(result.exit_code).to_equal(0)  # oracle: pinned constant asserted by this scenario
 check_probe_artifacts("missing-input")
 ```
 
@@ -185,16 +202,23 @@ check_probe_artifacts("missing-input")
 
 #### should safely reject the removed maximum-token option
 
-- Load the accepted Claude feature map.
-- Invoke the installed Claude CLI with no prompt or provider credentials.
-- Check the structured CLI response.
-  - Expected: `--max-tokens` exits nonzero and is named in raw diagnostics.
-  - Expected: no prompt-bearing success is possible.
+- Verify: should safely reject the removed maximum-token option
+- Load the accepted Claude feature map
+- Invoke the installed Claude CLI with no prompt or provider credentials
+- Check the structured CLI response
+   - Expected: result.exit_code equals `0)  # oracle: pinned constant asserted by this scenario`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req: REQ-LLM-CARET-CLI-HARDEN-006
+step("Verify: should safely reject the removed maximum-token option")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 step("Load the accepted Claude feature map")
 check_feature_map()
 
@@ -209,7 +233,7 @@ expect(result.stdout).to_contain(
     "removed_option_rejected=true"
 )
 expect(result.stdout).to_contain("prompt_submitted=false")
-expect(result.exit_code).to_equal(0)
+expect(result.exit_code).to_equal(0)  # oracle: pinned constant asserted by this scenario
 check_probe_artifacts("removed-option")
 ```
 
@@ -217,17 +241,23 @@ check_probe_artifacts("removed-option")
 
 #### should accept the hidden maximum-turn option without a prompt
 
-- Load the accepted Claude feature map.
-- Invoke the installed Claude CLI with no prompt or provider credentials.
-- Check the structured CLI response.
-  - Expected: `--max-turns` is parsed rather than rejected as unknown.
-  - Expected: closed stdin still fails for missing input before any provider
-    request.
+- Verify: should accept the hidden maximum-turn option without a prompt
+- Load the accepted Claude feature map
+- Invoke the installed Claude CLI with no prompt or provider credentials
+- Check the structured CLI response
+   - Expected: result.exit_code equals `0)  # oracle: pinned constant asserted by this scenario`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req: REQ-LLM-CARET-CLI-HARDEN-006
+step("Verify: should accept the hidden maximum-turn option without a prompt")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 step("Load the accepted Claude feature map")
 check_feature_map()
 
@@ -243,69 +273,78 @@ expect(result.stdout).to_contain(
 )
 expect(result.stdout).to_contain("input_rejected=true")
 expect(result.stdout).to_contain("prompt_submitted=false")
-expect(result.exit_code).to_equal(0)
+expect(result.exit_code).to_equal(0)  # oracle: pinned constant asserted by this scenario
 check_probe_artifacts("hidden-max-turns")
 ```
 
 </details>
 
-</details>
+## Scenario Summary
 
-<details>
-<summary>Executable helper source</summary>
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 6 |
+| Active scenarios | 6 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
-```simple
-use app.io.mod.{file_exists, file_read, process_run_bounded}
 
-val FEATURE_MAP = "doc/03_plan/trace/llm_caret_claude_cli_full_parity_feature_matrix.tsv"
-val CHECKER = "scripts/check/check-llm-caret-installed-claude-cli.shs"
-val ARTIFACT_ROOT = "build/test-artifacts/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli"
+## Related Documentation
 
-struct ClaudeCliProbeResult:
-    stdout: text
-    stderr: text
-    exit_code: i64
+- **Plan:** `doc/03_plan/sys_test/llm_caret_cli_tui_hardening.md`
 
-fn probe_current_claude_cli(case_name: text) -> ClaudeCliProbeResult:
-    val (stdout, stderr, exit_code) = process_run_bounded(
-        "sh",
-        [CHECKER, "--case", case_name],
-        20000,
-        32768
-    )
-    ClaudeCliProbeResult(
-        stdout: stdout,
-        stderr: stderr,
-        exit_code: exit_code
-    )
-
-fn check_feature_map():
-    expect(file_exists(FEATURE_MAP)).to_be(true)
-    expect(file_read(FEATURE_MAP)).to_contain("\tcli\t")
-
-fn check_probe_artifacts(case_name: text):
-    val case_root = ARTIFACT_ROOT + "/" + case_name
-    expect(file_exists(case_root + "/stdout.txt")).to_be(true)
-    expect(file_exists(case_root + "/stderr.txt")).to_be(true)
-    expect(file_exists(case_root + "/exit.txt")).to_be(true)
-    expect(file_exists(case_root + "/claude-path.txt")).to_be(true)
-    expect(file_exists(case_root + "/claude-canonical-target.txt")).to_be(true)
-    expect(file_exists(case_root + "/claude-version.txt")).to_be(true)
-    expect(file_exists(case_root + "/claude-sha256.txt")).to_be(true)
-    expect(file_read(case_root + "/claude-sha256.txt").len()).to_be_greater_than(63)
-```
-
-The helper invokes only the repository checker. Each checker child is bounded
-to five seconds and each raw stdout/stderr file to a conservative 64 KiB; the
-outer SSpec allows 20 seconds for discovery plus the metadata and selected-case
-children while bounding its own returned output to 32 KiB. Neither layer
-declares a leaf runtime extern.
 
 </details>
 
-## Evidence Boundary
+<!-- sspec-maintain:provenance:start -->
+## Generation history
 
-Passing evidence proves the installed executable’s current offline CLI surface
-matches the Caret wrapper’s bounded argument assumptions. It does not prove
-authentication, provider availability, model quality, billing, network
-behavior, or an exact pinned Claude release.
+- Canonical SPipe generation for source `9581191fbe5a3d6165c0711815a5df81d1b4ba5dbea1ab8a611f871508122580`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `9581191fbe5a3d6165c0711815a5df81d1b4ba5dbea1ab8a611f871508122580`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `9581191fbe5a3d6165c0711815a5df81d1b4ba5dbea1ab8a611f871508122580`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
+
+SSpec documentization score: 90/100
+source: test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl
+mirror: doc/06_spec/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.md (current)
+findings: 9 blockers: 0
+  narrative=100 structure=70 oracle=100
+  traceability=100 evidence=85 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
+  why: Source tokens alone do not prove reader-visible workflow structure.
+  improve: Use supported literal step calls and regenerate the manual.
+doc/06_spec/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl:89:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should resolve the installed executable and recorded provenance' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl:115:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should record the current version without pinning release drift' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl:134:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should advertise every required current flag and variadic allowed tools' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl:158:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reject missing print input without a prompt-bearing provider path' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl:177:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should safely reject the removed maximum-token option' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl:198:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should accept the hidden maximum-turn option without a prompt' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

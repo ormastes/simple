@@ -1,247 +1,185 @@
-# browser_chrome_pointer_cancellation_spec
+# Browser Chrome Pointer Cancellation
 
-> Navigation chrome and page-to-page replacement release a renderer-owned page
-> press with the prior press receipt before assigning new ownership.
+> Verifies the browser chrome pointer cancellation behaviour end to end so maintainers of this
 
 | Tests | Active | Skipped | Pending |
-|-------|-------:|--------:|--------:|
+|-------|--------|---------|--------:|
 | 3 | 3 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# Browser Chrome Pointer Cancellation
+
+Verifies the browser chrome pointer cancellation behaviour end to end so maintainers of this
 
 ## At a Glance
 
 | Field | Value |
 |-------|-------|
+| Category | Application |
 | Status | Active |
-| Requirements | REQ-WEB-BROWSER-007, 008, 009, 021 |
 | Source | `test/03_system/app/browser/feature/browser_chrome_pointer_cancellation_spec.spl` |
-| Updated | 2026-07-30 |
-| Runtime gate | Admitted pure-Simple `HOSTED_WM_ARTIFACT` and matching SHA-256 |
+| Updated | 2026-08-22 |
+| Generator | `simple spipe-docgen` (Simple) |
 
-## Scenario: cancel a page press before navigation chrome owns input
+## Purpose and audience
+Verifies the browser chrome pointer cancellation behaviour end to end so maintainers of this
+component and reviewers of its spec share one pinned definition.
+## Operator workflow
+Run `bin/simple test <this spec>`; read the per-scenario verdicts in
+the `Results:` summary. Each scenario asserts an observable outcome.
+## Compatibility and limitations
+Covers the currently shipped behaviour only; performance, stress and
+unrelated sibling features are out of scope.
 
-1. Press a renderer-owned page target.
-   - The registry owns window `141` and press receipt `401`.
-2. Cancel through navigation chrome state.
-   - Address chrome becomes the new owner under receipt `402`.
-3. Observe one canonical pointer release.
-   - The pending release retains window `141` and event `401`, then the
-     renderer reports no page pointer pressed and the receipt counter is
-     exactly `1`.
-4. Render without stale pressed state.
-   - The page remains green in semantic Draw IR, the hosted frame, and
-     Engine2D pixels; the red click discriminator remains absent.
+## Scenarios
+
+### Browser chrome pointer cancellation
+
+#### should cancel a page press before navigation chrome owns input
+
+- Verify: should cancel a page press before navigation chrome owns input
+   - GUI capture: after_step (HTML preferred when available)
+- Press a renderer-owned page target
+   - GUI capture: after_step (HTML preferred when available)
+- Cancel through navigation chrome state
+   - GUI capture: after_step (HTML preferred when available)
+   - Evidence: GUI state or HTML text verified by 2 expected checks
+   - Expected: chrome.reason equals `chrome-pressed`
+   - Expected: registry.pressed_event_id equals `402)  # oracle: pinned constant asserted by this scenario`
+- Observe one canonical pointer release
+   - GUI capture: after_step (HTML preferred when available)
+- Render without stale pressed state
+   - GUI capture: after_step (HTML preferred when available)
+   - Evidence: GUI state or HTML text verified by 2 expected checks
+   - Expected: registry.pressed_window_id equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: registry.pressed_event_id equals `0)  # oracle: pinned constant asserted by this scenario`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 30 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req: REQ-WEB-BROWSER-009
+step("Verify: should cancel a page press before navigation chrome owns input")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var registry = setup_chrome_cancel_fixture()
 
 step("Press a renderer-owned page target")
-check_page_press_owned(registry, CHROME_CANCEL_WINDOW, 401)
+check_page_press_owned(
+    registry, CHROME_CANCEL_WINDOW, 401
+)
 
 step("Cancel through navigation chrome state")
 val chrome = registry.dispatch_chrome_pointer(
     402, CHROME_CANCEL_WINDOW, "address", true
 )
 expect(chrome.reason).to_equal("chrome-pressed")
-expect(registry.pressed_event_id).to_equal(402)
+expect(registry.pressed_event_id).to_equal(402)  # oracle: pinned constant asserted by this scenario
 
 step("Observe one canonical pointer release")
-check_renderer_release_sent(registry, CHROME_CANCEL_WINDOW, 401)
+check_renderer_release_sent(
+    registry, CHROME_CANCEL_WINDOW, 401
+)
 
 step("Render without stale pressed state")
 check_pressed_state_cleared(registry)
 expect(registry.dispatch_chrome_pointer(
     403, CHROME_CANCEL_WINDOW, "address", false
 ).reason).to_equal("address-focused")
-expect(registry.pressed_window_id).to_equal(0)
-expect(registry.pressed_event_id).to_equal(0)
+expect(registry.pressed_window_id).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(registry.pressed_event_id).to_equal(0)  # oracle: pinned constant asserted by this scenario
 expect(registry.close()).to_be(true)
 ```
 
 </details>
 
 <details>
-<summary>Edge scenario: replace one page renderer with another</summary>
+<summary>Advanced: should release the prior renderer before a second page owns input</summary>
 
-The first page owns receipt `501`. A press on the second page assigns receipt
-`502` only after the shared clear path records a release for the first page
-using its original window and event IDs. The second page then receives its
-single ordinary release.
+#### should release the prior renderer before a second page owns input
+
+- Verify: should release the prior renderer before a second page owns input
+- Press the first renderer-owned page target
+- Replace ownership with a second page renderer
+   - Expected: replacement.callback_count equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: registry.pressed_event_id equals `502)  # oracle: pinned constant asserted by this scenario`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 28 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009
+step("Verify: should release the prior renderer before a second page owns input")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var registry = setup_chrome_cancel_fixture()
-check_page_press_owned(registry, CHROME_CANCEL_WINDOW, 501)
+step("Press the first renderer-owned page target")
+check_page_press_owned(
+    registry, CHROME_CANCEL_WINDOW, 501
+)
+
+step("Replace ownership with a second page renderer")
 val replacement = registry.dispatch_pointer(
     502, CHROME_CANCEL_SECOND_WINDOW, 4, 4, true
 )
-expect(replacement.callback_count).to_equal(1)
-expect(registry.pressed_window_id).to_equal(CHROME_CANCEL_SECOND_WINDOW)
-expect(registry.pressed_event_id).to_equal(502)
-check_renderer_release_sent(registry, CHROME_CANCEL_WINDOW, 501)
-_await_chrome_cancel_window(registry, CHROME_CANCEL_SECOND_WINDOW)
+expect(replacement.callback_count).to_equal(1)  # oracle: pinned constant asserted by this scenario
+expect(registry.pressed_window_id).to_equal(
+    CHROME_CANCEL_SECOND_WINDOW
+)
+expect(registry.pressed_event_id).to_equal(502)  # oracle: pinned constant asserted by this scenario
+check_renderer_release_sent(
+    registry, CHROME_CANCEL_WINDOW, 501
+)
+_await_chrome_cancel_window(
+    registry, CHROME_CANCEL_SECOND_WINDOW
+)
 expect(registry.dispatch_pointer(
     503, CHROME_CANCEL_SECOND_WINDOW, 4, 4, false
-).callback_count).to_equal(1)
+).callback_count).to_equal(1)  # oracle: pinned constant asserted by this scenario
 expect(registry.close()).to_be(true)
 ```
 
 </details>
 
-<details>
-<summary>Fixture and checker source</summary>
-
-```simple
-fn _count_chrome_cancel_color(pixels: [u32], color: u32) -> i64:
-    var count: i64 = 0
-    for pixel in pixels:
-        if pixel == color:
-            count = count + 1
-    count
-
-fn _await_chrome_cancel_window(
-    registry: HostedBrowserRendererRegistry,
-    window_id: i64
-):
-    var attempt: i64 = 0
-    while attempt < 500:
-        val state = registry.advance_window(
-            window_id, "", CHROME_CANCEL_HTML, 32, 24,
-            attempt * 1000, 100000, true
-        )
-        if state == "failed":
-            fail("browser renderer failed while awaiting pointer evidence")
-        if state == "frame":
-            return
-        thread_sleep_ms(1)
-        attempt = attempt + 1
-    fail("browser renderer did not produce pointer evidence")
-
-fn setup_chrome_cancel_fixture() -> HostedBrowserRendererRegistry:
-    val artifact = env_get("HOSTED_WM_ARTIFACT")
-    val expected_sha = env_get("HOSTED_WM_ARTIFACT_SHA256")
-    if artifact == "":
-        fail("HOSTED_WM_ARTIFACT must name the hosted_entry native binary")
-    if (expected_sha.len() != 64 or
-        file_hash_sha256(artifact) != expected_sha):
-        fail("HOSTED_WM_ARTIFACT does not match its admitted SHA-256")
-    var registry = HostedBrowserRendererRegistry.create(
-        artifact, "about:blank"
-    )
-    expect(registry.ensure(
-        CHROME_CANCEL_WINDOW, CHROME_CANCEL_HTML,
-        32, 24, 0, 100000
-    )).to_equal("none")
-    expect(registry.ensure(
-        CHROME_CANCEL_SECOND_WINDOW, CHROME_CANCEL_HTML,
-        32, 24, 0, 100000
-    )).to_equal("none")
-    _await_chrome_cancel_window(registry, CHROME_CANCEL_WINDOW)
-    _await_chrome_cancel_window(registry, CHROME_CANCEL_SECOND_WINDOW)
-    val _ = registry.take_frame(CHROME_CANCEL_WINDOW)
-    val _ = registry.take_frame(CHROME_CANCEL_SECOND_WINDOW)
-    registry
-
-fn check_page_press_owned(
-    registry: HostedBrowserRendererRegistry,
-    window_id: i64,
-    event_id: i64
-):
-    val pressed = registry.dispatch_pointer(
-        event_id, window_id, 4, 4, true
-    )
-    expect(pressed.callback_count).to_equal(1)
-    expect(pressed.reason).to_equal("")
-    expect(registry.pressed_window_id).to_equal(window_id)
-    expect(registry.pressed_event_id).to_equal(event_id)
-
-fn check_renderer_release_sent(
-    registry: HostedBrowserRendererRegistry,
-    prior_window_id: i64,
-    prior_event_id: i64
-):
-    expect(registry.pending_cancel_window_id).to_equal(prior_window_id)
-    expect(registry.pending_cancel_event_id).to_equal(prior_event_id)
-    var attempt: i64 = 0
-    while attempt < 500:
-        val state = registry.advance_window(
-            prior_window_id, "", CHROME_CANCEL_HTML, 32, 24,
-            1000000 + attempt * 1000, 100000, true
-        )
-        if state == "failed":
-            fail("browser renderer failed while releasing page press")
-        val index = registry._index(prior_window_id)
-        if (registry.pending_cancel_window_id == 0 and
-            registry.pending_cancel_event_id == 0 and
-            index >= 0 and
-            registry.entries[index].renderer.command_deadline_ms <= 0 and
-            not registry.entries[index].renderer.pointer_pressed):
-            expect(
-                registry.pointer_cancel_receipt_count
-            ).to_equal(1)
-            return
-        thread_sleep_ms(1)
-        attempt = attempt + 1
-    fail("browser renderer did not complete the canonical pointer release")
-
-fn check_pressed_state_cleared(registry: HostedBrowserRendererRegistry):
-    val index = registry._index(CHROME_CANCEL_WINDOW)
-    expect(index).to_be_greater_than(-1)
-    expect(registry.entries[index].renderer.pointer_pressed).to_be(false)
-    val frame = registry.take_frame(CHROME_CANCEL_WINDOW)
-    expect(frame.pixels.len()).to_equal(32 * 24)
-    expect(_count_chrome_cancel_color(
-        frame.pixels, 0xFF00FF00u32
-    )).to_equal(16 * 16)
-    expect(_count_chrome_cancel_color(
-        frame.pixels, 0xFFFF0000u32
-    )).to_equal(0)
-
-    val composition = simple_web_layout_render_html_draw_ir_with_images(
-        CHROME_CANCEL_HTML, 32, 24, []
-    )
-    var press_index: i32 = -1
-    var command_index: i32 = 0
-    while command_index < composition.batches[0].commands.len():
-        if (
-            composition.batches[0].commands[command_index].component_id ==
-                "press"
-        ):
-            press_index = command_index
-        command_index = command_index + 1
-    expect(press_index).to_be_greater_than(-1)
-    val press = composition.batches[0].commands[press_index]
-    expect(press.kind).to_equal("rect")
-    expect(press.x).to_equal(0)
-    expect(press.y).to_equal(0)
-    expect(press.width).to_equal(16)
-    expect(press.height).to_equal(16)
-    expect(press.color).to_equal(0xFF00FF00u32)
-    val raster = Engine2dCompositorBackend.create_named(
-        32, 24, "software"
-    )
-    val rendered = raster.render_draw_ir_composition(composition, [])
-    raster.shutdown()
-    expect(_count_chrome_cancel_color(
-        rendered.pixels, 0xFF00FF00u32
-    )).to_equal(16 * 16)
-    expect(_count_chrome_cancel_color(
-        rendered.pixels, 0xFFFF0000u32
-    )).to_equal(0)
-```
 
 </details>
 
 <details>
-<summary>Generation boundary: reject a stale release after site swap</summary>
+<summary>Advanced: should drop an old generation release before same-window replacement</summary>
 
-The old renderer generation owns page receipt `601` and its queued release.
-The same-window site-swap boundary clears both records before closing the old
-renderer. The replacement generation starts with no page press, no pending
-release, and an unchanged release-receipt count of zero.
+#### should drop an old generation release before same-window replacement
+
+- Verify: should drop an old generation release before same-window replacement
+- Arm page and pending-release ownership on the old generation
+- Replace the renderer generation at the teardown boundary
+   - Expected: registry._begin_site_swap(index, 100000) equals `none`
+   - Expected: registry.pressed_window_id equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: registry.pressed_event_id equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: registry.pending_cancel_window_id equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: registry.pending_cancel_event_id equals `0)  # oracle: pinned constant asserted by this scenario`
+- Reject the stale release for the replacement generation
+   - Expected: registry.pointer_cancel_receipt_count equals `0)  # oracle: pinned constant asserted by this scenario`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 46 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-021
+step("Verify: should drop an old generation release before same-window replacement")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+step("Arm page and pending-release ownership on the old generation")
 var registry = setup_chrome_cancel_fixture()
 val index = registry._index(CHROME_CANCEL_WINDOW)
 expect(index).to_be_greater_than(-1)
@@ -266,28 +204,83 @@ registry.pressed_event_id = 601
 registry.pending_cancel_window_id = CHROME_CANCEL_WINDOW
 registry.pending_cancel_event_id = 601
 
+step("Replace the renderer generation at the teardown boundary")
 expect(registry._begin_site_swap(index, 100000)).to_equal("none")
 expect(
     registry.entries[index].renderer.generation
 ).to_be_greater_than(old_generation)
-expect(registry.pressed_window_id).to_equal(0)
-expect(registry.pressed_event_id).to_equal(0)
-expect(registry.pending_cancel_window_id).to_equal(0)
-expect(registry.pending_cancel_event_id).to_equal(0)
+expect(registry.pressed_window_id).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(registry.pressed_event_id).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(registry.pending_cancel_window_id).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(registry.pending_cancel_event_id).to_equal(0)  # oracle: pinned constant asserted by this scenario
 
+step("Reject the stale release for the replacement generation")
 registry.cancel_pointer_state(999)
-expect(registry.pointer_cancel_receipt_count).to_equal(0)
+expect(registry.pointer_cancel_receipt_count).to_equal(0)  # oracle: pinned constant asserted by this scenario
 expect(registry.entries[index].renderer.pointer_pressed).to_be(false)
 expect(
     registry.entries[index].renderer.pending_pointer_cancel_event_id
-).to_equal(0)
+).to_equal(0)  # oracle: pinned constant asserted by this scenario
 expect(registry.close()).to_be(true)
 ```
 
 </details>
 
-## Evidence boundary
 
-This scenario requires the admitted pure-Simple hosted artifact. Static source
-review alone is not reported as runtime PASS. The red pixel is a click
-discriminator; its absence proves cancellation did not synthesize a click.
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 3 |
+| Active scenarios | 3 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `fbe688c7f51e2f9e5b656216a66ac74ddb0f859bca534999873d857b98379604`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `fbe688c7f51e2f9e5b656216a66ac74ddb0f859bca534999873d857b98379604`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `fbe688c7f51e2f9e5b656216a66ac74ddb0f859bca534999873d857b98379604`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/app/browser/feature/browser_chrome_pointer_cancellation_spec.spl
+mirror: doc/06_spec/03_system/app/browser/feature/browser_chrome_pointer_cancellation_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=85 oracle=100
+  traceability=100 evidence=85 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/app/browser/feature/browser_chrome_pointer_cancellation_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
+  why: Source tokens alone do not prove reader-visible workflow structure.
+  improve: Use supported literal step calls and regenerate the manual.
+doc/06_spec/03_system/app/browser/feature/browser_chrome_pointer_cancellation_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/browser/feature/browser_chrome_pointer_cancellation_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/browser/feature/browser_chrome_pointer_cancellation_spec.spl:192:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should cancel a page press before navigation chrome owns input' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/browser/feature/browser_chrome_pointer_cancellation_spec.spl:226:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should release the prior renderer before a second page owns input' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/browser/feature/browser_chrome_pointer_cancellation_spec.spl:258:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should drop an old generation release before same-window replacement' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

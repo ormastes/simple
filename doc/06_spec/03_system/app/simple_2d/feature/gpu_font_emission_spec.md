@@ -1,6 +1,6 @@
 # Shared Font GPU Program Emission
 
-> Emits one versioned alpha-atlas composition program and compile plan for five portable targets.
+> Verifies the gpu font emission behaviour end to end so maintainers of this
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -11,7 +11,7 @@
 
 # Shared Font GPU Program Emission
 
-Emits one versioned alpha-atlas composition program and compile plan for five portable targets.
+Verifies the gpu font emission behaviour end to end so maintainers of this
 
 ## At a Glance
 
@@ -20,13 +20,18 @@ Emits one versioned alpha-atlas composition program and compile plan for five po
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/simple_2d/feature/gpu_font_emission_spec.spl` |
-| Updated | 2026-07-25 |
-| Generator | manually synchronized; executable docgen refresh pending |
+| Updated | 2026-08-22 |
+| Generator | `simple spipe-docgen` (Simple) |
 
-Emits one versioned alpha-atlas composition program and compile plan for five portable targets.
-
-This scenario invokes no compiler toolchain, submits no device work, and makes
-no compiled-artifact, execution, readback, or presentation claim.
+## Purpose and audience
+Verifies the gpu font emission behaviour end to end so maintainers of this
+component and reviewers of its spec share one pinned definition.
+## Operator workflow
+Run `bin/simple test <this spec>`; read the per-scenario verdicts in
+the `Results:` summary. Each scenario asserts an observable outcome.
+## Compatibility and limitations
+Covers the currently shipped behaviour only; performance, stress and
+unrelated sibling features are out of scope.
 
 ## Scenarios
 
@@ -34,16 +39,20 @@ no compiled-artifact, execution, readback, or presentation claim.
 
 #### should gate configured ROCm font readback with admitted and provenance-bound evidence
 
+- Verify: should gate configured ROCm font readback with admitted and provenance-bound evidence
 - Inspect the strict public Engine2D harness and its fail-closed evidence wrapper
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-009 REQ-014
+step("Verify: should gate configured ROCm font readback with admitted and provenance-bound evidence")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 step("Inspect the strict public Engine2D harness and its fail-closed evidence wrapper")
 val harness = file_read("scripts/check/rocm_engine2d_font_readback_harness.spl")
 val wrapper = file_read("scripts/check/check-rocm-engine2d-font-readback.shs")
@@ -69,16 +78,19 @@ expect(wrapper).to_contain("if [ \"$RUNTIME_KIND\" = real-amd ]; then REAL_EVIDE
 
 #### should expose one stable pure-Simple source-emitter handoff
 
+- Verify: should expose one stable pure-Simple source-emitter handoff
 - Invoke the stable pure-Simple GPU source emitter without a generated test file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 99 lines folded for reproduction.
+Runnable source: 101 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-009 REQ-014
+step("Verify: should expose one stable pure-Simple source-emitter handoff")
 step("Invoke the stable pure-Simple GPU source emitter without a generated test file")
 val app = file_read("src/app/portable_compute_emit/main.spl")
 val checker = file_read("scripts/check/check-portable-compute-toolchains.shs")
@@ -161,17 +173,17 @@ expect(checker).to_contain("portable_compute_strict_result 1 true false")
 expect(checker).to_contain("portable_compute_strict_result 1 false false")
 expect(checker).to_contain("0|1) ;;")
 expect(checker).to_contain("if ! portable_compute_strict_result \"$PORTABLE_COMPUTE_REQUIRE_VERIFIED\" \"$all_portable_compute_candidates_validated\" \"$all_portable_compute_pins_verified\"; then")
-val report_pos = checker.last_index_of("} >\"$REPORT_PATH\"") ?? -1
-val evidence_pos = checker.last_index_of("} >>\"$BUILD_DIR/evidence.env\"") ?? -1
-val cat_pos = checker.last_index_of("cat \"$BUILD_DIR/evidence.env\"") ?? -1
-val strict_pos = checker.last_index_of("if ! portable_compute_strict_result") ?? -1
+val report_pos = checker.last_index_of("} >\"$REPORT_PATH\"")
+val evidence_pos = checker.last_index_of("} >>\"$BUILD_DIR/evidence.env\"")
+val cat_pos = checker.last_index_of("cat \"$BUILD_DIR/evidence.env\"")
+val strict_pos = checker.last_index_of("if ! portable_compute_strict_result")
 expect(report_pos).to_be_greater_than(-1)
 expect(evidence_pos).to_be_greater_than(-1)
 expect(cat_pos).to_be_greater_than(-1)
 expect(strict_pos).to_be_greater_than(cat_pos)
-val deterministic_pos = checker.last_index_of("if vulkan_artifact_tuple_deterministic") ?? -1
-val validator_pos = checker.last_index_of("if ! have \"$SPIRV_VAL_TOOL\"") ?? -1
-val pin_pos = checker.last_index_of("artifact_sha=\"$(sha256_file \"$out\" || true)\"") ?? -1
+val deterministic_pos = checker.last_index_of("if vulkan_artifact_tuple_deterministic")
+val validator_pos = checker.last_index_of("if ! have \"$SPIRV_VAL_TOOL\"")
+val pin_pos = checker.last_index_of("artifact_sha=\"$(sha256_file \"$out\" || true)\"")
 expect(deterministic_pos).to_be_greater_than(-1)
 expect(validator_pos).to_be_greater_than(deterministic_pos)
 expect(pin_pos).to_be_greater_than(validator_pos)
@@ -184,16 +196,19 @@ expect(checker).to_contain("if target_requested cuda; then run_cuda; fi")
 
 #### should bind artifact version hashes to entry format and source
 
-- expect artifact version hash binding
+- Verify: should bind artifact version hashes to entry format and source
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-009 REQ-014
+step("Verify: should bind artifact version hashes to entry format and source")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 expect_artifact_version_hash_binding()
 ```
 
@@ -201,6 +216,7 @@ expect_artifact_version_hash_binding()
 
 #### should emit the dedicated Vulkan GLSL 15-input ABI without portable target planning
 
+- Verify: should emit the dedicated Vulkan GLSL 15-input ABI without portable target planning
 - Emit two buffer bindings plus the contiguous 13-field Vulkan parameter block
    - Expected: source equals `font_atlas_composite_vulkan_glsl_source()`
    - Expected: plan.source equals `source`
@@ -221,10 +237,12 @@ expect_artifact_version_hash_binding()
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-009
+step("Verify: should emit the dedicated Vulkan GLSL 15-input ABI without portable target planning")
 step("Emit two buffer bindings plus the contiguous 13-field Vulkan parameter block")
 val source = emit_vulkan_font_atlas_composite_source()
 expect(source).to_contain("#version 450")
@@ -257,21 +275,20 @@ expect(portable.status).to_equal("unsupported-vulkan-spirv")
 
 #### should emit one deterministic versioned entry for every portable target
 
+- Verify: should emit one deterministic versioned entry for every portable target
 - Emit the selected font composite program and plan compilation
-- expect backend emission
-- expect backend emission
-- expect backend emission
-- expect backend emission
-- expect backend emission
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-009 REQ-014
+step("Verify: should emit one deterministic versioned entry for every portable target")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 step("Emit the selected font composite program and plan compilation")
 expect_backend_emission(PortableComputeTarget.Cuda, "cuda", "extern \"C\" __global__ void simple_font_atlas_composite_v1_u32", "cuda-c", "ptx", "nvrtc-or-nvcc", "simple_font_atlas_composite_v1_u32.ptx", true)
 expect_backend_emission(PortableComputeTarget.Hip, "hip", "extern \"C\" __global__ void simple_font_atlas_composite_v1_u32", "hip-cpp", "hsaco", "hiprtc-or-hipcc", "simple_font_atlas_composite_v1_u32.hsaco", true)
@@ -284,13 +301,21 @@ expect_backend_emission(PortableComputeTarget.WebGpu, "webgpu", "@compute @workg
 
 #### should preserve atlas and destination bindings in every emitted source
 
+- Verify: should preserve atlas and destination bindings in every emitted source
+   - Expected: cuda.source equals `font_atlas_composite_cuda_source()`
+   - Expected: hip.source equals `font_atlas_composite_hip_source()`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 41 lines folded for reproduction.
+Runnable source: 44 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-009 REQ-014
+step("Verify: should preserve atlas and destination bindings in every emitted source")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val cuda = emit_portable_font_atlas_composite_kernel(PortableComputeTarget.Cuda)
 val hip = emit_portable_font_atlas_composite_kernel(PortableComputeTarget.Hip)
 val opencl = emit_portable_font_atlas_composite_kernel(PortableComputeTarget.OpenCl)
@@ -338,13 +363,21 @@ expect(webgpu.source).to_contain("params[8] > 2147483647 - i32(local_x)")
 
 #### should stop at a source-only WGSL compile plan without execution evidence
 
+- Verify: should stop at a source-only WGSL compile plan without execution evidence
+   - Expected: plan.binary_format equals `source`
+   - Expected: plan.tool_hint equals `browser-webgpu-host-import`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-009
+step("Verify: should stop at a source-only WGSL compile plan without execution evidence")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val artifact = emit_portable_font_atlas_composite_kernel(PortableComputeTarget.WebGpu)
 val plan = portable_compute_compile_plan(artifact, "simple_font_atlas_composite_v1_u32")
 expect(artifact.is_source_only()).to_be(true)
@@ -357,9 +390,10 @@ expect(plan.tool_hint).to_equal("browser-webgpu-host-import")
 
 #### should plan a separate font companion artifact for each selected backend
 
+- Verify: should plan a separate font companion artifact for each selected backend
 - Plan optimization and font sources as separate companion artifacts
-   - Expected: plan.artifacts.len() equals `4`
-   - Expected: plan.plans.len() equals `4`
+   - Expected: plan.artifacts.len() equals `4)  # oracle: pinned constant asserted by this scenario`
+   - Expected: plan.plans.len() equals `4)  # oracle: pinned constant asserted by this scenario`
    - Expected: plan.plans[1].artifact_path_suffix equals `simple_2d_optimization_font_atlas.ptx`
    - Expected: plan.plans[3].artifact_path_suffix equals `simple_2d_optimization_font_atlas.wgsl`
 
@@ -367,17 +401,20 @@ expect(plan.tool_hint).to_equal("browser-webgpu-host-import")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-009 REQ-010 REQ-014
+step("Verify: should plan a separate font companion artifact for each selected backend")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 step("Plan optimization and font sources as separate companion artifacts")
 val plan = portable_compute_2d_optimization_backend_plan("cuda,webgpu", "simple_2d_optimization")
 val optimization_wgsl = emit_portable_2d_optimization_module(PortableComputeTarget.WebGpu)
 val font_wgsl = emit_portable_font_atlas_composite_kernel(PortableComputeTarget.WebGpu)
 expect(plan.ready).to_be(true)
-expect(plan.artifacts.len()).to_equal(4)
-expect(plan.plans.len()).to_equal(4)
+expect(plan.artifacts.len()).to_equal(4)  # oracle: pinned constant asserted by this scenario
+expect(plan.plans.len()).to_equal(4)  # oracle: pinned constant asserted by this scenario
 if plan.plans.len() == 4:
     expect(plan.plans[1].artifact_path_suffix).to_equal("simple_2d_optimization_font_atlas.ptx")
     expect(plan.plans[3].artifact_path_suffix).to_equal("simple_2d_optimization_font_atlas.wgsl")
@@ -401,3 +438,55 @@ expect(font_wgsl.source.contains("@binding(3)")).to_be(false)
 
 
 </details>
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `03f9adca366f2d6bdea8d23ec22ef634b5e9b0db566fa612982410ca50a8fdba`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `03f9adca366f2d6bdea8d23ec22ef634b5e9b0db566fa612982410ca50a8fdba`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `03f9adca366f2d6bdea8d23ec22ef634b5e9b0db566fa612982410ca50a8fdba`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
+
+SSpec documentization score: 90/100
+source: test/03_system/app/simple_2d/feature/gpu_font_emission_spec.spl
+mirror: doc/06_spec/03_system/app/simple_2d/feature/gpu_font_emission_spec.md (current)
+findings: 9 blockers: 0
+  narrative=100 structure=70 oracle=100
+  traceability=100 evidence=85 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/app/simple_2d/feature/gpu_font_emission_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
+  why: Source tokens alone do not prove reader-visible workflow structure.
+  improve: Use supported literal step calls and regenerate the manual.
+doc/06_spec/03_system/app/simple_2d/feature/gpu_font_emission_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/simple_2d/feature/gpu_font_emission_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/simple_2d/feature/gpu_font_emission_spec.spl:86:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should gate configured ROCm font readback with admitted and provenance-bound evidence' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/simple_2d/feature/gpu_font_emission_spec.spl:111:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should expose one stable pure-Simple source-emitter handoff' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/simple_2d/feature/gpu_font_emission_spec.spl:215:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should bind artifact version hashes to entry format and source' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/simple_2d/feature/gpu_font_emission_spec.spl:222:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should emit the dedicated Vulkan GLSL 15-input ABI without portable target planning' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/simple_2d/feature/gpu_font_emission_spec.spl:253:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should emit one deterministic versioned entry for every portable target' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/simple_2d/feature/gpu_font_emission_spec.spl:265:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should preserve atlas and destination bindings in every emitted source' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

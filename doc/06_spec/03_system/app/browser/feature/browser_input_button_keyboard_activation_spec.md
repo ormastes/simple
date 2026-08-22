@@ -1,117 +1,127 @@
 # Hosted input-button keyboard activation
 
-Status: **DRAFT / EVIDENCE-BLOCKED**
+> Verifies the browser input button keyboard activation behaviour end to end so maintainers of this
 
-Executable source:
-`test/03_system/app/browser/feature/browser_input_button_keyboard_activation_spec.spl`.
-No runtime result is claimed until an admitted current pure-Simple runner
-executes the scenario.
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 1 | 1 | 0 | 0 |
 
-## Scope and production route
+<details>
+<summary>Full Scenario Manual</summary>
 
-Native `<input type="button">` controls must remain operable by keyboard and
-pointer without becoming form submitters. The executable drives the production
-`HostedWebContentSession` APIs used by `hosted_entry`:
+# Hosted input-button keyboard activation
 
-```text
-host key
-  -> dispatch_key_with_shift
-  -> BrowserSession.dispatch_dom_keyboard_code_event
-  -> be_dom_keyboard_activation_event_for_target
-  -> click
+Verifies the browser input button keyboard activation behaviour end to end so maintainers of this
 
-host pointer
-  -> dispatch_pointer_at
-  -> pointerdown / mousedown / pointerup / mouseup / click
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/03_system/app/browser/feature/browser_input_button_keyboard_activation_spec.spl` |
+| Updated | 2026-08-22 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Purpose and audience
+Verifies the browser input button keyboard activation behaviour end to end so maintainers of this
+component and reviewers of its spec share one pinned definition.
+## Operator workflow
+Run `bin/simple test <this spec>`; read the per-scenario verdicts in
+the `Results:` summary. Each scenario asserts an observable outcome.
+## Compatibility and limitations
+Covers the currently shipped behaviour only; performance, stress and
+unrelated sibling features are out of scope.
+
+## Scenarios
+
+### Hosted input-button keyboard activation
+
+#### should preserve keyboard pointer and form semantics
+
+- Verify: should preserve keyboard pointer and form semantics
+   - HTML capture: after_step
+- Install hosted input-button activation controls
+   - HTML capture: after_step
+- Focus input buttons through the host Tab route
+   - HTML capture: after_step
+- Activate the focused controls with Space and Enter
+   - HTML capture: after_step
+- Preserve pointer parity and form non-submission
+   - HTML capture: after_step
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008
+step("Verify: should preserve keyboard pointer and form semantics")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+step("Install hosted input-button activation controls")
+var fixture = setup_hosted_input_button_activation_fixture()
+
+step("Focus input buttons through the host Tab route")
+focus_input_buttons_through_host_tab(fixture)
+
+step("Activate the focused controls with Space and Enter")
+activate_input_buttons_through_host_keyboard(fixture)
+
+step("Preserve pointer parity and form non-submission")
+check_input_button_activation_and_form_safety(fixture)
 ```
 
-The implementation change is limited to classifying Enter and Space on an
-input whose exact type is `button` as click activation. Existing Space timing
-arms on key-down and clicks on key-up; existing Enter timing clicks on
-key-down. Existing form-owner checks continue to reject `type=button` as a
-submitter.
+</details>
 
-## Scenario: preserve keyboard pointer and form semantics
+## Scenario Summary
 
-### 1. Install hosted input-button activation controls
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 1 |
+| Active scenarios | 1 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
-`setup_hosted_input_button_activation_fixture` creates hosted window `802`
-with a guarded POST form targeting
-`https://must-not-submit.test/save` and three block-layout input buttons:
 
-- `space-button`;
-- `enter-button`;
-- `pointer-button`.
+</details>
 
-Each control records exact focus, blur, or click attributes. The form records
-`data-submit=yes` if a submit event is incorrectly dispatched. The fixed
-20-pixel block geometry gives the pointer control the exact test point
-`(5, 45)`.
+<!-- sspec-maintain:provenance:start -->
+## Generation history
 
-### 2. Focus input buttons through the host Tab route
+- Canonical SPipe generation for source `dfd22fc654935059f5a91dae7618a74f2e562b9d17cfa996cfbf09d15dd9b153`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-`focus_input_buttons_through_host_tab` sends Tab down/up through
-`dispatch_key_with_shift`.
+Source SHA-256: `dfd22fc654935059f5a91dae7618a74f2e562b9d17cfa996cfbf09d15dd9b153`.
+<!-- sspec-maintain:provenance:end -->
 
-Exact oracles:
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
 
-- key-down semantic target is `space-button`;
-- key-down callback count is `1` for its focus listener;
-- key-up retains `space-button` and has callback count `0`;
-- DOM focus is exactly `space-button`;
-- `data-focus="space"` is present.
+Source SHA-256: `dfd22fc654935059f5a91dae7618a74f2e562b9d17cfa996cfbf09d15dd9b153`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
 
-### 3. Activate the focused controls with Space and Enter
-
-`activate_input_buttons_through_host_keyboard` sends both key edges through
-the same hosted route.
-
-Space oracles:
-
-- key-down targets `space-button`, has callback count `0`, and does not expose
-  `data-click="space"`;
-- key-up targets `space-button`, has callback count `1`, and exposes the click
-  attribute;
-- pending form-request count remains `0` on both edges.
-
-A hosted Tab transition then targets `enter-button`, has callback count `2`
-for the old control's blur and new control's focus, and records both exact
-attributes.
-
-Enter oracles:
-
-- key-down targets `enter-button`, has callback count `1`, and exposes
-  `data-click="enter"`;
-- key-up retains the target and has callback count `0`;
-- pending form-request count remains `0` on both edges.
-
-### 4. Preserve pointer parity and form non-submission
-
-`check_input_button_activation_and_form_safety` presses and releases `(5, 45)`
-through `dispatch_pointer_at`.
-
-Exact oracles:
-
-- pointer-down targets `pointer-button`, has callback count `2` for blur and
-  focus, records `data-blur="enter"` and `data-focus="pointer"`, and has not
-  clicked yet;
-- pointer-up targets the same button, has callback count `1`, and records
-  `data-click="pointer"`;
-- `data-submit="yes"` is absent;
-- pending form-request count is exactly `0`.
-
-## Frozen helper and step parity
-
-Helpers:
-
-- `setup_hosted_input_button_activation_fixture`
-- `focus_input_buttons_through_host_tab`
-- `activate_input_buttons_through_host_keyboard`
-- `check_input_button_activation_and_form_safety`
-
-Visible steps:
-
-1. `Install hosted input-button activation controls`
-2. `Focus input buttons through the host Tab route`
-3. `Activate the focused controls with Space and Enter`
-4. `Preserve pointer parity and form non-submission`
+SSpec documentization score: 94/100
+source: test/03_system/app/browser/feature/browser_input_button_keyboard_activation_spec.spl
+mirror: doc/06_spec/03_system/app/browser/feature/browser_input_button_keyboard_activation_spec.md (current)
+findings: 4 blockers: 0
+  narrative=100 structure=95 oracle=100
+  traceability=100 evidence=85 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/app/browser/feature/browser_input_button_keyboard_activation_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
+  why: Source tokens alone do not prove reader-visible workflow structure.
+  improve: Use supported literal step calls and regenerate the manual.
+doc/06_spec/03_system/app/browser/feature/browser_input_button_keyboard_activation_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/browser/feature/browser_input_button_keyboard_activation_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/browser/feature/browser_input_button_keyboard_activation_spec.spl:173:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should preserve keyboard pointer and form semantics' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

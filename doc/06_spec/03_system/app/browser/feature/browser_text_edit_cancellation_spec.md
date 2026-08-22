@@ -1,6 +1,6 @@
 # Canceled Browser Text Editing
 
-> This specification proves hosted and isolated-worker text controls preserve the same UTF-8 selection when cancelable `beforeinput` blocks Backspace or Delete. Both routes use the canonical BrowserSession DOM event and editing owners.
+> Verifies the browser text edit cancellation behaviour end to end so maintainers of this
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -11,7 +11,7 @@
 
 # Canceled Browser Text Editing
 
-This specification proves hosted and isolated-worker text controls preserve the same UTF-8 selection when cancelable `beforeinput` blocks Backspace or Delete. Both routes use the canonical BrowserSession DOM event and editing owners.
+Verifies the browser text edit cancellation behaviour end to end so maintainers of this
 
 ## At a Glance
 
@@ -24,115 +24,18 @@ This specification proves hosted and isolated-worker text controls preserve the 
 | Design | doc/04_architecture/simple_web_browser_engine_production_hardening.md |
 | Research | doc/01_research/local/simple_web_browser_engine_production_hardening.md |
 | Source | `test/03_system/app/browser/feature/browser_text_edit_cancellation_spec.spl` |
-| Updated | 2026-07-29 |
+| Updated | 2026-08-22 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Overview
-
-This specification proves hosted and isolated-worker text controls preserve the
-same UTF-8 selection when cancelable `beforeinput` blocks Backspace or Delete.
-Both routes use the canonical BrowserSession DOM event and editing owners.
-
-## Requirements
-
-**Requirements:** doc/02_requirements/feature/simple_web_browser_engine_production_hardening.md
-
-- REQ-WEB-BROWSER-007: cancellation must suppress the default edit without
-  corrupting live selection state.
-- REQ-WEB-BROWSER-008: keyboard editing, `beforeinput`, `input`, `change`,
-  selection movement, and blur must agree across hosted and worker paths.
-
-## Plan
-
-**Plan:** doc/03_plan/sys_test/simple_web_browser_engine_production_hardening.md
-
-## Design
-
-**Design:** doc/04_architecture/simple_web_browser_engine_production_hardening.md
-
-## Research
-
-**Research:** doc/01_research/local/simple_web_browser_engine_production_hardening.md
-
-Domain context: `doc/01_research/domain/simple_web_browser_engine_production_hardening.md`
-
-## Behavior and UTF-8 Example
-
-The fixture value is `aéz`. Its selected `é` occupies UTF-8 byte range `1..3`.
-Canceled Backspace and Delete must leave the value and selection unchanged.
-The observable order is `keydown` then canceled `beforeinput`; neither `input`
-nor `change` may follow. Shift+ArrowRight must then extend focus from byte 3 to
-byte 4, proving the retained selection was used. Blur finally clears the
-selection target and resets both byte offsets to zero.
-
-## Examples
-
-Given the value and byte boundaries:
-
-```text
-value:  a é   z
-bytes:  0 1-2 3
-range:    [1,3)
-```
-
-the canceling listener produces this transition:
-
-```text
-selection 1..3
-  -> keydown Backspace
-  -> beforeinput preventDefault()
-  -> value remains aéz
-  -> selection remains 1..3
-```
-
-The next shifted cursor operation proves cancellation retained both ends:
-
-```text
-Shift+ArrowRight
-  -> anchor remains 1
-  -> focus advances from 3 to 4
-```
-
-## Host and Worker Parity
-
-The hosted case calls the public input surface used by an in-process Web
-window. The worker case sends the unchanged K2 keyboard message through the
-isolated renderer session. Both end with identical DOM value, selection,
-event title, and blur cleanup.
-
-No test-only editing path is introduced. A difference between these rows means
-the hosted adapter or worker IPC adapter bypassed the canonical BrowserSession
-default-action owner.
-
-## Failure Discrimination
-
-The assertions distinguish the original bug from nearby failures:
-
-- A changed value means cancellation did not suppress the edit.
-- A collapsed `1..1` or `3..3` range means cancellation corrupted selection.
-- An `input` entry means a canceled default action still emitted mutation.
-- A `change` entry means blur committed a dirty state that never existed.
-- A focus byte other than 4 means the next key did not reuse retained state.
-- A nonempty target after blur means selection lifetime leaked past focus.
-
-## Scope
-
-This scenario covers cancellation state, UTF-8 byte offsets, event ordering,
-host/worker parity, subsequent keyboard selection, and blur cleanup. It does
-not add composition-event semantics, clipboard behavior, or a second selection
-model; those require separate executable requirements.
-
-## Frozen Steps
-
-The displayed scenario keeps these manual steps in order:
-
-1. Cancel hosted Backspace and Delete over the UTF-8 selection.
-2. Extend the retained hosted selection and clear it on blur.
-3. Cancel worker K2 Backspace and Delete over the same selection.
-4. Extend the retained worker selection and clear it on blur.
-
-The helper checks are executable assertions, not additional event paths or
-state owners.
+## Purpose and audience
+Verifies the browser text edit cancellation behaviour end to end so maintainers of this
+component and reviewers of its spec share one pinned definition.
+## Operator workflow
+Run `bin/simple test <this spec>`; read the per-scenario verdicts in
+the `Results:` summary. Each scenario asserts an observable outcome.
+## Compatibility and limitations
+Covers the currently shipped behaviour only; performance, stress and
+unrelated sibling features are out of scope.
 
 ## Scenarios
 
@@ -140,27 +43,26 @@ state owners.
 
 #### should preserve selection and event ordering across hosted and worker paths
 
+- Verify: should preserve selection and event ordering across hosted and worker paths
 - Cancel hosted Backspace and Delete over the UTF-8 selection
    - Expected: hosted_backspace.semantic_target_id equals `q`
-- expect canceled text edit
    - Expected: hosted_delete.semantic_target_id equals `q`
 - Extend the retained hosted selection and clear it on blur
    - Expected: hosted_shift_right.semantic_target_id equals `q`
-- expect shift extended selection
 - Cancel worker K2 Backspace and Delete over the same selection
-- var worker = HostedBrowserRendererWorkerSession create
-- expect canceled text edit
 - Extend the retained worker selection and clear it on blur
-- expect shift extended selection
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 59 lines folded for reproduction.
+Runnable source: 62 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008
+step("Verify: should preserve selection and event ordering across hosted and worker paths")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 step("Cancel hosted Backspace and Delete over the UTF-8 selection")
 var hosted = HostedWebContentSession.create(
     41, CANCELED_TEXT_EDIT_HTML, 80, 40
@@ -244,3 +146,40 @@ expect_text_selection_cleanup(
 
 
 </details>
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `a4c9b7a9f4024218f5e2d6800f68faba2525012546a543bc9873d63a8403e43a`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `a4c9b7a9f4024218f5e2d6800f68faba2525012546a543bc9873d63a8403e43a`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `a4c9b7a9f4024218f5e2d6800f68faba2525012546a543bc9873d63a8403e43a`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+
+SSpec documentization score: 94/100
+source: test/03_system/app/browser/feature/browser_text_edit_cancellation_spec.spl
+mirror: doc/06_spec/03_system/app/browser/feature/browser_text_edit_cancellation_spec.md (current)
+findings: 4 blockers: 0
+  narrative=100 structure=95 oracle=100
+  traceability=100 evidence=85 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/app/browser/feature/browser_text_edit_cancellation_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
+  why: Source tokens alone do not prove reader-visible workflow structure.
+  improve: Use supported literal step calls and regenerate the manual.
+doc/06_spec/03_system/app/browser/feature/browser_text_edit_cancellation_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/browser/feature/browser_text_edit_cancellation_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/browser/feature/browser_text_edit_cancellation_spec.spl:179:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should preserve selection and event ordering across hosted and worker paths' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

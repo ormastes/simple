@@ -1,109 +1,132 @@
 # Generation-qualified browser DOM identity
 
+> Verifies the browser dom identity generation behaviour end to end so maintainers of this
+
 | Tests | Active | Skipped | Pending |
-|------:|-------:|--------:|--------:|
+|-------|--------|---------|--------:|
 | 1 | 1 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# Generation-qualified browser DOM identity
+
+Verifies the browser dom identity generation behaviour end to end so maintainers of this
 
 ## At a Glance
 
 | Field | Value |
-|---|---|
-| Status | Integrated static evidence; runtime and docgen held |
-| Requirements | REQ-WEB-BROWSER-004/007/008/017/018 |
-| Planned NFRs | NFR-WEB-BROWSER-004/005/006/008/014/015/016 |
-| Executable source | `test/03_system/app/browser/feature/browser_dom_identity_generation_spec.spl` |
-| Plan | `doc/03_plan/sys_test/simple_web_browser_engine_production_hardening.md` |
-| Canonical render path | BrowserSession -> Web semantic/layout -> DrawIrComposition -> Engine2D |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/03_system/app/browser/feature/browser_dom_identity_generation_spec.spl` |
+| Updated | 2026-08-22 |
+| Generator | `simple spipe-docgen` (Simple) |
 
-## Scenario: retire stale routes across browser script UI and hosted rendering
+## Purpose and audience
+Verifies the browser dom identity generation behaviour end to end so maintainers of this
+component and reviewers of its spec share one pinned definition.
+## Operator workflow
+Run `bin/simple test <this spec>`; read the per-scenario verdicts in
+the `Results:` summary. Each scenario asserts an observable outcome.
+## Compatibility and limitations
+Covers the currently shipped behaviour only; performance, stress and
+unrelated sibling features are out of scope.
 
-### Build the document identity index
+## Scenarios
 
-Create a real blank `BrowserSession`, verify its generation-1 index, then open
-the document fixture. The published two-pass index proves first duplicate-ID
-ownership, external form ownership, explicit and nested label association,
-form-owned and ownerless radio groups, canonical `id:`/`path:` layout keys,
-and the session-owned `layout_target_key_for_route`, `author_id_for_route`,
-`document_generation`, and `current_dom_identity_index` projections.
+### Generation-qualified browser DOM identity
 
-### Dispatch through stable routes
+#### should retire stale routes across browser script UI and hosted rendering
 
-Dispatch a callable JavaScript listener using the typed route stored beside its
-JS heap object. The receipt exposes the same target/current route, while the
-textual UI adapter and SimpleScript bridge accept that live route. Focus,
-value, and style changes must preserve the generation, index object, and JS
-object identity; replacing child text must publish a new generation.
+- Verify: should retire stale routes across browser script UI and hosted rendering
+   - Artifact capture: after_step
+- Build the document identity index
+   - Artifact capture: after_step
+- Dispatch through stable routes
+   - Artifact capture: after_step
+- Replace the document during a handler
+   - Artifact capture: after_step
+- Reject stale routes and release the index
+   - Artifact capture: after_step
 
-Folded label cases require sibling `label,control` order, nested
-`label,control,label` order, interactive-descendant suppression, label
-cancellation, and canceled-control preactivation rollback. A 4,096-listener
-checkbox case requires its synthetic input phase to share the outer dispatch
-budget instead of executing a 4,097th action.
 
-### Replace the document during a handler
+<details>
+<summary>Executable SSpec</summary>
 
-An oversized script-driven `innerHTML` candidate is rejected at the
-`BrowserSession.publish_dom_snapshot` boundary after a broker cookie write. It
-must leave generation, index, DOM, JavaScript runtime/object map, callable
-listeners, SimpleScript root/runner/index/callbacks, and
-`pending_script_cookie_writes` unchanged. `BrowserSession` owns no stateful
-`ScriptHost`; `script_host_apply_action_to_route` is a pure DOM transform, so
-the oracle does not invent a ScriptHost root. An oversized load and an injected
-duplicate-node candidate have the same rollback obligation. The handler then replaces
-the document with a visually different button that intentionally reuses the
-old author and numeric identity. The old SimpleScript callback is retired, the
-generation advances once, and neither old nor new click default runs while the
-handler unwinds.
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
-### Reject stale routes and release the index
+```simple
+# @req: REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-018
+step("Verify: should retire stale routes across browser script UI and hosted rendering")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+step("Build the document identity index")
+val fixture = setup_dom_identity_generation_fixture()
+check_dom_identity_index_built(fixture)
 
-The session layout gate, reverse layout projection, author projection, DOM
-dispatch, SimpleScript bridge, and stale textual UI snapshot reject the old
-route without mutation. Both the direct hosted adapter and isolated worker
-replace during press and release without a click. The worker also clears its
-pressed/stale-hit routes and root-request/command-capability authority. The
-release oracle replaces the document between a valid press and capability-
-bound release, then proves no callback, body, title, URL, history, or pending-
-navigation mutation through rejection and same-request retry.
-The surviving current route is recovered from the canonical hit index,
-its `replace` Draw IR command is an exact green `8x8` rectangle, and Engine2D
-produces a green inside pixel and white outside pixel. Closing the session
-advances the generation and clears the current index and script document.
+step("Dispatch through stable routes")
+check_stable_route_dispatch(fixture)
+_check_generation_preserving_and_structural_mutations()
+_check_label_forwarding_and_rollback()
+_check_shared_nested_dispatch_budget()
 
-## Folded work and production-receipt policy
+step("Replace the document during a handler")
+_check_atomic_load_eval_and_index_rollback()
+val replacement = check_document_replacement_during_handler(fixture)
 
-The executable fixture builds exact 32-node and 64-node indexes and checks 64
-and 128 build visits: two bounded passes and exact N/2N work scaling. It also
-defines `dom-identity-runtime-receipt-v1` with these mandatory fields:
+step("Reject stale routes and release the index")
+check_stale_routes_and_index_release(fixture, replacement)
+```
 
-- 10,000 replacement/dispatch cycles;
-- build and input-to-paint p95;
-- allocation count;
-- live/retired index counts and index bytes;
-- post-warmup, final, and maximum RSS;
-- stale and budget reject counts.
+</details>
 
-Every runtime-measured field remains `-1` and status remains `runtime-held` in
-this static lane. No timing, allocation, RSS, 10,000-cycle, docgen, or target
-runtime PASS is claimed.
+## Scenario Summary
 
-Source **HOLD/RED** is now limited to independent acceptance of the rejected-
-evaluation `pending_script_cookie_writes` rollback. Isolated stale rejection
-has complete static route/capability and navigation-state evidence.
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 1 |
+| Active scenarios | 1 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
-## Traceability
 
-| Requirement | Evidence | Status |
-|---|---|---|
-| REQ-WEB-BROWSER-004 | canonical layout key, Draw IR command, Engine2D pixels | executable oracle; runtime held |
-| REQ-WEB-BROWSER-007 | typed callable/SimpleScript/UI event routes and label/default cases | executable oracle; runtime held |
-| REQ-WEB-BROWSER-008 | hosted stale press/release cannot click equal replacement | executable oracle; runtime held |
-| REQ-WEB-BROWSER-017 | old generation callbacks/listeners and failed candidates retire or roll back | executable oracle; runtime held |
-| REQ-WEB-BROWSER-018 | N/2N counters and complete held 10,000-cycle receipt schema | schema complete; numeric evidence held |
-| NFR-WEB-BROWSER-004/005/006/008/014/015/016 | receipt fields and fail-closed status | not promoted |
+</details>
 
-## Provenance
+<!-- sspec-maintain:provenance:start -->
+## Generation history
 
-This manual is hand-reconciled with the executable scenario because the lane
-forbids runtime, bootstrap, and docgen execution. The executable SSpec is the
-authoritative assertion source; this page makes no PASS claim.
+- Canonical SPipe generation for source `1c9394513a1ccb2fbf712d75a90096c9a470b2dd3964e298f70b1790b3005413`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `1c9394513a1ccb2fbf712d75a90096c9a470b2dd3964e298f70b1790b3005413`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `1c9394513a1ccb2fbf712d75a90096c9a470b2dd3964e298f70b1790b3005413`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+
+SSpec documentization score: 94/100
+source: test/03_system/app/browser/feature/browser_dom_identity_generation_spec.spl
+mirror: doc/06_spec/03_system/app/browser/feature/browser_dom_identity_generation_spec.md (current)
+findings: 4 blockers: 0
+  narrative=100 structure=95 oracle=100
+  traceability=100 evidence=85 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/app/browser/feature/browser_dom_identity_generation_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
+  why: Source tokens alone do not prove reader-visible workflow structure.
+  improve: Use supported literal step calls and regenerate the manual.
+doc/06_spec/03_system/app/browser/feature/browser_dom_identity_generation_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/browser/feature/browser_dom_identity_generation_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/browser/feature/browser_dom_identity_generation_spec.spl:867:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should retire stale routes across browser script UI and hosted rendering' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

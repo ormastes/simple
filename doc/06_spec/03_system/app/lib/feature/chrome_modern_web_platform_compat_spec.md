@@ -1,29 +1,6 @@
-# Chrome Modern Web Platform Compat Specification
+# chrome_modern_web_platform_compat_spec
 
-> <details>
-
-<!-- sdn-diagram:id=chrome_modern_web_platform_compat_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=chrome_modern_web_platform_compat_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-chrome_modern_web_platform_compat_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=chrome_modern_web_platform_compat_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Verifies the chrome modern web platform compat behaviour end to end so maintainers of this
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -32,7 +9,29 @@ chrome_modern_web_platform_compat_spec -> std
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Chrome Modern Web Platform Compat Specification
+# chrome_modern_web_platform_compat_spec
+
+Verifies the chrome modern web platform compat behaviour end to end so maintainers of this
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/03_system/app/lib/feature/chrome_modern_web_platform_compat_spec.spl` |
+| Updated | 2026-08-22 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Purpose and audience
+Verifies the chrome modern web platform compat behaviour end to end so maintainers of this
+component and reviewers of its spec share one pinned definition.
+## Operator workflow
+Run `bin/simple test <this spec>`; read the per-scenario verdicts in
+the `Results:` summary. Each scenario asserts an observable outcome.
+## Compatibility and limitations
+Covers the currently shipped behaviour only; performance, stress and
+unrelated sibling features are out of scope.
 
 ## Scenarios
 
@@ -45,13 +44,19 @@ chrome_modern_web_platform_compat_spec -> std
 
 #### should require HTML CSS DOM rendering and JavaScript matrix coverage
 
+- Verify: should require HTML CSS DOM rendering and JavaScript matrix coverage
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007
+step("Verify: should require HTML CSS DOM rendering and JavaScript matrix coverage")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val plan = _read(PLAN_PATH)
 expect(plan).to_contain("HTML, CSS, DOM/rendering, and JavaScript")
 expect(plan).to_contain("web_platform_feature_matrix.md")
@@ -64,13 +69,19 @@ expect(plan).to_contain("web_platform_feature_matrix.md")
 
 #### should require explicit compatibility statuses
 
+- Verify: should require explicit compatibility statuses
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007
+step("Verify: should require explicit compatibility statuses")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val plan = _read(PLAN_PATH)
 expect(plan).to_contain("`supported`, `partial`, `missing`, or `not-applicable`")
 ```
@@ -79,13 +90,19 @@ expect(plan).to_contain("`supported`, `partial`, `missing`, or `not-applicable`"
 
 #### should gate migration on first WPT and Test262 subset selection
 
+- Verify: should gate migration on first WPT and Test262 subset selection
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007
+step("Verify: should gate migration on first WPT and Test262 subset selection")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val plan = _read(PLAN_PATH)
 expect(plan).to_contain("identify the first WPT/Test262 subset to migrate")
 ```
@@ -96,13 +113,19 @@ expect(plan).to_contain("identify the first WPT/Test262 subset to migrate")
 
 #### should define a repeatable WPT subset import surface
 
+- Verify: should define a repeatable WPT subset import surface
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007
+step("Verify: should define a repeatable WPT subset import surface")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val plan = _read(PLAN_PATH)
 expect(plan).to_contain("tools/wpt_to_spipe/")
 expect(plan).to_contain("test/feature/web_platform/")
@@ -112,13 +135,19 @@ expect(plan).to_contain("test/feature/web_platform/")
 
 #### should provide the first executable WPT selector color subset
 
+- Verify: should provide the first executable WPT selector color subset
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007
+step("Verify: should provide the first executable WPT selector color subset")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val subset_plan = _read(WPT_SUBSET_PLAN_PATH)
 val subset_spec = _read(WPT_SELECTOR_COLOR_SPEC_PATH)
 expect(subset_plan).to_contain("selector_color_subset_spec.spl")
@@ -131,13 +160,19 @@ expect(subset_spec).to_contain("covers partial :has descendant matching")
 
 #### should cover selector color parser and rendering basics
 
+- Verify: should cover selector color parser and rendering basics
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007
+step("Verify: should cover selector color parser and rendering basics")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val plan = _read(PLAN_PATH)
 expect(plan).to_contain("CSS selectors")
 expect(plan).to_contain("CSS colors")
@@ -149,13 +184,19 @@ expect(plan).to_contain("Rendering basics")
 
 #### should cover CSS custom property fallback colors in the WPT selector subset
 
+- Verify: should cover CSS custom property fallback colors in the WPT selector subset
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007
+step("Verify: should cover CSS custom property fallback colors in the WPT selector subset")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val spec = _read(WPT_SELECTOR_COLOR_SPEC_PATH)
 expect(spec).to_contain("covers CSS custom property fallback colors")
 expect(spec).to_contain("covers CSS custom property fallback colors in background shorthand")
@@ -165,13 +206,19 @@ expect(spec).to_contain("covers CSS custom property fallback colors in backgroun
 
 #### should require at least twenty five WPT derived cases
 
+- Verify: should require at least twenty five WPT derived cases
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007
+step("Verify: should require at least twenty five WPT derived cases")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val plan = _read(PLAN_PATH)
 expect(plan).to_contain("At least 25 selected WPT-derived cases")
 ```
@@ -182,13 +229,19 @@ expect(plan).to_contain("At least 25 selected WPT-derived cases")
 
 #### should define a repeatable Test262 subset import surface
 
+- Verify: should define a repeatable Test262 subset import surface
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007
+step("Verify: should define a repeatable Test262 subset import surface")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val plan = _read(PLAN_PATH)
 expect(plan).to_contain("tools/test262_to_spipe/")
 expect(plan).to_contain("test/js/test262_subset/")
@@ -198,13 +251,19 @@ expect(plan).to_contain("test/js/test262_subset/")
 
 #### should classify JavaScript conformance outcomes
 
+- Verify: should classify JavaScript conformance outcomes
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007
+step("Verify: should classify JavaScript conformance outcomes")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val plan = _read(PLAN_PATH)
 expect(plan).to_contain("expected-pass, expected-fail, and unsupported-host")
 ```
@@ -213,13 +272,19 @@ expect(plan).to_contain("expected-pass, expected-fail, and unsupported-host")
 
 #### should require at least fifty stable Test262 derived cases
 
+- Verify: should require at least fifty stable Test262 derived cases
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007
+step("Verify: should require at least fifty stable Test262 derived cases")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val plan = _read(PLAN_PATH)
 expect(plan).to_contain("At least 50 selected Test262-derived cases")
 ```
@@ -230,13 +295,19 @@ expect(plan).to_contain("At least 50 selected Test262-derived cases")
 
 #### should require SPipe or external suite mapping for supported features
 
+- Verify: should require SPipe or external suite mapping for supported features
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007
+step("Verify: should require SPipe or external suite mapping for supported features")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val plan = _read(PLAN_PATH)
 expect(plan).to_contain("Every supported feature has SPipe coverage or an explicit external-suite mapping")
 ```
@@ -245,13 +316,19 @@ expect(plan).to_contain("Every supported feature has SPipe coverage or an explic
 
 #### should cover universal selectors in the WPT selector subset
 
+- Verify: should cover universal selectors in the WPT selector subset
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007
+step("Verify: should cover universal selectors in the WPT selector subset")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 expect(_read(WPT_SELECTOR_COLOR_SPEC_PATH)).to_contain("covers universal selector matching")
 ```
 
@@ -259,13 +336,19 @@ expect(_read(WPT_SELECTOR_COLOR_SPEC_PATH)).to_contain("covers universal selecto
 
 #### should cover modern is selector behavior in renderer SPipe
 
+- Verify: should cover modern is selector behavior in renderer SPipe
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007
+step("Verify: should cover modern is selector behavior in renderer SPipe")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 expect(_read(RENDERER_SPEC_PATH)).to_contain("applies :is selector lists in fallback pixels")
 ```
 
@@ -273,13 +356,19 @@ expect(_read(RENDERER_SPEC_PATH)).to_contain("applies :is selector lists in fall
 
 #### should cover modern where selector behavior in renderer SPipe
 
+- Verify: should cover modern where selector behavior in renderer SPipe
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007
+step("Verify: should cover modern where selector behavior in renderer SPipe")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 expect(_read(RENDERER_SPEC_PATH)).to_contain("applies :where selector lists in fallback pixels")
 ```
 
@@ -287,13 +376,19 @@ expect(_read(RENDERER_SPEC_PATH)).to_contain("applies :where selector lists in f
 
 #### should cover modern not selector behavior in renderer SPipe
 
+- Verify: should cover modern not selector behavior in renderer SPipe
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007
+step("Verify: should cover modern not selector behavior in renderer SPipe")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val spec = _read(RENDERER_SPEC_PATH)
 expect(spec).to_contain("applies :not selector lists in fallback pixels")
 expect(spec).to_contain("rejects :not selectors when an option matches")
@@ -303,13 +398,19 @@ expect(spec).to_contain("rejects :not selectors when an option matches")
 
 #### should cover partial has selector behavior in renderer SPipe
 
+- Verify: should cover partial has selector behavior in renderer SPipe
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007
+step("Verify: should cover partial has selector behavior in renderer SPipe")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val spec = _read(RENDERER_SPEC_PATH)
 expect(spec).to_contain("applies :has descendant selectors in fallback pixels")
 expect(spec).to_contain("applies :has direct child selectors in fallback pixels")
@@ -321,13 +422,19 @@ expect(spec).to_contain("rejects :has selectors when no descendant option matche
 
 #### should cover bounded descendant combinators in the WPT selector subset
 
+- Verify: should cover bounded descendant combinators in the WPT selector subset
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007
+step("Verify: should cover bounded descendant combinators in the WPT selector subset")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val spec = _read(WPT_SELECTOR_COLOR_SPEC_PATH)
 expect(spec).to_contain("covers descendant combinator matching")
 expect(spec).to_contain("covers descendant combinator sibling rejection")
@@ -337,13 +444,19 @@ expect(spec).to_contain("covers descendant combinator sibling rejection")
 
 #### should cover bounded direct child combinators in the WPT selector subset
 
+- Verify: should cover bounded direct child combinators in the WPT selector subset
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007
+step("Verify: should cover bounded direct child combinators in the WPT selector subset")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val spec = _read(WPT_SELECTOR_COLOR_SPEC_PATH)
 expect(spec).to_contain("covers direct child combinator matching")
 expect(spec).to_contain("covers ancestor child combinator matching")
@@ -355,13 +468,19 @@ expect(spec).to_contain("covers direct child combinator nested descendant reject
 
 #### should cover bounded adjacent sibling combinators in the WPT selector subset
 
+- Verify: should cover bounded adjacent sibling combinators in the WPT selector subset
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007
+step("Verify: should cover bounded adjacent sibling combinators in the WPT selector subset")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val spec = _read(WPT_SELECTOR_COLOR_SPEC_PATH)
 expect(spec).to_contain("covers adjacent sibling combinator matching")
 expect(spec).to_contain("covers adjacent sibling combinator non-adjacent rejection")
@@ -371,13 +490,19 @@ expect(spec).to_contain("covers adjacent sibling combinator non-adjacent rejecti
 
 #### should cover bounded general sibling combinators in the WPT selector subset
 
+- Verify: should cover bounded general sibling combinators in the WPT selector subset
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007
+step("Verify: should cover bounded general sibling combinators in the WPT selector subset")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val spec = _read(WPT_SELECTOR_COLOR_SPEC_PATH)
 expect(spec).to_contain("covers general sibling combinator matching")
 expect(spec).to_contain("covers general sibling combinator preceding-source rejection")
@@ -387,13 +512,19 @@ expect(spec).to_contain("covers general sibling combinator preceding-source reje
 
 #### should cover partial empty selector behavior in renderer SPipe
 
+- Verify: should cover partial empty selector behavior in renderer SPipe
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007
+step("Verify: should cover partial empty selector behavior in renderer SPipe")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val spec = _read(RENDERER_SPEC_PATH)
 expect(spec).to_contain("applies :empty selectors in fallback pixels")
 expect(spec).to_contain("rejects :empty selectors when the fallback div has content")
@@ -403,13 +534,19 @@ expect(spec).to_contain("rejects :empty selectors when the fallback div has cont
 
 #### should cover partial first child selector behavior in renderer SPipe
 
+- Verify: should cover partial first child selector behavior in renderer SPipe
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007
+step("Verify: should cover partial first child selector behavior in renderer SPipe")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val spec = _read(RENDERER_SPEC_PATH)
 expect(spec).to_contain("applies :first-child selectors in fallback pixels")
 expect(spec).to_contain("rejects :first-child selectors for later fallback divs")
@@ -419,13 +556,19 @@ expect(spec).to_contain("rejects :first-child selectors for later fallback divs"
 
 #### should cover partial last child selector behavior in renderer SPipe
 
+- Verify: should cover partial last child selector behavior in renderer SPipe
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007
+step("Verify: should cover partial last child selector behavior in renderer SPipe")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val spec = _read(RENDERER_SPEC_PATH)
 expect(spec).to_contain("applies :last-child selectors in fallback pixels")
 expect(spec).to_contain("rejects :last-child selectors for earlier fallback divs")
@@ -435,13 +578,19 @@ expect(spec).to_contain("rejects :last-child selectors for earlier fallback divs
 
 #### should cover partial only child selector behavior in renderer SPipe
 
+- Verify: should cover partial only child selector behavior in renderer SPipe
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007
+step("Verify: should cover partial only child selector behavior in renderer SPipe")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val spec = _read(RENDERER_SPEC_PATH)
 expect(spec).to_contain("applies :only-child selectors in fallback pixels")
 expect(spec).to_contain("rejects :only-child selectors when a sibling exists")
@@ -451,13 +600,19 @@ expect(spec).to_contain("rejects :only-child selectors when a sibling exists")
 
 #### should cover partial nth child selector behavior in renderer SPipe
 
+- Verify: should cover partial nth child selector behavior in renderer SPipe
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007
+step("Verify: should cover partial nth child selector behavior in renderer SPipe")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val spec = _read(RENDERER_SPEC_PATH)
 expect(spec).to_contain("applies :nth-child odd and even selectors in fallback pixels")
 expect(spec).to_contain("rejects :nth-child odd selectors for even fallback nodes")
@@ -469,13 +624,19 @@ expect(spec).to_contain("rejects :nth-child an plus b selectors for non matching
 
 #### should cover simple CSS layer block behavior in renderer SPipe
 
+- Verify: should cover simple CSS layer block behavior in renderer SPipe
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007
+step("Verify: should cover simple CSS layer block behavior in renderer SPipe")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val spec = _read(RENDERER_SPEC_PATH)
 expect(spec).to_contain("applies simple rules nested inside CSS layer blocks")
 expect(spec).to_contain("applies functional selectors nested inside CSS layer blocks")
@@ -485,13 +646,19 @@ expect(spec).to_contain("applies functional selectors nested inside CSS layer bl
 
 #### should cover simple CSS nesting behavior in renderer SPipe
 
+- Verify: should cover simple CSS nesting behavior in renderer SPipe
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007
+step("Verify: should cover simple CSS nesting behavior in renderer SPipe")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val spec = _read(RENDERER_SPEC_PATH)
 expect(spec).to_contain("normalizes simple CSS nesting before fallback selector scans")
 expect(spec).to_contain("applies simple CSS nesting with parent selector references")
@@ -502,13 +669,19 @@ expect(spec).to_contain("applies simple descendant rules from CSS nesting")
 
 #### should cover basic attribute selector behavior in renderer SPipe
 
+- Verify: should cover basic attribute selector behavior in renderer SPipe
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007
+step("Verify: should cover basic attribute selector behavior in renderer SPipe")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val spec = _read(RENDERER_SPEC_PATH)
 expect(spec).to_contain("applies attribute presence selectors in fallback pixels")
 expect(spec).to_contain("applies exact attribute value selectors in fallback pixels")
@@ -520,13 +693,19 @@ expect(spec).to_contain("rejects exact attribute value selectors with different 
 
 #### should cover bounded attribute selector operator behavior in renderer SPipe
 
+- Verify: should cover bounded attribute selector operator behavior in renderer SPipe
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007
+step("Verify: should cover bounded attribute selector operator behavior in renderer SPipe")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val spec = _read(RENDERER_SPEC_PATH)
 expect(spec).to_contain("applies attribute prefix selectors in fallback pixels")
 expect(spec).to_contain("applies attribute suffix selectors in fallback pixels")
@@ -547,35 +726,8 @@ expect(spec).to_contain("rejects explicit case sensitive attribute selectors wit
 
 #### should explicitly reject full Chrome compatibility claims
 
-<details>
-<summary>Executable SSpec</summary>
+- Verify: should explicitly reject full Chrome compatibility claims
 
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val audit = _read(AUDIT_PATH)
-expect(audit).to_contain("Simple is not a full Chrome-compatible browser engine")
-```
-
-</details>
-
-#### should require unsupported high value feature tracking
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val req = _read(FEATURE_REQ_PATH)
-expect(req).to_contain("Every unsupported high-value feature shall be recorded")
-```
-
-</details>
-
-#### should list broad WPT Test262 HTML and CSS gaps
 
 <details>
 <summary>Executable SSpec</summary>
@@ -584,6 +736,51 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007
+step("Verify: should explicitly reject full Chrome compatibility claims")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+val audit = _read(AUDIT_PATH)
+expect(audit).to_contain("Simple is not a full Chrome-compatible browser engine")
+```
+
+</details>
+
+#### should require unsupported high value feature tracking
+
+- Verify: should require unsupported high value feature tracking
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007
+step("Verify: should require unsupported high value feature tracking")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+val req = _read(FEATURE_REQ_PATH)
+expect(req).to_contain("Every unsupported high-value feature shall be recorded")
+```
+
+</details>
+
+#### should list broad WPT Test262 HTML and CSS gaps
+
+- Verify: should list broad WPT Test262 HTML and CSS gaps
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007
+step("Verify: should list broad WPT Test262 HTML and CSS gaps")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val audit = _read(AUDIT_PATH)
 expect(audit).to_contain("No complete WPT migration yet")
 expect(audit).to_contain("No complete Test262 migration yet")
@@ -597,13 +794,19 @@ expect(audit).to_contain("CSS modern layout systems")
 
 #### should define PASS WARN and FAIL states
 
+- Verify: should define PASS WARN and FAIL states
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007
+step("Verify: should define PASS WARN and FAIL states")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val plan = _read(PLAN_PATH)
 expect(plan).to_contain("STATUS: PASS")
 expect(plan).to_contain("STATUS: WARN")
@@ -614,13 +817,19 @@ expect(plan).to_contain("STATUS: FAIL")
 
 #### should require the broad library check command
 
+- Verify: should require the broad library check command
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007
+step("Verify: should require the broad library check command")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val plan = _read(PLAN_PATH)
 expect(plan).to_contain("bin/simple check src/lib")
 ```
@@ -629,13 +838,19 @@ expect(plan).to_contain("bin/simple check src/lib")
 
 #### should reject manual visual inspection as the only signal
 
+- Verify: should reject manual visual inspection as the only signal
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007
+step("Verify: should reject manual visual inspection as the only signal")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val req = _read(FEATURE_REQ_PATH)
 val nfr = _read(NFR_REQ_PATH)
 expect(req).to_contain("without relying on manual visual inspection")
@@ -648,13 +863,19 @@ expect(nfr).to_contain("shall not depend on manual visual inspection")
 
 #### should implement is and where selector matching in style blocks
 
+- Verify: should implement is and where selector matching in style blocks
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007
+step("Verify: should implement is and where selector matching in style blocks")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val source = _read(STYLE_BLOCK_PATH)
 expect(source).to_contain(":is() and :where()")
 expect(source).to_contain("functional_selector_list_matches")
@@ -664,13 +885,19 @@ expect(source).to_contain("functional_selector_list_matches")
 
 #### should avoid splitting fallback selector lists inside functional pseudos
 
+- Verify: should avoid splitting fallback selector lists inside functional pseudos
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007
+step("Verify: should avoid splitting fallback selector lists inside functional pseudos")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val source = _read(BROWSER_RENDERER_PATH)
 expect(source).to_contain("paren_depth")
 expect(source).to_contain("br_functional_selector_contains")
@@ -680,13 +907,19 @@ expect(source).to_contain("br_functional_selector_contains")
 
 #### should implement partial not and has selector matching
 
+- Verify: should implement partial not and has selector matching
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007
+step("Verify: should implement partial not and has selector matching")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val style_source = _read(STYLE_BLOCK_PATH)
 val renderer_source = _read(BROWSER_RENDERER_PATH)
 expect(style_source).to_contain("not_selector_list_matches")
@@ -712,13 +945,19 @@ expect(renderer_source).to_contain("br_style_block_rule_for_nth_child_self")
 
 #### should flatten simple CSS layer blocks before existing rule scans
 
+- Verify: should flatten simple CSS layer blocks before existing rule scans
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007
+step("Verify: should flatten simple CSS layer blocks before existing rule scans")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val style_source = _read(STYLE_BLOCK_PATH)
 val renderer_source = _read(BROWSER_RENDERER_PATH)
 val subset_spec = _read(WPT_SELECTOR_COLOR_SPEC_PATH)
@@ -731,13 +970,19 @@ expect(subset_spec).to_contain("covers simple rules nested inside CSS layer bloc
 
 #### should flatten simple CSS nesting before existing rule scans
 
+- Verify: should flatten simple CSS nesting before existing rule scans
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007
+step("Verify: should flatten simple CSS nesting before existing rule scans")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val style_source = _read(STYLE_BLOCK_PATH)
 val renderer_source = _read(BROWSER_RENDERER_PATH)
 val subset_spec = _read(WPT_SELECTOR_COLOR_SPEC_PATH)
@@ -750,13 +995,19 @@ expect(subset_spec).to_contain("covers simple parent selector CSS nesting")
 
 #### should implement basic attribute selector matching
 
+- Verify: should implement basic attribute selector matching
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007
+step("Verify: should implement basic attribute selector matching")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val style_source = _read(STYLE_BLOCK_PATH)
 val renderer_source = _read(BROWSER_RENDERER_PATH)
 val subset_spec = _read(WPT_SELECTOR_COLOR_SPEC_PATH)
@@ -771,13 +1022,19 @@ expect(subset_spec).to_contain("covers exact attribute value selector matching")
 
 #### should implement bounded attribute selector operators
 
+- Verify: should implement bounded attribute selector operators
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007
+step("Verify: should implement bounded attribute selector operators")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val style_source = _read(STYLE_BLOCK_PATH)
 val renderer_source = _read(BROWSER_RENDERER_PATH)
 val subset_spec = _read(WPT_SELECTOR_COLOR_SPEC_PATH)
@@ -799,34 +1056,25 @@ expect(subset_spec).to_contain("covers explicit case sensitive attribute selecto
 
 #### should trace the BDD slice through the system test plan
 
+- Verify: should trace the BDD slice through the system test plan
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006
+step("Verify: should trace the BDD slice through the system test plan")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val test_plan = _read(TEST_PLAN_PATH)
 expect(test_plan).to_contain("REQ-007: Initial Modern CSS BDD Slice")
 expect(test_plan).to_contain("attribute selector/operator, `:empty`, `:first-child`, `:last-child`, and `:only-child` examples should pass")
 ```
 
 </details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Application |
-| Status | Active |
-| Source | `test/03_system/app/lib/feature/chrome_modern_web_platform_compat_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- Chrome modern web platform compatibility plan
 
 ## Scenario Summary
 
@@ -840,3 +1088,55 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `d34275fc81063a5486cd081299d3ba2e071bc2c64c00097c3b4fa2f94aadf7a9`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `d34275fc81063a5486cd081299d3ba2e071bc2c64c00097c3b4fa2f94aadf7a9`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `d34275fc81063a5486cd081299d3ba2e071bc2c64c00097c3b4fa2f94aadf7a9`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
+
+SSpec documentization score: 90/100
+source: test/03_system/app/lib/feature/chrome_modern_web_platform_compat_spec.spl
+mirror: doc/06_spec/03_system/app/lib/feature/chrome_modern_web_platform_compat_spec.md (current)
+findings: 9 blockers: 0
+  narrative=100 structure=70 oracle=100
+  traceability=100 evidence=85 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/app/lib/feature/chrome_modern_web_platform_compat_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
+  why: Source tokens alone do not prove reader-visible workflow structure.
+  improve: Use supported literal step calls and regenerate the manual.
+doc/06_spec/03_system/app/lib/feature/chrome_modern_web_platform_compat_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/lib/feature/chrome_modern_web_platform_compat_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/lib/feature/chrome_modern_web_platform_compat_spec.spl:43:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should require HTML CSS DOM rendering and JavaScript matrix coverage' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/lib/feature/chrome_modern_web_platform_compat_spec.spl:51:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should require explicit compatibility statuses' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/lib/feature/chrome_modern_web_platform_compat_spec.spl:58:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should gate migration on first WPT and Test262 subset selection' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/lib/feature/chrome_modern_web_platform_compat_spec.spl:67:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should define a repeatable WPT subset import surface' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/lib/feature/chrome_modern_web_platform_compat_spec.spl:75:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should provide the first executable WPT selector color subset' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/lib/feature/chrome_modern_web_platform_compat_spec.spl:86:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should cover selector color parser and rendering basics' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->
