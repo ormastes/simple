@@ -52,6 +52,16 @@ fn mir_opt_env_get(key: text) -> text?:
 fn mir_opt_trace_enabled() -> bool:
     (mir_opt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
 
+var _mir_opt_verify_each_cached: i64 = -1
+
+fn mir_opt_verify_each_enabled() -> bool:
+    # Process configuration is immutable for compiler execution. Cache the
+    # environment lookup so disabled verification adds no per-pass allocation.
+    if _mir_opt_verify_each_cached >= 0:
+        return _mir_opt_verify_each_cached == 1
+    _mir_opt_verify_each_cached = if (mir_opt_env_get("SIMPLE_MIR_VERIFY_EACH") ?? "") == "1": 1 else: 0
+    _mir_opt_verify_each_cached == 1
+
 fn mir_opt_bootstrap_enabled() -> bool:
     # Gate strictly on the seed-stage2 bootstrap env var. This used to also
     # match any build whose entry file was named bootstrap_main.spl, which
@@ -1535,11 +1545,26 @@ fn pipeline_optimize(pipeline: OptimizationPipeline, module: MirModule) -> MirMo
         if mir_opt_trace_enabled():
             print "[mir-opt] pass:start {pass_name}"
         if pass_name == "pattern_idiom":
-            match ctx.caps_kind:
-                case None_:
-                    optimized_module = run_pattern_idiom_pass_x86(optimized_module, ctx.x86_caps, ctx.cipher_remark)
-                case _:
-                    optimized_module = run_pattern_idiom_pass_generic(optimized_module, ctx.caps_kind, ctx.cipher_remark)
+            val before_pattern = optimized_module
+            var pattern_input_valid = true
+            if mir_opt_verify_each_enabled():
+                val before_receipt = mir_module_structural_verification_receipt(before_pattern)
+                if not before_receipt.valid:
+                    pattern_input_valid = false
+                    if mir_opt_trace_enabled():
+                        print "[mir-opt] verifier:reject {pass_name} {before_receipt.error_codes.join(",")}"
+            if pattern_input_valid:
+                match ctx.caps_kind:
+                    case None_:
+                        optimized_module = run_pattern_idiom_pass_x86(optimized_module, ctx.x86_caps, ctx.cipher_remark)
+                    case _:
+                        optimized_module = run_pattern_idiom_pass_generic(optimized_module, ctx.caps_kind, ctx.cipher_remark)
+                if mir_opt_verify_each_enabled():
+                    val after_receipt = mir_module_structural_verification_receipt(optimized_module)
+                    if not after_receipt.valid:
+                        if mir_opt_trace_enabled():
+                            print "[mir-opt] verifier:reject {pass_name} {after_receipt.error_codes.join(",")}"
+                        optimized_module = before_pattern
         elif pass_name == "target_narrow_form":
             optimized_module = run_narrow_form_pass(optimized_module, ctx.caps_kind)
         else:
@@ -1561,7 +1586,51 @@ fn run_pass_on_module(pass_name: text, module: MirModule) -> MirModule:
         return module
     if not pass_status_allows_transform(descriptor.unwrap().status):
         return module
+    if mir_opt_verify_each_enabled():
+        val checked = run_pass_on_module_checked(pass_name, module)
+        match checked:
+            case Ok(updated): return updated
+            case Err(message):
+                if mir_opt_trace_enabled():
+                    print "[mir-opt] verifier:reject {pass_name} {message}"
+                return module
     run_typed_pass_on_module(descriptor.unwrap().kind, module)
+
+fn run_pass_on_module_checked(
+    pass_name: text, module: MirModule
+) -> Result<MirModule, text>:
+    """Fail-closed module boundary used by verify-each and focused tests."""
+    val before = mir_module_structural_verification_receipt(module)
+    if not before.valid:
+        return Err(
+            "invalid MIR module before pass " + pass_name + " [" +
+            before.error_codes.join(",") + "]: " + before.errors.join("; "))
+    val descriptor = mir_pass_descriptor_for_name(pass_name)
+    if not descriptor.?: return Ok(module)
+    val found = descriptor.unwrap()
+    if not pass_status_allows_transform(found.status): return Ok(module)
+
+    var updated = module
+    match found.scope:
+        case Function | FsDriver:
+            var symbol_ids: [i64] = []
+            for symbol in module.functions.keys(): symbol_ids.push(symbol.id)
+            symbol_ids.sort()
+            for symbol_id in symbol_ids:
+                val symbol = SymbolId(id: symbol_id)
+                val outcome = run_named_pass_with_record(
+                    found.stable_name, updated.functions[symbol])
+                if outcome.is_err(): return Err(outcome.err().unwrap())
+                updated.functions[symbol] = outcome.ok().unwrap().function
+        case Module:
+            updated = run_typed_pass_on_module(found.kind, module)
+
+    val after = mir_module_structural_verification_receipt(updated)
+    if not after.valid:
+        return Err(
+            "invalid MIR module after pass " + found.stable_name + " [" +
+            after.error_codes.join(",") + "]: " + after.errors.join("; "))
+    Ok(updated)
 
 fn run_typed_pass_on_module(kind: PassKind, module: MirModule) -> MirModule:
     """Typed module-level pass runner.  Dispatches on PassKind, not strings."""
@@ -1700,6 +1769,7 @@ export MirStructuralVerificationReceipt, MirModuleStructuralVerificationReceipt
 export PassFunctionOutcome
 export mir_structural_verification_error_code
 export mir_module_structural_verification_receipt
+export mir_opt_verify_each_enabled, run_pass_on_module_checked
 export pass_run_record_new, pass_run_record_add_reason, pass_run_record_integrity_errors
 export pass_run_record_for_unavailable_request
 export mir_structural_verification_receipt, run_named_pass_with_record
