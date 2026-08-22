@@ -1823,3 +1823,15 @@ classified once per line and compared with each lambda position in constant time
 rather than rescanning from byte zero for every candidate. Individual candidate
 parsers retain their syntax-dependent costs, so this does not claim an
 end-to-end linear rewrite rule for every adversarial expression shape.
+
+### Fail-fast dense liveness storage
+
+PerfFacts formerly allocated both dense live-in/live-out matrices before checking
+whether CFG and def-use inputs were complete. It also retained dense per-block
+USE/DEF matrices after liveness had failed closed. Invalid MIR could therefore
+retain four `blocks * locals` boolean matrices despite authorizing no liveness
+query. The liveness builder now rejects incomplete inputs before allocating its
+two output matrices. Duplicate-local incompleteness prevents all four matrices;
+later CFG/instruction incompleteness allocates only the USE/DEF working pair and
+releases it before returning facts. Complete-input semantics and the four-million
+cell budget are unchanged.
