@@ -2096,3 +2096,22 @@ uppercase ASCII `E` and ASCII digits only, and leaves the higher-priority
 bracketed `[E...]` extraction untouched. Valid prefixes drop from seven slices
 to one; non-`E` prefixes drop from one slice to zero; malformed leading-`E`
 prefixes retain one bounded slice to cap scan cost.
+
+### Shared query function-outline index
+
+Inlay hints previously split the same source three times and maintained two
+parallel-array function indexes. Each call-site lookup then scanned all known
+functions, making the active path `O(source + call_sites * functions)` and
+retaining duplicate line/name/return/parameter arrays. A second 304-line inlay
+implementation also duplicated the scanner and could drift from production.
+
+The canonical path now consumes its existing line array once, builds return and
+parameter dictionaries in one outline pass, and performs expected `O(1)`
+lookups. It preserves the legacy asymmetric overload rules: parameter names
+come from the first declaration even when empty, while return types come from
+the first nonempty annotation. The old module is a compatibility re-export of
+the production owner. Parameter text is still split at each matched call site;
+interning parsed parameter vectors is a later, profile-gated optimization.
+Execution timing/RSS evidence is intentionally absent under the requested
+no-verify policy; the claim is limited to static complexity and allocation
+removal.
