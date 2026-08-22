@@ -51,8 +51,8 @@ execution.
 1. Extend the exact `PassOutcome` adapter contract to active module passes and future
    rehabilitated passes without discarding native statistics.
 2. Extend actual adapter results with stable rejected-reason codes and injected timing.
-3. Extend the structural receipt beyond deployed operand/local, ABI-local type validity,
-   and SSA dominance into opcode type rules, ownership, and loop boundaries. Keep those
+3. Extend partial opcode typing beyond constants, copies/moves, and casts/bitcasts; then
+   add ownership and loop-boundary proof. Keep those
    scans opt-in through the cached verify-each gate.
 4. Reject transformed records without candidates, impossible instruction counts,
    missing verifier receipts, or missing active witness contracts.
