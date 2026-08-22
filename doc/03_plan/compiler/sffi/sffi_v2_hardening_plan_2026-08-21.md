@@ -1284,3 +1284,11 @@ untouched, and zero signed/admitted. Next prioritize `rt_file` (2,604 untouched)
 `rt_process` (970), `rt_env` (459), and `rt_time` (354), while preserving the
 one-call/no-lookup/no-unbounded-allocation rule. The repaired census must keep
 file-output mode and must never read `/dev/stdout` as an input.
+
+`driver_public_shared.spl` is now call-authority complete without changing its
+ordered file-probe or process-call cardinality. Keep its 27 direct lexical calls
+and failure-sentinel initialization; do not replace the constant ordered binary
+probes with an allocated candidate table on this startup path. The next bounded
+`rt_file` owners are compiler cache stamp/lease/GC modules; prefer owners whose
+nullable reads and write/delete statuses can be preserved without fabricating
+empty data or adding a second provider call.

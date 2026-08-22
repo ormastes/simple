@@ -2132,3 +2132,21 @@ blocking on `cat /dev/stdout`: 12,053 declaration rows are still unsafe, 365
 are minimized, 10,954 are untouched, and zero are evidence-verified, signature-
 verified, or admitted. Implementation definitions are Simple 558, Rust 2,161,
 C 2,321, and C++ 219. These are definition counts, not safety claims.
+
+## Shared-library driver authority
+
+All 27 live runtime calls in `driver_public_shared.spl` now have minimal lexical
+FFI authority and all eight declarations state their raw sentinel/error
+contracts. The unused `rt_getpid` declaration is removed. Shared-library build
+paths keep one source read, one wrapper write, one child process, one best-effort
+delete, and one success output probe. Binary discovery keeps the same ordered,
+short-circuiting probes and introduces no candidate collection or lookup table.
+
+The focused authority and pure guard/output behavior spec passes 4/4 in 4.77 s
+at 174,332 KiB peak RSS under the seed. Optimizer analysis reports the existing
+12 general loop/preallocation findings and no new dispatch class. Lint reports
+zero raw-runtime errors but remains red on three pre-existing public primitive-
+API findings. The call census remains 21,329 raw and moves 27 calls from missing
+to lexical: 2,005 explicit and 19,324 missing. Declaration rows fall to 12,052;
+842 are tagged, 368 are minimized, 10,945 are untouched, and zero are signed or
+admitted.

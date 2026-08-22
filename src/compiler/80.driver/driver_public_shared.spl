@@ -1,14 +1,21 @@
 use compiler.common.driver_core_types.{CompileResult}
 
+@unsafe(reason: "raw child process capture; status and text fields carry provider and tool failure", capabilities: [ffi])
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+@unsafe(reason: "raw file probe; false includes absent, inaccessible, or provider failure", capabilities: [ffi])
 extern fn rt_file_exists(path: text) -> bool
+@unsafe(reason: "raw path resolution; empty text is the invalid path or provider-failure sentinel", capabilities: [ffi])
 extern fn rt_path_absolute(path: text) -> text
+@unsafe(reason: "raw source read; empty text is valid data and also the unreadable or provider-failure sentinel", capabilities: [ffi])
 extern fn rt_file_read_text(path: text) -> text
+@unsafe(reason: "raw file write status; false means the provider did not complete the write", capabilities: [ffi])
 extern fn rt_file_write_text(path: text, content: text) -> bool
+@unsafe(reason: "raw file delete status; false includes absent, inaccessible, or provider failure", capabilities: [ffi])
 extern fn rt_file_delete(path: text) -> bool
+@unsafe(reason: "raw environment lookup; empty text is the unset or provider-failure sentinel", capabilities: [ffi])
 extern fn rt_env_get(name: text) -> text
+@unsafe(reason: "raw environment mutation status; false means the provider did not complete the update", capabilities: [ffi])
 extern fn rt_env_set(name: text, value: text) -> bool
-extern fn rt_getpid() -> i64
 
 struct SharedParam:
     name: text
@@ -35,7 +42,9 @@ struct SharedExports:
     error: text
 
 pub fn aot_shared_library(path: text, output: text) -> CompileResult:
-    val source = rt_file_read_text(path) ?? ""
+    var source = ""
+    unsafe(capabilities: [ffi]):
+        source = rt_file_read_text(path) ?? ""
     if source.trim() == "":
         return CompileResult.RuntimeError("failed to read source file: {path}")
 
@@ -63,25 +72,35 @@ fn _build_wrapped_shared_library(path: text, output: text, parsed: SharedExports
 
     val wrapper_cpp = output + ".public_wrapper.cpp"
     val wrapper_source = _emit_wrapper_cpp(parsed)
-    if not rt_file_write_text(wrapper_cpp, wrapper_source):
+    var wrapper_written = false
+    unsafe(capabilities: [ffi]):
+        wrapper_written = rt_file_write_text(wrapper_cpp, wrapper_source)
+    if not wrapper_written:
         return CompileResult.RuntimeError("failed to write wrapper source: {wrapper_cpp}")
 
-    val (stdout, stderr, exit_code) = rt_process_run("c++", [
-        "-std=c++14",
-        "-fPIC",
-        "-shared",
-        "-s",
-        wrapper_cpp,
-        "-L" + parent,
-        "-l:" + core_name,
-        "-Wl,-rpath,$ORIGIN",
-        "-o", output
-    ])
-    rt_file_delete(wrapper_cpp)
+    var stdout = ""
+    var stderr = ""
+    var exit_code: i64 = -1
+    unsafe(capabilities: [ffi]):
+        (stdout, stderr, exit_code) = rt_process_run("c++", [
+            "-std=c++14",
+            "-fPIC",
+            "-shared",
+            "-s",
+            wrapper_cpp,
+            "-L" + parent,
+            "-l:" + core_name,
+            "-Wl,-rpath,$ORIGIN",
+            "-o", output
+        ])
+    unsafe(capabilities: [ffi]):
+        rt_file_delete(wrapper_cpp)
 
     val combined = clean_child_output(stdout, stderr)
-    if exit_code == 0 and rt_file_exists(output):
-        return CompileResult.Success(combined)
+    if exit_code == 0:
+        unsafe(capabilities: [ffi]):
+            if rt_file_exists(output):
+                return CompileResult.Success(combined)
     if exit_code == 0:
         return CompileResult.RuntimeError("wrapper shared library build reported success but did not create output: {output}")
     CompileResult.RuntimeError(combined)
@@ -92,10 +111,16 @@ fn _build_native_shared_library(path: text, output: text) -> CompileResult:
     if guard_error != "":
         return CompileResult.RuntimeError(guard_error)
     mark_compile_delegated()
-    val (stdout, stderr, exit_code) = rt_process_run(simple_bin, ["compile", path, "--native", "--shared", "--strip", "-o", output])
+    var stdout = ""
+    var stderr = ""
+    var exit_code: i64 = -1
+    unsafe(capabilities: [ffi]):
+        (stdout, stderr, exit_code) = rt_process_run(simple_bin, ["compile", path, "--native", "--shared", "--strip", "-o", output])
     val combined = clean_child_output(stdout, stderr)
-    if exit_code == 0 and rt_file_exists(output):
-        return CompileResult.Success(combined)
+    if exit_code == 0:
+        unsafe(capabilities: [ffi]):
+            if rt_file_exists(output):
+                return CompileResult.Success(combined)
     if exit_code == 0:
         return CompileResult.RuntimeError("shared library build reported success but did not create output: {output}")
     CompileResult.RuntimeError(combined)
@@ -541,39 +566,57 @@ fn _basename_without_so(name: text) -> text:
     name
 
 pub fn find_simple_binary() -> text:
-    val env_bin = rt_env_get("SIMPLE_BINARY") ?? ""
+    var env_bin = ""
+    unsafe(capabilities: [ffi]):
+        env_bin = rt_env_get("SIMPLE_BINARY") ?? ""
     if env_bin != "":
         return env_bin
-    if rt_file_exists("bin/release/simple"):
-        return "bin/release/simple"
-    if rt_file_exists("bin/simple"):
-        return "bin/simple"
-    if rt_file_exists("src/compiler_rust/target/release/simple"):
-        return "src/compiler_rust/target/release/simple"
-    if rt_file_exists("src/compiler_rust/target/bootstrap/simple"):
-        return "src/compiler_rust/target/bootstrap/simple"
-    val os_env = rt_env_get("OS") ?? ""
+    unsafe(capabilities: [ffi]):
+        if rt_file_exists("bin/release/simple"):
+            return "bin/release/simple"
+    unsafe(capabilities: [ffi]):
+        if rt_file_exists("bin/simple"):
+            return "bin/simple"
+    unsafe(capabilities: [ffi]):
+        if rt_file_exists("src/compiler_rust/target/release/simple"):
+            return "src/compiler_rust/target/release/simple"
+    unsafe(capabilities: [ffi]):
+        if rt_file_exists("src/compiler_rust/target/bootstrap/simple"):
+            return "src/compiler_rust/target/bootstrap/simple"
+    var os_env = ""
+    unsafe(capabilities: [ffi]):
+        os_env = rt_env_get("OS") ?? ""
     if os_env.contains("Windows"):
-        if rt_file_exists("src/compiler_rust/target/release/simple.exe"):
-            return "src/compiler_rust/target/release/simple.exe"
-        if rt_file_exists("src/compiler_rust/target/bootstrap/simple.exe"):
-            return "src/compiler_rust/target/bootstrap/simple.exe"
-        if rt_file_exists("bin/simple.exe"):
-            return "bin/simple.exe"
-        if rt_file_exists("bin/release/x86_64-pc-windows-msvc/simple.exe"):
-            return "bin/release/x86_64-pc-windows-msvc/simple.exe"
-        if rt_file_exists("bin/release/x86_64-pc-windows-gnu/simple.exe"):
-            return "bin/release/x86_64-pc-windows-gnu/simple.exe"
-    if rt_file_exists("bin/release/aarch64-apple-darwin-macho/simple"):
-        return "bin/release/aarch64-apple-darwin-macho/simple"
-    if rt_file_exists("bin/release/macos-arm64/simple"):
-        return "bin/release/macos-arm64/simple"
-    if rt_file_exists("bin/release/darwin-aarch64/simple"):
-        return "bin/release/darwin-aarch64/simple"
-    if rt_file_exists("bin/release/macos-x86_64/simple"):
-        return "bin/release/macos-x86_64/simple"
-    if rt_file_exists("bin/release/linux-x86_64/simple"):
-        return "bin/release/linux-x86_64/simple"
+        unsafe(capabilities: [ffi]):
+            if rt_file_exists("src/compiler_rust/target/release/simple.exe"):
+                return "src/compiler_rust/target/release/simple.exe"
+        unsafe(capabilities: [ffi]):
+            if rt_file_exists("src/compiler_rust/target/bootstrap/simple.exe"):
+                return "src/compiler_rust/target/bootstrap/simple.exe"
+        unsafe(capabilities: [ffi]):
+            if rt_file_exists("bin/simple.exe"):
+                return "bin/simple.exe"
+        unsafe(capabilities: [ffi]):
+            if rt_file_exists("bin/release/x86_64-pc-windows-msvc/simple.exe"):
+                return "bin/release/x86_64-pc-windows-msvc/simple.exe"
+        unsafe(capabilities: [ffi]):
+            if rt_file_exists("bin/release/x86_64-pc-windows-gnu/simple.exe"):
+                return "bin/release/x86_64-pc-windows-gnu/simple.exe"
+    unsafe(capabilities: [ffi]):
+        if rt_file_exists("bin/release/aarch64-apple-darwin-macho/simple"):
+            return "bin/release/aarch64-apple-darwin-macho/simple"
+    unsafe(capabilities: [ffi]):
+        if rt_file_exists("bin/release/macos-arm64/simple"):
+            return "bin/release/macos-arm64/simple"
+    unsafe(capabilities: [ffi]):
+        if rt_file_exists("bin/release/darwin-aarch64/simple"):
+            return "bin/release/darwin-aarch64/simple"
+    unsafe(capabilities: [ffi]):
+        if rt_file_exists("bin/release/macos-x86_64/simple"):
+            return "bin/release/macos-x86_64/simple"
+    unsafe(capabilities: [ffi]):
+        if rt_file_exists("bin/release/linux-x86_64/simple"):
+            return "bin/release/linux-x86_64/simple"
     "bin/simple"
 
 # --- Compile delegation loop guard -----------------------------------------
@@ -631,7 +674,9 @@ pub fn compile_delegation_guard_decision(op_desc: text, marker: text, resolved_b
     ""
 
 fn _current_exe_path_for_guard() -> text:
-    val os_env = rt_env_get("OS") ?? ""
+    var os_env = ""
+    unsafe(capabilities: [ffi]):
+        os_env = rt_env_get("OS") ?? ""
     if os_env.contains("Windows"):
         return ""
     # Canonicalize IN-PROCESS (std::fs::canonicalize). Never shell out: a
@@ -639,7 +684,9 @@ fn _current_exe_path_for_guard() -> text:
     # how `readlink -f /proc/self/exe` returned /usr/bin/readlink and turned
     # this guard into a fork bomb (2026-07-25). "" means identity unknown, and
     # this guard refuses delegation on unknown identity.
-    val self_path = rt_path_absolute("/proc/self/exe") ?? ""
+    var self_path = ""
+    unsafe(capabilities: [ffi]):
+        self_path = rt_path_absolute("/proc/self/exe") ?? ""
     if self_path.len() > 0 and self_path != "/proc/self/exe":
         return self_path
     ""
@@ -647,14 +694,17 @@ fn _current_exe_path_for_guard() -> text:
 # Returns "" when the spawn is safe, or an error message when it must be
 # refused. Call before every `rt_process_run(simple_bin, ...)` delegation.
 pub fn check_compile_delegation_guard(op_desc: text, resolved_bin: text) -> text:
-    val marker = rt_env_get("SIMPLE_COMPILE_DELEGATED") ?? ""
+    var marker = ""
+    unsafe(capabilities: [ffi]):
+        marker = rt_env_get("SIMPLE_COMPILE_DELEGATED") ?? ""
     val current_exe = _current_exe_path_for_guard()
     compile_delegation_guard_decision(op_desc, marker, resolved_bin, current_exe)
 
 # Call right before every legitimate external-compile spawn so a re-entrant
 # child refuses to delegate again instead of forking without bound.
 pub fn mark_compile_delegated() -> bool:
-    rt_env_set("SIMPLE_COMPILE_DELEGATED", "1")
+    unsafe(capabilities: [ffi]):
+        rt_env_set("SIMPLE_COMPILE_DELEGATED", "1")
 
 pub fn clean_child_output(stdout: text, stderr: text) -> text:
     val combined = if stderr.trim() != "":

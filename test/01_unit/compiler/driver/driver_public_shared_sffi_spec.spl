@@ -1,0 +1,38 @@
+"""
+## Purpose and audience
+Purpose: Prove the shared-library driver keeps raw runtime calls lexically scoped.
+Audience: compiler driver and SFFI maintainers.
+"""
+
+use std.spec.{describe, it, expect, expect_not}
+use std.io_runtime.{file_read}
+use compiler.driver.driver_public_shared.{
+    compile_delegation_guard_decision, clean_child_output}
+
+describe "shared-library driver SFFI authority":
+    """Checks source authority plus pure delegation/output behavior."""
+    it "keeps every live raw call under one minimal lexical scope":
+        val source = file_read("src/compiler/80.driver/driver_public_shared.spl")
+        val scopes = source.split("unsafe(capabilities: [ffi]):").len() - 1
+        val declarations = source.split("extern fn rt_").len() - 1
+        expect(scopes).to_equal(27)
+        expect(declarations).to_equal(8)
+        expect_not(source.contains("extern fn rt_getpid("))
+        expect_not(source.contains("exit_code == 0 and rt_file_exists("))
+
+    it "documents ambiguous scalar, text, tuple, and status contracts":
+        val source = file_read("src/compiler/80.driver/driver_public_shared.spl")
+        expect(source).to_contain("raw child process capture")
+        expect(source).to_contain("raw file probe")
+        expect(source).to_contain("raw source read")
+        expect(source).to_contain("raw environment lookup")
+        expect(source).to_contain("raw environment mutation status")
+
+    it "still refuses an already delegated compile":
+        val error = compile_delegation_guard_decision(
+            "shared library build", "1", "/tmp/simple", "/other/simple")
+        expect(error).to_contain("shared library build")
+
+    it "preserves child stdout and nonempty stderr ordering":
+        expect(clean_child_output("out", "err")).to_equal("out\nerr")
+        expect(clean_child_output("out", "")).to_equal("out")
