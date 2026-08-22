@@ -1,0 +1,92 @@
+# @feature mcdc_hal_runtime_hardening
+# @req REQ-011 REQ-013 REQ-014
+
+use std.spec.*
+use std.common.structural.hal_provider.*
+
+fn capacity() -> HalCapacityV1:
+    hal_capacity_v1(64, 64, 8, 512, 4, 512, 512, 100)
+
+fn operation(preferred: HalProviderKind) -> HalOperationV1:
+    hal_operation_v1_default_critical(101, 7, 0, 11, 12,
+        HalSideEffectPolicy.PlanThenCommit, capacity(), 13, 14, preferred)
+
+fn request() -> HalProviderRequestV1:
+    hal_provider_request_v1(101, 7, 9, 0, 32, 64, 8)
+
+fn lane(provider: HalProviderKind, digest: i64,
+        present: bool = true, reaped: bool = true) -> HalProviderLaneV1:
+    val ordinal = hal_provider_kind_to_i64(provider)
+    val isolation = hal_isolation_receipt_v1(
+        provider, 7, 100 + ordinal, 200 + ordinal, 0, 0, 0, true, true)
+    val result = hal_provider_result_v1(
+        provider, 7, HalStatusV1.Ok, 0, digest, 20, 30, 40,
+        32, 64, 8, 8, HalOverflowKindV1.None, -1, 0, 5)
+    hal_provider_lane_v1(
+        provider, present, true, reaped, true, isolation, result)
+
+describe "rt(hal) fixed-slot provider orchestration":
+    it "compares equivalent isolated lanes and selects one parent commit":
+        val receipt = hal_orchestrate_provider_receipts_v1(
+            operation(HalProviderKind.PureSimple), request(),
+            HalRunMode.AlphaCompare,
+            lane(HalProviderKind.PureSimple, 10),
+            lane(HalProviderKind.C, 10), lane(HalProviderKind.Rust, 10))
+        expect(receipt.status).to_equal(HalOrchestrationStatusV1.CommitReady)
+        expect(receipt.received_mask).to_equal(7)
+        expect(receipt.admitted_mask).to_equal(7)
+        expect(receipt.difference_pair_mask).to_equal(0)
+        expect(receipt.commit_allowed).to_be(true)
+        expect(receipt.selected_provider).to_equal(HalProviderKind.PureSimple)
+
+    it "reports pair differences in deterministic Pure-C-Rust bits":
+        val receipt = hal_orchestrate_provider_receipts_v1(
+            operation(HalProviderKind.PureSimple), request(),
+            HalRunMode.AlphaCompare,
+            lane(HalProviderKind.PureSimple, 10),
+            lane(HalProviderKind.C, 11), lane(HalProviderKind.Rust, 12))
+        expect(receipt.status).to_equal(HalOrchestrationStatusV1.Diverged)
+        expect(receipt.difference_pair_mask).to_equal(7)
+        expect(receipt.commit_allowed).to_be(false)
+        expect(receipt.selected_provider_valid).to_be(false)
+
+    it "allows beta preferred commit while preserving divergence evidence":
+        val receipt = hal_orchestrate_provider_receipts_v1(
+            operation(HalProviderKind.C), request(), HalRunMode.BetaCompare,
+            lane(HalProviderKind.PureSimple, 10),
+            lane(HalProviderKind.C, 11), lane(HalProviderKind.Rust, 10))
+        expect(receipt.status).to_equal(HalOrchestrationStatusV1.CommitReady)
+        expect(receipt.difference_pair_mask).to_equal(5)
+        expect(receipt.commit_allowed).to_be(true)
+        expect(receipt.selected_provider).to_equal(HalProviderKind.C)
+
+    it "normal mode admits only the preferred terminal reaped lane":
+        val receipt = hal_orchestrate_provider_receipts_v1(
+            operation(HalProviderKind.Rust), request(),
+            HalRunMode.NormalPreferred,
+            lane(HalProviderKind.PureSimple, 0, false),
+            lane(HalProviderKind.C, 0, false), lane(HalProviderKind.Rust, 10))
+        expect(receipt.expected_mask).to_equal(4)
+        expect(receipt.received_mask).to_equal(4)
+        expect(receipt.commit_allowed).to_be(true)
+
+    it "rejects an unreaped lane before comparison or commit":
+        val receipt = hal_orchestrate_provider_receipts_v1(
+            operation(HalProviderKind.PureSimple), request(),
+            HalRunMode.AlphaCompare,
+            lane(HalProviderKind.PureSimple, 10),
+            lane(HalProviderKind.C, 10, true, false),
+            lane(HalProviderKind.Rust, 10))
+        expect(receipt.status).to_equal(HalOrchestrationStatusV1.InvalidReceipt)
+        expect(receipt.rejected_mask).to_equal(2)
+        expect(receipt.commit_allowed).to_be(false)
+
+    it "rejects a provider receipt placed in another provider slot":
+        val receipt = hal_orchestrate_provider_receipts_v1(
+            operation(HalProviderKind.PureSimple), request(),
+            HalRunMode.AlphaCompare,
+            lane(HalProviderKind.C, 10), lane(HalProviderKind.C, 10),
+            lane(HalProviderKind.Rust, 10))
+        expect(receipt.status).to_equal(HalOrchestrationStatusV1.InvalidReceipt)
+        expect(receipt.rejected_mask).to_equal(1)
+        expect(receipt.commit_allowed).to_be(false)

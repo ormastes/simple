@@ -1,0 +1,158 @@
+# codex-impl
+# Fixed-slot parent orchestration for isolated rt(hal) provider receipts.
+
+use std.common.structural.hal_provider.contracts.*
+use std.common.structural.hal_provider.execution.*
+
+val HAL_DIFFERENCE_PURE_C: i64 = 1
+val HAL_DIFFERENCE_PURE_RUST: i64 = 2
+val HAL_DIFFERENCE_C_RUST: i64 = 4
+
+enum HalOrchestrationStatusV1:
+    CommitReady
+    Incomplete
+    InvalidReceipt
+    Diverged
+    PreferredFailed
+
+struct HalProviderLaneV1:
+    provider: HalProviderKind
+    present: bool
+    terminal: bool
+    reaped: bool
+    input_consumed: bool
+    isolation: HalIsolationReceiptV1
+    result: HalProviderResultV1
+
+fn hal_provider_lane_v1(provider: HalProviderKind, present: bool,
+                        terminal: bool, reaped: bool, input_consumed: bool,
+                        isolation: HalIsolationReceiptV1,
+                        result: HalProviderResultV1) -> HalProviderLaneV1:
+    HalProviderLaneV1(provider: provider, present: present,
+                      terminal: terminal, reaped: reaped,
+                      input_consumed: input_consumed,
+                      isolation: isolation, result: result)
+
+fn hal_provider_lane_v1_admitted(lane: HalProviderLaneV1,
+                                 operation: HalOperationV1,
+                                 request: HalProviderRequestV1) -> bool:
+    lane.present and lane.terminal and lane.reaped and lane.input_consumed
+        and lane.provider == lane.isolation.provider
+        and lane.provider == lane.result.provider
+        and hal_execution_receipt_admitted(
+            operation, request, lane.isolation, lane.result)
+
+struct HalOrchestrationReceiptV1:
+    status: HalOrchestrationStatusV1
+    expected_mask: i64
+    received_mask: i64
+    admitted_mask: i64
+    rejected_mask: i64
+    difference_pair_mask: i64
+    all_equivalent: bool
+    preferred_result_ok: bool
+    commit_allowed: bool
+    selected_provider: HalProviderKind
+    selected_provider_valid: bool
+
+fn _hal_lane_present_mask(lane: HalProviderLaneV1,
+                          slot_provider: HalProviderKind) -> i64:
+    if lane.present:
+        return hal_provider_kind_mask(slot_provider)
+    0
+
+fn _hal_lane_admitted_mask(lane: HalProviderLaneV1,
+                           slot_provider: HalProviderKind,
+                           operation: HalOperationV1,
+                           request: HalProviderRequestV1) -> i64:
+    if (lane.provider == slot_provider
+            and hal_provider_lane_v1_admitted(lane, operation, request)):
+        return hal_provider_kind_mask(slot_provider)
+    0
+
+fn _hal_expected_pair_difference(a: HalProviderLaneV1,
+                                 b: HalProviderLaneV1,
+                                 expected_mask: i64,
+                                 pair_bit: i64) -> i64:
+    val a_bit = hal_provider_kind_mask(a.provider)
+    val b_bit = hal_provider_kind_mask(b.provider)
+    if (expected_mask & a_bit) == 0 or (expected_mask & b_bit) == 0:
+        return 0
+    if hal_provider_results_equivalent(a.result, b.result):
+        return 0
+    pair_bit
+
+fn _hal_preferred_ok(operation: HalOperationV1,
+                     pure_lane: HalProviderLaneV1,
+                     c_lane: HalProviderLaneV1,
+                     rust_lane: HalProviderLaneV1) -> bool:
+    val preferred = hal_provider_kind_to_i64(operation.preferred_provider)
+    if preferred == hal_provider_kind_to_i64(HalProviderKind.PureSimple):
+        return hal_status_to_i64(pure_lane.result.status) == hal_status_to_i64(HalStatusV1.Ok)
+    if preferred == hal_provider_kind_to_i64(HalProviderKind.C):
+        return hal_status_to_i64(c_lane.result.status) == hal_status_to_i64(HalStatusV1.Ok)
+    hal_status_to_i64(rust_lane.result.status) == hal_status_to_i64(HalStatusV1.Ok)
+
+fn _hal_orchestration_status(contract_valid: bool, complete: bool,
+                             rejected_mask: i64,
+                             all_equivalent: bool, preferred_ok: bool,
+                             may_commit: bool) -> HalOrchestrationStatusV1:
+    if not contract_valid or rejected_mask != 0:
+        return HalOrchestrationStatusV1.InvalidReceipt
+    if not complete:
+        return HalOrchestrationStatusV1.Incomplete
+    if not preferred_ok:
+        return HalOrchestrationStatusV1.PreferredFailed
+    if not all_equivalent and not may_commit:
+        return HalOrchestrationStatusV1.Diverged
+    HalOrchestrationStatusV1.CommitReady
+
+fn hal_orchestrate_provider_receipts_v1(
+        operation: HalOperationV1, request: HalProviderRequestV1,
+        mode: HalRunMode, pure_lane: HalProviderLaneV1,
+        c_lane: HalProviderLaneV1,
+        rust_lane: HalProviderLaneV1) -> HalOrchestrationReceiptV1:
+    val expected = hal_execution_expected_mask(operation, mode)
+    val received = _hal_lane_present_mask(
+        pure_lane, HalProviderKind.PureSimple)
+        | _hal_lane_present_mask(c_lane, HalProviderKind.C)
+        | _hal_lane_present_mask(rust_lane, HalProviderKind.Rust)
+    val admitted = _hal_lane_admitted_mask(
+        pure_lane, HalProviderKind.PureSimple, operation, request)
+        | _hal_lane_admitted_mask(
+            c_lane, HalProviderKind.C, operation, request)
+        | _hal_lane_admitted_mask(
+            rust_lane, HalProviderKind.Rust, operation, request)
+    val rejected = received & ~admitted
+    val contract_valid = (hal_operation_v1_well_formed(operation)
+        and hal_provider_request_v1_well_formed(request)
+        and request.operation_id == operation.operation_id)
+    val complete = (contract_valid
+        and hal_execution_complete(expected, received)
+        and admitted == expected)
+    val differences = _hal_expected_pair_difference(
+        pure_lane, c_lane, expected, HAL_DIFFERENCE_PURE_C)
+        | _hal_expected_pair_difference(
+            pure_lane, rust_lane, expected, HAL_DIFFERENCE_PURE_RUST)
+        | _hal_expected_pair_difference(
+            c_lane, rust_lane, expected, HAL_DIFFERENCE_C_RUST)
+    val equivalent = complete and differences == 0
+    val preferred_ok = complete and _hal_preferred_ok(
+        operation, pure_lane, c_lane, rust_lane)
+    val may_commit = hal_execution_may_commit(
+        mode, complete, equivalent, preferred_ok)
+    val status = _hal_orchestration_status(
+        contract_valid, complete, rejected, equivalent, preferred_ok, may_commit)
+    HalOrchestrationReceiptV1(
+        status: status, expected_mask: expected, received_mask: received,
+        admitted_mask: admitted, rejected_mask: rejected,
+        difference_pair_mask: differences, all_equivalent: equivalent,
+        preferred_result_ok: preferred_ok, commit_allowed: may_commit,
+        selected_provider: operation.preferred_provider,
+        selected_provider_valid: may_commit)
+
+export HAL_DIFFERENCE_PURE_C, HAL_DIFFERENCE_PURE_RUST
+export HAL_DIFFERENCE_C_RUST
+export HalOrchestrationStatusV1, HalProviderLaneV1, HalOrchestrationReceiptV1
+export hal_provider_lane_v1, hal_provider_lane_v1_admitted
+export hal_orchestrate_provider_receipts_v1
