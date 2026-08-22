@@ -640,7 +640,9 @@ consistent with the two OTHER mechanisms identified in follow-up (c):
 Each needs its own lane, its own reproduce spec, and its own measured census —
 not a predicate.
 
-## Follow-up (e) — both generic lanes REVERTED after run15 (2026-08-22)
+## Follow-up (f) — both generic lanes REVERTED after run15 (2026-08-22)
+
+(Renumbered (e) -> (f) on re-land: two sections had independently been labelled (e).)
 
 Follow-ups (d)'s two fixes, `d481f15e1ac` (generic arguments) and
 `86787968989` (generic callables + the `Function` arm), were **reverted**. On a
@@ -668,3 +670,85 @@ measured stage-1 census.
 Full measurement, the failing-name census, and the honest limits (no unit
 fixture reproduces it; per-commit attribution is static, not differential) are
 in `hir_generic_projection_regression_run15_2026-08-22.md`.
+
+## Follow-up (g) — generic-callable lane RE-LANDED ALONE for isolated measurement (2026-08-22)
+
+`ec13c319250` reverted **two** lanes together — the generic-ARGUMENT projection
+(`d481f15e1ac`) and this one, the generic-CALLABLE signature projection
+(`86787968989`). That was a static attribution, not a differential one: at the
+time there was no oracle short of a full stage-1 build, so both suspects went
+out together. This section records that this lane was **reverted on suspicion,
+not on evidence**, and is being re-landed ALONE so a run17 can measure it in
+isolation.
+
+### Counter-evidence that this lane is not the run15 cause
+
+Blast radius of `86787968989` is exactly "callables with `type_params > 0`"
+(plus a `Function` arm reachable only from projection). Occurrences of each NEW
+run15 type name, by the construct that could carry it:
+
+| run15 new name | in a GENERIC callable signature | as a generic ARGUMENT | as `T?` |
+|---|---|---|---|
+| HirContractBlock (472) | **0** | 0 | 6 |
+| SymbolId (339) | **0** | 94 | 61 |
+| ModuleSurfaceExportOrigin (145) | **0** | 2 | 0 |
+| MirFunction (134) | 2 | 27 | 12 |
+| HirType (124) | 1 | 53 | 100 |
+| Span (111) | **0** | 0 | 58 |
+
+The largest new population (HirContractBlock) has **zero** exposure to this
+lane, as do Span and ModuleSurfaceExportOrigin. HirContractBlock's only
+cross-module signature use is NON-generic —
+`70.backend/backend/lean_backend.spl:528`,
+`fn function_contract_from_hir(name: text, contract: HirContractBlock?, param_aliases: [(text, text)]) -> Result<FunctionContract, CompileError>`
+— Optional + array-of-tuple + `Result` with generic ARGS, no type params at all.
+
+Corroborating: a full `test/01_unit/compiler/hir` sweep run in both trees (the
+landed tree, and the same commit with only `86787968989` reverted) produced
+**byte-identical FAIL sets**, 48/48, 0 newly red and 0 newly green; the only
+difference was this lane's own spec, which passes. A synthetic A/B on the exact
+`function_contract_from_hir` shape plus bare `T?`, `Result<A, B>` and
+`Dict<text, T>` measured 0 errors on both sides, so the shape does not
+reproduce in isolation and real-module context is required.
+
+**Stated limit, not papered over:** none of this reproduces the regression, so
+it is "no exposure and no spec-level effect", NOT an exoneration. Run17 is the
+oracle. If fatals explode again with this lane alone on the tree, it is this
+lane's and it reverts with evidence.
+
+**And the sweep evidence above is WEAKER than it looks** — recorded here rather
+than left to flatter this lane. The bisect lane's point stands: the unit specs
+cannot see this population at all (48 of 124 hir specs are red on BOTH sides,
+and that lane's purpose-built facade-hop fixture is green on both), so a
+byte-identical FAIL set is near-uninformative for the run15 question. It rules
+out a spec-level regression and nothing more. The construct census and the
+lean_backend shape are the load-bearing parts of the argument; the sweep is not.
+
+The bisect lane reached the same conclusion independently and by a different
+route (recorded on main at `a50b92999d2`): the victim
+`50.mir/hwir/bit_vector_constant.spl` carries no `use` line at all yet reports
+exactly the four `X?` optional fields that `mir_instruction_graph.spl` imports
+at lines 3-5; the recursed ARGUMENT is looked up in the module the importer
+NAMED — a facade/glob re-exporter — misses (`qtype=4725/3781 miss`), and falls
+to `lower_type` in the importer's scope. That is the generic-argument/Optional
+surface, not this one. Note also that `Option`/`Result`/`Dict` are NOT among
+the 3716 fatals; their ARGUMENTS are.
+
+Why this lane was reverted anyway, which is explicitly not a verdict against
+it: (1) ENTANGLEMENT — `bound_type_params` and the `Function` arm share
+parameter lists and recursion sites with the sibling's argument projection, so
+reverting `d481f15e1ac` alone does not apply cleanly while this lane is
+present; (2) the unit specs cannot discriminate, per the paragraph above;
+(3) the only discriminating oracle is a stage-1 census. Re-land condition,
+agreed by both lanes and the coordinator: a measured stage-1 `[hir-fatal]`
+census at or below 48 fatals / 9 poisoned.
+
+### What this re-land contains
+
+Only `86787968989` + its two doc commits, cherry-picked onto the post-revert
+tree. Verified to NOT drag in `d481f15e1ac`: the generic-ARGUMENT method
+`imported_surface_projected_named_args` and both of its call sites appear **0
+times** in the re-landed `module_callable_types.spl` (they arrived as
+cherry-pick conflicts, from this lane's earlier rebase onto that sibling, and
+were resolved OUT). The parity gate and spec that `ec13c319250` removed with
+the sibling lane are likewise NOT restored here — they belong to that lane.
