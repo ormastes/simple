@@ -32,6 +32,15 @@ struct DefUseChain:
     defs: [i64]        # Instruction indices that define this local
     uses: [i64]        # Instruction indices that use this local
 
+struct LocalUseCollector:
+    locals: [LocalId]
+
+impl LocalUseCollector:
+    me operand(value: MirOperand):
+        match value.kind:
+            case Copy(local) | Move(local): self.locals.push(local)
+            case Const(_, _): pass_dn
+
 struct DependencyAnalysisResult:
     """Result of dependency analysis."""
     vectorizable: bool
@@ -153,54 +162,54 @@ fn get_inst_def(inst: MirInst) -> LocalId?:
 
 fn get_inst_uses(inst: MirInst) -> [LocalId]:
     """Get all locals that this instruction uses."""
-    var uses: [LocalId] = []
+    var collector = LocalUseCollector([])
 
     match inst.kind:
         case Copy(_, src):
-            uses.push(src)
+            collector.locals.push(src)
         case Move(_, src):
-            uses.push(src)
+            collector.locals.push(src)
         case BinOp(_, _, left, right):
-            uses = uses + (get_operand_locals(left))
-            uses = uses + (get_operand_locals(right))
+            collector.operand(left)
+            collector.operand(right)
         case UnaryOp(_, _, operand):
-            uses = uses + (get_operand_locals(operand))
+            collector.operand(operand)
         case CheckedBinOp(_, _, left, right):
-            uses = uses + (get_operand_locals(left))
-            uses = uses + (get_operand_locals(right))
+            collector.operand(left)
+            collector.operand(right)
         case Load(_, ptr):
-            uses = uses + (get_operand_locals(ptr))
+            collector.operand(ptr)
         case Store(ptr, value):
-            uses = uses + (get_operand_locals(ptr))
-            uses = uses + (get_operand_locals(value))
+            collector.operand(ptr)
+            collector.operand(value)
         case GetElementPtr(_, base, indices):
-            uses = uses + (get_operand_locals(base))
+            collector.operand(base)
             for idx in indices:
-                uses = uses + (get_operand_locals(idx))
+                collector.operand(idx)
         case Aggregate(_, _, operands):
             for op in operands:
-                uses = uses + (get_operand_locals(op))
+                collector.operand(op)
         case GetField(_, base, _):
-            uses = uses + (get_operand_locals(base))
+            collector.operand(base)
         case SetField(base, _, value):
-            uses = uses + (get_operand_locals(base))
-            uses = uses + (get_operand_locals(value))
+            collector.operand(base)
+            collector.operand(value)
         case Cast(_, operand, _):
-            uses = uses + (get_operand_locals(operand))
+            collector.operand(operand)
         case Bitcast(_, operand, _):
-            uses = uses + (get_operand_locals(operand))
+            collector.operand(operand)
         case Call(_, func, args):
-            uses = uses + (get_operand_locals(func))
+            collector.operand(func)
             for arg in args:
-                uses = uses + (get_operand_locals(arg))
+                collector.operand(arg)
         case CallIndirect(_, ptr, args, _):
-            uses = uses + (get_operand_locals(ptr))
+            collector.operand(ptr)
             for arg in args:
-                uses = uses + (get_operand_locals(arg))
+                collector.operand(arg)
         case _:
             pass_do_nothing
 
-    uses
+    collector.locals
 
 fn get_operand_locals(op: MirOperand) -> [LocalId]:
     """Extract local ID from operand if it references a local."""
@@ -370,7 +379,8 @@ fn analyze_loop_dependencies(loop_info: VectorLoopInfo, body_blocks: [MirBlock])
     var all_accesses: [ArrayAccess] = []
     for block in body_blocks:
         val block_accesses = detect_array_accesses(block)
-        all_accesses = all_accesses + block_accesses
+        for access in block_accesses:
+            all_accesses.push(access)
 
     # Check for aliasing
     val has_aliasing = check_array_aliasing(all_accesses, loop_info.induction_var)
