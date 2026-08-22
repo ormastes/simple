@@ -52,10 +52,13 @@ cannot admit the pure-Simple compiler or this feature.
 Earliest proven boundary: an invalid low-valued pointer reached libc `strlen`
 during the pure-Simple focused compiler operation.  Repetition at the same
 instruction with different low addresses (`0x11`, `0x1b`) establishes a
-deterministic invalid-text-pointer class, but not its owner.  The evidence does
-**not** distinguish parser/HIR text corruption, an extern text-ABI mismatch,
-or an earlier lifetime error.  Assigning the fault to the new streaming writer
-would be speculation because no caller stack exists.
+deterministic invalid-text-pointer class, but not its owner.  Because the
+standalone `check` crashes without executing the test or streaming writer, the
+first shared failing lane is module loading/parsing/HIR/type checking rather
+than MCDP file publication.  The evidence still does **not** distinguish text
+corruption in those compiler stages from an earlier lifetime error.  Assigning
+the fault to an individual source construct is speculation because no caller
+stack or reduced input exists.
 
 No source fix is safe from this evidence alone.  In particular, changing the
 manifest format, reducing its 64 KiB reusable buffer, or weakening atomic
