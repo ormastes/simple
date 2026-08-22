@@ -217,6 +217,12 @@ scope and restores it on every current return. Split conversion modules import
 the dependency-leaf accessor rather than owning process caches. Build policy
 such as `SIMPLE_BOOTSTRAP` is not part of this snapshot.
 
+Parser timing has one parse-owned policy decision. `parser_init_with_path`
+invalidates its tri-state before tokenization, `par_prof_enabled` samples and
+applies trace suppression, and token/declaration probes consume that read-only
+decision. Clock and formatting work remains below the enabled branch. This is a
+parse-lifetime cache, not a process-lifetime configuration singleton.
+
 ## References
 
 - `doc/01_research/local/simple_compiler_performance_memory_efficiency_audit.md`
