@@ -422,3 +422,12 @@ eligible candidates and is released after the line. Functional-update exclusion
 computes the first non-function-type arrow once only when the line has an eligible
 lambda candidate; candidate filtering compares only its numeric position and
 never rescans the line prefix.
+
+## Incomplete liveness storage contract
+
+Dense liveness arrays exist only when their fact family is requested, the cell
+budget is admitted, and prerequisite CFG/def-use facts are complete. The builder
+checks completeness before allocating live-in/live-out. If completeness becomes
+false after USE/DEF collection, the request returns empty USE, DEF, live-in, and
+live-out arrays with `liveness_complete = false`. Consumers must gate on that bit;
+incomplete matrices are never retained as shape-compatible placeholder data.
