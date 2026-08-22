@@ -13,13 +13,51 @@ cocoa=src/os/compositor/hosted_backend_cocoa.spl
 sdl2=src/os/compositor/hosted_backend_sdl2.spl
 sffi_io=src/lib/nogc_sync_mut/sffi/io.spl
 sffi_system=src/lib/nogc_sync_mut/sffi/system.spl
+cuda_args=src/lib/gc_async_mut/gpu/engine2d/backend_cuda_launch_args.spl
+metal_backend=src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl
+opencl_backend=src/lib/gc_async_mut/gpu/engine2d/backend_opencl.spl
+cuda_lane=src/lib/gc_async_mut/gpu_lane/cuda_lane_session.spl
+dom_color=src/lib/gc_async_mut/gpu/browser_engine/dom_color.spl
 
-for owner in "$decl_fn" "$decl_use" "$stmt" "$flat" "$hir" "$cocoa" "$sdl2" "$sffi_io" "$sffi_system"; do
+for owner in "$decl_fn" "$decl_use" "$stmt" "$flat" "$hir" "$cocoa" "$sdl2" "$sffi_io" "$sffi_system" "$cuda_args" "$metal_backend" "$opencl_backend" "$cuda_lane" "$dom_color"; do
     test -f "$owner" || {
         echo "unsafe capability ownership: missing owner $owner" >&2
         exit 1
     }
 done
+
+# GPU raw-pointer leaves observed in the same strict bootstrap inventory use
+# declaration-scoped ownership too.  This remains a bounded five-file scan and
+# prevents the admitted builder from lowering capability names as GlobalLoads.
+for owner in "$cuda_args" "$metal_backend" "$opencl_backend" "$cuda_lane"; do
+    if grep -Fq 'unsafe(capabilities: [ffi, raw_ptr]):' "$owner"; then
+        echo "unsafe capability ownership: bootstrap-incompatible GPU lexical scope in $owner" >&2
+        exit 1
+    fi
+done
+grep -Fq 'fn cuda_launch_args_write_u8(' "$cuda_args" || { echo "unsafe capability ownership: CUDA byte owner missing" >&2; exit 1; }
+grep -Fq 'fn cuda_launch_args_write_i64(' "$cuda_args" || { echo "unsafe capability ownership: CUDA word owner missing" >&2; exit 1; }
+grep -Fq 'fn metal_host_write_i32(' "$metal_backend" || { echo "unsafe capability ownership: Metal word owner missing" >&2; exit 1; }
+grep -Fq 'fn opencl_host_write_u8(' "$opencl_backend" || { echo "unsafe capability ownership: OpenCL byte owner missing" >&2; exit 1; }
+grep -Fq 'fn opencl_host_write_i64(' "$opencl_backend" || { echo "unsafe capability ownership: OpenCL word owner missing" >&2; exit 1; }
+grep -Fq 'fn write_bytes_to_ptr(' "$cuda_lane" || { echo "unsafe capability ownership: CUDA lane byte owner missing" >&2; exit 1; }
+
+# Optional floats must be pattern-unwrapped before comparison/conversion.  A
+# nullable comparison was previously typed as a float immediate comparison by
+# the admitted Cranelift path.  Exact function-body checks avoid a tree scan.
+parse_pct_body=$(sed -n '/^pub fn parse_pct_value/,/^pub fn f32_abs/p' "$dom_color")
+printf '%s\n' "$parse_pct_body" | grep -Fq 'if val n = num_str.parse_f64():' || {
+    echo "unsafe capability ownership: percentage parser does not unwrap suffixed float" >&2
+    exit 1
+}
+printf '%s\n' "$parse_pct_body" | grep -Fq 'if val n = trimmed.parse_f64():' || {
+    echo "unsafe capability ownership: percentage parser does not unwrap scalar float" >&2
+    exit 1
+}
+if printf '%s\n' "$parse_pct_body" | grep -Fq '!= nil'; then
+    echo "unsafe capability ownership: percentage parser retains nullable float comparison" >&2
+    exit 1
+fi
 
 canonical='use compiler.frontend.core.parser_stmts.{parse_block}'
 grep -Fq "$canonical" "$decl_fn" || {
