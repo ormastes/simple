@@ -15,103 +15,61 @@ doc/04_architecture/feature/REQ-FEATURE-UI-DYNAMIC-001.md
 doc/05_design/feature/REQ-FEATURE-UI-DYNAMIC-001.md
 """
 
-
-# @cover src/lib/common/ui/reactive.spl 80%
-# @cover src/lib/common/ui/widget.spl 60%
-"""
-# UI Dynamic Structure Specification
-
-**Feature IDs:** #TBD
-**Category:** Runtime
-**Difficulty:** 3/5
-**Status:** Planned
-
-## Overview
-
-UI Dynamic Structure enables runtime modification of user interface element
-hierarchies, supporting conditional rendering, lists, and dynamic component
-composition. This is fundamental for building reactive user interfaces.
-
-## Syntax
-
-```simple
-if condition:
-    render(ComponentA)
-else:
-    render(ComponentB)
-
-for item in items:
-    render(ListItem(key: item.id, data: item))
-```
-
-## Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| Conditional Rendering | Show/hide elements based on state |
-| List Rendering | Dynamically create elements from collections |
-| Dynamic Components | Runtime component type selection |
-
-## Behavior
-
-- Supports conditional show/hide of UI elements
-- Efficiently renders and updates lists with keys
-- Handles component mounting and unmounting
-- Preserves state across structure changes when appropriate
-"""
-
 import std.spec
 
-
-# ============================================================================
-# Dynamic Structure Basics
-# ============================================================================
-
 use std.spec.step
+use common.ui.widget.{
+    WidgetNode, default_widget_record, upsert_widget_record,
+    register_widget_child, get_widget_child_ids, get_widget_record}
+use common.ui.reactive.{ReactiveUI}
+use common.ui.patch.{PatchKind}
 
 describe "UI Dynamic Structure":
-    """
-    ## Core Dynamic Structure Functionality
-
-    Tests for runtime modification of UI element hierarchies including
-    conditional rendering, list rendering, and dynamic component composition.
-    """
-
-    context "when conditionally rendering", skip:
-        """
-        ### Scenario: Conditional Rendering
-
-        Elements are shown or hidden based on runtime conditions.
-        """
-
-        it "renders element when condition is true":
+    context "when conditionally rendering":
+        it "replaces a panel record with a hidden variant on upsert":
             # @req: REQ-FEATURE-UI-DYNAMIC-001
+            step("Upsert a visible panel then a hidden variant and read it back")
+            upsert_widget_record(default_widget_record("panel", "box"))
+            var hidden_record = default_widget_record("panel", "box")
+            hidden_record.visible = false
+            upsert_widget_record(hidden_record)
+            match get_widget_record("panel"):
+                case None: fail("record missing")
+                case Some(rec): assert_equal(rec.visible, false)
+
+    context "when rendering lists":
+        it "appends keyed list items to a parent without duplicates":
             # @req: REQ-FEATURE-UI-DYNAMIC-001
-            step("Verify: renders element when condition is true")
-            # TODO: Implement conditional rendering
-            pass
+            step("Register the same child twice and count its slots")
+            register_widget_child("list", "item-0")
+            register_widget_child("list", "item-0")
+            assert_equal(get_widget_child_ids("list").len(), 1)
+            register_widget_child("list", "item-2")
+            assert_equal(get_widget_child_ids("list").contains("item-2"), true)
 
-        it "hides element when condition is false":
+        it "keeps keyed list items in registration order":
             # @req: REQ-FEATURE-UI-DYNAMIC-001
-            step("Verify: hides element when condition is false")
-            # TODO: Implement conditional rendering
-            pass
+            step("Read back the parent child list and check its order")
+            val ids = get_widget_child_ids("list")
+            assert_equal(ids.len(), 2)
+            assert_equal(ids[0], "item-0")
+            assert_equal(ids[1], "item-2")
 
-    context "when rendering lists", skip:
-        """
-        ### Scenario: List Rendering
-
-        Dynamically creates UI elements from collection data.
-        """
-
-        it "renders list items from array":
+    context "when replacing structure":
+        it "emits a ReplaceNode patch when the root identity changes":
             # @req: REQ-FEATURE-UI-DYNAMIC-001
-            step("Verify: renders list items from array")
-            # TODO: Implement list rendering
-            pass
+            step("Diff trees with different root ids")
+            upsert_widget_record(default_widget_record("root-a", "box"))
+            upsert_widget_record(default_widget_record("root-b", "box"))
+            val ui = ReactiveUI.new()
+            assert_equal(ui.update(WidgetNode(id: "root-a")).len(), 0)
+            val patches = ui.update(WidgetNode(id: "root-b"))
+            assert_equal(patches.len(), 1)
+            assert_true(patches[0].kind == PatchKind.ReplaceNode)
 
-        it "updates list when items change":
+        it "returns an empty patch list for an identical re-render":
             # @req: REQ-FEATURE-UI-DYNAMIC-001
-            step("Verify: updates list when items change")
-            # TODO: Implement list rendering
-            pass
+            step("Re-diff an unchanged tree")
+            val ui = ReactiveUI.new()
+            assert_equal(ui.update(WidgetNode(id: "root-a")).len(), 0)
+            assert_equal(ui.update(WidgetNode(id: "root-a")).len(), 0)
