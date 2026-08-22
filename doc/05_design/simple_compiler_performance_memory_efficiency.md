@@ -327,3 +327,13 @@ LICM, full/partial unrolling, and combined loop optimization remain identity at 
 ## Generator analysis and rehabilitation contract
 
 `analyze_yields` is an analysis-only storage-order scaffold. It may report conservative named/argument locals but does not prove CFG liveness or frame layout. Generator transformation remains identity until shared def-use/liveness, suspension ownership, frame type/layout/alignment, state ABI, exception/unwind, drop/destruction, reentrancy, debug, and runtime protocol contracts are complete. Rehabilitation uses a dedicated lowering owner and positive runtime witnesses; optimizer class methods never independently invent the coroutine ABI.
+
+## Dead-code-elimination rehabilitation contract
+
+DCE is a zero-change Skeleton at every callable transform surface. Compatibility
+observability queries fail closed and probe classification cannot authorize
+deletion. Activation requires exhaustive opcode def/use and observability facts,
+including traps, ownership/destruction, unwind, volatile/atomic/device behavior
+and debug probes. Liveness must use sparse/worklist storage with bounded CPU and
+memory, expose incompleteness, reuse unchanged MIR storage, and pass activation,
+differential, idempotence and IR-verification gates.
