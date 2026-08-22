@@ -106,3 +106,17 @@ Existing COLL behavior dual-runs during migration and must match ordered code/se
 REQ-001..005: pipeline/sentinel/verifier system and integration specs. REQ-006..009: revision reuse, exact spans, diagnostic compatibility. REQ-010..012: rule matrices and bounded costs. REQ-013..015: fact/invalidation/escape/COW adversarial tests. REQ-016..018: CollectionPlan/fusion/pass differential tests. REQ-019..023: summary/CI/profile/curve/hot-path measurements. REQ-024..025: facade guards, docs, traceability, and admitted pure-Simple provenance.
 
 No UI design artifact is required: all surfaces are compiler CLI/LSP structured text/protocol outputs, covered by text/API/protocol evidence.
+### Checked optimizer execution cost contract
+
+Canonical module dispatch supports a fail-closed checked boundary. With
+`SIMPLE_MIR_VERIFY_EACH` unset, the compiler reads that process setting once and retains
+only an O(1) cached integer comparison per pass. It must not construct receipts, collect
+or sort function identifiers, scan MIR, or allocate diagnostic strings on that path.
+
+With verification enabled, or when `run_pass_on_module_checked` is called explicitly,
+the boundary verifies the module before and after execution. Function-scoped passes sort
+function identifiers for deterministic records and use the exact recorded function-pass
+adapter. Its expected cost is O(F log F + B + I + A), where F is functions, B blocks, I
+instructions, and A modeled operand/CFG accesses; transient memory is O(F + E), where E
+is verifier evidence. This cost is accepted only for focused tests and opt-in compiler
+diagnostics until incremental receipts exist.
