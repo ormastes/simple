@@ -21,6 +21,133 @@ struct StorageLayoutAccessAdvisoryV1:
     independent_field_access: bool
     identity: text
 
+struct StorageLayoutFieldIntervalV1:
+    region_id: i64
+    start: i64
+    end: i64
+    field_id: i64
+
+fn storage_layout_interval_less(
+    left: StorageLayoutFieldIntervalV1,
+    right: StorageLayoutFieldIntervalV1
+) -> bool:
+    if left.region_id != right.region_id:
+        return left.region_id < right.region_id
+    if left.start != right.start:
+        return left.start < right.start
+    if left.end != right.end:
+        return left.end < right.end
+    left.field_id < right.field_id
+
+fn storage_layout_sort_intervals(
+    values: [StorageLayoutFieldIntervalV1]
+) -> [StorageLayoutFieldIntervalV1]:
+    var result = values
+    val count = result.len()
+    if count <= 1:
+        return result
+    var scratch = values
+    var width = 1
+    while width < count:
+        var run_start = 0
+        while run_start < count:
+            var middle = run_start + width
+            if middle > count:
+                middle = count
+            var run_end = middle + width
+            if run_end > count:
+                run_end = count
+            var left = run_start
+            var right = middle
+            var output = run_start
+            while output < run_end:
+                if right < run_end and (left >= middle or
+                    storage_layout_interval_less(result[right], result[left])):
+                    scratch[output] = result[right]
+                    right = right + 1
+                else:
+                    scratch[output] = result[left]
+                    left = left + 1
+                output = output + 1
+            run_start = run_end
+        var copy_index = 0
+        while copy_index < count:
+            result[copy_index] = scratch[copy_index]
+            copy_index = copy_index + 1
+        if width > count / 2:
+            width = count
+        else:
+            width = width * 2
+    result
+
+fn storage_layout_intervals_overlap(
+    left: StorageLayoutFieldIntervalV1,
+    right: StorageLayoutFieldIntervalV1
+) -> bool:
+    left.field_id != right.field_id
+        and left.region_id == right.region_id
+        and left.start < right.end
+        and right.start < left.end
+
+fn storage_layout_has_cross_field_overlap(
+    values: [StorageLayoutFieldIntervalV1]
+) -> bool:
+    val intervals = storage_layout_sort_intervals(values)
+    var region_start = 0
+    while region_start < intervals.len():
+        val region_id = intervals[region_start].region_id
+        var index = region_start
+        var primary_field = 0
+        var primary_end = 0
+        var primary_present = false
+        var secondary_field = 0
+        var secondary_end = 0
+        var secondary_present = false
+        while index < intervals.len() and intervals[index].region_id == region_id:
+            val current = intervals[index]
+            if current.end <= current.start:
+                # The producer emits proper half-open ranges. Preserve the v1
+                # predicate exactly for externally constructed malformed facts.
+                var prior = region_start
+                while prior < index:
+                    if storage_layout_intervals_overlap(intervals[prior], current):
+                        return true
+                    prior = prior + 1
+            elif ((primary_present and primary_field != current.field_id
+                    and primary_end > current.start)
+                or (primary_present and primary_field == current.field_id
+                    and secondary_present and secondary_end > current.start)):
+                return true
+
+            if primary_present and primary_field == current.field_id:
+                if current.end > primary_end:
+                    primary_end = current.end
+            elif secondary_present and secondary_field == current.field_id:
+                if current.end > secondary_end:
+                    secondary_end = current.end
+                if secondary_end > primary_end:
+                    val old_primary_field = primary_field
+                    val old_primary_end = primary_end
+                    primary_field = secondary_field
+                    primary_end = secondary_end
+                    secondary_field = old_primary_field
+                    secondary_end = old_primary_end
+            elif not primary_present or current.end > primary_end:
+                if primary_present:
+                    secondary_field = primary_field
+                    secondary_end = primary_end
+                    secondary_present = true
+                primary_field = current.field_id
+                primary_end = current.end
+                primary_present = true
+            elif not secondary_present or current.end > secondary_end:
+                secondary_field = current.field_id
+                secondary_end = current.end
+                secondary_present = true
+            index = index + 1
+        region_start = index
+    false
+
 fn storage_layout_access_advisory_v1(
     summary: MirStorageAccessSummaryV1,
     logical_type_id: i64, schema_field_count: i64,
@@ -49,22 +176,19 @@ fn storage_layout_access_advisory_v1(
         complete = false
 
     # Fields consumed together from an overlapping logical element range are
-    # co-access, not evidence for physical separation.
-    var left = 0
-    while left < summary.typed_facts.len():
-        val left_fact = summary.typed_facts[left]
-        if left_fact.has_field:
-            var right = left + 1
-            while right < summary.typed_facts.len():
-                val right_fact = summary.typed_facts[right]
-                if right_fact.has_field and left_fact.field_id != right_fact.field_id
-                    and left_fact.path.region_id == right_fact.path.region_id
-                    and left_fact.path.known_range and right_fact.path.known_range
-                    and left_fact.path.start < right_fact.path.end
-                    and right_fact.path.start < left_fact.path.end:
-                    complete = false
-                right = right + 1
-        left = left + 1
+    # co-access, not evidence for physical separation. Invalid evidence already
+    # failed closed above, so allocate interval work only for a viable advisory.
+    if complete:
+        var intervals: [StorageLayoutFieldIntervalV1] = []
+        for fact in summary.typed_facts:
+            if fact.has_field and fact.path.known_range:
+                intervals.push(StorageLayoutFieldIntervalV1(
+                    region_id: fact.path.region_id,
+                    start: fact.path.start,
+                    end: fact.path.end,
+                    field_id: fact.field_id))
+        if storage_layout_has_cross_field_overlap(intervals):
+            complete = false
 
     identity_rows.sort()
 
