@@ -13,11 +13,12 @@ This design implements REQ-001..REQ-025 and NFR-001..NFR-015 as one staged progr
 
 Compiler self-rules include identity/empty active wrapper, missing/unchanged sentinel, invalid contract, dishonest effective listing, duplicate identity, missing run evidence, unenforced required fact, missing verifier receipt, and nondeterministic report order.
 
-The verifier is admitted incrementally by named proof surface. The initial
+The verifier is admitted incrementally by named proof surface. The current
 `MirStructuralVerificationReceipt` proves block/local identity, canonical access coverage,
-declared operand/local membership, signature-consistent ABI locals, entry membership, and CFG target closure only. It must
+declared operand/local membership, signature-consistent ABI locals, entry membership, CFG
+target closure, single-definition SSA shape, and definition-before-use dominance. It must
 never be labeled a general MIR or semantic verifier.
-Later receipts add opcode type rules, SSA dominance, ownership, loop-boundary,
+Later receipts add opcode type rules, ownership, loop-boundary,
 and semantic-differential evidence. A pipeline-wide `--verify-each` claim requires all
 applicable receipts, not merely the structural slice.
 The receipt exposes parallel stable `MIRVnnn` codes and human messages; cardinalities
@@ -120,3 +121,7 @@ adapter. Its expected cost is O(F log F + B + I + A), where F is functions, B bl
 instructions, and A modeled operand/CFG accesses; transient memory is O(F + E), where E
 is verifier evidence. This cost is accepted only for focused tests and opt-in compiler
 diagnostics until incremental receipts exist.
+
+SSA validation requests a verifier-specific `PerfFacts` projection. It retains CFG,
+def-use buckets, reverse postorder, and immediate dominators, but omits dense liveness
+USE/DEF/live-in/live-out matrices. Validation visits each definition and use bucket once.
