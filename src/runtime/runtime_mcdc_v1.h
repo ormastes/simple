@@ -88,6 +88,20 @@ int32_t rt_mcdc_record_vector_v1(uint64_t session_id, uint64_t decision_id,
                                  uint64_t evaluated_mask, uint64_t true_mask,
                                  uint64_t owner_id, uint64_t owner_sequence,
                                  uint8_t outcome);
+/* Compiled-producer lane. Configuration happens before the mission-critical
+ * execution boundary; the record operation is fixed-storage and allocation
+ * free. Exactly one compiled owner is admitted per collector process. */
+int32_t rt_mcdc_configure_compiled_owner_v1(uint64_t session_id,
+                                            uint64_t owner_id);
+int32_t rt_mcdc_release_compiled_owner_v1(uint64_t session_id,
+                                          uint64_t owner_id);
+int32_t rt_mcdc_record_compiled_vector_v1(uint64_t decision_id,
+                                          uint32_t condition_count,
+                                          uint64_t source_digest,
+                                          uint64_t evaluated_mask,
+                                          uint64_t true_mask,
+                                          uint8_t outcome);
+int32_t rt_mcdc_compiled_last_status_v1(void);
 int32_t rt_mcdc_collector_seal_v1(uint64_t session_id);
 int32_t rt_mcdc_claim_interpreter_owner_v1(uint64_t session_id,
                                            uint64_t owner_id);

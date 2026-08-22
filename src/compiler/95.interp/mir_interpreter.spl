@@ -29,6 +29,12 @@ export use compiler.interp.mir_interp_runtime.{mir_interp_call_runtime_fn, f64_t
 # SIMPLE_STRICT_INTERP=1 so default interpreter perf/behavior is untouched.
 # Read once at interpreter creation (see MirInterpreter.strict_mode).
 extern fn rt_env_get(key: text) -> text
+extern fn rt_mcdc_record_compiled_vector_v1(decision_id: u64,
+                                             condition_count: u32,
+                                             source_digest: u64,
+                                             evaluated_mask: u64,
+                                             true_mask: u64,
+                                             outcome: u8) -> i32
 
 
 # ============================================================================
@@ -441,17 +447,26 @@ impl MirInterpreter:
                 self.last_error = nil
                 intrinsic_err
 
-            case DecisionProbe(_, semantic_id, _, _, _, _, _, _, _):
-                Some(InterpError.UnsupportedOperation(
-                    op: "unlowered DecisionProbe '{semantic_id}'"
-                ))
+            case DecisionProbe(runtime_id, semantic_id, source_digest, condition_count,
+                               evaluated_mask, true_mask, result, _, _, _):
+                val status = rt_mcdc_record_compiled_vector_v1(
+                    runtime_id as u64, condition_count as u32,
+                    source_digest as u64,
+                    self.get_operand(evaluated_mask) as u64,
+                    self.get_operand(true_mask) as u64,
+                    if self.get_operand(result) != 0: 1u8 else: 0u8)
+                if status == 0:
+                    nil
+                else:
+                    Some(InterpError.RuntimeError(
+                        message: "DecisionProbe '{semantic_id}' runtime status {status}"))
 
             case ConditionProbe(_, semantic_id, _, _, _, _, _, _):
                 Some(InterpError.UnsupportedOperation(
                     op: "unlowered ConditionProbe '{semantic_id}'"
                 ))
 
-            case DynamicDecisionProbe(_, semantic_id, _, _, _, _, _, _, _):
+            case DynamicDecisionProbe(_, semantic_id, _, _, _, _, _, _, _, _):
                 Some(InterpError.UnsupportedOperation(
                     op: "unlowered DynamicDecisionProbe '{semantic_id}'"
                 ))

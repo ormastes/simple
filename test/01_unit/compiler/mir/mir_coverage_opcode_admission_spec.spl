@@ -36,7 +36,7 @@ fn probe_mask() -> MirOperand:
 
 fn decision_probe(runtime_id: i64 = 7, path: text = "src/example.spl") -> MirInst:
     MirInst(kind: MirInstKind.DecisionProbe(
-        runtime_id, "decision:sha256", 1, probe_mask(), probe_mask(),
+        runtime_id, "decision:sha256", 99, 1, probe_mask(), probe_mask(),
         probe_result(), path, 12, 0
     ), span: nil)
 
@@ -77,7 +77,7 @@ describe "typed MIR coverage opcode admission":
         var visitor = ProbeOperandVisitor(operands: 0)
         visitor.visit_inst(decision_probe())
         visitor.visit_inst(condition_probe())
-        expect(visitor.operands).to_equal(2)  # oracle: 2 — named expected value from the requirement
+        expect(visitor.operands).to_equal(4)  # decision masks+outcome, condition outcome
         expect(dce_instruction_is_mandatory_observation(decision_probe())).to_equal(true)
         expect(dce_instruction_is_mandatory_observation(condition_probe())).to_equal(true)
 
@@ -146,7 +146,7 @@ describe "typed MIR coverage opcode admission":
                 ), span: nil),
                 MirInst(kind: MirInstKind.DecisionProbe(
                     7, "decision:sha256",
-                    1, probe_mask(), probe_mask(),
+                    99, 1, probe_mask(), probe_mask(),
                     MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
                     "src/example.spl", 12, 0
                 ), span: nil),
@@ -214,7 +214,7 @@ describe "typed MIR coverage opcode admission":
                 ), span: nil),
                 MirInst(kind: MirInstKind.DecisionProbe(
                     7, "decision:sha256",
-                    1, probe_mask(), probe_mask(),
+                    99, 1, probe_mask(), probe_mask(),
                     MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
                     "src/example.spl", 12, 0
                 ), span: nil)
@@ -258,7 +258,7 @@ describe "typed MIR coverage opcode admission":
                 ), span: nil),
                 MirInst(kind: MirInstKind.DecisionProbe(
                     7, "decision:sha256",
-                    1, probe_mask(), probe_mask(),
+                    99, 1, probe_mask(), probe_mask(),
                     MirOperand(kind: MirOperandKind.Copy(LocalId(id: 7))),
                     "src/example.spl", 12, 0
                 ), span: nil)
@@ -317,12 +317,12 @@ describe "typed MIR coverage opcode admission":
             case Const(local, Int(42), _): expect(local.id).to_equal(9)  # oracle: 9 — named expected value from the requirement
             case _: expect(false).to_equal(true)
 
-    it "validates IDs paths positions and boolean operands before rejecting unlowered probes":
-        step("Verify: validates IDs paths positions and boolean operands before rejecting unlowered probes")
+    it "admits a valid static vector and rejects malformed payloads":
+        step("Verify: admits a valid static vector and rejects malformed payloads")
         val locals = [probe_bool_local()]
         expect(mir_coverage_probe_admission_diagnostic_inst_v1(
             decision_probe().kind, locals
-        )).to_contain("MIRCOV-PROBE-E-UNLOWERED")
+        )).to_equal("")
         expect(mir_coverage_probe_admission_diagnostic_inst_v1(
             decision_probe(0).kind, locals
         )).to_contain("RUNTIME-ID")
@@ -333,7 +333,7 @@ describe "typed MIR coverage opcode admission":
             decision_probe(7, "../escape.spl").kind, locals
         )).to_contain("PATH")
         val non_bool = MirInstKind.DecisionProbe(
-            7, "decision:bad", 1, probe_mask(), probe_mask(),
+            7, "decision:bad", 99, 1, probe_mask(), probe_mask(),
             MirOperand(kind: MirOperandKind.Const(
                 MirConstValue.Int(1), MirType.i64()
             )), "src/example.spl", 12, 0
@@ -342,8 +342,8 @@ describe "typed MIR coverage opcode admission":
             non_bool, locals
         )).to_contain("OPERAND")
 
-    it "reports a malformed later probe before a valid first probe is unlowered":
-        step("Verify: reports a malformed later probe before a valid first probe is unlowered")
+    it "reports a malformed later probe after a valid admitted vector":
+        step("Verify: reports a malformed later probe after a valid admitted vector")
         val block = MirBlock(
             id: BlockId.entry(), label: "entry",
             instructions: [decision_probe(), decision_probe(0)],
@@ -393,14 +393,14 @@ describe "typed MIR coverage opcode admission":
         var inliner = FunctionInliner.new(10)
         expect(inliner.can_inline_block(block)).to_equal(false)
 
-    it "makes the MIR interpreter reject probes explicitly":
-        step("Verify: makes the MIR interpreter reject probes explicitly")
+    it "runs static vectors through the bounded runtime and rejects legacy conditions":
+        step("Verify: runs static vectors through the bounded runtime and rejects legacy conditions")
         var interpreter = MirInterpreter.create()
         val decision_error = interpreter.execute_instruction(decision_probe())
         val condition_error = interpreter.execute_instruction(condition_probe())
         expect(decision_error != nil).to_equal(true)
         expect(condition_error != nil).to_equal(true)
-        expect(decision_error.unwrap().message()).to_contain("unlowered DecisionProbe")
+        expect(decision_error.unwrap().message()).to_contain("runtime status")
         expect(condition_error.unwrap().message()).to_contain("unlowered ConditionProbe")
 
     it "guards both LLVM translation paths before any probe can be skipped":

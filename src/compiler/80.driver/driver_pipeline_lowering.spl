@@ -14,6 +14,15 @@ use compiler.driver.driver_mir_target.{driver_mir_target_context}
 
 extern fn rt_env_get(key: text) -> text
 
+fn _driver_mcdc_source_digest(ctx: CompileContext, module_name: text) -> i64:
+    var index = 0
+    while index < ctx.source_module_names_owner.len() and
+          index < ctx.source_content_hashes_owner.len():
+        if ctx.source_module_names_owner[index] == module_name:
+            return ctx.source_content_hashes_owner[index]
+        index = index + 1
+    0
+
 # Diagnostics-plumbing: MirLowering.errors was silently dropped on the
 # native-build worker path (nothing outside 70.backend read it), so a bare
 # `nosuchfn(1)` call or an unsupported construct produced broken MIR that
@@ -178,6 +187,9 @@ impl CompilerDriver:
             log_phase("aot:bootstrap_fixed:start module=app.cli.bootstrap_main functions={bootstrap_hir.functions.len()}")
             var bootstrap_lowering = MirLowering.new_for_target_with_mcdc(
                 bootstrap_hir.symbols, target_context, self.ctx.options.mcdc_policy)
+            if self.ctx.options.mcdc_policy != "off":
+                bootstrap_lowering.mcdc_source_digest = _driver_mcdc_source_digest(
+                    self.ctx, "app.cli.bootstrap_main")
             var bootstrap_mir = bootstrap_lowering.lower_module(bootstrap_hir)
             self.ctx.bootstrap_entry_mir = Some(bootstrap_mir)
             _driver_collect_mir_errors(self.ctx, bootstrap_lowering.errors)
@@ -226,6 +238,9 @@ impl CompilerDriver:
                         log_phase("aot:lower_to_mir:missing_hir idx={direct_idx} module={name_direct} path={src_direct.path}")
                         return false
                     direct_lowering.symbols = direct_hir.symbols
+                    if self.ctx.options.mcdc_policy != "off":
+                        direct_lowering.mcdc_source_digest = _driver_mcdc_source_digest(
+                            self.ctx, name_direct)
                     var lowered_entry = direct_lowering.lower_module(direct_hir)
                     lowered_entry.name = name_direct
                     log_phase("aot:lower_to_mir:module:done idx={direct_idx} module={name_direct} functions={lowered_entry.functions.len()}")
@@ -268,6 +283,9 @@ impl CompilerDriver:
                 lowering.prescan_module_struct_names(prescan_module)
             for hir_module in self.ctx.hir_modules:
                 val name = hir_module.name
+                if self.ctx.options.mcdc_policy != "off":
+                    lowering.mcdc_source_digest = _driver_mcdc_source_digest(
+                        self.ctx, name)
                 var mir_module = lowering.lower_module(hir_module)
                 mir_module.name = name
                 self.ctx.mir_modules[name] = mir_module

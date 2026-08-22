@@ -7,6 +7,7 @@
 #endif
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,12 +34,23 @@ typedef struct {
     uint64_t overflow_count;
     uint64_t session_id;
     uint64_t interpreter_owner_id;
+    uint64_t compiled_owner_id;
+    uint64_t compiled_owner_sequence;
     bool initialized;
     bool overflowed;
     bool sealed;
 } McdcCollectorV1;
 
 static McdcCollectorV1 g_mcdc;
+static _Atomic int32_t g_mcdc_compiled_last_status = SIMPLE_MCDC_V1_OK;
+
+static void mcdc_compiled_note_status(int32_t status) {
+    if (status == SIMPLE_MCDC_V1_OK) return;
+    int32_t expected = SIMPLE_MCDC_V1_OK;
+    (void)atomic_compare_exchange_strong_explicit(
+        &g_mcdc_compiled_last_status, &expected, status,
+        memory_order_relaxed, memory_order_relaxed);
+}
 
 static CoverageRow *g_decisions;
 static size_t g_decision_count;
@@ -106,10 +118,49 @@ int32_t rt_mcdc_collector_init_v1(void *storage, uint64_t storage_bytes,
     g_mcdc.overflow_count = 0;
     g_mcdc.session_id = session_id;
     g_mcdc.interpreter_owner_id = 0;
+    g_mcdc.compiled_owner_id = 0;
+    g_mcdc.compiled_owner_sequence = 0;
+    atomic_store_explicit(&g_mcdc_compiled_last_status,
+                          SIMPLE_MCDC_V1_OK, memory_order_relaxed);
     g_mcdc.overflowed = false;
     g_mcdc.sealed = false;
     g_mcdc.initialized = true;
     mcdc_unlock();
+    return SIMPLE_MCDC_V1_OK;
+}
+
+static int32_t mcdc_record_vector_locked_v1(
+        uint64_t session_id, uint64_t decision_id, uint32_t condition_count,
+        uint64_t source_digest, uint64_t evaluated_mask, uint64_t true_mask,
+        uint64_t owner_id, uint64_t owner_sequence, uint8_t outcome) {
+    if (!session_id || !decision_id || !condition_count || condition_count > 62u ||
+        !source_digest ||
+        !owner_id || outcome > 1u) return SIMPLE_MCDC_V1_INVALID;
+    const uint64_t admitted = (UINT64_C(1) << condition_count) - UINT64_C(1);
+    if ((evaluated_mask & ~admitted) || (true_mask & ~evaluated_mask))
+        return SIMPLE_MCDC_V1_INVALID;
+    if (!g_mcdc.initialized) {
+        return SIMPLE_MCDC_V1_NOT_INITIALIZED;
+    }
+    if (g_mcdc.session_id != session_id) return SIMPLE_MCDC_V1_SESSION_MISMATCH;
+    if (g_mcdc.sealed) return SIMPLE_MCDC_V1_NOT_SEALED;
+    if (g_mcdc.next_sequence == UINT64_MAX) {
+        if (!g_mcdc.overflowed) g_mcdc.overflow_first = UINT64_MAX;
+        g_mcdc.overflowed = true;
+        if (g_mcdc.overflow_count != UINT64_MAX) ++g_mcdc.overflow_count;
+        return SIMPLE_MCDC_V1_OVERFLOW;
+    }
+    const uint64_t sequence = g_mcdc.next_sequence++;
+    if (g_mcdc.count == g_mcdc.capacity) {
+        if (!g_mcdc.overflowed) g_mcdc.overflow_first = sequence;
+        g_mcdc.overflowed = true;
+        if (g_mcdc.overflow_count != UINT64_MAX) ++g_mcdc.overflow_count;
+        return SIMPLE_MCDC_V1_OVERFLOW;
+    }
+    g_mcdc.events[g_mcdc.count++] = (SimpleMcdcVectorV1){
+        decision_id, condition_count, 0u, source_digest, evaluated_mask, true_mask,
+        owner_id, owner_sequence, outcome, {0}
+    };
     return SIMPLE_MCDC_V1_OK;
 }
 
@@ -119,40 +170,79 @@ int32_t rt_mcdc_record_vector_v1(uint64_t session_id, uint64_t decision_id,
                                  uint64_t evaluated_mask, uint64_t true_mask,
                                  uint64_t owner_id, uint64_t owner_sequence,
                                  uint8_t outcome) {
-    if (!session_id || !decision_id || !condition_count || condition_count > 62u ||
-        !source_digest ||
-        !owner_id || outcome > 1u) return SIMPLE_MCDC_V1_INVALID;
-    const uint64_t admitted = (UINT64_C(1) << condition_count) - UINT64_C(1);
-    if ((evaluated_mask & ~admitted) || (true_mask & ~evaluated_mask))
-        return SIMPLE_MCDC_V1_INVALID;
     if (!mcdc_try_lock()) return SIMPLE_MCDC_V1_BUSY;
-    if (!g_mcdc.initialized) {
-        mcdc_unlock();
-        return SIMPLE_MCDC_V1_NOT_INITIALIZED;
-    }
-    if (g_mcdc.session_id != session_id) { mcdc_unlock(); return SIMPLE_MCDC_V1_SESSION_MISMATCH; }
-    if (g_mcdc.sealed) { mcdc_unlock(); return SIMPLE_MCDC_V1_NOT_SEALED; }
-    if (g_mcdc.next_sequence == UINT64_MAX) {
-        if (!g_mcdc.overflowed) g_mcdc.overflow_first = UINT64_MAX;
-        g_mcdc.overflowed = true;
-        if (g_mcdc.overflow_count != UINT64_MAX) ++g_mcdc.overflow_count;
-        mcdc_unlock();
-        return SIMPLE_MCDC_V1_OVERFLOW;
-    }
-    const uint64_t sequence = g_mcdc.next_sequence++;
-    if (g_mcdc.count == g_mcdc.capacity) {
-        if (!g_mcdc.overflowed) g_mcdc.overflow_first = sequence;
-        g_mcdc.overflowed = true;
-        if (g_mcdc.overflow_count != UINT64_MAX) ++g_mcdc.overflow_count;
-        mcdc_unlock();
-        return SIMPLE_MCDC_V1_OVERFLOW;
-    }
-    g_mcdc.events[g_mcdc.count++] = (SimpleMcdcVectorV1){
-        decision_id, condition_count, 0u, source_digest, evaluated_mask, true_mask,
-        owner_id, owner_sequence, outcome, {0}
-    };
+    const int32_t status = mcdc_record_vector_locked_v1(
+        session_id, decision_id, condition_count, source_digest,
+        evaluated_mask, true_mask, owner_id, owner_sequence, outcome);
     mcdc_unlock();
-    return SIMPLE_MCDC_V1_OK;
+    return status;
+}
+
+int32_t rt_mcdc_configure_compiled_owner_v1(uint64_t session_id,
+                                            uint64_t owner_id) {
+    if (!session_id || !owner_id) return SIMPLE_MCDC_V1_INVALID;
+    mcdc_lock();
+    int32_t status = SIMPLE_MCDC_V1_OK;
+    if (!g_mcdc.initialized) status = SIMPLE_MCDC_V1_NOT_INITIALIZED;
+    else if (g_mcdc.session_id != session_id) status = SIMPLE_MCDC_V1_SESSION_MISMATCH;
+    else if (g_mcdc.sealed) status = SIMPLE_MCDC_V1_NOT_SEALED;
+    else if (g_mcdc.compiled_owner_id != 0) status = SIMPLE_MCDC_V1_BUSY;
+    else {
+        g_mcdc.compiled_owner_id = owner_id;
+        g_mcdc.compiled_owner_sequence = 0;
+        atomic_store_explicit(&g_mcdc_compiled_last_status,
+                              SIMPLE_MCDC_V1_OK, memory_order_relaxed);
+    }
+    mcdc_unlock();
+    return status;
+}
+
+int32_t rt_mcdc_release_compiled_owner_v1(uint64_t session_id,
+                                          uint64_t owner_id) {
+    if (!session_id || !owner_id) return SIMPLE_MCDC_V1_INVALID;
+    mcdc_lock();
+    int32_t status = SIMPLE_MCDC_V1_OK;
+    if (!g_mcdc.initialized) status = SIMPLE_MCDC_V1_NOT_INITIALIZED;
+    else if (g_mcdc.session_id != session_id) status = SIMPLE_MCDC_V1_SESSION_MISMATCH;
+    else if (g_mcdc.compiled_owner_id != owner_id) status = SIMPLE_MCDC_V1_INVALID;
+    else {
+        g_mcdc.compiled_owner_id = 0;
+        g_mcdc.compiled_owner_sequence = 0;
+    }
+    mcdc_unlock();
+    return status;
+}
+
+int32_t rt_mcdc_record_compiled_vector_v1(uint64_t decision_id,
+                                          uint32_t condition_count,
+                                          uint64_t source_digest,
+                                          uint64_t evaluated_mask,
+                                          uint64_t true_mask,
+                                          uint8_t outcome) {
+    if (!mcdc_try_lock()) {
+        mcdc_compiled_note_status(SIMPLE_MCDC_V1_BUSY);
+        return SIMPLE_MCDC_V1_BUSY;
+    }
+    int32_t status;
+    if (!g_mcdc.compiled_owner_id) {
+        status = SIMPLE_MCDC_V1_NOT_INITIALIZED;
+    } else if (g_mcdc.compiled_owner_sequence == UINT64_MAX) {
+        status = SIMPLE_MCDC_V1_OVERFLOW;
+    } else {
+        status = mcdc_record_vector_locked_v1(
+            g_mcdc.session_id, decision_id, condition_count, source_digest,
+            evaluated_mask, true_mask, g_mcdc.compiled_owner_id,
+            g_mcdc.compiled_owner_sequence, outcome);
+        if (status == SIMPLE_MCDC_V1_OK) ++g_mcdc.compiled_owner_sequence;
+    }
+    mcdc_compiled_note_status(status);
+    mcdc_unlock();
+    return status;
+}
+
+int32_t rt_mcdc_compiled_last_status_v1(void) {
+    return atomic_load_explicit(&g_mcdc_compiled_last_status,
+                                memory_order_relaxed);
 }
 
 int32_t rt_mcdc_collector_seal_v1(uint64_t session_id) {
@@ -220,6 +310,10 @@ void rt_mcdc_collector_reset_v1(void) {
     g_mcdc.overflow_count = 0;
     g_mcdc.session_id = 0;
     g_mcdc.interpreter_owner_id = 0;
+    g_mcdc.compiled_owner_id = 0;
+    g_mcdc.compiled_owner_sequence = 0;
+    atomic_store_explicit(&g_mcdc_compiled_last_status,
+                          SIMPLE_MCDC_V1_OK, memory_order_relaxed);
     g_mcdc.initialized = false;
     g_mcdc.overflowed = false;
     g_mcdc.sealed = false;
