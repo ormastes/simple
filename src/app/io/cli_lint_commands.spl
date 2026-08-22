@@ -5,7 +5,8 @@
 use std.tooling.easy_fix.types.{FixConfidence}
 use lazy compiler.tools.formatter.main.{make_formatter, check_formatting, format_file_inplace, read_file, print_diff}
 use compiler.tools.lint.main.{
-    Linter, LintReadFileResult, lint_read_file, run_lint_source_with_linter}
+    Linter, LintCliPolicy, LintReadFileResult, lint_read_file,
+    run_lint_source_with_linter_policy}
 use lazy compiler.tools.fix.main.{collect_fixes_from_source, FixToolApplicator, apply_fixes_to_disk, fix_read_source}
 use lazy compiler.tools.fix.rules.{check_simd_opportunities, check_short_grammar_refactor, easyfix_id_text, easyfix_description_text}
 use std.tooling.easy_fix.{FixConfidence}
@@ -205,6 +206,15 @@ fn run_lint_command(args: [text]) -> i64:
     # One command-scoped linter owns the immutable rule registry and bounded
     # project-policy cache. Do not reconstruct dozens of descriptors per file.
     var lint_session = Linter.new()
+    # Policy is command-invariant. Parse it once rather than rescanning the
+    # complete target/option array for every discovered file.
+    val lint_policy = LintCliPolicy.from_args(normalized_args)
+    if lint_policy.error != "":
+        if json_output:
+            print "{\"type\":\"lint-error\",\"message\":\"{escape_json(lint_policy.error)}\"}"
+        else:
+            _cli_eprint("Error: {lint_policy.error}")
+        return 2
     for file_path in lint_files:
         if not file_exists(file_path):
             if json_output:
@@ -229,8 +239,8 @@ fn run_lint_command(args: [text]) -> i64:
                 continue
             case LintReadFileResult.ReadFileOk(loaded_source):
                 source = loaded_source
-        val file_exit = run_lint_source_with_linter(
-            lint_session, file_path, normalized_args, source)
+        val file_exit = run_lint_source_with_linter_policy(
+            lint_session, file_path, lint_policy, source)
         if file_exit == 3:
             not_linted_files = not_linted_files + 1
         if file_exit != 0:
