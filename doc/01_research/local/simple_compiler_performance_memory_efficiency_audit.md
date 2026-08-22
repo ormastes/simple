@@ -1874,4 +1874,8 @@ application because dynamic length checks are also observable. Missing-source an
 overlap errors are unchanged. Follow-up replaced per-file dictionary array
 copyback with stable integer bucket indexes and owned nested replacement arrays,
 making grouping expected `O(R)` while retaining dictionary key iteration and
-per-file discovery order.
+per-file discovery order. The ordering/assembly implementation now lives with
+`std.tooling.easy_fix.types.FixApplicator`: compiler `FixToolApplicator`
+delegates to it, and lint `--fix` calls the same exported primitives. This removes
+the two remaining selection-sort/repeated-splice copies and prevents behavioral
+or performance drift among the three active entrypoints.

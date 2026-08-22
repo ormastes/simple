@@ -464,3 +464,7 @@ deletion, equal-start, invalid-range, missing-file, and conflict behavior while
 bounding the ordinary valid path. File grouping stores only bucket indexes in its
 dictionary and appends replacements directly into owned nested arrays; it never
 extracts and writes back a growing dictionary-held array.
+`std.tooling.easy_fix.types` is the single algorithm owner. Compiler fix retains
+its public compatibility class as a delegate; lint fix uses the shared ordering
+and assembly primitives after collecting its one-file replacements. Compiler
+modules must not fork private sorting or splice loops.
