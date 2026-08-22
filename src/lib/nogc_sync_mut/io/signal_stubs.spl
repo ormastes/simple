@@ -7,6 +7,25 @@ extern fn rt_atexit_install() -> i64
 @unsafe(reason: "raw hosted process-exit latch query ABI; positive status means pending", capabilities: [ffi])
 extern fn rt_atexit_check() -> i64
 
+# Declaration-scoped boundaries remain parseable by restricted bootstrap
+# closures.  They are direct calls with no allocation; public registration and
+# dispatch retain all capacity/status validation.
+@unsafe(reason: "contains the raw hosted signal-install ABI behind status validation", capabilities: [ffi])
+fn _signal_install_raw(signal_num: i64) -> i64:
+    rt_signal_install(signal_num)
+
+@unsafe(reason: "contains the raw hosted signal-latch ABI behind status validation", capabilities: [ffi])
+fn _signal_check_raw(signal_num: i64) -> i64:
+    rt_signal_check(signal_num)
+
+@unsafe(reason: "contains the raw hosted exit-latch install ABI behind status validation", capabilities: [ffi])
+fn _atexit_install_raw() -> i64:
+    rt_atexit_install()
+
+@unsafe(reason: "contains the raw hosted exit-latch query ABI behind status validation", capabilities: [ffi])
+fn _atexit_check_raw() -> i64:
+    rt_atexit_check()
+
 var _signal_handlers: [(i64, fn())] = []
 val SIGNAL_HANDLER_CAPACITY: i64 = 33
 
@@ -23,17 +42,13 @@ fn _store_signal_handler(signal: i64, handler: fn()) -> bool:
     true
 
 fn signal_handler_install(signal: i64, handler: fn()) -> bool:
-    var installed: i64 = 0
-    unsafe(capabilities: [ffi]):
-        installed = rt_signal_install(signal)
+    val installed = _signal_install_raw(signal)
     if installed <= 0:
         return false
     _store_signal_handler(signal, handler)
 
 fn atexit_register(handler: fn()) -> bool:
-    var installed: i64 = 0
-    unsafe(capabilities: [ffi]):
-        installed = rt_atexit_install()
+    val installed = _atexit_install_raw()
     if installed <= 0:
         return false
     _store_signal_handler(-1, handler)
@@ -43,14 +58,10 @@ fn signal_dispatch_pending():
         val sig = entry.0
         val cb = entry.1
         if sig >= 0:
-            var pending: i64 = 0
-            unsafe(capabilities: [ffi]):
-                pending = rt_signal_check(sig)
+            val pending = _signal_check_raw(sig)
             if pending > 0:
                 cb()
         elif sig == -1:
-            var pending: i64 = 0
-            unsafe(capabilities: [ffi]):
-                pending = rt_atexit_check()
+            val pending = _atexit_check_raw()
             if pending > 0:
                 cb()

@@ -28,6 +28,26 @@ extern fn rt_file_atomic_write(path: text, content: text) -> bool
 extern fn rt_file_size(path: text) -> i64
 extern fn rt_file_stat(path: text) -> i64
 
+# Bootstrap-compatible private FFI boundaries.  Keep capability metadata on
+# declarations: older restricted builders can misparse lexical scoped-unsafe
+# blocks and leak `ffi` into MIR as a GlobalLoad.  Each wrapper is one direct
+# call, performs no allocation, and leaves the public validation API safe.
+@unsafe(reason: "contains the raw file-lock acquisition ABI behind the owned-handle facade", capabilities: [ffi])
+fn _file_lock_raw(path: text, timeout_secs: i64) -> i64:
+    rt_file_lock(path, timeout_secs)
+
+@unsafe(reason: "contains the raw file-lock release ABI behind the status facade", capabilities: [ffi])
+fn _file_unlock_raw(handle: i64) -> bool:
+    rt_file_unlock(handle)
+
+@unsafe(reason: "contains the nullable mmap byte ABI behind Result validation", capabilities: [ffi])
+fn _file_mmap_read_bytes_raw(path: text) -> [i64]?:
+    rt_file_mmap_read_bytes(path)
+
+@unsafe(reason: "contains the nullable offset-read ABI behind Result validation", capabilities: [ffi])
+fn _file_read_text_at_raw(path: text, offset: i64, size: i64) -> text?:
+    rt_file_read_text_at_checked(path, offset, size)
+
 # --- Shell helpers (local copies to avoid circular imports) ---
 # These are minimal copies needed for file operations.
 # The canonical versions live in process_ops.spl.
@@ -126,16 +146,10 @@ fn file_read_lines(path: text) -> Result<[text], text>:
         Err(error): Err(error)
 
 fn file_lock(path: text, timeout_secs: i64) -> i64:
-    var handle: i64 = -1
-    unsafe(capabilities: [ffi]):
-        handle = rt_file_lock(path, timeout_secs)
-    handle
+    _file_lock_raw(path, timeout_secs)
 
 fn file_unlock(handle: i64) -> bool:
-    var released = false
-    unsafe(capabilities: [ffi]):
-        released = rt_file_unlock(handle)
-    released
+    _file_unlock_raw(handle)
 
 fn file_size(path: text) -> i64:
     file_size_raw(path)
@@ -157,9 +171,7 @@ fn file_mmap_read_text(path: text) -> text:
 # Preserve the provider's nullable failure state as Result.Err. A valid empty
 # mapping remains Ok([]), without a separate existence probe or second read.
 fn file_mmap_read_bytes(path: text) -> Result<[i64], text>:
-    var bytes: [i64]? = nil
-    unsafe(capabilities: [ffi]):
-        bytes = rt_file_mmap_read_bytes(path)
+    val bytes = _file_mmap_read_bytes_raw(path)
     if bytes == nil:
         Err("file mmap read failed: {path}")
     else:
@@ -170,9 +182,7 @@ fn file_mmap_read_bytes(path: text) -> Result<[i64], text>:
 # reason positional io file_ops API
 fn file_read_text_at(path: text, offset: i64, size: i64) -> Result<text, text>:
     # Read text from file at specific offset without changing file position.
-    var value: text? = nil
-    unsafe(capabilities: [ffi]):
-        value = rt_file_read_text_at_checked(path, offset, size)
+    val value = _file_read_text_at_raw(path, offset, size)
     if value.?:
         Ok(value.unwrap())
     else:
