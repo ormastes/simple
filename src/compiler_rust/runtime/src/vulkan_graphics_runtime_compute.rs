@@ -701,6 +701,7 @@ pub extern "C" fn rt_vulkan_submit_and_wait_fence(cmd: i64) -> i64 {
                 fence,
                 command_buffer: vk_cmd,
                 owners,
+                wait_handle: 0,
             });
             -1
         }
@@ -769,6 +770,7 @@ pub extern "C" fn rt_vulkan_submit_no_wait(cmd: i64) -> i64 {
                 fence,
                 command_buffer: vk_cmd,
                 owners,
+                wait_handle: handle,
             });
             // Re-key the fence under a caller-visible handle so
             // rt_vulkan_wait_fence can find it while it's still quarantined.
@@ -792,6 +794,7 @@ pub extern "C" fn rt_vulkan_submit_no_wait(cmd: i64) -> i64 {
                 fence,
                 command_buffer: vk_cmd,
                 owners,
+                wait_handle: 0,
             });
             -1
         }
