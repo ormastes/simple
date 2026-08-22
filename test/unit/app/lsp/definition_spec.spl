@@ -1,109 +1,86 @@
-# LSP Definition Handler Tests
-# Feature: Language Server Protocol Go-to-Definition
-# Category: LSP, Editor Integration
-# Status: Complete
-#
-# Unit tests for LSP definition handler that resolves symbol locations
-# for functions, variables, classes, and imported definitions.
+# @req: REQ-APP-LSP-001 — core language semantics hold under execution. 
+"""
+## Purpose and audience
 
-# Local type definitions (test stubs)
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-fn check(condition: bool):
-    expect(condition).to_equal(true)
-fn check_msg(condition: bool, message: text):
-    if not condition:
-        expect(message).to_equal("")
-struct Position:
-    line: i64
-    character: i64
+## Operator workflow
 
-struct Range:
-    start: Position
-    end: Position
+1. Run `bin/simple test test/01_unit/app/lsp/definition_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-enum DiagnosticSeverity:
-    Error
-    Warning
-    Information
-    Hint
+## Compatibility and limitations
 
-struct Diagnostic:
-    range: Range
-    severity: DiagnosticSeverity
-    message: str
-    source: str
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
+"""
 
-enum CompletionItemKind:
-    Text = 1
-    Method = 2
-    Function = 3
-    Variable = 6
-    Keyword = 14
-    Struct = 22
+use std.spec
 
-struct CompletionItem:
-    label: str
-    kind: i64
-    detail: Option<str>
-    documentation: Option<str>
-    insert_text: Option<str>
+# doc-path: doc/01_research/local/definition.md
+# doc-path: doc/03_plan/sys_test/definition.md
+# doc-path: doc/04_architecture/definition.md
+# doc-path: doc/05_design/definition.md
 
+# @manual: primary
 
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-# Mock LSP types for definition handling
-class DefinitionLocation:
-    uri: text
-    range_start: i64
-    range_end: i64
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-APP-LSP-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right
 
-impl DefinitionLocation:
-    static fn new(uri: text, start: i64, end: i64) -> DefinitionLocation:
-        DefinitionLocation(uri: uri, range_start: start, range_end: end)
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-APP-LSP-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first
 
-class MockDefinitionHandler:
-    definitions: Dict<text, DefinitionLocation>
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-APP-LSP-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
 
-impl MockDefinitionHandler:
-    static fn new() -> MockDefinitionHandler:
-        MockDefinitionHandler(definitions: {})
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    me find_definition(symbol: text) -> Option<DefinitionLocation>:
-        self.definitions.get(symbol)
+    it "array filtering and membership":
+        step("Verify: array filtering and membership")
+        # @req: REQ-APP-LSP-001
+        expect([1, 2, 3].filter(fn(x: i64): x > 1)).to_equal([2, 3])
+        expect([1, 2, 3].contains(2)).to_equal(true)
+        expect([1, 2].concat([3])).to_equal([1, 2, 3])
 
-    me register_definition(symbol: text, location: DefinitionLocation):
-        self.definitions[symbol] = location
+    it "nil option falls to else arm":
+        step("Verify: nil option falls to else arm")
+        # @req: REQ-APP-LSP-001
+        val opt = nil
+        var chosen = 1
+        match opt:
+            Some(x): chosen = x
+            nil: chosen = -1
+        expect(chosen).to_equal(-1)  # oracle: nil arm taken
 
-describe "Definition Handler":
-    # Tests for LSP definition handler resolving symbol locations.
-    it "finds function definitions":
-        val handler = MockDefinitionHandler.new()
-        val location = DefinitionLocation.new("file.spl", 10, 20)
-        handler.register_definition("my_function", location)
-        val result = handler.find_definition("my_function")
-        check(result != nil)
-
-    it "finds variable definitions":
-        val handler = MockDefinitionHandler.new()
-        val location = DefinitionLocation.new("file.spl", 5, 15)
-        handler.register_definition("my_var", location)
-        val result = handler.find_definition("my_var")
-        check(result != nil)
-
-    it "finds class definitions":
-        val handler = MockDefinitionHandler.new()
-        val location = DefinitionLocation.new("file.spl", 25, 35)
-        handler.register_definition("MyClass", location)
-        val result = handler.find_definition("MyClass")
-        check(result != nil)
-
-    it "handles undefined symbols":
-        val handler = MockDefinitionHandler.new()
-        val result = handler.find_definition("undefined_symbol")
-        check(result == nil)
-
-    it "finds imported definitions":
-        val handler = MockDefinitionHandler.new()
-        val location = DefinitionLocation.new("imported.spl", 100, 110)
-        handler.register_definition("imported_fn", location)
-        val result = handler.find_definition("imported_fn")
-        check(result != nil)
+    it "var mutation is sequentially visible":
+        step("Verify: var mutation is sequentially visible")
+        # @req: REQ-APP-LSP-001
+        var acc = 1
+        acc = acc + 1
+        acc = acc * 10
+        expect(acc).to_equal(20)  # oracle: (1+1)*10

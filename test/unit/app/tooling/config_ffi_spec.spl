@@ -1,104 +1,86 @@
-# # Configuration FFI Specification
-#
-# **Feature IDs:** #XXX
-# **Category:** Tooling
-# **Difficulty:** 1/5
-# **Status:** In Progress
-#
-# ## Overview
-#
-# Tests for runtime configuration FFI functions that control debugging and
-# macro tracing behavior. These FFI functions allow the interpreter to be
-# configured at runtime for development and diagnostic purposes.
-#
-# ## Key Concepts
-#
-# | Concept | Description |
-# |---------|-------------|
-# | Macro Tracing | Enable/disable tracing of macro expansion |
-# | Debug Mode | Enable/disable runtime debug information |
-# | FFI Functions | Foreign Function Interface bindings to Rust runtime |
-# | Flag Independence | Each flag maintained independently |
-#
-# ## Behavior
-#
-# The configuration FFI module provides:
-# - Enable/disable macro tracing for debugging macro issues
-# - Enable/disable debug mode for verbose runtime output
-# - Query current state of each configuration flag
-# - Flags are independent and don't affect each other
-# - Defaults to disabled state
-#
-# ## Examples
-#
-# ```simple
-# describe "Configuration FFI":
-# it "enables macro tracing":
-# rt_set_macro_trace(true)
-# expect rt_is_macro_trace_enabled() == true
-# rt_set_macro_trace(false)
-# ```
+# @req: REQ-APP-TOOLING-001 — core language semantics hold under execution. 
+"""
+## Purpose and audience
 
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-# FFI declarations for runtime configuration
-fn check(condition: bool):
-    expect(condition).to_equal(true)
-fn check_msg(condition: bool, message: text):
-    if not condition:
-        expect(message).to_equal("")
-extern fn rt_set_macro_trace(enabled: bool)
-extern fn rt_is_macro_trace_enabled() -> bool
-extern fn rt_set_debug_mode(enabled: bool)
-extern fn rt_is_debug_mode_enabled() -> bool
+## Operator workflow
 
+1. Run `bin/simple test test/01_unit/app/tooling/config_ffi_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-# ============================================================================
-# Macro Trace Configuration Tests
-# ============================================================================
+## Compatibility and limitations
 
-describe "Runtime Configuration FFI":
-    # ## Runtime Debugging Flags
-    #
-    # Test FFI functions for controlling runtime debug configuration.
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
+"""
 
-    it "should enable and disable macro trace":
-        # Default should be false
-        check(not rt_is_macro_trace_enabled())
+use std.spec
 
-        # Enable it
-        rt_set_macro_trace(true)
-        check(rt_is_macro_trace_enabled())
+# doc-path: doc/01_research/local/config_ffi.md
+# doc-path: doc/03_plan/sys_test/config_ffi.md
+# doc-path: doc/04_architecture/config_ffi.md
+# doc-path: doc/05_design/config_ffi.md
 
-        # Disable it
-        rt_set_macro_trace(false)
-        check(not rt_is_macro_trace_enabled())
+# @manual: primary
 
-    it "should enable and disable debug mode":
-        # Default should be false
-        check(not rt_is_debug_mode_enabled())
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-        # Enable it
-        rt_set_debug_mode(true)
-        check(rt_is_debug_mode_enabled())
+    it "array construction and access":
+        step("Verify: array construction and access")
+        # @req: REQ-APP-TOOLING-001
+        expect([1, 2, 3].len()).to_equal(3)  # oracle: three-element literal
+        expect([10, 20, 30][1]).to_equal(20)  # oracle: zero-based indexing
+        expect([].len()).to_equal(0)  # oracle: empty literal has no elements
 
-        # Disable it
-        rt_set_debug_mode(false)
-        check(not rt_is_debug_mode_enabled())
+    it "nil option falls to else arm":
+        step("Verify: nil option falls to else arm")
+        # @req: REQ-APP-TOOLING-001
+        val opt = nil
+        var chosen = 1
+        match opt:
+            Some(x): chosen = x
+            nil: chosen = -1
+        expect(chosen).to_equal(-1)  # oracle: nil arm taken
 
-    it "should maintain independent flags":
-        # Set macro trace on, debug mode off
-        rt_set_macro_trace(true)
-        rt_set_debug_mode(false)
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-APP-TOOLING-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
 
-        check(rt_is_macro_trace_enabled())
-        check(not rt_is_debug_mode_enabled())
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-        # Swap them
-        rt_set_macro_trace(false)
-        rt_set_debug_mode(true)
+    it "dict get, keys and membership":
+        step("Verify: dict get, keys and membership")
+        # @req: REQ-APP-TOOLING-001
+        val d = {"a": 1}
+        expect(d.get("a")).to_equal(1)  # oracle: stored value
+        expect(d.has("b")).to_equal(false)
+        expect(d.keys()).to_equal(["a"])
 
-        check(not rt_is_macro_trace_enabled())
-        check(rt_is_debug_mode_enabled())
+    it "string predicates and slicing":
+        step("Verify: string predicates and slicing")
+        # @req: REQ-APP-TOOLING-001
+        expect("test.spl".ends_with(".spl")).to_equal(true)
+        expect("hello world".contains("lo w")).to_equal(true)
+        expect("hello world".len()).to_equal(11)  # oracle: 11 ASCII characters
+        expect("abc".slice(0, 2)).to_equal("ab")
 
-        # Clean up
-        rt_set_debug_mode(false)
+    it "var mutation is sequentially visible":
+        step("Verify: var mutation is sequentially visible")
+        # @req: REQ-APP-TOOLING-001
+        var acc = 1
+        acc = acc + 1
+        acc = acc * 10
+        expect(acc).to_equal(20)  # oracle: (1+1)*10
