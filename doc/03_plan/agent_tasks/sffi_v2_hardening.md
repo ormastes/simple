@@ -121,3 +121,8 @@ passing placeholder.
     owner thread and clear returns status. Continue through remaining SDL2
     properties, then implement signed provider admission and artifact-bound
     sanitizer/proof receipts before declaring this module verified.
+22. Nine SDL2 window-property mutations now propagate boolean status across C,
+    Rust, and Simple, and eight public wrappers use lexical FFI scopes without
+    changing native-call or memory shape. Continue through the last generic
+    SDL2 declarations and compatibility adapters, then bind signed provider and
+    sanitizer/proof evidence before declaring SDL2 verified.

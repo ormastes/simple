@@ -1118,9 +1118,9 @@ void rt_sdl2_set_window_fullscreen(int64_t handle, int64_t fullscreen) {
     SDL_SetWindowFullscreen(win, fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
 }
 
-int64_t rt_sdl2_set_window_fullscreen_checked(int64_t handle, int64_t fullscreen) {
+bool rt_sdl2_set_window_fullscreen_checked(int64_t handle, int64_t fullscreen) {
     SDL_Window* win = sdl2_window_get(handle);
-    if (!win) return 0;
+    if (!win) return false;
     return SDL_SetWindowFullscreen(win, fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0) == 0;
 }
 
@@ -1168,53 +1168,53 @@ bool rt_sdl2_hide_window(int64_t handle) {
     return true;
 }
 
-int64_t rt_sdl2_set_window_minimum_size(int64_t handle, int64_t width, int64_t height) {
+bool rt_sdl2_set_window_minimum_size(int64_t handle, int64_t width, int64_t height) {
     SDL_Window* win = sdl2_window_get(handle);
     if (!win || width <= 0 || height <= 0 ||
-        width > INT_MAX || height > INT_MAX) return 0;
+        width > INT_MAX || height > INT_MAX) return false;
     SDL_SetWindowMinimumSize(win, (int)width, (int)height);
-    return 1;
+    return true;
 }
 
-int64_t rt_sdl2_set_window_maximum_size(int64_t handle, int64_t width, int64_t height) {
+bool rt_sdl2_set_window_maximum_size(int64_t handle, int64_t width, int64_t height) {
     SDL_Window* win = sdl2_window_get(handle);
     if (!win || width <= 0 || height <= 0 ||
-        width > INT_MAX || height > INT_MAX) return 0;
+        width > INT_MAX || height > INT_MAX) return false;
     SDL_SetWindowMaximumSize(win, (int)width, (int)height);
-    return 1;
+    return true;
 }
 
-int64_t rt_sdl2_minimize_window(int64_t handle) {
+bool rt_sdl2_minimize_window(int64_t handle) {
     SDL_Window* win = sdl2_window_get(handle);
-    if (!win) return 0;
+    if (!win) return false;
     SDL_MinimizeWindow(win);
-    return 1;
+    return true;
 }
 
-int64_t rt_sdl2_maximize_window(int64_t handle) {
+bool rt_sdl2_maximize_window(int64_t handle) {
     SDL_Window* win = sdl2_window_get(handle);
-    if (!win) return 0;
+    if (!win) return false;
     SDL_MaximizeWindow(win);
-    return 1;
+    return true;
 }
 
-int64_t rt_sdl2_restore_window(int64_t handle) {
+bool rt_sdl2_restore_window(int64_t handle) {
     SDL_Window* win = sdl2_window_get(handle);
-    if (!win) return 0;
+    if (!win) return false;
     SDL_RestoreWindow(win);
-    return 1;
+    return true;
 }
 
-int64_t rt_sdl2_set_window_bordered(int64_t handle, int64_t bordered) {
+bool rt_sdl2_set_window_bordered(int64_t handle, int64_t bordered) {
     SDL_Window* win = sdl2_window_get(handle);
-    if (!win) return 0;
+    if (!win) return false;
     SDL_SetWindowBordered(win, bordered ? SDL_TRUE : SDL_FALSE);
-    return 1;
+    return true;
 }
 
-int64_t rt_sdl2_set_window_always_on_top(int64_t handle, int64_t on_top) {
+bool rt_sdl2_set_window_always_on_top(int64_t handle, int64_t on_top) {
     SDL_Window* win = sdl2_window_get(handle);
-    if (!win) return 0;
+    if (!win) return false;
     SDL2_REQUIRE(0);
     /*
      * Added in SDL 2.0.16. With dynamic loading this is a RUNTIME capability
@@ -1222,17 +1222,17 @@ int64_t rt_sdl2_set_window_always_on_top(int64_t handle, int64_t on_top) {
      * export the symbol, and we report that honestly instead of baking the
      * build machine's SDL version into the binary.
      */
-    if (!p_SDL_SetWindowAlwaysOnTop) return 0;
+    if (!p_SDL_SetWindowAlwaysOnTop) return false;
     p_SDL_SetWindowAlwaysOnTop(
         win,
         on_top ? SDL_TRUE : SDL_FALSE
     );
-    return 1;
+    return true;
 }
 
-int64_t rt_sdl2_focus_window(int64_t handle) {
+bool rt_sdl2_focus_window(int64_t handle) {
     SDL_Window* win = sdl2_window_get(handle);
-    if (!win) return 0;
+    if (!win) return false;
     SDL_RaiseWindow(win);
     return (SDL_GetWindowFlags(win) & SDL_WINDOW_INPUT_FOCUS) != 0;
 }
@@ -1506,7 +1506,13 @@ int main(void) {
         rt_sdl2_set_window_resizable(1, 1) ||
         rt_sdl2_set_window_size(1, 1, 1) ||
         rt_sdl2_set_window_position(1, 0, 0) ||
-        rt_sdl2_show_window(1) || rt_sdl2_hide_window(1)) return 10;
+        rt_sdl2_show_window(1) || rt_sdl2_hide_window(1) ||
+        rt_sdl2_set_window_fullscreen_checked(1, 1) ||
+        rt_sdl2_set_window_minimum_size(1, 1, 1) ||
+        rt_sdl2_set_window_maximum_size(1, 1, 1) ||
+        rt_sdl2_minimize_window(1) || rt_sdl2_maximize_window(1) ||
+        rt_sdl2_restore_window(1) || rt_sdl2_set_window_bordered(1, 1) ||
+        rt_sdl2_set_window_always_on_top(1, 1) || rt_sdl2_focus_window(1)) return 10;
     if (rt_sdl2_clipboard_get() != NULL || rt_sdl2_clipboard_has_text() != -1 ||
         rt_sdl2_clipboard_set("probe")) return 9;
     if (rt_sdl2_get_num_displays() != -1 || rt_sdl2_get_display_name(0) != NULL ||

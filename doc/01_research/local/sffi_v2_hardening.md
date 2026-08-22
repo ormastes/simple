@@ -601,3 +601,19 @@ C, Rust bridge tests, four Simple checks, and the ABI/performance audit pass.
 Inventory improves to 200 contracted and 276 uncontracted unsafe declarations.
 The dynamically loaded SDL artifact is still unsigned and lacks bound
 sanitizer/proof receipts, so these contracts are fail-closed but not verified.
+
+Nine SDL2 property mutations previously used integer success values across the
+C ABI, Rust dispatcher, and Simple declarations; eight public wrappers also
+held whole-function unsafe authority. They now use boolean status end-to-end,
+have exact stale-handle, invalid-bound, SDL-failure, or unavailable-capability
+contracts, and confine raw calls to lexical `unsafe(ffi)` scopes. The invalid
+generation sabotage fixture now covers every operation in the family.
+
+Each wrapper preserves its prior one-call branch shape (minimize/maximize select
+one of two possible calls). There is no new native query, allocation, retained
+memory, lock, hash, dynamic lookup, error query, or retry. Optimized C, eight
+Rust bridge tests, four Simple checks, and the mutation ABI/performance audit
+pass. Inventory improves to 208 contracted and 268 uncontracted unsafe
+declarations. SDL's void property APIs can prove accepted inputs/live handles,
+not post-call compositor state; signed artifact admission and bound sanitizer
+or proof receipts are still absent, so this family is not fully verified.

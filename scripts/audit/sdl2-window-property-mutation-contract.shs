@@ -1,0 +1,56 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+runtime="$root/src/runtime/runtime_sdl2.c"
+header="$root/src/runtime/runtime.h"
+bridge="$root/src/compiler_rust/compiler/src/interpreter_extern/sdl2.rs"
+wrapper="$root/src/lib/nogc_sync_mut/io/window_sffi.spl"
+
+symbols='set_window_fullscreen_checked set_window_minimum_size set_window_maximum_size minimize_window maximize_window restore_window set_window_bordered set_window_always_on_top focus_window'
+
+for suffix in $symbols; do
+    symbol="rt_sdl2_$suffix"
+    if ! grep -Eq "bool[[:space:]]+$symbol\\(" "$header"; then
+        echo "FAIL: $symbol header result is not boolean status" >&2
+        exit 1
+    fi
+    if ! grep -Eq "bool $symbol\\(" "$runtime"; then
+        echo "FAIL: $symbol implementation result is not boolean status" >&2
+        exit 1
+    fi
+    if ! grep -Fq "(\"$symbol\", Ret::B," "$bridge"; then
+        echo "FAIL: $symbol interpreter result is not boolean status" >&2
+        exit 1
+    fi
+done
+
+for name in window_set_min_size window_set_max_size window_set_minimized \
+    window_set_maximized window_set_fullscreen window_set_decorations \
+    window_set_always_on_top window_focus; do
+    body=$(sed -n "/^fn $name(/,/^$/p" "$wrapper")
+    if ! printf '%s\n' "$body" | grep -Fq 'unsafe(capabilities: [ffi]):'; then
+        echo "FAIL: $name must use a lexical ffi scope" >&2
+        exit 1
+    fi
+    calls=$(printf '%s\n' "$body" | grep -c 'rt_sdl2_' || true)
+    case "$name" in
+        window_set_minimized|window_set_maximized) expected=2 ;;
+        *) expected=1 ;;
+    esac
+    if [ "$calls" -ne "$expected" ]; then
+        echo "FAIL: $name changed its direct native call shape" >&2
+        exit 1
+    fi
+    if printf '%s\n' "$body" | grep -Eq 'alloc|mutex|hash|dlsym|last_error|retry'; then
+        echo "FAIL: $name gained allocation, lookup, lock, hash, error-query, or retry work" >&2
+        exit 1
+    fi
+done
+
+if grep -B1 -E '^fn (window_set_min_size|window_set_max_size|window_set_minimized|window_set_maximized|window_set_fullscreen|window_set_decorations|window_set_always_on_top|window_focus)\(' "$wrapper" | grep -Fq '@unsafe'; then
+    echo 'FAIL: public window mutation wrapper retains whole-function unsafe authority' >&2
+    exit 1
+fi
+
+echo 'PASS: SDL2 property mutations propagate boolean status with unchanged direct-call shape'
