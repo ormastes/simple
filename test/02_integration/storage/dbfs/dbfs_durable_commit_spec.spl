@@ -6,7 +6,30 @@ power cut discards volatile bytes, so reconstruction never relies on the
 driver's in-memory inode table.
 """
 
+# @req: REQ-SSPEC-LOCAL-001 — behavior under test holds under execution.
+"""
+## Purpose and audience
+
+Purpose: the behavior asserted in this spec  Audience: engineers reading this spec to confirm the behavior still holds.
+
+## Operator workflow
+
+1. Run `bin/simple test test/02_integration/storage/dbfs/dbfs_durable_commit_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the behavior under test.
+
+## Compatibility and limitations
+
+Covers the behavior asserted here; platform-specific behavior is out of scope.
+"""
+
+# doc-path: doc/01_research/local/dbfs_durable_commit_spec.md
+# doc-path: doc/03_plan/sys_test/dbfs_durable_commit_spec.md
+# doc-path: doc/04_architecture/dbfs_durable_commit_spec.md
+# doc-path: doc/05_design/dbfs_durable_commit_spec_oracles.md
+# @manual: primary
+
 use std.spipe.*
+use std.spec.step
 use std.db.dbfs_driver.{DbFsDriver}
 use std.fs_driver.block_device.{BlockDevice}
 use std.fs_driver.mem_block_device.{MemBlockDevice}
@@ -17,6 +40,7 @@ use std.fs_driver.mount_table.{MountTable}
 use std.fs_driver.types.{MountOptions}
 use std.fs_driver.capability.{Capability, FsCapabilitySet}
 use nogc_sync_mut.db.dbfs_driver.device_commit_owner.{
+
     DBFS_DEVICE_SERIALIZATION_MISSING,
     dbfs_device_mutex_provider_blocker,
     dbfs_device_registration_count
@@ -156,6 +180,8 @@ fn reopened_text(dev: DurableCrashDevice, path: text, block_count: i64) -> Resul
 
 describe "DBFS durable device commit":
     it "reconstructs exact bytes after an acknowledged fsync and power cut":
+        step("Verify: reconstructs exact bytes after an acknowledged fsync and power cut")
+        # @req: REQ-SSPEC-LOCAL-001
         val dev = DurableCrashDevice.new(32, 512)
         val driver = DbFsDriver.open_on_device(dev, 0, 32).unwrap()
         expect(driver.durability_serialization_ready()).to_be(true)
@@ -172,6 +198,8 @@ describe "DBFS durable device commit":
         expect(reopened_text(dev, "/state", 32).unwrap()).to_equal("committed-state")
 
     it "fails closed on flush failure and preserves the prior acknowledged checkpoint":
+        step("Verify: fails closed on flush failure and preserves the prior acknowledged checkpoint")
+        # @req: REQ-SSPEC-LOCAL-001
         val dev = DurableCrashDevice.new(32, 512)
         val driver = DbFsDriver.open_on_device(dev, 0, 32).unwrap()
         val handle = driver.open_path(Path(raw: "/state"), OpenFlags.create_write()).unwrap()
@@ -185,6 +213,8 @@ describe "DBFS durable device commit":
         expect(reopened_text(dev, "/state", 32).unwrap()).to_equal("old")
 
     it "rejects a higher torn checkpoint whose referenced blob never reached media":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: rejects a higher torn checkpoint whose referenced blob never reached media")
         val dev = DurableCrashDevice.new(32, 512)
         val driver = DbFsDriver.open_on_device(dev, 0, 32).unwrap()
         val handle = driver.open_path(Path(raw: "/state"), OpenFlags.create_write()).unwrap()
@@ -196,6 +226,8 @@ describe "DBFS durable device commit":
         expect(reopened_text(dev, "/state", 32).unwrap()).to_equal("old")
 
     it "reports corruption when neither bounded checkpoint slot validates":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: reports corruption when neither bounded checkpoint slot validates")
         val dev = DurableCrashDevice.new(32, 512)
         val driver = DbFsDriver.open_on_device(dev, 0, 32).unwrap()
         val handle = driver.open_path(Path(raw: "/state"), OpenFlags.create_write()).unwrap()
@@ -209,6 +241,8 @@ describe "DBFS durable device commit":
         expect(dbfs_device_registration_count()).to_equal(owners_before)
 
     it "rejects an unavailable durability backend instead of accepting a no-op":
+        step("Verify: rejects an unavailable durability backend instead of accepting a no-op")
+        # @req: REQ-SSPEC-LOCAL-001
         val dev = MemBlockDevice.new(32u64, 512u32)
         val driver = DbFsDriver.open_on_device(dev, 0, 32).unwrap()
         val handle = driver.open_path(Path(raw: "/state"), OpenFlags.create_write()).unwrap()
@@ -216,6 +250,8 @@ describe "DBFS durable device commit":
         expect(driver.fsync(handle).unwrap_err()).to_equal(FsError.IoError(code: 0u32))
 
     it "bounds the namespace checkpoint and rolls back the rejected entry":
+        step("Verify: bounds the namespace checkpoint and rolls back the rejected entry")
+        # @req: REQ-SSPEC-LOCAL-001
         val dev = DurableCrashDevice.new(160, 4096)
         val driver = DbFsDriver.open_on_device(dev, 0, 160).unwrap()
         var i: i64 = 0
@@ -226,6 +262,8 @@ describe "DBFS durable device commit":
         expect(driver.stat_path(Path(raw: "/overflow")).unwrap_err()).to_equal(FsError.NotFound)
 
     it "serializes interleaved commit transitions without crossing device owners":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: serializes interleaved commit transitions without crossing device owners")
         val left = DurableCrashDevice.new(32, 512)
         val right = DurableCrashDevice.new(32, 512)
         val left_driver = DbFsDriver.open_on_device(left, 0, 32).unwrap()
@@ -245,6 +283,8 @@ describe "DBFS durable device commit":
         expect(reopened_text(right, "/state", 32).unwrap()).to_equal("right-1")
 
     it "keeps descriptor and namespace visibility coherent across unlink":
+        step("Verify: keeps descriptor and namespace visibility coherent across unlink")
+        # @req: REQ-SSPEC-LOCAL-001
         val dev = DurableCrashDevice.new(32, 512)
         val driver = DbFsDriver.open_on_device(dev, 0, 32).unwrap()
         val handle = driver.open_path(
@@ -259,6 +299,8 @@ describe "DBFS durable device commit":
             FsError.InvalidArg)
 
     it "uses one append cursor for passthrough bytes and committed file blobs":
+        step("Verify: uses one append cursor for passthrough bytes and committed file blobs")
+        # @req: REQ-SSPEC-LOCAL-001
         val dev = DurableCrashDevice.new(32, 512)
         val driver = DbFsDriver.open_on_device(dev, 0, 32).unwrap()
         var prefix: [u8] = []
@@ -272,6 +314,8 @@ describe "DBFS durable device commit":
         expect(reopened_text(dev, "/state", 32).unwrap()).to_equal("after-prefix")
 
     it "flushes unbound passthrough bytes even without a pending checkpoint":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: flushes unbound passthrough bytes even without a pending checkpoint")
         val dev = DurableCrashDevice.new(32, 512)
         val driver = DbFsDriver.open_on_device(dev, 0, 32).unwrap()
         val handle = driver.open_path(
@@ -285,6 +329,8 @@ describe "DBFS durable device commit":
         expect(dev.read_sector(1u64).unwrap()[0]).to_equal(0xA5u8)
 
     it "rejects the SimpleOS no-op mutex provider with a stable blocker":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: rejects the SimpleOS no-op mutex provider with a stable blocker")
         expect(dbfs_device_mutex_provider_blocker(
             "x86_64-baremetal-simpleos")).to_equal(
                 DBFS_DEVICE_SERIALIZATION_MISSING)

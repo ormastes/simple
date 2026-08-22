@@ -20,12 +20,35 @@ tables are required. All assertions use type-level struct fields only.
 """
 
 use std.spec.{describe, it, expect}
+use std.spec.step
 use os.kernel.types.vmspace_types.{
     VmArea, ProcessVmSpace,
     VMA_ANON, VMA_FILE, VMA_SHARED,
     VMA_READ, VMA_WRITE, VMA_EXEC, VMA_COW
 }
 use os.kernel.memory.vmm_vma.{vma_add, vma_find, vma_remove, vma_split}
+# @req: REQ-SSPEC-LOCAL-001 — behavior under test holds under execution.
+"""
+## Purpose and audience
+
+Purpose: the behavior asserted in this spec  Audience: engineers reading this spec to confirm the behavior still holds.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/os/kernel/memory/vmm_vma_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the behavior under test.
+
+## Compatibility and limitations
+
+Covers the behavior asserted here; platform-specific behavior is out of scope.
+"""
+
+# doc-path: doc/01_research/local/vmm_vma_spec.md
+# doc-path: doc/03_plan/sys_test/vmm_vma_spec.md
+# doc-path: doc/04_architecture/vmm_vma_spec.md
+# doc-path: doc/05_design/vmm_vma_spec_oracles.md
+# @manual: primary
+
 
 # ============================================================================
 # Helpers
@@ -74,6 +97,8 @@ fn _make_file(start: u64, len: u64, backing: u64, offset: u64) -> VmArea:
 
 describe "VmArea construction":
     it "creates anon area with correct fields":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: creates anon area with correct fields")
         val area = _make_anon(0x400000, 0x1000)
         expect(area.start).to_equal(0x400000)
         expect(area.len).to_equal(0x1000)
@@ -81,18 +106,24 @@ describe "VmArea construction":
         expect(area.flags).to_equal(VMA_READ | VMA_WRITE)
 
     it "creates file-backed area with backing handle":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: creates file-backed area with backing handle")
         val area = _make_file(0x600000, 0x2000, 42, 0x100)
         expect(area.kind).to_equal(VMA_FILE)
         expect(area.backing).to_equal(42)
         expect(area.backing_offset).to_equal(0x100)
 
     it "VMA_COW flag is distinct from VMA_WRITE":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: VMA_COW flag is distinct from VMA_WRITE")
         val cow_flags = VMA_READ | VMA_WRITE | VMA_COW
         expect(cow_flags & VMA_COW).to_be_greater_than(0)
         expect(cow_flags & VMA_WRITE).to_be_greater_than(0)
         expect(VMA_COW).to_equal(8)
 
     it "VMA kind constants are distinct":
+        step("Verify: VMA kind constants are distinct")
+        # @req: REQ-SSPEC-LOCAL-001
         expect(VMA_ANON).to_equal(0)
         expect(VMA_FILE).to_equal(1)
         expect(VMA_SHARED).to_equal(2)
@@ -103,14 +134,20 @@ describe "VmArea construction":
 
 describe "ProcessVmSpace construction":
     it "starts with zero VMAs":
+        step("Verify: starts with zero VMAs")
+        # @req: REQ-SSPEC-LOCAL-001
         val space = _make_space()
         expect(space.vma_count).to_equal(0)
 
     it "stores pml4 address":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: stores pml4 address")
         val space = _make_space()
         expect(space.pml4).to_equal(0xDEAD0000)
 
     it "stores id":
+        step("Verify: stores id")
+        # @req: REQ-SSPEC-LOCAL-001
         val space = _make_space()
         expect(space.id).to_equal(1)
 
@@ -120,6 +157,8 @@ describe "ProcessVmSpace construction":
 
 describe "vma_add":
     it "adds single VMA — count becomes 1":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: adds single VMA — count becomes 1")
         var space = _make_space()
         val area = _make_anon(0x400000, 0x1000)
         val result = vma_add(space, area)
@@ -128,6 +167,8 @@ describe "vma_add":
         expect(space.vma_count).to_equal(1)
 
     it "adds two non-overlapping VMAs":
+        step("Verify: adds two non-overlapping VMAs")
+        # @req: REQ-SSPEC-LOCAL-001
         var space = _make_space()
         val a1 = _make_anon(0x400000, 0x1000)
         val a2 = _make_anon(0x402000, 0x1000)
@@ -140,6 +181,8 @@ describe "vma_add":
         expect(space.vma_count).to_equal(2)
 
     it "rejects overlapping VMA — returns -EEXIST":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: rejects overlapping VMA — returns -EEXIST")
         var space = _make_space()
         val a1 = _make_anon(0x400000, 0x2000)
         val a2 = _make_anon(0x401000, 0x1000)  # overlaps a1
@@ -152,6 +195,8 @@ describe "vma_add":
         expect(space.vma_count).to_equal(1)
 
     it "rejects VMA touching the end of existing one at exact boundary — no overlap":
+        step("Verify: rejects VMA touching the end of existing one at exact boundary — no overlap")
+        # @req: REQ-SSPEC-LOCAL-001
         var space = _make_space()
         val a1 = _make_anon(0x400000, 0x1000)
         val a2 = _make_anon(0x401000, 0x1000)  # starts exactly at end of a1
@@ -169,6 +214,8 @@ describe "vma_add":
 
 describe "vma_find":
     it "finds VMA by address inside it":
+        step("Verify: finds VMA by address inside it")
+        # @req: REQ-SSPEC-LOCAL-001
         var space = _make_space()
         val area = _make_anon(0x400000, 0x4000)
         space = vma_add(space, area).space
@@ -180,6 +227,8 @@ describe "vma_find":
             expect(0).to_equal(1)   # force failure if nil
 
     it "returns nil for unmapped address":
+        step("Verify: returns nil for unmapped address")
+        # @req: REQ-SSPEC-LOCAL-001
         var space = _make_space()
         val area = _make_anon(0x400000, 0x1000)
         space = vma_add(space, area).space
@@ -190,6 +239,8 @@ describe "vma_find":
             expect(0).to_equal(1)   # should be nil — fail if reached
 
     it "finds correct VMA among multiple":
+        step("Verify: finds correct VMA among multiple")
+        # @req: REQ-SSPEC-LOCAL-001
         var space = _make_space()
         val a1 = _make_anon(0x400000, 0x1000)
         val a2 = _make_anon(0x402000, 0x1000)
@@ -204,6 +255,8 @@ describe "vma_find":
             expect(0).to_equal(1)
 
     it "does not find address exactly at end (exclusive)":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: does not find address exactly at end (exclusive)")
         var space = _make_space()
         val area = _make_anon(0x400000, 0x1000)
         space = vma_add(space, area).space
@@ -219,6 +272,8 @@ describe "vma_find":
 
 describe "vma_remove":
     it "removing entire VMA reduces count to 0":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: removing entire VMA reduces count to 0")
         var space = _make_space()
         val area = _make_anon(0x400000, 0x4000)
         space = vma_add(space, area).space
@@ -236,6 +291,8 @@ describe "vma_remove":
             expect(0).to_equal(1)   # should be nil — fail if reached
 
     it "splitting a VMA produces two smaller VMAs":
+        step("Verify: splitting a VMA produces two smaller VMAs")
+        # @req: REQ-SSPEC-LOCAL-001
         var space = _make_space()
         val area = _make_anon(0x400000, 0x4000)
         space = vma_add(space, area).space
@@ -250,6 +307,8 @@ describe "vma_remove":
         expect(space.areas[1].len).to_equal(0x2000)
 
     it "backing_offset of right fragment is correct after split":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: backing_offset of right fragment is correct after split")
         var space = _make_space()
         val area = _make_file(0x500000, 0x8000, 7, 0x1000)
         space = vma_add(space, area).space

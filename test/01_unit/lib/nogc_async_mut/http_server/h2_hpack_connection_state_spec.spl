@@ -1,9 +1,33 @@
+# @req: REQ-SSPEC-LOCAL-001 — behavior under test holds under execution.
+"""
+## Purpose and audience
+
+Purpose: the behavior asserted in this spec  Audience: engineers reading this spec to confirm the behavior still holds.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/lib/nogc_async_mut/http_server/h2_hpack_connection_state_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the behavior under test.
+
+## Compatibility and limitations
+
+Covers the behavior asserted here; platform-specific behavior is out of scope.
+"""
+
+# doc-path: doc/01_research/local/h2_hpack_connection_state_spec.md
+# doc-path: doc/03_plan/sys_test/h2_hpack_connection_state_spec.md
+# doc-path: doc/04_architecture/h2_hpack_connection_state_spec.md
+# doc-path: doc/05_design/h2_hpack_connection_state_spec_oracles.md
+# @manual: primary
+
 use std.spec
+use std.spec.step
 use std.common.hpack.encoder.{HpackHeader, hpack_decoder_new}
 use std.common.hpack.decoder.{hpack_decode}
 use std.http_server.h2_request_headers.{h2_validate_request_headers}
 use std.http_server.h2_connection.{H2Connection}
 use std.http.h2.h2_frame.{
+
     H2Frame, H2HeadersFrame, H2ContinuationFrame, H2DataFrame,
     H2_FLAG_END_HEADERS
 }
@@ -22,6 +46,8 @@ fn valid_get_headers() -> [HpackHeader]:
 
 describe "HTTP/2 connection HPACK and request validation":
     it "retains incrementally indexed fields across blocks on one connection":
+        step("Verify: retains incrementally indexed fields across blocks on one connection")
+        # @req: REQ-SSPEC-LOCAL-001
         # Literal with incremental indexing: x-a: one.
         val block1: [u8] = [0x40, 0x03, 0x78, 0x2d, 0x61, 0x03, 0x6f, 0x6e, 0x65]
         val first = hpack_decode(block1, hpack_decoder_new(256))
@@ -37,20 +63,28 @@ describe "HTTP/2 connection HPACK and request validation":
         expect(second.unwrap().0[0].value).to_equal("one")
 
     it "rejects dynamic table growth above the connection limit":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: rejects dynamic table growth above the connection limit")
         # 001xxxxx with a 5-bit prefix: size update to 257.
         val oversized_update: [u8] = [0x3f, 0xe2, 0x01]
         val result = hpack_decode(oversized_update, hpack_decoder_new(256))
         expect(result.is_err()).to_equal(true)
 
     it "rejects a table size update after a header field":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: rejects a table size update after a header field")
         val late_update: [u8] = [0x82, 0x20]
         val result = hpack_decode(late_update, hpack_decoder_new(256))
         expect(result.is_err()).to_equal(true)
 
     it "accepts a complete ordered request field section":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: accepts a complete ordered request field section")
         expect(h2_validate_request_headers(valid_get_headers()).valid).to_equal(true)
 
     it "rejects missing duplicate late and response pseudo-headers":
+        step("Verify: rejects missing duplicate late and response pseudo-headers")
+        # @req: REQ-SSPEC-LOCAL-001
         expect(h2_validate_request_headers([header(":method", "GET")]).valid).to_equal(false)
         expect(h2_validate_request_headers([
             header(":method", "GET"), header(":method", "POST"),
@@ -66,6 +100,8 @@ describe "HTTP/2 connection HPACK and request validation":
         ]).valid).to_equal(false)
 
     it "rejects uppercase and connection-specific request fields":
+        step("Verify: rejects uppercase and connection-specific request fields")
+        # @req: REQ-SSPEC-LOCAL-001
         var uppercase = valid_get_headers()
         uppercase.push(header("X-Test", "bad"))
         expect(h2_validate_request_headers(uppercase).valid).to_equal(false)
@@ -74,6 +110,8 @@ describe "HTTP/2 connection HPACK and request validation":
         expect(h2_validate_request_headers(forbidden).valid).to_equal(false)
 
     it "rejects invalid field bytes and oversized expanded lists":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: rejects invalid field bytes and oversized expanded lists")
         var invalid_value = valid_get_headers()
         invalid_value.push(header("x-test", "bad\rvalue"))
         expect(h2_validate_request_headers(invalid_value).valid).to_equal(false)
@@ -85,6 +123,8 @@ describe "HTTP/2 connection HPACK and request validation":
         expect(h2_validate_request_headers(oversized).valid).to_equal(false)
 
     it "enforces CONNECT pseudo-header shape":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: enforces CONNECT pseudo-header shape")
         val valid_connect = [header(":method", "CONNECT"), header(":authority", "example.test:443")]
         expect(h2_validate_request_headers(valid_connect).valid).to_equal(true)
         val invalid_connect = [
@@ -94,6 +134,8 @@ describe "HTTP/2 connection HPACK and request validation":
         expect(h2_validate_request_headers(invalid_connect).valid).to_equal(false)
 
     it "accepts only matching CONTINUATION frames inside an open envelope":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: accepts only matching CONTINUATION frames inside an open envelope")
         var conn = H2Connection.new(10, "peer", 1)
         val opened = conn.dispatch_frame(H2Frame.Headers(H2HeadersFrame(
             stream_id: 1, flags: 0, header_block: [0x82]
@@ -107,6 +149,8 @@ describe "HTTP/2 connection HPACK and request validation":
         expect(conn.pending_continuation_stream_id).to_equal(0)
 
     it "rejects a CONTINUATION on an unknown stream or after END_HEADERS":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: rejects a CONTINUATION on an unknown stream or after END_HEADERS")
         var unknown = H2Connection.new(11, "peer", 1)
         val unknown_ok = unknown.dispatch_frame(H2Frame.Continuation(H2ContinuationFrame(
             stream_id: 1, flags: H2_FLAG_END_HEADERS, header_block: []
@@ -125,6 +169,8 @@ describe "HTTP/2 connection HPACK and request validation":
         expect(ended.is_goaway_sent()).to_equal(true)
 
     it "rejects interleaved frames and CONTINUATION on a different stream":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: rejects interleaved frames and CONTINUATION on a different stream")
         var interleaved = H2Connection.new(13, "peer", 1)
         interleaved.dispatch_frame(H2Frame.Headers(H2HeadersFrame(
             stream_id: 1, flags: 0, header_block: [0x82]

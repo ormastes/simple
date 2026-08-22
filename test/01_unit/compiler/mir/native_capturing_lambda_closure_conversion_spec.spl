@@ -23,6 +23,7 @@ and compares its stdout against the interpreter lane on the same source.
 """
 
 use std.spec
+use std.spec.step
 use std.io_runtime.{file_write, process_run, env_get}
 use compiler.common.config.{Logger}
 use compiler.frontend.frontend.{parse_full_frontend}
@@ -30,6 +31,28 @@ use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
 use compiler.mir.mir.*
 use compiler.mir.mir_lowering.{MirLowering}
+# @req: REQ-SSPEC-LOCAL-001 — behavior under test holds under execution.
+"""
+## Purpose and audience
+
+Purpose: the behavior asserted in this spec  Audience: engineers reading this spec to confirm the behavior still holds.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/compiler/mir/native_capturing_lambda_closure_conversion_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the behavior under test.
+
+## Compatibility and limitations
+
+Covers the behavior asserted here; platform-specific behavior is out of scope.
+"""
+
+# doc-path: doc/01_research/local/native_capturing_lambda_closure_conversion_spec.md
+# doc-path: doc/03_plan/sys_test/native_capturing_lambda_closure_conversion_spec.md
+# doc-path: doc/04_architecture/native_capturing_lambda_closure_conversion_spec.md
+# doc-path: doc/05_design/native_capturing_lambda_closure_conversion_spec_oracles.md
+# @manual: primary
+
 
 # NOTE: no `{...}` interpolation in the embedded source (the spec's own lexer
 # would resolve it); the fixture prints via string concatenation instead.
@@ -114,12 +137,16 @@ fn errors_joined(errs: [MirError]) -> text:
 
 describe "capturing lambda MIR closure conversion", tag: ["only-compiled"]:
     it "lowers a val-bound capturing lambda call without 'undefined variable'":
+        step("Verify: lowers a val-bound capturing lambda call without 'undefined variable'")
+        # @req: REQ-SSPEC-LOCAL-001
         val src = "fn run() -> i64:\n    val k = 5\n    val add_k = \\v: v + k\n    add_k(10)\n"
         val errs = errors_joined(lowering_errors(src))
         expect_not(errs.contains("undefined variable"))
         expect_not(errs.contains("E-MIR-EXPR-Lambda"))
 
     it "materializes a capturing lambda call argument as an rt_closure_new env":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: materializes a capturing lambda call argument as an rt_closure_new env")
         val src = "fn apply(f: fn(i64) -> i64, x: i64) -> i64:\n    f(x)\nfn run() -> i64:\n    val k = 5\n    apply(\\v: v + k, 10)\n"
         val errs = errors_joined(lowering_errors(src))
         expect_not(errs.contains("E-MIR-EXPR-Lambda"))
@@ -130,18 +157,24 @@ describe "capturing lambda MIR closure conversion", tag: ["only-compiled"]:
         expect(count_direct_calls_named(mir, "rt_closure_get_capture")).to_equal(1)
 
     it "lowers a capturing lambda returned from a fn":
+        step("Verify: lowers a capturing lambda returned from a fn")
+        # @req: REQ-SSPEC-LOCAL-001
         val src = "fn make_adder(k: i64) -> fn(i64) -> i64:\n    \\v: v + k\n"
         val errs = errors_joined(lowering_errors(src))
         expect_not(errs.contains("E-MIR-EXPR-Lambda"))
         expect(has_function_prefix(lower_source(src), "__lambda_lift_")).to_equal(true)
 
     it "lowers a nested capturing lambda (inner captures the outer's param and a local)":
+        step("Verify: lowers a nested capturing lambda (inner captures the outer's param and a local)")
+        # @req: REQ-SSPEC-LOCAL-001
         val src = "fn apply(f: fn(i64) -> i64, x: i64) -> i64:\n    f(x)\nfn run() -> i64:\n    val outer = 2\n    val nested = \\a: apply(\\b: b + a + outer, 10)\n    nested(1)\n"
         val errs = errors_joined(lowering_errors(src))
         expect_not(errs.contains("undefined variable"))
         expect_not(errs.contains("E-MIR-EXPR-Lambda"))
 
     it "calls a fn-typed struct field holding a capturing lambda via method-call syntax":
+        step("Verify: calls a fn-typed struct field holding a capturing lambda via method-call syntax")
+        # @req: REQ-SSPEC-LOCAL-001
         val src = "struct Holder:\n    f: fn(i64) -> i64\nfn run() -> i64:\n    val k = 5\n    val h = Holder(f: \\v: v * k)\n    h.f(4)\n"
         val errs = errors_joined(lowering_errors(src))
         expect_not(errs.contains("unresolved method call: f"))
@@ -149,7 +182,9 @@ describe "capturing lambda MIR closure conversion", tag: ["only-compiled"]:
 
 describe "capturing lambdas native-build dual-run", tag: ["only-compiled", "slow"]:
     it "native-builds all six capture shapes and matches the interpreter lane":
+        # @req: REQ-SSPEC-LOCAL-001
         step("Write the fixture and run it on the interpreter lane")
+        # @capture: the expect/assert oracle below is the complete typed evidence for this scenario
         # An ABSOLUTE scratch dir: a repo-relative path under build/ is read by
         # native-build as module `build.test_artifacts...` and fails with
         # "missing importing module surface".

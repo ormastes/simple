@@ -1,4 +1,5 @@
 use std.spec
+use std.spec.step
 use compiler.common.config.{Logger}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.hir.hir_lowering.types.{HirLowering}
@@ -11,6 +12,28 @@ use compiler.mir.mir.*
 use compiler.mir.mir_lowering.{MirLowering}
 use compiler.backend.{MirToLlvm}
 use compiler.backend.backend.backend_types.{CodegenTarget}
+# @req: REQ-SSPEC-LOCAL-001 — behavior under test holds under execution.
+"""
+## Purpose and audience
+
+Purpose: the behavior asserted in this spec  Audience: engineers reading this spec to confirm the behavior still holds.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/compiler/mir/fn_typed_parameter_indirect_call_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the behavior under test.
+
+## Compatibility and limitations
+
+Covers the behavior asserted here; platform-specific behavior is out of scope.
+"""
+
+# doc-path: doc/01_research/local/fn_typed_parameter_indirect_call_spec.md
+# doc-path: doc/03_plan/sys_test/fn_typed_parameter_indirect_call_spec.md
+# doc-path: doc/04_architecture/fn_typed_parameter_indirect_call_spec.md
+# doc-path: doc/05_design/fn_typed_parameter_indirect_call_spec_oracles.md
+# @manual: primary
+
 
 # Bug stage1_lexer_hir_fatals_eprint_and_generic_len_helper_2026-08-22 (fn-param
 # call half): `fn apply(f: fn(i64) -> i64, x: i64) -> i64: f(x)` lowered `f(x)`
@@ -102,6 +125,8 @@ val apply_source = "fn apply(f: fn(i64) -> i64, x: i64) -> i64:\n    f(x)\n\nfn 
 
 describe "fn-typed parameter call MIR lowering", tag: ["only-compiled"]:
     it "calls a fn-typed parameter indirectly, never as a direct symbol call to its name":
+        step("Verify: calls a fn-typed parameter indirectly, never as a direct symbol call to its name")
+        # @req: REQ-SSPEC-LOCAL-001
         val mir = lower_source(apply_source)
         val apply_fn = find_function(mir, "apply")
         assert_true(apply_fn.?)
@@ -111,6 +136,8 @@ describe "fn-typed parameter call MIR lowering", tag: ["only-compiled"]:
         expect(count_indirect_calls(f)).to_equal(2)
 
     it "merges the indirect-call result through one slot, not a multi-def temp":
+        step("Verify: merges the indirect-call result through one slot, not a multi-def temp")
+        # @req: REQ-SSPEC-LOCAL-001
         val mir = lower_source(apply_source)
         val f = find_function(mir, "apply").unwrap()
         assert_true(max_copy_dest_block_count(f) <= 1)
@@ -133,6 +160,8 @@ describe "fn-typed parameter call MIR lowering", tag: ["only-compiled"]:
         assert_true(saw_load)
 
     it "passes a named function as the argument, keeping the outer call direct":
+        step("Verify: passes a named function as the argument, keeping the outer call direct")
+        # @req: REQ-SSPEC-LOCAL-001
         val mir = lower_source(apply_source)
         val main_fn = find_function(mir, "main").unwrap()
         assert_true(has_direct_call_named(main_fn, "apply"))
@@ -141,6 +170,8 @@ describe "fn-typed parameter call MIR lowering", tag: ["only-compiled"]:
     # Neighbour: a fn-typed LOCAL bound from a named function is the same
     # defect class (bound through bind_local, not local_map).
     it "calls a fn-typed local holding a named function indirectly":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: calls a fn-typed local holding a named function indirectly")
         val source = "fn double(v: i64) -> i64:\n    v * 2\n\nfn run() -> i64:\n    val g: fn(i64) -> i64 = double\n    g(4)\n"
         val mir = lower_source(source)
         val run_fn = find_function(mir, "run").unwrap()
@@ -150,6 +181,8 @@ describe "fn-typed parameter call MIR lowering", tag: ["only-compiled"]:
     # Over-demotion guard: an ordinary call to a top-level function whose name
     # is NOT a local stays direct.
     it "keeps an ordinary top-level function call direct":
+        step("Verify: keeps an ordinary top-level function call direct")
+        # @req: REQ-SSPEC-LOCAL-001
         val mir = lower_source(apply_source)
         val main_fn = find_function(mir, "main").unwrap()
         assert_true(has_direct_call_named(main_fn, "apply"))
@@ -157,6 +190,8 @@ describe "fn-typed parameter call MIR lowering", tag: ["only-compiled"]:
     # A val-bound lambda keeps its existing beta-reduction path (it is also
     # reachable through find_local now, but must not be demoted).
     it "still inlines a val-bound lambda call instead of demoting it":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: still inlines a val-bound lambda call instead of demoting it")
         val source = "fn run() -> i64:\n    val inc = \\v: v + 1\n    inc(4)\n"
         val mir = lower_source(source)
         val run_fn = find_function(mir, "run").unwrap()
@@ -165,6 +200,8 @@ describe "fn-typed parameter call MIR lowering", tag: ["only-compiled"]:
 
 describe "fn reference constant LLVM emission", tag: ["only-compiled"]:
     it "emits a struct-literal fn field as a function reference, not a string literal":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: emits a struct-literal fn field as a function reference, not a string literal")
         val source = "struct Op:\n    f: fn(i64) -> i64\n\nfn double(v: i64) -> i64:\n    v * 2\n\nfn run() -> i64:\n    val op = Op(f: double)\n    (op.f)(4)\n"
         val mir = lower_source(source)
         val llvm = MirToLlvm.create("test.fn_param.struct_field", CodegenTarget.X86_64, nil).translate_module(mir)
@@ -172,6 +209,8 @@ describe "fn reference constant LLVM emission", tag: ["only-compiled"]:
         expect_not(llvm.contains("c\"double\\00\""))
 
     it "emits the indirect-call diamond as SSA-valid IR with a single merge load":
+        step("Verify: emits the indirect-call diamond as SSA-valid IR with a single merge load")
+        # @req: REQ-SSPEC-LOCAL-001
         val mir = lower_source(apply_source)
         val llvm = MirToLlvm.create("test.fn_param.apply", CodegenTarget.X86_64, nil).translate_module(mir)
         assert_true(llvm.contains("call i64 @rt_closure_func_ptr"))
