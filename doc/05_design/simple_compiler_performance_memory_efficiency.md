@@ -304,3 +304,6 @@ Every BCE entrypoint remains identity while status is `Disabled`. A future trans
 ## General loop-transform rehabilitation contract
 
 LICM, full/partial unrolling, and combined loop optimization remain identity at every callable surface while disabled. LICM requires canonical preheaders, dominance/post-dominance, MemorySSA-lite, alias/effect invalidation, speculatability/trap and zero-trip proof. Unrolling additionally requires exact induction/trip semantics, SSA renaming, exit/continue/break/unwind preservation, ownership/destruction order, code-size/register-pressure profitability, and target validation. Combined passes route only through status-aware dispatch; they never chain class methods around it.
+## Generator analysis and rehabilitation contract
+
+`analyze_yields` is an analysis-only storage-order scaffold. It may report conservative named/argument locals but does not prove CFG liveness or frame layout. Generator transformation remains identity until shared def-use/liveness, suspension ownership, frame type/layout/alignment, state ABI, exception/unwind, drop/destruction, reentrancy, debug, and runtime protocol contracts are complete. Rehabilitation uses a dedicated lowering owner and positive runtime witnesses; optimizer class methods never independently invent the coroutine ABI.
