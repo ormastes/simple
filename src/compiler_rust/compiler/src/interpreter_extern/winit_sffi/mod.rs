@@ -489,5 +489,13 @@ mod tests {
             dispatch("rt_winit_window_present_staged", &invalid).unwrap(),
             Value::Int(0)
         ));
+        assert!(matches!(
+            dispatch(
+                "rt_winit_window_stage_clear",
+                &[Value::Int(i64::MAX), Value::Int(-1), Value::Int(1), Value::Int(0),],
+            )
+            .unwrap(),
+            Value::Int(0)
+        ));
     }
 }

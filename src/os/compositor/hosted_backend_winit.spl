@@ -1,8 +1,11 @@
 use os.compositor.display_backend_core.{CompositorBackend, CompositorGlassCapable}
 use common.ui.glyph_bitmap_8x16.{get_glyph_8x16}
 
+@unsafe(reason: "raw Winit staging borrow ABI; zero sentinel reports invalid handle/extent/allocation and nonzero pointer is valid only until present or resize", capabilities: [ffi, raw_ptr])
 extern fn rt_winit_window_staging_ptr(win: i64, w: i64, h: i64) -> i64
+@unsafe(reason: "raw Winit staging clear status ABI; zero sentinel reports invalid handle/extent/allocation", capabilities: [ffi])
 extern fn rt_winit_window_stage_clear(win: i64, w: i64, h: i64, color: i64) -> i64
+@unsafe(reason: "raw Winit staged-present status ABI; zero sentinel reports invalid handle or descriptor mismatch and consumes no caller memory", capabilities: [ffi])
 extern fn rt_winit_window_present_staged(win: i64, w: i64, h: i64) -> i64
 @unsafe(reason: "nonnull raw store; staging allocation and bounds are caller-owned", capabilities: [ffi, raw_ptr])
 extern fn rt_ptr_write_i32(addr: i64, offset: i64, value: i32)
@@ -21,7 +24,11 @@ class HostedWinitBufferBackend:
     static fn create(window_id: i64, w: i32, h: i32, clear_color: u32) -> HostedWinitBufferBackend?:
         if window_id <= 0 or w <= 0 or h <= 0:
             return nil
-        if rt_winit_window_stage_clear(window_id, w.to_i64(), h.to_i64(), clear_color.to_i64()) == 0:
+        var clear_status: i64 = 0
+        unsafe(capabilities: [ffi]):
+            clear_status = rt_winit_window_stage_clear(
+                window_id, w.to_i64(), h.to_i64(), clear_color.to_i64())
+        if clear_status == 0:
             return nil
         val backend = HostedWinitBufferBackend.new(window_id, window_id, w, h)
         backend.pixels = [clear_color; w * h]
@@ -42,14 +49,22 @@ fn hosted_winit_present_pure_simple_pixels(backend: HostedWinitBufferBackend, pi
     backend.w = width
     backend.h = height
     backend.pixels = pixels
-    val ptr = rt_winit_window_staging_ptr(backend.window_id, width as i64, height as i64)
+    var ptr: i64 = 0
+    unsafe(capabilities: [ffi, raw_ptr]):
+        ptr = rt_winit_window_staging_ptr(
+            backend.window_id, width as i64, height as i64)
     if ptr <= 0:
         return false
     var i = 0
     while i < pixels.len():
-        rt_ptr_write_i32(ptr, i as i64 * 4, pixels[i] as i32)
+        unsafe(capabilities: [ffi, raw_ptr]):
+            rt_ptr_write_i32(ptr, i as i64 * 4, pixels[i] as i32)
         i = i + 1
-    if rt_winit_window_present_staged(backend.window_id, width as i64, height as i64) == 0:
+    var present_status: i64 = 0
+    unsafe(capabilities: [ffi]):
+        present_status = rt_winit_window_present_staged(
+            backend.window_id, width as i64, height as i64)
+    if present_status == 0:
         return false
     backend.present_count = backend.present_count + 1
     true
@@ -120,13 +135,22 @@ impl CompositorBackend for HostedWinitBufferBackend:
 
     me present():
         if self.window_id > 0:
-            val ptr = rt_winit_window_staging_ptr(self.window_id, self.w.to_i64(), self.h.to_i64())
+            var ptr: i64 = 0
+            unsafe(capabilities: [ffi, raw_ptr]):
+                ptr = rt_winit_window_staging_ptr(
+                    self.window_id, self.w.to_i64(), self.h.to_i64())
             if ptr > 0:
                 var i = 0
                 while i < self.pixels.len():
-                    rt_ptr_write_i32(ptr, i.to_i64() * 4, self.pixels[i].to_i32())
+                    unsafe(capabilities: [ffi, raw_ptr]):
+                        rt_ptr_write_i32(
+                            ptr, i.to_i64() * 4, self.pixels[i].to_i32())
                     i = i + 1
-                if rt_winit_window_present_staged(self.window_id, self.w.to_i64(), self.h.to_i64()) != 0:
+                var present_status: i64 = 0
+                unsafe(capabilities: [ffi]):
+                    present_status = rt_winit_window_present_staged(
+                        self.window_id, self.w.to_i64(), self.h.to_i64())
+                if present_status != 0:
                     self.present_count = self.present_count + 1
 
     me present_rect(x: i32, y: i32, w: i32, h: i32):

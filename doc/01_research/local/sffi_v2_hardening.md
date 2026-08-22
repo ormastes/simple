@@ -733,3 +733,20 @@ five-example integration spec, and a call/memory-shape audit pass. This closes
 the Winit declaration-contract slice only; signed provider admission and
 artifact-bound proof/sanitizer receipts remain required before Winit or global
 SFFI can be called verified.
+
+Duplicate Winit staging bindings in `hosted_backend_winit.spl` and the BMP
+export in `dual_backend.spl` were untagged and exposed two provider defects.
+Native and interpreter staging-clear paths clamped invalid dimensions and used
+unchecked extent multiplication; the native BMP writer accepted dimensions
+that did not match the borrowed pixel length before constructing its slice.
+Both lanes now reject zero, negative, overflowing, over-`isize`, and mismatched
+extents before allocation or pointer/slice construction. The four duplicate
+declarations carry exact minimal unsafe contracts and calls use lexical scopes.
+
+Presentation retains one staging acquisition, one write per pixel, and one
+present call, with no added buffer, lookup, lock, hash, retry, or sleep. The BMP
+comparison lane retains one write call per output and now reports failure.
+Native provider tests, the GUI interpreter test, two Simple checks, lint, and a
+source call/memory-shape audit pass. The broader WM seam spec remains red only
+for its documented pre-existing missing FreeBSD implementation; it passed the
+other ten examples. Signed artifact admission remains outstanding.

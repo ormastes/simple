@@ -159,3 +159,8 @@ passing placeholder.
     release call and allocation shape; the canonical module is 30/30 contracted.
     Next migrate duplicated Winit bindings and implement signed, artifact-bound
     provider admission before claiming verified status.
+30. Four duplicate Winit staging/BMP declarations now have exact lexical unsafe
+    contracts; native and interpreter paths reject invalid or mismatched extents
+    before allocation/pointer lift while preserving presentation call/memory
+    shape. Continue the hosted-entry, compositor-input, Chromium, and game
+    duplicate bindings, then implement signed provider admission.

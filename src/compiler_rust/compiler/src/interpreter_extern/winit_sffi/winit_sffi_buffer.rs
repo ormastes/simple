@@ -450,6 +450,19 @@ pub(super) fn dispatch_buffer(name: &str, args: &[Value]) -> Result<Value, Compi
             let width = get_i64(args, 1, name)?;
             let height = get_i64(args, 2, name)?;
             let pixels = get_pixels(args, 3, name)?;
+            let (Ok(w), Ok(h)) = (usize::try_from(width), usize::try_from(height)) else {
+                return Ok(bool_value(false));
+            };
+            let Some(expected_len) = w.checked_mul(h) else {
+                return Ok(bool_value(false));
+            };
+            if w == 0
+                || h == 0
+                || expected_len > isize::MAX as usize / std::mem::size_of::<u32>()
+                || pixels.len() != expected_len
+            {
+                return Ok(bool_value(false));
+            }
             let cpath = checked_cstring(path, name, "path")?;
             let path_ptr = cpath.as_ptr() as i64;
             let pixels_ptr = pixels.as_ptr() as i64;

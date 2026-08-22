@@ -302,8 +302,15 @@ pub(super) fn dispatch_window(name: &str, args: &[Value]) -> Result<Value, Compi
         }
         "rt_winit_window_stage_clear" => {
             let window_id = get_i64(args, 0, name)?;
-            let width = get_i64(args, 1, name)?.max(1) as u32;
-            let height = get_i64(args, 2, name)?.max(1) as u32;
+            let Ok(width) = u32::try_from(get_i64(args, 1, name)?) else {
+                return Ok(int_value(0));
+            };
+            let Ok(height) = u32::try_from(get_i64(args, 2, name)?) else {
+                return Ok(int_value(0));
+            };
+            if width == 0 || height == 0 {
+                return Ok(int_value(0));
+            }
             let color = get_i64(args, 3, name)? as u32;
             if !WINDOW_OWNERS.lock().contains_key(&window_id) {
                 set_last_error(format!("invalid window handle: {window_id}"));
@@ -315,7 +322,12 @@ pub(super) fn dispatch_window(name: &str, args: &[Value]) -> Result<Value, Compi
                 height: 0,
                 pixels: Vec::new(),
             });
-            let want = width as usize * height as usize;
+            let Some(want) = (width as usize).checked_mul(height as usize) else {
+                return Ok(int_value(0));
+            };
+            if want > isize::MAX as usize / std::mem::size_of::<u32>() {
+                return Ok(int_value(0));
+            }
             if slot.pixels.len() != want {
                 slot.pixels = vec![0u32; want];
             }

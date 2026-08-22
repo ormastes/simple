@@ -749,9 +749,18 @@ pub extern "C" fn rt_winit_window_stage_clear(win: i64, w: i64, h: i64, color: i
         let Some(slot) = ps.inner.windows.get_mut(&win) else {
             return 0;
         };
-        let want_w = w.max(1) as u32;
-        let want_h = h.max(1) as u32;
-        let want = want_w as usize * want_h as usize;
+        let (Ok(want_w), Ok(want_h)) = (u32::try_from(w), u32::try_from(h)) else {
+            return 0;
+        };
+        if want_w == 0 || want_h == 0 {
+            return 0;
+        }
+        let Some(want) = (want_w as usize).checked_mul(want_h as usize) else {
+            return 0;
+        };
+        if want > isize::MAX as usize / std::mem::size_of::<u32>() {
+            return 0;
+        }
         if slot.staging.len() != want {
             slot.staging = vec![0u32; want];
         }
@@ -1991,17 +2000,28 @@ pub extern "C" fn rt_winit_save_pixels_bmp(
     if path_ptr == 0 || pixels_ptr == 0 {
         return 0;
     }
+    let (Ok(w), Ok(h), Ok(actual_len)) = (
+        u32::try_from(width),
+        u32::try_from(height),
+        usize::try_from(pixels_len),
+    ) else {
+        return 0;
+    };
+    if w == 0 || h == 0 {
+        return 0;
+    }
+    let Some(expected_len) = (w as usize).checked_mul(h as usize) else {
+        return 0;
+    };
+    if expected_len > isize::MAX as usize / std::mem::size_of::<u32>() || actual_len != expected_len
+    {
+        return 0;
+    }
     let path = unsafe { CStr::from_ptr(path_ptr as usize as *const c_char) }
         .to_string_lossy()
         .into_owned();
-    let w = width.max(1) as u32;
-    let h = height.max(1) as u32;
-    let pixels: &[u32] = unsafe {
-        std::slice::from_raw_parts(
-            pixels_ptr as usize as *const u32,
-            pixels_len.max(0) as usize,
-        )
-    };
+    let pixels: &[u32] =
+        unsafe { std::slice::from_raw_parts(pixels_ptr as usize as *const u32, actual_len) };
     let data = encode_bmp(w, h, pixels);
     match std::fs::write(&path, &data) {
         Ok(()) => 1,
@@ -2052,7 +2072,14 @@ mod sffi_contract_tests {
     fn invalid_staging_descriptor_fails_without_allocation() {
         assert_eq!(rt_winit_window_staging_ptr(i64::MAX, i64::MAX, i64::MAX), 0);
         assert_eq!(rt_winit_window_staging_ptr(i64::MAX, -1, 1), 0);
+        assert_eq!(rt_winit_window_stage_clear(i64::MAX, -1, 1, 0), 0);
         assert_eq!(rt_winit_window_present_staged(i64::MAX, 1, 1), 0);
+    }
+
+    #[test]
+    fn bmp_writer_rejects_invalid_extent_before_pointer_access() {
+        assert_eq!(rt_winit_save_pixels_bmp(1, -1, 1, 1, 1, 0, 0), 0);
+        assert_eq!(rt_winit_save_pixels_bmp(1, 2, 2, 1, 3, 0, 0), 0);
     }
 
     #[test]
