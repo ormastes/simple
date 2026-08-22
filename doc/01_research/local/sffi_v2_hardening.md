@@ -901,3 +901,20 @@ C++ 211 definitions/211 symbols/1 file; C 2,301/1,821/82; Rust 2,161/2,097/172;
 Simple 584/535/51. Of these, 486 are unsafe-tagged, 572 have contracts, 11,896
 remain untouched, and all 12,659 remain fail-closed unsafe because signed and
 verified artifact admissions remain zero.
+
+The system-boundary ownership slice removes the duplicate implementation in
+`std.nogc_sync_mut.ffi.system`: it is now an explicit compile-time facade over
+the canonical `std.nogc_sync_mut.sffi.system` owner. All 45 public functions,
+including the previously omitted all-limits process API in the async facade,
+remain exported. The canonical owner's seven process hooks and native-execution
+hook now have explicit sentinel contracts and uniquely named, allocation-free
+lexical FFI scopes. This removes 40 duplicate declaration rows without adding a
+runtime wrapper, lookup, allocation, or dispatch; optimizer findings for the
+legacy facade fall from 20 to zero.
+
+Owner/facade checks, lint, the existing 12-case return-contract regression, and
+the static one-call/no-allocation audit pass. The census now contains 12,619
+declarations: C++ 211 definitions/211 symbols/1 file; C 2,313/1,831/87; Rust
+2,161/2,097/172; Simple 592/543/52. There are 494 unsafe-tagged rows, 575
+contracted rows, and 11,849 untouched rows. Signed and verified admissions are
+still zero, so all 12,619 declarations remain fail-closed unsafe.

@@ -1,0 +1,31 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+owner="$root/src/lib/nogc_sync_mut/sffi/system.spl"
+legacy="$root/src/lib/nogc_sync_mut/ffi/system.spl"
+async="$root/src/lib/nogc_async_mut/sffi/system.spl"
+
+# Compatibility modules are compile-time exports, never duplicate providers.
+! grep -q '^extern fn ' "$legacy"
+! grep -q '^fn ' "$legacy"
+grep -q 'export use std.nogc_sync_mut.sffi.system.{' "$legacy"
+grep -q 'export use std.nogc_sync_mut.sffi.system.{' "$async"
+
+# Both compatibility surfaces preserve every public owner function.
+for name in $(sed -n 's/^fn \([A-Za-z0-9_]*\).*/\1/p' "$owner" | grep -v '^_'); do
+    grep -Eq "(^|[[:space:],])$name([[:space:],}]|$)" "$legacy"
+    grep -Eq "(^|[[:space:],])$name([[:space:],}]|$)" "$async"
+done
+
+# Each process/native raw call has exactly one minimal lexical boundary.
+test "$(grep -c '^fn _sffi_system_process_.*_raw' "$owner")" -eq 7
+test "$(grep -c '^fn _sffi_system_execute_native_raw' "$owner")" -eq 1
+test "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$owner")" -eq 8
+for name in $(sed -n 's/^fn \(_sffi_system_.*_raw\).*/\1/p' "$owner"); do
+    body=$(sed -n "/^fn $name(/,/^$/p" "$owner")
+    test "$(printf '%s\n' "$body" | grep -c 'unsafe(capabilities: \[ffi\]):')" -eq 1
+    ! printf '%s\n' "$body" | grep -Eq 'Array|Dict|sleep\(|\.push\(|\.append\('
+done
+
+echo 'sffi system owner contract: PASS'

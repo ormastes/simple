@@ -210,3 +210,9 @@ passing placeholder.
     static hot-path guards. Continue the remaining 1,023 `rt_process` rows and
     repair the module's existing primitive-API lint debt; signed artifact-bound
     admission is still required before any SFFI row is classified verified.
+40. `std.ffi.system` is now a zero-runtime-cost export facade over the canonical
+    SFFI system owner, removing 40 duplicate declarations while preserving all
+    45 public APIs. Eight canonical process/native hooks have unique minimal FFI
+    scopes and explicit failure contracts. Continue the remaining 1,011
+    untouched `rt_process` rows, then implement exact signed artifact admission;
+    declarations remain unsafe until both evidence checks succeed.
