@@ -26,6 +26,30 @@ fn _module_path_naming_text_index_of(value: text, needle: text) -> i64:
         return -1
     rt_string_len(value.split(needle)[0])
 
+fn _module_path_naming_strip_numbered_dirs(path: text) -> text:
+    """Make resolver-transparent `NN.name` directories transparent here too.
+
+    ModuleResolver accepts one-to-three digit directory prefixes, so physical
+    `editor/00.common/types.spl` owns logical `editor.common.types`.  Applying
+    this before slash-to-dot conversion preserves numeric dotted file-name
+    segments while keeping the identity pass linear in the number of path
+    segments.
+    """
+    var logical_parts: [text] = []
+    for part in path.split("/"):
+        var prefix_len = 0
+        val part_len = part.len()
+        while prefix_len < part_len and prefix_len < 3:
+            val code = part.char_code_at(prefix_len)
+            if code < 48 or code > 57:
+                break
+            prefix_len = prefix_len + 1
+        if prefix_len >= 1 and prefix_len <= 3 and prefix_len < part_len and part.char_at(prefix_len) == ".":
+            logical_parts.push(part.substring(prefix_len + 1))
+        else:
+            logical_parts.push(part)
+    logical_parts.join("/")
+
 pub fn module_logical_name_from_path(path: text) -> text:
     """Derive the dotted logical module name (e.g. `_wallB_mod_a`) from a
     source path (e.g. `src/_wallB_mod_a.spl`). Under `SIMPLE_BOOTSTRAP=1`,
@@ -54,6 +78,7 @@ pub fn module_logical_name_from_path(path: text) -> text:
         mod_path = mod_path.substring(4)
     mod_path = mod_path.replace(".spl", "")
     mod_path = mod_path.replace(".sdn", "")
+    mod_path = _module_path_naming_strip_numbered_dirs(mod_path)
     var portable = ""
     # WORKAROUND: `for ch in <text>` yields a corrupted loop element in the
     # seed interpreter and in pure-Simple-compiled native code, classifying

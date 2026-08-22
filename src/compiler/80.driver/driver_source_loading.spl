@@ -22,6 +22,7 @@ extern fn rt_env_get(key: text) -> text
 extern fn rt_string_len(value: text) -> i64
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_path_absolute(path: text) -> text
+extern fn rt_dir_list(path: text) -> [text]
 
 # Directories to skip during source collection
 val _skip_dirs = ["test", "tests", "doc", "docs", "verification", "resources", "scripts", "build"]
@@ -599,6 +600,48 @@ pub fn _driver_entry_sibling_module_paths(content: text) -> [text]:
             result = result.push(sibling)
     result
 
+fn _driver_numbered_child_dir(parent: text, segment: text) -> text:
+    if parent == "" or not rt_file_exists(parent):
+        return ""
+    for entry in rt_dir_list(parent):
+        var prefix_len = 0
+        val entry_len = entry.len()
+        while prefix_len < entry_len and prefix_len < 3:
+            val code = entry.char_code_at(prefix_len)
+            if code < 48 or code > 57:
+                break
+            prefix_len = prefix_len + 1
+        if prefix_len >= 1 and prefix_len <= 3 and prefix_len < entry_len and entry.char_at(prefix_len) == "." and entry.substring(prefix_len + 1) == segment:
+            val candidate = parent + "/" + entry
+            if rt_file_exists(candidate):
+                return candidate
+    ""
+
+fn _driver_try_numbered_entry_import_rel(root: text, rel: text) -> text:
+    val parts = rel.split("/")
+    if parts.len() == 0:
+        return ""
+    var current = root
+    var i = 0
+    while i + 1 < parts.len():
+        val direct = if current == "": parts[i] else: current + "/" + parts[i]
+        if rt_file_exists(direct):
+            current = direct
+        else:
+            val numbered = _driver_numbered_child_dir(current, parts[i])
+            if numbered == "":
+                return ""
+            current = numbered
+        i = i + 1
+    val base = if current == "": parts[parts.len() - 1] else: current + "/" + parts[parts.len() - 1]
+    if rt_file_exists(base + ".spl"):
+        return base + ".spl"
+    if rt_file_exists(base + "/mod.spl"):
+        return base + "/mod.spl"
+    if rt_file_exists(base + "/__init__.spl"):
+        return base + "/__init__.spl"
+    ""
+
 fn _driver_try_entry_import_rel(rel: text, entry_dir: text) -> text:
     var roots: [text] = ["", "src/"]
     if entry_dir != "":
@@ -611,6 +654,13 @@ fn _driver_try_entry_import_rel(rel: text, entry_dir: text) -> text:
             return base + "/mod.spl"
         if rt_file_exists(base + "/__init__.spl"):
             return base + "/__init__.spl"
+    # Resolver-transparent `NN.name` directories are a fallback only: ordinary
+    # imports keep the existing fixed probes and pay no directory-list cost.
+    for root in roots:
+        val normalized_root = if root.ends_with("/"): root[0:root.len() - 1] else: root
+        val numbered = _driver_try_numbered_entry_import_rel(normalized_root, rel)
+        if numbered != "":
+            return numbered
     ""
 
 fn _driver_resolve_rewritten_import(module_path: text, prefix: text, rel_prefix: text, entry_dir: text) -> text:

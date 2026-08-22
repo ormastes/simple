@@ -222,3 +222,69 @@ passing placeholder.
     deferred by a documented JIT deoptimization bug, not silently accepted.
     Continue the remaining 999 untouched process rows and fix alias lowering
     before removing these direct declarations. Signed admission remains zero.
+42. Remove the four C-owned editor DAP convenience symbols and route spawn,
+    framing, bounded incremental parsing, and event polling through the existing
+    Pure Simple DAP client. Preserve one checked nonblocking read per poll,
+    cap each client at 64 KiB, drain queued messages linearly, and prevent
+    request-sequence reuse after checked startup. Next migrate raw PID identity to
+    generation-bearing handles and attach exact signed provider evidence.
+43. Repair the stage4 process-provider source-introspection spec so it selects
+    the intended strict-link block, and migrate the module's 25 public primitive
+    parameters to semantic wrappers. Keep the direct 15-symbol DAP/process
+    closure audit release-blocking until that full spec and lint are green.
+44. Rebuild and deploy the Pure Simple runtime with
+    `rt_process_is_alive_checked` registered, then rerun the real editor DAP
+    command smoke. Do not fall back to the Rust seed; retain the measured
+    9.55-second/260,968-KiB failed smoke receipt until the rebuilt lane passes.
+45. Fix native-build worker orchestration so `--threads 8` shares one closure,
+    load, and parse phase instead of evaluating the 1,865-file manifest eight
+    times; also restore the missing `runtime_file_rename` JIT registration.
+    Resume the preserved `build/bootstrap/native_cache` only after those owners
+    are fixed, then produce and smoke the Pure Simple candidate once.
+46. Fix self-hosted entry-closure HIR origin resolution for editor semantic
+    types. The bounded 173-file, single-worker DAP smoke build parsed in
+    656.85 seconds but produced 44 entry-module unresolved-type errors and 121
+    accumulated errors by 730.82 seconds. Preserve the cache, add a focused
+    closure regression, and rerun this smoke only once after the owner fix.
+47. Verify the consolidated module-surface identity on the preserved editor-DAP
+    cache. The second build parsed in 892.92 seconds and proved the surface
+    layer still had a private normalizer; that duplicate is now removed in
+    favor of `module_logical_name_from_path`. Run the cached smoke once in a
+    fresh session because this session reached its three-cycle cap.
+48. Repair physical-path lookup for resolver-transparent numbered module
+    surfaces and add the missing `MdMotionResult` owner to the focused closure.
+    The closure now correctly contains 178 files and the former 44 editor-type
+    failures are gone, but HIR reports `missing importing module surface` for
+    `src/std/editor/00.common/*.spl`. Pin physical and logical lookup together
+    before another cached end-to-end build.
+49. Add explicit type/function imports to the editor view modules revealed by
+    the now-correct closure (`EditorDocumentId`, `EditorBuffer`, and
+    `render_block_line_span`). The entry and numbered common owners now lower
+    cleanly; do not rerun the full build until focused view-module coverage is
+    green. Ensure build cancellation terminates worker descendants, since the
+    prior launcher-only Ctrl-C left eleven cache writers and about 39 GiB RSS.
+50. Keep the preview marker linear: retain the Pure Simple `StringBuilder`
+    implementation and its focused lint gate. On a fresh verification turn,
+    run one cached single-worker editor-DAP native build, measure its smoke
+    timing and peak RSS if it produces an artifact, and do not publish an
+    end-to-end verified claim before that receipt exists.
+51. Verify the canonical process-owner imports in one fresh cached build. The
+    last bounded run parsed in 94.27 seconds and reached HIR, but `std.io`
+    resolved without its process exports in entry-closure mode. DAP and LSP now
+    import `std.nogc_sync_mut.io.process_ops` directly; do not add a runtime
+    adapter, dynamic dispatch, or per-call allocation to solve this compile-time
+    ownership issue.
+52. Retain the linear LSP framing/JSON parser changes: direct integer parsing,
+    `StringBuilder` text extraction, and loop-length hoisting. Add or reuse real
+    framing/parser correctness examples before claiming the concurrent LSP
+    migration verified; do not restore concatenation-based parser loops.
+53. Verify the corrected `md_vim_*` owner in one fresh cached build. These nine
+    typed motion functions belong to `std.editor.view.md_editing`, not the
+    similarly named builtin motion module. The 153-source closure and the
+    explicit commands/preview/process owners already lower cleanly; retain that
+    14.5% closure reduction and do not reintroduce wildcard facade imports.
+54. Repair the MIR closure after the now-green 153/153 HIR phase. Start from
+    the captured cycle-three diagnostics (`EditSession`, office sheet types,
+    window event constants/types, SIMD `Vec8i`, and unresolved string methods).
+    Keep `SIMPLE_NO_STUB_FALLBACK=1` release-blocking: any unresolved method
+    lowered to constant zero is a fabricated value and must reject admission.

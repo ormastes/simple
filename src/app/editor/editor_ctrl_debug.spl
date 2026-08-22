@@ -6,6 +6,7 @@ use std.io_runtime.{read_file_text}
 use app.editor.editor_controller_types.*
 use app.editor.editor_controller.*
 use std.editor.common.keybindings.*
+use std.editor.extensions.host.{extension_debug_adapter_id, extension_debug_adapter_program}
 use std.editor.services.debug_session_registry.*
 use std.editor.services.debug_session_dap.*
 use std.editor.services.debug_session_dap_protocol.*
@@ -74,21 +75,26 @@ fn ctrl_start_debug_process_adapter(ctrl: mut EditorController, debug_type: text
         adapter_program = extension_debug_adapter_program(adapter)
     val program = adapter_program
     val launch_config = _editor_debug_launch_config_for_doc(program, adapter_id)
-    val process_pid = if adapter_id == "simple" then editor_debug_process_spawn_simple_adapter() else: editor_debug_process_spawn_adapter(adapter_program)
-    var dap = EditorDebugDapClient.new()
-    if process_pid <= 0:
+    val started = editor_debug_dap_client_start_process(
+        EditorDebugDapClient.new(),
+        editor_debug_process_find_simple_binary(),
+        ["run", adapter_program]
+    )
+    var dap = started.0
+    if not started.1:
         ctrl.status_msg = "debug process adapter failed: " + adapter_program
         ctrl.debug_dap_client = dap
         ctrl.debug_process_pid = 0
         return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
+    val admitted = editor_debug_dap_client_initialize_launch(dap, launch_config)
+    dap = admitted.0
+    if not admitted.1:
+        ctrl.status_msg = "debug process adapter admission failed: " + adapter_program
+        ctrl.debug_dap_client = dap
+        ctrl.debug_process_pid = 0
+        return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
     ctrl.debug_registry = editor_debug_registry_start_fresh(launch_config)
-    if adapter_id == "simple":
-        editor_debug_process_start_simple_adapter(process_pid)
-    else:
-        val init_json = "{\"seq\":1,\"type\":\"request\",\"command\":\"initialize\",\"arguments\":{\"adapterID\":\"simple\"}}"
-        val launch_json = "{\"seq\":2,\"type\":\"request\",\"command\":\"launch\",\"arguments\":" + editor_debug_launch_config_dap_arguments(launch_config) + "}"
-        editor_debug_process_write_frame(process_pid, init_json)
-        editor_debug_process_write_frame(process_pid, launch_json)
+    val process_pid = dap.process_pid
     ctrl.debug_dap_client = dap
     ctrl.debug_dap_clients.push(dap)
     ctrl.debug_process_pid = process_pid
@@ -428,18 +434,14 @@ fn ctrl_debug_poll_dap_client(ctrl: mut EditorController) -> EditorAction:
 
 fn ctrl_poll_debug_dap_client(ctrl: mut EditorController) -> EditorAction:
     var messages: [EditorDebugDapInboundMessage] = []
-    if ctrl.debug_process_pid > 0:
-        if editor_debug_process_wait_simple_stopped(ctrl.debug_process_pid):
-            ctrl.debug_status = "paused"
-            ctrl.status_msg = "debug stopped: entry"
-            return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
-        return EditorAction(redraw: false, quit: false, status_msg: ctrl.status_msg)
-    else:
+    if ctrl.debug_dap_client.running:
         var dap = ctrl.debug_dap_client
         val polled = editor_debug_dap_client_poll_messages(dap)
         dap = polled.0
         messages = polled.1
         ctrl.debug_dap_client = dap
+        val session = editor_debug_first_session(ctrl.debug_registry)
+        ctrl_debug_store_client_for_session(ctrl, editor_debug_session_id(session), dap)
     var updated = false
     for message in messages:
         val message_type = editor_debug_dap_inbound_message_type(message)
@@ -577,11 +579,7 @@ fn ctrl_debug_terminate_first(ctrl: mut EditorController) -> EditorAction:
         val requested = editor_debug_dap_client_disconnect(dap)
         dap = requested.0
     ctrl.debug_registry = editor_debug_registry_terminate(ctrl.debug_registry, editor_debug_session_id(session))
-    if ctrl.debug_process_pid > 0:
-        ctrl.debug_dap_client = editor_debug_dap_stop_process_pid(ctrl.debug_process_pid)
-    else:
-        dap.running = false
-        ctrl.debug_dap_client = dap
+    ctrl.debug_dap_client = editor_debug_dap_client_stop_process(dap)
     ctrl_debug_store_client_for_session(ctrl, editor_debug_session_id(session), ctrl.debug_dap_client)
     ctrl.debug_process_pid = 0
     ctrl.debug_status = "terminated"

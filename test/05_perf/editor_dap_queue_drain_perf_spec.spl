@@ -1,0 +1,57 @@
+use std.spec.*
+use std.io_runtime.{time_now_unix_micros}
+use std.editor.services.debug_session_dap.*
+
+fn legacy_front_remove(messages: [text]) -> i64:
+    var pending = messages
+    var count = 0
+    while pending.len() > 0:
+        val json = pending[0]
+        val parsed = editor_debug_dap_message_type(json) + editor_debug_dap_event_name(json)
+        if parsed != "":
+            count = count + 1
+        var remaining: [text] = []
+        var i = 1
+        while i < pending.len():
+            remaining.push(pending[i])
+            i = i + 1
+        pending = remaining
+    count
+
+fn dap_messages(count: i64) -> [text]:
+    var messages: [text] = []
+    for i in 0..count:
+        messages.push("{\"seq\":" + str(i) + ",\"type\":\"event\",\"event\":\"output\"}")
+    messages
+
+describe "editor DAP queue drain performance":
+    it "preserves messages while replacing quadratic front removal with one pass":
+        val messages = dap_messages(2048)
+
+        val legacy_start = time_now_unix_micros()
+        val legacy_count = legacy_front_remove(messages)
+        val legacy_us = time_now_unix_micros() - legacy_start
+
+        var process_buffer = ""
+        for message in messages:
+            process_buffer = process_buffer + editor_debug_dap_frame_message(message)
+        val client = EditorDebugDapClient(
+            running: true,
+            next_seq: 1,
+            send_buffer: [],
+            recv_buffer: [],
+            pending_requests: [],
+            process_pid: 0,
+            process_buffer: process_buffer,
+            process_command: "",
+            process_args: []
+        )
+        val linear_start = time_now_unix_micros()
+        val polled = editor_debug_dap_client_poll_messages(client)
+        val linear_us = time_now_unix_micros() - linear_start
+
+        print "editor_dap_queue_drain messages={messages.len()} legacy_us={legacy_us} linear_us={linear_us}"
+        expect(legacy_count).to_equal(messages.len())
+        expect(polled.1.len()).to_equal(messages.len())
+        expect(polled.0.process_buffer).to_equal("")
+        expect(linear_us).to_be_less_than(legacy_us + 1)

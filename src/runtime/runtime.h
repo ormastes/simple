@@ -898,10 +898,6 @@ bool        rt_process_is_alive(int64_t pid);
 const char* rt_process_read_stdout_checked(int64_t pid, int32_t* out_status);
 int32_t     rt_process_is_alive_checked(int64_t pid);
 bool        rt_process_close_piped(int64_t pid);
-int64_t     rt_editor_spawn_simple_dap(void);
-bool        rt_editor_start_simple_dap(int64_t pid);
-bool        rt_editor_poll_simple_dap_stopped(int64_t pid);
-bool        rt_editor_wait_simple_dap_stopped(int64_t pid);
 
 /* ===== Environment ===== */
 

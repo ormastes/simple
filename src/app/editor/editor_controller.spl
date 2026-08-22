@@ -8,6 +8,24 @@ use std.editor.services.md_wiki_index.*
 use std.editor.services.md_search.*
 use std.editor.services.file_watcher.*
 use std.editor.services.command_palette.*
+use std.editor.services.diagnostics.{diagnostics_store_with_publish}
+use std.editor.services.debug_session_registry.{
+    editor_debug_first_session, editor_debug_session_id,
+    editor_debug_launch_config_debug_type, editor_debug_launch_config_name,
+    editor_debug_registry_select, editor_debug_registry_start,
+    editor_debug_session_status, editor_debug_update_scopes,
+    editor_debug_update_scope_variables, editor_debug_update_stack_frames,
+    editor_debug_update_watch
+}
+use std.editor.services.debug_session_dap.{
+    editor_debug_dap_client_evaluate, editor_debug_dap_client_initialize,
+    editor_debug_dap_client_launch
+}
+use std.editor.services.debug_session_dap_protocol.{editor_debug_dap_response_command}
+use std.editor.services.lsp_client.{LspNotification, lsp_response_from_json}
+use std.editor.services.md_lsp_config.{md_lsp_ensure_open, md_lsp_is_markdown_file, md_lsp_request}
+use std.editor.services.simple_lsp_config.{simple_lsp_ensure_open, simple_lsp_is_simple_file, simple_lsp_request}
+use std.editor.common.types.{editor_mode_normal}
 use std.editor.common.keybindings.*
 use std.editor.extensions.host.*
 use std.editor.extensions.builtin.md_edit_assist.*
@@ -1290,18 +1308,18 @@ impl EditorController:
 
     me _poll_debug_dap_client() -> EditorAction:
         var messages: [EditorDebugDapInboundMessage] = []
-        if me.debug_process_pid > 0:
-            if editor_debug_process_wait_simple_stopped(me.debug_process_pid):
-                me.debug_status = "paused"
-                me.status_msg = "debug stopped: entry"
-                return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
-            return EditorAction(redraw: false, quit: false, status_msg: me.status_msg)
-        else:
+        if me.debug_dap_client.running:
             var dap = me.debug_dap_client
             val polled = editor_debug_dap_client_poll_messages(dap)
             dap = polled.0
             messages = polled.1
             me.debug_dap_client = dap
+            val session = editor_debug_first_session(me.debug_registry)
+            val client_index = editor_debug_session_id(session) - 1
+            if client_index >= 0:
+                while me.debug_dap_clients.len() <= client_index:
+                    me.debug_dap_clients.push(EditorDebugDapClient.new())
+                me.debug_dap_clients[client_index] = dap
         var updated = false
         for message in messages:
             val message_type = editor_debug_dap_inbound_message_type(message)
@@ -1420,8 +1438,7 @@ impl EditorController:
             val requested = editor_debug_dap_client_disconnect(me.debug_dap_client)
             me.debug_dap_client = requested.0
         me.debug_registry = editor_debug_registry_terminate(me.debug_registry, editor_debug_session_id(session))
-        var stopped_dap = me.debug_dap_client
-        stopped_dap.running = false
+        val stopped_dap = editor_debug_dap_client_stop_process(me.debug_dap_client)
         me.debug_dap_client = stopped_dap
         val client_index = editor_debug_session_id(session) - 1
         while me.debug_dap_clients.len() <= client_index:

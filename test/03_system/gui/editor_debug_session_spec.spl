@@ -306,13 +306,53 @@ describe "editor debug session model":
         expect(src.contains("fn _dap_process_write(pid: i64, data: text) -> Result<(), text>:")).to_equal(true)
         expect(src.contains("process_close_piped(pid)")).to_equal(true)
         expect(src.contains("me start_process(command: text, args: [text]) -> bool")).to_equal(true)
-        expect(src.contains("if not me._send_framed_json(json):")).to_equal(true)
-        expect(src.contains("match process_read_stdout_result(me.process_pid):")).to_equal(true)
+        expect(src.contains("fn editor_debug_dap_client_poll_messages(client: EditorDebugDapClient)")).to_equal(true)
+        expect(src.contains("match process_read_stdout_result(process_pid):")).to_equal(true)
         expect(src.contains("match process_is_piped_alive_result(me.process_pid):")).to_equal(true)
-        expect(src.contains("editor_debug_dap_parse_frame(me.process_buffer)")).to_equal(true)
+        expect(src.contains("editor_debug_dap_parse_frame_at(process_buffer, consumed)")).to_equal(true)
 
         val failed_send = editor_debug_dap_process_request(0, 7, "continue", "{}")
         expect(failed_send.1).to_equal(0)
         expect(failed_send.0.running).to_equal(false)
         expect(failed_send.0.send_buffer.len()).to_equal(0)
         expect(failed_send.0.pending_requests.len()).to_equal(0)
+
+    it "admits initialize and launch without reusing request sequences":
+        step("Verify: client-owned startup continues at request sequence three")
+        # @req: REQ-GUI-EditDebuSess-001
+        val started = editor_debug_dap_client_start(EditorDebugDapClient.new())
+        val admitted = editor_debug_dap_client_initialize_launch(started, editor_debug_launch_config_default("/tmp/main.spl"))
+        expect(admitted.1).to_equal(true)
+        expect(admitted.0.next_seq).to_equal(3)
+        expect(admitted.0.pending_requests.len()).to_equal(2)
+        expect(admitted.0.pending_requests[0].command).to_equal("initialize")
+        expect(admitted.0.pending_requests[1].command).to_equal("launch")
+
+        val first = editor_debug_dap_frame_message("{\"seq\":1,\"type\":\"event\",\"event\":\"output\"}")
+        val second = editor_debug_dap_frame_message("{\"seq\":2,\"type\":\"event\",\"event\":\"stopped\"}")
+        val joined = first + second
+        val parsed_first = editor_debug_dap_parse_frame_at(joined, 0)
+        val parsed_second = editor_debug_dap_parse_frame_at(joined, parsed_first.1)
+        expect(parsed_first.0.contains("\"event\":\"output\"")).to_equal(true)
+        expect(parsed_second.0.contains("\"event\":\"stopped\"")).to_equal(true)
+        expect(parsed_second.1).to_equal(joined.len())
+        expect(editor_debug_dap_parse_frame_at(joined, -1).1).to_equal(0)
+        expect(editor_debug_dap_parse_frame_at(joined, joined.len()).1).to_equal(0)
+        expect(editor_debug_dap_parse_frame("Content-Length: bad\r\n\r\nx").1).to_equal(0)
+        expect(editor_debug_dap_parse_frame("Content-Length: 65001\r\n\r\nx").1).to_equal(0)
+
+        val partial_second = second.slice(0, 12)
+        val partial_client = EditorDebugDapClient(
+            running: true,
+            next_seq: 1,
+            send_buffer: [],
+            recv_buffer: [],
+            pending_requests: [],
+            process_pid: 0,
+            process_buffer: first + partial_second,
+            process_command: "",
+            process_args: []
+        )
+        val partial_poll = editor_debug_dap_client_poll_messages(partial_client)
+        expect(partial_poll.1.len()).to_equal(1)
+        expect(partial_poll.0.process_buffer).to_equal(partial_second)

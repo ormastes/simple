@@ -6,10 +6,12 @@
 
 use std.editor.services.debug_session_registry.*
 use std.editor.services.debug_session_dap_protocol.*
-use std.io.{
+use std.nogc_sync_mut.io.process_ops.{
     process_spawn_piped, process_write_stdin, process_read_stdout_result,
-    process_is_piped_alive_result, process_close_piped
+    process_is_piped_alive_result, process_close_piped, process_kill
 }
+
+val EDITOR_DEBUG_DAP_PROCESS_BUFFER_MAX: i64 = 65536
 
 fn _dap_process_spawn(command: text, args: [text]) -> Result<i64, text>:
     if command == "": return Err("empty_process_command")
@@ -80,7 +82,7 @@ impl EditorDebugDapClient:
             me.process_buffer = ""
         me.running = false
 
-    fn is_process_backed() -> bool:
+    me is_process_backed() -> bool:
         me.process_pid > 0
 
     me send_request(command: text, arguments_json: text) -> i64:
@@ -152,8 +154,8 @@ fn editor_debug_dap_client_start_process_with_pid(command: text, args: [text]) -
 
 fn editor_debug_dap_client_stop_process(client: EditorDebugDapClient) -> EditorDebugDapClient:
     if client.process_pid > 0:
-        if _dap_process_close(client.process_pid).is_err():
-            return client
+        val _killed = process_kill(client.process_pid)
+        val _closed = _dap_process_close(client.process_pid)
     EditorDebugDapClient(
         running: false,
         next_seq: 1,
@@ -224,6 +226,15 @@ fn editor_debug_dap_client_initialize(client: EditorDebugDapClient) -> (EditorDe
 
 fn editor_debug_dap_client_launch(client: EditorDebugDapClient, config: EditorDebugLaunchConfig) -> (EditorDebugDapClient, i64):
     editor_debug_dap_client_request(client, "launch", editor_debug_launch_config_dap_arguments(config))
+
+fn editor_debug_dap_client_initialize_launch(client: EditorDebugDapClient, config: EditorDebugLaunchConfig) -> (EditorDebugDapClient, bool):
+    val initialized = editor_debug_dap_client_initialize(client)
+    if initialized.1 == 0:
+        return (editor_debug_dap_client_stop_process(initialized.0), false)
+    val launched = editor_debug_dap_client_launch(initialized.0, config)
+    if launched.1 == 0:
+        return (editor_debug_dap_client_stop_process(launched.0), false)
+    (launched.0, true)
 
 fn editor_debug_launch_config_dap_arguments(config: EditorDebugLaunchConfig) -> text:
     var args_json = "{\"program\":\"" + _ed_json_escape(config.program) + "\",\"cwd\":\"" + _ed_json_escape(config.cwd) + "\""
@@ -305,32 +316,76 @@ fn editor_debug_dap_client_inject_message(client: EditorDebugDapClient, json: te
     next
 
 fn editor_debug_dap_client_poll_messages(client: EditorDebugDapClient) -> (EditorDebugDapClient, [EditorDebugDapInboundMessage]):
-    var next = client
+    var running = client.running
+    var process_pid = client.process_pid
+    var process_buffer = client.process_buffer
+    if running and process_pid > 0:
+        match process_read_stdout_result(process_pid):
+            case Ok(Some(chunk)):
+                if process_buffer.len() > EDITOR_DEBUG_DAP_PROCESS_BUFFER_MAX or chunk.len() > EDITOR_DEBUG_DAP_PROCESS_BUFFER_MAX - process_buffer.len():
+                    process_buffer = ""
+                    running = false
+                else:
+                    process_buffer = process_buffer + chunk
+            case Ok(nil): pass_dn
+            case Err(_):
+                process_buffer = ""
+                running = false
+            case _("fail closed if Result gains another variant"):
+                process_buffer = ""
+                running = false
+
+    var queued = client.recv_buffer
+    var consumed = 0
+    var parsing = true
+    while parsing:
+        val parsed = editor_debug_dap_parse_frame_at(process_buffer, consumed)
+        if parsed.0 == "" or parsed.1 <= consumed:
+            parsing = false
+        else:
+            queued.push(parsed.0)
+            consumed = parsed.1
+    if consumed > 0:
+        process_buffer = process_buffer.slice(consumed, process_buffer.len())
+
     var messages: [EditorDebugDapInboundMessage] = []
-    while next.recv_buffer.len() > 0:
-        val json = next.recv_buffer[0]
-        var remaining: [text] = []
-        var i = 1
-        while i < next.recv_buffer.len():
-            remaining.push(next.recv_buffer[i])
-            i = i + 1
-        next.recv_buffer = remaining
+    var pending = client.pending_requests
+    var completed_requests: [i64] = []
+    for json in queued:
         val kind = editor_debug_dap_message_type(json)
         val command = editor_debug_dap_response_command(json)
         if kind == "response":
-            var pending: [EditorDebugDapPendingRequest] = []
-            val request_seq = _ed_json_number_key(json, "request_seq")
-            for request in next.pending_requests:
-                if request.seq != request_seq:
-                    pending.push(request)
-            next.pending_requests = pending
+            completed_requests.push(_ed_json_number_key(json, "request_seq"))
         messages.push(EditorDebugDapInboundMessage(
             message_type: kind,
             command: command,
             event_name: editor_debug_dap_event_name(json),
             raw_json: json
         ))
-    (next, messages)
+    if completed_requests.len() > 0:
+        var remaining: [EditorDebugDapPendingRequest] = []
+        for request in pending:
+            var completed = false
+            for request_seq in completed_requests:
+                if request.seq == request_seq:
+                    completed = true
+            if not completed:
+                remaining.push(request)
+        pending = remaining
+    (
+        EditorDebugDapClient(
+            running: running,
+            next_seq: client.next_seq,
+            send_buffer: client.send_buffer,
+            recv_buffer: [],
+            pending_requests: pending,
+            process_pid: process_pid,
+            process_buffer: process_buffer,
+            process_command: client.process_command,
+            process_args: client.process_args
+        ),
+        messages
+    )
 
 fn editor_debug_dap_process_request(pid: i64, seq: i64, command: text, arguments_json: text) -> (EditorDebugDapClient, i64):
     val json = editor_debug_dap_request(seq, command, arguments_json)
@@ -385,6 +440,8 @@ fn editor_debug_dap_poll_process_pid(pid: i64) -> Result<[EditorDebugDapInboundM
             ))
             buf = buf.slice(consumed, buf.len())
     Ok(messages)
+
+impl EditorDebugDapClient:
 
     me _send_framed_json(json: text) -> bool:
         val framed = editor_debug_dap_frame_message(json)
@@ -472,55 +529,3 @@ fn editor_debug_dap_poll_process_pid(pid: i64) -> Result<[EditorDebugDapInboundM
 
     me inject_message(json: text):
         me.recv_buffer.push(json)
-
-    me poll_messages() -> [EditorDebugDapInboundMessage]:
-        me._poll_process_stdout()
-        var messages: [EditorDebugDapInboundMessage] = []
-        while me.recv_buffer.len() > 0:
-            val json = me.recv_buffer[0]
-            var remaining: [text] = []
-            var i = 1
-            while i < me.recv_buffer.len():
-                remaining.push(me.recv_buffer[i])
-                i = i + 1
-            me.recv_buffer = remaining
-            val kind = editor_debug_dap_message_type(json)
-            val command = editor_debug_dap_response_command(json)
-            if kind == "response":
-                var pending: [EditorDebugDapPendingRequest] = []
-                val request_seq = _ed_json_number_key(json, "request_seq")
-                for request in me.pending_requests:
-                    if request.seq != request_seq:
-                        pending.push(request)
-                me.pending_requests = pending
-            messages.push(EditorDebugDapInboundMessage(
-                message_type: kind,
-                command: command,
-                event_name: editor_debug_dap_event_name(json),
-                raw_json: json
-            ))
-        messages
-
-    me _poll_process_stdout():
-        if me.process_pid <= 0:
-            return
-        match process_read_stdout_result(me.process_pid):
-            case Ok(Some(chunk)):
-                me.process_buffer = me.process_buffer + chunk
-            case Ok(nil): return
-            case Err(_):
-                me.running = false
-                return
-            case _("fail closed if Result gains another variant"):
-                me.running = false
-                return
-        var parsed = true
-        while parsed:
-            val result = editor_debug_dap_parse_frame(me.process_buffer)
-            val json = result.0
-            val consumed = result.1
-            if json == "" or consumed <= 0:
-                parsed = false
-            else:
-                me.recv_buffer.push(json)
-                me.process_buffer = me.process_buffer.slice(consumed, me.process_buffer.len())

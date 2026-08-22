@@ -1643,6 +1643,202 @@ single-child synchronization cost buys same-child serialization; removing the
 global registry from the I/O critical section eliminates unrelated-child
 contention. No per-operation heap allocation or data copy was introduced.
 
+### Editor DAP process ownership and bounded polling
+
+The editor still carried four convenience `rt_editor_*simple_dap` symbols that
+duplicated the canonical process facade. Their C provider selected a Rust-seed
+binary, retained one process-global 64 KiB parser buffer across all sessions,
+searched accumulated text with `strstr`, and exposed a wait operation that
+could sleep for four seconds on the editor path. This was neither session-safe
+nor compatible with the repository's Pure Simple/self-hosted ownership rule.
+
+The existing Pure Simple `EditorDebugDapClient` now owns process creation,
+framing, incremental parsing, and message dispatch. Initialize and launch are
+admitted only after both checked writes succeed; failure closes the process,
+and successful startup continues at sequence three without reusing protocol
+identifiers. The parser retains the same 64 KiB
+wire-buffer bound per client, caps declared frame bodies at 65,000 bytes so the
+standard header also fits, and fails closed on overflow. Error polling marks
+the client stopped while retaining its PID as cleanup-pending; kill and
+close/reap occur only on explicit session termination. The UI hot poll therefore
+cannot enter either the POSIX five-second close budget, the Windows one-second
+kill wait, or the interpreter's synchronous reap. Queue draining is one linear
+pass, and offset parsing performs one final suffix copy instead of copying the
+remaining frame buffer after every message. Polling retains one nonblocking
+checked read and adds no lookup, lock,
+sleep, retry, hash, signature work, or C/Rust replacement of Pure Simple code.
+The underlying canonical process SFFI remains unsafe and unsigned until exact
+artifact-bound evidence admission succeeds.
+
+On the same 2,048-frame interpreter fixture, the source-equivalent legacy
+front-removal/parser path measured 8,031,399 microseconds and the final
+implementation path measured 1,377,245 microseconds (82.9% lower). Hoisting
+stable text lengths reduced the implementation path from 1,504,368
+microseconds by another 8.4%. The final compiler/test process peaked at
+172,640 KiB RSS, 116 KiB below the pre-hoist run; this RSS difference is small
+enough to treat as noise, while the per-client retained parser state is bounded
+at 64 KiB and the global C 64 KiB accumulator is gone.
+
+The focused stage4 process-provider example accepts the reduced 15-symbol
+closure, but its six-example file still has two unrelated source-introspection
+failures: the FreeBSD `closefrom` assertion reports `find == -1` even though the
+exact guarded source is present, and the native-link orchestration assertion
+selects an earlier `if stage4_requested` block. The stage4 module lint also has
+25 pre-existing `primitive_api` errors on public boolean/text parameters. The
+editor DAP gate therefore checks removal from the stage4 closure directly;
+these compiler-test/lint debts remain release blockers rather than being
+misreported as SFFI verification.
+
+The real editor DAP command smoke also exposes a deployed-runtime skew after
+its stale nonexistent `std.editor.services.debug_session` import is removed:
+the current self-hosted runtime reports `unknown extern function:
+rt_process_is_alive_checked`. The source registry and provider contract contain
+that checked symbol, so the deployed `bin/simple` must be rebuilt from the
+current compiler/runtime closure before this end-to-end lane can pass. The
+failing attempt took 9.55 seconds and peaked at 260,968 KiB RSS; the Rust seed
+was deliberately not substituted.
+
+A cache-preserving Pure Simple rebuild with stub fallback disabled was attempted
+to remove that deployment skew. The launcher first reported an unresolved
+`runtime_file_rename` JIT symbol and fell back to interpretation. With
+`--threads 8`, the native-build then duplicated whole source-closure, load, and
+parse progress across eight workers instead of sharing the 1,865-file closure.
+After about 168 seconds the workers were only around parse entries 99-138 of
+1,865, projecting tens of minutes before code generation. The runaway guard
+stopped the build and preserved `build/bootstrap/native_cache`; no candidate
+binary was produced. This is a build-orchestration performance blocker, not
+evidence that the editor DAP lane is verified.
+
+A smaller single-worker build then reduced the closure to 173 files and reused
+the dedicated editor-DAP cache. Parsing completed in 656.85 seconds (73 cache
+hits, 100 misses), but HIR lowering immediately poisoned the build with 44
+unresolved editor types in the smoke entry (`EditorBufferId`, `EditorViewport`,
+`EditorDocumentId`, and `EditorMode`) and then cascaded into imported editor
+modules. The attempt was stopped at 730.82 seconds after 121 accumulated HIR
+errors because a poisoned build cannot produce an executable. This isolates a
+second self-hosted closure/import blocker; no smoke artifact was produced and
+the DAP lane must not be described as end-to-end verified.
+
+The first identity fix pinned the resolver-transparent `NN.name` rule in the
+shared module-name helper (9/9 focused examples pass), but a second cached
+single-worker build proved that module surfaces retained a private duplicate
+normalizer. It parsed 173 files in 892.92 seconds (2 cache hits, 171 misses),
+entered HIR at 899.26 seconds, and repeated the 44 entry errors; the poisoned
+build was stopped at 1,005.66 seconds. The duplicate surface normalizer has now
+been replaced by the canonical helper, deleting an allocation-heavy repeated
+path scan. The three-cycle verification cap prevents another build in this
+session; the preserved cache is the next-session verification input.
+
+The next focused resolver change added numbered-directory fallback only after
+ordinary fixed probes fail. Its driver spec passes 5/5 and the rebuilt closure
+grew correctly from 173 to 178 physical sources, explicitly including editor
+`types`, `config`, `keybindings`, `settings_schema`, and `platform`. Parsing
+completed in 968.60 seconds. HIR then recognized
+`std.editor.common.types`, eliminating the former 44 unresolved editor-type
+errors, but exposed a narrower surface-index failure: each physical
+`src/std/editor/00.common/*.spl` owner reports `missing importing module
+surface`, and the entry now separately lacks `MdMotionResult`. The poisoned
+build was stopped after 1,037.82 seconds. This is progress, not an end-to-end
+verification receipt; no artifact was produced.
+
+The surface lookup fix replaced a third private importer-name normalizer with
+the canonical helper; its new numbered-physical-owner example passes. The
+32-example resolver file remains 26/32 because six unrelated historical cases
+are already red. Explicit imports were also added to `md_dispatch` for
+`MdMotionResult` and its actual buffer/document owners.
+
+During verification, process inspection found that Ctrl-C had stopped only the
+native-build launchers' foreground interaction: three earlier single workers
+and all eight workers from the abandoned full build were still alive. They
+were concurrently consuming roughly 39 GiB RSS and writing the same caches,
+which explains the extreme timing variance. Only those exact abandoned PIDs
+were terminated; the unrelated stage1 performance worker was preserved. The
+final worker was later terminated explicitly with its launcher, leaving no
+editor-DAP native-build process alive.
+
+The final closure kept all 178 owners and entry HIR lowered with zero errors;
+the numbered common owners also lowered with zero errors. It then exposed the
+next independent import-hygiene layer: view modules such as `file_tree`,
+`outline_panel`, `lsp_result_panel`, `wiki_panel`, and `settings_view` rely on
+undeclared `EditorDocumentId`/`EditorBuffer` owners, while `preview_pane` also
+lacks `render_block_line_span`. The poisoned build stopped at 1,930.86 seconds
+after 32 accumulated errors. No artifact exists, so end-to-end SFFI admission
+is still unverified.
+
+Focused view-module lint then identified a quadratic source-line marker in
+`preview_pane`: each character appended by rebuilding the accumulated text.
+The Pure Simple implementation now uses `StringBuilder`, reducing the loop
+from quadratic copying to a linear append/build path without changing its API
+or rendered escape sequences. Focused lint passes for both repaired view
+owners; end-to-end native verification remains deferred by the three-cycle
+guard rather than being represented as complete.
+
+The next fresh-turn cached build closed that view failure but exposed a second
+surface-owner leak: `debug_session_registry` returned `WikiPanel` without an
+explicit owner import, causing sibling-origin fallback to inject `WikiPanel`
+into unrelated service modules. Adding the explicit owner removed that
+cascade. Lint also found `_ed_join_text` rebuilding its result on every append;
+it now uses the Pure Simple `StringBuilder` and hoists the input length,
+preserving output while removing quadratic copying.
+
+Three bounded native-build cycles provided additional evidence. The cold
+179-file parse completed in 660.35 seconds; preserved-cache parses completed in
+97.98 and 94.27 seconds, an 85.2% to 85.7% reduction. The final HIR run proved
+the view and `WikiPanel` repairs, then found the concurrent editor process
+migration importing from the ambiguous `std.io` facade. Entry-closure HIR
+resolved none of the requested process names through that alias, including the
+legacy names. DAP and LSP transports now import the canonical checked owner,
+`std.nogc_sync_mut.io.process_ops`, directly. This adds no runtime dispatch or
+allocation and removes an alias-only compiler hop. The three-cycle cap prevents
+another build in this turn, so no native artifact or end-to-end smoke receipt
+is claimed yet.
+
+Focused lint of the newly touched LSP transport also rejected quadratic text
+accumulation. Content lengths and numeric JSON fields now parse directly into
+integers without temporary strings; string and scalar-value extraction use
+`StringBuilder`, with input lengths hoisted out of loops. This preserves the
+transport API and wire representation while removing repeated prefix copies.
+The focused transport lint passes and the optimizer reports only advisory
+follow-up opportunities, not a remaining quadratic-loop error. The canonical
+LSP transport system spec passes all 48 examples after the parser and owner
+changes, including checked read/liveness and owning cleanup assertions.
+
+The following three-cycle native audit confirmed the direct process-owner fix
+in HIR and reduced the entry closure from 179 to 153 sources (14.5% fewer).
+Warm parse remained stable at 93.77 to 95.18 seconds. It then exposed missing
+explicit application owners: `edit_quit`, preview-pane update functions, and
+the debug runtime's process functions. Those owners now resolve and lower.
+`md_buffer_content` was also quadratic; it now uses `StringBuilder` with a
+hoisted line count, preserving newline behavior.
+
+The last cycle found that nine `md_vim_*` calls had been attributed to
+`extensions.builtin.md_vim_motions`, whose actual surface owns only four
+`md_vim_motion_*` scalar helpers. The called typed motion functions belong to
+`std.editor.view.md_editing`; the explicit import now names that real owner and
+focused lint passes. The three-cycle cap prevents another native run this turn,
+so this correction remains focused-verified rather than artifact-verified.
+
+After rebasing onto `bc48cdc4ecb`, the corrected 153-source graph completed
+HIR 153/153. The missing `md_editing` owner, controller debug-registry owners,
+and DAP receiver scope are now proven at HIR. The repeated `me` errors were a
+source-structure defect: methods starting at `_send_framed_json` followed
+top-level free functions without a second `impl EditorDebugDapClient:` block.
+Restoring that impl boundary preserves the API and correctly binds receivers.
+
+The same audit removed direct editor calls to `rt_file_write_text` and
+`rt_dir_walk`; the existing semantic `write_file` and `dir_walk` owners are now
+used with unchanged call counts. Explicit LSP, DAP, diagnostics, palette,
+outline, settings, wiki, and extension-host owners eliminate the remaining HIR
+surface fallbacks. Focused lint passes and the closure remains 153 sources.
+
+The final bounded cycle then failed closed in MIR rather than emitting an
+artifact. Its authoritative blockers include unresolved editor/office/window/
+SIMD method and type ownership, ending at `undefined variable EditSession`.
+The log also records attempted unresolved-method constant-zero placeholders as
+`silent-null risk`; because `SIMPLE_NO_STUB_FALLBACK=1` ultimately rejects the
+build, no unsafe artifact was published. The MIR closure must be repaired
+before a native DAP smoke or signing claim is possible.
+
 The existing send/poll hot paths add no map, symbol lookup, hash, retry, sleep,
 heap allocation, or atomic reference-count operation. Lookup is a bounded scan
 of at most 16 contiguous atomic tags followed by one per-child lock.

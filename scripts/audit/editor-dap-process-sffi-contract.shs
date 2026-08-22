@@ -11,9 +11,18 @@ runtime="$root/src/runtime/runtime_process.c"
 interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/system.rs"
 registry="$root/src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
 specs="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+app_bridge="$root/src/app/editor/debug_process_runtime.spl"
+controller="$root/src/app/editor/editor_ctrl_debug.spl"
+stage4="$root/src/compiler/70.backend/backend/stage4_symbol_closure.spl"
 
 if grep -Eq '^extern fn rt_process_' "$dap"; then
     echo 'editor DAP redeclared a raw process SFFI symbol' >&2
+    exit 1
+fi
+
+if grep -Eq 'rt_editor_(spawn|start|poll|wait)_simple_dap' \
+    "$app_bridge" "$header" "$runtime" "$stage4"; then
+    echo 'duplicate C-owned editor DAP process state returned' >&2
     exit 1
 fi
 
@@ -46,14 +55,35 @@ test "$(grep -Fc 'rt_process_read_stdout_checked(pid, out_status)' "$owner")" -e
 test "$(grep -Fc 'rt_process_is_alive_checked(pid)' "$owner")" -eq 1
 grep -Fq 'fn editor_debug_dap_poll_process_pid(pid: i64) -> Result<[EditorDebugDapInboundMessage], text>:' "$dap"
 grep -Fq 'case Err(error): return Err(error)' "$dap"
+grep -Fq 'fn editor_debug_dap_client_initialize_launch(client: EditorDebugDapClient, config: EditorDebugLaunchConfig) -> (EditorDebugDapClient, bool):' "$dap"
+grep -Fq 'return (editor_debug_dap_client_stop_process(initialized.0), false)' "$dap"
+grep -Fq 'return (editor_debug_dap_client_stop_process(launched.0), false)' "$dap"
+grep -Fq 'EDITOR_DEBUG_DAP_PROCESS_BUFFER_MAX: i64 = 65536' "$dap"
+grep -Fq 'process_buffer.len() > EDITOR_DEBUG_DAP_PROCESS_BUFFER_MAX or chunk.len() > EDITOR_DEBUG_DAP_PROCESS_BUFFER_MAX - process_buffer.len()' "$dap"
+grep -Fq 'editor_debug_dap_parse_frame_at(process_buffer, consumed)' "$dap"
+test "$(grep -Fc 'process_buffer = process_buffer.slice(consumed, process_buffer.len())' "$dap")" -eq 1
+grep -Fq 'use std.io.{process_spawn_piped, process_write_stdin}' "$app_bridge"
+grep -Fq 'editor_debug_dap_client_start_process(' "$controller"
+grep -Fq 'editor_debug_dap_client_initialize_launch(dap, launch_config)' "$controller"
+grep -Fq 'ctrl_debug_store_client_for_session(ctrl, editor_debug_session_id(session), dap)' "$controller"
+test "$(grep -Fc 'process_kill(' "$dap")" -eq 1
+
+admit_line=$(grep -nF 'val admitted = editor_debug_dap_client_initialize_launch(dap, launch_config)' "$controller" | cut -d: -f1)
+publish_line=$(grep -nF 'ctrl.debug_registry = editor_debug_registry_start_fresh(launch_config)' "$controller" | cut -d: -f1)
+test "$publish_line" -gt "$admit_line"
+
+if grep -Eq 'while me\.recv_buffer\.len\(\) > 0|while next\.recv_buffer\.len\(\) > 0' "$dap"; then
+    echo 'quadratic DAP receive-queue front removal returned' >&2
+    exit 1
+fi
 
 grep -Fq 'if not me._send_framed_json(json):' "$dap"
 grep -Fq 'if pid <= 0 or _dap_process_write(pid, framed).is_err():' "$dap"
-grep -Fq 'if _dap_process_close(client.process_pid).is_err():' "$dap"
+grep -Fq 'val _closed = _dap_process_close(client.process_pid)' "$dap"
 
 if grep -Eq 'dlsym|CString|HashMap|Dictionary|sleep\(|retry' "$dap"; then
     echo 'editor DAP process path gained lookup, map, sleep, or retry work' >&2
     exit 1
 fi
 
-echo 'Editor DAP process SFFI contract: PASS raw_redeclarations=0 checked_provider_calls=1 stack_status=1 pending_after_write_only=1 explicit_hot_lookup=none admission=unsafe_unsigned'
+echo 'Editor DAP process SFFI contract: PASS raw_redeclarations=0 duplicate_c_owner=0 checked_provider_calls=1 bounded_buffer=65536 queue_drain=linear poll_cleanup=deferred explicit_hot_lookup=none admission=unsafe_unsigned'
