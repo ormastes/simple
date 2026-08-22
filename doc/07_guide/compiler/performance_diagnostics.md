@@ -266,3 +266,8 @@ Duplicate-typed-argument fixes index unique function-name/arity targets and scan
 call sites once. Ambiguous overloads remain untouched. Replacements retain declaration
 grouping and source order; memory grows with candidates and emitted replacements rather
 than candidate count multiplied by source lines.
+
+EasyFix policy uses the semantic code extracted from either `L|E:code:location` or
+`direct_code:location` IDs. Direct warning IDs such as W0406 remain W0406; their line is
+never interpreted as a code. Known annotation membership uses allocation-free exact
+dispatch rather than rebuilding whitelist arrays for each source line.
