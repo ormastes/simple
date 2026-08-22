@@ -373,3 +373,7 @@ implementation-blocked-by-bootstrap-authority
   `.agents/skills`, `.claude/agents/spipe`, `.claude/commands`, and
   `.gemini/commands` are N/A for this narrow installation mechanism because
   none names or implements must-check hook installation.
+- research: Added the previously missing domain research with primary Git,
+  in-toto, SLSA, TUF, NIST, Bazel, GitHub, GitLab, and pre-commit references.
+  The selected requirements remain unchanged; no option-selection cycle was
+  reopened.
