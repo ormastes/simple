@@ -1864,11 +1864,12 @@ traversal order, and repeated edges from one source/header still coalesce.
 
 The active `FixToolApplicator` selection-sorted every file's replacements in
 `O(R²)`, then rebuilt the complete source after each edit, copying roughly
-`O(R * S)` bytes for small edits. The common compatibility-safe path now detects
-distinct start offsets, uses comparator sorting (average `O(R log R)`), validates
+`O(R * S)` bytes for small edits. The compatibility-safe path now uses a typed,
+stable merge sort (`O(R log R)`) by descending start. Left-first equality retains
+discovery order within an equal-start group. It validates
 overlap exactly as before, and assembles untouched chunks plus replacement text
-with one final join (`O(S + output)` copied bytes). Equal-start edits retain the
-legacy selection sort because its historical insertion order is observable.
+with one final join (`O(S + output)` copied bytes). Equal-start edits therefore
+retain their historical insertion order without the former quadratic fallback.
 Negative, reversed, or originally out-of-range spans retain incremental legacy
 application because dynamic length checks are also observable. Missing-source and
 overlap errors are unchanged. Follow-up replaced per-file dictionary array
@@ -1877,7 +1878,7 @@ making grouping expected `O(R)` while retaining dictionary key iteration and
 per-file discovery order. The ordering/assembly implementation now lives with
 `std.tooling.easy_fix.types.FixApplicator`: compiler `FixToolApplicator`
 delegates to it, and lint `--fix` calls the same exported primitives. This removes
-the two remaining selection-sort/repeated-splice copies and prevents behavioral
+the remaining selection-sort/repeated-splice copies and prevents behavioral
 or performance drift among the three active entrypoints.
 
 ### Diagnostic JSON escaping allocation audit
