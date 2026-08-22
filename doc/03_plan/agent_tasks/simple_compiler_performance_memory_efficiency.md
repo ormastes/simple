@@ -359,3 +359,11 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Replace per-yield whole-function definition rescans with one forward definition walk plus conservative local snapshots.
 - Pin separation of analysis and transformation with a source contract.
 - Follow-up: move admitted coroutine lowering to an ABI/runtime owner backed by shared CFG liveness and ownership facts.
+
+## Completed compiler tranche: quarantine body outlining
+
+- Preserve exported compatibility analysis classes, counters, factory, and identity function/module entrypoints.
+- Remove dormant cold-region grouping, liveness, CFG extraction/remapping, and synthetic-function construction.
+- Pin absence of direct rewrite machinery with a source contract.
+- Count the deletion as compiler parse/compile, allocation, and code-footprint reduction; do not claim runtime speedup without measurement.
+- Follow-up: rehabilitate only with canonical region facts, complete SSA/ownership/unwind/debug proofs, checked module construction, profitability, and differential tests.
