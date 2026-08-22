@@ -6,8 +6,10 @@ use app.io.{cwd, file_read_bytes, file_remove, file_write_bytes, getpid,
             process_kill}
 use app.test.hal_environment_executor.{
     HostedProcessPollEnvExecutorV1, hosted_prepare_environment_get_v1,
+    hosted_environment_get_cursor_v1, hosted_environment_get_execute_v1,
     hosted_prepare_file_read_v1, hosted_prepare_stream_read_v1,
     hosted_prepare_clock_read_v1, hosted_prepare_random_fill_v1,
+    hosted_clock_read_cursor_v1, hosted_clock_read_execute_v1,
     hosted_prepare_file_write_v1, hosted_file_write_cursor_v1,
     hosted_file_write_execute_v1, hosted_prepare_process_v1,
     hosted_process_cursor_v1, hosted_process_execute_v1,
@@ -79,6 +81,7 @@ describe "hosted physical environment executor":
 
     it "captures ambient environment once before seal and serves bytes without reread":
         val executor = hosted_prepare_environment_get_v1("PATH")
+        val cursor = hosted_environment_get_cursor_v1(31)
         val key = ascii_bytes("PATH")
         val result_capacity = executor.value_bytes.len()
         val operation = env_instruction_v1(
@@ -89,13 +92,34 @@ describe "hosted physical environment executor":
             0, env_opcode_mask_v1(EnvOpcodeV1.EnvironmentGet),
             false, true, true)
         var results: [u8] = [0u8; result_capacity]
+        val wrong_identity = env_instruction_v1(
+            32, 0, EnvOpcodeV1.EnvironmentGet, 8, 0,
+            0, key.len(), key.len(), 0, result_capacity, result_capacity)
+        var wrong_results: [u8] = [66u8; result_capacity]
+        val rejected_identity = hosted_environment_get_execute_v1(
+            executor, cursor, policy, wrong_identity, key, wrong_results)
 
-        val receipt = executor.execute(policy, operation, key, results)
+        val step = hosted_environment_get_execute_v1(
+            executor, cursor, policy, operation, key, results)
+        var duplicate_results: [u8] = [77u8; result_capacity]
+        val duplicate = hosted_environment_get_execute_v1(
+            executor, step.cursor, policy, operation, key, duplicate_results)
+        var replayed: [u8] = [0u8; result_capacity]
+        val replay = env_replay_exact_v1(
+            operation, operation, step.receipt.observation,
+            key, results, replayed)
 
-        expect(receipt.applied).to_be(true)
-        expect(receipt.physical_effect).to_be(true)
-        expect(receipt.allocation_count_after_seal).to_equal(0)
-        expect(receipt.observation.bytes_length).to_equal(result_capacity)
+        expect(step.receipt.applied).to_be(true)
+        expect(step.receipt.physical_effect).to_be(true)
+        expect(step.receipt.allocation_count_after_seal).to_equal(0)
+        expect(step.receipt.observation.bytes_length).to_equal(result_capacity)
+        expect(rejected_identity.receipt.applied).to_be(false)
+        expect(wrong_results[0]).to_equal(66u8)
+        expect(duplicate.receipt.applied).to_be(false)
+        expect(duplicate_results[0]).to_equal(77u8)
+        expect(replay.applied).to_be(true)
+        expect(replay.physical_effect).to_be(false)
+        expect(replayed).to_equal(results)
 
     it "fails closed for unsupported physical opcodes before any effect":
         val executor = HostedProcessPollEnvExecutorV1(sealed: true)
@@ -247,6 +271,7 @@ describe "hosted physical environment executor":
 
     it "captures clock and random once and blocks them without nondeterminism authority":
         val clock = hosted_prepare_clock_read_v1()
+        val clock_cursor = hosted_clock_read_cursor_v1(41)
         val random = hosted_prepare_random_fill_v1(16)
         val clock_op = capture_instruction(EnvOpcodeV1.ClockRead, 11, 0, 8)
         val random_op = capture_instruction(EnvOpcodeV1.RandomFill, 12, 0, 16)
@@ -255,27 +280,36 @@ describe "hosted physical environment executor":
         var clock_replay: [u8] = [0u8; 8]
         var random_result: [u8] = [92u8; 16]
 
-        val blocked_clock = clock.execute(
-            capture_policy(EnvOpcodeV1.ClockRead, 11), clock_op, [], blocked_result)
+        val blocked_clock = hosted_clock_read_execute_v1(
+            clock, clock_cursor, capture_policy(EnvOpcodeV1.ClockRead, 11),
+            clock_op, [], blocked_result)
         val captured_random = random.execute(
             capture_policy(EnvOpcodeV1.RandomFill, 12, true),
             random_op, [], random_result)
-        val captured_clock = clock.execute(
+        val captured_clock = hosted_clock_read_execute_v1(
+            clock, clock_cursor,
             capture_policy(EnvOpcodeV1.ClockRead, 11, true),
             clock_op, [], clock_result)
         val replayed_clock = env_replay_exact_v1(
-            clock_op, clock_op, captured_clock.observation,
+            clock_op, clock_op, captured_clock.receipt.observation,
             [], clock_result, clock_replay)
+        var duplicate_clock_result: [u8] = [88u8; 8]
+        val duplicate_clock = hosted_clock_read_execute_v1(
+            clock, captured_clock.cursor,
+            capture_policy(EnvOpcodeV1.ClockRead, 11, true),
+            clock_op, [], duplicate_clock_result)
 
         expect(env_instruction_status_to_i64(
-            blocked_clock.observation.status)).to_equal(
+            blocked_clock.receipt.observation.status)).to_equal(
                 env_instruction_status_to_i64(EnvInstructionStatusV1.UnsafeInstruction))
         expect(blocked_result[0]).to_equal(91u8)
-        expect(captured_clock.applied).to_be(true)
-        expect(captured_clock.allocation_count_after_seal).to_equal(0)
+        expect(captured_clock.receipt.applied).to_be(true)
+        expect(captured_clock.receipt.allocation_count_after_seal).to_equal(0)
         expect(replayed_clock.applied).to_be(true)
         expect(replayed_clock.physical_effect).to_be(false)
         expect(clock_replay).to_equal(clock_result)
+        expect(duplicate_clock.receipt.applied).to_be(false)
+        expect(duplicate_clock_result[0]).to_equal(88u8)
         expect(captured_random.applied).to_be(true)
         expect(captured_random.allocation_count_after_seal).to_equal(0)
         expect(captured_random.observation.bytes_length).to_equal(16)

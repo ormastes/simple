@@ -15,8 +15,33 @@ class HostedProcessPollEnvExecutorV1:
 class HostedPreparedEnvironmentGetExecutorV1:
     key_bytes: [u8]
     value_bytes: [u8]
+    capability_id: i64
     captured_from_host: bool
     sealed: bool
+
+struct HostedEnvironmentGetCursorV1:
+    invocation_id: i64
+    consumed: bool
+    sealed: bool
+
+struct HostedEnvironmentGetStepReceiptV1:
+    receipt: EnvExecutionReceiptV1
+    cursor: HostedEnvironmentGetCursorV1
+
+class HostedPreparedClockReadExecutorV1:
+    captured_bytes: [u8]
+    capability_id: i64
+    captured_from_host: bool
+    sealed: bool
+
+struct HostedClockReadCursorV1:
+    invocation_id: i64
+    consumed: bool
+    sealed: bool
+
+struct HostedClockReadStepReceiptV1:
+    receipt: EnvExecutionReceiptV1
+    cursor: HostedClockReadCursorV1
 
 class HostedPreparedCaptureExecutorV1:
     opcode: EnvOpcodeV1
@@ -185,16 +210,20 @@ fn hosted_prepare_stream_read_v1(stream_id: i64, captured_bytes: [u8],
     _hosted_capture_v1(EnvOpcodeV1.StreamRead, key, captured_bytes,
                        captured_length, true)
 
-fn hosted_prepare_clock_read_v1() -> HostedPreparedCaptureExecutorV1:
-    val captured = time_now_unix_micros()
-    if captured < 0:
-        return _hosted_invalid_capture_v1(EnvOpcodeV1.ClockRead)
+fn hosted_prepare_clock_read_v1(
+        capability_id: i64 = 11) -> HostedPreparedClockReadExecutorV1:
+    val capability_valid = capability_id > 0 and capability_id < 63
+    val captured = if capability_valid: time_now_unix_micros() else: -1
+    val valid = capability_valid and captured >= 0
     var bytes: [u8] = [0u8; 8]
     var i = 0
     while i < 8:
         bytes[i] = ((captured >> (i * 8)) & 255) as u8
         i = i + 1
-    _hosted_capture_v1(EnvOpcodeV1.ClockRead, [], bytes, 8, true)
+    HostedPreparedClockReadExecutorV1(
+        captured_bytes: bytes,
+        capability_id: if valid: capability_id else: 0,
+        captured_from_host: valid, sealed: valid)
 
 fn hosted_prepare_random_fill_v1(length: i64) -> HostedPreparedCaptureExecutorV1:
     if length < 0 or length > HOSTED_ENV_CAPTURE_MAX_BYTES_V1:
@@ -209,12 +238,119 @@ fn hosted_prepare_random_fill_v1(length: i64) -> HostedPreparedCaptureExecutorV1
         i = i + 1
     _hosted_capture_v1(EnvOpcodeV1.RandomFill, [], bytes, length, true)
 
-fn hosted_prepare_environment_get_v1(key: text) -> HostedPreparedEnvironmentGetExecutorV1:
-    val value = env_get(key)
+fn hosted_prepare_environment_get_v1(
+        key: text, capability_id: i64 = 8)
+        -> HostedPreparedEnvironmentGetExecutorV1:
+    val key_valid = capability_id > 0 and capability_id < 63
+        and key.len() > 0 and key.len() <= HOSTED_ENV_CAPTURE_MAX_BYTES_V1
+        and _env_text_byte_safe(key)
+    # The only ambient read occurs during preparation. Invalid keys never reach
+    # the host facade and no host access remains after the executor is sealed.
+    val value = if key_valid: env_get(key) else: ""
+    val valid = key_valid and value.len() <= HOSTED_ENV_CAPTURE_MAX_BYTES_V1
+        and _env_text_byte_safe(value)
     HostedPreparedEnvironmentGetExecutorV1(
-        key_bytes: _env_text_bytes(key), value_bytes: _env_text_bytes(value),
-        captured_from_host: _env_text_byte_safe(key) and _env_text_byte_safe(value),
-        sealed: true)
+        key_bytes: if valid: _env_text_bytes(key) else: [],
+        value_bytes: if valid: _env_text_bytes(value) else: [],
+        capability_id: if valid: capability_id else: 0,
+        captured_from_host: valid, sealed: valid)
+
+fn hosted_environment_get_cursor_v1(
+        invocation_id: i64) -> HostedEnvironmentGetCursorV1:
+    HostedEnvironmentGetCursorV1(
+        invocation_id: invocation_id, consumed: false,
+        sealed: invocation_id > 0)
+
+fn _hosted_environment_get_rejected_v1(
+        instruction: EnvInstructionV1, cursor: HostedEnvironmentGetCursorV1,
+        status: EnvInstructionStatusV1) -> HostedEnvironmentGetStepReceiptV1:
+    HostedEnvironmentGetStepReceiptV1(
+        receipt: env_execution_rejected_v1(instruction, status), cursor: cursor)
+
+fn hosted_environment_get_execute_v1(
+        executor: HostedPreparedEnvironmentGetExecutorV1,
+        cursor: HostedEnvironmentGetCursorV1,
+        policy: EnvExecutorPolicyV1, instruction: EnvInstructionV1,
+        argument_bytes: [u8], result_bytes: [u8])
+        -> HostedEnvironmentGetStepReceiptV1:
+    val validation = env_executor_validate_instruction(
+        policy, instruction, argument_bytes, result_bytes)
+    if env_instruction_status_to_i64(validation)
+            != env_instruction_status_to_i64(EnvInstructionStatusV1.Planned):
+        return _hosted_environment_get_rejected_v1(
+            instruction, cursor, validation)
+    if not executor.sealed or not executor.captured_from_host
+            or not cursor.sealed or cursor.consumed
+            or instruction.invocation_id != cursor.invocation_id
+            or instruction.sequence != 0
+            or instruction.opcode != EnvOpcodeV1.EnvironmentGet
+            or instruction.capability_id != executor.capability_id:
+        return _hosted_environment_get_rejected_v1(
+            instruction, cursor, EnvInstructionStatusV1.Diverged)
+    if instruction.argument_length != executor.key_bytes.len()
+            or executor.value_bytes.len() > instruction.result_capacity:
+        return _hosted_environment_get_rejected_v1(
+            instruction, cursor, EnvInstructionStatusV1.Overflow)
+    var i = 0
+    while i < executor.key_bytes.len():
+        if argument_bytes[instruction.argument_offset + i] != executor.key_bytes[i]:
+            return _hosted_environment_get_rejected_v1(
+                instruction, cursor, EnvInstructionStatusV1.Diverged)
+        i = i + 1
+    i = 0
+    while i < executor.value_bytes.len():
+        result_bytes[instruction.result_offset + i] = executor.value_bytes[i]
+        i = i + 1
+    val receipt = env_execution_record_applied_v1(
+        instruction, argument_bytes, result_bytes,
+        executor.value_bytes.len(), true, 0)
+    HostedEnvironmentGetStepReceiptV1(
+        receipt: receipt,
+        cursor: HostedEnvironmentGetCursorV1(
+            invocation_id: cursor.invocation_id, consumed: true, sealed: true))
+
+fn hosted_clock_read_cursor_v1(invocation_id: i64) -> HostedClockReadCursorV1:
+    HostedClockReadCursorV1(
+        invocation_id: invocation_id, consumed: false,
+        sealed: invocation_id > 0)
+
+fn _hosted_clock_read_rejected_v1(
+        instruction: EnvInstructionV1, cursor: HostedClockReadCursorV1,
+        status: EnvInstructionStatusV1) -> HostedClockReadStepReceiptV1:
+    HostedClockReadStepReceiptV1(
+        receipt: env_execution_rejected_v1(instruction, status), cursor: cursor)
+
+fn hosted_clock_read_execute_v1(
+        executor: HostedPreparedClockReadExecutorV1,
+        cursor: HostedClockReadCursorV1,
+        policy: EnvExecutorPolicyV1, instruction: EnvInstructionV1,
+        argument_bytes: [u8], result_bytes: [u8])
+        -> HostedClockReadStepReceiptV1:
+    val validation = env_executor_validate_instruction(
+        policy, instruction, argument_bytes, result_bytes)
+    if env_instruction_status_to_i64(validation)
+            != env_instruction_status_to_i64(EnvInstructionStatusV1.Planned):
+        return _hosted_clock_read_rejected_v1(instruction, cursor, validation)
+    if not executor.sealed or not executor.captured_from_host
+            or not cursor.sealed or cursor.consumed
+            or instruction.invocation_id != cursor.invocation_id
+            or instruction.sequence != 0
+            or instruction.opcode != EnvOpcodeV1.ClockRead
+            or instruction.capability_id != executor.capability_id
+            or instruction.argument_length != 0
+            or instruction.result_capacity < 8:
+        return _hosted_clock_read_rejected_v1(
+            instruction, cursor, EnvInstructionStatusV1.Diverged)
+    var i = 0
+    while i < 8:
+        result_bytes[instruction.result_offset + i] = executor.captured_bytes[i]
+        i = i + 1
+    val receipt = env_execution_record_applied_v1(
+        instruction, argument_bytes, result_bytes, 8, true, 0)
+    HostedClockReadStepReceiptV1(
+        receipt: receipt,
+        cursor: HostedClockReadCursorV1(
+            invocation_id: cursor.invocation_id, consumed: true, sealed: true))
 
 fn _env_read_i64_le(data: [u8], offset: i64) -> i64:
     var value = 0
@@ -592,36 +728,6 @@ impl EnvPhysicalExecutorPortV1 for HostedProcessPollEnvExecutorV1:
         env_execution_record_applied_v1(
             instruction, argument_bytes, result_bytes, 1, true, 0)
 
-impl EnvPhysicalExecutorPortV1 for HostedPreparedEnvironmentGetExecutorV1:
-    fn execute(policy: EnvExecutorPolicyV1, instruction: EnvInstructionV1,
-               argument_bytes: [u8], result_bytes: [u8]) -> EnvExecutionReceiptV1:
-        val validation = env_executor_validate_instruction(
-            policy, instruction, argument_bytes, result_bytes)
-        if env_instruction_status_to_i64(validation)
-                != env_instruction_status_to_i64(EnvInstructionStatusV1.Planned):
-            return env_execution_rejected_v1(instruction, validation)
-        if not self.sealed or not self.captured_from_host
-                or instruction.opcode != EnvOpcodeV1.EnvironmentGet:
-            return env_execution_rejected_v1(
-                instruction, EnvInstructionStatusV1.UnsupportedCapability)
-        if instruction.argument_length != self.key_bytes.len()
-                or self.value_bytes.len() > instruction.result_capacity:
-            return env_execution_rejected_v1(
-                instruction, EnvInstructionStatusV1.InvalidInstruction)
-        var i = 0
-        while i < self.key_bytes.len():
-            if argument_bytes[instruction.argument_offset + i] != self.key_bytes[i]:
-                return env_execution_rejected_v1(
-                    instruction, EnvInstructionStatusV1.Diverged)
-            i = i + 1
-        i = 0
-        while i < self.value_bytes.len():
-            result_bytes[instruction.result_offset + i] = self.value_bytes[i]
-            i = i + 1
-        env_execution_record_applied_v1(
-            instruction, argument_bytes, result_bytes,
-            self.value_bytes.len(), true, 0)
-
 impl EnvPhysicalExecutorPortV1 for HostedPreparedCaptureExecutorV1:
     fn execute(policy: EnvExecutorPolicyV1, instruction: EnvInstructionV1,
                argument_bytes: [u8], result_bytes: [u8]) -> EnvExecutionReceiptV1:
@@ -631,7 +737,9 @@ impl EnvPhysicalExecutorPortV1 for HostedPreparedCaptureExecutorV1:
                 != env_instruction_status_to_i64(EnvInstructionStatusV1.Planned):
             return env_execution_rejected_v1(instruction, validation)
         if not self.sealed or not self.capture_valid
-                or instruction.opcode != self.opcode:
+                or instruction.opcode != self.opcode
+                or self.opcode == EnvOpcodeV1.ClockRead
+                or self.opcode == EnvOpcodeV1.EnvironmentGet:
             return env_execution_rejected_v1(
                 instruction, EnvInstructionStatusV1.UnsupportedCapability)
         if instruction.argument_length != self.argument_bytes.len()
@@ -656,6 +764,11 @@ impl EnvPhysicalExecutorPortV1 for HostedPreparedCaptureExecutorV1:
 export HostedProcessPollEnvExecutorV1
 export HostedPreparedEnvironmentGetExecutorV1
 export hosted_prepare_environment_get_v1
+export HostedEnvironmentGetCursorV1, HostedEnvironmentGetStepReceiptV1
+export hosted_environment_get_cursor_v1, hosted_environment_get_execute_v1
+export HostedPreparedClockReadExecutorV1
+export HostedClockReadCursorV1, HostedClockReadStepReceiptV1
+export hosted_clock_read_cursor_v1, hosted_clock_read_execute_v1
 export HOSTED_ENV_CAPTURE_MAX_BYTES_V1, HostedPreparedCaptureExecutorV1
 export hosted_prepare_file_read_v1, hosted_prepare_stream_read_v1
 export hosted_prepare_clock_read_v1, hosted_prepare_random_fill_v1

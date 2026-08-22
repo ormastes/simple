@@ -52,6 +52,29 @@ owner and is not a multi-writer object.
 
 The extractor writes strictly increasing instructions into a caller buffer and seals a digest. The executor validates capability, safety policy, capacity, and sequence before applying any instruction. Plan-Then-Commit performs the accepted plan once; ReplayOnly feeds recorded observations to shadow providers. A provider requesting an unrecorded or different interaction returns `InvalidRequest`/`Diverged`, never ambiently performs it.
 
+### Ambient environment and clock capture
+
+`HostedPreparedEnvironmentGetExecutorV1` performs its single ambient lookup
+before seal, rejects non-byte text and keys or values above 64 KiB, and pins the
+exact key plus capability. `HostedPreparedClockReadExecutorV1` similarly
+captures one eight-byte timestamp before seal and pins its capability. Neither
+sealed executor retains a host-access callback.
+
+The canonical parent creates a value-semantic cursor bound to one positive
+invocation identity. Execution admits only sequence zero, the exact opcode,
+capability, argument bytes, and caller-owned result capacity. It copies the
+prepared bytes into the caller region, returns a consumed cursor, and reports
+zero allocations after seal. Reusing the consumed cursor, presenting a stale
+cursor copy to the parent, or changing invocation/capability/bytes/capacity
+fails before result mutation. The parent is the sole cursor commit authority;
+provider copies are candidates only.
+
+Exact replay consumes the recorded observation and caller-owned recorded bytes,
+marks `physical_effect=false`, and never calls the environment or clock facade.
+Thus capture performs at most one host interaction, canonical consumption occurs
+at most once, and any number of isolated comparisons can replay without host
+effects or dynamic storage growth.
+
 ### Hosted bounded file write adapter
 
 `HostedPreparedFileWriteExecutorV1` admits one existing regular file beneath a
