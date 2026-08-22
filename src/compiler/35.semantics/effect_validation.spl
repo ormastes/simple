@@ -530,9 +530,33 @@ fn effect_expr_callees(expr: HirExpr, fn_names: Dict<i64, text>) -> [text]:
                 val arg: HirCallArg = a
                 for n in effect_expr_callees(arg.value, fn_names):
                     out = out.push(n)
-        case HirExprKind.MethodCall(receiver, _, args, _):
+        case HirExprKind.MethodCall(receiver, _, args, resolution):
+            # Resolved method/UFCS calls are real graph edges too. Omitting
+            # them made every transitive effect proof silently stop at the
+            # most common call syntax.
+            match resolution.get_symbol_id():
+                Some(symbol):
+                    if fn_names.contains_key(symbol.id):
+                        val resolved_name = fn_names[symbol.id]
+                        if not out.contains(resolved_name):
+                            out = out.push(resolved_name)
+                nil:
+                    pass_do_nothing("unresolved method is diagnosed by the owning semantic pass")
             for n in effect_expr_callees(receiver, fn_names):
                 out = out.push(n)
+            for a in args:
+                val arg: HirCallArg = a
+                for n in effect_expr_callees(arg.value, fn_names):
+                    out = out.push(n)
+        case HirExprKind.StaticCall(_, _, args, resolution):
+            match resolution.get_symbol_id():
+                Some(symbol):
+                    if fn_names.contains_key(symbol.id):
+                        val resolved_name = fn_names[symbol.id]
+                        if not out.contains(resolved_name):
+                            out = out.push(resolved_name)
+                nil:
+                    pass_do_nothing("unresolved static method is diagnosed by the owning semantic pass")
             for a in args:
                 val arg: HirCallArg = a
                 for n in effect_expr_callees(arg.value, fn_names):

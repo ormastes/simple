@@ -28,6 +28,11 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.driver.driver_pass_receipt.{PassReceipt, record_pass_receipt}
 use compiler.semantics.any_escape.{AnyEscapeProfile, any_escape_check}
 use compiler.semantics.enum_contract.{enum_contract_check}
+use compiler.semantics.critical_alloc_closure.{
+    CRITICAL_ALLOC_MAX_FUNCTIONS, CRITICAL_ALLOC_MAX_EDGES,
+    critical_alloc_nodes_from_hir_v1, critical_alloc_closure_check_v1,
+    critical_alloc_format_v1
+}
 use compiler.mono.verify.post_mono_verify.{
     post_mono_verify_modules,
     post_mono_report_total,
@@ -415,6 +420,35 @@ pub fn run_rt_hal_contract_pass(
         profile: ctx.assurance_policy.strictness.name(),
         executed: true,
         modules_checked: modules_checked,
+        diagnostics: out.len(),
+        errors_raised: errors_raised
+    ))
+    out
+
+pub fn run_critical_alloc_closure_pass(
+    ctx: CompileContext,
+    hir_modules: Dict<text, HirModule>
+) -> [text]:
+    """REQ-011 typed closure gate; Critical is an error, earlier profiles warn."""
+    val nodes = critical_alloc_nodes_from_hir_v1(hir_modules)
+    val findings = critical_alloc_closure_check_v1(
+        nodes, CRITICAL_ALLOC_MAX_FUNCTIONS, CRITICAL_ALLOC_MAX_EDGES)
+    val deny = ctx.assurance_policy.strictness.at_least(AssuranceStrictness.Critical)
+    var out: [text] = []
+    var errors_raised: i64 = 0
+    for finding in findings:
+        val msg = critical_alloc_format_v1(finding)
+        out.push(msg)
+        if deny:
+            ctx.add_error(msg)
+            errors_raised = errors_raised + 1
+        else:
+            ctx.add_warning(msg)
+    val _receipt = record_pass_receipt(PassReceipt(
+        pass_name: "critical_alloc_closure",
+        profile: ctx.assurance_policy.strictness.name(),
+        executed: true,
+        modules_checked: hir_modules.len(),
         diagnostics: out.len(),
         errors_raised: errors_raised
     ))
