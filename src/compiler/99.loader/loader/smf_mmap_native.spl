@@ -159,14 +159,16 @@ fn native_munlock(address: i64, size: i64) -> bool:
 # Native Executable Memory (Simple + unsafe)
 # ============================================================================
 
-# Global tracking for statistics (using dictionary as simple storage)
-var EXEC_MEMORY_ALLOCS: Dict<i64, i64> = {}
+# Scalar accounting keeps the loader path allocation-free. The caller owns the
+# exact mapping size passed back to native_free_exec_memory.
+var EXEC_MEMORY_TOTAL: i64 = 0
+var EXEC_MEMORY_COUNT: i64 = 0
 
 fn native_alloc_exec_memory(size: i64) -> i64:
-    """Allocate executable memory (RWX)."""
+    """Allocate writable memory; native_make_executable performs RW -> RX."""
     if size <= 0:
         return 0
-    val prot = PROT_READ | PROT_WRITE | PROT_EXEC
+    val prot = PROT_READ | PROT_WRITE
     val flags = MAP_PRIVATE | MAP_ANONYMOUS
 
     val addr = rt_mmap_raw(0, size, prot, flags, -1, 0)
@@ -174,8 +176,8 @@ fn native_alloc_exec_memory(size: i64) -> i64:
     if addr == MAP_FAILED:
         return 0
 
-    # Track allocation
-    EXEC_MEMORY_ALLOCS[addr] = size
+    EXEC_MEMORY_TOTAL = EXEC_MEMORY_TOTAL + size
+    EXEC_MEMORY_COUNT = EXEC_MEMORY_COUNT + 1
 
     addr
 
@@ -200,12 +202,13 @@ fn native_free_exec_memory(address: i64, size: i64) -> bool:
     val result = rt_munmap_raw(address, size)
 
     if result == 0:
-        # Remove from tracking
-        exec_memory_allocs_remove(address)
+        EXEC_MEMORY_TOTAL = EXEC_MEMORY_TOTAL - size
+        EXEC_MEMORY_COUNT = EXEC_MEMORY_COUNT - 1
         true
     else:
         false
 
+@unsafe(reason: "copies bounded code bytes into caller-owned RW mapped memory before the explicit RW-to-RX transition", capabilities: [ffi, raw_ptr])
 fn native_write_exec_memory(address: i64, code: [u8], offset: i64) -> i64:
     """Write code to executable memory."""
     if address == 0 or offset < 0:
@@ -213,14 +216,9 @@ fn native_write_exec_memory(address: i64, code: [u8], offset: i64) -> i64:
     val length = code.len() as i64
     if length == 0:
         return 0
-    var source: i64 = 0
-    unsafe(capabilities: [ffi, raw_ptr]):
-        source = rt_array_data_ptr(code)
+    val source = rt_array_data_ptr(code)
     if source != 0:
-        var written: i64 = 0
-        unsafe(capabilities: [ffi, raw_ptr]):
-            written = rt_ptr_write_bytes_raw(address, offset, source, length)
-        return written
+        return rt_ptr_write_bytes_raw(address, offset, source, length)
 
     # Interpreter boxed-array fallback. Packed/JIT/native arrays take the
     # single-call bulk path above, so this does not affect the compiled hot path.
@@ -303,16 +301,11 @@ fn native_call_function_3(fn_ptr: i64, arg1: i64, arg2: i64, arg3: i64) -> i64:
 
 fn native_exec_memory_total() -> i64:
     """Get total executable memory allocated."""
-    var total = 0i64
-    for _item_0 in EXEC_MEMORY_ALLOCS:
-        val addr = _item_0[0]
-        val size = _item_0[1]
-        total = total + size
-    total
+    EXEC_MEMORY_TOTAL
 
 fn native_exec_memory_count() -> i64:
     """Get number of executable memory allocations."""
-    exec_memory_allocs_len() as i64
+    EXEC_MEMORY_COUNT
 
 # ============================================================================
 # Unsafe Syscall Wrappers (Platform-specific)
