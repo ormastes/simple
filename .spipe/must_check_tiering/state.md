@@ -103,6 +103,18 @@ implementation-blocked-by-bootstrap-authority
 - implement: Added bootstrap Caret-suite rows and Kimi agent-runtime wrapping; added a bounded parent-owned multi-Caret manager as an automated gate while retaining honest TODO rows for real `os.apps.smux` integration and Slang-through-Caret inference.
 - harden: Bootstrap completion now runs all automated bootstrap-tier gates in the same invocation after individually validating compiler Stages 1–4; self-test-only runners cannot be enabled in production.
 - harden: Automated gate logs are retained under the source fingerprint and every PASS requires a timestamp plus an evidence reference; the push consumer rejects evidence-less PASS rows.
+- harden: Ledger schema v3 requires a stable owner and actionable unblock
+  condition on every unfinished row, rejects PASS rows with pending unblock
+  text, and exercises bootstrap-produced state through the real committed-ref
+  push consumer. The Unix installer now recognizes exact copied legacy guards
+  as well as symlinks without overwriting an existing preserved hook.
+- perf-fix: The dispatcher skips an exact canonical guard duplicated in
+  `pre-push.local`, preventing the bounded must-check from running twice while
+  continuing to chain any non-identical local hook.
+- artifacts: Added user-selected feature/NFR requirements and the missing
+  executable `test/03_system/check/must_check_tiering_spec.spl`. Its manual is
+  source-reviewed, but Stage-4 execution/docgen remains pending because this
+  isolated worktree contains no admitted `bin/simple`; no seed was substituted.
 - audit: Corrected Caret evidence boundaries: `local_torch` does not prove Slang inference, and `AgentTmuxEmbed` does not prove `os.apps.smux`; both claims remain explicit TODOs while the bounded multi-manager has its own automated row.
 - verify: Focused tiering/ref-path test passed in 2s (real ref path 0s); Caret and sdoctest parser self-tests, Unix hook check, working/staged direct-env guards, shell syntax, and scoped diff checks passed.
 - blocker: A full bootstrap cannot start because no canonical admitted Stage 2 parent and planner-admission-v2 receipt exist in `build/bootstrap`; the deployed `bin/simple` is a Rust seed and was not accepted as verification evidence.

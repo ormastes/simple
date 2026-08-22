@@ -20,3 +20,7 @@ into an arbitrary shell-command executor.
 The bootstrap owner writes logs before the ledger and records repository-relative
 evidence references and hashes. This avoids a circular Git hash dependency
 while binding PASS evidence to the source/config/scripts/tests/docs it qualifies.
+Ledger schema v3 also binds every result to a non-empty owner. A non-passing
+row must retain an actionable unblock condition; a passing row must use
+`unblock_condition=none`. The push consumer rejects unowned work, vacuous TODOs,
+and PASS rows that still claim unresolved work.

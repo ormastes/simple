@@ -47,10 +47,10 @@ write_ledger() {
     {
         echo '# Updated by scripts/check/check-bootstrap-must-pass.shs. TODO is visible debt, never PASS.'
         echo 'must_check_ledger:'
-        echo '  schema: "simple.must-check-ledger/v2"'
+        echo '  schema: "simple.must-check-ledger/v3"'
         echo "  source_fingerprint: \"$_fp\""
         echo "  completed_at_utc: \"$_at\""
-        echo 'must_check_results |id, status, passed_at_utc, command, evidence, evidence_sha256|'
+        echo 'must_check_results |id, status, passed_at_utc, command, evidence, evidence_sha256, owner, unblock_condition|'
         printf '%s\n' "$_rows"
     } > "$_tmp"
     mv "$_tmp" "$LEDGER"
@@ -63,6 +63,17 @@ manifest_rows() {
 row_value() {
     _id=$1; _column=$2
     awk -F, -v id="$_id" -v col="$_column" '{x=$1; gsub(/^[[:space:]]+/, "", x); if (x==id) {v=$col; gsub(/^[[:space:]]+|[[:space:]]+$/, "", v); if (substr(v,1,1)=="\"") v=substr(v,2); if (substr(v,length(v),1)=="\"") v=substr(v,1,length(v)-1); print v; exit}}' "$LEDGER" 2>/dev/null
+}
+
+gate_owner() {
+    case "$1" in
+        compiler-stage*) echo compiler-team ;;
+        caret-*) echo llm-caret-team ;;
+        web-server-*|db-server-*) echo server-performance-team ;;
+        simpleos-*|riscv32-*|simple-generated-*) echo simpleos-platform-team ;;
+        binary-size-*|interpreter-startup-*|rust-go-*) echo performance-team ;;
+        *) echo tooling-team ;;
+    esac
 }
 
 validate_compiler_phases() {
@@ -226,12 +237,16 @@ while IFS=, read -r _id _tier _blocking _gate_mode _command _description; do
     _passed_at=never
     _evidence='not run'
     _evidence_sha=never
+    _owner=$(gate_owner "$_id")
+    _unblock=$_description
+    _unblock=$(printf '%s' "$_unblock" | sed 's/^[[:space:]]*"//;s/"[[:space:]]*$//')
     if [ "$MODE" = record-bootstrap ] && { [ "$_id" = compiler-stage1 ] || [ "$_id" = compiler-stage2 ] || [ "$_id" = compiler-stage3 ] || [ "$_id" = compiler-stage4 ]; }; then
         _status=pass; _passed_at=$_at
         _evidence=$(printf '%s\n' "$_phase_results" | sed -n "s/^$_id-evidence=//p")
         [ -n "$_evidence" ] || { echo "bootstrap-must-check: FAIL — missing $_id evidence reference" >&2; exit 1; }
         case "$_evidence" in "$ROOT/"*) _evidence=${_evidence#"$ROOT/"} ;; esac
         _evidence_sha=$(evidence_hash "$_evidence") || exit 1
+        _unblock=none
     elif { [ "$MODE" = run ] || [ "$MODE" = record-bootstrap ]; } && [ "$_gate_mode" = automated ]; then
         _out="$_evidence_dir/${_id}.log.tmp.$$"
         _final_out="$_evidence_dir/${_id}.log"
@@ -242,6 +257,7 @@ while IFS=, read -r _id _tier _blocking _gate_mode _command _description; do
             _status=pass; _passed_at=$_at; _evidence="$_final_out"
             case "$_evidence" in "$ROOT/"*) _evidence=${_evidence#"$ROOT/"} ;; esac
             _evidence_sha=$(evidence_hash "$_evidence") || exit 1
+            _unblock=none
         else
             mv "$_out" "$_final_out"
             _status=fail; _evidence="exit $_rc without accepted PASS at $_at"; _failed=1
@@ -252,11 +268,12 @@ while IFS=, read -r _id _tier _blocking _gate_mode _command _description; do
             _status=pass
             _passed_at=$(row_value "$_id" 3)
             _evidence_sha=$(row_value "$_id" 6)
+            _unblock=none
         fi
         _evidence=$(row_value "$_id" 5)
         [ -n "$_evidence" ] || _evidence='pending required evidence'
     fi
-    printf '    %s, %s, %s, "%s", "%s", "%s"\n' "$_id" "$_status" "$_passed_at" "$_command" "$_evidence" "$_evidence_sha" >> "$_rows_tmp"
+    printf '    %s, %s, %s, "%s", "%s", "%s", "%s", "%s"\n' "$_id" "$_status" "$_passed_at" "$_command" "$_evidence" "$_evidence_sha" "$_owner" "$_unblock" >> "$_rows_tmp"
 done < "$_manifest_tmp"
 
 write_ledger "$(cat "$_rows_tmp")" "$_fp" "$_at"

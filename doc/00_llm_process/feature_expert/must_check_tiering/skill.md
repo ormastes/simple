@@ -12,6 +12,12 @@ records its retained log; do not require a second operator command. PASS needs
 a UTC timestamp and evidence reference. TODO and blocked rows remain visible
 and never count as PASS.
 
+Ledger schema v3 adds `owner` and `unblock_condition`. Reject empty or
+`unassigned` owners, TODO/blocked rows with `none` or empty unblock text, and
+PASS rows whose unblock condition is not `none`. Focused transition evidence
+must come from the bootstrap producer and then pass through the committed-ref
+push consumer; a hand-authored PASS fixture is insufficient.
+
 ## 2026-08-21 bootstrap repair handoff
 
 The must-check producer remains correctly blocked until a fresh Stage 4 exists.

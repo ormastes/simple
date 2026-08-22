@@ -18,6 +18,7 @@ grep -q 'exec sh "$repo_root/scripts/check/check-push-must-pass.shs"' "$HOOK"
 grep -q 'check-bootstrap-stage3-selfverify.shs' "$BOOTSTRAP"
 grep -q 'check-post-bootstrap-stage4-sspec.shs' "$BOOTSTRAP"
 grep -q 'pre-push.local' "$ROOT/scripts/hooks/pre-push"
+grep -q 'cmp -s "$LOCAL_HOOK" "$CANONICAL_GUARD"' "$ROOT/scripts/hooks/pre-push"
 grep -q -- '--install' "$INSTALL_UNIX"
 grep -q 'Move-Item' "$INSTALL_WINDOWS"
 
@@ -49,25 +50,37 @@ printf '%s\n' \
     > "$fixture/config/check/must_check_gates.sdn"
 printf '%s\n' \
     'must_check_ledger:' \
-    '  schema: "simple.must-check-ledger/v2"' \
+    '  schema: "simple.must-check-ledger/v3"' \
     '  source_fingerprint: "pending"' \
-    'must_check_results |id, status, passed_at_utc, command, evidence, evidence_sha256|' \
+    'must_check_results |id, status, passed_at_utc, command, evidence, evidence_sha256, owner, unblock_condition|' \
     > "$fixture/doc/08_tracking/check/must_check_db.sdn"
 mkdir -p "$fixture/build"
-printf '%s\n' 'fixture evidence' > "$fixture/build/compiler-stage1.receipt"
-fixture_evidence_sha=$(sha256sum "$fixture/build/compiler-stage1.receipt" | awk '{print $1}')
-printf '    compiler-stage1, pass, 2000-01-01T00:00:00Z, "", "build/compiler-stage1.receipt", "%s"\n' "$fixture_evidence_sha" >> "$fixture/doc/08_tracking/check/must_check_db.sdn"
+printf '    compiler-stage1, todo, never, "", "fixture bootstrap evidence pending", "never", "compiler-team", "run the fixture bootstrap producer"\n' >> "$fixture/doc/08_tracking/check/must_check_db.sdn"
+for phase in 1 2 3 4; do printf 'phase%s evidence\n' "$phase" > "$fixture/build/phase$phase.receipt"; done
+printf '%s\n' '#!/bin/sh' \
+    'printf "%s\n" compiler-stage1=pass compiler-stage2=pass compiler-stage3=pass compiler-stage4=pass' \
+    "printf '%s\\n' compiler-stage1-evidence=$fixture/build/phase1.receipt compiler-stage2-evidence=$fixture/build/phase2.receipt compiler-stage3-evidence=$fixture/build/phase3.receipt compiler-stage4-evidence=$fixture/build/phase4.receipt" \
+    > "$fixture/phase-validator"
+chmod +x "$fixture/phase-validator"
 git -C "$fixture" init -q
+cp "$fixture/scripts/check/pre-push-conflict-tree-guard.shs" "$fixture/.git/hooks/pre-push.local"
+chmod +x "$fixture/.git/hooks/pre-push.local"
 git -C "$fixture" config user.name must-check-test
 git -C "$fixture" config user.email must-check-test@example.invalid
 git -C "$fixture" add .
 git -C "$fixture" commit -qm base
 base=$(git -C "$fixture" rev-parse HEAD)
-fp=$(git -C "$fixture" ls-tree -r HEAD -- src scripts config test doc/07_guide doc/00_llm_process doc/glossary.md | sed '\|[[:space:]]doc/08_tracking/check/must_check_db.sdn$|d' | sha256sum | awk '{print $1}')
-sed "s/source_fingerprint: \"pending\"/source_fingerprint: \"$fp\"/" "$fixture/doc/08_tracking/check/must_check_db.sdn" > "$fixture/ledger.next"
-mv "$fixture/ledger.next" "$fixture/doc/08_tracking/check/must_check_db.sdn"
+MUST_CHECK_ROOT="$fixture" \
+MUST_CHECK_MANIFEST="$fixture/config/check/must_check_gates.sdn" \
+MUST_CHECK_LEDGER="$fixture/doc/08_tracking/check/must_check_db.sdn" \
+MUST_CHECK_EVIDENCE_DIR="$fixture/build/must-check-evidence" \
+MUST_CHECK_PHASE_VALIDATOR="$fixture/phase-validator" \
+MUST_CHECK_SELFTEST=1 MUST_CHECK_NOW=2000-01-01T00:00:00Z \
+    sh "$BOOTSTRAP" --record-bootstrap-success >/dev/null
+grep -q 'compiler-stage1, pass, 2000-01-01T00:00:00Z' "$fixture/doc/08_tracking/check/must_check_db.sdn"
+grep -q '"compiler-team", "none"' "$fixture/doc/08_tracking/check/must_check_db.sdn"
 git -C "$fixture" add doc/08_tracking/check/must_check_db.sdn
-git -C "$fixture" commit -qm ledger
+git -C "$fixture" commit -qm bootstrap-ledger
 tip=$(git -C "$fixture" rev-parse HEAD)
 start=$(date +%s)
 printf 'refs/heads/main %s refs/heads/main %s\n' "$tip" "$base" | MUST_CHECK_ROOT="$fixture" sh "$fixture/scripts/check/check-push-must-pass.shs" >/dev/null

@@ -1,5 +1,8 @@
 # Must-Check Tiering Operator Manual
 
+Requirements: REQ-MCT-001 through REQ-MCT-006. Executable source:
+`test/03_system/check/must_check_tiering_spec.spl`.
+
 ## Run the lightweight push must-check
 
 The push hook delegates to the lightweight driver. It executes only the
@@ -25,7 +28,22 @@ matches the ledger; a TODO
 or blocked row must say `never`. TODO and blocked non-push rows remain visible
 and are not reported as PASS.
 
+Every ledger v3 row also names its owner and unblock condition. Unowned rows,
+unfinished rows without actionable unblock text, and PASS rows that retain a
+pending unblock condition fail closed. The focused fixture obtains its PASS
+ledger from the bootstrap producer and then feeds that committed result through
+the real pre-push ref-input path.
+An exact legacy canonical payload preserved as `pre-push.local` is recognized
+as duplicate and runs only through the canonical dispatcher path; unrelated
+local hooks remain chained.
+
 Focused evidence: `sh test/01_unit/scripts/must_check_tiering_test.shs`.
+
+The executable scenario invokes the push self-test, bootstrap self-test, and
+the real bootstrap-produced-ledger to committed-ref push transition fixture.
+Its assertions require explicit PASS markers and timing fields. This manual was
+reviewed against that source; regeneration remains pending until an admitted
+Stage-4 CLI is available in the worktree.
 
 The Sdoctest bootstrap row additionally requires both the Markdown `Sdoctest:`
 and source-comment `SPL Doctest:` summaries to report at least one passing case

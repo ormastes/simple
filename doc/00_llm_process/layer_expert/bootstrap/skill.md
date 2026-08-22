@@ -602,3 +602,11 @@ Do not diagnose later `Span`, `Type`, `ProcessResult`, or directory-symbol
 messages as independent first causes until a fresh run proves the initial ASM
 dependency is gone. Resume with a new Stage-2 admission and receipt-bound
 Stage-3/4 run; never substitute the seed or bypass must-check.
+
+## Must-check ledger handoff
+
+The bootstrap owner is the only producer of must-check ledger PASS state.
+Schema v3 requires a named owner on every row, actionable unblock text for
+TODO/blocked rows, and `unblock_condition=none` for PASS. A bootstrap wrapper
+must not publish a phase PASS until its exact receipt has been validated and
+hashed; the bounded push consumer only verifies that retained state.

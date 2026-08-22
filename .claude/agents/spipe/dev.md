@@ -37,6 +37,8 @@ This agent CREATES the initial state file. All subsequent agents read and append
        the work it describes"); create the entry if none covers the area
      - `doc/08_tracking/bug/` records for every gap found and not fixed, with
        file:line and the unblock condition
+     - Must-check ledger v3 rows with a named owner and actionable unblock
+       condition for TODO/blocked work; PASS rows use `none`
    - If the request ALSO changes workflow, tooling, evidence wrappers,
      verification contracts, or SPipe behavior, extend that AC to cover
      `doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,

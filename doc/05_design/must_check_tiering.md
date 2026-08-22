@@ -16,3 +16,7 @@ only after row evaluation completes.
 Statuses are `pass`, `todo`, `blocked`, or `fail`. TODO and blocked are never
 aliases for PASS. Only explicitly push-blocking rows prevent an interactive
 push, allowing broad hardware/performance requirements to remain honestly open.
+Each v3 result row adds `owner` and `unblock_condition`: owner may not be empty
+or `unassigned`; TODO/blocked rows require a concrete non-`none` condition;
+PASS requires `none`. The bootstrap producer derives stable team ownership from
+the gate ID and copies the manifest description into unfinished rows.

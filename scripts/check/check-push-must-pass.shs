@@ -31,7 +31,7 @@ validate_ledger_text() {
     _ledger=$2
     _want_fp=$3
     _schema=$(printf '%s\n' "$_ledger" | field_from_text schema)
-    [ "$_schema" = simple.must-check-ledger/v2 ] || return 10
+    [ "$_schema" = simple.must-check-ledger/v3 ] || return 10
     _got_fp=$(printf '%s\n' "$_ledger" | field_from_text source_fingerprint)
     [ "$_got_fp" = "$_want_fp" ] || return 11
     _manifest_ids=$(printf '%s\n' "$_manifest" | awk -F, '/^[[:space:]]+[a-z0-9][a-z0-9-]*,[[:space:]]*bootstrap,/ {x=$1; gsub(/^[[:space:]]+/,"",x); print x}')
@@ -52,8 +52,11 @@ validate_ledger_text() {
         _evidence=$(printf '%s\n' "$_row" | awk -F, '{x=$5; gsub(/^[[:space:]]+|[[:space:]]+$/, "", x); gsub(/^"|"$/, "", x); print x}')
         _evidence_sha=$(printf '%s\n' "$_row" | awk -F, '{x=$6; gsub(/[[:space:]"]/, "", x); print x}')
         _ledger_command=$(printf '%s\n' "$_row" | awk -F, '{x=$4; gsub(/^[[:space:]]+|[[:space:]]+$/, "", x); gsub(/^"|"$/, "", x); print x}')
+        _owner=$(printf '%s\n' "$_row" | awk -F, '{x=$7; gsub(/^[[:space:]]+|[[:space:]]+$/, "", x); gsub(/^"|"$/, "", x); print x}')
+        _unblock=$(printf '%s\n' "$_row" | awk -F, '{x=$8; gsub(/^[[:space:]]+|[[:space:]]+$/, "", x); gsub(/^"|"$/, "", x); print x}')
         _manifest_command=$(printf '%s' "$_command" | sed 's/^[[:space:]]*"//;s/"[[:space:]]*$//')
         [ "$_ledger_command" = "$_manifest_command" ] || exit 26
+        [ -n "$_owner" ] && [ "$_owner" != unassigned ] || exit 30
         if [ "$_status" = pass ]; then
             printf '%s\n' "$_passed_at" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' || exit 23
             [ -n "$_evidence" ] && [ "$_evidence" != never ] && [ "$_evidence" != "pending required evidence" ] || exit 25
@@ -61,11 +64,13 @@ validate_ledger_text() {
             case "$_evidence" in /*) _evidence_path=$_evidence ;; *) _evidence_path="$ROOT/$_evidence" ;; esac
             [ -f "$_evidence_path" ] && [ ! -L "$_evidence_path" ] || exit 28
             [ "$(hash_file "$_evidence_path")" = "$_evidence_sha" ] || exit 29
+            [ "$_unblock" = none ] || exit 31
         elif [ "$_passed_at" != never ]; then
             exit 24
         fi
         if [ "$_blocking" = true ] && [ "$_status" != pass ]; then exit 21; fi
         if [ "$_status" = todo ] || [ "$_status" = blocked ]; then
+            [ -n "$_unblock" ] && [ "$_unblock" != none ] || exit 32
             echo "push-must-check: TODO $_id" >&2
         elif [ "$_status" != pass ]; then
             exit 22
@@ -109,7 +114,7 @@ if [ "${1:-}" = --self-test ]; then
     printf '%s\n' 'self-test authoritative evidence' > "$_tmp/evidence"
     _evidence_sha=$(hash_file "$_tmp/evidence") || exit 1
     sed 's/source_fingerprint: "unrecorded"/source_fingerprint: "abc"/; s/compiler-stage1, todo, never/compiler-stage1, pass, 2000-01-01T00:00:00Z/; s/compiler-stage2, todo, never/compiler-stage2, pass, 2000-01-01T00:00:00Z/; s/compiler-stage3, todo, never/compiler-stage3, pass, 2000-01-01T00:00:00Z/; s/compiler-stage4, todo, never/compiler-stage4, pass, 2000-01-01T00:00:00Z/' "$_tmp/ledger" > "$_tmp/pass-raw"
-    awk -F, -v ev="$_tmp/evidence" -v sha="$_evidence_sha" 'BEGIN{OFS=","} $2 ~ /pass/ {$5=" \"" ev "\""; $6=" \"" sha "\""} {print}' "$_tmp/pass-raw" > "$_tmp/pass"
+    awk -F, -v ev="$_tmp/evidence" -v sha="$_evidence_sha" 'BEGIN{OFS=","} $2 ~ /pass/ {$5=" \"" ev "\""; $6=" \"" sha "\""; $8=" \"none\""} {print}' "$_tmp/pass-raw" > "$_tmp/pass"
     validate_ledger_text "$(cat "$_tmp/manifest")" "$(cat "$_tmp/pass")" abc || die "valid fixture rejected"
     validate_ledger_text "$(cat "$_tmp/manifest")" "$(cat "$_tmp/pass")" stale && die "stale fixture accepted"
     sed 's/compiler-stage4, pass/compiler-stage4, fail/' "$_tmp/pass" > "$_tmp/fail"
@@ -128,7 +133,13 @@ if [ "${1:-}" = --self-test ]; then
     sed 's/authoritative evidence/tampered evidence/' "$_tmp/evidence" > "$_tmp/tampered"
     mv "$_tmp/tampered" "$_tmp/evidence"
     validate_ledger_text "$(cat "$_tmp/manifest")" "$(cat "$_tmp/pass")" abc && die "tampered evidence accepted"
-    echo "push-must-check: PASS — 9 ledger fixtures checked"
+    sed 's/, "compiler-team", "none"$/, "unassigned", "none"/' "$_tmp/pass" > "$_tmp/no-owner"
+    validate_ledger_text "$(cat "$_tmp/manifest")" "$(cat "$_tmp/no-owner")" abc && die "unowned row accepted"
+    sed 's/, "compiler-team", "none"$/, "compiler-team", "still pending"/' "$_tmp/pass" > "$_tmp/pass-with-unblock"
+    validate_ledger_text "$(cat "$_tmp/manifest")" "$(cat "$_tmp/pass-with-unblock")" abc && die "PASS with pending unblock accepted"
+    sed 's/compiler-stage4, pass, 2000-01-01T00:00:00Z/compiler-stage4, todo, never/; s/, "compiler-team", "none"$/, "compiler-team", "none"/' "$_tmp/pass" > "$_tmp/todo-without-unblock"
+    validate_ledger_text "$(cat "$_tmp/manifest")" "$(cat "$_tmp/todo-without-unblock")" abc && die "TODO without unblock accepted"
+    echo "push-must-check: PASS — 12 ledger fixtures checked"
     exit 0
 fi
 

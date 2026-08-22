@@ -1008,6 +1008,12 @@ the build receipt. A compiler path is not a bootstrap reason. Unknown
 compatibility rebuilds the smallest relevant closure; full bootstrap is limited
 to a typed incompatibility or explicit release/trust target.
 
+For mandatory-check tiering, keep the interactive push gate bounded and route
+expensive gates through `scripts/check/check-bootstrap-must-pass.shs`. Ledger v3
+rows must name a non-empty owner; TODO/blocked rows require an actionable
+non-`none` unblock condition, while PASS rows require
+`unblock_condition=none`. The push consumer must fail closed on violations.
+
 ## Log-retention convention (debug/perf instrumentation)
 
 General policy (canonical statement: `doc/07_guide/infra/logging/`): when

@@ -10,6 +10,8 @@ The repository has two mandatory-check tiers:
   `doc/08_tracking/check/must_check_db.sdn` atomically. Each PASS retains its
   own `passed_at_utc`, evidence reference, and evidence SHA-256; automated logs live under
   `build/must-check/<source-fingerprint>/`. TODO/blocked rows use `never`.
+  Schema v3 assigns every row an owner and actionable unblock condition. PASS
+  rows use `unblock_condition=none`.
 
 The registry is `config/check/must_check_gates.sdn`; it declares both bounded
 push commands and bootstrap evidence rows. A `todo` or `blocked` row
@@ -82,3 +84,8 @@ tracked dispatcher snapshots Git's ref input and supplies it to both the local
 hook and the canonical repository guard. The repository hook verifier accepts
 only the exact canonical guard or exact tracked dispatcher path; an unrelated
 wrapper containing a guard-name substring is not accepted.
+An exact file copy of the legacy canonical guard is treated like its symlink;
+if that same guard is already preserved as `pre-push.local`, installation may
+replace only `pre-push` with the dispatcher without overwriting either payload.
+The dispatcher detects that exact duplicate and does not execute it twice;
+non-identical local hooks remain chained and fail closed.
