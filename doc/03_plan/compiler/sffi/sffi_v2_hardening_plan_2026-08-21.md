@@ -971,3 +971,16 @@ values. Keep the single-pass provider behavior. Next lift those raw sentinels
 at the canonical Simple owner into `Option`/`Result` without a secondary
 last-error query, then migrate callers by semantic need. Six Rust file-provider
 tests pass; artifact signing and proof receipts are still absent.
+
+Nullable line and mmap-byte reads are now lifted once at their canonical
+owners into `Result`, preserving valid emptiness while rejecting unreadable
+paths without a second syscall. Keep this single-pass shape as remaining
+nullable arrays/text are migrated. Current census: 12,454 declarations,
+11,669 untouched, 513 tagged, 587 contracted, and zero signed admissions.
+
+The backing census now performs one linear Simple-source scan with a hashed
+symbol filter rather than recursive multi-pattern grep. Its measured full run
+is 34.09 seconds / 75,124 KiB peak RSS; the full safety census is 75.03 seconds
+/ 75,560 KiB. Preserve this bounded audit shape while adding contract fields;
+never move census, evidence, signature, or symbol-resolution work into the
+foreign-call hot path.

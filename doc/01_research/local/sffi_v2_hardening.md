@@ -1231,3 +1231,18 @@ focused Rust file-provider tests pass, including exact missing-size and
 empty-file-versus-failure hash cases. Higher-level optional/result lifting and
 signed artifact admission remain open, so this is cross-lane provider
 correction rather than full verification.
+
+The canonical line-array and mmap-byte facades now preserve the provider's
+nullable failure state as `Result.Err`; legitimate empty files remain
+`Ok([])`. Both paths perform one provider read and do not add an existence
+probe, last-error query, registry lookup, allocation, or hash pass. The two
+focused interpreter specs pass 3/3 and 12/12. The refreshed census contains
+12,454 declarations, 513 unsafe-tagged rows, 587 contracted rows, 11,669
+untouched rows, and zero verified/signed admissions.
+
+The census tool itself had a scalability defect: recursive `grep -Ff` with
+thousands of symbol needles remained live for more than an hour. It now scans
+each Simple source once and filters call names through an in-memory symbol
+hash. A complete backing census finishes in 34.09 seconds with 75,124 KiB peak
+RSS; the enclosing safety census finishes in 75.03 seconds with 75,560 KiB
+peak RSS. This is audit-time work only and adds no runtime/SFFI call overhead.

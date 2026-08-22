@@ -74,8 +74,26 @@ grep -rhoE '(pub[[:space:]]+(unsafe[[:space:]]+)?extern[[:space:]]+"C"[[:space:]
   src/compiler_rust --include=*.rs 2>/dev/null | awk '{print $NF}' | sort -u > "$W/rsdefs.txt"
 grep -rhoE '^[[:space:]]*(pub[[:space:]]+)?fn[[:space:]]+[A-Za-z_][A-Za-z0-9_]*' --include='*.spl' \
   --exclude-dir=vendor src test 2>/dev/null | awk '{print $NF}' | sort -u > "$W/splfns.txt"
-sed 's/$/(/' "$W/syms.txt" > "$W/needles.txt"
-grep -rnoFf "$W/needles.txt" --include='*.spl' --exclude-dir=vendor src test 2>/dev/null > "$W/occ.txt" || :
+# Scan every Simple source once. GNU grep's `-Ff` matcher becomes extremely
+# slow with the several-thousand-symbol extern set (observed at >1 hour),
+# because this report asks it to retain line/filename detail for every match.
+# Loading the exact symbol set into a hash keeps this O(source bytes + hits),
+# while preserving the same `file:line:symbol(` interchange below.
+export EXTERN_CENSUS_SYMBOLS="$W/syms.txt"
+find src test -type f -name '*.spl' ! -path '*/vendor/*' -print0 |
+xargs -0 -r -n 200 perl -ne '
+  BEGIN {
+    open my $fh, "<", $ENV{EXTERN_CENSUS_SYMBOLS} or die $!;
+    while (my $symbol = <$fh>) {
+      chomp $symbol;
+      $wanted{$symbol}=1 if $symbol ne "";
+    }
+  }
+  while (/\b([A-Za-z_]\w*)\s*\(/g) {
+    print "$ARGV:$.:$1(\n" if $wanted{$1};
+  }
+  close ARGV if eof;
+' > "$W/occ.txt"
 
 W="$W" OUT="$OUT" python3 - <<'PY'
 import os,collections
