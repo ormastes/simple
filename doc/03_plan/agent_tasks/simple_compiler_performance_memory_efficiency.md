@@ -540,3 +540,12 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
   claiming an end-to-end linear short-grammar rule.
 - Follow-up: share a lightweight lexical line-state service across source rules
   instead of retaining rule-local quote/comment models.
+
+## Completed compiler tranche: fail-fast liveness allocation
+
+- Reject incomplete CFG/def-use inputs before live-in/live-out allocation.
+- Skip USE/DEF allocation when duplicate locals already make def-use incomplete.
+- Release USE/DEF working matrices when later validation fails closed.
+- Preserve complete liveness results, visit budgets, and oversized-input status.
+- Pin duplicate-local, uncovered-instruction, and dangling-edge empty-storage
+  contracts.
