@@ -17,6 +17,9 @@ tampered, evidence-less, or non-passing push-blocking rows. Non-blocking TODOs
 remain visible. Push-tier commands are registry rows dispatched through a
 closed ID/mode/command allowlist, so a changed manifest cannot turn the hook
 into an arbitrary shell-command executor.
+The quick rules checker parses `rules.sdl` from the exact pushed revision, and
+that policy file participates in the producer/consumer fingerprint; dirty or
+concurrent working-tree command text is never executed.
 The consumer canonicalizes evidence beneath the repository root and applies a
 64 MiB aggregate byte budget before hashing. It deduplicates identical ref
 updates and accepts at most two unique updates per invocation; larger pushes

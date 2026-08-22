@@ -24,6 +24,8 @@
   mode while its exhaustive fixture campaign is bootstrap-owned.
 - Prove production ledger validation rejects absolute external evidence,
   parent traversal, and aggregate evidence beyond 64 MiB before hashing.
+- Prove `--ref` rules evaluation ignores a hostile dirty `rules.sdl`, parses the
+  committed registry, and fingerprints that policy in producer and consumer.
 - On a native Windows host, create two linked worktrees, run
   `powershell -File scripts/setup/install-must-check-hooks.ps1 -Install` in the
   first, then `-Check` and `sh scripts/check/check-hook-installation.shs` from

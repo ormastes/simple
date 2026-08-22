@@ -10,6 +10,9 @@ limited to 64 MiB. The tree-size range row is dispatched in `--push-tip` mode:
 it retains absolute size, duplicate entry, source shape, load-bearing path, and
 first-parent delta checks without materializing or scanning every outgoing
 commit. Exhaustive detector fixtures run in the bootstrap tier.
+The quick rules row extracts `rules.sdl` from the same committed ref before
+parsing its numeric commands. An explicit `--rules` path exists only for
+diagnostic and self-test fixtures.
 
 `check-bootstrap-must-pass.shs` runs expensive automated manifest rows. Its
 bootstrap-completion mode first requires the exact Stage 2/3 full-provenance
