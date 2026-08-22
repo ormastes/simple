@@ -3,7 +3,7 @@
 - Date: 2026-08-22
 - Lane: run13 stage1 HIR error census, class `unresolved name` (60 occurrences, 24 pairs)
 - Log: `stage1_build13.log` (worktree `stage1-clean15` @ `7f9a3e1c050`)
-- Status: FIXED for the 42 compiler-internal occurrences; 18 std/builtin occurrences deferred (see Scope)
+- Status: FIXED. Iteration 1 cleared 42 compiler-internal occurrences; iteration 2 (below) clears the 18 deferred std/builtin/generated ones. Class B is empty.
 
 ## Symptom
 
@@ -114,3 +114,121 @@ lane deliberately landed the **narrower half**: source-level import edges only,
 touching no resolver function, so the two lanes cannot collide. If that lane
 concludes the correct fix is to make re-export traversal transitive in the
 resolver, these import edges remain correct and harmless.
+
+
+---
+
+# Iteration 2 (2026-08-22) — the 18 deferred occurrences
+
+Iteration 1 deferred `exit`, `char_code`, `file_lock`, `file_unlock`,
+`is_windows`, `TargetOS`, `JitInstantiator`, `JitInstantiatorConfig` and `raise`
+because each names a symbol with 4+ candidate definitions in `src/lib` and the
+lane refused to guess. Per-symbol provenance is now settled. They are the same
+class as iteration 1 — a caller reaching a symbol through an edge that does not
+carry it — in **four further surface forms**, none of which needed a resolver
+change or a widened glob.
+
+## 5. A `use` nested INSIDE a function body
+
+`70.backend/linker/link.spl` carried `use std.platform.{is_windows, is_unix}`,
+`use std.common.target.TargetOS` and a second `use std.platform.is_windows`
+*inside* function bodies; `70.backend/codegen.spl` carried
+`use compiler.loader.jit_instantiator.{JitInstantiator, JitInstantiatorConfig}`
+inside a method body. The Rust seed honours a body-local `use`; stage1 HIR
+lowering does not, and reports `unresolved name` at the enclosing declaration.
+Fix: hoist all four to module level. The module paths were already correct —
+only their position was wrong — so this is a pure relocation, and the
+`jit_instantiator` names merge into the module-level `{JitStats}` import that
+was already there.
+
+## 6. No import at all, relying on an ambient builtin
+
+- `exit` in `20.hir/hir_codec_support.spl` (`exit(1)` in `hc_bad_tag`). Owner is
+  `std.nogc_sync_mut.io_runtime` (`pub fn exit`, `io_runtime.spl:315`); a second
+  `fn exit` in `io/signal_handlers.spl` is why the barrel is not usable, so the
+  direct module path is required. Precedent: `00.common/transition/check_main.spl`
+  already imports `exit` by name.
+- `char_code` in `10.frontend/core/parser_decls_use.spl`. Owner is
+  `std.string_core` (`src/lib/common/string_core.spl:396`) — the same import the
+  sibling `80.driver/driver_source_pipeline_parsing.spl` already carries and
+  which does not error, which is the controlled comparison that pins it.
+
+## 7. A barrel name that COLLIDES (not one that omits)
+
+`use std.io.{file_lock, file_unlock, file_exists, file_write}` in
+`80.driver/driver_source_pipeline_parsing.spl` and `80.driver/driver_hir_cache.spl`
+failed on exactly the two lock names while the other two resolved. The barrel is
+not missing them — `io/__init__.spl:107` exports them on a line adjacent to the
+one exporting `file_exists`/`file_write` (`:104`). The discriminator is that
+`file_lock` and `file_unlock` are each defined **twice** in modules that
+`io/__init__.spl` re-exports from: `io/file_ops.spl:128,134` and
+`sffi/io.spl:158,162` (identical signatures). `file_exists` is defined once.
+So this is a re-export *ambiguity*, and it is the mirror image of forms 1-4.
+Fix: import from the canonical owner directly —
+`use std.io.file_ops.{file_lock, file_unlock}` — which the barrel itself names
+as authoritative ("File mutation stays owned by file_ops", `io/__init__.spl:116`).
+The std barrel is left untouched: deduplicating it is a separate, wider change.
+
+## 8. GENERATED code calling `raise`
+
+`raise` is **not a keyword** (no token, no lexer entry) and has **no definition
+anywhere in `src/lib`** — `/usr/bin/grep -rn "fn raise" src/` finds only
+`raise_to_top`, `raise_error` and vendored Rust. The Rust seed itself says so:
+pre-fix, `simple compile src/compiler/20.hir/generated/hir_visit.spl` reports
+`Undefined("undefined identifier: raise")`. Three generated files emitted it:
+`20.hir/generated/hir_visitor.spl`, `20.hir/generated/hir_visit.spl`,
+`10.frontend/generated/ast_visitor.spl`.
+
+Fixed at the **generator**, not the output: `src/app/compiler_schema/fold_gen.spl`
+and `src/app/compiler_schema/visitor_gen.spl` now emit
+`use std.nogc_sync_mut.io_runtime.{exit}` in the generated header and replace
+`raise "MSG"` with `exit(1)` followed by `"MSG"` as the declared `-> text` tail.
+Loudness is preserved exactly: the adjacent `print` of the same diagnostic is
+untouched, and the abort is now real rather than a call into nothing.
+
+**Generator trap found while doing this:** the emitted literal must be written
+`io_runtime.{{exit}}`. Written singly, `{exit}` is string INTERPOLATION and the
+first regeneration emitted `use std.nogc_sync_mut.io_runtime.<closure@0x...>`.
+The same trap applies to the spec below, whose brace literals are escaped.
+After the fix, `bin/simple run src/app/compiler_schema/main.spl visitors`
+reproduces all three files byte-identically to the committed content.
+
+## Verification
+
+- Seed `compile` of all 9 touched files, before vs after, is diagnostically
+  identical **except** that the three `undefined identifier: raise` errors are
+  gone, replaced by the pre-existing, unrelated `runtime_file_rename` residual
+  that every other file in the set already shows. No new error anywhere.
+- Generator round-trip: regeneration is byte-identical (see above).
+- Spec `test/01_unit/compiler/hir/hir_unresolved_name_import_reachability_spec.spl`
+  extended with 7 new `it` blocks, one per sub-cause. Measured on this tree:
+  **pre-fix 6 passed / 7 failed; post-fix 13 passed / 0 failed.**
+
+## Coverage of class B
+
+Iteration 1 (42) + the sibling `1aa81cac8c6` (25, overlapping) + iteration 2 (18)
+account for all 85 `unresolved name` occurrences in the run13 census. Nothing in
+class B is left open.
+
+## Pre-push gate record (iteration 2 landing)
+
+`check-test-tree-divergence-delta.shs 5d888bd349d <tip>` verdict:
+**PASS — 1 pre-existing offender(s), 0 introduced by this range**
+(base verdict: `FAIL — 855 diverged vs 854 baselined (1 new, 0
+fixed-but-still-baselined); 1 mirror-only`). The pre-existing offender list is
+recorded at `/mnt/data/tmp/test_tree_divergence_preexisting.txt`; this change
+touches no file under `test/` other than the single spec named above, and that
+spec has no mirror-tree counterpart, so it introduces zero divergence.
+
+Other gates on this range: `check-no-conflict-tree-push` PASS (1 commit),
+`check-no-conflict-markers-push` PASS (13 files), `check-tree-size-push` PASS
+(base 118047 files, 0 structural faults), `check-runtime-api-regression-push`
+PASS (2813 symbols, 0 removed).
+
+**Blocked gate, recorded not stepped over silently:** `check-push-must-pass.shs`
+FAILs for every `src/`-touching push on this tree, independently of this change —
+`doc/08_tracking/check/must_check_db.sdn` carries
+`source_fingerprint: "unrecorded"` and every bootstrap row is `todo`, so the
+fingerprint comparison can never match. Refreshing it requires a full
+`bootstrap-from-scratch --full-bootstrap --deploy` receipt, which this lane does
+not own.

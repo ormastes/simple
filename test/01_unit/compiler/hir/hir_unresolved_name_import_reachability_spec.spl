@@ -43,6 +43,21 @@ fn imports_naming(path: text, symbol: text) -> bool:
             found = true
     found
 
+fn module_imports_naming(path: text, symbol: text) -> bool:
+    """True when a MODULE-LEVEL `use` line (column 0) names `symbol`.
+
+    Stricter than `imports_naming`: a `use` nested inside a function body is
+    honoured by the Rust seed but not by stage1 HIR lowering, so an indented
+    `use` does not count as reachability.
+    """
+    var found = false
+    for line in read_file(path).split("\n"):
+        if not (line.starts_with("use ") or line.starts_with("export use ")):
+            continue
+        if line.contains(symbol):
+            found = true
+    found
+
 describe "HIR unresolved-name import reachability":
 
     it "module_surface_declarations imports the parser TypeKind accessors directly":
@@ -75,3 +90,58 @@ describe "HIR unresolved-name import reachability":
         expect(imports_naming(
             "src/compiler/70.backend/backend/cranelift_codegen_adapter.spl",
             "mir_operand_const_int")).to_be_true()
+
+    # --- iteration 2: the 8 deferred symbols -------------------------------
+    # Three further surface forms of the same class, all previously deferred
+    # because the symbol had 4+ candidate definitions across src/lib:
+    #   5. a `use` nested INSIDE a function body (the seed honours it, stage1
+    #      HIR lowering does not) -- TargetOS, is_windows, JitInstantiator,
+    #      JitInstantiatorConfig
+    #   6. no import at all, relying on an ambient builtin -- exit, char_code
+    #   7. a barrel name that collides: `std.io` re-exports file_lock /
+    #      file_unlock from BOTH io/file_ops.spl and sffi/io.spl, so the
+    #      barrel route is ambiguous while file_exists (unique) resolves
+    #   8. GENERATED code calling `raise`, which is not a keyword and has no
+    #      definition anywhere in src/lib
+
+    it "link.spl imports TargetOS and is_windows at module level, not inside a function":
+        val p = "src/compiler/70.backend/linker/link.spl"
+        expect(module_imports_naming(p, "TargetOS")).to_be_true()
+        expect(module_imports_naming(p, "is_windows")).to_be_true()
+        expect(read_file(p).contains("    use std.platform.")).to_be_false()
+
+    it "codegen.spl imports JitInstantiator/JitInstantiatorConfig at module level":
+        val p = "src/compiler/70.backend/codegen.spl"
+        expect(module_imports_naming(p, "JitInstantiator")).to_be_true()
+        expect(module_imports_naming(p, "JitInstantiatorConfig")).to_be_true()
+        expect(read_file(p).contains("        use compiler.loader.jit_instantiator")).to_be_false()
+
+    it "hir_codec_support imports exit explicitly rather than as an ambient builtin":
+        expect(module_imports_naming(
+            "src/compiler/20.hir/hir_codec_support.spl",
+            "use std.nogc_sync_mut.io_runtime.{{exit}}")).to_be_true()
+
+    it "parser_decls_use imports char_code from string_core":
+        expect(module_imports_naming(
+            "src/compiler/10.frontend/core/parser_decls_use.spl",
+            "use std.string_core.{{char_code}}")).to_be_true()
+
+    it "the driver takes file_lock/file_unlock from their owner, not the colliding std.io barrel":
+        for p in ["src/compiler/80.driver/driver_source_pipeline_parsing.spl",
+                  "src/compiler/80.driver/driver_hir_cache.spl"]:
+            expect(read_file(p).contains("use std.io.file_ops.{{file_lock, file_unlock}}")).to_be_true()
+            expect(read_file(p).contains("use std.io.{{file_lock")).to_be_false()
+
+    it "generated visitors call an imported exit, never the undefined `raise`":
+        for p in ["src/compiler/20.hir/generated/hir_visitor.spl",
+                  "src/compiler/20.hir/generated/hir_visit.spl",
+                  "src/compiler/10.frontend/generated/ast_visitor.spl"]:
+            expect(read_file(p).contains("use std.nogc_sync_mut.io_runtime.{{exit}}")).to_be_true()
+            expect(read_file(p).contains("raise \"")).to_be_false()
+
+    it "the generators that emit those visitors emit the exit import too":
+        for p in ["src/app/compiler_schema/fold_gen.spl",
+                  "src/app/compiler_schema/visitor_gen.spl"]:
+            val src = read_file(p)
+            expect(src.contains("io_runtime.{{{{exit}}}}")).to_be_true()
+            expect(src.contains("raise \\\"")).to_be_false()
