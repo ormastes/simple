@@ -127,7 +127,7 @@ pub(super) fn dispatch_input(name: &str, args: &[Value]) -> Result<Value, Compil
             let events = EVENTS.lock();
             match events.get(&event_id) {
                 Some(RuntimeEvent::KeyboardInput { keycode, .. }) => Ok(int_value(*keycode)),
-                _ => Ok(int_value(0)),
+                _ => Ok(int_value(-1)),
             }
         }
         "rt_winit_event_keyboard_modifiers" => Ok(int_value(0)),
@@ -136,10 +136,8 @@ pub(super) fn dispatch_input(name: &str, args: &[Value]) -> Result<Value, Compil
             let event_id = get_i64(args, 0, name)?;
             let events = EVENTS.lock();
             match events.get(&event_id) {
-                Some(RuntimeEvent::MouseButton { button, pressed, .. }) => {
-                    Ok(tuple_value(vec![Value::Int(*button), Value::Bool(*pressed)]))
-                }
-                _ => Ok(tuple_value(vec![Value::Int(0), Value::Bool(false)])),
+                Some(RuntimeEvent::MouseButton { button, .. }) => Ok(int_value(*button)),
+                _ => Ok(int_value(-1)),
             }
         }
         "rt_winit_event_mouse_moved" => {
@@ -164,13 +162,13 @@ pub(super) fn dispatch_input(name: &str, args: &[Value]) -> Result<Value, Compil
         }
         // Flat accessors used by the window_winit.spl / hosted_entry.spl API
         // (mirror src/runtime/spl_winit/src/lib.rs event accessors: each returns
-        // the matching field for its event kind, 0 otherwise).
+        // the matching field for its event kind, a disjoint sentinel otherwise).
         "rt_winit_event_key_scancode" => {
             let event_id = get_i64(args, 0, name)?;
             let events = EVENTS.lock();
             match events.get(&event_id) {
                 Some(RuntimeEvent::KeyboardInput { scancode, .. }) => Ok(int_value(*scancode)),
-                _ => Ok(int_value(0)),
+                _ => Ok(int_value(-1)),
             }
         }
         "rt_winit_event_key_keycode" => {
@@ -178,7 +176,7 @@ pub(super) fn dispatch_input(name: &str, args: &[Value]) -> Result<Value, Compil
             let events = EVENTS.lock();
             match events.get(&event_id) {
                 Some(RuntimeEvent::KeyboardInput { keycode, .. }) => Ok(int_value(*keycode)),
-                _ => Ok(int_value(0)),
+                _ => Ok(int_value(-1)),
             }
         }
         "rt_winit_event_key_pressed" => {
@@ -186,18 +184,18 @@ pub(super) fn dispatch_input(name: &str, args: &[Value]) -> Result<Value, Compil
             let events = EVENTS.lock();
             match events.get(&event_id) {
                 Some(RuntimeEvent::KeyboardInput { pressed, .. }) => Ok(int_value(*pressed as i64)),
-                _ => Ok(int_value(0)),
+                _ => Ok(int_value(-1)),
             }
         }
         // The interpreter event stream does not track shift state or IME text
         // events; report none rather than guessing.
-        "rt_winit_event_key_shifted" | "rt_winit_event_text_len" | "rt_winit_event_text_byte" => Ok(int_value(0)),
+        "rt_winit_event_key_shifted" | "rt_winit_event_text_len" | "rt_winit_event_text_byte" => Ok(int_value(-1)),
         "rt_winit_event_mouse_pressed" => {
             let event_id = get_i64(args, 0, name)?;
             let events = EVENTS.lock();
             match events.get(&event_id) {
                 Some(RuntimeEvent::MouseButton { pressed, .. }) => Ok(int_value(*pressed as i64)),
-                _ => Ok(int_value(0)),
+                _ => Ok(int_value(-1)),
             }
         }
         "rt_winit_event_mouse_x_milli" => {
@@ -205,7 +203,7 @@ pub(super) fn dispatch_input(name: &str, args: &[Value]) -> Result<Value, Compil
             let events = EVENTS.lock();
             match events.get(&event_id) {
                 Some(RuntimeEvent::MouseMoved { x, .. }) => Ok(int_value((*x * 1000.0).round() as i64)),
-                _ => Ok(int_value(0)),
+                _ => Ok(int_value(i64::MIN)),
             }
         }
         "rt_winit_event_mouse_y_milli" => {
@@ -213,7 +211,7 @@ pub(super) fn dispatch_input(name: &str, args: &[Value]) -> Result<Value, Compil
             let events = EVENTS.lock();
             match events.get(&event_id) {
                 Some(RuntimeEvent::MouseMoved { y, .. }) => Ok(int_value((*y * 1000.0).round() as i64)),
-                _ => Ok(int_value(0)),
+                _ => Ok(int_value(i64::MIN)),
             }
         }
         "rt_winit_event_wheel_x_milli" => {
@@ -221,7 +219,7 @@ pub(super) fn dispatch_input(name: &str, args: &[Value]) -> Result<Value, Compil
             let events = EVENTS.lock();
             match events.get(&event_id) {
                 Some(RuntimeEvent::MouseWheel { x, .. }) => Ok(int_value((*x * 1000.0).round() as i64)),
-                _ => Ok(int_value(0)),
+                _ => Ok(int_value(i64::MIN)),
             }
         }
         "rt_winit_event_wheel_y_milli" => {
@@ -229,7 +227,7 @@ pub(super) fn dispatch_input(name: &str, args: &[Value]) -> Result<Value, Compil
             let events = EVENTS.lock();
             match events.get(&event_id) {
                 Some(RuntimeEvent::MouseWheel { y, .. }) => Ok(int_value((*y * 1000.0).round() as i64)),
-                _ => Ok(int_value(0)),
+                _ => Ok(int_value(i64::MIN)),
             }
         }
         _ => Err(super::unknown_function(name)),

@@ -31,16 +31,26 @@ extern fn rt_write_u32s_to_raw(ptr: i64, pixels: [u32]) -> i64
 extern fn rt_winit_event_loop_poll_events(el: i64, max: i64) -> i64
 @unsafe(reason: "raw Winit event wait ABI; negative sentinel reports invalid loop/provider, zero means timeout, positive handle is owned until release", capabilities: [ffi])
 extern fn rt_winit_event_loop_wait_events(el: i64, timeout_ms: i64) -> i64
+@unsafe(reason: "raw Winit event-kind ABI; negative sentinel reports a stale event handle", capabilities: [ffi])
 extern fn rt_winit_event_get_type(ev: i64) -> i64
+@unsafe(reason: "raw Winit keyboard/text keycode ABI; negative sentinel reports stale handle or wrong event kind", capabilities: [ffi])
 extern fn rt_winit_event_key_keycode(ev: i64) -> i64
+@unsafe(reason: "raw Winit keyboard/text pressed ABI; negative sentinel reports stale handle or wrong event kind", capabilities: [ffi])
 extern fn rt_winit_event_key_pressed(ev: i64) -> i64
+@unsafe(reason: "raw Winit text-length ABI; negative sentinel reports stale handle or wrong event kind", capabilities: [ffi])
 extern fn rt_winit_event_text_len(ev: i64) -> i64
+@unsafe(reason: "raw Winit text-byte ABI; negative sentinel reports stale handle, wrong event kind, or invalid index", capabilities: [ffi])
 extern fn rt_winit_event_text_byte(ev: i64, index: i64) -> i64
 use std.common.string_core.{bytes_to_text}
+@unsafe(reason: "raw Winit mouse-button ABI; negative sentinel reports stale handle or wrong event kind", capabilities: [ffi])
 extern fn rt_winit_event_mouse_button(ev: i64) -> i64
+@unsafe(reason: "raw Winit mouse-pressed ABI; negative sentinel reports stale handle or wrong event kind", capabilities: [ffi])
 extern fn rt_winit_event_mouse_pressed(ev: i64) -> i64
+@unsafe(reason: "raw Winit mouse-x milli-unit ABI; INT64_MIN sentinel reports stale handle or wrong event kind", capabilities: [ffi])
 extern fn rt_winit_event_mouse_x_milli(ev: i64) -> i64
+@unsafe(reason: "raw Winit mouse-y milli-unit ABI; INT64_MIN sentinel reports stale handle or wrong event kind", capabilities: [ffi])
 extern fn rt_winit_event_mouse_y_milli(ev: i64) -> i64
+@unsafe(reason: "raw Winit wheel-y milli-unit ABI; INT64_MIN sentinel reports stale handle or wrong event kind", capabilities: [ffi])
 extern fn rt_winit_event_wheel_y_milli(ev: i64) -> i64
 @unsafe(reason: "raw Winit owned-event release status ABI; zero sentinel reports stale handle", capabilities: [ffi])
 extern fn rt_winit_event_free(ev: i64) -> i64
@@ -48,7 +58,9 @@ extern fn rt_winit_event_free(ev: i64) -> i64
 extern fn rt_winit_window_free(win: i64) -> i64
 @unsafe(reason: "raw Winit owned-loop release status ABI; zero sentinel reports stale handle", capabilities: [ffi])
 extern fn rt_winit_event_loop_free(el: i64) -> i64
+@unsafe(reason: "raw Winit fullscreen mutation ABI; requires a live owned window handle and false reports mutation failure", capabilities: [ffi])
 extern fn rt_winit_window_set_fullscreen(win: i64, on: bool) -> bool
+@unsafe(reason: "raw Winit fullscreen read ABI; requires a live owned window handle", capabilities: [ffi])
 extern fn rt_winit_window_is_fullscreen(win: i64) -> bool
 @unsafe(reason: "raw Winit window width ABI; negative sentinel reports stale handle", capabilities: [ffi])
 extern fn rt_winit_window_inner_width(win: i64) -> i64
@@ -60,8 +72,11 @@ extern fn rt_winit_window_scale_factor_milli(win: i64) -> i64
 extern fn rt_winit_window_position_x(win: i64) -> i64
 @unsafe(reason: "raw Winit window-position ABI; INT64_MIN sentinel reports stale handle or unavailable position", capabilities: [ffi])
 extern fn rt_winit_window_position_y(win: i64) -> i64
+@unsafe(reason: "raw Winit position mutation status ABI; requires a live owned window handle and zero reports failure", capabilities: [ffi])
 extern fn rt_winit_window_set_position(win: i64, x: i64, y: i64) -> i64
+@unsafe(reason: "raw Winit moved-event x ABI; INT64_MIN sentinel reports stale handle or wrong event kind", capabilities: [ffi])
 extern fn rt_winit_event_window_x(ev: i64) -> i64
+@unsafe(reason: "raw Winit moved-event y ABI; INT64_MIN sentinel reports stale handle or wrong event kind", capabilities: [ffi])
 extern fn rt_winit_event_window_y(ev: i64) -> i64
 
 # Event types returned by rt_winit_event_get_type.
@@ -73,6 +88,7 @@ val EVT_TEXT: i64 = 11
 val EVT_MOUSE_BUTTON: i64 = 20
 val EVT_MOUSE_MOVED: i64 = 21
 val EVT_MOUSE_WHEEL: i64 = 22
+val WINT_I64_MIN: i64 = -9223372036854775808
 
 # ============================================================================
 # Tier 2: Typed handles
@@ -159,13 +175,15 @@ fn winit_present_rgba(win: WinitWindow, w: i64, h: i64, pixels: [i64]) -> bool:
 fn winit_window_set_fullscreen(win: WinitWindow, on: bool) -> bool:
     if not win.is_valid:
         return false
-    rt_winit_window_set_fullscreen(win.handle, on)
+    unsafe(capabilities: [ffi]):
+        rt_winit_window_set_fullscreen(win.handle, on)
 
 # Read the current fullscreen state from the runtime window record.
 fn winit_window_is_fullscreen(win: WinitWindow) -> bool:
     if not win.is_valid:
         return false
-    rt_winit_window_is_fullscreen(win.handle)
+    unsafe(capabilities: [ffi]):
+        rt_winit_window_is_fullscreen(win.handle)
 
 # Current inner size (width, height) in physical pixels from the runtime window
 # record. Updated by present/resize handling, so it reflects fullscreen growth.
@@ -215,27 +233,52 @@ fn winit_window_get_position(win: WinitWindow) -> WinitWindowPosition?:
 fn winit_window_set_position(win: WinitWindow, position: WinitWindowPosition) -> bool:
     if not win.is_valid:
         return false
-    rt_winit_window_set_position(win.handle, position.x.to_i64(), position.y.to_i64()) != 0
+    var status: i64 = 0
+    unsafe(capabilities: [ffi]):
+        status = rt_winit_window_set_position(
+            win.handle, position.x.to_i64(), position.y.to_i64())
+    status != 0
 
 # Position carried by an EVT_WINDOW_MOVED event.
-fn winit_event_window_position(event: i64) -> WinitWindowPosition:
-    WinitWindowPosition(
-        x: rt_winit_event_window_x(event).to_i32(),
-        y: rt_winit_event_window_y(event).to_i32()
-    )
+fn winit_event_window_position(event: i64) -> WinitWindowPosition?:
+    var x: i64 = WINT_I64_MIN
+    var y: i64 = WINT_I64_MIN
+    unsafe(capabilities: [ffi]):
+        x = rt_winit_event_window_x(event)
+        y = rt_winit_event_window_y(event)
+    if x == WINT_I64_MIN or y == WINT_I64_MIN:
+        return nil
+    WinitWindowPosition(x: x.to_i32(), y: y.to_i32())
 
 # Copy one committed character/IME payload while the StoredEvent is alive.
 # The public caller receives owned Simple text and can then free the event.
-fn winit_event_text(event: i64) -> text:
-    val length = rt_winit_event_text_len(event)
-    if length <= 0:
+fn winit_event_text_checked(event: i64) -> text?:
+    var length: i64 = -1
+    unsafe(capabilities: [ffi]):
+        length = rt_winit_event_text_len(event)
+    if length < 0:
+        return nil
+    if length == 0:
         return ""
     var bytes: [u8] = []
     var index: i64 = 0
     while index < length:
-        bytes.push(rt_winit_event_text_byte(event, index).to_u8())
+        var byte: i64 = -1
+        unsafe(capabilities: [ffi]):
+            byte = rt_winit_event_text_byte(event, index)
+        if byte < 0:
+            return nil
+        bytes.push(byte.to_u8())
         index = index + 1
     bytes_to_text(bytes)
+
+# Compatibility API for callers whose event-kind admission is already proven.
+# A violated foreign contract aborts instead of manufacturing empty text.
+fn winit_event_text(event: i64) -> text:
+    match winit_event_text_checked(event):
+        case Some(value): value
+        case nil:
+            panic("E-SFFI-WINIT-TEXT-CONTRACT: stale handle, wrong event kind, or invalid byte extent")
 
 # Drain every pending event, freeing each one, and report whether a window-close
 # was requested. Freeing each event is mandatory: the runtime never reclaims
@@ -248,10 +291,15 @@ fn winit_poll_close_requested(lp: WinitLoop) -> bool?:
     unsafe(capabilities: [ffi]):
         ev = rt_winit_event_loop_poll_events(lp.handle, 1)
     while ev > 0:
-        if rt_winit_event_get_type(ev) == EVT_CLOSE:
+        var kind: i64 = -1
+        unsafe(capabilities: [ffi]):
+            kind = rt_winit_event_get_type(ev)
+        if kind == EVT_CLOSE:
             close_requested = true
         unsafe(capabilities: [ffi]):
             rt_winit_event_free(ev)
+        if kind < 0:
+            return nil
         unsafe(capabilities: [ffi]):
             ev = rt_winit_event_loop_poll_events(lp.handle, 1)
     if ev < 0:
@@ -324,20 +372,54 @@ fn winit_poll_input_into(
     unsafe(capabilities: [ffi]):
         ev = rt_winit_event_loop_poll_events(lp.handle, 1)
     while ev > 0:
-        val kind = rt_winit_event_get_type(ev)
+        var decode_valid = true
+        var kind: i64 = -1
+        var keycode: i64 = 0
+        var pressed_raw: i64 = 0
+        var committed_text = ""
+        var mouse_x_milli: i64 = 0
+        var mouse_y_milli: i64 = 0
+        var button: i64 = 0
+        var button_pressed_raw: i64 = 0
+        var wheel_y_milli: i64 = 0
+        unsafe(capabilities: [ffi]):
+            kind = rt_winit_event_get_type(ev)
+        if kind < 0:
+            decode_valid = false
         # Decode before rt_winit_event_free: text accessors borrow this handle.
-        val committed_text = if kind == EVT_TEXT:
-            winit_event_text(ev)
-        else:
-            ""
-        val keycode = if kind == EVT_KEYBOARD or kind == EVT_TEXT:
-            rt_winit_event_key_keycode(ev)
-        else:
-            0
-        val pressed = if kind == EVT_KEYBOARD or kind == EVT_TEXT:
-            rt_winit_event_key_pressed(ev) != 0
-        else:
-            false
+        if kind == EVT_TEXT:
+            match winit_event_text_checked(ev):
+                case Some(value): committed_text = value
+                case nil: decode_valid = false
+        if kind == EVT_KEYBOARD or kind == EVT_TEXT:
+            unsafe(capabilities: [ffi]):
+                keycode = rt_winit_event_key_keycode(ev)
+                pressed_raw = rt_winit_event_key_pressed(ev)
+            if keycode < 0 or pressed_raw < 0:
+                decode_valid = false
+        elif kind == EVT_MOUSE_MOVED:
+            unsafe(capabilities: [ffi]):
+                mouse_x_milli = rt_winit_event_mouse_x_milli(ev)
+                mouse_y_milli = rt_winit_event_mouse_y_milli(ev)
+            if mouse_x_milli == WINT_I64_MIN or mouse_y_milli == WINT_I64_MIN:
+                decode_valid = false
+        elif kind == EVT_MOUSE_BUTTON:
+            unsafe(capabilities: [ffi]):
+                button = rt_winit_event_mouse_button(ev)
+                button_pressed_raw = rt_winit_event_mouse_pressed(ev)
+            if button < 0 or button_pressed_raw < 0:
+                decode_valid = false
+        elif kind == EVT_MOUSE_WHEEL:
+            unsafe(capabilities: [ffi]):
+                wheel_y_milli = rt_winit_event_wheel_y_milli(ev)
+            if wheel_y_milli == WINT_I64_MIN:
+                decode_valid = false
+        val pressed = pressed_raw != 0
+        unsafe(capabilities: [ffi]):
+            rt_winit_event_free(ev)
+        if not decode_valid:
+            ev = -1
+            break
         winit_input_event_record_into(
             events_out, event_kinds, kind, keycode, pressed, committed_text)
         if kind == EVT_CLOSE:
@@ -350,20 +432,16 @@ fn winit_poll_input_into(
             if pressed:
                 keys = keys.push(keycode)
         elif kind == EVT_MOUSE_MOVED:
-            mouse_x = rt_winit_event_mouse_x_milli(ev).to_f64() / 1000.0
-            mouse_y = rt_winit_event_mouse_y_milli(ev).to_f64() / 1000.0
+            mouse_x = mouse_x_milli.to_f64() / 1000.0
+            mouse_y = mouse_y_milli.to_f64() / 1000.0
             mouse_moves = mouse_moves + 1
         elif kind == EVT_MOUSE_BUTTON:
-            val button = rt_winit_event_mouse_button(ev)
-            val pressed = rt_winit_event_mouse_pressed(ev) != 0
             click_buttons = click_buttons.push(button)
-            click_pressed = click_pressed.push(pressed)
+            click_pressed = click_pressed.push(button_pressed_raw != 0)
             click_x = click_x.push(mouse_x)
             click_y = click_y.push(mouse_y)
         elif kind == EVT_MOUSE_WHEEL:
-            scroll_y = scroll_y + rt_winit_event_wheel_y_milli(ev).to_f64() / 1000.0
-        unsafe(capabilities: [ffi]):
-            rt_winit_event_free(ev)
+            scroll_y = scroll_y + wheel_y_milli.to_f64() / 1000.0
         unsafe(capabilities: [ffi]):
             ev = rt_winit_event_loop_poll_events(lp.handle, 1)
     WinitInput(is_valid: ev >= 0, close: close_requested, focus_events: focus_events,
@@ -402,20 +480,54 @@ fn winit_wait_input_into(
     unsafe(capabilities: [ffi]):
         ev = rt_winit_event_loop_wait_events(lp.handle, timeout_ms)
     while ev > 0:
-        val kind = rt_winit_event_get_type(ev)
+        var decode_valid = true
+        var kind: i64 = -1
+        var keycode: i64 = 0
+        var pressed_raw: i64 = 0
+        var committed_text = ""
+        var mouse_x_milli: i64 = 0
+        var mouse_y_milli: i64 = 0
+        var button: i64 = 0
+        var button_pressed_raw: i64 = 0
+        var wheel_y_milli: i64 = 0
+        unsafe(capabilities: [ffi]):
+            kind = rt_winit_event_get_type(ev)
+        if kind < 0:
+            decode_valid = false
         # Decode before rt_winit_event_free: text accessors borrow this handle.
-        val committed_text = if kind == EVT_TEXT:
-            winit_event_text(ev)
-        else:
-            ""
-        val keycode = if kind == EVT_KEYBOARD or kind == EVT_TEXT:
-            rt_winit_event_key_keycode(ev)
-        else:
-            0
-        val pressed = if kind == EVT_KEYBOARD or kind == EVT_TEXT:
-            rt_winit_event_key_pressed(ev) != 0
-        else:
-            false
+        if kind == EVT_TEXT:
+            match winit_event_text_checked(ev):
+                case Some(value): committed_text = value
+                case nil: decode_valid = false
+        if kind == EVT_KEYBOARD or kind == EVT_TEXT:
+            unsafe(capabilities: [ffi]):
+                keycode = rt_winit_event_key_keycode(ev)
+                pressed_raw = rt_winit_event_key_pressed(ev)
+            if keycode < 0 or pressed_raw < 0:
+                decode_valid = false
+        elif kind == EVT_MOUSE_MOVED:
+            unsafe(capabilities: [ffi]):
+                mouse_x_milli = rt_winit_event_mouse_x_milli(ev)
+                mouse_y_milli = rt_winit_event_mouse_y_milli(ev)
+            if mouse_x_milli == WINT_I64_MIN or mouse_y_milli == WINT_I64_MIN:
+                decode_valid = false
+        elif kind == EVT_MOUSE_BUTTON:
+            unsafe(capabilities: [ffi]):
+                button = rt_winit_event_mouse_button(ev)
+                button_pressed_raw = rt_winit_event_mouse_pressed(ev)
+            if button < 0 or button_pressed_raw < 0:
+                decode_valid = false
+        elif kind == EVT_MOUSE_WHEEL:
+            unsafe(capabilities: [ffi]):
+                wheel_y_milli = rt_winit_event_wheel_y_milli(ev)
+            if wheel_y_milli == WINT_I64_MIN:
+                decode_valid = false
+        val pressed = pressed_raw != 0
+        unsafe(capabilities: [ffi]):
+            rt_winit_event_free(ev)
+        if not decode_valid:
+            ev = -1
+            break
         winit_input_event_record_into(
             events_out, event_kinds, kind, keycode, pressed, committed_text)
         if kind == EVT_CLOSE:
@@ -428,20 +540,16 @@ fn winit_wait_input_into(
             if pressed:
                 keys = keys.push(keycode)
         elif kind == EVT_MOUSE_MOVED:
-            mouse_x = rt_winit_event_mouse_x_milli(ev).to_f64() / 1000.0
-            mouse_y = rt_winit_event_mouse_y_milli(ev).to_f64() / 1000.0
+            mouse_x = mouse_x_milli.to_f64() / 1000.0
+            mouse_y = mouse_y_milli.to_f64() / 1000.0
             mouse_moves = mouse_moves + 1
         elif kind == EVT_MOUSE_BUTTON:
-            val button = rt_winit_event_mouse_button(ev)
-            val pressed = rt_winit_event_mouse_pressed(ev) != 0
             click_buttons = click_buttons.push(button)
-            click_pressed = click_pressed.push(pressed)
+            click_pressed = click_pressed.push(button_pressed_raw != 0)
             click_x = click_x.push(mouse_x)
             click_y = click_y.push(mouse_y)
         elif kind == EVT_MOUSE_WHEEL:
-            scroll_y = scroll_y + rt_winit_event_wheel_y_milli(ev).to_f64() / 1000.0
-        unsafe(capabilities: [ffi]):
-            rt_winit_event_free(ev)
+            scroll_y = scroll_y + wheel_y_milli.to_f64() / 1000.0
         unsafe(capabilities: [ffi]):
             ev = rt_winit_event_loop_poll_events(lp.handle, 1)
     WinitInput(is_valid: ev >= 0, close: close_requested, focus_events: focus_events,

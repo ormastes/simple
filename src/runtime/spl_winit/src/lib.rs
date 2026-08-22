@@ -537,7 +537,7 @@ fn mouse_button_to_simple(button: MouseButton) -> i64 {
 
 #[cfg(test)]
 mod sided_modifier_tests {
-    use super::{KeyCode, keycode_to_simple};
+    use super::{keycode_to_simple, KeyCode};
 
     #[test]
     fn preserves_left_and_right_control_and_alt_identity() {
@@ -849,7 +849,11 @@ pub extern "C" fn rt_winit_window_present_staged(win: i64, w: i64, h: i64) -> i6
     });
     // Let the loop breathe so the freshly presented frame is serviced.
     pump_once(1);
-    if ok { 1 } else { 0 }
+    if ok {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -1032,7 +1036,7 @@ pub extern "C" fn rt_winit_window_scale_factor_milli(win: i64) -> i64 {
 // ---- Event accessors --------------------------------------------------------
 #[no_mangle]
 pub extern "C" fn rt_winit_event_get_type(ev: i64) -> i64 {
-    with_event(ev, |e| e.type_code()).unwrap_or(0)
+    with_event(ev, |e| e.type_code()).unwrap_or(-1)
 }
 
 #[no_mangle]
@@ -1044,27 +1048,27 @@ pub extern "C" fn rt_winit_event_get_window_id(ev: i64) -> i64 {
 pub extern "C" fn rt_winit_event_window_x(ev: i64) -> i64 {
     with_event(ev, |e| match e {
         StoredEvent::Moved { x, .. } => *x,
-        _ => 0,
+        _ => i64::MIN,
     })
-    .unwrap_or(0)
+    .unwrap_or(i64::MIN)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_winit_event_window_y(ev: i64) -> i64 {
     with_event(ev, |e| match e {
         StoredEvent::Moved { y, .. } => *y,
-        _ => 0,
+        _ => i64::MIN,
     })
-    .unwrap_or(0)
+    .unwrap_or(i64::MIN)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_winit_event_key_scancode(ev: i64) -> i64 {
     with_event(ev, |e| match e {
         StoredEvent::Keyboard { scancode, .. } => *scancode,
-        _ => 0,
+        _ => -1,
     })
-    .unwrap_or(0)
+    .unwrap_or(-1)
 }
 
 #[no_mangle]
@@ -1072,9 +1076,9 @@ pub extern "C" fn rt_winit_event_key_keycode(ev: i64) -> i64 {
     with_event(ev, |e| match e {
         StoredEvent::Keyboard { keycode, .. } => *keycode,
         StoredEvent::Text { origin_keycode, .. } => *origin_keycode,
-        _ => 0,
+        _ => -1,
     })
-    .unwrap_or(0)
+    .unwrap_or(-1)
 }
 
 #[no_mangle]
@@ -1082,9 +1086,9 @@ pub extern "C" fn rt_winit_event_key_pressed(ev: i64) -> i64 {
     with_event(ev, |e| match e {
         StoredEvent::Keyboard { pressed, .. } => *pressed as i64,
         StoredEvent::Text { origin_pressed, .. } => *origin_pressed as i64,
-        _ => 0,
+        _ => -1,
     })
-    .unwrap_or(0)
+    .unwrap_or(-1)
 }
 
 #[no_mangle]
@@ -1100,38 +1104,39 @@ pub extern "C" fn rt_winit_event_key_shifted(ev: i64) -> i64 {
 pub extern "C" fn rt_winit_event_text_len(ev: i64) -> i64 {
     with_event(ev, |e| match e {
         StoredEvent::Text { text, .. } => text.len() as i64,
-        _ => 0,
+        _ => -1,
     })
-    .unwrap_or(0)
+    .unwrap_or(-1)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_winit_event_text_byte(ev: i64, index: i64) -> i64 {
     with_event(ev, |e| match e {
-        StoredEvent::Text { text, .. } if index >= 0 => {
-            text.as_bytes().get(index as usize).copied().unwrap_or(0) as i64
-        }
-        _ => 0,
+        StoredEvent::Text { text, .. } if index >= 0 => text
+            .as_bytes()
+            .get(index as usize)
+            .map_or(-1, |byte| *byte as i64),
+        _ => -1,
     })
-    .unwrap_or(0)
+    .unwrap_or(-1)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_winit_event_mouse_button(ev: i64) -> i64 {
     with_event(ev, |e| match e {
         StoredEvent::MouseButton { button, .. } => *button,
-        _ => 0,
+        _ => -1,
     })
-    .unwrap_or(0)
+    .unwrap_or(-1)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_winit_event_mouse_pressed(ev: i64) -> i64 {
     with_event(ev, |e| match e {
         StoredEvent::MouseButton { pressed, .. } => *pressed as i64,
-        _ => 0,
+        _ => -1,
     })
-    .unwrap_or(0)
+    .unwrap_or(-1)
 }
 
 // Integer milli-unit accessors: spl_wffi_call_i64 is the only argument-passing
@@ -1143,9 +1148,9 @@ pub extern "C" fn rt_winit_event_mouse_x_milli(ev: i64) -> i64 {
     with_event(ev, |e| match e {
         StoredEvent::MouseMoved { x, .. } => (*x * 1000.0).round() as i64,
         StoredEvent::MouseButton { x, .. } => (*x * 1000.0).round() as i64,
-        _ => 0,
+        _ => i64::MIN,
     })
-    .unwrap_or(0)
+    .unwrap_or(i64::MIN)
 }
 
 #[no_mangle]
@@ -1153,27 +1158,27 @@ pub extern "C" fn rt_winit_event_mouse_y_milli(ev: i64) -> i64 {
     with_event(ev, |e| match e {
         StoredEvent::MouseMoved { y, .. } => (*y * 1000.0).round() as i64,
         StoredEvent::MouseButton { y, .. } => (*y * 1000.0).round() as i64,
-        _ => 0,
+        _ => i64::MIN,
     })
-    .unwrap_or(0)
+    .unwrap_or(i64::MIN)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_winit_event_wheel_x_milli(ev: i64) -> i64 {
     with_event(ev, |e| match e {
         StoredEvent::MouseWheel { x, .. } => (*x * 1000.0).round() as i64,
-        _ => 0,
+        _ => i64::MIN,
     })
-    .unwrap_or(0)
+    .unwrap_or(i64::MIN)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_winit_event_wheel_y_milli(ev: i64) -> i64 {
     with_event(ev, |e| match e {
         StoredEvent::MouseWheel { y, .. } => (*y * 1000.0).round() as i64,
-        _ => 0,
+        _ => i64::MIN,
     })
-    .unwrap_or(0)
+    .unwrap_or(i64::MIN)
 }
 
 #[no_mangle]
@@ -1678,7 +1683,11 @@ pub extern "C" fn rt_winit_buffer_present(
         buffer.present().is_ok()
     });
     pump_once(1);
-    if ok { 1 } else { 0 }
+    if ok {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -2020,6 +2029,23 @@ mod sffi_contract_tests {
         assert_eq!(rt_winit_event_loop_free(i64::MAX), 0);
         assert_eq!(rt_winit_event_loop_poll_events(i64::MAX, 1), -1);
         assert_eq!(rt_winit_event_loop_wait_events(i64::MAX, 0), -1);
+    }
+
+    #[test]
+    fn stale_event_accessors_use_disjoint_sentinels() {
+        let stale = i64::MAX;
+        assert_eq!(rt_winit_event_get_type(stale), -1);
+        assert_eq!(rt_winit_event_key_keycode(stale), -1);
+        assert_eq!(rt_winit_event_key_pressed(stale), -1);
+        assert_eq!(rt_winit_event_text_len(stale), -1);
+        assert_eq!(rt_winit_event_text_byte(stale, 0), -1);
+        assert_eq!(rt_winit_event_mouse_button(stale), -1);
+        assert_eq!(rt_winit_event_mouse_pressed(stale), -1);
+        assert_eq!(rt_winit_event_mouse_x_milli(stale), i64::MIN);
+        assert_eq!(rt_winit_event_mouse_y_milli(stale), i64::MIN);
+        assert_eq!(rt_winit_event_wheel_y_milli(stale), i64::MIN);
+        assert_eq!(rt_winit_event_window_x(stale), i64::MIN);
+        assert_eq!(rt_winit_event_window_y(stale), i64::MIN);
     }
 
     #[test]

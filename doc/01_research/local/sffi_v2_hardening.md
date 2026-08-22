@@ -717,3 +717,19 @@ loop test, three Simple checks, the five-example wrapper spec, and event
 admission call/memory audit pass. Winit is 18/30 contracted; owned production
 becomes 236 contracted and 7,571 rows missing both. The remaining twelve event
 accessors still require lifetime/type contracts and signed artifact evidence.
+
+The twelve Winit event accessors now reserve disjoint failure values: `-1`
+for kinds, keys, booleans, lengths, bytes, and buttons, and `INT64_MIN` for
+coordinates and wheel deltas where zero is valid. Native and interpreter lanes
+agree, safe wrappers validate before lifting, and borrowed text is copied before
+the event's single release. The final three Winit fullscreen/position operations
+also carry explicit live-handle/status contracts, completing the canonical
+module's 30/30 declaration contract inventory.
+
+The event hot path retains the prior provider-call count, performs no lookup,
+hash, retry, sleep, or additional allocation, and reads every accessed field at
+most once. Provider/interpreter sentinel tests, Simple check and lint, the
+five-example integration spec, and a call/memory-shape audit pass. This closes
+the Winit declaration-contract slice only; signed provider admission and
+artifact-bound proof/sanitizer receipts remain required before Winit or global
+SFFI can be called verified.

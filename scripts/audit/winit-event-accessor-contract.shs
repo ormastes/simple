@@ -1,0 +1,49 @@
+#!/bin/sh
+set -eu
+
+owner=src/lib/nogc_sync_mut/io/window_winit.spl
+provider=src/runtime/spl_winit/src/lib.rs
+interpreter=src/compiler_rust/compiler/src/interpreter_extern/winit_sffi
+
+awk '
+    /extern fn rt_/ {
+        count++
+        if (previous !~ /@unsafe\(/) {
+            print "missing exact unsafe contract before " $0 > "/dev/stderr"
+            failed = 1
+        }
+    }
+    { previous = $0 }
+    END {
+        if (count != 30) {
+            print "expected 30 canonical Winit-owner declarations, found " count > "/dev/stderr"
+            failed = 1
+        }
+        exit failed
+    }
+' "$owner"
+
+accessors='get_type key_keycode key_pressed text_len text_byte mouse_button mouse_pressed mouse_x_milli mouse_y_milli wheel_y_milli window_x window_y'
+for suffix in $accessors; do
+    symbol="rt_winit_event_$suffix"
+    grep -B1 -F "extern fn $symbol" "$owner" | grep -q '@unsafe('
+    grep -q "fn $symbol" "$provider"
+    grep -R -q "\"$symbol\"" "$interpreter"
+done
+
+grep -q 'fn winit_event_window_position(event: i64) -> WinitWindowPosition?:' "$owner"
+grep -q 'fn winit_event_text_checked(event: i64) -> text?:' "$owner"
+grep -q 'E-SFFI-WINIT-TEXT-CONTRACT' "$owner"
+grep -q 'with_event(ev, |e| e.type_code()).unwrap_or(-1)' "$provider"
+grep -q 'rt_winit_event_window_x(stale), i64::MIN' "$provider"
+grep -q 'stale_event_accessors_use_disjoint_native_sentinels' \
+    src/compiler_rust/compiler/src/interpreter_extern/winit_sffi/mod.rs
+
+# Hot path remains cached direct calls: no lookup, retry, allocation, or sleep
+# was introduced into the event-accessor owner.
+if grep -E 'dlsym|HashMap|Mutex|sleep\(|retry' "$owner" >/dev/null; then
+    echo 'winit event accessor owner contains forbidden hot-path machinery' >&2
+    exit 1
+fi
+
+echo 'winit event accessor contract audit: PASS'

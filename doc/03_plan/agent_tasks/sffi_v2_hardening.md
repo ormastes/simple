@@ -154,3 +154,8 @@ passing placeholder.
     with one bounded pump, and safe APIs expose validity while retaining exact
     event release and memory shape. Finish the remaining 12 accessor lifetime/
     type contracts, then duplicate-binding migration and signed admission.
+29. Winit event accessors now use matching disjoint sentinels in native and
+    interpreter lanes, validate before typed lift, and preserve one-read/one-
+    release call and allocation shape; the canonical module is 30/30 contracted.
+    Next migrate duplicated Winit bindings and implement signed, artifact-bound
+    provider admission before claiming verified status.

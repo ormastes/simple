@@ -451,6 +451,34 @@ mod tests {
     }
 
     #[test]
+    fn stale_event_accessors_use_disjoint_native_sentinels() {
+        let stale = [Value::Int(i64::MAX)];
+        for name in [
+            "rt_winit_event_get_type",
+            "rt_winit_event_key_keycode",
+            "rt_winit_event_key_pressed",
+            "rt_winit_event_text_len",
+            "rt_winit_event_mouse_button",
+            "rt_winit_event_mouse_pressed",
+        ] {
+            assert!(matches!(dispatch(name, &stale).unwrap(), Value::Int(-1)));
+        }
+        assert!(matches!(
+            dispatch("rt_winit_event_text_byte", &[Value::Int(i64::MAX), Value::Int(0)]).unwrap(),
+            Value::Int(-1)
+        ));
+        for name in [
+            "rt_winit_event_mouse_x_milli",
+            "rt_winit_event_mouse_y_milli",
+            "rt_winit_event_wheel_y_milli",
+            "rt_winit_event_window_x",
+            "rt_winit_event_window_y",
+        ] {
+            assert!(matches!(dispatch(name, &stale).unwrap(), Value::Int(i64::MIN)));
+        }
+    }
+
+    #[test]
     fn invalid_staging_descriptor_fails_closed() {
         let invalid = [Value::Int(i64::MAX), Value::Int(i64::MAX), Value::Int(i64::MAX)];
         assert!(matches!(
