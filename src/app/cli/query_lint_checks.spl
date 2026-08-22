@@ -241,6 +241,24 @@ fn _infer_type_from_patterns(
 
 fn _check_closure_capture_text(lines: [text], file: text, format: text) -> i64:
     """Text-based heuristic for closure capture modification detection."""
+    # Resolve the nearest prior lower-indent declaration boundary in logarithmic
+    # time, then advance declaration counts once per (boundary, indent) group.
+    # Sibling closures therefore share the same forward scan instead of each
+    # rebuilding a dictionary by walking the outer body backward.
+    var max_indent = 0
+    for source_line in lines:
+        val source_indent = _count_indent(source_line)
+        if source_indent > max_indent:
+            max_indent = source_indent
+    var boundary_tree: [i64] = []
+    var boundary_slot = 0
+    while boundary_slot < max_indent + 2:
+        boundary_tree.push(-1)
+        boundary_slot = boundary_slot + 1
+    var group_by_scope: Dict<text, i64> = {}
+    var group_scan_start: [i64] = []
+    var group_var_counts: Dict<text, i64> = {}
+
     var count = 0
     var clos_i = 0
     while clos_i < lines.len():
@@ -250,8 +268,39 @@ fn _check_closure_capture_text(lines: [text], file: text, format: text) -> i64:
         if (trimmed.starts_with("fn ") or trimmed.starts_with("me ")):
             val fn_indent = _count_indent(line)
             if fn_indent > 0:
-                val outer_vars = _collect_outer_var_counts_clos(
-                    lines, clos_i, fn_indent)
+                # Fenwick prefix maximum over declaration-boundary indentation.
+                # Indent d queries stored indentation ranks [0, d).
+                var boundary = -1
+                var query_slot = fn_indent
+                while query_slot > 0:
+                    if boundary_tree[query_slot] > boundary:
+                        boundary = boundary_tree[query_slot]
+                    query_slot = query_slot - (query_slot & (0 - query_slot))
+
+                val scope_key = "{boundary}:{fn_indent}"
+                var group_id = 0
+                if group_by_scope.contains_key(scope_key):
+                    group_id = group_by_scope[scope_key]
+                else:
+                    group_id = group_scan_start.len()
+                    group_by_scope[scope_key] = group_id
+                    group_scan_start.push(boundary + 1)
+
+                var scan_i = group_scan_start[group_id]
+                while scan_i < clos_i:
+                    val prior_line = lines[scan_i]
+                    val prior_trimmed = prior_line.trim()
+                    if (prior_trimmed.starts_with("var ") and
+                        _count_indent(prior_line) <= fn_indent):
+                        val var_name = _extract_decl_name(
+                            prior_trimmed.substring(4))
+                        if var_name != "":
+                            val count_key = "{group_id}:{var_name}"
+                            group_var_counts[count_key] =
+                                (group_var_counts[count_key] ?? 0) + 1
+                    scan_i = scan_i + 1
+                group_scan_start[group_id] = clos_i + 1
+
                 var body_start = clos_i + 1
                 while body_start < lines.len():
                     val bline = lines[body_start]
@@ -263,41 +312,36 @@ fn _check_closure_capture_text(lines: [text], file: text, format: text) -> i64:
                     if bindent <= fn_indent:
                         break
                     val assigned = _closure_assignment_target(bt)
-                    if assigned != "" and outer_vars.has(assigned):
-                        var occurrence = 0
-                        while occurrence < outer_vars[assigned]:
-                            val bline_num = body_start + 1
-                            if format == "json":
-                                _diag_emit_or_collect("{\"severity\":2,\"code\":\"CLOS001\",\"message\":\"closure modifies outer variable '{assigned}' — changes won't persist (capture-by-value)\",\"line\":{bline_num},\"col\":1,\"end_line\":{bline_num},\"end_col\":{bt.len()},\"tags\":[],\"source\":\"simple-lint\"}")
-                            else:
-                                print "{file}:{bline_num}: warning[CLOS001]: closure modifies outer variable '{assigned}'"
-                            count = count + 1
-                            occurrence = occurrence + 1
+                    if assigned != "":
+                        val assigned_key = "{group_id}:{assigned}"
+                        if group_var_counts.contains_key(assigned_key):
+                            var occurrence = 0
+                            while occurrence < group_var_counts[assigned_key]:
+                                val bline_num = body_start + 1
+                                if format == "json":
+                                    _diag_emit_or_collect("{\"severity\":2,\"code\":\"CLOS001\",\"message\":\"closure modifies outer variable '{assigned}' — changes won't persist (capture-by-value)\",\"line\":{bline_num},\"col\":1,\"end_line\":{bline_num},\"end_col\":{bt.len()},\"tags\":[],\"source\":\"simple-lint\"}")
+                                else:
+                                    print "{file}:{bline_num}: warning[CLOS001]: closure modifies outer variable '{assigned}'"
+                                count = count + 1
+                                occurrence = occurrence + 1
                     body_start = body_start + 1
+
+        # A boundary becomes visible only to following lines. All five legacy
+        # forms participate, including top-level and nested declarations.
+        val is_boundary = (trimmed.starts_with("fn ") or
+            trimmed.starts_with("me ") or
+            trimmed.starts_with("static fn ") or
+            trimmed.starts_with("class ") or
+            trimmed.starts_with("struct "))
+        if is_boundary and trimmed != "" and not trimmed.starts_with("#"):
+            val boundary_indent = _count_indent(line)
+            var update_slot = boundary_indent + 1
+            while update_slot < boundary_tree.len():
+                if clos_i > boundary_tree[update_slot]:
+                    boundary_tree[update_slot] = clos_i
+                update_slot = update_slot + (update_slot & (0 - update_slot))
         clos_i = clos_i + 1
     count
-
-fn _collect_outer_var_counts_clos(
-    lines: [text], fn_line: i64, fn_indent: i64
-) -> Dict<text, i64>:
-    """Collect outer declaration multiplicities without a growing COW array."""
-    var vars: Dict<text, i64> = {}
-    var si = fn_line - 1
-    while si >= 0:
-        val sline = lines[si]
-        val st = sline.trim()
-        val sindent = _count_indent(sline)
-        if sindent < fn_indent and st != "" and not st.starts_with("#"):
-            if (st.starts_with("fn ") or st.starts_with("me ") or
-                st.starts_with("static fn ") or st.starts_with("class ") or
-                st.starts_with("struct ")):
-                break
-        if st.starts_with("var ") and sindent <= fn_indent:
-            val var_name = _extract_decl_name(st.substring(4))
-            if var_name != "":
-                vars[var_name] = (vars[var_name] ?? 0) + 1
-        si = si - 1
-    vars
 
 fn _closure_assignment_target(trimmed: text) -> text:
     """Extract the leading identifier only when the line assigns to it."""
