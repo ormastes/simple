@@ -1,0 +1,52 @@
+# @cover src/os/kernel/arch/riscv64/compiler_filesystem_fw_cfg_metadata_v2.spl 80%
+
+use std.spec.{describe, it, expect}
+use os.kernel.arch.riscv64.compiler_filesystem_fw_cfg_metadata_v2.{
+    riscv64_compiler_filesystem_fw_cfg_metadata_with_reader_v2,
+    riscv64_compiler_filesystem_metadata_collect_reads_v2,
+}
+use os.kernel.fw_cfg.read_result_v1.{SimpleOsFwCfgReadV1}
+use os.port.init.compiler_filesystem_metadata_v2.{SimpleOsCfsMetadataReadsV2}
+
+fn recording_reader(name: text, max_bytes: i64) -> SimpleOsFwCfgReadV1:
+    SimpleOsFwCfgReadV1(
+        ok: true,
+        bytes: [7u8],
+        reason: name + ":" + max_bytes.to_text()
+    )
+
+fn valid_reader(name: text, max_bytes: i64) -> SimpleOsFwCfgReadV1:
+    var value = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    if name == "opt/simpleos.cfs.nonce":
+        value = "nonce-7"
+    elif name == "opt/simpleos.cfs.image_path":
+        value = "/images/compiler.raw"
+    elif name == "opt/simpleos.cfs.drive_arg":
+        value = "file=/images/compiler.raw,if=none,id=cfsexecns1,format=raw"
+    SimpleOsFwCfgReadV1(ok: max_bytes > 0, bytes: value.bytes(), reason: "ok")
+
+fn collect_recorded_reads() -> SimpleOsCfsMetadataReadsV2:
+    riscv64_compiler_filesystem_fw_cfg_metadata_with_reader_v2(recording_reader)
+
+describe "RV64 compiler-filesystem fw_cfg metadata source":
+    it "requests only the four exact names with per-field bounds":
+        val metadata = collect_recorded_reads()
+
+        expect(metadata.nonce.reason).to_equal("opt/simpleos.cfs.nonce:128")
+        expect(metadata.image_path.reason).to_equal("opt/simpleos.cfs.image_path:1024")
+        expect(metadata.image_sha256.reason).to_equal("opt/simpleos.cfs.image_sha256:64")
+        expect(metadata.drive_arg.reason).to_equal("opt/simpleos.cfs.drive_arg:1062")
+        expect(metadata.nonce.ok).to_equal(true)
+        expect(metadata.image_path.ok).to_equal(true)
+        expect(metadata.image_sha256.ok).to_equal(true)
+        expect(metadata.drive_arg.ok).to_equal(true)
+        expect(metadata.nonce.bytes).to_equal([7u8])
+
+    it "adapts fw_cfg reads and delegates validation to the shared collector":
+        val reads = riscv64_compiler_filesystem_fw_cfg_metadata_with_reader_v2(
+            valid_reader)
+        val result = riscv64_compiler_filesystem_metadata_collect_reads_v2(reads)
+
+        expect(result.ok).to_equal(true)
+        expect(result.metadata.nonce).to_equal("nonce-7")
+        expect(result.metadata.image_path).to_equal("/images/compiler.raw")

@@ -1,0 +1,65 @@
+# @cover src/os/kernel/arch/x86_64/compiler_filesystem_fw_cfg_metadata_v2.spl 100%
+
+use std.spec.{describe, it, expect}
+use os.kernel.fw_cfg.read_result_v1.{SimpleOsFwCfgReadV1}
+use os.kernel.arch.x86_64.compiler_filesystem_fw_cfg_metadata_v2.{
+    x86_64_compiler_filesystem_fw_cfg_metadata_with_reader_v2,
+}
+use os.port.init.compiler_filesystem_metadata_v2.{
+    simpleos_cfs_collect_metadata_v2,
+}
+
+var observed_names: [text] = []
+var observed_bounds: [u64] = []
+var fixture_path: text = "/tmp/simpleos-cfs.img"
+
+fn _record_read(name: text, max_bytes: u64) -> SimpleOsFwCfgReadV1:
+    observed_names.push(name)
+    observed_bounds.push(max_bytes)
+    SimpleOsFwCfgReadV1(ok: true, bytes: [max_bytes.to_u8()], reason: name)
+
+fn _metadata_read(name: text, max_bytes: u64) -> SimpleOsFwCfgReadV1:
+    if name == "opt/simpleos.cfs.nonce":
+        return SimpleOsFwCfgReadV1(ok: true, bytes: "nonce-7".bytes(), reason: "ok")
+    if name == "opt/simpleos.cfs.image_path":
+        return SimpleOsFwCfgReadV1(ok: true, bytes: fixture_path.bytes(), reason: "ok")
+    if name == "opt/simpleos.cfs.image_sha256":
+        return SimpleOsFwCfgReadV1(
+            ok: true,
+            bytes: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".bytes(),
+            reason: "ok")
+    SimpleOsFwCfgReadV1(
+        ok: true,
+        bytes: "file={fixture_path},if=none,id=cfsexecns1,format=raw".bytes(),
+        reason: "ok")
+
+describe "x86_64 compiler-filesystem fw_cfg metadata source":
+    it "requests only the four closed names with their shared field bounds":
+        observed_names = []
+        observed_bounds = []
+        val reads = x86_64_compiler_filesystem_fw_cfg_metadata_with_reader_v2(
+            _record_read)
+
+        expect(observed_names.len()).to_equal(4)
+        expect(observed_names[0]).to_equal("opt/simpleos.cfs.nonce")
+        expect(observed_names[1]).to_equal("opt/simpleos.cfs.image_path")
+        expect(observed_names[2]).to_equal("opt/simpleos.cfs.image_sha256")
+        expect(observed_names[3]).to_equal("opt/simpleos.cfs.drive_arg")
+        expect(observed_bounds[0]).to_equal(128u64)
+        expect(observed_bounds[1]).to_equal(1024u64)
+        expect(observed_bounds[2]).to_equal(64u64)
+        expect(observed_bounds[3]).to_equal(1062u64)
+
+        expect(reads.nonce.reason).to_equal("opt/simpleos.cfs.nonce")
+        expect(reads.image_path.reason).to_equal("opt/simpleos.cfs.image_path")
+        expect(reads.image_sha256.reason).to_equal("opt/simpleos.cfs.image_sha256")
+        expect(reads.drive_arg.reason).to_equal("opt/simpleos.cfs.drive_arg")
+
+    it "converts transport reads for validation by the common collector":
+        val reads = x86_64_compiler_filesystem_fw_cfg_metadata_with_reader_v2(
+            _metadata_read)
+        val result = simpleos_cfs_collect_metadata_v2(reads)
+
+        expect(result.ok).to_equal(true)
+        expect(result.metadata.nonce).to_equal("nonce-7")
+        expect(result.metadata.image_path).to_equal(fixture_path)

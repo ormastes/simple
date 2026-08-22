@@ -1,0 +1,180 @@
+# Hardware-independent compiler-filesystem fw_cfg metadata validation.
+
+extern fn rt_bytes_to_text(bytes: [u8]) -> text
+
+pub class SimpleOsCfsRawReadV2:
+    ok: bool
+    bytes: [u8]
+    reason: text
+
+pub class SimpleOsCfsMetadataV2:
+    nonce: text
+    image_path: text
+    image_sha256: text
+    drive_arg: text
+
+pub class SimpleOsCfsMetadataReadsV2:
+    nonce: SimpleOsCfsRawReadV2
+    image_path: SimpleOsCfsRawReadV2
+    image_sha256: SimpleOsCfsRawReadV2
+    drive_arg: SimpleOsCfsRawReadV2
+
+pub class SimpleOsCfsMetadataResultV2:
+    ok: bool
+    metadata: SimpleOsCfsMetadataV2
+    reason: text
+
+pub fn simpleos_cfs_nonce_max_bytes_v2() -> u64: 128u64
+pub fn simpleos_cfs_image_path_max_bytes_v2() -> u64: 1024u64
+pub fn simpleos_cfs_image_sha256_max_bytes_v2() -> u64: 64u64
+pub fn simpleos_cfs_drive_arg_max_bytes_v2() -> u64:
+    # 1024-byte path + "file=" + ",if=none,id=cfsexecns1,format=raw".
+    simpleos_cfs_image_path_max_bytes_v2() + 38u64
+
+fn _cfs_empty_metadata_v2() -> SimpleOsCfsMetadataV2:
+    SimpleOsCfsMetadataV2(nonce: "", image_path: "", image_sha256: "", drive_arg: "")
+
+fn _cfs_metadata_failure_v2(reason: text) -> SimpleOsCfsMetadataResultV2:
+    SimpleOsCfsMetadataResultV2(ok: false, metadata: _cfs_empty_metadata_v2(), reason: reason)
+
+fn _cfs_utf8_continuation_v2(value: i64) -> bool:
+    value >= 0x80 and value <= 0xBF
+
+fn _cfs_valid_utf8_v2(bytes: [u8]) -> bool:
+    var index: i64 = 0
+    while index < bytes.len():
+        val first = bytes[index] as i64
+        if first <= 0x7F:
+            index = index + 1
+        elif first >= 0xC2 and first <= 0xDF:
+            if index + 1 >= bytes.len() or not _cfs_utf8_continuation_v2(bytes[index + 1] as i64):
+                return false
+            index = index + 2
+        elif first >= 0xE0 and first <= 0xEF:
+            if index + 2 >= bytes.len():
+                return false
+            val second = bytes[index + 1] as i64
+            val third = bytes[index + 2] as i64
+            if (not _cfs_utf8_continuation_v2(second) or
+                    not _cfs_utf8_continuation_v2(third) or
+                    (first == 0xE0 and second < 0xA0) or
+                    (first == 0xED and second > 0x9F)):
+                return false
+            index = index + 3
+        elif first >= 0xF0 and first <= 0xF4:
+            if index + 3 >= bytes.len():
+                return false
+            val second = bytes[index + 1] as i64
+            if (not _cfs_utf8_continuation_v2(second) or
+                    not _cfs_utf8_continuation_v2(bytes[index + 2] as i64) or
+                    not _cfs_utf8_continuation_v2(bytes[index + 3] as i64) or
+                    (first == 0xF0 and second < 0x90) or
+                    (first == 0xF4 and second > 0x8F)):
+                return false
+            index = index + 4
+        else:
+            return false
+    true
+
+fn _cfs_decode_v2(read: SimpleOsCfsRawReadV2, max_bytes: u64, label: text) -> SimpleOsCfsMetadataResultV2:
+    if not read.ok:
+        return _cfs_metadata_failure_v2("{label}-read-{read.reason}")
+    if read.bytes.len() == 0:
+        return _cfs_metadata_failure_v2("{label}-empty")
+    if read.bytes.len().to_u64() > max_bytes:
+        return _cfs_metadata_failure_v2("{label}-exceeds-limit")
+    if not _cfs_valid_utf8_v2(read.bytes):
+        return _cfs_metadata_failure_v2("{label}-invalid-utf8")
+    SimpleOsCfsMetadataResultV2(
+        ok: true,
+        metadata: SimpleOsCfsMetadataV2(
+            nonce: rt_bytes_to_text(read.bytes), image_path: "", image_sha256: "", drive_arg: ""),
+        reason: "ok")
+
+fn _cfs_valid_nonce_v2(value: text) -> bool:
+    if value.len() == 0 or value.len().to_u64() > simpleos_cfs_nonce_max_bytes_v2():
+        return false
+    var index: i64 = 0
+    while index < value.len():
+        val byte = value.char_code_at(index)
+        if not ((byte >= 48 and byte <= 57) or (byte >= 65 and byte <= 90) or
+                (byte >= 97 and byte <= 122) or byte == 45 or byte == 46 or byte == 95):
+            return false
+        index = index + 1
+    true
+
+fn _cfs_valid_image_path_v2(value: text) -> bool:
+    val bytes = value.bytes()
+    var index: i64 = 0
+    while index < bytes.len():
+        val byte = bytes[index] as i64
+        # Serial receipt fields and QEMU keyval strings cannot safely carry
+        # whitespace, commas, control bytes, or DEL.
+        if byte <= 32 or byte == 34 or byte == 39 or byte == 44 or
+                byte == 92 or byte == 127:
+            return false
+        index = index + 1
+    true
+
+fn _cfs_valid_sha256_v2(value: text) -> bool:
+    if value.len().to_u64() != simpleos_cfs_image_sha256_max_bytes_v2():
+        return false
+    var index: i64 = 0
+    while index < value.len():
+        val byte = value.char_code_at(index)
+        if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 102)):
+            return false
+        index = index + 1
+    true
+
+pub fn simpleos_cfs_collect_metadata_v2(
+    reads: SimpleOsCfsMetadataReadsV2,
+) -> SimpleOsCfsMetadataResultV2:
+    """Validate four already-read fw_cfg values without architecture or hardware access."""
+    val nonce_result = _cfs_decode_v2(
+        reads.nonce, simpleos_cfs_nonce_max_bytes_v2(), "nonce")
+    if not nonce_result.ok:
+        return nonce_result
+    val nonce = nonce_result.metadata.nonce
+    if not _cfs_valid_nonce_v2(nonce):
+        return _cfs_metadata_failure_v2("invalid-nonce")
+
+    val path_result = _cfs_decode_v2(
+        reads.image_path, simpleos_cfs_image_path_max_bytes_v2(), "image-path")
+    if not path_result.ok:
+        return path_result
+    val image_path = path_result.metadata.nonce
+    if not _cfs_valid_image_path_v2(image_path):
+        return _cfs_metadata_failure_v2("invalid-image-path")
+
+    val sha_result = _cfs_decode_v2(
+        reads.image_sha256, simpleos_cfs_image_sha256_max_bytes_v2(), "image-sha256")
+    if not sha_result.ok:
+        return sha_result
+    val image_sha256 = sha_result.metadata.nonce
+    if not _cfs_valid_sha256_v2(image_sha256):
+        return _cfs_metadata_failure_v2("invalid-image-sha256")
+
+    val drive_result = _cfs_decode_v2(
+        reads.drive_arg, simpleos_cfs_drive_arg_max_bytes_v2(), "drive-arg")
+    if not drive_result.ok:
+        return drive_result
+    val drive_arg = drive_result.metadata.nonce
+    val expected_drive_arg = "file={image_path},if=none,id=cfsexecns1,format=raw"
+    if drive_arg != expected_drive_arg:
+        return _cfs_metadata_failure_v2("invalid-drive-arg-binding")
+
+    SimpleOsCfsMetadataResultV2(
+        ok: true,
+        metadata: SimpleOsCfsMetadataV2(
+            nonce: nonce,
+            image_path: image_path,
+            image_sha256: image_sha256,
+            drive_arg: drive_arg),
+        reason: "ok")
+
+export SimpleOsCfsRawReadV2, SimpleOsCfsMetadataReadsV2
+export SimpleOsCfsMetadataV2, SimpleOsCfsMetadataResultV2
+export simpleos_cfs_nonce_max_bytes_v2, simpleos_cfs_image_path_max_bytes_v2
+export simpleos_cfs_image_sha256_max_bytes_v2, simpleos_cfs_drive_arg_max_bytes_v2
+export simpleos_cfs_collect_metadata_v2

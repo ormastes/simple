@@ -103,3 +103,15 @@ does not turn existing ARM/RISC-V VFS-presence probes into execution evidence.
 Those architectures remain blocked until their adapters supply real observed
 process results and authenticated fw_cfg metadata. The role catalog is
 function-local because freestanding images do not execute module initializers.
+
+QEMU metadata transport is now target-local: x86_64 reads fw_cfg through the
+0x510/0x511 I/O ports, while ARM64 and RV64 use their virt-machine MMIO
+windows. All three readers delegate untrusted directory parsing to one bounded
+owner, then adapt the four raw values into the port-neutral
+`compiler_filesystem_metadata_v2` collector. That collector enforces the same
+nonce/path grammar as the host command builder, strict UTF-8, lowercase image
+SHA-256, and the exact `cfsexecns1` drive binding. Concrete hardware backends
+are never runtime-dispatched from one common module because doing so would pull
+incompatible PIO/MMIO symbols into every target closure. This establishes the
+metadata boundary only; the production boot/process caller remains a required
+blocked row and no live receipt is inferred from these sources or unit specs.

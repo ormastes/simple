@@ -1,0 +1,121 @@
+# @cover src/os/port/init/compiler_filesystem_metadata_v2.spl 80%
+
+use std.spec.{describe, it, expect}
+use os.port.init.compiler_filesystem_metadata_v2.{
+    SimpleOsCfsRawReadV2,
+    SimpleOsCfsMetadataReadsV2,
+    SimpleOsCfsMetadataResultV2,
+    simpleos_cfs_collect_metadata_v2,
+    simpleos_cfs_nonce_max_bytes_v2,
+    simpleos_cfs_image_path_max_bytes_v2,
+    simpleos_cfs_image_sha256_max_bytes_v2,
+    simpleos_cfs_drive_arg_max_bytes_v2,
+}
+
+fn _read(value: text) -> SimpleOsCfsRawReadV2:
+    SimpleOsCfsRawReadV2(ok: true, bytes: value.bytes(), reason: "ok")
+
+fn _hash() -> text:
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+fn _valid() -> [SimpleOsCfsRawReadV2]:
+    val path = "/images/compiler.raw"
+    [
+        _read("nonce-7"),
+        _read(path),
+        _read(_hash()),
+        _read("file={path},if=none,id=cfsexecns1,format=raw"),
+    ]
+
+fn _collect(reads: [SimpleOsCfsRawReadV2]) -> SimpleOsCfsMetadataResultV2:
+    simpleos_cfs_collect_metadata_v2(SimpleOsCfsMetadataReadsV2(
+        nonce: reads[0], image_path: reads[1],
+        image_sha256: reads[2], drive_arg: reads[3]))
+
+describe "compiler-filesystem fw_cfg metadata v2":
+    it "collects typed metadata and publishes exact byte bounds":
+        val reads = _valid()
+        val result = _collect(reads)
+        expect(result.ok).to_equal(true)
+        expect(result.reason).to_equal("ok")
+        expect(result.metadata.nonce).to_equal("nonce-7")
+        expect(result.metadata.image_path).to_equal("/images/compiler.raw")
+        expect(result.metadata.image_sha256).to_equal(_hash())
+        expect(result.metadata.drive_arg).to_equal(
+            "file=/images/compiler.raw,if=none,id=cfsexecns1,format=raw")
+        expect(simpleos_cfs_nonce_max_bytes_v2()).to_equal(128u64)
+        expect(simpleos_cfs_image_path_max_bytes_v2()).to_equal(1024u64)
+        expect(simpleos_cfs_image_sha256_max_bytes_v2()).to_equal(64u64)
+        expect(simpleos_cfs_drive_arg_max_bytes_v2()).to_equal(1062u64)
+
+    it "preserves valid UTF-8 paths while requiring exact drive binding":
+        val path = "/images/中.raw"
+        val result = _collect([
+            _read("nonce_8"), _read(path), _read(_hash()),
+            _read("file={path},if=none,id=cfsexecns1,format=raw")])
+        expect(result.ok).to_equal(true)
+        expect(result.metadata.image_path).to_equal(path)
+
+    it "propagates transport failure without inspecting payload":
+        val reads = _valid()
+        val failed = SimpleOsCfsRawReadV2(ok: false, bytes: [0xFFu8], reason: "file-not-found")
+        val result = _collect([failed, reads[1], reads[2], reads[3]])
+        expect(result.ok).to_equal(false)
+        expect(result.reason).to_equal("nonce-read-file-not-found")
+
+    it "rejects empty and oversized fields before decoding":
+        val reads = _valid()
+        val empty = _collect([
+            SimpleOsCfsRawReadV2(ok: true, bytes: [], reason: "ok"), reads[1], reads[2], reads[3]])
+        var oversized: [u8] = []
+        var index: i64 = 0
+        while index < 129:
+            oversized.push(97u8)
+            index = index + 1
+        val too_large = _collect([
+            SimpleOsCfsRawReadV2(ok: true, bytes: oversized, reason: "ok"), reads[1], reads[2], reads[3]])
+        expect(empty.reason).to_equal("nonce-empty")
+        expect(too_large.reason).to_equal("nonce-exceeds-limit")
+
+    it "rejects malformed UTF-8 and workflow-unsafe grammar":
+        val reads = _valid()
+        val malformed = SimpleOsCfsRawReadV2(
+            ok: true, bytes: [0xE2u8, 0x28u8, 0xA1u8], reason: "ok")
+        val bad_utf8 = _collect([reads[0], malformed, reads[2], reads[3]])
+        val bad_nonce = _collect([_read("nonce value"), reads[1], reads[2], reads[3]])
+        val bad_path = _collect([reads[0], _read("/images/a,b.raw"), reads[2], reads[3]])
+        val quoted_path = _collect([reads[0], _read("/images/a\"b.raw"), reads[2], reads[3]])
+        expect(bad_utf8.reason).to_equal("image-path-invalid-utf8")
+        expect(bad_nonce.reason).to_equal("invalid-nonce")
+        expect(bad_path.reason).to_equal("invalid-image-path")
+        expect(quoted_path.reason).to_equal("invalid-image-path")
+
+    it "requires lowercase SHA-256 and binds the whole drive argument":
+        val reads = _valid()
+        val bad_hash = _collect([reads[0], reads[1], _read(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeF"), reads[3]])
+        val bad_drive = _collect([reads[0], reads[1], reads[2],
+            _read("file=/images/other.raw,if=none,id=cfsexecns1,format=raw")])
+        expect(bad_hash.reason).to_equal("invalid-image-sha256")
+        expect(bad_drive.reason).to_equal("invalid-drive-arg-binding")
+
+    it "rejects image path and drive payloads one byte over their exact bounds":
+        val reads = _valid()
+        var path_bytes: [u8] = []
+        var index: i64 = 0
+        while index < 1025:
+            path_bytes.push(97u8)
+            index = index + 1
+        val path_oversize = _collect([
+            reads[0], SimpleOsCfsRawReadV2(ok: true, bytes: path_bytes, reason: "ok"),
+            reads[2], reads[3]])
+        var drive_bytes: [u8] = []
+        index = 0
+        while index < 1063:
+            drive_bytes.push(97u8)
+            index = index + 1
+        val drive_oversize = _collect([
+            reads[0], reads[1], reads[2],
+            SimpleOsCfsRawReadV2(ok: true, bytes: drive_bytes, reason: "ok")])
+        expect(path_oversize.reason).to_equal("image-path-exceeds-limit")
+        expect(drive_oversize.reason).to_equal("drive-arg-exceeds-limit")

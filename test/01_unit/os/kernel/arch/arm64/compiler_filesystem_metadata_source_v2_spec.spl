@@ -1,0 +1,40 @@
+use os.kernel.arch.arm64.compiler_filesystem_metadata_source_v2.{
+    arm64_cfs_fw_cfg_field_plan_v2,
+    arm64_cfs_collect_fw_cfg_reads_v2,
+}
+use os.port.init.compiler_filesystem_metadata_v2.{
+    SimpleOsCfsRawReadV2,
+    SimpleOsCfsMetadataReadsV2,
+}
+
+fn metadata_read(value: text) -> SimpleOsCfsRawReadV2:
+    SimpleOsCfsRawReadV2(ok: true, bytes: value.bytes(), reason: "ok")
+
+describe "ARM64 compiler-filesystem fw_cfg metadata source":
+    it "plans only the four exact names with tight per-field bounds":
+        val fields = arm64_cfs_fw_cfg_field_plan_v2()
+
+        expect(fields.len()).to_equal(4)
+        expect(fields[0].name).to_equal("opt/simpleos.cfs.nonce")
+        expect(fields[0].max_bytes).to_equal(128u32)
+        expect(fields[1].name).to_equal("opt/simpleos.cfs.image_path")
+        expect(fields[1].max_bytes).to_equal(1024u32)
+        expect(fields[2].name).to_equal("opt/simpleos.cfs.image_sha256")
+        expect(fields[2].max_bytes).to_equal(64u32)
+        expect(fields[3].name).to_equal("opt/simpleos.cfs.drive_arg")
+        expect(fields[3].max_bytes).to_equal(1062u32)
+
+    it "delegates injected reads to the shared metadata collector":
+        val path = "/tmp/simpleos-cfs.img"
+        val result = arm64_cfs_collect_fw_cfg_reads_v2(SimpleOsCfsMetadataReadsV2(
+            nonce: metadata_read("nonce-7"),
+            image_path: metadata_read(path),
+            image_sha256: metadata_read(
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+            drive_arg: metadata_read(
+                "file={path},if=none,id=cfsexecns1,format=raw"),
+        ))
+
+        expect(result.ok).to_equal(true)
+        expect(result.metadata.nonce).to_equal("nonce-7")
+        expect(result.metadata.image_path).to_equal(path)
