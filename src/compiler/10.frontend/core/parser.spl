@@ -35,6 +35,7 @@ use compiler.core.ast.{module_set_path, module_get_path}
 use compiler.core.ast.{ast_reset}
 use compiler.frontend.trace_policy.{
     frontend_trace_suppressed, frontend_trace_suppression_set,
+    frontend_compiler_trace_enabled,
     frontend_compiler_trace_scope_enter, frontend_compiler_trace_scope_exit}
 extern fn rt_env_get(key: text) -> text
 extern fn rt_env_set(key: text, value: text) -> bool
@@ -239,6 +240,10 @@ fn parser_init(source: text):
     parser_init_with_path(source, "")
 
 fn parser_init_with_path(source: text, path: text):
+    # Profile policy is immutable within one parse but may change between
+    # same-process compiler requests. Resample once before the first token;
+    # split declaration profiling consumes this same cached decision.
+    par_prof_enabled_cached = -1
     # Whole-owner replacement is required across transient file scopes. These
     # module-global array headers are process-lived, but push() can replace
     # their backing storage while a transient scope is active. scope_end then
@@ -296,7 +301,8 @@ fn parser_init_with_path(source: text, path: text):
     lex_init_with_path(source, path)
     parser_advance()
 
-# Per-token timing probe (level-gated, DEFAULT OFF; SIMPLE_PARSE_PROFILE=1).
+# Parse-scoped timing policy (level-gated, DEFAULT OFF;
+# SIMPLE_PARSE_PROFILE=1). Token and declaration probes share one env sample.
 # Same idiom as lint_prof_now/lint_prof_mark; see the block comment in
 # parser_decls_use.spl. NOT a throwaway probe — do not delete during cleanup.
 extern fn rt_time_now_unix_micros() -> i64
@@ -469,8 +475,7 @@ fn parser_warn(msg: text):
         par_warnings = []
     val full = "line " + int_to_str(par_line_get()) + ":" + int_to_str(par_col_get()) + ": " + msg
     par_warnings.push(full)
-    if ((rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1" and
-        not frontend_trace_suppressed()):
+    if frontend_compiler_trace_enabled():
         print "[parser_warning] {full}"
 
 fn parser_path_is_script(path: text) -> bool:
@@ -1184,6 +1189,7 @@ export parser_has_errors, parser_get_errors, parser_error_count, parser_set_had_
 export parser_first_error_get
 export parser_tok_save, parser_tok_restore
 export parser_path_is_script, parser_warn_print_if_needed
+export par_prof_enabled
 export rt_is_debug_mode_enabled
 export parse_module_body
 
