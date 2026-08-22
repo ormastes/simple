@@ -13,7 +13,8 @@ use compiler.common.attributes.{DriverManifestAttr, DriverManifestAttrKind, vhdl
 use compiler.mir_opt.mir_opt.perf_facts.{
     PerfFactKind, PerfFactPreservation,
     perf_instruction_access,
-    perf_facts_build, perf_facts_successors, perf_facts_predecessors,
+    perf_facts_build, perf_facts_build_for_verification,
+    perf_facts_successors, perf_facts_predecessors,
     perf_facts_dominates, perf_facts_definitions, perf_facts_uses,
     perf_facts_is_live_in, perf_facts_is_live_out,
     perf_fact_preservation_all, perf_fact_preservation_cfg_only,
@@ -314,3 +315,22 @@ describe "shared MIR PerfFacts":
         expect(perf_facts_invalidated(perf_fact_preservation_all()).len()).to_equal(0)
         val invalid = PerfFactPreservation(false, true, false, true)
         expect(perf_fact_preservation_integrity_errors(invalid).len()).to_equal(2)
+
+    it "omits dense liveness matrices from verifier facts":
+        step("Bound verifier memory independently of blocks times locals")
+        val local0 = LocalId(id: 0)
+        val facts = perf_facts_build_for_verification(
+            _pf_function_with_locals_blocks([
+                MirLocal(local0, Some("value"), MirType.i64(), LocalKind.Temp, false)
+            ], [
+                _pf_block_with(0, [
+                    MirInst(MirInstKind.Const(local0, MirConstValue.Int(1), MirType.i64()), nil)
+                ], MirTerminator.Ret(Some(mir_operand_copy(local0))))
+            ]))
+        expect(facts.cfg_complete).to_equal(true)
+        expect(facts.def_use_complete).to_equal(true)
+        expect(facts.live_in_bits.len()).to_equal(0)
+        expect(facts.live_out_bits.len()).to_equal(0)
+        expect(facts.block_definition_bits.len()).to_equal(0)
+        expect(facts.block_use_before_definition_bits.len()).to_equal(0)
+        expect(facts.liveness_complete).to_equal(false)

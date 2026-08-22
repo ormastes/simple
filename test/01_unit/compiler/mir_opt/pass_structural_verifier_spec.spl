@@ -118,6 +118,73 @@ describe "MIR optimizer structural verifier":
         expect(source).not.to_contain("local_ids.contains")
         expect(source).not.to_contain("block_ids.contains")
 
+    it "rejects a same-block use before its definition":
+        step("Verify instruction order without a definitions-by-uses scan")
+        val receipt = mir_structural_verification_receipt(
+            _pv_function_with_local_ids([
+                _pv_block_with(0, [
+                    MirInst(MirInstKind.Copy(_pv_local(1), _pv_local(0)), nil),
+                    MirInst(MirInstKind.Const(_pv_local(0), MirConstValue.Int(7), MirType.i64()), nil)
+                ], MirTerminator.Ret(nil))
+            ], 0, [0, 1]))
+        expect(receipt.valid).to_equal(false)
+        expect(receipt.error_codes.contains("MIRV022")).to_equal(true)
+
+    it "rejects undefined and multiply-defined SSA locals":
+        step("Reject ambiguous or absent value origins")
+        val undefined_receipt = mir_structural_verification_receipt(
+            _pv_function_with_local_ids([
+                _pv_block(0, MirTerminator.Ret(Some(_pv_copy(0))))
+            ], 0, [0]))
+        expect(undefined_receipt.error_codes.contains("MIRV020")).to_equal(true)
+
+        val multiple_receipt = mir_structural_verification_receipt(
+            _pv_function_with_local_ids([
+                _pv_block_with(0, [
+                    MirInst(MirInstKind.Const(_pv_local(0), MirConstValue.Int(1), MirType.i64()), nil),
+                    MirInst(MirInstKind.Const(_pv_local(0), MirConstValue.Int(2), MirType.i64()), nil)
+                ], MirTerminator.Ret(nil))
+            ], 0, [0]))
+        expect(multiple_receipt.error_codes.contains("MIRV021")).to_equal(true)
+
+    it "rejects a definition that does not dominate a cross-block use":
+        step("Use shared CFG dominance for SSA validation")
+        val receipt = mir_structural_verification_receipt(
+            _pv_function_with_local_ids([
+                _pv_block(0, MirTerminator.If(_pv_const(1), BlockId(id: 1), BlockId(id: 2))),
+                _pv_block_with(1, [
+                    MirInst(MirInstKind.Const(_pv_local(0), MirConstValue.Int(7), MirType.i64()), nil)
+                ], MirTerminator.Goto(BlockId(id: 3))),
+                _pv_block(2, MirTerminator.Goto(BlockId(id: 3))),
+                _pv_block(3, MirTerminator.Ret(Some(_pv_copy(0))))
+            ], 0, [0]))
+        expect(receipt.valid).to_equal(false)
+        expect(receipt.error_codes.contains("MIRV023")).to_equal(true)
+
+    it "rejects cross-block value flow when dominance is unavailable":
+        step("Fail closed for unreachable cross-block SSA flow")
+        val receipt = mir_structural_verification_receipt(
+            _pv_function_with_local_ids([
+                _pv_block(0, MirTerminator.Ret(nil)),
+                _pv_block_with(1, [
+                    MirInst(MirInstKind.Const(_pv_local(0), MirConstValue.Int(7), MirType.i64()), nil)
+                ], MirTerminator.Goto(BlockId(id: 2))),
+                _pv_block(2, MirTerminator.Ret(Some(_pv_copy(0))))
+            ], 0, [0]))
+        expect(receipt.valid).to_equal(false)
+        expect(receipt.error_codes.contains("MIRV024")).to_equal(true)
+
+    it "accepts a single definition that dominates its use":
+        step("Admit a valid SSA value flow")
+        val receipt = mir_structural_verification_receipt(
+            _pv_function_with_local_ids([
+                _pv_block_with(0, [
+                    MirInst(MirInstKind.Const(_pv_local(0), MirConstValue.Int(7), MirType.i64()), nil)
+                ], MirTerminator.Goto(BlockId(id: 1))),
+                _pv_block(1, MirTerminator.Ret(Some(_pv_copy(0))))
+            ], 0, [0]))
+        expect(receipt.valid).to_equal(true)
+
     it "validates high-fanout switch edges without a target buffer":
         step("Validate CFG edges in place")
         var cases: [SwitchCase] = []
@@ -234,6 +301,12 @@ describe "MIR optimizer structural verifier":
     it "records every write-coalesce candidate instead of a changed Boolean":
         step("Record exact active-pass candidate counts")
         val instructions = [
+            MirInst(MirInstKind.Const(_pv_local(0), MirConstValue.Int(0), MirType.i64()), nil),
+            MirInst(MirInstKind.Const(_pv_local(1), MirConstValue.Int(1), MirType.i64()), nil),
+            MirInst(MirInstKind.Const(_pv_local(2), MirConstValue.Int(2), MirType.i64()), nil),
+            MirInst(MirInstKind.Const(_pv_local(5), MirConstValue.Int(5), MirType.i64()), nil),
+            MirInst(MirInstKind.Const(_pv_local(6), MirConstValue.Int(6), MirType.i64()), nil),
+            MirInst(MirInstKind.Const(_pv_local(9), MirConstValue.Int(9), MirType.i64()), nil),
             MirInst(MirInstKind.GetElementPtr(_pv_local(10), _pv_copy(0), [_pv_copy(1)]), nil),
             MirInst(MirInstKind.Store(_pv_copy(10), _pv_copy(5)), nil),
             MirInst(MirInstKind.GetElementPtr(_pv_local(11), _pv_copy(0), [_pv_copy(2)]), nil),
@@ -260,6 +333,10 @@ describe "MIR optimizer structural verifier":
     it "records every syscall-batch candidate instead of a changed Boolean":
         step("Record exact syscall batching outcomes")
         val instructions = [
+            MirInst(MirInstKind.Const(_pv_local(0), MirConstValue.Int(0), MirType.i64()), nil),
+            MirInst(MirInstKind.Const(_pv_local(1), MirConstValue.Int(1), MirType.i64()), nil),
+            MirInst(MirInstKind.Const(_pv_local(2), MirConstValue.Int(2), MirType.i64()), nil),
+            MirInst(MirInstKind.Const(_pv_local(9), MirConstValue.Int(9), MirType.i64()), nil),
             MirInst(MirInstKind.Call(nil, _pv_copy(0), [_pv_copy(1)]), nil),
             MirInst(MirInstKind.Call(nil, _pv_copy(0), [_pv_copy(2)]), nil),
             MirInst(MirInstKind.Nop, nil),
