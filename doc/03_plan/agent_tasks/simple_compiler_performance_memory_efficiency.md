@@ -710,7 +710,11 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
   atomic `generate` modes without process, shell, C, or Rust delegation.
 - Added mirrored manifest alignment, cardinality, exact source freshness, and
   injected-bound failure contracts.
-- Remaining follow-up: a separate canonical manifest for ordered rule priority.
+- Added an 80-row postfix predicate manifest and seven-row fallback manifest.
+- Added fail-closed priority, postfix arity, pattern-ID, E-code, and sole dynamic
+  phrase validation plus exact generated-block freshness ownership.
+- Remaining follow-up: stale-file CLI red fixture and optional direct-mask rule
+  emission to remove helper-call dispatch after semantic evidence exists.
 - Verification intentionally not run under the user's no-verify instruction.
 
 ## Completed diagnostic tranche: shared query error-code ownership
