@@ -246,3 +246,8 @@ For spec files, the EasyFix registry derives line number, byte offset, trimmed t
 indent once per source line and shares those contexts across SPipe rules. Non-spec files
 do not allocate this context array. Compatibility calls outside the compiler may build a
 private view, but the normal lint path always supplies its existing canonical lines.
+
+The same request-owned contexts feed general code, annotation, deprecation, and module
+boundary EasyFix rules. Duplicate-typed-argument candidates reuse canonical lines rather
+than allocating one line array per signature. These facts are immutable and released with
+the registry call; long-lived lint/LSP instances retain no EasyFix source view.
