@@ -617,3 +617,15 @@ dictionaries, a per-call pattern array, or a heap bitset. The classifier gathers
 all hits before evaluating rules because rule priority—not textual occurrence—
 selects the code. The dynamic codegen phrase remains outside the fixed automaton
 and is evaluated at its historical ordinal.
+
+### Generator ownership and determinism
+
+`app.query_error_pattern_gen` is a build-only Pure Simple owner. Its manifest
+pins contiguous numeric IDs; its builder uses a flat `Dict<i64,i64>` transition
+map keyed by `state*128+byte`, parallel scalar arrays, and an append-only BFS
+queue. It must never iterate dictionary order, store growable arrays inside
+dictionary values, delegate to C/Rust/scripts, or use cumulative output text
+concatenation. Rendering uses ordered fragments and one join. `check` renders in
+memory and performs one exact read without mutation; `generate` validates and
+renders fully before at most one changed-only atomic write. Missing evidence,
+invalid input, and capacity exhaustion fail closed.
