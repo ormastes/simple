@@ -234,3 +234,9 @@ to that name. Direct visibility warnings W0401–W0404 and W0406 map to the shar
 `visibility_boundary` policy. Mapping uses exact match dispatch and precedes severity and
 suppression projection; no diagnostic may bypass configured allow/warn/deny because its
 producer uses EasyFix. Registry/default/mapping parity is a source-contract invariant.
+
+Advisory EasyFix families use stable configuration owners even when several wire codes
+represent one rewrite family. `short_grammar_method_ref`, `short_grammar_function_ref`,
+`short_grammar_placeholder`, and `short_grammar_ignored_param` map to
+`short_grammar_refactor`; contextual, deprecated, struct, raw-unit, and SIMD codes map
+directly. All default to warning until an explicit profile decision changes them.
