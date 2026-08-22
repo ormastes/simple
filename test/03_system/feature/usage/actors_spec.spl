@@ -53,6 +53,50 @@ val result = counter.ask(GetCount())
 
 use std.spec.step
 
+use std.spec.step
+use std.concurrent.green_thread.{green_spawn, green_run_all}
+
+var SPAWN_SEEN = 0
+
+actor MailboxActor:
+    val depth: i64
+
+    fn doubled() -> i64:
+        self.depth * 2
+
+fn spawn_body() -> i64:
+    SPAWN_SEEN = SPAWN_SEEN + 1
+    1
+
 describe "Actors":
-    # Tests for actor model implementation and concurrent message passing.
-    pass
+    # Actors are module-level isolated entities; these oracles pin the
+    # runtime-observable guarantees: construction, state encapsulation,
+    # methods, and coexistence with the green-thread scheduler.
+    it "constructs an actor with encapsulated state":
+        # @req: REQ-FEATURE-ACTORS-001
+        step("Verify: an actor instance carries its constructed state")
+        val a = MailboxActor(depth: 4)
+        expect(a.depth).to_equal(4)
+
+    it "runs actor methods against the actor's own state":
+        # @req: REQ-FEATURE-ACTORS-001
+        step("Verify: the method reads the actor's field and computes on it")
+        val a = MailboxActor(depth: 21)
+        expect(a.doubled()).to_equal(42)
+
+    it "keeps two actor instances independently isolated":
+        # @req: REQ-FEATURE-ACTORS-001
+        step("Verify: sibling instances do not share state")
+        val a = MailboxActor(depth: 1)
+        val b = MailboxActor(depth: 2)
+        expect(a.doubled() + b.doubled()).to_equal(6)
+
+    it "runs a spawned task alongside module-level actor declarations":
+        # @req: REQ-FEATURE-ACTORS-001
+        step("Verify: green_spawn executes the task body exactly once at run-all")
+        SPAWN_SEEN = 0
+        val handle = green_spawn(spawn_body)
+        val before = SPAWN_SEEN
+        green_run_all()
+        expect(before).to_equal(0)
+        expect(SPAWN_SEEN).to_equal(1)
