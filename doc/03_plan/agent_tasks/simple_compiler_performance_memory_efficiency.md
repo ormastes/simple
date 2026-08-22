@@ -490,3 +490,12 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Keep every unrequested fact family empty and incomplete.
 - Follow-up: expose requested/effective capabilities in optimization telemetry
   and replace the hard-coded liveness cell cap with a named budget policy.
+
+## Completed review hardening: PerfFacts capability integrity
+
+- Add explicit dominance completeness and gate loop discovery on it.
+- Add CFG+def-use preset without RPO/dominance/liveness.
+- Require CFG integrity for vector dependency analysis and typed-storage rewrite.
+- Reject duplicate block identities before block-keyed def-use interpretation.
+- Retain def-use-only storage-access analysis because incomplete facts become
+  conservative unknown access rather than transformation authority.
