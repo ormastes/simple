@@ -12,7 +12,7 @@ Verifies that explicit, glob, and aliased imports register symbols from the
 requested source module even when another loaded module exports the same name.
 """
 
-use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
 use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
 use compiler.hir.hir_definitions.*
@@ -59,9 +59,11 @@ describe "resolve_import_symbols 2-pass import resolver":
         var modules: Dict<text, Module> = {}
         modules["wildcard.owner"] = owner
         modules["wildcard.facade"] = facade
+        modules["wildcard.consumer"] = consumer
         val sources = [
             SourceFile(path: "wildcard/owner.spl", content: owner_source, module_name: "wildcard.owner"),
-            SourceFile(path: "wildcard/facade.spl", content: facade_source, module_name: "wildcard.facade")
+            SourceFile(path: "wildcard/facade.spl", content: facade_source, module_name: "wildcard.facade"),
+            SourceFile(path: "wildcard/consumer.spl", content: consumer_source, module_name: "wildcard.consumer")
         ]
         val surfaces = resolve_import_symbols_spec_build_surfaces(modules, sources)
         var lowering = hirlowering_for_module("wildcard.consumer", surfaces)
@@ -84,15 +86,110 @@ describe "resolve_import_symbols 2-pass import resolver":
         # `answer` as an identifier in ITS OWN scope before parse_full_frontend
         # ever runs, crashing with "variable `answer` not found" -- see
         # doc/08_tracking/bug/frontend_single_item_use_braces_import_crash_2026-07-29.md.
-        val consumer = parse_full_frontend("use provider.\{answer\}\nfn main() -> i64:\n    if answer() == 42: 0 else: 1", "consumer_fn", "consumer_fn", log)
+        val consumer_source = "use provider.\{answer\}\nfn main() -> i64:\n    if answer() == 42: 0 else: 1"
+        val consumer = parse_full_frontend(consumer_source, "consumer_fn", "consumer_fn", log)
         var modules: Dict<text, Module> = {}
         modules["provider"] = provider
+        modules["consumer_fn"] = consumer
         var sources: [SourceFile] = []
         sources = sources.push(SourceFile(path: "provider", content: src_provider, module_name: "provider"))
+        sources = sources.push(SourceFile(path: "consumer_fn.spl", content: consumer_source, module_name: "consumer_fn"))
         val surfaces = resolve_import_symbols_spec_build_surfaces(modules, sources)
         var lowering = hirlowering_for_module("consumer_fn", surfaces)
         val hir = lowering.lower_module(consumer)
         expect(hir.symbols.lookup("answer").?).to_be_truthy()
+
+    it "registers explicit return-only types from frozen scalar routes":
+        val log = make_logger()
+        val provider_source = "pub struct ProcessResult:\n    exit_code: i64\npub struct SourceAlias:\n    value: i64"
+        val consumer_source = "use result.provider.\{ProcessResult, SourceAlias as LocalAlias\}\nfn first() -> ProcessResult:\n    ProcessResult(exit_code: 0)\nfn second() -> LocalAlias:\n    LocalAlias(value: 1)"
+        val provider = parse_full_frontend(
+            provider_source, "result.provider", "result.provider", log)
+        val consumer = parse_full_frontend(
+            consumer_source, "result.consumer", "result.consumer", log)
+        var modules: Dict<text, Module> = {}
+        modules["result.provider"] = provider
+        modules["result.consumer"] = consumer
+        val sources = [
+            SourceFile(
+                path: "result/provider.spl", content: provider_source,
+                module_name: "result.provider"),
+            SourceFile(
+                path: "result/consumer.spl", content: consumer_source,
+                module_name: "result.consumer")
+        ]
+        val surfaces = resolve_import_symbols_spec_build_surfaces(
+            modules, sources)
+        var lowering = hirlowering_for_module("result.consumer", surfaces)
+        val hir = lowering.lower_module(consumer)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(hir.symbols.lookup("ProcessResult").?).to_be_truthy()
+        expect(hir.symbols.lookup("LocalAlias").?).to_be_truthy()
+
+    it "closes package-sibling signatures over explicit glob and re-export imports":
+        val log = make_logger()
+        val owner_source = "pub struct ExternalToken:\n    value: i64\nexport ExternalToken"
+        val facade_source = "export use foreign.owner.\{ExternalToken\}\nexport ExternalToken"
+        val glob_sibling_source = "use foreign.owner.*\npub fn glob_token(v: ExternalToken) -> ExternalToken:\n    v"
+        val named_sibling_source = "use foreign.facade.\{ExternalToken\}\npub fn named_token(v: ExternalToken) -> ExternalToken:\n    v"
+        val consumer_source = "fn local_value() -> i64:\n    1"
+        val owner = parse_full_frontend(owner_source, "foreign.owner", "foreign.owner", log)
+        val facade = parse_full_frontend(facade_source, "foreign.facade", "foreign.facade", log)
+        val glob_sibling = parse_full_frontend(glob_sibling_source, "pkg.glob_sibling", "pkg.glob_sibling", log)
+        val named_sibling = parse_full_frontend(named_sibling_source, "pkg.named_sibling", "pkg.named_sibling", log)
+        val consumer = parse_full_frontend(consumer_source, "pkg.consumer", "pkg.consumer", log)
+        var modules: Dict<text, Module> = {}
+        modules["foreign.owner"] = owner
+        modules["foreign.facade"] = facade
+        modules["pkg.glob_sibling"] = glob_sibling
+        modules["pkg.named_sibling"] = named_sibling
+        modules["pkg.consumer"] = consumer
+        val sources = [
+            SourceFile(path: "foreign/owner.spl", content: owner_source, module_name: "foreign.owner"),
+            SourceFile(path: "foreign/facade.spl", content: facade_source, module_name: "foreign.facade"),
+            SourceFile(path: "pkg/glob_sibling.spl", content: glob_sibling_source, module_name: "pkg.glob_sibling"),
+            SourceFile(path: "pkg/named_sibling.spl", content: named_sibling_source, module_name: "pkg.named_sibling"),
+            SourceFile(path: "pkg/consumer.spl", content: consumer_source, module_name: "pkg.consumer")
+        ]
+        val surfaces = resolve_import_symbols_spec_build_surfaces(modules, sources)
+        var lowering = hirlowering_for_module("pkg.consumer", surfaces)
+        val hir = lowering.lower_module(consumer)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(hir.symbols.lookup("glob_token").?).to_be_truthy()
+        expect(hir.symbols.lookup("named_token").?).to_be_truthy()
+
+    it "gives a named signature dependency route precedence over an overlapping glob":
+        val log = make_logger()
+        val named_source = "pub struct RouteToken:\n    value: i64"
+        val glob_source = "pub struct RouteToken:\n    other: text"
+        val owner_source = "use route.glob.*\nuse route.named.\{RouteToken\}\npub fn keep_route(value: RouteToken) -> RouteToken:\n    value"
+        val consumer_source = "use route.owner.\{keep_route\}\nfn main(value: RouteToken) -> RouteToken:\n    keep_route(value)"
+        val named = parse_full_frontend(named_source, "route.named", "route.named", log)
+        val glob = parse_full_frontend(glob_source, "route.glob", "route.glob", log)
+        val owner = parse_full_frontend(owner_source, "route.owner", "route.owner", log)
+        val consumer = parse_full_frontend(consumer_source, "route.consumer", "route.consumer", log)
+        var modules: Dict<text, Module> = {}
+        modules["route.named"] = named
+        modules["route.glob"] = glob
+        modules["route.owner"] = owner
+        modules["route.consumer"] = consumer
+        val sources = [
+            SourceFile(path: "route/named.spl", content: named_source, module_name: "route.named"),
+            SourceFile(path: "route/glob.spl", content: glob_source, module_name: "route.glob"),
+            SourceFile(path: "route/owner.spl", content: owner_source, module_name: "route.owner"),
+            SourceFile(path: "route/consumer.spl", content: consumer_source, module_name: "route.consumer")
+        ]
+        var surfaces = resolve_import_symbols_spec_build_surfaces(modules, sources)
+        # A copied surface may carry an in-range but stale physical slot. The
+        # dependency materializer must recover the owner by stable name rather
+        # than reading another module's route arrays.
+        val route_owner_index = surfaces.index_by_name["route.owner"]
+        surfaces.surfaces[route_owner_index].physical_index = surfaces.index_by_name["route.glob"]
+        var lowering = hirlowering_for_module("route.consumer", surfaces)
+        val hir = lowering.lower_module(consumer)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(hir.symbols.lookup("keep_route").?).to_be_truthy()
+        expect(hir.symbols.lookup("RouteToken").?).to_be_truthy()
 
     it "resolves plain facade exports to their unique package sibling":
         step("Verify: resolves plain facade exports to their unique package sibling")
@@ -101,15 +198,18 @@ describe "resolve_import_symbols 2-pass import resolver":
         val facade_source = "export tick, TickSpan, locate"
         val provider = parse_full_frontend(provider_source, "pkg.time_ops", "pkg.time_ops", log)
         val facade = parse_full_frontend(facade_source, "pkg.__init__", "pkg.__init__", log)
+        val consumer_source = "use pkg.\{tick, TickSpan, locate\}\nfn main() -> i64:\n    val span: TickSpan = locate()\n    tick() + span.value"
         val consumer = parse_full_frontend(
-            "use pkg.\{tick, TickSpan, locate\}\nfn main() -> i64:\n    val span: TickSpan = locate()\n    tick() + span.value",
+            consumer_source,
             "plain.consumer", "plain.consumer", log)
         var modules: Dict<text, Module> = {}
         modules["pkg.time_ops"] = provider
         modules["pkg.__init__"] = facade
+        modules["plain.consumer"] = consumer
         val sources = [
             SourceFile(path: "pkg/time_ops.spl", content: provider_source, module_name: "pkg.time_ops"),
-            SourceFile(path: "pkg/__init__.spl", content: facade_source, module_name: "pkg.__init__")
+            SourceFile(path: "pkg/__init__.spl", content: facade_source, module_name: "pkg.__init__"),
+            SourceFile(path: "plain/consumer.spl", content: consumer_source, module_name: "plain.consumer")
         ]
         val surfaces = resolve_import_symbols_spec_build_surfaces(modules, sources)
         val facade_surface = surfaces.surfaces[surfaces.index_by_name["pkg.__init__"]]
@@ -459,14 +559,17 @@ describe "resolve_import_symbols 2-pass import resolver":
         val src_provider = "struct FlatType:\n    value: i64\npub fn flat_answer() -> i64:\n    42"
         val provider = parse_full_frontend(
             src_provider, "flat.provider", "flat.provider", log)
+        val consumer_source = "type LocalText = text\nfn consume(value: FlatType) -> i64:\n    flat_answer()\nfn inferred_answer():\n    flat_answer()\nfn local_alias(value: LocalText) -> LocalText:\n    value\nfn maybe(value: FlatType?) -> FlatType?:\n    value\nfn parse_float(value: text) -> f64:\n    if value == \"panic\":\n        panic(value)\n    float(value)"
         val consumer = parse_full_frontend(
-            "type LocalText = text\nfn consume(value: FlatType) -> i64:\n    flat_answer()\nfn inferred_answer():\n    flat_answer()\nfn local_alias(value: LocalText) -> LocalText:\n    value\nfn maybe(value: FlatType?) -> FlatType?:\n    value\nfn parse_float(value: text) -> f64:\n    if value == \"panic\":\n        panic(value)\n    float(value)",
+            consumer_source,
             "flat.consumer", "flat.consumer", log)
         var modules: Dict<text, Module> = {}
         modules["flat.provider"] = provider
-        val sources = [SourceFile(
-            path: "flat.provider", content: src_provider,
-            module_name: "flat.provider")]
+        modules["flat.consumer"] = consumer
+        val sources = [
+            SourceFile(path: "flat.provider", content: src_provider, module_name: "flat.provider"),
+            SourceFile(path: "flat/consumer.spl", content: consumer_source, module_name: "flat.consumer")
+        ]
         val surfaces = resolve_import_symbols_spec_build_surfaces(modules, sources)
 
         rt_env_set("SIMPLE_BOOTSTRAP", "1")
@@ -505,9 +608,11 @@ describe "resolve_import_symbols 2-pass import resolver":
         var modules_map: Dict<text, Module> = {}
         modules_map[path_a] = module_a
         modules_map[path_b] = module_b
+        modules_map[path_consumer] = module_consumer
         var sources: [SourceFile] = []
         sources = sources.push(SourceFile(path: path_a, content: src_a, module_name: path_a))
         sources = sources.push(SourceFile(path: path_b, content: src_b, module_name: path_b))
+        sources = sources.push(SourceFile(path: "consumer.spl", content: src_consumer, module_name: path_consumer))
         val surfaces = resolve_import_symbols_spec_build_surfaces(modules_map, sources)
 
         # Lower the consumer with module_surfaces set
@@ -544,8 +649,10 @@ describe "resolve_import_symbols 2-pass import resolver":
 
         var modules_map2: Dict<text, Module> = {}
         modules_map2[path_lib] = module_lib
+        modules_map2[path_consumer2] = module_consumer2
         var sources2: [SourceFile] = []
         sources2 = sources2.push(SourceFile(path: path_lib, content: src_lib, module_name: path_lib))
+        sources2 = sources2.push(SourceFile(path: "consumer2.spl", content: src_consumer2, module_name: path_consumer2))
         val surfaces2 = resolve_import_symbols_spec_build_surfaces(modules_map2, sources2)
 
         var lowering2 = hirlowering_for_module(path_consumer2, surfaces2)
@@ -564,14 +671,17 @@ describe "resolve_import_symbols 2-pass import resolver":
         val inner = parse_full_frontend(src_inner, "pkg.inner", "pkg.inner", log)
         val src_facade = "use pkg.inner.*\nexport InnerType, inner_fn"
         val facade = parse_full_frontend(src_facade, "pkg.facade", "pkg.facade", log)
-        val consumer = parse_full_frontend("use pkg.facade.*\nfn main() -> i64:\n    inner_fn()", "consumer_facade", "consumer_facade", log)
+        val consumer_source = "use pkg.facade.*\nfn main() -> i64:\n    inner_fn()"
+        val consumer = parse_full_frontend(consumer_source, "consumer_facade", "consumer_facade", log)
 
         var modules: Dict<text, Module> = {}
         modules["pkg.inner"] = inner
         modules["pkg.facade"] = facade
+        modules["consumer_facade"] = consumer
         var sources: [SourceFile] = []
         sources = sources.push(SourceFile(path: "pkg.inner", content: src_inner, module_name: "pkg.inner"))
         sources = sources.push(SourceFile(path: "pkg.facade", content: src_facade, module_name: "pkg.facade"))
+        sources = sources.push(SourceFile(path: "consumer_facade.spl", content: consumer_source, module_name: "consumer_facade"))
         val surfaces = resolve_import_symbols_spec_build_surfaces(modules, sources)
 
         var lowering = hirlowering_for_module("consumer_facade", surfaces)
@@ -593,14 +703,17 @@ describe "resolve_import_symbols 2-pass import resolver":
         # is ever reached.
         val src_compat_types = "export use shared.access.\{AccessResult as T32BridgeResult\}"
         val facade = parse_full_frontend(src_compat_types, "compat.types", "compat.types", log)
-        val consumer = parse_full_frontend("use compat.types.\{T32BridgeResult\}\nfn main(value: T32BridgeResult) -> T32BridgeResult:\n    value", "compat.consumer", "compat.consumer", log)
+        val consumer_source = "use compat.types.\{T32BridgeResult\}\nfn main(value: T32BridgeResult) -> T32BridgeResult:\n    value"
+        val consumer = parse_full_frontend(consumer_source, "compat.consumer", "compat.consumer", log)
 
         var modules: Dict<text, Module> = {}
         modules["shared.access"] = provider
         modules["compat.types"] = facade
+        modules["compat.consumer"] = consumer
         var sources: [SourceFile] = []
         sources = sources.push(SourceFile(path: "shared.access", content: src_shared_access, module_name: "shared.access"))
         sources = sources.push(SourceFile(path: "compat.types", content: src_compat_types, module_name: "compat.types"))
+        sources = sources.push(SourceFile(path: "compat/consumer.spl", content: consumer_source, module_name: "compat.consumer"))
         val surfaces = resolve_import_symbols_spec_build_surfaces(modules, sources)
 
         var lowering = hirlowering_for_module("compat.consumer", surfaces)
@@ -612,8 +725,14 @@ describe "resolve_import_symbols 2-pass import resolver":
     it "binds the mutable me receiver in a prefixed class method":
         step("Verify: binds the mutable me receiver in a prefixed class method")
         val log = make_logger()
-        val module = parse_full_frontend("class Box:\n    value: i64\n    me set(next: i64) -> i64:\n        me.value = next\n        me.value", "me_receiver", "me_receiver", log)
-        var lowering = HirLowering.with_filename("me_receiver")
+        val module_source = "class Box:\n    value: i64\n    me set(next: i64) -> i64:\n        me.value = next\n        me.value"
+        val module = parse_full_frontend(module_source, "me_receiver", "me_receiver", log)
+        var modules: Dict<text, Module> = {}
+        modules["me_receiver"] = module
+        val surfaces = resolve_import_symbols_spec_build_surfaces(modules, [
+            SourceFile(path: "me_receiver.spl", content: module_source, module_name: "me_receiver")
+        ])
+        var lowering = hirlowering_for_module("me_receiver", surfaces)
         val hir = lowering.lower_module(module)
 
         expect(lowering.errors.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
@@ -640,9 +759,11 @@ describe "resolve_import_symbols 2-pass import resolver":
         var modules_map: Dict<text, Module> = {}
         modules_map[path_driver] = module_driver
         modules_map[path_backend] = module_backend
+        modules_map[path_consumer] = module_consumer
         var sources: [SourceFile] = []
         sources = sources.push(SourceFile(path: path_driver, content: src_driver, module_name: path_driver))
         sources = sources.push(SourceFile(path: path_backend, content: src_backend, module_name: path_backend))
+        sources = sources.push(SourceFile(path: "consumer_aliases.spl", content: src_consumer, module_name: path_consumer))
         val surfaces = resolve_import_symbols_spec_build_surfaces(modules_map, sources)
 
         var lowering = hirlowering_for_module(path_consumer, surfaces)
@@ -668,11 +789,14 @@ describe "resolve_import_symbols 2-pass import resolver":
         val log = make_logger()
         val src_provider = "pub fn answer() -> i64:\n    42"
         val provider = parse_full_frontend(src_provider, "provider", "provider", log)
-        val consumer = parse_full_frontend("import provider\nfn answer() -> i64:\n    7\nfn main() -> i64:\n    provider.answer()", "consumer_qualified", "consumer_qualified", log)
+        val consumer_source = "import provider\nfn answer() -> i64:\n    7\nfn main() -> i64:\n    provider.answer()"
+        val consumer = parse_full_frontend(consumer_source, "consumer_qualified", "consumer_qualified", log)
         var modules: Dict<text, Module> = {}
         modules["provider"] = provider
+        modules["consumer_qualified"] = consumer
         var sources: [SourceFile] = []
         sources = sources.push(SourceFile(path: "provider", content: src_provider, module_name: "provider"))
+        sources = sources.push(SourceFile(path: "consumer_qualified.spl", content: consumer_source, module_name: "consumer_qualified"))
         val surfaces = resolve_import_symbols_spec_build_surfaces(modules, sources)
         var lowering = hirlowering_for_module("consumer_qualified", surfaces)
         val hir = lowering.lower_module(consumer)
@@ -741,9 +865,11 @@ describe "resolve_import_symbols 2-pass import resolver":
 
         var modules: Dict<text, Module> = {}
         modules["pkg.file_system.file_ops"] = provider
-        val sources = [SourceFile(
-            path: "pkg/file_system/file_ops.spl", content: provider_source,
-            module_name: "pkg.file_system.file_ops")]
+        modules["pkg.file_system.metadata"] = consumer
+        val sources = [
+            SourceFile(path: "pkg/file_system/file_ops.spl", content: provider_source, module_name: "pkg.file_system.file_ops"),
+            SourceFile(path: "pkg/file_system/metadata.spl", content: consumer_source, module_name: "pkg.file_system.metadata")
+        ]
         val surfaces = resolve_import_symbols_spec_build_surfaces(modules, sources)
         var lowering = hirlowering_for_module("pkg.file_system.metadata", surfaces)
         val hir = lowering.lower_module(consumer)
@@ -798,12 +924,14 @@ describe "resolve_import_symbols 2-pass import resolver":
         modules["shared_pkg.a"] = sibling_a
         modules["shared_pkg.b"] = sibling_b
         modules["shared_pkg.c"] = sibling_c
+        modules["explicit.consumer"] = explicit_consumer
         val sources = [
             SourceFile(path: "hidden/defs.spl", content: hidden_source, module_name: "hidden.defs"),
             SourceFile(path: "hidden/private_glob.spl", content: private_glob_source, module_name: "hidden.private_glob"),
             SourceFile(path: "shared_pkg/a.spl", content: sibling_a_source, module_name: "shared_pkg.a"),
             SourceFile(path: "shared_pkg/b.spl", content: sibling_b_source, module_name: "shared_pkg.b"),
-            SourceFile(path: "shared_pkg/c.spl", content: sibling_c_source, module_name: "shared_pkg.c")
+            SourceFile(path: "shared_pkg/c.spl", content: sibling_c_source, module_name: "shared_pkg.c"),
+            SourceFile(path: "explicit/consumer.spl", content: explicit_consumer_source, module_name: "explicit.consumer")
         ]
         val surfaces = resolve_import_symbols_spec_build_surfaces(modules, sources)
 

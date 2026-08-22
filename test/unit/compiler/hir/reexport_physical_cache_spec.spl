@@ -9,7 +9,7 @@ Audience: compiler and tooling engineers who maintain this spec.
 
 use std.spec.{describe, it, expect}
 use compiler.common.diagnostics.span.{Span}
-use compiler.frontend.parser_types.{ParserImport}
+use compiler.frontend.parser_types.{ParserImport, ImportItem}
 use compiler.frontend.parser_types_expr.{Type, TypeKind}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.hir.hir_lowering.types.{hirlowering_for_module}
@@ -34,6 +34,16 @@ extern fn rt_heap_live_bytes() -> i64
 
 fn reexport_import(module_name: text) -> ParserImport:
     ParserImport(module: module_name, items: [], is_lazy: false, span: Span.empty())
+
+fn named_reexport_import(module_name: text) -> ParserImport:
+    ParserImport(
+        module: module_name,
+        items: [
+            ImportItem(name: "Source", has_alias: true, alias: "Local"),
+            ImportItem(name: "Direct", has_alias: false, alias: "")
+        ],
+        is_lazy: false,
+        span: Span.empty())
 
 fn freeze_registry(
     surfaces: [ModuleSurface],
@@ -165,6 +175,23 @@ fn depth_registry() -> ModuleSurfacesByName:
     freeze_registry(surfaces, names, ordered_names, ordered_indices)
 
 describe "physical re-export cache":
+    it "freezes named imports into aligned scalar routes":
+        var facade = ModuleSurface.empty("named.facade")
+        var leaf = ModuleSurface.empty("named.leaf")
+        facade.imports = [named_reexport_import("named.leaf")]
+        val registry = freeze_registry(
+            [facade, leaf],
+            {"named.facade": 0, "named.leaf": 1},
+            ["named.facade", "named.leaf"], [0, 1])
+        expect(registry.surfaces[0].import_route_item_offsets).to_equal([0])
+        expect(registry.surfaces[0].import_route_item_counts).to_equal([2])
+        expect(registry.surfaces[0].import_route_module_names).to_equal(
+            ["named.leaf"])
+        expect(registry.surfaces[0].import_route_item_names).to_equal(
+            ["Source", "Direct"])
+        expect(registry.surfaces[0].import_route_item_local_names).to_equal(
+            ["Local", "Direct"])
+
     it "allocates a unique nonzero generation for every successful freeze":
         step("Verify: allocates a unique nonzero generation for every successful freeze")
         # @req: REQ-COMPILER-HIR-001
