@@ -280,3 +280,6 @@ Command-scoped lint resolves `critical.dynamic_acquire` lazily once and retains 
 ### Bounded manifest discovery
 
 The command session maps source directories and discovered manifest directories to the resolved `simple.sdn` path or an explicit miss. Each ancestor step consults the cache, allowing sibling trees to stop at a cached common ancestor. The cache retains at most 4096 directory entries; after the cap, discovery remains correct but uncached. A prepared source-path token prevents the downstream lint configuration layer from repeating discovery while still applying file-local attributes to a child configuration.
+### Bounded parsed-policy storage
+
+Manifest discovery and manifest parsing use separate caches. Parsed policies are stored in a flat array and addressed by a `path -> i64` index, avoiding class/struct-valued dictionary access. At most 256 unique policies are retained per command. Every hit returns a child configuration; CLI and file attributes never mutate the cached base. New paths after saturation follow the ordinary parse path without retention.
