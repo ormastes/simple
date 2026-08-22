@@ -96,10 +96,23 @@
 - Preserve exact legacy ANSI/malformed-sequence behavior on the slow path.
 - Pin plain Unicode, multiple terminated sequences and unterminated sequences in
   mirrored query-diagnostic contracts.
-- Record repeated normalization and workspace process-per-file work as
-  architecture follow-ups rather than changing query APIs in this bounded tranche.
+- Record workspace process-per-file work as the remaining architecture follow-up;
+  repeated normalization is completed by the shared clean-output tranche below.
 - Verification status: intentionally not executed under the user's explicit
   no-verify instruction; static diff and ownership review only.
+
+## Completed shared query diagnostic normalization tranche
+
+- Materialize combined cleaned compiler output once in active single-file and
+  workspace callers while retaining raw stdout/stderr for text rendering.
+- Feed lint policy and JSON parsing from the same immutable clean text.
+- Count workspace text diagnostics from the exact line-admission predicate,
+  without constructing JSON merely to obtain array length.
+- Preserve stdout-before-stderr order, the inserted separator, duplicates,
+  compiler-before-lint ordering, malformed ANSI behavior, and exit status.
+- Add mirrored clean-view, policy, parse/count order, and active-source contracts.
+- Verification intentionally not run under the user's no-verify instruction.
+
 ## Authority
 
 Merge owner and final highest-capability reviewer: `/root`. Generated-manual review owner: `/root`. Sidecars may implement bounded disjoint lanes but cannot change frozen interfaces, accept exclusions, or mark done.
