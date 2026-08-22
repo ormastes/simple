@@ -130,3 +130,12 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Release on normal completion, non-Simple input, parse failure, and revision mismatch.
 - Ensure ordinary/long-lived lint calls retain neither lines nor last-file policy.
 - Follow-up: replace fallback location indexing with typed AST/HIR spans per producer.
+
+## Active tool tranche: migrate line-view consumers
+
+- Pass canonical lines into file-attribute policy resolution.
+- Add compatibility `content` wrappers and allocation-free `*_lines` consumers.
+- Migrate parameter-tag, raw-runtime fix, diagram, LLVM guard, name, freestanding, and WM
+  owners without changing their order or predicates.
+- Pin the normal call graph to line variants.
+- Follow-up: extend the shared view through EasyFix registry owners and traceability rules.
