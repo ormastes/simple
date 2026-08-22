@@ -453,9 +453,11 @@ unchanged.
 
 ## Fix application fast-path contract
 
-Per-file replacements are ordered descending by start. When starts are distinct,
-the applicator uses comparator sorting; when any start repeats, it uses the exact
-legacy selection order. Overlap validation runs on that order before assembly.
+Per-file replacements use a typed stable merge sort ordered by descending start.
+The merge selects from the left half on equality, preserving the exact input
+order for equal-start edits while keeping every batch at `O(R log R)` time and
+`O(R)` peak auxiliary storage. Overlap validation runs on that order before
+assembly.
 Only spans satisfying `0 <= start <= end <= original_source_len` enter the
 chunk-assembly path. It walks replacements in reverse, emits each untouched source
 slice and replacement once, then joins one time. Any range outside that contract
