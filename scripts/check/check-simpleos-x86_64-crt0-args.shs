@@ -1,0 +1,139 @@
+#!/bin/sh
+# Assemble, link, and inspect the canonical x86_64 SimpleOS CRT argument path.
+# The executable check uses the host's valid initial frame only. SimpleOS raw
+# exit paths are verified structurally because syscall 0 has different Linux
+# semantics and must not be represented as guest runtime evidence.
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+CRT="$ROOT_DIR/src/os/libc/simpleos_crt0.S"
+TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/simpleos-x64-crt.XXXXXX")
+trap 'rm -rf "$TMP_DIR"' EXIT HUP INT TERM
+
+CC=${CC:-clang}
+READELF=${READELF:-readelf}
+OBJDUMP=${OBJDUMP:-objdump}
+
+command -v "$CC" >/dev/null 2>&1
+command -v "$READELF" >/dev/null 2>&1
+command -v "$OBJDUMP" >/dev/null 2>&1
+
+"$CC" --target=x86_64-unknown-none-elf -c "$CRT" -o "$TMP_DIR/crt-contract.o"
+"$READELF" -Ws "$TMP_DIR/crt-contract.o" >"$TMP_DIR/symbols.txt"
+"$READELF" -Wr "$TMP_DIR/crt-contract.o" >"$TMP_DIR/relocations.txt"
+"$OBJDUMP" -dr "$TMP_DIR/crt-contract.o" >"$TMP_DIR/disassembly.txt"
+
+# The CRT owns weak fallback storage for environ while retaining compatibility
+# with simpleos_process.c's strong definition. Runtime hooks stay weak.
+awk '$5 == "WEAK" && $8 == "environ" { found = 1 } END { exit !found }' "$TMP_DIR/symbols.txt"
+awk '$5 == "WEAK" && $8 == "rt_set_args" { found = 1 } END { exit !found }' "$TMP_DIR/symbols.txt"
+grep -F 'environ' "$TMP_DIR/relocations.txt" >/dev/null
+grep -F 'rt_set_args' "$TMP_DIR/relocations.txt" >/dev/null
+grep -F '__simple_startup_before_main' "$TMP_DIR/relocations.txt" >/dev/null
+
+# Source/control-flow assertions cover the guest-only rejection paths. These
+# are deliberately not executed under Linux, where syscall 0 means read(2).
+grep -F 'cmp     r12, 64' "$CRT" >/dev/null
+grep -F 'cmp     qword ptr [r13 + rcx*8], 0' "$CRT" >/dev/null
+grep -F 'cmp     qword ptr [r13 + r12*8], 0' "$CRT" >/dev/null
+grep -F 'mov     ecx, 128' "$CRT" >/dev/null
+grep -F 'jnz     .Lstartup_rejected' "$CRT" >/dev/null
+grep -F 'mov     edi, 127' "$CRT" >/dev/null
+grep -F 'mov     edi, 125' "$CRT" >/dev/null
+grep -F 'jmp     .Lraw_exit' "$CRT" >/dev/null
+grep -F 'syscall' "$TMP_DIR/disassembly.txt" >/dev/null
+
+startup_branch=$(grep -n -F 'jnz     .Lstartup_rejected' "$CRT" | cut -d: -f1)
+constructors=$(grep -n -F 'call    __libc_init_array' "$CRT" | cut -d: -f1)
+module_inits=$(grep -n -F '.Lmodule_inits_done:' "$CRT" | cut -d: -f1)
+main_call=$(grep -n -F 'call    main' "$CRT" | cut -d: -f1)
+test "$startup_branch" -lt "$constructors"
+test "$constructors" -lt "$module_inits"
+test "$module_inits" -lt "$main_call"
+
+# A tiny freestanding host harness supplies strong environ plus all hooks. Its
+# stage byte proves rt_set_args -> startup admission -> libc constructors ->
+# module initializers -> main ordering on a real, valid process-entry frame.
+cat >"$TMP_DIR/harness.S" <<'HARNESS'
+.intel_syntax noprefix
+.section .data
+.global environ
+environ: .quad 0
+
+.section .bss
+.global __bss_start
+__bss_start:
+stage: .byte 0
+.global __bss_end
+__bss_end:
+
+.section .text
+.global rt_set_args
+rt_set_args:
+    cmp byte ptr [rip + stage], 0
+    jne .Lfail
+    test rdi, rdi
+    jz .Lfail
+    test rsi, rsi
+    jz .Lfail
+    mov byte ptr [rip + stage], 1
+    ret
+
+.global __simple_startup_before_main
+__simple_startup_before_main:
+    cmp byte ptr [rip + stage], 1
+    jne .Lreject
+    mov byte ptr [rip + stage], 2
+    xor eax, eax
+    ret
+.Lreject:
+    mov eax, 1
+    ret
+
+.global __libc_init_array
+__libc_init_array:
+    cmp byte ptr [rip + stage], 2
+    jne .Lfail
+    mov byte ptr [rip + stage], 3
+    ret
+
+.global __simple_call_module_inits
+__simple_call_module_inits:
+    cmp byte ptr [rip + stage], 3
+    jne .Lfail
+    mov byte ptr [rip + stage], 4
+    ret
+
+.global main
+main:
+    cmp byte ptr [rip + stage], 4
+    jne .Lfail_main
+    cmp qword ptr [rip + environ], 0
+    je .Lfail_main
+    test edi, edi
+    jz .Lfail_main
+    test rsi, rsi
+    jz .Lfail_main
+    xor eax, eax
+    ret
+.Lfail_main:
+    mov eax, 91
+    ret
+
+.Lfail:
+    mov edi, 92
+    jmp exit
+
+.global exit
+exit:
+    mov eax, 60
+    syscall
+    hlt
+HARNESS
+
+"$CC" --target=x86_64-unknown-linux-gnu -c "$CRT" -o "$TMP_DIR/crt-host.o"
+"$CC" --target=x86_64-unknown-linux-gnu -c "$TMP_DIR/harness.S" -o "$TMP_DIR/harness.o"
+"$CC" -nostdlib -no-pie "$TMP_DIR/crt-host.o" "$TMP_DIR/harness.o" -o "$TMP_DIR/crt-host"
+"$TMP_DIR/crt-host" contract-argument
+
+printf '%s\n' 'PASS: x86_64 SimpleOS CRT argument and startup-order contract'

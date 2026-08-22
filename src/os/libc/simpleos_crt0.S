@@ -4,8 +4,7 @@
  * Called by the kernel's process loader after mapping the ELF.
  * Stack is already set up by the kernel. BSS must be zeroed.
  *
- * Calls main(argc, argv) then exit(retval). SimpleOS kernels that do not
- * provide an argc/argv stack still fall back to argc=0, argv=NULL.
+ * Calls main(argc, argv, envp) then exit(retval).
  */
 
 .intel_syntax noprefix
@@ -18,26 +17,46 @@ _start:
     cld
 
     /*
-     * Preserve a conventional process entry stack when present:
+     * Admit the conventional process entry stack before touching runtime
+     * state:
      *   rsp[0] = argc, rsp[1...] = argv, then envp.
-     * This lets the Linux-host smoke artifact run LLVM's InitLLVM path while
-     * retaining the SimpleOS no-arguments fallback for early kernels.
+     * argv is capped at 64 entries and envp at 128.  Every declared argv
+     * entry must be non-NULL, argv[argc] must be NULL, and envp must terminate
+     * within its bound.  Malformed loader input cannot reach constructors or
+     * user code.
      */
+    test    rsp, 15
+    jnz     .Lmalformed_initial_stack
     mov     r12, qword ptr [rsp]        /* argc */
     lea     r13, [rsp + 8]              /* argv */
-    xor     r14d, r14d                  /* envp */
-    test    r12, r12
-    jz      .Lno_initial_args
-    cmp     r12, 4096
-    ja      .Lno_initial_args
-    cmp     qword ptr [r13], 0
-    je      .Lno_initial_args
+    cmp     r12, 64
+    ja      .Lmalformed_initial_stack
+
+    xor     ecx, ecx                    /* argv index */
+.Lscan_argv:
+    cmp     rcx, r12
+    jae     .Largv_terminated
+    cmp     qword ptr [r13 + rcx*8], 0
+    je      .Lmalformed_initial_stack
+    inc     rcx
+    jmp     .Lscan_argv
+.Largv_terminated:
+    cmp     qword ptr [r13 + r12*8], 0
+    jne     .Lmalformed_initial_stack
     lea     r14, [r13 + r12*8 + 8]
-    jmp     .Largs_done
-.Lno_initial_args:
-    xor     r12d, r12d
-    xor     r13d, r13d
-.Largs_done:
+
+    mov     rax, r14                    /* bounded envp cursor */
+    mov     ecx, 128
+.Lscan_envp:
+    cmp     qword ptr [rax], 0
+    je      .Linitial_stack_valid
+    add     rax, 8
+    dec     ecx
+    jnz     .Lscan_envp
+    /* Exactly 128 entries are valid only when the next slot terminates. */
+    cmp     qword ptr [rax], 0
+    jne     .Lmalformed_initial_stack
+.Linitial_stack_valid:
 
     /* Zero BSS segment */
     lea     rdi, [rip + __bss_start]
@@ -80,6 +99,8 @@ _start:
     mov     rdi, r12
     mov     rsi, r13
     call    rax
+    test    eax, eax
+    jnz     .Lstartup_rejected
 .Lstartup_before_main_done:
 
     /* Initialize C++ constructors and libc (.init_array) */
@@ -116,6 +137,25 @@ _start:
     /* Should never reach here */
     hlt
     jmp     _start
+
+    /*
+     * No libc call is safe before the initial stack has been admitted.
+     * Syscall 0 is the always-authorized SimpleOS process exit operation;
+     * issue it directly so malformed input cannot reach constructors.
+     */
+.Lmalformed_initial_stack:
+    mov     edi, 127
+.Lraw_exit:
+    xor     eax, eax
+    syscall
+.Lmalformed_hang:
+    hlt
+    jmp     .Lmalformed_hang
+
+    /* Manifest startup admission rejected the otherwise valid image. */
+.Lstartup_rejected:
+    mov     edi, 125
+    jmp     .Lraw_exit
 
 .size _start, . - _start
 

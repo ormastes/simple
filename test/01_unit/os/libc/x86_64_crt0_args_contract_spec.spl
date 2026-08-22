@@ -1,0 +1,59 @@
+use std.spec.*
+use std.io_runtime.{file_read}
+
+val CRT0 = "src/os/libc/simpleos_crt0.S"
+
+describe "x86_64 SimpleOS CRT initial-stack contract":
+    it "admits bounded argv and envp before publishing runtime state":
+        val source = file_read(CRT0)
+
+        expect(source).to_contain("test    rsp, 15\n    jnz     .Lmalformed_initial_stack")
+        expect(source).to_contain("cmp     r12, 64\n    ja      .Lmalformed_initial_stack")
+        expect(source).to_contain(".Lscan_argv:")
+        expect(source).to_contain("cmp     qword ptr [r13 + rcx*8], 0")
+        expect(source).to_contain("cmp     qword ptr [r13 + r12*8], 0")
+        expect(source).to_contain("mov     ecx, 128\n.Lscan_envp:")
+        expect(source).to_contain("cmp     qword ptr [rax], 0\n    jne     .Lmalformed_initial_stack")
+
+    it "publishes environ and SimpleCore args before initialization and main":
+        val source = file_read(CRT0)
+        val publish_env = source.index_of("mov     qword ptr [rdi], r14")
+        val publish_args = source.index_of("lea     rax, [rip + rt_set_args]")
+        val constructors = source.index_of("call    __libc_init_array")
+        val module_inits = source.index_of("call    rax\n.Lmodule_inits_done:")
+        val user_main = source.index_of("call    main")
+
+        expect(publish_env >= 0).to_be(true)
+        expect(publish_args > publish_env).to_be(true)
+        expect(constructors > publish_args).to_be(true)
+        expect(module_inits > constructors).to_be(true)
+        expect(user_main > module_inits).to_be(true)
+        expect(source).to_contain(".weak environ\nenviron:\n    .quad 0")
+
+    it "raw-exits rejected startup admission before initialization":
+        val source = file_read(CRT0)
+        val startup_branch = source.index_of("jnz     .Lstartup_rejected")
+        val constructors = source.index_of("call    __libc_init_array")
+        val rejected = source.slice(
+            source.index_of(".Lstartup_rejected:\n"),
+            source.index_of(".size _start")
+        )
+
+        expect(startup_branch >= 0).to_be(true)
+        expect(startup_branch < constructors).to_be(true)
+        expect(rejected).to_contain("mov     edi, 125")
+        expect(rejected).to_contain("jmp     .Lraw_exit")
+        expect(rejected.contains("call    __libc_init_array")).to_be(false)
+        expect(rejected.contains("call    main")).to_be(false)
+
+    it "exits malformed frames with 127 before constructors or main":
+        val source = file_read(CRT0)
+        val malformed = source.slice(
+            source.index_of(".Lmalformed_initial_stack:\n"),
+            source.index_of(".size _start")
+        )
+
+        expect(malformed).to_contain("mov     edi, 127")
+        expect(malformed).to_contain("xor     eax, eax\n    syscall")
+        expect(malformed.contains("call    __libc_init_array")).to_be(false)
+        expect(malformed.contains("call    main")).to_be(false)

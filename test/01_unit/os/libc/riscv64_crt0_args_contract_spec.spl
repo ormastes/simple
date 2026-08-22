@@ -1,0 +1,50 @@
+use std.spec.*
+use std.io_runtime.{file_read}
+
+describe "RV64 SimpleOS CRT initial-stack contract":
+    it "delivers bounded argv and envp to libc, SimpleCore, and main":
+        val source = file_read("scripts/os/simpleos-sysroot-riscv64.shs")
+
+        expect(source).to_contain("mv s0, sp")
+        expect(source).to_contain("andi t0, s0, 15\n    bnez t0, .Lmalformed_stack")
+        expect(source).to_contain("ld s1, 0(s0)                       /* argc */")
+        expect(source).to_contain("li t0, 64")
+        expect(source).to_contain("bgtu s1, t0, .Lmalformed_stack")
+        expect(source).to_contain("beqz t3, .Lmalformed_stack")
+        expect(source).to_contain("bnez t3, .Lmalformed_stack")
+        expect(source).to_contain("addi s3, t1, 8                    /* envp */")
+        expect(source).to_contain("li t2, 128")
+        expect(source).to_contain(".Lvalidate_envp:\n    ld t3, 0(t1)\n    beqz t3, .Linitial_stack_valid")
+        expect(source).to_contain("bnez t2, .Lvalidate_envp\n    /* Exactly 128 entries are valid only when the following slot terminates. */\n    ld t3, 0(t1)\n    bnez t3, .Lmalformed_stack")
+        expect(source).to_contain("sd s3, 0(t0)")
+        expect(source).to_contain("la t0, rt_set_args")
+        expect(source).to_contain("mv a0, s1\n    mv a1, s2\n    jalr t0")
+        expect(source).to_contain("mv a0, s1\n    mv a1, s2\n    mv a2, s3\n    call main")
+        val publish_pos = source.index_of("la t0, rt_set_args")
+        val startup_pos = source.index_of("la t0, __simple_startup_before_main")
+        val constructors_pos = source.index_of("call __libc_init_array")
+        val module_init_pos = source.index_of("la t0, __simple_call_module_inits")
+        val main_pos = source.index_of("call main")
+        expect(startup_pos).to_be_greater_than(publish_pos)
+        expect(constructors_pos).to_be_greater_than(startup_pos)
+        expect(module_init_pos).to_be_greater_than(constructors_pos)
+        expect(main_pos).to_be_greater_than(module_init_pos)
+
+    it "ships the isolated CLI bridge and fails closed on malformed metadata":
+        val source = file_read("scripts/os/simpleos-sysroot-riscv64.shs")
+
+        expect(source).to_contain("simpleos_libc.c simpleos_cli_args.c")
+        expect(source).to_contain(".weak rt_set_args")
+        expect(source).to_contain(".weak environ")
+        expect(source).to_contain(".weak __simple_startup_before_main")
+        expect(source).to_contain("jalr t0\n    bnez a0, .Lstartup_rejected")
+        expect(source).to_contain(".Lmalformed_stack:\n    /* Avoid constructors, user code, and libc state on an untrusted frame. */\n    li a0, 127")
+        expect(source).to_contain("li a7, 0                           /* SIMPLEOS_SYS_EXIT */\n    ecall")
+        expect(source).to_contain(".Lstartup_rejected:\n    li a0, 125\n    li a7, 0")
+        val malformed = source.slice(source.index_of(".Lmalformed_stack:\n"), source.index_of(".size _start"))
+        val malformed_only = malformed.slice(0, malformed.index_of(".Lstartup_rejected:"))
+        expect(malformed_only.contains("call __libc_init_array")).to_be(false)
+        expect(malformed_only.contains("call main")).to_be(false)
+        val rejected = source.slice(source.index_of(".Lstartup_rejected:\n"), source.index_of(".size _start"))
+        expect(rejected.contains("call __libc_init_array")).to_be(false)
+        expect(rejected.contains("call main")).to_be(false)

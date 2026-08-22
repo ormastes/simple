@@ -15,27 +15,45 @@
 
 _start:
     /*
-     * Preserve a conventional process entry stack when present:
+     * Preserve and validate the conventional process entry stack:
      *   sp[0] = argc, sp[1...] = argv, then envp.
-     * Falls back to argc=0/argv=NULL/envp=NULL for early kernels that eret
-     * with an empty stack.
+     * argv is capped at 64 entries and envp at 128, matching the admitted
+     * executable-launch contract.  Rejecting a
+     * malformed image here is deliberate: constructors and user code must
+     * never observe attacker-controlled unterminated vectors.
      */
-    ldr     x19, [sp]                   /* argc */
-    add     x20, sp, #8                 /* argv */
-    mov     x21, xzr                    /* envp */
-    cbz     x19, .Lno_initial_args
-    mov     x9, #4096
+    mov     x22, sp                     /* immutable entry SP */
+    tst     x22, #15
+    b.ne    .Lmalformed_initial_stack
+    ldr     x19, [x22]                  /* argc */
+    mov     x9, #64
     cmp     x19, x9
-    b.hi    .Lno_initial_args
-    ldr     x9, [x20]
-    cbz     x9, .Lno_initial_args
+    b.hi    .Lmalformed_initial_stack
+    add     x20, x22, #8                /* argv */
+    mov     x10, x19                    /* validate every declared argv slot */
+    mov     x11, x20
+    cbz     x10, .Largv_terminated
+.Lscan_argv:
+    ldr     x9, [x11], #8
+    cbz     x9, .Lmalformed_initial_stack
+    subs    x10, x10, #1
+    b.ne    .Lscan_argv
+.Largv_terminated:
+    ldr     x9, [x20, x19, lsl #3]
+    cbnz    x9, .Lmalformed_initial_stack
     add     x21, x20, x19, lsl #3
-    add     x21, x21, #8
-    b       .Largs_done
-.Lno_initial_args:
-    mov     x19, xzr
-    mov     x20, xzr
-.Largs_done:
+    add     x21, x21, #8                /* envp = &argv[argc + 1] */
+    mov     x11, x21                    /* bounded validation cursor */
+    mov     x10, #128
+.Lscan_envp:
+    ldr     x9, [x11], #8
+    cbz     x9, .Lenvp_terminated
+    subs    x10, x10, #1
+    b.ne    .Lscan_envp
+    /* Exactly 128 entries are valid only when the next slot terminates. */
+    ldr     x9, [x11]
+    cbnz    x9, .Lmalformed_initial_stack
+.Lenvp_terminated:
 
     /* Zero BSS segment (weak boundaries: literal-pool loads tolerate 0) */
     ldr     x0, =__bss_start
@@ -77,6 +95,7 @@ _start:
     mov     x0, x19
     mov     x1, x20
     blr     x9
+    cbnz    x0, .Lstartup_admission_failed
 .Lstartup_before_main_done:
 
     /* Initialize C++ constructors and libc (.init_array) */
@@ -115,6 +134,24 @@ _start:
     wfe
     b       .Lhang
 
+    /* Manifest/startup admission failure has its reserved raw exit status. */
+.Lstartup_admission_failed:
+    mov     x0, #125
+    b       .Lraw_exit
+
+    /*
+     * No libc call is safe before the initial stack has been admitted.
+     * Syscall 0 is the always-authorized SimpleOS process exit operation;
+     * issue it directly so malformed input cannot reach constructors.
+     */
+.Lmalformed_initial_stack:
+    mov     x0, #127
+.Lraw_exit:
+    mov     x8, #0
+    svc     #0
+    wfe
+    b       .Lmalformed_initial_stack
+
 .size _start, . - _start
 
 .weak __bss_start
@@ -130,6 +167,6 @@ _start:
  */
     .bss
     .balign 8
-    .globl environ
+    .weak environ
 environ:
     .quad 0

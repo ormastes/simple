@@ -32,6 +32,7 @@ use std.spec
 val BUILD_SPL = "src/os/port/llvm/build.spl"
 val BUILD_SHS = "src/os/port/llvm/build.shs"
 val SYSROOT_SHS = "src/os/port/llvm/sysroot.shs"
+val AARCH64_SYSROOT_SHS = "scripts/os/simpleos-sysroot-aarch64.shs"
 val RT_CMAKE  = "src/os/port/llvm/compiler_rt_cmake.cmake"
 val TOOLCHAIN_README = "src/os/port/llvm/patches/simpleos_toolchain_cpp/README.md"
 val RAW_OS_OSTREAM_PATCH = "src/os/port/llvm/patches/0005-llvm-support-raw-os-ostream-no-localization.patch.md"
@@ -60,6 +61,7 @@ val FS_C = "src/os/libc/simpleos_fs.c"
 val FORK_C = "src/os/libc/simpleos_fork.c"
 val IPC_C = "src/os/libc/simpleos_ipc.c"
 val CRT0_S = "src/os/libc/simpleos_crt0.S"
+val AARCH64_CRT0_S = "src/os/libc/simpleos_crt0_aarch64.S"
 val PROCESS_WAIT_C = "src/os/libc/simpleos_process_wait.c"
 val STRING_EXT_C = "src/os/libc/simpleos_string_ext.c"
 val MATH_EXT_C = "src/os/libc/simpleos_math_ext.c"
@@ -339,6 +341,47 @@ describe "SimpleOS LLVM per-target build (A4/A5)":
         check(src.contains("_LIBCPP_HAS_WIDE_CHARACTERS 1"))
         check(src.contains("_LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE 1"))
         check(src.contains("_LIBCPP_PSTL_BACKEND_SERIAL"))
+
+    it "AArch64 sysroot uses the canonical bounded argv and envp CRT":
+        val sysroot = sysroot_shs_src()
+        val standalone_sysroot = process.run("cat", [AARCH64_SYSROOT_SHS]).stdout
+        val crt0 = process.run("cat", [AARCH64_CRT0_S]).stdout
+        check(sysroot.contains("$LIBC_DIR/simpleos_crt0_aarch64.S"))
+        check(sysroot.contains("cat > \"$LIBC_BUILD/simpleos_crt0_aarch64.S\"").to_equal(false)
+        check(sysroot.contains("simpleos_libc.c simpleos_cli_args.c"))
+        check(standalone_sysroot.contains("simpleos_libc.c simpleos_cli_args.c"))
+        check(crt0.contains("mov     x22, sp"))
+        check(crt0.contains("mov     x9, #64"))
+        check(crt0.contains(".Lscan_argv:"))
+        check(crt0.contains("ldr     x9, [x11], #8"))
+        check(crt0.contains("cbz     x9, .Lmalformed_initial_stack"))
+        check(crt0.contains("ldr     x9, [x20, x19, lsl #3]"))
+        check(crt0.contains("mov     x10, #128"))
+        check(crt0.contains(".Lmalformed_initial_stack:"))
+        check(crt0.contains("mov     x0, #127"))
+        check(crt0.contains("mov     x8, #0"))
+        check(crt0.contains("svc     #0"))
+        check(crt0.contains("ldr     x0, =environ"))
+        check(crt0.contains("ldr     x9, =rt_set_args"))
+        check(crt0.contains("mov     x2, x21"))
+        check(crt0.contains("cbnz    x0, .Lstartup_admission_failed"))
+        check(crt0.contains("mov     x0, #125"))
+        val args_publish = crt0.find("ldr     x9, =rt_set_args")
+        val startup_admission = crt0.find("ldr     x9, =__simple_startup_before_main")
+        val constructors = crt0.find("bl      __libc_init_array")
+        val module_inits = crt0.find("ldr     x9, =__simple_call_module_inits")
+        val user_main = crt0.find("bl      main")
+        check(args_publish >= 0)
+        check(args_publish < startup_admission)
+        check(startup_admission < constructors)
+        check(constructors < module_inits)
+        check(module_inits < user_main)
+
+    it "canonical AArch64 CRT assembles as an AArch64 ELF object":
+        val script = "set -eu\nTMP=$(mktemp -d /tmp/simpleos-crt0-aarch64.XXXXXX)\nOBJ=\"$TMP/crt0.o\"\ncleanup() { rm -f \"$OBJ\"; rmdir \"$TMP\"; }\ntrap cleanup EXIT\nclang --target=aarch64-unknown-none-elf -ffreestanding -nostdlib -c \"{AARCH64_CRT0_S}\" -o \"$OBJ\"\nreadelf -h \"$OBJ\""
+        val build = process.run("sh", ["-c", script])
+        expect(build.exit_code).to_equal(0)
+        check(build.stdout.contains("Machine:") and build.stdout.contains("AArch64"))
 
     it "LLVM toolchain searches libc++ before C headers":
         # @req: REQ-OS-LLVM_PER_TARGET_BUILD-001

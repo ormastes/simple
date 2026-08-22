@@ -36,7 +36,7 @@ printf '%s\n' "riscv64-unknown-simpleos" > "$SYSROOT/share/simpleos/target-tripl
 
 echo "[sysroot-rv64] Building SimpleOS libc for riscv64..."
 for src in \
-    simpleos_libc.c simpleos_math.c simpleos_math_ext.c simpleos_fs.c \
+    simpleos_libc.c simpleos_cli_args.c simpleos_math.c simpleos_math_ext.c simpleos_fs.c \
     simpleos_pthread.c simpleos_alloc.c simpleos_process.c \
     simpleos_string_ext.c simpleos_stdlib_ext.c \
     simpleos_time.c simpleos_printf_float.c simpleos_cxxabi.c \
@@ -58,10 +58,62 @@ cat > "$LIBC_BUILD/simpleos_crt0_riscv64.S" << 'ASMEOF'
 .global _start
 .type _start, %function
 _start:
+    /* Preserve the process-entry stack before any call or stack alignment. */
+    mv s0, sp
 .option push
 .option norelax
     la gp, __global_pointer$
 .option pop
+
+    /*
+     * Decode the ELF64 initial stack built by stack_builder.spl:
+     *   sp[0] = argc
+     *   sp[1 .. argc] = non-null argv pointers
+     *   sp[argc + 1] = NULL
+     *   sp[argc + 2 ..] = envp
+     *
+     * The kernel admission contract permits at most 64 argv and 128 envp
+     * entries.  The kernel-owned stack builder already enforces those limits,
+     * but crt0 checks both vectors defensively before trusting or publishing
+     * them.  Do not reinterpret an invalid count or unterminated vector as a
+     * different, privileged invocation: malformed entry metadata exits closed.
+     * An inaccessible stack/pointer slot faults the process, which is also
+     * fail-closed; crt0 never dereferences the argument strings themselves.
+     */
+    andi t0, s0, 15
+    bnez t0, .Lmalformed_stack
+    ld s1, 0(s0)                       /* argc */
+    li t0, 64
+    bgtu s1, t0, .Lmalformed_stack
+    addi s2, s0, 8                    /* argv */
+    mv t1, s2
+    mv t2, s1
+.Lvalidate_argv:
+    beqz t2, .Lvalidate_argv_end
+    ld t3, 0(t1)
+    beqz t3, .Lmalformed_stack
+    addi t1, t1, 8
+    addi t2, t2, -1
+    j .Lvalidate_argv
+.Lvalidate_argv_end:
+    ld t3, 0(t1)
+    bnez t3, .Lmalformed_stack
+    addi s3, t1, 8                    /* envp */
+
+    /* envp has no count word: accept at most 128 non-null entries plus NULL. */
+    mv t1, s3
+    li t2, 128
+.Lvalidate_envp:
+    ld t3, 0(t1)
+    beqz t3, .Linitial_stack_valid
+    addi t1, t1, 8
+    addi t2, t2, -1
+    bnez t2, .Lvalidate_envp
+    /* Exactly 128 entries are valid only when the following slot terminates. */
+    ld t3, 0(t1)
+    bnez t3, .Lmalformed_stack
+.Linitial_stack_valid:
+
     la a0, __bss_start
     la a1, __bss_end
     bgeu a0, a1, 1f
@@ -70,17 +122,69 @@ _start:
     addi a0, a0, 1
     bltu a0, a1, 0b
 1:
+    /* Publish POSIX environ before constructors. */
+    la t0, environ
+    sd s3, 0(t0)
+
+    /* Publish argv for SimpleCore when its weak runtime hook is linked. */
+    la t0, rt_set_args
+    beqz t0, .Largs_published
+    mv a0, s1
+    mv a1, s2
+    jalr t0
+.Largs_published:
+
+    /* Admit manifest-aware native artifacts before constructors or user code. */
+    la t0, __simple_startup_before_main
+    beqz t0, .Lstartup_before_main_done
+    mv a0, s1
+    mv a1, s2
+    jalr t0
+    bnez a0, .Lstartup_rejected
+.Lstartup_before_main_done:
+
     call __libc_init_array
-    li a0, 0
-    li a1, 0
-    li a2, 0
+
+    /* Native Simple artifacts may expose module-global initializers. */
+    la t0, __simple_call_module_inits
+    beqz t0, .Lmodule_inits_done
+    jalr t0
+.Lmodule_inits_done:
+
+    mv a0, s1
+    mv a1, s2
+    mv a2, s3
     call main
     call exit
 2:
     j 2b
+
+.Lmalformed_stack:
+    /* Avoid constructors, user code, and libc state on an untrusted frame. */
+    li a0, 127
+    li a7, 0                           /* SIMPLEOS_SYS_EXIT */
+    ecall
+.Lmalformed_hang:
+    j .Lmalformed_hang
+
+.Lstartup_rejected:
+    li a0, 125
+    li a7, 0                           /* SIMPLEOS_SYS_EXIT */
+    ecall
+.Lstartup_rejected_hang:
+    j .Lstartup_rejected_hang
 .size _start, . - _start
 .weak __bss_start
 .weak __bss_end
+.weak rt_set_args
+.weak __simple_call_module_inits
+.weak __simple_startup_before_main
+
+.section .bss
+.balign 8
+.weak environ
+environ:
+    .quad 0
 ASMEOF
 
 cat > "$LIBC_BUILD/simpleos_syscall_riscv64.S" << 'ASMEOF'

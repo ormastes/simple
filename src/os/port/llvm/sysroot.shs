@@ -202,7 +202,7 @@ build_libc_runtime() {
             fi
             CFLAGS="--target=$TRIPLE --sysroot=$SYSROOT -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables -O2 -Wall -Wextra -Wno-unused-parameter -D__simpleos__=1 -I$LIBC_DIR/include"
             for src in \
-                simpleos_libc.c simpleos_math.c simpleos_math_ext.c simpleos_fs.c \
+                simpleos_libc.c simpleos_cli_args.c simpleos_math.c simpleos_math_ext.c simpleos_fs.c \
                 simpleos_pthread.c simpleos_alloc.c simpleos_process.c \
                 simpleos_string_ext.c simpleos_stdlib_ext.c \
                 simpleos_time.c simpleos_printf_float.c simpleos_cxxabi.c \
@@ -218,34 +218,6 @@ build_libc_runtime() {
             do
                 "$CC" $CFLAGS -c "$LIBC_DIR/$src" -o "$LIBC_BUILD/${src%.c}.o"
             done
-            cat > "$LIBC_BUILD/simpleos_crt0_aarch64.S" << 'ASMEOF'
-.section .text
-.global _start
-.type _start, %function
-_start:
-    adrp x0, __bss_start
-    add  x0, x0, :lo12:__bss_start
-    adrp x1, __bss_end
-    add  x1, x1, :lo12:__bss_end
-    cmp  x0, x1
-    b.hs 1f
-0:
-    strb wzr, [x0], #1
-    cmp  x0, x1
-    b.lo 0b
-1:
-    bl __libc_init_array
-    mov x0, #0
-    mov x1, #0
-    mov x2, #0
-    bl main
-    bl exit
-2:
-    b 2b
-.size _start, . - _start
-.weak __bss_start
-.weak __bss_end
-ASMEOF
             cat > "$LIBC_BUILD/simpleos_syscall_aarch64.S" << 'ASMEOF'
 .section .text
 .global simpleos_syscall
@@ -309,7 +281,10 @@ _longjmp:
     b longjmp
 .size _longjmp, . - _longjmp
 ASMEOF
-            "$CC" --target="$TRIPLE" -ffreestanding -nostdlib -c "$LIBC_BUILD/simpleos_crt0_aarch64.S" -o "$LIBC_BUILD/simpleos_crt0.o"
+            # Keep one authoritative AArch64 startup implementation.  The
+            # canonical CRT validates and publishes the kernel-provided
+            # argc/argv/envp stack before constructors or user code execute.
+            "$CC" --target="$TRIPLE" -ffreestanding -nostdlib -c "$LIBC_DIR/simpleos_crt0_aarch64.S" -o "$LIBC_BUILD/simpleos_crt0.o"
             "$CC" --target="$TRIPLE" -ffreestanding -nostdlib -c "$LIBC_BUILD/simpleos_syscall_aarch64.S" -o "$LIBC_BUILD/simpleos_syscall.o"
             "$CC" --target="$TRIPLE" -ffreestanding -nostdlib -c "$LIBC_BUILD/simpleos_setjmp_aarch64.S" -o "$LIBC_BUILD/simpleos_setjmp.o"
             rm -f "$SYSROOT/lib/libsimpleos_c.a"

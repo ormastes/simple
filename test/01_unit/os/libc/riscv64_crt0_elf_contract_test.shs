@@ -1,0 +1,75 @@
+#!/bin/sh
+set -eu
+
+REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../../.." && pwd)
+SOURCE="$REPO_ROOT/scripts/os/simpleos-sysroot-riscv64.shs"
+CC=${CC:-clang}
+READELF=${READELF:-llvm-readelf}
+
+command -v "$CC" >/dev/null 2>&1 || {
+    echo "FAIL: clang-compatible compiler is required" >&2
+    exit 1
+}
+command -v "$READELF" >/dev/null 2>&1 || {
+    echo "FAIL: llvm-readelf is required" >&2
+    exit 1
+}
+
+WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/simpleos-rv64-crt.XXXXXX")
+trap 'rm -rf "$WORK_DIR"' EXIT HUP INT TERM
+ASM="$WORK_DIR/crt0.S"
+OBJ="$WORK_DIR/crt0.o"
+SYMS="$WORK_DIR/symbols.txt"
+RELOCS="$WORK_DIR/relocs.txt"
+
+awk '
+    /simpleos_crt0_riscv64[.]S" << '\''ASMEOF'\''/ { inside = 1; next }
+    inside && /^ASMEOF$/ { exit }
+    inside { print }
+' "$SOURCE" > "$ASM"
+test -s "$ASM" || { echo "FAIL: RV64 CRT heredoc was not extracted" >&2; exit 1; }
+
+"$CC" --target=riscv64-unknown-none-elf -march=rv64gc -mabi=lp64d \
+    -ffreestanding -nostdlib -x assembler -c "$ASM" -o "$OBJ"
+"$READELF" --symbols "$OBJ" > "$SYMS"
+"$READELF" --relocations "$OBJ" > "$RELOCS"
+
+for symbol in _start environ rt_set_args __simple_startup_before_main \
+              __simple_call_module_inits main __libc_init_array
+do
+    grep -q " $symbol$" "$SYMS" || {
+        echo "FAIL: missing RV64 CRT symbol: $symbol" >&2
+        exit 1
+    }
+done
+grep -q 'WEAK.*__simple_startup_before_main$' "$SYMS" || {
+    echo "FAIL: startup admission hook is not weak" >&2
+    exit 1
+}
+grep -q '__simple_startup_before_main' "$RELOCS" || {
+    echo "FAIL: startup admission hook has no relocation" >&2
+    exit 1
+}
+
+awk '
+    /la t0, rt_set_args/ { publish = NR }
+    /la t0, __simple_startup_before_main/ { startup = NR }
+    /call __libc_init_array/ { constructors = NR }
+    /la t0, __simple_call_module_inits/ { modules = NR }
+    /call main/ { usermain = NR }
+    END {
+        if (!(publish < startup && startup < constructors &&
+              constructors < modules && modules < usermain)) exit 1
+    }
+' "$ASM" || { echo "FAIL: CRT startup ordering changed" >&2; exit 1; }
+
+grep -q 'bnez a0, .Lstartup_rejected' "$ASM" || {
+    echo "FAIL: startup rejection result is ignored" >&2
+    exit 1
+}
+grep -q 'li a0, 125' "$ASM" || {
+    echo "FAIL: startup rejection status is missing" >&2
+    exit 1
+}
+
+echo "PASS: RV64 CRT argv/envp ELF contract"
