@@ -248,8 +248,8 @@ fn _check_closure_capture_text(lines: [text], file: text, format: text) -> i64:
         if (trimmed.starts_with("fn ") or trimmed.starts_with("me ")):
             val fn_indent = _count_indent(line)
             if fn_indent > 0:
-                var outer_vars: [text] = []
-                _collect_outer_vars_clos(lines, clos_i, fn_indent, outer_vars)
+                val outer_vars = _collect_outer_var_counts_clos(
+                    lines, clos_i, fn_indent)
                 var body_start = clos_i + 1
                 while body_start < lines.len():
                     val bline = lines[body_start]
@@ -260,20 +260,26 @@ fn _check_closure_capture_text(lines: [text], file: text, format: text) -> i64:
                     val bindent = _count_indent(bline)
                     if bindent <= fn_indent:
                         break
-                    for ovar in outer_vars:
-                        if _is_assign_to_clos(bt, ovar):
+                    val assigned = _closure_assignment_target(bt)
+                    if assigned != "" and outer_vars.has(assigned):
+                        var occurrence = 0
+                        while occurrence < outer_vars[assigned]:
                             val bline_num = body_start + 1
                             if format == "json":
-                                _diag_emit_or_collect("{\"severity\":2,\"code\":\"CLOS001\",\"message\":\"closure modifies outer variable '{ovar}' — changes won't persist (capture-by-value)\",\"line\":{bline_num},\"col\":1,\"end_line\":{bline_num},\"end_col\":{bt.len()},\"tags\":[],\"source\":\"simple-lint\"}")
+                                _diag_emit_or_collect("{\"severity\":2,\"code\":\"CLOS001\",\"message\":\"closure modifies outer variable '{assigned}' — changes won't persist (capture-by-value)\",\"line\":{bline_num},\"col\":1,\"end_line\":{bline_num},\"end_col\":{bt.len()},\"tags\":[],\"source\":\"simple-lint\"}")
                             else:
-                                print "{file}:{bline_num}: warning[CLOS001]: closure modifies outer variable '{ovar}'"
+                                print "{file}:{bline_num}: warning[CLOS001]: closure modifies outer variable '{assigned}'"
                             count = count + 1
+                            occurrence = occurrence + 1
                     body_start = body_start + 1
         clos_i = clos_i + 1
     count
 
-fn _collect_outer_vars_clos(lines: [text], fn_line: i64, fn_indent: i64, vars: [text]):
-    """Collect var declarations from the enclosing scope above fn_line."""
+fn _collect_outer_var_counts_clos(
+    lines: [text], fn_line: i64, fn_indent: i64
+) -> Dict<text, i64>:
+    """Collect outer declaration multiplicities without a growing COW array."""
+    var vars: Dict<text, i64> = {}
     var si = fn_line - 1
     while si >= 0:
         val sline = lines[si]
@@ -287,20 +293,29 @@ fn _collect_outer_vars_clos(lines: [text], fn_line: i64, fn_indent: i64, vars: [
         if st.starts_with("var ") and sindent <= fn_indent:
             val var_name = _extract_decl_name(st.substring(4))
             if var_name != "":
-                vars.push(var_name)
+                vars[var_name] = (vars[var_name] ?? 0) + 1
         si = si - 1
+    vars
 
-fn _is_assign_to_clos(trimmed: text, var_name: text) -> bool:
-    """Check if a trimmed line assigns to the given variable name."""
-    if trimmed.starts_with(var_name):
-        val after = trimmed.substring(var_name.len())
-        val at = after.trim()
-        if at.starts_with("= ") or at.starts_with("=\t") or at == "=":
-            return true
-        if (at.starts_with("+= ") or at.starts_with("-= ") or
-            at.starts_with("*= ") or at.starts_with("/= ")):
-            return true
-    false
+fn _closure_assignment_target(trimmed: text) -> text:
+    """Extract the leading identifier only when the line assigns to it."""
+    var end = 0
+    while end < trimmed.len():
+        val character = trimmed.substring(end, end + 1)
+        val is_identifier = (character >= "a" and character <= "z") or
+            (character >= "A" and character <= "Z") or
+            (character >= "0" and character <= "9") or character == "_"
+        if not is_identifier: break
+        end = end + 1
+    if end == 0: return ""
+    val target = trimmed.substring(0, end)
+    val operator = trimmed.substring(end).trim()
+    if (operator.starts_with("= ") or operator.starts_with("=\t") or
+        operator == "=" or operator.starts_with("+= ") or
+        operator.starts_with("-= ") or operator.starts_with("*= ") or
+        operator.starts_with("/= ")):
+        return target
+    ""
 
 # ============================================================================
 # RET001: Ignored function return value (text-based heuristic)
