@@ -139,3 +139,10 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
   owners without changing their order or predicates.
 - Pin the normal call graph to line variants.
 - Follow-up: extend the shared view through EasyFix registry owners and traceability rules.
+
+## Completed tool tranche: quality-check line view
+
+- Pass canonical lines to feature tracking, SPipe quality, and raw typed-UI checks.
+- Remove five rule-local source splits without changing rule order or locations.
+- Pin the normal call graph and forbid regression to content-taking method signatures.
+- Follow-up: extend the shared view through EasyFix registry owners.
