@@ -13,3 +13,12 @@ Pre-existing diverged-offender list (858 entries) preserved at
 /mnt/data/tmp/test_tree_divergence_preexisting.txt and identical to the
 committed baseline scripts/check/test_tree_divergence_baseline.txt
 (854) plus 4 category offenders. No new divergence introduced.
+
+## Wave-6 mod11 landing (2026-08-22)
+
+Step-over (delta-PASS, 4 pre-existing offenders, none introduced by this range,
+all already diverged at base 106dc4df58e):
+- unit:app/llm_caret/agent_runtime_provider_spec.spl
+- unit:compiler/hir/reexport_physical_cache_spec.spl
+- unit:compiler/hir/resolve_import_symbols_spec.spl
+- unit:compiler/semantics/collection_patterns_lint_spec.spl
