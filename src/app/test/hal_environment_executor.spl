@@ -1,0 +1,101 @@
+# codex-impl
+# Hosted physical executor adapter. All process access stays behind app.io.
+
+use app.io.{env_get, process_is_alive}
+use std.common.structural.environment_instruction.*
+
+class HostedProcessPollEnvExecutorV1:
+    sealed: bool
+
+class HostedPreparedEnvironmentGetExecutorV1:
+    key_bytes: [u8]
+    value_bytes: [u8]
+    captured_from_host: bool
+    sealed: bool
+
+fn _env_text_bytes(value: text) -> [u8]:
+    var bytes: [u8] = [0u8; value.len()]
+    var i = 0
+    while i < value.len():
+        bytes[i] = value.char_code_at(i) as u8
+        i = i + 1
+    bytes
+
+fn _env_text_byte_safe(value: text) -> bool:
+    var i = 0
+    while i < value.len():
+        val code = value.char_code_at(i)
+        if code < 0 or code > 255:
+            return false
+        i = i + 1
+    true
+
+fn hosted_prepare_environment_get_v1(key: text) -> HostedPreparedEnvironmentGetExecutorV1:
+    val value = env_get(key)
+    HostedPreparedEnvironmentGetExecutorV1(
+        key_bytes: _env_text_bytes(key), value_bytes: _env_text_bytes(value),
+        captured_from_host: _env_text_byte_safe(key) and _env_text_byte_safe(value),
+        sealed: true)
+
+fn _env_read_i64_le(data: [u8], offset: i64) -> i64:
+    var value = 0
+    var i = 0
+    while i < 8:
+        value = value | ((data[offset + i] as i64) << (i * 8))
+        i = i + 1
+    value
+
+impl EnvPhysicalExecutorPortV1 for HostedProcessPollEnvExecutorV1:
+    fn execute(policy: EnvExecutorPolicyV1, instruction: EnvInstructionV1,
+               argument_bytes: [u8], result_bytes: [u8]) -> EnvExecutionReceiptV1:
+        val validation = env_executor_validate_instruction(
+            policy, instruction, argument_bytes, result_bytes)
+        if env_instruction_status_to_i64(validation)
+                != env_instruction_status_to_i64(EnvInstructionStatusV1.Planned):
+            return env_execution_rejected_v1(instruction, validation)
+        if not self.sealed or instruction.opcode != EnvOpcodeV1.ProcessPoll:
+            return env_execution_rejected_v1(
+                instruction, EnvInstructionStatusV1.UnsupportedCapability)
+        if instruction.argument_length != 8 or instruction.result_capacity < 1:
+            return env_execution_rejected_v1(
+                instruction, EnvInstructionStatusV1.InvalidInstruction)
+        val process_id = _env_read_i64_le(
+            argument_bytes, instruction.argument_offset)
+        result_bytes[instruction.result_offset] =
+            if process_is_alive(process_id): 1u8 else: 0u8
+        env_execution_record_applied_v1(
+            instruction, argument_bytes, result_bytes, 1, true, 0)
+
+impl EnvPhysicalExecutorPortV1 for HostedPreparedEnvironmentGetExecutorV1:
+    fn execute(policy: EnvExecutorPolicyV1, instruction: EnvInstructionV1,
+               argument_bytes: [u8], result_bytes: [u8]) -> EnvExecutionReceiptV1:
+        val validation = env_executor_validate_instruction(
+            policy, instruction, argument_bytes, result_bytes)
+        if env_instruction_status_to_i64(validation)
+                != env_instruction_status_to_i64(EnvInstructionStatusV1.Planned):
+            return env_execution_rejected_v1(instruction, validation)
+        if not self.sealed or not self.captured_from_host
+                or instruction.opcode != EnvOpcodeV1.EnvironmentGet:
+            return env_execution_rejected_v1(
+                instruction, EnvInstructionStatusV1.UnsupportedCapability)
+        if instruction.argument_length != self.key_bytes.len()
+                or self.value_bytes.len() > instruction.result_capacity:
+            return env_execution_rejected_v1(
+                instruction, EnvInstructionStatusV1.InvalidInstruction)
+        var i = 0
+        while i < self.key_bytes.len():
+            if argument_bytes[instruction.argument_offset + i] != self.key_bytes[i]:
+                return env_execution_rejected_v1(
+                    instruction, EnvInstructionStatusV1.Diverged)
+            i = i + 1
+        i = 0
+        while i < self.value_bytes.len():
+            result_bytes[instruction.result_offset + i] = self.value_bytes[i]
+            i = i + 1
+        env_execution_record_applied_v1(
+            instruction, argument_bytes, result_bytes,
+            self.value_bytes.len(), true, 0)
+
+export HostedProcessPollEnvExecutorV1
+export HostedPreparedEnvironmentGetExecutorV1
+export hosted_prepare_environment_get_v1

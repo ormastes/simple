@@ -1,0 +1,82 @@
+# @feature mcdc_hal_runtime_hardening
+# @req REQ-011 REQ-016 REQ-017
+
+use std.spec.*
+use app.io.{getpid}
+use app.test.hal_environment_executor.{
+    HostedProcessPollEnvExecutorV1, hosted_prepare_environment_get_v1
+}
+use std.common.structural.environment_instruction.*
+
+fn put_i64_le(out: [u8], value: i64):
+    var i = 0
+    while i < 8:
+        out[i] = ((value >> (i * 8)) & 255) as u8
+        i = i + 1
+
+fn ascii_bytes(value: text) -> [u8]:
+    var out: [u8] = [0u8; value.len()]
+    var i = 0
+    while i < value.len():
+        out[i] = value.char_code_at(i) as u8
+        i = i + 1
+    out
+
+describe "hosted physical environment executor":
+    it "polls the current process through the canonical process facade":
+        val executor = HostedProcessPollEnvExecutorV1(sealed: true)
+        val operation = env_instruction_v1(
+            29, 0, EnvOpcodeV1.ProcessPoll, 7, 0,
+            0, 8, 8, 0, 1, 1)
+        val policy = env_executor_policy_v1(
+            env_opcode_mask_v1(EnvOpcodeV1.ProcessPoll), 1 << 7,
+            0, env_opcode_mask_v1(EnvOpcodeV1.ProcessPoll),
+            false, true, true)
+        var arguments: [u8] = [0u8; 8]
+        var results: [u8] = [0u8; 1]
+        put_i64_le(arguments, getpid())
+
+        val receipt = executor.execute(policy, operation, arguments, results)
+
+        expect(receipt.applied).to_be(true)
+        expect(receipt.physical_effect).to_be(true)
+        expect(receipt.allocation_count_after_seal).to_equal(0)
+        expect(results[0]).to_equal(1u8)
+
+    it "captures ambient environment once before seal and serves bytes without reread":
+        val executor = hosted_prepare_environment_get_v1("PATH")
+        val key = ascii_bytes("PATH")
+        val result_capacity = executor.value_bytes.len()
+        val operation = env_instruction_v1(
+            31, 0, EnvOpcodeV1.EnvironmentGet, 8, 0,
+            0, key.len(), key.len(), 0, result_capacity, result_capacity)
+        val policy = env_executor_policy_v1(
+            env_opcode_mask_v1(EnvOpcodeV1.EnvironmentGet), 1 << 8,
+            0, env_opcode_mask_v1(EnvOpcodeV1.EnvironmentGet),
+            false, true, true)
+        var results: [u8] = [0u8; result_capacity]
+
+        val receipt = executor.execute(policy, operation, key, results)
+
+        expect(receipt.applied).to_be(true)
+        expect(receipt.physical_effect).to_be(true)
+        expect(receipt.allocation_count_after_seal).to_equal(0)
+        expect(receipt.observation.bytes_length).to_equal(result_capacity)
+
+    it "fails closed for unsupported physical opcodes before any effect":
+        val executor = HostedProcessPollEnvExecutorV1(sealed: true)
+        val operation = env_instruction_v1(
+            29, 0, EnvOpcodeV1.EnvironmentGet, 7, 0,
+            0, 8, 8, 0, 1, 1)
+        val policy = env_executor_policy_v1(
+            env_opcode_mask_v1(EnvOpcodeV1.EnvironmentGet), 1 << 7,
+            0, 0, false, false, true)
+        val arguments: [u8] = [0u8; 8]
+        var results: [u8] = [9u8; 1]
+
+        val receipt = executor.execute(policy, operation, arguments, results)
+
+        expect(receipt.applied).to_be(false)
+        expect(env_instruction_status_to_i64(receipt.observation.status)).to_equal(
+            env_instruction_status_to_i64(EnvInstructionStatusV1.UnsupportedCapability))
+        expect(results[0]).to_equal(9u8)

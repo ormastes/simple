@@ -1,0 +1,95 @@
+# @feature mcdc_hal_runtime_hardening
+# @req REQ-011 REQ-016 REQ-017
+
+use std.spec.*
+use std.common.structural.environment_instruction.*
+
+fn policy(allow_unsafe: bool = false) -> EnvExecutorPolicyV1:
+    env_executor_policy_v1(16777215, 1 << 21,
+        env_opcode_mask_v1(EnvOpcodeV1.FileWrite)
+            | env_opcode_mask_v1(EnvOpcodeV1.ProcessKill)
+            | env_opcode_mask_v1(EnvOpcodeV1.MmioWrite),
+        env_opcode_mask_v1(EnvOpcodeV1.ClockRead)
+            | env_opcode_mask_v1(EnvOpcodeV1.RandomFill),
+        allow_unsafe, false, true)
+
+fn instruction(opcode: EnvOpcodeV1, result_capacity: i64 = 4) -> EnvInstructionV1:
+    env_instruction_v1(17, 0, opcode, 21, 0,
+                       0, 2, 8, 4, result_capacity, 16)
+
+describe "bounded environment executor":
+    it "copies a sandbox fixture into caller-owned result storage":
+        val executor = EnvSandboxExecutorV1(
+            fixture_bytes: [10u8, 11u8, 12u8, 13u8],
+            fixture_offset: 1, fixture_length: 2, sealed: true)
+        val arguments: [u8] = [1u8, 2u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]
+        var results: [u8] = [0u8; 16]
+        val receipt = executor.execute(
+            policy(), instruction(EnvOpcodeV1.FileRead), arguments, results)
+
+        expect(receipt.applied).to_be(true)
+        expect(receipt.physical_effect).to_be(false)
+        expect(receipt.allocation_count_after_seal).to_equal(0)
+        expect(receipt.observation.bytes_length).to_equal(2)
+        expect(results[4]).to_equal(11u8)
+        expect(results[5]).to_equal(12u8)
+
+    it "validates capability and safety policy before touching storage":
+        val executor = EnvSandboxExecutorV1(
+            fixture_bytes: [9u8], fixture_offset: 0,
+            fixture_length: 1, sealed: true)
+        val arguments: [u8] = [0u8; 8]
+        var results: [u8] = [7u8; 16]
+        val unsafe = executor.execute(
+            policy(), instruction(EnvOpcodeV1.FileWrite), arguments, results)
+        val absent_capability = env_executor_policy_v1(
+            16777215, 1 << 20, 0, 0, false, false, true)
+        val unsupported = executor.execute(
+            absent_capability, instruction(EnvOpcodeV1.FileRead),
+            arguments, results)
+
+        expect(unsafe.applied).to_be(false)
+        expect(env_instruction_status_to_i64(unsafe.observation.status)).to_equal(
+            env_instruction_status_to_i64(EnvInstructionStatusV1.UnsafeInstruction))
+        expect(unsupported.applied).to_be(false)
+        expect(env_instruction_status_to_i64(unsupported.observation.status)).to_equal(
+            env_instruction_status_to_i64(EnvInstructionStatusV1.UnsupportedCapability))
+        expect(results[4]).to_equal(7u8)
+
+    it "replays exact recorded bytes without performing the effect again":
+        val executor = EnvSandboxExecutorV1(
+            fixture_bytes: [31u8, 32u8], fixture_offset: 0,
+            fixture_length: 2, sealed: true)
+        val planned = instruction(EnvOpcodeV1.FileRead)
+        val arguments: [u8] = [1u8, 2u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]
+        var recorded_results: [u8] = [0u8; 16]
+        var replay_results: [u8] = [0u8; 16]
+        val applied = executor.execute(
+            policy(), planned, arguments, recorded_results)
+        val replay = env_replay_exact_v1(
+            planned, planned, applied.observation,
+            arguments, recorded_results, replay_results)
+
+        expect(replay.applied).to_be(true)
+        expect(replay.physical_effect).to_be(false)
+        expect(env_replay_observations_equivalent(
+            applied.observation, replay.observation)).to_be(true)
+        expect(replay_results[4]).to_equal(31u8)
+        expect(replay_results[5]).to_equal(32u8)
+
+    it "rejects changed replay instructions and undersized buffers":
+        val arguments: [u8] = [0u8; 8]
+        var too_small: [u8] = [0u8; 8]
+        val overflow = env_executor_validate_instruction(
+            policy(), instruction(EnvOpcodeV1.FileRead), arguments, too_small)
+        val recorded = env_observation_v1(
+            17, 0, EnvInstructionStatusV1.Applied, 0, 0, 4, 1, 2)
+        val changed = instruction(EnvOpcodeV1.FileWrite)
+        val divergence = env_replay_exact_v1(
+            instruction(EnvOpcodeV1.FileRead), changed, recorded,
+            arguments, too_small, too_small)
+
+        expect(env_instruction_status_to_i64(overflow)).to_equal(
+            env_instruction_status_to_i64(EnvInstructionStatusV1.Overflow))
+        expect(env_instruction_status_to_i64(divergence.observation.status)).to_equal(
+            env_instruction_status_to_i64(EnvInstructionStatusV1.Diverged))

@@ -1,0 +1,251 @@
+# codex-impl
+# Bounded parent-owned execution interface and exact byte replay.
+
+use std.common.structural.environment_instruction.contracts.*
+use std.common.structural.environment_instruction.extraction.{env_instructions_equivalent}
+
+val ENV_EXEC_ERROR_INVALID: i64 = 1
+val ENV_EXEC_ERROR_CAPABILITY: i64 = 2
+val ENV_EXEC_ERROR_UNSAFE: i64 = 3
+val ENV_EXEC_ERROR_OVERFLOW: i64 = 4
+val ENV_EXEC_ERROR_DIVERGED: i64 = 5
+
+struct EnvExecutorPolicyV1:
+    allowed_opcode_mask: i64
+    available_capability_mask: i64
+    unsafe_opcode_mask: i64
+    nondeterministic_opcode_mask: i64
+    allow_unsafe: bool
+    allow_nondeterministic_capture: bool
+    sealed: bool
+
+fn env_executor_policy_v1(allowed_opcode_mask: i64,
+                          available_capability_mask: i64,
+                          unsafe_opcode_mask: i64,
+                          nondeterministic_opcode_mask: i64,
+                          allow_unsafe: bool,
+                          allow_nondeterministic_capture: bool,
+                          sealed: bool) -> EnvExecutorPolicyV1:
+    EnvExecutorPolicyV1(allowed_opcode_mask: allowed_opcode_mask,
+        available_capability_mask: available_capability_mask,
+        unsafe_opcode_mask: unsafe_opcode_mask,
+        nondeterministic_opcode_mask: nondeterministic_opcode_mask,
+        allow_unsafe: allow_unsafe,
+        allow_nondeterministic_capture: allow_nondeterministic_capture,
+        sealed: sealed)
+
+fn env_opcode_mask_v1(opcode: EnvOpcodeV1) -> i64:
+    1 << env_opcode_to_i64(opcode)
+
+fn env_capability_mask_v1(capability_id: i64) -> i64:
+    if capability_id <= 0 or capability_id >= 63:
+        return 0
+    1 << capability_id
+
+fn env_executor_policy_v1_well_formed(value: EnvExecutorPolicyV1) -> bool:
+    value.allowed_opcode_mask > 0 and value.available_capability_mask > 0
+        and value.unsafe_opcode_mask >= 0
+        and value.nondeterministic_opcode_mask >= 0 and value.sealed
+
+fn env_executor_validate_instruction(policy: EnvExecutorPolicyV1,
+                                     instruction: EnvInstructionV1,
+                                     argument_bytes: [u8],
+                                     result_bytes: [u8]) -> EnvInstructionStatusV1:
+    if not env_executor_policy_v1_well_formed(policy):
+        return EnvInstructionStatusV1.InvalidInstruction
+    if not env_instruction_v1_well_formed(instruction):
+        return EnvInstructionStatusV1.InvalidInstruction
+    if instruction.argument_capacity > argument_bytes.len()
+            or instruction.result_region_capacity > result_bytes.len():
+        return EnvInstructionStatusV1.Overflow
+    val opcode_mask = env_opcode_mask_v1(instruction.opcode)
+    if (policy.allowed_opcode_mask & opcode_mask) == 0:
+        return EnvInstructionStatusV1.UnsupportedCapability
+    val capability_mask = env_capability_mask_v1(instruction.capability_id)
+    if capability_mask == 0
+            or (policy.available_capability_mask & capability_mask) == 0:
+        return EnvInstructionStatusV1.UnsupportedCapability
+    if (policy.unsafe_opcode_mask & opcode_mask) != 0 and not policy.allow_unsafe:
+        return EnvInstructionStatusV1.UnsafeInstruction
+    if (policy.nondeterministic_opcode_mask & opcode_mask) != 0
+            and not policy.allow_nondeterministic_capture:
+        return EnvInstructionStatusV1.UnsafeInstruction
+    EnvInstructionStatusV1.Planned
+
+fn _env_execution_status_code(status: EnvInstructionStatusV1) -> i64:
+    if env_instruction_status_to_i64(status)
+            == env_instruction_status_to_i64(EnvInstructionStatusV1.UnsupportedCapability):
+        return ENV_EXEC_ERROR_CAPABILITY
+    if env_instruction_status_to_i64(status)
+            == env_instruction_status_to_i64(EnvInstructionStatusV1.UnsafeInstruction):
+        return ENV_EXEC_ERROR_UNSAFE
+    if env_instruction_status_to_i64(status)
+            == env_instruction_status_to_i64(EnvInstructionStatusV1.Overflow):
+        return ENV_EXEC_ERROR_OVERFLOW
+    if env_instruction_status_to_i64(status)
+            == env_instruction_status_to_i64(EnvInstructionStatusV1.Diverged):
+        return ENV_EXEC_ERROR_DIVERGED
+    ENV_EXEC_ERROR_INVALID
+
+fn _env_execution_digest_lane(state: i64, value: i64) -> i64:
+    ((state * 257 + (value % 2147483629) + 17) % 2147483629) + 1
+
+fn _env_execution_digest(instruction: EnvInstructionV1,
+                         argument_bytes: [u8], result_bytes: [u8],
+                         result_length: i64, reverse: bool) -> i64:
+    var digest = if reverse: 216613626 else: 146959810
+    digest = _env_execution_digest_lane(digest, instruction.invocation_id)
+    digest = _env_execution_digest_lane(digest, instruction.sequence)
+    digest = _env_execution_digest_lane(digest,
+                                         env_opcode_to_i64(instruction.opcode))
+    digest = _env_execution_digest_lane(digest, instruction.capability_id)
+    digest = _env_execution_digest_lane(digest, instruction.flags)
+    digest = _env_execution_digest_lane(digest, instruction.argument_offset)
+    digest = _env_execution_digest_lane(digest, instruction.argument_length)
+    digest = _env_execution_digest_lane(digest, instruction.argument_capacity)
+    digest = _env_execution_digest_lane(digest, instruction.result_offset)
+    digest = _env_execution_digest_lane(digest, instruction.result_capacity)
+    digest = _env_execution_digest_lane(
+        digest, instruction.result_region_capacity)
+    var i = 0
+    while i < instruction.argument_length:
+        val index = if reverse:
+            instruction.argument_offset + instruction.argument_length - 1 - i
+        else:
+            instruction.argument_offset + i
+        digest = _env_execution_digest_lane(digest, argument_bytes[index])
+        i = i + 1
+    i = 0
+    while i < result_length:
+        val index = if reverse:
+            instruction.result_offset + result_length - 1 - i
+        else:
+            instruction.result_offset + i
+        digest = _env_execution_digest_lane(digest, result_bytes[index])
+        i = i + 1
+    digest
+
+struct EnvExecutionReceiptV1:
+    observation: EnvObservationV1
+    applied: bool
+    physical_effect: bool
+    allocation_count_after_seal: i64
+
+fn env_execution_rejected_v1(instruction: EnvInstructionV1,
+                             status: EnvInstructionStatusV1) -> EnvExecutionReceiptV1:
+    EnvExecutionReceiptV1(observation: env_observation_v1(
+        instruction.invocation_id, instruction.sequence, status,
+        _env_execution_status_code(status), 0, instruction.result_capacity, 0, 0),
+        applied: false, physical_effect: false, allocation_count_after_seal: 0)
+
+fn env_execution_record_applied_v1(instruction: EnvInstructionV1,
+                                   argument_bytes: [u8], result_bytes: [u8],
+                                   result_length: i64,
+                                   physical_effect: bool,
+                                   allocation_count_after_seal: i64) -> EnvExecutionReceiptV1:
+    if not env_instruction_v1_well_formed(instruction)
+            or instruction.argument_capacity > argument_bytes.len()
+            or instruction.result_region_capacity > result_bytes.len():
+        return env_execution_rejected_v1(
+            instruction, EnvInstructionStatusV1.InvalidInstruction)
+    if result_length < 0 or result_length > instruction.result_capacity:
+        return env_execution_rejected_v1(instruction,
+                                         EnvInstructionStatusV1.Overflow)
+    val digest_hi = _env_execution_digest(
+        instruction, argument_bytes, result_bytes, result_length, false)
+    val digest_lo = _env_execution_digest(
+        instruction, argument_bytes, result_bytes, result_length, true)
+    EnvExecutionReceiptV1(observation: env_observation_v1(
+        instruction.invocation_id, instruction.sequence,
+        EnvInstructionStatusV1.Applied, 0, result_length,
+        instruction.result_capacity, digest_hi, digest_lo),
+        applied: true, physical_effect: physical_effect,
+        allocation_count_after_seal: allocation_count_after_seal)
+
+trait EnvPhysicalExecutorPortV1:
+    fn execute(policy: EnvExecutorPolicyV1, instruction: EnvInstructionV1,
+               argument_bytes: [u8], result_bytes: [u8]) -> EnvExecutionReceiptV1
+
+class EnvSandboxExecutorV1:
+    fixture_bytes: [u8]
+    fixture_offset: i64
+    fixture_length: i64
+    sealed: bool
+
+impl EnvPhysicalExecutorPortV1 for EnvSandboxExecutorV1:
+    fn execute(policy: EnvExecutorPolicyV1, instruction: EnvInstructionV1,
+               argument_bytes: [u8], result_bytes: [u8]) -> EnvExecutionReceiptV1:
+        val validation = env_executor_validate_instruction(
+            policy, instruction, argument_bytes, result_bytes)
+        if env_instruction_status_to_i64(validation)
+                != env_instruction_status_to_i64(EnvInstructionStatusV1.Planned):
+            return env_execution_rejected_v1(instruction, validation)
+        if not self.sealed or self.fixture_offset < 0 or self.fixture_length < 0:
+            return env_execution_rejected_v1(
+                instruction, EnvInstructionStatusV1.InvalidInstruction)
+        if self.fixture_offset > self.fixture_bytes.len() - self.fixture_length:
+            return env_execution_rejected_v1(
+                instruction, EnvInstructionStatusV1.InvalidInstruction)
+        if self.fixture_length > instruction.result_capacity:
+            return env_execution_rejected_v1(
+                instruction, EnvInstructionStatusV1.Overflow)
+        var i = 0
+        while i < self.fixture_length:
+            result_bytes[instruction.result_offset + i] =
+                self.fixture_bytes[self.fixture_offset + i]
+            i = i + 1
+        env_execution_record_applied_v1(
+            instruction, argument_bytes, result_bytes,
+            self.fixture_length, false, 0)
+
+fn env_replay_exact_v1(recorded_instruction: EnvInstructionV1,
+                       replay_instruction: EnvInstructionV1,
+                       recorded: EnvObservationV1,
+                       argument_bytes: [u8],
+                       recorded_result_bytes: [u8],
+                       replay_result_bytes: [u8]) -> EnvExecutionReceiptV1:
+    if not env_instructions_equivalent(recorded_instruction,
+                                       replay_instruction):
+        return env_execution_rejected_v1(
+            replay_instruction, EnvInstructionStatusV1.Diverged)
+    if not env_observation_matches(recorded_instruction, recorded):
+        return env_execution_rejected_v1(
+            replay_instruction, EnvInstructionStatusV1.Diverged)
+    if recorded.bytes_length > replay_instruction.result_capacity
+            or recorded_instruction.argument_capacity > argument_bytes.len()
+            or recorded_instruction.result_region_capacity
+                > recorded_result_bytes.len()
+            or replay_instruction.result_region_capacity
+                > replay_result_bytes.len():
+        return env_execution_rejected_v1(
+            replay_instruction, EnvInstructionStatusV1.Overflow)
+    val recorded_digest_hi = _env_execution_digest(
+        recorded_instruction, argument_bytes, recorded_result_bytes,
+        recorded.bytes_length, false)
+    val recorded_digest_lo = _env_execution_digest(
+        recorded_instruction, argument_bytes, recorded_result_bytes,
+        recorded.bytes_length, true)
+    if recorded.interaction_digest_hi != recorded_digest_hi
+            or recorded.interaction_digest_lo != recorded_digest_lo:
+        return env_execution_rejected_v1(
+            replay_instruction, EnvInstructionStatusV1.Diverged)
+    var i = 0
+    while i < recorded.bytes_length:
+        replay_result_bytes[replay_instruction.result_offset + i] =
+            recorded_result_bytes[recorded_instruction.result_offset + i]
+        i = i + 1
+    EnvExecutionReceiptV1(observation: env_observation_v1(
+        replay_instruction.invocation_id, replay_instruction.sequence,
+        EnvInstructionStatusV1.Replayed, 0, recorded.bytes_length,
+        replay_instruction.result_capacity, recorded.interaction_digest_hi,
+        recorded.interaction_digest_lo), applied: true, physical_effect: false,
+        allocation_count_after_seal: 0)
+
+export ENV_EXEC_ERROR_INVALID, ENV_EXEC_ERROR_CAPABILITY, ENV_EXEC_ERROR_UNSAFE
+export ENV_EXEC_ERROR_OVERFLOW, ENV_EXEC_ERROR_DIVERGED
+export EnvExecutorPolicyV1, EnvExecutionReceiptV1, EnvPhysicalExecutorPortV1
+export env_executor_policy_v1, env_executor_policy_v1_well_formed
+export env_opcode_mask_v1, env_capability_mask_v1
+export env_executor_validate_instruction
+export env_execution_rejected_v1, env_execution_record_applied_v1
+export EnvSandboxExecutorV1, env_replay_exact_v1
