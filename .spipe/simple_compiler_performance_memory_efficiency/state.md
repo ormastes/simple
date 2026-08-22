@@ -1,0 +1,58 @@
+# Feature: Simple Compiler Performance and Memory Efficiency Hardening
+
+## Raw Request
+`$sp_dev make deep design update and plan creations. do pherallel agents. update compiler and lint warnung error system and harden in simple. remove perf and mem bug from simple and tools. simple_compiler_performance_memory_efficiency_audit.md`
+
+## Task Type
+code-quality
+
+## Refined Goal
+Make Simple's optimizer activation, performance diagnostics, shared MIR analysis, compiler/tool hot paths, and memory-efficiency behavior truthful, semantics-preserving, measurable, and production-hardened through one staged pure-Simple design and implementation program derived from `simple_compiler_performance_memory_efficiency_audit.md`.
+
+## Acceptance Criteria
+- AC-1: The supplied audit is retained at `doc/01_research/local/simple_compiler_performance_memory_efficiency_audit.md`, is bound to commit `37bd406e219cc35cae049b4130f5167c21801864`, distinguishes observed facts from derived risks and measurement-required claims, and is extended rather than overwritten by later research.
+- AC-2: Local and domain research identify the current optimizer registry/dispatch truth table, lint diagnostic model, shared/repeated compiler analyses, compiler and tool hot paths, existing performance evidence, and relevant external compiler precedents; feature and NFR option documents give 2-4 selectable options with pros, cons, effort, correctness policy, compile-time overhead targets, runtime targets, and memory targets, and no final requirements are written until the user selects them.
+- AC-3: The effective optimizer pipeline represents every registered pass with structural `PassStatus` and `PassExpectation` semantics (or selected equivalent names), excludes or explicitly labels non-operational transforms, reports requested versus effective pipelines, and has a fail-closed compiler self-check that detects an active identity transform or empty active module transform.
+- AC-4: Every transformation activated by this lane has a positive sentinel, negative legality cases, semantic differential evidence, idempotence evidence, and adversarial coverage for applicable overflow, floating-point, traps, zero-trip loops, dominance, aliasing, exceptional control flow, unsafe pointers, and target/backend behavior; unsafe or incomplete passes remain explicitly disabled, skeleton, analysis-only, or remark-only.
+- AC-5: A cached `PerfFacts` service (or selected equivalent) owns reusable CFG predecessor/successor data, reverse-postorder, dominators/post-dominators, loop forest, def-use, induction/range facts, region alias/effect facts, and MemorySSA-lite facts with explicit preservation/invalidation; compiler passes and lint rules do not rebuild equivalent whole-function facts independently.
+- AC-6: The lint/diagnostic system supports stable performance and memory rule identities, severity/profile policy, source spans, structured evidence, uncertainty/suppression reasons, human text, and machine-readable output; warnings are reserved for actionable likely defects, missed optimization is a remark, and transforms run only with legality and profitability proof.
+- AC-7: The selected first-wave loop/collection rules cover nested dynamic iteration, repeated linear lookup, repeated materialization, sequential indexing, repeated sort/setup, unbounded flat-map, accidental Cartesian product, missing index, same-domain repeated traversal, I/O/wait/lock effects in loops, and the audit's required suppression cases without warning merely because multiple loops exist.
+- AC-8: The selected first-wave memory rules cover allocation in dynamic loops, missing reserve, repeated immutable concatenation, needless materialization, avoidable clone/copy and large by-value movement, temporary buffers, index reconstruction, closure capture, stack/frame/layout risks, and retained/unbounded collections, with automatic rewrites limited to proven semantics-preserving cases.
+- AC-9: Escape analysis fails closed: unresolved/unknown flows do not become `NoEscape`; return, field, aggregate, closure, indirect/unknown-call, global, size, alignment, and lifetime flows have proof reasons and regression coverage before any allocation placement consumes the result.
+- AC-10: General loop fusion is not enabled until real loop, dependence, alias, effect/order, early-exit, numeric-order, and profitability proofs exist; high-level `CollectionPlan` producer/consumer and multiple-reduction fusion is designed as the first fusion layer, and every rejected hot candidate can emit a precise structured missed-optimization reason.
+- AC-11: Compiler and tool compile-time regressions identified by the audit are removed or recorded as concrete tracked blockers: repeated parsing, repeated CFG/loop construction, quadratic worklists/membership, definitions-by-uses scans, textual expression keys, repeated array concatenation, and redundant full-tree/file/process work have before/after evidence on realistic fixtures.
+- AC-12: Relevant baselines are captured before optimization; touched `.spl` files are evaluated with `bin/simple run src/app/optimize/main.spl <file> --full --level=O3`; correctness tests and the same performance measurements run once after changes, and any unmet runtime/compiler parity or material regression is recorded under `doc/08_tracking/bug/` with measurements and an unblock condition.
+- AC-13: Executable SSpec scenarios trace every selected `REQ-NNN`, use canonical built-in matchers and real fail-closed assertions, cover diagnostic output and transformation legality, and mirror to reviewed operator-quality Markdown under `doc/06_spec`; no executable `_spec.spl` exists under `doc/06_spec`.
+- AC-14: The smallest applicable pure-Simple compiler target/provider/SCI projection and admitted binary provenance are recorded for focused checks; Rust-seed fallback is forbidden, unsupported Stage 2/3 commands fail closed, and Stage 2/3 evidence is not promoted to Stage 4, general SPipe/docgen/test, release, convergence, or cross-host proof.
+- AC-15: Knowledge updates ship with implementation: research, requirements, plans, architecture, detail design, generated/manual specs, and the compiler performance guide are current; `doc/00_llm_process/feature_expert/compiler_performance/skill.md` and the applicable compiler/lint layer-expert skill are created or updated; every discovered unfixed gap has a `doc/08_tracking/bug/` record with file:line evidence and unblock condition. Workflow skill/agent/command files are updated only if their contracts change, otherwise the plan records them as N/A with reasons.
+- AC-16: Final verification covers compiler/core/lib and affected MCP/LSP/tool checks required by repository policy, direct env/process facade guards, lint and duplicate checks for owned files, optimizer sentinel integrity, requirements-to-test traceability, NFR measurement evidence, generated-manual quality, and cooperative-review completion; it reports `STATUS: PASS` only when all selected requirements are proven.
+
+## Scope Exclusions
+- No blind bulk activation of dormant MIR passes.
+- No C/Rust rewrite to claim performance improvement; pure-Simple owners are inspected and fixed first, with runtime edits allowed only after boundary evidence proves the defect is below them.
+- No generic source rewrite that changes observable ordering, errors, allocation identity, ABI, persistence formats, hashing/equality, worst-case guarantees, concurrency semantics, or public API without an explicitly selected requirement.
+- No release/version bump or push unless separately requested after verification passes.
+
+## Cooperative Review
+- Parallel sidecar lanes: optimizer registry/dispatch and pass-legality audit; lint/diagnostic and CollectionPlan rule audit; shared MIR analysis/escape-analysis audit; compiler/tool compile-time and allocation hot-path audit; existing tests/docs/evidence audit; external compiler/research precedent audit.
+- Merge owner: `/root` primary Codex agent.
+- Final reviewer: `/root` on the highest-capability model; sidecar findings are advisory until source-evidence checked and merged.
+- Shared interface names: `PassStatus`, `PassExpectation`, `PassRunRecord`, `PerfFacts`, `LoopFact`, `MemoryRegion`, `OperationSummary`, `CostExpr`, `PerfDiagnostic`, and `PerfRuleId`. These are design anchors; final requirements may select equivalent names deliberately.
+- Manual flow steps: `Load the effective optimizer pipeline`; `Reject dishonest active transforms`; `Analyze one function with shared performance facts`; `Report actionable performance and memory diagnostics`; `Preserve semantics while applying a proven transform`; `Compare compiler and runtime evidence against the baseline`.
+- Setup/checker helpers: `setup_optimizer_integrity_fixture`, `setup_perf_diagnostic_fixture`, `check_effective_pipeline_status`, `check_perf_facts_reuse`, `check_perf_diagnostic_record`, `check_semantic_differential`, and `check_perf_budget`.
+- Fail-fast placeholder policy: incomplete executable scenarios use `fail("implementation pending: <REQ-ID>")` or `assert(false)` and can never count as PASS; no `pass_todo`, empty body, or always-true assertion is permitted.
+- Generated-manual review owner: `/root`; sidecars may draft scenarios or mappings but cannot accept manual quality or mark requirements done.
+
+## Phase
+implementation-in-progress
+
+## Log
+- dev: Created state file with 16 acceptance criteria (type: code-quality); recorded parallel lanes, shared interfaces, helpers, and fail-closed review policy.
+- research: Preserved both research intakes, completed local/domain validation, and recorded the user-selected full staged feature and strict fail-closed NFR requirements.
+- design: Added canonical architecture and TLDR, detail design, system-test plan, agent task plan, fail-fast executable SSpec scaffold, and reviewed operator manual. Parallel design drafts were reconciled against existing compiler layer ownership and the frozen interface/test contract.
+- implementation: Added structural `PassStatus`/`PassExpectation` truth and fail-closed dispatch for dormant/proof-incomplete MIR passes; hardened active vector loop recognition to exact integer unit steps in the actual loop region; made escape finalization preserve `Unknown`; added focused pass, vector, and escape regression coverage.
+- implementation: Split requested from effective pipelines, added backend-aware inactive reasons and registry integrity checks, introduced shared CFG `PerfFacts`, and rewired loop detection to reuse successors/predecessors/indexes while removing slice-based worklist pops.
+- implementation: Added structured lint evidence/uncertainty to human and JSON records; mapped `COLL*` to `collection_performance`; capped unresolved AST fallback findings at warning; removed their unproved machine fixes; retained robust/critical deny policy for future typed high-confidence producers.
+- implementation: Repaired GC escape integration for `Ret(value)`, made field store/load region keys consistent, and propagated proven allocation sizes while rejecting invalid sizes.
+- knowledge: Added the compiler performance operator guide, feature-expert skill, and MIR optimization layer-expert skill.
+- verification-blocker: The isolated worktree has no admitted pure-Simple Stage 4 binary. A nearby executable identified itself as a Rust bootstrap seed and was rejected as acceptance evidence; blocker recorded under `doc/08_tracking/bug/simple_compiler_perf_audit_missing_stage4_binary.md`.
