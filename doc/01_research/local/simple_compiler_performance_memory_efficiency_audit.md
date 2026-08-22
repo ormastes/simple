@@ -1351,3 +1351,17 @@ This addendum validates the supplied audit against commit `37bd406e219cc35cae049
 ### Primary synthesis
 
 The implementation order should be: immediately contain the active unsafe vector rewrite and active collection header-hoist behavior; make pass activation and effective pipelines truthful; unify structured diagnostic identities and parse/HIR reuse; land cached CFG/dominance/loop/def-use facts; make escape fail closed; add bounded Tier-0/1 diagnostics; then rehabilitate scalar transforms one at a time. MemorySSA-lite, CollectionPlan fusion, general loop fusion, bounded interprocedural cost analysis, and profile-guided layout work follow only after their proof inputs exist.
+## 2026-08-22 implementation addendum: SSA dominance boundary
+
+The checked optimizer boundary now extends its admitted proof surface beyond identity,
+CFG closure, operand membership, and ABI locals. It builds shared CFG, def-use, and
+immediate-dominator facts without liveness matrices and rejects undefined values,
+multiple definitions, same-block use-before-definition, non-dominating cross-block uses,
+and unavailable dominance. Call-terminator results are modeled on the normal edge so an
+unwind path cannot falsely authorize their use. Stable codes `MIRV020` through `MIRV024`
+identify these failures.
+
+The verifier projection costs O(B + I + A + L) indexed storage plus bounded dominator
+construction. It omits O(B*L) liveness matrices and definitions-by-uses Cartesian scans.
+Normal builds construct none of these facts because checked dispatch remains behind the
+cached verify-each gate. Opcode typing, ownership, and loop proof remain open.
