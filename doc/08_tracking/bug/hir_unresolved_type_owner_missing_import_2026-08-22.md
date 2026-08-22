@@ -196,5 +196,35 @@ sub-groups (CodegenTarget 113, MirType 87 — the latter with one representative
 per layer) plus the asm and HIR/layout groups, and carries a guard-the-guard
 assertion that the fenced signatures still name the type.
 
-**Status:** class A callable half CLEARED for 273 of 291; 18 remain (2 blocked on
-a cycle, 16 pending owner evidence from a verification build). Do not close.
+### Authoritative terminal counts (run13 final dump, `error_census13.md`, 590 errors / 173 files)
+
+The in-flight numbers used above are superseded. Terminal `unresolved type` = **479**
+across exactly the same 14 compiler-internal names; the primitives appear ONLY in
+in-flight `[hir-fatal]` traces and are absent from the terminal set. Mapped onto
+the owner fixes:
+
+| type | terminal n | owner modules fixed | status |
+|---|---|---|---|
+| MirType | 132 | 36 | cleared here |
+| CodegenTarget | 122 | 2 | cleared here |
+| BlockValue | 57 | 1 | cleared by `1aa81cac8c6` (A1) |
+| Export | 35 | 1 | cleared here |
+| TypeLayout | 34 | 1 | cleared here |
+| HirIfArm | 25 | 1 | cleared here |
+| HirPattern | 16 | 0 | **remains** — no owner gap under the predicate |
+| CompilationContext | 14 | 1 | cleared here |
+| AsmLocation | 14 | 3 | cleared here |
+| AsmConstraintKind | 14 | 2 | cleared here |
+| HirModule | 6 | 1 | cleared here |
+| HirExpr | 6 | 1 | cleared here |
+| HirFunction | 2 | 0 | **remains** — import would be a cycle |
+| CompiledModule | 2 | 0 | **remains** — no owner gap under the predicate |
+
+**402 of 479 cleared by this commit** (10 of the 14 names), **459 of 479 counting
+A1's already-landed BlockValue** (11 of 14). **20 remain** across 3 names:
+HirPattern 16, HirFunction 2, CompiledModule 2 — reasons unchanged from the
+"NOT fixed" section above.
+
+**Status:** class A callable half CLEARED for 459 of the 479 terminal
+errors (402 by this commit + A1's 57); 20 remain (2 blocked on a cycle, 18
+pending owner evidence from a verification build). Do not close.
