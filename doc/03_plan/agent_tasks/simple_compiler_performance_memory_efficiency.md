@@ -713,8 +713,10 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Added an 80-row postfix predicate manifest and seven-row fallback manifest.
 - Added fail-closed priority, postfix arity, pattern-ID, E-code, and sole dynamic
   phrase validation plus exact generated-block freshness ownership.
-- Remaining follow-up: stale-file CLI red fixture and optional direct-mask rule
-  emission to remove helper-call dispatch after semantic evidence exists.
+- Completed direct constant-mask rule emission across low/high `u64` boundaries,
+  removing about 135 helper calls and variable shifts on late/no-match paths.
+- Remaining follow-up: stale-file CLI red fixture and executed latency/RSS
+  evidence when verification is permitted.
 - Verification intentionally not run under the user's no-verify instruction.
 
 ## Completed diagnostic tranche: shared query error-code ownership
