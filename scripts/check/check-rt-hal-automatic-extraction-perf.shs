@@ -1,0 +1,34 @@
+#!/bin/sh
+# Focused Pure Simple native timing/RSS evidence for automatic extraction.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+simple=${SIMPLE_SELFHOST_BIN:-"$root/bin/simple"}
+time_bin=${RT_HAL_AUTOMATIC_TIME_BIN:-/usr/bin/time}
+rss_limit=${RT_HAL_AUTOMATIC_RSS_LIMIT_KIB:-65536}
+ratio_limit=${RT_HAL_AUTOMATIC_RATIO_LIMIT:-3}
+work=$(mktemp -d "${TMPDIR:-/tmp}/rt-hal-auto.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+
+fail() { echo "rt-hal-automatic-extraction: FAIL reason=$1" >&2; exit 1; }
+[ -x "$simple" ] || fail selfhost-unavailable
+[ -x "$time_bin" ] || fail time-unavailable
+
+SIMPLE_LIB="$root/src" "$simple" native-build \
+    --source "$root/src/lib" --source "$root/test/05_perf/mcdc" \
+    --entry-closure \
+    --entry "$root/test/05_perf/mcdc/rt_hal_automatic_extraction_bench.spl" \
+    --strip --output "$work/bench"
+"$time_bin" -f '%M' -o "$work/rss" "$work/bench" >"$work/result"
+
+rss=$(sed -n '1p' "$work/rss")
+direct=$(sed -n 's/.*direct_ns=\([0-9][0-9]*\).*/\1/p' "$work/result")
+automatic=$(sed -n 's/.*automatic_ns=\([0-9][0-9]*\).*/\1/p' "$work/result")
+case "$rss:$direct:$automatic" in *[!0-9:]*) fail invalid-evidence;; esac
+[ "$rss" -le "$rss_limit" ] || fail "rss-$rss-over-$rss_limit"
+# Integer comparison avoids adding float parsing to the evidence path.
+[ "$automatic" -le $((direct * ratio_limit)) ] || \
+    fail "overhead-$automatic-over-$ratio_limit-times-$direct"
+grep -q 'hot_allocations=0' "$work/result" || fail allocation-receipt
+cat "$work/result"
+echo "peak_rss_kib=$rss ratio_limit=$ratio_limit status=PASS"
