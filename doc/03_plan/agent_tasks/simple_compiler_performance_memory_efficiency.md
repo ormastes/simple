@@ -471,3 +471,12 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Preserve exact getter/setter rewrite guards and fail closed on ambiguous names.
 - Follow-up: route the legacy aggregate easy-fix registry through one shared view
   and profile remaining rules that still accept raw source.
+
+## Completed warning-system tranche: bound candidate and delimiter scans
+
+- Reject non-public/extern lines before `primitive_api` item-suppression scans.
+- Preserve file/item allow semantics and advance offsets once per line.
+- Replace suffix-based spec-docstring counting with one absolute forward cursor.
+- Remove duplicate silent-default warning entrypoints and pin one owner.
+- Follow-up: implement dependency-closed `PerfFactRequest` presets so CFG-only
+  and def-use-only analyses stop building unrelated fact families.
