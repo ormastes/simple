@@ -1315,6 +1315,13 @@ argument types, an incapable one reports `unknown extern function`.
 
 ## Shared working tree: blob-first landing (2026-08-07)
 
+Linked Git worktrees share one hooks directory. Must-check setup installs the
+stable `scripts/hooks/pre-push-worktree-launcher`, which resolves the active
+worktree before entering its tracked dispatcher. Do not replace it with an
+absolute symlink to one checkout; that makes every sibling fail hook-wiring
+verification. Do not preserve a legacy dispatcher as `pre-push.local`, which
+would recurse.
+
 On this repo's shared working tree, a concurrent session's checkout/reconcile
 can silently WIPE an in-progress file — no `git status` trace, not even
 "deleted". Mitigate immediately after writing anything you intend to land:
