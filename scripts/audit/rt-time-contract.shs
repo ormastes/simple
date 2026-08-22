@@ -4,6 +4,8 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 binding="$root/src/lib/nogc_sync_mut/io/time_ops.spl"
 rust="$root/src/compiler_rust/runtime/src/value/sffi/time.rs"
+progress="$root/src/compiler_rust/lib/std/src/spec/progress.spl"
+timestamp_c="$root/src/runtime/runtime_timestamp.c"
 
 for symbol in rt_time_now_unix_micros rt_time_now_nanos rt_time_now_micros; do
     grep -B1 -F "extern fn $symbol" "$binding" |
@@ -16,6 +18,12 @@ test "$(grep -c 'E-SFFI-TIME-00[123]' "$binding")" -eq 3
 for wrapper in try_rt_time_now_unix_micros try_rt_time_now_nanos try_rt_time_now_micros; do
     grep -q "pub fn $wrapper() -> Option<i64>" "$rust"
 done
+grep -q 'pub fn try_rt_time_now_seconds() -> Option<f64>' "$rust"
+grep -q 'pub fn rt_progress_init() -> bool' "$rust"
+grep -q 'pub fn rt_progress_reset() -> bool' "$rust"
+test "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$progress")" -eq 3
+test "$(grep -c 'E-SFFI-TIME-00[456]' "$progress")" -eq 3
+grep -q 'RT_TIME_THREAD_LOCAL bool g_progress_initialized' "$timestamp_c"
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT INT TERM
@@ -23,5 +31,9 @@ ${CC:-cc} -std=gnu11 -O2 -Wall -Wextra -Werror \
     "$root/src/runtime/test/runtime_time_failure_selfcheck.c" \
     -o "$tmp/runtime_time_failure_selfcheck"
 "$tmp/runtime_time_failure_selfcheck"
+${CC:-cc} -std=gnu11 -O2 -Wall -Wextra -Werror \
+    "$root/src/runtime/test/runtime_timestamp_failure_selfcheck.c" \
+    -o "$tmp/runtime_timestamp_failure_selfcheck"
+"$tmp/runtime_timestamp_failure_selfcheck"
 
 echo 'rt time contract: PASS'

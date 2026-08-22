@@ -176,8 +176,8 @@ passing placeholder.
     hosted compositor mouse coordinates and remaining hosted-entry bindings.
 33. The fail-closed `rt-safety-census.shs` now reports declaration/symbol totals,
     implementation languages, unsafe tags, contracts, trusted verified evidence,
-    signatures, and untouched rows. Reduce the current 11,876 untouched rows by
-    provider family; never lower the 12,610-row unsafe total without a trusted
+    signatures, and untouched rows. Reduce the current 11,908 untouched rows by
+    provider family; never lower the 12,650-row unsafe total without a trusted
     artifact-bound evidence+signature admission row.
 34. The census now emits a ranked provider-family queue and a build-time ratchet
     freezes the fail-closed baseline. Migrate `rt_file`, `rt_process`, `rt_env`,
@@ -191,5 +191,10 @@ passing placeholder.
 36. The canonical three `rt_time` clocks now reserve and propagate `-1`, lift
     failure in Rust/Simple, and have exact minimal lexical FFI scopes. Failure
     sabotage, epoch parity, lint, syntax, one-call shape, and census ratchet pass.
-    Continue the remaining 365 `rt_time` declaration rows (including timestamp/
-    progress state), then attach exact signed provider artifact evidence.
+    Continue the remaining 367 `rt_time` declaration rows and timestamp
+    arithmetic contracts, then attach exact signed provider artifact evidence.
+37. Progress init/reset now use boolean ABI across C, Rust, interpreter, and
+    Simple; elapsed/seconds failures use a negative sentinel and thread-local
+    state removes parallel races with no heap or per-call mutex. Seven rows
+    advance the ratchet. Continue duplicate clock declarations and timestamp
+    arithmetic contracts before signed artifact admission.

@@ -83,16 +83,14 @@ pub fn rt_time_now(_args: &[Value]) -> Result<Value, CompileError> {
 ///
 /// Callable from Simple as: `rt_progress_init()`
 pub fn rt_progress_init(_args: &[Value]) -> Result<Value, CompileError> {
-    simple_runtime::value::sffi::rt_progress_init();
-    Ok(Value::Nil)
+    Ok(Value::Bool(simple_runtime::value::sffi::rt_progress_init()))
 }
 
 /// Reset progress timing - clears stored start time
 ///
 /// Callable from Simple as: `rt_progress_reset()`
 pub fn rt_progress_reset(_args: &[Value]) -> Result<Value, CompileError> {
-    simple_runtime::value::sffi::rt_progress_reset();
-    Ok(Value::Nil)
+    Ok(Value::Bool(simple_runtime::value::sffi::rt_progress_reset()))
 }
 
 /// Get elapsed seconds since progress was initialized
@@ -100,7 +98,7 @@ pub fn rt_progress_reset(_args: &[Value]) -> Result<Value, CompileError> {
 /// Callable from Simple as: `rt_progress_get_elapsed_seconds()`
 ///
 /// # Returns
-/// * Float representing seconds since init (0.0 if never initialized)
+/// * Non-negative elapsed seconds, or the negative failure sentinel
 pub fn rt_progress_get_elapsed_seconds(_args: &[Value]) -> Result<Value, CompileError> {
     let elapsed = simple_runtime::value::sffi::rt_progress_get_elapsed_seconds();
     Ok(Value::Float(elapsed))
@@ -692,5 +690,15 @@ mod tests {
             }
             _ => panic!("Expected Int value"),
         }
+    }
+
+    #[test]
+    fn test_progress_lifecycle_uses_boolean_status() {
+        assert_eq!(rt_progress_init(&[]).unwrap(), Value::Bool(true));
+        match rt_progress_get_elapsed_seconds(&[]).unwrap() {
+            Value::Float(value) => assert!(value >= 0.0),
+            other => panic!("Expected Float value, got {other:?}"),
+        }
+        assert_eq!(rt_progress_reset(&[]).unwrap(), Value::Bool(true));
     }
 }

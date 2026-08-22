@@ -788,19 +788,19 @@ artifact-bound admission ledger. On 2026-08-22 it reports:
 
 | Metric | Count |
 | --- | ---: |
-| Simple `rt_*` declaration rows | 12,610 |
-| Distinct declared symbols | 3,172 |
-| Rows explicitly tagged unsafe | 458 |
-| Rows with a documented/typed contract | 543 |
+| Simple `rt_*` declaration rows | 12,650 |
+| Distinct declared symbols | 3,177 |
+| Rows explicitly tagged unsafe | 465 |
+| Rows with a documented/typed contract | 551 |
 | Verified evidence rows | 0 |
 | Signature-verified rows | 0 |
 | Verified and signed rows | 0 |
-| Fail-closed unsafe rows | 12,610 |
-| Untouched rows (no unsafe tag, contract, or evidence) | 11,876 |
+| Fail-closed unsafe rows | 12,650 |
+| Untouched rows (no unsafe tag, contract, or evidence) | 11,908 |
 | Symbols with source-signature variants | 297 |
 
-Implementation-shaped owned definitions are: C 2,301 rows / 1,821 distinct
-symbols / 82 files; Rust 2,161 / 2,097 / 172; Simple 584 / 535 / 51; C++ 211 /
+Implementation-shaped owned definitions are: C 2,312 rows / 1,830 distinct
+symbols / 87 files; Rust 2,161 / 2,097 / 172; Simple 592 / 543 / 52; C++ 211 /
 211 / 1. Symbols may intentionally appear in multiple language lanes, so those
 language distinct counts are not additive. Static annotations remain claims:
 without a trusted admission receipt bound to the exact artifact, the tool keeps
@@ -808,7 +808,7 @@ the row unsafe.
 
 The census now also emits a provider-family migration queue and has a checked-in
 one-way ratchet. The largest untouched families are `rt_file` (2,791 rows),
-`rt_process` (1,045), `rt_env` (469), `rt_time` (365), and `rt_cuda` (353).
+`rt_process` (1,044), `rt_env` (469), `rt_time` (367), and `rt_cuda` (353).
 The ratchet rejects increases in untouched or signature-variant counts and
 decreases in unsafe tags, documented contracts, or trusted admissions. It runs
 only during audit/build verification and adds no runtime lookup, hash, branch,
@@ -849,3 +849,24 @@ passes 6/6, Rust sentinel lifting passes, C syntax checks and Rust clippy pass,
 and the census advances by three tags/contracts/untouched rows. This is verified
 behavioral evidence, not signed artifact admission: globally signed rows remain
 zero.
+
+The follow-on progress/timestamp slice changes initialization and reset from
+void to a real C/Rust/Simple boolean ABI. C progress state is thread-local, so
+parallel test workers cannot race over a process-global start value, and every
+clock call is checked. Failed initialization/reset returns `false`; failed
+seconds/elapsed reads return `-1.0`; a first successful elapsed read may still
+legitimately return zero. Negative clock regression is a contract failure, not
+an empty duration. The safe Simple progress facade uses three minimal lexical
+FFI scopes and panics on violations; the interpreter now lifts lifecycle status
+as `Value::Bool` rather than `Nil`.
+
+The elapsed hot path remains one clock read and arithmetic, with thread-local
+static storage, no heap allocation, map, hash, retry, or per-call mutex. C
+failure sabotage, Rust lift tests, interpreter ABI tests, and Simple checks pass.
+Seven additional declaration rows are tagged and contracted. During integration,
+concurrent `main` added 41 declarations and 33 untouched rows; the ratchet caught
+the stale baseline. A detached census of the exact parent established 12,651 /
+11,916, and this slice advanced that authoritative parent to 11,909. After the
+final rebase, an upstream declaration removal leaves 12,650 total and 11,908
+untouched. These figures preserve both upstream movement and this slice's
+improvement. Signed/verified admission remains zero.

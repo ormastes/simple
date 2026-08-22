@@ -7,6 +7,7 @@
  */
 
 #include <stdint.h>
+#include <stdbool.h>
 #include <time.h>
 
 #ifdef _WIN32
@@ -17,10 +18,11 @@ extern int64_t rt_time_now_nanos(void);
 /* ---- Unix timestamp in seconds as f64 (fractional) ---- */
 double rt_time_now_seconds_f64(void) {
 #ifdef _WIN32
-    return (double)rt_time_now_unix_micros() / 1000000.0;
+    int64_t micros = rt_time_now_unix_micros();
+    return micros < 0 ? -1.0 : (double)micros / 1000000.0;
 #else
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
+    struct timespec ts = {0, 0};
+    if (clock_gettime(CLOCK_REALTIME, &ts) != 0) return -1.0;
     return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
 #endif
 }
@@ -127,51 +129,61 @@ int64_t rt_timestamp_diff_days(int64_t micros1, int64_t micros2) {
 }
 
 /* ---- Progress tracking (process-local monotonic timer) ---- */
-static int g_progress_initialized = 0;
-#ifdef _WIN32
-static int64_t g_progress_start_nanos = 0;
+#if defined(_MSC_VER)
+#define RT_TIME_THREAD_LOCAL __declspec(thread)
 #else
-static struct timespec g_progress_start;
+#define RT_TIME_THREAD_LOCAL _Thread_local
 #endif
 
-void rt_progress_init(void) {
+static RT_TIME_THREAD_LOCAL bool g_progress_initialized = false;
 #ifdef _WIN32
-    g_progress_start_nanos = rt_time_now_nanos();
-    g_progress_initialized = 1;
+static RT_TIME_THREAD_LOCAL int64_t g_progress_start_nanos = 0;
 #else
-    clock_gettime(CLOCK_MONOTONIC, &g_progress_start);
-    g_progress_initialized = 1;
+static RT_TIME_THREAD_LOCAL struct timespec g_progress_start;
 #endif
+
+bool rt_progress_init(void) {
+#ifdef _WIN32
+    int64_t now = rt_time_now_nanos();
+    if (now < 0) {
+        g_progress_initialized = false;
+        return false;
+    }
+    g_progress_start_nanos = now;
+#else
+    if (clock_gettime(CLOCK_MONOTONIC, &g_progress_start) != 0) {
+        g_progress_initialized = false;
+        return false;
+    }
+#endif
+    g_progress_initialized = true;
+    return true;
 }
 
-void rt_progress_reset(void) {
-#ifdef _WIN32
-    g_progress_start_nanos = rt_time_now_nanos();
-    g_progress_initialized = 1;
-#else
-    clock_gettime(CLOCK_MONOTONIC, &g_progress_start);
-    g_progress_initialized = 1;
-#endif
+bool rt_progress_reset(void) {
+    return rt_progress_init();
 }
 
 double rt_progress_get_elapsed_seconds(void) {
 #ifdef _WIN32
     if (!g_progress_initialized) {
-        rt_progress_init();
+        if (!rt_progress_init()) return -1.0;
         return 0.0;
     }
-    int64_t elapsed_nanos = rt_time_now_nanos() - g_progress_start_nanos;
-    if (elapsed_nanos <= 0) return 0.0;
+    int64_t now = rt_time_now_nanos();
+    if (now < 0) return -1.0;
+    int64_t elapsed_nanos = now - g_progress_start_nanos;
+    if (elapsed_nanos < 0) return -1.0;
     return (double)elapsed_nanos / 1000000000.0;
 #else
     if (!g_progress_initialized) {
-        rt_progress_init();
+        if (!rt_progress_init()) return -1.0;
         return 0.0;
     }
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
+    struct timespec now = {0, 0};
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return -1.0;
     double secs = (double)(now.tv_sec  - g_progress_start.tv_sec)
                 + (double)(now.tv_nsec - g_progress_start.tv_nsec) / 1e9;
-    return secs < 0.0 ? 0.0 : secs;
+    return secs < 0.0 ? -1.0 : secs;
 #endif
 }

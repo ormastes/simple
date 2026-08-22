@@ -25,8 +25,8 @@ mod c_sffi {
         ) -> i64;
         pub(super) fn rt_timestamp_add_days(micros: i64, days: i64) -> i64;
         pub(super) fn rt_timestamp_diff_days(micros1: i64, micros2: i64) -> i64;
-        pub(super) fn rt_progress_init();
-        pub(super) fn rt_progress_reset();
+        pub(super) fn rt_progress_init() -> bool;
+        pub(super) fn rt_progress_reset() -> bool;
         pub(super) fn rt_progress_get_elapsed_seconds() -> f64;
     }
 }
@@ -63,6 +63,11 @@ pub fn try_rt_time_now_unix_micros() -> Option<i64> {
 #[inline(always)]
 pub fn rt_time_now_seconds() -> f64 {
     unsafe { c_sffi::rt_time_now_seconds_f64() }
+}
+#[inline(always)]
+pub fn try_rt_time_now_seconds() -> Option<f64> {
+    let value = rt_time_now_seconds();
+    (value >= 0.0).then_some(value)
 }
 #[inline(always)]
 pub fn rt_timestamp_get_year(micros: i64) -> i32 {
@@ -113,11 +118,11 @@ pub fn rt_timestamp_diff_days(micros1: i64, micros2: i64) -> i64 {
     unsafe { c_sffi::rt_timestamp_diff_days(micros1, micros2) }
 }
 #[inline(always)]
-pub fn rt_progress_init() {
+pub fn rt_progress_init() -> bool {
     unsafe { c_sffi::rt_progress_init() }
 }
 #[inline(always)]
-pub fn rt_progress_reset() {
+pub fn rt_progress_reset() -> bool {
     unsafe { c_sffi::rt_progress_reset() }
 }
 #[inline(always)]
@@ -127,12 +132,17 @@ pub fn rt_progress_get_elapsed_seconds() -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::lift_clock_value;
+    use super::{lift_clock_value, try_rt_time_now_seconds};
 
     #[test]
     fn clock_failure_sentinel_is_not_a_value() {
         assert_eq!(lift_clock_value(-1), None);
         assert_eq!(lift_clock_value(0), Some(0));
         assert_eq!(lift_clock_value(i64::MAX), Some(i64::MAX));
+    }
+
+    #[test]
+    fn seconds_clock_lifts_nonnegative_live_value() {
+        assert!(try_rt_time_now_seconds().is_some());
     }
 }
