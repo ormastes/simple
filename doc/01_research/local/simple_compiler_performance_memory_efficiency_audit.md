@@ -1568,3 +1568,19 @@ allocation-free membership. Exact emitted-code mapping routes the four short-gra
 to one `short_grammar_refactor` policy and maps the other codes directly. Users and CI can
 now allow, warn, or deny every emitted EasyFix family rather than relying on an immutable
 authored warning level.
+
+## 2026-08-22 implementation addendum: honest unknown-annotation fallback
+
+The source scanner ran `unknown_decorator` and `unknown_attribute` over the same `@name`
+syntax using disjoint allowlists. Known decorators such as `@extern` could therefore be
+reported as unknown attributes, known attributes could be reported as decorators, and a
+truly unknown name produced two warnings and two fix objects. Raw source has no fact that
+can distinguish those categories.
+
+Normal registry dispatch now runs one `unknown_annotation` fallback against the union of
+both known sets and emits at most one advisory per line. Legacy standalone functions
+remain for compatibility. `unknown_annotation` is a real configurable name; setting it
+updates both legacy aliases, while setting either legacy name updates the generic owner.
+Typed HIR remains the future owner for decorator-versus-attribute classification. Normal
+cost falls from two full context scans to one and duplicate diagnostic/fix storage is
+removed.
