@@ -36,6 +36,70 @@ fn input_line() -> String:
 # FixToolApplicator: applies fixes to source files
 # ============================================================================
 
+fn _sort_replacements_descending(replacements: [Replacement]) -> [Replacement]:
+    var sorted = replacements
+    var starts_seen: Dict<i64, bool> = {}
+    var distinct_starts = true
+    for rep in sorted:
+        if starts_seen.has(rep.start):
+            distinct_starts = false
+            break
+        starts_seen[rep.start] = true
+    if distinct_starts:
+        sorted.sort_by(\a, b:
+            if a.start > b.start: -1
+            elif a.start < b.start: 1
+            else: 0
+        )
+        return sorted
+
+    # Equal-start insertions expose the historical selection-sort order.
+    # Retain it only for that compatibility edge case.
+    var sort_i = 0
+    while sort_i < sorted.len():
+        var sort_j = sort_i + 1
+        while sort_j < sorted.len():
+            val left: Replacement = sorted[sort_i]
+            val right: Replacement = sorted[sort_j]
+            if left.start < right.start:
+                sorted[sort_i] = right
+                sorted[sort_j] = left
+            sort_j = sort_j + 1
+        sort_i = sort_i + 1
+    sorted
+
+fn _replacement_ranges_fit_source(replacements: [Replacement], source_len: i64) -> bool:
+    for rep in replacements:
+        if rep.start < 0 or rep.end < rep.start:
+            return false
+        if rep.start > source_len or rep.end > source_len:
+            return false
+    true
+
+fn _apply_sorted_replacements(source: text, replacements: [Replacement]) -> text:
+    if not _replacement_ranges_fit_source(replacements, source.len()):
+        # Preserve legacy dynamic range checks: a higher edit can change the
+        # length seen by a later lower-start replacement.
+        var legacy_source = source
+        for rep in replacements:
+            if rep.start <= legacy_source.len() and rep.end <= legacy_source.len():
+                legacy_source = (
+                    legacy_source.slice(0, rep.start) + rep.new_text +
+                    legacy_source.slice(rep.end))
+        return legacy_source
+
+    var parts: [text] = []
+    var cursor = 0
+    var index = replacements.len()
+    while index > 0:
+        index = index - 1
+        val rep = replacements[index]
+        parts.push(source.slice(cursor, rep.start))
+        parts.push(rep.new_text)
+        cursor = rep.end
+    parts.push(source.slice(cursor))
+    parts.join("")
+
 class FixToolApplicator:
     static fn apply(fixes: [EasyFix], sources: Dict<String, String>) -> Result<Dict<String, String>, String>:
         # Group replacements by file
@@ -57,21 +121,7 @@ class FixToolApplicator:
                 return Err("File not found in sources: {file}")
 
             val source = sources[file]
-            var replacements: [Replacement] = by_file[file]
-
-            # Sort by start position descending (apply from end to avoid offset shifts)
-            var sort_i = 0
-            while sort_i < replacements.len():
-                var sort_j = sort_i + 1
-                while sort_j < replacements.len():
-                    val left: Replacement = replacements[sort_i]
-                    val right: Replacement = replacements[sort_j]
-                    if left.start < right.start:
-                        val temp = left
-                        replacements[sort_i] = replacements[sort_j]
-                        replacements[sort_j] = temp
-                    sort_j = sort_j + 1
-                sort_i = sort_i + 1
+            val replacements = _sort_replacements_descending(by_file[file])
 
             # Check for overlapping spans
             var i = 0
@@ -83,14 +133,7 @@ class FixToolApplicator:
                     return Err("Conflicting replacements in {file}: spans [{next.start}..{next.end}] and [{curr.start}..{curr.end}] overlap")
                 i = i + 1
 
-            # Apply replacements from end to start
-            var new_source = source
-            for rep in replacements:
-                val typed_rep: Replacement = rep
-                if typed_rep.start <= new_source.len() and typed_rep.end <= new_source.len():
-                    new_source = new_source.slice(0, typed_rep.start) + typed_rep.new_text + new_source.slice(typed_rep.end)
-
-            results[file] = new_source
+            results[file] = _apply_sorted_replacements(source, replacements)
 
         Ok(results)
 
