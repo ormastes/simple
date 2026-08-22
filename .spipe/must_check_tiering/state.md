@@ -410,3 +410,10 @@ implementation-blocked-by-bootstrap-authority
   a count-only parent reference. The same 12-commit range measured 25.79s
   before and 1.29s after at 79,872 KiB peak RSS. Multi-ref deduplication and
   evidence-file bounds remain tracked follow-up work.
+- push-bound-follow-up: Identical ref updates are now deduplicated, invocations
+  above two unique updates fail closed with split-push guidance, and committed
+  PASS evidence must remain under the canonical repository root within a
+  64 MiB aggregate hashing budget. The exhaustive 24-fixture tree campaign is
+  now a bootstrap automated row; interactive push retains bounded tip structure
+  checks. The complete focused contract passed in 7.14s at 71,168 KiB peak RSS;
+  committed-ref and installed-hook paths reported 1s and 0s respectively.

@@ -69,6 +69,11 @@ provide a generation endpoint that Caret can call. The independent
 `local_torch` provider is not accepted as Slang evidence.
 The existing interpreter/JIT/native engine differential is also an automated
 bootstrap row; it is intentionally absent from the interactive push tier.
+The exhaustive structural-tree self-test is likewise bootstrap-owned. The hook
+uses the bounded `--push-tip` path, deduplicates identical ref updates, and
+fails closed above two unique updates so operators split unusually broad
+pushes. Ledger evidence must be repository-contained and the consumer hashes at
+most 64 MiB total per validation.
 
 Do not hand-edit a TODO to `pass`; promotion must come from its bootstrap-owned
 checker or retained receipt validator. The push consumer opens and rehashes the
