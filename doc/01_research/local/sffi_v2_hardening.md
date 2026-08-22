@@ -1389,3 +1389,10 @@ uses the same typed permute path. The status spec passes 5/5, both source checks
 pass, and lint has zero errors. Each wrapper contains one availability query,
 constant-time input validation, one raw call, and one output-handle check, with
 no allocation, lookup, hashing, I/O, retry, or synchronization added.
+
+Dynamic Torch concatenate and stack for two through four inputs now return
+typed results, and `TorchNDArray` propagates provider failure reasons instead
+of lifting a zero handle. The status spec passes 6/6, both source checks pass,
+and lint has zero errors. Existing caller count/shape/device validation remains;
+each selected wrapper adds only constant handle checks around one raw operation
+call, with no allocation, lookup, hashing, I/O, retry, or synchronization.

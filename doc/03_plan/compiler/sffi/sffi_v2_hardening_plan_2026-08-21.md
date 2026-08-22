@@ -1095,3 +1095,8 @@ production callers. Status tests pass 5/5, focused checks and lint pass, and
 each wrapper keeps exactly one raw operation call. Continue with cat/stack,
 binary operations, and to-float; then migrate fixed-dimension constructors and
 scalar reductions. Do not combine valid numeric zero with provider failure.
+
+Cat/stack for two through four tensors now preserve typed provider errors
+through `TorchNDArray`. Status tests pass 6/6, focused checks and lint pass, and
+each wrapper retains one raw call. Next migrate binary operation and to-float,
+then fixed-dimension constructors and scalar reductions.
