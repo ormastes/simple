@@ -1686,3 +1686,16 @@ Canonical MIR constant folding was correctly marked `Skeleton` and excluded from
 ### In-place lint result compaction
 
 Each lint invocation accumulated diagnostics in `self.results`, then allocated and grew a second `filtered_results` array while both held the same file's retained messages, fixes, evidence, and uncertainty records. Filtering now uses stable indexed compaction directly on the request-owned field: `write <= read` guarantees no unread slot is overwritten, kept order is unchanged, severity changes still construct an isolated diagnostic/result, and tail entries are popped only after the original range is scanned. This removes the second result-array capacity and peak reference retention. It deliberately avoids aliasing the value-semantic array into a local mutable copy. Source contracts pin the indexed loop, direct field writes, tail truncation, and absence of the old buffer.
+
+### Dead-code-elimination quarantine result
+
+DCE was registered as a `Skeleton`, but `DeadCodeElimination.run_on_function`
+still provided a direct transformation bypass. That body built dense shared
+liveness, scanned block/local combinations, allocated live and keep tables plus
+rebuilt instruction arrays, and deleted instructions using an incomplete
+observability/trap contract. All transform surfaces are now identity and the
+Skeleton path performs none of that work. The mandatory decision/condition
+probe classifier remains analysis compatibility only; side-effect and intrinsic
+purity queries fail closed. Rehabilitation requires exhaustive opcode effects,
+traps, ownership/destruction, unwind, volatile/atomic/device and debug semantics,
+plus sparse/worklist liveness with explicit CPU and memory budgets.
