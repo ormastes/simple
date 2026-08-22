@@ -1,0 +1,44 @@
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
+
+describe "MIR trace scope policy":
+    it "samples trace aliases once per outer module lowering":
+        val data = file_read("src/compiler/50.mir/mir_data.spl")
+        val lowering = file_read(
+            "src/compiler/50.mir/_MirLowering/module_lowering.spl")
+        expect(data).to_contain(
+            "var _mir_trace_scope_slot: [i64] = [0, 0, 0, 0]")
+        expect(data).to_contain("pub fn mir_trace_scope_enter() -> i64:")
+        expect(data).to_contain("SIMPLE_COMPILER_TRACE")
+        expect(data).to_contain("SIMPLE_COMPILER_PHASE_PROFILE")
+        expect(data).to_contain("SIMPLE_BOOTSTRAP_DIAG")
+        expect(data).to_contain("SIMPLE_MIRB_TRACE")
+        expect(lowering).to_contain(
+            "val saved_trace_scope_depth = mir_trace_scope_enter()")
+        expect(lowering).to_contain(
+            "mir_trace_scope_exit(saved_trace_scope_depth)\n            return bootstrap_result")
+        expect(lowering).to_contain(
+            "mir_trace_scope_exit(saved_trace_scope_depth)\n        result")
+
+    it "keeps builder receipts behind the MIRB-only cached decision":
+        val data = file_read("src/compiler/50.mir/mir_data.spl")
+        expect(data).to_contain("pub fn mir_builder_trace_enabled() -> bool:")
+        expect(data).to_contain(
+            "val mirb_trace = mir_builder_trace_enabled()")
+        expect(data).to_contain("if mir_builder_trace_enabled():")
+        expect(data).not.to_contain(
+            "val mirb_trace = (rt_env_get(\"SIMPLE_MIRB_TRACE\")")
+
+    it "refreshes lifetime caches for each outer lowering generation":
+        val expr = file_read(
+            "src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl")
+        val calls = file_read(
+            "src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl")
+        val functions = file_read(
+            "src/compiler/50.mir/_MirLowering/function_lowering.spl")
+        expect(expr).to_contain(
+            "mir_lower_expr_trace_generation != trace_generation")
+        expect(calls).to_contain(
+            "mir_mc_trace_generation != trace_generation")
+        expect(functions).to_contain(
+            "mir_optional_inner_trace_generation != trace_generation")
