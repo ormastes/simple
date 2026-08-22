@@ -4,7 +4,7 @@ use compiler.tools.lint.main.*
 # Direct import from the concrete defining sibling module — the seed mangler
 # bare-externs calls whose import chain crosses the facade wildcard re-export.
 # See doc/08_tracking/bug/mangler_bare_extern_sibling_split_part_2026-07-30.md
-use compiler.tools.lint._LintMain.name_lints.{lint_accessor_and_parent_names}
+use compiler.tools.lint._LintMain.name_lints.{lint_accessor_and_parent_names_lines}
 # Simple Language Linter
 # Semantic lints for code quality and safety
 # Usage: simple_lint <file.spl> [--deny-all] [--warn-all]
@@ -257,10 +257,9 @@ impl Linter:
     me lint_source(path: String, content: String) -> [LintRunResult]:
         self.results = []
 
-        val file_config = resolve_lint_config(self.config, path, content)
-
         # Run simple pattern-based lints
         val lines = content.split("\n")
+        val file_config = resolve_lint_config_with_lines(self.config, path, lines)
         if self.retain_combined_view:
             self.last_resolved_path = path
             self.last_resolved_config = Some(file_config)
@@ -281,13 +280,13 @@ impl Linter:
         self.check_ui_raw_theme_name(path, content)
         self.check_theme_package(path)
         self.check_riscv_rtl_debuggability(path, content)
-        self.check_param_tag_spl(path, content)
-        self.check_stale_md_diagrams(path, content)
-        self.check_accessor_and_parent_names(path, content)
-        self.check_llvm_backend_type_safety(path, content)
-        self.check_os_freestanding_patterns(path, content)
+        self.check_param_tag_spl(path, lines)
+        self.check_stale_md_diagrams(path, lines)
+        self.check_accessor_and_parent_names(path, lines)
+        self.check_llvm_backend_type_safety(path, lines)
+        self.check_os_freestanding_patterns(path, lines)
         self.check_module_init_literal_spl(path, content)
-        self.check_raw_rt_access_spl(path, content)
+        self.check_raw_rt_access_spl(path, content, lines)
         self.check_dynamic_capability_acquire_spl(path, content)
         self.check_silent_default_spl(path, content)
         self.check_leading_operator_spl(path, content)
@@ -296,7 +295,7 @@ impl Linter:
         self.check_unwrapped_foreign_resource_spl(path, content)
         self.check_raw_sffi_call_spl(path, content)
         self.check_raw_sffi_declaration_spl(path, content)
-        self.check_wm_lane_boundary(file_config, path, content)
+        self.check_wm_lane_boundary(file_config, path, lines)
 
         # Run shared EasyFix rules and attach as lint results
         val shared_fixes = check_all_rules(content, path)
@@ -392,11 +391,10 @@ impl Linter:
                 .with_fix(warning.hint)
             self.results.push(LintRunResult.new(path, warning.line_num, 0, lint))
 
-    me check_param_tag_spl(path: String, content: String):
+    me check_param_tag_spl(path: String, lines: [String]):
         # PTAG001/PTAG002 scope: src/lib/ only (AC-5 annotation sweep covered lib; compiler/app not yet annotated)
         if not path.contains("src/lib/"):
             return
-        val lines = content.split("\n")
         val warnings = check_param_tag(lines, path)
         for warning in warnings:
             val lint = LintDiag.new(warning.code, LintLevel.Warn, LintCategory.Warning, warning.message)
@@ -428,7 +426,7 @@ impl Linter:
                 .with_fix(finding.note)
             self.results.push(LintRunResult.new(path, finding.line_num, 0, lint))
 
-    me check_raw_rt_access_spl(path: String, content: String):
+    me check_raw_rt_access_spl(path: String, content: String, lines: [String]):
         val findings = check_raw_rt_access_with_allowlist(content, path, _raw_rt_canonical_allowlist())
         # There is currently one signature-proven mechanical mapping. Resolve
         # its import evidence once per file, not once per finding.
@@ -436,7 +434,7 @@ impl Linter:
         var fix_lines: [text] = []
         var fix_line_starts: [i64] = []
         if process_run_fixable:
-            fix_lines = content.split("\n")
+            fix_lines = lines
             var next_start = 0
             for fix_line in fix_lines:
                 fix_line_starts.push(next_start)
@@ -565,8 +563,8 @@ impl Linter:
                 .with_fix(finding.note)
             self.results.push(LintRunResult.new(path, finding.line_num, 0, lint))
 
-    me check_accessor_and_parent_names(path: String, content: String):
-        val warnings = lint_accessor_and_parent_names(path, content)
+    me check_accessor_and_parent_names(path: String, lines: [String]):
+        val warnings = lint_accessor_and_parent_names_lines(path, lines)
         for warning in warnings:
             val lint = LintDiag.new(warning.code, LintLevel.Warn, LintCategory.Warning, warning.message)
                 .with_fix(warning.hint)
@@ -576,8 +574,8 @@ impl Linter:
     # C1/C4/C5/C7) — scoped to src/os/** and examples/09_embedded/** inside
     # lint_os_freestanding_patterns itself. Always warn-level: heuristic,
     # non-type-checked patterns must never fail the build.
-    me check_os_freestanding_patterns(path: String, content: String):
-        val warnings = lint_os_freestanding_patterns(path, content)
+    me check_os_freestanding_patterns(path: String, lines: [String]):
+        val warnings = lint_os_freestanding_patterns_lines(path, lines)
         for warning in warnings:
             val lint = LintDiag.new(warning.code, LintLevel.Warn, LintCategory.Correctness, warning.message)
                 .with_fix(warning.hint)
@@ -594,7 +592,7 @@ impl Linter:
     # this costs one dict probe per file and reads zero lines. Deliberately not
     # routed through get_level(), which rebuilds the whole defaults dict on
     # every call.
-    me check_wm_lane_boundary(file_config: LintConfig, path: String, content: String):
+    me check_wm_lane_boundary(file_config: LintConfig, path: String, lines: [String]):
         if not file_config.levels.has("wm_lane_boundary"):
             return
         match file_config.get_level("wm_lane_boundary"):
@@ -602,7 +600,7 @@ impl Linter:
                 return
             case _:
                 val _ = 0
-        val warnings = lint_wm_lane_boundary(path, content)
+        val warnings = lint_wm_lane_boundary_lines(path, lines)
         for warning in warnings:
             val lint = LintDiag.new(warning.code, LintLevel.Warn, LintCategory.Correctness, warning.message)
                 .with_fix(warning.hint)
@@ -818,10 +816,9 @@ impl Linter:
                     .with_fix("Add issue: {keyword}: [{area}][{priority}] description [#123]")
                 self.results.push(LintRunResult.new(path, line_num, idx, lint))
 
-    me check_stale_md_diagrams(path: String, content: String):
+    me check_stale_md_diagrams(path: String, lines: [String]):
         if not path.ends_with(".md"):
             return
-        val lines = content.split("\n")
         var line_num = 1
         for line in lines:
             val trimmed = line.trim()
@@ -840,14 +837,13 @@ impl Linter:
                         self.results.push(LintRunResult.new(path, line_num, 0, lint))
             line_num = line_num + 1
 
-    me check_llvm_backend_type_safety(path: String, content: String):
+    me check_llvm_backend_type_safety(path: String, lines: [String]):
         if not path.contains("src/compiler/70.backend/backend/"):
             return
         val is_text_llvm = path.contains("MirToLlvm") or path.contains("mir_to_llvm_instructions.spl")
         val is_llvm_lib = path.contains("llvm_lib_translate")
         if not is_text_llvm and not is_llvm_lib:
             return
-        val lines = content.split("\n")
         var line_num = 1
         for line in lines:
             val trimmed = line.trim()
