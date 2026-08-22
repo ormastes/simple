@@ -21,7 +21,9 @@ enum {
     SIMPLE_MCDC_V1_DRAINING = 9,
     SIMPLE_MCDC_V1_GATE_FAILED = 10,
     SIMPLE_MCDC_V1_EMPTY_DENOMINATOR = 11,
-    SIMPLE_MCDC_V1_EXCLUSION_INVALID = 12
+    SIMPLE_MCDC_V1_EXCLUSION_INVALID = 12,
+    SIMPLE_MCDC_V1_DUPLICATE = 13,
+    SIMPLE_MCDC_V1_TAMPERED = 14
 };
 
 typedef struct {
@@ -153,6 +155,56 @@ typedef struct {
     uint8_t provenance_sha256[64];
 } SimpleMcdcReportV1;
 
+/* V2 extends the frozen V1 report without changing any V1 layout.  Source
+ * paths remain outside the critical ABI: the compiler supplies their stable
+ * digest plus line/column, avoiding variable text and report-time allocation. */
+typedef struct {
+    uint64_t decision_id;
+    uint64_t source_digest;
+    uint64_t source_file_digest;
+    uint32_t line;
+    uint32_t column;
+} SimpleMcdcSourceLocationV2;
+
+typedef struct {
+    uint64_t decision_id;
+    uint64_t source_digest;
+    uint64_t source_file_digest;
+    uint64_t covered_mask;
+    uint64_t excluded_mask;
+    uint64_t eligible_mask;
+    uint64_t process_id;
+    uint64_t process_sequence;
+    uint32_t line;
+    uint32_t column;
+    uint32_t condition_count;
+    uint32_t mode;
+    uint8_t binary_identity_sha256[64];
+    uint8_t row_provenance_sha256[64];
+} SimpleMcdcDecisionReportV2;
+
+typedef struct {
+    uint64_t gross_decisions;
+    uint64_t eligible_decisions;
+    uint64_t excluded_decisions;
+    uint64_t covered_decisions;
+    uint64_t uncovered_decisions;
+    uint64_t gross_conditions;
+    uint64_t eligible_conditions;
+    uint64_t excluded_conditions;
+    uint64_t covered_conditions;
+    uint64_t uncovered_conditions;
+    uint64_t witnessed_pairs;
+    uint64_t process_count;
+    uint64_t decision_row_count;
+    uint64_t process_id;
+    uint64_t process_sequence;
+    uint32_t mode;
+    uint32_t gate_passed;
+    uint8_t binary_identity_sha256[64];
+    uint8_t provenance_sha256[64];
+} SimpleMcdcReportV2;
+
 /* Recompute the lowercase SHA-256 identity over canonical MCDP V1 bytes:
  * bytes [0,24) followed by bytes [88,byte_count). The embedded identity field
  * is deliberately excluded. This helper is allocation free. */
@@ -187,6 +239,9 @@ SIMPLE_MCDC_STATIC_ASSERT(sizeof(SimpleMcdcDecisionExprV1) == 32, "SimpleMcdcDec
 SIMPLE_MCDC_STATIC_ASSERT(sizeof(SimpleMcdcManifestInfoV1) == 96, "SimpleMcdcManifestInfoV1 ABI");
 SIMPLE_MCDC_STATIC_ASSERT(sizeof(SimpleMcdcExclusionV1) == 376, "SimpleMcdcExclusionV1 ABI");
 SIMPLE_MCDC_STATIC_ASSERT(sizeof(SimpleMcdcReportV1) == 152, "SimpleMcdcReportV1 ABI");
+SIMPLE_MCDC_STATIC_ASSERT(sizeof(SimpleMcdcSourceLocationV2) == 32, "SimpleMcdcSourceLocationV2 ABI");
+SIMPLE_MCDC_STATIC_ASSERT(sizeof(SimpleMcdcDecisionReportV2) == 208, "SimpleMcdcDecisionReportV2 ABI");
+SIMPLE_MCDC_STATIC_ASSERT(sizeof(SimpleMcdcReportV2) == 256, "SimpleMcdcReportV2 ABI");
 #undef SIMPLE_MCDC_STATIC_ASSERT
 
 int32_t rt_mcdc_collector_init_v1(void *storage, uint64_t storage_bytes,
@@ -303,6 +358,27 @@ int32_t rt_mcdc_report_mcdp_v1(
     SimpleMcdcExprTokenV1 *token_workspace, uint64_t token_capacity,
     SimpleMcdcWitnessV1 *witness_workspace, uint64_t witness_capacity,
     uint64_t proof_budget, SimpleMcdcReportV1 *report);
+/* Complete bounded REQ-004 report. Locations must exactly match manifest
+ * decision order. Decision rows and witnesses are caller-owned. */
+int32_t rt_mcdc_report_mcdp_v2(
+    SimpleMcdcVectorV1 *events, uint64_t event_count,
+    const uint8_t *manifest_bytes, uint64_t manifest_byte_count,
+    const SimpleMcdcExclusionV1 *exclusions, uint64_t exclusion_count,
+    const SimpleMcdcSourceLocationV2 *locations, uint64_t location_count,
+    uint64_t current_epoch, uint32_t mode, uint64_t process_id,
+    uint64_t process_sequence,
+    SimpleMcdcDecisionExprV1 *program_workspace, uint64_t program_capacity,
+    SimpleMcdcExprTokenV1 *token_workspace, uint64_t token_capacity,
+    SimpleMcdcWitnessV1 *witness_workspace, uint64_t witness_capacity,
+    SimpleMcdcDecisionReportV2 *decision_rows, uint64_t decision_capacity,
+    uint64_t proof_budget, SimpleMcdcReportV2 *report);
+/* Merge globally sorted decision rows. Sort key is source digest, decision id,
+ * process id, process sequence. Each row carries its own integrity digest.
+ * Duplicate process contributions and mixed binary/mode rows fail closed. */
+int32_t rt_mcdc_merge_reports_v2(
+    const SimpleMcdcDecisionReportV2 *inputs, uint64_t input_count,
+    SimpleMcdcDecisionReportV2 *outputs, uint64_t output_capacity,
+    SimpleMcdcReportV2 *report);
 int32_t rt_mcdc_sort_vectors_v1(SimpleMcdcVectorV1 *events,
                                 uint64_t event_count);
 void rt_mcdc_collector_reset_v1(void);

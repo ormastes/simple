@@ -94,7 +94,7 @@ Only `CapabilityUnavailable`, `FixtureUnavailable`, `PlatformInapplicable`, `Saf
 
 Initialization may map packs, launch provider workers, and size storage. `seal()` establishes the no-allocation epoch. Every success, failure, timeout, overflow, comparison, logging, shutdown, and cleanup path after sealing uses fixed storage. Per-thread shards avoid hot-path locks; overflow sets a sticky typed failure with first-lost sequence and count.
 
-The parent merges child receipts deterministically by manifest/binary identity, provider lane, shard, and sequence. Witness choice uses a stable lexicographic rule. No provider performs authoritative side effects and no shared-memory thread comparison qualifies as provider isolation.
+The parent merges child receipts deterministically by manifest/binary identity, provider lane, shard, and sequence. The additive bounded V2 native report ABI materializes stable file digest/line/column, decision and condition accounting, witnessed pairs, mode, binary identity, and per-process provenance. Canonical decision-major rows merge in one O(N) pass into caller-owned storage; duplicate, omitted, reordered, mixed-identity, or tampered rows fail closed. Witness choice uses a stable lexicographic rule. No provider performs authoritative side effects and no shared-memory thread comparison qualifies as provider isolation.
 
 ## R3 migration
 

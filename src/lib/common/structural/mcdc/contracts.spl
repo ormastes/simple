@@ -6,6 +6,7 @@ use std.common.structural.environment_instruction.contracts.{
 }
 
 val MCDC_SCHEMA_VERSION: i64 = 1
+val MCDC_REPORT_SCHEMA_VERSION: i64 = 2
 val MCDC_MAX_CONDITIONS: i64 = 62
 
 enum McdcWitnessPolicyV1:
@@ -212,7 +213,50 @@ fn mcdc_normal_gate_v1_passes(value: McdcNormalGateV1) -> bool:
         and value.summary.excluded_conditions == value.excluded_conditions
         and mcdc_coverage_summary_v1_is_exact_100(value.summary)
 
-export MCDC_SCHEMA_VERSION, MCDC_MAX_CONDITIONS
+# Pure-Simple mirror of the pointer-free V2 native report contract.  File
+# names remain in the compiler metadata store; reports retain the stable file
+# digest and exact span without allocating variable text.
+struct McdcDecisionReportV2:
+    schema_version: i64
+    decision: McdcDecisionIdV1
+    source_file_digest: i64
+    line: i64
+    column: i64
+    covered_mask: i64
+    excluded_mask: i64
+    eligible_mask: i64
+    process_id: i64
+    process_sequence: i64
+    mode: McdcReportModeV1
+
+fn mcdc_decision_report_v2_well_formed(value: McdcDecisionReportV2) -> bool:
+    if value.schema_version != MCDC_REPORT_SCHEMA_VERSION:
+        return false
+    if not mcdc_decision_id_v1_well_formed(value.decision):
+        return false
+    if value.source_file_digest == 0 or value.line <= 0 or value.column <= 0:
+        return false
+    if value.process_id <= 0 or value.process_sequence <= 0:
+        return false
+    val complete = mcdc_condition_mask(value.decision.condition_count)
+    value.covered_mask >= 0 and value.excluded_mask >= 0 and value.eligible_mask >= 0
+        and (value.excluded_mask & value.eligible_mask) == 0
+        and (value.excluded_mask | value.eligible_mask) == complete
+        and (value.covered_mask & ~value.eligible_mask) == 0
+
+fn mcdc_decision_report_v2_before(a: McdcDecisionReportV2,
+                                  b: McdcDecisionReportV2) -> bool:
+    if a.decision.source_digest_hi != b.decision.source_digest_hi:
+        return a.decision.source_digest_hi < b.decision.source_digest_hi
+    if a.decision.source_digest_lo != b.decision.source_digest_lo:
+        return a.decision.source_digest_lo < b.decision.source_digest_lo
+    if a.decision.span_start != b.decision.span_start:
+        return a.decision.span_start < b.decision.span_start
+    if a.process_id != b.process_id:
+        return a.process_id < b.process_id
+    a.process_sequence < b.process_sequence
+
+export MCDC_SCHEMA_VERSION, MCDC_REPORT_SCHEMA_VERSION, MCDC_MAX_CONDITIONS
 export McdcWitnessPolicyV1, McdcDecisionIdV1, McdcEvaluationV1, McdcWitnessV1
 export McdcCoverageSummaryV1, McdcDecisionExclusionV1
 export mcdc_decision_id_v1, mcdc_decision_id_v1_well_formed, mcdc_condition_mask
@@ -225,3 +269,5 @@ export mcdc_coverage_summary_v1, mcdc_coverage_summary_v1_well_formed
 export mcdc_coverage_summary_v1_is_exact_100
 export McdcReportModeV1, McdcNormalGateV1
 export mcdc_normal_gate_v1, mcdc_normal_gate_v1_passes
+export McdcDecisionReportV2
+export mcdc_decision_report_v2_well_formed, mcdc_decision_report_v2_before

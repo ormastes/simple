@@ -155,6 +155,62 @@ int main(void) {
                witnesses, 2, 100, &report) == SIMPLE_MCDC_V1_OK);
     assert(memcmp(provenance, report.provenance_sha256, 64) == 0);
 
+    /* V2 retains V1 behavior while materializing the complete bounded ABI:
+       source span, binary identity, decision/condition totals and merge rows. */
+    const SimpleMcdcSourceLocationV2 locations[] = {
+        {9, 99, UINT64_C(0x55aa), 12, 7}
+    };
+    SimpleMcdcDecisionReportV2 process_rows[2];
+    SimpleMcdcReportV2 report_v2;
+    SimpleMcdcVectorV1 process_a_events[] = {
+        {9, 2, 0, 99, 3, 2, 2, 3, 1, {0}},
+        {9, 2, 0, 99, 3, 0, 1, 1, 0, {0}},
+        {9, 2, 0, 99, 1, 1, 1, 2, 1, {0}}
+    };
+    assert(rt_mcdc_report_mcdp_v2(
+               process_a_events, 3, wire, wire_size, NULL, 0,
+               locations, 1, 10, SIMPLE_MCDC_REPORT_NORMAL_V1, 101, 1,
+               programs, 1, tokens, 3, witnesses, 2, process_rows, 1,
+               100, &report_v2) == SIMPLE_MCDC_V1_OK);
+    assert(report_v2.gross_decisions == 1 &&
+           report_v2.eligible_decisions == 1 &&
+           report_v2.covered_decisions == 1 &&
+           report_v2.gross_conditions == 2 &&
+           report_v2.covered_conditions == 2 &&
+           report_v2.witnessed_pairs == 2 && report_v2.process_count == 1);
+    assert(process_rows[0].source_file_digest == UINT64_C(0x55aa) &&
+           process_rows[0].line == 12 && process_rows[0].column == 7 &&
+           process_rows[0].covered_mask == 3 &&
+           memcmp(process_rows[0].binary_identity_sha256,
+                  info.identity_sha256, 64) == 0);
+    SimpleMcdcVectorV1 process_b_events[] = {
+        {9, 2, 0, 99, 3, 2, 2, 3, 1, {0}},
+        {9, 2, 0, 99, 3, 0, 1, 1, 0, {0}},
+        {9, 2, 0, 99, 1, 1, 1, 2, 1, {0}}
+    };
+    assert(rt_mcdc_report_mcdp_v2(
+               process_b_events, 3, wire, wire_size, NULL, 0,
+               locations, 1, 10, SIMPLE_MCDC_REPORT_NORMAL_V1, 102, 1,
+               programs, 1, tokens, 3, witnesses, 2, &process_rows[1], 1,
+               100, &report_v2) == SIMPLE_MCDC_V1_OK);
+    SimpleMcdcDecisionReportV2 merged_rows[1];
+    assert(rt_mcdc_merge_reports_v2(process_rows, 2, merged_rows, 1,
+                                     &report_v2) == SIMPLE_MCDC_V1_OK);
+    assert(report_v2.process_count == 2 && report_v2.gross_decisions == 1 &&
+           report_v2.covered_decisions == 1 &&
+           report_v2.covered_conditions == 2 &&
+           merged_rows[0].process_id == 0);
+    SimpleMcdcDecisionReportV2 corrupted_rows[2];
+    memcpy(corrupted_rows, process_rows, sizeof(corrupted_rows));
+    corrupted_rows[1].covered_mask ^= 1;
+    assert(rt_mcdc_merge_reports_v2(corrupted_rows, 2, merged_rows, 1,
+                                     &report_v2) == SIMPLE_MCDC_V1_TAMPERED);
+    corrupted_rows[1] = corrupted_rows[0];
+    assert(rt_mcdc_merge_reports_v2(corrupted_rows, 2, merged_rows, 1,
+                                     &report_v2) == SIMPLE_MCDC_V1_DUPLICATE);
+    assert(rt_mcdc_merge_reports_v2(process_rows, 2, merged_rows, 0,
+                                     &report_v2) == SIMPLE_MCDC_V1_OUTPUT_TOO_SMALL);
+
     SimpleMcdcVectorV1 incomplete[] = {
         {9, 2, 0, 99, 3, 0, 1, 1, 0, {0}},
         {9, 2, 0, 99, 1, 1, 1, 2, 1, {0}}
@@ -369,6 +425,66 @@ int main(void) {
            (unsigned long long)(sizeof(full_events) + sizeof(programs) +
                                 sizeof(tokens) + sizeof(witnesses) + sizeof(report)));
     assert(ns_per_report < UINT64_C(100000));
+
+    const uint64_t v2_iterations = UINT64_C(100000);
+#ifdef MCDC_SELFCHECK_WRAP_ALLOC
+    tracked_allocations = 0;
+    track_allocations = 1;
+#endif
+    assert(clock_gettime(CLOCK_MONOTONIC, &start) == 0);
+    for (uint64_t i = 0; i < v2_iterations; ++i)
+        assert(rt_mcdc_report_mcdp_v2(
+                   process_a_events, 3, wire, wire_size, NULL, 0,
+                   locations, 1, 10, SIMPLE_MCDC_REPORT_NORMAL_V1, 101, 1,
+                   programs, 1, tokens, 3, witnesses, 2, process_rows, 1,
+                   100, &report_v2) == SIMPLE_MCDC_V1_OK);
+    assert(clock_gettime(CLOCK_MONOTONIC, &finish) == 0);
+#ifdef MCDC_SELFCHECK_WRAP_ALLOC
+    track_allocations = 0;
+    assert(tracked_allocations == 0);
+#endif
+    const uint64_t v2_report_elapsed_ns = (uint64_t)(
+        (int64_t)(finish.tv_sec - start.tv_sec) * INT64_C(1000000000) +
+        (int64_t)(finish.tv_nsec - start.tv_nsec));
+    printf("mcdc_report_v2_perf iterations=%llu ns_per_report=%llu allocations=%llu workspace_bytes=%llu\n",
+           (unsigned long long)v2_iterations,
+           (unsigned long long)(v2_report_elapsed_ns / v2_iterations),
+#ifdef MCDC_SELFCHECK_WRAP_ALLOC
+           (unsigned long long)tracked_allocations,
+#else
+           0ull,
+#endif
+           (unsigned long long)(sizeof(process_a_events) + sizeof(programs) +
+                                sizeof(tokens) + sizeof(witnesses) +
+                                sizeof(process_rows[0]) + sizeof(report_v2)));
+    assert(v2_report_elapsed_ns / v2_iterations < UINT64_C(100000));
+#ifdef MCDC_SELFCHECK_WRAP_ALLOC
+    tracked_allocations = 0;
+    track_allocations = 1;
+#endif
+    assert(clock_gettime(CLOCK_MONOTONIC, &start) == 0);
+    for (uint64_t i = 0; i < v2_iterations; ++i)
+        assert(rt_mcdc_merge_reports_v2(process_rows, 2, merged_rows, 1,
+                                         &report_v2) == SIMPLE_MCDC_V1_OK);
+    assert(clock_gettime(CLOCK_MONOTONIC, &finish) == 0);
+#ifdef MCDC_SELFCHECK_WRAP_ALLOC
+    track_allocations = 0;
+    assert(tracked_allocations == 0);
+#endif
+    const uint64_t v2_elapsed_ns = (uint64_t)(
+        (int64_t)(finish.tv_sec - start.tv_sec) * INT64_C(1000000000) +
+        (int64_t)(finish.tv_nsec - start.tv_nsec));
+    printf("mcdc_report_v2_merge_perf iterations=%llu ns_per_merge=%llu allocations=%llu workspace_bytes=%llu\n",
+           (unsigned long long)v2_iterations,
+           (unsigned long long)(v2_elapsed_ns / v2_iterations),
+#ifdef MCDC_SELFCHECK_WRAP_ALLOC
+           (unsigned long long)tracked_allocations,
+#else
+           0ull,
+#endif
+           (unsigned long long)(sizeof(process_rows) + sizeof(merged_rows) +
+                                sizeof(report_v2)));
+    assert(v2_elapsed_ns / v2_iterations < UINT64_C(100000));
 #endif
     return 0;
 }

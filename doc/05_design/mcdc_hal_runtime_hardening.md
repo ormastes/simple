@@ -23,6 +23,16 @@ All safe-boundary wire values use fixed-width scalars and checked `(offset,lengt
 
 Observations deduplicate by decision ID, evaluated mask, masked value mask, and outcome. For each condition, search deterministic pairs in sorted order. Accept unique-cause first. For masking fallback, evaluate the frozen postfix Boolean DAG for all allowed values of changed or unevaluated non-target atoms within the proof budget. If every completion preserves each observation outcome and the target flips the decision, emit a masking witness; otherwise leave uncovered. Proof exhaustion is not an exclusion.
 
+The complete report uses the additive `SimpleMcdcReportV2` ABI. Compiler-owned
+source locations are supplied as fixed `(file_digest,line,column)` rows in exact
+manifest order. Report creation fills fixed decision rows and binds every row
+to mode, binary identity, process identity/sequence, masks, and a SHA-256
+integrity receipt. Cross-process inputs are sorted once by decision identity
+then process provenance; the merge performs one linear scan, unions covered
+masks, requires identical eligible/excluded masks and an identical process set
+for every decision, and writes only caller-owned output. It allocates no memory
+and an empty eligible denominator remains a hard failure.
+
 ## Dynamic activation state machine
 
 `Absent -> Validating -> Prepared -> Armed(generation) -> Disarming -> Settled -> Absent`.

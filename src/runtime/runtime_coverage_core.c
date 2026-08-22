@@ -1803,6 +1803,335 @@ int32_t rt_mcdc_report_mcdp_v1(
     return SIMPLE_MCDC_V1_OK;
 }
 
+static void mcdc_report_digest_init_v2(McdcSha256V1 *digest,
+                                       const char *domain) {
+    *digest = (McdcSha256V1){{0x6a09e667u,0xbb67ae85u,0x3c6ef372u,0xa54ff53au,
+                             0x510e527fu,0x9b05688cu,0x1f83d9abu,0x5be0cd19u},
+                            0,{0},0};
+    mcdc_sha256_update_v1(digest, (const uint8_t *)domain, strlen(domain));
+}
+
+static void mcdc_decision_row_digest_v2(
+        const SimpleMcdcDecisionReportV2 *row, uint8_t output[64]) {
+    McdcSha256V1 digest;
+    mcdc_report_digest_init_v2(&digest, "simple-mcdc-decision-report-v2");
+    mcdc_sha256_scalar_le_v1(&digest, row->decision_id, 8u);
+    mcdc_sha256_scalar_le_v1(&digest, row->source_digest, 8u);
+    mcdc_sha256_scalar_le_v1(&digest, row->source_file_digest, 8u);
+    mcdc_sha256_scalar_le_v1(&digest, row->covered_mask, 8u);
+    mcdc_sha256_scalar_le_v1(&digest, row->excluded_mask, 8u);
+    mcdc_sha256_scalar_le_v1(&digest, row->eligible_mask, 8u);
+    mcdc_sha256_scalar_le_v1(&digest, row->process_id, 8u);
+    mcdc_sha256_scalar_le_v1(&digest, row->process_sequence, 8u);
+    mcdc_sha256_scalar_le_v1(&digest, row->line, 4u);
+    mcdc_sha256_scalar_le_v1(&digest, row->column, 4u);
+    mcdc_sha256_scalar_le_v1(&digest, row->condition_count, 4u);
+    mcdc_sha256_scalar_le_v1(&digest, row->mode, 4u);
+    mcdc_sha256_update_v1(&digest, row->binary_identity_sha256, 64u);
+    mcdc_sha256_finish_hex_v1(&digest, output);
+}
+
+static void mcdc_report_summary_digest_v2(
+        const SimpleMcdcReportV2 *report,
+        const SimpleMcdcDecisionReportV2 *rows, uint64_t row_count,
+        const SimpleMcdcWitnessV1 *witnesses, uint64_t witness_count,
+        uint8_t output[64]) {
+    McdcSha256V1 digest;
+    mcdc_report_digest_init_v2(&digest, "simple-mcdc-complete-report-v2");
+    const uint64_t *totals = &report->gross_decisions;
+    for (size_t i = 0; i < 15u; ++i)
+        mcdc_sha256_scalar_le_v1(&digest, totals[i], 8u);
+    mcdc_sha256_scalar_le_v1(&digest, report->mode, 4u);
+    mcdc_sha256_scalar_le_v1(&digest, report->gate_passed, 4u);
+    mcdc_sha256_update_v1(&digest, report->binary_identity_sha256, 64u);
+    for (size_t i = 0; i < (size_t)row_count; ++i)
+        mcdc_sha256_update_v1(&digest, rows[i].row_provenance_sha256, 64u);
+    for (size_t i = 0; i < (size_t)witness_count; ++i) {
+        const SimpleMcdcWitnessV1 *w = &witnesses[i];
+        mcdc_sha256_scalar_le_v1(&digest, w->decision_id, 8u);
+        mcdc_sha256_scalar_le_v1(&digest, w->source_digest, 8u);
+        mcdc_sha256_scalar_le_v1(&digest, w->condition_index, 4u);
+        mcdc_sha256_scalar_le_v1(&digest, w->policy, 4u);
+        mcdc_sha256_scalar_le_v1(&digest, w->owner_a, 8u);
+        mcdc_sha256_scalar_le_v1(&digest, w->sequence_a, 8u);
+        mcdc_sha256_scalar_le_v1(&digest, w->owner_b, 8u);
+        mcdc_sha256_scalar_le_v1(&digest, w->sequence_b, 8u);
+    }
+    mcdc_sha256_finish_hex_v1(&digest, output);
+}
+
+int32_t rt_mcdc_report_mcdp_v2(
+        SimpleMcdcVectorV1 *events, uint64_t event_count,
+        const uint8_t *manifest_bytes, uint64_t manifest_byte_count,
+        const SimpleMcdcExclusionV1 *exclusions, uint64_t exclusion_count,
+        const SimpleMcdcSourceLocationV2 *locations, uint64_t location_count,
+        uint64_t current_epoch, uint32_t mode, uint64_t process_id,
+        uint64_t process_sequence,
+        SimpleMcdcDecisionExprV1 *programs, uint64_t program_capacity,
+        SimpleMcdcExprTokenV1 *tokens, uint64_t token_capacity,
+        SimpleMcdcWitnessV1 *witnesses, uint64_t witness_capacity,
+        SimpleMcdcDecisionReportV2 *rows, uint64_t decision_capacity,
+        uint64_t proof_budget, SimpleMcdcReportV2 *report) {
+    if (!report || !process_id || !process_sequence ||
+        (location_count && !locations) || (decision_capacity && !rows) ||
+        event_count > SIZE_MAX / sizeof(*events) ||
+        manifest_byte_count > SIZE_MAX ||
+        exclusion_count > SIZE_MAX / sizeof(*exclusions) ||
+        program_capacity > SIZE_MAX / sizeof(*programs) ||
+        token_capacity > SIZE_MAX / sizeof(*tokens) ||
+        witness_capacity > SIZE_MAX / sizeof(*witnesses) ||
+        location_count > SIZE_MAX / sizeof(*locations) ||
+        decision_capacity > SIZE_MAX / sizeof(*rows) ||
+        (locations && (uintptr_t)locations % _Alignof(SimpleMcdcSourceLocationV2)) ||
+        (rows && (uintptr_t)rows % _Alignof(SimpleMcdcDecisionReportV2)) ||
+        (uintptr_t)report % _Alignof(SimpleMcdcReportV2))
+        return SIMPLE_MCDC_V1_INVALID;
+    const size_t location_bytes = (size_t)location_count * sizeof(*locations);
+    const size_t decision_bytes = (size_t)decision_capacity * sizeof(*rows);
+    const size_t event_bytes = (size_t)event_count * sizeof(*events);
+    const size_t manifest_bytes_size = (size_t)manifest_byte_count;
+    const size_t exclusion_bytes = (size_t)exclusion_count * sizeof(*exclusions);
+    const size_t program_bytes = (size_t)program_capacity * sizeof(*programs);
+    const size_t token_bytes = (size_t)token_capacity * sizeof(*tokens);
+    const size_t witness_bytes = (size_t)witness_capacity * sizeof(*witnesses);
+    if (mcdc_ranges_overlap(locations, location_bytes, rows, decision_bytes) ||
+        mcdc_ranges_overlap(locations, location_bytes, report, sizeof(*report)) ||
+        mcdc_ranges_overlap(locations, location_bytes, events, event_bytes) ||
+        mcdc_ranges_overlap(locations, location_bytes, programs, program_bytes) ||
+        mcdc_ranges_overlap(locations, location_bytes, tokens, token_bytes) ||
+        mcdc_ranges_overlap(locations, location_bytes, witnesses, witness_bytes) ||
+        mcdc_ranges_overlap(rows, decision_bytes, report, sizeof(*report)) ||
+        mcdc_ranges_overlap(rows, decision_bytes, events, event_bytes) ||
+        mcdc_ranges_overlap(rows, decision_bytes, manifest_bytes, manifest_bytes_size) ||
+        mcdc_ranges_overlap(rows, decision_bytes, exclusions, exclusion_bytes) ||
+        mcdc_ranges_overlap(rows, decision_bytes, programs, program_bytes) ||
+        mcdc_ranges_overlap(rows, decision_bytes, tokens, token_bytes) ||
+        mcdc_ranges_overlap(rows, decision_bytes, witnesses, witness_bytes) ||
+        mcdc_ranges_overlap(report, sizeof(*report), events, event_bytes) ||
+        mcdc_ranges_overlap(report, sizeof(*report), manifest_bytes, manifest_bytes_size) ||
+        mcdc_ranges_overlap(report, sizeof(*report), exclusions, exclusion_bytes) ||
+        mcdc_ranges_overlap(report, sizeof(*report), programs, program_bytes) ||
+        mcdc_ranges_overlap(report, sizeof(*report), tokens, token_bytes) ||
+        mcdc_ranges_overlap(report, sizeof(*report), witnesses, witness_bytes))
+        return SIMPLE_MCDC_V1_INVALID;
+    *report = (SimpleMcdcReportV2){0};
+    SimpleMcdcReportV1 v1;
+    const int32_t status = rt_mcdc_report_mcdp_v1(
+        events, event_count, manifest_bytes, manifest_byte_count,
+        exclusions, exclusion_count, current_epoch, mode, programs,
+        program_capacity, tokens, token_capacity, witnesses, witness_capacity,
+        proof_budget, &v1);
+    if (status != SIMPLE_MCDC_V1_OK &&
+        status != SIMPLE_MCDC_V1_GATE_FAILED &&
+        status != SIMPLE_MCDC_V1_EMPTY_DENOMINATOR) return status;
+    /* V1 has already authenticated and decoded this exact manifest into the
+     * supplied program workspace.  Rehashing it here would add a redundant
+     * O(manifest bytes) pass to every V2 report. */
+    SimpleMcdcManifestInfoV1 info = {0};
+    info.program_count = v1.decisions;
+    memcpy(info.identity_sha256, manifest_bytes + 24u, 64u);
+    if (location_count != info.program_count ||
+        decision_capacity < info.program_count)
+        return SIMPLE_MCDC_V1_OUTPUT_TOO_SMALL;
+
+    size_t witness_index = 0, exclusion_index = 0;
+    for (size_t i = 0; i < (size_t)info.program_count; ++i) {
+        const SimpleMcdcDecisionExprV1 *program = &programs[i];
+        const SimpleMcdcSourceLocationV2 *location = &locations[i];
+        if (location->decision_id != program->decision_id ||
+            location->source_digest != program->source_digest ||
+            !location->source_file_digest || !location->line || !location->column)
+            return SIMPLE_MCDC_V1_INVALID;
+        const uint64_t complete = (UINT64_C(1) << program->condition_count) - 1u;
+        while (exclusion_index < (size_t)exclusion_count &&
+               (exclusions[exclusion_index].source_digest < program->source_digest ||
+                (exclusions[exclusion_index].source_digest == program->source_digest &&
+                 exclusions[exclusion_index].decision_id < program->decision_id)))
+            ++exclusion_index;
+        uint64_t excluded = 0;
+        if (exclusion_index < (size_t)exclusion_count &&
+            exclusions[exclusion_index].source_digest == program->source_digest &&
+            exclusions[exclusion_index].decision_id == program->decision_id)
+            excluded = exclusions[exclusion_index].condition_mask;
+        uint64_t covered = 0;
+        while (witness_index < (size_t)v1.witness_count &&
+               witnesses[witness_index].source_digest == program->source_digest &&
+               witnesses[witness_index].decision_id == program->decision_id) {
+            covered |= UINT64_C(1) << witnesses[witness_index].condition_index;
+            ++witness_index;
+        }
+        SimpleMcdcDecisionReportV2 *row = &rows[i];
+        *row = (SimpleMcdcDecisionReportV2){0};
+        row->decision_id = program->decision_id;
+        row->source_digest = program->source_digest;
+        row->source_file_digest = location->source_file_digest;
+        row->covered_mask = covered & ~excluded;
+        row->excluded_mask = excluded;
+        row->eligible_mask = complete & ~excluded;
+        row->process_id = process_id;
+        row->process_sequence = process_sequence;
+        row->line = location->line;
+        row->column = location->column;
+        row->condition_count = program->condition_count;
+        row->mode = mode;
+        memcpy(row->binary_identity_sha256, info.identity_sha256, 64u);
+        mcdc_decision_row_digest_v2(row, row->row_provenance_sha256);
+        ++report->gross_decisions;
+        if (!row->eligible_mask) ++report->excluded_decisions;
+        else {
+            ++report->eligible_decisions;
+            if ((row->covered_mask & row->eligible_mask) == row->eligible_mask)
+                ++report->covered_decisions;
+            else ++report->uncovered_decisions;
+        }
+    }
+    if (witness_index != (size_t)v1.witness_count)
+        return SIMPLE_MCDC_V1_INVALID;
+    report->gross_conditions = v1.gross_conditions;
+    report->eligible_conditions = v1.eligible_conditions;
+    report->excluded_conditions = v1.excluded_conditions;
+    report->covered_conditions = v1.covered_eligible_conditions;
+    report->uncovered_conditions = v1.uncovered_eligible_conditions;
+    report->witnessed_pairs = v1.witness_count;
+    report->process_count = 1;
+    report->decision_row_count = info.program_count;
+    report->process_id = process_id;
+    report->process_sequence = process_sequence;
+    report->mode = mode;
+    report->gate_passed = v1.gate_passed;
+    memcpy(report->binary_identity_sha256, info.identity_sha256, 64u);
+    mcdc_report_summary_digest_v2(report, rows, info.program_count,
+                                  witnesses, v1.witness_count,
+                                  report->provenance_sha256);
+    return status;
+}
+
+static int mcdc_merge_order_v2(const SimpleMcdcDecisionReportV2 *a,
+                               const SimpleMcdcDecisionReportV2 *b) {
+    if (a->source_digest != b->source_digest)
+        return a->source_digest < b->source_digest ? -1 : 1;
+    if (a->decision_id != b->decision_id)
+        return a->decision_id < b->decision_id ? -1 : 1;
+    if (a->process_id != b->process_id)
+        return a->process_id < b->process_id ? -1 : 1;
+    if (a->process_sequence != b->process_sequence)
+        return a->process_sequence < b->process_sequence ? -1 : 1;
+    return 0;
+}
+
+int32_t rt_mcdc_merge_reports_v2(
+        const SimpleMcdcDecisionReportV2 *inputs, uint64_t input_count,
+        SimpleMcdcDecisionReportV2 *outputs, uint64_t output_capacity,
+        SimpleMcdcReportV2 *report) {
+    if (!report || !input_count || !inputs || !outputs ||
+        input_count > SIZE_MAX / sizeof(*inputs) ||
+        output_capacity > SIZE_MAX / sizeof(*outputs) ||
+        (uintptr_t)inputs % _Alignof(SimpleMcdcDecisionReportV2) ||
+        (uintptr_t)outputs % _Alignof(SimpleMcdcDecisionReportV2) ||
+        (uintptr_t)report % _Alignof(SimpleMcdcReportV2) ||
+        mcdc_ranges_overlap(inputs, (size_t)input_count * sizeof(*inputs),
+                            outputs, (size_t)output_capacity * sizeof(*outputs)))
+        return SIMPLE_MCDC_V1_INVALID;
+    *report = (SimpleMcdcReportV2){0};
+    uint8_t expected_digest[64];
+    uint64_t process_count = 0, group_process_count = 0;
+    size_t output_count = 0, i = 0;
+    while (i < (size_t)input_count) {
+        const size_t begin = i;
+        const SimpleMcdcDecisionReportV2 *first = &inputs[i];
+        if (!first->decision_id || !first->source_digest ||
+            !first->source_file_digest || !first->line || !first->column ||
+            !first->condition_count || first->condition_count > 62u ||
+            first->mode > SIMPLE_MCDC_REPORT_BETA_V1)
+            return SIMPLE_MCDC_V1_INVALID;
+        uint64_t covered = 0;
+        while (i < (size_t)input_count &&
+               inputs[i].source_digest == first->source_digest &&
+               inputs[i].decision_id == first->decision_id) {
+            const SimpleMcdcDecisionReportV2 *row = &inputs[i];
+            if (i && mcdc_merge_order_v2(&inputs[i - 1], row) >= 0)
+                return mcdc_merge_order_v2(&inputs[i - 1], row) == 0
+                    ? SIMPLE_MCDC_V1_DUPLICATE : SIMPLE_MCDC_V1_INVALID;
+            mcdc_decision_row_digest_v2(row, expected_digest);
+            if (memcmp(expected_digest, row->row_provenance_sha256, 64u))
+                return SIMPLE_MCDC_V1_TAMPERED;
+            if (row->source_file_digest != first->source_file_digest ||
+                row->line != first->line || row->column != first->column ||
+                row->condition_count != first->condition_count ||
+                row->mode != first->mode ||
+                row->excluded_mask != first->excluded_mask ||
+                row->eligible_mask != first->eligible_mask ||
+                memcmp(row->binary_identity_sha256,
+                       first->binary_identity_sha256, 64u))
+                return SIMPLE_MCDC_V1_TAMPERED;
+            const uint64_t complete =
+                (UINT64_C(1) << row->condition_count) - 1u;
+            if ((row->eligible_mask | row->excluded_mask) != complete ||
+                (row->eligible_mask & row->excluded_mask) ||
+                (row->covered_mask & ~row->eligible_mask))
+                return SIMPLE_MCDC_V1_INVALID;
+            covered |= row->covered_mask;
+            ++i;
+        }
+        const uint64_t this_process_count = (uint64_t)(i - begin);
+        if (!process_count) process_count = this_process_count;
+        else if (this_process_count != process_count)
+            return SIMPLE_MCDC_V1_TAMPERED;
+        /* Every decision must contain the same canonical process provenance
+         * sequence.  This detects omitted/injected process rows in O(N). */
+        if (begin) {
+            const size_t previous_begin = begin - (size_t)group_process_count;
+            for (size_t p = 0; p < (size_t)process_count; ++p)
+                if (inputs[previous_begin + p].process_id != inputs[begin + p].process_id ||
+                    inputs[previous_begin + p].process_sequence !=
+                        inputs[begin + p].process_sequence)
+                    return SIMPLE_MCDC_V1_TAMPERED;
+        }
+        group_process_count = this_process_count;
+        if (output_count >= (size_t)output_capacity)
+            return SIMPLE_MCDC_V1_OUTPUT_TOO_SMALL;
+        if (output_count &&
+            (first->mode != outputs[0].mode ||
+             memcmp(first->binary_identity_sha256,
+                    outputs[0].binary_identity_sha256, 64u)))
+            return SIMPLE_MCDC_V1_TAMPERED;
+        SimpleMcdcDecisionReportV2 *out = &outputs[output_count++];
+        *out = *first;
+        out->covered_mask = covered;
+        out->process_id = 0;
+        out->process_sequence = 0;
+        mcdc_decision_row_digest_v2(out, out->row_provenance_sha256);
+        ++report->gross_decisions;
+        report->gross_conditions += first->condition_count;
+        report->excluded_conditions += mcdc_popcount_v1(first->excluded_mask);
+        report->eligible_conditions += mcdc_popcount_v1(first->eligible_mask);
+        report->covered_conditions += mcdc_popcount_v1(covered);
+        report->witnessed_pairs += mcdc_popcount_v1(covered);
+        if (!first->eligible_mask) ++report->excluded_decisions;
+        else {
+            ++report->eligible_decisions;
+            if (covered == first->eligible_mask) ++report->covered_decisions;
+            else ++report->uncovered_decisions;
+        }
+    }
+    report->uncovered_conditions =
+        report->eligible_conditions - report->covered_conditions;
+    report->process_count = process_count;
+    report->decision_row_count = output_count;
+    report->mode = outputs[0].mode;
+    report->gate_passed = report->eligible_conditions &&
+        report->covered_conditions == report->eligible_conditions;
+    memcpy(report->binary_identity_sha256,
+           outputs[0].binary_identity_sha256, 64u);
+    /* Merge output has no single-process identity and no raw witness rows;
+     * covered masks are the canonical merged witness evidence. */
+    mcdc_report_summary_digest_v2(report, outputs, output_count, NULL, 0,
+                                  report->provenance_sha256);
+    if (!report->eligible_conditions) return SIMPLE_MCDC_V1_EMPTY_DENOMINATOR;
+    return report->gate_passed ? SIMPLE_MCDC_V1_OK
+                               : SIMPLE_MCDC_V1_GATE_FAILED;
+}
+
 static bool coverage_add_size(size_t a, size_t b, size_t *result) {
     if (a > SIZE_MAX - b) return false;
     *result = a + b;
