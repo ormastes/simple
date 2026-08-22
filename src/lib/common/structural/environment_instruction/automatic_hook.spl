@@ -51,9 +51,46 @@ fn rt_hal_automatic_access_metadata_v1_well_formed(
             value.result_offset, value.result_capacity,
             value.result_region_capacity))
 
-struct RtHalAutomaticExtractionOwnerV1:
+struct RtHalAutomaticExtractionReceiptV1:
+    instruction: EnvInstructionV1
+    accepted: bool
+    status: EnvInstructionStatusV1
+
+class RtHalAutomaticExtractionOwnerV1:
     installed: bool
     binding: RtHalEnvironmentBindingV1
+
+    me extract(metadata: RtHalAutomaticAccessMetadataV1)
+            -> RtHalAutomaticExtractionReceiptV1:
+        # Constant work: scalar validation plus the existing fixed cursor
+        # update.  Mutation occurs only on this canonical owner; no stale owner
+        # copy is returned to invite a second commit of the same sequence.
+        val admitted = self.installed
+            and rt_hal_automatic_access_metadata_v1_well_formed(metadata)
+            and rt_hal_environment_binding_v1_well_formed(self.binding)
+            and not self.binding.extraction.sealed
+            and metadata.tagged_operation_id == self.binding.tagged_operation_id
+            and metadata.invocation_id == self.binding.extraction.invocation_id
+            and metadata.sequence == self.binding.extraction.next_sequence
+            and rt_hal_environment_opcode_admitted_v1(
+                metadata.tagged_operation_id, metadata.opcode)
+        if not admitted:
+            val rejected = _rt_hal_automatic_rejected_binding_v1(
+                self.binding, metadata)
+            self.binding = rejected.0
+            return RtHalAutomaticExtractionReceiptV1(
+                rejected.1, false, self.binding.extraction.status)
+        val extracted = rt_hal_environment_extract_v1(self.binding,
+            metadata.opcode, metadata.capability_id, metadata.flags,
+            metadata.argument_offset, metadata.argument_length,
+            metadata.argument_capacity, metadata.result_offset,
+            metadata.result_capacity, metadata.result_region_capacity)
+        self.binding = extracted.binding
+        RtHalAutomaticExtractionReceiptV1(extracted.instruction,
+            extracted.accepted, self.binding.extraction.status)
+
+    me seal():
+        self.binding = rt_hal_environment_binding_seal_v1(self.binding)
 
 fn rt_hal_automatic_extraction_owner_v1(
         tagged_operation_id: i64, invocation_id: i64,
@@ -69,16 +106,11 @@ fn rt_hal_automatic_extraction_owner_absent_v1()
     RtHalAutomaticExtractionOwnerV1(false,
         rt_hal_environment_binding_v1(0, 0, 0))
 
-struct RtHalAutomaticExtractionStepV1:
-    owner: RtHalAutomaticExtractionOwnerV1
-    instruction: EnvInstructionV1
-    accepted: bool
-
-fn _rt_hal_automatic_rejected_step_v1(
-        owner: RtHalAutomaticExtractionOwnerV1,
+fn _rt_hal_automatic_rejected_binding_v1(
+        binding: RtHalEnvironmentBindingV1,
         metadata: RtHalAutomaticAccessMetadataV1)
-        -> RtHalAutomaticExtractionStepV1:
-    val cursor = owner.binding.extraction
+        -> (RtHalEnvironmentBindingV1, EnvInstructionV1):
+    val cursor = binding.extraction
     val status = if cursor.instruction_count >= cursor.instruction_capacity:
         EnvInstructionStatusV1.Overflow
     else:
@@ -94,49 +126,13 @@ fn _rt_hal_automatic_rejected_step_v1(
         metadata.flags, metadata.argument_offset, metadata.argument_length,
         metadata.argument_capacity, metadata.result_offset,
         metadata.result_capacity, metadata.result_region_capacity)
-    RtHalAutomaticExtractionStepV1(
-        RtHalAutomaticExtractionOwnerV1(owner.installed,
-            RtHalEnvironmentBindingV1(owner.binding.tagged_operation_id,
-                owner.binding.environment_schema_id, failed)),
-        instruction, false)
-
-fn rt_hal_automatic_extract_v1(
-        owner: RtHalAutomaticExtractionOwnerV1,
-        metadata: RtHalAutomaticAccessMetadataV1)
-        -> RtHalAutomaticExtractionStepV1:
-    # Constant work: scalar validation plus the existing fixed cursor update.
-    # No array growth, map lookup, string operation, physical access, or copy.
-    val admitted = owner.installed
-        and rt_hal_automatic_access_metadata_v1_well_formed(metadata)
-        and rt_hal_environment_binding_v1_well_formed(owner.binding)
-        and not owner.binding.extraction.sealed
-        and metadata.tagged_operation_id == owner.binding.tagged_operation_id
-        and metadata.invocation_id == owner.binding.extraction.invocation_id
-        and metadata.sequence == owner.binding.extraction.next_sequence
-        and rt_hal_environment_opcode_admitted_v1(
-            metadata.tagged_operation_id, metadata.opcode)
-    if not admitted:
-        return _rt_hal_automatic_rejected_step_v1(owner, metadata)
-    val extracted = rt_hal_environment_extract_v1(owner.binding,
-        metadata.opcode, metadata.capability_id, metadata.flags,
-        metadata.argument_offset, metadata.argument_length,
-        metadata.argument_capacity, metadata.result_offset,
-        metadata.result_capacity, metadata.result_region_capacity)
-    RtHalAutomaticExtractionStepV1(
-        RtHalAutomaticExtractionOwnerV1(true, extracted.binding),
-        extracted.instruction, extracted.accepted)
-
-fn rt_hal_automatic_extraction_seal_v1(
-        owner: RtHalAutomaticExtractionOwnerV1)
-        -> RtHalAutomaticExtractionOwnerV1:
-    RtHalAutomaticExtractionOwnerV1(owner.installed,
-        rt_hal_environment_binding_seal_v1(owner.binding))
+    (RtHalEnvironmentBindingV1(binding.tagged_operation_id,
+        binding.environment_schema_id, failed), instruction)
 
 export RT_HAL_AUTOMATIC_METADATA_SCHEMA_V1
 export RtHalAutomaticAccessMetadataV1
 export rt_hal_automatic_access_metadata_v1
 export rt_hal_automatic_access_metadata_v1_well_formed
-export RtHalAutomaticExtractionOwnerV1, RtHalAutomaticExtractionStepV1
+export RtHalAutomaticExtractionOwnerV1, RtHalAutomaticExtractionReceiptV1
 export rt_hal_automatic_extraction_owner_v1
 export rt_hal_automatic_extraction_owner_absent_v1
-export rt_hal_automatic_extract_v1, rt_hal_automatic_extraction_seal_v1
