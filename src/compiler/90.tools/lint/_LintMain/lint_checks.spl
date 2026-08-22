@@ -250,8 +250,10 @@ impl Linter:
         Linter(
             lints: lints, results: [], config: config,
             last_resolved_path: "", last_resolved_config: nil,
-            retain_combined_view: false, last_source_view_valid: false,
-            last_source_lines: [], parsed_sdn_index: {}, parsed_sdn_configs: [],
+            retain_combined_view: false, last_source_locations_valid: false,
+            last_source_function_lines: {}, last_source_collection_fix_lines: {},
+            last_source_export_star_lines: {},
+            parsed_sdn_index: {}, parsed_sdn_configs: [],
             parsed_sdn_count: 0, manifest_free_config: manifest_free_config,
             critical_dynamic_acquire_loaded: false,
             critical_dynamic_acquire_mode: "allow",
@@ -269,8 +271,10 @@ impl Linter:
     me release_combined_lint_view():
         self.last_resolved_path = ""
         self.last_resolved_config = nil
-        self.last_source_view_valid = false
-        self.last_source_lines = []
+        self.last_source_locations_valid = false
+        self.last_source_function_lines = {}
+        self.last_source_collection_fix_lines = {}
+        self.last_source_export_star_lines = {}
     
     me lint_source(path: String, content: String) -> [LintRunResult]:
         self.results = []
@@ -281,11 +285,18 @@ impl Linter:
             resolve_prepared_lint_config_with_lines(self.config, lines)
         else:
             resolve_lint_config_with_lines(self.config, path, lines)
-        if self.retain_combined_view:
+        if self.retain_combined_view and path.ends_with(".spl"):
             self.last_resolved_path = path
             self.last_resolved_config = Some(file_config)
-            self.last_source_view_valid = true
-            self.last_source_lines = lines
+            # Build the compact fallback-location index while the canonical
+            # split view is already live. Do not retain file-sized line text
+            # across the parser/AST append boundary.
+            val locations = lint_source_location_index(lines)
+            self.last_source_function_lines = locations.function_lines
+            self.last_source_collection_fix_lines = locations.collection_fix_lines
+            self.last_source_export_star_lines = locations.export_star_lines
+            # Publish only after the complete same-revision snapshot exists.
+            self.last_source_locations_valid = true
         else:
             self.release_combined_lint_view()
         var line_num = 1
