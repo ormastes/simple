@@ -144,6 +144,7 @@ fn all_lint_names() -> [text]:
      # map_lint_code_to_config_name). Default warn (regression-safe).
      "unused_code", "style_convention", "unsafe_pattern", "concurrency_misuse",
      "closure_capture", "ignored_return", "multiline_bool", "memory_safety",
+     "collection_performance",
      "visibility_boundary", "database_integrity", "tracking_traceability",
      # Freestanding/kernel-risk entry-closure codegen defect avoidance
      # (C1/C4/C5/C7) — scoped to src/os/** and examples/09_embedded/**.
@@ -221,6 +222,10 @@ fn build_default_levels() -> Dict<String, String>:
     levels["ignored_return"] = "warn"
     levels["multiline_bool"] = "warn"
     levels["memory_safety"] = "warn"
+    # Stable policy owner for COLL001-COLL019 and future typed CollectionPlan
+    # diagnostics. Moderate/strict report warnings; robust/critical may deny
+    # typed high-confidence defects. The AST fallback caps itself at warning.
+    levels["collection_performance"] = "warn"
     levels["visibility_boundary"] = "warn"
     levels["database_integrity"] = "warn"
     levels["tracking_traceability"] = "warn"
@@ -289,6 +294,7 @@ fn _strict_robust_levels(levels: Dict<String, String>) -> Dict<String, String>:
     strict["unsafe_pattern"] = "deny"
     strict["raw_sffi_call"] = "deny"
     strict["memory_safety"] = "deny"
+    strict["collection_performance"] = "deny"
     strict["concurrency_misuse"] = "deny"
     strict["visibility_boundary"] = "deny"
     strict["non_exhaustive_match"] = "deny"
@@ -709,6 +715,8 @@ fn apply_config_level(config: LintConfig, lint_code: String, original_level: Lin
 # Map internal lint code (e.g. "T001") to config name (e.g. "todo_format").
 # Returns "" for codes with no direct mapping.
 fn map_lint_code_to_config_name(code: String) -> String:
+    if code.starts_with("COLL"):
+        return "collection_performance"
     if code == "primitive_api":
         return "primitive_api"
     if code == "bare_bool":
@@ -839,6 +847,8 @@ class LintDiag:
     message: String
     fix_hint: Option<String>
     easy_fix: Option<EasyFix>
+    evidence: [String]
+    uncertainty: Option<String>
 
 impl LintDiag:
     fn new(code: String, level: LintLevel, category: LintCategory, message: String) -> LintDiag:
@@ -848,7 +858,9 @@ impl LintDiag:
             category: category,
             message: message,
             fix_hint: nil,
-            easy_fix: nil
+            easy_fix: nil,
+            evidence: [],
+            uncertainty: nil
         )
 
     fn with_fix(hint: String) -> LintDiag:
@@ -858,7 +870,9 @@ impl LintDiag:
             category: self.category,
             message: self.message,
             fix_hint: Some(hint),
-            easy_fix: self.easy_fix
+            easy_fix: self.easy_fix,
+            evidence: self.evidence,
+            uncertainty: self.uncertainty
         )
 
     fn with_easy_fix(fix: EasyFix) -> LintDiag:
@@ -868,7 +882,25 @@ impl LintDiag:
             category: self.category,
             message: self.message,
             fix_hint: self.fix_hint,
-            easy_fix: Some(fix)
+            easy_fix: Some(fix),
+            evidence: self.evidence,
+            uncertainty: self.uncertainty
+        )
+
+    fn with_evidence(evidence: [String]) -> LintDiag:
+        LintDiag(
+            code: self.code, level: self.level, category: self.category,
+            message: self.message, fix_hint: self.fix_hint,
+            easy_fix: self.easy_fix, evidence: evidence,
+            uncertainty: self.uncertainty
+        )
+
+    fn with_uncertainty(reason: String) -> LintDiag:
+        LintDiag(
+            code: self.code, level: self.level, category: self.category,
+            message: self.message, fix_hint: self.fix_hint,
+            easy_fix: self.easy_fix, evidence: self.evidence,
+            uncertainty: Some(reason)
         )
 
 class LintRunResult:
@@ -907,6 +939,15 @@ impl LintRunResult:
         match self.lint.easy_fix:
             case Some(fix):
                 output = output + "\n" + "  fix: available [{fix.id}] ({fix.confidence_str()})"
+            case nil:
+                val _ = 0
+
+        for evidence_line in self.lint.evidence:
+            output = output + "\n  evidence: " + evidence_line
+
+        match self.lint.uncertainty:
+            case Some(reason):
+                output = output + "\n  uncertainty: " + reason
             case nil:
                 val _ = 0
 
