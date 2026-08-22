@@ -367,7 +367,6 @@ void spl_eprintln(const char* s) {
     fputs(s ? s : "", stderr);
     fputc('\n', stderr);
 }
-
 void spl_panic(const char* msg) {
     fprintf(stderr, "panic: %s\n", msg ? msg : "");
     exit(1);

@@ -1654,3 +1654,108 @@ it returns, resume sub-operation tracing at the first-pass caller. The split
 conditional-expression parse failure is also concrete language evidence; do
 not reintroduce that unaccepted line break. No trusted Stage 3, ARM64 SimpleOS
 artifact, or QEMU rendering evidence is claimed.
+
+## Scalar helper aggregate-boundary cycles (2026-08-22)
+
+Cycle 1 added helper-entry, scalar-route, candidate, helper-return, and
+first-pass caller-return receipts for `process_run_bounded`. The original
+surface-5 call entered the helper and returned to its caller. A later facade
+entered the same helper and exited 139 before its first scalar-route receipt.
+
+Cycle 2 added a `facade.source_index` receipt immediately after helper entry.
+The result was stronger: neither call emitted that receipt, while the first
+call still returned and the second call exited 139. The later failure is
+therefore at the `ModuleSurface` aggregate parameter/field-projection boundary,
+before traversal of `import_target_indices`. No Stage-3 candidate was created.
+
+Cycle 3 removed the `ModuleSurface`, `ParserImport`, and `ImportItem` values
+from `module_surface_explicit_import_origin` entirely. The helper now receives
+only frozen scalar route arrays plus facade path/name text; empty aligned item
+ranges identify wildcard routes. The source passed parsing and native code
+generation, but the refreshed upstream bootstrap could not link Phase 2:
+`Stage4 runtime capsule has unresolved runtime symbols: spl_eprintln`. This
+link failure is outside the changed helper and occurred before a Phase-2
+compiler, sanity receipt, or new Stage-3 admission could be produced.
+
+The three-cycle cap is exhausted. Preserve the scalar-argument correction as
+unverified work, repair or sync the `core-c-bootstrap` runtime capsule's
+`spl_eprintln` ownership in a fresh session, then resume Phase 2 exactly once.
+Do not claim Phase 3 or QEMU evidence from this run. No ARM64 SimpleOS artifact
+or QEMU 2D, web, GUI, or window-manager evidence exists yet.
+
+## Runtime capsule and frontend-cache cycles (2026-08-22)
+
+The `spl_eprintln` Phase-2 link failure was an exact compatibility-owner gap.
+`runtime_native.c::rt_eprintln` calls `spl_eprintln`; the standalone core lane
+excludes `runtime.c`, while `runtime_legacy_core.c` owned `spl_print` and
+`spl_println` but not their stderr twin. Adding `spl_eprintln` to that same
+localized compatibility owner made the exact failed native-build shard pass
+with 3 rebuilt modules, 742 cached modules, and zero failures. After removing
+obsolete content-addressed Rust-authority outputs to recover 24 GiB, the full
+Phase-2 wrapper passed compiler sanity and the struct receiver/runtime gate.
+
+The newly admitted Stage 3 then exited 139 much earlier than the prior
+export-origin boundary: twelve surfaces released, followed by a crash at
+`parse-start` for `src/compiler/backend/backend_types.spl`. No Stage-3 binary,
+sanity receipt, or provenance manifest was produced.
+
+Cycle 2 changed the cache decoder call from direct optional pattern binding to
+an explicit retained optional, `nil` check, and subsequent `unwrap()`. This is
+the required fail-closed ordering for `ParserModule?`, but the exact Phase-2
+compile still exited 139 on the first cache-restored module. With
+`SIMPLE_FRONTEND_CACHE=0`, the same compiler parsed all 221 files and advanced
+into HIR, proving the authored file and fresh parser path are not the crash.
+
+Cycle 3 wired the outer streaming driver to the unused dedicated Stage-4
+streaming frontend entry and disabled cache restoration in that mode. The
+exact probe advanced from file 1 to file 21 before exit 139, proving the nested
+scope/lifetime behavior is not equivalent to the driver's existing outer
+scope. That wiring was removed. The explicit optional `nil` check/unwrap and
+the verified `spl_eprintln` owner remain.
+
+The three-cycle cap is exhausted. In a fresh session, add an explicit
+`allow_cache_restore`/uncached frontend entry that keeps
+`parse_and_build_module_scoped(..., false)` under the driver's existing outer
+transient scope, and call it only from `add_streaming_module_surface`. Verify
+the exact 221-file probe first. This avoids both the unsafe restored module and
+the failed nested streaming-scope experiment. No Phase-3 or QEMU rendering
+evidence is claimed.
+
+## Hermetic Stage-3 cache-off cycles (2026-08-22)
+
+Cycle 1 added an `allow_cache_restore` boolean through the shared frontend
+helpers. Phase 2 linked, but the exact 221-file probe exited 139 after four
+files. The extra native control parameter was removed rather than accepted as
+another ABI-sensitive workaround.
+
+Cycle 2 introduced a separate uncached frontend function with no added helper
+parameter and kept the driver's existing outer transient scope. Phase 2 linked,
+but the exact probe exited 139 after 23 files. Changing the frontend function
+body/layout was therefore not a stable lifetime fix and the duplicate entry
+was removed.
+
+Cycle 3 preserved the original driver/frontend call graph and instead added
+`SIMPLE_FRONTEND_CACHE=0` to the hermetic Stage-3 environment and its hashed
+argument identity in both bootstrap entrypoints. This matches the prior
+diagnostic configuration that parsed all 221 reproducer files. The current
+Phase-2 compiler again parsed all 221 files and entered HIR. Fresh Phase-2
+compiler sanity, struct receiver/runtime capability, and planner admission
+passed.
+
+The admitted Stage-3 run then released all 687 current surfaces and emitted
+`phase2:parse:done`, proving the cache-restore crash is excluded. It advanced
+into HIR and reported real unresolved-type families beginning with 81 errors
+in `src/compiler/driver/driver.spl` (`HirImpl`, `HirStaticAssert`,
+`HirAopAdvice`, `HirDiBinding`, `HirArchRule`, and `HirMockDecl`), followed by
+`Export`/`BlockValue` failures in backend and driver facades. It remained
+CPU-bound inside `src/compiler/driver/driver_pipeline.spl` for more than twenty
+minutes without another durable progress receipt; RSS peaked near 11 GiB and
+later fell near 5.7 GiB. The exact process chain was terminated under the
+runaway/no-progress guard, with its 546308-byte Stage-3 log preserved.
+
+The three-cycle cap is exhausted. The next fresh session should treat the
+first `driver.spl` unresolved HIR payload family as the new fail-fast boundary
+and audit whether the scalar export-origin helper lost wildcard/import owner
+semantics before changing later HIR code. No Stage-3 executable, sanity
+receipt, provenance manifest, ARM64 SimpleOS artifact, or QEMU 2D/web/GUI/
+window-manager evidence exists.
