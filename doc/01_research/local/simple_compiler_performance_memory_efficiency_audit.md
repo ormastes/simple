@@ -2151,3 +2151,28 @@ map rebuilding for request-local indexed storage. Deeply nested overlapping
 bodies can still multiply body scans; the exact follow-up is an offline
 assignment-interval join with source-order emission. No runtime measurement is
 claimed under the no-verify policy.
+
+### Structural-union canonicalization correctness and cost
+
+Union normalization used a linear duplicate scan plus insertion rebuilding of
+parallel key/member arrays, giving quadratic comparisons and cumulative array
+copying. Synthesis normalized the same members three times; module registration
+made that four, narrowing made it two, and canonical/variant names used growing
+immutable text accumulators.
+
+More seriously, the former key dropped named generic arguments, type-parameter
+bounds, array size, reference/pointer mutability, and every field of function,
+projection, inference, tensor, and layer types; several distinct constructors
+collapsed to `other`. That could silently deduplicate distinct members and
+attach the wrong payload/discriminant. The replacement is exhaustive and
+aligned with `hir_types_equal`: spans, function effects, and inference levels
+remain deliberately non-identity, while every actual structural identity field
+is length-framed and identifier-safe.
+
+`UnionNormalized` now owns members, keys, and name from one flatten/key/dedup/
+stable-merge operation. Expected dictionary deduplication plus deterministic
+bottom-up merge ordering replaces quadratic insertion work; synthesis,
+registration, and narrowing reuse one result. Primitive names remain byte
+compatible. Synthetic SymbolId collision handling and source-level named-type
+narrowing remain separately tracked. Execution evidence is unavailable under
+the no-verify instruction.
