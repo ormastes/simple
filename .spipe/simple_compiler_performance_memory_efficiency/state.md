@@ -56,3 +56,7 @@ implementation-in-progress
 - implementation: Repaired GC escape integration for `Ret(value)`, made field store/load region keys consistent, and propagated proven allocation sizes while rejecting invalid sizes.
 - knowledge: Added the compiler performance operator guide, feature-expert skill, and MIR optimization layer-expert skill.
 - verification-blocker: The isolated worktree has no admitted pure-Simple Stage 4 binary. A nearby executable identified itself as a Rust bootstrap seed and was rejected as acceptance evidence; blocker recorded under `doc/08_tracking/bug/simple_compiler_perf_audit_missing_stage4_binary.md`.
+- implementation: Reclassified auto-vectorization as `AnalysisOnly` and canonical collection optimization as `Disabled`; removed hoisting claims, made both hoisting facades fail closed, and excluded unproved collection rewrites pending ownership/alias/effect/differential gates.
+- implementation: Corrected loop exits to retain `(from,to)` edges and made trip counts unknown until SCEV-lite proves initialization, step, direction, branch polarity, nowrap, and finiteness.
+- implementation: AST-only collection findings remain advisory under Robust/Critical profiles with explicit uncertainty and no machine fix; typed proven diagnostics retain the future deny-policy lane.
+- review: Parallel warning/error, MIR-safety, tool-hot-path, and completion audits were source-checked by the merge owner. Remaining requirements stay explicitly incomplete.
