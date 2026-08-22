@@ -20,15 +20,23 @@ into an arbitrary shell-command executor.
 The quick rules checker parses `rules.sdl` from the exact pushed revision, and
 that policy file participates in the producer/consumer fingerprint; dirty or
 concurrent working-tree command text is never executed.
-The consumer canonicalizes evidence beneath the repository root and applies a
+The consumer resolves each repository-relative evidence path as a regular blob
+in the exact pushed revision, never through the live worktree, and applies a
 64 MiB aggregate byte budget before hashing. It deduplicates identical ref
 updates and accepts at most two unique updates per invocation; larger pushes
 fail closed with an instruction to split the push. These bounds prevent
 committed policy input from turning the interactive hook into unbounded local
 file I/O.
-The bootstrap owner writes logs before the ledger and records repository-relative
-evidence references and hashes. This avoids a circular Git hash dependency
+The bootstrap owner writes logs before the ledger under
+`doc/08_tracking/check/evidence/<source-fingerprint>/` and records
+repository-relative evidence references and hashes. Operators commit those
+logs with the ledger, avoiding a circular Git hash dependency
 while binding PASS evidence to the source/config/scripts/tests/docs it qualifies.
+The producer refuses production recording if fingerprinted inputs differ from
+`HEAD`. External or hardware TODO receipts use a separate explicit import:
+their first PASS requires a regular committed blob at `HEAD`, and later source
+fingerprints carry the PASS only while that exact blob/hash remains committed.
+Automated source-sensitive results still invalidate on fingerprint changes.
 After Stage 1-4 admission succeeds, the bootstrap owner canonicalizes the exact
 validated Stage 4 path and injects it as `SIMPLE_BINARY` and the established
 `SIMPLE_BIN` compatibility name for every automated

@@ -22,19 +22,36 @@ lane_is_green() {
     [ -n "$_line" ] || return 1
     _counts=$(printf '%s\n' "$_line" | sed -n "s/^${_label}: *\\([0-9][0-9]*\\) passed, \\([0-9][0-9]*\\) failed, \\([0-9][0-9]*\\) skipped$/\\1 \\2 \\3/p")
     set -- $_counts
-    [ "$#" -eq 3 ] && [ "$1" -gt 0 ] && [ "$2" -eq 0 ]
+    [ "$#" -eq 3 ] && [ "$1" -gt 0 ] && [ "$2" -eq 0 ] && [ "$3" -eq 0 ]
+}
+
+run_explicit_fixture() {
+    _flag=$1
+    _path=$2
+    _label=$3
+    _fixture_out=$(mktemp) || return 2
+    (cd "$ROOT" && "$SIMPLE" test "$_flag" "$_path" --mode=interpreter) >"$_fixture_out" 2>&1
+    _fixture_rc=$?
+    if [ "$_fixture_rc" -ne 0 ] || ! results_are_green "$_fixture_out" || ! lane_is_green "$_fixture_out" "$_label"; then
+        tail -n 20 "$_fixture_out" >&2
+        rm -f "$_fixture_out"
+        return 1
+    fi
+    rm -f "$_fixture_out"
 }
 
 if [ "${1:-}" = --self-test ]; then
     _tmp=$(mktemp -d) || exit 2
     trap 'rm -rf "$_tmp"' EXIT INT TERM
-    printf '%s\n' 'Sdoctest: 3 passed, 0 failed, 0 skipped' 'SPL Doctest: 5 passed, 0 failed, 1 skipped' 'Results: 8 total, 8 passed, 0 failed' > "$_tmp/green"
+    printf '%s\n' 'Sdoctest: 3 passed, 0 failed, 0 skipped' 'SPL Doctest: 5 passed, 0 failed, 0 skipped' 'Results: 8 total, 8 passed, 0 failed' > "$_tmp/green"
+    printf '%s\n' 'Sdoctest: 2 passed, 0 failed, 1 skipped' 'Results: 2 total, 2 passed, 0 failed' > "$_tmp/skipped"
     printf '%s\n' 'Results: 8 total, 7 passed, 1 failed' > "$_tmp/failed"
     printf '%s\n' 'Results: 0 total, 0 passed, 0 failed' > "$_tmp/empty"
     printf '%s\n' 'Results: 8 total, 8 passed, 0 failed trailing' > "$_tmp/malformed"
     results_are_green "$_tmp/green" || exit 1
     lane_is_green "$_tmp/green" Sdoctest || exit 1
     lane_is_green "$_tmp/green" 'SPL Doctest' || exit 1
+    ! lane_is_green "$_tmp/skipped" Sdoctest || exit 1
     ! results_are_green "$_tmp/failed" || exit 1
     ! results_are_green "$_tmp/empty" || exit 1
     ! results_are_green "$_tmp/malformed" || exit 1
@@ -45,6 +62,14 @@ fi
 
 _out=$(mktemp) || exit 2
 trap 'rm -f "$_out"' EXIT INT TERM
+run_explicit_fixture --sdoctest test/fixtures/doctest/green.md Sdoctest || {
+    echo 'STATUS: FAIL sdoctest-markdown-fixture' >&2
+    exit 1
+}
+run_explicit_fixture --spl-doctest test/fixtures/doc_coverage/fully_documented.spl 'SPL Doctest' || {
+    echo 'STATUS: FAIL sdoctest-comment-fixture' >&2
+    exit 1
+}
 (cd "$ROOT" && "$SIMPLE" test test --whole --mode=interpreter) > "$_out" 2>&1
 _rc=$?
 if [ "$_rc" -ne 0 ] || ! results_are_green "$_out" ||

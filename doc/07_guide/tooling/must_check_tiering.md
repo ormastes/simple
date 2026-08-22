@@ -8,8 +8,9 @@ The repository has two mandatory-check tiers:
 - `scripts/check/check-bootstrap-must-pass.shs` owns expensive compiler,
   native-build, full-test, device, QEMU, and benchmark evidence. It updates
   `doc/08_tracking/check/must_check_db.sdn` atomically. Each PASS retains its
-  own `passed_at_utc`, evidence reference, and evidence SHA-256; automated logs live under
-  `build/must-check/<source-fingerprint>/`. TODO/blocked rows use `never`.
+  own `passed_at_utc`, evidence reference, and evidence SHA-256; automated logs
+  live under `doc/08_tracking/check/evidence/<source-fingerprint>/` and are
+  committed with the ledger. TODO/blocked rows use `never`.
   Schema v3 assigns every row an owner and actionable unblock condition. PASS
   rows use `unblock_condition=none`.
 
@@ -59,14 +60,18 @@ Run the bootstrap-owned automated gates with:
 sh scripts/check/check-bootstrap-must-pass.shs
 ```
 
-The Caret bootstrap suite has automated gates for Claude/Codex/Gemini/Kimi
-wrappers, agent-manager messaging primitives, and the bounded parent-owned
+The Caret bootstrap suite has automated fixture-backed gates for the
+Claude/Codex/Gemini/Kimi argv/process wrapper contracts, agent-manager messaging
+primitives, and the bounded parent-owned
 multi-Caret manager with its derived terminal view. `caret-smux-multi-launch`
 remains TODO until that manager is bound to real `os.apps.smux` sessions and
 PTY lifecycle evidence. `caret-local-llm-launch`
 remains TODO: Slang currently owns loader/readiness primitives but does not yet
 provide a generation endpoint that Caret can call. The independent
 `local_torch` provider is not accepted as Slang evidence.
+Actual installed-provider launches are a separate
+`caret-installed-provider-launches` TODO: `/bin/echo` proves routing and process
+lifecycle without paid calls, but does not prove an authenticated provider CLI.
 The existing interpreter/JIT/native engine differential is also an automated
 bootstrap row; it is intentionally absent from the interactive push tier.
 The exhaustive structural-tree self-test is likewise bootstrap-owned. The hook
@@ -79,10 +84,21 @@ dirty policy cannot alter commands or floors, and `rules.sdl` is included in
 the bootstrap/push source fingerprint.
 
 Do not hand-edit a TODO to `pass`; promotion must come from its bootstrap-owned
-checker or retained receipt validator. The push consumer opens and rehashes the
-recorded evidence, so a missing or modified log/receipt rejects the push. PASS may carry forward only while the
-source fingerprint is unchanged; a changed fingerprint resets unrerun rows to
-TODO instead of laundering stale evidence into the new source state.
+checker or a committed receipt:
+
+```sh
+sh scripts/check/check-bootstrap-must-pass.shs \
+  --record-gate-pass <gate-id> --evidence <repo-relative-committed-receipt>
+```
+
+This interface accepts only a manifest `todo` row and a regular evidence blob
+already committed at `HEAD`. Its original PASS time carries forward across
+source fingerprints only while the identical blob/hash remains committed.
+Automated source-sensitive rows still reset when their fingerprint changes.
+The push consumer reads and hashes evidence from the exact pushed revision, so
+dirty, removed, or substituted live-worktree bytes cannot affect the verdict.
+Production recording also refuses to run when fingerprinted inputs differ from
+`HEAD`.
 
 ## Local hook installation
 

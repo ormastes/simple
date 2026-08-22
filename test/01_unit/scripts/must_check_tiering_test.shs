@@ -126,6 +126,7 @@ chmod +x "$fixture/scripts/check/check-tree-size-push.shs"
 printf '%s\n' \
     'must_check_gates |id, tier, push_blocking, mode, command, description|' \
     '    compiler-stage1, bootstrap, true, receipt, "", "fixture"' \
+    '    fixture-manual-receipt, bootstrap, true, todo, "", "record fixture evidence"' \
     '    push-conflict-tree, push, true, range, "sh scripts/check/check-no-conflict-tree-push.shs", "fixture"' \
     '    push-tree-size, push, true, range, "sh scripts/check/check-tree-size-push.shs", "fixture"' \
     '    push-conflict-markers, push, true, range, "sh scripts/check/check-no-conflict-markers-push.shs", "fixture"' \
@@ -140,7 +141,9 @@ printf '%s\n' \
     > "$fixture/doc/08_tracking/check/must_check_db.sdn"
 mkdir -p "$fixture/build"
 printf '    compiler-stage1, todo, never, "", "fixture bootstrap evidence pending", "never", "compiler-team", "run the fixture bootstrap producer"\n' >> "$fixture/doc/08_tracking/check/must_check_db.sdn"
+printf '    fixture-manual-receipt, todo, never, "", "fixture manual evidence pending", "never", "release-team", "record fixture evidence"\n' >> "$fixture/doc/08_tracking/check/must_check_db.sdn"
 for phase in 1 2 3 4; do printf 'phase%s evidence\n' "$phase" > "$fixture/build/phase$phase.receipt"; done
+printf '%s\n' 'fixture manual receipt evidence' > "$fixture/build/manual.receipt"
 printf '%s\n' '#!/bin/sh' \
     'printf "%s\n" compiler-stage1=pass compiler-stage2=pass compiler-stage3=pass compiler-stage4=pass' \
     "printf '%s\\n' compiler-stage1-evidence=$fixture/build/phase1.receipt compiler-stage2-evidence=$fixture/build/phase2.receipt compiler-stage3-evidence=$fixture/build/phase3.receipt compiler-stage4-evidence=$fixture/build/phase4.receipt" \
@@ -163,7 +166,31 @@ MUST_CHECK_SELFTEST=1 MUST_CHECK_NOW=2000-01-01T00:00:00Z \
     sh "$BOOTSTRAP" --record-bootstrap-success >/dev/null
 grep -q 'compiler-stage1, pass, 2000-01-01T00:00:00Z' "$fixture/doc/08_tracking/check/must_check_db.sdn"
 grep -q '"compiler-team", "none"' "$fixture/doc/08_tracking/check/must_check_db.sdn"
-git -C "$fixture" add doc/08_tracking/check/must_check_db.sdn
+
+# A receipt-backed TODO becomes PASS only through the explicit recording
+# interface. Re-recording unchanged evidence must carry the original PASS
+# forward instead of resetting the row or inventing a new evidence binding.
+MUST_CHECK_ROOT="$fixture" \
+MUST_CHECK_MANIFEST="$fixture/config/check/must_check_gates.sdn" \
+MUST_CHECK_LEDGER="$fixture/doc/08_tracking/check/must_check_db.sdn" \
+MUST_CHECK_EVIDENCE_DIR="$fixture/build/must-check-evidence" \
+MUST_CHECK_SELFTEST=1 MUST_CHECK_NOW=2000-01-02T00:00:00Z \
+    sh "$BOOTSTRAP" --record-gate-pass fixture-manual-receipt \
+        --evidence build/manual.receipt >/dev/null
+grep -q 'fixture-manual-receipt, pass, 2000-01-02T00:00:00Z' "$fixture/doc/08_tracking/check/must_check_db.sdn"
+manual_pass_row=$(grep '^[[:space:]]*fixture-manual-receipt,' "$fixture/doc/08_tracking/check/must_check_db.sdn")
+MUST_CHECK_ROOT="$fixture" \
+MUST_CHECK_MANIFEST="$fixture/config/check/must_check_gates.sdn" \
+MUST_CHECK_LEDGER="$fixture/doc/08_tracking/check/must_check_db.sdn" \
+MUST_CHECK_EVIDENCE_DIR="$fixture/build/must-check-evidence" \
+MUST_CHECK_SELFTEST=1 MUST_CHECK_NOW=2000-01-03T00:00:00Z \
+    sh "$BOOTSTRAP" --record-gate-pass fixture-manual-receipt \
+        --evidence build/manual.receipt >/dev/null
+[ "$(grep '^[[:space:]]*fixture-manual-receipt,' "$fixture/doc/08_tracking/check/must_check_db.sdn")" = "$manual_pass_row" ] || {
+    echo "FAIL: unchanged committed receipt PASS was not carried forward"
+    exit 1
+}
+git -C "$fixture" add doc/08_tracking/check/must_check_db.sdn build/must-check-evidence
 git -C "$fixture" commit -qm bootstrap-ledger
 tip=$(git -C "$fixture" rev-parse HEAD)
 start=$(date +%s)
@@ -171,10 +198,41 @@ printf 'refs/heads/main %s refs/heads/main %s\n' "$tip" "$base" | MUST_CHECK_ROO
 ref_elapsed=$(($(date +%s) - start))
 [ "$ref_elapsed" -le 10 ] || { echo "FAIL: push must-check ref path took ${ref_elapsed}s"; exit 1; }
 
+# The pushed commit is authoritative. A dirty or absent live-worktree copy must
+# not replace the exact evidence blob retained in that pushed commit.
+cp "$fixture/build/manual.receipt" "$fixture/build/manual.receipt.saved"
+printf '%s\n' 'live worktree evidence mismatch' > "$fixture/build/manual.receipt"
+printf 'refs/heads/main %s refs/heads/main %s\n' "$tip" "$base" |
+    MUST_CHECK_ROOT="$fixture" sh "$fixture/scripts/check/check-push-must-pass.shs" >/dev/null 2>&1 || {
+        echo "FAIL: exact pushed-ref evidence was replaced by mismatched live bytes"
+        exit 1
+    }
+rm -f "$fixture/build/manual.receipt"
+printf 'refs/heads/main %s refs/heads/main %s\n' "$tip" "$base" |
+    MUST_CHECK_ROOT="$fixture" sh "$fixture/scripts/check/check-push-must-pass.shs" >/dev/null 2>&1 || {
+        echo "FAIL: exact pushed-ref evidence depended on a live worktree file"
+        exit 1
+    }
+mv "$fixture/build/manual.receipt.saved" "$fixture/build/manual.receipt"
+
+# Removing the blob from the revision itself must fail even if the ledger row
+# and a separately restored live file would otherwise look valid.
+git -C "$fixture" rm -q build/manual.receipt
+git -C "$fixture" commit -qm remove-receipt-from-ref
+missing_evidence_tip=$(git -C "$fixture" rev-parse HEAD)
+printf 'refs/heads/main %s refs/heads/main %s\n' "$missing_evidence_tip" "$tip" |
+    MUST_CHECK_ROOT="$fixture" sh "$fixture/scripts/check/check-push-must-pass.shs" >/dev/null 2>&1 && {
+        echo "FAIL: pushed revision without its evidence blob was accepted"
+        exit 1
+    }
+
 rm -f "$fixture/tree-guard-invocations"
+two_ref_start=$(date +%s)
 printf 'refs/heads/main %s refs/heads/main %s\nrefs/tags/same %s refs/tags/same %s\n' \
     "$tip" "$base" "$tip" "$base" |
     MUST_CHECK_ROOT="$fixture" sh "$fixture/scripts/check/check-push-must-pass.shs" >/dev/null
+two_ref_elapsed=$(($(date +%s) - two_ref_start))
+[ "$two_ref_elapsed" -le 10 ] || { echo "FAIL: two-ref push path took ${two_ref_elapsed}s"; exit 1; }
 [ "$(wc -l < "$fixture/tree-guard-invocations" | tr -d ' ')" -eq 1 ] || {
     echo "FAIL: duplicate ref update reran the tree gate"
     exit 1
@@ -191,4 +249,4 @@ start=$(date +%s)
 hook_elapsed=$(($(date +%s) - start))
 [ "$hook_elapsed" -le 10 ] || { echo "FAIL: installed push hook path took ${hook_elapsed}s"; exit 1; }
 
-echo "PASS: must-check tiering contract selftest=${elapsed}s ref-path=${ref_elapsed}s installed-hook=${hook_elapsed}s"
+echo "PASS: must-check tiering contract selftest=${elapsed}s ref-path=${ref_elapsed}s two-ref=${two_ref_elapsed}s installed-hook=${hook_elapsed}s"

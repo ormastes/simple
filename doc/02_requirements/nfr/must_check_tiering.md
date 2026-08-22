@@ -13,4 +13,7 @@
 - NFR-MCT-005: No full bootstrap is required merely to execute the push hook;
   missing required bootstrap evidence is reported quickly and fails closed.
 - NFR-MCT-006: Production PASS evidence is repository-contained, non-symlinked,
-  SHA-256 bound, and limited to 64 MiB aggregate input per ledger validation.
+  committed, SHA-256 bound, read from the exact pushed revision, and limited to
+  64 MiB aggregate input per ledger validation.
+- NFR-MCT-007: A production bootstrap recorder refuses to label evidence with
+  `HEAD` while any fingerprinted input differs from that revision.
