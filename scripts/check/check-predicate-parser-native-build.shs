@@ -9,12 +9,38 @@
 # broke LLVM codegen with "llvm global load referenced undeclared symbol".
 #
 # Scoped to src/compiler/00.common only, so this is a ~10s check, not a full
-# bootstrap. Requires a built stage2 `simple` binary — pass its path as $1,
-# or set SIMPLE_STAGE2_BIN. Falls back to bin/simple if neither is set.
+# bootstrap. Automated bootstrap callers bind the admitted Stage 4 candidate
+# through SIMPLE_BINARY/SIMPLE_BIN. An explicit path remains available for
+# focused diagnostics; SIMPLE_STAGE2_BIN is the legacy fallback.
 set -eu
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-BIN="${1:-${SIMPLE_STAGE2_BIN:-$REPO_ROOT/bin/simple}}"
+
+resolve_binary() {
+    if [ -n "${1:-}" ]; then
+        printf '%s\n' "$1"
+    elif [ -n "${SIMPLE_BINARY:-}" ]; then
+        printf '%s\n' "$SIMPLE_BINARY"
+    elif [ -n "${SIMPLE_BIN:-}" ]; then
+        printf '%s\n' "$SIMPLE_BIN"
+    elif [ -n "${SIMPLE_STAGE2_BIN:-}" ]; then
+        printf '%s\n' "$SIMPLE_STAGE2_BIN"
+    else
+        printf '%s\n' "$REPO_ROOT/bin/simple"
+    fi
+}
+
+if [ "${1:-}" = "--self-test" ]; then
+    [ "$(SIMPLE_BINARY=/stage4 SIMPLE_BIN=/other SIMPLE_STAGE2_BIN=/stage2 resolve_binary /explicit)" = /explicit ]
+    [ "$(SIMPLE_BINARY=/stage4 SIMPLE_BIN=/other SIMPLE_STAGE2_BIN=/stage2 resolve_binary)" = /stage4 ]
+    [ "$(SIMPLE_BINARY= SIMPLE_BIN=/stage4-bin SIMPLE_STAGE2_BIN=/stage2 resolve_binary)" = /stage4-bin ]
+    [ "$(SIMPLE_BINARY= SIMPLE_BIN= SIMPLE_STAGE2_BIN=/stage2 resolve_binary)" = /stage2 ]
+    [ "$(SIMPLE_BINARY= SIMPLE_BIN= SIMPLE_STAGE2_BIN= resolve_binary)" = "$REPO_ROOT/bin/simple" ]
+    echo 'PASS — predicate-parser compiler resolver preserves explicit override and exact Stage4 priority'
+    exit 0
+fi
+
+BIN="$(resolve_binary "${1:-}")"
 
 if [ ! -x "$BIN" ]; then
     echo "ERROR — stage2 binary not found/executable: $BIN" >&2
