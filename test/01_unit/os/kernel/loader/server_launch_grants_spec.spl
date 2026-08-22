@@ -1,0 +1,71 @@
+use std.spec.{describe, it, expect, step}
+use os.kernel.loader.server_launch_grants.{
+    SIMPLEOS_SERVER_EXECUTABLE_V1, SIMPLEOS_SERVER_STATIC_FILE_V1,
+    SIMPLEOS_SERVER_DB_KEY_V1, SIMPLEOS_SERVER_DB_CERTIFICATE_V1,
+    SIMPLEOS_SERVER_DB_PRIVATE_KEY_V1, SIMPLEOS_SERVER_HTTP_PORT_V1,
+    SIMPLEOS_SERVER_DATABASE_PORT_V1, server_launch_grant_plan_v1
+}
+use os.kernel.loader.spawn_recipes.{
+    SPAWN_RECIPE_AUTHENTICATED_SERVER, spawn_recipe_seed_parent_caps
+}
+use os.kernel.loader.spawn_authority.{spawn_authority_spawn_caps}
+use os.kernel.types.capability_types.{
+    CapabilityKind, CapabilitySet, capability_set_bind_owner
+}
+
+describe("authenticated server launch grant builder"):
+
+    it("declares only the exact executable, mounted inputs, and listeners"):
+        val plan = server_launch_grant_plan_v1(SIMPLEOS_SERVER_EXECUTABLE_V1)
+        expect(plan.executable_identity).to_equal(SIMPLEOS_SERVER_EXECUTABLE_V1)
+        expect(plan.future_server_data_authority).to_equal("")
+        expect(plan.grants.len()).to_equal(7)
+
+        val parent = spawn_recipe_seed_parent_caps(
+            SPAWN_RECIPE_AUTHENTICATED_SERVER, 41u64)
+        val child = spawn_authority_spawn_caps(
+            41, SPAWN_RECIPE_AUTHENTICATED_SERVER, parent)
+        expect(child.is_pledged).to_equal(true)
+        expect(child.caps.len()).to_equal(7)
+        expect(child.has(CapabilityKind.FileExec(
+            path_prefix: SIMPLEOS_SERVER_EXECUTABLE_V1))).to_equal(true)
+        expect(child.has(CapabilityKind.FileRead(
+            path_prefix: SIMPLEOS_SERVER_STATIC_FILE_V1))).to_equal(true)
+        expect(child.has(CapabilityKind.FileRead(
+            path_prefix: SIMPLEOS_SERVER_DB_KEY_V1))).to_equal(true)
+        expect(child.has(CapabilityKind.FileRead(
+            path_prefix: SIMPLEOS_SERVER_DB_CERTIFICATE_V1))).to_equal(true)
+        expect(child.has(CapabilityKind.FileRead(
+            path_prefix: SIMPLEOS_SERVER_DB_PRIVATE_KEY_V1))).to_equal(true)
+        expect(child.has(CapabilityKind.NetListen(
+            port: SIMPLEOS_SERVER_HTTP_PORT_V1))).to_equal(true)
+        expect(child.has(CapabilityKind.NetListen(
+            port: SIMPLEOS_SERVER_DATABASE_PORT_V1))).to_equal(true)
+
+        step("unrequested authority remains denied")
+        expect(child.has(CapabilityKind.ProcessSpawn)).to_equal(false)
+        expect(child.has(CapabilityKind.NetConnect(port: 0u16))).to_equal(false)
+        expect(child.has(CapabilityKind.NetListen(port: 22u16))).to_equal(false)
+        expect(child.has(CapabilityKind.FileRead(path_prefix: "/"))).to_equal(false)
+        expect(child.has(CapabilityKind.FileWrite(
+            path_prefix: SIMPLEOS_SERVER_DB_KEY_V1))).to_equal(false)
+        expect(child.has(CapabilityKind.FileCreate(
+            path_prefix: "/SERVER.SDN"))).to_equal(false)
+
+    it("fails closed for a caller-selected executable identity"):
+        val plan = server_launch_grant_plan_v1("/sys/apps/other.elf")
+        expect(plan.executable_identity).to_equal("")
+        expect(plan.grants.len()).to_equal(0)
+
+    it("binds minted tokens to the scheduler task and preserves generations"):
+        val parent = spawn_recipe_seed_parent_caps(
+            SPAWN_RECIPE_AUTHENTICATED_SERVER, 51u64)
+        val minted = spawn_authority_spawn_caps(
+            51, SPAWN_RECIPE_AUTHENTICATED_SERVER, parent)
+        val original_generation = minted.caps[0].generation
+        val bound: CapabilitySet = capability_set_bind_owner(minted, 9001u64)
+        expect(bound.caps.len()).to_equal(minted.caps.len())
+        expect(bound.caps[0].owner).to_equal(9001u64)
+        expect(bound.caps[0].generation).to_equal(original_generation)
+        expect(bound.caps[0].parent_token_id).to_equal(
+            minted.caps[0].parent_token_id)

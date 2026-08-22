@@ -34,6 +34,9 @@ use os.kernel.types.capability_types.{
     CAP_RIGHT_READ, CAP_RIGHT_EXEC
 }
 use os.kernel.ipc.cspace_spawn.{SpawnSpec, CapGrant, AttenuationSpec}
+use os.kernel.loader.server_launch_grants.{
+    SIMPLEOS_SERVER_EXECUTABLE_V1, server_launch_grants_v1
+}
 
 # ============================================================================
 # Recipe ids
@@ -46,9 +49,10 @@ pub val SPAWN_RECIPE_NONE: i64 = 0
 pub val SPAWN_RECIPE_SHELL: i64 = 1
 pub val SPAWN_RECIPE_CONSOLE_SHELL: i64 = 2
 pub val SPAWN_RECIPE_APP_LAUNCHER: i64 = 3
+pub val SPAWN_RECIPE_AUTHENTICATED_SERVER: i64 = 4
 
 pub val SPAWN_RECIPE_FIRST: i64 = 1
-pub val SPAWN_RECIPE_LAST: i64 = 3
+pub val SPAWN_RECIPE_LAST: i64 = 4
 
 pub fn spawn_recipe_is_migrated(recipe: i64) -> bool:
     """True when `recipe` names a migrated caller with a real recipe.
@@ -67,6 +71,8 @@ pub fn spawn_recipe_name(recipe: i64) -> text:
         return "console-shell"
     if recipe == SPAWN_RECIPE_APP_LAUNCHER:
         return "app-launcher"
+    if recipe == SPAWN_RECIPE_AUTHENTICATED_SERVER:
+        return "authenticated-server"
     "none"
 
 # ============================================================================
@@ -85,6 +91,8 @@ pub fn spawn_recipe_exec_prefix(recipe: i64) -> text:
         return "/bin/"
     if recipe == SPAWN_RECIPE_APP_LAUNCHER:
         return "/sys/apps/"
+    if recipe == SPAWN_RECIPE_AUTHENTICATED_SERVER:
+        return SIMPLEOS_SERVER_EXECUTABLE_V1
     ""
 
 pub fn spawn_recipe_read_prefix(recipe: i64) -> text:
@@ -96,6 +104,8 @@ pub fn spawn_recipe_read_prefix(recipe: i64) -> text:
         return "/bin/"
     if recipe == SPAWN_RECIPE_APP_LAUNCHER:
         return "/sys/apps/"
+    if recipe == SPAWN_RECIPE_AUTHENTICATED_SERVER:
+        return ""
     ""
 
 pub fn spawn_recipe_rights_mask(recipe: i64) -> u32:
@@ -137,6 +147,8 @@ pub fn spawn_recipe_grants(recipe: i64) -> [CapGrant]:
     var grants: [CapGrant] = []
     if not spawn_recipe_is_migrated(recipe):
         return grants
+    if recipe == SPAWN_RECIPE_AUTHENTICATED_SERVER:
+        return server_launch_grants_v1(SIMPLEOS_SERVER_EXECUTABLE_V1)
     val exec_prefix = spawn_recipe_exec_prefix(recipe)
     val read_prefix = spawn_recipe_read_prefix(recipe)
     val mask = spawn_recipe_rights_mask(recipe)
@@ -205,6 +217,13 @@ pub fn spawn_recipe_seed_parent_caps(recipe: i64, owner: u64) -> CapabilitySet:
     Returns a PLEDGED set: it can only ever shrink from here."""
     var tokens: [CapabilityToken] = []
     if not spawn_recipe_is_migrated(recipe):
+        return CapabilitySet(caps: tokens, is_pledged: true)
+    if recipe == SPAWN_RECIPE_AUTHENTICATED_SERVER:
+        val grants = server_launch_grants_v1(SIMPLEOS_SERVER_EXECUTABLE_V1)
+        var token_id: u64 = 1u64
+        for grant in grants:
+            tokens.push(_root_token(grant.requested, owner, token_id))
+            token_id = token_id + 1u64
         return CapabilitySet(caps: tokens, is_pledged: true)
     val exec_prefix = spawn_recipe_exec_prefix(recipe)
     val read_prefix = spawn_recipe_read_prefix(recipe)

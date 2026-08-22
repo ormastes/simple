@@ -1,0 +1,75 @@
+# Shared least-authority pouch for the authenticated filesystem server image.
+#
+# This module owns policy, while spawn_recipes owns generic mint plumbing.  A
+# server launch may not borrow APP_LAUNCHER: that recipe authorizes a different
+# executable tree and carries ProcessSpawn authority that the server does not
+# need.
+
+use os.kernel.types.capability_types.{
+    CapabilityKind, CAP_RIGHT_READ, CAP_RIGHT_EXEC
+}
+use os.kernel.ipc.cspace_spawn.{CapGrant, AttenuationSpec}
+
+pub val SIMPLEOS_SERVER_EXECUTABLE_V1: text = "/SERVERS.ELF"
+pub val SIMPLEOS_SERVER_STATIC_FILE_V1: text = "/SYS/SERVER.HTM"
+pub val SIMPLEOS_SERVER_DB_KEY_V1: text = "/SYS/SRVDB.KEY"
+pub val SIMPLEOS_SERVER_DB_CERTIFICATE_V1: text = "/SYS/SRVDB.CRT"
+pub val SIMPLEOS_SERVER_DB_PRIVATE_KEY_V1: text = "/SYS/SRVDB.PK8"
+pub val SIMPLEOS_SERVER_HTTP_PORT_V1: u16 = 8080u16
+pub val SIMPLEOS_SERVER_DATABASE_PORT_V1: u16 = 5433u16
+
+pub struct ServerLaunchGrantPlanV1:
+    executable_identity: text
+    future_server_data_authority: text
+    grants: [CapGrant]
+
+fn _server_attenuation_v1(mask: u32) -> AttenuationSpec:
+    AttenuationSpec(
+        rights_mask: mask, path_prefix: "", depth_limit: 0, single_use: false)
+
+fn _server_file_grant_v1(label: text, path: text) -> CapGrant:
+    CapGrant(
+        label: label,
+        requested: CapabilityKind.FileRead(path_prefix: path),
+        atten: _server_attenuation_v1(CAP_RIGHT_READ))
+
+pub fn server_launch_grant_plan_v1(executable_path: text) -> ServerLaunchGrantPlanV1:
+    """Build the complete authority declaration for one server image.
+
+    An identity mismatch returns an empty pouch.  The future server-data field
+    is deliberately empty and descriptive only: it is not a CapabilityKind and
+    therefore cannot authorize DBFS, FAT32 writes, or any sibling path.
+    """
+    var grants: [CapGrant] = []
+    if executable_path != SIMPLEOS_SERVER_EXECUTABLE_V1:
+        return ServerLaunchGrantPlanV1(
+            executable_identity: "", future_server_data_authority: "",
+            grants: grants)
+    grants.push(CapGrant(
+        label: "server.exec",
+        requested: CapabilityKind.FileExec(
+            path_prefix: SIMPLEOS_SERVER_EXECUTABLE_V1),
+        atten: _server_attenuation_v1(CAP_RIGHT_EXEC)))
+    grants.push(_server_file_grant_v1(
+        "server.static.read", SIMPLEOS_SERVER_STATIC_FILE_V1))
+    grants.push(_server_file_grant_v1(
+        "server.db.credential.read", SIMPLEOS_SERVER_DB_KEY_V1))
+    grants.push(_server_file_grant_v1(
+        "server.db.certificate.read", SIMPLEOS_SERVER_DB_CERTIFICATE_V1))
+    grants.push(_server_file_grant_v1(
+        "server.db.private-key.read", SIMPLEOS_SERVER_DB_PRIVATE_KEY_V1))
+    grants.push(CapGrant(
+        label: "server.http.listen",
+        requested: CapabilityKind.NetListen(port: SIMPLEOS_SERVER_HTTP_PORT_V1),
+        atten: _server_attenuation_v1(CAP_RIGHT_READ)))
+    grants.push(CapGrant(
+        label: "server.database.listen",
+        requested: CapabilityKind.NetListen(
+            port: SIMPLEOS_SERVER_DATABASE_PORT_V1),
+        atten: _server_attenuation_v1(CAP_RIGHT_READ)))
+    ServerLaunchGrantPlanV1(
+        executable_identity: SIMPLEOS_SERVER_EXECUTABLE_V1,
+        future_server_data_authority: "", grants: grants)
+
+pub fn server_launch_grants_v1(executable_path: text) -> [CapGrant]:
+    server_launch_grant_plan_v1(executable_path).grants
