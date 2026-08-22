@@ -54,6 +54,8 @@ not allocate a target collection per basic block, including high-fanout switches
 Verifier consumers should key automation on stable `MIRV001`-`MIRV019` codes, not message
 text. `MIRV999` means the failure remains fail-closed but its machine category has not yet
 been admitted.
+Module receipts aggregate function receipts in sorted symbol order and add `MIRVM001` for
+function-map key/symbol disagreement. They do not imply that a module optimization ran.
 
 ## Diagnostic policy
 
