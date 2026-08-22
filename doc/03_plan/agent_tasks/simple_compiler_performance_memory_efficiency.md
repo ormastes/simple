@@ -59,6 +59,19 @@
 - Verification status: intentionally not executed under the user's explicit
   no-verify instruction; static diff and parallel review only.
 
+## MCP diagnostic wrapper assembly tranche
+
+- Move wrapper JSON construction into cycle-free `query_rich_common`.
+- Cache count text, append envelope/diagnostic/comma fragments and join once.
+- Delegate active `query_diagnostics` and legacy `query_check` entrypoints to the
+  shared emitter; preserve their public command behavior.
+- Pin exact empty and multiple/nested-diagnostic output plus order and both caller
+  delegations in mirrored query diagnostic specs.
+- Performance acceptance: no full `diags_array` or structured-content
+  intermediate; `O(S + D)` work, `O(D)` fragments and one final output allocation.
+- Verification status: intentionally not executed under the user's explicit
+  no-verify instruction; static diff and parallel review only.
+
 ## ANSI-free query diagnostic follow-up
 
 - Merge owner: compiler performance/memory lane.
