@@ -57,14 +57,7 @@ fn _text_list_eq(a: [text], b: [text]) -> bool:
     true
 
 fn mir_lower_trace_enabled() -> bool:
-    val trace = mir_lower_env_get("SIMPLE_COMPILER_TRACE") ?? ""
-    val phase = mir_lower_env_get("SIMPLE_COMPILER_PHASE_PROFILE") ?? ""
-    val diag = mir_lower_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? ""
-    if trace == "1":
-        return true
-    if phase == "1":
-        return true
-    diag == "1"
+    mir_lowering_trace_enabled()
 use compiler.core.types.{TYPE_BOOL, TYPE_I64, TYPE_F64}
 use compiler.mir.synthetic_driver_codegen.{apply_synthetic_driver_codegen}
 
@@ -1025,6 +1018,7 @@ impl MirLowering:
 
     me lower_module(module: HirModule) -> MirModule:
         """Lower HIR module to MIR."""
+        val saved_trace_scope_depth = mir_trace_scope_enter()
         self.symbols = module.symbols
         var function_names: [text] = []
         for raw_func in module.functions.values():
@@ -1185,7 +1179,9 @@ impl MirLowering:
             # the now-complete module so its statics and module index are
             # available to the flat bootstrap LLVM emitter.
             bootstrap_mir_modules_add(self.builder.module)
-            return self.builder.module
+            val bootstrap_result = self.builder.module
+            mir_trace_scope_exit(saved_trace_scope_depth)
+            return bootstrap_result
 
         # Build field map from struct and class definitions
         # (use while loops - for-in broken in compiled native code)
@@ -1474,7 +1470,9 @@ impl MirLowering:
 
         if bootstrap_trace:
             print "[mir-lower] lower_module:done"
-        self.builder.module
+        val result = self.builder.module
+        mir_trace_scope_exit(saved_trace_scope_depth)
+        result
 
     # mutglobal lane (module-level `var` mutation, see
     # scratchpad/mutglobal_plan.md): `lower_const` (function_lowering.spl,
