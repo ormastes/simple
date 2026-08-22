@@ -343,14 +343,20 @@ impl Linter:
                 fix_line = first_rep.line
             self.results.push(LintRunResult.new(path, fix_line, 0, lint))
 
-        # Filter and adjust results based on config
-        var filtered_results: [LintRunResult] = []
-        for result in self.results:
+        # Stable in-place compaction. `self.results` is request-owned and has no
+        # exposed alias here; write never exceeds read, so unread entries are
+        # preserved. Avoid retaining a second full result array at peak.
+        val original_result_count = self.results.len()
+        var result_read = 0
+        var result_write = 0
+        while result_read < original_result_count:
+            val result = self.results[result_read]
             val policy = lint_policy_decision(
                 file_config, result.lint.code, result.lint.level,
                 result.lint.evidence_tier)
             if policy.keep:
                 val adjusted_level = policy.level
+                var kept_result = result
                 if adjusted_level != result.lint.level:
                     val adjusted_lint = LintDiag(
                         code: result.lint.code,
@@ -363,16 +369,18 @@ impl Linter:
                         uncertainty: result.lint.uncertainty,
                         evidence_tier: result.lint.evidence_tier
                     )
-                    filtered_results.push(LintRunResult(
+                    kept_result = LintRunResult(
                         file_path: result.file_path,
                         line: result.line,
                         column: result.column,
                         lint: adjusted_lint
-                    ))
-                else:
-                    filtered_results.push(result)
+                    )
+                self.results[result_write] = kept_result
+                result_write = result_write + 1
+            result_read = result_read + 1
 
-        self.results = filtered_results
+        while self.results.len() > result_write:
+            self.results.pop()
         self.results
 
     me lint_file(path: String) -> LintFileResult:
