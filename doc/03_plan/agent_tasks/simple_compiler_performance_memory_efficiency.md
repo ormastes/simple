@@ -384,3 +384,11 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Pin absence of per-file argument membership/profile scans with a source contract.
 - Reduce explicit N-file policy work from quadratic argument comparisons to one linear command parse plus O(1) per file; retain only constant-size policy state.
 - Follow-up: replace source-sized retained line arrays only after an explicit borrowing/ownership design.
+
+## Completed compiler tranche: quarantine copy propagation
+
+- Preserve exported `CopyChain`/`CopyPropagation` shapes, zero counters, factory, and identity wrapper.
+- Remove partial block/instruction/operand/terminator rewrites and fixed-depth copy-chain walking.
+- Replace simulated copy-to-move fixtures and their manual with honest fail-closed contracts.
+- Record eliminated MIR-array rebuilding, chain traversal, dead parsing/compilation, and source footprint as compiler performance/memory improvements.
+- Follow-up: implement exhaustive block-local Copy-only propagation with near-linear roots, ownership exclusion for Move, exact receipts, verification, and semantic differential witnesses.
