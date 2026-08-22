@@ -367,6 +367,13 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         // hands a raw base pointer to Simple code. Kept a separate TU so it
         // stays auditable in isolation.
         "runtime_packed_span.c",
+        // Terminal probes (rt_terminal_is_tty / rt_terminal_stdout_is_tty / raw
+        // mode / size / rt_stdin_read_byte) backing the std.tui.terminal externs.
+        // Was never an archive member, so a core-C native link of anything
+        // using std.tui.terminal left rt_terminal_* undefined -- the same
+        // tolerated-undefined-then-SIGSEGV class as rt_unwrap_or_trap
+        // (stage3_native_build_and_compile_segv_on_hello_world_2026-08-18).
+        "runtime_terminal.c",
         "runtime_value.h",
         "runtime.h",
         "runtime_packed_span.h",
@@ -905,6 +912,39 @@ fn canonical_archive_symbol(symbol: &str) -> &str {
     }
 }
 
+/// Global symbols DEFINED WEAK (`nm` kinds `W`/`V`) in an archive or object.
+/// A weak definition is overridable by any strong one at the final link, which
+/// is how runtime_memtrack.c's rt_heap_* fallbacks yield to the Rust runtime
+/// accounting (93e0b028ffb). `archive_global_symbols` counts these as defined.
+pub(super) fn archive_weak_global_symbols(path: &Path) -> Result<BTreeSet<String>, String> {
+    let output = nm_command()
+        .arg("-g")
+        .arg("-p")
+        .arg(path)
+        .output()
+        .map_err(|err| format!("failed to inspect archive {}: {err}", path.display()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "failed to inspect archive {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let mut weak = BTreeSet::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let (kind, name) = match fields.as_slice() {
+            [kind, name] if kind.len() == 1 => (*kind, *name),
+            [_address, kind, name] if kind.len() == 1 => (*kind, *name),
+            _ => continue,
+        };
+        if matches!(kind, "W" | "V") {
+            weak.insert(name.to_string());
+        }
+    }
+    Ok(weak)
+}
+
 pub(super) fn archive_global_symbols(path: &Path) -> Result<(BTreeMap<String, usize>, BTreeSet<String>), String> {
     let output = nm_command()
         .arg("-g")
@@ -1166,7 +1206,14 @@ pub(super) fn validate_stage4_cli_c_provider_archive_contract(path: &Path, sourc
 fn archive_definition_owners(archives: &[(&str, &Path)]) -> Result<BTreeMap<String, String>, String> {
     let mut owners = BTreeMap::<String, String>::new();
     for (label, archive) in archives {
-        let forbidden_sections = forbidden_archive_sections(archive)?;
+        // Providers must arrive constructor-free (validate_stage4_cli_c_provider_archive
+        // enforces the same on each one). The CORE is different: it is the whole C
+        // runtime, and its constructors are DISCARDED by the projection step
+        // (`objcopy --remove-section=.init_array/.ctors/...` in
+        // project_stage4_archive_closure), whose output is re-checked. Rejecting
+        // them here made every capsule build fail on a core that the projection
+        // was designed to sanitize (test_stage4_runtime_capsule_keeps_only_requested_globals).
+        let forbidden_sections = if *label == "core" { Vec::new() } else { forbidden_archive_sections(archive)? };
         if !forbidden_sections.is_empty() {
             return Err(format!(
                 "Stage4 archive {label} retained constructor/destructor sections: {}",
@@ -1844,6 +1891,13 @@ fn project_stage4_archive_closure(
             // relocations, so localizing the std-provided rust_eh_personality
             // leaves the final link undefined (observed run 9, 2026-07-24).
             .filter(|raw| canonical_archive_symbol(raw) != "rust_eh_personality")
+            // Allowed-external runtime symbols are OWNED by the outer link (the
+            // Rust runtime's rt_heap_* accounting). The core-C archive ships
+            // WEAK fallbacks for them in the same object as rt_mem_snapshot_*,
+            // so the closure carries them; localizing a weak fallback would bind
+            // the capsule to a private copy the strong owner can never override.
+            // Keep them global; `verify` below insists they stay weak.
+            .filter(|raw| !allowed_external.contains(canonical_archive_symbol(raw)))
             .map(String::as_str)
             .collect::<Vec<_>>()
             .join("\n");
@@ -1884,9 +1938,25 @@ fn project_stage4_archive_closure(
         }
 
         let (localized_defined, localized_undefined) = archive_global_symbols(&localized_object)?;
+        let localized_weak = archive_weak_global_symbols(&localized_object)?;
+        let strong_external: Vec<&str> = localized_defined
+            .keys()
+            .filter(|raw| allowed_external.contains(canonical_archive_symbol(raw)))
+            .filter(|raw| !localized_weak.contains(*raw))
+            .map(String::as_str)
+            .collect();
+        if !strong_external.is_empty() {
+            return Err(format!(
+                "Stage4 runtime capsule defines owner-provided runtime symbols STRONGLY (the outer runtime could not override them): {}",
+                strong_external.join(", ")
+            ));
+        }
         let actual: BTreeMap<String, usize> = localized_defined
             .iter()
             .map(|(symbol, count)| (canonical_archive_symbol(symbol).to_string(), *count))
+            // Allowed-external symbols present as WEAK fallbacks are not exports
+            // of this capsule; the final link replaces them with the owner's.
+            .filter(|(symbol, _)| !allowed_external.contains(symbol.as_str()))
             // rust_eh_personality is deliberately kept global (see the localize
             // filter above): unwind-info personality references stay EXTERNAL
             // through `ld -r`, so demoting it breaks the final link. It is a
@@ -3012,6 +3082,14 @@ fn is_known_system_name(name: &str) -> bool {
     matches!(
         name,
         "malloc"
+            // POSIX, present in glibc/musl/BSD libc alike. These used to be listed
+            // only in is_macos_system_symbol, so on a Linux host they were
+            // weak-stub candidates (test_cxx_abi_symbols_are_not_stub_candidates).
+            | "clock_getres"
+            | "recvmsg"
+            | "sendfile"
+            | "sigaltstack"
+            | "socketpair"
             | "_GLOBAL_OFFSET_TABLE_"
             | "GLOBAL_OFFSET_TABLE_"
             | "calloc"

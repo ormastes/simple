@@ -326,7 +326,12 @@ impl NativeProjectBuilder {
     }
 
     pub(crate) fn selected_runtime_library(&self, temp_dir: &Path) -> Result<Option<(PathBuf, bool)>, String> {
-        let bootstrap_hosted = is_bootstrap_main_entry(&self.entry_file) || self.is_authorized_stage4_compiler_entry();
+        // Only the bootstrap CLI entry may still ask for the Rust-hosted bundle.
+        // A Stage4 compiler entry must build on the core-C lane or fail closed
+        // (doc/04_architecture/runtime/default_native_runtime_shift_to_c_core_abi.md);
+        // it used to be let past this check and then have its explicit `hosted`
+        // request silently re-routed to core-C by resolve_runtime_lane.
+        let bootstrap_hosted = is_bootstrap_main_entry(&self.entry_file);
         if self.runtime_bundle_requests_removed_hosted() && !bootstrap_hosted {
             return Err(
                 "native-build removed Rust-hosted runtime bundles; use simple-core or core-c-bootstrap".to_string(),

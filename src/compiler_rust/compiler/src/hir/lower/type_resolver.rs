@@ -208,6 +208,20 @@ impl Lowerer {
                         return Ok(id);
                     }
                 }
+                // A struct name that exists ONLY with conflicting layouts across the
+                // project (build_import_map moves it from struct_defs into the
+                // duplicate_struct_defs sidecar) is deliberately ERASED to ANY here:
+                // no single field layout is correct, and expr/access.rs resolves
+                // field accesses through such a receiver by NAME against the
+                // sidecar (try_resolve_global_field_index_by_name). Reporting
+                // UnknownType instead rejected every annotation naming it.
+                if self
+                    .duplicate_global_struct_defs
+                    .as_ref()
+                    .is_some_and(|defs| defs.contains_key(name))
+                {
+                    return Ok(TypeId::ANY);
+                }
                 // Bare type names from inference / cross-module signatures.
                 match name {
                     "unit" => return Ok(TypeId::VOID),

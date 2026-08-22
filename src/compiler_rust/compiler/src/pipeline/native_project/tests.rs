@@ -2369,7 +2369,11 @@ int main(void) {
     int64_t keyword_join = rt_string_join(keyword_slice, rt_string_new(NULL, 0));
     if (rt_string_len(keyword_join) != 2 || memcmp(rt_string_data(keyword_join), "fn", 2) != 0) return 47;
     if (!rt_is_none(rt_value_nil()) || rt_is_none(rt_value_int(1))) return 48;
-    if (!rt_is_none(0) || rt_is_some(0) || !rt_is_some(rt_value_int(1))) return 49;
+    /* Raw 0 IS rt_value_int(0) (nil is the special sentinel), so it is a present
+       payload: rt_is_none must say no. Pins the typed-Option contract documented
+       at rt_is_none (enum id 1, Some=0/None=1; raw zero stays present). */
+    if (rt_is_none(0) || !rt_is_some(0) || !rt_is_some(rt_value_int(1))) return 49;
+    if (!rt_is_none(rt_enum_new(1, 1, rt_value_nil())) || rt_is_none(rt_enum_new(1, 0, rt_value_int(0)))) return 72;
     int64_t byte_stride = rt_slice((int64_t)(uintptr_t)byte_left, 0, 2, 2);
     if (rt_array_len((SplArray*)(uintptr_t)byte_stride) != 1 ||
         rt_bytes_u8_at((SplArray*)(uintptr_t)byte_stride, 0) != 'a') return 50;
@@ -2946,18 +2950,22 @@ int main(void) {
     __simple_runtime_init();
     int64_t connection = rt_sqlite_open_memory();
     if (connection == rt_value_nil()) return 1;
-    if (rt_sqlite_execute(connection, text("CREATE TABLE item(label TEXT)")) != rt_value_int(0)) return 2;
-    if (rt_sqlite_execute(connection, text("INSERT INTO item VALUES ('hello')")) != rt_value_int(0)) return 3;
+    /* Scalar extern results cross RAW (untagged): runtime_sqlite.c from_int(v)
+       is `v`, per its header comment, and std sqlite_sffi.spl tests `result == 1`.
+       1 = success, 0 = failure. Comparing against rt_value_int(..) (the boxed
+       in-runtime form) was the stale part of this probe. */
+    if (rt_sqlite_execute(connection, text("CREATE TABLE item(label TEXT)")) != 1) return 2;
+    if (rt_sqlite_execute(connection, text("INSERT INTO item VALUES ('hello')")) != 1) return 3;
     int64_t statement = rt_sqlite_query(connection, text("SELECT label AS item_name FROM item"));
     if (statement == rt_value_nil()) return 4;
-    if (rt_sqlite_query_next(statement) != rt_value_bool(1)) return 5;
-    int64_t index = rt_value_int(0);
+    if (rt_sqlite_query_next(statement) != 1) return 5;
+    int64_t index = 0;
     if (!text_equals(rt_sqlite_column_name(statement, index), "item_name")) return 6;
     if (!text_equals(rt_sqlite_column_text(statement, index), "hello")) return 7;
     rt_sqlite_query_done(statement);
-    if (rt_sqlite_execute(connection, text("invalid sql")) != rt_value_int(-1)) return 8;
+    if (rt_sqlite_execute(connection, text("invalid sql")) != 0) return 8;
     if (!text_contains(rt_sqlite_error_message(connection), "syntax")) return 9;
-    if (rt_sqlite_close(connection) != rt_value_int(0)) return 10;
+    if (rt_sqlite_close(connection) != 1) return 10;
     __simple_runtime_shutdown();
     return 0;
 }
@@ -3655,8 +3663,16 @@ fn test_runtime_bundle_auto_ignores_native_all_for_non_compiler_entry() {
         "/project/examples/10_tooling/trace32_tools/t32_lsp_mcp/tool_runner.spl",
     ));
 
+    // Since fc35bbc28c2 a source checkout is authoritative for the core-C lane:
+    // with `src/runtime` present the lane builds its own archive instead of
+    // returning None. What this test pins is that the `libsimple_native_all.a`
+    // beside the runtime_path is never selected for a non-compiler entry.
     let selected_runtime = builder.selected_runtime_library(temp.path()).unwrap();
-    assert!(selected_runtime.is_none());
+    if let Some((selected, is_native_all)) = selected_runtime.as_ref() {
+        assert_ne!(selected, &native_all);
+        assert!(!is_native_all);
+        assert!(runtime_archive_has_bootstrap_cli_symbols(selected));
+    }
     builder.reject_unexpected_native_all(selected_runtime.as_ref()).unwrap();
 }
 
@@ -3740,9 +3756,19 @@ fn test_bootstrap_mutex_capsule_exports_only_canonical_bootstrap_abi() {
     .into_iter()
     .map(str::to_string)
     .collect::<std::collections::BTreeSet<_>>();
+    // rt_heap_live_bytes / rt_heap_peak_bytes are OWNED by the outer (Rust)
+    // runtime. runtime_memtrack.c ships them as WEAK fallbacks (93e0b028ffb), so
+    // the capsule may carry them only as weak globals the owner overrides --
+    // never as strong exports and never localized into a private copy.
+    let owner_provided = ["rt_heap_live_bytes", "rt_heap_peak_bytes"]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<std::collections::BTreeSet<_>>();
+    let weak = super::tools::archive_weak_global_symbols(&capsule).unwrap();
     let actual = defined
         .keys()
         .map(|symbol| symbol.trim_start_matches('_').to_string())
+        .filter(|symbol| !owner_provided.contains(symbol))
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(actual, expected);
     assert!(!defined.contains_key("rt_native_build"));
@@ -3752,13 +3778,15 @@ fn test_bootstrap_mutex_capsule_exports_only_canonical_bootstrap_abi() {
         .map(|symbol| symbol.trim_start_matches('_').to_string())
         .filter(|symbol| symbol.starts_with("rt_") || symbol.starts_with("spl_"))
         .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(
-        unresolved_runtime,
-        ["rt_heap_live_bytes", "rt_heap_peak_bytes"]
-            .into_iter()
-            .map(str::to_string)
-            .collect()
-    );
+    for symbol in &owner_provided {
+        let is_weak = weak.iter().any(|w| w.trim_start_matches('_') == symbol);
+        let is_undefined = unresolved_runtime.contains(symbol);
+        assert!(
+            is_weak || is_undefined,
+            "{symbol} must be owner-overridable (weak or undefined) in the capsule, found strong/local"
+        );
+    }
+    assert!(unresolved_runtime.is_subset(&owner_provided), "unexpected unresolved: {unresolved_runtime:?}");
 }
 
 #[cfg(target_os = "linux")]
@@ -3917,7 +3945,13 @@ fn test_runtime_bundle_core_c_bootstrap_alias_prefers_runtime_for_non_compiler_e
     builder.entry_file = Some(PathBuf::from("/project/examples/demo/app.spl"));
 
     let (selected, is_native_all) = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
-    assert_eq!(selected, runtime);
+    // fc35bbc28c2: the explicit core-c-bootstrap alias still resolves the lane,
+    // but a source checkout builds the complete core-C archive rather than
+    // trusting a runtime_path decoy (its bootstrap-CLI symbol prefix is not
+    // proof of a complete ABI). The alias must not fall through to native_all.
+    assert_ne!(selected, runtime);
+    assert_ne!(selected, native_all);
+    assert!(runtime_archive_has_bootstrap_cli_symbols(&selected));
     assert!(!is_native_all);
 }
 
@@ -4589,7 +4623,10 @@ fn test_build_import_map_anchors_split_trait_impl_vtable_to_type_definition() {
         (impl_path.clone(), std::fs::read_to_string(&impl_path).unwrap()),
     ];
     let result = super::imports::build_import_map(&file_sources, std::slice::from_ref(&lib_root), &src_root);
-    let owner = format!("{}__Translator", module_prefix_from_path(&class_path, &src_root));
+    // Prefixes are relative to the matched SOURCE DIR (source_root_for_file),
+    // not the fallback root -- the same convention every sibling fixture that
+    // passes `lib_root` as the source dir already asserts (e.g. `log_info`).
+    let owner = format!("{}__Translator", module_prefix_from_path(&class_path, &lib_root));
     assert!(result.vtable_type_owners.contains(&owner));
     assert_eq!(
         result.vtable_symbols.get(&owner),
@@ -4597,7 +4634,7 @@ fn test_build_import_map_anchors_split_trait_impl_vtable_to_type_definition() {
     );
     assert!(!result.vtable_type_owners.contains(&format!(
         "{}__Translator",
-        module_prefix_from_path(&impl_path, &src_root)
+        module_prefix_from_path(&impl_path, &lib_root)
     )));
 }
 
@@ -5600,22 +5637,33 @@ fn test_cxx_abi_symbols_are_not_stub_candidates() {
     assert!(super::tools::is_system_symbol("_perror"));
     assert!(super::tools::is_system_symbol("strcasestr"));
     assert!(super::tools::is_system_symbol("_strcasestr"));
+    // POSIX names: system on every host.
     for symbol in [
         "_cfgetispeed",
-        "_class_addMethod",
         "_clock_getres",
-        "_fsetattrlist",
-        "_getpeereid",
-        "_ivar_getName",
-        "_method_getImplementation",
-        "_protocol_getName",
         "_recvmsg",
         "_sendfile",
-        "_setattrlist",
         "_sigaltstack",
         "_socketpair",
     ] {
         assert!(super::tools::is_system_symbol(symbol), "{symbol}");
+    }
+    // Darwin-only (ObjC runtime / BSD attrlist) names: is_system_symbol is
+    // HOST-gated (is_macos_system_symbol runs only on macOS), so a Linux host
+    // correctly does not treat them as system -- there they are genuinely
+    // unresolvable, and a stub would hide that. Pin them on macOS only.
+    if cfg!(target_os = "macos") {
+        for symbol in [
+            "_class_addMethod",
+            "_fsetattrlist",
+            "_getpeereid",
+            "_ivar_getName",
+            "_method_getImplementation",
+            "_protocol_getName",
+            "_setattrlist",
+        ] {
+            assert!(super::tools::is_system_symbol(symbol), "{symbol}");
+        }
     }
     assert!(!super::tools::is_system_symbol("app__mcp__main"));
 }
@@ -6911,13 +6959,33 @@ fn test_compile_failure_preserves_completed_objects_for_retry() {
                 .count();
             assert_eq!(completed, 1, "successful object was discarded with failed batch");
 
+            // The object cache key folds the cross-module layout fingerprint
+            // (mod.rs: "a CORRECTNESS input to the cache key", not a dependency
+            // model). A retry that FIXES failing.spl adds `failing_probe` to the
+            // world, so good.o legitimately misses -- reuse is not promised
+            // there. What the policy does promise: the preserved object is
+            // reused when the world it was compiled against is reproduced
+            // (failing.spl gone), and a no-change rebuild reuses every object.
+            fs::remove_file(&failing).unwrap();
+            let result = NativeProjectBuilder::new(temp.path().to_path_buf(), archive.clone())
+                .config(config())
+                .source_dir(source_dir.clone())
+                .build()
+                .unwrap();
+            assert_eq!(result.cached, 1, "retry did not reuse the object completed before the failed batch");
+
             fs::write(&failing, "fn failing_probe() -> i64:\n    return 202\n").unwrap();
+            NativeProjectBuilder::new(temp.path().to_path_buf(), archive.clone())
+                .config(config())
+                .source_dir(source_dir.clone())
+                .build()
+                .unwrap();
             let result = NativeProjectBuilder::new(temp.path().to_path_buf(), archive)
                 .config(config())
                 .source_dir(source_dir)
                 .build()
                 .unwrap();
-            assert_eq!(result.cached, 1, "retry did not reuse the completed object");
+            assert_eq!(result.cached, 2, "no-change rebuild did not reuse both objects");
         }
     }
 }
