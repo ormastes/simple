@@ -2401,3 +2401,19 @@ the parser/HIR boundary and remains tracked. Review also corrected nested union
 keys to preserve ordered `hir_types_equal` identity inside other constructors;
 only top-level union normalization is set-like. No execution evidence is
 claimed.
+
+### VHDL deterministic catalog ordering
+
+The catalog contained 29 static calls to local text/SymbolId ordering helpers.
+Both used selection-style nested scans, requiring `n(n-1)/2` comparisons and
+exposing array value/COW copies while ordering dictionary keys. Catalog assembly
+also sorted the same module-owned function, static, constant, and type keys
+twice.
+
+The replacement is a stable bottom-up merge with raw text ordering and numeric
+`SymbolId.id` ordering unchanged. It uses `O(n log n)` comparisons and writes,
+bounded `O(n)` scratch, selects the left run on equality, copies odd trailing
+runs, and guards width growth. Module names and each module-owned key set are
+sorted once and reused. Existing reverse-insertion catalog coverage remains the
+behavioral witness; execution timing, allocation, and RSS evidence is not
+claimed under the no-verify instruction.
