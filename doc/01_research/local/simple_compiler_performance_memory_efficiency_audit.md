@@ -2082,3 +2082,17 @@ returns while removing helper dispatch and runtime shifts. It adds no locals,
 arrays, registry, callbacks, or allocation. Timing evidence remains unavailable
 under the requested no-verify policy, so only the static operation reduction is
 claimed.
+
+### Leading explicit-code allocation audit
+
+The leading `Edddd` probe previously allocated a one-character prefix, a
+five-character candidate, then another prefix and four digit substrings inside
+validation—up to seven temporary texts on the ordinary rejection path. The
+classifier now rejects non-`E` messages without allocation, then materializes
+one bounded five-byte candidate and validates its bytes in place. This avoids
+repeated `byte_at` calls on a potentially raw long C-string, where each access
+may otherwise repeat `strlen`. It deliberately accepts longer suffixes, keeps
+uppercase ASCII `E` and ASCII digits only, and leaves the higher-priority
+bracketed `[E...]` extraction untouched. Valid prefixes drop from seven slices
+to one; non-`E` prefixes drop from one slice to zero; malformed leading-`E`
+prefixes retain one bounded slice to cap scan cost.
