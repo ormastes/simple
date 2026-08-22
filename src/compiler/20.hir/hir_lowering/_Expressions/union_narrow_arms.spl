@@ -26,7 +26,7 @@
 # with no written type is not narrowable -- and the bound is reported, never
 # silent: a type pattern whose scrutinee is not a known union is E-NARROW-001.
 
-use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, SymbolKind}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolKind}
 use compiler.hir.hir_definitions.{
     HirExpr, HirExprKind, HirMatchArm, HirPattern, HirPatternKind, HirPatternPayload
 }
@@ -34,11 +34,10 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.semantics.union_normalize.canonical.{
-    union_normalize, union_variant_name
+    union_member_key, union_normalize, union_variant_name
 }
-use compiler.semantics.union_normalize.synth_enum.{union_synth_symbol_id}
 use compiler.semantics.union_normalize.narrow.{
-    union_narrow_variant_name, union_narrow_error_text
+    union_narrow_member_key_for_type_name, union_narrow_error_text
 }
 
 impl HirLowering:
@@ -103,26 +102,36 @@ impl HirLowering:
         the source visibly handles."""
         val normalized = union_normalize(members)
         val enum_name = normalized.name
+        val enum_symbol = self.symbols.structural_union_symbol(
+            enum_name, 0)
         val enum_type = HirType(
-            kind: HirTypeKind.Named(SymbolId.new(union_synth_symbol_id(enum_name)), []),
+            kind: HirTypeKind.Named(enum_symbol, []),
             span: span)
-        val keys = normalized.keys
+        var variant_by_key: Dict<text, text> = {}
+        for key in normalized.keys:
+            variant_by_key[key] = union_variant_name(key)
         var out: [HirMatchArm] = []
         for a in hir_arms:
             var rewritten = a
             match a.pattern.kind:
                 case HirPatternKind.TypeTest(tt_type, tt_binder):
-                    val variant = union_narrow_variant_name(tt_type)
-                    var known = false
-                    for k in keys:
-                        if union_variant_name(k) == variant:
-                            known = true
-                    if not known:
+                    var requested_key =
+                        union_narrow_member_key_for_type_name(tt_type)
+                    # Bare named type patterns carry spelling only today. Use
+                    # the same registered SymbolId as annotation lowering so a
+                    # named union member matches its structural canonical key.
+                    if not variant_by_key.contains_key(requested_key):
+                        if val named_symbol = self.symbols.lookup(tt_type):
+                            requested_key = union_member_key(HirType(
+                                kind: HirTypeKind.Named(named_symbol, []),
+                                span: a.pattern.span))
+                    if not variant_by_key.contains_key(requested_key):
                         # A member the union does not have. Loud, and NOT
                         # rewritten: an arm that names no variant of the
                         # closed enum must not be smuggled in as one.
                         self.error("E-NARROW-002: `case " + tt_type + " " + tt_binder + ":` is not a member of union " + enum_name, a.pattern.span)
                     else:
+                        val variant = variant_by_key[requested_key]
                         val binder_symbol = self.symbols.define(tt_binder, SymbolKind.Variable, nil, a.pattern.span, Visibility.Private, false, nil)
                         val payload_pat = HirPattern(kind: HirPatternKind.Binding(binder_symbol, false), type_: nil, span: a.pattern.span)
                         val new_pattern = HirPattern(
@@ -133,13 +142,10 @@ impl HirLowering:
                 case HirPatternKind.Literal(lit_expr):
                     match lit_expr.kind:
                         case HirExprKind.NilLit:
-                            var has_nil = false
-                            for k in keys:
-                                if k == "nil":
-                                    has_nil = true
-                            if has_nil:
+                            if variant_by_key.contains_key("nil"):
                                 val nil_pattern = HirPattern(
-                                    kind: HirPatternKind.Enum(enum_type, union_variant_name("nil"), nil),
+                                    kind: HirPatternKind.Enum(
+                                        enum_type, variant_by_key["nil"], nil),
                                     type_: nil,
                                     span: a.pattern.span)
                                 rewritten = HirMatchArm(pattern: nil_pattern, has_guard: a.has_guard, guard: a.guard, body: a.body, span: a.span)
