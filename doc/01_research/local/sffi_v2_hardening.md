@@ -1403,3 +1403,11 @@ zero; conversions release their input handle before matching success or error,
 preserving ownership on both paths. Status tests pass 7/7, both source checks
 pass, and lint has zero errors. Each wrapper has one raw call and constant input
 and output checks only, with no allocation, lookup, hash, I/O, retry, or sync.
+
+Dynamic Torch sum/mean/min/max/argmin/argmax dimension reductions now return
+typed tensor-handle results. `TorchNDArray` propagates the reduction reason;
+argmin/argmax release the intermediate index tensor before matching the
+to-float conversion. Readiness passes 9/9, both source checks pass, and lint has
+zero errors. Each simple reduction retains one raw call; arg reductions retain
+their intrinsic reduction plus conversion calls, without retries, lookups,
+hashing, I/O, synchronization, or added allocations.

@@ -1105,3 +1105,9 @@ Binary arithmetic and to-float now preserve typed errors through all production
 callers. Status tests pass 7/7, focused checks and lint pass, and conversion
 ownership is released before result propagation. Continue with fixed-dimension
 constructors and dimension reductions, then scalar status/value results.
+
+Dimension sum/mean/min/max/argmin/argmax now preserve typed errors end-to-end.
+Readiness passes 9/9, focused checks and lint pass, and index intermediates are
+freed before conversion error propagation. Next migrate fixed-dimension
+constructors, softmax/leaky-relu, and scalar reductions using status/value
+results so legitimate floating-point zero remains distinguishable from error.
