@@ -5,6 +5,10 @@
 - `must_check_tests_docs`: read-only test/manual/wiki routing — complete.
 - Merge owner and final reviewer: primary Codex agent.
 - Generated-manual reviewer: primary Codex agent.
+- `windows_hook_installation`: tooling-team owns native Windows linked-worktree
+  execution; final reviewer is the primary Codex agent. Resume with the exact
+  commands in `doc/03_plan/sys_test/must_check_tiering.md` and retain both
+  installer verdicts plus the installed launcher SHA-256.
 - `.agents/skills/`: N/A — no agent-side `sp_dev` skill exists; the shared
   implementation and verification skills do not define the must-check ledger.
 - `.claude/commands/`: N/A — SPipe development routing is agent/skill owned in
