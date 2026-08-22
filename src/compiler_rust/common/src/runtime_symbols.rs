@@ -190,6 +190,7 @@ pub const CORE_REQUIRED_RUNTIME_SYMBOLS: &[&str] = &[
     "rt_time_now_unix",
     "rt_time_now_nanos",
     "rt_hal_buffer_dispatch_direct_v3",
+    "rt_hal_buffer_dispatch_configured_v3",
     "rt_hal_buffer_dispatch_compare_v3",
     "rt_time_now_micros",
     "rt_time_now_unix_micros",
@@ -577,6 +578,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     // Time operations backed by runtime_time.c and runtime_timestamp.c.
     "rt_time_now_nanos",
     "rt_hal_buffer_dispatch_direct_v3",
+    "rt_hal_buffer_dispatch_configured_v3",
     "rt_hal_buffer_dispatch_compare_v3",
     "rt_time_now_micros",
     "rt_time_now_unix_micros",

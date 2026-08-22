@@ -35,8 +35,8 @@ use compiler.common.assurance.policy_names.{normalize_profile_name}
 use compiler.common.assurance.policy_schema.{AssuranceStrictness}
 use compiler.common.gpu_target_metadata.{normalize_gpu_backend_order_metadata, normalize_gpu_target_metadata_name}
 use compiler.common.hal.rt_hal_static_binding.{
-    rt_hal_manifest_operation_v1, rt_hal_manifest_provider_mask_v1,
-    rt_hal_provider_mask_compares_v1, rt_hal_static_binding_v1}
+    rt_hal_manifest_operation_v1, rt_hal_manifest_is_static_direct_v1,
+    rt_hal_static_binding_v1}
 use compiler.mir.rt_hal_call_rewrite.{RtHalCallModeV1, rt_hal_rewrite_function_calls_v1}
 use compiler.mir.mir_types.{MirConstant}
 
@@ -597,21 +597,17 @@ impl MirLowering:
         # alpha contract: multi-provider functions bind the ABI-compatible
         # zero-argument leaf backed by the immutable init-owned V2 session.
         if resolved_function_attr.has_rt_hal:
-            val provider_mask = rt_hal_manifest_provider_mask_v1(
-                resolved_function_attr.rt_hal_manifest)
             val binding = rt_hal_static_binding_v1(
                 rt_hal_manifest_operation_v1(
                     resolved_function_attr.rt_hal_manifest))
-            val compare_mode = rt_hal_provider_mask_compares_v1(provider_mask)
-            if provider_mask > 0 and (
-                    (compare_mode and binding.compare_supported) or
-                    (not compare_mode and binding.direct_rewrite_supported)):
+            # Multi-provider contracts retain their configured wrapper. Runtime
+            # NormalPreferred chooses direct; alpha/beta choose sealed compare.
+            # A one-provider contract is the only statically direct case.
+            if rt_hal_manifest_is_static_direct_v1(
+                    resolved_function_attr.rt_hal_manifest, binding):
                 val rewrite = rt_hal_rewrite_function_calls_v1(fn_result,
                     resolved_function_attr.rt_hal_manifest,
-                    if compare_mode:
-                        RtHalCallModeV1.SealedCompare
-                    else:
-                        RtHalCallModeV1.NormalDirect)
+                    RtHalCallModeV1.NormalDirect)
                 if rewrite.diagnostic != "":
                     self.error(rewrite.diagnostic, Some(fn_.span))
                 elif rewrite.rewritten_calls != 1:

@@ -1912,6 +1912,12 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
         &[I32],
     ),
     RuntimeFuncSpec::new(
+        "rt_hal_buffer_dispatch_configured_v3",
+        &[I64, I64, I32, I32, I64, I64, I64, I64, I64, I64,
+          I64, I64, I64, I64, I64],
+        &[I32],
+    ),
+    RuntimeFuncSpec::new(
         "rt_hal_buffer_dispatch_compare_v3",
         &[I64, I64, I32, I32, I64, I64, I64, I64, I64, I64,
           I64, I64, I64, I64, I64],
