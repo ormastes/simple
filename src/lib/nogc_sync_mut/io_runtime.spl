@@ -28,25 +28,25 @@ extern fn rt_process_kill(pid: i64) -> bool
 @unsafe(reason: "raw timed process capture; exit code -1 is the failure-or-timeout sentinel", capabilities: [ffi])
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 
+@unsafe(reason: "contains the raw process-capture ABI behind a validated result facade", capabilities: [ffi])
 fn _io_runtime_process_run_raw(cmd: text, args: [text]) -> (text, text, i64):
-    unsafe(capabilities: [ffi]):
-        rt_process_run(cmd, args)
+    rt_process_run(cmd, args)
 
+@unsafe(reason: "contains the raw owned-child spawn ABI behind a PID facade", capabilities: [ffi])
 fn _io_runtime_process_spawn_async_raw(cmd: text, args: [text]) -> i64:
-    unsafe(capabilities: [ffi]):
-        rt_process_spawn_async(cmd, args)
+    rt_process_spawn_async(cmd, args)
 
+@unsafe(reason: "contains the raw owned-child liveness ABI behind a boolean facade", capabilities: [ffi])
 fn _io_runtime_process_is_running_raw(pid: i64) -> bool:
-    unsafe(capabilities: [ffi]):
-        rt_process_is_running(pid)
+    rt_process_is_running(pid)
 
+@unsafe(reason: "contains the raw owned-child termination ABI behind PID validation", capabilities: [ffi])
 fn _io_runtime_process_kill_raw(pid: i64) -> bool:
-    unsafe(capabilities: [ffi]):
-        rt_process_kill(pid)
+    rt_process_kill(pid)
 
+@unsafe(reason: "contains the raw timed process-capture ABI behind a result facade", capabilities: [ffi])
 fn _io_runtime_process_run_timeout_raw(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
-    unsafe(capabilities: [ffi]):
-        rt_process_run_timeout(cmd, args, timeout_ms)
+    rt_process_run_timeout(cmd, args, timeout_ms)
 
 @unsafe(reason: "raw nullable file read; nil is the invalid, unreadable, or runtime-failure sentinel", capabilities: [ffi])
 extern fn rt_file_read_text(path: text) -> text?
@@ -89,6 +89,36 @@ extern fn rt_time_now_monotonic_ms() -> i64
 extern fn rt_shell_exec(cmd: text) -> text
 @unsafe(reason: "raw file-rename status; false sentinel means the rename did not complete", capabilities: [ffi])
 extern fn rt_file_rename(old_path: text, new_path: text) -> bool
+
+# Bootstrap-compatible raw boundaries deliberately use function annotations,
+# not lexical `unsafe(capabilities: ...)` blocks. Older admitted builders parsed
+# those blocks as ordinary expressions in restricted source closures and leaked
+# the capability name into MIR as an unresolved GlobalLoad. These wrappers add
+# no allocation and at most one call around operations already dominated by an
+# OS/runtime boundary.
+@unsafe(reason: "contains the nullable raw file-read ABI behind Result validation", capabilities: [ffi])
+fn _io_runtime_file_read_text_raw(path: text) -> text?:
+    rt_file_read_text(path)
+
+@unsafe(reason: "contains the raw file-write ABI behind status validation", capabilities: [ffi])
+fn _io_runtime_file_write_text_raw(path: text, content: text) -> bool:
+    rt_file_write_text(path, content)
+
+@unsafe(reason: "contains the raw file-existence ABI behind a boolean facade", capabilities: [ffi])
+fn _io_runtime_file_exists_raw(path: text) -> bool:
+    rt_file_exists(path)
+
+@unsafe(reason: "contains the raw recursive-directory ABI behind status validation", capabilities: [ffi])
+fn _io_runtime_dir_create_all_raw(path: text) -> bool:
+    rt_dir_create_all(path)
+
+@unsafe(reason: "contains the raw blocking-sleep ABI behind a unit facade", capabilities: [ffi])
+fn _io_runtime_thread_sleep_raw(millis: i64):
+    rt_thread_sleep(millis)
+
+@unsafe(reason: "contains the raw file-rename ABI behind status validation", capabilities: [ffi])
+fn _io_runtime_file_rename_raw(old_path: text, new_path: text) -> bool:
+    rt_file_rename(old_path, new_path)
 
 # ============================================================================
 # Shell Result
@@ -144,9 +174,7 @@ pub fn file_read(path: text) -> text:
         case Err(_): ""
 
 pub fn file_read_result(path: text) -> Result<text, text>:
-    var content: text? = nil
-    unsafe(capabilities: [ffi]):
-        content = rt_file_read_text(path)
+    val content = _io_runtime_file_read_text_raw(path)
     if content == nil:
         Err("file read failed: {path}")
     else:
@@ -165,9 +193,7 @@ pub fn read_file_text_result(path: text) -> Result<text, text>:
     file_read_result(path)
 
 pub fn file_write(path: text, content: text) -> bool:
-    var wrote = false
-    unsafe(capabilities: [ffi]):
-        wrote = rt_file_write_text(path, content)
+    val wrote = _io_runtime_file_write_text_raw(path, content)
     if wrote:
         return true
     # Writing into a nonexistent directory otherwise no-ops silently
@@ -177,31 +203,24 @@ pub fn file_write(path: text, content: text) -> bool:
     if sep_idx <= 0:
         return false
     val parent = path.substring(0, sep_idx)
-    var parent_exists = false
-    unsafe(capabilities: [ffi]):
-        parent_exists = rt_file_exists(parent)
+    val parent_exists = _io_runtime_file_exists_raw(parent)
     if parent_exists:
         return false
-    unsafe(capabilities: [ffi]):
-        rt_dir_create_all(parent)
-    unsafe(capabilities: [ffi]):
-        rt_file_write_text(path, content)
+    _io_runtime_dir_create_all_raw(parent)
+    _io_runtime_file_write_text_raw(path, content)
 
 pub fn write_file(path: text, content: text) -> bool:
     file_write(path, content)
 
 pub fn file_exists(path: text) -> bool:
-    unsafe(capabilities: [ffi]):
-        rt_file_exists(path)
+    _io_runtime_file_exists_raw(path)
 
 pub fn file_delete(path: text) -> bool:
     rt_file_delete(path)
 
 pub fn remove_file_if_exists(path: text) -> bool:
     # Idempotent delete: true when the file was removed or did not exist.
-    var exists = false
-    unsafe(capabilities: [ffi]):
-        exists = rt_file_exists(path)
+    val exists = _io_runtime_file_exists_raw(path)
     if not exists:
         return true
     rt_file_delete(path)
@@ -316,8 +335,7 @@ pub fn exit(code: i64):
     rt_exit(code)
 
 pub fn thread_sleep(ms: i64):
-    unsafe(capabilities: [ffi]):
-        rt_thread_sleep(ms)
+    _io_runtime_thread_sleep_raw(ms)
 
 # ============================================================================
 # Directory Operations
@@ -325,18 +343,15 @@ pub fn thread_sleep(ms: i64):
 
 pub fn dir_create(path: text, recursive: bool) -> bool:
     if recursive:
-        unsafe(capabilities: [ffi]):
-            rt_dir_create_all(path)
+        _io_runtime_dir_create_all_raw(path)
     else:
         rt_dir_create(path, false)
 
 pub fn dir_create_all(path: text) -> bool:
-    unsafe(capabilities: [ffi]):
-        rt_dir_create_all(path)
+    _io_runtime_dir_create_all_raw(path)
 
 pub fn mkdir_p(path: text) -> bool:
-    unsafe(capabilities: [ffi]):
-        rt_dir_create_all(path)
+    _io_runtime_dir_create_all_raw(path)
 
 pub fn is_dir(path: text) -> bool:
     shell_bool("test -d '{path}'")
@@ -422,8 +437,7 @@ pub fn shell_exec(cmd: text) -> text:
     rt_shell_exec(cmd)
 
 pub fn file_rename(old_path: text, new_path: text) -> bool:
-    unsafe(capabilities: [ffi]):
-        rt_file_rename(old_path, new_path)
+    _io_runtime_file_rename_raw(old_path, new_path)
 
 pub fn process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
     _io_runtime_process_run_timeout_raw(cmd, args, timeout_ms)
