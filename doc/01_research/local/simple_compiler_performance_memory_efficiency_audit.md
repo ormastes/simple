@@ -1891,3 +1891,33 @@ It returns an unchanged value directly when no JSON escape is present; otherwise
 it performs one character scan, records unchanged spans and exact escape literals,
 then joins once. The accepted escape set remains exactly backslash, quote, LF, CR
 and TAB; other text, including Unicode, is unchanged.
+
+### ANSI-free diagnostic output allocation audit
+
+`query check` normalizes combined compiler stdout/stderr before deciding whether
+lint may run, and JSON/count paths normalize it again. `_strip_ansi` previously
+pushed every retained character into a text array and joined it even when the
+compiler emitted no ANSI escape—the normal machine-consumer case. This created
+`O(M)` tiny fragments plus a full output copy per normalization. A preliminary
+escape scan now returns the original text directly when ESC is absent, eliminating
+that common-case auxiliary allocation. ANSI-bearing input still uses the original
+state machine exactly: ESC begins suppression, lowercase `m` ends it, and an
+unterminated sequence drops the remaining suffix. Sharing the already-normalized
+combined output across the decision and JSON parser remains a larger internal API
+follow-up.
+
+### Workspace diagnostics repeated-startup audit
+
+The active workspace command loops over discovered files and launches one
+`simple check` child for each text result. JSON launches `simple run ... query
+check` per file, and that child launches `simple check` again: `N` files therefore
+cost `N` child processes in text mode and `2N` in JSON mode, plus repeated compiler
+startup, configuration, frontend state and output parsing. The LSP/MCP tool already
+documents nested-check deadlock risk and disables this path by default.
+
+The safe replacement is not naive parallelism: parser, lexer, AST pools and lint
+collection still contain module-global mutable state. Introduce a serial in-process
+`WorkspaceDiagnosticSession` first. Freeze command configuration once, create a
+fresh compilation/diagnostic context per file, pass source directly to lint, tag
+results with discovery ordinals and preserve standalone per-file isolation. Move
+parser-owned globals into request/session state before bounded workers are enabled.
