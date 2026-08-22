@@ -1201,3 +1201,22 @@ status-bearing nonblocking read/liveness ABI across C, Rust interpreter, JIT,
 native, and Simple wrappers before promoting this family beyond unsafe-
 minimized. After that, migrate `lsp_transport.spl` and editor smoke/runtime
 duplicates to the same owner, then return to signed provider admission.
+
+The checked read/liveness ABI is now implemented across those source lanes and
+keeps a bounded one-observation poll path. Native behavioral coverage and both
+static source-shape gates pass. Do not promote it beyond `unsafe_unsigned` yet:
+the compiled interpreter artifact is stale, returned C buffers and slot access
+still need an explicit serialization/thread policy, and no provider evidence
+manifest has been signed or admitted. Next actions are:
+
+1. rebuild the compiler and rerun checked status behavior in the compiled
+   interpreter;
+2. add and verify owning serialization plus close-after-EOF lifecycle;
+3. migrate LSP/editor duplicate read/liveness consumers to the checked owner;
+4. bind runtime artifact, compiler, ABI registry, and verification receipt to a
+   real signature and loader admission;
+5. continue `rt_file`, remaining `rt_process`, `rt_env`, and `rt_time` without
+   weakening the one-call/no-unbounded-allocation gates.
+
+Current census: 12,295 rows, 810 tagged, 626 contracted, 352 minimized, 11,211
+untouched, and zero evidence-verified, signature-verified, or admitted.

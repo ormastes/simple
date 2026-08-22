@@ -17,7 +17,7 @@ pub struct AbiVersion {
 
 impl AbiVersion {
     /// Current ABI version of the runtime.
-    pub const CURRENT: Self = Self { major: 1, minor: 6 };
+    pub const CURRENT: Self = Self { major: 1, minor: 7 };
 
     /// Create a new ABI version.
     pub const fn new(major: u16, minor: u16) -> Self {
@@ -797,6 +797,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_process_is_running",
     "rt_process_wait",
     "rt_process_kill",
+    "rt_process_read_stdout_checked",
+    "rt_process_is_alive_checked",
     "rt_process_owned_cancel",
     "rt_process_owned_cancel_value",
     "rt_process_owned_terminate",

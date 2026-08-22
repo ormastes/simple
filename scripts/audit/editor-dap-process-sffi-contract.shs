@@ -1,12 +1,16 @@
 #!/bin/sh
 # Static gate for the editor DAP piped-process boundary.
-# This proves source shape only. The raw stdout ABI still conflates no-data,
-# EOF, invalid handle, and I/O failure, so this gate must not claim verification.
+# This proves source shape only; it is not artifact/signature admission.
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 dap="$root/src/lib/editor/services/debug_session_dap.spl"
 owner="$root/src/lib/nogc_sync_mut/io/process_ops.spl"
+header="$root/src/runtime/runtime.h"
+runtime="$root/src/runtime/runtime_process.c"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/system.rs"
+registry="$root/src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
+specs="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
 
 if grep -Eq '^extern fn rt_process_' "$dap"; then
     echo 'editor DAP redeclared a raw process SFFI symbol' >&2
@@ -15,8 +19,17 @@ fi
 
 for symbol in rt_process_spawn_piped rt_process_write_stdin \
     rt_process_read_stdout rt_process_is_alive rt_process_close_piped; do
-    grep -B1 -F "extern fn ${symbol}" "$owner" |
+    grep -B1 -E "^extern fn ${symbol}\\(" "$owner" |
         grep -Eq '@unsafe\(.*capabilities: \[ffi\]'
+done
+for symbol in rt_process_read_stdout_checked rt_process_is_alive_checked; do
+    grep -B1 -F "extern fn ${symbol}" "$owner" |
+        grep -Eq '@unsafe\(.*capabilities: \[ffi'
+    grep -Fq "${symbol}" "$header"
+    grep -Fq "${symbol}" "$runtime"
+    grep -Fq "pub fn ${symbol}" "$interpreter"
+    grep -Fq "insert_simple!(\"${symbol}\"" "$registry"
+    grep -Fq "RuntimeFuncSpec::new(\"${symbol}\"" "$specs"
 done
 
 grep -Fq 'fn _dap_process_spawn(command: text, args: [text]) -> Result<i64, text>:' "$dap"
@@ -25,7 +38,14 @@ grep -Fq 'fn _dap_process_close(pid: i64) -> Result<(), text>:' "$dap"
 test "$(grep -Fc 'process_spawn_piped(command, args)' "$dap")" -eq 1
 test "$(grep -Fc 'process_write_stdin(pid, data)' "$dap")" -eq 1
 test "$(grep -Fc 'process_close_piped(pid)' "$dap")" -eq 1
-test "$(grep -Fc 'process_read_stdout(' "$dap")" -eq 2
+test "$(grep -Fc 'process_read_stdout_result(' "$dap")" -eq 2
+test "$(grep -Fc 'process_is_piped_alive_result(' "$dap")" -eq 2
+grep -Fq 'pub fn process_read_stdout_result(pid: i64) -> Result<Option<text>, text>:' "$owner"
+grep -Fq 'pub fn process_is_piped_alive_result(pid: i64) -> Result<bool, text>:' "$owner"
+test "$(grep -Fc 'rt_process_read_stdout_checked(pid, out_status)' "$owner")" -eq 1
+test "$(grep -Fc 'rt_process_is_alive_checked(pid)' "$owner")" -eq 1
+grep -Fq 'fn editor_debug_dap_poll_process_pid(pid: i64) -> Result<[EditorDebugDapInboundMessage], text>:' "$dap"
+grep -Fq 'case Err(error): return Err(error)' "$dap"
 
 grep -Fq 'if not me._send_framed_json(json):' "$dap"
 grep -Fq 'if pid <= 0 or _dap_process_write(pid, framed).is_err():' "$dap"
@@ -36,4 +56,4 @@ if grep -Eq 'dlsym|CString|HashMap|Dictionary|sleep\(|retry' "$dap"; then
     exit 1
 fi
 
-echo 'Editor DAP process SFFI contract: PASS raw_redeclarations=0 canonical_calls=1 pending_after_write_only=1 explicit_hot_lookup=none read_contract=unsafe_ambiguous'
+echo 'Editor DAP process SFFI contract: PASS raw_redeclarations=0 checked_provider_calls=1 stack_status=1 pending_after_write_only=1 explicit_hot_lookup=none admission=unsafe_unsigned'

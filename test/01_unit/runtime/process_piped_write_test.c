@@ -638,6 +638,53 @@ static int close_recycles_slots_and_rejects_unknown_handles(void) {
     return elapsed < 5.0;
 }
 
+static int checked_read_and_liveness_preserve_statuses(void) {
+    int32_t status = 99;
+    const char* invalid = rt_process_read_stdout_checked(-1, &status);
+    if (!invalid || invalid[0] != '\0' || status != -2 ||
+        rt_process_read_stdout_checked(-1, NULL)[0] != '\0' ||
+        rt_process_is_alive_checked(-1) != -2) {
+        return 0;
+    }
+
+    int64_t idle_pid = spawn_shell("sleep 30");
+    if (idle_pid <= 0) return 0;
+    status = 99;
+    const char* idle = rt_process_read_stdout_checked(idle_pid, &status);
+    int idle_ok = idle && idle[0] == '\0' && status == 0 &&
+        rt_process_is_alive_checked(idle_pid) == 1;
+    int idle_closed = rt_process_close_piped(idle_pid);
+    if (!idle_ok || !idle_closed) return 0;
+
+    int64_t data_pid = spawn_shell("printf checked-data");
+    if (data_pid <= 0) return 0;
+    int saw_data = 0;
+    int saw_eof = 0;
+    for (int i = 0; i < 1000 && !saw_eof; i++) {
+        status = 99;
+        const char* chunk = rt_process_read_stdout_checked(data_pid, &status);
+        if (status == 1) {
+            if (!chunk || strstr(chunk, "checked-data") == NULL) return 0;
+            saw_data = 1;
+        } else if (status == 2) {
+            saw_eof = 1;
+        } else if (status != 0) {
+            return 0;
+        }
+        if (!saw_eof) usleep(1000);
+    }
+    int exited = 0;
+    for (int i = 0; i < 1000 && !exited; i++) {
+        int32_t alive = rt_process_is_alive_checked(data_pid);
+        if (alive == 0) exited = 1;
+        else if (alive != 1) return 0;
+        if (!exited) usleep(1000);
+    }
+    int closed = rt_process_close_piped(data_pid);
+    return saw_data && saw_eof && exited && closed &&
+        rt_process_is_alive_checked(data_pid) == -2;
+}
+
 static int parent_death_stops_child(void) {
 #ifndef __linux__
     return 1;
@@ -685,8 +732,9 @@ int main(int argc, char** argv) {
     if (!exact_close_kills_and_reaps_group()) return 5;
     if (!reaped_leader_still_kills_group()) return 6;
     if (!close_recycles_slots_and_rejects_unknown_handles()) return 7;
-    if (!parent_death_stops_child()) return 8;
-    if (!sandboxed_renderer_is_sanitized_and_contained()) return 9;
-    if (!sandbox_enter_without_preinit_fails_closed()) return 10;
+    if (!checked_read_and_liveness_preserve_statuses()) return 8;
+    if (!parent_death_stops_child()) return 9;
+    if (!sandboxed_renderer_is_sanitized_and_contained()) return 10;
+    if (!sandbox_enter_without_preinit_fails_closed()) return 11;
     return 0;
 }

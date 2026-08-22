@@ -7,8 +7,8 @@
 use std.editor.services.debug_session_registry.*
 use std.editor.services.debug_session_dap_protocol.*
 use std.io.{
-    process_spawn_piped, process_write_stdin, process_read_stdout,
-    process_is_piped_alive, process_close_piped
+    process_spawn_piped, process_write_stdin, process_read_stdout_result,
+    process_is_piped_alive_result, process_close_piped
 }
 
 fn _dap_process_spawn(command: text, args: [text]) -> Result<i64, text>:
@@ -192,8 +192,12 @@ fn editor_debug_dap_client_request(client: EditorDebugDapClient, command: text, 
     val json = editor_debug_dap_request(seq, command, arguments_json)
     val framed = editor_debug_dap_frame_message(json)
     if client.process_pid > 0:
-        if not process_is_piped_alive(client.process_pid):
-            return (client, 0)
+        match process_is_piped_alive_result(client.process_pid):
+            case Ok(true): pass_dn
+            case Ok(false): return (client, 0)
+            case Err(_): return (client, 0)
+            case _("fail closed if Result gains another variant"):
+                return (client, 0)
         if _dap_process_write(client.process_pid, framed).is_err():
             return (client, 0)
     var send_buffer = client.send_buffer
@@ -354,13 +358,17 @@ fn editor_debug_dap_process_initialize(pid: i64) -> (EditorDebugDapClient, i64):
 fn editor_debug_dap_process_launch(pid: i64, seq: i64, config: EditorDebugLaunchConfig) -> (EditorDebugDapClient, i64):
     editor_debug_dap_process_request(pid, seq, "launch", editor_debug_launch_config_dap_arguments(config))
 
-fn editor_debug_dap_poll_process_pid(pid: i64) -> [EditorDebugDapInboundMessage]:
+fn editor_debug_dap_poll_process_pid(pid: i64) -> Result<[EditorDebugDapInboundMessage], text>:
     var messages: [EditorDebugDapInboundMessage] = []
     if pid <= 0:
-        return messages
-    var buf = process_read_stdout(pid)
-    if buf == "":
-        return messages
+        return Err("invalid_process_handle")
+    var buf = ""
+    match process_read_stdout_result(pid):
+        case Ok(Some(chunk)): buf = chunk
+        case Ok(nil): return Ok(messages)
+        case Err(error): return Err(error)
+        case _("fail closed if Result gains another variant"):
+            return Err("unknown_process_read_result")
     var parsed = true
     while parsed:
         val result = editor_debug_dap_parse_frame(buf)
@@ -376,13 +384,17 @@ fn editor_debug_dap_poll_process_pid(pid: i64) -> [EditorDebugDapInboundMessage]
                 raw_json: json
             ))
             buf = buf.slice(consumed, buf.len())
-    messages
+    Ok(messages)
 
     me _send_framed_json(json: text) -> bool:
         val framed = editor_debug_dap_frame_message(json)
         if me.process_pid > 0:
-            if not process_is_piped_alive(me.process_pid):
-                return false
+            match process_is_piped_alive_result(me.process_pid):
+                case Ok(true): pass_dn
+                case Ok(false): return false
+                case Err(_): return false
+                case _("fail closed if Result gains another variant"):
+                    return false
             if _dap_process_write(me.process_pid, framed).is_err():
                 return false
         me.send_buffer.push(framed)
@@ -492,9 +504,16 @@ fn editor_debug_dap_poll_process_pid(pid: i64) -> [EditorDebugDapInboundMessage]
     me _poll_process_stdout():
         if me.process_pid <= 0:
             return
-        val chunk = process_read_stdout(me.process_pid)
-        if chunk != "":
-            me.process_buffer = me.process_buffer + chunk
+        match process_read_stdout_result(me.process_pid):
+            case Ok(Some(chunk)):
+                me.process_buffer = me.process_buffer + chunk
+            case Ok(nil): return
+            case Err(_):
+                me.running = false
+                return
+            case _("fail closed if Result gains another variant"):
+                me.running = false
+                return
         var parsed = true
         while parsed:
             val result = editor_debug_dap_parse_frame(me.process_buffer)

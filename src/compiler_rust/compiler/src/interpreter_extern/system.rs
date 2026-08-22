@@ -1304,29 +1304,55 @@ pub fn rt_process_write_stdin_some(args: &[Value]) -> Result<Value, CompileError
 /// Callable from Simple as: `rt_process_read_stdout(pid: i64) -> text`
 /// Returns "" when the child is unknown or no data is available yet -- this is
 /// the documented C behaviour, not an error.
-pub fn rt_process_read_stdout(args: &[Value]) -> Result<Value, CompileError> {
+fn piped_read_stdout_checked(pid: i64) -> Result<(String, i32), CompileError> {
     use std::io::Read;
-    let pid = piped_arg_pid(args, "rt_process_read_stdout")?;
-    let mut map = PIPED_PROCESSES.lock().unwrap();
-    let mut out = Vec::new();
-    if let Some(stdout) = map.get_mut(&pid).and_then(|c| c.stdout.as_mut()) {
-        let mut buf = [0u8; 8192];
-        loop {
-            match stdout.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    out.extend_from_slice(&buf[..n]);
-                    if n < buf.len() {
-                        break;
-                    }
-                }
-                // WouldBlock is the normal "nothing yet" answer on the
-                // O_NONBLOCK fd; every other error also yields "".
-                Err(_) => break,
-            }
+    let mut map = PIPED_PROCESSES
+        .lock()
+        .map_err(|_| CompileError::runtime("piped process registry lock poisoned"))?;
+    let Some(stdout) = map.get_mut(&pid).and_then(|c| c.stdout.as_mut()) else {
+        return Ok((String::new(), -2));
+    };
+    let mut buf = [0u8; 8192];
+    let read = loop {
+        match stdout.read(&mut buf) {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            result => break result,
         }
+    };
+    match read {
+        Ok(0) => Ok((String::new(), 2)),
+        Ok(n) => Ok((String::from_utf8_lossy(&buf[..n]).into_owned(), 1)),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok((String::new(), 0)),
+        Err(_) => Ok((String::new(), -3)),
     }
-    Ok(Value::text(String::from_utf8_lossy(&out).into_owned()))
+}
+
+pub fn rt_process_read_stdout(args: &[Value]) -> Result<Value, CompileError> {
+    let pid = piped_arg_pid(args, "rt_process_read_stdout")?;
+    let (out, _) = piped_read_stdout_checked(pid)?;
+    Ok(Value::text(out))
+}
+
+/// Checked non-blocking stdout read. Returns the text from the single read
+/// observation and writes 1=data, 0=would-block, 2=EOF, or a negative error.
+pub fn rt_process_read_stdout_checked(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::runtime(
+            "rt_process_read_stdout_checked requires 2 arguments (pid, out_status)",
+        ));
+    }
+    let pid = piped_arg_pid(args, "rt_process_read_stdout_checked")?;
+    let status_out = match &args[1] {
+        Value::BorrowMut(value) => value,
+        _ => {
+            return Err(CompileError::runtime(
+                "rt_process_read_stdout_checked: out_status must be &mut i32",
+            ))
+        }
+    };
+    let (out, status) = piped_read_stdout_checked(pid)?;
+    *status_out.inner_mut() = Value::Int(i64::from(status));
+    Ok(Value::text(out))
 }
 
 /// Is a piped child still running?
@@ -1334,13 +1360,28 @@ pub fn rt_process_read_stdout(args: &[Value]) -> Result<Value, CompileError> {
 /// Callable from Simple as: `rt_process_is_alive(pid: i64) -> bool`
 pub fn rt_process_is_alive(args: &[Value]) -> Result<Value, CompileError> {
     let pid = piped_arg_pid(args, "rt_process_is_alive")?;
-    let mut map = PIPED_PROCESSES.lock().unwrap();
-    let alive = match map.get_mut(&pid) {
-        // try_wait -> Ok(None) means "still running".
-        Some(child) => matches!(child.try_wait(), Ok(None)),
-        None => false,
+    Ok(Value::Bool(piped_is_alive_checked(pid)? == 1))
+}
+
+fn piped_is_alive_checked(pid: i64) -> Result<i32, CompileError> {
+    let mut map = PIPED_PROCESSES
+        .lock()
+        .map_err(|_| CompileError::runtime("piped process registry lock poisoned"))?;
+    let status = match map.get_mut(&pid) {
+        Some(child) => match child.try_wait() {
+            Ok(None) => 1,
+            Ok(Some(_)) => 0,
+            Err(_) => -3,
+        },
+        None => -2,
     };
-    Ok(Value::Bool(alive))
+    Ok(status)
+}
+
+/// Checked piped-child liveness: 1=alive, 0=exited, negatives=error.
+pub fn rt_process_is_alive_checked(args: &[Value]) -> Result<Value, CompileError> {
+    let pid = piped_arg_pid(args, "rt_process_is_alive_checked")?;
+    Ok(Value::Int(i64::from(piped_is_alive_checked(pid)?)))
 }
 
 /// Close a piped child: drop its stdin (EOF to the child), then kill+reap it.

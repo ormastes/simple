@@ -1995,7 +1995,9 @@ void rt_process_run(void) {}
         "spl_thread_sleep",
         "rt_process_spawn_piped",
         "rt_process_read_stdout",
+        "rt_process_read_stdout_checked",
         "rt_process_is_alive",
+        "rt_process_is_alive_checked",
         "rt_process_close_piped",
     ] {
         assert!(symbols.contains(required), "missing core-C provider {required}");

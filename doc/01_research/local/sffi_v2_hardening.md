@@ -1531,6 +1531,40 @@ failed piped cleanup no longer fabricates a stopped client. Cleanup now uses
 `process_close_piped`, which owns pipe-table and descriptor cleanup, instead of
 generic PID kill.
 
+### Checked piped-process status ABI follow-up
+
+The additive checked ABI now separates nonblocking read outcomes:
+`1=data`, `0=would-block`, `2=EOF`, `-1=null status output`, `-2=invalid
+handle`, and `-3=OS/read failure`; checked liveness returns `1=alive`,
+`0=exited`, `-2=invalid handle`, or `-3=OS/wait failure`. C, Rust interpreter,
+runtime symbol/version metadata, native/JIT signatures, Stage4 closure, and the
+canonical Simple owner agree on the two new symbols. Safe-facing wrappers lift
+them to `Result<Option<text>, text>` and `Result<bool, text>` without converting
+valid `false` or no-data states into numeric workarounds.
+
+The hot path is bounded: POSIX performs one read with EINTR retry, Windows one
+pipe availability query and at most one read, and the Rust interpreter performs
+one 8192-byte read while holding the existing registry mutex. No per-poll
+symbol lookup, hash, retry sleep, map addition, or unbounded buffer growth was
+introduced. Windows no longer performs a process wait on every empty poll or
+infers EOF from leader exit while a descendant can retain stdout. POSIX tracks
+whether the leader was reaped so cleanup does not signal a reused PID/PGID.
+
+The native C behavioral fixture passes invalid-handle, would-block, data, EOF,
+liveness, post-close, slot-recycle, and cleanup checks. Static contract gates
+pass. Compiled-interpreter execution remains unverified because the available
+runner launches the pre-change main-worktree binary, which reports the new
+symbol unknown; rebuilding an admitted compiler is required. Global/static
+returned buffers and unlocked slot lookup also leave a thread-policy proof
+obligation. This boundary therefore remains `unsafe_unsigned`.
+
+The refreshed census is 12,295 declaration rows and 3,172 distinct symbols:
+810 unsafe-tagged, 626 contract-documented, 352 unsafe-minimized, 11,943
+unsafe-unminimized, 11,211 untouched, and zero evidence-verified,
+signature-verified, or verified-and-signed. Implementations are C++ 219, C
+2,325, Rust 2,161, and Simple 558. `rt_process` has 1,031 rows, 31 minimized,
+994 untouched, and zero signed/verified admissions.
+
 This migration adds no map, symbol lookup, hash, retry, sleep, or explicit
 success-path allocation. Each send retains one liveness query and one write;
 each poll retains one read. The source-shape gate reports the stdout contract

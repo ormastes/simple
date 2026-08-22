@@ -892,6 +892,11 @@ bool        rt_process_write_stdin(int64_t pid, const char* data);
 int64_t     rt_process_write_stdin_some(int64_t pid, const char* data, int64_t data_len, int64_t offset, int64_t max_bytes);
 const char* rt_process_read_stdout(int64_t pid);
 bool        rt_process_is_alive(int64_t pid);
+/* Checked nonblocking process state: read status 1=data, 0=would-block,
+ * 2=EOF, -1=null status output, -2=invalid handle, -3=OS/read failure.
+ * Liveness is 1=alive, 0=exited, -2=invalid handle, -3=OS/wait failure. */
+const char* rt_process_read_stdout_checked(int64_t pid, int32_t* out_status);
+int32_t     rt_process_is_alive_checked(int64_t pid);
 bool        rt_process_close_piped(int64_t pid);
 int64_t     rt_editor_spawn_simple_dap(void);
 bool        rt_editor_start_simple_dap(int64_t pid);

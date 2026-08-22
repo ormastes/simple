@@ -832,15 +832,32 @@ int64_t rt_process_write_stdin_some(
     return 0;
 }
 
-const char* rt_process_read_stdout(int64_t pid) {
+const char* rt_process_read_stdout_checked(int64_t pid, int32_t* out_status) {
     win_piped_read_buf[0] = '\0';
-    if (pid <= 0 || pid > UINT32_MAX) return win_piped_read_buf;
+    if (!out_status) return win_piped_read_buf;
+    *out_status = -1;
+    if (pid <= 0 || pid > UINT32_MAX) {
+        *out_status = -2;
+        return win_piped_read_buf;
+    }
     struct WinPipedSlot* slot = win_piped_find((DWORD)pid);
-    if (!slot || !slot->stdout_read) return win_piped_read_buf;
+    if (!slot || !slot->stdout_read) {
+        *out_status = -2;
+        return win_piped_read_buf;
+    }
     DWORD available = 0;
-    if (!PeekNamedPipe(
-            slot->stdout_read, NULL, 0, NULL, &available, NULL) ||
-        available == 0) {
+    if (!PeekNamedPipe(slot->stdout_read, NULL, 0, NULL, &available, NULL)) {
+        DWORD error = GetLastError();
+        *out_status = (error == ERROR_BROKEN_PIPE ||
+                       error == ERROR_PIPE_NOT_CONNECTED) ? 2 : -3;
+        return win_piped_read_buf;
+    }
+    if (available == 0) {
+        /* A descendant may still own the pipe after the leader exits.  Peek
+         * succeeding with no bytes means only "not ready"; broken-pipe is the
+         * authoritative EOF observation.  This also keeps the empty-poll hot
+         * path to one pipe query. */
+        *out_status = 0;
         return win_piped_read_buf;
     }
     DWORD request = available < WIN_PIPED_READ_BUF - 1
@@ -849,21 +866,38 @@ const char* rt_process_read_stdout(int64_t pid) {
     if (!ReadFile(
             slot->stdout_read, win_piped_read_buf, request,
             &read_count, NULL)) {
+        DWORD error = GetLastError();
+        *out_status = (error == ERROR_BROKEN_PIPE ||
+                       error == ERROR_PIPE_NOT_CONNECTED) ? 2 : -3;
         return win_piped_read_buf;
     }
     win_piped_read_buf[read_count] = '\0';
+    *out_status = read_count > 0 ? 1 : 2;
     return win_piped_read_buf;
 }
 
-bool rt_process_is_alive(int64_t pid) {
-    if (pid <= 0 || pid > UINT32_MAX) return false;
+const char* rt_process_read_stdout(int64_t pid) {
+    int32_t ignored = 0;
+    return rt_process_read_stdout_checked(pid, &ignored);
+}
+
+int32_t rt_process_is_alive_checked(int64_t pid) {
+    if (pid <= 0 || pid > UINT32_MAX) return -2;
     struct WinPipedSlot* slot = win_piped_find((DWORD)pid);
-    if (!slot || !slot->process) return false;
+    if (!slot || !slot->process) return -2;
     DWORD wait_result = WaitForSingleObject(slot->process, 0);
-    if (wait_result == WAIT_TIMEOUT) return true;
-    if (wait_result == WAIT_FAILED) return false;
-    win_piped_free(slot);
-    return false;
+    if (wait_result == WAIT_TIMEOUT) return 1;
+    if (wait_result == WAIT_FAILED) return -3;
+    if (wait_result != WAIT_OBJECT_0) return -3;
+    return 0;
+}
+
+bool rt_process_is_alive(int64_t pid) {
+    int32_t status = rt_process_is_alive_checked(pid);
+    if (status == 0 && pid > 0 && pid <= UINT32_MAX) {
+        win_piped_free(win_piped_find((DWORD)pid));
+    }
+    return status == 1;
 }
 
 bool rt_process_close_piped(int64_t pid) {
@@ -981,6 +1015,7 @@ struct RtProcSlot {
     int   stdin_fd;  /* parent writes here  → child's stdin */
     int   stdout_fd; /* parent reads here   ← child's stdout */
     bool  sandboxed_renderer;
+    bool  leader_reaped;
 };
 
 static struct RtProcSlot s_procs[RT_PROC_MAX];
@@ -1013,6 +1048,7 @@ static struct RtProcSlot* proc_alloc(bool sandboxed_renderer) {
             s_procs[i].stdin_fd = -1;
             s_procs[i].stdout_fd = -1;
             s_procs[i].sandboxed_renderer = sandboxed_renderer;
+            s_procs[i].leader_reaped = false;
             if (sandboxed_renderer) s_renderer_slots_active++;
             (void)pthread_mutex_unlock(&s_proc_lock);
             return &s_procs[i];
@@ -1037,6 +1073,7 @@ static void proc_free(struct RtProcSlot* slot) {
     slot->stdin_fd = -1;
     slot->stdout_fd = -1;
     slot->sandboxed_renderer = false;
+    slot->leader_reaped = false;
     slot->pid = 0;
     (void)pthread_mutex_unlock(&s_proc_lock);
     if (stdin_fd >= 0) close(stdin_fd);
@@ -1584,43 +1621,78 @@ int64_t rt_process_write_stdin_some(
  * Returns available data (may be partial), or "" if nothing ready.
  * The returned pointer is valid until the next call.
  */
-const char* rt_process_read_stdout(int64_t pid) {
+const char* rt_process_read_stdout_checked(int64_t pid, int32_t* out_status) {
     s_read_buf[0] = '\0';
-    if (pid <= 0) return s_read_buf;
+    if (!out_status) return s_read_buf;
+    *out_status = -1;
+    pid_t native_pid = (pid_t)pid;
+    if (pid <= 0 || (int64_t)native_pid != pid) {
+        *out_status = -2;
+        return s_read_buf;
+    }
 
-    struct RtProcSlot* slot = proc_find((pid_t)pid);
-    if (!slot || slot->stdout_fd < 0) return s_read_buf;
+    struct RtProcSlot* slot = proc_find(native_pid);
+    if (!slot || slot->stdout_fd < 0) {
+        *out_status = -2;
+        return s_read_buf;
+    }
 
-    ssize_t n = read(slot->stdout_fd, s_read_buf, RT_PROC_READ_BUF - 1);
+    ssize_t n;
+    do {
+        n = read(slot->stdout_fd, s_read_buf, RT_PROC_READ_BUF - 1);
+    } while (n < 0 && errno == EINTR);
     if (n > 0) {
         s_read_buf[n] = '\0';
+        *out_status = 1;
+    } else if (n == 0) {
+        *out_status = 2;
+    } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        *out_status = 0;
     } else {
-        s_read_buf[0] = '\0';
+        *out_status = -3;
     }
     return s_read_buf;
+}
+
+const char* rt_process_read_stdout(int64_t pid) {
+    int32_t ignored = 0;
+    return rt_process_read_stdout_checked(pid, &ignored);
 }
 
 /*
  * Returns true if the process is still alive.
  * Lazily closes fds and clears the table entry when death is detected.
  */
-bool rt_process_is_alive(int64_t pid) {
-    if (pid <= 0) return false;
-    struct RtProcSlot* slot = proc_find((pid_t)pid);
-    if (!slot) return false;
+int32_t rt_process_is_alive_checked(int64_t pid) {
+    pid_t native_pid = (pid_t)pid;
+    if (pid <= 0 || (int64_t)native_pid != pid) return -2;
+    struct RtProcSlot* slot = proc_find(native_pid);
+    if (!slot) return -2;
 
     int status;
     pid_t result;
     do {
         result = waitpid(slot->pid, &status, WNOHANG);
     } while (result < 0 && errno == EINTR);
-    if (result == 0) return true;   /* still running */
+    if (result == 0) return 1;   /* still running */
     if (result == slot->pid || (result < 0 && errno == ECHILD)) {
-        if (!proc_signal_tree(slot->pid, SIGKILL, true)) return false;
-        proc_free(slot);
-        return false;
+        slot->leader_reaped = true;
+        return 0;
     }
-    return false;
+    return -3;
+}
+
+bool rt_process_is_alive(int64_t pid) {
+    int32_t status = rt_process_is_alive_checked(pid);
+    if (status == 0) {
+        pid_t native_pid = (pid_t)pid;
+        struct RtProcSlot* slot = proc_find(native_pid);
+        if (slot) {
+            (void)proc_signal_tree(slot->pid, SIGKILL, true);
+            proc_free(slot);
+        }
+    }
+    return status == 1;
 }
 
 bool rt_process_close_piped(int64_t pid) {
@@ -1632,21 +1704,28 @@ bool rt_process_close_piped(int64_t pid) {
         close(slot->stdin_fd);
         slot->stdin_fd = -1;
     }
-    if (!proc_signal_tree(slot->pid, SIGTERM, false)) return false;
+    if (!slot->leader_reaped &&
+        !proc_signal_tree(slot->pid, SIGTERM, false)) return false;
 
     int status = 0;
-    bool leader_reaped = false;
-    for (int waited_ms = 0; waited_ms < 100; waited_ms++) {
-        pid_t result = waitpid(slot->pid, &status, WNOHANG);
-        if (result == slot->pid || (result < 0 && errno == ECHILD)) {
-            leader_reaped = true;
-            break;
+    bool leader_reaped = slot->leader_reaped;
+    if (!leader_reaped) {
+        for (int waited_ms = 0; waited_ms < 100; waited_ms++) {
+            pid_t result = waitpid(slot->pid, &status, WNOHANG);
+            if (result == slot->pid || (result < 0 && errno == ECHILD)) {
+                leader_reaped = true;
+                slot->leader_reaped = true;
+                break;
+            }
+            if (result < 0 && errno != EINTR) return false;
+            usleep(1000);
         }
-        if (result < 0 && errno != EINTR) return false;
-        usleep(1000);
     }
 
-    if (!proc_signal_tree(slot->pid, SIGKILL, leader_reaped)) return false;
+    /* Do not signal a process group after its leader was reaped: the PID/PGID
+     * can be reused while stdout is retained for draining. */
+    if (!leader_reaped &&
+        !proc_signal_tree(slot->pid, SIGKILL, false)) return false;
     if (!leader_reaped) {
         for (int waited_ms = 0; waited_ms < 5000; waited_ms++) {
             pid_t result = waitpid(slot->pid, &status, WNOHANG);

@@ -29,8 +29,12 @@ extern fn rt_process_write_stdin(pid: i64, data: text) -> bool
 extern fn rt_process_write_stdin_some(pid: i64, data: text, data_len: i64, offset: i64, max_bytes: i64) -> i64
 @unsafe(reason: "raw nonblocking stdout; empty sentinel conflates no data with absent or read failure", capabilities: [ffi])
 extern fn rt_process_read_stdout(pid: i64) -> text
+@unsafe(reason: "raw checked nonblocking stdout; status 1=data, 0=would-block, 2=EOF, negatives=contract/runtime error", capabilities: [ffi, raw_ptr])
+extern fn rt_process_read_stdout_checked(pid: i64, out_status: *mut i32) -> text
 @unsafe(reason: "raw piped-child liveness status; false sentinel means stopped, absent, or runtime failure", capabilities: [ffi])
 extern fn rt_process_is_alive(pid: i64) -> bool
+@unsafe(reason: "raw checked piped-child liveness status; 1=alive, 0=exited, negatives=contract/runtime error", capabilities: [ffi])
+extern fn rt_process_is_alive_checked(pid: i64) -> i32
 @unsafe(reason: "raw piped-child close status; false sentinel means absent or cleanup failure", capabilities: [ffi])
 extern fn rt_process_close_piped(pid: i64) -> bool
 extern fn rt_file_read_text(path: text) -> text
@@ -81,9 +85,17 @@ fn _process_read_stdout_raw(pid: i64) -> text:
     unsafe(capabilities: [ffi]):
         rt_process_read_stdout(pid)
 
+fn _process_read_stdout_checked_raw(pid: i64, out_status: *mut i32) -> text:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_process_read_stdout_checked(pid, out_status)
+
 fn _process_is_alive_raw(pid: i64) -> bool:
     unsafe(capabilities: [ffi]):
         rt_process_is_alive(pid)
+
+fn _process_is_alive_checked_raw(pid: i64) -> i32:
+    unsafe(capabilities: [ffi]):
+        rt_process_is_alive_checked(pid)
 
 fn _process_close_piped_raw(pid: i64) -> bool:
     unsafe(capabilities: [ffi]):
@@ -203,8 +215,28 @@ pub fn process_write_stdin_some(pid: i64, data: text, offset: i64, max_bytes: i6
 pub fn process_read_stdout(pid: i64) -> text:
     _process_read_stdout_raw(pid)
 
+pub fn process_read_stdout_result(pid: i64) -> Result<Option<text>, text>:
+    if pid <= 0: return Err("invalid_process_handle")
+    var status: i32 = 0
+    val chunk = _process_read_stdout_checked_raw(pid, &mut status)
+    if status == 1:
+        if chunk == "": return Err("process_stdout_empty_data_contract")
+        return Ok(Some(chunk))
+    if status == 0: return Ok(nil)
+    if status == 2: return Err("process_stdout_eof")
+    if status == -2: return Err("invalid_process_handle")
+    Err("process_stdout_read_failed")
+
 pub fn process_is_piped_alive(pid: i64) -> bool:
     _process_is_alive_raw(pid)
+
+pub fn process_is_piped_alive_result(pid: i64) -> Result<bool, text>:
+    if pid <= 0: return Err("invalid_process_handle")
+    val status = _process_is_alive_checked_raw(pid)
+    if status == 1: return Ok(true)
+    if status == 0: return Ok(false)
+    if status == -2: return Err("invalid_process_handle")
+    Err("process_liveness_check_failed")
 
 pub fn process_close_piped(pid: i64) -> bool:
     _process_close_piped_raw(pid)

@@ -1505,6 +1505,10 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_process_wait", &[I64, I64], &[I64]),
     // rt_process_kill(pid) -> bool (as i64: 0/1)
     RuntimeFuncSpec::new("rt_process_kill", &[I64], &[I64]),
+    // Checked piped process state. The stdout call returns RuntimeValue text
+    // and writes an i32 status through the second pointer argument.
+    RuntimeFuncSpec::new("rt_process_read_stdout_checked", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_is_alive_checked", &[I64], &[I32]),
     // rt_process_spawn_async(cmd_ptr, cmd_len, args) -> pid (i64)
     RuntimeFuncSpec::new("rt_process_spawn_async", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_spawn_guarded", &[I64, I64, I64], &[I64]),
