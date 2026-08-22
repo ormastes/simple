@@ -22,16 +22,10 @@
 
 use std.crypto.sha256.{sha256_text}
 use compiler.driver.cache.action_key.{canon_str, canon_nat, canon_field, canon_seq}
-use std.io_runtime.{dir_create_all}
-
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_delete(path: text) -> bool
-extern fn rt_file_move(old_path: text, new_path: text) -> bool
-extern fn rt_env_get(key: text) -> text
-extern fn rt_getpid() -> i64
-extern fn rt_time_now_unix_micros() -> i64
+use std.io_runtime.{
+    dir_create_all, read_file_text, write_file, file_exists, file_delete,
+    file_rename, env_get, getpid, time_now_unix_micros
+}
 
 val CAS_SCHEMA_VERSION: i64 = 1
 val CAS_MANIFEST_HEADER: text = "simple-cas-manifest-v1"
@@ -63,7 +57,7 @@ val RESULT_MANIFEST_HEADER: text = "simple-result-manifest-v2"
 # ============================================================================
 
 fn cas_root() -> text:
-    val env = rt_env_get("SIMPLE_CACHE") ?? ""
+    val env = env_get("SIMPLE_CACHE") ?? ""
     if env != "":
         return env
     "build/cache_cas"
@@ -94,15 +88,15 @@ fn cas_open(root: text) -> bool:
     dir_create_all(root)
     val vpath = "{root}/VERSION"
     val current = cas_version_text()
-    if rt_file_exists(vpath):
-        val stored = rt_file_read_text(vpath) ?? ""
+    if file_exists(vpath):
+        val stored = read_file_text(vpath) ?? ""
         if stored.trim() != current:
-            val stamp = "{rt_getpid()}-{rt_time_now_unix_micros()}"
-            rt_file_move("{root}/cas", "{root}/stale-cas-{stamp}")
-            rt_file_move("{root}/actions", "{root}/stale-actions-{stamp}")
-            rt_file_write_text(vpath, current)
+            val stamp = "{getpid()}-{time_now_unix_micros()}"
+            file_rename("{root}/cas", "{root}/stale-cas-{stamp}")
+            file_rename("{root}/actions", "{root}/stale-actions-{stamp}")
+            write_file(vpath, current)
     else:
-        rt_file_write_text(vpath, current)
+        write_file(vpath, current)
     dir_create_all("{root}/cas/sha256")
     dir_create_all("{root}/actions/sha256")
     dir_create_all("{root}/tmp")
@@ -118,16 +112,16 @@ fn cas_open(root: text) -> bool:
 fn cas_put(root: text, content: text) -> text:
     val digest = sha256_text(content)
     val path = cas_blob_path(root, digest)
-    if rt_file_exists(path):
+    if file_exists(path):
         return digest
     dir_create_all(cas_parent_dir(path))
     dir_create_all("{root}/tmp")
-    val tmp = "{root}/tmp/{digest}.{rt_getpid()}.tmp"
-    if not rt_file_write_text(tmp, content):
+    val tmp = "{root}/tmp/{digest}.{getpid()}.tmp"
+    if not write_file(tmp, content):
         return ""
-    if not rt_file_move(tmp, path):
-        rt_file_delete(tmp)
-        if not rt_file_exists(path):
+    if not file_rename(tmp, path):
+        file_delete(tmp)
+        if not file_exists(path):
             return ""
     digest
 
@@ -136,9 +130,9 @@ fn cas_put(root: text, content: text) -> text:
 # never returned.
 fn cas_get(root: text, digest: text) -> text?:
     val path = cas_blob_path(root, digest)
-    if not rt_file_exists(path):
+    if not file_exists(path):
         return nil
-    val content = rt_file_read_text(path) ?? ""
+    val content = read_file_text(path) ?? ""
     if sha256_text(content) != digest:
         cas_quarantine(root, path)
         return nil
@@ -146,14 +140,14 @@ fn cas_get(root: text, digest: text) -> text?:
 
 # Stamp-fast existence check (no verification — strict path is cas_get).
 fn cas_has(root: text, digest: text) -> bool:
-    rt_file_exists(cas_blob_path(root, digest))
+    file_exists(cas_blob_path(root, digest))
 
 fn cas_quarantine(root: text, path: text) -> bool:
     dir_create_all("{root}/quarantine")
-    val name = "{rt_getpid()}-{rt_time_now_unix_micros()}"
-    if rt_file_move(path, "{root}/quarantine/{name}"):
+    val name = "{getpid()}-{time_now_unix_micros()}"
+    if file_rename(path, "{root}/quarantine/{name}"):
         return true
-    rt_file_delete(path)
+    file_delete(path)
 
 # ============================================================================
 # Action manifests
@@ -189,12 +183,12 @@ fn action_put(root: text, action_digest: text, manifest: ActionManifest) -> bool
     val path = cas_action_path(root, action_digest)
     dir_create_all(cas_parent_dir(path))
     dir_create_all("{root}/tmp")
-    val tmp = "{root}/tmp/action-{action_digest}.{rt_getpid()}.tmp"
-    if not rt_file_write_text(tmp, action_manifest_serialize(manifest)):
+    val tmp = "{root}/tmp/action-{action_digest}.{getpid()}.tmp"
+    if not write_file(tmp, action_manifest_serialize(manifest)):
         return false
-    if not rt_file_move(tmp, path):
-        rt_file_delete(tmp)
-        return rt_file_exists(path)
+    if not file_rename(tmp, path):
+        file_delete(tmp)
+        return file_exists(path)
     true
 
 # Fetch a manifest by action digest. The stored manifest's own action_digest
@@ -202,9 +196,9 @@ fn action_put(root: text, action_digest: text, manifest: ActionManifest) -> bool
 # quarantined and treated as absent.
 fn action_get(root: text, action_digest: text) -> ActionManifest?:
     val path = cas_action_path(root, action_digest)
-    if not rt_file_exists(path):
+    if not file_exists(path):
         return nil
-    val content = rt_file_read_text(path) ?? ""
+    val content = read_file_text(path) ?? ""
     val parsed = action_manifest_parse(content)
     match parsed:
         case Some(manifest):
@@ -285,19 +279,19 @@ fn result_manifest_put(root: text, action_digest: text, m: ResultManifest) -> bo
     val path = cas_action_path(root, action_digest)
     dir_create_all(cas_parent_dir(path))
     dir_create_all("{root}/tmp")
-    val tmp = "{root}/tmp/result-{action_digest}.{rt_getpid()}.tmp"
-    if not rt_file_write_text(tmp, result_manifest_serialize(m)):
+    val tmp = "{root}/tmp/result-{action_digest}.{getpid()}.tmp"
+    if not write_file(tmp, result_manifest_serialize(m)):
         return false
-    if not rt_file_move(tmp, path):
-        rt_file_delete(tmp)
-        return rt_file_exists(path)
+    if not file_rename(tmp, path):
+        file_delete(tmp)
+        return file_exists(path)
     true
 
 fn result_manifest_get(root: text, action_digest: text) -> ResultManifest?:
     val path = cas_action_path(root, action_digest)
-    if not rt_file_exists(path):
+    if not file_exists(path):
         return nil
-    val content = rt_file_read_text(path) ?? ""
+    val content = read_file_text(path) ?? ""
     val parsed = result_manifest_parse(content)
     match parsed:
         case Some(manifest):

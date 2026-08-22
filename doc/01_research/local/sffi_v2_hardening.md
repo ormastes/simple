@@ -1948,3 +1948,20 @@ count at 1,021 across the dynamic and runtime-family owners, proving this pass
 did not add provider calls. This completes call-authority tagging only:
 raw-handle, ownership, nullability, artifact evidence, and signature work still
 prevent any global Torch safe/verified claim.
+
+## Compiler CAS semantic-owner migration (unverified checkpoint)
+
+The compiler CAS previously duplicated eight raw file, environment, process-ID,
+and wall-clock declarations and called them directly. It now imports the
+canonical `std.io_runtime` semantic owners instead. Successful reads, writes,
+renames, existence checks, deletes, PID reads, and clock reads retain one
+provider call; the canonical write owner adds only its existing failure-only
+parent-create/retry recovery. No lookup, process launch, sleep, collection, or
+unsafe scope was added to the CAS path.
+
+`cas-store-runtime-owner-contract.shs` records this ownership and hot-path
+source shape and has three sabotage cases for a raw call, raw declaration, and
+dynamic lookup. Per the sync override, neither that gate, the optimizer, the CAS
+behavior spec, nor the census has run in this checkpoint. This migration is
+therefore coherent source progress but explicitly unverified. It also does not
+make the canonical runtime owner signed or evidence-admitted.

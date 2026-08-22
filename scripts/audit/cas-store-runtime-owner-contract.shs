@@ -1,0 +1,34 @@
+#!/bin/sh
+# Static ownership/performance-shape gate for the compiler CAS runtime boundary.
+# This proves source shape only; it is not artifact/signature admission.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cas=${1:-"$root/src/compiler/80.driver/cache/cas_store.spl"}
+
+if grep -Eq '(^|[^[:alnum:]_])rt_(file|env|getpid|time)_[[:alnum:]_]*[[:space:]]*\(' "$cas"; then
+    echo 'compiler CAS contains a direct file/env/process/time runtime call' >&2
+    exit 1
+fi
+
+if grep -Eq '^extern fn rt_' "$cas"; then
+    echo 'compiler CAS redeclared a raw runtime symbol' >&2
+    exit 1
+fi
+
+for owner in dir_create_all read_file_text write_file file_exists file_delete \
+    file_rename env_get getpid time_now_unix_micros; do
+    grep -Eq "(^|[,{[:space:]])${owner}([,}[:space:](]|$)" "$cas"
+done
+
+if grep -Eq 'dlsym|CString|HashMap|Dictionary|process_run|shell\(|sleep\(|retry' "$cas"; then
+    echo 'compiler CAS gained lookup, process, sleep, retry, or map work' >&2
+    exit 1
+fi
+
+if grep -Eq 'unsafe[[:space:]]*\(|unsafe[[:space:]]*\{' "$cas"; then
+    echo 'compiler CAS bypassed the canonical semantic runtime owner' >&2
+    exit 1
+fi
+
+echo 'Compiler CAS runtime-owner contract: PASS raw_calls=0 raw_declarations=0 explicit_hot_lookup=none admission=unsafe_unsigned-owner'

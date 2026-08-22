@@ -320,3 +320,10 @@ passing placeholder.
     only in the same reviewed change that proves the corresponding raw calls
     gained minimal lexical authority or were removed; never relax it to absorb
     an unrelated regression.
+61. Complete and verify the compiler CAS semantic-owner migration. Run the CAS
+    ownership sabotage gate, optimizer, focused CAS behavior spec, direct-env
+    guard, and call-authority census exactly once when verification is
+    authorized. Confirm successful operations retain one provider call and
+    compare the census to the 21,371/19,486 call baseline before updating it.
+    Until those receipts exist, retain the explicit `unverified` classification;
+    the canonical file/env/time provider is also still unsigned and unadmitted.

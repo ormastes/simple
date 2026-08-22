@@ -1,0 +1,33 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+gate="$root/scripts/audit/cas-store-runtime-owner-contract.shs"
+source_file="$root/src/compiler/80.driver/cache/cas_store.spl"
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT INT TERM
+
+sh "$gate" "$source_file" >/dev/null
+
+cp "$source_file" "$work/direct-call.spl"
+printf '\nfn regression_probe(path: text) -> bool:\n    rt_file_exists(path)\n' >>"$work/direct-call.spl"
+if sh "$gate" "$work/direct-call.spl" >/dev/null 2>&1; then
+    echo 'CAS owner contract accepted a direct runtime call' >&2
+    exit 1
+fi
+
+cp "$source_file" "$work/raw-declaration.spl"
+printf '\nextern fn rt_file_exists(path: text) -> bool\n' >>"$work/raw-declaration.spl"
+if sh "$gate" "$work/raw-declaration.spl" >/dev/null 2>&1; then
+    echo 'CAS owner contract accepted a raw runtime declaration' >&2
+    exit 1
+fi
+
+cp "$source_file" "$work/hot-lookup.spl"
+printf '\nfn regression_lookup() -> text:\n    dlsym("rt_file_exists")\n' >>"$work/hot-lookup.spl"
+if sh "$gate" "$work/hot-lookup.spl" >/dev/null 2>&1; then
+    echo 'CAS owner contract accepted hot-path symbol lookup' >&2
+    exit 1
+fi
+
+echo 'CAS store runtime-owner contract test: PASS positive=1 sabotage=3'
