@@ -16,19 +16,32 @@ doc/05_design/REQ-OS-KERNEL-001.md
 """
 # @req: REQ-OS-KERNEL-001
 
-use os.kernel.arch.riscv64.process_stdout_capture.{RV64_PROCESS_STDOUT_LIMIT, rv64_process_stdout_begin, rv64_process_stdout_write_byte, rv64_process_stdout_finish}
+use os.kernel.arch.riscv64.process_stdout_capture.{RV64_PROCESS_STDOUT_LIMIT, Rv64ProcessStdoutSessionV1, rv64_process_stdout_begin, rv64_process_stdout_bind_child, rv64_process_stdout_write_byte, rv64_process_stdout_finish}
 use os.kernel.loader.riscv64_fs_exec_spawn.{riscv64_fs_exec_failed_capture}
 
 use std.spec.step
 
 describe "RV64 process stdout capture":
+    it "rejects concurrent begin foreign finish and cross-child writes":
+        val session = rv64_process_stdout_begin().unwrap()
+        expect(rv64_process_stdout_begin().is_some()).to_equal(false)
+        expect(rv64_process_stdout_bind_child(session, 71u64, false)).to_equal(true)
+        expect(rv64_process_stdout_write_byte(72u64, 0x58u8)).to_equal(false)
+        val foreign = Rv64ProcessStdoutSessionV1(
+            generation: session.generation, nonce: session.nonce + 1u64)
+        expect(rv64_process_stdout_finish(foreign, 0).is_some()).to_equal(false)
+        expect(rv64_process_stdout_write_byte(71u64, 0x41u8)).to_equal(true)
+        val result = rv64_process_stdout_finish(session, 0).unwrap()
+        expect(result.bytes).to_equal([0x41u8])
+
     it "returns exact stdout bytes with a successful status":
         # @req: REQ-OS-KERNEL-001
         step("Verify: returns exact stdout bytes with a successful status")
-        rv64_process_stdout_begin()
-        rv64_process_stdout_write_byte(0x4Fu8)
-        rv64_process_stdout_write_byte(0x4Bu8)
-        val result = rv64_process_stdout_finish(0)
+        val session = rv64_process_stdout_begin().unwrap()
+        expect(rv64_process_stdout_bind_child(session, 1u64, false)).to_equal(true)
+        _ = rv64_process_stdout_write_byte(1u64, 0x4Fu8)
+        _ = rv64_process_stdout_write_byte(1u64, 0x4Bu8)
+        val result = rv64_process_stdout_finish(session, 0).unwrap()
         expect(result.bytes.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
         expect(result.bytes[0]).to_equal(0x4Fu8)
         expect(result.bytes[1]).to_equal(0x4Bu8)
@@ -38,8 +51,8 @@ describe "RV64 process stdout capture":
     it "preserves empty output and a nonzero status":
         # @req: REQ-OS-KERNEL-001
         step("Verify: preserves empty output and a nonzero status")
-        rv64_process_stdout_begin()
-        val result = rv64_process_stdout_finish(37)
+        val session = rv64_process_stdout_begin().unwrap()
+        val result = rv64_process_stdout_finish(session, 37).unwrap()
         expect(result.bytes.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(result.exit_code).to_equal(37)  # oracle: 37 — named expected value from the requirement
         expect(result.truncated).to_be(false)
@@ -47,9 +60,10 @@ describe "RV64 process stdout capture":
     it "clears prior stdout for a pre-launch command failure":
         # @req: REQ-OS-KERNEL-001
         step("Verify: clears prior stdout for a pre-launch command failure")
-        rv64_process_stdout_begin()
-        rv64_process_stdout_write_byte(0x58u8)
-        val prior = rv64_process_stdout_finish(0)
+        val session = rv64_process_stdout_begin().unwrap()
+        expect(rv64_process_stdout_bind_child(session, 1u64, false)).to_equal(true)
+        _ = rv64_process_stdout_write_byte(1u64, 0x58u8)
+        val prior = rv64_process_stdout_finish(session, 0).unwrap()
         expect(prior.bytes.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         val failed = riscv64_fs_exec_failed_capture(127)
         expect(failed.bytes.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
@@ -59,12 +73,13 @@ describe "RV64 process stdout capture":
     it "retains the bounded prefix and reports truncation":
         # @req: REQ-OS-KERNEL-001
         step("Verify: retains the bounded prefix and reports truncation")
-        rv64_process_stdout_begin()
+        val session = rv64_process_stdout_begin().unwrap()
+        expect(rv64_process_stdout_bind_child(session, 1u64, false)).to_equal(true)
         var i: u64 = 0
         while i < RV64_PROCESS_STDOUT_LIMIT + 3:
-            rv64_process_stdout_write_byte((i % 251).to_u8())
+            _ = rv64_process_stdout_write_byte(1u64, (i % 251).to_u8())
             i = i + 1
-        val result = rv64_process_stdout_finish(0)
+        val result = rv64_process_stdout_finish(session, 0).unwrap()
         expect(result.bytes.len()).to_equal(RV64_PROCESS_STDOUT_LIMIT)
         expect(result.bytes[0]).to_equal(0u8)
         expect(result.bytes[RV64_PROCESS_STDOUT_LIMIT - 1]).to_equal(((RV64_PROCESS_STDOUT_LIMIT - 1) % 251).to_u8())

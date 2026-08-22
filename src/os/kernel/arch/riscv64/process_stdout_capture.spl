@@ -1,7 +1,16 @@
-# Bounded stdout capture for one synchronously entered RV64 user process.
+# Bounded stdout capture owned by one explicit synchronous RV64 session.
+use os.kernel.scheduler.process_execution_observation.{
+    SchedulerExecutionObservationHandleV1,
+    scheduler_execution_observation_handle_for_child_v1,
+    scheduler_execution_observe_stdout_byte_for_handle_v1
+}
+use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
 
 val RV64_PROCESS_STDOUT_LIMIT: u64 = 4096
-use os.kernel.scheduler.process_execution_observation.{scheduler_execution_observe_stdout_byte_v1}
+
+pub(package) struct Rv64ProcessStdoutSessionV1:
+    generation: u64
+    nonce: u64
 
 struct Rv64ProcessStdoutResult:
     bytes: [u8]
@@ -10,34 +19,89 @@ struct Rv64ProcessStdoutResult:
 
 extern fn rt_push_byte(arr: [u8], byte_val: i64) -> [u8]
 
-var g_rv64_process_stdout_active: bool = false
-var g_rv64_process_stdout_bytes: [u8] = []
-var g_rv64_process_stdout_truncated: bool = false
-var g_rv64_process_stdout_exit_code: i64 = -1
+val _capture_mutex: i64 = mutex_raw_create()
+var _active: bool = false
+var _generation: u64 = 0u64
+var _nonce: u64 = 0x5256363443415054u64
+var _bound_child: u64 = 0u64
+var _observation: SchedulerExecutionObservationHandleV1? = nil
+var _bytes: [u8] = []
+var _truncated: bool = false
+var _last = Rv64ProcessStdoutResult(bytes: [], exit_code: -1, truncated: false)
 
-fn rv64_process_stdout_begin():
-    g_rv64_process_stdout_bytes = []
-    g_rv64_process_stdout_truncated = false
-    g_rv64_process_stdout_exit_code = -1
-    g_rv64_process_stdout_active = true
+fn _lock() -> bool:
+    _capture_mutex > 0 and mutex_raw_lock(_capture_mutex)
+fn _unlock() -> bool:
+    mutex_raw_unlock(_capture_mutex)
+fn _matches(session: Rv64ProcessStdoutSessionV1) -> bool:
+    _active and session.generation == _generation and session.nonce == _nonce
 
-fn rv64_process_stdout_write_byte(byte: u8):
-    if not g_rv64_process_stdout_active:
-        return
-    if g_rv64_process_stdout_bytes.len() < RV64_PROCESS_STDOUT_LIMIT:
-        g_rv64_process_stdout_bytes = rt_push_byte(g_rv64_process_stdout_bytes, byte.to_i64())
-        scheduler_execution_observe_stdout_byte_v1(byte)
-    else:
-        g_rv64_process_stdout_truncated = true
+fn rv64_process_stdout_begin() -> Rv64ProcessStdoutSessionV1?:
+    if not _lock(): return nil
+    if _active or _generation == 0xFFFFFFFFFFFFFFFFu64 or _nonce == 0xFFFFFFFFFFFFFFFFu64:
+        _unlock()
+        return nil
+    _generation = _generation + 1u64
+    _nonce = _nonce + 1u64
+    _active = true
+    _bound_child = 0u64
+    _observation = nil
+    _bytes = []
+    _truncated = false
+    val session = Rv64ProcessStdoutSessionV1(generation: _generation, nonce: _nonce)
+    if not _unlock(): return nil
+    Some(session)
 
-fn rv64_process_stdout_finish(exit_code: i64) -> Rv64ProcessStdoutResult:
-    g_rv64_process_stdout_active = false
-    g_rv64_process_stdout_exit_code = exit_code
-    rv64_process_stdout_last_result()
+fn rv64_process_stdout_bind_child(
+    session: Rv64ProcessStdoutSessionV1, child_id: u64, require_observation: bool
+) -> bool:
+    val handle = scheduler_execution_observation_handle_for_child_v1(child_id)
+    if require_observation and not handle.?: return false
+    if not _lock(): return false
+    var bound = false
+    if _matches(session) and _bound_child == 0u64:
+        _bound_child = child_id
+        _observation = handle
+        bound = true
+    if not _unlock(): return false
+    bound
 
-fn rv64_process_stdout_last_result() -> Rv64ProcessStdoutResult:
-    Rv64ProcessStdoutResult(
-        bytes: g_rv64_process_stdout_bytes,
-        exit_code: g_rv64_process_stdout_exit_code,
-        truncated: g_rv64_process_stdout_truncated
-    )
+fn rv64_process_stdout_write_byte(child_id: u64, byte: u8) -> bool:
+    if child_id == 0u64 or not _lock(): return false
+    var accepted = false
+    var observation: SchedulerExecutionObservationHandleV1? = nil
+    if _active and _bound_child == child_id:
+        observation = _observation
+        if _bytes.len() < RV64_PROCESS_STDOUT_LIMIT:
+            _bytes = rt_push_byte(_bytes, byte.to_i64())
+        else:
+            _truncated = true
+        accepted = true
+    if not _unlock(): return false
+    if observation.?:
+        _ = scheduler_execution_observe_stdout_byte_for_handle_v1(observation.unwrap(), byte)
+    accepted
+
+fn rv64_process_stdout_finish(
+    session: Rv64ProcessStdoutSessionV1, exit_code: i64
+) -> Rv64ProcessStdoutResult?:
+    if not _lock(): return nil
+    if not _matches(session):
+        _unlock()
+        return nil
+    _active = false
+    _bound_child = 0u64
+    _observation = nil
+    _last = Rv64ProcessStdoutResult(bytes: _bytes, exit_code: exit_code, truncated: _truncated)
+    val result = _last
+    if not _unlock(): return nil
+    Some(result)
+
+fn rv64_process_stdout_last_result() -> Rv64ProcessStdoutResult?:
+    if not _lock(): return nil
+    if _active:
+        _unlock()
+        return nil
+    val result = _last
+    if not _unlock(): return nil
+    Some(result)

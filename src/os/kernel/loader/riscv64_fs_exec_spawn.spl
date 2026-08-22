@@ -10,10 +10,14 @@ use os.kernel.loader.executable_load_plan_v1.{ExecutableLoadConsumerV1}
 use os.kernel.scheduler.scheduler_types.{Scheduler}
 use os.kernel.scheduler.process_execution_observation.{
     SchedulerExecutionEvidenceTokenV1, scheduler_execution_take_reaped_token_v1,
-    scheduler_execution_evidence_consume_once_v1
+    scheduler_execution_evidence_consume_once_v1,
+    scheduler_execution_observe_reap_v1
 }
 use std.fs_driver.bytes_util.{text_to_bytes_pure}
-use os.kernel.arch.riscv64.process_stdout_capture.{Rv64ProcessStdoutResult, rv64_process_stdout_begin, rv64_process_stdout_finish}
+use os.kernel.arch.riscv64.process_stdout_capture.{
+    Rv64ProcessStdoutResult, rv64_process_stdout_begin,
+    rv64_process_stdout_bind_child, rv64_process_stdout_finish
+}
 use os.kernel.types.task_types.{TaskId}
 use os.kernel.scheduler.scheduler.{wait_collect_result_error, wait_collect_result_status}
 
@@ -22,6 +26,13 @@ extern fn serial_println(msg: text)
 pub struct Rv64AuthenticatedExecutionResultV1:
     exit_code: i64
     evidence: SchedulerExecutionEvidenceTokenV1?
+
+fn _discard_execution_observation(child_id: u64):
+    # Terminal cleanup is idempotent: reap may already have happened, delivery
+    # may already have happened, and consume rejects every replay.
+    _ = scheduler_execution_observe_reap_v1(child_id)
+    val token = scheduler_execution_take_reaped_token_v1(child_id)
+    if token.?: _ = scheduler_execution_evidence_consume_once_v1(token.unwrap())
 
 pub fn riscv64_fs_exec_spawn_authenticated_capture_v1(
     scheduler: Scheduler,
@@ -35,26 +46,49 @@ pub fn riscv64_fs_exec_spawn_authenticated_capture_v1(
     recipe: i64
 ) -> Rv64AuthenticatedExecutionResultV1:
     """Authenticated RV64 adoption, stdout capture, exit, reap, and token handoff."""
-    rv64_process_stdout_begin()
+    val capture_session = rv64_process_stdout_begin()
+    if not capture_session.?:
+        return Rv64AuthenticatedExecutionResultV1(exit_code: -10, evidence: nil)
     val prepared = fs_exec_adopt_authenticated_v1(
         scheduler, table, authorities, token, consumer, entry_point, caller, path, recipe)
     if prepared.pid <= 0:
+        val failed_capture = rv64_process_stdout_finish(capture_session.unwrap(), prepared.pid)
+        if not failed_capture.?:
+            return Rv64AuthenticatedExecutionResultV1(exit_code: -10, evidence: nil)
         return Rv64AuthenticatedExecutionResultV1(
-            exit_code: rv64_process_stdout_finish(prepared.pid).exit_code, evidence: nil)
+            exit_code: failed_capture.unwrap().exit_code, evidence: nil)
+    if not rv64_process_stdout_bind_child(capture_session.unwrap(), prepared.pid.to_u64(), true):
+        val failed_child = TaskId(id: prepared.pid.to_u64())
+        var failed_owner = prepared.scheduler
+        failed_owner.exit_task_by_id(failed_child, -10)
+        _ = failed_owner.wait_for_collect(TaskId(id: 0), failed_child, false)
+        _discard_execution_observation(failed_child.id)
+        val failed_capture = rv64_process_stdout_finish(capture_session.unwrap(), -10)
+        if not failed_capture.?:
+            return Rv64AuthenticatedExecutionResultV1(exit_code: -10, evidence: nil)
+        return Rv64AuthenticatedExecutionResultV1(
+            exit_code: failed_capture.unwrap().exit_code, evidence: nil)
     serial_println("RV64_AUTH_EXEC_ADOPTION status=authorized")
     val child = TaskId(id: prepared.pid.to_u64())
     val exit_code = dispatch_fs_exec_user_handoff(Architecture.Riscv64, child.id, prepared.scheduler)
     var owner = prepared.scheduler
     owner.exit_task_by_id(child, exit_code.to_i32())
     val collected = owner.wait_for_collect(TaskId(id: 0), child, false)
-    val captured = rv64_process_stdout_finish(exit_code)
+    val captured_result = rv64_process_stdout_finish(capture_session.unwrap(), exit_code)
+    if not captured_result.?:
+        _discard_execution_observation(child.id)
+        return Rv64AuthenticatedExecutionResultV1(exit_code: -10, evidence: nil)
+    val captured = captured_result.unwrap()
     if wait_collect_result_error(collected) != 0 or
        wait_collect_result_status(collected) != exit_code.to_i32():
+        _discard_execution_observation(child.id)
         return Rv64AuthenticatedExecutionResultV1(exit_code: -10, evidence: nil)
     serial_println("RV64_AUTH_EXEC_EXIT code={captured.exit_code}")
     val evidence = scheduler_execution_take_reaped_token_v1(child.id)
     if evidence.?:
         serial_println("RV64_AUTH_EXEC_REAP count=1 token=issued")
+    if not evidence.?:
+        _discard_execution_observation(child.id)
     Rv64AuthenticatedExecutionResultV1(
         exit_code: captured.exit_code,
         evidence: evidence)
@@ -94,15 +128,32 @@ pub fn riscv64_fs_exec_spawn_ring3(path: text, argv: [text], envp: [text]) -> i6
 
 pub fn riscv64_fs_exec_failed_capture(exit_code: i64) -> Rv64ProcessStdoutResult:
     """Reset capture and return an empty result for a pre-launch failure."""
-    rv64_process_stdout_begin()
-    rv64_process_stdout_finish(exit_code)
+    val session = rv64_process_stdout_begin()
+    if not session.?: return Rv64ProcessStdoutResult(bytes: [], exit_code: -10, truncated: false)
+    val finished = rv64_process_stdout_finish(session.unwrap(), exit_code)
+    if not finished.?: return Rv64ProcessStdoutResult(bytes: [], exit_code: -10, truncated: false)
+    finished.unwrap()
 
 pub fn riscv64_fs_exec_spawn_capture(path: text, argv: [text], envp: [text]) -> Rv64ProcessStdoutResult:
     """Run one RV64 filesystem payload and return its bounded stdout and status."""
-    rv64_process_stdout_begin()
+    val capture_session = rv64_process_stdout_begin()
+    if not capture_session.?: return Rv64ProcessStdoutResult(bytes: [], exit_code: -10, truncated: false)
     val prepared = fs_exec_prepare_spawn(path, argv, envp)
     if prepared.pid <= 0:
-        return rv64_process_stdout_finish(prepared.pid)
+        val failed = rv64_process_stdout_finish(capture_session.unwrap(), prepared.pid)
+        if not failed.?: return Rv64ProcessStdoutResult(bytes: [], exit_code: -10, truncated: false)
+        return failed.unwrap()
+    # Legacy unauthenticated execution has no scheduler evidence slot. Its
+    # local capture remains synchronous; observation binding therefore fails
+    # closed without rejecting the execution itself.
+    if not rv64_process_stdout_bind_child(capture_session.unwrap(), prepared.pid.to_u64(), false):
+        val failed_child = TaskId(id: prepared.pid.to_u64())
+        var failed_owner = prepared.scheduler
+        failed_owner.exit_task_by_id(failed_child, -10)
+        _ = failed_owner.wait_for_collect(TaskId(id: 0), failed_child, false)
+        val failed = rv64_process_stdout_finish(capture_session.unwrap(), -10)
+        if not failed.?: return Rv64ProcessStdoutResult(bytes: [], exit_code: -10, truncated: false)
+        return failed.unwrap()
     serial_println("[fs-exec] spawn:pid={prepared.pid} path={path}")
     val child = TaskId(id: prepared.pid as u64)
     val exit_code = dispatch_fs_exec_user_handoff(Architecture.Riscv64, child.id, prepared.scheduler)
@@ -110,7 +161,13 @@ pub fn riscv64_fs_exec_spawn_capture(path: text, argv: [text], envp: [text]) -> 
     scheduler.exit_task_by_id(child, exit_code as i32)
     val collected = scheduler.wait_for_collect(TaskId(id: 0), child, false)
     if wait_collect_result_error(collected) != 0:
-        return rv64_process_stdout_finish(-10)
+        val failed = rv64_process_stdout_finish(capture_session.unwrap(), -10)
+        if not failed.?: return Rv64ProcessStdoutResult(bytes: [], exit_code: -10, truncated: false)
+        return failed.unwrap()
     if wait_collect_result_status(collected) != exit_code as i32:
-        return rv64_process_stdout_finish(-10)
-    rv64_process_stdout_finish(exit_code)
+        val failed = rv64_process_stdout_finish(capture_session.unwrap(), -10)
+        if not failed.?: return Rv64ProcessStdoutResult(bytes: [], exit_code: -10, truncated: false)
+        return failed.unwrap()
+    val finished = rv64_process_stdout_finish(capture_session.unwrap(), exit_code)
+    if not finished.?: return Rv64ProcessStdoutResult(bytes: [], exit_code: -10, truncated: false)
+    finished.unwrap()
