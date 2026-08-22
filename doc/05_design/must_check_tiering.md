@@ -1,9 +1,15 @@
 # Mandatory Check Tiering Detail Design
 
-`check-push-must-pass.shs` consumes standard pre-push ref rows. For each unique
-outgoing revision it loads the manifest and ledger from that committed revision,
+`check-push-must-pass.shs` consumes standard pre-push ref rows, rejects malformed
+input or more than two unique updates, and deduplicates identical tip/base
+pairs. For each remaining outgoing revision it loads the manifest and ledger from that committed revision,
 recomputes the source fingerprint, validates ledger cardinality/status/command
 parity and evidence hashes, and runs the registry's `tier=push` range/ref rows.
+Production evidence is repository-contained and its aggregate hashed size is
+limited to 64 MiB. The tree-size range row is dispatched in `--push-tip` mode:
+it retains absolute size, duplicate entry, source shape, load-bearing path, and
+first-parent delta checks without materializing or scanning every outgoing
+commit. Exhaustive detector fixtures run in the bootstrap tier.
 
 `check-bootstrap-must-pass.shs` runs expensive automated manifest rows. Its
 bootstrap-completion mode first requires the exact Stage 2/3 full-provenance
