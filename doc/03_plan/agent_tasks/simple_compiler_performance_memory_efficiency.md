@@ -715,8 +715,8 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
   preserving exact legacy diagnostic grouping and order.
 - Add mirrored contracts for group order, duplicate-class/transitive lookup,
   and nested textual-class behavior.
-- Deferred: banded allocation-bounded edit distance and compact first-statement
-  storage for NAME001/ACC001.
+- Implemented: allocation-bounded three-row edit band with byte comparisons.
+- Deferred: compact first-statement storage for NAME001/ACC001.
 - Verification intentionally not run under the user's no-verify instruction.
 
 ## Completed query outline-index tranche
