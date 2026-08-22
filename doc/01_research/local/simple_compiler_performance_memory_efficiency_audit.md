@@ -2014,6 +2014,25 @@ accepts the codegen phrase explicitly. Both entry modules keep thin wrappers, so
 their exact phrase behavior, explicit-code handling, first-match precedence, and
 fallback codes remain unchanged. Replacing 473 entry-local lines with one
 242-line owner and four wrapper lines yields a net 227-line reduction. The
-active classifier still performs up to 136 substring
-scans over 117 needles for late/no-match diagnostics; a generated immutable
-multi-pattern matcher remains the next runtime-complexity tranche.
+classifier still performed up to 136 substring scans over 117 probes for
+late/no-match diagnostics; the following runtime tranche closes that defect.
+
+### Query diagnostic multi-pattern runtime audit
+
+The remaining classifier performed 136 case-sensitive `contains` probes over
+116 unique fixed ASCII literals for every uncoded diagnostic. A late or unknown
+message therefore rescanned the full payload roughly 136 times.
+
+The classifier now scans message bytes once through a precomputed sparse
+Aho-Corasick automaton. Its 1,160 states and 1,159 edges occupy approximately
+12,567 raw table bytes; root dispatch is direct, non-root degree is bounded, and
+failure traversal is amortized linear. Two local `u64` masks retain all fixed
+hits without a heap bitset. The existing 80 predicates still execute in source
+priority order, so message occurrence order, overlaps, negative guards, and
+legacy shadowing remain unchanged. Only the caller-selected dynamic `FFI`/`SFFI`
+phrase retains one `contains` call. Runtime matching becomes `O(message bytes +
+matches + rules)` with no per-diagnostic registry or message-copy allocation.
+
+The committed numeric table adds about 49.6 KB of source text for 12.6 KB of
+packed runtime data. A deterministic Pure Simple regeneration/freshness command
+remains required before pattern ownership can be considered self-maintaining.
