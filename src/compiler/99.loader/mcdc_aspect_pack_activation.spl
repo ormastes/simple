@@ -1,0 +1,44 @@
+# Canonical outer-pack route -> executable MC/DC payload activation.
+
+use compiler.loader.loader.module_loader.{
+    LazyModuleLoader,
+    moduleloader_activate_mcdc_aspect_payload_v1,
+    moduleloader_retire_mcdc_aspect_payload_v1
+}
+use compiler.loader.mcdc_aspect_pack_payload.{
+    MCDC_ASPECT_MODULE_ID_V1, MCDC_ASPECT_ID_V1
+}
+use std.common.aspect_pack.{
+    apk_load_aspect_manual, apk_unload_facet_v1
+}
+
+val MCDC_ASPECT_FACET_KEY_V1: text = "Runtime/McdcVectorV1"
+
+fn moduleloader_activate_mcdc_aspect_pack_v1(
+        self: LazyModuleLoader, apk_loader: i64, catalog: [u8],
+        pack_owner: text) -> Result<(), text>:
+    """Explicitly route one module, validate its identity, map and publish it."""
+    val selected = apk_load_aspect_manual(
+        apk_loader, catalog, MCDC_ASPECT_FACET_KEY_V1)
+    if not selected.ok:
+        return Err("MCDC-ASPECT-E-PACK: " + selected.error_code + ": " +
+            selected.error_message)
+    if not selected.found:
+        return Err("MCDC-ASPECT-E-PACK: canonical facet is absent")
+    if selected.module_id != MCDC_ASPECT_MODULE_ID_V1 or
+            selected.aspect_id != MCDC_ASPECT_ID_V1:
+        return Err("MCDC-ASPECT-E-IDENTITY: routed module/aspect is not MC/DC v1")
+    moduleloader_activate_mcdc_aspect_payload_v1(
+        self, pack_owner, selected.payload, selected.generation)
+
+fn moduleloader_retire_mcdc_aspect_pack_v1(
+        self: LazyModuleLoader, apk_loader: i64,
+        pack_owner: text) -> Result<bool, text>:
+    """Settle/unmap executable state before releasing cached pack bytes."""
+    val retired = moduleloader_retire_mcdc_aspect_payload_v1(self, pack_owner)
+    if retired.is_err() or not retired.unwrap(): return retired
+    val released = apk_unload_facet_v1(apk_loader, MCDC_ASPECT_FACET_KEY_V1)
+    if not released.ok:
+        return Err("MCDC-ASPECT-E-PACK-RETIRE: " + released.error_code +
+            ": " + released.error_message)
+    Ok(released.released)

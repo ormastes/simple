@@ -13,6 +13,12 @@ use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
 use compiler.backend.linker.obj_taker.{SymbolType}
 use compiler.loader.smf_mmap_native.{native_alloc_exec_memory, native_write_exec_memory, native_make_executable, native_make_rw, native_flush_icache, native_reloc_write_i32, native_reloc_write_i64, native_call_function_0}
 use std.io_runtime.{file_read_bytes}
+use compiler.loader.loader.module_loader.{
+    LazyModuleLoader,
+    lazymoduleloader_with_defaults,
+    moduleloader_activate_mcdc_aspect_payload_v1,
+    moduleloader_retire_mcdc_aspect_payload_v1
+}
 
 fn _path_tag(path: text) -> text:
     val base = path.split("/").last() ?? path
@@ -200,6 +206,10 @@ struct ModuleLoader:
     semantic_dependencies: Dict<text, [text]>
     semantic_fingerprints: Dict<text, text>
     dependency_semantic_fingerprints: Dict<text, Dict<text, text>>
+    # Empty until an explicit MC/DC aspect activation.  Compatibility loader
+    # construction and ordinary loads therefore allocate no pack bytes,
+    # executable buffer, registry target, or canonical lazy-loader services.
+    mcdc_payload_loader_cell: Dict<i64, LazyModuleLoader>
 
 impl ModuleLoader:
     static fn new(config: ModuleLoaderConfig) -> ModuleLoader:
@@ -224,6 +234,18 @@ impl ModuleLoader:
         for path in self.modules.keys():
             out.push(path)
         out
+
+    me activate_mcdc_aspect_payload_v1(owner_id: text, payload: [u8],
+                                       generation: i64) -> Result<(), text>:
+        if not self.mcdc_payload_loader_cell.has(0):
+            self.mcdc_payload_loader_cell[0] = lazymoduleloader_with_defaults()
+        moduleloader_activate_mcdc_aspect_payload_v1(
+            self.mcdc_payload_loader_cell[0], owner_id, payload, generation)
+
+    me retire_mcdc_aspect_payload_v1(owner_id: text) -> Result<bool, text>:
+        if not self.mcdc_payload_loader_cell.has(0): return Ok(true)
+        moduleloader_retire_mcdc_aspect_payload_v1(
+            self.mcdc_payload_loader_cell[0], owner_id)
 
     # NOTE: the body below is inlined directly (rather than delegating to a
     # free helper function) because the interpreter used by `bin/simple`
@@ -349,12 +371,19 @@ impl ModuleLoader:
     me reload(path: text) -> LoadResult:
         self.unload(path)
         if self.modules.has(path):
-            self.modules = self.modules.remove(path)
+            return LoadResult.Error(message: "module is still settling and cannot reload: " + path)
         self.load(path)
 
     me unload(path: text):
         if not self.modules.has(path):
             return
+        if self.mcdc_payload_loader_cell.has(0):
+            val retired = moduleloader_retire_mcdc_aspect_payload_v1(
+                self.mcdc_payload_loader_cell[0], path)
+            if retired.is_err() or not retired.unwrap():
+                # Fail closed: leave the compatibility module and its symbols
+                # resident until all patchpoint readers have settled.
+                return
         val remove_jit = _collect_unload_jit_symbols(self, path)
         for sym_name in remove_jit:
             self.jit.drop_cached_symbol(sym_name)
@@ -524,7 +553,8 @@ fn moduleloader_new(config: ModuleLoaderConfig) -> ModuleLoader:
             semantic_exports: {},
             semantic_dependencies: {},
             semantic_fingerprints: {},
-            dependency_semantic_fingerprints: {}
+            dependency_semantic_fingerprints: {},
+            mcdc_payload_loader_cell: {}
     )
 
 fn moduleloader_with_defaults() -> ModuleLoader:
@@ -538,6 +568,15 @@ me moduleloader_reload(self: ModuleLoader, path: text) -> LoadResult:
 
 me moduleloader_unload(self: ModuleLoader, path: text):
     self.unload(path)
+
+me moduleloader_compat_activate_mcdc_aspect_payload_v1(
+        self: ModuleLoader, owner_id: text, payload: [u8],
+        generation: i64) -> Result<(), text>:
+    self.activate_mcdc_aspect_payload_v1(owner_id, payload, generation)
+
+me moduleloader_compat_retire_mcdc_aspect_payload_v1(
+        self: ModuleLoader, owner_id: text) -> Result<bool, text>:
+    self.retire_mcdc_aspect_payload_v1(owner_id)
 
 me moduleloader_resolve_symbol(self: ModuleLoader, name: text) -> SymbolResult:
     self.resolve_symbol(name)

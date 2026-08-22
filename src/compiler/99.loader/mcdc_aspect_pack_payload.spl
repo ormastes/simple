@@ -1,0 +1,133 @@
+# Executable payload contract for the dynamic MC/DC aspect pack.
+#
+# The outer SMFAPK container is only deployment/storage.  Its selected module
+# payload is an ordinary, independently validated SMF holding exactly the two
+# exports below.  Keeping this bridge separate is important: constructing a
+# LazyModuleLoader or opening/decompressing a pack is never part of the
+# disarmed patchpoint path.
+
+use compiler.backend.linker.obj_taker.{SymbolType}
+use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
+use compiler.loader.loader.bytecode_writer.{
+    SmfBytecodeWriter, SmfSymbolType, SmfSymbolBinding
+}
+use std.common.aspect_pack.{
+    ApkModuleSourceV3, ApkBuildResultV1, apk_build_pack_v3,
+    APK_CHUNK_CODE, APK_CHUNK_FLAG_STORED
+}
+
+val MCDC_ASPECT_VECTOR_SYMBOL_V1: text = "rt_mcdc_aspect_vector_v1"
+val MCDC_ASPECT_VECTOR_ABI_MARKER_V1: text =
+    "rt_mcdc_aspect_vector_v1__abi_u64_u32_u64_u64_u64_u8_i32_v1"
+val MCDC_ASPECT_MODULE_ID_V1: text = "runtime.mcdc.vector.v1"
+val MCDC_ASPECT_ID_V1: text = "runtime.mcdc"
+val MCDC_ASPECT_MODULE_ABI_V1: text =
+    "simple:mcdc-vector:u64,u32,u64,u64,u64,u8->i32:v1"
+val MCDC_ASPECT_PAYLOAD_MAX_BYTES_V1: i64 = 1048576
+val MCDC_ASPECT_MARKER_VALUE_V1: u8 = 1u8
+
+struct McdcAspectPayloadValidationV1:
+    ok: bool
+    error: text
+    vector_code: [u8]
+    marker_bytes: [u8]
+
+fn _mcdc_payload_error(message: text) -> McdcAspectPayloadValidationV1:
+    McdcAspectPayloadValidationV1(
+        ok: false, error: message, vector_code: [], marker_bytes: [])
+
+fn mcdc_validate_aspect_module_payload_v1(payload: [u8]) -> McdcAspectPayloadValidationV1:
+    """Validate before any executable mapping or registry publication.
+
+    The tight symbol cardinality prevents a selected telemetry pack from
+    smuggling unrelated executable exports into the process.  The one-byte
+    marker is payload evidence, not merely a symbol-table spelling.
+    """
+    if payload.len() <= 0 or payload.len() > MCDC_ASPECT_PAYLOAD_MAX_BYTES_V1:
+        return _mcdc_payload_error("MCDC-ASPECT-E-SIZE: inner SMF is empty or exceeds 1 MiB")
+    val parsed = SmfReaderMemory.from_data(payload)
+    if parsed.is_err():
+        return _mcdc_payload_error("MCDC-ASPECT-E-SMF: " + parsed.unwrap_err())
+    val reader = parsed.unwrap()
+    val exports = reader.exported_symbols()
+    if exports.len() != 2:
+        return _mcdc_payload_error("MCDC-ASPECT-E-EXPORTS: inner SMF must export exactly vector and ABI marker")
+    var vector_found = false
+    var marker_found = false
+    var vector_code: [u8] = []
+    var marker_bytes: [u8] = []
+    for symbol in exports:
+        if symbol.name == MCDC_ASPECT_VECTOR_SYMBOL_V1:
+            match symbol.ty:
+                case SymbolType.Function: ()
+                case _:
+                    return _mcdc_payload_error("MCDC-ASPECT-E-ABI: vector export is not a function")
+            val code = reader.read_code(symbol)
+            if code.is_err() or code.unwrap().len() <= 0:
+                return _mcdc_payload_error("MCDC-ASPECT-E-CODE: vector export has no bytes")
+            vector_code = code.unwrap()
+            vector_found = true
+        else:
+            if symbol.name != MCDC_ASPECT_VECTOR_ABI_MARKER_V1:
+                return _mcdc_payload_error("MCDC-ASPECT-E-EXPORTS: unexpected export " + symbol.name)
+            match symbol.ty:
+                case SymbolType.Constant | SymbolType.Data: ()
+                case _:
+                    return _mcdc_payload_error("MCDC-ASPECT-E-ABI: ABI marker is not data")
+            val bytes = reader.read_code(symbol)
+            if bytes.is_err():
+                return _mcdc_payload_error("MCDC-ASPECT-E-ABI: ABI marker is unreadable")
+            marker_bytes = bytes.unwrap()
+            if marker_bytes.len() != 1 or marker_bytes[0] != MCDC_ASPECT_MARKER_VALUE_V1:
+                return _mcdc_payload_error("MCDC-ASPECT-E-ABI: ABI marker payload is not v1")
+            marker_found = true
+    if not vector_found or not marker_found:
+        return _mcdc_payload_error("MCDC-ASPECT-E-EXPORTS: canonical exports are incomplete")
+    McdcAspectPayloadValidationV1(
+        ok: true, error: "", vector_code: vector_code,
+        marker_bytes: marker_bytes)
+
+fn mcdc_build_aspect_module_payload_v1(vector_code: [u8]) -> Result<[u8], text>:
+    """Build the target-neutral inner container around compiled PIC bytes.
+
+    `vector_code` is produced by the normal target backend; this function does
+    not invent machine code or fall back to a host compiler.
+    """
+    if vector_code.len() <= 0 or vector_code.len() > MCDC_ASPECT_PAYLOAD_MAX_BYTES_V1:
+        return Err("MCDC-ASPECT-E-SIZE: vector code is empty or exceeds 1 MiB")
+    var writer = SmfBytecodeWriter.create()
+    writer.set_flags(1u32)
+    writer.add_code_section(".text.mcdc", vector_code)
+    writer.add_data_section(".rodata.mcdc_abi", [MCDC_ASPECT_MARKER_VALUE_V1], false)
+    writer.add_symbol(MCDC_ASPECT_VECTOR_SYMBOL_V1, 0, vector_code.len(),
+        SmfSymbolType.Function, SmfSymbolBinding.Global, 0)
+    writer.add_symbol(MCDC_ASPECT_VECTOR_ABI_MARKER_V1, 0, 1,
+        SmfSymbolType.Object, SmfSymbolBinding.Global, 1)
+    val payload = writer.finalize()
+    if payload.len() > MCDC_ASPECT_PAYLOAD_MAX_BYTES_V1:
+        return Err("MCDC-ASPECT-E-SIZE: encoded inner SMF exceeds 1 MiB")
+    Ok(payload)
+
+fn mcdc_build_aspect_pack_v1(vector_code: [u8]) -> ApkBuildResultV1:
+    """Create the deployable one-module pack artifact.
+
+    The inner executable SMF is STORED (not inflated) and 64-KiB aligned, so
+    activation can select/map this one payload without whole-pack readahead.
+    """
+    val payload = mcdc_build_aspect_module_payload_v1(vector_code)
+    if payload.is_err():
+        return ApkBuildResultV1(ok: false, error_code: "MCDC_ASPECT_BUILD",
+            error_message: payload.unwrap_err(), bytes: [], module_count: 0)
+    val module = ApkModuleSourceV3(
+        module_id: MCDC_ASPECT_MODULE_ID_V1,
+        aspect_id: MCDC_ASPECT_ID_V1,
+        module_abi_hash: MCDC_ASPECT_MODULE_ABI_V1,
+        required_core_public_abi_hash: "",
+        required_core_layout_hash: "",
+        variant_fingerprint: "",
+        cluster_id: "",
+        chunk_kind: APK_CHUNK_CODE,
+        chunk_flags: APK_CHUNK_FLAG_STORED,
+        alignment: 65536,
+        payload: payload.unwrap())
+    apk_build_pack_v3([module])

@@ -22,7 +22,7 @@ use ..linker.smf_reader.*
 use compiler.backend.linker.object_provider.{ObjectProvider, ObjectProviderConfig}
 use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory, SmfRelocEntry}
 use .object_mapper.{LoaderMapper, LoaderMapperConfig, ResolvedSymbol, apply_smf_relocations}
-use .smf_mmap_native.{native_alloc_rw_memory, native_make_executable, native_make_rw, native_flush_icache, native_write_exec_memory, native_call_function_0}
+use .smf_mmap_native.{native_alloc_rw_memory, native_free_exec_memory, native_make_executable, native_make_readonly, native_make_rw, native_flush_icache, native_write_exec_memory, native_call_function_0}
 use .jit_instantiator.*
 use ..metadata_symbols.{loaded_metadata_instantiation_symbol_names, loaded_metadata_remove_path}
 use ..unload_ownership.{owned_global_symbol_names, global_symbols_without_names}
@@ -58,6 +58,10 @@ export use .module_loader_semantic.{
 }
 use compiler.loader.mcdc_aspect_binding.{
     McdcAspectBindingState, McdcAspectBinding
+}
+use compiler.loader.mcdc_aspect_pack_payload.{
+    MCDC_ASPECT_VECTOR_SYMBOL_V1, MCDC_ASPECT_VECTOR_ABI_MARKER_V1,
+    mcdc_validate_aspect_module_payload_v1
 }
 use std.nogc_sync_mut.io.coverage_mcdc.{
     MCDC_STATUS_OK
@@ -181,6 +185,9 @@ struct LazyModuleLoader:
     # symbol supplies the vector target. No caller may free that module until
     # unbind has published dormancy and all prior readers have settled.
     mcdc_aspect_bindings: Dict<text, McdcAspectBinding>
+    # One read-only ABI byte mapping per explicitly activated payload. Empty
+    # while disarmed; marker pages are released only after reader settlement.
+    mcdc_aspect_marker_pages: Dict<text, (i64, i64)>
 
 
 # ============================================================================
@@ -210,7 +217,8 @@ fn lazymoduleloader_new(config: LazyModuleLoaderConfig) -> LazyModuleLoader:
             config: config,
             semantic_exports: {},
             semantic_dependencies: {},
-            mcdc_aspect_bindings: {}
+            mcdc_aspect_bindings: {},
+            mcdc_aspect_marker_pages: {}
         )
 
 fn moduleloader_bind_mcdc_aspect(self: LazyModuleLoader, path: text,
@@ -251,6 +259,113 @@ fn moduleloader_bind_mcdc_aspect(self: LazyModuleLoader, path: text,
     else:
         _ = rt_mcdc_dynamic_unregister_target_v1(target_handle, generation as u64)
     bound
+
+fn moduleloader_activate_mcdc_aspect_payload_v1(
+        self: LazyModuleLoader, owner_id: text, payload: [u8],
+        generation: i64) -> Result<(), text>:
+    """Map and publish one explicitly selected MC/DC aspect-pack payload.
+
+    This is deliberately not called by loader construction or by a dynamic
+    patchpoint.  The caller first routes/selects one outer pack module, then
+    supplies its inner-SMF bytes here.  Only the vector code is mapped; the ABI
+    marker is validated as data and never consumes an executable page.
+    """
+    if owner_id == "": return Err("MCDC-ASPECT-E-OWNER: empty payload owner")
+    if generation <= 0: return Err("MCDC-ASPECT-E-GENERATION: generation must be positive")
+    if self.mcdc_aspect_bindings.has(owner_id):
+        return Err("MCDC-ASPECT-E-STATE: payload owner is already active or settling")
+    if self.global_symbols.has(MCDC_ASPECT_VECTOR_SYMBOL_V1):
+        return Err("MCDC-ASPECT-E-STATE: canonical vector export is already mapped")
+    if self.global_symbols.has(MCDC_ASPECT_VECTOR_ABI_MARKER_V1):
+        return Err("MCDC-ASPECT-E-STATE: canonical ABI marker is already mapped")
+    val checked = mcdc_validate_aspect_module_payload_v1(payload)
+    if not checked.ok: return Err(checked.error)
+
+    val marker_address = native_alloc_rw_memory(checked.marker_bytes.len())
+    if marker_address == 0:
+        return Err("MCDC-ASPECT-E-MAP: ABI marker mapping failed")
+    if native_write_exec_memory(marker_address, checked.marker_bytes, 0) !=
+            checked.marker_bytes.len():
+        _ = native_free_exec_memory(marker_address, checked.marker_bytes.len())
+        return Err("MCDC-ASPECT-E-MAP: ABI marker copy failed")
+    if not native_make_readonly(marker_address, checked.marker_bytes.len()):
+        _ = native_free_exec_memory(marker_address, checked.marker_bytes.len())
+        return Err("MCDC-ASPECT-E-MAP: ABI marker permission hardening failed")
+
+    val lifecycle = moduleloader_ensure_lifecycle(self)
+    val jit = moduleloader_ensure_jit(self)
+    lifecycle_on_module_load(lifecycle, owner_id, jit.exec_mapper.generation,
+        current_time())
+    val address = moduleloader_allocate_exec_module(
+        self, owner_id, MCDC_ASPECT_VECTOR_SYMBOL_V1,
+        checked.vector_code, false)
+    if address == 0:
+        _ = native_free_exec_memory(marker_address, checked.marker_bytes.len())
+        lifecycle_unload_module(lifecycle, jit.exec_mapper, owner_id)
+        return Err("MCDC-ASPECT-E-MAP: vector code mapping failed")
+
+    val target_handle = rt_mcdc_dynamic_register_target_v1(
+        address as u64, generation as u64)
+    if target_handle == 0u64:
+        _ = native_free_exec_memory(marker_address, checked.marker_bytes.len())
+        lifecycle_unload_module(lifecycle, jit.exec_mapper, owner_id)
+        return Err("MCDC-ASPECT-E-REGISTRY: target registry rejected mapped vector")
+    var binding = McdcAspectBinding.dormant()
+    val bound = binding.bind(target_handle, generation)
+    if bound.is_err():
+        _ = rt_mcdc_dynamic_unregister_target_v1(
+            target_handle, generation as u64)
+        _ = native_free_exec_memory(marker_address, checked.marker_bytes.len())
+        lifecycle_unload_module(lifecycle, jit.exec_mapper, owner_id)
+        return bound
+    self.mcdc_aspect_bindings[owner_id] = binding
+    self.mcdc_aspect_marker_pages[owner_id] = (
+        marker_address, checked.marker_bytes.len())
+    val symbol = LoadedSymbol(
+        name: MCDC_ASPECT_VECTOR_SYMBOL_V1,
+        address: address,
+        size: checked.vector_code.len(),
+        ty: SymbolType.Function,
+        is_jit: false,
+        file_offset: 0)
+    self.global_symbols[MCDC_ASPECT_VECTOR_SYMBOL_V1] = (owner_id, symbol)
+    val marker_symbol = LoadedSymbol(
+        name: MCDC_ASPECT_VECTOR_ABI_MARKER_V1,
+        address: marker_address,
+        size: checked.marker_bytes.len(),
+        ty: SymbolType.Data,
+        is_jit: false,
+        file_offset: 0)
+    self.global_symbols[MCDC_ASPECT_VECTOR_ABI_MARKER_V1] = (
+        owner_id, marker_symbol)
+    lifecycle_on_symbol_mapped(lifecycle, owner_id,
+        MCDC_ASPECT_VECTOR_SYMBOL_V1)
+    Ok(())
+
+fn moduleloader_retire_mcdc_aspect_payload_v1(
+        self: LazyModuleLoader, owner_id: text) -> Result<bool, text>:
+    """Withdraw, settle, unregister, and only then unmap a pack payload."""
+    if not self.mcdc_aspect_bindings.has(owner_id): return Ok(true)
+    val retired = moduleloader_retire_mcdc_aspect(self, owner_id)
+    if retired.is_err() or not retired.unwrap(): return retired
+    if self.global_symbols.has(MCDC_ASPECT_VECTOR_SYMBOL_V1):
+        val current = self.global_symbols[MCDC_ASPECT_VECTOR_SYMBOL_V1]
+        if current[0] == owner_id:
+            self.global_symbols = self.global_symbols.remove(
+                MCDC_ASPECT_VECTOR_SYMBOL_V1)
+    if self.global_symbols.has(MCDC_ASPECT_VECTOR_ABI_MARKER_V1):
+        val current_marker = self.global_symbols[MCDC_ASPECT_VECTOR_ABI_MARKER_V1]
+        if current_marker[0] == owner_id:
+            self.global_symbols = self.global_symbols.remove(
+                MCDC_ASPECT_VECTOR_ABI_MARKER_V1)
+    if self.mcdc_aspect_marker_pages.has(owner_id):
+        val marker_page = self.mcdc_aspect_marker_pages[owner_id]
+        _ = native_free_exec_memory(marker_page[0], marker_page[1])
+        self.mcdc_aspect_marker_pages = self.mcdc_aspect_marker_pages.remove(owner_id)
+    val lifecycle = moduleloader_ensure_lifecycle(self)
+    val jit = moduleloader_ensure_jit(self)
+    lifecycle_unload_module(lifecycle, jit.exec_mapper, owner_id)
+    Ok(true)
 
 
 fn lazymoduleloader_with_defaults() -> LazyModuleLoader:
