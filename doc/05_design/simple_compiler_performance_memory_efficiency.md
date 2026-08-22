@@ -440,3 +440,13 @@ directly; no result or diagnostic payload is reconstructed. When severity change
 one new diagnostic/result is created. Callers must not mutate either path, and
 rendered output, counts, ordering, fix identity, evidence, and uncertainty remain
 identical.
+
+## Natural-loop latch bucket contract
+
+Loop detection maps each dominance-proven header to one owned latch-array index
+and one membership set. First header discovery fixes loop-output order. First
+source/header discovery fixes backedge order; duplicate terminator edges from the
+same source to the same header are ignored. The edge loop performs no growing
+array extraction, linear duplicate scan, or dictionary copyback. Incomplete CFG
+or dominance still produces no loops, and loop body/exit construction is
+unchanged.
