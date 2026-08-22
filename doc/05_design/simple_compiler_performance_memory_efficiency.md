@@ -823,3 +823,14 @@ identity, then constructs the enum with those assigned IDs. Per-match member
 recognition is a dictionary keyed by complete canonical member key. Bare named
 patterns resolve their existing symbol; generic/qualified patterns require a
 future grammar/HIR type payload.
+
+### Compiler-trace scope state
+
+The trace-policy owner stores `scope_active` and `cached_enabled` in one
+two-element i64 owner buffer. `scope_enter` returns the packed prior pair. An
+outer entry reads the environment once; a nested entry preserves the outer
+snapshot. `scope_exit` unpacks the prior pair. The hot accessor reads the cached
+bit when active, otherwise reads the environment, and applies diagnostic trace
+suppression last. This preserves ordinary direct-call behavior, silent output,
+and same-process between-parse changes while removing environment dispatch from
+expression, statement, primary, module-body, and parser-type trace probes.

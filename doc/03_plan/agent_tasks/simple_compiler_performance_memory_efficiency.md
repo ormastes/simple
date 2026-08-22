@@ -113,6 +113,20 @@
 - Add mirrored clean-view, policy, parse/count order, and active-source contracts.
 - Verification intentionally not run under the user's no-verify instruction.
 
+## Completed frontend trace hot-path tranche
+
+- Added one cycle-free parse-scope snapshot of `SIMPLE_COMPILER_TRACE`.
+- Preserved dynamic behavior outside parsing, nested LIFO restoration, silent
+  structured output, and resampling at the next top-level parse.
+- Routed expression, statement, primary, module-body, and parser-type probes
+  through the shared decision.
+- Added mirrored same-process next-parse refresh contracts.
+- Static operation model: about `15E + P + S` environment reads become one per
+  top-level parse; constant two-i64 state; no AST/layout/API change.
+- Cache-restore frontend conversion paths and remaining independent trace flags
+  remain separate follow-up inventory; no broader cache claim is made.
+- Verification intentionally not run under the user's no-verify instruction.
+
 ## Completed nested lint collection state tranche
 
 - Harden `_collect_lint_diagnostics_json` as the lint-owned structured boundary.
