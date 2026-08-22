@@ -9,9 +9,56 @@ use crate::mir::blocks::Terminator;
 use crate::mir::effects::CallTarget;
 use crate::mir::effects::LocalKind;
 use crate::mir::function::MirLocal;
-use crate::mir::instructions::{MirInst, UnitOverflowBehavior};
+use crate::mir::instructions::{MirInst, UnitOverflowBehavior, VReg};
 
 impl<'a> MirLowerer<'a> {
+    /// Store an aggregate assignment into its leaf places without materializing
+    /// an intermediate aggregate. Array patterns use the array getter; tuple
+    /// patterns use the tuple getter. Nested patterns recurse over the value
+    /// returned by the parent getter, so each aggregate element is read once.
+    fn lower_destructuring_assignment(&mut self, target: &HirExpr, aggregate: VReg) -> MirLowerResult<()> {
+        let (elements, getter) = match &target.kind {
+            HirExprKind::Array(elements) => (elements.as_slice(), "rt_array_get"),
+            HirExprKind::Tuple(elements) => (elements.as_slice(), "rt_tuple_get"),
+            _ => {
+                let value = self.unbox_scalar_for_raw_slot(target.ty, TypeId::ANY, aggregate)?;
+                let addr = self.lower_lvalue(target)?;
+                return self.with_func(|func, current_block| {
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::Store {
+                        addr,
+                        value,
+                        ty: target.ty,
+                    });
+                });
+            }
+        };
+
+        for (index, element) in elements.iter().enumerate() {
+            let index_reg = self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::ConstInt {
+                    dest,
+                    value: index as i64,
+                });
+                dest
+            })?;
+            let element_reg = self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: CallTarget::from_name(getter),
+                    args: vec![aggregate, index_reg],
+                });
+                dest
+            })?;
+            self.lower_destructuring_assignment(element, element_reg)?;
+        }
+        Ok(())
+    }
+
     /// True when a HIR expression is a PLACE read -- it evaluates to the SAME
     /// memory an existing binding already owns (a plain local/global variable
     /// read, a field projection, an index projection) rather than a
@@ -672,8 +719,7 @@ impl<'a> MirLowerer<'a> {
                                             | TypeId::U64
                                     );
                                 let needs_float_boxing = !elem_is_heap && matches!(value.ty, TypeId::F32 | TypeId::F64);
-                                let needs_bool_boxing =
-                                    !elem_is_heap && value.ty == TypeId::BOOL;
+                                let needs_bool_boxing = !elem_is_heap && value.ty == TypeId::BOOL;
                                 if value.ty == TypeId::U64 && !elem_is_heap {
                                     self.box_u64_runtime_value(val_reg)?
                                 } else if needs_int_boxing {
@@ -755,39 +801,11 @@ impl<'a> MirLowerer<'a> {
                         })?;
                     }
 
-                    // Tuple destructuring: (a, b, c) = expr
-                    HirExprKind::Tuple(elements) => {
-                        // val_reg holds the tuple value; extract each element and assign
-                        for (i, elem) in elements.iter().enumerate() {
-                            // Create index constant
-                            let index_reg = self.with_func(|func, current_block| {
-                                let dest = func.new_vreg();
-                                let block = func.block_mut(current_block).unwrap();
-                                block.instructions.push(MirInst::ConstInt { dest, value: i as i64 });
-                                dest
-                            })?;
-                            // Extract tuple element via rt_tuple_get
-                            let elem_reg = self.with_func(|func, current_block| {
-                                let dest = func.new_vreg();
-                                let block = func.block_mut(current_block).unwrap();
-                                block.instructions.push(MirInst::Call {
-                                    dest: Some(dest),
-                                    target: crate::mir::CallTarget::from_name("rt_tuple_get"),
-                                    args: vec![val_reg, index_reg],
-                                });
-                                dest
-                            })?;
-                            // Store to the lvalue element
-                            let addr_reg = self.lower_lvalue(elem)?;
-                            self.with_func(|func, current_block| {
-                                let block = func.block_mut(current_block).unwrap();
-                                block.instructions.push(MirInst::Store {
-                                    addr: addr_reg,
-                                    value: elem_reg,
-                                    ty: elem.ty,
-                                });
-                            })?;
-                        }
+                    // Aggregate destructuring: `(a, b) = tuple`, `[a, b] = array`,
+                    // and nested combinations. The helper extracts every slot once,
+                    // recursively stores leaves, and emits no aggregate copy/allocation.
+                    HirExprKind::Tuple(_) | HirExprKind::Array(_) => {
+                        self.lower_destructuring_assignment(target, val_reg)?;
                     }
 
                     // Global variable assignment: use GlobalStore directly.

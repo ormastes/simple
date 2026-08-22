@@ -39,6 +39,53 @@ fn has_exact_declared_call(func: &MirFunction, name: &str) -> bool {
         })
 }
 
+fn count_calls(func: &MirFunction, name: &str) -> usize {
+    func.blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .filter(|inst| matches!(inst, MirInst::Call { target, .. } if target.name() == name))
+        .count()
+}
+
+#[test]
+fn array_destructuring_assignment_lowers_single_pair_and_nested_patterns() {
+    let source = include_str!("../../../../../../../test/fixtures/compiler/array_destructuring_assignment.spl");
+    let mir = compile_to_mir(source).expect("array-pattern assignments must lower to MIR");
+
+    for (function_name, expected_gets) in [("single", 1), ("pair", 2), ("nested", 6)] {
+        let function = mir
+            .functions
+            .iter()
+            .find(|function| function.name == function_name)
+            .expect(function_name);
+        assert_eq!(
+            count_calls(function, "rt_array_get"),
+            expected_gets,
+            "{function_name} must read every destructured slot exactly once"
+        );
+        assert_eq!(
+            count_calls(function, "rt_array_copy")
+                + count_calls(function, "rt_array_new")
+                + count_calls(function, "rt_array_with_capacity"),
+            0,
+            "{function_name} destructuring must not allocate or copy an aggregate"
+        );
+    }
+}
+
+#[test]
+fn tuple_destructuring_keeps_tuple_specific_extraction() {
+    let source = "fn pair(values: (i64, i64)) -> i64:\n    var left = 0\n    var right = 0\n    (left, right) = values\n    left + right\n";
+    let mir = compile_to_mir(source).expect("tuple destructuring must remain supported");
+    let function = mir
+        .functions
+        .iter()
+        .find(|function| function.name == "pair")
+        .expect("pair");
+    assert_eq!(count_calls(function, "rt_tuple_get"), 2);
+    assert_eq!(count_calls(function, "rt_array_get"), 0);
+}
+
 #[test]
 fn typed_text_bytes_does_not_bind_same_leaf_user_owner() {
     let source = include_str!("../../../../../../../test/fixtures/compiler/text_bytes_owner_collision.spl");
