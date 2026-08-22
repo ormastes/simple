@@ -8,9 +8,19 @@
 
 use compiler.backend.linker.obj_taker.{SymbolType}
 use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
-use compiler.loader.loader.bytecode_writer.{
-    SmfBytecodeWriter, SmfSymbolType, SmfSymbolBinding
+use compiler.backend.linker.elf_parser.{
+    ElfObject, ElfSymbol, elf_parse_object, elf_strtab_get,
+    elf_symbol_binding, elf_symbol_type, elf_reloc_sym, elf_reloc_type,
+    SHT_RELA, SHT_REL, SHN_UNDEF, STB_GLOBAL, STT_OBJECT, STT_FUNC
 }
+use compiler.backend.linker.elf_inspect.{ET_REL, EM_X86_64, SHT_PROGBITS}
+use compiler.backend.linker.smf_writer.{
+    SmfWriter, SmfWriterSymbol, SmfWriterSymbolBinding,
+    SmfWriterSymbolType, SmfRelocation, RelocationType,
+    DataSectionKind
+}
+use compiler.common.config.{McdcPolicy}
+use std.common.crypto.sha256.{sha256_u8_hex}
 use std.common.aspect_pack.{
     ApkModuleSourceV3, ApkBuildResultV1, apk_build_pack_v3,
     APK_CHUNK_CODE, APK_CHUNK_FLAG_STORED
@@ -24,7 +34,28 @@ val MCDC_ASPECT_ID_V1: text = "runtime.mcdc"
 val MCDC_ASPECT_MODULE_ABI_V1: text =
     "simple:mcdc-vector:u64,u32,u64,u64,u64,u8->i32:v1"
 val MCDC_ASPECT_PAYLOAD_MAX_BYTES_V1: i64 = 1048576
+val MCDC_ASPECT_VECTOR_CODE_MAX_BYTES_V1: i64 = 65536
 val MCDC_ASPECT_MARKER_VALUE_V1: u8 = 1u8
+val MCDC_ASPECT_OBJECT_MAX_SECTIONS_V1: i64 = 64
+val MCDC_ASPECT_OBJECT_MAX_SYMBOLS_V1: i64 = 64
+val MCDC_ASPECT_OBJECT_MAX_RELOCS_V1: i64 = 64
+val MCDC_ASPECT_RUNTIME_IMPORT_V1: text = "rt_mcdc_record_compiled_vector_v1"
+
+# ELF section flags admitted by the aspect object converter.
+val MCDC_ELF_SHF_WRITE: i64 = 1
+val MCDC_ELF_SHF_ALLOC: i64 = 2
+val MCDC_ELF_SHF_EXECINSTR: i64 = 4
+
+struct McdcAspectObjectConversionV1:
+    inner_smf: [u8]
+    source_object_sha256: text
+    inner_smf_sha256: text
+    relocation_count: i64
+
+struct McdcAspectPackPolicyResultV1:
+    built: bool
+    skipped_static_off: bool
+    result: ApkBuildResultV1
 
 struct McdcAspectPayloadValidationV1:
     ok: bool
@@ -87,34 +118,198 @@ fn mcdc_validate_aspect_module_payload_v1(payload: [u8]) -> McdcAspectPayloadVal
         ok: true, error: "", vector_code: vector_code,
         marker_bytes: marker_bytes)
 
-fn mcdc_build_aspect_module_payload_v1(vector_code: [u8]) -> Result<[u8], text>:
-    """Build the target-neutral inner container around compiled PIC bytes.
+fn _mcdc_object_section_bytes(obj: ElfObject, symbol: ElfSymbol) -> Result<[u8], text>:
+    if symbol.st_shndx <= 0 or symbol.st_shndx >= obj.sections.len():
+        return Err("MCDC-ASPECT-E-SYMBOL: symbol section is out of range")
+    val section = obj.sections[symbol.st_shndx]
+    if symbol.st_value < 0 or symbol.st_size <= 0 or
+            symbol.st_value + symbol.st_size > section.sh_size:
+        return Err("MCDC-ASPECT-E-SYMBOL: symbol bytes exceed their section")
+    val start = section.sh_addr + symbol.st_value
+    val end = start + symbol.st_size
+    if start < 0 or end > obj.raw.len():
+        return Err("MCDC-ASPECT-E-SYMBOL: symbol bytes exceed the object")
+    var out: [u8] = [0u8; symbol.st_size]
+    var i = 0
+    while i < symbol.st_size:
+        out[i] = obj.raw[start + i]
+        i = i + 1
+    Ok(out)
 
-    `vector_code` is produced by the normal target backend; this function does
-    not invent machine code or fall back to a host compiler.
+fn _mcdc_object_reloc_type(machine: i64, kind: i64) -> Result<RelocationType, text>:
+    if machine != EM_X86_64:
+        return Err("MCDC-ASPECT-E-ARCH: only the loader-proven x86_64 relocation ABI is admitted")
+    match kind:
+        case 1: Ok(RelocationType.Abs64)       # R_X86_64_64
+        case 2: Ok(RelocationType.Rel32)       # R_X86_64_PC32
+        case 4: Ok(RelocationType.PltRel32)    # R_X86_64_PLT32
+        case 9: Ok(RelocationType.GotRel32)    # R_X86_64_GOTPCREL
+        case 10: Ok(RelocationType.Abs32)      # R_X86_64_32
+        case _: Err("MCDC-ASPECT-E-RELOC: unsupported x86_64 relocation {kind}")
+
+fn _mcdc_find_object_symbol(obj: ElfObject, name: text) -> Result<ElfSymbol, text>:
+    var found: ElfSymbol? = nil
+    for symbol in obj.symbols:
+        if symbol.name == name:
+            if found != nil:
+                return Err("MCDC-ASPECT-E-SYMBOL: duplicate symbol {name}")
+            found = symbol
+    if val value = found:
+        return Ok(value)
+    Err("MCDC-ASPECT-E-SYMBOL: missing symbol {name}")
+
+fn mcdc_convert_aspect_object_v1(object_bytes: [u8]) -> Result<McdcAspectObjectConversionV1, text>:
+    """Convert one isolated PIC ELF object into a relocation-bearing inner SMF.
+
+    The converter admits one immutable code section, one immutable ABI-marker
+    section, and one unresolved runtime import.  Compiler metadata sections are
+    ignored.  Writable/extra allocated sections, implicit imports, REL records,
+    and relocation kinds the loader cannot apply are rejected before packaging.
     """
-    if vector_code.len() <= 0 or vector_code.len() > MCDC_ASPECT_PAYLOAD_MAX_BYTES_V1:
-        return Err("MCDC-ASPECT-E-SIZE: vector code is empty or exceeds 1 MiB")
-    var writer = SmfBytecodeWriter.create()
-    writer.set_flags(1u32)
-    writer.add_code_section(".text.mcdc", vector_code)
-    writer.add_data_section(".rodata.mcdc_abi", [MCDC_ASPECT_MARKER_VALUE_V1], false)
-    writer.add_symbol(MCDC_ASPECT_VECTOR_SYMBOL_V1, 0, vector_code.len(),
-        SmfSymbolType.Function, SmfSymbolBinding.Global, 0)
-    writer.add_symbol(MCDC_ASPECT_VECTOR_ABI_MARKER_V1, 0, 1,
-        SmfSymbolType.Object, SmfSymbolBinding.Global, 1)
-    val payload = writer.finalize()
+    if object_bytes.len() <= 0 or object_bytes.len() > MCDC_ASPECT_PAYLOAD_MAX_BYTES_V1:
+        return Err("MCDC-ASPECT-E-SIZE: object is empty or exceeds 1 MiB")
+    val parsed = elf_parse_object(object_bytes)
+    if parsed.is_err():
+        return Err("MCDC-ASPECT-E-OBJECT: " + parsed.unwrap_err())
+    val obj = parsed.unwrap()
+    if obj.header.e_type != ET_REL:
+        return Err("MCDC-ASPECT-E-OBJECT: input is not relocatable")
+    if obj.header.e_machine != EM_X86_64:
+        return Err("MCDC-ASPECT-E-ARCH: object is not x86_64")
+    if obj.sections.len() > MCDC_ASPECT_OBJECT_MAX_SECTIONS_V1 or
+            obj.symbols.len() > MCDC_ASPECT_OBJECT_MAX_SYMBOLS_V1 or
+            obj.relocations.len() > MCDC_ASPECT_OBJECT_MAX_RELOCS_V1:
+        return Err("MCDC-ASPECT-E-BOUNDS: object metadata exceeds fixed capacities")
+    for section in obj.sections:
+        if section.sh_type == SHT_REL:
+            return Err("MCDC-ASPECT-E-RELOC: REL is unsupported; use explicit-addend RELA")
+
+    val vector = _mcdc_find_object_symbol(obj, MCDC_ASPECT_VECTOR_SYMBOL_V1)?
+    val marker = _mcdc_find_object_symbol(obj, MCDC_ASPECT_VECTOR_ABI_MARKER_V1)?
+    val runtime_import = _mcdc_find_object_symbol(obj, MCDC_ASPECT_RUNTIME_IMPORT_V1)?
+    if elf_symbol_type(vector) != STT_FUNC or elf_symbol_binding(vector) != STB_GLOBAL:
+        return Err("MCDC-ASPECT-E-ABI: vector must be a global function")
+    if elf_symbol_type(marker) != STT_OBJECT or elf_symbol_binding(marker) != STB_GLOBAL:
+        return Err("MCDC-ASPECT-E-ABI: marker must be a global object")
+    if runtime_import.st_shndx != SHN_UNDEF:
+        return Err("MCDC-ASPECT-E-IMPORT: runtime collector must remain unresolved")
+
+    # No additional externally visible definitions or unresolved dependencies.
+    for symbol in obj.symbols:
+        if elf_symbol_binding(symbol) == STB_GLOBAL and symbol.name != "" and
+                symbol.name != MCDC_ASPECT_VECTOR_SYMBOL_V1 and
+                symbol.name != MCDC_ASPECT_VECTOR_ABI_MARKER_V1 and
+                symbol.name != MCDC_ASPECT_RUNTIME_IMPORT_V1:
+            return Err("MCDC-ASPECT-E-EXPORTS: unexpected global symbol " + symbol.name)
+        if symbol.st_shndx == SHN_UNDEF and symbol.name != "" and
+                symbol.name != MCDC_ASPECT_RUNTIME_IMPORT_V1:
+            return Err("MCDC-ASPECT-E-IMPORT: unexpected import " + symbol.name)
+
+    val vector_section = obj.sections[vector.st_shndx]
+    val marker_section = obj.sections[marker.st_shndx]
+    if vector_section.sh_type != SHT_PROGBITS or
+            (vector_section.sh_flags & MCDC_ELF_SHF_ALLOC) == 0 or
+            (vector_section.sh_flags & MCDC_ELF_SHF_EXECINSTR) == 0 or
+            (vector_section.sh_flags & MCDC_ELF_SHF_WRITE) != 0:
+        return Err("MCDC-ASPECT-E-WX: vector section must be immutable executable PIC")
+    if marker_section.sh_type != SHT_PROGBITS or
+            (marker_section.sh_flags & MCDC_ELF_SHF_ALLOC) == 0 or
+            (marker_section.sh_flags & (MCDC_ELF_SHF_WRITE | MCDC_ELF_SHF_EXECINSTR)) != 0:
+        return Err("MCDC-ASPECT-E-WX: marker section must be immutable non-executable data")
+    var si = 0
+    while si < obj.sections.len():
+        val section = obj.sections[si]
+        if (section.sh_flags & MCDC_ELF_SHF_ALLOC) != 0 and
+                si != vector.st_shndx and si != marker.st_shndx and section.sh_size > 0:
+            val section_name = elf_strtab_get(obj.shstrtab, section.sh_name)
+            return Err("MCDC-ASPECT-E-SECTIONS: unexpected allocated section " + section_name)
+        si = si + 1
+
+    val vector_code = _mcdc_object_section_bytes(obj, vector)?
+    val marker_bytes = _mcdc_object_section_bytes(obj, marker)?
+    if vector_code.len() > MCDC_ASPECT_VECTOR_CODE_MAX_BYTES_V1:
+        return Err("MCDC-ASPECT-E-SIZE: vector code exceeds 64 KiB")
+    if marker_bytes.len() != 1 or marker_bytes[0] != MCDC_ASPECT_MARKER_VALUE_V1:
+        return Err("MCDC-ASPECT-E-ABI: ABI marker payload is not v1")
+    if obj.relocations.len() <= 0:
+        return Err("MCDC-ASPECT-E-RELOC: vector must retain its runtime collector relocation")
+
+    var vector_i64: [i64] = [0; vector_code.len()]
+    var vi = 0
+    while vi < vector_code.len():
+        vector_i64[vi] = vector_code[vi] as i64
+        vi = vi + 1
+    var marker_i64: [i64] = [0; marker_bytes.len()]
+    var mi = 0
+    while mi < marker_bytes.len():
+        marker_i64[mi] = marker_bytes[mi] as i64
+        mi = mi + 1
+    var writer = SmfWriter.create()
+    writer.add_code_section(".text.mcdc", vector_i64)
+    writer.add_data_section(".rodata.mcdc", marker_i64, DataSectionKind.ReadOnly)
+    writer.add_symbol(SmfWriterSymbol(
+        name: MCDC_ASPECT_VECTOR_SYMBOL_V1, binding: SmfWriterSymbolBinding.Global,
+        sym_type: SmfWriterSymbolType.Function, section_index: 0, value: 0,
+        size: vector_code.len(), layout_phase: 3, is_event_loop_anchor: false,
+        layout_pinned: true))
+    writer.add_symbol(SmfWriterSymbol(
+        name: MCDC_ASPECT_VECTOR_ABI_MARKER_V1, binding: SmfWriterSymbolBinding.Global,
+        sym_type: SmfWriterSymbolType.Object, section_index: 1, value: 0,
+        size: 1, layout_phase: 3, is_event_loop_anchor: false,
+        layout_pinned: true))
+    val import_index = writer.add_symbol(SmfWriterSymbol(
+        name: MCDC_ASPECT_RUNTIME_IMPORT_V1, binding: SmfWriterSymbolBinding.Local,
+        sym_type: SmfWriterSymbolType.Function, section_index: 0, value: 0,
+        size: 0, layout_phase: 3, is_event_loop_anchor: false,
+        layout_pinned: true))
+    for reloc in obj.relocations:
+        if reloc.target_section_idx != vector.st_shndx:
+            return Err("MCDC-ASPECT-E-RELOC: relocation does not target the vector section")
+        val original_symbol_index = elf_reloc_sym(reloc)
+        if original_symbol_index < 0 or original_symbol_index >= obj.symbols.len() or
+                obj.symbols[original_symbol_index].name != MCDC_ASPECT_RUNTIME_IMPORT_V1:
+            return Err("MCDC-ASPECT-E-RELOC: relocation does not target the runtime collector")
+        val relative_offset = reloc.r_offset - vector.st_value
+        if relative_offset < 0 or relative_offset + 4 > vector.st_size:
+            return Err("MCDC-ASPECT-E-RELOC: relocation patch exceeds vector bytes")
+        val mapped_type = _mcdc_object_reloc_type(obj.header.e_machine, elf_reloc_type(reloc))?
+        writer.add_relocation(SmfRelocation(
+            offset: relative_offset, symbol_index: import_index,
+            reloc_type: mapped_type, addend: reloc.r_addend))
+    val encoded = writer.write()
+    if encoded.is_err():
+        return Err("MCDC-ASPECT-E-SMF: " + encoded.unwrap_err().message())
+    var payload: [u8] = []
+    for byte in encoded.unwrap():
+        payload.push(byte as u8)
     if payload.len() > MCDC_ASPECT_PAYLOAD_MAX_BYTES_V1:
         return Err("MCDC-ASPECT-E-SIZE: encoded inner SMF exceeds 1 MiB")
-    Ok(payload)
+    val checked = mcdc_validate_aspect_module_payload_v1(payload)
+    if not checked.ok:
+        return Err(checked.error)
+    val readback = SmfReaderMemory.from_data(payload)?
+    val readback_relocs = readback.read_relocations()?
+    if readback_relocs.len() != obj.relocations.len():
+        return Err("MCDC-ASPECT-E-RELOC: relocation readback count changed")
+    Ok(McdcAspectObjectConversionV1(
+        inner_smf: payload,
+        source_object_sha256: sha256_u8_hex(object_bytes),
+        inner_smf_sha256: sha256_u8_hex(payload),
+        relocation_count: readback_relocs.len()))
 
-fn mcdc_build_aspect_pack_v1(vector_code: [u8]) -> ApkBuildResultV1:
+fn mcdc_build_aspect_module_payload_v1(object_bytes: [u8]) -> Result<[u8], text>:
+    val converted = mcdc_convert_aspect_object_v1(object_bytes)
+    if converted.is_err():
+        return Err(converted.unwrap_err())
+    Ok(converted.unwrap().inner_smf)
+
+fn mcdc_build_aspect_pack_v1(object_bytes: [u8]) -> ApkBuildResultV1:
     """Create the deployable one-module pack artifact.
 
     The inner executable SMF is STORED (not inflated) and 64-KiB aligned, so
     activation can select/map this one payload without whole-pack readahead.
     """
-    val payload = mcdc_build_aspect_module_payload_v1(vector_code)
+    val payload = mcdc_build_aspect_module_payload_v1(object_bytes)
     if payload.is_err():
         return ApkBuildResultV1(ok: false, error_code: "MCDC_ASPECT_BUILD",
             error_message: payload.unwrap_err(), bytes: [], module_count: 0)
@@ -131,3 +326,20 @@ fn mcdc_build_aspect_pack_v1(vector_code: [u8]) -> ApkBuildResultV1:
         alignment: 65536,
         payload: payload.unwrap())
     apk_build_pack_v3([module])
+
+fn mcdc_build_aspect_pack_for_policy_v1(policy: McdcPolicy, object_bytes: [u8]) -> McdcAspectPackPolicyResultV1:
+    """Build only for dynamic policy; static-off performs no parse/hash/link work."""
+    if policy == McdcPolicy.StaticOff:
+        return McdcAspectPackPolicyResultV1(
+            built: false, skipped_static_off: true,
+            result: ApkBuildResultV1(ok: true, error_code: "", error_message: "",
+                bytes: [], module_count: 0))
+    if policy != McdcPolicy.Dynamic:
+        return McdcAspectPackPolicyResultV1(
+            built: false, skipped_static_off: false,
+            result: ApkBuildResultV1(ok: false, error_code: "MCDC_ASPECT_POLICY",
+                error_message: "aspect pack is valid only for dynamic MC/DC policy",
+                bytes: [], module_count: 0))
+    McdcAspectPackPolicyResultV1(
+        built: true, skipped_static_off: false,
+        result: mcdc_build_aspect_pack_v1(object_bytes))

@@ -1,0 +1,31 @@
+#!/bin/sh
+set -eu
+
+repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+work_dir=$(mktemp -d)
+trap 'rm -r "$work_dir"' EXIT HUP INT TERM
+
+common_flags='-std=c11 -O2 -fPIC -fvisibility=hidden -fno-asynchronous-unwind-tables -fno-unwind-tables -fno-stack-protector -fcf-protection=none'
+cc $common_flags -c "$repo_dir/src/runtime/aspect/mcdc_vector_aspect_v1.c" -o "$work_dir/provider-a.o"
+cc $common_flags -c "$repo_dir/src/runtime/aspect/mcdc_vector_aspect_v1.c" -o "$work_dir/provider-b.o"
+cmp "$work_dir/provider-a.o" "$work_dir/provider-b.o"
+
+cc -std=c11 -O2 -Wall -Wextra -Werror -pedantic \
+  "$repo_dir/test/01_unit/runtime/mcdc_aspect_object_converter_selfcheck.c" \
+  -o "$work_dir/selfcheck"
+"$work_dir/selfcheck" "$work_dir/provider-a.o"
+
+# The policy owner must branch before conversion, hashing, or packing. This is
+# a source-level zero-work guard that remains meaningful without a Simple CLI.
+policy_file="$repo_dir/src/compiler/99.loader/mcdc_aspect_pack_payload.spl"
+awk '
+  /fn mcdc_build_aspect_pack_for_policy_v1/ { in_fn=1 }
+  in_fn && /if policy == McdcPolicy.StaticOff/ { off=NR }
+  in_fn && /mcdc_build_aspect_pack_v1\(object_bytes\)/ { build=NR }
+  END { if (!off || !build || off >= build) exit 1 }
+' "$policy_file"
+
+hash_a=$(sha256sum "$work_dir/provider-a.o" | cut -d ' ' -f 1)
+hash_b=$(sha256sum "$work_dir/provider-b.o" | cut -d ' ' -f 1)
+test "$hash_a" = "$hash_b"
+printf 'PASS reproducible_object_sha256=%s static_off_build_calls=0\n' "$hash_a"

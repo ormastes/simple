@@ -1,23 +1,30 @@
 use std.spec.*
+use compiler.common.config.{McdcPolicy}
 use compiler.loader.mcdc_aspect_pack_payload.*
 
 describe "MC/DC executable aspect-pack payload contract":
-    it "builds one bounded inner SMF with only vector and exact ABI marker exports":
-        # RET is sufficient for container/loader validation; execution ABI is
-        # independently pinned by mcdc_vector_aspect_payload_selfcheck.c.
+    it "rejects raw machine code because it cannot preserve object relocations":
         val built = mcdc_build_aspect_module_payload_v1([0xC3u8])
-        expect(built.is_ok()).to_equal(true)
-        val checked = mcdc_validate_aspect_module_payload_v1(built.unwrap())
-        expect(checked.ok).to_equal(true)
-        expect(checked.vector_code).to_equal([0xC3u8])
-        expect(checked.marker_bytes).to_equal([MCDC_ASPECT_MARKER_VALUE_V1])
+        expect(built.is_err()).to_equal(true)
+        expect(built.unwrap_err()).to_contain("MCDC-ASPECT-E-OBJECT")
 
     it "rejects empty and non-SMF payloads before mapping":
         expect(mcdc_validate_aspect_module_payload_v1([]).ok).to_equal(false)
         expect(mcdc_validate_aspect_module_payload_v1([1u8, 2u8, 3u8]).ok).to_equal(false)
 
-    it "packages the validated executable inner SMF as one stored aligned module":
-        val pack = mcdc_build_aspect_pack_v1([0xC3u8])
-        expect(pack.ok).to_equal(true)
-        expect(pack.module_count).to_equal(1)
-        expect(pack.bytes.len()).to_be_greater_than(0)
+    it "does no object parsing hashing linking or packaging for static-off":
+        val skipped = mcdc_build_aspect_pack_for_policy_v1(
+            McdcPolicy.StaticOff, [0xC3u8])
+        expect(skipped.built).to_equal(false)
+        expect(skipped.skipped_static_off).to_equal(true)
+        expect(skipped.result.ok).to_equal(true)
+        expect(skipped.result.bytes.len()).to_equal(0)
+        expect(skipped.result.module_count).to_equal(0)
+
+    it "does not build an aspect pack for static-on policy":
+        val rejected = mcdc_build_aspect_pack_for_policy_v1(
+            McdcPolicy.StaticOn, [0xC3u8])
+        expect(rejected.built).to_equal(false)
+        expect(rejected.skipped_static_off).to_equal(false)
+        expect(rejected.result.ok).to_equal(false)
+        expect(rejected.result.error_code).to_equal("MCDC_ASPECT_POLICY")
