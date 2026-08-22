@@ -1141,11 +1141,24 @@ fn rewrite_method_expect_line(line: &str) -> String {
         None => return line.to_string(),
     };
 
+    // Parenthesize the equality subject only when it is a compound expression
+    // (e.g. `if ready: 1 else: 0`, `a + b`). A bare atom — identifier, literal,
+    // or a single call/member chain — must stay unparenthesized: the HIR BDD
+    // recognizer matches `expect <a> == <b>` textually, and wrapping every
+    // subject broke the plain `expect value == 1` form.
+    fn equality_subject(actual: &str) -> String {
+        if actual.chars().any(char::is_whitespace) {
+            format!("({})", actual)
+        } else {
+            actual.to_string()
+        }
+    }
+
     let op_form = match matcher {
         "to_equal" | "to_be" => Some(if negated {
-            format!("({}) != {}", actual, arg_str)
+            format!("{} != {}", equality_subject(actual), arg_str)
         } else {
-            format!("({}) == {}", actual, arg_str)
+            format!("{} == {}", equality_subject(actual), arg_str)
         }),
         "to_be_nil" => Some(if negated {
             format!("{} != nil", actual)
@@ -2381,13 +2394,24 @@ mod tests {
     #[test]
     fn test_build_safe_mode_child_args_runs_spec_directly() {
         let options = super::super::types::TestOptions::default();
+        // `preprocess_matchers_only` only writes a `.spipe_matchers_` sibling when
+        // a line actually changes, so the spec must exist and carry an infix
+        // matcher. The old fixture pointed at a nonexistent `test/example_spec.spl`,
+        // so the read failed and the call silently fell back to the original path.
+        let tempdir = tempdir().expect("tempdir");
+        let spec_path = tempdir.path().join("example_spec.spl");
+        fs::write(&spec_path, "describe \"safe\":\n    it \"runs\":\n        expect value to_equal 1\n")
+            .expect("write spec");
 
-        let args = build_safe_mode_child_args(Path::new("test/example_spec.spl"), &options);
+        let args = build_safe_mode_child_args(&spec_path, &options);
 
         assert_eq!(args.first().map(String::as_str), Some("run"));
         assert_eq!(
             args.get(1).map(String::as_str),
-            Some("test/.spipe_matchers_example_spec.spl")
+            tempdir
+                .path()
+                .join(".spipe_matchers_example_spec.spl")
+                .to_str()
         );
         assert!(!args.iter().any(|arg| arg == "test"));
     }

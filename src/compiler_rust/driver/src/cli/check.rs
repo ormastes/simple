@@ -3041,7 +3041,9 @@ mod tests {
         let temp_dir = repo_root.join("target/gc-boundary-check-tests/src/lib/nogc_sync_mut");
         std::fs::create_dir_all(&temp_dir).unwrap();
         let path = temp_dir.join("gc_boundary_crossing.spl");
-        std::fs::write(&path, "use std.gc_async_mut.task\n").unwrap();
+        // `std.gc_async_mut.gc` must be a module that really exists: an unresolved
+        // import is a hard error, which would mask the Warning severity under test.
+        std::fs::write(&path, "use std.gc_async_mut.gc\n").unwrap();
 
         let result = check_file(&path, &[], false);
         assert_eq!(result.status, CheckStatus::Warning);
@@ -3062,7 +3064,7 @@ mod tests {
         let temp_dir = repo_root.join("target/gc-boundary-check-tests/src/lib/nogc_sync_mut");
         std::fs::create_dir_all(&temp_dir).unwrap();
         let path = temp_dir.join("gc_boundary_crossing_strict.spl");
-        std::fs::write(&path, "use std.gc_async_mut.task\n").unwrap();
+        std::fs::write(&path, "use std.gc_async_mut.gc\n").unwrap();
 
         let result = check_file(&path, &[], true);
         assert_eq!(result.status, CheckStatus::Error);
