@@ -113,6 +113,7 @@ fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintRunRes
     val config = resolve_lint_config(linter.config, path, content)
     val decls = module_get_decls()
     val lines = content.split("\n")
+    val source_locations = lint_source_location_index(lines)
     val stub_profile_name = _lint_profile_to_assurance_name(config.profile)
     for warning in check_argument_count(decls):
         if not should_keep_lint_result(config, warning.code):
@@ -143,8 +144,8 @@ fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintRunRes
         # this path (verified: expr/stmt spans all read 0 and span_is_valid is
         # false), so line recovery here works the same way lint_cli_find_fn_line
         # already does.
-        val hit = collection_fix_line(lines, warning.code)
-        var coll_line = lint_cli_find_fn_line(lines, warning.item_name)
+        val hit = lint_source_collection_fix_line(source_locations, warning.code)
+        var coll_line = lint_source_function_line(source_locations, warning.item_name)
         if hit >= 0:
             coll_line = hit + 1
         results.push(LintRunResult.new(path, coll_line, 0, lint))
@@ -237,6 +238,50 @@ fn lint_cli_find_fn_line(lines: [text], fn_name: text) -> i64:
                 return i + 1
         i = i + 1
     0
+
+struct LintSourceLocationIndex:
+    function_lines: Dict<text, i64>
+    collection_fix_lines: Dict<text, i64>
+
+fn lint_source_declared_function_name(trimmed: text) -> text:
+    val fn_pos = trimmed.find("fn ")
+    if fn_pos < 0: return ""
+    val suffix = trimmed[fn_pos + 3:]
+    val paren = suffix.find("(")
+    val generic = suffix.find("<")
+    var end = paren
+    if end < 0 or (generic >= 0 and generic < end): end = generic
+    if end <= 0: return ""
+    suffix[0:end].trim()
+
+fn lint_source_location_index(lines: [text]) -> LintSourceLocationIndex:
+    """Build all fallback source locations in one pass over the file."""
+    var function_lines: Dict<text, i64> = {}
+    var collection_fix_lines: Dict<text, i64> = {}
+    var line_index = 0
+    while line_index < lines.len():
+        val trimmed = lines[line_index].trim()
+        val is_fn_decl = trimmed.starts_with("fn ") or trimmed.starts_with("pub fn ") or trimmed.starts_with("static fn ") or trimmed.starts_with("pub static fn ") or trimmed.starts_with("async fn ") or trimmed.starts_with("pub async fn ")
+        if is_fn_decl:
+            val name = lint_source_declared_function_name(trimmed)
+            if name != "" and not function_lines.has(name):
+                function_lines[name] = line_index + 1
+        val assignment = collection_split_assign(lines[line_index])
+        if assignment.0 != "":
+            for code in ["COLL001", "COLL007"]:
+                if collection_rewrite_for(code, assignment.0, assignment.1) != "":
+                    if collection_fix_lines.has(code):
+                        collection_fix_lines[code] = -1
+                    else:
+                        collection_fix_lines[code] = line_index
+        line_index = line_index + 1
+    LintSourceLocationIndex(function_lines, collection_fix_lines)
+
+fn lint_source_function_line(index: LintSourceLocationIndex, fn_name: text) -> i64:
+    index.function_lines[fn_name] ?? 0
+
+fn lint_source_collection_fix_line(index: LintSourceLocationIndex, code: text) -> i64:
+    index.collection_fix_lines[code] ?? -1
 
 # ---------------------------------------------------------------------------
 # Source-location recovery for collection-efficiency lints (COLL0xx).
