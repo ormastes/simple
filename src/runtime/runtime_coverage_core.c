@@ -1590,6 +1590,19 @@ static bool mcdc_exclusion_kind_predicate_valid_v1(
     }
 }
 
+int32_t rt_mcdc_exclusion_rows_exact_v1(
+        const SimpleMcdcExclusionV1 *source_rows,
+        const SimpleMcdcExclusionV1 *binary_rows, uint64_t row_count) {
+    if (row_count > SIZE_MAX / sizeof(*source_rows) ||
+        (row_count && (!source_rows || !binary_rows)) ||
+        (source_rows && (uintptr_t)source_rows % _Alignof(SimpleMcdcExclusionV1)) ||
+        (binary_rows && (uintptr_t)binary_rows % _Alignof(SimpleMcdcExclusionV1)))
+        return SIMPLE_MCDC_V1_INVALID;
+    const size_t bytes = (size_t)row_count * sizeof(*source_rows);
+    return bytes == 0 || memcmp(source_rows, binary_rows, bytes) == 0
+        ? SIMPLE_MCDC_V1_OK : SIMPLE_MCDC_V1_EXCLUSION_INVALID;
+}
+
 int32_t rt_mcdc_report_mcdp_v1(
         SimpleMcdcVectorV1 *events, uint64_t event_count,
         const uint8_t *manifest_bytes, uint64_t manifest_byte_count,

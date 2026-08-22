@@ -189,6 +189,18 @@ int main(void) {
         .reason_length = 34,
         .reason = "device IRQ cannot be produced here"
     };
+    SimpleMcdcExclusionV1 source_exclusion = exclusion;
+    assert(rt_mcdc_exclusion_rows_exact_v1(
+               &source_exclusion, &exclusion, 1) == SIMPLE_MCDC_V1_OK);
+    source_exclusion.owner_id ^= 1u;
+    assert(rt_mcdc_exclusion_rows_exact_v1(
+               &source_exclusion, &exclusion, 1) == SIMPLE_MCDC_V1_EXCLUSION_INVALID);
+    source_exclusion = exclusion;
+    source_exclusion.reason[0] ^= 1u;
+    assert(rt_mcdc_exclusion_rows_exact_v1(
+               &source_exclusion, &exclusion, 1) == SIMPLE_MCDC_V1_EXCLUSION_INVALID);
+    assert(rt_mcdc_exclusion_rows_exact_v1(
+               NULL, NULL, 0) == SIMPLE_MCDC_V1_OK);
     assert(rt_mcdc_report_mcdp_v1(
                incomplete, 2, wire, wire_size, &exclusion, 1, 10,
                SIMPLE_MCDC_REPORT_NORMAL_V1, programs, 1, tokens, 3,

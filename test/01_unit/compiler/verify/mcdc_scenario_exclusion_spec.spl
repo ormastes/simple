@@ -15,6 +15,11 @@ fn exclusion(reviewed: i64, expires: i64) -> text:
     exclusion_kind("capability-unavailable", "clock.rollback.inject",
         "capability.unavailable", reviewed, reviewed, expires)
 
+fn bound_exclusion(scenario: text, decision: text, source: text,
+                   mask: text, kind: text, code: text, capability: text,
+                   predicate: text) -> text:
+    "# @mcdc-exclude: scenario={scenario} | decision={decision} | source={source} | conditions={mask} | condition-count=2 | kind={kind} | code={code} | capability={capability} | predicate={predicate} | producible=false | reason=host cannot produce the governed clock scenario | evidence={DIGEST} | observed=1700000000 | owner=runtime.safety | reviewed=1700000100 | expires=1705000000"
+
 describe "reason-bearing MC/DC scenario exclusions":
     it "accepts only a fresh capability-unproducible scenario expression":
         val parsed = parse_mcdc_scenario_exclusion_v1(
@@ -142,3 +147,50 @@ describe "reason-bearing MC/DC scenario exclusions":
         expect(audit.directive_count).to_equal(1)
         expect(audit.accepted_count).to_equal(0)
         expect(audit.rejected_count).to_equal(1)
+
+    it "binds every source field to the exact binary exclusion row":
+        val source = bound_exclusion(
+            "rt.clock.rollback", "u64:0000000000000009",
+            "u64:0000000000000063", "u64:0000000000000002",
+            "capability-unavailable", "clock.rollback.inject", "clock.injector",
+            "capability.unavailable")
+        val parsed = parse_mcdc_scenario_exclusion_v1(source, 1701000000)
+        val rows = encode_mcdc_scenario_exclusion_v1(parsed)
+        val binding = bind_mcdc_scenario_exclusions_v1(source, rows, 1701000000)
+        expect(parsed.binding_ready).to_be(true)
+        expect(rows.len()).to_equal(376)
+        expect(binding.exact).to_be(true)
+        expect(binding.bound_count).to_equal(1)
+
+    it "fails closed on missing extra duplicate reordered and tampered rows":
+        val first = bound_exclusion(
+            "rt.clock.rollback", "u64:0000000000000009",
+            "u64:0000000000000063", "u64:0000000000000002",
+            "capability-unavailable", "clock.rollback.inject", "clock.injector",
+            "capability.unavailable")
+        val second = bound_exclusion(
+            "rt.irq.edge", "u64:000000000000000a",
+            "u64:0000000000000064", "u64:0000000000000001",
+            "fixture-unavailable", "irq.fixture", "irq.fixture.v1",
+            "fixture.unavailable")
+        val first_row = encode_mcdc_scenario_exclusion_v1(
+            parse_mcdc_scenario_exclusion_v1(first, 1701000000))
+        val second_row = encode_mcdc_scenario_exclusion_v1(
+            parse_mcdc_scenario_exclusion_v1(second, 1701000000))
+        var tampered = first_row
+        tampered[120] = tampered[120] + 1u8
+        expect(bind_mcdc_scenario_exclusions_v1(first, [], 1701000000).exact).to_be(false)
+        expect(bind_mcdc_scenario_exclusions_v1("", first_row, 1701000000).exact).to_be(false)
+        expect(bind_mcdc_scenario_exclusions_v1(first + "\n" + first,
+            first_row + first_row, 1701000000).exact).to_be(false)
+        expect(bind_mcdc_scenario_exclusions_v1(first + "\n" + second,
+            second_row + first_row, 1701000000).exact).to_be(false)
+        expect(bind_mcdc_scenario_exclusions_v1(first, tampered, 1701000000).exact).to_be(false)
+
+    it "never promotes a legacy unbound directive through the binary gate":
+        val legacy = exclusion(1700000000, 1705000000)
+        val parsed = parse_mcdc_scenario_exclusion_v1(legacy, 1701000000)
+        expect(parsed.status == McdcScenarioExclusionStatusV1.Accepted).to_be(true)
+        expect(parsed.binding_ready).to_be(false)
+        expect(encode_mcdc_scenario_exclusion_v1(parsed).len()).to_equal(0)
+        expect(bind_mcdc_scenario_exclusions_v1(legacy, [], 1701000000).exact).to_be(false)

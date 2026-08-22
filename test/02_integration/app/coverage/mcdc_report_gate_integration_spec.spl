@@ -3,7 +3,9 @@ use std.common.structural.mcdc.contracts.{
     McdcReportModeV1, mcdc_coverage_summary_v1, mcdc_normal_gate_v1
 }
 use compiler.tools.verify.mcdc_scenario_exclusion.{
-    scan_mcdc_scenario_exclusions_v1, mcdc_audited_normal_gate_v1_passes
+    scan_mcdc_scenario_exclusions_v1, mcdc_audited_normal_gate_v1_passes,
+    parse_mcdc_scenario_exclusion_v1, encode_mcdc_scenario_exclusion_v1,
+    bind_mcdc_scenario_exclusions_v1, mcdc_bound_normal_gate_v1_passes
 }
 
 val EVIDENCE = "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
@@ -14,6 +16,16 @@ fn _exact_gate():
         McdcReportModeV1.Normal, true, summary, 1, 1, 0)
 
 describe "MC/DC report normal-mode gate":
+    it "requires exact source-to-binary exclusion binding":
+        val source = "# @mcdc-exclude: scenario=irq-edge | decision=u64:0000000000000009 | source=u64:0000000000000063 | conditions=u64:0000000000000001 | condition-count=2 | kind=fixture-unavailable | code=irq.fixture | capability=board.fixture.v1 | predicate=fixture.unavailable | producible=false | reason=host cannot produce the physical IRQ edge | evidence={EVIDENCE} | observed=90 | owner=safety-team | reviewed=100 | expires=200"
+        val row = encode_mcdc_scenario_exclusion_v1(
+            parse_mcdc_scenario_exclusion_v1(source, 150))
+        val binding = bind_mcdc_scenario_exclusions_v1(source, row, 150)
+        expect(mcdc_bound_normal_gate_v1_passes(_exact_gate(), binding)).to_equal(true)
+        row[24] = row[24] + 1u8
+        val tampered = bind_mcdc_scenario_exclusions_v1(source, row, 150)
+        expect(mcdc_bound_normal_gate_v1_passes(_exact_gate(), tampered)).to_equal(false)
+
     it "joins exact eligible coverage with a fresh governed directive":
         val source = "# @mcdc-exclude: scenario=irq-edge | kind=fixture-unavailable | code=irq.fixture | predicate=fixture.unavailable | producible=false | reason=host cannot produce the physical IRQ edge | evidence={EVIDENCE} | observed=90 | owner=safety-team | reviewed=100 | expires=200"
         val audit = scan_mcdc_scenario_exclusions_v1(source, 150)

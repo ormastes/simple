@@ -243,7 +243,7 @@ An environment scenario that cannot be physically produced may use exactly one
 compiler-verifier directive:
 
 ```text
-# @mcdc-exclude: scenario=<stable-id> | kind=<capability-unavailable|fixture-unavailable|platform-inapplicable|safety-prohibited|uncontrollable-nondeterminism> | code=<stable-id> | predicate=<registered-kind-predicate> | producible=false | reason=<8..256 byte reason> | evidence=sha256:<64 lowercase hex> | observed=<unix-seconds> | owner=<stable-id> | reviewed=<unix-seconds> | expires=<unix-seconds>
+# @mcdc-exclude: scenario=<stable-id> | decision=u64:<16-lower-hex> | source=u64:<16-lower-hex> | conditions=u64:<16-lower-hex> | condition-count=<1..63> | kind=<governed-kind> | code=<stable-id> | capability=<stable-id> | predicate=<registered-kind-predicate> | producible=false | reason=<8..256 ASCII bytes> | evidence=sha256:<64 lowercase hex> | observed=<unix-seconds> | owner=<stable-id> | reviewed=<unix-seconds> | expires=<unix-seconds>
 ```
 
 The five registered predicates are `capability.unavailable`,
@@ -254,17 +254,23 @@ a generic skip. The predicate observation must precede review and remain fresh
 at verification time. The line is bounded to 1024 bytes, identifiers to 96
 bytes, and both observation and review lifetimes to 90 days. One linear compiler audit accepts
 at most 256 directives from a source of at most 4 MiB, retains only the bounded
-stable-ID set needed to reject duplicates, and performs no runtime/hot-path work.
+stable-ID hash index needed to reject duplicates, and performs no runtime/hot-path work.
 The scanner walks source offsets rather than splitting the full source into a
 line array: it copies at most one 1024-byte candidate line at a time and retains
 at most 256 identifiers of at most 96 bytes each. Parsing a candidate has a
-fixed 11-field shape. Thus auxiliary storage is bounded independently of source
+fixed 16-field binding shape. The legacy 11-field spelling remains parseable
+for diagnostics but cannot pass the binary binding gate. Thus auxiliary storage is bounded independently of source
 line count; the offline verifier may allocate within those caps, while runtime
 probe paths allocate nothing for exclusion governance.
 The verifier reports an accepted
 entry as `EXCLUDED`, never `PASS` or covered. Stable decision/exclusion joining
 owns denominator removal; the directive audit is an additional normal-mode
-gate. A blank or placeholder reason, malformed identity, missing SHA-256
+gate. Before that gate, one ordered O(N) pass compares each directive with the
+corresponding 376-byte row: decision/source/mask/count, five-kind predicate,
+FNV-1a-64 scenario/code/capability/owner identities, the first 128 SHA-256
+evidence bits, epochs, exact ASCII reason bytes, and zero padding. Missing,
+extra, duplicate, reordered, or tampered rows fail closed; a validated report
+count alone is insufficient. A blank or placeholder reason, malformed identity, missing SHA-256
 evidence, future/stale observation, future review, expired entry, or overlong
 review window is an error.
 Consequently, exclusions reduce only the eligible denominator and never increase

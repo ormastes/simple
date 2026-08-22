@@ -26,6 +26,7 @@ Static-off is resolved before instrumentation and link-closure construction. Sta
 | `src/compiler/70.backend/` | One backend-neutral lowering contract consumed by LLVM/C/native/JIT/WASM and interpreter sink parity |
 | `src/compiler/80.driver/` | Policy resolution, cache identity, closure freeze, normal+coverage gate, R3 migration milestone |
 | `src/compiler/85.mdsoc/feature/mcdc/` | Virtual-capsule composition only; no runtime hot-path state |
+| `src/compiler/90.tools/verify/` | Bounded source directive parsing and exact ordered binding to native exclusion rows |
 | `src/compiler/99.loader/` | Canonical aspect catalog, pack validation, slot binding, generation publication, invalidation |
 | `src/lib/common/structural/` | Frozen HAL/provider, environment-instruction, exclusion, wire, comparison, and receipt schemas |
 | `src/lib/nogc_async_mut_noalloc/` | Critical fixed-capacity MC/DC sink, HAL parent, environment executor, storage and error paths |

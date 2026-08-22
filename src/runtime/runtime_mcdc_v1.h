@@ -160,6 +160,12 @@ int32_t rt_mcdc_manifest_identity_v1(const uint8_t *bytes,
                                      uint64_t byte_count,
                                      uint8_t identity_sha256[64]);
 
+/* Exact source-produced/binary exclusion row comparison.  Callers first
+ * canonicalize source directives into SimpleMcdcExclusionV1 rows. */
+int32_t rt_mcdc_exclusion_rows_exact_v1(
+    const SimpleMcdcExclusionV1 *source_rows,
+    const SimpleMcdcExclusionV1 *binary_rows, uint64_t row_count);
+
 #if defined(__cplusplus)
 #define SIMPLE_MCDC_STATIC_ASSERT static_assert
 #else
