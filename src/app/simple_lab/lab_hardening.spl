@@ -14,6 +14,7 @@ use std.common.crypto.constant_time.{constant_time_compare}
 use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
 use std.common.json.parser.{json_parse_with_error}
 use std.nogc_sync_mut.io_runtime.{env_get}
+use app.simple_lab.pending_events.{LAB_MIN_CONTROL_FRAME_BYTES}
 
 # ============================================================================
 # Config — every field configurable via env, safe default otherwise.
@@ -28,7 +29,11 @@ struct LabHardeningConfig:
     max_cells_per_session: i64
     max_output_bytes: i64
     max_ws_frame_bytes: i64
+    max_pending_events: i64
     max_sessions: i64
+
+val LAB_DEFAULT_MAX_PENDING_EVENTS: i64 = 256
+val LAB_MAX_PENDING_EVENTS_CEILING: i64 = 1024
 
 fn _lab_hard_env_or(key: text, fallback: text) -> text:
     val v = env_get(key)
@@ -44,6 +49,24 @@ fn _lab_hard_env_i64(key: text, fallback: i64) -> i64:
     val n = v.trim().to_i64()
     if n <= 0:
         return fallback
+    n
+
+fn lab_pending_events_limit(raw: text?) -> i64:
+    if raw == nil or raw == "":
+        return LAB_DEFAULT_MAX_PENDING_EVENTS
+    val n = raw.trim().to_i64()
+    if n <= 0:
+        return LAB_DEFAULT_MAX_PENDING_EVENTS
+    if n > LAB_MAX_PENDING_EVENTS_CEILING:
+        return LAB_MAX_PENDING_EVENTS_CEILING
+    n
+
+fn lab_ws_frame_bytes_limit(raw: text?) -> i64:
+    if raw == nil or raw == "":
+        return 262144
+    val n = raw.trim().to_i64()
+    if n < LAB_MIN_CONTROL_FRAME_BYTES:
+        return LAB_MIN_CONTROL_FRAME_BYTES
     n
 
 fn _lab_hard_env_i32(key: text, fallback: i32) -> i32:
@@ -83,7 +106,8 @@ fn lab_hardening_config_from_env() -> LabHardeningConfig:
         max_cell_bytes: _lab_hard_env_i64("SIMPLE_LAB_MAX_CELL_BYTES", 1048576),
         max_cells_per_session: _lab_hard_env_i64("SIMPLE_LAB_MAX_CELLS_PER_SESSION", 500),
         max_output_bytes: _lab_hard_env_i64("SIMPLE_LAB_MAX_OUTPUT_BYTES", 65536),
-        max_ws_frame_bytes: _lab_hard_env_i64("SIMPLE_LAB_MAX_WS_FRAME_BYTES", 262144),
+        max_ws_frame_bytes: lab_ws_frame_bytes_limit(env_get("SIMPLE_LAB_MAX_WS_FRAME_BYTES")),
+        max_pending_events: lab_pending_events_limit(env_get("SIMPLE_LAB_MAX_PENDING_EVENTS")),
         max_sessions: _lab_hard_env_i64("SIMPLE_LAB_MAX_SESSIONS", 8)
     )
 
@@ -193,3 +217,5 @@ export lab_bearer_token_from_header, lab_token_matches
 export lab_is_loopback_host, lab_bind_allowed
 export lab_origin_allowed, lab_notebook_name_is_safe
 export lab_json_body_is_valid, lab_truncate_with_marker
+export lab_pending_events_limit, LAB_DEFAULT_MAX_PENDING_EVENTS, LAB_MAX_PENDING_EVENTS_CEILING
+export lab_ws_frame_bytes_limit

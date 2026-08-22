@@ -53,6 +53,7 @@ use std.nogc_sync_mut.http_server.types.{HttpRequest, HttpResponse, HttpStatus, 
 use std.nogc_sync_mut.http_server.parser.{parse_request_with_limits, MAX_REQUEST_LINE, MAX_HEADER_COUNT, MAX_HEADER_LINE}
 use std.nogc_sync_mut.http_server.response.{write_response}
 use std.nogc_sync_mut.http_server.router.{Router, path_is_safe}
+use app.simple_lab.pending_events.{LabPendingEvents}
 use app.simple_lab.lab_hardening.{
     LabHardeningConfig, lab_hardening_config_from_env,
     lab_bearer_token_from_header, lab_token_matches,
@@ -117,7 +118,7 @@ struct LabApiSession:
     id: text
     default_mode: text
     cells: [LabApiCell]
-    events: [text]
+    events: LabPendingEvents
 
 class LabApiState:
     session_mgr: KernelSessionManager
@@ -175,8 +176,7 @@ class LabApiState:
 
     me drain_events(session_idx: i64) -> [text]:
         var session = self.sessions[session_idx]
-        val drained = session.events
-        session.events = []
+        val drained = session.events.drain()
         self.sessions[session_idx] = session
         drained
 
@@ -377,7 +377,15 @@ fn lab_route_create_session(req: HttpRequest) -> HttpResponse:
     val diag = LAB_STATE.session_mgr.create_session(session_id, default_mode)
     if diag != "":
         return _lab_error(HttpStatus.BadRequest, diag)
-    LAB_STATE.sessions.push(LabApiSession(id: session_id, default_mode: default_mode, cells: [], events: []))
+    LAB_STATE.sessions.push(LabApiSession(
+        id: session_id,
+        default_mode: default_mode,
+        cells: [],
+        events: LabPendingEvents.create_with_frame_limit(
+            LAB_CONFIG.max_pending_events,
+            LAB_CONFIG.max_ws_frame_bytes
+        )
+    ))
     _lab_versioned(HttpResponse(
         status: HttpStatus.Created,
         headers: [("Content-Type", "application/json; charset=utf-8")],

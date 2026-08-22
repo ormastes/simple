@@ -1,0 +1,71 @@
+# Bounded per-session event storage for the Simple Lab WebSocket stream.
+
+# Enough for every protocol control frame, including a resync frame carrying
+# the decimal form of the largest signed drop counter.
+val LAB_MIN_CONTROL_FRAME_BYTES: i64 = 128
+
+fn lab_resync_frame(dropped: i64) -> text:
+    "{\"type\":\"resync\",\"reason\":\"backpressure\",\"dropped\":{dropped}}"
+
+class LabPendingEvents:
+    events: [text]
+    start: i64
+    count: i64
+    dropped: i64
+    capacity: i64
+    max_frame_bytes: i64
+
+    static fn create(capacity: i64) -> LabPendingEvents:
+        LabPendingEvents.create_with_frame_limit(capacity, 262144)
+
+    static fn create_with_frame_limit(capacity: i64, max_frame_bytes: i64) -> LabPendingEvents:
+        val safe_capacity = if capacity > 0: capacity else: 1
+        val safe_frame_bytes = if max_frame_bytes >= LAB_MIN_CONTROL_FRAME_BYTES: max_frame_bytes else: LAB_MIN_CONTROL_FRAME_BYTES
+        LabPendingEvents(
+            events: [], start: 0, count: 0, dropped: 0,
+            capacity: safe_capacity, max_frame_bytes: safe_frame_bytes
+        )
+
+    me push(frame_json: text):
+        # Never retain a frame which can exceed the configured WebSocket
+        # budget. Truncating serialized JSON would corrupt the protocol, so
+        # drop it and report the loss through the resync frame on drain.
+        if frame_json.bytes().len() > self.max_frame_bytes:
+            self.dropped = self.dropped + 1
+            return
+
+        if self.count < self.capacity:
+            self.events.push(frame_json)
+            self.count = self.count + 1
+            return
+
+        # Once full, `events` has exactly `capacity` slots. Reuse the oldest
+        # slot instead of growing or shifting the array.
+        self.events[self.start] = frame_json
+        self.start = (self.start + 1) % self.capacity
+        self.dropped = self.dropped + 1
+
+    me drain() -> [text]:
+        var drained: [text] = []
+        if self.dropped > 0:
+            drained.push(lab_resync_frame(self.dropped))
+
+        var i = 0
+        while i < self.count:
+            val idx = (self.start + i) % self.events.len()
+            drained.push(self.events[idx])
+            i = i + 1
+
+        self.events = []
+        self.start = 0
+        self.count = 0
+        self.dropped = 0
+        drained
+
+    fn retained_count() -> i64:
+        self.count
+
+    fn dropped_count() -> i64:
+        self.dropped
+
+export LabPendingEvents, LAB_MIN_CONTROL_FRAME_BYTES, lab_resync_frame
