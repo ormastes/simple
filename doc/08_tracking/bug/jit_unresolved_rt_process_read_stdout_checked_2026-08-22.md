@@ -119,3 +119,8 @@ file(s) compiled, 0 errors (2 skipped)`.
 was checked (no tracked bootstrap stage binary found)`; origin/main no longer
 tracks any `bootstrap/**/simple` blob, so that guard cannot observe this fix
 either way. Unchanged by this commit.
+
+Regression test executed post-fix:
+`cargo test --release -p simple-compiler --test process_checked_symbols_registered`
+-> `test result: ok. 2 passed; 0 failed` (`checked_process_symbols_are_registered_for_jit`,
+`registry_is_live`).
