@@ -2208,6 +2208,13 @@ existing nested textual-class behavior are preserved. Avoidable work falls
 from quadratic class/suffix scans to expected linear indexing; NAME001's
 ordered bounded-edit-distance candidate comparisons remain separately tracked.
 
+The remaining comparison kernel now uses a fixed edit band because NAME001's
+maximum accepted distance is one or two. Three logical rows rotate over one
+flat `3 * (2L + 1)` integer buffer, and byte equality uses `byte_at` rather than
+allocating one-byte substrings. This changes each comparison from quadratic
+matrix work and cumulative row allocation to `O(K * L)` work and `O(L)` matrix
+storage while retaining ordered candidate selection and adjacent transposition.
+
 Narrowing now builds one key-to-variant dictionary instead of rescanning and
 resanitizing all union keys for every arm. Bare named pattern types resolve via
 the already-registered SymbolId, allowing their complete canonical key to match
