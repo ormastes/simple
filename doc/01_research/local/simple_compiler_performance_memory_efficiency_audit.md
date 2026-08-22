@@ -1480,3 +1480,13 @@ Applicable source was therefore scanned twice for each rule and identical fixes 
 appended twice. The redundant imports and append loops are removed. The registry is now
 the single owner, cutting those rules from two executions to one and preventing duplicate
 diagnostic/fix storage. Registry-wide shared line/context construction remains open.
+
+## 2026-08-22 implementation addendum: shared SPipe EasyFix facts
+
+The five SPipe EasyFix members are dispatched together, but four independently built a
+full `LineContext` array and the missing-docstring rule built another line array. The
+registry now accepts the lint request's canonical lines, builds one context array only for
+`_spec.spl` files, and shares it across the four context rules; the fifth consumes the
+same lines directly. Compatibility entrypoints keep their early file gate and construct
+private facts only for standalone callers. Normal spec lint therefore removes one line
+split plus three duplicate context arrays and their repeated trim/indent/offset work.
