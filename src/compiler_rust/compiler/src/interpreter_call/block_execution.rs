@@ -460,6 +460,14 @@ pub(super) fn exec_block_closure_into(
                     )?;
                     match optional_let_binding(pattern, &value) {
                         LetBind::Bind(name, inner) => {
+                            // An `if val NAME = …` binding is a LOCAL of this frame. Marking it
+                            // so is load-bearing, not cosmetic: `Env::insert` alone leaves
+                            // `is_local(NAME)` false, and the identifier read in
+                            // interpreter/expr/literals.rs prefers MODULE_GLOBALS over any
+                            // NON-local binding. A bound name that also exists as a module
+                            // global therefore read back as the GLOBAL — in the bootstrap
+                            // closure `if val get_value = …` returned `<fn:get_value>`.
+                            local_env.mark_local(name.clone());
                             local_env.insert(name, inner);
                             last_value = exec_block_closure_mut(
                                 &if_stmt.then_block.statements,
@@ -532,6 +540,14 @@ pub(super) fn exec_block_closure_into(
                             let value = evaluate_expr(cond, &mut local_env, functions, classes, enums, impl_methods)?;
                             match optional_let_binding(pattern, &value) {
                                 LetBind::Bind(name, inner) => {
+                                    // An `if val NAME = …` binding is a LOCAL of this frame. Marking it
+                                    // so is load-bearing, not cosmetic: `Env::insert` alone leaves
+                                    // `is_local(NAME)` false, and the identifier read in
+                                    // interpreter/expr/literals.rs prefers MODULE_GLOBALS over any
+                                    // NON-local binding. A bound name that also exists as a module
+                                    // global therefore read back as the GLOBAL — in the bootstrap
+                                    // closure `if val get_value = …` returned `<fn:get_value>`.
+                                    local_env.mark_local(name.clone());
                                     local_env.insert(name, inner);
                                     last_value = exec_block_closure_mut(
                                         &block.statements,
@@ -1329,6 +1345,14 @@ fn exec_block_closure_mut_inner(
                     let value = evaluate_expr(&if_stmt.condition, local_env, functions, classes, enums, impl_methods)?;
                     match optional_let_binding(pattern, &value) {
                         LetBind::Bind(name, inner) => {
+                            // An `if val NAME = …` binding is a LOCAL of this frame. Marking it
+                            // so is load-bearing, not cosmetic: `Env::insert` alone leaves
+                            // `is_local(NAME)` false, and the identifier read in
+                            // interpreter/expr/literals.rs prefers MODULE_GLOBALS over any
+                            // NON-local binding. A bound name that also exists as a module
+                            // global therefore read back as the GLOBAL — in the bootstrap
+                            // closure `if val get_value = …` returned `<fn:get_value>`.
+                            local_env.mark_local(name.clone());
                             local_env.insert(name, inner);
                             last_value = exec_block_closure_mut(
                                 &if_stmt.then_block.statements,
@@ -1392,6 +1416,14 @@ fn exec_block_closure_mut_inner(
                             let value = evaluate_expr(cond, local_env, functions, classes, enums, impl_methods)?;
                             match optional_let_binding(pattern, &value) {
                                 LetBind::Bind(name, inner) => {
+                                    // An `if val NAME = …` binding is a LOCAL of this frame. Marking it
+                                    // so is load-bearing, not cosmetic: `Env::insert` alone leaves
+                                    // `is_local(NAME)` false, and the identifier read in
+                                    // interpreter/expr/literals.rs prefers MODULE_GLOBALS over any
+                                    // NON-local binding. A bound name that also exists as a module
+                                    // global therefore read back as the GLOBAL — in the bootstrap
+                                    // closure `if val get_value = …` returned `<fn:get_value>`.
+                                    local_env.mark_local(name.clone());
                                     local_env.insert(name, inner);
                                     last_value = exec_block_closure_mut(
                                         &block.statements,

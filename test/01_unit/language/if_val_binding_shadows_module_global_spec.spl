@@ -1,0 +1,64 @@
+"""
+# `if val` bindings are locals and shadow module globals
+
+**Category:** Language
+**Status:** Stable
+
+## Purpose and Audience
+
+An `if val NAME = expr:` binding is a LOCAL of the enclosing frame. Reading
+NAME inside the bound body must yield the bound payload, even when a
+module-level global of the same name exists.
+
+## Scope and Preconditions
+
+The module global here is deliberately FUNCTION-valued. The seed's identifier
+read (`interpreter/expr/literals.rs`) prefers `MODULE_GLOBALS` over any binding
+the frame does not mark local, and `Env::insert` — which every `if val` site
+used — does not mark one. The bound name therefore read back as the global,
+and a function-valued global makes that visible as a value rather than as a
+plausible-looking wrong number.
+
+## Primary Workflow
+
+`probe(7)` binds `get_value` to `7` and returns it. Pre-fix it returned
+`<fn:helper>`, which downstream became
+`undefined field 'id': cannot access field on value of type 'function'` far
+from here — see
+doc/08_tracking/bug/single_module_native_build_dies_in_any_escape_and_mir_for_2026-08-22.md
+
+## Evidence and Provenance
+
+Measured on the deployed seed: pre-fix `p=<fn:helper>`, post-fix `p=7`.
+"""
+
+use std.spec.{describe, it, expect}
+
+fn helper(a: i64) -> i64:
+    a + 1
+
+val get_value = helper
+
+fn probe(o: i64?) -> i64:
+    if val get_value = o:
+        return get_value
+    -1
+
+fn probe_text(o: text?) -> text:
+    if val get_value = o:
+        return get_value
+    "unbound"
+
+describe("if val bindings shadow a same-named module global", fn():
+    it("returns the bound payload, not the function-valued global", fn():
+        expect(probe(7)).to_equal(7)
+    )
+
+    it("takes the else path when the optional is empty", fn():
+        expect(probe(nil)).to_equal(-1)
+    )
+
+    it("shadows for a text payload too", fn():
+        expect(probe_text("bound")).to_equal("bound")
+    )
+)

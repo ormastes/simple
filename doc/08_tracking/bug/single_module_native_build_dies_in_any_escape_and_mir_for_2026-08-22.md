@@ -1,7 +1,7 @@
 # Single-module `native-build` dies before codegen — two stacked defects
 
 - **Filed:** 2026-08-22
-- **Status:** defect 1 FIXED; defect 2 OPEN (blocks both lanes below)
+- **Status:** defect 1 FIXED; defect 2 FIXED (seed `if val` bindings now marked local — see "Defect 2 — root cause" below)
 - **Impact:** every single-file / single-module `native-build` (the deploy
   gate's shape) and the **engine-differential native lane**
   (`scripts/check/check_engine_differential.spl`), which reported
@@ -228,3 +228,44 @@ rather than by growing a fixture: the diagnostic now names the exact frame, so
 a cut-down `mir_lowering_stmts.spl` that still fires
 `site=variant-construction ... fn=get_value` is a much shorter path to the
 minimal case than another synthetic guess.
+
+## Defect 2 — root cause and fix (2026-08-22)
+
+**Root cause (seed, Rust):** every `if val NAME = expr:` binding site in the
+tree-walking interpreter called `Env::insert(name, inner)` but never
+`Env::mark_local(name)`. The identifier read in
+`src/compiler_rust/compiler/src/interpreter/expr/literals.rs` (the
+`!env.is_local(name)` branch, ~line 298) prefers `MODULE_GLOBALS` over any
+binding the frame does not report as local — a deliberate fix for the
+stale-`it`-block-copy bug of 2026-08-04. An inserted-but-unmarked `if val`
+binding therefore read back as the module global whenever a global of the
+same name existed. In `lower_for_array_indexed`
+(`src/compiler/50.mir/mir_lowering_stmts.spl:2711`) that global is the
+imported `fn get_value`, so `elem_local = get_value` stored `<fn:get_value>`
+and `mir_operand_copy` built `MirOperandKind.Copy(<fn:get_value>)` — the
+producer pinned by `SIMPLE_DEBUG_ENUM_PAYLOAD=1`. Same mechanism at
+`src/compiler/80.driver/driver_build/incremental.spl:875`: the local
+`hash_text` collided with the imported `std.io_runtime.hash_text` function,
+which is why a SECOND `native-build` into the same `--cache-dir` (the only
+path that serialises the cache) died with
+``method `replace` not found on type `function` ('hash_text')``.
+
+**Why synthetic fixtures stayed green:** the branch is only taken when the
+same name is also a live entry in `MODULE_GLOBALS` of the executing frame,
+i.e. a module-level `val`/imported function of that exact name — a
+function-VALUED global makes it visible as `<fn:…>` rather than a plausible
+wrong value.
+
+**Fix:** `env.mark_local(name.clone())` before `insert` at all 8 `if val` /
+`elif val` binding sites (`interpreter_control.rs` `exec_if_core` x2 and the
+closure path, `interpreter_call/block_execution.rs` x4). Semantics: a local
+always shadows; no value-semantics or ABI change.
+
+**Evidence:**
+- `test/01_unit/language/if_val_binding_shadows_module_global_spec.spl`:
+  pristine seed `1 passed, 2 failed`; fixed seed `3 passed`.
+- Rust unit tests `interpreter_control.rs::if_val_binding_locality_tests`
+  pin that `Env::insert` alone does not imply locality.
+- `SIMPLE_DEBUG_ENUM_PAYLOAD=1 simple native-build src/compiler/80.driver/driver_public_api.spl`:
+  0 `fn=get_value` writes on the fixed seed; second build into the same
+  `--cache-dir` exits 0 with no `hash_text` error.
