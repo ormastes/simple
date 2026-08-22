@@ -42,15 +42,17 @@ fn file_read(path: text) -> text:
 use std.io_runtime.{file_read_bytes}
 export file_read_bytes
 
-# `rt_file_read_lines` returns nil when the file cannot be read, so the extern
-# must be declared optional. The wrapper stays NON-optional and total: every
-# caller consumes the result directly (`file_read_lines(path).len()` in
-# std.file_system.utilities), so an unreadable file collapses to an empty list
-# rather than propagating nil through a non-optional return (E-SFFI-016).
+@unsafe(reason: "raw nullable line-array ABI; nil means the provider could not read the file", capabilities: [ffi])
 extern fn rt_file_read_lines(path: text) -> [text]?
 
-fn file_read_lines(path: text) -> [text]:
-    rt_file_read_lines(path) ?? []
+fn file_read_lines(path: text) -> Result<[text], text>:
+    var lines: [text]? = nil
+    unsafe(capabilities: [ffi]):
+        lines = rt_file_read_lines(path)
+    if lines == nil:
+        Err("file line read failed: {path}")
+    else:
+        Ok(lines ?? [])
 
 # --- File Writing ---
 
@@ -167,15 +169,20 @@ extern fn rt_file_mmap_read_text(path: text) -> text
 fn file_mmap_read_text(path: text) -> text:
     rt_file_mmap_read_text(path)
 
-extern fn rt_file_mmap_read_bytes(path: text) -> [i64]
+@unsafe(reason: "raw nullable mmap byte-array ABI; nil means mapping or read failure", capabilities: [ffi])
+extern fn rt_file_mmap_read_bytes(path: text) -> [i64]?
 
 # `rt_file_mmap_read_bytes` delegates to rt_file_read_bytes, which yields nil
-# on any fs::read error (missing/unreadable path). TOTAL with the documented
-# default [] — identical to std.io_runtime.file_read_bytes, whose `?? []` this
-# mirrors; callers that must distinguish a missing file from an empty one use
-# file_exists() first.
-fn file_mmap_read_bytes(path: text) -> [i64]:
-    rt_file_mmap_read_bytes(path) ?? []
+# on any fs::read error. Preserve that state as Result.Err; a valid empty
+# mapping remains Ok([]), without an extra existence probe or second read.
+fn file_mmap_read_bytes(path: text) -> Result<[i64], text>:
+    var bytes: [i64]? = nil
+    unsafe(capabilities: [ffi]):
+        bytes = rt_file_mmap_read_bytes(path)
+    if bytes == nil:
+        Err("file mmap read failed: {path}")
+    else:
+        Ok(bytes ?? [])
 
 # ============================================================================
 # Directory Operations

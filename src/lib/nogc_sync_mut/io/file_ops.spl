@@ -3,10 +3,11 @@
 
 # Extern fn declarations (runtime resolves at file level)
 
-use std.io_runtime.{read_file_text, file_delete, file_copy}
+use std.io_runtime.{read_file_text, read_file_text_result, file_delete, file_copy}
 extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
 extern fn rt_file_mmap_read_text(path: text) -> text
-extern fn rt_file_mmap_read_bytes(path: text) -> [i64]
+@unsafe(reason: "raw nullable mmap byte-array ABI; nil means mapping or read failure", capabilities: [ffi])
+extern fn rt_file_mmap_read_bytes(path: text) -> [i64]?
 extern fn rt_file_hash_sha256(path: text) -> text
 @unsafe(reason: "acquires an OS-owned file descriptor that must be released exactly once", capabilities: [ffi])
 extern fn rt_file_lock(path: text, timeout_secs: i64) -> i64
@@ -115,13 +116,14 @@ fn file_remove(path: text) -> bool:
 fn file_hash_sha256(path: text) -> text:
     rt_file_hash_sha256(path)
 
-fn file_read_lines(path: text) -> [text]:
-    # Canonical (text)->[text]: matches std.ffi.io / rt_file_read_lines. Empty on missing.
-    val content = file_read(path)
-    if content.len() == 0:
-        []
-    else:
-        content.split("\n")
+fn file_read_lines(path: text) -> Result<[text], text>:
+    match read_file_text_result(path):
+        Ok(content):
+            if content.len() == 0:
+                Ok([])
+            else:
+                Ok(content.split("\n"))
+        Err(error): Err(error)
 
 fn file_lock(path: text, timeout_secs: i64) -> i64:
     var handle: i64 = -1
@@ -152,11 +154,16 @@ fn file_mmap_read_text(path: text) -> text:
 
 # `rt_file_mmap_read_bytes` delegates to rt_file_read_bytes, which yields nil
 # on any fs::read error (missing/unreadable path). TOTAL with the documented
-# default [] — identical to std.io_runtime.file_read_bytes, whose `?? []` this
-# mirrors; callers that must distinguish a missing file from an empty one use
-# file_exists() first.
-fn file_mmap_read_bytes(path: text) -> [i64]:
-    rt_file_mmap_read_bytes(path) ?? []
+# Preserve the provider's nullable failure state as Result.Err. A valid empty
+# mapping remains Ok([]), without a separate existence probe or second read.
+fn file_mmap_read_bytes(path: text) -> Result<[i64], text>:
+    var bytes: [i64]? = nil
+    unsafe(capabilities: [ffi]):
+        bytes = rt_file_mmap_read_bytes(path)
+    if bytes == nil:
+        Err("file mmap read failed: {path}")
+    else:
+        Ok(bytes ?? [])
 
 # --- Offset-based File I/O ---
 
