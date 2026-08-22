@@ -934,3 +934,15 @@ hot-path work. Continue the owner-first queue with remaining constant-success,
 empty-on-error, and fabricated capability implementations. Current census is
 12,492 declarations, 11,710 untouched, 508 tagged, 586 contracted, and zero
 signed admissions.
+
+Signal ownership is consolidated in the library façade: delete the two unused
+app copies, remove unconditional capability success, check the actual install
+status, reject failed atexit registration, and confine the four raw operations
+to explicit `unsafe(ffi)` blocks. The hot path loses a precheck and adds no
+lookup, allocation, hashing, or synchronization. Provider execution remains
+unverified because the available bootstrap seed rejects `rt_signal_install` as
+unknown; do not reinterpret that failure as unavailability or success. Current
+census: 12,487 declarations, 11,701 untouched, 512 tagged, 586 contracted, 558
+Simple implementation rows, and zero signed admissions. A later memory-focused
+slice must bound or reset the callback registry before calling this family
+complete.

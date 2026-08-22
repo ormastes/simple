@@ -1173,3 +1173,20 @@ modules check, focused lint passes, debugger state passes 42/42, and the fault
 numeric guard passes 2/2. Census/ratchet remain at 12,492 declaration rows,
 11,710 untouched, 508 tagged, 586 contracted, and zero signed admissions; Simple
 implementations fall to 564 rows (522 symbols) across 48 files.
+
+Signal handling had an unconditional `rt_signal_handler_available() == true`
+precheck even though the only authoritative capability result is the existing
+`rt_signal_install` status. The fabricated predicate is removed; installation
+now performs one direct raw call and returns its checked status, saving the
+precheck branch. Four raw signal/atexit declarations are explicitly
+`unsafe(ffi)`, and semantic wrappers contain the only minimal lexical unsafe
+regions. Atexit registration no longer stores a callback when provider
+installation fails. Two unused app-local duplicate signal modules are deleted.
+Checks and lint pass; the current checked-in bootstrap seed cannot execute the
+fixture because it fail-closes with `unknown extern function:
+rt_signal_install`, so behavioral provider verification is not claimed. The
+broad tooling spec also remains independently red due existing seed semantic
+resolution failures and an 8.9-second formatter threshold breach. Census and
+ratchet pass at 12,487 declarations, 11,701 untouched, 512 tagged, 586
+contracted, 558 Simple implementation rows (519 symbols) across 46 files, and
+zero signed admissions.

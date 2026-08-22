@@ -1,15 +1,19 @@
+@unsafe(reason: "raw hosted signal installation ABI; positive status is success", capabilities: [ffi])
 extern fn rt_signal_install(signal_num: i64) -> i64
+@unsafe(reason: "raw hosted pending-signal latch ABI; positive status means pending", capabilities: [ffi])
 extern fn rt_signal_check(signal_num: i64) -> i64
+@unsafe(reason: "raw hosted process-exit latch installation ABI; positive status is success", capabilities: [ffi])
 extern fn rt_atexit_install() -> i64
+@unsafe(reason: "raw hosted process-exit latch query ABI; positive status means pending", capabilities: [ffi])
 extern fn rt_atexit_check() -> i64
 
 var _signal_handlers: [(i64, fn())] = []
 
-fn rt_signal_handler_available() -> bool:
-    true
-
-fn rt_signal_handler_install(signal: i64, handler: fn()) -> bool:
-    if rt_signal_install(signal) <= 0:
+fn signal_handler_install(signal: i64, handler: fn()) -> bool:
+    var installed: i64 = 0
+    unsafe(capabilities: [ffi]):
+        installed = rt_signal_install(signal)
+    if installed <= 0:
         return false
     var i = 0
     while i < _signal_handlers.len():
@@ -20,15 +24,28 @@ fn rt_signal_handler_install(signal: i64, handler: fn()) -> bool:
     _signal_handlers.push((signal, handler))
     true
 
-fn rt_atexit_register(handler: fn()):
-    rt_atexit_install()
+fn atexit_register(handler: fn()) -> bool:
+    var installed: i64 = 0
+    unsafe(capabilities: [ffi]):
+        installed = rt_atexit_install()
+    if installed <= 0:
+        return false
     _signal_handlers.push((-1, handler))
+    true
 
 fn signal_dispatch_pending():
     for entry in _signal_handlers:
         val sig = entry.0
         val cb = entry.1
-        if sig >= 0 and rt_signal_check(sig) > 0:
-            cb()
-        elif sig == -1 and rt_atexit_check() > 0:
-            cb()
+        if sig >= 0:
+            var pending: i64 = 0
+            unsafe(capabilities: [ffi]):
+                pending = rt_signal_check(sig)
+            if pending > 0:
+                cb()
+        elif sig == -1:
+            var pending: i64 = 0
+            unsafe(capabilities: [ffi]):
+                pending = rt_atexit_check()
+            if pending > 0:
+                cb()
