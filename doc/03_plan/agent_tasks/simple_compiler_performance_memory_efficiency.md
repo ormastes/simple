@@ -418,3 +418,11 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Preserve defensive fallback indexing and all early-return releases.
 - Pin absence of `last_source_lines` and immediate release with source contracts.
 - Follow-up: evaluate result-array in-place compaction only after value-semantics/alias tests prove it safe.
+
+## Completed compiler tranche: quarantine MIR constant folding
+
+- Preserve evaluator, simplifier, pass, factory, method, statistics, and wrapper compatibility as zero-change/`nil` surfaces.
+- Remove untyped host arithmetic, algebraic rewrites, branch rewrites, and unconditional MIR-array reconstruction.
+- Replace direct-transform fixtures/manual with effective-pipeline and fail-closed contracts.
+- Record deleted source/IR, avoided direct-call allocations, and malformed-result prevention as compiler performance/memory/correctness hardening.
+- Follow-up: design one shared typed evaluator with exact target semantics, structured rejections, changed flags, receipts, verification, and differential tests.
