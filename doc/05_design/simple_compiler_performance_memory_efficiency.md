@@ -261,3 +261,10 @@ speculatability evidence. Header insertion is never a substitute for hoisting.
 ## Fail-closed trip-count ownership
 
 `LoopDetector` may identify natural-loop structure, but it must report `trip_count=nil` until the shared SCEV-lite owner proves the initial value, signed step, comparison direction and polarity, nowrap semantics, and finiteness. Disabled inference paths must not retain unreachable rewrite or recognizer bodies. Rehabilitation belongs in the shared fact service with positive, zero-trip, negative-step, overflow, and non-finite witnesses; it is not a one-line removal of a fail-closed return.
+## TCO rehabilitation contract
+
+The current TCO facade is a `Skeleton` identity and must contain no dormant rewrite body. A future active implementation must evaluate every recursive-call argument into fresh temporaries before assigning any parameter, then prove exact arity and MIR types, ownership and destruction timing, effect and unwind equivalence, entry-edge phi semantics, and debug-location preservation. Positive witnesses must include argument permutations and cycles; negative witnesses must cover non-tail calls, indirect recursion, throws/unwind, borrowed values, and observable destructors.
+
+## CLI-scoped lint session
+
+Repository lint should construct one `LintSession` per command. The session owns the immutable lint registry, parsed CLI policy, critical-mode policy, a directory-to-manifest cache, and a manifest-to-parsed-config cache. Per-file attributes are applied to a child configuration; cached configurations are never mutated. The CLI reads each source once and shares it with ordinary and SIMD checks. Session lifetime provides batch invalidation; long-lived daemon/LSP sessions must key cached policy by path plus content digest or validated metadata. This removes file-count-multiplied descriptor allocation, ancestor walks, configuration reads, and parsing without creating process-global stale state.
