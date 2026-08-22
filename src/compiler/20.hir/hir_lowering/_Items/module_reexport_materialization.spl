@@ -15,7 +15,7 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.module_surface.*
-use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_package_name}
+use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_package_name_from_name}
 use compiler.hir.hir_lowering.expressions.*
 use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
 use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind, PlatformParseResult, PlatformDiagnosticLevel, PlatformLayoutDiagnostic}
@@ -204,7 +204,7 @@ impl HirLowering:
                     # siblings declare the same short name, return not-found
                     # rather than guess, matching the payload path's stance on
                     # package inference (`resolve_materialized_enum_payload_*`).
-                    val facade_package = self.cached_surface_package_name(facade_mod)
+                    val facade_package = self.cached_surface_package_name(facade_mod.module_name)
                     if facade_package != "":
                         val sibling_names = self.package_sibling_registry_names(facade_package)
                         var sibling_match_index = -1
@@ -618,7 +618,7 @@ impl HirLowering:
                 imported_mod.module_name, dependency,
                 terminal_symbol)
 
-    me cached_surface_package_name(surface: ModuleSurface) -> text:
+    me cached_surface_package_name(module_name: text) -> text:
         """Package name of `surface`, memoized by module name.
 
         module_surface_package_name canonicalizes and then split/joins the
@@ -626,14 +626,14 @@ impl HirLowering:
         materialize_imported_field_package_dependency called it once per
         candidate per query; the registry is frozen for the whole HIR phase,
         so one computation per surface is enough."""
-        if self.surface_package_name_memo.contains_key(surface.module_name):
-            return self.surface_package_name_memo[surface.module_name]
-        val computed = module_surface_package_name(surface)
-        self.surface_package_name_memo[surface.module_name] = computed
+        if self.surface_package_name_memo.contains_key(module_name):
+            return self.surface_package_name_memo[module_name]
+        val computed = module_surface_package_name_from_name(module_name)
+        self.surface_package_name_memo[module_name] = computed
         computed
 
     me materialize_imported_field_package_dependency(
-        imported_mod: ModuleSurface,
+        imported_index: i64,
         dependency: text,
         import_span: Span,
         materialize_enum: bool
@@ -668,7 +668,15 @@ impl HirLowering:
         ambiguous short name (Span, TraitBound) leaves the dependency alone
         rather than silently choosing, exactly as the explicit-import chase
         does."""
-        val package_name = self.cached_surface_package_name(imported_mod)
+        if imported_index < 0 or imported_index >= self.module_surfaces.surfaces.len():
+            self.error("invalid imported module surface index {imported_index} for package dependency `{dependency}`", import_span)
+            return
+        val imported_mod = self.module_surfaces.surfaces[imported_index]
+        if imported_mod.physical_index != imported_index or
+           imported_mod.generation != self.module_surfaces.generation:
+            self.error("stale imported module surface index {imported_index} for package dependency `{dependency}`", import_span)
+            return
+        val package_name = self.cached_surface_package_name(imported_mod.module_name)
         if package_name == "":
             return
         # PKGDEP (2026-08-21): the registry is frozen for the whole HIR phase,
@@ -693,7 +701,7 @@ impl HirLowering:
                 val candidate_index: i64 = owner_indices[index]
                 val candidate = self.module_surfaces.surfaces[candidate_index]
                 if candidate.module_name != imported_mod.module_name and
-                   self.cached_surface_package_name(candidate) == package_name:
+                   self.cached_surface_package_name(candidate.module_name) == package_name:
                     if selected >= 0:
                         ambiguous = true
                         break

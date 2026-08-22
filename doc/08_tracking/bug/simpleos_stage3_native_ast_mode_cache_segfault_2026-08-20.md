@@ -1344,3 +1344,46 @@ the successfully registered terminal type under the facade-qualified alias in
 the re-export branch. It is intentionally unclaimed until a fresh admitted
 session; the three-cycle cap forbids another run here. ARM64 and QEMU remain
 pending on a trusted Stage 3.
+
+## Facade-alias and synthesized-origin cycles (2026-08-22)
+
+A fresh admitted three-cycle session tested the facade-qualified alias fix.
+Every Stage 2 rebuilt successfully and passed compiler sanity plus the
+struct-receiver/runtime capability gate. Every strict Stage 3 still exited 139
+with the same first fatal family at source 1: `HirImpl`, `HirStaticAssert`,
+`HirAopAdvice`, `HirDiBinding`, `HirArchRule`, and `HirMockDecl`. The first run
+reached roughly 25/666 HIR modules; trace-enabled runs stopped earlier.
+
+`SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE=1` emitted no payload-origin record for any of
+those six names, excluding enum-payload materialization and the facade payload
+route. Extending the same opt-in trace to `lower_named_kind` recorded every
+failure with an empty span, for example:
+
+`name=HirImpl lowering_module=src/compiler/driver/driver.spl span_file= span_line=0 span_col=0`
+
+The same synthesized pattern repeated in `interpreter.spl`, `sdn.spl`,
+`driver_types.spl`, and `driver_hir_pipeline_impl.spl`. This proves the errors
+come from retained `ModuleSurface` field projection, not source AST annotations.
+
+## Scalar field-dependency boundary queued (2026-08-22)
+
+Inspection after the capped run found one remaining aggregate ABI boundary on
+that exact path. `register_imported_symbol` had already been converted to a
+scalar physical-index API, but its composite-field loop passed the retained
+`ModuleSurface` by value through `materialize_imported_field_dependency` and
+again through `materialize_imported_field_package_dependency`. Projection then
+reused the canonical surface locally and still saw `[HirImpl]`, explaining how
+the dependency walk could silently miss while the immediately following
+projection emitted the synthesized unresolved type.
+
+The queued correction carries only the validated physical index through both
+nested dependency calls, reloads the canonical frozen surface in each owner,
+and computes cached package names from scalar module names rather than retained
+surface aggregates. The package-dependency memo spec is updated to exercise the
+new scalar contract. The admitted Stage-2 compiler (`64d9b1c4...573b`) does not
+support `check` or `test`; its supported SMF compile parsed the changed closure
+but failed later on existing bootstrap-wide HIR categories (`BlockValue`,
+`MethodResolution`, generic native functions, and missing AST accessor names).
+No focused PASS is claimed. The session cap prevents another Stage-3 run, so
+this correction remains queued for a fresh admitted verification session.
+ARM64 artifact and QEMU 2D/web/GUI/window-manager evidence remain pending.
