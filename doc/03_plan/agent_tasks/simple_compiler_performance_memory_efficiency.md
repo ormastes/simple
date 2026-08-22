@@ -113,6 +113,20 @@
 - Add mirrored clean-view, policy, parse/count order, and active-source contracts.
 - Verification intentionally not run under the user's no-verify instruction.
 
+## Completed nested lint collection state tranche
+
+- Harden `_collect_lint_diagnostics_json` as the lint-owned structured boundary.
+- Snapshot/restore collection mode, outer records, severity map/count, and the
+  private tier flag; return inner records as a separate ordered array.
+- Preserve the legacy per-rule scalar and treat emitted array length as the
+  authoritative serialized count.
+- Reuse the pipeline's canonical source lines for file-attribute policy parsing,
+  removing one full-source split and transient line array per linted file.
+- Add mirrored source contracts and a top-level executable nested-state oracle.
+- Parser trace stdout and parser/AST ownership remain separate blockers to
+  workspace subprocess removal.
+- Verification intentionally not run under the user's no-verify instruction.
+
 ## Completed workspace diagnostic JSON scanner tranche
 
 - Replace two per-byte-substring scans and the full interior copy with one
