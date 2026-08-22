@@ -5,7 +5,9 @@
 # `@unsafe(... capabilities: [ffi])` boundary. Safe wrappers validate and lift
 # the result outside that raw helper.
 
-use compiler.semantics.lint.lint_text.{iter_code_lines, CodeLine}
+use compiler.semantics.lint.lint_text.{
+    iter_code_lines, CodeLine
+}
 
 pub struct RawSffiCallFinding:
     code: text
@@ -19,6 +21,22 @@ pub struct RawSffiDeclarationFinding:
     note: text
     line_num: i64
 
+fn _rsc_file_excluded(file_path: text) -> bool:
+    file_path.contains("src/compiler_rust/vendor") or
+        file_path.contains("src/runtime/vendor") or file_path.contains("sffi_gen")
+
+pub class RawSffiCodeSnapshot:
+    lines: [CodeLine]
+    excluded: bool
+
+pub fn raw_sffi_code_snapshot(
+    source: text, file_path: text
+) -> RawSffiCodeSnapshot:
+    val excluded = _rsc_file_excluded(file_path)
+    RawSffiCodeSnapshot(
+        lines: if excluded: [] else: iter_code_lines(source),
+        excluded: excluded)
+
 fn _rsc_indent(raw: text) -> i64:
     var i = 0
     while i < raw.len() and raw.substring(i, i + 1) == " ":
@@ -31,7 +49,8 @@ fn _rsc_fn_header(line: text) -> bool:
         line.starts_with("me ")
 
 fn _rsc_extern_name(line: text) -> text:
-    var rest = line.trim()
+    # Callers consume CodeLine.trimmed; do not allocate a second trim result.
+    var rest = line
     if rest.starts_with("pub "):
         rest = rest.substring(4, rest.len()).trim()
     if not rest.starts_with("extern fn "):
@@ -63,10 +82,12 @@ fn _rsc_add_import_names(fragment: text, existing: [text]) -> [text]:
             externs.push(part)
     externs
 
-fn _rsc_collect_imported_raw_names(lines: [CodeLine], existing: [text]) -> [text]:
+fn _rsc_collect_imported_raw_names(
+    snapshot: RawSffiCodeSnapshot, existing: [text]
+) -> [text]:
     var externs = existing
     var in_sffi_use = false
-    for line in lines:
+    for line in snapshot.lines:
         val source = line.trimmed
         if source.starts_with("use "):
             in_sffi_use = source.contains("sffi") and source.contains("{")
@@ -83,10 +104,12 @@ fn _rsc_collect_imported_raw_names(lines: [CodeLine], existing: [text]) -> [text
                 in_sffi_use = false
     externs
 
-fn _rsc_has_ffi_unsafe_boundary(lines: [CodeLine], header_index: i64) -> bool:
+fn _rsc_has_ffi_unsafe_boundary(
+    snapshot: RawSffiCodeSnapshot, header_index: i64
+) -> bool:
     var i = header_index - 1
     while i >= 0:
-        val previous = lines[i].trimmed
+        val previous = snapshot.lines[i].trimmed
         if previous == "":
             i = i - 1
             continue
@@ -94,14 +117,16 @@ fn _rsc_has_ffi_unsafe_boundary(lines: [CodeLine], header_index: i64) -> bool:
             previous.contains("ffi")
     false
 
-fn _rsc_has_ffi_unsafe_declaration(lines: [CodeLine], declaration_index: i64) -> bool:
-    val declaration = lines[declaration_index].trimmed
+fn _rsc_has_ffi_unsafe_declaration(
+    snapshot: RawSffiCodeSnapshot, declaration_index: i64
+) -> bool:
+    val declaration = snapshot.lines[declaration_index].trimmed
     if declaration.starts_with("unsafe extern fn ") or
         declaration.starts_with("pub unsafe extern fn "):
         return true
     var i = declaration_index - 1
     while i >= 0 and declaration_index - i <= 8:
-        val previous = lines[i].trimmed
+        val previous = snapshot.lines[i].trimmed
         if previous == "":
             i = i - 1
             continue
@@ -112,64 +137,53 @@ fn _rsc_has_ffi_unsafe_declaration(lines: [CodeLine], declaration_index: i64) ->
         i = i - 1
     false
 
-pub fn check_raw_sffi_declarations(
-    source: text,
-    file_path: text
+fn _rsc_check_declarations(
+    snapshot: RawSffiCodeSnapshot
 ) -> [RawSffiDeclarationFinding]:
     var findings: [RawSffiDeclarationFinding] = []
-    if file_path.contains("src/compiler_rust/vendor") or
-        file_path.contains("src/runtime/vendor") or file_path.contains("sffi_gen"):
-        return findings
-
-    val lines = iter_code_lines(source)
     var i = 0
-    while i < lines.len():
-        val declaration = lines[i].trimmed
+    while i < snapshot.lines.len():
+        val declaration = snapshot.lines[i].trimmed
         val is_raw = declaration.starts_with("extern fn ") or
             declaration.starts_with("pub extern fn ") or
             declaration.starts_with("unsafe extern fn ") or
             declaration.starts_with("pub unsafe extern fn ") or
             declaration.starts_with("@extern(")
-        if is_raw and not _rsc_has_ffi_unsafe_declaration(lines, i):
+        if is_raw and not _rsc_has_ffi_unsafe_declaration(snapshot, i):
             findings.push(RawSffiDeclarationFinding(
                 code: "SFFI010",
                 message: "raw foreign declaration is not explicitly ffi-unsafe",
                 note: "add the smallest @unsafe(reason: ..., capabilities: [ffi]) boundary; a signature, name, or runtime provider does not make foreign code safe",
-                line_num: lines[i].line_num
+                line_num: snapshot.lines[i].line_num
             ))
         i = i + 1
     findings
 
-pub fn check_raw_sffi_calls(source: text, file_path: text) -> [RawSffiCallFinding]:
+fn _rsc_check_calls(snapshot: RawSffiCodeSnapshot) -> [RawSffiCallFinding]:
     var findings: [RawSffiCallFinding] = []
-    if file_path.contains("src/compiler_rust/vendor") or
-        file_path.contains("src/runtime/vendor") or file_path.contains("sffi_gen"):
-        return findings
-
-    val lines = iter_code_lines(source)
     var externs: [text] = []
-    for line in lines:
+    for line in snapshot.lines:
         val name = _rsc_extern_name(line.trimmed)
         if name != "" and not externs.contains(name):
             externs.push(name)
-    externs = _rsc_collect_imported_raw_names(lines, externs)
+    externs = _rsc_collect_imported_raw_names(snapshot, externs)
 
     var i = 0
-    while i < lines.len():
-        val header = lines[i]
+    while i < snapshot.lines.len():
+        val header = snapshot.lines[i]
         if _rsc_fn_header(header.trimmed):
-            val ffi_unsafe = _rsc_has_ffi_unsafe_boundary(lines, i)
+            val ffi_unsafe = _rsc_has_ffi_unsafe_boundary(snapshot, i)
             val header_indent = _rsc_indent(header.raw)
             var inline_ffi_indent = -1
             var j = i + 1
-            while j < lines.len():
-                val body = lines[j]
+            while j < snapshot.lines.len():
+                val body = snapshot.lines[j]
                 if body.trimmed == "":
                     j = j + 1
                     continue
-                if _rsc_indent(body.raw) <= header_indent:
-                    break
                 val body_indent = _rsc_indent(body.raw)
+                if body_indent <= header_indent:
+                    break
                 if inline_ffi_indent >= 0 and body_indent <= inline_ffi_indent:
                     inline_ffi_indent = -1
                 if body.trimmed.contains("unsafe(") and
@@ -193,3 +207,27 @@ pub fn check_raw_sffi_calls(source: text, file_path: text) -> [RawSffiCallFindin
             continue
         i = i + 1
     findings
+
+pub fn check_raw_sffi_declarations_snapshot(
+    snapshot: RawSffiCodeSnapshot
+) -> [RawSffiDeclarationFinding]:
+    if snapshot.excluded:
+        return []
+    _rsc_check_declarations(snapshot)
+
+pub fn check_raw_sffi_calls_snapshot(
+    snapshot: RawSffiCodeSnapshot
+) -> [RawSffiCallFinding]:
+    if snapshot.excluded:
+        return []
+    _rsc_check_calls(snapshot)
+
+pub fn check_raw_sffi_declarations(
+    source: text,
+    file_path: text
+) -> [RawSffiDeclarationFinding]:
+    check_raw_sffi_declarations_snapshot(
+        raw_sffi_code_snapshot(source, file_path))
+
+pub fn check_raw_sffi_calls(source: text, file_path: text) -> [RawSffiCallFinding]:
+    check_raw_sffi_calls_snapshot(raw_sffi_code_snapshot(source, file_path))
