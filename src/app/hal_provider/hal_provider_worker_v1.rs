@@ -118,7 +118,10 @@ fn bytes_request_v2(p: &[u8]) -> Option<BytesRequestV2> {
     let mut at = 9;
     let mut f = [0i64; 19];
     for i in 0..19 { f[i] = signed_number(p, &mut at, i == 18)?; }
-    let admitted = f[1] == 102 || f[1] == 1001 || f[1] == 1004;
+    // These are parent-captured normalized results. Admitting a lifecycle ID
+    // never executes the represented process or socket operation here.
+    let admitted = f[1] == 102 || f[1] == 1001 || f[1] == 1004 ||
+        (f[1] >= 1006 && f[1] <= 1008) || (f[1] >= 1012 && f[1] <= 1015);
     let error_valid = if f[4] == 0 {
         f[5] == 0 && f[6] == 0 && f[7] == 0
     } else {

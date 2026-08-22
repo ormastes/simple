@@ -160,9 +160,13 @@ static int parse_request_v2(const unsigned char *p, size_t n, HalRequestV2 *r) {
 }
 
 static int admitted_bytes_operation(uint64_t operation) {
-    /* EnvironmentGet plus typed FileRead and StreamRead. */
+    /* Parent-captured normalized results only. Process and socket lifecycle
+     * IDs are typed EnvOpcodeV1 values plus the provider-operation base;
+     * admitting them does not perform the represented host side effect. */
     return operation == UINT64_C(102) || operation == UINT64_C(1001) ||
-           operation == UINT64_C(1004);
+           operation == UINT64_C(1004) ||
+           (operation >= UINT64_C(1006) && operation <= UINT64_C(1008)) ||
+           (operation >= UINT64_C(1012) && operation <= UINT64_C(1015));
 }
 
 static int canonical_word(uint64_t word, uint64_t used) {

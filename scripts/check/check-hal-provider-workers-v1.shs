@@ -33,7 +33,7 @@ printf '%s\n' "$c_result_v2" | rg '^HALRES2\|1\|7\|0\|0\|0\|0\|1\|987654321\|8\|
     echo 'FAIL: C V2 did not preserve the captured scalar/trace cursor' >&2; exit 1
 }
 
-for operation in 102 1001 1004; do
+for operation in 102 1001 1004 1006 1007 1008 1012 1013 1014 1015; do
     bytes_request=$(printf '%s\n' "$request_v2_bytes" | sed "s/HALREQ2B|2|102|/HALREQ2B|2|$operation|/")
     c_bytes=$(printf '%s\n' "$bytes_request" | "$work/bin/hal-provider-c-v1")
     rust_bytes=$(printf '%s\n' "$bytes_request" | "$work/bin/hal-provider-rust-v1")
@@ -47,6 +47,23 @@ for operation in 102 1001 1004; do
     }
 done
 
+# Exact ordered lifecycle receipts use caller-owned inline payload and trace
+# cursors. Workers only echo the parent observation, so replay cannot repeat a
+# process or socket side effect.
+lifecycle_cursor=0
+for operation in 1006 1007 1008 1012 1013 1014 1015; do
+    lifecycle_cursor=$((lifecycle_cursor + 1))
+    lifecycle_request="HALREQ2B|2|$operation|$((20 + lifecycle_cursor))|9|0|0|0|0|8|32|$((7000 + lifecycle_cursor))|0|0|0|41|42|$lifecycle_cursor|7|8"
+    c_lifecycle=$(printf '%s\n' "$lifecycle_request" | "$work/bin/hal-provider-c-v1")
+    rust_lifecycle=$(printf '%s\n' "$lifecycle_request" | "$work/bin/hal-provider-rust-v1")
+    [ "$(printf '%s\n' "$c_lifecycle" | sed 's/^HALRES2B|1|/HALRES2B|X|/')" = "$(printf '%s\n' "$rust_lifecycle" | sed 's/^HALRES2B|2|/HALRES2B|X|/')" ] || {
+        echo "FAIL: C/Rust lifecycle payload differs for operation $operation" >&2; exit 1
+    }
+    printf '%s\n' "$c_lifecycle" | rg "^HALRES2B\\|1\\|$((20 + lifecycle_cursor))\\|0\\|0\\|0\\|0\\|2\\|0\\|8\\|32\\|$((7000 + lifecycle_cursor))\\|0\\|0\\|0\\|41\\|42\\|$lifecycle_cursor\\|7\\|8\\|0\\|-1\\|0\\|152$" >/dev/null || {
+        echo "FAIL: exact lifecycle payload/trace changed for operation $operation" >&2; exit 1
+    }
+done
+
 error_request='HALREQ2B|2|102|8|9|3|2|17|23|0|32|0|0|0|0|41|42|2|2|8'
 c_error=$(printf '%s\n' "$error_request" | "$work/bin/hal-provider-c-v1")
 rust_error=$(printf '%s\n' "$error_request" | "$work/bin/hal-provider-rust-v1")
@@ -56,6 +73,17 @@ rust_error=$(printf '%s\n' "$error_request" | "$work/bin/hal-provider-rust-v1")
 printf '%s\n' "$c_error" | rg '^HALRES2B\|1\|8\|3\|2\|17\|23\|2\|0\|0\|32\|0\|0\|0\|0\|41\|42\|2\|2\|8\|0\|-1\|0\|152$' >/dev/null || {
     echo 'FAIL: structured error/trace was not preserved' >&2; exit 1
 }
+for operation in 1007 1014; do
+    lifecycle_error=$(printf '%s\n' "$error_request" | sed "s/HALREQ2B|2|102|/HALREQ2B|2|$operation|/")
+    c_lifecycle_error=$(printf '%s\n' "$lifecycle_error" | "$work/bin/hal-provider-c-v1")
+    rust_lifecycle_error=$(printf '%s\n' "$lifecycle_error" | "$work/bin/hal-provider-rust-v1")
+    [ "$(printf '%s\n' "$c_lifecycle_error" | sed 's/^HALRES2B|1|/HALRES2B|X|/')" = "$(printf '%s\n' "$rust_lifecycle_error" | sed 's/^HALRES2B|2|/HALRES2B|X|/')" ] || {
+        echo "FAIL: lifecycle structured error differs for operation $operation" >&2; exit 1
+    }
+    printf '%s\n' "$c_lifecycle_error" | rg '^HALRES2B\|1\|8\|3\|2\|17\|23\|2\|0\|0\|32\|0\|0\|0\|0\|41\|42\|2\|2\|8\|0\|-1\|0\|152$' >/dev/null || {
+        echo "FAIL: lifecycle structured error/trace changed for operation $operation" >&2; exit 1
+    }
+done
 binary_request='HALREQ2B|2|1001|9|9|0|0|0|0|8|32|-70363229389192960|0|0|0|41|42|3|3|8'
 c_binary=$(printf '%s\n' "$binary_request" | "$work/bin/hal-provider-c-v1")
 rust_binary=$(printf '%s\n' "$binary_request" | "$work/bin/hal-provider-rust-v1")
@@ -133,5 +161,14 @@ fi
 
 rg -F 'HALREQ2B|' "$repo_root/src/app/hal_provider/pure_worker_v1.spl" >/dev/null
 rg -F '_canonical_word' "$repo_root/src/app/hal_provider/pure_worker_v1.spl" >/dev/null
+for mapping in \
+    'case EnvOpcodeV1.ProcessSpawn: 6' 'case EnvOpcodeV1.ProcessPoll: 7' \
+    'case EnvOpcodeV1.ProcessKill: 8' 'case EnvOpcodeV1.SocketOpen: 12' \
+    'case EnvOpcodeV1.SocketSend: 13' 'case EnvOpcodeV1.SocketReceive: 14' \
+    'case EnvOpcodeV1.SocketClose: 15'; do
+    rg -F "$mapping" "$repo_root/src/lib/common/structural/environment_instruction/contracts.spl" >/dev/null || {
+        echo "FAIL: provider lifecycle ID drifted from typed environment opcode: $mapping" >&2; exit 1
+    }
+done
 
-echo "PASS: real C/Rust HAL providers agree; v2_scalar=987654321 v2_exact_bytes=8 v2_binary_high_bit=true v2_error=2:17:23 v2_trace_cursor=1 operations=EnvironmentGet,FileRead,StreamRead ipc_cap=512 session_rows=5 direct_heap_calls=0 c_v1_rss_kib=$(cat "$work/c.rss") c_v2_rss_kib=$(cat "$work/c.v2.rss") c_v2_bytes_rss_kib=$(cat "$work/c.v2-bytes.rss") rust_v1_rss_kib=$(cat "$work/rust.rss") rust_v2_rss_kib=$(cat "$work/rust.v2.rss") rust_v2_bytes_rss_kib=$(cat "$work/rust.v2-bytes.rss")"
+echo "PASS: real C/Rust HAL providers agree; v2_scalar=987654321 v2_exact_bytes=8 v2_binary_high_bit=true v2_error=2:17:23 v2_trace_cursor=1 operations=EnvironmentGet,FileRead,StreamRead,ProcessSpawn,ProcessPoll,ProcessKill,SocketOpen,SocketSend,SocketReceive,SocketClose lifecycle_replay_side_effects=0 ipc_cap=512 session_rows=5 direct_heap_calls=0 c_v1_rss_kib=$(cat "$work/c.rss") c_v2_rss_kib=$(cat "$work/c.v2.rss") c_v2_bytes_rss_kib=$(cat "$work/c.v2-bytes.rss") rust_v1_rss_kib=$(cat "$work/rust.rss") rust_v2_rss_kib=$(cat "$work/rust.v2.rss") rust_v2_bytes_rss_kib=$(cat "$work/rust.v2-bytes.rss")"

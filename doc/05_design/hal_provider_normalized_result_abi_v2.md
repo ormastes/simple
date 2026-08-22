@@ -22,13 +22,22 @@ out-of-range cursors, inconsistent success/error state, and overflow metadata
 fail closed. Comparison includes actual scalar/words, structured error, and
 the exact trace identity/cursor rather than accepting digest equality.
 
-## Clock replay wire pilot
+## Typed replay wire
 
 The additive `HALREQ2`/`HALRES2` direct-worker protocol carries a
 parent-captured monotonic clock scalar, result capacity, and trace position.
 Pure Simple, C, and Rust workers normalize that same observation; they do not
 perform three independent physical clock reads. V1 requests remain byte-for-byte
 compatible. The fixed wire ceiling remains 512 bytes.
+
+`HALREQ2B` also admits the typed environment operation IDs for
+`ProcessSpawn`, `ProcessPoll`, `ProcessKill`, `SocketOpen`, `SocketSend`,
+`SocketReceive`, and `SocketClose` (`1006..1008`, `1012..1015`). The parent
+executes or models each operation once, then sends its normalized result,
+structured error, and exact trace cursor. Provider workers only validate and
+return that fixed inline observation; replay therefore cannot repeat a process
+or socket side effect. Lifecycle ordering remains parent-owned and is bound by
+the exact trace identity, cursor, length, and capacity in every result.
 
 The C and Rust worker implementations use only stack arrays and direct I/O;
 the focused gate rejects heap-owning constructs. The Pure worker preserves the
@@ -38,9 +47,10 @@ normalized provider-result data model itself has no dynamic payload.
 ## Evidence (2026-08-22)
 
 `sh scripts/check/check-hal-provider-workers-v1.shs` proves identical normalized
-C/Rust scalar and trace output, rejects oversize/missing-identity requests, and
-retains zero direct heap calls. Measured peak RSS on the same host was unchanged:
-C V1/V2 1024/1024 KiB and Rust V1/V2 1792/1792 KiB.
+C/Rust scalar, byte, process-lifecycle, socket-lifecycle, structured-error, and
+trace output; rejects oversize/missing-identity requests; and retains zero
+direct heap calls. Measured peak RSS on the same host was unchanged: C V1/V2
+1024/1024 KiB and Rust V1/V2 1792/1792 KiB.
 
 Pure-Simple execution and optimizer evidence remain blocked by the inadmissible
 self-hosted compiler; the Rust seed is deliberately not substituted.
