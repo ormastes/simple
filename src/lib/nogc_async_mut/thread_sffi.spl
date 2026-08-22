@@ -54,6 +54,47 @@ extern fn spl_condvar_destroy(handle: i64)
 @unsafe(reason: "native thread ABI", capabilities: [ffi])
 extern fn spl_thread_cpu_count() -> i64
 
+# Bootstrap-compatible private FFI leaves. Restricted admitted builders can
+# misparse lexical unsafe blocks and emit `ffi` as a GlobalLoad. Keep the
+# public validation methods safe and make each leaf exactly one direct call:
+# no allocation, aggregate copy, collection growth, or additional branch.
+@unsafe(reason: "private native thread join ABI boundary", capabilities: [ffi])
+fn _thread_join_raw(handle: i64) -> bool: spl_thread_join(handle)
+@unsafe(reason: "private native thread detach ABI boundary", capabilities: [ffi])
+fn _thread_detach_raw(handle: i64) -> bool: spl_thread_detach(handle)
+@unsafe(reason: "private native thread identity ABI boundary", capabilities: [ffi])
+fn _thread_current_id_raw() -> i64: spl_thread_current_id()
+@unsafe(reason: "private native thread sleep ABI boundary", capabilities: [ffi])
+fn _thread_sleep_raw(millis: i64): spl_thread_sleep(millis)
+@unsafe(reason: "private native thread yield ABI boundary", capabilities: [ffi])
+fn _thread_yield_raw(): spl_thread_yield()
+@unsafe(reason: "private native CPU-count ABI boundary", capabilities: [ffi])
+fn _thread_cpu_count_raw() -> i64: spl_thread_cpu_count()
+
+@unsafe(reason: "private native mutex create ABI boundary", capabilities: [ffi])
+fn _mutex_create_raw() -> i64: spl_mutex_create()
+@unsafe(reason: "private native mutex lock ABI boundary", capabilities: [ffi])
+fn _mutex_lock_raw(handle: i64) -> bool: spl_mutex_lock(handle)
+@unsafe(reason: "private native mutex try-lock ABI boundary", capabilities: [ffi])
+fn _mutex_try_lock_raw(handle: i64) -> bool: spl_mutex_try_lock(handle)
+@unsafe(reason: "private native mutex unlock ABI boundary", capabilities: [ffi])
+fn _mutex_unlock_raw(handle: i64) -> bool: spl_mutex_unlock(handle)
+@unsafe(reason: "private native mutex destroy ABI boundary", capabilities: [ffi])
+fn _mutex_destroy_raw(handle: i64): spl_mutex_destroy(handle)
+
+@unsafe(reason: "private native condition-variable create ABI boundary", capabilities: [ffi])
+fn _condvar_create_raw() -> i64: spl_condvar_create()
+@unsafe(reason: "private native condition-variable wait ABI boundary", capabilities: [ffi])
+fn _condvar_wait_raw(cv_handle: i64, mutex_handle: i64) -> bool: spl_condvar_wait(cv_handle, mutex_handle)
+@unsafe(reason: "private native condition-variable timed-wait ABI boundary", capabilities: [ffi])
+fn _condvar_wait_timeout_raw(cv_handle: i64, mutex_handle: i64, timeout_ms: i64) -> bool: spl_condvar_wait_timeout(cv_handle, mutex_handle, timeout_ms)
+@unsafe(reason: "private native condition-variable signal ABI boundary", capabilities: [ffi])
+fn _condvar_signal_raw(handle: i64) -> bool: spl_condvar_signal(handle)
+@unsafe(reason: "private native condition-variable broadcast ABI boundary", capabilities: [ffi])
+fn _condvar_broadcast_raw(handle: i64) -> bool: spl_condvar_broadcast(handle)
+@unsafe(reason: "private native condition-variable destroy ABI boundary", capabilities: [ffi])
+fn _condvar_destroy_raw(handle: i64): spl_condvar_destroy(handle)
+
 # ============================================================================
 # Thread Handle
 # ============================================================================
@@ -87,8 +128,7 @@ class ThreadHandle:
         """
         if not self.is_valid():
             return false
-        unsafe(capabilities: [ffi]):
-            spl_thread_join(self.handle)
+        _thread_join_raw(self.handle)
 
     fn detach() -> bool:
         """Detach thread (no join required).
@@ -98,8 +138,7 @@ class ThreadHandle:
         """
         if not self.is_valid():
             return false
-        unsafe(capabilities: [ffi]):
-            spl_thread_detach(self.handle)
+        _thread_detach_raw(self.handle)
 
 # ============================================================================
 # Thread Functions
@@ -111,8 +150,7 @@ fn thread_current_id() -> i64:
     Returns:
         Platform-specific thread ID
     """
-    unsafe(capabilities: [ffi]):
-        spl_thread_current_id()
+    _thread_current_id_raw()
 
 fn thread_sleep(millis: i64):
     """Sleep current thread.
@@ -121,13 +159,11 @@ fn thread_sleep(millis: i64):
         millis: Sleep duration in milliseconds
     """
     if millis > 0:
-        unsafe(capabilities: [ffi]):
-            spl_thread_sleep(millis)
+        _thread_sleep_raw(millis)
 
 fn thread_yield():
     """Yield CPU to other threads."""
-    unsafe(capabilities: [ffi]):
-        spl_thread_yield()
+    _thread_yield_raw()
 
 fn thread_cpu_count() -> i64:
     """Get number of available CPU cores.
@@ -135,8 +171,7 @@ fn thread_cpu_count() -> i64:
     Returns:
         Number of logical CPU cores
     """
-    unsafe(capabilities: [ffi]):
-        spl_thread_cpu_count()
+    _thread_cpu_count_raw()
 
 # ============================================================================
 # Mutex Handle
@@ -168,8 +203,7 @@ class MutexHandle:
         """
         if not self.is_valid():
             return false
-        unsafe(capabilities: [ffi]):
-            spl_mutex_lock(self.handle)
+        _mutex_lock_raw(self.handle)
 
     fn try_lock() -> bool:
         """Try to lock mutex (non-blocking).
@@ -179,8 +213,7 @@ class MutexHandle:
         """
         if not self.is_valid():
             return false
-        unsafe(capabilities: [ffi]):
-            spl_mutex_try_lock(self.handle)
+        _mutex_try_lock_raw(self.handle)
 
     fn unlock() -> bool:
         """Unlock mutex.
@@ -190,14 +223,12 @@ class MutexHandle:
         """
         if not self.is_valid():
             return false
-        unsafe(capabilities: [ffi]):
-            spl_mutex_unlock(self.handle)
+        _mutex_unlock_raw(self.handle)
 
     fn destroy():
         """Destroy mutex and free resources."""
         if self.is_valid():
-            unsafe(capabilities: [ffi]):
-                spl_mutex_destroy(self.handle)
+            _mutex_destroy_raw(self.handle)
 
 fn mutex_create() -> MutexHandle:
     """Create new mutex.
@@ -205,9 +236,7 @@ fn mutex_create() -> MutexHandle:
     Returns:
         Mutex handle (check is_valid())
     """
-    var handle: i64 = 0
-    unsafe(capabilities: [ffi]):
-        handle = spl_mutex_create()
+    val handle = _mutex_create_raw()
     MutexHandle(handle: handle)
 
 # Scalar owner facade for no-GC classes that must retain a mutex across
@@ -215,20 +244,17 @@ fn mutex_create() -> MutexHandle:
 # avoids embedding a second mutable class while preserving the same checked
 # runtime operations.
 fn mutex_raw_create() -> i64:
-    unsafe(capabilities: [ffi]):
-        spl_mutex_create()
+    _mutex_create_raw()
 
 fn mutex_raw_lock(handle: i64) -> bool:
     if handle <= 0:
         return false
-    unsafe(capabilities: [ffi]):
-        spl_mutex_lock(handle)
+    _mutex_lock_raw(handle)
 
 fn mutex_raw_unlock(handle: i64) -> bool:
     if handle <= 0:
         return false
-    unsafe(capabilities: [ffi]):
-        spl_mutex_unlock(handle)
+    _mutex_unlock_raw(handle)
 
 # ============================================================================
 # Condition Variable Handle
@@ -272,8 +298,7 @@ class CondVarHandle:
             return false
         if not mutex.is_valid():
             return false
-        unsafe(capabilities: [ffi]):
-            spl_condvar_wait(self.handle, mutex.handle)
+        _condvar_wait_raw(self.handle, mutex.handle)
 
     fn wait_timeout(mutex: MutexHandle, timeout_ms: i64) -> bool:
         """Wait with timeout.
@@ -289,8 +314,7 @@ class CondVarHandle:
             return false
         if not mutex.is_valid():
             return false
-        unsafe(capabilities: [ffi]):
-            spl_condvar_wait_timeout(self.handle, mutex.handle, timeout_ms)
+        _condvar_wait_timeout_raw(self.handle, mutex.handle, timeout_ms)
 
     fn signal() -> bool:
         """Wake one waiting thread.
@@ -300,8 +324,7 @@ class CondVarHandle:
         """
         if not self.is_valid():
             return false
-        unsafe(capabilities: [ffi]):
-            spl_condvar_signal(self.handle)
+        _condvar_signal_raw(self.handle)
 
     fn broadcast() -> bool:
         """Wake all waiting threads.
@@ -311,14 +334,12 @@ class CondVarHandle:
         """
         if not self.is_valid():
             return false
-        unsafe(capabilities: [ffi]):
-            spl_condvar_broadcast(self.handle)
+        _condvar_broadcast_raw(self.handle)
 
     fn destroy():
         """Destroy condition variable and free resources."""
         if self.is_valid():
-            unsafe(capabilities: [ffi]):
-                spl_condvar_destroy(self.handle)
+            _condvar_destroy_raw(self.handle)
 
 fn condvar_create() -> CondVarHandle:
     """Create new condition variable.
@@ -326,9 +347,7 @@ fn condvar_create() -> CondVarHandle:
     Returns:
         Condvar handle (check is_valid())
     """
-    var handle: i64 = 0
-    unsafe(capabilities: [ffi]):
-        handle = spl_condvar_create()
+    val handle = _condvar_create_raw()
     CondVarHandle(handle: handle)
 
 # ============================================================================

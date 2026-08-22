@@ -11,6 +11,13 @@ use std.concurrent.multicore_green.{MulticoreGreenHandle, multicore_green_spawn}
 @unsafe(reason: "native thread-pool worker ABI", capabilities: [ffi])
 extern fn spl_thread_pool_spawn_worker(pool_id: i64) -> i64
 
+# One direct declaration-scoped FFI leaf keeps the safe constructor compatible
+# with restricted bootstrap parsers without adding allocation, copies, or a
+# hot-path branch.
+@unsafe(reason: "private native thread-pool worker ABI boundary", capabilities: [ffi])
+fn _thread_pool_spawn_worker_raw(pool_id: i64) -> i64:
+    spl_thread_pool_spawn_worker(pool_id)
+
 class ThreadPool:
     """Thread pool for parallel task execution.
 
@@ -76,9 +83,7 @@ class ThreadPool:
 
         # Spawn workers using C helper function
         for i in 0..workers:
-            var handle_id: i64 = 0
-            unsafe(capabilities: [ffi]):
-                handle_id = spl_thread_pool_spawn_worker(pool_id)
+            val handle_id = _thread_pool_spawn_worker_raw(pool_id)
             if handle_id <= 0:
                 panic("E-SFFI-THREAD-POOL-SPAWN: native worker provider failed for pool {pool_id}, worker {i}")
             val handle = ThreadHandle.from_raw(handle_id)
