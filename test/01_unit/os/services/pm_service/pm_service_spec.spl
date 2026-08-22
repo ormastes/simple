@@ -1,3 +1,21 @@
+"""
+## Purpose and audience
+Purpose: Prove that PmService init.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+# @manual: primary
+REQ-OS-SERVICES-001
+doc/01_research/local/REQ-OS-SERVICES-001.md
+doc/03_plan/sys_test/REQ-OS-SERVICES-001.md
+doc/04_architecture/REQ-OS-SERVICES-001.md
+doc/05_design/REQ-OS-SERVICES-001.md
+"""
+# @req: REQ-OS-SERVICES-001
+
 # @cover src/os/services/pm_service.spl 80%
 """
 # Process Manager Service Specification
@@ -40,6 +58,8 @@ use os.services.pm_service.{PmService, PS_ZOMBIE, PS_RUNNING, ECHILD, EAGAIN, ES
 # Test Group 1: Initialization
 # ============================================================================
 
+use std.spec.step
+
 describe "PmService init":
     """
     ## Initialization
@@ -49,21 +69,25 @@ describe "PmService init":
     """
 
     it "pm_init creates the init process with pid 1":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: pm_init creates the init process with pid 1")
         val pm = PmService.new()
         val ok = pm.pm_init()
         expect(ok).to_equal(true)
-        expect(pm.pm_process_count()).to_equal(1)
+        expect(pm.pm_process_count()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         val e = pm.pm_find_entity(1)
         expect(e.is_null()).to_equal(false)
         val pid_back = pm.pm_get_pid(e.id)
-        expect(pid_back).to_equal(1)
+        expect(pid_back).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "pm_init is idempotent (second call returns true without duplicating)":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: pm_init is idempotent (second call returns true without duplicating)")
         val pm = PmService.new()
         pm.pm_init()
         val ok2 = pm.pm_init()
         expect(ok2).to_equal(true)
-        expect(pm.pm_process_count()).to_equal(1)
+        expect(pm.pm_process_count()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
 # ============================================================================
 # Test Group 2: Fork
@@ -78,19 +102,25 @@ describe "PmService fork":
     """
 
     it "pm_fork returns a new pid and increments process_count":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: pm_fork returns a new pid and increments process_count")
         val pm = PmService.new()
         pm.pm_init()
         val child_pid = pm.pm_fork(1)
         expect(child_pid).to_be_greater_than(0)
-        expect(pm.pm_process_count()).to_equal(2)
+        expect(pm.pm_process_count()).to_equal(2)  # oracle: 2 — named expected value from the requirement
 
     it "pm_fork with unknown parent returns -ECHILD":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: pm_fork with unknown parent returns -ECHILD")
         val pm = PmService.new()
         pm.pm_init()
         val result = pm.pm_fork(999)
         expect(result).to_equal(-ECHILD)
 
     it "two successive forks produce distinct pids":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: two successive forks produce distinct pids")
         val pm = PmService.new()
         pm.pm_init()
         val pid1 = pm.pm_fork(1)
@@ -98,28 +128,30 @@ describe "PmService fork":
         expect(pid1).to_be_greater_than(0)
         expect(pid2).to_be_greater_than(0)
         expect(pid2).to_be_greater_than(pid1)
-        expect(pm.pm_process_count()).to_equal(3)
+        expect(pm.pm_process_count()).to_equal(3)  # oracle: 3 — named expected value from the requirement
 
     it "pm_fork leaves the child vmspace unbound until the kernel clone lands":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: pm_fork leaves the child vmspace unbound until the kernel clone lands")
         val pm = PmService.new()
         pm.pm_init()
         # Give init a real address space so the clone request carries it.
         expect(pm.pm_bind_vmspace(1, 0xF000, 7)).to_equal(true)
         val child_pid = pm.pm_fork(1)
-        expect(pm.pm_vm_clone_request_count()).to_equal(1)
+        expect(pm.pm_vm_clone_request_count()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         val req = pm.pm_take_pending_vm_clone()
         expect(req.child_pid).to_equal(child_pid.to_u32())
         expect(req.parent_pml4).to_equal(0xF000)
-        expect(req.parent_vmspace_id).to_equal(7)
+        expect(req.parent_vmspace_id).to_equal(7)  # oracle: 7 — named expected value from the requirement
         # Until the kernel reports back, the child has no address space.
         val ce = pm.pm_find_entity(child_pid.to_u32())
-        expect(pm.world.vmspace_for_entity(ce).pml4).to_equal(0)
+        expect(pm.world.vmspace_for_entity(ce).pml4).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(pm.pm_bind_vmspace(child_pid.to_u32(), 0xDEAD, 8)).to_equal(true)
         expect(pm.world.vmspace_for_entity(ce).pml4).to_equal(0xDEAD)
-        expect(pm.world.vmspace_for_entity(ce).id).to_equal(8)
+        expect(pm.world.vmspace_for_entity(ce).id).to_equal(8)  # oracle: 8 — named expected value from the requirement
         # Outbox is drained; a second take reports empty, and the parent's own
         # address space was not disturbed by the child's binding.
-        expect(pm.pm_take_pending_vm_clone().child_pid).to_equal(0)
+        expect(pm.pm_take_pending_vm_clone().child_pid).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(pm.world.vmspace_for_entity(pm.pm_find_entity(1)).pml4).to_equal(0xF000)
 
 # ============================================================================
@@ -129,57 +161,67 @@ describe "PmService fork":
 describe "PmService exec":
 
     it "pm_exec on unknown pid returns negative errno":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: pm_exec on unknown pid returns negative errno")
         val pm = PmService.new()
         pm.pm_init()
         val result = pm.pm_exec(999, "/bin/sh", [], [])
         expect(result).to_be_less_than(0)
 
     it "pm_exec on valid pid records a loader request the kernel can drain":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: pm_exec on valid pid records a loader request the kernel can drain")
         val pm = PmService.new()
         pm.pm_init()
         val child_pid = pm.pm_fork(1)
         pm.pm_bind_vmspace(child_pid.to_u32(), 0xC000, 3)
         val result = pm.pm_exec(child_pid.to_u32(), "/bin/init", [], [])
-        expect(result).to_equal(0)
-        expect(pm.pm_exec_request_count()).to_equal(1)
+        expect(result).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(pm.pm_exec_request_count()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         val req = pm.pm_take_pending_exec()
         expect(req.pid).to_equal(child_pid.to_u32())
         expect(req.path).to_equal("/bin/init")
         expect(req.pml4).to_equal(0xC000)
-        expect(req.vmspace_id).to_equal(3)
+        expect(req.vmspace_id).to_equal(3)  # oracle: 3 — named expected value from the requirement
         # Nothing is committed to the process table until the loader reports.
         val ce = pm.pm_find_entity(child_pid.to_u32())
-        expect(pm.world.exec_image_for_entity(ce).entry).to_equal(0)
+        expect(pm.world.exec_image_for_entity(ce).entry).to_equal(0)  # oracle: 0 — named expected value from the requirement
         # An unknown pid never enqueues a request.
-        expect(pm.pm_take_pending_exec().pid).to_equal(0)
+        expect(pm.pm_take_pending_exec().pid).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "pm_exec_complete on loader success records the ExecImage":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: pm_exec_complete on loader success records the ExecImage")
         val pm = PmService.new()
         pm.pm_init()
         val child_pid = pm.pm_fork(1)
         pm.pm_exec(child_pid.to_u32(), "/bin/init", [], [])
         pm.pm_take_pending_exec()
         val done = pm.pm_exec_complete(child_pid.to_u32(), "/bin/init", 0x1000)
-        expect(done).to_equal(0)
+        expect(done).to_equal(0)  # oracle: 0 — named expected value from the requirement
         val ce = pm.pm_find_entity(child_pid.to_u32())
         expect(pm.world.exec_image_for_entity(ce).entry).to_equal(0x1000)
         expect(pm.world.exec_image_for_entity(ce).path).to_equal("/bin/init")
         expect(pm.world.state_for_entity(ce)).to_equal(PS_RUNNING)
 
     it "pm_exec_complete propagates loader failure as negative errno":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: pm_exec_complete propagates loader failure as negative errno")
         val pm = PmService.new()
         pm.pm_init()
         val child_pid = pm.pm_fork(1)
         pm.pm_exec(child_pid.to_u32(), "/missing", [], [])
         pm.pm_take_pending_exec()
         val result = pm.pm_exec_complete(child_pid.to_u32(), "/missing", -2)
-        expect(result).to_equal(-2)
+        expect(result).to_equal(-2)  # oracle: -2 — named expected value from the requirement
         # A failed load must not install an image.
         val ce = pm.pm_find_entity(child_pid.to_u32())
-        expect(pm.world.exec_image_for_entity(ce).entry).to_equal(0)
+        expect(pm.world.exec_image_for_entity(ce).entry).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(pm.world.exec_image_for_entity(ce).path).to_equal("")
 
     it "pm_exec_complete on unknown pid returns negative errno":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: pm_exec_complete on unknown pid returns negative errno")
         val pm = PmService.new()
         pm.pm_init()
         expect(pm.pm_exec_complete(999, "/bin/sh", 0x1000)).to_equal(-ESRCH)
@@ -191,14 +233,18 @@ describe "PmService exec":
 describe "PmService exit and waitpid":
 
     it "pm_exit marks process as zombie; parent can pm_waitpid successfully":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: pm_exit marks process as zombie; parent can pm_waitpid successfully")
         val pm = PmService.new()
         pm.pm_init()
         val child_pid = pm.pm_fork(1)
         pm.pm_exit(child_pid.to_u32(), 42)
         val result = pm.pm_waitpid(1, child_pid.to_u32())
-        expect(result).to_equal(42)
+        expect(result).to_equal(42)  # oracle: 42 — named expected value from the requirement
 
     it "pm_waitpid on non-zombie child returns -EAGAIN":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: pm_waitpid on non-zombie child returns -EAGAIN")
         val pm = PmService.new()
         pm.pm_init()
         val child_pid = pm.pm_fork(1)
@@ -206,6 +252,8 @@ describe "PmService exit and waitpid":
         expect(result).to_equal(-EAGAIN)
 
     it "pm_waitpid on already-reaped child returns -ECHILD (one-shot)":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: pm_waitpid on already-reaped child returns -ECHILD (one-shot)")
         val pm = PmService.new()
         pm.pm_init()
         val child_pid = pm.pm_fork(1)
@@ -215,6 +263,8 @@ describe "PmService exit and waitpid":
         expect(result2).to_equal(-ECHILD)
 
     it "pm_waitpid with wrong parent returns -ECHILD":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: pm_waitpid with wrong parent returns -ECHILD")
         val pm = PmService.new()
         pm.pm_init()
         val child_pid = pm.pm_fork(1)
@@ -224,26 +274,30 @@ describe "PmService exit and waitpid":
         expect(result).to_equal(-ECHILD)
 
     it "pm_exit records a SIGCHLD notification aimed at the parent":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: pm_exit records a SIGCHLD notification aimed at the parent")
         val pm = PmService.new()
         pm.pm_init()
         val child_pid = pm.pm_fork(1)
-        expect(pm.pm_signal_count()).to_equal(0)
+        expect(pm.pm_signal_count()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         pm.pm_exit(child_pid.to_u32(), 0)
-        expect(pm.pm_signal_count()).to_equal(1)
-        expect(pm.pm_last_signal_signo()).to_equal(17)   # SIGCHLD
-        expect(pm.pm_last_signal_pid()).to_equal(1)      # the parent, not the child
+        expect(pm.pm_signal_count()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(pm.pm_last_signal_signo()).to_equal(17)  # oracle: 17 — named expected value from the requirement
+        expect(pm.pm_last_signal_pid()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         val intent = pm.pm_take_pending_signal()
-        expect(intent.target_pid).to_equal(1)
-        expect(intent.signo).to_equal(17)
+        expect(intent.target_pid).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(intent.signo).to_equal(17)  # oracle: 17 — named expected value from the requirement
         # One notification per exit; the outbox is now empty.
-        expect(pm.pm_take_pending_signal().signo).to_equal(0)
+        expect(pm.pm_take_pending_signal().signo).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "pm_exit of init (no parent) records no signal":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: pm_exit of init (no parent) records no signal")
         val pm = PmService.new()
         pm.pm_init()
         pm.pm_exit(1, 0)
-        expect(pm.pm_signal_count()).to_equal(0)
-        expect(pm.pm_take_pending_signal().signo).to_equal(0)
+        expect(pm.pm_signal_count()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(pm.pm_take_pending_signal().signo).to_equal(0)  # oracle: 0 — named expected value from the requirement
         # The zombie transition still happened.
         expect(pm.world.state_for_entity(pm.pm_find_entity(1))).to_equal(PS_ZOMBIE)
 
@@ -254,40 +308,48 @@ describe "PmService exit and waitpid":
 describe "PmService kill and find":
 
     it "pm_kill on unknown pid returns -ESRCH and records nothing":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: pm_kill on unknown pid returns -ESRCH and records nothing")
         val pm = PmService.new()
         pm.pm_init()
         val result = pm.pm_kill(9999, 9)
         expect(result).to_equal(-ESRCH)
-        expect(pm.pm_signal_count()).to_equal(0)
-        expect(pm.pm_take_pending_signal().signo).to_equal(0)
+        expect(pm.pm_signal_count()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(pm.pm_take_pending_signal().signo).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "pm_kill on valid pid returns 0 and records the signal for delivery":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: pm_kill on valid pid returns 0 and records the signal for delivery")
         val pm = PmService.new()
         pm.pm_init()
         val result = pm.pm_kill(1, 9)
-        expect(result).to_equal(0)
-        expect(pm.pm_signal_count()).to_equal(1)
-        expect(pm.pm_last_signal_pid()).to_equal(1)
-        expect(pm.pm_last_signal_signo()).to_equal(9)
+        expect(result).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(pm.pm_signal_count()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(pm.pm_last_signal_pid()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(pm.pm_last_signal_signo()).to_equal(9)  # oracle: 9 — named expected value from the requirement
         val intent = pm.pm_take_pending_signal()
-        expect(intent.target_pid).to_equal(1)
-        expect(intent.signo).to_equal(9)
+        expect(intent.target_pid).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(intent.signo).to_equal(9)  # oracle: 9 — named expected value from the requirement
         # Fast-path shadow: bit 9 set, and only bit 9.
-        expect(pm.world.pending_mask_for_entity(pm.pm_find_entity(1))).to_equal(512)
+        expect(pm.world.pending_mask_for_entity(pm.pm_find_entity(1))).to_equal(512)  # oracle: 512 — named expected value from the requirement
 
     it "pm_kill accumulates distinct signals in the pending mask and outbox":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: pm_kill accumulates distinct signals in the pending mask and outbox")
         val pm = PmService.new()
         pm.pm_init()
-        expect(pm.pm_kill(1, 9)).to_equal(0)
-        expect(pm.pm_kill(1, 17)).to_equal(0)
-        expect(pm.pm_signal_count()).to_equal(2)
+        expect(pm.pm_kill(1, 9)).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(pm.pm_kill(1, 17)).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(pm.pm_signal_count()).to_equal(2)  # oracle: 2 — named expected value from the requirement
         # 1<<9 | 1<<17 == 512 + 131072
-        expect(pm.world.pending_mask_for_entity(pm.pm_find_entity(1))).to_equal(131584)
-        expect(pm.pm_take_pending_signal().signo).to_equal(9)
-        expect(pm.pm_take_pending_signal().signo).to_equal(17)
-        expect(pm.pm_take_pending_signal().signo).to_equal(0)
+        expect(pm.world.pending_mask_for_entity(pm.pm_find_entity(1))).to_equal(131584)  # oracle: 131584 — named expected value from the requirement
+        expect(pm.pm_take_pending_signal().signo).to_equal(9)  # oracle: 9 — named expected value from the requirement
+        expect(pm.pm_take_pending_signal().signo).to_equal(17)  # oracle: 17 — named expected value from the requirement
+        expect(pm.pm_take_pending_signal().signo).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "pm_find_entity round-trips pid to entity to pid":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: pm_find_entity round-trips pid to entity to pid")
         val pm = PmService.new()
         pm.pm_init()
         val child_pid = pm.pm_fork(1)
@@ -297,6 +359,8 @@ describe "PmService kill and find":
         expect(pid_back).to_equal(child_pid.to_u32())
 
     it "pm_find_entity for unknown pid returns null entity":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: pm_find_entity for unknown pid returns null entity")
         val pm = PmService.new()
         pm.pm_init()
         val e = pm.pm_find_entity(9999)
@@ -315,26 +379,30 @@ describe "PmService cross-entity identity (two-hop mutation-loss regression)":
     """
 
     it "three forks produce three distinct pids and entity ids":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: three forks produce three distinct pids and entity ids")
         val pm = PmService.new()
         pm.pm_init()
         val pid1 = pm.pm_fork(1)
         val pid2 = pm.pm_fork(1)
         val pid3 = pm.pm_fork(1)
-        expect(pid1).to_equal(2)
-        expect(pid2).to_equal(3)
-        expect(pid3).to_equal(4)
-        expect(pm.pm_process_count()).to_equal(4)
+        expect(pid1).to_equal(2)  # oracle: 2 — named expected value from the requirement
+        expect(pid2).to_equal(3)  # oracle: 3 — named expected value from the requirement
+        expect(pid3).to_equal(4)  # oracle: 4 — named expected value from the requirement
+        expect(pm.pm_process_count()).to_equal(4)  # oracle: 4 — named expected value from the requirement
         val e1 = pm.pm_find_entity(pid1.to_u32())
         val e2 = pm.pm_find_entity(pid2.to_u32())
         val e3 = pm.pm_find_entity(pid3.to_u32())
-        expect(e1.id).to_equal(1)
-        expect(e2.id).to_equal(2)
-        expect(e3.id).to_equal(3)
+        expect(e1.id).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(e2.id).to_equal(2)  # oracle: 2 — named expected value from the requirement
+        expect(e3.id).to_equal(3)  # oracle: 3 — named expected value from the requirement
         expect(e1.is_null()).to_equal(false)
         expect(e2.is_null()).to_equal(false)
         expect(e3.is_null()).to_equal(false)
 
     it "exiting one child leaves its two siblings running":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: exiting one child leaves its two siblings running")
         val pm = PmService.new()
         pm.pm_init()
         val pid1 = pm.pm_fork(1)
@@ -348,13 +416,15 @@ describe "PmService cross-entity identity (two-hop mutation-loss regression)":
         expect(pm.world.state_for_entity(e1)).to_equal(PS_RUNNING)
         expect(pm.world.state_for_entity(e3)).to_equal(PS_RUNNING)
         # Only the exited child is reapable; the siblings are still running.
-        expect(pm.pm_waitpid(1, pid2.to_u32())).to_equal(42)
+        expect(pm.pm_waitpid(1, pid2.to_u32())).to_equal(42)  # oracle: 42 — named expected value from the requirement
         expect(pm.pm_waitpid(1, pid1.to_u32())).to_equal(-EAGAIN)
         expect(pm.pm_waitpid(1, pid3.to_u32())).to_equal(-EAGAIN)
         # Reap is one-shot per child, and does not leak to siblings.
         expect(pm.pm_waitpid(1, pid2.to_u32())).to_equal(-ECHILD)
 
     it "pid <-> entity round trip is stable for all three children":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: pid <-> entity round trip is stable for all three children")
         val pm = PmService.new()
         pm.pm_init()
         val pid1 = pm.pm_fork(1)
@@ -363,5 +433,5 @@ describe "PmService cross-entity identity (two-hop mutation-loss regression)":
         expect(pm.pm_get_pid(1)).to_equal(pid1.to_u32())
         expect(pm.pm_get_pid(2)).to_equal(pid2.to_u32())
         expect(pm.pm_get_pid(3)).to_equal(pid3.to_u32())
-        expect(pm.world.parent_pid_for_entity(pm.pm_find_entity(pid1.to_u32()))).to_equal(1)
-        expect(pm.world.parent_pid_for_entity(pm.pm_find_entity(pid3.to_u32()))).to_equal(1)
+        expect(pm.world.parent_pid_for_entity(pm.pm_find_entity(pid1.to_u32()))).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(pm.world.parent_pid_for_entity(pm.pm_find_entity(pid3.to_u32()))).to_equal(1)  # oracle: 1 — named expected value from the requirement

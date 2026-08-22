@@ -1,3 +1,10 @@
+"""
+## Purpose and audience
+Purpose: Prove that SSHD live KEXINIT payload (RFC 4253 §7.1).
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-OS-APPS-001 — stable requirement identity for this spec.
+
 # @cover src/os/apps/sshd/ssh_kex.spl
 # RFC 4253 §6 binary-packet layout lock for the live sshd KEXINIT path.
 #
@@ -78,31 +85,38 @@ fn _walk_kexinit_structure(payload: [u8]) -> u64:
 
 val KEX_LIST: text = "curve25519-sha256,ext-info-s,kex-strict-s-v00@openssh.com"
 
+use std.spec.step
+
 describe "SSHD live KEXINIT payload (RFC 4253 §7.1)":
     it "emits SSH_MSG_KEXINIT 0x14 as payload byte 0 on the ed25519 live lane":
+        step("Verify: emits SSH_MSG_KEXINIT 0x14 as payload byte 0 on the ed25519 live lane")
+        # @req: REQ-OS-APPS-001
         val payload = ssh_build_kexinit_for_host_keys_and_certs(_ed25519_keys(), _no_certs())
         expect(_u8_at(payload, 0)).to_equal(0x14)
         # regression: live lane once emitted 0x54 ('T') here
         assert_not_equal(_u8_at(payload, 0), 0x54)
 
     it "keeps all ten name-lists intact behind the 16-byte cookie (ed25519 lane)":
+        step("Verify: keeps all ten name-lists intact behind the 16-byte cookie (ed25519 lane)")
         val payload = ssh_build_kexinit_for_host_keys_and_certs(_ed25519_keys(), _no_certs())
         # 62 bytes is the corrupt skeleton with every name-list content dropped
         expect(payload.len() > 62).to_equal(true)
         expect(_walk_kexinit_structure(payload)).to_equal(payload.len())
         # kex_algorithms starts right after cookie: length 57, first byte 'c'
-        expect(ssh_get_u32(payload, 17).to_u64()).to_equal(57)
+        expect(ssh_get_u32(payload, 17).to_u64()).to_equal(57)  # oracle: 57 — named expected value from the requirement
         expect(_u8_at(payload, 21)).to_equal(0x63)
 
     it "emits SSH_MSG_KEXINIT 0x14 with intact name-lists on the RSA live lane":
+        step("Verify: emits SSH_MSG_KEXINIT 0x14 with intact name-lists on the RSA live lane")
         val payload = ssh_build_kexinit_for_host_keys_and_certs(_rsa_only_keys(), _no_certs())
         expect(_u8_at(payload, 0)).to_equal(0x14)
         expect(_walk_kexinit_structure(payload)).to_equal(payload.len())
         # host key list = "rsa-sha2-256,rsa-sha2-512" (25 bytes), after kex list
-        expect(ssh_get_u32(payload, 17 + 4 + 57).to_u64()).to_equal(25)
+        expect(ssh_get_u32(payload, 17 + 4 + 57).to_u64()).to_equal(25)  # oracle: 25 — named expected value from the requirement
         expect(_u8_at(payload, 17 + 4 + 57 + 4)).to_equal(0x72)
 
     it "emits SSH_MSG_KEXINIT 0x14 with intact name-lists on the certificate path":
+        step("Verify: emits SSH_MSG_KEXINIT 0x14 with intact name-lists on the certificate path")
         val certs = HostCertificateSet(
             ssh_ed25519_cert: [0x01, 0x02, 0x03, 0x04],
             rsa_sha2_256_cert: nil,
@@ -114,6 +128,7 @@ describe "SSHD live KEXINIT payload (RFC 4253 §7.1)":
 
 describe "SSHD live KEXINIT binary packet (RFC 4253 §6)":
     it "frames the KEXINIT as uint32 length, padding byte, payload at offset 5":
+        step("Verify: frames the KEXINIT as uint32 length, padding byte, payload at offset 5")
         val payload = ssh_build_kexinit_for_host_keys_and_certs(_ed25519_keys(), _no_certs())
         val packet = ssh_packet_build(payload, 0)
         # uint32 packet_length covers everything after the length field
@@ -126,9 +141,10 @@ describe "SSHD live KEXINIT binary packet (RFC 4253 §6)":
         # packet_length = 1 (padding byte) + payload + padding
         expect(packet.len()).to_equal(4 + 1 + payload.len() + padding_len)
         # pre-KEX block size: total length multiple of 8
-        expect(packet.len() % 8).to_equal(0)
+        expect(packet.len() % 8).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "preserves every payload byte between the header and the padding":
+        step("Verify: preserves every payload byte between the header and the padding")
         val payload = ssh_build_kexinit_for_host_keys_and_certs(_ed25519_keys(), _no_certs())
         val packet = ssh_packet_build(payload, 0)
         var i: u64 = 0
@@ -137,17 +153,19 @@ describe "SSHD live KEXINIT binary packet (RFC 4253 §6)":
             if _u8_at(packet, 5 + i) != _u8_at(payload, i):
                 mismatches = mismatches + 1
             i = i + 1
-        expect(mismatches).to_equal(0)
+        expect(mismatches).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
 describe "SSH ASCII name-list text/byte conversion":
     it "converts the kex algorithm name-list losslessly":
+        step("Verify: converts the kex algorithm name-list losslessly")
         val bytes = ssh_ascii_text_to_bytes(KEX_LIST)
-        expect(bytes.len()).to_equal(57)
+        expect(bytes.len()).to_equal(57)  # oracle: 57 — named expected value from the requirement
         expect(_u8_at(bytes, 0)).to_equal(0x63)
         # '@' of kex-strict-s-v00@openssh.com
         expect(_u8_at(bytes, 45)).to_equal(0x40)
 
     it "round-trips every printable byte without shifting":
+        step("Verify: round-trips every printable byte without shifting")
         # the historical corruption shifted bytes by +0x20 per table pass
         # (0x14 -> 0x34 -> 0x54); identity here locks the table offsets
         var b: u64 = 32
@@ -160,7 +178,8 @@ describe "SSH ASCII name-list text/byte conversion":
             elif back[0].to_u64() != b:
                 shifted = shifted + 1
             b = b + 1
-        expect(shifted).to_equal(0)
+        expect(shifted).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "does not map the non-printable SSH_MSG_KEXINIT byte to any character":
+        step("Verify: does not map the non-printable SSH_MSG_KEXINIT byte to any character")
         expect(ssh_ascii_byte_to_text(0x14)).to_equal("")

@@ -1,3 +1,21 @@
+"""
+## Purpose and audience
+Purpose: Prove that SQLite lock ladder -> flock op mapping.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+# @manual: primary
+REQ-OS-PORT-001
+doc/01_research/local/REQ-OS-PORT-001.md
+doc/03_plan/sys_test/REQ-OS-PORT-001.md
+doc/04_architecture/REQ-OS-PORT-001.md
+doc/05_design/REQ-OS-PORT-001.md
+"""
+# @req: REQ-OS-PORT-001
+
 use std.spec.{describe, it, expect}
 use os.port.sqlite.sqlite_vfs_contract.{
     SqliteLockLevel,
@@ -13,90 +31,140 @@ use os.port.sqlite.sqlite_vfs_contract.{
     posix_mmap_shared_status
 }
 
+use std.spec.step
+
 describe "SQLite lock ladder -> flock op mapping":
     it "maps NONE to LOCK_UN":
+        # @req: REQ-OS-PORT-001
+        step("Verify: maps NONE to LOCK_UN")
         expect(flock_op_for(SqliteLockLevel.LockNone)).to_equal("LOCK_UN")
 
     it "maps SHARED to LOCK_SH":
+        # @req: REQ-OS-PORT-001
+        step("Verify: maps SHARED to LOCK_SH")
         expect(flock_op_for(SqliteLockLevel.LockShared)).to_equal("LOCK_SH")
 
     it "maps RESERVED onto LOCK_SH (whole-file flock approximation)":
+        # @req: REQ-OS-PORT-001
+        step("Verify: maps RESERVED onto LOCK_SH (whole-file flock approximation)")
         expect(flock_op_for(SqliteLockLevel.LockReserved)).to_equal("LOCK_SH")
 
     it "maps PENDING onto LOCK_EX (whole-file flock approximation)":
+        # @req: REQ-OS-PORT-001
+        step("Verify: maps PENDING onto LOCK_EX (whole-file flock approximation)")
         expect(flock_op_for(SqliteLockLevel.LockPending)).to_equal("LOCK_EX")
 
     it "maps EXCLUSIVE to LOCK_EX":
+        # @req: REQ-OS-PORT-001
+        step("Verify: maps EXCLUSIVE to LOCK_EX")
         expect(flock_op_for(SqliteLockLevel.LockExclusive)).to_equal("LOCK_EX")
 
     it "flags SHARED and EXCLUSIVE as exact whole-file equivalents":
+        # @req: REQ-OS-PORT-001
+        step("Verify: flags SHARED and EXCLUSIVE as exact whole-file equivalents")
         expect(flock_mapping_is_exact(SqliteLockLevel.LockShared)).to_equal(true)
         expect(flock_mapping_is_exact(SqliteLockLevel.LockExclusive)).to_equal(true)
 
     it "flags RESERVED and PENDING as inexact (byte-range intent not representable)":
+        # @req: REQ-OS-PORT-001
+        step("Verify: flags RESERVED and PENDING as inexact (byte-range intent not representable)")
         expect(flock_mapping_is_exact(SqliteLockLevel.LockReserved)).to_equal(false)
         expect(flock_mapping_is_exact(SqliteLockLevel.LockPending)).to_equal(false)
 
     it "names the lock levels for the audit table":
+        # @req: REQ-OS-PORT-001
+        step("Verify: names the lock levels for the audit table")
         expect(sqlite_lock_level_name(SqliteLockLevel.LockShared)).to_equal("SHARED")
         expect(sqlite_lock_level_name(SqliteLockLevel.LockExclusive)).to_equal("EXCLUSIVE")
 
 describe "shared-memory (shm) methods fail closed, gating WAL":
     it "reports xShmMap unsupported (not fake-supported)":
+        # @req: REQ-OS-PORT-001
+        step("Verify: reports xShmMap unsupported (not fake-supported)")
         expect(method_report("xShmMap").status).to_equal("unsupported")
 
     it "reports xShmLock / xShmBarrier / xShmUnmap unsupported":
+        # @req: REQ-OS-PORT-001
+        step("Verify: reports xShmLock / xShmBarrier / xShmUnmap unsupported")
         expect(method_report("xShmLock").status).to_equal("unsupported")
         expect(method_report("xShmBarrier").status).to_equal("unsupported")
         expect(method_report("xShmUnmap").status).to_equal("unsupported")
 
     it "shared mmap facility itself is unsupported":
+        # @req: REQ-OS-PORT-001
+        step("Verify: shared mmap facility itself is unsupported")
         expect(posix_mmap_shared_status()).to_equal("unsupported")
 
     it "gates WAL mode off because xShmMap is unsupported":
+        # @req: REQ-OS-PORT-001
+        step("Verify: gates WAL mode off because xShmMap is unsupported")
         # Honest-failure oracle: if xShmMap ever falsely reported supported,
         # this must fail. Restore proves the gate is wired to the real status.
         expect(wal_mode_supported()).to_equal(false)
 
     it "names the exact WAL prerequisite":
+        # @req: REQ-OS-PORT-001
+        step("Verify: names the exact WAL prerequisite")
         expect(wal_blocked_prerequisite()).to_contain("shared mmap")
 
 describe "rollback-journal mode is the supported path":
     it "reports rollback-journal (DELETE) mode supported":
+        # @req: REQ-OS-PORT-001
+        step("Verify: reports rollback-journal (DELETE) mode supported")
         expect(rollback_journal_mode_supported()).to_equal(true)
 
     it "keeps core file methods supported":
+        # @req: REQ-OS-PORT-001
+        step("Verify: keeps core file methods supported")
         expect(method_report("xOpen").status).to_equal("supported")
         expect(method_report("xRead").status).to_equal("supported")
         expect(method_report("xWrite").status).to_equal("supported")
         expect(method_report("xFileSize").status).to_equal("supported")
 
     it "reports xSync partial (durability proof pending), still functional":
+        # @req: REQ-OS-PORT-001
+        step("Verify: reports xSync partial (durability proof pending), still functional")
         expect(method_report("xSync").status).to_equal("partial")
 
     it "reports xLock partial (flock advisory, no blocking)":
+        # @req: REQ-OS-PORT-001
+        step("Verify: reports xLock partial (flock advisory, no blocking)")
         expect(method_report("xLock").status).to_equal("partial")
 
     it "reports xTruncate unsupported (no VFS truncate; DELETE mode unaffected)":
+        # @req: REQ-OS-PORT-001
+        step("Verify: reports xTruncate unsupported (no VFS truncate; DELETE mode unaffected)")
         expect(method_report("xTruncate").status).to_equal("unsupported")
 
 describe "published block durability characteristics (§8 contract)":
     it "publishes a 512-byte sector size":
+        # @req: REQ-OS-PORT-001
+        step("Verify: publishes a 512-byte sector size")
         expect(published_durability_flags().sector_size).to_equal(512u32)
 
     it "publishes a flush/fsync path":
+        # @req: REQ-OS-PORT-001
+        step("Verify: publishes a flush/fsync path")
         expect(published_durability_flags().has_flush).to_equal(true)
 
     it "does NOT claim atomic-write or powersafe-overwrite (unproven -> false)":
+        # @req: REQ-OS-PORT-001
+        step("Verify: does NOT claim atomic-write or powersafe-overwrite (unproven -> false)")
         expect(published_durability_flags().has_atomic_write).to_equal(false)
         expect(published_durability_flags().powersafe_overwrite).to_equal(false)
 
 describe "method status tally is honest":
     it "counts 6 supported methods":
+        # @req: REQ-OS-PORT-001
+        step("Verify: counts 6 supported methods")
         expect(count_with_status("supported")).to_equal(6)
 
     it "counts 6 partial methods":
+        # @req: REQ-OS-PORT-001
+        step("Verify: counts 6 partial methods")
         expect(count_with_status("partial")).to_equal(6)
 
     it "counts 5 unsupported methods":
+        # @req: REQ-OS-PORT-001
+        step("Verify: counts 5 unsupported methods")
         expect(count_with_status("unsupported")).to_equal(5)

@@ -1,4 +1,22 @@
 """
+## Purpose and audience
+Purpose: Prove that spawn_with_cspace: same image_hash, two disjoint pouches.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+# @manual: primary
+REQ-OS-SECURITY-001
+doc/01_research/local/REQ-OS-SECURITY-001.md
+doc/03_plan/sys_test/REQ-OS-SECURITY-001.md
+doc/04_architecture/REQ-OS-SECURITY-001.md
+doc/05_design/REQ-OS-SECURITY-001.md
+"""
+# @req: REQ-OS-SECURITY-001
+
+"""
 # spawn_with_cspace Specification (OCap Privilege — P1)
 
 **Feature IDs:** #OS-OCAP-P1
@@ -90,38 +108,54 @@ fn scheduling_spec() -> SpawnSpec:
 # Group 1 — Same binary, different privilege (the headline gate)
 # ============================================================================
 
+use std.spec.step
+
 describe "spawn_with_cspace: same image_hash, two disjoint pouches":
     """Two C-Spaces minted from ONE binary differ ONLY in their injected pouch."""
 
     it "both roles pin the SAME immutable image_hash":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: both roles pin the SAME immutable image_hash")
         expect(ticketing_spec().image_hash).to_equal(scheduling_spec().image_hash)
 
     it "ticketing C-Space ALLOWS its ticket cap":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: ticketing C-Space ALLOWS its ticket cap")
         val orch = make_orchestrator()
         val tk = spawn_with_cspace(orch, ticketing_spec(), 20u64, 1000u64, 300u64)
         expect(tk.caps.has(_tickets())).to_equal(true)
 
     it "ticketing C-Space DENIES FileWrite (no ambient FS authority)":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: ticketing C-Space DENIES FileWrite (no ambient FS authority)")
         val orch = make_orchestrator()
         val tk = spawn_with_cspace(orch, ticketing_spec(), 20u64, 1000u64, 300u64)
         expect(tk.caps.has(_fwrite())).to_equal(false)
 
     it "ticketing C-Space DENIES the calendar cap":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: ticketing C-Space DENIES the calendar cap")
         val orch = make_orchestrator()
         val tk = spawn_with_cspace(orch, ticketing_spec(), 20u64, 1000u64, 300u64)
         expect(tk.caps.has(_calendar_ro())).to_equal(false)
 
     it "scheduling C-Space ALLOWS the calendar cap":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: scheduling C-Space ALLOWS the calendar cap")
         val orch = make_orchestrator()
         val sc = spawn_with_cspace(orch, scheduling_spec(), 21u64, 2000u64, 400u64)
         expect(sc.caps.has(_calendar_ro())).to_equal(true)
 
     it "scheduling C-Space DENIES the ticket cap":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: scheduling C-Space DENIES the ticket cap")
         val orch = make_orchestrator()
         val sc = spawn_with_cspace(orch, scheduling_spec(), 21u64, 2000u64, 400u64)
         expect(sc.caps.has(_tickets())).to_equal(false)
 
     it "both minted C-Spaces are pledged (never ambient full)":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: both minted C-Spaces are pledged (never ambient full)")
         val orch = make_orchestrator()
         val tk = spawn_with_cspace(orch, ticketing_spec(), 20u64, 1000u64, 300u64)
         val sc = spawn_with_cspace(orch, scheduling_spec(), 21u64, 2000u64, 400u64)
@@ -136,13 +170,17 @@ describe "spawn_with_cspace: empty recipe = deny-all, not full()":
     """A spawn without explicit grants gets an EMPTY C-Space (no ambient authority)."""
 
     it "empty recipe yields a pledged, zero-token set":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: empty recipe yields a pledged, zero-token set")
         val orch = make_orchestrator()
         val empty_spec = SpawnSpec(image_hash: IMAGE_HASH, grants: [], isolation: "sandbox", budget: 0u64)
         val em = spawn_with_cspace(orch, empty_spec, 22u64, 3000u64, 500u64)
-        expect(em.caps.caps.len()).to_equal(0)
+        expect(em.caps.caps.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(em.caps.is_pledged).to_equal(true)
 
     it "empty C-Space denies every capability check":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: empty C-Space denies every capability check")
         val orch = make_orchestrator()
         val empty_spec = SpawnSpec(image_hash: IMAGE_HASH, grants: [], isolation: "sandbox", budget: 0u64)
         val em = spawn_with_cspace(orch, empty_spec, 22u64, 3000u64, 500u64)
@@ -150,6 +188,8 @@ describe "spawn_with_cspace: empty recipe = deny-all, not full()":
         expect(em.caps.has(CapabilityKind.ProcessSpawn)).to_equal(false)
 
     it "spawn_full() remains the explicit ambient (unpledged) boot marker":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: spawn_full() remains the explicit ambient (unpledged) boot marker")
         val full_caps = spawn_full()
         expect(full_caps.is_pledged).to_equal(false)
 
@@ -161,15 +201,19 @@ describe "spawn_with_cspace: monotonic attenuation":
     """A child cannot gain a cap the parent lacks, nor widen the parent's rights."""
 
     it "child cannot gain a cap the parent does not hold":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: child cannot gain a cap the parent does not hold")
         val calendar = _tok(_calendar_rw(), 2u64, 101u64, 2)
         val fwrite = _tok(_fwrite(), 3u64, 102u64, 2)
         val no_ticket_parent = CapabilitySet(caps: [calendar, fwrite], is_pledged: true)
         val m = spawn_with_cspace(no_ticket_parent, ticketing_spec(), 30u64, 5000u64, 600u64)
-        expect(m.rejected).to_equal(1)
-        expect(m.caps.caps.len()).to_equal(0)
+        expect(m.rejected).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(m.caps.caps.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(m.caps.has(_tickets())).to_equal(false)
 
     it "child cannot widen rights the parent holds (read-only parent, rw request)":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: child cannot widen rights the parent holds (read-only parent, rw request)")
         val ro_cal = _tok(_calendar_ro(), 2u64, 200u64, 2)
         val ro_parent = CapabilitySet(caps: [ro_cal], is_pledged: true)
         val widen_spec = SpawnSpec(
@@ -179,11 +223,13 @@ describe "spawn_with_cspace: monotonic attenuation":
             budget: 0u64
         )
         val mm = spawn_with_cspace(ro_parent, widen_spec, 31u64, 6000u64, 700u64)
-        expect(mm.rejected).to_equal(1)
-        expect(mm.caps.caps.len()).to_equal(0)
+        expect(mm.rejected).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(mm.caps.caps.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(mm.caps.has(_calendar_rw())).to_equal(false)
 
     it "attenuation narrows rw -> r (write dropped) when parent holds rw":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: attenuation narrows rw -> r (write dropped) when parent holds rw")
         val orch = make_orchestrator()
         val narrow_spec = SpawnSpec(
             image_hash: IMAGE_HASH,
@@ -192,14 +238,16 @@ describe "spawn_with_cspace: monotonic attenuation":
             budget: 0u64
         )
         val mn = spawn_with_cspace(orch, narrow_spec, 32u64, 7000u64, 800u64)
-        expect(mn.rejected).to_equal(0)
+        expect(mn.rejected).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(mn.caps.has(_calendar_ro())).to_equal(true)
         expect(mn.caps.has(_calendar_rw())).to_equal(false)
 
     it "delegated child token consumes a delegation-depth budget (parent 2 -> child 1)":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: delegated child token consumes a delegation-depth budget (parent 2 -> child 1)")
         val orch = make_orchestrator()
         val sc = spawn_with_cspace(orch, scheduling_spec(), 21u64, 2000u64, 400u64)
-        expect(sc.caps.caps[0].depth).to_equal(1)
+        expect(sc.caps.caps[0].depth).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
 # ============================================================================
 # Group 4 — fork = inherit-attenuated, never full
@@ -209,17 +257,21 @@ describe "fork_cspace: inherit-attenuated, never full":
     """Fork re-delegates the parent pouch at depth - 1; it never yields ambient authority."""
 
     it "fork of a role pouch keeps the authority but decrements depth":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: fork of a role pouch keeps the authority but decrements depth")
         val orch = make_orchestrator()
         val tk = spawn_with_cspace(orch, ticketing_spec(), 20u64, 1000u64, 300u64)
         val fk = fork_cspace(tk.caps, 40u64, 9000u64, 900u64)
         expect(fk.caps.is_pledged).to_equal(true)
         expect(fk.caps.has(_tickets())).to_equal(true)
-        expect(fk.caps.caps[0].depth).to_equal(0)
+        expect(fk.caps.caps[0].depth).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "fork of ambient full() does NOT propagate ambient authority":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: fork of ambient full() does NOT propagate ambient authority")
         val fk_full = fork_cspace(spawn_full(), 41u64, 9500u64, 950u64)
         expect(fk_full.caps.is_pledged).to_equal(true)
-        expect(fk_full.caps.caps.len()).to_equal(0)
+        expect(fk_full.caps.caps.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(fk_full.caps.has(CapabilityKind.ProcessSpawn)).to_equal(false)
 
 # ============================================================================
@@ -230,6 +282,8 @@ describe "spawn_with_cspace: revocation liveness":
     """A revoke on the parent source cascades to the minted child C-Space."""
 
     it "revoke_transitive(parent source) removes the child's calendar cap":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: revoke_transitive(parent source) removes the child's calendar cap")
         var mgr = CapabilityManager.new()
         val parent_task = TaskId(id: 1)
         val child_task = TaskId(id: 21)

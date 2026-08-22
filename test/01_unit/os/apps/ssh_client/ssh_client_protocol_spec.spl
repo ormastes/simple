@@ -1,4 +1,11 @@
 """
+## Purpose and audience
+Purpose: Prove that SSH client version exchange.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-OS-APPS-001 — stable requirement identity for this spec.
+
+"""
 # Pure-Simple SSH Client — Transport, Auth and Channel Encoding
 
 **Feature IDs:** N/A
@@ -137,51 +144,61 @@ fn err_text(msg: text) -> text:
 
 # ============================================================================
 
+use std.spec.step
+
 describe "SSH client version exchange":
 
     it "emits an SSH-2.0 client banner terminated by CR LF":
+        step("Verify: emits an SSH-2.0 client banner terminated by CR LF")
+        # @req: REQ-OS-APPS-001
         val wire = ssh_client_version_wire()
-        expect(wire.len()).to_equal(23)
+        expect(wire.len()).to_equal(23)  # oracle: 23 — named expected value from the requirement
         expect(wire[0]).to_equal(0x53)
         expect(wire[4]).to_equal(0x32)
         expect(wire[wire.len() - 2]).to_equal(0x0D)
         expect(wire[wire.len() - 1]).to_equal(0x0A)
         # V_C for the exchange hash excludes the terminator.
-        expect(ssh_client_version_bytes().len()).to_equal(21)
+        expect(ssh_client_version_bytes().len()).to_equal(21)  # oracle: 21 — named expected value from the requirement
 
     it "accepts a well-formed server banner and reports it without CR LF":
+        step("Verify: accepts a well-formed server banner and reports it without CR LF")
         val parsed = ssh_client_parse_server_banner(line("SSH-2.0-OpenSSH_9.6"))
         expect(parsed.is_ok()).to_equal(true)
         val banner = parsed.unwrap()
         expect(banner.version).to_equal("SSH-2.0-OpenSSH_9.6")
-        expect(banner.raw.len()).to_equal(19)
-        expect(banner.consumed).to_equal(21)
-        expect(banner.preamble_lines).to_equal(0)
+        expect(banner.raw.len()).to_equal(19)  # oracle: 19 — named expected value from the requirement
+        expect(banner.consumed).to_equal(21)  # oracle: 21 — named expected value from the requirement
+        expect(banner.preamble_lines).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "skips informational preamble lines before the identification string":
+        step("Verify: skips informational preamble lines before the identification string")
         val data = cat(cat(line("*** legal notice ***"), line("second line")), line("SSH-2.0-OpenSSH_9.6"))
         val parsed = ssh_client_parse_server_banner(data)
         expect(parsed.is_ok()).to_equal(true)
         val banner = parsed.unwrap()
         expect(banner.version).to_equal("SSH-2.0-OpenSSH_9.6")
-        expect(banner.preamble_lines).to_equal(2)
+        expect(banner.preamble_lines).to_equal(2)  # oracle: 2 — named expected value from the requirement
 
     it "rejects a banner with no CR LF terminator":
+        step("Verify: rejects a banner with no CR LF terminator")
         val parsed = ssh_client_parse_server_banner(bstr("SSH-2.0-OpenSSH_9.6"))
         expect(parsed.is_ok()).to_equal(false)
         expect(parsed.unwrap_err()).to_contain("no CRLF terminator")
 
     it "rejects a protocol version that is not SSH-2.0":
+        step("Verify: rejects a protocol version that is not SSH-2.0")
         val parsed = ssh_client_parse_server_banner(line("SSH-1.5-ancient"))
         expect(parsed.is_ok()).to_equal(false)
         expect(parsed.unwrap_err()).to_contain("unsupported SSH version")
 
     it "rejects an identification string with an empty softwareversion":
+        step("Verify: rejects an identification string with an empty softwareversion")
         val parsed = ssh_client_parse_server_banner(line("SSH-2.0-"))
         expect(parsed.is_ok()).to_equal(false)
         expect(parsed.unwrap_err()).to_contain("empty softwareversion")
 
     it "rejects a banner longer than the RFC 4253 255-byte limit":
+        step("Verify: rejects a banner longer than the RFC 4253 255-byte limit")
         var long_name: text = "SSH-2.0-"
         var i: u64 = 0
         while i < 250:
@@ -192,6 +209,7 @@ describe "SSH client version exchange":
         expect(parsed.unwrap_err()).to_contain("exceeds 255 bytes")
 
     it "rejects a banner carrying an embedded control byte":
+        step("Verify: rejects a banner carrying an embedded control byte")
         var raw = bstr("SSH-2.0-Open")
         raw.push(0x00)
         raw.push(0x53)
@@ -204,6 +222,7 @@ describe "SSH client version exchange":
 describe "SSH client KEXINIT negotiation":
 
     it "negotiates curve25519-sha256 / ssh-ed25519 / aes256-gcm against the real sshd proposal":
+        step("Verify: negotiates curve25519-sha256 / ssh-ed25519 / aes256-gcm against the real sshd proposal")
         val client_payload = ssh_client_build_kexinit(fixed_cookie())
         val server_payload = ssh_build_kexinit()
         val negotiated = ssh_client_negotiate_from_payloads(client_payload, server_payload)
@@ -218,8 +237,9 @@ describe "SSH client KEXINIT negotiation":
         expect(algorithms.compress_c2s).to_equal("none")
 
     it "puts the caller-supplied cookie in the first 16 bytes after the message type":
+        step("Verify: puts the caller-supplied cookie in the first 16 bytes after the message type")
         val payload = ssh_client_build_kexinit(fixed_cookie())
-        expect(payload[0]).to_equal(20)
+        expect(payload[0]).to_equal(20)  # oracle: 20 — named expected value from the requirement
         expect(payload[1]).to_equal(0x5A)
         expect(payload[16]).to_equal(0x5A)
         val decoded = ssh_parse_kexinit(payload)
@@ -227,6 +247,7 @@ describe "SSH client KEXINIT negotiation":
         expect(decoded.unwrap().first_kex_packet_follows).to_equal(false)
 
     it "advertises ext-info-c and kex-strict-c so strict KEX is agreed with sshd":
+        step("Verify: advertises ext-info-c and kex-strict-c so strict KEX is agreed with sshd")
         val client_payload = ssh_client_build_kexinit(fixed_cookie())
         val decoded = ssh_parse_kexinit(client_payload)
         expect(decoded.is_ok()).to_equal(true)
@@ -237,6 +258,7 @@ describe "SSH client KEXINIT negotiation":
         expect(strict.unwrap()).to_equal(true)
 
     it "fails closed when the server offers no common key exchange algorithm":
+        step("Verify: fails closed when the server offers no common key exchange algorithm")
         val client_payload = ssh_client_build_kexinit(fixed_cookie())
         val server_payload = kexinit_with_kex("diffie-hellman-group1-sha1")
         val negotiated = ssh_client_negotiate_from_payloads(client_payload, server_payload)
@@ -244,6 +266,7 @@ describe "SSH client KEXINIT negotiation":
         expect(negotiated.unwrap_err()).to_contain("no matching kex algorithm")
 
     it "fails closed on a truncated server KEXINIT":
+        step("Verify: fails closed on a truncated server KEXINIT")
         val client_payload = ssh_client_build_kexinit(fixed_cookie())
         val full = kexinit_with_kex("curve25519-sha256")
         var truncated: [u8] = []
@@ -257,9 +280,10 @@ describe "SSH client KEXINIT negotiation":
 describe "SSH binary packet round-trip":
 
     it "round-trips a client payload through build and read with correct padding":
+        step("Verify: round-trips a client payload through build and read with correct padding")
         val payload = ssh_client_build_kexinit(fixed_cookie())
         val framed = ssh_packet_build(payload, 0)
-        expect(framed.len() % 8).to_equal(0)
+        expect(framed.len() % 8).to_equal(0)  # oracle: 0 — named expected value from the requirement
         # padding_length byte must be at least the RFC minimum of 4
         expect(framed[4] >= 4).to_equal(true)
         val decoded = ssh_packet_read(framed, 0)
@@ -270,6 +294,7 @@ describe "SSH binary packet round-trip":
         expect(result.packet.payload).to_equal(payload)
 
     it "fails closed on a truncated packet":
+        step("Verify: fails closed on a truncated packet")
         val payload = ssh_client_build_kexinit(fixed_cookie())
         val framed = ssh_packet_build(payload, 0)
         var truncated: [u8] = []
@@ -284,12 +309,14 @@ describe "SSH binary packet round-trip":
 describe "SSH client user authentication encoding":
 
     it "encodes a service request for ssh-userauth":
+        step("Verify: encodes a service request for ssh-userauth")
         val payload = ssh_client_build_service_request(SSH_SERVICE_USERAUTH)
-        expect(payload[0]).to_equal(5)
-        expect(payload.len()).to_equal(17)
-        expect(payload[4]).to_equal(12)
+        expect(payload[0]).to_equal(5)  # oracle: 5 — named expected value from the requirement
+        expect(payload.len()).to_equal(17)  # oracle: 17 — named expected value from the requirement
+        expect(payload[4]).to_equal(12)  # oracle: 12 — named expected value from the requirement
 
     it "accepts SERVICE_ACCEPT only for the service that was requested":
+        step("Verify: accepts SERVICE_ACCEPT only for the service that was requested")
         var accept: [u8] = []
         accept.push(6)
         accept = ssh_put_text(accept, "ssh-userauth")
@@ -302,15 +329,17 @@ describe "SSH client user authentication encoding":
         expect(bad.unwrap_err()).to_contain("expected ssh-userauth")
 
     it "encodes a password userauth request in RFC 4252 field order":
+        step("Verify: encodes a password userauth request in RFC 4252 field order")
         val payload = ssh_client_build_userauth_password("root", SSH_SERVICE_CONNECTION, "hunter2")
-        expect(payload[0]).to_equal(50)
-        expect(payload[4]).to_equal(4)
+        expect(payload[0]).to_equal(50)  # oracle: 50 — named expected value from the requirement
+        expect(payload[4]).to_equal(4)  # oracle: 4 — named expected value from the requirement
         expect(ssh_ascii_bytes_to_text(payload)).to_contain("root")
         expect(ssh_ascii_bytes_to_text(payload)).to_contain("ssh-connection")
         expect(ssh_ascii_bytes_to_text(payload)).to_contain("password")
         expect(ssh_ascii_bytes_to_text(payload)).to_contain("hunter2")
 
     it "binds the session id into the publickey signature input":
+        step("Verify: binds the session id into the publickey signature input")
         val blob = bstr("KEYBLOB")
         val signed_a = ssh_client_publickey_signed_data(seed32(1), "root", SSH_SERVICE_CONNECTION, "ssh-ed25519", blob)
         val signed_b = ssh_client_publickey_signed_data(seed32(9), "root", SSH_SERVICE_CONNECTION, "ssh-ed25519", blob)
@@ -318,16 +347,18 @@ describe "SSH client user authentication encoding":
         expect(signed_a.len()).to_equal(signed_b.len())
         expect(signed_a == signed_b).to_equal(false)
         # The signed blob starts with string(session_id) and the TRUE flag is set.
-        expect(signed_a[3]).to_equal(32)
-        expect(signed_a[36]).to_equal(50)
+        expect(signed_a[3]).to_equal(32)  # oracle: 32 — named expected value from the requirement
+        expect(signed_a[36]).to_equal(50)  # oracle: 50 — named expected value from the requirement
 
     it "refuses to wrap a signature that is not 64 bytes":
+        step("Verify: refuses to wrap a signature that is not 64 bytes")
         val bad = ssh_client_build_ed25519_signature_blob(repeat_byte(1, 63))
         expect(bad.is_ok()).to_equal(false)
         expect(bad.unwrap_err()).to_contain("64 bytes")
         expect(ssh_client_build_ed25519_signature_blob(repeat_byte(1, 64)).is_ok()).to_equal(true)
 
     it "decodes SUCCESS, FAILURE and BANNER replies and rejects anything else":
+        step("Verify: decodes SUCCESS, FAILURE and BANNER replies and rejects anything else")
         var success: [u8] = []
         success.push(52)
         val ok = ssh_client_parse_userauth_reply(success)
@@ -360,22 +391,25 @@ describe "SSH client user authentication encoding":
 describe "SSH client session channel and exec":
 
     it "encodes a session channel open with our window and packet limits":
+        step("Verify: encodes a session channel open with our window and packet limits")
         val payload = ssh_client_build_channel_open_session(0)
-        expect(payload[0]).to_equal(90)
+        expect(payload[0]).to_equal(90)  # oracle: 90 — named expected value from the requirement
         expect(ssh_ascii_bytes_to_text(payload)).to_contain("session")
-        expect(payload.len()).to_equal(24)
+        expect(payload.len()).to_equal(24)  # oracle: 24 — named expected value from the requirement
 
     it "encodes an exec request and refuses an empty command":
+        step("Verify: encodes an exec request and refuses an empty command")
         val request = ssh_client_build_exec_request(3, "uname -a", true)
         expect(request.is_ok()).to_equal(true)
         val payload = request.unwrap()
-        expect(payload[0]).to_equal(98)
-        expect(payload[4]).to_equal(3)
+        expect(payload[0]).to_equal(98)  # oracle: 98 — named expected value from the requirement
+        expect(payload[4]).to_equal(3)  # oracle: 3 — named expected value from the requirement
         expect(ssh_ascii_bytes_to_text(payload)).to_contain("exec")
         expect(ssh_ascii_bytes_to_text(payload)).to_contain("uname -a")
         expect(ssh_client_build_exec_request(3, "", true).is_ok()).to_equal(false)
 
     it "decodes channel open confirmation, data, stderr and exit-status":
+        step("Verify: decodes channel open confirmation, data, stderr and exit-status")
         var confirm: [u8] = []
         confirm.push(91)
         confirm = ssh_put_u32(confirm, 0)
@@ -385,7 +419,7 @@ describe "SSH client session channel and exec":
         val open_ok = ssh_client_parse_channel_message(confirm)
         expect(open_ok.is_ok()).to_equal(true)
         expect(open_ok.unwrap().kind).to_equal(SSH_CHAN_OPEN_OK)
-        expect(open_ok.unwrap().sender).to_equal(7)
+        expect(open_ok.unwrap().sender).to_equal(7)  # oracle: 7 — named expected value from the requirement
 
         var data_msg: [u8] = []
         data_msg.push(94)
@@ -415,9 +449,10 @@ describe "SSH client session channel and exec":
         val status = ssh_client_parse_channel_message(exit_msg)
         expect(status.is_ok()).to_equal(true)
         expect(status.unwrap().kind).to_equal(SSH_CHAN_EXIT_STATUS)
-        expect(status.unwrap().exit_status).to_equal(42)
+        expect(status.unwrap().exit_status).to_equal(42)  # oracle: 42 — named expected value from the requirement
 
     it "fails closed on a truncated channel data message":
+        step("Verify: fails closed on a truncated channel data message")
         var short_msg: [u8] = []
         short_msg.push(94)
         short_msg = ssh_put_u32(short_msg, 0)

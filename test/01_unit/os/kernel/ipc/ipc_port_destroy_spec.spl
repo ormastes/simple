@@ -1,3 +1,21 @@
+"""
+## Purpose and audience
+Purpose: Prove that IpcDestroyPort lifecycle.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+# @manual: primary
+REQ-OS-KERNEL-001
+doc/01_research/local/REQ-OS-KERNEL-001.md
+doc/03_plan/sys_test/REQ-OS-KERNEL-001.md
+doc/04_architecture/REQ-OS-KERNEL-001.md
+doc/05_design/REQ-OS-KERNEL-001.md
+"""
+# @req: REQ-OS-KERNEL-001
+
 use std.spec.{describe, it, expect}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.ipc.syscall.{syscall_handler_ipc_state}
@@ -8,8 +26,12 @@ use os.kernel.types.syscall_types.{SyscallArgs}
 use os.kernel.types.task_types.{TaskId}
 use os.kernel.types.capability_types.{CapabilitySet}
 
+use std.spec.step
+
 describe "IpcDestroyPort lifecycle":
     it "releases a queued message and allows a fresh port allocation":
+        # @req: REQ-OS-KERNEL-001
+        step("Verify: releases a queued message and allows a fresh port allocation")
         var ipc = IpcManager.new()
         val owner = TaskId(id: 7)
         val sender = TaskId(id: 8)
@@ -17,14 +39,14 @@ describe "IpcDestroyPort lifecycle":
         val source = ipc.create_port(sender, "client-port")
         val message = IpcMessage(src_port: source.id, dst_port: destination.id, method: 4u32, flags: 0u32, payload_len: 0u32, cap_count: 0u32)
 
-        expect(ipc.send(message)).to_equal(0)
-        expect(ipc.queued_message_count(destination.id)).to_equal(1)
+        expect(ipc.send(message)).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(ipc.queued_message_count(destination.id)).to_equal(1)  # oracle: 1 — named expected value from the requirement
         val received = ipc.recv(destination, 0)
         expect(received != nil).to_equal(true)
-        expect(ipc.send(message)).to_equal(0)
+        expect(ipc.send(message)).to_equal(0)  # oracle: 0 — named expected value from the requirement
         ipc.add_waiter(destination, TaskId(id: 99))
         expect(ipc.destroy_port_owned(owner, destination.id)).to_equal(true)
-        expect(ipc.queued_message_count(destination.id)).to_equal(0)
+        expect(ipc.queued_message_count(destination.id)).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(ipc.get_first_waiter(destination.id)).to_equal(nil)
         expect(ipc.connect("reply-port")).to_equal(nil)
 
@@ -33,6 +55,8 @@ describe "IpcDestroyPort lifecycle":
         expect(ipc.connect("reply-port") != nil).to_equal(true)
 
     it "rejects a wrong owner and an absent port without consuming either":
+        # @req: REQ-OS-KERNEL-001
+        step("Verify: rejects a wrong owner and an absent port without consuming either")
         var ipc = IpcManager.new()
         val owner = TaskId(id: 41)
         val other = TaskId(id: 42)
@@ -45,6 +69,8 @@ describe "IpcDestroyPort lifecycle":
         expect(ipc.destroy_port_owned(owner, port.id)).to_equal(false)
 
     it "lets a deny-all task close only its own anonymous reply port through the generic dispatcher":
+        # @req: REQ-OS-KERNEL-001
+        step("Verify: lets a deny-all task close only its own anonymous reply port through the generic dispatcher")
         val scheduler = Scheduler.new()
         var ipc = IpcManager.new()
         val current = scheduler.get_current()
@@ -57,7 +83,7 @@ describe "IpcDestroyPort lifecycle":
             scheduler, ipc, KernelLog.new(8)
         )
 
-        expect(state.result.value).to_equal(0)
+        expect(state.result.value).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(state.ipc.port_owner_task_id(port.id)).to_equal(0u64)
 
         var after_destroy = state.ipc
@@ -66,10 +92,12 @@ describe "IpcDestroyPort lifecycle":
             SyscallArgs(id: 18u64, arg0: foreign_port.id, arg1: 0u64, arg2: 0u64, arg3: 0u64, arg4: 0u64, arg5: 0u64),
             state.scheduler, after_destroy, KernelLog.new(8)
         )
-        expect(foreign.result.value).to_equal(-1)
+        expect(foreign.result.value).to_equal(-1)  # oracle: -1 — named expected value from the requirement
         expect(foreign.ipc.port_owner_task_id(foreign_port.id)).to_equal(99u64)
 
     it "keeps IPC operations 20 through 23 capability-gated":
+        # @req: REQ-OS-KERNEL-001
+        step("Verify: keeps IPC operations 20 through 23 capability-gated")
         val scheduler = Scheduler.new()
         var ipc = IpcManager.new()
         ipc.cap_manager.init_task(scheduler.get_current(), CapabilitySet.empty())
@@ -78,19 +106,19 @@ describe "IpcDestroyPort lifecycle":
             SyscallArgs(id: 20u64, arg0: 0u64, arg1: 0u64, arg2: 0u64, arg3: 0u64, arg4: 0u64, arg5: 0u64),
             scheduler, ipc, KernelLog.new(8)
         )
-        expect(send.result.value).to_equal(-1)
+        expect(send.result.value).to_equal(-1)  # oracle: -1 — named expected value from the requirement
         val recv = syscall_handler_ipc_state(
             SyscallArgs(id: 21u64, arg0: 0u64, arg1: 0u64, arg2: 0u64, arg3: 0u64, arg4: 0u64, arg5: 0u64),
             scheduler, send.ipc, KernelLog.new(8)
         )
-        expect(recv.result.value).to_equal(-1)
+        expect(recv.result.value).to_equal(-1)  # oracle: -1 — named expected value from the requirement
         val created = syscall_handler_ipc_state(
             SyscallArgs(id: 22u64, arg0: 0u64, arg1: 0u64, arg2: 0u64, arg3: 0u64, arg4: 0u64, arg5: 0u64),
             scheduler, recv.ipc, KernelLog.new(8)
         )
-        expect(created.result.value).to_equal(-1)
+        expect(created.result.value).to_equal(-1)  # oracle: -1 — named expected value from the requirement
         val connected = syscall_handler_ipc_state(
             SyscallArgs(id: 23u64, arg0: 0u64, arg1: 0u64, arg2: 0u64, arg3: 0u64, arg4: 0u64, arg5: 0u64),
             scheduler, created.ipc, KernelLog.new(8)
         )
-        expect(connected.result.value).to_equal(-1)
+        expect(connected.result.value).to_equal(-1)  # oracle: -1 — named expected value from the requirement

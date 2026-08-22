@@ -1,4 +1,22 @@
 """
+## Purpose and audience
+Purpose: Prove that fat32 host-like write path — wave-4g.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+# @manual: primary
+REQ-OS-KERNEL-001
+doc/01_research/local/REQ-OS-KERNEL-001.md
+doc/03_plan/sys_test/REQ-OS-KERNEL-001.md
+doc/04_architecture/REQ-OS-KERNEL-001.md
+doc/05_design/REQ-OS-KERNEL-001.md
+"""
+# @req: REQ-OS-KERNEL-001
+
+"""
 # FAT32 Host-Like Write Path — Wave-4g Spec
 
 **Feature:** kernel FAT32 driver (IF-07) directory *creation*
@@ -176,11 +194,13 @@ describe "fat32 host-like write path — wave-4g":
     describe "short-name and LFN encoding":
 
         it "keeps a plain uppercase 8.3 name out of the LFN path":
+            # @req: REQ-OS-KERNEL-001
             step("FILE.O fits the 8.3 field exactly")
             assert_false(fat32_name_needs_lfn("FILE.O"))
             expect(fat32_short_field_to_text(fat32_short_field("FILE.O"))).to_equal("FILE.O")
 
         it "forces an LFN for any name a bare 8.3 field would mangle":
+            # @req: REQ-OS-KERNEL-001
             step("lowercase cannot survive an 8.3 field — it has no case bits")
             assert_true(fat32_name_needs_lfn("main.c"))
             step("an over-long basename cannot fit 8 characters")
@@ -191,6 +211,7 @@ describe "fat32 host-like write path — wave-4g":
             assert_true(fat32_name_needs_lfn(".config"))
 
         it "derives the ~1 alias by truncating the sanitised basename":
+            # @req: REQ-OS-KERNEL-001
             step("LongName.txt -> LONGNA~1.TXT")
             expect(fat32_short_field_to_text(fat32_gen_short_field("LongName.txt", 1))).to_equal("LONGNA~1.TXT")
             step("the collision counter replaces the tail, never the extension")
@@ -201,11 +222,14 @@ describe "fat32 host-like write path — wave-4g":
             expect(fat32_short_field_to_text(fat32_gen_short_field("a b.txt", 1))).to_equal("AB~1.TXT")
 
         it "computes the LFN checksum that binds a slot to its 8.3 alias":
+            # @req: REQ-OS-KERNEL-001
             step("fixed vector: the 11 padded bytes of LONGNA~1TXT check to 0xF4")
             val field = fat32_gen_short_field("LongName.txt", 1)
             expect(fat32_lfn_checksum(field).to_i32()).to_equal(0xF4)
 
         it "sizes the LFN chain at 13 characters per slot":
+            # @req: REQ-OS-KERNEL-001
+            step("Verify: sizes the LFN chain at 13 characters per slot")
             expect(fat32_lfn_slot_count("LongName.txt")).to_equal(1)   # 12 chars
             expect(fat32_lfn_slot_count("AnotherLongName.txt")).to_equal(2)   # 19 chars
             expect(fat32_lfn_slot_count("abcdefghijklm")).to_equal(1)  # exactly 13
@@ -213,6 +237,7 @@ describe "fat32 host-like write path — wave-4g":
     describe "mkdir":
 
         it "creates a directory whose . and .. entries resolve on re-read":
+            # @req: REQ-OS-KERNEL-001
             val dev = _make_dev()
             var fs = _fs_from(dev)
             step("mkdir /usr")
@@ -233,7 +258,7 @@ describe "fat32 host-like write path — wave-4g":
             step("'..' under the root records cluster 0, as FAT32 requires")
             expect(dsec[32].to_i32()).to_equal(0x2E)
             expect(dsec[33].to_i32()).to_equal(0x2E)
-            expect(dsec[58].to_i32()).to_equal(0)                   # +26 of entry 1
+            expect(dsec[58].to_i32()).to_equal(0)  # oracle: 0 — named expected value from the requirement
             step("a mid-path '.' still resolves through the new directory")
             assert_true(fs2.create_at(dev, "/usr/X.O").is_ok())
             assert_true(_fs_from(dev).stat_at(dev, "/usr/./X.O").is_ok())
@@ -243,6 +268,7 @@ describe "fat32 host-like write path — wave-4g":
             expect(up.unwrap().size).to_equal(11u64)
 
         it "nests directories two deep":
+            # @req: REQ-OS-KERNEL-001
             val dev = _make_dev()
             var fs = _fs_from(dev)
             step("mkdir /usr then /usr/bin")
@@ -258,6 +284,7 @@ describe "fat32 host-like write path — wave-4g":
             assert_true(a.start_cluster != b.start_cluster)
 
         it "records .. as 0 under the root but as a real cluster deeper down":
+            # @req: REQ-OS-KERNEL-001
             val dev = _make_dev()
             var fs = _fs_from(dev)
             assert_true(fs.mkdir_at(dev, "/usr").is_ok())
@@ -270,32 +297,37 @@ describe "fat32 host-like write path — wave-4g":
             expect(back.unwrap().dir_cluster).to_equal(usr.start_cluster)
 
         it "refuses to create a directory that already exists":
+            # @req: REQ-OS-KERNEL-001
             val dev = _make_dev()
             var fs = _fs_from(dev)
             assert_true(fs.mkdir_at(dev, "/usr").is_ok())
             step("a second mkdir /usr is EEXIST, not a silent second entry")
             val again = fs.mkdir_at(dev, "/usr")
             assert_true(again.is_err())
-            expect(again.unwrap_err()).to_equal(-17)
+            expect(again.unwrap_err()).to_equal(-17)  # oracle: -17 — named expected value from the requirement
 
         it "refuses to create under a parent that does not exist":
+            # @req: REQ-OS-KERNEL-001
+            step("Verify: refuses to create under a parent that does not exist")
             val dev = _make_dev()
             var fs = _fs_from(dev)
             val r = fs.mkdir_at(dev, "/nope/deeper")
             assert_true(r.is_err())
-            expect(r.unwrap_err()).to_equal(-2)
+            expect(r.unwrap_err()).to_equal(-2)  # oracle: -2 — named expected value from the requirement
 
         it "refuses to descend through a regular file":
+            # @req: REQ-OS-KERNEL-001
             val dev = _make_dev()
             var fs = _fs_from(dev)
             step("/FILE.O is a file, so /FILE.O/x has no parent directory")
             val r = fs.mkdir_at(dev, "/FILE.O/x")
             assert_true(r.is_err())
-            expect(r.unwrap_err()).to_equal(-20)
+            expect(r.unwrap_err()).to_equal(-20)  # oracle: -20 — named expected value from the requirement
 
     describe "create and write at a nested path":
 
         it "creates /usr/bin/CLANG, writes it, and reads it back after reopen":
+            # @req: REQ-OS-KERNEL-001
             val dev = _make_dev()
             var fs = _fs_from(dev)
             assert_true(fs.mkdir_at(dev, "/usr").is_ok())
@@ -328,6 +360,7 @@ describe "fat32 host-like write path — wave-4g":
             expect(n.unwrap()).to_equal(600u64)
 
         it "reads back every byte, not just the length":
+            # @req: REQ-OS-KERNEL-001
             val dev = _make_dev()
             var fs = _fs_from(dev)
             assert_true(fs.mkdir_at(dev, "/d").is_ok())
@@ -350,9 +383,10 @@ describe "fat32 host-like write path — wave-4g":
                 if rbuf[i] != payload[i]:
                     mismatches = mismatches + 1
                 i = i + 1
-            expect(mismatches).to_equal(0)
+            expect(mismatches).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
         it "does not confuse /FILE.O with /a/b/c/FILE.O":
+            # @req: REQ-OS-KERNEL-001
             val dev = _make_dev()
             var fs = _fs_from(dev)
             step("build /a/b/c and create a SECOND FILE.O three levels down")
@@ -371,6 +405,7 @@ describe "fat32 host-like write path — wave-4g":
             assert_true(fs2.stat_at(dev, "/a/b/FILE.O").is_err())
 
         it "keeps the cached root directory coherent after a root-level create":
+            # @req: REQ-OS-KERNEL-001
             val dev = _make_dev()
             var fs = _fs_from(dev)
             step("create /NEW.TXT and look it up on the SAME object, cache and all")
@@ -381,16 +416,19 @@ describe "fat32 host-like write path — wave-4g":
             expect(fs.stat_at(dev, "/FILE.O").unwrap().size).to_equal(11u64)
 
         it "refuses to create a file that already exists":
+            # @req: REQ-OS-KERNEL-001
+            step("Verify: refuses to create a file that already exists")
             val dev = _make_dev()
             var fs = _fs_from(dev)
             assert_true(fs.create_at(dev, "/NEW.TXT").is_ok())
             val again = fs.create_at(dev, "/NEW.TXT")
             assert_true(again.is_err())
-            expect(again.unwrap_err()).to_equal(-17)
+            expect(again.unwrap_err()).to_equal(-17)  # oracle: -17 — named expected value from the requirement
 
     describe "long filename creation":
 
         it "round-trips a mixed-case long name through the read path":
+            # @req: REQ-OS-KERNEL-001
             val dev = _make_dev()
             var fs = _fs_from(dev)
             assert_true(fs.mkdir_at(dev, "/home").is_ok())
@@ -405,6 +443,7 @@ describe "fat32 host-like write path — wave-4g":
             expect(fs2.stat_at(dev, "/home/LONGNA~1.TXT").unwrap().size).to_equal(5u64)
 
         it "stores the long name with its ORIGINAL case in the LFN slot":
+            # @req: REQ-OS-KERNEL-001
             val dev = _make_dev()
             var fs = _fs_from(dev)
             assert_true(fs.mkdir_at(dev, "/home").is_ok())
@@ -424,6 +463,7 @@ describe "fat32 host-like write path — wave-4g":
             expect(sec[lfn_off].to_i32()).to_equal(0x41)
 
         it "numbers colliding aliases ~1 then ~2":
+            # @req: REQ-OS-KERNEL-001
             val dev = _make_dev()
             var fs = _fs_from(dev)
             assert_true(fs.mkdir_at(dev, "/home").is_ok())
@@ -442,6 +482,7 @@ describe "fat32 host-like write path — wave-4g":
             expect(fs2.stat_at(dev, "/home/LONGNA~2.TXT").unwrap().size).to_equal(9u64)
 
         it "creates a full host-shaped source path":
+            # @req: REQ-OS-KERNEL-001
             val dev = _make_dev()
             var fs = _fs_from(dev)
             step("mkdir -p /home/user/proj/src")
@@ -458,6 +499,7 @@ describe "fat32 host-like write path — wave-4g":
     describe "directory growth and the end-of-directory marker":
 
         it "grows the directory by a cluster when an entry chain does not fit":
+            # @req: REQ-OS-KERNEL-001
             val dev = _make_dev()
             var fs = _fs_from(dev)
             assert_true(fs.mkdir_at(dev, "/g").is_ok())
@@ -488,9 +530,10 @@ describe "fat32 host-like write path — wave-4g":
                 if fs2.stat_at(dev, nm2).is_err():
                     missing = missing + 1
                 k = k + 1
-            expect(missing).to_equal(0)
+            expect(missing).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
         it "leaves a 0x00 end-of-directory marker after the last entry":
+            # @req: REQ-OS-KERNEL-001
             val dev = _make_dev()
             var fs = _fs_from(dev)
             assert_true(fs.mkdir_at(dev, "/g").is_ok())
@@ -499,11 +542,12 @@ describe "fat32 host-like write path — wave-4g":
             val loc = fs2.resolve_path(dev, "/g/ONE.O").unwrap()
             step("the slot immediately after the new entry must still read 0x00")
             val sec = dev.read_sector(loc.dirent_sector).unwrap()
-            expect(sec[loc.dirent_offset + 32].to_i32()).to_equal(0)
+            expect(sec[loc.dirent_offset + 32].to_i32()).to_equal(0)  # oracle: 0 — named expected value from the requirement
             step("and an absent sibling is reported ENOENT, not matched against poison")
             assert_true(fs2.stat_at(dev, "/g/TWO.O").is_err())
 
         it "zero-fills a freshly allocated directory cluster":
+            # @req: REQ-OS-KERNEL-001
             val dev = _make_dev()
             var fs = _fs_from(dev)
             step("the mock hands back 0xAA for any never-written sector")
@@ -519,11 +563,12 @@ describe "fat32 host-like write path — wave-4g":
                 if sec[i] != 0u8:
                     poisoned = poisoned + 1
                 i = i + 1
-            expect(poisoned).to_equal(0)
+            expect(poisoned).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     describe "dirent size write-back":
 
         it "persists the size across a reopen, not just in the live handle":
+            # @req: REQ-OS-KERNEL-001
             val dev = _make_dev()
             var fs = _fs_from(dev)
             assert_true(fs.mkdir_at(dev, "/s").is_ok())
@@ -536,6 +581,7 @@ describe "fat32 host-like write path — wave-4g":
             expect(_fs_from(dev).stat_at(dev, "/s/GROW.BIN").unwrap().size).to_equal(250u64)
 
         it "flush() writes the dirent back on demand instead of returning ENOSYS":
+            # @req: REQ-OS-KERNEL-001
             val dev = _make_dev()
             var fs = _fs_from(dev)
             assert_true(fs.mkdir_at(dev, "/s").is_ok())

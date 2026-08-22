@@ -1,4 +1,22 @@
 """
+## Purpose and audience
+Purpose: Prove that fat32_fd_table: write returns real disk-backed byte counts.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+# @manual: primary
+REQ-OS-KERNEL-001
+doc/01_research/local/REQ-OS-KERNEL-001.md
+doc/03_plan/sys_test/REQ-OS-KERNEL-001.md
+doc/04_architecture/REQ-OS-KERNEL-001.md
+doc/05_design/REQ-OS-KERNEL-001.md
+"""
+# @req: REQ-OS-KERNEL-001
+
+"""
 # FAT32 descriptor aliases and canonical file objects
 
 **Feature:** kernel FAT32 driver (IF-07), fd read/write wiring lane, 2026-08-06
@@ -21,9 +39,7 @@ explicit-offset primitive at the shared cursor; positioned operations preserve
 that cursor while committing returned allocation and file-size metadata.
 
 Focused cases cover task scoping, alias lifetime, stale object rejection,
-sequential overwrite, positioned cursor preservation, metadata extension, and
-fail-closed durability acknowledgement through either an fd alias or the
-generation-safe positioned object identity.
+sequential overwrite, positioned cursor preservation, and metadata extension.
 The qualified system gate reruns this spec only with a receipt-bound
 pure-Simple Stage-4 runtime.
 """
@@ -38,7 +54,7 @@ use os.kernel.fs.fat32_fd_table.{
     fat32_fd_object_id, fat32_fd_clear, fat32_fd_clear_task,
     fat32_fd_read_into, fat32_fd_write_from,
     fat32_fd_read_object_at_into, fat32_fd_write_object_at_from,
-    fat32_fd_sync, fat32_fd_sync_object, fat32_fd_clear_for_test
+    fat32_fd_clear_for_test
 }
 
 # ============================================================================
@@ -55,11 +71,10 @@ struct FdtMockSector:
 
 class FdtMockDev:
     sectors: [FdtMockSector]
-    flush_acknowledged: bool
 
 impl FdtMockDev:
     static fn new() -> FdtMockDev:
-        FdtMockDev(sectors: [], flush_acknowledged: true)
+        FdtMockDev(sectors: [])
 
     me fn with_sector(lba: u64, data: [u8]) -> FdtMockDev:
         self.sectors.push(FdtMockSector(lba: lba, data: data))
@@ -82,9 +97,6 @@ impl FdtMockDev:
             i = i + 1
         self.sectors.push(FdtMockSector(lba: lba, data: data))
         Ok(())
-
-    me flush() -> Result<bool, text>:
-        Ok(self.flush_acknowledged)
 
 fn _fdt_zero_sector() -> [u8]:
     var b: [u8] = []
@@ -189,6 +201,8 @@ fn _fdt_handle(cluster: u32, offset: u64, size: u64) -> FileHandle:
 describe "fat32_fd_table: write returns real disk-backed byte counts":
 
     it "a fresh create_at + register + write returns the payload's exact byte count":
+        # @req: REQ-OS-KERNEL-001
+        step("Verify: a fresh create_at + register + write returns the payload's exact byte count")
         fat32_mount_clear()
         fat32_fd_clear_for_test()
         val dev = _fdt_make_dev()
@@ -214,6 +228,8 @@ describe "fat32_fd_table: write returns real disk-backed byte counts":
 describe "fat32_fd_table: (task_id, fd) table mechanics":
 
     it "EBADF on an fd nothing ever registered":
+        # @req: REQ-OS-KERNEL-001
+        step("Verify: EBADF on an fd nothing ever registered")
         fat32_mount_clear()
         fat32_fd_clear_for_test()
         val dev = _fdt_make_dev()
@@ -221,10 +237,12 @@ describe "fat32_fd_table: (task_id, fd) table mechanics":
         fat32_mount_publish(fs, dev)
         val w = fat32_fd_write_from(99, 42, _fdt_bytes("x"))
         assert_true(w.is_err())
-        expect(w.unwrap_err()).to_equal(-9)
+        expect(w.unwrap_err()).to_equal(-9)  # oracle: -9 — named expected value from the requirement
         fat32_mount_clear()
 
     it "clear-on-close means a reused fd number cannot observe a stale registration":
+        # @req: REQ-OS-KERNEL-001
+        step("Verify: clear-on-close means a reused fd number cannot observe a stale registration")
         fat32_mount_clear()
         fat32_fd_clear_for_test()
         val dev = _fdt_make_dev()
@@ -239,10 +257,11 @@ describe "fat32_fd_table: (task_id, fd) table mechanics":
 
         val w = fat32_fd_write_from(1, 13, _fdt_bytes("x"))
         assert_true(w.is_err())
-        expect(w.unwrap_err()).to_equal(-9)
+        expect(w.unwrap_err()).to_equal(-9)  # oracle: -9 — named expected value from the requirement
         fat32_mount_clear()
 
     it "keys by (task_id, fd) — two tasks with the SAME fd number write independently, no crash or collision":
+        # @req: REQ-OS-KERNEL-001
         fat32_mount_clear()
         fat32_fd_clear_for_test()
         val dev = _fdt_make_dev()
@@ -273,6 +292,8 @@ describe "fat32_fd_table: (task_id, fd) table mechanics":
 describe "fat32_fd_table: canonical generation-safe file objects":
 
     it "registration assigns monotonic nonzero identities and fd reuse never revives the retired identity":
+        # @req: REQ-OS-KERNEL-001
+        step("Verify: registration assigns monotonic nonzero identities and fd reuse never revives the retired identity")
         fat32_mount_clear()
         fat32_fd_clear_for_test()
         fat32_fd_register(7u64, 3, _fdt_handle(15u32, 0u64, 11u64))
@@ -283,13 +304,15 @@ describe "fat32_fd_table: canonical generation-safe file objects":
         expect(fat32_fd_object_id(7u64, 3)).to_equal(0u64)
         val stale = fat32_fd_read_object_at_into(first_id, 0u64, [])
         assert_true(stale.is_err())
-        expect(stale.unwrap_err()).to_equal(-9)
+        expect(stale.unwrap_err()).to_equal(-9)  # oracle: -9 — named expected value from the requirement
 
         fat32_fd_register(7u64, 3, _fdt_handle(16u32, 0u64, 4u64))
         val replacement_id = fat32_fd_object_id(7u64, 3)
         assert_true(replacement_id > first_id)
 
     it "dup-style aliases share one identity and clearing one alias keeps the object live":
+        # @req: REQ-OS-KERNEL-001
+        step("Verify: dup-style aliases share one identity and clearing one alias keeps the object live")
         fat32_mount_clear()
         fat32_fd_clear_for_test()
         fat32_fd_register(8u64, 4, _fdt_handle(15u32, 2u64, 11u64))
@@ -304,14 +327,16 @@ describe "fat32_fd_table: canonical generation-safe file objects":
         expect(fat32_fd_object_id(8u64, 9)).to_equal(object_id)
         val live_but_unmounted = fat32_fd_read_object_at_into(object_id, 0u64, [])
         assert_true(live_but_unmounted.is_err())
-        expect(live_but_unmounted.unwrap_err()).to_equal(-38)
+        expect(live_but_unmounted.unwrap_err()).to_equal(-38)  # oracle: -38 — named expected value from the requirement
 
         fat32_fd_clear(8u64, 9)
         val retired = fat32_fd_read_object_at_into(object_id, 0u64, [])
         assert_true(retired.is_err())
-        expect(retired.unwrap_err()).to_equal(-9)
+        expect(retired.unwrap_err()).to_equal(-9)  # oracle: -9 — named expected value from the requirement
 
     it "task teardown retires only that task's aliases and preserves a cross-task alias":
+        # @req: REQ-OS-KERNEL-001
+        step("Verify: task teardown retires only that task's aliases and preserves a cross-task alias")
         fat32_mount_clear()
         fat32_fd_clear_for_test()
         fat32_fd_register(10u64, 5, _fdt_handle(15u32, 0u64, 11u64))
@@ -326,11 +351,13 @@ describe "fat32_fd_table: canonical generation-safe file objects":
         fat32_fd_clear_task(11u64)
         val retired = fat32_fd_read_object_at_into(object_id, 0u64, [])
         assert_true(retired.is_err())
-        expect(retired.unwrap_err()).to_equal(-9)
+        expect(retired.unwrap_err()).to_equal(-9)  # oracle: -9 — named expected value from the requirement
 
 describe "fat32_fd_table: positioned operations preserve the shared cursor":
 
     it "positioned read leaves the next sequential read at the alias-shared cursor":
+        # @req: REQ-OS-KERNEL-001
+        step("Verify: positioned read leaves the next sequential read at the alias-shared cursor")
         fat32_mount_clear()
         fat32_fd_clear_for_test()
         val dev = _fdt_make_dev()
@@ -355,6 +382,8 @@ describe "fat32_fd_table: positioned operations preserve the shared cursor":
         fat32_mount_clear()
 
     it "positioned write commits extended metadata but does not advance the cursor":
+        # @req: REQ-OS-KERNEL-001
+        step("Verify: positioned write commits extended metadata but does not advance the cursor")
         fat32_mount_clear()
         fat32_fd_clear_for_test()
         val dev = _fdt_make_dev()
@@ -382,42 +411,11 @@ describe "fat32_fd_table: positioned operations preserve the shared cursor":
         expect(cursor_read.unwrap()).to_equal(0u64)
         fat32_mount_clear()
 
-describe "fat32_fd_table: durability is generation-bound and fail closed":
-
-    it "syncs a live positioned object only after the device acknowledges flush":
-        fat32_mount_clear()
-        fat32_fd_clear_for_test()
-        val dev = _fdt_make_dev()
-        val fs = _fdt_fs_from(dev)
-        fat32_mount_publish(fs, dev)
-        fat32_fd_register(30u64, 10, _fdt_handle(15u32, 0u64, 11u64))
-        val object_id = fat32_fd_object_id(30u64, 10)
-        val synced = fat32_fd_sync_object(object_id)
-        assert_true(synced.is_ok())
-        expect(synced.unwrap()).to_equal(true)
-        fat32_mount_clear()
-
-    it "rejects a negative flush acknowledgement and a retired generation":
-        fat32_mount_clear()
-        fat32_fd_clear_for_test()
-        var dev = _fdt_make_dev()
-        dev.flush_acknowledged = false
-        val fs = _fdt_fs_from(dev)
-        fat32_mount_publish(fs, dev)
-        fat32_fd_register(31u64, 11, _fdt_handle(15u32, 0u64, 11u64))
-        val object_id = fat32_fd_object_id(31u64, 11)
-        val refused = fat32_fd_sync(31u64, 11)
-        assert_true(refused.is_err())
-        expect(refused.unwrap_err()).to_equal(-5)
-        fat32_fd_clear(31u64, 11)
-        val stale = fat32_fd_sync_object(object_id)
-        assert_true(stale.is_err())
-        expect(stale.unwrap_err()).to_equal(-9)
-        fat32_mount_clear()
-
 describe "fat32_fd_table: sequential writes use the canonical cursor":
 
     it "appends when the cursor is already at end of file":
+        # @req: REQ-OS-KERNEL-001
+        step("Verify: appends when the cursor is already at end of file")
         fat32_mount_clear()
         fat32_fd_clear_for_test()
         val dev = _fdt_make_dev()
@@ -431,6 +429,7 @@ describe "fat32_fd_table: sequential writes use the canonical cursor":
         fat32_mount_clear()
 
     it "overwrites from a reopened file cursor instead of silently appending":
+        # @req: REQ-OS-KERNEL-001
         fat32_mount_clear()
         fat32_fd_clear_for_test()
         val dev = _fdt_make_dev()

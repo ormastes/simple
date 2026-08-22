@@ -1,4 +1,22 @@
 """
+## Purpose and audience
+Purpose: Prove that container-manager: rootless by construction.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+# @manual: primary
+REQ-OS-SERVICES-001
+doc/01_research/local/REQ-OS-SERVICES-001.md
+doc/03_plan/sys_test/REQ-OS-SERVICES-001.md
+doc/04_architecture/REQ-OS-SERVICES-001.md
+doc/05_design/REQ-OS-SERVICES-001.md
+"""
+# @req: REQ-OS-SERVICES-001
+
+"""
 # container-manager (Podman on MDSOC+) Specification
 
 **Feature IDs:** #OS-CTR-MDSOC
@@ -27,14 +45,20 @@ Properties proven:
 use std.spec.{describe, it, expect}
 use os.services.container.container_manager.{ContainerWorld, Pod, SpawnRequest, caps_is_subset, NS_NET, NS_IPC}
 
+use std.spec.step
+
 describe "container-manager: rootless by construction":
     it "a fresh container rooted at /c1 allows only paths at/below /c1":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: a fresh container rooted at /c1 allows only paths at/below /c1")
         var w = ContainerWorld.new()
         val c1 = w.sys_create("app1", "/c1", [100u64, 101u64], "sha256:aaa", 1024u64, 4096u64, 100u64, 64u64, ["cap.fs_read", "cap.net_scoped"], false)
         expect(w.allows_path(c1, "/c1/app")).to_equal(true)
         expect(w.path_decision(c1, "/c1/app")).to_equal("allow")
 
     it "the same container DENIES a sibling root and an escape":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: the same container DENIES a sibling root and an escape")
         var w = ContainerWorld.new()
         val c1 = w.sys_create("app1", "/c1", [100u64], "sha256:aaa", 1024u64, 4096u64, 100u64, 64u64, ["cap.fs_read"], false)
         expect(w.allows_path(c1, "/c2/x")).to_equal(false)
@@ -42,6 +66,8 @@ describe "container-manager: rootless by construction":
         expect(w.allows_path(c1, "/c1/../c2/x")).to_equal(false)
 
     it "the container sees only its declared pids":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: the container sees only its declared pids")
         var w = ContainerWorld.new()
         val c1 = w.sys_create("app1", "/c1", [100u64, 101u64], "sha256:aaa", 1024u64, 4096u64, 100u64, 64u64, ["cap.fs_read"], false)
         expect(w.allows_pid(c1, 100u64)).to_equal(true)
@@ -49,12 +75,16 @@ describe "container-manager: rootless by construction":
         expect(w.pid_decision(c1, 999u64)).to_equal("deny")
 
     it "a fresh container is created, not started":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: a fresh container is created, not started")
         var w = ContainerWorld.new()
         val c1 = w.sys_create("app1", "/c1", [100u64], "sha256:aaa", 1024u64, 4096u64, 100u64, 64u64, ["cap.fs_read"], false)
         expect(w.lifecycle_state(c1)).to_equal("created")
 
 describe "container-manager: pod sharing (net/ipc yes, mount no)":
     it "two pod members share net/ipc endpoints but keep separate mount views":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: two pod members share net/ipc endpoints but keep separate mount views")
         var w = ContainerWorld.new()
         val pod = w.create_pod(7001u64, 7002u64)
         val a = w.sys_create("a", "/ca", [200u64], "sha256:a", 512u64, 2048u64, 50u64, 32u64, ["cap.net_scoped"], false)
@@ -75,6 +105,8 @@ describe "container-manager: pod sharing (net/ipc yes, mount no)":
 
 describe "container-manager: daemonless / no ambient authority":
     it "sys_start spawn request caps are a SUBSET of what was granted":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: sys_start spawn request caps are a SUBSET of what was granted")
         var w = ContainerWorld.new()
         val granted = ["cap.fs_read", "cap.net_scoped", "cap.resource_domain"]
         val c1 = w.sys_create("app1", "/c1", [100u64], "sha256:aaa", 1024u64, 4096u64, 100u64, 64u64, granted, false)
@@ -89,6 +121,8 @@ describe "container-manager: daemonless / no ambient authority":
 
 describe "container-manager: stop revocation (§21 invariant)":
     it "after sys_stop the view denies every path and pid it previously allowed":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: after sys_stop the view denies every path and pid it previously allowed")
         var w = ContainerWorld.new()
         val c1 = w.sys_create("app1", "/c1", [100u64, 101u64], "sha256:aaa", 1024u64, 4096u64, 100u64, 64u64, ["cap.fs_read", "cap.net_scoped"], false)
         val started: SpawnRequest = w.sys_start(c1)
@@ -98,7 +132,7 @@ describe "container-manager: stop revocation (§21 invariant)":
         # ordered revocation.
         val life = w.sys_stop(c1)
         expect(life.state).to_equal("stopped")
-        expect(life.exit_code).to_equal(0)
+        expect(life.exit_code).to_equal(0)  # oracle: 0 — named expected value from the requirement
         # §21: NOTHING resolves afterward — no stale grant.
         expect(w.allows_path(c1, "/c1/app")).to_equal(false)
         expect(w.allows_pid(c1, 100u64)).to_equal(false)
@@ -106,7 +140,7 @@ describe "container-manager: stop revocation (§21 invariant)":
         expect(w.path_decision(c1, "/c1/app")).to_equal("deny")
         # resource domain freed, monitor reaped, granted pouch dropped.
         expect(w.monitor_state(c1)).to_equal("stopped")
-        expect(w.granted_of(c1).len()).to_equal(0)
+        expect(w.granted_of(c1).len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
 describe "container-manager: cross-entity identity (two-hop mutation-loss regression)":
     # Regression guard for bug selfhost_two_hop_field_method_mutation_lost_2026-07-27:
@@ -115,15 +149,17 @@ describe "container-manager: cross-entity identity (two-hop mutation-loss regres
     # hazard by holding component arrays directly (single hop) + extract-mutate-
     # writeback; this proves identities stay distinct and state stays per-entity.
     it "three containers in one world keep distinct indices and isolated state":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: three containers in one world keep distinct indices and isolated state")
         var w = ContainerWorld.new()
         val c0 = w.sys_create("svc-a", "/ca", [100u64], "sha256:aaa", 512u64, 2048u64, 50u64, 32u64, ["cap.fs_read"], false)
         val c1 = w.sys_create("svc-b", "/cb", [200u64], "sha256:bbb", 512u64, 2048u64, 50u64, 32u64, ["cap.net_scoped"], false)
         val c2 = w.sys_create("svc-c", "/cc", [300u64], "sha256:ccc", 512u64, 2048u64, 50u64, 32u64, ["cap.fs_read", "cap.net_scoped"], false)
         # identity: absolute, distinct indices — NOT all zero.
-        expect(c0).to_equal(0)
-        expect(c1).to_equal(1)
-        expect(c2).to_equal(2)
-        expect(w.count()).to_equal(3)
+        expect(c0).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(c1).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(c2).to_equal(2)  # oracle: 2 — named expected value from the requirement
+        expect(w.count()).to_equal(3)  # oracle: 3 — named expected value from the requirement
         # per-entity state isolation: each resolves ONLY its own root/pid.
         expect(w.allows_path(c0, "/ca/app")).to_equal(true)
         expect(w.allows_path(c0, "/cb/app")).to_equal(false)
@@ -136,9 +172,9 @@ describe "container-manager: cross-entity identity (two-hop mutation-loss regres
         expect(w.allows_pid(c1, 200u64)).to_equal(true)
         expect(w.allows_pid(c2, 300u64)).to_equal(true)
         # per-entity granted pouches stay distinct in size and content.
-        expect(w.granted_of(c0).len()).to_equal(1)
-        expect(w.granted_of(c1).len()).to_equal(1)
-        expect(w.granted_of(c2).len()).to_equal(2)
+        expect(w.granted_of(c0).len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(w.granted_of(c1).len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(w.granted_of(c2).len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
         # mutating ONE entity's lifecycle must not leak to siblings.
         val started: SpawnRequest = w.sys_start(c1)
         expect(w.lifecycle_state(c0)).to_equal("created")

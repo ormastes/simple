@@ -1,3 +1,21 @@
+"""
+## Purpose and audience
+Purpose: Prove that usb_msc SCSI bring-up over BOT.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+# @manual: primary
+REQ-OS-DRIVERS-001
+doc/01_research/local/REQ-OS-DRIVERS-001.md
+doc/03_plan/sys_test/REQ-OS-DRIVERS-001.md
+doc/04_architecture/REQ-OS-DRIVERS-001.md
+doc/05_design/REQ-OS-DRIVERS-001.md
+"""
+# @req: REQ-OS-DRIVERS-001
+
 # USB Mass Storage Class (Bulk-Only Transport) Spec
 #
 # Drives the real usb_msc BOT/SCSI state machine (CBW -> data -> CSW,
@@ -325,30 +343,38 @@ fn _stage_fat32_volume(t: FakeBotTransport):
 
 describe "usb_msc SCSI bring-up over BOT":
     it "answers TEST UNIT READY":
+        # @req: REQ-OS-DRIVERS-001
+        step("Verify: answers TEST UNIT READY")
         val t = FakeBotTransport.create()
         val rc = usb_msc_test_unit_ready(t)
         expect(rc.is_ok()).to_equal(true)
 
     it "reads INQUIRY and READ CAPACITY through CBW/CSW":
+        # @req: REQ-OS-DRIVERS-001
+        step("Verify: reads INQUIRY and READ CAPACITY through CBW/CSW")
         val t = FakeBotTransport.create()
         val inq = usb_msc_inquiry(t)
         expect(inq.is_ok()).to_equal(true)
         val cap = usb_msc_read_capacity(t)
         expect(cap.is_ok()).to_equal(true)
         if val Ok(c) = cap:
-            expect(c.sector_count.to_i64()).to_equal(64)
-            expect(c.sector_size.to_i64()).to_equal(512)
+            expect(c.sector_count.to_i64()).to_equal(64)  # oracle: 64 — named expected value from the requirement
+            expect(c.sector_size.to_i64()).to_equal(512)  # oracle: 512 — named expected value from the requirement
 
     it "initializes a UsbMscDevice with the probed geometry":
+        # @req: REQ-OS-DRIVERS-001
+        step("Verify: initializes a UsbMscDevice with the probed geometry")
         val t = FakeBotTransport.create()
         val dev_rc = usb_msc_init(t)
         expect(dev_rc.is_ok()).to_equal(true)
         if val Ok(dev) = dev_rc:
-            expect(dev.sector_size().to_i64()).to_equal(512)
-            expect(dev.sector_count().to_i64()).to_equal(64)
+            expect(dev.sector_size().to_i64()).to_equal(512)  # oracle: 512 — named expected value from the requirement
+            expect(dev.sector_count().to_i64()).to_equal(64)  # oracle: 64 — named expected value from the requirement
 
 describe "usb_msc BlockDevice read/write":
     it "round-trips a sector through WRITE(10) then READ(10)":
+        # @req: REQ-OS-DRIVERS-001
+        step("Verify: round-trips a sector through WRITE(10) then READ(10)")
         val t = FakeBotTransport.create()
         val dev_rc = usb_msc_init(t)
         expect(dev_rc.is_ok()).to_equal(true)
@@ -361,11 +387,13 @@ describe "usb_msc BlockDevice read/write":
             val rrc = dev.read_sector(5u64)
             expect(rrc.is_ok()).to_equal(true)
             if val Ok(back) = rrc:
-                expect(back.len()).to_equal(512)
+                expect(back.len()).to_equal(512)  # oracle: 512 — named expected value from the requirement
                 expect(back[0].to_i64()).to_equal(0xAB)
                 expect(back[511].to_i64()).to_equal(0xCD)
 
     it "rejects out-of-range LBAs":
+        # @req: REQ-OS-DRIVERS-001
+        step("Verify: rejects out-of-range LBAs")
         val t = FakeBotTransport.create()
         if val Ok(dev) = usb_msc_init(t):
             expect(dev.read_sector(64u64).is_err()).to_equal(true)
@@ -373,21 +401,29 @@ describe "usb_msc BlockDevice read/write":
 
 describe "usb_msc fail-closed on transfer errors":
     it "rejects a corrupt CSW signature":
+        # @req: REQ-OS-DRIVERS-001
+        step("Verify: rejects a corrupt CSW signature")
         val t = FakeBotTransport.create()
         t.set_fault(FAULT_BAD_CSW_SIG)
         expect(usb_msc_inquiry(t).is_err()).to_equal(true)
 
     it "rejects a failing CSW status":
+        # @req: REQ-OS-DRIVERS-001
+        step("Verify: rejects a failing CSW status")
         val t = FakeBotTransport.create()
         t.set_fault(FAULT_CSW_STATUS)
         expect(usb_msc_inquiry(t).is_err()).to_equal(true)
 
     it "rejects a CSW tag mismatch":
+        # @req: REQ-OS-DRIVERS-001
+        step("Verify: rejects a CSW tag mismatch")
         val t = FakeBotTransport.create()
         t.set_fault(FAULT_WRONG_TAG)
         expect(usb_msc_inquiry(t).is_err()).to_equal(true)
 
     it "rejects short data stages instead of returning partial sectors":
+        # @req: REQ-OS-DRIVERS-001
+        step("Verify: rejects short data stages instead of returning partial sectors")
         val t = FakeBotTransport.create()
         if val Ok(dev) = usb_msc_init(t):
             t.set_fault(FAULT_SHORT_DATA)
@@ -395,6 +431,8 @@ describe "usb_msc fail-closed on transfer errors":
 
 describe "FAT32 mounts on usb-storage via the BlockDevice trait":
     it "mounts and reads /HELLO.TXT through the MSC device unchanged":
+        # @req: REQ-OS-DRIVERS-001
+        step("Verify: mounts and reads /HELLO.TXT through the MSC device unchanged")
         val t = FakeBotTransport.create()
         _stage_fat32_volume(t)
         val dev_rc = usb_msc_init(t)
@@ -409,7 +447,7 @@ describe "FAT32 mounts on usb-storage via the BlockDevice trait":
                 val bytes_rc = fs.read_bytes(handle, 14)
                 expect(bytes_rc.is_ok()).to_equal(true)
                 if val Ok(bytes) = bytes_rc:
-                    expect(bytes.len()).to_equal(14)
+                    expect(bytes.len()).to_equal(14)  # oracle: 14 — named expected value from the requirement
                     # "hello from usb" as ASCII bytes
                     val want: [u8] = [
                         0x68u8, 0x65u8, 0x6Cu8, 0x6Cu8, 0x6Fu8,
@@ -424,4 +462,4 @@ describe "FAT32 mounts on usb-storage via the BlockDevice trait":
                         if bytes[i].to_i64() != want[i].to_i64():
                             mismatches = mismatches + 1
                         i = i + 1
-                    expect(mismatches).to_equal(0)
+                    expect(mismatches).to_equal(0)  # oracle: 0 — named expected value from the requirement

@@ -1,4 +1,22 @@
 """
+## Purpose and audience
+Purpose: Prove that kernel-global FAT32 mount publish.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+# @manual: primary
+REQ-OS-KERNEL-001
+doc/01_research/local/REQ-OS-KERNEL-001.md
+doc/03_plan/sys_test/REQ-OS-KERNEL-001.md
+doc/04_architecture/REQ-OS-KERNEL-001.md
+doc/05_design/REQ-OS-KERNEL-001.md
+"""
+# @req: REQ-OS-KERNEL-001
+
+"""
 # FAT32 kernel-global mount publish + readdir/unlink/rmdir primitives
 
 **Feature:** kernel FAT32 driver (IF-07), 2026-08-06 wiring lane
@@ -163,6 +181,7 @@ fn _fs_from(dev: MockDev) -> Fat32Filesystem:
 describe "kernel-global FAT32 mount publish":
 
     it "is not ready before publish, ready after, and returns the SAME instance":
+        # @req: REQ-OS-KERNEL-001
         fat32_mount_clear()
         assert_false(fat32_mount_ready())
         val dev = _make_dev()
@@ -181,20 +200,22 @@ describe "kernel-global FAT32 mount publish":
 describe "Fat32Filesystem.readdir_at":
 
     it "lists the root directory's live entries, including a freshly mkdir'd one":
+        # @req: REQ-OS-KERNEL-001
         val dev = _make_dev()
         var fs = _fs_from(dev)
         step("root starts with just the FILE.O decoy")
         val names0 = fs.readdir_at(dev, "/")
         assert_true(names0.is_ok())
-        expect(names0.unwrap().len()).to_equal(1)
+        expect(names0.unwrap().len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         step("mkdir /usr, then re-read through a FRESH view")
         assert_true(fs.mkdir_at(dev, "/usr").is_ok())
         val fs2 = _fs_from(dev)
         val names1 = fs2.readdir_at(dev, "/")
         assert_true(names1.is_ok())
-        expect(names1.unwrap().len()).to_equal(2)
+        expect(names1.unwrap().len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
 
     it "lists a nested directory's own entries, not the parent's":
+        # @req: REQ-OS-KERNEL-001
         val dev = _make_dev()
         var fs = _fs_from(dev)
         assert_true(fs.mkdir_at(dev, "/usr").is_ok())
@@ -204,18 +225,21 @@ describe "Fat32Filesystem.readdir_at":
         val names = fs2.readdir_at(dev, "/usr/bin")
         assert_true(names.is_ok())
         step("'.', '..', and 'clang' — three entries, none of them 'usr'")
-        expect(names.unwrap().len()).to_equal(3)
+        expect(names.unwrap().len()).to_equal(3)  # oracle: 3 — named expected value from the requirement
 
     it "returns ENOTDIR when the path is a file, not a directory":
+        # @req: REQ-OS-KERNEL-001
+        step("Verify: returns ENOTDIR when the path is a file, not a directory")
         val dev = _make_dev()
         var fs = _fs_from(dev)
         val names = fs.readdir_at(dev, "/FILE.O")
         assert_true(names.is_err())
-        expect(names.unwrap_err()).to_equal(-20)
+        expect(names.unwrap_err()).to_equal(-20)  # oracle: -20 — named expected value from the requirement
 
 describe "Fat32Filesystem.unlink_at":
 
     it "frees the cluster chain and marks the dirent deleted — a fresh stat_at then reports ENOENT":
+        # @req: REQ-OS-KERNEL-001
         val dev = _make_dev()
         var fs = _fs_from(dev)
         step("the decoy is visible before unlink")
@@ -226,23 +250,27 @@ describe "Fat32Filesystem.unlink_at":
         val fs2 = _fs_from(dev)
         val st = fs2.stat_at(dev, "/FILE.O")
         assert_true(st.is_err())
-        expect(st.unwrap_err()).to_equal(-2)
+        expect(st.unwrap_err()).to_equal(-2)  # oracle: -2 — named expected value from the requirement
         step("cluster 15 is freed in the FAT — a fresh allocate_cluster can reclaim it")
         val alloc = fs2.allocate_cluster(dev)
         assert_true(alloc.is_ok())
 
     it "refuses to unlink a directory with EISDIR":
+        # @req: REQ-OS-KERNEL-001
+        step("Verify: refuses to unlink a directory with EISDIR")
         val dev = _make_dev()
         var fs = _fs_from(dev)
         assert_true(fs.mkdir_at(dev, "/usr").is_ok())
         val fs2 = _fs_from(dev)
         val r = fs2.unlink_at(dev, "/usr")
         assert_true(r.is_err())
-        expect(r.unwrap_err()).to_equal(-21)
+        expect(r.unwrap_err()).to_equal(-21)  # oracle: -21 — named expected value from the requirement
 
 describe "Fat32Filesystem.rmdir_at":
 
     it "removes an empty directory — a fresh readdir_at on the parent no longer lists it":
+        # @req: REQ-OS-KERNEL-001
+        step("Verify: removes an empty directory — a fresh readdir_at on the parent no longer lists it")
         val dev = _make_dev()
         var fs = _fs_from(dev)
         assert_true(fs.mkdir_at(dev, "/usr").is_ok())
@@ -251,9 +279,10 @@ describe "Fat32Filesystem.rmdir_at":
         val fs3 = _fs_from(dev)
         val names = fs3.readdir_at(dev, "/")
         assert_true(names.is_ok())
-        expect(names.unwrap().len()).to_equal(1)   # only FILE.O remains
+        expect(names.unwrap().len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "refuses ENOTEMPTY on a directory that holds more than '.' and '..'":
+        # @req: REQ-OS-KERNEL-001
         val dev = _make_dev()
         var fs = _fs_from(dev)
         assert_true(fs.mkdir_at(dev, "/usr").is_ok())
@@ -261,11 +290,11 @@ describe "Fat32Filesystem.rmdir_at":
         val fs2 = _fs_from(dev)
         val r = fs2.rmdir_at(dev, "/usr")
         assert_true(r.is_err())
-        expect(r.unwrap_err()).to_equal(-39)
+        expect(r.unwrap_err()).to_equal(-39)  # oracle: -39 — named expected value from the requirement
         step("SABOTAGE-equivalent negative control: the FILE.O path is not a directory")
         val r2 = fs2.rmdir_at(dev, "/FILE.O")
         assert_true(r2.is_err())
-        expect(r2.unwrap_err()).to_equal(-20)
+        expect(r2.unwrap_err()).to_equal(-20)  # oracle: -20 — named expected value from the requirement
 
 describe "deleting an LFN-named entry clears its whole slot chain":
 
@@ -282,6 +311,7 @@ describe "deleting an LFN-named entry clears its whole slot chain":
     # this scenario is about.
 
     it "unlink_at: a later 8.3 create does not inherit the deleted long name":
+        # @req: REQ-OS-KERNEL-001
         val dev = _make_dev()
         var fs = _fs_from(dev)
         step("create a name that needs an LFN chain (2 LFN slots + 1 8.3 alias)")
@@ -306,6 +336,8 @@ describe "deleting an LFN-named entry clears its whole slot chain":
         assert_true(fs3.stat_at(dev, "/verylongname.txt").is_err())
 
     it "rmdir_at: an LFN-named directory leaves no orphan slots behind":
+        # @req: REQ-OS-KERNEL-001
+        step("Verify: rmdir_at: an LFN-named directory leaves no orphan slots behind")
         val dev = _make_dev()
         var fs = _fs_from(dev)
         assert_true(fs.mkdir_at(dev, "/longdirectory").is_ok())
@@ -319,6 +351,8 @@ describe "deleting an LFN-named entry clears its whole slot chain":
         assert_false(names.contains("longdirectory"))
 
     it "rename_at: the old long name is fully unlinked, not left as an orphan chain":
+        # @req: REQ-OS-KERNEL-001
+        step("Verify: rename_at: the old long name is fully unlinked, not left as an orphan chain")
         val dev = _make_dev()
         var fs = _fs_from(dev)
         assert_true(fs.create_at(dev, "/originallongname.txt").is_ok())

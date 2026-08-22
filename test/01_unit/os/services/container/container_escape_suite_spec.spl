@@ -1,4 +1,22 @@
 """
+## Purpose and audience
+Purpose: Prove that escape/path: traversal out of the container root is refused.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+# @manual: primary
+REQ-OS-SERVICES-001
+doc/01_research/local/REQ-OS-SERVICES-001.md
+doc/03_plan/sys_test/REQ-OS-SERVICES-001.md
+doc/04_architecture/REQ-OS-SERVICES-001.md
+doc/05_design/REQ-OS-SERVICES-001.md
+"""
+# @req: REQ-OS-SERVICES-001
+
+"""
 # Container Escape Suite Specification
 
 **Feature IDs:** #OS-CTR-MDSOC
@@ -78,8 +96,12 @@ fn locked_policy() -> OciPolicy:
 # 1. PATH ESCAPE
 # ===========================================================================
 
+use std.spec.step
+
 describe "escape/path: traversal out of the container root is refused":
     it "a .. component in a resolved path is denied, never normalized away":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: a .. component in a resolved path is denied, never normalized away")
         val v = container_view_create("/containers/victim", [100u64])
         expect(container_view_path_decision(v, "/containers/victim/../../etc/shadow")).to_equal("deny")
         expect(container_view_path_decision(v, "/containers/victim/..")).to_equal("deny")
@@ -89,6 +111,8 @@ describe "escape/path: traversal out of the container root is refused":
         expect(container_view_path_decision(v, "/containers/victim/app/bin")).to_equal("allow")
 
     it "an absolute host path outside the root is denied":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: an absolute host path outside the root is denied")
         val v = container_view_create("/containers/victim", [100u64])
         expect(container_view_path_decision(v, "/etc/shadow")).to_equal("deny")
         expect(container_view_path_decision(v, "/")).to_equal("deny")
@@ -96,6 +120,8 @@ describe "escape/path: traversal out of the container root is refused":
         expect(container_view_path_decision(v, "/sys/firmware")).to_equal("deny")
 
     it "a sibling path that merely CONTAINS the root as a prefix is denied":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: a sibling path that merely CONTAINS the root as a prefix is denied")
         # Prefix confusion: "/rootfsevil" shares its first 8 characters with
         # "/rootfs" but is a DIFFERENT directory. A naive starts_with(root)
         # check hands the attacker the host filesystem.
@@ -108,6 +134,8 @@ describe "escape/path: traversal out of the container root is refused":
         expect(container_view_path_decision(v, "/rootfs/x")).to_equal("allow")
 
     it "an OCI mount destination that escapes the root is rejected by name":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: an OCI mount destination that escapes the root is rejected by name")
         val r = oci_import_checked(
             hostile_oci([OciMount(src: "tmpfs", dest: "/tmp/../../etc", mtype: "tmpfs")], ["cap.fs_read"], "/containers/evil", false),
             locked_policy()
@@ -116,9 +144,11 @@ describe "escape/path: traversal out of the container root is refused":
         expect(r.error).to_contain("escapes container root")
         # a rejected import yields an EMPTY spec — no partial authority leaks.
         expect(r.spec.root).to_equal("")
-        expect(r.spec.caps.len()).to_equal(0)
+        expect(r.spec.caps.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "an OCI mount SOURCE that escapes the bundle is rejected":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: an OCI mount SOURCE that escapes the bundle is rejected")
         # HOLE FOUND BY THIS SUITE (now fixed): only `dest` was checked for
         # "..", and the raw-host-mount check only caught ABSOLUTE sources — so
         # a RELATIVE traversal source walked through every 6.3 check.
@@ -131,6 +161,8 @@ describe "escape/path: traversal out of the container root is refused":
         expect(r.spec.root).to_equal("")
 
     it "an OCI container root of slash, empty, or dot-dot is rejected":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: an OCI container root of slash, empty, or dot-dot is rejected")
         # HOLE FOUND BY THIS SUITE (now fixed): root_path was copied verbatim
         # into ContainerSpec.root, so an untrusted bundle could name the HOST
         # root and container_view_create would confine the container to "/".
@@ -154,19 +186,23 @@ describe "escape/path: traversal out of the container root is refused":
 
 describe "escape/caps: authority can never be amplified":
     it "an OCI config cannot import a capability outside the policy ceiling":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: an OCI config cannot import a capability outside the policy ceiling")
         val r = oci_import_checked(
             hostile_oci([], ["cap.fs_read", "cap.sys_admin", "cap.kernel_module", "cap.raw_io"], "/containers/evil", false),
             locked_policy()
         )
         expect(r.ok).to_equal(true)
         # Only the ceiling-approved cap survives — absolute oracle on the set.
-        expect(r.spec.caps.len()).to_equal(1)
+        expect(r.spec.caps.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(r.spec.caps[0]).to_equal("cap.fs_read")
         expect(caps_is_subset(["cap.sys_admin"], r.spec.caps)).to_equal(false)
         expect(caps_is_subset(["cap.kernel_module"], r.spec.caps)).to_equal(false)
         expect(caps_is_subset(["cap.raw_io"], r.spec.caps)).to_equal(false)
 
     it "a spawn request never carries a capability the container was not granted":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: a spawn request never carries a capability the container was not granted")
         var w = ContainerWorld.new()
         val victim = w.sys_create("victim", "/containers/victim", [100u64], "sha256:base", 1024u64, 4096u64, 100u64, 64u64, ["cap.fs_read"], false)
         val req: SpawnRequest = w.sys_start(victim)
@@ -176,6 +212,8 @@ describe "escape/caps: authority can never be amplified":
         expect(req.isolation).to_equal("container")
 
     it "a crash-loop restart cannot re-request caps beyond the create-time ceiling":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: a crash-loop restart cannot re-request caps beyond the create-time ceiling")
         # HOLE FOUND BY THIS SUITE (now fixed): section 21 empties the pouch on
         # exit, so granted_caps could not bound the RE-acquisition —
         # sys_restart took whatever the caller named. A container that crashes
@@ -185,23 +223,25 @@ describe "escape/caps: authority can never be amplified":
         w.set_restart_policy(c, "on-failure", 3)
         val first: SpawnRequest = w.sys_start(c)
         w.post_monitor_report(c, "crashed", 137)
-        expect(w.sys_monitor()).to_equal(1)
-        expect(w.granted_of(c).len()).to_equal(0)
+        expect(w.sys_monitor()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(w.granted_of(c).len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         # the attack: come back asking for far more than was ever granted.
         val again: SpawnRequest = w.sys_restart(c, ["cap.fs_read", "cap.sys_admin", "cap.host_net"], "/containers/victim", [100u64], 1024u64, 4096u64, 100u64, 64u64)
-        expect(w.granted_of(c).len()).to_equal(1)
+        expect(w.granted_of(c).len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(w.granted_of(c)[0]).to_equal("cap.fs_read")
         expect(caps_is_subset(["cap.sys_admin"], again.caps)).to_equal(false)
         expect(caps_is_subset(["cap.host_net"], again.caps)).to_equal(false)
         expect(caps_is_subset(again.caps, w.ceiling_of(c))).to_equal(true)
 
     it "a crash-loop restart cannot widen the container root to the host":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: a crash-loop restart cannot widen the container root to the host")
         var w = ContainerWorld.new()
         val c = w.sys_create("victim", "/containers/victim", [100u64], "sha256:base", 1024u64, 4096u64, 100u64, 64u64, ["cap.fs_read"], false)
         w.set_restart_policy(c, "always", 3)
         val first: SpawnRequest = w.sys_start(c)
         w.post_monitor_report(c, "crashed", 9)
-        expect(w.sys_monitor()).to_equal(1)
+        expect(w.sys_monitor()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         val again: SpawnRequest = w.sys_restart(c, ["cap.fs_read"], "/", [100u64], 1024u64, 4096u64, 100u64, 64u64)
         expect(w.path_decision(c, "/etc/shadow")).to_equal("deny")
         expect(w.path_decision(c, "/")).to_equal("deny")
@@ -210,18 +250,22 @@ describe "escape/caps: authority can never be amplified":
         expect(w.ceiling_root_of(c)).to_equal("/containers/victim")
 
     it "a restart may NARROW its root, proving the clamp is not a blanket reset":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: a restart may NARROW its root, proving the clamp is not a blanket reset")
         var w = ContainerWorld.new()
         val c = w.sys_create("victim", "/containers/victim", [100u64], "sha256:base", 1024u64, 4096u64, 100u64, 64u64, ["cap.fs_read"], false)
         w.set_restart_policy(c, "always", 3)
         val first: SpawnRequest = w.sys_start(c)
         w.post_monitor_report(c, "exited", 0)
-        expect(w.sys_monitor()).to_equal(1)
+        expect(w.sys_monitor()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         val again: SpawnRequest = w.sys_restart(c, ["cap.fs_read"], "/containers/victim/inner", [100u64], 1024u64, 4096u64, 100u64, 64u64)
         expect(w.path_decision(c, "/containers/victim/inner/x")).to_equal("allow")
         # narrowed: the parent is now OUTSIDE this instance's view.
         expect(w.path_decision(c, "/containers/victim/other")).to_equal("deny")
 
     it "a pod member cannot inherit another pod member's capabilities":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: a pod member cannot inherit another pod member's capabilities")
         var w = ContainerWorld.new()
         val weak = w.sys_create("weak", "/containers/weak", [100u64], "sha256:base", 1024u64, 4096u64, 100u64, 64u64, ["cap.fs_read"], false)
         val strong = w.sys_create("strong", "/containers/strong", [200u64], "sha256:base", 1024u64, 4096u64, 100u64, 64u64, ["cap.fs_read", "cap.net_scoped", "cap.device_gpu"], false)
@@ -230,7 +274,7 @@ describe "escape/caps: authority can never be amplified":
         # manager offers. Caps must still not flow between them.
         w.sys_pod_wire(weak, pod, 1u32 | 2u32)
         w.sys_pod_wire(strong, pod, 1u32 | 2u32)
-        expect(w.granted_of(weak).len()).to_equal(1)
+        expect(w.granted_of(weak).len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(caps_is_subset(["cap.device_gpu"], w.granted_of(weak))).to_equal(false)
         expect(caps_is_subset(["cap.net_scoped"], w.granted_of(weak))).to_equal(false)
         val req: SpawnRequest = w.sys_start(weak)
@@ -242,6 +286,8 @@ describe "escape/caps: authority can never be amplified":
 
 describe "escape/namespace: one container cannot resolve another's world":
     it "a container cannot resolve a sibling container's path":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: a container cannot resolve a sibling container's path")
         var w = ContainerWorld.new()
         val a = w.sys_create("a", "/containers/a", [100u64], "sha256:base", 1024u64, 4096u64, 100u64, 64u64, ["cap.fs_read"], false)
         val b = w.sys_create("b", "/containers/b", [200u64], "sha256:base", 1024u64, 4096u64, 100u64, 64u64, ["cap.fs_read"], false)
@@ -251,6 +297,8 @@ describe "escape/namespace: one container cannot resolve another's world":
         expect(w.path_decision(a, "/containers/a/secret")).to_equal("allow")
 
     it "a container cannot resolve a sibling container's pid or a host pid":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: a container cannot resolve a sibling container's pid or a host pid")
         var w = ContainerWorld.new()
         val a = w.sys_create("a", "/containers/a", [100u64, 101u64], "sha256:base", 1024u64, 4096u64, 100u64, 64u64, ["cap.fs_read"], false)
         val b = w.sys_create("b", "/containers/b", [200u64], "sha256:base", 1024u64, 4096u64, 100u64, 64u64, ["cap.fs_read"], false)
@@ -262,6 +310,8 @@ describe "escape/namespace: one container cannot resolve another's world":
         expect(w.pid_decision(a, 100u64)).to_equal("allow")
 
     it "sharing a pod net and ipc does NOT widen the filesystem or pid view":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: sharing a pod net and ipc does NOT widen the filesystem or pid view")
         var w = ContainerWorld.new()
         val a = w.sys_create("a", "/containers/a", [100u64], "sha256:base", 1024u64, 4096u64, 100u64, 64u64, ["cap.fs_read"], false)
         val b = w.sys_create("b", "/containers/b", [200u64], "sha256:base", 1024u64, 4096u64, 100u64, 64u64, ["cap.fs_read"], false)
@@ -279,6 +329,8 @@ describe "escape/namespace: one container cannot resolve another's world":
         expect(w.path_decision(b, "/containers/a/secret")).to_equal("deny")
 
     it "the rootless default view resolves absolutely nothing":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: the rootless default view resolves absolutely nothing")
         val r = container_view_rootless()
         expect(container_view_path_decision(r, "/")).to_equal("deny")
         expect(container_view_path_decision(r, "/etc/shadow")).to_equal("deny")
@@ -289,6 +341,8 @@ describe "escape/namespace: one container cannot resolve another's world":
         expect(container_view_pid_decision(r, 999999u64)).to_equal("deny")
 
     it "a STOPPED container resolves nothing and holds no capability":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: a STOPPED container resolves nothing and holds no capability")
         var w = ContainerWorld.new()
         val c = w.sys_create("victim", "/containers/victim", [100u64], "sha256:base", 1024u64, 4096u64, 100u64, 64u64, ["cap.fs_read", "cap.net_scoped"], false)
         val req: SpawnRequest = w.sys_start(c)
@@ -299,12 +353,14 @@ describe "escape/namespace: one container cannot resolve another's world":
         expect(w.path_decision(c, "/containers/victim/app")).to_equal("deny")
         expect(w.path_decision(c, "/containers/victim")).to_equal("deny")
         expect(w.pid_decision(c, 100u64)).to_equal("deny")
-        expect(w.granted_of(c).len()).to_equal(0)
+        expect(w.granted_of(c).len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(w.view_of(c).net_handle).to_equal(0u64)
         expect(w.view_of(c).ipc_handle).to_equal(0u64)
         expect(w.svc_world_invariant()).to_equal(true)
 
     it "an EXITED container resolves nothing even after a pod wired it":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: an EXITED container resolves nothing even after a pod wired it")
         var w = ContainerWorld.new()
         val c = w.sys_create("victim", "/containers/victim", [100u64], "sha256:base", 1024u64, 4096u64, 100u64, 64u64, ["cap.fs_read"], false)
         val pod = w.create_pod(7000u64, 7001u64)
@@ -312,10 +368,10 @@ describe "escape/namespace: one container cannot resolve another's world":
         val req: SpawnRequest = w.sys_start(c)
         expect(w.view_of(c).net_handle).to_equal(7000u64)
         w.post_monitor_report(c, "exited", 0)
-        expect(w.sys_monitor()).to_equal(1)
+        expect(w.sys_monitor()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(w.path_decision(c, "/containers/victim/app")).to_equal("deny")
         expect(w.pid_decision(c, 100u64)).to_equal("deny")
-        expect(w.granted_of(c).len()).to_equal(0)
+        expect(w.granted_of(c).len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         # the shared pod endpoint was revoked too — no dangling net handle.
         expect(w.view_of(c).net_handle).to_equal(0u64)
         expect(w.svc_world_invariant()).to_equal(true)
@@ -326,6 +382,8 @@ describe "escape/namespace: one container cannot resolve another's world":
 
 describe "escape/leakage: the OCI edge never grants host net, devices, or hooks":
     it "every raw host-net capability token is stripped, ceiling or not":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: every raw host-net capability token is stripped, ceiling or not")
         # Ask under a ceiling that even LISTS the host-net tokens — the strip is
         # unconditional, so a mis-written policy cannot re-open host networking.
         val permissive = OciPolicy(
@@ -342,11 +400,13 @@ describe "escape/leakage: the OCI edge never grants host net, devices, or hooks"
             permissive
         )
         expect(r.ok).to_equal(true)
-        expect(r.spec.caps.len()).to_equal(1)
+        expect(r.spec.caps.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(r.spec.caps[0]).to_equal("cap.fs_read")
         expect(spec_is_isolated_net(r.spec)).to_equal(true)
 
     it "a device-node mount is rejected, including pseudo-device types":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: a device-node mount is rejected, including pseudo-device types")
         # HOLE FOUND BY THIS SUITE (now fixed): the check exact-matched mtype
         # "device", so "devtmpfs" carried /dev/mem straight through.
         val p = locked_policy()
@@ -365,6 +425,8 @@ describe "escape/leakage: the OCI edge never grants host net, devices, or hooks"
         expect(r_mknod.ok).to_equal(false)
 
     it "a raw host bind is rejected however the mount type is spelled":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: a raw host bind is rejected however the mount type is spelled")
         # HOLE FOUND BY THIS SUITE (now fixed): only mtype == "bind" was
         # checked, so "rbind" (and any unknown type) smuggled an absolute host
         # source in. The rule now keys off the absolute host SOURCE, not the
@@ -378,7 +440,7 @@ describe "escape/leakage: the OCI edge never grants host net, devices, or hooks"
         val r_rbind = oci_import_checked(
             hostile_oci([OciMount(src: "/etc", dest: "/etc", mtype: "rbind")], ["cap.fs_read"], "/containers/evil", false), p)
         expect(r_rbind.ok).to_equal(false)
-        expect(r_rbind.spec.caps.len()).to_equal(0)
+        expect(r_rbind.spec.caps.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
         val r_unknown = oci_import_checked(
             hostile_oci([OciMount(src: "/", dest: "/host", mtype: "overlay-future")], ["cap.fs_read"], "/containers/evil", false), p)
@@ -391,13 +453,17 @@ describe "escape/leakage: the OCI edge never grants host net, devices, or hooks"
         expect(r_tmpfs.ok).to_equal(true)
 
     it "lifecycle hook injection is rejected outright":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: lifecycle hook injection is rejected outright")
         val r = oci_import_checked(
             hostile_oci([], ["cap.fs_read"], "/containers/evil", true), locked_policy())
         expect(r.ok).to_equal(false)
         expect(r.error).to_contain("hooks")
-        expect(r.spec.caps.len()).to_equal(0)
+        expect(r.spec.caps.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "an unsigned image and an unpack bomb are both rejected":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: an unsigned image and an unpack bomb are both rejected")
         val p = locked_policy()
         var unsigned = hostile_oci([], ["cap.fs_read"], "/containers/evil", false)
         unsigned.digest = ""
@@ -423,6 +489,8 @@ describe "escape/leakage: the OCI edge never grants host net, devices, or hooks"
 
 describe "escape/storage: COW layers are never shared or resurrected":
     it "two containers off the SAME base get DISTINCT writable layers":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: two containers off the SAME base get DISTINCT writable layers")
         # HOLE FOUND BY THIS SUITE (now fixed): the COW id was
         # `digest + ":cow"`, so every container branched from one base was
         # handed the SAME writable layer id — in a real COW backend that is
@@ -438,6 +506,8 @@ describe "escape/storage: COW layers are never shared or resurrected":
         expect(lb).to_start_with("sha256:shared:cow")
 
     it "writes into one container's COW layer are invisible to its sibling":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: writes into one container's COW layer are invisible to its sibling")
         var w = ContainerWorld.new()
         val a = w.sys_create("a", "/containers/a", [100u64], "sha256:shared", 1024u64, 4096u64, 100u64, 64u64, ["cap.fs_read"], false)
         val b = w.sys_create("b", "/containers/b", [200u64], "sha256:shared", 1024u64, 4096u64, 100u64, 64u64, ["cap.fs_read"], false)
@@ -450,6 +520,8 @@ describe "escape/storage: COW layers are never shared or resurrected":
         expect(w.snapshot_used_of(a)).to_equal(1000u64)
 
     it "a container cannot write past its own COW quota":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: a container cannot write past its own COW quota")
         var w = ContainerWorld.new()
         val a = w.sys_create("a", "/containers/a", [100u64], "sha256:shared", 1024u64, 100u64, 100u64, 64u64, ["cap.fs_read"], false)
         expect(w.snapshot_write_of(a, 100u64)).to_equal(true)
@@ -458,6 +530,8 @@ describe "escape/storage: COW layers are never shared or resurrected":
         expect(w.snapshot_used_of(a)).to_equal(100u64)
 
     it "a removed container's layers are unreachable and its refcount is gone":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: a removed container's layers are unreachable and its refcount is gone")
         var w = ContainerWorld.new()
         val a = w.sys_create("a", "/containers/a", [100u64], "sha256:dead", 1024u64, 4096u64, 100u64, 64u64, ["cap.fs_read"], false)
         expect(w.store_add_layer("sha256:dead", "", 512u64)).to_equal(true)
@@ -465,7 +539,7 @@ describe "escape/storage: COW layers are never shared or resurrected":
         expect(w.layer_refcount_of("sha256:dead")).to_equal(1)
         # the container exits and is collected.
         w.post_monitor_report(a, "exited", 0)
-        expect(w.sys_monitor()).to_equal(1)
+        expect(w.sys_monitor()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         val reclaimed = w.sys_gc()
         expect(w.was_reclaimed("sha256:dead")).to_equal(true)
         expect(w.store_has_layer("sha256:dead")).to_equal(false)
@@ -474,9 +548,11 @@ describe "escape/storage: COW layers are never shared or resurrected":
         # cannot walk back to a reclaimed layer.
         expect(w.snapshot_live_of(a)).to_equal(false)
         expect(w.snapshot_layer_of(a)).to_equal("")
-        expect(w.live_snapshot_count()).to_equal(0)
+        expect(w.live_snapshot_count()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "GC never reclaims a layer a LIVE container still references":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: GC never reclaims a layer a LIVE container still references")
         var w = ContainerWorld.new()
         val live = w.sys_create("live", "/containers/live", [100u64], "sha256:keep", 1024u64, 4096u64, 100u64, 64u64, ["cap.fs_read"], false)
         val dead = w.sys_create("dead", "/containers/dead", [200u64], "sha256:drop", 1024u64, 4096u64, 100u64, 64u64, ["cap.fs_read"], false)
@@ -485,7 +561,7 @@ describe "escape/storage: COW layers are never shared or resurrected":
         val r1: SpawnRequest = w.sys_start(live)
         val r2: SpawnRequest = w.sys_start(dead)
         w.post_monitor_report(dead, "exited", 0)
-        expect(w.sys_monitor()).to_equal(1)
+        expect(w.sys_monitor()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         val reclaimed = w.sys_gc()
         # the dead container's base went; the live container's base survived.
         expect(w.was_reclaimed("sha256:drop")).to_equal(true)
@@ -494,6 +570,8 @@ describe "escape/storage: COW layers are never shared or resurrected":
         expect(w.snapshot_live_of(live)).to_equal(true)
 
     it "a manager restart tears down every brokered grant, live or not":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: a manager restart tears down every brokered grant, live or not")
         # A crashed manager must not leave containers holding the authority it
         # vouched for and can no longer supervise.
         var w = ContainerWorld.new()
@@ -509,8 +587,8 @@ describe "escape/storage: COW layers are never shared or resurrected":
         # service-level: no inherited grant.
         expect(w.svc_holds_grants()).to_equal(false)
         # world-level: no container kept what the dead manager brokered.
-        expect(w.granted_of(a).len()).to_equal(0)
-        expect(w.granted_of(b).len()).to_equal(0)
+        expect(w.granted_of(a).len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(w.granted_of(b).len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(w.path_decision(a, "/containers/a/app")).to_equal("deny")
         expect(w.path_decision(b, "/containers/b/app")).to_equal("deny")
 
@@ -527,6 +605,8 @@ describe "escape/storage: COW layers are never shared or resurrected":
 
 describe "escape/calibration: the oracles do detect a real breach":
     it "CALIBRATION — a container seeded with a global root DOES escape":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: CALIBRATION — a container seeded with a global root DOES escape")
         var w = ContainerWorld.new()
         # seed_global_root: true is the defect injection — the container is
         # handed "/" instead of its declared root.
@@ -544,6 +624,8 @@ describe "escape/calibration: the oracles do detect a real breach":
         expect(w.path_decision(breached, "/etc/../etc/shadow")).to_equal("deny")
 
     it "CALIBRATION — with the traversal check off, the escape mount IMPORTS":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: CALIBRATION — with the traversal check off, the escape mount IMPORTS")
         val p = locked_policy()
         val attack = hostile_oci([OciMount(src: "tmpfs", dest: "/tmp/../../etc", mtype: "tmpfs")], ["cap.fs_read"], "/containers/evil", false)
         # Production path (check_traversal: true) rejects — section 1 proves it.
@@ -557,6 +639,8 @@ describe "escape/calibration: the oracles do detect a real breach":
         expect(breached.spec.root).to_equal("/containers/evil")
 
     it "CALIBRATION — a stale global-root view WOULD be reported by the detector":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: CALIBRATION — a stale global-root view WOULD be reported by the detector")
         # svc_world_invariant is the section-21 detector several attacks above
         # assert `true` on. Show the primitive it consults reports a breach, so
         # the detector is not a constant-true.

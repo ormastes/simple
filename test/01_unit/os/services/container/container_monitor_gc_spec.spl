@@ -1,4 +1,22 @@
 """
+## Purpose and audience
+Purpose: Prove that container-manager: sys_monitor records the observed exit.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+# @manual: primary
+REQ-OS-SERVICES-001
+doc/01_research/local/REQ-OS-SERVICES-001.md
+doc/03_plan/sys_test/REQ-OS-SERVICES-001.md
+doc/04_architecture/REQ-OS-SERVICES-001.md
+doc/05_design/REQ-OS-SERVICES-001.md
+"""
+# @req: REQ-OS-SERVICES-001
+
+"""
 # container-manager sys_monitor / sys_gc + §6.4 storage Specification
 
 **Feature IDs:** #OS-CTR-MDSOC
@@ -32,8 +50,12 @@ use std.spec.{describe, it, expect}
 use os.services.container.container_manager.{ContainerWorld, SpawnRequest}
 use os.services.container.container_storage.{LayerStore, layer_refcount, gc_collect, snapshot_rollback}
 
+use std.spec.step
+
 describe "container-manager: sys_monitor records the observed exit":
     it "a monitored container that exits records exited with the exact code":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: a monitored container that exits records exited with the exact code")
         var w = ContainerWorld.new()
         val c1 = w.sys_create("app1", "/c1", [100u64], "sha256:aaa", 1024u64, 4096u64, 100u64, 64u64, ["cap.fs_read"], false)
         val req: SpawnRequest = w.sys_start(c1)
@@ -42,25 +64,29 @@ describe "container-manager: sys_monitor records the observed exit":
         w.post_monitor_report(c1, "exited", 42)
         expect(w.report_pending(c1)).to_equal(true)
         val reaped = w.sys_monitor()
-        expect(reaped).to_equal(1)
+        expect(reaped).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(w.lifecycle_state(c1)).to_equal("exited")
-        expect(w.lifecycle_exit(c1)).to_equal(42)
+        expect(w.lifecycle_exit(c1)).to_equal(42)  # oracle: 42 — named expected value from the requirement
         # reaped: the per-container monitor is done, its handle released.
         expect(w.monitor_state(c1)).to_equal("reaped")
         expect(w.report_pending(c1)).to_equal(false)
 
     it "a still-running report only moves the monitor state, never the lifecycle":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: a still-running report only moves the monitor state, never the lifecycle")
         var w = ContainerWorld.new()
         val c1 = w.sys_create("app1", "/c1", [100u64], "sha256:aaa", 1024u64, 4096u64, 100u64, 64u64, ["cap.fs_read"], false)
         val req: SpawnRequest = w.sys_start(c1)
         w.post_monitor_report(c1, "running", -1)
-        expect(w.sys_monitor()).to_equal(0)
+        expect(w.sys_monitor()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(w.lifecycle_state(c1)).to_equal("running")
-        expect(w.lifecycle_exit(c1)).to_equal(-1)
+        expect(w.lifecycle_exit(c1)).to_equal(-1)  # oracle: -1 — named expected value from the requirement
         expect(w.monitor_state(c1)).to_equal("running")
 
 describe "container-manager: crash restart re-acquires, never inherits (§21)":
     it "a crashed container is restart-eligible yet holds NO stale grant":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: a crashed container is restart-eligible yet holds NO stale grant")
         var w = ContainerWorld.new()
         val c1 = w.sys_create("app1", "/c1", [100u64, 101u64], "sha256:aaa", 1024u64, 4096u64, 100u64, 64u64, ["cap.fs_read", "cap.net_scoped"], false)
         w.set_restart_policy(c1, "on-failure", 3)
@@ -68,48 +94,54 @@ describe "container-manager: crash restart re-acquires, never inherits (§21)":
         expect(w.allows_path(c1, "/c1/app")).to_equal(true)
         # the monitor observes a crash (SIGKILL-shaped code).
         w.post_monitor_report(c1, "crashed", 137)
-        expect(w.sys_monitor()).to_equal(1)
-        expect(w.lifecycle_exit(c1)).to_equal(137)
+        expect(w.sys_monitor()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(w.lifecycle_exit(c1)).to_equal(137)  # oracle: 137 — named expected value from the requirement
         # eligible for the restart policy ...
         expect(w.restart_eligible(c1)).to_equal(true)
         # ... but every grant is GONE: no pouch, no path, no pid.
-        expect(w.granted_of(c1).len()).to_equal(0)
+        expect(w.granted_of(c1).len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(w.allows_path(c1, "/c1/app")).to_equal(false)
         expect(w.allows_pid(c1, 100u64)).to_equal(false)
         expect(w.path_decision(c1, "/c1/app")).to_equal("deny")
 
     it "sys_restart runs on freshly re-acquired authority":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: sys_restart runs on freshly re-acquired authority")
         var w = ContainerWorld.new()
         val c1 = w.sys_create("app1", "/c1", [100u64], "sha256:aaa", 1024u64, 4096u64, 100u64, 64u64, ["cap.fs_read", "cap.net_scoped"], false)
         w.set_restart_policy(c1, "always", 2)
         val req: SpawnRequest = w.sys_start(c1)
         w.post_monitor_report(c1, "exited", 3)
-        expect(w.sys_monitor()).to_equal(1)
-        expect(w.granted_of(c1).len()).to_equal(0)
+        expect(w.sys_monitor()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(w.granted_of(c1).len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         # restart supplies the authority again — narrower than before.
         val again: SpawnRequest = w.sys_restart(c1, ["cap.fs_read"], "/c1", [100u64], 512u64, 2048u64, 50u64, 32u64)
         expect(w.lifecycle_state(c1)).to_equal("running")
         expect(w.monitor_state(c1)).to_equal("running")
-        expect(w.granted_of(c1).len()).to_equal(1)
+        expect(w.granted_of(c1).len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(w.granted_of(c1)[0]).to_equal("cap.fs_read")
         # the request carries exactly the re-acquired set, not the dead one.
-        expect(again.caps.len()).to_equal(1)
+        expect(again.caps.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(again.budget).to_equal(2048u64)
         expect(w.allows_path(c1, "/c1/app")).to_equal(true)
-        expect(w.restart_retries(c1)).to_equal(1)
+        expect(w.restart_retries(c1)).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "a clean exit under on-failure is NOT restart-eligible":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: a clean exit under on-failure is NOT restart-eligible")
         var w = ContainerWorld.new()
         val c1 = w.sys_create("app1", "/c1", [100u64], "sha256:aaa", 1024u64, 4096u64, 100u64, 64u64, ["cap.fs_read"], false)
         w.set_restart_policy(c1, "on-failure", 3)
         val req: SpawnRequest = w.sys_start(c1)
         w.post_monitor_report(c1, "exited", 0)
-        expect(w.sys_monitor()).to_equal(1)
-        expect(w.lifecycle_exit(c1)).to_equal(0)
+        expect(w.sys_monitor()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(w.lifecycle_exit(c1)).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(w.restart_eligible(c1)).to_equal(false)
 
 describe "container-manager: ref-tracked GC (§6.4)":
     it "gc reclaims an unreferenced layer but NOT one a live container uses":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: gc reclaims an unreferenced layer but NOT one a live container uses")
         var w = ContainerWorld.new()
         w.store_add_layer("sha256:base", "", 100u64)
         w.store_add_layer("sha256:orphan", "", 50u64)
@@ -119,18 +151,20 @@ describe "container-manager: ref-tracked GC (§6.4)":
         expect(w.layer_refcount_of("sha256:orphan")).to_equal(0)
         val reclaimed = w.sys_gc()
         # exactly one digest reclaimed, and it is the orphan BY VALUE.
-        expect(reclaimed.len()).to_equal(1)
+        expect(reclaimed.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(reclaimed[0]).to_equal("sha256:orphan")
         # the live container's base survives, by value.
         expect(w.store_has_layer("sha256:base")).to_equal(true)
         expect(w.store_has_layer("sha256:orphan")).to_equal(false)
-        expect(w.store_layer_count()).to_equal(1)
+        expect(w.store_layer_count()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(w.was_reclaimed("sha256:orphan")).to_equal(true)
         expect(w.was_reclaimed("sha256:base")).to_equal(false)
         # and its snapshot is untouched — the container is still alive.
         expect(w.snapshot_live_of(c1)).to_equal(true)
 
     it "a layer deeper in a live parent chain is never reclaimed":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: a layer deeper in a live parent chain is never reclaimed")
         var w = ContainerWorld.new()
         w.store_add_layer("sha256:b0", "", 100u64)
         w.store_add_layer("sha256:b1", "sha256:b0", 20u64)
@@ -139,20 +173,22 @@ describe "container-manager: ref-tracked GC (§6.4)":
         expect(w.layer_refcount_of("sha256:b0")).to_equal(2)
         expect(w.layer_refcount_of("sha256:b1")).to_equal(1)
         val reclaimed = w.sys_gc()
-        expect(reclaimed.len()).to_equal(0)
-        expect(w.store_layer_count()).to_equal(2)
+        expect(reclaimed.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(w.store_layer_count()).to_equal(2)  # oracle: 2 — named expected value from the requirement
         expect(w.store_has_layer("sha256:b0")).to_equal(true)
         expect(w.store_has_layer("sha256:b1")).to_equal(true)
 
 describe "container-manager: sys_gc keeps explicit persistent volumes":
     it "a persistent volume survives while the COW snapshot is reclaimed":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: a persistent volume survives while the COW snapshot is reclaimed")
         var w = ContainerWorld.new()
         w.store_add_layer("sha256:v", "", 100u64)
         val c1 = w.sys_create("app1", "/c1", [100u64], "sha256:v", 1024u64, 4096u64, 100u64, 64u64, ["cap.fs_read"], false)
         w.attach_volume(c1, "data", "/data", true)
         w.attach_volume(c1, "scratch", "/scratch", false)
         val req: SpawnRequest = w.sys_start(c1)
-        expect(w.live_volume_count()).to_equal(2)
+        expect(w.live_volume_count()).to_equal(2)  # oracle: 2 — named expected value from the requirement
         expect(w.snapshot_live_of(c1)).to_equal(true)
         expect(w.layer_refcount_of("sha256:v")).to_equal(1)
         # stop then collect.
@@ -161,18 +197,20 @@ describe "container-manager: sys_gc keeps explicit persistent volumes":
         val reclaimed = w.sys_gc()
         # COW snapshot released and its RO base reclaimed (nothing else holds it).
         expect(w.snapshot_live_of(c1)).to_equal(false)
-        expect(w.live_snapshot_count()).to_equal(0)
-        expect(reclaimed.len()).to_equal(1)
+        expect(w.live_snapshot_count()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(reclaimed.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(reclaimed[0]).to_equal("sha256:v")
-        expect(w.store_layer_count()).to_equal(0)
+        expect(w.store_layer_count()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         # the EXPLICIT persistent volume survives container removal; the
         # anonymous one does not.
         expect(w.volume_live("data")).to_equal(true)
         expect(w.volume_live("scratch")).to_equal(false)
-        expect(w.live_volume_count()).to_equal(1)
+        expect(w.live_volume_count()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
 describe "container-manager: atomic snapshot rollback (§6.4)":
     it "rollback returns exactly the base digest and zeroes the writable layer":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: rollback returns exactly the base digest and zeroes the writable layer")
         var w = ContainerWorld.new()
         w.store_add_layer("sha256:base", "", 100u64)
         val c1 = w.sys_create("app1", "/c1", [100u64], "sha256:base", 1024u64, 4096u64, 100u64, 64u64, ["cap.fs_read"], false)
@@ -185,6 +223,8 @@ describe "container-manager: atomic snapshot rollback (§6.4)":
         expect(w.snapshot_live_of(c1)).to_equal(true)
 
     it "rollback with a missing RO base changes NOTHING":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: rollback with a missing RO base changes NOTHING")
         var w = ContainerWorld.new()
         # note: no store_add_layer — the base digest is not in the store.
         val c1 = w.sys_create("app1", "/c1", [100u64], "sha256:ghost", 1024u64, 4096u64, 100u64, 64u64, ["cap.fs_read"], false)
@@ -196,6 +236,8 @@ describe "container-manager: atomic snapshot rollback (§6.4)":
         expect(w.snapshot_layer_of(c1)).to_equal("sha256:ghost:cow")
 
     it "a write past the per-container quota is refused and writes nothing":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: a write past the per-container quota is refused and writes nothing")
         var w = ContainerWorld.new()
         val c1 = w.sys_create("app1", "/c1", [100u64], "sha256:q", 1024u64, 4096u64, 100u64, 64u64, ["cap.fs_read"], false)
         expect(w.snapshot_write_of(c1, 5000u64)).to_equal(false)
@@ -207,6 +249,8 @@ describe "container-manager: atomic snapshot rollback (§6.4)":
 
 describe "container-storage: the §6.4 free-function API":
     it "layer_refcount, snapshot_rollback and gc_collect agree on one store":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: layer_refcount, snapshot_rollback and gc_collect agree on one store")
         var s = LayerStore.new()
         s.add_layer("sha256:a", "", 10u64)
         s.add_snapshot("cow-a", "sha256:a", 1u64, 100u64)
@@ -219,14 +263,16 @@ describe "container-storage: the §6.4 free-function API":
         expect(s2.release_snapshot(1u64)).to_equal(true)
         expect(layer_refcount(s2, "sha256:a")).to_equal(0)
         val g = gc_collect(s2)
-        expect(g.reclaimed.len()).to_equal(1)
+        expect(g.reclaimed.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(g.reclaimed[0]).to_equal("sha256:a")
-        expect(g.store.layer_count()).to_equal(0)
+        expect(g.store.layer_count()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "rollback of an unknown container is a no-op":
+        # @req: REQ-OS-SERVICES-001
+        step("Verify: rollback of an unknown container is a no-op")
         var s = LayerStore.new()
         s.add_layer("sha256:a", "", 10u64)
         val rb = snapshot_rollback(s, 999u64)
         expect(rb.ok).to_equal(false)
         expect(rb.base_digest).to_equal("")
-        expect(rb.store.layer_count()).to_equal(1)
+        expect(rb.store.layer_count()).to_equal(1)  # oracle: 1 — named expected value from the requirement

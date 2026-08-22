@@ -1,3 +1,21 @@
+"""
+## Purpose and audience
+Purpose: Prove that X25519MLKEM768 cache lifecycle negative branches.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+# @manual: primary
+REQ-OS-CRYPTO-001
+doc/01_research/local/REQ-OS-CRYPTO-001.md
+doc/03_plan/sys_test/REQ-OS-CRYPTO-001.md
+doc/04_architecture/REQ-OS-CRYPTO-001.md
+doc/05_design/REQ-OS-CRYPTO-001.md
+"""
+# @req: REQ-OS-CRYPTO-001
+
 # @req NFR-012
 use std.spec.*
 use std.sffi.io.{file_read_text}
@@ -42,8 +60,11 @@ fn _bound_identity() -> X25519MlKem768CacheIdentity:
         case Ok(value): value
         case Err(reason): fail(reason)
 
+use std.spec.step
+
 describe "X25519MLKEM768 cache lifecycle negative branches":
     it "should NFR-012 reject absent provenance and an unbound device":
+        # @req: REQ-OS-CRYPTO-001
         step("Attempt admission without provenance and device binding before admission")
         val absent = x25519_mlkem768_cache_identity("cuda", "", "")
         match x25519_mlkem768_cache_bind(
@@ -58,6 +79,7 @@ describe "X25519MLKEM768 cache lifecycle negative branches":
                 "x25519mlkem768-cache-unbound")
 
     it "should NFR-012 rebind idempotently and reject invalid devices":
+        # @req: REQ-OS-CRYPTO-001
         step("Repeat valid binds and contrast them with zero or changed devices")
         val bound = _bound_identity()
         val rebound = match x25519_mlkem768_cache_bind(
@@ -81,6 +103,7 @@ describe "X25519MLKEM768 cache lifecycle negative branches":
         expect(same_device.key_digest).to_equal(device_bound.key_digest)
 
     it "should NFR-012 reject bound admission-digest corruption":
+        # @req: REQ-OS-CRYPTO-001
         step("Mutate the immutable admission digest before rebinding")
         var corrupted = _bound_identity()
         corrupted.admission_digest = _OTHER_DIGEST
@@ -92,6 +115,7 @@ describe "X25519MLKEM768 cache lifecycle negative branches":
                 "x25519mlkem768-cache-identity-integrity-mismatch")
 
     it "should reject both bound integrity fields through their independent paths":
+        # @req: REQ-OS-CRYPTO-001
         step("Corrupt the execution digest on reuse and admission digest on device bind")
         var bad_key = _bound_identity()
         bad_key.key_digest = _OTHER_DIGEST
@@ -109,6 +133,7 @@ describe "X25519MLKEM768 cache lifecycle negative branches":
                 "x25519mlkem768-cache-identity-integrity-mismatch")
 
     it "should NFR-012 reject corrupt index operations without an executor":
+        # @req: REQ-OS-CRYPTO-001
         step("Probe invalid hit positions and empty removal paths")
         var index = X25519MlKem768AcceleratorCacheIndex.create(2)
         expect(index.validate_hit(-1, _EXECUTION_DIGEST)).to_equal(
@@ -119,6 +144,7 @@ describe "X25519MLKEM768 cache lifecycle negative branches":
         expect(index.remove("cuda", _CONFIG_DIGEST).backend).to_equal("")
 
     it "should NFR-012 reject invalid and duplicate index insertions":
+        # @req: REQ-OS-CRYPTO-001
         step("Insert invalid capacities backends keys and a duplicate admission row")
         var zero = X25519MlKem768AcceleratorCacheIndex.create(0)
         expect(zero.insert(
@@ -141,9 +167,10 @@ describe "X25519MLKEM768 cache lifecycle negative branches":
             "x25519mlkem768-cache-index-duplicate")
         expect(index.remove(
             "cuda", _CONFIG_DIGEST).admission_digest).to_equal(_CONFIG_DIGEST)
-        expect(index.size()).to_equal(0)
+        expect(index.size()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "should NFR-012 reject all providers after cache shutdown before hardware":
+        # @req: REQ-OS-CRYPTO-001
         step("Close the owner before proposing CUDA Metal and Vulkan executors")
         val cache = match X25519MlKem768AcceleratorCache.create(2):
             case Ok(value): value
@@ -177,6 +204,7 @@ describe "X25519MLKEM768 cache lifecycle negative branches":
         expect(vulkan.closed).to_be(true)
 
     it "should retain unknown-completion owners before removing cache metadata":
+        # @req: REQ-OS-CRYPTO-001
         step("Inspect transactional GPU eviction invalidation and shutdown ordering")
         val source = file_read_text(
             "src/os/crypto/x25519_mlkem768/accelerator_cache.spl")
@@ -212,19 +240,19 @@ describe "X25519MLKEM768 cache lifecycle negative branches":
         val cache = match X25519MlKem768AcceleratorCache.create(1):
             case Ok(value): value
             case Err(reason): fail(reason)
-        expect(cache.quarantined_owner_count()).to_equal(0)
+        expect(cache.quarantined_owner_count()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(cache.cleanup_pending()).to_be(false)
         val open_retry = cache.retry_quarantined_cleanup()
-        expect(open_retry.attempted).to_equal(0)
-        expect(open_retry.pending).to_equal(0)
+        expect(open_retry.attempted).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(open_retry.pending).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(open_retry.vulkan_reason).to_equal("x25519mlkem768-cache-open")
         cache.shutdown()
         expect(cache.closed).to_be(true)
-        expect(cache.quarantined_owner_count()).to_equal(0)
+        expect(cache.quarantined_owner_count()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         val closed_retry = cache.retry_quarantined_cleanup()
-        expect(closed_retry.attempted).to_equal(0)
-        expect(closed_retry.reaped).to_equal(0)
-        expect(closed_retry.pending).to_equal(0)
+        expect(closed_retry.attempted).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(closed_retry.reaped).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(closed_retry.pending).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(closed_retry.cuda_reason).to_equal(
             "cuda-quarantine-not-pending")
         expect(closed_retry.metal_reason).to_equal(
@@ -233,6 +261,7 @@ describe "X25519MLKEM768 cache lifecycle negative branches":
             "vulkan-quarantine-not-pending")
 
     it "should retain exact Vulkan dependencies until bounded recovery succeeds":
+        # @req: REQ-OS-CRYPTO-001
         step("Inspect ownership transfer retry ordering and unsupported API reasons")
         val session_source = file_read_text(
             "src/lib/gc_async_mut/crypto_accel/vulkan_session.spl")
@@ -263,6 +292,7 @@ describe "X25519MLKEM768 cache lifecycle negative branches":
         expect(cache_source).to_contain("session.retry_terminal_completion()")
 
     it "should NFR-012 reject already-warmed provider state before hardware":
+        # @req: REQ-OS-CRYPTO-001
         step("Present preinitialized executors without transferring ownership")
         val cache = match X25519MlKem768AcceleratorCache.create(2):
             case Ok(value): value
@@ -287,7 +317,7 @@ describe "X25519MLKEM768 cache lifecycle negative branches":
             vulkan, X25519_MLKEM768_IMPLEMENTATION_VERSION,
             X25519_MLKEM768_PROFILE_VERSION,
             _CONFIG_DIGEST).is_err()).to_be(true)
-        expect(cache.admission_failures).to_equal(3)
+        expect(cache.admission_failures).to_equal(3)  # oracle: 3 — named expected value from the requirement
         cuda.device_identity = 0
         metal.session.initialized = false
         vulkan.session.initialized = false
@@ -297,6 +327,7 @@ describe "X25519MLKEM768 cache lifecycle negative branches":
         cache.shutdown()
 
     it "should NFR-012 reject missing artifacts during provider contract binding":
+        # @req: REQ-OS-CRYPTO-001
         step("Bind each provider contract against deliberately absent artifacts")
         var cuda = X25519MlKem768CudaNttExecutor.create("missing.ptx")
         expect(cuda.bind_cache_contract(
@@ -320,6 +351,7 @@ describe "X25519MLKEM768 cache lifecycle negative branches":
         vulkan.shutdown()
 
     it "should reject closed provider bind and warmup paths before hardware":
+        # @req: REQ-OS-CRYPTO-001
         step("Close each provider before contract binding and readiness checks")
         var cuda = X25519MlKem768CudaNttExecutor.create("missing.ptx")
         cuda.shutdown()
@@ -346,6 +378,7 @@ describe "X25519MLKEM768 cache lifecycle negative branches":
         expect(vulkan.warmup()).to_equal("vulkan-ntt-executor-closed")
 
     it "should reject source mismatch extension and uncertain completion before hardware":
+        # @req: REQ-OS-CRYPTO-001
         step("Mutate admitted source identities and pre-session lifecycle state")
         var cuda_source = X25519MlKem768CudaNttExecutor.create(
             "src/os/crypto/x25519_mlkem768/kernels/ml_kem_ntt_forward.ptx")

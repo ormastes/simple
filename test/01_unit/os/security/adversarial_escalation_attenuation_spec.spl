@@ -1,4 +1,22 @@
 """
+## Purpose and audience
+Purpose: Prove that adversarial escalation: child cannot exceed parent authority.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+# @manual: primary
+REQ-OS-SECURITY-001
+doc/01_research/local/REQ-OS-SECURITY-001.md
+doc/03_plan/sys_test/REQ-OS-SECURITY-001.md
+doc/04_architecture/REQ-OS-SECURITY-001.md
+doc/05_design/REQ-OS-SECURITY-001.md
+"""
+# @req: REQ-OS-SECURITY-001
+
+"""
 # Adversarial: Privilege Escalation + Attenuation Bypass (OCap Hardening)
 
 **Feature IDs:** #OS-OCAP-HARDEN
@@ -76,10 +94,14 @@ fn make_parent() -> CapabilitySet:
 # Group 1 — Privilege escalation attempts (must fail closed)
 # ============================================================================
 
+use std.spec.step
+
 describe "adversarial escalation: child cannot exceed parent authority":
     """Every escalation attempt is REJECTED and the illicit cap stays absent."""
 
     it "a multi-grant recipe drops the ONE cap the parent lacks (FileWrite)":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: a multi-grant recipe drops the ONE cap the parent lacks (FileWrite)")
         val spec = SpawnSpec(
             image_hash: IMG,
             grants: [
@@ -90,19 +112,23 @@ describe "adversarial escalation: child cannot exceed parent authority":
             isolation: "sandbox", budget: 0u64
         )
         val m = spawn_with_cspace(make_parent(), spec, 20u64, 1000u64, 300u64)
-        expect(m.rejected).to_equal(1)
+        expect(m.rejected).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(m.caps.has(_tickets())).to_equal(true)
         expect(m.caps.has(_calendar_ro())).to_equal(true)
         expect(m.caps.has(_fwrite_var())).to_equal(false)
 
     it "fork of an EMPTY pouch stays empty (no ambient authority gained)":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: fork of an EMPTY pouch stays empty (no ambient authority gained)")
         val fk = fork_cspace(CapabilitySet.empty(), 30u64, 2000u64, 400u64)
-        expect(fk.caps.caps.len()).to_equal(0)
+        expect(fk.caps.caps.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(fk.caps.is_pledged).to_equal(true)
         expect(fk.caps.has(CapabilityKind.ProcessSpawn)).to_equal(false)
         expect(fk.caps.has(_fread_var())).to_equal(false)
 
     it "an ambient full() parent authorizes NOTHING through spawn_with_cspace":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: an ambient full() parent authorizes NOTHING through spawn_with_cspace")
         val spec = SpawnSpec(
             image_hash: IMG,
             grants: [
@@ -112,12 +138,14 @@ describe "adversarial escalation: child cannot exceed parent authority":
             isolation: "sandbox", budget: 0u64
         )
         val m = spawn_with_cspace(spawn_full(), spec, 21u64, 3000u64, 500u64)
-        expect(m.rejected).to_equal(2)
-        expect(m.caps.caps.len()).to_equal(0)
+        expect(m.rejected).to_equal(2)  # oracle: 2 — named expected value from the requirement
+        expect(m.caps.caps.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(m.caps.has(_tickets())).to_equal(false)
         expect(m.caps.has(_calendar_ro())).to_equal(false)
 
     it "a subrole cannot WIDEN its own rights (parent ro, mask asks rw)":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: a subrole cannot WIDEN its own rights (parent ro, mask asks rw)")
         var mgr = CapabilityManager.new()
         val user = mgr.login("alice", CapabilitySet(caps: [_tok(_calendar_ro(), 1u64, 60u64, 2)], is_pledged: true))
         val sub = mgr.open_subrole(user, [_calendar_rw()])
@@ -127,6 +155,8 @@ describe "adversarial escalation: child cannot exceed parent authority":
         expect(sub.current.has(_calendar_ro())).to_equal(false)
 
     it "a subrole cannot REGAIN a cap the parent never held (FileWrite)":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: a subrole cannot REGAIN a cap the parent never held (FileWrite)")
         var mgr = CapabilityManager.new()
         val user = mgr.login("bob", CapabilitySet(caps: [_tok(_fread_var(), 1u64, 61u64, 2)], is_pledged: true))
         val sub = mgr.open_subrole(user, [_fwrite_var()])
@@ -137,6 +167,8 @@ describe "adversarial escalation: session containment (create_child_session)":
     ambient-full ceiling trick that once vacuously passed capset_subset."""
 
     it "REGRESSION GUARD: an ambient-full ceiling under a narrow parent is REJECTED":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: REGRESSION GUARD: an ambient-full ceiling under a narrow parent is REJECTED")
         var mgr = CapabilityManager.new()
         val narrow = CapabilitySet(caps: [_tok(_fread_var(), 1u64, 10u64, 2)], is_pledged: true)
         val root = mgr.login("root", narrow)
@@ -145,6 +177,8 @@ describe "adversarial escalation: session containment (create_child_session)":
         expect(esc).to_equal(nil)
 
     it "a child whose CURRENT exceeds its own ceiling is REJECTED":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: a child whose CURRENT exceeds its own ceiling is REJECTED")
         var mgr = CapabilityManager.new()
         val root = mgr.login("root", CapabilitySet(caps: [_tok(_fread_var(), 1u64, 11u64, 2), _tok(_fwrite_var(), 2u64, 12u64, 2)], is_pledged: true))
         val ceil = CapabilitySet(caps: [_tok(_fread_var(), 3u64, 13u64, 2)], is_pledged: true)
@@ -153,6 +187,8 @@ describe "adversarial escalation: session containment (create_child_session)":
         expect(bad).to_equal(nil)
 
     it "a legit narrowing child IS accepted (fix does not over-block)":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: a legit narrowing child IS accepted (fix does not over-block)")
         var mgr = CapabilityManager.new()
         val narrow = CapabilitySet(caps: [_tok(_fread_var(), 1u64, 15u64, 2)], is_pledged: true)
         val root = mgr.login("root", narrow)
@@ -169,51 +205,75 @@ describe "adversarial attenuation: widening is denied by capability_kind_allows"
     is authorized."""
 
     it "wider path-prefix is denied (/var held -> / requested)":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: wider path-prefix is denied (/var held -> / requested)")
         expect(capability_kind_allows(_fread_var(), CapabilityKind.FileRead(path_prefix: "/"))).to_equal(false)
 
     it "sibling path is denied (/var held -> /etc requested)":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: sibling path is denied (/var held -> /etc requested)")
         expect(capability_kind_allows(_fread_var(), CapabilityKind.FileRead(path_prefix: "/etc"))).to_equal(false)
 
     it "narrower path IS allowed (/var held -> /var/log requested)":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: narrower path IS allowed (/var held -> /var/log requested)")
         expect(capability_kind_allows(_fread_var(), CapabilityKind.FileRead(path_prefix: "/var/log"))).to_equal(true)
 
     it "sneaky prefix-not-on-boundary is denied (/var held -> /vardata requested)":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: sneaky prefix-not-on-boundary is denied (/var held -> /vardata requested)")
         expect(capability_kind_allows(_fread_var(), CapabilityKind.FileRead(path_prefix: "/vardata"))).to_equal(false)
 
     it "broader device class is denied (class 1 held -> class 2 requested)":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: broader device class is denied (class 1 held -> class 2 requested)")
         val held = CapabilityKind.DeviceEnumerate(class_code: 1, subclass: 0)
         val req = CapabilityKind.DeviceEnumerate(class_code: 2, subclass: 0)
         expect(capability_kind_allows(held, req)).to_equal(false)
 
     it "widening the subclass wildcard is denied (class1/sub5 -> class1/all)":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: widening the subclass wildcard is denied (class1/sub5 -> class1/all)")
         val held = CapabilityKind.DeviceEnumerate(class_code: 1, subclass: 5)
         val req = CapabilityKind.DeviceEnumerate(class_code: 1, subclass: 0)
         expect(capability_kind_allows(held, req)).to_equal(false)
 
     it "larger DMA byte budget is denied (1000 held -> 2000 requested)":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: larger DMA byte budget is denied (1000 held -> 2000 requested)")
         val held = CapabilityKind.DeviceDma(bdf_bus: 0, bdf_device: 4, bdf_func: 0, max_bytes: 1000)
         val req = CapabilityKind.DeviceDma(bdf_bus: 0, bdf_device: 4, bdf_func: 0, max_bytes: 2000)
         expect(capability_kind_allows(held, req)).to_equal(false)
 
     it "an extent reaching outside the parent window is denied":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: an extent reaching outside the parent window is denied")
         val held = CapabilityKind.StorageExtent(object_id: 44, offset_lba: 100, lba_count: 50, rights: CAP_RIGHT_READ, generation: 7)
         val outside = CapabilityKind.StorageExtent(object_id: 44, offset_lba: 80, lba_count: 100, rights: CAP_RIGHT_READ, generation: 7)
         expect(capability_kind_allows(held, outside)).to_equal(false)
 
     it "an extent inside the parent window IS allowed":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: an extent inside the parent window IS allowed")
         val held = CapabilityKind.StorageExtent(object_id: 44, offset_lba: 100, lba_count: 50, rights: CAP_RIGHT_READ, generation: 7)
         val inside = CapabilityKind.StorageExtent(object_id: 44, offset_lba: 120, lba_count: 8, rights: CAP_RIGHT_READ, generation: 7)
         expect(capability_kind_allows(held, inside)).to_equal(true)
 
     it "rights widening r -> rw is denied (SharedDataset)":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: rights widening r -> rw is denied (SharedDataset)")
         expect(capability_kind_allows(_calendar_ro(), _calendar_rw())).to_equal(false)
 
     it "rights widening r -> rw is denied (Mount)":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: rights widening r -> rw is denied (Mount)")
         val held = CapabilityKind.Mount(path_prefix: "/data", rights: CAP_RIGHT_READ)
         val req = CapabilityKind.Mount(path_prefix: "/data", rights: CAP_RIGHT_READ + CAP_RIGHT_WRITE)
         expect(capability_kind_allows(held, req)).to_equal(false)
 
     it "the mint DROPS a path-widening attenuation (/var parent, / attenuation)":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: the mint DROPS a path-widening attenuation (/var parent, / attenuation)")
         val parent = CapabilitySet(caps: [_tok(_fread_var(), 1u64, 50u64, 2)], is_pledged: true)
         val widen = SpawnSpec(
             image_hash: IMG,
@@ -221,5 +281,5 @@ describe "adversarial attenuation: widening is denied by capability_kind_allows"
             isolation: "sandbox", budget: 0u64
         )
         val mm = spawn_with_cspace(parent, widen, 40u64, 4000u64, 600u64)
-        expect(mm.rejected).to_equal(1)
+        expect(mm.rejected).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(mm.caps.has(CapabilityKind.FileRead(path_prefix: "/"))).to_equal(false)

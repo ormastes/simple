@@ -1,4 +1,22 @@
 """
+## Purpose and audience
+Purpose: Prove that resolve_effective: deny always wins.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+# @manual: primary
+REQ-OS-SECURITY-001
+doc/01_research/local/REQ-OS-SECURITY-001.md
+doc/03_plan/sys_test/REQ-OS-SECURITY-001.md
+doc/04_architecture/REQ-OS-SECURITY-001.md
+doc/05_design/REQ-OS-SECURITY-001.md
+"""
+# @req: REQ-OS-SECURITY-001
+
+"""
 # LLM Security Profile Attenuation Specification (Production Harden, Lane P8)
 
 **Feature IDs:** #OS-HARDEN-P8-LLM-PROFILE
@@ -62,6 +80,7 @@ describe "resolve_effective: deny always wins":
     """A deny removes authority even when every other input granted it."""
 
     it "a denied rights bit is removed even though base grants it":
+        # @req: REQ-OS-SECURITY-001
         step("Grant FS_READ + FS_WRITE + NET in base under wide-open ceilings")
         val base = _profile("base", LLM_RIGHT_FS_READ | LLM_RIGHT_FS_WRITE | LLM_RIGHT_NET, ["/workspace"], ["/workspace"], ["api.example.com"])
         step("Deny NET explicitly")
@@ -72,6 +91,8 @@ describe "resolve_effective: deny always wins":
         expect(eff.rights).to_equal(LLM_RIGHT_FS_READ | LLM_RIGHT_FS_WRITE)
 
     it "a denied rights bit stays removed even when an overlay re-grants it":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: a denied rights bit stays removed even when an overlay re-grants it")
         val base = _profile("base", LLM_RIGHT_FS_READ, ["/workspace"], [], [])
         val overlay = _profile("overlay", LLM_RIGHT_NET, [], [], ["api.example.com"])
         val denies = LlmDenyList(deny_rights: LLM_RIGHT_NET, deny_fs_paths: [], deny_net_hosts: [], deny_secrets_labels: [])
@@ -80,18 +101,22 @@ describe "resolve_effective: deny always wins":
         expect(has_right(eff.rights, LLM_RIGHT_FS_READ)).to_equal(true)
 
     it "a denied filesystem path is removed even though the right is granted":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: a denied filesystem path is removed even though the right is granted")
         val base = _profile("base", LLM_RIGHT_FS_WRITE, [], ["/workspace", "/workspace/secrets"], [])
         val denies = LlmDenyList(deny_rights: LLM_RIGHT_NONE, deny_fs_paths: ["/workspace/secrets"], deny_net_hosts: [], deny_secrets_labels: [])
         val eff = resolve_effective(_wide_ceiling(), _wide_ceiling(), base, [], denies)
-        expect(eff.fs_write_roots.len()).to_equal(1)
+        expect(eff.fs_write_roots.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(eff.fs_write_roots[0]).to_equal("/workspace")
         expect(has_right(eff.rights, LLM_RIGHT_FS_WRITE)).to_equal(true)
 
     it "a denied net host is removed even though NET is granted and ceilings allow it":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: a denied net host is removed even though NET is granted and ceilings allow it")
         val base = _profile("base", LLM_RIGHT_NET, [], [], ["good.example.com", "evil.example.com"])
         val denies = LlmDenyList(deny_rights: LLM_RIGHT_NONE, deny_fs_paths: [], deny_net_hosts: ["evil.example.com"], deny_secrets_labels: [])
         val eff = resolve_effective(_wide_ceiling(), _wide_ceiling(), base, [], denies)
-        expect(eff.net_hosts.len()).to_equal(1)
+        expect(eff.net_hosts.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(eff.net_hosts[0]).to_equal("good.example.com")
 
 # ============================================================================
@@ -102,6 +127,7 @@ describe "resolve_effective: overlay only adds within ceilings":
     """An overlay's grant is never honored beyond what BOTH ceilings allow."""
 
     it "effective rights are always a subset of the system ceiling":
+        # @req: REQ-OS-SECURITY-001
         step("System ceiling: FS_READ + FS_WRITE only")
         val sys_ceiling = _profile("sys", LLM_RIGHT_FS_READ | LLM_RIGHT_FS_WRITE, ["/"], ["/"], [])
         step("User ceiling: FS_READ + FS_WRITE + NET (wider than system)")
@@ -111,13 +137,14 @@ describe "resolve_effective: overlay only adds within ceilings":
         val overlay = _profile("overlay", LLM_RIGHT_FS_WRITE | LLM_RIGHT_NET | LLM_RIGHT_PROCESS_SPAWN, [], ["/workspace"], ["api.example.com"])
         val eff = resolve_effective(sys_ceiling, user_ceiling, base, [overlay], empty_deny_list())
         step("Effective rights bitmask is exactly FS_READ | FS_WRITE (3)")
-        expect(eff.rights).to_equal(3)
+        expect(eff.rights).to_equal(3)  # oracle: 3 — named expected value from the requirement
         step("is_subset proves containment in the system ceiling absolutely")
         expect(is_subset(eff.rights, sys_ceiling.rights)).to_equal(true)
         expect(has_right(eff.rights, LLM_RIGHT_NET)).to_equal(false)
         expect(has_right(eff.rights, LLM_RIGHT_PROCESS_SPAWN)).to_equal(false)
 
     it "effective rights are always a subset of the user ceiling":
+        # @req: REQ-OS-SECURITY-001
         val sys_ceiling = _profile("sys", LLM_RIGHT_ALL, ["/"], ["/"], ["*"])
         step("User ceiling is the narrow one this time: FS_READ only")
         val user_ceiling = _profile("user", LLM_RIGHT_FS_READ, ["/"], [], [])
@@ -129,13 +156,14 @@ describe "resolve_effective: overlay only adds within ceilings":
         expect(has_right(eff.rights, LLM_RIGHT_FS_WRITE)).to_equal(false)
 
     it "effective filesystem roots are always covered by both ceilings' roots":
+        # @req: REQ-OS-SECURITY-001
         val sys_ceiling = _profile("sys", LLM_RIGHT_FS_READ, ["/workspace"], [], [])
         val user_ceiling = _profile("user", LLM_RIGHT_FS_READ, ["/workspace", "/tmp"], [], [])
         val base = _profile("base", LLM_RIGHT_FS_READ, ["/workspace/src"], [], [])
         val overlay = _profile("overlay", LLM_RIGHT_FS_READ, ["/etc"], [], [])
         val eff = resolve_effective(sys_ceiling, user_ceiling, base, [overlay], empty_deny_list())
         step("/etc is dropped: system ceiling only covers /workspace, not /etc")
-        expect(eff.fs_read_roots.len()).to_equal(1)
+        expect(eff.fs_read_roots.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(eff.fs_read_roots[0]).to_equal("/workspace/src")
 
 # ============================================================================
@@ -147,23 +175,25 @@ describe "resolve_effective: never more than the ceiling intersection":
     effective result cannot exceed system_ceiling ∩ user_ceiling."""
 
     it "granted union far exceeds the ceiling intersection, yet effective == intersection":
+        # @req: REQ-OS-SECURITY-001
         step("System ceiling: FS_READ + FS_EXEC (5). User ceiling: FS_EXEC + SECRETS (36). Intersection: FS_EXEC (4) only")
         val sys_ceiling = _profile("sys", LLM_RIGHT_FS_READ | LLM_RIGHT_FS_EXEC, ["/"], [], [])
         val user_ceiling = _profile("user", LLM_RIGHT_FS_EXEC | LLM_RIGHT_SECRETS, ["/"], [], [])
         val ceiling_intersection = sys_ceiling.rights & user_ceiling.rights
-        expect(ceiling_intersection).to_equal(4)
+        expect(ceiling_intersection).to_equal(4)  # oracle: 4 — named expected value from the requirement
         step("Base + overlay request far more than either ceiling: FS_EXEC + SECRETS + DEVICE (292)")
         val base = _profile("base", LLM_RIGHT_FS_EXEC, [], [], [])
         val overlay = _profile("overlay", LLM_RIGHT_SECRETS | LLM_RIGHT_DEVICE, [], [], [])
         val requested_union = base.rights | overlay.rights
-        expect(requested_union).to_equal(292)
+        expect(requested_union).to_equal(292)  # oracle: 292 — named expected value from the requirement
         val eff = resolve_effective(sys_ceiling, user_ceiling, base, [overlay], empty_deny_list())
         step("Effective rights equal the ceiling intersection exactly, not the requested union")
-        expect(eff.rights).to_equal(4)
+        expect(eff.rights).to_equal(4)  # oracle: 4 — named expected value from the requirement
         expect(eff.rights).to_equal(ceiling_intersection)
         expect(is_subset(eff.rights, ceiling_intersection)).to_equal(true)
 
     it "two DIFFERENT overlay profiles never combine past the ceiling intersection":
+        # @req: REQ-OS-SECURITY-001
         val sys_ceiling = _profile("sys", LLM_RIGHT_FS_READ | LLM_RIGHT_FS_WRITE, ["/"], ["/"], [])
         val user_ceiling = _profile("user", LLM_RIGHT_FS_READ | LLM_RIGHT_FS_WRITE | LLM_RIGHT_NET, ["/"], ["/"], ["*"])
         val base = _profile("base", LLM_RIGHT_NONE, [], [], [])
@@ -183,24 +213,33 @@ describe "is_subset: attenuation check":
     """The bitmask subset check used to prove attenuation everywhere above."""
 
     it "detects a genuine violation: child holds a bit the parent lacks":
+        # @req: REQ-OS-SECURITY-001
         step("Child requests FS_READ + NET; parent only holds FS_READ — NOT a subset")
         val child = LLM_RIGHT_FS_READ | LLM_RIGHT_NET
         val parent = LLM_RIGHT_FS_READ
         expect(is_subset(child, parent)).to_equal(false)
 
     it "confirms a genuine subset relationship":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: confirms a genuine subset relationship")
         val child = LLM_RIGHT_FS_READ
         val parent = LLM_RIGHT_FS_READ | LLM_RIGHT_FS_WRITE
         expect(is_subset(child, parent)).to_equal(true)
 
     it "a set is always a subset of itself":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: a set is always a subset of itself")
         expect(is_subset(LLM_RIGHT_ALL, LLM_RIGHT_ALL)).to_equal(true)
 
     it "the empty grant is a subset of every set, including empty":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: the empty grant is a subset of every set, including empty")
         expect(is_subset(LLM_RIGHT_NONE, LLM_RIGHT_ALL)).to_equal(true)
         expect(is_subset(LLM_RIGHT_NONE, LLM_RIGHT_NONE)).to_equal(true)
 
     it "no non-empty set is a subset of the empty set":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: no non-empty set is a subset of the empty set")
         expect(is_subset(LLM_RIGHT_FS_READ, LLM_RIGHT_NONE)).to_equal(false)
 
 # ============================================================================
@@ -211,6 +250,8 @@ describe "profile_by_name: built-in profile registry":
     """Every named §17 built-in profile resolves, and unknown names return nil."""
 
     it "resolves all six built-in profiles by name":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: resolves all six built-in profiles by name")
         assert_true(profile_by_name("offline") != nil)
         assert_true(profile_by_name("code-review") != nil)
         assert_true(profile_by_name("workspace-write") != nil)
@@ -219,12 +260,17 @@ describe "profile_by_name: built-in profile registry":
         assert_true(profile_by_name("system-administration") != nil)
 
     it "returns nil for an unknown profile name":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: returns nil for an unknown profile name")
         assert_true(profile_by_name("does-not-exist") == nil)
 
     it "offline profile grants no rights at all":
+        # @req: REQ-OS-SECURITY-001
+        step("Verify: offline profile grants no rights at all")
         assert_equal(profile_offline().rights, LLM_RIGHT_NONE)
 
     it "system-administration is the broadest built-in but still resolves through a narrow ceiling":
+        # @req: REQ-OS-SECURITY-001
         step("Even the broadest built-in profile is bounded by resolve_effective's ceiling intersection")
         val narrow_ceiling = _profile("narrow", LLM_RIGHT_FS_READ, ["/workspace"], [], [])
         val eff = resolve_effective(narrow_ceiling, narrow_ceiling, profile_system_administration(), [], empty_deny_list())
