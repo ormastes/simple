@@ -198,6 +198,21 @@ describe "PointsToSet operations":
         expect(a.all()[0]).to_equal(8)  # oracle: 8 — named expected value from the requirement
 
 describe "EscapeAnalysis pipeline":
+    it "retains a proven allocation size for later threshold decisions":
+        step("Record allocation size evidence")
+        var ea = EscapeAnalysis.create()
+        val allocation_id = ea.record_allocation(1, 100, 10)
+        ea.record_allocation_size(allocation_id, 128)
+        expect(ea.allocations[allocation_id].has_size_bytes).to_equal(true)
+        expect(ea.allocations[allocation_id].size_bytes).to_equal(128)
+
+    it "rejects a negative allocation size instead of treating it as proof":
+        step("Reject invalid allocation size evidence")
+        var ea = EscapeAnalysis.create()
+        val allocation_id = ea.record_allocation(1, 100, 10)
+        ea.record_allocation_size(allocation_id, -1)
+        expect(ea.allocations[allocation_id].has_size_bytes).to_equal(false)
+
     it "records allocations and hands out increasing ids":
         step("Verify: records allocations and hands out increasing ids")
         var ea = EscapeAnalysis.create()
@@ -207,14 +222,14 @@ describe "EscapeAnalysis pipeline":
         expect(b).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(ea.total_allocations).to_equal(2)  # oracle: 2 — named expected value from the requirement
 
-    it "leaves an untouched allocation Unknown until finalize demotes it":
-        step("Verify: leaves an untouched allocation Unknown until finalize demotes it")
+    it "keeps an untouched allocation Unknown after finalize":
+        step("Verify: missing escape evidence remains fail-closed")
         var ea = EscapeAnalysis.create()
         val a = ea.record_allocation(1, 100, 10)
         expect(ea.get_escape_state(a) == EscapeState.Unknown).to_equal(true)
         ea.finalize()
-        expect(ea.get_escape_state(a) == EscapeState.NoEscape).to_equal(true)
-        expect(ea.can_stack_allocate(a)).to_equal(true)
+        expect(ea.get_escape_state(a) == EscapeState.Unknown).to_equal(true)
+        expect(ea.can_stack_allocate(a)).to_equal(false)
 
     it "marks a returned local as ReturnEscape":
         step("Verify: marks a returned local as ReturnEscape")
@@ -291,25 +306,23 @@ describe "EscapeAnalysis pipeline":
     it "partitions allocations into escaping and non-escaping":
         step("Verify: partitions allocations into escaping and non-escaping")
         var ea = EscapeAnalysis.create()
-        val a = ea.record_allocation(1, 100, 70)
-        val b = ea.record_allocation(2, 101, 71)
+        ea.record_allocation(1, 100, 70)
+        ea.record_allocation(2, 101, 71)
         ea.record_return(71)
         ea.finalize()
-        expect(ea.get_non_escaping().len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
-        expect(ea.get_escaping().len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
-        expect(ea.get_non_escaping()[0].id).to_equal(a)
-        expect(ea.get_escaping()[0].id).to_equal(b)
+        expect(ea.get_non_escaping().len()).to_equal(0)
+        expect(ea.get_escaping().len()).to_equal(2)
 
     it "counts stack-eligible sites and reports their ratio":
         step("Verify: counts stack-eligible sites and reports their ratio")
         var ea = EscapeAnalysis.create()
-        val a = ea.record_allocation(1, 100, 80)
-        val b = ea.record_allocation(2, 101, 81)
+        ea.record_allocation(1, 100, 80)
+        ea.record_allocation(2, 101, 81)
         ea.record_return(81)
         ea.finalize()
-        expect(ea.stack_eligible).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(ea.stack_eligible).to_equal(0)
         expect(ea.total_allocations).to_equal(2)  # oracle: 2 — named expected value from the requirement
-        expect(ea.stack_allocation_ratio()).to_equal(0.5)  # oracle: 0.5 — named expected value from the requirement
+        expect(ea.stack_allocation_ratio()).to_equal(0.0)
 
     it "reports a zero ratio when nothing was allocated":
         step("Verify: reports a zero ratio when nothing was allocated")
