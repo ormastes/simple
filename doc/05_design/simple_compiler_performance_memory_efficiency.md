@@ -523,6 +523,16 @@ lint result API and one lint-owned snapshot/restore boundary covering collection
 severity policy, tier activation, and failure cleanup. Until those contracts have
 behavioral fixtures, retain the JSON-only nested query process.
 
+On normal return, `_collect_lint_diagnostics_json` restores the outer mode, array,
+severity map/count, and tier flag after running in a fresh inner scope. Never append
+inner records to the outer collector implicitly. The returned scalar keeps legacy
+per-rule semantics; serializers and workspace exit logic use array length as the
+authoritative emitted count. Cleanup-safe unwinding remains a session prerequisite.
+This is a serial primitive, not permission for concurrent parser use.
+Construct the request's canonical line array before policy resolution and call
+`apply_file_attributes_lines`; lint policy and all line-oriented checks must share
+that array rather than independently splitting the same source.
+
 Add compiler-tool owners under `compiler/90.tools/workspace_diagnostics` for an
 immutable `WorkspaceDiagnosticConfig`, ordinal/path/digest request, per-file
 result and serial `WorkspaceDiagnosticSession`. The app discovers files once,
