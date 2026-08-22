@@ -84,3 +84,12 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
   is designed and tested.
 - Next type lanes: arithmetic/operator families, memory/pointer operations, aggregates,
   calls/signatures, SIMD/GPU, and terminators.
+
+## Active tool tranche: allocation-free lint configuration membership
+
+- Preserve the canonical `collection_performance` code mapping and evidence-tier policy.
+- Replace per-entry `all_lint_names().contains` array construction/scanning in SDN and
+  file attributes with allocation-free exhaustive membership.
+- Pin enumeration/membership parity and reject the former source shape.
+- Leave one-time enumeration consumers intact; do not introduce a mutable global cache or
+  per-`LintConfig` registry dictionary.

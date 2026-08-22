@@ -13,6 +13,10 @@ Source warnings describe likely application defects. Optimizer remarks describe 
 decisions. Runtime profiles rank candidates but never authorize a semantics-changing
 transformation.
 
+Collection rules use the `collection_performance` configuration name. SDN entries and
+`@allow`/`@warn`/`@deny` attributes resolve lint names without rebuilding the registry per
+name, so large explicit configurations do not multiply registry allocation and scanning.
+
 ## Optimizer truth
 
 The requested pipeline is an inventory. The effective pipeline contains only descriptors
