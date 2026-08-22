@@ -408,33 +408,41 @@ fn vhdl_catalog_operand_with_target(operand: MirOperand, target: text) -> MirOpe
             MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(target), type_))
         case _: operand
 
+fn vhdl_catalog_target_index_key(hardware_only: bool, qualified: bool,
+                                 target: text) -> text:
+    val domain = if hardware_only: "H|" else: "A|"
+    val shape = if qualified: "Q|" else: "B|"
+    domain + shape + target
+
+fn vhdl_catalog_target_index_record(mut symbol_ids: Dict<text, i64>,
+                                    mut match_counts: Dict<text, i64>,
+                                    key: text, symbol_id: i64):
+    val previous = if rt_dict_contains(match_counts, key):
+        match_counts[key]
+    else:
+        0
+    if previous == 0:
+        symbol_ids[key] = symbol_id
+    match_counts[key] = previous + 1
+
 fn vhdl_catalog_resolve_target(target: text,
-                               all_functions: Dict<SymbolId, MirFunction>,
-                               all_function_modules: Dict<i64, text>,
+                               target_symbol_ids: Dict<text, i64>,
+                               target_match_counts: Dict<text, i64>,
                                hardware_only: bool,
                                target_kind: text) -> Result<SymbolId?, text>:
     val qualified = target.contains("::")
-    var found_id = -1
-    var matches = 0
-    for candidate_symbol in vhdl_catalog_sorted_symbols(all_functions.keys()):
-        val candidate = all_functions[candidate_symbol]
-        if hardware_only and not vhdl_function_is_hardware_entity(candidate):
-            continue
-        val identity = "{all_function_modules[candidate_symbol.id]}::{candidate.name}"
-        val matches_target = if qualified:
-            identity == target
-        else:
-            candidate.name == target
-        if matches_target:
-            found_id = candidate_symbol.id
-            matches = matches + 1
+    val key = vhdl_catalog_target_index_key(hardware_only, qualified, target)
+    val matches = if rt_dict_contains(target_match_counts, key):
+        target_match_counts[key]
+    else:
+        0
     if matches > 1:
         return Err("Ambiguous VHDL {target_kind} `{target}`; use a module-qualified identity")
     if matches == 0:
         if qualified:
             return Err("Unresolved VHDL {target_kind} `{target}`")
         return Ok(nil)
-    Ok(Some(SymbolId(id: found_id)))
+    Ok(Some(SymbolId(id: target_symbol_ids[key])))
 
 fn vhdl_catalog_mark_type(ty: MirType, mut needed: Dict<i64, bool>):
     match ty.kind:
@@ -768,6 +776,33 @@ fn vhdl_build_design_catalog_with_metadata(modules: Dict<text, MirModule>,
             all_types[type_def.symbol] = type_def
             all_type_modules[type_def.symbol.id] = global_type_owner_modules[identity]
 
+    # Resolve string call/port-map targets through one raw-name index. The old
+    # resolver rebuilt and selection-sorted all function keys for every edge,
+    # then constructed every qualified identity again. Counts preserve exact
+    # ambiguity behavior; the stored symbol is consumed only when count == 1.
+    var target_symbol_ids: Dict<text, i64> = {}
+    var target_match_counts: Dict<text, i64> = {}
+    for candidate_symbol in all_functions.keys():
+        val candidate = all_functions[candidate_symbol]
+        val identity = "{all_function_modules[candidate_symbol.id]}::{candidate.name}"
+        vhdl_catalog_target_index_record(
+            target_symbol_ids, target_match_counts,
+            vhdl_catalog_target_index_key(false, false, candidate.name),
+            candidate_symbol.id)
+        vhdl_catalog_target_index_record(
+            target_symbol_ids, target_match_counts,
+            vhdl_catalog_target_index_key(false, true, identity),
+            candidate_symbol.id)
+        if vhdl_function_is_hardware_entity(candidate):
+            vhdl_catalog_target_index_record(
+                target_symbol_ids, target_match_counts,
+                vhdl_catalog_target_index_key(true, false, candidate.name),
+                candidate_symbol.id)
+            vhdl_catalog_target_index_record(
+                target_symbol_ids, target_match_counts,
+                vhdl_catalog_target_index_key(true, true, identity),
+                candidate_symbol.id)
+
     var reachable: Dict<i64, bool> = {}
     var queue: [SymbolId] = []
     for symbol in vhdl_catalog_sorted_symbols(all_functions.keys()):
@@ -799,7 +834,8 @@ fn vhdl_build_design_catalog_with_metadata(modules: Dict<text, MirModule>,
                     case Call(dest, operand, args):
                         if val target = vhdl_catalog_call_target(operand):
                             val resolved_result = vhdl_catalog_resolve_target(target,
-                                all_functions, all_function_modules, false, "design call target")
+                                target_symbol_ids, target_match_counts, false,
+                                "design call target")
                             if rt_enum_discriminant(resolved_result) == rt_enum_discriminant(Err("")):
                                 eprint("[vhdl-catalog-site] call-target-resolution")
                                 val resolved_error: text = rt_enum_payload(resolved_result)
@@ -815,7 +851,8 @@ fn vhdl_build_design_catalog_with_metadata(modules: Dict<text, MirModule>,
                                     queue = queue.push(callee_symbol)
                     case VhdlPortMap(entity, instance, connections):
                         val resolved_result = vhdl_catalog_resolve_target(entity,
-                            all_functions, all_function_modules, true, "port-map entity")
+                            target_symbol_ids, target_match_counts, true,
+                            "port-map entity")
                         if rt_enum_discriminant(resolved_result) == rt_enum_discriminant(Err("")):
                             eprint("[vhdl-catalog-site] port-map-resolution")
                             val resolved_error: text = rt_enum_payload(resolved_result)
