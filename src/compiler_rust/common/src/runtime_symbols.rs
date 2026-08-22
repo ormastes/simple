@@ -134,6 +134,8 @@ pub const CORE_REQUIRED_RUNTIME_SYMBOLS: &[&str] = &[
     "rt_transient_array_scope_begin",
     "rt_transient_array_scope_pause",
     "rt_transient_heap_promote",
+    "rt_transient_last_promoted_nodes",
+    "rt_transient_last_promoted_bytes",
     "rt_transient_array_scope_end",
     "rt_byte_array_new",
     "rt_byte_array_new_len",
@@ -390,6 +392,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_transient_array_scope_begin",
     "rt_transient_array_scope_pause",
     "rt_transient_heap_promote",
+    "rt_transient_last_promoted_nodes",
+    "rt_transient_last_promoted_bytes",
     "rt_transient_array_scope_end",
     // Unconditionally defined in value/heap.rs and emitted by codegen; absent
     // from this list until 2026-08-01, so any module tagging heap ownership

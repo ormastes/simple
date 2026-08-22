@@ -348,6 +348,14 @@ pub fn rt_transient_heap_promote(args: &[Value]) -> Result<Value, CompileError> 
     Ok(Value::Bool(promoted))
 }
 
+pub fn rt_transient_last_promoted_nodes(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(simple_runtime::value::rt_transient_last_promoted_nodes()))
+}
+
+pub fn rt_transient_last_promoted_bytes(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(simple_runtime::value::rt_transient_last_promoted_bytes()))
+}
+
 pub fn rt_transient_array_scope_end(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Bool(simple_runtime::value::rt_transient_array_scope_end()))
 }
