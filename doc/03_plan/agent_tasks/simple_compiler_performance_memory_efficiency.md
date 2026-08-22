@@ -576,4 +576,6 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Pin multi-edit output, equal-start insertion order, and invalid-span skipping.
 - Replace per-file dictionary array copyback with owned indexed buckets while
   preserving dictionary key iteration and per-file replacement order.
-- Follow-up: consolidate the three duplicated applicator implementations.
+- Consolidate ordering and assembly in the stdlib EasyFix owner.
+- Delegate compiler FixToolApplicator and route lint fix through shared primitives.
+- Remove all three private quadratic sort/repeated-splice implementations.
