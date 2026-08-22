@@ -479,6 +479,15 @@ receipts consume these locals. This retains independent call semantics and
 avoids new environment work on early invalid-input returns. The trace gate does
 not enter catalog records or emitted VHDL.
 
+### VHDL target-resolution index
+
+Keys are `A|Q|target`, `A|B|target`, `H|Q|target`, and `H|B|target` for
+all/hardware and qualified/bare domains. One pass records the first symbol and
+increments an exact count. Lookup selects a domain from `hardware_only` and raw
+`contains("::")`. Count zero retains qualified-error/bare-nil behavior; count
+above one retains ambiguity; count one returns the SymbolId. Successful target
+rewriting and BFS enqueue behavior are unchanged.
+
 ## Fix application fast-path contract
 
 Per-file replacements use a typed stable merge sort ordered by descending start.
