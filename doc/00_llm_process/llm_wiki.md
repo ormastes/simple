@@ -3,6 +3,18 @@
 Short, canonical term resolution for coding agents. Read this index when a user
 names a repository capability whose implementation owner is ambiguous.
 
+## Mandatory checks and hook setup
+
+- Keep interactive push checks bounded; compiler builds, full tests, QEMU,
+  hardware, and benchmarks belong to the bootstrap-owned evidence tier.
+- Before changing hook wiring, use the check-then-install commands in
+  `doc/07_guide/tooling/must_check_tiering.md` for the current host.
+- Linked worktrees share their hooks directory. Install the stable
+  `scripts/hooks/pre-push-worktree-launcher`; never bind the shared hook to one
+  worktree's absolute dispatcher path.
+- Start detailed work at
+  `doc/00_llm_process/feature_expert/must_check_tiering/skill.md`.
+
 ## Parent-authoritative actor/process transport
 
 - **Canonical owner rule:** the scheduler owns actor registry/admission/replies;

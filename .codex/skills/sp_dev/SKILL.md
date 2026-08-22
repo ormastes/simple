@@ -65,6 +65,24 @@ directory is shared. Install the stable `scripts/hooks/pre-push-worktree-launche
 and let it resolve the active worktree; never bind the shared hook to one
 worktree's absolute dispatcher path.
 
+Check the canonical hook wiring before installing or repairing it. On Unix-like
+hosts, run:
+
+```sh
+sh scripts/setup/install-must-check-hooks.shs --check ||
+  sh scripts/setup/install-must-check-hooks.shs --install
+```
+
+On Windows PowerShell, run:
+
+```powershell
+& scripts/setup/install-must-check-hooks.ps1 -Check
+if ($LASTEXITCODE -ne 0) { & scripts/setup/install-must-check-hooks.ps1 -Install }
+```
+
+See `doc/07_guide/tooling/must_check_tiering.md` for the tier contract and
+linked-worktree launcher details.
+
 For every acceptance criterion, record one passing result and do not rerun the
 same unchanged green command. Stop after three verify/fix cycles for one
 feature and report any remaining failure; convergence ends the lane instead of

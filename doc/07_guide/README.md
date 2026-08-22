@@ -59,6 +59,7 @@ User-facing guides for the Simple programming language. For specifications see `
 | [app/ui/wm_ui_snapshot.md](app/ui/wm_ui_snapshot.md) | WM/UI HTML snapshot export, PNG generation, Stitch handoff |
 | [app/devhub.md](app/devhub.md) | devhub CLI -- gh/mc/Gmail-shaped UX over Jira, GitHub, Bitbucket, Confluence, MinIO/S3, and email backends |
 | [tooling/script_layout_policy.md](tooling/script_layout_policy.md) | `scripts/` vs `bin/` policy, `.shs` rule, ignore list |
+| [tooling/must_check_tiering.md](tooling/must_check_tiering.md) | Fast push checks, bootstrap-owned evidence, and cross-platform hook installation |
 | [tooling/ai_cli_registration.md](tooling/ai_cli_registration.md) | AI CLI plugin registration |
 | [tooling/ai_command_parity.md](tooling/ai_command_parity.md) | AI command parity across providers |
 | [tooling/ai_plugin_status.md](tooling/ai_plugin_status.md) | AI plugin status dashboard |

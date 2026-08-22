@@ -747,7 +747,7 @@ fn matrix_multiply(A: []f32, B: []f32, C: []f32, N: u32):
 - [Macro System](doc/06_spec/macro.md) - Executable macro spec and status
 - [AOP Support Matrix](doc/05_design/aop_support_matrix.md) - Supported selectors, advice kinds, backends, and error codes
 - [SDN Format](doc/04_architecture/format/note_sdn_index.md) - Note/SDN storage and indexing format
-- [SDoctest](doc/06_spec/app/compiler/modules/testing/sdoctest.md) - Documentation testing and verified examples
+- [SDoctest](doc/06_spec/03_system/feature/features/sdoctest/sdoctest_spec.md) - Documentation testing and verified examples
 - [Feature Documentation](doc/06_spec/feature.md) - Generated feature-doc artifact format
 
 ---

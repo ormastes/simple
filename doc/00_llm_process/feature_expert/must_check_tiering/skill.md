@@ -18,6 +18,21 @@ PASS rows whose unblock condition is not `none`. Focused transition evidence
 must come from the bootstrap producer and then pass through the committed-ref
 push consumer; a hand-authored PASS fixture is insufficient.
 
+Production automated and compiler evidence is retained below
+`doc/08_tracking/check/evidence/<source-fingerprint>/` and committed with the
+ledger. The push consumer hashes the evidence blob from the exact pushed ref,
+not the live checkout. Production recording refuses fingerprinted input drift
+from `HEAD`. A receipt-backed TODO can earn its first durable PASS only through
+`check-bootstrap-must-pass.shs --record-gate-pass <id> --evidence
+<repo-relative-committed-receipt>`; carry-forward requires the identical
+committed blob/hash. Source-sensitive automated rows still invalidate when the
+fingerprint changes.
+
+The fixture-backed Caret wrapper gate proves argv routing and process lifecycle,
+not authenticated installed Claude/Codex/Gemini/Kimi execution. Keep
+`caret-installed-provider-launches` TODO until the bounded real-provider
+receipts exist.
+
 Linked worktrees share the common Git hooks directory. Install only the stable
 `scripts/hooks/pre-push-worktree-launcher`, which resolves the active worktree
 and enters its tracked dispatcher. Never install an absolute symlink to one
