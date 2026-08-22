@@ -80,3 +80,23 @@ No build was run (resource embargo). The retention mechanism is established from
 source and from the call-site census above; the attribution of the specific
 doubling steps to the immortal registry rather than to a caller-side buffer is
 inference from the 2x step pattern, not measurement.
+
+## Fresh canonical evidence (2026-08-22, `codex/session-01a023a8`)
+
+A source-bound four-core Stage 2 build completed and admitted successfully from
+commit `d1414723ef0`; the canonical planner-admission-v2 producer then authorized
+the required one-thread Stage 3 recovery lane. Stage 3 parsed, promoted, and
+released all 687 module surfaces in 458,677 ms, entered HIR, and completed the
+first HIR module. RSS rose from 638,492 KiB during late surface parsing to
+3,599,144 KiB at HIR 1/687, then to 7,341 MiB. At 13:08:44 UTC, host `earlyoom`
+sent SIGTERM because available memory fell below 10%; the compiler exited 143
+without a product diagnostic or candidate. The retained log is
+`build/bootstrap/logs/x86_64-unknown-linux-gnu/stage3-native-build.log`.
+
+This fresh measurement confirms the open blocker on current source: surface
+lifecycle is now stable, but HIR retention remains unbounded enough to prevent
+Stage 3 admission under shared-host load. Stage 4, deployment, the optimizer,
+SPipe/docgen, and bootstrap-ledger PASS publication remain unavailable. The
+unblock condition is unchanged: bound the Pure-Simple per-module HIR/MIR/codegen
+owner lifetime, preserve behavior/API, and rerun one provenance-bound Stage 3
+transaction with the canonical peak-RSS gate.
