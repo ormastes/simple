@@ -47,6 +47,7 @@ unsafe extern "C" {
     fn rt_audio_pause(playback_handle: i64);
     fn rt_audio_resume(playback_handle: i64);
     fn rt_audio_set_volume(playback_handle: i64, volume: f64);
+    fn rt_audio_set_pitch(playback_handle: i64, pitch: f64) -> i64;
     fn rt_audio_set_master_volume(volume: f64);
     fn rt_audio_get_master_volume() -> f64;
     fn rt_audio_is_playing(playback_handle: i64) -> i64;
@@ -85,6 +86,7 @@ const AUDIO_ARITY: &[(&str, usize)] = &[
     ("rt_audio_pause", 1),
     ("rt_audio_resume", 1),
     ("rt_audio_set_volume", 2),
+    ("rt_audio_set_pitch", 2),
     ("rt_audio_set_master_volume", 1),
     ("rt_audio_get_master_volume", 0),
     ("rt_audio_is_playing", 1),
@@ -225,6 +227,12 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             unsafe { rt_audio_set_volume(a0, a1) };
             Ok(Value::Nil)
         }
+        "rt_audio_set_pitch" => {
+            expect_arity(name, args, 2)?;
+            let a0 = as_int(name, args, 0)?;
+            let a1 = as_float(name, args, 1)?;
+            Ok(Value::Int(unsafe { rt_audio_set_pitch(a0, a1) }))
+        }
         "rt_audio_set_master_volume" => {
             expect_arity(name, args, 1)?;
             let a0 = as_float(name, args, 0)?;
@@ -352,8 +360,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn audio_arity_table_has_all_thirty_one_symbols() {
-        assert_eq!(AUDIO_ARITY.len(), 31);
+    fn audio_arity_table_has_all_thirty_two_symbols() {
+        assert_eq!(AUDIO_ARITY.len(), 32);
     }
 
     #[test]

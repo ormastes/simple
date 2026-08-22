@@ -1101,3 +1101,20 @@ evidence uses those values. Five affected database modules pass. Together with
 the time-facade rename, the implementation census drops to 587 Simple `rt_*`
 definitions, 542 distinct symbols, in 49 files. Declaration safety remains
 12,499 total, 11,718 untouched, 507 tagged, 586 contracted, and zero signed.
+
+Live playback pitch no longer resolves to the constant-zero implementation in
+`audio_effects.spl`. `runtime_audio.c` now applies pitch through the existing
+generation-checked playback slot and miniaudio's direct `ma_sound_set_pitch`
+operation. The raw integer status declaration is tagged and called only inside
+one lexical `unsafe(ffi)` block; ordinary audio callers import the boolean
+`audio_set_pitch` lift, so invalid handles and non-finite or non-positive pitch
+fail as `false` rather than looking applied. The hot path adds no allocation,
+registry lookup, hashing, signing, or process call: it uses the audio mutex,
+one slot check, one direct provider call, and one status comparison. The six
+unimplemented node-graph effect declarations, constant-zero implementations,
+raw exports, and self-confirming tests were deleted because no production
+caller or foreign provider exists. C warning-as-error syntax checking, focused
+Simple lint, five Rust dispatcher tests, and the Simple contract (2/2) pass.
+The census and ratchet pass at 12,493 declarations, 11,711 untouched, 508
+tagged, 586 contracted, and zero verified/signed admissions. Implementations
+are C++ 211, C 2,323, Rust 2,161, and Simple 580 rows.

@@ -886,3 +886,15 @@ Database evidence helpers now use real canonical identity/time providers rather
 than dummy zero/fixed values. Continue searching production `rt_*` definitions
 for constant success, zero, empty, or dummy returns before merely tagging them;
 fabricated implementations must be replaced or deleted, not blessed as unsafe.
+
+Live pitch is the first fabricated audio implementation removed: the real C
+provider owns generation-handle validation and performs a direct miniaudio
+operation, while one safe Simple boolean wrapper owns the raw status lift and
+the only lexical `unsafe(ffi)` call. Six unsupported, unused live node-graph
+effect boundaries and their constant-zero implementations are deleted rather
+than granted unsafe authority. Continue the fabricated-implementation queue
+with JIT setters that claim success while ignoring configuration. Preserve this
+slice's hot-path rule: existing owner lock plus direct typed call and status
+comparison; provider evidence and signatures remain admission-time work.
+Current gate: 12,493 declaration rows, 11,711 untouched, 508 tagged, 586
+contracted, and zero verified/signed admissions.

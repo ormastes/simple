@@ -1164,6 +1164,7 @@ void     rt_audio_stop(int64_t playback_handle);
 void     rt_audio_pause(int64_t playback_handle);
 void     rt_audio_resume(int64_t playback_handle);
 void     rt_audio_set_volume(int64_t playback_handle, double volume);
+int64_t  rt_audio_set_pitch(int64_t playback_handle, double pitch);
 void     rt_audio_set_master_volume(double volume);
 double   rt_audio_get_master_volume(void);
 int64_t  rt_audio_is_playing(int64_t playback_handle);

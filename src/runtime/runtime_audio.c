@@ -19,6 +19,7 @@
 #endif
 #include "runtime.h"
 
+#include <math.h>
 #include <stdint.h>
 #if defined(_WIN32) || defined(_WIN64)
 #define RT_AUDIO_WINDOWS_LOCK
@@ -577,6 +578,16 @@ void rt_audio_set_volume(int64_t playback_handle, double volume) {
     rt_audio_slot* slot = audio_slot(g_playback_slots, playback_handle, NULL);
     if (slot) ma_sound_set_volume(slot->sound, (float)volume);
     RT_AUDIO_UNLOCK();
+}
+
+int64_t rt_audio_set_pitch(int64_t playback_handle, double pitch) {
+    if (!isfinite(pitch) || pitch <= 0.0) return 0;
+
+    RT_AUDIO_LOCK();
+    rt_audio_slot* slot = audio_slot(g_playback_slots, playback_handle, NULL);
+    if (slot) ma_sound_set_pitch(slot->sound, (float)pitch);
+    RT_AUDIO_UNLOCK();
+    return slot ? 1 : 0;
 }
 
 void rt_audio_set_master_volume(double volume) {
