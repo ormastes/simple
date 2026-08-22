@@ -2132,3 +2132,22 @@ unchanged. The runtime still necessarily retains each complete original and
 formatted fingerprint for comparison; streaming equality is a possible later
 design only if mismatch/error behavior can remain identical. No timing/RSS
 claim is made because execution remains excluded by the no-verify instruction.
+
+### CLOS001 shared scope indexing
+
+The production CLOS001 text heuristic rebuilt a declaration-count dictionary by
+walking backward from every nested `fn`/`me`. Many sibling closures in one long
+outer body therefore repeated the same prefix work and transient map allocation.
+The rule now resolves its exact legacy stop boundary with a Fenwick prefix
+maximum over indentation and advances one declaration-count state per identical
+`(boundary, closure-indent)` group. Sibling declaration work becomes linear in
+the shared outer region plus expected constant-time target lookup.
+
+This deliberately retains unusual observable behavior: stale same-indent
+declarations count, duplicate declarations duplicate warnings, dedented comments
+end a body, nested bodies remain visible to containing closures, and only the
+historical assignment spellings match. Persistent group facts trade transient
+map rebuilding for request-local indexed storage. Deeply nested overlapping
+bodies can still multiply body scans; the exact follow-up is an offline
+assignment-interval join with source-order emission. No runtime measurement is
+claimed under the no-verify policy.
