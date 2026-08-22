@@ -388,3 +388,12 @@ count when native dictionary length is not an admitted contract. They do not
 scan a growing array for every candidate. Ordering-sensitive diagnostics retain
 an ordered result array separately; count-only rules such as `wide_public` never
 iterate the membership dictionary.
+
+## Diagnostic override fast-path contract
+
+Serialized diagnostic code extraction is conditional on a positive explicit
+override-entry count. The lint-config loader is the sole owner of the override
+dictionary/count pair: clear resets both, and every insertion increments the
+count exactly once. Default-policy emission must not scan JSON or allocate a code
+substring. The count is authoritative because dictionary length is not an
+admitted cross-engine contract.
