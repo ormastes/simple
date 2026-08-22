@@ -61,3 +61,12 @@ decisions. Scalar receipts never authorize access: a future kernel owner must
 look up and match its stored task-generation, epoch, lease-generation, and
 128-bit nonce record. Do not advertise readiness before the distinct DBFS
 medium and sole transactional owner from the architecture plan exist.
+
+## Server-data media identity layer (2026-08-22)
+
+OS/QEMU/transport code shares role, serial, UUID, geometry, generation, and
+checksum encoding through `std.common.contracts.os.server_data_media_v1`; it
+must not import an app module or fork these constants. The codec deliberately
+does not attest a host path, durability, uniqueness, attachment, or DBFS
+readiness. Those claims require the future descriptor-owned provisioner and
+transport/owner layers.

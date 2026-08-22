@@ -108,3 +108,14 @@ nonce words. Do not add SDK call wrappers, dispatcher branches, device/media
 owners, or readiness claims until the unique owner and launcher grant boundary
 land atomically. Source parity is not QEMU, persistence, timing, allocation, or
 RSS evidence.
+
+## Server-data media identity codec (2026-08-22)
+
+`std.common.contracts.os.server_data_media_v1` is only the canonical bounded
+512-byte identity codec and corrupt/duplicate/root-alias rejection policy. It
+does not provision, publish, attach, mount, or admit media. The pure-Simple
+provisioner remains fail-closed until the narrow bounded binary and atomic
+no-replace host capability in
+`doc/08_tracking/bug/simpleos_server_data_atomic_publication_primitive_2026-08-22.md`
+exists. Never replace that missing boundary with whole-image text conversion,
+overwrite rename, shell `ln`, or a readiness claim.
