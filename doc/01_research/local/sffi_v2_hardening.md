@@ -1285,3 +1285,13 @@ is now 12,400 declarations, 679 tagged, 587 contracted, 11,449 untouched, and
 zero verified/signed. The raw availability ABI remains integer-valued for C ABI
 compatibility; semantic APIs continue to expose `bool`, so no boolean behavior
 was replaced by a numeric public workaround.
+
+The engine2d Vulkan dynamic-dispatch module duplicated 24 declarations already
+owned by `sffi_vulkan`; it now imports them statically from that owner. All 57
+canonical declarations are explicitly FFI-unsafe. Static calls retain the same
+direct symbol and dynamic-mode rejection behavior is unchanged, so no runtime
+layer, allocation, lookup, or branch was added. Both modules check and lint
+without errors. Census: 12,376 declarations, 736 tagged, 587 contracted, 11,368
+untouched, zero verified/signed. Existing quarantine arrays still trigger two
+unbounded-growth warnings; this slice does not worsen them, and they must gain
+backpressure/ownership-aware bounds rather than silently dropping GPU handles.

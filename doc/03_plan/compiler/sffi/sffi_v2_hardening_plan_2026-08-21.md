@@ -1016,3 +1016,12 @@ allocation, or synchronization. Current census: 12,400 declarations, 679
 tagged, 587 contracted, 11,449 untouched, zero signed admissions. Next migrate
 CUDA handle/status families at this one owner; preserve the C-compatible raw
 integer ABI where required while keeping semantic capability APIs boolean.
+
+Engine2d Vulkan now has one raw declaration owner: the dynamic-dispatch module
+imports its 24 static symbols from `sffi_vulkan`, whose 57 declarations are all
+unsafe-tagged. Current census: 12,376 declarations, 736 tagged, 587 contracted,
+11,368 untouched, zero signed admissions. Preserve the direct static-call hot
+path. Separately redesign dependency/orphan quarantine admission with bounded
+backpressure: current global arrays are unbounded, while a blind cap would
+lose ownership and leak GPU resources, and synchronous forced-idle retry would
+create a latency regression.
