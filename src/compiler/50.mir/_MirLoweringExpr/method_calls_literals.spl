@@ -938,6 +938,36 @@ impl MirLowering:
         self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, push_recv)
         push_recv
 
+    me lower_unresolved_array_merge(mg_recv: LocalId, mg_src: HirExpr, wb_kind: i64, wb_base: LocalId, wb_index: LocalId, wb_field_idx: i64) -> LocalId:
+        """Builtin Array.merge(other) -- the COMPILER-GENERATED form.
+
+        `10.frontend/desugar/collection_desugar.spl` rewrites `x = x + arr`
+        and `x += arr` into `x.merge(arr)` as a bare statement (the result is
+        discarded), so this arm MUST extend the receiver through its stable
+        handle exactly like `push` does -- returning a fresh rt_array_concat
+        would be silently dropped. Mirrors the Rust seed
+        (`mir/lower/lowering_expr_method.rs` "merge"|"concat"|"extend" arm):
+        `rt_array_extend_i64(dst, src, count)` with count = -1 (copy all;
+        runtime_native.c treats a negative count as src.len()). Elements are
+        copied slot-for-slot as already-tagged runtime values, so no
+        per-element box/unbox. See
+        doc/08_tracking/bug/mir_unresolved_method_call_merge_2026-08-22.md."""
+        val mg_other = self.lower_expr(mg_src)
+        val mg_op = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_array_extend_i64"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                params: [MirType.ptr(MirType.i64(), false), MirType.ptr(MirType.i64(), false), MirType.i64()],
+                return_type: MirType(kind: MirTypeKind.I8),
+                is_variadic: false
+            )))
+        ))
+        var b_mg = self.builder
+        val mg_all = b_mg.emit_const_int(-1)
+        b_mg.emit_call(mg_op, [mir_operand_copy(mg_recv), mir_operand_copy(mg_other), mir_operand_copy(mg_all)], MirType(kind: MirTypeKind.I8))
+        self.builder = b_mg
+        self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, mg_recv)
+        mg_recv
+
     me lower_unresolved_array_write_span(ws_recv: LocalId, ws_args: [HirCallArg], wb_kind: i64, wb_base: LocalId, wb_index: LocalId, wb_field_idx: i64) -> LocalId:
         """Builtin Array.write_span(src, dst_off, src_off, count) -> i64.
 
@@ -2890,6 +2920,10 @@ impl MirLowering:
                     return self.lower_unresolved_array_push(
                         unresolved_receiver_local, args[0].value,
                         wb_kind, wb_base, wb_index, wb_field_idx)
+                if method == "merge" and args.len() == 1:
+                    return self.lower_unresolved_array_merge(
+                        unresolved_receiver_local, args[0].value,
+                        wb_kind, wb_base, wb_index, wb_field_idx)
 
                 # Builtin Array.write_span, same no-method-symbol situation
                 # as push above (see lower_unresolved_array_write_span).
@@ -3175,6 +3209,10 @@ impl MirLowering:
                     # value instead of corrupting a small untagged int (e.g.
                     # push(7) stored raw 7, then read-side `7 >> 3 == 0`).
                     return self.lower_unresolved_array_push(
+                        unresolved_receiver_local, args[0].value,
+                        wb_kind, wb_base, wb_index, wb_field_idx)
+                if method == "merge" and args.len() == 1:
+                    return self.lower_unresolved_array_merge(
                         unresolved_receiver_local, args[0].value,
                         wb_kind, wb_base, wb_index, wb_field_idx)
                 # Builtin Array.write_span, same no-method-symbol situation

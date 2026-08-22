@@ -1,0 +1,49 @@
+# Reproduce spec for doc/08_tracking/bug/mir_unresolved_method_call_merge_2026-08-22.md
+#
+# `collection_desugar` rewrites `x = x + arr` / `x += arr` into a bare
+# `x.merge(arr)` statement for every backend, but the self-hosted MIR lowering
+# had no `merge` arm for a builtin array receiver, so every native-build whose
+# closure contained that shape died with
+#   error: MIR lowering error: unresolved method call: merge
+# Pre-fix this spec fails on exactly that line. The fix lowers `merge` to the
+# C runtime's existing in-place `rt_array_extend_i64(dst, src, -1)` (the same
+# primitive the Rust seed's MIR uses), which is what a discarded-result
+# statement needs -- a fresh rt_array_concat would be silently dropped.
+#
+# Dual-run: the interpret lane and the native binary must print the same
+# lines (whitespace-normalised: native `print` still drops its newline --
+# doc/08_tracking/bug/native_build_print_drops_newline_2026-08-17.md).
+
+use std.spec
+use std.io_runtime.{process_run, env_get, dir_create_all}
+use app.io.sysinfo_ops.{getpid}
+
+val PROBE = "test/02_integration/compiler/mir/probe_array_concat_assign_merge.spl"
+
+fn simple_bin() -> text:
+    val b = env_get("SIMPLE_BIN")
+    if b == "": "bin/simple" else: b
+
+fn squash(s: text) -> text:
+    s.replace("\n", "").replace(" ", "")
+
+describe "array concat-assign lowers through the MIR merge arm":
+    slow_it "native-builds, runs, and matches the interpret lane for int, text and struct arrays":
+        step("interpret lane is the reference")
+        val interp = process_run("sh", ["-c", "SIMPLE_RUST_SEED_WARNING=0 " + simple_bin() + " run " + PROBE + " 2>/dev/null"])
+        expect(interp.0).to_contain("ints 5 1 3 5")
+        expect(interp.0).to_contain("texts 3 abc")
+        expect(interp.0).to_contain("structs 2 3 4")
+        expect(interp.0).to_contain("fromempty 5 5")
+
+        step("native-build must not report the unresolved `merge` method call")
+        val root = "build/tmp/array_concat_merge_{getpid()}"
+        expect(dir_create_all(root)).to_equal(true)
+        val out = root + "/probe"
+        val build = process_run("sh", ["-c", simple_bin() + " native-build --runtime-bundle core-c-bootstrap --threads 2 -o " + out + " " + PROBE + " 2>&1"])
+        expect(build.0.contains("unresolved method call: merge")).to_equal(false)
+        expect(build.2).to_equal(0)
+
+        step("the native binary prints the same lines as the interpret lane")
+        val run = process_run("sh", ["-c", out + " 2>&1"])
+        expect(squash(run.0)).to_equal(squash(interp.0))

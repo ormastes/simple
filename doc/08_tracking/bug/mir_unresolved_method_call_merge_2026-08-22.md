@@ -1,7 +1,7 @@
 # MIR lowering has no `merge` arm, but the desugar generates `.merge()` (2026-08-22)
 
 Filed: 2026-08-22
-Status: OPEN
+Status: RESOLVED 2026-08-22
 Severity: blocker — currently the last wall for MCP/LSP-MCP `--entry-closure` native-builds
 
 ## Symptom
@@ -82,3 +82,43 @@ SIMPLE_CACHE_SCOPE=mcp /mnt/data/seedperf/simple.mcpdbg native-build \
 ```
 
 ~9 min on the LSP entry; use it rather than the MCP entry (~20-33 min).
+
+## Resolution (2026-08-22)
+
+Root cause: the desugar emits `x.merge(arr)` as a bare statement whose result is
+discarded, and the pure-Simple MIR `Unresolved`-receiver arm only special-cased
+`push` and `write_span`; `merge` fell through to the fail-closed const-0 error.
+
+The "not a one-line fix" analysis above was wrong on one fact: the C runtime
+ALREADY has the in-place extend — `rt_array_extend_i64(dst, src, count)` in
+`src/runtime/runtime_native.c` (count < 0 = all), the exact primitive the Rust
+seed's MIR uses for its `"merge" | "concat" | "extend"` arm
+(`src/compiler_rust/compiler/src/mir/lower/lowering_expr_method.rs`). It was
+merely undeclared in `runtime.h` and in the LLVM backend's extern tables.
+
+Fix (additive only):
+- `50.mir/_MirLoweringExpr/method_calls_literals.spl`: new
+  `lower_unresolved_array_merge` (mirror of `lower_unresolved_array_push`)
+  emitting `rt_array_extend_i64(recv, other, -1)` plus the same
+  `emit_method_writeback`; wired at both `push` dispatch sites. Seed parity:
+  in-place extend through the stable handle, not `rt_array_concat` (a fresh
+  array would be dropped by the statement form).
+- `70.backend/backend/{llvm_backend,llvm_backend_tools,llvm_lib_translate,
+  _MirToLlvm/asm_constraints_helpers}.spl` + `src/runtime/runtime.h`:
+  declarations for `rt_array_extend_i64`.
+- `80.driver/driver_build/incremental.spl:449`: a pattern-bound local named
+  `hash_text` was resolved by the seed interpreter to the prelude FUNCTION
+  `std.io_runtime.hash_text`, so every native-build that loaded a populated
+  `build_cache.sdn` died with `method replace not found on type function`.
+  Renamed the local (origin/main fixed the same line concurrently as `parsed_hash`; that version is kept). (Seed name-resolution defect; the rename is the
+  pure-Simple-side fix.)
+
+Spec: `test/02_integration/compiler/mir/array_concat_assign_merge_native_spec.spl`
+(+ probe `probe_array_concat_assign_merge.spl`) — native-build + run, dual-run
+identical to the interpret lane for int/text/struct arrays and `+=`. Fails
+pre-fix with exactly `unresolved method call: merge`.
+
+Not covered here: `val t = xs` alias before the concat — the array-copy loop it
+lowers to hits a separate pre-existing llc SSA error, filed as
+`llvm_text_backend_array_copy_loop_ssa_redefinition_2026-08-22.md`. Sibling
+unresolved names `partition`, `new`, `upper` remain open.
