@@ -648,3 +648,15 @@ one resolve inside the extracted 690..730 range (`:714`, `:718`, `:699`/`:719`,
 `:691`, `:692`, `:701`/`:721`; `module_surface_index_for_source(` appears
 nowhere in the file). No assertion was weakened or removed and the driver was
 not touched.
+
+### 2026-08-22 recovery snapshot ABI blocker
+
+A fresh Stage 2 was admitted, but its first Stage 3 recovery stopped at HIR
+entry with `SIMPLE_MEM_SNAPSHOT_FILE could not be established safely`.
+`strace` showed no `openat` attempt. At a GDB breakpoint,
+`rt_mem_snapshot_open` received a boxed Simple text value in `rdi` and zero in
+`rsi`; the runtime provider requires `(byte_ptr, byte_len)`. The memory and
+phase-profile owners now lower this raw SFFI boundary explicitly with
+`rt_string_data` and `rt_string_len`. Another Stage 2 admission is required
+before Stage 3 can be retried because the admitted compiler embeds the old
+call site.
