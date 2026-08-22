@@ -19,9 +19,12 @@
 # - Branch terminators
 
 use compiler.mir.mir_data.*
-use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
 use compiler.mir_opt.mod.{MirPass}
+use compiler.mir_opt.mir_opt.perf_facts.{
+    PerfFacts, perf_facts_build, perf_facts_is_live_out,
+    perf_instruction_access, perf_terminator_access
+}
 
 fn dce_instruction_is_mandatory_observation(inst: MirInst) -> bool:
     """True for ordered observations which may never be removed as dead."""
@@ -29,46 +32,6 @@ fn dce_instruction_is_mandatory_observation(inst: MirInst) -> bool:
         case DecisionProbe(_, _, _, _, _, _): true
         case ConditionProbe(_, _, _, _, _, _, _, _): true
         case _: false
-
-# ============================================================================
-# Liveness Analysis
-# ============================================================================
-
-class DceLivenessAnalysis:
-    """
-    Tracks which local variables are live (used later).
-
-    A variable is live if:
-    - It's used in a future instruction
-    - It's returned from the function
-    - It's passed to a function call
-    - It's stored to memory
-    """
-    live_locals: Dict<i64, bool>  # Set of live LocalId indices
-    live_blocks: Dict<i64, bool>  # Set of reachable BlockId indices
-
-impl DceLivenessAnalysis:
-    static fn new() -> DceLivenessAnalysis:
-        DceLivenessAnalysis(
-            live_locals: {},
-            live_blocks: {}
-        )
-
-    me mark_live(local: LocalId):
-        """Mark a local as live."""
-        self.live_locals[local.id] = true
-
-    fn is_live(local: LocalId) -> bool:
-        """Check if local is live."""
-        self.live_locals.has(local.id)
-
-    me mark_block_reachable(block: BlockId):
-        """Mark a block as reachable."""
-        self.live_blocks[block.id] = true
-
-    fn is_block_reachable(block: BlockId) -> bool:
-        """Check if block is reachable."""
-        self.live_blocks.has(block.id)
 
 # ============================================================================
 # Dead Code Elimination Pass
@@ -121,19 +84,20 @@ impl DeadCodeElimination:
         """
         self.iterations = self.iterations + 1
 
-        # Phase 1: Find reachable blocks
-        val reachable = self.find_reachable_blocks(func)
+        val facts = perf_facts_build(func)
+        if not facts.cfg_complete or not facts.def_use_complete or not facts.liveness_complete:
+            return func
 
         # Build reachable set for O(1) lookup
         var reachable_set = {}
-        for bid in reachable:
+        for bid in facts.reverse_postorder:
             reachable_set[bid.id] = true
 
         # Phase 2: Remove dead instructions in reachable blocks
         var optimized_blocks: [MirBlock] = []
         for block in func.blocks:
             if reachable_set.has(block.id.id):
-                val optimized_block = self.remove_dead_instructions(block)
+                val optimized_block = self.remove_dead_instructions(block, facts)
                 optimized_blocks = optimized_blocks.push(optimized_block)
             else:
                 # Unreachable block - don't include
@@ -143,88 +107,10 @@ impl DeadCodeElimination:
         MirFunction(..func, blocks: optimized_blocks)
 
     # ========================================================================
-    # Reachability Analysis
-    # ========================================================================
-
-    fn find_reachable_blocks(func: MirFunction) -> [BlockId]:
-        """
-        Find all reachable blocks via depth-first search from entry.
-
-        Returns list of reachable block IDs.
-        """
-        var reachable: [BlockId] = []
-        var visited = {}
-        var worklist: [BlockId] = [func.entry_block]
-
-        # Pre-compute block lookup by ID for O(1) find_block
-        var block_map = {}
-        for i in 0..(func.blocks.len()):
-            val b = func.blocks[i]
-            block_map[b.id.id] = i
-
-        var wi = 0
-        while wi < worklist.len():
-            val block_id = worklist[wi]
-            wi = wi + 1
-
-            # Skip if already visited (O(1) Dict lookup)
-            if visited.has("{block_id.id}"):
-                continue
-
-            # Mark reachable
-            visited[block_id.id] = true
-            reachable = reachable.push(block_id)
-
-            # Find block via pre-computed map (O(1) lookup)
-            if not block_map.has(block_id.id):
-                continue
-            val block_idx = block_map[block_id.id]
-            val block = func.blocks[block_idx]
-
-            # Add successors to worklist
-            val successors = self.get_successor_blocks(block.terminator)
-            for succ in successors:
-                if not visited.has(succ.id):
-                    worklist = worklist.push(succ)
-
-        reachable
-
-    fn get_successor_blocks(term: MirTerminator) -> [BlockId]:
-        """Get successor block IDs from terminator."""
-        match term:
-            case Goto(target):
-                [target]
-
-            case If(_, then_, else_):
-                [then_, else_]
-
-            case Switch(_, targets, default):
-                var succs: [BlockId] = [default]
-                for case_item in targets:
-                    val sc: SwitchCase = case_item
-                    succs = succs.push(sc.target)
-                succs
-
-            case CallTerminator(_, _, _, normal, unwind):
-                if unwind.?:
-                    [normal, unwind.unwrap()]
-                else:
-                    [normal]
-
-            case Ret(_):
-                []
-
-            case Unreachable:
-                []
-
-            case Abort(_):
-                []
-
-    # ========================================================================
     # Instruction-Level DCE
     # ========================================================================
 
-    me remove_dead_instructions(block: MirBlock) -> MirBlock:
+    me remove_dead_instructions(block: MirBlock, facts: PerfFacts) -> MirBlock:
         """
         Remove dead instructions from a block.
 
@@ -233,32 +119,40 @@ impl DeadCodeElimination:
         - It's a pure operation (no side effects)
         - Its result isn't consumed
         """
+        var live: Dict<i64, bool> = {}
+        for local in facts.locals:
+            if perf_facts_is_live_out(facts, block.id, local):
+                live[local.id] = true
+        for local in perf_terminator_access(block.terminator).uses:
+            live[local.id] = true
+
+        # One backwards transfer replaces the former per-definition scan.
+        # The function-level completeness gate guarantees the shared visitor
+        # modeled every instruction before this method is entered.
+        var keep: [bool] = []
+        for _ in block.instructions: keep.push(false)
+        var index = block.instructions.len()
+        while index > 0:
+            index = index - 1
+            val instruction = block.instructions[index]
+            val access = perf_instruction_access(instruction)
+            var instruction_live = self.instruction_has_side_effects(instruction)
+            if access.defs.len() == 0:
+                # Preserve marker/debug/no-result semantics until each opcode
+                # has an explicit observability contract.
+                instruction_live = true
+            for local in access.defs:
+                if live.has(local.id): instruction_live = true
+            if instruction_live:
+                keep[index] = true
+                for local in access.defs: live.remove(local.id)
+                for local in access.uses: live[local.id] = true
+
         var live_instructions: [MirInst] = []
-
-        # Liveness analysis strategy (Phase 1B.6 - TODO #131 ✅)
-        # 1. Mark all instructions with side effects as live
-        # 2. Mark instructions whose results are used as live
-        # 3. Remove unmarked (dead) instructions
-
-        var live_set = {}
-
-        # First pass: mark side-effect instructions
         for i in 0..(block.instructions.len()):
-            if self.instruction_has_side_effects(block.instructions[i]):
-                live_set[i] = true
-
-        # Second pass: mark instructions whose results are used
-        for i in 0..(block.instructions.len()):
-            if self.is_instruction_result_used(block.instructions[i], block):
-                if not live_set.has(i):
-                    live_set[i] = true
-
-        # Third pass: build live instruction list
-        for i in 0..(block.instructions.len()):
-            if live_set.has(i):
-                live_instructions = live_instructions.push(block.instructions[i])
+            if keep[i]:
+                live_instructions.push(block.instructions[i])
             else:
-                # Dead instruction - count removal
                 self.removed_instructions = self.removed_instructions + 1
 
         MirBlock(
@@ -311,111 +205,6 @@ impl DeadCodeElimination:
                 true
             case _:
                 false  # Conservative: assume impure
-
-    fn is_instruction_result_used(inst: MirInst, block: MirBlock) -> bool:
-        """
-        Check if instruction's result is used later.
-
-        Performs basic def-use analysis: checks if the dest local appears
-        as an operand in any subsequent instruction or terminator.
-        """
-        # Extract dest local from instruction
-        val dest_id = self.get_inst_dest(inst)
-        if not dest_id.?:
-            return true  # No dest = side-effect instruction, always keep
-
-        val dest = dest_id.unwrap()
-
-        # Check if dest is used in any instruction in this block
-        var found_inst = false
-        for other_inst in block.instructions:
-            if not found_inst:
-                # Skip until we find our instruction
-                if self.same_inst(inst, other_inst):
-                    found_inst = true
-                continue
-            # Check if other_inst uses dest
-            if self.inst_uses_local(other_inst, dest):
-                return true
-
-        # Check if used in terminator
-        if self.terminator_uses_local(block.terminator, dest):
-            return true
-
-        # Not used in this block - conservatively assume used across blocks
-        true
-
-    fn get_inst_dest(inst: MirInst) -> LocalId?:
-        """Extract destination local from an instruction."""
-        match inst.kind:
-            case Const(dest, _, _): Some(dest)
-            case Copy(dest, _): Some(dest)
-            case Move(dest, _): Some(dest)
-            case BinOp(dest, _, _, _): Some(dest)
-            case UnaryOp(dest, _, _): Some(dest)
-            case Alloc(dest, _): Some(dest)
-            case Load(dest, _): Some(dest)
-            case GetField(dest, _, _): Some(dest)
-            case Cast(dest, _, _): Some(dest)
-            case Aggregate(dest, _, _): Some(dest)
-            case _: nil
-
-    fn same_inst(a: MirInst, b: MirInst) -> bool:
-        """Simple identity check for instructions (by span)."""
-        if a.span.? and b.span.?:
-            val sa: Span = a.span.unwrap()
-            val sb: Span = b.span.unwrap()
-            return sa.start == sb.start and sa.end == sb.end
-        false
-
-    fn inst_uses_local(inst: MirInst, local: LocalId) -> bool:
-        """Check if instruction uses a given local."""
-        match inst.kind:
-            case Copy(_, src): src.id == local.id
-            case Move(_, src): src.id == local.id
-            case BinOp(_, _, left, right):
-                self.operand_uses_local(left, local) or self.operand_uses_local(right, local)
-            case UnaryOp(_, _, operand):
-                self.operand_uses_local(operand, local)
-            case Load(_, ptr):
-                self.operand_uses_local(ptr, local)
-            case Store(ptr, value):
-                self.operand_uses_local(ptr, local) or self.operand_uses_local(value, local)
-            case Call(_, func, args):
-                if self.operand_uses_local(func, local):
-                    return true
-                for arg in args:
-                    if self.operand_uses_local(arg, local):
-                        return true
-                false
-            case GetField(_, base, _):
-                self.operand_uses_local(base, local)
-            case DecisionProbe(_, _, result, _, _, _):
-                self.operand_uses_local(result, local)
-            case ConditionProbe(_, _, _, _, result, _, _, _):
-                self.operand_uses_local(result, local)
-            case _: false
-
-    fn operand_uses_local(operand: MirOperand, local: LocalId) -> bool:
-        """Check if operand references a local."""
-        match operand.kind:
-            case Copy(src): src.id == local.id
-            case Move(src): src.id == local.id
-            case _: false
-
-    fn terminator_uses_local(term: MirTerminator, local: LocalId) -> bool:
-        """Check if terminator uses a local."""
-        match term:
-            case Ret(op):
-                if op.?:
-                    self.operand_uses_local(op.unwrap(), local)
-                else:
-                    false
-            case If(cond, _, _):
-                self.operand_uses_local(cond, local)
-            case Switch(value, _, _):
-                self.operand_uses_local(value, local)
-            case _: false
 
     # ========================================================================
     # Statistics
