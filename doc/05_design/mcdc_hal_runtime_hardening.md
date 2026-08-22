@@ -52,6 +52,20 @@ owner and is not a multi-writer object.
 
 The extractor writes strictly increasing instructions into a caller buffer and seals a digest. The executor validates capability, safety policy, capacity, and sequence before applying any instruction. Plan-Then-Commit performs the accepted plan once; ReplayOnly feeds recorded observations to shadow providers. A provider requesting an unrecorded or different interaction returns `InvalidRequest`/`Diverged`, never ambiently performs it.
 
+`RtHalEnvironmentBindingV1` is the parent-owned bridge from a manifest-pinned
+numeric operation identity to that extractor. Operation 101 is the production
+`io.clock.monotonic_nanos.v1` declaration, operation 102 is environment lookup,
+and the remaining typed adapters use `1000 + EnvOpcodeV1`. The binding retains
+only fixed scalars and the existing extraction cursor. Extraction is O(1) per
+interaction with no lookup, hashing, collection, or allocation; replay performs
+only the unavoidable O(result bytes) copy into caller-owned storage. A cursor
+preflight occurs before that copy, so a duplicate or reordered replay cannot
+mutate the result region, reread ambient state, or consume twice.
+The additive provider-result V2 trace position mixes the operation and schema
+identities into the sealed plan digest and carries the exact consumed cursor;
+cross-operation relabeling and incomplete provider consumption therefore fail
+comparison without retaining a dynamic transcript.
+
 ### Ambient environment and clock capture
 
 `HostedPreparedEnvironmentGetExecutorV1` performs its single ambient lookup

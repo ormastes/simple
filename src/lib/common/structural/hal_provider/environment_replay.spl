@@ -3,6 +3,86 @@
 
 use std.common.structural.environment_instruction.*
 use std.common.structural.hal_provider.contracts.*
+use std.common.structural.hal_provider.normalized_result_v2.{
+    HalProviderResultV2, HalTracePositionV2,
+    hal_provider_result_v2_well_formed, hal_trace_position_v2,
+    hal_trace_position_v2_well_formed
+}
+
+val HAL_ENV_TRACE_ID_MODULUS_V2: i64 = 2147483629
+
+fn _hal_environment_trace_identity_lane_v2(
+        digest: i64, operation_id: i64, schema_id: i64,
+        salt: i64) -> i64:
+    ((digest * 257 + (operation_id % HAL_ENV_TRACE_ID_MODULUS_V2)
+        + schema_id * 17 + salt)
+        % HAL_ENV_TRACE_ID_MODULUS_V2) + 1
+
+fn hal_environment_trace_position_v2(
+        plan: RtHalEnvironmentPlanV1,
+        consumed_count: i64) -> HalTracePositionV2:
+    val admitted = rt_hal_environment_plan_admitted_v1(
+        plan, plan.tagged_operation_id)
+        and consumed_count >= 0
+        and consumed_count <= plan.trace.instruction_count
+    if not admitted:
+        return hal_trace_position_v2(0, 0, 0, 0, 0)
+    hal_trace_position_v2(
+        _hal_environment_trace_identity_lane_v2(
+            plan.trace.plan_digest_hi, plan.tagged_operation_id,
+            plan.environment_schema_id, 11),
+        _hal_environment_trace_identity_lane_v2(
+            plan.trace.plan_digest_lo, plan.tagged_operation_id,
+            plan.environment_schema_id, 29),
+        consumed_count, plan.trace.instruction_count,
+        plan.trace.instruction_capacity)
+
+struct HalEnvironmentPlanReceiptV2:
+    provider: HalProviderKind
+    tagged_operation_id: i64
+    environment_schema_id: i64
+    invocation_id: i64
+    trace: HalTracePositionV2
+    status: EnvInstructionStatusV1
+    sealed: bool
+
+fn hal_environment_plan_receipt_v2(
+        provider: HalProviderKind,
+        plan: RtHalEnvironmentPlanV1) -> HalEnvironmentPlanReceiptV2:
+    HalEnvironmentPlanReceiptV2(
+        provider: provider,
+        tagged_operation_id: plan.tagged_operation_id,
+        environment_schema_id: plan.environment_schema_id,
+        invocation_id: plan.trace.invocation_id,
+        trace: hal_environment_trace_position_v2(plan, 0),
+        status: plan.status,
+        sealed: rt_hal_environment_plan_admitted_v1(
+            plan, plan.tagged_operation_id))
+
+fn hal_environment_plan_receipt_v2_well_formed(
+        value: HalEnvironmentPlanReceiptV2) -> bool:
+    value.tagged_operation_id > 0
+        and value.tagged_operation_id <= RT_HAL_ENV_OPERATION_MAX_V1
+        and value.environment_schema_id == RT_HAL_ENVIRONMENT_SCHEMA_V1
+        and value.invocation_id > 0
+        and hal_trace_position_v2_well_formed(value.trace)
+        and value.trace.cursor == 0
+        and env_instruction_status_to_i64(value.status)
+            == env_instruction_status_to_i64(EnvInstructionStatusV1.Planned)
+        and value.sealed
+
+fn hal_environment_plan_result_admitted_v2(
+        value: HalEnvironmentPlanReceiptV2,
+        result: HalProviderResultV2) -> bool:
+    hal_environment_plan_receipt_v2_well_formed(value)
+        and hal_provider_result_v2_well_formed(result)
+        and value.provider == result.provider
+        and value.invocation_id == result.invocation_id
+        and value.trace.identity_hi == result.trace.identity_hi
+        and value.trace.identity_lo == result.trace.identity_lo
+        and value.trace.length == result.trace.length
+        and value.trace.capacity == result.trace.capacity
+        and result.trace.cursor == result.trace.length
 
 struct HalEnvironmentPlanReceiptV1:
     provider: HalProviderKind
@@ -87,3 +167,7 @@ export hal_environment_plan_receipt_v1_well_formed
 export hal_environment_plan_admitted
 export hal_environment_plans_equivalent
 export hal_environment_replay_receipt_v1, hal_environment_replay_admitted
+export hal_environment_trace_position_v2
+export HalEnvironmentPlanReceiptV2, hal_environment_plan_receipt_v2
+export hal_environment_plan_receipt_v2_well_formed
+export hal_environment_plan_result_admitted_v2

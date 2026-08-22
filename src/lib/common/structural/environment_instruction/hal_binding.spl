@@ -1,0 +1,204 @@
+# codex-impl
+# Fixed-state binding from an @rt(hal) operation to environment extraction.
+#
+# The binding owner is the parent test/runtime coordinator.  It retains only
+# scalar contract state plus the extraction cursor.  Argument and result bytes
+# remain caller-owned; physical adapters capture once before replay begins.
+
+use std.common.structural.environment_instruction.contracts.*
+use std.common.structural.environment_instruction.extraction.*
+use std.common.structural.environment_instruction.executor.*
+
+val RT_HAL_ENVIRONMENT_SCHEMA_V1: i64 = 1
+val RT_HAL_CLOCK_MONOTONIC_NANOS_OPERATION_V1: i64 = 101
+val RT_HAL_ENVIRONMENT_GET_OPERATION_V1: i64 = 102
+val RT_HAL_TYPED_ENV_OPERATION_BASE_V1: i64 = 1000
+val RT_HAL_ENV_OPERATION_MAX_V1: i64 = 4194304
+
+fn rt_hal_environment_operation_for_opcode_v1(opcode: EnvOpcodeV1) -> i64:
+    RT_HAL_TYPED_ENV_OPERATION_BASE_V1 + env_opcode_to_i64(opcode)
+
+struct RtHalEnvironmentBindingV1:
+    tagged_operation_id: i64
+    environment_schema_id: i64
+    extraction: EnvExtractionCursorV1
+
+fn rt_hal_environment_binding_v1(
+        tagged_operation_id: i64, invocation_id: i64,
+        instruction_capacity: i64,
+        environment_schema_id: i64 = RT_HAL_ENVIRONMENT_SCHEMA_V1)
+        -> RtHalEnvironmentBindingV1:
+    RtHalEnvironmentBindingV1(
+        tagged_operation_id: tagged_operation_id,
+        environment_schema_id: environment_schema_id,
+        extraction: env_extraction_cursor_v1(
+            invocation_id, instruction_capacity))
+
+fn rt_hal_environment_binding_v1_well_formed(
+        value: RtHalEnvironmentBindingV1) -> bool:
+    value.tagged_operation_id > 0
+        and value.tagged_operation_id <= RT_HAL_ENV_OPERATION_MAX_V1
+        and value.environment_schema_id == RT_HAL_ENVIRONMENT_SCHEMA_V1
+        and env_extraction_cursor_v1_well_formed(value.extraction)
+
+fn rt_hal_environment_opcode_admitted_v1(
+        tagged_operation_id: i64, opcode: EnvOpcodeV1) -> bool:
+    if tagged_operation_id == RT_HAL_CLOCK_MONOTONIC_NANOS_OPERATION_V1:
+        return opcode == EnvOpcodeV1.ClockRead
+    if tagged_operation_id == RT_HAL_ENVIRONMENT_GET_OPERATION_V1:
+        return opcode == EnvOpcodeV1.EnvironmentGet
+    # Every existing adapter has one collision-free scalar operation identity.
+    # This avoids string hashing, lookup, and allocation in the sealed path.
+    tagged_operation_id == rt_hal_environment_operation_for_opcode_v1(opcode)
+
+struct RtHalEnvironmentExtractionStepV1:
+    binding: RtHalEnvironmentBindingV1
+    instruction: EnvInstructionV1
+    accepted: bool
+
+fn rt_hal_environment_extract_v1(
+        value: RtHalEnvironmentBindingV1, opcode: EnvOpcodeV1,
+        capability_id: i64, flags: i64,
+        argument_offset: i64, argument_length: i64,
+        argument_capacity: i64, result_offset: i64,
+        result_capacity: i64, result_region_capacity: i64)
+        -> RtHalEnvironmentExtractionStepV1:
+    val event = env_access_event_v1(
+        value.extraction.invocation_id, value.extraction.next_sequence,
+        opcode, capability_id, flags, argument_offset, argument_length,
+        argument_capacity, result_offset, result_capacity,
+        result_region_capacity)
+    if not rt_hal_environment_binding_v1_well_formed(value)
+            or value.extraction.sealed
+            or not rt_hal_environment_opcode_admitted_v1(
+                value.tagged_operation_id, opcode):
+        val rejected = env_extract_access_v1(
+            value.extraction,
+            env_access_event_v1(
+                value.extraction.invocation_id,
+                value.extraction.next_sequence + 1,
+                opcode, capability_id, flags, argument_offset,
+                argument_length, argument_capacity, result_offset,
+                result_capacity, result_region_capacity))
+        return RtHalEnvironmentExtractionStepV1(
+            binding: RtHalEnvironmentBindingV1(
+                tagged_operation_id: value.tagged_operation_id,
+                environment_schema_id: value.environment_schema_id,
+                extraction: rejected.cursor),
+            instruction: rejected.instruction, accepted: false)
+    val extracted = env_extract_access_v1(value.extraction, event)
+    RtHalEnvironmentExtractionStepV1(
+        binding: RtHalEnvironmentBindingV1(
+            tagged_operation_id: value.tagged_operation_id,
+            environment_schema_id: value.environment_schema_id,
+            extraction: extracted.cursor),
+        instruction: extracted.instruction, accepted: extracted.accepted)
+
+fn rt_hal_environment_binding_seal_v1(
+        value: RtHalEnvironmentBindingV1) -> RtHalEnvironmentBindingV1:
+    RtHalEnvironmentBindingV1(
+        tagged_operation_id: value.tagged_operation_id,
+        environment_schema_id: value.environment_schema_id,
+        extraction: env_extraction_cursor_seal(value.extraction))
+
+fn rt_hal_environment_binding_complete_v1(
+        value: RtHalEnvironmentBindingV1) -> bool:
+    rt_hal_environment_binding_v1_well_formed(value)
+        and env_extraction_complete(value.extraction)
+
+fn rt_hal_environment_binding_trace_v1(
+        value: RtHalEnvironmentBindingV1) -> EnvTraceV1:
+    env_extraction_trace_v1(value.extraction)
+
+struct RtHalEnvironmentPlanV1:
+    tagged_operation_id: i64
+    environment_schema_id: i64
+    trace: EnvTraceV1
+    status: EnvInstructionStatusV1
+    complete: bool
+
+fn rt_hal_environment_plan_v1(
+        value: RtHalEnvironmentBindingV1) -> RtHalEnvironmentPlanV1:
+    RtHalEnvironmentPlanV1(
+        tagged_operation_id: value.tagged_operation_id,
+        environment_schema_id: value.environment_schema_id,
+        trace: rt_hal_environment_binding_trace_v1(value),
+        status: value.extraction.status,
+        complete: rt_hal_environment_binding_complete_v1(value))
+
+fn rt_hal_environment_plan_admitted_v1(
+        value: RtHalEnvironmentPlanV1,
+        tagged_operation_id: i64) -> bool:
+    value.tagged_operation_id == tagged_operation_id
+        and value.environment_schema_id == RT_HAL_ENVIRONMENT_SCHEMA_V1
+        and env_trace_v1_well_formed(value.trace)
+        and value.trace.sealed and value.trace.instruction_count > 0
+        and value.complete
+        and env_instruction_status_to_i64(value.status)
+            == env_instruction_status_to_i64(EnvInstructionStatusV1.Planned)
+
+fn rt_hal_environment_plan_replay_v1(
+        value: RtHalEnvironmentPlanV1,
+        tagged_operation_id: i64) -> EnvDeterministicReplayV1:
+    if rt_hal_environment_plan_admitted_v1(value, tagged_operation_id):
+        return env_deterministic_replay_v1(value.trace)
+    # Fail closed before any copy/effect: this deliberately invalid identity
+    # cannot pass replay cursor validation.
+    env_deterministic_replay_v1(env_trace_v1(
+        0, 0, 0, 0, 0, 0, 0, 0, 0, true))
+
+struct RtHalEnvironmentReplayStepV1:
+    replay: EnvDeterministicReplayV1
+    receipt: EnvExecutionReceiptV1
+    accepted: bool
+
+fn rt_hal_environment_replay_exact_v1(
+        value: EnvDeterministicReplayV1,
+        recorded_instruction: EnvInstructionV1,
+        replay_instruction: EnvInstructionV1,
+        applied: EnvObservationV1, argument_bytes: [u8],
+        recorded_result_bytes: [u8], replay_result_bytes: [u8])
+        -> RtHalEnvironmentReplayStepV1:
+    # env_replay_exact_v1 copies only the recorded bounded result and performs
+    # no physical/ambient access.  Its replay observation is then consumed by
+    # the canonical cursor exactly once and in sequence.
+    val cursor_ready = env_replay_cursor_v1_well_formed(value.cursor)
+        and not value.cursor.sealed
+        and replay_instruction.invocation_id == value.cursor.invocation_id
+        and replay_instruction.sequence == value.cursor.next_sequence
+        and value.cursor.consumed_count < value.cursor.instruction_capacity
+        and value.cursor.consumed_count < value.instruction_count
+    val receipt = if cursor_ready:
+        env_replay_exact_v1(
+            recorded_instruction, replay_instruction, applied, argument_bytes,
+            recorded_result_bytes, replay_result_bytes)
+    else:
+        env_execution_rejected_v1(
+            replay_instruction, EnvInstructionStatusV1.Diverged)
+    val replay = env_deterministic_replay_accept(
+        value, recorded_instruction, replay_instruction,
+        applied, receipt.observation)
+    val accepted = receipt.applied and not receipt.physical_effect
+        and receipt.allocation_count_after_seal == 0
+        and replay.cursor.consumed_count == value.cursor.consumed_count + 1
+        and not replay.cursor.sealed
+    RtHalEnvironmentReplayStepV1(
+        replay: replay, receipt: receipt, accepted: accepted)
+
+export RT_HAL_ENVIRONMENT_SCHEMA_V1
+export RT_HAL_CLOCK_MONOTONIC_NANOS_OPERATION_V1
+export RT_HAL_ENVIRONMENT_GET_OPERATION_V1
+export RT_HAL_TYPED_ENV_OPERATION_BASE_V1
+export RT_HAL_ENV_OPERATION_MAX_V1
+export rt_hal_environment_operation_for_opcode_v1
+export RtHalEnvironmentBindingV1, RtHalEnvironmentExtractionStepV1
+export rt_hal_environment_binding_v1
+export rt_hal_environment_binding_v1_well_formed
+export rt_hal_environment_opcode_admitted_v1
+export rt_hal_environment_extract_v1, rt_hal_environment_binding_seal_v1
+export rt_hal_environment_binding_complete_v1
+export rt_hal_environment_binding_trace_v1
+export RtHalEnvironmentPlanV1, rt_hal_environment_plan_v1
+export rt_hal_environment_plan_admitted_v1
+export rt_hal_environment_plan_replay_v1
+export RtHalEnvironmentReplayStepV1, rt_hal_environment_replay_exact_v1
