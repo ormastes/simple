@@ -197,6 +197,37 @@ custom_root="$scratch/custom-output"
 make_fixture "$custom_root" 'stage2-provenance: pure-simple' strict
 mv "$custom_root/build/bootstrap" "$custom_root/build/bootstrap-custom"
 custom_root=$(CDPATH= cd -- "$custom_root" && pwd -P)
+custom_output="$custom_root/build/bootstrap-custom"
+custom_parent="$custom_output/stage2/fixture-triple/simple"
+custom_evidence="$custom_output/provenance/fixture"
+custom_admission="$custom_evidence/admission.env"
+custom_sanity="$custom_output/stage2/fixture-triple/stage2-sanity.receipt"
+custom_provenance="$custom_output/stage2/fixture-triple/stage2-provenance.receipt"
+
+# Admission receipts bind canonical absolute paths. Moving a valid fixture is
+# therefore intentionally insufficient: rebuild its authority receipt at the
+# configured owner, then rebind both parent receipts to that exact artifact.
+custom_old="$custom_root/build/bootstrap"
+custom_old_esc=$(printf '%s' "$custom_old" | sed 's/[\/&]/\\&/g')
+custom_output_esc=$(printf '%s' "$custom_output" | sed 's/[\/&]/\\&/g')
+replace_in_file "s/$custom_old_esc/$custom_output_esc/g" \
+    "$custom_evidence/stage2-receiver.env"
+rm -f -- "$custom_admission"
+bootstrap_stage3_write_stage2_admission_receipt \
+    "$custom_admission" "$custom_parent" "$custom_evidence/source.snapshot" \
+    "$custom_evidence/runtime.snapshot" "$custom_evidence/tool.snapshot" \
+    cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
+    "$custom_evidence/stage2-sanity.env" \
+    "$custom_evidence/stage2-receiver.env" || \
+    fail "could not rebuild configured-output Stage-2 admission"
+custom_admission_sha=$(bootstrap_planner_v2_hash_file "$custom_admission")
+custom_admission_esc=$(printf '%s' "$custom_admission" | sed 's/[\/&]/\\&/g')
+for custom_receipt in "$custom_sanity" "$custom_provenance"; do
+    replace_in_file "s/^admission_receipt_path=.*/admission_receipt_path=$custom_admission_esc/" \
+        "$custom_receipt"
+    replace_in_file "s/^admission_receipt_sha256=.*/admission_receipt_sha256=$custom_admission_sha/" \
+        "$custom_receipt"
+done
 run_custom_output_producer "$custom_root" >"$scratch/custom-output.log" 2>&1 ||
     fail "producer refused configured bootstrap output"
 bootstrap_planner_v2_verify "$custom_root/custom-output-receipt.env" "$custom_root" >/dev/null 2>&1 ||
@@ -254,7 +285,7 @@ seed_root=$(CDPATH= cd -- "$seed_root" && pwd -P)
 if run_producer "$seed_root" >"$scratch/seed.log" 2>&1; then
     fail "producer admitted a Rust-seed parent compiler"
 fi
-grep -q 'parent-compiler-is-rust-seed' "$scratch/seed.log" ||
+grep -q 'parent-stage2-provenance-not-pure-simple' "$scratch/seed.log" ||
     fail "seed parent did not yield the typed diagnostic"
 checked=$((checked + 1))
 
