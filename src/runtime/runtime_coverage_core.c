@@ -3,12 +3,14 @@
 #include <windows.h>
 #else
 #include <pthread.h>
+#include <errno.h>
 #endif
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "runtime_mcdc_v1.h"
 
 typedef struct {
     uint32_t decision_id;
@@ -20,6 +22,23 @@ typedef struct {
     uint64_t false_count;
 } CoverageRow;
 
+/* Correlated MC/DC V1 collector. Storage is supplied before the critical
+ * entry boundary; record/snapshot never allocate and overflow is sticky. */
+typedef struct {
+    SimpleMcdcVectorV1 *events;
+    size_t capacity;
+    size_t count;
+    uint64_t next_sequence;
+    uint64_t overflow_first;
+    uint64_t overflow_count;
+    uint64_t session_id;
+    bool initialized;
+    bool overflowed;
+    bool sealed;
+} McdcCollectorV1;
+
+static McdcCollectorV1 g_mcdc;
+
 static CoverageRow *g_decisions;
 static size_t g_decision_count;
 static CoverageRow *g_conditions;
@@ -28,6 +47,8 @@ static size_t g_condition_count;
 #ifdef _WIN32
 static INIT_ONCE g_coverage_lock_once = INIT_ONCE_STATIC_INIT;
 static CRITICAL_SECTION g_coverage_lock;
+static INIT_ONCE g_mcdc_lock_once = INIT_ONCE_STATIC_INIT;
+static CRITICAL_SECTION g_mcdc_lock;
 static BOOL CALLBACK coverage_init_lock(PINIT_ONCE once, PVOID parameter, PVOID *context) {
     (void)once; (void)parameter; (void)context;
     InitializeCriticalSection(&g_coverage_lock);
@@ -38,11 +59,142 @@ static void coverage_lock(void) {
     EnterCriticalSection(&g_coverage_lock);
 }
 static void coverage_unlock(void) { LeaveCriticalSection(&g_coverage_lock); }
+static BOOL CALLBACK mcdc_init_lock(PINIT_ONCE once, PVOID parameter, PVOID *context) {
+    (void)once; (void)parameter; (void)context;
+    InitializeCriticalSection(&g_mcdc_lock);
+    return TRUE;
+}
+static void mcdc_lock(void) {
+    if (!InitOnceExecuteOnce(&g_mcdc_lock_once, mcdc_init_lock, NULL, NULL)) abort();
+    EnterCriticalSection(&g_mcdc_lock);
+}
+static bool mcdc_try_lock(void) {
+    if (!InitOnceExecuteOnce(&g_mcdc_lock_once, mcdc_init_lock, NULL, NULL)) abort();
+    return TryEnterCriticalSection(&g_mcdc_lock) != 0;
+}
+static void mcdc_unlock(void) { LeaveCriticalSection(&g_mcdc_lock); }
 #else
 static pthread_mutex_t g_coverage_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_mcdc_lock = PTHREAD_MUTEX_INITIALIZER;
 static void coverage_lock(void) { if (pthread_mutex_lock(&g_coverage_lock) != 0) abort(); }
 static void coverage_unlock(void) { if (pthread_mutex_unlock(&g_coverage_lock) != 0) abort(); }
+static void mcdc_lock(void) { if (pthread_mutex_lock(&g_mcdc_lock) != 0) abort(); }
+static bool mcdc_try_lock(void) {
+    int result = pthread_mutex_trylock(&g_mcdc_lock);
+    if (result == 0) return true;
+    if (result == EBUSY) return false;
+    abort();
+}
+static void mcdc_unlock(void) { if (pthread_mutex_unlock(&g_mcdc_lock) != 0) abort(); }
 #endif
+
+int32_t rt_mcdc_collector_init_v1(void *storage, uint64_t storage_bytes,
+                                  uint64_t session_id) {
+    if (!storage || !session_id || storage_bytes < sizeof(SimpleMcdcVectorV1))
+        return SIMPLE_MCDC_V1_INVALID;
+    if (((uintptr_t)storage % _Alignof(SimpleMcdcVectorV1)) != 0)
+        return SIMPLE_MCDC_V1_INVALID;
+    if (storage_bytes > SIZE_MAX) return SIMPLE_MCDC_V1_INVALID;
+    mcdc_lock();
+    g_mcdc.events = (SimpleMcdcVectorV1 *)storage;
+    g_mcdc.capacity = (size_t)storage_bytes / sizeof(SimpleMcdcVectorV1);
+    g_mcdc.count = 0;
+    g_mcdc.next_sequence = 0;
+    g_mcdc.overflow_first = UINT64_MAX;
+    g_mcdc.overflow_count = 0;
+    g_mcdc.session_id = session_id;
+    g_mcdc.overflowed = false;
+    g_mcdc.sealed = false;
+    g_mcdc.initialized = true;
+    mcdc_unlock();
+    return SIMPLE_MCDC_V1_OK;
+}
+
+int32_t rt_mcdc_record_vector_v1(uint64_t session_id, uint32_t decision_id,
+                                 uint32_t condition_count,
+                                 uint64_t evaluated_mask, uint64_t true_mask,
+                                 uint64_t owner_id, uint64_t owner_sequence,
+                                 uint8_t outcome) {
+    if (!session_id || !decision_id || !condition_count || condition_count > 62u ||
+        !owner_id || outcome > 1u) return SIMPLE_MCDC_V1_INVALID;
+    const uint64_t admitted = (UINT64_C(1) << condition_count) - UINT64_C(1);
+    if ((evaluated_mask & ~admitted) || (true_mask & ~evaluated_mask))
+        return SIMPLE_MCDC_V1_INVALID;
+    if (!mcdc_try_lock()) return SIMPLE_MCDC_V1_BUSY;
+    if (!g_mcdc.initialized) {
+        mcdc_unlock();
+        return SIMPLE_MCDC_V1_NOT_INITIALIZED;
+    }
+    if (g_mcdc.session_id != session_id) { mcdc_unlock(); return SIMPLE_MCDC_V1_SESSION_MISMATCH; }
+    if (g_mcdc.sealed) { mcdc_unlock(); return SIMPLE_MCDC_V1_NOT_SEALED; }
+    if (g_mcdc.next_sequence == UINT64_MAX) {
+        if (!g_mcdc.overflowed) g_mcdc.overflow_first = UINT64_MAX;
+        g_mcdc.overflowed = true;
+        if (g_mcdc.overflow_count != UINT64_MAX) ++g_mcdc.overflow_count;
+        mcdc_unlock();
+        return SIMPLE_MCDC_V1_OVERFLOW;
+    }
+    const uint64_t sequence = g_mcdc.next_sequence++;
+    if (g_mcdc.count == g_mcdc.capacity) {
+        if (!g_mcdc.overflowed) g_mcdc.overflow_first = sequence;
+        g_mcdc.overflowed = true;
+        if (g_mcdc.overflow_count != UINT64_MAX) ++g_mcdc.overflow_count;
+        mcdc_unlock();
+        return SIMPLE_MCDC_V1_OVERFLOW;
+    }
+    g_mcdc.events[g_mcdc.count++] = (SimpleMcdcVectorV1){
+        decision_id, condition_count, evaluated_mask, true_mask,
+        owner_id, owner_sequence, outcome, {0}
+    };
+    mcdc_unlock();
+    return SIMPLE_MCDC_V1_OK;
+}
+
+int32_t rt_mcdc_collector_seal_v1(uint64_t session_id) {
+    mcdc_lock();
+    if (!g_mcdc.initialized) { mcdc_unlock(); return SIMPLE_MCDC_V1_NOT_INITIALIZED; }
+    if (g_mcdc.session_id != session_id) { mcdc_unlock(); return SIMPLE_MCDC_V1_SESSION_MISMATCH; }
+    g_mcdc.sealed = true;
+    mcdc_unlock();
+    return SIMPLE_MCDC_V1_OK;
+}
+
+int32_t rt_mcdc_snapshot_v1(SimpleMcdcVectorV1 *output, uint64_t output_capacity,
+                            SimpleMcdcSnapshotV1 *snapshot) {
+    if (!snapshot || output_capacity > SIZE_MAX) return SIMPLE_MCDC_V1_INVALID;
+    mcdc_lock();
+    if (!g_mcdc.initialized) {
+        mcdc_unlock();
+        return SIMPLE_MCDC_V1_NOT_INITIALIZED;
+    }
+    if (!g_mcdc.sealed) { mcdc_unlock(); return SIMPLE_MCDC_V1_NOT_SEALED; }
+    if (g_mcdc.count > output_capacity || (g_mcdc.count && !output)) {
+        mcdc_unlock();
+        return SIMPLE_MCDC_V1_OUTPUT_TOO_SMALL;
+    }
+    if (g_mcdc.count) memmove(output, g_mcdc.events, g_mcdc.count * sizeof(*output));
+    *snapshot = (SimpleMcdcSnapshotV1){
+        (uint64_t)g_mcdc.count, g_mcdc.overflow_first, g_mcdc.overflow_count,
+        g_mcdc.session_id, g_mcdc.overflowed ? 1u : 0u, {0}
+    };
+    mcdc_unlock();
+    return SIMPLE_MCDC_V1_OK;
+}
+
+void rt_mcdc_collector_reset_v1(void) {
+    mcdc_lock();
+    g_mcdc.events = NULL;
+    g_mcdc.capacity = 0;
+    g_mcdc.count = 0;
+    g_mcdc.next_sequence = 0;
+    g_mcdc.overflow_first = UINT64_MAX;
+    g_mcdc.overflow_count = 0;
+    g_mcdc.session_id = 0;
+    g_mcdc.initialized = false;
+    g_mcdc.overflowed = false;
+    g_mcdc.sealed = false;
+    mcdc_unlock();
+}
 
 static bool coverage_add_size(size_t a, size_t b, size_t *result) {
     if (a > SIZE_MAX - b) return false;

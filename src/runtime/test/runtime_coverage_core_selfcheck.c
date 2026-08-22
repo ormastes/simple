@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include "../runtime_mcdc_v1.h"
 
 bool rt_coverage_enabled(void);
 void rt_coverage_decision_probe(uint32_t, bool, const char *, uint32_t, uint32_t);
@@ -25,6 +26,23 @@ int64_t rt_string_new(const uint8_t *bytes, uint64_t len) {
 }
 
 int main(void) {
+    SimpleMcdcVectorV1 storage[2];
+    SimpleMcdcVectorV1 vectors[2];
+    SimpleMcdcSnapshotV1 snapshot;
+    assert(rt_mcdc_record_vector_v1(7, 9, 2, 3, 1, 1, 0, 0) == 1);
+    assert(rt_mcdc_collector_init_v1(storage, sizeof(storage), 7) == 0);
+    assert(rt_mcdc_record_vector_v1(8, 9, 2, 3, 1, 1, 0, 0) == 5);
+    assert(rt_mcdc_record_vector_v1(7, 9, 2, 3, 1, 1, 0, 0) == 0);
+    assert(rt_mcdc_record_vector_v1(7, 9, 2, 3, 3, 1, 1, 1) == 0);
+    assert(rt_mcdc_record_vector_v1(7, 9, 2, 4, 0, 1, 2, 0) == 2);
+    assert(rt_mcdc_record_vector_v1(7, 9, 2, 3, 0, 1, 2, 0) == 3);
+    assert(rt_mcdc_collector_seal_v1(7) == 0);
+    assert(rt_mcdc_snapshot_v1(vectors, 2, &snapshot) == 0);
+    assert(snapshot.written == 2 && snapshot.overflowed &&
+           snapshot.overflow_first == 2 && snapshot.overflow_count == 1);
+    assert(vectors[0].decision_id == 9 && vectors[0].evaluated_mask == 3);
+    assert(vectors[1].owner_sequence == 1 && vectors[1].outcome == 1);
+    rt_mcdc_collector_reset_v1();
     assert(setenv("SIMPLE_COVERAGE", "1", 1) == 0);
     rt_coverage_clear();
     rt_coverage_decision_probe(9, true, "z.spl", 3, 4);
