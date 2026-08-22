@@ -4,6 +4,16 @@
 //! pointer wrapper types for manual memory management.
 
 use std::collections::{HashMap, HashSet};
+
+/// Per-frame maps of `CowEnv`. These are probed several times per variable
+/// read/write in the tree-walking interpreter (overlay, tombstones, block
+/// locals, dirty set); SipHash over the name dominated those probes in the
+/// sampled profile. `ahash` keeps the same randomized-per-process iteration
+/// order contract as `std::collections::HashMap`'s `RandomState`, so nothing
+/// observable changes. Private fields only -- every public signature that
+/// hands a map out still builds a std `HashMap`.
+pub(crate) type FrameMap<K, V> = HashMap<K, V, ahash::RandomState>;
+pub(crate) type FrameSet<K> = HashSet<K, ahash::RandomState>;
 use std::fmt;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
@@ -498,17 +508,17 @@ pub struct CowEnv {
     /// Module scope resolved by parent pointer: never copied into the frame.
     scope: Option<GlobalScope>,
     /// Local modifications/additions (typically small — function args, locals)
-    overlay: HashMap<String, Value>,
+    overlay: FrameMap<String, Value>,
     /// Keys removed from base/scope (tombstones)
-    tombstones: HashSet<String>,
+    tombstones: FrameSet<String>,
     /// Names declared by the current lexical function frame.
-    local_bindings: HashSet<String>,
+    local_bindings: FrameSet<String>,
     /// Names shadowed by currently executing nested blocks.
-    block_local_bindings: HashMap<String, usize>,
+    block_local_bindings: FrameMap<String, usize>,
     /// Owner-global values copied from a callee for reads, not caller writes.
-    refreshed_globals: HashSet<String>,
+    refreshed_globals: FrameSet<String>,
     /// Owner-qualified updates crossing frames from another module.
-    forwarded_globals: HashMap<(Arc<str>, String), Value>,
+    forwarded_globals: FrameMap<(Arc<str>, String), Value>,
     /// Explicit local-name -> defining module/name bindings (selective lambda
     /// capture, tests). The module scope answers the same question lazily for
     /// every other name, so this stays small.
@@ -516,12 +526,12 @@ pub struct CowEnv {
     /// Names written through this frame since the last `clear_dirty()`.
     /// Distinguishes actual frame writes from values merely present in a
     /// cloned environment, so block/closure write-back can be dirty-only.
-    dirty_names: HashSet<String>,
+    dirty_names: FrameSet<String>,
     /// Strict-mode only (plan M5 §2): names bound by an initializer-less
     /// `let` that have not yet received a first assignment. Stays an
     /// unallocated empty `HashSet` when `SIMPLE_STRICT_MEM` is unset — no
     /// off-path cost beyond the field itself.
-    uninit_names: HashSet<String>,
+    uninit_names: FrameSet<String>,
 }
 
 impl CowEnv {
@@ -549,15 +559,15 @@ impl CowEnv {
         CowEnv {
             base: None,
             scope: None,
-            overlay: HashMap::new(),
-            tombstones: HashSet::new(),
-            local_bindings: HashSet::new(),
-            block_local_bindings: HashMap::new(),
-            refreshed_globals: HashSet::new(),
-            forwarded_globals: HashMap::new(),
+            overlay: FrameMap::default(),
+            tombstones: FrameSet::default(),
+            local_bindings: FrameSet::default(),
+            block_local_bindings: FrameMap::default(),
+            refreshed_globals: FrameSet::default(),
+            forwarded_globals: FrameMap::default(),
             global_bindings: Arc::new(HashMap::new()),
-            dirty_names: HashSet::new(),
-            uninit_names: HashSet::new(),
+            dirty_names: FrameSet::default(),
+            uninit_names: FrameSet::default(),
         }
     }
 
@@ -585,8 +595,14 @@ impl CowEnv {
 
     /// Insert a key-value pair. Returns the previous value if any.
     pub fn insert(&mut self, key: String, value: Value) -> Option<Value> {
-        self.tombstones.remove(&key);
-        self.refreshed_globals.remove(&key);
+        // Both sets are empty in the common frame; a `remove` on an empty
+        // set still hashes the key (SipHash over the name) for nothing.
+        if !self.tombstones.is_empty() {
+            self.tombstones.remove(&key);
+        }
+        if !self.refreshed_globals.is_empty() {
+            self.refreshed_globals.remove(&key);
+        }
         self.dirty_names.insert(key.clone());
         // First assignment to a strict-mode uninit name clears its trap
         // (same removal point `tombstones` uses above).
@@ -996,15 +1012,15 @@ impl CowEnv {
         CowEnv {
             base: None,
             scope: None,
-            overlay: map,
-            tombstones: HashSet::new(),
-            local_bindings: HashSet::new(),
-            block_local_bindings: HashMap::new(),
-            refreshed_globals: HashSet::new(),
-            forwarded_globals: HashMap::new(),
+            overlay: map.into_iter().collect(),
+            tombstones: FrameSet::default(),
+            local_bindings: FrameSet::default(),
+            block_local_bindings: FrameMap::default(),
+            refreshed_globals: FrameSet::default(),
+            forwarded_globals: FrameMap::default(),
             global_bindings: Arc::new(HashMap::new()),
-            dirty_names: HashSet::new(),
-            uninit_names: HashSet::new(),
+            dirty_names: FrameSet::default(),
+            uninit_names: FrameSet::default(),
         }
     }
 
@@ -1013,15 +1029,15 @@ impl CowEnv {
         CowEnv {
             base: Some(base),
             scope: None,
-            overlay: HashMap::new(),
-            tombstones: HashSet::new(),
-            local_bindings: HashSet::new(),
-            block_local_bindings: HashMap::new(),
-            refreshed_globals: HashSet::new(),
-            forwarded_globals: HashMap::new(),
+            overlay: FrameMap::default(),
+            tombstones: FrameSet::default(),
+            local_bindings: FrameSet::default(),
+            block_local_bindings: FrameMap::default(),
+            refreshed_globals: FrameSet::default(),
+            forwarded_globals: FrameMap::default(),
             global_bindings: Arc::new(HashMap::new()),
-            dirty_names: HashSet::new(),
-            uninit_names: HashSet::new(),
+            dirty_names: FrameSet::default(),
+            uninit_names: FrameSet::default(),
         }
     }
 

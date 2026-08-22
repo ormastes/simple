@@ -74,7 +74,7 @@ use super::interpreter_patterns::{is_catch_all_pattern, pattern_matches};
 
 // Import coverage helpers
 use super::coverage_helpers::{
-    current_coverage_file, decision_id_from_span, is_coverage_enabled, record_decision_coverage_sffi,
+    decision_id_from_span, is_coverage_enabled, record_decision_coverage_here,
 };
 
 /// Handle loop control flow result. Returns Some if we should exit the loop.
@@ -293,7 +293,7 @@ pub(super) fn exec_if(
         let decision_result = is_condition_present(&if_stmt.condition, &cond_val);
 
         // COVERAGE: Record decision for if statement
-        record_decision_coverage_sffi(&current_coverage_file(), if_stmt.span.line, if_stmt.span.column, decision_result);
+        record_decision_coverage_here(if_stmt.span.line, if_stmt.span.column, decision_result);
 
         if decision_result {
             return exec_block(&if_stmt.then_block, env, functions, classes, enums, impl_methods);
@@ -339,9 +339,7 @@ pub(super) fn exec_if(
 
             // COVERAGE: Record decision for elif statement
             let elif_decision_id = if_stmt.span.line as u32 + idx as u32;
-            record_decision_coverage_sffi(
-                &current_coverage_file(),
-                if_stmt.span.line + idx,
+            record_decision_coverage_here(if_stmt.span.line + idx,
                 if_stmt.span.column,
                 elif_decision,
             );
@@ -470,9 +468,7 @@ pub(super) fn exec_while(
                     // This should be very rare; fall through to a full condition eval.
                     let cond_val = evaluate_expr(&while_stmt.condition, env, functions, classes, enums, impl_methods)?;
                     let decision_result = is_condition_present(&while_stmt.condition, &cond_val);
-                    record_decision_coverage_sffi(
-                        &current_coverage_file(),
-                        while_stmt.span.line,
+                    record_decision_coverage_here(while_stmt.span.line,
                         while_stmt.span.column,
                         decision_result,
                     );
@@ -511,9 +507,7 @@ pub(super) fn exec_while(
                 }
             };
 
-            record_decision_coverage_sffi(
-                &current_coverage_file(),
-                while_stmt.span.line,
+            record_decision_coverage_here(while_stmt.span.line,
                 while_stmt.span.column,
                 decision_result,
             );
@@ -543,9 +537,7 @@ pub(super) fn exec_while(
         let decision_result = is_condition_present(&while_stmt.condition, &cond_val);
 
         // COVERAGE: Record decision for while condition on each iteration
-        record_decision_coverage_sffi(
-            &current_coverage_file(),
-            while_stmt.span.line,
+        record_decision_coverage_here(while_stmt.span.line,
             while_stmt.span.column,
             decision_result,
         );
@@ -4871,9 +4863,7 @@ pub(crate) fn exec_match_core(
             }
 
             // COVERAGE: Record that this match arm was taken
-            record_decision_coverage_sffi(
-                &current_coverage_file(),
-                match_stmt.span.line + arm_index,
+            record_decision_coverage_here(match_stmt.span.line + arm_index,
                 match_stmt.span.column,
                 true, // We matched an arm
             );
@@ -5017,7 +5007,7 @@ pub(crate) fn exec_if_core(
         // reported zero coverage regardless of how it was exercised. Mirrors
         // `exec_if`'s recording exactly (see also block_execution.rs's two
         // `Node::If` sites, which had the same gap for a different reason).
-        record_decision_coverage_sffi(&current_coverage_file(), if_stmt.span.line, if_stmt.span.column, decision_result);
+        record_decision_coverage_here(if_stmt.span.line, if_stmt.span.column, decision_result);
         if decision_result {
             let (flow, last_val) = exec_block_fn(&if_stmt.then_block, env, functions, classes, enums, impl_methods)?;
             return match flow {
@@ -5070,9 +5060,7 @@ pub(crate) fn exec_if_core(
                 elif_val
             };
             let elif_decision = is_condition_present(cond, &elif_val);
-            record_decision_coverage_sffi(
-                &current_coverage_file(),
-                if_stmt.span.line + elif_idx,
+            record_decision_coverage_here(if_stmt.span.line + elif_idx,
                 if_stmt.span.column,
                 elif_decision,
             );

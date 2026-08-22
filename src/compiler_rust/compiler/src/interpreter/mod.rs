@@ -93,7 +93,7 @@ mod error_macros;
 // Coverage instrumentation helpers
 mod coverage_helpers;
 pub(crate) use coverage_helpers::{
-    current_coverage_file, extract_node_location, record_node_coverage, record_decision_coverage_sffi,
+    current_coverage_file, extract_node_location, record_node_coverage, record_decision_coverage_sffi, record_decision_coverage_here,
     record_condition_coverage, decision_id_from_span, is_coverage_enabled,
 };
 

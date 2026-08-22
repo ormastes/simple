@@ -7,8 +7,8 @@ use super::super::interpreter_helpers::{
 use super::bdd::{BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_INDENT};
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
-    current_coverage_file, evaluate_expr, exec_assignment, exec_augmented_assignment, exec_with, get_type_name,
-    pattern_matches, record_decision_coverage_sffi, BLOCK_SCOPED_ENUMS, CONST_NAMES, CONTEXT_OBJECT, CONTEXT_VAR_NAME,
+    evaluate_expr, exec_assignment, exec_augmented_assignment, exec_with, get_type_name,
+    pattern_matches, record_decision_coverage_here, BLOCK_SCOPED_ENUMS, CONST_NAMES, CONTEXT_OBJECT, CONTEXT_VAR_NAME,
     EXTERN_FUNCTIONS, GLOBAL_ENUMS, IMMUTABLE_VARS, MACRO_DEFINITION_ORDER, MIXINS, MODULE_GLOBALS,
     MODULE_GLOBAL_BINDINGS_BY_OWNER, MODULE_GLOBALS_BY_OWNER, CURRENT_EXEC_MODULE, TRAIT_IMPLS, TRAITS, USER_MACROS,
 };
@@ -516,9 +516,7 @@ pub(super) fn exec_block_closure_into(
                     // `exec_if` — so branch decisions inside a function body
                     // previously recorded NOTHING. See
                     // doc/08_tracking/bug/coverage_tooling_does_not_instrument_spl_2026-08-07.md.
-                    record_decision_coverage_sffi(
-                        &current_coverage_file(),
-                        if_stmt.span.line,
+                    record_decision_coverage_here(if_stmt.span.line,
                         if_stmt.span.column,
                         decision_result,
                     );
@@ -587,9 +585,7 @@ pub(super) fn exec_block_closure_into(
                             // COVERAGE: mirror `interpreter_control::exec_if`'s elif
                             // handling (offset the line by `elif_idx` so each elif
                             // gets a distinct decision id, same scheme as there).
-                            record_decision_coverage_sffi(
-                                &current_coverage_file(),
-                                if_stmt.span.line + elif_idx,
+                            record_decision_coverage_here(if_stmt.span.line + elif_idx,
                                 if_stmt.span.column,
                                 elif_decision,
                             );
@@ -1392,9 +1388,7 @@ fn exec_block_closure_mut_inner(
                     // COVERAGE: mirror `interpreter_control::exec_if`. This is the
                     // `exec_block_closure_into` twin of the `exec_block_closure_mut`
                     // `Node::If` handling above — same previously-missing wiring.
-                    record_decision_coverage_sffi(
-                        &current_coverage_file(),
-                        if_stmt.span.line,
+                    record_decision_coverage_here(if_stmt.span.line,
                         if_stmt.span.column,
                         decision_result,
                     );
@@ -1459,9 +1453,7 @@ fn exec_block_closure_mut_inner(
                         } else if {
                             let elif_val = evaluate_expr(cond, local_env, functions, classes, enums, impl_methods)?;
                             let elif_decision = is_condition_present(cond, &elif_val);
-                            record_decision_coverage_sffi(
-                                &current_coverage_file(),
-                                if_stmt.span.line + elif_idx,
+                            record_decision_coverage_here(if_stmt.span.line + elif_idx,
                                 if_stmt.span.column,
                                 elif_decision,
                             );

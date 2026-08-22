@@ -173,6 +173,21 @@ pub fn record_node_coverage(node: &Node) {
     }
 }
 
+#[inline]
+/// Decision probe for the CURRENT function's file. Checks `is_coverage_enabled()`
+/// BEFORE resolving the file: `current_coverage_file()` borrows the
+/// `CURRENT_EXEC_MODULE` thread-local and allocates a `String` for the path,
+/// and every `if`/`elif`/`while`/`match` decision used to pay that on the
+/// default (coverage-off) path before `record_decision_coverage_sffi` could
+/// early-return. Same probe, same id, same file when coverage IS on.
+/// doc/08_tracking/bug/hir_phase_per_module_cost_2026-08-21.md (7th session).
+pub fn record_decision_coverage_here(line: usize, column: usize, decision_result: bool) {
+    if !is_coverage_enabled() {
+        return;
+    }
+    record_decision_coverage_sffi(&current_coverage_file(), line, column, decision_result);
+}
+
 /// Record decision coverage for a statement via SFFI
 ///
 /// Typically called from if/while/match statements with the outcome

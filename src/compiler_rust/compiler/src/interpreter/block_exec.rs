@@ -54,14 +54,23 @@ pub(crate) fn capture_node_scope_shadows(nodes: &[Node], env: &mut Env) -> Vec<(
             // block started executing.
             if seen.insert(name.clone()) {
                 let prior_value = env.get(&name).cloned();
-                if !env.is_local(&name) {
-                    let target = env.global_binding(&name).or_else(|| {
-                        crate::interpreter::CURRENT_EXEC_MODULE
-                            .with(|cell| cell.borrow().clone())
-                            .map(|owner| (owner, name.clone()))
-                    });
-                    if let (Some((owner, source_name)), Some(value)) = (target, prior_value.as_ref()) {
-                        crate::interpreter::set_owned_global(&owner, &source_name, value.clone(), false);
+                // The owner write-back below needs BOTH a prior value and a
+                // non-local name. Test the prior value first: for the common
+                // case (a block-local `val` with no outer binding, e.g. every
+                // loop-body iteration) that skips the `global_binding` probe
+                // and the `CURRENT_EXEC_MODULE` borrow + owner String clone,
+                // both of which are pure reads. Same writes in every case
+                // where a write happened before.
+                if let Some(value) = prior_value.as_ref() {
+                    if !env.is_local(&name) {
+                        let target = env.global_binding(&name).or_else(|| {
+                            crate::interpreter::CURRENT_EXEC_MODULE
+                                .with(|cell| cell.borrow().clone())
+                                .map(|owner| (owner, name.clone()))
+                        });
+                        if let Some((owner, source_name)) = target {
+                            crate::interpreter::set_owned_global(&owner, &source_name, value.clone(), false);
+                        }
                     }
                 }
                 shadows.push((name.clone(), prior_value));

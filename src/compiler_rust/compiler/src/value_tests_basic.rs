@@ -565,3 +565,32 @@ fn test_value_equality_mismatch() {
 }
 
 // ==========================================================================
+
+    // FrameMap (ahash) swap + `insert` empty-set guards, 2026-08-22: the
+    // per-frame maps changed hasher and `insert` skips the tombstone /
+    // refreshed-global removes when those sets are empty. Every observable
+    // behaviour must be byte-identical: `from_map` round-trips through
+    // `to_map`, a removed shared key stays hidden behind its tombstone, and a
+    // re-insert clears that tombstone again.
+    #[test]
+    fn cow_env_frame_maps_round_trip_and_tombstone_clear() {
+        let mut seed = HashMap::new();
+        seed.insert("a".to_string(), Value::Int(1));
+        seed.insert("b".to_string(), Value::Int(2));
+        let env = CowEnv::from_map(seed.clone());
+        assert_eq!(env.to_map().len(), 2);
+        assert_eq!(env.get("a"), Some(&Value::Int(1)));
+
+        let base = Arc::new(seed);
+        let mut layered = CowEnv::with_base(base);
+        assert_eq!(layered.get("b"), Some(&Value::Int(2)));
+        // remove a shared key -> tombstone hides it
+        assert_eq!(layered.remove("b"), Some(Value::Int(2)));
+        assert!(!layered.contains_key("b"));
+        assert_eq!(layered.get("b"), None);
+        // insert must clear the tombstone (the guarded remove path)
+        layered.insert("b".to_string(), Value::Int(3));
+        assert!(layered.contains_key("b"));
+        assert_eq!(layered.get("b"), Some(&Value::Int(3)));
+        assert_eq!(layered.to_map().get("b"), Some(&Value::Int(3)));
+    }
