@@ -1985,3 +1985,17 @@ not parsed, Unicode neighbors remain nonidentifier characters, interpolation use
 one boolean brace state, doubled braces never change it, and tuple parameters are
 still rewritten sequentially. The legacy `_` probe remains false when replacing
 `_` by `_` would leave the expression unchanged.
+
+### SPIPE005 assertion-helper graph audit
+
+Assertion-helper discovery previously encoded call sets as growing delimiter
+strings, split them repeatedly, and rescanned every helper until a fixed point.
+A reverse-ordered chain could require `F` whole-graph rounds, with additional
+immutable character/name copying and split allocation.
+
+The Pure Simple implementation now extracts each bare-call token as one span,
+deduplicates with dictionaries, builds indexed `callee -> callers` buckets once,
+and propagates direct assertions with an append-only queue. Expected work is
+`O(source bytes + F + E)` and graph storage is `O(F + E)`. The rewrite preserves
+method-call exclusion, forward references, duplicate-definition name union,
+seedless-cycle rejection, and seeded-cycle propagation.

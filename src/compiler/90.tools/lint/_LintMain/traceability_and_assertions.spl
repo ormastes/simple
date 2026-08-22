@@ -584,25 +584,32 @@ fn is_trace_ident_char(ch: String) -> Bool:
     val alnum = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
     alnum.contains(ch)
 
-# Names called in BARE (non-method) position, returned as "|a|b|c|".
+# Names called in BARE (non-method) position.
 # Bare position matters for precision: `might_fail(x)` must not read as a
 # `fail(` assertion, and `parser.check(x)` must not read as a `check(` one.
-fn bare_call_names(normalized: String) -> String:
-    var names = "|"
-    var current = ""
-    var prev_char = ""
-    var last_char = ""
-    for ch in normalized:
+fn bare_call_names(normalized: String) -> [String]:
+    var names: [String] = []
+    var seen: Dict<String, Bool> = {}
+    var token_start = -1
+    var i = 0
+    while i < normalized.len():
+        val ch = normalized.slice(i, i + 1)
         if is_trace_ident_char(ch):
-            if current == "":
-                prev_char = last_char
-            current = current + ch
+            if token_start < 0:
+                token_start = i
         else:
-            if ch == "(" and current != "" and prev_char != ".":
-                if not names.contains("|" + current + "|"):
-                    names = names + current + "|"
-            current = ""
-        last_char = ch
+            if ch == "(" and token_start >= 0:
+                val prev_char = if token_start == 0:
+                    ""
+                else:
+                    normalized.slice(token_start - 1, token_start)
+                if prev_char != ".":
+                    val name = normalized.slice(token_start, i)
+                    if not seen.contains_key(name):
+                        seen[name] = true
+                        names.push(name)
+            token_start = -1
+        i = i + 1
     names
 
 fn strip_leading_underscores(raw: String) -> String:
@@ -623,9 +630,8 @@ fn is_assertion_family_name(raw: String) -> Bool:
     name == "check" or name == "verify" or name == "fail"
 
 fn has_assertion_family_call(normalized: String) -> Bool:
-    val parts = bare_call_names(normalized).split("|")
-    for part in parts:
-        if part != "" and is_assertion_family_name(part):
+    for name in bare_call_names(normalized):
+        if is_assertion_family_name(name):
             return true
     false
 
@@ -692,10 +698,11 @@ fn statement_has_direct_assertion(normalized: String, trimmed_stmt: String) -> B
 # Names of fn/me definitions in THIS file whose body reaches an assertion,
 # transitively. Spec files routinely wrap `expect(...)` in a file-local
 # `check`/`verify` helper; calling such a helper IS an assertion.
-fn collect_asserting_helpers(lines: [String]) -> String:
+fn collect_asserting_helpers(lines: [String]) -> Dict<String, Bool>:
     var names: [String] = []
     var direct: [Bool] = []
-    var calls: [String] = []
+    var calls: [[String]] = []
+    var local_names: Dict<String, Bool> = {}
 
     var i = 0
     while i < lines.len():
@@ -716,7 +723,8 @@ fn collect_asserting_helpers(lines: [String]) -> String:
         val header_indent = indent_width(line)
         var j = i + 1
         var body_direct = false
-        var body_calls = "|"
+        var body_calls: [String] = []
+        var body_call_set: Dict<String, Bool> = {}
         while j < lines.len():
             val body_line = lines[j]
             val body_trimmed = body_line.trim()
@@ -726,47 +734,61 @@ fn collect_asserting_helpers(lines: [String]) -> String:
                 val body_norm = normalize_lint_line(body_trimmed)
                 if statement_has_direct_assertion(body_norm, body_trimmed):
                     body_direct = true
-                val found = bare_call_names(body_norm).split("|")
-                for part in found:
-                    if part != "" and not body_calls.contains("|" + part + "|"):
-                        body_calls = body_calls + part + "|"
+                for called_name in bare_call_names(body_norm):
+                    if not body_call_set.contains_key(called_name):
+                        body_call_set[called_name] = true
+                        body_calls.push(called_name)
             j = j + 1
 
         names.push(name)
+        local_names[name] = true
         direct.push(body_direct)
         calls.push(body_calls)
         i = j
 
-    var good = "|"
+    var good: Dict<String, Bool> = {}
+    var queue: [String] = []
     var k = 0
     while k < names.len():
-        if direct[k] and not good.contains("|" + names[k] + "|"):
-            good = good + names[k] + "|"
+        if direct[k] and not good.contains_key(names[k]):
+            good[names[k]] = true
+            queue.push(names[k])
         k = k + 1
 
-    var changed = true
-    while changed:
-        changed = false
-        var m = 0
-        while m < names.len():
-            if not good.contains("|" + names[m] + "|"):
-                var reaches = false
-                val parts = calls[m].split("|")
-                for part in parts:
-                    if part != "" and good.contains("|" + part + "|"):
-                        reaches = true
-                if reaches:
-                    good = good + names[m] + "|"
-                    changed = true
-            m = m + 1
+    # Index callee -> callers once, then propagate assertion reachability
+    # backwards. Bucket indexes avoid mutating arrays fetched from dictionaries.
+    var reverse_index: Dict<String, i64> = {}
+    var reverse_callers: [[String]] = []
+    var record = 0
+    while record < names.len():
+        val caller = names[record]
+        for callee in calls[record]:
+            if local_names.contains_key(callee):
+                if not reverse_index.contains_key(callee):
+                    reverse_index[callee] = reverse_callers.len()
+                    reverse_callers.push([])
+                val bucket: i64 = reverse_index[callee]
+                reverse_callers[bucket].push(caller)
+        record = record + 1
+
+    var queue_index = 0
+    while queue_index < queue.len():
+        val asserted_name = queue[queue_index]
+        queue_index = queue_index + 1
+        if not reverse_index.contains_key(asserted_name):
+            continue
+        val bucket: i64 = reverse_index[asserted_name]
+        for caller in reverse_callers[bucket]:
+            if not good.contains_key(caller):
+                good[caller] = true
+                queue.push(caller)
     good
 
-fn calls_asserting_helper(normalized: String, helper_names: String) -> Bool:
-    if helper_names == "|":
-        return false
-    val parts = bare_call_names(normalized).split("|")
-    for part in parts:
-        if part != "" and helper_names.contains("|" + part + "|"):
+fn calls_asserting_helper(
+    normalized: String, helper_names: Dict<String, Bool>
+) -> Bool:
+    for name in bare_call_names(normalized):
+        if helper_names.contains_key(name):
             return true
     false
 
