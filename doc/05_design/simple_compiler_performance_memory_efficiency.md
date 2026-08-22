@@ -292,3 +292,6 @@ Advisory field deduplication uses indexed membership and an explicit count; it m
 ## String-builder rehabilitation contract
 
 The current string-builder pass is a `Skeleton` identity and contains no dormant candidate or rewrite body. Rehabilitation must explicitly create a typed builder local, initialize it on the correct dominating path, preserve zero-trip results, append in observable order, emit a final join at every live exit, replace all dominated result uses, and prove ownership/destruction, allocation-failure, exception, alias, and debug semantics. Positive witnesses include zero/one/many iterations and multiple exits; incomplete push-only lowering is never admissible.
+## Strength-reduction rehabilitation contract
+
+Every callable strength-reduction surface—not only canonical dispatch—remains identity while status is `Disabled`. Rehabilitation must prove operand/result integer widths, signedness, non-negativity where required, overflow/trap semantics, shift legality, constant materialization, dominance and fresh-local allocation, and target profitability for each rewrite. Signed division/remainder and negative operands require dedicated differential witnesses. Provider metadata describes required facts but never authorizes a transform by itself.

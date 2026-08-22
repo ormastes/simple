@@ -324,3 +324,10 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Pin absence of push-only lowering with a source contract.
 - Require typed builder construction, initialization, final joins, dominated use replacement, and semantic differential tests before rehabilitation.
 - Follow-up: prefer CollectionPlan producer-consumer lowering once ownership/effect/cardinality facts are complete.
+## Completed compiler tranche: close strength-reduction bypass
+
+- Preserve provider metadata, class/factory compatibility, statistics, and zero-change receipts.
+- Make direct function and block entrypoints identities while status is disabled.
+- Remove signed arithmetic, decomposition, and synthetic-local rewrite helpers.
+- Replace legacy transformation fixtures with fail-closed/source contracts in both test layouts.
+- Follow-up: rehabilitate individual rewrite families only with per-operation range/type/overflow proofs and differential tests.
