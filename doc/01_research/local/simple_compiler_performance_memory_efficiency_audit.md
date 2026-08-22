@@ -1699,3 +1699,24 @@ probe classifier remains analysis compatibility only; side-effect and intrinsic
 purity queries fail closed. Rehabilitation requires exhaustive opcode effects,
 traps, ownership/destruction, unwind, volatile/atomic/device and debug semantics,
 plus sparse/worklist liveness with explicit CPU and memory budgets.
+
+### Capability-scoped PerfFacts construction
+
+Four active compiler analyses requested full `perf_facts_build` despite never
+querying liveness: natural-loop detection, vectorization dependency analysis,
+storage-access analysis, and typed-storage-view production. Below the existing
+four-million-cell admission cap, each call could initialize DEF/USE and live-in/
+live-out matrices proportional to `blocks * locals` and run repeated whole-local
+liveness propagation. A new `perf_facts_build_without_liveness` projection keeps
+CFG, dominance and def-use behavior while omitting all four matrices and the
+worklist. The verifier name remains a compatibility alias. The next refinement
+is an integrity-checked fact request so loop detection can omit def-use and
+def-use-only consumers can omit dominance.
+
+### Linear diagnostic evidence rendering
+
+Human and JSON warning/error evidence used repeated immutable text append. For
+a rendered payload of `B` bytes, cumulative copied bytes could grow quadratically
+even though peak output is only `O(B)`. Both paths now collect complete logical
+lines/items and join once, preserving exact ordering and escaping. Focused
+contracts pin the human byte sequence and prohibit recurrence of append loops.
