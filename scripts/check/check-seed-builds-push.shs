@@ -150,6 +150,18 @@ SELF=check-seed-builds-push
 GREP=grep
 [ -x /usr/bin/grep ] && GREP=/usr/bin/grep
 
+# Git exports repository-local variables while running hooks.  In particular,
+# an inherited GIT_DIR overrides -C and can make a fixture's `git init` and
+# `git commit` operate on the repository whose push invoked this guard.  Every
+# command aimed at a repository selected by path must therefore discard those
+# ambient selectors first.
+git_in_repo() {
+    gir_repo=$1
+    shift
+    env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR \
+        git -C "$gir_repo" "$@"
+}
+
 CARGO_TARGET_ROOT=${CARGO_TARGET_ROOT:-/mnt/data/cargo-target-seed-build-guard}
 KEEP_BUILD_DIR=${KEEP_BUILD_DIR:-0}
 SEED_GREEN_MARKER_DIR=${SEED_GREEN_MARKER_DIR:-/mnt/data/.seed-build-guard-green}
@@ -223,10 +235,10 @@ count_changed_files() {
 # ---------------------------------------------------------------------------
 seed_content_digest() {
     sd_repo=$1; sd_rev=$2
-    sd_ct=$(git -C "$sd_repo" rev-parse --verify --quiet "$sd_rev:src/compiler_rust" 2>/dev/null) || sd_ct=""
+    sd_ct=$(git_in_repo "$sd_repo" rev-parse --verify --quiet "$sd_rev:src/compiler_rust" 2>/dev/null) || sd_ct=""
     [ -n "$sd_ct" ] || return 1
-    sd_rt=$(git -C "$sd_repo" rev-parse --verify --quiet "$sd_rev:src/runtime" 2>/dev/null) || sd_rt="none"
-    sd_lk=$(git -C "$sd_repo" rev-parse --verify --quiet "$sd_rev:src/compiler_rust/Cargo.lock" 2>/dev/null) || sd_lk="none"
+    sd_rt=$(git_in_repo "$sd_repo" rev-parse --verify --quiet "$sd_rev:src/runtime" 2>/dev/null) || sd_rt="none"
+    sd_lk=$(git_in_repo "$sd_repo" rev-parse --verify --quiet "$sd_rev:src/compiler_rust/Cargo.lock" 2>/dev/null) || sd_lk="none"
     # The recipe tag is part of the digest ON PURPOSE: the marker records
     # "this content passed THIS guard's legs". Adding a leg (the 2026-08-21
     # --features vulkan leg) must invalidate every marker written by the older,
@@ -495,16 +507,15 @@ fn main() { let _ = module_globals_generation(); }
 EOF
     echo "before" >"$st_repo/doc/notes.md"
     (
-        cd "$st_repo" &&
-        git init -q . &&
-        git config user.email guard@selftest &&
-        git config user.name guard &&
-        git add -A &&
-        git commit -q -m "seed (already broken) + docs" &&
-        echo "after" >doc/notes.md &&
-        git add -A &&
-        git commit -q -m "docs(tracking): docs-only tip, touches no seed file"
-    ) >"$TMPROOT/st_e_setup.out" 2>&1
+        git_in_repo "$st_repo" init -q . &&
+        git_in_repo "$st_repo" config user.email guard@selftest &&
+        git_in_repo "$st_repo" config user.name guard &&
+        git_in_repo "$st_repo" add -A &&
+        git_in_repo "$st_repo" commit -q -m "seed (already broken) + docs" &&
+        echo "after" >"$st_repo/doc/notes.md" &&
+        git_in_repo "$st_repo" add -A &&
+        git_in_repo "$st_repo" commit -q -m "docs(tracking): docs-only tip, touches no seed file"
+    ) < /dev/null >"$TMPROOT/st_e_setup.out" 2>&1
     st_setup=$?
     st_ran=$((st_ran + 1))
     if [ "$st_setup" -ne 0 ]; then
@@ -512,10 +523,10 @@ EOF
         cat "$TMPROOT/st_e_setup.out" >&2
         st_fail=1
     else
-        st_e_base=$(git -C "$st_repo" rev-parse HEAD~1)
-        st_e_tip=$(git -C "$st_repo" rev-parse HEAD)
+        st_e_base=$(git_in_repo "$st_repo" rev-parse HEAD~1)
+        st_e_tip=$(git_in_repo "$st_repo" rev-parse HEAD)
         # E1 -- the range is docs-only
-        git -C "$st_repo" diff --name-only "$st_e_base" "$st_e_tip" -- >"$TMPROOT/st_e_changed.out" 2>&1
+        git_in_repo "$st_repo" diff --name-only "$st_e_base" "$st_e_tip" -- >"$TMPROOT/st_e_changed.out" 2>&1
         if $GREP -qE '^src/(compiler_rust|runtime)/' "$TMPROOT/st_e_changed.out"; then
             echo "SELFTEST FAIL: incident-replay range touches the seed -- fixture does not reproduce the fail-open" >&2
             st_fail=1
