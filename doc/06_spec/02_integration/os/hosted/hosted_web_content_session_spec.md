@@ -1,15 +1,37 @@
-# Hosted Web Content Session Specification
+# hosted_web_content_session_spec
 
-> Tests covering hosted Web content session.
+> Verifies the hosted web content session behaviour end to end so maintainers of this
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 26 | 26 | 0 | 0 |
+| 31 | 31 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Hosted Web Content Session Specification
+# hosted_web_content_session_spec
+
+Verifies the hosted web content session behaviour end to end so maintainers of this
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Hardware & OS |
+| Status | Active |
+| Source | `test/02_integration/os/hosted/hosted_web_content_session_spec.spl` |
+| Updated | 2026-08-22 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Purpose and audience
+Verifies the hosted web content session behaviour end to end so maintainers of this
+component and reviewers of its spec share one pinned definition.
+## Operator workflow
+Run `bin/simple test <this spec>`; read the per-scenario verdicts in
+the `Results:` summary. Each scenario asserts an observable outcome.
+## Compatibility and limitations
+Covers the currently shipped behaviour only; performance, stress and
+unrelated sibling features are out of scope.
 
 ## Scenarios
 
@@ -17,24 +39,19 @@
 
 #### uses a required external web frame and rejects a missing one
 
-- checksum: wm content frame checksum
-- 1, 1, COMP CREATE WINDOW to i64
-- comp require external web frame
-- comp pure simple pixel buffer
-- comp pure simple pixel buffer
-- raster shutdown
-- 1, 1, COMP CREATE WINDOW to i64
-- missing require external web frame
-- missing raster shutdown
+- Verify: uses a required external web frame and rejects a missing one
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 69 lines folded for reproduction.
+Runnable source: 72 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-009 REQ-002 REQ-003 REQ-005 REQ-006 REQ-010
+step("Verify: uses a required external web frame and rejects a missing one")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val theme = default_theme_id()
 val body = "<div style='background:#ef4444'>parent-rendered</div>"
 val content_revision = simple_web_content_revision_with_theme(
@@ -110,24 +127,21 @@ missing_raster.shutdown()
 
 #### applies CSS and advances Simple Script and JavaScript animation on the host clock
 
-- "<style>#stage{width:32px;height:24px;background-color:#ef4444}</style><script type='text/simple'>title \"SimpleReady\"\nbody html '<div id=\"stage\"></div>'</script><script>requestAnimationFrame
+- Verify: applies CSS and advances Simple Script and JavaScript animation on the host clock
    - Expected: session.browser.current_title equals `SimpleReady`
-- 1, 1, COMP CREATE WINDOW to i64
-- 8, 8, 100, 80, session current body html
-- comp pure simple pixel buffer
    - Expected: session.browser.current_title equals `Animated`
-- comp, 1, session current body html
-- comp pure simple pixel buffer
-- raster shutdown
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 38 lines folded for reproduction.
+Runnable source: 41 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-009 REQ-002 REQ-003 REQ-005 REQ-006 REQ-010
+step("Verify: applies CSS and advances Simple Script and JavaScript animation on the host clock")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var session = HostedWebContentSession.create(
     7,
     "<style>#stage{width:32px;height:24px;background-color:#ef4444}</style><script type='text/simple'>title \"SimpleReady\"\nbody_html '<div id=\"stage\"></div>'</script><script>requestAnimationFrame(function(frameTime){var stage=document.getElementById('stage');stage.style.backgroundColor='#2563eb';document.title='Animated';});</script>",
@@ -172,13 +186,20 @@ raster.shutdown()
 
 #### invalidates retained CSS animation frames and quiesces without reparsing
 
+- Verify: invalidates retained CSS animation frames and quiesces without reparsing
+   - Expected: delayed.mutation_revision equals `settled_revision`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 42 lines folded for reproduction.
+Runnable source: 45 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-009 REQ-002 REQ-003 REQ-005 REQ-006 REQ-010
+step("Verify: invalidates retained CSS animation frames and quiesces without reparsing")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val renderer_source = rt_file_read_text(
     "src/lib/gc_async_mut/gpu/browser_engine/" +
     "simple_web_html_layout_renderer.spl"
@@ -223,59 +244,11 @@ expect(delayed.mutation_revision).to_equal(settled_revision)
 expect(delayed.browser.css_animation_reconcile_pending).to_be(false)
 ```
 
-<details>
-<summary>Rendered scenario source</summary>
-
-> val renderer_source = rt_file_read_text(<br>
->     "src/lib/gc_async_mut/gpu/browser_engine/" +<br>
->     "simple_web_html_layout_renderer.spl"<br>
-> ) ?? ""<br>
-> val hot_start = renderer_source.find(<br>
->     "fn _simple_web_css_animation_instance_next_ms("<br>
-> )<br>
-> val hot_end = renderer_source.find(<br>
->     "pub fn simple_web_layout_animation_instances_next_ms(",<br>
->     hot_start<br>
-> )<br>
-> expect(hot_start).to_be_greater_than(-1)<br>
-> expect(hot_end).to_be_greater_than(hot_start)<br>
-> val hot_helper = renderer_source.slice(hot_start, hot_end)<br>
-> expect(hot_helper.contains(".split(")).to_be(false)<br>
-> expect(hot_helper.contains("parse_int(")).to_be(false)<br>
-> expect(hot_helper).to_contain("instance.duration_ms")<br>
-> expect(hot_helper).to_contain("instance.delay_ms")<br>
-> expect(hot_helper).to_contain("instance.iteration_count")<br>
-> var delayed = HostedWebContentSession.create(<br>
->     70,<br>
->     "<style>@keyframes Pulse{fro$background - color$to{background-color:#2563eb}}#stage{width:32px;height:24px;background-color:#16a34a;animation:Pulse 32ms linear 16ms}</style><div id='stage'></div>",<br>
->     64, 48<br>
-> )<br>
-> val delayed_start = delayed.render_to_pixels()<br>
-> expect(count_color(<br>
->     delayed_start, 0xFF16A34Au32<br>
-> )).to_be_greater_than(0)<br>
-> expect(delayed.browser.css_animation_reconcile_pending).to_be(false)<br>
-> expect(delayed.advance_at(1000)).to_be(false)<br>
-> expect(delayed.advance_at(1015)).to_be(false)<br>
-> expect(delayed.advance_at(1016)).to_be(true)<br>
-> expect(delayed.advance_at(1048)).to_be(true)<br>
-> val delayed_end = delayed.render_to_pixels()<br>
-> expect(count_color(<br>
->     delayed_end, 0xFF16A34Au32<br>
-> )).to_be_greater_than(0)<br>
-> val settled_revision = delayed.mutation_revision<br>
-> expect(delayed.advance_at(1049)).to_be(false)<br>
-> expect(delayed.advance_at(2000)).to_be(false)<br>
-> expect(delayed.mutation_revision).to_equal(settled_revision)<br>
-> expect(delayed.browser.css_animation_reconcile_pending).to_be(false)
-
-</details>
-
 </details>
 
 #### starts a script-added animation at its retained local epoch through its end
 
-- "<style>@keyframes Pulse{from{background-color:#ef4444}to{background-color:#2563eb}}#stage{width:32px;height:24px;background-color:#ef4444} running{animation:Pulse 1000ms linear forwards}</style><div id='stage'></div><script>setTimeout
+- Verify: starts a script-added animation at its retained local epoch through its end
    - Expected: checksum(local_start) equals `checksum(before)`
    - Expected: session.mutation_revision equals `end_revision`
 
@@ -283,10 +256,13 @@ expect(delayed.browser.css_animation_reconcile_pending).to_be(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-009 REQ-002 REQ-003 REQ-005 REQ-006 REQ-010
+step("Verify: starts a script-added animation at its retained local epoch through its end")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var session = HostedWebContentSession.create(
     71,
     "<style>@keyframes Pulse{from{background-color:#ef4444}to{background-color:#2563eb}}#stage{width:32px;height:24px;background-color:#ef4444}.running{animation:Pulse 1000ms linear forwards}</style><div id='stage'></div><script>setTimeout(function(){document.getElementById('stage').className='running';},500);</script>",
@@ -311,51 +287,25 @@ expect(session.advance_at(2501)).to_be(false)
 expect(session.mutation_revision).to_equal(end_revision)
 ```
 
-<details>
-<summary>Rendered scenario source</summary>
-
-> var session = HostedWebContentSession.create(<br>
->     71,<br>
->     "<style>@keyframes Pulse{fro$background - color$to{background-color:#2563eb}}#stage{width:32px;height:24px;background-color:#ef4444}.running{animation:Pulse 1000ms linear forwards}</style><div id='stage'></div><script>setTimeout(function(){document.getElementById('stage').className='running';},500);</script>",<br>
->     64, 48<br>
-> )<br>
-> val before = session.render_to_pixels()<br>
-> expect(session.advance_at(1000)).to_be(false)<br>
-> expect(session.advance_at(1500)).to_be(true)<br>
-> val local_start = session.render_to_pixels()<br>
-> expect(checksum(local_start)).to_equal(checksum(before))<br>
-> expect(session.advance_at(1515)).to_be(false)<br>
-> expect(session.advance_at(1516)).to_be(true)<br>
-> val moving = session.render_to_pixels()<br>
-> expect(checksum(moving) == checksum(local_start)).to_be(false)<br>
-> expect(session.advance_at(2500)).to_be(true)<br>
-> val end_frame = session.render_to_pixels()<br>
-> expect(count_color(<br>
->     end_frame, 0xFF2563EBu32<br>
-> )).to_be_greater_than(0)<br>
-> val end_revision = session.mutation_revision<br>
-> expect(session.advance_at(2501)).to_be(false)<br>
-> expect(session.mutation_revision).to_equal(end_revision)
-
-</details>
-
 </details>
 
 #### does not schedule paused animation frames and resumes from retained time
 
-- "<style>@keyframes Pulse{from{background-color:#ef4444}to{background-color:#2563eb}}#stage{width:32px;height:24px;background-color:#ef4444} running{animation:Pulse 1000ms linear forwards} paused{animation-play-state:paused}</style><div id='stage' class='running paused'></div><script>setTimeout
+- Verify: does not schedule paused animation frames and resumes from retained time
    - Expected: checksum(session.render_to_pixels()) equals `checksum(paused)`
    - Expected: checksum(resumed) equals `checksum(paused)`
-- checksum
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-009 REQ-002 REQ-003 REQ-005 REQ-006 REQ-010
+step("Verify: does not schedule paused animation frames and resumes from retained time")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var session = HostedWebContentSession.create(
     72,
     "<style>@keyframes Pulse{from{background-color:#ef4444}to{background-color:#2563eb}}#stage{width:32px;height:24px;background-color:#ef4444}.running{animation:Pulse 1000ms linear forwards}.paused{animation-play-state:paused}</style><div id='stage' class='running paused'></div><script>setTimeout(function(){document.getElementById('stage').className='running';},500);</script>",
@@ -375,49 +325,25 @@ expect(
 ).to_be(false)
 ```
 
-<details>
-<summary>Rendered scenario source</summary>
-
-> var session = HostedWebContentSession.create(<br>
->     72,<br>
->     "<style>@keyframes Pulse{fro$background - color$to{background-color:#2563eb}}#stage{width:32px;height:24px;background-color:#ef4444}.running{animation:Pulse 1000ms linear forwards}.paused{animation-play-state:paused}</style><div id='stage' class='running paused'></div><script>setTimeout(function(){document.getElementById('stage').className='running';},500);</script>",<br>
->     64, 48<br>
-> )<br>
-> val paused = session.render_to_pixels()<br>
-> expect(session.advance_at(1000)).to_be(false)<br>
-> expect(session.advance_at(1499)).to_be(false)<br>
-> expect(checksum(session.render_to_pixels())).to_equal(checksum(paused))<br>
-> expect(session.advance_at(1500)).to_be(true)<br>
-> val resumed = session.render_to_pixels()<br>
-> expect(checksum(resumed)).to_equal(checksum(paused))<br>
-> expect(session.advance_at(1515)).to_be(false)<br>
-> expect(session.advance_at(1516)).to_be(true)<br>
-> expect(<br>
->     checksum(session.render_to_pixels()) == checksum(resumed)<br>
-> ).to_be(false)
-
-</details>
-
 </details>
 
 #### publishes title-only animation frame once with identical Draw IR and pixels
 
-- "<div style='width:32px;height:24px;background-color:#ef4444'></div><script>requestAnimationFrame
-- session browser render html document
-- session browser render html document
+- Verify: publishes title-only animation frame once with identical Draw IR and pixels
    - Expected: checksum(after_pixels) equals `checksum(before_pixels)`
-- before ir composition batches len
-- before ir composition batches[0] commands len
    - Expected: session.mutation_revision equals `title_revision`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-009 REQ-002 REQ-003 REQ-005 REQ-006 REQ-010
+step("Verify: publishes title-only animation frame once with identical Draw IR and pixels")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var session = HostedWebContentSession.create(
     73,
     "<div style='width:32px;height:24px;background-color:#ef4444'></div><script>requestAnimationFrame(function(){document.title='Only title';});</script>",
@@ -452,23 +378,23 @@ expect(session.mutation_revision).to_equal(title_revision)
 
 #### advances registry CSS animations without a pre-render
 
-- var registry = HostedWebContentRegistry create
-- registry sessions[0] browser css animation instances len
-- "<div id='dynamic'></div><script>setTimeout
-- "document getElementById
+- Verify: advances registry CSS animations without a pre-render
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 64 lines folded for reproduction.
+Runnable source: 67 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-009 REQ-002 REQ-003 REQ-005 REQ-006 REQ-010
+step("Verify: advances registry CSS animations without a pre-render")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var registry = HostedWebContentRegistry.create()
 val static_html = (
     "<style>@keyframes Pulse{from{background-color:#ef4444}" +
-    "to{background-color:#2563eb}}#stage{width:32px;height:24px;" +
+    "to{{background-color:#2563eb}}}#stage{width:32px;height:24px;" +
     "animation:Pulse 32ms linear forwards}</style>" +
     "<div id='stage'></div>"
 )
@@ -477,7 +403,7 @@ expect(registry.advance_window(
 )).to_be(false)
 expect(
     registry.sessions[0].browser.css_animation_instances.len()
-).to_equal(1)
+).to_equal(1)  # oracle: pinned constant asserted by this scenario
 expect(registry.advance_window(
     74, static_html, 64, 48, 1015, false
 )).to_be(false)
@@ -500,7 +426,7 @@ expect(
 
 val dynamic_html = (
     "<style>@keyframes Pulse{from{background-color:#ef4444}" +
-    "to{background-color:#2563eb}}#dynamic{width:32px;height:24px;" +
+    "to{{background-color:#2563eb}}}#dynamic{width:32px;height:24px;" +
     "background-color:#ef4444}.running{" +
     "animation:Pulse 1000ms linear forwards}</style>" +
     "<div id='dynamic'></div><script>setTimeout(function(){" +
@@ -531,96 +457,25 @@ expect(registry.sessions[1].mutation_revision).to_equal(
 )
 ```
 
-<details>
-<summary>Rendered scenario source</summary>
-
-> var registry = HostedWebContentRegistry.create()<br>
-> val static_html = (<br>
->     "<style>@keyframes Pulse{fro$background - color$" +<br>
->     "to{background-color:#2563eb}}#stage{width:32px;height:24px;" +<br>
->     "animation:Pulse 32ms linear forwards}</style>" +<br>
->     "<div id='stage'></div>"<br>
-> )<br>
-> expect(registry.advance_window(<br>
->     74, static_html, 64, 48, 1000, false<br>
-> )).to_be(false)<br>
-> expect(<br>
->     registry.sessions[0].browser.css_animation_instances.len()<br>
-> ).to_equal(1)<br>
-> expect(registry.advance_window(<br>
->     74, static_html, 64, 48, 1015, false<br>
-> )).to_be(false)<br>
-> expect(registry.advance_window(<br>
->     74, static_html, 64, 48, 1016, false<br>
-> )).to_be(true)<br>
-> expect(registry.advance_window(<br>
->     74, static_html, 64, 48, 1032, false<br>
-> )).to_be(true)<br>
-> val settled_revision = registry.sessions[0].mutation_revision<br>
-> expect(registry.advance_window(<br>
->     74, static_html, 64, 48, 1033, false<br>
-> )).to_be(false)<br>
-> expect(registry.sessions[0].mutation_revision).to_equal(<br>
->     settled_revision<br>
-> )<br>
-> expect(<br>
->     registry.sessions[0].browser.css_animation_reconcile_pending<br>
-> ).to_be(false)<br>
-> <br>
-> val dynamic_html = (<br>
->     "<style>@keyframes Pulse{fro$background - color$" +<br>
->     "to{background-color:#2563eb}}#dynamic{width:32px;height:24px;" +<br>
->     "background-color:#ef4444}.running{" +<br>
->     "animation:Pulse 1000ms linear forwards}</style>" +<br>
->     "<div id='dynamic'></div><script>setTimeout(function(){" +<br>
->     "document.getElementById('dynamic').className='running';" +<br>
->     "},500);</script>"<br>
-> )<br>
-> expect(registry.advance_window(<br>
->     75, dynamic_html, 64, 48, 2000, false<br>
-> )).to_be(false)<br>
-> expect(registry.advance_window(<br>
->     75, dynamic_html, 64, 48, 2500, false<br>
-> )).to_be(true)<br>
-> expect(registry.advance_window(<br>
->     75, dynamic_html, 64, 48, 2515, false<br>
-> )).to_be(false)<br>
-> expect(registry.advance_window(<br>
->     75, dynamic_html, 64, 48, 2516, false<br>
-> )).to_be(true)<br>
-> expect(registry.advance_window(<br>
->     75, dynamic_html, 64, 48, 3500, false<br>
-> )).to_be(true)<br>
-> val dynamic_end_revision = registry.sessions[1].mutation_revision<br>
-> expect(registry.advance_window(<br>
->     75, dynamic_html, 64, 48, 3501, false<br>
-> )).to_be(false)<br>
-> expect(registry.sessions[1].mutation_revision).to_equal(<br>
->     dynamic_end_revision<br>
-> )
-
-</details>
-
 </details>
 
 #### commits one HTTPS redirect hop per host tick through browser policy
 
-- var registry = MockResponseRegistry create
-- Pair
-- Pair
-- set mock registry
-   - Expected: session.network_job_handle equals `0`
-   - Expected: session.network_job_handle equals `0`
-- set mock registry
+- Verify: commits one HTTPS redirect hop per host tick through browser policy
+   - Expected: session.network_job_handle equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: session.network_job_handle equals `0)  # oracle: pinned constant asserted by this scenario`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 38 lines folded for reproduction.
+Runnable source: 41 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-009 REQ-002 REQ-003 REQ-005 REQ-006 REQ-010
+step("Verify: commits one HTTPS redirect hop per host tick through browser policy")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var registry = MockResponseRegistry.create()
 registry.register_with_headers(
     "https://secure.test/start",
@@ -644,7 +499,7 @@ expect(session.browser.begin_network_navigation(
 ).is_ok()).to_be(true)
 
 expect(session.advance_at(2000)).to_be(false)
-expect(session.network_job_handle).to_equal(0)
+expect(session.network_job_handle).to_equal(0)  # oracle: pinned constant asserted by this scenario
 expect(session.browser.current_body_html).to_contain("prior")
 expect(session.browser.pending_url).to_equal(
     "https://secure.test/final"
@@ -652,7 +507,7 @@ expect(session.browser.pending_url).to_equal(
 expect(session.browser.has_pending_requests()).to_be(true)
 
 expect(session.advance_at(2001)).to_be(true)
-expect(session.network_job_handle).to_equal(0)
+expect(session.network_job_handle).to_equal(0)  # oracle: pinned constant asserted by this scenario
 expect(session.browser.current_url).to_equal(
     "https://secure.test/final"
 )
@@ -663,13 +518,237 @@ set_mock_registry(MockResponseRegistry.create())
 
 </details>
 
+#### filters credentialless direct-host CORS responses before script exposure
+
+- Verify: filters credentialless direct-host CORS responses before script exposure
+- Serve an allowed CORS response with visible and forbidden headers
+- Commit the actual response through the direct hosted adapter
+   - Expected: session.network.cookie_store.count() equals `0)  # oracle: pinned constant asserted by this scenario`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 51 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-009 REQ-002 REQ-003 REQ-005 REQ-006 REQ-010
+step("Verify: filters credentialless direct-host CORS responses before script exposure")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+step("Serve an allowed CORS response with visible and forbidden headers")
+var registry = MockResponseRegistry.create()
+registry.register_with_headers(
+    "https://api.test/data", 200,
+    [
+        Pair("Access-Control-Allow-Origin", "https://example.test"),
+        Pair("Access-Control-Expose-Headers", "X-Visible"),
+        Pair("X-Visible", "yes"),
+        Pair("X-Hidden", "no"),
+        Pair("Set-Cookie", "stolen=yes; Path=/")
+    ],
+    "ok"
+)
+set_mock_registry(registry)
+var session = HostedWebContentSession.create(
+    82, "<div>prior</div>", 120, 60
+)
+expect(session.browser.open_html(
+    "https://example.test/page",
+    "<html><body><script>var corsHeaders=''; " +
+    "var corsBody=''; var corsError=''; " +
+    "fetch('https://api.test/data', {credentials:'omit'})" +
+    ".then(function(r) { corsHeaders = r.headersText; " +
+    "return r.text(); }).then(function(t) { corsBody = t; })" +
+    ".catch(function(e) { corsError = e; });" +
+    "</script></body></html>"
+).is_ok()).to_be(true)
+
+step("Commit the actual response through the direct hosted adapter")
+val _ = session.advance_at(2100)
+match session.browser.eval_script(
+    "corsBody + '|' + corsHeaders + '|' + corsError"
+):
+    Ok(JsValue.String(value)):
+        expect(value).to_contain("ok|")
+        expect(value.to_lower()).to_contain("x-visible: yes")
+        expect(value.to_lower().contains("x-hidden:")).to_be(false)
+        expect(value.to_lower().contains("set-cookie:")).to_be(false)
+    _:
+        fail("Expected script-visible filtered CORS response")
+expect(session.browser.cookie_header_for_request(
+    "https://api.test/next"
+)).to_equal("")
+expect(session.network.cookie_store.count()).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(observed_mock_request_count(
+    "https://api.test/data", "GET"
+)).to_equal(1)  # oracle: pinned constant asserted by this scenario
+set_mock_registry(MockResponseRegistry.create())
+```
+
+</details>
+
+#### runs allowed direct-host preflight before the actual request
+
+- Verify: runs allowed direct-host preflight before the actual request
+- Serve OPTIONS policy and the PUT response from the mock transport
+- Observe one OPTIONS followed by one PUT and a filtered result
+   - Expected: session.network.cookie_store.count() equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: session.network_job_handle equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: session.network_job_phase equals ``
+   - Expected: session.network_job_deadline_ms equals `0)  # oracle: pinned constant asserted by this scenario`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 62 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-009 REQ-002 REQ-003 REQ-005 REQ-006 REQ-010
+step("Verify: runs allowed direct-host preflight before the actual request")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+step("Serve OPTIONS policy and the PUT response from the mock transport")
+var registry = MockResponseRegistry.create()
+registry.register_with_headers(
+    "https://api.test/update", 200,
+    [
+        Pair("Access-Control-Allow-Origin", "https://example.test"),
+        Pair("Access-Control-Allow-Methods", "PUT"),
+        Pair("Access-Control-Allow-Headers", "x-mode"),
+        Pair("Access-Control-Expose-Headers", "X-Visible"),
+        Pair("X-Visible", "yes"),
+        Pair("X-Hidden", "no"),
+        Pair("Set-Cookie", "stolen=yes; Path=/")
+    ],
+    "updated"
+)
+set_mock_registry(registry)
+var session = HostedWebContentSession.create(
+    84, "<div>prior</div>", 120, 60
+)
+expect(session.browser.open_html(
+    "https://example.test/page",
+    "<html><body><script>var putHeaders=''; " +
+    "var putBody=''; var putError=''; " +
+    "fetch('https://api.test/update', {method:'PUT', " +
+    "headers:{'X-Mode':'write'}, credentials:'omit'})" +
+    ".then(function(r) { putHeaders = r.headersText; " +
+    "return r.text(); }).then(function(t) { putBody = t; })" +
+    ".catch(function(e) { putError = e; });" +
+    "</script></body></html>"
+).is_ok()).to_be(true)
+
+step("Observe one OPTIONS followed by one PUT and a filtered result")
+val _ = session.advance_at(2150)
+expect(observed_mock_request_count(
+    "https://api.test/update", "OPTIONS"
+)).to_equal(1)  # oracle: pinned constant asserted by this scenario
+expect(observed_mock_request_count(
+    "https://api.test/update", "PUT"
+)).to_equal(1)  # oracle: pinned constant asserted by this scenario
+match session.browser.eval_script(
+    "putBody + '|' + putHeaders + '|' + putError"
+):
+    Ok(JsValue.String(value)):
+        expect(value).to_contain("updated|")
+        expect(value.to_lower()).to_contain("x-visible: yes")
+        expect(value.to_lower().contains("x-hidden:")).to_be(false)
+        expect(value.to_lower().contains("set-cookie:")).to_be(false)
+    _:
+        fail("Expected successful staged CORS response")
+expect(session.browser.cookie_header_for_request(
+    "https://api.test/next"
+)).to_equal("")
+expect(session.network.cookie_store.count()).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(session.network_job_handle).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(session.network_job_phase).to_equal("")
+expect(session.network_job_actual_request).to_be_nil()
+expect(session.network_job_deadline_ms).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(session.browser.has_pending_requests()).to_be(false)
+set_mock_registry(MockResponseRegistry.create())
+```
+
+</details>
+
+#### does not issue the actual direct-host request after denied preflight
+
+- Verify: does not issue the actual direct-host request after denied preflight
+- Serve a preflight response without the requested method
+- Reject after OPTIONS without starting PUT
+   - Expected: session.network_job_handle equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: session.network_job_phase equals ``
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 45 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-009 REQ-002 REQ-003 REQ-005 REQ-006 REQ-010
+step("Verify: does not issue the actual direct-host request after denied preflight")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+step("Serve a preflight response without the requested method")
+var registry = MockResponseRegistry.create()
+registry.register_with_headers(
+    "https://api.test/update", 204,
+    [
+        Pair("Access-Control-Allow-Origin", "https://example.test"),
+        Pair("Access-Control-Allow-Headers", "x-mode")
+    ],
+    ""
+)
+set_mock_registry(registry)
+var session = HostedWebContentSession.create(
+    83, "<div>prior</div>", 120, 60
+)
+expect(session.browser.open_html(
+    "https://example.test/page",
+    "<html><body><script>var denied='pending'; " +
+    "fetch('https://api.test/update', {method:'PUT', " +
+    "headers:{'X-Mode':'write'}, credentials:'omit'})" +
+    ".then(function() { denied='allowed'; })" +
+    ".catch(function(e) { denied=e; });" +
+    "</script></body></html>"
+).is_ok()).to_be(true)
+
+step("Reject after OPTIONS without starting PUT")
+val _ = session.advance_at(2200)
+expect(observed_mock_request_count(
+    "https://api.test/update", "OPTIONS"
+)).to_equal(1)  # oracle: pinned constant asserted by this scenario
+expect(observed_mock_request_count(
+    "https://api.test/update", "PUT"
+)).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(session.network_job_handle).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(session.network_job_phase).to_equal("")
+expect(session.network_job_actual_request).to_be_nil()
+expect(session.browser.has_pending_requests()).to_be(false)
+match session.browser.eval_script("denied"):
+    Ok(JsValue.String(value)):
+        expect(value).to_contain("CORS preflight denied")
+    _:
+        fail("Expected denied preflight rejection")
+set_mock_registry(MockResponseRegistry.create())
+```
+
+</details>
+
 #### cancels the native job immediately when browser chrome stops loading
 
-- Some
-- session network job request = Some
+- Verify: cancels the native job immediately when browser chrome stops loading
+   - Expected: address_down.reason equals `chrome-pressed`
+   - Expected: address_up.reason equals `address-focused`
+   - Expected: address_text.callback_count equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: address_submit.callback_count equals `1)  # oracle: pinned constant asserted by this scenario`
    - Expected: down.reason equals `chrome-pressed`
-   - Expected: up.callback_count equals `1`
-   - Expected: session.network_job_handle equals `0`
+   - Expected: up.callback_count equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: session.network_job_handle equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: session.network_job_phase equals ``
+   - Expected: session.network_job_deadline_ms equals `0)  # oracle: pinned constant asserted by this scenario`
    - Expected: session.browser.can_stop_loading() is false
    - Expected: session.address_text() equals `prior_url`
    - Expected: session.browser.current_url equals `prior_url`
@@ -678,10 +757,13 @@ set_mock_registry(MockResponseRegistry.create())
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 35 lines folded for reproduction.
+Runnable source: 43 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-009 REQ-002 REQ-003 REQ-005 REQ-006 REQ-010
+step("Verify: cancels the native job immediately when browser chrome stops loading")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var session = HostedWebContentSession.create(
     81, "<div id='prior'>Prior</div>", 120, 60
 )
@@ -698,12 +780,14 @@ val address_text = session.dispatch_text(
 val address_submit = session.dispatch_key(83, 13, true)
 expect(address_down.reason).to_equal("chrome-pressed")
 expect(address_up.reason).to_equal("address-focused")
-expect(address_text.callback_count).to_equal(1)
-expect(address_submit.callback_count).to_equal(1)
+expect(address_text.callback_count).to_equal(1)  # oracle: pinned constant asserted by this scenario
+expect(address_submit.callback_count).to_equal(1)  # oracle: pinned constant asserted by this scenario
 match session.browser.take_pending_request():
     Some(request):
         session.network_job_handle = 424242
         session.network_job_request = Some(request)
+        session.network_job_phase = "actual"
+        session.network_job_deadline_ms = 5000
     None:
         expect(false).to_be(true)
 
@@ -711,8 +795,11 @@ val down = session.dispatch_chrome_pointer(84, "stop", true)
 val up = session.dispatch_chrome_pointer(85, "stop", false)
 
 expect(down.reason).to_equal("chrome-pressed")
-expect(up.callback_count).to_equal(1)
-expect(session.network_job_handle).to_equal(0)
+expect(up.callback_count).to_equal(1)  # oracle: pinned constant asserted by this scenario
+expect(session.network_job_handle).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(session.network_job_phase).to_equal("")
+expect(session.network_job_actual_request).to_be_nil()
+expect(session.network_job_deadline_ms).to_equal(0)  # oracle: pinned constant asserted by this scenario
 expect(session.browser.can_stop_loading()).to_equal(false)
 expect(session.current_body_html()).to_contain("prior")
 expect(session.address_text()).to_equal(prior_url)
@@ -723,35 +810,52 @@ expect(session.browser.current_url).to_equal(prior_url)
 
 #### fails closed when no semantic element is hit or focused
 
+- Verify: fails closed when no semantic element is hit or focused
+   - Expected: miss.reason equals `no-semantic-target`
+   - Expected: miss.callback_count equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: unfocused.reason equals `no-focused-semantic-target`
+   - Expected: unfocused.mutation_revision equals `0)  # oracle: pinned constant asserted by this scenario`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-009 REQ-002 REQ-003 REQ-005 REQ-006 REQ-010
+step("Verify: fails closed when no semantic element is hit or focused")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var session = HostedWebContentSession.create(
     9, "<input id='name' value='ready'>", 80, 40
 )
 val miss = session.dispatch_pointer_at(1, 100, 100, false)
 expect(miss.reason).to_equal("no-semantic-target")
-expect(miss.callback_count).to_equal(0)
+expect(miss.callback_count).to_equal(0)  # oracle: pinned constant asserted by this scenario
 val unfocused = session.dispatch_text(2, "Ada")
 expect(unfocused.reason).to_equal("no-focused-semantic-target")
-expect(unfocused.mutation_revision).to_equal(0)
+expect(unfocused.mutation_revision).to_equal(0)  # oracle: pinned constant asserted by this scenario
 ```
 
 </details>
 
 #### targets a control at its CSS-painted geometry
 
+- Verify: targets a control at its CSS-painted geometry
+   - Expected: release.callback_count equals `1)  # oracle: pinned constant asserted by this scenario`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-009 REQ-002 REQ-003 REQ-005 REQ-006 REQ-010
+step("Verify: targets a control at its CSS-painted geometry")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var session = HostedWebContentSession.create(
     90,
     "<style>.moved{position:absolute;left:48px;top:32px;width:28px;height:20px}</style><button class='moved' onclick='set-attr:data-clicked=yes'>Move</button>",
@@ -764,7 +868,7 @@ expect(press.semantic_target_id.starts_with("node:")).to_be(true)
 expect(release.semantic_target_id).to_equal(
     press.semantic_target_id
 )
-expect(release.callback_count).to_equal(1)
+expect(release.callback_count).to_equal(1)  # oracle: pinned constant asserted by this scenario
 expect(session.current_body_html()).to_contain(
     "data-clicked=\"yes\""
 )
@@ -774,36 +878,40 @@ expect(session.current_body_html()).to_contain(
 
 #### reuses retained pointer layout and invalidates it after DOM mutation
 
+- Verify: reuses retained pointer layout and invalidates it after DOM mutation
 - Run animation pointer keyboard text and scroll workloads
    - Expected: press.semantic_target_id equals `target`
    - Expected: press.reason equals `pointer-pressed`
    - Expected: release.semantic_target_id equals `target`
-   - Expected: release.callback_count equals `1`
-   - Expected: session.render_session.counters.serialize_count equals `1`
-   - Expected: session.render_session.counters.parse_count equals `1`
-   - Expected: session.render_session.counters.css_count equals `1`
-   - Expected: session.render_session.counters.style_count equals `1`
-   - Expected: session.render_session.counters.layout_count equals `1`
-   - Expected: session.render_session.counters.reuse_count equals `1`
+   - Expected: release.callback_count equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: session.render_session.counters.serialize_count equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: session.render_session.counters.parse_count equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: session.render_session.counters.css_count equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: session.render_session.counters.style_count equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: session.render_session.counters.layout_count equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: session.render_session.counters.reuse_count equals `1)  # oracle: pinned constant asserted by this scenario`
    - Expected: after_mutation.semantic_target_id equals `target`
-   - Expected: session.render_session.counters.serialize_count equals `2`
-   - Expected: session.render_session.counters.parse_count equals `2`
-   - Expected: session.render_session.counters.layout_count equals `2`
-   - Expected: animated.render_session.counters.parse_count equals `1`
-   - Expected: animated.render_session.counters.layout_count equals `1`
+   - Expected: session.render_session.counters.serialize_count equals `2)  # oracle: pinned constant asserted by this scenario`
+   - Expected: session.render_session.counters.parse_count equals `2)  # oracle: pinned constant asserted by this scenario`
+   - Expected: session.render_session.counters.layout_count equals `2)  # oracle: pinned constant asserted by this scenario`
+   - Expected: animated.render_session.counters.parse_count equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: animated.render_session.counters.layout_count equals `1)  # oracle: pinned constant asserted by this scenario`
    - Expected: after_growth.semantic_target_id equals `stage`
-   - Expected: animated.render_session.counters.parse_count equals `1`
-   - Expected: animated.render_session.counters.style_count equals `2`
-   - Expected: animated.render_session.counters.layout_count equals `2`
+   - Expected: animated.render_session.counters.parse_count equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: animated.render_session.counters.style_count equals `2)  # oracle: pinned constant asserted by this scenario`
+   - Expected: animated.render_session.counters.layout_count equals `2)  # oracle: pinned constant asserted by this scenario`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 59 lines folded for reproduction.
+Runnable source: 62 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-009 REQ-002 REQ-003 REQ-005 REQ-006 REQ-010
+step("Verify: reuses retained pointer layout and invalidates it after DOM mutation")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 step("Run animation pointer keyboard text and scroll workloads")
 var session = HostedWebContentSession.create(
     91,
@@ -818,24 +926,24 @@ val release = session.dispatch_pointer_at(2, 52, 36, false)
 expect(press.semantic_target_id).to_equal("target")
 expect(press.reason).to_equal("pointer-pressed")
 expect(release.semantic_target_id).to_equal("target")
-expect(release.callback_count).to_equal(1)
+expect(release.callback_count).to_equal(1)  # oracle: pinned constant asserted by this scenario
 expect(session.current_body_html()).to_contain(
     "data-clicked=\"yes\""
 )
-expect(session.render_session.counters.serialize_count).to_equal(1)
-expect(session.render_session.counters.parse_count).to_equal(1)
-expect(session.render_session.counters.css_count).to_equal(1)
-expect(session.render_session.counters.style_count).to_equal(1)
-expect(session.render_session.counters.layout_count).to_equal(1)
-expect(session.render_session.counters.reuse_count).to_equal(1)
+expect(session.render_session.counters.serialize_count).to_equal(1)  # oracle: pinned constant asserted by this scenario
+expect(session.render_session.counters.parse_count).to_equal(1)  # oracle: pinned constant asserted by this scenario
+expect(session.render_session.counters.css_count).to_equal(1)  # oracle: pinned constant asserted by this scenario
+expect(session.render_session.counters.style_count).to_equal(1)  # oracle: pinned constant asserted by this scenario
+expect(session.render_session.counters.layout_count).to_equal(1)  # oracle: pinned constant asserted by this scenario
+expect(session.render_session.counters.reuse_count).to_equal(1)  # oracle: pinned constant asserted by this scenario
 
 val after_mutation = session.dispatch_pointer_at(
     3, 52, 36, true
 )
 expect(after_mutation.semantic_target_id).to_equal("target")
-expect(session.render_session.counters.serialize_count).to_equal(2)
-expect(session.render_session.counters.parse_count).to_equal(2)
-expect(session.render_session.counters.layout_count).to_equal(2)
+expect(session.render_session.counters.serialize_count).to_equal(2)  # oracle: pinned constant asserted by this scenario
+expect(session.render_session.counters.parse_count).to_equal(2)  # oracle: pinned constant asserted by this scenario
+expect(session.render_session.counters.layout_count).to_equal(2)  # oracle: pinned constant asserted by this scenario
 
 var animated = HostedWebContentSession.create(
     92,
@@ -852,95 +960,105 @@ val before_growth = animated.dispatch_pointer_at(
 expect(
     before_growth.semantic_target_id == "stage"
 ).to_be(false)
-expect(animated.render_session.counters.parse_count).to_equal(1)
-expect(animated.render_session.counters.layout_count).to_equal(1)
+expect(animated.render_session.counters.parse_count).to_equal(1)  # oracle: pinned constant asserted by this scenario
+expect(animated.render_session.counters.layout_count).to_equal(1)  # oracle: pinned constant asserted by this scenario
 
 expect(animated.advance_at(1500)).to_be(true)
 val after_growth = animated.dispatch_pointer_at(
     5, 20, 4, true
 )
 expect(after_growth.semantic_target_id).to_equal("stage")
-expect(animated.render_session.counters.parse_count).to_equal(1)
-expect(animated.render_session.counters.style_count).to_equal(2)
-expect(animated.render_session.counters.layout_count).to_equal(2)
+expect(animated.render_session.counters.parse_count).to_equal(1)  # oracle: pinned constant asserted by this scenario
+expect(animated.render_session.counters.style_count).to_equal(2)  # oracle: pinned constant asserted by this scenario
+expect(animated.render_session.counters.layout_count).to_equal(2)  # oracle: pinned constant asserted by this scenario
 ```
 
-<details>
-<summary>Rendered scenario source</summary>
-
-> step("Run animation pointer keyboard text and scroll workloads")<br>
-> var session = HostedWebContentSession.create(<br>
->     91,<br>
->     "<style>#target{position:absolute;left:48px;top:32px;" +<br>
->     "width:28px;height:20px}</style>" +<br>
->     "<div id='target' onclick='set-attr:data-clicked=yes'>Hit</div>",<br>
->     100, 70<br>
-> )<br>
-> val press = session.dispatch_pointer_at(1, 52, 36, true)<br>
-> val release = session.dispatch_pointer_at(2, 52, 36, false)<br>
-> <br>
-> expect(press.semantic_target_id).to_equal("target")<br>
-> expect(press.reason).to_equal("pointer-pressed")<br>
-> expect(release.semantic_target_id).to_equal("target")<br>
-> expect(release.callback_count).to_equal(1)<br>
-> expect(session.current_body_html()).to_contain(<br>
->     "data-clicked=\"yes\""<br>
-> )<br>
-> expect(session.render_session.counters.serialize_count).to_equal(1)<br>
-> expect(session.render_session.counters.parse_count).to_equal(1)<br>
-> expect(session.render_session.counters.css_count).to_equal(1)<br>
-> expect(session.render_session.counters.style_count).to_equal(1)<br>
-> expect(session.render_session.counters.layout_count).to_equal(1)<br>
-> expect(session.render_session.counters.reuse_count).to_equal(1)<br>
-> <br>
-> val after_mutation = session.dispatch_pointer_at(<br>
->     3, 52, 36, true<br>
-> )<br>
-> expect(after_mutation.semantic_target_id).to_equal("target")<br>
-> expect(session.render_session.counters.serialize_count).to_equal(2)<br>
-> expect(session.render_session.counters.parse_count).to_equal(2)<br>
-> expect(session.render_session.counters.layout_count).to_equal(2)<br>
-> <br>
-> var animated = HostedWebContentSession.create(<br>
->     92,<br>
->     "<style>@keyframes grow{fro$width$to{width:32px}}" +<br>
->     "#stage{width:8px;height:24px;background-color:#2563eb;" +<br>
->     "animation:grow 1000ms linear forwards}</style>" +<br>
->     "<div id='stage'></div>",<br>
->     64, 48<br>
-> )<br>
-> expect(animated.advance_at(1000)).to_be(false)<br>
-> val before_growth = animated.dispatch_pointer_at(<br>
->     4, 20, 4, true<br>
-> )<br>
-> expect(<br>
->     before_growth.semantic_target_id == "stage"<br>
-> ).to_be(false)<br>
-> expect(animated.render_session.counters.parse_count).to_equal(1)<br>
-> expect(animated.render_session.counters.layout_count).to_equal(1)<br>
-> <br>
-> expect(animated.advance_at(1500)).to_be(true)<br>
-> val after_growth = animated.dispatch_pointer_at(<br>
->     5, 20, 4, true<br>
-> )<br>
-> expect(after_growth.semantic_target_id).to_equal("stage")<br>
-> expect(animated.render_session.counters.parse_count).to_equal(1)<br>
-> expect(animated.render_session.counters.style_count).to_equal(2)<br>
-> expect(animated.render_session.counters.layout_count).to_equal(2)
-
 </details>
+
+#### advances a SimpleScript timer body mutation into the next Draw IR frame
+
+- Verify: advances a SimpleScript timer body mutation into the next Draw IR frame
+- Render the initial retained Draw IR frame before the script timer
+   - Expected: session.advance_at(1000) is false
+   - Expected: before.semantic_target_id equals `before`
+   - Expected: session.render_session.counters.serialize_count equals `1)  # oracle: pinned constant asserted by this scenario`
+- Advance the timer and rebuild one current Draw IR frame
+   - Expected: session.advance_at(1016) is true
+   - Expected: after.semantic_target_id equals `after`
+   - Expected: session.render_session.counters.serialize_count equals `2)  # oracle: pinned constant asserted by this scenario`
+   - Expected: session.render_session.counters.parse_count equals `2)  # oracle: pinned constant asserted by this scenario`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 35 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-009 REQ-002 REQ-003 REQ-005 REQ-006 REQ-010
+step("Verify: advances a SimpleScript timer body mutation into the next Draw IR frame")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+step("Render the initial retained Draw IR frame before the script timer")
+var session = HostedWebContentSession.create(
+    93,
+    "<style>#before,#after{position:absolute;left:0;top:0;" +
+    "width:32px;height:24px}#before{{background-color:#ef4444}}" +
+    "#after{{background-color:#2563eb}}</style>" +
+    "<div id='before'></div><script type='text/simple'>" +
+    "callback 91|body_html '<div id=\"after\"></div>'\n" +
+    "timeout 91 16</script>",
+    64, 48
+)
+expect(session.advance_at(1000)).to_equal(false)
+val before = session.dispatch_pointer_at(1, 4, 4, true)
+expect(before.semantic_target_id).to_equal("before")
+expect(draw_ir_has_component(
+    session.render_session.current_result.unwrap().composition, "before"
+)).to_equal(true)
+expect(session.render_session.counters.serialize_count).to_equal(1)  # oracle: pinned constant asserted by this scenario
+val before_revision = session.browser.ui_access_revision
+
+step("Advance the timer and rebuild one current Draw IR frame")
+expect(session.advance_at(1016)).to_equal(true)
+expect(session.browser.ui_access_revision).to_equal(
+    before_revision + 1
+)
+val after = session.dispatch_pointer_at(2, 4, 4, true)
+expect(after.semantic_target_id).to_equal("after")
+expect(draw_ir_has_component(
+    session.render_session.current_result.unwrap().composition, "after"
+)).to_equal(true)
+expect(session.render_session.counters.serialize_count).to_equal(2)  # oracle: pinned constant asserted by this scenario
+expect(session.render_session.counters.parse_count).to_equal(2)  # oracle: pinned constant asserted by this scenario
+```
 
 </details>
 
 #### appends committed text only to the actually focused hosted input
 
+- Verify: appends committed text only to the actually focused hosted input
+   - Expected: press.semantic_target_id equals `name`
+   - Expected: release.semantic_target_id equals `name`
+   - Expected: session.last_target_id equals `name`
+   - Expected: first.reason equals ``
+   - Expected: second.reason equals ``
+   - Expected: first.callback_count equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: second.callback_count equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: first.mutation_revision equals `2)  # oracle: pinned constant asserted by this scenario`
+   - Expected: second.mutation_revision equals `3)  # oracle: pinned constant asserted by this scenario`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-009 REQ-002 REQ-003 REQ-005 REQ-006 REQ-010
+step("Verify: appends committed text only to the actually focused hosted input")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var session = HostedWebContentSession.create(
     10, "<input id='name' value=''>", 80, 40
 )
@@ -954,10 +1072,10 @@ val first = session.dispatch_text(5, "A")
 val second = session.dispatch_text(6, "da")
 expect(first.reason).to_equal("")
 expect(second.reason).to_equal("")
-expect(first.callback_count).to_equal(0)
-expect(second.callback_count).to_equal(0)
-expect(first.mutation_revision).to_equal(2)
-expect(second.mutation_revision).to_equal(3)
+expect(first.callback_count).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(second.callback_count).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(first.mutation_revision).to_equal(2)  # oracle: pinned constant asserted by this scenario
+expect(second.mutation_revision).to_equal(3)  # oracle: pinned constant asserted by this scenario
 expect(session.current_body_html()).to_contain("value=\"Ada\"")
 ```
 
@@ -965,16 +1083,30 @@ expect(session.current_body_html()).to_contain("value=\"Ada\"")
 
 #### routes committed text to focus established on pointer down
 
+- Verify: routes committed text to focus established on pointer down
+   - Expected: session.last_target_id equals `first`
+   - Expected: down.semantic_target_id equals `second`
+   - Expected: _hosted_focused_author_id(session) equals `second`
+   - Expected: session.last_target_id equals `second`
+   - Expected: committed.semantic_target_id equals `second`
+   - Expected: canceled.semantic_target_id equals `blocked`
+   - Expected: _hosted_focused_author_id(session) equals `second`
+   - Expected: session.last_target_id equals `second`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-009 REQ-002 REQ-003 REQ-005 REQ-006 REQ-010
+step("Verify: routes committed text to focus established on pointer down")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var session = HostedWebContentSession.create(
     11,
-    "<style>body{margin:0}input{display:block;margin:0;padding:0;" +
+    "<style>body{{margin:0}}input{display:block;margin:0;padding:0;" +
     "border:0;width:40px;height:20px}</style>" +
     "<input id='first' value=''><input id='second' value=''>" +
     "<input id='blocked' value='' onmousedown='prevent-default'>",
@@ -986,7 +1118,7 @@ expect(session.last_target_id).to_equal("first")
 
 val down = session.dispatch_pointer_at(3, 5, 25, true)
 expect(down.semantic_target_id).to_equal("second")
-expect(be_dom_focused_id(session.browser.dom_root())).to_equal("second")
+expect(_hosted_focused_author_id(session)).to_equal("second")
 expect(session.last_target_id).to_equal("second")
 
 val committed = session.dispatch_text(4, "X")
@@ -997,7 +1129,7 @@ expect(session.current_body_html()).to_contain(
 
 val canceled = session.dispatch_pointer_at(5, 5, 45, true)
 expect(canceled.semantic_target_id).to_equal("blocked")
-expect(be_dom_focused_id(session.browser.dom_root())).to_equal("second")
+expect(_hosted_focused_author_id(session)).to_equal("second")
 expect(session.last_target_id).to_equal("second")
 ```
 
@@ -1005,13 +1137,22 @@ expect(session.last_target_id).to_equal("second")
 
 #### counts only an executed input listener as an application callback
 
+- Verify: counts only an executed input listener as an application callback
+   - Expected: focused.callback_count equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: edited.callback_count equals `3)  # oracle: pinned constant asserted by this scenario`
+   - Expected: edited.mutation_revision equals `2)  # oracle: pinned constant asserted by this scenario`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-009 REQ-002 REQ-003 REQ-005 REQ-006 REQ-010
+step("Verify: counts only an executed input listener as an application callback")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var session = HostedWebContentSession.create(
     13,
     "<input id='name' value='' onfocus='set-attr:data-focus=yes' onbeforeinput='set-attr:data-before=yes' oninput='set-attr:data-callback=yes'>",
@@ -1020,9 +1161,9 @@ var session = HostedWebContentSession.create(
 val focused = session.dispatch_pointer_at(7, 5, 5, true)
 val _ = session.dispatch_pointer_at(8, 5, 5, false)
 val edited = session.dispatch_text(9, "Ada")
-expect(focused.callback_count).to_equal(1)
-expect(edited.callback_count).to_equal(3)
-expect(edited.mutation_revision).to_equal(2)
+expect(focused.callback_count).to_equal(1)  # oracle: pinned constant asserted by this scenario
+expect(edited.callback_count).to_equal(3)  # oracle: pinned constant asserted by this scenario
+expect(edited.mutation_revision).to_equal(2)  # oracle: pinned constant asserted by this scenario
 expect(session.current_body_html()).to_contain("value=\"Ada\"")
 expect(session.current_body_html()).to_contain("data-focus=\"yes\"")
 expect(session.current_body_html()).to_contain("data-before=\"yes\"")
@@ -1035,28 +1176,30 @@ expect(session.current_body_html()).to_contain(
 
 #### enforces authored maxlength after cancelable beforeinput
 
+- Verify: enforces authored maxlength after cancelable beforeinput
 - Clamp text input to the authored maxlength
    - Expected: limited_press.semantic_target_id equals `limited`
    - Expected: limited_release.semantic_target_id equals `limited`
    - Expected: accepted.semantic_target_id equals `limited`
-   - Expected: accepted.callback_count equals `2`
+   - Expected: accepted.callback_count equals `2)  # oracle: pinned constant asserted by this scenario`
    - Expected: accepted.reason equals ``
-- limited current body html
    - Expected: canceled_press.semantic_target_id equals `blocked`
    - Expected: canceled_release.semantic_target_id equals `blocked`
    - Expected: blocked.semantic_target_id equals `blocked`
-   - Expected: blocked.callback_count equals `1`
+   - Expected: blocked.callback_count equals `1)  # oracle: pinned constant asserted by this scenario`
    - Expected: blocked.reason equals `no-application-mutation`
-- canceled current body html
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 42 lines folded for reproduction.
+Runnable source: 45 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-009 REQ-002 REQ-003 REQ-005 REQ-006 REQ-010
+step("Verify: enforces authored maxlength after cancelable beforeinput")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 step("Clamp text input to the authored maxlength")
 var limited = HostedWebContentSession.create(
     14,
@@ -1071,7 +1214,7 @@ expect(limited_press.semantic_target_id).to_equal("limited")
 expect(limited_release.semantic_target_id).to_equal("limited")
 val accepted = limited.dispatch_text(12, "a😀Z")
 expect(accepted.semantic_target_id).to_equal("limited")
-expect(accepted.callback_count).to_equal(2)
+expect(accepted.callback_count).to_equal(2)  # oracle: pinned constant asserted by this scenario
 expect(accepted.reason).to_equal("")
 expect(limited.current_body_html()).to_contain("value=\"a😀\"")
 expect(limited.current_body_html()).to_contain("data-before=\"yes\"")
@@ -1093,7 +1236,7 @@ expect(canceled_press.semantic_target_id).to_equal("blocked")
 expect(canceled_release.semantic_target_id).to_equal("blocked")
 val blocked = canceled.dispatch_text(15, "a😀Z")
 expect(blocked.semantic_target_id).to_equal("blocked")
-expect(blocked.callback_count).to_equal(1)
+expect(blocked.callback_count).to_equal(1)  # oracle: pinned constant asserted by this scenario
 expect(blocked.reason).to_equal("no-application-mutation")
 expect(canceled.current_body_html()).to_contain("value=\"kept\"")
 expect(
@@ -1105,60 +1248,40 @@ expect(
 
 #### clicks only after a matching hosted pointer press and release
 
+- Verify: clicks only after a matching hosted pointer press and release
 - Trace HTML elements through Web semantics and Draw IR
-- var comp = HostCompositor new headless
-- 1, 0, COMP CREATE WINDOW to i64
-- target unwrap
-- target unwrap
-- target unwrap
-- target unwrap
-- session browser dom root
-- session browser dom root
-- fail
-- form path[form path len
-- input path[input path len
-- form path[form path len
-- form path[form path len
-   - Expected: count_color(before, 0xFF2563EBu32) equals `0`
-- 17, target unwrap
+   - Expected: count_color(before, 0xFF2563EBu32) equals `0)  # oracle: pinned constant asserted by this scenario`
    - Expected: release_only.reason equals `pointer-release-without-press`
-   - Expected: release_only.mutation_revision equals `0`
-- session current body html
-- 18, target unwrap
+   - Expected: release_only.mutation_revision equals `0)  # oracle: pinned constant asserted by this scenario`
    - Expected: abandoned_press.reason equals ``
-   - Expected: abandoned_press.callback_count equals `1`
-   - Expected: be_dom_focused_id(session.browser.dom_root()) equals `accept`
+   - Expected: abandoned_press.callback_count equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: _hosted_focused_author_id(session) equals `accept`
    - Expected: missed_release.reason equals `no-semantic-target`
-- session current body html
-- 20, target unwrap
    - Expected: press.reason equals `pointer-pressed`
-   - Expected: press.callback_count equals `0`
-   - Expected: be_dom_focused_id(session.browser.dom_root()) equals `accept`
-- 21, target unwrap
-   - Expected: receipt.event_id equals `21`
+   - Expected: press.callback_count equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: _hosted_focused_author_id(session) equals `accept`
+   - Expected: receipt.event_id equals `21)  # oracle: pinned constant asserted by this scenario`
    - Expected: receipt.wm_target_id equals `target.unwrap().window_id`
    - Expected: receipt.semantic_target_id equals `accept`
-   - Expected: receipt.callback_count equals `2`
-   - Expected: receipt.mutation_revision equals `2`
-- session browser current style html + session current body html
-- target unwrap
-- form index to i64
+   - Expected: receipt.callback_count equals `2)  # oracle: pinned constant asserted by this scenario`
+   - Expected: receipt.mutation_revision equals `2)  # oracle: pinned constant asserted by this scenario`
    - Expected: input_command_found is true
    - Expected: input_command_parent equals `preferences`
    - Expected: input_command_geometry equals `[0, 0, 40, 28]`
-   - Expected: count_color(after, 0xFFEF4444u32) equals `0`
-- comp = host compositor update window content
+   - Expected: count_color(after, 0xFFEF4444u32) equals `0)  # oracle: pinned constant asserted by this scenario`
    - Expected: frame.len() equals `240 * 180`
-- raster shutdown
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 144 lines folded for reproduction.
+Runnable source: 143 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-009 REQ-002 REQ-003 REQ-005 REQ-006 REQ-010
+step("Verify: clicks only after a matching hosted pointer press and release")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 step("Trace HTML elements through Web semantics and Draw IR")
 val css_open = "{"
 val css_close = "}"
@@ -1187,12 +1310,8 @@ var session = HostedWebContentSession.create(
     target.unwrap().width,
     target.unwrap().height
 )
-val form_path = be_dom_find_path_to_id(
-    session.browser.dom_root(), "preferences"
-)
-val input_path = be_dom_find_path_to_id(
-    session.browser.dom_root(), "accept"
-)
+val form_path = _hosted_dom_path(session, "preferences")
+val input_path = _hosted_dom_path(session, "accept")
 if form_path.len() == 0 or input_path.len() < 2:
     fail("missing canonical form/input semantic path")
 expect(be_dom_get_tag(
@@ -1209,12 +1328,12 @@ expect(input_path[input_path.len() - 2].node_id).to_equal(
 )
 val before = session.render_to_pixels()
 expect(count_color(before, 0xFFEF4444u32)).to_be_greater_than(0)
-expect(count_color(before, 0xFF2563EBu32)).to_equal(0)
+expect(count_color(before, 0xFF2563EBu32)).to_equal(0)  # oracle: pinned constant asserted by this scenario
 val release_only = session.dispatch_pointer_at(
     17, target.unwrap().local_x, target.unwrap().local_y, false
 )
 expect(release_only.reason).to_equal("pointer-release-without-press")
-expect(release_only.mutation_revision).to_equal(0)
+expect(release_only.mutation_revision).to_equal(0)  # oracle: pinned constant asserted by this scenario
 expect(
     session.current_body_html().contains("checked=\"checked\"")
 ).to_be(false)
@@ -1223,8 +1342,8 @@ val abandoned_press = session.dispatch_pointer_at(
     18, target.unwrap().local_x, target.unwrap().local_y, true
 )
 expect(abandoned_press.reason).to_equal("")
-expect(abandoned_press.callback_count).to_equal(1)
-expect(be_dom_focused_id(session.browser.dom_root())).to_equal("accept")
+expect(abandoned_press.callback_count).to_equal(1)  # oracle: pinned constant asserted by this scenario
+expect(_hosted_focused_author_id(session)).to_equal("accept")
 expect(session.current_body_html()).to_contain(
     "data-focused=\"yes\""
 )
@@ -1238,17 +1357,17 @@ val press = session.dispatch_pointer_at(
     20, target.unwrap().local_x, target.unwrap().local_y, true
 )
 expect(press.reason).to_equal("pointer-pressed")
-expect(press.callback_count).to_equal(0)
-expect(be_dom_focused_id(session.browser.dom_root())).to_equal("accept")
+expect(press.callback_count).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(_hosted_focused_author_id(session)).to_equal("accept")
 val receipt = session.dispatch_pointer_at(
     21, target.unwrap().local_x, target.unwrap().local_y, false
 )
 
-expect(receipt.event_id).to_equal(21)
+expect(receipt.event_id).to_equal(21)  # oracle: pinned constant asserted by this scenario
 expect(receipt.wm_target_id).to_equal(target.unwrap().window_id)
 expect(receipt.semantic_target_id).to_equal("accept")
-expect(receipt.callback_count).to_equal(2)
-expect(receipt.mutation_revision).to_equal(2)
+expect(receipt.callback_count).to_equal(2)  # oracle: pinned constant asserted by this scenario
+expect(receipt.mutation_revision).to_equal(2)  # oracle: pinned constant asserted by this scenario
 expect(session.current_body_html()).to_contain("checked=\"checked\"")
 expect(session.current_body_html()).to_contain("data-input=\"yes\"")
 expect(session.current_body_html()).to_contain("data-clicked=\"yes\"")
@@ -1294,7 +1413,7 @@ expect(input_command_geometry).to_equal([0, 0, 40, 28])
 val after = session.render_to_pixels()
 expect(checksum(after) == checksum(before)).to_be(false)
 expect(count_color(after, 0xFF2563EBu32)).to_be_greater_than(0)
-expect(count_color(after, 0xFFEF4444u32)).to_equal(0)
+expect(count_color(after, 0xFFEF4444u32)).to_equal(0)  # oracle: pinned constant asserted by this scenario
 
 comp = host_compositor_update_window_content(comp, target.unwrap().window_id, session.current_body_html())
 val raster = Engine2dCompositorBackend.create_named(240, 180, "software")
@@ -1309,31 +1428,38 @@ raster.shutdown()
 
 #### routes hosted key edges to DOM focus before window shortcuts
 
-- "<script>var stay=document getElementById
-- "stay addEventListener
-- "if
-- "stay addEventListener
+- Verify: routes hosted key edges to DOM focus before window shortcuts
+   - Expected: input_press.semantic_target_id equals `name`
+   - Expected: input_release.semantic_target_id equals `name`
+   - Expected: letter_down.semantic_target_id equals `name`
+   - Expected: committed.semantic_target_id equals `name`
+   - Expected: letter_up.semantic_target_id equals `name`
+   - Expected: letter_down.callback_count equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: committed.callback_count equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: letter_up.callback_count equals `1)  # oracle: pinned constant asserted by this scenario`
    - Expected: shifted_letter.semantic_target_id equals `stay`
    - Expected: arrow_down.semantic_target_id equals `stay`
    - Expected: arrow_up.semantic_target_id equals `stay`
    - Expected: canceled_tab.semantic_target_id equals `stay`
-- payload session browser dom root
+   - Expected: _hosted_focused_author_id(payload_session) equals `stay`
    - Expected: checkbox_press.semantic_target_id equals `toggle`
    - Expected: checkbox_release.semantic_target_id equals `toggle`
    - Expected: space_down.semantic_target_id equals `toggle`
    - Expected: space_up.semantic_target_id equals `toggle`
-   - Expected: space_down.callback_count equals `0`
-   - Expected: space_up.callback_count equals `1`
-- checkbox session current body html
+   - Expected: space_down.callback_count equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: space_up.callback_count equals `1)  # oracle: pinned constant asserted by this scenario`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 98 lines folded for reproduction.
+Runnable source: 99 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-009 REQ-002 REQ-003 REQ-005 REQ-006 REQ-010
+step("Verify: routes hosted key edges to DOM focus before window shortcuts")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var input_session = HostedWebContentSession.create(
     11,
     "<input id='name' value='' onkeydown='set-attr:data-down=yes' onkeyup='set-attr:data-up=yes'>",
@@ -1350,9 +1476,9 @@ val letter_up = input_session.dispatch_key(34, 87, false)
 expect(letter_down.semantic_target_id).to_equal("name")
 expect(committed.semantic_target_id).to_equal("name")
 expect(letter_up.semantic_target_id).to_equal("name")
-expect(letter_down.callback_count).to_equal(1)
-expect(committed.callback_count).to_equal(0)
-expect(letter_up.callback_count).to_equal(1)
+expect(letter_down.callback_count).to_equal(1)  # oracle: pinned constant asserted by this scenario
+expect(committed.callback_count).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(letter_up.callback_count).to_equal(1)  # oracle: pinned constant asserted by this scenario
 expect(input_session.current_body_html()).to_contain(
     "data-down=\"yes\""
 )
@@ -1399,9 +1525,7 @@ val canceled_tab = payload_session.dispatch_key_with_shift(
     38, 9, true, true
 )
 expect(canceled_tab.semantic_target_id).to_equal("stay")
-expect(be_dom_focused_id(
-    payload_session.browser.dom_root()
-)).to_equal("stay")
+expect(_hosted_focused_author_id(payload_session)).to_equal("stay")
 
 var checkbox_session = HostedWebContentSession.create(
     12,
@@ -1424,8 +1548,8 @@ val space_down = checkbox_session.dispatch_key(37, 32, true)
 val space_up = checkbox_session.dispatch_key(38, 32, false)
 expect(space_down.semantic_target_id).to_equal("toggle")
 expect(space_up.semantic_target_id).to_equal("toggle")
-expect(space_down.callback_count).to_equal(0)
-expect(space_up.callback_count).to_equal(1)
+expect(space_down.callback_count).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(space_up.callback_count).to_equal(1)  # oracle: pinned constant asserted by this scenario
 expect(
     checkbox_session.current_body_html().contains("checked=\"checked\"")
 ).to_be(false)
@@ -1438,13 +1562,23 @@ expect(checkbox_session.current_body_html()).to_contain(
 
 #### deletes one UTF-8 scalar from the hosted address bar
 
+- Verify: deletes one UTF-8 scalar from the hosted address bar
+   - Expected: up.reason equals `address-focused`
+   - Expected: typed.callback_count equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: erased.callback_count equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: session.address_text() equals `https://example.test/`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-009 REQ-002 REQ-003 REQ-005 REQ-006 REQ-010
+step("Verify: deletes one UTF-8 scalar from the hosted address bar")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var session = HostedWebContentSession.create(
     17, "<p>ready</p>", 320, 180
 )
@@ -1459,11 +1593,11 @@ expect(down.semantic_target_id).to_equal(
     "browser:session#address"
 )
 expect(up.reason).to_equal("address-focused")
-expect(typed.callback_count).to_equal(1)
+expect(typed.callback_count).to_equal(1)  # oracle: pinned constant asserted by this scenario
 expect(erased.semantic_target_id).to_equal(
     "browser:session#address"
 )
-expect(erased.callback_count).to_equal(1)
+expect(erased.callback_count).to_equal(1)  # oracle: pinned constant asserted by this scenario
 expect(session.address_text()).to_equal("https://example.test/")
 ```
 
@@ -1471,19 +1605,20 @@ expect(session.address_text()).to_equal("https://example.test/")
 
 #### cancels the hosted address draft and defocuses on Escape
 
+- Verify: cancels the hosted address draft and defocuses on Escape
 - Focus the address bar and replace the committed URL
-   - Expected: typed.callback_count equals `1`
+   - Expected: typed.callback_count equals `1)  # oracle: pinned constant asserted by this scenario`
    - Expected: session.address_text() equals `https://draft.test/`
    - Expected: session.chrome_focus equals `address`
 - Cancel the draft with Escape
-   - Expected: canceled.callback_count equals `1`
+   - Expected: canceled.callback_count equals `1)  # oracle: pinned constant asserted by this scenario`
    - Expected: canceled.reason equals ``
    - Expected: canceled.mutation_revision equals `revision_before_escape`
    - Expected: session.browser.address_draft equals `committed_url`
    - Expected: session.address_text() equals `committed_url`
    - Expected: session.chrome_focus equals ``
 - Keep later text away from the defocused address bar
-   - Expected: ignored.callback_count equals `0`
+   - Expected: ignored.callback_count equals `0)  # oracle: pinned constant asserted by this scenario`
    - Expected: ignored.reason equals `no-focused-semantic-target`
    - Expected: session.address_text() equals `committed_url`
 
@@ -1491,10 +1626,13 @@ expect(session.address_text()).to_equal("https://example.test/")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 36 lines folded for reproduction.
+Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-009 REQ-002 REQ-003 REQ-005 REQ-006 REQ-010
+step("Verify: cancels the hosted address draft and defocuses on Escape")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var session = HostedWebContentSession.create(
     18, "<p>ready</p>", 320, 180
 )
@@ -1508,7 +1646,7 @@ step("Focus the address bar and replace the committed URL")
 val _ = session.dispatch_chrome_pointer(5, "address", true)
 val _ = session.dispatch_chrome_pointer(6, "address", false)
 val typed = session.dispatch_text(7, "https://draft.test/")
-expect(typed.callback_count).to_equal(1)
+expect(typed.callback_count).to_equal(1)  # oracle: pinned constant asserted by this scenario
 expect(session.address_text()).to_equal("https://draft.test/")
 expect(session.chrome_focus).to_equal("address")
 val revision_before_escape = session.mutation_revision
@@ -1518,7 +1656,7 @@ val canceled = session.dispatch_key(8, 27, true)
 expect(canceled.semantic_target_id).to_equal(
     "browser:session#address"
 )
-expect(canceled.callback_count).to_equal(1)
+expect(canceled.callback_count).to_equal(1)  # oracle: pinned constant asserted by this scenario
 expect(canceled.reason).to_equal("")
 expect(canceled.mutation_revision).to_equal(revision_before_escape)
 expect(session.browser.address_draft).to_equal(committed_url)
@@ -1528,7 +1666,7 @@ expect(session.address_replace_on_text).to_be(false)
 
 step("Keep later text away from the defocused address bar")
 val ignored = session.dispatch_text(9, "ignored")
-expect(ignored.callback_count).to_equal(0)
+expect(ignored.callback_count).to_equal(0)  # oracle: pinned constant asserted by this scenario
 expect(ignored.reason).to_equal("no-focused-semantic-target")
 expect(session.address_text()).to_equal(committed_url)
 ```
@@ -1537,20 +1675,24 @@ expect(session.address_text()).to_equal(committed_url)
 
 #### defocuses the hosted address only after a successful submit
 
+- Verify: defocuses the hosted address only after a successful submit
 - Operate browser navigation controls
-   - Expected: submitted.callback_count equals `1`
+   - Expected: submitted.callback_count equals `1)  # oracle: pinned constant asserted by this scenario`
    - Expected: session.chrome_focus equals ``
-   - Expected: rejected.callback_count equals `0`
+   - Expected: rejected.callback_count equals `0)  # oracle: pinned constant asserted by this scenario`
    - Expected: session.chrome_focus equals `address`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-009 REQ-002 REQ-003 REQ-005 REQ-006 REQ-010
+step("Verify: defocuses the hosted address only after a successful submit")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 step("Operate browser navigation controls")
 var session = HostedWebContentSession.create(
     20, "<p>ready</p>", 320, 180
@@ -1563,7 +1705,7 @@ val _ = session.dispatch_chrome_pointer(10, "address", true)
 val _ = session.dispatch_chrome_pointer(11, "address", false)
 val _ = session.dispatch_text(12, "https://target.test/")
 val submitted = session.dispatch_key(13, 13, true)
-expect(submitted.callback_count).to_equal(1)
+expect(submitted.callback_count).to_equal(1)  # oracle: pinned constant asserted by this scenario
 expect(session.chrome_focus).to_equal("")
 expect(session.address_replace_on_text).to_be(false)
 
@@ -1571,7 +1713,7 @@ val _ = session.dispatch_chrome_pointer(14, "address", true)
 val _ = session.dispatch_chrome_pointer(15, "address", false)
 val _ = session.dispatch_text(16, "javascript:alert(1)")
 val rejected = session.dispatch_key(17, 13, true)
-expect(rejected.callback_count).to_equal(0)
+expect(rejected.callback_count).to_equal(0)  # oracle: pinned constant asserted by this scenario
 expect(session.chrome_focus).to_equal("address")
 expect(session.address_replace_on_text).to_be(false)
 ```
@@ -1580,12 +1722,15 @@ expect(session.address_replace_on_text).to_be(false)
 
 #### accepts 2048 UTF-8 address bytes and rejects 2049 without mutation
 
+- Verify: accepts 2048 UTF-8 address bytes and rejects 2049 without mutation
+   - Expected: rt_text_to_bytes(accepted_value).len() equals `2048)  # oracle: pinned constant asserted by this scenario`
+   - Expected: rt_text_to_bytes(rejected_value).len() equals `2049)  # oracle: pinned constant asserted by this scenario`
 - Accept the exact UTF-8 byte boundary
-   - Expected: accepted.callback_count equals `1`
+   - Expected: accepted.callback_count equals `1)  # oracle: pinned constant asserted by this scenario`
    - Expected: accepted.reason equals ``
    - Expected: session.address_text() equals `accepted_value`
 - Reject one extra byte without changing editing state
-   - Expected: rejected.callback_count equals `0`
+   - Expected: rejected.callback_count equals `0)  # oracle: pinned constant asserted by this scenario`
    - Expected: rejected.reason equals `address-too-long`
    - Expected: session.browser.address_draft equals `accepted_value`
    - Expected: session.address_text() equals `accepted_value`
@@ -1595,23 +1740,26 @@ expect(session.address_replace_on_text).to_be(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 33 lines folded for reproduction.
+Runnable source: 36 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-009 REQ-002 REQ-003 REQ-005 REQ-006 REQ-010
+step("Verify: accepts 2048 UTF-8 address bytes and rejects 2049 without mutation")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var session = HostedWebContentSession.create(
     19, "<p>ready</p>", 320, 180
 )
 val accepted_value = repeated_text("a", 2045) + "한"
 val rejected_value = accepted_value + "b"
-expect(rt_text_to_bytes(accepted_value).len()).to_equal(2048)
-expect(rt_text_to_bytes(rejected_value).len()).to_equal(2049)
+expect(rt_text_to_bytes(accepted_value).len()).to_equal(2048)  # oracle: pinned constant asserted by this scenario
+expect(rt_text_to_bytes(rejected_value).len()).to_equal(2049)  # oracle: pinned constant asserted by this scenario
 
 step("Accept the exact UTF-8 byte boundary")
 val _ = session.dispatch_chrome_pointer(10, "address", true)
 val _ = session.dispatch_chrome_pointer(11, "address", false)
 val accepted = session.dispatch_text(12, accepted_value)
-expect(accepted.callback_count).to_equal(1)
+expect(accepted.callback_count).to_equal(1)  # oracle: pinned constant asserted by this scenario
 expect(accepted.reason).to_equal("")
 expect(session.address_text()).to_equal(accepted_value)
 
@@ -1623,7 +1771,7 @@ val rejected = session.dispatch_text(15, rejected_value)
 expect(rejected.semantic_target_id).to_equal(
     "browser:session#address"
 )
-expect(rejected.callback_count).to_equal(0)
+expect(rejected.callback_count).to_equal(0)  # oracle: pinned constant asserted by this scenario
 expect(rejected.reason).to_equal("address-too-long")
 expect(rejected.mutation_revision).to_equal(
     revision_before_rejection
@@ -1638,34 +1786,29 @@ expect(session.address_replace_on_text).to_be(true)
 
 #### keeps trusted browser chrome outside hostile page hit testing
 
-- 1, 1, COMP CREATE WINDOW to i64
+- Verify: keeps trusted browser chrome outside hostile page hit testing
    - Expected: toolbar.unwrap().control equals `address`
    - Expected: back.unwrap().control equals `back`
-   - Expected: page.unwrap().local_y equals `6`
-- page unwrap
-- page unwrap
-- page unwrap
-- page unwrap
+   - Expected: page.unwrap().local_y equals `6)  # oracle: pinned constant asserted by this scenario`
    - Expected: address_up.reason equals `address-focused`
-   - Expected: edited.callback_count equals `1`
-   - Expected: submitted.callback_count equals `1`
-- session current body html
+   - Expected: edited.callback_count equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: submitted.callback_count equals `1)  # oracle: pinned constant asserted by this scenario`
    - Expected: abandoned_back.reason equals `chrome-pressed`
-   - Expected: back_up.callback_count equals `1`
-   - Expected: forward_up.callback_count equals `1`
-- comp, page unwrap
-- comp, page unwrap
+   - Expected: back_up.callback_count equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: forward_up.callback_count equals `1)  # oracle: pinned constant asserted by this scenario`
    - Expected: pixels[90 * 420 + 300] equals `0xFFFFFFFFu32`
-- raster shutdown
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 106 lines folded for reproduction.
+Runnable source: 109 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-009 REQ-002 REQ-003 REQ-005 REQ-006 REQ-010
+step("Verify: keeps trusted browser chrome outside hostile page hit testing")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var comp = HostCompositor.new_headless(Size(
     width: 420u64, height: 280u64
 ))
@@ -1686,7 +1829,7 @@ expect(comp.content_target(300, 90).is_some()).to_be(false)
 
 val page = comp.content_target(30, 130)
 expect(page.is_some()).to_be(true)
-expect(page.unwrap().local_y).to_equal(6)
+expect(page.unwrap().local_y).to_equal(6)  # oracle: pinned constant asserted by this scenario
 var session = HostedWebContentSession.create(
     page.unwrap().window_id,
     page.unwrap().body_html,
@@ -1712,8 +1855,8 @@ expect(address_down.semantic_target_id).to_equal(
     "browser:session#address"
 )
 expect(address_up.reason).to_equal("address-focused")
-expect(edited.callback_count).to_equal(1)
-expect(submitted.callback_count).to_equal(1)
+expect(edited.callback_count).to_equal(1)  # oracle: pinned constant asserted by this scenario
+expect(submitted.callback_count).to_equal(1)  # oracle: pinned constant asserted by this scenario
 expect(session.browser.current_url).to_equal(
     "https://example.com/target"
 )
@@ -1744,7 +1887,7 @@ val back_up = session.dispatch_chrome_pointer(48, "back", false)
 expect(back_down.semantic_target_id).to_equal(
     "browser:session#back"
 )
-expect(back_up.callback_count).to_equal(1)
+expect(back_up.callback_count).to_equal(1)  # oracle: pinned constant asserted by this scenario
 expect(session.current_body_html()).to_contain("trap-address")
 val forward_down = session.dispatch_chrome_pointer(
     49, "forward", true
@@ -1755,7 +1898,7 @@ val forward_up = session.dispatch_chrome_pointer(
 expect(forward_down.semantic_target_id).to_equal(
     "browser:session#forward"
 )
-expect(forward_up.callback_count).to_equal(1)
+expect(forward_up.callback_count).to_equal(1)  # oracle: pinned constant asserted by this scenario
 expect(session.current_body_html()).to_contain("Target")
 
 comp = host_compositor_update_window_content(
@@ -1776,31 +1919,86 @@ raster.shutdown()
 
 </details>
 
-#### isolates address history and page state between browser windows
+#### publishes style-only history changes immediately through chrome
 
-- var registry = HostedWebContentRegistry create
-   - Expected: address_down.reason equals `chrome-pressed`
-   - Expected: address_up.reason equals `address-focused`
-   - Expected: edited.callback_count equals `1`
-   - Expected: submitted.callback_count equals `1`
-   - Expected: registry.address_text(71) equals `first_address`
-   - Expected: registry.body_html(71) equals `first_body`
-   - Expected: back_down.reason equals `chrome-pressed`
-   - Expected: back_up.callback_count equals `1`
-   - Expected: registry.body_html(71) equals `first_body`
-   - Expected: favorite_down.reason equals `chrome-pressed`
-   - Expected: favorite_up.callback_count equals `0`
-   - Expected: favorite_up.reason equals `profile-unavailable`
-- registry address text
+- Verify: publishes style-only history changes immediately through chrome
+   - Expected: session.dispatch_key(4, 13, true).callback_count equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: session.browser.current_body_html equals `red_body`
+   - Expected: session.browser.current_body_html equals `red_body`
+   - Expected: session.render_session.document_revision equals `-1)  # oracle: pinned constant asserted by this scenario`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 60 lines folded for reproduction.
+Runnable source: 33 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021 REQ-002 REQ-003 REQ-005 REQ-006 REQ-010
+step("Verify: publishes style-only history changes immediately through chrome")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+var session = HostedWebContentSession.create(
+    82,
+    "<style>body{{background:#dc2626}}</style>" +
+    "<div id='same'>Same</div>",
+    120, 60
+)
+val red_body = session.browser.current_body_html
+session.browser.register_resource(
+    "https://example.test/blue",
+    "<html><head><style>body{{background:#2563eb}}</style></head>" +
+    "<body><div id='same'>Same</div></body></html>"
+)
+
+val _ = session.dispatch_chrome_pointer(1, "address", true)
+val _ = session.dispatch_chrome_pointer(2, "address", false)
+val _ = session.dispatch_text(3, "https://example.test/blue")
+expect(session.dispatch_key(4, 13, true).callback_count).to_equal(1)  # oracle: pinned constant asserted by this scenario
+expect(session.browser.current_body_html).to_equal(red_body)
+expect(session.current_body_html()).to_contain("#2563eb")
+expect(session.current_body_html().contains("#dc2626")).to_be(false)
+
+session.render_session.document_revision = 42
+val _ = session.dispatch_chrome_pointer(5, "back", true)
+expect(
+    session.dispatch_chrome_pointer(6, "back", false).callback_count
+).to_equal(1)  # oracle: pinned constant asserted by this scenario
+expect(session.browser.current_body_html).to_equal(red_body)
+expect(session.current_body_html()).to_contain("#dc2626")
+expect(session.current_body_html().contains("#2563eb")).to_be(false)
+expect(session.render_session.document_revision).to_equal(-1)  # oracle: pinned constant asserted by this scenario
+```
+
+</details>
+
+#### isolates address history and page state between browser windows
+
+- Verify: isolates address history and page state between browser windows
+   - Expected: address_down.reason equals `chrome-pressed`
+   - Expected: address_up.reason equals `address-focused`
+   - Expected: edited.callback_count equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: submitted.callback_count equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: registry.address_text(71) equals `first_address`
+   - Expected: registry.body_html(71) equals `first_body`
+   - Expected: back_down.reason equals `chrome-pressed`
+   - Expected: back_up.callback_count equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: registry.body_html(71) equals `first_body`
+   - Expected: favorite_down.reason equals `chrome-pressed`
+   - Expected: favorite_up.callback_count equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: favorite_up.reason equals `profile-unavailable`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 63 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021 REQ-002 REQ-003 REQ-005 REQ-006 REQ-010
+step("Verify: isolates address history and page state between browser windows")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var registry = HostedWebContentRegistry.create()
 val _ = registry.advance_window(
     71, "<div id='first'>First</div>", 120, 60, 1000, false
@@ -1829,8 +2027,8 @@ val edited = registry.dispatch_text(
 val submitted = registry.dispatch_key(76, 72, 13, true)
 expect(address_down.reason).to_equal("chrome-pressed")
 expect(address_up.reason).to_equal("address-focused")
-expect(edited.callback_count).to_equal(1)
-expect(submitted.callback_count).to_equal(1)
+expect(edited.callback_count).to_equal(1)  # oracle: pinned constant asserted by this scenario
+expect(submitted.callback_count).to_equal(1)  # oracle: pinned constant asserted by this scenario
 expect(registry.address_text(72)).to_equal(
     "https://second.test/target"
 )
@@ -1845,7 +2043,7 @@ val back_up = registry.dispatch_chrome_pointer(
     78, 72, "back", false
 )
 expect(back_down.reason).to_equal("chrome-pressed")
-expect(back_up.callback_count).to_equal(1)
+expect(back_up.callback_count).to_equal(1)  # oracle: pinned constant asserted by this scenario
 expect(registry.body_html(72)).to_contain("second")
 expect(registry.body_html(71)).to_equal(first_body)
 
@@ -1856,7 +2054,7 @@ val favorite_up = registry.dispatch_chrome_pointer(
     80, 72, "favorite", false
 )
 expect(favorite_down.reason).to_equal("chrome-pressed")
-expect(favorite_up.callback_count).to_equal(0)
+expect(favorite_up.callback_count).to_equal(0)  # oracle: pinned constant asserted by this scenario
 expect(favorite_up.reason).to_equal("profile-unavailable")
 expect(registry.sessions[1].browser.is_favorite(
     registry.address_text(72)
@@ -1867,20 +2065,23 @@ expect(registry.sessions[1].browser.is_favorite(
 
 #### persists Favorite only for the selected secondary browser window
 
-- BrowserBookmarkStore memory
+- Verify: persists Favorite only for the selected secondary browser window
    - Expected: favorite_down.reason equals `chrome-pressed`
-   - Expected: favorite_up.callback_count equals `1`
-   - Expected: registry.profile_bookmarks.entries.len() equals `1`
+   - Expected: favorite_up.callback_count equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: registry.profile_bookmarks.entries.len() equals `1)  # oracle: pinned constant asserted by this scenario`
    - Expected: registry.close() is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-009
+step("Verify: persists Favorite only for the selected secondary browser window")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var registry = HostedWebContentRegistry.create_with_bookmark_store(
     BrowserBookmarkStore.memory()?
 )
@@ -1904,14 +2105,14 @@ val favorite_up = registry.dispatch_chrome_pointer(
     84, 82, "favorite", false
 )
 expect(favorite_down.reason).to_equal("chrome-pressed")
-expect(favorite_up.callback_count).to_equal(1)
+expect(favorite_up.callback_count).to_equal(1)  # oracle: pinned constant asserted by this scenario
 expect(registry.sessions[1].browser.is_favorite(
     "https://second.test/page"
 )).to_equal(true)
 expect(registry.sessions[0].browser.is_favorite(
     "https://second.test/page"
 )).to_equal(false)
-expect(registry.profile_bookmarks.entries.len()).to_equal(1)
+expect(registry.profile_bookmarks.entries.len()).to_equal(1)  # oracle: pinned constant asserted by this scenario
 expect(registry.close()).to_equal(true)
 ```
 
@@ -1919,35 +2120,29 @@ expect(registry.close()).to_equal(true)
 
 #### carries one compositor-local pointer release through BrowserSession and the canonical Engine2D frame
 
-- var comp = HostCompositor new headless
-- 1, 0, COMP CREATE WINDOW to i64
-- target unwrap
-- target unwrap
-- target unwrap
-- target unwrap
-- 16, target unwrap
-- 17, target unwrap
-   - Expected: receipt.event_id equals `17`
+- Verify: carries one compositor-local pointer release through BrowserSession and the canonical Engine2D frame
+   - Expected: receipt.event_id equals `17)  # oracle: pinned constant asserted by this scenario`
    - Expected: receipt.wm_target_id equals `target.unwrap().window_id`
    - Expected: receipt.semantic_target_id equals `accept`
-   - Expected: receipt.callback_count equals `0`
-   - Expected: receipt.mutation_revision equals `2`
-- comp, target unwrap
+   - Expected: receipt.callback_count equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: receipt.mutation_revision equals `2)  # oracle: pinned constant asserted by this scenario`
    - Expected: frame.len() equals `240 * 180`
-- raster shutdown
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 40 lines folded for reproduction.
+Runnable source: 43 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021 REQ-WEB-BROWSER-009 REQ-002 REQ-003 REQ-005 REQ-006 REQ-010
+step("Verify: carries one compositor-local pointer release through BrowserSession and the canonical Engine2D frame")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var comp = HostCompositor.new_headless(Size(width: 240u64, height: 180u64))
 comp.apply_bridge_request(
     1, 0, COMP_CREATE_WINDOW.to_i64(), 0, "Form", 20, 48, 180, 100,
-    "<style>input{display:block;width:40px;height:28px;background-color:#ef4444}input[checked]{background-color:#2563eb}</style><input id='accept' type='checkbox'>",
+    "<style>input{display:block;width:40px;height:28px;background-color:#ef4444}input[checked]{{background-color:#2563eb}}</style><input id='accept' type='checkbox'>",
     1, "hosted-web-event"
 )
 val target = comp.content_target(40, 90)
@@ -1967,11 +2162,11 @@ val receipt = session.dispatch_pointer_at(
     17, target.unwrap().local_x, target.unwrap().local_y, false
 )
 
-expect(receipt.event_id).to_equal(17)
+expect(receipt.event_id).to_equal(17)  # oracle: pinned constant asserted by this scenario
 expect(receipt.wm_target_id).to_equal(target.unwrap().window_id)
 expect(receipt.semantic_target_id).to_equal("accept")
-expect(receipt.callback_count).to_equal(0)
-expect(receipt.mutation_revision).to_equal(2)
+expect(receipt.callback_count).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(receipt.mutation_revision).to_equal(2)  # oracle: pinned constant asserted by this scenario
 expect(session.current_body_html()).to_contain("checked=\"checked\"")
 expect(checksum(session.render_to_pixels()) == checksum(before)).to_be(false)
 
@@ -1988,30 +2183,49 @@ raster.shutdown()
 
 </details>
 
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Hardware & OS |
-| Status | Active |
-| Source | `test/02_integration/os/hosted/hosted_web_content_session_spec.spl` |
-| Updated | 2026-07-29 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering hosted Web content session.
-- hosted Web content session
-
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 26 |
-| Active scenarios | 26 |
+| Total scenarios | 31 |
+| Active scenarios | 31 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
 
 </details>
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `9402dd118c225d0926822ddf5b4ea1399b33f5f56a11725806f56a06b4ce709b`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `9402dd118c225d0926822ddf5b4ea1399b33f5f56a11725806f56a06b4ce709b`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `9402dd118c225d0926822ddf5b4ea1399b33f5f56a11725806f56a06b4ce709b`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+
+SSpec documentization score: 94/100
+source: test/02_integration/os/hosted/hosted_web_content_session_spec.spl
+mirror: doc/06_spec/02_integration/os/hosted/hosted_web_content_session_spec.md (current)
+findings: 3 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=85 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/02_integration/os/hosted/hosted_web_content_session_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
+  why: Source tokens alone do not prove reader-visible workflow structure.
+  improve: Use supported literal step calls and regenerate the manual.
+doc/06_spec/02_integration/os/hosted/hosted_web_content_session_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/02_integration/os/hosted/hosted_web_content_session_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+<!-- sspec-maintain:scorecard:end -->

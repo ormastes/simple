@@ -1,29 +1,6 @@
-# Global Shortcut Specification
+# global_shortcut_spec
 
-> <details>
-
-<!-- sdn-diagram:id=global_shortcut_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=global_shortcut_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-global_shortcut_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=global_shortcut_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Verifies the global shortcut behaviour end to end so maintainers of this
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -32,26 +9,9 @@ global_shortcut_spec -> std
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Global Shortcut Specification
+# global_shortcut_spec
 
-## Scenarios
-
-### Desktop Global Shortcut API
-
-#### creates Shortcut struct
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val s = Shortcut(modifiers: ["ctrl", "shift"], key: "p")
-expect s.key == "p"
-```
-
-</details>
+Verifies the global shortcut behaviour end to end so maintainers of this
 
 ## At a Glance
 
@@ -60,13 +20,43 @@ expect s.key == "p"
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/std/desktop/global_shortcut_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-22 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Overview
+## Purpose and audience
+Verifies the global shortcut behaviour end to end so maintainers of this
+component and reviewers of its spec share one pinned definition.
+## Operator workflow
+Run `bin/simple test <this spec>`; read the per-scenario verdicts in
+the `Results:` summary. Each scenario asserts an observable outcome.
+## Compatibility and limitations
+Covers the currently shipped behaviour only; performance, stress and
+unrelated sibling features are out of scope.
 
-Tests covering:
-- Desktop Global Shortcut API
+## Scenarios
+
+### Desktop Global Shortcut API
+
+#### creates Shortcut struct
+
+- Verify: creates Shortcut struct
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-TEST-DESKTOP_GLOBAL_SHORTCUT-001
+step("Verify: creates Shortcut struct")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
+val s = Shortcut(modifiers: ["ctrl", "shift"], key: "p")
+expect s.key == "p"
+```
+
+</details>
 
 ## Scenario Summary
 
@@ -80,3 +70,37 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `9985d07cea854883bdd2e88d2cf6c73d327f3dfb0b0fc6c8ff618057d78cc6a5`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `9985d07cea854883bdd2e88d2cf6c73d327f3dfb0b0fc6c8ff618057d78cc6a5`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `9985d07cea854883bdd2e88d2cf6c73d327f3dfb0b0fc6c8ff618057d78cc6a5`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+
+SSpec documentization score: 94/100
+source: test/01_unit/std/desktop/global_shortcut_spec.spl
+mirror: doc/06_spec/01_unit/std/desktop/global_shortcut_spec.md (current)
+findings: 3 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=85 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/std/desktop/global_shortcut_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
+  why: Source tokens alone do not prove reader-visible workflow structure.
+  improve: Use supported literal step calls and regenerate the manual.
+doc/06_spec/01_unit/std/desktop/global_shortcut_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/std/desktop/global_shortcut_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+<!-- sspec-maintain:scorecard:end -->

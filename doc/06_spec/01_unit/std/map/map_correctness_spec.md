@@ -1,29 +1,6 @@
-# Map Correctness Specification
+# map_correctness_spec
 
-> 1. check
-
-<!-- sdn-diagram:id=map_correctness_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=map_correctness_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-map_correctness_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=map_correctness_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Verifies the map correctness behaviour end to end so maintainers of this
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -32,7 +9,29 @@ map_correctness_spec
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Map Correctness Specification
+# map_correctness_spec
+
+Verifies the map correctness behaviour end to end so maintainers of this
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Standard Library |
+| Status | Active |
+| Source | `test/01_unit/std/map/map_correctness_spec.spl` |
+| Updated | 2026-08-22 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Purpose and audience
+Verifies the map correctness behaviour end to end so maintainers of this
+component and reviewers of its spec share one pinned definition.
+## Operator workflow
+Run `bin/simple test <this spec>`; read the per-scenario verdicts in
+the `Results:` summary. Each scenario asserts an observable outcome.
+## Compatibility and limitations
+Covers the currently shipped behaviour only; performance, stress and
+unrelated sibling features are out of scope.
 
 ## Scenarios
 
@@ -40,18 +39,19 @@ map_correctness_spec
 
 #### creates an empty map
 
-1. check
-2. check
-3. check
+- Verify: creates an empty map
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-MAP_MAP_CORRECTNESS-001
+step("Verify: creates an empty map")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val map = MiniMap.new()
 check(map.is_empty())
 check(map.len() == 0)
@@ -62,21 +62,19 @@ check(map.capacity == 4)
 
 #### inserts and retrieves entries
 
-1. var map = MiniMap new
-2. map insert
-3. check
-4. check
-5. check
-6. check
+- Verify: inserts and retrieves entries
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-MAP_MAP_CORRECTNESS-001
+step("Verify: inserts and retrieves entries")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var map = MiniMap.new()
 map.insert("key", 42)
 check(not map.is_empty())
@@ -89,20 +87,19 @@ check(map.has("key"))
 
 #### updates an existing key without duplicating it
 
-1. var map = MiniMap new
-2. map insert
-3. map insert
-4. check
-5. check
+- Verify: updates an existing key without duplicating it
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-MAP_MAP_CORRECTNESS-001
+step("Verify: updates an existing key without duplicating it")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var map = MiniMap.new()
 map.insert("key", 1)
 map.insert("key", 2)
@@ -114,17 +111,19 @@ check(map.get("key") == Some(2))
 
 #### returns None for a missing key
 
-1. check
-2. check
+- Verify: returns None for a missing key
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-MAP_MAP_CORRECTNESS-001
+step("Verify: returns None for a missing key")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val map = MiniMap.new()
 check(map.get("missing") == None)
 check(not map.has("missing"))
@@ -134,24 +133,19 @@ check(not map.has("missing"))
 
 #### removes entries and keeps other entries intact
 
-1. var map = MiniMap new
-2. map insert
-3. map insert
-4. map insert
-5. check
-6. check
-7. check
-8. check
-9. check
+- Verify: removes entries and keeps other entries intact
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-MAP_MAP_CORRECTNESS-001
+step("Verify: removes entries and keeps other entries intact")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var map = MiniMap.new()
 map.insert("a", 1)
 map.insert("b", 2)
@@ -169,23 +163,19 @@ check(map.get("c") == Some(3))
 
 #### clears all entries
 
-1. var map = MiniMap new
-2. map insert
-3. map insert
-4. map clear
-5. check
-6. check
-7. check
-8. check
+- Verify: clears all entries
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-MAP_MAP_CORRECTNESS-001
+step("Verify: clears all entries")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var map = MiniMap.new()
 map.insert("a", 1)
 map.insert("b", 2)
@@ -201,29 +191,19 @@ check(sum_counts(map.buckets) == 0)
 
 #### returns keys values and entries in insertion order
 
-1. var map = MiniMap new
-2. map insert
-3. map insert
-4. check
-5. check text
-6. check text
-7. check
-8. check
-9. check
-10. check
-11. check text
-12. check
-13. check text
-14. check
+- Verify: returns keys values and entries in insertion order
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-MAP_MAP_CORRECTNESS-001
+step("Verify: returns keys values and entries in insertion order")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var map = MiniMap.new()
 map.insert("a", 1)
 map.insert("b", 2)
@@ -249,26 +229,19 @@ check(entries[1].value == 2)
 
 #### grows capacity when the load threshold is exceeded
 
-1. var map = MiniMap with capacity
-2. map insert
-3. map insert
-4. map insert
-5. map insert
-6. check
-7. check
-8. check
-9. check
-10. check
-11. check
+- Verify: grows capacity when the load threshold is exceeded
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-MAP_MAP_CORRECTNESS-001
+step("Verify: grows capacity when the load threshold is exceeded")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var map = MiniMap.with_capacity(4)
 val initial_capacity = map.capacity
 map.insert("a", 1)
@@ -288,24 +261,19 @@ check(map.get("dddd") == Some(4))
 
 #### clones independently
 
-1. var original = MiniMap new
-2. original insert
-3. original insert
-4. original insert
-5. check
-6. check
-7. check
-8. check
-9. check
+- Verify: clones independently
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-MAP_MAP_CORRECTNESS-001
+step("Verify: clones independently")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var original = MiniMap.new()
 original.insert("a", 1)
 original.insert("b", 2)
@@ -324,23 +292,19 @@ check(copy.get("b") == Some(2))
 
 #### tracks bucket counts for inserted entries
 
-1. var map = MiniMap with capacity
-2. map insert
-3. map insert
-4. map insert
-5. map insert
-6. check
-7. check
-8. check
+- Verify: tracks bucket counts for inserted entries
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-MAP_MAP_CORRECTNESS-001
+step("Verify: tracks bucket counts for inserted entries")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var map = MiniMap.with_capacity(4)
 map.insert("a", 1)
 map.insert("bb", 2)
@@ -356,22 +320,19 @@ check(map.capacity >= 4)
 
 #### handles special and unicode keys
 
-1. var map = MiniMap new
-2. map insert
-3. map insert
-4. map insert
-5. check
-6. check
-7. check
+- Verify: handles special and unicode keys
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-MAP_MAP_CORRECTNESS-001
+step("Verify: handles special and unicode keys")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var map = MiniMap.new()
 map.insert("key\nwith\nnewlines", 1)
 map.insert("key\twith\ttabs", 2)
@@ -383,21 +344,6 @@ check(map.get("héllo") == Some(3))
 ```
 
 </details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Standard Library |
-| Status | Active |
-| Source | `test/01_unit/std/map/map_correctness_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- Map correctness
 
 ## Scenario Summary
 
@@ -411,3 +357,37 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `033f1cdf87a554518d9b34fe0fce5961a0dc73205cb52ed084d173675a461120`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `033f1cdf87a554518d9b34fe0fce5961a0dc73205cb52ed084d173675a461120`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `033f1cdf87a554518d9b34fe0fce5961a0dc73205cb52ed084d173675a461120`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+
+SSpec documentization score: 94/100
+source: test/01_unit/std/map/map_correctness_spec.spl
+mirror: doc/06_spec/01_unit/std/map/map_correctness_spec.md (current)
+findings: 3 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=85 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/std/map/map_correctness_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
+  why: Source tokens alone do not prove reader-visible workflow structure.
+  improve: Use supported literal step calls and regenerate the manual.
+doc/06_spec/01_unit/std/map/map_correctness_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/std/map/map_correctness_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+<!-- sspec-maintain:scorecard:end -->

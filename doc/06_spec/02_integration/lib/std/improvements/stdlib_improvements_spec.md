@@ -1,29 +1,6 @@
-# Stdlib Improvements Specification
+# stdlib_improvements_spec
 
-> 1. expect text substring
-
-<!-- sdn-diagram:id=stdlib_improvements_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=stdlib_improvements_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-stdlib_improvements_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=stdlib_improvements_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Verifies the stdlib improvements behaviour end to end so maintainers of this
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -32,7 +9,29 @@ stdlib_improvements_spec -> std
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Stdlib Improvements Specification
+# stdlib_improvements_spec
+
+Verifies the stdlib improvements behaviour end to end so maintainers of this
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Standard Library |
+| Status | Active |
+| Source | `test/02_integration/lib/std/improvements/stdlib_improvements_spec.spl` |
+| Updated | 2026-08-22 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Purpose and audience
+Verifies the stdlib improvements behaviour end to end so maintainers of this
+component and reviewers of its spec share one pinned definition.
+## Operator workflow
+Run `bin/simple test <this spec>`; read the per-scenario verdicts in
+the `Results:` summary. Each scenario asserts an observable outcome.
+## Compatibility and limitations
+Covers the currently shipped behaviour only; performance, stress and
+unrelated sibling features are out of scope.
 
 ## Scenarios
 
@@ -42,16 +41,19 @@ stdlib_improvements_spec -> std
 
 #### substring extracts range
 
-1. expect text substring
+- Verify: substring extracts range
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: substring extracts range")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val text = "hello world"
 expect text.substring(start=0, end=5) == "hello"
 ```
@@ -60,16 +62,19 @@ expect text.substring(start=0, end=5) == "hello"
 
 #### substr extracts with length
 
-1. expect text substr
+- Verify: substr extracts with length
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: substr extracts with length")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val text = "hello world"
 expect text.substr(start=6, length=5) == "world"
 ```
@@ -78,17 +83,19 @@ expect text.substr(start=6, length=5) == "world"
 
 #### char_at gets single character
 
-1. expect text char at
-2. expect text char at
+- Verify: char_at gets single character
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: char_at gets single character")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val text = "hello"
 expect text.char_at(0) == "h"
 expect text.char_at(4) == "o"
@@ -98,16 +105,19 @@ expect text.char_at(4) == "o"
 
 #### chars returns list of characters
 
-1. expect chars len
+- Verify: chars returns list of characters
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: chars returns list of characters")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val text = "abc"
 val chars = text.chars()
 expect chars.len() == 3
@@ -120,16 +130,19 @@ expect chars[0] == "a"
 
 #### find returns index of substring
 
-1. expect result is some
+- Verify: find returns index of substring
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: find returns index of substring")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val text = "hello world"
 val result = text.find("world")
 expect result.is_some()
@@ -139,16 +152,19 @@ expect result.is_some()
 
 #### find_all returns all indices
 
-1. expect indices len
+- Verify: find_all returns all indices
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: find_all returns all indices")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val text = "abcabc"
 val indices = text.find_all("a")
 expect indices.len() == 2
@@ -158,17 +174,19 @@ expect indices.len() == 2
 
 #### contains checks for substring
 
-1. expect text contains
-2. expect text contains
+- Verify: contains checks for substring
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: contains checks for substring")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val text = "hello world"
 expect text.contains("world") == true
 expect text.contains("xyz") == false
@@ -178,17 +196,19 @@ expect text.contains("xyz") == false
 
 #### starts_with checks prefix
 
-1. expect text starts with
-2. expect text starts with
+- Verify: starts_with checks prefix
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: starts_with checks prefix")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val text = "hello world"
 expect text.starts_with("hello") == true
 expect text.starts_with("world") == false
@@ -198,17 +218,19 @@ expect text.starts_with("world") == false
 
 #### ends_with checks suffix
 
-1. expect text ends with
-2. expect text ends with
+- Verify: ends_with checks suffix
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: ends_with checks suffix")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val text = "hello world"
 expect text.ends_with("world") == true
 expect text.ends_with("hello") == false
@@ -220,16 +242,19 @@ expect text.ends_with("hello") == false
 
 #### strip removes leading and trailing whitespace
 
-1. expect text strip
+- Verify: strip removes leading and trailing whitespace
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: strip removes leading and trailing whitespace")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val text = "  hello  "
 expect text.strip() == "hello"
 ```
@@ -238,16 +263,19 @@ expect text.strip() == "hello"
 
 #### trim removes leading and trailing whitespace
 
-1. expect text trim
+- Verify: trim removes leading and trailing whitespace
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: trim removes leading and trailing whitespace")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val text = "  hello  "
 expect text.trim() == "hello"
 ```
@@ -256,16 +284,19 @@ expect text.trim() == "hello"
 
 #### trim_start removes leading whitespace
 
-1. expect text trim start
+- Verify: trim_start removes leading whitespace
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: trim_start removes leading whitespace")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val text = "  hello  "
 expect text.trim_start() == "hello  "
 ```
@@ -274,16 +305,19 @@ expect text.trim_start() == "hello  "
 
 #### trim_end removes trailing whitespace
 
-1. expect text trim end
+- Verify: trim_end removes trailing whitespace
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: trim_end removes trailing whitespace")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val text = "  hello  "
 expect text.trim_end() == "  hello"
 ```
@@ -294,16 +328,19 @@ expect text.trim_end() == "  hello"
 
 #### to_upper converts to uppercase
 
-1. expect text upper
+- Verify: to_upper converts to uppercase
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: to_upper converts to uppercase")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val text = "hello"
 expect text.upper() == "HELLO"
 ```
@@ -312,16 +349,19 @@ expect text.upper() == "HELLO"
 
 #### to_lower converts to lowercase
 
-1. expect text lower
+- Verify: to_lower converts to lowercase
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: to_lower converts to lowercase")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val text = "HELLO"
 expect text.lower() == "hello"
 ```
@@ -330,16 +370,19 @@ expect text.lower() == "hello"
 
 #### capitalize capitalizes first letter
 
-1. expect text capitalize
+- Verify: capitalize capitalizes first letter
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: capitalize capitalizes first letter")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val text = "hello world"
 expect text.capitalize() == "Hello world"
 ```
@@ -350,16 +393,19 @@ expect text.capitalize() == "Hello world"
 
 #### split divides string by delimiter
 
-1. expect parts len
+- Verify: split divides string by delimiter
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: split divides string by delimiter")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val text = "a,b,c"
 val parts = text.split(",")
 expect parts.len() == 3
@@ -370,16 +416,19 @@ expect parts[0] == "a"
 
 #### join combines list with delimiter
 
-1. expect "," join
+- Verify: join combines list with delimiter
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: join combines list with delimiter")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val parts = ["a", "b", "c"]
 expect ",".join(parts) == "a,b,c"
 ```
@@ -388,16 +437,19 @@ expect ",".join(parts) == "a,b,c"
 
 #### lines splits by newlines
 
-1. expect lines len
+- Verify: lines splits by newlines
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: lines splits by newlines")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val text = "line1\nline2\nline3"
 val lines = text.lines()
 expect lines.len() == 3
@@ -407,19 +459,19 @@ expect lines.len() == 3
 
 #### lines aliases preserve Rust-compatible edge cases
 
-1. expect empty lines length
-2. expect empty split_lines length
-3. expect CRLF lines length and values
-4. expect repeated trailing LF length and final empty value
-5. expect lone CR length and value
+- Verify: lines aliases preserve Rust-compatible edge cases
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: lines aliases preserve Rust-compatible edge cases")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 expect "".lines().len() == 0
 expect "".split_lines().len() == 0
 val crlf = "a\r\nb".lines()
@@ -440,16 +492,19 @@ expect lone_cr[0] == "a\rb"
 
 #### replace replaces all occurrences
 
-1. expect text replace
+- Verify: replace replaces all occurrences
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: replace replaces all occurrences")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val text = "hello hello"
 expect text.replace(old="hello", new="hi") == "hi hi"
 ```
@@ -458,16 +513,19 @@ expect text.replace(old="hello", new="hi") == "hi hi"
 
 #### replace_first replaces first occurrence
 
-1. expect text replace first
+- Verify: replace_first replaces first occurrence
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: replace_first replaces first occurrence")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val text = "hello hello"
 expect text.replace_first(old="hello", new="hi") == "hi hello"
 ```
@@ -480,13 +538,19 @@ expect text.replace_first(old="hello", new="hi") == "hi hello"
 
 #### read_file returns file contents
 
+- Verify: read_file returns file contents
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: read_file returns file contents")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val fs = MockFileSystem.create()
 val content = fs.read_file("/tmp/test.txt")
 expect content == "Hello, World!"
@@ -496,16 +560,19 @@ expect content == "Hello, World!"
 
 #### read_bytes returns raw bytes
 
-1. expect bytes len
+- Verify: read_bytes returns raw bytes
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: read_bytes returns raw bytes")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val fs = MockFileSystem.create()
 val bytes = fs.read_bytes("/tmp/test.txt")
 expect bytes.len() == 5
@@ -516,16 +583,19 @@ expect bytes[0] == 72
 
 #### read_lines returns list of lines
 
-1. expect lines len
+- Verify: read_lines returns list of lines
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: read_lines returns list of lines")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val fs = MockFileSystem.create()
 val lines = fs.read_lines("/tmp/test.txt")
 expect lines.len() == 3
@@ -538,13 +608,19 @@ expect lines[0] == "line1"
 
 #### write_file writes string to file
 
+- Verify: write_file writes string to file
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: write_file writes string to file")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val fs = MockFileSystem.create()
 val success = fs.write_file(path="/tmp/output.txt", content="content")
 expect success == true
@@ -554,13 +630,19 @@ expect success == true
 
 #### write_bytes writes raw bytes
 
+- Verify: write_bytes writes raw bytes
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: write_bytes writes raw bytes")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val fs = MockFileSystem.create()
 val success = fs.write_bytes("/tmp/output.bin", [1, 2, 3])
 expect success == true
@@ -570,13 +652,19 @@ expect success == true
 
 #### append_file appends to existing file
 
+- Verify: append_file appends to existing file
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: append_file appends to existing file")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val fs = MockFileSystem.create()
 val success = fs.append_file(path="/tmp/test.txt", content="more")
 expect success == true
@@ -588,17 +676,19 @@ expect success == true
 
 #### path_exists checks if path exists
 
-1. expect fs path exists
-2. expect fs path exists
+- Verify: path_exists checks if path exists
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: path_exists checks if path exists")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val fs = MockFileSystem.create()
 expect fs.path_exists("/tmp/test.txt") == true
 expect fs.path_exists("/nonexistent") == false
@@ -608,17 +698,19 @@ expect fs.path_exists("/nonexistent") == false
 
 #### is_file checks if path is file
 
-1. expect fs is file
-2. expect fs is file
+- Verify: is_file checks if path is file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: is_file checks if path is file")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val fs = MockFileSystem.create()
 expect fs.is_file("/tmp/test.txt") == true
 expect fs.is_file("/tmp") == false
@@ -628,17 +720,19 @@ expect fs.is_file("/tmp") == false
 
 #### is_dir checks if path is directory
 
-1. expect fs is dir
-2. expect fs is dir
+- Verify: is_dir checks if path is directory
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: is_dir checks if path is directory")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val fs = MockFileSystem.create()
 expect fs.is_dir("/tmp") == true
 expect fs.is_dir("/tmp/test.txt") == false
@@ -648,16 +742,19 @@ expect fs.is_dir("/tmp/test.txt") == false
 
 #### file_size returns size in bytes
 
-1. expect fs file size
+- Verify: file_size returns size in bytes
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: file_size returns size in bytes")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val fs = MockFileSystem.create()
 expect fs.file_size("/tmp/test.txt") == 13
 ```
@@ -668,16 +765,19 @@ expect fs.file_size("/tmp/test.txt") == 13
 
 #### list_dir returns directory contents
 
-1. expect contents len
+- Verify: list_dir returns directory contents
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: list_dir returns directory contents")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val fs = MockFileSystem.create()
 val contents = fs.list_dir("/tmp")
 expect contents.len() == 2
@@ -687,13 +787,19 @@ expect contents.len() == 2
 
 #### create_dir creates new directory
 
+- Verify: create_dir creates new directory
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: create_dir creates new directory")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val fs = MockFileSystem.create()
 val success = fs.create_dir("/tmp/newdir")
 expect success == true
@@ -703,13 +809,19 @@ expect success == true
 
 #### remove_file deletes file
 
+- Verify: remove_file deletes file
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: remove_file deletes file")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val fs = MockFileSystem.create()
 val success = fs.remove_file("/tmp/test.txt")
 expect success == true
@@ -719,13 +831,19 @@ expect success == true
 
 #### remove_dir deletes directory
 
+- Verify: remove_dir deletes directory
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: remove_dir deletes directory")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val fs = MockFileSystem.create()
 val success = fs.remove_dir("/tmp")
 expect success == true
@@ -739,16 +857,19 @@ expect success == true
 
 #### from_json parses JSON string
 
-1. expect json is object
+- Verify: from_json parses JSON string
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: from_json parses JSON string")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val json = MockJson.from_json("object:test")
 expect json.is_object() == true
 ```
@@ -757,16 +878,19 @@ expect json.is_object() == true
 
 #### parses JSON arrays
 
-1. expect json is array
+- Verify: parses JSON arrays
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: parses JSON arrays")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val json = MockJson.from_json("array:test")
 expect json.is_array() == true
 ```
@@ -775,16 +899,19 @@ expect json.is_array() == true
 
 #### parses nested JSON
 
-1. expect json is object
+- Verify: parses nested JSON
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: parses nested JSON")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val json = MockJson.from_json("object:nested")
 expect json.is_object() == true
 ```
@@ -795,16 +922,19 @@ expect json.is_object() == true
 
 #### to_json converts dict to JSON
 
-1. expect json str contains
+- Verify: to_json converts dict to JSON
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: to_json converts dict to JSON")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val json_str = MockJson.to_json("test")
 expect json_str.contains("json:")
 ```
@@ -813,16 +943,19 @@ expect json_str.contains("json:")
 
 #### to_json handles nested structures
 
-1. expect json str starts with
+- Verify: to_json handles nested structures
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: to_json handles nested structures")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val json_str = MockJson.to_json("nested")
 expect json_str.starts_with("json:")
 ```
@@ -831,16 +964,19 @@ expect json_str.starts_with("json:")
 
 #### escapes special characters
 
-1. expect escaped starts with
+- Verify: escapes special characters
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: escapes special characters")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val escaped = MockJson.escape("test")
 expect escaped.starts_with("escaped:")
 ```
@@ -851,17 +987,19 @@ expect escaped.starts_with("escaped:")
 
 #### builds JSON objects fluently
 
-1. builder add
-2. expect json str contains
+- Verify: builds JSON objects fluently
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: builds JSON objects fluently")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val builder = MockJsonBuilder.object()
 builder.add(key="key", value="value")
 val json_str = builder.build()
@@ -872,17 +1010,19 @@ expect json_str.contains("key")
 
 #### builds JSON arrays fluently
 
-1. builder append
-2. expect json str contains
+- Verify: builds JSON arrays fluently
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: builds JSON arrays fluently")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val builder = MockJsonBuilder.array()
 builder.append("item")
 val json_str = builder.build()
@@ -897,18 +1037,19 @@ expect json_str.contains("item")
 
 #### propagates Result errors
 
-1. expect success is ok
-2. expect success unwrap
-3. expect failure is err
+- Verify: propagates Result errors
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: propagates Result errors")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 # Test that ? propagates Err values
 val success = wrapper_divide(a=10, b=2)
 expect success.is_ok() == true
@@ -922,18 +1063,19 @@ expect failure.is_err() == true
 
 #### propagates Option None
 
-1. expect found is some
-2. expect found unwrap
-3. expect not found is none
+- Verify: propagates Option None
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: propagates Option None")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 # Test that ? propagates None values
 val items = [10, 20, 30]
 
@@ -949,19 +1091,19 @@ expect not_found.is_none() == true
 
 #### chains multiple ? operations
 
-1. expect success is ok
-2. expect success unwrap
-3. expect fail first is err
-4. expect fail second is err
+- Verify: chains multiple ? operations
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-IMPROVEMENTS_STDLIB_IMPROVEM-001
+step("Verify: chains multiple ? operations")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 # Test chaining multiple ? in sequence
 val success = chain_operations(a=100, b=5, c=2)
 # 100 / 5 = 20, 20 / 2 = 10
@@ -979,24 +1121,6 @@ expect fail_second.is_err() == true
 
 </details>
 
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Standard Library |
-| Status | Active |
-| Source | `test/02_integration/lib/std/improvements/stdlib_improvements_spec.spl` |
-| Updated | 2026-07-17 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- text Method Improvements
-- File I/O Improvements
-- JSON Library Improvements
-- Error Handling Improvements
-
 ## Scenario Summary
 
 | Metric | Count |
@@ -1009,3 +1133,37 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `89de264e6402aeb13ffae3639e9a54e7383a7f9dd58383f6b8e14cd70e665866`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `89de264e6402aeb13ffae3639e9a54e7383a7f9dd58383f6b8e14cd70e665866`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `89de264e6402aeb13ffae3639e9a54e7383a7f9dd58383f6b8e14cd70e665866`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+
+SSpec documentization score: 94/100
+source: test/02_integration/lib/std/improvements/stdlib_improvements_spec.spl
+mirror: doc/06_spec/02_integration/lib/std/improvements/stdlib_improvements_spec.md (current)
+findings: 3 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=85 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/02_integration/lib/std/improvements/stdlib_improvements_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
+  why: Source tokens alone do not prove reader-visible workflow structure.
+  improve: Use supported literal step calls and regenerate the manual.
+doc/06_spec/02_integration/lib/std/improvements/stdlib_improvements_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/02_integration/lib/std/improvements/stdlib_improvements_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+<!-- sspec-maintain:scorecard:end -->

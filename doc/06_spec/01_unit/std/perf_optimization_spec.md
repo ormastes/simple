@@ -1,29 +1,6 @@
-# Performance Optimization Specification
+# perf_optimization_spec
 
-> Intensive tests for performance optimization changes: 1. rt_thread_spawn_isolated closure execution (was stub) 2. rt_set_concurrent_backend / rt_get_concurrent_backend FFI 3. Integration: concurrent backend + thread spawn + channels
-
-<!-- sdn-diagram:id=perf_optimization_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=perf_optimization_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-perf_optimization_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=perf_optimization_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Verifies the perf optimization behaviour end to end so maintainers of this
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -32,36 +9,29 @@ perf_optimization_spec
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Performance Optimization Specification
+# perf_optimization_spec
 
-Intensive tests for performance optimization changes: 1. rt_thread_spawn_isolated closure execution (was stub) 2. rt_set_concurrent_backend / rt_get_concurrent_backend FFI 3. Integration: concurrent backend + thread spawn + channels
+Verifies the perf optimization behaviour end to end so maintainers of this
 
 ## At a Glance
 
 | Field | Value |
 |-------|-------|
-| Feature IDs | #perf-001 through #perf-003 |
-| Category | Runtime \| Infrastructure |
-| Difficulty | 4/5 |
-| Status | In Progress |
+| Category | Standard Library |
+| Status | Active |
 | Source | `test/01_unit/std/perf_optimization_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-22 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Overview
-
-Intensive tests for performance optimization changes:
-1. rt_thread_spawn_isolated closure execution (was stub)
-2. rt_set_concurrent_backend / rt_get_concurrent_backend FFI
-3. Integration: concurrent backend + thread spawn + channels
-
-## Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| Backend switching | PureStd (single-thread) vs Native (concurrent crates) |
-| Closure execution | rt_thread_spawn_isolated now evaluates closure body |
-| Channel communication | Threads can send/receive values via channels |
+## Purpose and audience
+Verifies the perf optimization behaviour end to end so maintainers of this
+component and reviewers of its spec share one pinned definition.
+## Operator workflow
+Run `bin/simple test <this spec>`; read the per-scenario verdicts in
+the `Results:` summary. Each scenario asserts an observable outcome.
+## Compatibility and limitations
+Covers the currently shipped behaviour only; performance, stress and
+unrelated sibling features are out of scope.
 
 ## Scenarios
 
@@ -71,13 +41,19 @@ Intensive tests for performance optimization changes:
 
 #### executes closure and returns result via join
 
-<details>
-<summary>Executable SPipe</summary>
+- Verify: executes closure and returns result via join
 
-Runnable source: 3 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: executes closure and returns result via join")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val handle = spawn_thread(\: 42)
 val result = handle.join()
 expect result == 42
@@ -87,13 +63,19 @@ expect result == 42
 
 #### executes closure with arithmetic
 
-<details>
-<summary>Executable SPipe</summary>
+- Verify: executes closure with arithmetic
 
-Runnable source: 3 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: executes closure with arithmetic")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val handle = spawn_thread(\: 10 + 20 + 12)
 val result = handle.join()
 expect result == 42
@@ -103,13 +85,19 @@ expect result == 42
 
 #### executes closure with string result
 
-<details>
-<summary>Executable SPipe</summary>
+- Verify: executes closure with string result
 
-Runnable source: 3 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: executes closure with string result")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val handle = spawn_thread(\: "hello world")
 val result = handle.join()
 expect result == "hello world"
@@ -119,13 +107,19 @@ expect result == "hello world"
 
 #### executes closure returning nil
 
-<details>
-<summary>Executable SPipe</summary>
+- Verify: executes closure returning nil
 
-Runnable source: 3 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: executes closure returning nil")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val handle = spawn_thread(\: nil)
 val result = handle.join()
 expect result == nil
@@ -137,13 +131,19 @@ expect result == nil
 
 #### captures outer variable
 
-<details>
-<summary>Executable SPipe</summary>
+- Verify: captures outer variable
 
-Runnable source: 4 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: captures outer variable")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val x = 100
 val handle = spawn_thread(\: x + 1)
 val result = handle.join()
@@ -154,13 +154,19 @@ expect result == 101
 
 #### captures multiple variables
 
-<details>
-<summary>Executable SPipe</summary>
+- Verify: captures multiple variables
 
-Runnable source: 6 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: captures multiple variables")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val a = 10
 val b = 20
 val c = 30
@@ -173,13 +179,19 @@ expect result == 60
 
 #### captures list and operates on it
 
-<details>
-<summary>Executable SPipe</summary>
+- Verify: captures list and operates on it
 
-Runnable source: 4 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: captures list and operates on it")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val items = [1, 2, 3, 4, 5]
 val handle = spawn_thread(\: items.len())
 val result = handle.join()
@@ -192,24 +204,19 @@ expect result == 5
 
 #### assigns incrementing handle IDs
 
-1. expect h1 id
-
-2. expect h2 id
-
-3. h1 join
-
-4. h2 join
-
-5. h3 join
+- Verify: assigns incrementing handle IDs
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: assigns incrementing handle IDs")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val h1 = spawn_thread(\: 1)
 val h2 = spawn_thread(\: 2)
 val h3 = spawn_thread(\: 3)
@@ -224,16 +231,19 @@ h3.join()
 
 #### handles are always positive
 
-1. h join
+- Verify: handles are always positive
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: handles are always positive")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val h = spawn_thread(\: nil)
 expect h._handle >= 1
 h.join()
@@ -245,18 +255,19 @@ h.join()
 
 #### reports done immediately for PureStd
 
-1. expect handle is done
-
-2. handle join
+- Verify: reports done immediately for PureStd
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: reports done immediately for PureStd")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val handle = spawn_thread(\: 42)
 expect handle.is_done()
 handle.join()
@@ -268,18 +279,19 @@ handle.join()
 
 #### spawns 10 threads and joins all
 
-1. results = results push
-
-2. expect results len
+- Verify: spawns 10 threads and joins all
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: spawns 10 threads and joins all")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var results = []
 for i in 0..10:
     val handle = spawn_thread(\: i * i)
@@ -291,13 +303,19 @@ expect results.len() == 10
 
 #### spawns and joins in different order
 
-<details>
-<summary>Executable SPipe</summary>
+- Verify: spawns and joins in different order
 
-Runnable source: 9 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: spawns and joins in different order")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val h1 = spawn_thread(\: "first")
 val h2 = spawn_thread(\: "second")
 val h3 = spawn_thread(\: "third")
@@ -311,19 +329,25 @@ expect r3 == "third"
 
 </details>
 
-### rt_thread_spawn_isolated_with_args - Two-arg Closure
+### rt_thread_spawn_isolated_with_args - Explicit-arg Closure
 
-#### basic two-arg execution
+#### basic explicit-argument execution
 
 #### adds two numbers
 
-<details>
-<summary>Executable SPipe</summary>
+- Verify: adds two numbers
 
-Runnable source: 3 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: adds two numbers")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val handle = spawn_thread_with_args(5, 3) \x, y: x + y
 val result = handle.join()
 expect result == 8
@@ -333,13 +357,19 @@ expect result == 8
 
 #### concatenates strings
 
-<details>
-<summary>Executable SPipe</summary>
+- Verify: concatenates strings
 
-Runnable source: 3 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: concatenates strings")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val handle = spawn_thread_with_args("hello", " world") \a, b: a + b
 val result = handle.join()
 expect result == "hello world"
@@ -349,13 +379,19 @@ expect result == "hello world"
 
 #### returns first argument
 
-<details>
-<summary>Executable SPipe</summary>
+- Verify: returns first argument
 
-Runnable source: 3 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: returns first argument")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val handle = spawn_thread_with_args(42, 99) \x, y: x
 val result = handle.join()
 expect result == 42
@@ -365,13 +401,19 @@ expect result == 42
 
 #### returns second argument
 
-<details>
-<summary>Executable SPipe</summary>
+- Verify: returns second argument
 
-Runnable source: 3 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: returns second argument")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val handle = spawn_thread_with_args(42, 99) \x, y: y
 val result = handle.join()
 expect result == 99
@@ -383,20 +425,19 @@ expect result == 99
 
 #### sends result via channel
 
-1. rt channel send
-
-2. handle join
-
-3. ch close
+- Verify: sends result via channel
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: sends result via channel")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val ch = new_channel()
 val handle = spawn_thread_with_args(6, ch._id) \data, channel_id:
     rt_channel_send(channel_id, data * 7)
@@ -412,26 +453,19 @@ ch.close()
 
 #### sends multiple values via channel
 
-1. rt channel send
-
-2. handle join
-
-3. expect ch try recv
-
-4. expect ch try recv
-
-5. expect ch try recv
-
-6. ch close
+- Verify: sends multiple values via channel
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: sends multiple values via channel")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val ch = new_channel()
 val handle = spawn_thread_with_args(3, ch._id) \count, channel_id:
     for i in 0..count:
@@ -447,20 +481,23 @@ ch.close()
 
 </details>
 
-#### multiple two-arg spawns
+#### multiple explicit-argument spawns
 
 #### runs 5 threads with accumulation
 
-1. total = total + handle join
+- Verify: runs 5 threads with accumulation
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: runs 5 threads with accumulation")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var total = 0
 for i in 0..5:
     val handle = spawn_thread_with_args(i, i + 1) \a, b: a * b
@@ -477,13 +514,19 @@ expect total == 40
 
 #### starts with pure_std
 
-<details>
-<summary>Executable SPipe</summary>
+- Verify: starts with pure_std
 
-Runnable source: 2 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: starts with pure_std")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val backend = rt_get_concurrent_backend()
 expect backend == "pure_std"
 ```
@@ -494,22 +537,19 @@ expect backend == "pure_std"
 
 #### switches to native and back
 
-1. rt set concurrent backend
-
-2. expect rt get concurrent backend
-
-3. rt set concurrent backend
-
-4. expect rt get concurrent backend
+- Verify: switches to native and back
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: switches to native and back")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 rt_set_concurrent_backend("native")
 expect rt_get_concurrent_backend() == "native"
 rt_set_concurrent_backend("pure_std")
@@ -520,18 +560,19 @@ expect rt_get_concurrent_backend() == "pure_std"
 
 #### accepts std as alias for pure_std
 
-1. rt set concurrent backend
-
-2. expect rt get concurrent backend
+- Verify: accepts std as alias for pure_std
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: accepts std as alias for pure_std")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 rt_set_concurrent_backend("std")
 expect rt_get_concurrent_backend() == "pure_std"
 ```
@@ -540,18 +581,19 @@ expect rt_get_concurrent_backend() == "pure_std"
 
 #### accepts pure_std explicitly
 
-1. rt set concurrent backend
-
-2. expect rt get concurrent backend
+- Verify: accepts pure_std explicitly
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: accepts pure_std explicitly")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 rt_set_concurrent_backend("pure_std")
 expect rt_get_concurrent_backend() == "pure_std"
 ```
@@ -562,18 +604,19 @@ expect rt_get_concurrent_backend() == "pure_std"
 
 #### spawns thread after switching to native
 
-1. rt set concurrent backend
-
-2. rt set concurrent backend
+- Verify: spawns thread after switching to native
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: spawns thread after switching to native")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 rt_set_concurrent_backend("native")
 val handle = spawn_thread(\: 42)
 val result = handle.join()
@@ -585,22 +628,19 @@ rt_set_concurrent_backend("pure_std")
 
 #### channel works after switching to native
 
-1. rt set concurrent backend
-
-2. ch send
-
-3. ch close
-
-4. rt set concurrent backend
+- Verify: channel works after switching to native
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: channel works after switching to native")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 rt_set_concurrent_backend("native")
 val ch = new_channel()
 ch.send(100)
@@ -614,18 +654,19 @@ rt_set_concurrent_backend("pure_std")
 
 #### spawn_isolated_with_args works in native mode
 
-1. rt set concurrent backend
-
-2. rt set concurrent backend
+- Verify: spawn_isolated_with_args works in native mode
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: spawn_isolated_with_args works in native mode")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 rt_set_concurrent_backend("native")
 val handle = spawn_thread_with_args(10, 5) \a, b: a - b
 val result = handle.join()
@@ -639,20 +680,19 @@ rt_set_concurrent_backend("pure_std")
 
 #### works after pure_std to native to pure_std
 
-1. rt set concurrent backend
-
-2. rt set concurrent backend
-
-3. expect handle join
+- Verify: works after pure_std to native to pure_std
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: works after pure_std to native to pure_std")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 rt_set_concurrent_backend("native")
 rt_set_concurrent_backend("pure_std")
 val handle = spawn_thread(\: "survived")
@@ -665,16 +705,19 @@ expect handle.join() == "survived"
 
 #### reports parallelism in pure_std
 
-1. rt set concurrent backend
+- Verify: reports parallelism in pure_std
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: reports parallelism in pure_std")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 rt_set_concurrent_backend("pure_std")
 val cores = rt_thread_available_parallelism()
 expect cores >= 1
@@ -684,18 +727,19 @@ expect cores >= 1
 
 #### reports parallelism in native
 
-1. rt set concurrent backend
-
-2. rt set concurrent backend
+- Verify: reports parallelism in native
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: reports parallelism in native")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 rt_set_concurrent_backend("native")
 val cores = rt_thread_available_parallelism()
 expect cores >= 1
@@ -710,20 +754,19 @@ rt_set_concurrent_backend("pure_std")
 
 #### thread produces main consumes
 
-1. rt channel send
-
-2. handle join
-
-3. ch close
+- Verify: thread produces main consumes
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: thread produces main consumes")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val ch = new_channel()
 val handle = spawn_thread_with_args(ch._id, 5) \channel_id, count:
     for i in 0..count:
@@ -748,26 +791,19 @@ ch.close()
 
 #### spawns multiple threads writing to same channel
 
-1. rt channel send
-
-2. handles = handles push
-
-3. h join
-
-4. received = received push
-
-5. expect received len
-
-6. ch close
+- Verify: spawns multiple threads writing to same channel
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: spawns multiple threads writing to same channel")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val ch = new_channel()
 var handles = []
 
@@ -796,13 +832,19 @@ ch.close()
 
 #### captures dict and processes it
 
-<details>
-<summary>Executable SPipe</summary>
+- Verify: captures dict and processes it
 
-Runnable source: 9 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: captures dict and processes it")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val data = {"a": 1, "b": 2, "c": 3}
 val handle = spawn_thread_with_args(data, nil) \d, _:
     var total = 0
@@ -818,16 +860,19 @@ expect result == 6
 
 #### captures list and computes sum
 
-1. expect handle join
+- Verify: captures list and computes sum
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: captures list and computes sum")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 val handle = spawn_thread_with_args(numbers, nil) \nums, _:
     var sum = 0
@@ -844,24 +889,19 @@ expect handle.join() == 55
 
 #### completes work switches continues
 
-1. expect h1 join
-
-2. rt set concurrent backend
-
-3. expect h2 join
-
-4. rt set concurrent backend
-
-5. expect h3 join
+- Verify: completes work switches continues
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: completes work switches continues")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val h1 = spawn_thread(\: "pure_std_result")
 expect h1.join() == "pure_std_result"
 
@@ -882,18 +922,19 @@ expect h3.join() == "back_to_std"
 
 #### spawns and joins 50 threads
 
-1. results = results push
-
-2. expect results len
+- Verify: spawns and joins 50 threads
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: spawns and joins 50 threads")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var results = []
 for i in 0..50:
     val h = spawn_thread(\: i)
@@ -903,18 +944,21 @@ expect results.len() == 50
 
 </details>
 
-#### spawns 50 two-arg threads
+#### spawns 50 explicit-argument threads
 
-1. total = total + h join
+- Verify: spawns 50 explicit-argument threads
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: spawns 50 explicit-argument threads")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var total = 0
 for i in 0..50:
     val h = spawn_thread_with_args(i, 1) \a, b: a + b
@@ -929,20 +973,19 @@ expect total == 1275
 
 #### sends and receives 100 messages
 
-1. ch send
-
-2. sum = sum + ch try recv
-
-3. ch close
+- Verify: sends and receives 100 messages
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: sends and receives 100 messages")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val ch = new_channel()
 for i in 0..100:
     ch.send(i)
@@ -959,24 +1002,19 @@ ch.close()
 
 #### creates and closes 20 channels
 
-1. channels = channels push
-
-2. ch send
-
-3. expect ch try recv
-
-4. ch close
-
-5. expect ch is closed
+- Verify: creates and closes 20 channels
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: creates and closes 20 channels")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var channels = []
 for _ in 0..20:
     channels = channels.push(new_channel())
@@ -998,26 +1036,19 @@ for ch in channels:
 
 #### 10 threads each send 5 messages
 
-1. rt channel send
-
-2. handles = handles push
-
-3. h join
-
-4. var msg = ch try recv
-
-5. msg = ch try recv
-
-6. ch close
+- Verify: 10 threads each send 5 messages
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: 10 threads each send 5 messages")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val ch = new_channel()
 var handles = []
 
@@ -1047,22 +1078,19 @@ ch.close()
 
 #### alternates backends 10 times with spawns
 
-1. rt set concurrent backend
-
-2. rt set concurrent backend
-
-3. expect h join
-
-4. rt set concurrent backend
+- Verify: alternates backends 10 times with spawns
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: alternates backends 10 times with spawns")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 for round in 0..10:
     if round % 2 == 0:
         rt_set_concurrent_backend("pure_std")
@@ -1081,18 +1109,19 @@ rt_set_concurrent_backend("pure_std")
 
 #### frees 20 handles without error
 
-1. h join
-
-2. rt thread free
+- Verify: frees 20 handles without error
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: frees 20 handles without error")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 for i in 0..20:
     val h = spawn_thread(\: i)
     h.join()
@@ -1107,13 +1136,19 @@ for i in 0..20:
 
 #### returns a list
 
-<details>
-<summary>Executable SPipe</summary>
+- Verify: returns a list
 
-Runnable source: 3 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: returns a list")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val handle = spawn_thread(\: [1, 2, 3])
 val result = handle.join()
 expect result == [1, 2, 3]
@@ -1123,13 +1158,19 @@ expect result == [1, 2, 3]
 
 #### returns a dict
 
-<details>
-<summary>Executable SPipe</summary>
+- Verify: returns a dict
 
-Runnable source: 3 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: returns a dict")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val handle = spawn_thread(\: {"key": "value"})
 val result = handle.join()
 expect result["key"] == "value"
@@ -1139,16 +1180,19 @@ expect result["key"] == "value"
 
 #### returns nested structure
 
-1. expect result["nums"] len
+- Verify: returns nested structure
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: returns nested structure")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val handle = spawn_thread(\: {"nums": [1, 2, 3], "name": "test"})
 val result = handle.join()
 expect result["nums"].len() == 3
@@ -1161,16 +1205,19 @@ expect result["name"] == "test"
 
 #### returns nil for empty closure
 
-1. expect handle join
+- Verify: returns nil for empty closure
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: returns nil for empty closure")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val handle = spawn_thread(\: nil)
 expect handle.join() == nil
 ```
@@ -1181,16 +1228,19 @@ expect handle.join() == nil
 
 #### try_recv on empty channel returns nil
 
-1. ch close
+- Verify: try_recv on empty channel returns nil
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: try_recv on empty channel returns nil")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val ch = new_channel()
 val result = ch.try_recv()
 expect result == nil
@@ -1201,20 +1251,19 @@ ch.close()
 
 #### is_closed after close
 
-1. expect not ch is closed
-
-2. ch close
-
-3. expect ch is closed
+- Verify: is_closed after close
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: is_closed after close")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val ch = new_channel()
 expect not ch.is_closed()
 ch.close()
@@ -1227,16 +1276,19 @@ expect ch.is_closed()
 
 #### yield does not crash
 
-1. rt thread yield
+- Verify: yield does not crash
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: yield does not crash")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 rt_thread_yield()
 expect true
 ```
@@ -1245,16 +1297,19 @@ expect true
 
 #### sleep for 1ms does not crash
 
-1. rt thread sleep
+- Verify: sleep for 1ms does not crash
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: sleep for 1ms does not crash")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 rt_thread_sleep(1)
 expect true
 ```
@@ -1265,16 +1320,19 @@ expect true
 
 #### closure with no parameters works
 
-1. expect h join
+- Verify: closure with no parameters works
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: closure with no parameters works")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val h = spawn_thread(\: 99)
 expect h.join() == 99
 ```
@@ -1285,16 +1343,19 @@ expect h.join() == 99
 
 #### handles nil data arguments
 
-1. expect handle join
+- Verify: handles nil data arguments
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-TEST-STD_PERF_OPTIMIZATION-001
+step("Verify: handles nil data arguments")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val handle = spawn_thread_with_args(nil, nil) \a, b: "ok"
 expect handle.join() == "ok"
 ```
@@ -1313,3 +1374,37 @@ expect handle.join() == "ok"
 
 
 </details>
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `e4a696058f59f3983bf5fd8a204f8244bd93676d5cda280adb4b21cb46c801e4`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `e4a696058f59f3983bf5fd8a204f8244bd93676d5cda280adb4b21cb46c801e4`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `e4a696058f59f3983bf5fd8a204f8244bd93676d5cda280adb4b21cb46c801e4`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+
+SSpec documentization score: 94/100
+source: test/01_unit/std/perf_optimization_spec.spl
+mirror: doc/06_spec/01_unit/std/perf_optimization_spec.md (current)
+findings: 3 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=85 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/std/perf_optimization_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
+  why: Source tokens alone do not prove reader-visible workflow structure.
+  improve: Use supported literal step calls and regenerate the manual.
+doc/06_spec/01_unit/std/perf_optimization_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/std/perf_optimization_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,29 +1,6 @@
-# Database Query Specification
+# database_query_spec
 
-> <details>
-
-<!-- sdn-diagram:id=database_query_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=database_query_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-database_query_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=database_query_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Verifies the database query behaviour end to end so maintainers of this
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -32,7 +9,29 @@ database_query_spec -> std
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Database Query Specification
+# database_query_spec
+
+Verifies the database query behaviour end to end so maintainers of this
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Standard Library |
+| Status | Active |
+| Source | `test/02_integration/lib/database_query_spec.spl` |
+| Updated | 2026-08-22 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Purpose and audience
+Verifies the database query behaviour end to end so maintainers of this
+component and reviewers of its spec share one pinned definition.
+## Operator workflow
+Run `bin/simple test <this spec>`; read the per-scenario verdicts in
+the `Results:` summary. Each scenario asserts an observable outcome.
+## Compatibility and limitations
+Covers the currently shipped behaviour only; performance, stress and
+unrelated sibling features are out of scope.
 
 ## Scenarios
 
@@ -43,34 +42,19 @@ database_query_spec -> std
 
 #### filters rows by equality _(slow)_
 
-1. var table = SdnTable
-
-2. var row = SdnRow
-
-3. row set
-
-4. row set
-
-5. row set
-
-6. table add row
-
-7. var query = QueryBuilder for table
-
-8. var filtered = query filter by
-
-9. check
-
-10. check
+- Verify: filters rows by equality
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-LIB_DATABASE_QUERY-001
+step("Verify: filters rows by equality")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 # Create test table
 var table = SdnTable(name: "users", columns: ["id", "name", "age"], rows: [], index: {})
 
@@ -101,36 +85,19 @@ check(results[0].get("name")? == "user_2")
 
 #### filters rows by comparison operators _(slow)_
 
-1. var table = SdnTable
-
-2. var row = SdnRow
-
-3. row set
-
-4. row set
-
-5. table add row
-
-6. var query gt = QueryBuilder for table
-
-7. var filtered gt = query gt filter by
-
-8. check
-
-9. var query lt = QueryBuilder for table
-
-10. var filtered lt = query lt filter by
-
-11. check
+- Verify: filters rows by comparison operators
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-LIB_DATABASE_QUERY-001
+step("Verify: filters rows by comparison operators")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var table = SdnTable(name: "items", columns: ["id", "price"], rows: [], index: {})
 
 # Add items with different prices
@@ -167,40 +134,19 @@ check(results_lt.len() == 3)
 
 #### filters rows by contains operator _(slow)_
 
-1. var table = SdnTable
-
-2. 
-
-3. 
-
-4. 
-
-5. 
-
-6. var row = SdnRow
-
-7. row set
-
-8. row set
-
-9. table add row
-
-10. var query = QueryBuilder for table
-
-11. var filtered = query filter by
-
-12. check
-
-13. check
+- Verify: filters rows by contains operator
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-LIB_DATABASE_QUERY-001
+step("Verify: filters rows by contains operator")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var table = SdnTable(name: "files", columns: ["path", "extension"], rows: [], index: {})
 
 # Add files
@@ -237,32 +183,19 @@ check(first_path.contains("src"))
 
 #### filters with in operator _(slow)_
 
-1. var table = SdnTable
-
-2. var row = SdnRow
-
-3. row set
-
-4. row set
-
-5. table add row
-
-6. var query = QueryBuilder for table
-
-7. var filtered = query filter in
-
-8. check
-
-9. check
+- Verify: filters with in operator
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-LIB_DATABASE_QUERY-001
+step("Verify: filters with in operator")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var table = SdnTable(name: "issues", columns: ["id", "status"], rows: [], index: {})
 val statuses = ["Open", "Closed", "Open", "Pending", "Closed"]
 for idx in 0..statuses.len():
@@ -289,44 +222,19 @@ check(results[0].get("status")? != "Pending")
 
 #### chains multiple filters _(slow)_
 
-1. var table = SdnTable
-
-2. 
-
-3. 
-
-4. 
-
-5. 
-
-6. 
-
-7. var row = SdnRow
-
-8. row set
-
-9. row set
-
-10. row set
-
-11. table add row
-
-12. var query = QueryBuilder for table
-
-13. var step1 = query filter by
-
-14. var step2 = step1 filter by
-
-15. check
+- Verify: chains multiple filters
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-LIB_DATABASE_QUERY-001
+step("Verify: chains multiple filters")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var table = SdnTable(name: "products", columns: ["name", "category", "price"], rows: [], index: {})
 
 # Add products
@@ -370,32 +278,19 @@ check(results.len() >= 2)
 
 #### filters only valid rows _(slow)_
 
-1. var table = SdnTable
-
-2. var row = SdnRow
-
-3. row set
-
-4. row set
-
-5. row set
-
-6. table add row
-
-7. var query = QueryBuilder for table
-
-8. var valid query = query only valid
-
-9. check
+- Verify: filters only valid rows
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-LIB_DATABASE_QUERY-001
+step("Verify: filters only valid rows")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var table = SdnTable(name: "data", columns: ["id", "value", "valid"], rows: [], index: {})
 
 # Add rows (some invalid)
@@ -426,30 +321,19 @@ check(results.len() == 3)
 
 #### filters rows by prefix and suffix _(slow)_
 
-1. var table = SdnTable
-
-2. var row = SdnRow
-
-3. row set
-
-4. table add row
-
-5. var prefix query = QueryBuilder for table
-
-6. check
-
-7. var suffix query = QueryBuilder for table
-
-8. check
+- Verify: filters rows by prefix and suffix
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-LIB_DATABASE_QUERY-001
+step("Verify: filters rows by prefix and suffix")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var table = SdnTable(name: "paths", columns: ["path"], rows: [], index: {})
 val paths = ["src/main.spl", "src/test.txt", "doc/readme.md", "main.spl"]
 for path in paths:
@@ -476,38 +360,19 @@ check(suffix_results.len() == 2)
 
 #### preserves query matches across batch boundaries _(slow)_
 
-1. var table = SdnTable
-
-2. var row = SdnRow
-
-3. row set
-
-4. row set
-
-5. row set
-
-6. row set
-
-7. row set
-
-8. table add row
-
-9.  filter by
-
-10.  filter by
-
-11.  execute
-
-12. check
+- Verify: preserves query matches across batch boundaries
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-LIB_DATABASE_QUERY-001
+step("Verify: preserves query matches across batch boundaries")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var table = SdnTable(name: "batch_paths", columns: ["id", "path", "valid"], rows: [], index: {})
 for idx in 0..130:
     var row = SdnRow(fields: {})
@@ -538,30 +403,19 @@ check(results.len() == 3)
 
 #### orders results ascending _(slow)_
 
-1. var table = SdnTable
-
-2. var row = SdnRow
-
-3. row set
-
-4. row set
-
-5. table add row
-
-6. check
-
-7. check
-
-8. check
+- Verify: orders results ascending
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-LIB_DATABASE_QUERY-001
+step("Verify: orders results ascending")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var table = SdnTable(name: "scores", columns: ["id", "score"], rows: [], index: {})
 val scores = [("a", "30"), ("b", "10"), ("c", "20")]
 for score in scores:
@@ -586,30 +440,19 @@ check(results[2].get("score")? == "30")
 
 #### orders results descending _(slow)_
 
-1. var table = SdnTable
-
-2. var row = SdnRow
-
-3. row set
-
-4. row set
-
-5. table add row
-
-6. check
-
-7. check
-
-8. check
+- Verify: orders results descending
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-LIB_DATABASE_QUERY-001
+step("Verify: orders results descending")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var table = SdnTable(name: "scores", columns: ["id", "score"], rows: [], index: {})
 val scores = [("a", "30"), ("b", "10"), ("c", "20")]
 for score in scores:
@@ -634,28 +477,19 @@ check(results[2].get("score")? == "10")
 
 #### limits number of results _(slow)_
 
-1. var table = SdnTable
-
-2. var row = SdnRow
-
-3. row set
-
-4. table add row
-
-5. check
-
-6. check
-
-7. check
+- Verify: limits number of results
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-LIB_DATABASE_QUERY-001
+step("Verify: limits number of results")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var table = SdnTable(name: "numbers", columns: ["id"], rows: [], index: {})
 for i in 0..5:
     var row = SdnRow(fields: {})
@@ -678,38 +512,19 @@ check(results[1].get("id")? == "1")
 
 #### combines filter, order, and limit _(slow)_
 
-1. var table = SdnTable
-
-2. var row = SdnRow
-
-3. row set
-
-4. row set
-
-5. table add row
-
-6.  filter by
-
-7.  order by
-
-8.  take
-
-9.  execute
-
-10. check
-
-11. check
-
-12. check
+- Verify: combines filter, order, and limit
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-LIB_DATABASE_QUERY-001
+step("Verify: combines filter, order, and limit")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 var table = SdnTable(name: "items", columns: ["id", "kind"], rows: [], index: {})
 val items = [("4", "c"), ("1", "b"), ("3", "b"), ("2", "a")]
 for item in items:
@@ -739,18 +554,19 @@ check(results[1].get("id")? == "3")
 
 #### returns empty for empty table _(slow)_
 
-1. var query = QueryBuilder for table
-
-2. check
+- Verify: returns empty for empty table
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-LIB_DATABASE_QUERY-001
+step("Verify: returns empty for empty table")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val table = SdnTable(name: "empty", columns: ["id"], rows: [], index: {})
 
 var query = QueryBuilder.for_table(table)
@@ -764,21 +580,6 @@ check(results.len() == 0)
 
 </details>
 
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Standard Library |
-| Status | Active |
-| Source | `test/02_integration/lib/database_query_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- QueryBuilder
-
 ## Scenario Summary
 
 | Metric | Count |
@@ -791,3 +592,37 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `5f0eb544a865bfb3de61ffb9b1111b56d552b1f072ee6e7656e91583854b3c6b`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `5f0eb544a865bfb3de61ffb9b1111b56d552b1f072ee6e7656e91583854b3c6b`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `5f0eb544a865bfb3de61ffb9b1111b56d552b1f072ee6e7656e91583854b3c6b`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+
+SSpec documentization score: 94/100
+source: test/02_integration/lib/database_query_spec.spl
+mirror: doc/06_spec/02_integration/lib/database_query_spec.md (current)
+findings: 3 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=85 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/02_integration/lib/database_query_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
+  why: Source tokens alone do not prove reader-visible workflow structure.
+  improve: Use supported literal step calls and regenerate the manual.
+doc/06_spec/02_integration/lib/database_query_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/02_integration/lib/database_query_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+<!-- sspec-maintain:scorecard:end -->

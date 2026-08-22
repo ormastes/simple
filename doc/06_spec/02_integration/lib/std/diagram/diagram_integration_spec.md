@@ -1,29 +1,6 @@
-# Diagram Integration Specification
+# diagram_integration_spec
 
-> 1. rec record call
-
-<!-- sdn-diagram:id=diagram_integration_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=diagram_integration_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-diagram_integration_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=diagram_integration_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Verifies the diagram integration behaviour end to end so maintainers of this
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -32,7 +9,29 @@ diagram_integration_spec -> std
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Diagram Integration Specification
+# diagram_integration_spec
+
+Verifies the diagram integration behaviour end to end so maintainers of this
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Standard Library |
+| Status | Active |
+| Source | `test/02_integration/lib/std/diagram/diagram_integration_spec.spl` |
+| Updated | 2026-08-22 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Purpose and audience
+Verifies the diagram integration behaviour end to end so maintainers of this
+component and reviewers of its spec share one pinned definition.
+## Operator workflow
+Run `bin/simple test <this spec>`; read the per-scenario verdicts in
+the `Results:` summary. Each scenario asserts an observable outcome.
+## Compatibility and limitations
+Covers the currently shipped behaviour only; performance, stress and
+unrelated sibling features are out of scope.
 
 ## Scenarios
 
@@ -42,23 +41,19 @@ diagram_integration_spec -> std
 
 #### should generate diagram from method calls
 
-1. rec record call
-2. rec record call
-3. rec record return
-4. rec record return
-5. expect output contains
-6. expect output contains
-7. expect output contains
-8. expect output contains
+- Verify: should generate diagram from method calls
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-DIAGRAM_DIAGRAM_INTEGRATION-001
+step("Verify: should generate diagram from method calls")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val rec = CallEventRecorder.new("auth_test")
 
 rec.record_call("authenticate", Some("UserService"), ["admin", "***"], CallType.Method)
@@ -79,18 +74,19 @@ expect output.contains("validate_credentials") == true
 
 #### should include timing and return values
 
-1. rec record call
-2. rec record return
-3. expect output contains
+- Verify: should include timing and return values
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-DIAGRAM_DIAGRAM_INTEGRATION-001
+step("Verify: should include timing and return values")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val rec = CallEventRecorder.new("timing_test")
 
 rec.record_call("process", Some("Handler"), ["data"], CallType.Method)
@@ -108,21 +104,19 @@ expect output.contains("Result(42)") == true
 
 #### should extract classes from calls
 
-1. rec record call
-2. rec record call
-3. rec record call
-4. expect output contains
-5. expect output contains
-6. expect output contains
+- Verify: should extract classes from calls
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-DIAGRAM_DIAGRAM_INTEGRATION-001
+step("Verify: should extract classes from calls")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val rec = CallEventRecorder.new("class_test")
 
 rec.record_call("methodA", Some("ClassA"), [], CallType.Method)
@@ -141,18 +135,19 @@ expect output.contains("class ClassB") == true
 
 #### should show relationships
 
-1. rec record call
-2. rec record call
-3. expect output contains
+- Verify: should show relationships
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-DIAGRAM_DIAGRAM_INTEGRATION-001
+step("Verify: should show relationships")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val rec = CallEventRecorder.new("rel_test")
 
 rec.record_call("handleRequest", Some("Controller"), [], CallType.Method)
@@ -170,23 +165,19 @@ expect output.contains("Controller --> Service") == true
 
 #### should show only architectural entities
 
-1. rec mark architectural
-2. rec mark architectural
-3. rec record call
-4. rec record call
-5. rec record call
-6. expect output contains
-7. expect output contains
-8. expect output contains
+- Verify: should show only architectural entities
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-DIAGRAM_DIAGRAM_INTEGRATION-001
+step("Verify: should show only architectural entities")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val rec = CallEventRecorder.new("arch_test")
 
 rec.mark_architectural("UserService")
@@ -208,19 +199,19 @@ expect output.contains("AuthService") == true
 
 #### should treat packages as architectural by default
 
-1. rec record call
-2. rec record call
-3. expect output contains
-4. expect output contains
+- Verify: should treat packages as architectural by default
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-DIAGRAM_DIAGRAM_INTEGRATION-001
+step("Verify: should treat packages as architectural by default")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val rec = CallEventRecorder.new("pkg_test")
 
 rec.record_call("method", Some("app.services.UserService"), [], CallType.Method)
@@ -239,23 +230,19 @@ expect output.contains("app") == true
 
 #### should apply include filter across diagrams
 
-1. rec record call
-2. rec record call
-3. rec record call
-4.  with sequence
-5.  with include
-6. expect output contains
-7. expect output contains
-8. expect output contains
+- Verify: should apply include filter across diagrams
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-DIAGRAM_DIAGRAM_INTEGRATION-001
+step("Verify: should apply include filter across diagrams")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val rec = CallEventRecorder.new("filter_test")
 
 rec.record_call("m", Some("UserService"), [], CallType.Method)
@@ -277,21 +264,19 @@ expect output.contains("DebugHelper") == false
 
 #### should apply exclude filter
 
-1. rec record call
-2. rec record call
-3.  with sequence
-4.  with exclude
-5. expect output contains
-6. expect output contains
+- Verify: should apply exclude filter
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-DIAGRAM_DIAGRAM_INTEGRATION-001
+step("Verify: should apply exclude filter")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val rec = CallEventRecorder.new("exclude_test")
 
 rec.record_call("m", Some("UserService"), [], CallType.Method)
@@ -313,24 +298,19 @@ expect output.contains("InternalHelper") == false
 
 #### should generate all diagrams from same recording
 
-1. rec mark architectural
-2. rec mark architectural
-3. rec record call
-4. rec record call
-5. rec record return
-6. rec record return
-7. expect seq contains
-8. expect cls contains
-9. expect arch contains
+- Verify: should generate all diagrams from same recording
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-DIAGRAM_DIAGRAM_INTEGRATION-001
+step("Verify: should generate all diagrams from same recording")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val rec = CallEventRecorder.new("all_test")
 
 rec.mark_architectural("Controller")
@@ -364,21 +344,19 @@ expect arch.contains("flowchart TD") == true
 
 #### should record traced calls
 
-1. diagram set recorder
-2. trace method
-3. trace return
-4. expect events len
-5. expect events[0] callee class == Some
-6. diagram clear recorder
+- Verify: should record traced calls
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-DIAGRAM_DIAGRAM_INTEGRATION-001
+step("Verify: should record traced calls")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val rec = CallEventRecorder.new("trace_test")
 diagram.set_recorder(rec)
 
@@ -397,22 +375,19 @@ diagram.clear_recorder()
 
 #### should track architectural entities
 
-1. diagram set recorder
-2. mark architectural
-3. mark architectural
-4. expect rec is architectural
-5. expect rec is architectural
-6. expect rec is architectural
-7. diagram clear recorder
+- Verify: should track architectural entities
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-DIAGRAM_DIAGRAM_INTEGRATION-001
+step("Verify: should track architectural entities")
+# evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
 val rec = CallEventRecorder.new("arch_trace_test")
 diagram.set_recorder(rec)
 
@@ -428,22 +403,6 @@ diagram.clear_recorder()
 
 </details>
 
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Standard Library |
-| Status | Active |
-| Source | `test/02_integration/lib/std/diagram/diagram_integration_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- Diagram Integration
-- Diagram Tracing API
-
 ## Scenario Summary
 
 | Metric | Count |
@@ -456,3 +415,55 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `1e6e1386040371383656483abd62a1b567c05be3030bc10c5e4dccf2d0e40327`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `1e6e1386040371383656483abd62a1b567c05be3030bc10c5e4dccf2d0e40327`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `1e6e1386040371383656483abd62a1b567c05be3030bc10c5e4dccf2d0e40327`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
+
+SSpec documentization score: 90/100
+source: test/02_integration/lib/std/diagram/diagram_integration_spec.spl
+mirror: doc/06_spec/02_integration/lib/std/diagram/diagram_integration_spec.md (current)
+findings: 9 blockers: 0
+  narrative=100 structure=70 oracle=100
+  traceability=100 evidence=85 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/02_integration/lib/std/diagram/diagram_integration_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
+  why: Source tokens alone do not prove reader-visible workflow structure.
+  improve: Use supported literal step calls and regenerate the manual.
+doc/06_spec/02_integration/lib/std/diagram/diagram_integration_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/02_integration/lib/std/diagram/diagram_integration_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/02_integration/lib/std/diagram/diagram_integration_spec.spl:50:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should generate diagram from method calls' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/02_integration/lib/std/diagram/diagram_integration_spec.spl:69:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should include timing and return values' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/02_integration/lib/std/diagram/diagram_integration_spec.spl:84:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should extract classes from calls' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/02_integration/lib/std/diagram/diagram_integration_spec.spl:101:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should show relationships' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/02_integration/lib/std/diagram/diagram_integration_spec.spl:116:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should show only architectural entities' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/02_integration/lib/std/diagram/diagram_integration_spec.spl:136:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should treat packages as architectural by default' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

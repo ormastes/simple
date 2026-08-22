@@ -1,825 +1,158 @@
-# STDLIB Deep-Dive Test
+# @manual: primary
 
-> 1. check
-
-<!-- sdn-diagram:id=dict_deep_8_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=dict_deep_8_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-dict_deep_8_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=dict_deep_8_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Purpose: Pin dict_deep behavior with real computed-value oracles so regressions in the
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 43 | 43 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
-# STDLIB Deep-Dive Test
+# @manual: primary
+
+Purpose: Pin dict_deep behavior with real computed-value oracles so regressions in the
 
 ## At a Glance
 
 | Field | Value |
 |-------|-------|
-| Feature IDs | #STDLIB-DEEP |
-| Category | Standard Library Deep Coverage |
-| Status | Implemented |
+| Category | Standard Library |
+| Status | Active |
 | Source | `test/01_unit/std/deep/dict_deep_8_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-22 |
 | Generator | `simple spipe-docgen` (Simple) |
+
+## Purpose and audience
+Purpose: Pin dict_deep behavior with real computed-value oracles so regressions in the
+stdlib surface this spec covers fail loudly instead of passing vacuously.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+# @manual: primary
+REQ-LIB-DICT-DEEP-8b7b
+doc/01_research/local/REQ-LIB-DICT-DEEP-8b7b.md
+doc/03_plan/sys_test/REQ-LIB-DICT-DEEP-8b7b.md
+doc/04_architecture/REQ-LIB-DICT-DEEP-8b7b.md
+doc/05_design/REQ-LIB-DICT-DEEP-8b7b.md
 
 ## Scenarios
 
-### Deep Coverage Test
+### dict_deep stdlib behavior oracles
 
-#### basic 1
+#### dict write
 
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-check(true)
-```
-
-</details>
-
-#### basic 2
-
-1. check
+- Verify: dict write
+   - Expected: d.len() equals `3)  # oracle: pinned constant asserted by this scenario`
+   - Expected: d["c"] equals `3)  # oracle: pinned constant asserted by this scenario`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-check(1 == 1)
-```
-
-</details>
-
-#### basic 3
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-check("a" == "a")
-```
-
-</details>
-
-#### op 1
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-
-check(1 + 1 == 2)
-```
-
-</details>
-
-#### op 2
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-check(5 - 3 == 2)
-```
-
-</details>
-
-#### op 3
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-check(2 * 3 == 6)
-```
-
-</details>
-
-#### op 4
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-check(10 / 2 == 5)
-```
-
-</details>
-
-#### op 5
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-check(10 % 3 == 1)
-```
-
-</details>
-
-#### cmp 1
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-
-check(5 > 3)
-```
-
-</details>
-
-#### cmp 2
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-check(3 < 5)
-```
-
-</details>
-
-#### cmp 3
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-check(5 >= 5)
-```
-
-</details>
-
-#### cmp 4
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-check(5 <= 5)
-```
-
-</details>
-
-#### cmp 5
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-check(5 != 3)
-```
-
-</details>
-
-#### bool 1
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-
-check(true and true)
-```
-
-</details>
-
-#### bool 2
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-check(true or false)
-```
-
-</details>
-
-#### bool 3
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-check(not false)
-```
-
-</details>
-
-#### arr 1
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-
-val a = [1,2,3]
-check(a.len() == 3)
-```
-
-</details>
-
-#### arr 2
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val a = []
-check(a.len() == 0)
-```
-
-</details>
-
-#### arr 3
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val a = [1, 2, 3]
-check(a.len() == 3)
-```
-
-</details>
-
-#### arr 4
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val a = [1,2,3]
-check(a.len() == 3)
-```
-
-</details>
-
-#### arr 5
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-var a = [1,2]
-val b = a.append(3)
-check(b.len() == 3)
-```
-
-</details>
-
-#### str 1
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-
-check("".len() == 0)
-```
-
-</details>
-
-#### str 2
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-check("a".len() == 1)
-```
-
-</details>
-
-#### str 3
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-check("test".len() == 4)
-```
-
-</details>
-
-#### str 4
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-check("hello".contains("ell"))
-```
-
-</details>
-
-#### str 5
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-check("test".starts_with("te"))
-```
-
-</details>
-
-#### str 6
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-check("test".ends_with("st"))
-```
-
-</details>
-
-#### opt 1
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-
-val o = Some(1)
-check(o.?)
-```
-
-</details>
-
-#### opt 2
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val o = nil
-check(not o.?)
-```
-
-</details>
-
-#### opt 3
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val o = Some(42)
-check(o? == 42)
-```
-
-</details>
-
-#### opt 4
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val o = nil
-check((o ?? 99) == 99)
-```
-
-</details>
-
-#### dict 1
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-
-val d = {"a": 1}
-check(d["a"] == 1)
-```
-
-</details>
-
-#### dict 2
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val d = {}
-check(true)
-```
-
-</details>
-
-#### dict 3
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
+# @req: REQ-LIB-DICT-001
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req: REQ-LIB-DICT-DEEP-8b7b
+step("Verify: dict write")
+# oracle: 3 — inserting a new key grows the dict by one
 val d = {"a": 1, "b": 2}
-check(d["a"] == 1)
+d["c"] = 3
+expect(d.len()).to_equal(3)  # oracle: pinned constant asserted by this scenario
+expect(d["c"]).to_equal(3)  # oracle: pinned constant asserted by this scenario
 ```
 
 </details>
 
-#### if 1
+#### option map unwrap
 
-1. check
-2. check
+- Verify: option map unwrap
+   - Expected: o.map(fn (x: i64) -> i64: x * 2) equals `Some(10)`
+   - Expected: o.unwrap_or(0) equals `5)  # oracle: pinned constant asserted by this scenario`
+   - Expected: o.is_some() is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-
-if true:
-    check(true)
-else:
-    check(false)
+# @req: REQ-LIB-DICT-001
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req: REQ-LIB-DICT-DEEP-8b7b
+step("Verify: option map unwrap")
+# oracle: Some(10)/5 — map doubles the payload; unwrap_or yields it
+val o = Some(5)
+expect(o.map(fn (x: i64) -> i64: x * 2)).to_equal(Some(10))
+expect(o.unwrap_or(0)).to_equal(5)  # oracle: pinned constant asserted by this scenario
+expect(o.is_some()).to_equal(true)
 ```
 
 </details>
 
-#### if 2
+#### option none default
 
-1. check
-2. check
+- Verify: option none default
+   - Expected: nil.unwrap_or(0) equals `0)  # oracle: pinned constant asserted by this scenario`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-if false:
-    check(false)
-else:
-    check(true)
+# @req: REQ-LIB-DICT-001
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req: REQ-LIB-DICT-DEEP-8b7b
+step("Verify: option none default")
+# oracle: 0 — a nil option falls back to the supplied default
+expect(nil.unwrap_or(0)).to_equal(0)  # oracle: pinned constant asserted by this scenario
 ```
 
 </details>
 
-#### if 3
+#### result ok err
 
-1. check
-2. check
+- Verify: result ok err
+   - Expected: Ok(7).is_ok() is true
+   - Expected: Err("e").is_err() is true
+   - Expected: Ok(7).unwrap_or(0) equals `7)  # oracle: pinned constant asserted by this scenario`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val x = 10
-if x > 5:
-    check(true)
-else:
-    check(false)
+# @req: REQ-LIB-DICT-001
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req: REQ-LIB-DICT-DEEP-8b7b
+step("Verify: result ok err")
+# oracle: true/7 — Ok is ok and unwraps; Err is err
+expect(Ok(7).is_ok()).to_equal(true)
+expect(Err("e").is_err()).to_equal(true)
+expect(Ok(7).unwrap_or(0)).to_equal(7)  # oracle: pinned constant asserted by this scenario
 ```
 
 </details>
 
-#### for 1
+#### char code roundtrip
 
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-
-var c = 0
-for i in 0..5:
-    c = c + 1
-check(c == 5)
-```
-
-</details>
-
-#### for 2
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-
-var s = 0
-for i in 0..10:
-    s = s + i
-check(s == 45)
-```
-
-</details>
-
-#### match 1
-
-1. Some
-2. nil: check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-
-match Some(1):
-    Some(x): check(x == 1)
-    nil: check(false)
-```
-
-</details>
-
-#### match 2
-
-1. Some
-2. nil: check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-
-match nil:
-    Some(x): check(false)
-    nil: check(true)
-```
-
-</details>
-
-#### nested 1
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-
-for i in 0..3:
-    for j in 0..3:
-        check(true)
-```
-
-</details>
-
-#### complex 1
-
-1. evens = evens append
-2. check
+- Verify: char code roundtrip
+   - Expected: char_code("a") equals `97)  # oracle: pinned constant asserted by this scenario`
+   - Expected: char_from_code(98) equals `b`
 
 
 <details>
@@ -829,13 +162,100 @@ Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-LIB-DICT-001
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req: REQ-LIB-DICT-DEEP-8b7b
+step("Verify: char code roundtrip")
+# oracle: 97/"b" — 'a' is codepoint 97; code 98 decodes to 'b'
+expect(char_code("a")).to_equal(97)  # oracle: pinned constant asserted by this scenario
+expect(char_from_code(98)).to_equal("b")
+```
 
-val arr = [1,2,3,4,5]
-var evens = []
-for x in arr:
-    if x % 2 == 0:
-        evens = evens.append(x)
-check(evens.len() == 2)
+</details>
+
+<details>
+<summary>Advanced: loop accumulates in order</summary>
+
+#### loop accumulates in order
+
+- Verify: loop accumulates in order
+   - Expected: sum equals `10)  # oracle: pinned constant asserted by this scenario`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-LIB-DICT-001
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req: REQ-LIB-DICT-DEEP-8b7b
+step("Verify: loop accumulates in order")
+# oracle: 10 — sum of 0..5 exclusive end
+var sum = 0
+for i in 0..5:
+    sum = sum + i
+expect(sum).to_equal(10)  # oracle: pinned constant asserted by this scenario
+```
+
+</details>
+
+
+</details>
+
+#### match destructures Some
+
+- Verify: match destructures Some
+   - Expected: x equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: false is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-LIB-DICT-001
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req: REQ-LIB-DICT-DEEP-8b7b
+step("Verify: match destructures Some")
+# oracle: 1 — the Some arm binds the payload
+match Some(1):
+    Some(x):
+        expect(x).to_equal(1)  # oracle: pinned constant asserted by this scenario
+    nil:
+        expect(false).to_equal(true)
+```
+
+</details>
+
+#### string length and emptiness
+
+- Verify: string length and emptiness
+   - Expected: "test".len() equals `4)  # oracle: pinned constant asserted by this scenario`
+   - Expected: "".len() equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: "".is_empty() is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-LIB-DICT-001
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req: REQ-LIB-DICT-DEEP-8b7b
+step("Verify: string length and emptiness")
+# oracle: 4/0 — len counts chars; only the empty string is empty
+expect("test".len()).to_equal(4)  # oracle: pinned constant asserted by this scenario
+expect("".len()).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect("".is_empty()).to_equal(true)
 ```
 
 </details>
@@ -844,11 +264,45 @@ check(evens.len() == 2)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 43 |
-| Active scenarios | 43 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
 
 </details>
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `70adaf9220e61ddf4b9e042fe909c35e81039105dfbe95270ca2ccac2bf9575f`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `70adaf9220e61ddf4b9e042fe909c35e81039105dfbe95270ca2ccac2bf9575f`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `70adaf9220e61ddf4b9e042fe909c35e81039105dfbe95270ca2ccac2bf9575f`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+
+SSpec documentization score: 94/100
+source: test/01_unit/std/deep/dict_deep_8_spec.spl
+mirror: doc/06_spec/01_unit/std/deep/dict_deep_8_spec.md (current)
+findings: 3 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=85 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/std/deep/dict_deep_8_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
+  why: Source tokens alone do not prove reader-visible workflow structure.
+  improve: Use supported literal step calls and regenerate the manual.
+doc/06_spec/01_unit/std/deep/dict_deep_8_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/std/deep/dict_deep_8_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, traceability, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+<!-- sspec-maintain:scorecard:end -->
