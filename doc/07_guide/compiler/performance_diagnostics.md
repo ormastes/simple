@@ -209,8 +209,8 @@ and [system-test plan](../../03_plan/sys_test/simple_compiler_performance_memory
 Set `SIMPLE_MIR_VERIFY_EACH=1` to apply the admitted structural MIR proof surface to the
 module before and after each canonical optimization pass. Malformed input or output is
 rejected fail-closed; tracing with `SIMPLE_COMPILER_TRACE=1` reports the stable verifier
-codes. This does not yet prove SSA dominance, full opcode typing, ownership, or loop
-invariants.
+codes. The admitted proof includes single-definition and dominance-scoped SSA use checks.
+It does not yet prove full opcode typing, ownership, or loop invariants.
 
 Verification is intentionally opt-in. The setting is cached after its first lookup, so
 normal builds do not scan MIR or allocate verifier receipts. Enabled verification scans
