@@ -2,13 +2,15 @@
 # @req REQ-011 REQ-016 REQ-017
 
 use std.spec.*
-use app.io.{cwd, file_read_bytes, file_remove, file_write_bytes, getpid}
+use app.io.{cwd, file_read_bytes, file_remove, file_write_bytes, getpid,
+            process_kill}
 use app.test.hal_environment_executor.{
     HostedProcessPollEnvExecutorV1, hosted_prepare_environment_get_v1,
     hosted_prepare_file_read_v1, hosted_prepare_stream_read_v1,
     hosted_prepare_clock_read_v1, hosted_prepare_random_fill_v1,
     hosted_prepare_file_write_v1, hosted_file_write_cursor_v1,
-    hosted_file_write_execute_v1
+    hosted_file_write_execute_v1, hosted_prepare_process_v1,
+    hosted_process_cursor_v1, hosted_process_execute_v1
 }
 use std.common.structural.environment_instruction.*
 
@@ -16,6 +18,12 @@ fn put_i64_le(out: [u8], value: i64):
     var i = 0
     while i < 8:
         out[i] = ((value >> (i * 8)) & 255) as u8
+        i = i + 1
+
+fn put_i64_le_at(out: [u8], offset: i64, value: i64):
+    var i = 0
+    while i < 8:
+        out[offset + i] = ((value >> (i * 8)) & 255) as u8
         i = i + 1
 
 fn ascii_bytes(value: text) -> [u8]:
@@ -229,3 +237,77 @@ describe "hosted physical environment executor":
         expect(replay.physical_effect).to_be(false)
         expect(replayed).to_equal(result)
         expect(file_remove(path)).to_be(true)
+
+    it "admits polls and terminates one prepared process in exact sequence":
+        val executor = hosted_prepare_process_v1("/bin/sleep", ["30"], 14)
+        var cursor = hosted_process_cursor_v1()
+        var spawn_arguments: [u8] = [0u8; 16]
+        put_i64_le_at(spawn_arguments, 0, executor.command_digest_hi)
+        put_i64_le_at(spawn_arguments, 8, executor.command_digest_lo)
+        val spawn = env_instruction_v1(
+            43, 0, EnvOpcodeV1.ProcessSpawn, 14, 0,
+            0, 16, 16, 0, 8, 8)
+        var spawn_result: [u8] = [0u8; 8]
+        val admitted = hosted_process_execute_v1(
+            executor, cursor, capture_policy(EnvOpcodeV1.ProcessSpawn, 14),
+            spawn, spawn_arguments, spawn_result)
+        cursor = admitted.cursor
+
+        var process_argument: [u8] = [0u8; 8]
+        put_i64_le(process_argument, executor.process_id)
+        val poll = env_instruction_v1(
+            43, 1, EnvOpcodeV1.ProcessPoll, 14, 0,
+            0, 8, 8, 0, 1, 1)
+        var poll_result: [u8] = [0u8]
+        val polled = hosted_process_execute_v1(
+            executor, cursor, capture_policy(EnvOpcodeV1.ProcessPoll, 14),
+            poll, process_argument, poll_result)
+        cursor = polled.cursor
+
+        val kill = env_instruction_v1(
+            43, 2, EnvOpcodeV1.ProcessKill, 14, 0,
+            0, 8, 8, 0, 1, 1)
+        var kill_result: [u8] = [0u8]
+        var replay_result: [u8] = [0u8]
+        val killed = hosted_process_execute_v1(
+            executor, cursor, capture_policy(EnvOpcodeV1.ProcessKill, 14),
+            kill, process_argument, kill_result)
+        val replayed = env_replay_exact_v1(
+            kill, kill, killed.receipt.observation,
+            process_argument, kill_result, replay_result)
+        val duplicate = hosted_process_execute_v1(
+            executor, killed.cursor,
+            capture_policy(EnvOpcodeV1.ProcessKill, 14),
+            kill, process_argument, replay_result)
+
+        expect(admitted.receipt.applied).to_be(true)
+        expect(admitted.receipt.allocation_count_after_seal).to_equal(0)
+        expect(polled.receipt.applied).to_be(true)
+        expect(poll_result[0]).to_equal(1u8)
+        expect(killed.receipt.applied).to_be(true)
+        expect(killed.receipt.allocation_count_after_seal).to_equal(0)
+        expect(replayed.applied).to_be(true)
+        expect(replayed.physical_effect).to_be(false)
+        expect(replay_result).to_equal(kill_result)
+        expect(duplicate.receipt.applied).to_be(false)
+
+    it "rejects changed process identity before polling or termination":
+        val executor = hosted_prepare_process_v1("/bin/sleep", ["30"], 15)
+        val cursor = hosted_process_cursor_v1()
+        var spawn_arguments: [u8] = [0u8; 16]
+        put_i64_le_at(spawn_arguments, 0, executor.command_digest_hi + 1)
+        put_i64_le_at(spawn_arguments, 8, executor.command_digest_lo)
+        val spawn = env_instruction_v1(
+            47, 0, EnvOpcodeV1.ProcessSpawn, 15, 0,
+            0, 16, 16, 0, 8, 8)
+        var result: [u8] = [77u8; 8]
+        val rejected = hosted_process_execute_v1(
+            executor, cursor, capture_policy(EnvOpcodeV1.ProcessSpawn, 15),
+            spawn, spawn_arguments, result)
+
+        expect(rejected.receipt.applied).to_be(false)
+        expect(env_instruction_status_to_i64(
+            rejected.receipt.observation.status)).to_equal(
+                env_instruction_status_to_i64(EnvInstructionStatusV1.Diverged))
+        expect(result[0]).to_equal(77u8)
+        expect(process_kill(executor.process_id)).to_be(true)

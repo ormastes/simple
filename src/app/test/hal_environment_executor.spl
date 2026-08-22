@@ -3,7 +3,8 @@
 
 use app.io.{env_get, file_is_regular_no_follow, file_read_bytes, file_size,
             file_write_bytes,
-            process_is_alive, random_randint, time_now_unix_micros}
+            process_is_alive, process_kill, process_spawn_async,
+            random_randint, time_now_unix_micros}
 use std.common.structural.environment_instruction.*
 
 val HOSTED_ENV_CAPTURE_MAX_BYTES_V1: i64 = 65536
@@ -42,6 +43,22 @@ class HostedFileWriteCursorV1:
 class HostedFileWriteStepReceiptV1:
     receipt: EnvExecutionReceiptV1
     cursor: HostedFileWriteCursorV1
+
+class HostedPreparedProcessExecutorV1:
+    process_id: i64
+    command_digest_hi: i64
+    command_digest_lo: i64
+    capability_id: i64
+    sealed: bool
+
+class HostedProcessCursorV1:
+    next_sequence: i64
+    terminated: bool
+    sealed: bool
+
+class HostedProcessStepReceiptV1:
+    receipt: EnvExecutionReceiptV1
+    cursor: HostedProcessCursorV1
 
 fn _env_text_bytes(value: text) -> [u8]:
     var bytes: [u8] = [0u8; value.len()]
@@ -185,6 +202,16 @@ fn _env_text_digest_v1(value: text, reverse: bool) -> i64:
         i = i + 1
     digest
 
+fn _env_command_digest_v1(command: text, arguments: [text], reverse: bool) -> i64:
+    var digest = _env_text_digest_v1(command, reverse)
+    var i = 0
+    while i < arguments.len():
+        val index = if reverse: arguments.len() - 1 - i else: i
+        digest = ((digest * 257 + _env_text_digest_v1(arguments[index], reverse)
+                  + arguments[index].len() + 17) % 2147483629) + 1
+        i = i + 1
+    digest
+
 fn _env_write_i64_le(data: [u8], offset: i64, value: i64):
     var i = 0
     while i < 8:
@@ -264,6 +291,101 @@ fn hosted_file_write_execute_v1(
         instruction, payload_bytes, result_bytes, 17, true, 0)
     HostedFileWriteStepReceiptV1(receipt: receipt,
         cursor: HostedFileWriteCursorV1(consumed: true, sealed: true))
+
+fn hosted_prepare_process_v1(command: text, arguments: [text],
+                             capability_id: i64) -> HostedPreparedProcessExecutorV1:
+    # Process creation and command storage are preparation work. The sealed
+    # lifecycle below retains only scalars and never constructs an argument.
+    var valid = capability_id > 0 and capability_id < 63
+        and command.len() > 0 and command.len() <= 1024
+        and arguments.len() <= 32 and _env_text_byte_safe(command)
+    var total_bytes = command.len()
+    var i = 0
+    while valid and i < arguments.len():
+        total_bytes = total_bytes + arguments[i].len()
+        valid = arguments[i].len() <= 1024
+            and total_bytes <= 8192 and _env_text_byte_safe(arguments[i])
+        i = i + 1
+    val process_id = if valid: process_spawn_async(command, arguments) else: -1
+    val ready = valid and process_id > 1 and process_is_alive(process_id)
+    HostedPreparedProcessExecutorV1(
+        process_id: if ready: process_id else: -1,
+        command_digest_hi: if ready:
+            _env_command_digest_v1(command, arguments, false)
+        else: 0,
+        command_digest_lo: if ready:
+            _env_command_digest_v1(command, arguments, true)
+        else: 0,
+        capability_id: if ready: capability_id else: 0,
+        sealed: ready)
+
+fn hosted_process_cursor_v1() -> HostedProcessCursorV1:
+    HostedProcessCursorV1(next_sequence: 0, terminated: false, sealed: true)
+
+fn _hosted_process_rejected_v1(
+        instruction: EnvInstructionV1, cursor: HostedProcessCursorV1,
+        status: EnvInstructionStatusV1) -> HostedProcessStepReceiptV1:
+    HostedProcessStepReceiptV1(
+        receipt: env_execution_rejected_v1(instruction, status), cursor: cursor)
+
+fn hosted_process_execute_v1(
+        executor: HostedPreparedProcessExecutorV1,
+        cursor: HostedProcessCursorV1,
+        policy: EnvExecutorPolicyV1, instruction: EnvInstructionV1,
+        argument_bytes: [u8], result_bytes: [u8]) -> HostedProcessStepReceiptV1:
+    val validation = env_executor_validate_instruction(
+        policy, instruction, argument_bytes, result_bytes)
+    if env_instruction_status_to_i64(validation)
+            != env_instruction_status_to_i64(EnvInstructionStatusV1.Planned):
+        return _hosted_process_rejected_v1(instruction, cursor, validation)
+    if not executor.sealed or not cursor.sealed or cursor.terminated
+            or instruction.capability_id != executor.capability_id
+            or instruction.sequence != cursor.next_sequence:
+        return _hosted_process_rejected_v1(
+            instruction, cursor, EnvInstructionStatusV1.Diverged)
+    var result_length = 0
+    var terminated = false
+    if instruction.opcode == EnvOpcodeV1.ProcessSpawn:
+        if cursor.next_sequence != 0 or instruction.argument_length != 16
+                or instruction.result_capacity < 8:
+            return _hosted_process_rejected_v1(
+                instruction, cursor, EnvInstructionStatusV1.InvalidInstruction)
+        val digest_hi = _env_read_i64_le(
+            argument_bytes, instruction.argument_offset)
+        val digest_lo = _env_read_i64_le(
+            argument_bytes, instruction.argument_offset + 8)
+        if digest_hi != executor.command_digest_hi
+                or digest_lo != executor.command_digest_lo
+                or not process_is_alive(executor.process_id):
+            return _hosted_process_rejected_v1(
+                instruction, cursor, EnvInstructionStatusV1.Diverged)
+        _env_write_i64_le(result_bytes, instruction.result_offset,
+                          executor.process_id)
+        result_length = 8
+    else:
+        if instruction.argument_length != 8 or instruction.result_capacity < 1
+                or _env_read_i64_le(argument_bytes, instruction.argument_offset)
+                    != executor.process_id:
+            return _hosted_process_rejected_v1(
+                instruction, cursor, EnvInstructionStatusV1.Diverged)
+        if instruction.opcode == EnvOpcodeV1.ProcessPoll:
+            result_bytes[instruction.result_offset] =
+                if process_is_alive(executor.process_id): 1u8 else: 0u8
+            result_length = 1
+        else:
+            if instruction.opcode != EnvOpcodeV1.ProcessKill
+                    or not process_kill(executor.process_id):
+                return _hosted_process_rejected_v1(
+                    instruction, cursor, EnvInstructionStatusV1.InvalidInstruction)
+            result_bytes[instruction.result_offset] = 1u8
+            result_length = 1
+            terminated = true
+    val receipt = env_execution_record_applied_v1(
+        instruction, argument_bytes, result_bytes, result_length, true, 0)
+    HostedProcessStepReceiptV1(receipt: receipt,
+        cursor: HostedProcessCursorV1(
+            next_sequence: cursor.next_sequence + 1,
+            terminated: terminated, sealed: true))
 
 impl EnvPhysicalExecutorPortV1 for HostedProcessPollEnvExecutorV1:
     fn execute(policy: EnvExecutorPolicyV1, instruction: EnvInstructionV1,
@@ -356,3 +478,6 @@ export hosted_prepare_clock_read_v1, hosted_prepare_random_fill_v1
 export HostedPreparedFileWriteExecutorV1, HostedFileWriteCursorV1
 export HostedFileWriteStepReceiptV1, hosted_prepare_file_write_v1
 export hosted_file_write_cursor_v1, hosted_file_write_execute_v1
+export HostedPreparedProcessExecutorV1, HostedProcessCursorV1
+export HostedProcessStepReceiptV1, hosted_prepare_process_v1
+export hosted_process_cursor_v1, hosted_process_execute_v1

@@ -77,6 +77,29 @@ allocations. This hosted pathname adapter assumes a trusted fixture directory;
 hostile shared directories require a future descriptor-relative no-follow
 facade rather than weakening this contract.
 
+### Hosted bounded process lifecycle adapter
+
+`HostedPreparedProcessExecutorV1` creates one allowlisted composition-owned
+process before seal, after bounding the command to 1024 bytes, at most 32
+arguments, and 8192 aggregate bytes. It discards command storage at the sealed
+boundary and retains only the PID, capability, and two command-digest lanes.
+`HostedProcessCursorV1` is the canonical value-semantic parent cursor. It admits
+exactly `ProcessSpawn(sequence=0)`, followed by zero or more ordered polls and a
+single terminal kill. Spawn admission must present the exact 16-byte command
+digest and returns the pinned PID; poll and kill must present that PID. Changed
+capability, identity, sequence, opcode, capacity, or a stale/terminated cursor
+fails closed before an effect.
+
+The lifecycle hot path calls only scalar process liveness/kill facades and
+writes fixed 8-byte or 1-byte results into caller storage. It creates no array,
+text, process, or result object with variable capacity after seal and reports
+zero post-seal allocations. Process construction remains preparation work,
+which is necessary because a real spawn can allocate in the host runtime.
+Replay uses `env_replay_exact_v1`; therefore a recorded kill or poll copies its
+fixed result and never consults or changes the host process. The parent must
+retain and commit only each returned cursor; isolated provider copies cannot
+advance or repeat the canonical lifecycle.
+
 ### IRQ/MMIO/DMA environment adapter
 
 Producible hardware scenarios use `DeviceSandboxExecutorV1`; it is a software
