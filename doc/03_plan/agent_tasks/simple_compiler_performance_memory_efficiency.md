@@ -114,3 +114,11 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
   explicit revision invalidation and bounds.
 - Follow-up: bounded directory-to-manifest cache keyed by canonical directory plus
   manifest size/mtime or digest for long-lived LSP/MCP sessions.
+
+## Active tool tranche: one-pass diagnostic policy
+
+- Introduce one evidence-aware suppression/severity decision record.
+- Migrate central text/EasyFix filtering and parsed AST diagnostic append first.
+- Preserve unknown-code, allow, warn, deny, typed-proven, and advisory-cap semantics.
+- Pin absence of paired keep/level calls in migrated owners.
+- Retain compatibility wrappers until query/LSP and remaining external callers migrate.
