@@ -33,6 +33,7 @@ Validates argument parsing, command construction, and output format.
 extern fn rt_file_read_text(path: text) -> text
 
 use std.spec.step
+use app.cli.query_helpers.{_collect_fn_outline, _infer_type_from_rhs}
 
 describe "query CLI subcommand dispatch":
     """
@@ -321,3 +322,27 @@ describe "inlay hint type inference":
         val line = "val count: i64 = 0"
         val has_colon = line.contains(": ")
         expect(has_colon).to_equal(true)
+
+    it "indexes duplicate function outlines with legacy precedence":
+        val lines = [
+            "fn no_params()",
+            "fn no_params(value: i64)",
+            "fn late_return(value)",
+            "fn late_return(value) -> text:",
+            "fn first_return() -> i64:",
+            "fn first_return() -> text:"
+        ]
+        val outline = _collect_fn_outline(lines)
+        expect(outline.parameter_names.contains_key("no_params")).to_equal(true)
+        expect(outline.parameter_names["no_params"]).to_equal("")
+        expect(outline.return_types["late_return"]).to_equal("text")
+        expect(outline.return_types["first_return"]).to_equal("i64")
+        expect(_infer_type_from_rhs("late_return()", outline.return_types)).to_equal("text")
+
+    it "shares one indexed inlay hint implementation":
+        val token_source = rt_file_read_text("src/app/cli/query_tokens.spl") ?? ""
+        val compatibility_source = rt_file_read_text("src/app/cli/query_inlay_hints.spl") ?? ""
+        expect(token_source).to_contain("_collect_fn_outline(lines)")
+        expect(token_source.contains("_collect_fn_param_names(content")).to_equal(false)
+        expect(token_source.contains("_lookup_params(")).to_equal(false)
+        expect(compatibility_source).to_contain("export use app.cli.query_tokens.{query_inlay_hints}")
