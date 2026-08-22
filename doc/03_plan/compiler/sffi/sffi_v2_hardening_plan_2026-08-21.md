@@ -864,3 +864,8 @@ contracted, lexically contained, and no longer exported raw for production use.
 Next migrate the remaining raw read export consumers in tests to the canonical
 facade, then remove that export; do not alter source-content assertions while
 changing the transport owner.
+
+Raw read/write exports are now removed. Fix the import-alias dependency-capture
+bug before using aliases that reuse foreign symbol names; until then use the
+canonical exported name directly. Repair the stale installer-font source
+contract separately. Neither issue justifies reopening raw SFFI exports.

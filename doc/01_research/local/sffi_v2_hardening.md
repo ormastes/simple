@@ -1060,3 +1060,13 @@ path remains one typed foreign call and its existing status branch; directory
 creation/retry remains failure-only. The census is now 12,499 declarations,
 11,720 untouched, 505 unsafe-tagged, 585 contract-documented, and zero signed
 admissions; production is 6,189 declarations with 5,610 untouched.
+
+The remaining ten test imports of the raw text-read export now use the canonical
+`read_file_text` name directly, allowing both raw read and raw write exports to
+be removed. Attempting a compact import alias exposed a resolver defect: the
+consumer alias captured the dependency module's internal name and recursively
+called `file_read` until stack overflow. The defect is recorded; raw access was
+not restored. The RV64 runtime-link contract passes 2/2 through the canonical
+export. The installer-font spec now reads correctly but exposes two unrelated
+stale assertions, also recorded. This export cleanup adds no runtime layer or
+per-call security work; consumers call the same canonical function directly.
