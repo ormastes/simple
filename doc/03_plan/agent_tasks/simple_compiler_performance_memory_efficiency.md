@@ -113,6 +113,19 @@
 - Add mirrored clean-view, policy, parse/count order, and active-source contracts.
 - Verification intentionally not run under the user's no-verify instruction.
 
+## Completed MIR trace-scope tranche
+
+- Added a nesting-safe dependency-leaf trace snapshot in `mir_data`.
+- Balanced bootstrap and normal `lower_module` exits.
+- Preserved separate general-lowering and MIRB-only semantics.
+- Removed per-call MIRB environment lookup from `emit_call_value` and builder
+  begin/end receipts.
+- Generation-refreshed three former process-lifetime trace caches.
+- Added mirrored contracts for aliases, exits, builder gates, and refresh.
+- Static model: repeated three/four-flag conversions become four reads per outer
+  module lowering; storage remains four i64 words.
+- Verification intentionally not run under the user's no-verify instruction.
+
 ## Completed shared parser-profile gate tranche
 
 - Reset the existing parser profiling tri-state once per parse boundary.
