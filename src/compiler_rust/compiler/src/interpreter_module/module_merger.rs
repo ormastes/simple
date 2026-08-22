@@ -34,7 +34,7 @@ pub fn merge_module_definitions(
                 let func_value = Value::Function {
                     name: f.name.clone(),
                     def: arc_f,
-                    captured_env: Arc::new(Env::new()),
+                    captured_env: Env::shared_empty(),
                 };
                 exports.insert(f.name.clone(), func_value);
             }

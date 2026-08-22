@@ -525,6 +525,25 @@ pub struct CowEnv {
 }
 
 impl CowEnv {
+    /// The process-wide (per thread) EMPTY captured environment.
+    ///
+    /// Every module env entry that names an imported function, and every
+    /// exported method, carries a `captured_env` that is deliberately empty
+    /// (`filter_functions_from_value`, `export_functions`). Allocating a fresh
+    /// `Arc<CowEnv>` for each of them costs ~9 heap-allocated maps' worth of
+    /// headers plus a second `Arc<HashMap>` for `global_bindings` -- ~600 B --
+    /// per binding, per importing module. A native-build shard holds ~950k
+    /// such entries (`[mem] env_entries`), so the copies alone were ~0.5 GB of
+    /// retained memory that encoded no information. Nothing ever mutates an
+    /// empty captured env in place (`Arc::make_mut` on a shared Arc clones
+    /// first), so sharing one is semantics-preserving.
+    pub fn shared_empty() -> Arc<CowEnv> {
+        thread_local! {
+            static EMPTY: Arc<CowEnv> = Arc::new(CowEnv::new());
+        }
+        EMPTY.with(Arc::clone)
+    }
+
     /// Create an empty environment.
     pub fn new() -> Self {
         CowEnv {

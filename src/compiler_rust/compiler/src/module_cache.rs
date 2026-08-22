@@ -622,7 +622,7 @@ pub fn filter_functions_from_value(value: &Value) -> Value {
             Value::Function {
                 name: name.clone(),
                 def: def.clone(),
-                captured_env: Arc::new(Env::new()),
+                captured_env: Env::shared_empty(),
             }
         }
         Value::Dict(dict) => {

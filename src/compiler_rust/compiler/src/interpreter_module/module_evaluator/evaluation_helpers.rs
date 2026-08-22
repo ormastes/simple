@@ -198,7 +198,7 @@ pub(super) fn register_definitions(
                             Value::Function {
                                 name: mangled,
                                 def: arc_method,
-                                captured_env: Arc::new(Env::new()),
+                                captured_env: Env::shared_empty(),
                             },
                         );
                     }
@@ -251,7 +251,7 @@ pub(super) fn register_definitions(
                             Value::Function {
                                 name: mangled,
                                 def: arc_method,
-                                captured_env: Arc::new(Env::new()),
+                                captured_env: Env::shared_empty(),
                             },
                         );
                     }
@@ -324,7 +324,7 @@ pub(super) fn register_definitions(
                                 Value::Function {
                                     name: mangled,
                                     def: arc_method,
-                                    captured_env: Arc::new(Env::new()),
+                                    captured_env: Env::shared_empty(),
                                 },
                             );
                         }
@@ -378,7 +378,7 @@ pub(super) fn register_definitions(
                             Value::Function {
                                 name: mangled,
                                 def: arc_method,
-                                captured_env: Arc::new(Env::new()),
+                                captured_env: Env::shared_empty(),
                             },
                         );
                     }
@@ -809,7 +809,7 @@ pub(super) fn export_functions(
             Value::Function {
                 name: name.clone(),
                 def: shared_def.clone(),
-                captured_env: Arc::new(Env::new()),
+                captured_env: Env::shared_empty(),
             },
         );
     }
