@@ -1847,3 +1847,15 @@ it is unchanged. Only a real Warn-to-Deny transition rebuilds the diagnostic.
 Traversal remains `O(D)`, but unchanged diagnostics avoid constructor dispatch,
 COW/reference traffic for message/fix/evidence/uncertainty payloads, and transient
 result objects. Formatting, ordering, counts, and JSON/text bytes are unchanged.
+
+### Linear natural-loop latch aggregation
+
+`LoopDetector.detect_loops` formerly stored a growing latch array in a dictionary.
+Every dominance-proven edge extracted that value, linearly scanned it for a
+duplicate source, appended, and wrote it back. A header with `L` latch edges paid
+`O(L²)` comparisons and, under COW value semantics, potentially `O(L²)` copied
+elements/transient allocation. Loop detection now assigns each first-seen header
+an owned latch bucket plus an indexed membership dictionary. Each backedge is
+admitted once in expected constant time and appended directly. Total aggregation
+is expected `O(E)`; header order and per-header latch order remain first CFG
+traversal order, and repeated edges from one source/header still coalesce.
