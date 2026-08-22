@@ -1949,19 +1949,34 @@ did not add provider calls. This completes call-authority tagging only:
 raw-handle, ownership, nullability, artifact evidence, and signature work still
 prevent any global Torch safe/verified claim.
 
-## Compiler CAS semantic-owner migration (unverified checkpoint)
+## Compiler CAS semantic-owner migration evidence
 
 The compiler CAS previously duplicated eight raw file, environment, process-ID,
 and wall-clock declarations and called them directly. It now imports the
 canonical `std.io_runtime` semantic owners instead. Successful reads, writes,
-renames, existence checks, deletes, PID reads, and clock reads retain one
+moves, existence checks, deletes, PID reads, and clock reads retain one
 provider call; the canonical write owner adds only its existing failure-only
 parent-create/retry recovery. No lookup, process launch, sleep, collection, or
 unsafe scope was added to the CAS path.
 
 `cas-store-runtime-owner-contract.shs` records this ownership and hot-path
-source shape and has three sabotage cases for a raw call, raw declaration, and
-dynamic lookup. Per the sync override, neither that gate, the optimizer, the CAS
-behavior spec, nor the census has run in this checkpoint. This migration is
-therefore coherent source progress but explicitly unverified. It also does not
-make the canonical runtime owner signed or evidence-admitted.
+source shape and passes one positive case plus three sabotage cases for a raw
+call, raw declaration, and dynamic lookup. Initial behavioral execution exposed
+the stale-seed `file_rename` alias defect rather than laundering it into a false
+success. The owner now provides the uniquely named
+`file_move_cross_device` wrapper over the same `rt_file_move` ABI CAS used
+before migration; this preserves rename-then-copy/delete behavior and one-call
+dispatch while avoiding alias de-JIT. The focused CAS spec then passes 12/12
+under the bootstrap seed in 4.77 seconds with 174,304 KiB peak RSS. This is not
+self-hosted evidence.
+
+The CAS optimizer run reports only generic MIR bounds/dead-code/loop-hoisting
+opportunities; the public shim reports none. CAS lint passes with zero errors
+and seven unrelated-shape warnings. The broader canonical `io_runtime` owner
+still fails lint with 39 primitive-API errors and 65 warnings across its legacy
+surface, including raw-runtime debt, so the owner is not globally lint-clean.
+The one-scan census falls from 21,371 to 21,337 raw calls and from 19,486 to
+19,451 missing-authority calls; production falls from 12,903 to 12,869 calls.
+Lexically authorized calls rise by one to 1,378 because the single centralized
+move call is scoped. These are source and seed-behavior receipts only: the
+runtime provider remains unsigned and evidence-unadmitted.

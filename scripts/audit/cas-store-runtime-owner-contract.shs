@@ -5,6 +5,7 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 cas=${1:-"$root/src/compiler/80.driver/cache/cas_store.spl"}
+owner_file="$root/src/lib/nogc_sync_mut/io_runtime.spl"
 
 if grep -Eq '(^|[^[:alnum:]_])rt_(file|env|getpid|time)_[[:alnum:]_]*[[:space:]]*\(' "$cas"; then
     echo 'compiler CAS contains a direct file/env/process/time runtime call' >&2
@@ -16,9 +17,9 @@ if grep -Eq '^extern fn rt_' "$cas"; then
     exit 1
 fi
 
-for owner in dir_create_all read_file_text write_file file_exists file_delete \
-    file_rename env_get getpid time_now_unix_micros; do
-    grep -Eq "(^|[,{[:space:]])${owner}([,}[:space:](]|$)" "$cas"
+for semantic_owner in dir_create_all read_file_text write_file file_exists file_delete \
+    file_move_cross_device env_get getpid time_now_unix_micros; do
+    grep -Eq "(^|[,{[:space:]])${semantic_owner}([,}[:space:](]|$)" "$cas"
 done
 
 if grep -Eq 'dlsym|CString|HashMap|Dictionary|process_run|shell\(|sleep\(|retry' "$cas"; then
@@ -31,4 +32,14 @@ if grep -Eq 'unsafe[[:space:]]*\(|unsafe[[:space:]]*\{' "$cas"; then
     exit 1
 fi
 
-echo 'Compiler CAS runtime-owner contract: PASS raw_calls=0 raw_declarations=0 explicit_hot_lookup=none admission=unsafe_unsigned-owner'
+grep -B1 -F 'extern fn rt_file_move(old_path: text, new_path: text) -> bool' "$owner_file" |
+    grep -Eq '@unsafe\(.*capabilities: \[ffi\]'
+owner_block=$(sed -n '/^pub fn file_move_cross_device(/,/^pub fn /p' "$owner_file")
+printf '%s\n' "$owner_block" | grep -Fq 'unsafe(capabilities: [ffi]):'
+test "$(printf '%s\n' "$owner_block" | grep -Fc 'rt_file_move(old_path, new_path)')" -eq 1
+if printf '%s\n' "$owner_block" | grep -Eq 'dlsym|CString|HashMap|Dictionary|sleep\(|retry'; then
+    echo 'canonical file-move owner gained lookup, allocation, sleep, or retry work' >&2
+    exit 1
+fi
+
+echo 'Compiler CAS runtime-owner contract: PASS raw_calls=0 raw_declarations=0 owner_provider_calls=1 explicit_hot_lookup=none admission=unsafe_unsigned-owner'
