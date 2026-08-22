@@ -1,7 +1,7 @@
 //! Collection types: Array, Tuple, String and their SFFI functions.
 //! Dict SFFI functions are in the dict module.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
@@ -25,6 +25,17 @@ use simple_simd::HostCpuConfigError;
 
 thread_local! {
     static TRANSIENT_HEAP_SCOPE: RefCell<Option<TransientHeapScope>> = const { RefCell::new(None) };
+    static LAST_TRANSIENT_PROMOTION: Cell<(i64, i64)> = const { Cell::new((0, 0)) };
+}
+
+#[no_mangle]
+pub extern "C" fn rt_transient_last_promoted_nodes() -> i64 {
+    LAST_TRANSIENT_PROMOTION.with(Cell::get).0
+}
+
+#[no_mangle]
+pub extern "C" fn rt_transient_last_promoted_bytes() -> i64 {
+    LAST_TRANSIENT_PROMOTION.with(Cell::get).1
 }
 
 struct TransientHeapScope {
@@ -1900,6 +1911,7 @@ fn free_transient_heap(value: RuntimeValue) {
 /// Keep transient heap objects reachable from a retained graph when the scope ends.
 #[no_mangle]
 pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
+    LAST_TRANSIENT_PROMOTION.with(|last| last.set((0, 0)));
     let mut root_words = std::ptr::null();
     let mut root_ptr = 0usize;
     let root_raw = unsafe { rt_transient_raw_words(value.0 as i64, &mut root_words, &mut root_ptr) >= 0 };
@@ -1918,6 +1930,7 @@ pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
         let mut pending = vec![value];
         let mut reachable_heap = HashSet::new();
         let mut reachable_raw = HashSet::new();
+        let mut reachable_raw_bytes = 0i64;
         while let Some(current) = pending.pop() {
             let mut words = std::ptr::null();
             let mut canonical_ptr = 0usize;
@@ -1926,6 +1939,7 @@ pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
                 if !reachable_raw.insert(canonical_ptr) {
                     continue;
                 }
+                reachable_raw_bytes = reachable_raw_bytes.saturating_add(word_count.saturating_mul(8));
                 if word_count > 0 {
                     if words.is_null() {
                         return false;
@@ -1942,12 +1956,24 @@ pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
                 pending.extend(children);
             }
         }
-        for ptr in reachable_raw {
-            if unsafe { rt_transient_raw_promote(ptr) } == 0 {
+        let promoted_heap_nodes = scope.objects.iter()
+            .filter(|object| reachable_heap.contains(&object.0))
+            .count() as i64;
+        let promoted_heap_bytes = scope.objects.iter()
+            .filter(|object| reachable_heap.contains(&object.0))
+            .map(|object| unsafe { (*object.as_heap_ptr()).size as i64 })
+            .fold(0i64, i64::saturating_add);
+        let promoted_raw_nodes = reachable_raw.len() as i64;
+        for ptr in &reachable_raw {
+            if unsafe { rt_transient_raw_promote(*ptr) } == 0 {
                 return false;
             }
         }
         scope.objects.retain(|object| !reachable_heap.contains(&object.0));
+        LAST_TRANSIENT_PROMOTION.with(|last| last.set((
+            promoted_heap_nodes.saturating_add(promoted_raw_nodes),
+            promoted_heap_bytes.saturating_add(reachable_raw_bytes),
+        )));
         true
     })
 }
