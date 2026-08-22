@@ -1,0 +1,52 @@
+"""
+# Untyped-return-value shapes: fixed files lower without the diagnostic
+
+Reproduce for bootstrap run9 stage1 fatal (2026-08-22):
+`HIR lowering error in src/compiler/driver/driver_build/incremental.spl:
+untyped function returns a value: function 'get_cached_mir_functions' ...`.
+Same defect class as 5c285c2436f (text_advanced.spl). The three examples
+below are the representative shapes that were fixed tree-wide:
+  1. `return nil` + trailing `Some(dict)`        (incremental.spl)
+  2. `return self.field` method on a struct      (vhdl/domain files)
+  3. `return Err(...)`/`Ok(...)` static ctor     (backend_api.spl)
+Each is asserted twice: the pre-fix (untyped) shape MUST produce the
+diagnostic, the fixed (`-> T`) shape MUST lower clean. Tree-wide coverage is
+`sh scripts/check/check-untyped-return-value.shs`.
+"""
+
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+
+fn error_count(src: text, name: text) -> i64:
+    val parsed = parse_full_frontend(src, "testdata/{name}.spl", name, Logger(level: 0))
+    var lowering = HirLowering.with_filename("testdata/{name}.spl")
+    lowering.lower_module(parsed)
+    var n = 0
+    for e in lowering.errors:
+        if e.message.contains("untyped function returns a value"):
+            n = n + 1
+    n
+
+describe "untyped function returns a value: fixed shapes lower clean":
+    it "return nil + trailing Some(dict): untyped errors, -> Dict<text, text>? is clean":
+        val body = "    if source == \"\":\n" +
+            "        return nil\n" +
+            "    var result: {text: text} = {}\n" +
+            "    result[\"k\"] = source\n" +
+            "    Some(result)\n"
+        expect(error_count("fn get_cached(source: text):\n" + body, "shape1_bad")).to_equal(1)
+        expect(error_count("fn get_cached(source: text) -> Dict<text, text>?:\n" + body, "shape1_ok")).to_equal(0)
+
+    it "method returning self.field: untyped errors, -> i32 is clean":
+        val head = "struct W:\n    width: i32\n"
+        val body = "        if self.width > 0:\n            return self.width\n        return 0\n"
+        expect(error_count(head + "    me max_unsigned():\n" + body, "shape2_bad")).to_equal(1)
+        expect(error_count(head + "    me max_unsigned() -> i32:\n" + body, "shape2_ok")).to_equal(0)
+
+    it "Err/Ok static constructor: untyped errors, -> Result<T, text> is clean":
+        val head = "struct B:\n    kind: i64\n"
+        val body = "        if kind < 0:\n            return Err(\"bad kind\")\n        Ok(B(kind: kind))\n"
+        expect(error_count(head + "    static fn create(kind: i64):\n" + body, "shape3_bad") > 0).to_equal(true)
+        expect(error_count(head + "    static fn create(kind: i64) -> Result<B, text>:\n" + body, "shape3_ok")).to_equal(0)

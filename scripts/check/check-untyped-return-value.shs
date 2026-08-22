@@ -1,0 +1,225 @@
+#!/bin/sh
+# check-untyped-return-value.shs — guard against the HIR diagnostic
+#   "untyped function returns a value: function 'X' returns a value but
+#    declares no return type; add '-> T'"
+# emitted by src/compiler/20.hir/hir_lowering/_Items/module_callable_types.spl
+# (infer_untyped_return_type). Incident 2026-08-22: bootstrap run9 stage1
+# fataled on src/compiler/80.driver/driver_build/incremental.spl
+# get_cached_mir_functions; same class as 5c285c2436f (text_advanced.spl).
+#
+# Verdict is ALWAYS the last stdout line: PASS exit 0 / FAIL exit 1 / ERROR exit 2.
+# A run that scanned 0 files is ERROR, never a pass. --selftest runs first and
+# is fatal (positive + negative fixtures).
+#
+# RULE (mirrors the compiler's signature-pass scanner, which is the authority):
+# an untyped (no `-> T`), non-generic `fn`/`me` with a body errors iff it has an
+# explicit `return <expr>` whose type the scanner cannot resolve. The scanner
+# resolves only: int/float/text/bool literals, `not x`, comparisons, a param
+# ident with a declared type, same-type arithmetic, and casts. Everything else
+# (nil, (), calls, fields, index, tuple/array literals, ...) is ambiguous and
+# fatal. A trailing expression without `return` is NOT scanned (it lowers to
+# Unit), so it is not flagged here either. Running the real compiler per file
+# costs >10 min on the interpreted path, so this is a textual mirror.
+#
+# SCOPE: src/compiler/**, src/app/**, src/lib/common/** and src/lib/*/array.spl
+# (the bootstrap closure) are a HARD zero-bar. Everything else under src/ is a
+# RATCHET against scripts/check/untyped_return_value_baseline.txt (file:name
+# keys): a NEW offender fails; a baselined offender that no longer exists is a
+# STALE baseline and also fails. --generate-baseline is for REVIEWED updates only.
+#
+# Usage: sh scripts/check/check-untyped-return-value.shs [--root DIR] [--selftest-only] [--generate-baseline] [--list]
+set -u
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO_ROOT=$(CDPATH= cd -- "${SCRIPT_DIR}/../.." && pwd)
+ROOT="$REPO_ROOT"; SELFTEST_ONLY=0; GEN=0; LIST=0
+BASELINE="$SCRIPT_DIR/untyped_return_value_baseline.txt"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --root) ROOT="$2"; shift ;;
+    --selftest-only) SELFTEST_ONLY=1 ;;
+    --generate-baseline) GEN=1 ;;
+    --list) LIST=1 ;;
+    *) echo "ERROR — unknown argument: $1"; exit 2 ;;
+  esac
+  shift
+done
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/untyped-ret.XXXXXX") || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -rf "$TMP"' EXIT
+AWK="$TMP/scan.awk"
+cat >"$AWK" <<'AWKEOF'
+# check-untyped-return-value scanner. Emits one line per offending function:
+#   file:line:name:<return sites>
+# Mirrors src/compiler/20.hir/hir_lowering/_Items/module_callable_types.spl
+# infer_untyped_return_type: an untyped, non-generic fn/me whose explicit
+# `return <expr>` site(s) cannot be resolved by the signature-pass scanner
+# (literal int/float/text/bool, `not x`, comparison, typed-param ident).
+function indent_of(s) { match(s, /^[ \t]*/); return RLENGTH }
+function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+function strip_comment(s,  i,c,q) {
+  q=0; for (i=1;i<=length(s);i++){ c=substr(s,i,1); if(c=="\""&&substr(s,i-1,1)!="\\")q=!q; else if(c=="#"&&!q) return substr(s,1,i-1) }
+  return s
+}
+function paren_balance(s,  i,c,n) { n=0; for(i=1;i<=length(s);i++){c=substr(s,i,1); if(c=="(")n++; else if(c==")")n--} return n }
+function pop_to(ind) { while (sp>0 && st_ind[sp] >= ind) { flush(sp); sp-- } }
+function flush(i) {
+  if (st_untyped[i] && st_bad[i] != "") print st_file[i] ":" st_line[i] ":" st_name[i] ":" st_bad[i]
+}
+function resolved(e, params,  p, n, i, nm) {
+  e = trim(e)
+  if (e ~ /^-?[0-9][0-9_]*$/) return 1
+  if (e ~ /^-?[0-9][0-9_]*\.[0-9]+$/) return 1
+  if (e ~ /^"/ && e ~ /"$/ && e !~ /" *[+*\/] *"/ ) return 1
+  if (e == "true" || e == "false") return 1
+  if (e ~ /^not /) return 1
+  if (e ~ /(==|!=|<=|>=| < | > )/ && e !~ /\(/ ) return 1
+  if (e ~ /^[A-Za-z_][A-Za-z0-9_]*$/) {
+    n = split(params, p, ",")
+    for (i=1;i<=n;i++) { nm = p[i]; sub(/^[ \t]*(mut )?/, "", nm); if (nm ~ ("^" e "[ \t]*:")) return 1 }
+  }
+  return 0
+}
+function return_expr(c,  pre, q) {
+  if (c ~ /^[ \t]*return[ \t]+[^ \t]/) { sub(/^[ \t]*return[ \t]+/, "", c); return trim(c) }
+  if (match(c, /:[ \t]*return[ \t]+[^ \t]/)) {
+    pre = substr(c, 1, RSTART); q = gsub(/"/, "\"", pre)
+    if (q % 2 == 1) return ""
+    c = substr(c, RSTART); sub(/^:[ \t]*return[ \t]+/, "", c); return trim(c)
+  }
+  return ""
+}
+function classify_sig(  nm, untyped, ps, a) {
+  if (sig !~ /:[ \t]*$/) return   # one-line body `fn f(x): expr` -- trailing expr, never a `return`
+  sp++
+  st_ind[sp]=sigind; st_line[sp]=sigline; st_bad[sp]=""; st_file[sp]=FILENAME
+  nm=sig; sub(/^((pub|static|async|override|unsafe|const)[ \t]+)*(fn|me)[ \t]+/, "", nm); sub(/[ \t]*[(<].*$/, "", nm)
+  st_name[sp]=nm
+  untyped = (sig !~ /\)[ \t]*->/ )
+  if (sig ~ /^((pub|static|async|override|unsafe|const)[ \t]+)*(fn|me)[ \t]+[A-Za-z_][A-Za-z0-9_]*[ \t]*</) untyped=0
+  st_untyped[sp]=untyped
+  a=index(sig,"("); ps=substr(sig,a+1); sub(/\)[^)]*$/, "", ps)
+  st_params[sp]=ps
+}
+FNR==1 { pop_to(-1); sp=0; indoc=0; sigpend=0 }
+{
+  line=$0
+  if (indoc) { if (line ~ /"""/) indoc=0; next }
+  raw=trim(line)
+  if (raw ~ /^"""/) { if (gsub(/"""/,"\"\"\"",raw) < 2) indoc=1; next }
+  if (raw=="" || raw ~ /^#/) next
+  ind=indent_of(line)
+  code=strip_comment(line)
+  if (sigpend) {
+    sig = sig " " trim(code)
+    if (paren_balance(sig) <= 0) { sigpend=0; classify_sig() }
+    next
+  }
+  pop_to(ind)
+  if (code ~ /^[ \t]*((pub|static|async|override|unsafe|const)[ \t]+)*(fn|me)[ \t]+[A-Za-z_][A-Za-z0-9_]*[ \t]*[(<]/) {
+    sig = trim(code); sigind=ind; sigline=FNR
+    if (paren_balance(sig) <= 0) classify_sig(); else sigpend=1
+    next
+  }
+  e = return_expr(code)
+  if (sp>0 && st_untyped[sp] && e != "") {
+    if (!resolved(e, st_params[sp])) st_bad[sp] = st_bad[sp] (st_bad[sp]==""?"":" | ") "L" FNR " return " e
+  }
+}
+END { pop_to(-1) }
+AWKEOF
+
+scan_tree() { # $1 = root ; prints file:line:name:sites with root-relative paths
+  (cd "$1" && find src -name '*.spl' -not -path '*/vendor/*' 2>/dev/null | LC_ALL=C sort | xargs -r awk -f "$AWK")
+}
+count_files() { (cd "$1" && find src -name '*.spl' -not -path '*/vendor/*' 2>/dev/null | wc -l | tr -d ' '); }
+
+# ---------------------------------------------------------------- selftest
+selftest() {
+  st=$TMP/st; mkdir -p "$st/src/a" "$st/src/lib/common"
+  cat >"$st/src/a/bad.spl" <<'F'
+fn get_cached(source: text):
+    if source == "":
+        return nil
+    var result: {text: text} = {}
+    Some(result)
+
+struct S:
+    v: i64
+    me value():
+        return self.v
+F
+  cat >"$st/src/a/good.spl" <<'F'
+fn typed(source: text) -> Dict<text, text>?:
+    if source == "":
+        return nil
+    nil
+
+fn literal_ok(x: text):
+    if x == "":
+        return 0
+    return 1
+
+fn param_ok(x: text):
+    if x.len() > 3:
+        return x
+    x
+
+fn trailing_only(x: text):
+    """Docstring that mentions return nil must not count."""
+    x + "!"
+
+fn unit(x: text):
+    if x == "":
+        return
+    print x
+
+fn generic<T>(x: T):
+    return x
+
+fn oneliner(x: text): x + "?"
+
+fn in_string(x: text):
+    val s = "return {x}"
+    print s
+F
+  out=$(scan_tree "$st"); st_fail=0
+  echo "$out" | grep -q "^src/a/bad.spl:1:get_cached:" || { echo "selftest: positive fixture get_cached not flagged"; st_fail=1; }
+  echo "$out" | grep -q "^src/a/bad.spl:9:value:"      || { echo "selftest: positive fixture method value not flagged"; st_fail=1; }
+  echo "$out" | grep -q "good.spl" && { echo "selftest: negative fixture flagged: $(echo "$out" | grep good.spl)"; st_fail=1; }
+  [ "$(echo "$out" | grep -c .)" -eq 2 ] || { echo "selftest: expected exactly 2 hits, got: $out"; st_fail=1; }
+  rm -rf "$st/src"; mkdir -p "$st/src"
+  [ "$(scan_tree "$st" | grep -c .)" -eq 0 ] || { echo "selftest: empty tree must yield 0 hits"; st_fail=1; }
+  return $st_fail
+}
+selftest || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
+[ "$SELFTEST_ONLY" -eq 1 ] && { echo "PASS — selftest only (4 fixtures)"; exit 0; }
+
+# ---------------------------------------------------------------- scan
+NFILES=$(count_files "$ROOT")
+[ "$NFILES" -gt 0 ] || { echo "ERROR — nothing was checked (0 .spl files under $ROOT/src)"; exit 2; }
+scan_tree "$ROOT" >"$TMP/hits"
+[ "$LIST" -eq 1 ] && cat "$TMP/hits"
+is_hard() { case "$1" in src/compiler/*|src/app/*|src/lib/common/*|src/lib/*/array.spl) return 0 ;; esac; return 1; }
+: >"$TMP/hard"; : >"$TMP/soft"
+while IFS=: read -r f l n rest; do
+  if is_hard "$f"; then echo "$f:$n (line $l)" >>"$TMP/hard"; else echo "$f:$n" >>"$TMP/soft"; fi
+done <"$TMP/hits"
+LC_ALL=C sort -u "$TMP/soft" >"$TMP/soft.sorted"
+if [ "$GEN" -eq 1 ]; then
+  { echo "# untyped-return-value ratchet baseline (file:function). Generated by"; echo "# scripts/check/check-untyped-return-value.shs --generate-baseline. REVIEWED updates only."; cat "$TMP/soft.sorted"; } >"$BASELINE"
+  echo "PASS — baseline regenerated: $(grep -c . "$TMP/soft.sorted") ratcheted offender(s) written to $BASELINE"; exit 0
+fi
+[ -f "$BASELINE" ] || { echo "ERROR — nothing was checked (baseline missing: $BASELINE)"; exit 2; }
+grep -v '^#' "$BASELINE" | grep . | LC_ALL=C sort -u >"$TMP/base.sorted"
+NEW=$(LC_ALL=C comm -23 "$TMP/soft.sorted" "$TMP/base.sorted")
+STALE=$(LC_ALL=C comm -13 "$TMP/soft.sorted" "$TMP/base.sorted")
+NHARD=$(grep -c . "$TMP/hard"); NNEW=$(echo "$NEW" | grep -c .); NSTALE=$(echo "$STALE" | grep -c .)
+NBASE=$(grep -c . "$TMP/base.sorted")
+if [ "$NHARD" -gt 0 ] || [ "$NNEW" -gt 0 ] || [ "$NSTALE" -gt 0 ]; then
+  [ "$NHARD" -gt 0 ] && { echo "hard-scope (bootstrap closure) offenders:"; sed 's/^/  /' "$TMP/hard"; }
+  [ "$NNEW" -gt 0 ] && { echo "new ratcheted offenders:"; echo "$NEW" | sed 's/^/  /'; }
+  [ "$NSTALE" -gt 0 ] && { echo "stale baseline entries (fixed or removed — update baseline):"; echo "$STALE" | sed 's/^/  /'; }
+  echo "FAIL — $NFILES file(s) scanned, $NHARD hard-scope offender(s), $NNEW new ratcheted offender(s), $NSTALE stale baseline entr(y/ies) (baseline $NBASE)"
+  exit 1
+fi
+echo "PASS — $NFILES file(s) scanned, 0 hard-scope offenders, 0 new, 0 stale (ratchet baseline $NBASE)"
+exit 0
