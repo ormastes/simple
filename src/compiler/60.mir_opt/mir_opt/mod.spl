@@ -196,6 +196,44 @@ enum PassExpectation:
     MustTransformSentinel
     NeverTransforms
 
+enum MirPassBackendOutcome:
+    Selected
+    Delegated
+    Rejected
+    NotApplicable
+
+struct PassWitnessContract:
+    kind: PassKind
+    positive_id: text
+    negative_id: text
+
+enum PassRunDisposition:
+    Transformed
+    Unchanged
+    Skipped
+    Failed
+
+struct PassReasonCount:
+    code: text
+    count: i64
+
+struct PassRunRecord:
+    requested_name: text
+    effective_name: text
+    status: PassStatus
+    expectation: PassExpectation
+    scope: PassScope
+    disposition: PassRunDisposition
+    functions_seen: i64
+    candidates: i64
+    transformed: i64
+    rejected: i64
+    instructions_before: i64
+    instructions_after: i64
+    elapsed_ns: i64
+    elapsed_measured: bool
+    reasons: [PassReasonCount]
+
 struct MirPassDescriptor:
     stable_name: text
     aliases: [text]
@@ -212,6 +250,7 @@ struct MirPassBackendDecision:
     max_cost_class: text
     cost_class: text
     applies: bool
+    outcome: MirPassBackendOutcome
     reason: text
 
 struct MirPipelineBackendPlan:
@@ -255,7 +294,7 @@ fn pass_status(kind: PassKind) -> PassStatus:
         case DeadCodeElimination | ConstantFolding | CopyPropagation | CommonSubexprElim:
             PassStatus.Skeleton
         case InlineSmallFunctions | InlineFunctions | InlineAggressive:
-            PassStatus.Active
+            PassStatus.Skeleton
         case LoopInvariantMotion | LoopUnroll | BoundsCheckElimination | StrengthReduction:
             PassStatus.Disabled("legality proof incomplete")
         case CollectionOpt:
@@ -268,9 +307,13 @@ fn pass_status(kind: PassKind) -> PassStatus:
             # The canonical pass currently discovers candidates and logs
             # blockers; it performs no production MIR rewrite.
             PassStatus.AnalysisOnly
-        case PatternIdiom | PredicatePromote | TargetNarrowForm:
+        case TargetNarrowForm:
+            PassStatus.Skeleton
+        case PatternIdiom | PredicatePromote:
             PassStatus.Active
-        case WriteCoalesce | ReadAheadHoist | SyscallBatch:
+        case ReadAheadHoist:
+            PassStatus.AnalysisOnly
+        case WriteCoalesce | SyscallBatch:
             PassStatus.Active
 
 fn pass_expectation(kind: PassKind) -> PassExpectation:
@@ -291,6 +334,140 @@ fn pass_status_name(status: PassStatus) -> text:
         case RemarkOnly: "remark-only"
         case Skeleton: "skeleton"
         case Disabled(reason): "disabled: " + reason
+
+fn pass_status_kind_name(status: PassStatus) -> text:
+    match status:
+        case Active: "active"
+        case AnalysisOnly: "analysis-only"
+        case RemarkOnly: "remark-only"
+        case Skeleton: "skeleton"
+        case Disabled(_): "disabled"
+
+fn pass_status_reason(status: PassStatus) -> text:
+    match status:
+        case Disabled(reason): reason
+        case _: ""
+
+fn pass_expectation_name(expectation: PassExpectation) -> text:
+    match expectation:
+        case MayTransform: "may-transform"
+        case MustTransformSentinel: "must-transform-sentinel"
+        case NeverTransforms: "never-transforms"
+
+fn mir_pass_backend_outcome_name(outcome: MirPassBackendOutcome) -> text:
+    match outcome:
+        case Selected: "selected"
+        case Delegated: "delegated"
+        case Rejected: "rejected"
+        case NotApplicable: "not-applicable"
+
+fn pass_witness_contract(kind: PassKind) -> PassWitnessContract?:
+    match kind:
+        case PatternIdiom:
+            Some(PassWitnessContract(kind, "pattern.supported_aes_call", "pattern.unsupported_target"))
+        case PredicatePromote:
+            Some(PassWitnessContract(kind, "predicate.mask_cmp_masked_add", "predicate.mismatched_mask"))
+        case WriteCoalesce:
+            Some(PassWitnessContract(kind, "fs.two_stores_same_base", "fs.single_store"))
+        case SyscallBatch:
+            Some(PassWitnessContract(kind, "fs.two_calls_same_callee", "fs.different_callees"))
+        case _: nil
+
+fn pass_witness_registry_integrity_errors() -> [text]:
+    var errors: [text] = []
+    var seen_positive: [text] = []
+    var seen_negative: [text] = []
+    for descriptor in mir_pass_descriptor_registry():
+        val witness = pass_witness_contract(descriptor.kind)
+        if pass_status_allows_transform(descriptor.status):
+            if not witness.?:
+                errors.push("active pass lacks witness contract: " + descriptor.stable_name)
+            else:
+                val found = witness.unwrap()
+                if found.positive_id == "" or found.negative_id == "":
+                    errors.push("active pass has empty witness identity: " + descriptor.stable_name)
+                if seen_positive.contains(found.positive_id):
+                    errors.push("duplicate positive witness identity: " + found.positive_id)
+                else:
+                    seen_positive.push(found.positive_id)
+                if seen_negative.contains(found.negative_id):
+                    errors.push("duplicate negative witness identity: " + found.negative_id)
+                else:
+                    seen_negative.push(found.negative_id)
+        elif witness.?:
+            errors.push("inactive pass must not advertise executable witnesses: " + descriptor.stable_name)
+    errors
+
+fn pass_run_record_new(requested_name: text, effective_name: text,
+                       status: PassStatus, expectation: PassExpectation,
+                       scope: PassScope, disposition: PassRunDisposition) -> PassRunRecord:
+    PassRunRecord(
+        requested_name, effective_name, status, expectation, scope, disposition,
+        0, 0, 0, 0, 0, 0, -1, false, []
+    )
+
+fn pass_run_record_add_reason(record: PassRunRecord, code: text, count: i64) -> PassRunRecord:
+    var result = record
+    if code == "" or count <= 0:
+        return result
+    var updated: [PassReasonCount] = []
+    var found = false
+    for reason in result.reasons:
+        if reason.code == code:
+            updated.push(PassReasonCount(code, reason.count + count))
+            found = true
+        else:
+            updated.push(reason)
+    if not found:
+        updated.push(PassReasonCount(code, count))
+    result.reasons = updated
+    result
+
+fn pass_run_record_integrity_errors(record: PassRunRecord) -> [text]:
+    var errors: [text] = []
+    if record.requested_name == "":
+        errors.push("missing requested pass name")
+    if record.functions_seen < 0 or record.candidates < 0 or record.transformed < 0 or record.rejected < 0:
+        errors.push("negative pass counters")
+    if record.instructions_before < 0 or record.instructions_after < 0:
+        errors.push("negative instruction counters")
+    if record.transformed > record.candidates:
+        errors.push("transformed count exceeds candidates")
+    if record.rejected > record.candidates - record.transformed:
+        errors.push("rejected count exceeds remaining candidates")
+    match record.disposition:
+        case Transformed:
+            if record.transformed <= 0:
+                errors.push("transformed disposition requires a positive transformed count")
+            if not pass_status_allows_transform(record.status):
+                errors.push("inactive pass cannot report a transformation")
+        case Unchanged | Skipped | Failed:
+            if record.transformed != 0:
+                errors.push("non-transforming disposition has transformed candidates")
+    if record.elapsed_measured:
+        if record.elapsed_ns < 0:
+            errors.push("measured elapsed time is negative")
+    elif record.elapsed_ns != -1:
+        errors.push("unmeasured elapsed time must use the -1 sentinel")
+    errors
+
+fn pass_run_record_for_unavailable_request(pass_name: text) -> PassRunRecord:
+    val descriptor = mir_pass_descriptor_for_name(pass_name)
+    if not descriptor.?:
+        var unknown = pass_run_record_new(pass_name, "", PassStatus.Disabled("unknown pass"), PassExpectation.NeverTransforms, PassScope.Function, PassRunDisposition.Failed)
+        return pass_run_record_add_reason(unknown, "unknown_pass", 1)
+    val found = descriptor.unwrap()
+    var skipped = pass_run_record_new(pass_name, found.stable_name, found.status, found.expectation, found.scope, PassRunDisposition.Skipped)
+    match found.status:
+        case AnalysisOnly:
+            skipped = pass_run_record_add_reason(skipped, "analysis_only", 1)
+        case RemarkOnly:
+            skipped = pass_run_record_add_reason(skipped, "remark_only", 1)
+        case Skeleton | Disabled(_):
+            skipped = pass_run_record_add_reason(skipped, "inactive_status", 1)
+        case Active:
+            skipped = pass_run_record_add_reason(skipped, "not_run", 1)
+    skipped
 
 fn mir_pass_descriptor_registry() -> [MirPassDescriptor]:
     [
@@ -350,6 +527,8 @@ fn mir_pass_registry_integrity_errors() -> [text]:
             val resolved = mir_pass_descriptor_for_name(alias)
             if not resolved.? or resolved.unwrap().stable_name != descriptor.stable_name:
                 errors.push("broken pass alias: " + alias + " -> " + descriptor.stable_name)
+    for witness_error in pass_witness_registry_integrity_errors():
+        errors.push(witness_error)
     errors
 
 fn mir_pass_descriptor_for_name(pass_name: text) -> MirPassDescriptor?:
@@ -743,19 +922,19 @@ fn mir_pass_applies_to_backend_budget(pass_name: text, backend_name: text, max_c
 
 fn mir_pass_backend_decision(pass_name: text, backend_name: text, max_cost_class: text) -> MirPassBackendDecision:
     if not mir_pass_known_fast(pass_name):
-        return MirPassBackendDecision(pass_name, backend_name, max_cost_class, "unknown", false, "unknown pass")
+        return MirPassBackendDecision(pass_name, backend_name, max_cost_class, "unknown", false, MirPassBackendOutcome.Rejected, "unknown pass")
     val cost_class = mir_pass_cost_class(pass_name)
     val descriptor = mir_pass_descriptor_for_name(pass_name)
     if not descriptor.?:
-        return MirPassBackendDecision(pass_name, backend_name, max_cost_class, cost_class, false, "missing descriptor")
+        return MirPassBackendDecision(pass_name, backend_name, max_cost_class, cost_class, false, MirPassBackendOutcome.Rejected, "missing descriptor")
     if not pass_status_allows_transform(descriptor.unwrap().status):
-        return MirPassBackendDecision(pass_name, backend_name, max_cost_class, cost_class, false, pass_status_name(descriptor.unwrap().status))
+        return MirPassBackendDecision(pass_name, backend_name, max_cost_class, cost_class, false, MirPassBackendOutcome.Rejected, pass_status_name(descriptor.unwrap().status))
     val backend_skip = mir_pass_backend_skip_reason_fast(pass_name, backend_name)
     if backend_skip.?:
-        return MirPassBackendDecision(pass_name, backend_name, max_cost_class, cost_class, false, backend_skip.unwrap())
+        return MirPassBackendDecision(pass_name, backend_name, max_cost_class, cost_class, false, MirPassBackendOutcome.Delegated, backend_skip.unwrap())
     if not mir_pass_cost_allowed(cost_class, max_cost_class):
-        return MirPassBackendDecision(pass_name, backend_name, max_cost_class, cost_class, false, "cost budget exceeded")
-    MirPassBackendDecision(pass_name, backend_name, max_cost_class, cost_class, true, "ready")
+        return MirPassBackendDecision(pass_name, backend_name, max_cost_class, cost_class, false, MirPassBackendOutcome.Rejected, "cost budget exceeded")
+    MirPassBackendDecision(pass_name, backend_name, max_cost_class, cost_class, true, MirPassBackendOutcome.Selected, "ready")
 
 fn optimizationpipeline_for_backend(level: OptLevel, backend_name: text) -> OptimizationPipeline:
     val passes = optimizationpipeline_pass_names_for_level(level)
@@ -824,6 +1003,36 @@ fn optimizationpipeline_inventory_lines() -> [text]:
             else:
                 lines.push("  - [mir] {pass_name} ({level_name}, requested, unknown)")
     lines
+
+fn mir_opt_json_escape(value: text) -> text:
+    value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+
+fn optimizationpipeline_report_json(level: OptLevel, backend_name: text, max_cost_class: text) -> text:
+    """Deterministic planning report. Execution counters remain null until a
+    PassRunRecord is supplied by an outcome-reporting pass adapter."""
+    var output = "{\"schema\":\"simple.opt-pipeline-report/v1\",\"level\":\"" + mir_opt_json_escape(optlevel_name(level)) + "\",\"backend\":\"" + mir_opt_json_escape(backend_name) + "\",\"max_cost_class\":\"" + mir_opt_json_escape(max_cost_class) + "\",\"passes\":["
+    val requested = optimizationpipeline_pass_names_for_level(level)
+    var ordinal = 0
+    while ordinal < requested.len():
+        if ordinal > 0:
+            output = output + ","
+        val requested_name = requested[ordinal]
+        val descriptor = mir_pass_descriptor_for_name(requested_name)
+        val decision = mir_pass_backend_decision(requested_name, backend_name, max_cost_class)
+        var stable_name = requested_name
+        var status_name = "unknown"
+        var status_reason = "unknown pass"
+        var expectation_name = "never-transforms"
+        if descriptor.?:
+            val found = descriptor.unwrap()
+            stable_name = found.stable_name
+            status_name = pass_status_kind_name(found.status)
+            status_reason = pass_status_reason(found.status)
+            expectation_name = pass_expectation_name(found.expectation)
+        val effective = if decision.applies: "true" else: "false"
+        output = output + "{\"ordinal\":" + ordinal.to_string() + ",\"requested_name\":\"" + mir_opt_json_escape(requested_name) + "\",\"stable_name\":\"" + mir_opt_json_escape(stable_name) + "\",\"requested\":true,\"effective\":" + effective + ",\"status\":\"" + status_name + "\",\"status_reason\":\"" + mir_opt_json_escape(status_reason) + "\",\"expectation\":\"" + expectation_name + "\",\"backend_outcome\":\"" + mir_pass_backend_outcome_name(decision.outcome) + "\",\"backend_reason\":\"" + mir_opt_json_escape(decision.reason) + "\",\"run_outcome\":\"not-run\",\"functions_seen\":null,\"candidates\":null,\"transformed\":null,\"rejected\":null,\"instructions_before\":null,\"instructions_after\":null,\"rejection_reasons\":[],\"verifier_outcome\":\"not-run\"}"
+        ordinal = ordinal + 1
+    output + "]}"
 
 fn optimize_module(module: MirModule, level: OptLevel) -> MirModule:
     """
@@ -1174,7 +1383,11 @@ fn run_typed_pass_on_module(kind: PassKind, module: MirModule) -> MirModule:
 # Exports
 # ============================================================================
 
-export PassKind, PassScope, PassStatus, PassExpectation
+export PassKind, PassScope, PassStatus, PassExpectation, MirPassBackendOutcome
+export PassWitnessContract, pass_witness_contract, pass_witness_registry_integrity_errors
+export PassRunDisposition, PassReasonCount, PassRunRecord
+export pass_run_record_new, pass_run_record_add_reason, pass_run_record_integrity_errors
+export pass_run_record_for_unavailable_request
 export MirPass, MirPassDescriptor, MirPassBackendDecision, MirPipelineBackendPlan
 export TargetOptContext, target_opt_context_default
 export OptLevel, optlevel_name
@@ -1191,8 +1404,10 @@ export mir_bulk_ops_enabled, apply_bulk_recognizers
 export optimize_function
 export mir_pipeline_provider, mir_pass_descriptor, mir_pass_descriptor_with_cost, mir_pass_descriptor_registry, mir_pass_descriptor_for_name
 export pass_status, pass_expectation, pass_status_allows_transform, pass_status_name
+export pass_status_kind_name, pass_status_reason, pass_expectation_name, mir_pass_backend_outcome_name
 export mir_pass_provider_registry, mir_pass_provider_name, mir_pass_uses_pipeline_provider
 export mir_pass_registry_integrity_errors
 export run_named_pass, run_typed_pass_on_function
 export run_pass_on_module, run_typed_pass_on_module
 export pipeline_optimize
+export optimizationpipeline_report_json
