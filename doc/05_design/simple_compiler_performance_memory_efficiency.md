@@ -249,3 +249,12 @@ union of both known sets. The generic policy is canonical; legacy `unknown_decor
 `unknown_attribute` settings alias it bidirectionally for compatibility. Only typed HIR
 may emit category-specific findings. The fallback performs one context traversal and
 allocates at most one fix per unknown line.
+
+### Disabled transform body policy
+
+A disabled transform exposes only its inert compatibility entrypoint, status/reason, and
+analysis predicates that have independent consumers. Unreachable rewrite bodies after an
+unconditional return are forbidden: they add parse/code memory and enable accidental
+activation without proof gates. Collection hoisting remains identity until a replacement
+accepts explicit preheader, dominance, memory-version, effect, zero-trip, and
+speculatability evidence. Header insertion is never a substitute for hoisting.
