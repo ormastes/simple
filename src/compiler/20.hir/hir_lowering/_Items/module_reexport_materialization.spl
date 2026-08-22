@@ -927,6 +927,25 @@ impl HirLowering:
                     self.materialize_imported_callable_dependency(
                         imported_mod, imported_mod_name, dependency,
                         import_span, materialize_enum)
+                # GENERIC ARGUMENTS of a scalar-captured name were dropped
+                # here too. The scalar shortcut above materializes only the
+                # HEAD name -- `Dict` for `Dict<text, MirType>` -- and the
+                # `parser_type_named_dependencies` walk, which DOES recurse
+                # `Named` args, was reachable only from the `else`. So the
+                # cross-module argument was never bound, and the projection
+                # twin dropped it in exactly the same place: a SYMMETRIC gap,
+                # which is why it produced 0 errors and total silence instead
+                # of an `unresolved type:`. Re-running the walk here is a
+                # superset of the scalar name and is idempotent
+                # (`materialize_imported_callable_dependency` short-circuits an
+                # already-bound name), so the scalar fast path is preserved
+                # byte for byte and only the dropped arguments are added.
+                # See doc/08_tracking/bug/hir_unresolved_type_owner_missing_import_2026-08-22.md
+            if param.type_name != "" or param.array_element_name != "":
+                for nested in parser_type_named_dependencies(param.type_):
+                    self.materialize_imported_callable_dependency(
+                        imported_mod, imported_mod_name, nested,
+                        import_span, materialize_enum)
         if callable.has_return_type:
             if callable.return_type_name != "":
                 self.materialize_imported_callable_dependency(
@@ -944,6 +963,12 @@ impl HirLowering:
                 for dependency in composite_deps:
                     self.materialize_imported_callable_dependency(
                         imported_mod, imported_mod_name, dependency,
+                        import_span, materialize_enum)
+            if callable.return_type_name != "" or callable.return_array_element_name != "":
+                # Same generic-argument gap as the parameter path above.
+                for nested in parser_type_named_dependencies(callable.return_type):
+                    self.materialize_imported_callable_dependency(
+                        imported_mod, imported_mod_name, nested,
                         import_span, materialize_enum)
 
     me materialize_imported_callable_dependency(imported_mod: ModuleSurface, imported_mod_name: text, dependency: text, import_span: Span, materialize_enum: bool):

@@ -1,0 +1,198 @@
+#!/bin/sh
+# check-type-walk-constructor-parity.shs
+#
+# Fails when the MATERIALIZATION walk over a parser `Type` handles a TypeKind
+# constructor that the PROJECTION walk neither handles nor explicitly
+# allowlists.
+#
+#   MATERIALIZATION  parser_type_named_dependencies
+#                    src/compiler/10.frontend/parser_types_expr.spl
+#   PROJECTION       imported_surface_type
+#                    src/compiler/20.hir/hir_lowering/_Items/module_callable_types.spl
+#
+# The two walk the SAME parser type with DIFFERENT recursion sets. Every
+# constructor in the first and not the second is a cross-module signature shape
+# whose dependency is bound by materialization and then never consulted by
+# projection -- it dies as a hard `unresolved type: X` blamed on an innocent
+# importer, with no diagnostic naming the owner. Array-of-tuple, pointer and
+# union all shipped that way and were each found the expensive way.
+#
+# Verdict is the LAST line of stdout:
+#   PASS  — <n> constructor(s) checked, 0 unprojected and unallowlisted   (exit 0)
+#   FAIL  — ...                                                          (exit 1)
+#   ERROR — nothing was checked (<reason>)                               (exit 2)
+# A run that compared 0 constructors is ERROR, never a pass.
+#
+# See doc/08_tracking/bug/hir_unresolved_type_owner_missing_import_2026-08-22.md
+
+set -u
+
+ROOT=${ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}
+MAT_FILE="$ROOT/src/compiler/10.frontend/parser_types_expr.spl"
+PROJ_FILE="$ROOT/src/compiler/20.hir/hir_lowering/_Items/module_callable_types.spl"
+ALLOWLIST="$ROOT/scripts/check/type_walk_projection_allowlist.txt"
+
+# Marker -> constructor map for the PROJECTION walk. It dispatches through
+# accessor helpers rather than naming TypeKind constructors, so the mapping is
+# explicit here. A new projection arm MUST add its marker to this list.
+proj_markers() {
+    printf '%s\n' \
+        "parser_type_kind_named_name|Named" \
+        "parser_type_kind_tuple_elements|Tuple" \
+        "parser_type_kind_is_array|Array" \
+        "parser_type_kind_array_element_name|Array" \
+        "parser_type_kind_is_pointer|Pointer" \
+        "parser_type_kind_union_members|Union" \
+        "parser_type_kind_optional_inner|Optional" \
+        "parser_type_kind_atomic_inner|Atomic" \
+        "parser_type_kind_isolated_inner|Isolated" \
+        "parser_type_kind_reference_inner|Reference" \
+        "parser_type_kind_projection_base|Projection" \
+        "parser_type_kind_function_params|Function" \
+        "parser_type_kind_weak_inner|Weak"
+}
+
+# Body of parser_type_named_dependencies, from its `fn` line to the next
+# top-level `fn `/`# ===` boundary.
+mat_body() {
+    awk '/^fn parser_type_named_dependencies\(/{on=1; print; next} on && (/^fn /||/^# =/) {exit} on{print}' "$1"
+}
+
+# Body of `me imported_surface_type(` up to the next `me ` at the same indent.
+proj_body() {
+    awk '/^    me imported_surface_type\(/{on=1; print; next} on && /^    me /{exit} on{print}' "$1"
+}
+
+mat_kinds() {
+    mat_body "$MAT_FILE" \
+        | grep -o 'TypeKind\.[A-Za-z_][A-Za-z0-9_]*' \
+        | sed 's/TypeKind\.//' \
+        | grep -v '^Infer$' \
+        | sort -u
+}
+
+proj_kinds() {
+    body=$(proj_body "$PROJ_FILE")
+    proj_markers | while IFS='|' read -r marker kind; do
+        case "$body" in
+            *"$marker"*) printf '%s\n' "$kind" ;;
+        esac
+    done | sort -u
+}
+
+allow_kinds() {
+    grep -v '^#' "$ALLOWLIST" 2>/dev/null | grep -v '^[[:space:]]*$' | awk '{print $1}' | sort -u
+}
+
+run_scan() {
+    if [ ! -f "$MAT_FILE" ] || [ ! -f "$PROJ_FILE" ] || [ ! -f "$ALLOWLIST" ]; then
+        echo "ERROR — nothing was checked (a required file is missing)"
+        return 2
+    fi
+    MAT=$(mat_kinds)
+    PROJ=$(proj_kinds)
+    ALLOW=$(allow_kinds)
+    N=$(printf '%s\n' "$MAT" | grep -c '[A-Za-z]')
+    if [ "$N" -lt 5 ]; then
+        echo "ERROR — nothing was checked (materialization walk yielded $N constructor(s); the extractor no longer matches the source)"
+        return 2
+    fi
+    MISSING=""
+    for k in $MAT; do
+        printf '%s\n' "$PROJ" | grep -qx "$k" && continue
+        printf '%s\n' "$ALLOW" | grep -qx "$k" && continue
+        MISSING="$MISSING $k"
+    done
+    STALE=""
+    for k in $ALLOW; do
+        printf '%s\n' "$PROJ" | grep -qx "$k" && STALE="$STALE $k"
+    done
+    if [ -n "$MISSING" ] || [ -n "$STALE" ]; then
+        MSG="FAIL — $N constructor(s) checked"
+        [ -n "$MISSING" ] && MSG="$MSG; unprojected and unallowlisted:$MISSING"
+        [ -n "$STALE" ] && MSG="$MSG; stale allowlist (now projected):$STALE"
+        echo "$MSG"
+        return 1
+    fi
+    echo "PASS — $N constructor(s) checked, 0 unprojected and unallowlisted"
+    return 0
+}
+
+selftest() {
+    TD=$(mktemp -d) || return 1
+    fails=0
+    # Fixture 1: a constructor materialized, not projected, not allowlisted -> FAIL
+    mkdir -p "$TD/f1/src/compiler/10.frontend" "$TD/f1/src/compiler/20.hir/hir_lowering/_Items" "$TD/f1/scripts/check"
+    cat > "$TD/f1/src/compiler/10.frontend/parser_types_expr.spl" <<'EOT'
+fn parser_type_named_dependencies(type_: Type) -> [text]:
+    if disc == rt_enum_discriminant(TypeKind.Named("", [])): return []
+    if disc == rt_enum_discriminant(TypeKind.Tuple([])): return []
+    if disc == rt_enum_discriminant(TypeKind.Array(p, nil)): return []
+    if disc == rt_enum_discriminant(TypeKind.Union([])): return []
+    if disc == rt_enum_discriminant(TypeKind.Pointer(p, false)): return []
+    if disc == rt_enum_discriminant(TypeKind.Brandnew(p)): return []
+    []
+EOT
+    cat > "$TD/f1/src/compiler/20.hir/hir_lowering/_Items/module_callable_types.spl" <<'EOT'
+    me imported_surface_type(type_: Type, m: text) -> HirType:
+        val n = parser_type_kind_named_name(type_.kind)
+        val t = parser_type_kind_tuple_elements(type_.kind)
+        val a = parser_type_kind_is_array(type_.kind)
+        val u = parser_type_kind_union_members(type_.kind)
+        val p = parser_type_kind_is_pointer(type_.kind)
+    me next_thing():
+        ()
+EOT
+    : > "$TD/f1/scripts/check/type_walk_projection_allowlist.txt"
+    out=$(ROOT="$TD/f1" MAT_FILE="" sh "$0" --scan-only 2>&1); rc=$?
+    case "$out" in
+        *"FAIL"*Brandnew*) : ;;
+        *) echo "selftest: fixture 1 (new unprojected constructor) did not FAIL naming it: $out"; fails=$((fails+1)) ;;
+    esac
+    # Fixture 2: same, but allowlisted -> PASS
+    cp -r "$TD/f1" "$TD/f2"
+    echo "Brandnew  fixture reason" > "$TD/f2/scripts/check/type_walk_projection_allowlist.txt"
+    out=$(ROOT="$TD/f2" sh "$0" --scan-only 2>&1); rc=$?
+    case "$out" in
+        PASS*) : ;;
+        *) echo "selftest: fixture 2 (allowlisted) did not PASS: $out"; fails=$((fails+1)) ;;
+    esac
+    # Fixture 3: stale allowlist (allowlisted AND projected) -> FAIL
+    cp -r "$TD/f1" "$TD/f3"
+    echo "Union  fixture reason" > "$TD/f3/scripts/check/type_walk_projection_allowlist.txt"
+    out=$(ROOT="$TD/f3" sh "$0" --scan-only 2>&1); rc=$?
+    case "$out" in
+        *"stale allowlist"*Union*) : ;;
+        *) echo "selftest: fixture 3 (stale allowlist) did not FAIL: $out"; fails=$((fails+1)) ;;
+    esac
+    # Fixture 4: extractor matches nothing -> ERROR, never a pass
+    cp -r "$TD/f1" "$TD/f4"
+    echo "" > "$TD/f4/src/compiler/10.frontend/parser_types_expr.spl"
+    out=$(ROOT="$TD/f4" sh "$0" --scan-only 2>&1); rc=$?
+    case "$out" in
+        ERROR*) [ "$rc" = 2 ] || { echo "selftest: fixture 4 exit $rc, want 2"; fails=$((fails+1)); } ;;
+        *) echo "selftest: fixture 4 (empty walk) did not ERROR: $out"; fails=$((fails+1)) ;;
+    esac
+    rm -rf "$TD"
+    [ "$fails" = 0 ] && return 0
+    echo "ERROR — nothing was checked (selftest failed: $fails fixture(s))"
+    return 2
+}
+
+case "${1:-}" in
+    --scan-only)
+        MAT_FILE="$ROOT/src/compiler/10.frontend/parser_types_expr.spl"
+        PROJ_FILE="$ROOT/src/compiler/20.hir/hir_lowering/_Items/module_callable_types.spl"
+        ALLOWLIST="$ROOT/scripts/check/type_walk_projection_allowlist.txt"
+        run_scan
+        exit $?
+        ;;
+    --selftest)
+        selftest
+        exit $?
+        ;;
+esac
+
+selftest || exit 2
+run_scan
+exit $?

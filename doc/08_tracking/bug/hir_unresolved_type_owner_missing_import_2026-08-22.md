@@ -361,3 +361,126 @@ The durable lesson for this class: **whenever a new constructor is added to
 `parser_type_named_dependencies`, the projection must gain the matching arm in
 the same change**, or a cross-module signature using it fails on an innocent
 third party with no diagnostic naming the owner.
+
+---
+
+## Follow-up 2026-08-22 (d) — the silent generic-argument drop, and the durable guard
+
+Follow-up (c) recorded two items rather than fixing them. Both are closed here,
+plus the enforcement it asked for.
+
+### 1. Generic arguments were dropped by BOTH walks — a symmetric gap
+
+(c) blamed the projection alone: "the scalar `type_name` branch calls
+`lower_named_kind(type_name, [], span)` — it drops generic arguments". That is
+true but only half the mechanism, and the missing half is why the probe read 0
+errors. `materialize_imported_callable_type_dependencies_inner`
+(`module_reexport_materialization.spl:916-947`) dispatches on the SAME scalar
+capture:
+
+```
+for param in callable.params:
+    if param.type_name != "":            <- "Dict" for Dict<text, MirType>
+        ... materialize that ONE name
+    elif param.array_element_name != "":
+        ...
+    else:
+        for dependency in parser_type_named_dependencies(param.type_):   <- the walk that DOES recurse args
+```
+
+So for a scalar-captured generic the argument-recursing walk was **never
+reached**. Materialization bound only `Dict`; projection then also projected
+only `Dict`. Symmetric — hence no `unresolved type:`, hence 0 errors, hence the
+(c) warning that 0 must not be read as "handled" was exactly right.
+
+### The consequence, measured, not argued
+
+`fn map_struct(d: Dict<text, MirType>)` imported across modules. The importer's
+own symbol table records the callable's first parameter as — verbatim from the
+new spec's probe of `symbols.get_symbol(lookup("map_struct")).type_`:
+
+| | first param as recorded by the importer |
+|---|---|
+| pre-fix | `Dict<any,any>` |
+| post-fix | `Dict<text,named>` (`named` = the real cross-module `MirType` symbol) |
+
+`lower_named_kind("Dict", [], span)` hits its zero-argument recovery arm and
+builds `Dict<any, any>`, so **both** the key and the cross-module value type are
+erased. Every later phase that reads that signature — inference, MIR lowering,
+layout — sees `any`. It is a silent type-fidelity loss with no diagnostic
+anywhere, which is a worse failure mode than the array-of-tuple/pointer/union
+arms fixed in (c): those at least errored.
+
+The pre-fix negative control is the sharper evidence: with the owner's `use` line
+**removed entirely**, the fixture still produced **zero** errors pre-fix. The drop
+was swallowing the dependency outright, not merely under-resolving it.
+
+### Fix
+
+- `module_callable_types.spl` — new `imported_surface_projected_named_args`;
+  both scalar branches (`imported_surface_type` and
+  `imported_surface_type_projected`) now project each generic argument in the
+  OWNER's qualified scope and carry them into `Named(sym, args)` /
+  `lower_named_kind(name, args, span)`. The argument-less path is unchanged byte
+  for byte, and `imported_surface_type_projected` consults the retained parser
+  `Type` only when it still *is* the named type the scalar capture describes
+  (`parser_type_kind_named_name(type_.kind) == type_name`), since `type_name`
+  may have been captured before the Type crossed a nested boundary.
+- `module_reexport_materialization.spl` — when the scalar shortcut is taken for
+  a param or the return type, additionally run
+  `parser_type_named_dependencies` over the retained Type. A superset of the
+  scalar name and idempotent, so the fast path is preserved and only the dropped
+  arguments are added.
+
+### 2. `Weak` (`-T`) — fixed on the materialization side
+
+`parser_type_named_dependencies` gained the `TypeKind.Weak` arm. Not fixed on the
+projection side, deliberately and with a reason recorded in the allowlist below:
+HIR has **no** `Weak` kind, so `lower_type` already erases `-T` to `Infer`
+without erroring — there is nothing to project into, and inventing a mapping
+would be the kind of unproven "fix" this lane already had to revert once.
+Evidence of scope: owned `.spl` carries **zero** `-T` type positions (measured
+2026-08-22; the only `: -X` grep hits are negative numeric literals in
+`engine/render/camera.spl`). This closes a latent gap, not a live one.
+
+### 3. The durable rule is now enforceable
+
+`scripts/check/check-type-walk-constructor-parity.shs` (+
+`scripts/check/type_walk_projection_allowlist.txt`) fails when
+`parser_type_named_dependencies` handles a `TypeKind` constructor that
+`imported_surface_type` neither handles nor allowlists **with a reason** — and
+fails equally on a STALE allowlist line (a constructor listed as unprojected
+that is now projected), because a list that no longer describes the tree is how
+a ratchet silently stops ratcheting. Projection dispatches through accessor
+helpers rather than naming constructors, so the marker→constructor map lives in
+the script and a new projection arm must add its marker there. Verdict is the
+last stdout line, same convention as the pre-push guards; a run that compared
+fewer than 5 constructors is `ERROR — nothing was checked`, never a pass.
+`--selftest` runs before every scan and is fatal (4 fixtures: a new unprojected
+constructor must FAIL naming it; the same constructor allowlisted must PASS; an
+allowlisted-but-projected constructor must FAIL as stale; an extractor that
+matches nothing must ERROR with exit 2).
+
+Measured: `PASS — 12 constructor(s) checked, 0 unprojected and unallowlisted`.
+Allowlist holds 7 (`Function`, `Optional`, `Reference`, `Atomic`, `Isolated`,
+`Projection`, `Weak`) — every one of them probed at 0 errors in (c), recorded
+rather than silently tolerated.
+
+### Reproduce spec
+
+`test/01_unit/compiler/hir/imported_generic_argument_projection_spec.spl` —
+measured **2 of 4 FAIL pre-fix, 4/4 PASS post-fix** (fresh worktree at
+`624ee9947f6`, seed `/mnt/data/worktrees/goal-main-1/bin/simple`,
+`SIMPLE_TIMEOUT_SECONDS=0`). It asserts the wrong OUTCOME (`Dict<any,any>` vs
+`Dict<text,named>` as recorded in the importer's symbol table), not merely the
+absence of an error, covers the return-type path as well as the parameter path,
+and carries a guard-the-guard: with the owner's import stripped the same
+signature must still fail, so the spec cannot go green because MirType started
+resolving in the IMPORTER's scope.
+
+### Pre-existing red, not introduced here
+
+`test/01_unit/compiler/hir/imported_tuple_signature_dependency_spec.spl` is
+`2 examples, 2 failures` at `624ee9947f6` **with and without** this lane's source
+changes (measured both ways by stashing). Recorded rather than stepped over
+silently; it is a separate defect from this one.
