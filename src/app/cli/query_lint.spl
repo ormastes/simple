@@ -13,8 +13,8 @@ use app.cli.query_lint_scan.{lint_scan_line}
 use compiler.tools.lint._LintMain.config_and_model.{LintConfig, LintLevel, map_lint_code_to_config_name, find_project_sdn}
 
 # AST-based lint pass imports
-use compiler.core.ast.{ast_reset, module_get_decls}
-use compiler.core.parser.{parse_module_silent, parser_has_errors}
+use compiler.core.ast.{module_get_decls}
+use compiler.core.parser.{parse_module_silent_checked, parser_has_errors, parser_set_had_error}
 use compiler.semantics.lint.argument_count.{check_argument_count}
 use compiler.semantics.lint.primitive_types.{is_bare_primitive_name}
 use compiler.semantics.lint.collection_patterns.{check_collection_patterns}
@@ -637,11 +637,19 @@ fn _run_ast_lint_passes(source: text, file: text, format: text) -> i64:
     var count = 0
     val lines = source.split("\n")
 
-    # Parse source into AST arena
-    ast_reset()
-    parse_module_silent(source, file)
-    if parser_has_errors():
-        return 0
+    # Parse source into the AST arena. The checked result must cross the parser
+    # module boundary by value; parse_module_silent() followed by
+    # parser_has_errors() can fail open in self-hosted execution.
+    val previous_parse_error = parser_has_errors()
+    val parse_failed = parse_module_silent_checked(source, file)
+    parser_set_had_error(previous_parse_error)
+    if parse_failed:
+        val message = "NOT LINTED: source did not parse - every AST-based query lint was skipped for this file"
+        if format == "json":
+            _diag_emit_or_collect("{\"severity\":1,\"code\":\"PARSE001\",\"message\":\"{message}\",\"line\":1,\"col\":1,\"end_line\":1,\"end_col\":1,\"tags\":[],\"source\":\"simple-lint\"}")
+        else:
+            print "{file}:1: error[PARSE001]: {message}"
+        return 1
     val decl_indices = module_get_decls()
 
     if decl_indices.len() == 0:
@@ -667,12 +675,16 @@ fn _run_ast_lint_passes(source: text, file: text, format: text) -> i64:
         if _lint_code_suppressed(w.code):
             continue
         val line_num = _find_fn_line_in_source(lines, w.item_name)
-        val sev = _severity_text_to_json(w.severity)
+        # These legacy checks run before type/effect completion. Keep them at
+        # warning severity and disclose the missing proof rather than allowing
+        # a textual HIGH label to look like a proven error.
+        val uncertainty = "source-pattern fallback; receiver type, effects, aliasing, and mutation version are unresolved"
+        val advisory_message = "{w.message} ({uncertainty})"
         if format == "json":
-            val msg = _escape_json(w.message)
-            _diag_emit_or_collect("{\"severity\":{sev},\"code\":\"{w.code}\",\"message\":\"{msg}\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":1,\"tags\":[],\"source\":\"simple-lint\"}")
+            val msg = _escape_json(advisory_message)
+            _diag_emit_or_collect("{\"severity\":2,\"code\":\"{w.code}\",\"message\":\"{msg}\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":1,\"tags\":[],\"source\":\"simple-lint\"}")
         else:
-            print "{file}:{line_num}: {w.severity}[{w.code}]: {w.message}"
+            print "{file}:{line_num}: warning[{w.code}]: {advisory_message}"
         count = count + 1
 
     # --- C3: DTYP001 — duplicate typed argument detection ---
