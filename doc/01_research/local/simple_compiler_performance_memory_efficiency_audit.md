@@ -1733,3 +1733,20 @@ and byte offsets. Parsing accepts lines directly; each class indexes real fields
 and unambiguous dummy names once; each line extracts only actual accessor-shaped
 call names for dictionary lookup. The public source wrapper remains compatible
 and performs one split for standalone callers. Conflicting mappings fail closed.
+
+### Warning-path quadratic scan removals
+
+The active `primitive_api` rule asked `line_is_allowed` to walk backward through
+comments, blanks and annotations for every source line before checking whether
+the line was a public function. A comment-only file therefore performed
+`1 + ... + lines` suppression work while it could not emit a finding. Candidate
+classification now occurs first; byte offsets advance once on rejected lines,
+and suppression runs only for public-function candidates. Because declarations
+bound their preceding annotation runs, total work is linear in source lines.
+
+The `_spec.spl` minimal-docstring warning separately counted delimiters with
+`source.slice(cursor).find`, repeatedly allocating and searching the remaining
+suffix. It now uses absolute `index_of_from` cursor advancement, reducing worst-
+case `O(N^2)` copied/scanned bytes to `O(N)` time and `O(1)` auxiliary memory.
+Two byte-identical `check_silent_default_spl` method declarations were also
+removed so the warning has one implementation owner.
