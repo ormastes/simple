@@ -24,13 +24,13 @@ fn llvm_codegen_bare_metal_requested() -> bool:
         requested_target = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
     mir_target_context_os_from(requested_target, "") == "baremetal"
 
-fn llvm_codegen_target_config(options: BackendCompileOptions) -> LlvmTargetConfig:
-    if llvm_codegen_bare_metal_requested():
+fn llvm_codegen_target_config_for(options: BackendCompileOptions, bare_metal: bool) -> LlvmTargetConfig:
+    if bare_metal:
         return LlvmTargetConfig.for_target_portable_numeric_baremetal(options.target, nil)
     LlvmTargetConfig.for_target_portable_numeric(options.target, nil)
 
-fn llvm_codegen_translator(module_name: text, target: CodegenTarget) -> MirToLlvm:
-    if llvm_codegen_bare_metal_requested():
+fn llvm_codegen_translator_for(module_name: text, target: CodegenTarget, bare_metal: bool) -> MirToLlvm:
+    if bare_metal:
         return MirToLlvm.create_baremetal(module_name, target, nil)
     MirToLlvm.create(module_name, target, nil)
 
@@ -42,35 +42,40 @@ class LlvmCodegenAdapter:
     """Adapts MirToLlvm translator to the Codegen trait interface."""
     options: BackendCompileOptions
 
-pub fn llvm_translate_module_direct_ir(options: BackendCompileOptions, module: MirModule) -> text:
+fn llvm_translate_module_direct_ir_for(options: BackendCompileOptions, module: MirModule, bare_metal: bool) -> text:
     val simpleos_header = match options.target:
         case CodegenTarget.SimpleOS_X86_64: true
         case _: false
     llvm_ir_builder_set_simpleos_header(simpleos_header)
-    var translator = llvm_codegen_translator(module.name, options.target)
+    var translator = llvm_codegen_translator_for(module.name, options.target, bare_metal)
     if options.debug_info:
         translator.enable_debug_info()
     val ir = translator.translate_module(module)
     llvm_ir_builder_set_simpleos_header(false)
     ir
 
+pub fn llvm_translate_module_direct_ir(options: BackendCompileOptions, module: MirModule) -> text:
+    llvm_translate_module_direct_ir_for(
+        options, module, llvm_codegen_bare_metal_requested())
+
 pub fn llvm_compile_module_direct(options: BackendCompileOptions, module: MirModule) -> Result<CodegenOutput, CompileError>:
     val trace_enabled = llvm_codegen_trace_enabled()
+    val bare_metal = llvm_codegen_bare_metal_requested()
     if trace_enabled:
         print "[llvm-direct] start"
         print "[llvm-direct] module-name {module.name}"
-        print "[llvm-direct] function-count {module.functions.keys().len()}"
+        print "[llvm-direct] function-count {module.functions.len()}"
         for fn_ in module.functions.values():
             print "[llvm-direct] function-name {fn_.name}"
     # Translate MIR to LLVM IR
     if trace_enabled:
         print "[llvm-direct] config"
-    val config = llvm_codegen_target_config(options)
+    val config = llvm_codegen_target_config_for(options, bare_metal)
     if trace_enabled:
         print "[llvm-direct] translator"
     if trace_enabled:
         print "[llvm-direct] translate"
-    val llvm_ir = llvm_translate_module_direct_ir(options, module)
+    val llvm_ir = llvm_translate_module_direct_ir_for(options, module, bare_metal)
 
     # Compile IR to object code via llc
     if trace_enabled:
@@ -91,10 +96,12 @@ pub fn llvm_compile_module_direct(options: BackendCompileOptions, module: MirMod
 
 pub fn llvm_compile_module_direct_compiled(options: BackendCompileOptions, module: MirModule) -> Result<CompiledModule, CompileError>:
     val trace_enabled = llvm_codegen_trace_enabled()
+    val bare_metal = llvm_codegen_bare_metal_requested()
     if trace_enabled:
         print "[llvm-direct] compiled:start"
-    val config = llvm_codegen_target_config(options)
-    var translator = llvm_codegen_translator("app.cli.bootstrap_main", options.target)
+    val config = llvm_codegen_target_config_for(options, bare_metal)
+    var translator = llvm_codegen_translator_for(
+        "app.cli.bootstrap_main", options.target, bare_metal)
     if options.debug_info:
         translator.enable_debug_info()
     val llvm_ir = translator.translate_module(module)
