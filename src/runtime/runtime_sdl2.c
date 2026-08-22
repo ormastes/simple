@@ -723,7 +723,7 @@ void rt_sdl2_destroy_window(int64_t handle) {
 
 int64_t rt_sdl2_get_window_width(int64_t handle) {
     SDL_Window* win = sdl2_window_get(handle);
-    if (!win) return 0;
+    if (!win) return -1;
     int w = 0, h = 0;
     SDL_GetWindowSize(win, &w, &h);
     return (int64_t)w;
@@ -731,7 +731,7 @@ int64_t rt_sdl2_get_window_width(int64_t handle) {
 
 int64_t rt_sdl2_get_window_height(int64_t handle) {
     SDL_Window* win = sdl2_window_get(handle);
-    if (!win) return 0;
+    if (!win) return -1;
     int w = 0, h = 0;
     SDL_GetWindowSize(win, &w, &h);
     return (int64_t)h;
@@ -1135,7 +1135,7 @@ bool rt_sdl2_set_window_position(int64_t handle, int64_t x, int64_t y) {
 
 int64_t rt_sdl2_get_window_position_x(int64_t handle) {
     SDL_Window* win = sdl2_window_get(handle);
-    if (!win) return 0;
+    if (!win) return INT64_MIN;
     int x = 0, y = 0;
     SDL_GetWindowPosition(win, &x, &y);
     return (int64_t)x;
@@ -1143,7 +1143,7 @@ int64_t rt_sdl2_get_window_position_x(int64_t handle) {
 
 int64_t rt_sdl2_get_window_position_y(int64_t handle) {
     SDL_Window* win = sdl2_window_get(handle);
-    if (!win) return 0;
+    if (!win) return INT64_MIN;
     int x = 0, y = 0;
     SDL_GetWindowPosition(win, &x, &y);
     return (int64_t)y;
@@ -1485,6 +1485,10 @@ int64_t rt_sdl_event_window_data2(void) {
 
 #ifdef SIMPLE_SDL2_HANDLE_SELFTEST
 int main(void) {
+    if (rt_sdl2_get_window_width(1) != -1 ||
+        rt_sdl2_get_window_height(1) != -1 ||
+        rt_sdl2_get_window_position_x(1) != INT64_MIN ||
+        rt_sdl2_get_window_position_y(1) != INT64_MIN) return 11;
     if (rt_sdl2_set_window_title(1, "probe") ||
         rt_sdl2_set_window_resizable(1, 1) ||
         rt_sdl2_set_window_size(1, 1, 1) ||

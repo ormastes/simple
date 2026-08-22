@@ -538,3 +538,17 @@ declarations. SDL functions whose underlying API itself returns `void` prove
 only accepted arguments/live handles, not post-call OS success, and provider
 artifact evidence remains unsigned; this is fail-closed contract hardening,
 not full verification.
+
+SDL2 window width/height and x/y position reads previously returned `0` for a
+stale, forged, or off-owner-thread handle, fabricating valid geometry. Width
+and height now use `-1`; coordinates use `INT64_MIN`. The four raw declarations
+record those exact contracts, and `window_get_size`, `window_get_position`,
+inner size, and outer size expose typed absence with lexical unsafe call scopes.
+The generation sabotage fixture asserts all four invalid-handle results.
+
+The wrappers retain the existing two native reads per size or position request;
+no extra validity query, allocation, lock, hash, lookup, or retry was added.
+Optimized C compilation, both Simple facade checks, and the read-contract hot-
+path audit pass. Inventory improves to 189 contracted and 287 uncontracted
+unsafe declarations. Successful OS reads still rely on SDL semantics and the
+provider remains unsigned, so this is fail-closed but not fully verified.

@@ -104,3 +104,7 @@ passing placeholder.
     Rust dispatch, and Simple; compositor resize commits only after success and
     the hot path is unchanged. Continue through remaining size/position reads,
     lifecycle, cursor, and property contracts before signed provider admission.
+18. SDL2 size/position reads now use disjoint invalid-handle sentinels and
+    optional wrappers without extra native calls. Continue through lifecycle,
+    cursor, flag, and remaining property contracts, then signed admission and
+    sanitizer evidence.

@@ -29,9 +29,9 @@ extern fn rt_sdl2_quit()
 extern fn rt_sdl2_create_window(title: text, width: i64, height: i64) -> i64
 @unsafe(reason: "raw SDL2 provider ABI", capabilities: [ffi])
 extern fn rt_sdl2_destroy_window(handle: i64)
-@unsafe(reason: "raw SDL2 provider ABI", capabilities: [ffi])
+@unsafe(reason: "raw SDL2 generation-checked size ABI; negative sentinel means invalid handle", capabilities: [ffi])
 extern fn rt_sdl2_get_window_width(handle: i64) -> i64
-@unsafe(reason: "raw SDL2 provider ABI", capabilities: [ffi])
+@unsafe(reason: "raw SDL2 generation-checked size ABI; negative sentinel means invalid handle", capabilities: [ffi])
 extern fn rt_sdl2_get_window_height(handle: i64) -> i64
 @unsafe(reason: "raw SDL2 borrowed title status ABI; false sentinel means invalid handle or title", capabilities: [ffi])
 extern fn rt_sdl2_set_window_title(handle: i64, title: text) -> bool
@@ -111,9 +111,9 @@ extern fn rt_sdl2_set_window_fullscreen_checked(handle: i64, fullscreen: i64) ->
 extern fn rt_sdl2_set_window_size(handle: i64, width: i64, height: i64) -> bool
 @unsafe(reason: "raw SDL2 generation-checked status ABI; false sentinel means invalid handle or coordinate", capabilities: [ffi])
 extern fn rt_sdl2_set_window_position(handle: i64, x: i64, y: i64) -> bool
-@unsafe(reason: "raw SDL2 provider ABI", capabilities: [ffi])
+@unsafe(reason: "raw SDL2 generation-checked position ABI; INT64_MIN sentinel means invalid handle", capabilities: [ffi])
 extern fn rt_sdl2_get_window_position_x(handle: i64) -> i64
-@unsafe(reason: "raw SDL2 provider ABI", capabilities: [ffi])
+@unsafe(reason: "raw SDL2 generation-checked position ABI; INT64_MIN sentinel means invalid handle", capabilities: [ffi])
 extern fn rt_sdl2_get_window_position_y(handle: i64) -> i64
 @unsafe(reason: "raw SDL2 generation-checked status ABI; false sentinel means invalid handle", capabilities: [ffi])
 extern fn rt_sdl2_show_window(handle: i64) -> bool
@@ -348,13 +348,17 @@ fn window_mouse_position() -> Position?:
         return nil
     Position(x: x, y: y)
 
-@unsafe(reason: "minimal direct SDL2 provider call", capabilities: [ffi])
-fn window_get_size(window: Window) -> Size:
+fn window_get_size(window: Window) -> Size?:
     if not window.is_valid:
-        Size(width: 0, height: 0)
+        nil
     else:
-        val w = rt_sdl2_get_window_width(window.handle)
-        val h = rt_sdl2_get_window_height(window.handle)
+        var w: i64 = -1
+        var h: i64 = -1
+        unsafe(capabilities: [ffi]):
+            w = rt_sdl2_get_window_width(window.handle)
+            h = rt_sdl2_get_window_height(window.handle)
+        if w < 0 or h < 0:
+            return nil
         Size(width: w, height: h)
 
 fn window_set_size(window: Window, size: Size) -> bool:
@@ -366,13 +370,18 @@ fn window_set_size(window: Window, size: Size) -> bool:
             ok = rt_sdl2_set_window_size(window.handle, size.width, size.height)
         ok
 
-@unsafe(reason: "minimal direct SDL2 provider call", capabilities: [ffi])
-fn window_get_position(window: Window) -> Position:
+fn window_get_position(window: Window) -> Position?:
     if not window.is_valid:
-        Position(x: 0, y: 0)
+        nil
     else:
-        val px = rt_sdl2_get_window_position_x(window.handle)
-        val py = rt_sdl2_get_window_position_y(window.handle)
+        val invalid_coordinate: i64 = -9223372036854775807 - 1
+        var px: i64 = invalid_coordinate
+        var py: i64 = invalid_coordinate
+        unsafe(capabilities: [ffi]):
+            px = rt_sdl2_get_window_position_x(window.handle)
+            py = rt_sdl2_get_window_position_y(window.handle)
+        if px == invalid_coordinate or py == invalid_coordinate:
+            return nil
         Position(x: px, y: py)
 
 fn window_set_position(window: Window, pos: Position) -> bool:
@@ -384,11 +393,11 @@ fn window_set_position(window: Window, pos: Position) -> bool:
             ok = rt_sdl2_set_window_position(window.handle, pos.x, pos.y)
         ok
 
-fn window_get_inner_size(window: Window) -> Size:
+fn window_get_inner_size(window: Window) -> Size?:
     # SDL2 window size is the client area (inner size)
     window_get_size(window)
 
-fn window_get_outer_size(window: Window) -> Size:
+fn window_get_outer_size(window: Window) -> Size?:
     # SDL2 does not distinguish outer size easily; return inner size
     window_get_size(window)
 
