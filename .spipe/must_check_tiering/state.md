@@ -295,3 +295,10 @@ implementation-blocked-by-bootstrap-authority
   `driver_pipeline_passes.spl` (15) and `driver_pipeline_aop.spl` (19). The
   already-failed long scan was terminated under the iteration/runaway guard.
   Stage 4, deployment, lightweight pre-push, and GitHub push were refused.
+- resumed-cycle-3-fail: Scalar route validation, canonical direct dependency
+  imports, and Dict-free origin lookup reduced the first driver HIR failure
+  from eight unresolved types to five unresolved `Span` types, but did not
+  converge. The final run reached HIR module 6 at +326955 ms with 777240 KiB
+  RSS. This is no material improvement over the diagnostic baseline (+240864
+  ms at module 5, 776960 KiB RSS). The three-cycle cap is exhausted; Stage 4,
+  deployment, lightweight pre-push, and GitHub push remain refused.
