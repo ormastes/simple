@@ -5,6 +5,7 @@
 
 use compiler.mir.mir_data.{MirInst, MirInstKind, MirTerminator, MirOperand, MirOperandKind, MirBinOp, LocalId, BlockId}
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
+use compiler.mir.mir_types.{MirConstValue}
 use compiler.mir_opt.mir_opt.auto_vectorize_types.{VectorLoopInfo, ArrayAccess}
 
 # ============================================================================
@@ -451,6 +452,15 @@ fn get_operand_local(op: MirOperand) -> LocalId?:
         case Move(local): Some(local)
         case Const(_, _): nil
 
+fn operand_is_integer_one(op: MirOperand) -> bool:
+    """True only for the exact integer unit-step constant."""
+    match op.kind:
+        case Const(value, _):
+            match value:
+                case Int(integer): integer == 1
+                case _: false
+        case _: false
+
 # ============================================================================
 # Loop Detection
 # ============================================================================
@@ -547,9 +557,10 @@ fn detect_loop_bounds(func: MirFunction, header: MirBlock, cond: MirOperand, exi
         case _: return nil
 
     # Step 4: Verify step == 1 by finding the index-increment BinOp:
-    #   %i_next = BinOp(Add, %i, 1)   where right is a small constant
-    # We check across the full header block (the increment may live here or in
-    # the body; if we cannot confirm step=1 we return nil).
+    #   %i_next = BinOp(Add, %i, 1)
+    # Only the header and its direct loop-body successors are admissible.
+    # Scanning unrelated function blocks can borrow an increment from another
+    # loop and incorrectly authorize a rewrite.
     var found_unit_step = false
     for inst in header.instructions:
         match inst.kind:
@@ -562,19 +573,25 @@ fn detect_loop_bounds(func: MirFunction, header: MirBlock, cond: MirOperand, exi
                         case Copy(local): local.id == induction_local_id
                         case Move(local): local.id == induction_local_id
                         case _: false
-                    val right_is_one = match right.kind:
-                        case Const(_, _): true   # conservative: any Const on right of Add
-                        case _: false
+                    val right_is_one = operand_is_integer_one(right)
                     if left_is_induction and right_is_one:
                         found_unit_step = true
             case _:
                 pass_do_nothing
 
-    # If the increment is not in the header, also scan body blocks for it.
-    # We look for BinOp(Add, %induction, Const) in any block of the function.
+    var candidate_body_ids: [i64] = []
+    match header.terminator:
+        case If(_, then_, else_):
+            if then_.id != exit.id and then_.id != header.id.id:
+                candidate_body_ids.push(then_.id)
+            if else_.id != exit.id and else_.id != header.id.id:
+                candidate_body_ids.push(else_.id)
+        case _: pass_do_nothing
+
+    # If the increment is not in the header, scan only direct body blocks.
     if not found_unit_step:
         for block in func.blocks:
-            if block.id.id != header.id.id:
+            if candidate_body_ids.contains(block.id.id):
                 for inst in block.instructions:
                     match inst.kind:
                         case BinOp(dest, op, left, right):
@@ -586,9 +603,7 @@ fn detect_loop_bounds(func: MirFunction, header: MirBlock, cond: MirOperand, exi
                                     case Copy(local): local.id == induction_local_id
                                     case Move(local): local.id == induction_local_id
                                     case _: false
-                                val right_is_one = match right.kind:
-                                    case Const(_, _): true
-                                    case _: false
+                                val right_is_one = operand_is_integer_one(right)
                                 if left_is_induction and right_is_one:
                                     found_unit_step = true
                         case _:
@@ -712,10 +727,8 @@ fn detect_bounds_from_block(header: MirBlock, cond: MirOperand, exit: BlockId) -
                         case Copy(local): local.id == induction_local_id
                         case Move(local): local.id == induction_local_id
                         case _: false
-                    val right_is_const = match right.kind:
-                        case Const(_, _): true
-                        case _: false
-                    if left_is_induction and right_is_const:
+                    val right_is_one = operand_is_integer_one(right)
+                    if left_is_induction and right_is_one:
                         found_unit_step = true
             case _:
                 pass_do_nothing
