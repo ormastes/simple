@@ -274,3 +274,6 @@ The first implementation stage reuses one command-owned `Linter` and a bounded l
 ### Source payload ownership
 
 Batch lint owns one immutable source payload per file. It passes the payload to ordinary lint and read-only sibling analyses such as SIMD opportunity detection. The reader returns a tagged success/error result so an unreadable file cannot be confused with valid empty source. Mutating fix application is intentionally outside this reuse contract: it must reread or otherwise validate a content digest immediately before atomic replacement.
+### Critical policy snapshot
+
+Command-scoped lint resolves `critical.dynamic_acquire` lazily once and retains the effective scalar mode rather than the complete configuration object. All files in one invocation observe one coherent policy snapshot. A subsequent command constructs a new session and reloads policy; long-lived daemon/LSP owners must use their separate digest-keyed invalidation contract.
