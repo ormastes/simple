@@ -211,6 +211,12 @@ two process-owned i64 cells, so it adds constant storage and avoids per-node
 environment/text traffic. It relies on the parser's existing serial
 process-global execution model and is not a concurrency primitive.
 
+Flat AST conversion is a second explicit scope because it may run after a fresh
+parse or independently after a cache restore. `flat_ast_to_module` owns that
+scope and restores it on every current return. Split conversion modules import
+the dependency-leaf accessor rather than owning process caches. Build policy
+such as `SIMPLE_BOOTSTRAP` is not part of this snapshot.
+
 ## References
 
 - `doc/01_research/local/simple_compiler_performance_memory_efficiency_audit.md`
