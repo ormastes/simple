@@ -74,6 +74,11 @@ function-local identifier-frequency table. It deliberately retains text semantic
 (including words in comments and strings) until typed HIR use-def facts own the rule,
 but it does not rescan the entire function for every declaration.
 
+The compatibility `RET001` producer computes last-statement facts once with a
+reverse monotonic indentation stack. Candidate calls consume an indexed Boolean
+instead of rescanning their remaining source suffix, keeping deeply nested files
+linear in line count.
+
 The standalone CLI and query/LSP source-pattern collection projections use the same
 confidence vocabulary. Query governance recognizes `COLL001` through `COLL019`, so
 `Allow` suppresses them, while robust/critical policy cannot upgrade those untyped
