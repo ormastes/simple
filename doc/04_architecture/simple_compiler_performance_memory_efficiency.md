@@ -249,6 +249,12 @@ and one match-count dictionary use domain prefixes. Counts, rather than
 candidate order, authorize resolution; duplicates fail closed. Sanitized emitted
 names and metadata aliases remain downstream, separate facts.
 
+VHDL metadata recovery uses separate exact and eligible-alias indexes keyed by
+length-framed module/function identities. Alias rows are indexed only when their
+raw module spelling is absent from the immutable module set. Row indices avoid
+payload copies; an ambiguity sentinel preserves duplicates and prevents rank
+selection. Validation remains after unique selection.
+
 ## References
 
 - `doc/01_research/local/simple_compiler_performance_memory_efficiency_audit.md`
