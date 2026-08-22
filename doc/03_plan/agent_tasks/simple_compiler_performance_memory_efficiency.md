@@ -723,6 +723,21 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
   interval join while preserving legacy double reporting.
 - Verification intentionally not run under the user's no-verify instruction.
 
+## Completed structural-union canonicalization tranche
+
+- Make member keys exhaustive and consistent with `hir_types_equal`.
+- Use numeric text atoms and length-framed lists so canonical keys and sanitized
+  variant identifiers cannot alias through delimiter/punctuation ambiguity.
+- Replace linear deduplication and insertion rebuilding with dictionary dedup
+  plus stable bottom-up merge ordering.
+- Return one `UnionNormalized` result and reuse it in synthesis, registration,
+  and narrowing.
+- Replace linear module registration membership with a dictionary.
+- Add direct permutation, flatten/optional, omitted-field, wrapper, and source
+  complexity contracts.
+- Track synthetic SymbolId collisions and named-type narrowing separately.
+- Verification intentionally not run under the user's no-verify instruction.
+
 ## Completed diagnostic runtime tranche: fixed-pattern automaton
 
 - Intern 116 fixed classifier literals into 1,160 sparse Aho-Corasick states.
