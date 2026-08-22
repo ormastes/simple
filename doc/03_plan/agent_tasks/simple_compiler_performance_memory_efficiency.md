@@ -480,3 +480,13 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Remove duplicate silent-default warning entrypoints and pin one owner.
 - Follow-up: implement dependency-closed `PerfFactRequest` presets so CFG-only
   and def-use-only analyses stop building unrelated fact families.
+
+## Completed compiler tranche: request exact PerfFacts capabilities
+
+- Add dependency-closed requests and diagnostics for hidden expansion.
+- Keep full, no-liveness and verifier builders as compatibility wrappers.
+- Migrate loop detection to CFG plus dominators without instruction def-use.
+- Migrate vector/storage consumers to def-use without CFG/RPO/dominators.
+- Keep every unrequested fact family empty and incomplete.
+- Follow-up: expose requested/effective capabilities in optimization telemetry
+  and replace the hard-coded liveness cell cap with a named budget policy.
