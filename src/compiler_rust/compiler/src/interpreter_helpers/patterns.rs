@@ -371,6 +371,9 @@ pub(crate) fn handle_method_call_with_self_update(
             return Ok(out);
         }
         sync_flat_global(name.as_str(), new_value);
+        if env.scope_released() {
+            env.refresh_scope(crate::interpreter::owned_globals_snapshot());
+        }
     }
     Ok(out)
 }
@@ -400,6 +403,35 @@ fn sync_flat_global(name: &str, value: &Value) {
     if let Some(owner) = owner {
         crate::interpreter::set_owned_global(&owner, name, value.clone(), false);
     }
+}
+
+/// Park the global stores' copies of a module-global array and drop the frame's
+/// store snapshot so the frame's Arc becomes uniquely owned before an in-place
+/// mutation. Returns whether anything was parked; the caller MUST follow with
+/// `sync_flat_global` + `refresh_scope` (normal path via
+/// `handle_method_call_with_self_update`, error path explicitly).
+fn release_global_aliases(name: &str, env: &mut Env) -> bool {
+    if env.is_local(name) {
+        return false;
+    }
+    let present = crate::interpreter::MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(name));
+    if !present {
+        return false;
+    }
+    // Promote the binding into the frame overlay FIRST: once the snapshot is
+    // gone the name is no longer resolvable through the scope.
+    if env.get_mut(name).is_none() {
+        return false;
+    }
+    env.release_scope();
+    crate::interpreter::MODULE_GLOBALS.with(|cell| {
+        cell.borrow_mut().insert(name.to_string(), Value::Nil);
+    });
+    let owner = crate::interpreter::CURRENT_EXEC_MODULE.with(|cell| cell.borrow().clone());
+    if let Some(owner) = owner {
+        crate::interpreter::set_owned_global(&owner, name, Value::Nil, false);
+    }
+    true
 }
 
 fn handle_method_call_with_self_update_inner(
@@ -887,6 +919,22 @@ fn handle_method_call_with_self_update_inner(
                 }
             }
             // Handle Array mutations for mutating methods
+            // A module-global array that is not yet visible through this frame's
+            // env (first mutation from a helper fn: `expr_tag.push(..)` in
+            // `expr_alloc`) used to fall through to the generic path, which
+            // clones the receiver and therefore the whole Vec on EVERY call.
+            // Promote the store's handle into the overlay (one Arc clone) so the
+            // ownership-gated in-place path below applies; the generic path's own
+            // write-back (`calls.rs`) ends in exactly this overlay state anyway.
+            if env.get(obj_name).is_none() && !env.is_local(obj_name) && ARRAY_MUTATING_METHODS.contains(&method.as_str()) {
+                let global_arr = MODULE_GLOBALS.with(|cell| match cell.borrow().get(obj_name) {
+                    Some(v @ Value::Array(_)) => Some(v.clone()),
+                    _ => None,
+                });
+                if let Some(v) = global_arr {
+                    env.insert(obj_name.clone(), v);
+                }
+            }
             if let Some(Value::Array(_)) = env.get(obj_name) {
                 if ARRAY_MUTATING_METHODS.contains(&method.as_str()) {
                     // Check if variable is mutable
@@ -1050,6 +1098,14 @@ fn handle_method_call_with_self_update_inner(
                     // semantics (index and RHS operands are likewise evaluated before the ownership
                     // check there). Not a regression to fix; documented so a future reader doesn't
                     // mistake it for an oversight.
+                    // A MODULE-GLOBAL receiver is aliased by the two global stores
+                    // (`MODULE_GLOBALS` and the owner's live store), so `Arc::make_mut`
+                    // below deep-copied the whole Vec on EVERY `g.push(x)` from inside a
+                    // function. Park the stores' copies (Nil) and drop the frame snapshot
+                    // so the frame's Arc is unique; the caller's write-through
+                    // (`sync_flat_global`) re-publishes the mutated Arc. On error the
+                    // stores are restored from the frame value, so nothing is lost.
+                    let released = release_global_aliases(obj_name, env);
                     if let Some(Value::Array(arc)) = env.get_mut(obj_name) {
                         crate::perf_counters::bump(&crate::perf_counters::ARR_MUT_CALLS, 1);
                         if crate::perf_counters::enabled() && Arc::strong_count(arc) > 1 {
@@ -1068,7 +1124,17 @@ fn handle_method_call_with_self_update_inner(
                         }
                         let popped = {
                             let vec = Arc::make_mut(arc);
-                            apply_array_mutation_in_place(m, vec, item, idx, second)?
+                            match apply_array_mutation_in_place(m, vec, item, idx, second) {
+                                Ok(p) => p,
+                                Err(e) => {
+                                    if released {
+                                        let cur = Value::Array(Arc::clone(arc));
+                                        sync_flat_global(obj_name, &cur);
+                                        env.refresh_scope(crate::interpreter::owned_globals_snapshot());
+                                    }
+                                    return Err(e);
+                                }
+                            }
                         };
                         // Hand the (already-mutated) Arc back as both the binding update and, for
                         // non-`pop` methods, the expression result — an O(1) refcount bump, not a copy.

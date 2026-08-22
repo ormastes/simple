@@ -1,0 +1,49 @@
+# `g.push(x)` on a MODULE-GLOBAL array from inside a helper fn must be O(1)
+# amortised, like the same push on a local.
+#
+# doc/08_tracking/bug/seed_global_array_push_quadratic_2026-08-22.md: in the
+# seed interpreter every mutation of a module-global array from a helper fn
+# (`expr_tag.push(tag)` in expr_alloc — every flat-AST side table) deep-copied
+# the whole backing Vec, because the receiver Arc was aliased by
+# MODULE_GLOBALS, the owner's live store and the frame's store snapshot, so
+# `Arc::make_mut` cloned on every call (ARR_MUT_COW_CLONES == ARR_MUT_CALLS).
+# Measured 20k pushes 5.0 s / 80k pushes 143 s (quadratic) vs 0.65 s for the
+# local form at 80k. 80c39729a40 fixed the SAME-FRAME shape (steal at
+# `get_mut` promotion); the HELPER-FN shape was still quadratic on top of it
+# (20k pushes 10.9 s, 80k 350 s) because the global is not in the helper's env
+# at all and fell to the generic clone-then-mutate path. Fix
+# (interpreter_helpers/patterns.rs): promote the store handle into the frame,
+# park the stores' copies and drop the snapshot for the in-place write.
+#
+# Pinned as a SCALING ratio (4x the pushes must cost under 8x) so it holds on
+# a loaded box: pre-fix 4x pushes cost 15-20x; post-fix ~4x. Rust twin:
+# src/compiler_rust/compiler/tests/interpreter_global_array_push_linear.rs
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.src.time.{now_micros}
+use test.fixtures.interpreter_global_array_push_linear.shapes.{fill_global, add, snapshot, reset, g_tag}
+
+fn time_fill(n: i64) -> i64:
+    val start = now_micros()
+    val got = fill_global(n)
+    val elapsed = now_micros() - start
+    expect(got).to_equal(n)
+    return elapsed
+
+describe "module-global array push from a helper fn":
+    it "keeps value semantics: an alias taken before a push does not see it":
+        reset()
+        add(1)
+        val before = snapshot()
+        add(2)
+        add(3)
+        expect(before.len()).to_equal(1)
+        expect(g_tag.len()).to_equal(3)
+        expect(g_tag[2]).to_equal(3)
+
+    it "4x the pushes cost less than 8x the time (linear, not quadratic)":
+        time_fill(2000)
+        val small = time_fill(5000)
+        val large = time_fill(20000)
+        val floor = if small < 20000: 20000 else: small
+        expect(large <= floor * 8).to_be_true()

@@ -704,6 +704,11 @@ impl CowEnv {
     /// pinned version forces the next COW mutation of a global container to
     /// deep-copy — O(recursion depth x container) memory under the parser.
     /// The frame re-acquires a snapshot through `refresh_scope` at sync.
+    /// True while `release_scope` has dropped this frame's store snapshot.
+    pub fn scope_released(&self) -> bool {
+        self.scope.as_ref().is_some_and(|scope| scope.is_released())
+    }
+
     pub fn release_scope(&mut self) {
         if let Some(scope) = &mut self.scope {
             scope.globals = EMPTY_GLOBALS.with(Arc::clone);
