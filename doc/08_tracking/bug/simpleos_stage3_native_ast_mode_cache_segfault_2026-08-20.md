@@ -1441,3 +1441,29 @@ The three-cycle cap is exhausted. The exact glob-target change remains useful
 for MIR payload resolution but does not yet provide a trusted Stage 3. No ARM64
 SimpleOS artifact was built and no QEMU 2D, web, GUI, or window-manager result
 is claimed.
+
+## Post-sync aggregate-origin corruption evidence (2026-08-22)
+
+A fresh current-tree Cycle 1 rebuilt and admitted Stage 2, passed compiler
+sanity plus the struct-receiver/runtime capability gate, and reproduced the
+same Stage-3 exit 139. The exact glob target continued to resolve the prior MIR
+payload family, while the source-1 `HirImpl` family remained unresolved.
+
+Cycle 2 instrumented only the package-sibling resolution boundary for
+`HirImpl`. The first `compiler.hir.hir_types` lookup entered correctly, but
+`surface_decl_owner_indices("HirImpl")` returned zero candidates. A later
+importer read `.CompileContext` from the package-name cache under the
+`compiler.hir.hir_types` key. Thus two independent `HirLowering` dictionaries
+were corrupted before package selection; registration and re-export memo
+completion are downstream of the first divergence.
+
+Cycle 3 replaced the newly nested five-field
+`HirMaterializedPayloadOrigin` return with a scalar retained-import index and
+unwrapped that index only after bounds checks. Stage 2 again passed both gates,
+but Stage 3 retained the same source-1 family and exited 139. The nested-only
+change was removed. The next correction must eliminate the outer
+`resolve_materialized_enum_payload_origin` aggregate method-return boundary
+entirely (resolve and consume scalar terminal indices/item positions in one
+owner), then prove both the declaration-owner index and package-name cache stay
+stable. The three-cycle cap is exhausted; no trusted Stage 3, ARM64 artifact,
+or QEMU rendering evidence is claimed.
