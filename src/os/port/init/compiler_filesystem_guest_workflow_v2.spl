@@ -1,0 +1,194 @@
+"""Fail-closed core for the compiler-filesystem guest workflow v2.
+
+The adapter that performs guest I/O records observations in order.  This core
+then validates those observations and only renders protocol PASS after every
+filesystem and process claim is bound to real bytes/output.
+"""
+
+use std.common.crypto.sha256.{sha256_u8_hex}
+use os.sosix.compiler_filesystem_guest_protocol_v2.*
+
+pub fn simpleos_cfs_role_paths_v2() -> [text]:
+    # Keep this function-local: freestanding SimpleOS images do not run module
+    # initializers, so a module-level array is not a valid guest invariant.
+    [
+        "/usr/bin/simple", "/usr/bin/simple.smf", "/bin/simple", "/bin/simple.smf",
+        "/sys/apps/simple", "/sys/apps/simple.smf",
+        "/sys/apps/simple_compiler", "/sys/apps/simple_compiler.smf",
+        "/sys/apps/simple_interpreter", "/sys/apps/simple_interpreter.smf",
+        "/sys/apps/simple_loader", "/sys/apps/simple_loader.smf",
+        "/SYS/SIMPLETOOL.SDN",
+    ]
+
+class SimpleOsCfsReadV2:
+    path: text
+    bytes: [u8]
+
+class SimpleOsCfsRunV2:
+    program: text
+    args: [text]
+    stdout: [u8]
+    stderr: [u8]
+    exit_code: i64
+
+class SimpleOsCfsGuestEvidenceV2:
+    arch: text
+    nonce: text
+    image_path: text
+    image_sha256: text
+    image_drive_arg: text
+    role_reads: [SimpleOsCfsReadV2]
+    source_read: SimpleOsCfsReadV2
+    artifact_read: SimpleOsCfsReadV2
+    runs: [SimpleOsCfsRunV2]
+
+class SimpleOsCfsGuestWorkflowResultV2:
+    passed: bool
+    reason: text
+    lines: [text]
+
+fn _cfs_fail_v2(reason: text) -> SimpleOsCfsGuestWorkflowResultV2:
+    SimpleOsCfsGuestWorkflowResultV2(passed: false, reason: reason, lines: [])
+
+fn _cfs_valid_arch_v2(arch: text) -> bool:
+    arch == "x86_32" or arch == "x86_64" or arch == "arm32" or
+        arch == "arm64" or arch == "aarch64" or
+        arch == "riscv32" or arch == "riscv64"
+
+fn _cfs_valid_token_v2(value: text) -> bool:
+    if value.len() == 0 or value.len() > 128:
+        return false
+    var i: i64 = 0
+    while i < value.len():
+        val c = value[i:i + 1]
+        val ok = (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or
+            (c >= "0" and c <= "9") or c == "." or c == "_" or c == "-"
+        if not ok:
+            return false
+        i = i + 1
+    true
+
+fn _cfs_valid_sha256_v2(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    var i: i64 = 0
+    while i < value.len():
+        val c = value[i:i + 1]
+        if not ((c >= "0" and c <= "9") or (c >= "a" and c <= "f")):
+            return false
+        i = i + 1
+    true
+
+fn _cfs_bytes_hex_v2(bytes: [u8]) -> text:
+    val digits = "0123456789abcdef"
+    var out = ""
+    var i: i64 = 0
+    while i < bytes.len():
+        val value = bytes[i] as i64
+        val hi = (value >> 4) & 15
+        val lo = value & 15
+        out = out + digits[hi:hi + 1]
+        out = out + digits[lo:lo + 1]
+        i = i + 1
+    out
+
+fn _cfs_args_equal_v2(actual: [text], expected: [text]) -> bool:
+    if actual.len() != expected.len():
+        return false
+    var i: i64 = 0
+    while i < actual.len():
+        if actual[i] != expected[i]:
+            return false
+        i = i + 1
+    true
+
+fn _cfs_check_run_v2(run: SimpleOsCfsRunV2, program: text, args: [text], label: text) -> text:
+    if run.program != program or not _cfs_args_equal_v2(run.args, args):
+        return "{label}-command-mismatch"
+    if run.exit_code != 0:
+        return "{label}-exit-{run.exit_code}"
+    ""
+
+pub fn simpleos_cfs_validate_guest_evidence_v2(
+    evidence: SimpleOsCfsGuestEvidenceV2,
+) -> SimpleOsCfsGuestWorkflowResultV2:
+    if not _cfs_valid_arch_v2(evidence.arch):
+        return _cfs_fail_v2("invalid-arch")
+    if not _cfs_valid_token_v2(evidence.nonce):
+        return _cfs_fail_v2("invalid-nonce")
+    if evidence.image_path.len() == 0 or not _cfs_valid_sha256_v2(evidence.image_sha256):
+        return _cfs_fail_v2("invalid-image-metadata")
+    val expected_drive = "file={evidence.image_path},if=none,id=cfsexecns1,format=raw"
+    if evidence.image_drive_arg != expected_drive:
+        return _cfs_fail_v2("invalid-image-drive-arg")
+    val role_paths = simpleos_cfs_role_paths_v2()
+    if evidence.role_reads.len() != role_paths.len():
+        return _cfs_fail_v2("role-read-count")
+
+    var lines: [text] = []
+    lines.push(simpleos_cfs_begin_v2(evidence.arch, evidence.nonce))
+    lines.push(simpleos_cfs_fwcfg_v2(evidence.nonce))
+    lines.push(simpleos_cfs_qemu_image_v2(
+        evidence.image_path, evidence.image_sha256, evidence.image_drive_arg))
+
+    var simple_sha = ""
+    var manifest_sha = ""
+    var role_index: i64 = 0
+    while role_index < role_paths.len():
+        val expected_path = role_paths[role_index]
+        val observed = evidence.role_reads[role_index]
+        if observed.path != expected_path or observed.bytes.len() == 0:
+            return _cfs_fail_v2("role-read-mismatch-{role_index}")
+        val digest = sha256_u8_hex(observed.bytes)
+        if expected_path == "/SYS/SIMPLETOOL.SDN":
+            manifest_sha = digest
+            lines.push(simpleos_cfs_role_v2(expected_path, digest, "manifest", expected_path))
+        else:
+            if simple_sha == "":
+                simple_sha = digest
+            elif digest != simple_sha:
+                return _cfs_fail_v2("exec-alias-hash-mismatch")
+            lines.push(simpleos_cfs_role_v2(expected_path, digest, "exec_alias", "/usr/bin/simple"))
+        role_index = role_index + 1
+
+    if evidence.source_read.path != "/HELLO.SPL" or evidence.source_read.bytes.len() == 0:
+        return _cfs_fail_v2("source-read-mismatch")
+    if evidence.artifact_read.path != "/TMP/HELLO" or evidence.artifact_read.bytes.len() == 0:
+        return _cfs_fail_v2("artifact-reread-mismatch")
+    if evidence.runs.len() != 4:
+        return _cfs_fail_v2("process-run-count")
+
+    var reason = _cfs_check_run_v2(evidence.runs[0], "/usr/bin/simple", ["--version"], "version")
+    if reason != "": return _cfs_fail_v2(reason)
+    if evidence.runs[0].stdout.len() == 0:
+        return _cfs_fail_v2("version-output-empty")
+    reason = _cfs_check_run_v2(evidence.runs[1], "/usr/bin/simple", ["/HELLO.SPL"], "interpret")
+    if reason != "": return _cfs_fail_v2(reason)
+    if evidence.runs[1].stdout != "Hello from SimpleOS\n".bytes():
+        return _cfs_fail_v2("interpret-output-mismatch")
+    reason = _cfs_check_run_v2(
+        evidence.runs[2], "/usr/bin/simple",
+        ["compile", "--native", "/HELLO.SPL", "-o", "/TMP/HELLO"],
+        "compile")
+    if reason != "": return _cfs_fail_v2(reason)
+    reason = _cfs_check_run_v2(evidence.runs[3], "/TMP/HELLO", [], "exec")
+    if reason != "": return _cfs_fail_v2(reason)
+    val hello = "Hello from SimpleOS\n".bytes()
+    if evidence.runs[3].stdout != hello:
+        return _cfs_fail_v2("exec-output-mismatch")
+
+    val source_sha = sha256_u8_hex(evidence.source_read.bytes)
+    val artifact_sha = sha256_u8_hex(evidence.artifact_read.bytes)
+    val version_sha = sha256_u8_hex(evidence.runs[0].stdout)
+    val stdout_sha = sha256_u8_hex(evidence.runs[3].stdout)
+    lines.push(simpleos_cfs_version_v2(simple_sha, version_sha,
+        _cfs_bytes_hex_v2(evidence.runs[0].stdout), manifest_sha, evidence.nonce, 0))
+    lines.push(simpleos_cfs_compile_v2(source_sha, artifact_sha, evidence.nonce, "pass"))
+    lines.push(simpleos_cfs_exec_v2(artifact_sha, evidence.nonce, 0,
+        _cfs_bytes_hex_v2(evidence.runs[3].stdout), stdout_sha))
+    lines.push(simpleos_cfs_pass_v2(evidence.arch, evidence.nonce, simple_sha, artifact_sha))
+    SimpleOsCfsGuestWorkflowResultV2(passed: true, reason: "", lines: lines)
+
+export simpleos_cfs_role_paths_v2
+export SimpleOsCfsReadV2, SimpleOsCfsRunV2, SimpleOsCfsGuestEvidenceV2
+export SimpleOsCfsGuestWorkflowResultV2, simpleos_cfs_validate_guest_evidence_v2

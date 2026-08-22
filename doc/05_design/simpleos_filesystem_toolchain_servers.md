@@ -84,3 +84,14 @@ Focused shell/C contract tests cover the FAT mount-value owner, architecture
 runtime symbol uniqueness and size bounds, authenticated server entry
 selection, RV64 streamed-loader rejection rules, and core-archive tool
 resolution. These checks are not substitutes for live QEMU receipts.
+
+## Guest workflow transcript assembly (2026-08-22)
+
+Architecture adapters must provide one `SimpleOsCfsGuestEvidenceV2` containing
+canonical architecture/image metadata, the ordered role reads, `/HELLO.SPL`
+and `/TMP/HELLO` bytes, and four observed process records. The shared validator
+requires `/usr/bin/simple --version`, interpretation, `compile --native`, and
+execution of the reread artifact. It hashes the supplied bytes and output
+itself, rejects alias substitution or command/path drift, and emits the 20-line
+protocol only after all validation succeeds. Failure returns a stable reason
+with an empty transcript, so a partial run cannot contain a PASS marker.

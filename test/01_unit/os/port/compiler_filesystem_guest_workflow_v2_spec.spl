@@ -1,0 +1,70 @@
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use os.port.init.compiler_filesystem_guest_workflow_v2.*
+
+fn valid_evidence() -> SimpleOsCfsGuestEvidenceV2:
+    val executable = "real-simple-elf".bytes()
+    var reads: [SimpleOsCfsReadV2] = []
+    for path in simpleos_cfs_role_paths_v2():
+        val bytes = if path == "/SYS/SIMPLETOOL.SDN": "real-manifest".bytes() else: executable
+        reads.push(SimpleOsCfsReadV2(path: path, bytes: bytes))
+    val hello = "Hello from SimpleOS\n".bytes()
+    SimpleOsCfsGuestEvidenceV2(
+        arch: "riscv64", nonce: "nonce-7", image_path: "/images/simpleos.raw",
+        image_sha256: sha256_text("image"),
+        image_drive_arg: "file=/images/simpleos.raw,if=none,id=cfsexecns1,format=raw",
+        role_reads: reads,
+        source_read: SimpleOsCfsReadV2(path: "/HELLO.SPL", bytes: "print \"Hello from SimpleOS\"\n".bytes()),
+        artifact_read: SimpleOsCfsReadV2(path: "/TMP/HELLO", bytes: "real-compiled-elf".bytes()),
+        runs: [
+            SimpleOsCfsRunV2(program: "/usr/bin/simple", args: ["--version"], stdout: "Simple v2\n".bytes(), stderr: [], exit_code: 0),
+            SimpleOsCfsRunV2(program: "/usr/bin/simple", args: ["/HELLO.SPL"], stdout: hello, stderr: [], exit_code: 0),
+            SimpleOsCfsRunV2(program: "/usr/bin/simple", args: ["compile", "--native", "/HELLO.SPL", "-o", "/TMP/HELLO"], stdout: [], stderr: [], exit_code: 0),
+            SimpleOsCfsRunV2(program: "/TMP/HELLO", args: [], stdout: hello, stderr: [], exit_code: 0),
+        ],
+    )
+
+describe "SimpleOS compiler-filesystem guest workflow v2":
+    it "accepts every canonical matrix architecture name":
+        for arch in ["x86_32", "x86_64", "arm32", "arm64", "riscv32", "riscv64"]:
+            val evidence = valid_evidence()
+            evidence.arch = arch
+            expect(simpleos_cfs_validate_guest_evidence_v2(evidence).passed).to_equal(true)
+
+    it "buffers exact real-evidence records and emits PASS last":
+        val result = simpleos_cfs_validate_guest_evidence_v2(valid_evidence())
+        expect(result.passed).to_equal(true)
+        expect(result.reason).to_equal("")
+        expect(result.lines.len()).to_equal(20)
+        expect(result.lines[19]).to_start_with("SIMPLEOS_COMPILER_FS_PASS ")
+        expect(result.lines[18]).to_start_with("SIMPLEOS_COMPILER_FS_EXEC path=/TMP/HELLO ")
+
+    it "rejects an executable alias with different bytes and emits no lines":
+        val evidence = valid_evidence()
+        val substituted = evidence.role_reads[4]
+        substituted.bytes = "substituted-simple".bytes()
+        evidence.role_reads[4] = substituted
+        val result = simpleos_cfs_validate_guest_evidence_v2(evidence)
+        expect(result.passed).to_equal(false)
+        expect(result.reason).to_equal("exec-alias-hash-mismatch")
+        expect(result.lines.len()).to_equal(0)
+
+    it "rejects a forged command path and never emits PASS":
+        val evidence = valid_evidence()
+        val forged = evidence.runs[2]
+        forged.args = ["compile", "--native", "/HELLO.SPL", "-o", "/tmp/not-the-artifact"]
+        evidence.runs[2] = forged
+        val result = simpleos_cfs_validate_guest_evidence_v2(evidence)
+        expect(result.passed).to_equal(false)
+        expect(result.reason).to_equal("compile-command-mismatch")
+        expect(result.lines.len()).to_equal(0)
+
+    it "requires exact hello output from both interpreter and artifact":
+        val evidence = valid_evidence()
+        val truncated = evidence.runs[3]
+        truncated.stdout = "Hello from SimpleOS".bytes()
+        evidence.runs[3] = truncated
+        val result = simpleos_cfs_validate_guest_evidence_v2(evidence)
+        expect(result.passed).to_equal(false)
+        expect(result.reason).to_equal("exec-output-mismatch")
+        expect(result.lines.len()).to_equal(0)
