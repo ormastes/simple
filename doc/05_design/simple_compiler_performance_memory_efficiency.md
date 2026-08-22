@@ -702,3 +702,28 @@ The remaining nested-body overlap requires an offline design: index assignment
 points, answer declaration multiplicity range queries by target, then replay
 records in legacy closure/body order. Do not change that behavior merely to
 obtain a simpler lexical-scope model.
+
+### Structural union canonical identity
+
+`UnionNormalized` is the sole reusable result:
+
+```text
+UnionNormalized
+  members  canonical payload order
+  keys     complete structural identities in the same order
+  name     __Union plus those exact keys
+```
+
+Flattening recursively expands nested unions and union-member optionals. Each
+flattened member is keyed once. Expected constant-time dictionary membership
+keeps the first flattened representative, then a type-specific stable bottom-up
+merge orders key/member pairs in `O(u log u)` comparisons. Name and variant
+assembly use fragments and one join.
+
+Keys must encode the same identity as `hir_types_equal`, excluding provenance
+spans, function effects, and inference levels while including every compared
+field. Numeric text atoms and length-framed ordered lists avoid delimiter and
+identifier-sanitization collisions. Nested unions recursively normalize their
+member keys, making their identity order-independent. Public legacy wrappers
+delegate to `union_normalize`; production callers must retain and reuse the
+result instead of invoking wrappers in sequence.
