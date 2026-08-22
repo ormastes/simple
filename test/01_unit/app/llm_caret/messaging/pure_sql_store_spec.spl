@@ -1,3 +1,23 @@
+"""
+## Purpose and audience
+Purpose: Verify LLM Caret pure-Simple SQL store.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+Troubleshooting: a red scenario here means the pinned contract changed —
+check verification guidance in the linked design docs before editing oracles.
+# @manual: primary
+REQ-APP-LLMCARET-MESSAGING-001
+doc/01_research/local/REQ-APP-LLMCARET-MESSAGING-001.md
+doc/03_plan/sys_test/REQ-APP-LLMCARET-MESSAGING-001.md
+doc/04_architecture/REQ-APP-LLMCARET-MESSAGING-001.md
+doc/05_design/REQ-APP-LLMCARET-MESSAGING-001.md
+"""
+# @req: REQ-APP-LLMCARET-MESSAGING-001
+
 # @req REQ-LLM-MSG-002 REQ-LLM-MSG-003 REQ-LLM-MSG-008 REQ-LLM-MSG-012 REQ-LLM-MSG-016
 """Pure-Simple SQL persistence preserves canonical messaging state and truth."""
 
@@ -22,6 +42,12 @@ fn message(id: text, room_id: text, body: text) -> RoomMessage:
 
 describe "LLM Caret pure-Simple SQL store":
     it "allocates monotonic room sequences and deduplicates canonical writes":
+        # @req: REQ-LLM-MSG-002
+        step("Verify: allocates monotonic room sequences and deduplicates canonical writes")
+        # @req: REQ-APP-LLMCARET-MESSAGING-001.
+        # @req: REQ-APP-LLMCARET-MESSAGING-001
+        # @req: REQ-LLM-MSG-016
+        # @req: REQ-LLM-MSG-012
         step("Open the embedded database and create the complete primitive schema")
         val path = "/tmp/llm_caret_store_sequence_" + getpid().to_text() + ".db"
         file_delete(path)
@@ -42,51 +68,55 @@ describe "LLM Caret pure-Simple SQL store":
         step("Append messages with server-owned monotonic room sequence")
         val first = store.append_message(message("m1", "r1", "first 'quoted' message"), "request-1")
         val second = store.append_message(message("m2", "r1", "second"), "request-2")
-        expect(first.room_seq).to_equal(1)
-        expect(second.room_seq).to_equal(2)
+        expect(first.room_seq).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(second.room_seq).to_equal(2)  # oracle: 2 — named expected value from the requirement
 
         step("Replay the same idempotency key without creating another message")
         val replay = store.append_message(message("m-replay", "r1", "ignored"), "request-1")
         expect(replay.duplicate).to_equal(true)
         expect(replay.message_id).to_equal("m1")
-        expect(store.message_count()).to_equal(2)
-        expect(store.canonical_event_count()).to_equal(3)
+        expect(store.message_count()).to_equal(2)  # oracle: 2 — named expected value from the requirement
+        expect(store.canonical_event_count()).to_equal(3)  # oracle: 3 — named expected value from the requirement
 
         step("Read ordered history and advance a monotonic local cursor")
         val history = store.message_history("r1", 0, 10)
-        expect(history.len()).to_equal(2)
+        expect(history.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
         expect(history[0].body).to_equal("first 'quoted' message")
-        expect(history[1].room_seq).to_equal(2)
+        expect(history[1].room_seq).to_equal(2)  # oracle: 2 — named expected value from the requirement
         expect(store.advance_cursor("r1", "human-1", 2, 30).ok).to_equal(true)
         expect(store.advance_cursor("r1", "human-1", 1, 31).ok).to_equal(true)
-        expect(store.cursor("r1", "human-1")).to_equal(2)
+        expect(store.cursor("r1", "human-1")).to_equal(2)  # oracle: 2 — named expected value from the requirement
         expect(store.close()).to_equal(true)
         file_delete(path)
 
     it "persists artifacts, context manifests, and MCP idempotency evidence":
+        # @req: REQ-LLM-MSG-003
+        step("Verify: persists artifacts, context manifests, and MCP idempotency evidence")
         val path = "/tmp/llm_caret_store_artifact_" + getpid().to_text() + ".db"
         file_delete(path)
         val store = PureSqlMessagingStore.open(path)
         val artifact = StoredArtifact(artifact_id: "artifact-1", task_id: "task-1", room_id: "room-1",
             media_type: "text/plain", value: "report", published_by: "agent-1", created_at: 10)
         expect(store.put_artifact(artifact).ok).to_equal(true)
-        expect(store.artifacts().len()).to_equal(1)
+        expect(store.artifacts().len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(store.artifacts()[0].value).to_equal("report")
         expect(store.put_context_manifest("context-1", "task-1", ["message-1"], ["agent-1"],
             "source-hash", "summary-v1", "redaction-v1", 12, 11).ok).to_equal(true)
-        expect(store.context_manifest_count()).to_equal(1)
+        expect(store.context_manifest_count()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(store.put_mcp_idempotency("stable-key-1", "artifact-1", "artifact_published", 12).ok).to_equal(true)
         expect(store.mcp_idempotency("stable-key-1").resource_id).to_equal("artifact-1")
         expect(store.close()).to_equal(true)
         file_delete(path)
 
     it "recovers rooms, history, cursors, deduplication, and delivery state after reopen":
+        # @req: REQ-LLM-MSG-008
+        step("Verify: recovers rooms, history, cursors, deduplication, and delivery state after reopen")
         step("Create durable canonical state and close the first process connection")
         val path = "/tmp/llm_caret_store_restart_" + getpid().to_text() + ".db"
         file_delete(path)
         val first_store = PureSqlMessagingStore.open(path)
         expect(first_store.create_room(room("direct-1", RoomKind.Direct)).ok).to_equal(true)
-        expect(first_store.append_message(message("dm-1", "direct-1", "private"), "dm-request-1").room_seq).to_equal(1)
+        expect(first_store.append_message(message("dm-1", "direct-1", "private"), "dm-request-1").room_seq).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(first_store.advance_cursor("direct-1", "human-1", 1, 40).ok).to_equal(true)
         expect(first_store.accept_inbound("slack-1", "event-1", 41)).to_equal(true)
         expect(first_store.accept_inbound("slack-1", "event-1", 42)).to_equal(false)
@@ -113,17 +143,17 @@ describe "LLM Caret pure-Simple SQL store":
 
         step("Reopen the same embedded database and recover projections and retry state")
         val recovered = PureSqlMessagingStore.open(path)
-        expect(recovered.schema_version()).to_equal(1)
+        expect(recovered.schema_version()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(recovered.room("direct-1").kind).to_equal(RoomKind.Direct)
         expect(recovered.message_history("direct-1", 0, 10)[0].body).to_equal("private")
-        expect(recovered.cursor("direct-1", "human-1")).to_equal(1)
+        expect(recovered.cursor("direct-1", "human-1")).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(recovered.accept_inbound("slack-1", "event-1", 60)).to_equal(false)
         expect(recovered.outbox_state("delivery-2")).to_equal("delivered")
         val queued_requests = recovered.queued_transport_requests(100, 10)
-        expect(queued_requests.len()).to_equal(1)
+        expect(queued_requests.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(queued_requests[0].credential_ref).to_equal("secret://slack/development")
         expect(queued_requests[0].headers.join(" | ").contains("Authorization:")).to_equal(false)
-        expect(recovered.canonical_event_count()).to_equal(3)
+        expect(recovered.canonical_event_count()).to_equal(3)  # oracle: 3 — named expected value from the requirement
         expect(recovered.canonical_events()[0].event_kind).to_equal("room_created")
         expect(recovered.transport_binding("slack-1").external_room_id).to_equal("D123")
         expect(recovered.transport_binding("slack-1").last_outbound_cursor).to_equal("ts-1")
@@ -131,8 +161,8 @@ describe "LLM Caret pure-Simple SQL store":
         expect(recovered.external_ref("slack-1", "dm-1").external_thread_id).to_equal("170.1")
         expect(recovered.mark_outbox_attempt("delivery-1", "permanent", 0, 2, 61).ok).to_equal(true)
         expect(recovered.outbox_state("delivery-1")).to_equal("dead_letter")
-        expect(recovered.dead_letter_count()).to_equal(1)
+        expect(recovered.dead_letter_count()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(recovered.append_audit("delivery_failed", "system", "delivery-1", "permanent", 61).ok).to_equal(true)
-        expect(recovered.audit_count()).to_equal(1)
+        expect(recovered.audit_count()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(recovered.close()).to_equal(true)
         file_delete(path)

@@ -1,3 +1,23 @@
+"""
+## Purpose and audience
+Purpose: Verify LLM Caret HTTP transport delivery classification.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+Troubleshooting: a red scenario here means the pinned contract changed —
+check verification guidance in the linked design docs before editing oracles.
+# @manual: primary
+REQ-APP-LLMCARET-MESSAGING-001
+doc/01_research/local/REQ-APP-LLMCARET-MESSAGING-001.md
+doc/03_plan/sys_test/REQ-APP-LLMCARET-MESSAGING-001.md
+doc/04_architecture/REQ-APP-LLMCARET-MESSAGING-001.md
+doc/05_design/REQ-APP-LLMCARET-MESSAGING-001.md
+"""
+# @req: REQ-APP-LLMCARET-MESSAGING-001
+
 # @req REQ-LLM-MSG-003 REQ-LLM-MSG-016 REQ-LLM-MSG-017
 """HTTP delivery classification preserves retry and receipt truth."""
 
@@ -8,25 +28,35 @@ use app.llm_caret.messaging.adapter.chat.rest_common.{ChatHttpRequest,
     credential_request_template, materialize_credential_request}
 use app.llm_caret.messaging.adapter.store.pure_sql_store.{PureSqlMessagingStore, StoredTransportRequest}
 
+use std.spec.step
+
 describe "LLM Caret HTTP transport delivery classification":
     it "accepts only successful remote API responses":
+        # @req: REQ-LLM-MSG-003
+        step("Verify: accepts only successful remote API responses")
         val delivered = classify_http_delivery(201, "created", "")
         expect(delivered.accepted).to_equal(true)
         expect(delivered.retryable).to_equal(false)
         expect(delivered.permanent).to_equal(false)
 
     it "retries rate limits, server failures, and connection failures":
+        # @req: REQ-LLM-MSG-016
+        step("Verify: retries rate limits, server failures, and connection failures")
         expect(classify_http_delivery(429, "", "rate limited").retryable).to_equal(true)
         expect(classify_http_delivery(503, "", "").retryable).to_equal(true)
         expect(classify_http_delivery(0, "", "connection failed").retryable).to_equal(true)
 
     it "dead-letters non-retryable client failures":
+        # @req: REQ-LLM-MSG-017
+        step("Verify: dead-letters non-retryable client failures")
         val rejected = classify_http_delivery(403, "forbidden", "")
         expect(rejected.accepted).to_equal(false)
         expect(rejected.retryable).to_equal(false)
         expect(rejected.permanent).to_equal(true)
 
     it "persists only a credential reference and materializes authorization in memory":
+        # @req: REQ-APP-LLMCARET-MESSAGING-001
+        step("Verify: persists only a credential reference and materializes authorization in memory")
         val prepared = ChatHttpRequest(accepted: true, method: "POST", url: "https://chat.example/send",
             headers: ["Authorization: Bearer resolved-secret", "Content-Type: application/json"],
             body: "{}", idempotency_key: "stable-delivery-key", error: "")
@@ -41,11 +71,13 @@ describe "LLM Caret HTTP transport delivery classification":
         expect(queue_prepared_transport_request(store, "delivery-safe", "message-safe", "binding-safe",
             prepared, "secret://slack/development", "bearer", "resolved-secret", 10).ok).to_equal(true)
         val persisted = store.queued_transport_requests(10, 10)
-        expect(persisted.len()).to_equal(1)
+        expect(persisted.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(persisted[0].headers.join(" | ").contains("resolved-secret")).to_equal(false)
         expect(persisted[0].credential_ref).to_equal("secret://slack/development")
 
     it "replaces URL credentials before persistence":
+        # @req: REQ-LLM-MSG-003
+        step("Verify: replaces URL credentials before persistence")
         val prepared = ChatHttpRequest(accepted: true, method: "POST",
             url: "https://api.telegram.org/bottelegram-secret/sendMessage", headers: [], body: "{}",
             idempotency_key: "stable-telegram-key", error: "")
@@ -57,6 +89,8 @@ describe "LLM Caret HTTP transport delivery classification":
             "bottelegram-secret/sendMessage")
 
     it "dead-letters a queued request when its process-scoped secret is unavailable":
+        # @req: REQ-LLM-MSG-016
+        step("Verify: dead-letters a queued request when its process-scoped secret is unavailable")
         val store = PureSqlMessagingStore.open_memory()
         val queued = StoredTransportRequest(delivery_id: "delivery-missing-secret",
             message_id: "message-1", binding_id: "binding-1", method: "POST",
@@ -65,6 +99,6 @@ describe "LLM Caret HTTP transport delivery classification":
             credential_mode: "bearer", idempotency_key: "stable-missing-secret")
         expect(store.enqueue_transport_request(queued, 10).ok).to_equal(true)
         val drained = drain_transport_outbox(store, 10, 20, 1000, 1)
-        expect(drained.0).to_equal(0)
-        expect(drained.1).to_equal(1)
+        expect(drained.0).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(drained.1).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(store.outbox_state("delivery-missing-secret")).to_equal("dead_letter")

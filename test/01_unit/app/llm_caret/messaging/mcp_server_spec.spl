@@ -1,3 +1,23 @@
+"""
+## Purpose and audience
+Purpose: Verify LLM Caret messaging MCP server.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+Troubleshooting: a red scenario here means the pinned contract changed —
+check verification guidance in the linked design docs before editing oracles.
+# @manual: primary
+REQ-APP-LLMCARET-MESSAGING-001
+doc/01_research/local/REQ-APP-LLMCARET-MESSAGING-001.md
+doc/03_plan/sys_test/REQ-APP-LLMCARET-MESSAGING-001.md
+doc/04_architecture/REQ-APP-LLMCARET-MESSAGING-001.md
+doc/05_design/REQ-APP-LLMCARET-MESSAGING-001.md
+"""
+# @req: REQ-APP-LLMCARET-MESSAGING-001
+
 # @req REQ-LLM-MSG-003 REQ-LLM-MSG-007 REQ-LLM-MSG-009 REQ-LLM-MSG-011 REQ-LLM-MSG-014 REQ-LLM-MSG-015 REQ-LLM-MSG-016
 """The dedicated MCP core exposes all canonical chat operations safely."""
 
@@ -36,6 +56,11 @@ fn server_with_room() -> MessagingMcpServer:
 
 describe "LLM Caret messaging MCP server":
     it "joins, leaves, sends, reads, and records truthful local read evidence":
+        # @req: REQ-LLM-MSG-003
+        step("Verify: joins, leaves, sends, reads, and records truthful local read evidence")
+        # @req: REQ-APP-LLMCARET-MESSAGING-001.
+        # @req: REQ-APP-LLMCARET-MESSAGING-001
+        # @req: REQ-LLM-MSG-016
         val server = server_with_room()
         step("Join and send through scoped mutation calls with stable keys")
         expect(server.dispatch(request(ChatTool.Join, ["room:write"], "join-key-001")).ok).to_equal(true)
@@ -45,7 +70,7 @@ describe "LLM Caret messaging MCP server":
 
         step("Read only a bounded canonical page and advance a local cursor")
         val read = server.dispatch(request(ChatTool.Read, ["room:read"], ""))
-        expect(read.messages.len()).to_equal(1)
+        expect(read.messages.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         var marked_request = request(ChatTool.MarkRead, ["room:read"], "cursor-key-001")
         marked_request.after_seq = 1
         val marked = server.dispatch(marked_request)
@@ -54,12 +79,14 @@ describe "LLM Caret messaging MCP server":
         server.close()
 
     it "queries profiles and builds bounded context without transcript reconstruction":
+        # @req: REQ-LLM-MSG-007
+        step("Verify: queries profiles and builds bounded context without transcript reconstruction")
         val server = server_with_room()
         server.dispatch(request(ChatTool.Send, ["room:write"], "send-key-ctx1"))
 
         step("Resolve a canonical profile by agent identity")
         val who = server.dispatch(request(ChatTool.Who, ["profile:read"], ""))
-        expect(who.profiles.len()).to_equal(1)
+        expect(who.profiles.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(who.profiles[0].display_name).to_equal("builder-claude-01")
 
         step("Cap injection context even when a caller requests an excessive page")
@@ -72,6 +99,8 @@ describe "LLM Caret messaging MCP server":
         server.close()
 
     it "opens private rooms and protects notify-all with scope and origin policy":
+        # @req: REQ-LLM-MSG-009
+        step("Verify: opens private rooms and protects notify-all with scope and origin policy")
         val server = server_with_room()
         step("Create a canonical primitive direct room when requested")
         var direct = request(ChatTool.OpenPrivate, ["dm:write"], "direct-key-01")
@@ -79,13 +108,15 @@ describe "LLM Caret messaging MCP server":
         expect(server.dispatch(direct).evidence).to_equal("primitive_direct_room")
 
         step("Reject broadcast without room management and reject agent progress loops")
-        expect(server.dispatch(request(ChatTool.NotifyAll, ["room:write"], "notify-key-1")).status).to_equal(403)
+        expect(server.dispatch(request(ChatTool.NotifyAll, ["room:write"], "notify-key-1")).status).to_equal(403)  # oracle: 403 — named expected value from the requirement
         var update = request(ChatTool.NotifyAll, ["room:write", "room:manage"], "notify-key-2")
         update.origin = MessageOrigin.AgentUpdate
         expect(server.dispatch(update).error).to_equal("agent_update_cannot_notify_all")
         server.close()
 
     it "assigns tasks, publishes artifacts, and transitions significant state":
+        # @req: REQ-LLM-MSG-011
+        step("Verify: assigns tasks, publishes artifacts, and transitions significant state")
         val server = server_with_room()
         step("Assign a stateful task independently from its origin message")
         val assigned = server.dispatch(request(ChatTool.Assign, ["agent:control"], "assign-key-01"))
@@ -100,6 +131,8 @@ describe "LLM Caret messaging MCP server":
         server.close()
 
     it "fails closed on scopes, unstable mutation keys, and duplicate calls":
+        # @req: REQ-LLM-MSG-014
+        step("Verify: fails closed on scopes, unstable mutation keys, and duplicate calls")
         val server = server_with_room()
         step("Require the exact tool scope and a stable bounded idempotency key")
         expect(server.dispatch(request(ChatTool.Send, ["room:read"], "send-key-auth")).error).to_equal("scope_required:room:write")
@@ -111,6 +144,8 @@ describe "LLM Caret messaging MCP server":
         server.close()
 
     it "recovers MCP memberships, profiles, tasks, artifacts, manifests, and idempotency after restart":
+        # @req: REQ-LLM-MSG-015
+        step("Verify: recovers MCP memberships, profiles, tasks, artifacts, manifests, and idempotency after restart")
         val path = "/tmp/llm_caret_mcp_restart_" + getpid().to_text() + ".db"
         file_delete(path)
         var server = MessagingMcpServer.open(path)
@@ -126,16 +161,16 @@ describe "LLM Caret messaging MCP server":
         expect(server.dispatch(request(ChatTool.PublishArtifact, ["agent:control"], "durable-artifact-1")).ok).to_equal(true)
         expect(server.dispatch(request(ChatTool.Send, ["room:write"], "durable-send-01")).ok).to_equal(true)
         expect(server.dispatch(request(ChatTool.GetContext, ["room:read"], "")).ok).to_equal(true)
-        expect(server.store.context_manifest_count()).to_equal(1)
+        expect(server.store.context_manifest_count()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(server.close()).to_equal(true)
 
         step("Reopen the same PureDatabase file and recover every MCP projection")
         server = MessagingMcpServer.open(path)
-        expect(server.dispatch(request(ChatTool.Who, ["profile:read"], "")).profiles.len()).to_equal(1)
-        expect(server.tasks.len()).to_equal(1)
-        expect(server.artifacts.len()).to_equal(1)
+        expect(server.dispatch(request(ChatTool.Who, ["profile:read"], "")).profiles.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(server.tasks.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(server.artifacts.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(server.memberships.len()).to_be_greater_than(0)
-        expect(server.store.context_manifest_count()).to_equal(1)
+        expect(server.store.context_manifest_count()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         val replay = server.dispatch(request(ChatTool.Assign, ["agent:control"], "durable-assign-1"))
         expect(replay.duplicate).to_equal(true)
         expect(replay.resource_id).to_equal("task-1")

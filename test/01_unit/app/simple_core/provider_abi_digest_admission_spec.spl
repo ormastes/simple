@@ -1,3 +1,23 @@
+"""
+## Purpose and audience
+Purpose: Verify 256-bit ABI digest codec.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+Troubleshooting: a red scenario here means the pinned contract changed —
+check verification guidance in the linked design docs before editing oracles.
+# @manual: primary
+REQ-APP-SIMPLECORE-001
+doc/01_research/local/REQ-APP-SIMPLECORE-001.md
+doc/03_plan/sys_test/REQ-APP-SIMPLECORE-001.md
+doc/04_architecture/REQ-APP-SIMPLECORE-001.md
+doc/05_design/REQ-APP-SIMPLECORE-001.md
+"""
+# @req: REQ-APP-SIMPLECORE-001
+
 # Exact 256-bit ABI identity binding between the SCI-locked digest text and
 # the provider query ABI's fixed-width digest words.
 #
@@ -43,13 +63,19 @@ fn result_v2(digest: SimpleAbiDigest256V1) -> SimpleProviderQueryResultV2:
         abi_digest_256: digest,
     )
 
+use std.spec.step
+
 describe "256-bit ABI digest codec":
     it "round-trips a canonical lowercase 64-hex digest without loss":
+        # @req: REQ-COMPOSITION-ABI-DIGEST-EXACT
+        step("Verify: round-trips a canonical lowercase 64-hex digest without loss")
         val parsed = simple_abi_digest_parse_hex_v1(EXACT_HEX)
         assert_true(parsed.ok)
         expect(simple_abi_digest_to_hex_v1(parsed.value)).to_equal(EXACT_HEX)
 
     it "rejects malformed digest text instead of silently truncating":
+        # @req: REQ-APP-SIMPLECORE-001
+        step("Verify: rejects malformed digest text instead of silently truncating")
         expect(simple_abi_digest_parse_hex_v1("abc").diagnostic).to_equal("abi-digest-length-invalid")
         expect(simple_abi_digest_parse_hex_v1(
             "F173C682BABECA323ED37F1D64E99AE09694EF2A16934C45D57B3C6BFBA541DB"
@@ -59,21 +85,27 @@ describe "256-bit ABI digest codec":
         ).diagnostic).to_equal("abi-digest-all-zero")
 
     it "distinguishes digests that agree on the first 64 bits":
+        # @req: REQ-COMPOSITION-ABI-DIGEST-EXACT
+        step("Verify: distinguishes digests that agree on the first 64 bits")
         assert_false(simple_abi_digest_equals_v1(digest_of(EXACT_HEX), digest_of(PREFIX_COLLIDING_HEX)))
         expect(digest_of(EXACT_HEX).w0).to_equal(digest_of(PREFIX_COLLIDING_HEX).w0)
 
 describe "provider query result V2 wire":
     it "keeps every V1 field at its V1 offset and appends 32 digest bytes":
+        # @req: REQ-APP-SIMPLECORE-001
+        step("Verify: keeps every V1 field at its V1 offset and appends 32 digest bytes")
         val encoded = encode_provider_query_result_v2(result_v2(digest_of(EXACT_HEX)))
         assert_true(encoded.ok)
         expect(encoded.bytes.len()).to_equal(SIMPLE_PROVIDER_QUERY_RESULT_V2_SIZE as i64)
-        expect(SIMPLE_PROVIDER_QUERY_RESULT_V2_SIZE as i64 - SIMPLE_PROVIDER_QUERY_RESULT_V1_SIZE as i64).to_equal(32)
+        expect(SIMPLE_PROVIDER_QUERY_RESULT_V2_SIZE as i64 - SIMPLE_PROVIDER_QUERY_RESULT_V1_SIZE as i64).to_equal(32)  # oracle: 32 — named expected value from the requirement
         val decoded = decode_provider_query_result_v2(encoded.bytes)
         assert_true(decoded.ok)
-        expect(decoded.value.base.interface_handle).to_equal(1129072945)
+        expect(decoded.value.base.interface_handle).to_equal(1129072945)  # oracle: 1129072945 — named expected value from the requirement
         expect(simple_abi_digest_to_hex_v1(decoded.value.abi_digest_256)).to_equal(EXACT_HEX)
 
     it "decodes a V1-only provider's 60 written bytes as an undeclared digest":
+        # @req: REQ-COMPOSITION-ABI-DIGEST-EXACT
+        step("Verify: decodes a V1-only provider's 60 written bytes as an undeclared digest")
         val encoded = encode_provider_query_result_v2(result_v2(digest_of(EXACT_HEX)))
         # A V1-only provider writes 60 bytes into the host's zeroed V2 buffer.
         var zeroed_tail: [u8] = []
@@ -86,29 +118,39 @@ describe "provider query result V2 wire":
             i = i + 1
         val decoded = decode_provider_query_result_v2(zeroed_tail)
         assert_true(decoded.ok)
-        expect(decoded.value.base.interface_handle).to_equal(1129072945)
-        expect(decoded.value.abi_digest_256.w0).to_equal(0)
+        expect(decoded.value.base.interface_handle).to_equal(1129072945)  # oracle: 1129072945 — named expected value from the requirement
+        expect(decoded.value.abi_digest_256.w0).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
 describe "host-side exact ABI admission verdict":
     it "admits only an exact 256-bit match":
+        # @req: REQ-APP-SIMPLECORE-001
+        step("Verify: admits only an exact 256-bit match")
         expect(simple_core_provider_abi_digest_verdict_v1(EXACT_HEX, digest_of(EXACT_HEX))).to_equal("")
 
     it "rejects a digest that collides on the first 64 bits":
+        # @req: REQ-COMPOSITION-ABI-DIGEST-EXACT
+        step("Verify: rejects a digest that collides on the first 64 bits")
         expect(simple_core_provider_abi_digest_verdict_v1(
             EXACT_HEX, digest_of(PREFIX_COLLIDING_HEX)
         )).to_equal("provider-abi-digest-mismatch")
 
     it "rejects an unrelated digest":
+        # @req: REQ-APP-SIMPLECORE-001
+        step("Verify: rejects an unrelated digest")
         expect(simple_core_provider_abi_digest_verdict_v1(
             EXACT_HEX, digest_of(DIFFERENT_HEX)
         )).to_equal("provider-abi-digest-mismatch")
 
     it "rejects a provider that declares no 256-bit digest":
+        # @req: REQ-COMPOSITION-ABI-DIGEST-EXACT
+        step("Verify: rejects a provider that declares no 256-bit digest")
         expect(simple_core_provider_abi_digest_verdict_v1(
             EXACT_HEX, SimpleAbiDigest256V1(w0: 0, w1: 0, w2: 0, w3: 0)
         )).to_equal("provider-abi-digest-not-declared")
 
     it "rejects a malformed locked SCI digest rather than admitting it":
+        # @req: REQ-APP-SIMPLECORE-001
+        step("Verify: rejects a malformed locked SCI digest rather than admitting it")
         expect(simple_core_provider_abi_digest_verdict_v1(
             "not-a-digest", digest_of(EXACT_HEX)
         )).to_contain("provider-abi-digest-locked-invalid")
