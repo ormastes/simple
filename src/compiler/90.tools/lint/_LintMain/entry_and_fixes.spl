@@ -232,7 +232,8 @@ fn lint_cli_append_parsed_results(
             continue
         val level = apply_config_level(config, warning.code, LintLevel.Warn)
         val lint = LintDiag.new(warning.code, level, LintCategory.Warning, warning.message)
-        results.push(LintRunResult.new(path, lint_cli_find_decl_line(lines, "export ", warning.module_path), 0, lint))
+        results.push(LintRunResult.new(
+            path, lint_source_export_star_line(source_locations, warning.module_path), 0, lint))
     for warning in check_wide_public_file(decls, path):
         if not should_keep_lint_result(config, warning.code):
             continue
@@ -280,6 +281,7 @@ fn lint_cli_find_fn_line(lines: [text], fn_name: text) -> i64:
 struct LintSourceLocationIndex:
     function_lines: Dict<text, i64>
     collection_fix_lines: Dict<text, i64>
+    export_star_lines: Dict<text, i64>
 
 fn lint_source_declared_function_name(trimmed: text) -> text:
     val fn_pos = trimmed.find("fn ")
@@ -292,10 +294,23 @@ fn lint_source_declared_function_name(trimmed: text) -> text:
     if end <= 0: return ""
     suffix[0:end].trim()
 
+fn lint_source_export_star_module(trimmed: text) -> text:
+    var prefix = ""
+    if trimmed.starts_with("export use "):
+        prefix = "export use "
+    elif trimmed.starts_with("export "):
+        prefix = "export "
+    else:
+        return ""
+    val star = trimmed.find(".*")
+    if star <= prefix.len(): return ""
+    trimmed[prefix.len():star].trim()
+
 fn lint_source_location_index(lines: [text]) -> LintSourceLocationIndex:
     """Build all fallback source locations in one pass over the file."""
     var function_lines: Dict<text, i64> = {}
     var collection_fix_lines: Dict<text, i64> = {}
+    var export_star_lines: Dict<text, i64> = {}
     var line_index = 0
     while line_index < lines.len():
         val trimmed = lines[line_index].trim()
@@ -304,22 +319,32 @@ fn lint_source_location_index(lines: [text]) -> LintSourceLocationIndex:
             val name = lint_source_declared_function_name(trimmed)
             if name != "" and not function_lines.has(name):
                 function_lines[name] = line_index + 1
+        val export_module = lint_source_export_star_module(trimmed)
+        if export_module != "" and not export_star_lines.has(export_module):
+            export_star_lines[export_module] = line_index + 1
         val assignment = collection_split_assign(lines[line_index])
         if assignment.0 != "":
-            for code in ["COLL001", "COLL007"]:
-                if collection_rewrite_for(code, assignment.0, assignment.1) != "":
-                    if collection_fix_lines.has(code):
-                        collection_fix_lines[code] = -1
-                    else:
-                        collection_fix_lines[code] = line_index
+            if collection_rewrite_for("COLL001", assignment.0, assignment.1) != "":
+                if collection_fix_lines.has("COLL001"):
+                    collection_fix_lines["COLL001"] = -1
+                else:
+                    collection_fix_lines["COLL001"] = line_index
+            if collection_rewrite_for("COLL007", assignment.0, assignment.1) != "":
+                if collection_fix_lines.has("COLL007"):
+                    collection_fix_lines["COLL007"] = -1
+                else:
+                    collection_fix_lines["COLL007"] = line_index
         line_index = line_index + 1
-    LintSourceLocationIndex(function_lines, collection_fix_lines)
+    LintSourceLocationIndex(function_lines, collection_fix_lines, export_star_lines)
 
 fn lint_source_function_line(index: LintSourceLocationIndex, fn_name: text) -> i64:
     index.function_lines[fn_name] ?? 0
 
 fn lint_source_collection_fix_line(index: LintSourceLocationIndex, code: text) -> i64:
     index.collection_fix_lines[code] ?? -1
+
+fn lint_source_export_star_line(index: LintSourceLocationIndex, module_path: text) -> i64:
+    index.export_star_lines[module_path] ?? 1
 
 # ---------------------------------------------------------------------------
 # Source-location recovery for collection-efficiency lints (COLL0xx).
