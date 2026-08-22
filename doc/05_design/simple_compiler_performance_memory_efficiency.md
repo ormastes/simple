@@ -42,6 +42,11 @@ Effective default levels are immutable configuration state. Construct them once 
 configuration/profile change and share them with child configs; never rebuild profile
 dictionaries from `get_level` per diagnostic. Overrides remain a separate small map.
 
+Project policy reuse is provenance-bound. `LintConfig.source_path` names the exact parsed
+manifest. A `Linter` may retain one last resolved `(file path, config)` pair for the
+immediately following parsed-rule projection; the next file overwrites it. Broader caches
+must add size/mtime or content-digest invalidation before admission.
+
 During compatibility migration, `LintDiag.evidence_tier` is the single severity
 input shared by CLI and query/LSP projections. `SourcePattern`,
 `ParsedStructural`, and `Incomplete` performance diagnostics are warning-capped;
