@@ -1,0 +1,167 @@
+# codex-impl
+# Descriptor-relative hosted file executor. Root authority is pinned during
+# initialization; admitted steps use only caller storage and positional I/O.
+
+use std.common.structural.environment_instruction.*
+use std.nogc_sync_mut.io.hosted_confined_file.{
+    hosted_confined_root_open, hosted_confined_file_open,
+    hosted_confined_file_read_at, hosted_confined_file_write_at,
+    hosted_confined_file_close}
+
+val HOSTED_CONFINED_FILE_MAX_BYTES_V1: i64 = 65536
+val HOSTED_CONFINED_FILE_STEPS_V1: i64 = 4
+
+struct HostedConfinedFileAuthorityV1:
+    invocation_id: i64
+    capability_id: i64
+    root_fd: i64
+    max_path_bytes: i64
+    max_io_bytes: i64
+    sealed: bool
+
+struct HostedConfinedFileCursorV1:
+    invocation_id: i64
+    next_sequence: i64
+    consumed_count: i64
+    file_fd: i64
+    sealed: bool
+
+struct HostedConfinedFileStepReceiptV1:
+    receipt: EnvExecutionReceiptV1
+    cursor: HostedConfinedFileCursorV1
+
+fn hosted_confined_file_authority_v1(root_path: text, invocation_id: i64,
+        capability_id: i64, max_path_bytes: i64,
+        max_io_bytes: i64) -> HostedConfinedFileAuthorityV1:
+    val well_formed = invocation_id > 0 and capability_id > 0
+        and capability_id < 63 and max_path_bytes > 0
+        and max_path_bytes <= 4095 and max_io_bytes > 0
+        and max_io_bytes <= HOSTED_CONFINED_FILE_MAX_BYTES_V1
+    val root_fd = if well_formed:
+        hosted_confined_root_open(root_path)
+    else:
+        -1
+    HostedConfinedFileAuthorityV1(invocation_id: invocation_id,
+        capability_id: capability_id, root_fd: root_fd,
+        max_path_bytes: max_path_bytes, max_io_bytes: max_io_bytes,
+        sealed: well_formed and root_fd >= 0)
+
+fn hosted_confined_file_cursor_v1(
+        authority: HostedConfinedFileAuthorityV1) -> HostedConfinedFileCursorV1:
+    HostedConfinedFileCursorV1(invocation_id: authority.invocation_id,
+        next_sequence: 0, consumed_count: 0, file_fd: -1,
+        sealed: authority.sealed)
+
+fn _confined_file_opcode_v1(sequence: i64) -> EnvOpcodeV1:
+    if sequence == 0:
+        return EnvOpcodeV1.FileOpen
+    if sequence == 1:
+        return EnvOpcodeV1.FileRead
+    if sequence == 2:
+        return EnvOpcodeV1.FileWrite
+    EnvOpcodeV1.FileClose
+
+fn _confined_file_rejected_v1(instruction: EnvInstructionV1,
+        cursor: HostedConfinedFileCursorV1,
+        status: EnvInstructionStatusV1) -> HostedConfinedFileStepReceiptV1:
+    HostedConfinedFileStepReceiptV1(
+        receipt: env_execution_rejected_v1(instruction, status), cursor: cursor)
+
+fn _confined_file_write_i64_v1(out: [u8], offset: i64, value: i64):
+    var i = 0
+    while i < 8:
+        out[offset + i] = ((value >> (i * 8)) & 255) as u8
+        i = i + 1
+
+fn hosted_confined_file_execute_v1(
+        authority: HostedConfinedFileAuthorityV1,
+        cursor: HostedConfinedFileCursorV1,
+        policy: EnvExecutorPolicyV1, instruction: EnvInstructionV1,
+        argument_bytes: [u8], result_bytes: [u8]) -> HostedConfinedFileStepReceiptV1:
+    val validation = env_executor_validate_instruction(
+        policy, instruction, argument_bytes, result_bytes)
+    if env_instruction_status_to_i64(validation)
+            != env_instruction_status_to_i64(EnvInstructionStatusV1.Planned):
+        return _confined_file_rejected_v1(instruction, cursor, validation)
+    if not authority.sealed or not cursor.sealed
+            or cursor.invocation_id != authority.invocation_id
+            or instruction.invocation_id != authority.invocation_id
+            or instruction.capability_id != authority.capability_id
+            or cursor.next_sequence != instruction.sequence
+            or cursor.consumed_count != cursor.next_sequence
+            or cursor.next_sequence < 0
+            or cursor.next_sequence >= HOSTED_CONFINED_FILE_STEPS_V1
+            or instruction.opcode != _confined_file_opcode_v1(cursor.next_sequence):
+        return _confined_file_rejected_v1(
+            instruction, cursor, EnvInstructionStatusV1.Diverged)
+    var next_fd = cursor.file_fd
+    var result_length = 0
+    if instruction.sequence == 0:
+        if instruction.argument_length <= 0
+                or instruction.argument_length > authority.max_path_bytes
+                or instruction.result_capacity < 1:
+            return _confined_file_rejected_v1(
+                instruction, cursor, EnvInstructionStatusV1.Overflow)
+        next_fd = hosted_confined_file_open(authority.root_fd,
+            argument_bytes, instruction.argument_offset,
+            instruction.argument_length, true)
+        if next_fd < 0:
+            return _confined_file_rejected_v1(
+                instruction, cursor, EnvInstructionStatusV1.UnsafeInstruction)
+        result_bytes[instruction.result_offset] = 1u8
+        result_length = 1
+    elif instruction.sequence == 1:
+        if cursor.file_fd < 0 or instruction.argument_length != 0
+                or instruction.result_capacity > authority.max_io_bytes:
+            return _confined_file_rejected_v1(
+                instruction, cursor, EnvInstructionStatusV1.InvalidInstruction)
+        result_length = hosted_confined_file_read_at(cursor.file_fd, 0,
+            result_bytes, instruction.result_offset, instruction.result_capacity)
+        if result_length < 0:
+            return _confined_file_rejected_v1(
+                instruction, cursor, EnvInstructionStatusV1.UnsafeInstruction)
+    elif instruction.sequence == 2:
+        if cursor.file_fd < 0 or instruction.argument_length > authority.max_io_bytes
+                or instruction.result_capacity < 8:
+            return _confined_file_rejected_v1(
+                instruction, cursor, EnvInstructionStatusV1.Overflow)
+        val wrote = hosted_confined_file_write_at(cursor.file_fd, 0,
+            argument_bytes, instruction.argument_offset,
+            instruction.argument_length)
+        if wrote != instruction.argument_length:
+            return _confined_file_rejected_v1(
+                instruction, cursor, EnvInstructionStatusV1.UnsafeInstruction)
+        _confined_file_write_i64_v1(result_bytes, instruction.result_offset, wrote)
+        result_length = 8
+    else:
+        if cursor.file_fd < 0 or instruction.argument_length != 0
+                or instruction.result_capacity < 1
+                or not hosted_confined_file_close(cursor.file_fd):
+            return _confined_file_rejected_v1(
+                instruction, cursor, EnvInstructionStatusV1.UnsafeInstruction)
+        next_fd = -1
+        result_bytes[instruction.result_offset] = 1u8
+        result_length = 1
+    val receipt = env_execution_record_applied_v1(
+        instruction, argument_bytes, result_bytes, result_length, true, 0)
+    val next = HostedConfinedFileCursorV1(invocation_id: cursor.invocation_id,
+        next_sequence: cursor.next_sequence + 1,
+        consumed_count: cursor.consumed_count + 1,
+        file_fd: next_fd, sealed: true)
+    HostedConfinedFileStepReceiptV1(receipt: receipt, cursor: next)
+
+fn hosted_confined_file_complete_v1(cursor: HostedConfinedFileCursorV1) -> bool:
+    cursor.sealed and cursor.next_sequence == HOSTED_CONFINED_FILE_STEPS_V1
+        and cursor.consumed_count == HOSTED_CONFINED_FILE_STEPS_V1
+        and cursor.file_fd < 0
+
+fn hosted_confined_file_authority_close_v1(
+        authority: HostedConfinedFileAuthorityV1) -> bool:
+    authority.root_fd >= 0 and hosted_confined_file_close(authority.root_fd)
+
+export HOSTED_CONFINED_FILE_MAX_BYTES_V1, HOSTED_CONFINED_FILE_STEPS_V1
+export HostedConfinedFileAuthorityV1, HostedConfinedFileCursorV1
+export HostedConfinedFileStepReceiptV1
+export hosted_confined_file_authority_v1, hosted_confined_file_cursor_v1
+export hosted_confined_file_execute_v1, hosted_confined_file_complete_v1
+export hosted_confined_file_authority_close_v1

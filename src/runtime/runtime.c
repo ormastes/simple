@@ -51,6 +51,8 @@
 #include <dirent.h>
 #endif
 
+#include "platform/hosted_confined_file_impl.h"
+
 /* ================================================================
  * Runtime Configuration
  * ================================================================ */

@@ -5,7 +5,7 @@ declarations or design prose.
 
 | Interaction | Executable evidence | State |
 |---|---|---|
-| file | bounded open/read/close session; bounded write; exact replay | covered |
+| file | pinned capability-root descriptor, descriptor-relative no-follow open/read/write/close, exact replay | covered |
 | stream | prepared bounded read; caller-owned bounded write; exact replay | covered |
 | process | prepared spawn, ordered polls, kill, duplicate rejection | covered |
 | environment | captured `EnvironmentGet`, exact key/value binding | partial |
@@ -24,9 +24,11 @@ Remaining concrete gaps:
 - The hosted stream-write adapter commits to a caller-owned environment model;
   concrete pipe/terminal/device owners still need their own bounded commit
   ports when those scenarios become eligible fixtures.
-- File path admission is pathname-based under a trusted fixture root. Hostile
-  shared directories remain excluded until a descriptor-relative no-follow
-  facade exists.
+- Hostile shared-directory file access now pins the capability-root descriptor
+  before sealing, rejects absolute/parent/symlink traversal, verifies the final
+  descriptor is a regular file, and uses positional caller-buffer I/O. Native
+  evidence replaces the root pathname after pinning and proves access remains
+  on the original inode tree (`check-hosted-confined-file.shs`).
 
 The hot paths added for file lifecycle and stream write contain no storage
 construction, resize, formatting, file reread, or process spawn. They use
