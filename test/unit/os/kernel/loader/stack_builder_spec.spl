@@ -11,6 +11,7 @@
 ##   bin/simple test test/unit/os/kernel/loader/stack_builder_spec.spl
 
 use std.spec
+extern fn rt_file_read_text(path: text) -> text
 use os.kernel.loader.stack_builder.{
     AuxEntry,
     StackBuildError,
@@ -141,6 +142,14 @@ describe "kernel.loader.stack_builder.build_initial_stack_checked":
             case Ok(_): fail("checked builder accepted a truncated envp string")
             case Err(error): expect(error).to_equal(StackBuildError.EmbeddedNul)
 
+    it "reports argv capacity failure before inspecting a later envp":
+        val eighty_bytes = "0123456789012345678901234567890123456789" +
+            "0123456789012345678901234567890123456789"
+        match build_initial_stack_checked(
+            STACK_TOP, 96, 8, _test_entropy(16), [eighty_bytes], ["bad\0env"], []):
+            case Ok(_): fail("checked builder accepted an oversized argv string")
+            case Err(error): expect(error).to_equal(StackBuildError.FrameTooLarge)
+
     it "serializes argv envp and a single terminal auxv marker":
         val checked = build_initial_stack_checked(
             STACK_TOP, 4096, 8, [], ["/bin/x", "arg"], ["K=V"],
@@ -171,3 +180,45 @@ describe "kernel.loader.stack_builder.build_initial_stack_checked":
                 expect(_read_u64_le(result.bytes, 88)).to_equal(0x1234 as u64)
                 expect(_read_u64_le(result.bytes, 96)).to_equal(0 as u64)
                 expect(_read_u64_le(result.bytes, 104)).to_equal(0 as u64)
+
+    it "builds a near-limit launch frame with ordered pointers":
+        val payload = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" +
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" +
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" +
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+        var argv: [text] = []
+        var envp: [text] = []
+        var i: i64 = 0
+        while i < 64:
+            argv.push(payload)
+            i = i + 1
+        i = 0
+        while i < 128:
+            envp.push(payload)
+            i = i + 1
+        val checked = build_initial_stack_checked(
+            STACK_TOP, 65536, 8, _test_entropy(16), argv, envp, [])
+        match checked:
+            case Err(_): fail("checked builder rejected a bounded 64/128 launch frame")
+            case Ok(result):
+                expect(result.sp & 0xf).to_equal(0 as u64)
+                expect(result.bytes.len()).to_be_greater_than(48000)
+                expect(result.bytes.len()).to_be_less_than(65537)
+                expect(_read_u64_le(result.bytes, 0)).to_equal(64 as u64)
+                val argv0 = _read_u64_le(result.bytes, 8)
+                val argv63 = _read_u64_le(result.bytes, 8 + 63 * 8)
+                val env0 = _read_u64_le(result.bytes, 8 + 65 * 8)
+                val env127 = _read_u64_le(result.bytes, 8 + (65 + 127) * 8)
+                expect(argv0 > argv63).to_be_true()
+                expect(argv63 > env0).to_be_true()
+                expect(env0 > env127).to_be_true()
+                expect(result.bytes[(argv0 - result.sp) as i64]).to_equal(97 as u8)
+                expect(result.bytes[(env127 - result.sp + payload.len() as u64) as i64]).to_equal(0 as u8)
+
+    it "keeps the exact-buffer single-materialization structure":
+        val source = rt_file_read_text("src/os/kernel/loader/stack_builder.spl") ?? ""
+        # One declaration plus exactly one call in each of the argv/envp loops.
+        expect(source.split("rt_text_to_bytes(").len()).to_equal(4)
+        expect(source).to_contain("rt_byte_array_new_len(total_size as i64)")
+        expect(source).not_to_contain("fn _push_cstr")
+        expect(source).not_to_contain("fn _push_bytes")

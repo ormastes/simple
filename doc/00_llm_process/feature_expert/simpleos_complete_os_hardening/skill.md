@@ -54,6 +54,18 @@ reduces scheduler commits from `N` to `ceil(N / 256)` but does not reduce
 logical retention: the bound is 65,536 + 4,096 + 256 = 69,888 stdout bytes.
 Keep `PERF-SIMPLEOS-002` open until an admitted Stage-4 optimizer and identical
 fixture timing/RSS campaign is retained.
+
+## Cross-architecture initial-stack construction (2026-08-22)
+
+The canonical x86_64/AArch64/RV64 process-image path shares one ELF64LE,
+16-byte-aligned initial-stack builder. It materializes each validated argv/envp
+text once, exact-allocates the final frame, and serializes with indexed writes;
+the process-image owner projects the accepted `sp` and bytes directly. Keep the
+legacy x86 physical-memory emitter separate until freestanding byte-array writes
+are proven safe. Public limits, error precedence, pointer order, auxv order,
+terminators, and entropy ownership are compatibility requirements. Runtime
+allocation/COW, timing, optimizer, and RSS evidence remains open under
+`PERF-SIMPLEOS-003`.
 # Protocol honesty update (2026-08-21)
 
 For web/SSH hardening, use `doc/07_guide/os/simpleos_server_protocol_status.md`.

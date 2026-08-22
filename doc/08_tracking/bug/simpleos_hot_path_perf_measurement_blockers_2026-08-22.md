@@ -44,6 +44,16 @@ may copy the growing frame repeatedly. Precompute owned byte vectors once and
 serialize into one exact-sized mutable buffer. Preserve all existing 64 argv,
 128 envp, 4,096-byte string, and 65,536-byte aggregate boundary tests.
 
+Implemented structurally on 2026-08-22 for the shared x86_64/AArch64/RV64
+ELF64LE builder: each argv/envp text is materialized once during construction,
+the final frame is allocated at its checked exact length, and indexed writes
+replace value-semantic growing-buffer helpers. `process_image.spl` also projects
+the accepted frame directly instead of passing its near-64 KiB payload through
+two by-value accessors. Logical construction is now linear in serialized bytes
+plus argv/envp/aux counts. Nested-array COW/capacity behavior and the separate
+x86 physical-memory emitter remain unmeasured; keep this bug open for the
+admitted-runtime optimizer, timing, allocation, and RSS evidence below.
+
 ## PERF-SIMPLEOS-004 — repeated fw_cfg directory scans
 
 Each of four compiler-filesystem metadata reads buffers and scans the complete

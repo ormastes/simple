@@ -382,3 +382,12 @@ consume-once evidence. The batching improvement is scheduler lock/dispatch
 count only; retained stdout grows by the fixed 256-byte pending buffer, so RSS
 and allocation claims remain blocked on the admitted-runtime campaign tracked
 by `PERF-SIMPLEOS-002`.
+
+The shared hosted initial-stack owner now uses one exact-sized zeroed byte frame
+for x86_64, AArch64, and RV64 ELF64LE images, with one UTF-8 materialization per
+argv/envp entry and sequential indexed serialization. Do not route the x86
+freestanding physical writer through this byte-array sink until its documented
+runtime boundary is fixed. Preserve 16-byte SP alignment, eight-byte words,
+existing error precedence, one argv/envp terminator each, terminal `AT_NULL`,
+and exact `AT_RANDOM` ownership. `PERF-SIMPLEOS-003` remains open until
+allocation/COW plus timing/RSS are measured with an admitted Stage-4 runtime.

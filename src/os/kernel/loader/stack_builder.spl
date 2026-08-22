@@ -50,6 +50,7 @@ val AUX_RANDOM_BYTES: u64 = 0x10
 val STACK_BUILDER_U64_MAX: u64 = 0xffffffffffffffffu64
 
 extern fn rt_text_to_bytes(s: text) -> [u8]
+extern fn rt_byte_array_new_len(len: i64) -> [u8]
 
 struct AuxEntry:
     """Single auxiliary vector entry (type, value) written to the stack."""
@@ -97,48 +98,6 @@ fn compute_stack_size(image_size: u64) -> u64:
         scaled = MAX_USER_STACK_SIZE
     scaled
 
-fn _push_u64_le(buf: [u8], value: u64) -> [u8]:
-    """Append a little-endian u64 to `buf` and return the new buffer."""
-    var out = buf
-    var v = value
-    var i: u64 = 0
-    while i < 8:
-        out.push((v & 0xff) as u8)
-        v = v >> 8
-        i = i + 1
-    out
-
-fn _push_bytes(buf: [u8], bytes: [u8]) -> [u8]:
-    """Append every byte of `bytes` to `buf`."""
-    var out = buf
-    var i: i64 = 0
-    val n = bytes.len()
-    while i < n:
-        out.push(bytes[i])
-        i = i + 1
-    out
-
-fn _push_cstr(buf: [u8], s: text) -> [u8]:
-    """Append the UTF-8 bytes of `s` plus a terminating NUL."""
-    var out = buf
-    val raw = rt_text_to_bytes(s)
-    var i: i64 = 0
-    val n = raw.len()
-    while i < n:
-        out.push(raw[i])
-        i = i + 1
-    out.push(0 as u8)
-    out
-
-fn _zero_bytes(n: u64) -> [u8]:
-    """Return a buffer of `n` zero bytes."""
-    var out: [u8] = []
-    var i: u64 = 0
-    while i < n:
-        out.push(0 as u8)
-        i = i + 1
-    out
-
 fn build_initial_stack_checked(
     stack_top: u64,
     stack_size: u64,
@@ -177,12 +136,10 @@ fn build_initial_stack_checked(
     if argc > stack_size / 8 or envc > stack_size / 8 or auxc > stack_size / 16:
         return Err(StackBuildError.FrameTooLarge)
 
-    # --- Pass 1: compute string pool starting at stack_top, growing down.
-    # We compute final absolute addresses for each argv/envp string and for
-    # the 16 AT_RANDOM bytes, then emit the pointer arrays with real addrs.
+    # Compute the string-pool addresses while materializing each text value
+    # exactly once.  Keep the original validation/layout order (entropy, every
+    # argv item, then every envp item) so callers observe the same first error.
     var top: u64 = stack_top
-
-    # AT_RANDOM is present only when its complete entropy payload is supplied.
     val has_random = random_bytes.len() == AUX_RANDOM_BYTES as i64
     var random_addr: u64 = 0
     if has_random:
@@ -191,47 +148,55 @@ fn build_initial_stack_checked(
         top = top - AUX_RANDOM_BYTES
         random_addr = top
 
-    # argv string pool (argv[0], argv[1], ...). Push strings high->low so
-    # argv[0] ends up at the highest address; track addresses in order.
+    var argv_bytes: [[u8]] = []
     var argv_addrs: [u64] = []
+    var argv_string_size: u64 = 0
     var i: i64 = 0
     val argc_i = argv.len()
     while i < argc_i:
-        val s = argv[i]
-        val raw = rt_text_to_bytes(s)
+        val raw = rt_text_to_bytes(argv[i])
         var raw_index: i64 = 0
-        while raw_index < raw.len():
+        val raw_count = raw.len()
+        while raw_index < raw_count:
             if raw[raw_index] == 0:
                 return Err(StackBuildError.EmbeddedNul)
             raw_index = raw_index + 1
-        val raw_len = raw.len() as u64
-        if raw_len == STACK_BUILDER_U64_MAX:
+        val raw_len = raw_count as u64
+        if raw_len == STACK_BUILDER_U64_MAX or
+           argv_string_size > STACK_BUILDER_U64_MAX - raw_len - 1:
             return Err(StackBuildError.ArithmeticOverflow)
         val slen: u64 = raw_len + 1
         if top - stack_bottom < slen:
             return Err(StackBuildError.FrameTooLarge)
+        argv_string_size = argv_string_size + slen
         top = top - slen
+        argv_bytes.push(raw)
         argv_addrs.push(top)
         i = i + 1
 
+    var envp_bytes: [[u8]] = []
     var envp_addrs: [u64] = []
+    var envp_string_size: u64 = 0
     var j: i64 = 0
     val envc_i = envp.len()
     while j < envc_i:
-        val s2 = envp[j]
-        val raw2 = rt_text_to_bytes(s2)
+        val raw2 = rt_text_to_bytes(envp[j])
         var raw_index2: i64 = 0
-        while raw_index2 < raw2.len():
+        val raw_count2 = raw2.len()
+        while raw_index2 < raw_count2:
             if raw2[raw_index2] == 0:
                 return Err(StackBuildError.EmbeddedNul)
             raw_index2 = raw_index2 + 1
-        val raw_len2 = raw2.len() as u64
-        if raw_len2 == STACK_BUILDER_U64_MAX:
+        val raw_len2 = raw_count2 as u64
+        if raw_len2 == STACK_BUILDER_U64_MAX or
+           envp_string_size > STACK_BUILDER_U64_MAX - raw_len2 - 1:
             return Err(StackBuildError.ArithmeticOverflow)
         val slen2: u64 = raw_len2 + 1
         if top - stack_bottom < slen2:
             return Err(StackBuildError.FrameTooLarge)
+        envp_string_size = envp_string_size + slen2
         top = top - slen2
+        envp_bytes.push(raw2)
         envp_addrs.push(top)
         j = j + 1
 
@@ -276,9 +241,6 @@ fn build_initial_stack_checked(
         return Err(StackBuildError.ArithmeticOverflow)
     val fixed_size: u64 = fixed_slots * 8
 
-    # --- The string/random region extends from `top` up to `stack_top`.
-    val strings_size: u64 = stack_top - top
-
     # Base address of the fixed region must be 16-byte aligned (SysV).
     # `sp` points at argc. Align by growing fixed_size downward.
     if top - stack_bottom < fixed_size:
@@ -307,53 +269,102 @@ fn build_initial_stack_checked(
             return Err(StackBuildError.InvalidFramePointer)
         pv = pv + 1
 
-    # --- Serialize into `bytes`. Index 0 of the blob maps to address `sp`.
-    var bytes: [u8] = []
+    # Allocate the checked final length once, then fill it sequentially.  This
+    # avoids capacity growth and the by-value append helpers that could copy the
+    # accumulated prefix for every scalar or payload.
+    val bytes = rt_byte_array_new_len(total_size as i64)
+    if bytes.len() as u64 != total_size:
+        return Err(StackBuildError.SerializationMismatch)
+    var cursor: i64 = 0
 
-    # 1. argc
-    bytes = _push_u64_le(bytes, n_argv)
+    # argc, argv pointers + NULL, envp pointers + NULL, and auxv words.
+    var word: u64 = n_argv
+    var word_byte: i64 = 0
+    while word_byte < 8:
+        bytes[cursor] = (word & 0xff) as u8
+        word = word >> 8
+        cursor = cursor + 1
+        word_byte = word_byte + 1
 
-    # 2. argv pointers then NULL
     var a: i64 = 0
     while a < argc_i:
-        bytes = _push_u64_le(bytes, argv_addrs[a])
+        word = argv_addrs[a]
+        word_byte = 0
+        while word_byte < 8:
+            bytes[cursor] = (word & 0xff) as u8
+            word = word >> 8
+            cursor = cursor + 1
+            word_byte = word_byte + 1
         a = a + 1
-    bytes = _push_u64_le(bytes, 0)
+    cursor = cursor + 8
 
-    # 3. envp pointers then NULL
     var e: i64 = 0
     while e < envc_i:
-        bytes = _push_u64_le(bytes, envp_addrs[e])
+        word = envp_addrs[e]
+        word_byte = 0
+        while word_byte < 8:
+            bytes[cursor] = (word & 0xff) as u8
+            word = word >> 8
+            cursor = cursor + 1
+            word_byte = word_byte + 1
         e = e + 1
-    bytes = _push_u64_le(bytes, 0)
+    cursor = cursor + 8
 
-    # 4. auxv (already terminated with AT_NULL,0)
     var x: i64 = 0
     val auxn_i = full_aux.len()
     while x < auxn_i:
         val ent = full_aux[x]
-        bytes = _push_u64_le(bytes, ent.aux_type)
-        bytes = _push_u64_le(bytes, ent.value)
+        word = ent.aux_type
+        word_byte = 0
+        while word_byte < 8:
+            bytes[cursor] = (word & 0xff) as u8
+            word = word >> 8
+            cursor = cursor + 1
+            word_byte = word_byte + 1
+        word = ent.value
+        word_byte = 0
+        while word_byte < 8:
+            bytes[cursor] = (word & 0xff) as u8
+            word = word >> 8
+            cursor = cursor + 1
+            word_byte = word_byte + 1
         x = x + 1
 
-    # 5. alignment pad (zero bytes) to reach the string region boundary
-    bytes = _push_bytes(buf: bytes, bytes: _zero_bytes(pad))
+    # The allocator zero-initializes the exact frame, so NULL slots and the
+    # alignment gap require only cursor movement.
+    cursor = cursor + (pad as i64)
 
-    # 6. envp strings (written low->high in stack order: envp[last]..envp[0])
+    # envp strings (low->high: envp[last]..envp[0]).
     var ee_count: i64 = envc_i
     while ee_count > 0:
         ee_count = ee_count - 1
-        bytes = _push_cstr(bytes, envp[ee_count])
+        val env_raw = envp_bytes[ee_count]
+        var env_byte: i64 = 0
+        while env_byte < env_raw.len():
+            bytes[cursor] = env_raw[env_byte]
+            cursor = cursor + 1
+            env_byte = env_byte + 1
+        cursor = cursor + 1
 
-    # 7. argv strings (argv[last]..argv[0] — addr[0] is highest)
+    # argv strings (argv[last]..argv[0] — addr[0] is highest).
     var aa_count: i64 = argc_i
     while aa_count > 0:
         aa_count = aa_count - 1
-        bytes = _push_cstr(bytes, argv[aa_count])
+        val arg_raw = argv_bytes[aa_count]
+        var arg_byte: i64 = 0
+        while arg_byte < arg_raw.len():
+            bytes[cursor] = arg_raw[arg_byte]
+            cursor = cursor + 1
+            arg_byte = arg_byte + 1
+        cursor = cursor + 1
 
-    # 8. Exact caller-owned entropy for AT_RANDOM, when requested.
-    bytes = _push_bytes(buf: bytes, bytes: random_bytes)
+    # Exact caller-owned entropy for AT_RANDOM, when requested.
+    var random_index: i64 = 0
+    while random_index < random_bytes.len():
+        bytes[cursor] = random_bytes[random_index]
+        cursor = cursor + 1
+        random_index = random_index + 1
 
-    if bytes.len() as u64 != total_size:
+    if cursor as u64 != total_size:
         return Err(StackBuildError.SerializationMismatch)
     Ok(StackBuildResult(sp: sp, bytes: bytes))
