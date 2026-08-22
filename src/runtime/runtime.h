@@ -1252,7 +1252,7 @@ int64_t  rt_sdl2_create_window(const char* title, int64_t width, int64_t height)
 void     rt_sdl2_destroy_window(int64_t handle);
 int64_t  rt_sdl2_get_window_width(int64_t handle);
 int64_t  rt_sdl2_get_window_height(int64_t handle);
-void     rt_sdl2_set_window_title(int64_t handle, const char* title);
+bool     rt_sdl2_set_window_title(int64_t handle, const char* title);
 
 /* Framebuffer present (pixels = SplArray* of packed i64 RGBA) */
 bool     rt_sdl2_present_rgba(int64_t window_handle, SplArray* pixels,
@@ -1316,15 +1316,15 @@ int64_t  rt_sdl2_event_window_data1(void);
 int64_t  rt_sdl2_event_window_data2(void);
 
 /* Window properties */
-void     rt_sdl2_set_window_resizable(int64_t handle, int64_t resizable);
+bool     rt_sdl2_set_window_resizable(int64_t handle, int64_t resizable);
 void     rt_sdl2_set_window_fullscreen(int64_t handle, int64_t fullscreen);
 int64_t  rt_sdl2_set_window_fullscreen_checked(int64_t handle, int64_t fullscreen);
-void     rt_sdl2_set_window_size(int64_t handle, int64_t width, int64_t height);
-void     rt_sdl2_set_window_position(int64_t handle, int64_t x, int64_t y);
+bool     rt_sdl2_set_window_size(int64_t handle, int64_t width, int64_t height);
+bool     rt_sdl2_set_window_position(int64_t handle, int64_t x, int64_t y);
 int64_t  rt_sdl2_get_window_position_x(int64_t handle);
 int64_t  rt_sdl2_get_window_position_y(int64_t handle);
-void     rt_sdl2_show_window(int64_t handle);
-void     rt_sdl2_hide_window(int64_t handle);
+bool     rt_sdl2_show_window(int64_t handle);
+bool     rt_sdl2_hide_window(int64_t handle);
 int64_t  rt_sdl2_set_window_minimum_size(int64_t handle, int64_t width, int64_t height);
 int64_t  rt_sdl2_set_window_maximum_size(int64_t handle, int64_t width, int64_t height);
 int64_t  rt_sdl2_minimize_window(int64_t handle);

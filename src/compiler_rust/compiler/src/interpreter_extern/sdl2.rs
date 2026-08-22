@@ -96,7 +96,7 @@ pub const SDL2_FNS: &[(&str, Ret, &str)] = &[
     ("rt_sdl2_get_window_position_x", Ret::I, "i"),
     ("rt_sdl2_get_window_position_y", Ret::I, "i"),
     ("rt_sdl2_get_window_width", Ret::I, "i"),
-    ("rt_sdl2_hide_window", Ret::V, "i"),
+    ("rt_sdl2_hide_window", Ret::B, "i"),
     ("rt_sdl2_init", Ret::I, ""),
     ("rt_sdl2_is_key_pressed", Ret::I, "i"),
     ("rt_sdl2_is_mouse_button_pressed", Ret::I, "i"),
@@ -115,11 +115,11 @@ pub const SDL2_FNS: &[(&str, Ret, &str)] = &[
     ("rt_sdl2_set_window_fullscreen_checked", Ret::I, "ii"),
     ("rt_sdl2_set_window_maximum_size", Ret::I, "iii"),
     ("rt_sdl2_set_window_minimum_size", Ret::I, "iii"),
-    ("rt_sdl2_set_window_position", Ret::V, "iii"),
-    ("rt_sdl2_set_window_resizable", Ret::V, "ii"),
-    ("rt_sdl2_set_window_size", Ret::V, "iii"),
-    ("rt_sdl2_set_window_title", Ret::V, "is"),
-    ("rt_sdl2_show_window", Ret::V, "i"),
+    ("rt_sdl2_set_window_position", Ret::B, "iii"),
+    ("rt_sdl2_set_window_resizable", Ret::B, "ii"),
+    ("rt_sdl2_set_window_size", Ret::B, "iii"),
+    ("rt_sdl2_set_window_title", Ret::B, "is"),
+    ("rt_sdl2_show_window", Ret::B, "i"),
     ("rt_sdl2_wait_event", Ret::I, "i"),
     ("rt_sdl2_warp_mouse", Ret::V, "iii"),
     ("rt_sdl2_window_flags", Ret::I, "i"),
@@ -382,6 +382,14 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             (Ret::B, 1) => {
                 let f: extern "C" fn(i64) -> bool = std::mem::transmute(fptr);
                 Value::Bool(f(raw[0]))
+            }
+            (Ret::B, 2) => {
+                let f: extern "C" fn(i64, i64) -> bool = std::mem::transmute(fptr);
+                Value::Bool(f(raw[0], raw[1]))
+            }
+            (Ret::B, 3) => {
+                let f: extern "C" fn(i64, i64, i64) -> bool = std::mem::transmute(fptr);
+                Value::Bool(f(raw[0], raw[1], raw[2]))
             }
             (kind, arity) => {
                 return Err(CompileError::runtime(format!(

@@ -7,9 +7,8 @@ use os.compositor.display_backend_core.{CompositorBackend, CompositorGlassCapabl
 # doc/04_architecture/ui/sdl2_seam_subset_audit.md. Fixed: `present` ->
 # `present_rgba` (real signature, builds a packed-i64 buffer from the CPU
 # pixel buffer this backend already maintains), `resize_window` ->
-# `set_window_size` (real symbol; void, so `resize()` can no longer report a
-# native failure and treats "handle is live" as the only precondition it can
-# check). Deleted (dead — no caller anywhere in this file): `clear`,
+# `set_window_size` (real symbol with generation-checked status). Deleted
+# (dead — no caller anywhere in this file): `clear`,
 # `fill_rect` as separate draw calls (the CPU-side pixel buffer update they
 # guarded is kept; there is no native "draw a primitive" entry point, only
 # whole-frame `present_rgba`), `get_event_type`, `get_key_code`,
@@ -23,8 +22,8 @@ extern fn rt_sdl2_create_window(title: text, width: i64, height: i64) -> i64
 extern fn rt_sdl2_destroy_window(handle: i64)
 @unsafe(reason: "SDL2 borrowed pixel-array status ABI; false is the invalid descriptor or presentation sentinel", capabilities: [ffi])
 extern fn rt_sdl2_present_rgba(window_handle: i64, pixels: [i64], width: i64, height: i64) -> bool
-@unsafe(reason: "SDL2 generation-checked window ownership resize ABI with no status result", capabilities: [ffi])
-extern fn rt_sdl2_set_window_size(handle: i64, width: i64, height: i64)
+@unsafe(reason: "SDL2 generation-checked resize status ABI; false sentinel means invalid handle or size", capabilities: [ffi])
+extern fn rt_sdl2_set_window_size(handle: i64, width: i64, height: i64) -> bool
 
 var _sdl2_initialized: bool = false
 
@@ -135,13 +134,13 @@ class HostedSdl2Backend:
         0u32
 
     me resize(w: i32, h: i32) -> bool:
-        # rt_sdl2_set_window_size is void (see runtime_sdl2.c) — SDL reports
-        # no native failure signal here, so "handle is live" is the only
-        # precondition this can honestly check before requesting the resize.
         if self.window_handle == 0:
             return false
+        var resized = false
         unsafe(capabilities: [ffi]):
-            rt_sdl2_set_window_size(self.window_handle, w.to_i64(), h.to_i64())
+            resized = rt_sdl2_set_window_size(self.window_handle, w.to_i64(), h.to_i64())
+        if not resized:
+            return false
         self.w = w
         self.h = h
         val total = w * h

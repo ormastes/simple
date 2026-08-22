@@ -520,3 +520,21 @@ Simple checks, and the clock performance-shape audit pass. Inventory improves
 to 179 contracted and 297 uncontracted unsafe declarations. The provider
 artifact and clock semantics still lack signed/sanitizer evidence, so they are
 fail-closed rather than verified.
+
+Six canonical SDL2 window mutations (title, resizable, size, position, show,
+and hide) previously returned `void`; their Simple wrappers therefore reported
+success after stale handles, invalid dimensions, or rejected coordinates. The
+C ABI and Rust dispatcher now carry boolean status for arities one through
+three. Five public wrappers validate that status in lexical `unsafe(ffi)`
+scopes, and compositor resize commits its dimensions/pixel buffer only after
+the native resize succeeds. The stale-handle sabotage fixture covers all six.
+
+Each mutation still performs one generation-table lookup and at most the same
+single SDL mutation call. No validation query, allocation, lock, hash, map, or
+retry was added. Optimized C compilation, Rust SDL family tests, three Simple
+implementation checks, the six-example compositor spec, and the ABI/performance
+audit pass. Inventory improves to 185 contracted and 291 uncontracted unsafe
+declarations. SDL functions whose underlying API itself returns `void` prove
+only accepted arguments/live handles, not post-call OS success, and provider
+artifact evidence remains unsigned; this is fail-closed contract hardening,
+not full verification.

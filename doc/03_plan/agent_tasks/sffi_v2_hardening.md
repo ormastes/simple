@@ -100,3 +100,7 @@ passing placeholder.
     overflow, and expose safe optional wrappers; Web UI stops rather than spins
     on loss. Continue with quit state and window properties, then attach signed
     artifact and runtime verification evidence.
+17. Six SDL2 window mutations now return generation-checked status across C,
+    Rust dispatch, and Simple; compositor resize commits only after success and
+    the hot path is unchanged. Continue through remaining size/position reads,
+    lifecycle, cursor, and property contracts before signed provider admission.
