@@ -1,0 +1,39 @@
+#!/bin/sh
+# Static gate for the editor DAP piped-process boundary.
+# This proves source shape only. The raw stdout ABI still conflates no-data,
+# EOF, invalid handle, and I/O failure, so this gate must not claim verification.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+dap="$root/src/lib/editor/services/debug_session_dap.spl"
+owner="$root/src/lib/nogc_sync_mut/io/process_ops.spl"
+
+if grep -Eq '^extern fn rt_process_' "$dap"; then
+    echo 'editor DAP redeclared a raw process SFFI symbol' >&2
+    exit 1
+fi
+
+for symbol in rt_process_spawn_piped rt_process_write_stdin \
+    rt_process_read_stdout rt_process_is_alive rt_process_close_piped; do
+    grep -B1 -F "extern fn ${symbol}" "$owner" |
+        grep -Eq '@unsafe\(.*capabilities: \[ffi\]'
+done
+
+grep -Fq 'fn _dap_process_spawn(command: text, args: [text]) -> Result<i64, text>:' "$dap"
+grep -Fq 'fn _dap_process_write(pid: i64, data: text) -> Result<(), text>:' "$dap"
+grep -Fq 'fn _dap_process_close(pid: i64) -> Result<(), text>:' "$dap"
+test "$(grep -Fc 'process_spawn_piped(command, args)' "$dap")" -eq 1
+test "$(grep -Fc 'process_write_stdin(pid, data)' "$dap")" -eq 1
+test "$(grep -Fc 'process_close_piped(pid)' "$dap")" -eq 1
+test "$(grep -Fc 'process_read_stdout(' "$dap")" -eq 2
+
+grep -Fq 'if not me._send_framed_json(json):' "$dap"
+grep -Fq 'if pid <= 0 or _dap_process_write(pid, framed).is_err():' "$dap"
+grep -Fq 'if _dap_process_close(client.process_pid).is_err():' "$dap"
+
+if grep -Eq 'dlsym|CString|HashMap|Dictionary|sleep\(|retry' "$dap"; then
+    echo 'editor DAP process path gained lookup, map, sleep, or retry work' >&2
+    exit 1
+fi
+
+echo 'Editor DAP process SFFI contract: PASS raw_redeclarations=0 canonical_calls=1 pending_after_write_only=1 explicit_hot_lookup=none read_contract=unsafe_ambiguous'

@@ -6,12 +6,26 @@
 
 use std.editor.services.debug_session_registry.*
 use std.editor.services.debug_session_dap_protocol.*
+use std.io.{
+    process_spawn_piped, process_write_stdin, process_read_stdout,
+    process_is_piped_alive, process_close_piped
+}
 
-extern fn rt_process_spawn_piped(cmd: text, args: [text]) -> i64
-extern fn rt_process_write_stdin(pid: i64, data: text) -> bool
-extern fn rt_process_read_stdout(pid: i64) -> text
-extern fn rt_process_is_alive(pid: i64) -> bool
-extern fn rt_process_kill(pid: i64) -> bool
+fn _dap_process_spawn(command: text, args: [text]) -> Result<i64, text>:
+    if command == "": return Err("empty_process_command")
+    val pid = process_spawn_piped(command, args)
+    if pid <= 0: return Err("process_spawn_failed")
+    Ok(pid)
+
+fn _dap_process_write(pid: i64, data: text) -> Result<(), text>:
+    if pid <= 0: return Err("invalid_process_handle")
+    if not process_write_stdin(pid, data): return Err("process_write_failed")
+    Ok(())
+
+fn _dap_process_close(pid: i64) -> Result<(), text>:
+    if pid <= 0: return Err("invalid_process_handle")
+    if not process_close_piped(pid): return Err("process_close_failed")
+    Ok(())
 
 class EditorDebugDapClient:
     running: bool
@@ -43,19 +57,25 @@ impl EditorDebugDapClient:
         me.running = true
 
     me start_process(command: text, args: [text]) -> bool:
-        val pid = rt_process_spawn_piped(command, args)
-        if pid <= 0:
-            me.running = false
-            me.process_pid = 0
-            return false
-        me.running = true
-        me.process_pid = pid
-        me.process_buffer = ""
-        true
+        match _dap_process_spawn(command, args):
+            case Ok(pid):
+                me.running = true
+                me.process_pid = pid
+                me.process_buffer = ""
+                true
+            case Err(_):
+                me.running = false
+                me.process_pid = 0
+                false
+            case _("fail closed if Result gains another variant"):
+                me.running = false
+                me.process_pid = 0
+                false
 
     me stop():
         if me.process_pid > 0:
-            rt_process_kill(me.process_pid)
+            if _dap_process_close(me.process_pid).is_err():
+                return
             me.process_pid = 0
             me.process_buffer = ""
         me.running = false
@@ -67,30 +87,17 @@ impl EditorDebugDapClient:
         if not me.running:
             return 0
         val seq = me.next_seq
-        me.next_seq = me.next_seq + 1
         val json = editor_debug_dap_request(seq, command, arguments_json)
-        me._send_framed_json(json)
+        if not me._send_framed_json(json):
+            return 0
+        me.next_seq = me.next_seq + 1
         me.pending_requests.push(EditorDebugDapPendingRequest(seq: seq, command: command))
         seq
 
 fn editor_debug_dap_client_start_process(client: EditorDebugDapClient, command: text, args: [text]) -> (EditorDebugDapClient, bool):
-    val pid = rt_process_spawn_piped(command, args)
-    if pid <= 0:
-        return (
-            EditorDebugDapClient(
-                running: false,
-                next_seq: 1,
-                send_buffer: [],
-                recv_buffer: [],
-                pending_requests: [],
-                process_pid: 0,
-                process_buffer: "",
-                process_command: "",
-                process_args: []
-            ),
-            false
-        )
-    (
+    match _dap_process_spawn(command, args):
+        case Ok(pid):
+            (
             EditorDebugDapClient(
                 running: true,
                 next_seq: 1,
@@ -102,8 +109,11 @@ fn editor_debug_dap_client_start_process(client: EditorDebugDapClient, command: 
             process_command: command,
             process_args: args
         ),
-        true
-    )
+                true
+            )
+        case Err(_): (EditorDebugDapClient.new(), false)
+        case _("fail closed if Result gains another variant"):
+            (EditorDebugDapClient.new(), false)
 
 fn editor_debug_dap_client_start(client: EditorDebugDapClient) -> EditorDebugDapClient:
     EditorDebugDapClient(
@@ -119,24 +129,9 @@ fn editor_debug_dap_client_start(client: EditorDebugDapClient) -> EditorDebugDap
     )
 
 fn editor_debug_dap_client_start_process_with_pid(command: text, args: [text]) -> (EditorDebugDapClient, bool, i64):
-    val pid = rt_process_spawn_piped(command, args)
-    if pid <= 0:
-        return (
-            EditorDebugDapClient(
-                running: false,
-                next_seq: 1,
-                send_buffer: [],
-                recv_buffer: [],
-                pending_requests: [],
-                process_pid: 0,
-                process_buffer: "",
-                process_command: "",
-                process_args: []
-            ),
-            false,
-            0
-        )
-    (
+    match _dap_process_spawn(command, args):
+        case Ok(pid):
+            (
         EditorDebugDapClient(
             running: true,
             next_seq: 1,
@@ -149,12 +144,16 @@ fn editor_debug_dap_client_start_process_with_pid(command: text, args: [text]) -
             process_args: args
         ),
         true,
-        pid
-    )
+                pid
+            )
+        case Err(_): (EditorDebugDapClient.new(), false, 0)
+        case _("fail closed if Result gains another variant"):
+            (EditorDebugDapClient.new(), false, 0)
 
 fn editor_debug_dap_client_stop_process(client: EditorDebugDapClient) -> EditorDebugDapClient:
     if client.process_pid > 0:
-        rt_process_kill(client.process_pid)
+        if _dap_process_close(client.process_pid).is_err():
+            return client
     EditorDebugDapClient(
         running: false,
         next_seq: 1,
@@ -169,7 +168,18 @@ fn editor_debug_dap_client_stop_process(client: EditorDebugDapClient) -> EditorD
 
 fn editor_debug_dap_stop_process_pid(pid: i64) -> EditorDebugDapClient:
     if pid > 0:
-        rt_process_kill(pid)
+        if _dap_process_close(pid).is_err():
+            return EditorDebugDapClient(
+                running: true,
+                next_seq: 1,
+                send_buffer: [],
+                recv_buffer: [],
+                pending_requests: [],
+                process_pid: pid,
+                process_buffer: "",
+                process_command: "",
+                process_args: []
+            )
     EditorDebugDapClient.new()
 
 fn editor_debug_dap_client_is_process_backed(client: EditorDebugDapClient) -> bool:
@@ -181,8 +191,11 @@ fn editor_debug_dap_client_request(client: EditorDebugDapClient, command: text, 
     val seq = client.next_seq
     val json = editor_debug_dap_request(seq, command, arguments_json)
     val framed = editor_debug_dap_frame_message(json)
-    if client.process_pid > 0 and rt_process_is_alive(client.process_pid):
-        rt_process_write_stdin(client.process_pid, framed)
+    if client.process_pid > 0:
+        if not process_is_piped_alive(client.process_pid):
+            return (client, 0)
+        if _dap_process_write(client.process_pid, framed).is_err():
+            return (client, 0)
     var send_buffer = client.send_buffer
     send_buffer.push(framed)
     var pending_requests = client.pending_requests
@@ -318,8 +331,8 @@ fn editor_debug_dap_client_poll_messages(client: EditorDebugDapClient) -> (Edito
 fn editor_debug_dap_process_request(pid: i64, seq: i64, command: text, arguments_json: text) -> (EditorDebugDapClient, i64):
     val json = editor_debug_dap_request(seq, command, arguments_json)
     val framed = editor_debug_dap_frame_message(json)
-    if pid > 0:
-        rt_process_write_stdin(pid, framed)
+    if pid <= 0 or _dap_process_write(pid, framed).is_err():
+        return (EditorDebugDapClient.new(), 0)
     (
         EditorDebugDapClient(
             running: true,
@@ -345,7 +358,7 @@ fn editor_debug_dap_poll_process_pid(pid: i64) -> [EditorDebugDapInboundMessage]
     var messages: [EditorDebugDapInboundMessage] = []
     if pid <= 0:
         return messages
-    var buf = rt_process_read_stdout(pid)
+    var buf = process_read_stdout(pid)
     if buf == "":
         return messages
     var parsed = true
@@ -365,11 +378,15 @@ fn editor_debug_dap_poll_process_pid(pid: i64) -> [EditorDebugDapInboundMessage]
             buf = buf.slice(consumed, buf.len())
     messages
 
-    me _send_framed_json(json: text):
+    me _send_framed_json(json: text) -> bool:
         val framed = editor_debug_dap_frame_message(json)
+        if me.process_pid > 0:
+            if not process_is_piped_alive(me.process_pid):
+                return false
+            if _dap_process_write(me.process_pid, framed).is_err():
+                return false
         me.send_buffer.push(framed)
-        if me.process_pid > 0 and rt_process_is_alive(me.process_pid):
-            rt_process_write_stdin(me.process_pid, framed)
+        true
 
     me initialize() -> i64:
         me.send_request("initialize", "{\"adapterID\":\"simple\"}")
@@ -388,9 +405,10 @@ fn editor_debug_dap_poll_process_pid(pid: i64) -> [EditorDebugDapInboundMessage]
         if not me.running:
             return 0
         val seq = me.next_seq
-        me.next_seq = me.next_seq + 1
         val command = editor_debug_dap_response_command(request)
-        me._send_framed_json(request)
+        if not me._send_framed_json(request):
+            return 0
+        me.next_seq = me.next_seq + 1
         me.pending_requests.push(EditorDebugDapPendingRequest(seq: seq, command: command))
         seq
 
@@ -474,7 +492,7 @@ fn editor_debug_dap_poll_process_pid(pid: i64) -> [EditorDebugDapInboundMessage]
     me _poll_process_stdout():
         if me.process_pid <= 0:
             return
-        val chunk = rt_process_read_stdout(me.process_pid)
+        val chunk = process_read_stdout(me.process_pid)
         if chunk != "":
             me.process_buffer = me.process_buffer + chunk
         var parsed = true

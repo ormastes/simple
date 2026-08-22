@@ -1188,3 +1188,16 @@ it does not claim libtorch reductions are allocation-free or synchronization-
 free. Next harden the bounded piped-process family, then implement real signed
 evidence admission. Current global admission remains zero, so neither all
 Torch SFFI nor all SFFI may be described as verified safe.
+
+The bounded editor DAP process slice now consumes the canonical process owner
+instead of declaring five additional raw externs. Typed spawn/write/close
+helpers prevent failed writes from becoming sent/pending requests and prevent
+failed cleanup from becoming a stopped state. Piped cleanup replaces generic
+PID kill. The success path preserves one liveness query plus one write and adds
+no map, lookup, hashing, retry, sleep, or explicit allocation. Nine system
+examples, focused check/lint, and `editor-dap-process-sffi-contract.shs` pass.
+The gate intentionally labels stdout `unsafe_ambiguous`: implement an additive
+status-bearing nonblocking read/liveness ABI across C, Rust interpreter, JIT,
+native, and Simple wrappers before promoting this family beyond unsafe-
+minimized. After that, migrate `lsp_transport.spl` and editor smoke/runtime
+duplicates to the same owner, then return to signed provider admission.

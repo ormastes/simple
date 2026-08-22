@@ -1521,3 +1521,23 @@ census is 12,296 declaration rows and 3,170 distinct symbols: 808 unsafe-tagged,
 Implementations found are C++ 219, C 2,323, Rust 2,161, and Simple 558.
 `rt_torch` remains 162 unsafe rows, 35 minimized, zero untouched, and zero
 verified/signed. Therefore Torch and SFFI globally are not yet verified safe.
+
+The editor DAP client no longer redeclares five raw piped-process symbols.
+It imports the canonical process owner, whose raw declarations are explicitly
+tagged `unsafe(ffi)` with their sentinel contracts. Spawn, write, and close are
+lifted locally to typed `Result` values. A failed write no longer increments the
+DAP sequence, appends a sent frame, or publishes a pending request, and a
+failed piped cleanup no longer fabricates a stopped client. Cleanup now uses
+`process_close_piped`, which owns pipe-table and descriptor cleanup, instead of
+generic PID kill.
+
+This migration adds no map, symbol lookup, hash, retry, sleep, or explicit
+success-path allocation. Each send retains one liveness query and one write;
+each poll retains one read. The source-shape gate reports the stdout contract
+as `unsafe_ambiguous`: the current raw ABI still maps no data, EOF, invalid
+handle, and read failure to empty text. A future additive status-bearing read
+ABI is required before this family can be called safe. The focused module check,
+lint, nine system examples, and the new static gate pass. Census falls to
+12,291 declaration rows: 350 unsafe-minimized, 11,941 unsafe-unminimized,
+11,211 untouched, and zero evidence/signature verified. `rt_process` is 1,027
+rows, 29 minimized, 994 untouched, and zero verified/signed.
