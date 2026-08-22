@@ -351,6 +351,27 @@ must_contain "shadow-type mechanism spec present" \
 must_contain "lint cost budget gate present" \
     "$ROOT/scripts/check/check-lint-cost-budget.shs" "selftest"
 
+# --- PAYLOADMISS (2026-08-22). Payload/callable origin materialization re-ran a
+# FULL failed origin search (owner declarations + re-export routes + whole
+# import table) for every occurrence and every importer of a name the owner
+# does not have. Builtin CONTAINER spellings dominated: stage-1 run14 emitted
+# ~31,700 in-flight advisories for them alone (Dict 14,847, Option 9,857,
+# Result 7,015, fn 290), none of them a terminal error.
+# The fix must NOT be a capitalized-name filter: `lower_named_kind` places the
+# container arms AFTER the symbol lookup so a DECLARED type of that name wins,
+# and 42 `Result` / 14 `Option` / 10 `Array` / 1 `Dict` declarations exist in
+# this tree (commit 1aa81cac8c6). It is a NEGATIVE memo keyed (owner, name):
+# only a MISS is cached, so a declaration still resolves on step 1 every time.
+# Record: doc/08_tracking/bug/hir_builtin_container_origin_search_storm_2026-08-22.md
+RXMAT="$ROOT/src/compiler/20.hir/hir_lowering/_Items/module_reexport_materialization.spl"
+PLMSPEC="$ROOT/test/01_unit/compiler/hir/hir_payload_origin_miss_memo_spec.spl"
+must_contain     "PAYLOADMISS negative memo consulted before the search" "$RXMAT" 'if self.payload_origin_miss_memo.contains_key(miss_key):'
+must_contain     "PAYLOADMISS miss recorded, owner-scoped key"           "$RXMAT" 'val miss_key = hir_payload_origin_miss_key(imported_mod_name, dependency)'
+must_contain     "PAYLOADMISS callable advisory keyspace kept separate"  "$RXMAT" 'hir_payload_origin_miss_key("callable " + imported_mod.module_name, dependency)'
+must_not_contain "PAYLOADMISS builtin filter stays lowercase-only"       "$RXMAT" 'dependency == "Dict"'
+must_contain     "PAYLOADMISS O(1)-per-name spec"                        "$PLMSPEC" "expect(lowering.payload_origin_miss_skip_count).to_equal(2)"
+must_contain     "PAYLOADMISS declared-Result control fixture"           "$PLMSPEC" 'decl.enum_names = ["Result"]'
+
 # --- memory: peak-RSS budget gate must exist and self-test.
 # Pins the 2026-08-21 survey (interpreter lint 12-13.6 GB -> 0.69 GB; JIT lint
 # 0.45 GB). Both headline cases were fixed once and re-reported later by another

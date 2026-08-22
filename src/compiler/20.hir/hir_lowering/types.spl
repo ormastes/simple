@@ -231,6 +231,21 @@ class HirLowering:
     # re-emitted per importer so diagnostics are unchanged).
     explicit_dep_target_memo: {text: i64}
     explicit_dep_item_memo: {text: text}
+    # PAYLOADMISS (2026-08-22): negative memo for
+    # `resolve_materialized_enum_payload_origin`, keyed `{owner key} {name}`.
+    # ONLY misses are cached. A HIT is never cached, so a module that really
+    # DECLARES `Result`/`Dict`/`Option` is still resolved from its own surface
+    # every time and `lower_named_kind`'s declared-type-wins precedence is
+    # untouched. The miss is the repeated cost: run14 emitted 14,847 `Dict`,
+    # 9,857 `Option` and 7,015 `Result` advisories, each a full failed origin
+    # search over the owner's declarations, re-export routes and import table.
+    # The resolve is a pure function of (owner surface, name) over the frozen
+    # `module_surfaces` set -- it reads no symbol table and mutates nothing --
+    # so replaying a cached miss is observationally identical to re-searching.
+    # The advisory is emitted once per (owner, name) rather than once per
+    # occurrence for the same reason.
+    payload_origin_miss_memo: {text: bool}
+    payload_origin_miss_skip_count: i64
     # RISDONE (2026-08-21): completed-registration memo for
     # `register_imported_symbol`, keyed on
     # `{declaring module} {imported name} {local name} {materialize_enum}`.
@@ -363,6 +378,7 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
     val empty_package_sibling_canons: {text: [text]} = {}
     val empty_surface_index_by_name: {text: i64} = {}
     val empty_explicit_dep_target_memo: {text: i64} = {}
+    val empty_payload_origin_miss_memo: {text: bool} = {}
     val empty_explicit_dep_item_memo: {text: text} = {}
     val empty_registered_import_memo: {text: bool} = {}
     val empty_impl_index_built: {text: bool} = {}
@@ -423,6 +439,8 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         explicit_dep_target_memo: empty_explicit_dep_target_memo,
         explicit_dep_item_memo: empty_explicit_dep_item_memo,
         explicit_dep_scan_count: 0,
+        payload_origin_miss_memo: empty_payload_origin_miss_memo,
+        payload_origin_miss_skip_count: 0,
         registered_import_memo: empty_registered_import_memo,
         registered_import_memo_owner: "",
         registered_import_skip_count: 0,

@@ -446,8 +446,21 @@ impl HirLowering:
         # Builtins are resolved by lower_named_kind's primitive arms, never by a
         # module surface; asking an owner to declare `text` can only ever fail.
         if hir_dependency_is_builtin_type(dependency): return
+        # PAYLOADMISS: a name this owner cannot resolve is re-searched by every
+        # importer and every occurrence. Container spellings dominate that cost
+        # (run14: Dict 14,847, Option 9,857, Result 7,015 advisories) and they
+        # deliberately are NOT builtin-filtered, because a user module may
+        # really declare `Result`/`Dict` and must win. Caching only the MISS
+        # keeps that precedence exactly: a declared type resolves on step 1 and
+        # is never cached, so the memo can only ever short-circuit a search
+        # whose answer was already "this owner does not have it".
+        val miss_key = hir_payload_origin_miss_key(imported_mod_name, dependency)
+        if self.payload_origin_miss_memo.contains_key(miss_key):
+            self.payload_origin_miss_skip_count = self.payload_origin_miss_skip_count + 1
+            return
         val origin = self.resolve_materialized_enum_payload_origin(imported_mod, imported_mod_name, dependency)
         if not origin.found:
+            self.payload_origin_miss_memo[miss_key] = true
             # NEVER silent. An unresolved payload origin used to return with no
             # trace at all, and the failure resurfaced much later as a hard
             # `unresolved type: {name}` (hir_lowering/types.spl) attributed to
@@ -716,7 +729,17 @@ impl HirLowering:
             # that already has the name in scope still lowers fine, so failing
             # here would be a regression rather than a fix.
             # See doc/08_tracking/bug/hir_unresolved_type_owner_missing_import_2026-08-22.md
-            if not hir_dependency_is_builtin_type(dependency):
+            # Namespaced away from the payload keys on purpose: the callable
+            # sweep's negative ("no explicit import declares it") is NARROWER
+            # than the payload search's negative, so letting one suppress the
+            # other would skip a resolution that could still succeed. This key
+            # only ever dedupes the ADVISORY.
+            val callable_miss_key = hir_payload_origin_miss_key("callable " + imported_mod.module_name, dependency)
+            val callable_already_advised = self.payload_origin_miss_memo.contains_key(callable_miss_key)
+            if callable_already_advised:
+                self.payload_origin_miss_skip_count = self.payload_origin_miss_skip_count + 1
+            if not hir_dependency_is_builtin_type(dependency) and not callable_already_advised:
+                self.payload_origin_miss_memo[callable_miss_key] = true
                 eprint("[hir-callable-dep-origin-unresolved] owner={imported_mod.module_name} dependency={dependency}: no declaration, re-export hop, or explicit import of this name in the owner; a later `unresolved type: {dependency}` will be reported against an importing module instead")
             return
         val terminal = self.module_surfaces.surfaces[selected_target]
@@ -1098,6 +1121,15 @@ impl HirLowering:
                                     trait_method, trait_module.module_name,
                                     Some(local_owner))
                                 self.symbols.define(symbol_name, kind, method_type, import_span, Visibility.Public, false, local_owner_defining_module)
+
+fn hir_payload_origin_miss_key(owner_key: text, dependency: text) -> text:
+    """Memo key for a FAILED payload-origin search: `{owner key} {name}`.
+
+    Owner-scoped on purpose. Two modules may spell the same name and only one
+    of them declare it, so a global name-keyed memo would be unsound; keying on
+    the owner makes the cached fact exactly the question that was asked.
+    See doc/08_tracking/bug/hir_builtin_container_origin_search_storm_2026-08-22.md"""
+    owner_key + " " + dependency
 
 fn hir_dependency_is_builtin_type(dependency: text) -> bool:
     """True for a PRIMITIVE/builtin spelling that no user module can ever own.

@@ -1,0 +1,149 @@
+# @tag: unit, compiler, hir, native-safe
+# @cover src/compiler/20.hir/hir_lowering/_Items/module_reexport_materialization.spl
+#
+# Pins the MECHANISM behind the builtin-container origin-search storm
+# (doc/08_tracking/bug/hir_builtin_container_origin_search_storm_2026-08-22.md).
+#
+# Stage-1 run14 emitted ~31,700 in-flight `[hir-payload-origin-unresolved]` /
+# `[hir-callable-dep-origin-unresolved]` advisories for BUILTIN CONTAINER
+# spellings alone -- `Dict` 14,847, `Option` 9,857, `Result` 7,015, `fn` 290 --
+# none of them a terminal error. Each advisory is one FULL failed origin search
+# over the owner's declarations, its re-export routes and its whole import
+# table, repeated per occurrence and per importer.
+#
+# The fix is NOT a capitalized-name filter. `lower_named_kind` places the
+# container arms AFTER the symbol lookup precisely so a DECLARED type of the
+# same name wins, and 42 `Result` / 14 `Option` / 10 `Array` / 1 `Dict`
+# declarations really exist in this tree (commit 1aa81cac8c6 made
+# `hir_dependency_is_builtin_type` lowercase-primitives-only for exactly that
+# reason). The fix is a NEGATIVE memo keyed on (owner, name): only a MISS is
+# cached, so a declared type still resolves on step 1 of every search and its
+# precedence is untouched.
+#
+# The observable is a COUNT, not a wall clock, so this spec discriminates the
+# algorithm rather than the machine: it cannot pass on the pre-fix code (the
+# counter did not exist and the search really did repeat), and a faster box
+# cannot satisfy it.
+
+use std.spec.{describe, it, expect}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering._Items.module_reexport_materialization.*
+use compiler.hir.hir_lowering._Items.module_import_registration.*
+use compiler.hir.hir_lowering._Items.module_lowering.*
+use compiler.hir.hir_lowering.module_surface.{
+    ModuleSurface,
+    ModuleSurfacesByName
+}
+
+fn container_registry() -> ModuleSurfacesByName:
+    """One declaring surface that owns NOTHING plus three importers -- the
+    shape that made the repeated failed search visible: N importers of ONE
+    surface, all naming the same container spelling."""
+    val decl = ModuleSurface.empty("pkg.decl")
+    val i1 = ModuleSurface.empty("pkg.imp1")
+    val i2 = ModuleSurface.empty("pkg.imp2")
+    val i3 = ModuleSurface.empty("pkg.imp3")
+    val built = ModuleSurfacesByName.from_parts(
+        [decl, i1, i2, i3],
+        {"pkg.decl": 0, "pkg.imp1": 1, "pkg.imp2": 2, "pkg.imp3": 3},
+        ["pkg.decl", "pkg.imp1", "pkg.imp2", "pkg.imp3"],
+        [0, 1, 2, 3])
+    built.unwrap()
+
+fn declaring_registry() -> ModuleSurfacesByName:
+    """CONTROL fixture: a module that really DECLARES `Result`. This is the
+    case a naive capitalized-name filter would silently break."""
+    var decl = ModuleSurface.empty("pkg.owner")
+    decl.enum_names = ["Result"]
+    val built = ModuleSurfacesByName.from_parts(
+        [decl], {"pkg.owner": 0}, ["pkg.owner"], [0])
+    built.unwrap()
+
+describe("HIR payload-origin miss memo", fn():
+    it("searches once per (owner, name) for a builtin container spelling", fn():
+        val registry = container_registry()
+        var lowering = hirlowering_for_module("pkg/imp1.spl", registry)
+        val span = Span.empty()
+        val decl = registry.surfaces[0]
+        val skipped: {text: bool} = {}
+        # `Dict` alone accounted for 14,847 of the run14 advisories. Three
+        # importers, one owner, one name: the second and third must cost a
+        # dict probe, not a search.
+        lowering.begin_module("pkg/imp1.spl")
+        lowering.register_materialized_payload_named_dependency(
+            decl, "pkg.decl", "Dict", skipped, span)
+        expect(lowering.payload_origin_miss_skip_count).to_equal(0)
+        expect(lowering.payload_origin_miss_memo.contains_key("pkg.decl Dict")).to_equal(true)
+        lowering.begin_module("pkg/imp2.spl")
+        lowering.register_materialized_payload_named_dependency(
+            decl, "pkg.decl", "Dict", skipped, span)
+        lowering.begin_module("pkg/imp3.spl")
+        lowering.register_materialized_payload_named_dependency(
+            decl, "pkg.decl", "Dict", skipped, span)
+        # O(1) searches per name: exactly one, plus two memo hits.
+        expect(lowering.payload_origin_miss_skip_count).to_equal(2)
+        expect(lowering.payload_origin_miss_memo.len()).to_equal(1)
+    )
+
+    it("keeps Option and Result distinct, and keys the memo per OWNER", fn():
+        val registry = container_registry()
+        var lowering = hirlowering_for_module("pkg/imp1.spl", registry)
+        val span = Span.empty()
+        val skipped: {text: bool} = {}
+        lowering.register_materialized_payload_named_dependency(
+            registry.surfaces[0], "pkg.decl", "Option", skipped, span)
+        lowering.register_materialized_payload_named_dependency(
+            registry.surfaces[0], "pkg.decl", "Result", skipped, span)
+        # A DIFFERENT owner is a different question: two modules may spell the
+        # same name and only one of them declare it, so a global name-keyed
+        # memo would be unsound.
+        lowering.register_materialized_payload_named_dependency(
+            registry.surfaces[1], "pkg.imp1", "Option", skipped, span)
+        expect(lowering.payload_origin_miss_memo.len()).to_equal(3)
+        expect(lowering.payload_origin_miss_skip_count).to_equal(0)
+    )
+
+    it("CONTROL: a module that DECLARES `Result` still resolves to its declaration", fn():
+        # The correctness half, and the reason the fix is a negative memo
+        # rather than a capitalized-name filter. `lower_named_kind` puts the
+        # builtin `Result` arm AFTER the symbol lookup so a declared type wins;
+        # a name filter would stop materializing this declaration entirely.
+        val registry = declaring_registry()
+        var lowering = hirlowering_for_module("pkg/owner.spl", registry)
+        val owner = registry.surfaces[0]
+        val origin = lowering.resolve_materialized_enum_payload_origin(
+            owner, "pkg.owner", "Result")
+        expect(origin.found).to_equal(true)
+        expect(origin.item_name).to_equal("Result")
+        expect(origin.item_kind).to_equal("enum")
+        # A HIT is never cached, so no memo entry can ever shadow it.
+        expect(lowering.payload_origin_miss_memo.contains_key("pkg.owner Result")).to_equal(false)
+    )
+
+    it("still filters only the lowercase primitives, never the containers", fn():
+        # Guards the precedence contract from commit 1aa81cac8c6 against being
+        # "simplified" into a capitalized-name test.
+        expect(hir_dependency_is_builtin_type("text")).to_equal(true)
+        expect(hir_dependency_is_builtin_type("i64")).to_equal(true)
+        expect(hir_dependency_is_builtin_type("Dict")).to_equal(false)
+        expect(hir_dependency_is_builtin_type("Option")).to_equal(false)
+        expect(hir_dependency_is_builtin_type("Result")).to_equal(false)
+    )
+
+    it("raises no diagnostic and defines no symbol for a memoized miss", fn():
+        # The cache changes only how the answer is FOUND. A miss bound nothing
+        # before and binds nothing now, for every importer.
+        val registry = container_registry()
+        var lowering = hirlowering_for_module("pkg/imp1.spl", registry)
+        val span = Span.empty()
+        val skipped: {text: bool} = {}
+        lowering.register_materialized_payload_named_dependency(
+            registry.surfaces[0], "pkg.decl", "Dict", skipped, span)
+        lowering.begin_module("pkg/imp2.spl")
+        lowering.register_materialized_payload_named_dependency(
+            registry.surfaces[0], "pkg.decl", "Dict", skipped, span)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.symbols.lookup_or_invalid("pkg.decl::Dict").is_valid()).to_equal(false)
+    )
+)
