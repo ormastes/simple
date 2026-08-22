@@ -567,7 +567,7 @@ bin/simple fix file.spl --fix-id=L:deprecated_if_let
 Override with flags:
 
 ```bash
-bin/simple lint file.spl --deny-all    # Treat all warnings as errors
+bin/simple lint file.spl --deny-all    # Treat all deniable warnings as errors
 bin/simple lint file.spl --warn-all    # Raise configured allow rules to warnings
 bin/simple lint file.spl --json        # Emit JSON Lines diagnostics and summaries
 bin/simple lint file.spl --fix-dry-run # Preview safe lint fixes without writing
