@@ -1445,7 +1445,14 @@ The authoritative static census now distinguishes unsafe declarations whose
 unsafe surface has been minimized (both an unsafe tag and a documented
 contract) from unminimized unsafe declarations, and reports verified/signed
 counts per family and scope. Current owned-code totals are 12,294 declaration
-rows and 3,167 distinct symbols: 12,294 unsafe, 315 unsafe-minimized, 11,979
+rows and 3,167 distinct symbols: 12,294 unsafe, 327 unsafe-minimized, 11,967
 unsafe-unminimized, 11,237 untouched, and zero evidence-verified, signed, or
 admitted. Implementations found by language are Simple 558, Rust 2,161, C
 2,323, and C++ 211. These are static source statistics, not safety proof.
+
+Twelve raw dynamic Torch handle declarations now document the exact
+nonpositive-handle sentinel enforced by their typed wrappers. This moves them
+from tagged-only to unsafe-minimized without claiming provider verification:
+`rt_torch` remains 161 unsafe rows, now with 12 contract-documented/minimized,
+22 untouched, and zero verified or signed. Scalar floating-point reductions
+remain uncontracted because valid zero is still indistinguishable from error.

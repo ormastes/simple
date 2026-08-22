@@ -1140,7 +1140,12 @@ be confused with provider failure; signed admission remains pending.
 
 The census now reports and ratchets `unsafe_minimized_rows` separately from
 unminimized unsafe rows, with family/scope evidence and signature columns.
-Current totals are 12,294 rows: 315 unsafe-minimized, 11,979 unminimized,
+Current totals are 12,294 rows: 327 unsafe-minimized, 11,967 unminimized,
 11,237 untouched, and zero verified/signed. Use the largest untouched families
 (`rt_file`, `rt_process`, `rt_env`, then `rt_time`) as the next broad migration
 order while the cross-lane Torch scalar status/out ABI is designed.
+
+Twelve migrated Torch raw handle declarations now state their enforced
+nonpositive-handle sentinel, raising contract-documented rows to 599 and
+unsafe-minimized rows to 327. Do not apply this annotation to scalar reductions
+until their status/value ABI removes the valid-zero ambiguity.
