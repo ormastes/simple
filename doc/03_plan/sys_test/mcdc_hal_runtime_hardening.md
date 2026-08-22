@@ -28,6 +28,13 @@ Primary steps: “Build the controlled fixture”; “Run the selected assurance
 
 Matched builds retain normalized hot code, symbols, sections, link maps, >=30 randomized paired samples, nearest-rank p95, CPU affinity/noise metadata, RSS, allocation epochs, mappings, raw sample hashes, capacities, log/event high-water, child receipts, and isolation setup/IPC metrics. Any missing identity/raw sample/child, NaN, overflow, evidence loss, or post-seal allocation fails.
 
+The bounded executable gate is
+`scripts/check/check-mcdc-performance-gate.shs`; its operator contract and
+retained evidence fields are documented at
+`doc/06_spec/05_perf/mcdc/mcdc_performance_gate_spec.md`. The gate records only
+measurements it actually runs and exits with `ERROR nothing-checked` when an
+input binary, compiler identity, tool, or receipt field is absent.
+
 ## Evidence rows
 
 Current Linux host must cover compiler manifests, supported execution modes, three policies, dynload mappings, isolated Pure/C/Rust workers, allocation/performance receipts, and producible file/stream/process/env/clock/random/socket interactions. Real interrupt/MMIO/DMA and non-current platforms retain explicit target/executor identities and governed exclusion or blocked receipts; none count as PASS.
@@ -35,4 +42,3 @@ Current Linux host must cover compiler manifests, supported execution modes, thr
 ## Sabotage requirement
 
 Each spec must prove green -> implementation sabotage red -> restored green. Arms target implementation: manifest IDs, probe emission, allocator call, slot publication, receipt validation, instruction order, provider isolation, comparison, and exclusion validation.
-

@@ -1,0 +1,283 @@
+#!/bin/sh
+# Retained MC/DC performance/allocation evidence gate (NFR-001..006, NFR-009).
+#
+# The five inputs must be controlled-fixture ELF executables built from the
+# same source and compiler invocation except for the MC/DC policy.  Each binary
+# accepts:
+#   --mcdc-perf-iterations N --mcdc-allocation-receipt PATH
+# and writes the allocation receipt described in require_allocation_receipt().
+#
+# Required environment:
+#   MCDC_CONTROL_BIN, MCDC_STATIC_OFF_BIN, MCDC_STATIC_ON_BIN,
+#   MCDC_DYNAMIC_IDLE_BIN, MCDC_DYNAMIC_ARMED_BIN, MCDC_COMPILER_BIN
+# Optional:
+#   MCDC_PERF_BUILD_DIR (build/mcdc-performance-gate)
+#   MCDC_PERF_WARMUPS (5), MCDC_PERF_SAMPLES (30),
+#   MCDC_PERF_ITERATIONS (1000000)
+
+set -u
+
+ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
+OUT=${MCDC_PERF_BUILD_DIR:-"$ROOT/build/mcdc-performance-gate"}
+WARMUPS=${MCDC_PERF_WARMUPS:-5}
+SAMPLES=${MCDC_PERF_SAMPLES:-30}
+ITERATIONS=${MCDC_PERF_ITERATIONS:-1000000}
+TIME_BIN=${MCDC_TIME_BIN:-/usr/bin/time}
+SUMMARY="$OUT/summary.tsv"
+RAW="$OUT/raw_samples.tsv"
+IDENTITIES="$OUT/binary_identities.tsv"
+SECTIONS="$OUT/sections.tsv"
+ALLOCATIONS="$OUT/allocation_receipts.tsv"
+
+error() {
+    echo "mcdc-performance-gate: ERROR nothing-checked reason=$1" >&2
+    exit 2
+}
+
+fail() {
+    echo "mcdc-performance-gate: FAIL reason=$1 evidence=$OUT" >&2
+    exit 1
+}
+
+is_uint() { case "$1" in ''|*[!0-9]*) return 1;; *) return 0;; esac; }
+
+is_uint "$WARMUPS" || error "warmups-not-unsigned-integer"
+is_uint "$SAMPLES" || error "samples-not-unsigned-integer"
+is_uint "$ITERATIONS" || error "iterations-not-unsigned-integer"
+[ "$WARMUPS" -ge 1 ] || error "warmups-less-than-1"
+[ "$SAMPLES" -ge 30 ] || error "samples-less-than-30"
+[ "$ITERATIONS" -ge 1 ] || error "iterations-less-than-1"
+
+CONTROL=${MCDC_CONTROL_BIN:-}
+STATIC_OFF=${MCDC_STATIC_OFF_BIN:-}
+STATIC_ON=${MCDC_STATIC_ON_BIN:-}
+DYNAMIC_IDLE=${MCDC_DYNAMIC_IDLE_BIN:-}
+DYNAMIC_ARMED=${MCDC_DYNAMIC_ARMED_BIN:-}
+COMPILER=${MCDC_COMPILER_BIN:-}
+
+command -v sha256sum >/dev/null 2>&1 || error "sha256sum-missing"
+command -v readelf >/dev/null 2>&1 || error "readelf-missing"
+command -v objcopy >/dev/null 2>&1 || error "objcopy-missing"
+command -v size >/dev/null 2>&1 || error "size-missing"
+command -v awk >/dev/null 2>&1 || error "awk-missing"
+command -v sort >/dev/null 2>&1 || error "sort-missing"
+[ -x "$TIME_BIN" ] || error "time-tool-not-executable"
+
+mkdir -p "$OUT" || error "cannot-create-output-directory"
+: >"$RAW" || error "cannot-create-raw-samples"
+: >"$IDENTITIES" || error "cannot-create-identities"
+: >"$SECTIONS" || error "cannot-create-sections"
+: >"$ALLOCATIONS" || error "cannot-create-allocation-receipts"
+printf 'mode\tsample\telapsed_us\tmax_rss_kb\tstdout_sha256\tallocation_receipt_sha256\n' >>"$RAW"
+printf 'role\trealpath\tsha256\tbytes\n' >>"$IDENTITIES"
+printf 'mode\ttext_bytes\tdata_bytes\tbss_bytes\tsection_table_sha256\tmcdc_named_bytes\n' >>"$SECTIONS"
+printf 'mode\tsample\tcoverage_alloc_count\tcoverage_alloc_bytes\tpost_seal_alloc_count\tpost_seal_alloc_bytes\tevent_capacity_bytes\tlog_capacity_bytes\tmapped_pack_count\toverflow\tevidence_loss\n' >>"$ALLOCATIONS"
+
+identity() {
+    role=$1
+    path=$2
+    [ -n "$path" ] || error "$role-binary-not-set"
+    [ -f "$path" ] || error "$role-binary-missing"
+    [ -x "$path" ] || error "$role-binary-not-executable"
+    real=$(readlink -f "$path") || error "$role-realpath-failed"
+    hash=$(sha256sum "$path" | awk '{print $1}') || error "$role-hash-failed"
+    bytes=$(wc -c <"$path" | tr -d ' ') || error "$role-size-failed"
+    printf '%s\t%s\t%s\t%s\n' "$role" "$real" "$hash" "$bytes" >>"$IDENTITIES"
+}
+
+identity compiler "$COMPILER"
+identity control "$CONTROL"
+identity static_off "$STATIC_OFF"
+identity static_on "$STATIC_ON"
+identity dynamic_idle "$DYNAMIC_IDLE"
+identity dynamic_armed "$DYNAMIC_ARMED"
+
+section_evidence() {
+    mode=$1
+    bin=$2
+    readelf -h "$bin" >/dev/null 2>&1 || error "$mode-not-elf"
+    table="$OUT/$mode.sections"
+    readelf -SW "$bin" >"$table" || error "$mode-section-read-failed"
+    table_hash=$(sha256sum "$table" | awk '{print $1}')
+    set -- $(size "$bin" | awk 'NR == 2 { print $1, $2, $3 }')
+    [ "$#" -eq 3 ] || error "$mode-size-fields-missing"
+    size -A "$bin" >"$OUT/$mode.size-a" || error "$mode-section-size-read-failed"
+    named=$(awk 'BEGIN { IGNORECASE=1; total=0 }
+        $1 ~ /mcdc|coverage/ && $2 ~ /^[0-9]+$/ { total += $2 }
+        END { printf "%.0f", total }' "$OUT/$mode.size-a") || error "$mode-named-section-scan-failed"
+    awk 'NF >= 2 && $2 ~ /^[0-9]+$/ { print $1, $2 }' "$OUT/$mode.size-a" >"$OUT/$mode.sections.normalized"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$mode" "$1" "$2" "$3" "$table_hash" "$named" >>"$SECTIONS"
+}
+
+section_evidence control "$CONTROL"
+section_evidence static_off "$STATIC_OFF"
+section_evidence static_on "$STATIC_ON"
+section_evidence dynamic_idle "$DYNAMIC_IDLE"
+section_evidence dynamic_armed "$DYNAMIC_ARMED"
+
+# Static-off must be indistinguishable in emitted code and contain no named
+# coverage material.  Full binary hashes are retained but are not compared:
+# build IDs and policy receipts may legitimately differ outside executable text.
+objcopy --dump-section .text="$OUT/control.text.bin" "$CONTROL" || error "control-text-read-failed"
+objcopy --dump-section .text="$OUT/static_off.text.bin" "$STATIC_OFF" || error "static-off-text-read-failed"
+CONTROL_TEXT=$(sha256sum "$OUT/control.text.bin" | awk '{print $1}')
+OFF_TEXT=$(sha256sum "$OUT/static_off.text.bin" | awk '{print $1}')
+[ "$CONTROL_TEXT" = "$OFF_TEXT" ] || fail "static-off-hot-text-differs"
+cmp -s "$OUT/control.sections.normalized" "$OUT/static_off.sections.normalized" || fail "static-off-section-layout-differs"
+OFF_NAMED=$(awk -F '\t' '$1 == "static_off" { print $6 }' "$SECTIONS")
+[ "$OFF_NAMED" = 0 ] || fail "static-off-coverage-section-nonzero"
+
+receipt_value() {
+    key=$1
+    file=$2
+    awk -F= -v key="$key" '$1 == key { if (seen++) exit 3; value=$2 } END { if (seen != 1) exit 4; print value }' "$file"
+}
+
+require_allocation_receipt() {
+    mode=$1
+    sample=$2
+    file=$3
+    [ -s "$file" ] || fail "$mode-sample-$sample-allocation-receipt-missing"
+    values=''
+    for key in coverage_alloc_count coverage_alloc_bytes post_seal_alloc_count post_seal_alloc_bytes event_capacity_bytes log_capacity_bytes mapped_pack_count overflow evidence_loss; do
+        value=$(receipt_value "$key" "$file") || fail "$mode-sample-$sample-$key-invalid"
+        is_uint "$value" || fail "$mode-sample-$sample-$key-not-unsigned-integer"
+        values="$values\t$value"
+        eval "$key=\$value"
+    done
+    [ "$post_seal_alloc_count" -eq 0 ] || fail "$mode-sample-$sample-post-seal-allocation"
+    [ "$post_seal_alloc_bytes" -eq 0 ] || fail "$mode-sample-$sample-post-seal-allocation-bytes"
+    [ "$overflow" -eq 0 ] || fail "$mode-sample-$sample-overflow"
+    [ "$evidence_loss" -eq 0 ] || fail "$mode-sample-$sample-evidence-loss"
+    total_capacity=$((event_capacity_bytes + log_capacity_bytes))
+    [ "$total_capacity" -le 4194304 ] || fail "$mode-sample-$sample-capacity-over-4mib"
+    case "$mode" in
+        control|static_off|dynamic_idle)
+            [ "$coverage_alloc_count" -eq 0 ] || fail "$mode-sample-$sample-coverage-allocation"
+            [ "$coverage_alloc_bytes" -eq 0 ] || fail "$mode-sample-$sample-coverage-allocation-bytes"
+            ;;
+    esac
+    [ "$mode" != dynamic_idle ] || [ "$mapped_pack_count" -eq 0 ] || fail "dynamic-idle-pack-mapped"
+    printf '%s\t%s%b\n' "$mode" "$sample" "$values" >>"$ALLOCATIONS"
+}
+
+run_once() {
+    mode=$1
+    bin=$2
+    sample=$3
+    record=$4
+    receipt="$OUT/$mode.$sample.alloc"
+    stdout="$OUT/$mode.$sample.stdout"
+    timing="$OUT/$mode.$sample.time"
+    rm -f "$receipt" "$stdout" "$timing"
+    "$TIME_BIN" -f '%e\t%M' -o "$timing" "$bin" \
+        --mcdc-perf-iterations "$ITERATIONS" \
+        --mcdc-allocation-receipt "$receipt" >"$stdout" 2>"$OUT/$mode.$sample.stderr"
+    rc=$?
+    [ "$rc" -eq 0 ] || fail "$mode-sample-$sample-exit-$rc"
+    require_allocation_receipt "$mode" "$sample" "$receipt"
+    [ "$record" -eq 1 ] || return 0
+    set -- $(awk -F '\t' 'NF == 2 { print $1, $2 }' "$timing")
+    [ "$#" -eq 2 ] || fail "$mode-sample-$sample-timing-missing"
+    elapsed_us=$(awk -v seconds="$1" 'BEGIN { if (seconds !~ /^[0-9]+([.][0-9]+)?$/) exit 1; printf "%.0f", seconds * 1000000 }') || fail "$mode-sample-$sample-time-invalid"
+    is_uint "$2" || fail "$mode-sample-$sample-rss-invalid"
+    [ "$elapsed_us" -gt 0 ] || fail "$mode-sample-$sample-zero-duration"
+    [ "$2" -gt 0 ] || fail "$mode-sample-$sample-zero-rss"
+    stdout_hash=$(sha256sum "$stdout" | awk '{print $1}')
+    receipt_hash=$(sha256sum "$receipt" | awk '{print $1}')
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$mode" "$sample" "$elapsed_us" "$2" "$stdout_hash" "$receipt_hash" >>"$RAW"
+}
+
+warm_mode() {
+    mode=$1
+    bin=$2
+    n=1
+    while [ "$n" -le "$WARMUPS" ]; do run_once "$mode" "$bin" "warmup-$n" 0; n=$((n + 1)); done
+}
+
+warm_mode control "$CONTROL"
+warm_mode static_off "$STATIC_OFF"
+warm_mode static_on "$STATIC_ON"
+warm_mode dynamic_idle "$DYNAMIC_IDLE"
+warm_mode dynamic_armed "$DYNAMIC_ARMED"
+
+# Deterministically rotate each complete five-mode round. Every mode therefore
+# sees every position equally (or differs by at most one round), while sample N
+# remains a paired observation across modes.
+n=1
+while [ "$n" -le "$SAMPLES" ]; do
+    case $((n % 5)) in
+        0) order='control static_off static_on dynamic_idle dynamic_armed';;
+        1) order='static_off static_on dynamic_idle dynamic_armed control';;
+        2) order='static_on dynamic_idle dynamic_armed control static_off';;
+        3) order='dynamic_idle dynamic_armed control static_off static_on';;
+        4) order='dynamic_armed control static_off static_on dynamic_idle';;
+    esac
+    for mode in $order; do
+        case "$mode" in
+            control) bin=$CONTROL;;
+            static_off) bin=$STATIC_OFF;;
+            static_on) bin=$STATIC_ON;;
+            dynamic_idle) bin=$DYNAMIC_IDLE;;
+            dynamic_armed) bin=$DYNAMIC_ARMED;;
+        esac
+        run_once "$mode" "$bin" "$n" 1
+    done
+    n=$((n + 1))
+done
+
+# Identical stdout hashes prove every measured mode ran the same fixture oracle.
+ORACLE_COUNT=$(awk -F '\t' 'NR > 1 { seen[$5]=1 } END { for (x in seen) n++; print n+0 }' "$RAW")
+[ "$ORACLE_COUNT" -eq 1 ] || fail "fixture-oracle-mismatch"
+
+printf 'mode\tmedian_us\tp95_us\tpeak_rss_kb\tmedian_slowdown_bp\tp95_slowdown_bp\tpeak_rss_increase_bp\n' >"$SUMMARY"
+metric() {
+    mode=$1
+    column=$2
+    rank=$3
+    awk -F '\t' -v mode="$mode" -v column="$column" '$1 == mode { print $column }' "$RAW" | sort -n | awk -v rank="$rank" 'NR == rank { print; found=1 } END { if (!found) exit 1 }'
+}
+rank50=$(( (SAMPLES + 1) / 2 ))
+rank95=$(( (95 * SAMPLES + 99) / 100 ))
+OFF_MEDIAN=$(metric static_off 3 "$rank50") || fail "static-off-median-missing"
+OFF_P95=$(metric static_off 3 "$rank95") || fail "static-off-p95-missing"
+OFF_RSS=$(metric static_off 4 "$SAMPLES") || fail "static-off-rss-missing"
+
+summarize() {
+    mode=$1
+    median=$(metric "$mode" 3 "$rank50") || fail "$mode-median-missing"
+    p95=$(metric "$mode" 3 "$rank95") || fail "$mode-p95-missing"
+    rss=$(metric "$mode" 4 "$SAMPLES") || fail "$mode-rss-missing"
+    med_bp=$(awk -v x="$median" -v b="$OFF_MEDIAN" 'BEGIN { printf "%.0f", ((x-b)*10000)/b }')
+    p95_bp=$(awk -v x="$p95" -v b="$OFF_P95" 'BEGIN { printf "%.0f", ((x-b)*10000)/b }')
+    rss_bp=$(awk -v x="$rss" -v b="$OFF_RSS" 'BEGIN { printf "%.0f", ((x-b)*10000)/b }')
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$mode" "$median" "$p95" "$rss" "$med_bp" "$p95_bp" "$rss_bp" >>"$SUMMARY"
+}
+
+summarize static_off
+summarize static_on
+summarize dynamic_idle
+summarize dynamic_armed
+
+within() {
+    mode=$1
+    field=$2
+    limit=$3
+    value=$(awk -F '\t' -v mode="$mode" -v field="$field" 'NR == 1 { for (i=1;i<=NF;i++) if ($i == field) col=i } $1 == mode { print $col }' "$SUMMARY")
+    is_uint "$value" || case "$value" in -[0-9]*) :;; *) fail "$mode-$field-invalid";; esac
+    [ "$value" -le "$limit" ] || fail "$mode-$field-${value}bp-over-${limit}bp"
+}
+
+# Basis points: 2%=200bp, .5%=50bp, etc.
+within static_on median_slowdown_bp 200
+within static_on p95_slowdown_bp 500
+within static_on peak_rss_increase_bp 200
+within dynamic_idle median_slowdown_bp 50
+within dynamic_idle p95_slowdown_bp 50
+within dynamic_idle peak_rss_increase_bp 50
+within dynamic_armed median_slowdown_bp 1000
+within dynamic_armed p95_slowdown_bp 1500
+within dynamic_armed peak_rss_increase_bp 500
+
+COMPILER_HASH=$(awk -F '\t' '$1 == "compiler" { print $3 }' "$IDENTITIES")
+echo "mcdc-performance-gate: PASS compiler_sha256=$COMPILER_HASH samples=$SAMPLES warmups=$WARMUPS percentile=nearest-rank evidence=$OUT"
