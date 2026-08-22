@@ -515,6 +515,14 @@ JSON acceptance or introduce sorting/validation.
 
 ## Workspace diagnostic session design
 
+Do not implement the intermediate shortcut of running today's lint emitter in the
+workspace parent. That emitter may print parser trace output and owns private tier
+state beyond the four common diagnostic globals. A disposable child currently
+contains both effects. Process removal therefore requires a nonprinting structured
+lint result API and one lint-owned snapshot/restore boundary covering collection,
+severity policy, tier activation, and failure cleanup. Until those contracts have
+behavioral fixtures, retain the JSON-only nested query process.
+
 Add compiler-tool owners under `compiler/90.tools/workspace_diagnostics` for an
 immutable `WorkspaceDiagnosticConfig`, ordinal/path/digest request, per-file
 result and serial `WorkspaceDiagnosticSession`. The app discovers files once,
@@ -525,7 +533,7 @@ handles never cross file boundaries. Results retain discovery ordinals so curren
 file order, compiler-before-lint order, clean-file omission, summary text/counts
 and exit status remain exact.
 
-Stage 1 is deliberately serial. Digest-keyed immutable source/config/import caches
+The session is deliberately serial. Digest-keyed immutable source/config/import caches
 may follow after ownership is explicit. Bounded concurrency is forbidden until
 lexer/parser/AST globals are session-owned and permutation/contamination tests
 prove isolation. Acceptance requires zero per-file subprocesses, each session
