@@ -1020,6 +1020,7 @@ pub(crate) fn exec_function_with_captured_env(
             self_mode,
         )?;
 
+        let parked = park_written_back_arguments(func, args, outer_env, classes, self_mode);
         outer_env.release_scope();
     let result = execute_function_body(
             func,
@@ -1038,6 +1039,7 @@ pub(crate) fn exec_function_with_captured_env(
         if result.is_ok() {
             write_back_mutable_arguments(func, args, outer_env, &local_env, classes, self_mode);
         }
+        restore_parked_arguments(&parked, outer_env, &local_env);
         result
     })
 }
@@ -1147,6 +1149,144 @@ fn merge_shared_collection_fields(caller_val: &mut Value, callee_val: &Value) ->
         slots.insert(name, value);
     }
     true
+}
+
+/// A caller binding parked for the duration of a call: the caller's variable
+/// name and the callee parameter it was bound to.
+type ParkedArg = (String, String);
+
+/// Map identifier arguments to their parameter names, using exactly the rules
+/// `write_back_mutable_arguments` uses, so the park set can never contain a
+/// binding the write-back will not restore.
+///
+/// Returns `None` when the mapping is not reconstructible (a spread argument),
+/// in which case nothing may be parked.
+fn identifier_arg_bindings(func: &FunctionDef, args: &[Argument], self_mode: SelfMode) -> Option<Vec<ParkedArg>> {
+    let params_to_bind: Vec<_> = func
+        .params
+        .iter()
+        .filter(|p| !(self_mode == SelfMode::SkipSelf && p.name == METHOD_SELF))
+        .collect();
+    let mut out: Vec<ParkedArg> = Vec::new();
+    let mut positional_idx = 0usize;
+    for arg in args {
+        if matches!(&arg.value, simple_parser::ast::Expr::Spread(_)) {
+            return None;
+        }
+        let simple_parser::ast::Expr::Identifier(caller) = &arg.value else {
+            if arg.name.is_none() {
+                positional_idx += 1;
+            }
+            continue;
+        };
+        let param_name = if let Some(name) = &arg.name {
+            if params_to_bind.iter().any(|p| p.name == name.as_str() && p.variadic) {
+                continue;
+            }
+            name.clone()
+        } else {
+            let param = params_to_bind.get(positional_idx);
+            positional_idx += 1;
+            match param {
+                Some(p) if !p.variadic => p.name.clone(),
+                // A variadic parameter swallows the rest, so no later
+                // positional argument can be mapped safely.
+                Some(_) => return None,
+                None => continue,
+            }
+        };
+        if caller == METHOD_SELF && self_mode == SelfMode::SkipSelf {
+            continue;
+        }
+        out.push((caller.clone(), param_name));
+    }
+    Some(out)
+}
+
+/// Release the CALLER's handle on a reference-semantics argument for the
+/// duration of the call, so the callee owns it uniquely.
+///
+/// `interpreter/expr/calls.rs`'s MECALL-OWNED fast path makes `w.put(x)` — a
+/// `me` method that mutates `self.field.push(..)` — an in-place `Arc::make_mut`
+/// by taking the receiver out of the frame that calls the method. That frame is
+/// then the only holder, so the push is O(1). But when the receiver reached that
+/// frame as a PARAMETER, every frame it travelled through still holds its own
+/// binding of the same object, `Arc::strong_count > 1`, and the push deep-copies
+/// the whole backing Vec. Accumulating n items through even one extra hop was
+/// therefore O(n^2): measured 80,000 pushes = 80,000 clones / 3.2e9 elements /
+/// 595 s, against 4 clones / 0.57 s for the direct shape. Every generated
+/// `hc_enc_*` HIR encoder is exactly the multi-hop shape.
+///
+/// This is unobservable, not a semantic change: the caller frame is suspended
+/// for the whole call and cannot read the binding, and the value it will hold
+/// afterwards is already fixed — `write_back_mutable_arguments` overwrites it
+/// with the callee's final value for precisely these argument shapes. A
+/// `Value::Nil` placeholder is left behind so the write-back's
+/// `outer_env.contains_key` test still sees the binding, and
+/// `restore_parked_arguments` fills in anything the write-back declined (and is
+/// the only restore on the error path).
+///
+/// What is deliberately NOT parked, because another observer would then see a
+/// hole rather than a copy: non-local names (module globals are reachable
+/// through MODULE_GLOBALS and the owner stores), `self`, a name passed more than
+/// once in the same call, value-type structs (they keep value semantics and are
+/// never written back wholesale), and non-container values. A genuine alias —
+/// a second live binding of the same object elsewhere — is untouched by this and
+/// still forces the copy-on-write clone, which is what preserves value
+/// semantics.
+///
+/// Record: doc/08_tracking/bug/seed_receiver_multi_hop_cow_clone_2026-08-22.md
+fn park_written_back_arguments(
+    func: &FunctionDef,
+    args: &[Argument],
+    outer_env: &mut Env,
+    classes: &HashMap<String, Arc<ClassDef>>,
+    self_mode: SelfMode,
+) -> Vec<ParkedArg> {
+    let Some(bindings) = identifier_arg_bindings(func, args, self_mode) else {
+        return Vec::new();
+    };
+    let mut parked: Vec<ParkedArg> = Vec::new();
+    for (caller_name, param_name) in bindings.iter() {
+        // Passed twice in the same call: the two parameters legitimately alias,
+        // and only one write-back wins. Leave it alone.
+        if bindings.iter().filter(|(c, _)| c == caller_name).count() > 1 {
+            continue;
+        }
+        if !outer_env.is_local(caller_name.as_str()) {
+            continue;
+        }
+        let parkable = match outer_env.get(caller_name.as_str()) {
+            Some(v @ (Value::Array(_) | Value::Dict(_) | Value::Tuple(_) | Value::Object { .. })) => {
+                !is_value_type_struct(v, classes)
+            }
+            _ => false,
+        };
+        if !parkable {
+            continue;
+        }
+        // Drop the caller's Arc, keeping the name bound so the write-back's
+        // `contains_key` gate still passes.
+        outer_env.insert(caller_name.clone(), Value::Nil);
+        crate::perf_counters::bump(&crate::perf_counters::PARK_ARG_OK, 1);
+        parked.push((caller_name.clone(), param_name.clone()));
+    }
+    parked
+}
+
+/// Refill any parked binding the write-back did not (error path, or a callee
+/// that rebound the parameter to a non-container). Idempotent: a binding the
+/// write-back already restored is left alone.
+fn restore_parked_arguments(parked: &[ParkedArg], outer_env: &mut Env, local_env: &Env) {
+    for (caller_name, param_name) in parked {
+        if !matches!(outer_env.get(caller_name.as_str()), Some(Value::Nil)) {
+            continue;
+        }
+        if let Some(value) = local_env.get(param_name.as_str()) {
+            outer_env.insert(caller_name.clone(), value.clone());
+        }
+        crate::perf_counters::bump(&crate::perf_counters::PARK_ARG_RESTORED, 1);
+    }
 }
 
 // Bug #19 fix: write back mutable-container parameters to caller's bindings.
@@ -1405,6 +1545,7 @@ fn exec_function_inner(
     // Record function return for layout call graph tracking
     crate::layout_recorder::record_function_return();
 
+    let parked = park_written_back_arguments(func, args, outer_env, classes, self_mode);
     outer_env.release_scope();
     let result = execute_function_body(
         func,
@@ -1424,6 +1565,7 @@ fn exec_function_inner(
     if result.is_ok() {
         write_back_mutable_arguments(func, args, outer_env, &local_env, classes, self_mode);
     }
+    restore_parked_arguments(&parked, outer_env, &local_env);
 
     // Runtime profiler return hook
     if crate::runtime_profile::is_profiling_active() {
@@ -1474,6 +1616,7 @@ fn exec_function_with_values_and_writeback_inner(
 
     crate::layout_recorder::record_function_return();
 
+    let parked = park_written_back_arguments(func, original_args, outer_env, classes, self_mode);
     outer_env.release_scope();
     let result = execute_function_body(
         func,
@@ -1493,6 +1636,7 @@ fn exec_function_with_values_and_writeback_inner(
     if result.is_ok() {
         write_back_mutable_arguments(func, original_args, outer_env, &local_env, classes, self_mode);
     }
+    restore_parked_arguments(&parked, outer_env, &local_env);
 
     if crate::runtime_profile::is_profiling_active() {
         crate::runtime_profile::record_full_return(None);

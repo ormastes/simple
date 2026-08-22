@@ -44,6 +44,9 @@ counters!(
     STEAL_INNER_SHARED,
     STEAL_MISSING,
     STEAL_MISMATCH,
+    // park_written_back_arguments (caller handle released across a nested call)
+    PARK_ARG_OK,
+    PARK_ARG_RESTORED,
     FILTERED_DICT_BUILDS,
     FILTERED_DICT_HITS,
 );

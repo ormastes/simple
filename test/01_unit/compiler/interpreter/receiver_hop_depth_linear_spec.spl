@@ -1,0 +1,64 @@
+# A `me`-mutating method on a class receiver must cost the same however many
+# PARAMETER HOPS the receiver travelled to reach the mutating frame.
+#
+# doc/08_tracking/bug/seed_receiver_multi_hop_cow_clone_2026-08-22.md: the seed's
+# MECALL-OWNED fast path (interpreter/expr/calls.rs) makes `w.put(x)` an in-place
+# `Arc::make_mut` by taking the receiver OUT of the frame that calls the method.
+# That works only when that frame is the sole holder. Pass `w` one function
+# further and every intermediate caller's binding still pins the same field Arc,
+# so each push deep-copied the whole backing Vec — O(n^2) accumulation. Measured
+# on 13bf3b2beee, same binary, 80,000 pushes: direct 4 clones / 0.57 s, one extra
+# hop 80,000 clones / 3.2e9 elements / 595 s. Every generated `hc_enc_*` HIR
+# encoder is the multi-hop shape, which is what made HIR encoding quadratic
+# (hir_codec_writer_quadratic_cow_clone_2026-08-22.md bounded one victim; this is
+# the root defect). Fix: park the caller's binding across the nested call and
+# restore it from the callee's final value, which is what the existing
+# write-back already does.
+#
+# Pinned as a SCALING ratio (4x the pushes must cost under 8x) so it holds on a
+# loaded box, plus a direct-vs-hopped comparison at one size. Rust twin:
+# src/compiler_rust/compiler/tests/interpreter_receiver_hop_depth_linear.rs
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.src.time.{now_micros}
+use test.fixtures.interpreter_receiver_hop_depth.shapes.{fill_direct, fill_hops, alias_keeps_snapshot, order_across_hops}
+
+fn time_hops(n: i64) -> i64:
+    val start = now_micros()
+    val got = fill_hops(n)
+    val elapsed = now_micros() - start
+    expect(got).to_equal(n)
+    return elapsed
+
+fn time_direct(n: i64) -> i64:
+    val start = now_micros()
+    val got = fill_direct(n)
+    val elapsed = now_micros() - start
+    expect(got).to_equal(n)
+    return elapsed
+
+describe "me-method field push through parameter hops":
+    it "keeps value semantics: an alias taken before the pushes does not see them":
+        val counts = alias_keeps_snapshot()
+        expect(counts[0]).to_equal(1)
+        expect(counts[1]).to_equal(3)
+
+    it "propagates every push back to the owning frame, in order":
+        val parts = order_across_hops()
+        expect(parts.len()).to_equal(4)
+        expect(parts[0]).to_equal("1")
+        expect(parts[3]).to_equal("4")
+
+    it "4x the pushes cost less than 8x the time (linear, not quadratic)":
+        time_hops(2000)
+        val small = time_hops(5000)
+        val large = time_hops(20000)
+        val floor = if small < 20000: 20000 else: small
+        expect(large <= floor * 8).to_be_true()
+
+    it "three parameter hops cost no more than 8x the direct receiver":
+        time_direct(2000)
+        val direct = time_direct(10000)
+        val hopped = time_hops(10000)
+        val floor = if direct < 20000: 20000 else: direct
+        expect(hopped <= floor * 8).to_be_true()

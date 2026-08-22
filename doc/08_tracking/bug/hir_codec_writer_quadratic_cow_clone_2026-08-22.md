@@ -172,3 +172,19 @@ The full 858-entry diverged list is what the helper writes to
 `/mnt/data/tmp/test_tree_divergence_preexisting.txt`. This change introduces
 zero divergence: the new spec is committed byte-identically to both
 `test/01_unit/compiler/hir/` and `test/unit/compiler/hir/`.
+
+---
+
+## Root defect fixed 2026-08-22
+
+The seed-interpreter defect this record identified but did not fix — a
+`me`-mutating method deep-cloning the field array when the receiver reached the
+mutating frame through more than one parameter hop — is now fixed in the seed:
+`doc/08_tracking/bug/seed_receiver_multi_hop_cow_clone_2026-08-22.md`. The
+caller's binding is parked for the duration of the nested call and restored from
+the callee's final value, so the shape is O(1) amortised at any hop depth
+(n = 4,000 through one hop: 8,018,103 elements cloned -> 1).
+
+`HIR_CODEC_CHUNK_LINES` and the chunked writer STAY. They are no longer
+load-bearing, but they remain a cheap bound on a hot generated encoder and their
+cost spec still passes; removing them would trade a proven bound for nothing.

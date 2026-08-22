@@ -238,6 +238,27 @@ must_contain     "HIRCODECCHUNK finish joins chunks not parts"    "$HIRCODECW" "
 must_contain     "HIRCODECCHUNK seal inlined at put sites"       "$HIRCODECW" "if self.parts.len() >= HIR_CODEC_CHUNK_LINES:"
 must_contain     "HIRCODECCHUNK cost spec pins the bound"         "$ROOT/test/01_unit/compiler/hir/hir_codec_writer_chunked_cost_spec.spl" "w.parts.len() <= HIR_CODEC_CHUNK_LINES"
 must_contain     "HIRCODECCHUNK cost spec pins linear growth"     "$ROOT/test/01_unit/compiler/hir/hir_codec_writer_chunked_cost_spec.spl" "big_ms <= floor_ms * 8"
+# --- HOPPARK (2026-08-22): the ROOT defect behind HIRCODECCHUNK. A `me`-mutating
+# method deep-cloned the field array whenever the receiver reached the mutating
+# frame through more than one parameter hop, because every intermediate frame
+# kept a live Arc on the field. The caller's binding is parked for the duration
+# of the call and restored from the callee's final value (which is exactly what
+# the Bug #19 write-back already does), so a genuinely live alias still forces
+# the copy. All three write-back call paths must park, or the shape comes back.
+# Record: doc/08_tracking/bug/seed_receiver_multi_hop_cow_clone_2026-08-22.md
+HOPPARK="$ROOT/src/compiler_rust/compiler/src/interpreter_call/core/function_exec.rs"
+HOPTEST="$ROOT/src/compiler_rust/compiler/tests/interpreter_receiver_hop_depth_linear.rs"
+must_contain     "HOPPARK caller handle released across the call" "$HOPPARK" "fn park_written_back_arguments("
+must_contain     "HOPPARK parked bindings always restored"        "$HOPPARK" "fn restore_parked_arguments("
+must_contain     "HOPPARK park set mirrors the write-back rules"  "$HOPPARK" "fn identifier_arg_bindings("
+must_contain     "HOPPARK module globals are never parked"        "$HOPPARK" "if !outer_env.is_local(caller_name.as_str()) {"
+must_contain     "HOPPARK test pins clone budget at every depth"  "$HOPTEST" "for depth in 1..=3usize {"
+must_contain     "HOPPARK test keeps the aliased control"         "$HOPTEST" "fn a_genuine_alias_still_forces_the_copy()"
+must_contain     "HOPPARK spec twin (scaling ratio)" \
+    "$ROOT/test/01_unit/compiler/interpreter/receiver_hop_depth_linear_spec.spl" "floor * 8"
+must_contain     "HOPPARK spec twin (alias keeps its snapshot)" \
+    "$ROOT/test/01_unit/compiler/interpreter/receiver_hop_depth_linear_spec.spl" "alias_keeps_snapshot"
+
 must_contain     "seed: CowEnv frame maps on ahash"               "$ROOT/src/compiler_rust/compiler/src/value.rs" 'pub(crate) type FrameMap<K, V> = HashMap<K, V, ahash::RandomState>;'
 must_contain     "seed: shadow capture tests prior value first"   "$ROOT/src/compiler_rust/compiler/src/interpreter/block_exec.rs" 'if let Some(value) = prior_value.as_ref() {'
 must_contain     "SCALARARR seed: scalar [T] args skip element scan" "$ROOT/src/compiler_rust/compiler/src/interpreter_call/core/arg_binding.rs" 'fn array_param_has_scalar_elements(param: &Parameter) -> bool {'
