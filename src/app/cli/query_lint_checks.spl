@@ -11,6 +11,16 @@ use app.cli.query_lint_scan.{lint_scan_line}
 # MEXH001-005: Match exhaustiveness (text-based heuristic)
 # ============================================================================
 
+struct QueryEnumFacts:
+    variants: [text]
+    variant_set: Dict<text, bool>
+
+fn _query_enum_facts(variants: [text]) -> QueryEnumFacts:
+    var variant_set: Dict<text, bool> = {}
+    for variant in variants:
+        variant_set[variant] = true
+    QueryEnumFacts(variants, variant_set)
+
 fn _check_match_exhaustiveness_text(lines: [text], file: text, format: text) -> i64:
     """Text-based heuristic for match exhaustiveness.
 
@@ -27,7 +37,7 @@ fn _check_match_exhaustiveness_text(lines: [text], file: text, format: text) -> 
     var count = 0
 
     # Pass 1: Collect enum definitions  { name -> [variant_names] }
-    var enum_defs: {text: [text]} = {}
+    var enum_defs: Dict<text, QueryEnumFacts> = {}
     var li = 0
     while li < lines.len():
         val line = lines[li]
@@ -52,18 +62,18 @@ fn _check_match_exhaustiveness_text(lines: [text], file: text, format: text) -> 
                     variants.push(vname)
                 vi = vi + 1
             if variants.len() > 0:
-                enum_defs[enum_name] = variants
+                enum_defs[enum_name] = _query_enum_facts(variants)
         li = li + 1
 
     # Add built-in exhaustible types
     if not enum_defs.has("bool"):
-        enum_defs["bool"] = ["true", "false"]
+        enum_defs["bool"] = _query_enum_facts(["true", "false"])
     if not enum_defs.has("Bool"):
-        enum_defs["Bool"] = ["true", "false"]
+        enum_defs["Bool"] = _query_enum_facts(["true", "false"])
     if not enum_defs.has("Option"):
-        enum_defs["Option"] = ["Some", "nil"]
+        enum_defs["Option"] = _query_enum_facts(["Some", "nil"])
     if not enum_defs.has("Result"):
-        enum_defs["Result"] = ["Ok", "Err"]
+        enum_defs["Result"] = _query_enum_facts(["Ok", "Err"])
 
     # Pass 2: Scan match expressions
     li = 0
@@ -80,6 +90,7 @@ fn _check_match_exhaustiveness_text(lines: [text], file: text, format: text) -> 
             var wildcard_pos = -1
             var arm_count = 0
             var arm_patterns: [text] = []
+            var arm_pattern_set: Dict<text, bool> = {}
             var ai = li + 1
             while ai < lines.len():
                 val aline = lines[ai]
@@ -108,11 +119,7 @@ fn _check_match_exhaustiveness_text(lines: [text], file: text, format: text) -> 
                             "unreachable match arm: duplicate wildcard '_'", format)
                 elif pat_name != "":
                     # Check for duplicate exact pattern
-                    var is_dup = false
-                    for prev in arm_patterns:
-                        if prev == pat_name:
-                            is_dup = true
-                    if is_dup:
+                    if arm_pattern_set.has(pat_name):
                         count = count + _emit_mexh(file, ai + 1, at.len(), "MEXH004",
                             "unreachable match arm: duplicate pattern '{pat_name}'", format)
 
@@ -123,6 +130,7 @@ fn _check_match_exhaustiveness_text(lines: [text], file: text, format: text) -> 
 
                 if pat_name != "" and pat_name != "_":
                     arm_patterns.push(pat_name)
+                    arm_pattern_set[pat_name] = true
                 arm_count = arm_count + 1
                 ai = ai + 1
 
@@ -133,14 +141,10 @@ fn _check_match_exhaustiveness_text(lines: [text], file: text, format: text) -> 
 
                 if inferred_type != "":
                     if enum_defs.has(inferred_type):
-                        val all_variants = enum_defs[inferred_type]
+                        val all_variants = enum_defs[inferred_type].variants
                         var missing: [text] = []
                         for v in all_variants:
-                            var found = false
-                            for p in arm_patterns:
-                                if p == v:
-                                    found = true
-                            if not found:
+                            if not arm_pattern_set.has(v):
                                 missing.push(v)
 
                         if missing.len() > 0:
@@ -177,7 +181,9 @@ fn _emit_mexh(file: text, line_num: i64, end_col: i64, code: text, message: text
         print "{file}:{line_num}: warning[{code}]: {message}"
     1
 
-fn _infer_type_from_patterns(patterns: [text], enums: {text: [text]}) -> text:
+fn _infer_type_from_patterns(
+    patterns: [text], enums: Dict<text, QueryEnumFacts>
+) -> text:
     """Infer the match scrutinee type from arm pattern names.
 
     Checks built-in types first (bool, Option, Result), then
@@ -216,14 +222,10 @@ fn _infer_type_from_patterns(patterns: [text], enums: {text: [text]}) -> text:
         if (enum_name == "bool" or enum_name == "Bool" or
             enum_name == "Option" or enum_name == "Result"):
             continue
-        val variants = enums[enum_name]
+        val variants = enums[enum_name].variant_set
         var is_subset = true
         for p in patterns:
-            var found = false
-            for v in variants:
-                if v == p:
-                    found = true
-            if not found:
+            if not variants.has(p):
                 is_subset = false
         if is_subset:
             matches.push(enum_name)
