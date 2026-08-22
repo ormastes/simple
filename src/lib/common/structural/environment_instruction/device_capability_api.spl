@@ -1,0 +1,383 @@
+# codex-impl
+# Additive mission-critical IRQ/MMIO/DMA API.
+#
+# One authority owns capability generations. One access owner binds a single
+# tagged operation and invocation to the automatic extraction cursor. Caller
+# byte storage is never retained: requests carry only checked scalar regions.
+
+use std.common.structural.environment_instruction.automatic_hook.*
+use std.common.structural.environment_instruction.contracts.*
+use std.common.structural.environment_instruction.device_adapter.*
+use std.common.structural.environment_instruction.hal_binding.*
+
+val RT_HAL_DEVICE_API_SCHEMA_V1: i64 = 1
+
+enum RtHalDeviceStatusV1:
+    Ready
+    Planned
+    InvalidAuthority
+    InvalidGrant
+    StaleGeneration
+    InvalidRegion
+    InvalidToken
+    AlreadyConsumed
+    WrongOperation
+    ExtractionRejected
+    Sealed
+
+struct RtHalDeviceHandleV1:
+    contract_version: i64
+    capability_id: i64
+    generation: i64
+    grant_digest_hi: i64
+    grant_digest_lo: i64
+    authority_digest_hi: i64
+    authority_digest_lo: i64
+    device_identity_hi: i64
+    device_identity_lo: i64
+    identity_hi: i64
+    identity_lo: i64
+    sealed: bool
+
+struct RtHalCallerOwnedRegionV1:
+    region_id: i64
+    offset: i64
+    length: i64
+    capacity: i64
+    identity_hi: i64
+    identity_lo: i64
+
+struct RtHalReadOnceTokenV1:
+    handle_identity_hi: i64
+    handle_identity_lo: i64
+    slot: i64
+
+struct RtHalDeviceAcquisitionV1:
+    status: RtHalDeviceStatusV1
+    handle: RtHalDeviceHandleV1
+    pin: DeviceAuthorityPinV1
+    proof: DeviceCapabilityProofV1
+    grant: DeviceRangeGrantV1
+
+struct RtHalDeviceRequestV1:
+    status: RtHalDeviceStatusV1
+    handle: RtHalDeviceHandleV1
+    region: RtHalCallerOwnedRegionV1
+    instruction: DeviceInstructionV1
+    extraction: RtHalAutomaticExtractionReceiptV1
+
+fn _rt_hal_device_digest_lane_v1(state: i64, value: i64) -> i64:
+    ((state * 269 + (value % 2147483563) + 31) % 2147483563) + 1
+
+fn _rt_hal_device_handle_v1(
+        proof: DeviceCapabilityProofV1) -> RtHalDeviceHandleV1:
+    var hi = 1073741831
+    var lo = 1879048207
+    hi = _rt_hal_device_digest_lane_v1(hi, proof.capability_id)
+    hi = _rt_hal_device_digest_lane_v1(hi, proof.generation)
+    hi = _rt_hal_device_digest_lane_v1(hi, proof.grant_digest_hi)
+    hi = _rt_hal_device_digest_lane_v1(hi, proof.grant_digest_lo)
+    hi = _rt_hal_device_digest_lane_v1(hi, proof.authority_digest_hi)
+    hi = _rt_hal_device_digest_lane_v1(hi, proof.authority_digest_lo)
+    hi = _rt_hal_device_digest_lane_v1(hi, proof.device_identity_hi)
+    hi = _rt_hal_device_digest_lane_v1(hi, proof.device_identity_lo)
+    lo = _rt_hal_device_digest_lane_v1(lo, proof.device_identity_lo)
+    lo = _rt_hal_device_digest_lane_v1(lo, proof.device_identity_hi)
+    lo = _rt_hal_device_digest_lane_v1(lo, proof.authority_digest_lo)
+    lo = _rt_hal_device_digest_lane_v1(lo, proof.authority_digest_hi)
+    lo = _rt_hal_device_digest_lane_v1(lo, proof.grant_digest_lo)
+    lo = _rt_hal_device_digest_lane_v1(lo, proof.grant_digest_hi)
+    lo = _rt_hal_device_digest_lane_v1(lo, proof.generation)
+    lo = _rt_hal_device_digest_lane_v1(lo, proof.capability_id)
+    RtHalDeviceHandleV1(RT_HAL_DEVICE_API_SCHEMA_V1, proof.capability_id,
+        proof.generation, proof.grant_digest_hi, proof.grant_digest_lo,
+        proof.authority_digest_hi, proof.authority_digest_lo,
+        proof.device_identity_hi, proof.device_identity_lo, hi, lo, true)
+
+fn rt_hal_device_handle_v1_well_formed(value: RtHalDeviceHandleV1) -> bool:
+    value.contract_version == RT_HAL_DEVICE_API_SCHEMA_V1
+        and value.capability_id > 0 and value.capability_id < 63
+        and value.generation > 0
+        and (value.grant_digest_hi != 0 or value.grant_digest_lo != 0)
+        and (value.authority_digest_hi != 0
+            or value.authority_digest_lo != 0)
+        and (value.device_identity_hi != 0 or value.device_identity_lo != 0)
+        and value.identity_hi > 0 and value.identity_lo > 0 and value.sealed
+
+fn rt_hal_device_handles_same_identity_v1(
+        a: RtHalDeviceHandleV1, b: RtHalDeviceHandleV1) -> bool:
+    rt_hal_device_handle_v1_well_formed(a)
+        and rt_hal_device_handle_v1_well_formed(b)
+        and a.identity_hi == b.identity_hi and a.identity_lo == b.identity_lo
+        and a.capability_id == b.capability_id
+        and a.generation == b.generation
+
+fn rt_hal_caller_owned_region_v1(
+        region_id: i64, offset: i64, length: i64, capacity: i64,
+        identity_hi: i64, identity_lo: i64) -> RtHalCallerOwnedRegionV1:
+    RtHalCallerOwnedRegionV1(region_id, offset, length, capacity,
+        identity_hi, identity_lo)
+
+fn rt_hal_caller_owned_region_v1_well_formed(
+        value: RtHalCallerOwnedRegionV1) -> bool:
+    value.region_id > 0 and value.offset >= 0 and value.length >= 0
+        and value.capacity >= 0 and value.length <= value.capacity
+        and value.capacity <= DEVICE_MAX_TRANSFER_BYTES_V1
+        and value.offset <= 9223372036854775807 - value.capacity
+        and (value.identity_hi != 0 or value.identity_lo != 0)
+
+fn rt_hal_read_once_token_v1(
+        handle: RtHalDeviceHandleV1, slot: i64) -> RtHalReadOnceTokenV1:
+    RtHalReadOnceTokenV1(handle.identity_hi, handle.identity_lo, slot)
+
+fn _rt_hal_empty_region_v1() -> RtHalCallerOwnedRegionV1:
+    RtHalCallerOwnedRegionV1(1, 0, 0, 0, 1, 1)
+
+fn _rt_hal_invalid_proof_v1() -> DeviceCapabilityProofV1:
+    device_capability_proof_v1(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+
+fn _rt_hal_invalid_pin_v1() -> DeviceAuthorityPinV1:
+    device_authority_pin_v1(0, 0, 0, 0, 0, 0)
+
+fn _rt_hal_invalid_handle_v1() -> RtHalDeviceHandleV1:
+    RtHalDeviceHandleV1(RT_HAL_DEVICE_API_SCHEMA_V1, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, false)
+
+class RtHalDeviceAuthorityOwnerV1:
+    capability_id: i64
+    next_generation: i64
+    authority_digest_hi: i64
+    authority_digest_lo: i64
+    device_identity_hi: i64
+    device_identity_lo: i64
+    sealed: bool
+
+    me grant(grant: DeviceRangeGrantV1, allowed_opcode_mask: i64,
+             issued_epoch: i64, expiry_epoch: i64)
+            -> RtHalDeviceAcquisitionV1:
+        if not self.sealed or self.capability_id <= 0
+                or self.capability_id >= 63
+                or self.next_generation <= 0
+                or self.next_generation == 9223372036854775807:
+            return RtHalDeviceAcquisitionV1(
+                RtHalDeviceStatusV1.InvalidAuthority,
+                _rt_hal_invalid_handle_v1(), _rt_hal_invalid_pin_v1(),
+                _rt_hal_invalid_proof_v1(), grant)
+        if not device_range_grant_v1_well_formed(grant)
+                or allowed_opcode_mask <= 0 or issued_epoch < 0
+                or expiry_epoch <= issued_epoch:
+            return RtHalDeviceAcquisitionV1(
+                RtHalDeviceStatusV1.InvalidGrant,
+                _rt_hal_invalid_handle_v1(), _rt_hal_invalid_pin_v1(),
+                _rt_hal_invalid_proof_v1(), grant)
+        val generation = self.next_generation
+        self.next_generation = self.next_generation + 1
+        val pin = device_authority_pin_v1(self.capability_id, generation,
+            self.authority_digest_hi, self.authority_digest_lo,
+            self.device_identity_hi, self.device_identity_lo)
+        val proof = device_capability_proof_v1(self.capability_id, generation,
+            allowed_opcode_mask, grant.grant_digest_hi, grant.grant_digest_lo,
+            self.authority_digest_hi, self.authority_digest_lo,
+            self.device_identity_hi, self.device_identity_lo,
+            issued_epoch, expiry_epoch)
+        RtHalDeviceAcquisitionV1(RtHalDeviceStatusV1.Ready,
+            _rt_hal_device_handle_v1(proof), pin, proof, grant)
+
+fn rt_hal_device_authority_owner_v1(
+        capability_id: i64, first_generation: i64,
+        authority_digest_hi: i64, authority_digest_lo: i64,
+        device_identity_hi: i64,
+        device_identity_lo: i64) -> RtHalDeviceAuthorityOwnerV1:
+    val valid = capability_id > 0 and capability_id < 63
+        and first_generation > 0
+        and (authority_digest_hi != 0 or authority_digest_lo != 0)
+        and (device_identity_hi != 0 or device_identity_lo != 0)
+    RtHalDeviceAuthorityOwnerV1(capability_id, first_generation,
+        authority_digest_hi, authority_digest_lo,
+        device_identity_hi, device_identity_lo, valid)
+
+class RtHalDeviceAccessOwnerV1:
+    acquisition: RtHalDeviceAcquisitionV1
+    opcode: EnvOpcodeV1
+    invocation_id: i64
+    next_sequence: i64
+    consumed_token_mask: i64
+    extraction: RtHalAutomaticExtractionOwnerV1
+    sealed: bool
+
+    me _request(opcode: EnvOpcodeV1, flags: i64,
+                address: i64, transfer_length: i64, width: i64, irq: i64,
+                token: RtHalReadOnceTokenV1,
+                region: RtHalCallerOwnedRegionV1,
+                argument_length: i64, result_capacity: i64)
+            -> RtHalDeviceRequestV1:
+        val handle = self.acquisition.handle
+        if not self.sealed:
+            return self._rejected(RtHalDeviceStatusV1.Sealed, opcode,
+                flags, address, transfer_length, width, irq, token, region,
+                argument_length, result_capacity)
+        if opcode != self.opcode:
+            return self._rejected(RtHalDeviceStatusV1.WrongOperation, opcode,
+                flags, address, transfer_length, width, irq, token, region,
+                argument_length, result_capacity)
+        if not rt_hal_device_handle_v1_well_formed(handle)
+                or handle.generation != self.acquisition.proof.generation:
+            return self._rejected(RtHalDeviceStatusV1.StaleGeneration, opcode,
+                flags, address, transfer_length, width, irq, token, region,
+                argument_length, result_capacity)
+        val needs_region = argument_length > 0 or result_capacity > 0
+        if needs_region and (not rt_hal_caller_owned_region_v1_well_formed(region)
+                or argument_length > region.length
+                or result_capacity > region.capacity):
+            return self._rejected(RtHalDeviceStatusV1.InvalidRegion, opcode,
+                flags, address, transfer_length, width, irq, token, region,
+                argument_length, result_capacity)
+        val uses_token = token.slot > 0
+        val requires_token = opcode == EnvOpcodeV1.InterruptAcknowledge
+            or opcode == EnvOpcodeV1.MmioRead
+            or opcode == EnvOpcodeV1.DmaPoll
+        if requires_token and not uses_token:
+            return self._rejected(RtHalDeviceStatusV1.InvalidToken, opcode,
+                flags, address, transfer_length, width, irq, token, region,
+                argument_length, result_capacity)
+        if uses_token and (token.slot >= 63
+                or token.handle_identity_hi != handle.identity_hi
+                or token.handle_identity_lo != handle.identity_lo):
+            return self._rejected(RtHalDeviceStatusV1.InvalidToken, opcode,
+                flags, address, transfer_length, width, irq, token, region,
+                argument_length, result_capacity)
+        val token_mask = if uses_token: 1 << token.slot else: 0
+        if token_mask != 0 and (self.consumed_token_mask & token_mask) != 0:
+            return self._rejected(RtHalDeviceStatusV1.AlreadyConsumed, opcode,
+                flags, address, transfer_length, width, irq, token, region,
+                argument_length, result_capacity)
+        val metadata = rt_hal_automatic_access_metadata_v1(
+            rt_hal_environment_operation_for_opcode_v1(opcode),
+            self.invocation_id, self.next_sequence, opcode,
+            handle.capability_id, flags, region.offset, argument_length,
+            region.capacity, region.offset, result_capacity, region.capacity)
+        val extracted = self.extraction.extract(metadata)
+        val instruction = device_instruction_v1(extracted.instruction,
+            address, transfer_length, width, irq, token.slot,
+            handle.generation, handle.grant_digest_hi, handle.grant_digest_lo)
+        if not extracted.accepted:
+            self.sealed = false
+            return RtHalDeviceRequestV1(
+                RtHalDeviceStatusV1.ExtractionRejected,
+                handle, region, instruction, extracted)
+        val validation = device_validate_instruction_v1(
+            self.acquisition.pin, self.acquisition.proof,
+            self.acquisition.grant, instruction,
+            self.acquisition.proof.issued_epoch, [], [])
+        # Buffer lengths are validated by the execution owner against the real
+        # caller arrays. Here only non-buffer contract failures are decisive.
+        if validation != EnvInstructionStatusV1.Planned
+                and validation != EnvInstructionStatusV1.Overflow:
+            self.sealed = false
+            return RtHalDeviceRequestV1(
+                RtHalDeviceStatusV1.InvalidGrant,
+                handle, region, instruction, extracted)
+        self.next_sequence = self.next_sequence + 1
+        self.consumed_token_mask = self.consumed_token_mask | token_mask
+        RtHalDeviceRequestV1(RtHalDeviceStatusV1.Planned,
+            handle, region, instruction, extracted)
+
+    me _rejected(status: RtHalDeviceStatusV1, opcode: EnvOpcodeV1,
+                 flags: i64, address: i64, transfer_length: i64,
+                 width: i64, irq: i64, token: RtHalReadOnceTokenV1,
+                 region: RtHalCallerOwnedRegionV1,
+                 argument_length: i64,
+                 result_capacity: i64) -> RtHalDeviceRequestV1:
+        val environment = env_instruction_v1(self.invocation_id,
+            self.next_sequence, opcode, self.acquisition.handle.capability_id,
+            flags, region.offset, argument_length, region.capacity,
+            region.offset, result_capacity, region.capacity)
+        val instruction = device_instruction_v1(environment, address,
+            transfer_length, width, irq, token.slot,
+            self.acquisition.handle.generation,
+            self.acquisition.handle.grant_digest_hi,
+            self.acquisition.handle.grant_digest_lo)
+        val extraction = RtHalAutomaticExtractionReceiptV1(
+            environment, false, EnvInstructionStatusV1.InvalidInstruction)
+        RtHalDeviceRequestV1(status, self.acquisition.handle,
+            region, instruction, extraction)
+
+    me rt_hal_irq_mask_v1(irq: i64) -> RtHalDeviceRequestV1:
+        self._request(EnvOpcodeV1.InterruptMask, 0, 0, 0, 0, irq,
+            RtHalReadOnceTokenV1(0, 0, 0), _rt_hal_empty_region_v1(), 0, 0)
+
+    me rt_hal_irq_acknowledge_v1(
+            irq: i64, token: RtHalReadOnceTokenV1) -> RtHalDeviceRequestV1:
+        self._request(EnvOpcodeV1.InterruptAcknowledge,
+            DEVICE_FLAG_READ_ONCE_V1, 0, 0, 0, irq, token,
+            _rt_hal_empty_region_v1(), 0, 0)
+
+    me rt_hal_mmio_read_v1(
+            address: i64, width: i64, region: RtHalCallerOwnedRegionV1,
+            token: RtHalReadOnceTokenV1) -> RtHalDeviceRequestV1:
+        val flags = if token.slot > 0: DEVICE_FLAG_READ_ONCE_V1 else: 0
+        self._request(EnvOpcodeV1.MmioRead, flags, address, width, width, 0,
+            token, region, 0, width)
+
+    me rt_hal_mmio_write_v1(
+            address: i64, width: i64,
+            region: RtHalCallerOwnedRegionV1) -> RtHalDeviceRequestV1:
+        val flags = if self.acquisition.grant.write_has_side_effect:
+            DEVICE_FLAG_SIDE_EFFECT_V1
+        else:
+            0
+        self._request(EnvOpcodeV1.MmioWrite, flags, address, width, width, 0,
+            RtHalReadOnceTokenV1(0, 0, 0), region, width, 0)
+
+    me rt_hal_dma_map_v1(
+            address: i64, length: i64,
+            region: RtHalCallerOwnedRegionV1) -> RtHalDeviceRequestV1:
+        self._request(EnvOpcodeV1.DmaMap, 0, address, length, 0, 0,
+            RtHalReadOnceTokenV1(0, 0, 0), region, 0, 0)
+
+    me rt_hal_dma_submit_v1(
+            address: i64, length: i64,
+            region: RtHalCallerOwnedRegionV1) -> RtHalDeviceRequestV1:
+        self._request(EnvOpcodeV1.DmaSubmit, DEVICE_FLAG_DMA_TO_DEVICE_V1,
+            address, length, 0, 0, RtHalReadOnceTokenV1(0, 0, 0),
+            region, length, 0)
+
+    me rt_hal_dma_poll_v1(
+            address: i64, length: i64, region: RtHalCallerOwnedRegionV1,
+            token: RtHalReadOnceTokenV1) -> RtHalDeviceRequestV1:
+        self._request(EnvOpcodeV1.DmaPoll, DEVICE_FLAG_DMA_FROM_DEVICE_V1,
+            address, length, 0, 0, token, region, 0, length)
+
+    me rt_hal_dma_unmap_v1(
+            address: i64, length: i64,
+            region: RtHalCallerOwnedRegionV1) -> RtHalDeviceRequestV1:
+        self._request(EnvOpcodeV1.DmaUnmap, 0, address, length, 0, 0,
+            RtHalReadOnceTokenV1(0, 0, 0), region, 0, 0)
+
+    me seal():
+        self.extraction.seal()
+        self.sealed = false
+
+fn rt_hal_device_access_owner_v1(
+        acquisition: RtHalDeviceAcquisitionV1, opcode: EnvOpcodeV1,
+        invocation_id: i64, instruction_capacity: i64 = 1)
+        -> RtHalDeviceAccessOwnerV1:
+    val operation = rt_hal_environment_operation_for_opcode_v1(opcode)
+    val valid = acquisition.status == RtHalDeviceStatusV1.Ready
+        and rt_hal_device_handle_v1_well_formed(acquisition.handle)
+        and invocation_id > 0 and instruction_capacity > 0
+        and instruction_capacity <= 62
+    RtHalDeviceAccessOwnerV1(acquisition, opcode, invocation_id, 0, 0,
+        rt_hal_automatic_extraction_owner_v1(
+            operation, invocation_id, instruction_capacity), valid)
+
+export RT_HAL_DEVICE_API_SCHEMA_V1, RtHalDeviceStatusV1
+export RtHalDeviceHandleV1, RtHalCallerOwnedRegionV1, RtHalReadOnceTokenV1
+export RtHalDeviceAcquisitionV1, RtHalDeviceRequestV1
+export rt_hal_device_handle_v1_well_formed
+export rt_hal_device_handles_same_identity_v1
+export rt_hal_caller_owned_region_v1
+export rt_hal_caller_owned_region_v1_well_formed
+export rt_hal_read_once_token_v1
+export RtHalDeviceAuthorityOwnerV1, rt_hal_device_authority_owner_v1
+export RtHalDeviceAccessOwnerV1, rt_hal_device_access_owner_v1

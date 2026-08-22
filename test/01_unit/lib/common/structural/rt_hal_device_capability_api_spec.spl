@@ -1,0 +1,154 @@
+# @feature mcdc_hal_runtime_hardening
+# @req REQ-016 REQ-017 NFR-005 NFR-006
+
+use std.spec.*
+use std.io_runtime.{file_read}
+use std.common.structural.environment_instruction.*
+use std.common.structural.hal_provider.*
+
+fn full_device_grant(read_side_effect: bool = false) -> DeviceRangeGrantV1:
+    device_range_grant_v1(4096, 4096, 1 | 2 | 4 | 8,
+        true, true, read_side_effect, false, 32, 4, 4096, 64, 801, 802)
+
+fn issue_device(grant: DeviceRangeGrantV1,
+                mask: i64) -> RtHalDeviceAcquisitionV1:
+    var authority = rt_hal_device_authority_owner_v1(
+        19, 7, 501, 502, 601, 602)
+    authority.grant(grant, mask, 10, 20)
+
+describe "mission-critical rt(hal) device capability API":
+    it "issues generation-bound stable handles from one explicit authority":
+        var authority = rt_hal_device_authority_owner_v1(
+            19, 7, 501, 502, 601, 602)
+        val mask = env_opcode_mask_v1(EnvOpcodeV1.MmioRead)
+        val first = authority.grant(full_device_grant(), mask, 10, 20)
+        val second = authority.grant(full_device_grant(), mask, 10, 20)
+
+        expect(first.status).to_equal(RtHalDeviceStatusV1.Ready)
+        expect(first.handle.generation).to_equal(7)
+        expect(second.handle.generation).to_equal(8)
+        expect(rt_hal_device_handle_v1_well_formed(first.handle)).to_be(true)
+        expect(rt_hal_device_handles_same_identity_v1(
+            first.handle, first.handle)).to_be(true)
+        expect(rt_hal_device_handles_same_identity_v1(
+            first.handle, second.handle)).to_be(false)
+
+    it "binds IRQ mask and acknowledge to automatic extraction and one token":
+        val mask = env_opcode_mask_v1(EnvOpcodeV1.InterruptMask)
+            | env_opcode_mask_v1(EnvOpcodeV1.InterruptAcknowledge)
+        val acquisition = issue_device(full_device_grant(), mask)
+        var mask_owner = rt_hal_device_access_owner_v1(
+            acquisition, EnvOpcodeV1.InterruptMask, 81)
+        val masked = mask_owner.rt_hal_irq_mask_v1(32)
+        expect(masked.status).to_equal(RtHalDeviceStatusV1.Planned)
+        expect(masked.extraction.accepted).to_be(true)
+
+        var ack_owner = rt_hal_device_access_owner_v1(
+            acquisition, EnvOpcodeV1.InterruptAcknowledge, 82, 2)
+        val token = rt_hal_read_once_token_v1(acquisition.handle, 1)
+        val acknowledged = ack_owner.rt_hal_irq_acknowledge_v1(32, token)
+        val duplicate = ack_owner.rt_hal_irq_acknowledge_v1(32, token)
+        expect(acknowledged.status).to_equal(RtHalDeviceStatusV1.Planned)
+        expect(acknowledged.instruction.read_once_token).to_equal(1)
+        expect(duplicate.status).to_equal(RtHalDeviceStatusV1.AlreadyConsumed)
+        expect(ack_owner.next_sequence).to_equal(1)
+
+    it "keeps MMIO and DMA regions caller-owned and rejects stale tokens":
+        val opcode_mask = env_opcode_mask_v1(EnvOpcodeV1.MmioRead)
+            | env_opcode_mask_v1(EnvOpcodeV1.DmaPoll)
+        val acquisition = issue_device(full_device_grant(true), opcode_mask)
+        val region = rt_hal_caller_owned_region_v1(9, 0, 64, 64, 701, 702)
+        var mmio = rt_hal_device_access_owner_v1(
+            acquisition, EnvOpcodeV1.MmioRead, 83)
+        val token = rt_hal_read_once_token_v1(acquisition.handle, 2)
+        val read = mmio.rt_hal_mmio_read_v1(4096, 4, region, token)
+        expect(read.status).to_equal(RtHalDeviceStatusV1.Planned)
+        expect(read.region.region_id).to_equal(9)
+        expect(read.instruction.environment.result_capacity).to_equal(4)
+
+        var other_authority = rt_hal_device_authority_owner_v1(
+            19, 7, 503, 504, 603, 604)
+        val other = other_authority.grant(
+            full_device_grant(true), opcode_mask, 10, 20)
+        var dma = rt_hal_device_access_owner_v1(
+            other, EnvOpcodeV1.DmaPoll, 84)
+        val stale = dma.rt_hal_dma_poll_v1(4096, 64, region, token)
+        expect(stale.status).to_equal(RtHalDeviceStatusV1.InvalidToken)
+        expect(dma.next_sequence).to_equal(0)
+
+    it "supports all additive request shapes without retaining byte arrays":
+        val source = file_read(
+            "src/lib/common/structural/environment_instruction/device_capability_api.spl")
+        val begin = source.find("class RtHalDeviceAccessOwnerV1:")
+        val finish = source.find("fn rt_hal_device_access_owner_v1(")
+        val owner = source.substring(begin, finish)
+        expect(begin).to_be_greater_than(-1)
+        expect(finish).to_be_greater_than(begin)
+        expect(owner.contains("[u8]")).to_equal(false)
+        expect(owner.contains(".push(")).to_equal(false)
+        expect(owner.contains("Dict<")).to_equal(false)
+        expect(owner.contains("rt_hal_irq_mask_v1")).to_equal(true)
+        expect(owner.contains("rt_hal_irq_acknowledge_v1")).to_equal(true)
+        expect(owner.contains("rt_hal_mmio_read_v1")).to_equal(true)
+        expect(owner.contains("rt_hal_mmio_write_v1")).to_equal(true)
+        expect(owner.contains("rt_hal_dma_map_v1")).to_equal(true)
+        expect(owner.contains("rt_hal_dma_submit_v1")).to_equal(true)
+        expect(owner.contains("rt_hal_dma_poll_v1")).to_equal(true)
+        expect(owner.contains("rt_hal_dma_unmap_v1")).to_equal(true)
+
+    it "feeds identical caller-owned payloads to Pure C and Rust compare lanes":
+        val mask = env_opcode_mask_v1(EnvOpcodeV1.MmioRead)
+        val acquisition = issue_device(full_device_grant(true), mask)
+        val region = rt_hal_caller_owned_region_v1(12, 0, 4, 4, 705, 706)
+        var owner = rt_hal_device_access_owner_v1(
+            acquisition, EnvOpcodeV1.MmioRead, 86)
+        val request = owner.rt_hal_mmio_read_v1(4096, 4, region,
+            rt_hal_read_once_token_v1(acquisition.handle, 4))
+        var bytes: [u8] = [9u8, 8u8, 7u8, 6u8]
+        val receipt = env_execution_record_applied_v1(
+            request.instruction.environment, [], bytes, 4, false, 0)
+        val payload = rt_hal_device_request_captured_payload_v1(
+            request, receipt.observation, 901, 902)
+        var compare = hal_device_compare_owner_v1(
+            86, 1, HalRunMode.AlphaCompare, HalProviderKind.PureSimple)
+
+        val pure = compare.submit(HalProviderKind.PureSimple,
+            payload, bytes, payload, bytes)
+        val c = compare.submit(HalProviderKind.C,
+            payload, bytes, payload, bytes)
+        val rust = compare.submit(HalProviderKind.Rust,
+            payload, bytes, payload, bytes)
+        val compared = compare.receipt()
+        expect(pure).to_equal(HalPayloadReplayStatusV1.Replayed)
+        expect(c).to_equal(HalPayloadReplayStatusV1.Replayed)
+        expect(rust).to_equal(HalPayloadReplayStatusV1.Replayed)
+        expect(compared.status).to_equal(
+            HalDeviceCompareOwnerStatusV1.CommitReady)
+        expect(compared.commit_allowed).to_be(true)
+        expect(compared.physical_effect).to_be(false)
+        expect(compared.allocation_count).to_equal(0)
+
+    it "replay remains copy-only with no physical effect":
+        val grant = full_device_grant(true)
+        val mask = env_opcode_mask_v1(EnvOpcodeV1.MmioRead)
+        val acquisition = issue_device(grant, mask)
+        val region = rt_hal_caller_owned_region_v1(10, 0, 4, 4, 703, 704)
+        var owner = rt_hal_device_access_owner_v1(
+            acquisition, EnvOpcodeV1.MmioRead, 85)
+        val request = owner.rt_hal_mmio_read_v1(4096, 4, region,
+            rt_hal_read_once_token_v1(acquisition.handle, 3))
+        var recorded_bytes: [u8] = [1u8, 2u8, 3u8, 4u8]
+        var replay_bytes: [u8] = [0u8; 4]
+        val observation = env_execution_record_applied_v1(
+            request.instruction.environment, [], recorded_bytes, 4, true, 0)
+        val recorded = DeviceExecutionReceiptV1(
+            observation.observation, 11, 12, true, true, 0)
+        # A fabricated physical receipt cannot authenticate and therefore
+        # cannot cause a replay effect.
+        val replayed = device_replay_exact_v1(
+            acquisition.pin, acquisition.proof, grant, 10,
+            request.instruction, request.instruction, recorded, [],
+            recorded_bytes, replay_bytes)
+        expect(replayed.applied).to_be(false)
+        expect(replayed.physical_effect).to_be(false)
+        expect(replay_bytes[0]).to_equal(0u8)
