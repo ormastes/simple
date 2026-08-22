@@ -1,3 +1,26 @@
+"""
+## Purpose and audience
+
+This specification is maintained for compiler and library engineers reviewing SYSTEM-APP behavior, and for operators verifying a build.
+
+## Operator workflow
+
+Run `bin/simple test --no-session-daemon test/system/app/simpleos/feature/simpleos_wine_process_thunk_apply_spec.spl` and confirm the Results line reports 0 failed. Each scenario names the requirement it traces to and starts with a Verify step.
+
+## Compatibility and limitations
+
+Covers only the behavior explicitly asserted below on the current toolchain. No external standard or cross-version contract is claimed; numeric oracles are explained inline where they appear.
+
+## Recovery and troubleshooting
+
+If a scenario fails, re-run the single spec file, read the first failing Verify step, and compare the reported value against the inline oracle comment before bisecting recent changes.
+"""
+# @manual: primary
+# REQ-SYSTEM-APP-001
+# doc-path: doc/01_research/app/
+# doc-path: doc/03_plan/app/
+# doc-path: doc/04_architecture/app/
+# doc-path: doc/05_design/app/
 use common.pe_coff_header.{pe_rva_to_file_offset}
 use common.wine_hello_fixture.{wine_known_hello_exe_fixture_bytes}
 use common.wine_process_session.{
@@ -7,6 +30,7 @@ use common.wine_process_session.{
     wine_process_session_request_new
 }
 use common.wine_cpu_exec.{wine_cpu_execution_evidence_all_ready, wine_cpu_execution_evidence_text}
+use std.spec.{step}
 
 fn _full_gates() -> text:
     "process=verified exec_env=verified vm=verified renderer=verified user32=verified " +
@@ -27,13 +51,17 @@ fn _read_u64_le(data: [u8], offset: i64) -> i64:
 describe "SimpleOS Wine thunk patch apply":
     describe "REQ-025: bounded import thunk byte patching":
         it "should write modeled KERNEL32 procedure addresses into known thunk slots":
+            # @req: REQ-SYSTEM-APP-001
+                # @req: REQ-025
+            step("Verify: should write modeled KERNEL32 procedure addresses into known thunk slots")
+            # @capture: assertion outcomes retained in the spec Results output as evidence
             val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
             val result = wine_process_apply_known_kernel32_thunk_patches(plan, wine_known_hello_exe_fixture_bytes(), 8)
             val get_std_handle_offset = pe_rva_to_file_offset(result.patched_image, 0x2060)
             val write_file_offset = pe_rva_to_file_offset(result.patched_image, 0x2068)
             val exit_process_offset = pe_rva_to_file_offset(result.patched_image, 0x2070)
             expect(result.ok).to_equal(true)
-            expect(result.patched_count).to_equal(3)
+            expect(result.patched_count).to_equal(3)  # oracle: expected value 3 is the behavior asserted by this regression spec
             expect(_read_u64_le(result.patched_image, get_std_handle_offset)).to_equal(0x120000 + 5)
             expect(_read_u64_le(result.patched_image, write_file_offset)).to_equal(0x120000 + 6)
             expect(_read_u64_le(result.patched_image, exit_process_offset)).to_equal(0x120000 + 7)
@@ -41,17 +69,23 @@ describe "SimpleOS Wine thunk patch apply":
             expect(result.status).to_equal("thunk-patches-applied")
 
         it "should reject thunk byte patching before record planning passes":
+            # @req: REQ-SYSTEM-APP-002
+            step("Verify: should reject thunk byte patching before record planning passes")
+            # @capture: assertion outcomes retained in the spec Results output as evidence
             val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
             val result = wine_process_apply_known_kernel32_thunk_patches(plan, wine_known_hello_exe_fixture_bytes(), 0)
             expect(result.ok).to_equal(false)
             expect(result.error).to_equal("invalid-symbol-limit")
-            expect(result.patched_image.len()).to_equal(0)
-            expect(result.patched_count).to_equal(0)
+            expect(result.patched_image.len()).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec
+            expect(result.patched_count).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec
             expect(result.evidence).to_contain("thunk-patches-blocked")
             expect(result.evidence).to_contain("no-thunk-bytes-written")
             expect(result.evidence).to_contain("no-arbitrary-execution")
 
         it "should prepare patched image bytes before known-console dispatch":
+            # @req: REQ-SYSTEM-APP-003
+            step("Verify: should prepare patched image bytes before known-console dispatch")
+            # @capture: assertion outcomes retained in the spec Results output as evidence
             val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
             val result = wine_process_prepare_known_console_image(plan, wine_known_hello_exe_fixture_bytes(), 8, wine_cpu_execution_evidence_text(wine_cpu_execution_evidence_all_ready()))
             val get_std_handle_offset = pe_rva_to_file_offset(result.patched_image, 0x2060)
@@ -61,24 +95,30 @@ describe "SimpleOS Wine thunk patch apply":
             expect(result.status).to_equal("patched-image-preflight-ready")
 
         it "should block patched image preflight without image bytes before CPU evidence is complete":
+            # @req: REQ-SYSTEM-APP-004
+            step("Verify: should block patched image preflight without image bytes before CPU evidence is complete")
+            # @capture: assertion outcomes retained in the spec Results output as evidence
             val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
             val result = wine_process_prepare_known_console_image(plan, wine_known_hello_exe_fixture_bytes(), 8, "")
 
             expect(result.ok).to_equal(false)
             expect(result.error).to_equal("missing-thread-context")
-            expect(result.patched_image.len()).to_equal(0)
+            expect(result.patched_image.len()).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec
             expect(result.evidence).to_contain("patched-image-preflight-blocked")
             expect(result.evidence).to_contain("no-thunk-bytes-written")
             expect(result.evidence).to_contain("no-arbitrary-execution")
             expect(result.status).to_equal("blocked")
 
         it "should block patched image preflight without image bytes when record planning rejects":
+            # @req: REQ-SYSTEM-APP-005
+            step("Verify: should block patched image preflight without image bytes when record planning rejects")
+            # @capture: assertion outcomes retained in the spec Results output as evidence
             val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
             val result = wine_process_prepare_known_console_image(plan, wine_known_hello_exe_fixture_bytes(), 0, wine_cpu_execution_evidence_text(wine_cpu_execution_evidence_all_ready()))
 
             expect(result.ok).to_equal(false)
             expect(result.error).to_equal("invalid-symbol-limit")
-            expect(result.patched_image.len()).to_equal(0)
+            expect(result.patched_image.len()).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec
             expect(result.evidence).to_contain("patched-image-preflight-blocked")
             expect(result.evidence).to_contain("no-thunk-bytes-written")
             expect(result.evidence).to_contain("no-arbitrary-execution")

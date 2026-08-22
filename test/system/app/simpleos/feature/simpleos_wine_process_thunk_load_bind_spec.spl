@@ -1,3 +1,26 @@
+"""
+## Purpose and audience
+
+This specification is maintained for compiler and library engineers reviewing SYSTEM-APP behavior, and for operators verifying a build.
+
+## Operator workflow
+
+Run `bin/simple test --no-session-daemon test/system/app/simpleos/feature/simpleos_wine_process_thunk_load_bind_spec.spl` and confirm the Results line reports 0 failed. Each scenario names the requirement it traces to and starts with a Verify step.
+
+## Compatibility and limitations
+
+Covers only the behavior explicitly asserted below on the current toolchain. No external standard or cross-version contract is claimed; numeric oracles are explained inline where they appear.
+
+## Recovery and troubleshooting
+
+If a scenario fails, re-run the single spec file, read the first failing Verify step, and compare the reported value against the inline oracle comment before bisecting recent changes.
+"""
+# @manual: primary
+# REQ-SYSTEM-APP-001
+# doc-path: doc/01_research/app/
+# doc-path: doc/03_plan/app/
+# doc-path: doc/04_architecture/app/
+# doc-path: doc/05_design/app/
 use common.wine_hello_fixture.{wine_known_hello_exe_fixture_bytes}
 use common.wine_peb_teb.{wine_peb_teb_apply_layout_byte_writes, wine_peb_teb_init_default, wine_peb_teb_layout_byte_writes, wine_peb_teb_layout_write_plan, wine_peb_teb_memory_write_gate}
 use common.wine_process_session.{
@@ -7,6 +30,7 @@ use common.wine_process_session.{
     wine_process_session_request_new
 }
 use common.wine_vm_adapter.{WineVmSpace, wine_vm_commit, wine_vm_process_space_new, wine_vm_reserve_fixed}
+use std.spec.{step}
 
 fn _commit_fixed(space: WineVmSpace, base: i64, size: i64, perms: text) -> WineVmSpace:
     val reserved = wine_vm_reserve_fixed(space, base, size)
@@ -31,10 +55,14 @@ fn _full_gates() -> text:
 describe "SimpleOS Wine thunk load binding":
     describe "REQ-023: thunk planning requires module-loaded bindings":
         it "should include module-load evidence in import thunk patch planning":
+            # @req: REQ-SYSTEM-APP-001
+                # @req: REQ-023
+            step("Verify: should include module-load evidence in import thunk patch planning")
+            # @capture: assertion outcomes retained in the spec Results output as evidence
             val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
             val result = wine_process_plan_import_thunk_patches(plan, wine_known_hello_exe_fixture_bytes(), 8)
             expect(result.ok).to_equal(true)
-            expect(result.patch_count).to_equal(3)
+            expect(result.patch_count).to_equal(3)  # oracle: expected value 3 is the behavior asserted by this regression spec
             expect(result.evidence).to_contain("import-module-loaded")
             expect(result.evidence).to_contain("import-thunk-records-planned")
             expect(result.evidence).to_contain("import-thunk-records-bounded")
@@ -42,6 +70,9 @@ describe "SimpleOS Wine thunk load binding":
             expect(result.status).to_equal("thunk-patch-planned")
 
         it "should block thunk planning before load-and-bind passes":
+            # @req: REQ-SYSTEM-APP-002
+            step("Verify: should block thunk planning before load-and-bind passes")
+            # @capture: assertion outcomes retained in the spec Results output as evidence
             val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
             val result = wine_process_plan_import_thunk_patches(plan, wine_known_hello_exe_fixture_bytes(), 0)
             expect(result.ok).to_equal(false)
@@ -49,6 +80,9 @@ describe "SimpleOS Wine thunk load binding":
             expect(result.status).to_equal("blocked")
 
         it "should require PEB/TEB VM byte-write readback before import thunk planning":
+            # @req: REQ-SYSTEM-APP-003
+            step("Verify: should require PEB/TEB VM byte-write readback before import thunk planning")
+            # @capture: assertion outcomes retained in the spec Results output as evidence
             val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
             val init = wine_peb_teb_init_default()
             val writes = wine_peb_teb_memory_write_gate(init, _startup_write_space())
@@ -58,7 +92,7 @@ describe "SimpleOS Wine thunk load binding":
             val result = wine_process_plan_import_thunk_patches_with_peb_teb_vm_writes(plan, wine_known_hello_exe_fixture_bytes(), 0x400000, 0x400000, "native-module-open tls-callback", 8, vm_writes)
 
             expect(result.ok).to_equal(true)
-            expect(result.patch_count).to_equal(3)
+            expect(result.patch_count).to_equal(3)  # oracle: expected value 3 is the behavior asserted by this regression spec
             expect(result.evidence).to_contain("peb-teb-vm-writes-ready")
             expect(result.evidence).to_contain("tls-callback-dispatch-empty")
             expect(result.evidence).to_contain("import-thunks-bound")

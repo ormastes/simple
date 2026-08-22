@@ -1,8 +1,32 @@
+"""
+## Purpose and audience
+
+This specification is maintained for compiler and library engineers reviewing SYSTEM-APP behavior, and for operators verifying a build.
+
+## Operator workflow
+
+Run `bin/simple test --no-session-daemon test/system/app/simpleos/feature/simpleos_wine_dll_view_startup_fault_spec.spl` and confirm the Results line reports 0 failed. Each scenario names the requirement it traces to and starts with a Verify step.
+
+## Compatibility and limitations
+
+Covers only the behavior explicitly asserted below on the current toolchain. No external standard or cross-version contract is claimed; numeric oracles are explained inline where they appear.
+
+## Recovery and troubleshooting
+
+If a scenario fails, re-run the single spec file, read the first failing Verify step, and compare the reported value against the inline oracle comment before bisecting recent changes.
+"""
+# @manual: primary
+# REQ-SYSTEM-APP-001
+# doc-path: doc/01_research/app/
+# doc-path: doc/03_plan/app/
+# doc-path: doc/04_architecture/app/
+# doc-path: doc/05_design/app/
 use common.pe_coff_header.{pe_rva_to_file_offset}
 use common.wine_dll_file_probe.{wine_dll_probe_file}
 use common.wine_dll_view_startup_fault.{wine_dll_record_file_view_startup_fault, wine_dll_record_file_view_startup_fault_with_peb_teb_layout, wine_dll_record_file_view_startup_fault_with_peb_teb_vm_writes, wine_dll_record_file_view_startup_fault_with_peb_teb_writes}
 use common.wine_peb_teb.{wine_peb_teb_apply_layout_byte_writes, wine_peb_teb_init_default, wine_peb_teb_layout_byte_writes, wine_peb_teb_layout_write_plan, wine_peb_teb_memory_write_gate}
 use common.wine_vm_adapter.{WineVmFault, WineVmSpace, wine_vm_commit, wine_vm_process_space_new, wine_vm_reserve_fixed}
+use std.spec.{step}
 
 fn _zero_bytes(count: i64) -> [u8]:
     var out: [u8] = []
@@ -107,18 +131,25 @@ fn _dll_with_import_relocation_tls() -> [u8]:
 
 describe "REQ-044: DLL view startup fault rollback":
     it "records SEH rollback around DllMain startup while keeping DLL code non-executing":
+        # @req: REQ-SYSTEM-APP-001
+            # @req: REQ-044
+        step("Verify: records SEH rollback around DllMain startup while keeping DLL code non-executing")
+        # @capture: assertion outcomes retained in the spec Results output as evidence
         val data = _dll_with_import_relocation_tls()
         val files = [wine_dll_probe_file("\\KnownDlls\\game.dll", data)]
         val fault = WineVmFault(process_id: 77, thread_id: 12, address: 0x502100, access: "execute", policy: "deliver-seh")
         val result = wine_dll_record_file_view_startup_fault("game.dll", "C:\\Games", "C:\\Users\\Player", [], ["game.dll"], files, data, 0x400000, 0x500000, 77, 78, "pid fs ipc net capability", 2, 4, "native-module-open tls-callback", fault)
         expect(result.ok).to_equal(true)
         expect(result.status).to_equal("dllmain-startup-fault-rollback-recorded")
-        expect(result.rollback_count).to_equal(1)
+        expect(result.rollback_count).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
         expect(result.evidence).to_contain("seh-dispatch-recorded")
         expect(result.evidence).to_contain("loader-lock-released")
         expect(result.evidence).to_contain("no-dllmain-executed")
 
     it "requires PEB/TEB write-gated DllMain handoff before startup rollback":
+        # @req: REQ-SYSTEM-APP-002
+        step("Verify: requires PEB/TEB write-gated DllMain handoff before startup rollback")
+        # @capture: assertion outcomes retained in the spec Results output as evidence
         val data = _dll_with_import_relocation_tls()
         val files = [wine_dll_probe_file("\\KnownDlls\\game.dll", data)]
         val fault = WineVmFault(process_id: 77, thread_id: 12, address: 0x502100, access: "execute", policy: "deliver-seh")
@@ -133,6 +164,9 @@ describe "REQ-044: DLL view startup fault rollback":
         expect(result.evidence).to_contain("no-dllmain-executed")
 
     it "requires PEB/TEB layout-gated DllMain handoff before startup rollback":
+        # @req: REQ-SYSTEM-APP-003
+        step("Verify: requires PEB/TEB layout-gated DllMain handoff before startup rollback")
+        # @capture: assertion outcomes retained in the spec Results output as evidence
         val data = _dll_with_import_relocation_tls()
         val files = [wine_dll_probe_file("\\KnownDlls\\game.dll", data)]
         val fault = WineVmFault(process_id: 77, thread_id: 12, address: 0x502100, access: "execute", policy: "deliver-seh")
@@ -148,6 +182,9 @@ describe "REQ-044: DLL view startup fault rollback":
         expect(result.evidence).to_contain("no-dllmain-executed")
 
     it "requires PEB/TEB VM byte-write readback before startup rollback":
+        # @req: REQ-SYSTEM-APP-004
+        step("Verify: requires PEB/TEB VM byte-write readback before startup rollback")
+        # @capture: assertion outcomes retained in the spec Results output as evidence
         val data = _dll_with_import_relocation_tls()
         val files = [wine_dll_probe_file("\\KnownDlls\\game.dll", data)]
         val fault = WineVmFault(process_id: 77, thread_id: 12, address: 0x502100, access: "execute", policy: "deliver-seh")
