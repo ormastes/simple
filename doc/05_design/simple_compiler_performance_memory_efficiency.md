@@ -834,3 +834,16 @@ bit when active, otherwise reads the environment, and applies diagnostic trace
 suppression last. This preserves ordinary direct-call behavior, silent output,
 and same-process between-parse changes while removing environment dispatch from
 expression, statement, primary, module-body, and parser-type trace probes.
+
+`flat_ast_to_module` reuses the same stack-token protocol around the complete
+bridge transaction. The bootstrap early-empty path materializes its result,
+restores the token, then returns; the normal path restores immediately before
+returning the assembled module. `module_assembly` and `convert_nodes` use the
+read-only cached compiler-trace decision. They continue reading bootstrap mode
+through the existing dynamic accessor because tests and same-process builds may
+change that independent policy.
+
+The driver fresh path opens an outer scope in
+`parse_and_build_module_scoped`; the inner assembly scope therefore inherits
+without resampling. Cache-hit reconstruction calls assembly directly and that
+inner scope becomes the sampling owner.
