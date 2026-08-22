@@ -1,0 +1,100 @@
+# @cover src/compiler/20.hir/hir_lowering/_Items/module_reexport_materialization.spl
+# Class A (callable half, owner-side) regression for
+# doc/08_tracking/bug/hir_unresolved_type_owner_missing_import_2026-08-22.md
+#
+# 1aa81cac8c6 fixed the DIAGNOSTIC gap: the callable explicit-dependency sweep no
+# longer ends in a bare `if selected_target < 0: return`, and now emits
+# [hir-callable-dep-origin-unresolved] naming the OWNER module. It left the 291
+# real `unresolved type: X` errors themselves -- owner-side import gaps of the
+# same shape as A1's BlockValue.
+#
+# An owner names a type in a function signature that it neither declares,
+# re-exports, nor explicitly imports. Nothing binds, and the failure resurfaces
+# much later as a hard `unresolved type: X` blamed on whichever module imported
+# the CALLABLE -- an innocent third party that never names the type.
+#
+# FAILS pre-fix: none of these import lines exist.
+use std.spec.{describe, it, expect}
+
+fn file_lines(path: text) -> [text]:
+    (rt_file_read_text(path) ?? "").split("\n")
+
+fn imports_name(path: text, module_prefix: text, name: text) -> bool:
+    # NOTE: no `{` in any literal -- braces are string INTERPOLATION in Simple,
+    # so an expected-import literal containing `.{MirType}` silently
+    # interpolates and never matches.
+    for line in file_lines(path):
+        if line.starts_with("use " + module_prefix) and line.contains(name):
+            return true
+    false
+
+fn names_in_signature(path: text, needle: text) -> bool:
+    # Guards the guard: the pin must not silently pass if the signature it
+    # fences is refactored away.
+    for line in file_lines(path):
+        if line.contains("fn ") and line.contains(needle):
+            return true
+    false
+
+describe "a callable's owner imports every type its signature names":
+    it "MirType owners import it (largest sub-group, 87 of the 291)":
+        # 36 owner modules across 50.mir / 55.borrow / 60.mir_opt / 70.backend /
+        # 90.tools. Three representatives, one per layer, plus the guard.
+        expect(names_in_signature(
+            "src/compiler/70.backend/backend/common/type_mapper.spl",
+            "MirType")).to_be_true()
+        expect(imports_name(
+            "src/compiler/70.backend/backend/common/type_mapper.spl",
+            "compiler.mir.mir_types.", "MirType")).to_be_true()
+        expect(imports_name(
+            "src/compiler/60.mir_opt/mir_opt/gvn.spl",
+            "compiler.mir.mir_types.", "MirType")).to_be_true()
+        expect(imports_name(
+            "src/compiler/90.tools/header_gen/c_header.spl",
+            "compiler.mir.mir_types.", "MirType")).to_be_true()
+
+    it "CodegenTarget owners import it (113 of the 291)":
+        expect(names_in_signature(
+            "src/compiler/70.backend/backend/llvm_type_mapper.spl",
+            "CodegenTarget")).to_be_true()
+        expect(imports_name(
+            "src/compiler/70.backend/backend/llvm_type_mapper.spl",
+            "compiler.backend.backend.backend_types.",
+            "CodegenTarget")).to_be_true()
+        expect(imports_name(
+            "src/compiler/70.backend/backend/wasm_backend.spl",
+            "compiler.backend.backend.backend_types.",
+            "CodegenTarget")).to_be_true()
+
+    it "inline-asm operand types are imported by their C/LLVM owners":
+        expect(imports_name(
+            "src/compiler/70.backend/backend/c_backend_translate_ops.spl",
+            "compiler.frontend.parser_types_expr.", "AsmLocation")).to_be_true()
+        expect(imports_name(
+            "src/compiler/70.backend/backend/c_backend_translate_ops.spl",
+            "compiler.frontend.parser_types_expr.",
+            "AsmConstraintKind")).to_be_true()
+        expect(imports_name(
+            "src/compiler/70.backend/backend/mir_to_llvm_helpers.spl",
+            "compiler.frontend.parser_types_expr.", "AsmLocation")).to_be_true()
+
+    it "HIR and layout types are imported by their non-declaring owners":
+        expect(imports_name(
+            "src/compiler/35.semantics/layer_eq_validation.spl",
+            "compiler.types.type_layout.", "TypeLayout")).to_be_true()
+        expect(imports_name(
+            "src/compiler/35.semantics/const_eval.spl",
+            "compiler.hir.hir_definitions.", "HirIfArm")).to_be_true()
+        expect(imports_name(
+            "src/compiler/35.semantics/macro_check/mod.spl",
+            "compiler.hir.hir_definitions.", "HirExpr")).to_be_true()
+        expect(imports_name(
+            "src/compiler/50.mir/_MirLowering/bootstrap_type_registration.spl",
+            "compiler.hir.hir_types.", "HirModule")).to_be_true()
+        expect(imports_name(
+            "src/compiler/40.mono/instantiation.spl",
+            "compiler.common.compilation_context.",
+            "CompilationContext")).to_be_true()
+        expect(imports_name(
+            "src/compiler/20.hir/hir_lowering/module_surface_types.spl",
+            "compiler.frontend.parser_types.", "Export")).to_be_true()

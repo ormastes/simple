@@ -125,3 +125,76 @@ The 291 remaining class-A errors are owner-side import gaps of the same shape as
 A1; fix 3 is what makes them individually addressable — before it, the log named
 only innocent importers. Do NOT close this record until a verification build
 reports them by owner.
+
+---
+
+## Follow-up 2026-08-22 — the 291 owner-side gaps, enumerated and fixed
+
+`1aa81cac8c6` closed the DIAGNOSTIC gap. This follow-up closes the SOURCE gaps it
+made addressable.
+
+### Method
+
+Owner enumeration reproduces the compiler's own predicate from
+`materialize_imported_callable_explicit_dependency_inner`: a module is an owner
+gap for type `T` when `T` appears in a type position of one of its callable
+signatures (or a struct field / `me` method), and the module neither **declares**
+`T`, nor **explicitly imports** it, nor reaches it through a glob whose target
+declares or `export use`-re-exports it (one hop — exactly what
+`find_reexport_source` allows). Two modelling errors had to be corrected before
+the list was trustworthy, and both inflate the count in the same direction:
+multi-line `use x.{\n a,\n b\n}` blocks are real imports (a line-based reader
+calls them gaps), and an enum VARIANT access `TopLevelItem.Export` is not a type
+position. Fresh worktree at `1aa81cac8c6`, seed
+`/mnt/data/worktrees/goal-main-1/bin/simple`, `SIMPLE_TIMEOUT_SECONDS=0`.
+
+### Fixed — 49 explicit imports across 45 owner modules
+
+| type | run13 errors | owner modules | import added |
+|---|---|---|---|
+| CodegenTarget | 113 | 2 | `compiler.backend.backend.backend_types.{CodegenTarget}` |
+| MirType | 87 | 36 | `compiler.mir.mir_types.{MirType}` |
+| Export | 26 | 1 | `compiler.frontend.parser_types.{Export}` |
+| TypeLayout | 18 | 1 | `compiler.types.type_layout.{TypeLayout}` |
+| HirIfArm | 11 | 1 | `compiler.hir.hir_definitions.{HirIfArm}` |
+| CompilationContext | 6 | 1 | `compiler.common.compilation_context.{CompilationContext}` |
+| AsmLocation | 5 | 3 | `compiler.frontend.parser_types_expr.{AsmLocation}` |
+| AsmConstraintKind | 5 | 2 | `compiler.frontend.parser_types_expr.{AsmConstraintKind}` |
+| HirModule | 2 | 1 | `compiler.hir.hir_types.{HirModule}` |
+| HirExpr | 2 | 1 | `compiler.hir.hir_definitions.{HirExpr}` |
+
+**273 of the 291.** Every edge is downward or intra-layer and already exists in
+the tree: 60/70/90 -> 50.mir, 35 -> 30/20, 40 -> 00.common, 20.hir -> 10.frontend
+(`hir_lowering/module_surface_declarations.spl`), 70.backend -> 10.frontend
+(`hir_definitions.spl:22` already imports the same two asm types). No new
+cross-layer edge, no glob widened, no `export use` added, no diagnostic silenced.
+
+### NOT fixed, and why
+
+- **HirFunction (2).** The only candidate is `20.hir/hir_types.spl:29`
+  (`functions: Dict<SymbolId, HirFunction>`), whose provider is its sibling
+  `hir_definitions.spl` — which already does `use compiler.hir.hir_types.*`
+  (line 9). Adding the import would create a module CYCLE. This one needs the
+  declaration moved, not an import; deliberately left for a structural change.
+  (`85.mdsoc/.../app/__init__.spl` also names HirFunction, but that is the
+  *different* `app/hir_function.spl` type re-exported from a sibling — correct
+  as it stands, and importing 20.hir's HirFunction there would be a real bug.)
+- **HirPattern (14), CompiledModule (2).** No owner gap exists under the
+  predicate above: `35.semantics/enum_contract/hir_match_coverage.spl` does
+  import `HirPattern` (multi-line brace block), and
+  `70.backend/backend/__init__.spl` re-exports `CompiledModule` from its sibling
+  `backend_types.spl`. These 16 need the run-time
+  `[hir-callable-dep-origin-unresolved]` line from a real stage-1 build to name
+  their owner; they are a different sub-shape (probably a re-export hop that the
+  materializer does not follow), not a missing `use`.
+
+### Reproduce spec
+
+`test/01_unit/compiler/hir/callable_signature_owner_imports_dependency_spec.spl`
+— measured **4/4 FAIL pre-fix, 4/4 PASS post-fix**. Covers the two largest
+sub-groups (CodegenTarget 113, MirType 87 — the latter with one representative
+per layer) plus the asm and HIR/layout groups, and carries a guard-the-guard
+assertion that the fenced signatures still name the type.
+
+**Status:** class A callable half CLEARED for 273 of 291; 18 remain (2 blocked on
+a cycle, 16 pending owner evidence from a verification build). Do not close.
