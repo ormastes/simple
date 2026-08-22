@@ -2194,6 +2194,20 @@ collision: whichever identity is registered first retains the shared starting
 slot. Fully reproducible IDs across reversed traversal need a sorted
 preregistration phase before either identity is embedded in HIR.
 
+### Indexed accessor and inherited-name lint facts
+
+The always-on ACC001/NAME001 path previously replaced a class record after
+every parsed method, scanned every class for each inheritance edge twice per
+child, deduplicated inherited names and suffixes through growing arrays, and
+rescanned every method for every accessor suffix. The indexed path finalizes
+each locally owned class once, builds a first-definition class-name dictionary,
+materializes ordered inheritance plus membership once per class, and groups
+accessors with flat head/tail/next arrays. Exact warning grouping, ordering,
+duplicate methods, first duplicate-class resolution, the 20-edge cap, and the
+existing nested textual-class behavior are preserved. Avoidable work falls
+from quadratic class/suffix scans to expected linear indexing; NAME001's
+ordered bounded-edit-distance candidate comparisons remain separately tracked.
+
 Narrowing now builds one key-to-variant dictionary instead of rescanning and
 resanitizing all union keys for every arm. Bare named pattern types resolve via
 the already-registered SymbolId, allowing their complete canonical key to match
