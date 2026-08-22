@@ -4,22 +4,52 @@
 use app.io.mod.{
     process_spawn_piped, process_write_stdin_some, process_read_stdout,
     process_is_piped_alive, process_close_piped, process_kill,
-    current_time_ms, rt_sleep_ms
+    rt_sleep_ms
 }
+use std.io_runtime.{time_now_monotonic_ms}
 use std.common.structural.hal_provider.*
 
 val HAL_PROCESS_PROTOCOL_V1: text = "HALRES1"
 val HAL_PROCESS_RESPONSE_FIELDS_V1: i64 = 17
 val HAL_PROCESS_MAX_RESPONSE_BYTES_V1: i64 = 512
+val HAL_PROCESS_MAX_OUTPUT_BYTES_V1: i64 = 704
+val HAL_ISOLATION_PROTOCOL_V1: text = "HALISO1"
+val HAL_ISOLATION_FIELDS_V1: i64 = 8
+val HAL_TRUSTED_LAUNCHER_V1: text =
+    "/usr/libexec/simple/hal-provider-launcher-v1"
+val HAL_TRUSTED_PURE_PROVIDER_V1: text =
+    "/usr/libexec/simple/hal-provider-pure-v1"
+val HAL_TRUSTED_C_PROVIDER_V1: text =
+    "/usr/libexec/simple/hal-provider-c-v1"
+val HAL_TRUSTED_RUST_PROVIDER_V1: text =
+    "/usr/libexec/simple/hal-provider-rust-v1"
 
 struct HalWorkerEndpointV1:
     provider: HalProviderKind
     command: text
     args: [text]
+    trusted_launcher: bool
 
 fn hal_worker_endpoint_v1(provider: HalProviderKind, command: text,
                           args: [text]) -> HalWorkerEndpointV1:
-    HalWorkerEndpointV1(provider: provider, command: command, args: args)
+    HalWorkerEndpointV1(provider: provider, command: command, args: args,
+                        trusted_launcher: false)
+
+fn _hal_trusted_provider_path_v1(provider: HalProviderKind) -> text:
+    match provider:
+        case HalProviderKind.PureSimple: HAL_TRUSTED_PURE_PROVIDER_V1
+        case HalProviderKind.C: HAL_TRUSTED_C_PROVIDER_V1
+        case HalProviderKind.Rust: HAL_TRUSTED_RUST_PROVIDER_V1
+
+fn hal_trusted_worker_endpoint_v1(provider: HalProviderKind,
+                                  args: [text]) -> HalWorkerEndpointV1:
+    # Only the repository-installed launcher is an isolation authority.  The
+    # worker path is data to that launcher and must be absolute so PATH cannot
+    # select a different image after the launcher clears the environment.
+    HalWorkerEndpointV1(provider: provider,
+                        command: _hal_trusted_provider_path_v1(provider),
+                        args: args,
+                        trusted_launcher: true)
 
 struct HalProcessCoordinatorReceiptV1:
     comparison: HalOrchestrationReceiptV1
@@ -46,6 +76,8 @@ class HalProcessLaneOwnerV1:
     cancelled: bool
     protocol_error: bool
     output_overflow: bool
+    isolation: HalIsolationReceiptV1
+    isolation_valid: bool
 
 fn _hal_invalid_result(provider: HalProviderKind,
                        invocation_id: i64) -> HalProviderResultV1:
@@ -73,7 +105,10 @@ fn _hal_process_lane_owner(endpoint: HalWorkerEndpointV1,
         endpoint: endpoint, pid: -1, request: request, request_offset: 0,
         output: "", result: _hal_invalid_result(endpoint.provider, invocation_id),
         result_valid: false, spawned: false, terminal: false, reaped: false,
-        cancelled: false, protocol_error: false, output_overflow: false)
+        cancelled: false, protocol_error: false, output_overflow: false,
+        isolation: _hal_unproven_isolation(
+            endpoint.provider, invocation_id, -1),
+        isolation_valid: false)
 
 fn _hal_signed_decimal(value: text) -> bool:
     if value == "":
@@ -144,8 +179,35 @@ fn _hal_parse_result_line(provider: HalProviderKind, line: text,
         overflow_pair.1, int(fields[14]), int(fields[15]), int(fields[16]))
     (hal_provider_result_v1_well_formed(result), result)
 
+fn _hal_parse_isolation_line(provider: HalProviderKind, line: text,
+                             expected_invocation: i64) ->
+        (bool, HalIsolationReceiptV1):
+    val invalid = _hal_unproven_isolation(
+        provider, expected_invocation, -1)
+    val fields = line.split("|")
+    if fields.len() != HAL_ISOLATION_FIELDS_V1:
+        return (false, invalid)
+    if fields[0] != HAL_ISOLATION_PROTOCOL_V1:
+        return (false, invalid)
+    var index = 1
+    while index < fields.len():
+        if not _hal_signed_decimal(fields[index]):
+            return (false, invalid)
+        if fields[index].parse_int() == nil:
+            return (false, invalid)
+        index = index + 1
+    if int(fields[1]) != expected_invocation:
+        return (false, invalid)
+    val receipt = hal_isolation_receipt_v1(
+        provider, int(fields[1]), int(fields[2]), int(fields[2]),
+        int(fields[3]), int(fields[4]), int(fields[5]),
+        int(fields[6]) == 1, int(fields[7]) == 1)
+    (int(fields[2]) > 0 and int(fields[3]) == 0
+        and int(fields[4]) == 0 and int(fields[5]) == 0
+        and int(fields[6]) == 1 and int(fields[7]) == 1, receipt)
+
 impl HalProcessLaneOwnerV1:
-    me spawn(enabled: bool, preflight_valid: bool):
+    me spawn(enabled: bool, preflight_valid: bool, deadline_ms: i64):
         if not enabled:
             return
         if not preflight_valid:
@@ -156,7 +218,19 @@ impl HalProcessLaneOwnerV1:
             self.protocol_error = true
             self.terminal = true
             return
-        self.pid = process_spawn_piped(self.endpoint.command, self.endpoint.args)
+        if self.endpoint.trusted_launcher:
+            if not self.endpoint.command.starts_with("/"):
+                self.protocol_error = true
+                self.terminal = true
+                return
+            val launcher_args = ["{deadline_ms}",
+                "{HAL_PROCESS_MAX_RESPONSE_BYTES_V1}", self.endpoint.command]
+                + self.endpoint.args
+            self.pid = process_spawn_piped(
+                HAL_TRUSTED_LAUNCHER_V1, launcher_args)
+        else:
+            self.pid = process_spawn_piped(
+                self.endpoint.command, self.endpoint.args)
         self.spawned = self.pid > 0
         if not self.spawned:
             self.protocol_error = true
@@ -181,13 +255,27 @@ impl HalProcessLaneOwnerV1:
             return
         val chunk = process_read_stdout(self.pid)
         if chunk.len() > 0:
-            if self.output.len() + chunk.len() > HAL_PROCESS_MAX_RESPONSE_BYTES_V1:
+            if self.output.len() + chunk.len() > HAL_PROCESS_MAX_OUTPUT_BYTES_V1:
                 self.output = ""
                 self.output_overflow = true
                 self.cancel()
                 return
             self.output = self.output + chunk
-            val newline = self.output.find("\n")
+            var newline = self.output.find("\n")
+            if (self.endpoint.trusted_launcher and not self.isolation_valid
+                    and newline >= 0):
+                val parsed_isolation = _hal_parse_isolation_line(
+                    self.endpoint.provider,
+                    self.output.substring(0, newline), expected_invocation)
+                self.isolation_valid = parsed_isolation.0
+                self.isolation = parsed_isolation.1
+                if not parsed_isolation.0:
+                    self.protocol_error = true
+                    self.cancel()
+                    return
+                self.output = self.output.substring(
+                    newline + 1, self.output.len())
+                newline = self.output.find("\n")
             if newline >= 0:
                 if newline != self.output.len() - 1:
                     self.protocol_error = true
@@ -236,8 +324,7 @@ impl HalProcessLaneOwnerV1:
             self.endpoint.provider, self.result_valid,
             self.terminal, self.reaped,
             self.request_offset == self.request.len(),
-            _hal_unproven_isolation(
-                self.endpoint.provider, invocation_id, self.pid),
+            self.isolation,
             self.result)
 
 fn _hal_lane_enabled(operation: HalOperationV1, mode: HalRunMode,
@@ -261,6 +348,29 @@ fn _hal_mask_if(value: bool, provider: HalProviderKind) -> i64:
     if value:
         return hal_provider_kind_mask(provider)
     0
+
+fn _hal_reject_spawn_after_critical_init(
+        operation: HalOperationV1,
+        receipt: HalOrchestrationReceiptV1) -> HalOrchestrationReceiptV1:
+    if hal_assurance_to_i64(operation.assurance_floor) < HAL_ASSURANCE_CRITICAL:
+        return receipt
+    # This coordinator still creates processes per invocation. That is useful
+    # for explicitly lower-assurance compatibility, but it cannot satisfy the
+    # sealed/no-allocation epoch of Critical or Verified operations. Preserve
+    # comparison evidence while revoking selection and commit until the
+    # preinitialized session owner lands.
+    HalOrchestrationReceiptV1(
+        status: HalOrchestrationStatusV1.InvalidReceipt,
+        expected_mask: receipt.expected_mask,
+        received_mask: receipt.received_mask,
+        admitted_mask: receipt.admitted_mask,
+        rejected_mask: receipt.rejected_mask,
+        difference_pair_mask: receipt.difference_pair_mask,
+        all_equivalent: receipt.all_equivalent,
+        preferred_result_ok: receipt.preferred_result_ok,
+        commit_allowed: false,
+        selected_provider: receipt.selected_provider,
+        selected_provider_valid: false)
 
 fn hal_coordinate_provider_processes_v1(
         operation: HalOperationV1, request: HalProviderRequestV1,
@@ -289,11 +399,11 @@ fn hal_coordinate_provider_processes_v1(
         and effective_deadline > 0)
     # Spawn every requested lane before servicing any lane: provider work may
     # proceed concurrently while the parent remains the sole result owner.
-    pure_lane.spawn(pure_enabled, preflight_valid)
-    c_lane.spawn(c_enabled, preflight_valid)
-    rust_lane.spawn(rust_enabled, preflight_valid)
+    pure_lane.spawn(pure_enabled, preflight_valid, effective_deadline)
+    c_lane.spawn(c_enabled, preflight_valid, effective_deadline)
+    rust_lane.spawn(rust_enabled, preflight_valid, effective_deadline)
     val expected = hal_execution_expected_mask(operation, mode)
-    val start_ms = current_time_ms()
+    val start_ms = time_now_monotonic_ms()
     while not _hal_all_terminal(expected, pure_lane, c_lane, rust_lane):
         pure_lane.advance_write()
         c_lane.advance_write()
@@ -304,7 +414,7 @@ fn hal_coordinate_provider_processes_v1(
         pure_lane.close_after_result()
         c_lane.close_after_result()
         rust_lane.close_after_result()
-        if current_time_ms() - start_ms >= effective_deadline:
+        if time_now_monotonic_ms() - start_ms >= effective_deadline:
             if pure_enabled:
                 pure_lane.cancel()
             if c_enabled:
@@ -313,11 +423,13 @@ fn hal_coordinate_provider_processes_v1(
                 rust_lane.cancel()
         elif not _hal_all_terminal(expected, pure_lane, c_lane, rust_lane):
             rt_sleep_ms(1)
-    val comparison = hal_orchestrate_provider_receipts_v1(
+    val raw_comparison = hal_orchestrate_provider_receipts_v1(
         operation, request, mode,
         pure_lane.structural_lane(request.invocation_id),
         c_lane.structural_lane(request.invocation_id),
         rust_lane.structural_lane(request.invocation_id))
+    val comparison = _hal_reject_spawn_after_critical_init(
+        operation, raw_comparison)
     HalProcessCoordinatorReceiptV1(
         comparison: comparison,
         launched_mask: _hal_mask_if(pure_lane.spawned, HalProviderKind.PureSimple)
@@ -338,10 +450,18 @@ fn hal_coordinate_provider_processes_v1(
         output_overflow_mask: _hal_mask_if(pure_lane.output_overflow, HalProviderKind.PureSimple)
             | _hal_mask_if(c_lane.output_overflow, HalProviderKind.C)
             | _hal_mask_if(rust_lane.output_overflow, HalProviderKind.Rust),
-        isolation_proven_mask: 0,
+        isolation_proven_mask: _hal_mask_if(
+            pure_lane.isolation_valid, HalProviderKind.PureSimple)
+            | _hal_mask_if(c_lane.isolation_valid, HalProviderKind.C)
+            | _hal_mask_if(rust_lane.isolation_valid, HalProviderKind.Rust),
         critical_ready: false)
 
 export HAL_PROCESS_PROTOCOL_V1, HAL_PROCESS_RESPONSE_FIELDS_V1
 export HAL_PROCESS_MAX_RESPONSE_BYTES_V1
+export HAL_PROCESS_MAX_OUTPUT_BYTES_V1, HAL_ISOLATION_PROTOCOL_V1
+export HAL_ISOLATION_FIELDS_V1, HAL_TRUSTED_LAUNCHER_V1
+export HAL_TRUSTED_PURE_PROVIDER_V1, HAL_TRUSTED_C_PROVIDER_V1
+export HAL_TRUSTED_RUST_PROVIDER_V1
 export HalWorkerEndpointV1, HalProcessCoordinatorReceiptV1
-export hal_worker_endpoint_v1, hal_coordinate_provider_processes_v1
+export hal_worker_endpoint_v1, hal_trusted_worker_endpoint_v1
+export hal_coordinate_provider_processes_v1

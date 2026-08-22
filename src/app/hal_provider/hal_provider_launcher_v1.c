@@ -1,0 +1,335 @@
+/* Trusted rt(hal) provider launcher, ABI v1.
+ *
+ * This executable is the isolation authority between the Simple coordinator
+ * and a Pure/C/Rust provider.  It deliberately has no dynamic allocation and
+ * accepts only an absolute worker image.  Linux is the only admitted platform
+ * in v1; every other platform fails closed at compile time.
+ */
+#define _GNU_SOURCE
+
+#if !defined(__linux__)
+#error "hal-provider-launcher-v1 requires Linux isolation primitives"
+#endif
+
+#include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/prctl.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
+
+enum {
+    HAL_LAUNCHER_REQUEST_CAP = 4096,
+    HAL_LAUNCHER_RESPONSE_CAP = 512,
+    HAL_LAUNCHER_ARG_CAP = 128
+};
+
+static const char *const HAL_BWRAP_PATH = "/usr/bin/bwrap";
+
+static int64_t monotonic_ms(void) {
+    struct timespec value;
+    if (clock_gettime(CLOCK_MONOTONIC, &value) != 0) return -1;
+    return (int64_t)value.tv_sec * 1000 + value.tv_nsec / 1000000;
+}
+
+static int parse_positive(const char *text, int64_t upper, int64_t *out) {
+    char *end = NULL;
+    long long value;
+    if (!text || !*text) return 0;
+    errno = 0;
+    value = strtoll(text, &end, 10);
+    if (errno || !end || *end || value <= 0 || value > upper) return 0;
+    *out = (int64_t)value;
+    return 1;
+}
+
+static int write_all(int fd, const char *data, size_t size) {
+    size_t offset = 0;
+    while (offset < size) {
+        ssize_t count = write(fd, data + offset, size - offset);
+        if (count > 0) {
+            offset += (size_t)count;
+        } else if (count < 0 && errno == EINTR) {
+            continue;
+        } else {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int read_request(char *buffer, size_t cap, size_t *size_out,
+                        int64_t *invocation_out) {
+    size_t size = 0;
+    int separators = 0;
+    int64_t invocation = 0;
+    int invocation_digits = 0;
+    while (size + 1 < cap) {
+        ssize_t count = read(STDIN_FILENO, buffer + size, 1);
+        char ch;
+        if (count < 0 && errno == EINTR) continue;
+        if (count != 1) return 0;
+        ch = buffer[size++];
+        if (ch == '\n') break;
+        if (ch == '|') {
+            separators++;
+            continue;
+        }
+        if (separators == 3) {
+            if (ch < '0' || ch > '9') return 0;
+            invocation_digits = 1;
+            if (invocation > (INT64_MAX - (ch - '0')) / 10) return 0;
+            invocation = invocation * 10 + (ch - '0');
+        }
+    }
+    if (size < 2 || buffer[size - 1] != '\n' || !invocation_digits ||
+        memcmp(buffer, "HALREQ1|", 8) != 0) return 0;
+    buffer[size] = '\0';
+    *size_out = size;
+    *invocation_out = invocation;
+    return 1;
+}
+
+static int close_ambient_descriptors(void) {
+    /* An incomplete numeric scan would not prove closure when RLIMIT_NOFILE
+     * is raised. Linux close_range is one constant-cost, exhaustive kernel
+     * transition; an older kernel is therefore unsupported, not best-effort.
+     */
+    return close_range(3, ~0U, 0) == 0;
+}
+
+static int trusted_bwrap_image(void) {
+    struct stat value;
+    if (lstat(HAL_BWRAP_PATH, &value) != 0) return 0;
+    return S_ISREG(value.st_mode) && value.st_uid == 0 &&
+        (value.st_mode & (S_IWGRP | S_IWOTH)) == 0;
+}
+
+static int trusted_worker_fd(const char *path) {
+    struct stat value;
+    int fd = open(path, O_PATH | O_NOFOLLOW);
+    if (fd < 0) return -1;
+    if (fstat(fd, &value) != 0 || !S_ISREG(value.st_mode) ||
+        value.st_uid != 0 || (value.st_mode & (S_IWGRP | S_IWOTH)) != 0 ||
+        (value.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) == 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static int apply_resource_limits(int64_t deadline_ms) {
+    struct rlimit limit;
+    rlim_t cpu_seconds = (rlim_t)((deadline_ms + 999) / 1000 + 1);
+#define HAL_SET_LIMIT(resource, amount) do { \
+    limit.rlim_cur = (rlim_t)(amount); \
+    limit.rlim_max = (rlim_t)(amount); \
+    if (setrlimit((resource), &limit) != 0) return 0; \
+} while (0)
+    HAL_SET_LIMIT(RLIMIT_AS, 256ULL * 1024ULL * 1024ULL);
+    HAL_SET_LIMIT(RLIMIT_NPROC, 32);
+    HAL_SET_LIMIT(RLIMIT_CPU, cpu_seconds);
+    HAL_SET_LIMIT(RLIMIT_FSIZE, 1024ULL * 1024ULL);
+    HAL_SET_LIMIT(RLIMIT_NOFILE, 64);
+    HAL_SET_LIMIT(RLIMIT_CORE, 0);
+#undef HAL_SET_LIMIT
+    return 1;
+}
+
+static void worker_exec(int input_fd, int output_fd,
+                        char **worker_argv, int worker_argc,
+                        int64_t deadline_ms) {
+    int null_fd;
+    int worker_fd;
+    int index = 0, worker_index = 0;
+    char *sandbox_argv[HAL_LAUNCHER_ARG_CAP + 32];
+    extern char **environ;
+    if (dup2(input_fd, STDIN_FILENO) < 0 ||
+        dup2(output_fd, STDOUT_FILENO) < 0) _exit(120);
+    null_fd = open("/dev/null", O_WRONLY | O_CLOEXEC);
+    if (null_fd < 0 || dup2(null_fd, STDERR_FILENO) < 0) _exit(121);
+    if (!close_ambient_descriptors()) _exit(122);
+    worker_fd = trusted_worker_fd(worker_argv[0]);
+    if (worker_fd < 0) _exit(127);
+    if (worker_fd != 3) {
+        if (dup2(worker_fd, 3) < 0) _exit(127);
+        close(worker_fd);
+        worker_fd = 3;
+    }
+    if (clearenv() != 0 || (environ && environ[0] != NULL)) _exit(123);
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) _exit(124);
+    if (prctl(PR_SET_PDEATHSIG, SIGKILL) != 0 || getppid() == 1) _exit(125);
+    if (!apply_resource_limits(deadline_ms)) _exit(128);
+    if (!trusted_bwrap_image()) _exit(126);
+    sandbox_argv[index++] = (char *)HAL_BWRAP_PATH;
+    sandbox_argv[index++] = "--unshare-all";
+    sandbox_argv[index++] = "--die-with-parent";
+    sandbox_argv[index++] = "--new-session";
+    sandbox_argv[index++] = "--clearenv";
+    sandbox_argv[index++] = "--preserve-fds";
+    sandbox_argv[index++] = "1";
+    sandbox_argv[index++] = "--tmpfs";
+    sandbox_argv[index++] = "/";
+    sandbox_argv[index++] = "--ro-bind";
+    sandbox_argv[index++] = "/usr";
+    sandbox_argv[index++] = "/usr";
+    sandbox_argv[index++] = "--ro-bind-try";
+    sandbox_argv[index++] = "/lib";
+    sandbox_argv[index++] = "/lib";
+    sandbox_argv[index++] = "--ro-bind-try";
+    sandbox_argv[index++] = "/lib64";
+    sandbox_argv[index++] = "/lib64";
+    sandbox_argv[index++] = "--proc";
+    sandbox_argv[index++] = "/proc";
+    sandbox_argv[index++] = "--tmpfs";
+    sandbox_argv[index++] = "/tmp";
+    sandbox_argv[index++] = "--chdir";
+    sandbox_argv[index++] = "/";
+    sandbox_argv[index++] = "--";
+    sandbox_argv[index++] = "/proc/self/fd/3";
+    worker_index = 1;
+    while (worker_index < worker_argc) {
+        sandbox_argv[index++] = worker_argv[worker_index++];
+    }
+    sandbox_argv[index] = NULL;
+    execve(HAL_BWRAP_PATH, sandbox_argv, environ);
+    _exit(126);
+}
+
+static int terminate_and_reap(pid_t child) {
+    int status;
+    pid_t waited;
+    /* The outer worker is a dedicated process-group leader. Bubblewrap also
+     * uses --die-with-parent, so killing the supervisor cannot orphan a
+     * namespaced descendant. The direct kill is a race-safe fallback. */
+    if (kill(-child, SIGKILL) != 0 && errno != ESRCH) return 0;
+    if (kill(child, SIGKILL) != 0 && errno != ESRCH) return 0;
+    do {
+        waited = waitpid(child, &status, 0);
+    } while (waited < 0 && errno == EINTR);
+    return waited == child;
+}
+
+int main(int argc, char **argv) {
+    char request[HAL_LAUNCHER_REQUEST_CAP];
+    char response[HAL_LAUNCHER_RESPONSE_CAP + 1];
+    char isolation[192];
+    int to_child[2] = {-1, -1};
+    int from_child[2] = {-1, -1};
+    size_t request_size = 0, response_size = 0;
+    int64_t invocation = 0, deadline_ms = 0, response_cap = 0, start_ms;
+    pid_t child;
+    int status = 0, reaped = 0;
+
+    if (argc < 4 || argc > HAL_LAUNCHER_ARG_CAP || argv[3][0] != '/' ||
+        !trusted_bwrap_image() ||
+        !parse_positive(argv[1], 3600000, &deadline_ms) ||
+        !parse_positive(argv[2], HAL_LAUNCHER_RESPONSE_CAP, &response_cap) ||
+        !read_request(request, sizeof(request), &request_size, &invocation)) return 64;
+    if (pipe2(to_child, O_CLOEXEC) != 0 || pipe2(from_child, O_CLOEXEC) != 0)
+        return 65;
+    child = fork();
+    if (child < 0) return 66;
+    if (child == 0) {
+        if (setpgid(0, 0) != 0) _exit(119);
+        worker_exec(to_child[0], from_child[1], &argv[3], argc - 3,
+                    deadline_ms);
+    }
+    if (setpgid(child, child) != 0 && errno != EACCES) {
+        terminate_and_reap(child);
+        return 66;
+    }
+    close(to_child[0]);
+    close(from_child[1]);
+    if (!write_all(to_child[1], request, request_size) || close(to_child[1])) {
+        terminate_and_reap(child);
+        return 67;
+    }
+    to_child[1] = -1;
+    start_ms = monotonic_ms();
+    if (start_ms < 0) {
+        terminate_and_reap(child);
+        return 68;
+    }
+    for (;;) {
+        struct pollfd descriptor;
+        int64_t now = monotonic_ms();
+        int remaining;
+        int poll_status;
+        ssize_t count;
+        pid_t waited;
+        if (now < 0 || now - start_ms >= deadline_ms) {
+            terminate_and_reap(child);
+            return 69;
+        }
+        remaining = (int)(deadline_ms - (now - start_ms));
+        descriptor.fd = from_child[0];
+        descriptor.events = POLLIN | POLLHUP;
+        descriptor.revents = 0;
+        poll_status = poll(&descriptor, 1, remaining);
+        if (poll_status < 0 && errno == EINTR) continue;
+        if (poll_status <= 0) {
+            terminate_and_reap(child);
+            return 69;
+        }
+        count = read(from_child[0], response + response_size,
+                     (size_t)response_cap + 1 - response_size);
+        if (count > 0) {
+            response_size += (size_t)count;
+            if (response_size > (size_t)response_cap) {
+                terminate_and_reap(child);
+                return 70;
+            }
+            continue;
+        }
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) {
+            terminate_and_reap(child);
+            return 71;
+        }
+        close(from_child[0]);
+        from_child[0] = -1;
+        /* EOF is not terminal proof: a hostile worker can close stdout and
+         * remain alive. Keep the same absolute deadline while waiting and
+         * never enter an unbounded blocking wait here. */
+        for (;;) {
+            const struct timespec pause = {.tv_sec = 0, .tv_nsec = 1000000};
+            do {
+                waited = waitpid(child, &status, WNOHANG);
+            } while (waited < 0 && errno == EINTR);
+            if (waited == child) {
+                reaped = 1;
+                break;
+            }
+            now = monotonic_ms();
+            if (waited < 0 || now < 0 || now - start_ms >= deadline_ms) {
+                terminate_and_reap(child);
+                return 69;
+            }
+            nanosleep(&pause, NULL);
+        }
+        break;
+    }
+    if (!reaped || !WIFEXITED(status) || WEXITSTATUS(status) != 0 ||
+        response_size < 2 || response[response_size - 1] != '\n' ||
+        memchr(response, '\n', response_size - 1) != NULL) return 72;
+    response[response_size] = '\0';
+    {
+        int count = snprintf(isolation, sizeof(isolation),
+            "HALISO1|%lld|%ld|0|0|0|1|1\n",
+            (long long)invocation, (long)child);
+        if (count <= 0 || (size_t)count >= sizeof(isolation) ||
+            !write_all(STDOUT_FILENO, isolation, (size_t)count) ||
+            !write_all(STDOUT_FILENO, response, response_size)) return 73;
+    }
+    return 0;
+}
