@@ -11,6 +11,8 @@ The MIR pass registry can now describe status, expectation, backend selection, w
 contracts, and deterministic requested-pipeline planning. The function dispatcher now
 returns exact native candidate/transformed counts for the active `write_coalesce` and
 `syscall_batch` adapters, with stable positive-witness reasons and instruction deltas.
+Those counts now come from the hints actually emitted in the rewrite, avoiding the former
+second recognizer scan and preventing recognizer/rewrite drift in recorded outcomes.
 It rejects an active function adapter that lacks exact outcome support rather than
 inferring a Boolean candidate from serialized MIR change. Module-pass outcomes and
 native rejected-candidate reasons remain unavailable. The repository also lacks one general
@@ -31,8 +33,7 @@ execution.
 
 1. Extend the exact `PassOutcome` adapter contract to active module passes and future
    rehabilitated passes without discarding native statistics.
-2. Populate `PassRunRecord` from the actual adapter result, with stable coalesced reason
-   codes and injected timing.
+2. Extend actual adapter results with stable rejected-reason codes and injected timing.
 3. Extend the structural receipt with operand/local validity, SSA dominance, types,
    ownership, and loop boundaries, then require it after every changed function/module
    pass in test and `--verify-each` modes.
