@@ -77,6 +77,29 @@ allocations. This hosted pathname adapter assumes a trusted fixture directory;
 hostile shared directories require a future descriptor-relative no-follow
 facade rather than weakening this contract.
 
+### Hosted file-read lifecycle and stream-write adapters
+
+`HostedPreparedFileReadSessionV1` closes the executable `FileOpen`/`FileClose`
+gap around a bounded read. Preparation admits and captures one stable regular
+file beneath the trusted fixture root, then retains fixed digest lanes, a
+derived nonzero handle token, capability identity, and at most 64 KiB of
+captured bytes. The canonical cursor admits exactly `FileOpen -> FileRead ->
+FileClose`. Open binds the caller-provided path digest, read binds the returned
+handle, and close consumes it. Changed identity, opcode, sequence, capability,
+capacity, or cursor state fails before modifying result storage. Canonical
+execution copies into caller storage without growth and reports zero post-seal
+allocations; exact replay never rereads or closes a host resource.
+
+`HostedPreparedStreamWriteExecutorV1` binds a nonnegative stream identity and a
+caller-owned sink fixed before seal. One `StreamWrite` carries the identity as
+an eight-byte prefix followed by at most 64 KiB of payload. Execution copies
+the payload directly into the admitted sink and returns the written length in
+the caller's eight-byte result region. Its consumed cursor rejects duplicate
+writes. Replay copies only the fixed result receipt, so it cannot mutate the
+sink. This is the deterministic environment-model adapter; a concrete pipe,
+terminal, or device owner may commit the accepted caller buffer outside shadow
+provider execution.
+
 ### Hosted bounded process lifecycle adapter
 
 `HostedPreparedProcessExecutorV1` creates one allowlisted composition-owned

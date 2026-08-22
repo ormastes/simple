@@ -10,7 +10,12 @@ use app.test.hal_environment_executor.{
     hosted_prepare_clock_read_v1, hosted_prepare_random_fill_v1,
     hosted_prepare_file_write_v1, hosted_file_write_cursor_v1,
     hosted_file_write_execute_v1, hosted_prepare_process_v1,
-    hosted_process_cursor_v1, hosted_process_execute_v1
+    hosted_process_cursor_v1, hosted_process_execute_v1,
+    hosted_prepare_file_read_session_v1,
+    hosted_file_read_session_cursor_v1,
+    hosted_file_read_session_execute_v1,
+    hosted_prepare_stream_write_v1, hosted_stream_write_cursor_v1,
+    hosted_stream_write_execute_v1
 }
 use std.common.structural.environment_instruction.*
 
@@ -156,6 +161,89 @@ describe "hosted physical environment executor":
             arguments, results)
         expect(env_instruction_status_to_i64(changed.observation.status)).to_equal(
             env_instruction_status_to_i64(EnvInstructionStatusV1.Diverged))
+
+    it "executes one bounded file open read close lifecycle and replays close":
+        val root = cwd()
+        val path = root + "/config/critical_mode.sdn"
+        val executor = hosted_prepare_file_read_session_v1(path, root, 16, 65536)
+        var cursor = hosted_file_read_session_cursor_v1()
+        var open_argument: [u8] = [0u8; 16]
+        put_i64_le_at(open_argument, 0, executor.path_digest_hi)
+        put_i64_le_at(open_argument, 8, executor.path_digest_lo)
+        val open = env_instruction_v1(45, 0, EnvOpcodeV1.FileOpen, 16, 0,
+            0, 16, 16, 0, 8, 8)
+        var open_result: [u8] = [0u8; 8]
+        val opened = hosted_file_read_session_execute_v1(
+            executor, cursor, capture_policy(EnvOpcodeV1.FileOpen, 16),
+            open, open_argument, open_result)
+        cursor = opened.cursor
+
+        var handle_argument: [u8] = [0u8; 8]
+        put_i64_le(handle_argument, executor.handle_token)
+        val read = env_instruction_v1(45, 1, EnvOpcodeV1.FileRead, 16, 0,
+            0, 8, 8, 0, executor.captured_length, executor.captured_length)
+        var read_result: [u8] = [0u8; executor.captured_length]
+        val read_step = hosted_file_read_session_execute_v1(
+            executor, cursor, capture_policy(EnvOpcodeV1.FileRead, 16),
+            read, handle_argument, read_result)
+        cursor = read_step.cursor
+
+        val close = env_instruction_v1(45, 2, EnvOpcodeV1.FileClose, 16, 0,
+            0, 8, 8, 0, 1, 1)
+        var close_result: [u8] = [0u8]
+        var replay_result: [u8] = [0u8]
+        val closed = hosted_file_read_session_execute_v1(
+            executor, cursor, capture_policy(EnvOpcodeV1.FileClose, 16),
+            close, handle_argument, close_result)
+        val replayed = env_replay_exact_v1(
+            close, close, closed.receipt.observation,
+            handle_argument, close_result, replay_result)
+        val duplicate = hosted_file_read_session_execute_v1(
+            executor, closed.cursor, capture_policy(EnvOpcodeV1.FileClose, 16),
+            close, handle_argument, replay_result)
+
+        expect(opened.receipt.applied).to_be(true)
+        expect(read_step.receipt.applied).to_be(true)
+        expect(read_result).to_equal(executor.captured_bytes)
+        expect(closed.receipt.applied).to_be(true)
+        expect(closed.receipt.allocation_count_after_seal).to_equal(0)
+        expect(replayed.applied).to_be(true)
+        expect(replayed.physical_effect).to_be(false)
+        expect(duplicate.receipt.applied).to_be(false)
+
+    it "writes a bounded stream payload into caller-owned storage once":
+        var sink: [u8] = [0u8; 8]
+        val executor = hosted_prepare_stream_write_v1(73, 17, sink.len())
+        val cursor = hosted_stream_write_cursor_v1()
+        var arguments: [u8] = [0u8; 12]
+        put_i64_le_at(arguments, 0, 73)
+        arguments[8] = 4u8
+        arguments[9] = 5u8
+        arguments[10] = 6u8
+        arguments[11] = 7u8
+        val operation = env_instruction_v1(
+            47, 0, EnvOpcodeV1.StreamWrite, 17, 0,
+            0, arguments.len(), arguments.len(), 0, 8, 8)
+        var result: [u8] = [0u8; 8]
+        var replay_result: [u8] = [0u8; 8]
+
+        val step = hosted_stream_write_execute_v1(
+            executor, cursor, capture_policy(EnvOpcodeV1.StreamWrite, 17),
+            operation, arguments, result, sink)
+        val duplicate = hosted_stream_write_execute_v1(
+            executor, step.cursor, capture_policy(EnvOpcodeV1.StreamWrite, 17),
+            operation, arguments, replay_result, sink)
+        val replay = env_replay_exact_v1(
+            operation, operation, step.receipt.observation,
+            arguments, result, replay_result)
+
+        expect(step.receipt.applied).to_be(true)
+        expect(step.receipt.allocation_count_after_seal).to_equal(0)
+        expect(sink[0]).to_equal(4u8)
+        expect(sink[3]).to_equal(7u8)
+        expect(duplicate.receipt.applied).to_be(false)
+        expect(replay.applied).to_be(true)
+        expect(replay.physical_effect).to_be(false)
 
     it "captures clock and random once and blocks them without nondeterminism authority":
         val clock = hosted_prepare_clock_read_v1()

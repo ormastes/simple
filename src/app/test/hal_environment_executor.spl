@@ -44,6 +44,38 @@ class HostedFileWriteStepReceiptV1:
     receipt: EnvExecutionReceiptV1
     cursor: HostedFileWriteCursorV1
 
+class HostedPreparedFileReadSessionV1:
+    path_digest_hi: i64
+    path_digest_lo: i64
+    handle_token: i64
+    capability_id: i64
+    captured_bytes: [u8]
+    captured_length: i64
+    sealed: bool
+
+class HostedFileReadSessionCursorV1:
+    next_sequence: i64
+    closed: bool
+    sealed: bool
+
+class HostedFileReadSessionStepReceiptV1:
+    receipt: EnvExecutionReceiptV1
+    cursor: HostedFileReadSessionCursorV1
+
+class HostedPreparedStreamWriteExecutorV1:
+    stream_id: i64
+    capability_id: i64
+    sink_capacity: i64
+    sealed: bool
+
+class HostedStreamWriteCursorV1:
+    consumed: bool
+    sealed: bool
+
+class HostedStreamWriteStepReceiptV1:
+    receipt: EnvExecutionReceiptV1
+    cursor: HostedStreamWriteCursorV1
+
 class HostedPreparedProcessExecutorV1:
     process_id: i64
     command_digest_hi: i64
@@ -292,6 +324,158 @@ fn hosted_file_write_execute_v1(
     HostedFileWriteStepReceiptV1(receipt: receipt,
         cursor: HostedFileWriteCursorV1(consumed: true, sealed: true))
 
+fn hosted_prepare_file_read_session_v1(
+        path: text, allowed_root: text, capability_id: i64,
+        max_bytes: i64) -> HostedPreparedFileReadSessionV1:
+    val valid = capability_id > 0 and capability_id < 63
+        and max_bytes >= 0 and max_bytes <= HOSTED_ENV_CAPTURE_MAX_BYTES_V1
+        and _env_path_safe_under_root(path, allowed_root)
+        and file_is_regular_no_follow(path)
+    val size_before = if valid: file_size(path) else: -1
+    val bounded = valid and size_before >= 0 and size_before <= max_bytes
+    val captured = if bounded: file_read_bytes(path) else: []
+    val size_after = if bounded: file_size(path) else: -1
+    val stable = bounded and file_is_regular_no_follow(path)
+        and size_after == size_before and captured.len() == size_before
+    val digest_hi = if stable: _env_text_digest_v1(path, false) else: 0
+    val digest_lo = if stable: _env_text_digest_v1(path, true) else: 0
+    val token = if stable:
+        ((digest_hi * 257 + digest_lo + capability_id) % 2147483629) + 1
+    else:
+        0
+    HostedPreparedFileReadSessionV1(
+        path_digest_hi: digest_hi, path_digest_lo: digest_lo,
+        handle_token: token, capability_id: if stable: capability_id else: 0,
+        captured_bytes: captured,
+        captured_length: if stable: captured.len() else: 0,
+        sealed: stable)
+
+fn hosted_file_read_session_cursor_v1() -> HostedFileReadSessionCursorV1:
+    HostedFileReadSessionCursorV1(next_sequence: 0, closed: false, sealed: true)
+
+fn _hosted_file_read_session_rejected_v1(
+        instruction: EnvInstructionV1, cursor: HostedFileReadSessionCursorV1,
+        status: EnvInstructionStatusV1) -> HostedFileReadSessionStepReceiptV1:
+    HostedFileReadSessionStepReceiptV1(
+        receipt: env_execution_rejected_v1(instruction, status), cursor: cursor)
+
+fn hosted_file_read_session_execute_v1(
+        executor: HostedPreparedFileReadSessionV1,
+        cursor: HostedFileReadSessionCursorV1,
+        policy: EnvExecutorPolicyV1, instruction: EnvInstructionV1,
+        argument_bytes: [u8], result_bytes: [u8])
+        -> HostedFileReadSessionStepReceiptV1:
+    val validation = env_executor_validate_instruction(
+        policy, instruction, argument_bytes, result_bytes)
+    if env_instruction_status_to_i64(validation)
+            != env_instruction_status_to_i64(EnvInstructionStatusV1.Planned):
+        return _hosted_file_read_session_rejected_v1(
+            instruction, cursor, validation)
+    if not executor.sealed or not cursor.sealed or cursor.closed
+            or instruction.capability_id != executor.capability_id
+            or instruction.sequence != cursor.next_sequence:
+        return _hosted_file_read_session_rejected_v1(
+            instruction, cursor, EnvInstructionStatusV1.Diverged)
+    var result_length = 0
+    var closed = false
+    if cursor.next_sequence == 0 and instruction.opcode == EnvOpcodeV1.FileOpen:
+        if instruction.argument_length != 16 or instruction.result_capacity < 8
+                or _env_read_i64_le(argument_bytes, instruction.argument_offset)
+                    != executor.path_digest_hi
+                or _env_read_i64_le(argument_bytes,
+                    instruction.argument_offset + 8) != executor.path_digest_lo:
+            return _hosted_file_read_session_rejected_v1(
+                instruction, cursor, EnvInstructionStatusV1.Diverged)
+        _env_write_i64_le(result_bytes, instruction.result_offset,
+                          executor.handle_token)
+        result_length = 8
+    else if cursor.next_sequence == 1
+            and instruction.opcode == EnvOpcodeV1.FileRead:
+        if instruction.argument_length != 8
+                or _env_read_i64_le(argument_bytes, instruction.argument_offset)
+                    != executor.handle_token
+                or executor.captured_length > instruction.result_capacity:
+            return _hosted_file_read_session_rejected_v1(
+                instruction, cursor, EnvInstructionStatusV1.Diverged)
+        var i = 0
+        while i < executor.captured_length:
+            result_bytes[instruction.result_offset + i] = executor.captured_bytes[i]
+            i = i + 1
+        result_length = executor.captured_length
+    else if cursor.next_sequence == 2
+            and instruction.opcode == EnvOpcodeV1.FileClose:
+        if instruction.argument_length != 8 or instruction.result_capacity < 1
+                or _env_read_i64_le(argument_bytes, instruction.argument_offset)
+                    != executor.handle_token:
+            return _hosted_file_read_session_rejected_v1(
+                instruction, cursor, EnvInstructionStatusV1.Diverged)
+        result_bytes[instruction.result_offset] = 1u8
+        result_length = 1
+        closed = true
+    else:
+        return _hosted_file_read_session_rejected_v1(
+            instruction, cursor, EnvInstructionStatusV1.Diverged)
+    val receipt = env_execution_record_applied_v1(
+        instruction, argument_bytes, result_bytes, result_length, true, 0)
+    HostedFileReadSessionStepReceiptV1(receipt: receipt,
+        cursor: HostedFileReadSessionCursorV1(
+            next_sequence: cursor.next_sequence + 1,
+            closed: closed, sealed: true))
+
+fn hosted_prepare_stream_write_v1(
+        stream_id: i64, capability_id: i64,
+        sink_capacity: i64)
+        -> HostedPreparedStreamWriteExecutorV1:
+    val valid = stream_id >= 0 and capability_id > 0 and capability_id < 63
+        and sink_capacity >= 0
+        and sink_capacity <= HOSTED_ENV_CAPTURE_MAX_BYTES_V1
+    HostedPreparedStreamWriteExecutorV1(
+        stream_id: if valid: stream_id else: -1,
+        capability_id: if valid: capability_id else: 0,
+        sink_capacity: if valid: sink_capacity else: 0,
+        sealed: valid)
+
+fn hosted_stream_write_cursor_v1() -> HostedStreamWriteCursorV1:
+    HostedStreamWriteCursorV1(consumed: false, sealed: true)
+
+fn hosted_stream_write_execute_v1(
+        executor: HostedPreparedStreamWriteExecutorV1,
+        cursor: HostedStreamWriteCursorV1,
+        policy: EnvExecutorPolicyV1, instruction: EnvInstructionV1,
+        argument_bytes: [u8], result_bytes: [u8], sink_bytes: [u8])
+        -> HostedStreamWriteStepReceiptV1:
+    val validation = env_executor_validate_instruction(
+        policy, instruction, argument_bytes, result_bytes)
+    if env_instruction_status_to_i64(validation)
+            != env_instruction_status_to_i64(EnvInstructionStatusV1.Planned):
+        return HostedStreamWriteStepReceiptV1(
+            receipt: env_execution_rejected_v1(instruction, validation),
+            cursor: cursor)
+    if not executor.sealed or not cursor.sealed or cursor.consumed
+            or instruction.sequence != 0
+            or instruction.opcode != EnvOpcodeV1.StreamWrite
+            or instruction.capability_id != executor.capability_id
+            or instruction.argument_offset != 0
+            or instruction.argument_length < 8
+            or instruction.argument_capacity != argument_bytes.len()
+            or _env_read_i64_le(argument_bytes, 0) != executor.stream_id
+            or instruction.argument_length - 8 > executor.sink_capacity
+            or executor.sink_capacity > sink_bytes.len()
+            or instruction.result_capacity < 8:
+        return HostedStreamWriteStepReceiptV1(
+            receipt: env_execution_rejected_v1(
+                instruction, EnvInstructionStatusV1.Diverged), cursor: cursor)
+    val payload_length = instruction.argument_length - 8
+    var i = 0
+    while i < payload_length:
+        sink_bytes[i] = argument_bytes[8 + i]
+        i = i + 1
+    _env_write_i64_le(result_bytes, instruction.result_offset, payload_length)
+    val receipt = env_execution_record_applied_v1(
+        instruction, argument_bytes, result_bytes, 8, true, 0)
+    HostedStreamWriteStepReceiptV1(receipt: receipt,
+        cursor: HostedStreamWriteCursorV1(consumed: true, sealed: true))
+
 fn hosted_prepare_process_v1(command: text, arguments: [text],
                              capability_id: i64) -> HostedPreparedProcessExecutorV1:
     # Process creation and command storage are preparation work. The sealed
@@ -478,6 +662,12 @@ export hosted_prepare_clock_read_v1, hosted_prepare_random_fill_v1
 export HostedPreparedFileWriteExecutorV1, HostedFileWriteCursorV1
 export HostedFileWriteStepReceiptV1, hosted_prepare_file_write_v1
 export hosted_file_write_cursor_v1, hosted_file_write_execute_v1
+export HostedPreparedFileReadSessionV1, HostedFileReadSessionCursorV1
+export HostedFileReadSessionStepReceiptV1, hosted_prepare_file_read_session_v1
+export hosted_file_read_session_cursor_v1, hosted_file_read_session_execute_v1
+export HostedPreparedStreamWriteExecutorV1, HostedStreamWriteCursorV1
+export HostedStreamWriteStepReceiptV1, hosted_prepare_stream_write_v1
+export hosted_stream_write_cursor_v1, hosted_stream_write_execute_v1
 export HostedPreparedProcessExecutorV1, HostedProcessCursorV1
 export HostedProcessStepReceiptV1, hosted_prepare_process_v1
 export hosted_process_cursor_v1, hosted_process_execute_v1
