@@ -64,6 +64,63 @@ describe "mission-critical process/socket lifecycle owner":
             HalExternalLifecycleKindV1.Socket, EnvOpcodeV1.SocketOpen,
             41, 101, 202, 0, 2, 8)).to_be(false)
 
+    it "requires registered process generation and consumes each poll once":
+        var admission = hal_external_captured_admission_owner_v2(8)
+        val no_spawn = admission.begin_process_poll(
+            41, 3, 101, 202, 1, 2, 8)
+        expect(no_spawn.accepted).to_be(false)
+        expect(admission.register_process_spawn(
+            41, 3, 101, 202, 0, 1, 8)).to_be(true)
+        expect(admission.register_process_spawn(
+            41, 3, 101, 202, 0, 1, 8)).to_be(false)
+        expect(admission.begin_process_poll(
+            41, 2, 101, 202, 1, 2, 8).accepted).to_be(false)
+        expect(admission.begin_process_poll(
+            41, 3, 999, 202, 1, 2, 8).accepted).to_be(false)
+        val first = admission.begin_process_poll(
+            41, 3, 101, 202, 1, 2, 8)
+        expect(first.accepted).to_be(true)
+        expect(admission.begin_process_poll(
+            41, 3, 101, 202, 1, 2, 8).accepted).to_be(false)
+        expect(admission.finish(first, true)).to_be(true)
+        expect(admission.finish(first, true)).to_be(false)
+        expect(admission.begin_process_poll(
+            41, 3, 101, 202, 1, 2, 8).accepted).to_be(false)
+        val second = admission.begin_process_poll(
+            41, 3, 101, 202, 2, 3, 8)
+        expect(second.accepted).to_be(true)
+        expect(admission.finish(second, false)).to_be(false)
+        expect(admission.begin_process_poll(
+            41, 3, 101, 202, 2, 3, 8).accepted).to_be(true)
+
+    it "fails closed on slot collision and socket generation replay":
+        var admission = hal_external_captured_admission_owner_v2(8)
+        val opened = admission.begin_socket_open(
+            41, 7, 303, 404, 0, 1, 8)
+        expect(opened.accepted).to_be(true)
+        expect(admission.finish(opened, true)).to_be(true)
+        expect(admission.begin_socket_open(
+            41, 7, 303, 404, 0, 1, 8).accepted).to_be(false)
+        expect(admission.begin_socket_open(
+            41, 6, 303, 404, 0, 1, 8).accepted).to_be(false)
+        expect(admission.begin_socket_open(
+            49, 8, 505, 606, 0, 1, 8).accepted).to_be(false)
+        val next_generation = admission.begin_socket_open(
+            41, 8, 505, 606, 0, 1, 8)
+        expect(next_generation.accepted).to_be(true)
+        expect(admission.finish(next_generation, false)).to_be(false)
+        expect(admission.begin_socket_open(
+            41, 8, 505, 606, 0, 1, 8).accepted).to_be(true)
+
+    it "rejects invalid fixed capacity without growing storage":
+        val zero = hal_external_captured_admission_owner_v2(0)
+        val too_large = hal_external_captured_admission_owner_v2(
+            HAL_EXTERNAL_CAPTURED_MAX_SLOTS_V2 + 1)
+        expect(zero.sealed).to_be(false)
+        expect(too_large.sealed).to_be(false)
+        expect(zero.fixture_ids.len()).to_equal(1)
+        expect(too_large.fixture_ids.len()).to_equal(1)
+
     it "extracts automatically and advances one exact process handle":
         var owner = lifecycle_owner(
             HalRunMode.AlphaCompare, HalProviderKind.PureSimple)
