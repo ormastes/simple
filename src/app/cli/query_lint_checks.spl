@@ -309,6 +309,7 @@ fn _is_assign_to_clos(trimmed: text, var_name: text) -> bool:
 fn _check_ignored_return_text(lines: [text], file: text, format: text) -> i64:
     """Text-based heuristic for ignored return value detection."""
     var count = 0
+    val last_statement = _query_last_statement_flags(lines)
     val side_effects: [text] = [
         "print", "println", "eprint", "eprintln",
         "push", "pop", "clear", "sort", "reverse", "remove", "insert",
@@ -345,7 +346,7 @@ fn _check_ignored_return_text(lines: [text], file: text, format: text) -> i64:
                                 is_side_effect = true
                                 break
                     if not is_side_effect:
-                        if not _is_last_stmt_ret(lines, ret_i):
+                        if not last_statement[ret_i]:
                             if format == "json":
                                 _diag_emit_or_collect("{\"severity\":3,\"code\":\"RET001\",\"message\":\"return value of '{call_name}()' is discarded\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":{trimmed.len()},\"tags\":[1],\"source\":\"simple-lint\"}")
                             else:
@@ -418,23 +419,33 @@ fn _is_any_assign_ret(trimmed: text) -> bool:
         return true
     false
 
-fn _is_last_stmt_ret(lines: [text], idx: i64) -> bool:
-    """Check if the line at idx is the last non-empty statement at its indent level."""
-    val target_indent = _count_indent(lines[idx])
-    var ni = idx + 1
-    while ni < lines.len():
-        val next_line = lines[ni]
-        val nt = next_line.trim()
-        if nt == "":
-            ni = ni + 1
+fn _query_last_statement_flags(lines: [text]) -> [bool]:
+    """Index whether each non-empty line is last at its indentation level.
+
+    A reverse monotonic stack exposes the first later non-empty line at the
+    same or a shallower indent. This preserves `_is_last_stmt_ret` semantics
+    without scanning the suffix once per call candidate.
+    """
+    var result: [bool] = []
+    var fill = 0
+    while fill < lines.len():
+        result.push(true)
+        fill = fill + 1
+    var stack: [i64] = []
+    var line_index = lines.len() - 1
+    while line_index >= 0:
+        if lines[line_index].trim() == "":
+            line_index = line_index - 1
             continue
-        val next_indent = _count_indent(next_line)
-        if next_indent < target_indent:
-            return true
-        if next_indent == target_indent:
-            return false
-        ni = ni + 1
-    true
+        val indent = _count_indent(lines[line_index])
+        while (stack.len() > 0 and
+            _count_indent(lines[stack.last()]) > indent):
+            stack.pop()
+        if stack.len() > 0:
+            result[line_index] = _count_indent(lines[stack.last()]) < indent
+        stack.push(line_index)
+        line_index = line_index - 1
+    result
 
 # ============================================================================
 # BOOL001: Multiline boolean without parentheses (text-based heuristic)
