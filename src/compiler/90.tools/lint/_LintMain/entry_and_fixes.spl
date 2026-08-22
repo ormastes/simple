@@ -158,26 +158,26 @@ fn lint_cli_append_parsed_results(
     val source_locations = lint_source_location_index(lines)
     val stub_profile_name = _lint_profile_to_assurance_name(config.profile)
     for warning in check_argument_count(decls):
-        if not should_keep_lint_result(config, warning.code):
-            continue
         val base_level = if warning.code == "ARG002": LintLevel.Deny else: LintLevel.Warn
-        val configured_level = apply_config_level(config, warning.code, base_level)
+        val policy = lint_policy_decision(
+            config, warning.code, base_level, LintEvidenceTier.ParsedStructural)
+        if not policy.keep: continue
         # This producer is the AST compatibility fallback. A deny policy is
         # reserved for typed, high-confidence evidence; never turn unresolved
         # receiver/effect/alias facts into a build error.
-        val level = if configured_level == LintLevel.Deny: LintLevel.Warn else: configured_level
+        val level = if policy.level == LintLevel.Deny: LintLevel.Warn else: policy.level
         val lint = LintDiag.new(warning.code, level, LintCategory.Style, warning.message)
             .with_fix(warning.hint)
         results.push(LintRunResult.new(path, warning.line, 0, lint))
     for warning in check_collection_patterns(decls):
-        if not should_keep_lint_result(config, warning.code):
-            continue
         # This is the AST compatibility fallback.  Robust/critical deny policy
         # is reserved for typed, high-confidence evidence; unresolved receiver,
         # effect, alias, and mutation facts must never become a build error.
         val base_level = LintLevel.Warn
-        val level = apply_config_level_for_evidence(
+        val policy = lint_policy_decision(
             config, warning.code, base_level, LintEvidenceTier.SourcePattern)
+        if not policy.keep: continue
+        val level = policy.level
         val lint = LintDiag.new(warning.code, level, LintCategory.Warning, warning.message)
             .with_fix(warning.hint)
             .with_evidence(["item=" + warning.item_name, "source_severity=" + warning.severity])
@@ -205,10 +205,11 @@ fn lint_cli_append_parsed_results(
         # (`cli_stub003_count != 1`) for the regression probe.
         if warning.code != "STUB001" and warning.code != "STUB002":
             continue
-        if not should_keep_lint_result(config, warning.code):
-            continue
         val base_level = if warning.code == "STUB001": LintLevel.Warn else: LintLevel.Allow
-        val level = apply_config_level(config, warning.code, base_level)
+        val policy = lint_policy_decision(
+            config, warning.code, base_level, LintEvidenceTier.ParsedStructural)
+        if not policy.keep: continue
+        val level = policy.level
         val lint = LintDiag.new(warning.code, level, LintCategory.Warning, warning.message)
             .with_fix(warning.hint)
         results.push(LintRunResult.new(path, warning.line, 0, lint))
@@ -224,25 +225,28 @@ fn lint_cli_append_parsed_results(
     # loop is the single source of REQC001-004 diagnostics.
     if required_comment_source_may_match(content):
         for warning in check_required_comment(decls):
-            if not should_keep_lint_result(config, warning.code):
-                continue
-            val level = apply_config_level(config, warning.code, LintLevel.Warn)
+            val policy = lint_policy_decision(
+                config, warning.code, LintLevel.Warn, LintEvidenceTier.ParsedStructural)
+            if not policy.keep: continue
+            val level = policy.level
             val lint = LintDiag.new(warning.code, level, LintCategory.Warning, warning.message)
                 .with_fix(warning.hint)
             results.push(LintRunResult.new(path, warning.line, 0, lint))
     # W0406 already comes from the text EasyFix owner. Add only the parsed
     # export sibling here so wildcard imports are not reported twice.
     for warning in check_star_export_file(decls, path):
-        if not should_keep_lint_result(config, warning.code):
-            continue
-        val level = apply_config_level(config, warning.code, LintLevel.Warn)
+        val policy = lint_policy_decision(
+            config, warning.code, LintLevel.Warn, LintEvidenceTier.ParsedStructural)
+        if not policy.keep: continue
+        val level = policy.level
         val lint = LintDiag.new(warning.code, level, LintCategory.Warning, warning.message)
         results.push(LintRunResult.new(
             path, lint_source_export_star_line(source_locations, warning.module_path), 0, lint))
     for warning in check_wide_public_file(decls, path):
-        if not should_keep_lint_result(config, warning.code):
-            continue
-        val level = apply_config_level(config, warning.code, LintLevel.Warn)
+        val policy = lint_policy_decision(
+            config, warning.code, LintLevel.Warn, LintEvidenceTier.ParsedStructural)
+        if not policy.keep: continue
+        val level = policy.level
         val message = "{warning.message} ({warning.export_count} symbols, threshold {warning.threshold})"
         val lint = LintDiag.new(warning.code, level, LintCategory.Warning, message)
         results.push(LintRunResult.new(path, warning.line, 0, lint))
@@ -254,9 +258,10 @@ fn lint_cli_append_parsed_results(
     # with a repo-wide index. See doc/08_tracking/bug/
     # me_method_mutation_through_optional_binding_discarded_2026-08-04.md.
     for warning in check_option_me_call_source(path, content):
-        if not should_keep_lint_result(config, warning.code):
-            continue
-        val level = apply_config_level(config, warning.code, LintLevel.Warn)
+        val policy = lint_policy_decision(
+            config, warning.code, LintLevel.Warn, LintEvidenceTier.SourcePattern)
+        if not policy.keep: continue
+        val level = policy.level
         val message = "{warning.message} — {warning.hint}"
         val lint = LintDiag.new(warning.code, level, LintCategory.Correctness, message)
         results.push(LintRunResult.new(path, warning.line_num, 0, lint))
