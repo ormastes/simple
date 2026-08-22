@@ -130,6 +130,7 @@ class FrozenNativeModuleCapsuleBatchV1:
     ok: bool
     registry_identity: text
     capsules: [FrozenNativeModuleCapsuleV1]
+    capsule_index: Dict<text, i64>
     reason: text
 
     fn find(module_name: text) -> FrozenNativeModuleCapsuleV1:
@@ -146,15 +147,23 @@ class FrozenNativeModuleCapsuleBatchV1:
             backend_name: "", target: "", target_cpu: "", opt_level: 0,
             is_release: false,
             reason: "capsule-not-found")
-        var count = 0
-        for capsule in self.capsules:
-            if capsule.module_name == module_name:
-                found = capsule
-                count = count + 1
-        if count != 1:
+        if not self.capsule_index.has(module_name):
             found.ok = false
-            found.reason = if count == 0: "capsule-not-found" else: "duplicate-capsule"
+            found.reason = "capsule-not-found"
             return found
+        val index = self.capsule_index[module_name]
+        if index < 0:
+            found.ok = false
+            found.reason = "duplicate-capsule"
+            return found
+        if index >= self.capsules.len():
+            found.ok = false
+            found.reason = "capsule-index-invalid"
+            return found
+        found = self.capsules[index]
+        if found.module_name != module_name:
+            found.ok = false
+            found.reason = "capsule-index-invalid"
         found
 
 extern fn rt_string_free(value: text) -> i64
@@ -1213,27 +1222,25 @@ class CompileContext:
         if not self.storage_registry_frozen
             or not self.frozen_storage_registry_well_formed():
             return FrozenNativeModuleCapsuleBatchV1(ok: false,
-                registry_identity: self.storage_binding_identity(), capsules: [],
+                registry_identity: self.storage_binding_identity(), capsules: [], capsule_index: {},
                 reason: "storage-registry-not-frozen")
         var capsules: [FrozenNativeModuleCapsuleV1] = []
+        var capsule_index: Dict<text, i64> = {}
         var index = 0
         while index < module_names.len():
             val module_name = module_names[index]
             if module_name == "":
                 return FrozenNativeModuleCapsuleBatchV1(ok: false,
-                    registry_identity: self.storage_binding_identity(), capsules: [],
+                    registry_identity: self.storage_binding_identity(), capsules: [], capsule_index: {},
                     reason: "invalid-capsule-module-name")
-            var prior = 0
-            while prior < index:
-                if module_names[prior] == module_name:
-                    return FrozenNativeModuleCapsuleBatchV1(ok: false,
-                        registry_identity: self.storage_binding_identity(), capsules: [],
-                        reason: "duplicate-capsule-module")
-                prior = prior + 1
+            if capsule_index.has(module_name):
+                return FrozenNativeModuleCapsuleBatchV1(ok: false,
+                    registry_identity: self.storage_binding_identity(), capsules: [], capsule_index: {},
+                    reason: "duplicate-capsule-module")
             val snapshot = self.frozen_storage_module_snapshot(module_name)
             if not snapshot.ok:
                 return FrozenNativeModuleCapsuleBatchV1(ok: false,
-                    registry_identity: self.storage_binding_identity(), capsules: [],
+                    registry_identity: self.storage_binding_identity(), capsules: [], capsule_index: {},
                     reason: snapshot.reason)
             var module_found = false
             var module = MirModule(name: "", functions: {}, statics: {},
@@ -1247,11 +1254,11 @@ class CompileContext:
                 module_found = true
             if not module_found:
                 return FrozenNativeModuleCapsuleBatchV1(ok: false,
-                    registry_identity: self.storage_binding_identity(), capsules: [],
+                    registry_identity: self.storage_binding_identity(), capsules: [], capsule_index: {},
                     reason: "capsule-mir-module-missing")
             if module.name != "" and module.name != module_name:
                 return FrozenNativeModuleCapsuleBatchV1(ok: false,
-                    registry_identity: self.storage_binding_identity(), capsules: [],
+                    registry_identity: self.storage_binding_identity(), capsules: [], capsule_index: {},
                     reason: "capsule-mir-module-name-mismatch")
             val cache_source = self.frozen_native_cache_source_v1(module_name)
             val object_path = "{object_base}.{module_name}.o"
@@ -1265,10 +1272,11 @@ class CompileContext:
                 is_release: is_release, reason: "ok")
             capsule.capsule_identity = capsule.expected_identity()
             capsules.push(capsule)
+            capsule_index[module_name] = index
             index = index + 1
         FrozenNativeModuleCapsuleBatchV1(ok: true,
             registry_identity: self.storage_binding_identity(),
-            capsules: capsules, reason: "ok")
+            capsules: capsules, capsule_index: capsule_index, reason: "ok")
 
     me add_error(message: text):
         self.errors.push(message)

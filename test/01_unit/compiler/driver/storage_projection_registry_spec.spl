@@ -341,6 +341,12 @@ describe "driver-owned storage projection registry":
             "/tmp/capsule", "native", "x86_64", "baseline", 2, false)
         assert_true(batch.ok)
         if batch.ok:
+            # The immutable lookup index must not reorder the public capsule
+            # sequence or duplicate the retained MIR payload.
+            assert_equal(batch.capsules[0].module_name, "d")
+            assert_equal(batch.capsules[1].module_name, "b")
+            assert_equal(batch.capsule_index["d"], 0)
+            assert_equal(batch.capsule_index["c"], 3)
             var builder = ParallelBuilder.create(ParallelBuildConfig(
                 num_threads: 2, parallel_threshold: 4,
                 deterministic: false, verbose: false))
@@ -369,9 +375,14 @@ describe "driver-owned storage projection registry":
             assert_true(capsule.ok and capsule.identity_valid())
             val duplicate_batch = FrozenNativeModuleCapsuleBatchV1(ok: true,
                 registry_identity: batch.registry_identity,
-                capsules: [capsule, capsule], reason: "ok")
+                capsules: [capsule, capsule], capsule_index: {"a": -1}, reason: "ok")
             assert_false(duplicate_batch.find("a").ok)
             assert_equal(duplicate_batch.find("a").reason, "duplicate-capsule")
+            val stale_batch = FrozenNativeModuleCapsuleBatchV1(ok: true,
+                registry_identity: batch.registry_identity,
+                capsules: [capsule], capsule_index: {"a": 1}, reason: "ok")
+            assert_false(stale_batch.find("a").ok)
+            assert_equal(stale_batch.find("a").reason, "capsule-index-invalid")
             var changed_sites = capsule.storage_snapshot.sites
             changed_sites[0] = registry_site(StorageLayoutKind.AoS, 7, 0)
             capsule.storage_snapshot.sites = changed_sites
