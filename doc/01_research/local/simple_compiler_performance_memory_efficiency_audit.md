@@ -1940,3 +1940,14 @@ capture Ref borrows, capture escapes using old aliases, then install/reset the
 new alias. Final count/escape aggregation is commutative, so dictionary key order
 cannot affect public booleans, counts, reasons or fixed JIT fact order. Expected
 runtime is `O(I*64 + L)` with `O(L)` retained state.
+
+### Bare-import file reconstruction audit
+
+The standalone Pure Simple bare-import fixer already scanned each line once, but
+then reconstructed every changed file by appending `"\n" + line` to an immutable
+growing prefix. A file with `S` output bytes across `L` lines could copy
+`O(S*L)` bytes and reaches quadratic behavior for similar-length lines. The fixer
+now joins the completed line array once, giving `O(S)` output assembly. Because
+the same `split(content, "\n")` result is joined with the same delimiter, empty
+interior lines and the trailing empty item that represents a final newline remain
+unchanged. Atomic-write failure and unchanged/written status values are untouched.
