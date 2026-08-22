@@ -601,3 +601,19 @@ claim linear runtime classification. The planned runtime representation is a
 build-generated immutable multi-pattern automaton plus ordered predicate records;
 it must allocate no rule registry per diagnostic and must evaluate overlapping
 rules in the current explicit priority order.
+
+### Fixed-pattern matcher representation
+
+The active representation uses module-scope immutable numeric arrays:
+`ROOT_NEXT`, sparse `EDGE_START/BYTE/NEXT`, failure links, output-mask indexes,
+and deduplicated low/high `u64` masks. The root consumes an ASCII byte in O(1);
+non-root edges are sorted and bounded, and missing transitions follow failure
+links. Bytes outside ASCII reset through the root without normalization, which
+preserves ASCII-substring matching around arbitrary UTF-8 text.
+
+`query_error_pattern_hits` owns only scalar state, byte offset, and two `u64`
+masks. It must use O(1) `text.byte_at`, never materialize `bytes()`, substrings,
+dictionaries, a per-call pattern array, or a heap bitset. The classifier gathers
+all hits before evaluating rules because rule priority—not textual occurrence—
+selects the code. The dynamic codegen phrase remains outside the fixed automaton
+and is evaluated at its historical ordinal.
