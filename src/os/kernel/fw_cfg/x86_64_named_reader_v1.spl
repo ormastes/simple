@@ -1,0 +1,98 @@
+# QEMU fw_cfg named-file reader for the x86_64 I/O-port transport.
+#
+# The device is untrusted input: directory cardinality, framing, names and
+# payload sizes are validated before allocation or payload reads.  The pure
+# directory helper is exported so hosted tests do not execute privileged I/O.
+
+use os.kernel.fw_cfg.read_result_v1.{SimpleOsFwCfgReadV1}
+use os.kernel.fw_cfg.directory_parser_v1.{
+    fw_cfg_max_directory_entries_v1,
+    fw_cfg_max_payload_bytes_v1,
+    fw_cfg_parse_directory_v1,
+    fw_cfg_valid_exact_name_v1,
+}
+
+extern fn rt_port_inb(port: u64) -> u64
+extern fn rt_port_outw(port: u64, value: u64)
+
+pub class SimpleOsFwCfgDirectoryMatchV1:
+    ok: bool
+    selector: u16
+    size: u64
+    reason: text
+
+fn _fw_cfg_directory_selector() -> u16: 0x19u16
+fn _fw_cfg_signature_selector() -> u16: 0u16
+fn _fw_cfg_selector_port() -> u64: 0x510u64
+fn _fw_cfg_data_port() -> u64: 0x511u64
+fn _fw_cfg_entry_size() -> i64: 64
+
+fn _read_reject(reason: text) -> SimpleOsFwCfgReadV1:
+    SimpleOsFwCfgReadV1(ok: false, bytes: [], reason: reason)
+
+fn _be32(data: [u8], offset: i64) -> u64:
+    (data[offset].to_u64() << 24) |
+        (data[offset + 1].to_u64() << 16) |
+        (data[offset + 2].to_u64() << 8) |
+        data[offset + 3].to_u64()
+
+pub fn x86_64_fw_cfg_find_named_v1(
+    directory: [u8], name: text, max_len: u64
+) -> SimpleOsFwCfgDirectoryMatchV1:
+    val match = fw_cfg_parse_directory_v1(directory, name, max_len)
+    SimpleOsFwCfgDirectoryMatchV1(
+        ok: match.ok, selector: match.selector, size: match.size.to_u64(),
+        reason: match.reason
+    )
+
+fn _select(selector: u16):
+    # Unlike the directory fields, the x86 I/O selector register is LE.
+    rt_port_outw(_fw_cfg_selector_port(), selector.to_u64())
+
+fn _read_data_byte() -> u8:
+    rt_port_inb(_fw_cfg_data_port()).to_u8()
+
+fn _read_selected_bytes(length: u64) -> [u8]:
+    var bytes: [u8] = []
+    var index: u64 = 0u64
+    while index < length:
+        bytes.push(_read_data_byte())
+        index = index + 1u64
+    bytes
+
+pub fn x86_64_fw_cfg_read_named_v1(
+    name: text, max_len: u64
+) -> SimpleOsFwCfgReadV1:
+    if not fw_cfg_valid_exact_name_v1(name):
+        return _read_reject("invalid-name")
+    if max_len > fw_cfg_max_payload_bytes_v1():
+        return _read_reject("invalid-max-bytes")
+
+    _select(_fw_cfg_signature_selector())
+    val signature = _read_selected_bytes(4u64)
+    if signature[0] != 0x51u8 or signature[1] != 0x45u8 or
+       signature[2] != 0x4Du8 or signature[3] != 0x55u8:
+        return _read_reject("device-signature-invalid")
+
+    _select(_fw_cfg_directory_selector())
+    val count_bytes = _read_selected_bytes(4u64)
+    val count = _be32(count_bytes, 0)
+    if count > fw_cfg_max_directory_entries_v1().to_u64():
+        return _read_reject("entry-count-exceeds-limit")
+    val directory_length = 4u64 + count * _fw_cfg_entry_size().to_u64()
+    var directory: [u8] = count_bytes
+    var index: u64 = 4u64
+    while index < directory_length:
+        directory.push(_read_data_byte())
+        index = index + 1u64
+
+    val found = x86_64_fw_cfg_find_named_v1(directory, name, max_len)
+    if not found.ok:
+        return _read_reject(found.reason)
+    _select(found.selector)
+    SimpleOsFwCfgReadV1(ok: true, bytes: _read_selected_bytes(found.size),
+                        reason: "ok")
+
+export SimpleOsFwCfgDirectoryMatchV1
+export x86_64_fw_cfg_find_named_v1
+export x86_64_fw_cfg_read_named_v1

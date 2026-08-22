@@ -1,0 +1,123 @@
+# RV64 QEMU virt fw_cfg named-file reader.
+#
+# QEMU's generated `virt` DTB identifies `qemu,fw-cfg-mmio` at
+# 0x10100000 with a 0x18-byte register window.  The selector and directory
+# fields are big-endian; file data is a byte stream.
+
+use os.kernel.boot.mmio.{mmio_disable_test_mode, mmio_read8, mmio_write16}
+use os.kernel.fw_cfg.directory_parser_v1.{
+    fw_cfg_max_directory_entries_v1,
+    fw_cfg_max_payload_bytes_v1,
+    fw_cfg_parse_directory_v1,
+    fw_cfg_valid_exact_name_v1,
+}
+use os.kernel.fw_cfg.read_result_v1.{SimpleOsFwCfgReadV1}
+
+pub class Riscv64FwCfgDirectoryEntryV1:
+    ok: bool
+    selector: u16
+    size: u32
+    reason: text
+
+fn _rv64_fw_cfg_entry_failure(reason: text) -> Riscv64FwCfgDirectoryEntryV1:
+    Riscv64FwCfgDirectoryEntryV1(
+        ok: false,
+        selector: 0u16,
+        size: 0u32,
+        reason: reason
+    )
+
+fn _rv64_fw_cfg_read_failure(reason: text) -> SimpleOsFwCfgReadV1:
+    SimpleOsFwCfgReadV1(ok: false, bytes: [], reason: reason)
+
+pub fn riscv64_fw_cfg_parse_directory_v1(
+    entries: [u8],
+    count: u32,
+    exact_name: text,
+    max_bytes: i64
+) -> Riscv64FwCfgDirectoryEntryV1:
+    """Parse bounded 64-byte fw_cfg directory entries using exact names."""
+    if max_bytes < 0:
+        return _rv64_fw_cfg_entry_failure("invalid-max-bytes")
+    var directory: [u8] = [
+        ((count >> 24) & 0xFFu32).to_u8(),
+        ((count >> 16) & 0xFFu32).to_u8(),
+        ((count >> 8) & 0xFFu32).to_u8(),
+        (count & 0xFFu32).to_u8(),
+    ]
+    for byte in entries:
+        directory.push(byte)
+    val matched = fw_cfg_parse_directory_v1(
+        directory, exact_name, max_bytes.to_u64()
+    )
+    Riscv64FwCfgDirectoryEntryV1(
+        ok: matched.ok, selector: matched.selector, size: matched.size,
+        reason: matched.reason
+    )
+
+fn _rv64_fw_cfg_swap16(value: u16) -> u16:
+    ((value & 0x00FFu16) << 8) | ((value >> 8) & 0x00FFu16)
+
+fn _rv64_fw_cfg_select(selector: u16):
+    # QEMU virt fw_cfg selector register is at MMIO base + 8.
+    mmio_write16(0x10100008u64, _rv64_fw_cfg_swap16(selector))
+
+fn _rv64_fw_cfg_read_byte() -> u8:
+    mmio_read8(0x10100000u64)
+
+fn _rv64_fw_cfg_read_be32_stream() -> u32:
+    (_rv64_fw_cfg_read_byte().to_u32() << 24) |
+        (_rv64_fw_cfg_read_byte().to_u32() << 16) |
+        (_rv64_fw_cfg_read_byte().to_u32() << 8) |
+        _rv64_fw_cfg_read_byte().to_u32()
+
+pub fn riscv64_qemu_fw_cfg_read_named_file_v1(
+    exact_name: text,
+    max_bytes: i64
+) -> SimpleOsFwCfgReadV1:
+    """Read one exact named file from RV64 QEMU virt fw_cfg, fail closed."""
+    if not fw_cfg_valid_exact_name_v1(exact_name):
+        return _rv64_fw_cfg_read_failure("invalid-name")
+    if max_bytes < 0 or max_bytes.to_u64() > fw_cfg_max_payload_bytes_v1():
+        return _rv64_fw_cfg_read_failure("invalid-max-bytes")
+
+    mmio_disable_test_mode()
+    _rv64_fw_cfg_select(0u16)
+    if (_rv64_fw_cfg_read_byte() != 81u8 or
+        _rv64_fw_cfg_read_byte() != 69u8 or
+        _rv64_fw_cfg_read_byte() != 77u8 or
+        _rv64_fw_cfg_read_byte() != 85u8):
+        return _rv64_fw_cfg_read_failure("signature-mismatch")
+
+    _rv64_fw_cfg_select(0x0019u16)
+    val count = _rv64_fw_cfg_read_be32_stream()
+    if count > fw_cfg_max_directory_entries_v1():
+        return _rv64_fw_cfg_read_failure("entry-count-exceeds-limit")
+
+    var entries: [u8] = []
+    var byte_index: i64 = 0
+    val directory_bytes = count.to_i64() * 64
+    while byte_index < directory_bytes:
+        entries.push(_rv64_fw_cfg_read_byte())
+        byte_index = byte_index + 1
+
+    val entry = riscv64_fw_cfg_parse_directory_v1(
+        entries,
+        count,
+        exact_name,
+        max_bytes
+    )
+    if not entry.ok:
+        return _rv64_fw_cfg_read_failure(entry.reason)
+
+    _rv64_fw_cfg_select(entry.selector)
+    var payload: [u8] = []
+    var payload_index: i64 = 0
+    while payload_index < entry.size.to_i64():
+        payload.push(_rv64_fw_cfg_read_byte())
+        payload_index = payload_index + 1
+    SimpleOsFwCfgReadV1(ok: true, bytes: payload, reason: "ok")
+
+export Riscv64FwCfgDirectoryEntryV1
+export riscv64_fw_cfg_parse_directory_v1
+export riscv64_qemu_fw_cfg_read_named_file_v1

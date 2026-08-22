@@ -1,0 +1,101 @@
+# Bounded QEMU virt fw_cfg named-file reader for ARM64.
+
+use os.kernel.boot.mmio_hardware.{mmio_read8, mmio_write16}
+use os.kernel.fw_cfg.directory_parser_v1.{
+    fw_cfg_max_directory_entries_v1,
+    fw_cfg_max_payload_bytes_v1,
+    fw_cfg_parse_directory_v1,
+    fw_cfg_valid_exact_name_v1,
+}
+use os.kernel.fw_cfg.read_result_v1.{SimpleOsFwCfgReadV1}
+
+pub class Arm64FwCfgDirectoryEntryV1:
+    ok: bool
+    selector: u16
+    size: u32
+    reason: text
+
+fn _arm64_fw_cfg_base_v1() -> u64: 0x09020000u64
+fn _arm64_fw_cfg_data_v1() -> u64: _arm64_fw_cfg_base_v1()
+fn _arm64_fw_cfg_selector_v1() -> u64: _arm64_fw_cfg_base_v1() + 0x08u64
+fn _arm64_fw_cfg_file_dir_v1() -> u16: 0x0019u16
+fn _arm64_fw_cfg_entry_bytes_v1() -> i64: 64
+
+fn _arm64_fw_cfg_swap16_v1(value: u16) -> u16:
+    ((value & 0x00FFu16) << 8) | ((value >> 8) & 0x00FFu16)
+
+pub fn arm64_fw_cfg_parse_directory_v1(
+    directory: [u8],
+    expected_name: text,
+    max_bytes: u32
+) -> Arm64FwCfgDirectoryEntryV1:
+    """Parse a complete fw_cfg file directory without touching hardware."""
+    val match = fw_cfg_parse_directory_v1(
+        directory, expected_name, max_bytes.to_u64()
+    )
+    Arm64FwCfgDirectoryEntryV1(
+        ok: match.ok, selector: match.selector, size: match.size,
+        reason: match.reason
+    )
+
+fn _arm64_fw_cfg_select_v1(selector: u16):
+    mmio_write16(_arm64_fw_cfg_selector_v1(), _arm64_fw_cfg_swap16_v1(selector))
+
+fn _arm64_fw_cfg_read_byte_v1() -> u8:
+    mmio_read8(_arm64_fw_cfg_data_v1())
+
+fn _arm64_fw_cfg_read_be32_v1() -> u32:
+    (_arm64_fw_cfg_read_byte_v1().to_u32() << 24) |
+        (_arm64_fw_cfg_read_byte_v1().to_u32() << 16) |
+        (_arm64_fw_cfg_read_byte_v1().to_u32() << 8) |
+        _arm64_fw_cfg_read_byte_v1().to_u32()
+
+pub fn arm64_fw_cfg_read_named_file_v1(
+    name: text,
+    max_bytes: u32
+) -> SimpleOsFwCfgReadV1:
+    """Read one exact QEMU fw_cfg file through virt MMIO, bounded by max_bytes."""
+    if not fw_cfg_valid_exact_name_v1(name):
+        return SimpleOsFwCfgReadV1(ok: false, bytes: [], reason: "invalid-name")
+    if max_bytes.to_u64() > fw_cfg_max_payload_bytes_v1():
+        return SimpleOsFwCfgReadV1(ok: false, bytes: [], reason: "invalid-max-bytes")
+
+    _arm64_fw_cfg_select_v1(0u16)
+    if (_arm64_fw_cfg_read_byte_v1() != 81u8 or
+        _arm64_fw_cfg_read_byte_v1() != 69u8 or
+        _arm64_fw_cfg_read_byte_v1() != 77u8 or
+        _arm64_fw_cfg_read_byte_v1() != 85u8):
+        return SimpleOsFwCfgReadV1(ok: false, bytes: [], reason: "signature-mismatch")
+    _arm64_fw_cfg_select_v1(_arm64_fw_cfg_file_dir_v1())
+    val count = _arm64_fw_cfg_read_be32_v1()
+    if count > fw_cfg_max_directory_entries_v1():
+        return SimpleOsFwCfgReadV1(
+            ok: false, bytes: [], reason: "entry-count-exceeds-limit"
+        )
+
+    var directory: [u8] = [
+        ((count >> 24) & 0xFFu32).to_u8(),
+        ((count >> 16) & 0xFFu32).to_u8(),
+        ((count >> 8) & 0xFFu32).to_u8(),
+        (count & 0xFFu32).to_u8(),
+    ]
+    var directory_index: i64 = 0
+    val directory_bytes = count.to_i64() * _arm64_fw_cfg_entry_bytes_v1()
+    while directory_index < directory_bytes:
+        directory.push(_arm64_fw_cfg_read_byte_v1())
+        directory_index = directory_index + 1
+    val found = fw_cfg_parse_directory_v1(directory, name, max_bytes.to_u64())
+    if not found.ok:
+        return SimpleOsFwCfgReadV1(ok: false, bytes: [], reason: found.reason)
+
+    _arm64_fw_cfg_select_v1(found.selector)
+    var bytes: [u8] = []
+    var index: u32 = 0u32
+    while index < found.size:
+        bytes.push(_arm64_fw_cfg_read_byte_v1())
+        index = index + 1u32
+    SimpleOsFwCfgReadV1(ok: true, bytes: bytes, reason: "ok")
+
+export Arm64FwCfgDirectoryEntryV1
+export arm64_fw_cfg_parse_directory_v1
+export arm64_fw_cfg_read_named_file_v1

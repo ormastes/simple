@@ -1,0 +1,105 @@
+# @cover src/os/kernel/fw_cfg/x86_64_named_reader_v1.spl 80%
+
+use std.spec.{describe, it, expect}
+use os.kernel.fw_cfg.x86_64_named_reader_v1.{x86_64_fw_cfg_find_named_v1}
+
+fn _put_be16(out: [u8], value: u16):
+    out.push(((value >> 8) & 0xFFu16).to_u8())
+    out.push((value & 0xFFu16).to_u8())
+
+fn _put_be32(out: [u8], value: u64):
+    out.push(((value >> 24) & 0xFFu64).to_u8())
+    out.push(((value >> 16) & 0xFFu64).to_u8())
+    out.push(((value >> 8) & 0xFFu64).to_u8())
+    out.push((value & 0xFFu64).to_u8())
+
+fn _directory(name: text, size: u64, selector: u16) -> [u8]:
+    var out: [u8] = []
+    _put_be32(out, 1u64)
+    _put_be32(out, size)
+    _put_be16(out, selector)
+    _put_be16(out, 0u16)
+    var index: i64 = 0
+    while index < 56:
+        if index < name.len():
+            out.push(name.char_code_at(index).to_u8())
+        else:
+            out.push(0u8)
+        index = index + 1
+    out
+
+describe "x86_64 QEMU fw_cfg directory parser":
+    it "finds an exact named file and decodes big-endian metadata":
+        val found = x86_64_fw_cfg_find_named_v1(
+            _directory("opt/simpleos/guest-workflow", 37u64, 0x20u16),
+            "opt/simpleos/guest-workflow", 64u64)
+        expect(found.ok).to_equal(true)
+        expect(found.selector).to_equal(0x20u16)
+        expect(found.size).to_equal(37u64)
+        expect(found.reason).to_equal("ok")
+
+    it "requires exact names rather than prefixes":
+        val found = x86_64_fw_cfg_find_named_v1(
+            _directory("opt/simpleos/workflow-extra", 1u64, 0x21u16),
+            "opt/simpleos/workflow", 8u64)
+        expect(found.ok).to_equal(false)
+        expect(found.reason).to_equal("file-not-found")
+
+    it "requires a NUL terminator after the exact name":
+        var directory = _directory("opt/simpleos/workflow", 1u64, 0x21u16)
+        directory[12 + 21] = 0x58u8
+        val found = x86_64_fw_cfg_find_named_v1(
+            directory, "opt/simpleos/workflow", 8u64)
+        expect(found.ok).to_equal(false)
+        expect(found.reason).to_equal("file-not-found")
+
+    it "does not treat bytes after the NUL terminator as part of the name":
+        var directory = _directory("opt/simpleos/workflow", 1u64, 0x21u16)
+        directory[12 + 22] = 0x58u8
+        val found = x86_64_fw_cfg_find_named_v1(
+            directory, "opt/simpleos/workflow", 8u64)
+        expect(found.ok).to_equal(true)
+
+    it "rejects payloads larger than the caller bound":
+        val found = x86_64_fw_cfg_find_named_v1(
+            _directory("opt/simpleos/workflow", 9u64, 0x22u16),
+            "opt/simpleos/workflow", 8u64)
+        expect(found.ok).to_equal(false)
+        expect(found.reason).to_equal("file-exceeds-limit")
+
+    it "rejects a truncated directory before scanning entries":
+        val directory: [u8] = [0u8, 0u8, 0u8, 1u8, 0u8]
+        val found = x86_64_fw_cfg_find_named_v1(
+            directory, "opt/simpleos/workflow", 8u64)
+        expect(found.ok).to_equal(false)
+        expect(found.reason).to_equal("malformed-directory-size")
+
+    it "rejects hostile entry counts before allocating entries":
+        val directory: [u8] = [0u8, 0u8, 0x10u8, 1u8]
+        val found = x86_64_fw_cfg_find_named_v1(
+            directory, "opt/simpleos/workflow", 8u64)
+        expect(found.ok).to_equal(false)
+        expect(found.reason).to_equal("entry-count-exceeds-limit")
+
+    it "rejects caller bounds above the hard allocation safety cap":
+        val found = x86_64_fw_cfg_find_named_v1(
+            _directory("opt/simpleos/workflow", 1u64, 0x22u16),
+            "opt/simpleos/workflow", 268435457u64)
+        expect(found.ok).to_equal(false)
+        expect(found.reason).to_equal("invalid-max-bytes")
+
+    it "rejects duplicate exact names":
+        val first = _directory("opt/simpleos/workflow", 1u64, 0x22u16)
+        var duplicate: [u8] = [0u8, 0u8, 0u8, 2u8]
+        var index: i64 = 4
+        while index < first.len():
+            duplicate.push(first[index])
+            index = index + 1
+        index = 4
+        while index < first.len():
+            duplicate.push(first[index])
+            index = index + 1
+        val found = x86_64_fw_cfg_find_named_v1(
+            duplicate, "opt/simpleos/workflow", 8u64)
+        expect(found.ok).to_equal(false)
+        expect(found.reason).to_equal("duplicate-name")

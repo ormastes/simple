@@ -1,0 +1,94 @@
+use std.spec.*
+use os.kernel.arch.arm64.fw_cfg_named_file.{arm64_fw_cfg_parse_directory_v1}
+
+fn fw_cfg_directory_v1(size: u32, selector: u16, name: text) -> [u8]:
+    var bytes: [u8] = [0u8, 0u8, 0u8, 1u8]
+    bytes.push(((size >> 24) & 0xFFu32).to_u8())
+    bytes.push(((size >> 16) & 0xFFu32).to_u8())
+    bytes.push(((size >> 8) & 0xFFu32).to_u8())
+    bytes.push((size & 0xFFu32).to_u8())
+    bytes.push(((selector >> 8) & 0xFFu16).to_u8())
+    bytes.push((selector & 0xFFu16).to_u8())
+    bytes.push(0u8)
+    bytes.push(0u8)
+    var index: i64 = 0
+    while index < 56:
+        if index < name.len():
+            bytes.push(name.char_code_at(index).to_u8())
+        else:
+            bytes.push(0u8)
+        index = index + 1
+    bytes
+
+describe "ARM64 QEMU fw_cfg named-file directory parser":
+    it "decodes big-endian size and selector for an exact name":
+        val result = arm64_fw_cfg_parse_directory_v1(
+            fw_cfg_directory_v1(0x01020304u32, 0x1234u16, "opt/simple/compiler"),
+            "opt/simple/compiler",
+            0x02000000u32
+        )
+        expect(result.ok).to_equal(true)
+        expect(result.selector).to_equal(0x1234u16)
+        expect(result.size).to_equal(0x01020304u32)
+        expect(result.reason).to_equal("ok")
+
+    it "rejects a prefix instead of accepting a different file":
+        val result = arm64_fw_cfg_parse_directory_v1(
+            fw_cfg_directory_v1(4u32, 0x20u16, "opt/simple/compiler-extra"),
+            "opt/simple/compiler",
+            4u32
+        )
+        expect(result.ok).to_equal(false)
+        expect(result.reason).to_equal("file-not-found")
+
+    it "rejects a matching file larger than the caller bound":
+        val result = arm64_fw_cfg_parse_directory_v1(
+            fw_cfg_directory_v1(4097u32, 0x21u16, "opt/simple/compiler"),
+            "opt/simple/compiler",
+            4096u32
+        )
+        expect(result.ok).to_equal(false)
+        expect(result.reason).to_equal("file-exceeds-limit")
+
+    it "rejects truncated directory entries":
+        val result = arm64_fw_cfg_parse_directory_v1(
+            [0u8, 0u8, 0u8, 1u8, 0u8],
+            "opt/simple/compiler",
+            4096u32
+        )
+        expect(result.ok).to_equal(false)
+        expect(result.reason).to_equal("malformed-directory-size")
+
+    it "rejects an unreasonable directory count before multiplication":
+        val result = arm64_fw_cfg_parse_directory_v1(
+            [0u8, 0u8, 0x10u8, 0x01u8],
+            "opt/simple/compiler",
+            4096u32
+        )
+        expect(result.ok).to_equal(false)
+        expect(result.reason).to_equal("entry-count-exceeds-limit")
+
+    it "rejects duplicate exact names":
+        val first = fw_cfg_directory_v1(4u32, 0x21u16, "opt/simple/compiler")
+        var duplicate: [u8] = [0u8, 0u8, 0u8, 2u8]
+        var index: i64 = 4
+        while index < first.len():
+            duplicate.push(first[index])
+            index = index + 1
+        index = 4
+        while index < first.len():
+            duplicate.push(first[index])
+            index = index + 1
+        val result = arm64_fw_cfg_parse_directory_v1(
+            duplicate, "opt/simple/compiler", 4u32
+        )
+        expect(result.ok).to_equal(false)
+        expect(result.reason).to_equal("duplicate-name")
+
+    it "rejects non-ASCII names and unsafe caller bounds":
+        val non_ascii = arm64_fw_cfg_parse_directory_v1([], "é", 1u32)
+        val unsafe_bound = arm64_fw_cfg_parse_directory_v1(
+            [], "opt/simple/compiler", 268435457u32
+        )
+        expect(non_ascii.reason).to_equal("invalid-name")
+        expect(unsafe_bound.reason).to_equal("invalid-max-bytes")

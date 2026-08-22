@@ -1,0 +1,81 @@
+use std.spec.{describe, it, expect}
+use os.kernel.arch.riscv64.fw_cfg_named_file_v1.{riscv64_fw_cfg_parse_directory_v1}
+
+fn fw_cfg_test_entry(size: u32, selector: u16, name: text) -> [u8]:
+    var bytes: [u8] = []
+    bytes.push(((size >> 24) & 0xFFu32).to_u8())
+    bytes.push(((size >> 16) & 0xFFu32).to_u8())
+    bytes.push(((size >> 8) & 0xFFu32).to_u8())
+    bytes.push((size & 0xFFu32).to_u8())
+    bytes.push(((selector >> 8) & 0xFFu16).to_u8())
+    bytes.push((selector & 0xFFu16).to_u8())
+    bytes.push(0u8)
+    bytes.push(0u8)
+    var i: i64 = 0
+    while i < 56:
+        if i < name.len():
+            bytes.push(name.char_code_at(i).to_u8())
+        else:
+            bytes.push(0u8)
+        i = i + 1
+    bytes
+
+describe "RV64 QEMU fw_cfg named-file directory parser":
+    it "returns the exact matching selector and size":
+        var entries = fw_cfg_test_entry(3u32, 0x20u16, "opt/other")
+        for byte in fw_cfg_test_entry(12u32, 0x31u16, "opt/simpleos.cfs"):
+            entries.push(byte)
+        val result = riscv64_fw_cfg_parse_directory_v1(
+            entries, 2u32, "opt/simpleos.cfs", 12
+        )
+        expect(result.ok).to_equal(true)
+        expect(result.selector).to_equal(0x31u16)
+        expect(result.size).to_equal(12u32)
+
+    it "does not accept a prefix as an exact file name":
+        val entries = fw_cfg_test_entry(12u32, 0x31u16, "opt/simpleos.cfs.extra")
+        val result = riscv64_fw_cfg_parse_directory_v1(
+            entries, 1u32, "opt/simpleos.cfs", 12
+        )
+        expect(result.ok).to_equal(false)
+        expect(result.reason).to_equal("file-not-found")
+
+    it "rejects duplicate exact names":
+        var entries = fw_cfg_test_entry(4u32, 0x31u16, "opt/simpleos.cfs")
+        for byte in fw_cfg_test_entry(4u32, 0x32u16, "opt/simpleos.cfs"):
+            entries.push(byte)
+        val result = riscv64_fw_cfg_parse_directory_v1(
+            entries, 2u32, "opt/simpleos.cfs", 4
+        )
+        expect(result.ok).to_equal(false)
+        expect(result.reason).to_equal("duplicate-name")
+
+    it "rejects oversized payloads before data-port reads":
+        val entries = fw_cfg_test_entry(4097u32, 0x31u16, "opt/simpleos.cfs")
+        val result = riscv64_fw_cfg_parse_directory_v1(
+            entries, 1u32, "opt/simpleos.cfs", 4096
+        )
+        expect(result.ok).to_equal(false)
+        expect(result.reason).to_equal("file-exceeds-limit")
+
+    it "rejects malformed and over-count directory inputs":
+        val malformed = riscv64_fw_cfg_parse_directory_v1(
+            [0u8], 1u32, "opt/simpleos.cfs", 4096
+        )
+        val over_count = riscv64_fw_cfg_parse_directory_v1(
+            [], 4097u32, "opt/simpleos.cfs", 4096
+        )
+        expect(malformed.reason).to_equal("malformed-directory-size")
+        expect(over_count.reason).to_equal("entry-count-exceeds-limit")
+
+    it "rejects empty, non-ASCII, and overlong requested names":
+        val empty = riscv64_fw_cfg_parse_directory_v1([], 0u32, "", 1)
+        val non_ascii = riscv64_fw_cfg_parse_directory_v1([], 0u32, "é", 1)
+        val overlong = riscv64_fw_cfg_parse_directory_v1(
+            [], 0u32,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            1
+        )
+        expect(empty.reason).to_equal("invalid-name")
+        expect(non_ascii.reason).to_equal("invalid-name")
+        expect(overlong.reason).to_equal("invalid-name")
