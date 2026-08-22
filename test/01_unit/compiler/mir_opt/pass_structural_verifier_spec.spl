@@ -46,6 +46,17 @@ fn _pv_function_with_local_ids(blocks: [MirBlock], entry: i64, ids: [i64]) -> Mi
         vhdl_hardware_metadata_default(), false
     )
 
+fn _pv_function_with_abi(
+    signature: MirSignature, locals: [MirLocal]
+) -> MirFunction:
+    MirFunction(
+        SymbolId(id: 194), "pass_verifier_abi_fixture",
+        signature, locals, [_pv_block(0, MirTerminator.Ret(nil))],
+        BlockId(id: 0), Span(0, 0, 1, 1), [], false, nil, {}, nil,
+        false, false, "", false, _pv_manifest(), false,
+        vhdl_hardware_metadata_default(), false
+    )
+
 describe "MIR optimizer structural verifier":
     it "accepts a structurally closed function":
         step("Verify MIR before optimizer dispatch")
@@ -97,6 +108,28 @@ describe "MIR optimizer structural verifier":
         expect(source).to_contain("perf_terminator_access(block.terminator)")
         expect(source).not.to_contain("local_ids.contains")
         expect(source).not.to_contain("block_ids.contains")
+
+    it "rejects missing, duplicate, and mistyped ABI locals":
+        step("Verify function ABI locals")
+        val signature = MirSignature([MirType.i64()], MirType.i64(), false)
+        val missing = mir_structural_verification_receipt(
+            _pv_function_with_abi(signature, []))
+        expect(missing.valid).to_equal(false)
+        expect(missing.errors.join("|")).to_contain("missing argument local index: 0")
+
+        val malformed = mir_structural_verification_receipt(
+            _pv_function_with_abi(signature, [
+                MirLocal(_pv_local(0), Some("arg0"), MirType.bool(), LocalKind.Arg(0), false),
+                MirLocal(_pv_local(1), Some("arg0_copy"), MirType.i64(), LocalKind.Arg(0), false),
+                MirLocal(_pv_local(2), Some("ret"), MirType.bool(), LocalKind.Return, false),
+                MirLocal(_pv_local(3), Some("ret2"), MirType.i64(), LocalKind.Return, false)
+            ]))
+        expect(malformed.valid).to_equal(false)
+        val errors = malformed.errors.join("|")
+        expect(errors).to_contain("argument local 0 type does not match signature")
+        expect(errors).to_contain("duplicate argument local index: 0")
+        expect(errors).to_contain("return local type does not match function signature")
+        expect(errors).to_contain("multiple return locals")
 
     it "records an honest unchanged active function pass":
         step("Record a verified optimizer outcome")
