@@ -1,0 +1,196 @@
+# codex-impl
+# Narrow Simple facade over the fixed native sealed Pure/C/Rust session owner.
+
+use std.common.structural.hal_provider.*
+
+val HAL_SEALED_STATUS_OK_V1: i32 = 0
+val HAL_SEALED_STATUS_INVALID_V1: i32 = 1
+val HAL_SEALED_STATUS_STATE_V1: i32 = 2
+val HAL_SEALED_STATUS_IO_V1: i32 = 3
+val HAL_SEALED_STATUS_PROTOCOL_V1: i32 = 4
+val HAL_SEALED_PHASE_EMPTY_V1: i32 = 0
+val HAL_SEALED_PHASE_PREPARED_V1: i32 = 1
+val HAL_SEALED_PHASE_CRITICAL_V1: i32 = 2
+val HAL_SEALED_RESULT_FIELD_COUNT_V1: i32 = 16
+
+extern fn rt_hal_sealed_prepare_v1(deadline_ms: i64) -> u64
+extern fn rt_hal_sealed_seal_v1(handle: u64) -> i32
+extern fn rt_hal_sealed_invoke_v1(
+    handle: u64, operation_id: i64, invocation_id: i64, fixture_id: i64,
+    input_offset: i64, input_length: i64, input_capacity: i64,
+    trace_capacity: i64
+) -> i32
+extern fn rt_hal_sealed_result_field_v1(
+    handle: u64, lane: i32, field: i32
+) -> i64
+extern fn rt_hal_sealed_sandbox_pid_v1(handle: u64, lane: i32) -> i64
+extern fn rt_hal_sealed_last_status_v1(handle: u64) -> i32
+extern fn rt_hal_sealed_hot_spawn_count_v1(handle: u64) -> u64
+extern fn rt_hal_sealed_hot_allocation_count_v1(handle: u64) -> u64
+extern fn rt_hal_sealed_maintenance_shutdown_v1(handle: u64) -> i32
+
+struct HalSealedInvocationReceiptV1:
+    comparison: HalOrchestrationReceiptV1
+    native_status: i32
+    completed_mask: i64
+    isolation_proven_mask: i64
+    critical_ready: bool
+    hot_spawn_count: u64
+    hot_allocation_count: u64
+
+class HalSealedCoordinatorV1:
+    # The native generation-bound handle is the sole mutable owner. Copies do
+    # not gain authority: native lifecycle CAS gates reject stale/concurrent
+    # aliases, and shutdown retires the generation.
+    handle: u64
+    phase: i32
+
+fn hal_sealed_operation_admitted_v1(operation: HalOperationV1,
+                                    mode: HalRunMode) -> bool:
+    hal_operation_v1_well_formed(operation)
+        and hal_assurance_to_i64(operation.assurance_floor)
+            >= HAL_ASSURANCE_CRITICAL
+        and operation.providers_mask == HAL_PROVIDER_MASK_ALL
+        and hal_run_mode_executes_all(mode)
+
+@init_phase
+fn hal_sealed_coordinator_prepare_v1(deadline_ms: i64) -> HalSealedCoordinatorV1:
+    val handle = if deadline_ms > 0:
+        rt_hal_sealed_prepare_v1(deadline_ms)
+    else:
+        0u64
+    HalSealedCoordinatorV1(
+        handle: handle,
+        phase: if handle != 0u64:
+            HAL_SEALED_PHASE_PREPARED_V1
+        else:
+            HAL_SEALED_PHASE_EMPTY_V1)
+
+fn _hal_sealed_status(value: i64) -> HalStatusV1:
+    match value:
+        case 0: HalStatusV1.Ok
+        case 1: HalStatusV1.UnsupportedCapability
+        case 2: HalStatusV1.InvalidRequest
+        case 3: HalStatusV1.ProviderError
+        case 4: HalStatusV1.Timeout
+        case 5: HalStatusV1.Overflow
+        case 6: HalStatusV1.Diverged
+        case 7: HalStatusV1.Cancelled
+        case _: HalStatusV1.ProviderError
+
+fn _hal_sealed_overflow(value: i64) -> HalOverflowKindV1:
+    match value:
+        case 0: HalOverflowKindV1.None
+        case 1: HalOverflowKindV1.Payload
+        case 2: HalOverflowKindV1.Trace
+        case 3: HalOverflowKindV1.DifferenceReport
+        case 4: HalOverflowKindV1.Log
+        case _: HalOverflowKindV1.None
+
+fn _hal_sealed_provider(lane: i32) -> HalProviderKind:
+    match lane:
+        case 0: HalProviderKind.PureSimple
+        case 1: HalProviderKind.C
+        case _: HalProviderKind.Rust
+
+fn _hal_sealed_invalid_result(provider: HalProviderKind,
+                              invocation_id: i64) -> HalProviderResultV1:
+    hal_provider_result_v1(provider, invocation_id,
+        HalStatusV1.ProviderError, 1, 0, 0, 0, 0, 0, 0, 0, 0,
+        HalOverflowKindV1.None, -1, 0, 0)
+
+fn _hal_sealed_lane(handle: u64, lane: i32,
+                    invocation_id: i64, valid: bool) -> HalProviderLaneV1:
+    val provider = _hal_sealed_provider(lane)
+    val sandbox_pid = rt_hal_sealed_sandbox_pid_v1(handle, lane)
+    if not valid or sandbox_pid <= 0:
+        return hal_provider_lane_v1(
+            provider, false, false, false, false,
+            hal_isolation_receipt_v1(
+                provider, invocation_id, -1, -1, -1, -1, -1,
+                false, false),
+            _hal_sealed_invalid_result(provider, invocation_id))
+    val result = hal_provider_result_v1(
+        provider, rt_hal_sealed_result_field_v1(handle, lane, 1),
+        _hal_sealed_status(rt_hal_sealed_result_field_v1(handle, lane, 2)),
+        rt_hal_sealed_result_field_v1(handle, lane, 3),
+        rt_hal_sealed_result_field_v1(handle, lane, 4),
+        rt_hal_sealed_result_field_v1(handle, lane, 5),
+        rt_hal_sealed_result_field_v1(handle, lane, 6),
+        rt_hal_sealed_result_field_v1(handle, lane, 7),
+        rt_hal_sealed_result_field_v1(handle, lane, 8),
+        rt_hal_sealed_result_field_v1(handle, lane, 9),
+        rt_hal_sealed_result_field_v1(handle, lane, 10),
+        rt_hal_sealed_result_field_v1(handle, lane, 11),
+        _hal_sealed_overflow(
+            rt_hal_sealed_result_field_v1(handle, lane, 12)),
+        rt_hal_sealed_result_field_v1(handle, lane, 13),
+        rt_hal_sealed_result_field_v1(handle, lane, 14),
+        rt_hal_sealed_result_field_v1(handle, lane, 15))
+    val isolation = hal_isolation_receipt_v1(
+        provider, invocation_id, sandbox_pid, sandbox_pid,
+        0, 0, 0, true, true)
+    hal_provider_lane_v1(
+        provider, true, true, false, true, isolation, result)
+
+fn _hal_sealed_receipt(handle: u64, operation: HalOperationV1,
+                       request: HalProviderRequestV1, mode: HalRunMode,
+                       native_status: i32) -> HalSealedInvocationReceiptV1:
+    val valid = native_status == HAL_SEALED_STATUS_OK_V1
+    val pure = _hal_sealed_lane(handle, 0, request.invocation_id, valid)
+    val c_lane = _hal_sealed_lane(handle, 1, request.invocation_id, valid)
+    val rust = _hal_sealed_lane(handle, 2, request.invocation_id, valid)
+    val comparison = hal_orchestrate_sealed_provider_receipts_v1(
+        operation, request, mode, pure, c_lane, rust)
+    val complete = if valid: HAL_PROVIDER_MASK_ALL else: 0
+    HalSealedInvocationReceiptV1(
+        comparison: comparison, native_status: native_status,
+        completed_mask: complete, isolation_proven_mask: complete,
+        critical_ready: valid,
+        hot_spawn_count: rt_hal_sealed_hot_spawn_count_v1(handle),
+        hot_allocation_count: rt_hal_sealed_hot_allocation_count_v1(handle))
+
+impl HalSealedCoordinatorV1:
+    me seal() -> bool:
+        if self.phase != HAL_SEALED_PHASE_PREPARED_V1 or self.handle == 0u64:
+            return false
+        val status = rt_hal_sealed_seal_v1(self.handle)
+        if status != HAL_SEALED_STATUS_OK_V1:
+            return false
+        self.phase = HAL_SEALED_PHASE_CRITICAL_V1
+        true
+
+    me invoke(operation: HalOperationV1, request: HalProviderRequestV1,
+              mode: HalRunMode) -> HalSealedInvocationReceiptV1:
+        var status = HAL_SEALED_STATUS_INVALID_V1
+        if (self.phase == HAL_SEALED_PHASE_CRITICAL_V1
+                and self.handle != 0u64
+                and hal_sealed_operation_admitted_v1(operation, mode)
+                and hal_provider_request_v1_well_formed(request)
+                and request.operation_id == operation.operation_id):
+            status = rt_hal_sealed_invoke_v1(
+                self.handle, operation.operation_id, request.invocation_id,
+                request.fixture_id, request.input_offset, request.input_length,
+                request.input_capacity, request.trace_capacity)
+        _hal_sealed_receipt(
+            self.handle, operation, request, mode, status)
+
+    me maintenance_shutdown() -> bool:
+        if ((self.phase != HAL_SEALED_PHASE_PREPARED_V1
+                and self.phase != HAL_SEALED_PHASE_CRITICAL_V1)
+                or self.handle == 0u64):
+            return false
+        val status = rt_hal_sealed_maintenance_shutdown_v1(self.handle)
+        if status != HAL_SEALED_STATUS_OK_V1:
+            return false
+        self.handle = 0u64
+        self.phase = HAL_SEALED_PHASE_EMPTY_V1
+        true
+
+export HAL_SEALED_STATUS_OK_V1, HAL_SEALED_STATUS_INVALID_V1
+export HAL_SEALED_STATUS_STATE_V1, HAL_SEALED_STATUS_IO_V1
+export HAL_SEALED_STATUS_PROTOCOL_V1
+export HAL_SEALED_PHASE_EMPTY_V1, HAL_SEALED_PHASE_PREPARED_V1
+export HAL_SEALED_PHASE_CRITICAL_V1, HAL_SEALED_RESULT_FIELD_COUNT_V1
+export HalSealedInvocationReceiptV1, HalSealedCoordinatorV1
+export hal_sealed_operation_admitted_v1, hal_sealed_coordinator_prepare_v1

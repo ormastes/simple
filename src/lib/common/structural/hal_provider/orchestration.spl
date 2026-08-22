@@ -36,7 +36,14 @@ fn hal_provider_lane_v1(provider: HalProviderKind, present: bool,
 fn hal_provider_lane_v1_admitted(lane: HalProviderLaneV1,
                                  operation: HalOperationV1,
                                  request: HalProviderRequestV1) -> bool:
-    lane.present and lane.terminal and lane.reaped and lane.input_consumed
+    hal_provider_lane_v1_admitted_lifecycle(
+        lane, operation, request, true)
+
+fn hal_provider_lane_v1_admitted_lifecycle(
+        lane: HalProviderLaneV1, operation: HalOperationV1,
+        request: HalProviderRequestV1, require_reaped: bool) -> bool:
+    lane.present and lane.terminal and (lane.reaped or not require_reaped)
+        and lane.input_consumed
         and lane.provider == lane.isolation.provider
         and lane.provider == lane.result.provider
         and hal_execution_receipt_admitted(
@@ -64,9 +71,11 @@ fn _hal_lane_present_mask(lane: HalProviderLaneV1,
 fn _hal_lane_admitted_mask(lane: HalProviderLaneV1,
                            slot_provider: HalProviderKind,
                            operation: HalOperationV1,
-                           request: HalProviderRequestV1) -> i64:
+                           request: HalProviderRequestV1,
+                           require_reaped: bool = true) -> i64:
     if (lane.provider == slot_provider
-            and hal_provider_lane_v1_admitted(lane, operation, request)):
+            and hal_provider_lane_v1_admitted_lifecycle(
+                lane, operation, request, require_reaped)):
         return hal_provider_kind_mask(slot_provider)
     0
 
@@ -112,17 +121,39 @@ fn hal_orchestrate_provider_receipts_v1(
         mode: HalRunMode, pure_lane: HalProviderLaneV1,
         c_lane: HalProviderLaneV1,
         rust_lane: HalProviderLaneV1) -> HalOrchestrationReceiptV1:
+    _hal_orchestrate_provider_receipts_lifecycle_v1(
+        operation, request, mode, pure_lane, c_lane, rust_lane, true)
+
+fn hal_orchestrate_sealed_provider_receipts_v1(
+        operation: HalOperationV1, request: HalProviderRequestV1,
+        mode: HalRunMode, pure_lane: HalProviderLaneV1,
+        c_lane: HalProviderLaneV1,
+        rust_lane: HalProviderLaneV1) -> HalOrchestrationReceiptV1:
+    # Persistent sealed workers remain live between invocations. Their result
+    # frame is terminal for this invocation, but reaping is a maintenance-only
+    # session shutdown transition.
+    _hal_orchestrate_provider_receipts_lifecycle_v1(
+        operation, request, mode, pure_lane, c_lane, rust_lane, false)
+
+fn _hal_orchestrate_provider_receipts_lifecycle_v1(
+        operation: HalOperationV1, request: HalProviderRequestV1,
+        mode: HalRunMode, pure_lane: HalProviderLaneV1,
+        c_lane: HalProviderLaneV1,
+        rust_lane: HalProviderLaneV1,
+        require_reaped: bool) -> HalOrchestrationReceiptV1:
     val expected = hal_execution_expected_mask(operation, mode)
     val received = _hal_lane_present_mask(
         pure_lane, HalProviderKind.PureSimple)
         | _hal_lane_present_mask(c_lane, HalProviderKind.C)
         | _hal_lane_present_mask(rust_lane, HalProviderKind.Rust)
     val admitted = _hal_lane_admitted_mask(
-        pure_lane, HalProviderKind.PureSimple, operation, request)
+        pure_lane, HalProviderKind.PureSimple, operation, request,
+        require_reaped)
         | _hal_lane_admitted_mask(
-            c_lane, HalProviderKind.C, operation, request)
+            c_lane, HalProviderKind.C, operation, request, require_reaped)
         | _hal_lane_admitted_mask(
-            rust_lane, HalProviderKind.Rust, operation, request)
+            rust_lane, HalProviderKind.Rust, operation, request,
+            require_reaped)
     val rejected = received & ~admitted
     val contract_valid = (hal_operation_v1_well_formed(operation)
         and hal_provider_request_v1_well_formed(request)
@@ -155,4 +186,6 @@ export HAL_DIFFERENCE_PURE_C, HAL_DIFFERENCE_PURE_RUST
 export HAL_DIFFERENCE_C_RUST
 export HalOrchestrationStatusV1, HalProviderLaneV1, HalOrchestrationReceiptV1
 export hal_provider_lane_v1, hal_provider_lane_v1_admitted
+export hal_provider_lane_v1_admitted_lifecycle
 export hal_orchestrate_provider_receipts_v1
+export hal_orchestrate_sealed_provider_receipts_v1

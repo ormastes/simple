@@ -18,6 +18,8 @@ typedef struct {
     int pid;
     uint64_t generation;
     uint64_t next_sequence;
+    int sandbox_pid;
+    int isolation_valid;
     int healthy;
     int reaped;
     unsigned char input[HAL_SEALED_FRAME_CAP_V1];

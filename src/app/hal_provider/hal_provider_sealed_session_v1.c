@@ -96,9 +96,23 @@ static int spawn_lane(HalSealedLaneV1 *lane, const char *launcher,
     lane->fd_in = to_child[1]; lane->fd_out = from_child[0]; lane->pid = (int)pid;
     lane->generation = 1; lane->next_sequence = 1;
     ready_deadline = now_ms() + deadline_ms;
-    if (!read_line_deadline(lane->fd_out, lane->output, sizeof(lane->output), ready_deadline, &n) ||
-        n < 12 || memcmp(lane->output, "HALSESSION1|", 12) != 0) {
-        lane_kill(lane); return 0;
+    {
+        int sandbox_pid = 0, writable = -1, environment = -1, shared = -1;
+        int initialized = 0, sealed = 0, consumed = 0;
+        if (!read_line_deadline(lane->fd_out, lane->output,
+                                sizeof(lane->output), ready_deadline, &n) ||
+            sscanf((char *)lane->output,
+                   "HALSESSION1|%d|%d|%d|%d|%d|%d%n",
+                   &sandbox_pid, &writable, &environment, &shared,
+                   &initialized, &sealed, &consumed) != 6 ||
+            consumed <= 0 || (size_t)consumed + 1 != n ||
+            lane->output[consumed] != '\n' || sandbox_pid <= 1 ||
+            writable != 0 || environment != 0 || shared != 0 ||
+            initialized != 1 || sealed != 1) {
+            lane_kill(lane); return 0;
+        }
+        lane->sandbox_pid = sandbox_pid;
+        lane->isolation_valid = 1;
     }
     lane->healthy = 1;
     return 1;
