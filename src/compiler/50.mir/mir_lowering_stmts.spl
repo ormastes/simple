@@ -1366,6 +1366,45 @@ impl MirLowering:
                 else:
                     self.array_element_struct_syms = self.array_element_struct_syms.remove(local.id)
 
+    me lower_array_destructuring_assign(elements: [HirExpr], value_local: LocalId, op: HirAssignOp?):
+        """Lower `[a, b] = value` without materializing a temporary array.
+
+        The HIR represents an array-pattern assignment target as ArrayLit.
+        Extract each source slot once, decode it to the leaf's declared type,
+        and feed it back through the ordinary assignment owner. Nested array
+        targets recurse; no runtime allocation or full-array copy is emitted.
+        """
+        if op.?:
+            self.error_fatal("compound assignment is not valid for an array destructuring target", nil)
+            return
+        var element_index = 0
+        while element_index < elements.len():
+            val target_element = elements[element_index]
+            var element_type = MirType.i64()
+            if target_element.has_type_:
+                element_type = self.lower_type(target_element.type_)
+            var b_get = self.builder
+            val index_local = b_get.emit_const_int(element_index)
+            val getter = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_array_get"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                    params: [MirType.i64(), MirType.i64()],
+                    return_type: MirType.i64(),
+                    is_variadic: false)))
+            ))
+            val get_result = b_get.emit_call(
+                getter,
+                [mir_operand_copy(value_local), mir_operand_copy(index_local)],
+                MirType.i64())
+            self.builder = b_get
+            if val raw_element = get_result:
+                val decoded_element = self.decode_runtime_value(raw_element, element_type)
+                self.lower_assign(target_element, nil, decoded_element, target_element.kind)
+            else:
+                self.error_fatal("array destructuring element extraction returned no value", Some(target_element.span))
+                return
+            element_index = element_index + 1
+
     me lower_assign(target: HirExpr, op: HirAssignOp?, value_local: LocalId, value_kind: HirExprKind):
         """Lower assignment."""
         match target.kind:
@@ -1605,6 +1644,12 @@ impl MirLowering:
 
                 # Emit call with no return value
                 self.builder.emit_call(func_operand, [mir_operand_copy(receiver), mir_operand_copy(index_local), mir_operand_copy(boxed_value)], MirType.unit())
+
+            case ArrayLit(elements, _):
+                # An array literal in assignment-target position is a
+                # destructuring pattern, not a place address. Before this arm
+                # it reached the fatal unsupported-target fallback.
+                self.lower_array_destructuring_assign(elements, value_local, op)
 
             case _:
                 self.error_fatal("unsupported MIR assignment target: {target.kind}", nil)
