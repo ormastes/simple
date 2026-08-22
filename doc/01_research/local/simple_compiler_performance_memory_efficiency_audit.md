@@ -1967,3 +1967,21 @@ output. Diagnostics remain embedded verbatim and in input order; empty, single a
 multiple arrays retain the exact prior MCP envelope. The active rich-query path
 and its older query-check predecessor both delegate to this owner, preventing
 serialization drift.
+
+### Short-grammar identifier reconstruction audit
+
+Compiler and stdlib short-grammar implementations contained four equivalent
+identifier rewriters. Each appended one character or replacement to an immutable
+growing result, causing `O(E²)` cumulative copied bytes for an expression of length
+`E`; the two contains probes built and discarded a complete rewritten expression.
+
+The cycle-free `std.tooling.easy_fix.rules_helpers` owner now provides a direct
+whole-token predicate and span-based plain/interpolation rewriters. Unchanged input
+returns directly. Changed input records only maximal unchanged spans and replacement
+fragments, then joins once, reducing reconstruction to linear output assembly with
+fragment count proportional to matches. All four former implementations are thin
+delegates. Semantics remain textual and ASCII-boundary based: strings/comments are
+not parsed, Unicode neighbors remain nonidentifier characters, interpolation uses
+one boolean brace state, doubled braces never change it, and tuple parameters are
+still rewritten sequentially. The legacy `_` probe remains false when replacing
+`_` by `_` would leave the expression unchanged.
