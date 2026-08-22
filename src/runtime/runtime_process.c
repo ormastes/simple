@@ -537,7 +537,10 @@ struct WinPipedSlot {
 #define WIN_PIPED_READ_BUF 8192
 
 static struct WinPipedSlot win_piped_slots[WIN_PIPED_MAX];
-static char win_piped_read_buf[WIN_PIPED_READ_BUF];
+/* Returned text remains valid until this thread's next read. TLS prevents
+ * concurrent callers from overwriting each other's result without adding a
+ * lock, allocation, or lookup to the read hot path. */
+__declspec(thread) static char win_piped_read_buf[WIN_PIPED_READ_BUF];
 static char win_browser_renderer_stdin_buf[WIN_PIPED_READ_BUF];
 
 static bool win_random_pipe_name(char* name, size_t name_size) {
@@ -1022,8 +1025,9 @@ static struct RtProcSlot s_procs[RT_PROC_MAX];
 static pthread_mutex_t s_proc_lock = PTHREAD_MUTEX_INITIALIZER;
 static unsigned int s_renderer_slots_active;
 
-/* Static read buffer — returned pointer is valid until the next call */
-static char s_read_buf[RT_PROC_READ_BUF];
+/* Returned text remains valid until this thread's next read. TLS removes the
+ * cross-thread data race while retaining fixed storage and zero allocations. */
+static _Thread_local char s_read_buf[RT_PROC_READ_BUF];
 static char s_browser_renderer_stdin_buf[RT_PROC_READ_BUF];
 
 /* ===== Internal helpers ===== */

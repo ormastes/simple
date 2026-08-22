@@ -1,0 +1,40 @@
+#!/bin/sh
+# Static ratchet for the allocation-bounded piped-process concurrency policy.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+c_runtime=$root/src/runtime/runtime_process.c
+rust_runtime=$root/src/compiler_rust/compiler/src/interpreter_extern/system.rs
+
+require() {
+    pattern=$1
+    file=$2
+    grep -Fq "$pattern" "$file" || {
+        echo "process piped concurrency: missing contract: $pattern" >&2
+        exit 1
+    }
+}
+
+require '__declspec(thread) static char win_piped_read_buf[WIN_PIPED_READ_BUF];' "$c_runtime"
+require 'static _Thread_local char s_read_buf[RT_PROC_READ_BUF];' "$c_runtime"
+require 'static ref PIPED_PROCESS_SLOTS: [PipedProcessSlot; PIPED_PROCESS_SLOT_COUNT]' "$rust_runtime"
+require '.compare_exchange(0, PIPED_PROCESS_RESERVED' "$rust_runtime"
+require 'fn piped_find_slot(pid: i64)' "$rust_runtime"
+require 'if pid <= 0 {' "$rust_runtime"
+require 'fn piped_failure_sentinel_cannot_steal_spawn_reservation()' "$rust_runtime"
+require 'let mut buf = [0u8; 8192];' "$rust_runtime"
+
+piped_section=$(mktemp)
+trap 'rm -f "$piped_section"' EXIT INT TERM
+sed -n '/Piped-process family/,/pub fn rt_process_close_piped/p' \
+    "$rust_runtime" >"$piped_section"
+if grep -Fq 'PIPED_PROCESSES' "$piped_section"; then
+    echo 'process piped concurrency: global process registry reintroduced' >&2
+    exit 1
+fi
+if grep -Eq 'Vec<u8>|read_to_end|read_to_string' "$piped_section"; then
+    echo 'process piped concurrency: unbounded/allocation-backed read introduced' >&2
+    exit 1
+fi
+
+echo 'STATUS: PASS process-piped-concurrency-source-ratchet native_read_buffer=tls_fixed rust_registry=fixed_atomic_slots rust_child=serialized read_bound=8192 remaining=raw_pid_and_dap_unsafe'

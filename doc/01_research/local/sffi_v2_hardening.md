@@ -1607,8 +1607,46 @@ symbol inspection, and signature work is admission-time. Clock calls retain one
 direct provider call, one negative-sentinel branch, and no lookup, allocation,
 lock, hash, retry, or retained evidence state.
 
-This migration adds no map, symbol lookup, hash, retry, sleep, or explicit
-success-path allocation. Each send retains one liveness query and one write;
+### Piped-process concurrency ratchet
+
+Checked read/liveness statuses removed fabricated outcomes but did not make the
+provider concurrency-safe. Native read results use a process-global writable
+array, so concurrent callers could overwrite one another. The Rust interpreter
+held its registry mutex across child pipe I/O,
+so one slow child could stall every unrelated child.
+
+Native checked-read result storage now has thread-local lifetime. The Rust
+interpreter uses 16 stable, contiguous process slots with atomic PID tags and
+one child mutex per slot. Lookup scans the fixed tag array, rechecks the tag
+after taking that slot's mutex, and never retains a global registry guard.
+Close therefore waits only for operations on the selected child.
+The native read path still uses one fixed 8 KiB buffer per native thread, with
+no per-call allocation, lookup, or global lock. Raw PID handles are not thereby
+safe: Windows/POSIX slot lookup, close, and PID reuse still require generation-
+bearing opaque handles and per-slot lifecycle locks. The legacy editor DAP
+accumulator and browser-renderer stdin buffers also remain global and unsafe;
+making them TLS would both confuse process/session identity and reserve about
+72 KiB more per thread. Until proper owners land, these entry points remain
+explicitly `unsafe(ffi)`.
+Rust stdin remains a potentially blocking compatibility surface on every host;
+changing it to nonblocking under the current boolean `write_all` ABI could
+publish a partial prefix and then report only `false`. Consumers must migrate
+to the existing bounded progress-count API before close can be cancellable
+without data duplication. This remains a stated unsafe obligation.
+`process-piped-concurrency-contract.shs` retains these source-shape invariants
+and rejects reintroduction of registry-owned I/O or unbounded Rust reads.
+The final performance evidence shows the same observed 2,048 KiB peak-RSS
+floor. A nonblocking-read model changes from 685.76 to 717.39 ns/op for one
+child (+4.6%) and from 995.75 to 263.57 ns/op for four independent children
+(-73.5%). The small
+single-child synchronization cost buys same-child serialization; removing the
+global registry from the I/O critical section eliminates unrelated-child
+contention. No per-operation heap allocation or data copy was introduced.
+
+The existing send/poll hot paths add no map, symbol lookup, hash, retry, sleep,
+heap allocation, or atomic reference-count operation. Lookup is a bounded scan
+of at most 16 contiguous atomic tags followed by one per-child lock.
+Each send retains one liveness query and one write;
 each poll retains one read. The source-shape gate reports the stdout contract
 as `unsafe_ambiguous`: the current raw ABI still maps no data, EOF, invalid
 handle, and read failure to empty text. A future additive status-bearing read

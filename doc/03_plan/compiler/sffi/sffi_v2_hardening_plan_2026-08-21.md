@@ -1236,3 +1236,30 @@ never production `verified_and_signed`. Do not promote the remaining
 273 matching clock declaration rows unless each duplicate is also lexically
 unsafe-tagged and contract-documented. No admission operation belongs on the
 clock call path.
+
+Piped-process concurrency proceeds without weakening the bounded hot path.
+First use one fixed thread-local native checked-read buffer and stable fixed
+Rust slots with atomic PID tags and per-child locks, so unrelated children do
+not serialize behind a registry and native results
+are not shared across threads. This adds no per-call native allocation and
+keeps the 8 KiB read bound. Do not move the 64 KiB DAP accumulator to TLS:
+move it into its process/session owner. Next add generation-bearing opaque handles with
+direct slot lookup and explicit
+`RESERVED/ACTIVE/CLOSING/FREE` states, and caller-buffer checked reads. Keep
+raw PID/text-return compatibility entry points tagged unsafe until consumers
+migrate; TLS/per-child locking alone is not verification of the family.
+
+Performance checkpoint: the first `Mutex<HashMap<PID, Arc<Mutex<Child>>>>`
+prototype regressed an isolated lookup/lock model from 23.56 to 51.43 ns/op at
+one thread and from 91.40 to 165.94 ns/op at four threads (2,048 KiB peak RSS
+for all runs). The final fixed-slot shape measures 24.66 ns/op at one thread
+and 40.58 ns/op at four threads in the lock-only stress model, versus 23.56 and
+91.40 ns/op. More representative nonblocking-read measurements are 685.76 ->
+717.39 ns/op at one thread (+4.6%) and 995.75 -> 263.57 ns/op across four
+independent children (-73.5%), at the same observed 2,048 KiB RSS floor.
+Lookup is bounded to 16 contiguous atomic tags, adds no allocation/copy or
+reference counting, and holds only the selected child mutex across I/O.
+The exact native fixture comparison
+was 2.02 s/2,048 KiB before and 1.96 s/2,048 KiB after, but both exited status 6
+in this environment, so it is performance evidence only and a correctness
+blocker remains recorded rather than retried.
