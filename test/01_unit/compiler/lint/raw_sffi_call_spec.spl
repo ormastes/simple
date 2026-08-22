@@ -18,11 +18,17 @@ doc/05_design/REQ-COMPILER-LINT-001.md
 
 use std.spec.*
 use compiler.semantics.lint.raw_sffi_call.{
-    check_raw_sffi_calls, check_raw_sffi_declarations
+    check_raw_sffi_calls, check_raw_sffi_declarations,
+    raw_sffi_code_snapshot, check_raw_sffi_calls_snapshot,
+    check_raw_sffi_declarations_snapshot
 }
 use compiler.tools.lint._LintMain.config_and_model.{
     profile_default_levels, map_lint_code_to_config_name, LintProfile
 }
+use compiler.tools.lint.main.{Linter}
+
+use std.spec.step
+use std.fs.{read_file}
 
 use std.spec.step
 
@@ -132,3 +138,42 @@ describe "SFFI009: raw calls require minimal ffi-unsafe scope":
         val findings = check_raw_sffi_declarations(source, "src/app/demo.spl")
         expect(findings.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(findings[0].code).to_equal("SFFI010")
+
+    it "shares one lexical snapshot and preserves category ordering":
+        step("Reuse one code-line revision for call and declaration diagnostics")
+        val source = "extern fn rt_widget_open() -> i64\n\nfn open_widget() -> i64:\n    rt_widget_open()\n"
+        val snapshot = raw_sffi_code_snapshot(source, "src/app/demo.spl")
+        val calls = check_raw_sffi_calls_snapshot(snapshot)
+        expect(calls.len()).to_equal(1)
+        expect(calls[0].line_num).to_equal(4)
+        val declarations = check_raw_sffi_declarations_snapshot(snapshot)
+        expect(declarations.len()).to_equal(1)
+        expect(declarations[0].line_num).to_equal(1)
+
+        val path = "/tmp/raw_sffi_category_order.spl"
+        val linter = Linter.new(false)
+        linter.config.set_profile(LintProfile.Robust)
+        linter.prepared_config_path = path
+        val lint_results = linter.lint_source(path, source)
+        var sffi_codes: [text] = []
+        for result in lint_results:
+            if result.lint.code.starts_with("SFFI"):
+                sffi_codes.push(result.lint.code)
+        expect(sffi_codes).to_equal(["SFFI009", "SFFI010"])
+
+        val checker = read_file(
+            "src/compiler/35.semantics/lint/raw_sffi_call.spl")
+        val caller = read_file(
+            "src/compiler/90.tools/lint/_LintMain/lint_checks.spl")
+        expect(checker).to_contain("pub class RawSffiCodeSnapshot:")
+        expect(caller).to_contain("val snapshot = raw_sffi_code_snapshot(content, path)")
+        expect(caller).not.to_contain("self.check_raw_sffi_call_spl(path, content)")
+        expect(caller).not.to_contain("self.check_raw_sffi_declaration_spl(path, content)")
+
+    it "applies path exclusions to both combined categories":
+        step("Keep generated and vendored sources outside both raw-SFFI rules")
+        val source = "extern fn rt_widget_open() -> i64\nfn demo():\n    rt_widget_open()\n"
+        val snapshot = raw_sffi_code_snapshot(
+            source, "src/runtime/vendor/demo.spl")
+        expect(check_raw_sffi_calls_snapshot(snapshot).len()).to_equal(0)
+        expect(check_raw_sffi_declarations_snapshot(snapshot).len()).to_equal(0)
