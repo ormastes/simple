@@ -15,10 +15,54 @@ Audience: compiler and tooling engineers who maintain this spec
 # @req: REQ-OS-SimpMain-001
 
 use std.spec
-use os.tools.simplebox.simplebox_main.{simplebox_seq_count, simplebox_run}
+use os.tools.simplebox.simplebox_main.{simplebox_seq_count, simplebox_seq_plan, simplebox_run, SIMPLEBOX_SEQ_MAX_OUTPUT_BYTES, SIMPLEBOX_SEQ_MAX_COUNT, SIMPLEBOX_SEQ_MAX_PARSE_BYTES}
 
 use std.spec.step
 describe "simplebox entry (pure-Simple libc consumer)":
+    context "seq output is preflighted against a fixed memory/time budget":
+        it "preserves admitted output accounting":
+            val plan = simplebox_seq_plan(["3"])
+            expect(plan.accepted).to_equal(true)
+            expect(plan.count).to_equal(3)
+            expect(plan.output_bytes).to_equal(6)
+            expect(plan.inspected_values).to_equal(3)
+
+        it "rejects oversized output after bounded work":
+            val plan = simplebox_seq_plan(["999999999999"])
+            expect(plan.accepted).to_equal(false)
+            expect(plan.output_bytes).to_equal(0)
+            expect(plan.inspected_values).to_equal(0)
+            expect(plan.inspected_input_bytes).to_be_less_than(6)
+
+        it "rejects decimal strings that would wrap libc_strtoul":
+            val positive_wrap = simplebox_seq_plan(["18446744073709551616"])
+            expect(positive_wrap.accepted).to_equal(false)
+            expect(positive_wrap.count).to_be_greater_than(SIMPLEBOX_SEQ_MAX_COUNT)
+            expect(simplebox_run(["simplebox", "seq", "18446744073709551616"])).to_equal(1)
+            val signed_wrap = simplebox_seq_plan(["9223372036854775808"])
+            expect(signed_wrap.accepted).to_equal(false)
+            val bounded_zeros = simplebox_seq_plan(["0".repeat(SIMPLEBOX_SEQ_MAX_PARSE_BYTES + 1)])
+            expect(bounded_zeros.accepted).to_equal(false)
+
+        it "preserves negative and stop-at-nondigit compatibility":
+            val negative = simplebox_seq_plan(["-1"])
+            expect(negative.accepted).to_equal(true)
+            expect(negative.count).to_equal(-1)
+            expect(negative.output_bytes).to_equal(0)
+            expect(simplebox_run(["simplebox", "seq", "-1"])).to_equal(0)
+            val suffix = simplebox_seq_plan(["3abc"])
+            expect(suffix.accepted).to_equal(true)
+            expect(suffix.count).to_equal(3)
+            expect(suffix.output_bytes).to_equal(6)
+
+        it "accepts the largest count under the cap and rejects the next":
+            val exact = simplebox_seq_plan(["12773"])
+            expect(exact.accepted).to_equal(true)
+            expect(exact.count).to_equal(SIMPLEBOX_SEQ_MAX_COUNT)
+            expect(exact.output_bytes).to_equal(65532)
+            val over = simplebox_seq_plan(["12774"])
+            expect(over.accepted).to_equal(false)
+
     context "seq count is parsed via the pure-Simple libc (libc_strtoul)":
         it "parses a plain decimal count":
             step("Verify: parses a plain decimal count")

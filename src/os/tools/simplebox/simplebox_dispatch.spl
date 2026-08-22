@@ -5,22 +5,49 @@
 
 extern fn stdout_write(data: text)
 
-fn _applet_echo(args: [text]) -> i32:
+val SIMPLEBOX_MAX_OUTPUT_BYTES: i64 = 65536
+
+struct SimpleboxEchoPlan:
+    parts: [text]
+    output_bytes: i64
+    accepted: bool
+
+fn simplebox_echo_plan(args: [text]) -> SimpleboxEchoPlan:
+    """Plan one bounded echo write without repeatedly copying its prefix."""
     var newline = true
     var start: u64 = 0u64
     if args.len() > 0u64 and args[0] == "-n":
         newline = false
         start = 1u64
-    var output = ""
+
+    var parts: [text] = []
+    var output_bytes: i64 = 0
     var index = start
     while index < args.len():
         if index > start:
-            output = output + " "
-        output = output + args[index]
+            output_bytes = output_bytes + 1
+            if output_bytes > SIMPLEBOX_MAX_OUTPUT_BYTES:
+                return SimpleboxEchoPlan(parts: [], output_bytes: output_bytes, accepted: false)
+            parts.push(" ")
+        val arg_bytes = args[index].len().to_i64()
+        if arg_bytes > SIMPLEBOX_MAX_OUTPUT_BYTES - output_bytes:
+            return SimpleboxEchoPlan(parts: [], output_bytes: output_bytes + arg_bytes, accepted: false)
+        output_bytes = output_bytes + arg_bytes
+        parts.push(args[index])
         index = index + 1u64
     if newline:
-        output = output + "\n"
-    stdout_write(output)
+        if output_bytes == SIMPLEBOX_MAX_OUTPUT_BYTES:
+            return SimpleboxEchoPlan(parts: [], output_bytes: output_bytes + 1, accepted: false)
+        output_bytes = output_bytes + 1
+        parts.push("\n")
+    SimpleboxEchoPlan(parts: parts, output_bytes: output_bytes, accepted: true)
+
+fn _applet_echo(args: [text]) -> i32:
+    val plan = simplebox_echo_plan(args)
+    if not plan.accepted:
+        stdout_write("echo: output exceeds 65536-byte limit\n")
+        return 1
+    stdout_write(plan.parts.join(""))
     0
 
 fn _applet_true(args: [text]) -> i32:

@@ -130,3 +130,14 @@ missing paths; NVFS has the corresponding no-regression coverage. This proves
 shared interface behavior only. It is not evidence of a native DBFS guest
 spawn, mounted NVFS durability, target artifact admission, or three-architecture
 QEMU execution.
+
+## SimpleBox bounded-output policy (2026-08-22)
+
+Filesystem-launched `echo` and `seq` must cap requested stdout at 65,536 bytes
+before writing. `echo` retains bounded parts and joins once, avoiding quadratic
+immutable-prefix copies. `seq` validates at most 64 input bytes with checked
+decimal admission, rejects counts above 12,773 before calling the unchecked
+libc accumulator, then requires the libc result to match and preflights exact
+line bytes before its first requested output. Do not expose the existing
+`dd`, `timeout`, or `chown` parser/core helpers as applets: they still lack the
+filesystem, process/signal, and ownership authority required by those tools.
