@@ -1174,3 +1174,17 @@ legacy bare scalar exports, static Torch trait consumers, provider signing, and
 evidence admission remain open. Next migrate the static scalar consumers or
 change their interfaces to typed results, then take the bounded piped-process
 family and implement signed provider admission separately.
+
+The static Torch scalar migration is now complete for repository-owned live
+callers. Backend trait methods, three ownership-family implementations,
+gradient clipping, accuracy, `Tensor.sum`, and the CUDA optimizer probe all
+propagate checked `Result<f64, text>` values. Bare scalar ABI declarations are
+retained only as internal, explicitly unsafe compatibility declarations and
+are no longer facade exports. Cleanup happens before error propagation. The
+focused source checks, 15/15 readiness cases, and the source-shape contract
+gate pass. The gate deliberately claims only one checked ABI call, cached
+interpreter lookup after initialization, and no explicit wrapper allocation;
+it does not claim libtorch reductions are allocation-free or synchronization-
+free. Next harden the bounded piped-process family, then implement real signed
+evidence admission. Current global admission remains zero, so neither all
+Torch SFFI nor all SFFI may be described as verified safe.

@@ -23,9 +23,9 @@ use std.nogc_async_mut.torch.sffi.{
     rt_torch_torchtensor_pow,
     rt_torch_torchtensor_log_softmax,
     rt_torch_torchtensor_gather,
-    rt_torch_torchtensor_sum,
+    torch_torchtensor_sum_result,
     rt_torch_torchtensor_sum_dim,
-    rt_torch_torchtensor_mean,
+    torch_torchtensor_mean_result,
     rt_torch_torchtensor_mean_dim,
     rt_torch_torchtensor_free,
     rt_torch_torchtensor_clone,
@@ -114,7 +114,7 @@ fn rms_norm(x: i64, weight: i64, eps: f64) -> i64:
 # Computes total gradient L2 norm across all params.
 # If norm > max_norm, scales all gradients down.
 # Returns the total norm (as f64).
-fn clip_grad_norm(param_handles: [i64], max_norm: f64) -> f64:
+fn clip_grad_norm(param_handles: [i64], max_norm: f64) -> Result<f64, text>:
     # Compute total squared gradient norm
     var total_sq = 0.0
     var idx = 0
@@ -123,9 +123,13 @@ fn clip_grad_norm(param_handles: [i64], max_norm: f64) -> f64:
         val g = rt_torch_autograd_grad(h)
         if g != 0:
             val g_sq = rt_torch_torchtensor_mul(g, g)
-            val g_sum = rt_torch_torchtensor_sum(g_sq)
+            val g_sum_result = torch_torchtensor_sum_result(g_sq)
             rt_torch_torchtensor_free(g_sq)
-            total_sq = total_sq + g_sum
+            match g_sum_result:
+                case Ok(g_sum): total_sq = total_sq + g_sum
+                case Err(error): return Err(error)
+                case _("fail closed if Result gains another variant"):
+                    return Err("invalid_scalar_result")
         idx = idx + 1
 
     val total_norm = rt_sqrt(total_sq)
@@ -144,7 +148,7 @@ fn clip_grad_norm(param_handles: [i64], max_norm: f64) -> f64:
                 rt_torch_torchtensor_free(scaled)
             j = j + 1
         rt_torch_autograd_no_grad_end()
-    total_norm
+    Ok(total_norm)
 
 
 # Simple sqrt for f64 (Newton's method, 10 iterations)
@@ -169,7 +173,7 @@ fn rt_sqrt(x: f64) -> f64:
 # Returns accuracy as f64 (0.0 to 1.0).
 # Note: uses rt_torch_torchtensor_mean on a comparison tensor as workaround
 # since we can't extract individual values easily.
-fn compute_accuracy(logits: i64, targets: i64) -> f64:
+fn compute_accuracy(logits: i64, targets: i64) -> Result<f64, text>:
     # Get predicted class indices: argmax over dim 1
     val preds = rt_torch_torchtensor_argmax(logits, 1, false)
     # Compare: preds == targets → need sub then check zeros
@@ -186,7 +190,7 @@ fn compute_accuracy(logits: i64, targets: i64) -> f64:
     rt_torch_torchtensor_free(diff_sq)
     val inv = rt_torch_torchtensor_pow(ones, -1.0)
     rt_torch_torchtensor_free(ones)
-    val accuracy = rt_torch_torchtensor_mean(inv)
+    val accuracy = torch_torchtensor_mean_result(inv)
     rt_torch_torchtensor_free(inv)
     accuracy
 

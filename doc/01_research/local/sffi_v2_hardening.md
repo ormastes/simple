@@ -1498,3 +1498,26 @@ The refreshed census is 12,295 declaration rows and 3,170 distinct symbols:
 unsafe-unminimized, 11,215 untouched, and zero evidence-verified, signed, or
 admitted. `rt_torch` has 162 unsafe rows, 35 minimized, zero untouched, and zero
 verified/signed; “zero untouched” means inventoried/tagged, not proven safe.
+
+The static Torch scalar consumers now use the same checked status/out boundary.
+The common backend trait, all three backend implementations, gradient clipping,
+accuracy computation, the GC Tensor `sum` API, and the CUDA optimizer probe
+propagate `Result<f64, text>` instead of accepting a fabricated numeric value.
+The eight legacy bare-`f64` declarations remain internal and explicitly
+`unsafe(ffi)` for ABI compatibility, but are no longer exported by the Torch
+facades. Error paths release temporary tensors before returning. The checked
+success path uses one provider reduction call and a stack output slot; no
+explicit allocation, lookup, hashing, reporting, retry, or synchronization was
+added by the wrapper. This does not claim that libtorch itself is allocation-
+free or that CUDA scalar extraction avoids device synchronization.
+
+Focused checks pass for all modified ownership variants and the optimizer
+probe. The readiness specification passes 15/15, and the static contract gate
+reports eight operations with one checked ABI call, cached interpreter symbols
+after initialization, and no explicit wrapper allocation. The refreshed static
+census is 12,296 declaration rows and 3,170 distinct symbols: 808 unsafe-tagged,
+622 contract-documented, 350 unsafe-minimized, 11,946 unsafe-unminimized,
+11,216 untouched, and zero evidence-verified, signature-verified, or admitted.
+Implementations found are C++ 219, C 2,323, Rust 2,161, and Simple 558.
+`rt_torch` remains 162 unsafe rows, 35 minimized, zero untouched, and zero
+verified/signed. Therefore Torch and SFFI globally are not yet verified safe.
