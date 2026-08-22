@@ -571,3 +571,17 @@ private entrypoints remain delegates, preserving sequential multi-parameter
 rewrites. Contains-callers explicitly retain the `_`-to-`_` no-change edge. The
 shared owner must not regress to per-character result concatenation or emit one
 fragment per unchanged character.
+
+## SPIPE005 helper-reachability contract
+
+`bare_call_names` returns first-seen unique textual names under the existing
+ASCII-token and immediate-dot exclusion rules. `collect_asserting_helpers`
+retains textual-name identity: duplicate definitions contribute the union of
+outgoing calls, and any direct assertion seeds that shared name.
+
+Owned call arrays and integer-indexed reverse caller buckets represent the
+graph. Nested arrays are mutated by bucket index to avoid dictionary-value
+copyback. An append-only queue with an integer cursor propagates reachability.
+Seedless cycles remain nonasserting, seeded cycles propagate, undefined callees
+are ignored, and source order does not affect membership. Expected cost is
+`O(source bytes + F + E)` time and `O(F + E)` graph memory.
