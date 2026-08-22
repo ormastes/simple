@@ -84,6 +84,16 @@ typedef struct {
     uint64_t token_offset;
 } SimpleMcdcDecisionExprV1;
 
+/* Validated MCDP wire metadata.  The wire identity is the compiler-emitted
+ * lowercase SHA-256 text; it is copied, not NUL terminated. */
+typedef struct {
+    uint64_t program_count;
+    uint64_t token_count;
+    uint64_t semantic_count;
+    uint64_t semantic_offset;
+    uint8_t identity_sha256[64];
+} SimpleMcdcManifestInfoV1;
+
 #if defined(__cplusplus)
 #define SIMPLE_MCDC_STATIC_ASSERT static_assert
 #else
@@ -102,6 +112,7 @@ SIMPLE_MCDC_STATIC_ASSERT(offsetof(SimpleMcdcWitnessV1, sequence_b) == 48, "witn
 SIMPLE_MCDC_STATIC_ASSERT(sizeof(SimpleMcdcAnalysisV1) == 48, "SimpleMcdcAnalysisV1 ABI");
 SIMPLE_MCDC_STATIC_ASSERT(sizeof(SimpleMcdcExprTokenV1) == 8, "SimpleMcdcExprTokenV1 ABI");
 SIMPLE_MCDC_STATIC_ASSERT(sizeof(SimpleMcdcDecisionExprV1) == 32, "SimpleMcdcDecisionExprV1 ABI");
+SIMPLE_MCDC_STATIC_ASSERT(sizeof(SimpleMcdcManifestInfoV1) == 96, "SimpleMcdcManifestInfoV1 ABI");
 #undef SIMPLE_MCDC_STATIC_ASSERT
 
 int32_t rt_mcdc_collector_init_v1(void *storage, uint64_t storage_bytes,
@@ -169,6 +180,29 @@ int32_t rt_mcdc_analyze_masking_v1(
     const SimpleMcdcExprTokenV1 *tokens, uint64_t token_count,
     SimpleMcdcWitnessV1 *witnesses, uint64_t witness_capacity,
     uint64_t proof_budget, SimpleMcdcAnalysisV1 *analysis);
+/* Validate a compiler-emitted MCDP V1 byte section and report exact bounded
+ * caller-storage requirements.  No allocation occurs. */
+int32_t rt_mcdc_manifest_requirements_v1(
+    const uint8_t *bytes, uint64_t byte_count,
+    SimpleMcdcManifestInfoV1 *info);
+/* Decode little-endian wire rows into aligned caller-owned ABI arrays.  Use
+ * requirements_v1 before entering a no-allocation execution phase. */
+int32_t rt_mcdc_manifest_decode_v1(
+    const uint8_t *bytes, uint64_t byte_count,
+    SimpleMcdcDecisionExprV1 *programs, uint64_t program_capacity,
+    SimpleMcdcExprTokenV1 *tokens, uint64_t token_capacity,
+    SimpleMcdcManifestInfoV1 *info);
+/* Allocation-free convenience bridge: validate/materialize MCDP, then invoke
+ * the canonical masking analyzer using the supplied workspace. */
+int32_t rt_mcdc_analyze_masking_mcdp_v1(
+    const SimpleMcdcVectorV1 *events, uint64_t event_count,
+    const uint8_t *bytes, uint64_t byte_count,
+    SimpleMcdcDecisionExprV1 *program_workspace,
+    uint64_t program_capacity,
+    SimpleMcdcExprTokenV1 *token_workspace, uint64_t token_capacity,
+    SimpleMcdcWitnessV1 *witnesses, uint64_t witness_capacity,
+    uint64_t proof_budget, SimpleMcdcAnalysisV1 *analysis,
+    SimpleMcdcManifestInfoV1 *info);
 int32_t rt_mcdc_sort_vectors_v1(SimpleMcdcVectorV1 *events,
                                 uint64_t event_count);
 void rt_mcdc_collector_reset_v1(void);

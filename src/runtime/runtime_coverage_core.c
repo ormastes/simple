@@ -681,6 +681,172 @@ int32_t rt_mcdc_analyze_unique_v1(const SimpleMcdcVectorV1 *events,
 }
 
 #define MCDC_EXPR_TOKEN_LIMIT_V1 256u
+#define MCDC_MANIFEST_MAX_BYTES_V1 UINT64_C(67108864)
+#define MCDC_MANIFEST_MAX_PROGRAMS_V1 UINT64_C(1048576)
+#define MCDC_MANIFEST_MAX_TOKENS_V1 UINT64_C(8388608)
+
+static uint32_t mcdc_wire_u32_v1(const uint8_t *bytes) {
+    return (uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8) |
+           ((uint32_t)bytes[2] << 16) | ((uint32_t)bytes[3] << 24);
+}
+
+static uint64_t mcdc_wire_u64_v1(const uint8_t *bytes) {
+    return (uint64_t)mcdc_wire_u32_v1(bytes) |
+           ((uint64_t)mcdc_wire_u32_v1(bytes + 4) << 32);
+}
+
+static bool mcdc_manifest_identity_valid_v1(const uint8_t *identity) {
+    for (size_t i = 0; i < 64; ++i)
+        if (!((identity[i] >= '0' && identity[i] <= '9') ||
+              (identity[i] >= 'a' && identity[i] <= 'f'))) return false;
+    return true;
+}
+
+static int32_t mcdc_manifest_inspect_v1(
+        const uint8_t *bytes, uint64_t byte_count,
+        SimpleMcdcManifestInfoV1 *info) {
+    if (!bytes || !info || byte_count < 96u ||
+        byte_count > MCDC_MANIFEST_MAX_BYTES_V1 || byte_count > SIZE_MAX)
+        return SIMPLE_MCDC_V1_INVALID;
+    if (mcdc_wire_u32_v1(bytes) != UINT32_C(0x5044434d) ||
+        mcdc_wire_u32_v1(bytes + 4) != 1u ||
+        !mcdc_manifest_identity_valid_v1(bytes + 24))
+        return SIMPLE_MCDC_V1_INVALID;
+    const uint64_t program_count = mcdc_wire_u64_v1(bytes + 8);
+    const uint64_t token_count = mcdc_wire_u64_v1(bytes + 16);
+    if (program_count > MCDC_MANIFEST_MAX_PROGRAMS_V1 ||
+        token_count > MCDC_MANIFEST_MAX_TOKENS_V1 ||
+        program_count > (UINT64_MAX - 88u) / 32u)
+        return SIMPLE_MCDC_V1_INVALID;
+    const uint64_t token_offset = 88u + program_count * 32u;
+    if (token_count > (UINT64_MAX - token_offset) / 8u)
+        return SIMPLE_MCDC_V1_INVALID;
+    const uint64_t semantic_offset = token_offset + token_count * 8u;
+    if (semantic_offset > byte_count || byte_count - semantic_offset < 8u)
+        return SIMPLE_MCDC_V1_INVALID;
+
+    uint64_t previous_digest = 0, previous_decision = 0;
+    uint64_t expected_token_offset = 0;
+    for (uint64_t row = 0; row < program_count; ++row) {
+        const uint8_t *wire = bytes + 88u + row * 32u;
+        const uint64_t decision = mcdc_wire_u64_v1(wire);
+        const uint64_t digest = mcdc_wire_u64_v1(wire + 8);
+        const uint32_t conditions = mcdc_wire_u32_v1(wire + 16);
+        const uint32_t count = mcdc_wire_u32_v1(wire + 20);
+        const uint64_t offset = mcdc_wire_u64_v1(wire + 24);
+        if (!decision || !digest || !conditions || conditions > 62u ||
+            !count || count > MCDC_EXPR_TOKEN_LIMIT_V1 ||
+            offset != expected_token_offset || offset > token_count ||
+            count > token_count - offset ||
+            (row && (previous_digest > digest ||
+                     (previous_digest == digest && previous_decision >= decision))))
+            return SIMPLE_MCDC_V1_INVALID;
+        size_t depth = 0;
+        uint64_t referenced = 0;
+        for (uint64_t index = 0; index < count; ++index) {
+            const uint8_t *token = bytes + token_offset + (offset + index) * 8u;
+            const uint8_t opcode = token[0];
+            const uint32_t condition = mcdc_wire_u32_v1(token + 4);
+            if (token[1] || token[2] || token[3]) return SIMPLE_MCDC_V1_INVALID;
+            if (opcode == SIMPLE_MCDC_EXPR_CONDITION_V1) {
+                if (condition >= conditions || depth == MCDC_EXPR_TOKEN_LIMIT_V1)
+                    return SIMPLE_MCDC_V1_INVALID;
+                const uint64_t bit = UINT64_C(1) << condition;
+                if (referenced & bit) return SIMPLE_MCDC_V1_INVALID;
+                referenced |= bit;
+                ++depth;
+            } else if (opcode == SIMPLE_MCDC_EXPR_NOT_V1) {
+                if (condition || depth < 1) return SIMPLE_MCDC_V1_INVALID;
+            } else if (opcode == SIMPLE_MCDC_EXPR_AND_V1 ||
+                       opcode == SIMPLE_MCDC_EXPR_OR_V1) {
+                if (condition || depth < 2) return SIMPLE_MCDC_V1_INVALID;
+                --depth;
+            } else return SIMPLE_MCDC_V1_INVALID;
+        }
+        if (depth != 1 || referenced != ((UINT64_C(1) << conditions) - 1u))
+            return SIMPLE_MCDC_V1_INVALID;
+        previous_digest = digest;
+        previous_decision = decision;
+        expected_token_offset += count;
+    }
+    if (expected_token_offset != token_count) return SIMPLE_MCDC_V1_INVALID;
+    const uint64_t semantic_count = mcdc_wire_u64_v1(bytes + semantic_offset);
+    if (semantic_count != program_count) return SIMPLE_MCDC_V1_INVALID;
+    uint64_t cursor = semantic_offset + 8u;
+    for (uint64_t row = 0; row < semantic_count; ++row) {
+        if (cursor > byte_count || byte_count - cursor < 4u)
+            return SIMPLE_MCDC_V1_INVALID;
+        const uint32_t length = mcdc_wire_u32_v1(bytes + cursor);
+        cursor += 4u;
+        if (length > 4096u || length > byte_count - cursor)
+            return SIMPLE_MCDC_V1_INVALID;
+        cursor += length;
+    }
+    if (cursor != byte_count) return SIMPLE_MCDC_V1_INVALID;
+    *info = (SimpleMcdcManifestInfoV1){program_count, token_count,
+                                      semantic_count, semantic_offset, {0}};
+    memcpy(info->identity_sha256, bytes + 24, 64);
+    return SIMPLE_MCDC_V1_OK;
+}
+
+int32_t rt_mcdc_manifest_requirements_v1(
+        const uint8_t *bytes, uint64_t byte_count,
+        SimpleMcdcManifestInfoV1 *info) {
+    if (!info || (uintptr_t)info % _Alignof(SimpleMcdcManifestInfoV1))
+        return SIMPLE_MCDC_V1_INVALID;
+    if (byte_count <= SIZE_MAX &&
+        mcdc_ranges_overlap(bytes, (size_t)byte_count, info, sizeof(*info)))
+        return SIMPLE_MCDC_V1_INVALID;
+    return mcdc_manifest_inspect_v1(bytes, byte_count, info);
+}
+
+int32_t rt_mcdc_manifest_decode_v1(
+        const uint8_t *bytes, uint64_t byte_count,
+        SimpleMcdcDecisionExprV1 *programs, uint64_t program_capacity,
+        SimpleMcdcExprTokenV1 *tokens, uint64_t token_capacity,
+        SimpleMcdcManifestInfoV1 *info) {
+    if (!info || (uintptr_t)info % _Alignof(SimpleMcdcManifestInfoV1) ||
+        (program_capacity && !programs) || (token_capacity && !tokens) ||
+        (programs && (uintptr_t)programs % _Alignof(SimpleMcdcDecisionExprV1)) ||
+        (tokens && (uintptr_t)tokens % _Alignof(SimpleMcdcExprTokenV1)))
+        return SIMPLE_MCDC_V1_INVALID;
+    if (byte_count <= SIZE_MAX &&
+        mcdc_ranges_overlap(bytes, (size_t)byte_count, info, sizeof(*info)))
+        return SIMPLE_MCDC_V1_INVALID;
+    int32_t status = mcdc_manifest_inspect_v1(bytes, byte_count, info);
+    if (status != SIMPLE_MCDC_V1_OK) return status;
+    if (program_capacity < info->program_count || token_capacity < info->token_count)
+        return SIMPLE_MCDC_V1_OUTPUT_TOO_SMALL;
+    const size_t byte_size = (size_t)byte_count;
+    if (mcdc_ranges_overlap(bytes, byte_size, programs,
+                            (size_t)info->program_count * sizeof(*programs)) ||
+        mcdc_ranges_overlap(bytes, byte_size, tokens,
+                            (size_t)info->token_count * sizeof(*tokens)) ||
+        mcdc_ranges_overlap(programs,
+                            (size_t)info->program_count * sizeof(*programs),
+                            tokens, (size_t)info->token_count * sizeof(*tokens)) ||
+        mcdc_ranges_overlap(programs,
+                            (size_t)info->program_count * sizeof(*programs),
+                            info, sizeof(*info)) ||
+        mcdc_ranges_overlap(tokens,
+                            (size_t)info->token_count * sizeof(*tokens),
+                            info, sizeof(*info)))
+        return SIMPLE_MCDC_V1_INVALID;
+    const uint64_t wire_token_offset = 88u + info->program_count * 32u;
+    for (uint64_t row = 0; row < info->program_count; ++row) {
+        const uint8_t *wire = bytes + 88u + row * 32u;
+        programs[row] = (SimpleMcdcDecisionExprV1){
+            mcdc_wire_u64_v1(wire), mcdc_wire_u64_v1(wire + 8),
+            mcdc_wire_u32_v1(wire + 16), mcdc_wire_u32_v1(wire + 20),
+            mcdc_wire_u64_v1(wire + 24)};
+    }
+    for (uint64_t index = 0; index < info->token_count; ++index) {
+        const uint8_t *wire = bytes + wire_token_offset + index * 8u;
+        tokens[index] = (SimpleMcdcExprTokenV1){wire[0], {0, 0, 0},
+                                               mcdc_wire_u32_v1(wire + 4)};
+    }
+    return SIMPLE_MCDC_V1_OK;
+}
 
 static bool mcdc_program_valid_v1(const SimpleMcdcDecisionExprV1 *program,
                                   const SimpleMcdcExprTokenV1 *tokens,
@@ -801,8 +967,20 @@ int32_t rt_mcdc_analyze_masking_v1(
     size_t start = 0;
     for (size_t p = 0; p < (size_t)program_count; ++p) {
         const SimpleMcdcDecisionExprV1 *program = &programs[p];
-        if (start >= (size_t)event_count || events[start].decision_id != program->decision_id ||
-            events[start].source_digest != program->source_digest) return SIMPLE_MCDC_V1_INVALID;
+        if (analysis->decisions == UINT64_MAX ||
+            analysis->gross_conditions > UINT64_MAX - program->condition_count)
+            return SIMPLE_MCDC_V1_OVERFLOW;
+        ++analysis->decisions;
+        analysis->gross_conditions += program->condition_count;
+        if (start >= (size_t)event_count) continue;
+        if (events[start].source_digest < program->source_digest ||
+            (events[start].source_digest == program->source_digest &&
+             events[start].decision_id < program->decision_id))
+            return SIMPLE_MCDC_V1_INVALID;
+        if (events[start].source_digest > program->source_digest ||
+            (events[start].source_digest == program->source_digest &&
+             events[start].decision_id > program->decision_id))
+            continue;
         size_t end = start;
         while (end < (size_t)event_count && events[end].decision_id == program->decision_id &&
                events[end].source_digest == program->source_digest) {
@@ -812,11 +990,6 @@ int32_t rt_mcdc_analyze_masking_v1(
                 return SIMPLE_MCDC_V1_INVALID;
             ++end;
         }
-        if (analysis->decisions == UINT64_MAX ||
-            analysis->gross_conditions > UINT64_MAX - program->condition_count)
-            return SIMPLE_MCDC_V1_OVERFLOW;
-        ++analysis->decisions;
-        analysis->gross_conditions += program->condition_count;
         uint64_t covered = 0;
         for (uint32_t condition = 0; condition < program->condition_count; ++condition) {
             const uint64_t target = UINT64_C(1) << condition;
@@ -867,6 +1040,50 @@ int32_t rt_mcdc_analyze_masking_v1(
     }
     if (start != (size_t)event_count) return SIMPLE_MCDC_V1_INVALID;
     return output_overflow ? SIMPLE_MCDC_V1_OUTPUT_TOO_SMALL : SIMPLE_MCDC_V1_OK;
+}
+
+int32_t rt_mcdc_analyze_masking_mcdp_v1(
+        const SimpleMcdcVectorV1 *events, uint64_t event_count,
+        const uint8_t *bytes, uint64_t byte_count,
+        SimpleMcdcDecisionExprV1 *program_workspace,
+        uint64_t program_capacity,
+        SimpleMcdcExprTokenV1 *token_workspace, uint64_t token_capacity,
+        SimpleMcdcWitnessV1 *witnesses, uint64_t witness_capacity,
+        uint64_t proof_budget, SimpleMcdcAnalysisV1 *analysis,
+        SimpleMcdcManifestInfoV1 *info) {
+    if (!analysis || !info || event_count > SIZE_MAX ||
+        witness_capacity > SIZE_MAX ||
+        program_capacity > MCDC_MANIFEST_MAX_PROGRAMS_V1 ||
+        token_capacity > MCDC_MANIFEST_MAX_TOKENS_V1 ||
+        event_count > SIZE_MAX / sizeof(*events) ||
+        witness_capacity > SIZE_MAX / sizeof(*witnesses))
+        return SIMPLE_MCDC_V1_INVALID;
+    const size_t event_bytes = (size_t)event_count * sizeof(*events);
+    const size_t program_bytes = (size_t)program_capacity * sizeof(*program_workspace);
+    const size_t token_bytes = (size_t)token_capacity * sizeof(*token_workspace);
+    const size_t witness_bytes = (size_t)witness_capacity * sizeof(*witnesses);
+    if (mcdc_ranges_overlap(events, event_bytes, program_workspace, program_bytes) ||
+        mcdc_ranges_overlap(events, event_bytes, token_workspace, token_bytes) ||
+        mcdc_ranges_overlap(events, event_bytes, info, sizeof(*info)) ||
+        mcdc_ranges_overlap(program_workspace, program_bytes,
+                            witnesses, witness_bytes) ||
+        mcdc_ranges_overlap(token_workspace, token_bytes,
+                            witnesses, witness_bytes) ||
+        mcdc_ranges_overlap(info, sizeof(*info), witnesses, witness_bytes) ||
+        mcdc_ranges_overlap(program_workspace, program_bytes,
+                            analysis, sizeof(*analysis)) ||
+        mcdc_ranges_overlap(token_workspace, token_bytes,
+                            analysis, sizeof(*analysis)) ||
+        mcdc_ranges_overlap(info, sizeof(*info), analysis, sizeof(*analysis)))
+        return SIMPLE_MCDC_V1_INVALID;
+    const int32_t status = rt_mcdc_manifest_decode_v1(
+        bytes, byte_count, program_workspace, program_capacity,
+        token_workspace, token_capacity, info);
+    if (status != SIMPLE_MCDC_V1_OK) return status;
+    return rt_mcdc_analyze_masking_v1(
+        events, event_count, program_workspace, info->program_count,
+        token_workspace, info->token_count, witnesses, witness_capacity,
+        proof_budget, analysis);
 }
 
 static bool coverage_add_size(size_t a, size_t b, size_t *result) {
