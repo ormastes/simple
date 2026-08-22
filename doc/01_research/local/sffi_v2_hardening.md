@@ -2017,6 +2017,20 @@ gap would otherwise force a success-path collection initializer or wider
 function authority. Lint reports exactly those two raw-call warnings plus the
 six older public primitive-API errors. No artifact is signed or admitted.
 
+The final two calls in this owner now also have lexical authority without a
+forwarding function. The directory-list scope encloses its single traversal so
+the array result needs no empty success-path initializer. The process scope
+encloses one tuple capture and copies only stdout plus status into existing
+locals before ordinary safe filtering resumes. Raw call counts, process
+launches, directory traversals, retries, and lookup behavior are unchanged.
+Both focused suites remain green (3/3 source authority, 6/6 behavior); the
+source-spec observation is 5.73 seconds at 172,956 KiB peak RSS under the seed.
+Optimizer general patterns remain 14. Lint now reports zero raw-runtime warnings
+for this owner and only the six older primitive-API errors. Census is 21,334
+raw / 1,926 explicit / 19,408 missing, with all 40 calls in this owner lexical.
+This closes call authority only, not the list/tuple ABI ambiguity or signed
+artifact admission.
+
 ## Driver source-loading file-call authority
 
 The largest remaining production `rt_file` caller,
