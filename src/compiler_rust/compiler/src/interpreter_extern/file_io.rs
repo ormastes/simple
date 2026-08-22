@@ -299,7 +299,7 @@ pub fn rt_file_size(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
     match fs::metadata(&path) {
         Ok(meta) => Ok(Value::Int(meta.len() as i64)),
-        Err(_) => Ok(Value::Int(0)),
+        Err(_) => Ok(Value::Int(-1)),
     }
 }
 
@@ -316,7 +316,7 @@ pub fn rt_file_hash_sha256(args: &[Value]) -> Result<Value, CompileError> {
                 .collect::<String>();
             Ok(Value::text(hex))
         }
-        Err(_) => Ok(Value::text(String::new())),
+        Err(_) => Ok(Value::Nil),
     }
 }
 
@@ -1490,6 +1490,38 @@ mod tests {
         );
         std::fs::remove_file(&path).unwrap();
         assert_eq!(rt_file_read_text(&[path_value]).unwrap(), Value::Nil);
+    }
+
+    #[test]
+    fn file_size_matches_native_missing_file_sentinel() {
+        let path = std::env::temp_dir().join(format!(
+            "simple_file_size_missing_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(
+            rt_file_size(&[Value::text(path.to_string_lossy().to_string())]).unwrap(),
+            Value::Int(-1)
+        );
+    }
+
+    #[test]
+    fn file_hash_distinguishes_empty_file_digest_from_failure() {
+        let path = std::env::temp_dir().join(format!(
+            "simple_file_hash_empty_{}",
+            std::process::id()
+        ));
+        std::fs::write(&path, "").unwrap();
+        let path_value = Value::text(path.to_string_lossy().to_string());
+        assert_eq!(
+            rt_file_hash_sha256(std::slice::from_ref(&path_value)).unwrap(),
+            Value::text(
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                    .to_string()
+            )
+        );
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(rt_file_hash_sha256(&[path_value]).unwrap(), Value::Nil);
     }
 
     #[test]

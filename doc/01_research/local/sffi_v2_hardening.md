@@ -1219,3 +1219,15 @@ specs pass through the interpreter. Census/ratchet pass at 12,453 declarations,
 11,670 untouched, 510 tagged, 585 contracted, and zero signed admissions.
 The lower tag count is intentional deletion of duplicate unsafe declarations,
 not loss of protection; canonical owner tags remain.
+
+Cross-engine file metadata/hash semantics are now aligned. The native C and
+Rust runtime providers already return `-1` for missing file size and `nil` for
+a failed SHA-256 read, but the interpreter fabricated `0` and empty text. The
+interpreter now returns the same `-1`/`nil` contract, preserving the real
+zero-byte size and the valid 64-character SHA-256 digest of an empty file as
+successful values. This changes only failure construction: no extra syscall,
+read, hash pass, allocation, lookup, or hot-path branch is introduced. Six
+focused Rust file-provider tests pass, including exact missing-size and
+empty-file-versus-failure hash cases. Higher-level optional/result lifting and
+signed artifact admission remain open, so this is cross-lane provider
+correction rather than full verification.

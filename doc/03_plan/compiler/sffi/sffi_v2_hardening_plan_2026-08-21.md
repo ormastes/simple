@@ -964,3 +964,10 @@ path. Current census: 12,453 declarations, 11,670 untouched, 510 tagged, 585
 contracted, and zero signed admissions. Continue with the remaining direct
 `rt_file_*` declarations ranked by production fan-out, preferring semantic
 facades over repeated unsafe annotations.
+
+The interpreter file-size and SHA-256 handlers now match native C/Rust failure
+sentinels (`-1` and `nil`) instead of fabricating valid-looking zero/empty
+values. Keep the single-pass provider behavior. Next lift those raw sentinels
+at the canonical Simple owner into `Option`/`Result` without a secondary
+last-error query, then migrate callers by semantic need. Six Rust file-provider
+tests pass; artifact signing and proof receipts are still absent.
