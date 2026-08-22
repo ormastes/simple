@@ -132,9 +132,53 @@ fn _finish_scenario(name: text, start_line: i64, end_line: i64,
         local_arithmetic_oracle: local_arithmetic,
         magic_expected_count: magic_expected)
 
+# Pre-pass: module-level fns whose bodies contain real executed assertions.
+# A scenario that calls such a helper is executing a real oracle even though
+# the assertion text lives outside the it-block (common `fn assert_offsets`
+# shape); ORA-001 must not fire on it.
+fn _asserting_helper_names(lines: [text]) -> [text]:
+    var names: [text] = []
+    var current = ""
+    var has_assertion = false
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("fn "):
+            var nm = trimmed.substring(3)
+            val paren = nm.index_of("(")
+            val named = paren > 0
+            if named:
+                nm = nm.substring(0, paren)
+            if current != "" and named:
+                if has_assertion and not names.contains(current):
+                    names.push(current)
+                current = ""
+                has_assertion = false
+            if named and nm != "main" and nm != "check" and nm != "expect":
+                current = nm
+                has_assertion = false
+        if current != "" and (trimmed.contains("expect(") or trimmed.contains("assert(") or
+                trimmed.contains("check(") or trimmed.contains("check_msg(") or
+                trimmed.contains("assert_true(") or trimmed.contains("assert_equal(")):
+            has_assertion = true
+    if current != "" and has_assertion and not names.contains(current):
+        names.push(current)
+    names
+
+fn _calls_asserting_helper(line: text, helper_names: [text]) -> bool:
+    if helper_names.len() == 0:
+        return false
+    val trimmed = line.trim()
+    if trimmed.starts_with("#") or trimmed.starts_with("fn "):
+        return false
+    for name in helper_names:
+        if trimmed.contains(name + "("):
+            return true
+    false
+
 fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
     val lines = source.split("\n")
     val lower = source.lower()
+    val asserting_helper_names = _asserting_helper_names(lines)
     var scenarios: [SspecScenarioFacts] = []
     var current_name = ""
     var current_line: i64 = 0
@@ -207,6 +251,8 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
             scenario_steps = scenario_steps + 1
         if current_line > 0 and (line_lower.contains("expect(") or line_lower.contains("assert(") or
                 line_lower.contains("expect_compile") or line_lower.contains("assert_compile") or
+                line_lower.contains("check(") or line_lower.contains("check_msg(") or
+                _calls_asserting_helper(line, asserting_helper_names) or
                 _is_standalone_assertion(line)):
             assertions = assertions + 1
             if current_line > 0: scenario_assertions = scenario_assertions + 1
@@ -218,7 +264,7 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
                     not line_lower.contains("# explained:") and
                     not line_lower.contains("# oracle:"):
                 scenario_magic_expected = scenario_magic_expected + 1
-            if _is_real_assertion(line) and not local_arithmetic:
+            if (_is_real_assertion(line) or _calls_asserting_helper(line, asserting_helper_names)) and not local_arithmetic:
                 real_assertions = real_assertions + 1
                 if current_line > 0: scenario_real = scenario_real + 1
         # Typed-evidence surface: the modern stack captures via
