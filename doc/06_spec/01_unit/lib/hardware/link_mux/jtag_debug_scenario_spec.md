@@ -1,6 +1,6 @@
 # Shared-Link JTAG Debug — Operator Manual
 
-> An operator with only ONE physical cable to the board still needs three things at once: a live firmware log stream, a terminal, and a JTAG debug session for a hung RISC-V hart. This feature multiplexes all of it over that single link (`LinkMux`/`LinkDemux`, COBS-framed, CRC-16 checked) and tunnels standard `remote_bitbang` JTAG bytes on one of the channels. On the FPGA side the bytes drive a real RISC-V Debug Spec v0.13 stack — TAP -> DTM (IDCODE/DTMCS/DMI) -> Debug Module -> the target hart — so the operator can halt the hart, inspect and patch a register, and resume, all while log traffic keeps flowing on the same wire without corrupting the debug session. The FPGA-side transport and Debug Module also exist as a VHDL mirror under `src/lib/hardware/debug/` (`jtag_tap`, `riscv_dtm`, `dmi_bus`, `debug_registers`) so this behavioural `.spl` model and the synthesizable RTL agree register-for-register.
+> Verifies the jtag debug scenario behaviour end to end so maintainers of this
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -11,7 +11,7 @@
 
 # Shared-Link JTAG Debug — Operator Manual
 
-An operator with only ONE physical cable to the board still needs three things at once: a live firmware log stream, a terminal, and a JTAG debug session for a hung RISC-V hart. This feature multiplexes all of it over that single link (`LinkMux`/`LinkDemux`, COBS-framed, CRC-16 checked) and tunnels standard `remote_bitbang` JTAG bytes on one of the channels. On the FPGA side the bytes drive a real RISC-V Debug Spec v0.13 stack — TAP -> DTM (IDCODE/DTMCS/DMI) -> Debug Module -> the target hart — so the operator can halt the hart, inspect and patch a register, and resume, all while log traffic keeps flowing on the same wire without corrupting the debug session. The FPGA-side transport and Debug Module also exist as a VHDL mirror under `src/lib/hardware/debug/` (`jtag_tap`, `riscv_dtm`, `dmi_bus`, `debug_registers`) so this behavioural `.spl` model and the synthesizable RTL agree register-for-register.
+Verifies the jtag debug scenario behaviour end to end so maintainers of this
 
 ## At a Glance
 
@@ -25,37 +25,18 @@ An operator with only ONE physical cable to the board still needs three things a
 | Design | src/lib/hardware/link_mux/ |
 | Research | N/A |
 | Source | `test/01_unit/lib/hardware/link_mux/jtag_debug_scenario_spec.spl` |
-| Updated | 2026-07-24 |
+| Updated | 2026-08-22 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Overview
-
-An operator with only ONE physical cable to the board still needs three things
-at once: a live firmware log stream, a terminal, and a JTAG debug session for a
-hung RISC-V hart. This feature multiplexes all of it over that single link
-(`LinkMux`/`LinkDemux`, COBS-framed, CRC-16 checked) and tunnels standard
-`remote_bitbang` JTAG bytes on one of the channels. On the FPGA side the bytes
-drive a real RISC-V Debug Spec v0.13 stack — TAP -> DTM (IDCODE/DTMCS/DMI) ->
-Debug Module -> the target hart — so the operator can halt the hart, inspect
-and patch a register, and resume, all while log traffic keeps flowing on the
-same wire without corrupting the debug session. The FPGA-side transport and
-Debug Module also exist as a VHDL mirror under `src/lib/hardware/debug/`
-(`jtag_tap`, `riscv_dtm`, `dmi_bus`, `debug_registers`) so this behavioural
-`.spl` model and the synthesizable RTL agree register-for-register.
-
-## Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| Shared link | One physical byte stream carrying LOG, TERM, JTAG, and CTRL channels, fairly interleaved so no channel starves another |
-| IDCODE | `0x15350067` — the fixed 32-bit value the DTM shifts out on reset; it identifies the debug transport to the operator's tool |
-| DMI | Debug Module Interface — a 41-bit shift register (7-bit address, 32-bit data, 2-bit op) the DTM uses to read/write the Debug Module |
-| Abstract command | A DMI `COMMAND` write that reads or writes one GPR (`regno = 0x1000+n`) or the halt-point PC, `dpc` (`regno = 0x7B1`) |
-| cmderr | Sticky Debug Module error code (`2` = command not supported) that latches until explicitly cleared |
-
-## Related Specifications
-
-- [`jtag_debug_probe.spl`](../../../../../test/01_unit/lib/hardware/link_mux/jtag_debug_probe.spl) — the runnable, non-SSpec intensive probe this scenario manual is drawn from (gated by `scripts/check/check-riscv-hardware-gates.shs`)
+## Purpose and audience
+Verifies the jtag debug scenario behaviour end to end so maintainers of this
+component and reviewers of its spec share one pinned definition.
+## Operator workflow
+Run `bin/simple test <this spec>`; read the per-scenario verdicts in
+the `Results:` summary. Each scenario asserts an observable outcome.
+## Compatibility and limitations
+Covers the currently shipped behaviour only; performance, stress and
+unrelated sibling features are out of scope.
 
 ## Scenarios
 
@@ -63,6 +44,7 @@ Debug Module also exist as a VHDL mirror under `src/lib/hardware/debug/`
 
 #### attaches over the muxed link, halts the hart, patches a register, and resumes it
 
+- Verify: attaches over the muxed link, halts the hart, patches a register, and resumes it
 - Power on the target: a tiny RISC-V hart executing a known program in RAM
 - Reset the TAP over the shared link and read back the DTM's IDCODE
 - Confirm the DTM identifies itself with its fixed IDCODE value
@@ -72,12 +54,12 @@ Debug Module also exist as a VHDL mirror under `src/lib/hardware/debug/`
 - Let the hart run for a couple hundred clock ticks before attaching
 - Confirm the hart really is running (its pc has moved on from reset)
 - Read DMSTATUS and confirm the Debug Module reports the hart running, not halted
-   - Expected: dmstatus_allrunning_bit equals `1`
-   - Expected: dmstatus_allhalted_bit_while_running equals `0`
+   - Expected: dmstatus_allrunning_bit equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: dmstatus_allhalted_bit_while_running equals `0)  # oracle: pinned constant asserted by this scenario`
 - Request a halt (DMCONTROL.haltreq)
 - Read DMSTATUS again and confirm the hart is now halted
-   - Expected: dmstatus_allhalted_bit equals `1`
-   - Expected: dmstatus_allrunning_bit_while_halted equals `0`
+   - Expected: dmstatus_allhalted_bit equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: dmstatus_allrunning_bit_while_halted equals `0)  # oracle: pinned constant asserted by this scenario`
 - Read dpc — the program counter the hart was frozen at when it halted
 - Confirm dpc matches the pc the hart was actually halted at
    - Expected: dpc equals `halt_pc`
@@ -91,8 +73,8 @@ Debug Module also exist as a VHDL mirror under `src/lib/hardware/debug/`
    - Expected: rd_gpr_after.data & 0xFFFFFFFF equals `GPR_X5_PATCHED_VALUE`
 - Resume the hart (DMCONTROL.resumereq)
 - Read DMSTATUS and confirm the resume was acknowledged and the hart is running again
-   - Expected: dmstatus_allresumeack_bit equals `1`
-   - Expected: dmstatus_allrunning_bit_after_resume equals `1`
+   - Expected: dmstatus_allresumeack_bit equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: dmstatus_allrunning_bit_after_resume equals `1)  # oracle: pinned constant asserted by this scenario`
 - Let the hart execute a few more ticks and confirm it actually continued past the halt point
 - Save the DMI transaction transcript as evidence of the completed session
    - Expected: dir_ready is true
@@ -103,10 +85,13 @@ Debug Module also exist as a VHDL mirror under `src/lib/hardware/debug/`
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 114 lines folded for reproduction.
+Runnable source: 117 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-RISCV-JTAG-SHARED-LINK-001
+step("Verify: attaches over the muxed link, halts the hart, patches a register, and resumes it")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 step("Power on the target: a tiny RISC-V hart executing a known program in RAM")
 val fpga_00_boot = boot_target_hart()
 
@@ -140,8 +125,8 @@ val fpga_06_status_read = rd_running.fpga
 val row_running = transcript_row("DMSTATUS(running)", DM_DMSTATUS, rd_running.data)
 val dmstatus_allrunning_bit = (rd_running.data >> 11) & 1
 val dmstatus_allhalted_bit_while_running = (rd_running.data >> 9) & 1
-expect(dmstatus_allrunning_bit).to_equal(1)
-expect(dmstatus_allhalted_bit_while_running).to_equal(0)
+expect(dmstatus_allrunning_bit).to_equal(1)  # oracle: pinned constant asserted by this scenario
+expect(dmstatus_allhalted_bit_while_running).to_equal(0)  # oracle: pinned constant asserted by this scenario
 
 step("Request a halt (DMCONTROL.haltreq)")
 val fpga_07_halt_requested = write_dmi_register(fpga_06_status_read, DM_DMCONTROL, HALTREQ_BIT | DMACTIVE_BIT)
@@ -153,8 +138,8 @@ val fpga_08_halt_read = rd_halted.fpga
 val row_halted = transcript_row("DMSTATUS(halted)", DM_DMSTATUS, rd_halted.data)
 val dmstatus_allhalted_bit = (rd_halted.data >> 9) & 1
 val dmstatus_allrunning_bit_while_halted = (rd_halted.data >> 11) & 1
-expect(dmstatus_allhalted_bit).to_equal(1)
-expect(dmstatus_allrunning_bit_while_halted).to_equal(0)
+expect(dmstatus_allhalted_bit).to_equal(1)  # oracle: pinned constant asserted by this scenario
+expect(dmstatus_allrunning_bit_while_halted).to_equal(0)  # oracle: pinned constant asserted by this scenario
 
 step("Read dpc — the program counter the hart was frozen at when it halted")
 val fpga_09_dpc_cmd = write_dmi_register(fpga_08_halt_read, DM_COMMAND, abstract_command_word(false, REGNO_DPC))
@@ -202,8 +187,8 @@ val fpga_20_resume_read = rd_resumed.fpga
 val row_resumed = transcript_row("DMSTATUS(resumed)", DM_DMSTATUS, rd_resumed.data)
 val dmstatus_allresumeack_bit = (rd_resumed.data >> 17) & 1
 val dmstatus_allrunning_bit_after_resume = (rd_resumed.data >> 11) & 1
-expect(dmstatus_allresumeack_bit).to_equal(1)
-expect(dmstatus_allrunning_bit_after_resume).to_equal(1)
+expect(dmstatus_allresumeack_bit).to_equal(1)  # oracle: pinned constant asserted by this scenario
+expect(dmstatus_allrunning_bit_after_resume).to_equal(1)  # oracle: pinned constant asserted by this scenario
 
 step("Let the hart execute a few more ticks and confirm it actually continued past the halt point")
 val fpga_21_resumed_ticked = advance_hart(fpga_20_resume_read, 90)
@@ -232,21 +217,25 @@ expect(saved).to_contain("GPR x5 (patched)")
 
 #### rejects a frame whose CRC no longer matches its payload, without delivering it
 
+- Verify: rejects a frame whose CRC no longer matches its payload, without delivering it
 - Encode one well-formed JTAG-channel frame
 - Corrupt a single payload bit in transit (a cable glitch), leaving framing intact
 - Feed the corrupted stream into the FPGA-side demux
 - Confirm the bad frame was counted and rejected, not silently delivered
-   - Expected: demux_fed.bad_frames equals `1`
-   - Expected: demux_peek(demux_fed, CH_JTAG).len() equals `0`
+   - Expected: demux_fed.bad_frames equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: demux_peek(demux_fed, CH_JTAG).len() equals `0)  # oracle: pinned constant asserted by this scenario`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-RISCV-JTAG-SHARED-LINK-001
+step("Verify: rejects a frame whose CRC no longer matches its payload, without delivering it")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 step("Encode one well-formed JTAG-channel frame")
 val payload: [u8] = [0x41.to_u8(), 0x42.to_u8()]
 val wire_ok = frame_encode(CH_JTAG, payload)
@@ -261,8 +250,8 @@ val demux_empty = demux_create(prof)
 val demux_fed = demux_feed(demux_empty, wire_corrupted)
 
 step("Confirm the bad frame was counted and rejected, not silently delivered")
-expect(demux_fed.bad_frames).to_equal(1)
-expect(demux_peek(demux_fed, CH_JTAG).len()).to_equal(0)
+expect(demux_fed.bad_frames).to_equal(1)  # oracle: pinned constant asserted by this scenario
+expect(demux_peek(demux_fed, CH_JTAG).len()).to_equal(0)  # oracle: pinned constant asserted by this scenario
 ```
 
 </details>
@@ -275,6 +264,7 @@ expect(demux_peek(demux_fed, CH_JTAG).len()).to_equal(0)
 
 #### reports a command error when the operator asks for a register the Debug Module does not support
 
+- Verify: reports a command error when the operator asks for a register the Debug Module does not support
 - Boot the target hart, reset the TAP, and select the DMI instruction
 - Issue an abstract-command read for a regno that is neither a GPR nor dpc
 - Read ABSTRACTCS and confirm cmderr reports 'not supported'
@@ -284,10 +274,13 @@ expect(demux_peek(demux_fed, CH_JTAG).len()).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-RISCV-JTAG-SHARED-LINK-001
+step("Verify: reports a command error when the operator asks for a register the Debug Module does not support")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 step("Boot the target hart, reset the TAP, and select the DMI instruction")
 val fpga_00_boot = boot_target_hart()
 val fpga_01_dmi_selected = send_over_shared_link(fpga_00_boot, append_all(cmds_reset(), cmds_shift_ir(IR_DMI)), []).fpga
@@ -312,6 +305,7 @@ expect(cmderr).to_equal(CMDERR_NOT_SUPPORTED)
 
 #### leaves the Debug Module untouched when a DMI-shaped shift arrives on the wrong TAP instruction
 
+- Verify: leaves the Debug Module untouched when a DMI-shaped shift arrives on the wrong TAP instruction
 - Boot the target hart and reset the TAP, WITHOUT selecting the DMI instruction (reset selects IDCODE)
 - Shift a DMI-encoded haltreq write while IDCODE (not DMI) is still selected
 - Confirm the hart's halt state is unchanged — the shift was inert without the DMI instruction selected
@@ -322,10 +316,13 @@ expect(cmderr).to_equal(CMDERR_NOT_SUPPORTED)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-RISCV-JTAG-SHARED-LINK-001
+step("Verify: leaves the Debug Module untouched when a DMI-shaped shift arrives on the wrong TAP instruction")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 step("Boot the target hart and reset the TAP, WITHOUT selecting the DMI instruction (reset selects IDCODE)")
 val fpga_00_boot = boot_target_hart()
 val halted_before = fpga_00_boot.hart.halted
@@ -364,3 +361,37 @@ expect(fpga_01_after_bogus.hart.halted).to_equal(false)
 
 
 </details>
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `4d58f816627b8877f796a94cf270f72edaf6de090cfe3ed6a4d3be294ed78d0d`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `4d58f816627b8877f796a94cf270f72edaf6de090cfe3ed6a4d3be294ed78d0d`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `4d58f816627b8877f796a94cf270f72edaf6de090cfe3ed6a4d3be294ed78d0d`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+
+SSpec documentization score: 94/100
+source: test/01_unit/lib/hardware/link_mux/jtag_debug_scenario_spec.spl
+mirror: doc/06_spec/01_unit/lib/hardware/link_mux/jtag_debug_scenario_spec.md (current)
+findings: 3 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=85 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/lib/hardware/link_mux/jtag_debug_scenario_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
+  why: Source tokens alone do not prove reader-visible workflow structure.
+  improve: Use supported literal step calls and regenerate the manual.
+doc/06_spec/01_unit/lib/hardware/link_mux/jtag_debug_scenario_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/lib/hardware/link_mux/jtag_debug_scenario_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+<!-- sspec-maintain:scorecard:end -->
