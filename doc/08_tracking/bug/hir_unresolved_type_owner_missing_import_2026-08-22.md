@@ -484,3 +484,105 @@ resolving in the IMPORTER's scope.
 `2 examples, 2 failures` at `624ee9947f6` **with and without** this lane's source
 changes (measured both ways by stashing). Recorded rather than stepped over
 silently; it is a separate defect from this one.
+## Follow-up 2026-08-22 (e) — third mechanism: a GENERIC callable's signature was never projected at all
+
+Two mechanisms are fixed above: owner-missing-import (`eeaf35d3be0`) and the
+projection/materialization constructor asymmetry — array-of-tuple, pointer,
+union (`4a40c00c8e5`, `9f11967564b`). This is the third, and it is neither.
+
+### The bail
+
+`declared_imported_surface_callable_type`
+(`20.hir/hir_lowering/_Items/module_callable_types.spl`) opened with
+
+```
+if callable.type_params.len() > 0 or not callable.has_return_type:
+    return nil
+```
+
+so a **generic** callable's signature was never projected. The importing module
+still got a `SymbolKind.Function` entry — with a `nil` type. No parameter types,
+no return type, and no projected identity for any cross-module type the
+signature names. Its non-generic sibling in the same module projects fine.
+
+The affected population is dominated by the generated fold visitors and codecs,
+where *every* walker is generic:
+
+```
+fn walk_ast_asm_location<C>(node: AsmLocation, ctx: C, f: fn(AstWalkNode, C) -> C) -> C
+```
+
+### Measured, not asserted — including what the lead got WRONG
+
+The lead for this lane predicted the bail also explained the run14 census names
+dominated by those generated files (AsmLocation 30, AsmConstraintKind 30,
+HirPattern 48, VhdlPortDirection 12, HirModule 12, HirExpr 12). **It does not,
+and the measurement says so.** Five probes on the deployed seed
+(`/mnt/data/worktrees/goal-main-1/bin/simple`, `SIMPLE_TIMEOUT_SECONDS=0`):
+
+1. Synthetic generic callable, explicit owner import — 0 errors.
+2. Same with the real `f: fn(AstWalkNode, C) -> C` parameter — 0 errors.
+3. Same through a `export use`-re-export hop, glob owner import, glob consumer,
+   and with the consumer actually CALLING the generic function — 0 errors.
+4. Targeted lowering against the **real** `10.frontend/generated/ast_visitor.spl`
+   and `10.frontend/parser_types_expr.spl` sources, with
+   `SIMPLE_HIR_UNRESOLVED_TYPE_TRACE=1`: every `[ist-proj-miss]` /
+   `[field-dep-unresolved]` line named `Span`, `bool`, `text`, `Option`, `i64`,
+   `Node` — modules deliberately absent from the probe's closure. **Zero
+   AsmLocation, zero AsmConstraintKind.**
+5. All six owner modules that name the asm types in a signature
+   (`hir_codec.spl`, `c_backend_translate_ops.spl`, `mir_to_llvm_helpers.spl`,
+   `asm_constraints_helpers.spl`, `_CBackendTranslate/class_core.spl`,
+   `mir_instruction_support.spl`) already import them explicitly.
+
+So the bail does **not** emit `unresolved type` — a `nil` signature type is
+silent by construction, which is exactly why this mechanism had no diagnostic
+and was never counted. The run14 asm/HirPattern census names remain
+**unexplained** by this lane and are NOT claimed as cleared here. Recording that
+plainly rather than asserting a clearance is the whole point of the
+"measure, do not reason" rule this record already carries twice.
+
+### What this lane DOES fix, with a measured before/after
+
+The defect is real and independently measurable: an imported generic callable's
+symbol carries no type. Pinned by parameter count of the projected signature,
+where `-1` means "nothing was projected":
+
+| shape | pre-fix | post-fix |
+|---|---|---|
+| `walk_ast_asm_location<C>(node, ctx, f)` | **-1** (nil type) | 3 |
+| non-generic sibling (control) | 2 | 2 |
+
+### Fix
+
+- `10.frontend/parser_types_expr.spl` — `parser_type_kind_is_function`,
+  `parser_type_kind_function_params`, `parser_type_kind_function_return`,
+  discriminant-guarded like every other `parser_type_kind_*` accessor.
+- `module_callable_types.spl` — the guard is now `not has_return_type` only.
+  `imported_surface_type` / `imported_surface_type_projected` take a
+  `bound_type_params: [text]` list; a `Named` (or array-element, or scalar
+  fast-path) name that the CALLABLE binds projects to
+  `HirTypeKind.TypeParam(name, [])` instead of being looked up in the owner's
+  qualified scope. That lookup is precisely what the old bail was avoiding: it
+  would have traded a dropped signature for a bogus `unresolved type: C`.
+- Same file — a `Function` arm on `imported_surface_type`, applying the durable
+  lesson from follow-up (c). `fn(A, B) -> C` is in the MATERIALIZATION walk's
+  constructor set and was not in the projection's; it only became *reachable*
+  once generic callables were projected at all, and without it this change would
+  have traded a dropped signature for a fresh `unresolved type: AstWalkNode` on
+  every importer of a generated visitor.
+
+Monomorphization is untouched — this is dependency PROJECTION, not
+instantiation (hardening plan §9).
+
+### Reproduce spec
+
+`test/01_unit/compiler/hir/imported_generic_callable_signature_projection_spec.spl`
+— **4 examples, 1 failure pre-fix** (`expected -1 to equal 3`), **0 failures
+post-fix**. Carries the non-generic control (green both sides, proving the
+defect is the generic guard and not the module shape) and an assertion that no
+error names the callable's own type parameter `C`.
+
+Pre-existing red, NOT caused by this lane and verified by `git stash` at
+`624ee9947f6`: `imported_tuple_signature_dependency_spec.spl` is 2/2 RED on
+origin/main.

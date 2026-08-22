@@ -163,7 +163,7 @@ impl HirLowering:
             param_idx = param_idx + 1
         HirType(kind: HirTypeKind.Function(param_types, self.lower_type(callable.return_type), []), span: callable.span)
 
-    me imported_surface_projected_named_args(kind: TypeKind, imported_module_name: text) -> [HirType]:
+    me imported_surface_projected_named_args(kind: TypeKind, imported_module_name: text, bound_type_params: [text]) -> [HirType]:
         # GENERIC ARGUMENTS were silently DROPPED by both scalar branches
         # below: each called `lower_named_kind(name, [], span)` / built
         # `Named(sym, [])` with an EMPTY argument list. The MATERIALIZATION
@@ -183,14 +183,25 @@ impl HirLowering:
         var projected_args: [HirType] = []
         for arg in parser_type_kind_named_args(kind):
             projected_args = projected_args.push(
-                self.imported_surface_type(arg, imported_module_name))
+                self.imported_surface_type(arg, imported_module_name, bound_type_params))
         projected_args
 
-    me imported_surface_type(type_: Type, imported_module_name: text) -> HirType:
+    me imported_surface_type(type_: Type, imported_module_name: text, bound_type_params: [text]) -> HirType:
         val source_name = parser_type_kind_named_name(type_.kind)
+        # A name the CALLABLE binds (`C`, `T`, ...) is not a name the owner
+        # declares. Projecting it through the owner's qualified scope finds
+        # nothing and `lower_named_kind` then reports `unresolved type: C`
+        # against an innocent importer -- which is exactly why
+        # `declared_imported_surface_callable_type` used to bail out of generic
+        # callables entirely rather than project them. Bind them here instead,
+        # so the signature can be projected without inventing that error.
+        # This is dependency PROJECTION only: instantiation stays where the
+        # hardening plan puts it (monomorphization, plan section 9).
+        if source_name != "" and module_surface_name_position(bound_type_params, source_name) >= 0:
+            return HirType(kind: HirTypeKind.TypeParam(source_name, []), span: type_.span)
         if source_name != "":
             val projected_args = self.imported_surface_projected_named_args(
-                type_.kind, imported_module_name)
+                type_.kind, imported_module_name, bound_type_params)
             val raw_symbol_id = self.symbols.lookup_qualified_type_raw(
                 imported_module_name, source_name)
             if raw_symbol_id >= 0:
@@ -229,9 +240,15 @@ impl HirLowering:
             var lowered_elements: [HirType] = []
             for element in tuple_elements:
                 lowered_elements = lowered_elements.push(
-                    self.imported_surface_type(element, imported_module_name))
+                    self.imported_surface_type(element, imported_module_name, bound_type_params))
             return HirType(kind: HirTypeKind.Tuple(lowered_elements), span: type_.span)
         val array_element_name = parser_type_kind_array_element_name(type_.kind)
+        if array_element_name != "" and module_surface_name_position(bound_type_params, array_element_name) >= 0:
+            return HirType(
+                kind: HirTypeKind.Array(
+                    HirType(kind: HirTypeKind.TypeParam(array_element_name, []), span: type_.span),
+                    nil),
+                span: type_.span)
         if array_element_name != "":
             val raw_element_id = self.symbols.lookup_qualified_type_raw(
                 imported_module_name, array_element_name)
@@ -280,7 +297,7 @@ impl HirLowering:
             val pointee = parser_type_kind_pointer_inner(type_.kind, type_)
             return HirType(
                 kind: HirTypeKind.Ptr(
-                    self.imported_surface_type(pointee, imported_module_name),
+                    self.imported_surface_type(pointee, imported_module_name, bound_type_params),
                     parser_type_kind_pointer_is_mutable(type_.kind)),
                 span: type_.span)
         val union_members = parser_type_kind_union_members(type_.kind)
@@ -288,18 +305,50 @@ impl HirLowering:
             var projected_members: [HirType] = []
             for member in union_members:
                 projected_members = projected_members.push(
-                    self.imported_surface_type(member, imported_module_name))
+                    self.imported_surface_type(member, imported_module_name, bound_type_params))
             return HirType(kind: HirTypeKind.Union(projected_members), span: type_.span)
         if parser_type_kind_is_array(type_.kind):
             val nested_element = parser_type_kind_array_element(type_.kind, type_)
             return HirType(
                 kind: HirTypeKind.Array(
-                    self.imported_surface_type(nested_element, imported_module_name),
+                    self.imported_surface_type(nested_element, imported_module_name, bound_type_params),
                     nil),
+                span: type_.span)
+        # FUNCTION (`fn(A, B) -> C`) is projected ELEMENTWISE for the same
+        # reason the array/tuple/pointer/union arms are: it is recursed by the
+        # MATERIALIZATION walk (`parser_type_named_dependencies`) and was not
+        # recursed here. It only became reachable once generic callables were
+        # projected at all -- the generated fold visitors are the population
+        # that carries it (`f: fn(AstWalkNode, C) -> C`), and without this arm
+        # enabling that projection would have traded a dropped signature for a
+        # fresh `unresolved type: AstWalkNode` on every importer.
+        if parser_type_kind_is_function(type_.kind):
+            var projected_params: [HirType] = []
+            for fn_param in parser_type_kind_function_params(type_.kind):
+                projected_params = projected_params.push(
+                    self.imported_surface_type(fn_param, imported_module_name, bound_type_params))
+            return HirType(
+                kind: HirTypeKind.Function(
+                    projected_params,
+                    self.imported_surface_type(
+                        parser_type_kind_function_return(type_.kind, type_),
+                        imported_module_name, bound_type_params),
+                    []),
                 span: type_.span)
         self.lower_type(type_)
 
-    me imported_surface_type_projected(type_: Type, type_name: text, array_element_name: text, imported_module_name: text) -> HirType:
+    me imported_surface_type_projected(type_: Type, type_name: text, array_element_name: text, imported_module_name: text, bound_type_params: [text]) -> HirType:
+        # Scalar fast paths run BEFORE the qualified lookup, so a callable-bound
+        # type parameter has to be recognised here too, not only in
+        # `imported_surface_type`.
+        if type_name != "" and module_surface_name_position(bound_type_params, type_name) >= 0:
+            return HirType(kind: HirTypeKind.TypeParam(type_name, []), span: type_.span)
+        if array_element_name != "" and module_surface_name_position(bound_type_params, array_element_name) >= 0:
+            return HirType(
+                kind: HirTypeKind.Array(
+                    HirType(kind: HirTypeKind.TypeParam(array_element_name, []), span: type_.span),
+                    nil),
+                span: type_.span)
         # Prefer scalar projections captured before the parser Type crossed a
         # nested Dict/array boundary.  The retained Type remains the complete
         # fallback for shapes not yet affected by the staged-native ABI bug.
@@ -313,7 +362,7 @@ impl HirLowering:
             var projected_args: [HirType] = []
             if parser_type_kind_named_name(type_.kind) == type_name:
                 projected_args = self.imported_surface_projected_named_args(
-                    type_.kind, imported_module_name)
+                    type_.kind, imported_module_name, bound_type_params)
             val raw_symbol_id = self.symbols.lookup_qualified_type_raw(
                 imported_module_name, type_name)
             if raw_symbol_id >= 0:
@@ -346,11 +395,26 @@ impl HirLowering:
                     kind: self.lower_named_kind(array_element_name, [], type_.span),
                     span: type_.span)
             return HirType(kind: HirTypeKind.Array(element, nil), span: type_.span)
-        self.imported_surface_type(type_, imported_module_name)
+        self.imported_surface_type(type_, imported_module_name, bound_type_params)
 
     me declared_imported_surface_callable_type(callable: ModuleSurfaceCallable, imported_module_name: text, owner_symbol: SymbolId?) -> HirType?:
-        if callable.type_params.len() > 0 or not callable.has_return_type:
+        # A GENERIC callable used to return nil here, so its signature was never
+        # projected AT ALL: the importer got a `SymbolKind.Function` symbol with
+        # a `nil` type, losing every parameter type, the return type, and the
+        # projected identity of every cross-module type the signature names.
+        # The population is dominated by the generated fold visitors and codecs,
+        # whose every walker is generic
+        # (`walk_ast_asm_location<C>(node: AsmLocation, ctx: C, f: fn(AstWalkNode, C) -> C) -> C`),
+        # while their non-generic siblings in the same module projected fine.
+        # Project them too, with the callable's own type parameters BOUND (see
+        # `imported_surface_type`) so `C` cannot surface as `unresolved type: C`.
+        # Instantiation is untouched -- monomorphization stays in plan section 9.
+        # See doc/08_tracking/bug/hir_unresolved_type_owner_missing_import_2026-08-22.md
+        if not callable.has_return_type:
             return nil
+        var bound_type_params: [text] = []
+        for type_param in callable.type_params:
+            bound_type_params = bound_type_params.push(type_param.name)
         var param_types: [HirType] = []
         var param_idx = 0
         if val owner_id = owner_symbol:
@@ -365,7 +429,8 @@ impl HirLowering:
                 return nil
             val param = callable.params[param_idx]
             param_types = param_types.push(self.imported_surface_type_projected(
-                param.type_, param.type_name, param.array_element_name, imported_module_name))
+                param.type_, param.type_name, param.array_element_name, imported_module_name,
+                bound_type_params))
             param_idx = param_idx + 1
         HirType(
             kind: HirTypeKind.Function(
@@ -374,7 +439,8 @@ impl HirLowering:
                     callable.return_type,
                     callable.return_type_name,
                     callable.return_array_element_name,
-                    imported_module_name),
+                    imported_module_name,
+                    bound_type_params),
                 []),
             span: callable.span)
 
