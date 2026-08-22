@@ -2,8 +2,10 @@
 
 use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.arch.user_entry_bridge.{dispatch_fs_exec_user_handoff}
-use os.kernel.loader.fs_exec_spawn.{fs_exec_prepare_spawn}
-use os.kernel.loader.fs_exec_spawn.{fs_exec_adopt_authenticated_with_launch_v1}
+use os.kernel.loader.fs_exec_spawn.{
+    fs_exec_prepare_spawn, fs_exec_adopt_authenticated_with_launch_v1,
+    FsExecAuthenticatedRunResultV1
+}
 use std.fs_driver.mount_table.{MountTable}
 use os.kernel.loader.executable_authority_registry.{ExecutableAuthorityRegistryV1, ExecutableAuthorityTokenV1}
 use os.kernel.loader.executable_load_plan_v1.{ExecutableLoadConsumerV1}
@@ -14,6 +16,11 @@ use os.kernel.log.klog.{KernelLog}
 use os.services.netstack.netstack_init.{net_arm64_task_teardown}
 use os.kernel.types.task_types.{TaskId}
 use os.kernel.scheduler.scheduler.{wait_collect_result_error, wait_collect_result_status}
+use os.kernel.scheduler.process_execution_observation.{
+    SchedulerExecutionDeliveryStatusV2,
+    scheduler_execution_compare_and_deliver_reaped_v2,
+    scheduler_execution_discard_terminal_v2
+}
 use os.kernel.types.capability_types.{CapabilityKind, CapabilitySet, CapabilityToken}
 use os.kernel.loader.server_launch_grants.{
     SIMPLEOS_SERVER_EXECUTABLE_V1, server_launch_grants_v1
@@ -94,12 +101,31 @@ pub fn arm64_fs_exec_spawn_authenticated_v1(
     path: text,
     recipe: i64
 ) -> i64:
-    """Consume loader authority, enter EL0, and reap the exact child once."""
+    """Compatibility launch with path as argv[0] and no environment."""
+    arm64_fs_exec_spawn_authenticated_with_launch_v1(
+        scheduler, table, authorities, token, consumer, entry_point,
+        caller, path, [path], [], recipe).exit_code
+
+pub fn arm64_fs_exec_spawn_authenticated_with_launch_v1(
+    scheduler: Scheduler,
+    table: MountTable,
+    authorities: ExecutableAuthorityRegistryV1,
+    token: ExecutableAuthorityTokenV1,
+    consumer: ExecutableLoadConsumerV1,
+    entry_point: u64,
+    caller: i64,
+    path: text,
+    argv: [text],
+    envp: [text],
+    recipe: i64
+) -> FsExecAuthenticatedRunResultV1:
+    """Consume authority, execute EL0, and return scheduler-owned evidence."""
     val prepared = fs_exec_adopt_authenticated_with_launch_v1(
         scheduler, table, authorities, token, consumer, entry_point,
-        caller, path, [path], [], recipe)
+        caller, path, argv, envp, recipe)
     if prepared.pid <= 0:
-        return prepared.pid
+        return FsExecAuthenticatedRunResultV1(
+            exit_code: prepared.pid, evidence: nil)
     serial_println("[fs-exec] spawn:pid={prepared.pid} path={path}")
     val child = TaskId(id: prepared.pid.to_u64())
     val exit_code = dispatch_fs_exec_user_handoff(
@@ -110,8 +136,14 @@ pub fn arm64_fs_exec_spawn_authenticated_v1(
     net_arm64_task_teardown(child.id)
     if wait_collect_result_error(collected) != 0 or
        wait_collect_result_status(collected) != exit_code.to_i32():
-        return -10
-    exit_code
+        _ = scheduler_execution_discard_terminal_v2(child.id)
+        return FsExecAuthenticatedRunResultV1(exit_code: -10, evidence: nil)
+    val delivered = scheduler_execution_compare_and_deliver_reaped_v2(
+        child.id, path, argv)
+    if delivered.status != SchedulerExecutionDeliveryStatusV2.Delivered:
+        _ = scheduler_execution_discard_terminal_v2(child.id)
+        return FsExecAuthenticatedRunResultV1(exit_code: -10, evidence: nil)
+    FsExecAuthenticatedRunResultV1(exit_code: exit_code, evidence: delivered.token)
 
 pub fn arm64_fs_exec_load_and_launch_hello_world() -> i64:
     """Load `/sys/apps/hello_world.smf` and emit genuine load + launch proofs.

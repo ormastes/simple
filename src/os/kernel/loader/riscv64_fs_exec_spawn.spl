@@ -9,9 +9,10 @@ use os.kernel.loader.executable_authority_registry.{ExecutableAuthorityRegistryV
 use os.kernel.loader.executable_load_plan_v1.{ExecutableLoadConsumerV1}
 use os.kernel.scheduler.scheduler_types.{Scheduler}
 use os.kernel.scheduler.process_execution_observation.{
-    SchedulerExecutionEvidenceTokenV1, scheduler_execution_take_reaped_token_v1,
-    scheduler_execution_evidence_consume_once_v1,
-    scheduler_execution_observe_reap_v1
+    SchedulerExecutionEvidenceTokenV1, SchedulerExecutionDeliveryStatusV2,
+    scheduler_execution_compare_and_deliver_reaped_v2,
+    scheduler_execution_discard_terminal_v2,
+    scheduler_execution_evidence_consume_once_v2,
 }
 use std.fs_driver.bytes_util.{text_to_bytes_pure}
 use os.kernel.arch.riscv64.process_stdout_capture.{
@@ -29,11 +30,9 @@ pub struct Rv64AuthenticatedExecutionResultV1:
     evidence: SchedulerExecutionEvidenceTokenV1?
 
 fn _discard_execution_observation(child_id: u64):
-    # Terminal cleanup is idempotent: reap may already have happened, delivery
-    # may already have happened, and consume rejects every replay.
-    _ = scheduler_execution_observe_reap_v1(child_id)
-    val token = scheduler_execution_take_reaped_token_v1(child_id)
-    if token.?: _ = scheduler_execution_evidence_consume_once_v1(token.unwrap())
+    # Terminal cleanup is one scheduler-owner transaction and never issues an
+    # evidence token to an adapter failure path.
+    _ = scheduler_execution_discard_terminal_v2(child_id)
 
 pub fn riscv64_fs_exec_spawn_authenticated_capture_with_launch_v1(
     scheduler: Scheduler,
@@ -94,7 +93,12 @@ pub fn riscv64_fs_exec_spawn_authenticated_capture_with_launch_v1(
         _discard_execution_observation(child.id)
         return Rv64AuthenticatedExecutionResultV1(exit_code: -10, evidence: nil)
     serial_println("RV64_AUTH_EXEC_EXIT code={captured.exit_code}")
-    val evidence = scheduler_execution_take_reaped_token_v1(child.id)
+    val delivered = scheduler_execution_compare_and_deliver_reaped_v2(
+        child.id, path, argv)
+    val evidence = if delivered.status == SchedulerExecutionDeliveryStatusV2.Delivered:
+        delivered.token
+    else:
+        nil
     if evidence.?:
         serial_println("RV64_AUTH_EXEC_REAP count=1 token=issued")
     if not evidence.?:
@@ -135,7 +139,7 @@ pub fn riscv64_authenticated_execution_acceptance_fixture_with_launch_v1(
     if run.exit_code != 0 or not run.evidence.?:
         return false
     val evidence_token = run.evidence.unwrap()
-    val consumed = scheduler_execution_evidence_consume_once_v1(evidence_token)
+    val consumed = scheduler_execution_evidence_consume_once_v2(evidence_token)
     if not consumed.?:
         return false
     val evidence = consumed.unwrap()
@@ -144,7 +148,7 @@ pub fn riscv64_authenticated_execution_acceptance_fixture_with_launch_v1(
         return false
     serial_println("RV64_AUTH_EXEC_STDOUT nonce={bundle_nonce} image={evidence.image_hash} value=hello from SimpleOS LLVM")
     serial_println("RV64_AUTH_EXEC_TOKEN_CONSUME nonce={bundle_nonce} image={evidence.image_hash} count=1 status=pass")
-    if scheduler_execution_evidence_consume_once_v1(evidence_token).?:
+    if scheduler_execution_evidence_consume_once_v2(evidence_token).?:
         return false
     serial_println("RV64_AUTH_EXEC_TOKEN_REPLAY nonce={bundle_nonce} image={evidence.image_hash} status=rejected")
     serial_println("RV64_AUTH_EXEC_ACCEPTANCE nonce={bundle_nonce} image={evidence.image_hash} status=pass")

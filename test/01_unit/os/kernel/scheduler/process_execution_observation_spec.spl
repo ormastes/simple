@@ -1,6 +1,10 @@
 use std.spec.*
 use std.common.contracts.execution.simpleos_executable_admission_v1.{ExecutableImageHandleV1}
 use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget}
+use os.kernel.loader.executable_launch_arguments_v1.{
+    executable_launch_arguments_v1_validate
+}
+use std.concurrent.thread.{thread_spawn}
 use os.kernel.arch.riscv64.process_stdout_capture.{
     rv64_process_stdout_begin, rv64_process_stdout_bind_child,
     rv64_process_stdout_write_byte, rv64_process_stdout_seal_and_flush,
@@ -10,7 +14,12 @@ use os.kernel.scheduler.process_execution_observation.{
     scheduler_execution_observe_adoption_v1, scheduler_execution_observe_exit_v1,
     scheduler_execution_observe_reap_v1, scheduler_execution_take_reaped_token_v1,
     scheduler_execution_evidence_consume_once_v1,
+    scheduler_execution_evidence_consume_once_v2,
+    scheduler_execution_compare_and_deliver_reaped_v2,
+    scheduler_execution_discard_terminal_v2,
+    SchedulerExecutionDeliveryStatusV2,
     scheduler_execution_observe_adoption_handle_v1,
+    scheduler_execution_observe_adoption_handle_with_launch_v1,
     scheduler_execution_observe_stdout_byte_for_handle_v1,
     scheduler_execution_observe_stdout_batch_for_handle_v1,
     scheduler_execution_observe_stderr_byte_for_handle_v1,
@@ -30,7 +39,102 @@ fn _handle() -> ExecutableImageHandleV1:
         admission_id: "observation-capacity", trust_epoch: 5u64,
         read_count: 0u64, read_bytes: 0u64, consumed: false)
 
+fn _race_delivery_410() -> i64:
+    val result = scheduler_execution_compare_and_deliver_reaped_v2(
+        410u64, "/tool", ["tool", "parallel"])
+    if result.status == SchedulerExecutionDeliveryStatusV2.Delivered: return 1
+    if result.status == SchedulerExecutionDeliveryStatusV2.Replay: return 2
+    0
+
 describe "scheduler execution observation capacity":
+    it "retains the scheduler-owned exact executable path and argv once":
+        val launch = executable_launch_arguments_v1_validate(
+            "/SYS/APPS/SIMPLEBOX.ELF", ["simplebox", "echo", "hello world"], []).unwrap()
+        val handle = scheduler_execution_observe_adoption_handle_with_launch_v1(
+            400u64, 7u64, _handle(), launch)
+        expect(handle.is_some()).to_equal(true)
+        expect(scheduler_execution_observe_exit_handle_v1(handle.unwrap(), 0)).to_equal(true)
+        expect(scheduler_execution_observe_reap_handle_v1(handle.unwrap())).to_equal(true)
+        val delivered = scheduler_execution_compare_and_deliver_reaped_v2(
+            400u64, "/SYS/APPS/SIMPLEBOX.ELF",
+            ["simplebox", "echo", "hello world"])
+        expect(delivered.status).to_equal(SchedulerExecutionDeliveryStatusV2.Delivered)
+        val token = delivered.token.unwrap()
+        val evidence = scheduler_execution_evidence_consume_once_v2(token).unwrap()
+        expect(evidence.command_observed).to_equal(true)
+        expect(evidence.executable_path).to_equal("/SYS/APPS/SIMPLEBOX.ELF")
+        expect(evidence.argv).to_equal(["simplebox", "echo", "hello world"])
+        expect(scheduler_execution_evidence_consume_once_v2(token).is_some()).to_equal(false)
+
+    it "rejects malformed or unbounded launch evidence before reserving a slot":
+        val invalid = scheduler_execution_compare_and_deliver_reaped_v2(
+            408u64, "", ["tool"])
+        expect(invalid.status).to_equal(
+            SchedulerExecutionDeliveryStatusV2.InvalidExpectedCommand)
+
+    it "tombstones a terminal command mismatch and rejects legacy rows in V2":
+        val launch = executable_launch_arguments_v1_validate(
+            "/tool", ["tool", "good"], []).unwrap()
+        val exact = scheduler_execution_observe_adoption_handle_with_launch_v1(
+            408u64, 7u64, _handle(), launch).unwrap()
+        expect(scheduler_execution_observe_exit_handle_v1(exact, 0)).to_equal(true)
+        expect(scheduler_execution_observe_reap_handle_v1(exact)).to_equal(true)
+        val mismatch = scheduler_execution_compare_and_deliver_reaped_v2(
+            408u64, "/tool", ["tool", "bad"])
+        expect(mismatch.status).to_equal(
+            SchedulerExecutionDeliveryStatusV2.CommandMismatch)
+        expect(scheduler_execution_take_reaped_token_v1(408u64).is_some()).to_equal(false)
+
+        val legacy = scheduler_execution_observe_adoption_handle_v1(
+            409u64, 7u64, _handle()).unwrap()
+        expect(scheduler_execution_observe_exit_handle_v1(legacy, 0)).to_equal(true)
+        expect(scheduler_execution_observe_reap_handle_v1(legacy)).to_equal(true)
+        val legacy_token = scheduler_execution_deliver_reaped_handle_v1(legacy).unwrap()
+        expect(scheduler_execution_evidence_consume_once_v2(legacy_token).is_some()).to_equal(false)
+        val legacy_evidence = scheduler_execution_evidence_consume_once_v1(legacy_token).unwrap()
+        expect(legacy_evidence.command_observed).to_equal(false)
+        expect(legacy_evidence.executable_path).to_equal("")
+        expect(legacy_evidence.argv.len()).to_equal(0)
+
+    it "normalizes empty argv and rejects replay and stale generation in V2":
+        val launch = executable_launch_arguments_v1_validate("/empty", [], []).unwrap()
+        val handle = scheduler_execution_observe_adoption_handle_with_launch_v1(
+            411u64, 7u64, _handle(), launch).unwrap()
+        expect(scheduler_execution_observe_exit_handle_v1(handle, 0)).to_equal(true)
+        expect(scheduler_execution_observe_reap_handle_v1(handle)).to_equal(true)
+        val delivered = scheduler_execution_compare_and_deliver_reaped_v2(
+            411u64, "/empty", [])
+        expect(delivered.status).to_equal(SchedulerExecutionDeliveryStatusV2.Delivered)
+        val replay = scheduler_execution_compare_and_deliver_reaped_v2(
+            411u64, "/empty", [])
+        expect(replay.status).to_equal(SchedulerExecutionDeliveryStatusV2.Replay)
+        val old_token = delivered.token.unwrap()
+        val evidence = scheduler_execution_evidence_consume_once_v2(old_token).unwrap()
+        expect(evidence.argv).to_equal(["/empty"])
+        val replacement = scheduler_execution_observe_adoption_handle_with_launch_v1(
+            412u64, 7u64, _handle(), launch).unwrap()
+        expect(scheduler_execution_evidence_consume_once_v2(old_token).is_some()).to_equal(false)
+        expect(scheduler_execution_discard_terminal_v2(412u64)).to_equal(false)
+        expect(scheduler_execution_observe_exit_handle_v1(replacement, -10)).to_equal(true)
+        expect(scheduler_execution_discard_terminal_v2(412u64)).to_equal(true)
+        expect(scheduler_execution_take_reaped_token_v1(412u64).is_some()).to_equal(false)
+
+    it "serializes concurrent token delivery to one winner":
+        val launch = executable_launch_arguments_v1_validate(
+            "/tool", ["tool", "parallel"], []).unwrap()
+        val handle = scheduler_execution_observe_adoption_handle_with_launch_v1(
+            410u64, 7u64, _handle(), launch).unwrap()
+        expect(scheduler_execution_observe_exit_handle_v1(handle, 0)).to_equal(true)
+        expect(scheduler_execution_observe_reap_handle_v1(handle)).to_equal(true)
+        val first = thread_spawn(\: _race_delivery_410())
+        val second = thread_spawn(\: _race_delivery_410())
+        val a = first.join()
+        val b = second.join()
+        expect(a + b).to_equal(3)
+        val token = scheduler_execution_take_reaped_token_v1(410u64)
+        expect(token.is_some()).to_equal(false)
+        expect(scheduler_execution_discard_terminal_v2(410u64)).to_equal(true)
+
     it "rejects duplicate live children and isolates interleaved handle operations":
         val first = scheduler_execution_observe_adoption_handle_v1(401u64, 7u64, _handle()).unwrap()
         val second = scheduler_execution_observe_adoption_handle_v1(402u64, 7u64, _handle()).unwrap()

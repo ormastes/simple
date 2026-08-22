@@ -1,6 +1,9 @@
 # Scheduler-owned, mutex-serialized, bounded execution observations.
 use std.common.contracts.execution.simpleos_executable_admission_v1.{ExecutableImageHandleV1}
 use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
+use os.kernel.loader.executable_launch_arguments_v1.{
+    ExecutableLaunchArgumentsV1, executable_launch_arguments_v1_validate
+}
 
 pub(package) struct SchedulerExecutionObservationHandleV1:
     slot: i64
@@ -12,6 +15,20 @@ pub struct SchedulerExecutionEvidenceTokenV1:
     generation: u64
     nonce: u64
 
+pub enum SchedulerExecutionDeliveryStatusV2:
+    Delivered
+    Unknown
+    NotExited
+    NotReaped
+    CommandMismatch
+    Replay
+    InvalidExpectedCommand
+    SerializationUnavailable
+
+pub struct SchedulerExecutionDeliveryResultV2:
+    status: SchedulerExecutionDeliveryStatusV2
+    token: SchedulerExecutionEvidenceTokenV1?
+
 pub struct SchedulerExecutionEvidenceV1:
     child_id: u64
     generation: u64
@@ -19,6 +36,9 @@ pub struct SchedulerExecutionEvidenceV1:
     image_hash: text
     mount_generation: u64
     file_generation: u64
+    command_observed: bool
+    executable_path: text
+    argv: [text]
     exit_code: i32
     stdout_bytes: [u8]
     stderr_bytes: [u8]
@@ -33,6 +53,9 @@ struct SchedulerExecutionObservationV1:
     image_hash: text
     mount_generation: u64
     file_generation: u64
+    command_observed: bool
+    executable_path: text
+    argv: [text]
     exit_code: i32
     exited: bool
     reaped: bool
@@ -81,13 +104,29 @@ fn _live_child_index(child_id: u64) -> i64:
         i = i + 1
     -1
 
-pub(package) fn scheduler_execution_observe_adoption_handle_v1(
-    child_id: u64, parent_id: u64, image: ExecutableImageHandleV1
+fn _text_vector_equal(left: [text], right: [text]) -> bool:
+    if left.len() != right.len(): return false
+    var i = 0
+    while i < left.len():
+        if left[i] != right[i]: return false
+        i = i + 1
+    true
+
+fn _consume_index(index: i64):
+    val observed = _observation_state.observations[index]
+    _observation_state.observations[index] = SchedulerExecutionObservationV1(
+        generation: observed.generation, nonce: 0u64, child_id: 0u64, parent_id: 0u64,
+        image_hash: "", mount_generation: 0u64, file_generation: 0u64,
+        command_observed: false, executable_path: "", argv: [], exit_code: 0,
+        exited: false, reaped: false, delivered: false, consumed: true,
+        stdout_bytes: [], stderr_bytes: [], stdout_truncated: false,
+        stderr_truncated: false)
+
+fn _reserve_observation_locked(
+    child_id: u64, parent_id: u64, image: ExecutableImageHandleV1,
+    command_observed: bool, executable_path: text, argv: [text]
 ) -> SchedulerExecutionObservationHandleV1?:
-    if child_id == 0u64 or image.image_hash == "" or image.mount_generation == 0u64 or not _lock():
-        return nil
     if _observation_state.exhausted or _live_child_index(child_id) >= 0:
-        _unlock()
         return nil
     var reusable = -1
     var i = 0
@@ -97,39 +136,82 @@ pub(package) fn scheduler_execution_observe_adoption_handle_v1(
             break
         i = i + 1
     if reusable < 0 and _observation_state.observations.len() >= OBSERVATION_LIMIT:
-        _unlock()
         return nil
-    val previous_generation = if reusable >= 0: _observation_state.observations[reusable].generation else: 0u64
-    if previous_generation == 0xFFFFFFFFFFFFFFFFu64 or _observation_state.nonce_counter == 0xFFFFFFFFFFFFFFFFu64:
+    val previous_generation = if reusable >= 0:
+        _observation_state.observations[reusable].generation
+    else:
+        0u64
+    if previous_generation == 0xFFFFFFFFFFFFFFFFu64 or
+       _observation_state.nonce_counter == 0xFFFFFFFFFFFFFFFFu64:
         _observation_state.exhausted = true
-        _unlock()
         return nil
     val generation = previous_generation + 1u64
     _observation_state.nonce_counter = _observation_state.nonce_counter + 1u64
-    val slot_index = if reusable >= 0: reusable else: _observation_state.observations.len()
-    # Private owner-issued identity and generation are the authority lookup;
-    # nonce is only a monotonic ABA discriminator, never a security claim.
+    val slot_index = if reusable >= 0:
+        reusable
+    else:
+        _observation_state.observations.len()
     val nonce = _observation_state.nonce_counter
     if nonce == 0u64:
         _observation_state.exhausted = true
-        _unlock()
         return nil
     val fresh = SchedulerExecutionObservationV1(
         generation: generation, nonce: nonce, child_id: child_id, parent_id: parent_id,
         image_hash: image.image_hash, mount_generation: image.mount_generation,
-        file_generation: image.file_generation, exit_code: 0, exited: false,
+        file_generation: image.file_generation, command_observed: command_observed,
+        executable_path: executable_path, argv: argv, exit_code: 0, exited: false,
         reaped: false, delivered: false, consumed: false, stdout_bytes: [], stderr_bytes: [],
         stdout_truncated: false, stderr_truncated: false)
     if reusable >= 0: _observation_state.observations[reusable] = fresh
     else: _observation_state.observations.push(fresh)
-    val handle = SchedulerExecutionObservationHandleV1(slot: slot_index, generation: generation, nonce: nonce)
+    Some(SchedulerExecutionObservationHandleV1(
+        slot: slot_index, generation: generation, nonce: nonce))
+
+pub(package) fn scheduler_execution_observe_adoption_handle_with_launch_v1(
+    child_id: u64, parent_id: u64, image: ExecutableImageHandleV1,
+    launch: ExecutableLaunchArgumentsV1
+) -> SchedulerExecutionObservationHandleV1?:
+    # `executable_path` and `argv` are the scheduler-validated, independently
+    # owned launch values.  This owner never accepts a post-execution command
+    # reconstructed by an adapter or caller.
+    # The transport struct is publicly constructible. Revalidate and take the
+    # observation owner's copy before locking; forged byte counts or embedded
+    # NULs can never enter canonical evidence.
+    val checked_launch = executable_launch_arguments_v1_validate(
+        launch.path, launch.argv, launch.envp)
+    if checked_launch.is_err(): return nil
+    val owned_launch = checked_launch.unwrap()
+    if child_id == 0u64 or image.image_hash == "" or
+       image.mount_generation == 0u64 or not _lock():
+        return nil
+    val handle = _reserve_observation_locked(
+        child_id, parent_id, image, true, owned_launch.path, owned_launch.argv)
     if not _unlock(): return nil
-    Some(handle)
+    handle
+
+pub(package) fn scheduler_execution_observe_adoption_with_launch_v1(
+    child_id: u64, parent_id: u64, image: ExecutableImageHandleV1,
+    launch: ExecutableLaunchArgumentsV1
+) -> bool:
+    scheduler_execution_observe_adoption_handle_with_launch_v1(
+        child_id, parent_id, image, launch).is_some()
+
+pub(package) fn scheduler_execution_observe_adoption_handle_v1(
+    child_id: u64, parent_id: u64, image: ExecutableImageHandleV1
+) -> SchedulerExecutionObservationHandleV1?:
+    """Compatibility observation that explicitly carries no command evidence."""
+    if child_id == 0u64 or image.image_hash == "" or image.mount_generation == 0u64 or not _lock():
+        return nil
+    val handle = _reserve_observation_locked(
+        child_id, parent_id, image, false, "", [])
+    if not _unlock(): return nil
+    handle
 
 pub(package) fn scheduler_execution_observe_adoption_v1(
     child_id: u64, parent_id: u64, image: ExecutableImageHandleV1
 ) -> bool:
-    scheduler_execution_observe_adoption_handle_v1(child_id, parent_id, image).is_some()
+    scheduler_execution_observe_adoption_handle_v1(
+        child_id, parent_id, image).is_some()
 
 pub(package) fn scheduler_execution_observation_handle_for_child_v1(child_id: u64) -> SchedulerExecutionObservationHandleV1?:
     if child_id == 0u64 or not _lock(): return nil
@@ -245,9 +327,96 @@ pub fn scheduler_execution_deliver_reaped_handle_v1(
     token
 
 pub fn scheduler_execution_take_reaped_token_v1(child_id: u64) -> SchedulerExecutionEvidenceTokenV1?:
-    val handle = scheduler_execution_observation_handle_for_child_v1(child_id)
-    if not handle.?: return nil
-    scheduler_execution_deliver_reaped_handle_v1(handle.unwrap())
+    # Lookup and delivery are one owner transaction; a reused slot cannot race
+    # between the child lookup and delivered-bit transition.
+    if child_id == 0u64 or not _lock(): return nil
+    val index = _live_child_index(child_id)
+    var token: SchedulerExecutionEvidenceTokenV1? = nil
+    if index >= 0:
+        val observed = _observation_state.observations[index]
+        if observed.reaped and not observed.delivered:
+            _observation_state.observations[index].delivered = true
+            token = Some(SchedulerExecutionEvidenceTokenV1(
+                slot: index, generation: observed.generation, nonce: observed.nonce))
+    if not _unlock(): return nil
+    token
+
+pub fn scheduler_execution_compare_and_deliver_reaped_v2(
+    child_id: u64, expected_path: text, expected_argv: [text]
+) -> SchedulerExecutionDeliveryResultV2:
+    """Atomically compare the retained command and deliver its one-shot token.
+
+    Expected input is validated and copied before locking. A mismatch consumes
+    the terminal row under the same mutex, preventing both evidence confusion
+    and bounded-table leaks. Unknown or incomplete lifecycle rows are unchanged.
+    """
+    val expected_result = executable_launch_arguments_v1_validate(
+        expected_path, expected_argv, [])
+    if expected_result.is_err():
+        return SchedulerExecutionDeliveryResultV2(
+            status: SchedulerExecutionDeliveryStatusV2.InvalidExpectedCommand,
+            token: nil)
+    val expected = expected_result.unwrap()
+    if child_id == 0u64:
+        return SchedulerExecutionDeliveryResultV2(
+            status: SchedulerExecutionDeliveryStatusV2.Unknown, token: nil)
+    if not _lock():
+        return SchedulerExecutionDeliveryResultV2(
+            status: SchedulerExecutionDeliveryStatusV2.SerializationUnavailable,
+            token: nil)
+    val index = _live_child_index(child_id)
+    if index < 0:
+        _unlock()
+        return SchedulerExecutionDeliveryResultV2(
+            status: SchedulerExecutionDeliveryStatusV2.Unknown, token: nil)
+    val observed = _observation_state.observations[index]
+    if not observed.exited:
+        _unlock()
+        return SchedulerExecutionDeliveryResultV2(
+            status: SchedulerExecutionDeliveryStatusV2.NotExited, token: nil)
+    if not observed.reaped:
+        _unlock()
+        return SchedulerExecutionDeliveryResultV2(
+            status: SchedulerExecutionDeliveryStatusV2.NotReaped, token: nil)
+    if observed.delivered:
+        _unlock()
+        return SchedulerExecutionDeliveryResultV2(
+            status: SchedulerExecutionDeliveryStatusV2.Replay, token: nil)
+    if not observed.command_observed or observed.executable_path != expected.path or
+       not _text_vector_equal(observed.argv, expected.argv):
+        _consume_index(index)
+        if not _unlock():
+            return SchedulerExecutionDeliveryResultV2(
+                status: SchedulerExecutionDeliveryStatusV2.SerializationUnavailable,
+                token: nil)
+        return SchedulerExecutionDeliveryResultV2(
+            status: SchedulerExecutionDeliveryStatusV2.CommandMismatch, token: nil)
+    _observation_state.observations[index].delivered = true
+    val token = SchedulerExecutionEvidenceTokenV1(
+        slot: index, generation: observed.generation, nonce: observed.nonce)
+    if not _unlock():
+        return SchedulerExecutionDeliveryResultV2(
+            status: SchedulerExecutionDeliveryStatusV2.SerializationUnavailable,
+            token: nil)
+    SchedulerExecutionDeliveryResultV2(
+        status: SchedulerExecutionDeliveryStatusV2.Delivered,
+        token: Some(token))
+
+pub fn scheduler_execution_discard_terminal_v2(child_id: u64) -> bool:
+    """Consume one exited observation without issuing evidence authority.
+
+    This is the post-adoption failure cleanup path. It deliberately accepts an
+    exited row even when collection could not mark it reaped, so adapter errors
+    cannot leak the fixed-capacity table. Live and unknown rows are unchanged.
+    """
+    if child_id == 0u64 or not _lock(): return false
+    val index = _live_child_index(child_id)
+    var discarded = false
+    if index >= 0 and _observation_state.observations[index].exited:
+        _consume_index(index)
+        discarded = true
+    if not _unlock(): return false
+    discarded
 
 pub fn scheduler_execution_evidence_consume_once_v1(token: SchedulerExecutionEvidenceTokenV1) -> SchedulerExecutionEvidenceV1?:
     if not _lock(): return nil
@@ -260,17 +429,46 @@ pub fn scheduler_execution_evidence_consume_once_v1(token: SchedulerExecutionEvi
     val evidence = SchedulerExecutionEvidenceV1(
         child_id: observed.child_id, generation: observed.generation, parent_id: observed.parent_id,
         image_hash: observed.image_hash, mount_generation: observed.mount_generation,
-        file_generation: observed.file_generation, exit_code: observed.exit_code,
+        file_generation: observed.file_generation, command_observed: observed.command_observed,
+        executable_path: observed.executable_path, argv: observed.argv,
+        exit_code: observed.exit_code,
         stdout_bytes: observed.stdout_bytes, stderr_bytes: observed.stderr_bytes,
         stdout_truncated: observed.stdout_truncated, stderr_truncated: observed.stderr_truncated)
-    _observation_state.observations[index] = SchedulerExecutionObservationV1(
-        generation: observed.generation, nonce: 0u64, child_id: 0u64, parent_id: 0u64,
-        image_hash: "", mount_generation: 0u64, file_generation: 0u64, exit_code: 0,
-        exited: false, reaped: false, delivered: false, consumed: true,
-        stdout_bytes: [], stderr_bytes: [], stdout_truncated: false, stderr_truncated: false)
+    _consume_index(index)
+    if not _unlock(): return nil
+    Some(evidence)
+
+pub fn scheduler_execution_evidence_consume_once_v2(
+    token: SchedulerExecutionEvidenceTokenV1
+) -> SchedulerExecutionEvidenceV1?:
+    if not _lock(): return nil
+    val handle = SchedulerExecutionObservationHandleV1(
+        slot: token.slot, generation: token.generation, nonce: token.nonce)
+    val index = _handle_index(handle)
+    if index < 0 or not _observation_state.observations[index].reaped or
+       not _observation_state.observations[index].delivered or
+       not _observation_state.observations[index].command_observed:
+        _unlock()
+        return nil
+    val observed = _observation_state.observations[index]
+    val evidence = SchedulerExecutionEvidenceV1(
+        child_id: observed.child_id, generation: observed.generation,
+        parent_id: observed.parent_id, image_hash: observed.image_hash,
+        mount_generation: observed.mount_generation,
+        file_generation: observed.file_generation, command_observed: true,
+        executable_path: observed.executable_path, argv: observed.argv,
+        exit_code: observed.exit_code, stdout_bytes: observed.stdout_bytes,
+        stderr_bytes: observed.stderr_bytes,
+        stdout_truncated: observed.stdout_truncated,
+        stderr_truncated: observed.stderr_truncated)
+    _consume_index(index)
     if not _unlock(): return nil
     Some(evidence)
 
 export SchedulerExecutionEvidenceTokenV1, SchedulerExecutionEvidenceV1
 export scheduler_execution_evidence_consume_once_v1
+export scheduler_execution_evidence_consume_once_v2
 export scheduler_execution_take_reaped_token_v1, scheduler_execution_deliver_reaped_handle_v1
+export scheduler_execution_compare_and_deliver_reaped_v2
+export scheduler_execution_discard_terminal_v2
+export SchedulerExecutionDeliveryStatusV2, SchedulerExecutionDeliveryResultV2

@@ -141,3 +141,19 @@ libc accumulator, then requires the libc result to match and preflights exact
 line bytes before its first requested output. Do not expose the existing
 `dd`, `timeout`, or `chown` parser/core helpers as applets: they still lack the
 filesystem, process/signal, and ownership authority required by those tools.
+
+## Scheduler-owned command evidence (2026-08-22)
+
+Authenticated adoption records the scheduler-validated effective executable
+path and argv before publishing a runnable task. V2 compares that immutable
+record and delivers its generation/nonce token atomically after reap; mismatch
+tombstones the row, replay fails, and every architecture adapter discards a
+terminal row on failure. Legacy observations explicitly carry no command
+provenance. An empty requested argv is normalized to `[path]`, so evidence must
+never claim `[]` for that launch.
+
+Stable compiler-artifact VFS snapshots remain blocked by
+`doc/08_tracking/bug/simpleos_vfs_stable_snapshot_backend_parity_2026-08-22.md`.
+Do not build the readiness gate on current positioned I/O: FAT32 ignores the
+offset, per-chunk allocations remain in NVFS/DBFS, and positioned writes do not
+advance the MountTable content generation.
