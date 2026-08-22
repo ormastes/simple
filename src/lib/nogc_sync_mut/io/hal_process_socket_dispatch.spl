@@ -1,0 +1,200 @@
+# Additive mission-critical process/socket caller-buffer APIs.
+#
+# Existing process_wait and TcpStream wrappers remain unchanged. These leaves
+# consume a preparation-time captured observation, extract the matching
+# environment instruction automatically, and route to the sealed fixed-buffer
+# comparison owner. No text, array, process or socket object is created here.
+
+use std.common.structural.environment_instruction.*
+use std.nogc_sync_mut.io.hal_buffer_dispatch.*
+
+val RT_HAL_PROCESS_WAIT_OPERATION_V3: i64 = 1007
+val RT_HAL_SOCKET_CONNECT_TIMEOUT_OPERATION_V3: i64 = 1012
+val RT_HAL_EXTERNAL_STATUS_BUSY_V3: i32 = 6
+val RT_HAL_EXTERNAL_STATUS_TIMEOUT_V3: i32 = 7
+val RT_HAL_EXTERNAL_STATUS_COMPARISON_FAILURE_V3: i32 = 8
+val RT_HAL_EXTERNAL_ERROR_DOMAIN_LIFECYCLE_V3: i32 = 6
+val RT_HAL_EXTERNAL_ERROR_BUSY_V3: i64 = 1001
+val RT_HAL_EXTERNAL_ERROR_TIMEOUT_V3: i64 = 1002
+val RT_HAL_EXTERNAL_ERROR_COMPARISON_FAILURE_V3: i64 = 1003
+
+enum RtHalExternalStatusV3:
+    Ok
+    Busy
+    Timeout
+    ComparisonFailure
+    Invalid
+
+fn rt_hal_external_status_v3(code: i32) -> RtHalExternalStatusV3:
+    if code == 0: return RtHalExternalStatusV3.Ok
+    if code == RT_HAL_EXTERNAL_STATUS_BUSY_V3:
+        return RtHalExternalStatusV3.Busy
+    if code == RT_HAL_EXTERNAL_STATUS_TIMEOUT_V3:
+        return RtHalExternalStatusV3.Timeout
+    if code == RT_HAL_EXTERNAL_STATUS_COMPARISON_FAILURE_V3:
+        return RtHalExternalStatusV3.ComparisonFailure
+    RtHalExternalStatusV3.Invalid
+
+fn rt_hal_external_reserved_error_v3_well_formed(
+        captured_status: i32, error_domain: i32,
+        error_code: i64, error_detail: i64) -> bool:
+    if captured_status == RT_HAL_EXTERNAL_STATUS_BUSY_V3:
+        return error_domain == RT_HAL_EXTERNAL_ERROR_DOMAIN_LIFECYCLE_V3
+            and error_code == RT_HAL_EXTERNAL_ERROR_BUSY_V3
+            and error_detail >= 0
+    if captured_status == RT_HAL_EXTERNAL_STATUS_TIMEOUT_V3:
+        return error_domain == RT_HAL_EXTERNAL_ERROR_DOMAIN_LIFECYCLE_V3
+            and error_code == RT_HAL_EXTERNAL_ERROR_TIMEOUT_V3
+            and error_detail >= 0
+    if captured_status == RT_HAL_EXTERNAL_STATUS_COMPARISON_FAILURE_V3:
+        return error_domain == RT_HAL_EXTERNAL_ERROR_DOMAIN_LIFECYCLE_V3
+            and error_code == RT_HAL_EXTERNAL_ERROR_COMPARISON_FAILURE_V3
+            and error_detail > 0 and error_detail <= 7
+    rt_hal_buffer_error_v3_well_formed(
+        captured_status, error_domain, error_code, error_detail)
+
+@inline
+fn _hal_process_wait_buffer_v3_raw(
+        fixture_id: i64, captured_status: i32, error_domain: i32,
+        error_code: i64, error_detail: i64, captured: *u8,
+        captured_length: i64, output: *mut u8, output_capacity: i64,
+        trace_identity_hi: i64, trace_identity_lo: i64,
+        trace_cursor: i64, trace_length: i64,
+        trace_capacity: i64) -> i32:
+    _rt_hal_buffer_call_v3(RT_HAL_PROCESS_WAIT_OPERATION_V3,
+        fixture_id, captured_status, error_domain, error_code, error_detail,
+        captured, captured_length, output, output_capacity,
+        trace_identity_hi, trace_identity_lo, trace_cursor, trace_length,
+        trace_capacity)
+
+@inline
+fn rt_hal_process_wait_buffer_direct_v3(
+        fixture_id: i64, captured_status: i32, error_domain: i32,
+        error_code: i64, error_detail: i64, captured: *u8,
+        captured_length: i64, output: *mut u8, output_capacity: i64,
+        trace_identity_hi: i64, trace_identity_lo: i64,
+        trace_cursor: i64, trace_length: i64,
+        trace_capacity: i64) -> i32:
+    _hal_process_wait_buffer_v3_raw(fixture_id, captured_status, error_domain,
+        error_code, error_detail, captured, captured_length, output,
+        output_capacity, trace_identity_hi, trace_identity_lo, trace_cursor,
+        trace_length, trace_capacity)
+
+@inline
+fn rt_hal_process_wait_buffer_compare_v3(
+        fixture_id: i64, captured_status: i32, error_domain: i32,
+        error_code: i64, error_detail: i64, captured: *u8,
+        captured_length: i64, output: *mut u8, output_capacity: i64,
+        trace_identity_hi: i64, trace_identity_lo: i64,
+        trace_cursor: i64, trace_length: i64,
+        trace_capacity: i64) -> i32:
+    _hal_process_wait_buffer_v3_raw(fixture_id, captured_status, error_domain,
+        error_code, error_detail, captured, captured_length, output,
+        output_capacity, trace_identity_hi, trace_identity_lo, trace_cursor,
+        trace_length, trace_capacity)
+
+@rt(hal, operation: io.process.wait.buffer_v3, providers: pure+c+rust,
+    capabilities: 8, comparator: 3, normalizer: 2, effects: replay_only,
+    request_bytes: 32, result_bytes: 32, trace_operations: 1,
+    trace_bytes: 32, diff_rows: 3, report_bytes: 256, log_bytes: 256,
+    deadline_ticks: 1000, error_schema: 2, environment_schema: 1,
+    preferred: c)
+fn hal_process_wait_buffer_v3(
+        fixture_id: i64, captured_status: i32, error_domain: i32,
+        error_code: i64, error_detail: i64, captured: *u8,
+        captured_length: i64, output: *mut u8, output_capacity: i64,
+        trace_identity_hi: i64, trace_identity_lo: i64,
+        trace_cursor: i64, trace_length: i64,
+        trace_capacity: i64) -> i32:
+    val preflight = rt_hal_buffer_preflight_v3(
+        captured_length, output_capacity)
+    if not preflight.accepted or not rt_hal_external_reserved_error_v3_well_formed(
+            captured_status, error_domain, error_code, error_detail): return 1
+    if not _rt_hal_buffer_extract_v3(RT_HAL_PROCESS_WAIT_OPERATION_V3,
+            EnvOpcodeV1.ProcessPoll, 8, fixture_id, trace_cursor,
+            captured_length, output_capacity): return 1
+    _hal_process_wait_buffer_v3_raw(fixture_id, captured_status, error_domain,
+        error_code, error_detail, captured, captured_length, output,
+        output_capacity, trace_identity_hi, trace_identity_lo, trace_cursor,
+        trace_length, trace_capacity)
+
+@inline
+fn _hal_socket_connect_timeout_buffer_v3_raw(
+        fixture_id: i64, captured_status: i32, error_domain: i32,
+        error_code: i64, error_detail: i64, captured: *u8,
+        captured_length: i64, output: *mut u8, output_capacity: i64,
+        trace_identity_hi: i64, trace_identity_lo: i64,
+        trace_cursor: i64, trace_length: i64,
+        trace_capacity: i64) -> i32:
+    _rt_hal_buffer_call_v3(RT_HAL_SOCKET_CONNECT_TIMEOUT_OPERATION_V3,
+        fixture_id, captured_status, error_domain, error_code, error_detail,
+        captured, captured_length, output, output_capacity,
+        trace_identity_hi, trace_identity_lo, trace_cursor, trace_length,
+        trace_capacity)
+
+@inline
+fn rt_hal_socket_connect_timeout_buffer_direct_v3(
+        fixture_id: i64, captured_status: i32, error_domain: i32,
+        error_code: i64, error_detail: i64, captured: *u8,
+        captured_length: i64, output: *mut u8, output_capacity: i64,
+        trace_identity_hi: i64, trace_identity_lo: i64,
+        trace_cursor: i64, trace_length: i64,
+        trace_capacity: i64) -> i32:
+    _hal_socket_connect_timeout_buffer_v3_raw(fixture_id, captured_status,
+        error_domain, error_code, error_detail, captured, captured_length,
+        output, output_capacity, trace_identity_hi, trace_identity_lo,
+        trace_cursor, trace_length, trace_capacity)
+
+@inline
+fn rt_hal_socket_connect_timeout_buffer_compare_v3(
+        fixture_id: i64, captured_status: i32, error_domain: i32,
+        error_code: i64, error_detail: i64, captured: *u8,
+        captured_length: i64, output: *mut u8, output_capacity: i64,
+        trace_identity_hi: i64, trace_identity_lo: i64,
+        trace_cursor: i64, trace_length: i64,
+        trace_capacity: i64) -> i32:
+    _hal_socket_connect_timeout_buffer_v3_raw(fixture_id, captured_status,
+        error_domain, error_code, error_detail, captured, captured_length,
+        output, output_capacity, trace_identity_hi, trace_identity_lo,
+        trace_cursor, trace_length, trace_capacity)
+
+@rt(hal, operation: io.socket.connect_timeout.buffer_v3,
+    providers: pure+c+rust, capabilities: 13, comparator: 3,
+    normalizer: 2, effects: replay_only, request_bytes: 32,
+    result_bytes: 32, trace_operations: 1, trace_bytes: 32, diff_rows: 3,
+    report_bytes: 256, log_bytes: 256, deadline_ticks: 1000,
+    error_schema: 2, environment_schema: 1, preferred: c)
+fn hal_socket_connect_timeout_buffer_v3(
+        fixture_id: i64, captured_status: i32, error_domain: i32,
+        error_code: i64, error_detail: i64, captured: *u8,
+        captured_length: i64, output: *mut u8, output_capacity: i64,
+        trace_identity_hi: i64, trace_identity_lo: i64,
+        trace_cursor: i64, trace_length: i64,
+        trace_capacity: i64) -> i32:
+    val preflight = rt_hal_buffer_preflight_v3(
+        captured_length, output_capacity)
+    if not preflight.accepted or not rt_hal_external_reserved_error_v3_well_formed(
+            captured_status, error_domain, error_code, error_detail): return 1
+    if not _rt_hal_buffer_extract_v3(
+            RT_HAL_SOCKET_CONNECT_TIMEOUT_OPERATION_V3,
+            EnvOpcodeV1.SocketOpen, 13, fixture_id, trace_cursor,
+            captured_length, output_capacity): return 1
+    _hal_socket_connect_timeout_buffer_v3_raw(fixture_id, captured_status,
+        error_domain, error_code, error_detail, captured, captured_length,
+        output, output_capacity, trace_identity_hi, trace_identity_lo,
+        trace_cursor, trace_length, trace_capacity)
+
+export RT_HAL_PROCESS_WAIT_OPERATION_V3
+export RT_HAL_SOCKET_CONNECT_TIMEOUT_OPERATION_V3
+export RT_HAL_EXTERNAL_STATUS_BUSY_V3, RT_HAL_EXTERNAL_STATUS_TIMEOUT_V3
+export RT_HAL_EXTERNAL_STATUS_COMPARISON_FAILURE_V3
+export RT_HAL_EXTERNAL_ERROR_DOMAIN_LIFECYCLE_V3
+export RT_HAL_EXTERNAL_ERROR_BUSY_V3, RT_HAL_EXTERNAL_ERROR_TIMEOUT_V3
+export RT_HAL_EXTERNAL_ERROR_COMPARISON_FAILURE_V3
+export RtHalExternalStatusV3, rt_hal_external_status_v3
+export rt_hal_external_reserved_error_v3_well_formed
+export hal_process_wait_buffer_v3, hal_socket_connect_timeout_buffer_v3
+export rt_hal_process_wait_buffer_direct_v3
+export rt_hal_process_wait_buffer_compare_v3
+export rt_hal_socket_connect_timeout_buffer_direct_v3
+export rt_hal_socket_connect_timeout_buffer_compare_v3

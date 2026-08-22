@@ -1,0 +1,162 @@
+# @feature mcdc_hal_runtime_hardening
+# @req REQ-009 REQ-011 REQ-012 REQ-015
+
+use std.spec.*
+use std.common.structural.environment_instruction.*
+use std.common.structural.hal_provider.*
+use std.common.structural.hal_provider.process_socket_lifecycle_v1.*
+
+fn lifecycle_owner(mode: HalRunMode, preferred: HalProviderKind,
+                   kind: HalExternalLifecycleKindV1 =
+                       HalExternalLifecycleKindV1.Process,
+                   deadline: i64 = 100) -> HalExternalLifecycleOwnerV1:
+    hal_external_lifecycle_owner_v1(
+        41, kind, 7001, 9, if kind == HalExternalLifecycleKindV1.Process:
+            8
+        else:
+            13,
+        8, deadline, mode, preferred)
+
+fn begin_step(owner: HalExternalLifecycleOwnerV1,
+              opcode: EnvOpcodeV1) -> HalExternalBeginReceiptV1:
+    owner.begin(opcode, 0, 0, 0, 0, 0, 8, 8)
+
+fn scalar_result(provider: HalProviderKind,
+                 begin: HalExternalBeginReceiptV1,
+                 scalar: i64) -> HalProviderResultV2:
+    hal_provider_scalar_result_v2(provider, 41, HalStatusV1.Ok, scalar,
+        hal_structured_error_v2(HalErrorDomainV2.None, 0),
+        hal_trace_position_v2(begin.trace.identity_hi,
+            begin.trace.identity_lo, begin.trace.sequence,
+            begin.trace.sequence + 1, 8), 1)
+
+fn publish_all(owner: HalExternalLifecycleOwnerV1,
+               begin: HalExternalBeginReceiptV1,
+               pure_value: i64, c_value: i64, rust_value: i64):
+    expect(owner.publish(scalar_result(
+        HalProviderKind.PureSimple, begin, pure_value))).to_equal(
+            HalExternalOwnerStatusV1.InFlight)
+    expect(owner.publish(scalar_result(
+        HalProviderKind.C, begin, c_value))).to_equal(
+            HalExternalOwnerStatusV1.InFlight)
+    expect(owner.publish(scalar_result(
+        HalProviderKind.Rust, begin, rust_value))).to_equal(
+            HalExternalOwnerStatusV1.InFlight)
+
+describe "mission-critical process/socket lifecycle owner":
+    it "extracts automatically and advances one exact process handle":
+        var owner = lifecycle_owner(
+            HalRunMode.AlphaCompare, HalProviderKind.PureSimple)
+        val begun = begin_step(owner, EnvOpcodeV1.ProcessSpawn)
+        expect(begun.accepted).to_be(true)
+        expect(begun.instruction.opcode).to_equal(EnvOpcodeV1.ProcessSpawn)
+        expect(begun.trace.sequence).to_equal(0)
+        val busy = begin_step(owner, EnvOpcodeV1.ProcessSpawn)
+        expect(busy.status).to_equal(HalExternalOwnerStatusV1.Busy)
+        publish_all(owner, begun, 7001, 7001, 7001)
+        var output: [u8] = [99u8; 8]
+        val committed = owner.finish(10, output, 0, 8)
+        expect(committed.status).to_equal(HalExternalOwnerStatusV1.Committed)
+        expect(committed.committed).to_be(true)
+        expect(committed.allocation_count_after_seal).to_equal(0)
+        expect(owner.handle.next_sequence).to_equal(1)
+        expect(output[0]).to_equal(89u8)
+
+        val poll = begin_step(owner, EnvOpcodeV1.ProcessPoll)
+        expect(poll.accepted).to_be(true)
+        expect(poll.trace.sequence).to_equal(1)
+        publish_all(owner, poll, 0, 0, 0)
+        expect(owner.finish(11, output, 0, 8).committed).to_be(true)
+        expect(owner.handle.next_sequence).to_equal(2)
+
+    it "rejects alpha differences without modifying caller storage":
+        var owner = lifecycle_owner(
+            HalRunMode.AlphaCompare, HalProviderKind.PureSimple)
+        val begun = begin_step(owner, EnvOpcodeV1.ProcessSpawn)
+        publish_all(owner, begun, 7001, 7002, 7001)
+        var output: [u8] = [170u8; 8]
+        val failed = owner.finish(10, output, 0, 8)
+        expect(failed.status).to_equal(
+            HalExternalOwnerStatusV1.ComparisonFailure)
+        expect(failed.error.code).to_equal(HAL_EXTERNAL_ERROR_COMPARISON_V1)
+        expect(failed.difference_pair_mask).to_be_greater_than(0)
+        expect(failed.committed).to_be(false)
+        expect(output[0]).to_equal(170u8)
+        expect(owner.handle.next_sequence).to_equal(0)
+
+    it "commits the preferred beta result while retaining divergence":
+        var owner = lifecycle_owner(
+            HalRunMode.BetaCompare, HalProviderKind.C)
+        val begun = begin_step(owner, EnvOpcodeV1.ProcessSpawn)
+        publish_all(owner, begun, 7001, 7002, 7001)
+        var output: [u8] = [0u8; 8]
+        val committed = owner.finish(10, output, 0, 8)
+        expect(committed.committed).to_be(true)
+        expect(committed.difference_pair_mask).to_be_greater_than(0)
+        expect(committed.selected_provider).to_equal(HalProviderKind.C)
+        expect(output[0]).to_equal(90u8)
+
+    it "normal mode admits only its preferred fixed slot":
+        var owner = lifecycle_owner(
+            HalRunMode.NormalPreferred, HalProviderKind.Rust)
+        val begun = begin_step(owner, EnvOpcodeV1.ProcessSpawn)
+        expect(owner.publish(scalar_result(
+            HalProviderKind.PureSimple, begun, 7001))).to_equal(
+                HalExternalOwnerStatusV1.Invalid)
+        expect(owner.publish(scalar_result(
+            HalProviderKind.Rust, begun, 7001))).to_equal(
+                HalExternalOwnerStatusV1.InFlight)
+        var output: [u8] = [0u8; 8]
+        val committed = owner.finish(10, output, 0, 8)
+        expect(committed.expected_provider_mask).to_equal(4)
+        expect(committed.received_provider_mask).to_equal(4)
+        expect(committed.committed).to_be(true)
+
+    it "returns a structured timeout and preserves lifecycle and output":
+        var owner = lifecycle_owner(
+            HalRunMode.NormalPreferred, HalProviderKind.PureSimple,
+            HalExternalLifecycleKindV1.Process, 5)
+        val begun = begin_step(owner, EnvOpcodeV1.ProcessSpawn)
+        expect(owner.publish(scalar_result(
+            HalProviderKind.PureSimple, begun, 7001))).to_equal(
+                HalExternalOwnerStatusV1.InFlight)
+        var output: [u8] = [204u8; 8]
+        val timeout = owner.finish(6, output, 0, 8)
+        expect(timeout.status).to_equal(HalExternalOwnerStatusV1.Timeout)
+        expect(timeout.error.code).to_equal(HAL_EXTERNAL_ERROR_TIMEOUT_V1)
+        expect(timeout.allocation_count_after_seal).to_equal(0)
+        expect(output[0]).to_equal(204u8)
+        expect(owner.handle.next_sequence).to_equal(0)
+
+    it "enforces the complete socket open send receive close order":
+        var owner = lifecycle_owner(HalRunMode.NormalPreferred,
+            HalProviderKind.PureSimple, HalExternalLifecycleKindV1.Socket)
+        var output: [u8] = [0u8; 8]
+        val open = begin_step(owner, EnvOpcodeV1.SocketOpen)
+        expect(open.accepted).to_be(true)
+        expect(owner.publish(scalar_result(
+            HalProviderKind.PureSimple, open, 7001))).to_equal(
+                HalExternalOwnerStatusV1.InFlight)
+        expect(owner.finish(1, output, 0, 8).committed).to_be(true)
+        expect(begin_step(owner, EnvOpcodeV1.SocketReceive).accepted).to_be(false)
+        val send = begin_step(owner, EnvOpcodeV1.SocketSend)
+        expect(send.accepted).to_be(true)
+        expect(owner.publish(scalar_result(
+            HalProviderKind.PureSimple, send, 8))).to_equal(
+                HalExternalOwnerStatusV1.InFlight)
+        expect(owner.finish(2, output, 0, 8).committed).to_be(true)
+        val receive = begin_step(owner, EnvOpcodeV1.SocketReceive)
+        expect(receive.accepted).to_be(true)
+        expect(owner.publish(scalar_result(
+            HalProviderKind.PureSimple, receive, 8))).to_equal(
+                HalExternalOwnerStatusV1.InFlight)
+        expect(owner.finish(3, output, 0, 8).committed).to_be(true)
+        val close = begin_step(owner, EnvOpcodeV1.SocketClose)
+        expect(close.accepted).to_be(true)
+        expect(owner.publish(scalar_result(
+            HalProviderKind.PureSimple, close, 1))).to_equal(
+                HalExternalOwnerStatusV1.InFlight)
+        expect(owner.finish(4, output, 0, 8).committed).to_be(true)
+        expect(owner.handle.closed).to_be(true)
+        expect(begin_step(owner, EnvOpcodeV1.SocketClose).status).to_equal(
+            HalExternalOwnerStatusV1.Closed)

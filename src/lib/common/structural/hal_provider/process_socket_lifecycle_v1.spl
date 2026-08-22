@@ -1,0 +1,422 @@
+# codex-impl
+# Parent-authoritative, fixed-state process/socket lifecycle comparison.
+#
+# Physical process and socket preparation stays in the existing hosted owners.
+# This owner receives only normalized scalar results from isolated providers.
+# It owns lifecycle order, automatic environment extraction and the sole
+# commit.  Its sealed methods construct no arrays/text and retain no payload;
+# the selected scalar is written directly into caller-owned fixed storage.
+
+use std.common.structural.environment_instruction.*
+use std.common.structural.hal_provider.contracts.*
+use std.common.structural.hal_provider.normalized_result_v2.*
+
+val HAL_EXTERNAL_LIFECYCLE_SCHEMA_V1: i64 = 1
+val HAL_EXTERNAL_LIFECYCLE_MAX_STEPS_V1: i64 = 4096
+val HAL_EXTERNAL_LIFECYCLE_MAX_ID_V1: i64 = 1000000000
+val HAL_EXTERNAL_ERROR_BUSY_V1: i64 = 1001
+val HAL_EXTERNAL_ERROR_TIMEOUT_V1: i64 = 1002
+val HAL_EXTERNAL_ERROR_COMPARISON_V1: i64 = 1003
+val HAL_EXTERNAL_ERROR_INVALID_V1: i64 = 1004
+val HAL_EXTERNAL_ERROR_OVERFLOW_V1: i64 = 1005
+val HAL_EXTERNAL_ERROR_CLOSED_V1: i64 = 1006
+
+enum HalExternalLifecycleKindV1:
+    Process
+    Socket
+
+enum HalExternalOwnerStatusV1:
+    Ready
+    InFlight
+    Committed
+    Busy
+    Timeout
+    ComparisonFailure
+    Invalid
+    Overflow
+    Closed
+
+struct HalExternalLifecycleHandleV1:
+    contract_version: i64
+    kind: HalExternalLifecycleKindV1
+    handle_id: i64
+    generation: i64
+    next_sequence: i64
+    closed: bool
+    sealed: bool
+
+struct HalExternalLifecycleTraceV1:
+    invocation_id: i64
+    operation_id: i64
+    sequence: i64
+    handle_id: i64
+    generation: i64
+    opcode_code: i64
+    identity_hi: i64
+    identity_lo: i64
+    allocation_count_after_seal: i64
+
+struct HalExternalBeginReceiptV1:
+    status: HalExternalOwnerStatusV1
+    trace: HalExternalLifecycleTraceV1
+    instruction: EnvInstructionV1
+    accepted: bool
+
+struct HalExternalCommitReceiptV1:
+    status: HalExternalOwnerStatusV1
+    error: HalStructuredErrorV2
+    trace: HalExternalLifecycleTraceV1
+    expected_provider_mask: i64
+    received_provider_mask: i64
+    difference_pair_mask: i64
+    selected_provider: HalProviderKind
+    result_length: i64
+    committed: bool
+    allocation_count_after_seal: i64
+
+fn _hal_external_trace_v1(invocation_id: i64, operation_id: i64,
+                          sequence: i64, handle_id: i64, generation: i64,
+                          opcode: EnvOpcodeV1) -> HalExternalLifecycleTraceV1:
+    var hi = invocation_id * 257 + operation_id * 17 + sequence + 1
+    hi = hi * 257 + handle_id
+    var lo = generation * 257 + env_opcode_to_i64(opcode) + 1
+    lo = lo * 257 + invocation_id
+    HalExternalLifecycleTraceV1(invocation_id, operation_id, sequence,
+        handle_id, generation, env_opcode_to_i64(opcode), hi, lo, 0)
+
+fn _hal_external_empty_instruction_v1() -> EnvInstructionV1:
+    env_instruction_v1(0, 0, EnvOpcodeV1.ProcessPoll, 0, 0,
+        0, 0, 0, 0, 0, 0)
+
+fn _hal_external_empty_result_v2(
+        provider: HalProviderKind) -> HalProviderResultV2:
+    hal_provider_scalar_result_v2(provider, 0, HalStatusV1.InvalidRequest, 0,
+        hal_structured_error_v2(HalErrorDomainV2.Contract,
+            HAL_EXTERNAL_ERROR_INVALID_V1),
+        hal_trace_position_v2(0, 0, 0, 0, 0), 0)
+
+fn hal_external_lifecycle_handle_v1_well_formed(
+        value: HalExternalLifecycleHandleV1) -> bool:
+    value.contract_version == HAL_EXTERNAL_LIFECYCLE_SCHEMA_V1
+        and value.handle_id > 1
+        and value.handle_id <= HAL_EXTERNAL_LIFECYCLE_MAX_ID_V1
+        and value.generation > 0
+        and value.generation <= HAL_EXTERNAL_LIFECYCLE_MAX_ID_V1
+        and value.next_sequence >= 0
+        and value.next_sequence <= HAL_EXTERNAL_LIFECYCLE_MAX_STEPS_V1
+        and value.sealed
+
+fn _hal_external_expected_opcode_v1(
+        handle: HalExternalLifecycleHandleV1,
+        opcode: EnvOpcodeV1) -> bool:
+    if handle.closed: return false
+    if handle.kind == HalExternalLifecycleKindV1.Process:
+        if handle.next_sequence == 0:
+            return opcode == EnvOpcodeV1.ProcessSpawn
+        return opcode == EnvOpcodeV1.ProcessPoll
+            or opcode == EnvOpcodeV1.ProcessKill
+    if handle.next_sequence == 0:
+        return opcode == EnvOpcodeV1.SocketOpen
+    if handle.next_sequence == 1:
+        return opcode == EnvOpcodeV1.SocketSend
+    if handle.next_sequence == 2:
+        return opcode == EnvOpcodeV1.SocketReceive
+    handle.next_sequence == 3 and opcode == EnvOpcodeV1.SocketClose
+
+fn _hal_external_terminal_opcode_v1(opcode: EnvOpcodeV1) -> bool:
+    opcode == EnvOpcodeV1.ProcessKill or opcode == EnvOpcodeV1.SocketClose
+
+fn _hal_external_operation_id_v1(opcode: EnvOpcodeV1) -> i64:
+    rt_hal_environment_operation_for_opcode_v1(opcode)
+
+fn _hal_external_provider_bit_v1(provider: HalProviderKind) -> i64:
+    1 << hal_provider_kind_to_i64(provider)
+
+fn _hal_external_result_matches_step_v1(
+        result: HalProviderResultV2, invocation_id: i64,
+        trace: HalExternalLifecycleTraceV1) -> bool:
+    hal_provider_result_v2_well_formed(result)
+        and result.invocation_id == invocation_id
+        and result.value_kind == HalNormalizedValueKindV2.ScalarI64
+        and result.trace.identity_hi == trace.identity_hi
+        and result.trace.identity_lo == trace.identity_lo
+        and result.trace.cursor == trace.sequence
+        and result.trace.length == trace.sequence + 1
+        and result.trace.capacity <= HAL_EXTERNAL_LIFECYCLE_MAX_STEPS_V1
+
+fn _hal_external_result_same_v1(a: HalProviderResultV2,
+                                b: HalProviderResultV2) -> bool:
+    hal_status_to_i64(a.status) == hal_status_to_i64(b.status)
+        and a.scalar == b.scalar
+        and a.error.domain == b.error.domain
+        and a.error.code == b.error.code
+        and a.error.detail_id == b.error.detail_id
+        and a.trace.identity_hi == b.trace.identity_hi
+        and a.trace.identity_lo == b.trace.identity_lo
+        and a.trace.cursor == b.trace.cursor
+        and a.trace.length == b.trace.length
+
+fn _hal_external_write_i64_le_v1(bytes: [u8], offset: i64, value: i64):
+    var index: i64 = 0
+    while index < 8:
+        bytes[offset + index] = ((value >> (index * 8)) & 255) as u8
+        index = index + 1
+
+class HalExternalLifecycleOwnerV1:
+    invocation_id: i64
+    mode: HalRunMode
+    preferred_provider: HalProviderKind
+    capability_id: i64
+    deadline_tick: i64
+    handle: HalExternalLifecycleHandleV1
+    in_flight: bool
+    current_opcode: EnvOpcodeV1
+    current_trace: HalExternalLifecycleTraceV1
+    expected_provider_mask: i64
+    received_provider_mask: i64
+    duplicate_provider_mask: i64
+    pure_result: HalProviderResultV2
+    c_result: HalProviderResultV2
+    rust_result: HalProviderResultV2
+    spawn_extraction: RtHalAutomaticExtractionOwnerV1
+    poll_extraction: RtHalAutomaticExtractionOwnerV1
+    kill_extraction: RtHalAutomaticExtractionOwnerV1
+    socket_open_extraction: RtHalAutomaticExtractionOwnerV1
+    socket_send_extraction: RtHalAutomaticExtractionOwnerV1
+    socket_receive_extraction: RtHalAutomaticExtractionOwnerV1
+    socket_close_extraction: RtHalAutomaticExtractionOwnerV1
+    sealed: bool
+
+    me begin(opcode: EnvOpcodeV1, flags: i64,
+             argument_offset: i64, argument_length: i64,
+             argument_capacity: i64, result_offset: i64,
+             result_capacity: i64, result_region_capacity: i64)
+            -> HalExternalBeginReceiptV1:
+        val operation_id = _hal_external_operation_id_v1(opcode)
+        val trace = _hal_external_trace_v1(self.invocation_id, operation_id,
+            self.handle.next_sequence, self.handle.handle_id,
+            self.handle.generation, opcode)
+        if self.in_flight:
+            return HalExternalBeginReceiptV1(HalExternalOwnerStatusV1.Busy,
+                trace, _hal_external_empty_instruction_v1(), false)
+        if not self.sealed or not hal_external_lifecycle_handle_v1_well_formed(
+                self.handle) or not _hal_external_expected_opcode_v1(
+                self.handle, opcode):
+            val status = if self.handle.closed:
+                HalExternalOwnerStatusV1.Closed
+            else:
+                HalExternalOwnerStatusV1.Invalid
+            return HalExternalBeginReceiptV1(status, trace,
+                _hal_external_empty_instruction_v1(), false)
+        var extraction_sequence: i64 = 0
+        match opcode:
+            case EnvOpcodeV1.ProcessSpawn:
+                extraction_sequence = self.spawn_extraction.binding.extraction.next_sequence
+            case EnvOpcodeV1.ProcessPoll:
+                extraction_sequence = self.poll_extraction.binding.extraction.next_sequence
+            case EnvOpcodeV1.ProcessKill:
+                extraction_sequence = self.kill_extraction.binding.extraction.next_sequence
+            case EnvOpcodeV1.SocketOpen:
+                extraction_sequence = self.socket_open_extraction.binding.extraction.next_sequence
+            case EnvOpcodeV1.SocketSend:
+                extraction_sequence = self.socket_send_extraction.binding.extraction.next_sequence
+            case EnvOpcodeV1.SocketReceive:
+                extraction_sequence = self.socket_receive_extraction.binding.extraction.next_sequence
+            case EnvOpcodeV1.SocketClose:
+                extraction_sequence = self.socket_close_extraction.binding.extraction.next_sequence
+            case _:
+                return HalExternalBeginReceiptV1(
+                    HalExternalOwnerStatusV1.Invalid, trace,
+                    _hal_external_empty_instruction_v1(), false)
+        val metadata = rt_hal_automatic_access_metadata_v1(operation_id,
+            self.invocation_id, extraction_sequence, opcode,
+            self.capability_id, flags, argument_offset, argument_length,
+            argument_capacity, result_offset, result_capacity,
+            result_region_capacity)
+        var extracted = RtHalAutomaticExtractionReceiptV1(
+            _hal_external_empty_instruction_v1(), false,
+            EnvInstructionStatusV1.InvalidInstruction)
+        match opcode:
+            case EnvOpcodeV1.ProcessSpawn:
+                extracted = self.spawn_extraction.extract(metadata)
+            case EnvOpcodeV1.ProcessPoll:
+                extracted = self.poll_extraction.extract(metadata)
+            case EnvOpcodeV1.ProcessKill:
+                extracted = self.kill_extraction.extract(metadata)
+            case EnvOpcodeV1.SocketOpen:
+                extracted = self.socket_open_extraction.extract(metadata)
+            case EnvOpcodeV1.SocketSend:
+                extracted = self.socket_send_extraction.extract(metadata)
+            case EnvOpcodeV1.SocketReceive:
+                extracted = self.socket_receive_extraction.extract(metadata)
+            case EnvOpcodeV1.SocketClose:
+                extracted = self.socket_close_extraction.extract(metadata)
+            case _: ()
+        if not extracted.accepted:
+            return HalExternalBeginReceiptV1(
+                HalExternalOwnerStatusV1.Invalid, trace,
+                extracted.instruction, false)
+        self.in_flight = true
+        self.current_opcode = opcode
+        self.current_trace = trace
+        self.received_provider_mask = 0
+        self.duplicate_provider_mask = 0
+        self.pure_result = _hal_external_empty_result_v2(
+            HalProviderKind.PureSimple)
+        self.c_result = _hal_external_empty_result_v2(HalProviderKind.C)
+        self.rust_result = _hal_external_empty_result_v2(HalProviderKind.Rust)
+        HalExternalBeginReceiptV1(HalExternalOwnerStatusV1.InFlight,
+            trace, extracted.instruction, true)
+
+    me publish(result: HalProviderResultV2) -> HalExternalOwnerStatusV1:
+        val bit = _hal_external_provider_bit_v1(result.provider)
+        if not self.sealed or not self.in_flight
+                or (self.expected_provider_mask & bit) == 0
+                or not _hal_external_result_matches_step_v1(
+                    result, self.invocation_id, self.current_trace):
+            return HalExternalOwnerStatusV1.Invalid
+        if (self.received_provider_mask & bit) != 0:
+            self.duplicate_provider_mask = self.duplicate_provider_mask | bit
+            return HalExternalOwnerStatusV1.Invalid
+        match result.provider:
+            case HalProviderKind.PureSimple: self.pure_result = result
+            case HalProviderKind.C: self.c_result = result
+            case HalProviderKind.Rust: self.rust_result = result
+        self.received_provider_mask = self.received_provider_mask | bit
+        HalExternalOwnerStatusV1.InFlight
+
+    me finish(now_tick: i64, output_bytes: [u8], output_offset: i64,
+              output_capacity: i64) -> HalExternalCommitReceiptV1:
+        if not self.sealed or not self.in_flight:
+            return self._failed_receipt(HalExternalOwnerStatusV1.Invalid,
+                HAL_EXTERNAL_ERROR_INVALID_V1, 0, false)
+        if now_tick > self.deadline_tick:
+            self.in_flight = false
+            return self._failed_receipt(HalExternalOwnerStatusV1.Timeout,
+                HAL_EXTERNAL_ERROR_TIMEOUT_V1, 0, false)
+        if self.received_provider_mask != self.expected_provider_mask
+                or self.duplicate_provider_mask != 0:
+            return self._failed_receipt(HalExternalOwnerStatusV1.Busy,
+                HAL_EXTERNAL_ERROR_BUSY_V1, 0, false)
+        var difference_pair_mask: i64 = 0
+        if self.expected_provider_mask == HAL_PROVIDER_MASK_ALL:
+            if not _hal_external_result_same_v1(
+                    self.pure_result, self.c_result):
+                difference_pair_mask = difference_pair_mask | 1
+            if not _hal_external_result_same_v1(
+                    self.pure_result, self.rust_result):
+                difference_pair_mask = difference_pair_mask | 2
+            if not _hal_external_result_same_v1(
+                    self.c_result, self.rust_result):
+                difference_pair_mask = difference_pair_mask | 4
+        if difference_pair_mask != 0
+                and hal_run_mode_stops_on_difference(self.mode):
+            self.in_flight = false
+            return self._failed_receipt(
+                HalExternalOwnerStatusV1.ComparisonFailure,
+                HAL_EXTERNAL_ERROR_COMPARISON_V1,
+                difference_pair_mask, false)
+        val selected = match self.preferred_provider:
+            case HalProviderKind.PureSimple: self.pure_result
+            case HalProviderKind.C: self.c_result
+            case HalProviderKind.Rust: self.rust_result
+        if output_offset < 0 or output_capacity < 8
+                or output_offset > output_bytes.len() - 8:
+            self.in_flight = false
+            return self._failed_receipt(HalExternalOwnerStatusV1.Overflow,
+                HAL_EXTERNAL_ERROR_OVERFLOW_V1, difference_pair_mask, false)
+        _hal_external_write_i64_le_v1(
+            output_bytes, output_offset, selected.scalar)
+        self.handle = HalExternalLifecycleHandleV1(
+            HAL_EXTERNAL_LIFECYCLE_SCHEMA_V1, self.handle.kind,
+            self.handle.handle_id, self.handle.generation,
+            self.handle.next_sequence + 1,
+            _hal_external_terminal_opcode_v1(self.current_opcode), true)
+        self.in_flight = false
+        HalExternalCommitReceiptV1(HalExternalOwnerStatusV1.Committed,
+            hal_structured_error_v2(HalErrorDomainV2.None, 0),
+            self.current_trace, self.expected_provider_mask,
+            self.received_provider_mask, difference_pair_mask,
+            self.preferred_provider, 8, true, 0)
+
+    me _failed_receipt(status: HalExternalOwnerStatusV1,
+                       code: i64, detail: i64,
+                       committed: bool) -> HalExternalCommitReceiptV1:
+        HalExternalCommitReceiptV1(status,
+            hal_structured_error_v2(HalErrorDomainV2.Runtime, code, detail),
+            self.current_trace, self.expected_provider_mask,
+            self.received_provider_mask, detail, self.preferred_provider,
+            0, committed, 0)
+
+fn hal_external_lifecycle_owner_v1(
+        invocation_id: i64, kind: HalExternalLifecycleKindV1,
+        handle_id: i64, generation: i64, capability_id: i64,
+        max_steps: i64, deadline_tick: i64, mode: HalRunMode,
+        preferred_provider: HalProviderKind) -> HalExternalLifecycleOwnerV1:
+    val preferred_bit = _hal_external_provider_bit_v1(preferred_provider)
+    val expected_mask = if hal_run_mode_executes_all(mode):
+        HAL_PROVIDER_MASK_ALL
+    else:
+        preferred_bit
+    val valid = invocation_id > 0
+        and invocation_id <= HAL_EXTERNAL_LIFECYCLE_MAX_ID_V1
+        and handle_id > 1 and handle_id <= HAL_EXTERNAL_LIFECYCLE_MAX_ID_V1
+        and generation > 0
+        and generation <= HAL_EXTERNAL_LIFECYCLE_MAX_ID_V1
+        and capability_id > 0
+        and capability_id < 63 and max_steps > 0
+        and max_steps <= HAL_EXTERNAL_LIFECYCLE_MAX_STEPS_V1
+        and deadline_tick >= 0
+    val handle = HalExternalLifecycleHandleV1(
+        HAL_EXTERNAL_LIFECYCLE_SCHEMA_V1, kind,
+        if valid: handle_id else: 0, if valid: generation else: 0,
+        0, false, valid)
+    val empty_trace = _hal_external_trace_v1(invocation_id, 1, 0,
+        handle_id, generation, if kind == HalExternalLifecycleKindV1.Process:
+            EnvOpcodeV1.ProcessSpawn
+        else:
+            EnvOpcodeV1.SocketOpen)
+    HalExternalLifecycleOwnerV1(invocation_id, mode, preferred_provider,
+        capability_id, deadline_tick, handle, false,
+        if kind == HalExternalLifecycleKindV1.Process:
+            EnvOpcodeV1.ProcessSpawn
+        else:
+            EnvOpcodeV1.SocketOpen,
+        empty_trace, expected_mask, 0, 0,
+        _hal_external_empty_result_v2(HalProviderKind.PureSimple),
+        _hal_external_empty_result_v2(HalProviderKind.C),
+        _hal_external_empty_result_v2(HalProviderKind.Rust),
+        rt_hal_automatic_extraction_owner_v1(
+            _hal_external_operation_id_v1(EnvOpcodeV1.ProcessSpawn),
+            invocation_id, 1),
+        rt_hal_automatic_extraction_owner_v1(
+            _hal_external_operation_id_v1(EnvOpcodeV1.ProcessPoll),
+            invocation_id, max_steps),
+        rt_hal_automatic_extraction_owner_v1(
+            _hal_external_operation_id_v1(EnvOpcodeV1.ProcessKill),
+            invocation_id, 1),
+        rt_hal_automatic_extraction_owner_v1(
+            _hal_external_operation_id_v1(EnvOpcodeV1.SocketOpen),
+            invocation_id, 1),
+        rt_hal_automatic_extraction_owner_v1(
+            _hal_external_operation_id_v1(EnvOpcodeV1.SocketSend),
+            invocation_id, 1),
+        rt_hal_automatic_extraction_owner_v1(
+            _hal_external_operation_id_v1(EnvOpcodeV1.SocketReceive),
+            invocation_id, 1),
+        rt_hal_automatic_extraction_owner_v1(
+            _hal_external_operation_id_v1(EnvOpcodeV1.SocketClose),
+            invocation_id, 1), valid)
+
+export HAL_EXTERNAL_LIFECYCLE_SCHEMA_V1
+export HAL_EXTERNAL_LIFECYCLE_MAX_STEPS_V1
+export HAL_EXTERNAL_LIFECYCLE_MAX_ID_V1
+export HAL_EXTERNAL_ERROR_BUSY_V1, HAL_EXTERNAL_ERROR_TIMEOUT_V1
+export HAL_EXTERNAL_ERROR_COMPARISON_V1, HAL_EXTERNAL_ERROR_INVALID_V1
+export HAL_EXTERNAL_ERROR_OVERFLOW_V1, HAL_EXTERNAL_ERROR_CLOSED_V1
+export HalExternalLifecycleKindV1, HalExternalOwnerStatusV1
+export HalExternalLifecycleHandleV1, HalExternalLifecycleTraceV1
+export HalExternalBeginReceiptV1, HalExternalCommitReceiptV1
+export HalExternalLifecycleOwnerV1
+export hal_external_lifecycle_handle_v1_well_formed
+export hal_external_lifecycle_owner_v1
