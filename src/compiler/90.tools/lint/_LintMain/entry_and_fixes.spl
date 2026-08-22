@@ -20,8 +20,10 @@ use std.log.{error, info}
 # Import EasyFix data types from stdlib
 use std.tooling.easy_fix.*
 use common.text.{escape_json}
+use std.common.crypto.sha256.{sha256_text}
 use compiler.semantics.lint.riscv_rtl_debuggability_lint.{lint_riscv_rtl_debuggability}
 use compiler.core.ast.{module_get_decls}
+use compiler.core.ast_expr.{ast_generation}
 use compiler.core.parser.{parse_module_silent_checked, parser_has_errors, parser_set_had_error, parser_first_error_get}
 use compiler.semantics.lint.argument_count.{check_argument_count}
 use compiler.semantics.lint.collection_patterns.{check_collection_patterns}
@@ -110,8 +112,43 @@ fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintRunRes
         results.push(LintRunResult.new(path, parse_line, parse_col, lint))
         return results
 
+    lint_cli_append_parsed_results(linter, path, content, module_get_decls(), results)
+
+struct LintParsedRevision:
+    path: text
+    source_digest: text
+    arena_generation: i64
+    decls: [i64]
+
+fn lint_parsed_revision(path: text, content: text, decls: [i64]) -> LintParsedRevision:
+    LintParsedRevision(path, sha256_text(content), ast_generation(), decls)
+
+fn lint_cli_source_with_parsed_revision(
+    linter: Linter, path: String, content: String, revision: LintParsedRevision
+) -> [LintRunResult]:
+    """Lint using declarations owned by an already-parsed compiler revision.
+
+    This entrypoint never invokes or resets the parser/AST arena. Revision
+    identity is checked before declaration indices are consumed.
+    """
+    var results = linter.lint_source(path, content)
+    if not path.ends_with(".spl"):
+        return results
+    if revision.path != path or revision.source_digest != sha256_text(content)
+        or revision.arena_generation != ast_generation():
+        val lint = LintDiag.new(
+            "LINTREV001", LintLevel.Deny, LintCategory.Correctness,
+            "NOT LINTED: parsed revision does not match source path, digest, and AST generation")
+        results.push(LintRunResult.new(path, 1, 0, lint))
+        return results
+    lint_cli_append_parsed_results(linter, path, content, revision.decls, results)
+
+fn lint_cli_append_parsed_results(
+    linter: Linter, path: String, content: String, decls: [i64],
+    initial_results: [LintRunResult]
+) -> [LintRunResult]:
+    var results = initial_results
     val config = resolve_lint_config(linter.config, path, content)
-    val decls = module_get_decls()
     val lines = content.split("\n")
     val source_locations = lint_source_location_index(lines)
     val stub_profile_name = _lint_profile_to_assurance_name(config.profile)
