@@ -232,6 +232,12 @@ nested lowering inherits it. A monotonic generation refreshes local caches
 between same-process module lowerings. Both current exits restore prior depth.
 The four-word state relies on MIR lowering's existing serial ownership.
 
+Backend adapters own immutable per-operation configuration snapshots. The LLVM
+direct adapters read trace and bare-metal target policy at entry, then pass the
+target boolean to configuration and translator helpers. Public API boundaries
+remain stable; no process-global backend cache is introduced, so same-process
+calls can select different policies.
+
 ## References
 
 - `doc/01_research/local/simple_compiler_performance_memory_efficiency_audit.md`
