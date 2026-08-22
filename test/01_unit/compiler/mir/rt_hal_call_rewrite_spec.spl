@@ -1,0 +1,52 @@
+# @feature mcdc_hal_runtime_hardening
+# @req REQ-009 REQ-010 REQ-014
+
+use std.spec.*
+use compiler.mir.*
+use compiler.mir.rt_hal_call_rewrite.*
+
+fn call_name(function: MirFunction) -> text:
+    match function.blocks[0].instructions[0].kind:
+        case MirInstKind.Call(_, callee, _):
+            match callee.kind:
+                case MirOperandKind.Const(MirConstValue.Str(name), _): return name
+                case _: return "<non-direct>"
+        case _: return "<non-call>"
+
+fn clock_wrapper_call() -> MirFunction:
+    val signature = MirSignature(
+        params: [], return_type: MirType.i64(), is_variadic: false)
+    val callee = MirOperand(kind: MirOperandKind.Const(
+        MirConstValue.Str("hal_clock_monotonic_nanos_v1"),
+        MirType(kind: MirTypeKind.FuncPtr(signature))))
+    val instruction = MirInst(kind: MirInstKind.Call(
+        Some(LocalId(id: 0)), callee, []), span: nil)
+    val block = MirBlock(id: BlockId(id: 0), label: nil,
+        instructions: [instruction],
+        terminator: MirTerminator.Ret(Some(MirOperand(kind:
+            MirOperandKind.Copy(LocalId(id: 0))))))
+    MirFunction(name: "time_now_nanos", blocks: [block], locals: [])
+
+val CLOCK_MANIFEST = "rt-hal-v1|operation=io.clock.monotonic_nanos.v1|providers=2"
+
+describe "resolved @rt(hal) MIR call rewrite":
+    it "replaces the exact raw clock leaf in normal mode":
+        val before = clock_wrapper_call()
+        expect(call_name(before)).to_equal("hal_clock_monotonic_nanos_v1")
+        val rewritten = rt_hal_rewrite_function_calls_v1(
+            before, CLOCK_MANIFEST, RtHalCallModeV1.NormalDirect)
+        expect(rewritten.diagnostic).to_equal("")
+        expect(rewritten.rewritten_calls).to_equal(1)
+        expect(rewritten.raw_symbol).to_equal("hal_clock_monotonic_nanos_v1")
+        expect(rewritten.selected_symbol).to_equal("rt_time_now_nanos")
+        expect(call_name(rewritten.function)).to_equal("rt_time_now_nanos")
+
+    it "fails closed when sealed comparison lacks init-owned state":
+        val compared = rt_hal_rewrite_function_calls_v1(
+            clock_wrapper_call(), CLOCK_MANIFEST,
+            RtHalCallModeV1.SealedCompare)
+        expect(compared.rewritten_calls).to_equal(0)
+        expect(call_name(compared.function)).to_equal(
+            "hal_clock_monotonic_nanos_v1")
+        expect(compared.diagnostic).to_start_with("E-RT-HAL-BIND-004:")
+        expect(compared.diagnostic).to_contain("immutable @init_phase session owner")
