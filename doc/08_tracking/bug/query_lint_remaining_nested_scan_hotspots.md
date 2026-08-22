@@ -8,9 +8,13 @@ still contain bounded nested work.
 
 ## Remaining candidates
 
-- Closure-capture analysis still walks backward for every nested function. Its former
-  outer-variable by body-line Cartesian comparison is fixed: each body line extracts one
-  assignment target and performs an indexed membership lookup.
+- Closure-capture analysis now resolves the nearest prior lower-indent boundary with a
+  prefix-maximum Fenwick index and advances declaration counts once per exact
+  `(boundary, closure-indent)` group. Sibling closures no longer rebuild the same map or
+  walk the outer body backward. Nested closure bodies can still be scanned by each
+  containing closure because that duplication is observable in legacy diagnostic output;
+  a future exact replacement should index assignment intervals and emit stored results in
+  closure/body order.
 - Match analysis now indexes duplicate arms and per-enum variant membership. It still
   tests each pattern against each candidate enum during ambiguous type inference; typed
   scrutinee facts should eventually remove that heuristic candidate search.
