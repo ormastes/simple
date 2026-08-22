@@ -840,3 +840,9 @@ the canonical checked facade, retain direct raw calls only where measured
 closure constraints require lexical `unsafe(ffi)`, and avoid per-call registry,
 signature, or hash work. Signed admission remains a load-time operation and is
 still zero for production providers.
+
+Five modules now route live raw text reads through the canonical facade. Improve
+the unused-boundary audit so comment-only mentions do not hide dead declarations,
+then repeat deletion before migrating additional live callers. Preserve the
+file-I/O-dominated hot-path shape: one typed call and required null/result branch,
+with signature/evidence verification confined to provider admission.

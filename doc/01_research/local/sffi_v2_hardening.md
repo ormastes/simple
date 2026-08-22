@@ -1019,3 +1019,14 @@ occurrence in its file, and census/ratchet gates pass. A bounded 12-file mixed
 check was stopped after five minutes at about 336 MB RSS under the convergence
 guard; it produced no source diagnostic. This slice deletes compile-time input
 only and adds no runtime branch, allocation, lookup, or hashing.
+
+Five live/comment-shadowed `rt_file_read_text` declarations were then removed
+from modules that already imported the canonical `read_file_text` facade. Four
+direct calls now use that facade; one declaration had only a comment mentioning
+the symbol, exposing a false negative in the earlier text-occurrence sweep. The
+five modules pass together. The compatibility result remains text with an empty
+fallback, but nullable foreign handling is now owned by one checked boundary.
+The added branch occurs only after file I/O; there is no per-call registry,
+signature, hash, allocation, or generic dispatch. The census is now 12,512
+declarations, 11,736 untouched, and zero verified-and-signed; production is
+6,202 declarations with 5,626 untouched.
