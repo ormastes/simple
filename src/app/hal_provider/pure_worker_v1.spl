@@ -1,15 +1,25 @@
 # codex-impl
 # Pure-Simple rt(hal) provider worker, protocol ABI v1.
 #
-# The semantic transform uses scalar state only. The current hosted stdin/text
-# runtime owns bounded line materialization; the launcher still enforces the
-# 512-byte wire ceiling. A future raw-buffer stdin facade can replace only the
-# two transport calls without changing the provider transform or wire identity.
-
-use std.nogc_async_mut.host_io.stdio.{read_line, write_line}
+# The sealed path owns three 512-byte arenas allocated once before handshake.
+# Buffered input, parsing, and formatting operate directly on those arenas: no
+# read_line, split, substring, interpolation, growable collection, or per-frame
+# allocation is reachable after initialization. All overflow fails closed.
 
 val FRAME_CAP: i64 = 512
 val PROVIDER_PURE: i64 = 0
+val I64_MIN: i64 = -9223372036854775807 - 1
+
+extern fn malloc(size: i64) -> i64
+extern fn free(ptr: i64)
+@unsafe(reason: "bounded read into worker-owned fixed storage", capabilities: [ffi, raw_ptr])
+extern fn read(fd: i64, buffer: i64, length: i64) -> i64
+@unsafe(reason: "bounded write from worker-owned fixed storage", capabilities: [ffi, raw_ptr])
+extern fn write(fd: i64, buffer: i64, length: i64) -> i64
+@unsafe(reason: "bounded fixed-arena byte access", capabilities: [ffi, raw_ptr])
+extern fn rt_ptr_read_u8(addr: i64, offset: i64) -> i64
+@unsafe(reason: "bounded fixed-arena byte access", capabilities: [ffi, raw_ptr])
+extern fn rt_ptr_write_u8(addr: i64, offset: i64, value: i64)
 
 struct PureHalRequestV1:
     contract: i64
@@ -55,178 +65,272 @@ struct PureHalBytesRequestV2:
     trace_length: i64
     trace_capacity: i64
 
-fn _parse_u64(value: text) -> (bool, i64):
-    if value == "" or value.len() > 19:
-        return (false, 0)
-    var result: i64 = 0
-    var index = 0
-    while index < value.len():
-        val code = value.char_code_at(index)
+struct ParsedFieldV1:
+    ok: bool
+    value: i64
+    next: i64
+
+class PureHalFrameIoV1:
+    stream: i64
+    frame: i64
+    output: i64
+    stream_start: i64
+    stream_end: i64
+    frame_length: i64
+
+    static fn create() -> PureHalFrameIoV1:
+        PureHalFrameIoV1(stream: malloc(FRAME_CAP), frame: malloc(FRAME_CAP),
+            output: malloc(FRAME_CAP), stream_start: 0, stream_end: 0,
+            frame_length: 0)
+
+    fn ready() -> bool:
+        self.stream > 0 and self.frame > 0 and self.output > 0
+
+    me close():
+        if self.stream > 0:
+            free(self.stream)
+            self.stream = 0
+        if self.frame > 0:
+            free(self.frame)
+            self.frame = 0
+        if self.output > 0:
+            free(self.output)
+            self.output = 0
+
+    me read_frame() -> i64:
+        self.frame_length = 0
+        while true:
+            var scan = self.stream_start
+            while scan < self.stream_end:
+                if _byte(self.stream, scan) == 10:
+                    val count = scan - self.stream_start + 1
+                    if count <= 0 or count >= FRAME_CAP:
+                        return 0
+                    var i = 0
+                    while i < count:
+                        _store(self.frame, i,
+                            _byte(self.stream, self.stream_start + i))
+                        i = i + 1
+                    self.stream_start = self.stream_start + count
+                    if self.stream_start == self.stream_end:
+                        self.stream_start = 0
+                        self.stream_end = 0
+                    self.frame_length = count
+                    return 1
+                scan = scan + 1
+            if self.stream_start > 0:
+                val retained = self.stream_end - self.stream_start
+                var i = 0
+                while i < retained:
+                    _store(self.stream, i,
+                        _byte(self.stream, self.stream_start + i))
+                    i = i + 1
+                self.stream_start = 0
+                self.stream_end = retained
+            if self.stream_end + 1 >= FRAME_CAP:
+                return 0
+            val count = read(0, self.stream + self.stream_end,
+                FRAME_CAP - self.stream_end - 1)
+            if count == 0:
+                return -1
+            if count < 0 or count > FRAME_CAP - self.stream_end - 1:
+                return 0
+            self.stream_end = self.stream_end + count
+        0
+
+    fn write_output(length: i64) -> bool:
+        if length <= 0 or length > FRAME_CAP:
+            return false
+        var at = 0
+        while at < length:
+            val count = write(1, self.output + at, length - at)
+            if count <= 0 or count > length - at:
+                return false
+            at = at + count
+        true
+
+fn _byte(address: i64, offset: i64) -> i64:
+    rt_ptr_read_u8(address, offset) & 255
+
+fn _store(address: i64, offset: i64, value: i64):
+    rt_ptr_write_u8(address, offset, value & 255)
+
+fn _prefix(address: i64, length: i64, expected: text) -> bool:
+    if expected.len() > length:
+        return false
+    var i = 0
+    while i < expected.len():
+        if _byte(address, i) != expected.char_code_at(i):
+            return false
+        i = i + 1
+    true
+
+fn _field(address: i64, length: i64, at: i64,
+          terminal: bool, signed: bool) -> ParsedFieldV1:
+    var cursor = at
+    var negative = false
+    if signed and cursor < length and _byte(address, cursor) == 45:
+        negative = true
+        cursor = cursor + 1
+    var magnitude = 0
+    var digits = 0
+    while cursor < length:
+        val code = _byte(address, cursor)
         if code < 48 or code > 57:
-            return (false, 0)
+            break
         val digit = code - 48
-        if result > (9223372036854775807 - digit) / 10:
-            return (false, 0)
-        result = result * 10 + digit
-        index = index + 1
-    (true, result)
+        if magnitude > (9223372036854775807 - digit) / 10:
+            return ParsedFieldV1(ok: false, value: 0, next: at)
+        magnitude = magnitude * 10 + digit
+        cursor = cursor + 1
+        digits = digits + 1
+    val separator = if terminal: 10 else: 124
+    if digits == 0 or cursor >= length or _byte(address, cursor) != separator:
+        return ParsedFieldV1(ok: false, value: 0, next: at)
+    ParsedFieldV1(ok: true,
+        value: if negative: -magnitude else: magnitude, next: cursor + 1)
 
-fn _parse_i64(value: text) -> (bool, i64):
-    if value == "-9223372036854775808":
-        return (true, -9223372036854775807 - 1)
-    if value.starts_with("-"):
-        val magnitude = _parse_u64(value.substring(1, value.len()))
-        if not magnitude.0:
-            return (false, 0)
-        return (true, -magnitude.1)
-    _parse_u64(value)
+fn _i64(address: i64, length: i64, at: i64,
+        terminal: bool) -> ParsedFieldV1:
+    val spelling = "-9223372036854775808"
+    val separator = if terminal: 10 else: 124
+    if at + spelling.len() < length:
+        var i = 0
+        while i < spelling.len() and _byte(address, at + i) == spelling.char_code_at(i):
+            i = i + 1
+        if i == spelling.len() and _byte(address, at + i) == separator:
+            return ParsedFieldV1(ok: true, value: I64_MIN, next: at + i + 1)
+    _field(address, length, at, terminal, true)
 
-fn _request(line: text) -> (bool, PureHalRequestV1):
+fn _u64(address: i64, length: i64, at: i64,
+        terminal: bool) -> ParsedFieldV1:
+    _field(address, length, at, terminal, false)
+
+fn _request(address: i64, length: i64) -> (bool, PureHalRequestV1):
     val invalid = PureHalRequestV1(contract: 0, operation: 0, invocation: 0,
         fixture: 0, input_offset: 0, input_length: 0, input_capacity: 0,
         trace_capacity: 0)
-    if line.len() >= FRAME_CAP or not line.starts_with("HALREQ1|"):
+    if length <= 0 or length >= FRAME_CAP or not _prefix(address, length, "HALREQ1|"):
         return (false, invalid)
-    val fields = line.split("|")
-    if fields.len() != 9:
+    val f0 = _u64(address, length, 8, false)
+    val f1 = _u64(address, length, f0.next, false)
+    val f2 = _u64(address, length, f1.next, false)
+    val f3 = _u64(address, length, f2.next, false)
+    val f4 = _u64(address, length, f3.next, false)
+    val f5 = _u64(address, length, f4.next, false)
+    val f6 = _u64(address, length, f5.next, false)
+    val f7 = _u64(address, length, f6.next, true)
+    if (not f0.ok or not f1.ok or not f2.ok or not f3.ok or not f4.ok
+            or not f5.ok or not f6.ok or not f7.ok or f7.next != length):
         return (false, invalid)
-    val f0 = _parse_u64(fields[1])
-    val f1 = _parse_u64(fields[2])
-    val f2 = _parse_u64(fields[3])
-    val f3 = _parse_u64(fields[4])
-    val f4 = _parse_u64(fields[5])
-    val f5 = _parse_u64(fields[6])
-    val f6 = _parse_u64(fields[7])
-    val f7 = _parse_u64(fields[8])
-    if (not f0.0 or not f1.0 or not f2.0 or not f3.0 or not f4.0
-            or not f5.0 or not f6.0 or not f7.0):
-        return (false, invalid)
-    val request = PureHalRequestV1(contract: f0.1, operation: f1.1,
-        invocation: f2.1, fixture: f3.1, input_offset: f4.1,
-        input_length: f5.1, input_capacity: f6.1, trace_capacity: f7.1)
-    val valid = request.contract == 1 and request.operation > 0
-        and request.invocation > 0 and request.fixture > 0
-        and request.input_offset >= 0 and request.input_length >= 0
-        and request.input_capacity >= 0 and request.trace_capacity > 0
-        and request.input_length <= request.input_capacity
-        and request.input_offset <= request.input_capacity - request.input_length
-        and request.input_capacity <= 1048576 and request.trace_capacity <= 65536
-    (valid, request)
+    val r = PureHalRequestV1(contract: f0.value, operation: f1.value,
+        invocation: f2.value, fixture: f3.value, input_offset: f4.value,
+        input_length: f5.value, input_capacity: f6.value,
+        trace_capacity: f7.value)
+    val valid = r.contract == 1 and r.operation > 0 and r.invocation > 0
+        and r.fixture > 0 and r.input_length <= r.input_capacity
+        and r.input_offset <= r.input_capacity - r.input_length
+        and r.input_capacity <= 1048576 and r.trace_capacity > 0
+        and r.trace_capacity <= 65536
+    (valid, r)
 
-fn _request_v2(line: text) -> (bool, PureHalRequestV2):
+fn _request_v2(address: i64, length: i64) -> (bool, PureHalRequestV2):
     val invalid = PureHalRequestV2(contract: 0, operation: 0, invocation: 0,
-        fixture: 0, captured_scalar: 0, result_capacity: 0,
-        trace_hi: 0, trace_lo: 0, trace_cursor: 0, trace_length: 0,
-        trace_capacity: 0)
-    if line.len() >= FRAME_CAP or not line.starts_with("HALREQ2|"):
+        fixture: 0, captured_scalar: 0, result_capacity: 0, trace_hi: 0,
+        trace_lo: 0, trace_cursor: 0, trace_length: 0, trace_capacity: 0)
+    if length <= 0 or length >= FRAME_CAP or not _prefix(address, length, "HALREQ2|"):
         return (false, invalid)
-    val fields = line.split("|")
-    if fields.len() != 12:
+    val f0 = _u64(address, length, 8, false)
+    val f1 = _u64(address, length, f0.next, false)
+    val f2 = _u64(address, length, f1.next, false)
+    val f3 = _u64(address, length, f2.next, false)
+    val f4 = _u64(address, length, f3.next, false)
+    val f5 = _u64(address, length, f4.next, false)
+    val f6 = _u64(address, length, f5.next, false)
+    val f7 = _u64(address, length, f6.next, false)
+    val f8 = _u64(address, length, f7.next, false)
+    val f9 = _u64(address, length, f8.next, false)
+    val f10 = _u64(address, length, f9.next, true)
+    if (not f0.ok or not f1.ok or not f2.ok or not f3.ok or not f4.ok
+            or not f5.ok or not f6.ok or not f7.ok or not f8.ok or not f9.ok
+            or not f10.ok or f10.next != length):
         return (false, invalid)
-    val f0 = _parse_u64(fields[1])
-    val f1 = _parse_u64(fields[2])
-    val f2 = _parse_u64(fields[3])
-    val f3 = _parse_u64(fields[4])
-    val f4 = _parse_u64(fields[5])
-    val f5 = _parse_u64(fields[6])
-    val f6 = _parse_u64(fields[7])
-    val f7 = _parse_u64(fields[8])
-    val f8 = _parse_u64(fields[9])
-    val f9 = _parse_u64(fields[10])
-    val f10 = _parse_u64(fields[11])
-    if (not f0.0 or not f1.0 or not f2.0 or not f3.0 or not f4.0
-            or not f5.0 or not f6.0 or not f7.0 or not f8.0
-            or not f9.0 or not f10.0):
-        return (false, invalid)
-    val request = PureHalRequestV2(contract: f0.1, operation: f1.1,
-        invocation: f2.1, fixture: f3.1, captured_scalar: f4.1,
-        result_capacity: f5.1, trace_hi: f6.1, trace_lo: f7.1,
-        trace_cursor: f8.1, trace_length: f9.1, trace_capacity: f10.1)
-    val valid = request.contract == 2 and request.operation > 0
-        and request.invocation > 0 and request.fixture > 0
-        and request.result_capacity >= 8 and request.result_capacity <= 32
-        and (request.trace_hi != 0 or request.trace_lo != 0)
-        and request.trace_cursor <= request.trace_length
-        and request.trace_length <= request.trace_capacity
-        and request.trace_capacity > 0 and request.trace_capacity <= 65536
-    (valid, request)
+    val r = PureHalRequestV2(contract: f0.value, operation: f1.value,
+        invocation: f2.value, fixture: f3.value, captured_scalar: f4.value,
+        result_capacity: f5.value, trace_hi: f6.value, trace_lo: f7.value,
+        trace_cursor: f8.value, trace_length: f9.value,
+        trace_capacity: f10.value)
+    val valid = r.contract == 2 and r.operation > 0 and r.invocation > 0
+        and r.fixture > 0 and r.result_capacity >= 8 and r.result_capacity <= 32
+        and (r.trace_hi != 0 or r.trace_lo != 0)
+        and r.trace_cursor <= r.trace_length and r.trace_length <= r.trace_capacity
+        and r.trace_capacity > 0 and r.trace_capacity <= 65536
+    (valid, r)
 
-fn _bytes_request_v2(line: text) -> (bool, PureHalBytesRequestV2):
+fn _bytes_request_v2(address: i64, length: i64) -> (bool, PureHalBytesRequestV2):
     val invalid = PureHalBytesRequestV2(contract: 0, operation: 0,
         invocation: 0, fixture: 0, status: 0, error_domain: 0,
         error_code: 0, error_detail: 0, payload_length: 0,
         payload_capacity: 0, word0: 0, word1: 0, word2: 0, word3: 0,
         trace_hi: 0, trace_lo: 0, trace_cursor: 0, trace_length: 0,
         trace_capacity: 0)
-    if line.len() >= FRAME_CAP or not line.starts_with("HALREQ2B|"):
+    if length <= 0 or length >= FRAME_CAP or not _prefix(address, length, "HALREQ2B|"):
         return (false, invalid)
-    val fields = line.split("|")
-    if fields.len() != 20:
+    val f0 = _u64(address, length, 9, false)
+    val f1 = _u64(address, length, f0.next, false)
+    val f2 = _u64(address, length, f1.next, false)
+    val f3 = _u64(address, length, f2.next, false)
+    val f4 = _u64(address, length, f3.next, false)
+    val f5 = _u64(address, length, f4.next, false)
+    val f6 = _u64(address, length, f5.next, false)
+    val f7 = _u64(address, length, f6.next, false)
+    val f8 = _u64(address, length, f7.next, false)
+    val f9 = _u64(address, length, f8.next, false)
+    val f10 = _i64(address, length, f9.next, false)
+    val f11 = _i64(address, length, f10.next, false)
+    val f12 = _i64(address, length, f11.next, false)
+    val f13 = _i64(address, length, f12.next, false)
+    val f14 = _u64(address, length, f13.next, false)
+    val f15 = _u64(address, length, f14.next, false)
+    val f16 = _u64(address, length, f15.next, false)
+    val f17 = _u64(address, length, f16.next, false)
+    val f18 = _u64(address, length, f17.next, true)
+    if (not f0.ok or not f1.ok or not f2.ok or not f3.ok or not f4.ok
+            or not f5.ok or not f6.ok or not f7.ok or not f8.ok or not f9.ok
+            or not f10.ok or not f11.ok or not f12.ok or not f13.ok
+            or not f14.ok or not f15.ok or not f16.ok or not f17.ok
+            or not f18.ok or f18.next != length):
         return (false, invalid)
-    val f0 = _parse_u64(fields[1])
-    val f1 = _parse_u64(fields[2])
-    val f2 = _parse_u64(fields[3])
-    val f3 = _parse_u64(fields[4])
-    val f4 = _parse_u64(fields[5])
-    val f5 = _parse_u64(fields[6])
-    val f6 = _parse_u64(fields[7])
-    val f7 = _parse_u64(fields[8])
-    val f8 = _parse_u64(fields[9])
-    val f9 = _parse_u64(fields[10])
-    val f10 = _parse_i64(fields[11])
-    val f11 = _parse_i64(fields[12])
-    val f12 = _parse_i64(fields[13])
-    val f13 = _parse_i64(fields[14])
-    val f14 = _parse_u64(fields[15])
-    val f15 = _parse_u64(fields[16])
-    val f16 = _parse_u64(fields[17])
-    val f17 = _parse_u64(fields[18])
-    val f18 = _parse_u64(fields[19])
-    if (not f0.0 or not f1.0 or not f2.0 or not f3.0 or not f4.0
-            or not f5.0 or not f6.0 or not f7.0 or not f8.0 or not f9.0
-            or not f10.0 or not f11.0 or not f12.0 or not f13.0
-            or not f14.0 or not f15.0 or not f16.0 or not f17.0
-            or not f18.0):
-        return (false, invalid)
-    val request = PureHalBytesRequestV2(contract: f0.1, operation: f1.1,
-        invocation: f2.1, fixture: f3.1, status: f4.1,
-        error_domain: f5.1, error_code: f6.1, error_detail: f7.1,
-        payload_length: f8.1, payload_capacity: f9.1,
-        word0: f10.1, word1: f11.1, word2: f12.1, word3: f13.1,
-        trace_hi: f14.1, trace_lo: f15.1, trace_cursor: f16.1,
-        trace_length: f17.1, trace_capacity: f18.1)
-    # Provider operation IDs 1006..1008 and 1012..1015 are the typed
-    # EnvOpcodeV1 process/socket lifecycles. The result is parent-captured;
-    # this worker only normalizes it and never performs the represented effect.
-    val admitted = request.operation == 102 or request.operation == 1001
-        or request.operation == 1004
-        or (request.operation >= 1006 and request.operation <= 1008)
-        or (request.operation >= 1012 and request.operation <= 1015)
-    val error_valid = if request.status == 0:
-        request.error_domain == 0 and request.error_code == 0
-            and request.error_detail == 0
+    val r = PureHalBytesRequestV2(contract: f0.value, operation: f1.value,
+        invocation: f2.value, fixture: f3.value, status: f4.value,
+        error_domain: f5.value, error_code: f6.value, error_detail: f7.value,
+        payload_length: f8.value, payload_capacity: f9.value,
+        word0: f10.value, word1: f11.value, word2: f12.value,
+        word3: f13.value, trace_hi: f14.value, trace_lo: f15.value,
+        trace_cursor: f16.value, trace_length: f17.value,
+        trace_capacity: f18.value)
+    val admitted = r.operation == 102 or r.operation == 1001
+        or r.operation == 1004 or (r.operation >= 1006 and r.operation <= 1008)
+        or (r.operation >= 1012 and r.operation <= 1015)
+    val error_valid = if r.status == 0:
+        r.error_domain == 0 and r.error_code == 0 and r.error_detail == 0
     else:
-        request.error_domain > 0 and request.error_domain <= 4
-            and request.error_code > 0
-    val valid = request.contract == 2 and admitted
-        and request.invocation > 0 and request.fixture > 0
-        and request.status >= 0 and request.status <= 7 and error_valid
-        and request.payload_length >= 0 and request.payload_capacity > 0
-        and request.payload_capacity <= 32
-        and request.payload_length <= request.payload_capacity
-        and (request.trace_hi != 0 or request.trace_lo != 0)
-        and request.trace_cursor >= 0
-        and request.trace_cursor <= request.trace_length
-        and request.trace_length <= request.trace_capacity
-        and request.trace_capacity > 0 and request.trace_capacity <= 65536
-        and _canonical_word(request.word0,
-            if request.payload_length > 8: 8 else: request.payload_length)
-        and _canonical_word(request.word1,
-            if request.payload_length > 16: 8 else: request.payload_length - 8)
-        and _canonical_word(request.word2,
-            if request.payload_length > 24: 8 else: request.payload_length - 16)
-        and _canonical_word(request.word3, request.payload_length - 24)
-    (valid, request)
+        r.error_domain > 0 and r.error_domain <= 4 and r.error_code > 0
+    val valid = r.contract == 2 and admitted and r.invocation > 0
+        and r.fixture > 0 and r.status >= 0 and r.status <= 7 and error_valid
+        and r.payload_capacity > 0 and r.payload_capacity <= 32
+        and r.payload_length <= r.payload_capacity
+        and (r.trace_hi != 0 or r.trace_lo != 0)
+        and r.trace_cursor <= r.trace_length and r.trace_length <= r.trace_capacity
+        and r.trace_capacity > 0 and r.trace_capacity <= 65536
+        and _canonical_word(r.word0,
+            if r.payload_length > 8: 8 else: r.payload_length)
+        and _canonical_word(r.word1,
+            if r.payload_length > 16: 8 else: r.payload_length - 8)
+        and _canonical_word(r.word2,
+            if r.payload_length > 24: 8 else: r.payload_length - 16)
+        and _canonical_word(r.word3, r.payload_length - 24)
+    (valid, r)
 
 fn _canonical_word(word: i64, used_bytes: i64) -> bool:
     if used_bytes <= 0:
@@ -236,94 +340,226 @@ fn _canonical_word(word: i64, used_bytes: i64) -> bool:
     (word >> (used_bytes * 8)) == 0
 
 fn _mix(hash: i64, value: i64) -> i64:
-    # A small positive modulus keeps every intermediate inside i64 while
-    # preserving exact cross-language behavior without overflow assumptions.
     var result = hash
     var remaining = value
-    var index = 0
-    while index < 8:
+    var i = 0
+    while i < 8:
         result = (result * 257 + (remaining & 255)) % 2147483647
         remaining = remaining >> 8
-        index = index + 1
+        i = i + 1
     result
 
-fn _digest(request: PureHalRequestV1, seed: i64) -> i64:
+fn _digest(r: PureHalRequestV1, seed: i64) -> i64:
     var result = seed % 2147483647
-    result = _mix(result, request.contract)
-    result = _mix(result, request.operation)
-    result = _mix(result, request.invocation)
-    result = _mix(result, request.fixture)
-    result = _mix(result, request.input_offset)
-    result = _mix(result, request.input_length)
-    result = _mix(result, request.input_capacity)
-    _mix(result, request.trace_capacity)
+    result = _mix(result, r.contract)
+    result = _mix(result, r.operation)
+    result = _mix(result, r.invocation)
+    result = _mix(result, r.fixture)
+    result = _mix(result, r.input_offset)
+    result = _mix(result, r.input_length)
+    result = _mix(result, r.input_capacity)
+    _mix(result, r.trace_capacity)
 
-fn _result(request: PureHalRequestV1) -> text:
-    val digest = _digest(request, 1469598103934665603)
-    val trace = _digest(request, 7809847782465536322)
-    val digest_lo = digest ^ 7640891576956012809
-    val trace_lo = trace ^ -4942790177534073029
-    "HALRES1|{PROVIDER_PURE}|{request.invocation}|0|0|{digest}|{digest_lo}|{trace}|{trace_lo}|{request.input_length}|{request.input_capacity}|1|{request.trace_capacity}|0|-1|0|64"
+fn _append_literal(output: i64, at: i64, value: text) -> i64:
+    if at < 0 or value.len() > FRAME_CAP - at:
+        return -1
+    var i = 0
+    while i < value.len():
+        _store(output, at + i, value.char_code_at(i))
+        i = i + 1
+    at + value.len()
 
-fn _result_v2(request: PureHalRequestV2) -> text:
-    "HALRES2|{PROVIDER_PURE}|{request.invocation}|0|0|0|0|1|{request.captured_scalar}|8|{request.result_capacity}|{request.trace_hi}|{request.trace_lo}|{request.trace_cursor}|{request.trace_length}|{request.trace_capacity}|0|-1|0|88"
+fn _append_i64(output: i64, at: i64, value: i64) -> i64:
+    if at < 0:
+        return -1
+    if value == I64_MIN:
+        return _append_literal(output, at, "-9223372036854775808")
+    var cursor = at
+    var magnitude = value
+    if value < 0:
+        if cursor >= FRAME_CAP:
+            return -1
+        _store(output, cursor, 45)
+        cursor = cursor + 1
+        magnitude = -value
+    val digit_start = cursor
+    while true:
+        if cursor >= FRAME_CAP:
+            return -1
+        _store(output, cursor, 48 + magnitude % 10)
+        cursor = cursor + 1
+        magnitude = magnitude / 10
+        if magnitude == 0:
+            break
+    var left = digit_start
+    var right = cursor - 1
+    while left < right:
+        val byte = _byte(output, left)
+        _store(output, left, _byte(output, right))
+        _store(output, right, byte)
+        left = left + 1
+        right = right - 1
+    cursor
 
-fn _bytes_result_v2(request: PureHalBytesRequestV2) -> text:
-    "HALRES2B|{PROVIDER_PURE}|{request.invocation}|{request.status}|{request.error_domain}|{request.error_code}|{request.error_detail}|2|0|{request.payload_length}|{request.payload_capacity}|{request.word0}|{request.word1}|{request.word2}|{request.word3}|{request.trace_hi}|{request.trace_lo}|{request.trace_cursor}|{request.trace_length}|{request.trace_capacity}|0|-1|0|152"
+fn _append_field(output: i64, at: i64, value: i64,
+                 terminal: bool) -> i64:
+    val next = _append_i64(output, at, value)
+    if next < 0 or next >= FRAME_CAP:
+        return -1
+    _store(output, next, if terminal: 10 else: 124)
+    next + 1
 
-fn _dispatch(line: text, expected_invocation: i64) -> (bool, text):
-    val v1 = _request(line)
+fn _result(io: PureHalFrameIoV1, r: PureHalRequestV1) -> bool:
+    val digest = _digest(r, 1469598103934665603)
+    val trace = _digest(r, 7809847782465536322)
+    var at = _append_literal(io.output, 0, "HALRES1|")
+    at = _append_field(io.output, at, PROVIDER_PURE, false)
+    at = _append_field(io.output, at, r.invocation, false)
+    at = _append_field(io.output, at, 0, false)
+    at = _append_field(io.output, at, 0, false)
+    at = _append_field(io.output, at, digest, false)
+    at = _append_field(io.output, at, digest ^ 7640891576956012809, false)
+    at = _append_field(io.output, at, trace, false)
+    at = _append_field(io.output, at, trace ^ -4942790177534073029, false)
+    at = _append_field(io.output, at, r.input_length, false)
+    at = _append_field(io.output, at, r.input_capacity, false)
+    at = _append_field(io.output, at, 1, false)
+    at = _append_field(io.output, at, r.trace_capacity, false)
+    at = _append_field(io.output, at, 0, false)
+    at = _append_field(io.output, at, -1, false)
+    at = _append_field(io.output, at, 0, false)
+    at = _append_field(io.output, at, 64, true)
+    at > 0 and io.write_output(at)
+
+fn _result_v2(io: PureHalFrameIoV1, r: PureHalRequestV2) -> bool:
+    var at = _append_literal(io.output, 0, "HALRES2|")
+    at = _append_field(io.output, at, PROVIDER_PURE, false)
+    at = _append_field(io.output, at, r.invocation, false)
+    at = _append_field(io.output, at, 0, false)
+    at = _append_field(io.output, at, 0, false)
+    at = _append_field(io.output, at, 0, false)
+    at = _append_field(io.output, at, 0, false)
+    at = _append_field(io.output, at, 1, false)
+    at = _append_field(io.output, at, r.captured_scalar, false)
+    at = _append_field(io.output, at, 8, false)
+    at = _append_field(io.output, at, r.result_capacity, false)
+    at = _append_field(io.output, at, r.trace_hi, false)
+    at = _append_field(io.output, at, r.trace_lo, false)
+    at = _append_field(io.output, at, r.trace_cursor, false)
+    at = _append_field(io.output, at, r.trace_length, false)
+    at = _append_field(io.output, at, r.trace_capacity, false)
+    at = _append_field(io.output, at, 0, false)
+    at = _append_field(io.output, at, -1, false)
+    at = _append_field(io.output, at, 0, false)
+    at = _append_field(io.output, at, 88, true)
+    at > 0 and io.write_output(at)
+
+fn _bytes_result_v2(io: PureHalFrameIoV1,
+                    r: PureHalBytesRequestV2) -> bool:
+    var at = _append_literal(io.output, 0, "HALRES2B|")
+    at = _append_field(io.output, at, PROVIDER_PURE, false)
+    at = _append_field(io.output, at, r.invocation, false)
+    at = _append_field(io.output, at, r.status, false)
+    at = _append_field(io.output, at, r.error_domain, false)
+    at = _append_field(io.output, at, r.error_code, false)
+    at = _append_field(io.output, at, r.error_detail, false)
+    at = _append_field(io.output, at, 2, false)
+    at = _append_field(io.output, at, 0, false)
+    at = _append_field(io.output, at, r.payload_length, false)
+    at = _append_field(io.output, at, r.payload_capacity, false)
+    at = _append_field(io.output, at, r.word0, false)
+    at = _append_field(io.output, at, r.word1, false)
+    at = _append_field(io.output, at, r.word2, false)
+    at = _append_field(io.output, at, r.word3, false)
+    at = _append_field(io.output, at, r.trace_hi, false)
+    at = _append_field(io.output, at, r.trace_lo, false)
+    at = _append_field(io.output, at, r.trace_cursor, false)
+    at = _append_field(io.output, at, r.trace_length, false)
+    at = _append_field(io.output, at, r.trace_capacity, false)
+    at = _append_field(io.output, at, 0, false)
+    at = _append_field(io.output, at, -1, false)
+    at = _append_field(io.output, at, 0, false)
+    at = _append_field(io.output, at, 152, true)
+    at > 0 and io.write_output(at)
+
+fn _dispatch(io: PureHalFrameIoV1, expected_invocation: i64) -> bool:
+    val v1 = _request(io.frame, io.frame_length)
     if v1.0:
-        return (expected_invocation == 0 or v1.1.invocation == expected_invocation,
-                _result(v1.1))
-    val v2 = _request_v2(line)
+        return (expected_invocation == 0 or v1.1.invocation == expected_invocation)
+            and _result(io, v1.1)
+    val v2 = _request_v2(io.frame, io.frame_length)
     if v2.0:
-        return (expected_invocation == 0 or v2.1.invocation == expected_invocation,
-                _result_v2(v2.1))
-    val bytes_v2 = _bytes_request_v2(line)
+        return (expected_invocation == 0 or v2.1.invocation == expected_invocation)
+            and _result_v2(io, v2.1)
+    val bytes_v2 = _bytes_request_v2(io.frame, io.frame_length)
     if bytes_v2.0:
         return (expected_invocation == 0
-                or bytes_v2.1.invocation == expected_invocation,
-                _bytes_result_v2(bytes_v2.1))
-    (false, "")
+                or bytes_v2.1.invocation == expected_invocation)
+            and _bytes_result_v2(io, bytes_v2.1)
+    false
 
-fn _parse_reset(line: text) -> (bool, i64, i64, i64):
-    if line.len() >= FRAME_CAP or not line.starts_with("HALRESET1|"):
+fn _parse_reset(address: i64, length: i64) -> (bool, i64, i64, i64):
+    if length <= 0 or length >= FRAME_CAP or not _prefix(address, length, "HALRESET1|"):
         return (false, 0, 0, 0)
-    val fields = line.split("|")
-    if fields.len() != 4:
-        return (false, 0, 0, 0)
-    val generation = _parse_u64(fields[1])
-    val sequence = _parse_u64(fields[2])
-    val invocation = _parse_u64(fields[3])
-    (generation.0 and sequence.0 and invocation.0 and generation.1 > 0
-        and sequence.1 > 0 and invocation.1 > 0,
-     generation.1, sequence.1, invocation.1)
+    val generation = _u64(address, length, 10, false)
+    val sequence = _u64(address, length, generation.next, false)
+    val invocation = _u64(address, length, sequence.next, true)
+    (generation.ok and sequence.ok and invocation.ok
+        and invocation.next == length and generation.value > 0
+        and sequence.value > 0 and invocation.value > 0,
+     generation.value, sequence.value, invocation.value)
+
+fn _write_reset_ok(io: PureHalFrameIoV1, generation: i64,
+                   sequence: i64, invocation: i64) -> bool:
+    var at = _append_literal(io.output, 0, "HALRESETOK1|")
+    at = _append_field(io.output, at, generation, false)
+    at = _append_field(io.output, at, sequence, false)
+    at = _append_field(io.output, at, invocation, true)
+    at > 0 and io.write_output(at)
 
 fn main():
+    # CLI decoding and the three arena allocations are initialization. The
+    # sealed request loop below performs no heap allocation or text creation.
     val args = get_cli_args()
-    if args.len() == 0:
-        val parsed = _dispatch(read_line(), 0)
-        if not parsed.0:
-            return
-        write_line(parsed.1)
+    val session = args.len() == 1 and args[0] == "session"
+    if args.len() > 1 or (args.len() == 1 and not session):
         return
-    if args.len() != 1 or args[0] != "session":
+    val io = PureHalFrameIoV1.create()
+    if not io.ready():
+        io.close()
         return
-    write_line("HALWORKER1")
+    if not session:
+        if io.read_frame() == 1:
+            _dispatch(io, 0)
+        io.close()
+        return
+    val greeting_length = _append_literal(io.output, 0, "HALWORKER1\n")
+    if greeting_length <= 0 or not io.write_output(greeting_length):
+        io.close()
+        return
     var generation = 0
     var next_sequence = 1
     while true:
-        val reset = _parse_reset(read_line())
+        val status = io.read_frame()
+        if status == -1:
+            io.close()
+            return
+        if status != 1:
+            io.close()
+            return
+        val reset = _parse_reset(io.frame, io.frame_length)
         if (not reset.0 or (generation != 0 and generation != reset.1)
-                or reset.2 != next_sequence):
+                or reset.2 != next_sequence
+                or not _write_reset_ok(io, reset.1, reset.2, reset.3)):
+            io.close()
             return
         generation = reset.1
-        write_line("HALRESETOK1|{reset.1}|{reset.2}|{reset.3}")
-        val parsed = _dispatch(read_line(), reset.3)
-        if not parsed.0:
+        if io.read_frame() != 1 or not _dispatch(io, reset.3):
+            io.close()
             return
-        write_line(parsed.1)
+        if next_sequence == 9223372036854775807:
+            io.close()
+            return
         next_sequence = next_sequence + 1
 
 main()
