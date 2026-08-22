@@ -20,37 +20,57 @@ use compiler.blocks.value.{BlockValue}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.common.binary_io.{f64_to_bits, f64_from_bits}
 
+# CHUNKED: `parts` is the CURRENT chunk and is bounded by HIR_CODEC_CHUNK_LINES;
+# every full chunk is joined once and moved to `chunks`. This is not a style
+# choice -- it is the fix for an O(n^2) blow-up. The seed interpreter deep-clones
+# a `me`-mutated field array whenever the receiver object reached this frame
+# through more than one parameter hop (every `hc_enc_*` does exactly that), so an
+# unbounded `parts` cloned all n lines on EVERY push. Measured: 80,000 pushes =
+# 80,000 clones / 3.2e9 elements copied. Bounding the mutated array bounds the
+# clone; `chunks` grows n/CHUNK times as fast, so the residual term is smaller by
+# CHUNK^2. `finish()` output is byte-identical to the unchunked writer.
+# Record: doc/08_tracking/bug/hir_codec_writer_quadratic_cow_clone_2026-08-22.md
+val HIR_CODEC_CHUNK_LINES: i64 = 512
+
 class HirCodecWriter:
     parts: [text]
+    chunks: [text]
     ok: bool
     unsupported: text
 
     static fn create() -> HirCodecWriter:
-        HirCodecWriter(parts: [], ok: true, unsupported: "")
+        HirCodecWriter(parts: [], chunks: [], ok: true, unsupported: "")
 
+    # Every put computes its line(s) first, then does exactly ONE push followed
+    # by the bounded-chunk seal. Written this way so no early `return` can skip
+    # the seal and let `parts` grow unbounded again.
+    #
     # Scalars too can be nil in a lowered module (see put_text). `N` is not a
     # digit, so it cannot collide with any encoded number or bool.
     me put_i64(v: i64):
-        if v == nil:
-            self.parts.push("N\n")
-            return
-        self.parts.push("{v}\n")
+        val line = if v == nil: "N\n" else: "{v}\n"
+        self.parts.push(line)
+        if self.parts.len() >= HIR_CODEC_CHUNK_LINES:
+            self.chunks.push(self.parts.join(""))
+            self.parts = []
 
     me put_bool(v: bool):
-        if v == nil:
-            self.parts.push("N\n")
-            return
-        self.parts.push(if v: "1\n" else: "0\n")
+        val line = if v == nil: "N\n" else: (if v: "1\n" else: "0\n")
+        self.parts.push(line)
+        if self.parts.len() >= HIR_CODEC_CHUNK_LINES:
+            self.chunks.push(self.parts.join(""))
+            self.parts = []
 
     # A declared `text` field can hold nil in a real lowered module (doc
     # comments, gpu targets). The escaper only ever emits `\\` or `\n`
     # after a backslash, so the line `\N` cannot collide with any real value
     # and marks nil exactly, keeping nil and "" distinct across the boundary.
     me put_text(v: text):
-        if v == nil:
-            self.parts.push("\\N\n")
-            return
-        self.parts.push(flat_pool_escape(v) + "\n")
+        val line = if v == nil: "\\N\n" else: flat_pool_escape(v) + "\n"
+        self.parts.push(line)
+        if self.parts.len() >= HIR_CODEC_CHUNK_LINES:
+            self.chunks.push(self.parts.join(""))
+            self.parts = []
 
     # Bit-exact: two i64 halves of the IEEE-754 image, never the printed form
     # (a C-runtime %g print is lossy; the seed's shortest-round-trip print is
@@ -60,6 +80,9 @@ class HirCodecWriter:
         val hi = (bits >> 32) as i64
         val lo = (bits & 0xFFFFFFFFu64) as i64
         self.parts.push("{hi}\n{lo}\n")
+        if self.parts.len() >= HIR_CODEC_CHUNK_LINES:
+            self.chunks.push(self.parts.join(""))
+            self.parts = []
 
     me reject(what: text):
         if self.ok:
@@ -67,7 +90,10 @@ class HirCodecWriter:
         self.ok = false
 
     me finish() -> text:
-        self.parts.join("")
+        if self.parts.len() > 0:
+            self.chunks.push(self.parts.join(""))
+            self.parts = []
+        self.chunks.join("")
 
 fn hc_read_f64(r: FlatPoolReader) -> f64:
     val hi = r.next_i64()

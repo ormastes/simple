@@ -199,6 +199,25 @@ must_contain     "SCOPEROW define probes scope row in place"      "$ROOT/src/com
 must_contain     "EXCL exclusive slot time"                       "$ROOT/src/compiler/20.hir/hir_lowering/hir_phase_profile.spl" '_hir_prof_excl_ms[slot] = _hir_prof_excl_ms[slot] + (elapsed - child_ms)'
 must_contain     "seed: decision coverage checks enabled first"   "$ROOT/src/compiler_rust/compiler/src/interpreter_control.rs" 'record_decision_coverage_here('
 must_not_contain "seed: no eager coverage file per decision"      "$ROOT/src/compiler_rust/compiler/src/interpreter_control.rs" 'record_decision_coverage_sffi(&current_coverage_file(),'
+
+# --- HIRCODECCHUNK (2026-08-22). The HIR per-module cliffs in stage1 run12 were
+# not lowering at all: `[build] hir` completion minus the `[hir-prof]` lowering
+# total left 1,535 s unaccounted on zca_rows (lowering was 7.8 s), and that gap
+# is hir_cache_store -> hir_module_encode. HirCodecWriter.parts was deep-cloned
+# by the seed on EVERY push (a class reaching a frame through >1 parameter hop
+# keeps a second Arc owner alive), so encode was O(n^2): 1,139,353 ms -> 6,702 ms
+# on zca_rows once `parts` is bounded to HIR_CODEC_CHUNK_LINES and full chunks
+# move to `chunks`. The seal must stay INLINE at each put site (a nested `me`
+# helper is the shape whose write-back the seed loses) and each put must do
+# exactly one push (an early `return` that skips the seal reinstates O(n^2)).
+# Record: doc/08_tracking/bug/hir_codec_writer_quadratic_cow_clone_2026-08-22.md
+HIRCODECW="$ROOT/src/compiler/20.hir/hir_codec_support.spl"
+must_contain     "HIRCODECCHUNK bounded chunk size"               "$HIRCODECW" "val HIR_CODEC_CHUNK_LINES: i64 = 512"
+must_contain     "HIRCODECCHUNK writer carries sealed chunks"     "$HIRCODECW" "chunks: [text]"
+must_contain     "HIRCODECCHUNK finish joins chunks not parts"    "$HIRCODECW" "self.chunks.join(\"\")"
+must_contain     "HIRCODECCHUNK seal inlined at put sites"       "$HIRCODECW" "if self.parts.len() >= HIR_CODEC_CHUNK_LINES:"
+must_contain     "HIRCODECCHUNK cost spec pins the bound"         "$ROOT/test/01_unit/compiler/hir/hir_codec_writer_chunked_cost_spec.spl" "w.parts.len() <= HIR_CODEC_CHUNK_LINES"
+must_contain     "HIRCODECCHUNK cost spec pins linear growth"     "$ROOT/test/01_unit/compiler/hir/hir_codec_writer_chunked_cost_spec.spl" "big_ms <= floor_ms * 8"
 must_contain     "seed: CowEnv frame maps on ahash"               "$ROOT/src/compiler_rust/compiler/src/value.rs" 'pub(crate) type FrameMap<K, V> = HashMap<K, V, ahash::RandomState>;'
 must_contain     "seed: shadow capture tests prior value first"   "$ROOT/src/compiler_rust/compiler/src/interpreter/block_exec.rs" 'if let Some(value) = prior_value.as_ref() {'
 must_contain     "SCALARARR seed: scalar [T] args skip element scan" "$ROOT/src/compiler_rust/compiler/src/interpreter_call/core/arg_binding.rs" 'fn array_param_has_scalar_elements(param: &Parameter) -> bool {'

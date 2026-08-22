@@ -1,0 +1,113 @@
+"""
+Purpose: Pin the MECHANISM that keeps `hir_module_encode` linear.
+
+The seed interpreter deep-clones a `me`-mutated field array whenever the
+receiver object reached the mutating frame through more than one parameter hop.
+Every generated encoder (`hc_enc_hir_function` -> `hc_enc_hir_block` -> ... ->
+`w.put_i64(...)`) is exactly that shape, so an UNBOUNDED `HirCodecWriter.parts`
+was deep-cloned on every single push: O(n^2) in the module's encoded line count.
+Measured on the real `src/compiler/50.mir/hwir/zca_rows.spl`, one process, one
+tree, one binary: encode 1,139,353 ms -> 6,702 ms (170x) with a byte-identical
+1,331,200-byte blob. That single term was the whole `[build] hir` per-module
+cliff (zca_rows: profiled lowering 7.8 s, completion receipt 1,543 s).
+
+This spec pins the ALGORITHM, not a wall clock:
+  - `parts` (the array that gets cloned) is bounded by HIR_CODEC_CHUNK_LINES,
+    which is what bounds each clone. Unbounded growth is the defect.
+  - a module large enough to need many chunks actually seals many chunks, so
+    the bound is reached in practice rather than being vacuously true.
+  - encode cost grows LINEARLY in module size: a 4x bigger module costs well
+    under the 16x a quadratic writer would charge. A ratio, so it cannot be
+    satisfied or broken by a faster machine.
+  - the chunking is invisible in the output: encode -> decode -> encode is
+    byte-identical and the decoded module keeps its shape.
+
+Record: doc/08_tracking/bug/hir_codec_writer_quadratic_cow_clone_2026-08-22.md
+
+HARNESS NOTE: `use compiler.hir.hir_lowering.statements.*` is REQUIRED for
+lower_module (see enum_payload_range_or_frontend_exec_spec.spl).
+"""
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode}
+use compiler.hir.hir_codec_support.{HirCodecWriter, HIR_CODEC_CHUNK_LINES}
+use compiler.hir.generated.hir_codec.{hc_enc_hir_module}
+
+extern fn rt_time_now_monotonic_ms() -> i64
+
+# A module whose encoded form is far larger than one chunk. Each statement
+# lowers to several HIR nodes, and every node is several writer lines.
+fn gen(nfn: i64, nstmt: i64) -> text:
+    var parts: [text] = []
+    var f = 0
+    while f < nfn:
+        parts.push("fn f{f}(a: i64, b: text) -> i64:\n    var acc = a\n")
+        var s = 0
+        while s < nstmt:
+            parts.push("    val v{s} = if acc > {s}: acc + {s} else: acc - b.len()\n    acc = acc + v{s}\n")
+            s = s + 1
+        parts.push("    acc\n\n")
+        f = f + 1
+    parts.join("")
+
+fn lower(src: text) -> HirModule:
+    val parsed = parse_full_frontend(src, "spec.spl", "spec", Logger(level: 0))
+    var hl = HirLowering.with_filename("spec.spl")
+    hl.lower_module(parsed)
+
+# Encode through a writer we still own, so the accumulator can be inspected.
+fn encode_and_inspect(hm: HirModule) -> HirCodecWriter:
+    var w = HirCodecWriter.create()
+    hc_enc_hir_module(w, hm)
+    w
+
+describe "HirCodecWriter chunked accumulation":
+    it "bounds the cloned array: parts never exceeds one chunk, and chunks are really sealed":
+        step("Verify: the mutated array is bounded and the bound is reached")
+        val hm = lower(gen(4, 40))
+        val w = encode_and_inspect(hm)
+        expect(w.ok).to_equal(true)
+        # THE invariant: the array the seed deep-clones per push stays small.
+        # Pre-fix this held every encoded line of the module.
+        expect(w.parts.len() <= HIR_CODEC_CHUNK_LINES).to_equal(true)
+        # Not vacuous: this module is big enough to seal many chunks.
+        expect(w.chunks.len() > 4).to_equal(true)
+
+    it "encodes in time linear in module size, not quadratic":
+        step("Verify: 4x the module costs far less than the 16x a quadratic writer charges")
+        val small = lower(gen(2, 20))
+        val big = lower(gen(8, 20))
+
+        val t0 = rt_time_now_monotonic_ms()
+        val small_blob = hir_module_encode(small)
+        val small_ms = rt_time_now_monotonic_ms() - t0
+
+        val t1 = rt_time_now_monotonic_ms()
+        val big_blob = hir_module_encode(big)
+        val big_ms = rt_time_now_monotonic_ms() - t1
+
+        # The fixture really is ~4x bigger, so the ratio below means something.
+        expect(big_blob.len() > small_blob.len() * 3).to_equal(true)
+
+        # Linear would be ~4x, quadratic ~16x. 8x separates them with room for
+        # scheduler noise on a shared box. Guard against a 0ms small case.
+        val floor_ms = if small_ms < 1: 1 else: small_ms
+        expect(big_ms <= floor_ms * 8).to_equal(true)
+
+    it "chunking is invisible in the output: re-encode is byte-identical":
+        step("Verify: the seam between chunks changes no byte")
+        val hm = lower(gen(3, 30))
+        val blob = hir_module_encode(hm)
+        expect(blob != "").to_equal(true)
+        val decoded = hir_module_decode(blob)
+        expect(decoded != nil).to_equal(true)
+        val again = hir_module_encode(decoded.unwrap())
+        expect(again.len()).to_equal(blob.len())
+        expect(again == blob).to_equal(true)
+        expect(decoded.unwrap().functions.len()).to_equal(hm.functions.len())
