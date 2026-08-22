@@ -136,6 +136,7 @@ pub use collections::{
     rt_array_push_i64_raw, rt_array_set, rt_array_set_len_known, rt_array_set_len_known_text, rt_array_set_text,
     rt_transient_array_scope_begin, rt_transient_array_scope_end, rt_transient_array_scope_pause,
     rt_transient_heap_promote, rt_transient_last_promoted_nodes, rt_transient_last_promoted_bytes,
+    rt_transient_promotion_stats_reset, rt_transient_scope_promoted_nodes, rt_transient_scope_promoted_bytes,
     rt_byte_array_new, rt_byte_array_new_len, rt_bytes_u32_le_at, rt_bytes_u64_le_at,
     rt_bytes_u8_at, rt_bytes_u8_set,
     rt_contains, rt_cstring_to_text, rt_hash_text, rt_for_iterable, rt_index_get, rt_index_set, rt_len, rt_range,

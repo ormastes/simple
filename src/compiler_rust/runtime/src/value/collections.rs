@@ -26,6 +26,7 @@ use simple_simd::HostCpuConfigError;
 thread_local! {
     static TRANSIENT_HEAP_SCOPE: RefCell<Option<TransientHeapScope>> = const { RefCell::new(None) };
     static LAST_TRANSIENT_PROMOTION: Cell<(i64, i64)> = const { Cell::new((0, 0)) };
+    static TRANSIENT_SCOPE_PROMOTION: Cell<(i64, i64)> = const { Cell::new((0, 0)) };
 }
 
 #[no_mangle]
@@ -36,6 +37,21 @@ pub extern "C" fn rt_transient_last_promoted_nodes() -> i64 {
 #[no_mangle]
 pub extern "C" fn rt_transient_last_promoted_bytes() -> i64 {
     LAST_TRANSIENT_PROMOTION.with(Cell::get).1
+}
+
+#[no_mangle]
+pub extern "C" fn rt_transient_promotion_stats_reset() {
+    LAST_TRANSIENT_PROMOTION.with(|last| last.set((0, 0)));
+}
+
+#[no_mangle]
+pub extern "C" fn rt_transient_scope_promoted_nodes() -> i64 {
+    TRANSIENT_SCOPE_PROMOTION.with(Cell::get).0
+}
+
+#[no_mangle]
+pub extern "C" fn rt_transient_scope_promoted_bytes() -> i64 {
+    TRANSIENT_SCOPE_PROMOTION.with(Cell::get).1
 }
 
 struct TransientHeapScope {
@@ -1808,6 +1824,8 @@ pub extern "C" fn rt_transient_array_scope_begin() -> bool {
             paused: false,
             objects: Vec::new(),
         });
+        rt_transient_promotion_stats_reset();
+        TRANSIENT_SCOPE_PROMOTION.with(|total| total.set((0, 0)));
         true
     })
 }
@@ -1911,7 +1929,7 @@ fn free_transient_heap(value: RuntimeValue) {
 /// Keep transient heap objects reachable from a retained graph when the scope ends.
 #[no_mangle]
 pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
-    LAST_TRANSIENT_PROMOTION.with(|last| last.set((0, 0)));
+    rt_transient_promotion_stats_reset();
     let mut root_words = std::ptr::null();
     let mut root_ptr = 0usize;
     let root_raw = unsafe { rt_transient_raw_words(value.0 as i64, &mut root_words, &mut root_ptr) >= 0 };
@@ -1970,10 +1988,13 @@ pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
             }
         }
         scope.objects.retain(|object| !reachable_heap.contains(&object.0));
-        LAST_TRANSIENT_PROMOTION.with(|last| last.set((
-            promoted_heap_nodes.saturating_add(promoted_raw_nodes),
-            promoted_heap_bytes.saturating_add(reachable_raw_bytes),
-        )));
+        let promoted_nodes = promoted_heap_nodes.saturating_add(promoted_raw_nodes);
+        let promoted_bytes = promoted_heap_bytes.saturating_add(reachable_raw_bytes);
+        LAST_TRANSIENT_PROMOTION.with(|last| last.set((promoted_nodes, promoted_bytes)));
+        TRANSIENT_SCOPE_PROMOTION.with(|total| {
+            let (nodes, bytes) = total.get();
+            total.set((nodes.saturating_add(promoted_nodes), bytes.saturating_add(promoted_bytes)));
+        });
         true
     })
 }

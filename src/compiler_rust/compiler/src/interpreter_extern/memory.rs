@@ -343,7 +343,10 @@ pub fn rt_transient_heap_promote(args: &[Value]) -> Result<Value, CompileError> 
         Value::Nil => false,
         // Interpreter composites are Arc/owned Rust values, not allocations in
         // the runtime transient scope, so they are already retained.
-        _ => true,
+        _ => {
+            simple_runtime::value::rt_transient_promotion_stats_reset();
+            true
+        }
     };
     Ok(Value::Bool(promoted))
 }
@@ -354,6 +357,19 @@ pub fn rt_transient_last_promoted_nodes(_args: &[Value]) -> Result<Value, Compil
 
 pub fn rt_transient_last_promoted_bytes(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(simple_runtime::value::rt_transient_last_promoted_bytes()))
+}
+
+pub fn rt_transient_promotion_stats_reset(_args: &[Value]) -> Result<Value, CompileError> {
+    simple_runtime::value::rt_transient_promotion_stats_reset();
+    Ok(Value::Nil)
+}
+
+pub fn rt_transient_scope_promoted_nodes(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(simple_runtime::value::rt_transient_scope_promoted_nodes()))
+}
+
+pub fn rt_transient_scope_promoted_bytes(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(simple_runtime::value::rt_transient_scope_promoted_bytes()))
 }
 
 pub fn rt_transient_array_scope_end(_args: &[Value]) -> Result<Value, CompileError> {
@@ -1507,8 +1523,21 @@ mod tests {
 
     #[test]
     fn transient_heap_promote_accepts_interpreter_owned_graphs() {
+        assert!(simple_runtime::value::rt_transient_array_scope_begin());
+        let runtime_array = simple_runtime::value::rt_array_new(1);
+        assert!(simple_runtime::value::rt_transient_array_scope_pause());
+        assert!(simple_runtime::value::rt_transient_heap_promote(runtime_array));
+        assert!(simple_runtime::value::rt_transient_last_promoted_nodes() > 0);
+        let scope_nodes = simple_runtime::value::rt_transient_scope_promoted_nodes();
+        let scope_bytes = simple_runtime::value::rt_transient_scope_promoted_bytes();
         let graph = Value::Array(std::sync::Arc::new(vec![Value::Int(1)]));
         assert!(matches!(rt_transient_heap_promote(&[graph]), Ok(Value::Bool(true))));
+        assert_eq!(simple_runtime::value::rt_transient_last_promoted_nodes(), 0);
+        assert_eq!(simple_runtime::value::rt_transient_last_promoted_bytes(), 0);
+        assert_eq!(simple_runtime::value::rt_transient_scope_promoted_nodes(), scope_nodes);
+        assert_eq!(simple_runtime::value::rt_transient_scope_promoted_bytes(), scope_bytes);
+        assert!(simple_runtime::value::rt_transient_array_scope_end());
+        simple_runtime::value::rt_array_free(runtime_array);
         assert!(matches!(
             rt_transient_heap_promote(&[Value::Int(0)]),
             Ok(Value::Bool(false))
