@@ -5,29 +5,111 @@
 # symbolic links, disk usage, file type detection.
 # Pure Simple implementations with mock backends.
 
-mod file_system.types
-mod file_system.file_ops
-mod file_system.dir_ops
-mod file_system.path_ops
-mod file_system.metadata
+use file_system.types.{TempFile as FsTempFile}
+use file_system.file_ops.{file_create as fs_file_create, file_delete as fs_file_delete, file_exists as fs_file_exists, file_read_lines as fs_file_read_lines, file_read_text as fs_file_read_text}
+use file_system.dir_ops.{dir_create as fs_dir_create, dir_create_all as fs_dir_create_all, dir_walk_files as fs_dir_walk_files, dir_list as fs_dir_list, dir_exists as fs_dir_exists, dir_size as fs_dir_size}
+use file_system.path_ops.{path_join2 as fs_path_join2, path_dirname as fs_path_dirname, path_extension as fs_path_extension, path_has_extension as fs_path_has_extension}
+use file_system.metadata.{file_is_symlink as fs_file_is_symlink, file_is_file as fs_file_is_file, file_size as fs_file_size, file_is_directory as fs_file_is_directory}
+
+# Direct-forward compatibility leaves keep imported aliases out of safe public
+# bodies.  They preserve the existing values and allocation behavior exactly.
+@unsafe(reason: "private bootstrap-compatible imported file-create boundary", capabilities: [ffi])
+fn _utility_file_create(path: text) -> bool:
+    fs_file_create(path)
+
+@unsafe(reason: "private bootstrap-compatible imported file-delete boundary", capabilities: [ffi])
+fn _utility_file_delete(path: text) -> bool:
+    fs_file_delete(path)
+
+@unsafe(reason: "private bootstrap-compatible imported file predicate boundary", capabilities: [ffi])
+fn _utility_file_exists(path: text) -> bool:
+    fs_file_exists(path)
+
+@unsafe(reason: "private bootstrap-compatible imported line-read boundary", capabilities: [ffi])
+fn _utility_file_read_lines(path: text) -> Result<[text], text>:
+    fs_file_read_lines(path)
+
+@unsafe(reason: "private bootstrap-compatible imported text-read boundary", capabilities: [ffi])
+fn _utility_file_read_text(path: text) -> text?:
+    fs_file_read_text(path)
+
+@unsafe(reason: "private bootstrap-compatible imported directory-create boundary", capabilities: [ffi])
+fn _utility_dir_create(path: text) -> bool:
+    fs_dir_create(path)
+
+@unsafe(reason: "private bootstrap-compatible imported recursive directory-create boundary", capabilities: [ffi])
+fn _utility_dir_create_all(path: text) -> bool:
+    fs_dir_create_all(path)
+
+@unsafe(reason: "private bootstrap-compatible imported file-walk boundary", capabilities: [ffi])
+fn _utility_dir_walk_files(path: text) -> [text]:
+    fs_dir_walk_files(path)
+
+@unsafe(reason: "private bootstrap-compatible imported directory-list boundary", capabilities: [ffi])
+fn _utility_dir_list(path: text) -> [text]?:
+    fs_dir_list(path)
+
+@unsafe(reason: "private bootstrap-compatible imported directory predicate boundary", capabilities: [ffi])
+fn _utility_dir_exists(path: text) -> bool:
+    fs_dir_exists(path)
+
+@unsafe(reason: "private bootstrap-compatible imported directory-size boundary", capabilities: [ffi])
+fn _utility_dir_size(path: text) -> i64:
+    fs_dir_size(path)
+
+@unsafe(reason: "private bootstrap-compatible imported path-join boundary", capabilities: [ffi])
+fn _utility_path_join(base: text, child: text) -> text:
+    fs_path_join2(base, child)
+
+@unsafe(reason: "private bootstrap-compatible imported dirname boundary", capabilities: [ffi])
+fn _utility_path_dirname(path: text) -> text:
+    fs_path_dirname(path)
+
+@unsafe(reason: "private bootstrap-compatible imported extension boundary", capabilities: [ffi])
+fn _utility_path_extension(path: text) -> text:
+    fs_path_extension(path)
+
+@unsafe(reason: "private bootstrap-compatible imported extension predicate boundary", capabilities: [ffi])
+fn _utility_path_has_extension(path: text, ext: text) -> bool:
+    fs_path_has_extension(path, ext)
+
+@unsafe(reason: "private bootstrap-compatible imported temporary-file construction boundary", capabilities: [ffi])
+fn _utility_temp_file(path: text) -> FsTempFile:
+    FsTempFile(path: path, cleanup_on_drop: true)
+
+@unsafe(reason: "private bootstrap-compatible imported symlink predicate boundary", capabilities: [ffi])
+fn _utility_file_is_symlink(path: text) -> bool:
+    fs_file_is_symlink(path)
+
+@unsafe(reason: "private bootstrap-compatible imported regular-file predicate boundary", capabilities: [ffi])
+fn _utility_file_is_file(path: text) -> bool:
+    fs_file_is_file(path)
+
+@unsafe(reason: "private bootstrap-compatible imported file-size boundary", capabilities: [ffi])
+fn _utility_file_size(path: text) -> i64?:
+    fs_file_size(path)
+
+@unsafe(reason: "private bootstrap-compatible imported directory metadata predicate boundary", capabilities: [ffi])
+fn _utility_file_is_directory(path: text) -> bool:
+    fs_file_is_directory(path)
 
 # ============================================================================
 # Temporary Files
 # ============================================================================
 
-fn temp_file_create() -> types.TempFile?:
+fn temp_file_create() -> FsTempFile?:
     """Create a temporary file.
 
     Returns:
         Some(TempFile) or nil on error
     """
     val path = "/tmp/simple_temp_" + random_suffix()
-    if not file_ops.file_create(path):
+    if not _utility_file_create(path):
         return nil
-    val temp = types.TempFile(path: path, cleanup_on_drop: true)
+    val temp = _utility_temp_file(path)
     Some(temp)
 
-fn temp_file_create_with_name(name: text) -> types.TempFile?:
+fn temp_file_create_with_name(name: text) -> FsTempFile?:
     """Create a temporary file with specific name.
 
     Args:
@@ -37,9 +119,9 @@ fn temp_file_create_with_name(name: text) -> types.TempFile?:
         Some(TempFile) or nil on error
     """
     val path = "/tmp/" + name
-    if not file_ops.file_create(path):
+    if not _utility_file_create(path):
         return nil
-    val temp = types.TempFile(path: path, cleanup_on_drop: true)
+    val temp = _utility_temp_file(path)
     Some(temp)
 
 fn temp_dir_create() -> text?:
@@ -49,11 +131,11 @@ fn temp_dir_create() -> text?:
         Some(path) or nil on error
     """
     val path = "/tmp/simple_temp_dir_" + random_suffix()
-    if not dir_ops.dir_create(path):
+    if not _utility_dir_create(path):
         return nil
     Some(path)
 
-fn temp_file_cleanup(temp: types.TempFile) -> bool:
+fn temp_file_cleanup(temp: FsTempFile) -> bool:
     """Clean up temporary file.
 
     Args:
@@ -62,7 +144,7 @@ fn temp_file_cleanup(temp: types.TempFile) -> bool:
     Returns:
         true on success, false on error
     """
-    file_ops.file_delete(temp.path)
+    _utility_file_delete(temp.path)
 
 fn random_suffix() -> text:
     """Generate random suffix for temp files."""
@@ -133,7 +215,7 @@ fn glob_find(pattern: text, root: text) -> [text]:
     Returns:
         Array of matching paths
     """
-    val all_files = dir_ops.dir_walk_files(root)
+    val all_files = _utility_dir_walk_files(root)
     var matches = []
     for file in all_files:
         if glob_match(pattern: pattern, path: file):
@@ -181,19 +263,19 @@ fn tree_create(root: text, structure: [text]) -> bool:
     Returns:
         true on success, false on error
     """
-    if not dir_ops.dir_create_all(root):
+    if not _utility_dir_create_all(root):
         return false
 
     for rel_path in structure:
-        val full_path = path_ops.path_join2(base: root, child: rel_path)
+        val full_path = _utility_path_join(root, rel_path)
         if rel_path.ends_with("/"):
-            if not dir_ops.dir_create_all(full_path):
+            if not _utility_dir_create_all(full_path):
                 return false
         else:
-            val dir = path_ops.path_dirname(full_path)
-            if not dir_ops.dir_create_all(dir):
+            val dir = _utility_path_dirname(full_path)
+            if not _utility_dir_create_all(dir):
                 return false
-            if not file_ops.file_create(full_path):
+            if not _utility_file_create(full_path):
                 return false
 
     true
@@ -213,7 +295,7 @@ fn tree_print(root: text) -> text:
 
 fn tree_print_recursive(path: text, indent: text, output):
     """Helper for tree printing."""
-    val entries_opt = dir_ops.dir_list(path)
+    val entries_opt = _utility_dir_list(path)
     if not entries_opt.?:
         return pass
 
@@ -229,8 +311,8 @@ fn tree_print_recursive(path: text, indent: text, output):
 
                 output.push(indent + branch + entry + "\n")
 
-                val full_path = path_ops.path_join2(base: path, child: entry)
-                if dir_ops.dir_exists(full_path):
+                val full_path = _utility_path_join(path, entry)
+                if _utility_dir_exists(full_path):
                     val new_indent = if is_last:
                         indent + "    "
                     else:
@@ -267,7 +349,7 @@ fn symlink_read(link: text) -> text?:
     Returns:
         Some(target) or nil on error
     """
-    if not metadata.file_is_symlink(link):
+    if not _utility_file_is_symlink(link):
         return nil
     Some("/mock/target")
 
@@ -280,7 +362,7 @@ fn symlink_resolve(path: text) -> text?:
     Returns:
         Some(resolved) or nil on error
     """
-    if not file_ops.file_exists(path):
+    if not _utility_file_exists(path):
         return nil
     # Mock: return path itself
     Some(path)
@@ -298,15 +380,15 @@ fn disk_usage(path: text) -> i64:
     Returns:
         Total size in bytes
     """
-    if metadata.file_is_file(path):
-        val size_opt = metadata.file_size(path)
+    if _utility_file_is_file(path):
+        val size_opt = _utility_file_size(path)
         match size_opt:
             Some(size):
                 return size
             nil:
                 return 0
-    elif metadata.file_is_directory(path):
-        return dir_ops.dir_size(path)
+    elif _utility_file_is_directory(path):
+        return _utility_dir_size(path)
     else:
         return 0
 
@@ -370,7 +452,7 @@ fn file_mime_type(path: text) -> text:
     Returns:
         MIME type string
     """
-    val ext = path_ops.path_extension(path)
+    val ext = _utility_path_extension(path)
 
     if ext == "txt":
         return "text/plain"
@@ -408,7 +490,7 @@ fn file_is_text(path: text) -> bool:
     Returns:
         true if likely text
     """
-    val ext = path_ops.path_extension(path)
+    val ext = _utility_path_extension(path)
     val text_exts = ["txt", "md", "spl", "py", "js", "html", "css", "json", "xml", "csv"]
 
     for text_ext in text_exts:
@@ -440,7 +522,7 @@ fn files_filter_by_extension(paths: [text], ext: text) -> [text]:
     """
     var result = []
     for p in paths:
-        if path_ops.path_has_extension(path: p, ext: ext):
+        if _utility_path_has_extension(p, ext):
             result.push(p)
     result
 
@@ -458,7 +540,7 @@ fn files_group_by_extension(paths: [text]) -> [(text, [text])]:
 
     # Collect unique extensions
     for p in paths:
-        val ext = path_ops.path_extension(p)
+        val ext = _utility_path_extension(p)
         var found = false
         for e in extensions:
             if e == ext:
@@ -483,9 +565,9 @@ fn file_line_count(path: text) -> i64?:
     Returns:
         Some(line count) or nil on error
     """
-    if not file_ops.file_exists(path):
+    if not _utility_file_exists(path):
         return nil
-    match file_ops.file_read_lines(path):
+    match _utility_file_read_lines(path):
         Ok(lines): Some(lines.len())
         Err(_): nil
 
@@ -498,7 +580,7 @@ fn file_word_count(path: text) -> i64?:
     Returns:
         Some(word count) or nil on error
     """
-    val content_opt = file_ops.file_read_text(path)
+    val content_opt = _utility_file_read_text(path)
     match content_opt:
         Some(content):
             val words = content.split(" ")
@@ -515,7 +597,7 @@ fn file_char_count(path: text) -> i64?:
     Returns:
         Some(char count) or nil on error
     """
-    val content_opt = file_ops.file_read_text(path)
+    val content_opt = _utility_file_read_text(path)
     match content_opt:
         Some(content):
             Some(content.len())
