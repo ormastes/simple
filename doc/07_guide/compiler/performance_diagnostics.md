@@ -39,8 +39,10 @@ only after dispatch owns verified change receipts.
 The first recorded execution boundary is `run_named_pass_with_record`. It rejects an
 invalid input or output when block/local identity, entry membership, or CFG targets are
 malformed. The active `write_coalesce` and `syscall_batch` function adapters report exact
-native candidate/transformed counts, stable witness reasons, and instruction deltas;
-the boundary rejects disagreement between those counts and serialized MIR change. It
+native candidate/transformed counts from the hints actually emitted, stable witness
+reasons, and instruction deltas. The recorded path no longer performs a separate
+candidate-count scan before the rewrite. The boundary rejects disagreement between
+native outcomes and serialized MIR change. It
 never substitutes `candidates=1` merely because a function changed, and a newly active
 function pass without an exact outcome adapter fails closed. This is a
 structural receipt, not yet proof of SSA dominance, type correctness, ownership, or
@@ -82,6 +84,10 @@ name locals. Result-match ghost metadata, text-encoded GPU launch arguments, and
 VHDL process-body CFG edges still make the facts incomplete; no liveness consumer may
 guess through those cases. Dormant DCE also conservatively retains every newly modeled
 effectful family.
+
+A registry-backed unit contract compares the named access arms against the generated
+`MirInstKind` registry and rejects wildcard coverage. Adding a new opcode therefore
+requires an explicit access decision rather than silently inheriting a default.
 
 Every pass has an explicit preservation contract. Current transforming adapters
 conservatively invalidate CFG, dominance, def/use, and liveness; non-transforming statuses preserve
