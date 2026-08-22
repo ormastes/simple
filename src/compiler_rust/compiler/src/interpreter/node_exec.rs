@@ -100,12 +100,15 @@ pub(crate) fn exec_node(
 
                 // Validate unit type annotation if present
                 // Type can come from either let_stmt.ty OR from a typed pattern (x: Type)
-                let type_annotation = if let_stmt.ty.is_some() {
-                    let_stmt.ty.clone()
-                } else if let simple_parser::ast::Pattern::Typed { ty, .. } = &let_stmt.pattern {
-                    Some(ty.clone())
-                } else {
-                    None
+                // Borrowed, not cloned: this runs on EVERY execution of the
+                // statement (per loop iteration), and a generic annotation such
+                // as `Dict<text, i64>` is a Vec plus several Strings to clone.
+                let type_annotation: Option<&Type> = match &let_stmt.ty {
+                    Some(ty) => Some(ty),
+                    None => match &let_stmt.pattern {
+                        simple_parser::ast::Pattern::Typed { ty, .. } => Some(ty),
+                        _ => None,
+                    },
                 };
 
                 // Helper to extract variable name for error messages
@@ -123,7 +126,7 @@ pub(crate) fn exec_node(
                 };
 
                 // Validate and constrain value based on type annotation
-                let value = match &type_annotation {
+                let value = match type_annotation {
                     // Coerce to Value::UInt when the annotation is an unsigned integer type
                     // so subsequent arithmetic on the bound variable applies modulo-2^width
                     // wrap. See doc/08_tracking/bug/interpreter_u32_wrap_subtraction_2026-05-01.md.

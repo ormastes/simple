@@ -32,6 +32,10 @@ counters!(
     ARR_MUT_CALLS,
     ARR_MUT_COW_CLONES,
     ARR_MUT_COW_ELEMS_CLONED,
+    // object-field array mutation (obj.field.push(x) / self.field.push(x))
+    SELF_FIELD_ARR_MUT_CALLS,
+    SELF_FIELD_ARR_COW_CLONES,
+    SELF_FIELD_ARR_COW_ELEMS_CLONED,
 );
 
 #[inline(always)]
@@ -53,6 +57,13 @@ fn init() -> bool {
     }
     STATE.store(if on { ON } else { OFF }, Ordering::Relaxed);
     on
+}
+
+/// Force the gate on/off regardless of `SIMPLE_PERF_COUNTERS` (mechanism
+/// tests: the gate is latched on first use, so an env var set after another
+/// test already ran in the same process would be ignored).
+pub fn set_enabled(on: bool) {
+    STATE.store(if on { ON } else { OFF }, Ordering::Relaxed);
 }
 
 #[inline(always)]

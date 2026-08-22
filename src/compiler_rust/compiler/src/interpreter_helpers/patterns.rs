@@ -327,6 +327,11 @@ pub(crate) fn try_field_array_mutation_in_place(
         return Ok(None);
     };
     let popped = {
+        crate::perf_counters::bump(&crate::perf_counters::SELF_FIELD_ARR_MUT_CALLS, 1);
+        if Arc::strong_count(arc) > 1 {
+            crate::perf_counters::bump(&crate::perf_counters::SELF_FIELD_ARR_COW_CLONES, 1);
+            crate::perf_counters::bump(&crate::perf_counters::SELF_FIELD_ARR_COW_ELEMS_CLONED, arc.len() as u64);
+        }
         let vec = Arc::make_mut(arc);
         apply_array_mutation_in_place(method, vec, item, idx, second)?
     };
