@@ -1,0 +1,237 @@
+# codex-impl
+# Bounded author-facing MC/DC scenario exclusion expression.
+#
+# Canonical form (one physical line, fields in this exact order):
+#   # @mcdc-exclude: scenario=<stable-id> | capability=<stable-id> |
+#   reason=<human reason> | evidence=sha256:<64 lowercase hex> |
+#   owner=<stable-id> | reviewed=<unix-seconds> | expires=<unix-seconds>
+#
+# This is intentionally not a generic test skip.  It can represent only an
+# objectively unavailable capability and is consumed by the MC/DC verifier.
+
+use std.common.structural.mcdc.contracts.{
+    McdcNormalGateV1, mcdc_normal_gate_v1_passes
+}
+
+val MCDC_EXCLUSION_PREFIX = "# @mcdc-exclude:"
+val MCDC_EXCLUSION_MAX_LINE_BYTES: i64 = 768
+val MCDC_EXCLUSION_MAX_ID_BYTES: i64 = 96
+val MCDC_EXCLUSION_MAX_REASON_BYTES: i64 = 256
+val MCDC_EXCLUSION_MAX_FRESHNESS_EPOCHS: i64 = 7776000  # 90 days
+val MCDC_EXCLUSION_MAX_SOURCE_BYTES: i64 = 4194304
+val MCDC_EXCLUSION_MAX_DIRECTIVES: i64 = 256
+
+enum McdcScenarioExclusionStatusV1:
+    Accepted
+    NotDirective
+    Malformed
+    InvalidIdentity
+    InvalidReason
+    InvalidEvidence
+    InvalidReview
+    Stale
+
+struct McdcScenarioExclusionExpressionV1:
+    status: McdcScenarioExclusionStatusV1
+    scenario_id: text
+    capability_id: text
+    reason: text
+    evidence_sha256: text
+    owner_id: text
+    reviewed_epoch: i64
+    expiry_epoch: i64
+
+struct McdcScenarioExclusionAuditV1:
+    directive_count: i64
+    accepted_count: i64
+    rejected_count: i64
+    stale_count: i64
+
+fn _mcdc_exclusion_result(status: McdcScenarioExclusionStatusV1) -> McdcScenarioExclusionExpressionV1:
+    McdcScenarioExclusionExpressionV1(
+        status: status, scenario_id: "", capability_id: "", reason: "",
+        evidence_sha256: "", owner_id: "", reviewed_epoch: 0,
+        expiry_epoch: 0)
+
+fn _mcdc_exclusion_field(part: text, name: text) -> text?:
+    val prefix = name + "="
+    val trimmed = part.trim()
+    if not trimmed.starts_with(prefix): return nil
+    val value = trimmed.substring(prefix.len(), trimmed.len()).trim()
+    if value == "": return nil
+    value
+
+fn _mcdc_exclusion_stable_id(value: text) -> bool:
+    if value.len() <= 0 or value.len() > MCDC_EXCLUSION_MAX_ID_BYTES:
+        return false
+    for ch in value:
+        val code = ch.ord()
+        val lower = code >= 97 and code <= 122
+        val digit = code >= 48 and code <= 57
+        if not lower and not digit and ch != "." and ch != "_" and ch != "-":
+            return false
+    true
+
+fn _mcdc_exclusion_reason_valid(value: text) -> bool:
+    if value.len() < 8 or value.len() > MCDC_EXCLUSION_MAX_REASON_BYTES:
+        return false
+    val normalized = value.trim().to_lower()
+    normalized != "unknown" and normalized != "todo" and normalized != "n/a"
+        and not value.contains("|") and not value.contains("\n")
+
+fn _mcdc_exclusion_evidence_valid(value: text) -> bool:
+    if not value.starts_with("sha256:") or value.len() != 71:
+        return false
+    val digest = value.substring(7, value.len())
+    var nonzero = false
+    for ch in digest:
+        val code = ch.ord()
+        val digit = code >= 48 and code <= 57
+        val lower_hex = code >= 97 and code <= 102
+        if not digit and not lower_hex: return false
+        if ch != "0": nonzero = true
+    nonzero
+
+fn _mcdc_exclusion_epoch(value: text) -> i64?:
+    if value == "": return nil
+    for ch in value:
+        val code = ch.ord()
+        if code < 48 or code > 57: return nil
+    value.to_int()
+
+fn parse_mcdc_scenario_exclusion_v1(line: text,
+                                    current_epoch: i64) -> McdcScenarioExclusionExpressionV1:
+    val trimmed = line.trim()
+    if not trimmed.starts_with(MCDC_EXCLUSION_PREFIX):
+        return _mcdc_exclusion_result(McdcScenarioExclusionStatusV1.NotDirective)
+    if trimmed.len() > MCDC_EXCLUSION_MAX_LINE_BYTES or current_epoch < 0:
+        return _mcdc_exclusion_result(McdcScenarioExclusionStatusV1.Malformed)
+    val body = trimmed.substring(MCDC_EXCLUSION_PREFIX.len(), trimmed.len()).trim()
+    val parts = body.split("|")
+    if parts.len() != 7:
+        return _mcdc_exclusion_result(McdcScenarioExclusionStatusV1.Malformed)
+    val scenario = _mcdc_exclusion_field(parts[0], "scenario")
+    val capability = _mcdc_exclusion_field(parts[1], "capability")
+    val reason = _mcdc_exclusion_field(parts[2], "reason")
+    val evidence = _mcdc_exclusion_field(parts[3], "evidence")
+    val owner = _mcdc_exclusion_field(parts[4], "owner")
+    val reviewed_text = _mcdc_exclusion_field(parts[5], "reviewed")
+    val expiry_text = _mcdc_exclusion_field(parts[6], "expires")
+    if scenario == nil or capability == nil or reason == nil or evidence == nil
+            or owner == nil or reviewed_text == nil or expiry_text == nil:
+        return _mcdc_exclusion_result(McdcScenarioExclusionStatusV1.Malformed)
+    val scenario_value = scenario ?? ""
+    val capability_value = capability ?? ""
+    val owner_value = owner ?? ""
+    if not _mcdc_exclusion_stable_id(scenario_value)
+            or not _mcdc_exclusion_stable_id(capability_value)
+            or not _mcdc_exclusion_stable_id(owner_value):
+        return _mcdc_exclusion_result(McdcScenarioExclusionStatusV1.InvalidIdentity)
+    val reason_value = reason ?? ""
+    if not _mcdc_exclusion_reason_valid(reason_value):
+        return _mcdc_exclusion_result(McdcScenarioExclusionStatusV1.InvalidReason)
+    val evidence_value = evidence ?? ""
+    if not _mcdc_exclusion_evidence_valid(evidence_value):
+        return _mcdc_exclusion_result(McdcScenarioExclusionStatusV1.InvalidEvidence)
+    val reviewed = _mcdc_exclusion_epoch(reviewed_text ?? "")
+    val expires = _mcdc_exclusion_epoch(expiry_text ?? "")
+    if reviewed == nil or expires == nil:
+        return _mcdc_exclusion_result(McdcScenarioExclusionStatusV1.InvalidReview)
+    val reviewed_value = reviewed ?? 0
+    val expiry_value = expires ?? 0
+    if reviewed_value <= 0 or reviewed_value > current_epoch or expiry_value <= reviewed_value
+            or expiry_value - reviewed_value > MCDC_EXCLUSION_MAX_FRESHNESS_EPOCHS:
+        return _mcdc_exclusion_result(McdcScenarioExclusionStatusV1.InvalidReview)
+    if expiry_value <= current_epoch:
+        return _mcdc_exclusion_result(McdcScenarioExclusionStatusV1.Stale)
+    McdcScenarioExclusionExpressionV1(
+        status: McdcScenarioExclusionStatusV1.Accepted,
+        scenario_id: scenario_value, capability_id: capability_value,
+        reason: reason_value, evidence_sha256: evidence_value,
+        owner_id: owner_value, reviewed_epoch: reviewed_value,
+        expiry_epoch: expiry_value)
+
+fn mcdc_scenario_exclusion_accepted_v1(value: McdcScenarioExclusionExpressionV1) -> bool:
+    value.status == McdcScenarioExclusionStatusV1.Accepted
+
+fn mcdc_scenario_exclusion_report_v1(value: McdcScenarioExclusionExpressionV1) -> text:
+    if value.status == McdcScenarioExclusionStatusV1.Accepted:
+        return "EXCLUDED scenario={value.scenario_id} capability={value.capability_id} reason={value.reason} evidence={value.evidence_sha256} owner={value.owner_id} reviewed={value.reviewed_epoch} expires={value.expiry_epoch}"
+    if value.status == McdcScenarioExclusionStatusV1.Stale:
+        return "ERROR mcdc-exclusion stale"
+    "ERROR mcdc-exclusion invalid"
+
+fn mcdc_scenario_exclusion_audit_v1() -> McdcScenarioExclusionAuditV1:
+    McdcScenarioExclusionAuditV1(
+        directive_count: 0, accepted_count: 0, rejected_count: 0,
+        stale_count: 0)
+
+fn mcdc_scenario_exclusion_audit_add_v1(
+        audit: McdcScenarioExclusionAuditV1,
+        value: McdcScenarioExclusionExpressionV1) -> McdcScenarioExclusionAuditV1:
+    if value.status == McdcScenarioExclusionStatusV1.NotDirective:
+        return audit
+    McdcScenarioExclusionAuditV1(
+        directive_count: audit.directive_count + 1,
+        accepted_count: audit.accepted_count + (if value.status == McdcScenarioExclusionStatusV1.Accepted: 1 else: 0),
+        rejected_count: audit.rejected_count + (if value.status != McdcScenarioExclusionStatusV1.Accepted: 1 else: 0),
+        stale_count: audit.stale_count + (if value.status == McdcScenarioExclusionStatusV1.Stale: 1 else: 0))
+
+fn scan_mcdc_scenario_exclusions_v1(
+        source: text, current_epoch: i64) -> McdcScenarioExclusionAuditV1:
+    var audit = mcdc_scenario_exclusion_audit_v1()
+    if source.len() > MCDC_EXCLUSION_MAX_SOURCE_BYTES:
+        return McdcScenarioExclusionAuditV1(
+            directive_count: 1, accepted_count: 0, rejected_count: 1,
+            stale_count: 0)
+    var seen_scenarios: [text] = []
+    for line in source.split("\n"):
+        if not line.trim().starts_with(MCDC_EXCLUSION_PREFIX):
+            continue
+        if audit.directive_count >= MCDC_EXCLUSION_MAX_DIRECTIVES:
+            return McdcScenarioExclusionAuditV1(
+                directive_count: audit.directive_count + 1,
+                accepted_count: audit.accepted_count,
+                rejected_count: audit.rejected_count + 1,
+                stale_count: audit.stale_count)
+        val parsed = parse_mcdc_scenario_exclusion_v1(line, current_epoch)
+        if parsed.status == McdcScenarioExclusionStatusV1.Accepted 
+                and seen_scenarios.contains(parsed.scenario_id):
+            audit = McdcScenarioExclusionAuditV1(
+                directive_count: audit.directive_count + 1,
+                accepted_count: audit.accepted_count,
+                rejected_count: audit.rejected_count + 1,
+                stale_count: audit.stale_count)
+        else:
+            audit = mcdc_scenario_exclusion_audit_add_v1(audit, parsed)
+            if parsed.status == McdcScenarioExclusionStatusV1.Accepted:
+                seen_scenarios.push(parsed.scenario_id)
+    audit
+
+fn mcdc_scenario_exclusion_normal_gate_v1(audit: McdcScenarioExclusionAuditV1) -> bool:
+    audit.directive_count >= 0 and audit.accepted_count >= 0
+        and audit.rejected_count == 0 and audit.stale_count == 0
+        and audit.accepted_count == audit.directive_count
+
+fn mcdc_audited_normal_gate_v1_passes(
+        gate: McdcNormalGateV1,
+        audit: McdcScenarioExclusionAuditV1) -> bool:
+    # Denominator accounting remains owned by the stable decision/exclusion
+    # join in structural.mcdc.  This additional verifier gate proves every
+    # author-facing directive parsed, was fresh, and produced an EXCLUDED
+    # record.  Neither layer converts an exclusion to covered evidence.
+    mcdc_normal_gate_v1_passes(gate)
+        and mcdc_scenario_exclusion_normal_gate_v1(audit)
+
+export MCDC_EXCLUSION_PREFIX, MCDC_EXCLUSION_MAX_LINE_BYTES
+export MCDC_EXCLUSION_MAX_ID_BYTES, MCDC_EXCLUSION_MAX_REASON_BYTES
+export MCDC_EXCLUSION_MAX_FRESHNESS_EPOCHS
+export MCDC_EXCLUSION_MAX_SOURCE_BYTES, MCDC_EXCLUSION_MAX_DIRECTIVES
+export McdcScenarioExclusionStatusV1, McdcScenarioExclusionExpressionV1
+export McdcScenarioExclusionAuditV1
+export parse_mcdc_scenario_exclusion_v1, mcdc_scenario_exclusion_accepted_v1
+export mcdc_scenario_exclusion_report_v1
+export mcdc_scenario_exclusion_audit_v1, mcdc_scenario_exclusion_audit_add_v1
+export scan_mcdc_scenario_exclusions_v1
+export mcdc_scenario_exclusion_normal_gate_v1
+export mcdc_audited_normal_gate_v1_passes

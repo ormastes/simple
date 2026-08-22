@@ -64,6 +64,28 @@ The verifier uses compiler-resolved declarations and entry closures. Its baselin
 
 All APIs return `Result<T, E>` or closed status values. Unknown dispatch arms, schema versions, providers, opcodes, comparators, normalizers, predicates, and receipt fields are catchable failures. No abort/unreachable fallback is permitted. Overflow, timeout, child crash, malformed receipt, pack failure, stale exclusion, and allocation violation preserve actionable bounded provenance.
 
+### Governed scenario exclusion expression
+
+An environment scenario that cannot be physically produced may use exactly one
+compiler-verifier directive:
+
+```text
+# @mcdc-exclude: scenario=<stable-id> | capability=<stable-id> | reason=<8..256 byte reason> | evidence=sha256:<64 lowercase hex> | owner=<stable-id> | reviewed=<unix-seconds> | expires=<unix-seconds>
+```
+
+This expression means only `CapabilityUnavailable`; it is not a generic skip,
+fixture waiver, or platform filter. The line is bounded to 768 bytes, identifiers
+to 96 bytes, and review lifetime to 90 days. One linear compiler audit accepts
+at most 256 directives from a source of at most 4 MiB, retains only the bounded
+stable-ID set needed to reject duplicates, and performs no runtime/hot-path work.
+The verifier reports an accepted
+entry as `EXCLUDED`, never `PASS` or covered. Stable decision/exclusion joining
+owns denominator removal; the directive audit is an additional normal-mode
+gate. A blank or placeholder reason, malformed identity, missing SHA-256
+evidence, future review, expired entry, or overlong review window is an error.
+Consequently, exclusions reduce only the eligible denominator and never increase
+the covered numerator.
+
 ## Performance implementation notes
 
 - Per-thread fixed shards; one compact commit per decision evaluation.
