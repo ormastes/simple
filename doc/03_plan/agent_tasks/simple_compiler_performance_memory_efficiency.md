@@ -295,3 +295,11 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Mark caller-prepared paths so lint policy resolution does not repeat the walk.
 - Continue cloning policy before file-local attributes.
 - Follow-up: extend parsed-policy caching from the adjacent-project slot to bounded unique manifests.
+## Completed tooling tranche: bounded parsed-policy cache
+
+- Replace the adjacent-only project-policy slot with a path-indexed flat cache.
+- Retain at most 256 unique parsed manifests per command.
+- Clone cached base policy before CLI and file-local overrides.
+- Avoid struct-valued dictionary retrieval by storing integer indexes.
+- Preserve uncached parsing after saturation.
+- Follow-up: reuse `LintConfig.new()` defaults for manifest-free files without mutable sharing.
