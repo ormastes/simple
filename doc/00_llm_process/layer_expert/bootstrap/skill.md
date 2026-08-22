@@ -612,6 +612,11 @@ Stage-3/4 run; never substitute the seed or bypass must-check.
 ## Must-check ledger handoff
 
 The bootstrap owner is the only producer of must-check ledger PASS state.
+It retains commit-ready logs under
+`doc/08_tracking/check/evidence/<source-fingerprint>/`, refuses fingerprinted
+input drift from `HEAD`, and records external TODO receipts only through
+`--record-gate-pass <id> --evidence <repo-relative-committed-receipt>`. The
+push consumer validates evidence blobs from the exact pushed revision.
 Schema v3 requires a named owner on every row, actionable unblock text for
 TODO/blocked rows, and `unblock_condition=none` for PASS. A bootstrap wrapper
 must not publish a phase PASS until its exact receipt has been validated and

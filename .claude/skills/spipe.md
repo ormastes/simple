@@ -1324,6 +1324,23 @@ absolute symlink to one checkout; that makes every sibling fail hook-wiring
 verification. Do not preserve a legacy dispatcher as `pre-push.local`, which
 would recurse.
 
+Check before installing or repairing the shared hook. On Unix-like hosts:
+
+```sh
+sh scripts/setup/install-must-check-hooks.shs --check ||
+  sh scripts/setup/install-must-check-hooks.shs --install
+```
+
+On Windows PowerShell:
+
+```powershell
+& scripts/setup/install-must-check-hooks.ps1 -Check
+if ($LASTEXITCODE -ne 0) { & scripts/setup/install-must-check-hooks.ps1 -Install }
+```
+
+The canonical tier and hook contract is
+`doc/07_guide/tooling/must_check_tiering.md`.
+
 On this repo's shared working tree, a concurrent session's checkout/reconcile
 can silently WIPE an in-progress file — no `git status` trace, not even
 "deleted". Mitigate immediately after writing anything you intend to land:

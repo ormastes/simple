@@ -238,6 +238,23 @@ implementation-blocked-by-bootstrap-authority
 - docs-audit: Operator manual, guide, feature expert, bootstrap layer expert,
   glossary, Unix/Windows installers, and `doc/06_spec` layout are present; the
   layout scan found zero executable `*_spec.spl` files under `doc/06_spec`.
+- harden-exact-ref: Fixed the ledger consumer to hash regular evidence blobs
+  from the exact pushed revision rather than the live worktree. Bootstrap now
+  retains compiler and automated evidence in a commit-ready tracking path and
+  refuses production recording when fingerprinted inputs differ from `HEAD`.
+- harden-todo-pass: Added explicit `--record-gate-pass <id> --evidence <path>`
+  promotion for receipt-backed TODO rows. The first timestamp persists across
+  fingerprints only while the identical committed receipt/hash remains;
+  source-sensitive automated results still invalidate normally.
+- evidence-honesty: Split mock-backed Caret argv/process coverage from real
+  installed-provider execution; the latter remains the actionable
+  `caret-installed-provider-launches` TODO. Sdoctest bootstrap now runs named
+  Markdown and source-comment fixtures and rejects skipped lane results.
+- verify-cycle-1: Focused exact-ref/TODO-transition/two-ref/hook contract PASS
+  in 8.73s (`selftest=2s`, `ref-path=1s`, `two-ref=0s`, `installed-hook=1s`).
+- verify-cycle-2: Updated Sdoctest parser self-test PASS and must-check contract
+  PASS in 8.25s (`selftest=2s`, other measured paths 0s). Generated Stage-4
+  SPipe execution/docgen and fresh Stage 1-4 ledger publication remain pending.
   `doc/01_research/domain/must_check_tiering.md` remains missing and must be
   produced through the required domain-research tooling before goal completion.
 - verify: Updated push/bootstrap/tiering self-tests passed; the real ref fixture

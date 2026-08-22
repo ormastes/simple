@@ -39,6 +39,10 @@ This agent CREATES the initial state file. All subsequent agents read and append
        file:line and the unblock condition
      - Must-check ledger v3 rows with a named owner and actionable unblock
        condition for TODO/blocked work; PASS rows use `none`
+     - Must-check receipt rows earn PASS only through
+       `check-bootstrap-must-pass.shs --record-gate-pass <id> --evidence
+       <repo-relative-committed-receipt>`; automated evidence remains
+       source-fingerprint scoped and push reads evidence from the pushed ref
    - If the request ALSO changes workflow, tooling, evidence wrappers,
      verification contracts, or SPipe behavior, extend that AC to cover
      `doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
