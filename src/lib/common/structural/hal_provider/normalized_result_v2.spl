@@ -60,23 +60,31 @@ fn hal_inline_bytes_v2(length: i64, capacity: i64,
                      word0: word0, word1: word1,
                      word2: word2, word3: word3)
 
+fn _hal_inline_word_canonical_v2(word: i64, used_bytes: i64) -> bool:
+    if used_bytes <= 0:
+        return word == 0
+    if used_bytes >= 8:
+        return true
+    # Arithmetic right shift is intentional: any high padding bit, including
+    # the sign bit, leaves a nonzero quotient and fails closed.
+    (word >> (used_bytes * 8)) == 0
+
 fn hal_inline_bytes_v2_well_formed(value: HalInlineBytesV2) -> bool:
     val bounds = value.length >= 0 and value.capacity >= 0
         and value.length <= value.capacity
         and value.capacity <= HAL_PROVIDER_RESULT_INLINE_BYTES_V2
     if not bounds:
         return false
-    # Unused words must be canonical zero: comparison never observes padding
-    # and child providers cannot smuggle uncommitted bytes past the length.
-    if value.length <= 24 and value.word3 != 0:
-        return false
-    if value.length <= 16 and value.word2 != 0:
-        return false
-    if value.length <= 8 and value.word1 != 0:
-        return false
-    if value.length == 0 and value.word0 != 0:
-        return false
-    true
+    # Every unused byte, including padding inside the final partial word, must
+    # be zero. Comparison therefore cannot observe or commit hidden payload.
+    val used0 = if value.length > 8: 8 else: value.length
+    val used1 = if value.length > 16: 8 else: value.length - 8
+    val used2 = if value.length > 24: 8 else: value.length - 16
+    val used3 = value.length - 24
+    _hal_inline_word_canonical_v2(value.word0, used0)
+        and _hal_inline_word_canonical_v2(value.word1, used1)
+        and _hal_inline_word_canonical_v2(value.word2, used2)
+        and _hal_inline_word_canonical_v2(value.word3, used3)
 
 fn hal_structured_error_v2(domain: HalErrorDomainV2, code: i64,
                            detail_id: i64 = 0) -> HalStructuredErrorV2:
