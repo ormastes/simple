@@ -643,7 +643,10 @@ mod vulkan_feature_disabled_tests {
         // (name, observed return, value that means "failed")
         let probes: Vec<(&str, i64)> = vec![
             ("rt_vulkan_init", super::rt_vulkan_init()),
-            ("rt_vulkan_is_available", super::rt_vulkan_is_available()),
+            // `rt_vulkan_is_available` is deliberately NOT probed here: since
+            // fe8fee8d6f0 it is an honest dlopen probe of the system Vulkan
+            // loader rather than an inert stub, so a `1` from it is a truthful
+            // answer about the host, not a lie about work that never happened.
             ("rt_vulkan_begin_compute", gfx::vulkan_graphics_runtime_compute::rt_vulkan_begin_compute()),
             ("rt_vulkan_begin_graphics", gfx::vulkan_graphics_runtime_compute::rt_vulkan_begin_graphics()),
             ("rt_vulkan_wait_idle", gfx::vulkan_graphics_runtime_compute::rt_vulkan_wait_idle()),

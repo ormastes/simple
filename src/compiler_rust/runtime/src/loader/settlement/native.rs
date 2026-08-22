@@ -544,13 +544,18 @@ mod tests {
     #[test]
     fn test_native_lib_manager() {
         let mut manager = NativeLibManager::new();
-        assert!(manager.is_empty());
+        // Contract change cfe0506e336: `new()` preloads the `__process__`
+        // pseudo-library so SFFI can resolve symbols already linked into the
+        // host process, so a fresh manager is no longer empty.
+        assert!(manager.get_by_name("__process__").is_some());
+        let base = manager.len();
+        assert!(base > 0);
 
         // Add a static lib (with dummy data)
         let data = [0u8; 100];
         let handle = manager.add_static("test", data.as_ptr(), data.len());
         assert!(handle.is_valid());
-        assert_eq!(manager.len(), 1);
+        assert_eq!(manager.len(), base + 1);
 
         let lib = manager.get(handle).unwrap();
         assert!(lib.is_static());
