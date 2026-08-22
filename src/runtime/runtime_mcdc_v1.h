@@ -16,7 +16,8 @@ enum {
     SIMPLE_MCDC_V1_OUTPUT_TOO_SMALL = 4,
     SIMPLE_MCDC_V1_SESSION_MISMATCH = 5,
     SIMPLE_MCDC_V1_NOT_SEALED = 6,
-    SIMPLE_MCDC_V1_BUSY = 7
+    SIMPLE_MCDC_V1_BUSY = 7,
+    SIMPLE_MCDC_V1_BUDGET_EXHAUSTED = 8
 };
 
 typedef struct {
@@ -41,12 +42,43 @@ typedef struct {
     uint8_t reserved[7];
 } SimpleMcdcSnapshotV1;
 
-_Static_assert(sizeof(SimpleMcdcVectorV1) == 64, "SimpleMcdcVectorV1 ABI");
-_Static_assert(offsetof(SimpleMcdcVectorV1, source_digest) == 16, "source digest ABI");
-_Static_assert(offsetof(SimpleMcdcVectorV1, evaluated_mask) == 24, "evaluated mask ABI");
-_Static_assert(offsetof(SimpleMcdcVectorV1, owner_id) == 40, "owner id ABI");
-_Static_assert(offsetof(SimpleMcdcVectorV1, outcome) == 56, "outcome ABI");
-_Static_assert(sizeof(SimpleMcdcSnapshotV1) == 40, "SimpleMcdcSnapshotV1 ABI");
+typedef struct {
+    uint64_t decision_id;
+    uint64_t source_digest;
+    uint32_t condition_index;
+    uint32_t policy;
+    uint64_t owner_a;
+    uint64_t sequence_a;
+    uint64_t owner_b;
+    uint64_t sequence_b;
+} SimpleMcdcWitnessV1;
+
+typedef struct {
+    uint64_t decisions;
+    uint64_t gross_conditions;
+    uint64_t covered_conditions;
+    uint64_t witness_count;
+    uint64_t pair_checks;
+    uint64_t pair_budget;
+} SimpleMcdcAnalysisV1;
+
+#if defined(__cplusplus)
+#define SIMPLE_MCDC_STATIC_ASSERT static_assert
+#else
+#define SIMPLE_MCDC_STATIC_ASSERT _Static_assert
+#endif
+SIMPLE_MCDC_STATIC_ASSERT(sizeof(SimpleMcdcVectorV1) == 64, "SimpleMcdcVectorV1 ABI");
+SIMPLE_MCDC_STATIC_ASSERT(offsetof(SimpleMcdcVectorV1, source_digest) == 16, "source digest ABI");
+SIMPLE_MCDC_STATIC_ASSERT(offsetof(SimpleMcdcVectorV1, evaluated_mask) == 24, "evaluated mask ABI");
+SIMPLE_MCDC_STATIC_ASSERT(offsetof(SimpleMcdcVectorV1, owner_id) == 40, "owner id ABI");
+SIMPLE_MCDC_STATIC_ASSERT(offsetof(SimpleMcdcVectorV1, outcome) == 56, "outcome ABI");
+SIMPLE_MCDC_STATIC_ASSERT(sizeof(SimpleMcdcSnapshotV1) == 40, "SimpleMcdcSnapshotV1 ABI");
+SIMPLE_MCDC_STATIC_ASSERT(sizeof(SimpleMcdcWitnessV1) == 56, "SimpleMcdcWitnessV1 ABI");
+SIMPLE_MCDC_STATIC_ASSERT(offsetof(SimpleMcdcWitnessV1, condition_index) == 16, "witness condition ABI");
+SIMPLE_MCDC_STATIC_ASSERT(offsetof(SimpleMcdcWitnessV1, owner_a) == 24, "witness owner A ABI");
+SIMPLE_MCDC_STATIC_ASSERT(offsetof(SimpleMcdcWitnessV1, sequence_b) == 48, "witness sequence B ABI");
+SIMPLE_MCDC_STATIC_ASSERT(sizeof(SimpleMcdcAnalysisV1) == 48, "SimpleMcdcAnalysisV1 ABI");
+#undef SIMPLE_MCDC_STATIC_ASSERT
 
 int32_t rt_mcdc_collector_init_v1(void *storage, uint64_t storage_bytes,
                                   uint64_t session_id);
@@ -63,6 +95,14 @@ int32_t rt_mcdc_release_interpreter_owner_v1(uint64_t session_id,
                                              uint64_t owner_id);
 int32_t rt_mcdc_snapshot_v1(SimpleMcdcVectorV1 *output, uint64_t output_capacity,
                             SimpleMcdcSnapshotV1 *snapshot);
+int32_t rt_mcdc_analyze_unique_v1(const SimpleMcdcVectorV1 *events,
+                                  uint64_t event_count,
+                                  SimpleMcdcWitnessV1 *witnesses,
+                                  uint64_t witness_capacity,
+                                  uint64_t pair_budget,
+                                  SimpleMcdcAnalysisV1 *analysis);
+int32_t rt_mcdc_sort_vectors_v1(SimpleMcdcVectorV1 *events,
+                                uint64_t event_count);
 void rt_mcdc_collector_reset_v1(void);
 
 #if defined(__cplusplus)

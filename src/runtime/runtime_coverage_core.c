@@ -226,6 +226,147 @@ void rt_mcdc_collector_reset_v1(void) {
     mcdc_unlock();
 }
 
+static bool mcdc_vector_valid(const SimpleMcdcVectorV1 *event) {
+    if (!event->decision_id || !event->source_digest || !event->owner_id ||
+        !event->condition_count || event->condition_count > 62u || event->outcome > 1u)
+        return false;
+    if (event->reserved0 != 0) return false;
+    for (size_t i = 0; i < sizeof(event->reserved); ++i)
+        if (event->reserved[i] != 0) return false;
+    const uint64_t admitted = (UINT64_C(1) << event->condition_count) - UINT64_C(1);
+    return !(event->evaluated_mask & ~admitted) &&
+           !(event->true_mask & ~event->evaluated_mask);
+}
+
+static bool mcdc_same_identity(const SimpleMcdcVectorV1 *a,
+                               const SimpleMcdcVectorV1 *b) {
+    return a->decision_id == b->decision_id &&
+           a->source_digest == b->source_digest &&
+           a->condition_count == b->condition_count;
+}
+
+static int mcdc_vector_order(const SimpleMcdcVectorV1 *a,
+                             const SimpleMcdcVectorV1 *b) {
+    if (a->source_digest != b->source_digest) return a->source_digest < b->source_digest ? -1 : 1;
+    if (a->decision_id != b->decision_id) return a->decision_id < b->decision_id ? -1 : 1;
+    if (a->owner_id != b->owner_id) return a->owner_id < b->owner_id ? -1 : 1;
+    if (a->owner_sequence != b->owner_sequence) return a->owner_sequence < b->owner_sequence ? -1 : 1;
+    return 0;
+}
+
+static int mcdc_vector_qsort_compare(const void *left, const void *right) {
+    return mcdc_vector_order((const SimpleMcdcVectorV1 *)left,
+                             (const SimpleMcdcVectorV1 *)right);
+}
+
+int32_t rt_mcdc_sort_vectors_v1(SimpleMcdcVectorV1 *events,
+                                uint64_t event_count) {
+    if ((event_count && !events) || event_count > SIZE_MAX ||
+        event_count > SIZE_MAX / sizeof(*events) ||
+        (events && ((uintptr_t)events % _Alignof(SimpleMcdcVectorV1)) != 0))
+        return SIMPLE_MCDC_V1_INVALID;
+    for (size_t i = 0; i < (size_t)event_count; ++i)
+        if (!mcdc_vector_valid(&events[i])) return SIMPLE_MCDC_V1_INVALID;
+    if (event_count > 1)
+        qsort(events, (size_t)event_count, sizeof(*events), mcdc_vector_qsort_compare);
+    return SIMPLE_MCDC_V1_OK;
+}
+
+static bool mcdc_ranges_overlap(const void *a, size_t a_bytes,
+                                const void *b, size_t b_bytes) {
+    if (!a_bytes || !b_bytes) return false;
+    const uintptr_t a_start = (uintptr_t)a;
+    const uintptr_t b_start = (uintptr_t)b;
+    if (a_start > UINTPTR_MAX - a_bytes || b_start > UINTPTR_MAX - b_bytes) return true;
+    const uintptr_t a_end = a_start + a_bytes;
+    const uintptr_t b_end = b_start + b_bytes;
+    return a_start < b_end && b_start < a_end;
+}
+
+int32_t rt_mcdc_analyze_unique_v1(const SimpleMcdcVectorV1 *events,
+                                  uint64_t event_count,
+                                  SimpleMcdcWitnessV1 *witnesses,
+                                  uint64_t witness_capacity,
+                                  uint64_t pair_budget,
+                                  SimpleMcdcAnalysisV1 *analysis) {
+    if (!analysis || (event_count && !events) || (witness_capacity && !witnesses) ||
+        event_count > SIZE_MAX || witness_capacity > SIZE_MAX)
+        return SIMPLE_MCDC_V1_INVALID;
+    if (((uintptr_t)analysis % _Alignof(SimpleMcdcAnalysisV1)) != 0 ||
+        (events && ((uintptr_t)events % _Alignof(SimpleMcdcVectorV1)) != 0) ||
+        (witnesses && ((uintptr_t)witnesses % _Alignof(SimpleMcdcWitnessV1)) != 0))
+        return SIMPLE_MCDC_V1_INVALID;
+    if (event_count > SIZE_MAX / sizeof(*events) ||
+        witness_capacity > SIZE_MAX / sizeof(*witnesses))
+        return SIMPLE_MCDC_V1_INVALID;
+    const size_t event_bytes = (size_t)event_count * sizeof(*events);
+    const size_t witness_bytes = (size_t)witness_capacity * sizeof(*witnesses);
+    if (mcdc_ranges_overlap(events, event_bytes, witnesses, witness_bytes) ||
+        mcdc_ranges_overlap(events, event_bytes, analysis, sizeof(*analysis)) ||
+        mcdc_ranges_overlap(witnesses, witness_bytes, analysis, sizeof(*analysis)))
+        return SIMPLE_MCDC_V1_INVALID;
+    *analysis = (SimpleMcdcAnalysisV1){0, 0, 0, 0, 0, pair_budget};
+    for (size_t i = 0; i < (size_t)event_count; ++i) {
+        if (!mcdc_vector_valid(&events[i])) return SIMPLE_MCDC_V1_INVALID;
+        if (i > 0) {
+            const int order = mcdc_vector_order(&events[i - 1], &events[i]);
+            if (order >= 0) return SIMPLE_MCDC_V1_INVALID;
+            if (events[i - 1].source_digest == events[i].source_digest &&
+                events[i - 1].decision_id == events[i].decision_id &&
+                events[i - 1].condition_count != events[i].condition_count)
+                return SIMPLE_MCDC_V1_INVALID;
+        }
+    }
+    bool output_overflow = false;
+    size_t group_start = 0;
+    while (group_start < (size_t)event_count) {
+        size_t group_end = group_start + 1;
+        while (group_end < (size_t)event_count &&
+               mcdc_same_identity(&events[group_start], &events[group_end]))
+            ++group_end;
+        if (analysis->decisions == UINT64_MAX ||
+            analysis->gross_conditions > UINT64_MAX - events[group_start].condition_count)
+            return SIMPLE_MCDC_V1_OVERFLOW;
+        ++analysis->decisions;
+        analysis->gross_conditions += events[group_start].condition_count;
+        uint64_t covered_mask = 0;
+        const uint64_t complete_mask =
+            (UINT64_C(1) << events[group_start].condition_count) - UINT64_C(1);
+        for (size_t a = group_start; a < group_end && covered_mask != complete_mask; ++a) {
+            for (size_t b = a + 1; b < group_end && covered_mask != complete_mask; ++b) {
+                if (analysis->pair_checks == pair_budget)
+                    return SIMPLE_MCDC_V1_BUDGET_EXHAUSTED;
+                ++analysis->pair_checks;
+                if (events[a].outcome == events[b].outcome) continue;
+                const uint64_t changed = (events[a].true_mask ^ events[b].true_mask) |
+                                         (events[a].evaluated_mask ^ events[b].evaluated_mask);
+                if (!changed || (changed & (changed - UINT64_C(1))) != 0) continue;
+                if ((covered_mask & changed) != 0 ||
+                    !(events[a].evaluated_mask & changed) ||
+                    !(events[b].evaluated_mask & changed)) continue;
+                uint32_t condition = 0;
+                while ((UINT64_C(1) << condition) != changed) ++condition;
+                if (analysis->witness_count == UINT64_MAX ||
+                    analysis->covered_conditions == UINT64_MAX)
+                    return SIMPLE_MCDC_V1_OVERFLOW;
+                const SimpleMcdcWitnessV1 witness = {
+                    events[group_start].decision_id, events[group_start].source_digest,
+                    condition, 0u, events[a].owner_id, events[a].owner_sequence,
+                    events[b].owner_id, events[b].owner_sequence
+                };
+                if (analysis->witness_count < witness_capacity)
+                    witnesses[analysis->witness_count] = witness;
+                else output_overflow = true;
+                ++analysis->witness_count;
+                ++analysis->covered_conditions;
+                covered_mask |= changed;
+            }
+        }
+        group_start = group_end;
+    }
+    return output_overflow ? SIMPLE_MCDC_V1_OUTPUT_TOO_SMALL : SIMPLE_MCDC_V1_OK;
+}
+
 static bool coverage_add_size(size_t a, size_t b, size_t *result) {
     if (a > SIZE_MAX - b) return false;
     *result = a + b;

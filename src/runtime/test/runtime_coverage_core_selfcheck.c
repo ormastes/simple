@@ -46,6 +46,26 @@ int main(void) {
     assert(vectors[0].decision_id == 9 && vectors[0].source_digest == 99 &&
            vectors[0].evaluated_mask == 3);
     assert(vectors[1].owner_sequence == 1 && vectors[1].outcome == 1);
+    SimpleMcdcWitnessV1 witnesses[2];
+    SimpleMcdcAnalysisV1 analysis;
+    SimpleMcdcVectorV1 swap = vectors[0]; vectors[0] = vectors[1]; vectors[1] = swap;
+    assert(rt_mcdc_sort_vectors_v1(vectors, 2) == 0);
+    assert(rt_mcdc_analyze_unique_v1(vectors, 2, witnesses, 2, 100, &analysis) == 0);
+    assert(analysis.decisions == 1 && analysis.gross_conditions == 2);
+    assert(analysis.covered_conditions == 1 && analysis.witness_count == 1);
+    assert(analysis.pair_checks == 1 && analysis.pair_budget == 100);
+    assert(witnesses[0].condition_index == 1 && witnesses[0].policy == 0);
+    assert(witnesses[0].owner_a == 1 && witnesses[0].sequence_a == 0);
+    assert(rt_mcdc_analyze_unique_v1(vectors, 2, NULL, 0, 100, &analysis) == 4);
+    assert(analysis.covered_conditions == 1 && analysis.witness_count == 1);
+    assert(rt_mcdc_analyze_unique_v1(vectors, 2, witnesses, 2, 0, &analysis) == 8);
+    assert(analysis.pair_checks == 0);
+    SimpleMcdcVectorV1 malformed[2] = {vectors[0], vectors[1]};
+    malformed[1].condition_count = 3;
+    assert(rt_mcdc_analyze_unique_v1(malformed, 2, witnesses, 2, 100, &analysis) == 2);
+    malformed[1] = vectors[1];
+    malformed[1].reserved[0] = 1;
+    assert(rt_mcdc_sort_vectors_v1(malformed, 2) == 2);
     assert(rt_mcdc_release_interpreter_owner_v1(7, 1) == 0);
     rt_mcdc_collector_reset_v1();
     assert(setenv("SIMPLE_COVERAGE", "1", 1) == 0);
