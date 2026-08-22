@@ -688,18 +688,3 @@ hash, error query, or retry. Five Rust provider tests, the GUI interpreter
 descriptor test, Simple check, and staging memory/call-shape audit pass. Winit
 is 13/30 contracted; owned production becomes 231 contracted and 7,576 rows
 missing both. Artifact signing and bound sanitizer/proof evidence remain open.
-
-Winit fullscreen declarations previously disagreed across lanes: Simple used a
-boolean ABI while the native provider exports integer status, and invalid state
-reads became `false`. Both engines and the wrapper now use integer status with
-negative typed absence for invalid fullscreen reads. Position mutation has an
-exact status contract and native coordinates are range-checked instead of
-truncated to `i32`. All three public wrappers use lexical FFI scopes.
-
-Each operation retains one provider call and adds no allocation, retained
-memory, copy, lookup, lock, hash, error query, or retry. Five provider tests,
-the GUI interpreter sentinel test, Simple check, and window-state call/memory-
-shape audit pass. Winit is 16/30 contracted; owned production becomes 234
-contracted and 7,573 rows missing both. During inventory verification, detached
-read-only census processes from earlier yielded sessions were explicitly
-terminated to avoid wasting host CPU/memory; no repository data was affected.

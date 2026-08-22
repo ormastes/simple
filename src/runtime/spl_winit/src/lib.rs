@@ -877,9 +877,6 @@ pub extern "C" fn rt_winit_window_position_y(win: i64) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn rt_winit_window_set_position(win: i64, x: i64, y: i64) -> i64 {
-    let (Ok(x), Ok(y)) = (i32::try_from(x), i32::try_from(y)) else {
-        return 0;
-    };
     PUMP.with(|cell| {
         let borrow = cell.borrow();
         let Some(ps) = borrow.as_ref() else {
@@ -888,7 +885,8 @@ pub extern "C" fn rt_winit_window_set_position(win: i64, x: i64, y: i64) -> i64 
         let Some(slot) = ps.inner.windows.get(&win) else {
             return 0;
         };
-        slot.window.set_outer_position(PhysicalPosition::new(x, y));
+        slot.window
+            .set_outer_position(PhysicalPosition::new(x as i32, y as i32));
         1
     })
 }
@@ -921,7 +919,7 @@ pub extern "C" fn rt_winit_window_is_fullscreen(win: i64) -> i64 {
             .as_ref()
             .and_then(|ps| ps.inner.windows.get(&win))
             .map(|slot| slot.window.fullscreen().is_some() as i64)
-            .unwrap_or(-1)
+            .unwrap_or(0)
     })
 }
 
@@ -1994,9 +1992,6 @@ mod sffi_contract_tests {
         assert_eq!(rt_winit_window_scale_factor_milli(i64::MAX), -1);
         assert_eq!(rt_winit_window_position_x(i64::MAX), i64::MIN);
         assert_eq!(rt_winit_window_position_y(i64::MAX), i64::MIN);
-        assert_eq!(rt_winit_window_is_fullscreen(i64::MAX), -1);
-        assert_eq!(rt_winit_window_set_fullscreen(i64::MAX, 1), 0);
-        assert_eq!(rt_winit_window_set_position(i64::MAX, i64::MAX, 0), 0);
     }
 
     #[test]

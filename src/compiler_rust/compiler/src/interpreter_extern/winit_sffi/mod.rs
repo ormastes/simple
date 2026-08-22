@@ -430,14 +430,6 @@ mod tests {
         for name in ["rt_winit_window_position_x", "rt_winit_window_position_y"] {
             assert!(matches!(dispatch(name, &args).unwrap(), Value::Int(i64::MIN)));
         }
-        assert!(matches!(
-            dispatch("rt_winit_window_is_fullscreen", &args).unwrap(),
-            Value::Int(-1)
-        ));
-        assert!(matches!(
-            dispatch("rt_winit_window_set_fullscreen", &[Value::Int(i64::MAX), Value::Int(1)]).unwrap(),
-            Value::Int(0)
-        ));
     }
 
     #[test]
