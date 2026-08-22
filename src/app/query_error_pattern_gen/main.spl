@@ -3,14 +3,47 @@ use app.io.mod.{cwd, file_exists, file_read_text, file_atomic_write}
 use app.query_error_pattern_gen.patterns.{query_error_pattern_specs}
 use app.query_error_pattern_gen.generator.{query_error_pattern_build_default}
 use app.query_error_pattern_gen.render.{query_error_pattern_render}
+use app.query_error_pattern_gen.rule_render.{
+    query_error_rule_block_render, query_error_fallback_block_render
+}
+
+const _QUERY_RULE_BEGIN: text = "    # BEGIN GENERATED QUERY ERROR RULES\n"
+const _QUERY_RULE_END: text = "    # END GENERATED QUERY ERROR RULES\n"
+const _QUERY_FALLBACK_BEGIN: text = "    # BEGIN GENERATED QUERY ERROR FALLBACKS\n"
+const _QUERY_FALLBACK_END: text = "    # END GENERATED QUERY ERROR FALLBACKS\n"
 
 fn _query_error_pattern_gen_help():
-    print "Usage: simple run src/app/query_error_pattern_gen/main.spl [check|generate|stats] [--root PATH] [--output PATH]"
+    print "Usage: simple run src/app/query_error_pattern_gen/main.spl [check|generate|stats] [--root PATH] [--output PATH] [--rules-output PATH]"
+
+fn _query_generated_block(source: text, begin_marker: text, end_marker: text) -> Result<text, text>:
+    val begin_at = source.find(begin_marker)
+    if begin_at < 0:
+        return Err("generated block begin marker is missing")
+    val end_at = source.find(end_marker, begin_at + begin_marker.len())
+    if end_at < 0:
+        return Err("generated block end marker is missing")
+    Ok(source.substring(begin_at, end_at + end_marker.len()))
+
+fn _query_replace_generated_block(
+    source: text,
+    begin_marker: text,
+    end_marker: text,
+    replacement: text
+) -> Result<text, text>:
+    val begin_at = source.find(begin_marker)
+    if begin_at < 0:
+        return Err("generated block begin marker is missing")
+    val end_at = source.find(end_marker, begin_at + begin_marker.len())
+    if end_at < 0:
+        return Err("generated block end marker is missing")
+    val suffix_at = end_at + end_marker.len()
+    Ok([source.substring(0, begin_at), replacement, source.substring(suffix_at, source.len())].join(""))
 
 fn run_query_error_pattern_gen(args: [text]) -> i64:
     var mode = "check"
     var root = cwd()
     var output = ""
+    var rules_output = ""
     var positional_seen = false
     var index = 0
     while index < args.len():
@@ -21,14 +54,16 @@ fn run_query_error_pattern_gen(args: [text]) -> i64:
                 return 2
             _query_error_pattern_gen_help()
             return 0
-        elif arg == "--root" or arg == "--output":
+        elif arg == "--root" or arg == "--output" or arg == "--rules-output":
             if index + 1 >= args.len():
                 print "ERROR query-error-pattern-gen: missing value for {arg}"
                 return 2
             if arg == "--root":
                 root = args[index + 1]
-            else:
+            elif arg == "--output":
                 output = args[index + 1]
+            else:
+                rules_output = args[index + 1]
             index = index + 1
         elif arg.starts_with("--"):
             print "ERROR query-error-pattern-gen: unknown option {arg}"
@@ -46,6 +81,8 @@ fn run_query_error_pattern_gen(args: [text]) -> i64:
         return 2
     if output == "":
         output = root + "/src/app/cli/query_error_pattern_matcher.spl"
+    if rules_output == "":
+        rules_output = root + "/src/app/cli/query_error_codes.spl"
 
     match query_error_pattern_build_default():
         case Err(message):
@@ -53,8 +90,20 @@ fn run_query_error_pattern_gen(args: [text]) -> i64:
             return 2
         case Ok(model):
             val specs = query_error_pattern_specs()
+            var rule_block = ""
+            match query_error_rule_block_render():
+                case Err(message):
+                    print "ERROR query-error-pattern-gen: {message}"
+                    return 2
+                case Ok(rendered_rules): rule_block = rendered_rules
+            var fallback_block = ""
+            match query_error_fallback_block_render():
+                case Err(message):
+                    print "ERROR query-error-pattern-gen: {message}"
+                    return 2
+                case Ok(rendered_fallbacks): fallback_block = rendered_fallbacks
             if mode == "stats":
-                print "PASS query-error-pattern-gen: patterns={specs.len()} states={model.fail.len()} edges={model.edge_byte.len()} outputs={model.output_lo.len()}"
+                print "PASS query-error-pattern-gen: patterns={specs.len()} states={model.fail.len()} edges={model.edge_byte.len()} outputs={model.output_lo.len()} rules=80"
                 return 0
 
             val rendered = query_error_pattern_render(model, specs.len())
@@ -66,16 +115,60 @@ fn run_query_error_pattern_gen(args: [text]) -> i64:
                 if existing != rendered:
                     print "STALE query-error-pattern-gen: generated output differs from {output}"
                     return 1
-                print "PASS query-error-pattern-gen: {output} is current"
+                if not file_exists(rules_output):
+                    print "STALE query-error-pattern-gen: missing {rules_output}"
+                    return 1
+                val rules_source = file_read_text(rules_output)
+                match _query_generated_block(rules_source, _QUERY_RULE_BEGIN, _QUERY_RULE_END):
+                    case Err(message):
+                        print "ERROR query-error-pattern-gen: {message}"
+                        return 2
+                    case Ok(current_rules):
+                        if current_rules != rule_block:
+                            print "STALE query-error-pattern-gen: ordered rules differ from {rules_output}"
+                            return 1
+                match _query_generated_block(rules_source, _QUERY_FALLBACK_BEGIN, _QUERY_FALLBACK_END):
+                    case Err(message):
+                        print "ERROR query-error-pattern-gen: {message}"
+                        return 2
+                    case Ok(current_fallbacks):
+                        if current_fallbacks != fallback_block:
+                            print "STALE query-error-pattern-gen: fallbacks differ from {rules_output}"
+                            return 1
+                print "PASS query-error-pattern-gen: matcher and ordered rules are current"
                 return 0
 
-            if file_exists(output) and file_read_text(output) == rendered:
-                print "PASS query-error-pattern-gen: {output} unchanged"
-                return 0
-            if not file_atomic_write(output, rendered):
-                print "ERROR query-error-pattern-gen: atomic write failed for {output}"
+            if not file_exists(rules_output):
+                print "ERROR query-error-pattern-gen: missing rules owner {rules_output}"
                 return 2
-            print "PASS query-error-pattern-gen: wrote {output}"
+            val original_rules_source = file_read_text(rules_output)
+            var generated_rules_source = ""
+            match _query_replace_generated_block(original_rules_source, _QUERY_RULE_BEGIN, _QUERY_RULE_END, rule_block):
+                case Err(message):
+                    print "ERROR query-error-pattern-gen: {message}"
+                    return 2
+                case Ok(updated): generated_rules_source = updated
+            match _query_replace_generated_block(generated_rules_source, _QUERY_FALLBACK_BEGIN, _QUERY_FALLBACK_END, fallback_block):
+                case Err(message):
+                    print "ERROR query-error-pattern-gen: {message}"
+                    return 2
+                case Ok(updated): generated_rules_source = updated
+
+            var changed = false
+            if not file_exists(output) or file_read_text(output) != rendered:
+                if not file_atomic_write(output, rendered):
+                    print "ERROR query-error-pattern-gen: atomic write failed for {output}"
+                    return 2
+                changed = true
+            if original_rules_source != generated_rules_source:
+                if not file_atomic_write(rules_output, generated_rules_source):
+                    print "ERROR query-error-pattern-gen: atomic write failed for {rules_output}"
+                    return 2
+                changed = true
+            if changed:
+                print "PASS query-error-pattern-gen: generated matcher and ordered rules"
+            else:
+                print "PASS query-error-pattern-gen: matcher and ordered rules unchanged"
             return 0
 
 fn main() -> i64:
