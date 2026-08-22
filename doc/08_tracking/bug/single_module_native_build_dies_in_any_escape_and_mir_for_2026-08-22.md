@@ -94,3 +94,75 @@ defect live for every other same-named pair.
    failure whose cause reads like a compiler defect. Left as-is (the lane is
    specified to run from a deployed checkout) but recorded so the next reader
    does not chase it.
+
+## Defect 2, corrected diagnosis (2026-08-22) — NOT a name-resolution bug
+
+The first write-up above (and the working hypothesis that followed it: "a local
+binding must shadow an imported callable; the shared symbol registry consults
+imported callables before local scopes") is **wrong**. Four independent
+standalone reproductions of that shape all behave CORRECTLY on the deployed
+seed:
+
+| fixture shape | result |
+|---|---|
+| same file: `fn get_value` + `if val get_value = o:` … `return get_value` | correct |
+| same file, binding assigned OUT of the `if val` into an outer `var` | correct |
+| 3 modules, no import edge between the collider and the user, `pub fn get_value` | correct |
+| 3 modules, collider NON-pub, reached only through a glob | correct |
+| collider declared as an enum-BODY method `fn get_value(self)` | correct |
+
+Instrumenting the real site settled it. With an `eprint` on either side of
+`mir_lowering_stmts.spl:2711`:
+
+```
+[probe-forarr] get_call_present=LocalId(id: 27)
+[probe-forarr] bound branch taken
+[probe-forarr] get_call_present=LocalId(id: 66)
+[probe-forarr] bound branch taken
+```
+
+The `if val` binds, takes the bound branch, and yields a real `LocalId` — the
+resolution order is fine. The build then dies **somewhere else entirely**:
+
+```
+[field-access-error] field=id recv_type=function recv=function = <fn:get_value>
+  expr=Identifier("local")
+  stack=main -> cli_native_build -> ... -> aot_compile -> borrow_check ->
+  check_mir_module -> check_function -> analyze_mir_borrows ->
+  analyze_instruction -> record_operand_use
+```
+
+`record_operand_use` (`src/compiler/55.borrow/borrow_check/mod.spl:344-353`)
+is `match op.kind: case Copy(local): nll.record_use(point, Place.local(local.id))`.
+So `local` here is a **match payload binding**, not an `if val` binding, and it
+too holds `<fn:get_value>`.
+
+The load-bearing observation is that **two unrelated enums yield the same bogus
+value**: `Option<LocalId>` in `lower_for_array_indexed` and `MirOperandKind` in
+`record_operand_use` both produce the function `get_value` as their payload. A
+name-resolution defect would be per-NAME (`elem_local` vs `local` are different
+names); this is per-VALUE. What is broken is **enum payload extraction handing
+back a stale/foreign value** — the same defect class as
+`doc/08_tracking/bug/hir_enum_payload_blockvalue_unresolved_2026-08-21.md` and
+the JIT optional-unwrap payload-read fix in `20416a1bda7`, not the symbol
+registry, `registered_import_memo`, or `SymbolTable.define`.
+
+Where `<fn:get_value>` itself comes from is still open. The only `get_value`
+declarations in the compiler closure are an enum-body method on `CompileResult`
+(`src/compiler/00.common/driver_compile_result.spl:16`) and a free
+`fn get_value` in `70.backend/backend/llvm_lib_translate_expr.spl:868`; neither
+is imported by either failing module, which is consistent with a slot/value
+mix-up rather than a lookup.
+
+**Next step for whoever picks this up:** do not touch the symbol registry.
+Instrument enum payload extraction (interpreter path, the seed's
+`rt_enum_payload` / match-arm binding) and print the discriminant and payload
+provenance at `record_operand_use`; the two call sites above are reliable,
+7-minute reproductions:
+
+```
+simple native-build test/fixtures/engine_differential/text_bytes_and_chars.spl -o /tmp/x --threads 2
+simple native-build --source src/compiler --entry src/compiler/80.driver/driver_public_api.spl -o /tmp/y --threads 2
+```
+
+Both need `SIMPLE_DEBUG_FIELD_ACCESS=1`, without which neither names anything.
