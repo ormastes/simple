@@ -182,3 +182,13 @@ implementation-in-progress
   private lint-tier state was not restored. The plan now requires a nonprinting
   structured lint API, complete cleanup-safe state ownership, and behavioral
   isolation fixtures before reducing the current `2N` explicit per-file processes.
+- correctness/memory: Structured lint collection now restores the caller's
+  diagnostic buffer, collection mode, severity map/count, and private tier flag.
+  Inner records remain separately ordered, value/COW snapshots avoid explicit
+  element-wise copies on normal return, and legacy producer count remains distinct
+  from authoritative emitted length. Failure cleanup, parser trace, and global
+  arenas still block workspace integration; execution evidence is absent.
+- optimization/memory: Query lint now passes its one canonical source-line array
+  to file-attribute policy parsing. This removes a second full-source split and
+  transient line array per linted file with unchanged attribute scan boundaries,
+  policy precedence, diagnostic ordering, and linear complexity.
