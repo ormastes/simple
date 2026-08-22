@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-int64_t rt_cstring_to_text(int64_t cstr_value);
+int64_t rt_cstring_to_text(const char *cstr);
 
 #ifdef __cplusplus
 }
