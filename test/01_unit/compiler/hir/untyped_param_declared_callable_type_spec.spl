@@ -1,0 +1,47 @@
+# Reproduce spec for: HIR lowering trapped with a span-less
+#   "semantic: undefined field 'kind': cannot access field on value of type 'nil'"
+# whenever declared_callable_type ran over a function with an UNTYPED parameter.
+#
+# `Param.type_` is a desugared optional paired with `has_type_`; an untyped
+# param leaves it nil, and declared_callable_type passed it straight to
+# lower_type, which does `val lt_kind: TypeKind = lt.kind` on the nil receiver
+# (src/compiler/20.hir/hir_lowering/types.spl). The sibling
+# declared_surface_callable_type already guarded on has_type_; this path did not.
+#
+# This blocked every --entry-closure native-build reaching such a function,
+# including bin/simple_mcp_server and bin/simple_lsp_mcp_server.
+
+fn untyped_param_free_fn(x) -> i64:
+    x + 1
+
+fn untyped_param_mixed(a, b: i64) -> i64:
+    a + b
+
+fn untyped_param_no_return(v):
+    v
+
+class UntypedParamHolder:
+    var base: i64 = 10
+
+    me add_untyped(delta) -> i64:
+        self.base + delta
+
+    fn static_untyped(y) -> i64:
+        y * 2
+
+describe "declared_callable_type tolerates untyped parameters":
+    it "lowers a free function with a fully untyped parameter":
+        expect(untyped_param_free_fn(1)).to_equal(2)
+
+    it "lowers a function mixing untyped and typed parameters":
+        expect(untyped_param_mixed(2, 3)).to_equal(5)
+
+    it "lowers an untyped-parameter function with no declared return type":
+        expect(untyped_param_no_return(7)).to_equal(7)
+
+    it "lowers a method with an untyped parameter":
+        val holder = UntypedParamHolder()
+        expect(holder.add_untyped(5)).to_equal(15)
+
+    it "lowers a static function with an untyped parameter":
+        expect(UntypedParamHolder.static_untyped(4)).to_equal(8)

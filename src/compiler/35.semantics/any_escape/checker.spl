@@ -99,17 +99,6 @@ fn any_type_is_any(t: HirType) -> bool:
     `Optional(Named(T))` regardless of where `T` is declared -- and the
     exclusion, whose cost was that a written `Any?` was invisible, is gone.
     """
-    # `HirStmtKind.Let` declares `type_: HirType`, but HIR lowering builds
-    # DESUGARED bindings with no declared type at all -- `Let(sym, nil, init)`
-    # at 10+ sites in hir_lowering (tuple destructure, match scrutinee temps,
-    # `for` index temps). Reading `.kind` off that nil aborted the whole
-    # compile with `semantic: undefined field 'kind': cannot access field on
-    # value of type 'nil'`, which killed every single-module `native-build`
-    # (and with it the engine-differential native lane). An absent annotation
-    # is not a declared `Any`: §8.1 is about what the source WROTE, and the
-    # value's own type is judged where it is used.
-    if t == nil:
-        return false
     match t.kind:
         case Any: true
         case Optional(inner): any_type_is_any(inner)
@@ -124,8 +113,6 @@ fn any_type_mentions_any(t: HirType) -> bool:
     §8.2 matrix: `[Any]`, `Dict<text, Any>` and `(i64, Any)` all keep an
     erased value alive past the boundary just as a bare `Any` would.
     """
-    if t == nil:
-        return false
     if any_type_is_any(t):
         return true
     match t.kind:
@@ -590,15 +577,26 @@ fn any_check_block(self: AnyEscapeState, profile: AnyEscapeProfile, b: HirBlock)
 fn any_check_stmt(self: AnyEscapeState, profile: AnyEscapeProfile, st: HirStmt):
     match st.kind:
         case Let(symbol, type_, init):
-            if any_type_is_any(type_):
-                if not any_in_type_erasure_region(self):
-                    any_emit_001(self, profile, "this binding is declared `Any`", st.span)
-                if symbol != nil:
-                    self.any_symbols = self.any_symbols.push(symbol.id)
-                self.live_any = self.live_any + 1
-            elif any_type_mentions_any(type_):
-                any_emit_002(self, profile, AnyEscapeKind.EscapeStore,
-                             "an erased value is stored in a container-typed binding", st.span)
+            # `type_` is nil for an inferred binding (`val x = e` with no
+            # annotation) -- the same way `symbol` can be nil just below.
+            # `any_type_is_any` takes a non-nil `HirType` and reads `t.kind`,
+            # so calling it on an untyped Let trapped with a span-less
+            # "undefined field 'kind' ... type 'nil'". Both predicates here ask
+            # about the DECLARED type, and an inferred binding has none;
+            # inference-side erasure is covered by `any_expr_is_any` on `init`.
+            # if-val, not `.unwrap()`: unwrap is box-assuming and breaks flat
+            # optionals on the stage4 native lane (see the same note in
+            # 20.hir/hir_lowering/_Items/module_callable_types.spl).
+            if val declared_type = type_:
+                if any_type_is_any(declared_type):
+                    if not any_in_type_erasure_region(self):
+                        any_emit_001(self, profile, "this binding is declared `Any`", st.span)
+                    if symbol != nil:
+                        self.any_symbols = self.any_symbols.push(symbol.id)
+                    self.live_any = self.live_any + 1
+                elif any_type_mentions_any(declared_type):
+                    any_emit_002(self, profile, AnyEscapeKind.EscapeStore,
+                                 "an erased value is stored in a container-typed binding", st.span)
             any_check_expr(self, profile, init)
 
         case Assign(target, op, value):
