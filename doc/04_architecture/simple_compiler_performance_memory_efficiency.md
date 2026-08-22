@@ -271,3 +271,13 @@ use stable bottom-up merge passes with the existing raw comparators, one bounded
 scratch array, left-biased equal keys, odd-run copying, and guarded width
 growth. The catalog owns and reuses module and category snapshots rather than
 rebuilding or resorting the same dictionary keys at each consumer.
+
+### Storage-layout overlap fact ownership
+
+The advisory owns a private compact interval snapshot; it never reorders the
+caller's typed facts. Stable region/start/end/field ordering groups
+independent regions and makes source-order ties deterministic. Two endpoint
+leaders for distinct fields prove overlap for analyzer-produced half-open
+ranges. Malformed externally supplied ranges retain an exact region-local
+predicate fallback. Identity canonicalization remains a separate lexical fact,
+and incomplete evidence continues to fail closed before interval allocation.
