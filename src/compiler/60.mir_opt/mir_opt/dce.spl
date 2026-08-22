@@ -1,50 +1,22 @@
-# Dead Code Elimination (DCE)
+# Dead Code Elimination Skeleton
 #
-# Removes instructions and basic blocks that don't affect program output.
-#
-# What it removes:
-# 1. Unused local variables (dead stores)
-# 2. Instructions whose results are never used
-# 3. Unreachable basic blocks
-# 4. Pure operations with unused results
-#
-# Algorithm:
-# 1. Mark phase: Mark all "live" values (used in output)
-# 2. Sweep phase: Remove unmarked instructions and blocks
-#
-# Preserves:
-# - Function calls (may have side effects)
-# - Memory stores (may be visible)
-# - Return instructions
-# - Branch terminators
+# DCE is inactive until every MIR opcode has complete DEF/USE, observability,
+# trap, ownership/destruction, unwind, volatile/atomic/device, and debug-probe
+# semantics. All callable transform surfaces fail closed while registry status
+# is Skeleton; dense liveness and MIR rebuilding must not run through bypasses.
 
 use compiler.mir.mir_data.*
-use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
-use compiler.mir_opt.mod.{MirPass}
-use compiler.mir_opt.mir_opt.perf_facts.{
-    PerfFacts, perf_facts_build, perf_facts_is_live_out,
-    perf_instruction_access, perf_terminator_access
-}
+use compiler.mir.mir_instructions.{MirFunction}
 
 fn dce_instruction_is_mandatory_observation(inst: MirInst) -> bool:
-    """True for ordered observations which may never be removed as dead."""
+    # Compatibility fact used by coverage-probe admission. This is not
+    # transformation authority.
     match inst.kind:
         case DecisionProbe(_, _, _, _, _, _): true
         case ConditionProbe(_, _, _, _, _, _, _, _): true
         case _: false
 
-# ============================================================================
-# Dead Code Elimination Pass
-# ============================================================================
-
 class DeadCodeElimination:
-    """
-    DCE optimization pass.
-
-    Removes dead code in two phases:
-    1. Mark: Identify live instructions via backwards dataflow
-    2. Sweep: Remove unmarked instructions
-    """
     removed_instructions: i64
     removed_blocks: i64
     iterations: i64
@@ -52,193 +24,39 @@ class DeadCodeElimination:
 impl DeadCodeElimination:
     static fn new() -> DeadCodeElimination:
         DeadCodeElimination(
-            removed_instructions: 0,
-            removed_blocks: 0,
-            iterations: 0
-        )
+            removed_instructions: 0, removed_blocks: 0, iterations: 0)
 
     fn name() -> text:
         "dead_code_elimination"
 
     fn description() -> text:
-        "Removes unused instructions and unreachable basic blocks"
+        "Dead code elimination transformation skeleton"
 
     fn is_analysis_pass() -> bool:
-        val _ = self.name()
         false
 
     fn dependencies() -> [text]:
-        val _ = self.description()
-        []  # No dependencies
+        []
 
     me run_on_function(func: MirFunction) -> MirFunction:
-        """
-        Run DCE on a function.
-
-        Algorithm:
-        1. Find reachable blocks (from entry)
-        2. For each reachable block:
-           a. Mark live instructions (backwards from terminator)
-           b. Remove dead instructions
-        3. Remove unreachable blocks
-        """
-        self.iterations = self.iterations + 1
-
-        val facts = perf_facts_build(func)
-        if not facts.cfg_complete or not facts.def_use_complete or not facts.liveness_complete:
-            return func
-
-        # Build reachable set for O(1) lookup
-        var reachable_set = {}
-        for bid in facts.reverse_postorder:
-            reachable_set[bid.id] = true
-
-        # Phase 2: Remove dead instructions in reachable blocks
-        var optimized_blocks: [MirBlock] = []
-        for block in func.blocks:
-            if reachable_set.has(block.id.id):
-                val optimized_block = self.remove_dead_instructions(block, facts)
-                optimized_blocks = optimized_blocks.push(optimized_block)
-            else:
-                # Unreachable block - don't include
-                self.removed_blocks = self.removed_blocks + 1
-
-        # Return optimized function
-        MirFunction(..func, blocks: optimized_blocks)
-
-    # ========================================================================
-    # Instruction-Level DCE
-    # ========================================================================
-
-    me remove_dead_instructions(block: MirBlock, facts: PerfFacts) -> MirBlock:
-        """
-        Remove dead instructions from a block.
-
-        An instruction is dead if:
-        - It assigns to a local that's never used
-        - It's a pure operation (no side effects)
-        - Its result isn't consumed
-        """
-        var live: Dict<i64, bool> = {}
-        for local in facts.locals:
-            if perf_facts_is_live_out(facts, block.id, local):
-                live[local.id] = true
-        for local in perf_terminator_access(block.terminator).uses:
-            live[local.id] = true
-
-        # One backwards transfer replaces the former per-definition scan.
-        # The function-level completeness gate guarantees the shared visitor
-        # modeled every instruction before this method is entered.
-        var keep: [bool] = []
-        for _ in block.instructions: keep.push(false)
-        var index = block.instructions.len()
-        while index > 0:
-            index = index - 1
-            val instruction = block.instructions[index]
-            val access = perf_instruction_access(instruction)
-            var instruction_live = self.instruction_has_side_effects(instruction)
-            if access.defs.len() == 0:
-                # Preserve marker/debug/no-result semantics until each opcode
-                # has an explicit observability contract.
-                instruction_live = true
-            for local in access.defs:
-                if live.has(local.id): instruction_live = true
-            if instruction_live:
-                keep[index] = true
-                for local in access.defs: live.remove(local.id)
-                for local in access.uses: live[local.id] = true
-
-        var live_instructions: [MirInst] = []
-        for i in 0..(block.instructions.len()):
-            if keep[i]:
-                live_instructions.push(block.instructions[i])
-            else:
-                self.removed_instructions = self.removed_instructions + 1
-
-        MirBlock(
-            id: block.id,
-            label: block.label,
-            instructions: live_instructions,
-            terminator: block.terminator
-        )
+        func
 
     fn instruction_has_side_effects(inst: MirInst) -> bool:
-        """
-        Check if instruction has observable side effects.
-
-        Side effects include:
-        - Function calls (may do anything)
-        - Memory stores (visible to other code)
-        - Checked operations (may trap)
-        """
-        if dce_instruction_is_mandatory_observation(inst): return true
-        match inst.kind:
-            case Call(_, _, _):
-                true  # Function calls may have side effects
-
-            case CallIndirect(_, _, _, _):
-                true
-
-            case Store(_, _):
-                true  # Memory stores are visible
-
-            case StoreGlobal(_, _) | SetField(_, _, _) | TransferOut(_, _, _, _, _, _) |
-                 TransferIn(_, _, _, _) | FreezeRegion(_) | CommitUpdates(_, _, _) |
-                 AcquireSnapshot(_, _) | Drop(_) | InlineAsm(_, _, _, _, _, _, _) |
-                 PipeForward(_, _, _) | Compose(_, _, _, _) | Parallel(_, _) |
-                 LayerConnect(_, _, _) | CreatePromise(_, _, _) | Await(_, _) | Yield(_) |
-                 Spawn(_, _, _) | Send(_, _, _) | Receive(_, _) | GpuLaunch(_) |
-                 GpuBarrier(_) | GpuMemFence(_) | GpuAtomicOp(_, _, _, _) |
-                 GpuAtomicCas(_, _, _, _) | HostGpuLaneBegin(_, _) | HostGpuLaneEnd(_) |
-                 VhdlProcess(_, _) | VhdlSignalAssign(_, _, _) | VhdlVarAssign(_, _) |
-                 VhdlPortMap(_, _, _) | MirSimdStore(_, _, _) |
-                 MirSimdScatter(_, _, _) | MirWarpSync(_):
-                true
-
-            case Intrinsic(_, name, _):
-                # Some intrinsics are pure, but be conservative
-                not self.is_pure_intrinsic(name)
-
-            case CheckedBinOp(_, _, _, _):
-                true  # May trap on overflow
-
-            case _:
-                false  # Most instructions are pure
+        # Fail closed: without an exhaustive opcode contract, every
+        # instruction is potentially observable or trapping.
+        true
 
     fn is_pure_intrinsic(name: text) -> bool:
-        """Check if intrinsic is pure (no side effects)."""
-        match name:
-            case "sqrt":
-                true
-            case "abs":
-                true
-            case "min":
-                true
-            case "max":
-                true
-            case _:
-                false  # Conservative: assume impure
-
-    # ========================================================================
-    # Statistics
-    # ========================================================================
+        # Purity belongs to verified effect summaries, not a string allowlist.
+        false
 
     fn stats_summary() -> text:
-        """Generate summary of optimization work."""
         "DCE: removed {self.removed_instructions} instructions, {self.removed_blocks} blocks ({self.iterations} runs)"
 
-# ============================================================================
-# Factory Function
-# ============================================================================
-
 fn create_dce_pass() -> DeadCodeElimination:
-    """Create a new DCE pass instance."""
     DeadCodeElimination.new()
 
-# ============================================================================
-# Exports
-# ============================================================================
-
-fn dce_run_on_function(dce_pass: DeadCodeElimination, func: MirFunction) -> MirFunction:
-    """Free-function wrapper for DCE pass dispatch."""
+fn dce_run_on_function(
+    dce_pass: DeadCodeElimination, func: MirFunction
+) -> MirFunction:
     func
