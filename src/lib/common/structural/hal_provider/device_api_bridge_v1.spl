@@ -39,6 +39,7 @@ enum RtHalDeviceDispatchStatusV1:
     InvalidRequest
     InvalidExecutor
     InvalidProviderOrder
+    InvalidReference
     ExecutionRejected
 
 struct RtHalDeviceDispatchReceiptV1:
@@ -88,6 +89,69 @@ fn _rt_hal_device_rejected_execution_v1(
     DeviceExecutionReceiptV1(
         rejected.observation, 0, 0, false, false, 0)
 
+fn _rt_hal_device_reference_metadata_equal_v1(
+        frozen: HalCapturedDevicePayloadV1,
+        supplied: HalCapturedDevicePayloadV1) -> bool:
+    frozen.contract_version == supplied.contract_version
+        and frozen.invocation_id == supplied.invocation_id
+        and frozen.sequence == supplied.sequence
+        and frozen.kind == supplied.kind and frozen.opcode == supplied.opcode
+        and frozen.capability_id == supplied.capability_id
+        and frozen.capability_generation == supplied.capability_generation
+        and frozen.grant_digest_hi == supplied.grant_digest_hi
+        and frozen.grant_digest_lo == supplied.grant_digest_lo
+        and frozen.read_once_token == supplied.read_once_token
+        and frozen.scalar0 == supplied.scalar0
+        and frozen.scalar1 == supplied.scalar1
+        and frozen.region.offset == supplied.region.offset
+        and frozen.region.length == supplied.region.length
+        and frozen.region.capacity == supplied.region.capacity
+        and frozen.region.digest_hi == supplied.region.digest_hi
+        and frozen.region.digest_lo == supplied.region.digest_lo
+        and frozen.observation.invocation_id
+            == supplied.observation.invocation_id
+        and frozen.observation.sequence == supplied.observation.sequence
+        and frozen.observation.status == supplied.observation.status
+        and frozen.observation.status_code == supplied.observation.status_code
+        and frozen.observation.bytes_length
+            == supplied.observation.bytes_length
+        and frozen.observation.bytes_capacity
+            == supplied.observation.bytes_capacity
+        and frozen.observation.interaction_digest_hi
+            == supplied.observation.interaction_digest_hi
+        and frozen.observation.interaction_digest_lo
+            == supplied.observation.interaction_digest_lo
+        and frozen.sealed == supplied.sealed
+
+fn _rt_hal_device_reference_digest_lane_v1(state: i64, value: i64) -> i64:
+    ((state * 257 + (value % 2147483629) + 17) % 2147483629) + 1
+
+struct RtHalDeviceReferenceDigestV1:
+    hi: i64
+    lo: i64
+
+fn _rt_hal_device_reference_bytes_digest_v1(
+        region: HalCallerRegionV1, bytes: [u8])
+        -> RtHalDeviceReferenceDigestV1:
+    if region.offset < 0 or region.length < 0
+            or region.offset > bytes.len() - region.length:
+        return RtHalDeviceReferenceDigestV1(0, 0)
+    var hi = _rt_hal_device_reference_digest_lane_v1(
+        146959810, region.offset)
+    hi = _rt_hal_device_reference_digest_lane_v1(hi, region.length)
+    hi = _rt_hal_device_reference_digest_lane_v1(hi, region.capacity)
+    var lo = _rt_hal_device_reference_digest_lane_v1(
+        216613626, region.capacity)
+    lo = _rt_hal_device_reference_digest_lane_v1(lo, region.length)
+    lo = _rt_hal_device_reference_digest_lane_v1(lo, region.offset)
+    var i = 0
+    while i < region.length:
+        val value = bytes[region.offset + i]
+        hi = _rt_hal_device_reference_digest_lane_v1(hi, value)
+        lo = _rt_hal_device_reference_digest_lane_v1(lo, value + 131)
+        i = i + 1
+    RtHalDeviceReferenceDigestV1(hi, lo)
+
 # Normal mode deliberately bypasses HalDeviceCompareOwnerV1. The executor is a
 # field of the mutable owner so sequence/token/DMA state cannot be discarded by
 # Simple's value semantics. Validation is O(1), and execute performs only the
@@ -134,6 +198,10 @@ class RtHalDeviceComparisonOwnerV1:
     request: RtHalDeviceRequestV1
     preferred_provider: HalProviderKind
     comparison: HalDeviceCompareOwnerV1
+    preferred_payload: HalCapturedDevicePayloadV1
+    preferred_bytes_digest_hi: i64
+    preferred_bytes_digest_lo: i64
+    preferred_frozen: bool
     sealed: bool
 
     me execute_provider(
@@ -173,6 +241,21 @@ class RtHalDeviceComparisonOwnerV1:
                 RtHalDeviceDispatchStatusV1.InvalidProviderOrder, rejected,
                 self.request, region_digest_hi, region_digest_lo,
                 HalPayloadReplayStatusV1.AlreadyConsumed)
+        if provider_bit != preferred_bit:
+            val supplied_digest = _rt_hal_device_reference_bytes_digest_v1(
+                recorded.region, recorded_bytes)
+            if not self.preferred_frozen
+                    or not _rt_hal_device_reference_metadata_equal_v1(
+                        self.preferred_payload, recorded)
+                    or supplied_digest.hi != self.preferred_bytes_digest_hi
+                    or supplied_digest.lo != self.preferred_bytes_digest_lo:
+                self.sealed = false
+                val rejected = _rt_hal_device_rejected_execution_v1(
+                    self.request, EnvInstructionStatusV1.Diverged)
+                return _rt_hal_device_dispatch_receipt_v1(
+                    RtHalDeviceDispatchStatusV1.InvalidReference, rejected,
+                    self.request, region_digest_hi, region_digest_lo,
+                    HalPayloadReplayStatusV1.PayloadDifference)
         val executed = executor.execute(self.request.instruction,
             argument_bytes, result_bytes, device_bytes)
         if not executed.applied:
@@ -184,6 +267,14 @@ class RtHalDeviceComparisonOwnerV1:
         val candidate = rt_hal_device_request_captured_payload_v1(
             self.request, executed.observation,
             region_digest_hi, region_digest_lo)
+        if provider_bit == preferred_bit:
+            self.preferred_payload = candidate
+            val frozen_digest = _rt_hal_device_reference_bytes_digest_v1(
+                candidate.region, result_bytes)
+            self.preferred_bytes_digest_hi = frozen_digest.hi
+            self.preferred_bytes_digest_lo = frozen_digest.lo
+            self.preferred_frozen = self.preferred_bytes_digest_hi != 0
+                and self.preferred_bytes_digest_lo != 0
         val compared = if provider_bit == preferred_bit:
             self.comparison.submit(provider, candidate, result_bytes,
                 candidate, result_bytes)
@@ -210,9 +301,13 @@ fn rt_hal_device_comparison_owner_v1(
         preferred_provider: HalProviderKind) -> RtHalDeviceComparisonOwnerV1:
     val valid = request.status == RtHalDeviceStatusV1.Planned
         and request.extraction.accepted and hal_run_mode_executes_all(mode)
+    val empty = _rt_hal_device_rejected_execution_v1(
+        request, EnvInstructionStatusV1.Diverged)
+    val empty_payload = rt_hal_device_request_captured_payload_v1(
+        request, empty.observation, 0, 0)
     RtHalDeviceComparisonOwnerV1(request, preferred_provider,
         hal_device_compare_owner_v1(request.instruction.environment.invocation_id,
-            1, mode, preferred_provider), valid)
+            1, mode, preferred_provider), empty_payload, 0, 0, false, valid)
 
 export rt_hal_device_request_captured_payload_v1
 export RtHalDeviceDispatchStatusV1, RtHalDeviceDispatchReceiptV1

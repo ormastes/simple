@@ -132,5 +132,10 @@ a comparison owner. `RtHalDeviceComparisonOwnerV1` is the alpha/beta route. It
 requires the preferred provider first, executes each fixed provider slot once,
 and submits the executor-produced observation to `HalDeviceCompareOwnerV1`.
 Duplicate/out-of-order publication or an executor whose sealed capability does
-not match the request fails before execution. Provider model/result buffers are
-scoped caller-owned loans and are never retained.
+not match the request fails before execution. After the preferred execution,
+the parent freezes its complete payload metadata and two independently ordered
+bounded byte fingerprints. Every later lane must present that exact reference
+before its executor can run; substituted metadata, bytes, or a mutated reference
+fails closed without a device effect. Provider model/result buffers remain
+scoped caller-owned loans and are never retained. This is parent-authoritative
+in-process comparison, not proof of C/Rust process or fault isolation.

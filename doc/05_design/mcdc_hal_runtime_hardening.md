@@ -219,6 +219,14 @@ later payloads are deterministically replay-compared before the parent may
 commit. A mismatched executor, duplicate provider, provider reordering, rejected
 execution, or payload difference seals the route and fails closed.
 
+The owner copies the preferred payload's fixed scalar metadata and derives two
+bounded fingerprints directly from its caller-owned result region. It retains
+no byte array and no provider/device authority. Before a later lane executes,
+its supplied reference metadata and bytes must reproduce the frozen values;
+otherwise `InvalidReference` is returned and the executor is not called. This
+adds one O(n) bounded reference scan per later lane (n <= 65536) and no heap
+allocation; exact payload comparison remains the canonical final check.
+
 The applied receipt carries a second two-lane digest over the pinned authority
 and device identity, proof generation/lifetime/opcode mask, full grant policy,
 device instruction scalars, and canonical environment observation. Replay

@@ -221,6 +221,69 @@ describe "mission-critical rt(hal) device capability API":
             HalDeviceCompareOwnerStatusV1.InvalidSubmission)
         expect(rejected.commit_allowed).to_be(false)
 
+    it "freezes preferred metadata and bytes before later device execution":
+        val grant = full_device_grant(true)
+        val mask = env_opcode_mask_v1(EnvOpcodeV1.MmioRead)
+        val acquisition = issue_device(grant, mask)
+        val region = rt_hal_caller_owned_region_v1(15, 0, 4, 4, 711, 712)
+        var access = rt_hal_device_access_owner_v1(
+            acquisition, EnvOpcodeV1.MmioRead, 89)
+        val request = access.rt_hal_mmio_read_v1(4096, 4, region,
+            rt_hal_read_once_token_v1(acquisition.handle, 7))
+        var preferred_executor = production_executor(acquisition, grant)
+        var later_executor = production_executor(acquisition, grant)
+        var preferred_device: [u8] = [0u8; 4096]
+        var later_device: [u8] = [0u8; 4096]
+        preferred_device[0] = 17u8
+        later_device[0] = 17u8
+        var preferred_result: [u8] = [0u8; 4]
+        var substituted_reference: [u8] = [0u8; 4]
+        var later_result: [u8] = [0u8; 4]
+        val empty_payload = rt_hal_device_request_captured_payload_v1(
+            request, env_execution_rejected_v1(request.instruction.environment,
+                EnvInstructionStatusV1.Diverged).observation, 0, 0)
+        var owner = rt_hal_device_comparison_owner_v1(
+            request, HalRunMode.AlphaCompare, HalProviderKind.PureSimple)
+
+        val preferred = owner.execute_provider(HalProviderKind.PureSimple,
+            preferred_executor, [], preferred_result, preferred_device,
+            empty_payload, [], 907, 908)
+        substituted_reference[0] = 99u8
+        val substituted_bytes = owner.execute_provider(HalProviderKind.C,
+            later_executor, [], later_result, later_device,
+            preferred.payload, substituted_reference, 907, 908)
+        val after_bytes = owner.receipt()
+
+        expect(substituted_bytes.status).to_equal(
+            RtHalDeviceDispatchStatusV1.InvalidReference)
+        expect(substituted_bytes.execution.applied).to_be(false)
+        expect(after_bytes.received_provider_mask).to_equal(1)
+        expect(after_bytes.commit_allowed).to_be(false)
+
+        var metadata_owner = rt_hal_device_comparison_owner_v1(
+            request, HalRunMode.AlphaCompare, HalProviderKind.PureSimple)
+        var metadata_preferred_executor = production_executor(acquisition, grant)
+        var metadata_later_executor = production_executor(acquisition, grant)
+        var metadata_preferred_result: [u8] = [0u8; 4]
+        var metadata_later_result: [u8] = [0u8; 4]
+        val metadata_preferred = metadata_owner.execute_provider(
+            HalProviderKind.PureSimple, metadata_preferred_executor, [],
+            metadata_preferred_result, preferred_device,
+            empty_payload, [], 907, 908)
+        val substituted_metadata = rt_hal_device_request_captured_payload_v1(
+            request, metadata_preferred.execution.observation, 909, 910)
+        val rejected_metadata = metadata_owner.execute_provider(
+            HalProviderKind.C, metadata_later_executor, [],
+            metadata_later_result, later_device, substituted_metadata,
+            metadata_preferred_result, 907, 908)
+        val after_metadata = metadata_owner.receipt()
+
+        expect(rejected_metadata.status).to_equal(
+            RtHalDeviceDispatchStatusV1.InvalidReference)
+        expect(rejected_metadata.execution.applied).to_be(false)
+        expect(after_metadata.received_provider_mask).to_equal(1)
+        expect(after_metadata.commit_allowed).to_be(false)
+
     it "replay remains copy-only with no physical effect":
         val grant = full_device_grant(true)
         val mask = env_opcode_mask_v1(EnvOpcodeV1.MmioRead)
