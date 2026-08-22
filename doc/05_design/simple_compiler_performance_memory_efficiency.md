@@ -289,3 +289,6 @@ The session owns one immutable moderate/default policy for files with no manifes
 ## Storage-layout advisory cost boundary
 
 Advisory field deduplication uses indexed membership and an explicit count; it must not depend on `Dict.len()` or a growing array scan. Canonical identity rows use the standard deterministic text sort. The remaining pairwise overlap proof is semantically distinct: it rejects co-accessing different fields over intersecting logical ranges and stays quadratic until facts can be grouped by region and swept in stable interval order without losing fail-closed unknown-range behavior.
+## String-builder rehabilitation contract
+
+The current string-builder pass is a `Skeleton` identity and contains no dormant candidate or rewrite body. Rehabilitation must explicitly create a typed builder local, initialize it on the correct dominating path, preserve zero-trip results, append in observable order, emit a final join at every live exit, replace all dominated result uses, and prove ownership/destruction, allocation-failure, exception, alias, and debug semantics. Positive witnesses include zero/one/many iterations and multiple exits; incomplete push-only lowering is never admissible.
