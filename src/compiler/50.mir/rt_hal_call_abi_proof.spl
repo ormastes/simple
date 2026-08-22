@@ -1,0 +1,86 @@
+# Exact MIR ABI proof for closed @rt(hal) call replacement.
+#
+# This module recognizes only the ten frozen semantic signatures. Unknown
+# aggregate, fixed-array, pointer, optional, or variadic shapes fail closed.
+# It performs a bounded structural walk of one function-pointer signature and
+# allocates only cold compiler diagnostics; generated programs pay no cost.
+
+use compiler.mir.mir_types.*
+use compiler.mir.mir_data.{MirOperand, MirOperandKind}
+
+fn _rt_hal_text_mir_type_v1(type_: MirType) -> bool:
+    match type_.kind:
+        case MirTypeKind.Tuple(elements):
+            if elements.len() != 2: return false
+            match elements[0].kind:
+                case MirTypeKind.Ptr(pointee, mutable):
+                    if mutable: return false
+                    match pointee.kind:
+                        case MirTypeKind.U8: ()
+                        case _: return false
+                case _: return false
+            match elements[1].kind:
+                case MirTypeKind.U64: true
+                case _: false
+        case _: false
+
+fn _rt_hal_optional_text_mir_type_v1(type_: MirType) -> bool:
+    match type_.kind:
+        case MirTypeKind.Tuple(elements):
+            if elements.len() != 2: return false
+            match elements[0].kind:
+                case MirTypeKind.Bool: _rt_hal_text_mir_type_v1(elements[1])
+                case _: false
+        case _: false
+
+fn rt_hal_mir_type_signature_key_v1(type_: MirType) -> text:
+    if _rt_hal_text_mir_type_v1(type_): return "text"
+    if _rt_hal_optional_text_mir_type_v1(type_): return "text?"
+    match type_.kind:
+        case MirTypeKind.I32: "i32"
+        case MirTypeKind.I64: "i64"
+        case MirTypeKind.U32: "u32"
+        case MirTypeKind.U64: "u64"
+        case MirTypeKind.Array(element, size):
+            if size != 0: return ""
+            match element.kind:
+                case MirTypeKind.U8: "[u8]"
+                case _: ""
+        case _: ""
+
+fn rt_hal_mir_signature_key_v1(signature: MirSignature) -> text:
+    if signature.is_variadic: return ""
+    var key = "fn("
+    var index: i64 = 0
+    while index < signature.params.len():
+        val parameter = rt_hal_mir_type_signature_key_v1(
+            signature.params[index])
+        if parameter == "": return ""
+        if index > 0: key = key + ","
+        key = key + parameter
+        index = index + 1
+    val result = rt_hal_mir_type_signature_key_v1(signature.return_type)
+    if result == "": return ""
+    key + ")->" + result
+
+fn rt_hal_call_operand_signature_key_v1(callee: MirOperand) -> text:
+    match callee.kind:
+        case MirOperandKind.Const(_, type_):
+            match type_.kind:
+                case MirTypeKind.FuncPtr(signature):
+                    rt_hal_mir_signature_key_v1(signature)
+                case _: ""
+        case _: ""
+
+fn rt_hal_call_operand_parameter_count_v1(callee: MirOperand) -> i64:
+    match callee.kind:
+        case MirOperandKind.Const(_, type_):
+            match type_.kind:
+                case MirTypeKind.FuncPtr(signature):
+                    if signature.is_variadic: -1 else: signature.params.len()
+                case _: -1
+        case _: -1
+
+export rt_hal_mir_type_signature_key_v1, rt_hal_mir_signature_key_v1
+export rt_hal_call_operand_signature_key_v1
+export rt_hal_call_operand_parameter_count_v1

@@ -1,0 +1,88 @@
+# @feature mcdc_hal_runtime_hardening
+# @req REQ-009 REQ-010 REQ-014
+
+use std.spec.*
+use compiler.mir.*
+use compiler.mir.rt_hal_call_abi_proof.*
+use compiler.mir.rt_hal_call_rewrite.*
+
+fn text_type_v1() -> MirType:
+    MirType(kind: MirTypeKind.Tuple([
+        MirType(kind: MirTypeKind.Ptr(
+            MirType(kind: MirTypeKind.U8), false)),
+        MirType(kind: MirTypeKind.U64)]))
+
+fn optional_text_type_v1() -> MirType:
+    MirType(kind: MirTypeKind.Tuple([
+        MirType(kind: MirTypeKind.Bool), text_type_v1()]))
+
+fn dynamic_u8_array_type_v1() -> MirType:
+    MirType(kind: MirTypeKind.Array(
+        MirType(kind: MirTypeKind.U8), 0))
+
+fn signature_key_v1(params: [MirType], result: MirType) -> text:
+    rt_hal_mir_signature_key_v1(MirSignature(
+        params: params, return_type: result, is_variadic: false))
+
+fn mismatched_clock_wrapper_v1() -> MirFunction:
+    val wrong = MirSignature(params: [MirType.i64()],
+        return_type: MirType.i64(), is_variadic: false)
+    val callee = MirOperand(kind: MirOperandKind.Const(
+        MirConstValue.Str("hal_clock_monotonic_nanos_v1"),
+        MirType(kind: MirTypeKind.FuncPtr(wrong))))
+    val block = MirBlock(id: BlockId(id: 0), label: nil,
+        instructions: [MirInst(kind: MirInstKind.Call(
+            Some(LocalId(id: 0)), callee, []), span: nil)],
+        terminator: MirTerminator.Ret(nil))
+    MirFunction(name: "wrong_clock", blocks: [block], locals: [])
+
+fn first_call_name_v1(function: MirFunction) -> text:
+    match function.blocks[0].instructions[0].kind:
+        case MirInstKind.Call(_, callee, _):
+            match callee.kind:
+                case MirOperandKind.Const(MirConstValue.Str(name), _): name
+                case _: ""
+        case _: ""
+
+describe "closed @rt(hal) MIR ABI proof":
+    it "proves each non-clock representative signature exactly":
+        expect(signature_key_v1([MirType.i64(), MirType.i64()],
+            dynamic_u8_array_type_v1())).to_equal("fn(i64,i64)->[u8]")
+        expect(signature_key_v1([MirType.i64()], text_type_v1()))
+            .to_equal("fn(i64)->text")
+        expect(signature_key_v1([MirType.i64(), MirType.i64()],
+            MirType.i64())).to_equal("fn(i64,i64)->i64")
+        expect(signature_key_v1([text_type_v1()], optional_text_type_v1()))
+            .to_equal("fn(text)->text?")
+        expect(signature_key_v1([dynamic_u8_array_type_v1()], MirType.i64()))
+            .to_equal("fn([u8])->i64")
+        expect(signature_key_v1([text_type_v1(), MirType.i64()],
+            MirType.i64())).to_equal("fn(text,i64)->i64")
+        expect(signature_key_v1([], MirType(kind: MirTypeKind.I32)))
+            .to_equal("fn()->i32")
+        expect(signature_key_v1([MirType(kind: MirTypeKind.U64)],
+            MirType(kind: MirTypeKind.U32))).to_equal("fn(u64)->u32")
+        expect(signature_key_v1([MirType.i64(),
+            MirType(kind: MirTypeKind.I32)], MirType.i64()))
+            .to_equal("fn(i64,i32)->i64")
+
+    it "rejects oversized fixed buffers and similar text layouts":
+        val fixed = MirType(kind: MirTypeKind.Array(
+            MirType(kind: MirTypeKind.U8), 33))
+        val mutable_text = MirType(kind: MirTypeKind.Tuple([
+            MirType(kind: MirTypeKind.Ptr(
+                MirType(kind: MirTypeKind.U8), true)),
+            MirType(kind: MirTypeKind.U64)]))
+        expect(signature_key_v1([fixed], MirType.i64())).to_equal("")
+        expect(signature_key_v1([mutable_text], optional_text_type_v1()))
+            .to_equal("")
+
+    it "leaves MIR unchanged when metadata and resolved ABI disagree":
+        val before = mismatched_clock_wrapper_v1()
+        val result = rt_hal_rewrite_function_calls_v1(before,
+            "rt-hal-v1|operation=io.clock.monotonic_nanos.v1|providers=2",
+            RtHalCallModeV1.NormalDirect)
+        expect(result.rewritten_calls).to_equal(0)
+        expect(result.diagnostic).to_contain("E-RT-HAL-BIND-002")
+        expect(first_call_name_v1(result.function)).to_equal(
+            "hal_clock_monotonic_nanos_v1")

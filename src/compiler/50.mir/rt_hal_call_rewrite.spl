@@ -9,6 +9,9 @@ use compiler.mir.mir_instructions.*
 use compiler.mir.mir_data.{MirFunction}
 use compiler.mir.mir_types.{MirConstValue}
 use compiler.common.hal.rt_hal_static_binding.*
+use compiler.mir.rt_hal_call_abi_proof.{
+    rt_hal_call_operand_signature_key_v1,
+    rt_hal_call_operand_parameter_count_v1}
 
 enum RtHalCallModeV1:
     NormalDirect
@@ -56,6 +59,42 @@ fn rt_hal_rewrite_function_calls_v1(
         return RtHalCallRewriteResultV1(function, operation,
             binding.raw_symbol, selected_symbol, 0,
             "E-RT-HAL-BIND-004: selected @rt(hal) mode has no ABI-compatible closed binding")
+
+    # Prove every matching resolved leaf before changing any block. This is a
+    # transaction: an unknown or mismatched MIR ABI leaves the function byte-
+    # for-byte unchanged instead of partially routing it to a same-name leaf.
+    var matching_calls: i64 = 0
+    for proof_block in function.blocks:
+        for proof_instruction in proof_block.instructions:
+            match proof_instruction.kind:
+                case MirInstKind.Call(_, proof_callee, proof_args):
+                    match proof_callee.kind:
+                        case MirOperandKind.Const(
+                                MirConstValue.Str(proof_name), _):
+                            if proof_name == binding.raw_symbol:
+                                matching_calls = matching_calls + 1
+                                val actual_signature =
+                                    rt_hal_call_operand_signature_key_v1(
+                                        proof_callee)
+                                val signature_diagnostic =
+                                    rt_hal_binding_signature_key_diagnostic_v1(
+                                        binding, actual_signature)
+                                if signature_diagnostic != "":
+                                    return RtHalCallRewriteResultV1(function,
+                                        operation, binding.raw_symbol,
+                                        selected_symbol, 0,
+                                        signature_diagnostic)
+                                if rt_hal_call_operand_parameter_count_v1(
+                                        proof_callee) != proof_args.len():
+                                    return RtHalCallRewriteResultV1(function,
+                                        operation, binding.raw_symbol,
+                                        selected_symbol, 0,
+                                        "E-RT-HAL-BIND-006: resolved call argument count does not match its frozen function-pointer ABI")
+                        case _: ()
+                case _: ()
+    if matching_calls == 0:
+        return RtHalCallRewriteResultV1(function, operation,
+            binding.raw_symbol, selected_symbol, 0, "")
 
     var blocks: [MirBlock] = []
     var rewritten: i64 = 0
