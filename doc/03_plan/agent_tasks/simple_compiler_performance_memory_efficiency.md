@@ -59,6 +59,22 @@
 - Verification status: intentionally not executed under the user's explicit
   no-verify instruction; static diff and parallel review only.
 
+## Shared short-grammar identifier rewrite tranche
+
+- Add canonical contains/plain/interpolation helpers to the cycle-free EasyFix
+  rules-helper owner and both stdlib facades.
+- Replace four compiler/stdlib immutable character-concatenation loops with thin
+  delegates; remove discarded-output contains probes.
+- Preserve ASCII whole-token boundaries, context-blind plain matching, Unicode,
+  legacy boolean interpolation state, doubled braces, malformed braces, sequential
+  tuple rewriting and the `_` no-change probe.
+- Pin boundaries, Unicode adjacency, empty parameter, escaped/triple braces and
+  all four delegation paths in mirrored short-grammar specs.
+- Performance acceptance: unchanged input allocates no output; changed input uses
+  match-proportional fragments and one join, with no growing result concatenation.
+- Verification status: intentionally not executed under the user's explicit
+  no-verify instruction; static diff and parallel semantic review only.
+
 ## MCP diagnostic wrapper assembly tranche
 
 - Move wrapper JSON construction into cycle-free `query_rich_common`.
