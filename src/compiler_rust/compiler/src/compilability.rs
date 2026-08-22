@@ -141,9 +141,21 @@ pub fn analyze_module(items: &[Node], mode: CompilabilityMode) -> HashMap<String
     let mut results = HashMap::new();
 
     for item in items {
-        if let Node::Function(f) = item {
-            let status = analyze_function(f, mode);
-            results.insert(f.name.clone(), status);
+        match item {
+            Node::Function(f) => {
+                let status = analyze_function(f, mode);
+                results.insert(f.name.clone(), status);
+            }
+            // Methods declared inside a `class`/`struct` body are functions too and
+            // are compiled by the same backend, so they must be classified here as
+            // well; a top-level function of the same name always wins.
+            Node::Class(c) => {
+                for m in &c.methods {
+                    let status = analyze_function(m, mode);
+                    results.entry(m.name.clone()).or_insert(status);
+                }
+            }
+            _ => {}
         }
     }
 

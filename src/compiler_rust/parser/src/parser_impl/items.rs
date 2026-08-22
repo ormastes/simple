@@ -131,7 +131,7 @@ impl<'a> Parser<'a> {
         self.parse_pub_item_with_visibility(visibility)
     }
 
-    fn parse_pub_item_with_visibility(&mut self, visibility: Visibility) -> Result<Node, ParseError> {
+    pub(super) fn parse_pub_item_with_visibility(&mut self, visibility: Visibility) -> Result<Node, ParseError> {
         match &self.current.kind {
             TokenKind::Fn | TokenKind::Kernel | TokenKind::Gen => {
                 let mut node = self.parse_function()?;
@@ -617,47 +617,51 @@ impl<'a> Parser<'a> {
     }
 
     pub(super) fn parse_pub_item_with_attrs(&mut self, attributes: Vec<Attribute>) -> Result<Node, ParseError> {
+        // `pub(peer)` / `pub(up)` etc. are legal after attributes too, so the scoped
+        // visibility modifier must be consumed here exactly as the attribute-less
+        // `parse_pub_item` path does; otherwise the `(` is seen as an item keyword.
+        let visibility = self.parse_visibility_modifier_after_pub()?;
         match &self.current.kind {
             TokenKind::Fn | TokenKind::Kernel | TokenKind::Gen => {
                 let mut node = self.parse_function_with_attrs(vec![], attributes)?;
                 if let Node::Function(ref mut f) = node {
-                    f.visibility = Visibility::Public;
+                    f.visibility = visibility;
                 }
                 Ok(node)
             }
             TokenKind::Struct => {
                 let mut node = self.parse_struct_with_attrs(attributes)?;
                 if let Node::Struct(ref mut s) = node {
-                    s.visibility = Visibility::Public;
+                    s.visibility = visibility;
                 }
                 Ok(node)
             }
             TokenKind::Class => {
                 let mut node = self.parse_class_with_attrs(attributes)?;
                 if let Node::Class(ref mut c) = node {
-                    c.visibility = Visibility::Public;
+                    c.visibility = visibility;
                 }
                 Ok(node)
             }
             TokenKind::Mixin => {
                 let mut node = self.parse_mixin_with_attrs(attributes)?;
                 if let Node::Mixin(ref mut m) = node {
-                    m.visibility = Visibility::Public;
+                    m.visibility = visibility;
                 }
                 Ok(node)
             }
-            TokenKind::Mod => self.parse_mod(Visibility::Public, attributes),
+            TokenKind::Mod => self.parse_mod(visibility, attributes),
             TokenKind::Enum => {
                 let mut node = self.parse_enum_with_attrs(attributes)?;
                 if let Node::Enum(ref mut e) = node {
-                    e.visibility = Visibility::Public;
+                    e.visibility = visibility;
                 }
                 Ok(node)
             }
             TokenKind::Union => {
                 let mut node = self.parse_union_with_attrs(attributes)?;
                 if let Node::Enum(ref mut e) = node {
-                    e.visibility = Visibility::Public;
+                    e.visibility = visibility;
                 }
                 Ok(node)
             }
@@ -673,15 +677,13 @@ impl<'a> Parser<'a> {
                 let mut node = self.parse_domain_from_kind()?;
                 if let Node::DomainBlock(ref mut d) = node {
                     d.attributes = attributes;
-                    d.visibility = Visibility::Public;
+                    d.visibility = visibility;
                 }
                 Ok(node)
             }
-            _ => Err(ParseError::unexpected_token(
-                "fn, struct, class, mixin, mod, enum, or union after pub with attributes",
-                format!("{:?}", self.current.kind),
-                self.current.span,
-            )),
+            // Everything else (val/var/const/static/trait/type/actor/use/...) shares the
+            // attribute-less `pub` item table rather than being rejected outright.
+            _ => self.parse_pub_item_with_visibility(visibility),
         }
     }
 }

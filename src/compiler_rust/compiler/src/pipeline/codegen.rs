@@ -390,6 +390,7 @@ fn emit_vhdl_function(
     out.push_str(&format!("end entity {};\n\n", entity));
     out.push_str(&format!("architecture rtl of {} is\n", entity));
 
+    let mut resume_block: Option<crate::mir::BlockId> = None;
     if let Some(entry) = func.blocks.first() {
         if let Terminator::Branch {
             cond,
@@ -405,6 +406,21 @@ fn emit_vhdl_function(
                 crate::hir::TypeId::BOOL,
                 types,
             )?;
+            // Short-circuit `and`/`or` lowers to a diamond whose arms JUMP to a shared
+            // merge block instead of returning; that is still pure combinational
+            // dataflow, so mux the locals the arms define and resume at the merge.
+            if let Some(merge) = vhdl_diamond_merge_block(func, *then_block, *else_block) {
+                lower_vhdl_diamond_mux(
+                    func,
+                    &mut state,
+                    *then_block,
+                    *else_block,
+                    &cond_expr,
+                    types,
+                    entity_table,
+                )?;
+                resume_block = Some(merge);
+            } else {
             let base_assign_len = state.assigns.len();
             let mut then_state = state.clone();
             let mut else_state = state.clone();
@@ -421,11 +437,20 @@ fn emit_vhdl_function(
             state.assigns.extend(then_assigns);
             state.assigns.extend(else_assigns);
             return_assignments = Some(branch_return_assignments(func, then_exprs, else_exprs, &cond_expr)?);
+            }
         }
     }
 
     if return_assignments.is_none() {
+        let mut started = resume_block.is_none();
         for block in &func.blocks {
+            if !started {
+                if Some(block.id) == resume_block {
+                    started = true;
+                } else {
+                    continue;
+                }
+            }
             lower_vhdl_block_instructions(func, &mut state, block, types, entity_table)?;
             match &block.terminator {
                 Terminator::Return(Some(reg)) => {
@@ -1080,6 +1105,117 @@ fn push_return_assignments(exprs: Vec<VhdlReturnOutputExpr>) -> Vec<String> {
         .collect()
 }
 
+/// A `then`/`else` pair that both jump to the SAME successor is a value-producing
+/// diamond (short-circuit `and`/`or`, or an if/else assigning a local), not a pair
+/// of returning arms. Returns that shared merge block.
+fn vhdl_diamond_merge_block(
+    func: &MirFunction,
+    then_block: crate::mir::BlockId,
+    else_block: crate::mir::BlockId,
+) -> Option<crate::mir::BlockId> {
+    let find = |id: crate::mir::BlockId| func.blocks.iter().find(|block| block.id == id);
+    match (
+        find(then_block).map(|b| &b.terminator),
+        find(else_block).map(|b| &b.terminator),
+    ) {
+        (Some(Terminator::Jump(a)), Some(Terminator::Jump(b))) if a == b => Some(*a),
+        _ => None,
+    }
+}
+
+/// Locals written by a block, as `(local_index, stored_reg, stored_ty)`.
+fn vhdl_block_local_stores(
+    block: &crate::mir::MirBlock,
+    state: &VhdlLowerState,
+) -> BTreeMap<usize, (mir::VReg, crate::hir::TypeId)> {
+    let mut stores = BTreeMap::new();
+    for inst in &block.instructions {
+        if let MirInst::Store { addr, value, ty } = inst {
+            if let Some(local_index) = state.addr_local.get(&addr.0).copied() {
+                stores.insert(local_index, (*value, *ty));
+            }
+        }
+    }
+    stores
+}
+
+/// Lowers both arms of a value-producing diamond and muxes every local they
+/// define into a single combinational signal, leaving `state` ready to continue
+/// at the merge block.
+#[allow(clippy::too_many_arguments)]
+fn lower_vhdl_diamond_mux(
+    func: &MirFunction,
+    state: &mut VhdlLowerState,
+    then_block: crate::mir::BlockId,
+    else_block: crate::mir::BlockId,
+    cond_expr: &str,
+    types: &TypeRegistry,
+    entity_table: &BTreeMap<&str, &MirFunction>,
+) -> Result<(), CompileError> {
+    let block_of = |id: crate::mir::BlockId| {
+        func.blocks
+            .iter()
+            .find(|block| block.id == id)
+            .ok_or_else(|| CompileError::Codegen(format!("VHDL backend missing block {:?}", id)))
+    };
+    let then_b = block_of(then_block)?;
+    let else_b = block_of(else_block)?;
+
+    let base_assign_len = state.assigns.len();
+    let mut then_state = state.clone();
+    let mut else_state = state.clone();
+    lower_vhdl_block_instructions(func, &mut then_state, then_b, types, entity_table)?;
+    lower_vhdl_block_instructions(func, &mut else_state, else_b, types, entity_table)?;
+    let then_assigns = then_state.assigns.split_off(base_assign_len);
+    let else_assigns = else_state.assigns.split_off(base_assign_len);
+    state.signals.extend(then_state.signals.iter().cloned());
+    state.signals.extend(else_state.signals.iter().cloned());
+    state.instances.extend(then_state.instances.iter().cloned());
+    state.instances.extend(else_state.instances.iter().cloned());
+    state.assigns.extend(then_assigns);
+    state.assigns.extend(else_assigns);
+
+    let then_stores = vhdl_block_local_stores(then_b, &then_state);
+    let else_stores = vhdl_block_local_stores(else_b, &else_state);
+    let mut locals: Vec<usize> = then_stores.keys().copied().collect();
+    locals.extend(else_stores.keys().copied());
+    locals.sort_unstable();
+    locals.dedup();
+
+    for local_index in locals {
+        let (then_reg, store_ty) = *then_stores.get(&local_index).ok_or_else(|| {
+            CompileError::Codegen(format!(
+                "VHDL backend requires both branch arms to define local {} in {}",
+                local_index, func.name
+            ))
+        })?;
+        let (else_reg, _) = *else_stores.get(&local_index).ok_or_else(|| {
+            CompileError::Codegen(format!(
+                "VHDL backend requires both branch arms to define local {} in {}",
+                local_index, func.name
+            ))
+        })?;
+        let ty = then_state
+            .reg_ty
+            .get(&then_reg.0)
+            .copied()
+            .or_else(|| else_state.reg_ty.get(&else_reg.0).copied())
+            .unwrap_or(store_ty);
+        let then_expr = reg_expr_for_type(&then_state.reg_expr, &then_state.reg_int_const, then_reg, ty, types)?;
+        let else_expr = reg_expr_for_type(&else_state.reg_expr, &else_state.reg_int_const, else_reg, ty, types)?;
+        let sig = format!("mux_l{}", local_index);
+        state.signals.insert((sig.clone(), ty));
+        state.assigns.push(format!(
+            "    {} <= {} when {} = '1' else {};",
+            sig, then_expr, cond_expr, else_expr
+        ));
+        state.local_expr.insert(local_index, sig);
+        state.local_ty.insert(local_index, ty);
+        state.local_tuple_fields.remove(&local_index);
+    }
+    Ok(())
+}
+
 fn branch_return_assignments(
     func: &MirFunction,
     then_exprs: Vec<VhdlReturnOutputExpr>,
@@ -1217,13 +1353,20 @@ fn lower_vhdl_instruction(
             state.reg_expr.insert(dest.0, sig);
             state.reg_ty.insert(dest.0, operand_ty);
         }
-        MirInst::BoxInt { dest, value } => {
+        // Hardware signals are never NaN-boxed, so both directions of the integer
+        // box/unbox pair are transparent aliases here. `UnboxInt` shows up after a
+        // call whose MIR result is boxed (e.g. `concat`, or a labeled @hardware
+        // entity call feeding a field access).
+        MirInst::BoxInt { dest, value } | MirInst::UnboxInt { dest, value } => {
             let ty = state.reg_ty.get(&value.0).copied().unwrap_or(crate::hir::TypeId::I64);
             let expr = reg_expr_for_type(&state.reg_expr, &state.reg_int_const, *value, ty, types)?;
             state.reg_expr.insert(dest.0, expr);
             state.reg_ty.insert(dest.0, ty);
             if let Some(value) = state.reg_int_const.get(&value.0).copied() {
                 state.reg_int_const.insert(dest.0, value);
+            }
+            if let Some(fields) = state.reg_tuple_fields.get(&value.0).cloned() {
+                state.reg_tuple_fields.insert(dest.0, fields);
             }
         }
         MirInst::TupleLit { dest, elements } => {
@@ -1673,6 +1816,18 @@ fn vhdl_type(ty: crate::hir::TypeId, types: &TypeRegistry) -> Result<String, Com
 }
 
 fn vhdl_int_literal(value: i64, ty: crate::hir::TypeId, types: &TypeRegistry) -> Result<String, CompileError> {
+    if ty == crate::hir::TypeId::BOOL {
+        // MIR materializes `false`/`true` in a bool-typed slot as ConstInt 0/1;
+        // the VHDL type for bool is `std_logic`, whose literals are '0'/'1'.
+        return match value {
+            0 => Ok("'0'".to_string()),
+            1 => Ok("'1'".to_string()),
+            other => Err(CompileError::Codegen(format!(
+                "VHDL backend cannot materialize bool literal from integer {}",
+                other
+            ))),
+        };
+    }
     if ty == crate::hir::TypeId::I32 {
         Ok(format!("to_signed({}, 32)", value))
     } else if ty == crate::hir::TypeId::I64 {

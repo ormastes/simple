@@ -95,6 +95,21 @@ impl TypeChecker {
                 ret: Box::new(Type::Int),
             },
         );
+        // `concat(hi, lo)` -- hardware bit-vector concatenation intrinsic consumed by
+        // the VHDL backend (`lower_vhdl_concat` in pipeline/codegen.rs), which expects
+        // it to reach MIR as a direct call target named `concat`.
+        {
+            let a = self.fresh_var();
+            let b = self.fresh_var();
+            let r = self.fresh_var();
+            self.env.insert(
+                "concat".to_string(),
+                Type::Function {
+                    params: vec![a, b],
+                    ret: Box::new(r),
+                },
+            );
+        }
         // I/O prelude functions
         self.env.insert("print".to_string(), generic_fn.clone());
         self.env.insert("println".to_string(), generic_fn.clone());
