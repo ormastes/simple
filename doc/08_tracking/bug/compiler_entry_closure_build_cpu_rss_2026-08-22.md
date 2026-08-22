@@ -31,6 +31,11 @@ build attempts:
   core and generated HIR codec; one SMF executable-memory body, one browser
   color body, and one legacy complex indexed lvalue also remained. The hard
   three-cycle cap prohibits another full retry in this session.
+- The subsequent isolated `dom_color.parse_pct_value` old-builder probe was
+  terminated after 554.36 s with 8,704,988 KiB maximum RSS before producing an
+  artifact. The former optional-float verifier diagnostic did not recur, but
+  this is not a PASS: an 8.3 GiB focused compile is a severe compiler memory
+  regression and prohibits using that probe as admission evidence.
 - The two Cycle 5 timeouts were an invocation defect, not evidence that either
   unit exceeded every bounded budget.  The admitted builder embeds a 60-second
   per-file default and advertises `--timeout <secs>`; the Cycle 5 command omitted
