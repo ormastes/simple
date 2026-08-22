@@ -1,0 +1,41 @@
+use std.spec.*
+use std.io_runtime.{file_read, time_now_unix_micros}
+use std.common.base_encoding.base64.{base64url_encode, base64url_decode}
+
+describe "fused Base64URL encoder work":
+    it "uses one exact URL output buffer without a standard-Base64 rescan":
+        val source = file_read("src/lib/common/base_encoding/base64.spl")
+        expect(source).to_contain("fn _base64url_encode_raw(bytes: [u8]) -> [u8]")
+        expect(source).to_contain("var out_bytes: [u8] = [0u8; out_len]")
+        expect(source).to_contain("_bytes_to_text(_base64url_encode_raw(data.bytes()))")
+        expect(source).to_contain("_bytes_to_text(_base64url_encode_raw(data))")
+        expect(source).to_not_contain("fn _std_b64_to_url(")
+        expect(source).to_not_contain("_std_b64_to_url(_base64_encode")
+
+    it "preserves RFC tails and has bounded encoder-only N-to-2N scaling":
+        expect(base64url_encode("")).to_equal("")
+        expect(base64url_encode("f")).to_equal("Zg")
+        expect(base64url_encode("fo")).to_equal("Zm8")
+        expect(base64url_encode("foo")).to_equal("Zm9v")
+
+        val small = [for _ in 0..4096: "a"].join("")
+        val large = [for _ in 0..8192: "a"].join("")
+        var small_checksum = 0
+        var large_checksum = 0
+        val small_start = time_now_unix_micros()
+        for _ in 0..8:
+            small_checksum = small_checksum + base64url_encode(small).len()
+        val small_us = time_now_unix_micros() - small_start
+        val large_start = time_now_unix_micros()
+        for _ in 0..8:
+            large_checksum = large_checksum + base64url_encode(large).len()
+        val large_us = time_now_unix_micros() - large_start
+
+        val small_encoded = base64url_encode(small)
+        val large_encoded = base64url_encode(large)
+        print "base64url_fused_scaling small_us={small_us} large_us={large_us} small_bytes={small_encoded.len()} large_bytes={large_encoded.len()}"
+        expect(small_checksum).to_equal(43696)
+        expect(large_checksum).to_equal(87384)
+        expect(base64url_decode(small_encoded)).to_equal(small)
+        expect(base64url_decode(large_encoded)).to_equal(large)
+        expect(large_us).to_be_less_than(small_us * 3 + 5000)

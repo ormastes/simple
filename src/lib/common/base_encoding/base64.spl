@@ -202,7 +202,7 @@ pub fn base64_decode(encoded: text) -> text:
 
 pub fn base64url_encode(data: text) -> text:
     """Encode text as URL-safe base64 (RFC 4648 §5, no padding)."""
-    _std_b64_to_url(_base64_encode_bytes(data))
+    _bytes_to_text(_base64url_encode_raw(data.bytes()))
 
 pub fn base64url_encode_bytes(data: [u8]) -> text:
     """Encode arbitrary BINARY as URL-safe base64 (RFC 4648 §5, no padding).
@@ -210,12 +210,11 @@ pub fn base64url_encode_bytes(data: [u8]) -> text:
     Sibling of `base64url_encode`, which takes `text`. Digest output (HMAC,
     SHA) is arbitrary binary: it contains 0x00 and bytes >= 0x80 that are not
     valid UTF-8, so routing it through the text-typed API is lossy. Both
-    functions run the SAME core loop (`_base64_encode_raw`) and the SAME
-    url-alphabet mapping (`_std_b64_to_url`), so for any input that happens
+    functions run the SAME core loop (`_base64url_encode_raw`), so for any input that happens
     to be valid text the two produce byte-identical output by construction,
     not by coincidence.
     """
-    _std_b64_to_url(_base64_encode_raw(data))
+    _bytes_to_text(_base64url_encode_raw(data))
 
 pub fn base64url_encode_i64_bytes(data: [i64]) -> text:
     """`base64url_encode_bytes` for callers whose byte arrays are `[i64]`.
@@ -234,22 +233,45 @@ pub fn base64url_encode_i64_bytes(data: [i64]) -> text:
         i = i + 1
     base64url_encode_bytes(bytes)
 
-fn _std_b64_to_url(std_bytes: [u8]) -> text:
-    """Map standard base64 output bytes onto the url alphabet: '+'→'-',
-    '/'→'_', and drop '=' padding (RFC 4648 §5)."""
-    val n = std_bytes.len()
-    var out_bytes: [u8] = []
+fn _base64url_encode_raw(bytes: [u8]) -> [u8]:
+    """Encode bytes directly with the RFC 4648 §5 alphabet and no padding.
+
+    This is intentionally separate from `_base64_encode_raw`: standard Base64
+    keeps its padded §4 behavior, while the URL lane avoids materializing that
+    padded intermediate and rescanning it in `_std_b64_to_url`.
+
+    The alphabet stays function-local because module-level `[u8]` lookup tables
+    are known to corrupt indexed values on the current JIT lane.
+    """
+    val encode_bytes = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_".bytes()
+    val n = bytes.len()
+    val groups = n / 3
+    val tail = n % 3
+    val out_len = groups * 4 + (if tail == 0: 0 elif tail == 1: 2 else: 3)
+    var out_bytes: [u8] = [0u8; out_len]
     var i = 0
-    while i < n:
-        val b = std_bytes[i]
-        if b == 43u8:      # '+'
-            out_bytes = out_bytes.push(45u8)   # '-'
-        else if b == 47u8: # '/'
-            out_bytes = out_bytes.push(95u8)   # '_'
-        else if b != 61u8: # skip '='
-            out_bytes = out_bytes.push(b)
-        i = i + 1
-    _bytes_to_text(out_bytes)
+    var o = 0
+    while i + 2 < n:
+        val b1 = bytes[i] as i64
+        val b2 = bytes[i + 1] as i64
+        val b3 = bytes[i + 2] as i64
+        out_bytes[o] = encode_bytes[b1 >> 2]
+        out_bytes[o + 1] = encode_bytes[((b1 & 3) << 4) | (b2 >> 4)]
+        out_bytes[o + 2] = encode_bytes[((b2 & 15) << 2) | (b3 >> 6)]
+        out_bytes[o + 3] = encode_bytes[b3 & 63]
+        i = i + 3
+        o = o + 4
+    if tail == 1:
+        val b1 = bytes[i] as i64
+        out_bytes[o] = encode_bytes[b1 >> 2]
+        out_bytes[o + 1] = encode_bytes[(b1 & 3) << 4]
+    elif tail == 2:
+        val b1 = bytes[i] as i64
+        val b2 = bytes[i + 1] as i64
+        out_bytes[o] = encode_bytes[b1 >> 2]
+        out_bytes[o + 1] = encode_bytes[((b1 & 3) << 4) | (b2 >> 4)]
+        out_bytes[o + 2] = encode_bytes[(b2 & 15) << 2]
+    out_bytes
 
 pub fn base64url_decode(encoded: text) -> text:
     """Decode URL-safe base64 text (RFC 4648 §5).
