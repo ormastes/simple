@@ -33,6 +33,11 @@ use compiler.semantics.critical_alloc_closure.{
     critical_alloc_nodes_from_hir_v1, critical_alloc_closure_check_v1,
     critical_alloc_format_v1
 }
+use compiler.semantics.rt_hal_assurance_closure.{
+    RT_HAL_ASSURANCE_MAX_FUNCTIONS, RT_HAL_ASSURANCE_MAX_EDGES,
+    rt_hal_assurance_nodes_from_hir_v1, rt_hal_assurance_closure_check_v1,
+    rt_hal_assurance_format_v1
+}
 use compiler.mono.verify.post_mono_verify.{
     post_mono_verify_modules,
     post_mono_report_total,
@@ -396,7 +401,7 @@ pub fn run_rt_hal_contract_pass(
     classifications have already supplied a rationale at attribute parsing;
     this typed driver policy decides whether the current closure may admit it.
     """
-    val critical_closure = ctx.assurance_policy.strictness.at_least(
+    val critical_profile = ctx.assurance_policy.strictness.at_least(
         AssuranceStrictness.Critical)
     var out: [text] = []
     var modules_checked = 0
@@ -410,11 +415,16 @@ pub fn run_rt_hal_contract_pass(
                     out = out.push(invalid)
                     ctx.add_error(invalid)
                     errors_raised = errors_raised + 1
-                elif critical_closure and function_.func_attr.rt_hal_assurance_rank < 3:
-                    val downgrade = "[E-RT-HAL-013] {module_name}::{function_.name}: lower-assurance rt(hal) operation is reachable from a Critical closure"
-                    out = out.push(downgrade)
-                    ctx.add_error(downgrade)
-                    errors_raised = errors_raised + 1
+    val assurance_nodes = rt_hal_assurance_nodes_from_hir_v1(
+        hir_modules, critical_profile)
+    val assurance_findings = rt_hal_assurance_closure_check_v1(
+        assurance_nodes, RT_HAL_ASSURANCE_MAX_FUNCTIONS,
+        RT_HAL_ASSURANCE_MAX_EDGES)
+    for finding in assurance_findings:
+        val message = rt_hal_assurance_format_v1(finding)
+        out.push(message)
+        ctx.add_error(message)
+        errors_raised = errors_raised + 1
     val _receipt = record_pass_receipt(PassReceipt(
         pass_name: "rt_hal_contract",
         profile: ctx.assurance_policy.strictness.name(),
